@@ -204,7 +204,7 @@ checkexp = util.make_visitor({
             if shape == "empty" or shape == "positional" then
                 check_positional_constructor(node, st, errors, expected, nil,
                     context and context.elem, operation,
-                    context and context.isconst or false)
+                    context and context.isconst or nil)
             else
                 for _, field in ipairs(node.fields) do
                     if shape == "named" then
@@ -217,7 +217,7 @@ checkexp = util.make_visitor({
                     end
                 end
                 check_rejected_constructor_fields(node, st, errors)
-                node._type = context or types.Array(types.Integer(), false)
+                node._type = context or types.Array(types.Integer(), { tag = "no" })
             end
         elseif expected == "Type.Map" then
             if shape == "computed" then
@@ -423,6 +423,9 @@ checkexp = util.make_visitor({
     end,
 
     ["Ast.ExpBinop"] = function(node, st, errors, context)
+        -- Only ordinary equality uses a ComparisonPlan. C operators and the
+        -- other binary operators finish this analysis without such a plan.
+        node._comparison = maybe3.none()
         local op = node.op
         checkexp(node.lhs, st, errors)
         local tlhs = node.lhs._type
@@ -474,13 +477,13 @@ checkexp = util.make_visitor({
                     }
                 end
             end
-            node._comparison = comparison or false
+            node._comparison = maybe3.from_optional(comparison)
             if comparison then
                 local function apply_comparison_adjustment(exp, adjustment)
                     if not adjustment then return exp end
                     local adjusted, consumed = trycoerce(
                         exp, adjustment.target, errors,
-                        "equality operand", adjustment)
+                        "equality operand", maybe3.from_optional(adjustment))
                     assert(consumed == adjustment,
                         "equality operand lost its ComparisonPlan adjustment")
                     return adjusted
@@ -761,7 +764,7 @@ checkexp = util.make_visitor({
                 if named then
                     local paramnames, lowering, recognized_ffi =
                         named_function_metadata(node)
-                    if recognized_ffi and paramnames == false then
+                    if recognized_ffi and paramnames == nil then
                         node._type = invalid(errors, node.loc,
                             "parameter names are unavailable for foreign function '%s' "
                             .. "because its prototypes do not provide one complete unambiguous list",
@@ -863,7 +866,7 @@ checkexp = util.make_visitor({
                 if not dependent_call then
                     generic_close_generic_adjusted_arguments(
                         inference_operation
-                            and inference_operation.context or false,
+                            and inference_operation.context or nil,
                         node, contextual_args, node.args.args,
                         synthesized, st, errors,
                         "function '" .. fname .. "'")
@@ -904,7 +907,7 @@ checkexp = util.make_visitor({
             if named then
                 local paramnames, lowering, recognized_ffi =
                     named_function_metadata(node)
-                if recognized_ffi and paramnames == false then
+                if recognized_ffi and paramnames == nil then
                     node._type = invalid(errors, node.loc,
                         "parameter names are unavailable for foreign function '%s' "
                         .. "because its prototypes do not provide one complete unambiguous list",
@@ -979,7 +982,7 @@ checkexp = util.make_visitor({
                     inference_operation, node, written_exp, "Type.Nominal")
             end
             if otype._tag == "Type.Parameter"
-               and otype.erased_constraint ~= false then
+               and otype.erased_constraint ~= nil then
                 node._rigid_receiver_type = otype
                 otype = otype.erased_constraint
             end
@@ -1163,14 +1166,14 @@ checkexp = util.make_visitor({
             -- discovery pattern for a directly enclosed contextual `value`
             -- call without making it an ordinary expected type elsewhere.
             local provisional = demand and demand.inference_fixed
-                and demand.inference_fixed[1] or false
+                and demand.inference_fixed[1] or nil
             if not provisional and demand
                and #(demand.fixed or {}) == 0 and demand.tail then
                 -- ExpAdjust turns its child's first result into one scalar.  If
                 -- that scalar occupies an open consumer (for example the sole
                 -- field of a dependent positional constructor), its inference
                 -- pattern lives on the tail side channel rather than slot 1.
-                provisional = demand.inference_tail or false
+                provisional = demand.inference_tail or nil
             end
             checkexp(node.exp, st, errors, context,
                 result_demand({ context or UNKNOWN_SLOT }, false, {
@@ -1208,15 +1211,15 @@ checkexp = util.make_visitor({
     -- defaults to zero-return `()`, exactly like an unannotated top-level
     -- function.
     ["Ast.ExpFunction"] = function(node, st, errors, context)
-        -- A trailing vararg `Decl` (`name == false`) is dropped from the fixed
+        -- A trailing vararg `Decl` (`name == nil`) is dropped from the fixed
         -- params; its element type is resolved separately below. A lambda vararg
-        -- may be untyped (`type == false`), in which case the element type is
+        -- may be untyped (`type == nil`), in which case the element type is
         -- inferred from context, exactly like an untyped lambda parameter.
         -- `nfixed` is the count compared against a context's arity.
         local nparams = #node.params
-        local varargtype = false
+        local varargtype = nil
         local varargdecl = node.params[nparams]
-        local has_vararg = varargdecl and varargdecl.name == false
+        local has_vararg = varargdecl and varargdecl.name == nil
         local nfixed = has_vararg and nparams - 1 or nparams
 
         -- Checking mode iff the context is a function type whose fixed arity
@@ -1285,14 +1288,14 @@ checkexp = util.make_visitor({
             -- Checking mode: take both fixed and flexible results from the
             -- context. This is deliberately distinct from an explicit `: ()`,
             -- whose parser shape is an empty fixed list plus `flexrettype =
-            -- false` and must not inherit the context's tail.
+            -- nil` and must not inherit the context's tail.
             rettypes = expected.rettypes
             flexrettype = expected.flexrettype
         else
             -- No annotation, no usable context: default to zero-return `()`,
             -- exactly like an unannotated top-level function.
             rettypes = {}
-            flexrettype = false
+            flexrettype = nil
         end
 
         node._type = types.Function(paramtypes, rettypes, false, varargtype,
@@ -1343,7 +1346,7 @@ checkexp = util.make_visitor({
             otype = otype.base
         end
         if otype._tag == "Type.Parameter"
-           and otype.erased_constraint ~= false then
+           and otype.erased_constraint ~= nil then
             node._rigid_receiver_type = otype
             otype = otype.erased_constraint
         end
@@ -1376,7 +1379,7 @@ checkexp = util.make_visitor({
                     class.name, node.name, nominal_module(class.name))
             else
                 node._decl = mtype
-                if mtype.scope ~= false then
+                if mtype.scope ~= nil then
                     local expected = context
                     if expected and expected._tag == "Type.Option"
                        and expected.base._tag == "Type.Function" then

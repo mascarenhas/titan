@@ -2,6 +2,7 @@
 -- This schema is closed: a new compiler annotation must not silently make
 -- syntax, lowering plans or CPP graphs persistent again.
 local cpp = require "c-parser.cpp"
+local types = require "titan-compiler.types"
 local graphcodec = require "titan-compiler.graphcodec"
 local version = require "titan-compiler.version"
 local staticmetadata = require "titan-compiler.staticmetadata"
@@ -62,15 +63,13 @@ local function project(entry, options, strict, declarations_only)
             if value == nil then return nil end
             kind = kind:sub(1, -2)
         end
-        if kind == "maybe_type" then
-            if value == false then return false end
-            kind = "type"
-        elseif kind == "names_or_false" then
-            if value == false then return false end
-            kind = "names"
-        elseif kind == "name" or kind == "c_name" then
-            if value == false then return false end
-            kind = kind == "c_name" and type(value) == "table" and "names" or "string"
+        if kind == "array_constness" then
+            if not types.valid_array_constness(value) then
+                fail("invalid Array const qualifier")
+            end
+            return { tag = value.tag }
+        elseif kind == "c_name" then
+            kind = type(value) == "table" and "names" or "string"
         end
         if kind == "string" or kind == "boolean" or kind == "integer" or kind == "atom" then
             local actual = type(value)
@@ -85,7 +84,12 @@ local function project(entry, options, strict, declarations_only)
                 fail("non-finite declaration number")
             end
             return value
-        elseif kind == "extent" and type(value) ~= "table" then return copy(value, "atom") end
+        elseif kind == "extent" and type(value) ~= "table" then
+            if type(value) ~= "string" and type(value) ~= "number" then
+                fail("expected C extent expression")
+            end
+            return copy(value, "atom")
+        end
         if type(value) ~= "table" then fail("expected " .. kind .. " declaration table") end
         if getmetatable(value) ~= nil then fail("declaration table has a metatable") end
         if kind == "type" then
@@ -264,7 +268,7 @@ local function project(entry, options, strict, declarations_only)
                 or typ.prefix ~= typ.name:gsub("[%-.]", "_") .. "_"
                 or typ.file ~= typ.name:gsub("[.]", "/") .. ".so" then fail("noncanonical module") end
         elseif typ._tag == "Type.Array" then
-            if type(typ.isconst) ~= "boolean" and typ.isconst ~= "maybe" then fail("invalid Array const qualifier") end
+            if not types.valid_array_constness(typ.isconst) then fail("invalid Array const qualifier") end
         elseif typ._tag == "Type.Function" and typ.vararg ~= false then fail("invalid Titan variadic sentinel")
         elseif typ._tag == "Type.Parameter" and typ.index < 1 then fail("invalid generic binder index") end
     end

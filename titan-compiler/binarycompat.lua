@@ -13,7 +13,7 @@ local function empty(module)
 end
 
 local function names(list)
-    if not list then return false end
+    if list == nil then return nil end
     local result = {}
     for i, name in ipairs(list) do result[i] = name end
     return result

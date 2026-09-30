@@ -28,14 +28,14 @@ describe("closure adjustment wrappers (checker)", function()
     it("does not classify C declarations as closure adjustments", function()
         local cfunc = types.CFunction(
             { types.CInteger("int", true, 3, 32) },
-            types.CInteger("int", true, 3, 32), false, false)
+            types.CInteger("int", true, 3, 32), false, nil)
         local titan = types.Function(
-            { types.Integer() }, { types.Integer() }, false, false, false)
+            { types.Integer() }, { types.Integer() }, false, nil, nil)
 
-        assert.is_false(types.callable_adjustment(cfunc, titan))
-        assert.is_false(types.callable_adjustment(titan, cfunc))
-        assert.is_false(types.assignment_adjustment(cfunc, titan))
-        assert.is_false(types.assignment_adjustment(titan, cfunc))
+        assert.is_nil(types.callable_adjustment(cfunc, titan))
+        assert.is_nil(types.callable_adjustment(titan, cfunc))
+        assert.is_nil(types.assignment_adjustment(cfunc, titan))
+        assert.is_nil(types.assignment_adjustment(titan, cfunc))
     end)
 
     it("classifies one finite edge and freezes its target-typed cast", function()
@@ -96,12 +96,12 @@ describe("closure adjustment wrappers (checker)", function()
             frozen.strict_relay.kind)
         assert.equal(2, #frozen.strict_relay.parameters)
         assert.equal("integer",
-            frozen.strict_relay.parameters[1].guard.op)
+            frozen.strict_relay.parameters[1].guard.value.op)
         assert.equal("value",
-            frozen.strict_relay.parameters[2].guard.op)
+            frozen.strict_relay.parameters[2].guard.value.op)
         assert.equal("value",
-            frozen.strict_relay.results[1].guard.op)
-        assert.is_false(frozen.strict_relay.vararg)
+            frozen.strict_relay.results[1].guard.value.op)
+        assert.is_nil(frozen.strict_relay.vararg)
         assert.is_nil(frozen.rooting.construction.source)
         assert.is_true(frozen.rooting.construction.result.traced)
         assert.equal("conditional_lua_stack_slot",
@@ -281,16 +281,16 @@ describe("closure adjustment wrappers (checker)", function()
 
         local written = stats[2].exps[1]
         assert.equal("Ast.ExpCast", written._tag)
-        assert.equal("callable", written._written_cast.op)
-        assert.equal(written._written_cast.callable._callable_adapter,
+        assert.equal("callable", written._written_cast.value.op)
+        assert.equal(written._written_cast.value.callable._callable_adapter,
             written._callable_adapter)
         assert.is_nil(written._adjustment)
 
         local predicate = stats[3].exps[1]
         assert.equal("Ast.ExpIs", predicate._tag)
-        assert.equal("callable", predicate._written_cast.op)
+        assert.equal("callable", predicate._written_cast.value.op)
         assert.is_nil(predicate._callable_adapter)
-        assert.is_nil(predicate._written_cast.callable._callable_adapter)
+        assert.is_nil(predicate._written_cast.value.callable._callable_adapter)
 
         local dynamic = stats[4].exps[1]
         assert.equal("Ast.ExpCast", dynamic._tag)

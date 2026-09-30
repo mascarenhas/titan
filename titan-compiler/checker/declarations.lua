@@ -13,7 +13,7 @@ local _ENV = core
 -- for having an open block and (for methods) declaring `self` before calling.
 --   node: a node carrying `_type` (Function), `params`, `block`, and (for the
 --         duplicate-parameter message) `name`. For lambdas, `node.rettypes` may
---         be `false`/a list; `node._type.rettypes` is authoritative here.
+--         be `nil`/a list; `node._type.rettypes` is authoritative here.
 --   opts (optional): { self_decl = Decl }. Returns (ret, frame): `ret` is
 --         whether the body cannot fall through; `frame` carries `captures`.
 function annotate_lua_function_boundary(node)
@@ -30,34 +30,34 @@ function annotate_lua_function_boundary(node)
     node._lua_dynamic_plans = {}
     node._strict_guard_plans = {}
     for index, typ in ipairs(targets) do
-        -- `false` is a checked policy decision, not a missing annotation.  A
+        -- `none` is a checked policy decision, not a missing annotation.  A
         -- raw-pointer parameter remains usable by exact Titan native calls,
         -- while invocation through the genuine Lua entry rejects it.
         node._lua_dynamic_plans[index] =
-            types.dynamic_coercion(typ) or false
+            maybe3.from_optional(types.dynamic_coercion(typ))
         node._strict_guard_plans[index] =
-            types.gradual_guard(typ) or false
+            maybe3.from_optional(types.gradual_guard(typ))
     end
     if signature.varargtype then
         node._lua_vararg_dynamic_plan =
-            types.dynamic_coercion(signature.varargtype) or false
+            maybe3.from_optional(types.dynamic_coercion(signature.varargtype))
         node._strict_vararg_guard_plan =
-            types.gradual_guard(signature.varargtype) or false
+            maybe3.from_optional(types.gradual_guard(signature.varargtype))
     else
-        node._lua_vararg_dynamic_plan = false
-        node._strict_vararg_guard_plan = false
+        node._lua_vararg_dynamic_plan = maybe3.none()
+        node._strict_vararg_guard_plan = maybe3.none()
     end
 
     if node._type._tag == "Type.Method" then
         node._bound_strict_guard_plans = {}
         for index, typ in ipairs(signature.params) do
             node._bound_strict_guard_plans[index] =
-                types.gradual_guard(typ) or false
+                maybe3.from_optional(types.gradual_guard(typ))
         end
         node._bound_strict_vararg_guard_plan =
             signature.varargtype
-                and (types.gradual_guard(signature.varargtype) or false)
-                or false
+                and maybe3.from_optional(types.gradual_guard(signature.varargtype))
+                or maybe3.none()
     end
 end
 
@@ -71,7 +71,7 @@ function checkfuncbody(node, st, errors, opts)
         captures = {},
         capture_set = {},
         node = node,
-        module_initializer = opts.module_initializer and st.modname or false,
+        module_initializer = opts.module_initializer and st.modname or nil,
     }
     table.insert(func_stack, frame)
     -- Synthesized constructors contain only member initializers, so they have
@@ -79,13 +79,13 @@ function checkfuncbody(node, st, errors, opts)
     -- are member names, which may legitimately be L or M.
     if not opts.foreign and not node._record_constructor
        and not node._union_constructor then
-        local ldecl = ast.Decl(node.loc, "L", false, false, false)
+        local ldecl = ast.Decl(node.loc, "L", nil, false, false)
         ldecl._type = lua_state_pointer_type(st)
         ldecl._funcdepth = #func_stack
         ldecl._cvar = "L"
         ldecl._readonly = true
         st:add_symbol("L", ldecl)
-        local mdecl = ast.Decl(node.loc, "M", false, false, false)
+        local mdecl = ast.Decl(node.loc, "M", nil, false, false)
         mdecl._type = types.Module(st.modname, {}, {})
         mdecl._type._current_module = true
         mdecl._current_module = true
@@ -113,7 +113,7 @@ function checkfuncbody(node, st, errors, opts)
     for i, rettype in ipairs(signature.rettypes) do
         -- Report an invalid return type at the precise return-type node when one
         -- exists (top-level functions/methods); a lambda's `node.rettypes` may be
-        -- `false` (inferred) or shorter, so fall back to the function location.
+        -- `nil` (inferred) or shorter, so fall back to the function location.
         local rloc = (node.rettypes and node.rettypes[i] and node.rettypes[i].loc)
             or node.loc
         checktype(rettype, rloc, errors)
@@ -144,10 +144,10 @@ function checkfuncbody(node, st, errors, opts)
     local fdesc = node.name and ("declaration of function '" .. node.name .. "'")
         or "anonymous function"
     for i, param in ipairs(node.params) do
-        -- The trailing vararg marker (`name == false`) is not a real parameter:
+        -- The trailing vararg marker (`name == nil`) is not a real parameter:
         -- it carries no name to declare and its type already lives on
         -- `node._type.varargtype`; skip it so `ptypes`/`node.params` stay aligned.
-        if param.name ~= false then
+        if param.name ~= nil then
             param._type = ptypes[i]
             param._funcdepth = #func_stack
             local builtin = st:find_symbol(param.name)
@@ -224,7 +224,7 @@ function checkinitializer(node, st, errors)
         name = "$module_initializer",
         params = {},
         rettypes = {},
-        flexrettype = false,
+        flexrettype = nil,
         block = node,
         _type = node._type,
     }
@@ -699,11 +699,12 @@ function check_foreign_environment(module_ast, st, errors)
     else
         local started = cdriver.process_phase_clock(options)
         -- The one real module header has already established final macro
-        -- visibility. Field lookups memoize misses as false, so their map must
+        -- visibility. Field lookup results have explicit analysis states, so their map must
         -- belong to this checker rather than the shared immutable header graph.
         st.foreign_field_macro_cache = {}
         for name, classification in pairs(ftypes.field_macro_classes) do
-            st.foreign_field_macro_cache[name] = classification
+            st.foreign_field_macro_cache[name] =
+                maybe3.from_optional(classification or nil)
         end
         local members, type_members = {}, {}
         for _, item in ipairs(ftypes) do
@@ -716,7 +717,7 @@ function check_foreign_environment(module_ast, st, errors)
                     st:add_foreign_type(name, decl)
                 else
                     local paramnames = ftype.type == "function"
-                        and copy_foreign_paramnames(ftype.paramnames) or false
+                        and copy_foreign_paramnames(ftype.paramnames) or nil
                     local member = types.ModuleMember("ffi", name, decl, paramnames)
                     member._foreign_namespace = true
                     member._c_origin_header = declaration and declaration.origin_header or include
@@ -794,7 +795,7 @@ toplevel_visitor = util.make_visitor({
 
     ["Ast.TopLevelVar"] = function(node, st, errors)
         node._module_name = st.modname
-        if node.value == false then
+        if node.value == nil then
             node._initializerless_const = node.isconst and true or nil
             local subject = (node.isconst and "const " or "") .. "module variable"
             local value = ast.ExpNil(node.decl.loc)
@@ -856,7 +857,7 @@ toplevel_visitor = util.make_visitor({
         -- an explicit unavailable marker for non-reifiable targets so its
         -- generated setter rejects every attempted Lua write.
         node._lua_write_dynamic_plan =
-            types.dynamic_coercion(node._type) or false
+            maybe3.from_optional(types.dynamic_coercion(node._type))
         if not isconst(node.value) then
             checker.typeerror(errors, node.value.loc,
                 "top level variable initialization must be constant")
@@ -915,7 +916,7 @@ toplevel_visitor = util.make_visitor({
                     local tfield = types.Field(
                         fqtn, member.name, ftype, #fields, true)
                     tfield.dynamic_plan =
-                        types.dynamic_coercion(ftype) or false
+                        maybe3.from_optional(types.dynamic_coercion(ftype))
                     member._field = tfield
                     member._decl = tfield
                     member._dynamic_plan = tfield.dynamic_plan
@@ -931,7 +932,7 @@ toplevel_visitor = util.make_visitor({
                             local fixed_index = 1
                             local param_names = {}
                             for _, param in ipairs(member.params) do
-                                if param.name == false then
+                                if param.name == nil then
                                     param._type = varargtype
                                 else
                                     param._type = ptypes[fixed_index]
@@ -993,7 +994,7 @@ toplevel_visitor = util.make_visitor({
             local signature = types.Function(ptypes, rettypes, false,
                 varargtype, flexrettype)
             node._signature = signature
-            if node._generic_scope ~= false then
+            if node._generic_scope ~= nil then
                 node._type = types.FunctionScheme(node._generic_scope,
                     node._generic_typeparams, signature)
             else
@@ -1008,9 +1009,9 @@ toplevel_visitor = util.make_visitor({
     ["Ast.TopLevelForeignFunc"] = function(node, st, errors)
         local argnodes = {}
         local paramnames = {}
-        local varargtype = false
+        local varargtype = nil
         for _, param in ipairs(node.params) do
-            if param.name == false then
+            if param.name == nil then
                 varargtype = param.type or { loc = param.loc }
             else
                 argnodes[#argnodes + 1] = param.type
@@ -1023,19 +1024,19 @@ toplevel_visitor = util.make_visitor({
         node._foreign_module = st.modname
         node._paramnames = paramnames
         for index, param in ipairs(node.params) do
-            if param.name ~= false then
+            if param.name ~= nil then
                 param._type = node._type.params[index]
             end
         end
     end,
 
     ["Ast.StatBlock"] = function(node)
-        node._type = types.Function({}, {}, false, false, false)
+        node._type = types.Function({}, {}, false, nil, nil)
     end,
 
     ["Ast.StatTry"] = function(node)
         assert(node._module_initializer)
-        node._type = types.Function({}, {}, false, false, false)
+        node._type = types.Function({}, {}, false, nil, nil)
     end,
 
     ["Ast.TopLevelRecord"] = function(node, st, errors)
@@ -1061,7 +1062,7 @@ toplevel_visitor = util.make_visitor({
                         checker._nominal_storage_plan(ftype, array_view)
                     tfield._nominal_storage = field._nominal_storage
                     tfield.dynamic_plan =
-                        types.dynamic_coercion(ftype) or false
+                        maybe3.from_optional(types.dynamic_coercion(ftype))
                     field._dynamic_plan = tfield.dynamic_plan
                     field._field = tfield
                     field._decl = tfield
@@ -1464,7 +1465,7 @@ function generic_reserve_generic_owner_headers(ast, st, errors)
                 local scope = generic_scope_for_node(node, st)
                 generic_reserve_generic_binders(node, scope, st, errors)
             else
-                node._generic_scope = false
+                node._generic_scope = nil
                 node._generic_bindings = {}
                 node._generic_parameters = {}
                 node._generic_typeparams = {}

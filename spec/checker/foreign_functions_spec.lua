@@ -88,7 +88,7 @@ describe("foreign functions (checker)", function()
             local empty = types.resolve_c_typedef(ast[2]._type)
             assert.equal("Type.CPointer", empty._tag)
             assert.equal("Type.CFunction", empty.pointee._tag)
-            assert.is_false(empty.pointee.abi)
+            assert.is_nil(empty.pointee.abi)
             assert.is_false(empty.pointee.vararg)
             assert.equal("Type.CVoid",
                 types.resolve_c_typedef(empty.pointee.ret)._tag)
@@ -107,7 +107,7 @@ describe("foreign functions (checker)", function()
 
             local noop = ast[5]
             assert.equal("Type.CFunction", noop._type._tag)
-            assert.is_false(noop._type.abi)
+            assert.is_nil(noop._type.abi)
             assert.equal("Type.CVoid",
                 types.resolve_c_typedef(noop._type.ret)._tag)
             assert.equal("Type.CFunction", ast[6]._type._tag)
@@ -320,7 +320,7 @@ describe("foreign functions (checker)", function()
             assert.truthy(ok, err)
             local raw = ast[4].block.stats[1].decls[1]
             assert.is_nil(raw._c_address_taken)
-            assert.is_false(ast[4].block.stats[2].callexp._c_mutated_decls)
+            assert.is_nil(ast[4].block.stats[2].callexp._c_mutated_decls)
             assert.is_nil(ast[3].block.stats[1].exps[1]._adjustment)
         end)
     end)

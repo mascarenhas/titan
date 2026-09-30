@@ -222,7 +222,7 @@ describe("module foreign conversion payloads", function()
         assert.equal(1, first.conversion.stores)
         -- Reuse the parsed header while asking for a fresh converted namespace.
         -- Reading the physical member during the first body check must not
-        -- have inserted a false macro memo into that shared header graph.
+        -- have inserted a checked-miss macro memo into that shared header graph.
         for key in pairs(payloads) do
             if key:find("ffi-conversion-v7\0", 1, true) == 1 then
                 payloads[key] = nil
@@ -360,13 +360,50 @@ describe("module foreign conversion payloads", function()
         for key, payload in pairs(payloads) do
             if key:sub(1, #"ffi-conversion-v7\0") == "ffi-conversion-v7\0" then
                 local snapshot = assert(cpp.decode_graph(payload, { references = graph_references(restored) }))
-                assert.equal('"a + b"', snapshot.field_macros.TEXT.replacement)
+                assert.equal("just", snapshot.field_macros.TEXT.tag)
+                assert.equal('"a + b"', snapshot.field_macros.TEXT.value.replacement)
                 assert.is_nil(snapshot.roots)
                 assert.is_nil(snapshot.converted_enums)
                 assert.is_nil(snapshot.converted_aggregates)
             end
         end
         assert.is_table(first.type_members.shared)
+    end)
+
+    it("rejects legacy false extents in converted C definition snapshots", function()
+        header("extents.h", "typedef struct { int values[4]; unsigned flag:1; } extent_holder;\n")
+        local mod = check('foreign import "extents.h"\nfunction answer(): integer return 42 end')
+        local definitions = require "titan-compiler.cdefinitioncache"
+        local snapshots = 0
+        for key, payload in pairs(payloads) do
+            if key:sub(1, #"ffi-conversion-v7\0") == "ffi-conversion-v7\0" then
+                snapshots = snapshots + 1
+                local snapshot = assert(cpp.decode_graph(payload, { references = graph_references(mod) }))
+                local options = {
+                    strict = true,
+                    external = { [mod.ast._ffi_namespace._include] = "ffi-include" },
+                }
+                local owner = types.resolve_c_typedef(snapshot.namespace_type.type_members.extent_holder)
+                local array, field = owner.fields.values.type, owner.fields.flag
+                assert.is_not_nil(array.len)
+                assert.is_not_nil(field.bitfield)
+                for _, target in ipairs({ { array, "len" }, { field, "bitfield" } }) do
+                    local node, name = target[1], target[2]
+                    local previous = node[name]
+                    node[name] = false
+                    local ok, err = pcall(definitions.foreign, snapshot, options)
+                    assert.is_false(ok)
+                    assert.matches("expected C extent expression", err, 1, true)
+                    node[name] = nil
+                    local restored = definitions.foreign(snapshot, options)
+                    local restored_owner = types.resolve_c_typedef(restored.namespace_type.type_members.extent_holder)
+                    if name == "len" then assert.is_nil(restored_owner.fields.values.type.len)
+                    else assert.is_nil(restored_owner.fields.flag.bitfield) end
+                    node[name] = previous
+                end
+            end
+        end
+        assert.equal(1, snapshots)
     end)
 
     it("invalidates changed-mtime header changes and corrupt conversion blobs", function()

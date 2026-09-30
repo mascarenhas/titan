@@ -250,7 +250,7 @@ describe("const values (typechecker)", function()
         assert.truthy(ok, err)
         local constructor = only_return_expression(find_function(tree, "make"))
         assert.equal("Ast.ExpInitList", constructor._tag)
-        assert.same(types.Array(types.Integer(), true), constructor._type)
+        assert.same(types.Array(types.Integer(), {tag="yes"}), constructor._type)
 
         local errs = check_errs([[
             function overwrite(items: const { integer }): nil
@@ -274,12 +274,12 @@ describe("const values (typechecker)", function()
         ]])
         assert.truthy(ok, err)
         local cast = only_return_expression(find_function(tree, "freeze"))
-        assert.equal("array_freeze", cast._written_cast.op)
-        assert.equal("copy", cast._written_cast.mode)
+        assert.equal("array_freeze", cast._written_cast.value.op)
+        assert.equal("copy", cast._written_cast.value.mode)
         local predicate = only_return_expression(
             find_function(tree, "can_freeze"))
-        assert.equal("array_freeze", predicate._written_cast.op)
-        assert.is_true(predicate._written_cast.allocation_free_test)
+        assert.equal("array_freeze", predicate._written_cast.value.op)
+        assert.is_true(predicate._written_cast.value.allocation_free_test)
 
         local errs = check_errs([[
             function implicit(items: { integer }): const { integer }
@@ -370,32 +370,32 @@ describe("const values (typechecker)", function()
         ]])
         assert.truthy(ok, err)
         local linear = only_return_expression(find_function(tree, "linear"))
-        assert.equal("freeze", linear._written_cast.mode)
+        assert.equal("freeze", linear._written_cast.value.mode)
         assert.is_true(linear._linear_array_freeze)
 
         local builder = only_return_expression(find_function(tree, "builder"))
-        assert.equal("freeze", builder._written_cast.mode)
+        assert.equal("freeze", builder._written_cast.value.mode)
         assert.is_true(builder._linear_array_freeze)
 
         local unrelated = only_return_expression(
             find_function(tree, "unrelated_closure"))
-        assert.equal("freeze", unrelated._written_cast.mode)
+        assert.equal("freeze", unrelated._written_cast.value.mode)
         assert.is_true(unrelated._linear_array_freeze)
 
         local escaped = only_return_expression(find_function(tree, "escaped"))
-        assert.equal("copy", escaped._written_cast.mode)
+        assert.equal("copy", escaped._written_cast.value.mode)
 
         local passed = only_return_expression(find_function(tree, "passed"))
-        assert.equal("copy", passed._written_cast.mode)
+        assert.equal("copy", passed._written_cast.value.mode)
 
         local captured = only_return_expression(
             find_function(tree, "captured"))
-        assert.equal("copy", captured._written_cast.mode)
+        assert.equal("copy", captured._written_cast.value.mode)
 
         local rebound = only_return_expression(find_function(tree, "rebound"))
-        assert.equal("copy", rebound._written_cast.mode)
+        assert.equal("copy", rebound._written_cast.value.mode)
 
         local used_after = find_function(tree, "used_after").block.stats[2]
-        assert.equal("copy", used_after.exps[1]._written_cast.mode)
+        assert.equal("copy", used_after.exps[1]._written_cast.value.mode)
     end)
 end)

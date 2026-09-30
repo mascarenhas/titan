@@ -111,13 +111,13 @@ describe("erased coder boundary", function()
     function()
         local tree = checked()
         local scope = generic_scope("function", "function")
-        local parameter = types.Parameter(scope, 1, "T", false)
+        local parameter = types.Parameter(scope, 1, "T", nil)
         local declared = types.Module(MODULE, {
             types.ModuleMember(MODULE, "id",
                 types.FunctionScheme(scope, {
-                    types.TypeParameter("T", false),
+                    types.TypeParameter("T", nil),
                 }, types.Function({ parameter }, { parameter },
-                    false, false, false)),
+                    false, nil, nil)),
                 { "x" }),
         })
         local erased_serialized = types.serialize(tree._type)
@@ -137,7 +137,7 @@ describe("erased coder boundary", function()
         local tree = checked()
         local scope = generic_scope("function", "function")
         tree[1].params[1]._type =
-            types.Parameter(scope, 1, "T", false)
+            types.Parameter(scope, 1, "T", nil)
         assert_rejected(tree,
             "generic type form Type%.Parameter.-code%-facing AST")
 
@@ -151,7 +151,7 @@ describe("erased coder boundary", function()
     it("rejects generic AST lists before code generation", function()
         local tree = checked()
         tree[1].typeparams = {
-            { _tag = "Ast.TypeParam", name = "T", constraint = false },
+            { _tag = "Ast.TypeParam", name = "T", constraint = nil },
         }
         assert_rejected(tree,
             "generic AST field 'typeparams'.-code%-facing AST")
@@ -180,7 +180,7 @@ describe("erased coder boundary", function()
         local scope = generic_scope("owner", "record", owner)
         tree._erased_registry[owner] = types.Record(
             owner, {}, {}, {}, 0, scope,
-            { types.TypeParameter("T", false) })
+            { types.TypeParameter("T", nil) })
         assert_rejected(tree,
             "generic type form Type%.Record.-active type registry")
     end)

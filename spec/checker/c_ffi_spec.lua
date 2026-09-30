@@ -120,7 +120,7 @@ describe("C FFI type checking", function()
             assert.same({ "count", "path" },
                 cmod.members.ffi_named.paramnames)
             assert.same({}, cmod.members.ffi_zero.paramnames)
-            assert.is_false(cmod.members.ffi_oldstyle.paramnames)
+            assert.is_nil(cmod.members.ffi_oldstyle.paramnames)
         end)
     end)
 

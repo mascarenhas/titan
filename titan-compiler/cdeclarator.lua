@@ -427,7 +427,7 @@ render_extent_expression = function(expression)
 end
 
 local function render_array_extent(len)
-    if len == nil or len == false or len == "" then
+    if len == nil or len == "" then
         return ""
     elseif type(len) == "number" or type(len) == "string"
         or type(len) == "table" then

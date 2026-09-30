@@ -33,11 +33,9 @@ function codeimmediatecall(ctx, node)
             destination.projections[source.index] = save
         end
     end
-    -- A false entry means evaluate the declared return conversion for effect,
-    -- without retaining an ABI output that this consumer cannot observe.
-    for i = 1, #ftype.rettypes do
-        destination.fixed[i] = destination.fixed[i] or false
-    end
+    -- Missing fixed destinations still evaluate the declared return conversion
+    -- for effect. The callable result list owns their positions, so nil slots
+    -- need no list-length sentinel here.
     local flexrun, flexwant
     if ftype.flexrettype then
         local open = node._coder_open_want ~= nil
@@ -202,7 +200,8 @@ function coder._finish_immediate_return(ctx, pending)
     local destination = assert(ctx.inline_return)
     local lines = {}
     if pending then
-        for i, save in ipairs(destination.fixed) do
+        for i in ipairs(pending.fixed) do
+            local save = destination.fixed[i]
             if save then
                 table.insert(lines, save.cvar .. " = "
                     .. coder._saved_fixed_value(pending.fixed[i]) .. ";")

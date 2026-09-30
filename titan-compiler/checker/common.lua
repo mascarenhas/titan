@@ -109,11 +109,11 @@ function checktype(typ, loc, errors, seen)
             checktype(argument, loc, errors, seen)
         end
     elseif tag == "Type.Parameter" then
-        if typ.erased_constraint ~= false then
+        if typ.erased_constraint ~= nil then
             checktype(typ.erased_constraint, loc, errors, seen)
         end
     elseif tag == "Type.TypeParameter" then
-        if typ.constraint ~= false then
+        if typ.constraint ~= nil then
             checktype(typ.constraint, loc, errors, seen)
         end
     elseif tag == "Type.FunctionScheme" then
@@ -185,13 +185,13 @@ function generic_bare_forwarding_alias_target(node, st, errors)
             local target = resolve_type_alias(alias, st, errors)
             if target._tag == "Type.GenericAlias" then
                 local owner = types.registry[target.target_owner_fqtn]
-                local target_alias_fqtn = false
+                local target_alias_fqtn = nil
                 if not target.locality then
                     target_alias_fqtn = target.module .. "." .. target.name
                 end
                 return owner, target_alias_fqtn, true
             end
-            return nil, false, false
+            return nil, nil, false
         end
         local declaration = st:find_symbol(node.name)
         if declaration and (declaration._tag == "Ast.TopLevelRecord"
@@ -202,13 +202,13 @@ function generic_bare_forwarding_alias_target(node, st, errors)
             node._decl = st.interface_declarations[node.name]
         end
         local owner = generic_resolve_local_owner(node.name, st)
-        return owner, false, owner ~= nil
+        return owner, nil, owner ~= nil
     elseif node._tag == "Ast.TypeQualName" then
         local declaration = st:find_symbol(node.module)
         if declaration then node._module_decl = declaration end
         local module = declaration and declaration._type
         if not module or module._tag ~= "Type.Module" then
-            return nil, false, false
+            return nil, nil, false
         end
         local include_source = declaration._source_import == true
         local member, member_islocal = types.module_type_member(
@@ -222,7 +222,7 @@ function generic_bare_forwarding_alias_target(node, st, errors)
                 islocal = member_islocal,
             }
             local owner = types.registry[member.target_owner_fqtn]
-            local target_alias_fqtn = false
+            local target_alias_fqtn = nil
             if not member.locality then
                 target_alias_fqtn = member.module .. "." .. member.name
             end
@@ -235,7 +235,7 @@ function generic_bare_forwarding_alias_target(node, st, errors)
                 type = member,
                 islocal = member_islocal,
             }
-            return member, false, true
+            return member, nil, true
         end
         local nominal = types.module_member(
             module, node.name, include_source)
@@ -249,10 +249,10 @@ function generic_bare_forwarding_alias_target(node, st, errors)
                 type = nominal,
                 islocal = nominal.islocal and true or false,
             }
-            return owner, false, true
+            return owner, nil, true
         end
     end
-    return nil, false, false
+    return nil, nil, false
 end
 
 resolve_type_alias = function(node, st, errors)
@@ -275,7 +275,7 @@ resolve_type_alias = function(node, st, errors)
         local owner, target_alias_fqtn, recognized =
             generic_bare_forwarding_alias_target(
                 node.type, st, errors)
-        if recognized and owner and owner.scope ~= false
+        if recognized and owner and owner.scope ~= nil
            and #(owner.typeparams or {}) > 0 then
             target = types.GenericAlias(
                 st.modname, node.name, node.islocal and true or false,
@@ -373,12 +373,11 @@ end
 --   exp: expression that was actually present
 --   errors: list of compile-time errors
 --   loc: location of the term that is being compared
---   adjustment: result already obtained by `trycoerce`
+--   prepared: explicit result already obtained by `trycoerce`
 --   precise_error: a target-specific diagnostic was already emitted
-function checkmatch(term, expected, exp, errors, loc, adjustment,
+function checkmatch(term, expected, exp, errors, loc, prepared,
                           precise_error)
-    assert(adjustment ~= nil,
-        "checkmatch requires the checker decision for this sink")
+    local adjustment = maybe3.get_checked(prepared, "checker sink adjustment")
     local found = exp._type
 
     -- Identity and every representation-changing adjustment must already have
@@ -390,7 +389,7 @@ function checkmatch(term, expected, exp, errors, loc, adjustment,
         and (adjustment.kind == "identity"
             or (adjustment.kind == "gradual_view"
                 and adjustment.op == "structural"))
-    if adjustment == false then
+    if adjustment == nil then
         if precise_error then return end
         local msg = "types in %s do not match, expected %s but found %s"
         msg = string.format(msg, term, types.tostring(expected), types.tostring(found))
@@ -464,19 +463,19 @@ function check_varg_elem(t, loc, errors, role)
 end
 
 -- Resolve the fixed parameter types of a function/method/static/lambda and, if
--- the last `Ast.Decl` is the trailing vararg marker (`name == false`), drop it
+-- the last `Ast.Decl` is the trailing vararg marker (`name == nil`), drop it
 -- from the fixed list and return its (validated) element type as the second
 -- value. `params` is the AST param list; this is the single place the signature
 -- pass + lambda checker turn the parser's vararg encoding into a `varargtype`.
 --   returns (ptypes, varargtype, paramnames) where varargtype is a type or
---   false and paramnames is the dense list of fixed declaration names.
+--   nil and paramnames is the dense list of fixed declaration names.
 function param_types(params, st, errors)
     local ptypes = {}
     local paramnames = {}
-    local varargtype = false
+    local varargtype = nil
     local n = #params
     for i, pdecl in ipairs(params) do
-        if i == n and pdecl.name == false then
+        if i == n and pdecl.name == nil then
             varargtype = check_varg_elem(
                 typefromnode(pdecl.type, st, errors), pdecl.loc, errors,
                 "parameter")
@@ -515,7 +514,7 @@ function bind_callable_parameter_declarations(
     local bound = {}
     local fixed_index = 0
     for _, parameter in ipairs(node.params or {}) do
-        if parameter.name ~= false then
+        if parameter.name ~= nil then
             fixed_index = fixed_index + 1
             local declaration = declarations and declarations[fixed_index]
                 or callable_parameter_descriptor(
@@ -573,7 +572,7 @@ end
 function flexible_return_type(
         node, st, errors, defer_c_enum_carrier)
     if not node.flexrettype then
-        return false
+        return nil
     end
     return check_varg_elem(
         typefromnode(node.flexrettype, st, errors,

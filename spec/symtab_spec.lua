@@ -112,6 +112,45 @@ describe("Titan symbol table", function()
         assert.is_false(known)
     end)
 
+    it("distinguishes uncomputed, absent, and present macro classifications", function()
+        local st = symtab.new()
+        local projection, known = st:find_cached_foreign_field_macro("field")
+        assert.is_nil(projection)
+        assert.is_false(known)
+        assert.same({tag="unknown"}, st.foreign_field_macro_cache.field)
+
+        st:cache_foreign_field_macro("field", nil)
+        projection, known = st:find_cached_foreign_field_macro("field")
+        assert.is_nil(projection)
+        assert.is_true(known)
+        assert.same({tag="none"}, st.foreign_field_macro_cache.field)
+
+        local classified = {name="field", path={"outer", "inner"}}
+        st:cache_foreign_field_macro("field", classified)
+        projection, known = st:find_cached_foreign_field_macro("field")
+        assert.equal(classified, projection)
+        assert.is_true(known)
+        assert.same({tag="just",value=classified},
+            st.foreign_field_macro_cache.field)
+
+        st:apply_foreign_macro_changes({}, {})
+        projection, known = st:find_cached_foreign_field_macro("field")
+        assert.is_nil(projection)
+        assert.is_false(known)
+        assert.same({tag="unknown"}, st.foreign_field_macro_cache.field)
+    end)
+
+    it("rejects false macro classification sentinels", function()
+        local st = symtab.new()
+        assert.has_error(function()
+            st:cache_foreign_field_macro("field", false)
+        end, "foreign field macro projection must be a table")
+        st.foreign_field_macro_cache.field = {tag="just",value=false}
+        assert.has_error(function()
+            st:find_cached_foreign_field_macro("field")
+        end, "cached foreign field macro projection must be a table")
+    end)
+
     describe("ordered C tag registry", function()
         local function provenance(header, order, scope, definition)
             return {

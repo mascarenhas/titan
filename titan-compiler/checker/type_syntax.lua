@@ -376,13 +376,9 @@ typefromnode = util.make_visitor({
 
     ["Ast.TypeArray"] = function(node, st, errors,
                                      defer_c_enum_carrier)
-        local isconst = node.isconst
-        if isconst ~= "maybe" then
-            isconst = isconst and true or false
-        end
         return types.Array(deoptionize(typefromnode(
             node.subtype, st, errors, defer_c_enum_carrier)),
-            isconst)
+            node.isconst)
     end,
 
     ["Ast.TypeMap"] = function(node, st, errors,
@@ -424,13 +420,13 @@ typefromnode = util.make_visitor({
                 rt, st, errors, defer_c_enum_carrier))
         end
         -- A first-class variadic function type `(P..., ...: t) -> (R...)` carries
-        -- its element type node on `node.varargtype` (false when absent); set
+        -- its element type node on `node.varargtype` (nil when absent); set
         -- the resulting Type.Function's `varargtype` slot accordingly.
         local varargtype = node.varargtype
             and check_varg_elem(typefromnode(
                 node.varargtype, st, errors, defer_c_enum_carrier),
                                 node.varargtype.loc, errors, "parameter")
-            or false
+            or nil
         local flexrettype = flexible_return_type(
             node, st, errors, defer_c_enum_carrier)
         return types.Function(ptypes, rettypes, false, varargtype, flexrettype)
@@ -451,7 +447,7 @@ typefromnode = util.make_visitor({
 })
 
 function generic_scope_for_node(node, st, owner)
-    local owner_fqtn = owner and owner._type and owner._type.name or false
+    local owner_fqtn = owner and owner._type and owner._type.name or nil
     local tag = node._tag
     local role, kind
     if tag == "Ast.TopLevelRecord" then
@@ -467,9 +463,9 @@ function generic_scope_for_node(node, st, owner)
     elseif tag == "Ast.InterfaceMethod" then
         role, kind = "method", "method"
     else
-        role, kind, owner_fqtn = "function", "function", false
+        role, kind, owner_fqtn = "function", "function", nil
     end
-    local callable_name = false
+    local callable_name = nil
     if role ~= "owner" then callable_name = node.name end
     return types.GenericScope(st.modname, owner_fqtn,
         callable_name, role, kind)
@@ -498,13 +494,13 @@ function generic_reserve_generic_binders(node, scope, st, errors)
         else
             active_names[name] = true
         end
-        local parameter = types.Parameter(scope, index, name, false)
+        local parameter = types.Parameter(scope, index, name, nil)
         parameter._decl = typeparam
         node._generic_parameters[index] = parameter
         if not node._generic_bindings[name] then
             node._generic_bindings[name] = parameter
         end
-        node._generic_typeparams[index] = types.TypeParameter(name, false)
+        node._generic_typeparams[index] = types.TypeParameter(name, nil)
         typeparam._type = parameter
     end
     st.generic_scope_bindings[types.generic_scope_key(scope)] =
@@ -566,12 +562,12 @@ end
 
 function generic_reject_constraint_cycles(node, errors)
     local count = #(node._generic_typeparams or {})
-    if count == 0 or node._generic_scope == false then return end
+    if count == 0 or node._generic_scope == nil then return end
 
     local edges = {}
     for index, typeparam in ipairs(node._generic_typeparams) do
         edges[index] = {}
-        if typeparam.constraint ~= false then
+        if typeparam.constraint ~= nil then
             generic_collect_local_constraint_parameters(
                 typeparam.constraint, node._generic_scope, edges[index])
         end
@@ -612,8 +608,8 @@ function generic_reject_constraint_cycles(node, errors)
             -- Recover as an unconstrained binder after the declaration error;
             -- this breaks the carrier cycle for later graph walks.
             node._generic_typeparams[index] =
-                types.TypeParameter(syntax.name, false)
-            node._generic_parameters[index].erased_constraint = false
+                types.TypeParameter(syntax.name, nil)
+            node._generic_parameters[index].erased_constraint = nil
         end
     end
     if #names > 0 then
@@ -628,7 +624,7 @@ function generic_resolve_generic_constraints(node, st, errors)
     node._generic_constraints_resolved = true
     st:push_generic_type_scope(node._generic_bindings)
     for index, syntax in ipairs(node.typeparams or {}) do
-        local constraint = false
+        local constraint = nil
         if syntax.constraint then
             local resolved = typefromnode(syntax.constraint, st, errors)
             local owner = generic_owner_type(resolved)
@@ -652,11 +648,10 @@ function generic_resolve_generic_constraints(node, st, errors)
     for _ = 1, math.max(1, #(node.typeparams or {})) do
         local changed = false
         for index, typeparam in ipairs(node._generic_typeparams) do
-            local carrier = typeparam.constraint == false and false
-                or types.erase_constraint(typeparam.constraint)
+            local carrier = typeparam.constraint and types.erase_constraint(typeparam.constraint)
             local previous = node._generic_parameters[index].erased_constraint
-            if (previous == false) ~= (carrier == false)
-               or (carrier ~= false
+            if (previous == nil) ~= (carrier == nil)
+               or (carrier ~= nil
                    and not types.equals(previous, carrier)) then
                 node._generic_parameters[index].erased_constraint = carrier
                 changed = true
@@ -669,7 +664,7 @@ end
 
 function generic_prepare_generic_binders(node, st, errors, owner)
     if #(node.typeparams or {}) == 0 then
-        node._generic_scope = false
+        node._generic_scope = nil
         node._generic_bindings = node._generic_bindings or {}
         node._generic_parameters = node._generic_parameters or {}
         node._generic_typeparams = node._generic_typeparams or {}
@@ -783,8 +778,8 @@ function pointer_category_diagnostic(
 end
 
 -- Validate one contextual or explicit object-pointer reinterpretation. Returns
--- a conversion annotation on success, nil when this is not an unsafe pointer
--- relation, and false after emitting a definitive diagnostic.
+-- an optional conversion plus whether a definitive diagnostic was emitted.
+-- An unrelated pointer pair returns nil without claiming diagnostic ownership.
 function checker._unsafe_c_pointer_conversion(
         source, target, errors, use)
     if types.equals(types.resolve_c_typedef(source._type),
@@ -831,13 +826,13 @@ function checker._unsafe_c_pointer_conversion(
             "unsafe C conversion from '%s' to '%s' would discard %s%s",
             types.tostring(source_pointer), types.tostring(target),
             discarded, use and (" in " .. use) or "")
-        return false
+        return nil, true
     end
 
     if not candidate then
         if pointer_category_diagnostic(
                 source_pointer, target, errors, source.loc, use) then
-            return false
+            return nil, true
         end
         return nil
     end
@@ -855,7 +850,7 @@ function checker._unsafe_c_pointer_conversion(
             "cannot validate C conversion because the probe service " ..
             "could not be configured%s: %s",
             use and (" for " .. use) or "", tostring(probe_error))
-        return false
+        return nil, true
     end
 
     local result = module_probe:probe_unsafe_object_pointer(
@@ -865,7 +860,7 @@ function checker._unsafe_c_pointer_conversion(
             result.message or
                 "cannot validate the unsafe C object-pointer conversion",
             use and (" in " .. use) or "")
-        return false
+        return nil, true
     end
 
     if address_source then
@@ -880,11 +875,10 @@ function checker._unsafe_c_pointer_conversion(
 end
 
 function adjust_unsafe_c_pointer(source, target, errors, use)
-    local conversion = checker._unsafe_c_pointer_conversion(
+    local conversion, rejected = checker._unsafe_c_pointer_conversion(
         source, target, errors, use)
     if not conversion then
-        return conversion == false
-            and failed_c_adjustment(source, target) or source
+        return rejected and failed_c_adjustment(source, target) or source
     end
     local n = ast.ExpCast(source.loc, source, target)
     n._implicit_coercion = true
@@ -897,7 +891,7 @@ function trycoerce(source, target, errors, use,
                          precomputed_adjustment)
     if reject_const_c_mutable_address(
             source, target, errors, use) then
-        return failed_c_adjustment(source, target), false, true
+        return failed_c_adjustment(source, target), nil, true
     end
     if is_mutable_c_address_source(source)
        and types.c_mutable_address_coerceable(source._type, target)
@@ -930,36 +924,39 @@ function trycoerce(source, target, errors, use,
             "cannot take a mutable C address of non-addressable "
             .. "expression of type '%s'%s", types.tostring(source._type),
             use and (" in " .. use) or "")
-        return failed_c_adjustment(source, target), false, true
+        return failed_c_adjustment(source, target), nil, true
     end
 
-    local adjustment = precomputed_adjustment
-    local interface_conversion =
-        adjustment and adjustment.interface_conversion or nil
-    local interface_failure
-    if adjustment == nil then
+    local prepared = precomputed_adjustment
+    if prepared == nil then prepared = maybe3.unknown() end
+    assert(maybe3.validate(prepared), "invalid precomputed adjustment state")
+    local adjustment, interface_conversion, interface_failure
+    if prepared.tag == "unknown" then
         adjustment, interface_conversion, interface_failure =
             checker_assignment_adjustment(
                 source._type, target, active_check_state)
+    else
+        adjustment = maybe3.get_checked(prepared, "precomputed adjustment")
+        interface_conversion = adjustment and adjustment.interface_conversion
     end
     if not adjustment then
         if report_interface_failure(
                 errors, source.loc, interface_failure) then
-            return source, false, true
+            return source, nil, true
         end
         -- A raw `value` cannot implicitly establish a C pointee type. Keep the
         -- old unsafe C-object probe for actual C address expressions only.
         if source._type._tag == "Type.Value" then
-            return source, false, false
+            return source, nil, false
         end
         local adjusted =
             adjust_unsafe_c_pointer(source, target, errors, use)
         if adjusted._c_conversion then
             return adjusted, adjusted._c_conversion, false
         elseif adjusted._c_conversion_failed then
-            return adjusted, false, true
+            return adjusted, nil, true
         else
-            return adjusted, false, false
+            return adjusted, nil, false
         end
     elseif adjustment.kind == "identity" then
         return source, adjustment
@@ -1005,7 +1002,7 @@ function trycoerce(source, target, errors, use,
         local n = ast.ExpCast(source.loc, source, target)
         n._implicit_coercion = true
         n._adjustment = adjustment
-        n._written_cast = adjustment
+        n._written_cast = maybe3.just(adjustment)
         n._interface_conversion = interface_conversion
         n._type = target
         return n, adjustment
@@ -1026,7 +1023,8 @@ function coerce_and_check(source, target, term, errors, loc,
         assert(stored == adjustment,
             "accepted nonidentity sink lost its checker decision")
     end
-    checkmatch(term, target, exp, errors, loc or exp.loc, adjustment,
+    checkmatch(term, target, exp, errors, loc or exp.loc,
+        maybe3.from_optional(adjustment),
         precise_error)
     return exp
 end
@@ -1086,7 +1084,7 @@ function trytostr(node)
 end
 
 function nil_can_adjust_to(typ)
-    return typ and types.assignment_adjustment(types.Nil(), typ) ~= false
+    return typ and types.assignment_adjustment(types.Nil(), typ) ~= nil
 end
 
 return core.checker

@@ -3,7 +3,7 @@ local _ENV = core
 
 -- Expression-list demand.  `fixed` is always dense: UNKNOWN_SLOT represents a
 -- position whose type is not known yet (notably an inferred local).  `tail` is
--- false for a finite consumer, a Type.* value for an open typed consumer, or
+-- nil for a finite consumer, a Type.* value for an open typed consumer, or
 -- INFER_OPEN for an open consumer whose element type is inferred from its
 -- inputs.  Keeping the sentinels as real table values is important: using nil
 -- for an unknown slot would make Lua's length operator collapse the demand.
@@ -24,7 +24,7 @@ function result_demand(fixed, tail, opts)
     opts = opts or {}
     return {
         fixed = fixed or {},
-        tail = tail or false,
+        tail = tail or nil,
         missing = opts.missing or "error",
         explicit_surplus = opts.explicit_surplus or "discard",
         term = opts.term or "expression list",
@@ -73,7 +73,7 @@ function synthesize_function_type(params, varargtype, demand, loc,
             or types.Value()
     end
 
-    local flexrettype = false
+    local flexrettype = nil
     if demand.tail then
         flexrettype = expected_type(demand.tail)
             or demand.inference_tail
@@ -82,7 +82,7 @@ function synthesize_function_type(params, varargtype, demand, loc,
             demand.loc or loc, errors, "return")
     end
 
-    return types.Function(params, rettypes, false, varargtype or false,
+    return types.Function(params, rettypes, false, varargtype or nil,
         flexrettype)
 end
 
@@ -113,8 +113,8 @@ function remaining_demand(demand, first)
     local fixed, inference_fixed = {}, {}
     for i = first, #demand.fixed do
         table.insert(fixed, demand.fixed[i])
-        table.insert(inference_fixed,
-            demand.inference_fixed and demand.inference_fixed[i] or false)
+        inference_fixed[i - first + 1] =
+            demand.inference_fixed and demand.inference_fixed[i] or nil
     end
     return result_demand(fixed, demand.tail, {
         missing = demand.missing,
@@ -192,7 +192,7 @@ end
 function normalize_spread_expression(exp)
     if exp and exp._tag == "Ast.ExpSubset"
        and exp.exp._tag == "Ast.ExpDots" then
-        return ast.ExpSpread(exp.loc, exp, false, false)
+        return ast.ExpSpread(exp.loc, exp, nil, nil)
     end
     return exp
 end
@@ -210,8 +210,8 @@ function refresh_spread_element_annotations(node, elem)
         node._spread_optional_type)
     local open_carrier = generic_runtime_carrier(elem)
     node._spread_optional_guard =
-        types.gradual_guard(optional_carrier) or false
-    node._spread_open_guard = types.gradual_guard(open_carrier) or false
+        maybe3.from_optional(types.gradual_guard(optional_carrier))
+    node._spread_open_guard = maybe3.from_optional(types.gradual_guard(open_carrier))
     if node._open_spread then
         node._open_spread.source_type = elem
     end
@@ -224,7 +224,7 @@ function spread_subject_container(typ)
        and types.equals(typ.keys, types.Integer()) then
         return "map", typ.values
     end
-    return false, false
+    return nil, nil
 end
 
 -- A spread subject is checked without a container context, but a valid
@@ -258,7 +258,7 @@ end
 function check_spread_marker(node, st, errors)
     if node._spread_checked then return node._spread_elem end
     local subject = node.exp
-    local first, last = false, false
+    local first, last = nil, nil
     local vararg_range = subject._tag == "Ast.ExpSubset"
         or node.first or node.last
     if subject._tag == "Ast.ExpSubset" then
@@ -302,7 +302,7 @@ function check_spread_marker(node, st, errors)
     end
 
     local function check_bound(bound, name)
-        if not bound then return false end
+        if not bound then return nil end
         checkexp(bound, st, errors)
         return coerce_and_check(bound, types.Integer(),
             "spread " .. name .. " bound", errors, bound.loc)
@@ -314,8 +314,8 @@ function check_spread_marker(node, st, errors)
     node._spread_kind = kind
     refresh_spread_element_annotations(node, elem)
     if elem._tag ~= "Type.Invalid"
-       and (not node._spread_optional_guard
-            or not node._spread_open_guard) then
+       and (node._spread_optional_guard.tag == "none"
+            or node._spread_open_guard.tag == "none") then
         checker.typeerror(errors, subject.loc,
             "cannot spread elements of type '%s' because the type has no sound runtime guard",
             types.tostring(elem))
@@ -343,11 +343,11 @@ function adjust_explist(exps, demand, st, errors)
         fixed = {},
         tail_scalars = {},
         discards = {},
-        open_source = false,
-        open_type = false,
-        open_target = false,
-        open_start = false,
-        open_adjustment = false,
+        open_source = nil,
+        open_type = nil,
+        open_target = nil,
+        open_start = nil,
+        open_adjustment = nil,
     }
     local next_fixed = 1
 
@@ -410,7 +410,7 @@ function adjust_explist(exps, demand, st, errors)
                     and demand.inference_fixed[next_fixed])
             subdemand = result_demand({ target }, false, {
                 term = demand_term(demand, next_fixed),
-                inference_fixed = { inference_target or false },
+                inference_fixed = { inference_target or nil },
             })
         else
             subdemand = result_demand({}, false, { term = demand.term })
@@ -599,15 +599,15 @@ function adjust_explist(exps, demand, st, errors)
                 allow_coercion = allow_open_coercion and true or false,
             })
     end
-    adjusted.open_adjustment = open_adjustment or false
+    adjusted.open_adjustment = open_adjustment or nil
     adjusted.open_callable_adapter = open_adjustment
         and open_adjustment.kind == "callable"
         and checker.freeze_callable_adapter(
             open_adjustment, adjusted.open_type,
             adjusted.open_target, adjusted.open_source.loc)
-        or false
+        or nil
     adjusted.open_interface_conversion =
-        open_interface_conversion or false
+        open_interface_conversion or nil
     if adjusted.open_source and not demand.defer_open_check then
         local open = open_source_descriptor(adjusted.open_source)
         if open then
@@ -663,7 +663,7 @@ function replace_adjusted_value(adjusted, old, new)
 end
 
 function constructor_field_kind(field)
-    -- Parser-built positional fields use false; synthesized fields may use nil.
+    -- Positional fields have no name.
     if not field.name then
         return "positional"
     elseif type(field.name) == "table" then
@@ -772,16 +772,16 @@ function annotate_array_writer(node, elem, errors)
     local normalized = types.normalize(elem)
     if not normalized then
         node._array_element_type = types.Invalid()
-        node._array_writer_plan = false
+        node._array_writer_plan = maybe3.none()
         return
     end
     node._array_element_type = normalized
     local writer_type = generic_runtime_carrier(normalized)
-    node._array_writer_plan = types.dynamic_coercion(writer_type) or false
+    node._array_writer_plan = maybe3.from_optional(types.dynamic_coercion(writer_type))
     if writer_type ~= normalized then
         node._generic_array_writer_type = writer_type
     end
-    if node._array_writer_plan == false
+    if node._array_writer_plan.tag == "none"
        and normalized._tag ~= "Type.Invalid" then
         checker.typeerror(errors, node.loc,
             "cannot construct an array with element type %s because genuine "
@@ -815,7 +815,7 @@ function generic_constructor_result_demand(
         expected, demand, operation, pattern)
     local provisional = operation and pattern and
         generic_substitute_inference(
-            operation.context, pattern, false) or false
+            operation.context, pattern, false) or nil
     if not expected and not provisional then return demand end
 
     local fixed, inference_fixed = {}, {}
@@ -824,11 +824,11 @@ function generic_constructor_result_demand(
         inference_fixed[index] = provisional
             or (demand.inference_fixed
                 and demand.inference_fixed[index])
-            or false
+            or nil
     end
-    local tail = demand.tail and (expected or demand.tail) or false
+    local tail = demand.tail and (expected or demand.tail) or nil
     local inference_tail = demand.tail and
-        (provisional or demand.inference_tail) or false
+        (provisional or demand.inference_tail) or nil
     return result_demand(fixed, tail, {
         term = demand.term,
         loc = demand.loc,
@@ -869,7 +869,7 @@ function generic_constructor_expression_needs_context(
     if exp._tag == "Ast.ExpFunction" then
         local nparams = #exp.params
         local vararg = exp.params[nparams]
-        local has_vararg = vararg and vararg.name == false
+        local has_vararg = vararg and vararg.name == nil
         local nfixed = has_vararg and nparams - 1 or nparams
         for index = 1, nfixed do
             if not exp.params[index].type then return true end
@@ -1014,7 +1014,7 @@ function generic_finish_positional_constructor(node, st, errors, container_tag,
         operation, keytype, true)
 
     if container_tag == "Type.Array" then
-        node._type = types.Array(etype, array_isconst and true or false)
+        node._type = types.Array(etype, array_isconst or { tag = "no" })
         annotate_array_writer(node, etype, errors)
     else
         node._type = types.Map(assert(closed_keytype), etype)
@@ -1068,15 +1068,15 @@ function generic_finish_positional_constructor(node, st, errors, container_tag,
             end
         end
         adjusted.open_target = etype
-        adjusted.open_adjustment = open_adjustment or false
+        adjusted.open_adjustment = open_adjustment or nil
         adjusted.open_callable_adapter = open_adjustment
             and open_adjustment.kind == "callable"
             and checker.freeze_callable_adapter(
                 open_adjustment, source, etype,
                 adjusted.open_source.loc)
-            or false
+            or nil
         adjusted.open_interface_conversion =
-            open_interface_conversion or false
+            open_interface_conversion or nil
         local open = open_source_descriptor(adjusted.open_source)
         if open then
             open.target_type = etype
@@ -1176,7 +1176,7 @@ function check_positional_constructor(node, st, errors, container_tag,
         local provisional_key = generic_substitute_constructor_type(
             operation, keytype, false)
         node._type = container_tag == "Type.Array"
-            and types.Array(etype, array_isconst and true or false)
+            and types.Array(etype, array_isconst or { tag = "no" })
             or types.Map(assert(provisional_key), etype)
         node._positional_adjustment = adjusted
         generic_add_inference_finalizer(operation, function()
@@ -1401,7 +1401,7 @@ function generic_finish_named_record_constructor(
                 exp = coerce_and_check(
                     exp, rfield.type,
                     "omitted field " .. rfield.name,
-                    errors, node.loc, adjustment)
+                    errors, node.loc, maybe3.from_optional(adjustment))
                 exp._named_omitted = true
                 local cfield = ast.Field(node.loc, rfield.name, exp)
                 cfield._field = rfield
@@ -1657,7 +1657,7 @@ function generic_check_named_record_constructor(
                     exp = coerce_and_check(
                         exp, rfield.type,
                         "omitted field " .. rfield.name,
-                        errors, node.loc, adjustment)
+                        errors, node.loc, maybe3.from_optional(adjustment))
                     exp._named_omitted = true
                     local cfield = ast.Field(node.loc, rfield.name, exp)
                     cfield._field = rfield
@@ -1822,7 +1822,7 @@ function generic_check_direct_positional_constructor(
             return false
         end
         generic_unify_inference(operation.context, pattern,
-            types.Array(typ, false),
+            types.Array(typ, { tag = "no" }),
             "positional constructor first component", loc)
         local candidate = current_type(pattern, false)
         if candidate._tag ~= "Type.Array" then return false end
@@ -1872,7 +1872,7 @@ function generic_check_direct_positional_constructor(
                             -- A nonfinal call contributes only its first scalar.
                             exp._types = { exp._type }
                             exp._visible_types = { exp._type }
-                            exp._open_results = false
+                            exp._open_results = nil
                         end
                     end
                     return
@@ -1976,7 +1976,7 @@ function generic_check_direct_positional_constructor(
             local sources = independent_sources(false)
             plan.container_tag = "Type.Array"
             plan.elem = sources[1] and sources[1].type or types.Integer()
-            plan.context = types.Array(plan.elem, false)
+            plan.context = types.Array(plan.elem, { tag = "no" })
         end
 
         if not plan.rejected then
@@ -1989,7 +1989,7 @@ function generic_check_direct_positional_constructor(
             plan.elem = current_type(plan.elem, false)
             plan.key = current_type(plan.key, false)
             node._type = plan.container_tag == "Type.Array"
-                and types.Array(plan.elem, false)
+                and types.Array(plan.elem, { tag = "no" })
                 or types.Map(plan.key, plan.elem)
         else
             node._type = candidate
@@ -2025,7 +2025,7 @@ function generic_check_direct_positional_constructor(
         select(closed)
     elseif sources[1] then
         generic_unify_inference(operation.context, pattern,
-            types.Array(sources[1].type, false),
+            types.Array(sources[1].type, { tag = "no" }),
             "positional constructor first component", sources[1].loc)
         select(generic_substitute_inference(
             operation.context, pattern, false))
@@ -2039,7 +2039,7 @@ function generic_check_direct_positional_constructor(
         local ready = independent_sources(true)
         if ready[1] then
             generic_unify_inference(operation.context, pattern,
-                types.Array(ready[1].type, false),
+                types.Array(ready[1].type, { tag = "no" }),
                 "positional constructor first component", ready[1].loc)
             return select(generic_substitute_inference(
                 operation.context, pattern, false))
@@ -2056,7 +2056,7 @@ function generic_check_direct_positional_constructor(
         local equations = independent_sources(false)
         if equations[1] then
             generic_unify_inference(operation.context, pattern,
-                types.Array(equations[1].type, false),
+                types.Array(equations[1].type, { tag = "no" }),
                 "default positional constructor shape", equations[1].loc)
             return select(generic_substitute_inference(
                 operation.context, pattern, false))
@@ -2078,7 +2078,7 @@ function generic_check_direct_positional_constructor(
             if elem
                and not generic_inference_type_has_invalid(elem) then
                 generic_unify_inference(operation.context, pattern,
-                    types.Array(deoptionize(elem), false),
+                    types.Array(deoptionize(elem), { tag = "no" }),
                     "default positional constructor component", item.exp.loc)
                 return select(generic_substitute_inference(
                     operation.context, pattern, false))
@@ -2106,7 +2106,7 @@ function generic_check_direct_positional_constructor(
                 node, st, errors, plan.container_tag, plan.key,
                 current_type(plan.elem, true), adjusted, operation,
                 plan.container_tag == "Type.Array"
-                    and plan.context.isconst or false)
+                    and plan.context.isconst or nil)
         elseif generic_inference_type_has_unresolved(
                 operation.context, node._type) then
             node._type = current_type(node._type, true)
@@ -2159,7 +2159,7 @@ function generic_defer_empty_constructor(
     generic_add_inference_discovery(operation, function()
         if finish(false) then return true end
         generic_unify_inference(operation.context, pattern,
-            types.Array(types.Integer(), false),
+            types.Array(types.Integer(), { tag = "no" }),
             "default empty constructor", node.loc)
         return finish(false)
     end, "default")

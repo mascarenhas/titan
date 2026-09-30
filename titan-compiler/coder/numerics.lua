@@ -557,7 +557,7 @@ end
 -- plan, so a present `boolean?` uses truthiness just like `boolean`.
 function coder._code_dynamic_predicate(ctx, plan, target, source)
     plan = coder._checked_dynamic_plan(plan, target, "written value is")
-    if plan == false then return "", "0" end
+    if plan == nil then return "", "0" end
     local resolved = coder._resolve_cast_type(target)
     local op = plan.op
 
@@ -646,7 +646,7 @@ end
 function coder._code_strict_predicate(ctx, plan, target, source)
     plan = coder._checked_gradual_guard(
         plan, target, "written gradual type test")
-    if plan == false then return "", "0" end
+    if plan == nil then return "", "0" end
 
     local resolved = coder._resolve_cast_type(target)
     local op = plan.op
@@ -901,9 +901,9 @@ function coder._codeis(ctx, node)
     -- evaluation and roots GC values while metatable/Array checks run.
     local original_source_type = node.exp._type
     coder._checked_written_cast_plan(
-        node._written_cast, original_source_type, node.target,
+        maybe3.get_checked(node._written_cast, "written cast"), original_source_type, node.target,
         "written type test")
-    if node._written_cast.op == "current_module" then
+    if maybe3.get_checked(node._written_cast, "written cast").op == "current_module" then
         return "", "1"
     end
     local source_type = coder._resolve_cast_type(node.exp._type)
@@ -921,7 +921,7 @@ function coder._codeis(ctx, node)
     local predicate_stats, predicate
 
     if source_type._tag == "Type.Value" then
-        local cast = assert(node._written_cast,
+        local cast = assert(maybe3.get_checked(node._written_cast, "written cast"),
             "value type test is missing its checker written-cast plan")
         if cast.op == "identity" then
             predicate_stats = render("(void)($SOURCE);", { SOURCE = source })
@@ -947,25 +947,25 @@ function coder._codeis(ctx, node)
             error("unknown value type-test plan operation "
                 .. tostring(cast.op))
         end
-    elseif node._written_cast
-           and node._written_cast.op == "coercion" then
+    elseif (node._written_cast and node._written_cast.tag == "just")
+           and maybe3.get_checked(node._written_cast, "written cast").op == "coercion" then
         predicate_stats, predicate = coder._code_coercion_predicate(
-            ctx, assert(node._written_cast.coercion),
+            ctx, assert(maybe3.get_checked(node._written_cast, "written cast").coercion),
             original_source_type, node.target, source)
-    elseif node._written_cast
-           and node._written_cast.op == "explicit"
-           and node._written_cast.conversion
-           and node._written_cast.conversion.op == "c_numeric" then
+    elseif (node._written_cast and node._written_cast.tag == "just")
+           and maybe3.get_checked(node._written_cast, "written cast").op == "explicit"
+           and maybe3.get_checked(node._written_cast, "written cast").conversion
+           and maybe3.get_checked(node._written_cast, "written cast").conversion.op == "c_numeric" then
         coder._checked_explicit_numeric_conversion(
-            node._written_cast.conversion,
+            maybe3.get_checked(node._written_cast, "written cast").conversion,
             original_source_type, node.target,
             "written C numeric type test")
         predicate_stats, predicate =
             coder._code_native_numeric_predicate(
                 ctx, original_source_type, node.target,
                 source, "explicit_c")
-    elseif node._written_cast
-           and node._written_cast.op == "gradual"
+    elseif (node._written_cast and node._written_cast.tag == "just")
+           and maybe3.get_checked(node._written_cast, "written cast").op == "gradual"
            and source_type._tag == "Type.Option"
            and target_type._tag == "Type.Option" then
         if coder._is_native_option(source_type)
@@ -981,15 +981,15 @@ function coder._codeis(ctx, node)
         -- consistency guards rather than Lua-boundary coercions. Structural
         -- Array/Map/callable tests remain total at this outer view edge.
         predicate_stats, predicate = coder._code_strict_predicate(
-            ctx, node._written_cast.guard, node.target, "&" .. source)
+            ctx, maybe3.get_checked(node._written_cast, "written cast").guard, node.target, "&" .. source)
     elseif original_source_type._tag == "Type.Option"
            and types.equals(original_source_type.base, node.target) then
         predicate = coder._option_present(original_source_type, source)
         predicate_stats = ""
-    elseif node._written_cast
-           and node._written_cast.op == "explicit"
-           and node._written_cast.conversion
-           and node._written_cast.conversion.op ==
+    elseif (node._written_cast and node._written_cast.tag == "just")
+           and maybe3.get_checked(node._written_cast, "written cast").op == "explicit"
+           and maybe3.get_checked(node._written_cast, "written cast").conversion
+           and maybe3.get_checked(node._written_cast, "written cast").conversion.op ==
                "gc_identity_to_void_pointer"
            and source_type._tag == "Type.Function" then
         -- Function values deliberately defer callability checks until call

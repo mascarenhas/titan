@@ -56,11 +56,11 @@ describe("interfaces (typechecker)", function()
         local method = declaration.methods[2]
         assert.is_true(method._type == interface.methods.write)
         assert.equal(2, #method._lua_dynamic_plans)
-        assert.equal("nominal", method._lua_dynamic_plans[1].op)
-        assert.equal("string", method._lua_dynamic_plans[2].op)
-        assert.equal("integer", method._lua_vararg_dynamic_plan.op)
+        assert.equal("nominal", method._lua_dynamic_plans[1].value.op)
+        assert.equal("string", method._lua_dynamic_plans[2].value.op)
+        assert.equal("integer", method._lua_vararg_dynamic_plan.value.op)
         assert.equal(1, #method._bound_strict_guard_plans)
-        assert.is_truthy(method._bound_strict_vararg_guard_plan)
+        assert.equal("just", method._bound_strict_vararg_guard_plan.tag)
 
         assert.is_true(modtype.type_members.Stream ==
             declaration._declared_type)
@@ -154,9 +154,9 @@ describe("interfaces (typechecker)", function()
         assert.equal("nominal",
             outer_declaration._dynamic_receiver_plan.op)
         assert.equal("nominal",
-            outer_declaration.fields[1]._dynamic_plan.op)
+            outer_declaration.fields[1]._dynamic_plan.value.op)
         assert.equal("option",
-            outer_declaration.fields[2]._dynamic_plan.op)
+            outer_declaration.fields[2]._dynamic_plan.value.op)
 
         local inner = conversion.fields[1]
         assert.equal("inner", inner.name)
@@ -838,14 +838,14 @@ describe("interfaces (typechecker)", function()
 
         local stats = find_function(ast, "casts").block.stats
         local built = stats[1].exps[1]
-        assert.equal("coercion", built._written_cast.op)
+        assert.equal("coercion", built._written_cast.value.op)
         assert.equal("interface_conversion",
             built._interface_conversion.kind)
 
         for index = 2, 3 do
             local downcast = stats[index].exps[1]
             assert.equal("interface_downcast",
-                downcast._written_cast.op)
+                downcast._written_cast.value.op)
             assert.equal("interface_downcast",
                 downcast._interface_downcast.kind)
         end
@@ -859,9 +859,9 @@ describe("interfaces (typechecker)", function()
             runtime_failure._interface_downcast.concrete.name)
 
         local exact = stats[5].exps[1]
-        assert.equal("dynamic", exact._written_cast.op)
+        assert.equal("dynamic", exact._written_cast.value.op)
         assert.equal("nominal",
-            exact._written_cast.dynamic.op)
+            exact._written_cast.value.dynamic.op)
 
         local scalar_is = stats[6].exps[1]
         assert.equal("interface_downcast_test",
@@ -917,13 +917,13 @@ describe("interfaces (typechecker)", function()
         assert.truthy(ok, err)
         local stats = find_function(ast, "dynamic").block.stats
         assert.equal("dynamic",
-            stats[1].exps[1]._written_cast.op)
+            stats[1].exps[1]._written_cast.value.op)
         assert.equal("option",
-            stats[1].exps[1]._written_cast.dynamic.op)
+            stats[1].exps[1]._written_cast.value.dynamic.op)
         assert.equal("coercion",
-            stats[2].exps[1]._written_cast.op)
+            stats[2].exps[1]._written_cast.value.op)
         assert.equal("dynamic",
-            stats[3].exps[1]._written_cast.op)
+            stats[3].exps[1]._written_cast.value.op)
 
         ok, err = run_checker([[
             interface Left

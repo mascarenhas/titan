@@ -415,7 +415,7 @@ and the coder later validates, registers, and emits that already frozen graph.
 `adjust_explist(exps, demand, st, errors)` own declarations, assignments,
 returns, positional calls, positional container constructors, and the
 generic-for tuple. `fixed` is dense
-(`UNKNOWN_SLOT` means inferred), while `tail` is false, a typed open element,
+(`UNKNOWN_SLOT` means inferred), while `tail` is nil, a typed open element,
 or `INFER_OPEN`. The result retains every written expression in lexical order,
 records delivered `fixed` and `tail_scalars`, marks effect-only `discards`, and
 identifies at most one runtime-sized final `open_source` with source/target
@@ -693,6 +693,9 @@ Every Array/Map `Ast.VarBracket` read also carries `_read_guard` for its
 optionized result type. Function declarations, methods, bound-method
 trampolines, and lambdas carry parallel strict GuardPlan arrays for fixed and
 variadic parameters; generic call nodes carry strict fixed/open result guards.
+Computed plan annotations use explicit `Maybe3` states: constructors start with
+`unknown`, checking records `none` or `just`, and dense arrays retain a state for
+every slot. Code generation requires a checked state before unwrapping a plan.
 Frozen callable adapters reuse those component guards plus explicit minimal
 root/rebase and action records. Incoming native values stay in C and borrow their
 existing provenance; newly allocated wrappers get immediate destination roots;
@@ -794,9 +797,9 @@ lambda body's `return` statements.
 * **Result shape.** An explicit `node.rettypes`/`node.flexrettype` pair is used
   as written. In particular, the parser's empty-list representation of explicit
   `: ()` is truthy and therefore fixes the zero-result shape. With syntactic
-  omission (`node.rettypes == false`), checking mode copies both
+  omission (`node.rettypes == nil`), checking mode copies both
   `expected.rettypes` and `expected.flexrettype`; synthesis mode defaults to
-  empty/false, exactly like an unannotated named function.
+  empty/nil, exactly like an unannotated named function.
 
 The complete result shape is installed before the body is checked. `StatReturn`
 checks and coerces body results against that finite/open demand. In a
@@ -883,7 +886,7 @@ nil-accepting result-bearing target through the checker-frozen callable plan.
   body's locals.
 * **Union construction and dispatch.** Synthesized variant statics are
   ordinary first-class `Type.StaticMethod` values, but publish
-  `paramnames = false`; fixed-call adjustment still nil-fills a missing
+  `paramnames = nil`; fixed-call adjustment still nil-fills a missing
   payload and evaluates/discards surplus arguments. `Ast.StatCase` applies
   ordinary `tryforce` to its scrutinee, so `Union?` dispatches after the
   normal nil check. It then requires a union owner, rejects duplicate arms and

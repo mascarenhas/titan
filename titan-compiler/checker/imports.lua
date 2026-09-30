@@ -99,7 +99,7 @@ function generic_validate_recovered_application(
         end
     end
 
-    if owner.scope ~= false then
+    if owner.scope ~= nil then
         local reconstructed, reconstruction_error = pcall(
             types.substitute, owner, owner.scope, arguments)
         if not reconstructed then
@@ -109,7 +109,7 @@ function generic_validate_recovered_application(
         end
     end
     for index, typeparam in ipairs(owner.typeparams or {}) do
-        if typeparam.constraint ~= false then
+        if typeparam.constraint ~= nil then
             local closed, constraint = pcall(
                 types.substitute, typeparam.constraint,
                 owner.scope, arguments)
@@ -146,7 +146,7 @@ function register_referenced_nominals(
     constraint_policy.generic_scope_bindings =
         constraint_policy.generic_scope_bindings or {}
     local function register_scope(scope, typeparams)
-        if scope == false or scope == nil then return true end
+        if scope == nil then return true end
         local key_ok, key = pcall(types.generic_scope_key, scope)
         if not key_ok then
             return nil, "recovered generic scope has an invalid schema"
@@ -212,7 +212,7 @@ function register_referenced_nominals(
     end
     local function visit_binders(typeparams)
         for _, typeparam in ipairs(typeparams or {}) do
-            if typeparam.constraint ~= false then
+            if typeparam.constraint ~= nil then
                 local ok, err = visit(typeparam.constraint, "constraint")
                 if not ok then return nil, err end
             end
@@ -265,7 +265,7 @@ function register_referenced_nominals(
                         t.target_owner_fqtn .. "'"
             end
         end
-        if ok and t.target_alias_fqtn ~= false then
+        if ok and t.target_alias_fqtn ~= nil then
             local target_module_name =
                 t.target_alias_fqtn:match("^(.*)%.[^.]+$")
             local memo = checker._recover_referenced_module(
@@ -291,11 +291,11 @@ function register_referenced_nominals(
         end
         if ok then ok, err = visit_binders(t.typeparams) end
     elseif tag == "Type.Parameter" then
-        if t.erased_constraint ~= false then
+        if t.erased_constraint ~= nil then
             ok, err = visit(t.erased_constraint, "erased-constraint")
         end
     elseif tag == "Type.TypeParameter" then
-        if t.constraint ~= false then
+        if t.constraint ~= nil then
             ok, err = visit(t.constraint, "constraint")
         end
     elseif tag == "Type.FunctionScheme" then
@@ -413,12 +413,12 @@ function first_local_nominal_type(typ, seen)
             if found then return found end
         end
     elseif tag == "Type.Parameter" then
-        if typ.erased_constraint ~= false then
+        if typ.erased_constraint ~= nil then
             return first_local_nominal_type(
                 typ.erased_constraint, seen)
         end
     elseif tag == "Type.TypeParameter" then
-        if typ.constraint ~= false then
+        if typ.constraint ~= nil then
             return first_local_nominal_type(typ.constraint, seen)
         end
     elseif tag == "Type.FunctionScheme" then
@@ -738,7 +738,7 @@ function makemoduletype(modname, modast, st)
             elseif tag == "Ast.TopLevelRecord"
                    or tag == "Ast.TopLevelUnion" then
                 local member = types.ModuleMember(
-                    modname, tlnode.name, tlnode._type, false)
+                    modname, tlnode.name, tlnode._type, nil)
                 if tlnode.islocal then
                     add_source_member(member)
                 else

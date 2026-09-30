@@ -578,6 +578,29 @@ describe("pure C expression semantics", function()
     end)
 
     describe("integer promotions", function()
+        it("accepts nil rank and width as absent profile metadata", function()
+            local profile = lp64_profile()
+            assert.equal(ctype(profile, "int"),
+                csemantics.integer_promotion(profile,
+                    types.CInteger("int", true, nil, nil)))
+        end)
+
+        it("rejects false rank instead of treating it as absent", function()
+            local profile = lp64_profile()
+            local promoted, err = csemantics.integer_promotion(profile,
+                types.CInteger("int", true, false, 32))
+            assert.is_nil(promoted)
+            assert.matches("disagrees with the target profile's rank", err, 1, true)
+        end)
+
+        it("rejects false width instead of treating it as absent", function()
+            local profile = lp64_profile()
+            local promoted, err = csemantics.integer_promotion(profile,
+                types.CInteger("int", true, 3, false))
+            assert.is_nil(promoted)
+            assert.matches("disagrees with the target profile's storage width", err, 1, true)
+        end)
+
         it("promotes every representable LP64 small integer to int", function()
             local profile = lp64_profile()
             for _, spelling in ipairs({
@@ -812,8 +835,17 @@ describe("pure C expression semantics", function()
     describe("array decay and pointer decisions", function()
         local function complete_struct()
             return types.CStruct(
-                "struct item", "item", false, {}, true, false)
+                "struct item", "item", nil, {}, true, false)
         end
+
+        it("requires a present valid extent for complete Array objects", function()
+            local int = ctype(lp64_profile(), "int")
+            assert.is_false(csemantics.is_complete_object(types.CArray(int, nil)))
+            assert.is_false(csemantics.is_complete_object(types.CArray(int, false)))
+            assert.is_false(csemantics.is_complete_object(types.CArray(int, "")))
+            assert.is_true(csemantics.is_complete_object(types.CArray(int, 4)))
+            assert.is_true(csemantics.is_complete_object(types.CArray(int, "N")))
+        end)
 
         it("decays arrays before complete-object pointer arithmetic", function()
             local profile = lp64_profile()
@@ -833,7 +865,7 @@ describe("pure C expression semantics", function()
             local profile = lp64_profile()
             local offset = ctype(profile, "int")
             local incomplete = types.CStruct(
-                "struct pending", "pending", false, {}, false, false)
+                "struct pending", "pending", nil, {}, false, false)
             local callback = types.CFunction({}, types.CVoid(), false, "cdecl")
 
             for _, pointer in ipairs({
@@ -908,9 +940,9 @@ describe("pure C expression semantics", function()
 
         it("keeps same-spelled aggregate tags nominal", function()
             local first = types.CStruct(
-                nil, "prototype_tag", false, {}, true, false)
+                nil, "prototype_tag", nil, {}, true, false)
             local second = types.CStruct(
-                nil, "prototype_tag", false, {}, true, false)
+                nil, "prototype_tag", nil, {}, true, false)
             local first_pointer = types.CPointer(first, {})
             local second_pointer = types.CPointer(second, {})
 
@@ -1001,7 +1033,7 @@ describe("pure C expression semantics", function()
         function()
             local profile = lp64_profile()
             local item = types.CStruct(
-                nil, "operator_item", false, {}, true, false)
+                nil, "operator_item", nil, {}, true, false)
             local pointer = types.CPointer(item, {"const"})
 
             local xor = assert(csemantics.decide_binary_operator(
@@ -1032,7 +1064,7 @@ describe("pure C expression semantics", function()
         it("rejects intrinsic shape errors without a target profile",
         function()
             local aggregate = types.CStruct(
-                nil, "aggregate_operand", false, {}, true, false)
+                nil, "aggregate_operand", nil, {}, true, false)
             local result, err, handled =
                 csemantics.decide_binary_operator(
                     nil, "==", aggregate, aggregate)

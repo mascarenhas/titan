@@ -27,7 +27,7 @@ native signatures are part of the compiled-module ABI.
 ## Representation in the AST and type graph
 
 The flexible element is stored separately from the dense fixed `rettypes`
-array. `false` means that no flexible tail is present; a parsed AST node or a
+array. `nil` means that no flexible tail is present; a parsed AST node or a
 resolved `Type.*` value means that it is present.
 
 The relevant `ast.lua` constructor fields are:
@@ -79,7 +79,7 @@ uses a parenthesized result list.
 `parenthesized_returns` and `singlereturn` construct the same transient carrier:
 
 ```lua
-{ rettypes = fixed_dense_list, flexrettype = type_node_or_false }
+{ rettypes = fixed_dense_list, flexrettype = type_node_or_nil }
 ```
 
 `functiontype` combines independent input and result captures into
@@ -108,8 +108,8 @@ descriptor representation are rejected with return-specific diagnostics.
 
 An unannotated lambda in an expected function context copies both the fixed
 `rettypes` and `flexrettype`. An explicit `: ()` keeps an empty fixed list and
-`flexrettype = false`. The main-function contract requires both
-`varargtype = false` and `flexrettype = false`, preserving the exact one-fixed-
+`flexrettype = nil`. The main-function contract requires both
+`varargtype = nil` and `flexrettype = nil`, preserving the exact one-fixed-
 parameter `main(args: {string}): integer` shape.
 
 ## One finite/open result demand
@@ -119,7 +119,7 @@ parameter `main(args: {string}): integer` shape.
 
 * `fixed` is a dense sequence of demanded positions. `UNKNOWN_SLOT` represents
   a known position whose type is inferred rather than supplied by context.
-* `tail` is `false` for a finite consumer, a resolved `Type.*` for a typed open
+* `tail` is `nil` for a finite consumer, a resolved `Type.*` for a typed open
   consumer, or `INFER_OPEN` for an open consumer whose element type is inferred
   from its inputs.
 * `missing` selects ordinary arity failure, call-argument nil padding, or the
@@ -142,7 +142,7 @@ exps          every written expression, plus synthesized finite projections
 fixed         values delivered to the finite prefix, indexed by demand slot
 tail_scalars  statically known scalar values delivered after the prefix
 discards      retained expressions evaluated only for effects
-open_source   the sole possible runtime-sized final producer, or false
+open_source   the sole possible runtime-sized final producer, or nil
 open_type     that producer's element type
 open_target   the sink's element type
 open_start    the first still-unconsumed element of the dynamic run
@@ -181,12 +181,12 @@ by the sink; `checkmatch` verifies that elaborated result.
 | --- | --- |
 | `_callee_type` | complete checked callable type; `Type.Function` for Titan/Lua or authoritative `Type.CFunction` for a C call |
 | `_types` | declared fixed result prefix; retained for existing coder paths |
-| `_flexrettype` | declared flexible element, or `false` |
+| `_flexrettype` | declared flexible element, or `nil` |
 | `_visible_types` | finite and statically visible results for this consumer |
 | `_result_sources` | `{kind="fixed", index=i}` or `{kind="flex", index=i, may_absent=true}` per visible slot |
 | `_finite_flex_prefix` | number of flexible slots projected by a finite demand |
 | `_flex_result_demand` | finite projected count, `"open"`, or `nil` |
-| `_open_results` | dynamic source/target/start descriptor for an open sink, or `false` |
+| `_open_results` | dynamic source/target/start descriptor for an open sink, or `nil` |
 
 `_type` remains the first visible type, or `Type.Void` when the demand exposes
 none. A flexible projection is `optionize(flexrettype)`: existing option types

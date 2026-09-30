@@ -51,12 +51,12 @@ function generic_prepare_erased_registry(surface_registry)
             for index, field in ipairs(lowered.fields) do
                 local source = owner.fields[index]
                 field.islocal = source and source.islocal or nil
-                field.dynamic_plan = types.dynamic_coercion(field.type) or false
+                field.dynamic_plan = maybe3.from_optional(types.dynamic_coercion(field.type))
             end
         elseif lowered._tag == "Type.Interface" then
             for _, field in ipairs(lowered.fields) do
                 field.dynamic_plan =
-                    types.dynamic_coercion(field.type) or false
+                    maybe3.from_optional(types.dynamic_coercion(field.type))
             end
         elseif lowered._tag == "Type.Union" then
             for index, variant in ipairs(lowered.variants) do
@@ -153,7 +153,7 @@ function generic_interface_downcast_expression(
     node._type = target
     node._implicit_coercion = true
     node._interface_downcast = downcast
-    node._written_cast = {
+    node._written_cast = maybe3.just({
         kind = "written_cast",
         op = "interface_downcast",
         source = source,
@@ -163,7 +163,7 @@ function generic_interface_downcast_expression(
         source_optional = downcast.source_optional,
         downcast = downcast,
         _erased_boundary = subject,
-    }
+    })
     return node
 end
 
@@ -186,7 +186,7 @@ function generic_erased_boundary_expression(
             subject, types.tostring(source), types.tostring(target)), 0)
     end
     local lowered, accepted = trycoerce(
-        exp, target, state.errors, subject, adjustment)
+        exp, target, state.errors, subject, maybe3.from_optional(adjustment))
     if not accepted then
         error("generic erased boundary lost its ordinary adjustment for "
             .. subject, 0)
@@ -237,19 +237,19 @@ function generic_reclassify_open_adjustment(
     local callable_adapter = plan.kind == "callable"
         and checker.freeze_callable_adapter(
             plan, source, target, adjusted.open_source.loc)
-        or false
+        or nil
     adjusted.open_type = source
     adjusted.open_target = target
     adjusted.open_adjustment = plan
     adjusted.open_callable_adapter = callable_adapter
-    adjusted.open_interface_conversion = plan.interface_conversion or false
+    adjusted.open_interface_conversion = plan.interface_conversion or nil
     if open then
         open.source_type = source
         open.target_type = target
         open.adjustment = plan
         open.callable_adapter = callable_adapter
     end
-    if mirror and mirror ~= false then
+    if mirror then
         mirror.source_type = source
         mirror.target_type = target
         mirror.adjustment = plan
@@ -398,9 +398,9 @@ function generic_lower_call_arguments(
                 adjusted.open_callable_adapter = plan.kind == "callable"
                     and checker.freeze_callable_adapter(
                         plan, source, target, adjusted.open_source.loc)
-                    or false
+                    or nil
                 adjusted.open_interface_conversion =
-                    plan.interface_conversion or false
+                    plan.interface_conversion or nil
                 if open then
                     open.target_type = target
                     open.adjustment = plan
@@ -486,14 +486,14 @@ function generic_lower_call_in_place(node, state)
     info.generic = true
     info.declaration = declaration
     info.primary_sink = node._assignment_adjustment
-        and node._assignment_adjustment.target or false
+        and node._assignment_adjustment.target or nil
     info.surface_visible = {}
     for index, typ in ipairs(node._visible_types or node._types or {}) do
         info.surface_visible[index] = typ
     end
-    info.surface_flex = node._flexrettype or false
+    info.surface_flex = node._flexrettype or nil
     info.surface_open_target = node._open_results
-        and node._open_results.target_type or false
+        and node._open_results.target_type or nil
 
     generic_lower_call_arguments(
         node, signature, surface_signature, state)
@@ -527,7 +527,7 @@ function generic_lower_call_in_place(node, state)
 
     node._callee_type = signature
     node._types = signature.rettypes
-    node._flexrettype = signature.flexrettype or false
+    node._flexrettype = signature.flexrettype or nil
     node._visible_types = {}
     node._lua_result_dynamic_plans = {}
     node._strict_result_guard_plans = {}
@@ -542,9 +542,9 @@ function generic_lower_call_in_place(node, state)
         end
         node._visible_types[index] = carrier
         node._lua_result_dynamic_plans[index] =
-            types.dynamic_coercion(carrier) or false
+            maybe3.from_optional(types.dynamic_coercion(carrier))
         node._strict_result_guard_plans[index] =
-            types.gradual_guard(carrier) or false
+            maybe3.from_optional(types.gradual_guard(carrier))
     end
     node._type = node._visible_types[1] or types.Void()
     if node._open_results then
@@ -564,11 +564,11 @@ function generic_lower_call_in_place(node, state)
         node._open_results.callable_adapter = plan.kind == "callable"
             and checker.freeze_callable_adapter(
                 plan, source, target, node.loc)
-            or false
+            or nil
         node._lua_open_result_dynamic_plan =
-            types.dynamic_coercion(source) or false
+            maybe3.from_optional(types.dynamic_coercion(source))
         node._strict_open_result_guard_plan =
-            types.gradual_guard(source) or false
+            maybe3.from_optional(types.gradual_guard(source))
     end
     generic_reclassify_node_open_adjustments(node, state)
     node._assignment_adjustment = nil
@@ -638,7 +638,7 @@ function generic_field_pair(field, state)
     if not owner
        or (owner._tag ~= "Type.Record"
            and owner._tag ~= "Type.Interface")
-       or owner.scope == false then
+       or owner.scope == nil then
         return nil
     end
     local canonical = generic_canonical_indexed_member(
@@ -839,7 +839,7 @@ function generic_reclassify_written_expression(
     end
     node.exp = lowered
     node.target = target
-    node._written_cast = plan
+    node._written_cast = maybe3.just(plan)
     node._adjustment = nil
     node._type = node._tag == "Ast.ExpIs" and types.Boolean() or target
     return node
@@ -861,14 +861,14 @@ function generic_reclassify_comparison(node, state)
         if not adjustment then return exp end
         local adjusted, consumed = trycoerce(
             exp, adjustment.target, state.errors,
-            "erased generic equality " .. side .. " operand", adjustment)
+            "erased generic equality " .. side .. " operand", maybe3.from_optional(adjustment))
         assert(consumed == adjustment,
             "erased generic equality lost its ComparisonPlan adjustment")
         return adjusted
     end
     node.lhs = apply(node.lhs, comparison.left_adjustment, "left")
     node.rhs = apply(node.rhs, comparison.right_adjustment, "right")
-    node._comparison = comparison
+    node._comparison = maybe3.just(comparison)
 end
 
 function generic_lower_spread_in_place(node, state)
@@ -890,10 +890,10 @@ function generic_lower_spread_in_place(node, state)
     node._spread_elem = generic_erased_descriptor(
         node._spread_elem, state)
     node._spread_optional_type = optionize(node._spread_elem)
-    node._spread_optional_guard = types.gradual_guard(
-        generic_runtime_carrier(node._spread_optional_type)) or false
-    node._spread_open_guard = types.gradual_guard(
-        generic_runtime_carrier(node._spread_elem)) or false
+    node._spread_optional_guard = maybe3.from_optional(types.gradual_guard(
+        generic_runtime_carrier(node._spread_optional_type)))
+    node._spread_open_guard = maybe3.from_optional(types.gradual_guard(
+        generic_runtime_carrier(node._spread_elem)))
     node._type = types.Nil()
     if node._open_spread then
         node._open_spread.source_type = node._spread_elem
@@ -911,7 +911,7 @@ end
 function generic_lower_spread_subject_force(node, state)
     if not node._spread_subject_force then return nil end
     local written = node.exp
-    local adjusted = false
+    local adjusted = nil
     local call = written
     if written._tag == "Ast.ExpAdjust" then
         adjusted = written
@@ -979,7 +979,7 @@ function generic_lower_expression(node, state)
             node.exp = producer
             local source = producer._visible_types[node.index]
             local sink = node._assignment_adjustment
-                and node._assignment_adjustment.target or false
+                and node._assignment_adjustment.target or nil
             node._type = source
             node._assignment_adjustment = nil
             local target = info.surface_visible[node.index]
@@ -999,8 +999,8 @@ function generic_lower_expression(node, state)
         local surface_target = node._type
         local generic_adjustment = node._adjustment
             and types.contains_generic(node._adjustment)
-        local generic_written = node._written_cast
-            and types.contains_generic(node._written_cast)
+        local generic_written = node._written_cast.tag == "just"
+            and types.contains_generic(maybe3.get_checked(node._written_cast, "written cast"))
         local spread_force = generic_lower_spread_subject_force(node, state)
         if spread_force then return spread_force end
         local lowered = generic_lower_expression(node.exp, state)
@@ -1028,8 +1028,8 @@ function generic_lower_expression(node, state)
         end
     elseif tag == "Ast.ExpIs" then
         local surface_target = node.target
-        local generic_written = node._written_cast
-            and types.contains_generic(node._written_cast)
+        local generic_written = node._written_cast.tag == "just"
+            and types.contains_generic(maybe3.get_checked(node._written_cast, "written cast"))
         local lowered = generic_lower_expression(node.exp, state)
         if generic_written then
             return generic_reclassify_written_expression(
@@ -1045,7 +1045,7 @@ function generic_lower_expression(node, state)
         local generic_comparison = (node.op == "==" or node.op == "~=")
             and (types.contains_generic(node.lhs._type)
                  or types.contains_generic(node.rhs._type)
-                 or types.contains_generic(node._comparison))
+                 or types.contains_generic(maybe3.get_checked(node._comparison, "comparison")))
         node.lhs = generic_lower_expression(node.lhs, state)
         node.rhs = generic_lower_expression(node.rhs, state)
         if generic_comparison then
@@ -1352,21 +1352,21 @@ function generic_refresh_erased_annotations(node)
             annotate_lua_function_boundary(value)
         elseif tag == "Ast.TopLevelVar" then
             value._lua_write_dynamic_plan =
-                types.dynamic_coercion(value._type) or false
+                maybe3.from_optional(types.dynamic_coercion(value._type))
         elseif tag == "Ast.TopLevelRecord" or tag == "Ast.TopLevelUnion"
                or tag == "Ast.TopLevelInterface" then
-            value._dynamic_receiver_plan = types.dynamic_coercion(
-                types.Nominal(value._type.name)) or false
+            value._dynamic_receiver_plan = assert(types.dynamic_coercion(
+                types.Nominal(value._type.name)))
             if tag == "Ast.TopLevelInterface" then
                 for index, field in ipairs(value.fields or {}) do
                     local descriptor = value._type.fields[index]
                     field._field = descriptor
                     field._dynamic_plan = descriptor
-                        and descriptor.dynamic_plan or false
+                        and descriptor.dynamic_plan or maybe3.none()
                 end
             end
         elseif tag == "Ast.VarBracket" then
-            value._read_guard = types.gradual_guard(value._type) or false
+            value._read_guard = maybe3.from_optional(types.gradual_guard(value._type))
         end
         for key, child in pairs(value) do
             if key ~= "_declared_type" and type(child) == "table"

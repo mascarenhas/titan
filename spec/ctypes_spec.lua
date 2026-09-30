@@ -294,7 +294,7 @@ describe("C FFI ctype registration", function()
         ]])
 
         assert.equal("oldstyle", ftypes.ffi_oldstyle._paramstyle)
-        assert.is_false(ftypes.ffi_oldstyle.paramnames)
+        assert.is_nil(ftypes.ffi_oldstyle.paramnames)
         assert.equal("unknown", ftypes.ffi_oldstyle.paramnames_state)
         assert.equal("prototype", ftypes.ffi_zero._paramstyle)
         assert.same({}, ftypes.ffi_zero.paramnames)
@@ -331,9 +331,9 @@ describe("C FFI ctype registration", function()
             extern int ffi_duplicate(int item, int item);
         ]])
 
-        assert.is_false(ftypes.ffi_unnamed.paramnames)
-        assert.is_false(ftypes.ffi_partial.paramnames)
-        assert.is_false(ftypes.ffi_duplicate.paramnames)
+        assert.is_nil(ftypes.ffi_unnamed.paramnames)
+        assert.is_nil(ftypes.ffi_partial.paramnames)
+        assert.is_nil(ftypes.ffi_duplicate.paramnames)
         assert.equal("unknown", ftypes.ffi_unnamed.paramnames_state)
         assert.equal("unknown", ftypes.ffi_partial.paramnames_state)
         assert.equal("unknown", ftypes.ffi_duplicate.paramnames_state)
@@ -353,7 +353,7 @@ describe("C FFI ctype registration", function()
         assert.same({ "event" },
             ftypes.ffi_apply.params[2].paramnames)
         assert.same({ "event" }, ftypes.ffi_callback_value.paramnames)
-        assert.is_false(ftypes.ffi_abstract.paramnames)
+        assert.is_nil(ftypes.ffi_abstract.paramnames)
     end)
 
     it("preserves the exact ordered pointer, array, and function path",
@@ -570,7 +570,7 @@ describe("C FFI ctype registration", function()
         for _, name in ipairs({
             "ffi_poison_xyx", "ffi_poison_yxx", "ffi_poison_xyy",
         }) do
-            assert.is_false(ftypes[name].paramnames)
+            assert.is_nil(ftypes[name].paramnames)
             assert.equal("conflicting", ftypes[name].paramnames_state)
         end
     end)

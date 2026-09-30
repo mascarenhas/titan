@@ -133,7 +133,7 @@ describe("generic declarations and explicit calls", function()
         assert.is_true(types.same_generic_scope(
             declared_pair.scope, declared_pair.fields[1].type.scope))
         assert.not_equal(declared_pair, ast._erased_registry["test.Pair"])
-        assert.is_false(pair._type.scope)
+        assert.is_nil(pair._type.scope)
         assert.equal("value", types.tostring(pair._type.fields[1].type))
 
         local constructor = ast[2]
@@ -680,7 +680,7 @@ describe("generic declarations and explicit calls", function()
         local public = toplevel(
             ast, "Ast.TopLevelTypeAlias", "Public")
         assert.equal("Type.GenericAlias", declared_type(public)._tag)
-        assert.is_false(declared_type(public).target_alias_fqtn)
+        assert.is_nil(declared_type(public).target_alias_fqtn)
 
         local decoded, decode_error = driver.decode_module_interface(
             types.serialize(modtype), "test", "generic-alias-source")
@@ -1372,16 +1372,16 @@ describe("generic declarations and explicit calls", function()
 
         local function inferred_result(pattern, target)
             local scope = types.GenericScope(
-                "test", false, "make", "function", "function")
-            local parameter = types.Parameter(scope, 1, "B", false)
+                "test", nil, "make", "function", "function")
+            local parameter = types.Parameter(scope, 1, "B", nil)
             local entry = checker_core.generic_inference_scope_entry(scope, {
-                types.TypeParameter("B", false),
+                types.TypeParameter("B", nil),
             }, { parameter })
             local inference = checker_core.generic_new_inference_context(
                 "option result", { entry }, false, {}, false)
             checker_core.generic_infer_result_evidence(inference,
                 types.Function({}, { pattern(parameter) },
-                    false, false, false), { fixed = { target } })
+                    false, nil, nil), { fixed = { target } })
             return entry.cells[1].binding
         end
         local reason = function(parameter)
@@ -2304,7 +2304,7 @@ describe("generic declarations and explicit calls", function()
             assert.equal("Ast.ExpCall", inner._tag)
             assert.same(types.Integer(), inner._type)
             assert.same(types.Function({}, { types.Integer() },
-                false, false, false), inner._callee_type)
+                false, nil, nil), inner._callee_type)
         end
 
         local seen = {}

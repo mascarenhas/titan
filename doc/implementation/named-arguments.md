@@ -74,7 +74,7 @@ value and is therefore positional-only, like every other bound method.
 `types.serialize` includes `paramnames` in exported `ModuleMember`, `Method`,
 and `StaticMethod` constructor expressions. It uses quoted Lua string literals
 for every spelling and preserves the difference between `{}` (a known
-zero-parameter declaration) and `false` (metadata unavailable). The imported
+zero-parameter declaration) and `nil` (metadata unavailable). The imported
 module's `<mangled>_types` function re-evaluates those descriptors through the
 normal constructor environment.
 
@@ -100,7 +100,7 @@ c99 declarator -> CType declaration -> foreigntypes conversion -> member.type
 typed parameter list, including `(void)`, and `"oldstyle"` for `()`. In
 `ctypes.lua`, `get_params` collects names from effective non-void fixed
 parameters. It publishes a table only if every name is present and unique;
-otherwise it publishes `false`. Thus `(void)` produces `{}`, while `()` does
+otherwise it publishes `nil`. Thus `(void)` produces `{}`, while `()` does
 not claim a known empty interface.
 
 Compatible C redeclarations still compare by C type, never by spelling.
@@ -109,7 +109,7 @@ After that comparison, `merge_paramnames` maintains a declaration-local state:
 * `unknown` can be upgraded by a complete later prototype;
 * an incomplete or unnamed redeclaration cannot erase a complete list;
 * two different complete lists make the declaration permanently
-  `conflicting`, represented externally as `paramnames = false`.
+  `conflicting`, represented externally as `paramnames = nil`.
 
 This merge is order-safe for the descriptor retained by `ctypes.register_types`.
 `foreigntypes.convert` continues to erase names from structural
@@ -131,7 +131,7 @@ direct foreign `Type.ModuleMember` copies the raw C function declaration's
 
 Generated union variant constructors are the deliberate nominal-static
 exception. Their parser-synthesized parameter is an implementation detail, so
-the checker publishes `paramnames = false` even for a payload variant. They
+the checker publishes `paramnames = nil` even for a payload variant. They
 remain first-class fixed Titan functions and use ordinary positional
 adjustment, but a brace-delimited call is rejected as unavailable named
 metadata. User-declared union functions follow the same named-call rules as
@@ -141,7 +141,7 @@ All structural function-value paths, C function-pointer calls, C pseudo
 constructors, input-variadic Titan declarations, and C variadic declarations
 are rejected before lowering. A declaration with a flexible *result* tail is
 still eligible because result shape does not make the label-to-fixed-parameter
-mapping ambiguous. A direct foreign declaration with `paramnames = false` gets the
+mapping ambiguous. A direct foreign declaration with `paramnames = nil` gets the
 specific unavailable-prototype diagnostic rather than a series of unknown-name
 errors.
 

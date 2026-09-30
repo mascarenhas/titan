@@ -12,6 +12,8 @@ symtab = require "titan-compiler.symtab"
 
 types = require "titan-compiler.types"
 
+maybe3 = require "titan-compiler.maybe3"
+
 ast = require "titan-compiler.ast"
 
 util = require "titan-compiler.util"

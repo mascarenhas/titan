@@ -298,20 +298,20 @@ end)
 describe("trusted object source metadata", function()
     local function source_entry()
         local name = "cache.producer"
-        local scope = types.GenericScope(name, false, "identity", "function", "function")
-        local parameter = types.Parameter(scope, 1, "T", false)
-        local scheme = types.FunctionScheme(scope, { types.TypeParameter("T", false) },
-            types.Function({ parameter }, { parameter }, false, false, false))
+        local scope = types.GenericScope(name, nil, "identity", "function", "function")
+        local parameter = types.Parameter(scope, 1, "T", nil)
+        local scheme = types.FunctionScheme(scope, { types.TypeParameter("T", nil) },
+            types.Function({ parameter }, { parameter }, false, nil, nil))
         local public = types.ModuleMember(name, "identity", scheme, { "item" })
         local private = types.ModuleMember(name, "secret", scheme, { "item" })
         private.islocal = true
-        local structure = types.CStruct(false, "Node", false, {}, true, false)
+        local structure = types.CStruct(nil, "Node", nil, {}, true, false)
         local pointer = types.CPointer(structure, {})
-        local field = types.CField(structure, "next", pointer, false, false)
+        local field = types.CField(structure, "next", pointer, nil, false)
         structure.fields[1], structure.fields.next = field, field
         local head = types.ModuleVariable(name, "head", pointer, false)
         head.islocal = true
-        local owner = types.Record(name .. ".Hidden", {}, {}, {}, 0, false, {})
+        local owner = types.Record(name .. ".Hidden", {}, {}, {}, 0, nil, {})
         owner.islocal, owner._source_complete = true, true
         local module = types.Module(name, { public }, {})
         module._source = true

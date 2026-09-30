@@ -712,8 +712,8 @@ local function same_names(left, right)
 end
 
 local function copy_names(names)
-    if names == false then
-        return false
+    if names == nil then
+        return nil
     end
     local out = {}
     for _, name in ipairs(names) do
@@ -724,7 +724,7 @@ end
 
 local function set_initial_paramnames(typ, paramnames)
     typ.paramnames = copy_names(paramnames)
-    typ.paramnames_state = paramnames == false and "unknown" or "complete"
+    typ.paramnames_state = paramnames == nil and "unknown" or "complete"
 end
 
 -- Parameter spellings are declaration metadata, not C type identity. Merge
@@ -733,24 +733,24 @@ end
 -- different complete lists permanently poison the declaration's name API.
 local function merge_paramnames(previous, current)
     local previous_state = previous.paramnames_state or
-        (previous.paramnames == false and "unknown" or "complete")
+        (previous.paramnames == nil and "unknown" or "complete")
     local current_state = current.paramnames_state or
-        (current.paramnames == false and "unknown" or "complete")
+        (current.paramnames == nil and "unknown" or "complete")
 
     if previous_state == "conflicting" then
-        current.paramnames = false
+        current.paramnames = nil
         current.paramnames_state = "conflicting"
     elseif previous_state == "complete" then
         if current_state == "complete"
            and not same_names(previous.paramnames, current.paramnames) then
-            current.paramnames = false
+            current.paramnames = nil
             current.paramnames_state = "conflicting"
         else
             current.paramnames = copy_names(previous.paramnames)
             current.paramnames_state = "complete"
         end
     elseif current_state ~= "complete" then
-        current.paramnames = false
+        current.paramnames = nil
         current.paramnames_state = "unknown"
     end
 end
@@ -769,12 +769,12 @@ local get_params = typed("TypeList, array, string? -> *, *, *", function(lst, pa
         if param_src == "..." then
             vararg = true
         elseif type(param_src) == "string" then
-            return nil, "old-style function parameter lists are unsupported", false
+            return nil, "old-style function parameter lists are unsupported", nil
         else
             local param, err =
                 convert_value(lst, param_src.param, true)
             if not param then
-                return nil, err, false
+                return nil, err, nil
             end
             if not is_void(param) then
                 table.insert(params, param)
@@ -789,7 +789,7 @@ local get_params = typed("TypeList, array, string? -> *, *, *", function(lst, pa
         end
     end
     if not names_available then
-        paramnames = false
+        paramnames = nil
     end
     return params, vararg, paramnames
 end)
@@ -1211,13 +1211,14 @@ local function shape_to_declaration(shape, template)
             (template.type == "function"
                 or template.type == "functionptr")
             and template or core.template
-        if names_source and names_source.paramnames ~= nil then
+        if names_source and (names_source.paramnames ~= nil
+           or names_source.paramnames_state ~= nil) then
             typ.paramnames =
                 copy_names(names_source.paramnames)
             typ.paramnames_state =
                 names_source.paramnames_state
         else
-            set_initial_paramnames(typ, false)
+            set_initial_paramnames(typ, nil)
         end
         return typ
     end

@@ -53,6 +53,15 @@ public descriptor.
 
 ## Descriptor hydration
 
+Compiler descriptor constructors represent ordinary absence with Lua `nil`.
+Hydration callbacks therefore accept typed optional tails, names, owners, and
+constraints directly; they do not translate `false` into absence. Dense fixed
+parameter/result lists remain required lists, including empty ones. Array
+constness arrives as `{tag="no"}`, `{tag="yes"}`, or `{tag="maybe"}` and maps
+to the public `ArrayTypeConstness` union. Heterogeneous C extent expressions
+retain `value` because their payloads can be numbers, strings, or expression
+tables.
+
 `hydrate_type` evaluates the compiler-produced descriptor expression through
 `titan.lua.load` with an explicit constructor environment. This is an internal
 decoder for trusted compiler metadata, not a public source-evaluation API.

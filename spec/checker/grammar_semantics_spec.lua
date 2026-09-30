@@ -136,7 +136,7 @@ describe("simplified grammar semantic boundaries", function()
             end
         ]], session)
         assert.truthy(ok, err)
-        assert.equal("current_module", tree[2].block.stats[1].exps[1]._written_cast.op)
+        assert.equal("current_module", tree[2].block.stats[1].exps[1]._written_cast.value.op)
         ok, err = h.run_checker([[
             local function bad(): value return M end
         ]], session)

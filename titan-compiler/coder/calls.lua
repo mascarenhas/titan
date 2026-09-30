@@ -208,9 +208,9 @@ function mutable_out_anchor(ctx, exp, target)
             direct_address_source = operand
             mutable_authority = true
         elseif is_addressable_local(operand)
-            and source._written_cast then
+            and (source._written_cast and source._written_cast.tag == "just") then
             local written = coder._checked_written_cast_plan(
-                source._written_cast, operand._type, source._type,
+                maybe3.get_checked(source._written_cast, "written cast"), operand._type, source._type,
                 "mutable C out-argument cast")
             local coercion = written.op == "coercion"
                 and written.coercion or nil
@@ -250,15 +250,15 @@ function nativetoforeignexp(ctx, exp, cexp, target, projection)
             if projection._adjustment.kind == "direct_coercion" then
                 coercion = projection._adjustment.coercion
             end
-        elseif projection._written_cast then
+        elseif (projection._written_cast and projection._written_cast.tag == "just") then
             coder._checked_written_cast_plan(
-                projection._written_cast, exp._type, target,
+                maybe3.get_checked(projection._written_cast, "written cast"), exp._type, target,
                 "written native-to-foreign cast")
             has_projection_authority = true
-            if projection._written_cast.op == "coercion" then
-                coercion = projection._written_cast.coercion
-            elseif projection._written_cast.op == "explicit" then
-                conversion = projection._written_cast.conversion
+            if maybe3.get_checked(projection._written_cast, "written cast").op == "coercion" then
+                coercion = maybe3.get_checked(projection._written_cast, "written cast").coercion
+            elseif maybe3.get_checked(projection._written_cast, "written cast").op == "explicit" then
+                conversion = maybe3.get_checked(projection._written_cast, "written cast").conversion
             end
         elseif projection._c_conversion then
             conversion = coder._checked_explicit_conversion_plan(
@@ -316,7 +316,7 @@ function nativetoforeignexp(ctx, exp, cexp, target, projection)
         local source_stats = ""
         local source_address
         local bytes
-        local count = false
+        local count = nil
         local fam_plan
         if is_addressable_local(exp) then
             local allocation_plan = exp.var._decl._c_allocation_plan
@@ -1253,7 +1253,7 @@ function coder._adjustment_allocates_gc(adjustment)
     end
     local coercion = adjustment.coercion
     local function coercion_allocates(plan)
-        if not plan or plan == false or plan.kind == "identity" then
+        if not plan or plan.kind == "identity" then
             return false
         end
         if plan.op == "interface_wrapper" then return true end
@@ -1278,12 +1278,12 @@ function coder._code_adjustment_value(
     adjustment = coder._checked_adjustment_plan(
         adjustment, source_type, target, "value adjustment")
     if adjustment.kind == "identity" then
-        assert(adapter_alias == nil or adapter_alias == false,
+        assert(adapter_alias == nil,
             "identity adjustment has an unexpected callable adapter")
         return "", raw
     elseif adjustment.kind == "callable" then
         if adjustment.exact then
-            assert(adapter_alias == nil or adapter_alias == false,
+            assert(adapter_alias == nil,
                 "exact callable adjustment has an unexpected adapter")
             return "", raw
         end
@@ -1377,6 +1377,7 @@ function coder._code_adjustment_value(
     }
     local synthcast = {
         _tag = "Ast.ExpCast",
+        _written_cast = maybe3.unknown(),
         loc = loc,
         exp = synthvar,
         target = target,
@@ -1532,12 +1533,12 @@ function coder._codeadjustedopen(
     assert(run, "adjusted open expression list produced no result run")
     run.adjustment = assert(adjusted.open_adjustment,
         "open expression list lacks checker adjustment")
-    run.callable_adapter = adjusted.open_callable_adapter or false
+    run.callable_adapter = adjusted.open_callable_adapter or nil
     if run.adjustment.kind == "callable" then
         assert(run.callable_adapter == run.adjustment._callable_adapter,
             "open callable adapter alias differs from its raw plan")
     else
-        assert(run.callable_adapter == false,
+        assert(run.callable_adapter == nil,
             "non-callable open adjustment has a callable adapter alias")
     end
     return stats, fixednames, tailnames, run
@@ -2001,7 +2002,7 @@ function codevaluecall(ctx, node)
                 assert(plans[i] ~= nil,
                     "generic call result lacks its checker strict guard")
                 local check = coder._strictcheckandget(
-                    ctx, plans[i], visible_types[i], visnames[i], source,
+                    ctx, maybe3.get_checked(plans[i], "call result plan"), visible_types[i], visnames[i], source,
                     node.loc, "branded Titan callable result")
                 local anchor = coder._may_discover_interface(
                         visible_types[i]) and visslots[i]
@@ -2014,7 +2015,7 @@ function codevaluecall(ctx, node)
                 assert(plans[i] ~= nil,
                     "generic call result lacks its checker dynamic plan")
                 local check = coder._dynamiccheckandget(
-                    ctx, plans[i], visible_types[i], visnames[i], source,
+                    ctx, maybe3.get_checked(plans[i], "call result plan"), visible_types[i], visnames[i], source,
                     node.loc, "non-Titan Lua callable result")
                 local anchor = coder._may_discover_interface(
                         visible_types[i]) and visslots[i]
@@ -2063,18 +2064,18 @@ function codevaluecall(ctx, node)
                 ("s2v(" .. stackslotat(flexrun.root_depth)
                     .. " + _vri)") or nil
             if strict then
-                assert(node._strict_open_result_guard_plan ~= nil,
-                    "open generic call result lacks its checker strict guard")
+                local guard = maybe3.get_checked(node._strict_open_result_guard_plan,
+                    "open generic call result guard")
                 readone = coder._strictcheckandget(
-                    ctx, node._strict_open_result_guard_plan,
+                    ctx, guard,
                     flexrun.elem, flexrun.args .. "[_vri]",
                     source, node.loc,
                     "branded Titan callable flexible result")
             else
-                assert(node._lua_open_result_dynamic_plan ~= nil,
-                    "open generic call result lacks its checker dynamic plan")
+                local plan = maybe3.get_checked(node._lua_open_result_dynamic_plan,
+                    "open generic call result conversion")
                 readone = coder._dynamiccheckandget(
-                    ctx, node._lua_open_result_dynamic_plan, flexrun.elem,
+                    ctx, plan, flexrun.elem,
                     flexrun.args .. "[_vri]", source, node.loc,
                     "non-Titan Lua callable flexible result")
             end

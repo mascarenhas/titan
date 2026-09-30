@@ -129,7 +129,7 @@ describe("C declarations in one module-wide ffi environment", function()
                 function positional(): integer return ffi.ffi_named(1) end
             ]])
             assert.truthy(ok, err)
-            assert.is_false(ast._ffi_namespace._type.members.ffi_named.paramnames)
+            assert.is_nil(ast._ffi_namespace._type.members.ffi_named.paramnames)
             ok, err = h.run_checker(source .. [[
                 function named(): integer
                     return ffi.ffi_named { first = 1 }
@@ -243,8 +243,8 @@ describe("C declarations in one module-wide ffi environment", function()
         }) do
             local ffi = checked(sources)
             assert.equal(7, bound(ffi.members.ffi_values.type))
-            assert.equal("", bound(ffi.type_members.ffi_array))
-            assert.equal("", bound(ffi.members.ffi_untouched.type))
+            assert.is_nil(bound(ffi.type_members.ffi_array))
+            assert.is_nil(bound(ffi.members.ffi_untouched.type))
         end
     end)
 
@@ -264,9 +264,9 @@ describe("C declarations in one module-wide ffi environment", function()
         ]] })
         assert.equal(7, bound(ffi.members.ffi_pointer.type))
         assert.equal(7, bound(ffi.members.ffi_function.type.params[1]))
-        assert.equal("", bound(ffi.members.ffi_untouched.type))
-        assert.equal("", bound(ffi.members.ffi_function_untouched.type.params[1]))
-        assert.equal("", bound(ffi.type_members.ffi_unknown_array))
+        assert.is_nil(bound(ffi.members.ffi_untouched.type))
+        assert.is_nil(bound(ffi.members.ffi_function_untouched.type.params[1]))
+        assert.is_nil(bound(ffi.type_members.ffi_unknown_array))
     end)
 
     it("retains exact pointer, array, and function declarator ordering", function()
@@ -410,7 +410,7 @@ describe("C declarations in one module-wide ffi environment", function()
             extern int ffi_values[4];
             #endif
         ]] })
-        assert.equal("", bound(ffi.members.ffi_values.type))
+        assert.is_nil(bound(ffi.members.ffi_values.type))
     end)
 
     it("uses final redefinition and undef state for macro members", function()

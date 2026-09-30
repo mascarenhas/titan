@@ -10,6 +10,7 @@ function coder._codenominalcall(ctx, node)
         constructor.variant or nil)
     assert(plan.complete, "direct constructor requires its complete layout")
     local stats, values, tails = {}, {}, {}
+    for index = 1, #constructor.slots do values[index] = maybe3.unknown() end
     local total = fresh_lowering_name(ctx, "_nominal_size_")
     stats[#stats + 1] = "size_t " .. total .. " = " .. coder._nominal_size(plan) .. ";"
 
@@ -31,7 +32,7 @@ function coder._codenominalcall(ctx, node)
         }, coder._freeze_code)
         for _, code in ipairs(astats) do stats[#stats + 1] = code end
         if allocation.storage == "nominal_fixed" then
-            values[index] = false -- zero directly in final owner
+            values[index] = maybe3.none() -- zero directly in final owner
             return
         end
         assert(allocation.storage == "nominal_tail")
@@ -100,11 +101,11 @@ function coder._codenominalcall(ctx, node)
                 .. cdeclarator.render_declaration(typ, "") .. ")];"
             stats[#stats + 1] = "memcpy(" .. snapshot .. ", " .. value
                 .. ", sizeof(" .. snapshot .. "));"
-            values[index] = snapshot
+            values[index] = maybe3.just(snapshot)
         else
             local frozen, name = materialize_code(ctx, exp._type, "", value)
             stats[#stats + 1] = frozen
-            values[index] = name
+            values[index] = maybe3.just(name)
         end
     end
 
@@ -145,12 +146,13 @@ function coder._codenominalcall(ctx, node)
         local slot = assert(plan.by_index[field.index])
         local tail = tails[index]
         if tail then
-            values[index] = "((" .. coder._render_c_type_name(tail.type)
-                .. ")(getudatamem(" .. object .. ") + " .. tail.offset .. "))"
+            values[index] = maybe3.just("((" .. coder._render_c_type_name(tail.type)
+                .. ")(getudatamem(" .. object .. ") + " .. tail.offset .. "))")
         end
-        if values[index] ~= false then
+        local value = maybe3.get_checked(values[index], "nominal constructor slot")
+        if value ~= nil then
             stats[#stats + 1] = coder._nominal_store(ctx, plan, slot,
-                field.type, object, assert(values[index]))
+                field.type, object, value)
         end
     end
     return table.concat(stats, "\n"), object

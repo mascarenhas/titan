@@ -6,6 +6,8 @@ local _ENV = core
 
 types = require "titan-compiler.types"
 
+maybe3 = require "titan-compiler.maybe3"
+
 util  = require "titan-compiler.util"
 
 cdeclarator = require "titan-compiler.cdeclarator"

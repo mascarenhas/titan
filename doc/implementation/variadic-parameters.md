@@ -45,16 +45,16 @@ ExpDotsLen      = {"loc"}           -- explicit `#...`
 ```
 
 There is **no** new parameter node. A variadic parameter is encoded as an
-ordinary trailing `Ast.Decl` whose `name` field is `false`
-(`defs.varargdecl(pos, type)` builds `ast.Decl(pos, false, type or false, false)`),
-so a function is variadic exactly when `params[#params].name == false`. An
-**untyped** lambda vararg additionally has `type == false` — the same inverted
-encoding an inferred lambda parameter uses (`name` set / `type == false`), but
-with `name == false` too. The `false`-name convention threads through the
+ordinary trailing `Ast.Decl` whose `name` field is `nil`
+(`defs.varargdecl(pos, type)` builds `ast.Decl(pos, nil, type, false, false)`),
+so a function is variadic exactly when `params[#params].name == nil`. An
+**untyped** lambda vararg additionally has `type == nil` — the same inverted
+encoding an inferred lambda parameter uses (`name` set / `type == nil`), but
+with `name == nil` too. The absent-name convention threads through the
 checker and coder, which detect and strip that marker. The function-type
 annotation likewise gains no node flag: the new field `varargtype` is appended
 to `Ast.TypeFunction`
-(`{"loc","argtypes","rettypes","varargtype","flexrettype"}`), `false` when
+(`{"loc","argtypes","rettypes","varargtype","flexrettype"}`), `nil` when
 absent. The independent final field describes a flexible *output* tail; see
 [flexible-return internals](flexible-returns.md).
 
@@ -147,7 +147,7 @@ resulting `Type.Function.varargtype` (after validating the element type).
 
 The three signature visitors (`TopLevelFunc`, `TopLevelStatic`,
 `TopLevelMethod`) all route through one helper, `param_types(params, st,
-errors)`: it detects the trailing `name == false` `Decl`, drops it from the fixed
+errors)`: it detects the trailing `name == nil` `Decl`, drops it from the fixed
 `ptypes` list, and returns its validated element type as the second value, which
 the caller passes as `varargtype` to the type constructor. The lambda checker
 (`Ast.ExpFunction`) does the same detection inline rather than calling
@@ -167,7 +167,7 @@ both tails in a first-class annotation.
 
 ### Untyped lambda vararg inference {#untyped-lambda-vararg}
 
-A lambda's vararg `Decl` may carry `type == false` (the parser's untyped form).
+A lambda's vararg `Decl` may carry `type == nil` (the parser's untyped form).
 The `Ast.ExpFunction` visitor resolves the vararg element type after it has
 computed `nfixed` and the `expected` context type (so the order is: count the
 fixed params, derive `expected` from the context iff it is a `Type.Function`
@@ -177,7 +177,7 @@ untyped-fixed-parameter path:
 * explicit `...: t` → `typefromnode(varargdecl.type, …)` (context ignored);
 * untyped `...`, variadic context → take `expected.varargtype` as the element;
 * untyped `...`, context present but **non-variadic** (`expected.varargtype` is
-  `false`) → `cannot infer the type of '...'; the lambda is variadic but the
+  `nil`) → `cannot infer the type of '...'; the lambda is variadic but the
   expected type is not`;
 * untyped `...`, **no usable context** → `cannot infer the type of '...';
   annotate it or use the lambda where its type is known`.
@@ -398,7 +398,7 @@ type-tag), `codefuncdec`'s cparams, `codelambdadec`'s cparams, and
 `codemethodtrampoline` (a variadic method's bound trampoline forwards
 `_varargs` + `_start` verbatim and likewise passes `_flexout` + `_flexwant`).
 `fixed_params` strips the trailing
-`name == false` marker so the per-name param loop never emits a C parameter for
+`name == nil` marker so the per-name param loop never emits a C parameter for
 it. Each of `codefuncdec` and `codelambdadec` then threads the context:
 
 ```lua

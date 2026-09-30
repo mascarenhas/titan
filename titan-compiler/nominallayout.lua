@@ -92,7 +92,7 @@ local function fixed_object(typ, active)
         end
         active[typ] = nil
     elseif tag == "Type.CArray" then
-        if typ.len == nil or typ.len == false or typ.len == "" then
+        if typ.len == nil or typ.len == "" then
             fail("embedded C array has no fixed extent")
         end
         if type(typ.len) == "number" then
@@ -126,7 +126,7 @@ classify = function(typ)
     elseif types.is_direct_c(typ) then
         local resolved = types.resolve_c_typedef(typ)
         if resolved._tag == "Type.CArray" and
-           (resolved.len == nil or resolved.len == false or resolved.len == "") then
+           (resolved.len == nil or resolved.len == "") then
             -- The nominal field rule treats an unsized array as a borrowed
             -- pointer view. Preserve the element's explicit C qualification.
             typ = types.CPointer(resolved.elem, types.c_type_qualifiers(typ))
@@ -273,7 +273,8 @@ local function type_recipe(typ)
     elseif tag == "Type.CFunction" then
         local params = {}
         for i, param in ipairs(typ.params) do params[i] = type_recipe(param) end
-        return { tag, params, type_recipe(typ.ret), false, false }
+        -- Portable C functions have no optional ABI annotation.
+        return { tag, params, type_recipe(typ.ret), false }
     end
     fail("unsupported public native declaration " .. tostring(tag))
 end
@@ -303,15 +304,15 @@ local function recipe_type(recipe, depth)
         local pointee
         if type(recipe[2]) == "table" and recipe[2][1] == "lua_State" then
             array(recipe[2], 1, "Lua state declaration")
-            pointee = types.CStruct(false, "lua_State", false, {}, false, false)
+            pointee = types.CStruct(nil, "lua_State", nil, {}, false, false)
         else pointee = recipe_type(recipe[2], depth) end
         typ = types.CPointer(pointee, recipe[3])
     elseif tag == "Type.CFunction" then
-        array(recipe, 5, "C function declaration")
+        array(recipe, 4, "C function declaration")
         array(recipe[2], nil, "C function parameters")
         local params = {}
         for i, param in ipairs(recipe[2]) do params[i] = recipe_type(param, depth) end
-        typ = types.CFunction(params, recipe_type(recipe[3], depth), recipe[4], recipe[5])
+        typ = types.CFunction(params, recipe_type(recipe[3], depth), recipe[4], nil)
     else fail("unknown native declaration " .. tostring(tag)) end
     if tag:match("^Type%.C") and not types.is_portable_c_type_graph(typ) then
         fail("invalid portable C declaration")

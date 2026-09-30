@@ -3,6 +3,7 @@
 -- projection/reconstruction visits its retained edges once with one memo, so
 -- recursive declarations and aliases retain their ordinary semantic sharing.
 local graphcodec = require "titan-compiler.graphcodec"
+local maybe3 = require "titan-compiler.maybe3"
 local shared = require "titan-compiler.declarationschemas"
 
 local cache = {}
@@ -19,7 +20,7 @@ schemas.extent.integer_token = "string?"
 schemas["Type.CNamed"] = { tagname = "c_name" }
 schemas["Type.CModule"] = { name = "string", members = "type_map", type_members = "type_map" }
 schemas["Type.ModuleMember"] = {
-    modname = "string", name = "string", type = "type", paramnames = "names_or_false",
+    modname = "string", name = "string", type = "type", paramnames = "names?",
     _foreign_namespace = "boolean?", _c_origin_header = "include?",
     _c_integer_constant = "string?",
 }
@@ -29,7 +30,7 @@ schemas.header_types = {
 }
 schemas.ctype = {
     type = "ctype_value", name = "c_name?", def = "ctype_value?",
-    ret = "ctype?", params = "ctypes?", paramnames = "names_or_false?",
+    ret = "ctype?", params = "ctypes?", paramnames = "names?",
     vararg = "boolean?", pointer = "names?", idxs = "extents?",
     fields = "ctypes?", values = "enumerators?", bitfield = "boolean?",
     width = "extent?", anonymous = "boolean?", flexible_array = "boolean?",
@@ -63,11 +64,11 @@ schemas.profile_float = {
 }
 schemas.foreign = {
     version = "integer", abi = "atom", key = "string", namespace_type = "type",
-    foreign_types = "type_map", field_macros = "macros", file_tags = "file_tags", profile = "profile",
+    foreign_types = "type_map", field_macros = "cached_macros", file_tags = "file_tags", profile = "profile",
 }
 
 local maps = {
-    type_map = "type", raw_tags = "raw_tag", macros = "macro", file_tags = "file_tag",
+    type_map = "type", raw_tags = "raw_tag", macros = "macro", cached_macros = "maybe3_macro", file_tags = "file_tag",
     profile_integers = "profile_integer", profile_floats = "profile_float", set = "true",
     profile_macros = "profile_macro",
 }
@@ -95,9 +96,12 @@ local function project(source, role, options)
             if value == nil then return nil end
             kind = kind:sub(1, -2)
         end
-        if kind == "names_or_false" or kind == "c_name" then
-            if value == false then return false end
-            kind = kind == "c_name" and type(value) ~= "table" and "string" or "names"
+        if kind == "maybe3_macro" then
+            if not maybe3.validate(value) then fail("invalid cached macro result") end
+            if value.tag == "just" then return maybe3.just(copy(value.value, "macro")) end
+            return { tag = value.tag }
+        elseif kind == "c_name" then
+            kind = type(value) ~= "table" and "string" or "names"
         elseif kind == "ctype_value" then
             if type(value) == "string" then return value end
             kind = type(value) == "table" and value.type ~= nil and "ctype" or "parts"
@@ -111,7 +115,12 @@ local function project(source, role, options)
             if type(value) == "table" and value.args ~= nil then return { args = {} } end
             fail("invalid target profile macro fact")
         end
-        if kind == "extent" and type(value) ~= "table" then kind = "atom" end
+        if kind == "extent" and type(value) ~= "table" then
+            if type(value) ~= "string" and type(value) ~= "number" then
+                fail("expected C extent expression")
+            end
+            kind = "atom"
+        end
         if kind == "true" then
             if value ~= true then fail("expected true set member") end
             return true

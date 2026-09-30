@@ -245,7 +245,7 @@ describe("Array, Map, and vararg spread expressions (typechecker)", function()
         local use = find_function(tree, "use")
         for _, stat in ipairs(use.block.stats) do
             assert.is_true(types.equals(
-                types.Array(types.Integer(), false), stat.decls[1]._type))
+                types.Array(types.Integer(), {tag="no"}), stat.decls[1]._type))
         end
         assert_no_type_parameters(use.block)
     end)
@@ -306,13 +306,13 @@ describe("Array, Map, and vararg spread expressions (typechecker)", function()
 
         local stats = find_function(tree, "use").block.stats
         assert.is_true(types.equals(
-            types.Array(types.Integer(), false),
+            types.Array(types.Integer(), {tag="no"}),
             stats[1].decls[1]._type))
         assert.is_true(types.equals(
             types.Map(types.Integer(), types.Integer()),
             stats[2].decls[1]._type))
         assert.is_true(types.equals(
-            types.Array(types.Integer(), false),
+            types.Array(types.Integer(), {tag="no"}),
             stats[3].decls[1]._type))
         assert.is_true(types.equals(
             types.Map(types.Integer(), types.Integer()),

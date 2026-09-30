@@ -920,7 +920,7 @@ function codeassignment(ctx, var, cexp, etype, lvalue)
     elseif vtag == "Ast.VarBracket" then
         local exp1type = var.exp1._type._tag
         if exp1type == "Type.Array" then
-            assert(var.exp1._type.isconst == false,
+            assert(var.exp1._type.isconst.tag == "no",
                 "const Array assignment reached code generation")
             local arr = var.exp1
             local idx = var.exp2
@@ -1162,7 +1162,7 @@ function coder._materialize_assignment_lvalue(ctx, var)
 
     local basetype = var.exp1._type
     if basetype._tag == "Type.Array" then
-        assert(basetype.isconst == false,
+        assert(basetype.isconst.tag == "no",
             "const Array lvalue reached code generation")
         return coder._materialize_array_lvalue(ctx, var)
     elseif basetype._tag == "Type.Map" then
@@ -1220,7 +1220,7 @@ function coder._codeadjustedfixed(ctx, node, stabilize)
     stabilize = stabilize or materialize_code
     local adjusted = node._result_adjustment
         or { exps = node.exps, fixed = node.exps, tail_scalars = {},
-             discards = {}, open_source = false }
+             discards = {}, open_source = nil }
     assert(not adjusted.open_source and #adjusted.tail_scalars == 0)
     local fixed_index, discard_set = {}, {}
     for i, exp in ipairs(adjusted.fixed) do fixed_index[exp] = i end
@@ -1373,7 +1373,7 @@ function make_return_frame(ctx, id)
         table.insert(decls, "(void)" .. cvar .. ";")
         saves[i] = { typ = typ, cvar = cvar, slot = slot }
     end
-    local flex = false
+    local flex = nil
     if ctx.flexrettype then
         local capacity = ctx.inline_return and ctx.inline_return.flex.capacity or 200
         local args = "_pa_flexargs_" .. id
@@ -1553,7 +1553,7 @@ function coder._adjusted_return(node)
         -- Compatibility for hand-built ASTs: the checker normally publishes
         -- the richer adjustment record on every return.
         adjusted = { exps = node.exps, fixed = node.exps,
-            tail_scalars = {}, discards = {}, open_source = false }
+            tail_scalars = {}, discards = {}, open_source = nil }
     end
     return adjusted
 end
@@ -1850,7 +1850,7 @@ function codereturn(ctx, node)
             elem = ctx.flexrettype,
             args = "_flexout->args",
             ownership = "direct",
-        } or false,
+        } or nil,
     }
     local cstats, fixednames = coder._lower_return_to_destination(ctx, node,
         destination)
@@ -2635,7 +2635,7 @@ function codeforin(ctx, node)
             loc = node.loc,
             callexp = node._close_call,
             _forin_nil_guard = node._runtime_optional_close
-                and node._tuple_decls[4] or false,
+                and node._tuple_decls[4] or nil,
         }
         local trynode = {
             _tag = "Ast.StatTry",
@@ -2645,7 +2645,7 @@ function codeforin(ctx, node)
                 loc = node.loc,
                 stats = { runnode },
             },
-            catchblock = false,
+            catchblock = nil,
             finallyblock = {
                 _tag = "Ast.StatBlock",
                 loc = node.loc,

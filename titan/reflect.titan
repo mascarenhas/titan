@@ -353,14 +353,6 @@ local function sort_strings(arr: {string})
   end
 end
 
-local function cast_metadata_optional<|T|>(v: value): T?
-  if v == nil or v == false then
-    return nil
-  else
-    return v as T
-  end
-end
-
 local function to_array<|T|>(v: {integer: T}?): const {T}
   local res: {T} = {}
   if v == nil then return res as const {T} end
@@ -427,12 +419,16 @@ local function init_hydration_env()
     end
   end
 
-  hydration_env["Array"] = function(elem: Type, isconst: value): Type
-    local ic = (function (mode: value): ArrayTypeConstness
-      if mode == "maybe" then return ArrayTypeConstness.is_maybe_const() end
-      if mode then return ArrayTypeConstness.is_const() end
-      return ArrayTypeConstness.is_mutable()
-    end)(isconst)
+  hydration_env["Array"] = function(elem: Type, isconst: {string: string}): Type
+    local tag = isconst["tag"]
+    local ic = ArrayTypeConstness.is_mutable()
+    if tag == "yes" then
+      ic = ArrayTypeConstness.is_const()
+    elseif tag == "maybe" then
+      ic = ArrayTypeConstness.is_maybe_const()
+    elseif tag ~= "no" then
+      raise "unknown Array const qualifier '" .. tag .. "'"
+    end
     return Type.is_array{ is_const = ic, elem_descriptor = elem }
   end
 
@@ -459,8 +455,9 @@ local function init_hydration_env()
     }
   end
 
-  hydration_env["Variant"] = function(fqtn: string, name: string, fields: value, index: integer): VariantType
-    local descriptors = to_array(cast_metadata_optional<|{integer: FieldType}|>(fields))
+  hydration_env["Variant"] = function(fqtn: string, name: string,
+        fields: {integer: FieldType}, index: integer): VariantType
+    local descriptors = to_array(fields)
     local parts: {VariantPartType} = {}
     for i = 1, #descriptors do
       parts[i] = { name = descriptors[i].name, type = descriptors[i].type }
@@ -474,81 +471,82 @@ local function init_hydration_env()
   end
 
   hydration_env["Method"] = function(fqtn: string,
-        name: string, params: value,
-        rettypes: value, varargtype: value, flexrettype: value,
-        paramnames: value): MethodType
+        name: string, params: {integer: Type},
+        rettypes: {integer: Type}, varargtype: Type?, flexrettype: Type?,
+        paramnames: {integer: string}?): MethodType
     return {
       name = name,
-      param_names = to_array(cast_metadata_optional<|{integer: string}|>(paramnames)),
-      param_descriptors = to_array(cast_metadata_optional<|{integer: Type}|>(params)),
-      vararg_descriptor = cast_metadata_optional<|Type|>(varargtype),
-      return_descriptors = to_array(cast_metadata_optional<|{integer: Type}|>(rettypes)),
-      flexret_descriptor = cast_metadata_optional<|Type|>(flexrettype),
+      param_names = to_array(paramnames),
+      param_descriptors = to_array(params),
+      vararg_descriptor = varargtype,
+      return_descriptors = to_array(rettypes),
+      flexret_descriptor = flexrettype,
       callable = active_membermap[name]
     }
   end
 
   hydration_env["StaticMethod"] = function(fqtn: string,
-        name: string, params: value,
-        rettypes: value, varargtype: value, flexrettype: value,
-        paramnames: value): StaticFunctionType
+        name: string, params: {integer: Type},
+        rettypes: {integer: Type}, varargtype: Type?, flexrettype: Type?,
+        paramnames: {integer: string}?): StaticFunctionType
     return {
       name = name,
-      param_names = to_array(cast_metadata_optional<|{integer: string}|>(paramnames)),
-      param_descriptors = to_array(cast_metadata_optional<|{integer: Type}|>(params)),
-      vararg_descriptor = cast_metadata_optional<|Type|>(varargtype),
-      return_descriptors = to_array(cast_metadata_optional<|{integer: Type}|>(rettypes)),
-      flexret_descriptor = cast_metadata_optional<|Type|>(flexrettype),
+      param_names = to_array(paramnames),
+      param_descriptors = to_array(params),
+      vararg_descriptor = varargtype,
+      return_descriptors = to_array(rettypes),
+      flexret_descriptor = flexrettype,
       callable = active_statics[name]
     }
   end
 
-  hydration_env["Function"] = function(params: value, rettypes: value, _: value,
-        varargtype: value, flexrettype: value): Type
+  hydration_env["Function"] = function(params: {integer: Type},
+        rettypes: {integer: Type}, _: boolean,
+        varargtype: Type?, flexrettype: Type?): Type
     return Type.is_function({
-      param_descriptors = to_array(cast_metadata_optional<|{integer: Type}|>(params)),
-      vararg_descriptor = cast_metadata_optional<|Type|>(varargtype),
-      return_descriptors = to_array(cast_metadata_optional<|{integer: Type}|>(rettypes)),
-      flexret_descriptor = cast_metadata_optional<|Type|>(flexrettype),
+      param_descriptors = to_array(params),
+      vararg_descriptor = varargtype,
+      return_descriptors = to_array(rettypes),
+      flexret_descriptor = flexrettype,
     })
   end
 
   hydration_env["Record"] = function(name: string,
-       fields: value, 
-       functions: value, 
-       methods: value): Type
+       fields: {integer: FieldType},
+       functions: {string: StaticFunctionType},
+       methods: {string: MethodType}): Type
     return Type.is_record({
       name = name,
-      fields = to_array(cast_metadata_optional<|{integer: FieldType}|>(fields)),
-      statics = to_sorted_array(cast_metadata_optional<|{string: StaticFunctionType}|>(functions)),
-      methods = to_sorted_array(cast_metadata_optional<|{string: MethodType}|>(methods))
+      fields = to_array(fields),
+      statics = to_sorted_array(functions),
+      methods = to_sorted_array(methods)
     })
   end
 
-  hydration_env["Union"] = function(name: string, 
-       variants: value, 
-       functions: value, 
-       methods: value): Type
+  hydration_env["Union"] = function(name: string,
+       variants: {integer: VariantType},
+       functions: {string: StaticFunctionType},
+       methods: {string: MethodType}): Type
     return Type.is_union({
       payload_reader = active_payload_reader as foreign function (*lua_State, *Udata, lua_Integer, *TValue): void,
       name = name,
-      variants = to_array(cast_metadata_optional<|{integer: VariantType}|>(variants)),
-      statics = to_sorted_array(cast_metadata_optional<|{string: StaticFunctionType}|>(functions)),
-      methods = to_sorted_array(cast_metadata_optional<|{string: MethodType}|>(methods))
+      variants = to_array(variants),
+      statics = to_sorted_array(functions),
+      methods = to_sorted_array(methods)
     })
   end
 
-  hydration_env["Interface"] = function(name: string, 
-        fields: value, 
-        methods: value): Type
+  hydration_env["Interface"] = function(name: string,
+        fields: {integer: FieldType},
+        methods: {integer: MethodType}): Type
     return Type.is_interface({
       name = name,
-      fields = to_array(cast_metadata_optional<|{integer: FieldType}|>(fields)),
-      methods = to_array(cast_metadata_optional<|{integer: MethodType}|>(methods))
+      fields = to_array(fields),
+      methods = to_array(methods)
     })
   end
 
-  hydration_env["COwned"] = function(pointee: Type, count: value): Type
+  hydration_env["COwned"] = function(pointee: Type, count: boolean): Type
     if count then
       return Type.is_owned_foreign_array({ elem_descriptor = pointee })
     else
@@ -556,12 +554,13 @@ local function init_hydration_env()
     end
   end
 
-  hydration_env["CInteger"] = function(spelling: string, is_signed: boolean, rank: value, bits: value): Type
+  hydration_env["CInteger"] = function(spelling: string, is_signed: boolean,
+        rank: integer?, bits: integer?): Type
     return Type.is_foreign_integer{
       spelling = spelling,
       is_signed = is_signed,
-      rank = cast_metadata_optional<|integer|>(rank),
-      bits = cast_metadata_optional<|integer|>(bits)
+      rank = rank,
+      bits = bits
     }
   end
 
@@ -569,18 +568,18 @@ local function init_hydration_env()
     return Type.is_foreign_float{ spelling = spelling }
   end
 
-  hydration_env["CPointer"] = function(pointee: Type, quals: value): Type
+  hydration_env["CPointer"] = function(pointee: Type, quals: {integer: string}?): Type
     return Type.is_foreign_pointer{
       pointee_descriptor = pointee,
-      quals = to_array(cast_metadata_optional<|{integer: string}|>(quals))
+      quals = to_array(quals)
     }
   end
 
-  hydration_env["CArray"] = function(elem: Type, len: value, quals: value): Type
+  hydration_env["CArray"] = function(elem: Type, len: value, quals: {integer: string}?): Type
     return Type.is_foreign_array{
       elem_descriptor = elem,
       len = len,
-      quals = to_array(cast_metadata_optional<|{integer: string}|>(quals))
+      quals = to_array(quals)
     }
   end
 
@@ -590,17 +589,15 @@ local function init_hydration_env()
     return Type.is_foreign_named({ name = name, declarations = seen_ctypes })
   end
 
-  hydration_env["CStruct"] = function(cname: value, tagname: value, typedef: value,
-        fields: value, complete: boolean, has_fam: boolean): Type
-    local c_name: string? = cast_metadata_optional<|string|>(cname)
-    local tag_name: string? = cast_metadata_optional<|string|>(tagname)
-    local name: string? = c_name
-    if name == nil then name = tag_name end
+  hydration_env["CStruct"] = function(cname: string?, tagname: string?, typedef: string?,
+        fields: {integer: ForeignFieldType}, complete: boolean, has_fam: boolean): Type
+    local name? = cname
+    if name == nil then name = tagname end
     local t = Type.is_foreign_struct({
-      cname = c_name or "",
-      tagname = tag_name or "",
-      typedef = cast_metadata_optional<|string|>(typedef) or "",
-      fields = to_array(cast_metadata_optional<|{integer: ForeignFieldType}|>(fields)),
+      cname = cname or "",
+      tagname = tagname or "",
+      typedef = typedef or "",
+      fields = to_array(fields),
       is_complete = complete,
       has_fam = has_fam
     })
@@ -610,17 +607,15 @@ local function init_hydration_env()
     return t
   end
 
-  hydration_env["CUnion"] = function(cname: value, tagname: value, typedef: value,
-        fields: value, complete: boolean): Type
-    local c_name: string? = cast_metadata_optional<|string|>(cname)
-    local tag_name: string? = cast_metadata_optional<|string|>(tagname)
-    local name: string? = c_name
-    if name == nil then name = tag_name end
+  hydration_env["CUnion"] = function(cname: string?, tagname: string?, typedef: string?,
+        fields: {integer: ForeignFieldType}, complete: boolean): Type
+    local name? = cname
+    if name == nil then name = tagname end
     local t = Type.is_foreign_union({
-      cname = c_name or "",
-      tagname = tag_name or "",
-      typedef = cast_metadata_optional<|string|>(typedef) or "",
-      fields = to_array(cast_metadata_optional<|{integer: ForeignFieldType}|>(fields)),
+      cname = cname or "",
+      tagname = tagname or "",
+      typedef = typedef or "",
+      fields = to_array(fields),
       is_complete = complete
     })
     if name ~= nil then
@@ -629,7 +624,8 @@ local function init_hydration_env()
     return t
   end
 
-  hydration_env["CField"] = function(_: value, name: string, typ: Type, bitfield: value, flex: boolean): ForeignFieldType
+  hydration_env["CField"] = function(_: nil, name: string, typ: Type,
+        bitfield: value, flex: boolean): ForeignFieldType
     return {
       name = name,
       type = typ,
@@ -638,19 +634,20 @@ local function init_hydration_env()
     }
   end
 
-  hydration_env["CTypedef"] = function(name: string, target: Type, quals: value): Type
+  hydration_env["CTypedef"] = function(name: string, target: Type, quals: {integer: string}?): Type
     local t = Type.is_foreign_typedef{
       name = name,
       target_descriptor = target,
-      quals = to_array(cast_metadata_optional<|{integer: string}|>(quals))
+      quals = to_array(quals)
     }
     seen_ctypes["typedef@" .. name] = t
     return t
   end
 
-  hydration_env["CFunction"] = function(params: value, ret: Type, vararg: boolean): Type
+  hydration_env["CFunction"] = function(params: {integer: Type}, ret: Type,
+        vararg: boolean, _abi: string?): Type
     return Type.is_foreign_function{
-      param_descriptors = to_array(cast_metadata_optional<|{integer: Type}|>(params)),
+      param_descriptors = to_array(params),
       is_vararg = vararg,
       return_descriptor = ret
     }
@@ -658,10 +655,12 @@ local function init_hydration_env()
 
   -- Parameters erase at the outer nominal boundary. Generic arguments and
   -- binder declarations do not describe additional runtime identities.
-  hydration_env["Parameter"] = function(scope: value, index: value, name: value, constraint: value): Type
-    return cast_metadata_optional<|Type|>(constraint) or Type.is_value()
+  hydration_env["Parameter"] = function(scope: nil, index: integer,
+        name: string, constraint: Type?): Type
+    return constraint or Type.is_value()
   end
-  hydration_env["FunctionScheme"] = function(scope: value, parameters: value, signature: Type): Type
+  hydration_env["FunctionScheme"] = function(scope: nil,
+        parameters: {integer: value}, signature: Type): Type
     return signature
   end
 

@@ -1,5 +1,6 @@
 local typedecl = require 'titan-compiler.typedecl'
 local util = require 'titan-compiler.util'
+local maybe3 = require 'titan-compiler.maybe3'
 
 local types = typedecl("Type", {
     Types = {
@@ -46,14 +47,23 @@ local types = typedecl("Type", {
     }
 })
 
--- Mutability is an ABI-visible axis of an Array, record field, and module
--- variable. Arrays admit exactly false, true, or "maybe"; field and variable
--- qualifiers require booleans. Constructors reject absent or hostile metadata
--- instead of silently normalizing it to mutable.
+-- Array mutability is a closed tagged value. Fields and module variables
+-- have a separate, Boolean constness axis. Compare tags, never table identity.
+function types.valid_array_constness(value)
+    if type(value) ~= "table" or getmetatable(value) ~= nil then return false end
+    if value.tag ~= "no" and value.tag ~= "yes" and value.tag ~= "maybe" then
+        return false
+    end
+    for key in pairs(value) do
+        if key ~= "tag" then return false end
+    end
+    return true
+end
+
 local raw_Array = types.Array
 function types.Array(elem, isconst)
-    if type(isconst) ~= "boolean" and isconst ~= "maybe" then
-        error("Array const qualifier must be a boolean or 'maybe'", 2)
+    if not types.valid_array_constness(isconst) then
+        error("Array const qualifier must be a tagged no, yes, or maybe value", 2)
     end
     return raw_Array(elem, isconst)
 end
@@ -63,7 +73,9 @@ function types.Field(fqtn, name, typ, index, isconst)
     if type(isconst) ~= "boolean" then
         error("Field const qualifier must be a boolean", 2)
     end
-    return raw_Field(fqtn, name, typ, index, isconst)
+    local field = raw_Field(fqtn, name, typ, index, isconst)
+    field.dynamic_plan = maybe3.unknown()
+    return field
 end
 
 local raw_ModuleVariable = types.ModuleVariable
@@ -105,7 +117,6 @@ end
 
 local raw_Record = types.Record
 function types.Record(name, fields, functions, methods, nfields, scope, typeparams)
-    if scope == nil then scope = false end
     if typeparams == nil then typeparams = {} end
     return raw_Record(name, fields, functions, methods, nfields,
         scope, typeparams)
@@ -114,7 +125,6 @@ end
 local raw_Method = types.Method
 function types.Method(fqtn, name, params, rettypes, varargtype,
                       flexrettype, paramnames, scope, typeparams)
-    if scope == nil then scope = false end
     if typeparams == nil then typeparams = {} end
     return raw_Method(fqtn, name, params, rettypes, varargtype,
         flexrettype, paramnames, scope, typeparams)
@@ -123,7 +133,6 @@ end
 local raw_StaticMethod = types.StaticMethod
 function types.StaticMethod(fqtn, name, params, rettypes, varargtype,
                             flexrettype, paramnames, scope, typeparams)
-    if scope == nil then scope = false end
     if typeparams == nil then typeparams = {} end
     return raw_StaticMethod(fqtn, name, params, rettypes, varargtype,
         flexrettype, paramnames, scope, typeparams)
@@ -135,7 +144,6 @@ end
 local raw_Union = types.Union
 function types.Union(name, variants, functions, methods, nvariants,
                      scope, typeparams)
-    if scope == nil then scope = false end
     if typeparams == nil then typeparams = {} end
     for _, variant in ipairs(variants) do
         variants[variant.name] = variant
@@ -217,7 +225,6 @@ local function validate_interface_constructor_input(name, fields, methods)
 end
 
 function types.Interface(name, fields, methods, scope, typeparams)
-    if scope == nil then scope = false end
     if typeparams == nil then typeparams = {} end
     validate_interface_constructor_input(name, fields, methods)
     for _, field in ipairs(fields) do
@@ -448,7 +455,7 @@ function types.is_portable_c_type_graph(root)
             ok = t._paramstyle == nil
                 and dense_plain_list_length(t.params) ~= nil
                 and type(t.ret) == "table"
-                and t.vararg == false and t.abi == false
+                and t.vararg == false and t.abi == nil
             if ok then
                 for _, param in ipairs(t.params) do
                     local param_tag = type(param) == "table" and param._tag
@@ -572,10 +579,10 @@ local function find_c_type(
         end
 
         if tag == "Type.TypeParameter" then
-            return typ.constraint ~= false
+            return typ.constraint ~= nil
                 and visit_type(typ.constraint, seen) or nil
         elseif tag == "Type.Parameter" then
-            return typ.erased_constraint ~= false
+            return typ.erased_constraint ~= nil
                 and visit_type(typ.erased_constraint, seen) or nil
         elseif tag == "Type.FunctionScheme" then
             for _, typeparam in ipairs(typ.typeparams) do
@@ -1582,7 +1589,7 @@ function types.is_truthy(typ)
     typ = resolved_c(typ)
     local tag = typ._tag
     if tag == "Type.Parameter" then
-        if typ.erased_constraint == false then return false end
+        if typ.erased_constraint == nil then return false end
         return types.is_truthy(types.erase_constraint(
             typ.erased_constraint))
     end
@@ -1655,10 +1662,8 @@ local function c_same_value(left, right, seen)
 end
 
 local function c_array_bounds_compatible(left, right)
-    local left_unknown =
-        left == nil or left == false or left == ""
-    local right_unknown =
-        right == nil or right == false or right == ""
+    local left_unknown = left == nil
+    local right_unknown = right == nil
     return left_unknown or right_unknown
         or c_same_value(left, right)
 end
@@ -1850,8 +1855,8 @@ local function same_typeparams(left, right, seen)
 end
 
 local function generic_metadata_equals(left, right, seen)
-    local lscope, rscope = left.scope or false, right.scope or false
-    if lscope == false or rscope == false then
+    local lscope, rscope = left.scope, right.scope
+    if lscope == nil or rscope == nil then
         if lscope ~= rscope then return false end
     elseif not generic_scope_equals(lscope, rscope) then
         return false
@@ -1860,7 +1865,7 @@ local function generic_metadata_equals(left, right, seen)
 end
 
 local function scope_component(value)
-    if value == false then return "-" end
+    if value == nil then return "-" end
     assert(type(value) == "string", "generic scope components are strings")
     return #value .. ":" .. value
 end
@@ -1886,31 +1891,32 @@ end
 -- must never serve as evidence that one generic constraint entails another.
 -- Callers keep binder lists indexed by canonical GenericScope spelling because
 -- decoded and reconstructed descriptors need not share scope table identity.
--- False is an unconstrained binder; nil is missing or malformed evidence.
+-- An absent constraint is an unconstrained binder. The second result says
+-- whether the binder evidence was valid, independently of that absence.
 function types.parameter_surface_constraint(parameter, scope_bindings)
     if type(parameter) ~= "table"
        or parameter._tag ~= "Type.Parameter"
        or type(scope_bindings) ~= "table" then
-        return nil
+        return nil, false
     end
     local ok, key = pcall(types.generic_scope_key, parameter.scope)
-    if not ok then return nil end
+    if not ok then return nil, false end
     local typeparams = scope_bindings[key]
     if type(typeparams) ~= "table"
        or type(parameter.index) ~= "number"
        or math.type(parameter.index) ~= "integer"
        or parameter.index < 1 then
-        return nil
+        return nil, false
     end
     local typeparam = typeparams[parameter.index]
     if type(typeparam) ~= "table"
        or typeparam._tag ~= "Type.TypeParameter"
-       or (typeparam.constraint ~= false
+       or (typeparam.constraint ~= nil
            and (type(typeparam.constraint) ~= "table"
                 or not typeparam.constraint._tag)) then
-        return nil
+        return nil, false
     end
-    return typeparam.constraint
+    return typeparam.constraint, true
 end
 
 -- Compare the Titan/Lua callable ABI shape shared by ordinary function values
@@ -1966,10 +1972,10 @@ type_equals = function(t1, t2, seen)
     elseif tag1 == "Type.TypeParameter" then
         -- Binder spellings are diagnostic only. Dense binder position and
         -- Parameter(scope,index) references carry semantic identity.
-        if (t1.constraint == false) ~= (t2.constraint == false) then
+        if (t1.constraint == nil) ~= (t2.constraint == nil) then
             return false
         end
-        return t1.constraint == false
+        return t1.constraint == nil
             or type_equals(t1.constraint, t2.constraint, seen)
     elseif tag1 == "Type.Parameter" then
         -- A rigid leaf's semantic identity is exactly (scope,index). The
@@ -1990,8 +1996,9 @@ type_equals = function(t1, t2, seen)
            and generic_scope_equals(t1.target_scope, t2.target_scope)
            and same_typeparams(t1.typeparams, t2.typeparams, seen)
     elseif tag1 == "Type.Array" then
-        return t1.isconst == t2.isconst
-           and (type(t1.isconst) == "boolean" or t1.isconst == "maybe")
+        return types.valid_array_constness(t1.isconst)
+           and types.valid_array_constness(t2.isconst)
+           and t1.isconst.tag == t2.isconst.tag
            and type_equals(t1.elem, t2.elem, seen)
     elseif tag1 == "Type.Map" then
         return type_equals(t1.keys, t2.keys, seen) and
@@ -2151,11 +2158,11 @@ function types.alpha_equals(t1, t2)
         if tag == "Type.FunctionScheme" or tag == "Type.Record"
            or tag == "Type.Union" or tag == "Type.Interface"
            or tag == "Type.Method" or tag == "Type.StaticMethod" then
-            if left.scope ~= false and right.scope ~= false then
+            if left.scope ~= nil and right.scope ~= nil then
                 scope_map[right.scope] = left.scope
             end
         elseif tag == "Type.GenericAlias" then
-            if left.target_scope ~= false and right.target_scope ~= false then
+            if left.target_scope ~= nil and right.target_scope ~= nil then
                 scope_map[right.target_scope] = left.target_scope
             end
         end
@@ -2277,8 +2284,8 @@ end
 function types.canonical_array(elem, isconst)
     assert(type(elem) == "table" and elem._tag,
         "array element must be a type")
-    assert(type(isconst) == "boolean" or isconst == "maybe",
-        "array const qualifier must be a boolean or 'maybe'")
+    assert(types.valid_array_constness(isconst),
+        "array const qualifier must be a tagged no, yes, or maybe value")
     return types.Array(deoptionized(elem), isconst)
 end
 
@@ -2314,7 +2321,7 @@ function types.valid_varg_element(typ)
     elseif tag == "Type.Option" then
         return types.has_tvalue_representation(typ.base)
     elseif tag == "Type.Parameter" then
-        local carrier = typ.erased_constraint ~= false
+        local carrier = typ.erased_constraint ~= nil
             and typ.erased_constraint or types.Value()
         return types.valid_varg_element(carrier)
     end
@@ -2322,7 +2329,7 @@ function types.valid_varg_element(typ)
 end
 
 local function canonical_callable_tail(typ, role)
-    if typ == false then return false end
+    if typ == nil then return nil end
     if typ._tag == "Type.Nil" then
         error("a " .. role .. " cannot have type nil", 3)
     elseif types.resolve_c_typedef(typ)._tag == "Type.CPointer" then
@@ -2373,7 +2380,7 @@ local function rewrite_type(root, policy)
     local memo, active = {}, {}
 
     local function rewrite(typ)
-        if typ == false or typ == nil then return typ end
+        if typ == nil then return nil end
         if type(typ) ~= "table" or type(typ._tag) ~= "string" then
             error("generic type rewrite expected a Type descriptor", 3)
         end
@@ -2390,18 +2397,17 @@ local function rewrite_type(root, policy)
                 local erased = typ.erased_constraint
                 out = types.Parameter(typ.scope, typ.index,
                     typ.diagnostic_name,
-                    erased == false and false or rewrite(erased))
+                    rewrite(erased))
             end
         elseif tag == "Type.GenericScope" then
             out = typ
         elseif tag == "Type.TypeParameter" then
             if policy.drop_generic then
-                out = typ.constraint == false and types.Value()
+                out = typ.constraint == nil and types.Value()
                     or rewrite(typ.constraint)
             else
                 out = types.TypeParameter(typ.name,
-                    typ.constraint == false and false
-                        or rewrite(typ.constraint))
+                    rewrite(typ.constraint))
             end
         elseif tag == "Type.FunctionScheme" then
             if policy.drop_generic or policy.closes(typ.scope) then
@@ -2446,10 +2452,8 @@ local function rewrite_type(root, policy)
             out = types.canonical_function(
                 rewrite_list(typ.params, rewrite),
                 rewrite_list(typ.rettypes, rewrite),
-                typ.varargtype == false and false
-                    or rewrite(typ.varargtype),
-                typ.flexrettype == false and false
-                    or rewrite(typ.flexrettype))
+                rewrite(typ.varargtype),
+                rewrite(typ.flexrettype))
         elseif tag == "Type.Field" then
             out = types.Field(typ.fqtn, typ.name,
                 rewrite(typ.type), typ.index, typ.isconst)
@@ -2460,47 +2464,45 @@ local function rewrite_type(root, policy)
             local constructor = tag == "Type.Method"
                 and types.Method or types.StaticMethod
             local closes = policy.drop_generic
-                or (typ.scope ~= false and policy.closes(typ.scope))
-            local varargtype = typ.varargtype == false and false
-                or rewrite(typ.varargtype)
-            local flexrettype = typ.flexrettype == false and false
-                or rewrite(typ.flexrettype)
+                or (typ.scope ~= nil and policy.closes(typ.scope))
+            local varargtype = rewrite(typ.varargtype)
+            local flexrettype = rewrite(typ.flexrettype)
             canonical_callable_tail(varargtype, "variadic parameter")
             canonical_callable_tail(flexrettype, "flexible return")
             out = constructor(typ.fqtn, typ.name,
                 rewrite_list(typ.params, rewrite),
                 rewrite_list(typ.rettypes, rewrite),
                 varargtype, flexrettype, typ.paramnames,
-                (not closes and typ.scope) or false,
+                (not closes and typ.scope) or nil,
                 closes and {} or rewrite_list(
                     typ.typeparams or {}, rewrite))
         elseif tag == "Type.Record" then
             local fields = rewrite_list(typ.fields, rewrite)
             local closes = policy.drop_generic
-                or (typ.scope ~= false and policy.closes(typ.scope))
+                or (typ.scope ~= nil and policy.closes(typ.scope))
             out = types.Record(typ.name, fields,
                 rewrite_map(typ.functions, rewrite),
                 rewrite_map(typ.methods, rewrite), typ.nfields,
-                (not closes and typ.scope) or false,
+                (not closes and typ.scope) or nil,
                 closes and {} or rewrite_list(
                     typ.typeparams or {}, rewrite))
         elseif tag == "Type.Union" then
             local variants = rewrite_list(typ.variants, rewrite)
             local closes = policy.drop_generic
-                or (typ.scope ~= false and policy.closes(typ.scope))
+                or (typ.scope ~= nil and policy.closes(typ.scope))
             out = types.Union(typ.name, variants,
                 rewrite_map(typ.functions, rewrite),
                 rewrite_map(typ.methods, rewrite), typ.nvariants,
-                (not closes and typ.scope) or false,
+                (not closes and typ.scope) or nil,
                 closes and {} or rewrite_list(
                     typ.typeparams or {}, rewrite))
         elseif tag == "Type.Interface" then
             local closes = policy.drop_generic
-                or (typ.scope ~= false and policy.closes(typ.scope))
+                or (typ.scope ~= nil and policy.closes(typ.scope))
             out = types.Interface(typ.name,
                 rewrite_list(typ.fields, rewrite),
                 rewrite_list(typ.methods, rewrite),
-                (not closes and typ.scope) or false,
+                (not closes and typ.scope) or nil,
                 closes and {} or rewrite_list(
                     typ.typeparams or {}, rewrite))
         elseif tag == "Type.ModuleMember" then
@@ -2659,7 +2661,7 @@ function types.erase_constraint(typ)
         keep_nominal_arguments = true,
         closes = function() return true end,
         parameter = function(parameter, rewrite)
-            if parameter.erased_constraint == false then
+            if parameter.erased_constraint == nil then
                 return types.Value()
             end
             return rewrite(parameter.erased_constraint)
@@ -2675,7 +2677,7 @@ function types.erase(typ)
         drop_generic = true,
         closes = function() return true end,
         parameter = function(parameter, rewrite)
-            if parameter.erased_constraint == false then
+            if parameter.erased_constraint == nil then
                 return types.Value()
             end
             return rewrite(parameter.erased_constraint)
@@ -2698,7 +2700,7 @@ function types.contains_generic(typ)
         elseif (tag == "Type.Record" or tag == "Type.Union"
                 or tag == "Type.Interface" or tag == "Type.Method"
                 or tag == "Type.StaticMethod")
-           and (value.scope ~= false or #(value.typeparams or {}) > 0) then
+           and (value.scope ~= nil or #(value.typeparams or {}) > 0) then
             return true
         end
         for key, child in pairs(value) do
@@ -2784,7 +2786,8 @@ local function sound_guardable(typ, seen)
        or tag == "Type.CFloat" or types.is_c_tvalue(typ) then
         ok = true
     elseif tag == "Type.Array" then
-        ok = sound_guardable(typ.elem, seen)
+        ok = types.valid_array_constness(typ.isconst)
+            and sound_guardable(typ.elem, seen)
     elseif tag == "Type.Map" then
         ok = sound_guardable(typ.keys, seen)
             and sound_guardable(typ.values, seen)
@@ -2846,7 +2849,7 @@ local function generic_tail_eligible(typ, seen)
     seen[typ] = false
     if typ._tag == "Type.Parameter" then
         return generic_tail_eligible(
-            typ.erased_constraint == false and types.Value()
+            typ.erased_constraint == nil and types.Value()
                 or types.erase_constraint(typ.erased_constraint), seen)
     elseif typ._tag == "Type.Option" then
         local ok = typ.base._tag ~= "Type.Option"
@@ -2908,7 +2911,7 @@ function types.transient_roundtrip(typ)
                 and value.scope._tag == "Type.GenericScope"
                 and type(value.index) == "number"
                 and value.index >= 1 and value.index % 1 == 0
-            if ok and value.erased_constraint ~= false then
+            if ok and value.erased_constraint ~= nil then
                 ok = value.erased_constraint._tag == "Type.Nominal"
                 if ok then ok, offender = visit(value.erased_constraint) end
             end
@@ -2930,7 +2933,9 @@ function types.transient_roundtrip(typ)
                 ok, offender = visit(value.base)
             end
         elseif tag == "Type.Array" then
-            if value.elem._tag == "Type.Option" then
+            if not types.valid_array_constness(value.isconst) then
+                ok = false
+            elseif value.elem._tag == "Type.Option" then
                 ok, offender = false, value.elem
             else
                 ok, offender = visit(value.elem)
@@ -2950,9 +2955,9 @@ function types.transient_roundtrip(typ)
             local pcount, rcount = dense_list_length(value.params),
                 dense_list_length(value.rettypes)
             ok = value.vararg == false and pcount ~= nil and rcount ~= nil
-                and (value.varargtype == false
+                and (value.varargtype == nil
                     or generic_tail_eligible(value.varargtype))
-                and (value.flexrettype == false
+                and (value.flexrettype == nil
                     or generic_tail_eligible(value.flexrettype))
             if ok then
                 for index = 1, pcount do
@@ -2966,10 +2971,10 @@ function types.transient_roundtrip(typ)
                     if not ok then break end
                 end
             end
-            if ok and value.varargtype ~= false then
+            if ok and value.varargtype ~= nil then
                 ok, offender = visit(value.varargtype)
             end
-            if ok and value.flexrettype ~= false then
+            if ok and value.flexrettype ~= nil then
                 ok, offender = visit(value.flexrettype)
             end
         end
@@ -2988,10 +2993,10 @@ end
 
 local function guard_plan(target, seen)
     target = types.normalize(target)
-    if not target or not sound_guardable(target, {}) then return false end
+    if not target or not sound_guardable(target, {}) then return nil end
 
     seen = seen or {}
-    if seen[target] then return seen[target] end
+    if seen[target] then return seen[target] or nil end
 
     local result = plan("gradual_guard", { target = target })
     seen[target] = result
@@ -3033,7 +3038,7 @@ local function guard_plan(target, seen)
     elseif types.is_c_tvalue(target) then
         result.op = "c_tvalue"
     else
-        return false
+        return nil
     end
     return result
 end
@@ -3049,10 +3054,10 @@ local rigid_erased_carrier
 local function gradual_view_plan(source, target)
     source, target = normalized_pair(source, target)
     if not source or not target then
-        return false
+        return nil
     elseif source._tag == "Type.Value" then
         local guard = guard_plan(target, {})
-        if not guard then return false end
+        if not guard then return nil end
         return plan("gradual_view", {
             op = "project",
             source = source,
@@ -3062,7 +3067,7 @@ local function gradual_view_plan(source, target)
     elseif target._tag == "Type.Value" then
         if not types.has_tvalue_representation(source)
            or not sound_guardable(source, {}) then
-            return false
+            return nil
         end
         return plan("gradual_view", {
             op = "inject",
@@ -3071,7 +3076,7 @@ local function gradual_view_plan(source, target)
         })
     end
     local guard = guard_plan(target, {})
-    if not guard then return false end
+    if not guard then return nil end
     return plan("gradual_view", {
         op = "structural",
         source = source,
@@ -3083,7 +3088,7 @@ end
 local function component_adjustment(source, target, context)
     source, target = normalized_pair(source, target)
     if not source or not target then
-        return false
+        return nil
     elseif relation_identity(source, target) then
         return plan("identity", { source = source, target = target })
     elseif source._tag == "Type.Function"
@@ -3092,7 +3097,7 @@ local function component_adjustment(source, target, context)
     elseif relation_consistent(source, target) then
         return gradual_view_plan(source, target)
     end
-    return false
+    return nil
 end
 
 function types.accepts_missing_nil(target)
@@ -3112,7 +3117,7 @@ callable_adjustment_impl = function(source, target, context)
        or target._tag ~= "Type.Function"
        or source.vararg ~= false
        or target.vararg ~= false then
-        return false
+        return nil
     end
 
     context = context or {
@@ -3121,7 +3126,7 @@ callable_adjustment_impl = function(source, target, context)
     }
     local matches = context.callable_seen[source]
     if matches and matches[target] ~= nil then
-        return matches[target]
+        return matches[target] or nil
     end
 
     local exact = relation_identity(source, target)
@@ -3152,7 +3157,7 @@ callable_adjustment_impl = function(source, target, context)
             target.params[index], source.params[index], context)
         if not adjustment then
             matches[target] = nil
-            return false
+            return nil
         end
         result.arguments[#result.arguments + 1] = {
             kind = "argument",
@@ -3166,14 +3171,14 @@ callable_adjustment_impl = function(source, target, context)
     for index = #target.params + 1, #source.params do
         if not accepts_missing_nil(source.params[index]) then
             matches[target] = nil
-            return false
+            return nil
         end
         if target.varargtype then
             local adjustment = component_adjustment(
                 target.varargtype, source.params[index], context)
             if not adjustment then
                 matches[target] = nil
-                return false
+                return nil
             end
             result.arguments[#result.arguments + 1] = {
                 kind = "tail_or_nil_to_argument",
@@ -3197,7 +3202,7 @@ callable_adjustment_impl = function(source, target, context)
                 target.params[index], source.varargtype, context)
             if not adjustment then
                 matches[target] = nil
-                return false
+                return nil
             end
             result.arguments[#result.arguments + 1] = {
                 kind = "argument_to_tail",
@@ -3217,7 +3222,7 @@ callable_adjustment_impl = function(source, target, context)
             target.varargtype, source.varargtype, context)
         if not adjustment then
             matches[target] = nil
-            return false
+            return nil
         end
         result.arguments[#result.arguments + 1] = {
             kind = "tail_to_tail",
@@ -3244,7 +3249,7 @@ callable_adjustment_impl = function(source, target, context)
                 component_adjustment(actual, expected, context)
             if not adjustment then
                 matches[target] = nil
-                return false
+                return nil
             end
             result.results[#result.results + 1] = {
                 kind = "result",
@@ -3270,7 +3275,7 @@ callable_adjustment_impl = function(source, target, context)
             end
             if not adjustment then
                 matches[target] = nil
-                return false
+                return nil
             end
             result.results[#result.results + 1] = {
                 kind = optional and "flex_to_optional_result"
@@ -3293,7 +3298,7 @@ callable_adjustment_impl = function(source, target, context)
             }
         else
             matches[target] = nil
-            return false
+            return nil
         end
     end
 
@@ -3303,7 +3308,7 @@ callable_adjustment_impl = function(source, target, context)
                 source.rettypes[index], target.flexrettype, context)
             if not adjustment then
                 matches[target] = nil
-                return false
+                return nil
             end
             result.results[#result.results + 1] = {
                 kind = "result_to_flex",
@@ -3324,7 +3329,7 @@ callable_adjustment_impl = function(source, target, context)
             source.flexrettype, target.flexrettype, context)
         if not adjustment then
             matches[target] = nil
-            return false
+            return nil
         end
         result.results[#result.results + 1] = {
             kind = "flex_to_flex",
@@ -3427,23 +3432,23 @@ local function callable_shape_consistent(source, target, context)
 end
 
 rigid_erased_carrier = function(parameter)
-    if parameter.erased_constraint == false then
+    if parameter.erased_constraint == nil then
         return types.Value()
     end
     return types.erase_constraint(parameter.erased_constraint)
 end
 
 local function owner_argument_carrier(owner, index, arguments)
-    if not owner or owner.scope == false
+    if not owner or owner.scope == nil
        or type(owner.typeparams) ~= "table"
        or not owner.typeparams[index] then
-        return false
+        return nil
     end
     local binder = owner.typeparams[index]
-    if binder.constraint == false then return types.Value() end
+    if binder.constraint == nil then return types.Value() end
     local ok, substituted = pcall(
         types.substitute, binder.constraint, owner.scope, arguments)
-    if not ok then return false end
+    if not ok then return nil end
     return types.erase_constraint(substituted)
 end
 
@@ -3542,8 +3547,9 @@ consistent_impl = function(left, right, context)
         end
     elseif left._tag == "Type.Array"
        and right._tag == "Type.Array" then
-        result = left.isconst == right.isconst
-            and (type(left.isconst) == "boolean" or left.isconst == "maybe")
+        result = types.valid_array_constness(left.isconst)
+            and types.valid_array_constness(right.isconst)
+            and left.isconst.tag == right.isconst.tag
             and consistent_impl(left.elem, right.elem, context)
     elseif left._tag == "Type.Map"
        and right._tag == "Type.Map" then
@@ -3606,7 +3612,7 @@ local function interface_match_failure(
     fields.index = index
     fields.name = required and required.name or nil
     fields.required = required
-    return false, fields
+    return nil, fields
 end
 
 local function non_method_named(concrete, name)
@@ -3849,11 +3855,11 @@ function types.interface_implementation(concrete, interface, policy)
 end
 
 local function generic_method_constraint_view(typeparam, scope, arguments)
-    if typeparam.constraint == false then return false end
+    if typeparam.constraint == nil then return nil, true end
     local ok, constraint = pcall(
         types.substitute, typeparam.constraint, scope, arguments)
-    if not ok then return nil end
-    return constraint
+    if not ok then return nil, false end
+    return constraint, true
 end
 
 local function close_generic_method_pair(concrete, required)
@@ -3862,24 +3868,24 @@ local function close_generic_method_pair(concrete, required)
     if #concrete_params == 0 and #required_params == 0 then
         return concrete, required
     elseif #concrete_params ~= #required_params
-       or concrete.scope == false or required.scope == false then
+       or concrete.scope == nil or required.scope == nil then
         return nil
     end
 
     local arguments = {}
     for index, typeparam in ipairs(required_params) do
         arguments[index] = types.Parameter(
-            required.scope, index, typeparam.name, false)
+            required.scope, index, typeparam.name, nil)
     end
     for index = 1, #arguments do
-        local concrete_constraint = generic_method_constraint_view(
+        local concrete_constraint, concrete_valid = generic_method_constraint_view(
             concrete_params[index], concrete.scope, arguments)
-        local required_constraint = generic_method_constraint_view(
+        local required_constraint, required_valid = generic_method_constraint_view(
             required_params[index], required.scope, arguments)
-        if concrete_constraint == nil or required_constraint == nil
-           or (concrete_constraint == false)
-                ~= (required_constraint == false)
-           or (concrete_constraint ~= false
+        if not concrete_valid or not required_valid
+           or (concrete_constraint == nil)
+                ~= (required_constraint == nil)
+           or (concrete_constraint ~= nil
                and not types.equals(
                    concrete_constraint, required_constraint)) then
             return nil
@@ -3926,7 +3932,7 @@ function types.generic_interface_implementation(concrete, interface, policy)
             local concrete_view, required_view =
                 close_generic_method_pair(method, required)
             if not concrete_view then
-                return false, {
+                return nil, {
                     kind = "interface_mismatch",
                     reason = "incompatible",
                     concrete = concrete,
@@ -3975,7 +3981,7 @@ function types.generic_interface_implementation(concrete, interface, policy)
                 failure.member = original.concrete
             end
         end
-        return false, failure
+        return nil, failure
     end
 
     implementation.concrete = concrete
@@ -4011,13 +4017,13 @@ local function coercion_impl(source, target, policy, seen)
        or source._tag == "Type.Variant"
        or target._tag == "Type.Variant"
        or relation_identity(source, target) then
-        return false
+        return nil
     end
 
     seen = seen or {}
     local matches = seen[source]
     if matches and matches[target] ~= nil then
-        return matches[target]
+        return matches[target] or nil
     end
     if not matches then
         matches = {}
@@ -4059,7 +4065,7 @@ local function coercion_impl(source, target, policy, seen)
     elseif source._tag == "Type.Nil" and is_c_pointer(target) then
         result = coercion_plan("nil_to_c_pointer", source, target)
     elseif source._tag == "Type.Value" and is_c_pointer(target) then
-        result = false
+        result = nil
     elseif types.c_address_coerceable(source, target) then
         result = coercion_plan("c_address", source, target)
     elseif types.is_c_pointer_coercion(source, target) then
@@ -4156,7 +4162,7 @@ local function coercion_impl(source, target, policy, seen)
             end
         end
     elseif types.is_direct_c(source) or types.is_direct_c(target) then
-        result = false
+        result = nil
     elseif source._tag == "Type.Integer"
        and target._tag == "Type.Float" then
         result = coercion_plan("integer_to_float", source, target)
@@ -4168,7 +4174,7 @@ local function coercion_impl(source, target, policy, seen)
        and policy and policy.interface_coercion then
         -- Scalar expressions carry nominals, not their Record/Union/Interface
         -- declaration descriptors. The cast-site callback owns descriptor
-        -- resolution, owner-kind checks, and visibility. A false result leaves
+        -- resolution, owner-kind checks, and visibility. A nil result leaves
         -- unrelated nominal pairs rejected; a successful result authorizes
         -- only this direct outer wrapper coercion.
         local implementation =
@@ -4189,7 +4195,7 @@ local function coercion_impl(source, target, policy, seen)
     end
 
     matches[target] = result or false
-    return result or false
+    return result
 end
 
 function types.coercion(source, target, policy)
@@ -4200,11 +4206,11 @@ local function dynamic_plan(target, seen)
     target = types.normalize(target)
     if not target or target._tag == "Type.Variant"
        or not sound_guardable(target, {}) then
-        return false
+        return nil
     end
 
     seen = seen or {}
-    if seen[target] ~= nil then return seen[target] end
+    if seen[target] ~= nil then return seen[target] or nil end
     seen[target] = false
 
     local tag = target._tag
@@ -4233,7 +4239,7 @@ local function dynamic_plan(target, seen)
         result.name = nominal_name(target)
     elseif tag == "Type.Option" then
         local inner = dynamic_plan(target.base, seen)
-        if not inner then return false end
+        if not inner then return nil end
         result.op = "option"
         result.inner = inner
     elseif tag == "Type.CInteger" then
@@ -4247,7 +4253,7 @@ local function dynamic_plan(target, seen)
     else
         -- Raw C pointers deliberately have no implicit dynamic plan: a
         -- lightuserdata address cannot establish its requested pointee type.
-        return false
+        return nil
     end
     seen[target] = result
     return result
@@ -4278,7 +4284,7 @@ local function explicit_conversion(source, target)
     elseif types.is_written_c_void_to_object_pointer_cast(source, target) then
         op = "c_void_to_object_pointer"
     end
-    if not op then return false end
+    if not op then return nil end
     return {
         kind = "explicit_conversion",
         op = op,
@@ -4292,7 +4298,7 @@ function types.written_cast(source, target, policy)
     if not source or not target
        or source._tag == "Type.Variant"
        or target._tag == "Type.Variant" then
-        return false
+        return nil
     elseif relation_identity(source, target) then
         return plan("written_cast", {
             op = "identity",
@@ -4318,14 +4324,14 @@ function types.written_cast(source, target, policy)
     -- its allocation-free test metadata.
     if source._tag == "Type.Array"
        and target._tag == "Type.Array" then
-        if source.isconst == false
-           and target.isconst == true
+        if source.isconst.tag == "no"
+           and target.isconst.tag == "yes"
            and (types.equals(source.elem, target.elem)
                 or relation_consistent(source.elem, target.elem)) then
-            local element_view = false
+            local element_view = nil
             if not types.equals(source.elem, target.elem) then
                 element_view = gradual_view_plan(source.elem, target.elem)
-                if not element_view then return false end
+                if not element_view then return nil end
             end
             local mode = (source.linear == true) and "freeze" or "copy"
             return plan("written_cast", {
@@ -4336,16 +4342,16 @@ function types.written_cast(source, target, policy)
                 element_view = element_view,
                 allocation_free_test = true,
             })
-        elseif source.isconst == "maybe"
-           and (target.isconst == false or target.isconst == true)
+        elseif source.isconst.tag == "maybe"
+           and (target.isconst.tag == "no" or target.isconst.tag == "yes")
            and (types.equals(source.elem, target.elem)
                 or relation_consistent(source.elem, target.elem)) then
-            local element_view = false
+            local element_view = nil
             if not types.equals(source.elem, target.elem) then
                 element_view = gradual_view_plan(source.elem, target.elem)
-                if not element_view then return false end
+                if not element_view then return nil end
             end
-            local op = (target.isconst == false)
+            local op = (target.isconst.tag == "no")
                 and "maybe_array_cast_mutable"
                 or "maybe_array_cast_const"
             return plan("written_cast", {
@@ -4355,14 +4361,14 @@ function types.written_cast(source, target, policy)
                 element_view = element_view,
                 allocation_free_test = false,
             })
-        elseif (source.isconst == false or source.isconst == true)
-           and target.isconst == "maybe"
+        elseif (source.isconst.tag == "no" or source.isconst.tag == "yes")
+           and target.isconst.tag == "maybe"
            and (types.equals(source.elem, target.elem)
                 or relation_consistent(source.elem, target.elem)) then
-            local element_view = false
+            local element_view = nil
             if not types.equals(source.elem, target.elem) then
                 element_view = gradual_view_plan(source.elem, target.elem)
-                if not element_view then return false end
+                if not element_view then return nil end
             end
             return plan("written_cast", {
                 op = "maybe_array_cast_upcast",
@@ -4443,7 +4449,7 @@ function types.written_cast(source, target, policy)
             })
         end
     end
-    return false
+    return nil
 end
 
 function types.comparable(left, right)
@@ -4451,7 +4457,7 @@ function types.comparable(left, right)
     if not left or not right
        or left._tag == "Type.Variant"
        or right._tag == "Type.Variant" then
-        return false
+        return nil
     elseif relation_identity(left, right) then
         return plan("comparison", {
             op = "identity",
@@ -4499,7 +4505,7 @@ function types.comparable(left, right)
             })
         end
     end
-    return false
+    return nil
 end
 
 function types.generic_owner_view(source, target)
@@ -4509,7 +4515,7 @@ function types.generic_owner_view(source, target)
        or target._tag ~= "Type.Nominal"
        or source.fqtn ~= target.fqtn
        or not relation_consistent(source, target) then
-        return false
+        return nil
     end
     return plan("generic_owner_view", {
         source = source,
@@ -4525,7 +4531,7 @@ function types.assignment_adjustment(source, target, policy)
     if not source or not target
        or source._tag == "Type.Variant"
        or target._tag == "Type.Variant" then
-        return false
+        return nil
     elseif relation_identity(source, target) then
         return plan("identity", { source = source, target = target })
     elseif source._tag == "Type.Nominal"
@@ -4535,7 +4541,7 @@ function types.assignment_adjustment(source, target, policy)
         -- generic lowering pass uses generic_owner_view only at a frozen
         -- closed/erased boundary where both applications denote the same
         -- runtime owner.
-        return false
+        return nil
     end
 
     -- Symmetric function consistency is useful during structural descent, but
@@ -4548,12 +4554,12 @@ function types.assignment_adjustment(source, target, policy)
     -- Array assignment rules
     if source._tag == "Type.Array" and target._tag == "Type.Array" then
         -- In-place freeze for unaliased linear array
-        if source.isconst == false and source.linear == true and target.isconst == true
+        if source.isconst.tag == "no" and source.linear == true and target.isconst.tag == "yes"
            and (types.equals(source.elem, target.elem) or relation_consistent(source.elem, target.elem)) then
-            local element_view = false
+            local element_view = nil
             if not types.equals(source.elem, target.elem) then
                 element_view = gradual_view_plan(source.elem, target.elem)
-                if not element_view then return false end
+                if not element_view then return nil end
             end
             return plan("written_cast", {
                 op = "array_freeze",
@@ -4566,19 +4572,19 @@ function types.assignment_adjustment(source, target, policy)
         end
 
         -- Maybe-const target admits mutable, const, or maybe-const source
-        if target.isconst == "maybe" and (source.isconst == false or source.isconst == true or source.isconst == "maybe") then
+        if target.isconst.tag == "maybe" and (source.isconst.tag == "no" or source.isconst.tag == "yes" or source.isconst.tag == "maybe") then
             if types.equals(source.elem, target.elem) then
                 return plan("identity", { source = source, target = target })
             elseif relation_consistent(source.elem, target.elem) then
                 local view = gradual_view_plan(source, target)
                 if view then return view end
             end
-            return false
+            return nil
         end
 
         -- Maybe-const source cannot be assigned to mutable or const target
-        if source.isconst == "maybe" and target.isconst ~= "maybe" then
-            return false
+        if source.isconst.tag == "maybe" and target.isconst.tag ~= "maybe" then
+            return nil
         end
     end
 
@@ -4605,7 +4611,7 @@ function types.assignment_adjustment(source, target, policy)
                     })
                 end
             end
-            return false
+            return nil
         end
     end
 
@@ -4619,7 +4625,7 @@ function types.assignment_adjustment(source, target, policy)
             })
         end
     end
-    return false
+    return nil
 end
 
 local function tostring_list(items, scoped)
@@ -4638,8 +4644,8 @@ local function c_display_name(name)
 end
 
 local function serialize_names(names)
-    if names == false then
-        return "false"
+    if names == nil then
+        return "nil"
     end
     local out = {}
     for _, name in ipairs(names) do
@@ -4728,7 +4734,7 @@ function types.tostring(t, wrap, scoped)
     elseif tag == "Type.GenericScope" then
         return "scope[" .. types.generic_scope_key(t) .. "]"
     elseif tag == "Type.TypeParameter" then
-        if t.constraint == false then return t.name end
+        if t.constraint == nil then return t.name end
         return t.name .. ": " .. types.tostring(t.constraint, false, scoped)
     elseif tag == "Type.Parameter" then
         return t.diagnostic_name
@@ -4756,9 +4762,9 @@ function types.tostring(t, wrap, scoped)
     elseif tag == "Type.Invalid"     then return "invalid type"
     elseif tag == "Type.Array" then
         local prefix = ""
-        if t.isconst == true then
+        if t.isconst.tag == "yes" then
             prefix = "const "
-        elseif t.isconst == "maybe" then
+        elseif t.isconst.tag == "maybe" then
             prefix = "const? "
         end
         return prefix .. "{ " .. types.tostring(t.elem, false, scoped) .. " }"
@@ -4905,8 +4911,8 @@ function types.validate_union_source_projection(union)
            or constructor._tag ~= "Type.StaticMethod"
            or constructor.fqtn ~= union.name
            or constructor.name ~= variant.name
-           or constructor.varargtype ~= false
-           or constructor.flexrettype ~= false
+           or constructor.varargtype ~= nil
+           or constructor.flexrettype ~= nil
            or type(constructor.paramnames) ~= "table"
            or #constructor.rettypes ~= 1
            or constructor.rettypes[1]._tag ~= "Type.Nominal"
@@ -4959,10 +4965,16 @@ function types.validate_union_source_projection(union)
 end
 
 local function serialize_literal(value)
-    if value == false or value == nil then return "false" end
+    if value == nil then return "nil" end
+    if value == false then return "false" end
     if value == true then return "true" end
     if type(value) == "string" then return string.format("%q", value) end
     error("cannot serialize generic metadata literal " .. tostring(value), 3)
+end
+
+local function serialize_optional_type(typ)
+    if typ == nil then return "nil" end
+    return types.serialize(typ)
 end
 
 local function serialize_type_list(list, seen_ctypes)
@@ -4974,7 +4986,7 @@ local function serialize_type_list(list, seen_ctypes)
 end
 
 local function serialize_generic_tail(scope, typeparams)
-    if scope == false and #(typeparams or {}) == 0 then return "" end
+    if scope == nil and #(typeparams or {}) == 0 then return "" end
     return "," .. types.serialize(scope) .. "," ..
         serialize_type_list(typeparams)
 end
@@ -4992,13 +5004,13 @@ function types.serialize(t, seen_ctypes)
             serialize_literal(t.declaration_kind) .. ")"
     elseif tag == "Type.TypeParameter" then
         return "TypeParameter(" .. string.format("%q", t.name) .. "," ..
-            (t.constraint == false and "false"
+            (t.constraint == nil and "nil"
                 or types.serialize(t.constraint)) .. ")"
     elseif tag == "Type.Parameter" then
         return "Parameter(" .. types.serialize(t.scope) .. "," ..
             tostring(t.index) .. "," ..
             string.format("%q", t.diagnostic_name) .. "," ..
-            (t.erased_constraint == false and "false"
+            (t.erased_constraint == nil and "nil"
                 or types.serialize(t.erased_constraint)) .. ")"
     elseif tag == "Type.FunctionScheme" then
         return "FunctionScheme(" .. types.serialize(t.scope) .. "," ..
@@ -5013,15 +5025,11 @@ function types.serialize(t, seen_ctypes)
             types.serialize(t.target_scope) .. "," ..
             serialize_type_list(t.typeparams) .. ")"
     elseif tag == "Type.Array" then
-        local const_repr
-        if t.isconst == "maybe" then
-            const_repr = '"maybe"'
-        elseif type(t.isconst) == "boolean" then
-            const_repr = tostring(t.isconst)
-        else
+        if not types.valid_array_constness(t.isconst) then
             error("cannot serialize malformed Array const qualifier")
         end
-        return "Array(" .. types.serialize(t.elem) .. "," .. const_repr .. ")"
+        return "Array(" .. types.serialize(t.elem) .. ",{tag=" ..
+            string.format("%q", t.isconst.tag) .. "})"
     elseif tag == "Type.Map" then
         return "Map(" .. types.serialize(t.keys) .. ", " .. types.serialize(t.values) .. ")"
     elseif tag == "Type.ModuleMember" then
@@ -5072,8 +5080,8 @@ function types.serialize(t, seen_ctypes)
             "{" .. table.concat(ptypes, ",") .. "}" .. "," ..
             "{" .. table.concat(rettypes, ",") .. "}" .. "," ..
             "false," ..
-            (t.varargtype and types.serialize(t.varargtype) or "false") .. "," ..
-            (t.flexrettype and types.serialize(t.flexrettype) or "false") .. ")"
+            serialize_optional_type(t.varargtype) .. "," ..
+            serialize_optional_type(t.flexrettype) .. ")"
     elseif tag == "Type.Nominal" then
         local args = t.args or {}
         if #args == 0 then
@@ -5106,8 +5114,8 @@ function types.serialize(t, seen_ctypes)
             t.fqtn .. "', '" .. t.name .. "'," ..
             "{" .. table.concat(ptypes, ",") .. "}" .. "," ..
             "{" .. table.concat(rettypes, ",") .. "}," ..
-            (t.varargtype and types.serialize(t.varargtype) or "false") .. "," ..
-            (t.flexrettype and types.serialize(t.flexrettype) or "false") .. "," ..
+            serialize_optional_type(t.varargtype) .. "," ..
+            serialize_optional_type(t.flexrettype) .. "," ..
             serialize_names(t.paramnames) ..
             serialize_generic_tail(t.scope, t.typeparams) .. ")"
     elseif tag == "Type.Record" then
@@ -5220,7 +5228,7 @@ function types.serialize(t, seen_ctypes)
         return "CFunction(" .. serialize_type_list(t.params, seen_ctypes) .. "," ..
             types.serialize(t.ret, seen_ctypes) .. "," ..
             tostring(t.vararg or false) .. "," ..
-            (t.abi and string.format("%q", t.abi) or "false") .. ")"
+            (t.abi and string.format("%q", t.abi) or "nil") .. ")"
     elseif tag == "Type.CStruct" then
         local name = t.cname or t.tagname
         if name then
@@ -5259,7 +5267,7 @@ function types.serialize(t, seen_ctypes)
             table.concat(fields, ",") .. "}," ..
             tostring(t.complete or false) .. ")"
     elseif tag == "Type.CField" then
-        return "CField(false," ..
+        return "CField(nil," ..
             string.format("%q", t.name) .. "," ..
             types.serialize(t.type, seen_ctypes) .. "," ..
             util.tostring(t.bitfield) .. "," ..

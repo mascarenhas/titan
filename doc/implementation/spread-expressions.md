@@ -12,7 +12,7 @@ The AST retains `ExpSubset(loc, exp, first, last)`,
 `ExpSpread(loc, exp, first, last)`, and checker-synthesized
 `ExpSpreadIndex(loc, spread, index, type)`. A comma-bearing bracket suffix is
 parsed once, selecting an ordinary index or range at the next delimiter.
-Missing range bounds are represented by `false`.
+Missing range bounds are represented by `nil`.
 
 Bare `...` is now an expression atom. After it, `[` selects input-vararg
 index/range syntax; otherwise a token in the expression FIRST set selects a

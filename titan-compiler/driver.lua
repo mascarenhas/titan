@@ -1941,7 +1941,7 @@ local function valid_qualified_nominal_name(name)
 end
 
 local function validate_name_list(names, expected_length)
-    if names == false then return true end
+    if names == nil then return true end
     local length = dense_plain_list_length(names)
     if not length or length ~= expected_length then return nil end
     local seen = {}
@@ -1956,7 +1956,7 @@ local function validate_name_list(names, expected_length)
 end
 
 local function generic_scope_component(value)
-    if value == false then return "-" end
+    if value == nil then return "-" end
     if type(value) ~= "string" then return nil end
     return #value .. ":" .. value
 end
@@ -1988,9 +1988,9 @@ local function validate_generic_scope(scope, expected)
     local key = generic_scope_key(scope)
     if not key
        or not staticmetadata.valid_module_name(scope.modname)
-       or (scope.owner_fqtn ~= false
+       or (scope.owner_fqtn ~= nil
            and not valid_qualified_nominal_name(scope.owner_fqtn))
-       or (scope.callable_name ~= false
+       or (scope.callable_name ~= nil
            and not valid_source_identifier(scope.callable_name))
        or not valid_source_identifier(scope.role)
        or not valid_source_identifier(scope.declaration_kind) then
@@ -2055,7 +2055,7 @@ local function validate_generic_binders(
     local count = dense_plain_list_length(typeparams)
     if not count then
         return nil, "generic binder list is not dense"
-    elseif scope == false then
+    elseif scope == nil then
         if count ~= 0 then
             return nil, "generic binder list has no scope"
         end
@@ -2083,7 +2083,7 @@ local function validate_generic_binders(
            or typeparam._tag ~= "Type.TypeParameter"
            or not valid_source_identifier(typeparam.name)
            or names[typeparam.name]
-           or (typeparam.constraint ~= false
+           or (typeparam.constraint ~= nil
                and type(typeparam.constraint) ~= "table") then
             return nil, "generic binder " .. index .. " has an invalid schema"
         end
@@ -2106,7 +2106,7 @@ local function validate_generic_binders(
 
     for index = 1, count do
         local constraint = typeparams[index].constraint
-        if constraint ~= false then
+        if constraint ~= nil then
             if constraint._tag ~= "Type.Nominal" then
                 return nil, "generic binder constraint is not an Interface application"
             end
@@ -2143,8 +2143,8 @@ local function validate_parameter_descriptor(parameter, context, seen)
         return nil, "generic Parameter has a noncanonical diagnostic name"
     end
 
-    if typeparam.constraint == false then
-        if parameter.erased_constraint ~= false then
+    if typeparam.constraint == nil then
+        if parameter.erased_constraint ~= nil then
             return nil, "generic Parameter has a noncanonical erased constraint"
         end
         return true
@@ -2190,7 +2190,7 @@ local function validate_callable_descriptor(callable, owner, kind, seen, context
     if not scopes then return nil, generic_error end
     local nested = value_context(context, scopes)
 
-    if callable.varargtype ~= false then
+    if callable.varargtype ~= nil then
         local ok, err = validate_interface_type(
             callable.varargtype, nested, seen)
         if not ok then return nil, err end
@@ -2198,7 +2198,7 @@ local function validate_callable_descriptor(callable, owner, kind, seen, context
             return nil, "variadic parameter has a noncanonical element type"
         end
     end
-    if callable.flexrettype ~= false then
+    if callable.flexrettype ~= nil then
         local ok, err = validate_interface_type(
             callable.flexrettype, nested, seen)
         if not ok then return nil, err end
@@ -2283,7 +2283,7 @@ local function validate_record_interface(record, context, seen)
         record.scope, record.typeparams, {
             modname = context.modname,
             owner_fqtn = record.name,
-            callable_name = false,
+            callable_name = nil,
             role = "owner",
             declaration_kind = "record",
         }, context, seen)
@@ -2345,10 +2345,10 @@ local function validate_record_interface(record, context, seen)
     end
     if constructor then
         if record.nfields ~= nfields
-           or constructor.scope ~= false
+           or constructor.scope ~= nil
            or #constructor.typeparams ~= 0
-           or constructor.varargtype ~= false
-           or constructor.flexrettype ~= false
+           or constructor.varargtype ~= nil
+           or constructor.flexrettype ~= nil
            or type(constructor.paramnames) ~= "table"
            or #constructor.paramnames ~= nfields
            or #constructor.params ~= nfields
@@ -2381,7 +2381,7 @@ local function validate_union_interface(union, context, seen)
         union.scope, union.typeparams, {
             modname = context.modname,
             owner_fqtn = union.name,
-            callable_name = false,
+            callable_name = nil,
             role = "owner",
             declaration_kind = "union",
         }, context, seen)
@@ -2443,10 +2443,10 @@ local function validate_union_interface(union, context, seen)
         local constructor = union.functions[variant.name]
         local payload_params = #variant.parts
         if not constructor
-           or constructor.scope ~= false
+           or constructor.scope ~= nil
            or #constructor.typeparams ~= 0
-           or constructor.varargtype ~= false
-           or constructor.flexrettype ~= false
+           or constructor.varargtype ~= nil
+           or constructor.flexrettype ~= nil
            or type(constructor.paramnames) ~= "table"
            or #constructor.paramnames ~= payload_params
            or #constructor.params ~= payload_params
@@ -2485,7 +2485,7 @@ local function validate_declared_interface(interface, context, seen)
         interface.scope, interface.typeparams, {
             modname = context.modname,
             owner_fqtn = interface.name,
-            callable_name = false,
+            callable_name = nil,
             role = "owner",
             declaration_kind = "interface",
         }, context, seen)
@@ -2528,7 +2528,7 @@ local function validate_function_scheme(scheme, context, seen)
     local scopes, generic_error = validate_generic_binders(
         scheme.scope, scheme.typeparams, {
             modname = context.modname,
-            owner_fqtn = false,
+            owner_fqtn = nil,
             callable_name = context.name,
             role = "function",
             declaration_kind = "function",
@@ -2544,7 +2544,7 @@ local function validate_generic_alias(alias, context, seen)
        or alias.name ~= context.name
        or alias.locality ~= false
        or not valid_qualified_nominal_name(alias.target_owner_fqtn)
-       or (alias.target_alias_fqtn ~= false
+       or (alias.target_alias_fqtn ~= nil
            and not valid_qualified_nominal_name(alias.target_alias_fqtn))
        or type(alias.target_scope) ~= "table"
        or alias.target_scope._tag ~= "Type.GenericScope"
@@ -2558,7 +2558,7 @@ local function validate_generic_alias(alias, context, seen)
         alias.target_scope, alias.typeparams, {
             modname = target_module,
             owner_fqtn = alias.target_owner_fqtn,
-            callable_name = false,
+            callable_name = nil,
             role = "owner",
             declaration_kind = alias.target_scope.declaration_kind,
         }, context, seen)
@@ -2590,7 +2590,7 @@ local function validate_local_alias_projection(
     end
     resolving[fqtn] = true
 
-    if alias.target_alias_fqtn ~= false then
+    if alias.target_alias_fqtn ~= nil then
         local target_module =
             alias.target_alias_fqtn:match("^(.*)%.[^.]+$")
         if target_module == validation.modname then
@@ -2620,9 +2620,9 @@ end
 function driver._metadata_generic_constraint_satisfied(
         argument, constraint, validation)
     if argument._tag == "Type.Parameter" then
-        local surface = types.parameter_surface_constraint(
+        local surface, valid = types.parameter_surface_constraint(
             argument, validation.scope_bindings)
-        return surface ~= nil and surface ~= false
+        return valid and surface ~= nil
             and types.equals(surface, constraint)
     elseif argument._tag ~= "Type.Nominal" then
         return false
@@ -2641,12 +2641,12 @@ function driver._metadata_generic_constraint_satisfied(
     end
 
     local concrete_ok, concrete_view = true, concrete
-    if concrete.scope ~= false then
+    if concrete.scope ~= nil then
         concrete_ok, concrete_view = pcall(
             types.substitute, concrete, concrete.scope, argument.args or {})
     end
     local interface_ok, interface_view = true, interface
-    if interface.scope ~= false then
+    if interface.scope ~= nil then
         interface_ok, interface_view = pcall(
             types.substitute, interface, interface.scope,
             constraint.args or {})
@@ -2656,7 +2656,7 @@ function driver._metadata_generic_constraint_satisfied(
         concrete_view, interface_view, {
             visibility = validation.modname,
         })
-    return implementation ~= false
+    return implementation ~= nil
 end
 
 function driver._validate_metadata_generic_application(
@@ -2670,7 +2670,7 @@ function driver._validate_metadata_generic_application(
     end
 
     for index, typeparam in ipairs(owner.typeparams or {}) do
-        if typeparam.constraint ~= false then
+        if typeparam.constraint ~= nil then
             local closed, constraint = pcall(
                 types.substitute, typeparam.constraint,
                 owner.scope, nominal.args or {})
@@ -2789,7 +2789,7 @@ validate_interface_type = function(typ, context, seen)
         if not context or context.kind ~= "c-pointee"
            or dense_plain_list_length(typ.params) == nil
            or type(typ.ret) ~= "table"
-           or typ.vararg ~= false or typ.abi ~= false then
+           or typ.vararg ~= false or typ.abi ~= nil then
             return nil, "portable C function has a noncanonical shape"
         end
         local nested = value_context(context)
@@ -2863,7 +2863,7 @@ validate_interface_type = function(typ, context, seen)
         end
         return true
     elseif tag == "Type.Array" then
-        if type(typ.isconst) ~= "boolean" and typ.isconst ~= "maybe" then
+        if not types.valid_array_constness(typ.isconst) then
             return nil, "array type has a noncanonical const qualifier"
         end
         return validate_interface_type(
@@ -2903,7 +2903,7 @@ validate_interface_type = function(typ, context, seen)
             local ok, err = validate_interface_type(rettype, nested, seen)
             if not ok then return nil, err end
         end
-        if typ.varargtype ~= false then
+        if typ.varargtype ~= nil then
             local ok, err = validate_interface_type(
                 typ.varargtype, nested, seen)
             if not ok then return nil, err end
@@ -2911,7 +2911,7 @@ validate_interface_type = function(typ, context, seen)
                 return nil, "function variadic parameter has a noncanonical element type"
             end
         end
-        if typ.flexrettype ~= false then
+        if typ.flexrettype ~= nil then
             local ok, err = validate_interface_type(
                 typ.flexrettype, nested, seen)
             if not ok then return nil, err end
@@ -3071,7 +3071,7 @@ function driver.validate_module_interface(modtype, modname)
                     return nil, "module function '" .. member.name ..
                         "' has invalid parameter-name metadata"
                 end
-            elseif member.paramnames ~= false then
+            elseif member.paramnames ~= nil then
                 return nil, "non-function module member '" .. member.name ..
                     "' has parameter-name metadata"
             end

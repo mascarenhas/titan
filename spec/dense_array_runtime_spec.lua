@@ -1184,9 +1184,9 @@ static void test_per_state_metatables(void) {
 static void test_function_type_tag_publication(void) {
     static const char *first_key = "Titan function type unit.first tag";
     static const char *second_key = "Titan function type unit.second tag";
-    static const char *first_tag_candidate = "Function({},{},false,false,false)";
-    static const char *first_tag_candidate_dup = "Function({},{},false,false,false)";
-    static const char *second_tag_candidate = "Function({Integer()},{Integer()},false,false,false)";
+    static const char *first_tag_candidate = "Function({},{},false,nil,nil)";
+    static const char *first_tag_candidate_dup = "Function({},{},false,nil,nil)";
+    static const char *second_tag_candidate = "Function({Integer()},{Integer()},false,nil,nil)";
     lua_State *first = luaL_newstate();
     lua_State *second = luaL_newstate();
     const void *first_tag;

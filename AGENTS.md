@@ -811,7 +811,7 @@ order, module-variable initialization, and code generation.
 Unions are nominal v1 sum types. `union`, `case`, and `when` are keywords;
 variants use `empty()` or `payload(T)`, and arms use `when empty() then` or
 `when payload(binding) then`. Variant constructors are positional-only,
-first-class fixed Titan functions (`paramnames = false`) and use ordinary
+first-class fixed Titan functions (`paramnames = nil`) and use ordinary
 nil-fill/surplus adjustment. Imported union visibility exactly follows record
 frontiers. Each case arm/else is a full ordinary block with its own
 `catch`; source `finally` is reserved and unused. Internal `defer` cleanup remains
@@ -1138,6 +1138,12 @@ initializer. `M` is a readonly compile-time marker for the current module:
 available. The usual visibility and initializer frontier still apply. Foreign
 function bodies receive neither builtin implicitly.
 
+- Ordinary optional Type/AST fields use `nil`. Computed analyses that distinguish
+  unfinished, completed absence, and a result use `titan-compiler.maybe3` with
+  `unknown`, `none`, and `just` tags; initialize scalar states to `unknown` and
+  retain one wrapper per dense plan slot. Unwrap only after checking the state.
+  Array `isconst` uses the closed `no`/`yes`/`maybe` tagged values; compare tags,
+  never wrapper identity or truthiness. Genuine boolean flags remain booleans.
 - Every ordinary type-directed target sink asks
   `types.assignment_adjustment(source, target)` once. Expression-dependent C
   edges are checker-finalized separately: mutable local/formal address

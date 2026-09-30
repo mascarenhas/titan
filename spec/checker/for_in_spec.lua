@@ -39,8 +39,8 @@ describe("generic for loops (typechecker)", function()
         assert.same({ types.Nil() }, iterator.params)
         assert.same({ types.Option(types.String()) }, iterator.rettypes)
         assert.is_false(iterator.vararg)
-        assert.is_false(iterator.varargtype)
-        assert.is_false(iterator.flexrettype)
+        assert.is_nil(iterator.varargtype)
+        assert.is_nil(iterator.flexrettype)
         assert.same(types.Nil(), loop._tuple_decls[2]._type)
         assert.same(types.Nil(), loop._tuple_decls[3]._type)
         assert.same(types.Nil(), loop._tuple_decls[4]._type)
@@ -271,10 +271,10 @@ describe("generic for loops (typechecker)", function()
 
         local loop = ast[1].block.stats[1]
         assert.same(types.Function({},
-            { types.Option(types.Integer()), types.String() }, false, false,
-            false),
+            { types.Option(types.Integer()), types.String() }, false, nil,
+            nil),
             loop._tuple_decls[1]._type)
-        assert.same(types.Function({}, {}, false, false, false),
+        assert.same(types.Function({}, {}, false, nil, nil),
             loop._tuple_decls[4]._type)
         assert.is_true(loop._runtime_optional_close)
         assert.is_true(loop._has_close)
@@ -297,11 +297,11 @@ describe("generic for loops (typechecker)", function()
         assert.same(types.Function(
             { types.Integer(), types.String() },
             { types.Value(), types.Value(), types.Value(), types.Value() },
-            false, false, false), factory_call._contextual_function_type)
+            false, nil, nil), factory_call._contextual_function_type)
         assert.same(types.Function({ types.Value(), types.Value() },
             { types.Option(types.Integer()), types.Option(types.String()) },
-            false, false, false), loop._tuple_decls[1]._type)
-        assert.same(types.Function({ types.Value() }, {}, false, false, false),
+            false, nil, nil), loop._tuple_decls[1]._type)
+        assert.same(types.Function({ types.Value() }, {}, false, nil, nil),
             loop._tuple_decls[4]._type)
         assert.is_true(loop._runtime_optional_close)
         assert.is_true(loop._has_close)
@@ -319,7 +319,7 @@ describe("generic for loops (typechecker)", function()
 
         local loop = ast[1].block.stats[1]
         assert.same(types.Function({ types.String(), types.Integer() },
-            { types.Option(types.Integer()) }, false, false, false),
+            { types.Option(types.Integer()) }, false, nil, nil),
             loop._tuple_decls[1]._type)
     end)
 

@@ -1,6 +1,7 @@
 local typedecl = require 'titan-compiler.typedecl'
+local maybe3 = require 'titan-compiler.maybe3'
 
-return typedecl("Ast", {
+local ast = typedecl("Ast", {
     Type = {
         TypeNil         = {"loc"},
         TypeBoolean     = {"loc"},
@@ -65,7 +66,7 @@ return typedecl("Ast", {
         StatReturn      = {"loc", "exps"},
         StatCase        = {"loc", "exp", "arms", "elseblock"},
         StatBreak       = {"loc"},
-        StatRaise       = {"loc", "exp"},   -- `raise <exp>`; `exp` false ⇒ bare re-raise
+        StatRaise       = {"loc", "exp"},   -- `raise <exp>`; nil `exp` means bare re-raise
         StatTry         = {"loc", "block", "catchblock", "finallyblock"},
     },
 
@@ -106,7 +107,7 @@ return typedecl("Ast", {
         ExpDots         = {"loc"},          -- bare `...`
         ExpDotsIndex    = {"loc", "exp"},   -- `...[e]` (checker sets _nilfill, _type)
         ExpDotsLen      = {"loc"},          -- explicit `#...`
-        ExpSubset       = {"loc", "exp", "first", "last"}, -- `exp[first,last]`; false means omitted
+        ExpSubset       = {"loc", "exp", "first", "last"}, -- `exp[first,last]`; nil means omitted
         ExpSpread       = {"loc", "exp", "first", "last"}, -- bounds populated by checker
         ExpSpreadIndex  = {"loc", "spread", "index", "_type"} -- checker-synthesized projection
     },
@@ -122,3 +123,37 @@ return typedecl("Ast", {
         Field           = {"loc", "name", "exp"},
     },
 })
+
+-- These annotations distinguish an unfinished analysis from a completed
+-- analysis that found no sound plan. Ordinary optional syntax stays nil.
+local function analysis_fields(constructor, fields)
+    local build = ast[constructor]
+    ast[constructor] = function(...)
+        local node = build(...)
+        for _, field in ipairs(fields) do node[field] = maybe3.unknown() end
+        return node
+    end
+end
+
+for _, constructor in ipairs {
+    "TopLevelFunc", "TopLevelMethod", "TopLevelStatic",
+    "TopLevelForeignFunc", "ExpFunction", "InterfaceMethod",
+} do
+    analysis_fields(constructor, {
+        "_lua_vararg_dynamic_plan", "_strict_vararg_guard_plan",
+        "_bound_strict_vararg_guard_plan",
+    })
+end
+analysis_fields("TopLevelVar", { "_lua_write_dynamic_plan" })
+analysis_fields("Decl", { "_dynamic_plan" })
+analysis_fields("VarBracket", { "_read_guard" })
+analysis_fields("ExpInitList", { "_array_writer_plan" })
+analysis_fields("ExpSpread", { "_spread_optional_guard", "_spread_open_guard" })
+analysis_fields("ExpCall", {
+    "_lua_open_result_dynamic_plan", "_strict_open_result_guard_plan",
+})
+analysis_fields("ExpCast", { "_written_cast" })
+analysis_fields("ExpIs", { "_written_cast" })
+analysis_fields("ExpBinop", { "_comparison" })
+
+return ast
