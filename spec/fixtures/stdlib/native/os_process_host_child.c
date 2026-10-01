@@ -1,3 +1,6 @@
+#if defined(_WIN32)
+#include "os_process_host_child_windows.h"
+#else
 #define _POSIX_C_SOURCE 200809L
 
 #include <stdio.h>
@@ -72,6 +75,19 @@ int main(int argc, char **argv) {
     return 2;
   if (strcmp(argv[1], "argv-env-cwd") == 0)
     return argv_env_cwd(argc, argv);
+  if (strcmp(argv[1], "environment") == 0) {
+    int index;
+    for (index = 2; index < argc; index++) {
+      const char *value = getenv(argv[index]);
+      if (value == NULL) {
+        if (fputs("absent\n", stdout) == EOF)
+          return 3;
+      } else if (write_field("env", value) != 0) {
+        return 4;
+      }
+    }
+    return fflush(stdout) == 0 ? 0 : 5;
+  }
   if (strcmp(argv[1], "echo") == 0)
     return echo_input();
   if (strcmp(argv[1], "dual") == 0 && argc == 3)
@@ -86,3 +102,5 @@ int main(int argc, char **argv) {
   }
   return 2;
 }
+
+#endif

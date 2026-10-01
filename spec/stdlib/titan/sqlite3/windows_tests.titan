@@ -1,0 +1,148 @@
+-- Public SQLite behavior; the runner owns and verifies the NTFS scratch root.
+local test = import "titan.test"
+local sqlite3 = import "titan.sqlite3"
+local fs = import "titan.fs"
+local system = import "titan.os"
+local runtime_test = import "support.runtime.titan"
+
+local function workspace(name: string): string
+  local root? = system.getenv("TITAN_WINDOWS_TEST_ROOT")
+  test.assert(root ~= nil and #root > 0,
+              "runner must supply its owned TITAN_WINDOWS_TEST_ROOT")
+  test.assert(fs.stat(root).kind == "directory",
+              "SQLite test root is not a directory")
+  local path = root .. "/" .. name
+  fs.mkdir(path)
+  runtime_test.cleanup(function () fs.rmdir(path) end)
+  return path
+end
+
+local function cleanup_database(path: string)
+  runtime_test.cleanup(function ()
+    if fs.stat(path) ~= nil then fs.unlink(path) end
+  end)
+end
+
+local function execute_sql(connection: sqlite3.Connection,
+                           sql: string): integer
+  local statement = connection:prepare(sql)
+  defer statement:close()
+  return statement:execute()
+end
+
+local function required_row(cursor: sqlite3.Cursor): sqlite3.Row
+  local row? = cursor:fetch()
+  test.assert(row ~= nil, "SQLite query returned no required row")
+  return row
+end
+
+local function scalar_integer(connection: sqlite3.Connection,
+                              sql: string): integer
+  local statement = connection:prepare(sql)
+  defer statement:close()
+  local cursor = statement:query()
+  defer cursor:close()
+  return required_row(cursor):get(1)
+end
+
+function test_scalar_bindings_and_owned_row_lifetime(context: test.Context)
+  local saved: sqlite3.Row? = nil
+  runtime_test.run(function ()
+    local connection = sqlite3.connect(":memory:")
+    defer connection:close()
+    local statement = connection:prepare("SELECT ?, ?, ?, ?, ?, ?")
+    defer statement:close()
+    local cursor = statement:query(73, 42.5, "héllo 世界",
+        sqlite3.Blob.new("\0\255binary\0"), sqlite3.Blob.new(""), nil)
+    defer cursor:close()
+    saved = required_row(cursor)
+    test.assert(cursor:fetch() == nil and cursor:fetch() == nil,
+                "SQLite query did not retain exhausted-cursor behavior")
+  end)
+  -- Row inspection is synchronous and remains valid after every owner closes.
+  local row = saved
+  local integer_value: integer = row:get(1)
+  local float_value: float = row:get(2)
+  local text_value: string = row:get(3)
+  local bytes: sqlite3.Blob = row:get(4)
+  local empty: sqlite3.Blob = row:get(5)
+  test.assert(#row.columns == 6 and row:get(6) == nil,
+              "trailing SQL NULL truncated the owned row")
+  test.assert(integer_value == 73 and float_value == 42.5 and
+              text_value == "héllo 世界",
+              "SQLite scalar values changed after their owners closed")
+  test.assert(bytes.bytes == "\0\255binary\0" and empty.bytes == "",
+              "SQLite BLOB bytes changed or empty BLOB became NULL")
+end
+
+function test_ntfs_persistence_commit_and_rollback(context: test.Context)
+  runtime_test.run(function ()
+    local root = workspace("sqlite persistence héllo 世界")
+    local path = root .. "/database héllo 世界.sqlite3"
+    cleanup_database(path)
+    local connection = sqlite3.connect(path)
+    defer connection:close()
+    execute_sql(connection, "CREATE TABLE item (value INTEGER)")
+    test.assert(connection:get_autocommit(),
+                "new SQLite connection was not in autocommit")
+    connection:set_autocommit(false)
+    execute_sql(connection, "INSERT INTO item VALUES (73)")
+    connection:commit()
+    test.assert(connection:get_autocommit(),
+                "COMMIT silently started another transaction")
+    connection:set_autocommit(false)
+    execute_sql(connection, "INSERT INTO item VALUES (99)")
+    connection:rollback()
+    test.assert(connection:get_autocommit() and
+                scalar_integer(connection, "SELECT count(*) FROM item") == 1,
+                "ROLLBACK retained data or restarted a transaction")
+    connection:close()
+    local reopened = sqlite3.connect(path)
+    defer reopened:close()
+    test.assert(scalar_integer(reopened, "SELECT value FROM item") == 73,
+                "reopening the NTFS database lost committed data")
+    reopened:close()
+    test.assert(fs.stat(path).kind == "file" and fs.stat(path).size > 0,
+                "SQLite did not persist a regular database file")
+  end)
+end
+
+function test_ntfs_busy_commit_preserves_transaction(context: test.Context)
+  runtime_test.run(function ()
+    local root = workspace("sqlite-busy")
+    local path = root .. "/database.sqlite3"
+    cleanup_database(path)
+    local writer = sqlite3.connect(path)
+    defer writer:close()
+    execute_sql(writer, "CREATE TABLE item (value INTEGER)")
+    execute_sql(writer, "INSERT INTO item VALUES (1)")
+    local reader = sqlite3.connect(path)
+    defer reader:close()
+    local statement = reader:prepare("SELECT value FROM item")
+    defer statement:close()
+    local cursor = statement:query()
+    defer cursor:close()
+    local first: integer = required_row(cursor):get(1)
+    test.assert(first == 1, "reader did not retain a live SQLite result")
+
+    -- A live reader owns SHARED while the writer may acquire RESERVED.
+    writer:set_autocommit(false)
+    execute_sql(writer, "INSERT INTO item VALUES (2)")
+    local failure: sqlite3.Error? = nil
+    do
+      writer:commit()
+    catch
+      if error is sqlite3.Error then failure = error else raise end
+    end
+    test.assert(failure ~= nil and failure.code == 5 and
+                failure.extended_code ~= nil and failure.operation == "commit",
+                "contended COMMIT did not report native SQLITE_BUSY")
+    test.assert(not writer:get_autocommit(),
+                "failed COMMIT discarded the active transaction")
+    cursor:close()
+    writer:commit()
+    test.assert(writer:get_autocommit() and
+                scalar_integer(writer, "SELECT count(*) FROM item") == 2,
+                "explicit COMMIT retry failed after releasing the reader")
+  end)
+end

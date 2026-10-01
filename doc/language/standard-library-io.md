@@ -92,6 +92,13 @@ Except for that repeat-call guarantee, these Interfaces intentionally describe
 method shapes rather than one shared buffering, cancellation, or ownership
 policy. Consult the concrete module's chapter for those details.
 
+The experimental Windows build checks native buffer lengths against libuv's
+32-bit unsigned length field. A single file-read request or file/stream-write
+buffer larger than 4 GiB minus one byte raises a numeric range error before
+submission; Titan does not silently truncate or split that buffer. Unix keeps
+its native `size_t` length range. Ordinary allocation and operating-system
+limits can reject smaller requests as well.
+
 ## Printing
 
 ```text
@@ -168,6 +175,10 @@ library's shell-string convenience, not an argv parser. Use `os.spawn` when an
 executable and arguments must be passed directly or stdout and stderr must
 remain separate. The command is text and rejects an embedded NUL before native
 process creation.
+
+`popen` is unsupported on the experimental Windows build because it requires
+`/bin/sh`. Windows programs can use `os.spawn` with a native executable and an
+explicit argument array; Titan does not select a Windows command shell.
 
 The child gets a captured stdin pipe and one captured pipe shared by stdout and
 stderr. `InputOutputStream:write` writes the child's stdin, while `read` and

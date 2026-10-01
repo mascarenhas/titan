@@ -1,0 +1,184 @@
+-- Native Windows process behavior; the runner supplies an absolute C child.
+local test = import "titan.test"
+local system = import "titan.os"
+local fs = import "titan.fs"
+local strings = import "titan.string"
+local async = import "titan.async"
+local runtime_test = import "support.runtime.titan"
+local process_support = import "os.process_test_support.titan"
+
+local function child_path(): string
+  local child? = system.getenv("TITAN_WINDOWS_PROCESS_CHILD")
+  test.assert(child ~= nil and #child > 0, "runner did not supply the process fixture")
+  return child
+end
+
+local function cleanup_process(process: system.Process)
+  do process_support.close_process_streams(process) catch end
+  do if process:is_running() then process:kill("kill") end catch end
+  do process:wait() catch end
+end
+
+local function captured(process: system.Process): (string, string, system.ExitStatus)
+  process_support.required_output(process.stdin, "child stdin"):close()
+  local output = process_support.read_all(
+      process_support.required_input(process.stdout, "child stdout"))
+  local diagnostic = process_support.read_all(
+      process_support.required_input(process.stderr, "child stderr"))
+  return output, diagnostic, process:wait()
+end
+
+function test_utf8_arguments_and_inherited_working_directory(_context: test.Context)
+  runtime_test.run(function ()
+    local root? = system.getenv("TITAN_WINDOWS_TEST_ROOT")
+    test.assert(root ~= nil, "runner did not supply its owned workspace")
+    local path = root .. "/process cwd ação 東京"
+    fs.mkdir(path)
+    defer fs.rmdir(path)
+    local previous = system.cwd()
+    system.chdir(path)
+    defer system.chdir(previous)
+    local cwd = system.cwd()
+    local child = child_path()
+    local name = "TITAN_WINDOWS_PROCESS_METADATA"
+    local previous_environment? = system.getenv(name)
+    local environment = "ação=東京"
+    local arguments: {string} = {"alpha", "", "space argument", "quote\"value", "trailing\\", "space trailing\\", "slash\\\"quote", "ação東京😀"}
+    local command: {string} = {"argv-env-cwd", name}
+    local expected = "cwd:" .. #cwd .. ":" .. cwd .. "\n" ..
+        "env:" .. #environment .. ":" .. environment .. "\n" ..
+        "argv0:" .. #child .. ":" .. child .. "\n"
+    for index = 1, #arguments do
+      local argument = arguments[index]
+      command[#command + 1] = argument
+      expected = expected .. "arg:" .. #argument .. ":" .. argument .. "\n"
+    end
+    local process = system.spawn(child, command, system.with_env(name, environment))
+    defer cleanup_process(process)
+    local output, diagnostic, status = captured(process)
+    process_support.assert_normal(status, "UTF-8 metadata child")
+    test.assert(output == expected, "spawn changed UTF-8 argv, empty arguments or inherited cwd")
+    test.assert(diagnostic == "", "metadata child wrote stderr")
+    test.assert(system.getenv(name) == previous_environment, "spawn mutated parent environment")
+  end)
+end
+
+function test_child_environment_case_empty_and_parent_isolation(_context: test.Context)
+  runtime_test.run(function ()
+    local upper = "TITAN_WINDOWS_PROCESS_CASE"
+    local lower = "titan_windows_process_case"
+    local empty = "TITAN_WINDOWS_PROCESS_EMPTY"
+    local absent = "TITAN_WINDOWS_PROCESS_ABSENT_185"
+    test.assert(system.getenv(absent) == nil, "runner did not clear its absent-variable fixture")
+    local old_upper? = system.getenv(upper)
+    local old_empty? = system.getenv(empty)
+    local value = "last ação=東京"
+    local process = system.spawn(child_path(), {"environment", upper, lower, empty, absent},
+        system.with_env(upper, "first"), system.with_env(lower, value),
+        system.with_env(empty, ""))
+    defer cleanup_process(process)
+    local output, diagnostic, status = captured(process)
+    process_support.assert_normal(status, "environment child")
+    local field = "env:" .. #value .. ":" .. value .. "\n"
+    test.assert(output == field .. field .. "env:0:\nabsent\n", "Windows environment merge lost case or empty-value semantics")
+    test.assert(diagnostic == "", "environment child wrote stderr")
+    test.assert(system.getenv(upper) == old_upper and system.getenv(empty) == old_empty,
+                "child environment choices escaped into the parent")
+  end)
+end
+
+function test_binary_capture_and_repeated_wait(_context: test.Context)
+  runtime_test.run(function ()
+    local payload = "head\0middle\r\n\26trail"
+    local process = system.spawn(child_path(), {"echo"})
+    defer cleanup_process(process)
+    local input = process_support.required_output(process.stdin, "echo stdin")
+    local output = process_support.required_input(process.stdout, "echo stdout")
+    local diagnostic = process_support.required_input(process.stderr, "echo stderr")
+    test.assert(not input:is_tty() and not output:is_tty(), "captured pipes were classified as TTYs")
+    input:write(payload)
+    input:close()
+    input:close()
+    test.assert(process_support.read_all(output) == payload, "binary pipe bytes were translated or truncated")
+    test.assert(process_support.read_all(diagnostic) == "", "echo child wrote stderr")
+    process_support.assert_normal(process:wait(), "binary echo child")
+    process_support.assert_normal(process:wait(), "repeated wait")
+    test.assert(not process:is_running(), "reaped process stayed running")
+    test.assert(not output:read(), "captured pipe did not retain EOF")
+  end)
+end
+
+function test_separate_and_merged_output(_context: test.Context)
+  runtime_test.run(function ()
+    local child = child_path()
+    local separate = system.spawn(child, {"dual", "64"})
+    defer cleanup_process(separate)
+    local output, diagnostic, status = captured(separate)
+    process_support.assert_normal(status, "separate output child")
+    test.assert(output == strings.rep("O", 64) and diagnostic == strings.rep("E", 64),
+                "separate streams lost their bytes")
+
+    local merged = system.spawn(child, {"dual", "64"}, system.with_merged_output)
+    defer cleanup_process(merged)
+    process_support.required_output(merged.stdin, "merged stdin"):close()
+    local stream = process_support.required_input(merged.stdout, "merged output")
+    test.assert(stream == merged.stderr, "merged streams do not share one facade")
+    local bytes = process_support.read_all(stream)
+    local stdout_count, stderr_count = 0, 0
+    for index = 1, #bytes do
+      local byte = strings.sub(bytes, index, index)
+      if byte == "O" then stdout_count = stdout_count + 1
+      elseif byte == "E" then stderr_count = stderr_count + 1
+      else test.assert(false, "merged stream gained an unexpected byte") end
+    end
+    test.assert(stdout_count == 64 and stderr_count == 64, "merged output lost bytes")
+    process_support.assert_normal(merged:wait(), "merged output child")
+  end)
+end
+
+local function exit_case(context: test.Context, name: string, expected: integer)
+  context:run(name, function (_child: test.Context)
+    runtime_test.run(function ()
+      local process = system.spawn(child_path(), {"exit", "" .. expected})
+      defer cleanup_process(process)
+      local output, diagnostic, status = captured(process)
+      test.assert(status.code == expected and status.signal == nil and status.signal_number == 0,
+                  "native child exit was confused with shell failure or a signal")
+      test.assert(output == "" and diagnostic == "", "exit child wrote unexpected output")
+    end)
+  end)
+end
+
+function test_native_exit_codes(context: test.Context)
+  exit_case(context, "one", 1)
+  exit_case(context, "one_twenty_six", 126)
+  exit_case(context, "one_twenty_seven", 127)
+  exit_case(context, "nine_thousand_nine", 9009)
+end
+
+function test_missing_executable_raises_spawn_error(_context: test.Context)
+  runtime_test.run(function ()
+    local rejected = false
+    do
+      local unexpected = system.spawn(child_path() .. ".absent", {})
+      cleanup_process(unexpected)
+    catch
+      test.assert(error is async.OperationError, "missing executable raised a non-operation error")
+      local failure = error as async.OperationError
+      test.assert(failure.operation == "process.spawn" and failure.name == "ENOENT",
+                  "missing executable lost its native spawn diagnostic")
+      rejected = true
+    end
+    test.assert(rejected, "missing executable unexpectedly spawned")
+  end)
+end
+
+function test_utc_calendar_and_cpu_clock(_context: test.Context)
+  local before = system.clock()
+  local count = 0
+  for index = 1, 10000 do count = count + index end
+  test.assert(count > 0 and system.clock() >= before, "CPU clock went backwards")
+  test.assert(system.difftime(27, 9) == 18.0, "time difference changed")
+  test.assert(system.date("!%Y-%m-%d %H:%M:%S", 946684800) == "2000-01-01 00:00:00",
+              "UTC calendar conversion changed")
+end

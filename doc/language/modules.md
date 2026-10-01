@@ -4,14 +4,19 @@ A *Titan module* is the unit of compilation, namespacing, and distribution.
 Its source may be one flat `.titan` file or a canonical main plus immediate
 `.titan` contributors in a [folder module](folder-modules.md). Both forms
 compile as one logical module. In library mode, one or more related logical
-modules are linked into a physical provider DSO/archive pair and receive
-generated Lua loaders; Lua programs use `require` and other Titan modules use
+modules are linked into a physical provider (a DSO/archive pair on Linux and
+macOS, a DLL on Windows) and receive generated Lua loaders; Lua programs use
+`require` and other Titan modules use
 `import` without exposing that physical grouping. A module that defines a
 [`main` function](functions.md) becomes a standalone executable instead. This
 chapter describes what goes inside a logical module, how modules reference
 each other, and what the compiler produces. See
 [Multi-module libraries](multi-module-libraries.md) for the provider and
 loader rules.
+
+The native output, archive, and static Lua examples in this chapter describe
+Linux and macOS. See [Experimental Windows compilation](#experimental-windows-compilation)
+for the Windows provider and runtime requirements.
 
 ## What a module is made of
 
@@ -477,7 +482,8 @@ titanc [--print-ast] [--pretty-print] [-v] [-j jobs] [--static] [--test] \
   linking remain ordered in the compiler process.
 * `--static` prefers self-describing Titan `.a` providers over `.so`
   providers for ordinary dependencies. It still permits DSO/source fallback
-  and does not request a fully static system executable.
+  and does not request a fully static system executable. Windows rejects this
+  option and selected Titan archive providers.
 * `--source-first` prefers available source dependencies to compiled providers,
   with compiled fallback for ordinary source misses. It does not grant private
   visibility to ordinary imports.
@@ -531,8 +537,8 @@ with `--std=c99 -O3 -Wall -fPIC`) does the rest. Linux also enables
 `-flto=auto -ffat-lto-objects` so final links can optimize across object boundaries
 while objects retain native metadata sections. macOS uses ordinary native
 objects without default LTO. See [Optimization and toolchain settings](incremental-compilation.md#optimization-and-toolchain-settings).
-A single-root library build
-uses that root as its physical provider:
+On Linux and macOS, a single-root library build uses that root as its physical
+provider and produces these paths:
 
 | Source form for `foo.bar` | Generated C/object | Lua loader | Provider pair | Entrypoint | Executable |
 | --- | --- | --- | --- | --- | --- |
@@ -581,7 +587,47 @@ are described in [the driver documentation](../implementation/driver.md);
 the structure of the generated C is in
 [the code generator overview](../implementation/codegen-overview.md).
 
+### Experimental Windows compilation
+
+Windows library builds emit one DLL provider and Lua shims; they do not emit
+a paired Titan archive. `--static` and selected Titan archive providers are
+unsupported. Standalone builds emit a launcher in `bin` and an application DLL
+under `lib/titan/0.6`. All use the SDK's controlled shared Lua DLL and matching
+import library, rather than the Unix static `liblua.a` or an ordinary stock
+Windows Lua build. See [Windows loading and launchers](binary-compatibility.md#experimental-windows-loading-and-launchers)
+for output names and runtime layout, and the [Windows build guide](../implementation/windows-build.md)
+for the SDK and native dependency link requirements.
+
+The experimental Windows compiler invokes the selected native C toolchain
+serially. A larger `--jobs` or `TITAN_JOBS` value still compiles one generated
+module at a time; verbose mode reports this restriction. Linux and macOS retain
+their existing concurrent compilation behavior.
+The Windows default C command is `clang.exe`; `CC` overrides it.
+
+Configured tool commands and flags keep Titan's small shell-word grammar:
+whitespace, single/double quotes, and backslash escapes. They do not expand
+environment variables or interpret shell operators. For Windows paths in these
+settings, quoted forward-slash spelling avoids ambiguity: set `CC` to the value
+`"C:/native tools/clang.exe"`, including its double quotes. The first word must name a native `.exe` or
+`.com`; an extensionless name selects `.exe`. Batch/PowerShell wrappers are
+unsupported as implicit tool commands. Bare names use Windows `SearchPathW`
+lookup; explicit paths select that exact native image. A native executable wrapper may precede
+the compiler. Windows command arguments must be valid UTF-8 without line breaks, and the
+initial shell transport has a conservative 8191-byte rendered-command limit.
+Explicit `\\?\` executable paths are unsupported by this transport; use an
+ordinary fully qualified executable path. Filesystem metadata operations retain
+their separate support for extended paths.
+
+Windows remains experimental. Shared-folder change notifications are best
+effort; guest-local folders are the supported watcher test boundary. A successful
+tool invocation alone does not establish that a complete Windows compiler,
+runtime, or shared-folder workflow has passed its platform tests.
+
 ## Where modules are found
+
+The binary-path and Lua relocation examples below describe Linux and macOS.
+Windows retains Lua's upstream `!` meaning (the running executable's directory)
+and uses `!..` for the SDK root; see the [Windows relocation rules](../implementation/windows-build.md#relocation-and-native-library-loading).
 
 * **Source modules** are looked up in the *source tree* — the directory
   given by `--tree`, defaulting to the current directory. In each source root,
@@ -708,7 +754,11 @@ provider from being displaced accidentally by source files in `./titan`.
 Changing `TITAN_PATH` so the installed provider is hidden deliberately selects
 a different module graph.
 
-A binary extension DSO may use that ordering to call bundled libuv directly.
+Windows DLLs that call libuv link the SDK's native dependency import libraries;
+the unresolved-symbol contract below applies to Linux and macOS.
+
+On Linux and macOS, a binary extension DSO may use that ordering to call bundled
+libuv directly.
 Its source must both `import "uv"` and `foreign import "uv.h"`, and its link
 must leave `uv_*` unresolved rather than adding `-luv` or a static archive.
 Titan maps every compiled runtime dependency with
@@ -824,6 +874,10 @@ with `<module>: multiple main functions found (already declared in
 [Functions](functions.md).
 
 ## Running with a stock Lua
+
+This section describes Linux and macOS. Windows modules require the
+[controlled Lua DLL and its SDK](../implementation/windows-build.md#one-controlled-lua-dll-and-its-sdk),
+including the matching exported Lua internals.
 
 Compiled Titan modules support the stock Lua loader; provider loading does
 not require patched `dlopen` flags. Titan's own Lua build separately patches

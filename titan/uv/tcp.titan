@@ -426,10 +426,11 @@ local function tcp_alloc_dispatch(tcp: uv_tcp_t, size: foreign size_t,
   local state = connection_state(tcp)
   local descriptor = pointer as foreign *uv_buf_t
   do
-    local bytes = foreign char.new_array(size as integer)
+    local length: integer = size
+    descriptor.len = length
+    local bytes = foreign char.new_array(length)
     state.buffer = bytes
     descriptor.base = bytes
-    descriptor.len = size
   catch
     -- A direct native callback cannot unwind through libuv. Return the zero
     -- buffer that makes libuv invoke the paired read_cb, preserving the exact

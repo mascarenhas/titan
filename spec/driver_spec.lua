@@ -16,9 +16,555 @@ local types = require "titan-compiler.types"
 local util = require "titan-compiler.util"
 local titan = require "titan"
 
+describe("Windows compiler path integration", function()
+    local platform = require "titan-compiler.platform"
+    local originals
+    before_each(function()
+        originals = {
+            windows = platform.windows,
+            native = platform.native,
+            new_sync = compiler_io.new_sync,
+        }
+        platform.windows = true
+        platform.native = function(name)
+            error("unexpected native call in injected path test: " .. name)
+        end
+    end)
+    after_each(function()
+        platform.windows = originals.windows
+        platform.native = originals.native
+        compiler_io.new_sync = originals.new_sync
+    end)
+
+    local function header_manifest(paths)
+        local modtype = types.Module("header_paths", {}, {})
+        modtype._source = true
+        modtype.source_members = {}
+        modtype.source_type_members = {}
+        local headers = {}
+        for index, path in ipairs(paths) do
+            headers[index] = { kind = "file", path = path, identity = "bytes:header" }
+        end
+        return sourceinterface.serialize({
+            kind = "source", type = modtype, c_header_dependencies = headers,
+        })
+    end
+
+    it("serializes fully qualified Windows header paths without rewriting identities", function()
+        local paths = {
+            "C:/SDK 日本/include/lua.h",
+            [[C:\SDK 日本\include\lua.h]],
+            [[\\server\share\include\lua.h]],
+            [[\\?\C:\SDK\include\lua.h]],
+            "C:/SDK/link/../include/lua.h",
+        }
+        local manifest = assert(header_manifest(paths))
+        for _, path in ipairs(paths) do
+            assert.matches(path, manifest, 1, true)
+        end
+        assert.not_equal(assert(header_manifest({ paths[1] })),
+            assert(header_manifest({ paths[2] })))
+        local duplicate, duplicate_error = header_manifest({ paths[1], paths[1] })
+        assert.is_nil(duplicate)
+        assert.matches("repeat file input", duplicate_error, 1, true)
+        for _, path in ipairs({ "relative.h", "C:relative.h", "/rooted.h",
+                [[\rooted.h]], [[\\server]], [[\\.\C:\device.h]], "C:/bad\0.h" }) do
+            local value, err = header_manifest({ path })
+            assert.is_nil(value)
+            assert.matches("invalid path", err, 1, true)
+        end
+    end)
+
+    it("retains Unix header path spellings and rejects Windows drive paths", function()
+        platform.windows = false
+        local paths = { "/sdk//include/./lua.h", "/sdk/link/../lua.h", "/sdk/lua.h " }
+        local manifest = assert(header_manifest(paths))
+        for _, path in ipairs(paths) do
+            assert.matches(path, manifest, 1, true)
+        end
+        for _, path in ipairs({ "relative.h", "C:/SDK/lua.h", "/bad\0.h" }) do
+            local value, err = header_manifest({ path })
+            assert.is_nil(value)
+            assert.matches("invalid path", err, 1, true)
+        end
+    end)
+
+    local function logical_header_owner()
+        return { io = {
+            cwd = function() return "C:/src/project" end,
+            tmpname = function() return "C:/tmp/ffi-reservation" end,
+            unlink = function() return true end,
+            mkdir = function() return true end,
+            write_file = function() return true end,
+        } }
+    end
+
+    it("constructs Windows generated-header logical origins in their own namespace", function()
+        local cases = {
+            { "C:/src/pkg/../main.titan", "C:/src/main.ffi.h" },
+            { [[C:\src\.\main.titan]], "C:/src/main.ffi.h" },
+            { "../main.titan", "C:/src/main.ffi.h" },
+            { [[\\server\share\dir\..\main.titan]], "//server/share/main.ffi.h" },
+            { [[\\?\C:\src\main.titan]], [[\\?\C:\src\main.ffi.h]] },
+        }
+        local descriptors = {}
+        for index, case in ipairs(cases) do
+            local descriptor = assert(ffiheaders.prepare(logical_header_owner(),
+                "main", {}, case[1]))
+            assert.equal(case[2], descriptor.identity)
+            assert.is_true(ffiheaders.validate_plan(descriptor))
+            descriptors[index] = descriptor
+        end
+        assert.equal(descriptors[1].digest, descriptors[2].digest)
+        assert.equal(descriptors[1].digest, descriptors[3].digest)
+        assert.not_equal(descriptors[1].digest, descriptors[4].digest)
+        for _, identity in ipairs({ "C:main.ffi.h", "/main.ffi.h", [[\main.ffi.h]],
+                "C:/main\0.ffi.h", "C:/main\n.ffi.h" }) do
+            descriptors[1].identity = identity
+            assert.has_error(function() ffiheaders.validate_plan(descriptors[1]) end,
+                "invalid generated FFI identity")
+        end
+    end)
+
+    it("requires the injected owner to resolve drive-relative generated origins", function()
+        local owner = logical_header_owner()
+        local descriptor, err = ffiheaders.prepare(owner, "main", {}, "D:main.titan")
+        assert.is_nil(descriptor)
+        assert.matches("per-drive", err, 1, true)
+        owner.io.absolute = function(_, path)
+            assert.equal("D:main.ffi.h", path)
+            return [[D:\per-drive\main.ffi.h]]
+        end
+        descriptor = assert(ffiheaders.prepare(owner, "main", {}, "D:main.titan"))
+        assert.equal("D:/per-drive/main.ffi.h", descriptor.identity)
+        assert.is_true(ffiheaders.validate_plan(descriptor))
+    end)
+
+    it("extracts the controlled Lua cpath without confusing Titan providers", function()
+        assert.equal("C:/SDK/bin/..", driver.root_from_package_cpath(table.concat({
+            [[C:\SDK\bin\..\lib\titan\0.6\?.dll]],
+            [[C:\Wrong\lib\lua\5.5\?.so]],
+            [[C:\SDK\bin\..\lib\lua\5.5\?.dll]],
+        }, ";")))
+        assert.equal([[\\?\C:\SDK]], driver.root_from_package_cpath(
+            [[\\?\C:\SDK\lib\lua\5.5\?.dll]]))
+        assert.equal("C:/", driver.root_from_package_cpath(
+            [[C:\lib\lua\5.5\?.dll]]))
+        assert.equal([[\\?\C:\]], driver.root_from_package_cpath(
+            [[\\?\C:\lib\lua\5.5\?.dll]]))
+        assert.equal([[\\?\Volume{d0ac8cd8-bd4b-11f1-af3e-fa5e484244a2}\]],
+            driver.root_from_package_cpath(
+                [[\\?\Volume{d0ac8cd8-bd4b-11f1-af3e-fa5e484244a2}\lib\lua\5.5\?.dll]]))
+        assert.is_nil(driver.root_from_package_cpath(
+            [[C:\SDK\bin\?.dll;C:\SDK\lib\lua\5.5\?.dll.debug]]))
+    end)
+
+    it("keeps extended SDK joins and the controlled Lua import library", function()
+        local layout = driver.installed_paths([[\\?\C:\SDK é]])
+        assert.equal([[\\?\C:\SDK é\lib\titan\0.6\?.dll]], layout.lua_cpath)
+        assert.equal([[\\?\C:\SDK é\src\lua-5.5.1]], layout.lua_source)
+        assert.equal([[\\?\C:\SDK é\lib\liblua-5.5.1.dll.a]], layout.liblua)
+        assert.equal([[\\?\C:\SDK é\include]], layout.include)
+    end)
+
+    it("keeps ordinary executable-relative SDK roots in their ordinary namespace", function()
+        local layout = driver.installed_paths([[C:\SDK 日本\bin\..]])
+        assert.equal("C:/SDK 日本", layout.root)
+        assert.equal("C:/SDK 日本/lib/liblua-5.5.1.dll.a", layout.liblua)
+        assert.equal("C:/SDK 日本/lib/titan/0.6/?.dll", layout.lua_cpath)
+    end)
+
+    it("discovers source checkouts through the injected strategy", function()
+        local observed = {}
+        local strategy = {
+            cwd = function() return [[C:\Source Tree\é]] end,
+            stat = function(_, filename)
+                observed[#observed + 1] = filename
+                return { kind = "file" }
+            end,
+        }
+        assert.is_true(driver.source_checkout_from_driver_source(
+            [[@titan-compiler\driver.lua]], nil, strategy))
+        assert.same({
+            "C:/Source Tree/é/titan-runtime/titan.c",
+            "C:/Source Tree/é/Makefile",
+        }, observed)
+    end)
+
+    it("requires injected per-drive resolution without guessing another cwd", function()
+        local strategy = {
+            cwd = function() return "D:/workspace" end,
+            stat = function() return { kind = "file" } end,
+        }
+        local found, err = driver.source_checkout_from_driver_source(
+            [[@C:repo\titan-compiler\driver.lua]], nil, strategy)
+        assert.is_false(found)
+        assert.matches("per-drive", err, 1, true)
+        strategy.absolute = function(_, filename)
+            assert.equal([[C:repo\titan-compiler\driver.lua]], filename)
+            return [[C:\per-drive\repo\titan-compiler\driver.lua]]
+        end
+        assert.is_true(driver.source_checkout_from_driver_source(
+            [[@C:repo\titan-compiler\driver.lua]], nil, strategy))
+    end)
+
+    it("searches DLL containers root-major with extended-safe joins", function()
+        assert.same({ "a.dll", "a/b.dll" }, driver.module_binary_candidates("a.b"))
+        local observed = {}
+        local context = { io = {
+            lstat = function(_, filename)
+                observed[#observed + 1] = filename
+            end,
+        } }
+        assert.is_nil(driver.find_dynamic_interface(
+            [[C:\First;\\?\D:\Second]], "a.b", context))
+        assert.same({
+            "C:/First/a.dll", "C:/First/a/b.dll",
+            [[\\?\D:\Second\a.dll]], [[\\?\D:\Second\a\b.dll]],
+        }, observed)
+        context.io.lstat = function() return nil, "native access denied" end
+        local value, err = driver.find_dynamic_interface("C:/First", "a.b", context)
+        assert.is_nil(value)
+        assert.matches("native access denied", err, 1, true)
+    end)
+
+    it("rejects differently named outputs with the same opaque native identity", function()
+        compiler_io.new_sync = function()
+            return {
+                stat = function()
+                    return { kind = "file", device = "win32-volume:feed",
+                        inode = "win32-file:full-opaque-identifier" }
+                end,
+                realpath = function(_, filename)
+                    return "\\\\?\\" .. filename:gsub("/", "\\")
+                end,
+            }
+        end
+        local okay, err = pcall(driver.compile_modules, {
+            { modname = "one", mod = { compiled = "C:/work/one.o" } },
+            { modname = "two", mod = { compiled = "C:/work/two.o" } },
+        }, 1)
+        assert.is_false(okay)
+        assert.matches("share object output", err, 1, true)
+    end)
+
+    it("resolves existing prefixes before comparing future output aliases", function()
+        compiler_io.new_sync = function()
+            return {
+                stat = function(_, filename)
+                    if filename == "C:/first" or filename == "C:/alias" then
+                        return { kind = "directory" }
+                    end
+                end,
+                realpath = function(_, filename)
+                    assert.is_true(filename == "C:/first" or filename == "C:/alias")
+                    return [[\\?\D:\real-directory]]
+                end,
+            }
+        end
+        local okay, err = pcall(driver.compile_modules, {
+            { modname = "one", mod = { compiled = "C:/first/result.o" } },
+            { modname = "two", mod = { compiled = "C:/alias/result.o" } },
+        }, 1)
+        assert.is_false(okay)
+        assert.matches("share object output", err, 1, true)
+    end)
+
+    it("propagates output metadata failures instead of assuming distinct files", function()
+        compiler_io.new_sync = function()
+            return { stat = function() return nil, "native metadata denied" end }
+        end
+        local okay, err = pcall(driver.compile_modules, {
+            { modname = "one", mod = { compiled = "C:/work/result.o" } },
+        }, 1)
+        assert.is_false(okay)
+        assert.matches("native metadata denied", err, 1, true)
+    end)
+
+    it("stops ancestor creation at the drive root and keeps stage separators", function()
+        local existing = { ["C:/"] = true }
+        local created = {}
+        compiler_io.new_sync = function()
+            return {
+                stat = function(_, filename)
+                    if existing[filename] then return { kind = "directory" } end
+                end,
+                mkdir = function(_, filename)
+                    created[#created + 1] = filename
+                    existing[filename] = true
+                    return true
+                end,
+            }
+        end
+        platform.native = function(name, filename, directory)
+            assert.equal("_win_reserve_sibling", name)
+            assert.equal([[C:\new\child\provider.dll.stage]], filename)
+            assert.is_true(directory)
+            return [[\\?\C:\new\child\.stage]]
+        end
+        local staged = assert(driver.staged_library_output(
+            [[C:\new\child\provider.dll]]))
+        assert.equal([[\\?\C:\new\child\.stage\provider.dll]], staged)
+        assert.same({ "C:/new", "C:/new/child" }, created)
+    end)
+end)
+
 local function empty_layouts(name)
     return (assert(require("titan-compiler.nominallayout").encode(name, {})))
 end
+
+describe("Windows launcher filenames", function()
+    it("uses the logical module and keeps overrides independent of the provider", function()
+        assert.equal("app.exe", driver.windows_launcher_name("app"))
+        assert.equal("app.main.exe", driver.windows_launcher_name("app.main"))
+        assert.equal("custom.exe", driver.windows_launcher_name("app.main", "custom"))
+        assert.equal("custom.EXE", driver.windows_launcher_name("app.main", "custom.EXE"))
+        local original = assert(driver.windows_program_paths("app.main"))
+        local renamed = assert(driver.windows_program_paths("app.main", "renamed"))
+        assert.equal("bin/app.main.exe", original.executable)
+        assert.equal("bin/renamed.exe", renamed.executable)
+        assert.equal(original.provider, renamed.provider)
+        assert.equal("lib/titan/0.6/app/main.dll", original.provider)
+        assert.equal("app/main.dll", original.relative_provider)
+        local suite = assert(driver.windows_program_paths("titan.test_runner", nil, "app.tests"))
+        assert.equal("bin/app.tests.exe", suite.executable)
+        assert.equal("app/tests.dll", suite.relative_provider)
+    end)
+
+    it("rejects path syntax, reserved names, controls and ambiguous endings", function()
+        for _, name in ipairs({ "", ".", "..", "a/b", "a\\b", "C:app", "app:stream",
+            'quote"name', "a*b", "a?b", "a|b", "<app>", "app.", "app ",
+            "con", "NUL.txt", "COM1.exe", "LPT9", "COM¹.exe", "LPT³", "CONIN$",
+            "CONOUT$", "CON .exe", "app" .. string.char(0), "app" .. string.char(31),
+            "app" .. string.char(127), string.char(255) }) do
+            local value, err = driver.windows_launcher_name("app", name)
+            assert.is_nil(value, name)
+            assert.matches("--launcher-name", err, 1, true)
+        end
+    end)
+
+    it("accepts Unicode names and bounds UTF-16 component length", function()
+        assert.equal("aplicação ü.exe", driver.windows_launcher_name("app", "aplicação ü"))
+        assert.equal("COM10.exe", driver.windows_launcher_name("app", "COM10"))
+        assert.truthy(driver.windows_launcher_name("app", string.rep("x", 251)))
+        assert.is_nil(driver.windows_launcher_name("app", string.rep("x", 252)))
+        assert.truthy(driver.windows_launcher_name("app", string.rep("😀", 125)))
+        assert.is_nil(driver.windows_launcher_name("app", string.rep("😀", 126)))
+    end)
+
+    it("rejects a missing DLL inventory before replacing an existing provider", function()
+        local platform = require "titan-compiler.platform"
+        local filename = os.tmpname()
+        assert(util.set_file_contents(filename, "existing provider"))
+        local previous = platform.windows
+        platform.windows = true
+        local called, ok, err = pcall(driver.compile_library_output, filename, {})
+        platform.windows = previous
+        local contents = util.get_file_contents(filename)
+        os.remove(filename)
+        assert.truthy(called)
+        assert.is_nil(ok)
+        assert.matches("logical module inventory", err, 1, true)
+        assert.equal("existing provider", contents)
+    end)
+
+    it("validates selected archive metadata and support before emitting a launcher", function()
+        local platform = require "titan-compiler.platform"
+        local previous_sync = compiler_io.new_sync
+        local previous_windows, previous_cwd = platform.windows, lfs.currentdir()
+        local directory = os.tmpname()
+        os.remove(directory)
+        assert(lfs.mkdir(directory))
+        local saved, calls = {}, {}
+        for _, name in ipairs({ "compile_library_output", "validate_library_image",
+            "validate_library_image_fresh", "validate_titan_support" }) do
+            saved[name] = driver[name]
+        end
+        local entries = { archive = { abi = "2", types = "embedded", layouts = "layout" } }
+        local names = { "archive" }
+        local fail_metadata = true
+        driver.compile_library_output = function() return true end
+        driver.validate_library_image = function() return true end
+        driver.validate_library_image_fresh = function(_, expected, required)
+            assert.equal(entries, expected)
+            assert.equal(names, required)
+            calls[#calls + 1] = "metadata"
+            if fail_metadata then return nil, "archive metadata mismatch" end
+            return true
+        end
+        driver.validate_titan_support = function()
+            calls[#calls + 1] = "support"
+            return nil, "invalid native support"
+        end
+        local ran, failure = pcall(function()
+            assert(lfs.chdir(directory))
+            compiler_io.new_sync = function()
+                return { stat = function() return { kind = "directory" } end }
+            end
+            platform.windows = true
+            local options = { module_names = { "app", "archive" },
+                archive_entries = entries, archive_names = names,
+                validate_titan_support = true }
+            local ok, err = driver.compile_program("app", {}, nil, false,
+                nil, nil, nil, "entrypoint.c", nil, options)
+            assert.is_nil(ok)
+            assert.equal("archive metadata mismatch", err)
+            assert.same({ "metadata" }, calls)
+            fail_metadata = false
+            ok, err = driver.compile_program("app", {}, nil, false,
+                nil, nil, nil, "entrypoint.c", nil, options)
+            assert.is_nil(ok)
+            assert.equal("invalid native support", err)
+            assert.same({ "metadata", "metadata", "support" }, calls)
+            assert.is_nil(lfs.attributes("entrypoint.c"))
+            assert.is_nil(lfs.attributes("bin/app.exe"))
+        end)
+        platform.windows = previous_windows
+        compiler_io.new_sync = previous_sync
+        assert(lfs.chdir(previous_cwd))
+        for name, fn in pairs(saved) do driver[name] = fn end
+        driver.remove_path(directory)
+        assert.truthy(ran, failure)
+    end)
+end)
+
+describe("Windows native ABI bootstrap", function()
+    local platform = require "titan-compiler.platform"
+    local previous_windows, previous_loadlib, previous_abivalue
+    local events, native_value, native_stage, claimed
+    local serialized = types.serialize(types.Module("winabi", {}, {}))
+
+    before_each(function()
+        previous_windows = platform.windows
+        previous_loadlib, previous_abivalue = titan._loadlib, titan._abivalue
+        platform.windows = true
+        events, native_value, native_stage, claimed = {}, driver.TITAN_ABI_VERSION, nil, true
+        titan._abivalue = function(path, symbol)
+            assert.equal("provider.dll", path)
+            assert.equal("winabi_abi_value", symbol)
+            events[#events + 1] = "native query"
+            return native_value, "native query diagnostic", native_stage
+        end
+        titan._loadlib = function(_, symbol)
+            events[#events + 1] = "resolve " .. symbol
+            if claimed and symbol == "winabi_abi" then
+                return function()
+                    events[#events + 1] = "Lua ABI"
+                    return driver.TITAN_ABI_VERSION
+                end
+            elseif claimed and symbol == "winabi_types" then
+                return function()
+                    events[#events + 1] = "Lua types"
+                    return serialized
+                end
+            end
+            return nil, "missing export", "init"
+        end
+    end)
+
+    after_each(function()
+        platform.windows = previous_windows
+        titan._loadlib, titan._abivalue = previous_loadlib, previous_abivalue
+    end)
+
+    local function probe()
+        return driver.probe_compiled_interface("winabi", "provider.dll",
+            { analysis_only = true })
+    end
+
+    it("checks the plain-C value before entering any provider Lua function", function()
+        local status, module = probe()
+        assert.equal("valid", status)
+        assert.equal(serialized, types.serialize(module))
+        assert.same({ "native query", "resolve winabi_abi", "resolve winabi_types",
+            "Lua ABI", "Lua types" }, events)
+    end)
+
+    it("rejects a native ABI mismatch without resolving Lua entries", function()
+        native_value = "999"
+        local status, err = probe()
+        assert.equal("error", status)
+        assert.matches("ABI mismatch", err, 1, true)
+        assert.same({ "native query" }, events)
+    end)
+
+    it("rejects a legacy-only claimed module without invoking its Lua entries", function()
+        native_value, native_stage = nil, "init"
+        local status, err = probe()
+        assert.equal("error", status)
+        assert.matches("missing native ABI query 'winabi_abi_value'", err, 1, true)
+        assert.same({ "native query", "resolve winabi_abi", "resolve winabi_types" }, events)
+    end)
+
+    it("preserves a clean nonclaim when all logical metadata exports are absent", function()
+        native_value, native_stage, claimed = nil, "init", false
+        assert.equal("nonclaim", probe())
+        assert.same({ "native query", "resolve winabi_abi", "resolve winabi_types" }, events)
+    end)
+
+    it("treats a native query alone as a claimed incomplete module", function()
+        claimed = false
+        local status, err = probe()
+        assert.equal("error", status)
+        assert.matches("missing metadata symbol 'winabi_abi'", err, 1, true)
+    end)
+
+    for _, stage in ipairs({ "open", "abi" }) do
+        it("keeps a native " .. stage .. " failure terminal", function()
+            native_value, native_stage, claimed = nil, stage, false
+            local status, err = probe()
+            assert.equal("error", status)
+            assert.matches("native query diagnostic", err, 1, true)
+            assert.same({ "native query" }, events)
+        end)
+    end
+
+    it("rejects a malformed native value before entering Lua metadata", function()
+        native_value = false
+        local status, err = probe()
+        assert.equal("error", status)
+        assert.matches("must return a string", err, 1, true)
+        assert.same({ "native query" }, events)
+    end)
+
+    it("retains Unix support for ABI-2 providers without a native query", function()
+        platform.windows = false
+        titan._abivalue = function() error("Unix must retain the Lua ABI protocol") end
+        assert.equal("valid", probe())
+        assert.same({ "resolve winabi_abi", "resolve winabi_types",
+            "Lua ABI", "Lua types" }, events)
+    end)
+
+    it("passes logical identity to Windows shims when a replacement provider resolves", function()
+        local previous_sync = compiler_io.new_sync
+        compiler_io.new_sync = function()
+            return { cwd = function() return "C:/shim-fixture" end,
+                stat = function() return { kind = "directory" } end }
+        end
+        local called, plans, plan_error = pcall(driver.plan_module_shims, "winabi", { "winabi" })
+        compiler_io.new_sync = previous_sync
+        assert.truthy(called, plans)
+        assert.truthy(plans, plan_error)
+        local canonical = {}
+        local environment = {
+            error = error,
+            package = { cpath = "?.dll", searchpath = function()
+                return "replacement.dll"
+            end },
+            require = function(name)
+                assert.equal("titan", name)
+                return { _loadlibglobal = function(path, entry, module)
+                    assert.equal("replacement.dll", path)
+                    assert.equal("luaopen_winabi", entry)
+                    assert.equal("winabi", module)
+                    return function() return canonical end
+                end }
+            end,
+        }
+        local shim = assert(load(plans[1].contents, "Windows shim", "t", environment))
+        assert.equal(canonical, shim())
+    end)
+end)
 
 local function write_file(path, contents)
     local previous = lfs.attributes(path, "modification")
@@ -1229,6 +1775,7 @@ describe("loader resolver ownership", function()
             ["titan-compiler.coder"] = {},
             ["titan-compiler.parser"] = {},
             ["titan-compiler.driver"] = fake_driver,
+            ["titan-compiler.platform"] = { windows = false },
             ["titan-compiler.test_runner"] = {},
             ["titan-compiler.util"] = {},
         }
@@ -7906,5 +8453,122 @@ end
             "interface already used in this compilation", errors[1])
         assert.equal("source", imported.cached.kind)
         assert.is_true(driver.close_tableloader(loader))
+    end)
+end)
+
+describe("Windows serial driver dispatch", function()
+    local platform = require "titan-compiler.platform"
+    local previous
+
+    before_each(function()
+        previous = {
+            windows = platform.windows,
+            native = platform.native,
+            uname = driver.UNAME,
+            darwin = driver.IS_DARWIN,
+            cflags = driver.CFLAGS,
+            compile_module = driver.compile_module,
+            new_sync = compiler_io.new_sync,
+        }
+        platform.windows = true
+    end)
+
+    after_each(function()
+        platform.windows = previous.windows
+        platform.native = previous.native
+        driver.UNAME = previous.uname
+        driver.IS_DARWIN = previous.darwin
+        driver.CFLAGS = previous.cflags
+        driver.compile_module = previous.compile_module
+        compiler_io.new_sync = previous.new_sync
+    end)
+
+    it("initializes without requiring uname or native support", function()
+        local strategy = compiler_io.new_sync()
+        function strategy:run() error("Windows attempted uname") end
+        platform.native = function() error("eager native support") end
+        -- Platform dispatch owns no layout discovery. A real Linux prefix is
+        -- not a valid synthetic Windows installation for this unit boundary.
+        local context = { io = strategy }
+        local ok, uname, darwin = driver.initialize_platform(context)
+        assert.is_true(ok)
+        assert.equal("Windows", uname)
+        assert.is_false(darwin)
+        assert.is_true(context._platform_initialized)
+        assert.equal(strategy, context.io)
+    end)
+
+    it("uses the serial per-module path even when more jobs were requested", function()
+        local calls, requests = {}, {}
+        compiler_io.new_sync = function()
+            return {
+                cwd = function() return "C:/project" end,
+                stat = function() return nil end,
+            }
+        end
+        for _, name in ipairs({ "first", "failed", "last" }) do
+            requests[#requests + 1] = {
+                modname = "windows_serial." .. name,
+                mod = { filename = "C:/project/windows_serial/" .. name .. ".titan", ast = {} },
+                static_deps = {},
+            }
+        end
+        driver.compile_module = function(name)
+            calls[#calls + 1] = name
+            if name == "windows_serial.failed" then return nil, "compile rejected" end
+            return true, nil, name .. ".o"
+        end
+        local results = driver.compile_modules(requests, 4, false)
+        assert.same({ "windows_serial.first", "windows_serial.failed",
+            "windows_serial.last" }, calls)
+        assert.is_true(results[1].ok)
+        assert.equal("compile rejected", results[2].err)
+        assert.is_true(results[3].ok)
+    end)
+
+    it("retains injected sibling reservation ownership", function()
+        local calls = {}
+        local strategy = {
+            tmpname = function()
+                calls[#calls + 1] = "reserve"
+                return "C:\\temporary\\owned-reservation"
+            end,
+            unlink = function(_, path, finish_cleanup)
+                assert.equal("C:\\temporary\\owned-reservation", path)
+                assert.is_true(finish_cleanup)
+                calls[#calls + 1] = "release"
+                return true
+            end,
+        }
+        platform.native = function() error("injected I/O bypassed") end
+        assert.equal("C:/project/module.c.tmp.owned-reservation",
+            driver.sibling_temporary_path("C:/project/module.c", strategy))
+        assert.same({ "reserve", "release" }, calls)
+    end)
+
+    it("returns reservation failures without changing existing shim contents", function()
+        local path = assert(os.tmpname())
+        local file = assert(io.open(path, "wb"))
+        assert(file:write("previous shim")); assert(file:close())
+        compiler_io.new_sync = function()
+            return { stat = function() return { kind = "directory" } end }
+        end
+        platform.native = function(name, destination)
+            assert.equal("_win_reserve_sibling", name)
+            assert.equal(path, destination)
+            return nil, "reservation denied"
+        end
+        local completed, failure = pcall(function()
+            local ok, err = driver.write_module_shims({
+                { filename = path, contents = "replacement shim" },
+            })
+            assert.is_nil(ok)
+            assert.equal("reservation denied", err)
+            local old = assert(io.open(path, "rb"))
+            assert.equal("previous shim", old:read("*a"))
+            assert(old:close())
+        end)
+        assert(os.remove(path))
+        assert.is_true(completed, failure)
     end)
 end)

@@ -21,6 +21,17 @@
 */
 #include "titan/ffi.h"
 
+/* Runtime helpers are linked into each Titan provider. Keep their declarations
+** independent of Lua's internal API import/export policy: a shared Lua DLL may
+** export Lua internals, but does not own these helpers. Preserve their existing
+** ELF/Mach-O visibility and use ordinary extern declarations elsewhere. */
+#if defined(__GNUC__) && ((__GNUC__*100 + __GNUC_MINOR__) >= 302) && \
+    (defined(__ELF__) || defined(__MACH__))
+#define TITAN_RUNTIME_FUNC __attribute__((visibility("internal"))) extern
+#else
+#define TITAN_RUNTIME_FUNC extern
+#endif
+
 /*
 ** ===========================================================================
 ** VENDORED FROM Lua 5.5.1 src/ldo.c lines 61-109 (keep VERBATIM; re-sync on
@@ -277,9 +288,9 @@ inline static TString *_float2str(lua_State *L, lua_Number f) {
   return luaS_newlstr(L, _cvtbuff, len);
 }
 
-LUAI_FUNC void *loadlib(lua_State *L, const char *file);
-LUAI_FUNC void *loadsym(lua_State *L, void *lib, const char *sym);
-LUAI_FUNC void *loadglobalsym(lua_State *L, const char *sym);
+TITAN_RUNTIME_FUNC void *loadlib(lua_State *L, const char *file);
+TITAN_RUNTIME_FUNC void *loadsym(lua_State *L, void *lib, const char *sym);
+TITAN_RUNTIME_FUNC void *loadglobalsym(lua_State *L, const char *sym);
 /* Every generated module payload begins with this header. The resolver belongs
 ** to the image which created the canonical module userdata, including a module
 ** linked directly into an executable rather than opened as a shared library. */
@@ -296,27 +307,27 @@ typedef struct TitanModuleProvider {
 /* Prefer the initialized logical module without opening another image. A NULL
 ** file permits only that canonical lookup, as used for transitive owners. All
 ** successful lookups and checks preserve the Lua stack. */
-LUAI_FUNC TitanModuleProvider titan_module_provider(lua_State *L,
+TITAN_RUNTIME_FUNC TitanModuleProvider titan_module_provider(lua_State *L,
     const char *module, const char *file);
-LUAI_FUNC void *titan_module_symbol(lua_State *L,
+TITAN_RUNTIME_FUNC void *titan_module_symbol(lua_State *L,
     TitanModuleProvider provider, const char *sym);
-LUAI_FUNC void titan_check_module_abi(lua_State *L,
+TITAN_RUNTIME_FUNC void titan_check_module_abi(lua_State *L,
     TitanModuleProvider provider, const char *sym, const char *file);
-LUAI_FUNC void titan_check_module_compatibility(lua_State *L,
+TITAN_RUNTIME_FUNC void titan_check_module_compatibility(lua_State *L,
     TitanModuleProvider provider, const char *sym, const char *file,
     const char *verifier, size_t verifier_size);
-LUAI_FUNC void titan_check_abi(lua_State *L, void *lib, const char *sym,
+TITAN_RUNTIME_FUNC void titan_check_abi(lua_State *L, void *lib, const char *sym,
                                const char *file);
-LUAI_FUNC void titan_check_types(lua_State *L, void *lib, const char *sym,
+TITAN_RUNTIME_FUNC void titan_check_types(lua_State *L, void *lib, const char *sym,
                                  const char *file, const char *expected);
-LUAI_FUNC void titan_check_compatibility(lua_State *L, void *lib,
+TITAN_RUNTIME_FUNC void titan_check_compatibility(lua_State *L, void *lib,
     const char *sym, const char *file, const char *verifier, size_t verifier_size);
-LUAI_FUNC void titan_invalidate_backtrace_state(lua_State *L);
-LUAI_FUNC void titan_init_paths(lua_State *L);
+TITAN_RUNTIME_FUNC void titan_invalidate_backtrace_state(lua_State *L);
+TITAN_RUNTIME_FUNC void titan_init_paths(lua_State *L);
 /* Publish/recover one type-specific canonical pointer. The candidate is an
 ** opaque identity key and is never dereferenced. The helper preserves the Lua
 ** stack on success. */
-LUAI_FUNC const char *titan_publish_function_type_tag(lua_State *L,
+TITAN_RUNTIME_FUNC const char *titan_publish_function_type_tag(lua_State *L,
                                                       const char *registry_key,
                                                       const char *candidate);
 
@@ -327,12 +338,12 @@ LUAI_FUNC const char *titan_publish_function_type_tag(lua_State *L,
 ** length in lenhint. Mutable proxy uservalue 2 carries the generated
 ** type-directed Lua writer CClosure; const proxy uservalue 2 is nil.
 */
-LUAI_FUNC void titan_array_metatables(lua_State *L, Table **mutable_out,
+TITAN_RUNTIME_FUNC void titan_array_metatables(lua_State *L, Table **mutable_out,
                                       Table **const_out);
 /* Read the already-initialized canonical pair without changing L->top. */
-LUAI_FUNC void titan_array_cached_metatables(lua_State *L, Table **mutable_out,
+TITAN_RUNTIME_FUNC void titan_array_cached_metatables(lua_State *L, Table **mutable_out,
                                              Table **const_out);
-LUAI_FUNC Table *titan_array_metatable(lua_State *L);
+TITAN_RUNTIME_FUNC Table *titan_array_metatable(lua_State *L);
 static l_inline Table *titan_const_array_metatable(lua_State *L) {
   Table *mutable_metatable;
   Table *const_metatable;
@@ -415,7 +426,7 @@ static l_inline Table *titan_array_require_backing(const TValue *value) {
   return hvalue(&uvalue(value)->uv[0].uv);
 }
 
-LUAI_FUNC Table *titan_array_new_impl(lua_State *L, Table *metatable,
+TITAN_RUNTIME_FUNC Table *titan_array_new_impl(lua_State *L, Table *metatable,
                                       lua_Unsigned capacity,
                                       const TValue *writer, int mutable,
                                       StkId result);
@@ -432,18 +443,18 @@ static l_inline Table *titan_const_array_new(lua_State *L, Table *metatable,
   return titan_array_new_impl(L, metatable, capacity, NULL, 0, result);
 }
 
-LUAI_FUNC Table *titan_array_shallow_copy(lua_State *L, Table *source,
+TITAN_RUNTIME_FUNC Table *titan_array_shallow_copy(lua_State *L, Table *source,
                                           Table *mutable_metatable,
                                           Table *const_metatable, StkId result);
-LUAI_FUNC Table *titan_array_freeze(lua_State *L, Table *backing,
+TITAN_RUNTIME_FUNC Table *titan_array_freeze(lua_State *L, Table *backing,
                                     Table *mutable_metatable,
                                     Table *const_metatable);
-LUAI_FUNC unsigned titan_array_growth(lua_State *L, lua_Unsigned index);
-LUAI_FUNC void titan_array_resize(lua_State *L, Table *backing,
+TITAN_RUNTIME_FUNC unsigned titan_array_growth(lua_State *L, lua_Unsigned index);
+TITAN_RUNTIME_FUNC void titan_array_resize(lua_State *L, Table *backing,
                                   lua_Unsigned capacity);
-LUAI_FUNC lu_byte titan_array_get(Table *backing, lua_Integer index,
+TITAN_RUNTIME_FUNC lu_byte titan_array_get(Table *backing, lua_Integer index,
                                   TValue *result);
-LUAI_FUNC void titan_array_set_stack(lua_State *L, Table *backing,
+TITAN_RUNTIME_FUNC void titan_array_set_stack(lua_State *L, Table *backing,
                                      lua_Integer index, int value_index);
 
 static l_inline Table *titan_ensure_metatables_table(lua_State *L) {

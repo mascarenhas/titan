@@ -4,9 +4,8 @@ foreign import "lauxlib.h"
 foreign import "titan/ffi.h"
 foreign import "string.h"
 foreign import "unistd.h"
-foreign import "signal.h"
+foreign import "signal_platform.h"
 foreign import "errno.h"
-foreign type Sigaction = sigaction
 local coroutine = import "coroutine"
 
 -- Exact native entries carried by the Titan closures stored in callback-owner
@@ -78,17 +77,7 @@ end
 -- terminate the process first. Preserve inherited application policy and
 -- change only the default Unix disposition.
 local function ignore_sigpipe_if_default(): integer
-  local current = foreign Sigaction.new()
-  if ffi.sigaction(ffi.SIGPIPE, nil, current) ~= 0 then
-    return ffi.uv_translate_sys_error(ffi.errno)
-  end
-  if current.sa_handler ~= ffi.SIG_DFL then return 0 end
-
-  current.sa_handler = ffi.SIG_IGN
-  if ffi.sigaction(ffi.SIGPIPE, current, nil) ~= 0 then
-    return ffi.uv_translate_sys_error(ffi.errno)
-  end
-  return 0
+  return ffi.titan_uv_ignore_sigpipe_if_default()
 end
 
 do

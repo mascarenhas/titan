@@ -5,6 +5,7 @@ local typed = require("c-parser.typed")
 local c99 = require("c-parser.c99")
 local sha256 = require("titan-compiler.sha256")
 local compiler_io = require("titan-compiler.io")
+local platform = require("titan-compiler.platform")
 local cacheadapter = require("titan-compiler.cacheadapter")
 local version = require "titan-compiler.version"
 local parse_contents
@@ -17,11 +18,17 @@ local default_io = compiler_io.new_sync()
 local SEP = package.config:sub(1,1)
 
 local function path_join(directory, name)
+    if platform.windows then return assert(platform.join(directory, name)) end
     if directory:sub(-1) == SEP then return directory .. name end
     return directory .. SEP .. name
 end
 
-function cpp.absolute_lookup_path(path, cwd)
+function cpp.absolute_lookup_path(path, cwd, strategy)
+    if platform.windows then
+        -- Preserve authored dot components and physical lookup spelling. Only
+        -- the native/injected filesystem determines the observed file ID.
+        return assert(platform.absolute(path, cwd, strategy or default_io))
+    end
     if path:sub(1, 1) ~= SEP then path = path_join(cwd, path) end
     -- Remove only standalone '.' components. Preserve separator runs and,
     -- critically, every '..' and symbolic-link component: in
@@ -604,7 +611,8 @@ local function normalize_toolchain(options)
     end
 
     local compiler, err = normalize_argv(
-        options.compiler or os.getenv("CC") or "cc", "compiler", true)
+        options.compiler or os.getenv("CC") or
+            (platform.windows and "clang.exe" or "cc"), "compiler", true)
     if not compiler then
         return nil, err
     elseif #compiler == 0 then
@@ -911,7 +919,8 @@ end
 
 local function probe_include_paths(config)
     local argv = config_argv(config)
-    append_argv(argv, { "-E", "-v", "-x", "c", "/dev/null", "-o", "/dev/null" })
+    local null = platform.windows and "NUL" or "/dev/null"
+    append_argv(argv, { "-E", "-v", "-x", "c", null, "-o", null })
     local output, err = run_command(argv, true, config.io)
     if not output then
         return nil, "failed probing C include search: " .. err
@@ -919,7 +928,8 @@ local function probe_include_paths(config)
 
     local paths = { quote = {}, system = {} }
     local mode
-    for line in (output .. "\n"):gmatch("(.-)\n") do
+    -- Native Windows compilers emit CRLF; the CR is not part of an include path.
+    for line in (output .. "\n"):gmatch("(.-)\r?\n") do
         if line:find([[#include "..." search starts here]], 1, true) then
             mode = "quote"
         elseif line:find([[#include <...> search starts here]], 1, true) then
@@ -976,7 +986,8 @@ local function probe_macro_definitions(config, source)
 end
 
 local function probe_default_defines(config)
-    return probe_macro_definitions(config, "/dev/null")
+    return probe_macro_definitions(config,
+        platform.windows and "NUL" or "/dev/null")
 end
 
 local function base_probe(config)
@@ -1006,20 +1017,20 @@ local function truncate_array(values, length)
     for index = #values, length + 1, -1 do values[index] = nil end
 end
 
-local function forced_header_candidates(operand, cwd, incdirs)
-    if operand:sub(1, 1) == SEP then
-        return { cpp.absolute_lookup_path(operand, cwd) }
+local function forced_header_candidates(operand, cwd, incdirs, strategy)
+    if platform.is_absolute(operand) then
+        return { cpp.absolute_lookup_path(operand, cwd, strategy) }
     end
     local candidates = {
-        cpp.absolute_lookup_path(operand, cwd),
+        cpp.absolute_lookup_path(operand, cwd, strategy),
     }
     for _, directory in ipairs(incdirs.quote or {}) do
         candidates[#candidates + 1] =
-            cpp.absolute_lookup_path(path_join(directory, operand), cwd)
+            cpp.absolute_lookup_path(path_join(directory, operand), cwd, strategy)
     end
     for _, directory in ipairs(incdirs.system or {}) do
         candidates[#candidates + 1] =
-            cpp.absolute_lookup_path(path_join(directory, operand), cwd)
+            cpp.absolute_lookup_path(path_join(directory, operand), cwd, strategy)
     end
     return candidates
 end
@@ -1044,7 +1055,7 @@ local function scan_forced_headers(forced, incdirs, base_defines, cwd,
     typed.set_type(ctx, "Ctx")
 
     ctx.header_dependency_observer = function(path, contents, read_state)
-        path = cpp.absolute_lookup_path(path, cwd)
+        path = cpp.absolute_lookup_path(path, cwd, strategy)
         local identity, observation = cpp.header_file_identity(contents, path, strategy, read_state)
         append_manifest(manifest, "file", path, identity)
         local previous = dependency_identities[path]
@@ -1060,7 +1071,7 @@ local function scan_forced_headers(forced, incdirs, base_defines, cwd,
         return true
     end
     ctx.include_search_observer = function(path, openable)
-        path = cpp.absolute_lookup_path(path, cwd)
+        path = cpp.absolute_lookup_path(path, cwd, strategy)
         local identity = cpp.header_search_identity(path, openable, strategy)
         append_manifest(manifest, "search", path, identity)
         local previous = search_identities[path]
@@ -1082,7 +1093,7 @@ local function scan_forced_headers(forced, incdirs, base_defines, cwd,
         local selected_contents, selected_read_state
         local open_error
         for _, candidate in ipairs(
-                forced_header_candidates(item.operand, cwd, incdirs)) do
+                forced_header_candidates(item.operand, cwd, incdirs, strategy)) do
             local contents, err, read_state, changed = read_header_contents(candidate, strategy)
             if changed then return nil, err end
             local observed, observe_err =
@@ -1693,7 +1704,7 @@ cpp.tokenize = typed("string -> table", function(line)
 end)
 
 local function find_file(ctx, filename, mode, is_next)
-    if filename:sub(1, 1) == SEP then
+    if platform.is_absolute(filename) then
         local contents, err, read_state, changed = read_header_contents(filename, ctx.io)
         if changed then return nil, nil, err, true end
         if contents then return filename, contents, nil, nil, read_state end
@@ -1721,7 +1732,7 @@ local function find_file(ctx, filename, mode, is_next)
         table.remove(paths, 1)
     end
     for _, path in ipairs(paths) do
-        local pathname = path..SEP..filename
+        local pathname = platform.windows and path_join(path, filename) or path..SEP..filename
         local contents, err, read_state, changed = read_header_contents(pathname, ctx.io)
         if changed then return nil, nil, err, true end
         if ctx.include_search_observer then
@@ -2364,7 +2375,7 @@ local function paste_token(linelist, cur, lhs, rhs)
     return parsed[1], token_raw_spelling(parsed, 1)
 end
 
-local replace_args = typed("Ctx, {string}, table, LineList, number -> ()", function(ctx, tokens, args, linelist, cur)
+local replace_args = typed("Ctx, {string}, table, LineList, number, table -> ()", function(ctx, tokens, args, linelist, cur, disabled)
     -- C macro arguments have two simultaneous representations. `#` and `##`
     -- consume the raw preprocessing tokens, while an ordinary occurrence
     -- consumes an independently prescanned copy. Never expand the shared raw
@@ -2374,7 +2385,7 @@ local replace_args = typed("Ctx, {string}, table, LineList, number -> ()", funct
         local expanded = expanded_args[name]
         if not expanded then
             expanded = array_copy(args[name])
-            macro_expand(ctx, expanded, linelist, cur, false)
+            macro_expand(ctx, expanded, linelist, cur, false, disabled)
             expanded_args[name] = expanded
         end
         return expanded
@@ -2456,9 +2467,8 @@ local replace_args = typed("Ctx, {string}, table, LineList, number -> ()", funct
     table_replace_n_with(tokens, 1, #tokens, replacement)
 end)
 
-macro_expand = typed("Ctx, {string}, LineList, number, boolean -> ()", function(ctx, tokens, linelist, cur, expr_mode)
+macro_expand = typed("Ctx, {string}, LineList, number, boolean, table? -> ()", function(ctx, tokens, linelist, cur, expr_mode, inherited_disabled)
     local i = 1
-    -- TODO propagate noloop into replace_args. recurse into macro_expand storing a proper offset internally.
     local noloop = {}
     while true do
         ::continue::
@@ -2477,7 +2487,8 @@ macro_expand = typed("Ctx, {string}, LineList, number, boolean -> ()", function(
             end
         end
         local define = ctx.defines[token]
-        if define and valid_noloop(noloop, token, i) then
+        if define and not (inherited_disabled and inherited_disabled[token])
+           and valid_noloop(noloop, token, i) then
             debug(token, define)
             local repl = define.repl
             if define.args then
@@ -2507,7 +2518,16 @@ macro_expand = typed("Ctx, {string}, LineList, number, boolean -> ()", function(
                         named_args["__VA_ARGS__"] = varargs
                     end
                     local expansion = array_copy(repl)
-                    replace_args(ctx, expansion, named_args, linelist, cur)
+                    -- Argument prescan inherits only guards covering this
+                    -- entire invocation, not an alias followed by caller-owned
+                    -- arguments. The current function is disabled
+                    -- after prescan, so nested F(F(1)) still expands normally.
+                    local disabled = {}
+                    for name in pairs(inherited_disabled or {}) do disabled[name] = true end
+                    for name, last in pairs(noloop) do
+                        if last >= j then disabled[name] = true end
+                    end
+                    replace_args(ctx, expansion, named_args, linelist, cur, disabled)
                     local nexpansion = #expansion
                     local n = j - i + 1
                     if nexpansion == 0 then
@@ -2531,6 +2551,7 @@ macro_expand = typed("Ctx, {string}, LineList, number, boolean -> ()", function(
                     noloop[token] = math.max(noloop[token] or 0, i)
                 else
                     table_replace_n_with(tokens, i, 1, define)
+                    shift_noloop(noloop, ndefine - 1, i)
                     mark_noloop(noloop, token, i + ndefine - 1)
                 end
             end
@@ -2558,7 +2579,8 @@ parse_contents = function(filename, contents, ctx, read_state)
     -- replace the earlier state rather than accumulate forever.
     ctx.macro_changes = ctx.macro_changes or {}
 
-    local current_dir = filename:gsub("/[^/]*$", "")
+    local current_dir = platform.windows and (platform.parent(filename) or ".")
+        or filename:gsub("/[^/]*$", "")
     if current_dir == filename then current_dir = "." end
     table.insert(ctx.current_dir, current_dir)
 
@@ -2591,7 +2613,7 @@ parse_contents = function(filename, contents, ctx, read_state)
         end
 
         if tk.exp then
-            macro_expand(ctx, tk.exp, linelist, cur, true)
+            macro_expand(ctx, tk.exp, linelist, cur, true, nil)
         end
 
         if ifmode[#ifmode] == true then
@@ -2650,7 +2672,7 @@ parse_contents = function(filename, contents, ctx, read_state)
                     return nil, name .. ":" .. include_err
                 end
             else
-                macro_expand(ctx, tk, linelist, cur, false)
+                macro_expand(ctx, tk, linelist, cur, false, nil)
                 table.insert(ctx.output, table.concat(tk, " "))
                 ctx.output_origins[#ctx.output] = {
                     file = filename,
@@ -2706,7 +2728,8 @@ cpp.parse_file = typed(
         ctx.io = ctx.io or default_io
 
         local contents, read_state
-        if not fd and not filename:match("^/") then
+        if platform.windows then filename = assert(platform.path.separators(filename)) end
+        if not fd and not platform.is_absolute(filename) then
             local found_name, found_contents, find_error, observer_failed, found_read_state =
                 find_file(ctx, filename, "system")
             if observer_failed then return nil, find_error end
@@ -2735,7 +2758,7 @@ cpp.expand_macro = typed("string, table -> string", function(macro, define_set)
     }, { __index = error, __newindex = error }))
     local tokens = { macro }
     local linelist = typed.table("LineList", { { nr = 1, line = macro } })
-    macro_expand(ctx, tokens, linelist, 1, false)
+    macro_expand(ctx, tokens, linelist, 1, false, nil)
     return table.concat(tokens, " ")
 end)
 

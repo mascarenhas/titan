@@ -7,7 +7,7 @@ local version = require "titan-compiler.version"
 
 local objectmetadata = {}
 local BANNER = "-- Titan object source metadata\n"
-local SECTION = { elf = ".titan.source", macho_segment = "__TEXT",
+local SECTION = { elf = ".titan.source", coff = ".titan.source", macho_segment = "__TEXT",
     macho_section = "__titansrc" }
 
 local function serialize(record)

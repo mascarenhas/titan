@@ -2,7 +2,9 @@
 #include <stdint.h>
 #include <string.h>
 #include <math.h>
+#if !defined(_WIN32)
 #include <dlfcn.h>
+#endif
 #include "lua.h"
 #include "lauxlib.h"
 #include "lapi.h"
@@ -14,6 +16,9 @@
 #include "lstate.h"
 #include "ltable.h"
 #include "titan.h"
+#if defined(_WIN32)
+#include "titan_winloader.h"
+#endif
 
 /*
 ** These assertions make the assumptions inherited from Lua's MAXASIZE
@@ -530,10 +535,10 @@ static void titan_bt_addframe(luaL_Buffer *buf, int *wrote_any,
 ** frames); the old execinfo path is kept as a no-DWARF fallback for platforms
 ** without libbacktrace (e.g. musl/Alpine). Define TITAN_NO_LIBBACKTRACE to
 ** force the fallback. */
-#ifndef TITAN_NO_LIBBACKTRACE
+#if !defined(TITAN_NO_LIBBACKTRACE) && !defined(_WIN32)
 #include "backtrace.h"
 #define TITAN_HAVE_LIBBACKTRACE 1
-#else
+#elif !defined(_WIN32)
 #include <execinfo.h>
 #endif
 
@@ -931,6 +936,7 @@ void titan_invalidate_backtrace_state(lua_State *L) {
 }
 #endif
 
+#if !defined(_WIN32)
 static int push_package_cpath_root(lua_State *L) {
     int top = lua_gettop(L);
     lua_getglobal(L, "package");
@@ -968,14 +974,20 @@ static int push_package_cpath_root(lua_State *L) {
     return 0;
 }
 
+#endif
+
 static void pushroot(lua_State *L) {
     lua_pushliteral(L, TITAN_ROOT_KEY);
     lua_rawget(L, LUA_REGISTRYINDEX);
     if(lua_type(L, -1) != LUA_TSTRING) {
         lua_pop(L, 1);
+#if defined(_WIN32)
+        titan_win_push_root(L);
+#else
         if(!push_package_cpath_root(L)) {
             lua_pushliteral(L, TITAN_ROOT_DEFAULT);
         }
+#endif
         lua_pushliteral(L, TITAN_ROOT_KEY);
         lua_pushvalue(L, -2);
         lua_rawset(L, LUA_REGISTRYINDEX);
@@ -1010,12 +1022,22 @@ static void pushpath (lua_State *L) {
         lua_pop(L, 1);
 
         /* Try the versioned name for the Titan Path variable */
+#if defined(_WIN32)
+        const char *path = NULL;
+        int environment_top = lua_gettop(L);
+        if (titan_win_push_environment(L,
+                TITAN_WIN_WIDEN_LITERAL(TITAN_PATH_VAR)
+                TITAN_WIN_WIDEN_LITERAL(TITAN_LIBRARY_VERSION_SUFFIX)) ||
+            titan_win_push_environment(L, TITAN_WIN_WIDEN_LITERAL(TITAN_PATH_VAR)))
+            path = lua_tostring(L, -1);
+#else
         const char *path = getenv(
             TITAN_PATH_VAR TITAN_LIBRARY_VERSION_SUFFIX);
         if (path == NULL) {
             /* Try the unversioned name for the Titan Path variable */
             path = getenv(TITAN_PATH_VAR);
         }
+#endif
         if (path == NULL) {
             /* No Titan Path environment variable */
             push_default_titan_path(L);
@@ -1028,6 +1050,9 @@ static void pushpath (lua_State *L) {
             lua_remove(L, -2); /* remove result from 1st 'gsub' */
             lua_remove(L, -2); /* remove default Titan path */
         }
+#if defined(_WIN32)
+        if (path != NULL) lua_remove(L, environment_top + 1);
+#endif
         lua_pushliteral(L, TITAN_PATH_KEY);
         lua_pushvalue(L, -2);
         lua_rawset(L, LUA_REGISTRYINDEX);
@@ -1060,7 +1085,11 @@ static void add_titan_package_cpath(lua_State *L) {
         size_t template_len;
         const char *path = lua_tolstring(L, -1, &path_len);
         const char *template;
+#if defined(_WIN32)
+        push_root_path(L, "/lib/titan/" TITAN_LIBRARY_VERSION "/?.dll");
+#else
         push_root_path(L, "/lib/titan/" TITAN_LIBRARY_VERSION "/?.so");
+#endif
         template = lua_tolstring(L, -1, &template_len);
         if(!path_has_template(path, path_len, template, template_len)) {
             if(path_len == 0) {
@@ -1115,6 +1144,30 @@ static void pushlibs(lua_State *L) {
     }
 }
 
+#if defined(_WIN32)
+static void *loadlibfrompath(lua_State *L, const char *file) {
+    int top = lua_gettop(L);
+    const char *path;
+    luaL_checkstack(L, 6, "searching for a Windows Titan provider");
+    lua_pushnil(L); /* last attempted path's diagnostic */
+    pushpath(L);
+    path = lua_tostring(L, -1);
+    while ((path = pushnextdir(L, path)) != NULL) {
+        const char *dir = lua_tostring(L, -1);
+        const char *filename = lua_pushfstring(L, "%s" TITAN_PATH_SEP "%s", dir, file);
+        HMODULE lib = titan_win_load_library(L, filename, TITAN_LIBS_KEY);
+        if (lib != NULL) {
+            lua_settop(L, top);
+            return lib;
+        }
+        lua_replace(L, top + 1);
+        lua_pop(L, 2); /* attempted filename and directory */
+    }
+    luaL_error(L, "cannot load module '%s': %s", file,
+        lua_isnil(L, top + 1) ? "search path is empty" : lua_tostring(L, top + 1));
+    return NULL;
+}
+#else
 static void *loadlibfrompath(lua_State *L, const char *file) {
     pushlibs(L);
     lua_pushstring(L, file);
@@ -1159,18 +1212,35 @@ static void *loadlibfrompath(lua_State *L, const char *file) {
         return NULL;
     }
 }
+#endif
 
 void *loadlib (lua_State *L, const char *file) {
     return loadlibfrompath(L, file);
 }
 
 void *loadsym (lua_State *L, void *lib, const char *sym) {
+#if defined(_WIN32)
+    void *f;
+    if (lib == NULL) luaL_error(L, "Windows Titan symbol lookup requires an explicit provider");
+    f = titan_cast_func(void *, GetProcAddress((HMODULE)lib, sym));
+    if (f == NULL) {
+        titan_win_loader_error(L, "cannot resolve symbol", sym, GetLastError());
+        lua_error(L);
+    }
+    return f;
+#else
     void *f = dlsym(lib, sym);
     if(f == NULL) luaL_error(L, dlerror());
     return f;
+#endif
 }
 
 void *loadglobalsym (lua_State *L, const char *sym) {
+#if defined(_WIN32)
+    luaL_error(L, "Windows Titan cannot resolve global native symbol '%s'; "
+        "use the canonical module provider", sym);
+    return NULL;
+#else
     void *f;
     const char *err;
     dlerror();  /* clear stale error; a NULL symbol value can be valid */
@@ -1178,6 +1248,7 @@ void *loadglobalsym (lua_State *L, const char *sym) {
     err = dlerror();
     if(err != NULL) luaL_error(L, "%s", err);
     return f;
+#endif
 }
 
 TitanModuleProvider titan_module_provider(lua_State *L, const char *module,
@@ -1228,9 +1299,14 @@ static void *titan_find_module_symbol(TitanModuleProvider provider,
         *error = "module provider is unavailable";
         return NULL;
     }
+#if defined(_WIN32)
+    raw = titan_cast_func(void *, GetProcAddress((HMODULE)provider.handle, sym));
+    if (raw == NULL) *error = "export not found in Windows provider";
+#else
     dlerror();
     raw = dlsym(provider.handle, sym);
     if (raw == NULL) *error = dlerror();
+#endif
     return raw;
 }
 
@@ -1246,6 +1322,21 @@ void *titan_module_symbol(lua_State *L, TitanModuleProvider provider,
 
 static void titan_check_abi_entry(lua_State *L, void *raw, const char *sym,
                                   const char *file, const char *error) {
+#if defined(_WIN32)
+    typedef const char *(*titan_abi_value_fn)(void);
+    const char *actual;
+    if (raw == NULL)
+        luaL_error(L, "Titan compiled module '%s' is missing ABI symbol '%s' "
+            "(expected ABI " TITAN_ABI_VERSION "): %s", file, sym,
+            error ? error : "symbol not found");
+    actual = titan_cast_func(titan_abi_value_fn, raw)();
+    if (actual == NULL)
+        luaL_error(L, "Titan compiled module '%s' has an invalid ABI marker '%s' "
+            "(expected ABI " TITAN_ABI_VERSION ")", file, sym);
+    if (strcmp(actual, TITAN_ABI_VERSION) != 0)
+        luaL_error(L, "Titan compiled module '%s' ABI mismatch: expected "
+            TITAN_ABI_VERSION " but found %s", file, actual);
+#else
     typedef int (*titan_abi_fn)(lua_State *);
     titan_abi_fn fn;
     int top = lua_gettop(L);
@@ -1276,23 +1367,41 @@ static void titan_check_abi_entry(lua_State *L, void *raw, const char *sym,
             file, actual);
     }
     lua_settop(L, top);
+#endif
 }
 
 void titan_check_abi(lua_State *L, void *lib, const char *sym,
                      const char *file) {
+#if defined(_WIN32)
+    TitanModuleProvider provider = { lib, NULL };
+    titan_check_module_abi(L, provider, sym, file);
+#else
     void *raw;
     const char *error;
     dlerror();
     raw = dlsym(lib != NULL ? lib : RTLD_DEFAULT, sym);
     error = raw == NULL ? dlerror() : NULL;
     titan_check_abi_entry(L, raw, sym, file, error);
+#endif
 }
 
 void titan_check_module_abi(lua_State *L, TitanModuleProvider provider,
                             const char *sym, const char *file) {
+#if defined(_WIN32)
+    int top = lua_gettop(L);
+    const char *error;
+    const char *query;
+    void *raw;
+    luaL_checkstack(L, 1, "checking the Windows Titan ABI");
+    query = lua_pushfstring(L, "%s_value", sym);
+    raw = titan_find_module_symbol(provider, query, &error);
+    titan_check_abi_entry(L, raw, query, file, error);
+    lua_settop(L, top);
+#else
     const char *error;
     void *raw = titan_find_module_symbol(provider, sym, &error);
     titan_check_abi_entry(L, raw, sym, file, error);
+#endif
 }
 
 void titan_check_types(lua_State *L, void *lib, const char *sym,
@@ -1303,10 +1412,18 @@ void titan_check_types(lua_State *L, void *lib, const char *sym,
     int top = lua_gettop(L);
     int nresults;
     const char *actual;
+#if defined(_WIN32)
+    TitanModuleProvider provider = { lib, NULL };
+    const char *err;
+    raw = titan_find_module_symbol(provider, sym, &err);
+#else
     dlerror();  /* clear stale error */
     raw = dlsym(lib, sym);
+#endif
     if (raw == NULL) {
+#if !defined(_WIN32)
         const char *err = dlerror();
+#endif
         luaL_error(L,
             "Titan compiled module '%s' is missing types symbol '%s': %s",
             file, sym, err ? err : "symbol not found");
@@ -1401,9 +1518,14 @@ void titan_check_compatibility(lua_State *L, void *lib, const char *sym,
                               size_t verifier_size) {
     void *raw;
     const char *error;
+#if defined(_WIN32)
+    TitanModuleProvider provider = { lib, NULL };
+    raw = titan_find_module_symbol(provider, sym, &error);
+#else
     dlerror();
     raw = dlsym(lib != NULL ? lib : RTLD_DEFAULT, sym);
     error = raw == NULL ? dlerror() : NULL;
+#endif
     titan_check_compatibility_entry(L, raw, sym, file, verifier,
         verifier_size, error);
 }
@@ -1447,6 +1569,12 @@ int errorhandler(lua_State *L) {
   /* Regenerate the raw traceback slot. luaL_Buffer lives on the stack from
   ** luaL_buffinit on and must stay at the top while in use, so push everything
   ** else first. */
+#if defined(_WIN32)
+  /* Root the Lua trace below the buffer: adding a long trace can grow its
+  ** UBox, whose stack slot must remain the topmost value during appends. */
+  luaL_traceback(L, L, NULL, 1);
+  const char *lua_trace = lua_tostring(L, -1);
+#endif
   lua_pushliteral(L, TITAN_BACKTRACE_KEY);
   luaL_Buffer buf;
   luaL_buffinit(L, &buf);
@@ -1464,16 +1592,33 @@ int errorhandler(lua_State *L) {
     int wrote_any = 0;
     void *nbuf[255];
     int calls;
+#if !defined(_WIN32)
     char **bt;
+#endif
+#if defined(_WIN32)
+    titan_add_raw_lua_trace(&buf, &wrote_any, lua_trace);
+#else
     luaL_traceback(L, L, NULL, 1);
     titan_add_raw_lua_trace(&buf, &wrote_any, lua_tostring(L, -1));
     lua_pop(L, 1);
+#endif
+#if defined(_WIN32)
+    /* Experimental Windows fallback: preserve Lua frames and report native
+    ** addresses. PE/DWARF source attribution is not implemented here. */
+    calls = CaptureStackBackTrace(0, sizeof(nbuf) / sizeof(void *), nbuf, NULL);
+    for (int i = 0; i < calls; i++) {
+      char frame[64];
+      snprintf(frame, sizeof(frame), "[native address %p]", nbuf[i]);
+      titan_bt_addframe(&buf, &wrote_any, frame);
+    }
+#else
     calls = backtrace(nbuf, sizeof(nbuf) / sizeof(void *));
     bt = backtrace_symbols(nbuf, calls);
     for (int i = 0; i < calls; i++) {
       titan_bt_addframe(&buf, &wrote_any, bt[i]);
     }
     free(bt);
+#endif
   }
 #endif
   luaL_pushresult(&buf);

@@ -471,6 +471,12 @@ function with_merged_output(config: SpawnConfig): integer
   return uv.os_spawn_config_with_merged_output(config.handle)
 end
 
+function with_env(name: string, contents: string): SpawnOption
+  return function (config: SpawnConfig): integer
+    return uv.os_spawn_config_with_env(config.handle, name, contents)
+  end
+end
+
 function spawn(file: string, args: {string},
                ...: SpawnOption): Process
   local config = SpawnConfig.new(uv.os_spawn_config_new())

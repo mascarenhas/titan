@@ -5,6 +5,7 @@ local c99 = require("c-parser.c99")
 local ctypes = require("c-parser.ctypes")
 local cdefines = require("c-parser.cdefines")
 local compiler_io = require("titan-compiler.io")
+local platform = require("titan-compiler.platform")
 local sha256 = require("titan-compiler.sha256")
 local cacheadapter = require("titan-compiler.cacheadapter")
 local version = require "titan-compiler.version"
@@ -252,18 +253,20 @@ local function io_for(options)
 end
 
 local function is_absolute_path(filename)
+    if platform.windows then return platform.is_absolute(filename) end
     return filename:match("^/") ~= nil
 end
 
 local function join_path(dir, filename)
+    if platform.windows then return assert(platform.join(dir, filename)) end
     if dir:sub(-1) == SEP then
         return dir .. filename
     end
     return dir .. SEP .. filename
 end
 
-local function absolute_lookup_path(path, cwd)
-    return cpp.absolute_lookup_path(path, cwd)
+local function absolute_lookup_path(path, cwd, strategy)
+    return cpp.absolute_lookup_path(path, cwd, strategy)
 end
 
 local function search_candidate_identity(path, openable, strategy)
@@ -640,7 +643,7 @@ function cdriver.resolve_includes(filenames, options)
     for index, filename in ipairs(filenames) do
         local searches = {}
         local function observe(path, openable)
-            path = absolute_lookup_path(path, cwd)
+            path = absolute_lookup_path(path, cwd, strategy)
             searches[#searches + 1] = {
                 kind = "search", path = path,
                 identity = search_candidate_identity(path, openable, strategy),
@@ -650,7 +653,7 @@ function cdriver.resolve_includes(filenames, options)
         local include, include_err = resolve_include(filename, options, ctx.incdirs, observe)
         if not include then return nil, include_err end
         if is_absolute_path(include.resolved) or file_exists(include.resolved, strategy) then
-            include.resolved = absolute_lookup_path(include.resolved, cwd)
+            include.resolved = absolute_lookup_path(include.resolved, cwd, strategy)
         end
         include.c_header_search_inputs = searches
         includes[index] = include
@@ -660,14 +663,23 @@ end
 
 local generated_header_cache = setmetatable({}, { __mode = "k" })
 
+local function generated_path_spelling(path)
+    -- Match the preprocessor's Windows lookup spelling only for owned paths.
+    -- Ordinary separators agree; extended namespaces keep native backslashes.
+    if platform.windows then return assert(platform.path.separators(path)) end
+    return path
+end
+
 local function generated_lookup_path(header, path)
-    local prefix = header.bundle_root .. "/"
+    local root = generated_path_spelling(header.bundle_root)
+    local separator = platform.windows and root:sub(1, 4) == [[\\?\]] and "\\" or "/"
+    local prefix = root .. separator
     if path:sub(1, #prefix) ~= prefix then return nil end
     -- Only this owned directory tree is known to have no symbolic links.
     -- Preserve '..' in authored header observations, but resolve it here so
     -- nested generated includes cannot escape as persistent file inputs.
     local components = {}
-    for component in path:sub(#prefix + 1):gmatch("[^/]+") do
+    for component in path:sub(#prefix + 1):gmatch("[^" .. separator .. "]+") do
         if component == ".." then
             if #components == 0 then return nil end
             components[#components] = nil
@@ -675,7 +687,7 @@ local function generated_lookup_path(header, path)
             components[#components + 1] = component
         end
     end
-    return prefix .. table.concat(components, "/")
+    return prefix .. table.concat(components, separator)
 end
 
 local function generated_header_inputs(header)
@@ -689,7 +701,7 @@ local function generated_header_inputs(header)
     local function visit(item)
         if visited[item] then return end
         visited[item] = true
-        files[item.filename] = item
+        files[generated_path_spelling(item.filename)] = item
         for _, input in ipairs(item.search_inputs or {}) do
             searches[#searches + 1] = input
         end
@@ -713,7 +725,7 @@ local function declaration_scope_resolver(ctx, generated, generated_files, cwd, 
         offset = offset + #line + 1
         local origin = ctx.output_origins[index]
         if origin then
-            local path = absolute_lookup_path(origin.file, cwd)
+            local path = absolute_lookup_path(origin.file, cwd, strategy)
             local scope = paths[path]
             if not scope then
                 local descriptor = generated and (generated_files[path]
@@ -788,7 +800,7 @@ local function process_file_inner(filename, options)
     local search_inputs = {}
     local search_identities = {}
     local function record_dependency(path, identity, observation)
-        path = absolute_lookup_path(path, cwd)
+        path = absolute_lookup_path(path, cwd, strategy)
         local previous = dependency_identities[path]
         if previous and previous ~= identity then
             return nil, "C header changed while it was being parsed: " .. path
@@ -804,7 +816,7 @@ local function process_file_inner(filename, options)
         return true
     end
     local function record_search(path, identity)
-        path = absolute_lookup_path(path, cwd)
+        path = absolute_lookup_path(path, cwd, strategy)
         -- Generated files are immutable inputs bound by the bundle digest.
         -- Their temporary location is neither a real-header dependency nor
         -- a persistent include-search observation.
@@ -824,7 +836,7 @@ local function process_file_inner(filename, options)
         return true
     end
     ctx.header_dependency_observer = function(path, contents, read_state)
-        path = absolute_lookup_path(path, cwd)
+        path = absolute_lookup_path(path, cwd, strategy)
         local input = generated_files and (generated_files[path]
             or generated_files[generated_lookup_path(generated, path)])
         if input then
@@ -837,7 +849,7 @@ local function process_file_inner(filename, options)
             path, file_contents_identity(path, contents, strategy, read_state))
     end
     ctx.include_search_observer = function(path, openable)
-        path = absolute_lookup_path(path, cwd)
+        path = absolute_lookup_path(path, cwd, strategy)
         if generated and generated_lookup_path(generated, path) then return true end
         return record_search(
             path, search_candidate_identity(path, openable, strategy))
@@ -886,7 +898,7 @@ local function process_file_inner(filename, options)
             return nil, "failed resolving C header '" .. filename .. "': " .. err
         end
         if is_absolute_path(include.resolved) or file_exists(include.resolved, strategy) then
-            include.resolved = absolute_lookup_path(include.resolved, cwd)
+            include.resolved = absolute_lookup_path(include.resolved, cwd, strategy)
         end
         parse_filename = file_exists(include.resolved, strategy)
             and include.resolved or filename

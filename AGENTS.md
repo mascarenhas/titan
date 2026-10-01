@@ -30,7 +30,7 @@ and focused tests when changing a contract or resolving an edge case.
 Titan is a statically-typed, ahead-of-time-compiled sister language to Lua.
 This repo is the prototype compiler, written in Lua, that translates each
 `.titan` module to its own C translation unit and invokes the system C
-compiler. A no-`main` invocation links all selected source modules into paired
+compiler. On Linux and macOS, a no-`main` invocation links selected modules into paired
 `.so` and `.a` providers named from the requested roots' longest common dotted
 prefix and emits one generated Lua shim per linked logical module; when exactly
 one requested module defines `main(args: {string}): integer`, it instead
@@ -53,6 +53,24 @@ trick, symbolic/hard-link dependency, unusual indirection, accumulating
 special cases, or another architectural workaround, first inspect the existing
 design and then pause to ask the maintainer about the intended invariant. Do
 not add epicycles around what may be a misunderstood simpler design.
+
+## Experimental Windows build
+
+The Unix build, provider, and test commands below describe Linux and macOS.
+Read `doc/implementation/windows-build.md` for the experimental native x64
+MSYS2 CLANG64/UCRT workflow in `Makefile.windows`. Keep its source/output tree
+separate from Unix builds. It installs a controlled Lua DLL and SDK without
+LuaRocks, compiles serially, and emits DLL providers; `--static` and Titan
+archive providers are unsupported on Windows. A program also gets a small
+`bin/<logical-module>.exe` launcher, optionally named with `--launcher-name`.
+The EXE may be renamed without changing the provider identity. Preserve Lua's
+stock Windows `!` executable-directory meaning and audit delivered PE imports
+for extra toolchain runtime dependencies.
+
+Windows limitations are documented with that workflow. Shared-folder watcher
+notifications are best effort; validate filesystem, SQLite, and local watcher
+behavior on NTFS. A VM boot or SDK component check is not a complete port test.
+Keep Linux behavior covered by its baseline and applicable post-change gates.
 
 ## Compiler completion work
 
@@ -105,15 +123,20 @@ change them only when their own compatibility rules require it.
   `RANLIB` (`LD` follows `CC`), so invoke later rock builds through that
   prefix's LuaRocks rather than changing native tool identity between phases.
 - **CI runs Linux on every push and the complete macOS suite only on manual
-  dispatch.** Use `workflow_dispatch` as the **pre-merge check**, but never
-  trigger that costly run without the maintainer's express authorization. Once
-  authorized, use `gh workflow run ci.yml --ref <branch>`. Linux jobs are
-  push-only and are not repeated by that macOS dispatch. The regular push graph
-  has exactly three standard `ubuntu-24.04` jobs. The stdlib producer and
-  compiler consumer retain explicit 30-minute timeouts; the independent
-  sanitizer has 35 minutes so a cold native-dependency cache miss remains a
-  valid build under the same two-CPU bound. Linux jobs export `MAKEFLAGS=-j2`
-  and `TITAN_JOBS=2`, matching the two CPUs on standard private-repository
+  dispatch.** Complete macOS validation is a **pre-merge check**. Prefer the
+  complete local macOS VM gates, including runtime/packaging/compiler tests and
+  both production modes, with exact source and architecture evidence. The hosted
+  workflow is a manual fallback; never trigger that costly run without an
+  explicit maintainer request for macOS CI.
+  Opening or updating a PR alone does not authorize dispatch; an explicit macOS
+  request made alongside that work does. Once requested, use
+  `gh workflow run macos.yml --ref <branch>`. The separate
+  `macos.yml` workflow is manual-only; `ci.yml` runs Linux jobs on pushes.
+  The regular push graph has exactly three standard `ubuntu-24.04` jobs. The
+  stdlib producer and compiler consumer retain explicit 30-minute timeouts; the
+  independent sanitizer has 35 minutes so a cold native-dependency cache miss
+  remains a valid build under the same two-CPU bound. Linux jobs export
+  `MAKEFLAGS=-j2` and `TITAN_JOBS=2`, matching the two CPUs on standard private-repository
   hosted runners; the macOS job
   overrides both bounds to three for its three CPUs. Make may overlap independent
   native prerequisites, and each `titanc` process may overlap only generated-C
@@ -254,8 +277,12 @@ change them only when their own compatibility rules require it.
   much larger generated Titan images and disposable fixtures use the same
   instrumentation at `-O0`.
 
-  The cold `test-macos` job remains dispatch-only and is a required pre-merge
-  gate. It retries only dependency-acquisition commands within the same prefix;
+  The cold `test-macos` job remains a dispatch-only fallback for the complete
+  macOS pre-merge gate. A complete equivalent local VM run satisfies that gate;
+  record its tested architecture explicitly, since an Intel run does not prove
+  Apple Silicon runtime behavior. For the companion extension, put GNU Make
+  4.4.1 first on `PATH` so recursive builds use it rather than Apple Make 3.81.
+  The hosted job retries only dependency-acquisition commands within the same prefix;
   the Titan build and complete test run remain single-shot. Run all uncovered
   stdlib/runtime/packaging work, including the aggregate native executable,
   before `ci_test_groups.sh compiler-uncovered`. Snapshot the runtime archive,
@@ -414,8 +441,9 @@ change them only when their own compatibility rules require it.
   uses the same C99 mode and parsed `TITAN_EXTRA_CPPFLAGS` as generated C. The
   authoritative object target comes from the first generated module object,
   not `uname`, because `CC`/`TITAN_EXTRA_CFLAGS` may select another target; all
-  other source, selected-provider, and `-X` objects must match it. The probe is
-  POSIX-only today (`/dev/null`, `LANG=C`). A system Readline development
+  other source, selected-provider, and `-X` objects must match it. Probes use
+  the platform's process transport and null device (`/dev/null` or Windows
+  `NUL`) with a deterministic locale. A system Readline development
   package is optional: when its compile/link probe fails, `make lua` builds the
   pinned, officially patched source fallback inside `PREFIX`. Bundled native
   dependencies need CMake for libuv, Perl for OpenSSL, tar, a downloader
@@ -555,7 +583,7 @@ Prefix-container public compilation and generated-shim behavior live in
 promotion are covered by that compiler suite plus `rockspec_spec.lua` and
 `stdlib_installer_spec.lua`, without a duplicate library boundary spec. Keep the
 root-major provider/metadata-claim matrix in `spec/driver_spec.lua`.
-Static-provider coverage is intentionally split: bounded ELF/Mach-O/archive
+Static-provider coverage is intentionally split: bounded ELF/Mach-O/COFF/archive
 and synthetic universal-container parsing belongs in
 `spec/staticmetadata_spec.lua`; format preference, occupied-path behavior,
 archive claim/error rules, caching, and source fallback belong in
@@ -732,9 +760,11 @@ markerless DSO remains an error. Native compilation also requires valid
 `<mangled>_layouts` metadata for native nominal storage; analysis-only recovery
 continues to accept the ABI/types pair without physical layouts. A regular
 static provider is self-describing:
-each Titan-generated ELF/Mach-O object carries one canonical `.titan.meta` or
-`__TEXT,__titanmeta` section with exactly one logical ABI/types/layouts entry. The
-in-process reader rejects thin/nested/raw/unsupported archives, duplicate
+each Titan-generated ELF/Mach-O/COFF object carries one canonical `.titan.meta`
+(ELF/COFF) or `__TEXT,__titanmeta` section with exactly one logical
+ABI/types/layouts entry. COFF object inspection does not add Windows
+static-provider emission or linking. The in-process reader rejects
+thin/nested/raw/unsupported archives, duplicate
 logical keys, malformed or incompatible entries, and an exact archive without
 the requested key; an ancestor archive without that key is a clean nonclaim.
 Universal Mach-O providers must expose identical key/value sets in every
@@ -1579,7 +1609,15 @@ substitution, recursive; error on missing keys). Key facts:
   `luaopen_<mangled>`, `<mangled>_init`
   (idempotent), `<mangled>_abi` (returns `TITAN_ABI_VERSION`; checked before trusting a
   provider), and `<mangled>_types` (serialized interface type, evaluated with
-  `types.lua` as env). For an explicit root, `titanc` gives code generation the
+  `types.lua` as env). New objects also export
+  `const char *<mangled>_abi_value(void)`, a Lua-free return of the immutable
+  provider-owned ABI string, with no allocation or initialization. Retain the
+  image while using that string; never free it or call this query through
+  `package.loadlib`/`titan._loadlib`. Include it in source/cached-object symbol
+  inventories and the source-generated canonical resolver; recovered ABI-2
+  type metadata alone does not promise this optional export. The Lua-callable `_abi` contract,
+  Unix callers, ABI `2`, and language-server API `1` remain unchanged.
+  For an explicit root, `titanc` gives code generation the
   finalized invocation-wide direct set so every linked source peer and
   physically carried static peer is wired directly while DSO dependencies
   stay dynamic. Library mode derives one provider from the requested roots,
@@ -1735,7 +1773,7 @@ unspellable prototype enum fails closed even below a pointer. Signed/unsigned
 Select the carrier with one object-producing question over all range-eligible
 ordinary integer candidates, not one compile per candidate. The exact enum
 object is declared once; the payload records match count and carrier ID/sum in
-a dedicated ELF/Mach-O section. Read it with the bounded object reader without
+a dedicated ELF/Mach-O/COFF section. Read it with the bounded object reader without
 linking or executing target code. Invalid/missing payloads are retryable and
 uncached; zero or multiple matches are typed completed answers. Preserve the
 independent exact enumerator value-range checks.

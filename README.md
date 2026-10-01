@@ -8,6 +8,12 @@ application programming language with a focus on performance.
 
 # Install
 
+The installation commands and provider paths below describe Linux and macOS.
+The experimental native x64 Windows build uses MSYS2 CLANG64/UCRT and
+`Makefile.windows`; see the [Windows build and its limitations](doc/implementation/windows-build.md).
+It prepares its own SDK without LuaRocks and uses DLL providers with small
+executable launchers. Keep Windows source/output trees separate from Unix builds.
+
 Titan is the primary entry point of a Titan+Lua installation. Give each
 project its own local absolute prefix, then use that prefix's Lua, LuaRocks,
 and Titan compiler to build and run the project. Two destination names have
@@ -589,8 +595,9 @@ canonical Array proxy contract, union and Interface representations, generic
 metadata, source-defined foreign callbacks, and const-qualified descriptors
 and wrappers. A provider with a different ABI is rejected before metadata
 decoding or native value exchange. Current lookup and publication use
-`TITAN_PATH_0_6` and `lib/titan/0.6`; the manually dispatched full macOS
-pre-merge suite remains required.
+`TITAN_PATH_0_6` and `lib/titan/0.6`; complete macOS pre-merge validation
+remains required, using the local VM gates or the explicitly requested hosted
+fallback described below.
 
 From Titan, importing `timer` is enough to enable the standalone async
 bootstrap:
@@ -821,8 +828,16 @@ Lua/libbacktrace/libuv/llhttp/OpenSSL tree before LuaRocks/Titan work, saves onl
 that clean dependency boundary, and reuses one aggregate native build for
 focused filters; it does not consume the regular artifact. Its 35-minute bound
 also admits the infrequent cold-cache rebuild under the two-CPU policy.
-The complete macOS suite remains a manually dispatched pre-merge gate and is
-run only with explicit maintainer authorization.
+Complete macOS validation remains a pre-merge gate. Prefer a local macOS VM
+run covering the complete runtime, packaging and compiler tests plus bundled
+and system production modes. Record the exact sources, toolchain and tested
+architecture; Intel x86_64 results do not establish Apple Silicon runtime
+coverage. The separate [macOS workflow](.github/workflows/macos.yml) is a
+manual-only fallback, run only after an explicit maintainer request for macOS
+CI, using `gh workflow run macos.yml --ref <branch>`.
+Opening or updating a PR alone does not authorize dispatch; an explicit macOS
+request made alongside that work does.
+The [Linux CI workflow](.github/workflows/ci.yml) runs only on pushes.
 
 To test compiler Lua edits without reinstalling them, run the explicit
 `checkout` Busted profile from the repository root with the `busted` installed

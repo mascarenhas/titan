@@ -606,7 +606,7 @@ object once and applies `__builtin_types_compatible_p` to its pointer type and
 each eligible primitive pointer type, preserving pointee qualification.
 
 The query emits a used, byte-aligned 12-byte constant payload in `.titan.cprobe`
-(ELF) or `__DATA,__titancprobe` (Mach-O): eight magic bytes, version, payload
+(ELF/COFF) or `__DATA,__titancprobe` (Mach-O): eight magic bytes, version, payload
 length, match count, and carrier identifier sum. This is an object-producing
 compile; it does not link or execute target code. The shared bounded object
 reader locates one initialized, uncompressed, relocation-free section and

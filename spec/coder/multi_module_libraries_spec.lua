@@ -2412,31 +2412,109 @@ end
         end
     end)
 
-    it("preflights cross-family protocol symbols from source dependencies",
-       function()
-        write_file(source_root .. "/bundle/foo_abi.titan",
-            "function probe(): integer return 1 end\n")
-        write_file(source_root .. "/bundle/left.titan", [[
+    it("links a legacy ABI-2 archive without inventing an optional query export", function()
+        local legacy_workspace = workspace .. "/legacy-abi-value"
+        local legacy_source = legacy_workspace .. "/source"
+        local provider_stem = legacy_source .. "/luaopen/bundle/foo"
+        write_file(provider_stem .. ".titan",
+            "function probe(): integer return 2 end\n")
+        local ok, output = compile(
+            legacy_workspace, legacy_source, "-v", "luaopen.bundle.foo")
+        assert.truthy(ok, output)
+
+        -- Retain the generated ABI-2 protocols and metadata, removing only
+        -- the optional query and its source-owned resolver entry.
+        local source = read_file(provider_stem .. ".c")
+        local count
+        source, count = source:gsub(
+            "const char %*luaopen_bundle_foo_abi_value%(void%) {%s*" ..
+            "return TITAN_ABI_VERSION;%s*}", "")
+        assert.equal(1, count)
+        source, count = source:gsub(
+            "[^\n]*if %(strcmp%(symbol, \"luaopen_bundle_foo_abi_value\"%) " ..
+            "== 0%) return [^\n]*;\n", "")
+        assert.equal(1, count)
+        assert.is_nil(source:find("luaopen_bundle_foo_abi_value", 1, true))
+        write_file(provider_stem .. ".c", source)
+
+        local object = legacy_workspace .. "/legacy-provider.o"
+        local compile_argv
+        for line in output:gmatch("[^\r\n]+") do
+            local argv = cdriver.split_shell_words(line)
+            if argv then
+                local has_source, compiles = false, false
+                for _, argument in ipairs(argv) do
+                    if argument == provider_stem .. ".c" then has_source = true end
+                    if argument == "-c" then compiles = true end
+                end
+                if has_source and compiles then compile_argv = argv end
+            end
+        end
+        assert.truthy(compile_argv, "missing generated object compile command")
+        for index, argument in ipairs(compile_argv) do
+            if argument == "-o" then compile_argv[index + 1] = object end
+        end
+        ok, output = run(compile_argv, legacy_workspace)
+        assert.truthy(ok, output)
+        local symbols = native_symbols(legacy_workspace, object)
+        assert.is_nil(symbols:find("luaopen_bundle_foo_abi_value", 1, true))
+
+        local archive = legacy_workspace .. "/luaopen/bundle/foo.a"
+        assert.truthy(os.remove(archive))
+        make_archive(legacy_workspace, "luaopen/bundle/foo.a", { object })
+        local parsed, parse_error = staticmetadata.scan_archive(archive, metadata_options())
+        assert.truthy(parsed, parse_error)
+        assert.equal("2", parsed.entries["luaopen.bundle.foo"].abi)
+        assert.truthy(os.remove(provider_stem .. ".titan"))
+        assert.truthy(os.remove(legacy_workspace .. "/luaopen/bundle/foo.so"))
+        assert.truthy(os.remove(legacy_workspace .. "/luaopen/bundle/foo.lua"))
+
+        write_file(legacy_source .. "/bundle/foo_abi_value.titan", [[
+local old = import "luaopen.bundle.foo"
+function probe(): integer return old.probe() + 40 end
+]])
+        ok, output = compile(
+            legacy_workspace, legacy_source, "--static", "bundle.foo_abi_value")
+        assert.truthy(ok, output)
+        local ran, result = run_lua(legacy_workspace, [[
+local current = require "bundle.foo_abi_value"
+local old = require "luaopen.bundle.foo"
+io.write(current.probe(), " ", old.probe())
+]])
+        assert.truthy(ran, result)
+        assert.equal("42 2", result)
+    end)
+
+    for _, protocol in ipairs({
+        { suffix = "abi", owner = "module ABI entry" },
+        { suffix = "abi_value", owner = "module ABI value entry" },
+    }) do
+        it("preflights cross-family protocol symbols from source dependencies (" ..
+           protocol.suffix .. ")", function()
+            write_file(source_root .. "/bundle/foo_" .. protocol.suffix .. ".titan",
+                "function probe(): integer return 1 end\n")
+            write_file(source_root .. "/bundle/left.titan", [[
 local other = import "luaopen.bundle.foo"
 function probe(): integer return other.probe() end
 ]])
-        write_file(source_root .. "/luaopen/bundle/foo.titan",
-            "function probe(): integer return 2 end\n")
+            write_file(source_root .. "/luaopen/bundle/foo.titan",
+                "function probe(): integer return 2 end\n")
 
-        local ok, output = compile(workspace, source_root,
-            "bundle.left", "bundle.foo_abi")
-        assert.falsy(ok)
-        assert.truthy(output:find(
-            "cannot link C symbol 'luaopen_bundle_foo_abi'", 1, true),
-            output)
-        assert.truthy(output:find("module Lua entry", 1, true), output)
-        assert.truthy(output:find("module ABI entry", 1, true), output)
-        assert.is_nil(lfs.attributes(source_root .. "/bundle/left.c", "mode"))
-        assert.is_nil(lfs.attributes(
-            source_root .. "/luaopen/bundle/foo.c", "mode"))
-        assert.is_nil(lfs.attributes(workspace .. "/bundle.so", "mode"))
-        assert.is_nil(lfs.attributes(workspace .. "/bundle.a", "mode"))
-    end)
+            local ok, output = compile(workspace, source_root,
+                "bundle.left", "bundle.foo_" .. protocol.suffix)
+            assert.falsy(ok)
+            assert.truthy(output:find(
+                "cannot link C symbol 'luaopen_bundle_foo_" .. protocol.suffix .. "'",
+                1, true), output)
+            assert.truthy(output:find("module Lua entry", 1, true), output)
+            assert.truthy(output:find(protocol.owner, 1, true), output)
+            assert.is_nil(lfs.attributes(source_root .. "/bundle/left.c", "mode"))
+            assert.is_nil(lfs.attributes(
+                source_root .. "/luaopen/bundle/foo.c", "mode"))
+            assert.is_nil(lfs.attributes(workspace .. "/bundle.so", "mode"))
+            assert.is_nil(lfs.attributes(workspace .. "/bundle.a", "mode"))
+        end)
+    end
 
     it("refuses an unrecognized Lua shim before changing C output", function()
         write_file(source_root .. "/owned/item.titan",

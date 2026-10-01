@@ -29,7 +29,7 @@ module object:
 #if defined(__APPLE__)
 #define TITAN_META_SECTION \
     __attribute__((used, aligned(1), section("__TEXT,__titanmeta")))
-#elif defined(__ELF__)
+#elif defined(__ELF__) || defined(_WIN32)
 #define TITAN_META_SECTION \
     __attribute__((used, aligned(1), section(".titan.meta")))
 #endif
@@ -147,6 +147,26 @@ One object may contain at most one metadata section. It must be uncompressed
 `SHT_PROGBITS`, in bounds, and not targeted by an `SHT_REL` or `SHT_RELA`
 section. The target fingerprint records class, encoded endianness, machine,
 and ABI-relevant flags.
+
+### COFF objects
+
+The object reader also accepts ordinary little-endian COFF relocatable objects
+with x86, x64, or ARM64 machine identities. It bounds the 20-byte header,
+40-byte section records, 18-byte symbol records, string table, section data,
+relocation tables (including overflow counts), and legacy line-number tables.
+Long section names use their decimal offsets into the COFF string table.
+Public `.titan.meta`, trusted `.titan.source`, and enum-query `.titan.cprobe`
+retain their existing names and exact payloads. Selected payload sections must
+contain initialized data and no relocations. PE images, short import objects,
+BigObj, and other machine identities are rejected.
+
+The COFF target fingerprint contains machine, word size, and little endianness;
+it does not claim to identify the compiler or CRT configuration. The generic
+archive reader can inspect ordinary COFF members through this same parser.
+The planned Windows port remains DLL-only; this slice adds no static provider
+emission or linking. Native dependency import libraries remain a separate
+linker input contract, and their short import-object members are not accepted
+by this reader.
 
 ### Mach-O and universal containers
 

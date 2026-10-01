@@ -146,3 +146,4 @@
 4 spec/types_spec.lua 0.209
 2 spec/union_interface_spec.lua 0.174
 4 spec/util_spec.lua 0.014
+2 spec/windows_publication_spec.lua 0.010

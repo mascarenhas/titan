@@ -1,6 +1,8 @@
 *.o
 *.a
 *.so
+*.dll
+*.exe
 *.dSYM/
 
 # Compiler-generated module C declaration environments and foreign interfaces
@@ -19,6 +21,8 @@
 
 # local lua install
 /.lua
+/windows-build/
+/.windows-sdk/
 
 # libbacktrace source tree (cloned + built by `make libbacktrace`)
 /libbacktrace/

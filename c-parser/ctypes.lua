@@ -165,8 +165,11 @@ local function is_modifier(str)
 end
 
 local function extract_modifiers(ret_pointer, items)
-    while is_modifier(items[1]) do
-        table.insert(ret_pointer, table.remove(items, 1))
+    -- A declaration specifier can be revisited for multiple typedef aliases.
+    -- Keep its declarators intact so every visit sees the same pointer shape.
+    for _, item in ipairs(items) do
+        if not is_modifier(item) then break end
+        table.insert(ret_pointer, item)
     end
 end
 
@@ -338,8 +341,9 @@ end
 local function add_to_fields(lst, field_src, fields)
 
     if type(field_src) == "table" and not field_src.ids then
-        assert(field_src.type.type == "union")
-        local subfields = get_fields(lst, field_src.type.fields)
+        assert(field_src.type.type == "union" or field_src.type.type == "struct")
+        local subfields, err = get_fields(lst, field_src.type.fields)
+        if not subfields then return nil, err end
         for _, subfield in ipairs(subfields) do
             table.insert(fields, subfield)
         end

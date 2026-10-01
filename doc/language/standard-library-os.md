@@ -182,6 +182,11 @@ async Task. It installs a one-shot watcher and returns the canonical lowercase
 name when the signal fires. Supported names on Linux and macOS are `"hup"`,
 `"int"`, `"quit"`, `"term"`, `"usr1"`, and `"usr2"`.
 
+Windows does not provide `"usr1"` or `"usr2"`; Titan rejects both before
+initializing a watcher. The remaining native signal constants do not imply
+Unix delivery semantics on Windows. Watcher registration is delegated to
+libuv, and a native registration error is reported as `signal.start`.
+
 Unknown names are rejected before a watcher is initialized. `"kill"` is also
 rejected because it cannot be caught. Cancellation stops the watcher and
 drains its close callback; a late signal cannot resume the Task a second time.
@@ -245,6 +250,7 @@ function with_parent_stdin(config: SpawnConfig): integer
 function with_parent_stdout(config: SpawnConfig): integer
 function with_parent_stderr(config: SpawnConfig): integer
 function with_merged_output(config: SpawnConfig): integer
+function with_env(name: string, contents: string): SpawnOption
 
 function spawn(file: string, args: {string},
                ...: SpawnOption): Process
@@ -301,6 +307,16 @@ no longer referenced. This includes a later choice that breaks an earlier
 merge; repeating an option has the same observable result. Callers may compose
 the supplied functions in their own integer-returning `SpawnOption` closures,
 but cannot construct or inspect a `SpawnConfig` directly.
+
+`with_env(name, contents)` returns an option that overrides one variable only
+in the child. All other variables are inherited at spawn time; the parent
+environment is unchanged. Later options for the same name win. Names compare
+exactly on Unix and with ordinal case-insensitive Unicode comparison on Windows.
+An empty value is retained as an empty value, not removed. Empty names, names
+containing `=` or NUL, and values containing NUL fail during spawn configuration.
+For example, `spawn(compiler, args, with_env("LANG", "C"),
+with_env("LC_ALL", "C"))` controls compiler diagnostics without changing the
+parent or requiring an environment-wrapper executable.
 
 `with_merged_output` creates one pipe, wraps both ends as libuv streams, and
 installs the child end into both stdout and stderr stdio entries with
@@ -370,6 +386,12 @@ raises `async.OperationError` with
 operation `stdio.parent.kind` and a message naming the descriptor and probe.
 An invalid descriptor retains its actual `EBADF` error.
 
+On experimental Windows builds, known libuv pipe and console kinds use the
+same Runtime-owned stream wrappers. An unknown native handle fails explicitly;
+the Unix socket-metadata fallback and `TITAN_STDIO_PIPE_FDS` hint do not apply.
+The wrapper owns a non-inheritable duplicate of the actual Windows handle,
+leaving the original parent stream open when the Runtime ends.
+
 The Runtime caches each successfully initialized parent wrapper. The launcher
 must update or clear the hint when replacing inherited descriptors; changing
 the variable after a wrapper has been initialized does not reclassify it.
@@ -409,6 +431,8 @@ On Unix, loading `titan.uv` changes a default `SIGPIPE` disposition to ignored
 so a child that closes stdin produces the ordinary libuv write error instead
 of terminating the parent process. An already ignored signal or an
 application-installed handler is preserved.
+Windows has no `SIGPIPE` disposition; this initialization step does nothing
+on Windows.
 
 Closing a captured `process.stdin` is idempotent. Its first call marks the
 stream terminal and submits the physical pipe's `uv_close`; later writes are
@@ -484,7 +508,10 @@ stdin and `wait`; waiting first can deadlock when an operating-system pipe
 buffer fills.
 
 `kill` accepts `"hup"`, `"int"`, `"quit"`, `"term"`, `"usr1"`, `"usr2"`,
-and `"kill"`. Unknown names are rejected before libuv is called. Killing an
+and `"kill"` on Linux and macOS. Windows rejects `"usr1"` and `"usr2"`;
+other recognized names are passed to libuv, whose native semantics and errors
+apply. Recognizing a name does not guarantee Unix signal delivery. Unknown
+names are rejected before libuv is called. Killing an
 already exited Process is a lifecycle error, so a recycled process identifier
 can never be targeted through an old wrapper.
 

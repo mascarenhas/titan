@@ -8,6 +8,7 @@ local version = require "titan-compiler.version"
 local staticmetadata = require "titan-compiler.staticmetadata"
 local ffiheaders = require "titan-compiler.ffiheaders"
 local completion = require "titan-compiler.completion"
+local platform = require "titan-compiler.platform"
 
 local projectcache = { VERSION = 5 }
 
@@ -194,7 +195,7 @@ local function project(entry, options, strict, declarations_only)
             elseif kind == "header" then headers[#headers + 1] = target
             elseif kind == "input" then
                 if target.kind ~= "file" and target.kind ~= "search" then fail("invalid header input kind") end
-                if target.path:sub(1, 1) ~= "/" or target.path:find("\0", 1, true) or target.identity == "" then
+                if not platform.is_absolute(target.path) or target.path:find("\0", 1, true) or target.identity == "" then
                     fail("invalid header input identity")
                 end
                 local current = observations[target.path .. "\0" .. target.identity]

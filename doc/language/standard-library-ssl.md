@@ -111,6 +111,21 @@ context caches and amortizes those default-path costs across later connections.
 Programs that need deployment-independent trust selection should pass an
 explicit CA file.
 
+To override default trust with `SSL_CERT_FILE` (a PEM bundle) or `SSL_CERT_DIR`
+(an OpenSSL subject-hash certificate directory), set the environment before
+starting the program. Default-context initialization happens when `titan.ssl`
+first loads; later environment changes do not reinitialize it. Start a fresh
+process when testing another default trust configuration. Successful module or
+TLS-context initialization alone does not prove any usable CA roots were loaded:
+OpenSSL can accept missing default locations and report the trust failure during
+peer verification instead.
+
+The experimental Windows SDK ships no CA bundle or other usable default roots
+and does not automatically use the Windows ROOT store. Its compiled filesystem
+CA paths retain the original build prefix after SDK relocation. Use the existing
+`ca_file` argument or explicitly configured environment overrides as described
+above; certificate-chain and hostname/IP verification remain enabled.
+
 The underlying `net.connect` contract supplies DNS resolution, address-order
 fallback, port validation, cancellation, and TCP errors.
 

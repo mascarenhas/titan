@@ -587,6 +587,24 @@ describe("native Titan test runner", function()
             output)
     end)
 
+    it("rejects launcher naming for library and compile-only output", function()
+        for _, compile_only in ipairs({ false, true }) do
+            local argv = working_titanc_arguments()
+            argv[#argv + 1] = "--launcher-name"
+            argv[#argv + 1] = "custom"
+            if compile_only then argv[#argv + 1] = "--compile-only" end
+            argv[#argv + 1] = "--tree"
+            argv[#argv + 1] = FIXTURE
+            argv[#argv + 1] = DEPENDENCY
+            local ok, output = run(argv)
+            assert.falsy(ok, output)
+            local expected = compile_only and
+                "--launcher-name cannot be combined with --compile-only" or
+                "--launcher-name is only valid when compiling a standalone executable"
+            assert.truthy(output:find(expected, 1, true), output)
+        end
+    end)
+
     it("rejects disabled async bootstrap for library output", function()
         local argv = working_titanc_arguments()
         argv[#argv + 1] = "--no-uv-bootstrap"

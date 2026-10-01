@@ -1,4 +1,5 @@
 local lfs = require "lfs"
+local platform = require "titan-compiler.platform"
 
 local compiler_io = {}
 
@@ -148,6 +149,17 @@ function Sync:cwd()
     return directory
 end
 
+-- Optional Windows spelling resolution, deliberately owned by this process's
+-- synchronous backend rather than imposed on an injected filesystem strategy.
+function Sync:absolute(path)
+    local valid, path_err = checked_path(path)
+    if not valid then return nil, path_err end
+    if platform.windows then return platform.native("_win_abspath", path) end
+    local cwd, err = self:cwd()
+    if not cwd then return nil, err end
+    return platform.absolute(path, cwd)
+end
+
 local function absolute_path(path, cwd)
     if path:sub(1, 1) == "/" then return path end
     if cwd == "/" then return "/" .. path end
@@ -228,6 +240,7 @@ end
 function Sync:realpath(path)
     local valid, path_err = checked_path(path)
     if not valid then return nil, path_err end
+    if platform.windows then return platform.native("_win_realpath", path) end
 
     local attributes, attribute_err = lfs_attributes(path, true)
     if not attributes then
@@ -241,6 +254,11 @@ end
 function Sync:stat(path)
     local valid, path_err = checked_path(path)
     if not valid then return nil, path_err end
+    if platform.windows then
+        local result, err, code = platform.native("_win_stat", path, true)
+        if not result and (code == 2 or code == 3) then return nil, nil end
+        return result, err
+    end
     local attributes, err = lfs_attributes(path, true)
     if not attributes then return nil, err end
     return normalized_stat(attributes)
@@ -249,6 +267,11 @@ end
 function Sync:lstat(path)
     local valid, path_err = checked_path(path)
     if not valid then return nil, path_err end
+    if platform.windows then
+        local result, err, code = platform.native("_win_stat", path, false)
+        if not result and (code == 2 or code == 3) then return nil, nil end
+        return result, err
+    end
     local attributes, err = lfs_attributes(path, false)
     if not attributes then return nil, err end
     return normalized_stat(attributes)
@@ -321,12 +344,19 @@ function Sync:write_file(path, contents)
     -- move that identity beside the destination. Writing and closing the
     -- sibling before rename means readers observe either the previous complete
     -- file or the replacement complete file, never a truncated intermediate.
-    local reservation, reservation_err = self:tmpname()
-    if not reservation then return nil, reservation_err end
-    local removed, remove_err = self:unlink(reservation)
-    if not removed then return nil, remove_err end
-    local unique = reservation:match("([^/]+)$") or reservation
-    local temporary = path .. "." .. unique .. ".tmp"
+    local temporary
+    if platform.windows then
+        local reserve_err
+        temporary, reserve_err = self:reserve_sibling(path)
+        if not temporary then return nil, reserve_err end
+    else
+        local reservation, reservation_err = self:tmpname()
+        if not reservation then return nil, reservation_err end
+        local removed, remove_err = self:unlink(reservation)
+        if not removed then return nil, remove_err end
+        local unique = reservation:match("([^/]+)$") or reservation
+        temporary = path .. "." .. unique .. ".tmp"
+    end
 
     local written, write_err = write_file_direct(temporary, contents)
     if not written then
@@ -395,14 +425,29 @@ function Sync:rename(from, to)
     if not valid_from then return nil, from_err end
     local valid_to, to_err = checked_path(to)
     if not valid_to then return nil, to_err end
+    if platform.windows then
+        return platform.native("_win_replace", from, to)
+    end
     return call_mutation("rename", lua_os.rename, from, to)
 end
 
 function Sync:tmpname()
+    if platform.windows then return platform.native("_win_tmpname") end
     local called, path, err = pcall(lua_os.tmpname)
     if not called then return nil, tostring(path) end
     if not path then return nil, operation_error("tmpname", err) end
     return path
+end
+
+-- Optional synchronous capability; injected strategies retain their existing
+-- required surface and keep ownership of their own temporary-file operations.
+function Sync:reserve_sibling(path, directory)
+    local valid, path_err = checked_path(path)
+    if not valid then return nil, path_err end
+    if not platform.windows then
+        return nil, "direct sibling reservation is a Windows capability"
+    end
+    return platform.native("_win_reserve_sibling", path, directory)
 end
 
 local function normalize_argv(value)
@@ -469,12 +514,23 @@ function Sync:run(argv, options)
         }
     end
 
-    local command = "env LANG=C LC_ALL=C " .. shell_command(normalized)
-    if options.stderr_to_stdout ~= false then
-        command = command .. " 2>&1"
+    local command
+    if platform.windows then
+        local command_err
+        command, command_err = platform.windows_command(normalized,
+            options.stderr_to_stdout ~= false)
+        if not command then
+            return { started = false, ok = false, diagnostic = command_err }
+        end
+    else
+        command = "env LANG=C LC_ALL=C " .. shell_command(normalized)
+        if options.stderr_to_stdout ~= false then
+            command = command .. " 2>&1"
+        end
     end
 
-    local opened, pipe, popen_err = pcall(lua_io.popen, command, "r")
+    local opened, pipe, popen_err = pcall(lua_io.popen, command,
+        platform.windows and "rb" or "r")
     if not opened or not pipe then
         return {
             started = false,
@@ -513,7 +569,9 @@ function Sync:run(argv, options)
         }
     end
 
-    local shell_status = not succeeded and why == "exit" and
+    -- Windows exit statuses are native values, not POSIX wait-status words.
+    -- In particular, an ordinary exit 143 is not evidence of SIGTERM there.
+    local shell_status = not platform.windows and not succeeded and why == "exit" and
         type(status) == "number" and status >= 129 and status <= 192 and
         status or nil
     local signal = not succeeded and (
@@ -525,7 +583,9 @@ function Sync:run(argv, options)
         why = "signal"
         status = signal
     end
-    local missing = not succeeded and why == "exit" and
+    -- Windows tools were resolved before execution. Every native exit value
+    -- remains a process result; cmd's missing-tool status is not distinctive.
+    local missing = not platform.windows and not succeeded and why == "exit" and
         (status == 126 or status == 127)
 
     return {

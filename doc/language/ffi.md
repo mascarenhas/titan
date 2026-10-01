@@ -744,8 +744,14 @@ end
 Field access works on C struct/union values, pointers to structs/unions, and
 owned C objects. For pointer and owned bases, `p.x` uses C's `->` semantics.
 
+Anonymous struct and union members promote their named fields into the
+containing aggregate, including nested combinations. A named struct or union
+member instead keeps its own field name. The configured C compiler remains
+authoritative for aggregate size, alignment, and field layout; importing a
+Windows declaration does not assume fixed Windows sizes or offsets.
+
 Bitfields are parsed and typed, but they remain C bitfields: assignment follows
-the C compiler's rules. Anonymous fields are not exposed as Titan members.
+the C compiler's rules. Unnamed bitfields are not exposed as Titan members.
 
 Named file-scope tag-only aggregates are available as `foreign Tag` without a C
 typedef. Such an aggregate local requires an initializer because the type does

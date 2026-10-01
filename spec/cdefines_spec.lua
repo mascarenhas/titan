@@ -177,46 +177,49 @@ describe("C declaration parsing", function()
         assert.is_true(instructions < 100000, tostring(instructions))
     end)
 
-    it("parses nested named inline-union members once", function()
-        local depth = 16
-        local field = "int leaf ; "
-        for index = depth, 1, -1 do
-            field =
-                "union { " .. field .. "} field" .. index .. " ; "
-        end
-        local parsed, instructions, err = call_with_instruction_count(
-            c99.match_language_grammar,
-            "struct Root { " .. field .. "} ; $EOF$")
+    for _, kind in ipairs({ "union", "struct" }) do
+        it("parses nested named inline-" .. kind .. " members once", function()
+            local depth = 16
+            local field = "int leaf ; "
+            for index = depth, 1, -1 do
+                field =
+                    kind .. " { " .. field .. "} field" .. index .. " ; "
+            end
+            local parsed, instructions, err = call_with_instruction_count(
+                c99.match_language_grammar,
+                "struct Root { " .. field .. "} ; $EOF$")
 
-        assert.is_truthy(parsed, err)
-        assert.equal(1, #parsed)
-        local outer = parsed[1].spec[1].fields[1]
-        assert.equal("field1", outer.ids[1].name)
-        assert.equal("union", outer.type[1].type)
-        -- Trying the complete body first as an anonymous union and then again
-        -- as a named field took over three million instructions at this depth.
-        assert.is_true(instructions < 100000, tostring(instructions))
-    end)
+            assert.is_truthy(parsed, err)
+            assert.equal(1, #parsed)
+            local outer = parsed[1].spec[1].fields[1]
+            assert.equal("field1", outer.ids[1].name)
+            assert.equal(kind, outer.type[1].type)
+            -- Trying the complete body first as an anonymous union and then again
+            -- as a named field took over three million instructions at this depth.
+            assert.is_true(instructions < 100000, tostring(instructions))
+        end)
 
-    it("preserves trailing inline-union specifier qualifiers", function()
-        local parsed, err = c99.match_language_grammar(
-            "struct Root { union { int leaf ; } const value ; } ; $EOF$")
+        it("preserves trailing inline-" .. kind .. " specifier qualifiers", function()
+            local parsed, err = c99.match_language_grammar(
+                "struct Root { " .. kind .. " { int leaf ; } const value ; } ; $EOF$")
 
-        assert.is_truthy(parsed, err)
-        assert.equal(1, #parsed)
-        local field = parsed[1].spec[1].fields[1]
-        assert.equal("value", field.ids[1].name)
-        assert.equal("union", field.type[1].type)
-        assert.equal("const", field.type[2])
-    end)
+            assert.is_truthy(parsed, err)
+            assert.equal(1, #parsed)
+            local field = parsed[1].spec[1].fields[1]
+            assert.equal("value", field.ids[1].name)
+            assert.equal(kind, field.type[1].type)
+            assert.equal("const", field.type[2])
+        end)
 
-    it("rejects an inline-union specifier tail without a declarator", function()
-        local parsed, err = c99.match_language_grammar(
-            "struct Root { union { int leaf ; } const ; } ; $EOF$")
+        it("rejects an inline-" .. kind .. " specifier tail without a declarator", function()
+            local parsed, err = c99.match_language_grammar(
+                "struct Root { " .. kind .. " { int leaf ; } const ; } ; $EOF$")
 
-        assert.is_truthy(parsed, err)
-        assert.equal(0, #parsed)
-    end)
+            assert.is_truthy(parsed, err)
+            assert.equal(0, #parsed)
+        end)
+    end
+
 end)
 
 describe("C declaration recovery", function()

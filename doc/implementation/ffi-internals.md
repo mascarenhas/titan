@@ -178,6 +178,7 @@ through the same normal compiler path.
   registered;
 * typedef and extern array dimensions are kept in `idxs`;
 * field declarators keep names, pointer suffixes and array suffixes;
+* anonymous struct and union members promote their fields in source order;
 * bitfields store `bitfield`, `width` and `anonymous`;
 * flexible array members are marked with `flexible_array = true`;
 * function-pointer typedefs are represented as `functionptr` CTypes;
@@ -187,6 +188,14 @@ through the same normal compiler path.
   and an eligible complete list of fixed-parameter spellings;
 * simple enum values, including typedef-enum values, are stored on the enum
   type's `values` list.
+
+The C grammar parses each inline struct/union body once before distinguishing
+an anonymous member from an ordinary named member. Qualifiers after the body
+still require a declarator; a tagged forward declaration is not an anonymous
+member. Field promotion uses the existing aggregate conversion path and
+propagates nested conversion errors. It does not calculate layout by flattening
+storage: generated C keeps the original aggregate declaration, and configured
+compiler probes supply authoritative size, alignment, and field facts.
 
 Array extents and enum values are constant-folded when possible. Unknown but
 syntactically present extents are preserved rather than thrown away; the checker
@@ -206,7 +215,7 @@ later macro invalidates cannot be certified by an earlier producer or alias.
 The query declares that surface once and compares its address type against all
 eligible primitive carrier pointer types with `__builtin_types_compatible_p`.
 Stable IDs 1–11 identify the ordered canonical carriers independently of the
-filtered list. A 12-byte versioned array in ELF `.titan.cprobe` or Mach-O
+filtered list. A 12-byte versioned array in ELF/COFF `.titan.cprobe` or Mach-O
 `__DATA,__titancprobe` records the match count and matching-ID sum. It is marked
 `used` and byte-aligned. After `-c`, the bounded object reader requires one
 initialized, uncompressed, relocation-free section with the exact payload;
@@ -1056,10 +1065,11 @@ left for a later FFI iteration.
   part of the FFI contract.
 * Parser support is bounded. A declaration outside its C/GNU/Clang subset may
   be unavailable to Titan even if the configured native compiler accepts it.
-* Enum selection requires a valid ELF/Mach-O result object. Missing, malformed,
-  oversized, duplicated, or relocated result data is retryable infrastructure
-  failure. A cached result deliberately does not detect external header or
-  compiler-policy changes; clear the source-result cache when necessary.
+* Enum selection requires a valid ELF, Mach-O, or ordinary COFF result object.
+  Missing, malformed, oversized, duplicated, or relocated result data is
+  retryable infrastructure failure. A cached result deliberately does not
+  detect external header or compiler-policy changes; clear the source-result
+  cache when necessary.
 
 ## `typed.lua`
 

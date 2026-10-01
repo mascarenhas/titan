@@ -1094,6 +1094,28 @@ esac
                 "TITAN_TEST_FOREIGN_" .. module .. " := 1", 1, true) ~= nil
             assert.equal(foreign, has_foreign, module)
         end
+        -- The Windows behavior runner owns these additional roots. Keep them
+        -- out of the Unix object graph while still accounting for every source.
+        local windows_owners = {}
+        local windows_manifest = read_file("spec/support/windows_stdlib_modules.tsv")
+        for line in windows_manifest:gmatch("[^\r\n]+") do
+            if line:sub(1, 1) ~= "#" then
+                local module, source = line:match("^([^\t]+)\t([^\t]+)$")
+                assert.truthy(module, line)
+                assert.truthy(module:match("^[%a_][%w_.]*$"), module)
+                assert.falsy(module:find("..", 1, true), module)
+                assert.falsy(module:sub(-1) == ".", module)
+                assert.equal("spec/stdlib/titan/" .. module:gsub("%.", "/") ..
+                    ".titan", source)
+                assert.falsy(owners[module], module)
+                assert.falsy(windows_owners[module], module)
+                assert.falsy(listed[source], source)
+                assert.equal("file", lfs.attributes(source, "mode"), source)
+                windows_owners[module] = true
+                listed[source] = true
+            end
+        end
+        assert.truthy(next(windows_owners), "missing Windows test source inventory")
         local discovered = {}
         local function visit(directory)
             for entry in lfs.dir(directory) do
@@ -1294,16 +1316,27 @@ done
     it("changes only an inherited default SIGPIPE disposition", function()
         local uv = read_file(UV_MAIN_SOURCE)
         for _, contract in ipairs({
-            "local current = foreign Sigaction.new()",
-            "ffi.sigaction(ffi.SIGPIPE, nil, current)",
-            "if current.sa_handler ~= ffi.SIG_DFL then return 0 end",
-            "current.sa_handler = ffi.SIG_IGN",
-            "ffi.sigaction(ffi.SIGPIPE, current, nil)",
+            'foreign import "signal_platform.h"',
+            "return ffi.titan_uv_ignore_sigpipe_if_default()",
+            "local sigpipe_status = ignore_sigpipe_if_default()",
+            "if sigpipe_status < 0 then",
+            'raise make_error(sigpipe_status, "runtime.sigpipe")',
         }) do
             assert.truthy(uv:find(contract, 1, true), contract)
         end
         assert.falsy(uv:find("Sigset", 1, true), uv)
-        assert.falsy(uv:find("sigemptyset", 1, true), uv)
+        local platform = read_file("titan/uv/signal_platform.h")
+        assert_ordered(platform,
+            "#else",
+            "struct sigaction current;",
+            "if (sigaction(SIGPIPE, NULL, &current) != 0)",
+            "return uv_translate_sys_error(errno);",
+            "if (current.sa_handler != SIG_DFL)",
+            "return 0;",
+            "current.sa_handler = SIG_IGN;",
+            "if (sigaction(SIGPIPE, &current, NULL) != 0)",
+            "return uv_translate_sys_error(errno);")
+        assert.falsy(platform:find("sigemptyset", 1, true), platform)
     end)
 
     it("keeps only async's nominal dependencies public in uv", function()
@@ -2473,8 +2506,8 @@ int main(void) {
             "tmpdir", "hostname", "exepath", "pid", "ppid",
             "with_stdin", "with_stdout", "with_stderr",
             "with_parent_stdin", "with_parent_stdout", "with_parent_stderr",
-            "with_merged_output", "spawn", "Process:wait", "Process:kill",
-            "Process:is_running", "OutputStream:write",
+            "with_merged_output", "with_env", "spawn", "Process:wait",
+            "Process:kill", "Process:is_running", "OutputStream:write",
             "OutputStream:close", "OutputStream:is_tty", "InputStream:read",
             "InputStream:read_until", "InputStream:close",
             "InputStream:is_tty", "exit",
@@ -4531,7 +4564,10 @@ done
                 assert.truthy(provider_smoke:find(contract, 1, true), contract)
             end
 
-            local workflow = read_file(".github/workflows/ci.yml")
+            local linux_workflow = read_file(".github/workflows/ci.yml")
+            local macos_workflow = read_file(".github/workflows/macos.yml")
+            -- Retain aggregate contracts across the independently triggered lanes.
+            local workflow = linux_workflow .. "\n" .. macos_workflow
             local function count_literal(text, needle)
                 local count = 0
                 local offset = 1
@@ -4565,31 +4601,49 @@ done
                 assert.falsy(job:find("\n%s+token:", 1), job)
             end
 
-            local stdlib_job = assert(workflow:match(
+            local stdlib_job = assert(linux_workflow:match(
                 "\n  test%-linux%-stdlib:(.-)" ..
                 "\n  test%-linux%-compiler:"))
-            local compiler_job = assert(workflow:match(
+            local compiler_job = assert(linux_workflow:match(
                 "\n  test%-linux%-compiler:(.-)\n  compiler%-coverage:"))
-            local coverage_job = assert(workflow:match(
-                "\n  compiler%-coverage:(.-)\n  # macOS"))
-            local macos_job = assert(workflow:match(
-                "\n  test%-macos:(.-)\n  sanitizer:"))
-            local sanitizer_job = assert(workflow:match(
+            local coverage_job = assert(linux_workflow:match(
+                "\n  compiler%-coverage:(.-)\n  sanitizer:"))
+            local macos_job = assert(macos_workflow:match(
+                "\n  test%-macos:(.*)"))
+            local sanitizer_job = assert(linux_workflow:match(
                 "\n  sanitizer:(.*)"))
 
-            assert.equal(4, count_literal(workflow,
-                "if: github.event_name == 'push'"), workflow)
-            assert.equal(1, count_literal(workflow,
-                "if: github.event_name == 'workflow_dispatch'"), workflow)
-            assert.equal(5, count_literal(workflow, "\n    runs-on:"),
-                workflow)
+            assert.equal(1, count_literal(linux_workflow, "\n  push:"),
+                linux_workflow)
+            assert.falsy(linux_workflow:find("workflow_dispatch", 1, true),
+                linux_workflow)
+            local macos_events = assert(macos_workflow:match("\non:(.-)\nenv:"))
+            assert.truthy(macos_events:match("^%s*workflow_dispatch:%s*$"),
+                macos_events)
+            assert.equal(4, count_literal(linux_workflow,
+                "if: github.event_name == 'push'"), linux_workflow)
+            assert.equal(1, count_literal(macos_workflow,
+                "if: github.event_name == 'workflow_dispatch'"), macos_workflow)
+            assert.equal(4, count_literal(linux_workflow, "\n    runs-on:"),
+                linux_workflow)
+            assert.equal(1, count_literal(macos_workflow, "\n    runs-on:"),
+                macos_workflow)
             for _, job_name in ipairs({
                 "test-linux-stdlib", "test-linux-compiler", "compiler-coverage",
-                "test-macos", "sanitizer",
+                "sanitizer",
             }) do
-                assert.equal(1, count_literal(workflow,
+                assert.equal(1, count_literal(linux_workflow,
                     "\n  " .. job_name .. ":"), job_name)
+                assert.falsy(macos_workflow:find(
+                    "\n  " .. job_name .. ":", 1, true), job_name)
             end
+            assert.equal(1, count_literal(macos_workflow, "\n  test-macos:"),
+                macos_workflow)
+            assert.falsy(linux_workflow:find("\n  test-macos:", 1, true),
+                linux_workflow)
+            assert.falsy(macos_job:find("\n    needs:", 1, true), macos_job)
+            assert.equal(1, count_literal(macos_workflow,
+                'TITAN_ABI_VERSION: "2"'), macos_workflow)
             for _, removed in ipairs({
                 "prepare-linux", "test-linux-library", "ubuntu-slim",
                 "compiler-core", "compiler-heavy", "library-serial",
@@ -5154,8 +5208,8 @@ done
                     assert.is_true(tonumber(seconds) >= 0)
                 end
             end
-            assert.same({ 32, 35, 31, 43 }, shard_counts)
-            assert.equal(141, assigned_count)
+            assert.same({ 32, 36, 31, 43 }, shard_counts)
+            assert.equal(142, assigned_count)
 
             local stress_partition = read_file(
                 "spec/support/ci_compiler_stress_files.txt")

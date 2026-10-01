@@ -90,6 +90,24 @@ local HARNESS = [=[
 #include "ltable.h"
 #include "titan.h"
 
+#ifdef TITAN_RUNTIME_VISIBILITY_PROBE
+#include <dlfcn.h>
+
+int titan_runtime_export_probe(void) {
+    return 1;
+}
+
+static void test_runtime_visibility(void) {
+    void *image = dlopen(NULL, RTLD_LAZY);
+    assert(image != NULL);
+    assert(dlsym(image, "titan_runtime_export_probe") != NULL);
+    assert(dlsym(image, "titan_array_growth") == NULL);
+    assert(dlsym(image, "titan_module_provider") == NULL);
+    assert(dlsym(image, "titan_publish_function_type_tag") == NULL);
+    assert(dlclose(image) == 0);
+}
+#endif
+
 static char backing_root_key;
 static char proxy_root_key;
 static char weak_root_key;
@@ -1231,6 +1249,9 @@ static void test_function_type_tag_publication(void) {
 }
 
 int main(void) {
+#ifdef TITAN_RUNTIME_VISIBILITY_PROBE
+    test_runtime_visibility();
+#endif
     test_array_metatable_publication();
     test_array_metatable_allocation_retry();
     test_capacity_length_and_hash();
@@ -1256,7 +1277,7 @@ local LUA_SOURCES = {
     "loadlib", "loslib", "lstrlib", "ltablib", "lutf8lib", "linit",
 }
 
-local function compile_and_run(hard_memory)
+local function compile_and_run(hard_memory, expose_lua_internals)
     local root = make_temp_dir()
     local source = root .. "/dense_array_runtime.c"
     local executable = root .. "/dense_array_runtime"
@@ -1277,6 +1298,19 @@ local function compile_and_run(hard_memory)
         argv[#argv + 1] = "-DTITAN_ARRAY_HARDMEM_PROBE"
         argv[#argv + 1] = platform == "Darwin"
             and "-DLUA_USE_MACOSX" or "-DLUA_USE_LINUX"
+    end
+    if expose_lua_internals then
+        local header = root .. "/lua_exports.h"
+        write_file(header, [[
+#define LUAI_FUNC __attribute__((visibility("default"))) extern
+#define LUAI_DDEC(dec) LUAI_FUNC dec
+#define LUAI_DDEF
+]])
+        argv[#argv + 1] = "-include"
+        argv[#argv + 1] = header
+        argv[#argv + 1] = "-DTITAN_RUNTIME_VISIBILITY_PROBE"
+        argv[#argv + 1] = platform == "Darwin"
+            and "-Wl,-export_dynamic" or "-Wl,--export-dynamic"
     end
     append_words(argv, os.getenv("TITAN_TEST_EXTRA_CFLAGS"),
         "TITAN_TEST_EXTRA_CFLAGS")
@@ -1360,5 +1394,10 @@ describe("dense Array stock-Lua runtime", function()
     it("keeps both construction objects rooted under HARDMEMTESTS",
         function()
             compile_and_run(true)
+        end)
+
+    it("keeps embedded runtime helpers private when Lua internals are exposed",
+        function()
+            compile_and_run(false, true)
         end)
 end)

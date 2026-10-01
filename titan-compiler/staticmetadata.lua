@@ -16,6 +16,17 @@ local type = type
 local ELF_MAGIC = "\127ELF"
 local ARCHIVE_MAGIC = "!<arch>\n"
 local THIN_ARCHIVE_MAGIC = "!<thin>\n"
+local COFF_SPECIAL_MAGIC = "\0\0\255\255"
+local COFF_BIGOBJ_UUID = "\199\161\186\209\238\186\169\75" ..
+    "\175\32\250\246\106\164\220\184"
+local COFF_MACHINES = {
+    [0x14c] = 32, -- IMAGE_FILE_MACHINE_I386
+    [0x8664] = 64, -- IMAGE_FILE_MACHINE_AMD64
+    [0xaa64] = 64, -- IMAGE_FILE_MACHINE_ARM64
+}
+local COFF_INITIALIZED_DATA = 0x40
+local COFF_UNINITIALIZED_DATA = 0x80
+local COFF_RELOCATION_OVERFLOW = 0x01000000
 
 local MACH_MAGICS = {
     ["\206\250\237\254"] = { word_size = 32, endian = "little" },
@@ -176,7 +187,7 @@ function staticmetadata.source_declaration(payload, symbol)
 #if defined(__APPLE__)
 #define TITAN_SOURCE_META_SECTION \
     __attribute__((used, aligned(1), section("__TEXT,__titansrc")))
-#elif defined(__ELF__)
+#elif defined(__ELF__) || defined(_WIN32)
 #define TITAN_SOURCE_META_SECTION \
     __attribute__((used, aligned(1), section(".titan.source")))
 #else
@@ -489,6 +500,14 @@ function staticmetadata.fingerprint_matches(actual, expected)
         }) do
             if actual[field] ~= expected[field] then
                 return false, "Mach-O " .. field .. " " ..
+                    tostring(actual[field]) .. " does not match target " ..
+                    tostring(expected[field])
+            end
+        end
+    elseif actual.format == "coff" then
+        for _, field in ipairs({ "word_size", "endian", "machine" }) do
+            if actual[field] ~= expected[field] then
+                return false, "COFF " .. field .. " " ..
                     tostring(actual[field]) .. " does not match target " ..
                     tostring(expected[field])
             end
@@ -883,6 +902,130 @@ local function parse_macho(bytes, origin, target, options)
     }
 end
 
+local function check_coff_payload_section(section, origin, label)
+    -- Code and zero-fill records are not serialized byte arrays.
+    if (section.flags & 0xe0) ~= COFF_INITIALIZED_DATA then
+        fail(origin, label .. " is not initialized COFF data")
+    end
+    if section.relocation_count ~= 0 then
+        fail(origin, label .. " has relocations")
+    end
+end
+
+local function parse_coff(bytes, origin, target, options)
+    local reader = Reader.new(bytes, origin)
+    reader:range(0, 20, "COFF header")
+    local machine = reader:uint(0, 2, "little", "COFF machine")
+    local word_size = COFF_MACHINES[machine]
+    if not word_size then fail(origin, "unsupported COFF machine " .. machine) end
+    local section_count = reader:uint(2, 2, "little", "COFF section count")
+    local symbol_offset = reader:uint(8, 4, "little", "COFF symbol table offset")
+    local symbol_count = reader:uint(12, 4, "little", "COFF symbol count")
+    local optional_size = reader:uint(16, 2, "little", "COFF optional header size")
+    local flags = reader:uint(18, 2, "little", "COFF characteristics")
+    if optional_size ~= 0 or (flags & 0x2002) ~= 0 then
+        fail(origin, "COFF file is not a relocatable object")
+    end
+    if (flags & 0x8080) ~= 0 then
+        fail(origin, "byte-reversed COFF objects are not supported")
+    end
+    if section_count == 0 then fail(origin, "COFF section table is empty") end
+    local table_size = checked_product(
+        section_count, 40, reader.length - 20, origin, "COFF section table")
+    reader:range(20, table_size, "COFF section table")
+
+    local strings
+    if symbol_offset == 0 then
+        if symbol_count ~= 0 then fail(origin, "COFF symbol table has no offset") end
+    else
+        local symbol_size = checked_product(symbol_count, 18,
+            reader.length - math.min(symbol_offset, reader.length),
+            origin, "COFF symbol table")
+        reader:range(symbol_offset, symbol_size, "COFF symbol table")
+        local string_offset = symbol_offset + symbol_size
+        local string_size = reader:uint(
+            string_offset, 4, "little", "COFF string table size")
+        if string_size < 4 then fail(origin, "COFF string table size is less than 4") end
+        strings = reader:slice(string_offset, string_size, "COFF string table")
+    end
+
+    local sections, metadata_section = {}, nil
+    for index = 1, section_count do
+        local offset = 20 + (index - 1) * 40
+        local name = fixed_name(reader:slice(offset, 8, "COFF section name"))
+        if name:sub(1, 1) == "/" then
+            local digits = name:match("^/(%d+)$")
+            local name_offset = digits and tonumber(digits)
+            if not name_offset or name_offset < 4 then
+                fail(origin, "invalid COFF long section name offset")
+            end
+            if not strings then fail(origin, "COFF long section name has no string table") end
+            name = c_string(strings, name_offset, origin, "COFF section name")
+        end
+        local section = {
+            index = index,
+            name = name,
+            size = reader:uint(offset + 16, 4, "little", "COFF section size"),
+            offset = reader:uint(offset + 20, 4, "little", "COFF section offset"),
+            relocation_offset = reader:uint(offset + 24, 4, "little", "COFF relocation offset"),
+            relocation_count = reader:uint(offset + 32, 2, "little", "COFF relocation count"),
+            flags = reader:uint(offset + 36, 4, "little", "COFF section characteristics"),
+        }
+        if (section.flags & COFF_UNINITIALIZED_DATA) == 0 and section.size ~= 0 then
+            reader:range(section.offset, section.size, "COFF section #" .. index .. " data")
+        end
+        local relocation_count = section.relocation_count
+        if (section.flags & COFF_RELOCATION_OVERFLOW) ~= 0 then
+            if relocation_count ~= 0xffff then
+                fail(origin, "invalid COFF relocation overflow count")
+            end
+            relocation_count = reader:uint(section.relocation_offset, 4,
+                "little", "COFF extended relocation count")
+            if relocation_count <= 0xffff then
+                fail(origin, "invalid COFF extended relocation count")
+            end
+            section.relocation_count = relocation_count - 1
+        end
+        if relocation_count ~= 0 then
+            local size = checked_product(relocation_count, 10,
+                reader.length - math.min(section.relocation_offset, reader.length),
+                origin, "COFF relocation table")
+            reader:range(section.relocation_offset, size, "COFF relocation table")
+        end
+        local line_offset = reader:uint(offset + 28, 4, "little", "COFF line-number offset")
+        local line_count = reader:uint(offset + 34, 2, "little", "COFF line-number count")
+        if line_count ~= 0 then
+            local size = checked_product(line_count, 6,
+                reader.length - math.min(line_offset, reader.length),
+                origin, "COFF line-number table")
+            reader:range(line_offset, size, "COFF line-number table")
+        end
+        sections[#sections + 1] = section
+        if section.name == ".titan.meta" then
+            local section_origin = origin .. ": COFF section #" .. index ..
+                " " .. format("%q", section.name)
+            if metadata_section then
+                fail(section_origin, "object contains more than one Titan metadata section")
+            end
+            check_coff_payload_section(section, section_origin, "Titan metadata section")
+            section.origin = section_origin
+            section.payload = reader:slice(section.offset, section.size, "Titan metadata section")
+            section.entry = validate_metadata_or_fail(section.payload, section_origin, options)
+            metadata_section = section
+        end
+    end
+    local fingerprint = {
+        format = "coff", word_size = word_size, endian = "little", machine = machine,
+    }
+    check_target_or_fail(fingerprint, target, origin)
+    return {
+        kind = "object", format = "coff", bytes = bytes, origin = origin,
+        fingerprint = fingerprint, sections = sections,
+        metadata_section = metadata_section,
+        metadata = metadata_section and metadata_section.entry or nil,
+    }
+end
+
 local function object_magic_kind(bytes)
     local magic = sub(bytes, 1, 4)
     if magic == ELF_MAGIC then return "elf" end
@@ -892,6 +1035,13 @@ local function object_magic_kind(bytes)
     if sub(bytes, 1, #THIN_ARCHIVE_MAGIC) == THIN_ARCHIVE_MAGIC then
         return "thin"
     end
+    if magic == COFF_SPECIAL_MAGIC then
+        return sub(bytes, 13, 28) == COFF_BIGOBJ_UUID and "coff_bigobj" or "coff_import"
+    end
+    if sub(bytes, 1, 2) == "MZ" then return "pe" end
+    if #bytes >= 2 and COFF_MACHINES[byte(bytes, 1) + byte(bytes, 2) * 256] then
+        return "coff"
+    end
 end
 
 local function classify_object_internal(bytes, origin, target, options)
@@ -900,6 +1050,14 @@ local function classify_object_internal(bytes, origin, target, options)
         return parse_elf(bytes, origin, target, options)
     elseif kind == "macho" then
         return parse_macho(bytes, origin, target, options)
+    elseif kind == "coff" then
+        return parse_coff(bytes, origin, target, options)
+    elseif kind == "coff_bigobj" then
+        fail(origin, "COFF BigObj objects are not supported")
+    elseif kind == "coff_import" then
+        fail(origin, "COFF import objects are not supported")
+    elseif kind == "pe" then
+        fail(origin, "PE image is not a relocatable object")
     elseif kind == "archive" then
         fail(origin, "nested archive member is not supported")
     elseif kind == "thin" then
@@ -928,6 +1086,7 @@ function staticmetadata.read_object_section(bytes, origin, names, max_bytes)
         if type(names) ~= "table" or type(names.elf) ~= "string" or
            type(names.macho_segment) ~= "string" or
            type(names.macho_section) ~= "string" or
+           (names.coff ~= nil and type(names.coff) ~= "string") or
            math.type(max_bytes) ~= "integer" or max_bytes < 0 then
             fail(origin, "invalid object section request")
         end
@@ -939,6 +1098,7 @@ function staticmetadata.read_object_section(bytes, origin, names, max_bytes)
                 or object.format == "macho"
                 and section.segname == names.macho_segment
                 and section.sectname == names.macho_section
+                or object.format == "coff" and section.name == names.coff
             if matches then
                 if selected then fail(origin, "duplicate requested object section") end
                 if section.size > max_bytes then
@@ -951,6 +1111,8 @@ function staticmetadata.read_object_section(bytes, origin, names, max_bytes)
                     if (section.flags & SHF_COMPRESSED) ~= 0 then
                         fail(origin, "requested object section is compressed")
                     end
+                elseif object.format == "coff" then
+                    check_coff_payload_section(section, origin, "requested object section")
                 else
                     if section.section_type ~= S_REGULAR then
                         fail(origin, "requested object section is not S_REGULAR")
@@ -1466,7 +1628,8 @@ local function scan_bytes_internal(bytes, origin, options)
         fail(origin, "thin archives are not supported")
     elseif kind == "fat" then
         return parse_fat(bytes, origin, options)
-    elseif kind == "elf" or kind == "macho" then
+    elseif kind == "elf" or kind == "macho" or kind == "coff" or
+           kind == "coff_bigobj" or kind == "coff_import" or kind == "pe" then
         return classify_object_internal(
             bytes, origin, options.target, options)
     else

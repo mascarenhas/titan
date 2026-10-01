@@ -370,6 +370,8 @@ UV_TITAN_SOURCES := \
 	titan/uv/task.titan \
 	titan/uv/tcp.titan \
 	titan/uv/work.titan
+UV_TITAN_HEADERS := titan/uv/process_environment.h \
+	titan/uv/process_platform.h titan/uv/signal_platform.h
 STDLIB_HTTP_SOURCES := titan/http/http.titan titan/http/client.titan \
 	titan/http/headers.titan titan/http/native.titan \
 	titan/http/server.titan
@@ -885,12 +887,13 @@ $(READLINE_EXTRACTED): $(READLINE_TARBALL) $(READLINE_PATCH_FILE)
 # atomically publishing the validated include/library tree. Its ordinary build
 # is parallel-safe, but its install targets race while replacing libhistory.a;
 # keep only that staging pass serial.
+# Keep recipe command substitutions on one physical line: Apple GNU Make 3.81
+# can corrupt the recipe tail when collapsing their escaped newlines.
 readline-bundled-install: check-readline-tools $(READLINE_EXTRACTED)
 	@set -e; \
 	echo "==> Building staged static GNU Readline $(READLINE_RELEASE) for $(PREFIX)"; \
 	mkdir -p "$(dir $(READLINE_PRIVATE_ROOT))"; \
-	stage="$$(mktemp -d \
-	  "$(dir $(READLINE_PRIVATE_ROOT)).readline-$(READLINE_RELEASE).stage.XXXXXX")"; \
+	stage="$$(mktemp -d "$(dir $(READLINE_PRIVATE_ROOT)).readline-$(READLINE_RELEASE).stage.XXXXXX")"; \
 	backup=; \
 	cleanup() { \
 	  if test -n "$$backup" && test -e "$$backup" && \
@@ -1032,8 +1035,7 @@ $(LUA_BUILD_CONFIG): $(LUA_EXTRACTED) $(READLINE_SELECTION_CONFIG) FORCE
 	     print line; }' "$$header" > "$$tmp_header"; \
 	grep -q '^#define LUA_ROOT' "$$tmp_header"; \
 	grep -q '^#define LUA_TITAN_CDIR' "$$tmp_header"; \
-	test "$$(grep -Ec 'LUA_TITAN_CDIR[[:space:]]*"[?][.]so;"' \
-	              "$$tmp_header")" -eq 1; \
+	test "$$(grep -Ec 'LUA_TITAN_CDIR[[:space:]]*"[?][.]so;"' "$$tmp_header")" -eq 1; \
 	if test -r "$@" && cmp -s "$$tmp" "$@" && \
 	   cmp -s "$$tmp_header" "$$header"; then \
 	  rm -f "$$tmp" "$$tmp_header"; \
@@ -1488,23 +1490,20 @@ $(LLHTTP_ARCHIVE): FORCE $(LLHTTP_OBJECTS) $(LLHTTP_ARCHIVE_CONFIG)
 	@set -e; \
 	expected="$$(printf '%s\n' $(notdir $(LLHTTP_OBJECTS)))"; actual=""; \
 	if test -f "$@" && test ! -L "$@"; then \
-	  actual="$$( $(AR) t "$@" 2>/dev/null | \
-	    awk '$$0 !~ /^__[.]SYMDEF(_64)?( SORTED)?$$/' )"; \
+	  actual="$$( $(AR) t "$@" 2>/dev/null | awk '$$0 !~ /^__[.]SYMDEF(_64)?( SORTED)?$$/' )"; \
 	fi; \
 	newer=$(call make_shell_quote,$(filter-out FORCE,$?)); \
 	if test -n "$$newer" || test "$$actual" != "$$expected"; then \
 	  tmp="$@.tmp"; rm -f "$$tmp"; \
 	  ar_mode="$$(sed -n 's/^AR_MODE=//p' "$(LLHTTP_ARCHIVE_CONFIG)")"; \
-	  ranlib_mode="$$(sed -n 's/^RANLIB_MODE=//p' \
-	    "$(LLHTTP_ARCHIVE_CONFIG)")"; \
+	  ranlib_mode="$$(sed -n 's/^RANLIB_MODE=//p' "$(LLHTTP_ARCHIVE_CONFIG)")"; \
 	  $(AR) "$$ar_mode" "$$tmp" $(LLHTTP_OBJECTS); \
 	  if test "$$ranlib_mode" = -D; then \
 	    $(RANLIB) -D "$$tmp"; \
 	  else \
 	    $(RANLIB) "$$tmp"; \
 	  fi; \
-	  actual="$$( $(AR) t "$$tmp" 2>/dev/null | \
-	    awk '$$0 !~ /^__[.]SYMDEF(_64)?( SORTED)?$$/' )"; \
+	  actual="$$( $(AR) t "$$tmp" 2>/dev/null | awk '$$0 !~ /^__[.]SYMDEF(_64)?( SORTED)?$$/' )"; \
 	  test "$$actual" = "$$expected" || { \
 	    rm -f "$$tmp"; \
 	    echo "ERROR: private llhttp archive has wrong member order" >&2; \
@@ -1643,23 +1642,20 @@ $(SQLITE3_ARCHIVE): FORCE $(SQLITE3_OBJECTS) $(SQLITE3_ARCHIVE_CONFIG)
 	@set -e; \
 	expected="$$(printf '%s\n' $(notdir $(SQLITE3_OBJECTS)))"; actual=""; \
 	if test -f "$@" && test ! -L "$@"; then \
-	  actual="$$( $(AR) t "$@" 2>/dev/null | \
-	    awk '$$0 !~ /^__[.]SYMDEF(_64)?( SORTED)?$$/' )"; \
+	  actual="$$( $(AR) t "$@" 2>/dev/null | awk '$$0 !~ /^__[.]SYMDEF(_64)?( SORTED)?$$/' )"; \
 	fi; \
 	newer=$(call make_shell_quote,$(filter-out FORCE,$?)); \
 	if test -n "$$newer" || test "$$actual" != "$$expected"; then \
 	  tmp="$@.tmp"; rm -f "$$tmp"; \
 	  ar_mode="$$(sed -n 's/^AR_MODE=//p' "$(SQLITE3_ARCHIVE_CONFIG)")"; \
-	  ranlib_mode="$$(sed -n 's/^RANLIB_MODE=//p' \
-	    "$(SQLITE3_ARCHIVE_CONFIG)")"; \
+	  ranlib_mode="$$(sed -n 's/^RANLIB_MODE=//p' "$(SQLITE3_ARCHIVE_CONFIG)")"; \
 	  $(AR) "$$ar_mode" "$$tmp" $(SQLITE3_OBJECTS); \
 	  if test "$$ranlib_mode" = -D; then \
 	    $(RANLIB) -D "$$tmp"; \
 	  else \
 	    $(RANLIB) "$$tmp"; \
 	  fi; \
-	  actual="$$( $(AR) t "$$tmp" 2>/dev/null | \
-	    awk '$$0 !~ /^__[.]SYMDEF(_64)?( SORTED)?$$/' )"; \
+	  actual="$$( $(AR) t "$$tmp" 2>/dev/null | awk '$$0 !~ /^__[.]SYMDEF(_64)?( SORTED)?$$/' )"; \
 	  test "$$actual" = "$$expected" || { \
 	    rm -f "$$tmp"; \
 	    echo "ERROR: private sqlite3 archive has wrong member order" >&2; \
@@ -1907,25 +1903,21 @@ $(LPEGLABEL_ARCHIVE): FORCE $(LPEGLABEL_OBJECTS) \
 	expected="$$(printf '%s\n' $(notdir $(LPEGLABEL_OBJECTS)))"; \
 	actual=""; \
 	if test -f "$@" && test ! -L "$@"; then \
-	  actual="$$( $(AR) t "$@" 2>/dev/null | \
-	    awk '$$0 !~ /^__[.]SYMDEF(_64)?( SORTED)?$$/' )"; \
+	  actual="$$( $(AR) t "$@" 2>/dev/null | awk '$$0 !~ /^__[.]SYMDEF(_64)?( SORTED)?$$/' )"; \
 	fi; \
 	newer=$(call make_shell_quote,$(filter-out FORCE,$?)); \
 	if test -n "$$newer" || test "$$actual" != "$$expected"; then \
 	  tmp="$@.tmp"; \
 	  rm -f "$$tmp"; \
-	  ar_mode="$$(sed -n 's/^AR_MODE=//p' \
-	    "$(LPEGLABEL_ARCHIVE_CONFIG)")"; \
-	  ranlib_mode="$$(sed -n 's/^RANLIB_MODE=//p' \
-	    "$(LPEGLABEL_ARCHIVE_CONFIG)")"; \
+	  ar_mode="$$(sed -n 's/^AR_MODE=//p' "$(LPEGLABEL_ARCHIVE_CONFIG)")"; \
+	  ranlib_mode="$$(sed -n 's/^RANLIB_MODE=//p' "$(LPEGLABEL_ARCHIVE_CONFIG)")"; \
 	  $(AR) "$$ar_mode" "$$tmp" $(LPEGLABEL_OBJECTS); \
 	  if test "$$ranlib_mode" = -D; then \
 	    $(RANLIB) -D "$$tmp"; \
 	  else \
 	    $(RANLIB) "$$tmp"; \
 	  fi; \
-	  actual="$$( $(AR) t "$$tmp" 2>/dev/null | \
-	    awk '$$0 !~ /^__[.]SYMDEF(_64)?( SORTED)?$$/' )"; \
+	  actual="$$( $(AR) t "$$tmp" 2>/dev/null | awk '$$0 !~ /^__[.]SYMDEF(_64)?( SORTED)?$$/' )"; \
 	  if test "$$actual" != "$$expected"; then \
 	    rm -f "$$tmp"; \
 	    echo "ERROR: private LPegLabel archive has wrong member order" >&2; \
@@ -2205,7 +2197,7 @@ ifeq ($(OPENSSL_MODE),bundled)
 else
   STDLIB_OPENSSL_HEADER_DIRS = $(shell $(OPENSSL_PKG_CONFIG) --variable=includedir openssl 2>/dev/null)
 endif
-STDLIB_C_INPUTS_uv = $(foreach dir,$(STDLIB_UV_HEADER_DIRS),$(wildcard $(dir)/uv.h $(dir)/uv/*.h))
+STDLIB_C_INPUTS_uv = $(UV_TITAN_HEADERS) $(foreach dir,$(STDLIB_UV_HEADER_DIRS),$(wildcard $(dir)/uv.h $(dir)/uv/*.h))
 STDLIB_C_INPUTS_fs = $(STDLIB_C_INPUTS_uv)
 STDLIB_C_INPUTS_peg = $(LPEGLABEL_HEADERS)
 STDLIB_C_INPUTS_http = $(LLHTTP_HEADER)
@@ -2605,8 +2597,7 @@ $(TITAN_TEST_BUILD_DIR)/uv_stdio_probe.o: spec/fixtures/stdlib/native/uv_stdio_p
 	  -Ispec/fixtures/stdlib/native -c "$<" -o "$@"
 $(TITAN_TEST_BUILD_DIR)/sqlite3_worker_fixture.o: spec/fixtures/stdlib/native/sqlite3_worker_fixture.c $(TITAN_TEST_BUILD_DIR)/sqlite3_worker_fixture.h $(SQLITE3_HEADER) $(TITAN_TEST_COMPILER_PREREQS) $(TITAN_TEST_CONFIG_STAMP)
 	@set -e; \
-	fixture_lua_include="$$( $(TEST_LUA) -E -e \
-	  'io.write(assert(require("titan-compiler.driver").LUA_SOURCE_PATH))' )"; \
+	fixture_lua_include="$$( $(TEST_LUA) -E -e 'io.write(assert(require("titan-compiler.driver").LUA_SOURCE_PATH))' )"; \
 	test -n "$$fixture_lua_include" && test -f "$$fixture_lua_include/lua.h"; \
 	$(CC) -std=c99 -Wall -Wextra -Werror -fPIC -pthread \
 	  $(TITAN_TEST_CPPFLAGS) $(TITAN_TEST_CFLAGS) $(SQLITE3_CPPFLAGS) \

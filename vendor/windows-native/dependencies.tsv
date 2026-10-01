@@ -1,0 +1,4 @@
+libuv	libuv-v1.52.1	libuv-v1.52.1.tar.gz	66d511b9e6e334c0e62279eb234fbfb2b3110b1479c09b95b44c7afca8cff9e7	https://dist.libuv.org/dist/v1.52.1/libuv-v1.52.1.tar.gz
+llhttp	llhttp-release-v9.4.3	llhttp-release-v9.4.3.tar.gz	1eb813c7437b31a87496a1cd3ed79f00746720f5e7e29c79b42c02cb69f36c39	https://github.com/nodejs/llhttp/archive/refs/tags/release/v9.4.3.tar.gz
+sqlite3	sqlite-autoconf-3530400	sqlite-autoconf-3530400.tar.gz	0e9483900e92cd5de8fd48d16bf9200145a61f7fd5be542a5ac81d8a9516eb9c	https://sqlite.org/2026/sqlite-autoconf-3530400.tar.gz
+openssl	openssl-3.5.7	openssl-3.5.7.tar.gz	a8c0d28a529ca480f9f36cf5792e2cd21984552a3c8e4aa11a24aa31aeac98e8	https://github.com/openssl/openssl/releases/download/openssl-3.5.7/openssl-3.5.7.tar.gz
