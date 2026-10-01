@@ -108,6 +108,15 @@ static int run(int argc, char **argv, wchar_t **wide_argv) {
       if (write_all(stdout, buffer, count)) return 1;
     return ferror(stdin) || fflush(stdout) != 0 ? 2 : 0;
   }
+  if (strcmp(argv[1], "echo-count") == 0 && argc == 3) {
+    long remaining = strtol(argv[2], NULL, 10);
+    if (remaining < 0) return 2;
+    while (remaining-- > 0) {
+      int byte = fgetc(stdin);
+      if (byte == EOF || fputc(byte, stdout) == EOF) return 1;
+    }
+    return fflush(stdout) == 0 ? 0 : 2;
+  }
   if (strcmp(argv[1], "dual") == 0 && argc == 3) {
     long count = strtol(argv[2], NULL, 10), i;
     for (i = 0; i < count; i++)

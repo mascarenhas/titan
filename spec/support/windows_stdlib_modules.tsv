@@ -1,4 +1,5 @@
 # Windows-only logical test root<TAB>source; shared roots remain in the Unix inventory.
 fs.windows_tests	spec/stdlib/titan/fs/windows_tests.titan
+io.windows_tests	spec/stdlib/titan/io/windows_tests.titan
 os.windows_process_tests	spec/stdlib/titan/os/windows_process_tests.titan
 sqlite3.windows_tests	spec/stdlib/titan/sqlite3/windows_tests.titan

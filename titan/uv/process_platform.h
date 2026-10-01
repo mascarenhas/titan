@@ -21,7 +21,56 @@ typedef struct titan_parent_stdio_probe {
 #ifdef _WIN32
 #define TITAN_UV_WINDOWS 1
 #include <io.h>
+#include <limits.h>
+#include <stdint.h>
+#include <stdlib.h>
 #include <windows.h>
+
+/* Match libuv's sized UTF-8 buffer convention. GetSystemDirectoryW reports
+ * WCHAR counts, including NUL only when the supplied capacity is too small. */
+static inline int titan_process_system_directory(char *buffer, size_t *size) {
+  UINT capacity = GetSystemDirectoryW(NULL, 0);
+  WCHAR *wide;
+  UINT length;
+  int bytes, status;
+  if (capacity == 0) return uv_translate_sys_error(GetLastError());
+  for (;;) {
+    if ((size_t)capacity > SIZE_MAX / sizeof(WCHAR)) return UV_ENOMEM;
+    wide = (WCHAR *)malloc((size_t)capacity * sizeof(WCHAR));
+    if (wide == NULL) return UV_ENOMEM;
+    length = GetSystemDirectoryW(wide, capacity);
+    if (length == 0) {
+      status = uv_translate_sys_error(GetLastError());
+      free(wide);
+      return status;
+    }
+    if (length < capacity) break;
+    free(wide);
+    if (length == UINT_MAX) return UV_ENAMETOOLONG;
+    capacity = length + 1;
+  }
+  bytes = WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, wide, -1,
+                               NULL, 0, NULL, NULL);
+  if (bytes == 0) {
+    status = uv_translate_sys_error(GetLastError());
+    free(wide);
+    return status;
+  }
+  if (*size < (size_t)bytes) {
+    *size = (size_t)bytes;
+    free(wide);
+    return UV_ENOBUFS;
+  }
+  if (WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, wide, -1,
+                         buffer, bytes, NULL, NULL) == 0) {
+    status = uv_translate_sys_error(GetLastError());
+    free(wide);
+    return status;
+  }
+  free(wide);
+  *size = (size_t)bytes - 1;
+  return 0;
+}
 
 static inline int titan_duplicate_parent_descriptor(uv_file descriptor,
                                                     uv_file *duplicate,
@@ -81,6 +130,12 @@ static inline void titan_probe_parent_stdio(uv_file descriptor,
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <unistd.h>
+
+static inline int titan_process_system_directory(char *buffer, size_t *size) {
+  (void)buffer;
+  (void)size;
+  return UV_ENOSYS;
+}
 
 static inline int titan_duplicate_parent_descriptor(uv_file descriptor,
                                                     uv_file *duplicate,

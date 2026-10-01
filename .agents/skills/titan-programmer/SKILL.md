@@ -1431,9 +1431,12 @@ while the iterator owns it.
 
 `io.print(...: value)` converts with `string.tostring`, joins with tabs, appends
 a newline, and performs one `os.stdout` write. `io.popen(command)` intentionally
-runs `/bin/sh -c`, gives writable stdin plus one readable stream merging stdout
-and stderr, and must be drained before waiting when output can fill a pipe. Use
-`os.spawn` for direct executable/argv control or separate stdout/stderr.
+runs `/bin/sh -c` on Linux and macOS or the system `cmd.exe /d /s /c` on
+Windows; commands use that shell's syntax. It gives writable stdin plus one
+readable byte stream merging stdout and stderr, and must be drained before
+waiting when output can fill a pipe. Use `os.spawn` for direct executable/argv
+control or separate stdout/stderr. Close and Task cancellation do not guarantee
+descendant termination.
 These operations may suspend; load **`titan-async`** for scheduling and process
 ownership.
 

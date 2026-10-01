@@ -380,7 +380,7 @@ normalization.
 
 Use `io.popen` when a program intentionally wants shell syntax and one stream
 containing the child's merged stdout and stderr. Drain that stream before
-waiting:
+waiting. This example uses POSIX shell syntax:
 
 ```titan
 local fs = import "fs"
@@ -411,17 +411,18 @@ function main(args: {string}): integer
 end
 ```
 
-`io.popen` invokes `/bin/sh -c`, captures stdin, and presents exactly one
-facade over the merged output pipe. Its `wait` method preserves the complete
-`os.ExitStatus`, including signal termination.
+`io.popen` invokes `/bin/sh -c` on Linux and macOS, or the system `cmd.exe`
+with `/d /s /c` on Windows. Command strings follow that shell's syntax. It
+captures stdin and presents exactly one facade over the merged byte stream.
+Its `wait` method preserves the complete `os.ExitStatus`, including signal
+termination.
 
 Use `os.spawn` when a shell is not wanted. It starts the named executable
 directly with the supplied argv and keeps stdout and stderr separate unless a
 spawn option explicitly merges them. Capture and inheritance options also
 decide which of the optional `Process.stdin`, `stdout`, and `stderr` endpoints
 exist in the parent. Drain captured output concurrently with input and `wait`,
-or a full operating-system pipe can deadlock the child and parent. These
-process APIs target Titan's current Linux and macOS hosts.
+or a full operating-system pipe can deadlock the child and parent.
 
 ## Math, collection iteration, GC, and dynamic Lua
 

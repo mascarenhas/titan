@@ -283,15 +283,20 @@ parent directories; junction/symlink destinations fail validation.
 
 A complete native standard-library build and its behavior tests remain required
 before treating this workflow as a validated Windows distribution. Passing the
-runtime, launcher, or publication canaries alone is insufficient.
+runtime, launcher, or publication canaries alone is insufficient. The complete
+Windows standard-library gate is tracked in
+[issue #187](https://github.com/mascarenhas/titan/issues/187).
 
 ## Experimental boundaries
 
 Windows compilation is serial and the initial stdlib target rebuilds its
 explicit roots. Windows error traces retain Lua frames and raw native addresses;
 native Titan source-line attribution is not yet available. `titan.io.popen`
-still requires `/bin/sh` and is unsupported on Windows; native child processes
-use `titan.os.spawn`.
+uses the system `cmd.exe` with `/d /s /c`, writable stdin, and merged output.
+Its command string must use native Windows shell syntax; see
+[shell commands](../language/standard-library-io.md#shell-commands). Use
+`titan.os.spawn` for direct executable and argument control. Both retain the
+existing process ownership rules, without a descendant-termination guarantee.
 
 The packaged OpenSSL configuration supplies no usable default CA roots and does
 not automatically use the Windows ROOT certificate store. Its compiled CA file

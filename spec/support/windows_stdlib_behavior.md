@@ -16,7 +16,7 @@ stdlib shims, matching Lua, and the controlled native DLL dependencies in `bin`.
 The script compiles disposable tests at `-O0` by default; caller-supplied
 `TITAN_EXTRA_CFLAGS` may select another test build optimization.
 
-This is **44 named public-behavior cases**, listed in
+This is **53 named public-behavior cases**, listed in
 `windows_stdlib_cases.txt`, not the complete native aggregate. The runner checks
 the exact successful case names and count, rejects skips, enforces a 180-second
 native execution deadline, and requires the cases' scratch directory to be
@@ -47,6 +47,11 @@ Coverage:
   replacement, case-insensitive names, absent/empty values, binary captured
   pipes, merged output, repeated waits, and native exits 1/126/127/9009. Calendar
   checks use an explicit UTC date and do not alter timezone or locale.
+- Nine `io.popen` cases cover fixed system `cmd.exe` selection, quoted paths
+  containing spaces and Unicode, binary duplex and merged output, shell
+  operators/pipelines/redirection, exit status and repeated waits, idempotent
+  close of a running shell, NUL rejection, and cancelling reads or waits
+  without terminating the child.
 - Four filesystem cases check binary streams, Unicode paths, stat/lstat,
   rename/identity, directory entries, and bounded local NTFS file/directory
   watcher events and retirement. The watcher asserts canonical returned paths;
@@ -60,21 +65,23 @@ Coverage:
   repository's checked-in TLS test fixture. No system trust store is modified.
 
 The four shared roots (`coroutine.tests`, `timer.tests`, `net.tests`, and
-`ssl.tests`) plus the three Windows roots in `windows_stdlib_modules.tsv` are
+`ssl.tests`) plus the four Windows roots in `windows_stdlib_modules.tsv` are
 compiled with `--no-uv-bootstrap`; their
 existing repository support helper owns and drains a Runtime per async case.
 Runtime filters select the intended cases but do not isolate compilation: the
 coroutine folder still compiles its existing contributors. None requires the
 POSIX aggregate's socket/stdio/filesystem C fixtures. The process child keeps
 its original Unix implementation unchanged behind an `#else` branch. The
-Windows inventory owns the three extra source modules independently of the Unix
+Windows inventory owns the four extra source modules independently of the Unix
 aggregate; the repository completeness gate checks their union without adding
 Windows-only cases to the Unix object graph. The runner validates each inventory
 entry and requires at least one selected case for each extra root.
 
 Excluded boundaries include the POSIX shell-based Lua coroutine fixtures,
-`io.popen` shell selection, exact native source-line traceback attribution,
-HTTP, the complete generic async suite, GUI/console inheritance, and shared
+exact native source-line traceback attribution, HTTP, the complete generic
+async suite, GUI/console inheritance, and shared
 folder notification guarantees. This runner neither accepts a firewall prompt
 nor changes firewall policy; a blocked loopback operation fails with its actual
-diagnostic. Passing this subset is not a complete Windows test or release claim.
+diagnostic. Passing this subset is not a complete Windows test or release claim;
+the complete Windows standard-library gate remains tracked in
+[issue #187](https://github.com/mascarenhas/titan/issues/187).

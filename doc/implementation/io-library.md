@@ -71,15 +71,24 @@ can replace a pending body error, break, or return.
 
 ## Shell process stream
 
-`popen` delegates parsing and execution to `/bin/sh` by calling:
+On Linux and macOS, `popen` delegates parsing and execution to `/bin/sh`
+through the existing process and pipe implementation:
 
 ```titan
 os.spawn("/bin/sh", {"-c", command},
          os.with_stdin, os.with_merged_output)
 ```
 
-The returned process must therefore have a writable stdin and captured
-stdout. `popen` narrows those optional fields explicitly, then constructs one
+The Windows branch obtains the absolute `cmd.exe` path with
+`GetSystemDirectoryW` and uses `/d /s /c`. It encloses the caller's command in
+the shell's outer quotes and uses a private libuv verbatim-argument transport
+to preserve that command payload. It does not consult `COMSPEC`. Ordinary
+`os.spawn` retains its existing argument transport.
+
+Both shell branches use the existing asynchronous process owner and captured
+libuv pipes, with writable stdin and one shared stdout/stderr pipe. There are
+no CRT mode flags or text-mode byte conversions. `popen` narrows the optional
+process stream fields explicitly, then constructs one
 public `InputOutputStream` whose five fields remain private: the Process, the
 writable input facade, the one merged readable facade, an optional cached
 `ExitStatus`, and the completed-close bit. It never constructs a second
@@ -99,7 +108,9 @@ calls the caching `wait` when it requested that termination. After stdin close
 succeeds, a `finally` closes the one merged InputStream even if signalling or
 waiting raises. The completed bit is set only after process cleanup succeeds,
 so a later call can retry whatever did not reach that point. A later `wait`
-uses either the facade cache or the Process's retained exit status.
+uses either the facade cache or the Process's retained exit status. Process
+signalling addresses the launched shell; the facade does not own a process
+tree or promise to terminate descendants on close or Task cancellation.
 
 The focused non-LuaCov native `io.tests` folder module is rooted at
 `spec/stdlib/titan/io/tests/tests.titan`; both `core_test.titan` and

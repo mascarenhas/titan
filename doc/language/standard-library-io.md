@@ -170,15 +170,17 @@ function InputOutputStream:wait(): os.ExitStatus
 function popen(command: string): InputOutputStream
 ```
 
-`popen` intentionally invokes `/bin/sh -c command`; it is the standard
-library's shell-string convenience, not an argv parser. Use `os.spawn` when an
-executable and arguments must be passed directly or stdout and stderr must
-remain separate. The command is text and rejects an embedded NUL before native
-process creation.
+`popen` is the standard library's shell-string convenience. On Linux and
+macOS it invokes `/bin/sh -c command`. On Windows it selects `cmd.exe` from the
+Windows system directory and invokes it with `/d /s /c`. Command strings use
+the selected shell's syntax, including its quoting, expansion, operators, and
+redirection rules; POSIX shell commands are not portable to `cmd.exe`.
 
-`popen` is unsupported on the experimental Windows build because it requires
-`/bin/sh`. Windows programs can use `os.spawn` with a native executable and an
-explicit argument array; Titan does not select a Windows command shell.
+Use `os.spawn` when an executable and arguments must be passed directly or
+stdout and stderr must remain separate. The command is text and rejects an
+embedded NUL before native process creation. `popen` has no mode argument; its
+captured pipes carry byte strings without CRT text-mode translation. A child
+program still chooses its own text encoding.
 
 The child gets a captured stdin pipe and one captured pipe shared by stdout and
 stderr. `InputOutputStream:write` writes the child's stdin, while `read` and
@@ -200,6 +202,8 @@ cleanup completes, so a later `close` can retry work that did not reach that
 point. If `wait` has already stored a status, `close` does not signal the exited
 child. A later `wait` returns the cached or already-retained process status;
 after output disposal, later `read` and `read_until` calls return nil.
+Signalling targets the launched shell process; neither `close` nor Task
+cancellation guarantees termination of its descendants.
 
 For large bidirectional traffic, schedule writing and reading concurrently so
 neither operating-system pipe can fill while the other direction is waiting.

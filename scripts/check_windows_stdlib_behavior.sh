@@ -113,8 +113,8 @@ powershell.exe -NoProfile -NonInteractive -Command '
   $ErrorActionPreference = "Stop"
   $cases = @(Get-Content -LiteralPath ($env:TITAN_BEHAVIOR_WORK + "\cases.txt") |
     Where-Object { $_ -ne "" -and -not $_.StartsWith("#") })
-  if ($cases.Count -ne 44 -or ($cases | Select-Object -Unique).Count -ne 44) {
-    throw "Expected exactly 44 distinct subset cases."
+  if ($cases.Count -ne 53 -or ($cases | Select-Object -Unique).Count -ne 53) {
+    throw "Expected exactly 53 distinct subset cases."
   }
   foreach ($case in $cases) {
     if ($case -notmatch "^[a-zA-Z0-9_.]+$") { throw "Invalid case name: $case" }
@@ -169,15 +169,15 @@ powershell.exe -NoProfile -NonInteractive -Command '
   $actual = @($stdout.Result -split "\r?\n" | Where-Object { $_.StartsWith("[       OK ] ") } |
     ForEach-Object { $_.Substring(13) } | Sort-Object)
   $expected = @($cases | Sort-Object)
-  if ($actual.Count -ne 44 -or (Compare-Object $expected $actual) -or
-      $stdout.Result -notmatch "(?m)^\[  PASSED  \] 44 tests\.[\r]?$" -or
+  if ($actual.Count -ne 53 -or (Compare-Object $expected $actual) -or
+      $stdout.Result -notmatch "(?m)^\[  PASSED  \] 53 tests\.[\r]?$" -or
       $stdout.Result -match "\[  (SKIPPED|FAILED)" ) {
     throw "Native subset did not pass every exact expected case."
   }
   if (@(Get-ChildItem -Force -LiteralPath $env:TITAN_WINDOWS_TEST_ROOT).Count -ne 0) {
     throw "Public behavior cases left files in their owned scratch directory."
   }
-  Write-Output "Windows stdlib subset: 44 exact cases passed; scratch cleanup passed."
+  Write-Output "Windows stdlib subset: 53 exact cases passed; scratch cleanup passed."
 '
 status=$?
 set -e

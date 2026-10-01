@@ -813,6 +813,30 @@ local function os_spawn_config_with_merged_output(
   return status
 end
 
+local function os_shell_directory_buffer(bytes: foreign *char,
+                                         sizes: foreign *size_t): foreign int
+  return ffi.titan_process_system_directory(bytes, sizes)
+end
+
+local function os_shell_command(command: string): (string, {string})
+  if ffi.TITAN_UV_WINDOWS == 0 then
+    return "/bin/sh", {"-c", command}
+  end
+  local directory = os_sized_buffer(os_shell_directory_buffer,
+      OS_BUFFER_INITIAL as foreign size_t, "process.shell.directory") as string
+  -- /s removes exactly the outer pair. The caller owns cmd syntax within it.
+  return directory .. "\\cmd.exe", {"/d", "/s", "/c", '"' .. command .. '"'}
+end
+
+local function os_spawn_config_for_shell(config: uv_spawn_config): integer
+  local status = validate_config(config)
+  if status < 0 then return status end
+  if ffi.TITAN_UV_WINDOWS ~= 0 then
+    config.options.flags = ffi.UV_PROCESS_WINDOWS_VERBATIM_ARGUMENTS as foreign unsigned int
+  end
+  return 0
+end
+
 local function os_spawn_config_with_env(config: uv_spawn_config,
                                          name: string,
                                          contents: string): integer
@@ -954,7 +978,14 @@ local function os_process_spawn_with_config(file: string, args: {string},
   local process_handle: foreign *uv_process_t = process.handle
   local argument_count = #args + 1
   local argv = foreign CharPointer.new_array(argument_count + 1)
-  argv[0] = file
+  local argument_zero = file
+  if ffi.TITAN_UV_WINDOWS ~= 0 and
+      (state.options.flags & ffi.UV_PROCESS_WINDOWS_VERBATIM_ARGUMENTS) ~= 0 then
+    -- Verbatim mode also covers argv[0]. Keep this owned string live through
+    -- uv_spawn while options.file retains the unquoted absolute executable.
+    argument_zero = '"' .. file .. '"'
+  end
+  argv[0] = argument_zero
   index = 1
   while index <= #args do
     argv[index] = args[index]
