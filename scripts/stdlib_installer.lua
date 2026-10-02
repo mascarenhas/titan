@@ -451,7 +451,7 @@ local function validate_native_pair(dso, archive, module_names, options)
     end
     local completed, validation_or_err = xpcall(function()
         local linked, term, code = validation_builder(
-            validation_image, archive, nil, false)
+            validation_image, archive, nil, false, nil, module_names)
         if not linked then
             error("cannot link staged titan.a validation image: " ..
                 tostring(term) ..

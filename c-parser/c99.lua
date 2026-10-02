@@ -258,20 +258,20 @@ defs["litstruct"] = typed("string, number, number -> boolean, string", function(
     return true, "litstruct"
 end)
 
-defs["inline_union_member"] = function(_, _, member)
+defs["inline_aggregate_member"] = function(_, _, member)
     if member.ids then
-        member.type = { member.union }
+        member.type = { member.aggregate }
         for _, specifier in ipairs(member.tail) do
             member.type[#member.type + 1] = specifier
         end
     else
         -- The ordinary struct-declaration production requires declarators
-        -- whenever anything follows the inline union specifier. Only the
-        -- bare body may use C's anonymous-union member form.
+        -- whenever anything follows the inline aggregate specifier. Only the
+        -- bare body may use C's anonymous struct/union member form.
         if #member.tail > 0 then return false end
-        member.type = member.union
+        member.type = member.aggregate
     end
-    member.union = nil
+    member.aggregate = nil
     member.tail = nil
     return true, member
 end
@@ -540,15 +540,14 @@ structOrUnionSpecifier <- {| {:_source_position: {} :} {:type: structOrUnion :} 
 structOrUnion <- { "struct" } _
                / { "union"  } _
 
--- Parse an inline union body once, then choose whether it is an anonymous
--- member or has ordinary field declarators. The former anonymousUnion / generic
--- choice reparsed the complete body for every named inline-union member, which
--- doubled at each nested member. The guard keeps a malformed exact `union {`
--- prefix from falling back and rebuilding the same recursive body.
-inlineUnionMember <- ({| {:union: {| {:_source_position: {} :} {:type: { "union" } :} _ "{" _ {:fields: {| structDeclaration+ |} :} "}" _ |} :} {:tail: {| specifierQualifier* |} :} ({:ids: structDeclaratorList :})? |} ";" _) => inline_union_member
+-- Parse an inline struct/union body once, then choose whether it is an
+-- anonymous member or has ordinary field declarators. A separate anonymous /
+-- generic choice reparses named bodies exponentially with nesting. The guard
+-- keeps a malformed exact bare-body prefix from rebuilding that recursive body.
+inlineAggregateMember <- ({| {:aggregate: {| {:_source_position: {} :} {:type: structOrUnion :} "{" _ {:fields: {| structDeclaration+ |} :} "}" _ |} :} {:tail: {| specifierQualifier* |} :} ({:ids: structDeclaratorList :})? |} ";" _) => inline_aggregate_member
 
-structDeclaration <- inlineUnionMember
-                   / !("union" _ "{") {| {:type: {| specifierQualifier+ |} :} {:ids: structDeclaratorList :} |} ";" _
+structDeclaration <- inlineAggregateMember
+                   / !(("struct" / "union") _ "{") {| {:type: {| specifierQualifier+ |} :} {:ids: structDeclaratorList :} |} ";" _
 
 specifierQualifier <- typeSpecifier
                     / typeQualifier
@@ -792,10 +791,10 @@ preprocessingLine <- _ ( ("#" / "%:") _ directive _
 
 preprocessingTokenList <- {| (preprocessingToken _)+ |}
 
-directive <- {| {:directive: "if"      :} S {:exp: preprocessingTokenList :} |}
+directive <- {| {:directive: "if"      :} !(identifierNondigit / [0-9]) _ {:exp: preprocessingTokenList :} |}
            / {| {:directive: "ifdef"   :} S {:id: IDENTIFIER :} |}
            / {| {:directive: "ifndef"  :} S {:id: IDENTIFIER :} |}
-           / {| {:directive: "elif"    :} S {:exp: preprocessingTokenList :} |}
+           / {| {:directive: "elif"    :} !(identifierNondigit / [0-9]) _ {:exp: preprocessingTokenList :} |}
            / {| {:directive: "else"    :} |}
            / {| {:directive: "endif"   :} |}
            / {| {:directive: "include" :} S {:exp: headerName :} |}

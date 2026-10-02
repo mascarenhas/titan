@@ -55,6 +55,11 @@ Metadata emitted by the compiler is trusted. Explicit roots and direct `.titan`
 imports still require actual source files; an orphan object, archive, or DSO
 does not substitute for source-private access.
 
+The object metadata reader recognizes ordinary COFF objects for the experimental
+Windows port, alongside ELF and Mach-O. This format support alone does not make
+Windows compilation available or enable Windows static providers. PE images,
+COFF import objects, and BigObj are not reusable source objects.
+
 Reused objects preserve their own native access paths. A module can directly
 import a dynamic provider while another module uses that provider's record
 methods through a returned value, without importing it. Those objects can be

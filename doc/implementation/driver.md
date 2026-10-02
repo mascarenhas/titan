@@ -8,6 +8,12 @@ front end, the small utility module the whole compiler leans on
 `titan-runtime/`. A reference table of every environment variable,
 default path and flag closes the chapter.
 
+Unless a Windows section or row says otherwise, native output paths, paired
+providers, archive selection, and static Lua linking below describe Linux and
+macOS. Windows uses DLL-only Titan providers and the controlled Lua import
+library; see [Windows application launchers](binary-compatibility.md#windows-application-launchers)
+and the [Windows build guide](windows-build.md).
+
 ## Module names and the search paths
 
 Module lookup deals in dot-separated **module names**, never file paths.
@@ -1002,6 +1008,11 @@ invocation-wide source-header plan when the CLI owns the compilation:
    explicitly disables LTO so saved object functions can be compared with
    the generated-C diagnostic shadow.
 
+On Windows, a requested bound above one is reduced to one before entering the
+existing per-module generation/formatting/compilation path. No Windows FIFO,
+parallel child manager, or compiler-bootstrap libuv dependency is introduced.
+Linux and macOS retain the completion-driven scheduling below unchanged.
+
 The native-tool strings, and `CLANG_FORMAT` when `--pretty-print` actually
 selects it, are parsed into dense argument arrays with a small shell-word grammar
 supporting whitespace, single/double
@@ -1887,7 +1898,7 @@ the explicit public-header input for its native helper builds.
 | `driver.LUA_SOURCE_PATH` | `driver.lua` | `<root>/src/lua-5.5.1` installed; `lua-5.5.1/src` in checkout mode; checkout-only override by `titanc --lua` | Lua internal source/header tree used at compile time. Installed mode rejects the override because `INSTALL_PATHS` supplies matching `<root>/lib/liblua.a` and `<root>/lib/titan/0.6/libtitan.a`. |
 | `driver.INCLUDE_PATH` | `driver.lua` | `<root>/include` in installed mode | Titan SDK and selected bundled-dependency headers used by generated C and foreign imports: `minicoro.h`, `titan.h`, `titan/ffi.h`, `llhttp.h`, `sqlite3.h`, plus bundled `uv.h`, `uv/`, and `openssl/`. Generated source-foreign companions are source-build intermediates, not installed SDK headers. |
 | `driver.TITAN_RUNTIME_PATH` / `driver.LIBBACKTRACE_PATH` | `driver.lua` | `titan-runtime/` / `libbacktrace` | Checkout-only runtime source/archive/header and separate libbacktrace locations. |
-| `CC` / `driver.CC` | environment / `driver.lua` | `"cc"` | C compiler command, parsed as shell words and shared with foreign-import probing. |
+| `CC` / `driver.CC` | environment / `driver.lua` | `"cc"` on Unix; `"clang.exe"` on Windows | C compiler command, parsed as shell words and shared with foreign-import probing. |
 | `TITAN_JOBS` / `titanc --jobs` | environment / CLI | `1` | Positive bound for concurrent generated logical-module C object compilations. The CLI wins over the environment. It does not affect checker probes, code generation, formatting, entrypoints, linking, archiving, or provider validation. |
 | `CLANG_FORMAT` / `driver.CLANG_FORMAT` | environment / `driver.lua` | `"clang-format"` | Formatter command used only by `titanc --pretty-print`, then parsed as shell words. The driver appends its in-place operation, fixed explicit style with include sorting disabled, and generated-source path; default builds neither parse nor invoke it. |
 | `driver.CFLAGS` | `driver.lua` | C99, `-O3`, warnings, PIC and debug info; Linux additionally uses `-flto=auto -ffat-lto-objects` | Shared compile/link defaults for both GCC and Clang. macOS keeps native objects without LTO. |
@@ -1895,7 +1906,7 @@ the explicit public-header input for its native helper builds.
 | `TITAN_EXTRA_CFLAGS` / `driver.EXTRA_CFLAGS` | environment / `driver.lua` | empty | Parsed compilation-only flags, after fixed defaults; never used by final links. |
 | `TITAN_EXTRA_LDFLAGS` / `driver.EXTRA_LDFLAGS` | environment / `driver.lua` | empty | Parsed ordered linker inputs appended to final module and program links. |
 | shared-library flags | `shared_flag()` | `-shared`; on Darwin `-shared -undefined dynamic_lookup` | Platform from `driver.UNAME`, populated lazily by `driver.configure_foreign_c(context)` through `context.io:run({"uname"})`. |
-| installed link set | `driver.installed_link_inputs` / `append_runtime_libraries` | `<root>/lib/titan/0.6/libtitan.a` + separate `<root>/lib/libbacktrace.a` + `<root>/lib/liblua.a` + platform libraries | Used by provider DSOs and programs; Linux adds `-ldl`, and all platforms add `-lm`. These common final inputs are not copied into package archives. The standard build separately supplies bundled libuv as `-X` payload to both `titan.so` and `titan.a`; system mode keeps explicit pkg-config link flags at final link. |
+| installed link set | `driver.installed_link_inputs` / `append_runtime_libraries` | Unix: `<root>/lib/titan/0.6/libtitan.a` + separate `<root>/lib/libbacktrace.a` + `<root>/lib/liblua.a` + platform libraries; Windows: `libtitan.a` + `<root>/lib/liblua-5.5.1.dll.a` + `-lbcrypt` | Used by provider DSOs and programs; Linux adds `-ldl`, and Linux/macOS add `-lm`. These common final inputs are not copied into Unix package archives. The Unix standard build separately supplies bundled libuv as `-X` payload to both `titan.so` and `titan.a`; system mode keeps explicit pkg-config link flags at final link. |
 | checkout link set | `driver.source_link_inputs` / `append_runtime_libraries` | local `libtitan.a` + separate local `libbacktrace.a` + local `liblua.a` + `-ldl -lm` | Preserves the writable source-development path while using the same archive contract; it never links `titan.o` directly. |
 | `TITAN_ROOT_DEFAULT` / `TITAN_LUA_CPATH_SUFFIX` | `titan.h`/`titan.c` | `/usr/local` / `/lib/lua/5.5/?.so` | Legacy run-time root fallback and exact template suffix used for root discovery. |
 | `titan_init_paths` | generated standalone entrypoint / `titan.c` | root parsed from inherited `package.cpath` | Caches the root and Titan module path and ensures `<root>/lib/titan/0.6/?.so` is in `package.cpath`; Titan-owned Lua has it first by default, with `<root>` inferred from the running executable. |
@@ -1909,3 +1920,86 @@ driver compiles); the contents of the runtime archive's callers — the
 generated `_init`, standalone path initialization, and Lua entry wrappers that
 ensure `errorhandler` is active —
 are in [Lua interop internals](lua-interop-internals.md).
+
+## Experimental Windows serial transport
+
+`titan-compiler.platform` reads the Lua host separator without filesystem or
+process operations at import. `initialize_platform` retains lazy Unix `uname`
+through the injected strategy, while native Windows initializes as `Windows`
+without that subprocess. This host choice does not replace the generated
+object's authoritative target fingerprint.
+
+The Windows-only command renderer accepts already parsed argv. It represents
+C-runtime quote/backslash rules, then protects the representation from `cmd`
+metacharacter interpretation. The executable position uses Windows separators;
+extensionless tools explicitly select `.exe`, avoiding implicit PATHEXT batch
+selection. `.exe` and `.com` are native tool forms; explicit batch/script
+filenames fail before execution. A fixed `set` prefix supplies `LANG=C` and
+`LC_ALL=C`. The Unix command renderers remain unchanged.
+
+Before rendering, `_win_resolve_executable` resolves the first parsed word with
+`GetFullPathNameW` for explicit paths or the documented `SearchPathW` order for
+bare names. It does not change the process search mode, consult `PATHEXT`, or
+execute a probe. `GetBinaryTypeW` rejects directories, scripts and non-native
+images; the returned absolute pathname becomes argv[0]. These checks distinguish
+lookup/access failures from ordinary child exit values but do not eliminate the
+race between lookup and launch. The initial cmd transport rejects explicit
+`\\?\` executable spellings: native lookup can validate them but the shell
+cannot launch the tested form. It does not silently strip their namespace.
+Ordinary installation roots retain their ordinary normalized spelling, including
+when the controlled Lua cpath starts with `bin/..`. See Microsoft's [SearchPathW contract](https://learn.microsoft.com/en-us/windows/win32/api/processenv/nf-processenv-searchpathw)
+and [GetBinaryTypeW contract](https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-getbinarytypew).
+
+Serial inherited-output commands still use `os.execute`. Captured commands
+still use `io.popen`, with `rb` on Windows so CRLF, NUL, and Ctrl-Z bytes are not
+translated. Windows statuses are not decoded as POSIX signals. All native exits,
+including 1, 126, 127 and 9009, retain `started=true` and their exact value. The
+semantic-probe classifier conservatively reserves out-of-contract statuses as
+infrastructure failures rather than persisting rejection evidence. These shell
+transports do not provide the same direct child-launch evidence as a process API.
+
+The synchronous Windows filesystem implementation lazily acquires private
+helpers from native support. `_win_tmpname` reserves a caller-owned regular file;
+`_win_reserve_sibling` reserves a regular file or directory directly beside a
+destination. Names contain 128 OS-random bits and use exclusive creation.
+`_win_replace` performs one same-volume replacement without a delete-before-move
+or cross-volume copy fallback. Paths are converted explicitly between UTF-8 and
+UTF-16. All helpers and their bcrypt import are Windows-only; Unix bootstrap
+contents and dependencies stay unchanged. The injected compiler-I/O required
+surface stays unchanged, and injected strategies retain their temporary-file
+ownership and cancellation behavior.
+
+`_win_stat(path, follow)` reports the same seven compiler-I/O fields, using
+lossless tagged strings for device/file identity. Full `FileIdInfo` volume and
+128-bit file IDs are preferred. Only unsupported-query errors on the positively
+identified `VirtIO-FS` filesystem permit the approved fallback: actual
+handle-reported volume GUID plus the full legacy 64-bit file index. No zero
+volume serial, pathname, hash, case folding or truncated ID substitutes for
+identity. Size and 100ns timestamps remain Lua integers; mode contains type bits
+only. Symlinks and junctions have deliberate lstat semantics; unknown reparse
+tags and failed traversal are errors. `_win_realpath` returns the exact
+OS-resolved extended spelling separately from identity. `_win_abspath` uses
+`GetFullPathNameW` for the default process's per-drive resolution; injected
+strategies may provide optional `absolute` capability instead, with no required
+API surface change. Pure Windows path operations preserve case, Unicode and
+authored observation components, distinguish drive/UNC/extended roots, and
+never supply physical identity. Missing Win32 errors
+2/3 become `nil,nil` only at the synchronous stat/lstat boundary; access and
+query errors remain visible. The existing persisted physical identity is already
+an opaque string, so no cache-schema or API-1 marker change is needed.
+
+On the tested VM, NTFS junction-follow reports error 448 (untrusted mount
+point), including junctions created with Windows' `mklink`. That error remains
+explicit; no security setting is changed. VirtIO-FS does not provide the tested
+hardlink, junction and sparse-file operations. Regular live file bytes and
+stable file identities work on the share. Share long-path and notification
+limitations remain separate platform boundaries.
+
+`spec/fixtures/windows_serial/` contains actual Windows transport and filesystem
+oracles. Host tests cover dispatch, validation, and status normalization but do
+not establish Windows quoting or filesystem semantics. Run the native oracles
+with the edited compiler files and exact helper header on guest-local NTFS,
+then repeat the filesystem gate on the shared workspace. Unicode input also
+requires the controlled Lua executable's UTF-8 startup policy; changing only
+the locale after startup does not repair initial narrow argv. The fixtures
+record the remaining platform gates separately from Linux regression results.

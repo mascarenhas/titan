@@ -92,6 +92,13 @@ Except for that repeat-call guarantee, these Interfaces intentionally describe
 method shapes rather than one shared buffering, cancellation, or ownership
 policy. Consult the concrete module's chapter for those details.
 
+The experimental Windows build checks native buffer lengths against libuv's
+32-bit unsigned length field. A single file-read request or file/stream-write
+buffer larger than 4 GiB minus one byte raises a numeric range error before
+submission; Titan does not silently truncate or split that buffer. Unix keeps
+its native `size_t` length range. Ordinary allocation and operating-system
+limits can reject smaller requests as well.
+
 ## Printing
 
 ```text
@@ -163,11 +170,17 @@ function InputOutputStream:wait(): os.ExitStatus
 function popen(command: string): InputOutputStream
 ```
 
-`popen` intentionally invokes `/bin/sh -c command`; it is the standard
-library's shell-string convenience, not an argv parser. Use `os.spawn` when an
-executable and arguments must be passed directly or stdout and stderr must
-remain separate. The command is text and rejects an embedded NUL before native
-process creation.
+`popen` is the standard library's shell-string convenience. On Linux and
+macOS it invokes `/bin/sh -c command`. On Windows it selects `cmd.exe` from the
+Windows system directory and invokes it with `/d /s /c`. Command strings use
+the selected shell's syntax, including its quoting, expansion, operators, and
+redirection rules; POSIX shell commands are not portable to `cmd.exe`.
+
+Use `os.spawn` when an executable and arguments must be passed directly or
+stdout and stderr must remain separate. The command is text and rejects an
+embedded NUL before native process creation. `popen` has no mode argument; its
+captured pipes carry byte strings without CRT text-mode translation. A child
+program still chooses its own text encoding.
 
 The child gets a captured stdin pipe and one captured pipe shared by stdout and
 stderr. `InputOutputStream:write` writes the child's stdin, while `read` and
@@ -189,6 +202,8 @@ cleanup completes, so a later `close` can retry work that did not reach that
 point. If `wait` has already stored a status, `close` does not signal the exited
 child. A later `wait` returns the cached or already-retained process status;
 after output disposal, later `read` and `read_until` calls return nil.
+Signalling targets the launched shell process; neither `close` nor Task
+cancellation guarantees termination of its descendants.
 
 For large bidirectional traffic, schedule writing and reading concurrently so
 neither operating-system pipe can fill while the other direction is waiting.

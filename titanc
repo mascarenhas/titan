@@ -8,6 +8,7 @@ local parser = require 'titan-compiler.parser'
 local driver = require 'titan-compiler.driver'
 local test_runner = require 'titan-compiler.test_runner'
 local util = require 'titan-compiler.util'
+local platform = require 'titan-compiler.platform'
 
 local p = argparse('titan', 'Titan compiler')
 p:argument('module', 'Names of the modules to compile.'):args("+")
@@ -16,7 +17,8 @@ p:flag('--pretty-print', 'Format generated C and headers with clang-format.')
 p:flag('-v --verbose', 'Be verbose about compiler invocations.')
 p:option('-j --jobs',
     'Maximum concurrent generated-C compilations (default: TITAN_JOBS or 1).')
-p:flag('--static', 'Prefer static Titan archive providers.')
+p:option('--launcher-name', 'Windows standalone/test launcher filename in bin (default: logical module name).')
+p:flag('--static', 'Prefer static Titan archive providers (unsupported on Windows).')
 p:flag('--source-first', 'Prefer available source modules to compiled providers.')
 p:flag('--incremental', 'Reuse source module objects that are no older than their sources; the build system owns other invalidation.')
 p:flag('-c --compile-only', 'Generate objects and headers only; always rebuild explicitly requested modules.')
@@ -29,7 +31,7 @@ p:option('-u --lua', 'Path to Lua source tree (source checkouts only; installed 
 p:option('-t --tree', 'Root of the source tree, used for looking for source modules (defaults to ".").')
 p:option('-l --link', 'Comma-separated list of additional libraries to link into module.')
 p:option('-X --extra-object',
-    'Additional native object/archive payload; library mode carries it into both provider forms.'):args("*")
+    'Additional native object/archive payload carried into the linked provider outputs.'):args("*")
 local args = p:parse()
 
 local resolver_context
@@ -71,7 +73,13 @@ end
 if args.incremental and args.print_ast then
     exit("--incremental cannot be combined with --print-ast")
 end
+if platform.windows and args.static then
+    exit("--static is not supported on Windows; Titan modules use DLL providers")
+end
 if args.compile_only then
+    if args.launcher_name then
+        exit("--launcher-name cannot be combined with --compile-only")
+    end
     if args.link ~= nil or args.extra_object ~= nil or args.no_uv_bootstrap then
         exit("--compile-only cannot be combined with -l, -X, or --no-uv-bootstrap")
     end
@@ -206,6 +214,18 @@ if args.test then
     end
 end
 
+if args.launcher_name then
+    if not main_module then
+        exit("--launcher-name is only valid when compiling a standalone executable")
+    end
+    local launcher, launcher_error =
+        driver.windows_launcher_name(main_module, args.launcher_name)
+    if not launcher then exit(launcher_error) end
+    if not platform.windows then
+        exit("--launcher-name is only supported for Windows launchers")
+    end
+end
+
 if args.no_uv_bootstrap and not main_module then
     exit("--no-uv-bootstrap is only valid when compiling a standalone executable")
 end
@@ -216,6 +236,9 @@ if not finalized then
     exit(table.concat(finalize_errors, "\n"))
 end
 local selected_static_archives = {}
+if platform.windows and #resolver_context.selected_static_providers > 0 then
+    exit("Windows Titan dependencies require DLL providers; static Titan archives are not supported")
+end
 for _, static_provider in ipairs(
         resolver_context.selected_static_providers) do
     table.insert(selected_static_archives, static_provider.archive)
@@ -296,8 +319,18 @@ if main_module then
     for _, input in ipairs(args.extra_object or {}) do
         program_inputs[#program_inputs + 1] = input
     end
+    local extra_outputs
+    if platform.windows then
+        local paths, path_error = driver.windows_program_paths(main_module,
+            args.launcher_name, args.test and requested_modules[1] or nil)
+        if not paths then exit(path_error) end
+        program_output = paths.executable
+        extra_outputs = driver.windows_program_auxiliary_paths(
+            entrypoint_output, paths.provider)
+    end
     local outputs_ok, outputs_err = driver.validate_program_output_paths(
-        source_outputs, program_output, entrypoint_output, program_inputs)
+        source_outputs, program_output, entrypoint_output, program_inputs,
+        extra_outputs)
     if not outputs_ok then table.insert(errors, outputs_err) end
 end
 
@@ -493,8 +526,9 @@ local native_target, target_or_err =
 if not native_target then
     exit("failed to derive generated native target: " .. tostring(target_or_err))
 end
+local generated_entries = platform.windows and {} or nil
 local objects_valid, objects_err =
-    driver.validate_generated_objects(generated_objects, native_target)
+    driver.validate_generated_objects(generated_objects, native_target, generated_entries)
 if not objects_valid then exit(objects_err) end
 local providers_valid, providers_err =
     driver.prepare_static_providers_for_target(
@@ -521,10 +555,13 @@ if main_module then
             break
         end
     end
-    local probe_ok, probe_err = driver.run_standalone_archive_probe(
-        archive_entries, archive_names, ofiles, selected_static_archives,
-        args.link, args.verbose, args.extra_object,
-        validate_titan_support, { pretty_print = args.pretty_print })
+    local probe_ok, probe_err = true
+    if not platform.windows then
+        probe_ok, probe_err = driver.run_standalone_archive_probe(
+            archive_entries, archive_names, ofiles, selected_static_archives,
+            args.link, args.verbose, args.extra_object,
+            validate_titan_support, { pretty_print = args.pretty_print })
+    end
     if not probe_ok then
         table.insert(errors, probe_err)
     else
@@ -538,6 +575,12 @@ if main_module then
             {
                 no_uv_bootstrap = args.no_uv_bootstrap,
                 pretty_print = args.pretty_print,
+                launcher_name = args.launcher_name,
+                output_module = args.test and requested_modules[1] or nil,
+                module_names = output_names,
+                archive_entries = archive_entries,
+                archive_names = archive_names,
+                validate_titan_support = validate_titan_support,
             })
         if not ok then
             table.insert(errors, link_failed("program", main_module, term, code))
@@ -561,12 +604,26 @@ else
     if #errors > 0 then exit(table.concat(errors, "\n")) end
     local ok, term, code = driver.compile_library_output(
         temporary, ofiles, args.link, args.verbose, nil,
-        selected_static_archives, native_payload.inputs, provider_output)
+        selected_static_archives, native_payload.inputs, provider_output,
+        platform.windows and output_names or nil)
     if not ok then
         driver.remove_path(temporary)
         driver.remove_path(temporary .. ".dSYM")
         driver.remove_path(temporary_directory)
         table.insert(errors, link_failed("library", provider, term, code))
+    elseif platform.windows then
+        local valid, validation_err = driver.validate_library_image_fresh(
+            temporary, generated_entries, output_names, args.verbose)
+        if valid and provider == "titan" then
+            valid, validation_err = driver.validate_titan_support(temporary, args.verbose)
+        end
+        if valid then
+            valid, validation_err = driver.publish_windows_provider(
+                temporary, provider_output, shim_plans, provider)
+        end
+        driver.remove_path(temporary)
+        driver.remove_path(temporary_directory)
+        if not valid then table.insert(errors, validation_err) end
     else
         local ordered_archive_inputs = {}
         for _, name in ipairs(linked_names) do
@@ -625,7 +682,7 @@ else
             local image_ok, image_term, image_code =
                 driver.compile_archive_validation_image(
                     validation_image, temporary_archive, args.link,
-                    args.verbose)
+                    args.verbose, nil, platform.windows and output_names or nil)
             if not image_ok then
                 valid = nil
                 validation_err = link_failed(

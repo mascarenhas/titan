@@ -1,5 +1,16 @@
 # Third-party notices
 
+## Experimental Windows builds
+
+`Makefile.windows` packages the pinned Lua, libuv, OpenSSL, llhttp, and SQLite
+providers as application-private DLLs. The corresponding attribution and
+license texts below also accompany those DLLs. Windows does not link GNU
+Readline. The private namespaced LPegLabel payload remains statically embedded
+in the Titan standard provider. Compiler-only LuaFileSystem, LPegLabel/relabel,
+argparse, and inspect have their upstream notices installed separately under
+`share/titan/0.6/licenses/`; the standard-provider notices and texts are under
+`share/titan/THIRD_PARTY_NOTICES.md` and `share/titan/LICENSES/`.
+
 ## GNU Readline
 
 Lua's interactive `linux-readline` and `macosx` targets link the prefix-local

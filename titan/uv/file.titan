@@ -281,11 +281,12 @@ local function FsOpenCall:dispatch(task: Task): Immediate?
 end
 
 local function FsReadCall:dispatch(task: Task): Immediate?
+  local descriptor = foreign uv_buf_t.new()
+  -- Check the target's buffer length before allocating or rooting a request.
+  descriptor.len = self.maximum
   local owner = new_fs_request(
       task, "fs.read", nil, read_result, self.maximum)
-  local descriptor = foreign uv_buf_t.new()
   descriptor.base = owner.buffer
-  descriptor.len = self.maximum as foreign size_t
   local status = ffi.uv_fs_read {
     loop = task.runtime.loop,
     req = owner.handle,
@@ -302,7 +303,7 @@ local function FsWriteCall:dispatch(task: Task): Immediate?
   local descriptor = foreign uv_buf_t.new()
   local base: foreign *char = self.data
   descriptor.base = base + self.offset
-  descriptor.len = (#self.data - self.offset) as foreign size_t
+  descriptor.len = #self.data - self.offset
   local owner = new_fs_request(
       task, "fs.write", self.data, write_result, -1)
   local status = ffi.uv_fs_write {

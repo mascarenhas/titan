@@ -231,7 +231,7 @@ local function submit_stream_write(task: Task,
                                     operation: string): Immediate?
   local descriptor = foreign uv_buf_t.new()
   descriptor.base = data
-  descriptor.len = #data as foreign size_t
+  descriptor.len = #data
   local callback = function (_owner: StreamWriteOwner, status: integer)
     -- Libuv borrows the string bytes through write_cb, so retain the string.
     local _data = data
@@ -285,14 +285,14 @@ local function report_task_error(err: value, trace: string)
     text = text .. "stack traceback:\n" .. trace .. "\n"
   end
   -- stderr is a macro on the supported C libraries and therefore is not a
-  -- portable FFI object. Descriptor 2 is the POSIX stderr boundary already
-  -- required by the libuv runtime.
+  -- portable FFI object. Descriptor 2 is the inherited stderr boundary. The
+  -- typed call checks its count against this platform's actual write parameter.
   local bytes = text as foreign const *char
   local offset = 0
   while offset < #text do
     local written = ffi.write(
         2 as foreign int, bytes + offset,
-        (#text - offset) as foreign size_t)
+        #text - offset)
     if written < 0 then
       if ffi.errno == ffi.EINTR then
         -- Retry the same suffix.

@@ -471,6 +471,12 @@ function with_merged_output(config: SpawnConfig): integer
   return uv.os_spawn_config_with_merged_output(config.handle)
 end
 
+function with_env(name: string, contents: string): SpawnOption
+  return function (config: SpawnConfig): integer
+    return uv.os_spawn_config_with_env(config.handle, name, contents)
+  end
+end
+
 function spawn(file: string, args: {string},
                ...: SpawnOption): Process
   local config = SpawnConfig.new(uv.os_spawn_config_new())
@@ -511,6 +517,17 @@ function spawn(file: string, args: {string},
     end)(raw_stderr, raw_stdout, output)
 
   return Process.new(process_handle, input, output, diagnostics)
+end
+
+-- Only io.popen selects shell syntax. Ordinary spawn keeps libuv's normal argv
+-- quoting; the source-private option is not part of the public SpawnOption API.
+local function with_shell_arguments(config: SpawnConfig): integer
+  return uv.os_spawn_config_for_shell(config.handle)
+end
+
+local function spawn_shell(command: string): Process
+  local file, args = uv.os_shell_command(command)
+  return spawn(file, args, with_stdin, with_merged_output, with_shell_arguments)
 end
 
 function Process:wait(): ExitStatus

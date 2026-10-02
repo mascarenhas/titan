@@ -57,6 +57,52 @@ describe("declared project manifests", function()
         end
     end
 
+    for _, windows in ipairs({ false, true }) do
+        it("round-trips exact " .. (windows and "Windows" or "Unix")
+            .. " header identities in declared manifests", function()
+            local platform = require "titan-compiler.platform"
+            local projectcache = require "titan-compiler.projectcache"
+            local old_windows = platform.windows
+            local ok, failure = xpcall(function()
+                platform.windows = windows
+                local paths = windows and {
+                    "C:/SDK 日本/include/lua.h", [[C:\SDK 日本\include\lua.h]],
+                    [[\\server\share\include\lua.h]], [[\\?\C:\SDK\lua.h]],
+                    "C:/SDK/link/../lua.h",
+                } or { "/SDK//include/./lua.h", "/SDK/link/../lua.h", "/SDK/lua.h " }
+                local modtype = types.Module("header_identities", {}, {})
+                modtype._source = true
+                modtype.source_members, modtype.source_type_members = {}, {}
+                local entry = {
+                    kind = "source", type = modtype, deps = {},
+                    filename = "source.titan", source_files = { "source.titan" },
+                    source_manifest = "source", completion_facts = {},
+                    c_header_dependencies = {},
+                }
+                for index, path in ipairs(paths) do
+                    entry.c_header_dependencies[index] = {
+                        kind = "file", path = path, identity = "semantic:" .. index,
+                    }
+                end
+                local payload = assert(projectcache.encode(entry))
+                local restored = assert(projectcache.decode(payload))
+                assert.same(entry.c_header_dependencies, restored.c_header_dependencies)
+                assert.equal(payload, assert(projectcache.encode(restored)))
+                local invalid = windows and { "C:relative.h", "/rooted.h", [[\rooted.h]] }
+                    or { "relative.h", "C:/SDK/lua.h" }
+                invalid[#invalid + 1] = paths[1] .. "\0"
+                for _, path in ipairs(invalid) do
+                    entry.c_header_dependencies[1].path = path
+                    local result, err = projectcache.encode(entry)
+                    assert.is_nil(result)
+                    assert.matches("invalid header input identity", err, 1, true)
+                end
+            end, debug.traceback)
+            platform.windows = old_windows
+            assert(ok, failure)
+        end)
+    end
+
     it("hydrates a private generic source entry and reuses it on the next edit", function()
         local provider = load_module("provider", [[
             record Box<|A|> item: A end

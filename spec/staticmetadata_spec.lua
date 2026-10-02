@@ -248,9 +248,42 @@ local function macho_object(payload, options)
     return assemble(file_size, parts)
 end
 
+local function coff_object(payload, options)
+    options = options or {}
+    local count = options.duplicate and 2 or 1
+    local name = options.section_name or ".titan.meta"
+    local long_name = #name > 8
+    local data_offset = 20 + count * 40
+    local relocations = options.relocations or 0
+    local relocation_data = options.relocation_data or zeros(relocations * 10)
+    local relocation_offset = data_offset + count * #payload
+    local symbol_offset = relocation_offset + #relocation_data
+    local strings = long_name and name .. "\0" or ""
+    strings = uint(#strings + 4, 4) .. strings
+    if options.strings then strings = options.strings end
+    local header = uint(options.machine or 0x8664, 2) ..
+        uint(options.section_count or count, 2) .. zeros(4) ..
+        uint(options.symbol_offset or symbol_offset, 4) ..
+        uint(options.symbol_count or 0, 4) ..
+        uint(options.optional_size or 0, 2) .. uint(options.flags or 0, 2)
+    local parts = { header }
+    for index = 1, count do
+        parts[#parts + 1] = fixed(options.raw_name or (long_name and "/4" or name), 8) ..
+            zeros(8) .. uint(options.data_size or #payload, 4) ..
+            uint(options.data_offset or data_offset + (index - 1) * #payload, 4) ..
+            uint(options.relocation_offset or (relocations > 0 and relocation_offset or 0), 4) ..
+            uint(options.line_offset or 0, 4) .. uint(relocations, 2) ..
+            uint(options.line_count or 0, 2) .. uint(options.section_flags or 0x40100040, 4)
+    end
+    parts[#parts + 1] = payload:rep(count)
+    parts[#parts + 1] = relocation_data
+    parts[#parts + 1] = strings
+    return table.concat(parts)
+end
+
 describe("bounded raw object sections", function()
     local names = { elf = ".titan.cprobe", macho_segment = "__DATA",
-        macho_section = "__titancprobe" }
+        macho_section = "__titancprobe", coff = ".titan.cprobe" }
     local payload = "TITENUM\0\1\12\1\6"
     local function extract(bytes, limit)
         return staticmetadata.read_object_section(bytes, "query.o", names, limit or 12)
@@ -265,6 +298,20 @@ describe("bounded raw object sections", function()
         options.segname, options.sectname = names.macho_segment, names.macho_section
         return macho_object(payload, options)
     end
+    local function coff(options)
+        options = options or {}
+        options.section_name = names.coff
+        return coff_object(payload, options)
+    end
+
+    it("extracts exact COFF bytes using long section names", function()
+        assert.equal(payload, assert(extract(coff())))
+        local short_names = { elf = ".probe", macho_segment = "__DATA",
+            macho_section = "__probe", coff = ".probe" }
+        assert.equal(payload, assert(staticmetadata.read_object_section(
+            coff_object(payload, { section_name = ".probe", symbol_offset = 0 }),
+            "short.o", short_names, 12)))
+    end)
 
     it("extracts exact bytes from ELF and Mach-O in either width and byte order", function()
         for _, build in ipairs({ elf, macho }) do
@@ -278,18 +325,22 @@ describe("bounded raw object sections", function()
     end)
 
     it("rejects missing, duplicate, oversized and relocated result sections", function()
-        for _, build in ipairs({ elf, macho }) do
+        for _, build in ipairs({ elf, macho, coff }) do
             assert.is_nil(extract(build(), 11))
             assert.is_nil(extract(build({ duplicate = true })))
             assert.is_nil(extract(build():sub(1, 50)))
         end
         assert.is_nil(extract(elf({ relocation = true })))
         assert.is_nil(extract(macho({ relocations = 1 })))
+        assert.is_nil(extract(coff({ relocations = 1 })))
         assert.is_nil(extract(elf_object(payload, { section_name = ".other" })))
         assert.is_nil(extract(macho_object(payload, { sectname = "__other" })))
         assert.is_nil(extract(elf({ metadata_type = 8 })))
         assert.is_nil(extract(elf({ metadata_flags = 0x800 })))
         assert.is_nil(extract(macho({ section_type = 1 })))
+        assert.is_nil(extract(coff({ section_flags = 0x80 })))
+        assert.is_nil(extract(coff({ section_flags = 0x20 })))
+        assert.is_nil(extract(coff_object(payload, { section_name = ".other" })))
         assert.is_nil(extract("!<arch>\n"))
         assert.is_nil(extract("not an object"))
     end)
@@ -375,8 +426,12 @@ describe("trusted object source metadata", function()
         assert.matches("invalid object nominal layout metadata", err, 1, true)
     end)
 
-    it("reads source records from ELF and Mach-O without interpreting them as public metadata", function()
+    it("reads source records without interpreting them as public metadata", function()
         local payload = assert(objectmetadata.encode(source_entry(), {}))
+        local coff = assert(objectmetadata.read(coff_object(payload,
+            { section_name = ".titan.source" }), "producer.obj"))
+        assert.equal("cache.producer", coff.type.name)
+        assert.equal("secret", coff.type.source_members[1].name)
         for _, width in ipairs({ 32, 64 }) do
             for _, endian in ipairs({ "little", "big" }) do
                 for _, bytes in ipairs({
@@ -443,6 +498,56 @@ describe("trusted object source metadata", function()
                 end
                 assert.is_true(has_lto, "compiler did not emit a native fat LTO object")
             end
+        end, debug.traceback)
+        os.remove(source)
+        os.remove(output)
+        os.remove(stem)
+        assert.is_true(ok, failure)
+    end)
+
+    it("reads real Clang Windows metadata and enum result objects without an SDK", function()
+        local strategy = require("titan-compiler.io").new_sync()
+        if not strategy:run({ "clang", "--version" }).ok then
+            pending("Clang is required for the cross-target COFF probe")
+            return
+        end
+        local core = require "titan-compiler.coder.core"
+        require "titan-compiler.coder.module"
+        local util = require "titan-compiler.util"
+        local entry = source_entry()
+        local public = assert(staticmetadata.render(entry.type.name,
+            version.TITAN_ABI_VERSION, types.serialize(entry.type)))
+        local source_record = assert(objectmetadata.encode(entry, {}))
+        local code = util.render(core.coder.modmetadata, {
+            METADATANAME = "native_public_metadata",
+            METADATA = assert(staticmetadata.c_initializer(public)),
+        }) .. assert(objectmetadata.render(source_record, "native_source_metadata")) .. [[
+enum carrier { NEGATIVE = -1, POSITIVE = 1 };
+extern enum carrier value;
+__attribute__((used, aligned(1), section(".titan.cprobe")))
+static const unsigned char result[] = {84,73,84,69,78,85,77,0,1,12,
+    __builtin_types_compatible_p(__typeof__(&value), int *), 6};
+]]
+        local stem = os.tmpname()
+        local source, output = stem .. ".c", stem .. ".o"
+        local ok, failure = xpcall(function()
+            assert(util.set_file_contents(source, code))
+            local compiled = strategy:run({ "clang", "--target=x86_64-w64-windows-gnu",
+                "-std=c99", "-O2", "-Wall", "-Werror", "-c", source, "-o", output })
+            assert.is_true(compiled.ok, compiled.output or compiled.diagnostic)
+            local bytes = assert(util.get_file_contents(output))
+            local object = assert(staticmetadata.classify_object(bytes, output))
+            assert.same({ format = "coff", machine = 0x8664, word_size = 64,
+                endian = "little" }, object.fingerprint)
+            assert.equal(public, object.metadata.payload)
+            local restored = assert(objectmetadata.read(bytes, output))
+            assert.equal(entry.type.name, restored.type.name)
+            assert.equal(restored.type.source_members.head.type.pointee,
+                restored.type.source_members.head.type.pointee.fields.next.owner)
+            local result = assert(staticmetadata.read_object_section(bytes, output,
+                { elf = ".titan.cprobe", coff = ".titan.cprobe",
+                    macho_segment = "__DATA", macho_section = "__titancprobe" }, 12))
+            assert.equal("TITENUM\0\1\12\1\6", result)
         end, debug.traceback)
         os.remove(source)
         os.remove(output)
@@ -923,6 +1028,97 @@ return {
         end)
     end)
 
+    describe("COFF relocatable objects", function()
+        it("reads public metadata and distinguishes machine targets", function()
+            local target = assert(scan(coff_object(PAYLOAD))).fingerprint
+            for _, machine in ipairs({ 0x14c, 0x8664, 0xaa64 }) do
+                local object = assert(scan(coff_object(PAYLOAD, { machine = machine })))
+                assert.equal("object", object.kind)
+                assert.equal("coff", object.format)
+                assert.equal(machine, object.fingerprint.machine)
+                assert.equal(machine == 0x14c and 32 or 64, object.fingerprint.word_size)
+                assert.equal("little", object.fingerprint.endian)
+                assert.equal("pkg.mod", object.metadata.module)
+                if machine ~= target.machine then
+                    local mismatch, err = scan(coff_object(PAYLOAD, { machine = machine }),
+                        { target = target })
+                    assert.is_nil(mismatch)
+                    assert.matches("target mismatch", err, 1, true)
+                end
+            end
+            assert.is_false(staticmetadata.fingerprint_matches(target,
+                assert(scan(elf_object(PAYLOAD))).fingerprint))
+        end)
+
+        it("rejects malformed headers, section names, payloads and native tables", function()
+            local cases = {
+                { { optional_size = 1 }, "not a relocatable" },
+                { { flags = 2 }, "not a relocatable" },
+                { { flags = 0x2000 }, "not a relocatable" },
+                { { flags = 0x80 }, "byte-reversed" },
+                { { section_count = 0 }, "section table is empty" },
+                { { section_count = 0xffff }, "COFF section table" },
+                { { duplicate = true }, "more than one" },
+                { { raw_name = "/bad" }, "long section name offset" },
+                { { raw_name = "/3" }, "long section name offset" },
+                { { raw_name = "/999999" }, "outside its string table" },
+                { { symbol_offset = 0 }, "no string table" },
+                { { symbol_offset = 0, symbol_count = 1 }, "has no offset" },
+                { { symbol_offset = 0xffff }, "outside the input" },
+                { { symbol_count = 0xffffffff }, "COFF symbol table" },
+                { { strings = uint(3, 4) }, "less than 4" },
+                { { strings = uint(1000, 4) }, "outside the input" },
+                { { strings = uint(15, 4) .. ".titan.meta" }, "not NUL-terminated" },
+                { { data_offset = 0xffff }, "outside the input" },
+                { { data_size = 0xffffffff }, "outside the input" },
+                { { section_flags = 0x80 }, "not initialized COFF data" },
+                { { relocations = 1 }, "has relocations" },
+                { { relocations = 1, relocation_offset = 0xffff }, "COFF relocation table" },
+                { { section_flags = 0x01000040 }, "overflow count" },
+                { { relocations = 0xffff, relocation_data = uint(10, 4),
+                    section_flags = 0x01000040 }, "extended relocation count" },
+                { { relocations = 0xffff, relocation_data = uint(0xffffffff, 4),
+                    section_flags = 0x01000040 }, "COFF relocation table" },
+                { { line_count = 1, line_offset = 0xffff }, "COFF line-number table" },
+            }
+            for _, case in ipairs(cases) do
+                local object, err = scan(coff_object(PAYLOAD, case[1]))
+                assert.is_nil(object)
+                assert.matches(case[2], err, 1, true)
+                assert.matches("fixture with spaces", err, 1, true)
+            end
+            local bytes = coff_object(PAYLOAD)
+            for _, size in ipairs({ 2, 19, 59, #bytes - 1 }) do
+                assert.is_nil(scan(bytes:sub(1, size)))
+            end
+        end)
+
+        it("bounds relocation overflow tables in ordinary objects", function()
+            local count = 0x10000
+            local object = assert(scan(coff_object("code", {
+                section_name = ".text", section_flags = 0x01000020,
+                relocations = 0xffff,
+                relocation_data = uint(count, 4) .. zeros(count * 10 - 4),
+            })))
+            assert.equal(count - 1, object.sections[1].relocation_count)
+        end)
+
+        it("rejects PE images, import objects and BigObj explicitly", function()
+            local cases = {
+                { "MZ" .. zeros(100), "PE image is not a relocatable object" },
+                { "\0\0\255\255" .. zeros(16), "COFF import objects" },
+                { "\0\0\255\255\2\0\100\134" .. zeros(4) ..
+                    "\199\161\186\209\238\186\169\75\175\32\250\246\106\164\220\184" ..
+                    zeros(28), "COFF BigObj objects" },
+            }
+            for _, case in ipairs(cases) do
+                local object, err = scan(case[1])
+                assert.is_nil(object)
+                assert.matches(case[2], err, 1, true)
+            end
+        end)
+    end)
+
     describe("regular archives", function()
         local native_object = elf_object("", { section_name = ".text" })
 
@@ -980,6 +1176,22 @@ return {
                 result.members[2].header_offset)
             assert.equal(native_object, result.members[1].bytes)
             assert.equal("elf", result.members[1].fingerprint.format)
+        end)
+
+        it("inspects ordinary COFF members without accepting import objects", function()
+            local result = assert(scan(archive({
+                ar_member("module.o/", coff_object(PAYLOAD)),
+                ar_member("native.o/", coff_object("native", { section_name = ".data" })),
+            })))
+            assert.equal(2, #result.members)
+            assert.equal("coff", result.members[1].fingerprint.format)
+            assert.equal("coff", result.members[2].fingerprint.format)
+            assert.equal("pkg.mod", result.members[1].metadata.module)
+            local invalid, err = scan(archive({
+                ar_member("import.o/", "\0\0\255\255" .. zeros(16)),
+            }))
+            assert.is_nil(invalid)
+            assert.matches("COFF import objects", err, 1, true)
         end)
 
         it("rejects duplicate logical keys with both object origins", function()

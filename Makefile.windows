@@ -1,0 +1,201 @@
+# Native Windows x64 / MSYS2 CLANG64 build. Invoke from that environment with
+# make -f Makefile.windows lua PREFIX=/c/path/to/titan-sdk
+# Experimental controlled Lua and native dependency DLLs with matching SDKs.
+SHELL := /bin/bash
+.SHELLFLAGS := -eu -o pipefail -c
+.DELETE_ON_ERROR:
+.NOTPARALLEL:
+.DEFAULT_GOAL := help
+
+quote = '$(subst ','"'"',$(1))'
+empty :=
+space := $(empty) $(empty)
+make_path = $(subst $(space),\$(space),$(1))
+ifeq ($(origin CC),default)
+CC := clang
+endif
+CC ?= clang
+ifeq ($(origin RC),default)
+RC := llvm-rc
+endif
+RC ?= llvm-rc
+LUA_CFLAGS ?= -O2 -Wall -Wextra
+LUA_CPPFLAGS ?=
+LUA_LDFLAGS ?=
+PREFIX ?= $(CURDIR)/.windows-sdk
+WINDOWS_BUILD_ROOT ?= $(CURDIR)/windows-build
+
+LUA_VERSION := 5.5.1
+LUA_ARCHIVE := lua-$(LUA_VERSION).tar.gz
+LUA_URL := https://www.lua.org/ftp/$(LUA_ARCHIVE)
+LUA_SHA256 := 1c4b4068d67061f2a2231ad2b5422e77acea1487ea9890f6320af614f4373dce
+LUA_SOURCE := $(WINDOWS_BUILD_ROOT)/lua-$(LUA_VERSION)/src
+LUA_READY := $(LUA_SOURCE)/.titan-windows-source
+LUA_CONFIGURE := scripts/configure_windows_lua.pl
+LUA_OBJECT_DIR := $(WINDOWS_BUILD_ROOT)/lua-objects
+LUA_CONFIG := $(LUA_OBJECT_DIR)/.configuration
+LUA_DLL := $(WINDOWS_BUILD_ROOT)/bin/lua-$(LUA_VERSION).dll
+LUA_IMPORT := $(WINDOWS_BUILD_ROOT)/lib/liblua-$(LUA_VERSION).dll.a
+LUA_EXE := $(WINDOWS_BUILD_ROOT)/bin/lua.exe
+LUA_RESOURCE := $(LUA_OBJECT_DIR)/lua.res
+LUA_MANIFEST := vendor/lua/lua-$(LUA_VERSION)-windows.manifest
+LUA_RC_SOURCE := vendor/lua/lua-$(LUA_VERSION)-windows.rc
+
+# Stock Lua's CORE_O and LIB_O; neither lua.c nor luac.c produces the DLL.
+LUA_CORE := lapi lcode lctype ldebug ldo ldump lfunc lgc llex lmem lobject \
+	lopcodes lparser lstate lstring ltable ltm lundump lvm lzio
+LUA_LIBRARIES := lauxlib lbaselib lcorolib ldblib liolib lmathlib loadlib \
+	loslib lstrlib ltablib lutf8lib linit
+LUA_OBJECTS := $(foreach name,$(LUA_CORE) $(LUA_LIBRARIES),$(call make_path,$(LUA_OBJECT_DIR)/$(name).o))
+
+.PHONY: help lua-source lua-source-check lua-build lua lua-check check-windows-toolchain FORCE
+help:
+	@echo 'Windows CLANG64/UCRT x64 targets (serial compilation):'
+	@echo '  lua-source  verify and configure the dedicated Lua source stage'
+	@echo '  lua-source-check  test configured headers with Clang COFF objects (also on Linux)'
+	@echo '  lua-build   build lua-5.5.1.dll, its import library, and lua.exe'
+	@echo '  lua         install those files and the complete matching Lua SDK'
+	@echo '  lua-check   check native exports/imports and exercise SDK consumers'
+	@echo '  native-source-check  check configured native headers with Clang COFF objects'
+	@echo '  native      build/install pinned native DLLs, import libraries and headers'
+	@echo '  native-check  inspect private PE imports and run native SDK consumers'
+	@echo '  compiler    install the native compiler frontend and Lua dependencies'
+	@echo '  compiler-check  validate the native frontend and compiler dependencies'
+	@echo '  runtime     build/install the runtime SDK and seed an absent support DLL'
+	@echo '  runtime-check  validate runtime consumers, rebuilds and provider preservation'
+	@echo '  stdlib      compile the 21 Windows roots into titan.dll and exact shims'
+	@echo '  stdlib-check  validate the staged DLL, metadata, shims and PE inventory'
+	@echo '  install-stdlib  build, validate and publish the Windows DLL-only provider'
+	@echo '  publish-stdlib  validate and publish an already built Windows provider'
+	@echo '  stdlib-publication-check  exercise commit/rollback with a mapped native DLL'
+
+FORCE:
+
+$(LUA_ARCHIVE):
+	@temporary=$(call quote,$@.tmp); trap 'rm -f "$$temporary"' EXIT; \
+	curl --fail --location --output "$$temporary" $(call quote,$(LUA_URL)); \
+	perl -MDigest::SHA=sha256_hex -e 'local $$/; open my $$f,"<:raw",$$ARGV[0] or die $$!; die "Lua checksum mismatch\n" unless sha256_hex(<$$f>) eq $$ARGV[1]' \
+	  "$$temporary" $(call quote,$(LUA_SHA256)); \
+	mv "$$temporary" $(call quote,$@)
+
+# A fresh verified extraction prevents accidentally using the configured Unix
+# Lua tree. Only our stamped generated tree may be replaced on a recipe change.
+$(call make_path,$(LUA_READY)): $(LUA_ARCHIVE) $(LUA_CONFIGURE) vendor/lua/titan_windows_loadlib.h
+	@perl -MDigest::SHA=sha256_hex -e 'local $$/; open my $$f,"<:raw",$$ARGV[0] or die $$!; die "Lua checksum mismatch\n" unless sha256_hex(<$$f>) eq $$ARGV[1]' \
+	  $(call quote,$(LUA_ARCHIVE)) $(call quote,$(LUA_SHA256))
+	@mkdir -p $(call quote,$(WINDOWS_BUILD_ROOT)); \
+	stage=$$(mktemp -d $(call quote,$(WINDOWS_BUILD_ROOT)/.lua-source.XXXXXX)); \
+	trap 'rm -rf "$$stage"' EXIT; \
+	tar -xzf $(call quote,$(LUA_ARCHIVE)) -C "$$stage"; \
+	perl $(call quote,$(LUA_CONFIGURE)) "$$stage/lua-$(LUA_VERSION)/src"; \
+	printf '%s\n' $(call quote,$(LUA_SHA256)) > "$$stage/lua-$(LUA_VERSION)/src/.titan-windows-source"; \
+	if test -e $(call quote,$(WINDOWS_BUILD_ROOT)/lua-$(LUA_VERSION)); then \
+	  test -f $(call quote,$(LUA_READY)) || { echo 'Refusing to replace an unstamped Lua source directory' >&2; exit 1; }; \
+	  rm -rf $(call quote,$(WINDOWS_BUILD_ROOT)/lua-$(LUA_VERSION)); \
+	fi; \
+	mv "$$stage/lua-$(LUA_VERSION)" $(call quote,$(WINDOWS_BUILD_ROOT)/lua-$(LUA_VERSION))
+
+lua-source: $(call make_path,$(LUA_READY))
+
+lua-source-check: lua-source
+	perl scripts/check_windows_lua_source.pl $(call quote,$(LUA_SOURCE)) clang llvm-readobj
+
+check-windows-toolchain:
+	@test "$${MSYSTEM:-}" = CLANG64 || { echo 'Use the native MSYS2 CLANG64 environment (x64 UCRT)' >&2; exit 1; }
+	@test "$$($(CC) -dumpmachine)" = x86_64-w64-windows-gnu || { echo 'Expected the CLANG64 x86_64 Windows GNU target' >&2; exit 1; }
+	@printf '%s\n' '#include <_mingw.h>' \
+	  '#if !defined(__clang__) || !defined(_WIN64) || !defined(_UCRT)' \
+	  '#error Expected native Clang x64 with UCRT headers' '#endif' | $(CC) -x c -E - >/dev/null
+	@$(CC) --version | head -n 1
+	@command -v $(RC) >/dev/null
+	@command -v llvm-readobj >/dev/null
+
+$(call make_path,$(LUA_CONFIG)): FORCE $(call make_path,$(LUA_READY)) Makefile.windows $(LUA_MANIFEST) | check-windows-toolchain
+	@mkdir -p $(call quote,$(LUA_OBJECT_DIR)); \
+	temporary=$(call quote,$@.tmp); trap 'rm -f "$$temporary"' EXIT; \
+	{ printf '%s\n' 'titan-windows-lua-v1' \
+	    'source-sha256=$(LUA_SHA256)' 'lua-dll=lua-5.5.1.dll' \
+	    $(call quote,CC=$(CC)) $(call quote,RC=$(RC)) \
+	    $(call quote,CPPFLAGS=$(LUA_CPPFLAGS)) $(call quote,CFLAGS=$(LUA_CFLAGS)) \
+	    $(call quote,LDFLAGS=$(LUA_LDFLAGS)); \
+	  $(CC) --version; $(CC) -dumpmachine; \
+	  perl -MDigest::SHA=sha256_hex -e 'for my $$p (@ARGV) { open my $$f,"<:raw",$$p or die $$!; local $$/; print sha256_hex(<$$f>),"  ",$$p,"\n"; }' \
+	    Makefile.windows $(call quote,$(LUA_CONFIGURE)) $(call quote,$(LUA_MANIFEST)); \
+	  (cd $(call quote,$(LUA_SOURCE)); \
+	    perl -MDigest::SHA=sha256_hex -e 'for my $$p (@ARGV) { open my $$f,"<:raw",$$p or die $$!; local $$/; print sha256_hex(<$$f>),"  src/",$$p,"\n"; }' *.c *.h lua.hpp); \
+	} > "$$temporary"; \
+	if ! cmp -s "$$temporary" $(call quote,$@); then mv "$$temporary" $(call quote,$@); fi
+
+$(LUA_OBJECTS): $(call make_path,$(LUA_OBJECT_DIR)/%.o): $(call make_path,$(LUA_READY)) $(call make_path,$(LUA_CONFIG))
+	$(CC) -std=c99 $(LUA_CPPFLAGS) $(LUA_CFLAGS) -DTITAN_LUA_BUILD_DLL \
+	  -c $(call quote,$(LUA_SOURCE)/$*.c) -o $(call quote,$@)
+
+$(call make_path,$(LUA_OBJECT_DIR)/lua.o): $(call make_path,$(LUA_READY)) $(call make_path,$(LUA_CONFIG))
+	$(CC) -std=c99 $(LUA_CPPFLAGS) $(LUA_CFLAGS) \
+	  -c $(call quote,$(LUA_SOURCE)/lua.c) -o $(call quote,$@)
+
+$(call make_path,$(LUA_RESOURCE)): $(LUA_RC_SOURCE) $(LUA_MANIFEST) $(call make_path,$(LUA_CONFIG))
+	$(RC) -I vendor/lua -FO $(call quote,$@) $(call quote,$(LUA_RC_SOURCE))
+
+$(call make_path,$(LUA_DLL)) $(call make_path,$(LUA_IMPORT)) &: $(LUA_OBJECTS) $(call make_path,$(LUA_CONFIG))
+	@mkdir -p $(call quote,$(WINDOWS_BUILD_ROOT)/bin) $(call quote,$(WINDOWS_BUILD_ROOT)/lib)
+	$(CC) -shared $(LUA_LDFLAGS) -Wl,--exclude-all-symbols -Wl,--no-insert-timestamp \
+	  -Xlinker --out-implib -Xlinker $(call quote,$(LUA_IMPORT)) \
+	  -o $(call quote,$(LUA_DLL)) $(foreach name,$(LUA_CORE) $(LUA_LIBRARIES),$(call quote,$(LUA_OBJECT_DIR)/$(name).o))
+
+$(call make_path,$(LUA_EXE)): $(call make_path,$(LUA_OBJECT_DIR)/lua.o) $(call make_path,$(LUA_RESOURCE)) $(call make_path,$(LUA_IMPORT)) $(call make_path,$(LUA_DLL))
+	$(CC) $(LUA_LDFLAGS) -Wl,--no-insert-timestamp -o $(call quote,$@) \
+	  $(call quote,$(LUA_OBJECT_DIR)/lua.o) $(call quote,$(LUA_RESOURCE)) $(call quote,$(LUA_IMPORT))
+
+lua-build: $(call make_path,$(LUA_EXE))
+
+# Headers and all configured sources are part of the compiler SDK contract.
+# No static Lua archive is built or installed.
+lua: lua-build
+	@mkdir -p $(call quote,$(PREFIX)/bin) $(call quote,$(PREFIX)/lib) \
+	  $(call quote,$(PREFIX)/include) $(call quote,$(PREFIX)/src/lua-$(LUA_VERSION)) \
+	  $(call quote,$(PREFIX)/etc/titan)
+	install -m 0755 $(call quote,$(LUA_EXE)) $(call quote,$(LUA_DLL)) $(call quote,$(PREFIX)/bin/)
+	install -m 0644 $(call quote,$(LUA_IMPORT)) $(call quote,$(PREFIX)/lib/)
+	install -m 0644 $(foreach header,lua.h luaconf.h lualib.h lauxlib.h lua.hpp,$(call quote,$(LUA_SOURCE)/$(header))) $(call quote,$(PREFIX)/include/)
+	install -m 0644 $(call quote,$(LUA_SOURCE))/*.c $(call quote,$(LUA_SOURCE))/*.h \
+	  $(call quote,$(LUA_SOURCE)/lua.hpp) $(call quote,$(PREFIX)/src/lua-$(LUA_VERSION)/)
+	install -m 0644 $(call quote,$(LUA_CONFIG)) $(call quote,$(PREFIX)/etc/titan/lua-$(LUA_VERSION)-windows.config)
+
+lua-check: lua
+	CC=$(call quote,$(CC)) bash scripts/check_windows_lua.sh $(call quote,$(PREFIX)) $(call quote,$(WINDOWS_BUILD_ROOT))
+
+# Native dependencies are built in the same CLANG64/UCRT identity as Lua.
+ifeq ($(origin CXX),default)
+CXX := clang++
+endif
+CXX ?= clang++
+ifeq ($(origin AR),default)
+AR := llvm-ar
+endif
+AR ?= llvm-ar
+RANLIB ?= llvm-ranlib
+NATIVE_CFLAGS ?= -O2
+NATIVE_CPPFLAGS ?=
+NATIVE_LDFLAGS ?=
+
+.PHONY: native-source native native-source-check
+native-source:
+	perl scripts/prepare_windows_native.pl $(call quote,$(WINDOWS_BUILD_ROOT)/native-src) vendor/windows-native/dependencies.tsv
+
+native: native-source check-windows-toolchain
+	CC=$(call quote,$(CC)) CXX=$(call quote,$(CXX)) AR=$(call quote,$(AR)) RANLIB=$(call quote,$(RANLIB)) \
+	  NATIVE_CFLAGS=$(call quote,$(NATIVE_CFLAGS)) NATIVE_CPPFLAGS=$(call quote,$(NATIVE_CPPFLAGS)) \
+	  NATIVE_LDFLAGS=$(call quote,$(NATIVE_LDFLAGS)) \
+	  bash scripts/build_windows_native.sh $(call quote,$(WINDOWS_BUILD_ROOT)) $(call quote,$(PREFIX))
+
+native-source-check: native-source
+	perl scripts/check_windows_native_source.pl $(call quote,$(WINDOWS_BUILD_ROOT)/native-src) clang llvm-readobj
+
+.PHONY: native-check
+native-check: native
+	CC=$(call quote,$(CC)) bash scripts/check_windows_native.sh $(call quote,$(PREFIX)) $(call quote,$(WINDOWS_BUILD_ROOT))
+
+include Makefile.windows.compiler
+include Makefile.windows.runtime
+include Makefile.windows.stdlib

@@ -59,8 +59,12 @@ describe("compiled-module ABI version", function()
         local makefile = f:read("*a")
         f:close()
         f = assert(io.open(".github/workflows/ci.yml", "r"))
-        local workflow = f:read("*a")
+        local linux_workflow = f:read("*a")
         f:close()
+        f = assert(io.open(".github/workflows/macos.yml", "r"))
+        local macos_workflow = f:read("*a")
+        f:close()
+        local workflow = linux_workflow .. "\n" .. macos_workflow
         f = assert(io.open("scripts/stdlib_installer.lua", "r"))
         local installer = f:read("*a")
         f:close()
@@ -145,8 +149,10 @@ describe("compiled-module ABI version", function()
         assert.truthy(makefile:find(
             "TITAN_PATH$(TITAN_LIBRARY_VERSION_SUFFIX)", 1, true))
         assert.match("TITAN_PATH_0_6", workflow)
-        assert.equal(1, count_plain(
-            workflow, 'TITAN_ABI_VERSION: "2"'))
+        for _, lane in ipairs({ linux_workflow, macos_workflow }) do
+            assert.equal(1, count_plain(
+                lane, 'TITAN_ABI_VERSION: "2"'))
+        end
         local cache_abi = "abi-${{ env.TITAN_ABI_VERSION }}"
         assert.equal(4, count_plain(workflow, cache_abi))
         assert.equal(4, count_plain(workflow,

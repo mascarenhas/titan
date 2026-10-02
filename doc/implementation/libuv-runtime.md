@@ -384,6 +384,17 @@ it and terminalizes the unwaited stream. This is exception transport through
 libuv's ordinary alloc/read pairing, not a fallback status, recovery path, or
 guard against a read callback without its alloc callback.
 
+Buffer lengths cross through Titan's checked integer adjustment into the
+actual `uv_buf_t.len` field: `size_t` on Unix and `ULONG` on Windows. Do not force
+a `size_t` C value into that field or route every platform through
+`uv_buf_init`, whose length argument is only `unsigned int`. Allocation callbacks
+first convert the suggested `size_t` to a Titan integer, then validate the native
+field before allocating storage. A conversion failure follows the same zero-buffer
+and retained-error path as allocation failure. File reads validate the field
+before creating a pending request; write lengths are checked before their owner
+is rooted. No new chunking or narrowing policy is introduced. The diagnostic
+`write` call likewise uses its platform declaration's checked count type.
+
 During cleanup, each synchronous `uv_walk` selects at most one currently
 non-closing `uv_handle_t *`; the Task submits that close immediately and walks
 again only after `close_cb`. A raw handle pointer is therefore never retained
@@ -462,7 +473,7 @@ ownership and cleanup responsibility.
 Parent descriptors are always represented by the Runtime's pipe-or-TTY stream
 wrappers and inherited with `UV_INHERIT_STREAM`, never `UV_INHERIT_FD`.
 Classification preserves libuv's known TTY and named-pipe fast paths and
-rejects its other known kinds. For `UV_UNKNOWN_HANDLE`, an explicit `fstat`
+rejects its other known kinds. On Unix, for `UV_UNKNOWN_HANDLE`, an explicit `fstat`
 must identify a socket before independent `getsockname` and
 `getsockopt(SO_TYPE)` probes run. Each failure's `errno` is captured
 immediately; `errno` left by `uv_guess_handle` is not evidence. Available
@@ -474,12 +485,37 @@ parser validates the entire comma-separated sequence of single digits
 overrides contradictory metadata nor accepts an unexplained unknown kind
 whose metadata probes both succeeded.
 
-The name probe uses `titan_posix_getsockname`, one inline adapter in the
-POSIX-guarded part of `titan/ffi.h`. It exposes the ordinary `sockaddr *`
-signature because glibc's GNU declaration uses a transparent-union parameter
-outside the C importer's supported subset. The adapter performs exactly the
-native call and preserves its return value and `errno`; it introduces no
-runtime state or exported ABI entry.
+The source-private `process_platform.h` owns the conditional native headers,
+descriptor duplication and metadata queries, because Titan cannot conditionally
+import a platform's C declarations. Its neutral probe record contains native
+results for the existing Titan classification rules; each failed Unix query
+captures `errno` immediately. The C `getsockname` call also avoids exposing
+glibc's transparent-union parameter to the importer. No exported ABI entry or
+runtime state is added.
+
+On Windows, an unknown libuv kind is checked with the actual OS handle and
+`GetFileType`. An invalid handle retains its native error; an unsupported kind
+fails explicitly. It does not supply invented Unix socket metadata or apply the
+Unix launcher hint. A duplicate starts with `DuplicateHandle` using inheritance
+disabled, then `uv_open_osfhandle` gives it a CRT `uv_file`. `uv_fileno` returns a
+Windows `HANDLE`, so ownership transfer compares it with
+`uv_get_osfhandle(duplicate)`, never with the numeric CRT descriptor. Libuv may
+itself duplicate descriptors 0..2 when opening a pipe or TTY. The independently
+owned parent duplicate uses `_close` even in those slots: Windows `uv_fs_close`
+deliberately preserves them. Other descriptor and file ownership paths are
+unchanged.
+
+The narrow C oracles `spec/fixtures/stdlib/native/uv_platform_probe.c` and
+`uv_signal_platform_probe.c` exercise the platform header against the real
+libuv SDK. Build them from the checkout root with C99, `-Wall -Wextra -Werror`,
+`-I.`, and the SDK include/library paths. Windows consumers define
+`USING_UV_SHARED` and link the SDK's `lib/libuv.dll.a`; put its `bin/libuv-1.dll`
+next to the private test executable. Unix consumers use the matching libuv
+archive and ordinary platform link flags. The descriptor oracle checks
+non-inheritance, repeated pipe ownership transfer, missing descriptors, and
+Windows's reused descriptor-0 case; the signal oracle verifies inherited Unix
+policy and the Windows no-op. These gates do not replace the native Titan
+process tests or establish Windows console or signal-delivery support.
 
 Classification occurs before the existing close-on-exec duplication and
 stream-owner transfer. Failed classification creates no descriptor or handle
@@ -489,6 +525,22 @@ descriptor and responsible probe in `OperationError.message`.
 Merged output uses separate child-write and parent-read pipe handles, installs
 the child stream in both child entries, and exposes the same parent stream as
 both Process outputs.
+
+Environment options retain ordered, deduplicated Titan name/value entries in
+the configuration. With none, `uv_process_options_t.env` remains NULL and libuv
+inherits normally. Otherwise, immediately before `uv_spawn`, `uv_os_environ`
+captures the parent environment. Titan copies inherited entries not replaced
+by an option, appends the overrides, and frees the native snapshot before
+spawning. Special inherited Windows entries such as `=C:` remain intact.
+The Titan strings and null-terminated pointer array stay rooted through the
+synchronous `uv_spawn` call; no environment borrow survives its return or the
+spawn-failure yield. The parent environment is never modified.
+
+The source-private `process_environment.h` only supplies platform name equality:
+`strcmp` on Unix and checked UTF-8 to UTF-16 conversion followed by
+`CompareStringOrdinal` with case ignored on Windows. Titan cannot conditionally
+import those platform headers. Allocation/conversion failures return a negative
+libuv status; snapshot, merge, and resource ownership remain in Titan.
 
 A successful spawn returns the native process wrapper and its three optional
 parent endpoints together. The public `os.Process` takes those streams
@@ -502,6 +554,12 @@ stream for `UV_INHERIT_STREAM` does not consume the child's input. An
 unexpected captured-read startup error closes and terminalizes only that
 stream; the low-level module does not kill or reap the successfully spawned
 child.
+
+Filesystem watcher registrations retain their canonical `realpath` directory.
+A directory event joins the unchanged child filename with configured
+`LUA_DIRSEP`, reusing a trailing separator for Unix, drive, or UNC roots. It
+does not resolve the child again: deleted children must still have a canonical
+absolute event path after they cease to exist.
 
 Closing a watcher stops callbacks that libuv says may be suppressed and uses
 the asynchronous `uv_close` callback to settle any blocked continuation.
@@ -734,7 +792,14 @@ close.
 Module initialization records the main Lua thread, applies `uv_setup_args`
 when a generated entrypoint published argc/argv, and installs the private main
 bootstrap hook. It also changes only a default Unix `SIGPIPE` disposition to
-ignored so libuv can report closed-stream writes. A generated entrypoint built
+ignored so libuv can report closed-stream writes. The private
+`uv/signal_platform.h` seam retains the Unix `sigaction` query and changes only
+a default disposition; its Windows branch is a no-op. The same header gives
+Windows-only zero sentinels to the unavailable `SIGUSR1` and `SIGUSR2` names.
+The existing wait/kill validation rejects these before native submission, and
+reverse lookup treats zero as no signal. Other signal constants still come
+from the native headers; they do not establish delivery support.
+A generated entrypoint built
 with `--no-uv-bootstrap` still performs this complete initialization and leaves
 the hook installed, but takes its direct `main(args)` branch. This allows an
 application or test runner to own sequential outer-loop sessions explicitly;

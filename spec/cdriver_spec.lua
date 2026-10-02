@@ -229,6 +229,121 @@ describe("generated module C header inputs", function()
         assert.is_true(changed)
     end)
 
+    it("excludes owned Windows header spellings while retaining authored inputs", function()
+        local platform = require "titan-compiler.platform"
+        local cpp = require "c-parser.cpp"
+        local sha256 = require "titan-compiler.sha256"
+        local previous = platform.windows
+        local ok, failure = pcall(function()
+            for _, fixture in ipairs({
+                { windows = true, root = [[C:\audit\temp]] },
+                { windows = true, root = "C:/audit/temp" },
+                { windows = true, root = [[\\server\share\temp]] },
+                { windows = true, root = [[\\?\C:\audit\temp]] },
+                { windows = false, root = "/audit/temp" },
+            }) do
+                platform.windows = fixture.windows
+                local root = fixture.root
+                local cwd = fixture.windows and "C:/project" or "/project"
+                local authored = cwd .. "/link/../stable.h"
+                local world, serial = {}, 0
+                local function key(path)
+                    if fixture.windows then
+                        local normalized = assert(platform.path.normalize(path))
+                        return (normalized:gsub("\\app\\%.%.\\", "\\"))
+                    end
+                    return path:gsub("/app/%.%./", "/")
+                end
+                local strategy = {}
+                function strategy:cwd() return cwd end
+                function strategy:write_file(path, contents)
+                    serial = serial + 1
+                    world[key(path)] = { contents = contents, inode = serial }
+                    return true
+                end
+                function strategy:read_file(path)
+                    local entry = world[key(path)]
+                    return entry and entry.contents, entry and nil or "missing fixture file"
+                end
+                function strategy:readable(path) return world[key(path)] ~= nil end
+                function strategy:stat(path)
+                    local entry = world[key(path)]
+                    return entry and { kind = "file", mode = 33188, device = 1,
+                        inode = entry.inode, modified_seconds = 1, modified_nanoseconds = 0 }
+                end
+                strategy.lstat = strategy.stat
+                function strategy:realpath(path) return self:readable(path) and key(path) end
+                function strategy:unlink(path) world[key(path)] = nil; return true end
+                function strategy:run() return { started = true, ok = true, output = "" } end
+                function strategy:yield() end
+                function strategy:mkdir() return true end
+                function strategy:rmdir() return true end
+                function strategy:list() return {} end
+                function strategy:rename() error("unused fixture rename") end
+                function strategy:tmpname() return root end
+                local state = owner(strategy)
+                local extended = root:sub(1, 4) == [[\\?\]]
+                local function generated(logical, contents, dependencies)
+                    -- Ordinary native tmpname spelling is retained by ffiheaders.
+                    -- Extended descriptors use their literal native separators.
+                    local filename = extended and assert(platform.join(root, logical))
+                        or root .. "/" .. logical
+                    assert(strategy:write_file(filename, contents))
+                    ffiheaders.remember_file(state, filename)
+                    return { filename = filename, bundle_root = root,
+                        logical_name = logical, identity = cwd .. "/" .. logical,
+                        contents = contents, digest = sha256.hex(contents),
+                        dependencies = dependencies or {}, search_inputs = {} }
+                end
+                assert(strategy:write_file(authored, "typedef int stable_type;\n"))
+                local neighbor = root .. "-outside.h"
+                local escaped = fixture.windows and assert(platform.join(root, "app/../../escaped.h"))
+                    or root .. "/app/../../escaped.h"
+                assert(strategy:write_file(neighbor, "typedef int outside_type;\n"))
+                assert(strategy:write_file(escaped, "typedef int escaped_type;\n"))
+                local leaf = generated("leaf.ffi.h", '#include "' .. authored .. '"\n' ..
+                    '#include "' .. neighbor .. '"\n' ..
+                    "typedef struct Owned { int member; } Owned;\n")
+                local header = generated("app/main.ffi.h",
+                    '#include "../leaf.ffi.h"\n#include "../../escaped.h"\n', { leaf })
+                local original_filename = header.filename
+                local stored = {}
+                local result, err, include = cdriver.process_module(header, {
+                    io = strategy, compiler = { "fixture-cc" }, compiler_include_dirs = {},
+                    cache_adapter = { get = function() end,
+                        put = function(_, _, _, inputs) stored[#stored + 1] = inputs; return true end },
+                })
+                assert.truthy(result, err)
+                assert.same({ "int" }, result.stable_type.def)
+                assert.equal("c-header-" .. sha256.hex("generated-header\0" .. leaf.identity) ..
+                    ".struct", result["struct@Owned"]._tag_provenance.ffi_scope)
+                assert.equal(root, header.bundle_root)
+                assert.equal(original_filename, header.filename)
+                assert.is_true(#stored > 0)
+                stored[#stored + 1] = include.c_header_dependencies
+                stored[#stored + 1] = include.c_header_search_inputs
+                local found = {}
+                for _, inputs in ipairs(stored) do
+                    for _, input in ipairs(inputs) do
+                        assert.falsy(input.path:find(".ffi.h", 1, true), input.path)
+                        if input.kind == "file" then found[input.path] = true end
+                    end
+                end
+                assert.is_true(found[authored])
+                assert.is_true(found[cpp.absolute_lookup_path(neighbor, cwd, strategy)])
+                assert.is_true(found[cpp.absolute_lookup_path(escaped, cwd, strategy)])
+                assert.is_true(ffiheaders.close(state))
+                for _, input in ipairs(include.c_header_dependencies) do
+                    local current, current_error, changed = cpp.revalidate_header_input(input, { io = strategy })
+                    assert.truthy(current, current_error)
+                    assert.is_false(changed)
+                end
+            end
+        end)
+        platform.windows = previous
+        assert.truthy(ok, failure)
+    end)
+
     it("reopens persisted graphs with fresh bundles and no temporary observations", function()
         local root = directory()
         local path = file(root .. "/stable.h", "typedef int stable_type;\n")
@@ -278,13 +393,16 @@ end)
 describe("mtime-first C header validation", function()
     local cpp = require "c-parser.cpp"
     local sha256 = require "titan-compiler.sha256"
-    local function fixture()
+    local function fixture(identity)
         local world = {
             contents = "typedef int observed_type;\n",
             attributes = { kind = "file", mode = 33188, device = 1, inode = 17,
                 modified_seconds = 100, modified_nanoseconds = 123 },
             reads = 0, hashes = 0, stats = 0, lstats = 0, opens = 0,
         }
+        if identity then
+            world.attributes.device, world.attributes.inode = identity[1], identity[2]
+        end
         local function attributes()
             if not world.attributes then return nil end
             local copy = {}
@@ -382,6 +500,23 @@ describe("mtime-first C header validation", function()
         assert.is_false(repeated)
         assert.same(current, stable)
         assert.equal(1, world.reads)
+    end)
+
+    it("retains lossless opaque Windows IDs through header observations", function()
+        local world, input = fixture({ "win32-volume:fffffffffffffffe",
+            "win32-file:ffffffffffffffff0000000000000001" })
+        local current, err, changed = validate(world, input)
+        assert.is_nil(err); assert.is_false(changed)
+        assert.same(input, current)
+        assert.equal(0, world.reads)
+        world.attributes.inode = "win32-file:ffffffffffffffff0000000000000002"
+        current, err, changed = validate(world, input)
+        assert.is_nil(err); assert.is_true(changed)
+        assert.not_equal(input.observation.physical_identity,
+            current.observation.physical_identity)
+        assert.equal(1, world.reads)
+        assert.equal(1, world.hashes)
+        assert.is_false(select(3, validate(world, current)))
     end)
 
     it("detects missing files without attempting a content read", function()

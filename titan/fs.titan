@@ -578,8 +578,9 @@ end
 local function WatchRegistration:event_path(
     filename: string?): string
   if not self.directory or not filename then return self.path end
-  if self.path == "/" then return "/" .. filename end
-  return self.path .. "/" .. filename
+  local separator = ffi.LUA_DIRSEP as string
+  if string.sub(self.path, -1) == separator then return self.path .. filename end
+  return self.path .. separator .. filename
 end
 
 local function Watcher:map_notification(

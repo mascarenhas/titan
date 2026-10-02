@@ -1,0 +1,4 @@
+lpeglabel	lpeglabel-1.6.2-1	lpeglabel-v1.6.2-1.tar.gz	5511d2704de4580c5b79b100c2daec5e773db58be9c2239e49ea2d9da2decf67	https://codeload.github.com/sqmedeiros/lpeglabel/tar.gz/refs/tags/v1.6.2-1
+argparse	argparse-0.7.2	argparse-0.7.2.tar.gz	d2ae8066939420957bb6d580c6a6b8176c4f05419eca318e48d90a670fe2f59e	https://codeload.github.com/luarocks/argparse/tar.gz/refs/tags/0.7.2
+inspect	inspect.lua-3.1.3	inspect-v3.1.3.tar.gz	43386a613f9916186af4919f36392d8b8dad8c4428a5f8c85ebac80acba71eeb	https://codeload.github.com/kikito/inspect.lua/tar.gz/refs/tags/v3.1.3
+lfs	luafilesystem-1_9_0	luafilesystem-v1_9_0.tar.gz	1142c1876e999b3e28d1c236bf21ffd9b023018e336ac25120fb5373aade1450	https://codeload.github.com/lunarmodules/luafilesystem/tar.gz/refs/tags/v1_9_0

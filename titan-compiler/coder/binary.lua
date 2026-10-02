@@ -134,6 +134,12 @@ function coder._binary_resolver(tlcontext, ast)
             entry.kind, entry.value)] = true
     end
     local symbols = coder.interface_external_symbols(tlcontext.module, ast._type)
+    -- This source generation emits the optional native query. A recovered
+    -- ABI-2 interface alone cannot promise that its provider has this export.
+    symbols[#symbols + 1] = {
+        symbol = mangle_qn(tlcontext.module) .. "_abi_value",
+        owner = "module ABI value entry",
+    }
     table.sort(symbols, function(a, b)
         return util.bytewise_less(a.symbol, b.symbol)
     end)

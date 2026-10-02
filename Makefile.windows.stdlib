@@ -1,0 +1,28 @@
+# Additive native Windows standard-library workflow. Include after the runtime,
+# native-dependency and compiler fragments, or pass as a second -f Makefile.
+# The initial experimental build compiles all roots serially; no warm-build
+# completion stamp is claimed until the complete Windows provider is validated.
+.PHONY: stdlib stdlib-check install-stdlib publish-stdlib stdlib-publication-check windows-stdlib-help
+stdlib: compiler runtime native
+	CC=$(call quote,$(CC)) AR=$(call quote,$(AR)) RANLIB=$(call quote,$(RANLIB)) \
+	  bash scripts/build_windows_stdlib.sh $(call quote,$(WINDOWS_BUILD_ROOT)) $(call quote,$(PREFIX))
+
+stdlib-check:
+	bash scripts/publish_windows_stdlib.sh $(call quote,$(WINDOWS_BUILD_ROOT)) $(call quote,$(PREFIX)) check
+
+install-stdlib: stdlib
+	bash scripts/publish_windows_stdlib.sh $(call quote,$(WINDOWS_BUILD_ROOT)) $(call quote,$(PREFIX)) publish
+
+# Publishing an already built stage must not rebuild or replace its inputs.
+publish-stdlib:
+	bash scripts/publish_windows_stdlib.sh $(call quote,$(WINDOWS_BUILD_ROOT)) $(call quote,$(PREFIX)) publish
+
+stdlib-publication-check: runtime
+	bash scripts/check_windows_publication.sh $(call quote,$(WINDOWS_BUILD_ROOT)) $(call quote,$(PREFIX))
+
+windows-stdlib-help:
+	@echo '  stdlib          compile the 21 Windows roots into titan.dll and exact shims'
+	@echo '  stdlib-check    validate the staged DLL, metadata, shims and PE inventory'
+	@echo '  install-stdlib  build, validate and publish the Windows DLL-only provider'
+	@echo '  publish-stdlib  validate and publish an already built Windows provider'
+	@echo '  stdlib-publication-check  exercise commit/rollback with a mapped native DLL'

@@ -140,6 +140,52 @@ describe("c preprocessor (cpp)", function()
         assert(lfs.rmdir(root))
     end)
 
+    for _, ending in ipairs({ "\n", "\r\n" }) do
+        it("finds headers from " .. (ending == "\n" and "LF" or "CRLF")
+            .. " compiler include output without trimming path bytes", function()
+            local strategy = require("titan-compiler.io").new_sync()
+            local root = assert(strategy:tmpname())
+            assert(strategy:unlink(root))
+            -- Ordinary Windows directory names cannot retain a trailing space.
+            local windows = require("titan-compiler.platform").windows
+            root = root .. (windows and "-cpp include path" or "-cpp include ")
+            assert(lfs.mkdir(root))
+            local header = root .. "/discovered.h"
+            local file = assert(io.open(header, "wb"))
+            assert(file:write("int discovered_header;\n"))
+            assert(file:close())
+            local completed, failure = xpcall(function()
+                strategy.run = function(_, argv)
+                    local verbose = false
+                    for _, word in ipairs(argv) do
+                        if word == "-v" then verbose = true end
+                    end
+                    return {
+                        started = true, ok = true, why = "exit", status = 0,
+                        output = verbose and table.concat({
+                            '#include "..." search starts here:',
+                            '#include <...> search starts here:',
+                            " " .. root,
+                            "End of search list.", "",
+                        }, ending) or "",
+                    }
+                end
+                local context = assert(cpp.new_context({
+                    compiler = { "cc" }, fixed_include_dirs = {}, io = strategy,
+                }))
+                assert.same({ quote = {}, system = { root } }, context.incdirs)
+                local parsed, err = cpp.parse_contents("input.c",
+                    "#include <discovered.h>\n", context)
+                assert.truthy(parsed, err)
+                assert.matches("int discovered_header ;",
+                    table.concat(context.output, " "), 1, true)
+            end, debug.traceback)
+            assert(os.remove(header))
+            assert(lfs.rmdir(root))
+            assert(completed, failure)
+        end)
+    end
+
     describe("shell argument handling", function()
         it("splits quoted and escaped paths without losing argument boundaries", function()
             local words = assert(cpp.split_shell_words(
@@ -396,6 +442,52 @@ DECL(f, ignored, extras)
         -- what regresses if the function-like macro is no longer marked to
         -- prevent re-expansion (see the rejected PR #11): each would otherwise
         -- expand forever.
+        it("preserves active recursion guards through argument prescan", function()
+            -- MinGW's _HUGE imports use an object macro that names itself
+            -- inside the argument of a function-like token-pasting macro.
+            local source = [[
+#define CAT_RAW(a,b) a ## b
+#define CAT(a,b) CAT_RAW(a,b)
+#define IMPORT(sym) CAT(__imp_,sym)
+#define VALUE (*IMPORT(VALUE))
+#define HUGE VALUE
+HUGE
+VALUE
+]]
+            assert.equal("( * __imp_VALUE ) ( * __imp_VALUE )", expand(source))
+            assert.same(cpp.tokenize(host_expand(source)), cpp.tokenize(expand(source)))
+        end)
+        it("extends ancestor recursion guards when an object replacement grows", function()
+            local source = [[
+#define A B
+#define B (*F(A))
+#define F(x) x
+A F(7)
+]]
+            assert.equal("( * A ) 7", expand(source))
+            assert.same(cpp.tokenize(host_expand(source)), cpp.tokenize(expand(source)))
+        end)
+        it("expires object aliases before prescanning caller-owned arguments", function()
+            local source = [[
+#define A F
+#define F(x) STR(x)
+#define STR(x) RAW(x)
+#define RAW(x) #x
+A(A)
+A(F(A))
+]]
+            assert.equal([=["F" "\"F\""]=], expand(source))
+            assert.same(cpp.tokenize(host_expand(source)), cpp.tokenize(expand(source)))
+        end)
+        it("prescans repeated function names before disabling their replacement", function()
+            local source = [[
+#define F(x) x + 1
+#define WRAP(x) F(x)
+F(F(1)) WRAP(F(2)) F(3)
+]]
+            assert.equal("1 + 1 + 1 2 + 1 + 1 3 + 1", expand(source))
+            assert.same(cpp.tokenize(host_expand(source)), cpp.tokenize(expand(source)))
+        end)
         it("stops a self-referential function-like macro", function()
             assert.equal("F ( 1 )", expand("#define F(x) F(x)\nF(1)\n"))
         end)
@@ -704,6 +796,20 @@ VEC(acos,, (double __x))
         it("anonymous union member inside a struct", function()
             ok_decls("struct s { int tag; union { int i; float f; }; };\n", 1)
         end)
+        it("keeps anonymous struct members nested inside anonymous unions", function()
+            ok_decls([[
+struct Overlapped {
+    unsigned long long internal;
+    union {
+        struct { unsigned long offset; unsigned long offset_high; };
+        void *pointer;
+    };
+    void *event;
+};
+typedef struct Overlapped Overlapped;
+struct Request { Overlapped overlapped; int type; };
+]], 3)
+        end)
         it("enum with assigned values and a trailing comma", function()
             ok_decls("enum E { A, B = 5, C, };\n", 1)
         end)
@@ -994,6 +1100,32 @@ OK
         it("skips a nested #if inside a dropped block", function()
             assert.equal("after", expand("#if 0\n#if 1\nx\n#endif\ny\n#endif\nafter\n"))
         end)
+        it("accepts punctuation immediately after conditional directive names", function()
+            local source = [[
+#define ENABLED 1
+#if(defined(ENABLED) && !defined(MISSING))
+first
+#else
+wrong
+#endif
+#if+0
+wrong
+#elif!defined(MISSING)
+second
+#endif
+#ifdef ENABLED
+third
+#endif
+]]
+            assert.equal("first second third", expand(source))
+            assert.equal(host_expand(source):gsub("%s+", " "), expand(source))
+        end)
+
+        it("does not split longer identifiers into conditional directive names", function()
+            assert.has_error(function() expand("#iffoo\nwrong\n#endif\n") end)
+            assert.has_error(function() expand("#if 0\n#elifx\nwrong\n#endif\n") end)
+        end)
+
         it("ignores #pragma", function()
             assert.equal("kept", expand("#pragma once\nkept\n"))
         end)

@@ -10,6 +10,23 @@ local compiler_io = require "titan-compiler.io"
 local ffiheaders = require "titan-compiler.ffiheaders"
 local lfs = require "lfs"
 
+describe("quoted C header names", function()
+    it("preserves literal bytes and only normalizes Windows separators", function()
+        local name = "folder 文 😀 $line\\literal/header.h"
+        local expected = require("titan-compiler.platform").windows
+            and name:gsub("\\", "/") or name
+        assert.equal('"' .. expected .. '"', ffiheaders.quote_header(name))
+    end)
+
+    it("rejects bytes that cannot occur in a quoted header token", function()
+        for _, byte in ipairs({ '"', "\r", "\n", "\0" }) do
+            local rendered, err = ffiheaders.quote_header("before" .. byte .. "after.h")
+            assert.is_nil(rendered)
+            assert.match("quoted C header name", err, 1, true)
+        end
+    end)
+end)
+
 local function cstruct(name)
     return types.CStruct(nil, name, nil, {}, true, false)
 end
@@ -2677,6 +2694,27 @@ describe("whole-question enum carrier selection", function()
             assert.equal(2, #state.calls)
             assert.is_true(service:close())
         end
+    end)
+
+    it("accepts a COFF enum result through the same object and cache lifecycle", function()
+        -- Long COFF section names live in the symbol string table. Parser
+        -- bounds and hostile table variants are owned by staticmetadata_spec.
+        local result = payload(1, 6)
+        local name = ".titan.cprobe\0"
+        local bytes = string.pack("<I2I2I4I4I4I2I2", 0x8664, 1, 0,
+            60 + #result, 0, 0, 0) ..
+            "/4\0\0\0\0\0\0" .. string.pack("<I4I4I4I4I4I4I2I2I4",
+                0, 0, #result, 60, 0, 0, 0, 0, 0x40100040) ..
+            result .. string.pack("<I4", #name + 4) .. name
+        local service, state = fake_selection_service(nil, bytes)
+        local module = context(service)
+        local selected = module:select_enum_carrier(int_enum, { 2, 4, 6 })
+        assert.equal("success", selected.status, selected.message)
+        assert.equal(6, selected.selection.carrier_id)
+        assert.equal("service", module:select_enum_carrier(int_enum, { 2, 4, 6 }).cache_tier)
+        assert.equal(2, #state.calls)
+        assert.same({}, state.files)
+        assert.is_true(service:close())
     end)
 
     it("retries missing, malformed and ineligible object payloads after cleanup", function()

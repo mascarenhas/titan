@@ -116,6 +116,69 @@ describe("C FFI ctype registration", function()
         assert.same({ 3 }, point.fields[3].idxs)
     end)
 
+    it("preserves aggregate pointers through multiple typedef declarators", function()
+        for _, aliases in ipairs({ "Node", "Node, *PNode", "*PNode, Node" }) do
+            local ftypes = parse_header([[
+                typedef struct Node {
+                    struct Node *next;
+                    const struct Node * const *links;
+                    int (*rows)[3];
+                    int *columns[4];
+                    struct Marker { int code; } marker;
+                } ]] .. aliases .. [[;
+                struct Marker *outside;
+            ]])
+            assert.equal(0, c99.recoveries)
+            assert.equal(0, ctypes.skipped)
+            local node = assert(ftypes["struct@Node"])
+            local fields = node.fields
+            assert.same({ "*" }, fields[1]._declarator_ops)
+            assert.equal("*", fields[1].type[2])
+            assert.equal(node, fields[1].type[1]._canonical_tag)
+            assert.same({ "*", "const", "*" }, fields[2]._declarator_ops)
+            assert.same({ { idx = 3 }, "*" }, fields[3]._declarator_ops)
+            assert.same({ "*", { idx = 4 } }, fields[4]._declarator_ops)
+            assert.same({ "next", "links", "rows", "columns", "marker" }, {
+                fields[1].name, fields[2].name, fields[3].name,
+                fields[4].name, fields[5].name,
+            })
+            local marker = assert(ftypes["struct@Marker"])
+            assert.is_true(marker._file_scope_tag)
+            assert.equal("file", marker._tag_provenance.scope)
+            assert.equal(marker, fields[5].type[1]._canonical_tag or fields[5].type[1])
+        end
+    end)
+
+    it("promotes nested anonymous struct fields without losing containing definitions", function()
+        local ftypes = parse_header([[
+            typedef unsigned long DWORD;
+            typedef unsigned long long ULONG_PTR;
+            typedef void *HANDLE;
+            typedef struct ffi_overlapped {
+                ULONG_PTR Internal;
+                ULONG_PTR InternalHigh;
+                union {
+                    struct { DWORD Offset; DWORD OffsetHigh; };
+                    void *Pointer;
+                };
+                HANDLE hEvent;
+            } ffi_overlapped;
+            struct ffi_request { ffi_overlapped overlapped; int type; };
+        ]])
+        assert.equal(0, c99.recoveries)
+        assert.equal(0, ctypes.skipped)
+        local overlapped = assert(ftypes["struct@ffi_overlapped"])
+        local fields = {}
+        for _, field in ipairs(overlapped.fields) do fields[#fields + 1] = field.name end
+        assert.same({ "Internal", "InternalHigh", "Offset", "OffsetHigh", "Pointer", "hEvent" }, fields)
+        assert.same({ "DWORD" }, overlapped.fields[3].type)
+        assert.same({ "void", "*" }, overlapped.fields[5].type)
+        local request = assert(ftypes["struct@ffi_request"])
+        assert.equal("overlapped", request.fields[1].name)
+        assert.same({ "ffi_overlapped" }, request.fields[1].type)
+        assert.equal("type", request.fields[2].name)
+    end)
+
     it("preserves bitfield widths and anonymous bitfields", function()
         local ftypes = parse_header([[
             struct Flags {

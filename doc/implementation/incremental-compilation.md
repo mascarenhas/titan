@@ -59,11 +59,16 @@ not publish an object which a later invocation can mistake for a success.
 ## Trusted source record
 
 Each generated relocatable module keeps its existing public `.titan.meta`
-(ELF) or `__TEXT,__titanmeta` (Mach-O) and callable ABI/type/layout protocol. A second
+(ELF/COFF) or `__TEXT,__titanmeta` (Mach-O) and callable ABI/type/layout protocol. A second
 `.titan.source` / `__TEXT,__titansrc` section holds a Lua reconstruction chunk.
 The existing in-process section reader locates these bytes. Emission uses the
 same byte alignment, `used` retention, relocation-free representation, and
 Clang address-sanitizer exclusion as public metadata.
+
+Ordinary COFF uses the same `.titan.source` name and source-record format as
+ELF. Its section lookup follows the COFF long-name string table and rejects
+uninitialized or relocated payloads. Supporting this object representation
+does not enable Windows static providers or complete Windows compilation.
 
 The chunk allocates graph tables before assigning their scalar and reference
 fields, preserving recursive C declarations and shared generic/nominal state.

@@ -1,0 +1,47 @@
+-- Native header/range oracle without allocating a multi-gigabyte buffer.
+foreign import "uv.h"
+foreign import "stdlib.h"
+
+function main(_args: {string}): integer
+  local mode_pointer = ffi.getenv("TITAN_UV_WIDTH_MODE")
+  if mode_pointer == nil then return 1 end
+  local mode = mode_pointer as string
+  if mode ~= "windows" and mode ~= "unix" then return 2 end
+  local descriptor = foreign uv_buf_t.new()
+  descriptor.base = nil
+  descriptor.len = 4294967295
+  if descriptor.len ~= 4294967295 then return 3 end
+
+  local rejected = false
+  do descriptor.len = -1 catch rejected = true end
+  if not rejected then return 4 end
+
+  rejected = false
+  do descriptor.len = 4294967296 catch rejected = true end
+  if rejected ~= (mode == "windows") then return 5 end
+  if mode == "unix" and descriptor.len ~= 4294967296 then return 6 end
+
+  -- The alloc callback crosses size_t -> Titan integer -> native field before
+  -- allocating. Test exactly that adjustment without asking an allocator for it.
+  local suggested = 4294967296 as foreign size_t
+  rejected = false
+  do
+    local length: integer = suggested
+    descriptor.len = length
+  catch
+    rejected = true
+  end
+  if rejected ~= (mode == "windows") then return 7 end
+
+  -- On the supported 64-bit targets, SIZE_MAX cannot fit in lua_Integer.
+  local impossible = ~(0 as foreign size_t)
+  rejected = false
+  do
+    local length: integer = impossible
+    descriptor.len = length
+  catch
+    rejected = true
+  end
+  if not rejected then return 8 end
+  return 0
+end

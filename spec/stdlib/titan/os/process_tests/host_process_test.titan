@@ -171,3 +171,147 @@ function test_process_cancellation_waits_for_accepted_callbacks(
                 "replacement wait lost process termination")
   end)
 end
+
+local function child_environment(child: string, names: {string},
+                                  ...: system.SpawnOption): string
+  local arguments: {string} = {"environment"}
+  local index = 1
+  while index <= #names do
+    arguments[#arguments + 1] = names[index]
+    index = index + 1
+  end
+  local process = system.spawn(child, arguments, ...)
+  defer cleanup_process(process)
+  process_support.required_output(process.stdin, "environment stdin"):close()
+  local output = process_support.read_all(
+      process_support.required_input(process.stdout, "environment stdout"))
+  local diagnostics = process_support.read_all(
+      process_support.required_input(process.stderr, "environment stderr"))
+  process_support.assert_normal(process:wait(), "environment child")
+  test.assert(diagnostics == "", "environment child wrote stderr")
+  return output
+end
+
+function test_process_environment_overrides_inherit_without_mutating_parent(
+    _context: test.Context)
+  with_process_child(function (child: string)
+    local name = "TITAN_PROCESS_CHILD_ENV"
+    local unrelated = "TITAN_PROCESS_CHILD_INHERIT"
+    local added = "TITAN_PROCESS_CHILD_NEW"
+    local missing = "TITAN_PROCESS_CHILD_ABSENT"
+    local original? = system.getenv(name)
+    local original_unrelated? = system.getenv(unrelated)
+    local original_added? = system.getenv(added)
+    local original_missing? = system.getenv(missing)
+    defer restore_process_environment(name, original)
+    defer restore_process_environment(unrelated, original_unrelated)
+    defer restore_process_environment(added, original_added)
+    defer restore_process_environment(missing, original_missing)
+    system.setenv(name, "parent")
+    system.setenv(unrelated, "inherited")
+    system.unsetenv(added)
+    system.unsetenv(missing)
+    local option = system.with_env(name, "child=first")
+    local first = child_environment(child, {name, unrelated, added, missing},
+        option, system.with_env(added, ""))
+    test.assert(first == "env:11:child=first\nenv:9:inherited\nenv:0:\nabsent\n",
+                "child environment did not inherit, override, or retain empty")
+    test.assert(system.getenv(name) == "parent" and
+                system.getenv(unrelated) == "inherited" and
+                not system.getenv(added) and not system.getenv(missing),
+                "spawn changed the parent's environment")
+    local unicode = "ação=東京"
+    test.assert(child_environment(child, {name}, system.with_env(name, unicode)) ==
+                "env:" .. #unicode .. ":" .. unicode .. "\n",
+                "child environment changed Unicode bytes")
+    local second = child_environment(child, {name}, option,
+        system.with_env(name, "last"))
+    test.assert(second == "env:4:last\n", "later environment option did not win")
+    test.assert(child_environment(child, {name, added}) ==
+                "env:6:parent\nabsent\n", "options leaked into another spawn")
+    system.setenv(unrelated, "late")
+    test.assert(child_environment(child, {name, unrelated}, option) ==
+                "env:11:child=first\nenv:4:late\n",
+                "reused option did not inherit the current environment")
+  end)
+end
+
+function test_process_environment_children_are_isolated(
+    _context: test.Context)
+  with_process_child(function (child: string)
+    local name = "TITAN_PROCESS_CHILD_PARALLEL"
+    local original? = system.getenv(name)
+    defer restore_process_environment(name, original)
+    system.setenv(name, "parent")
+    local first = async.run<|string, value|>(function (): string
+      return child_environment(child, {name}, system.with_env(name, "first"))
+    end)
+    task_support.cleanup_task(first, "first environment child cleanup")
+    local second = async.run<|string, value|>(function (): string
+      return child_environment(child, {name}, system.with_env(name, "second"))
+    end)
+    task_support.cleanup_task(second, "second environment child cleanup")
+    local first_output, second_output = async.all_two(first, second)
+    test.assert(first_output == "env:5:first\n" and
+                second_output == "env:6:second\n",
+                "concurrent children shared an environment override")
+    test.assert(system.getenv(name) == "parent",
+                "concurrent spawn changed the parent environment")
+  end)
+end
+
+function test_process_environment_rejects_invalid_options_and_preserves_failure(
+    _context: test.Context)
+  with_process_child(function (child: string)
+    local names: {string} = {"", "BAD=NAME", "BAD\0NAME"}
+    local index = 1
+    while index <= #names do
+      local name = names[index]
+      local later_called = false
+      process_support.expect_failure(function ()
+        system.spawn(child, {"exit", "0"}, system.with_env(name, "value"),
+            function (_config: system.SpawnConfig): integer
+              later_called = true
+              return 0
+            end)
+      end, "spawn accepted invalid environment name")
+      test.assert(not later_called, "spawn continued after invalid environment option")
+      index = index + 1
+    end
+    process_support.expect_failure(function ()
+      system.spawn(child, {"exit", "0"}, system.with_env("VALID", "BAD\0VALUE"))
+    end, "spawn accepted embedded NUL in environment value")
+    local name = "TITAN_PROCESS_CHILD_FAILURE"
+    local original? = system.getenv(name)
+    defer restore_process_environment(name, original)
+    system.setenv(name, "parent")
+    process_support.expect_failure(function ()
+      system.spawn(child .. ".missing", {}, system.with_env(name, "child"))
+    end, "missing executable unexpectedly spawned")
+    test.assert(system.getenv(name) == "parent",
+                "failed spawn changed the parent environment")
+    test.assert(child_environment(child, {name}) == "env:6:parent\n",
+                "failed spawn contaminated the next child")
+  end)
+end
+
+function test_process_environment_names_follow_native_case_rules(
+    _context: test.Context)
+  with_process_child(function (child: string)
+    local upper = "TITAN_PROCESS_CHILD_CASE"
+    local lower = "titan_process_child_case"
+    local original_upper? = system.getenv(upper)
+    local original_lower? = system.getenv(lower)
+    defer restore_process_environment(lower, original_lower)
+    defer restore_process_environment(upper, original_upper)
+    system.unsetenv(lower)
+    system.setenv(upper, "parent")
+    local case_insensitive = system.getenv(lower) == "parent"
+    local actual = child_environment(child, {upper, lower},
+        system.with_env(upper, "first"), system.with_env(lower, "second"))
+    local expected = "env:5:first\nenv:6:second\n"
+    if case_insensitive then expected = "env:6:second\nenv:6:second\n" end
+    test.assert(actual == expected, "child environment used wrong name equality")
+    test.assert(system.getenv(upper) == "parent", "case merge changed parent")
+  end)
+end

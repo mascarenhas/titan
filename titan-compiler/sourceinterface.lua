@@ -1,6 +1,7 @@
 local types = require "titan-compiler.types"
 local util = require "titan-compiler.util"
 local cdeclarator = require "titan-compiler.cdeclarator"
+local platform = require "titan-compiler.platform"
 
 local sourceinterface = {}
 
@@ -400,7 +401,7 @@ local function encode_headers(headers)
             dependency.path, dependency.identity
         if kind ~= "file" and kind ~= "search" then
             fail("C header dependency " .. index .. " has invalid kind")
-        elseif type(path) ~= "string" or path:sub(1, 1) ~= "/"
+        elseif type(path) ~= "string" or not platform.is_absolute(path)
            or path:find("\0", 1, true) then
             fail("C header dependency " .. index .. " has invalid path")
         elseif type(identity) ~= "string" or identity == "" then

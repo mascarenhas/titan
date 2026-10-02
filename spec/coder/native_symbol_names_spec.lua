@@ -24,7 +24,7 @@ end
 describe("native callable symbol separators", function()
     after_each(clean)
 
-    it("inventories compatibility and public slot exports from source and recovered interfaces", function()
+    it("distinguishes source ABI query exports from recovered interface guarantees", function()
         local ok, err, ast, modtype = h.run_checker([[
             state: integer = 0
             local secret: integer = 1
@@ -60,17 +60,23 @@ describe("native callable symbol separators", function()
             ["test_\\u2133_Item_\\u2131_make_closure_slot"] = "record function 'test.Item.make' closure slot",
             ["test_\\u2133_Choice_\\u2131_ready_closure_slot"] = "union function 'test.Choice.ready' closure slot",
         }
-        for _, inventory in ipairs({coder.external_symbols("test", ast),
-            coder.interface_external_symbols("test", recovered)}) do
+        for _, inventory in ipairs({
+            { symbols = coder.external_symbols("test", ast), abi_value = true },
+            { symbols = coder.interface_external_symbols("test", recovered),
+              abi_value = false },
+        }) do
             local actual, seen = {}, {}
-            for _, entry in ipairs(inventory) do
+            for _, entry in ipairs(inventory.symbols) do
                 assert.is_nil(seen[entry.symbol], entry.symbol)
                 seen[entry.symbol] = true
-                if entry.symbol:match("_slot$") or entry.symbol == "test_compatibility" then
+                if entry.symbol == "test_abi_value" then
+                    assert.equal("module ABI value entry", entry.owner)
+                elseif entry.symbol:match("_slot$") or entry.symbol == "test_compatibility" then
                     actual[entry.symbol] = entry.owner
                 end
             end
             assert.same(expected, actual)
+            assert.equal(inventory.abi_value, seen.test_abi_value == true)
             assert.is_true(seen["test_\\u2133_identity_titan"])
         end
     end)

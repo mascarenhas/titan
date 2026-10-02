@@ -315,7 +315,9 @@ end
 ```
 
 Every path payload is canonical and absolute. A directory callback's filename
-is joined to the watched directory; a file callback names the watched file.
+is joined to the watched directory using the native path separator (`/` on
+Unix, `\` on Windows), without duplicating a root directory's trailing
+separator; a file callback names the watched file.
 Each native notification maps to one `WatcherEvent`. A native rename flag is
 classified as `created` or `deleted` by calling `lstat` when `poll` drains the
 notification; if rename and change flags are both present, rename takes

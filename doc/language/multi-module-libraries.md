@@ -2,12 +2,17 @@
 
 Titan keeps a module's *logical identity* separate from the native provider
 that physically carries its symbols. A single `titanc` invocation can compile
-several related modules into one provider pair while every module retains its
+several related modules into one provider while every module retains its
 own interface, state, initialization, and Lua entry point. Library mode
-publishes matching `.so` and `.a` forms; this chapter concentrates on logical
-grouping and the runtime DSO. See [Static compiled
+publishes matching `.so` and `.a` forms on Linux and macOS; this chapter
+concentrates on logical grouping and the runtime DSO. See [Static compiled
 modules](static-compiled-modules.md) for archive lookup, embedded metadata,
 linking, and `--static`.
+
+The paired-provider paths and archive examples below describe Linux and macOS.
+Windows uses the same logical grouping with one DLL provider and Lua shims,
+without a paired Titan archive or `--static` mode; see
+[Windows loading and launchers](binary-compatibility.md#experimental-windows-loading-and-launchers).
 
 For example, given:
 

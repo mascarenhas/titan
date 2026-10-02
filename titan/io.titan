@@ -1,4 +1,4 @@
-local os = import "os"
+local os = import "os.titan"
 local string = import "string"
 
 interface Reader
@@ -118,9 +118,7 @@ function InputOutputStream:close()
 end
 
 function popen(command: string): InputOutputStream
-  local process = os.spawn(
-    "/bin/sh", {"-c", command},
-    os.with_stdin, os.with_merged_output)
+  local process = os.spawn_shell(command)
   local input? = process.stdin
   local output? = process.stdout
   if not input or not output then

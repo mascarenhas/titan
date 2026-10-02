@@ -10,6 +10,7 @@ local cprobe = require "titan-compiler.cprobe"
 local cprobe_cache = require "titan-compiler.cprobe_cache"
 local csemantics = require "titan-compiler.csemantics"
 local compiler_io = require "titan-compiler.io"
+local platform = require "titan-compiler.platform"
 local sourceinterface = require "titan-compiler.sourceinterface"
 local version = require "titan-compiler.version"
 local projectcache = require "titan-compiler.projectcache"
@@ -68,9 +69,13 @@ function driver.compiler_cache_stats(options)
     }
 end
 
-local LUA_CPATH_SUFFIX = "/lib/lua/" .. driver.LUA_VERSION .. "/?.so"
+local function lua_cpath_suffix()
+    return "/lib/lua/" .. driver.LUA_VERSION ..
+        (platform.windows and "/?.dll" or "/?.so")
+end
 
 local function normalize_absolute_path(path)
+    if platform.windows then return platform.path.normalize(path) end
     local components = {}
     for component in path:gmatch("[^/]+") do
         if component == ".." then
@@ -83,6 +88,16 @@ local function normalize_absolute_path(path)
 end
 
 local function absolute_filename(filename, strategy)
+    if platform.windows then
+        if platform.is_absolute(filename) then
+            return platform.absolute(filename, nil, strategy)
+        end
+        local cwd, cwd_error
+        if strategy then cwd, cwd_error = strategy:cwd()
+        else cwd, cwd_error = lfs.currentdir() end
+        if not cwd then return nil, cwd_error end
+        return platform.absolute(filename, cwd, strategy)
+    end
     if filename:sub(1, 1) == "/" then return filename end
     if strategy then
         local current_dir, current_err = strategy:cwd()
@@ -93,6 +108,9 @@ local function absolute_filename(filename, strategy)
 end
 
 local function normalized_absolute_filename(filename)
+    if platform.windows then
+        return assert(normalize_absolute_path(assert(absolute_filename(filename))))
+    end
     return normalize_absolute_path(absolute_filename(filename))
 end
 
@@ -100,6 +118,37 @@ end
 -- This preserves POSIX symlink/.. resolution for alias and containment checks
 -- while retaining every not-yet-created destination component.
 local function physical_absolute_filename(filename)
+    if platform.windows then
+        local strategy = compiler_io.new_sync()
+        local raw = assert(absolute_filename(filename, strategy))
+        local extended = assert(platform.path.kind(raw)):match("^extended_") ~= nil
+        local candidate, unresolved = raw, {}
+        while candidate do
+            local attributes, stat_error = strategy:stat(candidate)
+            assert(not stat_error, stat_error)
+            if attributes then
+                local resolved = assert(strategy:realpath(candidate))
+                for _, leaf in ipairs(unresolved) do
+                    -- Ordinary unresolved dot components retain ordinary
+                    -- traversal after the existing prefix has been resolved.
+                    -- An extended input instead owns literal dot semantics.
+                    if not extended and leaf == ".." then
+                        resolved = platform.parent(resolved) or resolved
+                    elseif extended or (leaf ~= "." and leaf ~= "") then
+                        resolved = assert(platform.join(resolved, leaf))
+                    end
+                end
+                return resolved
+            end
+            local parent, leaf = platform.parent(candidate)
+            if not parent then break end
+            table.insert(unresolved, 1, leaf)
+            candidate = parent
+        end
+        -- There is no existing prefix to query. This is an output spelling,
+        -- not a fabricated file identity; later creation reports the failure.
+        return assert(normalize_absolute_path(raw))
+    end
     local raw = absolute_filename(filename)
     local previous = lfs.currentdir()
     local unresolved = {}
@@ -144,6 +193,17 @@ local function physical_absolute_filename(filename)
 end
 
 local function same_existing_file(left, right)
+    if platform.windows then
+        local strategy = compiler_io.new_sync()
+        local left_attr, left_error = strategy:stat(left)
+        local right_attr, right_error = strategy:stat(right)
+        assert(not left_error, left_error)
+        assert(not right_error, right_error)
+        return left_attr and right_attr and
+            left_attr.device ~= nil and left_attr.inode ~= nil and
+            left_attr.device == right_attr.device and
+            left_attr.inode == right_attr.inode or false
+    end
     local left_attr = lfs.attributes(left)
     local right_attr = lfs.attributes(right)
     return left_attr and right_attr and
@@ -156,10 +216,27 @@ end
 -- one layout established by Titan's prefix-owned Lua installation.
 function driver.root_from_package_cpath(cpath)
     if type(cpath) ~= "string" then return nil end
+    local suffix = lua_cpath_suffix()
     for template in (cpath .. ";"):gmatch("(.-);") do
-        if #template >= #LUA_CPATH_SUFFIX and
-           template:sub(-#LUA_CPATH_SUFFIX) == LUA_CPATH_SUFFIX then
-            local root = template:sub(1, #template - #LUA_CPATH_SUFFIX)
+        local matched = template
+        if platform.windows then
+            -- Match separators without changing the returned extended-root
+            -- spelling or interpreting executable-relative ".." components.
+            matched = template:gsub("\\", "/")
+        end
+        if #matched >= #suffix and matched:sub(-#suffix) == suffix then
+            local root = template:sub(1, #template - #suffix)
+            if platform.windows then
+                if root:match("^[A-Za-z]:$") then root = root .. "/" end
+                if root == "" then return nil end
+                local spelling = platform.path.separators(root)
+                if not spelling and root:sub(1, 4) == "\\\\?\\" then
+                    -- Removing the suffix also removed the separator that is
+                    -- part of an extended drive or volume-GUID root.
+                    spelling = platform.path.separators(root .. "\\")
+                end
+                return spelling
+            end
             return root ~= "" and root or "/"
         end
     end
@@ -168,6 +245,15 @@ end
 
 local function normalize_root(root, strategy)
     if type(root) ~= "string" or root == "" then return nil end
+    if platform.windows then
+        local absolute, absolute_error = absolute_filename(root, strategy)
+        if not absolute then return nil, absolute_error end
+        -- Ordinary Win32 roots apply dot normalization before filesystem
+        -- traversal. Preserve that ordinary namespace for installed tools;
+        -- handle realpath's extended spelling belongs to physical queries.
+        -- Explicit extended roots retain their literal semantics below.
+        return normalize_absolute_path(absolute)
+    end
     local current_dir
     if root:sub(1, 1) ~= "/" then
         if strategy then
@@ -208,8 +294,14 @@ function driver.resolve_installation_root(cpath, override)
 end
 
 local function root_join(root, suffix)
+    if platform.windows then return assert(platform.join(root, suffix)) end
     if root == "/" then return "/" .. suffix end
     return root .. "/" .. suffix
+end
+
+local function append_path(directory, suffix)
+    if platform.windows then return assert(platform.join(directory, suffix)) end
+    return directory .. "/" .. suffix
 end
 
 function driver.probe_cache_directory(cpath, override)
@@ -228,11 +320,12 @@ function driver.installed_paths(root)
         lua_source = root_join(root, "src/lua-5.5.1"),
         include = root_join(root, "include"),
         lib = root_join(root, "lib"),
-        libtitan = titan_lib .. "/libtitan.a",
+        libtitan = root_join(titan_lib, "libtitan.a"),
         libbacktrace = root_join(root, "lib/libbacktrace.a"),
-        liblua = root_join(root, "lib/liblua.a"),
+        liblua = root_join(root, platform.windows and
+            "lib/liblua-5.5.1.dll.a" or "lib/liblua.a"),
         titan_bin = titan_lib,
-        lua_cpath = titan_lib .. "/?.so",
+        lua_cpath = root_join(titan_lib, platform.windows and "?.dll" or "?.so"),
         test_source = root_join(root, "share/titan/" ..
             driver.TITAN_LIBRARY_VERSION .. "/src/titan/test.titan"),
     }
@@ -243,6 +336,28 @@ function driver.source_checkout_from_driver_source(
     if type(source) ~= "string" then return false end
     if source:sub(1, 1) ~= "@" then return false end
     source = source:sub(2)
+    if platform.windows then
+        if not platform.is_absolute(source) and not current_dir then
+            if strategy then
+                local current_error
+                current_dir, current_error = strategy:cwd()
+                if not current_dir then return false, current_error end
+            else
+                current_dir = lfs.currentdir()
+            end
+        end
+        local absolute, absolute_error = platform.absolute(source, current_dir, strategy)
+        if not absolute then return false, absolute_error end
+        local root = absolute:match("^(.*)[/\\]titan%-compiler[/\\]driver[.]lua$")
+        if not root then return false end
+        local io_strategy = strategy or compiler_io.new_sync()
+        local runtime, runtime_error = io_strategy:stat(root_join(root, "titan-runtime/titan.c"))
+        if runtime_error then return false, runtime_error end
+        local makefile, makefile_error = io_strategy:stat(root_join(root, "Makefile"))
+        if makefile_error then return false, makefile_error end
+        return runtime and runtime.kind == "file" and
+            makefile and makefile.kind == "file" or false
+    end
     if source:sub(1, 1) ~= "/" then
         if not current_dir and strategy then
             local current_error
@@ -281,12 +396,18 @@ local function source_checkout_root(strategy)
     local source = DRIVER_SOURCE
     if not source then return nil end
     source = source:sub(2)
-    if source:sub(1, 1) ~= "/" then
+    if platform.windows then
+        local absolute, absolute_error = absolute_filename(source, strategy)
+        if not absolute then return nil, absolute_error end
+        source = absolute
+    elseif source:sub(1, 1) ~= "/" then
         local current_dir, current_error = strategy:cwd()
         if not current_dir then return nil, current_error end
         source = current_dir .. "/" .. source
     end
-    local root = source:match("^(.*)/titan%-compiler/driver[.]lua$")
+    local root = source:match(platform.windows and
+        "^(.*)[/\\]titan%-compiler[/\\]driver[.]lua$" or
+        "^(.*)/titan%-compiler/driver[.]lua$")
     if root then
         local checkout, checkout_error =
             driver.source_checkout_from_driver_source(
@@ -305,10 +426,10 @@ local probe_cache_disabled = os.getenv("TITAN_PROBE_CACHE_DISABLE") == "1"
 local configured_installation_root =
     internal_root or driver.root_from_package_cpath(package.cpath)
 driver.TITAN_ROOT = configured_installation_root and
-    configured_installation_root:sub(1, 1) == "/" and
+    platform.is_absolute(configured_installation_root) and
     normalize_absolute_path(configured_installation_root) or nil
 local preliminary_probe_root = probe_prefix and
-    probe_prefix:sub(1, 1) == "/" and
+    platform.is_absolute(probe_prefix) and
     normalize_absolute_path(probe_prefix) or driver.TITAN_ROOT
 driver.PROBE_CACHE_DIRECTORY = not probe_cache_disabled and
     preliminary_probe_root and root_join(preliminary_probe_root,
@@ -325,12 +446,12 @@ local function apply_layout(source_root)
     driver.INSTALLED = not driver.SOURCE_CHECKOUT
     driver.INSTALL_PATHS = driver.installed_paths(driver.TITAN_ROOT)
     driver.TEST_SUPPORT_SOURCE_PATH = driver.SOURCE_CHECKOUT and
-        (source_root .. "/titan/test.titan") or
+        append_path(source_root, "titan/test.titan") or
         (driver.INSTALL_PATHS and driver.INSTALL_PATHS.test_source or nil)
     driver.INSTALLATION_ERROR = driver.INSTALLED and
         not driver.INSTALL_PATHS and
         ("cannot locate the Titan installation: package.cpath has no entry " ..
-            "ending in '" .. LUA_CPATH_SUFFIX .. "'") or nil
+            "ending in '" .. lua_cpath_suffix() .. "'") or nil
 
     local bin_default = driver.INSTALL_PATHS and
         (".;" .. driver.INSTALL_PATHS.titan_bin) or
@@ -356,8 +477,10 @@ end
 -- checkout shape; every real filesystem check and canonicalization is repeated
 -- through the first resolver context below before compiler work begins.
 local lexical_source_root = not internal_root and DRIVER_SOURCE and
-    DRIVER_SOURCE:sub(2, 2) ~= "/" and
-    DRIVER_SOURCE:sub(2):match("^(.*)/titan%-compiler/driver[.]lua$") or nil
+    not platform.is_absolute(DRIVER_SOURCE:sub(2)) and
+    DRIVER_SOURCE:sub(2):match(platform.windows and
+        "^(.*)[/\\]titan%-compiler[/\\]driver[.]lua$" or
+        "^(.*)/titan%-compiler/driver[.]lua$") or nil
 apply_layout(lexical_source_root)
 
 function driver.initialize_layout(context)
@@ -427,7 +550,7 @@ function driver.test_support_source_descriptor(context)
         program_output = "titan/test",
     }
 end
-driver.CC = os.getenv("CC") or "cc"
+driver.CC = os.getenv("CC") or (platform.windows and "clang.exe" or "cc")
 driver.AR = os.getenv("AR") or "ar"
 driver.RANLIB = os.getenv("RANLIB") or "ranlib"
 driver.CLANG_FORMAT = os.getenv("CLANG_FORMAT") or "clang-format"
@@ -491,6 +614,14 @@ function driver.initialize_platform(context)
     if context._platform_initialized then
         select_platform_defaults(context.uname, context.is_darwin)
         return true, context.uname, context.is_darwin
+    end
+
+    if platform.windows then
+        context.uname = "Windows"
+        context.is_darwin = false
+        context._platform_initialized = true
+        select_platform_defaults(context.uname, false)
+        return true, context.uname, false
     end
 
     local result = context.io:run({ "uname" }, {
@@ -657,7 +788,7 @@ local function validate_embedded_interface_provider(candidate)
 
     local provider_file = rawget(candidate, "provider_file")
     if type(provider_file) ~= "string" or
-       provider_file:sub(1, 1) ~= "/" or
+       not platform.is_absolute(provider_file) or
        provider_file:find("\0", 1, true) then
         return nil, "provider_file must be an absolute NUL-free pathname"
     end
@@ -959,6 +1090,7 @@ local function parsed_words(value, label)
 end
 
 local function command_argv(argv)
+    if platform.windows then return platform.windows_command(argv, false) end
     local quoted = {}
     for i, arg in ipairs(argv) do
         local word, err = cdriver.shell_quote(arg)
@@ -966,6 +1098,11 @@ local function command_argv(argv)
         quoted[i] = word
     end
     return table.concat(quoted, " ")
+end
+
+local function rename_output(from, to)
+    if platform.windows then return platform.native("_win_replace", from, to) end
+    return os.rename(from, to)
 end
 
 local function run_argv(argv, verbose)
@@ -1438,7 +1575,7 @@ local function copy_c_header_dependencies(value, label)
         if kind ~= "file" and kind ~= "search" then
             return nil, label .. " entry " .. index ..
                 " kind must be 'file' or 'search'"
-        elseif type(path) ~= "string" or path:sub(1, 1) ~= "/" or
+        elseif type(path) ~= "string" or not platform.is_absolute(path) or
                path:find("\0", 1, true) then
             return nil, label .. " entry " .. index ..
                 " path must be an absolute NUL-free pathname"
@@ -1710,8 +1847,10 @@ end
 -- Return shallowest-to-exact physical container candidates for one logical
 -- module. Component boundaries are significant: a.b and a.bc share only a.
 function driver.module_compiled_candidates(modname, suffix)
-    assert(suffix == ".so" or suffix == ".a",
-        "compiled module candidates require .so or .a")
+    assert(suffix == ".so" or suffix == ".a" or
+        (platform.windows and suffix == ".dll"),
+        platform.windows and "compiled module candidates require .so, .a, or Windows .dll" or
+            "compiled module candidates require .so or .a")
     local components = module_components(modname)
     if #components == 0 then return {} end
 
@@ -1725,10 +1864,16 @@ function driver.module_compiled_candidates(modname, suffix)
 end
 
 function driver.module_binary_candidates(modname)
-    return driver.module_compiled_candidates(modname, ".so")
+    return driver.module_compiled_candidates(modname, platform.windows and ".dll" or ".so")
 end
 
 local function regular_file(filename, context)
+    if platform.windows then
+        local strategy = context and context.io or compiler_io.new_sync()
+        local attributes, attribute_error = strategy:stat(filename)
+        assert(not attribute_error, attribute_error)
+        return attributes and attributes.kind == "file" or false
+    end
     if context and context.io then
         local attributes = context.io:stat(filename)
         return attributes and attributes.kind == "file" or false
@@ -1740,8 +1885,8 @@ local function source_resolution_in_root(root, modname, context)
     local module_path = modname:gsub("[.]", "/")
     local basename = modname:match("([^.]+)$")
     if not basename then return nil end
-    local folder = root .. "/" .. module_path
-    local folder_main = folder .. "/" .. basename .. ".titan"
+    local folder = append_path(root, module_path)
+    local folder_main = append_path(folder, basename .. ".titan")
 
     if regular_file(folder_main, context) then
         local entries
@@ -1780,7 +1925,7 @@ local function source_resolution_in_root(root, modname, context)
             if name ~= "." and name ~= ".." and
                name ~= basename .. ".titan" and
                name:sub(-6) == ".titan" and
-               regular_file(folder .. "/" .. name, context) then
+               regular_file(append_path(folder, name), context) then
                 table.insert(contributors, name)
             end
         end
@@ -1788,7 +1933,7 @@ local function source_resolution_in_root(root, modname, context)
 
         local files = { folder_main }
         for _, name in ipairs(contributors) do
-            table.insert(files, folder .. "/" .. name)
+            table.insert(files, append_path(folder, name))
         end
         return {
             kind = "folder",
@@ -1798,7 +1943,7 @@ local function source_resolution_in_root(root, modname, context)
         }
     end
 
-    local flat = root .. "/" .. module_path .. ".titan"
+    local flat = append_path(root, module_path .. ".titan")
     if not regular_file(flat, context) then return nil end
 
     local owner = modname:match("^(.*)[.][^.]+$")
@@ -1806,8 +1951,7 @@ local function source_resolution_in_root(root, modname, context)
         local owner_path = owner:gsub("[.]", "/")
         local owner_basename = owner:match("([^.]+)$")
         if not owner_basename then return nil end
-        local owner_main = root .. "/" .. owner_path .. "/" ..
-            owner_basename .. ".titan"
+        local owner_main = append_path(root, owner_path .. "/" .. owner_basename .. ".titan")
         if regular_file(owner_main, context) then
             return {
                 kind = "blocked",
@@ -3206,9 +3350,34 @@ end
 -- clean nonclaim is skippable (ancestor) or an error (exact candidate).
 local function probe_compiled_interface(modname, binf, options)
     local prefix = driver.mangle_module_name(modname)
-    local loadlib = require("titan")._loadlib
+    local support = require("titan")
+    local loadlib = support._loadlib
     local abiname = prefix .. "_abi"
     local typesname = prefix .. "_types"
+    local native_abi
+    if platform.windows then
+        -- Resolve/call the plain-C query before invoking any provider Lua
+        -- function. Legacy symbols may still be inspected for membership when
+        -- the query is absent, but must never be called in that case.
+        if type(support._abivalue) ~= "function" then
+            return "error", "Windows Titan native ABI query support is unavailable"
+        end
+        local queryerr, querystage
+        native_abi, queryerr, querystage = support._abivalue(binf, abiname .. "_value")
+        if native_abi == nil then
+            if querystage ~= "init" then
+                return "error", "cannot inspect compiled module '" .. modname ..
+                    "' in '" .. binf .. "': " .. tostring(queryerr)
+            end
+        elseif type(native_abi) ~= "string" then
+            return "error", "compiled module ABI query '" .. abiname ..
+                "_value' must return a string"
+        elseif native_abi ~= driver.TITAN_ABI_VERSION then
+            return "error", "compiled module '" .. modname ..
+                "' ABI mismatch: expected " .. driver.TITAN_ABI_VERSION ..
+                " but found " .. native_abi
+        end
+    end
     local abif, abierr, abistage = loadlib(binf, abiname)
     if not abif and abistage ~= nil and abistage ~= "init" then
         return "error", "cannot inspect compiled module '" .. modname ..
@@ -3220,7 +3389,7 @@ local function probe_compiled_interface(modname, binf, options)
             "' in '" .. binf .. "': " .. tostring(typeserr)
     end
 
-    if not abif and not typesf then
+    if not abif and not typesf and native_abi == nil then
         return "nonclaim", {
             abi = abierr,
             types = typeserr,
@@ -3229,6 +3398,11 @@ local function probe_compiled_interface(modname, binf, options)
         local missing = not abif and abiname or typesname
         return "error", "compiled container '" .. binf .. "' claims module '" ..
             modname .. "' but is missing metadata symbol '" .. missing .. "'"
+    end
+
+    if platform.windows and native_abi == nil then
+        return "error", "compiled container '" .. binf .. "' claims module '" ..
+            modname .. "' but is missing native ABI query '" .. abiname .. "_value'"
     end
 
     local abi_or_err, abi_call_err = one_metadata_result(
@@ -3285,6 +3459,7 @@ end
 driver.probe_compiled_interface = probe_compiled_interface
 
 local function join_path(root, relative)
+    if platform.windows then return assert(platform.join(root, relative)) end
     if root:sub(-1) == "/" then return root .. relative end
     return root .. "/" .. relative
 end
@@ -3297,6 +3472,8 @@ function driver.find_dynamic_interface(paths, modname, context)
     local candidates = driver.module_binary_candidates(modname)
     if #candidates == 0 then return nil end
     local occupied = {}
+    local windows_io = platform.windows and not (context and context.io) and
+        compiler_io.new_sync() or nil
 
     for _, root in ipairs(driver.titan_bin_path_entries(paths)) do
         local absolute_root, root_error = normalize_root(
@@ -3311,6 +3488,8 @@ function driver.find_dynamic_interface(paths, modname, context)
                 local attributes, attribute_error
                 if context and context.io then
                     attributes, attribute_error = context.io:lstat(filename)
+                elseif windows_io then
+                    attributes, attribute_error = windows_io:lstat(filename)
                 else
                     local mode = lfs.symlinkattributes(filename, "mode")
                     attributes = mode and { kind = mode } or nil
@@ -3893,14 +4072,15 @@ function driver.defaultloader(static_deps, options)
                 node._foreign_header_for_check =
                     dependency.checking_foreign_header ~= nil
                 local probe_identity = dependency.foreign_header
-                if probe_identity and probe_identity:sub(1, 1) ~= "/" then
+                if probe_identity and not platform.is_absolute(probe_identity) then
                     local absolute, absolute_error = absolute_filename(
                         probe_identity, context.io)
                     if not absolute then
                         cached_source_loading[modname] = nil
                         return false, absolute_error
                     end
-                    probe_identity = normalize_absolute_path(absolute)
+                    probe_identity = platform.windows and absolute or
+                        normalize_absolute_path(absolute)
                 end
                 node._foreign_header_probe_identity = probe_identity
                 node._ffi_header_descriptor = dependency.ffi_header_descriptor
@@ -4427,13 +4607,14 @@ function driver.defaultloader(static_deps, options)
         end
         driver.imported[modname] = entry
         static_deps[modname] = true
-        if foreign_header and foreign_header:sub(1, 1) ~= "/" then
+        if foreign_header and not platform.is_absolute(foreign_header) then
             local absolute, absolute_error = absolute_filename(
                 foreign_header, context.io)
             if not absolute then
                 return false, absolute_error
             end
-            foreign_header = normalize_absolute_path(absolute)
+            foreign_header = platform.windows and absolute or
+                normalize_absolute_path(absolute)
         end
         -- The context strategy owns cooperative suspension. This module is
         -- fully published and its dependency frame has been popped. Recursive
@@ -4799,18 +4980,20 @@ function driver.defaultloader(static_deps, options)
             if mod.kind == "source" and mod.filename then
                 local foreign_header = mod.checking_foreign_header
                     or mod.foreign_header
-                if foreign_header and foreign_header:sub(1, 1) ~= "/" then
+                if foreign_header and not platform.is_absolute(foreign_header) then
                     local absolute, absolute_error = absolute_filename(
                         foreign_header, context.io)
                     if not absolute then return false, absolute_error end
-                    foreign_header = normalize_absolute_path(absolute)
+                    foreign_header = platform.windows and absolute or
+                        normalize_absolute_path(absolute)
                 end
                 local probe_identity = mod.foreign_header
-                if probe_identity and probe_identity:sub(1, 1) ~= "/" then
+                if probe_identity and not platform.is_absolute(probe_identity) then
                     local absolute, absolute_error = absolute_filename(
                         probe_identity, context.io)
                     if not absolute then return false, absolute_error end
-                    probe_identity = normalize_absolute_path(absolute)
+                    probe_identity = platform.windows and absolute or
+                        normalize_absolute_path(absolute)
                 end
                 info.filename = mod.filename
                 info.foreign_header = foreign_header
@@ -5512,6 +5695,9 @@ function driver.shared_library_flags(context)
     end
 
     local shared = { "-shared" }
+    if platform.windows then
+        table.insert(shared, "-Wl,--exclude-all-symbols")
+    end
     if driver.IS_DARWIN then
         table.insert(shared, "-undefined")
         table.insert(shared, "dynamic_lookup")
@@ -5633,6 +5819,7 @@ local function check_runtime(verbose)
 end
 
 function driver.installed_link_inputs(paths, is_darwin)
+    if platform.windows then return { paths.libtitan, paths.liblua, "-lbcrypt" } end
     local inputs = {
         paths.libtitan,
         paths.libbacktrace,
@@ -5647,6 +5834,13 @@ end
 
 function driver.source_link_inputs(lua_source_path)
     lua_source_path = lua_source_path or driver.LUA_SOURCE_PATH
+    if platform.windows then
+        return {
+            driver.TITAN_RUNTIME_PATH .. "libtitan.a",
+            lua_source_path .. "/../../lib/liblua-5.5.1.dll.a",
+            "-lbcrypt",
+        }
+    end
     return {
         driver.TITAN_RUNTIME_PATH .. "libtitan.a",
         driver.LIBBACKTRACE_PATH .. "/.libs/libbacktrace.a",
@@ -5993,8 +6187,9 @@ function driver.write_foreign_header_plans(plans, verbose, pretty_print)
         if entry.contents and not entry.preserve then
             local ok, err = ensure_output_parent(entry.filename)
             if not ok then return abandon(err) end
-            local temporary = driver.sibling_temporary_path(
+            local temporary, reserve_err = driver.sibling_temporary_path(
                 entry.filename .. ".format")
+            if not temporary then return abandon(reserve_err) end
             staged[entry] = temporary
             ok, err = util.set_file_contents(temporary, entry.contents)
             if not ok then return abandon(err) end
@@ -6006,7 +6201,7 @@ function driver.write_foreign_header_plans(plans, verbose, pretty_print)
     for _, entry in ipairs(entries) do
         local ok, err
         if staged[entry] then
-            ok, err = os.rename(staged[entry], entry.filename)
+            ok, err = rename_output(staged[entry], entry.filename)
             if not ok then return abandon(err) end
             staged[entry] = nil
         elseif entry.managed and not entry.preserve then
@@ -6141,7 +6336,7 @@ local function prepare_compile(
 end
 
 local function publish_compiled_object(prepared, ok, err)
-    if ok then ok, err = os.rename(prepared.temporary, prepared.libname) end
+    if ok then ok, err = rename_output(prepared.temporary, prepared.libname) end
     if not ok then os.remove(prepared.temporary) end
     return ok, err
 end
@@ -6610,6 +6805,11 @@ function driver.compile_modules(requests, parallelism, verbose)
         parallelism % 1 == 0, "parallelism must be a positive integer")
     validate_compile_requests(requests)
 
+    if platform.windows and parallelism > 1 then
+        if verbose then print("Windows generated-C compilation is serial") end
+        parallelism = 1
+    end
+
     local results = {}
     if parallelism == 1 then
         for index, request in ipairs(requests) do
@@ -6681,6 +6881,124 @@ function driver.compile_modules(requests, parallelism, verbose)
     return results
 end
 
+-- Windows launchers live in bin; their file name is presentation only.
+function driver.windows_launcher_name(modname, override)
+    local name = override or modname
+    if type(name) ~= "string" or name == "" or
+       name:find('[%z\1-\31\127<>:"/\\|?*]') or name:find('[. ]$') then
+        return nil, "--launcher-name requires a valid Windows filename without a path"
+    end
+    local length = utf8.len(name)
+    if not length then return nil, "--launcher-name requires valid UTF-8" end
+    local stem = name:match("^[^.]*"):gsub(" +$", ""):upper()
+    if stem == "CON" or stem == "PRN" or stem == "AUX" or stem == "NUL" or
+       stem == "CONIN$" or stem == "CONOUT$" or
+       stem:match("^COM[1-9]$") or stem:match("^LPT[1-9]$") or
+       stem == "COM¹" or stem == "COM²" or stem == "COM³" or
+       stem == "LPT¹" or stem == "LPT²" or stem == "LPT³" then
+        return nil, "--launcher-name cannot use a reserved Windows device name"
+    end
+    if name:sub(-4):lower() ~= ".exe" then name = name .. ".exe" end
+    local units = 0
+    for _, value in utf8.codes(name) do units = units + (value > 0xffff and 2 or 1) end
+    if units > 255 then return nil, "--launcher-name exceeds a Windows filename component" end
+    return name
+end
+
+function driver.windows_program_paths(modname, override, output_module)
+    output_module = output_module or modname
+    local name, err = driver.windows_launcher_name(output_module, override)
+    if not name then return nil, err end
+    local relative = output_module:gsub("[.]", "/") .. ".dll"
+    return {
+        executable = "bin/" .. name,
+        provider = "lib/titan/" .. driver.TITAN_LIBRARY_VERSION .. "/" .. relative,
+        relative_provider = relative,
+    }
+end
+
+-- These are actual producer definitions. All post-init native/data lookup
+-- uses the already generated canonical callback; collision inventories also
+-- contain hidden and source-only names and are not PE export inventories.
+function driver.windows_provider_exports(module_names)
+    local names, seen = {}, {}
+    for _, modname in ipairs(module_names) do
+        local mangled = driver.mangle_module_name(modname)
+        for _, suffix in ipairs({ "_abi_value", "_abi", "_types", "_layouts",
+                                   "_compatibility", "_init" }) do
+            local name = mangled .. suffix
+            assert(not seen[name], "duplicate Windows module export " .. name)
+            seen[name], names[#names + 1] = true, name
+        end
+        names[#names + 1] = "luaopen_" .. mangled
+    end
+    table.sort(names, util.bytewise_less)
+    return "EXPORTS\n    " .. table.concat(names, "\n    ") .. "\n", names
+end
+
+function driver.windows_launcher_manifest()
+    return [[<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
+  <assemblyIdentity name="Titan.Launcher" version="0.6.0.0" processorArchitecture="amd64" type="win32"/>
+  <trustInfo xmlns="urn:schemas-microsoft-com:asm.v3">
+    <security><requestedPrivileges>
+      <requestedExecutionLevel level="asInvoker" uiAccess="false"/>
+    </requestedPrivileges></security>
+  </trustInfo>
+  <application xmlns="urn:schemas-microsoft-com:asm.v3"><windowsSettings>
+    <activeCodePage xmlns="http://schemas.microsoft.com/SMI/2019/WindowsSettings">UTF-8</activeCodePage>
+    <longPathAware xmlns="http://schemas.microsoft.com/SMI/2016/WindowsSettings">true</longPathAware>
+  </windowsSettings></application>
+</assembly>
+]]
+end
+
+function driver.windows_program_auxiliary_paths(entrypoint, provider)
+    return { provider, provider .. ".def", entrypoint .. ".manifest",
+        entrypoint .. ".rc", entrypoint .. ".res" }
+end
+
+local function c_string_contents(value)
+    return (value:gsub('[%z\1-\31\127-\255"\\]', function(byte)
+        return string.format("\\%03o", byte:byte())
+    end))
+end
+
+function driver.windows_launcher_resource(manifest)
+    -- Resource filenames do not interpret C octal byte escapes. Windows
+    -- accepts forward slashes, so no resource-string escapes are necessary.
+    assert(not manifest:find('[%z\1-\31"]'), "invalid Windows manifest path")
+    return '#pragma code_page(65001)\n1 24 "' ..
+        manifest:gsub("\\", "/") .. '"\n'
+end
+
+local unix_entrypoint_alerts = [[
+/* portable alerts, from srlua */
+#ifdef _WIN32
+#include <windows.h>
+#define alert(message)  MessageBox(NULL, message, progname, MB_ICONERROR | MB_OK)
+#define getprogname()   char name[MAX_PATH]; argv[0]= GetModuleFileName(NULL,name,sizeof(name)) ? name : NULL;
+#else
+#define alert(message)  fprintf(stderr,"%s: %s\n", "$PROGNAME", message)
+#define getprogname()
+#endif]]
+
+local windows_entrypoint_alerts = [[
+/* A console launcher keeps diagnostics available to callers and editors. */
+#define alert(message)  fprintf(stderr,"%s: %s\n", "$PROGNAME", message)
+#define getprogname()]]
+
+local windows_entrypoint_declarations = [[
+/* The selected identity and provider do not depend on this EXE's basename. */
+static int titan_open_main(lua_State *L) {
+    TitanModuleProvider provider = titan_module_provider(L,
+        "$MODNAME", "$PROVIDER");
+    titan_check_module_abi(L, provider, "$ABI_FN", "$PROVIDER");
+    lua_CFunction open = titan_cast_func(lua_CFunction,
+        titan_module_symbol(L, provider, "$LUAOPEN_FN"));
+    return open(L);
+}]]
+
 local entrypoint_template = [[
 
 #include <stdio.h>
@@ -6692,15 +7010,7 @@ local entrypoint_template = [[
 #include "lauxlib.h"
 #include "titan.h"
 
-/* portable alerts, from srlua */
-#ifdef _WIN32
-#include <windows.h>
-#define alert(message)  MessageBox(NULL, message, progname, MB_ICONERROR | MB_OK)
-#define getprogname()   char name[MAX_PATH]; argv[0]= GetModuleFileName(NULL,name,sizeof(name)) ? name : NULL;
-#else
-#define alert(message)  fprintf(stderr,"%s: %s\n", "$PROGNAME", message)
-#define getprogname()
-#endif
+$PLATFORM_ALERTS
 
 /* fatal error, from srlua */
 static void fatal(const char* message) {
@@ -6852,7 +7162,7 @@ static int pmain(lua_State *L) {
     return 1;
 }
 
-int $LUAOPEN_FN(lua_State* L);
+$ENTRYPOINT_DECLARATIONS
 
 /* main function, based on srlua */
 int main(int argc, char** argv) {
@@ -6870,7 +7180,7 @@ int main(int argc, char** argv) {
     titan_init_paths(L);
     lua_getglobal(L, "package");
     lua_getfield(L, -1, "preload");
-    lua_pushcfunction(L, $LUAOPEN_FN);
+    lua_pushcfunction(L, $PRELOAD_FN);
     lua_setfield(L, -2, "$MODNAME");
     lua_pushcfunction(L, errorhandler);
     lua_pushcfunction(L, pmain);
@@ -6899,17 +7209,39 @@ int main(int argc, char** argv) {
 
 ]]
 
+function driver.entrypoint_contents(modname, program_name, options)
+    options = options or {}
+    local values = {
+        PROGNAME = program_name or modname:gsub(".*[.]", ""),
+        LUAOPEN_FN = "luaopen_" .. modname:gsub("[.]", "_"),
+        MODNAME = modname,
+        SKIP_MAIN_BOOTSTRAP = options.no_uv_bootstrap and "1" or "0",
+    }
+    if platform.windows then
+        values.PROGNAME = c_string_contents(values.PROGNAME)
+        values.LUAOPEN_FN = "luaopen_" .. driver.mangle_module_name(modname)
+        values.ABI_FN = driver.mangle_module_name(modname) .. "_abi"
+        values.PROVIDER = c_string_contents(assert(options.provider,
+            "Windows entrypoint requires an explicit provider"))
+        values.PRELOAD_FN = "titan_open_main"
+        values.PLATFORM_ALERTS = util.render(windows_entrypoint_alerts, values)
+        values.ENTRYPOINT_DECLARATIONS =
+            util.render(windows_entrypoint_declarations, values)
+    else
+        values.PRELOAD_FN = values.LUAOPEN_FN
+        values.PLATFORM_ALERTS = util.render(unix_entrypoint_alerts, values)
+        values.ENTRYPOINT_DECLARATIONS =
+            "int " .. values.LUAOPEN_FN .. "(lua_State* L);"
+    end
+    return util.render(entrypoint_template, values)
+end
+
 local function write_entrypoint(modname, entrypoint_c, program_name,
                                 options, verbose)
     options = options or {}
     entrypoint_c = entrypoint_c or
         (modname:gsub("[.]", "/") .. "__entrypoint.c")
-    local contents = util.render(entrypoint_template, {
-        PROGNAME = program_name or modname:gsub(".*[.]", ""),
-        LUAOPEN_FN = "luaopen_" .. modname:gsub("[.]", "_"),
-        MODNAME = modname,
-        SKIP_MAIN_BOOTSTRAP = options.no_uv_bootstrap and "1" or "0",
-    })
+    local contents = driver.entrypoint_contents(modname, program_name, options)
     local wrote, write_err = util.set_file_contents(entrypoint_c, contents)
     if not wrote then return nil, write_err end
     local formatted, format_err = driver.format_generated_file(
@@ -6919,6 +7251,27 @@ local function write_entrypoint(modname, entrypoint_c, program_name,
 end
 
 local function ensure_directory(path)
+    if platform.windows then
+        local strategy = compiler_io.new_sync()
+        local attributes, attribute_error = strategy:stat(path)
+        if attribute_error then return nil, attribute_error end
+        if attributes then
+            return attributes.kind == "directory" and true or nil,
+                attributes.kind ~= "directory" and
+                    ("output path '" .. path .. "' is not a directory") or nil
+        end
+        local parent = platform.parent(path)
+        if parent and parent ~= path then
+            local ok, err = ensure_directory(parent)
+            if not ok then return nil, err end
+        end
+        local made, make_error = strategy:mkdir(path)
+        if made then return true end
+        local appeared, appeared_error = strategy:stat(path)
+        if appeared_error then return nil, appeared_error end
+        if appeared and appeared.kind == "directory" then return true end
+        return nil, make_error
+    end
     local mode = lfs.attributes(path, "mode")
     if mode == "directory" then return true end
     if mode then return nil, "output path '" .. path .. "' is not a directory" end
@@ -6935,12 +7288,20 @@ local function ensure_directory(path)
 end
 
 ensure_output_parent = function(filename)
+    if platform.windows then
+        local parent = platform.parent(filename)
+        if not parent then return true end
+        return ensure_directory(parent)
+    end
     local parent = filename:match("^(.*)/[^/]+$")
     if not parent or parent == "" then return true end
     return ensure_directory(parent)
 end
 
 function driver.sibling_temporary_path(filename, strategy)
+    if platform.windows and strategy == nil then
+        return platform.native("_win_reserve_sibling", filename)
+    end
     local unique
     if strategy then
         local temporary_error
@@ -6956,8 +7317,19 @@ function driver.sibling_temporary_path(filename, strategy)
         if not unique then return nil, "os.tmpname returned no path" end
         os.remove(unique)
     end
-    unique = unique:match("([^/]+)$") or unique:gsub("[^%w]", "_")
+    unique = unique:match(platform.windows and "([^/\\]+)$" or "([^/]+)$")
+        or unique:gsub("[^%w]", "_")
     return filename .. ".tmp." .. unique
+end
+
+local function sibling_temporary_directory(filename)
+    if platform.windows then
+        return platform.native("_win_reserve_sibling", filename, true)
+    end
+    local directory = driver.sibling_temporary_path(filename)
+    local made, err = lfs.mkdir(directory)
+    if not made then return nil, err end
+    return directory
 end
 
 -- Keep the linked image's basename identical to its eventual public basename.
@@ -6967,12 +7339,12 @@ end
 function driver.staged_library_output(publicname)
     local parent_ok, parent_err = ensure_output_parent(publicname)
     if not parent_ok then return nil, parent_err end
-    local basename = publicname:match("([^/]+)$")
+    local basename = publicname:match(
+        platform.windows and "([^/\\]+)$" or "([^/]+)$")
     if not basename then return nil, "invalid library output path" end
-    local directory = driver.sibling_temporary_path(publicname .. ".stage")
-    local made, make_err = lfs.mkdir(directory)
-    if not made then return nil, make_err end
-    return directory .. "/" .. basename, directory
+    local directory, make_err = sibling_temporary_directory(publicname .. ".stage")
+    if not directory then return nil, make_err end
+    return append_path(directory, basename), directory
 end
 
 local function remove_path(path)
@@ -6993,6 +7365,7 @@ end
 driver.remove_path = remove_path
 
 local function absolute_native_path(filename)
+    if platform.windows then return assert(absolute_filename(filename)) end
     if filename:sub(1, 1) == "/" then return filename end
     return lfs.currentdir() .. "/" .. filename
 end
@@ -7081,7 +7454,7 @@ function driver.derive_target_fingerprint(filename, expected_module)
     return parsed.fingerprint, parsed
 end
 
-function driver.validate_generated_objects(objects, target)
+function driver.validate_generated_objects(objects, target, entries)
     for _, input in ipairs(objects or {}) do
         local filename = type(input) == "table" and input.filename or input
         local expected_module =
@@ -7094,6 +7467,13 @@ function driver.validate_generated_objects(objects, target)
         if not matches then
             return nil, "generated module object '" .. tostring(filename) ..
                 "' target mismatch: " .. tostring(mismatch)
+        end
+        if entries then
+            local entry = parsed_or_err.metadata
+            if entries[entry.module] then
+                return nil, "duplicate generated module metadata '" .. entry.module .. "'"
+            end
+            entries[entry.module] = entry
         end
     end
     return true
@@ -7483,10 +7863,9 @@ function driver.build_static_archive(
     end
     local output_ok, output_err = ensure_output_parent(output)
     if not output_ok then return nil, output_err end
-    local stage = absolute_native_path(
-        driver.sibling_temporary_path(output .. ".archive-stage"))
-    local made, make_err = lfs.mkdir(stage)
-    if not made then return nil, make_err end
+    local stage, make_err = sibling_temporary_directory(output .. ".archive-stage")
+    if not stage then return nil, make_err end
+    stage = absolute_native_path(stage)
     local temporary = stage .. "/output.a"
     local probe = stage .. "/tool-probe.a"
     local staged_paths = {}
@@ -7645,7 +8024,7 @@ function driver.build_static_archive(
         "produced archive '" .. output .. "'")
     if not entries_ok then return abort(entries_err) end
 
-    local published, publish_err = os.rename(temporary, output)
+    local published, publish_err = rename_output(temporary, output)
     if not published then return abort(publish_err) end
     produced.filename = output
     local result = {
@@ -7663,14 +8042,19 @@ end
 -- policy. Callers validate its complete protocol set with
 -- validate_library_image and remove it after use.
 function driver.compile_archive_validation_image(
-        output, archive, link, verbose, extra_objects)
+        output, archive, link, verbose, extra_objects, module_names)
     return driver.compile_library_output(
-        output, {}, link, verbose, extra_objects, { archive })
+        output, {}, link, verbose, extra_objects, { archive }, nil, nil,
+        module_names)
 end
 
 function driver.compile_library_output(soname, libnames, link, verbose,
                                        extra_objects, static_archives,
-                                       ordered_payload, install_name)
+                                       ordered_payload, install_name,
+                                       module_names)
+    if platform.windows and (not module_names or #module_names == 0) then
+        return nil, "Windows DLL linking requires its logical module inventory"
+    end
     local runtime_ok, runtime_err = check_runtime(verbose)
     if not runtime_ok then return nil, runtime_err end
     local output_ok, output_err = ensure_output_parent(soname)
@@ -7696,6 +8080,14 @@ function driver.compile_library_output(soname, libnames, link, verbose,
         })
     end
     append_argv(args, { "-o", soname })
+    local export_file
+    if platform.windows then
+        local exports = driver.windows_provider_exports(module_names)
+        export_file = soname .. ".def"
+        local wrote, write_error = util.set_file_contents(export_file, exports)
+        if not wrote then return nil, write_error end
+        table.insert(args, export_file)
+    end
     for _, libname in ipairs(libnames) do
         table.insert(args, libname)
     end
@@ -7727,6 +8119,7 @@ function driver.compile_library_output(soname, libnames, link, verbose,
     append_argv(args, driver.EXTRA_LDFLAGS)
 
     local ok, term, code = run_argv(args, verbose)
+    if export_file then os.remove(export_file) end
     if ok then
         local dsym_ok, dsym_term, dsym_code =
             run_dsymutil(soname, verbose, install_name ~= nil)
@@ -7741,9 +8134,10 @@ end
 
 function driver.compile_library(modname, libnames, link, verbose, extra_objects,
                                 static_archives)
-    local soname = modname:gsub("[.]", "/") .. ".so"
+    local soname = modname:gsub("[.]", "/") .. (platform.windows and ".dll" or ".so")
     return driver.compile_library_output(
-        soname, libnames, link, verbose, extra_objects, static_archives)
+        soname, libnames, link, verbose, extra_objects, static_archives,
+        nil, nil, platform.windows and { modname } or nil)
 end
 
 -- Publish a successfully validated sibling temporary DSO. On Darwin the
@@ -7761,21 +8155,21 @@ function driver.publish_library(tempname, publicname)
         end
         if lfs.attributes(public_dsym, "mode") then
             dsym_backup = driver.sibling_temporary_path(public_dsym .. ".old")
-            local backed_up, backup_err = os.rename(public_dsym, dsym_backup)
+            local backed_up, backup_err = rename_output(public_dsym, dsym_backup)
             if not backed_up then return nil, backup_err end
         end
-        local moved, move_err = os.rename(temp_dsym, public_dsym)
+        local moved, move_err = rename_output(temp_dsym, public_dsym)
         if not moved then
-            if dsym_backup then os.rename(dsym_backup, public_dsym) end
+            if dsym_backup then rename_output(dsym_backup, public_dsym) end
             return nil, move_err
         end
     end
 
-    local published, publish_err = os.rename(tempname, publicname)
+    local published, publish_err = rename_output(tempname, publicname)
     if not published then
         if driver.IS_DARWIN then
-            os.rename(public_dsym, temp_dsym)
-            if dsym_backup then os.rename(dsym_backup, public_dsym) end
+            rename_output(public_dsym, temp_dsym)
+            if dsym_backup then rename_output(dsym_backup, public_dsym) end
         end
         return nil, publish_err
     end
@@ -7875,7 +8269,16 @@ finish(true, "ok")
 
 local function current_lua_executable()
     if driver.INSTALL_PATHS then
-        return root_join(driver.INSTALL_PATHS.root, "bin/lua")
+        return root_join(driver.INSTALL_PATHS.root,
+            platform.windows and "bin/lua.exe" or "bin/lua")
+    end
+    if platform.windows then
+        local source_lua = driver.LUA_SOURCE_PATH .. "/lua.exe"
+        if lfs.attributes(source_lua, "mode") == "file" then return source_lua end
+        -- Native titanc.exe is a compiler frontend, never the Lua interpreter
+        -- for validation subprocesses. Select the controlled interpreter by
+        -- its real name rather than reusing the frontend's argv[-1].
+        return "lua.exe"
     end
     local source_lua = driver.LUA_SOURCE_PATH .. "/lua"
     if lfs.attributes(source_lua, "mode") == "file" then return source_lua end
@@ -7889,9 +8292,21 @@ end
 -- Provider `titan` owns Lua's bare native support API. Validate its entry in a
 -- fresh process so package.loaded or a compiler-side support table cannot make
 -- an unrelated/stub luaopen_titan appear valid.
+local function validation_temporary_pair()
+    if not platform.windows then return os.tmpname(), os.tmpname() end
+    local script, script_error = platform.native("_win_tmpname")
+    if not script then return nil, script_error end
+    local result, result_error = platform.native("_win_tmpname")
+    if not result then
+        os.remove(script)
+        return nil, result_error
+    end
+    return script, result
+end
+
 function driver.validate_titan_support(filename, verbose)
-    local script = os.tmpname()
-    local result = os.tmpname()
+    local script, result = validation_temporary_pair()
+    if not script then return nil, result end
     local ok, err = util.set_file_contents(script, support_validation_script)
     if not ok then
         os.remove(script)
@@ -7941,6 +8356,17 @@ end
 local support = require "titan"
 for name, entry in pairs(expected) do
     local prefix = name:gsub("[.]", "_")
+    if package.config:sub(1, 1) == "\\" then
+        prefix = name:gsub("[%-.]", "_")
+        if type(support._abivalue) ~= "function" then
+            finish(false, "Windows Titan support is missing its native ABI query helper")
+        end
+        local value, value_error = support._abivalue(image, prefix .. "_abi_value")
+        if value ~= entry.abi then
+            finish(false, prefix .. "_abi_value does not match embedded ABI: " ..
+                tostring(value or value_error))
+        end
+    end
     for _, field in ipairs({ "abi", "types", "layouts" }) do
         local symbol = prefix .. "_" .. field
         local fn, load_error = support._loadlib(image, symbol)
@@ -7969,8 +8395,8 @@ for name, entry in pairs(expected) do
 end
 finish(true, "ok")
 ]]
-    local script = os.tmpname()
-    local result = os.tmpname()
+    local script, result = validation_temporary_pair()
+    if not script then return nil, result end
     local wrote, write_err = util.set_file_contents(script, script_source)
     if not wrote then
         os.remove(script)
@@ -8017,6 +8443,21 @@ local function safe_provider_output_path(provider, extension)
 end
 
 local function validate_output_ancestors(filename)
+    if platform.windows then
+        local strategy = compiler_io.new_sync()
+        local absolute, absolute_error = absolute_filename(filename, strategy)
+        if not absolute then return nil, absolute_error end
+        local current = platform.parent(absolute)
+        while current do
+            local attributes, attribute_error = strategy:stat(current)
+            if attribute_error then return nil, attribute_error end
+            if attributes and attributes.kind ~= "directory" then
+                return nil, "output parent '" .. current .. "' is not a directory"
+            end
+            current = platform.parent(current)
+        end
+        return true
+    end
     local normalized = normalized_absolute_filename(filename)
     local parent = normalized:match("^(.*)/[^/]+$")
     local parents = {}
@@ -8047,9 +8488,20 @@ if not open then error(open_error, 0) end
 return open()
 ]]
 
+local windows_shim_template = [[local path, search_error = package.searchpath($PROVIDER, package.cpath)
+if not path then error(search_error, 0) end
+
+local titan = require "titan"
+local open, open_error = titan._loadlibglobal(path, $ENTRY, $MODULE)
+if not open then error(open_error, 0) end
+
+return open()
+]]
+
 local function generated_shim_contents(provider, modname)
     return driver.GENERATED_SHIM_BANNER .. util.render(
-        shim_template, {
+        platform.windows and windows_shim_template or shim_template, {
+            MODULE = string.format("%q", modname),
             PROVIDER = string.format("%q", provider),
             ENTRY = string.format(
                 "%q", "luaopen_" .. driver.mangle_module_name(modname)),
@@ -8213,7 +8665,7 @@ local function same_file_tree(left, right)
 end
 
 function driver.validate_program_output_paths(
-        source_outputs, executable, entrypoint_c, native_inputs)
+        source_outputs, executable, entrypoint_c, native_inputs, extra_outputs)
     if type(executable) ~= "string" or executable == "" then
         return nil, "standalone executable path must be a nonempty string"
     end
@@ -8304,6 +8756,10 @@ function driver.validate_program_output_paths(
     if not ok then return nil, err end
     ok, err = add_output(executable, "standalone executable", "file")
     if not ok then return nil, err end
+    for _, path in ipairs(extra_outputs or {}) do
+        ok, err = add_output(path, "standalone native auxiliary output", "file")
+        if not ok then return nil, err end
+    end
     if driver.IS_DARWIN then
         ok, err = add_output(
             executable .. ".dSYM", "standalone dSYM", "directory")
@@ -8345,8 +8801,10 @@ end
 
 function driver.validate_provider_output_paths(
         public_dso, native_inputs, generated_outputs)
-    local public_archive = public_dso:gsub("[.]so$", ".a")
-    if public_archive == public_dso then
+    local public_archive = not platform.windows and public_dso:gsub("[.]so$", ".a")
+    if platform.windows and not public_dso:match("[.]dll$") then
+        return nil, "Windows provider path must end in .dll"
+    elseif public_archive == public_dso then
         return nil, "provider DSO path '" .. tostring(public_dso) ..
             "' does not end in .so"
     end
@@ -8402,8 +8860,10 @@ function driver.validate_provider_output_paths(
 
     local ok, err = add_output(public_dso, "provider DSO", "file")
     if not ok then return nil, err end
-    ok, err = add_output(public_archive, "provider archive", "file")
-    if not ok then return nil, err end
+    if public_archive then
+        ok, err = add_output(public_archive, "provider archive", "file")
+        if not ok then return nil, err end
+    end
     if driver.IS_DARWIN then
         ok, err = add_output(
             public_dso .. ".dSYM", "provider dSYM", "directory")
@@ -8470,7 +8930,7 @@ end
 -- Validate the complete shim set before code generation. Only files carrying
 -- Titan's exact generated banner are owned and replaceable.
 function driver.plan_module_shims(provider, module_names)
-    local provider_path = safe_provider_output_path(provider, ".so")
+    local provider_path = safe_provider_output_path(provider, platform.windows and ".dll" or ".so")
     if not provider_path then
         return nil, "invalid library provider name '" .. tostring(provider) .. "'"
     end
@@ -8500,6 +8960,39 @@ function driver.plan_module_shims(provider, module_names)
         })
     end
     return plans, provider_path
+end
+
+-- The child validator must have exited before this function is called. Unlike
+-- the Unix pair publisher, this path never opens either provider in this Lua
+-- state. Retiring shims for removed logical modules is currently unsupported.
+function driver.publish_windows_provider(staged, destination, shim_plans, provider)
+    local support = require "titan"
+    local entries = {}
+    for _, plan in ipairs(shim_plans) do
+        local ok, err = ensure_output_parent(plan.filename)
+        if not ok then return nil, err end
+        entries[#entries + 1] = { destination = plan.filename,
+            contents = plan.contents, modname = plan.modname }
+    end
+    entries[#entries + 1] = { source = staged, destination = destination }
+    return require("titan-compiler.windows_publication").publish(entries, {
+        stat = function(path) return support._win_stat(path, false) end,
+        reserve = support._win_reserve_sibling,
+        replace = support._win_replace,
+        remove = os.remove,
+    }, {
+        validate_existing = function(entry, existing)
+            if existing and entry.modname then
+                local contents, err = util.get_file_contents(entry.destination)
+                if not contents then return nil, err end
+                if contents ~= generated_shim_contents(provider, entry.modname) then
+                    return nil, "refusing to overwrite unrecognized or differently owned shim '" ..
+                        entry.destination .. "'"
+                end
+            end
+            return true
+        end,
+    })
 end
 
 -- Publish one validated no-main bundle as a recoverable process-level
@@ -8565,8 +9058,12 @@ function driver.publish_provider_bundle(
             cleanup_staged_shims()
             return nil, output_err
         end
-        local temporary = driver.sibling_temporary_path(
+        local temporary, reserve_err = driver.sibling_temporary_path(
             plan.filename .. ".provider-stage")
+        if not temporary then
+            cleanup_staged_shims()
+            return nil, reserve_err
+        end
         local wrote, write_err =
             util.set_file_contents(temporary, plan.contents)
         if not wrote then
@@ -8654,16 +9151,20 @@ function driver.publish_provider_bundle(
         if backed_up[public] then return true end
         backed_up[public] = true
         if not lfs.symlinkattributes(public, "mode") then return true end
-        local old = driver.sibling_temporary_path(public .. ".old")
-        local moved, move_err = os.rename(public, old)
-        if not moved then return nil, move_err end
+        local old, reserve_err = driver.sibling_temporary_path(public .. ".old")
+        if not old then return nil, reserve_err end
+        local moved, move_err = rename_output(public, old)
+        if not moved then
+            if platform.windows then os.remove(old) end
+            return nil, move_err
+        end
         backups[#backups + 1] = { public = public, old = old }
         return true
     end
     local function install(staged, public)
         local backed, backup_err = backup(public)
         if not backed then return nil, backup_err end
-        local moved, move_err = os.rename(staged, public)
+        local moved, move_err = rename_output(staged, public)
         if not moved then return nil, move_err end
         installed[#installed + 1] = public
         return true
@@ -8687,7 +9188,7 @@ function driver.publish_provider_bundle(
         end
         for index = #backups, 1, -1 do
             local item = backups[index]
-            os.rename(item.old, item.public)
+            rename_output(item.old, item.public)
         end
         cleanup_staged_shims()
         return nil, message
@@ -8738,13 +9239,14 @@ function driver.write_module_shims(plans)
     for _, plan in ipairs(plans) do
         local output_ok, output_err = ensure_output_parent(plan.filename)
         if not output_ok then return nil, output_err end
-        local tempname = driver.sibling_temporary_path(plan.filename)
+        local tempname, reserve_err = driver.sibling_temporary_path(plan.filename)
+        if not tempname then return nil, reserve_err end
         local wrote, write_err = util.set_file_contents(tempname, plan.contents)
         if not wrote then
             os.remove(tempname)
             return nil, write_err
         end
-        local moved, move_err = os.rename(tempname, plan.filename)
+        local moved, move_err = rename_output(tempname, plan.filename)
         if not moved then
             os.remove(tempname)
             return nil, move_err
@@ -8911,12 +9413,86 @@ function driver.run_standalone_archive_probe(
     return true
 end
 
+local function compile_windows_program(modname, libnames, link, verbose,
+        extra_objects, static_archives, entrypoint_name, program_name, options)
+    local paths, err = driver.windows_program_paths(
+        modname, options.launcher_name, options.output_module)
+    if not paths then return nil, err end
+    local ok
+    ok, err = ensure_output_parent(paths.executable)
+    if not ok then return nil, err end
+    ok, err = ensure_output_parent(entrypoint_name)
+    if not ok then return nil, err end
+    local module_names = options.module_names or { modname }
+    local linked, term, code = driver.compile_library_output(paths.provider,
+        libnames, link, verbose, extra_objects, static_archives,
+        nil, nil, module_names)
+    if not linked then return nil, term, code end
+    ok, err = driver.validate_library_image(paths.provider, module_names)
+    if not ok then return nil, err end
+    if options.archive_names and #options.archive_names > 0 then
+        ok, err = driver.validate_library_image_fresh(paths.provider,
+            assert(options.archive_entries), options.archive_names, verbose)
+        if not ok then return nil, err end
+    end
+    if options.validate_titan_support then
+        ok, err = driver.validate_titan_support(paths.provider, verbose)
+        if not ok then return nil, err end
+    end
+
+    local entry_options = {
+        pretty_print = options.pretty_print,
+        no_uv_bootstrap = options.no_uv_bootstrap,
+        provider = paths.relative_provider,
+    }
+    local entrypoint_c
+    entrypoint_c, err = write_entrypoint(modname, entrypoint_name,
+        program_name or options.output_module or modname, entry_options, verbose)
+    if not entrypoint_c then return nil, err end
+    local entrypoint_o = entrypoint_c:gsub("[.]c$", ".o")
+    local compile_args
+    compile_args, err = driver.generated_compile_prefix()
+    if not compile_args then return nil, err end
+    append_argv(compile_args, { "-c", entrypoint_c, "-o", entrypoint_o })
+    local compiled, cterm, ccode = run_argv(compile_args, verbose)
+    if not compiled then return nil, cterm, ccode end
+
+    local manifest, resource_source, resource = entrypoint_c .. ".manifest",
+        entrypoint_c .. ".rc", entrypoint_c .. ".res"
+    ok, err = util.set_file_contents(manifest, driver.windows_launcher_manifest())
+    if not ok then return nil, err end
+    ok, err = util.set_file_contents(resource_source,
+        driver.windows_launcher_resource(absolute_filename(manifest)))
+    if not ok then return nil, err end
+    local rc
+    rc, err = parsed_words(os.getenv("RC") or "llvm-rc", "RC")
+    if not rc then return nil, err end
+    if #rc == 0 then return nil, "RC command is empty" end
+    append_argv(rc, { "-FO", resource, resource_source })
+    compiled, cterm, ccode = run_argv(rc, verbose)
+    if not compiled then return nil, cterm, ccode end
+
+    local args
+    args, err = compiler_argv(false)
+    if not args then return nil, err end
+    append_argv(args, { "-o", paths.executable, entrypoint_o, resource })
+    append_runtime_libraries(args)
+    append_argv(args, driver.EXTRA_LDFLAGS)
+    return run_argv(args, verbose)
+end
+
 function driver.compile_program(modname, libnames, link, verbose, extra_objects,
                                 program_output, static_archives,
                                 entrypoint_output, program_name, options)
     options = options or {}
     local runtime_ok, runtime_err = check_runtime(verbose)
     if not runtime_ok then return nil, runtime_err end
+    if platform.windows then
+        return compile_windows_program(modname, libnames, link, verbose,
+            extra_objects, static_archives, entrypoint_output or
+                (modname:gsub("[.]", "/") .. "__entrypoint.c"),
+            program_name, options)
+    end
     local execname = program_output or modname:gsub("[.]", "/")
     local output_ok, output_err = ensure_output_parent(execname)
     if not output_ok then return nil, output_err end

@@ -53,6 +53,10 @@ function coder._foreign_include_line(include)
         "foreign include has no normalized spelling")
 end
 
+function c_header_name(name)
+    return assert(require("titan-compiler.ffiheaders").quote_header(name))
+end
+
 -- Numeric expressions copy C values, so their mutable native carriers must
 -- not inherit a typedef's top-level const/volatile qualification. Keep the
 -- checked declaration identity and every pointer/aggregate qualifier intact.
@@ -372,6 +376,7 @@ function coder.external_symbols(modname, ast)
     local mangled = mangle_qn(modname)
     local symbols = {
         { symbol = mangled .. "_abi", owner = "module ABI entry" },
+        { symbol = mangled .. "_abi_value", owner = "module ABI value entry" },
         { symbol = mangled .. "_types", owner = "module type entry" },
         { symbol = mangled .. "_layouts", owner = "module layout entry" },
         { symbol = mangled .. "_compatibility", owner = "module compatibility entry" },
@@ -431,6 +436,8 @@ end
 -- Return the known public symbol families represented by a recovered module
 -- interface. Static-provider preflight has no AST, but it can still reject the
 -- same protocol/function/record-member collisions before invoking the linker.
+-- Optional exports added within this ABI are not implied by type metadata:
+-- older providers need not have the native ABI value query.
 function coder.interface_external_symbols(modname, modtype)
     local mangled = mangle_qn(modname)
     local symbols = {

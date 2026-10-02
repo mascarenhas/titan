@@ -23,7 +23,7 @@ local MAX_PERSISTENT_RECORD_BYTES = cprobe_cache.MAX_RECORD_BYTES
 local MAX_SELECTION_OBJECT_BYTES = 16 * 1024 * 1024
 local ENUM_PAYLOAD_PREFIX = "TITENUM\0\1\12"
 local ENUM_PAYLOAD_BYTES = 12
-local ENUM_SECTION = { elf = ".titan.cprobe", macho_segment = "__DATA",
+local ENUM_SECTION = { elf = ".titan.cprobe", coff = ".titan.cprobe", macho_segment = "__DATA",
     macho_section = "__titancprobe" }
 
 -- IDs are a persistent query protocol, not positions in an eligibility list.
@@ -165,12 +165,16 @@ local function trace_header_label(includes)
     return label
 end
 
+local platform = require "titan-compiler.platform"
+
 local function path_join(directory, name)
+    if platform.windows then return assert(platform.join(directory, name)) end
     if directory:sub(-1) == "/" then return directory .. name end
     return directory .. "/" .. name
 end
 
-local function absolute_path(path, base)
+local function absolute_path(path, base, strategy)
+    if platform.windows then return assert(platform.absolute(path, base, strategy or default_io)) end
     if path:sub(1, 1) == "/" then return path end
     return path_join(base, path)
 end
@@ -179,7 +183,7 @@ local function ensure_directory(path, strategy)
     local attributes = strategy:stat(path)
     if attributes and attributes.kind == "directory" then return true end
     if attributes ~= nil then return nil end
-    local parent = path:match("^(.*)/[^/]+$")
+    local parent = platform.windows and platform.parent(path) or path:match("^(.*)/[^/]+$")
     if parent and parent ~= "" and parent ~= path then
         if not ensure_directory(parent, strategy) then return nil end
     end
@@ -198,12 +202,7 @@ local function first_diagnostic_line(diagnostic)
     return ""
 end
 
-local function quote_header_name(name)
-    if name:find("[\r\n%z]") then
-        return nil, "quoted C header name contains a newline or NUL byte"
-    end
-    return '"' .. name:gsub("\\", "\\\\"):gsub('"', '\\"') .. '"'
-end
+local quote_header_name = ffiheaders.quote_header
 
 local function angle_header_name(name)
     if name:find("[<>\r\n%z]") then
@@ -212,7 +211,7 @@ local function angle_header_name(name)
     return "<" .. name .. ">"
 end
 
-local function normalize_include_descriptor(descriptor, source_dir, cwd)
+local function normalize_include_descriptor(descriptor, source_dir, cwd, strategy)
     if type(descriptor) == "string" then
         descriptor = {
             original = descriptor,
@@ -263,9 +262,9 @@ local function normalize_include_descriptor(descriptor, source_dir, cwd)
         -- explicit before the source moves under /tmp. When no resolved path
         -- was supplied, the original quote import belongs to source_dir.
         if resolved then
-            effective_resolved = absolute_path(resolved, cwd)
+            effective_resolved = absolute_path(resolved, cwd, strategy)
         else
-            effective_resolved = absolute_path(name, source_dir)
+            effective_resolved = absolute_path(name, source_dir, strategy)
         end
         local err
         rendered, err = quote_header_name(effective_resolved)
@@ -1093,7 +1092,7 @@ function Service:_create_workspace()
         return nil, "temporary workspace provider did not return a table"
     elseif type(workspace.root) ~= "string" or workspace.root == "" then
         return nil, "temporary workspace has no root path"
-    elseif workspace.root:sub(1, 1) ~= "/" then
+    elseif not platform.is_absolute(workspace.root) then
         return nil, "temporary workspace root path must be absolute"
     elseif workspace.root:find("\0", 1, true) then
         return nil, "temporary workspace root path contains a NUL byte"
@@ -2026,12 +2025,12 @@ function Service:module_context(options)
     if type(cwd) ~= "string" or cwd == "" then
         return nil, "module probe context cwd must be a nonempty string"
     end
-    cwd = absolute_path(cwd, process_cwd)
+    cwd = absolute_path(cwd, process_cwd, self.io)
     local source_dir = options.source_dir or cwd
     if type(source_dir) ~= "string" or source_dir == "" then
         return nil, "module probe source_dir must be a nonempty string"
     end
-    source_dir = absolute_path(source_dir, cwd)
+    source_dir = absolute_path(source_dir, cwd, self.io)
 
     local raw_includes = options.includes or options.include_descriptors
         or options.headers or {}
@@ -2041,7 +2040,7 @@ function Service:module_context(options)
     local includes = {}
     for index = 1, #raw_includes do
         local include, err = normalize_include_descriptor(
-            raw_includes[index], source_dir, cwd)
+            raw_includes[index], source_dir, cwd, self.io)
         if not include then
             return nil, "invalid C include descriptor " .. index .. ": " .. err
         end
@@ -2354,7 +2353,7 @@ function cprobe.new_service(options)
         if not cwd then
             return nil, "cannot determine cache cwd: " .. tostring(cwd_error)
         end
-        cache_directory = absolute_path(cache_directory, cwd)
+        cache_directory = absolute_path(cache_directory, cwd, strategy)
         if cache_directory ~= "/" then
             cache_directory = cache_directory:gsub("/+$", "")
         end
@@ -2447,9 +2446,9 @@ function cprobe.normalize_include_descriptor(descriptor, options)
     if not process_cwd then
         return nil, "cannot determine include cwd: " .. tostring(cwd_error)
     end
-    local cwd = absolute_path(options.cwd or process_cwd, process_cwd)
-    local source_dir = absolute_path(options.source_dir or cwd, cwd)
-    return normalize_include_descriptor(descriptor, source_dir, cwd)
+    local cwd = absolute_path(options.cwd or process_cwd, process_cwd, strategy)
+    local source_dir = absolute_path(options.source_dir or cwd, cwd, strategy)
+    return normalize_include_descriptor(descriptor, source_dir, cwd, strategy)
 end
 
 cprobe.new = cprobe.new_service

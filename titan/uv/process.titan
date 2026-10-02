@@ -1,9 +1,9 @@
-foreign import "fcntl.h"
-foreign import "unistd.h"
-foreign import "sys/socket.h"
+foreign import "process_platform.h"
+foreign import "process_environment.h"
 
 foreign type CharPointer = *char
-foreign type ParentStdioStat = stat
+foreign type EnvironmentPointer = *uv_env_item_t
+foreign type ParentStdioProbe = titan_parent_stdio_probe
 
 -- Stream reads are the one multi-shot operation in this contributor. A
 -- stream therefore buffers callback chunks and has at most one suspended
@@ -66,11 +66,17 @@ local union SpawnSlot
   merged(child: uv_stdio_t, parent: uv_stdio_t)
 end
 
+local record SpawnEnvironmentEntry
+  local name: string
+  local contents: string
+end
+
 local record uv_spawn_config
   local runtime: Runtime
   local options: foreign uv_process_options_t
   local const stdio: foreign uv_stdio_container_t[]
   local slots: {SpawnSlot}
+  local environment: {SpawnEnvironmentEntry}
   local consumed: boolean
 end
 
@@ -188,10 +194,11 @@ local function stream_alloc(stdio: uv_stdio_t, size: foreign size_t,
                             pointer: foreign *void)
   local descriptor = pointer as foreign *uv_buf_t
   do
-    local bytes = foreign char.new_array(size as integer)
+    local length: integer = size
+    descriptor.len = length
+    local bytes = foreign char.new_array(length)
     stdio.buffer = bytes
     descriptor.base = bytes
-    descriptor.len = size
   catch
     -- A direct native callback cannot unwind through libuv. Return the zero
     -- buffer that makes libuv invoke the paired read_cb, preserving the exact
@@ -442,27 +449,19 @@ end
 
 local function duplicate_descriptor(
     descriptor: foreign uv_file): foreign uv_file
-  local duplicate = ffi.dup(descriptor)
-  while duplicate < 0 and ffi.errno == ffi.EINTR do
-    duplicate = ffi.dup(descriptor)
-  end
-  if duplicate < 0 then
-    raise make_error(ffi.uv_translate_sys_error(ffi.errno),
-                     "stdio.parent.duplicate")
-  end
-  local status = ffi.fcntl(
-      duplicate, ffi.F_SETFD, ffi.FD_CLOEXEC)
-  while status < 0 and ffi.errno == ffi.EINTR do
-    status = ffi.fcntl(
-        duplicate, ffi.F_SETFD, ffi.FD_CLOEXEC)
-  end
+  local duplicate = foreign uv_file.new_array(1)
+  local cloexec_failed = foreign int.new_array(1)
+  local status = ffi.titan_duplicate_parent_descriptor(
+      descriptor, duplicate, cloexec_failed)
   if status < 0 then
-    local saved_errno = ffi.errno
-    close_descriptor(duplicate as foreign uv_file)
-    raise make_error(ffi.uv_translate_sys_error(saved_errno),
-                     "stdio.parent.duplicate.cloexec")
+    ffi.titan_close_parent_duplicate(duplicate[0])
+    local operation = "stdio.parent.duplicate"
+    if cloexec_failed[0] ~= 0 then
+      operation = "stdio.parent.duplicate.cloexec"
+    end
+    raise make_error(status, operation)
   end
-  return duplicate as foreign uv_file
+  return duplicate[0]
 end
 
 local function parent_stdio_kind_error(code: integer, descriptor: integer,
@@ -507,43 +506,26 @@ local function parent_stdio_kind(descriptor: integer): foreign uv_handle_type
 
   -- uv_guess_handle does not promise errno; its isatty probe can leave an
   -- unrelated value behind. Inspect this UNKNOWN fd explicitly.
-  local metadata = foreign ParentStdioStat.new()
-  if ffi.fstat(fd, metadata) ~= 0 then
-    local saved_errno = ffi.errno
-    raise parent_stdio_kind_error(ffi.uv_translate_sys_error(saved_errno),
-                                   descriptor, "fstat")
+  local probe = foreign ParentStdioProbe.new()
+  ffi.titan_probe_parent_stdio(fd, probe)
+  if probe.status < 0 then
+    raise parent_stdio_kind_error(probe.status, descriptor,
+                                   probe.operation as string)
   end
-  if (metadata.st_mode & ffi.S_IFMT) ~= ffi.S_IFSOCK then
+  if probe.is_socket == 0 then
     raise parent_stdio_kind_error(ffi.UV_ENOTSUP, descriptor,
                                    "fstat did not identify a socket")
   end
-
-  local address = foreign sockaddr_storage.new()
-  local address_size = foreign socklen_t.new_array(1)
-  address_size[0] = foreign sockaddr_storage.sizeof as
-                    foreign socklen_t
-  local name_status = ffi.titan_posix_getsockname(fd,
-      address as foreign *sockaddr, address_size)
-  local name_errno = 0
-  if name_status ~= 0 then name_errno = ffi.errno end
-
-  local socket_type = foreign int.new_array(1)
-  local type_size = foreign socklen_t.new_array(1)
-  type_size[0] = foreign int.sizeof as foreign socklen_t
-  local type_status = ffi.getsockopt(fd, ffi.SOL_SOCKET,
-      ffi.SO_TYPE, socket_type, type_size)
-  local type_errno = 0
-  if type_status ~= 0 then type_errno = ffi.errno end
+  local name_errno = probe.name_errno as integer
+  local type_errno = probe.type_errno as integer
 
   -- Both probes run even when the first fails: any available contradiction
   -- defeats launcher knowledge about the missing metadata.
-  if name_status == 0 and address.ss_family ~= ffi.AF_UNIX then
+  if name_errno == 0 and probe.is_unix == 0 then
     raise parent_stdio_kind_error(ffi.UV_ENOTSUP, descriptor,
-      "getsockname reported family " .. (address.ss_family as integer))
+      "getsockname reported family " .. (probe.family as integer))
   end
-  if type_status == 0 and
-     (type_size[0] ~= (foreign int.sizeof as foreign socklen_t) or
-      socket_type[0] ~= ffi.SOCK_STREAM) then
+  if type_errno == 0 and probe.is_stream == 0 then
     raise parent_stdio_kind_error(ffi.UV_ENOTSUP, descriptor,
       "getsockopt(SO_TYPE) did not identify SOCK_STREAM")
   end
@@ -590,7 +572,7 @@ local function initialize_parent_stdio(runtime: Runtime,
 
   local guessed = parent_stdio_kind(descriptor)
   local duplicate = duplicate_descriptor(descriptor as foreign uv_file)
-  defer close_descriptor(duplicate)
+  defer ffi.titan_close_parent_duplicate(duplicate)
   local stdio: uv_stdio_t? = nil
   local keep = false
   defer if not keep then discard_unpublished_stdio(stdio) end
@@ -614,8 +596,8 @@ local function initialize_parent_stdio(runtime: Runtime,
     local actual = foreign uv_os_fd_t.new_array(1)
     status = ffi.uv_fileno(native_pointer as foreign *uv_handle_t, actual)
     check_status(status, "stdio.parent.fileno")
-    if (actual[0] as integer) ~= (duplicate as integer) then
-      status = close_descriptor(duplicate)
+    if actual[0] ~= ffi.uv_get_osfhandle(duplicate) then
+      status = ffi.titan_close_parent_duplicate(duplicate)
       check_status(status, "stdio.parent.duplicate.close")
     end
     duplicate = -1 as foreign uv_file
@@ -626,6 +608,18 @@ local function initialize_parent_stdio(runtime: Runtime,
     status = ffi.uv_pipe_open(
         stream_native(stdio as uv_stdio_t) as foreign *uv_pipe_t, duplicate)
     check_status(status, "stdio.parent.open")
+    if ffi.TITAN_UV_WINDOWS ~= 0 then
+      -- Windows libuv duplicates descriptors 0..2 internally. Compare the
+      -- real OS handles before relinquishing our independently owned CRT fd.
+      local actual = foreign uv_os_fd_t.new_array(1)
+      status = ffi.uv_fileno(
+          stream_handle(stdio as uv_stdio_t), actual)
+      check_status(status, "stdio.parent.fileno")
+      if actual[0] ~= ffi.uv_get_osfhandle(duplicate) then
+        status = ffi.titan_close_parent_duplicate(duplicate)
+        check_status(status, "stdio.parent.duplicate.close")
+      end
+    end
     duplicate = -1 as foreign uv_file
   end
 
@@ -766,6 +760,7 @@ local function os_spawn_config_new(): uv_spawn_config
     options = foreign uv_process_options_t.new(),
     stdio = foreign uv_stdio_container_t.new_array(3),
     slots = {},
+    environment = {},
     consumed = false,
   }
   config.options.exit_cb = uv_process_exit_cb
@@ -816,6 +811,99 @@ local function os_spawn_config_with_merged_output(
     configure_slot(config, 2, slot, ffi.UV_INHERIT_STREAM)
   end
   return status
+end
+
+local function os_shell_directory_buffer(bytes: foreign *char,
+                                         sizes: foreign *size_t): foreign int
+  return ffi.titan_process_system_directory(bytes, sizes)
+end
+
+local function os_shell_command(command: string): (string, {string})
+  if ffi.TITAN_UV_WINDOWS == 0 then
+    return "/bin/sh", {"-c", command}
+  end
+  local directory = os_sized_buffer(os_shell_directory_buffer,
+      OS_BUFFER_INITIAL as foreign size_t, "process.shell.directory") as string
+  -- /s removes exactly the outer pair. The caller owns cmd syntax within it.
+  return directory .. "\\cmd.exe", {"/d", "/s", "/c", '"' .. command .. '"'}
+end
+
+local function os_spawn_config_for_shell(config: uv_spawn_config): integer
+  local status = validate_config(config)
+  if status < 0 then return status end
+  if ffi.TITAN_UV_WINDOWS ~= 0 then
+    config.options.flags = ffi.UV_PROCESS_WINDOWS_VERBATIM_ARGUMENTS as foreign unsigned int
+  end
+  return 0
+end
+
+local function os_spawn_config_with_env(config: uv_spawn_config,
+                                         name: string,
+                                         contents: string): integer
+  local status = validate_config(config)
+  if status < 0 then return status end
+  if #name == 0 or contains_nul(name) or contains_nul(contents) then
+    return ffi.UV_EINVAL
+  end
+  local bytes = name as foreign const *unsigned char
+  local byte_index = 0
+  while byte_index < #name do
+    if bytes[byte_index] == 61 then return ffi.UV_EINVAL end
+    byte_index = byte_index + 1
+  end
+  local entry = SpawnEnvironmentEntry.new(name, contents)
+  local index = 1
+  while index <= #config.environment do
+    local equal = ffi.titan_process_environment_name_equal(
+        config.environment[index].name, name) as integer
+    if equal < 0 then return equal end
+    if equal == 1 then
+      config.environment[index] = entry
+      return 0
+    end
+    index = index + 1
+  end
+  config.environment[#config.environment + 1] = entry
+  return 0
+end
+
+-- uv_os_environ owns a native snapshot only while this helper copies its
+-- entries. The returned Titan strings own all bytes borrowed by uv_spawn.
+local function spawn_environment(config: uv_spawn_config): {string}
+  local result: {string} = {}
+  if #config.environment == 0 then return result end
+  local entries = foreign EnvironmentPointer.new_array(1)
+  local count = foreign int.new_array(1)
+  check_status(ffi.uv_os_environ(entries, count), "process.spawn.environment")
+  defer ffi.uv_os_free_environ(entries[0], count[0])
+  local index = 0
+  while index < count[0] as integer do
+    local inherited = entries[0][index]
+    local replaced = false
+    local option_index = 1
+    while option_index <= #config.environment do
+      local equal = ffi.titan_process_environment_name_equal(
+          inherited.name, config.environment[option_index].name) as integer
+      check_status(equal, "process.spawn.environment")
+      if equal == 1 then
+        replaced = true
+        break
+      end
+      option_index = option_index + 1
+    end
+    if not replaced then
+      result[#result + 1] = (inherited.name as string) .. "=" ..
+                            (inherited.value as string)
+    end
+    index = index + 1
+  end
+  index = 1
+  while index <= #config.environment do
+    local entry = config.environment[index]
+    result[#result + 1] = entry.name .. "=" .. entry.contents
+    index = index + 1
+  end
+  return result
 end
 
 local function os_spawn_config_close(config: uv_spawn_config)
@@ -877,11 +965,27 @@ local function os_process_spawn_with_config(file: string, args: {string},
       slot_merged_child(stdout_slot as SpawnSlot)
   local stderr_merged_child? =
       slot_merged_child(stderr_slot as SpawnSlot)
+  local environment = spawn_environment(state)
+  local envp = foreign CharPointer.new_array(#environment + 1)
+  index = 1
+  while index <= #environment do
+    envp[index - 1] = environment[index]
+    index = index + 1
+  end
+  envp[#environment] = nil
+  if #state.environment > 0 then state.options.env = envp end
   local process = new_process(state.runtime)
   local process_handle: foreign *uv_process_t = process.handle
   local argument_count = #args + 1
   local argv = foreign CharPointer.new_array(argument_count + 1)
-  argv[0] = file
+  local argument_zero = file
+  if ffi.TITAN_UV_WINDOWS ~= 0 and
+      (state.options.flags & ffi.UV_PROCESS_WINDOWS_VERBATIM_ARGUMENTS) ~= 0 then
+    -- Verbatim mode also covers argv[0]. Keep this owned string live through
+    -- uv_spawn while options.file retains the unquoted absolute executable.
+    argument_zero = '"' .. file .. '"'
+  end
+  argv[0] = argument_zero
   index = 1
   while index <= #args do
     argv[index] = args[index]
@@ -894,6 +998,7 @@ local function os_process_spawn_with_config(file: string, args: {string},
   state.consumed = true
   local spawn_status = ffi.uv_spawn(
       state.runtime.loop, process_handle, state.options)
+  state.options.env = nil
 
   if spawn_status < 0 then
     defer discard_config_streams(state)

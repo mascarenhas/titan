@@ -36,6 +36,11 @@ int $ABINAME(lua_State* L) {
     lua_pushliteral(L, TITAN_ABI_VERSION);
     return 1;
 }
+
+/* Native bootstrap query: callable before a Lua state or module exists. */
+const char *${ABINAME}_value(void) {
+    return TITAN_ABI_VERSION;
+}
 ]]
 
 init = [[
@@ -101,7 +106,7 @@ coder.modmetadata = [[
 #if defined(__APPLE__)
 #define TITAN_META_SECTION \
     __attribute__((used, aligned(1), section("__TEXT,__titanmeta")))
-#elif defined(__ELF__)
+#elif defined(__ELF__) || defined(_WIN32)
 #define TITAN_META_SECTION \
     __attribute__((used, aligned(1), section(".titan.meta")))
 #else
@@ -1144,7 +1149,7 @@ function coder.generate_foreign_header(modname, ast, tlcontext, header_paths)
     local ffi_header = header_paths.ffi_header or ast._ffi_header_output
         or (ast._ffi_header and ast._ffi_header.filename)
         or (modname:gsub("[.]", "/") .. ".ffi.h")
-    local includes = { "#include " .. c_string_literal(ffi_header) }
+    local includes = { "#include " .. c_header_name(ffi_header) }
     local source_headers = {}
     local seen = { [ffi_header] = true }
     for _, node in ipairs(ast) do
@@ -1155,7 +1160,7 @@ function coder.generate_foreign_header(modname, ast, tlcontext, header_paths)
             if not seen[header] then
                 seen[header] = true
                 source_headers[#source_headers + 1] = node.modname
-                includes[#includes + 1] = "#include " .. c_string_literal(header)
+                includes[#includes + 1] = "#include " .. c_header_name(header)
             end
         end
     end

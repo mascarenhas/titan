@@ -174,6 +174,82 @@ describe("selective binary dependency compatibility", function()
         generated = {}
     end)
 
+    it("exposes a Lua-independent ABI value through the canonical provider", function()
+        build({ {
+            name = "bc180_provider",
+            src = [[
+                initializations: integer = 0
+                do
+                    initializations = initializations + 1
+                end
+            ]],
+        } })
+
+        run_native_harness([[
+#include <dlfcn.h>
+#include <string.h>
+
+typedef const char *(*abi_value_fn)(void);
+
+int main(void) {
+    void *image = dlopen("./bc180_provider.so", RTLD_LAZY | RTLD_LOCAL);
+    assert(image != NULL);
+
+    void *raw = dlsym(image, "bc180_provider_abi_value");
+    assert(raw != NULL);
+    abi_value_fn query = titan_cast_func(abi_value_fn, raw);
+
+    /* Query the ABI before creating any Lua state or initializing the module. */
+    const char *abi = query();
+    assert(abi != NULL);
+    assert(strcmp(abi, TITAN_ABI_VERSION) == 0);
+
+    lua_State *L = new_state();
+    int top = lua_gettop(L);
+    lua_getfield(L, LUA_REGISTRYINDEX, "Titan module bc180_provider");
+    assert(lua_isnil(L, -1));
+    lua_pop(L, 1);
+
+    void *legacy_raw = dlsym(image, "bc180_provider_abi");
+    assert(legacy_raw != NULL);
+    lua_CFunction legacy = titan_cast_func(lua_CFunction, legacy_raw);
+    assert(legacy(L) == 1);
+    assert(lua_gettop(L) == top + 1);
+    assert(lua_type(L, -1) == LUA_TSTRING);
+    assert(strcmp(lua_tostring(L, -1), abi) == 0);
+    lua_settop(L, top);
+
+    lua_getfield(L, LUA_REGISTRYINDEX, "Titan module bc180_provider");
+    assert(lua_isnil(L, -1));
+    lua_pop(L, 1);
+
+    void *open_raw = dlsym(image, "luaopen_bc180_provider");
+    assert(open_raw != NULL);
+    lua_CFunction open = titan_cast_func(lua_CFunction, open_raw);
+    assert(open(L) == 1);
+    lua_setglobal(L, "provider");
+    assert(execute(L, "assert(provider.initializations == 1)"));
+
+    top = lua_gettop(L);
+    TitanModuleProvider provider =
+        titan_module_provider(L, "bc180_provider", NULL);
+    assert(provider.handle == NULL);
+    assert(provider.symbols != NULL);
+
+    void *canonical = titan_module_symbol(
+        L, provider, "bc180_provider_abi_value");
+    assert(canonical == raw);
+    abi_value_fn canonical_query = titan_cast_func(abi_value_fn, canonical);
+    assert(strcmp(canonical_query(), abi) == 0);
+    assert(lua_gettop(L) == top);
+    assert(execute(L, "assert(provider.initializations == 1)"));
+
+    lua_close(L);
+    return 0;
+}
+]])
+    end)
+
     it("accepts removal, addition and type changes of unused declarations", function()
         local image = fixture([[
             unused: integer = 7

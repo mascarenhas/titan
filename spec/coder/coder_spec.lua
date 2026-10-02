@@ -2208,6 +2208,49 @@ describe("Titan code generator", function()
             generate_err, 1, true)
     end)
 
+    it("compiles generated companion headers under literal Unicode paths", function()
+        local lfs = require "lfs"
+        local platform = require "titan-compiler.platform"
+        local strategy = require("titan-compiler.io").new_sync()
+        local reservation = assert(strategy:tmpname())
+        assert(strategy:unlink(reservation))
+        local root = reservation .. " space 文 😀 $line"
+            .. (platform.windows and "" or "\\literal")
+        if platform.windows then root = root:gsub("\\", "/") end
+        assert(lfs.mkdir(root))
+        local stem = root .. "/header_path"
+        local source = stem .. ".titan"
+        local code = [[
+            foreign function plus_one(input: int): int
+                return input + 1
+            end
+            function answer(): integer
+                return plus_one(41) as integer
+            end
+        ]]
+        local ok, err = pcall(function()
+            assert(util.set_file_contents(source, code))
+            local ast, parse_error = parse(code, source)
+            assert.truthy(ast, parse_error)
+            local _, errors = checker.check("header_path", ast, code, source)
+            assert.equal(0, #errors, table.concat(errors, "\n"))
+            local compiled, compile_error, object =
+                driver.compile("header_path", ast, source, {}, h.verbose)
+            assert.truthy(compiled, compile_error)
+            assert.equal("file", lfs.attributes(object, "mode"))
+            local generated = assert(util.get_file_contents(stem .. ".c"))
+            assert.match('#include "' .. stem .. '.ffi.h"', generated, 1, true)
+            assert.match('#include "' .. stem .. '.titan.h"', generated, 1, true)
+            local companion = assert(util.get_file_contents(stem .. ".titan.h"))
+            assert.match('#include "' .. stem .. '.ffi.h"', companion, 1, true)
+        end)
+        for _, extension in ipairs({ ".titan", ".c", ".o", ".ffi.h", ".titan.h" }) do
+            os.remove(stem .. extension)
+        end
+        assert(lfs.rmdir(root))
+        if not ok then error(err, 0) end
+    end)
+
     it("uses quoted includes for local foreign headers", function()
         local suffix = os.tmpname():match("[^/]+$"):gsub("%W", "_")
         local header = "tmp_titan_ffi_local_header_" .. suffix .. ".h"

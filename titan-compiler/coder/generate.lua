@@ -925,15 +925,15 @@ function coder.generate(modname, ast, static_deps, abi, emit_line_directives, op
         or (ast._ffi_header and ast._ffi_header.filename)
         or (modname:gsub("[.]", "/") .. ".ffi.h")
     local foreignimports = {
-        "#include " .. c_string_literal(ffi_header),
+        "#include " .. c_header_name(ffi_header),
     }
     if ast._foreign_header_output then
         foreignimports[#foreignimports + 1] =
-            "#include " .. c_string_literal(ast._foreign_header_output)
+            "#include " .. c_header_name(ast._foreign_header_output)
     else
         for _, header in ipairs(tlcontext.source_foreign_headers) do
             foreignimports[#foreignimports + 1] =
-                "#include " .. c_string_literal(header)
+                "#include " .. c_header_name(header)
         end
     end
 
