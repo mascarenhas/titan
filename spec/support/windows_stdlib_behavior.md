@@ -30,6 +30,9 @@ compilation. It must contain the native compiler, complete `titan.dll`, stdlib
 shims, matching controlled Lua, and native DLL dependencies/import libraries.
 The workspace and its logs remain available for inspection. Test compilation
 uses `-O0` by default on Windows; provider optimization is recorded separately.
+The aggregate launcher reserves 8 MiB of stack, matching the ordinary Unix
+main-thread budget for the unchanged deep-recursion tests at `-O0`. This is a
+test resource setting; production launcher defaults remain unchanged.
 
 Both platforms accept `TITAN_FILTER` for focused execution after all owners
 compile. An acceptance run has no filter. The output auditor verifies every
@@ -76,6 +79,10 @@ fixtures compile before execution on every platform. Fresh compiler/Lua child
 probes use `support.command`, which reuses the compiler's existing host argv
 transport, resolves the selected SDK's tools, restores cwd/environment, writes
 multiline Lua probes to owned files, and preserves native Windows exit bits.
+Windows child programs receive byte-for-byte copies of the validated SDK's
+runtime DLLs beside their executables. The test provider path keeps the SDK
+first and retains the normal executable-relative defaults with `;;`; each
+child's existing workspace cleanup also removes its DLL copies.
 
 ## Remaining platform boundaries
 

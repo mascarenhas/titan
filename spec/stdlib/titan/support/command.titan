@@ -116,12 +116,12 @@ local function helper_functions(): Helpers
       end
 
       local function remove_tree(path)
-        local attributes, message, code = lfs.symlinkattributes(path)
-        if not attributes then
+        local mode, message, code = lfs.symlinkattributes(path, "mode")
+        if not mode then
           if code == 2 then return end
           error(message, 0)
         end
-        if attributes.mode == "directory" then
+        if mode == "directory" then
           for entry in lfs.dir(path) do
             if entry ~= "." and entry ~= ".." then
               remove_tree(platform.join(path, entry))
@@ -130,6 +130,22 @@ local function helper_functions(): Helpers
           assert(lfs.rmdir(path))
         else
           assert(os.remove(path))
+        end
+      end
+
+      local function copy_windows_runtime(directory)
+        local sdk = assert(os.getenv("TITAN_TEST_SDK_ROOT"),
+          "Windows child fixtures require TITAN_TEST_SDK_ROOT")
+        local source = platform.join(sdk, "bin")
+        local destination = platform.join(directory, "bin")
+        -- The controlled loader resolves native dependencies beside the EXE.
+        -- Each child owns copies from the same validated SDK as its compiler;
+        -- removing the fixture workspace also removes these runtime DLLs.
+        for name in lfs.dir(source) do
+          if name:lower():match("%.dll$") then
+            local contents = assert(compiler_io:read_file(platform.join(source, name)))
+            assert(compiler_io:write_file(platform.join(destination, name), contents))
+          end
         end
       end
 
@@ -157,7 +173,11 @@ local function helper_functions(): Helpers
           if extra then
             for index = 1, #extra do argv[#argv + 1] = extra[index] end
           end
-          return run(true, argv, directory)
+          local output, why, status = run(true, argv, directory)
+          if platform.windows and why == "exit" and status == 0 then
+            copy_windows_runtime(directory)
+          end
+          return output, why, status
         end,
         program = function(directory, name)
           return platform.join(directory,

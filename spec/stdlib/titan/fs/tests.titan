@@ -381,6 +381,15 @@ function test_fs_paths_metadata_locations_and_errors(context: test.Context)
                 fs.lstat(missing .. "/child") == nil,
                 "missing metadata parent did not return nil")
 
+    local metadata_error_path = target .. "/child"
+    if common.is_windows() then
+      -- Windows reports UV_ENOENT for a child below an ordinary file. Use a
+      -- path beyond its UTF-16 limit to retain the native non-ENOENT oracle.
+      test.assert(fs.stat(metadata_error_path) == nil and
+                  fs.lstat(metadata_error_path) == nil,
+                  "Windows missing metadata component did not return nil")
+      metadata_error_path = root .. "/" .. strings.rep("x", 40000)
+    end
     local expect_metadata_error: function (function (): (), string): () =
       function (action: function (): (), operation: string)
         local failed = false
@@ -390,15 +399,19 @@ function test_fs_paths_metadata_locations_and_errors(context: test.Context)
           local failure = error as async.OperationError
           test.assert(failure.operation == operation,
                       "metadata failure reported the wrong operation")
+          if common.is_windows() then
+            test.assert(failure.name == "ENAMETOOLONG",
+                        "overlong Windows metadata path lost its native error")
+          end
           failed = true
         end
         test.assert(failed, "metadata swallowed a non-ENOENT failure")
       end
     expect_metadata_error(function ()
-      fs.stat(target .. "/child")
+      fs.stat(metadata_error_path)
     end, "fs.stat")
     expect_metadata_error(function ()
-      fs.lstat(target .. "/child")
+      fs.lstat(metadata_error_path)
     end, "fs.lstat")
     expect_failure(function ()
       fs.list(missing)

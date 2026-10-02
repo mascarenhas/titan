@@ -307,6 +307,10 @@ native child executables, and logs stay inside that workspace. The runner uses
 the bounded Job Object supervisor and drains both output streams, including
 when the aggregate fails or times out. `TITAN_TEST_TIMEOUT` defaults to 300
 seconds. Keep the complete native exit status, including values above 255.
+The test launcher reserves 8 MiB of stack so the common deep-recursion oracles
+also run with `-O0` providers. Fresh-process fixtures copy the selected SDK's
+runtime DLLs beside their child executables and preserve normal
+executable-relative provider lookup. Both settings are private to the harness.
 
 The output audit reports selected, passed, skipped, and failed cases, checks
 that every owner executed, and requires each exclusion to name its semantic,

@@ -110,7 +110,9 @@ if [[ $mode == build ]]; then
   # Public fixture calls use the same DLL instances as the canonical provider;
   # these import libraries are final-link inputs, never Titan -X providers.
   [[ -f $work/sdk/lib/libsqlite3.dll.a ]]
-  export TITAN_EXTRA_LDFLAGS="${TITAN_EXTRA_LDFLAGS:-} \"$winprefix/lib/libsqlite3.dll.a\" -luser32"
+  # Match the ordinary Unix main-thread budget for unchanged deep-recursion
+  # oracles at -O0; CLANG64 otherwise gives launchers only a 1 MiB reserve.
+  export TITAN_EXTRA_LDFLAGS="${TITAN_EXTRA_LDFLAGS:-} \"$winprefix/lib/libsqlite3.dll.a\" -luser32 -Wl,--stack,8388608"
   # Parse configured tool/flag strings without evaluating command substitutions.
   for name in CC TITAN_EXTRA_CFLAGS TITAN_EXTRA_CPPFLAGS TITAN_EXTRA_LDFLAGS; do
     perl -MText::ParseWords=shellwords -e '
@@ -163,7 +165,9 @@ rm -f "$work/stdout.log" "$work/stderr.log"
 source "$work/compiler.env"
 winprefix=$(cygpath -m "$work/sdk")
 export TITAN_ROCKS_ROOT="$winprefix" TITAN_RUNTIME_PREBUILT=1 TITAN_JOBS=1
-export TITAN_PROBE_CACHE_DISABLE=1 TITAN_PATH_0_6="$winprefix/lib/titan/0.6"
+# Preserve the controlled provider first and each child launchers default
+# executable-relative provider directory for fresh-process fixture programs.
+export TITAN_PROBE_CACHE_DISABLE=1 TITAN_PATH_0_6="$winprefix/lib/titan/0.6;;"
 unset LUA_PATH LUA_CPATH LUA_PATH_5_5 LUA_CPATH_5_5 LUA_INIT LUA_INIT_5_5 ROCKS_TREE
 export PATH="$work/sdk/bin:$PATH"
 export TITAN_TEST_ROOT=$(cygpath -w "$work/scratch")
@@ -244,11 +248,13 @@ powershell.exe -NoProfile -NonInteractive -Command '
       }
     } finally { $process.Dispose() }
   }
+  if ($status -ne 0) {
+    [Console]::Error.WriteLine("Native suite/supervisor failed with Windows exit code " + $status + ".")
+  }
   if (@(Get-ChildItem -Force -LiteralPath $env:TITAN_TEST_ROOT).Count -ne 0) {
     throw "Public behavior cases left files in their owned scratch directory."
   }
   if ($status -ne 0) {
-    [Console]::Error.WriteLine("Native suite/supervisor failed with Windows exit code " + $status + ".")
     # Bash keeps only eight exit bits; a native code such as 256 is still failure.
     exit 1
   }
