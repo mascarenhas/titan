@@ -548,7 +548,7 @@ run) live under `spec/coder/`. Standard-library API and runtime behavior lives a
 in the unified native executable without LuaCov. There are no Lua files under
 `spec/stdlib/` and no root-level standard-library `*_boundary_spec.lua` files.
 Fresh-process public behavior belongs in the owning native Titan module: a
-compiled parent may launch a focused standalone fixture through C99 `system`,
+compiled parent may launch a focused standalone fixture through `support.command`,
 receive its explicit result through a temporary file, and remove that file with
 `defer`. Do not retain implementation/codegen inspection, provider-cache
 internals, or redundant FFI/interposition checks as library behavior. Do not put a
@@ -617,7 +617,9 @@ Helpers pull in luassert explicitly (`require 'luassert'`) because a
 command lines and keep generated `.c` files.
 
 Native standard-library behavior lives in 25 module-owned roots under
-`spec/stdlib/titan/`. `TITAN_STDLIB_TEST_ROOTS` names every root explicitly;
+`spec/stdlib/titan/`. `TITAN_STDLIB_TEST_ROOTS` in
+`spec/support/stdlib_test_modules.mk` names every root explicitly and is shared
+by Linux, macOS, and native Windows;
 `make titan-stdlib-test-build` builds the explicit test/support object DAG in
 `spec/support/stdlib_test_modules.mk` with `titanc -c --test --incremental`,
 then invokes `titanc --test --incremental --no-uv-bootstrap` from
@@ -637,11 +639,20 @@ pattern but still compiles all 25 roots. The separate build/run targets let CI
 and ASan reuse one executable for several fresh filtered processes without
 reintroducing native groups.
 
+Windows exposes the same leaf targets through `Makefile.windows` with an owned
+`TITAN_TEST_BUILD_DIR` on local NTFS and a copied validated SDK. Both platform
+runners audit named results, totals, and complete owner presence. Repository
+skips use concrete `platform: `, `capability: `, or `unsupported: ` reasons;
+`portability: ` records an unfinished fixture and fails the complete gate.
+Port every compile/link dependency before relying on a runtime skip. Keep
+filesystem, SQLite, and local watcher checks on NTFS, preserve the Windows Job
+Object supervisor and full exit status, and record the tested macOS architecture.
+
 The retained Busted specs own compiler, provider-publication, packaging, and
 native dependency/build gates; public standard-library host and process behavior
 belongs to the aggregate native executable. Its narrow parent-stdio probe is
 linked into the compiled parent, which launches standalone Titan children with
-C99 `system`; each child reports through a temporary result file removed by
+the argv-aware `support.command` helper; each child reports through a temporary result file removed by
 `defer`. `make rock-test` runs the retained Busted gates and then the aggregate
 native executable. There are no per-suite native scripts, named host group
 selectors, root standard-library boundary specs, or Busted wrappers around

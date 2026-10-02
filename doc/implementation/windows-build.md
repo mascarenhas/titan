@@ -281,11 +281,45 @@ file bytes, without promising crash atomicity or concurrent publication.
 Publication currently requires an ordinary SDK directory and ordinary internal
 parent directories; junction/symlink destinations fail validation.
 
-A complete native standard-library build and its behavior tests remain required
-before treating this workflow as a validated Windows distribution. Passing the
-runtime, launcher, or publication canaries alone is insufficient. The complete
-Windows standard-library gate is tracked in
-[issue #187](https://github.com/mascarenhas/titan/issues/187).
+## Shared native standard-library tests
+
+After publishing the current provider, run the complete common suite from
+CLANG64. Choose a disposable workspace on a local NTFS volume:
+
+```sh
+make -f Makefile.windows titan-stdlib-test-build \
+  PREFIX=/c/Titan/sdk TITAN_TEST_BUILD_DIR=/c/Titan/native-tests
+make -f Makefile.windows titan-stdlib-test-run \
+  PREFIX=/c/Titan/sdk TITAN_TEST_BUILD_DIR=/c/Titan/native-tests
+```
+
+`titan-stdlib-test` composes both steps. `TITAN_FILTER` selects a runtime Lua
+pattern without narrowing compilation; omit it for complete validation. The
+compatibility entrypoint `scripts/check_windows_stdlib_behavior.sh WORKSPACE SDK`
+also builds and runs the full shared suite. There is no separate Windows case
+allowlist: `spec/support/stdlib_test_modules.mk` supplies the same 25 explicit
+roots to all three platforms, including filesystem, SQLite, and local watchers.
+
+The build copies the supplied SDK and authored fixtures into its marked
+workspace, preserving the published SDK. It rejects unrelated existing
+directories and nonlocal or non-NTFS workspaces. Test outputs, scratch files,
+native child executables, and logs stay inside that workspace. The runner uses
+the bounded Job Object supervisor and drains both output streams, including
+when the aggregate fails or times out. `TITAN_TEST_TIMEOUT` defaults to 300
+seconds. Keep the complete native exit status, including values above 255.
+
+The output audit reports selected, passed, skipped, and failed cases, checks
+that every owner executed, and requires each exclusion to name its semantic,
+environment, or production-API reason. An unfinished fixture port fails the
+gate. Native C fixtures are compiled on Windows even when an individual
+platform-specific assertion is skipped. See the
+[shared harness contract](test-runner.md#platform-portability-and-complete-execution).
+
+A complete provider build and unfiltered behavior run remain required; runtime,
+launcher, or publication canaries alone are insufficient. Record the source
+revision, SDK identity, native OS/architecture, provider optimization, local
+filesystem, and classified skip reasons. Repeat the shared suite with both
+`-O0` and `-O3` providers when validating the Windows port.
 
 ## Experimental boundaries
 
