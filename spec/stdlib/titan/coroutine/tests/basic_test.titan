@@ -97,20 +97,20 @@ function test_uses_default_override_and_nil_fallback_tags(
 end
 
 function test_reports_running_and_normal_statuses(_context: test.Context)
-  local a: coroutine.Coro? = nil
-  local b: coroutine.Coro? = nil
+  local a: coroutine.Coroutine? = nil
+  local b: coroutine.Coroutine? = nil
   b = coroutine.create(function(_: value): value
-    test.assert((a as coroutine.Coro):status() == "normal")
-    test.assert((b as coroutine.Coro):status() == "running")
+    test.assert((a as coroutine.Coroutine):status() == "normal")
+    test.assert((b as coroutine.Coroutine):status() == "running")
     return "ok"
   end, "b")
   a = coroutine.create(function(_: value): value
-    return (b as coroutine.Coro):resume(nil, "b")
+    return (b as coroutine.Coroutine):resume(nil, "b")
   end, "a")
 
-  test.assert((a as coroutine.Coro):resume(nil, "a") == "ok")
-  test.assert((a as coroutine.Coro):status() == "dead")
-  test.assert((b as coroutine.Coro):status() == "dead")
+  test.assert((a as coroutine.Coroutine):resume(nil, "a") == "ok")
+  test.assert((a as coroutine.Coroutine):status() == "dead")
+  test.assert((b as coroutine.Coroutine):status() == "dead")
 end
 
 function test_raw_tag_mismatch_does_not_call_lua_eq(_context: test.Context)

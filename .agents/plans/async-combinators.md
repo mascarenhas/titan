@@ -522,7 +522,7 @@ timeout and test that boundary.
 
 Migrate all Task string-status uses in production sources, stdlib specs,
 packaging/production smokes, README, and quick tour to `as_string()` or the
-new predicates. Do not alter `coroutine.Coro:status()` string call sites.
+new predicates. Do not alter `coroutine.Coroutine:status()` string call sites.
 
 Update:
 

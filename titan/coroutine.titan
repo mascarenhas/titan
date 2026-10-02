@@ -8,20 +8,32 @@ foreign type VoidPointer = *void
 foreign type coro_entry_func = function (*lua_State, *Udata, *CClosure, TValue, *mco_coro): void
 
 foreign function coro_entry_trampoline(co: *mco_coro)
+  -- Foreign bodies cannot read Titan module constants. These are the C-array
+  -- indices corresponding to the first four owner uservalues below.
+  const THREAD_UV_INDEX = 0
+  const MODULE_UV_INDEX = 1
+  const ENTRY_UV_INDEX = 2
+  const CALLBACK_UV_INDEX = 3
   local owner = ffi.mco_get_user_data(co) as foreign *Udata
-  local T = ffi.lmacro_thvalue(owner.uv[0].uv)
-  local module = ffi.lmacro_uvalue(owner.uv[1].uv)
-  local callback = ffi.lmacro_clCvalue(owner.uv[2].uv)
-  local func = owner.uv[3].uv
+  local T = ffi.lmacro_thvalue(owner.uv[THREAD_UV_INDEX].uv)
+  local module = ffi.lmacro_uvalue(owner.uv[MODULE_UV_INDEX].uv)
+  local callback = ffi.lmacro_clCvalue(owner.uv[ENTRY_UV_INDEX].uv)
+  local func = owner.uv[CALLBACK_UV_INDEX].uv
   local entry = ffi.lmacro_pvalue(callback.upvalue[2]) as foreign coro_entry_func
   entry(T, module, nil, func, co)
 end
 
 local STACK_SIZE = 2 * 1024 * 1024
-local TITAN_CORO_OWNER_USERVALUES = 5
+local TITAN_CORO_OWNER_USERVALUES = 6
+local TITAN_CORO_THREAD_USERVALUE = 1
+local TITAN_CORO_MODULE_USERVALUE = 2
+local TITAN_CORO_ENTRY_USERVALUE = 3
+local TITAN_CORO_CALLBACK_USERVALUE = 4
+local TITAN_CORO_TRANSFER_USERVALUE = 5
+local TITAN_CORO_RECORD_USERVALUE = 6
 local runtime = foreign mco_runtime.new()
 
-record Coro
+record Coroutine
   local udata: value -- just for GC rooting
   local handle: foreign *mco_coro
   local default_tag: value
@@ -66,7 +78,7 @@ local function root_transfer(co: foreign *mco_coro, payload: value)
   ffi.lua_pushtvalue(L, owner)
   ffi.lua_pushtvalue(L, payload)
   local set = ffi.lua_setiuservalue(
-    L, -2, TITAN_CORO_OWNER_USERVALUES)
+    L, -2, TITAN_CORO_TRANSFER_USERVALUE)
   if set == 0 then
     raise "cannot set coroutine transfer root"
   end
@@ -190,7 +202,7 @@ local function yield_result_or_raise(co: foreign *mco_coro, tag: value): value
   return pop_transfer_or_raise(co, false)
 end
 
-function Coro:resume(arg: value, tag: value): value
+function Coroutine:resume(arg: value, tag: value): value
   local effective = effective_tag(self.default_tag, tag)
   local co = self.handle
   local source = transfer_source(co)
@@ -198,7 +210,7 @@ function Coro:resume(arg: value, tag: value): value
   return resume_result_or_raise(co, source, effective)
 end
 
-function Coro:error(err: value, tag: value): value
+function Coroutine:error(err: value, tag: value): value
   local effective = effective_tag(self.default_tag, tag)
   local co = self.handle
   local source = transfer_source(co)
@@ -206,7 +218,7 @@ function Coro:error(err: value, tag: value): value
   return resume_result_or_raise(co, source, effective)
 end
 
-function Coro:status(): string
+function Coroutine:status(): string
   local status = ffi.mco_status(self.handle)
   if status == ffi.MCO_SUSPENDED then
     return "suspended"
@@ -255,17 +267,23 @@ catch
   push_transfer(co, 0, error)
 end
 
-function create(func: function (value): (value), default_tag: value): Coro
+function create(func: function (value): (value), default_tag: value): Coroutine
+  local top = ffi.lua_gettop(L)
+  defer ffi.lua_settop(L, top)
+  if ffi.lua_checkstack(L, 2) == 0 then
+    raise "cannot reserve Lua stack for coroutine creation"
+  end
   local slot: foreign *(*mco_coro) = ffi.lua_newuserdatauv(
     L, foreign VoidPointer.sizeof, TITAN_CORO_OWNER_USERVALUES)
+  local owner_index = ffi.lua_gettop(L)
   local _ = ffi.titan_newthread(L)
-  ffi.lua_setiuservalue(L, -2, 1)
+  ffi.lua_setiuservalue(L, -2, TITAN_CORO_THREAD_USERVALUE)
   ffi.lua_pushtvalue(L, M as foreign *Udata)
-  ffi.lua_setiuservalue(L, -2, 2)
+  ffi.lua_setiuservalue(L, -2, TITAN_CORO_MODULE_USERVALUE)
   ffi.lua_pushtvalue(L, coro_entry)
-  ffi.lua_setiuservalue(L, -2, 3)
+  ffi.lua_setiuservalue(L, -2, TITAN_CORO_ENTRY_USERVALUE)
   ffi.lua_pushtvalue(L, func)
-  ffi.lua_setiuservalue(L, -2, 4)
+  ffi.lua_setiuservalue(L, -2, TITAN_CORO_CALLBACK_USERVALUE)
   ffi.luaL_setmetatable(L, "titan.coroutine")
 
   local desc = ffi.mco_desc_init(nil, STACK_SIZE)
@@ -278,7 +296,28 @@ function create(func: function (value): (value), default_tag: value): Coro
     raise "could not create coroutine: " .. (ffi.mco_result_description(res) as string)
   end
 
-  return Coro.new(ffi.lua_totvalue(L, -1), slot[0], default_tag)
+  local co = Coroutine.new(ffi.lua_totvalue(L, owner_index), slot[0], default_tag)
+  ffi.lua_pushtvalue(L, co)
+  if ffi.lua_setiuservalue(L, owner_index, TITAN_CORO_RECORD_USERVALUE) == 0 then
+    raise "cannot set coroutine record root"
+  end
+  return co
+end
+
+function running(): Coroutine?
+  local coro = ffi.mco_get_user_data(runtime.current_co) as foreign *Udata
+  if coro then
+    local top = ffi.lua_gettop(L)
+    defer ffi.lua_settop(L, top)
+    if ffi.lua_checkstack(L, 2) == 0 then
+      raise "cannot reserve Lua stack for running coroutine lookup"
+    end
+    ffi.lua_pushtvalue(L, coro)
+    ffi.lua_getiuservalue(L, -1, TITAN_CORO_RECORD_USERVALUE)
+    return ffi.lua_totvalue(L, -1) as value
+  end
+
+  return nil
 end
 
 do

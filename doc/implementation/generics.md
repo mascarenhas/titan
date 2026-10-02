@@ -839,7 +839,7 @@ union TaskStatus<|A, B|>
 end
 
 record Task<|A, B|>
-    local root: coroutine.Coro
+    local root: coroutine.Coroutine
     local runtime: Runtime
     local state: TaskStatus<|A, B|>
     local cancel_value: CancellationReason<|B|>?

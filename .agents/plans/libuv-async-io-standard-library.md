@@ -457,7 +457,7 @@ Runtime (module-local record + opaque loop-wrapper record)
   +-- loop wrapper ----------> local `*uv_loop_t` pointer
   |                              +-- rooted native-storage userdata
   +-- shared UV_TAG reference
-  +-- typed ownership lists -> Task ----------> root coroutine.Coro
+  +-- typed ownership lists -> Task ----------> root coroutine.Coroutine
   |                           |                  +-- coroutine handle userdata
   |                           +-- state/result   +-- child Lua thread
   |                           +-- operation epoch+-- entry closure/function
@@ -492,7 +492,7 @@ it still does not drive or resume anything.
 
 An opaque `Task` contains:
 
-- root `coroutine.Coro`;
+- root `coroutine.Coroutine`;
 - operation epoch/generation number;
 - state: `new`, `ready`, `running`, `waiting`, `succeeded`, `failed`, or
   `cancelled`;
@@ -1238,7 +1238,7 @@ in the compiled public interface.
 
 ```titan
 record Task
-  local root: coroutine.Coro
+  local root: coroutine.Coroutine
 end
 
 record Error

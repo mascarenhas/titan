@@ -29,16 +29,17 @@ standard Lua coroutine table; Titan's module does not replace it.
 The Titan interface is:
 
 ```lua
-record Coro
+record Coroutine
   local udata: value
   local handle: *mco.mco_coro
   local default_tag: value
 end
 
-function create(func: (value) -> value, default_tag: value): Coro
-function Coro:resume(arg: value, tag: value): value
-function Coro:error(err: value, tag: value): value
-function Coro:status(): string
+function create(func: (value) -> value, default_tag: value): Coroutine
+function running(): Coroutine?
+function Coroutine:resume(arg: value, tag: value): value
+function Coroutine:error(err: value, tag: value): value
+function Coroutine:status(): string
 
 function yield(arg: value, tag: value): value
 function is_yieldable(tag: value): boolean
@@ -56,7 +57,7 @@ for `value == value`: numbers compare by Lua numeric equality, strings
 by contents, booleans by value, and tables, userdata, threads, and
 functions by identity. Tag comparison does not call metamethods.
 
-`default_tag` is only a convenience stored on a `Coro`. When `resume` or
+`default_tag` is only a convenience stored on a `Coroutine`. When `resume` or
 `error` receives `nil` as its explicit tag, it uses `self.default_tag`.
 If the effective tag is still `nil`, the method raises in the caller.
 `yield` and `is_yieldable` do not use any default tag and require an
@@ -99,8 +100,26 @@ The function has type `(value) -> value`; the first successful
 `resume(arg, tag)` calls `func(arg)` on the coroutine's own Lua thread.
 
 `default_tag` may be omitted or nil. A non-nil default tag is stored and
-used only by `Coro:resume` and `Coro:error` when their tag argument is
+used only by `Coroutine:resume` and `Coroutine:error` when their tag argument is
 nil.
+
+### Finding the running coroutine
+
+`coroutine.running()` takes no arguments and returns the currently executing
+Titan `Coroutine`, or `nil` when no Titan coroutine is executing. It returns
+the same public record as `create`, preserving handle identity and the usual
+`Coroutine` methods.
+
+Nested resumes make the innermost executing coroutine current. A yield,
+normal return, or uncaught error restores the caller's active coroutine, or
+leaves no current coroutine if control returns outside Titan coroutines.
+After a tagged yield skips inner coroutines, resuming the suspended handler
+makes the restored innermost coroutine current again.
+
+Lua callers use `require "titan.coroutine"`; this lookup observes Titan
+coroutines independently of Lua's own `coroutine.running()`. It also differs
+from `async.running()`, which returns the current Task and raises outside a
+Task. Use the Task API for scheduling and async I/O.
 
 ### Resuming normally
 
@@ -186,10 +205,10 @@ direct-resume case.
 ## Module shape
 
 `coroutine` is an ordinary Titan source module installed with the
-compiler. It owns the public `Coro` record, default-tag policy,
-status-string mapping, result-code checks, success/error payload
-convention, Lua-thread/userdata setup, and Titan/Lua-facing entry
-wrappers. Its implementation imports minicoro and private runtime
+compiler. It owns the public `Coroutine` record, default-tag policy,
+current-coroutine lookup, status-string mapping, result-code checks,
+success/error payload convention, Lua-thread/userdata setup, and Titan/Lua-facing
+entry wrappers. Its implementation imports minicoro and private runtime
 headers:
 
 ```lua
@@ -217,6 +236,12 @@ allocates one GC-owned runtime as a local top-level module variable. This keeps
 current-coroutine and ASan bookkeeping in traced per-state storage without a
 Lua-registry lookup on each coroutine operation.
 
+`running` reads that module-local runtime's `current_co`, recovers the private
+allocation owner with `mco_get_user_data`, and returns the public record saved
+in the owner's sixth uservalue. It reserves two Lua stack slots, reads the
+record with `lua_getiuservalue`, copies it into a traced Titan value, and
+restores the saved stack top. A null current-coroutine pointer yields nil.
+
 The split is the important point. `mco_resume`, `mco_yield`,
 `mco_push`, and `mco_pop` return `mco_result`, not the user's payload.
 The Titan layer checks those results and raises a Titan error with
@@ -232,12 +257,14 @@ simply the injected error.
 ```lua
 local runtime = mco.mco_runtime.new()
 
-function create(func: (value) -> value, default_tag: value): Coro
+function create(func: (value) -> value, default_tag: value): Coroutine
   -- after creating the owner userdata:
   local desc = mco.mco_desc_init(nil, STACK_SIZE)
   desc.runtime = runtime
   -- set desc.func/user_data, then let mco_create fill slot
-  return Coro.new(ffi.lua_totvalue(L, -1), slot[0], default_tag)
+  local co = Coroutine.new(ffi.lua_totvalue(L, -1), slot[0], default_tag)
+  -- store co in the owner's sixth uservalue with lua_setiuservalue
+  return co
 end
 
 local function effective_tag(default_tag: value, explicit_tag: value): value
@@ -264,7 +291,7 @@ local function transfer_source(co: *mco.mco_coro): *mco.mco_coro
   return co
 end
 
-function Coro:resume(arg: value, tag: value): value
+function Coroutine:resume(arg: value, tag: value): value
   local t = effective_tag(self.default_tag, tag)
   local co = self.handle
   local source = transfer_source(co)
@@ -272,7 +299,7 @@ function Coro:resume(arg: value, tag: value): value
   return resume_result_or_raise(co, source, t)
 end
 
-function Coro:error(err: value, tag: value): value
+function Coroutine:error(err: value, tag: value): value
   local t = effective_tag(self.default_tag, tag)
   local co = self.handle
   local source = transfer_source(co)
@@ -312,7 +339,7 @@ string under `TITAN_BACKTRACE_KEY`, sets Titan's one-shot trace pin, and
 re-raises the same payload. The pin is still required because that final
 raise would otherwise replace the combined traceback.
 
-The raise in `yield` is different. When `Coro:error` injects an error
+The raise in `yield` is different. When `Coroutine:error` injects an error
 into a suspended yield, that error is intentionally raised at the yield
 site. If it escapes the callback, the entry boundary then treats it like
 any other uncaught coroutine-body error and returns a staged traceback to
@@ -371,7 +398,7 @@ C `TValue` before passing it to `mco_resume`, `mco_yield`, or
 
 ## Coroutine object representation
 
-The exported `Coro` record is opaque. Its fields are local to `coroutine`:
+The exported `Coroutine` record is opaque. Its fields are local to `coroutine`:
 
 * `udata: value` roots the full owner userdata whose raw payload is an
   `mco_coro *` slot.
@@ -385,14 +412,21 @@ unwrapping a `value` for every `resume`, `error`, or `status` call. Only
 the owner userdata's `__gc` finalizer pushes its userdata argument,
 recovers the pointer with `lua_touserdata`, and calls `mco_destroy`.
 
-The owner userdata has five uservalues that root:
+The owner userdata has six uservalues that root:
 
 1. the Lua thread created by `lua_newthread`;
 2. the coroutine module state;
 3. the native Titan entry closure;
 4. the callback function value passed to `create`;
 5. the one pending transfer payload copied through that owner's minicoro
-   storage.
+   storage;
+6. the public `Coroutine` record returned by `create` and `running`.
+
+Named `TITAN_CORO_*_USERVALUE` constants select these one-based Lua API slots.
+The foreign trampoline uses named zero-based C array indices for the first
+four slots. The record and its owner form an ordinary GC-traced cycle, which
+Lua can collect when neither is reachable. The transfer root remains slot 5;
+clearing a transfer does not clear the public record in slot 6.
 
 The module slot is a real full-userdata root, not a boxed native pointer.
 `M` is a native `Udata *`, which the coder treats specially when it crosses a
@@ -415,7 +449,7 @@ userdata uservalue, table, registry entry, or another traced object.
 
 There is no private registry root for live coroutine handles. A
 reachable coroutine stays alive through ordinary Lua ownership: the
-user's `Coro` record roots the owner userdata through `udata`, the
+user's `Coroutine` record roots the owner userdata through `udata`, the
 userdata roots the child thread and callback through its uservalues, and
 nested coroutine chains keep their outer Titan frames suspended rather
 than unwound.
@@ -431,14 +465,14 @@ The runtime transfers one `value` at a time in each direction. The
 control transfer is stackful: a `yield` switches C stacks without
 unwinding the Lua/Titan call stack that called `yield`. Therefore:
 
-* the values passed as `arg` to `Coro:resume` and `coroutine.yield`, and as
-  `err` to `Coro:error`, retain their upstream allocation/result/semantic/VM
+* the values passed as `arg` to `Coroutine:resume` and `coroutine.yield`, and as
+  `err` to `Coroutine:error`, retain their upstream allocation/result/semantic/VM
   provenance while the preserved caller chain is suspended;
 * a parameter gets a separate traced home only when ordinary assignment or
   setjmp-spill analysis requires one; native argument transport itself remains
   C-only; and
 * active non-nil tags are rooted by that preserved upstream provenance or by
-  the `Coro` record's `default_tag` field.
+  the `Coroutine` record's `default_tag` field.
 
 This is the normal no-copy Titan calling convention: minicoro preserves the
 native caller chain and therefore preserves the existing traced owners without
@@ -476,13 +510,13 @@ barrier from Lua. Coroutine transfer rooting intentionally stays on that
 public path and does not write `Udata->uv[]` directly.
 
 The implementation must be tested in both incremental and generational
-GC modes. In particular, an old `Coro` record must safely keep a young
+GC modes. In particular, an old `Coroutine` record must safely keep a young
 owner userdata reachable, and that userdata's uservalues must keep a
 young Lua thread, module state, entry closure, callback, and pending payload
 reachable. A focused transfer test forces a full collection after
 `mco_resume` returns and before the result pop, then verifies both that a fresh
 finalizable payload survives with its identity intact and that it becomes
-collectable after the pop clears slot 5. The `Coro` record itself keeps the
+collectable after the pop clears slot 5. The `Coroutine` record itself keeps the
 default tag reachable.
 
 ## Calling the entry function
@@ -542,7 +576,7 @@ uses the same one-shot pin mechanism as Titan generated code's bare
 re-raise, but the trace string being pinned is the coroutine trace plus
 the resume/error propagation trace.
 
-An error injected by `Coro:error` is different from an uncaught callback
+An error injected by `Coroutine:error` is different from an uncaught callback
 error: it is raised at the target `yield` site. If target code catches
 it, the coroutine continues. If it escapes, the same uncaught-error rule
 above applies.
@@ -696,8 +730,11 @@ Add Titan runtime/coder coverage for:
   coroutine;
 * `is_yieldable` outside a coroutine, inside a coroutine with no matching
   handler, and inside a coroutine with a matching outer handler;
+* `running` returning nil outside Titan coroutines, preserving handle identity
+  across yield/resume, nested tagged stack restoration and error unwinding,
+  and Lua-host identity and GC retention;
 * normal callback return, dead status, and resume/error after dead;
-* `Coro:error` into a suspended yield, catch inside the coroutine,
+* `Coroutine:error` into a suspended yield, catch inside the coroutine,
   uncaught injected error, and injected error before first resume;
 * uncaught callback errors, preserved coroutine traceback plus propagation
   traceback, and

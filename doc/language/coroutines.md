@@ -18,19 +18,20 @@ This does not replace Lua's standard coroutine library:
 ## API
 
 ```text
-record Coro
+record Coroutine
 end
 
-function create(func: function (value): (value), default_tag: value): Coro
-function Coro:resume(arg: value, tag: value): value
-function Coro:error(err: value, tag: value): value
-function Coro:status(): string
+function create(func: function (value): (value), default_tag: value): Coroutine
+function running(): Coroutine?
+function Coroutine:resume(arg: value, tag: value): value
+function Coroutine:error(err: value, tag: value): value
+function Coroutine:status(): string
 
 function yield(arg: value, tag: value): value
 function is_yieldable(tag: value): boolean
 ```
 
-The `Coro` record is opaque. Its handle and default tag are private to
+The `Coroutine` record is opaque. Its handle and default tag are private to
 the `coroutine` module.
 
 Titan's ordinary argument adjustment makes the second argument to
@@ -39,6 +40,33 @@ Titan's ordinary argument adjustment makes the second argument to
 
 Payloads are ordinary `value`s, so `arg`, `err`, yielded values, and
 returned values may be `nil`. Tags must be non-nil.
+
+## Currently Running Coroutine
+
+`coroutine.running()` returns the currently executing Titan `Coroutine`, or
+`nil` when no Titan coroutine is executing. It takes no arguments and returns
+the same record as `create`, so the result can be compared by identity with a
+saved handle and used with the ordinary `Coroutine` methods.
+
+In nested resumes it returns the innermost executing coroutine. When that
+coroutine yields, returns, or raises an uncaught error, it reports the caller's
+active Titan coroutine, or `nil` if control has returned outside Titan
+coroutines. A tagged yield that skips several coroutines follows the same
+rule; resuming the suspended handler makes the restored innermost coroutine
+current again.
+
+```titan
+local coroutine = import "coroutine"
+
+function running_status(): string
+    local co? = coroutine.running()
+    if co == nil then return "none" end
+    return co:status()  -- "running"
+end
+```
+
+Lua code uses `require "titan.coroutine"` to call this function. It observes
+Titan coroutines, independently of Lua's own `coroutine.running()`.
 
 ## Tags
 
