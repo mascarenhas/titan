@@ -2,8 +2,8 @@
 
 The `coroutine` standard module is split deliberately:
 
-* `titan/coroutine.titan` owns the public API and policy: tag defaults, status
-  strings, result-code checks, `resume` versus `error`, the
+* `titan/coroutine.titan` owns the public API and policy: tag defaults, current
+  coroutine lookup, status strings, result-code checks, `resume` versus `error`, the
   success/error payload convention, Lua-thread/userdata setup, traceback
   handoff, and the transfer choreography around minicoro.
 * `titan-runtime/minicoro.c` owns only the pieces that still need C:
@@ -169,6 +169,9 @@ The helper stores live values in ordinary Lua roots:
 * its fifth uservalue roots the one pending payload copied through that
   coroutine's minicoro storage. The helper writes it before the payload push
   and clears it only after the payload has been removed and stack-anchored;
+* its sixth uservalue roots the public `Coroutine` record so `running()` can
+  recover that exact handle. The record and owner form an ordinary traced
+  cycle, which Lua can collect when neither is reachable;
 * when the entry point finishes, its child-thread frame roots the final
   return/error payload until `push_transfer` installs that fifth-userdata
   root. It may then stage any captured traceback and clear the dead child
@@ -216,9 +219,12 @@ not been established.
 
 ## Entry Function
 
-Each coroutine owner userdata holds five uservalues: the `lua_newthread`
+Each coroutine owner userdata holds six uservalues: the `lua_newthread`
 thread, the owning module state, the native Titan entry closure, the callback
-value, and the pending transfer root. Creation stores the userdata pointer in
+value, the pending transfer root, and the public `Coroutine` record. Named
+`TITAN_CORO_*_USERVALUE` constants select these one-based Lua API slots; the
+foreign trampoline uses named zero-based C array indices for the first four.
+Creation stores the userdata pointer in
 `mco_coro->user_data` and assigns the source-defined
 `coro_entry_trampoline` foreign function directly to the minicoro descriptor's
 `void (*)(mco_coro *)` field.
@@ -293,6 +299,25 @@ The pending-transfer update likewise does not belong to that C surface:
 `lua_settop` directly, with Titan's existing `lua_pushtvalue` support bridge
 for raw `TValue` pushes. The runtime header and archive therefore export neither
 `titan_coro_root_transfer` nor `titan_coro_clear_transfer`.
+
+## Current Coroutine Lookup
+
+`running(): Coroutine?` observes the module-local `runtime.current_co`.
+Minicoro updates that pointer during resume, tagged yield, stack restoration,
+and entry completion, so the lookup needs no separate current-coroutine
+registry or saved module variable. A null pointer means no Titan coroutine is
+executing; `mco_get_user_data(NULL)` returns null and the public result is nil.
+
+`create` stores its newly constructed public `Coroutine` record in the
+allocation owner's sixth uservalue with `lua_setiuservalue`, which supplies
+the GC write barrier. It reserves two temporary Lua stack slots and restores
+the saved entry top with `defer`; an absolute owner index remains valid across
+record allocation and stack relocation. `running` recovers the owner with
+`mco_get_user_data`, reserves two stack slots, pushes the owner, reads its
+sixth uservalue with `lua_getiuservalue`, and copies the result into a traced
+Titan return value before restoring the saved top. It neither allocates a
+replacement record nor returns the private owner userdata. Lua callers observe
+the same nominal record and identity as direct Titan callers.
 
 ## Tagged Minicoro
 

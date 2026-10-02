@@ -1,0 +1,109 @@
+function test_running_returns_nil_outside_coroutine(_context: test.Context)
+  test.assert(coroutine.running() == nil)
+  local co = coroutine.create(function(_: value): value
+    return nil
+  end, "running")
+  test.assert(coroutine.running() == nil, "creation changed running coroutine")
+  co:resume(nil)
+  test.assert(coroutine.running() == nil, "return left a running coroutine")
+end
+
+function test_running_returns_same_handle_across_yield(_context: test.Context)
+  local co: coroutine.Coroutine?
+  co = coroutine.create(function(_: value): value
+    test.assert(coroutine.running() == co, "running returned a different handle")
+    test.assert(coroutine.running():status() == "running")
+    coroutine.yield("paused", "running")
+    test.assert(coroutine.running() == co, "resume changed running handle")
+    return coroutine.running()
+  end, "running")
+  test.assert(co:resume(nil) == "paused")
+  test.assert(coroutine.running() == nil, "yield left a running coroutine")
+  test.assert(co:resume(nil) == co, "returned running handle lost identity")
+  test.assert(coroutine.running() == nil)
+end
+
+function test_running_tracks_nested_tagged_yield(_context: test.Context)
+  local outer: coroutine.Coroutine?
+  local inner: coroutine.Coroutine?
+  inner = coroutine.create(function(_: value): value
+    test.assert(coroutine.running() == inner, "inner coroutine was not current")
+    coroutine.yield("paused", "outer")
+    test.assert(coroutine.running() == inner, "stack restoration lost inner handle")
+    return "done"
+  end, "inner")
+  outer = coroutine.create(function(_: value): value
+    test.assert(coroutine.running() == outer, "outer coroutine was not current")
+    local result = inner:resume(nil)
+    test.assert(coroutine.running() == outer, "inner return did not restore outer")
+    return result
+  end, "outer")
+  test.assert(outer:resume(nil) == "paused")
+  test.assert(coroutine.running() == nil, "tagged yield left inner current")
+  test.assert(outer:resume(nil) == "done")
+  test.assert(coroutine.running() == nil)
+end
+
+function test_running_restores_caller_after_error(_context: test.Context)
+  local outer: coroutine.Coroutine?
+  local inner: coroutine.Coroutine?
+  inner = coroutine.create(function(_: value): value
+    test.assert(coroutine.running() == inner)
+    raise "running failure"
+  end, "inner")
+  outer = coroutine.create(function(_: value): value
+    local caught = false
+    do
+      inner:resume(nil)
+    catch
+      test.assert(error == "running failure")
+      test.assert(coroutine.running() == outer, "error did not restore outer")
+      caught = true
+    end
+    test.assert(caught, "inner failure was not caught")
+    raise "outer failure"
+  end, "outer")
+  local caught = false
+  do
+    outer:resume(nil)
+  catch
+    test.assert(error == "outer failure")
+    test.assert(coroutine.running() == nil, "error left a running coroutine")
+    caught = true
+  end
+  test.assert(caught, "outer failure was not caught")
+end
+
+function test_running_lua_host_preserves_identity(_context: test.Context)
+  assert_coroutine_lua_probe([==[
+    local coroutine = require "titan.coroutine"
+    assert(coroutine.running() == nil)
+    local co
+    co = coroutine.create(function()
+      assert(rawequal(coroutine.running(), co))
+      collectgarbage("collect")
+      assert(rawequal(coroutine.running(), co))
+      coroutine.yield("paused", "running")
+      assert(rawequal(coroutine.running(), co))
+      return coroutine.running()
+    end, "running")
+    assert(coroutine.running() == nil)
+    assert(co:resume(nil) == "paused")
+    assert(coroutine.running() == nil)
+    assert(rawequal(co:resume(nil), co))
+    assert(coroutine.running() == nil)
+
+    -- Keep only the handle returned by running(), without a callback capture.
+    co = coroutine.create(function()
+      coroutine.yield(coroutine.running(), "running")
+      return coroutine.running()
+    end, "running")
+    local current = co:resume(nil)
+    assert(rawequal(current, co))
+    co = nil
+    collectgarbage("collect")
+    assert(current:status() == "suspended")
+    assert(rawequal(current:resume(nil), current))
+    assert(coroutine.running() == nil)
+  ]==], "Lua-host running identity probe")
+end
