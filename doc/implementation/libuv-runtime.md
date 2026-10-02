@@ -47,7 +47,7 @@ loop thread. Titan records are never accessed from those workers.
 
 ## Coroutine protocol
 
-All Tasks are Titan `coroutine.Coro` values with one private module-identity
+All Tasks are Titan `coroutine.Coroutine` values with one private module-identity
 tag. A Task-to-runtime transfer is a local `Call` union. Every variant
 represents one suspension action and carries one local record containing its
 ordinary parameters. A one-shot variant normally submits one callback-taking

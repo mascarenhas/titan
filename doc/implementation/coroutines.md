@@ -46,10 +46,10 @@ foreign import "lauxlib.h"
 foreign import "titan/ffi.h"
 ```
 
-The exported `Coro` record has local fields:
+The exported `Coroutine` record has local fields:
 
 ```titan
-record Coro
+record Coroutine
   local udata: value
   local handle: foreign *mco_coro
   local default_tag: value
@@ -87,12 +87,12 @@ That object is allocated by the Titan module initializer and stored in a
 GC-traced module slot, so the hot path does not perform a Lua-registry table
 lookup. User payloads are transported separately:
 
-1. `Coro:resume` reads its private, typed `mco_coro *` handle directly,
+1. `Coroutine:resume` reads its private, typed `mco_coro *` handle directly,
    selects the current transfer source (`co->stacked_co` when present,
    otherwise `co`), stores `payload=arg` in that source owner's fifth
    uservalue, pushes `payload=arg` and `ok=true`, and calls `mco_resume`
    with the resolved tag.
-2. `Coro:error` follows the same path but pushes `ok=false` and
+2. `Coroutine:error` follows the same path but pushes `ok=false` and
    `payload=err`.
 3. `coroutine.yield` reads `runtime.current_co`, pushes `payload=arg` and
    `ok=true`, and calls `mco_yield`.
@@ -161,8 +161,8 @@ ordering and stack-balance contract. There is no private C root/clear helper.
 
 The helper stores live values in ordinary Lua roots:
 
-* `Coro.udata` roots the owner userdata whose raw payload stores the
-  `mco_coro *`; `Coro.handle` is the same pointer cached as a native
+* `Coroutine.udata` roots the owner userdata whose raw payload stores the
+  `mco_coro *`; `Coroutine.handle` is the same pointer cached as a native
   field and is not itself a GC root;
 * the owner userdata's first four uservalues root the child Lua thread,
   module state, native Titan entry closure, and callback function;
@@ -180,7 +180,7 @@ The helper stores live values in ordinary Lua roots:
   suspended by minicoro.
 
 There is no registry pin for coroutine handles. A reachable coroutine is
-kept alive by ordinary Lua reachability: the user's `Coro` record roots
+kept alive by ordinary Lua reachability: the user's `Coroutine` record roots
 the owner userdata through `udata`, the userdata roots the child thread
 and callback through its uservalues, and nested `resume`/`yield` chains
 keep their outer frames suspended instead of unwinding them.
@@ -263,7 +263,7 @@ the same error payload. The pin tells the caller's error handler to keep
 the combined trace. This preserves frames from the now-dead coroutine and
 also records where the error crossed the `resume`/`error` boundary.
 
-`Coro:error` before the first normal `resume` is handled without calling
+`Coroutine:error` before the first normal `resume` is handled without calling
 the callback: the entry sees the preloaded `ok=false` transfer, returns
 it as the final payload, and leaves the value in the owner's pending-transfer
 root until the transfer is consumed.

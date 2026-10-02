@@ -1125,18 +1125,18 @@ pinned libuv contract instead of generalizing another operation's workaround.
 The exact public `coroutine` surface is:
 
 ```text
-record Coro
+record Coroutine
 end
 
-function create(func: function (value): (value), default_tag: value): Coro
-function Coro:resume(arg: value, tag: value): value
-function Coro:error(err: value, tag: value): value
-function Coro:status(): string
+function create(func: function (value): (value), default_tag: value): Coroutine
+function Coroutine:resume(arg: value, tag: value): value
+function Coroutine:error(err: value, tag: value): value
+function Coroutine:status(): string
 function yield(arg: value, tag: value): value
 function is_yieldable(tag: value): boolean
 ```
 
-`Coro` fields and constructor are **not public**; use `coroutine.create`.
+`Coroutine` fields and constructor are **not public**; use `coroutine.create`.
 Ordinary fixed-call adjustment makes the second argument to `create`, `resume`,
 and `error` omittable by nil-fill. Nil means “no explicit tag”; resume/error then
 use the stored default, and raise if neither is nonnil. `coroutine.yield` and

@@ -21,7 +21,7 @@ local STACK_SIZE = 2 * 1024 * 1024
 local TITAN_CORO_OWNER_USERVALUES = 5
 local runtime = foreign mco_runtime.new()
 
-record Coro
+record Coroutine
   local udata: value -- just for GC rooting
   local handle: foreign *mco_coro
   local default_tag: value
@@ -190,7 +190,7 @@ local function yield_result_or_raise(co: foreign *mco_coro, tag: value): value
   return pop_transfer_or_raise(co, false)
 end
 
-function Coro:resume(arg: value, tag: value): value
+function Coroutine:resume(arg: value, tag: value): value
   local effective = effective_tag(self.default_tag, tag)
   local co = self.handle
   local source = transfer_source(co)
@@ -198,7 +198,7 @@ function Coro:resume(arg: value, tag: value): value
   return resume_result_or_raise(co, source, effective)
 end
 
-function Coro:error(err: value, tag: value): value
+function Coroutine:error(err: value, tag: value): value
   local effective = effective_tag(self.default_tag, tag)
   local co = self.handle
   local source = transfer_source(co)
@@ -206,7 +206,7 @@ function Coro:error(err: value, tag: value): value
   return resume_result_or_raise(co, source, effective)
 end
 
-function Coro:status(): string
+function Coroutine:status(): string
   local status = ffi.mco_status(self.handle)
   if status == ffi.MCO_SUSPENDED then
     return "suspended"
@@ -255,7 +255,7 @@ catch
   push_transfer(co, 0, error)
 end
 
-function create(func: function (value): (value), default_tag: value): Coro
+function create(func: function (value): (value), default_tag: value): Coroutine
   local slot: foreign *(*mco_coro) = ffi.lua_newuserdatauv(
     L, foreign VoidPointer.sizeof, TITAN_CORO_OWNER_USERVALUES)
   local _ = ffi.titan_newthread(L)
@@ -278,7 +278,7 @@ function create(func: function (value): (value), default_tag: value): Coro
     raise "could not create coroutine: " .. (ffi.mco_result_description(res) as string)
   end
 
-  return Coro.new(ffi.lua_totvalue(L, -1), slot[0], default_tag)
+  return Coroutine.new(ffi.lua_totvalue(L, -1), slot[0], default_tag)
 end
 
 do

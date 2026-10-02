@@ -18,19 +18,19 @@ This does not replace Lua's standard coroutine library:
 ## API
 
 ```text
-record Coro
+record Coroutine
 end
 
-function create(func: function (value): (value), default_tag: value): Coro
-function Coro:resume(arg: value, tag: value): value
-function Coro:error(err: value, tag: value): value
-function Coro:status(): string
+function create(func: function (value): (value), default_tag: value): Coroutine
+function Coroutine:resume(arg: value, tag: value): value
+function Coroutine:error(err: value, tag: value): value
+function Coroutine:status(): string
 
 function yield(arg: value, tag: value): value
 function is_yieldable(tag: value): boolean
 ```
 
-The `Coro` record is opaque. Its handle and default tag are private to
+The `Coroutine` record is opaque. Its handle and default tag are private to
 the `coroutine` module.
 
 Titan's ordinary argument adjustment makes the second argument to

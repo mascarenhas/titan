@@ -64,9 +64,9 @@ function test_roots_nested_stacked_payloads_and_tags_across_gc(
 end
 
 local function make_abandoned_stacked(tag_main: value,
-                                      tag_b: value): coroutine.Coro
-  local stacked: coroutine.Coro? = nil
-  local a: coroutine.Coro? = coroutine.create(function(_: value): value
+                                      tag_b: value): coroutine.Coroutine
+  local stacked: coroutine.Coroutine? = nil
+  local a: coroutine.Coroutine? = coroutine.create(function(_: value): value
     local b = coroutine.create(function(_: value): value
       return coroutine.yield("from-b", tag_main)
     end, tag_b)
@@ -74,11 +74,11 @@ local function make_abandoned_stacked(tag_main: value,
     return b:resume(nil, tag_b)
   end, tag_main)
 
-  test.assert((a as coroutine.Coro):resume(nil, tag_main) == "from-b")
-  test.assert((a as coroutine.Coro):status() == "suspended")
-  test.assert((stacked as coroutine.Coro):status() == "stacked")
+  test.assert((a as coroutine.Coroutine):resume(nil, tag_main) == "from-b")
+  test.assert((a as coroutine.Coroutine):status() == "suspended")
+  test.assert((stacked as coroutine.Coroutine):status() == "stacked")
   a = nil
-  return stacked as coroutine.Coro
+  return stacked as coroutine.Coroutine
 end
 
 function test_abandons_stacked_coroutine_when_handler_is_collected(
