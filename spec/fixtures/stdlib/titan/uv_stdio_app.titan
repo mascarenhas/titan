@@ -4,6 +4,12 @@ local system = import "os"
 local str = import "string"
 foreign import "uv_stdio_probe.h"
 
+local function child_path(): string
+  local child? = system.getenv("TITAN_PROCESS_CHILD")
+  if not child or #child == 0 then raise "runner did not supply TITAN_PROCESS_CHILD" end
+  return child
+end
+
 local function required_input(candidate: system.InputStream?,
                               label: string): system.InputStream
   if not candidate then raise label .. " was not captured" end
@@ -43,7 +49,7 @@ end
 
 local function parent_inheritance(): string
   local process = system.spawn(
-    "/bin/sh", {"-c", ":"},
+    child_path(), {"exit", "0"},
     system.with_parent_stdin, system.with_parent_stdout,
     system.with_parent_stderr)
   if process.stdin then
@@ -70,7 +76,7 @@ end
 local function reject_parent_stdout(expected: string, expected_name: string?,
                                      expected_probe: string?,
                                      close_stdout: boolean?): string
-  local warm = system.spawn("/bin/sh", {"-c", ":"})
+  local warm = system.spawn(child_path(), {"exit", "0"})
   required_output(warm.stdin, "warm stdin"):close()
   local warm_stdout = required_input(warm.stdout, "warm stdout")
   local warm_stderr = required_input(warm.stderr, "warm stderr")
@@ -113,7 +119,7 @@ local function reject_parent_stdout(expected: string, expected_name: string?,
     local rejected = false
     do
       local process = system.spawn(
-        "/bin/sh", {"-c", ":"}, system.with_parent_stdout)
+        child_path(), {"exit", "0"}, system.with_parent_stdout)
       if process.stdin then (process.stdin as system.OutputStream):close() end
       if process.stdout then (process.stdout as system.InputStream):close() end
       if process.stderr then (process.stderr as system.InputStream):close() end
@@ -169,7 +175,8 @@ local function run_case(mode: string): string
   elseif mode == "socket" then
     return reject_parent_stdout("parent-socket-rejected")
   elseif mode == "closed" then
-    return reject_parent_stdout("parent-closed-rejected", "EBADF", "fstat", true)
+    return reject_parent_stdout("parent-closed-rejected", "EBADF",
+                                ffi.titan_uv_test_stdio_closed_probe() as string, true)
   elseif mode == "denied-pipes" or mode == "denied-pipes-access" then
     deny_metadata(ffi.TITAN_UV_TEST_STDIO_DENY_ALL, 7,
                   mode == "denied-pipes-access")

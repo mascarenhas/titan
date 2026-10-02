@@ -68,6 +68,9 @@ help:
 	@echo '  install-stdlib  build, validate and publish the Windows DLL-only provider'
 	@echo '  publish-stdlib  validate and publish an already built Windows provider'
 	@echo '  stdlib-publication-check  exercise commit/rollback with a mapped native DLL'
+	@echo '  titan-stdlib-test-build  build all shared native tests in a private NTFS SDK copy'
+	@echo '  titan-stdlib-test-run  run the built aggregate, optionally with TITAN_FILTER'
+	@echo '  titan-stdlib-test  build and run the shared native aggregate'
 
 FORCE:
 

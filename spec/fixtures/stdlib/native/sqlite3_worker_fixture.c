@@ -1,20 +1,55 @@
 #include "sqlite3_worker_fixture.h"
 
 #include <errno.h>
-#include <pthread.h>
 #include <sqlite3.h>
 #include <stdlib.h>
 #include <string.h>
+#ifdef _WIN32
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#else
+#include <pthread.h>
 #include <sys/time.h>
+#endif
 
 /*
  * A normal SQLite auto-extension supplies deterministic worker boundaries.
- * This object links only into a standalone static consumer of the canonical
- * provider. It neither interposes SQLite/libuv symbols nor changes provider
- * source, and every SQLite callback below is ordinary C with no Titan state.
+ * This object links only into a standalone consumer of the canonical provider:
+ * its static SQLite on Unix, the same controlled SQLite DLL on Windows. It
+ * neither interposes symbols nor changes provider source, and every SQLite
+ * callback below is ordinary C with no Titan state.
  */
+#ifdef _WIN32
+static SRWLOCK fixture_mutex = SRWLOCK_INIT;
+static CONDITION_VARIABLE fixture_condition = CONDITION_VARIABLE_INIT;
+
+static void fixture_lock(void) {
+  AcquireSRWLockExclusive(&fixture_mutex);
+}
+
+static void fixture_unlock(void) {
+  ReleaseSRWLockExclusive(&fixture_mutex);
+}
+
+static void fixture_wake_all(void) {
+  WakeAllConditionVariable(&fixture_condition);
+}
+#else
 static pthread_mutex_t fixture_mutex = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t fixture_condition = PTHREAD_COND_INITIALIZER;
+
+static void fixture_lock(void) {
+  (void)pthread_mutex_lock(&fixture_mutex);
+}
+
+static void fixture_unlock(void) {
+  (void)pthread_mutex_unlock(&fixture_mutex);
+}
+
+static void fixture_wake_all(void) {
+  (void)pthread_cond_broadcast(&fixture_condition);
+}
+#endif
 static int armed_point;
 static int gate_ready;
 static int gate_released;
@@ -68,32 +103,52 @@ int titan_sqlite_fixture_failed_allocations(void) {
 }
 
 static void gate(int point) {
+#ifdef _WIN32
+  ULONGLONG deadline;
+#else
   struct timeval now;
   struct timespec deadline;
+#endif
   int status = 0;
 
-  (void)pthread_mutex_lock(&fixture_mutex);
+  fixture_lock();
   if (armed_point != point) {
-    (void)pthread_mutex_unlock(&fixture_mutex);
+    fixture_unlock();
     return;
   }
   armed_point = 0;
   gate_ready = 1;
+#ifdef _WIN32
+  deadline = GetTickCount64() + 15000;
+  while (!gate_released && status == 0) {
+    ULONGLONG now = GetTickCount64();
+    if (now >= deadline) {
+      status = ETIMEDOUT;
+      break;
+    }
+    if (!SleepConditionVariableSRW(&fixture_condition, &fixture_mutex,
+                                    (DWORD)(deadline - now), 0)) {
+      DWORD error = GetLastError();
+      status = error == ERROR_TIMEOUT ? ETIMEDOUT : (int)error;
+    }
+  }
+#else
   (void)gettimeofday(&now, NULL);
   deadline.tv_sec = now.tv_sec + 15;
   deadline.tv_nsec = now.tv_usec * 1000;
   while (!gate_released && status == 0)
     status = pthread_cond_timedwait(&fixture_condition, &fixture_mutex,
                                     &deadline);
+#endif
   if (!gate_released)
     gate_timed_out = status == 0 ? ETIMEDOUT : status;
   gate_completed = 1;
-  (void)pthread_mutex_unlock(&fixture_mutex);
+  fixture_unlock();
 }
 
 int titan_sqlite_fixture_arm(int point) {
   int status = 0;
-  (void)pthread_mutex_lock(&fixture_mutex);
+  fixture_lock();
   if (point < TITAN_SQLITE_GATE_OPEN || point > TITAN_SQLITE_GATE_RESET ||
       armed_point != 0 || (gate_ready && !gate_completed)) {
     status = -1;
@@ -104,15 +159,15 @@ int titan_sqlite_fixture_arm(int point) {
     gate_completed = 0;
     gate_timed_out = 0;
   }
-  (void)pthread_mutex_unlock(&fixture_mutex);
+  fixture_unlock();
   return status;
 }
 
 static int read_statistic(const int *statistic) {
   int result;
-  (void)pthread_mutex_lock(&fixture_mutex);
+  fixture_lock();
   result = *statistic;
-  (void)pthread_mutex_unlock(&fixture_mutex);
+  fixture_unlock();
   return result;
 }
 
@@ -121,10 +176,10 @@ int titan_sqlite_fixture_ready(void) {
 }
 
 void titan_sqlite_fixture_release(void) {
-  (void)pthread_mutex_lock(&fixture_mutex);
+  fixture_lock();
   gate_released = 1;
-  (void)pthread_cond_broadcast(&fixture_condition);
-  (void)pthread_mutex_unlock(&fixture_mutex);
+  fixture_wake_all();
+  fixture_unlock();
 }
 
 int titan_sqlite_fixture_completed(void) {
@@ -166,10 +221,10 @@ static int authorize(void *unused, int action, const char *first,
 
 static void connection_destroy(void *owner) {
   gate(TITAN_SQLITE_GATE_CLOSE);
-  (void)pthread_mutex_lock(&fixture_mutex);
+  fixture_lock();
   live_connections--;
   closed_connections++;
-  (void)pthread_mutex_unlock(&fixture_mutex);
+  fixture_unlock();
   free(owner);
 }
 
@@ -190,10 +245,10 @@ static void blocking_value(sqlite3_context *context, int argc,
 
 static void blob_destroy(void *bytes) {
   gate(TITAN_SQLITE_GATE_RESET);
-  (void)pthread_mutex_lock(&fixture_mutex);
+  fixture_lock();
   live_blobs--;
   released_blobs++;
-  (void)pthread_mutex_unlock(&fixture_mutex);
+  fixture_unlock();
   free(bytes);
 }
 
@@ -208,9 +263,9 @@ static void owned_value(sqlite3_context *context, int argc,
     return;
   }
   memcpy(bytes, "raw\0data", 8);
-  (void)pthread_mutex_lock(&fixture_mutex);
+  fixture_lock();
   live_blobs++;
-  (void)pthread_mutex_unlock(&fixture_mutex);
+  fixture_unlock();
   sqlite3_result_blob(context, bytes, 8, blob_destroy);
 }
 
@@ -235,9 +290,9 @@ static int extension_init(sqlite3 *database, char **error,
   owner = malloc(1);
   if (owner == NULL)
     return SQLITE_NOMEM;
-  (void)pthread_mutex_lock(&fixture_mutex);
+  fixture_lock();
   live_connections++;
-  (void)pthread_mutex_unlock(&fixture_mutex);
+  fixture_unlock();
   /* SQLite calls this destructor even when create_function_v2 fails. */
   status = sqlite3_create_function_v2(database, "titan_test_connection", 0,
       SQLITE_UTF8, owner, connection_value, NULL, NULL, connection_destroy);

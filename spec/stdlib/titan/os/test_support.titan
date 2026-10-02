@@ -5,6 +5,8 @@ foreign import "lauxlib.h"
 foreign import "titan/ffi.h"
 foreign import "string.h"
 foreign import "time.h"
+foreign import "time_support.h"
+local common = import "support.common.titan"
 
 local type CheckedAction = function (): ()
 
@@ -84,15 +86,27 @@ local function restore_environment(name: string, original: string?)
 end
 
 local function refresh_local_timezone()
-  -- POSIX localtime behaves as though tzset had been called. Going through
-  -- the public calendar operation keeps this setup portable across the two
-  -- supported hosts without a feature-test-macro-only tzset declaration.
-  system.date("%Y", 0)
+  local zone? = system.getenv("TZ")
+  local status = 0
+  if zone then
+    status = ffi.titan_spec_refresh_timezone(zone)
+  else
+    status = ffi.titan_spec_refresh_timezone(nil)
+  end
+  test.assert(status == 0, "could not refresh the test timezone")
+  -- _putenv_s deletes an empty setting; preserve the exact Win32 value that
+  -- public os.getenv observes while keeping the CRT timezone synchronized.
+  if common.is_windows() then restore_environment("TZ", zone) end
 end
 
 local function install_test_timezone(): string?
   local original: string? = system.getenv("TZ")
-  system.setenv("TZ", "EST5EDT,M3.2.0/2,M11.1.0/2")
+  if common.is_windows() then
+    -- UCRT accepts the standard/DST names and uses the US transition rules.
+    system.setenv("TZ", "EST5EDT")
+  else
+    system.setenv("TZ", "EST5EDT,M3.2.0/2,M11.1.0/2")
+  end
   refresh_local_timezone()
   return original
 end

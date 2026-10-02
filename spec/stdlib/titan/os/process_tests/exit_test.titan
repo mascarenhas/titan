@@ -3,20 +3,17 @@ local type ExitFixtureCase = function (string): ()
 local function compile_exit_fixture(workspace: string)
   local source = fs.read_file("spec/fixtures/stdlib/titan/os_exit_app.titan")
   fs.write_file(workspace .. "/os_exit_app.titan", source)
-  local ok: boolean?, why: string, code: integer = command.execute({
-    "sh", "-c", "cd \"$1\" && titanc os_exit_app",
-    "titan-os-exit-compile", workspace,
-  })
-  test.assert(ok ~= nil and why == "exit" and code == 0,
+  local output, why, code = command.compile(workspace, "os_exit_app")
+  test.assert(why == "exit" and code == 0,
               "could not compile os.exit fixture (" .. why .. ", " ..
-              code .. ")")
+              code .. "): " .. output)
 end
 
 local function run_exit_fixture(workspace: string, mode: string):
     (string, integer, string)
   local marker = workspace .. "/" .. mode .. ".marker"
   local output, why, code = command.capture({
-    workspace .. "/os_exit_app", mode, marker,
+    command.program(workspace, "os_exit_app"), mode, marker,
   })
   test.assert(why == "exit", "os.exit fixture did not exit normally: " .. output)
   return marker, code, output
@@ -28,10 +25,7 @@ local function with_exit_fixture(body: ExitFixtureCase)
     fs.unlink(workspace)
     fs.mkdir(workspace)
     runtime_test.cleanup(function ()
-      local ok: boolean?, _: string, code: integer =
-        command.execute({"rm", "-rf", workspace})
-      test.assert(ok ~= nil and code == 0,
-                  "could not remove os.exit fixture workspace")
+      command.remove_tree(workspace)
     end)
     compile_exit_fixture(workspace)
     body(workspace)

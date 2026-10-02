@@ -5,27 +5,20 @@ function test_parent_stdin_exists_before_module_initialization(
     fs.unlink(workspace)
     fs.mkdir(workspace)
     runtime_test.cleanup(function ()
-      local ok: boolean?, _: string, code: integer =
-        command.execute({"rm", "-rf", workspace})
-      test.assert(ok ~= nil and code == 0,
-                  "could not remove parent-stdin fixture workspace")
+      command.remove_tree(workspace)
     end)
 
     local source = fs.read_file(
       "spec/fixtures/stdlib/titan/os_parent_stdin_app.titan")
     fs.write_file(workspace .. "/os_parent_stdin_app.titan", source)
-    local compiled = command.system({
-      "sh", "-c", "cd \"$1\" && titanc os_parent_stdin_app",
-      "titan-parent-stdin-compile", workspace,
-    })
-    test.assert(compiled == 0, "could not compile parent-stdin fixture")
+    local output, why, compiled = command.compile(workspace, "os_parent_stdin_app")
+    test.assert(why == "exit" and compiled == 0,
+                "could not compile parent-stdin fixture: " .. output)
 
     local result_path = workspace .. "/parent-stdin.result"
     local status = command.system({
-      "sh", "-c", "printf 'first|second' | \"$1\" \"$2\"",
-      "titan-parent-stdin-run",
-      workspace .. "/os_parent_stdin_app", result_path,
-    })
+      command.program(workspace, "os_parent_stdin_app"), result_path,
+    }, nil, nil, nil, "first|second")
     local report = fs.read_file(result_path)
     defer fs.unlink(result_path)
     test.assert(status == 0 and report == "OK:parent-input-ok",

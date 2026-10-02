@@ -1,75 +1,228 @@
--- Native-test access to the host shell through Lua's standard os/io library.
+-- Synchronous, test-private child boundary. Reuse the compiler's host command
+-- transport rather than requiring an active Titan Runtime to test one.
 local common = import "support.common.titan"
-foreign import "stdlib.h"
 
-local type Renderer = function ({string}): (string)
-local type Executor = function ({string}): (boolean?, string, integer)
-local type Capturer = function ({string}): (string, string, integer)
+local type Helpers = function (string): (value)
+local type Runner = function ({string}, string?, {string: string}?, {string}?,
+                             string?): (string, string, integer)
+local type Compiler = function (string, string, {string}?, boolean?):
+                               (string, string, integer)
+local type LuaRunner = function (string): (string, string, integer)
+local type Program = function (string, string): (string)
+local type FixtureObject = function (string): (string)
+local type Remover = function (string): ()
 
-local renderer: Renderer? = nil
-local executor: Executor? = nil
-local capturer: Capturer? = nil
+local helpers: Helpers? = nil
 
-local function renderer_function(): Renderer
-  if not renderer then
-    renderer = common.lua_helper([==[
-      local function quote(argument)
-        return "'" .. argument:gsub("'", "'\\''") .. "'"
+local function helper_functions(): Helpers
+  if not helpers then
+    helpers = common.lua_helper([==[
+      local platform = require "titan-compiler.platform"
+      local compiler_io = require "titan-compiler.io".new_sync()
+      local lfs = require "lfs"
+      local system = require "titan.os"
+
+      local function argv_table(argv)
+        local result = {}
+        for index = 1, #argv do result[index] = argv[index] end
+        return result
       end
-      return function(argv)
-        local command = {}
-        for index = 1, #argv do command[index] = quote(argv[index]) end
-        return table.concat(command, " ")
+
+      local function native_status(code)
+        -- The Windows CRT returns an int; retain every bit of the native
+        -- DWORD exit status rather than treating high bits as POSIX signals.
+        if platform.windows and type(code) == "number" then
+          return code & 0xffffffff
+        end
+        return code or 1
       end
-    ]==]) as Renderer
+
+      local function render(argv)
+        if platform.windows then
+          return assert(platform.windows_command(argv, false))
+        end
+        local quoted = {}
+        for index, argument in ipairs(argv) do
+          assert(not argument:find("\0", 1, true), "command argument contains NUL")
+          quoted[index] = "'" .. argument:gsub("'", "'\\''") .. "'"
+        end
+        assert(#quoted > 0, "command is empty")
+        return table.concat(quoted, " ")
+      end
+
+      -- No yielding call occurs between changing cwd/environment and restoring
+      -- them. These process-global settings therefore cannot leak to another
+      -- cooperative test Task, including when launching the child fails.
+      local function run(capture, argv, directory, environment, unset, input)
+        argv = argv_table(argv)
+        local previous_directory = assert(lfs.currentdir())
+        local saved, changed = {}, {}
+        local function remember(name)
+          if not changed[name] then
+            saved[name] = system.getenv(name)
+            changed[name] = true
+          end
+        end
+        local result = table.pack(pcall(function()
+          if environment then
+            for name, value in pairs(environment) do
+              remember(name)
+              system.setenv(name, value)
+            end
+          end
+          if unset then
+            for index = 1, #unset do
+              local name = unset[index]
+              remember(name)
+              system.unsetenv(name)
+            end
+          end
+          if directory then assert(lfs.chdir(directory)) end
+          if capture then
+            assert(input == nil, "captured test command does not accept stdin")
+            local outcome = compiler_io:run(argv)
+            return outcome.output or outcome.diagnostic or "",
+                   outcome.why or "spawn", native_status(outcome.status)
+          end
+          local command = render(argv)
+          local ok, why, code
+          if input ~= nil then
+            local pipe = assert(io.popen(command, platform.windows and "wb" or "w"))
+            local wrote, failure = pipe:write(input)
+            ok, why, code = pipe:close()
+            assert(wrote, failure)
+          else
+            ok, why, code = os.execute(command)
+          end
+          return "", why or "spawn", ok and 0 or native_status(code)
+        end))
+        local restored = table.pack(pcall(function()
+          for name in pairs(changed) do
+            if saved[name] == nil then system.unsetenv(name)
+            else system.setenv(name, saved[name]) end
+          end
+        end))
+        local restored_directory, directory_error = lfs.chdir(previous_directory)
+        assert(restored_directory, directory_error)
+        if not restored[1] then error(restored[2], 0) end
+        if not result[1] then error(result[2], 0) end
+        return table.unpack(result, 2, result.n)
+      end
+
+      local function tool(name)
+        local sdk = os.getenv("TITAN_TEST_SDK_ROOT")
+        local executable = name .. (platform.windows and ".exe" or "")
+        return sdk and platform.join(platform.join(sdk, "bin"), executable) or executable
+      end
+
+      local function remove_tree(path)
+        local attributes, message, code = lfs.symlinkattributes(path)
+        if not attributes then
+          if code == 2 then return end
+          error(message, 0)
+        end
+        if attributes.mode == "directory" then
+          for entry in lfs.dir(path) do
+            if entry ~= "." and entry ~= ".." then
+              remove_tree(platform.join(path, entry))
+            end
+          end
+          assert(lfs.rmdir(path))
+        else
+          assert(os.remove(path))
+        end
+      end
+
+      local functions = {
+        capture = function(...) return run(true, ...) end,
+        execute = function(...) return run(false, ...) end,
+        lua = function(source)
+          -- Windows' compiler transport intentionally rejects multiline argv.
+          -- A source file also avoids command-length limits for boundary probes.
+          local path = assert(compiler_io:tmpname())
+          local result = table.pack(pcall(function()
+            assert(compiler_io:write_file(path, source))
+            return run(true, {tool("lua"), "-E", path})
+          end))
+          assert(compiler_io:unlink(path))
+          if not result[1] then error(result[2], 0) end
+          return table.unpack(result, 2, result.n)
+        end,
+        compile = function(directory, name, extra, static)
+          local argv = {tool("titanc")}
+          -- Windows production providers are DLL-only. Unix retains the
+          -- archive-linked SQLite worker oracle; both execute the same child.
+          if static and not platform.windows then argv[#argv + 1] = "--static" end
+          argv[#argv + 1] = name
+          if extra then
+            for index = 1, #extra do argv[#argv + 1] = extra[index] end
+          end
+          return run(true, argv, directory)
+        end,
+        program = function(directory, name)
+          return platform.join(directory,
+            platform.windows and ("bin/" .. name .. ".exe") or name)
+        end,
+        fixture_object = function(name)
+          local directory = os.getenv("TITAN_TEST_BUILD_DIR") or
+            platform.join(assert(lfs.currentdir()), ".titan-tests")
+          return platform.join(directory, name .. ".o")
+        end,
+        remove_tree = remove_tree,
+      }
+      return function(name) return assert(functions[name]) end
+    ]==]) as Helpers
   end
-  return renderer as Renderer
+  return helpers
 end
 
-local function executor_function(): Executor
-  if not executor then
-    executor = common.lua_helper([==[
-      local function quote(argument)
-        return "'" .. argument:gsub("'", "'\\''") .. "'"
-      end
-      return function(argv)
-        local command = {}
-        for index = 1, #argv do command[index] = quote(argv[index]) end
-        return os.execute(table.concat(command, " "))
-      end
-    ]==]) as Executor
-  end
-  return executor as Executor
+local function capture(argv: {string}, directory: string?,
+                       environment: {string: string}?, unset: {string}?,
+                       input: string?): (string, string, integer)
+  local run: Runner = helper_functions()("capture")
+  return run(argv, directory, environment, unset, input)
 end
 
-local function capturer_function(): Capturer
-  if not capturer then
-    capturer = common.lua_helper([==[
-      local function quote(argument)
-        return "'" .. argument:gsub("'", "'\\''") .. "'"
-      end
-      return function(argv)
-        local command = {}
-        for index = 1, #argv do command[index] = quote(argv[index]) end
-        local pipe, message = io.popen(table.concat(command, " ") .. " 2>&1", "r")
-        if not pipe then return tostring(message), "open", 1 end
-        local output = pipe:read("*a")
-        local ok, why, code = pipe:close()
-        return output, why or "exit", ok and 0 or code
-      end
-    ]==]) as Capturer
-  end
-  return capturer as Capturer
+local function execute(argv: {string}, directory: string?,
+                       environment: {string: string}?, unset: {string}?,
+                       input: string?): (boolean?, string, integer)
+  local run: Runner = helper_functions()("execute")
+  local _: string, why: string, code: integer =
+    run(argv, directory, environment, unset, input)
+  if why == "exit" and code == 0 then return true, why, code end
+  return nil, why, code
 end
 
-local function execute(argv: {string}): (boolean?, string, integer)
-  return executor_function()(argv)
+local function system(argv: {string}, directory: string?,
+                      environment: {string: string}?, unset: {string}?,
+                      input: string?): integer
+  local _: boolean?, why: string, code: integer =
+    execute(argv, directory, environment, unset, input)
+  return code
 end
 
-local function capture(argv: {string}): (string, string, integer)
-  return capturer_function()(argv)
+local function compile(directory: string, name: string, extra: {string}?,
+                       static: boolean?): (string, string, integer)
+  local compile_child: Compiler = helper_functions()("compile")
+  return compile_child(directory, name, extra, static)
 end
 
-local function system(argv: {string}): integer
-  return ffi.system(renderer_function()(argv))
+local function program(directory: string, name: string): string
+  local program_path: Program = helper_functions()("program")
+  return program_path(directory, name)
+end
+
+local function fixture_object(name: string): string
+  local object_path: FixtureObject = helper_functions()("fixture_object")
+  return object_path(name)
+end
+
+local function remove_tree(path: string)
+  local remove: Remover = helper_functions()("remove_tree")
+  remove(path)
+end
+
+local function lua(source: string): (string, string, integer)
+  local run_lua: LuaRunner = helper_functions()("lua")
+  return run_lua(source)
 end

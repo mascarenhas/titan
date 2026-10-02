@@ -1,3 +1,5 @@
+foreign import "uv_stdio_probe.h"
+
 function test_lua_dofile_preserves_flexible_values_and_recovers_after_errors(
     context: test.Context)
   runtime_test.run(function ()
@@ -33,17 +35,10 @@ function test_lua_dofile_preserves_flexible_values_and_recovers_after_errors(
     test.assert(lua_support.find_literal(syntax_text, "dofile-syntax-error.lua") ~= nil,
                 syntax_text)
 
-    local count_fds = common.lua_helper([==[
-      local lfs = require "lfs"
-      return function()
-        local count = 0
-        for entry in lfs.dir("/dev/fd") do
-          if entry:match("^%d+$") then count = count + 1 end
-        end
-        return count
-      end
-    ]==]) as function (): (integer)
-    local baseline_fds = count_fds()
+    -- The shared native fixture counts descriptors on Unix and kernel handles
+    -- on Windows, so file-error cleanup remains observable on both platforms.
+    local baseline_fds = ffi.titan_uv_test_stdio_open_fd_count() as integer
+    test.assert(baseline_fds >= 0, "could not count native file handles")
     for _ = 1, 24 do
       test.assert(lua_support.caught_string(function ()
         tlua.dofile(runtime_error)
@@ -52,9 +47,9 @@ function test_lua_dofile_preserves_flexible_values_and_recovers_after_errors(
         tlua.dofile(syntax_error)
       end) ~= nil, "repeated dofile syntax failure escaped")
     end
-    local final_fds = count_fds()
-    test.assert(final_fds <= baseline_fds + 2,
-                "dofile leaked file descriptors")
+    local final_fds = ffi.titan_uv_test_stdio_open_fd_count() as integer
+    test.assert(final_fds >= 0 and final_fds <= baseline_fds + 2,
+                "dofile leaked native file handles")
 
     -- Both exceptional paths leave dofile usable after repeated failures.
     fs.write_file(runtime_error, "return 'runtime-recovered'")

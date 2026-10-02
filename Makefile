@@ -2444,15 +2444,8 @@ rock-post-install:
 # longer builds stdlib before LuaRocks has deployed the compiler.
 rock-build: titan
 
-# --test gives its first root ownership of the aggregate executable path. Keep
-# that role explicit and assign it to titan.test's tests, not an unrelated module.
-TITAN_STDLIB_TEST_PROGRAM_ROOT := test.tests
-TITAN_STDLIB_TEST_PROGRAM_OUTPUT := test/tests
-TITAN_STDLIB_TEST_ROOTS := $(TITAN_STDLIB_TEST_PROGRAM_ROOT) \
-	coroutine.tests iteration.tests gc.tests lua.tests math.tests peg.tests \
-	string.core_test string.format_pack_test string.regex_test async.tests \
-	uv.task_tests io.tests fs.tests timer.tests net.tests ssl.tests http.tests \
-	url.tests os.tests os.process_tests uv.runtime_tests reflect.tests sqlite3.tests json.tests
+TITAN_TEST_MODULE_MANIFEST := $(dir $(abspath $(lastword $(MAKEFILE_LIST))))spec/support/stdlib_test_modules.mk
+include $(TITAN_TEST_MODULE_MANIFEST)
 TITAN_TEST_BUILD_DIR ?= .titan-tests
 TITAN_TEST_EXECUTABLE := $(TITAN_TEST_BUILD_DIR)/$(TITAN_STDLIB_TEST_PROGRAM_OUTPUT)
 # The suite deadline includes fresh child-fixture compilation at the selected
@@ -2466,15 +2459,12 @@ TITAN_FILTER ?=
 TITAN_TEST_CPPFLAGS = $(if $(strip $(TITAN_EXTRA_CPPFLAGS)),$(TITAN_EXTRA_CPPFLAGS),$(TITAN_TEST_EXTRA_CPPFLAGS))
 TITAN_TEST_CFLAGS = $(if $(strip $(TITAN_EXTRA_CFLAGS)),$(TITAN_EXTRA_CFLAGS),$(TITAN_TEST_EXTRA_CFLAGS))
 TITAN_TEST_LDFLAGS = $(if $(strip $(TITAN_EXTRA_LDFLAGS)),$(TITAN_EXTRA_LDFLAGS),$(TITAN_TEST_EXTRA_LDFLAGS))
-TITAN_TEST_MODULE_MANIFEST := $(dir $(abspath $(lastword $(MAKEFILE_LIST))))spec/support/stdlib_test_modules.mk
-include $(TITAN_TEST_MODULE_MANIFEST)
-
 titan_test_stem = $(patsubst %.titan,%,$(firstword $(TITAN_TEST_SOURCES_$(1))))
 titan_test_outputs = $(call titan_test_stem,$(1)).o $(call titan_test_stem,$(1)).c $(call titan_test_stem,$(1)).ffi.h $(if $(TITAN_TEST_FOREIGN_$(1)),$(call titan_test_stem,$(1)).titan.h)
 TITAN_TEST_MODULE_OBJECTS := $(foreach module,$(TITAN_TEST_MODULES),$(call titan_test_stem,$(module)).o)
 TITAN_TEST_SUPPORT_STEM := $(TITAN_TEST_BUILD_DIR)/titan/test__test_support
 TITAN_TEST_SUPPORT_OUTPUTS := $(addprefix $(TITAN_TEST_SUPPORT_STEM),.o .c .ffi.h)
-TITAN_TEST_NATIVE_OBJECTS := $(addprefix $(TITAN_TEST_BUILD_DIR)/,async_foreign_work.o uv_stdio_probe.o sqlite3_worker_fixture.o)
+TITAN_TEST_NATIVE_OBJECTS := $(addprefix $(TITAN_TEST_BUILD_DIR)/,async_foreign_work.o fs_fixture.o uv_stdio_probe.o sqlite3_worker_fixture.o)
 TITAN_TEST_FIXTURE_OUTPUTS := $(TITAN_TEST_NATIVE_OBJECTS) $(addprefix $(TITAN_TEST_BUILD_DIR)/,async_foreign_work.h uv_stdio_probe.h sqlite3_worker_fixture.h os_process_host_child)
 TITAN_TEST_CONFIG_STAMP := $(TITAN_TEST_BUILD_DIR)/build.config
 # TEST_LUA selects the installed SDK, just as it does for the compiler and the
@@ -2592,6 +2582,9 @@ $(TITAN_TEST_BUILD_DIR)/sqlite3_worker_fixture.h: spec/fixtures/stdlib/native/sq
 $(TITAN_TEST_BUILD_DIR)/async_foreign_work.o: spec/fixtures/stdlib/native/async_foreign_work.c $(TITAN_TEST_BUILD_DIR)/async_foreign_work.h $(TITAN_TEST_CONFIG_STAMP)
 	$(CC) -std=c99 -Wall -Wextra -Werror -fPIC $(TITAN_TEST_CPPFLAGS) $(TITAN_TEST_CFLAGS) \
 	  -Ispec/fixtures/stdlib/native -c "$<" -o "$@"
+$(TITAN_TEST_BUILD_DIR)/fs_fixture.o: spec/fixtures/stdlib/native/fs_fixture.c spec/stdlib/titan/fs/fixture_support.h $(TITAN_TEST_COMPILER_PREREQS) $(TITAN_TEST_CONFIG_STAMP)
+	$(CC) -std=c99 -Wall -Wextra -Werror -fPIC $(TITAN_TEST_CPPFLAGS) $(TITAN_TEST_CFLAGS) \
+	  -c "$<" -o "$@"
 $(TITAN_TEST_BUILD_DIR)/uv_stdio_probe.o: spec/fixtures/stdlib/native/uv_stdio_probe.c $(TITAN_TEST_BUILD_DIR)/uv_stdio_probe.h $(TITAN_TEST_CONFIG_STAMP)
 	$(CC) -std=c99 -Wall -Wextra -Werror -fPIC $(TITAN_TEST_CPPFLAGS) $(TITAN_TEST_CFLAGS) \
 	  -Ispec/fixtures/stdlib/native -c "$<" -o "$@"
@@ -2617,7 +2610,7 @@ $(TITAN_TEST_EXECUTABLE): FORCE $(TITAN_TEST_MODULE_OBJECTS) $(TITAN_TEST_SUPPOR
 	  cd $(call make_shell_quote,$(TITAN_TEST_BUILD_DIR)); \
 	  $(TITAN_TEST_COMPILER_ENV) $(TEST_TITANC) --test --incremental --no-uv-bootstrap \
 	    --tree $(call make_shell_quote,$(abspath spec/stdlib/titan)) \
-	    $(TITAN_STDLIB_TEST_ROOTS) -X async_foreign_work.o uv_stdio_probe.o; \
+	    $(TITAN_STDLIB_TEST_ROOTS) -X async_foreign_work.o fs_fixture.o uv_stdio_probe.o; \
 	fi
 
 titan-stdlib-test-build: $(TITAN_TEST_EXECUTABLE) ## Build every native Titan stdlib test into one incremental executable
@@ -2628,16 +2621,29 @@ titan-stdlib-test-run: ## Run the built native suite, optionally with TITAN_FILT
 	@test -x $(call make_shell_quote,$(TITAN_TEST_EXECUTABLE)) || { \
 	  echo "ERROR: run 'make titan-stdlib-test-build' first" >&2; exit 1; \
 	}
-	@LUA_PATH_5_5="$$( $(TEST_LUA) -E -e 'io.write(package.path)' )" \
+	@printf '%s\n' $(TITAN_STDLIB_TEST_ROOTS) > $(call make_shell_quote,$(TITAN_TEST_BUILD_DIR)/roots.txt)
+	@status=0; \
+	LUA_PATH_5_5="$$( $(TEST_LUA) -E -e 'io.write(package.path)' )" \
 	LUA_CPATH_5_5="$$( $(TEST_LUA) -E -e 'io.write(package.cpath)' )" \
+	TITAN_TEST_BUILD_DIR=$(call make_shell_quote,$(abspath $(TITAN_TEST_BUILD_DIR))) \
+	TITAN_TEST_SOURCE_ROOT=$(call make_shell_quote,$(CURDIR)) \
+	TITAN_TEST_SDK_ROOT=$(call make_shell_quote,$(TITAN_TEST_INSTALL_ROOT)) \
+	TITAN_PROCESS_CHILD=$(call make_shell_quote,$(abspath $(TITAN_TEST_BUILD_DIR)/os_process_host_child)) \
 	TITAN_FILTER=$(call make_shell_quote_value,TITAN_FILTER) \
 	bash -o pipefail -c ' \
+	  log=$$1; shift; \
 	  if [[ -n $${TITAN_FILTER:-} ]]; then \
 	    set -- "$$@" "--filter=$$TITAN_FILTER"; \
 	  fi; \
-	  bash spec/support/run_with_timeout.sh "$$@" 2>&1 | cat' -- \
+	  bash spec/support/run_with_timeout.sh "$$@" 2>&1 | tee "$$log"' -- \
+	  $(call make_shell_quote,$(TITAN_TEST_BUILD_DIR)/stdout.log) \
 	  $(call make_shell_quote,$(TITAN_TEST_TIMEOUT)) \
-	  $(call make_shell_quote,$(TITAN_TEST_EXECUTABLE))
+	  $(call make_shell_quote,$(TITAN_TEST_EXECUTABLE)) || status=$$?; \
+	$(TEST_LUA) -E scripts/check_stdlib_test_output.lua \
+	  $(call make_shell_quote,$(TITAN_TEST_BUILD_DIR)/stdout.log) \
+	  $(call make_shell_quote,$(TITAN_TEST_BUILD_DIR)/roots.txt) \
+	  $(call make_shell_quote_value,TITAN_FILTER); \
+	audit=$$?; test "$$status" = 0 || exit "$$status"; exit "$$audit"
 
 titan-stdlib-test: titan-stdlib-test-build ## Build and run all native Titan stdlib tests
 	$(MAKE) titan-stdlib-test-run

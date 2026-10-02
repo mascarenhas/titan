@@ -4,30 +4,23 @@ function test_ssl_http_fresh_process_sanitizer_composition(_context: test.Contex
     fs.unlink(workspace)
     fs.mkdir(workspace)
     runtime_test.cleanup(function ()
-      local ok: boolean?, _: string, code: integer =
-        command.execute({"rm", "-rf", workspace})
-      test.assert(ok ~= nil and code == 0,
-                  "could not remove SSL/HTTP fixture workspace")
+      command.remove_tree(workspace)
     end)
 
     local source = fs.read_file(
       "spec/fixtures/stdlib/titan/ssl_http_sanitizer_app.titan")
     fs.write_file(workspace .. "/ssl_http_sanitizer_app.titan", source)
-    local compiled = command.system({
-      "sh", "-c", "cd \"$1\" && titanc ssl_http_sanitizer_app",
-      "titan-ssl-http-sanitizer-compile", workspace,
-    })
-    test.assert(compiled == 0, "could not compile SSL/HTTP fixture")
+    local output, why, compiled = command.compile(workspace, "ssl_http_sanitizer_app")
+    test.assert(why == "exit" and compiled == 0,
+                "could not compile SSL/HTTP fixture: " .. output)
 
     local result_path = workspace .. "/ssl-http.result"
     local status = command.system({
-      "env",
-      "SSL_CERT_FILE=" .. "spec/fixtures/ssl/ca.pem",
-      workspace .. "/ssl_http_sanitizer_app",
+      command.program(workspace, "ssl_http_sanitizer_app"),
       result_path,
       "spec/fixtures/ssl/server.pem",
       "spec/fixtures/ssl/server-key.pem",
-    })
+    }, nil, {["SSL_CERT_FILE"] = "spec/fixtures/ssl/ca.pem"})
     local report = fs.read_file(result_path)
     defer fs.unlink(result_path)
     test.assert(status == 0 and

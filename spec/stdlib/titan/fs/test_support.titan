@@ -1,5 +1,8 @@
 -- Filesystem fixture ownership for fs.tests.
 local test = import "test"
+local fs = import "fs"
+local system = import "os"
+local common = import "support.common.titan"
 foreign import "stdlib.h"
 foreign import "string.h"
 foreign import "fixture_support.h"
@@ -16,15 +19,16 @@ local function cleanup_path(context: test.Context, path: string)
 end
 
 local function new_workspace(context: test.Context): string
-  local pattern = "/tmp/titan-fs-test-XXXXXX"
+  local parent = system.getenv("TITAN_TEST_ROOT") or fs.tmpdir()
+  local pattern = parent .. "/titan-fs-ação世界-XXXXXX"
   local storage = foreign char.new_array(#pattern + 1)
   ffi.memcpy(storage as foreign *char,
                  pattern as foreign const *char,
                  #pattern as foreign size_t)
   storage[#pattern] = 0
-  local created = ffi.mkdtemp(storage as foreign *char)
-  test.assert(created, "could not create native workspace")
-  local root = created as string
+  local status = ffi.titan_spec_mkdtemp(storage as foreign *char)
+  test.assert(status == 0, "could not create native workspace")
+  local root = (storage as foreign *char) as string
   cleanup_path(context, root)
   return root
 end
@@ -32,26 +36,26 @@ end
 local function make_symlink(context: test.Context,
                             target: string, link: string)
   cleanup_path(context, link)
-  local status: integer = ffi.symlink(target, link)
+  local info? = fs.stat(target)
+  local directory = info ~= nil and info.kind == "directory"
+  local status: integer = ffi.titan_spec_symlink(target, link, directory and 1 or 0)
+  if common.is_windows() and status == 1 then
+    test.skip("capability: symbolic links require Windows Developer Mode or symlink privilege")
+  end
   test.assert(status == 0, "could not create native symlink fixture")
 end
 
 local function set_fixture_environment(context: test.Context,
                                        name: string, contents: string)
-  local old_pointer = ffi.getenv(name)
-  local old_value: string? = nil
-  if old_pointer then old_value = old_pointer as string end
+  local old_value? = system.getenv(name)
   context:cleanup(function ()
-    local status: integer = 0
     if old_value then
-      status = ffi.setenv(name, old_value as string, 1)
+      system.setenv(name, old_value)
     else
-      status = ffi.unsetenv(name)
+      system.unsetenv(name)
     end
-    test.assert(status == 0, "could not restore native environment fixture")
   end)
-  local status: integer = ffi.setenv(name, contents, 1)
-  test.assert(status == 0, "could not set native environment fixture")
+  system.setenv(name, contents)
 end
 
 local function write_file_synchronously(path: string, contents: string)
@@ -72,5 +76,5 @@ local function make_boundary_payload(): string
   storage[prefix_length + 3] = 97
   storage[prefix_length + 4] = 105
   storage[prefix_length + 5] = 108
-  return storage as string
+  return (storage as string) .. "\r\n\255"
 end

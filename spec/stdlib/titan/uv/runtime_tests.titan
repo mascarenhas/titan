@@ -3,15 +3,25 @@ local runtime_test = import "support.runtime.titan"
 local common = import "support.common.titan"
 local command = import "support.command.titan"
 local fs = import "fs"
-local system = import "os"
 local timer = import "timer"
 foreign import "uv_stdio_probe.h"
 
 local retained_shutdown_file: fs.File? = nil
 local retained_shutdown_ticker: timer.Ticker? = nil
 
+local function assert_symbolic_frame(context: test.Context, trace: string,
+                                      frame: string)
+  test.assert(#trace > 0, "failure did not retain a traceback")
+  context:run("symbolic_frame", function (_context: test.Context)
+    if common.is_windows() then
+      test.skip("unsupported: native Windows tracebacks retain raw addresses without Titan symbols")
+    end
+    test.assert(common.contains(trace, frame), "traceback lost its Titan frame: " .. frame)
+  end)
+end
+
 function test_runtime_shutdown_closes_native_handles_but_not_files(
-    _context: test.Context)
+    context: test.Context)
   local path = ""
   runtime_test.run(function ()
     path = fs.tmpname()
@@ -29,13 +39,16 @@ function test_runtime_shutdown_closes_native_handles_but_not_files(
               "Runtime shutdown closed a retained File descriptor")
 
   local close_trace = ""
+  local close_failure: value = nil
   do
     file:close()
   catch
     close_trace = traceback
+    close_failure = error
   end
-  test.assert(common.contains(close_trace, "in titan.uv.fs_close"),
-              "File close outside a Runtime lost its uv frame")
+  test.assert(close_failure == "async Runtime is not active",
+              "File close outside a Runtime lost its rejection")
+  assert_symbolic_frame(context, close_trace, "in titan.uv.fs_close")
   test.assert(not file:is_closed(),
               "rejected close changed the retained File state")
 
@@ -60,19 +73,16 @@ local function compile_bootstrap_fixture(workspace: string, name: string)
   local source = fs.read_file(
     "spec/fixtures/stdlib/titan/uv_bootstrap/" .. name .. ".titan")
   fs.write_file(workspace .. "/" .. name .. ".titan", source)
-  local ok: boolean?, why: string, code: integer = command.execute({
-    "sh", "-c", "cd \"$1\" && titanc \"$2\"",
-    "titan-uv-bootstrap-compile", workspace, name,
-  })
-  test.assert(ok ~= nil and why == "exit" and code == 0,
+  local output, why, code = command.compile(workspace, name)
+  test.assert(why == "exit" and code == 0,
               "could not compile " .. name .. " (" .. why .. ", " ..
-              code .. ")")
+              code .. "): " .. output)
 end
 
 local function run_bootstrap_fixture(workspace: string,
                                      arguments: {string}):
     (string, string, integer)
-  local command_line: {string} = { workspace .. "/" .. arguments[1] }
+  local command_line: {string} = { command.program(workspace, arguments[1]) }
   for index = 2, #arguments do
     command_line[#command_line + 1] = arguments[index]
   end
@@ -86,10 +96,7 @@ local function with_bootstrap_fixture(include_sync: boolean,
     fs.unlink(workspace)
     fs.mkdir(workspace)
     runtime_test.cleanup(function ()
-      local ok: boolean?, _: string, code: integer =
-        command.execute({"rm", "-rf", workspace})
-      test.assert(ok ~= nil and code == 0,
-                  "could not remove uv bootstrap fixture workspace")
+      command.remove_tree(workspace)
     end)
     compile_bootstrap_fixture(workspace, "uv_bootstrap_app")
     if include_sync then
@@ -140,9 +147,9 @@ function test_default_bootstrap_isolates_failed_child(
     test.assert(why == "exit" and code == 0 and
                 common.contains(output, "uncaught error in async Task:") and
                 common.contains(output, "isolated-child-boom") and
-                common.contains(output, "stack traceback:") and
-                common.contains(output, "uv_bootstrap_app.unhandled_origin"),
+                common.contains(output, "stack traceback:"),
                 "isolated bootstrap failure changed: " .. output)
+    assert_symbolic_frame(context, output, "uv_bootstrap_app.unhandled_origin")
     test.assert(fs.read_file(marker) == "healthy-sibling-finished",
                 "failed child stopped its healthy sibling")
   end)
@@ -159,9 +166,9 @@ function test_default_bootstrap_finishes_child_after_failed_main(
     context:log("END expected failed-main bootstrap diagnostics")
     test.assert(why == "exit" and code == 1 and
                 common.contains(output, "main-task-boom") and
-                common.contains(output, "stack traceback:") and
-                common.contains(output, "uv_bootstrap_app.main_origin"),
+                common.contains(output, "stack traceback:"),
                 "failed main bootstrap changed: " .. output)
+    assert_symbolic_frame(context, output, "uv_bootstrap_app.main_origin")
     test.assert(fs.read_file(marker) ==
                 "healthy-child-after-main-failure",
                 "failed main stopped its healthy child")
@@ -175,16 +182,10 @@ local function compile_stdio_fixture(workspace: string)
     fs.read_file("spec/fixtures/stdlib/native/uv_stdio_probe.h"))
   fs.write_file(workspace .. "/uv_stdio_app.titan",
     fs.read_file("spec/fixtures/stdlib/titan/uv_stdio_app.titan"))
-  local probe_object = system.cwd() .. "/.titan-tests/uv_stdio_probe.o"
-  local status = command.system({
-    "sh", "-c", [==[
-      set -eu
-      cd "$1"
-      titanc uv_stdio_app -X "$2"
-    ]==],
-    "titan-uv-stdio-compile", workspace, probe_object,
-  })
-  test.assert(status == 0, "could not compile uv stdio fixture")
+  local probe_object = command.fixture_object("uv_stdio_probe")
+  local output, why, status = command.compile(workspace, "uv_stdio_app", {"-X", probe_object})
+  test.assert(why == "exit" and status == 0,
+              "could not compile uv stdio fixture: " .. output)
 end
 
 local function with_stdio_fixture(body: StdioFixtureCase)
@@ -193,10 +194,7 @@ local function with_stdio_fixture(body: StdioFixtureCase)
     fs.unlink(workspace)
     fs.mkdir(workspace)
     runtime_test.cleanup(function ()
-      local ok: boolean?, _: string, code: integer =
-        command.execute({"rm", "-rf", workspace})
-      test.assert(ok ~= nil and code == 0,
-                  "could not remove uv stdio fixture workspace")
+      command.remove_tree(workspace)
     end)
     compile_stdio_fixture(workspace)
     body(workspace)
@@ -230,14 +228,12 @@ local function assert_stdio_fixture(workspace: string, mode: string,
   local captured_stderr = ""
   do
     defer restore_stdio_probe()
-    local arguments = {"env", "-u", "TITAN_STDIO_PIPE_FDS"}
+    local arguments = {command.program(workspace, "uv_stdio_app"), mode, result_path}
     if pipe_hint ~= nil then
-      arguments = {"env", "TITAN_STDIO_PIPE_FDS=" .. pipe_hint}
+      status = command.system(arguments, nil, {["TITAN_STDIO_PIPE_FDS"] = pipe_hint})
+    else
+      status = command.system(arguments, nil, nil, {"TITAN_STDIO_PIPE_FDS"})
     end
-    arguments[#arguments + 1] = workspace .. "/uv_stdio_app"
-    arguments[#arguments + 1] = mode
-    arguments[#arguments + 1] = result_path
-    status = command.system(arguments)
     finish_status =
       ffi.titan_uv_test_stdio_finish(nonblocking_mask)
     stdio_probe_active = false
@@ -300,6 +296,9 @@ end
 
 function test_parent_socket_stdio_rejection_does_not_leak(
     _context: test.Context)
+  if ffi.titan_uv_test_stdio_mode_supported(ffi.TITAN_UV_TEST_STDIO_SOCKET_STDOUT as integer) == 0 then
+    test.skip("platform: Windows standard handles do not represent Unix socket descriptors")
+  end
   with_stdio_fixture(function (workspace: string)
     assert_stdio_fixture(
       workspace, "socket", "parent-socket-rejected",
@@ -309,6 +308,9 @@ end
 
 function test_parent_unix_stream_stdio_classification_and_transfer(
     _context: test.Context)
+  if ffi.titan_uv_test_stdio_mode_supported(ffi.TITAN_UV_TEST_STDIO_UNIX_STREAM_ALL as integer) == 0 then
+    test.skip("platform: Windows standard handles do not represent Unix socket descriptors")
+  end
   with_stdio_fixture(function (workspace: string)
     assert_stdio_fixture(
       workspace, "pipes", "parent-pipes-ok",
@@ -318,25 +320,44 @@ function test_parent_unix_stream_stdio_classification_and_transfer(
 end
 
 function test_parent_stdio_hints_preserve_known_descriptor_kinds(
-    _context: test.Context)
-  with_stdio_fixture(function (workspace: string)
-    assert_stdio_fixture(workspace, "pipes", "parent-pipes-ok",
-      ffi.TITAN_UV_TEST_STDIO_PIPE_ALL, 7,
-      "pipe-stdout", "pipe-stderr", "invalid")
-    assert_stdio_fixture(workspace, "tty", "parent-tty-ok",
-      ffi.TITAN_UV_TEST_STDIO_TTY_SLAVE, 0, "tty-output", "", "1")
-    assert_stdio_fixture(workspace, "file", "parent-file-rejected",
-      ffi.TITAN_UV_TEST_STDIO_FILE_STDOUT, 0, "", "", "1")
-    local modes = {
-      ffi.TITAN_UV_TEST_STDIO_SOCKET_STDOUT,
-      ffi.TITAN_UV_TEST_STDIO_INET_DATAGRAM_STDOUT,
-      ffi.TITAN_UV_TEST_STDIO_UNIX_DATAGRAM_STDOUT,
-    }
-    for index = 1, #modes do
-      assert_stdio_fixture(workspace, "socket", "parent-socket-rejected",
-        modes[index], 0, "", "", "1")
-    end
+    context: test.Context)
+  context:run("pipe", function (_context: test.Context)
+    with_stdio_fixture(function (workspace: string)
+      assert_stdio_fixture(workspace, "pipes", "parent-pipes-ok",
+        ffi.TITAN_UV_TEST_STDIO_PIPE_ALL, 7,
+        "pipe-stdout", "pipe-stderr", "invalid")
+    end)
   end)
+  context:run("tty", function (_context: test.Context)
+    with_stdio_fixture(function (workspace: string)
+      assert_stdio_fixture(workspace, "tty", "parent-tty-ok",
+        ffi.TITAN_UV_TEST_STDIO_TTY_SLAVE, 0, "tty-output", "", "1")
+    end)
+  end)
+  context:run("regular_file", function (_context: test.Context)
+    with_stdio_fixture(function (workspace: string)
+      assert_stdio_fixture(workspace, "file", "parent-file-rejected",
+        ffi.TITAN_UV_TEST_STDIO_FILE_STDOUT, 0, "", "", "1")
+    end)
+  end)
+  local modes: {integer} = {
+    ffi.TITAN_UV_TEST_STDIO_SOCKET_STDOUT,
+    ffi.TITAN_UV_TEST_STDIO_INET_DATAGRAM_STDOUT,
+    ffi.TITAN_UV_TEST_STDIO_UNIX_DATAGRAM_STDOUT,
+  }
+  local names = {"inet_stream", "inet_datagram", "unix_datagram"}
+  for index = 1, #modes do
+    local mode = modes[index]
+    context:run(names[index], function (_context: test.Context)
+      if ffi.titan_uv_test_stdio_mode_supported(mode) == 0 then
+        test.skip("platform: Windows standard handles do not represent Unix socket descriptors")
+      end
+      with_stdio_fixture(function (workspace: string)
+        assert_stdio_fixture(workspace, "socket", "parent-socket-rejected",
+          mode, 0, "", "", "1")
+      end)
+    end)
+  end
 end
 
 function test_parent_closed_stdio_reports_ebadf_without_leaking(
@@ -350,7 +371,7 @@ end
 function test_parent_denied_unix_stdio_uses_only_valid_per_fd_pipe_hints(
     _context: test.Context)
   if ffi.titan_uv_test_stdio_metadata_denial_supported() == 0 then
-    test.skip("stdio metadata denial requires Linux x86_64 or aarch64")
+    test.skip("platform: stdio metadata denial requires the Linux x86_64 or aarch64 seccomp fixture")
   end
   with_stdio_fixture(function (workspace: string)
     local sockets = ffi.TITAN_UV_TEST_STDIO_UNIX_STREAM_ALL
@@ -377,7 +398,7 @@ end
 function test_parent_partial_metadata_denial_preserves_socket_contradictions(
     _context: test.Context)
   if ffi.titan_uv_test_stdio_metadata_denial_supported() == 0 then
-    test.skip("stdio metadata denial requires Linux x86_64 or aarch64")
+    test.skip("platform: stdio metadata denial requires the Linux x86_64 or aarch64 seccomp fixture")
   end
   with_stdio_fixture(function (workspace: string)
     local sockets = ffi.TITAN_UV_TEST_STDIO_UNIX_STREAM_ALL
@@ -395,7 +416,7 @@ end
 function test_parent_stdio_denial_renders_operation_error_fields(
     _context: test.Context)
   if ffi.titan_uv_test_stdio_metadata_denial_supported() == 0 then
-    test.skip("stdio metadata denial requires Linux x86_64 or aarch64")
+    test.skip("platform: stdio metadata denial requires the Linux x86_64 or aarch64 seccomp fixture")
   end
   with_stdio_fixture(function (workspace: string)
     assert_stdio_fixture(workspace, "denied-diagnostic", "parent-denied-diagnostic",

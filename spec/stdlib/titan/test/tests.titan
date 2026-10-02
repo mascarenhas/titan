@@ -4,7 +4,7 @@ local runtime_test = import "support.runtime.titan"
 local common = import "support.common.titan"
 
 local function assert_outside_runner_probe(source: string, label: string)
-  local output, why, code = command.capture({"lua", "-E", "-e", source})
+  local output, why, code = command.lua(source)
   test.assert(why == "exit" and code == 0,
               label .. " failed: " .. output)
 end
@@ -98,23 +98,34 @@ local function cleanup_trace_origin()
   raise "cleanup-trace"
 end
 
-function test_runtime_cleanup_failure_replaces_pass(_context: test.Context)
+local function assert_cleanup_trace(context: test.Context, trace: string)
+  test.assert(#trace > 0, "cleanup failure omitted its traceback")
+  context:run("symbolic_frame", function (_context: test.Context)
+    if common.is_windows() then
+      test.skip("unsupported: native Windows tracebacks retain raw addresses without Titan symbols")
+    end
+    test.assert(common.contains(trace, "cleanup_trace_origin"),
+                "cleanup failure omitted its original frame")
+  end)
+end
+
+function test_runtime_cleanup_failure_replaces_pass(context: test.Context)
   local failure, failure_traceback = caught_runtime(function ()
     runtime_test.cleanup(cleanup_trace_origin)
   end)
-  test.assert(failure == "cleanup-trace" and
-              common.contains(failure_traceback, "cleanup_trace_origin"),
-              "cleanup failure did not replace a passing body with its trace")
+  test.assert(failure == "cleanup-trace",
+              "cleanup failure did not replace a passing body")
+  assert_cleanup_trace(context, failure_traceback)
 end
 
-function test_runtime_cleanup_failure_replaces_skip(_context: test.Context)
+function test_runtime_cleanup_failure_replaces_skip(context: test.Context)
   local failure, failure_traceback = caught_runtime(function ()
     runtime_test.cleanup(cleanup_trace_origin)
     test.skip("body skip")
   end)
-  test.assert(failure == "cleanup-trace" and
-              common.contains(failure_traceback, "cleanup_trace_origin"),
+  test.assert(failure == "cleanup-trace",
               "cleanup failure did not replace a skipped body")
+  assert_cleanup_trace(context, failure_traceback)
 end
 
 function test_runtime_body_failure_precedes_cleanup_failure(

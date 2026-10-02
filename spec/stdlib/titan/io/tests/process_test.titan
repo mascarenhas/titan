@@ -1,3 +1,43 @@
+-- Quote the controlled native fixture arguments in the shell under test. Only
+-- the syntax differs; the byte/stream/status assertions below are shared.
+local function popen_quote(argument: string): string
+  local output = "'"
+  if common.is_windows() then
+    output = '"'
+    local slashes = 0
+    for index = 1, #argument do
+      local byte = strings.sub(argument, index, index)
+      if byte == "\\" then
+        slashes = slashes + 1
+      else
+        if byte == '"' then
+          output = output .. strings.rep("\\", 2 * slashes + 1)
+        else
+          output = output .. strings.rep("\\", slashes)
+        end
+        output = output .. byte
+        slashes = 0
+      end
+    end
+    return output .. strings.rep("\\", 2 * slashes) .. '"'
+  end
+  for index = 1, #argument do
+    local byte = strings.sub(argument, index, index)
+    if byte == "'" then byte = "'\\''" end
+    output = output .. byte
+  end
+  return output .. "'"
+end
+
+local function shell_syntax(unix: string, windows: string): string
+  if common.is_windows() then return windows end
+  return unix
+end
+
+local function shell_newline(): string
+  return shell_syntax("\n", "\r\n")
+end
+
 local function check_stream_interfaces(pipe: stream.InputOutputStream)
   local reader: stream.Reader = pipe
   local writer: stream.Writer = pipe
@@ -25,13 +65,16 @@ function test_io_process_interactive_merged_output_and_status(
     do
       stream.popen("printf forbidden\0suffix")
     catch
+      test.assert(error is async.OperationError,
+                  "invalid popen command lost its operation error")
+      test.assert((error as async.OperationError).name == "EINVAL",
+                  "embedded NUL command lost EINVAL")
       rejected_nul = true
     end
     test.assert(rejected_nul, "popen accepted an embedded NUL command")
 
-    local pipe = stream.popen(
-        "IFS= read -r line; printf 'OUT:%s' \"$line\"; " ..
-        "printf ':ERR' >&2; exit 7")
+    local pipe = stream.popen(popen_quote(process_support.child_path()) ..
+                              " popen-interactive")
     defer pipe:close()
     check_stream_interfaces(pipe)
     pipe:write("hello world\n")
@@ -61,9 +104,9 @@ end
 
 function test_io_process_binary_delimiters(_context: test.Context)
   runtime_test.run(function ()
-    local payload = "head\0middle\ntrail"
-    local pipe = stream.popen(
-        "dd bs=1 count=17 2>/dev/null; printf '|done'")
+    local payload = "head\0middle\r\n\26\255trail"
+    local pipe = stream.popen(popen_quote(process_support.child_path()) ..
+        " echo-count " .. #payload .. " " .. popen_quote("|done"))
     defer pipe:close()
     pipe:write(payload)
     test.assert(pipe:read_until("|", true) == payload,
@@ -83,9 +126,10 @@ function test_io_process_close_terminates_and_reaps(
     _context: test.Context)
   runtime_test.run(function ()
     local pipe = stream.popen(
-        "printf 'READY\nUNREAD\n'; while :; do :; done")
+        shell_syntax("printf 'READY\\nUNREAD\\n'; while :; do :; done",
+                     "echo READY&echo UNREAD&for /l %i in (0,0,1) do @rem hold"))
     defer pipe:close()
-    test.assert(pipe:read_until("\n", true) == "READY",
+    test.assert(pipe:read_until(shell_newline(), true) == "READY",
                 "running popen command did not become ready")
     pipe:close()
     pipe:close()
@@ -99,5 +143,143 @@ function test_io_process_close_terminates_and_reaps(
     test.assert(first.code == second.code and first.signal == second.signal and
                 first.signal_number == second.signal_number,
                 "popen close did not retain the signal exit status")
+  end)
+end
+
+function test_io_process_quoted_unicode_arguments(_context: test.Context)
+  runtime_test.run(function ()
+    local child = process_support.child_path()
+    local cwd = system.cwd()
+    local name = "TITAN_POPEN_METADATA"
+    local value = "space value"
+    local arguments: {string} = {"", "space argument", "a&b|<>^", "ação東京😀", "trailing\\"}
+    local command = shell_syntax(name .. "=" .. popen_quote(value) .. " ",
+                                  'set "' .. name .. '=' .. value .. '"&&') ..
+                    popen_quote(child) .. " argv-env-cwd " .. name
+    local expected = "cwd:" .. #cwd .. ":" .. cwd .. "\n" ..
+        "env:" .. #value .. ":" .. value .. "\n" ..
+        "argv0:" .. #child .. ":" .. child .. "\n"
+    for index = 1, #arguments do
+      local argument = arguments[index]
+      command = command .. " " .. popen_quote(argument)
+      expected = expected .. "arg:" .. #argument .. ":" .. argument .. "\n"
+    end
+    local previous? = system.getenv(name)
+    local pipe = stream.popen(command)
+    defer pipe:close()
+    test.assert(read_process_output(pipe) == expected,
+                "shell quoting changed UTF-8 arguments or metacharacters")
+    process_support.assert_normal(pipe:wait(), "quoted shell child")
+    test.assert(system.getenv(name) == previous,
+                "shell changed its parent's environment")
+  end)
+end
+
+function test_io_process_shell_pipeline_and_redirection(_context: test.Context)
+  runtime_test.run(function ()
+    local temporary = fs.tmpname()
+    local path = temporary .. " output ação 東京.bin"
+    defer do
+      if fs.stat(temporary) ~= nil then fs.unlink(temporary) end
+      if fs.stat(path) ~= nil then fs.unlink(path) end
+    end
+    fs.rename(temporary, path)
+    -- cmd's TYPE builtin uses native path separators.
+    if common.is_windows() then
+      local native = ""
+      for index = 1, #path do
+        local byte = strings.sub(path, index, index)
+        if byte == "/" then byte = "\\" end
+        native = native .. byte
+      end
+      path = native
+    end
+    local child = popen_quote(process_support.child_path())
+    local pipe = stream.popen(child .. " dual 64 > " .. popen_quote(path) ..
+        " 2>&1 && " .. shell_syntax("cat ", "type ") .. popen_quote(path) ..
+        " | " .. child .. " echo")
+    defer pipe:close()
+    local bytes = read_process_output(pipe)
+    local stdout_count, stderr_count = 0, 0
+    for index = 1, #bytes do
+      local byte = strings.sub(bytes, index, index)
+      if byte == "O" then stdout_count = stdout_count + 1
+      elseif byte == "E" then stderr_count = stderr_count + 1
+      else test.assert(false, "shell pipeline gained unexpected output") end
+    end
+    test.assert(stdout_count == 64 and stderr_count == 64,
+                "shell pipeline lost merged output")
+    test.assert(fs.read_file(path) == bytes,
+                "redirection did not preserve exact bytes")
+    process_support.assert_normal(pipe:wait(), "shell pipeline")
+  end)
+end
+
+function test_io_process_nonzero_and_missing_command_status(_context: test.Context)
+  runtime_test.run(function ()
+    local failed = stream.popen(shell_syntax("exit 126", "exit /b 126"))
+    defer failed:close()
+    test.assert(read_process_output(failed) == "" and failed:wait().code == 126,
+                "nonzero shell exit became a spawn error")
+    local missing = stream.popen(popen_quote(process_support.child_path() .. ".absent"))
+    defer missing:close()
+    test.assert(#read_process_output(missing) > 0,
+                "missing command lost merged diagnostic")
+    local expected = 127
+    if common.is_windows() then expected = 1 end
+    test.assert(missing:wait().code == expected,
+                "quoted missing command lost the native shell exit code")
+  end)
+end
+
+local function popen_cancellation_case(waiting: boolean)
+  runtime_test.run(function ()
+    local pipe = stream.popen(shell_syntax(
+        "printf 'READY\\n'; IFS= read -r ignored; printf 'AFTER\\n'",
+        "echo READY&set /p ignored=&echo AFTER"))
+    defer pipe:close()
+    test.assert(pipe:read_until(shell_newline(), true) == "READY",
+                "shell did not become ready")
+    local task = async.run<|value, value|>(function (): value
+      if waiting then pipe:wait() else pipe:read() end
+      return nil
+    end)
+    defer task_support.cancel_and_join_task(task, "popen Task cleanup")
+    process_support.wait_until_waiting(task, "popen operation")
+    timer.sleep(10)
+    test.assert(task:status():as_string() == "waiting",
+                "pending popen operation blocked its Runtime")
+    task:cancel(async.CancellationReason.simple("popen operation cancelled"))
+    async.join(task)
+    test.assert(task:status():has_cancelled(), "popen operation ignored cancellation")
+    pipe:write("continue" .. shell_newline())
+    test.assert(read_process_output(pipe) == "AFTER" .. shell_newline(),
+                "cancelling a waiter killed or closed its shell")
+    process_support.assert_normal(pipe:wait(), "shell after waiter cancellation")
+  end)
+end
+
+function test_io_process_wait_cancellation_preserves_child(_context: test.Context)
+  popen_cancellation_case(true)
+end
+
+function test_io_process_read_cancellation_preserves_child(_context: test.Context)
+  popen_cancellation_case(false)
+end
+
+function test_io_process_fixed_system_shell(_context: test.Context)
+  runtime_test.run(function ()
+    local name = shell_syntax("SHELL", "COMSPEC")
+    local previous? = system.getenv(name)
+    defer do
+      if previous then system.setenv(name, previous)
+      else system.unsetenv(name) end
+    end
+    system.setenv(name, process_support.child_path() .. ".absent")
+    local pipe = stream.popen("echo SYSTEM_SHELL")
+    defer pipe:close()
+    test.assert(read_process_output(pipe) == "SYSTEM_SHELL" .. shell_newline(),
+                "popen did not select its fixed system shell")
+    process_support.assert_normal(pipe:wait(), "fixed system shell")
   end)
 end

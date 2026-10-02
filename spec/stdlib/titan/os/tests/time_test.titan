@@ -10,6 +10,8 @@ function test_clocks_and_calendar_results(_context: test.Context)
               "CPU clock did not remain monotonic")
   test.assert(system.difftime(27, 9) == 18.0)
   test.assert(system.difftime(25, 10) == 15.0)
+  test.assert(system.date("!%Y-%m-%d %H:%M:%S", 946684800) == "2000-01-01 00:00:00",
+              "UTC calendar conversion changed")
 
   test.assert(support.as_string(system.date("!%Y-%m-%d %H:%M:%S", 0),
                         "formatted UTC date") ==

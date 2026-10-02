@@ -108,15 +108,31 @@ static int run(int argc, char **argv, wchar_t **wide_argv) {
       if (write_all(stdout, buffer, count)) return 1;
     return ferror(stdin) || fflush(stdout) != 0 ? 2 : 0;
   }
-  if (strcmp(argv[1], "echo-count") == 0 && argc == 3) {
+  if (strcmp(argv[1], "echo-count") == 0 && (argc == 3 || argc == 4)) {
     long remaining = strtol(argv[2], NULL, 10);
     if (remaining < 0) return 2;
     while (remaining-- > 0) {
       int byte = fgetc(stdin);
       if (byte == EOF || fputc(byte, stdout) == EOF) return 1;
     }
+    if (argc == 4 && fputs(argv[3], stdout) == EOF) return 1;
     return fflush(stdout) == 0 ? 0 : 2;
   }
+  if (strcmp(argv[1], "output") == 0 && argc == 4) {
+    return write_all(stdout, argv[2], strlen(argv[2])) || fflush(stdout) != 0 ||
+           write_all(stderr, argv[3], strlen(argv[3])) || fflush(stderr) != 0;
+  }
+  if (strcmp(argv[1], "popen-interactive") == 0) {
+    int byte;
+    if (fputs("OUT:", stdout) == EOF) return 1;
+    while ((byte = fgetc(stdin)) != '\n') {
+      if (byte == EOF || fputc(byte, stdout) == EOF) return 1;
+    }
+    if (fflush(stdout) != 0 || fputs(":ERR", stderr) == EOF ||
+        fflush(stderr) != 0) return 1;
+    return 7;
+  }
+  if (strcmp(argv[1], "wait") == 0) Sleep(INFINITE);
   if (strcmp(argv[1], "dual") == 0 && argc == 3) {
     long count = strtol(argv[2], NULL, 10), i;
     for (i = 0; i < count; i++)

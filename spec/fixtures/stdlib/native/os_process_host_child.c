@@ -7,6 +7,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <signal.h>
 
 static int write_all(FILE *stream, const void *data, size_t length) {
   const unsigned char *cursor = (const unsigned char *)data;
@@ -90,6 +91,40 @@ int main(int argc, char **argv) {
   }
   if (strcmp(argv[1], "echo") == 0)
     return echo_input();
+  if (strcmp(argv[1], "echo-count") == 0 && (argc == 3 || argc == 4)) {
+    long remaining = strtol(argv[2], NULL, 10);
+    if (remaining < 0) return 2;
+    while (remaining-- > 0) {
+      int byte = fgetc(stdin);
+      if (byte == EOF || fputc(byte, stdout) == EOF) return 1;
+    }
+    if (argc == 4 && fputs(argv[3], stdout) == EOF) return 1;
+    return fflush(stdout) == 0 ? 0 : 2;
+  }
+  if (strcmp(argv[1], "output") == 0 && argc == 4) {
+    return write_all(stdout, argv[2], strlen(argv[2])) || fflush(stdout) != 0 ||
+           write_all(stderr, argv[3], strlen(argv[3])) || fflush(stderr) != 0;
+  }
+  if (strcmp(argv[1], "popen-interactive") == 0) {
+    int byte;
+    if (fputs("OUT:", stdout) == EOF) return 1;
+    while ((byte = fgetc(stdin)) != '\n') {
+      if (byte == EOF || fputc(byte, stdout) == EOF) return 1;
+    }
+    if (fflush(stdout) != 0 || fputs(":ERR", stderr) == EOF ||
+        fflush(stderr) != 0) return 1;
+    return 7;
+  }
+  if (strcmp(argv[1], "wait") == 0) {
+    for (;;) pause();
+  }
+  if (strcmp(argv[1], "signal-parent") == 0 && argc == 3) {
+    int signal_number;
+    if (strcmp(argv[2], "usr1") == 0) signal_number = SIGUSR1;
+    else if (strcmp(argv[2], "usr2") == 0) signal_number = SIGUSR2;
+    else return 2;
+    return kill(getppid(), signal_number) == 0 ? 0 : 1;
+  }
   if (strcmp(argv[1], "dual") == 0 && argc == 3)
     return dual_output(argv[2]);
   if (strcmp(argv[1], "exit") == 0 && argc == 3)

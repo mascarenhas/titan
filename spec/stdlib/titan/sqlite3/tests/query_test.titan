@@ -169,6 +169,7 @@ function test_row_snapshots_survive_fetch_and_all_owner_closes(
     context: test.Context)
   local first: sqlite3.Row? = nil
   local second: sqlite3.Row? = nil
+  local bound: sqlite3.Row? = nil
   runtime_test.run(function ()
     local connection = sqlite3.connect(":memory:")
     defer connection:close()
@@ -181,6 +182,15 @@ function test_row_snapshots_survive_fetch_and_all_owner_closes(
     first = required_row(cursor)
     second = required_row(cursor)
     test.assert(cursor:fetch() == nil, "snapshot query did not exhaust")
+
+    local scalars = connection:prepare("SELECT ?, ?, ?, ?, ?, ?")
+    defer scalars:close()
+    local scalar_cursor = scalars:query(73, 42.5, "héllo 世界",
+        sqlite3.Blob.new("\0\255binary\0"), sqlite3.Blob.new(""), nil)
+    defer scalar_cursor:close()
+    bound = required_row(scalar_cursor)
+    test.assert(scalar_cursor:fetch() == nil and scalar_cursor:fetch() == nil,
+                "bound snapshot query did not retain exhaustion")
   end)
   -- Row access is synchronous and independent of any live Task or Runtime.
   test.assert(first:get(1) as string == "first" and
@@ -193,6 +203,18 @@ function test_row_snapshots_survive_fetch_and_all_owner_closes(
   test.assert(first.columns[1].name == "text" and
               first.columns[2].name == "bytes",
               "Connection close invalidated row metadata")
+  local integer_value: integer = bound:get(1)
+  local float_value: float = bound:get(2)
+  local text_value: string = bound:get(3)
+  local binary_value: sqlite3.Blob = bound:get(4)
+  local empty_value: sqlite3.Blob = bound:get(5)
+  test.assert(integer_value == 73 and float_value == 42.5 and
+              text_value == "héllo 世界",
+              "owner close changed bound scalar values")
+  test.assert(binary_value.bytes == "\0\255binary\0" and empty_value.bytes == "",
+              "owner close changed binary or empty BLOB bytes")
+  test.assert(#bound.columns == 6 and bound:get(6) == nil,
+              "owner close truncated a trailing SQL NULL")
 end
 
 function test_column_metadata_and_automatic_schema_reprepare(

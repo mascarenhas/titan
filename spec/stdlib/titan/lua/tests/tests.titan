@@ -8,7 +8,3 @@ local tlua = import "lua"
 local common = import "support.common.titan"
 local lua_support = import "lua.test_support.titan"
 local task_support = import "support.async.titan"
-
--- Package-search tests inspect and temporarily replace existing Lua package
--- fields through the narrow C API boundary.
-foreign import "sys/stat.h"

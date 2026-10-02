@@ -107,7 +107,7 @@ function test_core_locale_independent_numbers(_context: test.Context)
       if point ~= "." then changed = true; break end
     end
   end
-  if not changed then test.skip("no alternate numeric locale installed") end
+  if not changed then test.skip("capability: no alternate numeric locale installed") end
   local before = ffi.setlocale(ffi.LC_NUMERIC, nil) as string
   test.assert(json.encode(1234.5) == "1234.5")
   test.assert(json.decode("1234.5", reflect.Type.is_float()) == 1234.5)

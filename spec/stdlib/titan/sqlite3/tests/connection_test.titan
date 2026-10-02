@@ -15,18 +15,40 @@ end
 
 function test_file_database_persists_across_connections(context: test.Context)
   runtime_test.run(function ()
-    local path = fs.tmpname()
-    defer fs.unlink(path)
+    local workspace = fs.tmpname()
+    fs.unlink(workspace)
+    fs.mkdir(workspace)
+    defer fs.rmdir(workspace)
+    local directory = workspace .. "/sqlite persistence héllo 世界"
+    fs.mkdir(directory)
+    defer fs.rmdir(directory)
+    local path = directory .. "/database héllo 世界.sqlite3"
+    defer remove_if_present(path)
     local connection = sqlite3.connect(path)
     defer connection:close()
     execute_sql(connection, "CREATE TABLE persisted (value INTEGER)")
+    test.assert(connection:get_autocommit(),
+                "new file database was not in autocommit")
+    connection:set_autocommit(false)
     execute_sql(connection, "INSERT INTO persisted VALUES (73)")
+    connection:commit()
+    test.assert(connection:get_autocommit(),
+                "file COMMIT silently started another transaction")
+    connection:set_autocommit(false)
+    execute_sql(connection, "INSERT INTO persisted VALUES (99)")
+    connection:rollback()
+    test.assert(connection:get_autocommit() and
+                scalar_integer(connection, "SELECT count(*) FROM persisted") == 1,
+                "file ROLLBACK retained data or restarted a transaction")
     connection:close()
 
     local reopened = sqlite3.connect(path)
     defer reopened:close()
     test.assert(scalar_integer(reopened, "SELECT value FROM persisted") == 73,
                 "closed file database lost its committed data")
+    reopened:close()
+    test.assert(fs.stat(path).kind == "file" and fs.stat(path).size > 0,
+                "Unicode database path did not contain a persistent regular file")
   end)
 end
 

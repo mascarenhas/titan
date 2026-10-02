@@ -43,7 +43,7 @@ function test_stream_facades_capture_merge_inheritance_options_and_interfaces(
     option_tail_called = false
     process_support.expect_failure(function ()
       local unexpected = system.spawn(
-        "/bin/sh", {"-c", ":"}, reject_option, forbidden_tail)
+        process_support.child_path(), {"exit", "0"}, reject_option, forbidden_tail)
       defer cleanup_process(unexpected)
     end, "spawn accepted a rejected option")
     test.assert(not option_tail_called,
@@ -51,7 +51,7 @@ function test_stream_facades_capture_merge_inheritance_options_and_interfaces(
 
     do
       local separate = system.spawn(
-        "/bin/sh", {"-c", "printf separate; printf diagnostic >&2"})
+        process_support.child_path(), {"output", "separate", "diagnostic"})
       defer cleanup_process(separate)
       local input = process_support.required_output(separate.stdin, "default stdin")
       local output = process_support.required_input(separate.stdout, "default stdout")
@@ -71,7 +71,7 @@ function test_stream_facades_capture_merge_inheritance_options_and_interfaces(
 
     do
       local merged = system.spawn(
-        "/bin/sh", {"-c", "printf A; printf B >&2"},
+        process_support.child_path(), {"output", "A", "B"},
         system.with_merged_output)
       defer cleanup_process(merged)
       process_support.required_output(merged.stdin, "merged stdin"):close()
@@ -87,8 +87,27 @@ function test_stream_facades_capture_merge_inheritance_options_and_interfaces(
     end
 
     do
+      local merged = system.spawn(process_support.child_path(), {"dual", "64"},
+                                  system.with_merged_output)
+      defer cleanup_process(merged)
+      process_support.required_output(merged.stdin, "bulk merged stdin"):close()
+      local output = process_support.required_input(merged.stdout, "bulk merged output")
+      test.assert(output == merged.stderr, "merged streams do not share one facade")
+      local bytes = process_support.read_all(output)
+      local stdout_count, stderr_count = 0, 0
+      for index = 1, #bytes do
+        local byte = strings.sub(bytes, index, index)
+        if byte == "O" then stdout_count = stdout_count + 1
+        elseif byte == "E" then stderr_count = stderr_count + 1
+        else test.assert(false, "merged stream gained an unexpected byte") end
+      end
+      test.assert(stdout_count == 64 and stderr_count == 64, "merged output lost bytes")
+      process_support.assert_normal(merged:wait(), "bulk merged output")
+    end
+
+    do
       local recaptured = system.spawn(
-        "/bin/sh", {"-c", "printf E; printf F >&2"},
+        process_support.child_path(), {"output", "E", "F"},
         system.with_merged_output, inherit_then_capture,
         system.with_stderr, system.with_stderr)
       defer cleanup_process(recaptured)
@@ -107,7 +126,7 @@ function test_stream_facades_capture_merge_inheritance_options_and_interfaces(
 
     do
       local inherited = system.spawn(
-        "/bin/sh", {"-c", ":"},
+        process_support.child_path(), {"exit", "0"},
         system.with_parent_stdout, system.with_parent_stderr)
       defer cleanup_process(inherited)
       process_support.required_output(inherited.stdin, "inherited stdin"):close()
@@ -122,7 +141,7 @@ function test_stream_facade_close_wakes_pending_reader(
     context: test.Context)
   runtime_test.run(function ()
     local process = system.spawn(
-      "/bin/sh", {"-c", "while :; do :; done"})
+      process_support.child_path(), {"wait"})
     defer cleanup_process(process)
 
     local input = process_support.required_output(process.stdin, "pending stdin")
@@ -168,7 +187,7 @@ function test_closed_stream_facades_remain_terminal_in_later_runtime(
   local closed_output: system.OutputStream? = nil
 
   runtime_test.run(function ()
-    local process = system.spawn("/bin/sh", {"-c", ":"})
+    local process = system.spawn(process_support.child_path(), {"exit", "0"})
     defer cleanup_process(process)
     local input = process_support.required_output(
       process.stdin, "retained stdin")

@@ -55,27 +55,39 @@ local function inject(): string
 end
 
 function test_preserves_callback_traces_and_injects_suspended_error(
-    _context: test.Context)
+    context: test.Context)
   local caught = false
   do
     uncaught()
   catch
     caught = true
     test.assert(error == "boom", "coroutine changed the callback error")
-    test.assert(support.contains(traceback, "in coroutine.tests.fail"),
-                "missing coroutine callback frame\n" .. traceback)
-    test.assert(support.contains(traceback, "in coroutine.tests.uncaught"),
-                "missing propagation frame\n" .. traceback)
+    local trace = traceback
+    test.assert(#trace > 0, "coroutine callback omitted its traceback")
+    context:run("callback_symbolic_frames", function (_context: test.Context)
+      if common.is_windows() then
+        test.skip("unsupported: native Windows tracebacks retain raw addresses without Titan symbols")
+      end
+      test.assert(support.contains(trace, "in coroutine.tests.fail"),
+                  "missing coroutine callback frame\n" .. trace)
+      test.assert(support.contains(trace, "in coroutine.tests.uncaught"),
+                  "missing propagation frame\n" .. trace)
+    end)
   end
   test.assert(caught, "uncaught callback error was not raised")
 
   test.assert(inject() == "ready,caught:oops,dead")
   local injected = injected_trace as string
-  test.assert(support.contains(injected, "in coroutine.tests.catcher"),
-              "missing injected yield frame\n" .. injected)
-  test.assert(not support.contains(injected, "in coroutine.tests.inject"),
-              "yield-side injected error appended caller propagation\n" ..
-              injected)
+  test.assert(#injected > 0, "injected error omitted its traceback")
+  context:run("injected_symbolic_frames", function (_context: test.Context)
+    if common.is_windows() then
+      test.skip("unsupported: native Windows tracebacks retain raw addresses without Titan symbols")
+    end
+    test.assert(support.contains(injected, "in coroutine.tests.catcher"),
+                "missing injected yield frame\n" .. injected)
+    test.assert(not support.contains(injected, "in coroutine.tests.inject"),
+                "yield-side injected error appended caller propagation\n" .. injected)
+  end)
 
   caught = false
   do
@@ -83,10 +95,17 @@ function test_preserves_callback_traces_and_injects_suspended_error(
   catch
     caught = true
     test.assert(error == "fresh", "fresh raise changed its error")
-    test.assert(support.contains(traceback, "in coroutine.tests.fresh_fail"),
-                "fresh trace missing fresh raise\n" .. traceback)
-    test.assert(not support.contains(traceback, "in coroutine.tests.fail"),
-                "fresh trace retained dead coroutine frame\n" .. traceback)
+    local trace = traceback
+    test.assert(#trace > 0, "fresh error omitted its traceback")
+    context:run("fresh_symbolic_frames", function (_context: test.Context)
+      if common.is_windows() then
+        test.skip("unsupported: native Windows tracebacks retain raw addresses without Titan symbols")
+      end
+      test.assert(support.contains(trace, "in coroutine.tests.fresh_fail"),
+                  "fresh trace missing fresh raise\n" .. trace)
+      test.assert(not support.contains(trace, "in coroutine.tests.fail"),
+                  "fresh trace retained dead coroutine frame\n" .. trace)
+    end)
   end
   test.assert(caught, "fresh error was not raised")
 end

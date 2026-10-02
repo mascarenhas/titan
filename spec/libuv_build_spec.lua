@@ -1067,8 +1067,9 @@ esac
     it("keeps the native test object inventory complete with exact source edges", function()
         local manifest = "spec/support/stdlib_test_modules.mk"
         local modules = makefile_words("TITAN_TEST_MODULES", manifest)
-        local listed, owners = {}, {}
+        local listed, owners, test_owners = {}, {}, {}
         for _, module in ipairs(modules) do
+            assert.falsy(owners[module], "duplicate native module " .. module)
             owners[module] = true
             local imports = {}
             local foreign = false
@@ -1082,6 +1083,9 @@ esac
                         imports[node.modname] = true
                     elseif node._tag == "Ast.TopLevelForeignFunc" then
                         foreign = true
+                    elseif node._tag == "Ast.TopLevelFunc" and not node.islocal and
+                           node.name:match("^test_") then
+                        test_owners[module] = true
                     end
                 end
             end
@@ -1094,28 +1098,6 @@ esac
                 "TITAN_TEST_FOREIGN_" .. module .. " := 1", 1, true) ~= nil
             assert.equal(foreign, has_foreign, module)
         end
-        -- The Windows behavior runner owns these additional roots. Keep them
-        -- out of the Unix object graph while still accounting for every source.
-        local windows_owners = {}
-        local windows_manifest = read_file("spec/support/windows_stdlib_modules.tsv")
-        for line in windows_manifest:gmatch("[^\r\n]+") do
-            if line:sub(1, 1) ~= "#" then
-                local module, source = line:match("^([^\t]+)\t([^\t]+)$")
-                assert.truthy(module, line)
-                assert.truthy(module:match("^[%a_][%w_.]*$"), module)
-                assert.falsy(module:find("..", 1, true), module)
-                assert.falsy(module:sub(-1) == ".", module)
-                assert.equal("spec/stdlib/titan/" .. module:gsub("%.", "/") ..
-                    ".titan", source)
-                assert.falsy(owners[module], module)
-                assert.falsy(windows_owners[module], module)
-                assert.falsy(listed[source], source)
-                assert.equal("file", lfs.attributes(source, "mode"), source)
-                windows_owners[module] = true
-                listed[source] = true
-            end
-        end
-        assert.truthy(next(windows_owners), "missing Windows test source inventory")
         local discovered = {}
         local function visit(directory)
             for entry in lfs.dir(directory) do
@@ -1128,10 +1110,64 @@ esac
         end
         visit("spec/stdlib/titan")
         assert.same(discovered, listed)
-        for _, module in ipairs(makefile_words("TITAN_STDLIB_TEST_ROOTS")) do
-            if module == "$(TITAN_STDLIB_TEST_PROGRAM_ROOT)" then module = "test.tests" end
+        local roots = {}
+        local program_root = makefile_words("TITAN_STDLIB_TEST_PROGRAM_ROOT", manifest)[1]
+        for _, entry in ipairs(makefile_words("TITAN_STDLIB_TEST_ROOTS", manifest)) do
+            local module = entry == "$(TITAN_STDLIB_TEST_PROGRAM_ROOT)" and program_root or entry
+            assert.falsy(roots[module], "duplicate native root " .. module)
+            roots[module] = true
             assert.truthy(owners[module], module)
         end
+        assert.same(test_owners, roots, "every test owner must be an explicit shared root")
+        assert.truthy(read_file("Makefile.windows.stdlib"):find(
+            "include " .. manifest, 1, true))
+        assert.falsy(lfs.attributes("spec/support/windows_stdlib_modules.tsv"))
+        assert.falsy(lfs.attributes("spec/support/windows_stdlib_cases.txt"))
+    end)
+
+    it("validates complete native reports and narrowly classified skips", function()
+        local validate, final_counts = assert(loadfile("scripts/check_stdlib_test_output.lua"))()
+        local roots = { "first.tests", "second.tests" }
+        local output = table.concat({
+            "[==========] Running Titan tests.",
+            "[ RUN      ] first.tests.test_value",
+            "[       OK ] first.tests.test_value",
+            "[ RUN      ] second.tests.test_optional",
+            "[  SKIPPED ] second.tests.test_optional.child (parent skipped: capability: locale unavailable)",
+            "[  SKIPPED ] second.tests.test_optional (capability: locale unavailable)",
+            "[==========] 3 tests ran.",
+            "[  PASSED  ] 1 test.",
+            "[  SKIPPED ] 2 tests.",
+        }, "\n")
+        local result, err = validate(output, roots, false)
+        assert.truthy(result, err)
+        assert.equal(3, result.count)
+        assert.equal(2, result.owners)
+        assert.equal(2, result.categories.capability)
+        local function rejects(contents, expected, inventory)
+            local accepted, message = validate(contents, inventory or roots, false)
+            assert.is_nil(accepted)
+            assert.truthy(message:find(expected, 1, true), message)
+        end
+        rejects(output:gsub("capability: locale unavailable", "no locale"), "unclassified native skip")
+        rejects(output:gsub("capability:", "portability:"), "unfinished portability skips")
+        rejects(output:gsub("3 tests ran", "4 tests ran"), "summary differs")
+        rejects(output .. "\n[       OK ] first.tests.test_value", "duplicate native result")
+        rejects(output .. "\n[ RUN      ] first.tests.test_unfinished", "did not finish")
+        rejects(output .. "\n[  FAILED  ] first.tests.test_value", "native test failure")
+        rejects(output, "native root did not execute", { "first.tests", "second.tests", "third.tests" })
+        rejects("[==========] Running Titan tests.\n[==========] 0 tests ran.\n[  PASSED  ] 0 tests.",
+            "selected no cases")
+        assert.truthy(validate(output, { "first.tests", "second.tests", "third.tests" }, true))
+        assert.same({ count = 3, passed = 1, skipped = 2, failed = 0 }, final_counts(output))
+        local failed = output:gsub("%[       OK %] first.tests.test_value",
+            "[  FAILED  ] first.tests.test_value"):gsub("1 test%.", "0 tests.") ..
+            "\n[  FAILED  ] 1 test.\n[  FAILED  ] first.tests.test_value"
+        rejects(failed, "native test failure")
+        assert.same({ count = 3, passed = 0, skipped = 2, failed = 1 }, final_counts(failed))
+        assert.is_nil(final_counts(failed:gsub("%[==========%] 3 tests ran%.\n", "")))
+        assert.is_nil(final_counts(failed .. "\n[  FAILED  ] 1 test."))
+        assert.is_nil(final_counts("[==========] Running Titan tests.\n[ RUN      ] first.tests.test_value"))
     end)
 
     it("reuses separate native test objects and relinks only after a changed prerequisite", function()
@@ -1187,6 +1223,7 @@ printf '%s\n' "$module" >> ../build.log
                 "TITAN_TEST_INSTALL_ROOT=" .. root,
                 "TITAN_TEST_SUPPORT_SOURCE=prepared", "TITAN_TEST_COMPILER_PREREQS=prepared",
                 "TITAN_TEST_PROVIDER_PREREQS=prepared", "TITAN_TEST_FIXTURE_OUTPUTS=prepared",
+                "TITAN_TEST_C_INPUTS_support.common=prepared",
                 "TITAN_TEST_MODULES=" .. table.concat(modules, " "),
                 "TITAN_STDLIB_TEST_ROOTS=test.tests", "titan-stdlib-test-build" }
             local function build()
@@ -4334,10 +4371,7 @@ done
                 "rm -rf $(STDLIB_CONTAINER).dSYM",
                 "examples/utils.a examples/artisanal.a examples/sdl_quit.a",
                 "testfiles/selection_sort.a testfiles/sieve.a",
-                "TITAN_STDLIB_TEST_PROGRAM_ROOT := test.tests",
-                "TITAN_STDLIB_TEST_PROGRAM_OUTPUT := test/tests",
-                "TITAN_STDLIB_TEST_ROOTS := " ..
-                "$(TITAN_STDLIB_TEST_PROGRAM_ROOT)",
+                "include $(TITAN_TEST_MODULE_MANIFEST)",
                 "TITAN_TEST_EXECUTABLE := $(TITAN_TEST_BUILD_DIR)/" ..
                 "$(TITAN_STDLIB_TEST_PROGRAM_OUTPUT)",
                 "\nbusted-test:",
@@ -4419,7 +4453,8 @@ done
             local native_run_end = assert(makefile:find(
                 "\ntitan-stdlib-test:", native_run_start, true))
             local native_run = makefile:sub(native_run_start, native_run_end - 1)
-            assert.truthy(native_run:find("2>&1 | cat", 1, true), native_run)
+            assert.truthy(native_run:find('2>&1 | tee "$$log"', 1, true), native_run)
+            assert.truthy(native_run:find("scripts/check_stdlib_test_output.lua", 1, true), native_run)
             assert.falsy(native_run:find("output=$$(", 1, true), native_run)
 
             local examples_makefile = read_file("examples/Makefile")
@@ -4723,12 +4758,13 @@ done
             for _, native_build_contract in ipairs({
                 "spec/fixtures/stdlib/native/async_foreign_work.h",
                 "spec/fixtures/stdlib/native/async_foreign_work.c",
+                "spec/fixtures/stdlib/native/fs_fixture.c",
                 "spec/fixtures/stdlib/native/uv_stdio_probe.h",
                 "spec/fixtures/stdlib/native/uv_stdio_probe.c",
                 "spec/fixtures/stdlib/native/sqlite3_worker_fixture.h",
                 "spec/fixtures/stdlib/native/sqlite3_worker_fixture.c",
                 "spec/fixtures/stdlib/native/os_process_host_child.c",
-                "-X async_foreign_work.o uv_stdio_probe.o",
+                "-X async_foreign_work.o fs_fixture.o uv_stdio_probe.o",
             }) do
                 assert.truthy(makefile:find(
                     native_build_contract, 1, true), native_build_contract)

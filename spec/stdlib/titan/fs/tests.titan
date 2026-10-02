@@ -4,8 +4,10 @@ local async = import "async"
 local fs = import "fs"
 local gc = import "gc"
 local stream = import "io"
+local strings = import "string"
 local timer = import "timer"
 local support = import "fs.test_support.titan"
+local common = import "support.common.titan"
 local task_support = import "support.async.titan"
 
 local function contains_entry(entries: {string}, wanted: string): boolean
@@ -99,9 +101,9 @@ function test_fs_binary_delimiters_and_close(context: test.Context)
       file:read_until("")
     end, "File accepted an empty delimiter")
     local selected: string? = file:read_until("\0Y", true)
-    test.assert(selected ~= nil and #selected == 65535,
+    test.assert(selected == strings.rep("x", 65535),
                 "delimiter spanning native reads returned the wrong prefix")
-    test.assert(file:read() == "tail",
+    test.assert(file:read() == "tail\r\n\255",
                 "delimiter read lost retained excess")
     test.assert(not file:read(1) and not file:read_until("missing"),
                 "repeated File reads did not return EOF")
@@ -120,6 +122,15 @@ function test_fs_binary_delimiters_and_close(context: test.Context)
     expect_failure(function ()
       file:flush()
     end, "closed File accepted a flush")
+
+    local append = fs.open(binary_path, "ab")
+    defer append:close()
+    test.assert(append:write("\0end\r\n") == 6,
+                "binary append returned the wrong byte count")
+    append:flush()
+    append:close()
+    test.assert(fs.read_file(binary_path) == boundary .. "\0end\r\n",
+                "binary append or flush changed bytes or line endings")
 
     fs.unlink(binary_path)
   end)
@@ -274,15 +285,19 @@ end
 
 function test_fs_paths_metadata_locations_and_errors(context: test.Context)
   runtime_test.run(function ()
-    local actual_root = support.new_workspace(context)
-    local root = actual_root .. "-alias"
-    support.make_symlink(context, actual_root, root)
-    support.set_fixture_environment(context, "HOME", root)
-    support.set_fixture_environment(context, "TMPDIR", root)
+    local root = support.new_workspace(context)
+    if common.is_windows() then
+      support.set_fixture_environment(context, "USERPROFILE", root)
+      support.set_fixture_environment(context, "TMP", root)
+      support.set_fixture_environment(context, "TEMP", root)
+    else
+      support.set_fixture_environment(context, "HOME", root)
+      support.set_fixture_environment(context, "TMPDIR", root)
+    end
 
-    local canonical_root = fs.realpath(actual_root)
+    local canonical_root = fs.realpath(root)
     test.assert(fs.realpath(root .. "/.") == canonical_root,
-                "realpath did not resolve a symlink and dot component")
+                "realpath did not resolve a dot component")
     local realpath_missing = false
     do
       fs.realpath(root .. "/missing-realpath")
@@ -298,15 +313,13 @@ function test_fs_paths_metadata_locations_and_errors(context: test.Context)
     end, "realpath accepted an embedded-NUL path")
 
     local target = root .. "/target.dat"
-    local link = root .. "/target-link"
     support.cleanup_path(context, target)
     fs.write_file(target, "target")
-    support.make_symlink(context, target, link)
 
     local tree = root .. "/tree"
     local sub = tree .. "/sub"
-    local first = tree .. "/first.dat"
-    local renamed = tree .. "/renamed.dat"
+    local first = tree .. "/first héllo 世界.dat"
+    local renamed = tree .. "/renamed héllo 世界.dat"
     local cwd = root .. "/cwd"
     local marker = cwd .. "/marker"
     support.cleanup_path(context, tree)
@@ -330,18 +343,9 @@ function test_fs_paths_metadata_locations_and_errors(context: test.Context)
                 "stat returned invalid portable metadata")
     test.assert(fs.stat(sub).kind == "directory",
                 "stat did not classify a directory")
-    test.assert(fs.stat(link).kind == "file",
-                "stat did not follow a symbolic link")
-    local target_info = fs.stat(target)
-    local link_info = fs.stat(link)
-    test.assert(link_info.device == target_info.device and
-                link_info.inode == target_info.inode,
-                "stat did not preserve physical identity through a symlink")
-    test.assert(fs.lstat(link).kind == "symlink",
-                "lstat did not classify the symbolic link")
 
     local entries = fs.list(tree)
-    test.assert(#entries == 2 and contains_entry(entries, "first.dat") and
+    test.assert(#entries == 2 and contains_entry(entries, "first héllo 世界.dat") and
                 contains_entry(entries, "sub"),
                 "list returned wrong entries")
     test.assert(not contains_entry(entries, ".") and
@@ -349,6 +353,18 @@ function test_fs_paths_metadata_locations_and_errors(context: test.Context)
                 "list exposed dot entries")
 
     fs.rename(first, renamed)
+    test.assert(fs.stat(first) == nil and fs.lstat(first) == nil,
+                "rename left the old path present")
+    local renamed_info = fs.stat(renamed)
+    local renamed_link_info = fs.lstat(renamed)
+    test.assert(renamed_info.device == info.device and
+                renamed_info.inode == info.inode and renamed_info.size == info.size,
+                "rename changed file identity or metadata")
+    test.assert(renamed_link_info.device == renamed_info.device and
+                renamed_link_info.inode == renamed_info.inode and
+                renamed_link_info.size == renamed_info.size and
+                renamed_link_info.kind == "file",
+                "stat and lstat disagreed on the same ordinary file")
     test.assert(fs.read_file(renamed) == "abc\0def",
                 "rename lost file data")
     expect_failure(function ()
@@ -364,15 +380,6 @@ function test_fs_paths_metadata_locations_and_errors(context: test.Context)
     test.assert(fs.stat(missing .. "/child") == nil and
                 fs.lstat(missing .. "/child") == nil,
                 "missing metadata parent did not return nil")
-
-    local dangling = root .. "/dangling-link"
-    support.make_symlink(context, missing, dangling)
-    test.assert(fs.stat(dangling) == nil,
-                "stat did not treat a dangling symlink as missing")
-    local dangling_info? = fs.lstat(dangling)
-    test.assert(dangling_info ~= nil and
-                dangling_info.kind == "symlink",
-                "lstat did not preserve a dangling symlink")
 
     local expect_metadata_error: function (function (): (), string): () =
       function (action: function (): (), operation: string)
@@ -397,7 +404,8 @@ function test_fs_paths_metadata_locations_and_errors(context: test.Context)
       fs.list(missing)
     end, "list accepted a missing path")
 
-    test.assert(fs.tmpdir() == root and fs.homedir() == root,
+    test.assert(fs.realpath(fs.tmpdir()) == canonical_root and
+                fs.realpath(fs.homedir()) == canonical_root,
                 "portable directory helpers returned wrong paths")
     local temporary = fs.tmpname()
     support.cleanup_path(context, temporary)
@@ -417,13 +425,43 @@ function test_fs_paths_metadata_locations_and_errors(context: test.Context)
     end
     test.assert(fs.pwd() == original, "chdir did not restore pwd")
 
-    fs.unlink(link)
     fs.unlink(target)
     fs.unlink(renamed)
     fs.unlink(marker)
     fs.rmdir(sub)
     fs.rmdir(tree)
     fs.rmdir(cwd)
+  end)
+end
+
+function test_fs_symbolic_links_preserve_metadata_and_identity(context: test.Context)
+  runtime_test.run(function ()
+    local actual_root = support.new_workspace(context)
+    local root = actual_root .. "-alias"
+    support.make_symlink(context, actual_root, root)
+    test.assert(fs.realpath(root .. "/.") == fs.realpath(actual_root),
+                "realpath did not resolve a symlink and dot component")
+    local target = root .. "/target.dat"
+    local link = root .. "/target-link"
+    support.cleanup_path(context, target)
+    fs.write_file(target, "target")
+    support.make_symlink(context, target, link)
+    test.assert(fs.stat(link).kind == "file",
+                "stat did not follow a symbolic link")
+    local target_info = fs.stat(target)
+    local link_info = fs.stat(link)
+    test.assert(link_info.device == target_info.device and
+                link_info.inode == target_info.inode,
+                "stat did not preserve physical identity through a symlink")
+    test.assert(fs.lstat(link).kind == "symlink",
+                "lstat did not classify the symbolic link")
+    local dangling = root .. "/dangling-link"
+    support.make_symlink(context, root .. "/missing", dangling)
+    test.assert(fs.stat(dangling) == nil,
+                "stat did not treat a dangling symlink as missing")
+    local dangling_info? = fs.lstat(dangling)
+    test.assert(dangling_info ~= nil and dangling_info.kind == "symlink",
+                "lstat did not preserve a dangling symlink")
   end)
 end
 
@@ -574,7 +612,7 @@ end
 function test_fs_watcher_directory_events_and_canonical_paths(context: test.Context)
   runtime_test.run(function ()
     local root = support.new_workspace(context)
-    local modify_path = root .. "/modify.dat"
+    local modify_path = root .. "/modify héllo 世界.dat"
     local delete_path = root .. "/delete.dat"
     local create_path = root .. "/create.dat"
     local nested_dir = root .. "/nested"
@@ -674,7 +712,7 @@ end
 function test_fs_watcher_file_scope(context: test.Context)
   runtime_test.run(function ()
     local root = support.new_workspace(context)
-    local watched_path = root .. "/watched.dat"
+    local watched_path = root .. "/watched héllo 世界.dat"
     local sibling_path = root .. "/watched.dat.other"
     support.cleanup_path(context, watched_path)
     support.cleanup_path(context, sibling_path)
@@ -686,6 +724,9 @@ function test_fs_watcher_file_scope(context: test.Context)
     local watcher = fs.watcher()
     cleanup_watcher(watcher)
     watcher:watch(watched_path)
+    watcher:watch(root .. "/./watched héllo 世界.dat")
+    test.assert(watcher:is_watching(canonical_watched),
+                "file watcher did not retain its canonical registration")
     wait_for_watcher_subscription()
 
     fs.write_file(sibling_path, "sibling-after")

@@ -19,6 +19,7 @@ enum titan_uv_test_stdio_metadata_probe {
 };
 
 /* Test-only parent-stdio fixtures linked into the compiled native Titan runner. */
+int titan_uv_test_stdio_mode_supported(int mode);
 int titan_uv_test_stdio_setup(int mode);
 int titan_uv_test_stdio_finish(int expected_nonblocking_mask);
 const char *titan_uv_test_stdio_failure(void);
@@ -29,5 +30,6 @@ int titan_uv_test_stdio_metadata_denial_supported(void);
 int titan_uv_test_stdio_deny_metadata(int probes, int descriptors,
                                       int access_error);
 int titan_uv_test_stdio_close_child_stdout(void);
+const char *titan_uv_test_stdio_closed_probe(void);
 
 #endif
