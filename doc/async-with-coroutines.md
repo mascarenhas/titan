@@ -36,6 +36,7 @@ record Coroutine
 end
 
 function create(func: (value) -> value, default_tag: value): Coroutine
+function running(): Coroutine?
 function Coroutine:resume(arg: value, tag: value): value
 function Coroutine:error(err: value, tag: value): value
 function Coroutine:status(): string
@@ -101,6 +102,24 @@ The function has type `(value) -> value`; the first successful
 `default_tag` may be omitted or nil. A non-nil default tag is stored and
 used only by `Coroutine:resume` and `Coroutine:error` when their tag argument is
 nil.
+
+### Finding the running coroutine
+
+`coroutine.running()` takes no arguments and returns the currently executing
+Titan `Coroutine`, or `nil` when no Titan coroutine is executing. It returns
+the same public record as `create`, preserving handle identity and the usual
+`Coroutine` methods.
+
+Nested resumes make the innermost executing coroutine current. A yield,
+normal return, or uncaught error restores the caller's active coroutine, or
+leaves no current coroutine if control returns outside Titan coroutines.
+After a tagged yield skips inner coroutines, resuming the suspended handler
+makes the restored innermost coroutine current again.
+
+Lua callers use `require "titan.coroutine"`; this lookup observes Titan
+coroutines independently of Lua's own `coroutine.running()`. It also differs
+from `async.running()`, which returns the current Task and raises outside a
+Task. Use the Task API for scheduling and async I/O.
 
 ### Resuming normally
 
@@ -187,9 +206,9 @@ direct-resume case.
 
 `coroutine` is an ordinary Titan source module installed with the
 compiler. It owns the public `Coroutine` record, default-tag policy,
-status-string mapping, result-code checks, success/error payload
-convention, Lua-thread/userdata setup, and Titan/Lua-facing entry
-wrappers. Its implementation imports minicoro and private runtime
+current-coroutine lookup, status-string mapping, result-code checks,
+success/error payload convention, Lua-thread/userdata setup, and Titan/Lua-facing
+entry wrappers. Its implementation imports minicoro and private runtime
 headers:
 
 ```lua
@@ -217,6 +236,12 @@ allocates one GC-owned runtime as a local top-level module variable. This keeps
 current-coroutine and ASan bookkeeping in traced per-state storage without a
 Lua-registry lookup on each coroutine operation.
 
+`running` reads that module-local runtime's `current_co`, recovers the private
+allocation owner with `mco_get_user_data`, and returns the public record saved
+in the owner's sixth uservalue. It reserves two Lua stack slots, reads the
+record with `lua_getiuservalue`, copies it into a traced Titan value, and
+restores the saved stack top. A null current-coroutine pointer yields nil.
+
 The split is the important point. `mco_resume`, `mco_yield`,
 `mco_push`, and `mco_pop` return `mco_result`, not the user's payload.
 The Titan layer checks those results and raises a Titan error with
@@ -237,7 +262,9 @@ function create(func: (value) -> value, default_tag: value): Coroutine
   local desc = mco.mco_desc_init(nil, STACK_SIZE)
   desc.runtime = runtime
   -- set desc.func/user_data, then let mco_create fill slot
-  return Coroutine.new(ffi.lua_totvalue(L, -1), slot[0], default_tag)
+  local co = Coroutine.new(ffi.lua_totvalue(L, -1), slot[0], default_tag)
+  -- store co in the owner's sixth uservalue with lua_setiuservalue
+  return co
 end
 
 local function effective_tag(default_tag: value, explicit_tag: value): value
@@ -385,14 +412,21 @@ unwrapping a `value` for every `resume`, `error`, or `status` call. Only
 the owner userdata's `__gc` finalizer pushes its userdata argument,
 recovers the pointer with `lua_touserdata`, and calls `mco_destroy`.
 
-The owner userdata has five uservalues that root:
+The owner userdata has six uservalues that root:
 
 1. the Lua thread created by `lua_newthread`;
 2. the coroutine module state;
 3. the native Titan entry closure;
 4. the callback function value passed to `create`;
 5. the one pending transfer payload copied through that owner's minicoro
-   storage.
+   storage;
+6. the public `Coroutine` record returned by `create` and `running`.
+
+Named `TITAN_CORO_*_USERVALUE` constants select these one-based Lua API slots.
+The foreign trampoline uses named zero-based C array indices for the first
+four slots. The record and its owner form an ordinary GC-traced cycle, which
+Lua can collect when neither is reachable. The transfer root remains slot 5;
+clearing a transfer does not clear the public record in slot 6.
 
 The module slot is a real full-userdata root, not a boxed native pointer.
 `M` is a native `Udata *`, which the coder treats specially when it crosses a
@@ -696,6 +730,9 @@ Add Titan runtime/coder coverage for:
   coroutine;
 * `is_yieldable` outside a coroutine, inside a coroutine with no matching
   handler, and inside a coroutine with a matching outer handler;
+* `running` returning nil outside Titan coroutines, preserving handle identity
+  across yield/resume, nested tagged stack restoration and error unwinding,
+  and Lua-host identity and GC retention;
 * normal callback return, dead status, and resume/error after dead;
 * `Coroutine:error` into a suspended yield, catch inside the coroutine,
   uncaught injected error, and injected error before first resume;
