@@ -63,7 +63,8 @@ TITAN_TEST_SOURCES_coroutine.tests := spec/stdlib/titan/coroutine/tests/tests.ti
 	spec/stdlib/titan/coroutine/tests/gc_test.titan \
 	spec/stdlib/titan/coroutine/tests/lifecycle_test.titan \
 	spec/stdlib/titan/coroutine/tests/lua_boundary_test.titan \
-	spec/stdlib/titan/coroutine/tests/nested_test.titan
+	spec/stdlib/titan/coroutine/tests/nested_test.titan \
+	spec/stdlib/titan/coroutine/tests/running_test.titan
 TITAN_TEST_IMPORTS_coroutine.tests := coroutine.test_support support.command support.common
 
 TITAN_TEST_SOURCES_fs.test_support := spec/stdlib/titan/fs/test_support.titan
