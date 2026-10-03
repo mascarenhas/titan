@@ -226,30 +226,32 @@ local UV_FOREIGN_CALLBACKS = {
       record = "fs_poll_t", field = "close_handler", handler = "fs_poll_closed", owner = "owner",
       call = "entry(L, module, handler, owner, loop)" },
 }
+-- Simple C forwarding helpers may live in the generated foreign header as
+-- static inline definitions. Their linkage names need not appear in nm output.
 local UV_NATIVE_ENTRIES = {
     { name = "consume_spawn_pipes", source = "titan/uv/process.titan" },
     { name = "native_mutex_lock", source = "titan/uv/sync.titan" },
-    { name = "native_mutex_trylock", source = "titan/uv/sync.titan" },
+    { name = "native_mutex_trylock", inline = true, source = "titan/uv/sync.titan" },
     { name = "native_mutex_unlock", source = "titan/uv/sync.titan" },
     { name = "native_rwlock_rdlock", source = "titan/uv/sync.titan" },
-    { name = "native_rwlock_tryrdlock", source = "titan/uv/sync.titan" },
+    { name = "native_rwlock_tryrdlock", inline = true, source = "titan/uv/sync.titan" },
     { name = "native_rwlock_rdunlock", source = "titan/uv/sync.titan" },
     { name = "native_rwlock_wrlock", source = "titan/uv/sync.titan" },
-    { name = "native_rwlock_trywrlock", source = "titan/uv/sync.titan" },
+    { name = "native_rwlock_trywrlock", inline = true, source = "titan/uv/sync.titan" },
     { name = "native_rwlock_wrunlock", source = "titan/uv/sync.titan" },
     { name = "native_sem_post", source = "titan/uv/sync.titan" },
     { name = "native_sem_wait", source = "titan/uv/sync.titan" },
-    { name = "native_sem_trywait", source = "titan/uv/sync.titan" },
+    { name = "native_sem_trywait", inline = true, source = "titan/uv/sync.titan" },
     { name = "native_cond_signal", source = "titan/uv/sync.titan" },
     { name = "native_cond_broadcast", source = "titan/uv/sync.titan" },
-    { name = "native_barrier_wait", source = "titan/uv/sync.titan" },
+    { name = "native_barrier_wait", inline = true, source = "titan/uv/sync.titan" },
     { name = "native_cond_wait", source = "titan/uv/sync.titan" },
-    { name = "native_cond_timedwait", source = "titan/uv/sync.titan" },
-    { name = "native_key_get", source = "titan/uv/sync.titan" },
+    { name = "native_cond_timedwait", inline = true, source = "titan/uv/sync.titan" },
+    { name = "native_key_get", inline = true, source = "titan/uv/sync.titan" },
     { name = "native_key_set", source = "titan/uv/sync.titan" },
     { name = "native_once", source = "titan/uv/sync.titan" },
     { name = "work_worker_callback", source = "titan/uv/uv.titan" },
-    { name = "async_send_native", source = "titan/uv/uv.titan" },
+    { name = "async_send_native", inline = true, source = "titan/uv/uv.titan" },
 }
 local LEGACY_UV_CALLBACKS = {
     "titan_uvshim_signal_cb",
@@ -284,13 +286,13 @@ local DIRECT_LIBUV_CALLS = {
     "uv_shutdown",
     "uv_signal_init",
     "uv_signal_start_oneshot",
-    "uv_tcp_init",
+    "uv_tcp_init_ex",
     "uv_tcp_bind",
     "uv_tcp_connect",
     "uv_translate_sys_error",
     "uv_spawn",
     "uv_walk",
-    "uv_write",
+    "uv_write2",
     "uv_fs_event_init",
     "uv_fs_event_start",
     "uv_fs_event_stop",
@@ -1780,10 +1782,24 @@ int main(void) {
             local entries = {}
             for _, entry in ipairs(UV_FOREIGN_CALLBACKS) do entries[#entries + 1] = entry end
             for _, entry in ipairs(UV_NATIVE_ENTRIES) do entries[#entries + 1] = entry end
+            local foreign_header = read_file("titan/uv/uv.titan.h")
             for _, callback in ipairs(entries) do
-                local symbol = coder_names._linkage_symbol_name(
-                    coder_names._foreign_func_name("titan.uv", callback.name))
-                assert.truthy(nm_has_symbol(output, symbol), symbol)
+                local c_name = coder_names._foreign_func_name("titan.uv", callback.name)
+                if callback.inline then
+                    -- Require the emitted definition, not only a prototype;
+                    -- an optimizer may inline or internalize this C-only shim.
+                    local defined = false
+                    for line in foreign_header:gmatch("[^\r\n]+") do
+                        if line:match("^static inline ") and
+                                line:find(c_name .. "(", 1, true) and line:match("{%s*$") then
+                            defined = true
+                        end
+                    end
+                    assert.truthy(defined, "missing inline definition: " .. c_name)
+                else
+                    local symbol = coder_names._linkage_symbol_name(c_name)
+                    assert.truthy(nm_has_symbol(output, symbol), symbol)
+                end
             end
 
             ok, output, why, code = run_argv(tool_argv(

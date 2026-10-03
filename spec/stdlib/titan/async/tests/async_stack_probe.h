@@ -14,8 +14,8 @@ static inline void titan_async_stack_reset(AsyncStackProbe *probe) {
 }
 
 static inline void titan_async_stack_sample(AsyncStackProbe *probe) {
-    volatile unsigned char marker = 0;
-    uintptr_t address = (uintptr_t)&marker;
+    /* Frame addresses avoid ASan relocation of automatic variables. */
+    uintptr_t address = (uintptr_t)__builtin_frame_address(0);
     if (address < probe->low) probe->low = address;
     if (address > probe->high) probe->high = address;
 }
