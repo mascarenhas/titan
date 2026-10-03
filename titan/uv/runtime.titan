@@ -169,17 +169,17 @@ end
 local function make_error(code: integer,
                           operation: string): OperationError
   local status = code as foreign int
-  return OperationError.new(code, ffi.uv_err_name(status) as string,
+  return OperationError(code, ffi.uv_err_name(status) as string,
                             ffi.uv_strerror(status) as string, operation)
 end
 
 local function immediate_ok(payload: value): Immediate
-  return Immediate.new(false, payload)
+  return Immediate(false, payload)
 end
 
 local function immediate_error(code: integer,
                                operation: string): Immediate
-  return Immediate.new(true, make_error(code, operation))
+  return Immediate(true, make_error(code, operation))
 end
 
 local function check_status(status: integer, operation: string)
@@ -237,7 +237,7 @@ local function submit_stream_write(task: Task,
     local _data = data
     complete_status(task, status, operation)
   end
-  local owner = StreamWriteOwner.new(foreign uv_write_t.new(), callback)
+  local owner = StreamWriteOwner(foreign uv_write_t.new(), callback)
   task.pending = owner
   local request = owner.handle
   ffi.uv_req_set_data(request as foreign *uv_req_t,
@@ -358,7 +358,7 @@ end
 local function new_runtime(): Runtime
   -- Allocate every GC-owned Runtime field before uv_loop_init gives the native
   -- loop resources that require an explicit uv_loop_close.
-  local runtime = Runtime.new {
+  local runtime = Runtime {
     loop = foreign uv_loop_t.new(),
     task_roots = {},
     next_task_root = 1,
@@ -394,7 +394,7 @@ local function begin_close(runtime: Runtime, handle: foreign *uv_handle_t,
     unroot_handle(runtime, owner.root_index)
     completion()
   end
-  local owner = CloseOwner.new(0, callback)
+  local owner = CloseOwner(0, callback)
   owner.root_index = root_handle(runtime, owner)
   if old_root_index > 0 then unroot_handle(runtime, old_root_index) end
   ffi.uv_handle_set_data(handle, owner as foreign *void)
@@ -425,14 +425,14 @@ local function HandleCloseCall:dispatch(task: Task): Immediate?
                   self.root_index, task, nil) then
     return nil
   end
-  return Immediate.new(false, nil)
+  return Immediate(false, nil)
 end
 
 local function wait_handle_close(runtime: Runtime,
                                  handle: foreign *uv_handle_t,
                                  keepalive: value,
                                  root_index: integer)
-  await(Call.handle_close(HandleCloseCall.new(
+  await(Call.handle_close(HandleCloseCall(
       runtime, handle, keepalive, root_index)))
 end
 
@@ -448,7 +448,7 @@ local function walk_callback(owner: WalkOwner,
 end
 
 local function collect_handle(runtime: Runtime): foreign *void
-  local owner = WalkOwner.new(nil, walk_callback)
+  local owner = WalkOwner(nil, walk_callback)
   ffi.uv_walk(runtime.loop, uv_walk_cb,
                 owner as foreign *void)
   return owner.handle
@@ -460,7 +460,7 @@ local function loop_owns_handle(runtime: Runtime,
                              pointer: foreign *void)
     if pointer == target then owner.handle = pointer end
   end
-  local owner = WalkOwner.new(nil, callback)
+  local owner = WalkOwner(nil, callback)
   ffi.uv_walk(runtime.loop, uv_walk_cb,
                 owner as foreign *void)
   return owner.handle ~= nil

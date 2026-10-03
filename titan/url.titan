@@ -198,7 +198,7 @@ end
 local function url_parse_error(kind: string, position: integer): Error
   local message = "URL parse error [" .. kind .. "] at byte " ..
     string.tostring(position) .. ": " .. url_parse_detail(kind)
-  return Error.new(position, kind, message)
+  return Error(position, kind, message)
 end
 
 local function hex_value(byte: integer): integer
@@ -350,7 +350,7 @@ function parse(source: string): (Url?, Error?)
     local query = normalize_component(query_text as string, false)
     return query, path .. "?" .. query
   end)(parts["query"], path)
-  return Url.new(scheme, host, port, path, query, target, authority), nil
+  return Url(scheme, host, port, path, query, target, authority), nil
 end
 
 function parse_request(scheme: string, authority: string,

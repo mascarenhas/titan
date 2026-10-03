@@ -212,7 +212,7 @@ local function SignalWaitCall:dispatch(task: Task): Immediate?
   catch
     fail_task_at_callback_boundary(task, error, traceback)
   end
-  local owner = uv_signal_t.new(foreign uv_signal_t.new(), callback, 0)
+  local owner = uv_signal_t(foreign uv_signal_t.new(), callback, 0)
   local native = owner.handle
   owner.root_index = root_handle(runtime, owner)
   local status = ffi.uv_signal_init(runtime.loop, native)
@@ -250,5 +250,5 @@ local function os_wait_signal(name: string): string
     raise "unsupported waitable signal name '" .. name .. "'"
   end
   return await(Call.signal_wait(
-      SignalWaitCall.new(signum as integer))) as string
+      SignalWaitCall(signum as integer))) as string
 end

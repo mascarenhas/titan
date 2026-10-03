@@ -483,7 +483,11 @@ borrowed pointers. Delimiter search and slicing reuse the module's binary-safe
 
 `StringWriter` is the checked accumulator used by formatting, packing,
 substitution, and other bounded joins. The record itself stores rooted chunks
-plus their checked aggregate length. Every public and internal `write` is
+plus their checked aggregate length. Its local `StringWriter.new()` override
+initializes an empty chunk array and zero length with a context-typed record
+literal. Internal code calls `StringWriter()`; the public `writer()` factory
+uses that same constructor. The constructor remains source-private.
+Every public and internal `write` is
 synchronous; Task synchronization belongs to the channel-backed adapter owned
 by `async`. `drain` performs one exact-size allocation and copy, then replaces
 the chunk array and resets the length to zero. This

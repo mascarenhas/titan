@@ -25,11 +25,11 @@ union Message
 end
 
 function main(args: {string}): integer
-  local original = Message.person(Person.new("Ada", 42))
+  local original = Message.person(Person("Ada", 42))
   local text = json.encode(original)
   io.print(text)
   local schema = reflect.Type.is_named(
-    reflect.NamedType.new("json_example.Message"))
+    reflect.NamedType("json_example.Message"))
   local restored: Message = json.decode(text, schema)
   case restored
   when person(person) then
@@ -152,7 +152,7 @@ local record NullToken
 end
 
 function main(args: {string}): integer
-  local token = NullToken.new()
+  local token = NullToken()
   local data: value = json.decode("[1,null,null]", nil,
     json.DecodeOption.null_value(token))
   io.print(json.encode(data, json.EncodeOption.null_value(token)))
@@ -182,7 +182,7 @@ these distinctions:
 
 ## Records and schemas
 
-Use `reflect.Type.is_named(reflect.NamedType.new("package.Record"))` for a
+Use `reflect.Type.is_named(reflect.NamedType("package.Record"))` for a
 nominal target, with the declaration's fully qualified module name. The module
 that defines it must already be initialized. JSON does not import modules, and
 an unknown nominal name raises `unknown_type` rather than becoming dynamic.
@@ -201,16 +201,27 @@ function read_integers(text: string): {integer}
 end
 ```
 
-Automatic record decoding calls the public synthesized `new` constructor after
-validating every argument. This initializes both mutable and const fields.
-Missing fields are accepted only when the field descriptor admits nil: nil,
-Option, or `value`. Required booleans are required even though false is falsy.
+Automatic record decoding calls the public `new` constructor after validating
+every argument. It accepts the synthesized constructor and a custom override
+whose fixed result is exactly the requested record. Variadic parameters,
+flexible results, optional results, and any other result shape are unsupported
+and raise `constructor_unavailable` before the constructor runs.
+
+JSON member names and value schemas come from the constructor's parameters.
+For a synthesized constructor these are the record's fields, including const
+fields. A custom constructor can use different parameter names and preserve
+its own validation or normalization. Encoding still uses public field names,
+so an overridden constructor need not accept the record's encoded object.
+Missing arguments are accepted only when the parameter descriptor admits nil:
+nil, Option, or `value`. Required booleans are required even though false is falsy.
 Unknown members normally raise `unknown_field`; pass
 `DecodeOption.ignore_unknown_fields(true)` to allow extra record members.
 Ignored members still undergo syntax and resource validation.
 
-A local record, or a record with any local field, has no public synthesized
-constructor. Its public view can be encoded, but automatic decoding raises
+A local record cannot publish a public constructor. A record with any local
+field has no public synthesized constructor, but can provide a compatible
+public custom constructor. Its public view can be encoded either way; automatic
+decoding without a compatible public constructor raises
 `constructor_unavailable`. Decode ordinary data and invoke an application
 factory when such a type must be reconstructed. JSON does not guess factories
 or expose private fields.

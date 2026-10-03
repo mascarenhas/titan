@@ -439,3 +439,17 @@ part access, source-order evaluation, and distinct construction/matching
 omission rules. The produced complete module must parse and typecheck; the
 duplicate-selection negative example must fail parsing. This exercise targets
 ordinary language use, not userdata internals.
+
+### R1 — record calls and custom constructors (`titan-programmer` only)
+
+Ask for an exported record with a private integer state, a public optional-input
+`new` override that validates and fills that state, and an importer using named
+record-call shorthand. Require raw `{ ... }` construction inside the override,
+no call to a hidden default constructor, and a rejection of raw literals in
+both ordinary and explicit source importers. Ask whether a second record's
+`new` may return `(integer, string?)` and whether bare calls expand both results.
+Require yes, ordinary call adjustment, public-only Lua namespace `__call`, and
+the distinction between Titan named calls and Lua's one-table brace argument.
+Require `Box<|integer|>(x)` to bind owner arguments and `.new<|U|>` for explicit
+callable-local generic arguments under the existing all-or-none inference rule.
+Compile the complete owner/importer examples with the current isolated toolchain.

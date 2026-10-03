@@ -61,7 +61,7 @@ Row.columns: const {Column}
 Row:get(i: integer): value
 Row:fill(target: value)
 
-Blob.new(bytes: string): Blob
+Blob(bytes: string): Blob
 Blob.bytes: string                  -- const field
 Column.name: string                 -- const field
 Column.declared_type: string?       -- const field
@@ -131,7 +131,7 @@ argument is inspected and validated before the statement is changed. Each
 accepted execution resets and clears the preceding binding set and binds the
 complete new set; omitted values never inherit prior bindings.
 
-TEXT must be valid UTF-8 and contain no NUL. Use `Blob.new(bytes)` for arbitrary
+TEXT must be valid UTF-8 and contain no NUL. Use `Blob(bytes)` for arbitrary
 bytes, including empty data, embedded NUL, and invalid UTF-8. Empty BLOB is
 distinct from NULL. NaN and positive/negative infinity are rejected as inputs.
 Other records, unions, Interfaces, containers, functions, threads, raw
@@ -200,7 +200,7 @@ record Note
 end
 
 function note_from_row(row: sqlite3.Row): Note
-  return Note.new(row:get(1), row:get(2))
+  return Note(row:get(1), row:get(2))
 end
 ```
 

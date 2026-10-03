@@ -281,6 +281,17 @@ semantic distinction rather than the rooting mechanism.
 
 ## Put behavior and state on their real owner
 
+Prefer `Record(...)`, `Record{...}`, or `Record "text"` when calling a record
+constructor. These spellings select `Record.new` with its ordinary visibility,
+argument adjustment, and result list. Keep `.new` when referring to the
+function as a value or supplying its own explicit generic arguments.
+
+Put custom initialization on `[local] function Record.new(...)` when it is the
+record's construction operation. Build the raw object with a context-typed
+`{ ... }` inside that module; an override makes raw construction module-private.
+Keep existing domain operations such as `fs.open` and `net.connect` named for
+what they do.
+
 When a private helper's first argument is one nominal record and the operation
 exists to read or mutate that record, write a local method on the record:
 
@@ -298,7 +309,7 @@ local record Watcher
 end
 
 local function Watcher:map(item: Pending): Event
-  return Event.new(item.number)
+  return Event(item.number)
 end
 
 local function Watcher:drain(): {Event}

@@ -51,8 +51,8 @@ local function regex_attempt(regex: Regex, subject: string,
     groups[index] = captured[index + 2] as Span
     index = index + 1
   end
-  return RegexMatch.new(
-    subject, Span.new(first, after - 1), groups)
+  return RegexMatch(
+    subject, Span(first, after - 1), groups)
 end
 
 local function regex_find_from(regex: Regex, subject: string,

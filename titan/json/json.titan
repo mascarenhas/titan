@@ -62,7 +62,7 @@ local record Path
 end
 
 local function root_path(): Path
-  return Path.new(nil, nil, nil)
+  return Path(nil, nil, nil)
 end
 
 local function path_text(path: Path): string
@@ -81,19 +81,19 @@ local function json_fail(code: string, message: string, path: Path,
   if source ~= nil and position ~= nil then
     line, column = peg.line_column(source, position)
   end
-  raise Error.new(code, message, position, line, column, path_text(path))
+  raise Error(code, message, position, line, column, path_text(path))
 end
 
 local function field_path(path: Path, name: string): Path
-  return Path.new(path, name, nil)
+  return Path(path, name, nil)
 end
 
 local function index_path(path: Path, index: integer): Path
-  return Path.new(path, nil, index)
+  return Path(path, nil, index)
 end
 
 local function default_settings(): Settings
-  return Settings.new("tag", nil, 32, 16 * 1024 * 1024, 1000000, false)
+  return Settings("tag", nil, 32, 16 * 1024 * 1024, 1000000, false)
 end
 
 local function validate_settings(settings: Settings)

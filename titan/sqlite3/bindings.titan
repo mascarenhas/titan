@@ -1,7 +1,7 @@
 local function check_no_nul(subject: string, operation: string)
   local position? = string.find(subject, "\0")
   if position ~= nil then
-    raise Error.new("embedded NUL is not permitted", nil, nil, operation)
+    raise Error("embedded NUL is not permitted", nil, nil, operation)
   end
 end
 
@@ -45,7 +45,7 @@ local function valid_text(subject: string): boolean
 end
 
 local function native_allocation_error(operation: string)
-  raise Error.new("out of memory allocating SQLite operation",
+  raise Error("out of memory allocating SQLite operation",
                   ffi.SQLITE_NOMEM, ffi.SQLITE_NOMEM, operation)
 end
 
@@ -65,7 +65,7 @@ end
 
 local function unsupported_argument(index: integer, kind: string,
                                     operation: string)
-  raise Error.new("argument " .. index .. " has unsupported kind " .. kind,
+  raise Error("argument " .. index .. " has unsupported kind " .. kind,
                   nil, nil, operation)
 end
 
@@ -83,14 +83,14 @@ local function bind_argument(cell: foreign *TitanSqliteCell,
     cell.integer_value = number
   when is_float(number) then
     if number ~= number or number == math.huge or number == -math.huge then
-      raise Error.new("argument " .. index .. " must be finite",
+      raise Error("argument " .. index .. " must be finite",
                       nil, nil, operation)
     end
     cell.kind = ffi.SQLITE_FLOAT
     cell.float_value = number
   when is_string(bytes) then
     if not valid_text(bytes) then
-      raise Error.new("argument " .. index ..
+      raise Error("argument " .. index ..
                       " must be UTF-8 TEXT without NUL; use Blob for bytes",
                       nil, nil, operation)
     end
@@ -123,7 +123,7 @@ end
 local function Statement:bind(packet: foreign *TitanSqlitePacket,
                               operation: string, ...: value)
   if #... ~= self.parameter_count then
-    raise Error.new("expected " .. self.parameter_count .. " arguments, got " ..
+    raise Error("expected " .. self.parameter_count .. " arguments, got " ..
                     #..., nil, nil, operation)
   end
   packet.argument_count = #...
@@ -151,7 +151,7 @@ local function decode_columns(packet: foreign *TitanSqlitePacket): const {Column
     if native_column.declared_type ~= nil then
       declared_type = native_column.declared_type as string
     end
-    columns[index] = Column.new(native_column.name as string, declared_type)
+    columns[index] = Column(native_column.name as string, declared_type)
   end
   return columns as const {Column}
 end
@@ -170,8 +170,8 @@ local function decode_row(packet: foreign *TitanSqlitePacket,
     elseif cell.kind == ffi.SQLITE_TEXT then
       cells[index] = copy_result_bytes(cell)
     elseif cell.kind == ffi.SQLITE_BLOB then
-      cells[index] = Blob.new(copy_result_bytes(cell))
+      cells[index] = Blob(copy_result_bytes(cell))
     end
   end
-  return Row.new(columns, cells as const {value})
+  return Row(columns, cells as const {value})
 end

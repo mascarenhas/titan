@@ -54,7 +54,7 @@ local function check_result(packet: foreign *TitanSqlitePacket,
       if packet.code ~= 0 then return packet.code, packet.extended_code end
       return nil, nil
     end)(packet)
-  raise Error.new(message, code, extended_code, operation)
+  raise Error(message, code, extended_code, operation)
 end
 
 -- A packet is rooted by its suspended caller and this lexical cleanup. Raw
@@ -68,27 +68,27 @@ end
 
 local function Connection:reserve(operation: string, allow_cursor: boolean)
   if not self.handle then
-    raise Error.new("connection is closed", nil, nil, operation)
+    raise Error("connection is closed", nil, nil, operation)
   end
   if self.busy then
-    raise Error.new("connection has an outstanding operation", nil, nil, operation)
+    raise Error("connection has an outstanding operation", nil, nil, operation)
   end
   if not allow_cursor and self.active_statement ~= nil then
-    raise Error.new("connection has an active cursor", nil, nil, operation)
+    raise Error("connection has an active cursor", nil, nil, operation)
   end
   self.busy = true
 end
 
 local function Statement:require_open(operation: string)
   if not self.handle then
-    raise Error.new("statement is closed", nil, nil, operation)
+    raise Error("statement is closed", nil, nil, operation)
   end
 end
 
 function connect(name: string): Connection
   check_no_nul(name, "connect")
   -- Allocate the public shell before acquiring the native handle.
-  local connection = Connection.new(nil, 0, false, nil)
+  local connection = Connection(nil, 0, false, nil)
   local packet: owned *TitanSqlitePacket = foreign TitanSqlitePacket.new()
   defer sqlite_free_packet(packet)
   defer retire_packet(packet)
@@ -104,7 +104,7 @@ function Connection:prepare(sql: string): Statement
   self:reserve("prepare", true)
   defer self.busy = false
   check_no_nul(sql, "prepare")
-  local statement = Statement.new(self, nil, 0)
+  local statement = Statement(self, nil, 0)
   local packet: owned *TitanSqlitePacket = foreign TitanSqlitePacket.new()
   defer sqlite_free_packet(packet)
   defer retire_packet(packet)
@@ -124,7 +124,7 @@ function Connection:close()
   self:reserve("close", false)
   defer self.busy = false
   if self.statements ~= 0 then
-    raise Error.new("connection owns open statements", nil, nil, "close")
+    raise Error("connection owns open statements", nil, nil, "close")
   end
   local packet: owned *TitanSqlitePacket = foreign TitanSqlitePacket.new()
   defer sqlite_free_packet(packet)
@@ -142,7 +142,7 @@ function Statement:close()
   self.connection:reserve("statement.close", true)
   defer self.connection.busy = false
   if self.connection.active_statement == self then
-    raise Error.new("statement has an active cursor", nil, nil, "statement.close")
+    raise Error("statement has an active cursor", nil, nil, "statement.close")
   end
   local packet: owned *TitanSqlitePacket = foreign TitanSqlitePacket.new()
   defer sqlite_free_packet(packet)
@@ -225,7 +225,7 @@ function Statement:query(...: value): Cursor
   local columns = decode_columns(packet)
   local row: Row?
   if packet.has_row ~= 0 then row = decode_row(packet, columns) end
-  local cursor = Cursor.new(columns, self, row, packet.done ~= 0, false)
+  local cursor = Cursor(columns, self, row, packet.done ~= 0, false)
   if not cursor.exhausted then self.connection.active_statement = self end
   packet.needs_reset = 0
   return cursor
@@ -233,7 +233,7 @@ end
 
 function Cursor:fetch(): Row?
   if self.closed then
-    raise Error.new("cursor is closed", nil, nil, "fetch")
+    raise Error("cursor is closed", nil, nil, "fetch")
   end
   if self.pending ~= nil then
     local row: Row? = self.pending

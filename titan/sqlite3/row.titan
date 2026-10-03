@@ -16,7 +16,7 @@ end
 
 function Row:get(i: integer): value
   if i < 1 or i > #self.columns then
-    raise Error.new("column index " .. i .. " out of bounds [1, " ..
+    raise Error("column index " .. i .. " out of bounds [1, " ..
                     #self.columns .. "]", nil, nil, "row.get")
   end
   return self.cells[i]
@@ -53,7 +53,7 @@ local function fill_value(cell: value, descriptor: reflect.Type,
       if number == 0 then return false end
       if number == 1 then return true end
     end
-    raise Error.new("field " .. name .. " requires SQL integer 0 or 1",
+    raise Error("field " .. name .. " requires SQL integer 0 or 1",
                     nil, nil, "row.fill")
   when is_integer() then
     if cell ~= nil then return cell end
@@ -66,7 +66,7 @@ local function fill_value(cell: value, descriptor: reflect.Type,
   when is_record() then
     if cell is Blob then return cell end
   end
-  raise Error.new("incompatible SQL value for field " .. name,
+  raise Error("incompatible SQL value for field " .. name,
                   nil, nil, "row.fill")
 end
 
@@ -77,7 +77,7 @@ local function Row:fill_field(target: reflect.RecordValue, ordinal: integer,
   target:set(ordinal, cell)
 catch
   if error is Error then raise end
-  raise Error.new("field " .. target.type.fields[ordinal].name ..
+  raise Error("field " .. target.type.fields[ordinal].name ..
                   ": " .. string.tostring(error), nil, nil, "row.fill")
 end
 
@@ -89,13 +89,13 @@ function Row:fill(target: value)
     for index = 1, #self.columns do
       local name = self.columns[index].name
       if positions[name] ~= nil then
-        raise Error.new("duplicate column name " .. name,
+        raise Error("duplicate column name " .. name,
                         nil, nil, "row.fill")
       end
       positions[name] = index
     end
     if record_value.n_fields ~= #self.columns then
-      raise Error.new("column names must match every public record field",
+      raise Error("column names must match every public record field",
                       nil, nil, "row.fill")
     end
     -- Validate the whole shape before the first write. Value conversions are
@@ -103,15 +103,15 @@ function Row:fill(target: value)
     for ordinal = 1, record_value.n_fields do
       local field = record_value.type.fields[ordinal]
       if positions[field.name] == nil then
-        raise Error.new("missing column for field " .. field.name,
+        raise Error("missing column for field " .. field.name,
                         nil, nil, "row.fill")
       end
       if field.is_const then
-        raise Error.new("cannot fill const field " .. field.name,
+        raise Error("cannot fill const field " .. field.name,
                         nil, nil, "row.fill")
       end
       if not fill_type_supported(field.type) then
-        raise Error.new("unsupported field type for " .. field.name,
+        raise Error("unsupported field type for " .. field.name,
                         nil, nil, "row.fill")
       end
     end
@@ -120,6 +120,6 @@ function Row:fill(target: value)
                       positions[record_value.type.fields[ordinal].name])
     end
   else
-    raise Error.new("row.fill requires a record", nil, nil, "row.fill")
+    raise Error("row.fill requires a record", nil, nil, "row.fill")
   end
 end

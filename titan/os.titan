@@ -61,9 +61,9 @@ record Process
   stderr: InputStream?
 end
 
-stdin: InputStream = InputStream.new(nil, 0, "")
-stdout: OutputStream = OutputStream.new(nil, 1)
-stderr: OutputStream = OutputStream.new(nil, 2)
+stdin: InputStream = InputStream(nil, 0, "")
+stdout: OutputStream = OutputStream(nil, 1)
+stderr: OutputStream = OutputStream(nil, 2)
 
 local function byte_at(text: string, index: integer): integer
   local bytes = text as foreign const *unsigned char
@@ -319,7 +319,7 @@ function date(format: string?, timestamp: integer?): value
     if calendar.tm_isdst >= 0 then
       isdst = calendar.tm_isdst ~= 0
     end
-    return Date.new(
+    return Date(
       (calendar.tm_year as integer) + 1900,
       (calendar.tm_mon as integer) + 1,
       calendar.tm_mday as integer,
@@ -479,7 +479,7 @@ end
 
 function spawn(file: string, args: {string},
                ...: SpawnOption): Process
-  local config = SpawnConfig.new(uv.os_spawn_config_new())
+  local config = SpawnConfig(uv.os_spawn_config_new())
   defer uv.os_spawn_config_close(config.handle)
   local status = with_stdin(config)
   if status >= 0 then status = with_stdout(config) end
@@ -499,13 +499,13 @@ function spawn(file: string, args: {string},
   local input: OutputStream? = nil
   if raw_stdin then
     local stdio = raw_stdin as uv.uv_stdio_t
-    input = OutputStream.new(stdio, -1)
+    input = OutputStream(stdio, -1)
   end
 
   local output: InputStream? = nil
   if raw_stdout then
     local stdio = raw_stdout as uv.uv_stdio_t
-    output = InputStream.new(stdio, -1, "")
+    output = InputStream(stdio, -1, "")
   end
 
   local diagnostics: InputStream? =
@@ -513,10 +513,10 @@ function spawn(file: string, args: {string},
                output: InputStream?): InputStream?
       if not stderr then return nil end
       if stdout and stderr == stdout then return output end
-      return InputStream.new(stderr, -1, "")
+      return InputStream(stderr, -1, "")
     end)(raw_stderr, raw_stdout, output)
 
-  return Process.new(process_handle, input, output, diagnostics)
+  return Process(process_handle, input, output, diagnostics)
 end
 
 -- Only io.popen selects shell syntax. Ordinary spawn keeps libuv's normal argv
@@ -532,7 +532,7 @@ end
 
 function Process:wait(): ExitStatus
   local code, signal_number = uv.os_process_wait(self.handle)
-  return ExitStatus.new(code, uv.signal_name(signal_number),
+  return ExitStatus(code, uv.signal_name(signal_number),
                         signal_number)
 end
 

@@ -126,12 +126,12 @@ local function pattern_match_attempt(
     if capture_count > 200 then
       raise "too many flexible return values (max 200)"
     end
-    return PatternMatchAttempt.new(
+    return PatternMatchAttempt(
       true, results[native_count] as integer,
       capture_count, results, false, "", 0)
   elseif native_count == 3 then
     local label = results[2] as string
-    return PatternMatchAttempt.new(
+    return PatternMatchAttempt(
       false, 0, 0, results, label == "fail", label,
       (results[3] as integer) + start - 1)
   end
@@ -155,7 +155,7 @@ function Match:values(): (...: value)
 end
 
 function rule(name: string, pattern: Pattern): Rule
-  return Rule.new(name, pattern)
+  return Rule(name, pattern)
 end
 
 function grammar(start: string,
@@ -185,7 +185,7 @@ end
 
 function locale(): Locale
   local native = _locale()
-  return Locale.new(
+  return Locale(
     _pattern(native["alnum"], 5),
     _pattern(native["alpha"], 5),
     _pattern(native["cntrl"], 5),
@@ -527,7 +527,7 @@ end
 
 function define(name: string,
                 pattern: Pattern): Definition
-  return Definition.new(
+  return Definition(
     name, pattern.raw, pattern.tree_size)
 end
 
@@ -536,7 +536,7 @@ function define_value(name: string,
   if candidate == nil or candidate == false then
     raise "PEG definition value must be truthy"
   end
-  return Definition.new(name, candidate, -1)
+  return Definition(name, candidate, -1)
 end
 
 function compile(
@@ -566,7 +566,7 @@ function match(subject: string, candidate: value,
     local attempt = pattern_match_attempt(
       compiled, subject, start)
     if attempt.matched then
-      return Match.new(
+      return Match(
         start, attempt.after - 1,
         attempt.capture_count, attempt.captures)
     end

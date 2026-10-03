@@ -62,7 +62,7 @@ local function WorkCall:dispatch(task: Task): Immediate?
     ffi.lua_pushtvalue(L, owner)
     complete_work(task, status)
   end
-  local owner = WorkOwner.new(
+  local owner = WorkOwner(
       foreign uv_work_t.new(), foreign WorkPointer.new_array(3), callback)
   local request: foreign *uv_work_t = owner.request
 
@@ -84,7 +84,7 @@ local function WorkCall.from_callback(f: foreign WorkFunction,
                                       arg: foreign WorkPointer): WorkCall
   if not f then raise "async.run_foreign callback must not be NULL" end
 
-  return WorkCall.new(f, arg)
+  return WorkCall(f, arg)
 end
 
 local function run_foreign(f: foreign WorkFunction, arg: foreign WorkPointer)

@@ -124,7 +124,7 @@ function popen(command: string): InputOutputStream
   if not input or not output then
     raise "internal popen spawn did not capture its streams"
   end
-  return InputOutputStream.new(
+  return InputOutputStream(
     process, input as os.OutputStream, output as os.InputStream,
     nil, false)
 end

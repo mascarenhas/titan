@@ -45,7 +45,7 @@ local function same_header_name(left: string, right: string): boolean
 end
 
 function headers(initial: {Header}?): Headers
-  local result = Headers.new({})
+  local result = Headers({})
   if initial then
     local supplied = initial as {Header}
     local index = 1
@@ -61,7 +61,7 @@ end
 function Headers:add(name: string, contents: string)
   validate_header_name(name)
   validate_header_value(contents)
-  self.entries[#self.entries + 1] = Header.new(name, contents)
+  self.entries[#self.entries + 1] = Header(name, contents)
 end
 
 function Headers:set(name: string, contents: string)
@@ -113,7 +113,7 @@ function Headers:all(): {Header}
   local index = 1
   while index <= #self.entries do
     local entry = self.entries[index]
-    result[#result + 1] = Header.new(entry.name, entry.contents)
+    result[#result + 1] = Header(entry.name, entry.contents)
     index = index + 1
   end
   return result

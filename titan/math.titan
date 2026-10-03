@@ -24,7 +24,7 @@ local record RandomState
   local fourth: integer
 end
 
-local random_state = RandomState.new(0, 0xff, 0, 0)
+local random_state = RandomState(0, 0xff, 0, 0)
 
 local function rotate_left(word: integer, amount: integer): integer
   return (word << amount) | (word >> (64 - amount))

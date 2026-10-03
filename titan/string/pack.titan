@@ -57,7 +57,7 @@ end
 
 local function new_pack_state(format_string: string): PackState
   local native_little = HOST_IS_LITTLE_ENDIAN
-  return PackState.new(
+  return PackState(
     format_string, 1, native_little, native_little, 1)
 end
 
@@ -105,55 +105,55 @@ local function read_pack_option(state: PackState): PackOption
   state.cursor = state.cursor + 1
 
   if option == 98 then
-    return PackOption.new(PACK_INT, 1, 0)
+    return PackOption(PACK_INT, 1, 0)
   elseif option == 66 then
-    return PackOption.new(PACK_UINT, 1, 0)
+    return PackOption(PACK_UINT, 1, 0)
   elseif option == 104 then
-    return PackOption.new(
+    return PackOption(
       PACK_INT, foreign short.sizeof as integer, 0)
   elseif option == 72 then
-    return PackOption.new(
+    return PackOption(
       PACK_UINT, foreign short.sizeof as integer, 0)
   elseif option == 108 then
-    return PackOption.new(
+    return PackOption(
       PACK_INT, foreign long.sizeof as integer, 0)
   elseif option == 76 then
-    return PackOption.new(
+    return PackOption(
       PACK_UINT, foreign long.sizeof as integer, 0)
   elseif option == 106 then
-    return PackOption.new(
+    return PackOption(
       PACK_INT, foreign lua_Integer.sizeof as integer, 0)
   elseif option == 74 then
-    return PackOption.new(
+    return PackOption(
       PACK_UINT, foreign lua_Integer.sizeof as integer, 0)
   elseif option == 84 then
-    return PackOption.new(
+    return PackOption(
       PACK_UINT, foreign size_t.sizeof as integer, 0)
   elseif option == 102 then
-    return PackOption.new(
+    return PackOption(
       PACK_FLOAT, foreign float.sizeof as integer, 0)
   elseif option == 110 then
-    return PackOption.new(
+    return PackOption(
       PACK_NUMBER, foreign lua_Number.sizeof as integer, 0)
   elseif option == 100 then
-    return PackOption.new(
+    return PackOption(
       PACK_DOUBLE, foreign double.sizeof as integer, 0)
   elseif option == 105 then
-    return PackOption.new(
+    return PackOption(
       PACK_INT,
       checked_pack_integer_size(
         read_pack_number(
           state, foreign int.sizeof as integer)),
       0)
   elseif option == 73 then
-    return PackOption.new(
+    return PackOption(
       PACK_UINT,
       checked_pack_integer_size(
         read_pack_number(
           state, foreign int.sizeof as integer)),
       0)
   elseif option == 115 then
-    return PackOption.new(
+    return PackOption(
       PACK_STRING,
       checked_pack_integer_size(
         read_pack_number(
@@ -164,29 +164,29 @@ local function read_pack_option(state: PackState): PackOption
     if size < 0 then
       raise "missing size for format option 'c'"
     end
-    return PackOption.new(PACK_CHAR, size, 0)
+    return PackOption(PACK_CHAR, size, 0)
   elseif option == 122 then
-    return PackOption.new(PACK_ZSTRING, 0, 0)
+    return PackOption(PACK_ZSTRING, 0, 0)
   elseif option == 120 then
-    return PackOption.new(PACK_PADDING, 1, 0)
+    return PackOption(PACK_PADDING, 1, 0)
   elseif option == 88 then
-    return PackOption.new(PACK_ALIGN, 0, 0)
+    return PackOption(PACK_ALIGN, 0, 0)
   elseif option == 32 then
-    return PackOption.new(PACK_NONE, 0, 0)
+    return PackOption(PACK_NONE, 0, 0)
   elseif option == 60 then
     state.little_endian = true
-    return PackOption.new(PACK_NONE, 0, 0)
+    return PackOption(PACK_NONE, 0, 0)
   elseif option == 62 then
     state.little_endian = false
-    return PackOption.new(PACK_NONE, 0, 0)
+    return PackOption(PACK_NONE, 0, 0)
   elseif option == 61 then
     state.little_endian = state.native_little_endian
-    return PackOption.new(PACK_NONE, 0, 0)
+    return PackOption(PACK_NONE, 0, 0)
   elseif option == 33 then
     state.maximum_alignment =
       checked_pack_integer_size(
         read_pack_number(state, NATIVE_MAXIMUM_ALIGNMENT))
-    return PackOption.new(PACK_NONE, 0, 0)
+    return PackOption(PACK_NONE, 0, 0)
   else
     raise "invalid format option"
   end

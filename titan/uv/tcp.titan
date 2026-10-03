@@ -316,16 +316,16 @@ local function validate_tcp(tcp: uv_tcp_t, operation: string)
 end
 
 local function new_connection_role(): TcpRole
-  return TcpRole.connection(TcpConnectionState.new(
+  return TcpRole.connection(TcpConnectionState(
       nil, {}, 1, false, nil, nil))
 end
 
 local function new_server_role(): TcpRole
-  return TcpRole.server(TcpServerState.new({}, 1, 0, nil, nil))
+  return TcpRole.server(TcpServerState({}, 1, 0, nil, nil))
 end
 
 local function new_tcp(runtime: Runtime, role: TcpRole): uv_tcp_t
-  local tcp = uv_tcp_t.new {
+  local tcp = uv_tcp_t {
     native = foreign uv_tcp_t.new(),
     alloc_callback = tcp_alloc_dispatch,
     read_callback = tcp_read_dispatch,
@@ -521,7 +521,7 @@ local function GetaddrinfoCall:dispatch(task: Task): Immediate?
                              pointer: foreign *void)
     complete_getaddrinfo(task, status, pointer)
   end
-  local owner = uv_getaddrinfo_t.new(foreign uv_getaddrinfo_t.new(), callback)
+  local owner = uv_getaddrinfo_t(foreign uv_getaddrinfo_t.new(), callback)
   local request = owner.native
   task.pending = owner
   ffi.uv_req_set_data(request as foreign *uv_req_t,
@@ -543,7 +543,7 @@ local function TcpConnectCall:dispatch(task: Task): Immediate?
   local callback = function (_owner: uv_connect_t, status: integer)
     complete_status(task, status, "net.connect")
   end
-  local owner = uv_connect_t.new(foreign uv_connect_t.new(), callback)
+  local owner = uv_connect_t(foreign uv_connect_t.new(), callback)
   local request = owner.native
   task.pending = owner
   ffi.uv_req_set_data(request as foreign *uv_req_t,
@@ -565,11 +565,11 @@ local function TcpReadCall:dispatch(task: Task): Immediate?
     return immediate_ok(take_chunk(tcp))
   end
   if state.read_error ~= nil then
-    return Immediate.new(true, state.read_error)
+    return Immediate(true, state.read_error)
   end
   if state.eof then return immediate_ok(nil) end
   if state.reader then
-    return Immediate.new(true, "Connection already has a waiting reader")
+    return Immediate(true, "Connection already has a waiting reader")
   end
   local cancel_action: CancelAction = function ()
     if state.reader == task then
@@ -596,7 +596,7 @@ local function TcpShutdownCall:dispatch(task: Task): Immediate?
   local callback = function (_owner: uv_shutdown_t, status: integer)
     complete_status(task, status, "net.shutdown")
   end
-  local owner = uv_shutdown_t.new(foreign uv_shutdown_t.new(), callback)
+  local owner = uv_shutdown_t(foreign uv_shutdown_t.new(), callback)
   local request = owner.native
   task.pending = owner
   ffi.uv_req_set_data(request as foreign *uv_req_t,
@@ -616,13 +616,13 @@ local function TcpAcceptCall:dispatch(task: Task): Immediate?
   local tcp = self.tcp
   local state = server_state(tcp)
   if state.error ~= nil then
-    return Immediate.new(true, state.error)
+    return Immediate(true, state.error)
   end
   if state.accepted_head <= state.accepted_tail then
     return immediate_ok(take_accepted(tcp))
   end
   if state.waiter then
-    return Immediate.new(true, "Server already has a waiting accept Task")
+    return Immediate(true, "Server already has a waiting accept Task")
   end
 
   local cancel_action: CancelAction = function ()
@@ -642,7 +642,7 @@ local function resolve_addresses(host: string,
     raise make_error(ffi.UV_EINVAL, "net.resolve")
   end
   return await(Call.getaddrinfo(
-      GetaddrinfoCall.new(host, service_text(port)))) as AddressList
+      GetaddrinfoCall(host, service_text(port)))) as AddressList
 end
 
 local function validate_port(port: integer)
@@ -665,7 +665,7 @@ local function net_connect(host: string, port: integer): uv_tcp_t
     do
       defer if not connected then begin_tcp_close(tcp, nil) end
       await(Call.tcp_connect(
-          TcpConnectCall.new(tcp, addresses, address_index)))
+          TcpConnectCall(tcp, addresses, address_index)))
       connected = true
     catch
       last_failure = error
@@ -717,7 +717,7 @@ local function net_read(tcp: uv_tcp_t): string?
   require_connection(tcp, "read from")
   if ffi.uv_is_closing(tcp_handle(tcp)) ~= 0 then return nil end
   validate_tcp(tcp, "read from")
-  return await(Call.tcp_read(TcpReadCall.new(tcp))) as string?
+  return await(Call.tcp_read(TcpReadCall(tcp))) as string?
 end
 
 local function net_write(tcp: uv_tcp_t, data: string)
@@ -728,27 +728,27 @@ local function net_write(tcp: uv_tcp_t, data: string)
   end
   if #data == 0 then return end
   await(Call.tcp_write(
-      TcpWriteCall.new(tcp, data)))
+      TcpWriteCall(tcp, data)))
 end
 
 local function net_shutdown(tcp: uv_tcp_t)
   require_connection(tcp, "shut down")
   validate_tcp(tcp, "shut down")
   if ffi.uv_is_writable(tcp_stream(tcp)) == 0 then return end
-  await(Call.tcp_shutdown(TcpShutdownCall.new(tcp)))
+  await(Call.tcp_shutdown(TcpShutdownCall(tcp)))
 end
 
 local function net_accept(server: uv_tcp_t): uv_tcp_t
   local state = require_server(server, "accept on")
   if state.error ~= nil then raise state.error end
   validate_tcp(server, "accept on")
-  return await(Call.tcp_accept(TcpAcceptCall.new(server))) as uv_tcp_t
+  return await(Call.tcp_accept(TcpAcceptCall(server))) as uv_tcp_t
 end
 
 local function net_close(tcp: uv_tcp_t)
   if ffi.uv_is_closing(tcp_handle(tcp)) ~= 0 then return end
   validate_tcp(tcp, "close")
-  await(Call.tcp_close(TcpCloseCall.new(tcp)))
+  await(Call.tcp_close(TcpCloseCall(tcp)))
 end
 
 local function net_is_closed(tcp: uv_tcp_t): boolean

@@ -147,10 +147,10 @@ local function new_fs_request(task: Task,
   local owner = (function (read_size: integer,
                            callback: function (uv_fs_t): ()): uv_fs_t
     if read_size >= 0 then
-      return uv_fs_t.new(
+      return uv_fs_t(
           foreign uv_fs_t.new(), foreign char.new_array(read_size), callback)
     end
-    return uv_fs_t.new(foreign uv_fs_t.new(), nil, callback)
+    return uv_fs_t(foreign uv_fs_t.new(), nil, callback)
   end)(read_size, callback)
   local request: foreign *uv_fs_t = owner.handle
   ffi.uv_req_set_data(request as foreign *uv_req_t,
@@ -185,7 +185,7 @@ local function stat_result(task: Task, owner: uv_fs_t, result: integer,
     if file_type == ffi.S_IFLNK then return "symlink" end
     return "other"
   end)(file_type)
-  return FsStatResult.new(statbuf.st_size, kind, mode,
+  return FsStatResult(statbuf.st_size, kind, mode,
                           statbuf.st_dev as foreign lua_Integer,
                           statbuf.st_ino as foreign lua_Integer,
                           statbuf.st_mtim.tv_sec,
@@ -411,13 +411,13 @@ local function FsListCall:dispatch(task: Task): Immediate?
 end
 
 local function fs_open(path: string, mode: string): foreign uv_file
-  return await(Call.fs_open(FsOpenCall.new(
+  return await(Call.fs_open(FsOpenCall(
       checked_text(path, "fs.open"), fs_open_flags(mode)))) as foreign uv_file
 end
 
 local function fs_read(file: foreign uv_file, max_bytes: integer): string?
   validate_file(file)
-  return await(Call.fs_read(FsReadCall.new(file, max_bytes)))
+  return await(Call.fs_read(FsReadCall(file, max_bytes)))
 end
 
 local function fs_write(file: foreign uv_file, data: string,
@@ -425,12 +425,12 @@ local function fs_write(file: foreign uv_file, data: string,
   validate_file(file)
   if #data == 0 then return 0 end
   return await(
-      Call.fs_write(FsWriteCall.new(file, data, offset))) as integer
+      Call.fs_write(FsWriteCall(file, data, offset))) as integer
 end
 
 local function fs_flush(file: foreign uv_file)
   validate_file(file)
-  await(Call.fs_flush(FsFlushCall.new(file)))
+  await(Call.fs_flush(FsFlushCall(file)))
 end
 
 local function fs_close(operation: FsCloseCall)
@@ -440,7 +440,7 @@ end
 
 local function fs_stat(path: string):
     (integer, string, integer, integer, integer, integer, integer)
-  local result = await(Call.fs_stat(FsStatCall.new(
+  local result = await(Call.fs_stat(FsStatCall(
       checked_text(path, "fs.stat")))) as FsStatResult
   return result.size, result.kind, result.mode, result.device, result.inode,
          result.modified_seconds, result.modified_nanoseconds
@@ -448,7 +448,7 @@ end
 
 local function fs_lstat(path: string):
     (integer, string, integer, integer, integer, integer, integer)
-  local result = await(Call.fs_lstat(FsLstatCall.new(
+  local result = await(Call.fs_lstat(FsLstatCall(
       checked_text(path, "fs.lstat")))) as FsStatResult
   return result.size, result.kind, result.mode, result.device, result.inode,
          result.modified_seconds, result.modified_nanoseconds
@@ -456,32 +456,32 @@ end
 
 local function fs_tmpname(): string
   local template = fs_tmpname_template()
-  return await(Call.fs_tmpname(FsTmpnameCall.new(
+  return await(Call.fs_tmpname(FsTmpnameCall(
       checked_text(template, "fs.tmpname")))) as string
 end
 
 local function fs_mkdir(path: string)
-  await(Call.fs_mkdir(FsMkdirCall.new(
+  await(Call.fs_mkdir(FsMkdirCall(
       checked_text(path, "fs.mkdir"))))
 end
 
 local function fs_unlink(path: string)
-  await(Call.fs_unlink(FsUnlinkCall.new(
+  await(Call.fs_unlink(FsUnlinkCall(
       checked_text(path, "fs.unlink"))))
 end
 
 local function fs_rmdir(path: string)
-  await(Call.fs_rmdir(FsRmdirCall.new(
+  await(Call.fs_rmdir(FsRmdirCall(
       checked_text(path, "fs.rmdir"))))
 end
 
 local function fs_rename(from: string, to: string)
   checked_text(from, "fs.rename")
   checked_text(to, "fs.rename")
-  await(Call.fs_rename(FsRenameCall.new(from, to)))
+  await(Call.fs_rename(FsRenameCall(from, to)))
 end
 
 local function fs_list(path: string): {string}
-  return await(Call.fs_list(FsListCall.new(
+  return await(Call.fs_list(FsListCall(
       checked_text(path, "fs.list")))) as {string}
 end

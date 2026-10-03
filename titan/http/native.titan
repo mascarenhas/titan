@@ -211,7 +211,7 @@ local function native_string(pointer: foreign const *char): string
 end
 
 local function event(kind: integer, text: string): Event
-  return Event.new(kind, text, 0, 0, 0, 0, false, false)
+  return Event(kind, text, 0, 0, 0, 0, false, false)
 end
 
 local function callback_failure(parser: Parser,
@@ -271,7 +271,7 @@ end
 local function headers_complete_callback(
     parser: Parser): foreign int
   do
-    parser.events[#parser.events + 1] = Event.new {
+    parser.events[#parser.events + 1] = Event {
       kind = EVENT_HEADERS_COMPLETE,
       text = "",
       method = ffi.llhttp_get_method(parser.native) as integer,
@@ -299,7 +299,7 @@ end
 local function message_complete_callback(
     parser: Parser): foreign int
   do
-    parser.events[#parser.events + 1] = Event.new {
+    parser.events[#parser.events + 1] = Event {
       kind = EVENT_MESSAGE_COMPLETE,
       text = "",
       method = 0,
@@ -318,7 +318,7 @@ end
 local function new_parser(connection: io.ReaderWriterCloser,
                           parser_type: foreign llhttp_type_t,
                           response_to_head: boolean): Parser
-  local parser = Parser.new {
+  local parser = Parser {
     native = foreign llhttp_t.new(),
     settings = foreign llhttp_settings_t.new(),
     callback_state = L,

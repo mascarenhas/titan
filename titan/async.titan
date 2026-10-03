@@ -149,7 +149,7 @@ function channel<|T|>(size: integer?):
   local send_waiter: Task<|value, value|>? = nil
   local receive_waiter: Task<|value, value|>? = nil
   local closed = false
-  local resume_token = ResumeToken.new("channel")
+  local resume_token = ResumeToken("channel")
 
   local send: function (T): () = function (item: T)
     if closed then raise "channel is closed" end
@@ -290,8 +290,8 @@ end
 function reader_writer_channel(size: integer?):
     (ChannelReader, ChannelWriter)
   local send, receive, close = channel<|string|>(size)
-  return ChannelReader.new(receive, close, nil, false),
-         ChannelWriter.new(send, close)
+  return ChannelReader(receive, close, nil, false),
+         ChannelWriter(send, close)
 end
 
 -- The Runtime never runs two Tasks reentrantly, so a named operand equal to
@@ -333,7 +333,7 @@ function any_two<|A1, B1, A2, B2|>(
 
   if terminal_count == 2 then return AnyTwoResult<|A1, A2|>.none() end
 
-  local resume_token = ResumeToken.new("async.any_two")
+  local resume_token = ResumeToken("async.any_two")
   local waiting = current
   local winner = 0
   local result: value = nil
@@ -428,7 +428,7 @@ function any_three<|A1, B1, A2, B2, A3, B3|>(
 
   if terminal_count == 3 then return AnyThreeResult<|A1, A2, A3|>.none() end
 
-  local resume_token = ResumeToken.new("async.any_three")
+  local resume_token = ResumeToken("async.any_three")
   local waiting = current
   local winner = 0
   local result: value = nil
@@ -557,7 +557,7 @@ function any_four<|A1, B1, A2, B2, A3, B3, A4, B4|>(
 
   if terminal_count == 4 then return AnyFourResult<|A1, A2, A3, A4|>.none() end
 
-  local resume_token = ResumeToken.new("async.any_four")
+  local resume_token = ResumeToken("async.any_four")
   local waiting = current
   local winner = 0
   local result: value = nil
@@ -721,7 +721,7 @@ function any_five<|A1, B1, A2, B2, A3, B3, A4, B4, A5, B5|>(
 
   if terminal_count == 5 then return AnyFiveResult<|A1, A2, A3, A4, A5|>.none() end
 
-  local resume_token = ResumeToken.new("async.any_five")
+  local resume_token = ResumeToken("async.any_five")
   local waiting = current
   local winner = 0
   local result: value = nil
@@ -871,7 +871,7 @@ function race_two<|A1, B1, A2, B2|>(
     return RaceTwoResult<|A1, B1, A2, B2|>.second(second_status)
   end
 
-  local resume_token = ResumeToken.new("async.race_two")
+  local resume_token = ResumeToken("async.race_two")
   local waiting = current
   local winner = 0
   local result = TaskStatus<|value, value|>.ready()
@@ -923,7 +923,7 @@ function race_three<|A1, B1, A2, B2, A3, B3|>(
     return RaceThreeResult<|A1, B1, A2, B2, A3, B3|>.third(third_status)
   end
 
-  local resume_token = ResumeToken.new("async.race_three")
+  local resume_token = ResumeToken("async.race_three")
   local waiting = current
   local winner = 0
   local result = TaskStatus<|value, value|>.ready()
@@ -992,7 +992,7 @@ function race_four<|A1, B1, A2, B2, A3, B3, A4, B4|>(
     return RaceFourResult<|A1, B1, A2, B2, A3, B3, A4, B4|>.fourth(fourth_status)
   end
 
-  local resume_token = ResumeToken.new("async.race_four")
+  local resume_token = ResumeToken("async.race_four")
   local waiting = current
   local winner = 0
   local result = TaskStatus<|value, value|>.ready()
@@ -1079,7 +1079,7 @@ function race_five<|A1, B1, A2, B2, A3, B3, A4, B4, A5, B5|>(
     return RaceFiveResult<|A1, B1, A2, B2, A3, B3, A4, B4, A5, B5|>.fifth(fifth_status)
   end
 
-  local resume_token = ResumeToken.new("async.race_five")
+  local resume_token = ResumeToken("async.race_five")
   local waiting = current
   local winner = 0
   local result = TaskStatus<|value, value|>.ready()
@@ -1176,7 +1176,7 @@ function all_two<|A1, B1, A2, B2|>(
     return first_result as A1, second_result as A2
   end
 
-  local resume_token = ResumeToken.new("async.all_two")
+  local resume_token = ResumeToken("async.all_two")
   local waiting = current
   local rejected = 0
   local rejection = TaskStatus<|value, value|>.ready()
@@ -1276,7 +1276,7 @@ function all_three<|A1, B1, A2, B2, A3, B3|>(
            third_result as A3
   end
 
-  local resume_token = ResumeToken.new("async.all_three")
+  local resume_token = ResumeToken("async.all_three")
   local waiting = current
   local rejected = 0
   local rejection = TaskStatus<|value, value|>.ready()
@@ -1411,7 +1411,7 @@ function all_four<|A1, B1, A2, B2, A3, B3, A4, B4|>(
            third_result as A3, fourth_result as A4
   end
 
-  local resume_token = ResumeToken.new("async.all_four")
+  local resume_token = ResumeToken("async.all_four")
   local waiting = current
   local rejected = 0
   local rejection = TaskStatus<|value, value|>.ready()
@@ -1582,7 +1582,7 @@ function all_five<|A1, B1, A2, B2, A3, B3, A4, B4, A5, B5|>(
            fifth_result as A5
   end
 
-  local resume_token = ResumeToken.new("async.all_five")
+  local resume_token = ResumeToken("async.all_five")
   local waiting = current
   local rejected = 0
   local rejection = TaskStatus<|value, value|>.ready()
@@ -1714,7 +1714,7 @@ function join<|A, B|>(task: Task<|A, B|>): TaskStatus<|A, B|>
   local status = task:status()
   if status:has_finished() then return status end
 
-  local resume_token = ResumeToken.new("async.join")
+  local resume_token = ResumeToken("async.join")
   local waiting = current
   local result = TaskStatus<|value, value|>.ready()
   local listener = function (terminal_status: TaskStatus<|A, B|>)
@@ -1752,7 +1752,7 @@ function join_two<|A1, B1, A2, B2|>(
     return first_result as TaskStatus<|A1, B1|>, second_result as TaskStatus<|A2, B2|>
   end
 
-  local resume_token = ResumeToken.new("async.join_two")
+  local resume_token = ResumeToken("async.join_two")
   local waiting = current
   local first_listener = function (status: TaskStatus<|A1, B1|>)
     if first_result:has_finished() then return end
@@ -1809,7 +1809,7 @@ function join_three<|A1, B1, A2, B2, A3, B3|>(
            third_result as TaskStatus<|A3, B3|>
   end
 
-  local resume_token = ResumeToken.new("async.join_three")
+  local resume_token = ResumeToken("async.join_three")
   local waiting = current
   local first_listener = function (status: TaskStatus<|A1, B1|>)
     if first_result:has_finished() then return end
@@ -1884,7 +1884,7 @@ function join_four<|A1, B1, A2, B2, A3, B3, A4, B4|>(
            third_result as TaskStatus<|A3, B3|>, fourth_result as TaskStatus<|A4, B4|>
   end
 
-  local resume_token = ResumeToken.new("async.join_four")
+  local resume_token = ResumeToken("async.join_four")
   local waiting = current
   local first_listener = function (status: TaskStatus<|A1, B1|>)
     if first_result:has_finished() then return end
@@ -1977,7 +1977,7 @@ function join_five<|A1, B1, A2, B2, A3, B3, A4, B4, A5, B5|>(
            fifth_result as TaskStatus<|A5, B5|>
   end
 
-  local resume_token = ResumeToken.new("async.join_five")
+  local resume_token = ResumeToken("async.join_five")
   local waiting = current
   local first_listener = function (status: TaskStatus<|A1, B1|>)
     if first_result:has_finished() then return end

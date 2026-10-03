@@ -103,7 +103,7 @@ function request(method: string, source_url: string,
     if exact.status_number < 200 or exact.status_number > 999 then
       raise "HTTP server returned an invalid final status code"
     end
-    return ClientResponse.new(
+    return ClientResponse(
       exact.status_number, exact.reason_text, "HTTP/1.1",
       exact.parsed_headers, exact, connection, false, false)
   catch

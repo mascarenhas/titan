@@ -45,7 +45,7 @@ end
 function connect(host: string, port: integer): Connection
   check_host(host)
   check_connect_port(port)
-  return Connection.new(uv.net_connect(host, port), "")
+  return Connection(uv.net_connect(host, port), "")
 end
 
 function listen(host: string, port: integer,
@@ -55,7 +55,7 @@ function listen(host: string, port: integer,
   local actual_backlog = 128
   if backlog then actual_backlog = backlog as integer end
   if actual_backlog <= 0 then raise "listen backlog must be positive" end
-  return Server.new(uv.net_listen(host, port, actual_backlog))
+  return Server(uv.net_listen(host, port, actual_backlog))
 end
 
 function Connection:read(): string?
@@ -124,7 +124,7 @@ function Connection:close()
 end
 
 function Server:accept(): Connection
-  return Connection.new(uv.net_accept(self.handle), "")
+  return Connection(uv.net_accept(self.handle), "")
 end
 
 function Server:close()
