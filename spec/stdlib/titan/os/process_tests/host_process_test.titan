@@ -437,3 +437,37 @@ function test_native_exit_codes(context: test.Context)
   native_exit_case(context, "one_twenty_seven", 127)
   native_exit_case(context, "nine_thousand_nine", 9009)
 end
+
+-- Public failure preservation before native acceptance. Accepted-child
+-- rollback is covered separately by the private instrumented-provider oracle.
+function test_spawn_option_false_failure_preserves_original_trace(
+    _context: test.Context)
+  runtime_test.run(function ()
+    local original_trace = ""
+    local rejected = function (_config: system.SpawnConfig): integer
+      do
+        raise false
+      catch
+        original_trace = traceback
+        raise
+      end
+    end
+    local caught = false
+    do
+      system.spawn(process_support.child_path(), {"exit", "0"}, rejected)
+    catch
+      caught = true
+      test.assert(error == false, "SpawnOption false payload changed")
+      test.assert(#original_trace > 0 and traceback == original_trace,
+                  "SpawnOption original traceback changed during cleanup")
+    end
+    test.assert(caught, "throwing SpawnOption unexpectedly published a Process")
+
+    -- A fresh ordinary spawn remains usable in that same Runtime after the
+    -- failed Config has unwound. This is a control, not an injected rollback.
+    local process = system.spawn(process_support.child_path(), {"exit", "0"})
+    defer cleanup_process(process)
+    process_support.close_process_streams(process)
+    process_support.assert_normal(process:wait(), "post-option-failure child")
+  end)
+end

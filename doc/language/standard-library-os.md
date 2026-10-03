@@ -299,6 +299,17 @@ and writes the corresponding stdio entry. It returns a libuv-style status, so
 by the configuration, and raises the corresponding error without calling later
 options.
 
+If native child creation succeeds but `spawn` then fails before returning its
+`Process`, the configuration still owns that child. Rollback closes captured
+streams, sends SIGTERM, and sends SIGKILL after 30 seconds if the child is still
+running. It waits for the actual child exit and native handle close before
+rethrowing the original error with its original traceback. Pending Task
+cancellation does not interrupt this cleanup. A child that exits earlier
+cancels escalation. The 30 seconds is a grace period, not an unconditional
+cleanup deadline: if signaling cannot terminate the child, cleanup continues
+to wait for its real exit. Successfully returned Processes retain their normal
+explicit `kill` and `wait` behavior.
+
 `with_stdin`, `with_stdout`, and `with_stderr` select a captured
 parent-facing pipe. The corresponding `with_parent_*` function selects direct
 inheritance of the current parent stream. Later options replace conflicting

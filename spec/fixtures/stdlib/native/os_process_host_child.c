@@ -71,9 +71,40 @@ static int dual_output(const char *count_text) {
   return fflush(stdout) == 0 && fflush(stderr) == 0 ? 0 : 2;
 }
 
+/* Private rollback oracles use READY to exclude a TERM-handler startup race.
+ * The independent 40-second alarm bounds this child even if Titan loses it. */
+static void rollback_deadline(int signal_number) {
+  (void)signal_number;
+  _exit(90);
+}
+
+static int rollback_bounded(int ignore_term) {
+  struct sigaction action;
+  sigset_t unblocked;
+  memset(&action, 0, sizeof(action));
+  if (sigemptyset(&action.sa_mask) != 0) return 3;
+  action.sa_handler = rollback_deadline;
+  if (sigaction(SIGALRM, &action, NULL) != 0) return 3;
+  action.sa_handler = ignore_term ? SIG_IGN : SIG_DFL;
+  if (sigaction(SIGTERM, &action, NULL) != 0) return 3;
+  if (sigemptyset(&unblocked) != 0 ||
+      sigaddset(&unblocked, SIGALRM) != 0 ||
+      sigaddset(&unblocked, SIGTERM) != 0 ||
+      sigprocmask(SIG_UNBLOCK, &unblocked, NULL) != 0) return 3;
+  alarm(40);
+  if (fputs("ROLLBACK_READY\n", stdout) == EOF || fflush(stdout) != 0)
+    return 3;
+  for (;;) pause();
+}
+
 int main(int argc, char **argv) {
   if (argc < 2)
     return 2;
+  if (strcmp(argv[1], "rollback-bounded") == 0 && argc == 3) {
+    if (strcmp(argv[2], "ignore") == 0) return rollback_bounded(1);
+    if (strcmp(argv[2], "default") == 0) return rollback_bounded(0);
+    return 2;
+  }
   if (strcmp(argv[1], "argv-env-cwd") == 0)
     return argv_env_cwd(argc, argv);
   if (strcmp(argv[1], "environment") == 0) {

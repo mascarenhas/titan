@@ -494,51 +494,58 @@ function spawn(file: string, args: {string},
                ...: SpawnOption): Process
   local config = SpawnConfig(os_spawn_config_new())
   defer os_spawn_config_close(config.handle)
-  local status = with_stdin(config)
-  if status >= 0 then status = with_stdout(config) end
-  if status >= 0 then status = with_stderr(config) end
-  local index = 1
-  while status >= 0 and index <= #... do
-    local option = ...[index]
-    status = option(config)
-    index = index + 1
-  end
-  if status < 0 then
-    os_spawn_config_error(config.handle, status)
-  end
-  local process_handle, raw_stdin?, raw_stdout?, raw_stderr? =
-    os_process_spawn_with_config(file, args, config.handle)
+  do
+    local status = with_stdin(config)
+    if status >= 0 then status = with_stdout(config) end
+    if status >= 0 then status = with_stderr(config) end
+    local index = 1
+    while status >= 0 and index <= #... do
+      local option = ...[index]
+      status = option(config)
+      index = index + 1
+    end
+    if status < 0 then
+      os_spawn_config_error(config.handle, status)
+    end
+    local process_handle, raw_stdin?, raw_stdout?, raw_stderr? =
+      os_process_spawn_with_config(file, args, config.handle)
 
-  local input: OutputStream? = nil
-  if raw_stdin then
-    local stdio = raw_stdin as Stdio
-    input = OutputStream { handle = stdio, parent_descriptor = -1 }
+    local input: OutputStream? = nil
+    if raw_stdin then
+      local stdio = raw_stdin as Stdio
+      input = OutputStream { handle = stdio, parent_descriptor = -1 }
+    end
+
+    local output: InputStream? = nil
+    if raw_stdout then
+      local stdio = raw_stdout as Stdio
+      output = InputStream { handle = stdio, parent_descriptor = -1, excess = "" }
+    end
+
+    local diagnostics: InputStream? =
+      (function (stderr: Stdio?, stdout: Stdio?,
+                 output: InputStream?): InputStream?
+        if not stderr then return nil end
+        if stdout and stderr == stdout then return output end
+        return InputStream { handle = stderr, parent_descriptor = -1, excess = "" }
+      end)(raw_stderr, raw_stdout, output)
+
+    local result = Process {
+      handle = process_handle,
+      stdin = input,
+      stdout = output,
+      stderr = diagnostics,
+    }
+    local empty_slots: {SpawnSlot} = {}
+    config.handle.cleanup(true)
+    config.handle.slots = empty_slots
+    config.handle.cleanup = nil
+    config.handle.consumed = true
+    return result
+  catch
+    do os_spawn_config_close(config.handle) catch end
+    raise
   end
-
-  local output: InputStream? = nil
-  if raw_stdout then
-    local stdio = raw_stdout as Stdio
-    output = InputStream { handle = stdio, parent_descriptor = -1, excess = "" }
-  end
-
-  local diagnostics: InputStream? =
-    (function (stderr: Stdio?, stdout: Stdio?,
-               output: InputStream?): InputStream?
-      if not stderr then return nil end
-      if stdout and stderr == stdout then return output end
-      return InputStream { handle = stderr, parent_descriptor = -1, excess = "" }
-    end)(raw_stderr, raw_stdout, output)
-
-  local result = Process {
-    handle = process_handle,
-    stdin = input,
-    stdout = output,
-    stderr = diagnostics,
-  }
-  local empty_slots: {SpawnSlot} = {}
-  config.handle.slots = empty_slots
-  config.handle.consumed = true
-  return result
 end
 
 -- Only io.popen selects shell syntax. Ordinary spawn keeps libuv's normal argv
@@ -643,6 +650,7 @@ local record ProcessConfig
   slots: {SpawnSlot}
   environment: {SpawnEnvironmentEntry}
   consumed: boolean
+  cleanup: (function (boolean): ())?
 end
 
 local record ProcessOwner
@@ -1211,7 +1219,7 @@ local function os_spawn_config_new(): ProcessConfig
   if async.is_closing() then
     raise "cannot configure a Process while async Runtime is shutting down"
   end
-  return ProcessConfig(async.current_loop(), uv.process_options_t.new("", {}), {}, {}, false)
+  return ProcessConfig(async.current_loop(), uv.process_options_t.new("", {}), {}, {}, false, nil)
 end
 
 local function configure_capture(config: ProcessConfig,
@@ -1304,12 +1312,14 @@ local function os_spawn_config_close(config: ProcessConfig)
   if config.loop ~= loop then
     raise "SpawnConfig belongs to a different async Runtime"
   end
+  local cleanup? = config.cleanup
   config.consumed = true
-  discard_config_streams(config)
+  config.cleanup = nil
+  if cleanup ~= nil then cleanup(false)
+  else discard_config_streams(config) end
 end
 
 local function os_spawn_config_error(config: ProcessConfig, status: integer)
-  os_spawn_config_close(config)
   raise make_error(status, "process.spawn.config")
 end
 
@@ -1378,11 +1388,74 @@ local function os_process_spawn_with_config(file: string, args: {string}, config
   config.options.args = arguments
   config.options.env = spawn_environment(config)
   local process = ProcessOwner(uv.process_t.new(), config.loop, nil, nil)
+  local handle = process.native:as_handle_t()
+  local timer = uv.timer_t.new()
+  local timer_handle = timer:as_handle_t()
+  local rollback = false
+  local term = signal_number("term")
+  local kill = signal_number("kill")
+  local resolve: (function (nil): ())? = nil
+  local fatal: (function (value, string): ())? = nil
+  -- Native close callbacks run after root retirement. A callback may precede
+  -- wait registration, so registration also checks this exact same condition.
+  local retired = function (_: uv.handle_t)
+    if resolve ~= nil and not handle:is_initialized() and
+        not timer_handle:is_initialized() then
+      do resolve(nil)
+      catch fatal(error, traceback); raise end
+    end
+  end
+  local escalate = function (_: uv.timer_t)
+    if handle:is_initialized() and uv.is_active(handle) then
+      uv.process_kill(process.native, kill)
+    end
+    uv.close(timer_handle, retired)
+  end
+  local register = function (done: function (nil): (),
+                            _reject: function (async.OperationError): (),
+                            failed: function (value, string): ())
+    resolve = done
+    fatal = failed
+    if handle:is_initialized() and not uv.is_closing(handle) and uv.is_active(handle) then
+      -- Native timer_start is allocation-free and cannot reject this live,
+      -- non-closing timer, prebuilt callback and fixed nonnegative interval.
+      -- Refresh libuv's cached time so the grace period starts with SIGTERM.
+      uv.process_kill(process.native, term)
+      uv.update_time(config.loop)
+      uv.timer_start(timer, escalate, 30000, 0)
+    else
+      if not stream_is_closed(handle) then uv.close(handle, retired) end
+      if not stream_is_closed(timer_handle) then uv.close(timer_handle, retired) end
+      retired(handle)
+    end
+  end
+  config.cleanup = function (published: boolean)
+    if published then
+      uv.close(timer_handle, retired)
+      return
+    end
+    rollback = true
+    defer do
+      case async.await_cleanup<|nil, async.OperationError|>(register)
+      when success() then
+      when error(failure) then raise failure
+      end
+    end
+    discard_config_streams(config)
+  end
+  -- Prepare escalation before accepting a child, including the loop root.
+  -- The Config capability already owns this timer if subsequent setup fails.
+  check_status(uv.timer_init(config.loop, timer), "process.spawn.cleanup.timer.init")
   process.exits = async.CoalescingSubscription<|ExitStatus, async.OperationError|>.new(function (publish, fail, finish)
     -- Cancelling a wait detaches only that waiter. The accepted child remains
     -- owned until its exit callback reaps it and closes the process handle.
     local actions = async.SubscriptionActions<|ExitStatus|>(function () end, function (drain) drain() end)
     config.options.exit_cb = function (_: uv.process_t, code: integer, signum: integer)
+      if rollback then
+        if not stream_is_closed(timer_handle) then uv.close(timer_handle, retired) end
+        uv.close(handle, retired)
+        return
+      end
       local result = ExitStatus(code, signal_name(signum), signum)
       process.result = result
       uv.close(process.native:as_handle_t(), nil)
@@ -1392,10 +1465,7 @@ local function os_process_spawn_with_config(file: string, args: {string}, config
     return actions
   end)
   local status = uv.spawn(config.loop, process.native, config.options)
-  if status < 0 then
-    close_native(process.native:as_handle_t())
-    raise make_error(status, "process.spawn")
-  end
+  if status < 0 then raise make_error(status, "process.spawn") end
   local stdin? = slot_parent(stdin_slot)
   local stdout? = slot_parent(stdout_slot)
   local stderr? = slot_parent(stderr_slot)

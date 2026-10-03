@@ -103,13 +103,38 @@ spawning a child. It still requires a running Task, so a native callback cannot
 bypass that boundary. See `async.is_closing()` for the observation used here.
 
 The configuration retains lexical ownership until native spawn, captured-read
-registration, and result construction are ready for publication. Empty slots
-are prepared before the consumed-state commit, so a preparation failure leaves
-rollback ownership intact. Native spawn failure follows the public binding's
-initialized-process close obligation; a negative status alone is not proof that
-no native handle needs close. CREATE_PIPE eligibility and the pinned native
-failed-spawn repair are documented in the
-[public process policy](../language/uv/PROCESS-POLICY.md).
+registration, and result construction are ready for publication. One private
+Config completion capability owns a preinitialized native timer and the
+unpublished process. Both handle views, callbacks, and signal numbers are
+prepared before child acceptance. Empty slots and the public Process are
+allocated before completion closes the unused timer; field-only assignments
+then clear Config ownership and commit publication.
+
+The protected public spawn body catches failures before Config cleanup and
+uses a nested protected cleanup followed by bare rethrow. This preserves the
+original error and traceback across yielding cleanup and secondary failures.
+Config commits its consumed state and detaches the capability before invoking
+it. Rollback selects its exit callback branch before discarding streams, and a
+defer guarantees the cancellation-shielded `async.await_cleanup` even if stream
+discard fails. The branch skips ExitStatus construction and subscription
+publication, retaining the native watcher through the actual exit and close.
+
+An active unpublished child receives SIGTERM, followed by a one-shot 30000ms
+native timer that sends SIGKILL if the child remains active. Cached loop time is
+refreshed at the initial signal request. The timer is initialized before spawn;
+its fixed-duration, prebuilt-callback start is allocation-free under the pinned
+native contract. Early child exit closes the timer; escalation also closes it.
+Cleanup resolves only after both native close callbacks have retired their
+owners. Registration checks for already completed retirement as well. Negative
+signal results never abandon an active watcher: 30 seconds bounds the grace
+period, not exit completion if signaling fails. No cleanup Task, saved-PID
+poller, extra scheduler queue, or ProcessOwner state is introduced.
+
+Native spawn failure follows actual handle state: an uninitialized process
+needs no close, an initialized inactive process must close, and an active
+process retains its exit obligation regardless of the returned status.
+CREATE_PIPE eligibility and the pinned native failed-spawn repair are
+documented in the [public process policy](../language/uv/PROCESS-POLICY.md).
 
 The exit callback records the `ExitStatus`, closes the process handle, publishes
 the coalesced result, and ends the subscription. Wait cancellation detaches only
