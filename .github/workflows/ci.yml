@@ -32,7 +32,7 @@ jobs:
       READLINE_MODE: bundled
       LIBUV_VERSION: "1.52.1"
       # Bump when any CMake option that affects the cached archive changes.
-      LIBUV_BUILD_PROFILE: "static-pic-release-tests-off-v1"
+      LIBUV_BUILD_PROFILE: "static-pic-release-tests-off-v2"
       LLHTTP_VERSION: "9.4.3"
       LLHTTP_SHA256: "1eb813c7437b31a87496a1cd3ed79f00746720f5e7e29c79b42c02cb69f36c39"
       LLHTTP_BUILD_PROFILE: "static-pic-hidden-c99-v1"
@@ -77,7 +77,7 @@ jobs:
             libuv-v${{ env.LIBUV_VERSION }}
             libuv-v${{ env.LIBUV_VERSION }}.tar.gz
             libuv-build
-          key: ubuntu-24.04-${{ runner.arch }}-libuv-${{ env.LIBUV_VERSION }}-${{ env.LIBUV_BUILD_PROFILE }}
+          key: ubuntu-24.04-${{ runner.arch }}-libuv-${{ env.LIBUV_VERSION }}-${{ env.LIBUV_BUILD_PROFILE }}-${{ hashFiles('vendor/libuv/*.patch') }}
           restore-keys: |
             ubuntu-24.04-${{ runner.arch }}-libuv-${{ env.LIBUV_VERSION }}-${{ env.LIBUV_BUILD_PROFILE }}-
 
@@ -503,7 +503,7 @@ jobs:
       LUA_MYLDFLAGS: "-O1 -g -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer"
       LUA_MYLIBS: "-O1 -g -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer"
       LIBBT_CFLAGS: "-fPIC -O1 -g -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer"
-      LIBUV_BUILD_PROFILE: "static-pic-debug-tests-off-asan-ubsan-v1"
+      LIBUV_BUILD_PROFILE: "static-pic-debug-tests-off-asan-ubsan-v2"
       LIBUV_BUILD_TYPE: Debug
       LIBUV_BUILD_CFLAGS: "-O1 -g -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer"
       LLHTTP_BUILD_CFLAGS: "-O1 -g -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer"
@@ -556,6 +556,7 @@ jobs:
           done
           inputs="$RUNNER_TEMP/titan-sanitizer-native-cache-inputs"
           lua_patch_sha256="$(sha256sum vendor/lua/lua-5.5.1-relocatable.patch | cut -d' ' -f1)"
+          libuv_patch_sha256="$(sha256sum vendor/libuv/libuv-1.52.1-spawn-close.patch | cut -d' ' -f1)"
           {
             printf '%s\n' \
               "schema=$SANITIZER_NATIVE_CACHE_SCHEMA" \
@@ -564,6 +565,7 @@ jobs:
               "lua_patch=$lua_patch_sha256" \
               "libbacktrace=$libbacktrace_rev" \
               "libuv=$SANITIZER_LIBUV_VERSION:$SANITIZER_LIBUV_SHA256" \
+              "libuv_patch=$libuv_patch_sha256" \
               "llhttp=$SANITIZER_LLHTTP_VERSION:$SANITIZER_LLHTTP_SHA256" \
               "sqlite3=$SANITIZER_SQLITE3_VERSION:$SANITIZER_SQLITE3_SHA256" \
               "openssl=$SANITIZER_OPENSSL_VERSION:$SANITIZER_OPENSSL_SHA256" \

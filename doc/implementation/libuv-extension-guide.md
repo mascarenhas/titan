@@ -38,6 +38,14 @@ or source-defined foreign callback.
 - `LIBUV_VERSION` selects the audited bundled source, currently 1.52.1; and
 - `LIBUV_MIN_VERSION` is the oldest accepted system libuv, currently 1.43.0.
 
+The bundled Unix source has one [local spawn cleanup
+correction](../../vendor/libuv/README.md). Checksum-verified extraction applies
+the patch before recording a versioned stamp; the build profile and CI cache
+identities distinguish patched archives. Keep the patch, extraction stamp and
+cache identities synchronized. System mode never applies this correction to the
+external library; recommend an up-to-date package and document any remaining
+upstream exposure.
+
 Run `make LIBUV_MODE=bundled libuv`, then read the prospective function in both
 `libuv-v1.52.1/include/uv.h` and its chapter under
 `libuv-v1.52.1/docs/src/`. The header gives the exact callback typedef and

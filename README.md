@@ -203,6 +203,7 @@ make libuv
 ```
 
 The install sequence above builds this bundled copy before installing Titan.
+It includes a [small Unix spawn cleanup correction](vendor/libuv/README.md).
 To use a system development package instead, install it with pkg-config and
 select the optional mode consistently for both steps:
 
@@ -224,6 +225,10 @@ effective mode, include flags, archive, and support libraries; `make help`
 lists the related targets and setup hints. The Makefile records the effective
 mode, compiler, and flags, so switching between bundled and system mode
 rebuilds the libuv-facing objects without requiring a manual clean.
+
+Use system mode only with an up-to-date package. As checked on 2026-10-03,
+upstream libuv 1.53.0 still has the failed-spawn cleanup defect corrected in the
+bundled build; check whether the system package includes that correction.
 
 In bundled mode, the combined `titan.so` is the sole complete dynamic libuv
 provider, while `titan.a` carries the same bundled libuv objects for static

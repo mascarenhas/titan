@@ -5307,7 +5307,7 @@ done
                 'SANITIZER_LIBUV_SHA256: "66d511b9e6e334c0e62279eb234fbfb2b' ..
                 '3110b1479c09b95b44c7afca8cff9e7"',
                 'LIBUV_BUILD_PROFILE: "static-pic-debug-tests-off-' ..
-                'asan-ubsan-v1"',
+                'asan-ubsan-v2"',
                 'SANITIZER_LLHTTP_VERSION: "9.4.3"',
                 'SANITIZER_LLHTTP_SHA256: "1eb813c7437b31a87496a1cd3ed79f007' ..
                 '46720f5e7e29c79b42c02cb69f36c39"',
@@ -5316,6 +5316,7 @@ done
                 '1984552a3c8e4aa11a24aa31aeac98e8"',
                 "id: sanitizer-native-cache-key",
                 "sha256sum vendor/lua/lua-5.5.1-relocatable.patch",
+                "sha256sum vendor/libuv/libuv-1.52.1-spawn-close.patch",
                 "git ls-remote",
                 "libbacktrace.git HEAD",
                 'cc_target="$(cc -dumpmachine)"',
@@ -5371,6 +5372,7 @@ done
             for _, fingerprint in ipairs({
                 "titan_abi=$TITAN_ABI_VERSION",
                 "lua_patch=$lua_patch_sha256",
+                "libuv_patch=$libuv_patch_sha256",
                 "libuv_profile=$LIBUV_BUILD_PROFILE",
                 "sqlite3=$SANITIZER_SQLITE3_VERSION:$SANITIZER_SQLITE3_SHA256",
                 "sqlite3_cflags=$SQLITE3_BUILD_CFLAGS",

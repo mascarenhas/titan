@@ -135,10 +135,11 @@ LIBUV_TARBALL     := $(LIBUV_SRC_DIR).tar.gz
 LIBUV_URL         := https://dist.libuv.org/dist/v$(LIBUV_VERSION)/$(LIBUV_TARBALL)
 LIBUV_SHA256      := 66d511b9e6e334c0e62279eb234fbfb2b3110b1479c09b95b44c7afca8cff9e7
 LIBUV_BUNDLED_LIB := $(LIBUV_BUILD_DIR)/libuv.a
-LIBUV_EXTRACTED   := $(LIBUV_SRC_DIR)/.titan-extracted
+LIBUV_PATCH_FILE  := vendor/libuv/libuv-1.52.1-spawn-close.patch
+LIBUV_EXTRACTED   := $(LIBUV_SRC_DIR)/.titan-extracted-spawn-close-v1
 LIBUV_PKG_CONFIG  ?= pkg-config
 LIBUV_BUILD_TYPE  ?= Release
-LIBUV_BUILD_PROFILE ?= static-pic-release-tests-off-v1
+LIBUV_BUILD_PROFILE ?= static-pic-release-tests-off-v2
 LIBUV_CMAKE_FLAGS := -DLIBUV_BUILD_SHARED=OFF -DBUILD_TESTING=OFF \
 	-DCMAKE_POSITION_INDEPENDENT_CODE=ON \
 	-DCMAKE_BUILD_TYPE=$(LIBUV_BUILD_TYPE)
@@ -1234,6 +1235,9 @@ check-libuv-tools:
 	  echo "  Linux: install the tar package" >&2; \
 	  echo "  macOS: tar is supplied by the operating system" >&2; missing=1; \
 	fi; \
+	if ! command -v git >/dev/null 2>&1; then \
+	  echo "ERROR: 'git' is required to apply the bundled libuv correction." >&2; missing=1; \
+	fi; \
 	if [ "$(HOST_OS)" != Linux ] && [ "$(HOST_OS)" != Darwin ]; then \
 	  echo "ERROR: bundled libuv is currently supported only on Linux and macOS (host: $(HOST_OS)/$(HOST_ARCH))." >&2; \
 	  missing=1; \
@@ -1251,7 +1255,7 @@ $(LIBUV_TARBALL):
 	  echo "ERROR: need 'curl' or 'wget' to download libuv" >&2; exit 1; \
 	fi
 
-$(LIBUV_EXTRACTED): $(LIBUV_TARBALL)
+$(LIBUV_EXTRACTED): $(LIBUV_TARBALL) $(LIBUV_PATCH_FILE)
 	@$(MAKE) --no-print-directory check-libuv-tools
 	@echo "==> Verifying SHA-256 for $(LIBUV_TARBALL)"
 	@if command -v sha256sum >/dev/null 2>&1; then \
@@ -1270,6 +1274,7 @@ $(LIBUV_EXTRACTED): $(LIBUV_TARBALL)
 	@test -d "$(LIBUV_SRC_DIR)" || { \
 	  echo "ERROR: $(LIBUV_TARBALL) did not contain $(LIBUV_SRC_DIR)." >&2; exit 1; \
 	}
+	git apply --directory="$(LIBUV_SRC_DIR)" "$(LIBUV_PATCH_FILE)"
 	@touch "$@"
 
 # Make does not otherwise notice changes to command-line CMake variables, while

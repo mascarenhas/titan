@@ -182,6 +182,11 @@ LIBUV_MODE=system make libuv
 LIBUV_MODE=system "$PREFIX/bin/luarocks" make
 ```
 
+Use an up-to-date system package. The bundled Unix build includes a
+[failed-spawn cleanup correction](../../vendor/libuv/README.md) that upstream
+1.53.0 still lacks as checked on 2026-10-03. System mode uses the installed
+library unchanged, so its package must supply the fix to avoid that exposure.
+
 Typical packages are `libuv1-dev pkg-config` on Debian/Ubuntu,
 `libuv-devel pkgconf-pkg-config` on Fedora, and `libuv pkgconf` through
 Homebrew on macOS. Applications importing the installed binary `net` module do
