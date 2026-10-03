@@ -152,11 +152,13 @@ end
 
 function test_lua_source_open_cancellation_is_retryable(
     context: test.Context)
+  if common.is_windows() then
+    test.skip("platform: source-open cancellation fixture requires Unix filesystem FIFOs")
+  end
   runtime_test.run(function ()
     local root = lua_support.temporary_directory(context)
     local fifo = root .. "/source.fifo"
-    test.assert(ffi.mkfifo(fifo, 384) == 0,
-                "could not create source-search FIFO")
+    lua_support.make_source_fifo(fifo)
     runtime_test.cleanup(function () fs.unlink(fifo) end)
 
     local package_table = lua_support.lua_package_table()

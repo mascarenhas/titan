@@ -234,16 +234,17 @@ lifecycle protocol.
 
 ## Repository dogfooding
 
-The Makefile's `TITAN_STDLIB_TEST_ROOTS` manifest names 25 module-owned roots
-under `spec/stdlib/titan/`. The reviewed `spec/support/stdlib_test_modules.mk`
-inventory names their 42 test/helper compilation units, folder contributors,
-and direct source imports. Make compiles shared `titan.test` support once with
+The shared `spec/support/stdlib_test_modules.mk` manifest names 25 module-owned
+roots under `spec/stdlib/titan/`, used by Linux, macOS, and native Windows.
+The same reviewed inventory names their test/helper compilation units, folder
+contributors, and direct source imports. On Unix, Make compiles shared
+`titan.test` support once with
 `-c --test --incremental titan.test`, then schedules per-module
 `-c --test --incremental` commands after their source dependencies. Every
 command runs from `.titan-tests/` with the same absolute source tree and flags.
 The shared support output is `titan/test__test_support.o` within that directory.
 
-One final `--test --incremental --no-uv-bootstrap` invocation keeps all 25
+One final Unix `--test --incremental --no-uv-bootstrap` invocation keeps all 25
 roots explicit and discovers the complete source/object closure. The designated
 first root, `test.tests`, owns `.titan-tests/test/tests`; the current synthetic
 runner, entrypoint, and Darwin dSYM are also owned there. Ordinary module
@@ -309,6 +310,53 @@ uncaught Task diagnostics are owned by their Titan tests: a case emits flushed
 diagnostics` and `END expected uncaught async Task diagnostics` around the
 operation. Those prefixed brackets make a successful aggregate log readable
 and keep the expectation owned by the case that produces it.
+
+### Platform portability and complete execution
+
+`Makefile.windows.stdlib` provides the same build/run leaf targets through
+`scripts/windows_stdlib_tests.sh`. It compiles every root serially with the
+native CLANG64/UCRT SDK in a marked, disposable local NTFS workspace. The
+workspace contains a private SDK copy, test sources, authored child fixtures,
+generated objects, logs, and scratch paths. Windows retains its Job Object
+supervisor: descendants enter the private job before execution and are killed
+when supervision ends. PowerShell drains both output pipes concurrently and
+preserves the complete native exit status. The aggregate still uses
+`--no-uv-bootstrap`; fresh child tests select their own bootstrap normally.
+
+The platform runners audit named results with
+`scripts/check_stdlib_test_output.lua`. An unfiltered run must execute every
+manifest owner, and named terminal results must match the runner's summary.
+Empty selections, duplicate results, unclassified skips, unfinished cases,
+and unfinished fixture portability fail the gate. A filter affects execution
+only and reports the number of owners it actually selected.
+
+Repository skips use one of these reason prefixes (the public `test.skip` API
+continues to accept arbitrary reasons):
+
+- `platform: ` for semantics belonging to another operating system, such as
+  POSIX user signals, Unix-domain stdio sockets, or Windows DWORD exit codes;
+- `capability: ` for a probed environment limitation, such as an unavailable
+  locale or Windows symbolic-link privilege;
+- `unsupported: ` for a production API limitation, such as Windows native
+  source-frame attribution;
+- `portability: ` for an unfinished test fixture; this records the gap but
+  deliberately fails a complete validation gate.
+
+Keep the exclusion at the smallest independent assertion. An unsupported
+symbolic traceback frame must not skip the surrounding bootstrap behavior.
+Port compile-time and link-time dependencies before adding runtime conditions:
+every root and its native fixtures must compile on every platform. The async
+foreign-work and SQLite fixtures use Windows synchronization or POSIX
+counterparts; print capture and inherited stdio retain binary pipes on Windows.
+`support.command` invokes the compiler's existing argv-aware platform transport
+for compiler/Lua children, environment overrides, capture, and cleanup. Shell
+syntax appears only in cases testing the shell-command API itself.
+
+Filesystem, SQLite, and local watcher cases run on local NTFS in Windows.
+Shared-folder notification behavior cannot satisfy or replace those assertions.
+Validation evidence records source identity, OS and architecture, SDK/compiler
+and provider settings, selected/passed/skipped/failed counts, and every skip
+reason. An Intel macOS run does not establish Apple Silicon behavior.
 
 Builds retain their reusable outputs; explicit `make clean` performs generic
 cleanup within a narrow ownership boundary. `.titan-tests/` is a

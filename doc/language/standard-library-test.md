@@ -249,6 +249,15 @@ Help exits with status 0. Invalid options or patterns exit 2. Any failed case
 makes the executable exit 1; all-pass, all-skip, zero-selected, and zero-test
 runs exit 0. Skipped and failed summaries are printed only when nonzero.
 
+The Titan repository runs the same explicit standard-library test owners on
+Linux, macOS, and native Windows. Its build gate adds stricter completeness
+checks: an unfiltered run must execute every owner, an empty selection is an
+error, and skips must explain a platform, environment-capability, or unsupported
+API limitation. These are repository validation rules; they do not change the
+public runner's exit-status or `skip` contract. See the
+[repository test workflow](../implementation/test-runner.md#platform-portability-and-complete-execution)
+and [native Windows commands](../implementation/windows-build.md#shared-native-standard-library-tests).
+
 ## Initial boundaries
 
 The runner is intentionally synchronous and recursive. It supplies no suite

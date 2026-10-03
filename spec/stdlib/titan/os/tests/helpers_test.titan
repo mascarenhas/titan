@@ -81,15 +81,13 @@ end
 
 function test_lua_host_rejects_exepath_without_standalone_arguments(
     _context: test.Context)
-  local output, why, code = command.capture({
-    "lua", "-E", "-e", [==[
+  local output, why, code = command.lua([==[
       local system = require "titan.os"
       local succeeded, failure = pcall(system.exepath)
       assert(not succeeded)
       assert(failure ==
         "os.exepath is only available in a compiled Titan program", failure)
-    ]==],
-  })
+    ]==])
   test.assert(why == "exit" and code == 0,
               "Lua-host os.exepath probe failed: " .. output)
 end

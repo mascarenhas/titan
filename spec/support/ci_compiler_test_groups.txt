@@ -10,6 +10,7 @@
 3 spec/cdeclarator_spec.lua 0.034
 1 spec/cdefines_spec.lua 0.045
 2 spec/cdriver_spec.lua 184.496
+3 spec/codecov_report_spec.lua 0.010
 1 spec/checker/binary_compatibility_spec.lua 1.000
 3 spec/checker/c_ffi_declaration_compatibility_spec.lua 36.115
 3 spec/checker/c_ffi_operators_spec.lua 13.669

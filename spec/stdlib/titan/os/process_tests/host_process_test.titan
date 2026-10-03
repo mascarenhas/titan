@@ -2,7 +2,7 @@ local type ProcessChildCase = function (string): ()
 
 local function with_process_child(body: ProcessChildCase)
   runtime_test.run(function ()
-    body(system.cwd() .. "/.titan-tests/os_process_host_child")
+    body(process_support.child_path())
   end)
 end
 
@@ -29,14 +29,26 @@ function test_process_validates_inputs_and_preserves_argv_env_cwd(
 
     local envname = "TITAN_PROCESS_DIRECT_ENV"
     local original: string? = system.getenv(envname)
-    local environment = "direct-continuation-process"
+    local environment = "direct-continuation-process ação=東京"
     do
       defer restore_process_environment(envname, original)
       system.setenv(envname, environment)
+      local previous_directory = system.cwd()
+      local directory = fs.tmpname()
+      fs.unlink(directory)
+      directory = directory .. "-process cwd ação 東京"
+      fs.mkdir(directory)
+      defer fs.rmdir(directory)
+      system.chdir(directory)
+      defer system.chdir(previous_directory)
       local cwd = system.cwd()
-      local process = system.spawn(child, {
-        "argv-env-cwd", envname, "alpha", "", "beta",
-      })
+      local arguments = {"alpha", "", "beta", "space argument", "quote\"value",
+                         "trailing\\", "space trailing\\", "slash\\\"quote", "ação東京😀"}
+      local command_line = {"argv-env-cwd", envname}
+      for index = 1, #arguments do
+        command_line[#command_line + 1] = arguments[index]
+      end
+      local process = system.spawn(child, command_line)
       defer cleanup_process(process)
       process_support.required_output(process.stdin, "metadata stdin"):close()
       local output = process_support.read_all(
@@ -47,8 +59,11 @@ function test_process_validates_inputs_and_preserves_argv_env_cwd(
       local expected =
         "cwd:" .. #cwd .. ":" .. cwd .. "\n" ..
         "env:" .. #environment .. ":" .. environment .. "\n" ..
-        "argv0:" .. #child .. ":" .. child .. "\n" ..
-        "arg:5:alpha\narg:0:\narg:4:beta\n"
+        "argv0:" .. #child .. ":" .. child .. "\n"
+      for index = 1, #arguments do
+        local argument = arguments[index]
+        expected = expected .. "arg:" .. #argument .. ":" .. argument .. "\n"
+      end
       test.assert(output == expected,
                   "spawn changed argv, environment, or cwd")
       test.assert(diagnostics == "", "metadata child wrote stderr")
@@ -59,7 +74,7 @@ end
 function test_process_preserves_binary_streams_status_and_signals(
     _context: test.Context)
   with_process_child(function (child: string)
-    local payload = "head\0middle\ntrail"
+    local payload = "head\0middle\r\n\26trail"
     local echoed = system.spawn(child, {"echo"})
     defer cleanup_process(echoed)
     local echo_input = process_support.required_output(
@@ -76,7 +91,9 @@ function test_process_preserves_binary_streams_status_and_signals(
     test.assert(process_support.read_all(echo_error) == "",
                 "echo child wrote stderr")
     process_support.assert_normal(echoed:wait(), "echo child")
+    process_support.assert_normal(echoed:wait(), "repeated echo wait")
     test.assert(not echoed:is_running(), "reaped child remained running")
+    test.assert(not echo_output:read(), "echo pipe did not retain terminal EOF")
 
     local split = system.spawn(child, {"dual", "64"})
     defer cleanup_process(split)
@@ -86,8 +103,8 @@ function test_process_preserves_binary_streams_status_and_signals(
     local split_stderr = process_support.read_all(
       process_support.required_input(split.stderr, "dual stderr"))
     process_support.assert_normal(split:wait(), "dual-output child")
-    test.assert(#split_stdout == 64 and #split_stderr == 64 and
-                split_stdout ~= split_stderr,
+    test.assert(split_stdout == strings.rep("O", 64) and
+                split_stderr == strings.rep("E", 64),
                 "separate process captures changed")
 
     local exited = system.spawn(child, {"exit", "37"})
@@ -285,9 +302,20 @@ function test_process_environment_rejects_invalid_options_and_preserves_failure(
     local original? = system.getenv(name)
     defer restore_process_environment(name, original)
     system.setenv(name, "parent")
-    process_support.expect_failure(function ()
-      system.spawn(child .. ".missing", {}, system.with_env(name, "child"))
-    end, "missing executable unexpectedly spawned")
+    local rejected = false
+    do
+      local unexpected = system.spawn(child .. ".missing", {},
+                                      system.with_env(name, "child"))
+      cleanup_process(unexpected)
+    catch
+      test.assert(error is async.OperationError,
+                  "missing executable raised a non-operation error")
+      local failure = error as async.OperationError
+      test.assert(failure.operation == "process.spawn" and failure.name == "ENOENT",
+                  "missing executable lost its native spawn diagnostic")
+      rejected = true
+    end
+    test.assert(rejected, "missing executable unexpectedly spawned")
     test.assert(system.getenv(name) == "parent",
                 "failed spawn changed the parent environment")
     test.assert(child_environment(child, {name}) == "env:6:parent\n",
@@ -300,18 +328,59 @@ function test_process_environment_names_follow_native_case_rules(
   with_process_child(function (child: string)
     local upper = "TITAN_PROCESS_CHILD_CASE"
     local lower = "titan_process_child_case"
+    local empty = "TITAN_PROCESS_CHILD_CASE_EMPTY"
+    local absent = "TITAN_PROCESS_CHILD_CASE_ABSENT"
     local original_upper? = system.getenv(upper)
     local original_lower? = system.getenv(lower)
+    local original_empty? = system.getenv(empty)
+    local original_absent? = system.getenv(absent)
     defer restore_process_environment(lower, original_lower)
     defer restore_process_environment(upper, original_upper)
+    defer restore_process_environment(empty, original_empty)
+    defer restore_process_environment(absent, original_absent)
     system.unsetenv(lower)
+    system.unsetenv(empty)
+    system.unsetenv(absent)
     system.setenv(upper, "parent")
     local case_insensitive = system.getenv(lower) == "parent"
-    local actual = child_environment(child, {upper, lower},
-        system.with_env(upper, "first"), system.with_env(lower, "second"))
-    local expected = "env:5:first\nenv:6:second\n"
-    if case_insensitive then expected = "env:6:second\nenv:6:second\n" end
+    local value = "last ação=東京"
+    local actual = child_environment(child, {upper, lower, empty, absent},
+        system.with_env(upper, "first"), system.with_env(lower, value),
+        system.with_env(empty, ""))
+    local field = "env:" .. #value .. ":" .. value .. "\n"
+    local expected = "env:5:first\n" .. field .. "env:0:\nabsent\n"
+    if case_insensitive then expected = field .. field .. "env:0:\nabsent\n" end
     test.assert(actual == expected, "child environment used wrong name equality")
-    test.assert(system.getenv(upper) == "parent", "case merge changed parent")
+    test.assert(system.getenv(upper) == "parent" and system.getenv(empty) == nil and
+                system.getenv(absent) == nil, "case merge changed parent")
   end)
+end
+
+local function native_exit_case(context: test.Context, name: string, expected: integer)
+  context:run(name, function (_child: test.Context)
+    if expected > 255 and not common.is_windows() then
+      test.skip("platform: POSIX process exit status contains only eight bits")
+    end
+    with_process_child(function (child: string)
+      local process = system.spawn(child, {"exit", "" .. expected})
+      defer cleanup_process(process)
+      process_support.required_output(process.stdin, "exit stdin"):close()
+      local output = process_support.read_all(
+          process_support.required_input(process.stdout, "exit stdout"))
+      local diagnostic = process_support.read_all(
+          process_support.required_input(process.stderr, "exit stderr"))
+      local status = process:wait()
+      test.assert(status.code == expected and status.signal == nil and
+                  status.signal_number == 0,
+                  "native child exit was confused with shell failure or a signal")
+      test.assert(output == "" and diagnostic == "", "exit child wrote unexpected output")
+    end)
+  end)
+end
+
+function test_native_exit_codes(context: test.Context)
+  native_exit_case(context, "one", 1)
+  native_exit_case(context, "one_twenty_six", 126)
+  native_exit_case(context, "one_twenty_seven", 127)
+  native_exit_case(context, "nine_thousand_nine", 9009)
 end

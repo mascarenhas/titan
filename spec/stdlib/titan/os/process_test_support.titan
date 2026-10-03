@@ -1,4 +1,5 @@
 local test = import "test"
+local common = import "support.common.titan"
 local async = import "async"
 local stream = import "io"
 local system = import "os"
@@ -6,6 +7,14 @@ local timer = import "timer"
 local task_support = import "support.async.titan"
 
 local type CheckedAction = function (): ()
+
+local function child_path(): string
+  local supplied? = system.getenv("TITAN_PROCESS_CHILD")
+  if supplied and #supplied > 0 then return supplied end
+  test.assert(not common.is_windows(),
+              "runner did not supply the native Windows process fixture")
+  return system.cwd() .. "/.titan-tests/os_process_host_child"
+end
 
 local function wait_until_waiting(task: async.Task, subject: string)
   while task:status():as_string() == "ready" or

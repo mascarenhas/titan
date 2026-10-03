@@ -4,9 +4,15 @@ local async = import "async"
 local fs = import "fs"
 foreign import "lua.h"
 foreign import "titan/ffi.h"
+foreign import "source_fixture.h"
 
 local type CheckedAction = function (): ()
 local type PackageSearcher = function (string): (value, value)
+
+local function make_source_fifo(path: string)
+  test.assert(ffi.titan_lua_test_mkfifo(path) == 0,
+              "could not create source-search FIFO")
+end
 
 local record PackageSearchState
   local package_table: {string: value}

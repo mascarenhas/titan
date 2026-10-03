@@ -11,15 +11,18 @@ describe("Windows file publication transaction", function()
         return { { destination = shim, contents = "new shim" },
             { destination = image, source = source } }
     end
-    local function unchanged()
-        assert.equal("old shim", read(shim))
-        assert.equal("old DLL", read(image))
+    local function filenames()
         local files = {}
         for name in lfs.dir(root) do
             if name ~= "." and name ~= ".." then files[#files + 1] = name end
         end
         table.sort(files)
-        assert.same({ "module.lua", "provider.dll", "source.dll" }, files)
+        return files
+    end
+    local function unchanged()
+        assert.equal("old shim", read(shim))
+        assert.equal("old DLL", read(image))
+        assert.same({ "module.lua", "provider.dll", "source.dll" }, filenames())
     end
     before_each(function()
         root = os.tmpname(); assert(os.remove(root)); assert(lfs.mkdir(root))
@@ -65,6 +68,109 @@ describe("Windows file publication transaction", function()
         end })
         assert.is_nil(ok); assert.matches("injected final failure", err, 1, true)
         unchanged()
+    end)
+
+    for _, operation in ipairs({ "read", "write" }) do
+        it("closes copy streams and removes partial stages after a " .. operation .. " failure", function()
+            local original_open, original_reserve = io.open, fs.reserve
+            local copy_target, input, output
+            local reads, writes, input_closes, output_closes = 0, 0, 0, 0
+            local failure = "injected copy " .. operation .. " failure"
+            fs.reserve = function(path)
+                local reserved = original_reserve(path)
+                if path == image then copy_target = reserved end
+                return reserved
+            end
+            io.open = function(path, mode)
+                local file, err = original_open(path, mode)
+                if not file then return nil, err end
+                if path == source and mode == "rb" then
+                    input = file
+                    return {
+                        read = function()
+                            reads = reads + 1
+                            if operation == "read" and reads == 2 then return nil, failure end
+                            return file:read(3)
+                        end,
+                        close = function()
+                            input_closes = input_closes + 1
+                            return file:close()
+                        end,
+                    }
+                elseif path == copy_target and mode == "wb" then
+                    output = file
+                    return {
+                        write = function(_, bytes)
+                            writes = writes + 1
+                            if operation == "write" and writes == 2 then return nil, failure end
+                            return file:write(bytes)
+                        end,
+                        close = function()
+                            output_closes = output_closes + 1
+                            return file:close()
+                        end,
+                    }
+                end
+                return file
+            end
+            local called, ok, err = pcall(publication.publish, entries(), fs)
+            io.open = original_open
+            assert.is_true(called, ok)
+            assert.is_nil(ok)
+            assert.matches(failure, err, 1, true)
+            assert.equal(2, reads)
+            assert.equal(operation == "read" and 1 or 2, writes)
+            assert.equal(1, input_closes)
+            assert.equal(1, output_closes)
+            assert.equal("closed file", io.type(input))
+            assert.equal("closed file", io.type(output))
+            unchanged()
+        end)
+    end
+
+    it("removes an obsolete companion before committing its replacement provider", function()
+        local plans = entries()
+        plans[1] = { destination = shim, remove = true }
+        assert(publication.publish(plans, fs, { after_commit = function(index)
+            assert.is_nil(lfs.symlinkattributes(shim))
+            assert.equal(index == 1 and "old DLL" or "new DLL", read(image))
+            return true
+        end }))
+        assert.equal("new DLL", read(image))
+        assert.same({ "provider.dll", "source.dll" }, filenames())
+    end)
+
+    it("restores an obsolete companion when the later provider commit fails", function()
+        local plans = entries()
+        plans[1] = { destination = shim, remove = true }
+        fs.replace = function(from, to)
+            if to == image then
+                assert.is_nil(lfs.symlinkattributes(shim))
+                return nil, "DLL is in use"
+            end
+            return os.rename(from, to)
+        end
+        local ok, err = publication.publish(plans, fs)
+        assert.is_nil(ok)
+        assert.matches("DLL is in use", err, 1, true)
+        unchanged()
+    end)
+
+    it("removes a newly created companion when the later provider commit fails", function()
+        assert(os.remove(shim))
+        fs.replace = function(from, to)
+            if to == image then
+                assert.equal("new shim", read(shim))
+                return nil, "DLL is in use"
+            end
+            return os.rename(from, to)
+        end
+        local ok, err = publication.publish(entries(), fs)
+        assert.is_nil(ok)
+        assert.matches("DLL is in use", err, 1, true)
+        assert.is_nil(lfs.symlinkattributes(shim))
+        assert.equal("old DLL", read(image))
+        assert.same({ "provider.dll", "source.dll" }, filenames())
     end)
 
     it("rolls back companions when the existing DLL cannot be replaced", function()

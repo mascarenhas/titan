@@ -1,3 +1,19 @@
+# All platforms compile this complete native test inventory. Runtime filters
+# select cases only after compilation; platform differences belong in named
+# cases and classified skips, never in a second root or case allowlist.
+# --test gives its first root ownership of the aggregate executable path.
+TITAN_STDLIB_TEST_PROGRAM_ROOT := test.tests
+TITAN_STDLIB_TEST_PROGRAM_OUTPUT := test/tests
+TITAN_STDLIB_TEST_ROOTS := $(TITAN_STDLIB_TEST_PROGRAM_ROOT) \
+	coroutine.tests iteration.tests gc.tests lua.tests math.tests peg.tests \
+	string.core_test string.format_pack_test string.regex_test async.tests \
+	uv.task_tests io.tests fs.tests timer.tests net.tests ssl.tests http.tests \
+	url.tests os.tests os.process_tests uv.runtime_tests reflect.tests sqlite3.tests json.tests
+
+.PHONY: print-stdlib-test-roots
+print-stdlib-test-roots:
+	@printf '%s\n' $(TITAN_STDLIB_TEST_ROOTS)
+
 # Reviewed native-test compilation units and direct source imports.
 # Update when adding/removing a contributor or changing a source import.
 TITAN_TEST_MODULES := async.test_support \
@@ -68,10 +84,10 @@ TITAN_TEST_SOURCES_coroutine.tests := spec/stdlib/titan/coroutine/tests/tests.ti
 TITAN_TEST_IMPORTS_coroutine.tests := coroutine.test_support support.command support.common
 
 TITAN_TEST_SOURCES_fs.test_support := spec/stdlib/titan/fs/test_support.titan
-TITAN_TEST_IMPORTS_fs.test_support :=
+TITAN_TEST_IMPORTS_fs.test_support := support.common
 
 TITAN_TEST_SOURCES_fs.tests := spec/stdlib/titan/fs/tests.titan
-TITAN_TEST_IMPORTS_fs.tests := fs.test_support support.async support.runtime
+TITAN_TEST_IMPORTS_fs.tests := fs.test_support support.async support.common support.runtime
 
 TITAN_TEST_SOURCES_gc.tests := spec/stdlib/titan/gc/tests.titan
 TITAN_TEST_IMPORTS_gc.tests := support.common
@@ -94,7 +110,7 @@ TITAN_TEST_IMPORTS_io.test_support :=
 TITAN_TEST_SOURCES_io.tests := spec/stdlib/titan/io/tests/tests.titan \
 	spec/stdlib/titan/io/tests/core_test.titan \
 	spec/stdlib/titan/io/tests/process_test.titan
-TITAN_TEST_IMPORTS_io.tests := io.test_support support.runtime
+TITAN_TEST_IMPORTS_io.tests := io.test_support os.process_test_support support.async support.common support.runtime
 
 TITAN_TEST_SOURCES_iteration.tests := spec/stdlib/titan/iteration/tests.titan
 TITAN_TEST_IMPORTS_iteration.tests := support.common
@@ -126,7 +142,7 @@ TITAN_TEST_SOURCES_net.tests := spec/stdlib/titan/net/tests.titan
 TITAN_TEST_IMPORTS_net.tests := net.test_support support.async support.runtime
 
 TITAN_TEST_SOURCES_os.process_test_support := spec/stdlib/titan/os/process_test_support.titan
-TITAN_TEST_IMPORTS_os.process_test_support := support.async
+TITAN_TEST_IMPORTS_os.process_test_support := support.async support.common
 
 TITAN_TEST_SOURCES_os.process_tests := spec/stdlib/titan/os/process_tests/process_tests.titan \
 	spec/stdlib/titan/os/process_tests/exit_test.titan \
@@ -137,7 +153,7 @@ TITAN_TEST_SOURCES_os.process_tests := spec/stdlib/titan/os/process_tests/proces
 TITAN_TEST_IMPORTS_os.process_tests := os.process_test_support support.async support.command support.common support.runtime
 
 TITAN_TEST_SOURCES_os.test_support := spec/stdlib/titan/os/test_support.titan
-TITAN_TEST_IMPORTS_os.test_support :=
+TITAN_TEST_IMPORTS_os.test_support := support.common
 
 TITAN_TEST_SOURCES_os.tests := spec/stdlib/titan/os/tests/tests.titan \
 	spec/stdlib/titan/os/tests/helpers_test.titan \
@@ -217,8 +233,12 @@ TITAN_TEST_SOURCES_uv.task_tests := spec/stdlib/titan/uv/task_tests/task_tests.t
 TITAN_TEST_IMPORTS_uv.task_tests := support.async support.runtime uv.task_test_support
 
 # Project-private C declarations and generated native fixture headers.
+TITAN_TEST_C_INPUTS_support.common := spec/stdlib/titan/support/common.h
 TITAN_TEST_C_INPUTS_fs.test_support := spec/stdlib/titan/fs/fixture_support.h
 TITAN_TEST_C_INPUTS_io.test_support := spec/stdlib/titan/io/print_capture.h
+TITAN_TEST_C_INPUTS_lua.test_support := spec/stdlib/titan/lua/source_fixture.h
+TITAN_TEST_C_INPUTS_os.test_support := spec/stdlib/titan/os/time_support.h
 TITAN_TEST_C_INPUTS_reflect.tests := spec/stdlib/titan/reflect/reflection_recursive.h
 TITAN_TEST_C_INPUTS_async.tests = $(TITAN_TEST_BUILD_DIR)/async_foreign_work.h
 TITAN_TEST_C_INPUTS_uv.runtime_tests = $(TITAN_TEST_BUILD_DIR)/uv_stdio_probe.h
+TITAN_TEST_C_INPUTS_lua.tests = $(TITAN_TEST_BUILD_DIR)/uv_stdio_probe.h

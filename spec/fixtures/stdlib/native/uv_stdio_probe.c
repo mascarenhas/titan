@@ -1,3 +1,378 @@
+#ifdef _WIN32
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#include <errno.h>
+#include <fcntl.h>
+#include <io.h>
+#include <stdarg.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+#include "uv_stdio_probe.h"
+
+#define OUTPUT_CAPACITY 8192
+
+static int active_mode;
+static int target_mask;
+static int saved_descriptors[3] = {-1, -1, -1};
+static HANDLE peer_handles[3];
+static char outputs[3][OUTPUT_CAPACITY];
+static char failure_message[256];
+static int allocated_console;
+static HANDLE console_standard_handles[3];
+static const DWORD standard_kinds[3] = {
+  STD_INPUT_HANDLE, STD_OUTPUT_HANDLE, STD_ERROR_HANDLE
+};
+
+static void record_failure(const char *format, ...) {
+  va_list arguments;
+  if (failure_message[0] != '\0') return;
+  va_start(arguments, format);
+  vsnprintf(failure_message, sizeof(failure_message), format, arguments);
+  va_end(arguments);
+}
+
+static HANDLE duplicate_handle(HANDLE source) {
+  HANDLE copy = NULL;
+  if (!DuplicateHandle(GetCurrentProcess(), source, GetCurrentProcess(),
+                       &copy, 0, FALSE, DUPLICATE_SAME_ACCESS))
+    record_failure("could not duplicate stdio handle: Windows error %lu",
+                   (unsigned long)GetLastError());
+  return copy;
+}
+
+/* Transfer replacement into a binary CRT descriptor and the Win32 standard
+ * handle table. Both forms are inherited by the ordinary child launch paths. */
+static int replace_target(int target, HANDLE replacement, int access) {
+  int descriptor = _open_osfhandle((intptr_t)replacement, access | _O_BINARY);
+  int saved;
+  HANDLE actual;
+  if (descriptor < 0) {
+    record_failure("could not open replacement fd %d: %s", target, strerror(errno));
+    CloseHandle(replacement);
+    return -1;
+  }
+  saved = _dup(target);
+  if (saved < 0) {
+    record_failure("could not save fd %d: %s", target, strerror(errno));
+    _close(descriptor);
+    return -1;
+  }
+  if (!SetHandleInformation((HANDLE)_get_osfhandle(saved), HANDLE_FLAG_INHERIT, 0) ||
+      _dup2(descriptor, target) != 0) {
+    record_failure("could not replace fd %d", target);
+    _close(saved);
+    _close(descriptor);
+    return -1;
+  }
+  _close(descriptor);
+  saved_descriptors[target] = saved;
+  target_mask |= 1 << target;
+  actual = (HANDLE)_get_osfhandle(target);
+  if (!SetHandleInformation(actual, HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT) ||
+      !SetStdHandle(standard_kinds[target], actual)) {
+    record_failure("could not publish fd %d: Windows error %lu", target,
+                   (unsigned long)GetLastError());
+    return -1;
+  }
+  return 0;
+}
+
+static int setup_pipe(int target) {
+  static const char input[] = "parent-pipe-input";
+  HANDLE reader, writer;
+  DWORD written;
+  if (!CreatePipe(&reader, &writer, NULL, OUTPUT_CAPACITY)) {
+    record_failure("pipe(fd %d) failed: Windows error %lu", target,
+                   (unsigned long)GetLastError());
+    return -1;
+  }
+  if (target == 0) {
+    if (!WriteFile(writer, input, sizeof(input) - 1, &written, NULL) ||
+        written != sizeof(input) - 1) {
+      record_failure("could not seed stdin pipe: Windows error %lu",
+                     (unsigned long)GetLastError());
+      CloseHandle(reader);
+      CloseHandle(writer);
+      return -1;
+    }
+    CloseHandle(writer);
+    return replace_target(target, reader, _O_RDONLY);
+  }
+  peer_handles[target] = reader;
+  return replace_target(target, writer, _O_WRONLY);
+}
+
+static int setup_file_stdout(void) {
+  wchar_t directory[MAX_PATH + 1], path[MAX_PATH + 1];
+  HANDLE file;
+  DWORD length = GetTempPathW(MAX_PATH + 1, directory);
+  if (length == 0 || length > MAX_PATH ||
+      !GetTempFileNameW(directory, L"tus", 0, path)) {
+    record_failure("could not create stdio temporary file: Windows error %lu",
+                   (unsigned long)GetLastError());
+    return -1;
+  }
+  file = CreateFileW(path, GENERIC_READ | GENERIC_WRITE,
+                     FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                     NULL, OPEN_EXISTING, FILE_ATTRIBUTE_TEMPORARY |
+                     FILE_FLAG_DELETE_ON_CLOSE, NULL);
+  if (file == INVALID_HANDLE_VALUE) {
+    DWORD error = GetLastError();
+    DeleteFileW(path);
+    record_failure("could not open stdio temporary file: Windows error %lu",
+                   (unsigned long)error);
+    return -1;
+  }
+  peer_handles[1] = duplicate_handle(file);
+  if (peer_handles[1] == NULL) { CloseHandle(file); return -1; }
+  return replace_target(1, file, _O_RDWR);
+}
+
+static int setup_console(void) {
+  HANDLE screen;
+  COORD origin = {0, 0};
+  int index;
+  if (GetConsoleCP() == 0) {
+    HANDLE previous[3];
+    for (index = 0; index < 3; index++)
+      previous[index] = GetStdHandle(standard_kinds[index]);
+    if (!AllocConsole()) {
+      record_failure("could not allocate private console: Windows error %lu",
+                     (unsigned long)GetLastError());
+      return -1;
+    }
+    allocated_console = 1;
+    /* Only the newly allocated fixture console may be hidden or freed. An
+     * inherited console is never activated, hidden, resized, or detached. */
+    ShowWindow(GetConsoleWindow(), SW_HIDE);
+    for (index = 0; index < 3; index++) {
+      HANDLE created = GetStdHandle(standard_kinds[index]);
+      int owned = created != NULL && created != INVALID_HANDLE_VALUE;
+      int other;
+      for (other = 0; other < 3; other++)
+        if (created == previous[other]) owned = 0;
+      console_standard_handles[index] = owned ? created : NULL;
+      if (!SetStdHandle(standard_kinds[index], previous[index])) {
+        record_failure("could not restore standard handle after AllocConsole");
+        return -1;
+      }
+    }
+  }
+  screen = CreateConsoleScreenBuffer(GENERIC_READ | GENERIC_WRITE,
+      FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, CONSOLE_TEXTMODE_BUFFER, NULL);
+  if (screen == INVALID_HANDLE_VALUE) {
+    record_failure("could not create console screen buffer: Windows error %lu",
+                   (unsigned long)GetLastError());
+    return -1;
+  }
+  if (!SetConsoleCursorPosition(screen, origin)) {
+    record_failure("could not reset private console cursor");
+    CloseHandle(screen);
+    return -1;
+  }
+  peer_handles[1] = duplicate_handle(screen);
+  if (peer_handles[1] == NULL) { CloseHandle(screen); return -1; }
+  return replace_target(1, screen, _O_WRONLY);
+}
+
+static void restore_targets(void) {
+  int target;
+  for (target = 0; target < 3; target++) {
+    if (!(target_mask & (1 << target))) continue;
+    if (_dup2(saved_descriptors[target], target) != 0 ||
+        !SetStdHandle(standard_kinds[target], (HANDLE)_get_osfhandle(target)))
+      record_failure("could not restore fd %d", target);
+    _close(saved_descriptors[target]);
+    saved_descriptors[target] = -1;
+  }
+}
+
+static void read_pipe(int target) {
+  size_t offset = 0;
+  for (;;) {
+    DWORD available, received;
+    if (!PeekNamedPipe(peer_handles[target], NULL, 0, NULL, &available, NULL)) {
+      DWORD error = GetLastError();
+      if (error != ERROR_BROKEN_PIPE)
+        record_failure("could not inspect captured fd %d: Windows error %lu",
+                       target, (unsigned long)error);
+      break;
+    }
+    if (available == 0) {
+      record_failure("fd %d still had a live writer after Runtime teardown", target);
+      break;
+    }
+    if (available > OUTPUT_CAPACITY - 1 - offset) {
+      record_failure("captured fd %d output exceeded test capacity", target);
+      break;
+    }
+    if (!ReadFile(peer_handles[target], outputs[target] + offset,
+                   available, &received, NULL) || received != available) {
+      record_failure("could not read captured fd %d: Windows error %lu", target,
+                     (unsigned long)GetLastError());
+      break;
+    }
+    offset += received;
+  }
+  outputs[target][offset] = '\0';
+}
+
+static void read_file(void) {
+  LARGE_INTEGER length, origin;
+  DWORD received;
+  origin.QuadPart = 0;
+  if (!GetFileSizeEx(peer_handles[1], &length) ||
+      length.QuadPart < 0 || length.QuadPart >= OUTPUT_CAPACITY ||
+      !SetFilePointerEx(peer_handles[1], origin, NULL, FILE_BEGIN) ||
+      !ReadFile(peer_handles[1], outputs[1], (DWORD)length.QuadPart,
+                 &received, NULL) || received != (DWORD)length.QuadPart) {
+    record_failure("could not read captured stdio file");
+    return;
+  }
+  outputs[1][received] = '\0';
+}
+
+static void read_console(void) {
+  CONSOLE_SCREEN_BUFFER_INFO info;
+  wchar_t wide[OUTPUT_CAPACITY];
+  COORD origin = {0, 0};
+  DWORD length, received;
+  int bytes;
+  if (!GetConsoleScreenBufferInfo(peer_handles[1], &info)) {
+    record_failure("could not inspect captured console");
+    return;
+  }
+  length = (DWORD)info.dwCursorPosition.Y * (DWORD)info.dwSize.X +
+           (DWORD)info.dwCursorPosition.X;
+  if (length >= OUTPUT_CAPACITY ||
+      !ReadConsoleOutputCharacterW(peer_handles[1], wide, length, origin, &received) ||
+      received != length) {
+    record_failure("could not read captured console");
+    return;
+  }
+  if (length == 0) return;
+  bytes = WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, wide, (int)length,
+                               outputs[1], OUTPUT_CAPACITY - 1, NULL, NULL);
+  if (bytes == 0) record_failure("could not encode captured console output");
+  else outputs[1][bytes] = '\0';
+}
+
+int titan_uv_test_stdio_mode_supported(int mode) {
+  return mode == TITAN_UV_TEST_STDIO_PIPE_ALL ||
+         mode == TITAN_UV_TEST_STDIO_FILE_STDOUT ||
+         mode == TITAN_UV_TEST_STDIO_TTY_SLAVE;
+}
+
+int titan_uv_test_stdio_setup(int mode) {
+  int index;
+  if (active_mode != 0) { record_failure("stdio fixture is already active"); return -1; }
+  failure_message[0] = '\0';
+  target_mask = 0;
+  for (index = 0; index < 3; index++) {
+    saved_descriptors[index] = -1;
+    peer_handles[index] = NULL;
+    console_standard_handles[index] = NULL;
+    outputs[index][0] = '\0';
+  }
+  fflush(NULL);
+  active_mode = mode;
+  switch (mode) {
+  case TITAN_UV_TEST_STDIO_PIPE_ALL:
+    if (setup_pipe(0) || setup_pipe(1) || setup_pipe(2)) goto fail;
+    break;
+  case TITAN_UV_TEST_STDIO_FILE_STDOUT:
+    if (setup_file_stdout()) goto fail;
+    break;
+  case TITAN_UV_TEST_STDIO_TTY_SLAVE:
+    if (setup_console()) goto fail;
+    break;
+  default:
+    record_failure("stdio mode %d requires Unix socket descriptors", mode);
+    goto fail;
+  }
+  return 0;
+fail:
+  titan_uv_test_stdio_finish(0);
+  return -1;
+}
+
+int titan_uv_test_stdio_finish(int expected_nonblocking_mask) {
+  int target;
+  /* O_NONBLOCK describes Unix shared open-file flags. Windows libuv uses its
+   * own overlapped/non-overlapped pipe machinery without that descriptor flag. */
+  (void)expected_nonblocking_mask;
+  if (active_mode == 0) { record_failure("stdio fixture is not active"); return -1; }
+  fflush(NULL);
+  for (target = 0; target < 3; target++) {
+    DWORD flags;
+    if ((target_mask & (1 << target)) &&
+        !GetHandleInformation(GetStdHandle(standard_kinds[target]), &flags))
+      record_failure("Runtime teardown closed parent handle %d", target);
+  }
+  if (active_mode == TITAN_UV_TEST_STDIO_TTY_SLAVE && peer_handles[1] != NULL)
+    read_console();
+  restore_targets();
+  for (target = 1; target < 3; target++) {
+    if (peer_handles[target] == NULL) continue;
+    if (active_mode == TITAN_UV_TEST_STDIO_FILE_STDOUT) read_file();
+    else if (active_mode != TITAN_UV_TEST_STDIO_TTY_SLAVE) read_pipe(target);
+    CloseHandle(peer_handles[target]);
+    peer_handles[target] = NULL;
+  }
+  if (allocated_console) {
+    for (target = 0; target < 3; target++) {
+      int previous, duplicate = 0;
+      for (previous = 0; previous < target; previous++)
+        if (console_standard_handles[previous] == console_standard_handles[target])
+          duplicate = 1;
+      if (console_standard_handles[target] != NULL && !duplicate)
+        CloseHandle(console_standard_handles[target]);
+    }
+    if (!FreeConsole()) record_failure("could not release private fixture console");
+    allocated_console = 0;
+  }
+  active_mode = 0;
+  target_mask = 0;
+  return failure_message[0] == '\0' ? 0 : -1;
+}
+
+const char *titan_uv_test_stdio_failure(void) { return failure_message; }
+
+const char *titan_uv_test_stdio_output(int descriptor) {
+  return descriptor >= 0 && descriptor < 3 ? outputs[descriptor] : "";
+}
+
+int titan_uv_test_stdio_open_fd_count(void) {
+  DWORD count;
+  /* Count kernel handles too, so a leaked DuplicateHandle is observable even
+   * when no CRT descriptor was published for it. */
+  return GetProcessHandleCount(GetCurrentProcess(), &count) ? (int)count : -1;
+}
+
+int titan_uv_test_stdio_metadata_denial_supported(void) { return 0; }
+
+int titan_uv_test_stdio_deny_metadata(int probes, int descriptors, int access_error) {
+  (void)probes;
+  (void)descriptors;
+  (void)access_error;
+  record_failure("stdio metadata denial requires Linux x86_64 or aarch64");
+  return -1;
+}
+
+int titan_uv_test_stdio_close_child_stdout(void) {
+  if (active_mode != 0) {
+    record_failure("stdout may only be closed in the fresh child");
+    return -1;
+  }
+  return _close(1);
+}
+
+const char *titan_uv_test_stdio_closed_probe(void) { return "GetFileType"; }
+
+#else
 #if defined(__APPLE__) && !defined(_DARWIN_C_SOURCE)
 #define _DARWIN_C_SOURCE
 #endif
@@ -342,6 +717,11 @@ fail:
   return -1;
 }
 
+int titan_uv_test_stdio_mode_supported(int mode) {
+  return mode >= TITAN_UV_TEST_STDIO_PIPE_ALL &&
+         mode <= TITAN_UV_TEST_STDIO_INET_DATAGRAM_STDOUT;
+}
+
 int titan_uv_test_stdio_finish(int expected_nonblocking_mask) {
   int target;
   int regular_file = active_mode == TITAN_UV_TEST_STDIO_FILE_STDOUT;
@@ -506,3 +886,6 @@ int titan_uv_test_stdio_close_child_stdout(void) {
   }
   return close(1);
 }
+
+const char *titan_uv_test_stdio_closed_probe(void) { return "fstat"; }
+#endif

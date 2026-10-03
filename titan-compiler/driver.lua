@@ -6959,7 +6959,8 @@ function driver.windows_program_auxiliary_paths(entrypoint, provider)
 end
 
 local function c_string_contents(value)
-    return (value:gsub('[%z\1-\31\127-\255"\\]', function(byte)
+    -- Literal dollar signs must survive recursive util.render expansion.
+    return (value:gsub('[%z\1-\31\127-\255"\\$]', function(byte)
         return string.format("\\%03o", byte:byte())
     end))
 end

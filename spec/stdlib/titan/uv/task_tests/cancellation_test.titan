@@ -96,28 +96,21 @@ end
 function test_cancellation_crosses_close_callback(
     context: test.Context)
   runtime_test.run(function ()
-    local close_started = false
     local close_finished = false
     local target = async.run<|value, value|>(function (): value
       local ticker = timer.ticker(60000)
-      close_started = true
+      -- Establish cancellation before the ownership-retiring close. The close
+      -- dispatch and callback must both ignore cancellation until completion;
+      -- polling from another Task would depend on libuv timer/close phase order.
+      async.running():cancel(async.CancellationReason.simple(
+        "close callback cancellation"))
       ticker:close()
       close_finished = true
       return nil
     end)
     task_support.cleanup_task(target, "close target cleanup")
-    local canceller = async.run<|value, value|>(function (): value
-      while not close_started do timer.yield() end
-      target:cancel(async.CancellationReason.simple(
-        "close callback cancellation"))
-      return nil
-    end)
-    task_support.cleanup_task(canceller, "close canceller cleanup")
 
-    support.wait_finished(canceller)
     support.wait_finished(target)
-    test.assert(canceller:status():as_string() == "succeeded",
-                "close cancellation controller failed")
     test.assert(target:status():as_string() == "cancelled",
                 "close callback lost pending cancellation")
     test.assert(support.simple_cancellation_reason(target) ==

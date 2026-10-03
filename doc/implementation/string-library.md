@@ -248,8 +248,21 @@ window.
 Each rendering closure casts its operand to the Titan type selected by the
 conversion. Integer families use `as integer`, number families use `as float`,
 and `%s` calls the module's explicit `tostring`. C-formatted conversions then
-call C99 `snprintf` once to obtain the length and again with a rooted
-`required + 1` destination.
+call a bounded native formatter once to obtain the length and again with a
+rooted `required + 1` destination. A declaration/macro-only portability header
+selects `__mingw_snprintf` on native CLANG64/UCRT and ordinary `snprintf`
+elsewhere. Lua's `lprefix.h` selects MinGW ANSI stdio before `luaconf.h` enables
+its Windows C89 compatibility mode; reproducing that formatter choice keeps
+pointer padding/case and non-finite-number spellings equal without changing
+the generated-C feature macros for other FFI users. No formatter algorithm
+lives in the header, and both calls retain the exact allocation/result checks.
+
+When the configured Lua headers do not define `lua_number2strx`, the formatter
+uses the Lua hexadecimal fallback translated into Titan. It handles signs,
+zero, finite mantissas/exponents, and non-finite values, and accepts only bare
+`%a`/`%A`, as Lua does in that configuration. `%q` uses the same configured
+hexadecimal conversion before normalizing the locale radix. Other Lua builds
+retain their native hexadecimal formatter.
 
 The C variadic call is statically explicit for that conversion. Titan does not
 attempt to forward a heterogeneous Titan `...` descriptor to C.

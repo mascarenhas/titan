@@ -7,7 +7,7 @@ local record ForeignWorkProbe
 end
 
 -- This source-defined callback remains in the restricted C subset. The
--- fixture blocks on a pipe; it never enters Titan or Lua from the worker.
+-- fixture blocks on a native release gate; it never enters Titan or Lua.
 foreign function blocking_foreign_work(arg: *void)
   ffi.titan_async_work_fixture_block(arg)
 end
@@ -35,19 +35,19 @@ local function mark_foreign_work_finalizable(
   ffi.lua_setmetatable(L, -2)
 end
 
-local function release_foreign_work(descriptor: integer)
+local function release_foreign_work(token: integer)
   local status = ffi.titan_async_work_fixture_release(
-      descriptor as foreign int) as integer
+      token as foreign intptr_t) as integer
   test.assert(status == 0, "could not release blocked foreign work")
 end
 
 local function run_cancelled_foreign_work_probe(probe: ForeignWorkProbe)
-  local release_descriptor = -1
+  local release_token = -1
   local target = async.run<|nil, value|>(function (): nil
     local fixture = new_foreign_work_fixture(63)
     defer ffi.titan_async_work_fixture_destroy(fixture)
-    release_descriptor =
-      ffi.titan_async_work_fixture_release_fd(fixture) as integer
+    release_token =
+      ffi.titan_async_work_fixture_release_token(fixture) as integer
     mark_foreign_work_finalizable(fixture, function (_: value)
       probe.finalized = true
     end)
@@ -58,7 +58,7 @@ local function run_cancelled_foreign_work_probe(probe: ForeignWorkProbe)
   end)
 
   support.wait_until_waiting(target)
-  test.assert(release_descriptor >= 0,
+  test.assert(release_token >= 0,
         "foreign-work Task suspended before publishing its release handle")
   target:cancel(async.CancellationReason.simple(
       "cancel accepted foreign work"))
@@ -67,7 +67,7 @@ local function run_cancelled_foreign_work_probe(probe: ForeignWorkProbe)
   test.assert(not probe.finalized,
         "accepted foreign work released its owned argument before callback")
 
-  release_foreign_work(release_descriptor)
+  release_foreign_work(release_token)
   local status = async.join(target)
   test.assert(support.cancelled_with(status, "cancel accepted foreign work"),
         "foreign-work cancellation did not wait for callback completion")
@@ -80,13 +80,13 @@ function test_run_foreign_keeps_the_event_loop_live_and_publishes_result(
   runtime_test.run(function ()
     local fixture = new_foreign_work_fixture(41)
     defer ffi.titan_async_work_fixture_destroy(fixture)
-    local release_descriptor =
-      ffi.titan_async_work_fixture_release_fd(fixture) as integer
+    local release_token =
+      ffi.titan_async_work_fixture_release_token(fixture) as integer
     local release_status = -1
     local releaser = async.run<|nil, value|>(function (): nil
       timer.yield()
       release_status = ffi.titan_async_work_fixture_release(
-          release_descriptor as foreign int) as integer
+          release_token as foreign intptr_t) as integer
       return nil
     end)
     task_support.cleanup_task(releaser, "foreign-work releaser cleanup")
@@ -139,7 +139,7 @@ function test_run_foreign_pending_cancellation_does_not_submit_work(
     -- Pre-release the fixture so an erroneous submission completes promptly
     -- and leaves a visible result instead of hanging the test.
     release_foreign_work(
-        ffi.titan_async_work_fixture_release_fd(fixture) as integer)
+        ffi.titan_async_work_fixture_release_token(fixture) as integer)
     local resumed = false
     local target = async.run<|nil, value|>(function (): nil
       async.running():cancel(async.CancellationReason.simple(

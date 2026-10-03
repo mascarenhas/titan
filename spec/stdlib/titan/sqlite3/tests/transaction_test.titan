@@ -108,7 +108,9 @@ function test_failed_commit_preserves_active_transaction_and_native_busy_code(
     -- acquire RESERVED and modify, but COMMIT cannot become EXCLUSIVE yet.
     writer:set_autocommit(false)
     execute_sql(writer, "INSERT INTO item VALUES (2)")
-    expect_native_error(function () writer:commit() end, 5)
+    local failure = expect_native_error(function () writer:commit() end, 5)
+    test.assert(failure.operation == "commit",
+                "contended COMMIT reported the wrong operation")
     test.assert(not writer:get_autocommit(),
                 "failed COMMIT pretended the transaction had ended")
     cursor:close()

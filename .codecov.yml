@@ -1,5 +1,10 @@
 # See https://docs.codecov.io/docs/codecov-yaml
 
+# The LuaCov upload copy uses a .lua heading so Codecov recognizes the CLI
+# section. Restore the real tracked filename after report parsing.
+fixes:
+  - "^titanc[.]lua$::titanc"
+
 comment:
   layout: "files, footer"
   behavior: default

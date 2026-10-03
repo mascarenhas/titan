@@ -3,9 +3,14 @@ foreign import "lua.h"
 foreign import "lauxlib.h"
 foreign import "titan/ffi.h"
 foreign import "string.h"
+foreign import "common.h"
 
 local type LuaCallable = function (...: value): (...: value)
 local type CheckedAction = function (): ()
+
+local function is_windows(): boolean
+  return ffi.TITAN_SPEC_WINDOWS ~= 0
+end
 
 -- Compile and run a Lua snippet that returns one helper callable. Lua is used
 -- only to construct or inspect boundary values which Titan cannot spell

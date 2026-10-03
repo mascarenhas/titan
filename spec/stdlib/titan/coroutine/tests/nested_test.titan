@@ -71,19 +71,24 @@ local function nested_uncaught(): value
 end
 
 function test_preserves_uncaught_trace_through_nested_stacked_yield(
-    _context: test.Context)
+    context: test.Context)
   local caught = false
   do
     nested_uncaught()
   catch
     caught = true
     test.assert(error == "oops", "nested coroutine changed the error value")
-    test.assert(support.contains(traceback,
-                         "in coroutine.tests.nested_fail_body"),
-                "missing nested coroutine frame\n" .. traceback)
-    test.assert(support.contains(traceback,
-                         "in coroutine.tests.nested_uncaught"),
-                "missing propagation frame\n" .. traceback)
+    local trace = traceback
+    test.assert(#trace > 0, "nested coroutine omitted its traceback")
+    context:run("symbolic_frames", function (_context: test.Context)
+      if common.is_windows() then
+        test.skip("unsupported: native Windows tracebacks retain raw addresses without Titan symbols")
+      end
+      test.assert(support.contains(trace, "in coroutine.tests.nested_fail_body"),
+                  "missing nested coroutine frame\n" .. trace)
+      test.assert(support.contains(trace, "in coroutine.tests.nested_uncaught"),
+                  "missing propagation frame\n" .. trace)
+    end)
   end
   test.assert(caught, "nested coroutine error was not raised")
 end

@@ -188,7 +188,7 @@ function test_io_print_formats_left_to_right_and_is_atomic(
                   "io.print emitted a prefix before conversion completed")
     end
 
-    local process = system.spawn("/bin/cat", {})
+    local process = system.spawn(process_support.child_path(), {"echo"})
     defer cleanup_print_process(process)
     local input = required_print_output(process.stdin)
     local output = required_print_input(process.stdout)

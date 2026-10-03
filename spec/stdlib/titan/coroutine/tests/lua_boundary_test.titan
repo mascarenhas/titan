@@ -1,5 +1,5 @@
 local function assert_coroutine_lua_probe(source: string, label: string)
-  local output, why, code = command.capture({"lua", "-E", "-e", source})
+  local output, why, code = command.lua(source)
   test.assert(why == "exit" and code == 0,
               label .. " failed: " .. output)
 end
