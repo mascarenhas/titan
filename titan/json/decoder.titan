@@ -133,8 +133,19 @@ local function Decoder:decode_record(node: Node, descriptor: reflect.RecordType,
     end
     return nil
   end)(descriptor)
-  if constructor == nil then
-    json_fail("constructor_unavailable", "record has no public constructor: " ..
+  local compatible = false
+  if constructor ~= nil and constructor.vararg_descriptor == nil and
+      constructor.flexret_descriptor == nil and
+      #constructor.return_descriptors == 1 then
+    case constructor.return_descriptors[1]
+    when is_named(named) then
+      compatible = named.name == descriptor.name
+    when is_record(record_type) then
+      compatible = record_type.name == descriptor.name
+    end
+  end
+  if not compatible then
+    json_fail("constructor_unavailable", "record has no compatible public constructor: " ..
               descriptor.name, path, self.source, node.position)
   end
 
@@ -276,6 +287,6 @@ end
 
 local function decode_node(node: Node, target: reflect.Type?, settings: Settings,
                            source: string, path: Path): value
-  local decoder = Decoder.new(settings, source)
+  local decoder = Decoder(settings, source)
   return decoder:decode(node, target, path)
 end

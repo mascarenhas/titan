@@ -152,7 +152,10 @@ Ordinary collection subsets without a spread remain invalid scalar expressions.
 
 ## Parse-time desugarings
 
-Record declarations retain an adjacent synthesized `new` function. Union
+Record declarations produce an adjacent synthesized `new` function. The checker
+removes that synthetic declaration when an explicit record static overrides
+`new`; record-call shorthand also lowers in the checker after namespace
+resolution. Union
 variants written `empty()` or `payload(T)` retain their adjacent positional
 constructors. The checker assigns public-first tags without reordering the
 source declarations. Visibility and constructor markers are unchanged. Short

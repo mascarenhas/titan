@@ -41,9 +41,10 @@ Constructors root the final userdata before any operation that can collect it.
 Records with private fields cannot be constructed by incomplete binary clients: their
 synthesized constructor is private, and literal checks retain the total logical
 field count even when private descriptors are omitted.
-For replacement DSOs, record literals also record a public `new` compatibility
-dependency. This rejects a newly private constructor before an old consumer
-can perform an inlined allocation using the earlier complete layout.
+For replacement DSOs, record literals also record a raw-construction capability
+dependency. This rejects a newly private field layout or a `new` override
+before the consumer can perform an inlined allocation using its earlier
+default-constructor assumptions.
 
 ## Fixed objects and borrowed projections
 

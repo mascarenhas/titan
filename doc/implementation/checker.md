@@ -120,7 +120,9 @@ and detects cycles with a `resolving` state.
    `TopLevelStatic` nodes: one `new` immediately after each `TopLevelRecord`,
    and one positional constructor per variant immediately after each
    `TopLevelUnion`. A duplicate nominal owner also suppresses its constructors,
-   preventing secondary namespace diagnostics.
+   preventing secondary namespace diagnostics. An explicit record static `new`
+   replaces its synthesized declaration and marks the record's
+   `custom_constructor` metadata; see [record constructors](record-constructors.md).
 3. All Titan and foreign imports are visited in AST order. This establishes
    module and C type environments before non-variable declarations, while
    `current_toplevel_order` records the origin of each C declaration in its
@@ -842,8 +844,8 @@ nil-accepting result-bearing target through the checker-frozen callable plan.
   checker type or admissibility rule.
 * **Const lvalues.** Assignment rejects const locals, const module members,
   const record or Interface fields, and indices of `const { T }`. The
-  synthesized record constructor remains the one initialization path for
-  const fields. C lvalue analysis also rejects mutation or mutable
+  raw record constructor remains the initialization path for const fields,
+  including inside an explicit `new` override. C lvalue analysis also rejects mutation or mutable
   address/decay through a const binding's inline aggregate or array storage;
   pointer and owner pointees remain shallowly mutable.
 * **Record constructor omissions.** In a Nominal record context, explicit
@@ -852,6 +854,8 @@ nil-accepting result-bearing target through the checker-frozen callable plan.
   appended as a coerced `ExpNil` marked `_named_omitted` with its `Type.Field`
   in `_field`. A record with any local field remains wholly unconstructible by
   `{...}` outside its defining module, before per-field omission is considered.
+  Overriding `new` imposes the same module-only rule independently of field
+  visibility, including through an explicit source import.
 * **First-class functions, closures, and bound methods.** These are now
   *implemented*, so the points that historically rejected them are acceptance
   points. Referencing a name whose type is `Type.Function` as a value

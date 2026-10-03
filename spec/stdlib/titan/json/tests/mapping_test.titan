@@ -63,6 +63,63 @@ end
 record MappingToken
 end
 
+record MappingCustom
+  const text: string
+end
+
+function MappingCustom.new(source: string): MappingCustom
+  return { text = string.upper(source) }
+end
+
+record MappingScalarConstructor
+end
+
+function MappingScalarConstructor.new(): string
+  raise "JSON must not invoke an incompatible constructor"
+end
+
+record MappingOtherConstructor
+end
+
+function MappingOtherConstructor.new(): MappingEmpty
+  raise "JSON must not invoke an incompatible constructor"
+end
+
+record MappingZeroConstructor
+end
+
+function MappingZeroConstructor.new()
+  raise "JSON must not invoke an incompatible constructor"
+end
+
+record MappingManyConstructor
+end
+
+function MappingManyConstructor.new(): (MappingManyConstructor, integer)
+  raise "JSON must not invoke an incompatible constructor"
+end
+
+record MappingOptionalConstructor
+end
+
+function MappingOptionalConstructor.new(): MappingOptionalConstructor?
+  raise "JSON must not invoke an incompatible constructor"
+end
+
+record MappingFlexibleConstructor
+end
+
+function MappingFlexibleConstructor.new(): (...: MappingFlexibleConstructor)
+  raise "JSON must not invoke an incompatible constructor"
+end
+
+record MappingVariadicConstructor
+end
+
+function MappingVariadicConstructor.new(...: value): MappingVariadicConstructor
+  raise "JSON must not invoke an incompatible constructor"
+end
+
 interface MappingView
   name: string
 end
@@ -164,6 +221,34 @@ function test_mapping_record_rejections_and_unknown_policy(_context: test.Contex
                   "constructor_unavailable", "$")
   else raise "expected local record"
   end
+end
+
+function test_mapping_custom_record_constructor(_context: test.Context)
+  local constructed: MappingCustom = json.decode(
+    [[{"source":"mixed case"}]], mapping_target("MappingCustom"))
+  test.assert(constructed.text == "MIXED CASE",
+              "JSON bypassed the custom constructor")
+  test.assert(json.encode(constructed) == [[{"text":"MIXED CASE"}]])
+  mapping_error([[{"text":"raw field"}]], mapping_target("MappingCustom"),
+                "unknown_field", "$[\"text\"]")
+  mapping_error("{}", mapping_target("MappingCustom"),
+                "missing_field", "$[\"source\"]")
+end
+
+local function mapping_constructor_rejection(context: test.Context, name: string)
+  context:run(name, function(_context: test.Context)
+    mapping_error("{}", mapping_target(name), "constructor_unavailable", "$")
+  end)
+end
+
+function test_mapping_rejects_incompatible_record_constructors(context: test.Context)
+  mapping_constructor_rejection(context, "MappingScalarConstructor")
+  mapping_constructor_rejection(context, "MappingOtherConstructor")
+  mapping_constructor_rejection(context, "MappingZeroConstructor")
+  mapping_constructor_rejection(context, "MappingManyConstructor")
+  mapping_constructor_rejection(context, "MappingOptionalConstructor")
+  mapping_constructor_rejection(context, "MappingFlexibleConstructor")
+  mapping_constructor_rejection(context, "MappingVariadicConstructor")
 end
 
 function test_mapping_nested_records_unions_and_const_containers(_context: test.Context)

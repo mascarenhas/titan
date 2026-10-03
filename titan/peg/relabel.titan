@@ -264,21 +264,21 @@ end
 local function _relabel_named_replace_suffix(
     first: value, definitions: value): RelabelSuffix
   local candidate = _relabel_resolve_value(first, definitions)
-  return RelabelSuffix.new(
+  return RelabelSuffix(
     RELABEL_SUFFIX_REPLACE, candidate)
 end
 
 local function _relabel_named_match_time_suffix(
     first: value, definitions: value): RelabelSuffix
   local candidate = _relabel_resolve_value(first, definitions)
-  return RelabelSuffix.new(
+  return RelabelSuffix(
     RELABEL_SUFFIX_MATCH_TIME, candidate)
 end
 
 local function _relabel_named_fold_suffix(
     first: value, definitions: value): RelabelSuffix
   local candidate = _relabel_resolve_value(first, definitions)
-  return RelabelSuffix.new(
+  return RelabelSuffix(
     RELABEL_SUFFIX_FOLD, candidate)
 end
 
@@ -289,20 +289,20 @@ end
 
 local function _relabel_number_suffix(
     first: value): RelabelSuffix
-  return RelabelSuffix.new(
+  return RelabelSuffix(
     RELABEL_SUFFIX_REPLACE,
     _relabel_decimal(first as string))
 end
 
 local function _relabel_string_suffix(
     first: value): RelabelSuffix
-  return RelabelSuffix.new(
+  return RelabelSuffix(
     RELABEL_SUFFIX_REPLACE, first as string)
 end
 
 local function _relabel_exact_suffix(
     first: value): RelabelSuffix
-  return RelabelSuffix.new(
+  return RelabelSuffix(
     RELABEL_SUFFIX_EXACT,
     _relabel_decimal(first as string))
 end
@@ -313,16 +313,16 @@ local function _relabel_signed_suffix(
   local amount = _relabel_decimal(
     _relabel_slice(text, 2, #text + 1))
   if _relabel_byte(text, 1) == 43 then
-    return RelabelSuffix.new(
+    return RelabelSuffix(
       RELABEL_SUFFIX_AT_LEAST, amount)
   end
-  return RelabelSuffix.new(
+  return RelabelSuffix(
     RELABEL_SUFFIX_AT_MOST, amount)
 end
 
 local function _relabel_label_suffix(
     first: value): RelabelSuffix
-  return RelabelSuffix.new(
+  return RelabelSuffix(
     RELABEL_SUFFIX_LABEL, first)
 end
 
@@ -485,7 +485,7 @@ end
 
 local function _relabel_parsed_rule(
     first: value, captured_pattern: value): RelabelParsedRule
-  return RelabelParsedRule.new(
+  return RelabelParsedRule(
     first as string, captured_pattern as Pattern)
 end
 
@@ -580,20 +580,28 @@ local function _relabel_build_lexical(): RelabelLexical
       folded_class,
       _relabel_expect(literal("]"), "MisClose8")),
     _relabel_class_capture)
-  return RelabelLexical.new(
-    one, spacing, name, digits, number, arrow,
-    defined, quoted, class_pattern,
-    choice(sequence(capture(digits), spacing), name))
+  return RelabelLexical {
+    one = one,
+    spacing = spacing,
+    name = name,
+    digits = digits,
+    number = number,
+    arrow = arrow,
+    defined = defined,
+    quoted = quoted,
+    class_pattern = class_pattern,
+    label = choice(sequence(capture(digits), spacing), name)
+  }
 end
 
 local function _relabel_build_suffix_operation(
     lex: RelabelLexical): Pattern
   local suffix_plus = constant(
-    RelabelSuffix.new(RELABEL_SUFFIX_AT_LEAST, 1))
+    RelabelSuffix(RELABEL_SUFFIX_AT_LEAST, 1))
   local suffix_star = constant(
-    RelabelSuffix.new(RELABEL_SUFFIX_AT_LEAST, 0))
+    RelabelSuffix(RELABEL_SUFFIX_AT_LEAST, 0))
   local suffix_optional = constant(
-    RelabelSuffix.new(RELABEL_SUFFIX_AT_MOST, 1))
+    RelabelSuffix(RELABEL_SUFFIX_AT_MOST, 1))
   local exact_suffix = function_capture(
     capture(lex.digits), _relabel_exact_suffix)
   local signed_suffix = function_capture(
@@ -607,7 +615,7 @@ local function _relabel_build_suffix_operation(
     capture(lex.digits), _relabel_number_suffix)
   local replace_table = sequence(
     literal("{}"),
-    constant(RelabelSuffix.new(
+    constant(RelabelSuffix(
       RELABEL_SUFFIX_TABLE, nil)))
   local replace_named = function_capture(
     sequence(lex.name, argument(1)),

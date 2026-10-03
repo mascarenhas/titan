@@ -227,8 +227,15 @@ local function raise_regex_diagnostic(label: string, message: string,
   if actual > #source + 1 then actual = #source + 1 end
   local line, column, source_line =
     regex_line_details(source, actual)
-  local diagnostic = RegexDiagnostic.new(
-    label, message, source, actual, line, column, source_line)
+  local diagnostic = RegexDiagnostic {
+    label = label,
+    message = message,
+    source = source,
+    position = actual,
+    line = line,
+    column = column,
+    source_line = source_line
+  }
   raise "invalid regular expression [" .. diagnostic.label ..
         "] at L" .. diagnostic.line ..
         ":C" .. diagnostic.column ..
@@ -324,22 +331,30 @@ end
 
 local function regex_class_plain(position: integer,
                                  text: string): RegexClassItem
-  return RegexClassItem.new(position, text, true, false)
+  return RegexClassItem { position = position, bytes = text, single = true, escaped = false }
 end
 
 local function regex_class_escape(position: integer,
                                   code: string): RegexClassItem
   if regex_byte_set_contains("tnrfea", code) then
-    return RegexClassItem.new(
-      position, regex_control_byte(code), true, true)
+    return RegexClassItem {
+      position = position,
+      bytes = regex_control_byte(code),
+      single = true,
+      escaped = true
+    }
   end
-  return RegexClassItem.new(position, code, true, true)
+  return RegexClassItem { position = position, bytes = code, single = true, escaped = true }
 end
 
 local function regex_class_builtin(position: integer,
                                    code: string): RegexClassItem
-  return RegexClassItem.new(
-    position, regex_builtin_bytes(code), false, true)
+  return RegexClassItem {
+    position = position,
+    bytes = regex_builtin_bytes(code),
+    single = false,
+    escaped = true
+  }
 end
 
 local function regex_class_add(
@@ -490,7 +505,7 @@ local function regex_simple_quantifier(
   elseif symbol == "?" then
     maximum = 1
   end
-  return RegexQuantifier.new(position, minimum, maximum)
+  return RegexQuantifier { position = position, minimum = minimum, maximum = maximum }
 end
 
 local function regex_counted_quantifier(
@@ -514,7 +529,7 @@ local function regex_counted_quantifier(
       end
     end
   end
-  return true, RegexQuantifier.new(position, minimum, maximum)
+  return true, RegexQuantifier { position = position, minimum = minimum, maximum = maximum }
 end
 
 local function regex_apply_quantifier(
@@ -592,9 +607,15 @@ local function regex_parse_open_group(
 
   local pieces: {RegexNode} = {}
   local alternatives: {RegexNode} = {}
-  state.frames[state.depth] = RegexParseFrame.new(
-    position, group_index, capturing,
-    after, after, pieces, alternatives)
+  state.frames[state.depth] = RegexParseFrame {
+    group_position = position,
+    group_index = group_index,
+    capturing = capturing,
+    alternation_position = after,
+    branch_position = after,
+    pieces = pieces,
+    alternatives = alternatives
+  }
   return true
 end
 
@@ -717,15 +738,18 @@ local function regex_parse_finish(
       state.source, position)
   end
   local root = regex_finish_frame(state.frames[1])
-  return true, ParsedRegex.new(
-    root, state.capture_count,
-    state.anchored_start, state.anchored_end)
+  return true, ParsedRegex {
+    root = root,
+    capture_count = state.capture_count,
+    anchored_start = state.anchored_start,
+    anchored_end = state.anchored_end
+  }
 end
 
 local function build_regex_parser(): peg.Pattern
   local any = peg.any()
   local no_quantifier =
-    RegexQuantifier.new(0, 0, 0)
+    RegexQuantifier { position = 0, minimum = 0, maximum = 0 }
   local definitions: {peg.Definition} = {
     peg.define("state", peg.argument(1)),
     peg.define("capturing", peg.constant("c")),

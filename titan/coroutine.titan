@@ -296,7 +296,11 @@ function create(func: function (value): (value), default_tag: value): Coroutine
     raise "could not create coroutine: " .. (ffi.mco_result_description(res) as string)
   end
 
-  local co = Coroutine.new(ffi.lua_totvalue(L, owner_index), slot[0], default_tag)
+  local co = Coroutine {
+    udata = ffi.lua_totvalue(L, owner_index),
+    handle = slot[0],
+    default_tag = default_tag,
+  }
   ffi.lua_pushtvalue(L, co)
   if ffi.lua_setiuservalue(L, owner_index, TITAN_CORO_RECORD_USERVALUE) == 0 then
     raise "cannot set coroutine record root"

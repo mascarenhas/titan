@@ -160,9 +160,32 @@ interchangeable with a record with `float` fields (see
 
 ## Creating records
 
-### `RecName.new`
+### Calling a record
 
-Every record automatically gets a static function `new` with one
+A record reference in call position selects its `new` function. Positional,
+named, and single-string calls are shorthand for the corresponding calls to
+`new`:
+
+```text
+Point(2.0, 3.0)                  -- Point.new(2.0, 3.0)
+Point { y = 4.0, x = 1.0 }       -- Point.new { y = 4.0, x = 1.0 }
+Label "hello"                   -- Label.new "hello"
+```
+
+The shorthand works with imported records and record aliases, preserves the
+constructor's visibility and complete result list, and uses ordinary call
+adjustment. Named expressions evaluate in written order. It does not make the
+record namespace a first-class Titan value: save `Point.new` when a callable
+value is needed. Prefer the shorthand when creating records.
+
+Explicit owner arguments use `Box<|integer|>(item)`, equivalent to
+`Box<|integer|>.new(item)`. If an override also has callable-local generic
+parameters, the ordinary rule requiring both explicit lists or neither still
+applies; write `Box<|integer|>.new<|string|>(item)` when both lists are needed.
+
+### Default `new`
+
+Unless overridden, every record automatically gets a static function `new` with one
 parameter per field, in declaration order:
 
 ```lua
@@ -187,6 +210,51 @@ whose body is a record constructor expression over its parameters. For a local
 record, `new` is local too. For an exported record with any local field, `new`
 is also local, because exposing it would let outside code supply private field
 values through its parameters.
+
+### Overriding `new`
+
+Declare a record function named `new` to replace the generated constructor:
+
+```titan
+record Counter
+    local amount: integer
+end
+
+function Counter.new(initial: integer?): Counter
+    local amount = initial or 0
+    if amount < 0 then raise "negative initial count" end
+    return { amount = amount }
+end
+```
+
+The declaration may precede or follow the record, including in another file of
+the same folder module. It is an ordinary record function: its parameters,
+parameter names, generic parameters, variadic input, and result list are its
+own. It may be public even when the record has private fields, or explicitly
+`local` even when all fields are public. Calls through the record name obey
+that visibility too.
+
+An override need not return the record, or even one result:
+
+```titan
+record Parsed end
+
+function Parsed.new(input: string): (integer, string)
+    return #input, input
+end
+
+function parse_example(): (integer, string)
+    return Parsed "hello"
+end
+```
+
+The generated `new` no longer exists; calling `Counter(...)` or
+`Counter.new(...)` inside the override recurses. Use a context-typed `{ ... }`
+expression to allocate the raw record. Once `new` is overridden, those raw
+constructor expressions are allowed **only in the defining module**, even if
+the override and all fields are public. Explicit source imports do not grant
+this construction privilege. Importers must call the visible `new` or use the
+record-call shorthand.
 
 ### Constructor expressions
 
@@ -249,21 +317,22 @@ local defaults: Config = {}
 local labelled: Config = { label = "test" }
 ```
 
-Outside the defining module, constructor expressions are rejected for records
-that have local fields. The compiler cannot safely fill private slots from a
-public field list, so this record-level ban applies even to `{}` and even when
-every private field could accept `nil`. Inside the defining module, public and
-local fields use the same omission rule. Outside, use an exported factory
-function from the defining module instead.
+Constructor expressions require access to every field. An ordinary import of
+a record with local fields therefore rejects raw construction, even `{}` and
+even when every private field could accept `nil`. Inside the defining module,
+public and local fields use the same omission rule; explicit source
+collaboration may also expose private fields. A `new` override imposes the
+stricter defining-module-only rule regardless of field visibility, so even a
+source collaborator must call the constructor.
 
 ### Records in module variables
 
-A module variable can hold a record, and both constructor forms are
-accepted as its (constant) initializer:
+A module variable can hold a record. A raw constructor expression or a call
+to the default generated constructor can be its constant initializer:
 
 ```titan
 p: Point = { x = 1.0, y = 2.0 }
-origin: Point = Point.new(0.0, 0.0)
+origin: Point = Point(0.0, 0.0)
 ```
 
 Both initializer forms compile and work at run time. *Reassigning* the
@@ -275,6 +344,10 @@ function recenter()
     p = { x = 30.0, y = 40.0 }
 end
 ```
+
+An overridden `new` is an ordinary function call and cannot be used as a
+constant module-variable initializer. Perform computed initialization in the
+module's final `do ... end` block.
 
 The record declaration may appear before or after the module variable. The
 module-variable ordering restriction concerns only imports and other module
@@ -492,9 +565,9 @@ flexible result tails exactly like module functions. A bound method reference
 preserves both tails after binding `self`; the synthesized `new` constructor
 itself remains a fixed-result function returning one record.
 
-The synthesized `new` constructor is just a record function. When `new` is local
-because the record is local or has local fields, a public record function is the
-usual way to expose a controlled factory:
+The synthesized `new` constructor is just a record function. When its default
+visibility is local because the record has local fields, a public override can
+expose a controlled factory:
 
 ```lua
 record Cell
@@ -502,8 +575,8 @@ record Cell
     value: integer
 end
 
-function Cell.fresh(value: integer): Cell
-    return Cell.new(0, value)
+function Cell.new(value: integer): Cell
+    return { generation = 0, value = value }
 end
 ```
 
@@ -549,9 +622,11 @@ end
 Local records and local record members are omitted from the imported interface.
 If an exported record has local fields, importers can still receive and pass
 values of that record type and access its public fields, methods, and record
-functions, but they cannot construct it directly with `Rec.new` or `{ ... }`;
-the defining module should export a factory record function or module function
-when outside code needs instances.
+functions. Its default `new` is private, and outside raw `{ ... }` construction
+is unavailable. The defining module may expose a public `new` override or
+another factory when outside code needs instances. A public override can be
+called as `Rec(...)` or `Rec.new(...)`; it keeps raw construction inside the
+defining module even for records with no private fields.
 
 Imported unions follow this exact visibility frontier. Their types,
 constructors, methods, and union functions are available to signatures and
@@ -587,7 +662,7 @@ end
 -- Lua
 local test = require "test"
 
-local p = test.Point.new(1, 2)   -- record namespaces are members of the module
+local p = test.Point(1, 2)       -- record namespaces are callable when new is public
 print(type(p))                   --> userdata
 p:move(1.0, 1.0)                 -- methods work with Lua's colon call
 print(p.x, p.y)                  --> 2.0  3.0
@@ -598,10 +673,14 @@ The details, all run-time behavior:
 
 * **Construction and record functions.** Each record name is a member of the
   module — a small namespace table holding its public record functions — so
-  `test.Point.new(1, 2)` and `test.Point.origin()` work from Lua when those
-  functions are public. Missing Lua arguments are padded with `nil` and
-  then checked against the field types; surplus positional arguments to a
-  fixed-parameter record function are ignored.
+  `test.Point(1, 2)`, `test.Point.new(1, 2)`, and `test.Point.origin()` work from
+  Lua when the corresponding functions are public. A namespace with public
+  `new` has a `__call` metamethod that calls its `new` member without passing
+  the namespace as an argument, preserving every result. Missing Lua arguments
+  are padded with `nil` and checked against the declared parameter types;
+  surplus arguments to a fixed-parameter function are ignored. Lua brace calls
+  still pass one table argument: Titan's named-call syntax is compile-time
+  syntax and does not add named Lua arguments.
 * **Field reads and mutable-field writes** go through the record's metatable
   and are fully checked. An unknown field, read or written, raises
   `field 'z' not found in record 'test.Point'`; a wrongly-typed write
@@ -616,7 +695,7 @@ The details, all run-time behavior:
   member of the module value. Local fields and methods on an exported record
   raise "field ... not found" when Lua tries to read or write them. Local
   record functions, including a local `new`, are absent from the record
-  namespace table.
+  namespace table, and a namespace whose `new` is local has no `__call`.
 * **Identity.** A record instance is one stable userdata: sending the
   same record to Lua twice (or round-tripping it through Lua, an array,
   or a `value`) yields the same object, and mutations on either side are

@@ -20,7 +20,7 @@ local types = typedecl("Type", {
         Parameter   = {"scope", "index", "diagnostic_name", "erased_constraint"},
         FunctionScheme = {"scope", "typeparams", "signature"},
         GenericAlias = {"module", "name", "locality", "target_owner_fqtn", "target_alias_fqtn", "target_scope", "typeparams"},
-        Record      = {"name", "fields", "functions", "methods", "nfields", "scope", "typeparams"},
+        Record      = {"name", "fields", "functions", "methods", "nfields", "scope", "typeparams", "custom_constructor"},
         Union       = {"name", "variants", "functions", "methods", "nvariants", "scope", "typeparams"},
         Interface   = {"name", "fields", "methods", "scope", "typeparams"},
         Variant     = {"fqtn", "name", "parts", "index"},
@@ -116,10 +116,12 @@ function types.Nominal(fqtn, args)
 end
 
 local raw_Record = types.Record
-function types.Record(name, fields, functions, methods, nfields, scope, typeparams)
+function types.Record(name, fields, functions, methods, nfields, scope, typeparams,
+                      custom_constructor)
     if typeparams == nil then typeparams = {} end
+    if custom_constructor == nil then custom_constructor = false end
     return raw_Record(name, fields, functions, methods, nfields,
-        scope, typeparams)
+        scope, typeparams, custom_constructor)
 end
 
 local raw_Method = types.Method
@@ -2092,6 +2094,7 @@ type_equals = function(t1, t2, seen)
     elseif tag1 == "Type.Record" then
         return t1.name == t2.name
            and t1.nfields == t2.nfields
+           and t1.custom_constructor == t2.custom_constructor
            and generic_metadata_equals(t1, t2, seen)
            and same_value(t1.fields, t2.fields, seen)
            and same_value(t1.functions, t2.functions, seen)
@@ -2485,7 +2488,7 @@ local function rewrite_type(root, policy)
                 rewrite_map(typ.methods, rewrite), typ.nfields,
                 (not closes and typ.scope) or nil,
                 closes and {} or rewrite_list(
-                    typ.typeparams or {}, rewrite))
+                    typ.typeparams or {}, rewrite), typ.custom_constructor)
         elseif tag == "Type.Union" then
             local variants = rewrite_list(typ.variants, rewrite)
             local closes = policy.drop_generic
@@ -5147,12 +5150,17 @@ function types.serialize(t, seen_ctypes)
                 table.insert(functions, name .. " = " .. types.serialize(func))
             end
         end
+        local generic_tail = serialize_generic_tail(t.scope, t.typeparams)
+        if t.custom_constructor then
+            if generic_tail == "" then generic_tail = ",nil,{}" end
+            generic_tail = generic_tail .. ",true"
+        end
         return "Record('" .. t.name ..
             "',{" .. table.concat(fields, ",") ..
             "},{" ..table.concat(functions, ",") .. "}" .. "," ..
             "{" .. table.concat(methods, ",") .. "}" .. "," ..
             tostring(t.nfields or #t.fields) ..
-            serialize_generic_tail(t.scope, t.typeparams) ..
+            generic_tail ..
             ")"
     elseif tag == "Type.Union" then
         local functions, variants, methods = {}, {}, {}

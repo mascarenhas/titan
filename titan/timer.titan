@@ -13,7 +13,7 @@ function yield()
 end
 
 function ticker(milliseconds: integer): Ticker
-  return Ticker.new(uv.ticker(milliseconds))
+  return Ticker(uv.ticker(milliseconds))
 end
 
 function Ticker:tick(): boolean

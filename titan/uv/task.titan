@@ -234,7 +234,7 @@ function Task:add_terminal_listener(
     return function () end
   end
 
-  local registration = TerminalRegistration<|A, B|>.new(listener, true)
+  local registration = TerminalRegistration<|A, B|> { listener = listener, live = true }
   self.terminal_registrations[#self.terminal_registrations + 1] = registration
   local task = self
   return function ()
@@ -356,7 +356,7 @@ local function finish_cleanup_task(task: Task)
 end
 
 local function fail_cleanup_task(task: Task, err: value, trace: string)
-  retire_task(task, TaskStatus<|value, value|>.failed(Error.new(err, trace)))
+  retire_task(task, TaskStatus<|value, value|>.failed(Error(err, trace)))
   report_task_error(err, trace)
 end
 
@@ -386,7 +386,7 @@ local function finish_user_failure(task: Task, err: value, trace: string)
     finish_user_task(task, TaskStatus<|value, value|>.cancelled(
         cancellation as CancellationReason<|value|>))
   else
-    finish_user_task(task, TaskStatus<|value, value|>.failed(Error.new(err, trace)))
+    finish_user_task(task, TaskStatus<|value, value|>.failed(Error(err, trace)))
   end
 end
 
@@ -593,7 +593,11 @@ local function start_timer(task: Task, milliseconds: integer,
       fail_task_at_callback_boundary(task, error, traceback)
     end
   end
-  local owner = TimerOwner.new(foreign uv_timer_t.new(), callback, 0)
+  local owner = TimerOwner {
+    handle = foreign uv_timer_t.new(),
+    callback = callback,
+    root_index = 0,
+  }
   owner.root_index = activate_timer(
       runtime, owner.handle, uv_timer_cb, owner, owner as foreign *void,
       milliseconds, 0)
@@ -625,8 +629,14 @@ end
 local function start_ticker(task: Task,
                             milliseconds: integer): uv_timer_t
   local runtime = task.runtime
-  local ticker = uv_timer_t.new(
-      foreign uv_timer_t.new(), ticker_callback, runtime, nil, false, 0)
+  local ticker = uv_timer_t {
+    handle = foreign uv_timer_t.new(),
+    callback = ticker_callback,
+    runtime = runtime,
+    waiting = nil,
+    fired = false,
+    root_index = 0,
+  }
   ticker.root_index = activate_timer(
       runtime, ticker.handle, uv_ticker_cb, ticker, ticker as foreign *void,
       milliseconds, milliseconds)
@@ -697,7 +707,7 @@ local function TickerTickCall:dispatch(task: Task): Immediate?
     return immediate_ok(true)
   end
   if ticker.waiting then
-    return Immediate.new(true, "Ticker already has a waiting Task")
+    return Immediate { failed = true, payload = "Ticker already has a waiting Task" }
   end
   local cancel_action: CancelAction = function ()
     if ticker.waiting == task then
@@ -735,7 +745,7 @@ local function CleanupStepCall:dispatch(task: Task): Immediate?
 end
 
 local function cleanup_runtime(runtime: Runtime)
-  while await(Call.cleanup_step(CleanupStepCall.new())) as boolean do end
+  while await(Call.cleanup_step(CleanupStepCall())) as boolean do end
 end
 
 local function begin_shutdown(runtime: Runtime)
@@ -743,9 +753,21 @@ local function begin_shutdown(runtime: Runtime)
   local root = coroutine.create(function (_: value): ()
     cleanup_runtime(runtime)
   end, UV_TAG)
-  local task = Task<|value, value|>.new(
-      root, runtime, TaskStatus<|value, value|>.ready(),
-                        nil, nil, nil, 0, true, {}, false, nil, false, true)
+  local task = Task<|value, value|> {
+    root = root,
+    runtime = runtime,
+    state = TaskStatus<|value, value|>.ready(),
+    cancel_value = nil,
+    cancel_action = nil,
+    pending = nil,
+    root_index = 0,
+    cleanup = true,
+    terminal_registrations = {},
+    suspended = false,
+    resume_token = nil,
+    resume_pending = false,
+    pending_cancellation_affected = true,
+  }
   task.root_index = root_task(runtime, task)
   start_timer(task, 0, false, nil)
 end
@@ -756,9 +778,21 @@ local function run_internal(func: function (): (value)): Task<|value, value|>
   local root = coroutine.create(function (_: value): value
     return func()
   end, UV_TAG)
-  local task = Task<|value, value|>.new(
-      root, runtime, TaskStatus<|value, value|>.ready(),
-                        nil, nil, nil, 0, false, {}, false, nil, false, true)
+  local task = Task<|value, value|> {
+    root = root,
+    runtime = runtime,
+    state = TaskStatus<|value, value|>.ready(),
+    cancel_value = nil,
+    cancel_action = nil,
+    pending = nil,
+    root_index = 0,
+    cleanup = false,
+    terminal_registrations = {},
+    suspended = false,
+    resume_token = nil,
+    resume_pending = false,
+    pending_cancellation_affected = true,
+  }
   task.root_index = root_task(runtime, task)
 
   do
@@ -771,15 +805,15 @@ local function run_internal(func: function (): (value)): Task<|value, value|>
 end
 
 local function yield()
-  await(Call.turn(TurnCall.new()))
+  await(Call.turn(TurnCall()))
 end
 
 local function suspend(token: ResumeToken, cancel_action: CancelAction?)
-  await(Call.suspend(SuspendCall.new(token, cancel_action)))
+  await(Call.suspend(SuspendCall(token, cancel_action)))
 end
 
 local function sleep(milliseconds: integer)
-  await(Call.sleep(SleepCall.new(milliseconds)))
+  await(Call.sleep(SleepCall(milliseconds)))
 end
 
 local function ticker(milliseconds: integer): uv_timer_t
@@ -792,11 +826,11 @@ local function ticker(milliseconds: integer): uv_timer_t
 end
 
 local function ticker_tick(ticker: uv_timer_t): boolean
-  return await(Call.ticker_tick(TickerTickCall.new(ticker))) as boolean
+  return await(Call.ticker_tick(TickerTickCall(ticker))) as boolean
 end
 
 local function ticker_close(ticker: uv_timer_t)
-  await(Call.ticker_close(TickerCloseCall.new(ticker)))
+  await(Call.ticker_close(TickerCloseCall(ticker)))
 end
 
 local function os_exit(code: integer)

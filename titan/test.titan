@@ -26,7 +26,7 @@ local runner_is_verbose = false
 local runner_logger: TestLogger? = nil
 local trace_scanner: TraceScanner? = nil
 local pattern_matcher: PatternMatcher? = nil
-local location_probe = LocationProbe.new()
+local location_probe = LocationProbe()
 
 function testing(): boolean
   return runner_active
@@ -49,7 +49,7 @@ function location(): (string, string, integer)
 end
 
 function skip(reason: string?)
-  if runner_active then raise SkipMarker.new(reason) end
+  if runner_active then raise SkipMarker(reason) end
   if reason then raise "test skipped: " .. (reason as string) end
   raise "test skipped"
 end
@@ -91,7 +91,7 @@ function Context:run(name: string, subtest: TestFunction)
     raise "cannot register subtest after test body finishes"
   end
   self.subtests[#self.subtests + 1] =
-    RegisteredTest.new(self.full_name .. "." .. name, subtest)
+    RegisteredTest(self.full_name .. "." .. name, subtest)
 end
 
 local function runner_begin(is_verbose: boolean, logger: TestLogger)
@@ -108,7 +108,13 @@ local function runner_end()
 end
 
 local function runner_new_context(name: string): Context
-  return Context.new(name, {}, {}, true, true)
+  return Context {
+    full_name = name,
+    subtests = {},
+    cleanups = {},
+    subtests_open = true,
+    cleanups_open = true
+  }
 end
 
 local function runner_take_subtests(context: Context): {RegisteredTest}

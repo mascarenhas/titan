@@ -83,12 +83,32 @@ existing finalized provider provenance to decide where to verify them.
 
 ### Construction and closed-union proofs
 
-An imported record literal contributes a dependency on its synthesized public
-`new`. Direct construction can inline allocation using the complete public
-record layout. If a replacement adds the first private field, the public
-constructor disappears and verification rejects this consumer before it can
-allocate an undersized record. Access-only consumers require the public field
-shape and can accept changed private storage.
+An imported record literal contributes a separate `literal = true` requirement.
+Providers advertise this capability only for records with no constructor override
+and a complete public field layout. Direct construction can inline allocation
+using that layout. Adding the first private field or overriding `new` removes
+the capability and rejects literal consumers, even if a public override retains
+the generated constructor's exact signature. Ordinary calls depend on `new`'s
+signature; access-only consumers require the public field shape and can accept
+changed private storage. New literal consumers require rebuilt providers that
+publish this capability. Historical consumers recorded only a `new` dependency
+and cannot distinguish same-signature overrides; see
+[record constructor metadata](record-constructors.md#semantic-metadata-and-separate-providers).
+
+The same raw-construction capability is required by a generated record call
+whose fresh native arguments are fused into its userdata allocation. Ordinary
+calls to a separate provider use its callable implementation; fused-storage
+calls retain direct construction to preserve their ownership contract, and
+therefore reject a replacement constructor override.
+
+Generated record calls accepted by `isconst` as constant module variable
+initializers also require this capability. The checker marks each accepted
+call with `_binary_constant_constructor`, including nested constructor calls,
+and usage collection retains that proof requirement. Lambda bodies and
+computed `do` initializers do not participate in this constant-expression
+proof; ordinary calls there continue to depend only on `new`'s signature.
+New consumers with this proof require providers rebuilt to publish the
+capability.
 
 The case checker retains its existing `_always_returns` inference. When all
 arms terminate and complete variant coverage supplies the non-fallthrough

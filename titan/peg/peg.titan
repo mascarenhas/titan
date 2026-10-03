@@ -126,14 +126,26 @@ local function pattern_match_attempt(
     if capture_count > 200 then
       raise "too many flexible return values (max 200)"
     end
-    return PatternMatchAttempt.new(
-      true, results[native_count] as integer,
-      capture_count, results, false, "", 0)
+    return PatternMatchAttempt {
+      matched = true,
+      after = results[native_count] as integer,
+      capture_count = capture_count,
+      captures = results,
+      ordinary_failure = false,
+      failure_label = "",
+      failure_position = 0
+    }
   elseif native_count == 3 then
     local label = results[2] as string
-    return PatternMatchAttempt.new(
-      false, 0, 0, results, label == "fail", label,
-      (results[3] as integer) + start - 1)
+    return PatternMatchAttempt {
+      matched = false,
+      after = 0,
+      capture_count = 0,
+      captures = results,
+      ordinary_failure = label == "fail",
+      failure_label = label,
+      failure_position = (results[3] as integer) + start - 1
+    }
   end
   raise "embedded LPegLabel returned an invalid match result"
 end
@@ -155,7 +167,7 @@ function Match:values(): (...: value)
 end
 
 function rule(name: string, pattern: Pattern): Rule
-  return Rule.new(name, pattern)
+  return Rule(name, pattern)
 end
 
 function grammar(start: string,
@@ -185,18 +197,19 @@ end
 
 function locale(): Locale
   local native = _locale()
-  return Locale.new(
-    _pattern(native["alnum"], 5),
-    _pattern(native["alpha"], 5),
-    _pattern(native["cntrl"], 5),
-    _pattern(native["digit"], 5),
-    _pattern(native["graph"], 5),
-    _pattern(native["lower"], 5),
-    _pattern(native["print"], 5),
-    _pattern(native["punct"], 5),
-    _pattern(native["space"], 5),
-    _pattern(native["upper"], 5),
-    _pattern(native["xdigit"], 5))
+  return Locale {
+    alnum = _pattern(native["alnum"], 5),
+    alpha = _pattern(native["alpha"], 5),
+    cntrl = _pattern(native["cntrl"], 5),
+    digit = _pattern(native["digit"], 5),
+    graph = _pattern(native["graph"], 5),
+    lower = _pattern(native["lower"], 5),
+    print = _pattern(native["print"], 5),
+    punct = _pattern(native["punct"], 5),
+    space = _pattern(native["space"], 5),
+    upper = _pattern(native["upper"], 5),
+    xdigit = _pattern(native["xdigit"], 5)
+  }
 end
 
 function set_max_stack(maximum: integer)
@@ -527,7 +540,7 @@ end
 
 function define(name: string,
                 pattern: Pattern): Definition
-  return Definition.new(
+  return Definition(
     name, pattern.raw, pattern.tree_size)
 end
 
@@ -536,7 +549,7 @@ function define_value(name: string,
   if candidate == nil or candidate == false then
     raise "PEG definition value must be truthy"
   end
-  return Definition.new(name, candidate, -1)
+  return Definition(name, candidate, -1)
 end
 
 function compile(
@@ -566,9 +579,12 @@ function match(subject: string, candidate: value,
     local attempt = pattern_match_attempt(
       compiled, subject, start)
     if attempt.matched then
-      return Match.new(
-        start, attempt.after - 1,
-        attempt.capture_count, attempt.captures)
+      return Match {
+        first = start,
+        last = attempt.after - 1,
+        capture_count = attempt.capture_count,
+        captures = attempt.captures
+      }
     end
     if not attempt.ordinary_failure then return nil end
     start = start + 1

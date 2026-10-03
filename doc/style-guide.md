@@ -155,8 +155,13 @@ parenthesize a call when one result is intended.
 
 Prefer positional calls for short functions whose operands explain
 themselves. Use declaration-based named calls when several same-typed
-arguments are easy to transpose or when the names carry real meaning. Named
-calls are unavailable through arbitrary function values and for variadic
+arguments are easy to transpose or when the names carry real meaning. Apply
+this to record constructors as well: name long state-initialization lists,
+adjacent boolean flags, and runs of zero, nil, or empty-container placeholders.
+Use the selected `new` declaration's parameter names, which may differ from
+record fields for an override. Preserve expression evaluation order and any
+final multi-result adjustment when converting an existing call. Named calls
+are unavailable through arbitrary function values and for variadic
 functions, so do not make readability depend on names that disappear at the
 callable boundary.
 
@@ -281,6 +286,17 @@ semantic distinction rather than the rooting mechanism.
 
 ## Put behavior and state on their real owner
 
+Prefer `Record(...)`, `Record{...}`, or `Record "text"` when calling a record
+constructor. These spellings select `Record.new` with its ordinary visibility,
+argument adjustment, and result list. Keep `.new` when referring to the
+function as a value or supplying its own explicit generic arguments.
+
+Put custom initialization on `[local] function Record.new(...)` when it is the
+record's construction operation. Build the raw object with a context-typed
+`{ ... }` inside that module; an override makes raw construction module-private.
+Keep existing domain operations such as `fs.open` and `net.connect` named for
+what they do.
+
 When a private helper's first argument is one nominal record and the operation
 exists to read or mutate that record, write a local method on the record:
 
@@ -298,7 +314,7 @@ local record Watcher
 end
 
 local function Watcher:map(item: Pending): Event
-  return Event.new(item.number)
+  return Event(item.number)
 end
 
 local function Watcher:drain(): {Event}

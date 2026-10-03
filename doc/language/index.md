@@ -65,7 +65,7 @@ use the chapters below for the normative language reference.
 | [Flexible returns](flexible-returns.md) | Runtime-sized homogeneous result tails, finite option projection, open sinks, contextual calls through `value`, surplus adjustment, and directional callable adjustment. |
 | [Spread expressions](spread-expressions.md) | Tail-only expansion of whole or closed-range Array, integer-Map, and variadic subjects; exact subject rules, once-only evaluation, finite optional projections, open sinks, metamethods, and capacity limits. |
 | [Native storage in records and unions](nominal-storage.md) | Exact foreign values, embedded C objects, borrowed interior pointers, shallow constness, and fresh buffers sharing their nominal owner. |
-| [Records](records.md) | Nominal record types, constructors, fields, methods, record functions, and records as seen from Lua. |
+| [Records](records.md) | Nominal record types, record-call shorthand, overridable constructors, fields, methods, record functions, and records as seen from Lua. |
 | [Unions](unions.md) | Nominal tagged unions with named payload parts, positional and named constructors and case bindings, full-block `when` arms, optional coverage with closed-union control-flow proof, and Lua visibility. |
 | [Arrays and maps](arrays-maps.md) | Mutable and const-qualified positive-only, holed Arrays with deterministic highest-present length and distinct canonical Lua userdata tags; ordinary Maps, positional integer-Map construction, metamethod-aware integer-Map length, conversions, and performance. |
 | [Modules](modules.md) | Logical modules, `import`, visibility, module variables, initialization, and the compilation model (shared libraries, executables, search paths). |

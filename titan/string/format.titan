@@ -13,9 +13,8 @@ local type FormatFactory = function (string, string): (FormatPartial)
 
 local MAXIMUM_FORMAT_SPECIFICATION_BYTES = 22
 
-local function new_string_builder(): StringWriter
-  local chunks: {string} = {}
-  return StringWriter.new(chunks, 0)
+local function StringWriter.new(): StringWriter
+  return { chunks = {}, length = 0 }
 end
 
 local function builder_append(builder: StringWriter, text: string)
@@ -238,7 +237,7 @@ local function render_lua_hex_number(form: string,
   else
     local exponent: foreign int = 0 as foreign int
     local fraction = ffi.frexp(number, exponent) as float
-    local builder = new_string_builder()
+    local builder = StringWriter()
     if fraction < 0 then
       builder_append(builder, "-")
       fraction = -fraction
@@ -382,7 +381,7 @@ local function append_quoted(builder: StringWriter, text: string)
 end
 
 local function render_literal(candidate: value): string
-  local builder = new_string_builder()
+  local builder = StringWriter()
   if candidate is string then
     append_quoted(builder, candidate as string)
   elseif candidate == nil then
@@ -558,7 +557,7 @@ local function build_format_plan(items_value: value): FormatPlan
     partials[index] = items[index] as FormatPartial
     index = index + 1
   end
-  return FormatPlan.new(partials, items[count] as string)
+  return FormatPlan(partials, items[count] as string)
 end
 
 local function format_specification(

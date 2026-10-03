@@ -55,6 +55,7 @@ local schemas = {
     ["Type.Record"] = {
         name = "string", fields = "members", functions = "type_map", methods = "type_map",
         nfields = "integer", scope = "type?", typeparams = "types", islocal = "boolean?",
+        custom_constructor = "boolean",
         _source_complete = "boolean?", _generic_parameters = "types?",
     },
     ["Type.Union"] = {

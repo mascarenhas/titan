@@ -235,13 +235,17 @@ not apply. See [Flexible returns](flexible-returns.md).
 
 ## Record construction
 
-The synthesized record static `Rec.new` is an ordinary named-call target:
+Calling a record selects its ordinary static `new`, including for named calls:
 
 ```lua
-local p = Point.new { y = 3.0, x = 2.0 }
+local p = Point { y = 3.0, x = 2.0 }  -- Point.new { y = 3.0, x = 2.0 }
 ```
 
-Context-typed record constructor expressions use the same omission rule:
+The default constructor's names are its fields. An explicit `new` override uses
+its own parameter names and result list. In both cases the selected `new` must
+be visible and nonvariadic to accept named arguments.
+
+Context-typed raw record constructor expressions use the same omission rule:
 
 ```titan
 record Config
@@ -260,9 +264,10 @@ constructor semantics rather than named-call semantics: if an explicit field
 is repeated, both expressions are evaluated in source order and the last store
 wins.
 
-A record with any local field still cannot be constructed with `{...}` outside
-its declaring module, even if every local field could accept `nil`. Inside the
-declaring module, omitted public and local fields follow the same nil rule.
+A raw literal requires visibility of every field, even if every hidden field
+could accept `nil`. Inside the declaring module, omitted public and local
+fields follow the same nil rule. An overridden `new` restricts raw literals to
+the defining module regardless of visibility, including through source imports.
 
 See [Records](records.md#creating-records) for the two record construction forms.
 

@@ -55,7 +55,7 @@ local function _initialize_native()
 end
 
 local function _pattern(raw: value, tree_size: integer): Pattern
-  return Pattern.new(raw, tree_size)
+  return Pattern(raw, tree_size)
 end
 
 local function _checked_sum(first: integer, second: integer,

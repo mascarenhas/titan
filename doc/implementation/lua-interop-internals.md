@@ -507,20 +507,26 @@ barrier the old `CClosure` record used. Mutable record-field writes from Lua
 are thus **coerced and type-enforced by the same matrix as function
 arguments**, while const fields remain readable but cannot be replaced.
 
-Record functions need no record metatable: each record name becomes a plain Lua
+Each record name becomes a Lua
 **static-namespace table** with its public record functions inserted, held in a dedicated
 `_mod` user-value slot and served by the module metatable's `__index`
 (read-only) under the record's name. So `mod.Point.new(2, 3)` resolves
 `mod.Point` through the module `Udata`'s `__index` to that table, then
-does an ordinary table lookup plus a wrapped call — `new` was desugared
-into a record function by the parser long before codegen.
+does an ordinary table lookup plus a wrapped call. The parser supplies the
+default `new`; an explicit override replaces it during declaration staging.
+When `new` is public, the namespace table also gets a `__call` metatable. Its
+C bridge replaces the namespace receiver with the `new` member and invokes it
+with the remaining arguments and all results, using `lua_callk` to preserve
+Lua yielding. This is separate from the instance metatable; see
+[record constructors](record-constructors.md#lua-namespace-calls).
 To make these constructors and static methods discoverable from instance values
 at runtime without going through the module table, generated initialization also
 attaches this static-namespace table directly to the record metatable under the
 lightuserdata key `TITAN_MT_STATICS` (`metatable[TITAN_MT_STATICS] = <statics table>`).
 Local records are not entered in the module member map. Public records with a
 local `new` still allocate their namespace table for Titan-internal use, but
-local record functions are not inserted into the Lua-visible table.
+local record functions are not inserted into the Lua-visible table and no
+`__call` is installed for a private `new`.
 
 ## Arrays from Lua
 

@@ -200,7 +200,7 @@ function tostring(candidate: value): string
 end
 
 function reader(contents: string): StringReader
-  return StringReader.new(contents, 1)
+  return StringReader(contents, 1)
 end
 
 function StringReader:read(): string?
@@ -240,7 +240,7 @@ function StringReader:close()
 end
 
 function writer(): StringWriter
-  return new_string_builder()
+  return StringWriter()
 end
 
 function StringWriter:write(data: string)
@@ -296,7 +296,7 @@ function format(format_string: string, ...: value): string
   local captured = FORMAT_PATTERN:match(format_string)
   if captured == nil then raise "invalid conversion to 'format'" end
   local plan = captured as FormatPlan
-  local builder = new_string_builder()
+  local builder = StringWriter()
   local argument = 1
   while argument <= #plan.partials do
     if argument > #... then
@@ -312,7 +312,7 @@ end
 
 function pack(format_string: string, ...: value): string
   local state = new_pack_state(format_string)
-  local builder = new_string_builder()
+  local builder = StringWriter()
   local arguments: {value} = {...}
   local argument = 0
 
@@ -565,9 +565,12 @@ function compile_regex(expression: string): Regex
       "compiled regular expression exceeds the pattern-size limit",
       expression, parsed.root:position())
   end
-  return Regex.new(
-    expression, parsed.capture_count, pattern as peg.Pattern,
-    parsed.anchored_start)
+  return Regex {
+    expression = expression,
+    capture_count = parsed.capture_count,
+    pattern = pattern as peg.Pattern,
+    anchored_start = parsed.anchored_start
+  }
 end
 
 function Regex:source(): string
@@ -633,7 +636,7 @@ function Regex:gsub(subject: string,
 
   if limit <= 0 then return subject, 0 end
 
-  local builder = new_string_builder()
+  local builder = StringWriter()
   local search = 1
   local copied = 1
   local previous_end = 0
@@ -680,7 +683,7 @@ function Regex:gsub(subject: string,
 end
 
 function RegexMatch:span(): Span
-  return Span.new(self.matched_span.first, self.matched_span.last)
+  return Span(self.matched_span.first, self.matched_span.last)
 end
 
 function RegexMatch:group_count(): integer
@@ -693,7 +696,7 @@ function RegexMatch:group_span(index: integer): Span?
   end
   local span = self.groups[index] as Span
   if span.first == 0 and span.last == -1 then return nil end
-  return Span.new(span.first, span.last)
+  return Span(span.first, span.last)
 end
 
 function RegexMatch:whole(): string

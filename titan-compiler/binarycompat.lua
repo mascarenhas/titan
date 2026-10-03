@@ -69,6 +69,8 @@ local function nominal(owner)
     result.functions, result.methods = callables(owner.functions), callables(owner.methods)
     if owner._tag == "Type.Record" then
         result.fields = fields(owner.fields)
+        result.literal = not owner.custom_constructor
+            and #result.fields == owner.nfields
         return "records", result
     end
     assert(owner._tag == "Type.Union", "expected a nominal owner")
@@ -150,7 +152,9 @@ function binarycompat.requirements(modtype, registry, usage)
                     functions = selected(descriptor.functions, use.functions, "function"),
                     methods = selected(descriptor.methods, use.methods, "method"),
                 }
-                if category == "records" then entry.fields = descriptor.fields
+                if category == "records" then
+                    entry.fields = descriptor.fields
+                    if use.literal then entry.literal = true end
                 else
                     entry.variants = descriptor.variants
                     if use.closed then entry.nvariants = descriptor.nvariants end
@@ -243,7 +247,7 @@ end]],
             else
                 out[#out + 1] = "if type(actual" .. key .. ") ~= 'table' then fail(" .. literal(path) .. ") end"
                 local descriptor = expected[category][name]
-                for _, field in ipairs({ "fqtn", category == "records" and "fields" or "variants", "nvariants" }) do
+                for _, field in ipairs({ "fqtn", category == "records" and "fields" or "variants", "nvariants", "literal" }) do
                     if descriptor[field] ~= nil then
                         local access = key .. "[" .. literal(field) .. "]"
                         out[#out + 1] = "same(expected" .. access .. ", actual" .. access .. ", " .. literal(path .. "." .. field) .. ")"

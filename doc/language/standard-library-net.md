@@ -138,8 +138,8 @@ Immediate and asynchronous libuv failures raise the same provider-owned error
 record, re-exported through the transparent facade alias
 `async.OperationError`. Its fields are `code: integer`, `name: string`,
 `message: string`, and `operation: string`. Like every alias to a record with a
-public constructor, its nominal namespace also exposes
-`async.OperationError.new`; ordinary callers normally receive these values
+public constructor, it can be called directly as `async.OperationError(...)`
+(or explicitly through `async.OperationError.new`); ordinary callers normally receive these values
 from the operation that failed.
 
 DNS errors use libuv's `EAI_*` names. EOF is normal for both `read` and

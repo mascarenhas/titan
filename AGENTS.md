@@ -1111,7 +1111,16 @@ Every error label used by the grammar or lexer must appear in
 locations and other private state are installed and cleared transactionally.
 It consumes one complete program and rejects trailing text. Records still
 produce an adjacent synthesized `new` static marked `_record_constructor`;
-unions use `empty()` / `payload(T)` declarations and produce adjacent statics
+the checker removes that synthetic declaration when an explicit record static
+`new` replaces it. Calling a record namespace with positional, named, or string
+arguments lowers to `.new` through the ordinary member/call checker. An override
+has an arbitrary ordinary callable signature and visibility, and its record's
+raw `{ ... }` construction is defining-module-only even through source imports.
+Preserve `Type.Record.custom_constructor` across metadata/erasure/cache paths;
+only default constructors qualify for field-parameter bindings, native
+constructor allocation plans, and constant module initializers. Lua record
+namespace tables are callable only when `new` is public.
+Unions use `empty()` / `payload(T)` declarations and produce adjacent statics
 marked `_union_constructor`/`_union_variant`. Case arms use
 `when variant(binding) then` or `when empty() then` with ordinary full blocks.
 Record fields spell optional types as `field: T?`, never `field?: T`.

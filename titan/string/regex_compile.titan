@@ -175,14 +175,14 @@ local function regex_group_result(
     -- Source spans are one-based, including participating empty captures at
     -- (n, n - 1). Only (0, -1) is therefore impossible and can represent an
     -- unmatched capture without making the dense group array sparse.
-    return Span.new(0, -1)
+    return Span(0, -1)
   end
   if group_after_value == nil then
     raise "internal regular-expression group capture is invalid"
   end
   local group_first = first as integer
   local group_after = group_after_value as integer
-  return Span.new(group_first, group_after - 1)
+  return Span(group_first, group_after - 1)
 end
 
 local function regex_compile_node(node: RegexNode,
@@ -241,7 +241,7 @@ local function regex_compile_node(node: RegexNode,
           (RegexCompileState, boolean)
         if state then return state as RegexCompileState, false end
         local rules: {peg.Rule} = {}
-        return RegexCompileState.new(rules, 0), true
+        return RegexCompileState(rules, 0), true
       end)(state)
       shared.next_rule = shared.next_rule + 1
       local rule_name =
@@ -318,13 +318,28 @@ end
 local function parse_regex(expression: string): ParsedRegex
   local pieces: {RegexNode} = {}
   local alternatives: {RegexNode} = {}
-  local root_frame = RegexParseFrame.new(
-    0, 0, false, 1, 1, pieces, alternatives)
+  local root_frame = RegexParseFrame {
+    group_position = 0,
+    group_index = 0,
+    capturing = false,
+    alternation_position = 1,
+    branch_position = 1,
+    pieces = pieces,
+    alternatives = alternatives
+  }
   local frames: {RegexParseFrame} = {root_frame}
   local closed: {integer: boolean} = {}
   local nullable: {integer: boolean} = {}
-  local state = RegexParseState.new(
-    expression, frames, 1, 0, closed, nullable, false, false)
+  local state = RegexParseState {
+    source = expression,
+    frames = frames,
+    depth = 1,
+    capture_count = 0,
+    closed_groups = closed,
+    nullable_groups = nullable,
+    anchored_start = false,
+    anchored_end = false
+  }
 
   local result, raw_label, failure_position =
     REGEX_PARSER:match(expression, nil, state)

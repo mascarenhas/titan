@@ -166,12 +166,19 @@ eagerly expanded cyclic descriptor shells. Reflection's generic erasure remains
 visible: erased value leaves decode dynamically, with no specialization registry
 or implied proof from the result's outer nominal identity.
 
-Record decoding locates public static `new`, checks member names and presence,
-and constructs a fresh argument Array in the reflected parameter order. Missing
-nil-admitting fields remain nil. It keeps the declared arity separately and
+Record decoding locates public static `new` and verifies that it takes fixed
+parameters and returns exactly one value of the target record's nominal type.
+Absent constructors, input varargs, flexible results, optional results, and
+other result shapes raise `constructor_unavailable` before invocation. This
+accepts compatible custom overrides without bypassing their bodies or assuming
+that their parameters correspond to record fields.
+
+It checks member names and presence and constructs a fresh argument Array in
+the reflected parameter order. Missing nil-admitting arguments remain nil.
+It keeps the declared arity separately and
 calls `constructor.callable(...arguments[1, arity])`; ordinary `#arguments`
-would lose trailing optional nils. The ordinary constructor initializes const
-and mutable fields once. There is no partially initialized record, raw storage
+would lose trailing optional nils. The constructor initializes const and
+mutable fields once. There is no partially initialized record, raw storage
 write, or allocate-then-`RecordValue:set` stage.
 
 Union encoding emits the configured discriminator (default `tag`) followed by

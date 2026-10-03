@@ -383,6 +383,119 @@ assert(dotted.answer() == 42)
         assert.truthy(ok, output)
     end)
 
+    it("shares one custom record constructor across distinct contributors", function()
+        local folder = source_root .. "/customparts"
+        write_file(folder .. "/customparts.titan", [[
+calls: integer = 0
+
+function from_main(): integer
+    return Box(1).value
+end
+
+function constructor_from_main(): function(integer): Box
+    return Box.new
+end
+]])
+        write_file(folder .. "/a-record.titan", [[
+record Box
+    local value: integer
+end
+
+function Box:read(): integer
+    return self.value
+end
+]])
+        write_file(folder .. "/b-constructor.titan", [[
+function Box.new(input: integer): Box
+    calls = calls + 1
+    return {value = input + 10}
+end
+]])
+        write_file(folder .. "/c-caller.titan", [[
+function from_contributor(): integer
+    return Box{input = 2}.value
+end
+
+function constructor_from_contributor(): function(integer): Box
+    return Box.new
+end
+]])
+
+        compile("customparts")
+        for _, basename in ipairs({"a-record", "b-constructor", "c-caller"}) do
+            assert.is_nil(lfs.attributes(folder .. "/" .. basename .. ".c"))
+            assert.is_nil(lfs.attributes(folder .. "/" .. basename .. ".o"))
+        end
+        local script = string.format([[
+package.cpath = %q .. "/?.so;" .. package.cpath
+local folder = require "customparts"
+assert(folder.calls == 0)
+assert(folder.from_main() == 11)
+assert(folder.from_contributor() == 12)
+assert(folder.Box(3):read() == 13)
+assert(folder.calls == 3)
+local constructor = folder.constructor_from_main()
+assert(constructor == folder.constructor_from_contributor())
+assert(constructor == folder.Box.new)
+assert(constructor(4):read() == 14 and folder.calls == 4)
+]], workspace)
+        local ok, output = run({LUA, "-e", script}, workspace)
+        assert.truthy(ok, output)
+    end)
+
+    for _, mode in ipairs({"dynamic", "static"}) do
+        it("imports arbitrary custom constructor results from a " .. mode .. " provider", function()
+            local provider = "factory_api_" .. mode
+            local consumer = "factory_client_" .. mode
+            local provider_source = source_root .. "/" .. provider .. ".titan"
+            write_file(provider_source, [[
+record Factory
+    unused: integer
+end
+
+function Factory.new(text: string): (integer, string?, string)
+    return #text, nil, text
+end
+
+type Alias = Factory
+]])
+            compile(provider)
+            assert.truthy(os.remove(provider_source))
+            local unselected = workspace .. "/" .. provider ..
+                (mode == "dynamic" and ".a" or ".so")
+            assert.truthy(os.remove(unselected))
+            assert.is_nil(lfs.attributes(provider_source))
+            assert.is_nil(lfs.attributes(unselected))
+            write_file(source_root .. "/" .. consumer .. ".titan", string.format([[
+local provider = import %q
+
+function positional(): (integer, string?, string)
+    return provider.Factory("positional")
+end
+
+function named(): (integer, string?, string)
+    return provider.Alias{text = "named"}
+end
+
+function string_argument(): (integer, string?, string)
+    return provider.Factory "string"
+end
+]], provider))
+            compile(consumer)
+            local script = string.format([[
+package.cpath = %q .. "/?.so;" .. package.cpath
+local consumer = require %q
+for name, expected in pairs({positional = "positional", named = "named", string_argument = "string"}) do
+    local results = table.pack(consumer[name]())
+    assert(results.n == 3)
+    assert(results[1] == #expected and results[2] == nil and results[3] == expected)
+end
+]], workspace, consumer)
+            local ok, output = run({LUA, "-e", script}, workspace)
+            assert.truthy(ok, output)
+        end)
+    end
+
     it("uses a collision-free executable for a folder main", function()
         local folder = source_root .. "/programs/folderapp"
         write_file(folder .. "/folderapp.titan", [[

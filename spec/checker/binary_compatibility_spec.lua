@@ -103,7 +103,7 @@ describe("binary dependency usage", function()
         assert.equal("owner", tree._binary_modules.owner.name)
     end)
 
-    it("treats contextual record construction as a new reference", function()
+    it("tracks contextual record construction independently of new calls", function()
         local tree = check({
             provider = [[record Item number: integer end]],
             consumer = [[
@@ -111,7 +111,38 @@ describe("binary dependency usage", function()
                 function make(): p.Item return {number = 42} end
             ]],
         })
-        assert.is_true(tree._binary_usage.provider.records.Item.functions.new)
+        assert.is_true(tree._binary_usage.provider.records.Item.literal)
+        assert.same({}, tree._binary_usage.provider.records.Item.functions)
+    end)
+
+    it("requires default construction for direct and nested constant initializers", function()
+        for _, initializer in ipairs({
+            "item: p.Item = p.Item(42)",
+            "items: {p.Item} = {p.Item.new(42)}",
+            "record Wrapper item: p.Item end; item = Wrapper(p.Item{number = 42})",
+        }) do
+            local tree = check({
+                provider = [[record Item number: integer end]],
+                consumer = 'local p = import "provider"\n' .. initializer,
+            })
+            assert.is_true(tree._binary_usage.provider.records.Item.literal)
+            assert.same({new = true}, tree._binary_usage.provider.records.Item.functions)
+        end
+    end)
+
+    it("keeps ordinary calls independent of default construction authority", function()
+        local tree = check({
+            provider = [[record Item number: integer end]],
+            consumer = [[
+                local p = import "provider"
+                factory: function(): p.Item = function(): p.Item return p.Item(1) end
+                item: p.Item?
+                function make(): p.Item return p.Item.new(2) end
+                do item = p.Item{number = 3} end
+            ]],
+        })
+        assert.is_nil(tree._binary_usage.provider.records.Item.literal)
+        assert.same({new = true}, tree._binary_usage.provider.records.Item.functions)
     end)
 
     it("tracks concrete methods used only by implicit Interface conversion", function()
