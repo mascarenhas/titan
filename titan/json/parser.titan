@@ -22,16 +22,22 @@ local JSON_PATTERN: peg.Pattern? = nil
 
 local function ParseBudget:count_value(position: integer)
   if self.nodes >= self.settings.max_nodes then
-    raise ParseFailure(
-      "limit_exceeded", "JSON value count exceeds max_nodes", position)
+    raise ParseFailure {
+      code = "limit_exceeded",
+      message = "JSON value count exceeds max_nodes",
+      position = position
+    }
   end
   self.nodes = self.nodes + 1
 end
 
 local function ParseBudget:enter_container(position: integer)
   if self.depth >= self.settings.max_depth then
-    raise ParseFailure(
-      "limit_exceeded", "JSON container nesting exceeds max_depth", position)
+    raise ParseFailure {
+      code = "limit_exceeded",
+      message = "JSON container nesting exceeds max_depth",
+      position = position
+    }
   end
   self.depth = self.depth + 1
 end
@@ -66,7 +72,13 @@ end
 local function json_parse_array_seed(position_value: value): value
   local position: integer = position_value
   local elements: {Node} = {}
-  return Node("array", position, nil, elements, nil)
+  return Node {
+    kind = "array",
+    position = position,
+    scalar = nil,
+    elements = elements,
+    members = nil
+  }
 end
 
 local function json_parse_object_seed(position_value: value): value
@@ -74,7 +86,13 @@ local function json_parse_object_seed(position_value: value): value
   local members: {Member} = {}
   local names: {string: boolean} = {}
   local state = ObjectParseState(names, nil)
-  return Node("object", position, state, nil, members)
+  return Node {
+    kind = "object",
+    position = position,
+    scalar = state,
+    elements = nil,
+    members = members
+  }
 end
 
 local function Node:append_parse_element(child: Node)
@@ -93,8 +111,11 @@ local function Node:append_parse_object_node(child: Node)
   end
   local name: string = key.scalar
   if state.names[name] ~= nil then
-    raise ParseFailure(
-      "duplicate_key", "duplicate JSON object member", key.position)
+    raise ParseFailure {
+      code = "duplicate_key",
+      message = "duplicate JSON object member",
+      position = key.position
+    }
   end
   state.names[name] = true
   local members: {Member} = self.members
@@ -122,17 +143,35 @@ end
 
 local function json_parse_true(position_value: value): value
   local position: integer = position_value
-  return Node("boolean", position, true, nil, nil)
+  return Node {
+    kind = "boolean",
+    position = position,
+    scalar = true,
+    elements = nil,
+    members = nil
+  }
 end
 
 local function json_parse_false(position_value: value): value
   local position: integer = position_value
-  return Node("boolean", position, false, nil, nil)
+  return Node {
+    kind = "boolean",
+    position = position,
+    scalar = false,
+    elements = nil,
+    members = nil
+  }
 end
 
 local function json_parse_null(position_value: value): value
   local position: integer = position_value
-  return Node("null", position, nil, nil, nil)
+  return Node {
+    kind = "null",
+    position = position,
+    scalar = nil,
+    elements = nil,
+    members = nil
+  }
 end
 
 local function json_parse_number(
@@ -140,7 +179,13 @@ local function json_parse_number(
   local first: integer = first_value
   local after: integer = after_value
   -- Defer copying and numeric conversion until the requested type is known.
-  return Node("number", first, after, nil, nil)
+  return Node {
+    kind = "number",
+    position = first,
+    scalar = after,
+    elements = nil,
+    members = nil
+  }
 end
 
 local function json_parse_byte(source: string, position: integer): integer
@@ -218,22 +263,29 @@ local function json_parse_string(
           if cursor + 5 >= closing or
               json_parse_byte(source, cursor) ~= 92 or
               json_parse_byte(source, cursor + 1) ~= 117 then
-            raise ParseFailure(
-              "invalid_surrogate", "expected a low surrogate escape",
-              escape_position)
+            raise ParseFailure {
+              code = "invalid_surrogate",
+              message = "expected a low surrogate escape",
+              position = escape_position
+            }
           end
           local low = json_parse_hex_quad(source, cursor + 2)
           if low < 0xDC00 or low > 0xDFFF then
-            raise ParseFailure(
-              "invalid_surrogate", "expected a low surrogate escape", cursor)
+            raise ParseFailure {
+              code = "invalid_surrogate",
+              message = "expected a low surrogate escape",
+              position = cursor
+            }
           end
           codepoint = 0x10000 + (codepoint - 0xD800) * 0x400 +
                       low - 0xDC00
           cursor = cursor + 6
         elseif codepoint >= 0xDC00 and codepoint <= 0xDFFF then
-          raise ParseFailure(
-            "invalid_surrogate", "unexpected low surrogate escape",
-            escape_position)
+          raise ParseFailure {
+            code = "invalid_surrogate",
+            message = "unexpected low surrogate escape",
+            position = escape_position
+          }
         end
         output:write(json_parse_utf8(codepoint))
       end
@@ -243,7 +295,13 @@ local function json_parse_string(
   if plain_start < closing then
     output:write(string.sub(source, plain_start, closing - 1))
   end
-  return Node("string", first, output:drain(), nil, nil)
+  return Node {
+    kind = "string",
+    position = first,
+    scalar = output:drain(),
+    elements = nil,
+    members = nil
+  }
 end
 
 local function json_parse_message(code: string): string
@@ -380,7 +438,7 @@ local function build_json_pattern(): peg.Pattern
 end
 
 local function parse_document(source: string, settings: Settings): Node
-  local budget = ParseBudget(source, settings, 0, 0)
+  local budget = ParseBudget { source = source, settings = settings, nodes = 0, depth = 0 }
   local result: value, label: value, position: value =
     JSON_PATTERN:match(source, 1, budget)
   if result == nil then

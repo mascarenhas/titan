@@ -185,11 +185,15 @@ local function stat_result(task: Task, owner: uv_fs_t, result: integer,
     if file_type == ffi.S_IFLNK then return "symlink" end
     return "other"
   end)(file_type)
-  return FsStatResult(statbuf.st_size, kind, mode,
-                          statbuf.st_dev as foreign lua_Integer,
-                          statbuf.st_ino as foreign lua_Integer,
-                          statbuf.st_mtim.tv_sec,
-                          statbuf.st_mtim.tv_nsec)
+  return FsStatResult {
+    size = statbuf.st_size,
+    kind = kind,
+    mode = mode,
+    device = statbuf.st_dev as foreign lua_Integer,
+    inode = statbuf.st_ino as foreign lua_Integer,
+    modified_seconds = statbuf.st_mtim.tv_sec,
+    modified_nanoseconds = statbuf.st_mtim.tv_nsec,
+  }
 end
 
 local function list_result(task: Task, owner: uv_fs_t,

@@ -155,8 +155,13 @@ parenthesize a call when one result is intended.
 
 Prefer positional calls for short functions whose operands explain
 themselves. Use declaration-based named calls when several same-typed
-arguments are easy to transpose or when the names carry real meaning. Named
-calls are unavailable through arbitrary function values and for variadic
+arguments are easy to transpose or when the names carry real meaning. Apply
+this to record constructors as well: name long state-initialization lists,
+adjacent boolean flags, and runs of zero, nil, or empty-container placeholders.
+Use the selected `new` declaration's parameter names, which may differ from
+record fields for an override. Preserve expression evaluation order and any
+final multi-result adjustment when converting an existing call. Named calls
+are unavailable through arbitrary function values and for variadic
 functions, so do not make readability depend on names that disappear at the
 callable boundary.
 

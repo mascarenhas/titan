@@ -212,7 +212,11 @@ local function SignalWaitCall:dispatch(task: Task): Immediate?
   catch
     fail_task_at_callback_boundary(task, error, traceback)
   end
-  local owner = uv_signal_t(foreign uv_signal_t.new(), callback, 0)
+  local owner = uv_signal_t {
+    handle = foreign uv_signal_t.new(),
+    callback = callback,
+    root_index = 0,
+  }
   local native = owner.handle
   owner.root_index = root_handle(runtime, owner)
   local status = ffi.uv_signal_init(runtime.loop, native)

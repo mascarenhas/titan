@@ -318,13 +318,28 @@ end
 local function parse_regex(expression: string): ParsedRegex
   local pieces: {RegexNode} = {}
   local alternatives: {RegexNode} = {}
-  local root_frame = RegexParseFrame(
-    0, 0, false, 1, 1, pieces, alternatives)
+  local root_frame = RegexParseFrame {
+    group_position = 0,
+    group_index = 0,
+    capturing = false,
+    alternation_position = 1,
+    branch_position = 1,
+    pieces = pieces,
+    alternatives = alternatives
+  }
   local frames: {RegexParseFrame} = {root_frame}
   local closed: {integer: boolean} = {}
   local nullable: {integer: boolean} = {}
-  local state = RegexParseState(
-    expression, frames, 1, 0, closed, nullable, false, false)
+  local state = RegexParseState {
+    source = expression,
+    frames = frames,
+    depth = 1,
+    capture_count = 0,
+    closed_groups = closed,
+    nullable_groups = nullable,
+    anchored_start = false,
+    anchored_end = false
+  }
 
   local result, raw_label, failure_position =
     REGEX_PARSER:match(expression, nil, state)

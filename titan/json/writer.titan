@@ -300,7 +300,13 @@ end
 local function encode_value(subject: value, settings: Settings): string
   local output = string.writer()
   defer output:close()
-  local encoder = Encoder(settings, output, {}, 0, 0)
+  local encoder = Encoder {
+    settings = settings,
+    output = output,
+    active = {},
+    bytes = 0,
+    nodes = 0
+  }
   encoder:visit(subject, root_path(), 0)
   return output:drain()
 end

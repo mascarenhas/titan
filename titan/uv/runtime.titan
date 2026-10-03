@@ -169,17 +169,21 @@ end
 local function make_error(code: integer,
                           operation: string): OperationError
   local status = code as foreign int
-  return OperationError(code, ffi.uv_err_name(status) as string,
-                            ffi.uv_strerror(status) as string, operation)
+  return OperationError {
+    code = code,
+    name = ffi.uv_err_name(status) as string,
+    message = ffi.uv_strerror(status) as string,
+    operation = operation,
+  }
 end
 
 local function immediate_ok(payload: value): Immediate
-  return Immediate(false, payload)
+  return Immediate { failed = false, payload = payload }
 end
 
 local function immediate_error(code: integer,
                                operation: string): Immediate
-  return Immediate(true, make_error(code, operation))
+  return Immediate { failed = true, payload = make_error(code, operation) }
 end
 
 local function check_status(status: integer, operation: string)
@@ -394,7 +398,7 @@ local function begin_close(runtime: Runtime, handle: foreign *uv_handle_t,
     unroot_handle(runtime, owner.root_index)
     completion()
   end
-  local owner = CloseOwner(0, callback)
+  local owner = CloseOwner { root_index = 0, callback = callback }
   owner.root_index = root_handle(runtime, owner)
   if old_root_index > 0 then unroot_handle(runtime, old_root_index) end
   ffi.uv_handle_set_data(handle, owner as foreign *void)
@@ -425,15 +429,19 @@ local function HandleCloseCall:dispatch(task: Task): Immediate?
                   self.root_index, task, nil) then
     return nil
   end
-  return Immediate(false, nil)
+  return Immediate { failed = false, payload = nil }
 end
 
 local function wait_handle_close(runtime: Runtime,
                                  handle: foreign *uv_handle_t,
                                  keepalive: value,
                                  root_index: integer)
-  await(Call.handle_close(HandleCloseCall(
-      runtime, handle, keepalive, root_index)))
+  await(Call.handle_close(HandleCloseCall {
+    runtime = runtime,
+    handle = handle,
+    keepalive = keepalive,
+    root_index = root_index,
+  }))
 end
 
 local function walk_callback(owner: WalkOwner,

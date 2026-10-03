@@ -290,8 +290,12 @@ end
 function reader_writer_channel(size: integer?):
     (ChannelReader, ChannelWriter)
   local send, receive, close = channel<|string|>(size)
-  return ChannelReader(receive, close, nil, false),
-         ChannelWriter(send, close)
+  return ChannelReader {
+    receive = receive,
+    close_channel = close,
+    excess = nil,
+    closed = false,
+  }, ChannelWriter(send, close)
 end
 
 -- The Runtime never runs two Tasks reentrantly, so a named operand equal to

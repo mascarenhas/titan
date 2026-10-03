@@ -211,7 +211,16 @@ local function native_string(pointer: foreign const *char): string
 end
 
 local function event(kind: integer, text: string): Event
-  return Event(kind, text, 0, 0, 0, 0, false, false)
+  return Event {
+    kind = kind,
+    text = text,
+    method = 0,
+    status = 0,
+    major = 0,
+    minor = 0,
+    keep_alive = false,
+    upgrade = false,
+  }
 end
 
 local function callback_failure(parser: Parser,

@@ -103,8 +103,12 @@ end
 
 local function checked_text(text: string, operation: string): string
   if ffi.strlen(text) ~= (#text as foreign size_t) then
-    raise Error(0, "INVALID_TEXT",
-                    "text must not contain an embedded NUL", operation)
+    raise Error {
+      code = 0,
+      name = "INVALID_TEXT",
+      message = "text must not contain an embedded NUL",
+      operation = operation,
+    }
   end
   return text
 end
@@ -137,12 +141,26 @@ local function openssl_error(operation: string,
   if packed ~= 0 then
     local reason = ffi.ERR_reason_error_string(packed)
     if reason then
-      return Error(packed as integer, "OPENSSL",
-                       reason as string, operation)
+      return Error {
+        code = packed as integer,
+        name = "OPENSSL",
+        message = reason as string,
+        operation = operation,
+      }
     end
-    return Error(packed as integer, "OPENSSL", fallback, operation)
+    return Error {
+      code = packed as integer,
+      name = "OPENSSL",
+      message = fallback,
+      operation = operation,
+    }
   end
-  return Error(0, "OPENSSL", fallback, operation)
+  return Error {
+    code = 0,
+    name = "OPENSSL",
+    message = fallback,
+    operation = operation,
+  }
 end
 
 local function ssl_error_name(code: integer): string
@@ -179,14 +197,22 @@ local function ssl_error_name(code: integer): string
 end
 
 local function ssl_error(code: integer, operation: string): Error
-  return Error(code, ssl_error_name(code),
-                   error_reason("TLS operation failed"), operation)
+  return Error {
+    code = code,
+    name = ssl_error_name(code),
+    message = error_reason("TLS operation failed"),
+    operation = operation,
+  }
 end
 
 local function truncated_eof_error(code: integer,
                                    operation: string): Error
-  return Error(code, "TLS_TRUNCATED_EOF",
-                   "TLS transport closed without close_notify", operation)
+  return Error {
+    code = code,
+    name = "TLS_TRUNCATED_EOF",
+    message = "TLS transport closed without close_notify",
+    operation = operation,
+  }
 end
 
 local function operation_error(connection: Connection, code: integer,
@@ -205,8 +231,12 @@ local function verify_error(code: integer): Error
   local reason = ffi.X509_verify_cert_error_string(
       code as foreign long)
   if reason then message = reason as string end
-  return Error(code, "CERTIFICATE_VERIFY_FAILED", message,
-                   "ssl.handshake.verify")
+  return Error {
+    code = code,
+    name = "CERTIFICATE_VERIFY_FAILED",
+    message = message,
+    operation = "ssl.handshake.verify",
+  }
 end
 
 local function bytes_string(bytes: foreign const *char,
@@ -356,9 +386,12 @@ local function want_retry(connection: Connection, code: integer,
     return true
   elseif code == ffi.SSL_ERROR_WANT_WRITE then
     if drained == 0 then
-      raise Error(code, "SSL_ERROR_WANT_WRITE",
-                      "TLS requested output progress without producing output",
-                      operation)
+      raise Error {
+        code = code,
+        name = "SSL_ERROR_WANT_WRITE",
+        message = "TLS requested output progress without producing output",
+        operation = operation,
+      }
     end
     return true
   end
@@ -514,9 +547,12 @@ local function write_piece_locked(connection: Connection, piece: string)
         #piece as foreign size_t, lengths)
     if result == 1 then
       if (lengths[0] as integer) ~= #piece then
-        raise Error(0, "TLS_PARTIAL_WRITE",
-                        "OpenSSL accepted only part of a TLS write",
-                        "ssl.write")
+        raise Error {
+          code = 0,
+          name = "TLS_PARTIAL_WRITE",
+          message = "OpenSSL accepted only part of a TLS write",
+          operation = "ssl.write",
+        }
       end
       drain_output(connection)
       return
@@ -585,8 +621,19 @@ local function new_connection(transport: net.Connection,
   else
     ffi.SSL_set_accept_state(handle)
   end
-  return Connection(transport, handle, input, output, client,
-                        STATE_HANDSHAKING, false, false, false, false, "")
+  return Connection {
+    transport = transport,
+    handle = handle,
+    input = input,
+    output = output,
+    client = client,
+    state = STATE_HANDSHAKING,
+    busy = false,
+    transport_eof = false,
+    transport_shutdown = false,
+    transport_closed = false,
+    excess = "",
+  }
 end
 
 -- SSL_CTX_set_min_proto_version is a public function-like macro unavailable
@@ -624,8 +671,12 @@ end
 local function pem_memory_bio(data: string,
                               operation: string): foreign *BIO
   if #data > MAX_PEM_BYTES then
-    raise Error(0, "PEM_TOO_LARGE",
-                    "PEM data is too large for OpenSSL", operation)
+    raise Error {
+      code = 0,
+      name = "PEM_TOO_LARGE",
+      message = "PEM data is too large for OpenSSL",
+      operation = operation,
+    }
   end
 
   local source = data as foreign const *char
@@ -704,14 +755,24 @@ local function read_pem_block(bio: foreign *BIO,
 
   if not names[0] or not headers[0] or not data[0] or lengths[0] < 0 then
     free_pem_buffers(names[0], headers[0], data[0])
-    raise Error(0, "OPENSSL", "OpenSSL returned an invalid PEM block",
-                    operation)
+    raise Error {
+      code = 0,
+      name = "OPENSSL",
+      message = "OpenSSL returned an invalid PEM block",
+      operation = operation,
+    }
   end
   do
     local name = (names[0] as foreign *char) as string
     local header = (headers[0] as foreign *char) as string
-    return PemBlock(names[0], headers[0], data[0], name, header,
-                        lengths[0] as integer)
+    return PemBlock {
+      name_buffer = names[0],
+      header_buffer = headers[0],
+      data_buffer = data[0],
+      name = name,
+      header = header,
+      length = lengths[0] as integer,
+    }
   catch
     local failure = error
     free_pem_buffers(names[0], headers[0], data[0])
@@ -751,17 +812,24 @@ local function decode_certificate(block: PemBlock,
     (block.data_buffer as foreign const *unsigned char) + block.length
   if (cursors[0] as foreign const *unsigned char) ~= expected then
     ffi.X509_free(certificate)
-    raise Error(0, "OPENSSL",
-                    "certificate PEM block has trailing DER data", operation)
+    raise Error {
+      code = 0,
+      name = "OPENSSL",
+      message = "certificate PEM block has trailing DER data",
+      operation = operation,
+    }
   end
   return certificate
 end
 
 local function decode_private_key(block: PemBlock): foreign *EVP_PKEY
   if #block.header > 0 then
-    raise Error(0, "OPENSSL",
-                    "encrypted private keys are not supported",
-                    "ssl.server.private-key")
+    raise Error {
+      code = 0,
+      name = "OPENSSL",
+      message = "encrypted private keys are not supported",
+      operation = "ssl.server.private-key",
+    }
   end
   local cursors = foreign VoidPointer.new_array(1)
   cursors[0] = block.data_buffer
@@ -777,9 +845,12 @@ local function decode_private_key(block: PemBlock): foreign *EVP_PKEY
     (block.data_buffer as foreign const *unsigned char) + block.length
   if (cursors[0] as foreign const *unsigned char) ~= expected then
     ffi.EVP_PKEY_free(private_key)
-    raise Error(0, "OPENSSL",
-                    "private-key PEM block has trailing DER data",
-                    "ssl.server.private-key")
+    raise Error {
+      code = 0,
+      name = "OPENSSL",
+      message = "private-key PEM block has trailing DER data",
+      operation = "ssl.server.private-key",
+    }
   end
   return private_key
 end
@@ -800,35 +871,39 @@ local function next_certificate(bio: foreign *BIO,
                                 operation: string): CertificateResult
   while true do
     local block? = read_pem_block(bio, operation)
-    if not block then return CertificateResult(nil, false) end
+    if not block then return CertificateResult { pointer = nil, found = false } end
     local exact = block as PemBlock
     if certificate_pem_name(exact.name) then
-      return CertificateResult(
-          decode_certificate_block(exact, operation), true)
+      return CertificateResult {
+        pointer = decode_certificate_block(exact, operation),
+        found = true,
+      }
     end
     free_pem_block(exact)
   end
-  return CertificateResult(nil, false)
+  return CertificateResult { pointer = nil, found = false }
 end
 
 local function next_private_key(
     bio: foreign *BIO): PrivateKeyResult
   while true do
     local block? = read_pem_block(bio, "ssl.server.private-key")
-    if not block then return PrivateKeyResult(nil, false) end
+    if not block then return PrivateKeyResult { pointer = nil, found = false } end
     local exact = block as PemBlock
     if exact.name == "ENCRYPTED PRIVATE KEY" then
       free_pem_block(exact)
-      raise Error(0, "OPENSSL",
-                      "encrypted private keys are not supported",
-                      "ssl.server.private-key")
+      raise Error {
+        code = 0,
+        name = "OPENSSL",
+        message = "encrypted private keys are not supported",
+        operation = "ssl.server.private-key",
+      }
     elseif private_key_pem_name(exact.name) then
-      return PrivateKeyResult(
-          decode_private_key_block(exact), true)
+      return PrivateKeyResult { pointer = decode_private_key_block(exact), found = true }
     end
     free_pem_block(exact)
   end
-  return PrivateKeyResult(nil, false)
+  return PrivateKeyResult { pointer = nil, found = false }
 end
 
 local function load_ca_certificates(context: foreign *SSL_CTX,
@@ -863,8 +938,12 @@ local function load_ca_certificates(context: foreign *SSL_CTX,
     certificates = certificates + 1
   end
   if certificates == 0 then
-    raise Error(0, "OPENSSL", "PEM data contains no certificates",
-                    "ssl.client.trust")
+    raise Error {
+      code = 0,
+      name = "OPENSSL",
+      message = "PEM data contains no certificates",
+      operation = "ssl.client.trust",
+    }
   end
 end
 
@@ -883,8 +962,12 @@ end
 local function acquire_default_client_context(): foreign *SSL_CTX
   local context = default_client_context
   if not context then
-    raise Error(0, "OPENSSL", "default trust context is unavailable",
-                    "ssl.client.trust")
+    raise Error {
+      code = 0,
+      name = "OPENSSL",
+      message = "default trust context is unavailable",
+      operation = "ssl.client.trust",
+    }
   end
   ffi.ERR_clear_error()
   if ffi.SSL_CTX_up_ref(context) ~= 1 then
@@ -930,8 +1013,12 @@ local function load_certificate_chain(context: foreign *SSL_CTX,
     certificates = certificates + 1
   end
   if certificates == 0 then
-    raise Error(0, "OPENSSL", "PEM data contains no certificates",
-                    "ssl.server.certificate")
+    raise Error {
+      code = 0,
+      name = "OPENSSL",
+      message = "PEM data contains no certificates",
+      operation = "ssl.server.certificate",
+    }
   end
 end
 
@@ -940,9 +1027,12 @@ local function load_private_key(context: foreign *SSL_CTX, data: string)
   defer ffi.BIO_free(bio)
   local next_result = next_private_key(bio)
   if not next_result.found then
-    raise Error(0, "OPENSSL",
-                    "PEM data contains no unencrypted private key",
-                    "ssl.server.private-key")
+    raise Error {
+      code = 0,
+      name = "OPENSSL",
+      message = "PEM data contains no unencrypted private key",
+      operation = "ssl.server.private-key",
+    }
   end
   local private_key = next_result.pointer
   do
@@ -1096,7 +1186,12 @@ function listen(host: string, port: integer, certificate_file: string,
   local context = server_context(certificate_data, private_key_data)
   do
     local listener = net.listen(host, port, backlog)
-    return Server(listener, context, false, false)
+    return Server {
+      listener = listener,
+      context = context,
+      closed = false,
+      listener_closed = false,
+    }
   catch
     local failure = error
     ffi.SSL_CTX_free(context)

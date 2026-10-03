@@ -1,7 +1,12 @@
 local function check_no_nul(subject: string, operation: string)
   local position? = string.find(subject, "\0")
   if position ~= nil then
-    raise Error("embedded NUL is not permitted", nil, nil, operation)
+    raise Error {
+      message = "embedded NUL is not permitted",
+      code = nil,
+      extended_code = nil,
+      operation = operation
+    }
   end
 end
 
@@ -45,8 +50,12 @@ local function valid_text(subject: string): boolean
 end
 
 local function native_allocation_error(operation: string)
-  raise Error("out of memory allocating SQLite operation",
-                  ffi.SQLITE_NOMEM, ffi.SQLITE_NOMEM, operation)
+  raise Error {
+    message = "out of memory allocating SQLite operation",
+    code = ffi.SQLITE_NOMEM,
+    extended_code = ffi.SQLITE_NOMEM,
+    operation = operation
+  }
 end
 
 local function copy_input(packet: foreign *TitanSqlitePacket,
@@ -65,8 +74,12 @@ end
 
 local function unsupported_argument(index: integer, kind: string,
                                     operation: string)
-  raise Error("argument " .. index .. " has unsupported kind " .. kind,
-                  nil, nil, operation)
+  raise Error {
+    message = "argument " .. index .. " has unsupported kind " .. kind,
+    code = nil,
+    extended_code = nil,
+    operation = operation
+  }
 end
 
 local function bind_argument(cell: foreign *TitanSqliteCell,
@@ -83,16 +96,24 @@ local function bind_argument(cell: foreign *TitanSqliteCell,
     cell.integer_value = number
   when is_float(number) then
     if number ~= number or number == math.huge or number == -math.huge then
-      raise Error("argument " .. index .. " must be finite",
-                      nil, nil, operation)
+      raise Error {
+        message = "argument " .. index .. " must be finite",
+        code = nil,
+        extended_code = nil,
+        operation = operation
+      }
     end
     cell.kind = ffi.SQLITE_FLOAT
     cell.float_value = number
   when is_string(bytes) then
     if not valid_text(bytes) then
-      raise Error("argument " .. index ..
-                      " must be UTF-8 TEXT without NUL; use Blob for bytes",
-                      nil, nil, operation)
+      raise Error {
+        message = "argument " .. index ..
+          " must be UTF-8 TEXT without NUL; use Blob for bytes",
+        code = nil,
+        extended_code = nil,
+        operation = operation
+      }
     end
     cell.kind = ffi.SQLITE_TEXT
     copy_argument_bytes(cell, bytes, operation)
@@ -123,8 +144,13 @@ end
 local function Statement:bind(packet: foreign *TitanSqlitePacket,
                               operation: string, ...: value)
   if #... ~= self.parameter_count then
-    raise Error("expected " .. self.parameter_count .. " arguments, got " ..
-                    #..., nil, nil, operation)
+    raise Error {
+      message = "expected " .. self.parameter_count .. " arguments, got " ..
+        #...,
+      code = nil,
+      extended_code = nil,
+      operation = operation
+    }
   end
   packet.argument_count = #...
   if #... <= 0 then return end

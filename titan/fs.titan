@@ -173,7 +173,7 @@ function File:close()
   self.excess = ""
   if (self.handle as integer) < 0 then return end
   local descriptor = self.handle
-  local operation = uv.FsCloseCall(descriptor, false)
+  local operation = uv.FsCloseCall { file = descriptor, accepted = false }
   self.handle = -1 as foreign uv_file
   do
     uv.fs_close(operation)
@@ -217,8 +217,15 @@ function stat(path: string): Stat?
     local size, kind, mode, device, inode,
       modified_seconds, modified_nanoseconds =
       uv.fs_stat(path)
-    return Stat(size, kind, mode, device, inode,
-                    modified_seconds, modified_nanoseconds)
+    return Stat {
+      size = size,
+      kind = kind,
+      mode = mode,
+      device = device,
+      inode = inode,
+      modified_seconds = modified_seconds,
+      modified_nanoseconds = modified_nanoseconds,
+    }
   catch
     if missing_path(error) then return nil end
     raise
@@ -230,8 +237,15 @@ function lstat(path: string): Stat?
     local size, kind, mode, device, inode,
       modified_seconds, modified_nanoseconds =
       uv.fs_lstat(path)
-    return Stat(size, kind, mode, device, inode,
-                    modified_seconds, modified_nanoseconds)
+    return Stat {
+      size = size,
+      kind = kind,
+      mode = mode,
+      device = device,
+      inode = inode,
+      modified_seconds = modified_seconds,
+      modified_nanoseconds = modified_nanoseconds,
+    }
   catch
     if missing_path(error) then return nil end
     raise
@@ -315,8 +329,13 @@ function realpath(path: string): string
   local callback = function (request: RealpathRequest)
     request:finish()
   end
-  local request = RealpathRequest(
-      foreign uv_fs_t.new(), callback, task, false, nil)
+  local request = RealpathRequest {
+    handle = foreign uv_fs_t.new(),
+    callback = callback,
+    waiter = task,
+    failed = false,
+    payload = nil,
+  }
   local native = request.handle
   local cancel_action = function ()
     if request.waiter == task then request.waiter = nil end
@@ -441,7 +460,12 @@ local function Watcher:receive_event(
   local copied: string? = nil
   if filename then copied = filename as string end
   self.notifications[#self.notifications + 1] =
-    WatcherNotification(registration, copied, events, status)
+    WatcherNotification {
+      registration = registration,
+      filename = copied,
+      events = events,
+      status = status,
+    }
   self:wake_from_callback()
 end
 
@@ -505,7 +529,15 @@ end
 function watcher(): Watcher
   local task = uv.running_task()
   uv.accepting_work(task.runtime, "create a filesystem watcher")
-  return Watcher(task.runtime, {}, {}, {}, nil, nil, WATCHER_IDLE)
+  return Watcher {
+    runtime = task.runtime,
+    registrations = {},
+    paths = {},
+    notifications = {},
+    waiter = nil,
+    resume_token = nil,
+    operation_state = WATCHER_IDLE,
+  }
 end
 
 function Watcher:watch(path: string)

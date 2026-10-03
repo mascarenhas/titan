@@ -316,12 +316,24 @@ local function validate_tcp(tcp: uv_tcp_t, operation: string)
 end
 
 local function new_connection_role(): TcpRole
-  return TcpRole.connection(TcpConnectionState(
-      nil, {}, 1, false, nil, nil))
+  return TcpRole.connection(TcpConnectionState {
+    reader = nil,
+    chunks = {},
+    chunk_head = 1,
+    eof = false,
+    read_error = nil,
+    buffer = nil,
+  })
 end
 
 local function new_server_role(): TcpRole
-  return TcpRole.server(TcpServerState({}, 1, 0, nil, nil))
+  return TcpRole.server(TcpServerState {
+    accepted = {},
+    accepted_head = 1,
+    accepted_tail = 0,
+    waiter = nil,
+    error = nil,
+  })
 end
 
 local function new_tcp(runtime: Runtime, role: TcpRole): uv_tcp_t
@@ -565,11 +577,11 @@ local function TcpReadCall:dispatch(task: Task): Immediate?
     return immediate_ok(take_chunk(tcp))
   end
   if state.read_error ~= nil then
-    return Immediate(true, state.read_error)
+    return Immediate { failed = true, payload = state.read_error }
   end
   if state.eof then return immediate_ok(nil) end
   if state.reader then
-    return Immediate(true, "Connection already has a waiting reader")
+    return Immediate { failed = true, payload = "Connection already has a waiting reader" }
   end
   local cancel_action: CancelAction = function ()
     if state.reader == task then
@@ -616,13 +628,13 @@ local function TcpAcceptCall:dispatch(task: Task): Immediate?
   local tcp = self.tcp
   local state = server_state(tcp)
   if state.error ~= nil then
-    return Immediate(true, state.error)
+    return Immediate { failed = true, payload = state.error }
   end
   if state.accepted_head <= state.accepted_tail then
     return immediate_ok(take_accepted(tcp))
   end
   if state.waiter then
-    return Immediate(true, "Server already has a waiting accept Task")
+    return Immediate { failed = true, payload = "Server already has a waiting accept Task" }
   end
 
   local cancel_action: CancelAction = function ()

@@ -1422,7 +1422,7 @@ done
             "cancel_action: CancelAction?)",
             "local function run_internal(func: function (): (value)): " ..
             "Task<|value, value|>",
-            "Task<|value, value|>(",
+            "Task<|value, value|> {",
         }) do
             assert.truthy(task:find(contract, 1, true), contract)
         end

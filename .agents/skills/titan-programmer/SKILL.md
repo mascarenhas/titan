@@ -511,6 +511,15 @@ function bounded_example(): integer
 end
 ```
 
+Use named calls when positional arguments are ambiguous, including record
+constructors with many parameters, repeated same-typed values, adjacent boolean
+flags, or runs of `0`, `nil`, and empty containers. Read the declaration and use
+its actual parameter names; an overridden `new` may have parameters unrelated
+to the record's fields. Keep short, self-explanatory calls positional, such as
+`Point(x, y)` or `Error(message)`. When converting a call, preserve the written
+evaluation order and expression-list adjustment: a final call or spread that
+supplies several parameters cannot simply become one named entry.
+
 Explicit named expressions evaluate in written order, then map to formal
 positions. Omitted names receive nil and must accept it. Function values,
 lambdas, bound methods, and variadic functions are positional-only. Direct
@@ -879,7 +888,8 @@ with its ordinary visibility, argument adjustment, and complete result list.
 `Label "text"` also selects `Label.new "text"`. Imported record names and
 aliases behave the same way. Keep `.new` to take the function as a value or
 supply its own explicit generic arguments. A bare record namespace is still
-not a first-class Titan value.
+not a first-class Titan value. Choose `Record { parameter = value, ... }`
+for ambiguous constructor arguments using the named-call guidance above.
 
 By default `new` is synthesized with fields in declaration order. It is private
 for a local record or a record with private fields. A context-typed constructor

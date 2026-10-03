@@ -56,8 +56,15 @@ local function read_request(parser: Parser,
   if not ensure_parser_headers(parser) then return nil end
   if #parser.method_text == 0 then raise "HTTP request has no method" end
   local parsed_url = request_url(parser, encrypted)
-  return Request(parser.method_text, parser.target_text, parsed_url,
-                     "HTTP/1.1", parser.parsed_headers, parser, false)
+  return Request {
+    method = parser.method_text,
+    target = parser.target_text,
+    url = parsed_url,
+    version = "HTTP/1.1",
+    headers = parser.parsed_headers,
+    parser = parser,
+    ended = false,
+  }
 end
 
 function Request:read(): string?
@@ -121,10 +128,21 @@ end
 
 local function new_response(connection: io.ReaderWriterCloser,
                             request_value: Request): Response
-  return Response(connection, request_value.method,
-                      request_value.parser.keep_alive,
-                      headers(nil), 200, "OK", false, false, true,
-                      nil, 0, request_value.parser.keep_alive, false)
+  return Response {
+    connection = connection,
+    request_method = request_value.method,
+    request_keep_alive = request_value.parser.keep_alive,
+    response_headers = headers(nil),
+    status_number = 200,
+    reason_text = "OK",
+    headers_sent = false,
+    chunked = false,
+    body_allowed = true,
+    content_length = nil,
+    written = 0,
+    keep_alive = request_value.parser.keep_alive,
+    closed = false,
+  }
 end
 
 function Response:set_status(status: integer, reason: string?)
@@ -362,8 +380,15 @@ function listen(host: string, handler: Handler, port: integer?,
   end
   local actual_port = 80
   if port then actual_port = port as integer end
-  return Server(net.listen(host, actual_port, backlog), nil,
-                    false, handler, actual_idle_timeout, false, false)
+  return Server {
+    plain = net.listen(host, actual_port, backlog),
+    secure = nil,
+    encrypted = false,
+    handler = handler,
+    idle_timeout_ms = actual_idle_timeout,
+    closed = false,
+    listener_closed = false,
+  }
 end
 
 function listen_tls(host: string, certificate_file: string, handler: Handler,
@@ -376,10 +401,15 @@ function listen_tls(host: string, certificate_file: string, handler: Handler,
   end
   local actual_port = 443
   if port then actual_port = port as integer end
-  return Server(nil, ssl.listen(host, actual_port,
-                                   certificate_file, private_key_file,
-                                   backlog),
-                    true, handler, actual_idle_timeout, false, false)
+  return Server {
+    plain = nil,
+    secure = ssl.listen(host, actual_port, certificate_file, private_key_file, backlog),
+    encrypted = true,
+    handler = handler,
+    idle_timeout_ms = actual_idle_timeout,
+    closed = false,
+    listener_closed = false,
+  }
 end
 
 function Server:idle_timeout(timeout: integer?): integer

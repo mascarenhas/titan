@@ -290,13 +290,13 @@ local function StreamReadCall:dispatch(task: Task): Immediate?
   local chunk? = next_chunk(state)
   if chunk then return immediate_ok(chunk) end
   if state.read_error ~= nil then
-    return Immediate(true, state.read_error)
+    return Immediate { failed = true, payload = state.read_error }
   end
   if ffi.uv_is_closing(stream_handle(state)) ~= 0 then
     return immediate_ok(nil)
   end
   if state.waiter then
-    return Immediate(true, "stream already has a waiting reader")
+    return Immediate { failed = true, payload = "stream already has a waiting reader" }
   end
   local cancel_action: CancelAction = function ()
     if state.waiter == task then
@@ -316,7 +316,7 @@ end
 local function StreamWriteCall:dispatch(task: Task): Immediate?
   local state = self.stream
   if ffi.uv_is_closing(stream_handle(state)) ~= 0 then
-    return Immediate(true, "cannot write to a closed stream")
+    return Immediate { failed = true, payload = "cannot write to a closed stream" }
   end
   if #self.data == 0 then return immediate_ok(nil) end
   return submit_stream_write(
@@ -375,7 +375,7 @@ local function ProcessWaitCall:dispatch(task: Task): Immediate?
     return immediate_ok(state.result)
   end
   if state.waiter then
-    return Immediate(true, "Process already has a waiting Task")
+    return Immediate { failed = true, payload = "Process already has a waiting Task" }
   end
   local cancel_action: CancelAction = function ()
     if state.waiter == task then
@@ -927,7 +927,7 @@ local function new_process(runtime: Runtime): uv_process_t
     exit_callback = process_exit_callback,
     runtime = runtime,
     waiter = nil,
-    result = ProcessExitResult(0, 0),
+    result = ProcessExitResult { code = 0, signal_number = 0 },
     root_index = 0,
   }
 end

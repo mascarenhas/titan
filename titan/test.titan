@@ -108,7 +108,13 @@ local function runner_end()
 end
 
 local function runner_new_context(name: string): Context
-  return Context(name, {}, {}, true, true)
+  return Context {
+    full_name = name,
+    subtests = {},
+    cleanups = {},
+    subtests_open = true,
+    cleanups_open = true
+  }
 end
 
 local function runner_take_subtests(context: Context): {RegisteredTest}

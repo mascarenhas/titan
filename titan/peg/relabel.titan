@@ -580,10 +580,18 @@ local function _relabel_build_lexical(): RelabelLexical
       folded_class,
       _relabel_expect(literal("]"), "MisClose8")),
     _relabel_class_capture)
-  return RelabelLexical(
-    one, spacing, name, digits, number, arrow,
-    defined, quoted, class_pattern,
-    choice(sequence(capture(digits), spacing), name))
+  return RelabelLexical {
+    one = one,
+    spacing = spacing,
+    name = name,
+    digits = digits,
+    number = number,
+    arrow = arrow,
+    defined = defined,
+    quoted = quoted,
+    class_pattern = class_pattern,
+    label = choice(sequence(capture(digits), spacing), name)
+  }
 end
 
 local function _relabel_build_suffix_operation(

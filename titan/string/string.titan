@@ -565,9 +565,12 @@ function compile_regex(expression: string): Regex
       "compiled regular expression exceeds the pattern-size limit",
       expression, parsed.root:position())
   end
-  return Regex(
-    expression, parsed.capture_count, pattern as peg.Pattern,
-    parsed.anchored_start)
+  return Regex {
+    expression = expression,
+    capture_count = parsed.capture_count,
+    pattern = pattern as peg.Pattern,
+    anchored_start = parsed.anchored_start
+  }
 end
 
 function Regex:source(): string

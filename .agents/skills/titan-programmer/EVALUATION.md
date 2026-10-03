@@ -453,3 +453,17 @@ the distinction between Titan named calls and Lua's one-table brace argument.
 Require `Box<|integer|>(x)` to bind owner arguments and `.new<|U|>` for explicit
 callable-local generic arguments under the existing all-or-none inference rule.
 Compile the complete owner/importer examples with the current isolated toolchain.
+
+### R2 — choosing readable constructor calls (`titan-programmer` only)
+
+Give a fresh agent a short `Point(x: integer, y: integer)` constructor and a
+record constructor with two strings, three integer positions, and two boolean
+flags. Ask it to write call sites using both meaningful local variables and
+literal initial state, choosing the clearest syntax. Include an overridden
+`new` whose parameter names differ from the fields and a call whose arguments
+have side effects.
+
+Score whether it keeps the obvious coordinate pair concise, names ambiguous
+state and flag arguments, uses constructor parameter names rather than field
+names, and preserves evaluation order. A final multi-result argument requires
+preserving expression-list adjustment, not blindly mapping it to one name.
