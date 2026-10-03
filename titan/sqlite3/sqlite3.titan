@@ -1,5 +1,5 @@
 local async = import "async"
-local uv = import "uv.titan"
+local uv = import "uv"
 local reflect = import "reflect"
 local string = import "string"
 local math = import "math"
@@ -62,12 +62,35 @@ local function check_result(packet: foreign *TitanSqlitePacket,
   }
 end
 
+-- Cleanup work must finish even when its caller is already cancelled. The
+-- public request retains the packet until its terminal callback has returned.
+local function run_foreign_cleanup(worker: foreign function (*void): void,
+                                    packet: owned *TitanSqlitePacket)
+  local request = uv.work_t()
+  local result = async.await_cleanup<|nil, integer|>(function (resolve, reject, fatal)
+    local completed = function (_: uv.work_t, status: integer)
+      do
+        if status ~= 0 then reject(status) else resolve(nil) end
+      catch fatal(error, traceback); raise end
+    end
+    local status = uv.queue_work(async.current_loop(), request,
+                                worker, packet, completed, packet)
+    if status ~= 0 then reject(status) end
+  end)
+  case result
+  when error(status) then
+    raise async.OperationError(status, uv.err_name(status), uv.strerror(status),
+                               "async.run_foreign")
+  else
+  end
+end
+
 -- A packet is rooted by its suspended caller and this lexical cleanup. Raw
 -- pointers passed to run_foreign alone do not retain their pointees. SQLite
 -- resource retirement remains on a worker even during cancellation unwind.
-local function retire_packet(packet: foreign *TitanSqlitePacket)
+local function retire_packet(packet: owned *TitanSqlitePacket)
   if packet.owns_db ~= 0 or packet.owns_stmt ~= 0 or packet.needs_reset ~= 0 then
-    uv.run_foreign_cleanup(sqlite_retire_worker, packet)
+    run_foreign_cleanup(sqlite_retire_worker, packet)
   end
 end
 
@@ -168,7 +191,7 @@ function Connection:close()
   defer do
     if packet.db == nil then self.handle = nil end
   end
-  uv.run_foreign_cleanup(sqlite_close_worker, packet)
+  run_foreign_cleanup(sqlite_close_worker, packet)
   check_result(packet, "close")
 end
 
@@ -194,7 +217,7 @@ function Statement:close()
       self.connection.statements = self.connection.statements - 1
     end
   end
-  uv.run_foreign_cleanup(sqlite_finalize_worker, packet)
+  run_foreign_cleanup(sqlite_finalize_worker, packet)
   check_result(packet, "statement.close")
 end
 
@@ -341,6 +364,6 @@ function Cursor:close()
       self.statement.connection.active_statement = nil
     end
   end
-  uv.run_foreign_cleanup(sqlite_reset_worker, packet)
+  run_foreign_cleanup(sqlite_reset_worker, packet)
   check_result(packet, "cursor.close")
 end
