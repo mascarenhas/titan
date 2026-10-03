@@ -344,6 +344,7 @@ UV_TITAN_SOURCES := \
 	titan/uv/pipe_tty.titan \
 	titan/uv/platform_constants.titan \
 	titan/uv/process.titan \
+	titan/uv/startup.titan \
 	titan/uv/stream_ops.titan \
 	titan/uv/stream_owners.titan \
 	titan/uv/sync.titan \
@@ -417,7 +418,7 @@ stdlib_outputs = $(call stdlib_stem,$(1)).o $(call stdlib_stem,$(1)).c $(filter 
 STDLIB_MODULE_OBJECTS := $(foreach module,$(STDLIB_MODULES),$(call stdlib_stem,$(module)).o)
 STDLIB_IMPORTS_coroutine :=
 STDLIB_IMPORTS_uv := iteration
-STDLIB_IMPORTS_async := uv string
+STDLIB_IMPORTS_async := uv coroutine string
 STDLIB_IMPORTS_timer := uv
 STDLIB_IMPORTS_io := os string
 STDLIB_IMPORTS_fs := uv string
@@ -2144,6 +2145,7 @@ else
   STDLIB_OPENSSL_HEADER_DIRS = $(shell $(OPENSSL_PKG_CONFIG) --variable=includedir openssl 2>/dev/null)
 endif
 STDLIB_C_INPUTS_uv = $(UV_TITAN_HEADERS) $(foreach dir,$(STDLIB_UV_HEADER_DIRS),$(wildcard $(dir)/uv.h $(dir)/uv/*.h))
+STDLIB_C_INPUTS_async = titan/async_signal_platform.h
 STDLIB_C_INPUTS_fs = $(STDLIB_C_INPUTS_uv)
 STDLIB_C_INPUTS_peg = $(LPEGLABEL_HEADERS)
 STDLIB_C_INPUTS_string = $(STRING_TITAN_HEADERS)

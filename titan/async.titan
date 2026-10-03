@@ -1,13 +1,67 @@
-local uv = import "uv.titan"
-local string = import "string"
+foreign import "lua.h"
+foreign import "lauxlib.h"
+foreign import "titan/ffi.h"
+foreign import "unistd.h"
+foreign import "errno.h"
+local uv = import "titan.uv"
+local coroutine = import "titan.coroutine"
+local string = import "titan.string"
 
-type Error = uv.Error
-type OperationError = uv.OperationError
-type CancellationReason = uv.CancellationReason
-type TaskStatus = uv.TaskStatus
-type Task = uv.Task
-type ResumeToken = uv.ResumeToken
 type SuspendCancelAction = function (): ()
+
+local ASYNC_TAG: value = {}
+local active_runtime: Runtime? = nil
+local const WAIT_ORDINARY = 0
+local const WAIT_CANCELLABLE = 1
+local const WAIT_CLEANUP = 2
+local const WAIT_REGISTERING = 0
+local const WAIT_PENDING = 1
+local const WAIT_SETTLED = 2
+local const WAIT_RETIRED = 3
+local const OUTCOME_SUCCESS = 0
+local const OUTCOME_ERROR = 1
+local const OUTCOME_FATAL = 2
+
+record Error
+  error: value
+  traceback: string
+end
+
+record OperationError
+  code: integer
+  name: string
+  message: string
+  operation: string
+end
+
+record ResumeToken
+  const source: string?
+end
+
+union CancellationReason<|B|>
+  simple(string)
+  complex(B)
+end
+
+union TaskStatus<|A, B|>
+  ready()
+  running()
+  waiting()
+  succeeded(A)
+  failed(Error)
+  cancelled(CancellationReason<|B|>)
+end
+
+union Result<|T, E|>
+  success(T)
+  error(E)
+end
+
+union CancellableResult<|T, E|>
+  success(T)
+  error(E)
+  cancelled(CancellationReason<|value|>)
+end
 
 record ChannelReader
   local receive: function (): (string)
@@ -103,36 +157,659 @@ union AllFiveError<|A1, B1, A2, B2, A3, B3, A4, B4, A5, B5|>
   fifth(TaskStatus<|A5, B5|>)
 end
 
-function run<|A, B|>(func: function (): (A)): Task<|A, B|>
-  local erased: function (): (value) = function (): value
-    return func()
+local record Operation<|T, E|>
+  local register: function (function (T): (), function (E): (), function (value, string): ()): (uv.req_t?)
+  local policy: integer
+end
+
+local record Wait
+  local task: Task
+  local policy: integer
+  local phase: integer
+  local kind: integer
+  local payload: value
+  local request: uv.req_t?
+end
+
+local record Orphan
+  local task: Task
+  local wait: Wait?
+end
+
+local record TerminalRegistration<|A, B|>
+  local listener: function (TaskStatus<|A, B|>): ()
+  local live: boolean
+end
+
+local record Runtime
+  local loop: uv.loop_t
+  local tasks: {Task}
+  local next_task: integer
+  local current_task: Task?
+  local driving: boolean
+  local closing: boolean
+  local failure: Error?
+  local shutdown_cancelled: boolean
+  local exit_code: integer?
+end
+
+record Task<|A, B|>
+  local root: coroutine.Coroutine
+  local runtime: Runtime
+  local state: TaskStatus<|A, B|>
+  local cancel_value: CancellationReason<|B|>?
+  local wait: Wait?
+  local root_index: integer
+  local terminal_registrations: {TerminalRegistration<|A, B|>}
+  local suspended: boolean
+  local resume_token: ResumeToken?
+  local resume_pending: boolean
+  local suspend_cancel: (function (): ())?
+end
+
+function TaskStatus:as_string(): string
+  case self
+  when ready() then return "ready"
+  when running() then return "running"
+  when waiting() then return "waiting"
+  when succeeded() then return "succeeded"
+  when failed() then return "failed"
+  when cancelled() then return "cancelled"
   end
-  return uv.run_internal(erased)
 end
 
-function run_foreign(f: foreign function (*void): void, arg: foreign *void)
-  uv.run_foreign(f, arg)
+function TaskStatus:has_finished(): boolean
+  case self
+  when succeeded() then return true
+  when failed() then return true
+  when cancelled() then return true
+  else return false
+  end
 end
 
-function loop()
-  uv.loop()
+function TaskStatus:has_succeeded(): (boolean, A?)
+  case self
+  when succeeded(result) then return true, result
+  else return false, nil
+  end
 end
 
-function yield()
-  uv.yield()
+function TaskStatus:has_failed(): (boolean, Error?)
+  case self
+  when failed(failure) then return true, failure
+  else return false, nil
+  end
+end
+
+function TaskStatus:has_cancelled(): (boolean, CancellationReason<|B|>?)
+  case self
+  when cancelled(reason) then return true, reason
+  else return false, nil
+  end
+end
+
+function Task:status(): TaskStatus<|A, B|>
+  return self.state
+end
+
+function Task:add_terminal_listener(listener: function (TaskStatus<|A, B|>): ()): function (): ()
+  if self.state:has_finished() then return function () end end
+  local registration = TerminalRegistration<|A, B|> {listener = listener, live = true}
+  self.terminal_registrations[#self.terminal_registrations + 1] = registration
+  local task = self
+  return function ()
+    if not registration.live then return end
+    registration.live = false
+    local registrations = task.terminal_registrations
+    for index = 1, #registrations do
+      if registrations[index] == registration then
+        for following = index, #registrations - 1 do
+          registrations[following] = registrations[following + 1]
+        end
+        registrations[#registrations] = nil
+        return
+      end
+    end
+  end
+end
+
+local function operation_error(code: integer, operation: string): OperationError
+  return OperationError(code, uv.err_name(code), uv.strerror(code), operation)
+end
+
+local function check_status(code: integer, operation: string)
+  if code < 0 then raise operation_error(code, operation) end
+end
+
+local function has_tasks(runtime: Runtime): boolean
+  for index = 1, runtime.next_task - 1 do
+    if runtime.tasks[index] ~= nil then return true end
+  end
+  return false
+end
+
+local function require_main_thread()
+  local top = ffi.lua_gettop(L)
+  ffi.lua_rawgeti(L, ffi.LUA_REGISTRYINDEX, ffi.LUA_RIDX_MAINTHREAD as foreign lua_Integer)
+  local main = ffi.lua_tothread(L, -1)
+  ffi.lua_settop(L, top)
+  if L ~= main then raise "async.loop must be driven from the Lua main thread" end
+end
+
+local function rethrow_failure(failure: Error)
+  local top = ffi.lua_gettop(L)
+  defer ffi.lua_settop(L, top)
+  if ffi.lua_checkstack(L, 2) == 0 then raise "cannot reserve error handoff" end
+  ffi.lua_pushtvalue(L, failure.traceback)
+  ffi.lua_setfield(L, ffi.LUA_REGISTRYINDEX, ffi.TITAN_BACKTRACE_KEY)
+  ffi.lua_pushboolean(L, 1)
+  ffi.lua_setfield(L, ffi.LUA_REGISTRYINDEX, ffi.TITAN_TRACE_PINNED)
+  raise failure.error
+end
+
+local function new_runtime(): Runtime
+  local runtime = Runtime {loop = uv.loop_t.new(), tasks = {}, next_task = 1,
+    current_task = nil, driving = false, closing = false, failure = nil, shutdown_cancelled = false, exit_code = nil}
+  check_status(uv.loop_init(runtime.loop), "runtime.loop.init")
+  return runtime
+end
+
+local function ensure_runtime(): Runtime
+  local runtime? = active_runtime
+  if runtime ~= nil then return runtime end
+  local created = new_runtime()
+  active_runtime = created
+  return created
+end
+
+function current_loop(): uv.loop_t
+  local runtime? = active_runtime
+  if runtime == nil then raise "async Runtime is not active" end
+  return runtime.loop
 end
 
 function running(): Task<|value, value|>
-  return uv.running_task()
+  local runtime? = active_runtime
+  if runtime == nil then raise "async Runtime is not active" end
+  local task? = runtime.current_task
+  if task == nil then raise "asynchronous operation must be called from an async Task" end
+  return task
 end
 
-function suspend(token: ResumeToken,
-                 cancel_action: SuspendCancelAction?)
-  uv.suspend(token, cancel_action)
+local function clear_suspension(task: Task)
+  task.suspended = false
+  task.resume_token = nil
+  task.resume_pending = false
+  task.suspend_cancel = nil
+end
+
+local function finish_task(task: Task, state: TaskStatus)
+  clear_suspension(task)
+  local wait? = task.wait
+  if wait ~= nil then wait.phase = WAIT_RETIRED; wait.request = nil end
+  task.wait = nil
+  task.state = state
+  local listeners = task.terminal_registrations
+  task.terminal_registrations = {}
+  for index = 1, #listeners do listeners[index].live = false end
+  for index = 1, #listeners do
+    do listeners[index].listener(state) catch end
+  end
+  task.runtime.tasks[task.root_index] = nil
+  if not has_tasks(task.runtime) then
+    task.runtime.closing = true
+    uv.stop(task.runtime.loop)
+  end
+end
+
+local function error_text(err: value): string
+  local text = "<error while rendering Task failure>"
+  do
+    local top = ffi.lua_gettop(L)
+    defer ffi.lua_settop(L, top)
+    if err is OperationError then
+      local failure = err as OperationError
+      text = failure.operation .. ": " .. failure.name ..
+             " (" .. failure.code .. "): " .. failure.message
+    else
+      if ffi.lua_checkstack(L, 2) == 0 then
+        raise "cannot reserve Lua stack for Task error rendering"
+      end
+      ffi.lua_pushtvalue(L, err)
+      local rendered = ffi.luaL_tolstring(L, -1, nil)
+      if rendered then
+        text = rendered as string
+      else
+        text = "<unprintable error>"
+      end
+    end
+  catch
+    -- Keep the conservative fallback already installed above.
+  end
+  return text
+end
+
+local function report_task_error(err: value, trace: string)
+  local text = "uncaught error in async Task: " .. error_text(err) .. "\n"
+  if #trace > 0 then
+    text = text .. "stack traceback:\n" .. trace .. "\n"
+  end
+  -- stderr is a macro on the supported C libraries and therefore is not a
+  -- portable FFI object. Descriptor 2 is the inherited stderr boundary. The
+  -- typed call checks its count against this platform's actual write parameter.
+  local bytes = text as foreign const *char
+  local offset = 0
+  while offset < #text do
+    local written = ffi.write(
+        2 as foreign int, bytes + offset,
+        #text - offset)
+    if written < 0 then
+      if ffi.errno == ffi.EINTR then
+        -- Retry the same suffix.
+      else
+        return
+      end
+    elseif written == 0 then
+      return
+    else
+      offset = offset + (written as integer)
+    end
+  end
+end
+
+local function finish_failure(task: Task, error: value, trace: string)
+  local reason? = task.cancel_value
+  if reason ~= nil then
+    finish_task(task, TaskStatus.cancelled(reason))
+  else
+    finish_task(task, TaskStatus.failed(Error(error, trace)))
+    report_task_error(error, trace)
+  end
+end
+
+local function resume_root(task: Task, failed: boolean, payload: value): value
+  task.runtime.current_task = task
+  defer task.runtime.current_task = nil
+  if failed then return task.root:error(payload, ASYNC_TAG) end
+  return task.root:resume(payload, ASYNC_TAG)
+end
+
+local function wait_result(wait: Wait): (boolean, value)
+  if wait.kind == OUTCOME_FATAL then return true, wait.payload end
+  local reason? = wait.task.cancel_value
+  if wait.policy ~= WAIT_CLEANUP and reason ~= nil then
+    if wait.policy == WAIT_CANCELLABLE then
+      return false, CancellableResult<|value, value|>.cancelled(reason)
+    end
+    return true, reason
+  end
+  if wait.policy == WAIT_CANCELLABLE then
+    if wait.kind == OUTCOME_SUCCESS then
+      return false, CancellableResult<|value, value|>.success(wait.payload)
+    end
+    return false, CancellableResult<|value, value|>.error(wait.payload)
+  end
+  if wait.kind == OUTCOME_SUCCESS then return false, Result<|value, value|>.success(wait.payload) end
+  return false, Result<|value, value|>.error(wait.payload)
+end
+
+local function deliver_wait(wait: Wait)
+  if wait.phase ~= WAIT_SETTLED then raise "async operation is not settled" end
+  local task = wait.task
+  if task.wait ~= wait then raise "stale async operation settlement" end
+  wait.phase = WAIT_RETIRED
+  wait.request = nil
+  task.wait = nil
+  clear_suspension(task)
+  local failed, payload = wait_result(wait)
+  advance_task(task, failed, payload)
+end
+
+local function settle(wait: Wait, kind: integer, payload: value)
+  if wait.phase == WAIT_SETTLED or wait.phase == WAIT_RETIRED then
+    raise "async operation already settled"
+  end
+  local registering = wait.phase == WAIT_REGISTERING
+  local deferred = not registering and wait.task.runtime.current_task ~= nil
+  -- A peer Task cannot advance this Task inline. Accept its deferred wake
+  -- before committing settlement: synchronous scheduling failure leaves the
+  -- exact pending wait available for retry or shutdown. The timer cannot run
+  -- until this call returns; only nonallocating field writes follow acceptance.
+  if deferred then schedule(wait.task.runtime, function () deliver_wait(wait) end) end
+  wait.kind = kind
+  wait.payload = payload
+  wait.phase = WAIT_SETTLED
+  if not registering and not deferred then deliver_wait(wait) end
+end
+
+-- This capability belongs to one terminal operation, not to whichever wait
+-- the Task happens to have when a late callback reports its failure.
+local function fatal(wait: Wait, error: value, trace: string)
+  local task = wait.task
+  local runtime = task.runtime
+  if runtime.current_task ~= nil then
+    raise "async fatal callback must run outside an async Task"
+  end
+  if wait.phase == WAIT_REGISTERING then
+    wait.kind = OUTCOME_FATAL
+    wait.payload = error
+    wait.phase = WAIT_SETTLED
+    fail_runtime(runtime, error, trace)
+    cancel_shutdown_tasks(runtime, task)
+    return
+  end
+  if wait.phase ~= WAIT_PENDING or task.wait ~= wait then
+    fail_runtime(runtime, error, trace)
+    return
+  end
+  -- Its native completion has already been consumed. Retire the exact old
+  -- capability before cancellation or lexical cleanup can create a new wait.
+  wait.phase = WAIT_RETIRED
+  wait.request = nil
+  task.wait = nil
+  clear_suspension(task)
+  fail_runtime(runtime, error, trace)
+  cancel_shutdown_tasks(runtime, task)
+  do advance_task(task, true, error)
+  catch
+    -- The original callback failure remains authoritative. If advancement
+    -- itself failed before installing a wait, the driver's orphan pass can
+    -- still unwind the rooted Task after native ownership is quiescent.
+  end
+end
+
+local function advance_task(task: Task, failed: boolean, payload: value)
+  local next_failed = failed
+  local next_payload = payload
+  while true do
+    task.state = TaskStatus.running()
+    local yielded: value = nil
+    do yielded = resume_root(task, next_failed, next_payload)
+    catch finish_failure(task, error, traceback); return end
+    if task.root:status() == "dead" then
+      local reason? = task.cancel_value
+      if reason ~= nil then finish_task(task, TaskStatus.cancelled(reason))
+      else finish_task(task, TaskStatus.succeeded(yielded)) end
+      return
+    end
+    local operation = yielded as Operation<|value, value|>
+    local reason? = task.cancel_value
+    if operation.policy ~= WAIT_CLEANUP and reason ~= nil then
+      if operation.policy == WAIT_CANCELLABLE then
+        next_failed = false
+        next_payload = CancellableResult<|value, value|>.cancelled(reason)
+      else next_failed = true; next_payload = reason end
+    elseif operation.policy ~= WAIT_CLEANUP and task.runtime.closing then
+      next_failed = true
+      next_payload = (task.runtime.failure as Error).error
+    else
+      local wait = Wait {task = task, policy = operation.policy,
+        phase = WAIT_REGISTERING, kind = OUTCOME_SUCCESS, payload = nil, request = nil}
+      local resolve = function (value: value) settle(wait, OUTCOME_SUCCESS, value) end
+      local reject = function (value: value) settle(wait, OUTCOME_ERROR, value) end
+      local fail = function (error: value, trace: string) fatal(wait, error, trace) end
+      task.wait = wait
+      task.state = TaskStatus.waiting()
+      local request: uv.req_t? = nil
+      local registration_failed = false
+      do request = operation.register(resolve, reject, fail)
+      catch
+        wait.phase = WAIT_RETIRED
+        wait.request = nil
+        task.wait = nil
+        clear_suspension(task)
+        registration_failed = true
+        next_failed = true
+        next_payload = error
+      end
+      if not registration_failed then
+        if wait.phase == WAIT_SETTLED then
+          wait.phase = WAIT_RETIRED
+          task.wait = nil
+          clear_suspension(task)
+          next_failed, next_payload = wait_result(wait)
+        elseif operation.policy == WAIT_CANCELLABLE and request == nil then
+          wait.phase = WAIT_RETIRED
+          task.wait = nil
+          clear_suspension(task)
+          next_failed = true
+          next_payload = "cancellable registration returned nil without settling"
+        else
+          wait.request = request
+          wait.phase = WAIT_PENDING
+          if operation.policy == WAIT_CANCELLABLE and task.cancel_value ~= nil then
+            uv.cancel(request as uv.req_t)
+          end
+          return
+        end
+      end
+    end
+  end
+end
+
+local function schedule(runtime: Runtime, action: function (): ())
+  local timer = uv.timer_t.new()
+  local handle = timer:as_handle_t()
+  local closed = function (_: uv.handle_t) action() end
+  local fired = function (_: uv.timer_t) uv.close(handle, closed) end
+  check_status(uv.timer_init(runtime.loop, timer), "runtime.timer.init")
+  local status = uv.timer_start(timer, fired, 0, 0)
+  if status < 0 then uv.close(handle); raise operation_error(status, "runtime.timer.start") end
+end
+
+function Task:cancel(reason: CancellationReason<|B|>?)
+  if self.state:has_finished() or self.cancel_value ~= nil then return end
+  local actual? = reason
+  if actual == nil then actual = CancellationReason.simple("cancelled") end
+  self.cancel_value = actual
+  local wait? = self.wait
+  if wait ~= nil and wait.policy == WAIT_CANCELLABLE and wait.request ~= nil then
+    uv.cancel(wait.request as uv.req_t)
+  end
+  if self.suspended then
+    local action? = self.suspend_cancel
+    if action ~= nil then action() end
+    self:resume(self.resume_token as ResumeToken)
+  end
+end
+
+function Task:resume(token: ResumeToken)
+  if token ~= self.resume_token then
+    local source = "unknown source"
+    local expected? = self.resume_token
+    if expected ~= nil then source = expected.source or source end
+    raise "Task resume token mismatch (expected source: " .. source .. ")"
+  end
+  if not self.suspended or self.resume_pending or self.state:has_finished() then return end
+  local task = self
+  local wait = self.wait as Wait
+  self.resume_pending = true
+  do
+    schedule(self.runtime, function () settle(wait, OUTCOME_SUCCESS, nil) end)
+  catch self.resume_pending = false; raise end
+end
+
+function await<|T, E|>(op: function (function (T): (), function (E): (), function (value, string): ()): ()): Result<|T, E|>
+  running()
+  local register = function (resolve: function (T): (), reject: function (E): (), fail: function (value, string): ()): uv.req_t?
+    op(resolve, reject, fail)
+    return nil
+  end
+  return coroutine.yield(Operation<|T, E|>(register, WAIT_ORDINARY), ASYNC_TAG) as Result<|T, E|>
+end
+
+function await_cleanup<|T, E|>(op: function (function (T): (), function (E): (), function (value, string): ()): ()): Result<|T, E|>
+  running()
+  local register = function (resolve: function (T): (), reject: function (E): (), fail: function (value, string): ()): uv.req_t?
+    op(resolve, reject, fail)
+    return nil
+  end
+  return coroutine.yield(Operation<|T, E|>(register, WAIT_CLEANUP), ASYNC_TAG) as Result<|T, E|>
+end
+
+function await_cancellable<|T, E|>(op: function (function (T): (), function (E): (), function (value, string): ()): (uv.req_t?)): CancellableResult<|T, E|>
+  running()
+  return coroutine.yield(Operation<|T, E|>(op, WAIT_CANCELLABLE), ASYNC_TAG) as CancellableResult<|T, E|>
+end
+
+function yield()
+  local result = await<|value, value|>(function (resolve: function (value): (), _: function (value): (), fail: function (value, string): ())
+    schedule(active_runtime as Runtime, function ()
+      do resolve(nil)
+      catch fail(error, traceback); raise end
+    end)
+  end)
+  case result
+  when error(failure) then raise failure
+  else
+  end
+end
+
+function suspend(token: ResumeToken, cancel_action: (function (): ())?)
+  local task = running()
+  local register = function (_resolve: function (value): (), _reject: function (value): (), _fail: function (value, string): ()): uv.req_t?
+    task.suspended = true
+    task.resume_token = token
+    task.resume_pending = false
+    task.suspend_cancel = cancel_action
+    return nil
+  end
+  local result = coroutine.yield(Operation<|value, value|>(register, WAIT_ORDINARY), ASYNC_TAG) as Result<|value, value|>
+  case result
+  when error(failure) then raise failure
+  else
+  end
+end
+
+function run<|A, B|>(func: function (): (A)): Task<|A, B|>
+  local runtime = ensure_runtime()
+  if runtime.closing or runtime.exit_code ~= nil then raise "cannot start a Task while async Runtime is shutting down" end
+  local root = coroutine.create(function (_: value): value return func() end, ASYNC_TAG)
+  local task = Task<|A, B|> {root = root, runtime = runtime, state = TaskStatus.ready(),
+    cancel_value = nil, wait = nil, root_index = runtime.next_task,
+    terminal_registrations = {}, suspended = false, resume_token = nil,
+    resume_pending = false, suspend_cancel = nil}
+  local erased = task as Task<|value, value|>
+  runtime.tasks[runtime.next_task] = erased
+  runtime.next_task = runtime.next_task + 1
+  do schedule(runtime, function ()
+    local reason? = erased.cancel_value
+    if reason ~= nil then advance_task(erased, true, reason)
+    else advance_task(erased, false, nil) end
+  end)
+  catch finish_failure(erased, error, traceback); raise end
+  return task
+end
+
+local function close_handles(runtime: Runtime)
+  uv.walk(runtime.loop, function (handle: uv.handle_t, _: value)
+    if not uv.is_closing(handle) then uv.close(handle) end
+  end)
+end
+
+local function fail_runtime(runtime: Runtime, error: value, trace: string)
+  if runtime.failure == nil then runtime.failure = Error(error, trace) end
+  runtime.closing = true
+  if runtime.driving then uv.stop(runtime.loop) end
+end
+
+local function cancel_shutdown_tasks(runtime: Runtime, origin: Task?)
+  if runtime.shutdown_cancelled then return end
+  runtime.shutdown_cancelled = true
+  for index = 1, runtime.next_task - 1 do
+    local task? = runtime.tasks[index]
+    if task ~= nil and task ~= origin then
+      do task:cancel(CancellationReason.simple("async Runtime stopped after callback failure")) catch end
+    end
+  end
+end
+
+local function unwind_orphans(runtime: Runtime)
+  local stranded: {Orphan} = {}
+  for index = 1, runtime.next_task - 1 do
+    local task? = runtime.tasks[index]
+    if task ~= nil then stranded[#stranded + 1] = Orphan(task, task.wait) end
+  end
+  -- Cancellation may queue legitimate explicit wakes or settle another
+  -- captured wait. Never reinterpret a newer wait as one from this snapshot.
+  cancel_shutdown_tasks(runtime, nil)
+  for index = 1, #stranded do
+    local orphan = stranded[index]
+    local task = orphan.task
+    local wait? = orphan.wait
+    if not task.state:has_finished() and task.wait == wait and not task.resume_pending and
+        (wait == nil or wait.phase == WAIT_PENDING) then
+      if wait ~= nil then wait.phase = WAIT_RETIRED; wait.request = nil end
+      task.wait = nil
+      clear_suspension(task)
+      local failure = runtime.failure as Error
+      advance_task(task, true, failure.error)
+    end
+  end
+end
+
+function loop()
+  require_main_thread()
+  local runtime? = active_runtime
+  if runtime == nil then return end
+  if runtime.current_task ~= nil then raise "async.loop must be driven from the Lua main thread" end
+  if runtime.driving then raise "async.loop is already being driven" end
+  runtime.driving = true
+  defer runtime.driving = false
+  while true do
+    if runtime.failure ~= nil then cancel_shutdown_tasks(runtime, nil) end
+    -- Task-owned cleanup may have accepted a handle-based wait. Leave its
+    -- completion and scheduler wakes intact until every Task has unwound.
+    if not has_tasks(runtime) then
+      runtime.closing = true
+      do close_handles(runtime) catch fail_runtime(runtime, error, traceback) end
+    end
+    do uv.run(runtime.loop)
+    catch fail_runtime(runtime, error, traceback) end
+    if not uv.loop_alive(runtime.loop) then
+      if has_tasks(runtime) then
+        if runtime.failure == nil then fail_runtime(runtime, "libuv loop became idle while async Tasks were waiting", "") end
+        unwind_orphans(runtime)
+      else
+        -- Native liveness excludes initialized inactive handles. Last-Task
+        -- retirement can reach this branch before the next outer iteration.
+        do close_handles(runtime) catch fail_runtime(runtime, error, traceback) end
+        if not uv.loop_alive(runtime.loop) then
+          local status = uv.loop_close(runtime.loop)
+          if status == 0 then
+            active_runtime = nil
+            local failure? = runtime.failure
+            if failure ~= nil then rethrow_failure(failure) end
+            return
+          end
+          check_status(status, "runtime.loop.close")
+        end
+      end
+    end
+  end
 end
 
 function version(): string
-  return uv.version()
+  return uv.version_string()
+end
+
+function run_foreign(f: foreign function (*void): void, arg: foreign *void)
+  if not f then raise "async.run_foreign callback must not be NULL" end
+  local request = uv.work_t.new()
+  local result = await<|value, OperationError|>(function (resolve: function (value): (), reject: function (OperationError): (), fail: function (value, string): ())
+    local callback = function (_: uv.work_t, status: integer)
+      do
+        if status < 0 then reject(operation_error(status, "async.run_foreign"))
+        else resolve(nil) end
+      catch fail(error, traceback); raise end
+    end
+    local status = uv.queue_work(current_loop(), request, f, arg, callback, nil)
+    if status < 0 then reject(operation_error(status, "async.run_foreign")) end
+  end)
+  case result
+  when error(failure) then raise failure
+  else
+  end
 end
 
 function channel<|T|>(size: integer?):
@@ -2032,4 +2709,391 @@ function join_five<|A1, B1, A2, B2, A3, B3, A4, B4, A5, B5|>(
   return first_result as TaskStatus<|A1, B1|>, second_result as TaskStatus<|A2, B2|>,
          third_result as TaskStatus<|A3, B3|>, fourth_result as TaskStatus<|A4, B4|>,
          fifth_result as TaskStatus<|A5, B5|>
+end
+
+-- Contributor to async. All Task/Runtime ownership stays inside this module;
+-- an ordinary os import calls this public operation without source privileges.
+function request_exit(code: integer)
+  local task = running()
+  local runtime = task.runtime
+  if runtime.exit_code == nil then runtime.exit_code = code end
+  local index = 1
+  while index < runtime.next_task do
+    local other? = runtime.tasks[index]
+    if other ~= nil then
+      other:cancel(CancellationReason.simple("program exit"))
+    end
+    index = index + 1
+  end
+  raise task.cancel_value
+end
+
+-- Merge declarations into async and the final initializer into its sole root
+-- initializer. async already imports lua.h and titan/ffi.h; this header is
+-- OS-only and introduces no transitive libuv dependency.
+foreign import "async_signal_platform.h"
+
+local function bootstrap(main_callable: function ({string}): (integer),
+                         args: {string}): integer
+  local result = 1
+  local task = run<|value, value|>(function (): value
+    result = main_callable(args)
+    return nil
+  end)
+  loop()
+  local exit_code? = task.runtime.exit_code
+  if exit_code ~= nil then return exit_code end
+  local succeeded = task:status():has_succeeded()
+  if succeeded then return result end
+  return 1
+end
+
+local const COMPACT_MIN_PREFIX = 32
+
+-- Payload presence is carried by this record, never by Array length or truthiness.
+local record Item<|T|>
+  value: T
+end
+
+record SubscriptionBatch<|T|>
+  const count: integer
+  local const first: integer
+  local const items: {Item<|T|>}
+end
+
+function SubscriptionBatch:get(index: integer): T
+  if index < 1 or index > self.count then raise "subscription batch index out of range" end
+  return self.items[self.first + index - 1].value
+end
+
+union SubscriptionResult<|T, E|>
+  item(T)
+  error(E)
+  ended()
+  closed()
+end
+
+union SubscriptionBatchResult<|T, E|>
+  batch(SubscriptionBatch<|T|>)
+  error(E)
+  ended()
+  closed()
+end
+
+record SubscriptionActions<|T|>
+  const stop: function (): ()
+  const close: function (function (): (SubscriptionBatch<|T|>)): ()
+end
+
+local union Terminal<|E|>
+  live()
+  ended()
+  error(E)
+  closed()
+end
+
+local record Waiter
+  task: Task<|value, value|>
+  token: ResumeToken
+  notified: boolean
+  batch: boolean
+end
+
+local record Core<|T, E|>
+  items: {Item<|T|>}
+  first: integer
+  count: integer
+  coalescing: boolean
+  terminal: Terminal<|E|>
+  stopped: boolean
+  waiter: Waiter?
+  actions: SubscriptionActions<|T|>?
+  drain: (function (): (SubscriptionBatch<|T|>))?
+end
+
+record CoalescingSubscription<|T, E|>
+  local core: Core<|T, E|>
+end
+
+record BufferedSubscription<|T, E|>
+  local core: Core<|T, E|>
+end
+
+local function Core:is_live(): boolean
+  case self.terminal
+  when live() then return true
+  else return false
+  end
+end
+
+local function Core:wake()
+  local waiter? = self.waiter
+  if waiter == nil or waiter.notified then return end
+  waiter.notified = true
+  do waiter.task:resume(waiter.token)
+  catch waiter.notified = false; raise end
+end
+
+local function Core:publish(value: T): boolean
+  if not self:is_live() then return false end
+  local item = Item<|T|>(value)
+  local index = self.first
+  local old_count = self.count
+  if not self.coalescing or self.count == 0 then index = self.first + self.count end
+  local previous? = self.items[index]
+  self.items[index] = item
+  if not self.coalescing or self.count == 0 then self.count = self.count + 1 end
+  do self:wake()
+  catch
+    -- Task.resume either schedules its deferred wake or raises before doing
+    -- so. Restore the exact old slot/count before returning producer ownership.
+    self.items[index] = previous
+    self.count = old_count
+    raise
+  end
+  return true
+end
+
+local function Core:fail(error: E): boolean
+  if not self:is_live() then return false end
+  local previous = self.terminal
+  self.terminal = Terminal<|E|>.error(error)
+  do self:wake()
+  catch self.terminal = previous; raise end
+  return true
+end
+
+local function Core:finish(): boolean
+  if not self:is_live() then return false end
+  local previous = self.terminal
+  self.terminal = Terminal<|E|>.ended()
+  do self:wake()
+  catch self.terminal = previous; raise end
+  return true
+end
+
+local function Core:detach(): SubscriptionBatch<|T|>
+  local replacement: {Item<|T|>} = {}
+  local batch: SubscriptionBatch<|T|> = {
+    count = self.count, first = self.first, items = self.items}
+  self.items = replacement
+  self.first = 1
+  self.count = 0
+  return batch
+end
+
+local function Core.new(coalescing: boolean): Core<|T, E|>
+  local core: Core<|T, E|> = {items = {}, first = 1, count = 0,
+    coalescing = coalescing, terminal = Terminal<|E|>.live(), stopped = false,
+    waiter = nil, actions = nil, drain = nil}
+  core.drain = function (): SubscriptionBatch<|T|> return core:detach() end
+  return core
+end
+
+local function Core:register(producer: function (function (T): (boolean), function (E): (boolean), function (): (boolean)): (SubscriptionActions<|T|>))
+  local core = self
+  local publish = function (item: T): boolean return core:publish(item) end
+  local fail = function (error: E): boolean return core:fail(error) end
+  local finish = function (): boolean return core:finish() end
+  -- The producer must prebuild its actions before accepting resources. Until
+  -- it returns, partial-registration rollback remains the producer's job.
+  local actions = producer(publish, fail, finish)
+  core.actions = actions
+end
+
+function CoalescingSubscription.new(producer: function (function (T): (boolean), function (E): (boolean), function (): (boolean)): (SubscriptionActions<|T|>)): CoalescingSubscription<|T, E|>
+  local core = Core<|T, E|>(true)
+  local subscription: CoalescingSubscription<|T, E|> = {core = core}
+  core:register(producer)
+  return subscription
+end
+
+function BufferedSubscription.new(producer: function (function (T): (boolean), function (E): (boolean), function (): (boolean)): (SubscriptionActions<|T|>)): BufferedSubscription<|T, E|>
+  local core = Core<|T, E|>(false)
+  local subscription: BufferedSubscription<|T, E|> = {core = core}
+  core:register(producer)
+  return subscription
+end
+
+local function Core:wait(batch: boolean)
+  local task = running()
+  local token = ResumeToken("subscription")
+  local waiter = Waiter(task, token, false, batch)
+  local core = self
+  local detach = function ()
+    if core.waiter == waiter then core.waiter = nil end
+  end
+  self.waiter = waiter
+  defer detach()
+  suspend(token, detach)
+end
+
+local function Core:prepare_read(batch: boolean)
+  local task = running()
+  if self.waiter ~= nil then raise "subscription already has a waiter" end
+  -- Check before transferring any queued resource, without yielding.
+  local reason? = task.cancel_value
+  if reason ~= nil then raise reason end
+  if task.runtime.closing then raise (task.runtime.failure as Error).error end
+  if self.count == 0 and self:is_live() then self:wait(batch) end
+end
+
+local function Core:compact()
+  -- Copy only after the consumed prefix can pay for all remaining elements.
+  -- Keep the entire old FIFO owned until replacement allocation/copy succeeds.
+  if self.first <= COMPACT_MIN_PREFIX or self.first <= self.count then return end
+  local replacement: {Item<|T|>} = {}
+  for index = 1, self.count do
+    replacement[index] = self.items[self.first + index - 1]
+  end
+  self.items = replacement
+  self.first = 1
+end
+
+local function Core:next(): SubscriptionResult<|T, E|>
+  self:prepare_read(false)
+  case self.terminal
+  when closed() then return SubscriptionResult<|T, E|>.closed()
+  else
+  end
+  if self.count > 0 then
+    self:compact()
+    local item = self.items[self.first]
+    local result = SubscriptionResult<|T, E|>.item(item.value)
+    self.items[self.first] = nil
+    self.first = self.first + 1
+    self.count = self.count - 1
+    if self.count == 0 then self.first = 1 end
+    return result
+  end
+  case self.terminal
+  when error(failure) then return SubscriptionResult<|T, E|>.error(failure)
+  when ended() then return SubscriptionResult<|T, E|>.ended()
+  when closed() then return SubscriptionResult<|T, E|>.closed()
+  when live() then raise "subscription wake has no outcome"
+  end
+end
+
+local function Core:next_batch(): SubscriptionBatchResult<|T, E|>
+  self:prepare_read(true)
+  case self.terminal
+  when closed() then return SubscriptionBatchResult<|T, E|>.closed()
+  else
+  end
+  if self.count > 0 then
+    local replacement: {Item<|T|>} = {}
+    local batch: SubscriptionBatch<|T|> = {
+      count = self.count, first = self.first, items = self.items}
+    local result = SubscriptionBatchResult<|T, E|>.batch(batch)
+    self.items = replacement
+    self.first = 1
+    self.count = 0
+    return result
+  end
+  case self.terminal
+  when error(failure) then return SubscriptionBatchResult<|T, E|>.error(failure)
+  when ended() then return SubscriptionBatchResult<|T, E|>.ended()
+  when closed() then return SubscriptionBatchResult<|T, E|>.closed()
+  when live() then return SubscriptionBatchResult<|T, E|>.batch(self:detach())
+  end
+end
+
+local function Core:stop()
+  if self.stopped then return end
+  local terminal = self.terminal
+  if self:is_live() then terminal = Terminal<|E|>.ended() end
+  defer self:wake()
+  self.stopped = true
+  self.terminal = terminal
+  self.actions.stop()
+end
+
+local function Core:discard()
+  self.items = {}
+  self.first = 1
+  self.count = 0
+  self.actions = nil
+  self.drain = nil
+end
+
+local function Core:close()
+  case self.terminal
+  when closed() then return
+  else
+  end
+  running()
+  local closing = Terminal<|E|>.closed()
+  local actions = self.actions
+  local drain = self.drain
+  -- Close blocks ordinary delivery immediately. The producer's cleanup may
+  -- suspend via await_cleanup and can drain unread resource-bearing events.
+  -- Repeated close calls initiate nothing, including while cleanup is pending.
+  defer self:discard()
+  defer actions.close(drain)
+  self.terminal = closing
+  self:stop()
+  self:wake()
+end
+
+function CoalescingSubscription:next(): SubscriptionResult<|T, E|>
+  return self.core:next()
+end
+
+function CoalescingSubscription:stop()
+  self.core:stop()
+end
+
+function CoalescingSubscription:close()
+  self.core:close()
+end
+
+function BufferedSubscription:next(): SubscriptionResult<|T, E|>
+  return self.core:next()
+end
+
+function BufferedSubscription:next_batch(): SubscriptionBatchResult<|T, E|>
+  return self.core:next_batch()
+end
+
+function BufferedSubscription:stop()
+  self.core:stop()
+end
+
+function BufferedSubscription:close()
+  self.core:close()
+end
+
+-- Producer/domain control operations are synchronous and never suspend.
+function BufferedSubscription:drain_pending(): SubscriptionBatch<|T|>
+  return self.core:detach()
+end
+
+function BufferedSubscription:drain_if(predicate: function (T): (boolean)): SubscriptionBatch<|T|>?
+  local core = self.core
+  for index = core.first, core.first + core.count - 1 do
+    if predicate(core.items[index].value) then return core:detach() end
+  end
+  return nil
+end
+
+function BufferedSubscription:wake_batch()
+  local waiter? = self.core.waiter
+  if waiter ~= nil and waiter.batch then self.core:wake() end
+end
+
+do
+  local native_error = ffi.titan_async_ignore_sigpipe_if_default()
+  if native_error ~= 0 then
+    check_status(uv.translate_sys_error(native_error), "runtime.sigpipe")
+  end
+  -- The generated entrypoint has not yet built its Titan argument Array.
+  -- This still runs with --no-uv-bootstrap; only invoking bootstrap is skipped.
+  uv.setup_process_args()
+  local top = ffi.lua_gettop(L)
+  defer ffi.lua_settop(L, top)
+  if ffi.lua_checkstack(L, 1) == 0 then
+    raise "cannot reserve Lua stack for async bootstrap registration"
+  end
+  ffi.lua_pushtvalue(L, bootstrap)
+  ffi.lua_setfield(L, ffi.LUA_REGISTRYINDEX, ffi.TITAN_MAIN_BOOTSTRAP_KEY)
 end
