@@ -5,7 +5,6 @@ record Ticker
   local timer: uv.timer_t
   local loop: uv.loop_t
   local subscription: async.CoalescingSubscription<|boolean, async.OperationError|>?
-  local waiting: boolean
   local closed: boolean
 end
 
@@ -38,7 +37,7 @@ local function start_timer(milliseconds: integer, repeat_time: integer): Ticker
   local timer = uv.timer_t.new()
   local handle = timer:as_handle_t()
   local ticker: Ticker = {timer = timer, loop = loop, subscription = nil,
-    waiting = false, closed = false}
+    closed = false}
   local subscription = async.CoalescingSubscription<|boolean, async.OperationError|>(
     function (publish, _fail, _finish): async.SubscriptionActions<|boolean|>
       local fired = function (_: uv.timer_t) publish(true) end
@@ -94,9 +93,7 @@ end
 function Ticker:tick(): boolean
   check_work()
   if self.closed or self.loop ~= async.current_loop() then return false end
-  if self.waiting then raise "Ticker already has a waiting Task" end
-  self.waiting = true
-  defer self.waiting = false
+  if self.subscription:has_waiter() then raise "Ticker already has a waiting Task" end
   local outcome = self.subscription:next()
   case outcome
   when item(value) then return value

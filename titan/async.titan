@@ -328,6 +328,14 @@ function current_loop(): uv.loop_t
   return runtime.loop
 end
 
+-- Domain resource constructors may reject shutdown without turning their
+-- synchronous operation into a Task cancellation boundary.
+function is_closing(): boolean
+  local runtime? = active_runtime
+  if runtime == nil then raise "async Runtime is not active" end
+  return runtime.closing
+end
+
 function running(): Task<|value, value|>
   local runtime? = active_runtime
   if runtime == nil then raise "async Runtime is not active" end
@@ -3039,6 +3047,12 @@ function CoalescingSubscription:next(): SubscriptionResult<|T, E|>
   return self.core:next()
 end
 
+-- Admission queries use the same reservation that cancellation detaches.
+-- A queued wake remains reserved until that reader leaves its wait.
+function CoalescingSubscription:has_waiter(): boolean
+  return self.core.waiter ~= nil
+end
+
 function CoalescingSubscription:stop()
   self.core:stop()
 end
@@ -3049,6 +3063,10 @@ end
 
 function BufferedSubscription:next(): SubscriptionResult<|T, E|>
   return self.core:next()
+end
+
+function BufferedSubscription:has_waiter(): boolean
+  return self.core.waiter ~= nil
 end
 
 function BufferedSubscription:next_batch(): SubscriptionBatchResult<|T, E|>
