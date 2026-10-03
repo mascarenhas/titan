@@ -233,7 +233,7 @@ TITAN_TEST_SOURCES_uv.public_tests := spec/stdlib/titan/uv/public_tests/public_t
 	spec/stdlib/titan/uv/public_tests/process.titan \
 	spec/stdlib/titan/uv/public_tests/workers.titan \
 	spec/stdlib/titan/uv/public_tests/outputs.titan
-TITAN_TEST_IMPORTS_uv.public_tests :=
+TITAN_TEST_IMPORTS_uv.public_tests := support.common
 TITAN_TEST_FOREIGN_uv.public_tests := 1
 
 TITAN_TEST_SOURCES_uv.runtime_tests := spec/stdlib/titan/uv/runtime_tests.titan

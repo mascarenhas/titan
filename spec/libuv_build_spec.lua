@@ -2850,14 +2850,33 @@ exit 64
     end)
 
     it("defaults only OpenSSL to its system provider", function()
-        local ok, output = run_argv({
-            "env", "-u", "OPENSSL_MODE", "make", "--no-print-directory", "-s",
-            "--eval=print-native-policy: ; @echo $(OPENSSL_MODE) $(LIBUV_EXTRA_OBJECTS) $(LLHTTP_ARCHIVE) $(SQLITE3_ARCHIVE)",
-            "print-native-policy",
-        })
-        assert.truthy(ok, output)
-        assert.equal("system libuv-build/libuv.a llhttp-build/libtitan-llhttp.a " ..
-            "sqlite3-build/libtitan-sqlite3.a\n", output)
+        for _, inherited in ipairs({
+            {},
+            {
+                "OPENSSL_MODE=bundled",
+                "MAKEFLAGS=-j --jobserver-auth=998,999 -- OPENSSL_MODE=bundled",
+                "MFLAGS=-j --jobserver-auth=998,999",
+                "GNUMAKEFLAGS=--warn-undefined-variables",
+                "MAKELEVEL=1", "MAKEOVERRIDES=OPENSSL_MODE=bundled",
+            },
+        }) do
+            local argv = { "env", table.unpack(inherited) }
+            -- This standalone defaults query cannot use a parent Make
+            -- jobserver through the Lua pipe or inherit its command overrides.
+            for _, argument in ipairs({
+                "env", "-u", "OPENSSL_MODE", "-u", "MAKEFLAGS",
+                "-u", "MFLAGS", "-u", "GNUMAKEFLAGS", "-u", "MAKELEVEL",
+                "-u", "MAKEOVERRIDES", "make", "--no-print-directory", "-s",
+                "--eval=print-native-policy: ; @echo $(OPENSSL_MODE) $(LIBUV_EXTRA_OBJECTS) $(LLHTTP_ARCHIVE) $(SQLITE3_ARCHIVE)",
+                "print-native-policy",
+            }) do
+                argv[#argv + 1] = argument
+            end
+            local ok, output = run_argv(argv)
+            assert.truthy(ok, output)
+            assert.equal("system libuv-build/libuv.a llhttp-build/libtitan-llhttp.a " ..
+                "sqlite3-build/libtitan-sqlite3.a\n", output)
+        end
     end)
 
     it("builds one provider pair with native support and one libuv policy",
