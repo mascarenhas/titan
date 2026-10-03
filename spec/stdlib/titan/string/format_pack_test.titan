@@ -1,6 +1,7 @@
 local test = import "test"
 local string = import "string"
 local support = import "string.test_support.titan"
+foreign import "locale.h"
 
 local observed = ""
 
@@ -85,6 +86,29 @@ function test_format_lua_compatibility(context: test.Context)
                                  true, "abc", "abcd",
                                  string.rep("long", 40)))
 
+  -- The linked Lua configuration selects either native C99 hexadecimal
+  -- formatting or Lua's own fallback, including its modifier restrictions.
+  local hexadecimal_values: {float} = {
+    0.0, -0.0, 1.5, -1.5, 1.0 / 3.0,
+    4.9406564584124654e-324, 2.2250738585072014e-308,
+    1.7976931348623157e308, infinity, -infinity, nan,
+  }
+  for index = 1, #hexadecimal_values do
+    assert_format_parity("%a", hexadecimal_values[index])
+    assert_format_parity("%A", hexadecimal_values[index])
+  end
+  assert_format_parity("%q", 1.5)
+  assert_format_parity("%q", 1.0 / 3.0)
+  assert_format_parity("%q", 4.9406564584124654e-324)
+  assert_format_parity("%q", nan)
+  assert_format_parity("%g", nan)
+  assert_format_parity("%G", nan)
+  assert_format_parity("%p", pointer_object)
+  assert_format_parity("%-p", pointer_object)
+  assert_format_parity("%15p", pointer_object)
+  support.expect_error(function() string.format("%1a") end,
+                       "no value for format conversion")
+
   local binary_format =
     "\0A%%B%+05d\0C%%%#06x\0D%%E%.2f\0F%s\0tail%%\0"
   local binary_actual =
@@ -165,6 +189,36 @@ function test_format_lua_compatibility(context: test.Context)
   local many_flags = "%" .. string.rep("-", 20) .. "d"
   test.assert(string.format(many_flags, 1) ==
               support.lua_format(many_flags, 1))
+end
+
+function test_format_numeric_locale_parity(_context: test.Context)
+  local original = ffi.setlocale(ffi.LC_NUMERIC, nil) as string
+  defer ffi.setlocale(ffi.LC_NUMERIC, original)
+  local candidates: {string} = {
+    "de_DE.UTF-8", "fr_FR.UTF-8", "pt_BR.UTF-8",
+    "de_DE.utf8", "fr_FR.utf8", "French_France.1252",
+  }
+  local changed = false
+  for index = 1, #candidates do
+    if ffi.setlocale(ffi.LC_NUMERIC, candidates[index]) ~= nil and
+        (ffi.localeconv().decimal_point as string) ~= "." then
+      changed = true
+      break
+    end
+  end
+  if not changed then
+    test.skip("capability: no alternate numeric locale installed for formatting")
+  end
+  local selected = ffi.setlocale(ffi.LC_NUMERIC, nil) as string
+  assert_format_parity("%a", 1.5)
+  assert_format_parity("%A", 1.0 / 3.0)
+  assert_format_parity("%q", 1.5)
+  assert_format_parity("%q", 4.9406564584124654e-324)
+  assert_format_parity("%.2f", 1234.5)
+  assert_format_parity("%.3e", 1.0 / 3.0)
+  assert_format_parity("%g", 1234.5)
+  test.assert((ffi.setlocale(ffi.LC_NUMERIC, nil) as string) == selected,
+              "formatting changed the process numeric locale")
 end
 
 function test_format_accounting_and_recovery(context: test.Context)
@@ -248,9 +302,23 @@ function test_target_native_pack_and_unpack(context: test.Context)
     "bBhH", -128, 255, -32768, 65535))
   assert_unpack_parity("bBhH", packed)
 
-  packed = string.pack("lLjJT", minimum, -1, maximum, -1, 123)
+  -- Native C long is 32 bits on Windows LLP64 and 64 bits on Unix LP64.
+  -- Keep the full target range while Lua integer formats retain their 64 bits.
+  local long_size = support.lua_packsize("l")
+  local long_minimum = minimum
+  local unsigned_long_maximum = -1
+  if long_size < support.lua_packsize("j") then
+    long_minimum = -(1 << (long_size * 8 - 1))
+    unsigned_long_maximum = (1 << (long_size * 8)) - 1
+    support.expect_error(function() string.pack("l", minimum) end, nil)
+    support.expect_error(function() support.lua_pack("l", minimum) end, nil)
+    support.expect_error(function() string.pack("L", -1) end, nil)
+    support.expect_error(function() support.lua_pack("L", -1) end, nil)
+  end
+  packed = string.pack("lLjJT", long_minimum, unsigned_long_maximum,
+                       maximum, -1, 123)
   test.assert(packed == support.lua_pack(
-    "lLjJT", minimum, -1, maximum, -1, 123))
+    "lLjJT", long_minimum, unsigned_long_maximum, maximum, -1, 123))
   assert_unpack_parity("lLjJT", packed)
 
   packed = string.pack("i1I1i2I2i8I8i16I16",

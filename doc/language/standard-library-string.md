@@ -164,7 +164,11 @@ function format(format_string: string, ...: value): string
 ```
 
 Flags, widths, and precisions follow Lua's accepted combinations. Integer and
-floating conversions use the configured target Lua/C widths. `%p` uses the
+floating conversions use the configured target Lua/C widths and formatting
+configuration. A Lua build using its hexadecimal-float fallback, including the
+controlled Windows SDK, accepts bare `%a` and `%A` but rejects their flags,
+widths, and precisions. Native pointer and non-finite-number spellings follow
+that same Lua build. `%p` uses the
 Lua identity pointer for the value. `%q` writes a Lua-readable literal for a
 string, number, boolean, or nil and rejects other values.
 

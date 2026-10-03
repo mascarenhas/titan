@@ -717,6 +717,7 @@ int titan_sdk_headers(void) { return LUA_VERSION_NUM + SQLITE_VERSION_NUMBER; }
             "titan/string/string.titan",
             "titan/string/bytes.titan",
             "titan/string/format.titan",
+            "titan/string/format_native.h",
             "titan/string/pack.titan",
             "titan/string/regex_api.titan",
             "titan/string/regex_compile.titan",

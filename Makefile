@@ -378,6 +378,7 @@ STDLIB_HTTP_SOURCES := titan/http/http.titan titan/http/client.titan \
 SQLITE3_TITAN_SOURCES := titan/sqlite3/sqlite3.titan titan/sqlite3/bindings.titan \
 	titan/sqlite3/row.titan titan/sqlite3/worker.titan
 SQLITE3_TITAN_HEADERS := titan/sqlite3/native.h
+STRING_TITAN_HEADERS := titan/string/format_native.h
 JSON_TITAN_SOURCES := titan/json/json.titan titan/json/parser.titan \
 	titan/json/decoder.titan titan/json/writer.titan titan/json/numbers.titan
 STDLIB_MODULES := coroutine uv async timer io fs net ssl url http os peg string \
@@ -2200,6 +2201,7 @@ endif
 STDLIB_C_INPUTS_uv = $(UV_TITAN_HEADERS) $(foreach dir,$(STDLIB_UV_HEADER_DIRS),$(wildcard $(dir)/uv.h $(dir)/uv/*.h))
 STDLIB_C_INPUTS_fs = $(STDLIB_C_INPUTS_uv)
 STDLIB_C_INPUTS_peg = $(LPEGLABEL_HEADERS)
+STDLIB_C_INPUTS_string = $(STRING_TITAN_HEADERS)
 STDLIB_C_INPUTS_http = $(LLHTTP_HEADER)
 STDLIB_C_INPUTS_ssl = $(foreach dir,$(STDLIB_OPENSSL_HEADER_DIRS),$(wildcard $(dir)/openssl/*.h))
 STDLIB_C_INPUTS_sqlite3 = $(SQLITE3_HEADER) $(SQLITE3_TITAN_HEADERS)
@@ -2290,6 +2292,7 @@ $(STDLIB_CONFIG_STAMP): FORCE $(STDLIB_NATIVE_IDENTITY_PREREQS)
 		$(call make_shell_quote,STDLIB_HTTP_CPPFLAGS=$(STDLIB_HTTP_CPPFLAGS)) \
 		$(call make_shell_quote,STDLIB_SQLITE3_CPPFLAGS=$(STDLIB_SQLITE3_CPPFLAGS)) \
 		$(call make_shell_quote,SQLITE3_TITAN_HEADERS=$(SQLITE3_TITAN_HEADERS)) \
+		$(call make_shell_quote,STRING_TITAN_HEADERS=$(STRING_TITAN_HEADERS)) \
 		$(call make_shell_quote,STDLIB_OPENSSL_CPPFLAGS=$(STDLIB_OPENSSL_CPPFLAGS)) \
 		$(call make_shell_quote,STDLIB_OPENSSL_LDFLAGS=$(STDLIB_OPENSSL_LDFLAGS)) \
 		$(call make_shell_quote,STDLIB_EMBEDDED_FORMAT_INPUTS=$(STDLIB_EMBEDDED_FORMAT_INPUTS)) \

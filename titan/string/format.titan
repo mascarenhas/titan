@@ -4,7 +4,8 @@
 -- Copyright (C) 1994-2026 Lua.org, PUC-Rio. MIT terms are reproduced in
 -- LICENSES/lua-LICENSE.
 
-foreign import "stdio.h"
+foreign import "./format_native.h"
+foreign import "math.h"
 foreign import "locale.h"
 
 local type FormatPartial = function (value): (string)
@@ -95,31 +96,31 @@ local function render_signed(form: string,
                              number: foreign lua_Integer): string
   if foreign lua_Integer.sizeof <= foreign int.sizeof then
     local converted = number as foreign int
-    local required = ffi.snprintf(nil, 0, form, converted)
+    local required = ffi.titan_string_snprintf(nil, 0, form, converted)
     local storage = foreign char.new_array(
       snprintf_allocation_length(required))
     local output = storage as foreign *char
-    local actual = ffi.snprintf(
+    local actual = ffi.titan_string_snprintf(
         output, #storage as foreign size_t,
         form, converted)
     return finish_snprintf_prefix(storage, required, actual)
   elseif foreign lua_Integer.sizeof <= foreign long.sizeof then
     local converted = number as foreign long
-    local required = ffi.snprintf(nil, 0, form, converted)
+    local required = ffi.titan_string_snprintf(nil, 0, form, converted)
     local storage = foreign char.new_array(
       snprintf_allocation_length(required))
     local output = storage as foreign *char
-    local actual = ffi.snprintf(
+    local actual = ffi.titan_string_snprintf(
         output, #storage as foreign size_t,
         form, converted)
     return finish_snprintf_prefix(storage, required, actual)
   else
     local converted = number as foreign long long
-    local required = ffi.snprintf(nil, 0, form, converted)
+    local required = ffi.titan_string_snprintf(nil, 0, form, converted)
     local storage = foreign char.new_array(
       snprintf_allocation_length(required))
     local output = storage as foreign *char
-    local actual = ffi.snprintf(
+    local actual = ffi.titan_string_snprintf(
         output, #storage as foreign size_t,
         form, converted)
     return finish_snprintf_prefix(storage, required, actual)
@@ -130,31 +131,31 @@ local function render_unsigned(form: string,
                                number: foreign lua_Integer): string
   if foreign lua_Integer.sizeof <= foreign int.sizeof then
     local converted = number as foreign unsigned int
-    local required = ffi.snprintf(nil, 0, form, converted)
+    local required = ffi.titan_string_snprintf(nil, 0, form, converted)
     local storage = foreign char.new_array(
       snprintf_allocation_length(required))
     local output = storage as foreign *char
-    local actual = ffi.snprintf(
+    local actual = ffi.titan_string_snprintf(
         output, #storage as foreign size_t,
         form, converted)
     return finish_snprintf_prefix(storage, required, actual)
   elseif foreign lua_Integer.sizeof <= foreign long.sizeof then
     local converted = number as foreign unsigned long
-    local required = ffi.snprintf(nil, 0, form, converted)
+    local required = ffi.titan_string_snprintf(nil, 0, form, converted)
     local storage = foreign char.new_array(
       snprintf_allocation_length(required))
     local output = storage as foreign *char
-    local actual = ffi.snprintf(
+    local actual = ffi.titan_string_snprintf(
         output, #storage as foreign size_t,
         form, converted)
     return finish_snprintf_prefix(storage, required, actual)
   else
     local converted = number as foreign unsigned long long
-    local required = ffi.snprintf(nil, 0, form, converted)
+    local required = ffi.titan_string_snprintf(nil, 0, form, converted)
     local storage = foreign char.new_array(
       snprintf_allocation_length(required))
     local output = storage as foreign *char
-    local actual = ffi.snprintf(
+    local actual = ffi.titan_string_snprintf(
         output, #storage as foreign size_t,
         form, converted)
     return finish_snprintf_prefix(storage, required, actual)
@@ -164,35 +165,35 @@ end
 local function render_character(form: string,
                                 number: foreign lua_Integer): string
   local converted = number as foreign int
-  local required = ffi.snprintf(nil, 0, form, converted)
+  local required = ffi.titan_string_snprintf(nil, 0, form, converted)
   local storage = foreign char.new_array(
     snprintf_allocation_length(required))
   local output = storage as foreign *char
-  local actual = ffi.snprintf(
+  local actual = ffi.titan_string_snprintf(
       output, #storage as foreign size_t,
       form, converted)
   return finish_snprintf_prefix(storage, required, actual)
 end
 
-local function render_number(form: string,
+local function render_native_number(form: string,
                              number: foreign lua_Number): string
   local converted = number as foreign double
-  local required = ffi.snprintf(nil, 0, form, converted)
+  local required = ffi.titan_string_snprintf(nil, 0, form, converted)
   local storage = foreign char.new_array(
     snprintf_allocation_length(required))
   local output = storage as foreign *char
-  local actual = ffi.snprintf(
+  local actual = ffi.titan_string_snprintf(
       output, #storage as foreign size_t,
       form, converted)
   return finish_snprintf_prefix(storage, required, actual)
 end
 
 local function render_c_string(form: string, text: string): string
-  local required = ffi.snprintf(nil, 0, form, text)
+  local required = ffi.titan_string_snprintf(nil, 0, form, text)
   local storage = foreign char.new_array(
     snprintf_allocation_length(required))
   local output = storage as foreign *char
-  local actual = ffi.snprintf(
+  local actual = ffi.titan_string_snprintf(
       output, #storage as foreign size_t,
       form, text)
   return finish_snprintf_prefix(storage, required, actual)
@@ -208,15 +209,74 @@ local function render_pointer(form: string, candidate: value): string
       copy_interval(form, 1, #form - 1) .. "s"
     return render_c_string(string_form, "(null)")
   else
-    local required = ffi.snprintf(nil, 0, form, pointer)
+    local required = ffi.titan_string_snprintf(nil, 0, form, pointer)
     local storage = foreign char.new_array(
       snprintf_allocation_length(required))
     local output = storage as foreign *char
-    local actual = ffi.snprintf(
+    local actual = ffi.titan_string_snprintf(
         output, #storage as foreign size_t,
         form, pointer)
     return finish_snprintf_prefix(storage, required, actual)
   end
+end
+
+-- Lua uses this algorithm when its configured lua_number2strx macro is absent.
+-- In particular, that is the normal Windows Lua configuration even on a C99
+-- compiler. Keep digit selection and modifier rejection in Titan.
+local function render_lua_hex_number(form: string,
+                                     number: foreign lua_Number): string
+  if #form ~= 2 then
+    raise "modifiers for format '%a'/'%A' not implemented"
+  end
+  local rendered = ""
+  if number ~= number or
+      (number ~= 0 and number + number == number) then
+    rendered = render_native_number(ffi.LUA_NUMBER_FMT as string, number)
+  elseif number == 0 then
+    rendered = render_native_number(
+      (ffi.LUA_NUMBER_FMT as string) .. "x0p+0", number)
+  else
+    local exponent: foreign int = 0 as foreign int
+    local fraction = ffi.frexp(number, exponent) as float
+    local builder = new_string_builder()
+    if fraction < 0 then
+      builder_append(builder, "-")
+      fraction = -fraction
+    end
+    builder_append(builder, "0x")
+    local leading_bits = ffi.TITAN_STRING_HEX_LEADING_BITS as integer
+    fraction = fraction * (1 << leading_bits)
+    local digit = (ffi.floor(fraction) as float) as integer
+    builder_append(builder, copy_interval("0123456789abcdef", digit + 1, 1))
+    fraction = fraction - digit
+    if fraction > 0 then
+      local locale = ffi.localeconv()
+      local decimal = locale.decimal_point[0] as foreign unsigned char
+      builder_append(builder, char(decimal as integer))
+      repeat
+        fraction = fraction * 16
+        digit = (ffi.floor(fraction) as float) as integer
+        builder_append(builder, copy_interval("0123456789abcdef", digit + 1, 1))
+        fraction = fraction - digit
+      until fraction == 0
+    end
+    builder_append(builder, render_signed(add_integer_length("p%+d"),
+      ((exponent as integer) - leading_bits) as foreign lua_Integer))
+    rendered = builder_finish(builder)
+  end
+  if form == "%A" then return upper(rendered) end
+  return rendered
+end
+
+local function render_number(form: string,
+                             number: foreign lua_Number): string
+  if ffi.TITAN_STRING_LUA_HEX_FALLBACK ~= 0 then
+    local conversion = copy_interval(form, #form, 1)
+    if conversion == "a" or conversion == "A" then
+      return render_lua_hex_number(form, number)
+    end
+  end
+  return render_native_number(form, number)
 end
 
 local function is_ascii_digit(octet: integer): boolean

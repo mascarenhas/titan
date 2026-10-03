@@ -1961,6 +1961,8 @@ int main(void) {
             assert.same(STDLIB_MODULES, makefile_words("STDLIB_MODULES"))
             assert.same(STDLIB_ROOTS, makefile_words("STDLIB_ROOTS"))
             assert.same(STDLIB_SHIMS, makefile_words("STDLIB_SHIMS"))
+            assert.same({ "titan/string/format_native.h" },
+                makefile_words("STRING_TITAN_HEADERS"))
             assert.same({
                 "$(LTITANLIB_O)", "$(LPEGLABEL_ARCHIVE)",
                 "$(LIBUV_EXTRA_OBJECTS)", "$(LLHTTP_ARCHIVE)",
@@ -3093,7 +3095,7 @@ esac
             }
             for _, ensemble in ipairs({
                 "UV_TITAN_SOURCES", "SQLITE3_TITAN_SOURCES", "JSON_TITAN_SOURCES",
-                "SQLITE3_TITAN_HEADERS",
+                "SQLITE3_TITAN_HEADERS", "STRING_TITAN_HEADERS",
             }) do
                 for _, source in ipairs(makefile_words(ensemble)) do
                     sources[#sources + 1] = source
