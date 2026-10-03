@@ -39,7 +39,8 @@ local function sockaddr_copy(native: foreign const *sockaddr): sockaddr_t?
     -- presence and the family without pretending the remaining bytes exist.
     local storage = foreign sockaddr_storage.new()
     local result = sockaddr_t(storage, 0)
-    result.native.ss_family = native.sa_family
+    local address = result.native as foreign *sockaddr
+    address.sa_family = native.sa_family
     return result
   end
   return sockaddr_copy_sized(native, length)
@@ -91,7 +92,7 @@ function ip_name(address: sockaddr_t): (integer, string?)
 end
 
 function sockaddr_t:family(): integer
-  return self.native.ss_family as integer
+  return (self.native as foreign *sockaddr).sa_family as integer
 end
 
 function sockaddr_t:is_complete(): boolean
@@ -112,11 +113,11 @@ end
 function sockaddr_t:port(): integer
   if self.native.ss_family == ffi.AF_INET then
     local address = self.native as foreign *sockaddr_in
-    return ffi.ntohs(address.sin_port) as integer
+    return ffi.titan_sockaddr_ntohs(address.sin_port) as integer
   end
   if self.native.ss_family ~= ffi.AF_INET6 then raise "IP address required" end
   local address = self.native as foreign *sockaddr_in6
-  return ffi.ntohs(address.sin6_port) as integer
+  return ffi.titan_sockaddr_ntohs(address.sin6_port) as integer
 end
 
 -- Flowinfo uses the native field's numeric representation; no bits are dropped.
@@ -132,12 +133,12 @@ end
 
 function sockaddr_t:set_flowinfo(value: integer)
   if self.native.ss_family ~= ffi.AF_INET6 then raise "IPv6 address required" end
-  (self.native as foreign *sockaddr_in6).sin6_flowinfo = value as foreign uint32_t
+  (self.native as foreign *sockaddr_in6).sin6_flowinfo = value
 end
 
 function sockaddr_t:set_scope_id(value: integer)
   if self.native.ss_family ~= ffi.AF_INET6 then raise "IPv6 address required" end
-  (self.native as foreign *sockaddr_in6).sin6_scope_id = value as foreign uint32_t
+  (self.native as foreign *sockaddr_in6).sin6_scope_id = value
 end
 
 function sockaddr_t:address_bytes(): string

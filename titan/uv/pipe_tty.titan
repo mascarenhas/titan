@@ -60,14 +60,14 @@ end
 
 function pipe_getsockname(handle: pipe_t, buffer: buf_t): (integer, integer)
   if not handle:valid() or not buffer.writable then return ffi.UV_EINVAL, 0 end
-  local length: foreign size_t = buffer.native.len
+  local length: foreign size_t = buffer.native.len as integer
   local status: integer = ffi.uv_pipe_getsockname(handle.native, buffer.native.base, length)
   return status, length
 end
 
 function pipe_getpeername(handle: pipe_t, buffer: buf_t): (integer, integer)
   if not handle:valid() or not buffer.writable then return ffi.UV_EINVAL, 0 end
-  local length: foreign size_t = buffer.native.len
+  local length: foreign size_t = buffer.native.len as integer
   local status: integer = ffi.uv_pipe_getpeername(handle.native, buffer.native.base, length)
   return status, length
 end

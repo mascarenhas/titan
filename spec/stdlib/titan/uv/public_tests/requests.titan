@@ -174,3 +174,41 @@ function test_dns_callback_error_preserves_result_cleanup(_context: test.Context
   uv.freeaddrinfo(result)
   success(uv.run(loop))
 end
+
+local function check_address_port(context: test.Context, name: string, port: integer)
+  context:run(name .. "_ipv4", function (_child: test.Context)
+    local status, address? = uv.ip4_addr("127.0.0.1", port)
+    success(status)
+    test.assert(address:port() == port, "IPv4 port changed byte order")
+  end)
+  context:run(name .. "_ipv6", function (_child: test.Context)
+    local status, address? = uv.ip6_addr("::1", port)
+    success(status)
+    test.assert(address:port() == port, "IPv6 port changed byte order")
+  end)
+end
+
+function test_address_port_uses_native_byte_order(context: test.Context)
+  check_address_port(context, "zero", 0)
+  check_address_port(context, "one", 1)
+  check_address_port(context, "mixed_bytes", 0x1234)
+  check_address_port(context, "maximum", 65535)
+end
+
+function test_ipv6_fields_preserve_unsigned_values(context: test.Context)
+  local status, address? = uv.ip6_addr("::1", 1234)
+  success(status)
+  test.assert(address:family() == uv.AF_INET6)
+  context:run("flowinfo", function (_child: test.Context)
+    address:set_flowinfo(0xffffffff)
+    test.assert(address:flowinfo() == 0xffffffff)
+    address:set_flowinfo(0)
+    test.assert(address:flowinfo() == 0)
+  end)
+  context:run("scope_id", function (_child: test.Context)
+    address:set_scope_id(0xffffffff)
+    test.assert(address:scope_id() == 0xffffffff)
+    address:set_scope_id(0)
+    test.assert(address:scope_id() == 0)
+  end)
+end

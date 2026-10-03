@@ -24,6 +24,9 @@ for library in libuv libllhttp libsqlite3 libssl libcrypto; do
   [[ -f $prefix/lib/$library.dll.a ]]
   TITAN_EXTRA_LDFLAGS="${TITAN_EXTRA_LDFLAGS:-} \"$winprefix/lib/$library.dll.a\""
 done
+# The private UV address helper calls the Windows byte-order API directly.
+# This import belongs to the provider, not to ordinary compiled Titan clients.
+TITAN_EXTRA_LDFLAGS="${TITAN_EXTRA_LDFLAGS:-} -lws2_32"
 export TITAN_EXTRA_LDFLAGS
 # These are native argv/paths. In particular, import archives are final linker
 # arguments; they must not be scanned as Titan static providers or -X payload.
