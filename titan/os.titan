@@ -1331,7 +1331,7 @@ local function os_shell_command(command: string): (string, {string})
     if status == uv.ENOBUFS then capacity = sizes[0] as integer
     else
       check_status(status, "process.shell.directory")
-      directory = bytes as string
+      directory = (bytes as foreign *char) as string
       break
     end
   end

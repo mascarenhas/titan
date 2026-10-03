@@ -1,9 +1,7 @@
 local function exit_options(first: uv.pipe_t, second: uv.pipe_t?): uv.process_options_t
-  local status, system? = uv.os_uname()
-  success(status)
   local file = "/bin/sh"
   local args = {"sh", "-c", "exit 0"}
-  if system.sysname == "Windows_NT" then
+  if common.is_windows() then
     local found, shell?, _size = uv.os_getenv("ComSpec", 32768)
     if found ~= 0 or shell == nil then
       test.skip("capability: Windows command interpreter is unavailable in ComSpec")

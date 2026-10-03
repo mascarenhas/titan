@@ -1,3 +1,5 @@
+local common = import "support.common.titan"
+
 local function install_unref_timer(loop: uv.loop_t, weak: {value: value})
   local timer = uv.timer_t()
   success(uv.timer_init(loop, timer))
@@ -157,7 +159,7 @@ function test_callbacks_use_ordinary_callable_adaptation(context: test.Context)
   end)
 end
 
-local function callback_failure(payload: value, expected: value)
+local function callback_failure(context: test.Context, payload: value, expected: value)
   local loop = new_loop()
   defer finish_loop(loop)
   local timer = uv.timer_t()
@@ -172,21 +174,28 @@ local function callback_failure(payload: value, expected: value)
   catch
     caught = true
     test.assert(error == expected, "callback error value changed at run boundary")
-    test.assert(strings.find(traceback, "callback_failure", 1, true) ~= nil,
-                "callback traceback was lost")
+    test.assert(#traceback > 0, "callback traceback was lost")
+    local trace = traceback
+    context:run("symbolic_frame", function (_child: test.Context)
+      if common.is_windows() then
+        test.skip("unsupported: native Windows tracebacks retain raw addresses without Titan symbols")
+      end
+      test.assert(strings.find(trace, "callback_failure", 1, true) ~= nil,
+                  "callback traceback lost its Titan frame")
+    end)
   end
   test.assert(caught, "callback failure was swallowed")
   success(uv.run(loop))
 end
 
 function test_callback_errors_preserve_false_nil_and_trace(context: test.Context)
-  context:run("false", function (_child: test.Context) callback_failure(false, false) end)
-  context:run("nil", function (_child: test.Context)
+  context:run("false", function (child: test.Context) callback_failure(child, false, false) end)
+  context:run("nil", function (child: test.Context)
     -- Lua 5.5 normalizes a raised nil before Titan's catch sees it.
-    callback_failure(nil, "<no error object>")
+    callback_failure(child, nil, "<no error object>")
   end)
-  context:run("string", function (_child: test.Context)
-    callback_failure("callback sentinel", "callback sentinel")
+  context:run("string", function (child: test.Context)
+    callback_failure(child, "callback sentinel", "callback sentinel")
   end)
 end
 
