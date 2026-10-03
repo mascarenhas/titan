@@ -443,6 +443,59 @@ assert(constructor(4):read() == 14 and folder.calls == 4)
         assert.truthy(ok, output)
     end)
 
+    for _, mode in ipairs({"dynamic", "static"}) do
+        it("imports arbitrary custom constructor results from a " .. mode .. " provider", function()
+            local provider = "factory_api_" .. mode
+            local consumer = "factory_client_" .. mode
+            local provider_source = source_root .. "/" .. provider .. ".titan"
+            write_file(provider_source, [[
+record Factory
+    unused: integer
+end
+
+function Factory.new(text: string): (integer, string?, string)
+    return #text, nil, text
+end
+
+type Alias = Factory
+]])
+            compile(provider)
+            assert.truthy(os.remove(provider_source))
+            local unselected = workspace .. "/" .. provider ..
+                (mode == "dynamic" and ".a" or ".so")
+            assert.truthy(os.remove(unselected))
+            assert.is_nil(lfs.attributes(provider_source))
+            assert.is_nil(lfs.attributes(unselected))
+            write_file(source_root .. "/" .. consumer .. ".titan", string.format([[
+local provider = import %q
+
+function positional(): (integer, string?, string)
+    return provider.Factory("positional")
+end
+
+function named(): (integer, string?, string)
+    return provider.Alias{text = "named"}
+end
+
+function string_argument(): (integer, string?, string)
+    return provider.Factory "string"
+end
+]], provider))
+            compile(consumer)
+            local script = string.format([[
+package.cpath = %q .. "/?.so;" .. package.cpath
+local consumer = require %q
+for name, expected in pairs({positional = "positional", named = "named", string_argument = "string"}) do
+    local results = table.pack(consumer[name]())
+    assert(results.n == 3)
+    assert(results[1] == #expected and results[2] == nil and results[3] == expected)
+end
+]], workspace, consumer)
+            local ok, output = run({LUA, "-e", script}, workspace)
+            assert.truthy(ok, output)
+        end)
+    end
+
     it("uses a collision-free executable for a folder main", function()
         local folder = source_root .. "/programs/folderapp"
         write_file(folder .. "/folderapp.titan", [[

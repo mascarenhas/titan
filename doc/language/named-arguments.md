@@ -264,9 +264,10 @@ constructor semantics rather than named-call semantics: if an explicit field
 is repeated, both expressions are evaluated in source order and the last store
 wins.
 
-A record with any local field still cannot be constructed with `{...}` outside
-its declaring module, even if every local field could accept `nil`. Inside the
-declaring module, omitted public and local fields follow the same nil rule.
+A raw literal requires visibility of every field, even if every hidden field
+could accept `nil`. Inside the declaring module, omitted public and local
+fields follow the same nil rule. An overridden `new` restricts raw literals to
+the defining module regardless of visibility, including through source imports.
 
 See [Records](records.md#creating-records) for the two record construction forms.
 

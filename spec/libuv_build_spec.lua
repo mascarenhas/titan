@@ -1422,7 +1422,7 @@ done
             "cancel_action: CancelAction?)",
             "local function run_internal(func: function (): (value)): " ..
             "Task<|value, value|>",
-            "Task<|value, value|>.new(",
+            "Task<|value, value|>(",
         }) do
             assert.truthy(task:find(contract, 1, true), contract)
         end
@@ -1438,7 +1438,7 @@ done
             "function suspend(token: ResumeToken,",
             "cancel_action: SuspendCancelAction?)",
             "function channel<|T|>(size: integer?):",
-            "ResumeToken.new(\"channel\")",
+            "ResumeToken(\"channel\")",
             "local transfer: {T} = {}",
             "local send: function (T): ()",
             "local receive: function (): (T)",
@@ -1911,7 +1911,7 @@ int main(void) {
                 "\nlocal WATCHER_IDLE", realpath_start, true))
             local realpath = source:sub(realpath_start, realpath_stop - 1)
             assert_ordered(realpath,
-                'local resume_token = uv.ResumeToken.new("fs.realpath")',
+                'local resume_token = uv.ResumeToken("fs.realpath")',
                 "local cancel_action = function ()",
                 "defer cancel_action()",
                 "local status = ffi.uv_fs_realpath(",
@@ -1942,7 +1942,7 @@ int main(void) {
                 "function Watcher:poll(): {WatcherEvent}", 1, true))
             local poll = source:sub(poll_start)
             assert_ordered(poll,
-                'local resume_token = uv.ResumeToken.new("fs.watcher")',
+                'local resume_token = uv.ResumeToken("fs.watcher")',
                 "local cancel_action = function ()",
                 "defer cancel_action()",
                 "self.resume_token = resume_token",
@@ -5252,8 +5252,8 @@ done
                     assert.is_true(tonumber(seconds) >= 0)
                 end
             end
-            assert.same({ 32, 36, 32, 43 }, shard_counts)
-            assert.equal(143, assigned_count)
+            assert.same({ 32, 36, 32, 44 }, shard_counts)
+            assert.equal(144, assigned_count)
 
             local stress_partition = read_file(
                 "spec/support/ci_compiler_stress_files.txt")
