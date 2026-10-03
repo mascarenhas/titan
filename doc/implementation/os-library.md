@@ -97,10 +97,9 @@ without exposing UV internals. The Windows shell uses the system-directory
 helper rather than duplicating transport policy.
 
 Configuration creation and spawn reject an async Runtime whose closing flag is
-set. Spawn remains synchronous and deliberately introduces no ordinary
-cancellation checkpoint: pending Task cancellation alone does not forbid
-spawning a child. It still requires a running Task, so a native callback cannot
-bypass that boundary. See `async.is_closing()` for the observation used here.
+set. Spawn deliberately introduces no ordinary cancellation checkpoint:
+pending Task cancellation alone does not forbid spawning a child. It still
+requires a running Task, so a native callback cannot bypass that boundary. See `async.is_closing()` for the observation used here.
 
 The configuration retains lexical ownership until native spawn, captured-read
 registration, and result construction are ready for publication. One private
