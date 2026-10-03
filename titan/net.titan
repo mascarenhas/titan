@@ -1,16 +1,184 @@
-local uv = import "uv.titan"
+local uv = import "uv"
+local async = import "async"
 local string = import "string"
 
 -- Stream payloads are binary strings, so delimiter handling uses the string
 -- library's length-aware literal search and slicing operations.
 
 record Connection
-  local handle: uv.uv_tcp_t
+  local handle: uv.tcp_t
+  local loop: uv.loop_t
   local excess: string
+  local input: async.BufferedSubscription<|string, value|>?
+  local start_read: (function (): integer)?
+  local started: boolean
 end
 
 record Server
-  local handle: uv.uv_tcp_t
+  local handle: uv.tcp_t
+  local loop: uv.loop_t
+  local clients: async.BufferedSubscription<|Connection, value|>?
+  local failure: value
+  local start_listen: (function (integer): integer)?
+end
+
+local function is_closed(handle: uv.handle_t): boolean
+  return not handle:is_initialized() or uv.is_closing(handle)
+end
+
+local function operation_error(code: integer, operation: string): async.OperationError
+  return async.OperationError(code, uv.err_name(code), uv.strerror(code), operation)
+end
+
+local function check_status(code: integer, operation: string)
+  if code < 0 then raise operation_error(code, operation) end
+end
+
+local function validate(handle: uv.tcp_t, loop: uv.loop_t, operation: string)
+  async.running()
+  if loop ~= async.current_loop() then
+    raise "TCP resource belongs to a different async Runtime"
+  end
+  if is_closed(handle:as_handle_t()) then
+    raise "cannot " .. operation .. " a closed TCP resource"
+  end
+end
+
+local function close_handle(handle: uv.handle_t)
+  if is_closed(handle) then return end
+  async.await_cleanup<|nil, nil|>(function (resolve, _reject, fatal)
+    local callback = function (_: uv.handle_t)
+      do resolve(nil)
+      catch fatal(error, traceback); raise end
+    end
+    uv.close(handle, callback)
+  end)
+end
+
+-- Unpublished sockets have no reader. Native close retains their owner; failed
+-- connection candidates and queued accepts need not await each close callback.
+local function abandon(connection: Connection)
+  local handle = connection.handle:as_handle_t()
+  if not is_closed(handle) then uv.close(handle) end
+end
+
+local function new_connection(loop: uv.loop_t): Connection
+  local tcp = uv.tcp_t.new()
+  local stream = tcp:as_stream_t()
+  local handle = tcp:as_handle_t()
+  local connection = Connection(tcp, loop, "", nil, nil, false)
+  connection.input = async.BufferedSubscription<|string, value|>(function (publish, fail, finish)
+    local stop = function ()
+      if connection.started then uv.read_stop(stream) end
+    end
+    local close = function (drain: function (): async.SubscriptionBatch<|string|>)
+      drain()
+      close_handle(handle)
+    end
+    local actions = async.SubscriptionActions<|string|>(stop, close)
+    local allocate = function (_: uv.handle_t, suggested: integer): uv.buf_t
+      return uv.buf_t.allocate(suggested)
+    end
+    local receive = function (_: uv.stream_t, count: integer, buffer: uv.buf_t?)
+      if count == 0 then return end
+      if count > 0 then
+        publish(buffer:to_string(count))
+      else
+        uv.read_stop(stream)
+        if count == uv.EOF then finish()
+        else fail(operation_error(count, "net.read")) end
+      end
+    end
+    connection.start_read = function (): integer
+      return uv.read_start(stream, allocate, receive)
+    end
+    return actions
+  end)
+  check_status(uv.tcp_init(loop, tcp), "net.tcp.init")
+  return connection
+end
+
+local function resolve_addresses(host: string, port: integer): {uv.sockaddr_t}
+  if string.find(host, "\0") ~= nil then raise operation_error(uv.EINVAL, "net.resolve") end
+  local loop = async.current_loop()
+  local request = uv.getaddrinfo_t.new()
+  local hints = uv.addrinfo_hints_t(uv.AI_NUMERICSERV, uv.AF_UNSPEC, uv.SOCK_STREAM, uv.IPPROTO_TCP)
+  -- The request retains an allocated result even if the binding's result copy
+  -- fails before our callback. Retire it from the Task's lexical cleanup too.
+  defer do
+    local _, retained = request:addrinfo()
+    uv.freeaddrinfo(retained)
+  end
+  local result = async.await<|{uv.sockaddr_t}, integer|>(function (resolve, reject, fatal)
+    local callback = function (_: uv.getaddrinfo_t, status: integer, native: uv.addrinfo_result_t?)
+      do
+        local addresses: {uv.sockaddr_t} = {}
+        do
+          defer uv.freeaddrinfo(native)
+          if status >= 0 then
+            local entries = native:entries()
+            for index = 1, #entries do
+              local entry = entries[index]
+              if entry.ai_addr ~= nil and
+                 (entry.ai_family == uv.AF_INET or entry.ai_family == uv.AF_INET6) then
+                addresses[#addresses + 1] = entry.ai_addr
+              end
+            end
+          end
+        end
+        if status < 0 then reject(status)
+        elseif #addresses == 0 then reject(uv.EADDRNOTAVAIL)
+        else resolve(addresses) end
+      catch fatal(error, traceback); raise end
+    end
+    local status = uv.getaddrinfo(loop, request, callback, host, "" .. port, hints)
+    if status < 0 then reject(status) end
+  end)
+  case result
+  when success(addresses) then return addresses
+  when error(code) then raise operation_error(code, "net.resolve")
+  end
+end
+
+local function fail_server(server: Server, failure: value)
+  server.failure = failure
+  local pending = server.clients:drain_pending()
+  for index = 1, pending.count do abandon(pending:get(index)) end
+  local handle = server.handle:as_handle_t()
+  if not is_closed(handle) then uv.close(handle) end
+  server.clients:stop()
+end
+
+local function new_server(loop: uv.loop_t): Server
+  local tcp = uv.tcp_t.new()
+  local handle = tcp:as_handle_t()
+  local server = Server(tcp, loop, nil, nil, nil)
+  server.clients = async.BufferedSubscription<|Connection, value|>(function (publish, _fail, _finish)
+    local actions = async.SubscriptionActions<|Connection|>(function () end,
+      function (drain: function (): async.SubscriptionBatch<|Connection|>)
+        local pending = drain()
+        for index = 1, pending.count do abandon(pending:get(index)) end
+        close_handle(handle)
+      end)
+    local callback = function (_: uv.stream_t, status: integer)
+      local client: Connection? = nil
+      defer if client ~= nil then abandon(client) end
+      if status < 0 then fail_server(server, operation_error(status, "net.accept")); return end
+      client = new_connection(loop)
+      local accepted = uv.accept(tcp:as_stream_t(), client.handle:as_handle_t())
+      if accepted < 0 then fail_server(server, operation_error(accepted, "net.accept")); return end
+      if publish(client) then client = nil end
+    catch
+      fail_server(server, error)
+      raise
+    end
+    server.start_listen = function (backlog: integer): integer
+      return uv.listen(tcp:as_stream_t(), backlog, callback)
+    end
+    return actions
+  end)
+  check_status(uv.tcp_init(loop, tcp), "net.tcp.init")
+  return server
 end
 
 local function check_host(host: string)
@@ -30,7 +198,7 @@ local function check_listen_port(port: integer)
 end
 
 local function read(connection: Connection): string?
-  if uv.net_is_closed(connection.handle) then
+  if is_closed(connection.handle:as_handle_t()) then
     connection.excess = ""
     return nil
   end
@@ -39,13 +207,58 @@ local function read(connection: Connection): string?
     connection.excess = ""
     return result
   end
-  return uv.net_read(connection.handle)
+  validate(connection.handle, connection.loop, "read from")
+  -- The old ordinary wait injected cancellation before checking reader
+  -- contention or accepting the first persistent read.
+  async.await<|nil, nil|>(function (resolve, _reject, _fatal) resolve(nil) end)
+  if connection.input:has_waiter() then raise "Connection already has a waiting reader" end
+  if not connection.started then
+    check_status(connection.start_read(), "net.read.start")
+    connection.started = true
+  end
+  case connection.input:next()
+  when item(bytes) then return bytes
+  when error(failure) then raise failure
+  when ended() then return nil
+  when closed() then return nil
+  end
 end
 
 function connect(host: string, port: integer): Connection
   check_host(host)
   check_connect_port(port)
-  return Connection(uv.net_connect(host, port), "")
+  async.running()
+  local loop = async.current_loop()
+  local addresses = resolve_addresses(host, port)
+  local last_failure: value = nil
+  for index = 1, #addresses do
+    local connection = new_connection(loop)
+    local transferred = false
+    do
+      defer if not transferred then abandon(connection) end
+      local request = uv.connect_t.new()
+      local address = addresses[index]
+      case async.await<|nil, integer|>(function (resolve, reject, fatal)
+        local callback = function (_: uv.connect_t, status: integer)
+          do
+            if status < 0 then reject(status) else resolve(nil) end
+          catch fatal(error, traceback); raise end
+        end
+        local status = uv.tcp_connect(request, connection.handle, address, callback)
+        if status < 0 then reject(status) end
+      end)
+      when success() then
+      when error(code) then raise operation_error(code, "net.connect")
+      end
+      transferred = true
+      return connection
+    catch
+      if not (error is async.OperationError) then raise end
+      last_failure = error
+    end
+  end
+  if last_failure ~= nil then raise last_failure end
+  raise operation_error(uv.EADDRNOTAVAIL, "net.connect")
 end
 
 function listen(host: string, port: integer,
@@ -55,7 +268,26 @@ function listen(host: string, port: integer,
   local actual_backlog = 128
   if backlog then actual_backlog = backlog as integer end
   if actual_backlog <= 0 then raise "listen backlog must be positive" end
-  return Server(uv.net_listen(host, port, actual_backlog))
+  if actual_backlog > 2147483647 then
+    raise "TCP listen backlog is not representable by libuv"
+  end
+  async.running()
+  local loop = async.current_loop()
+  local addresses = resolve_addresses(host, port)
+  local last_status = uv.EADDRNOTAVAIL
+  for index = 1, #addresses do
+    local server = new_server(loop)
+    local transferred = false
+    defer if not transferred then
+      local handle = server.handle:as_handle_t()
+      if not is_closed(handle) then uv.close(handle) end
+    end
+    local status = uv.tcp_bind(server.handle, addresses[index], 0)
+    if status >= 0 then status = server.start_listen(actual_backlog) end
+    if status >= 0 then transferred = true; return server end
+    last_status = status
+  end
+  raise operation_error(last_status, "net.listen")
 end
 
 function Connection:read(): string?
@@ -64,7 +296,7 @@ end
 
 function Connection:read_until(delimiter: string,
                                chop: boolean?): string?
-  if uv.net_is_closed(self.handle) then
+  if is_closed(self.handle:as_handle_t()) then
     self.excess = ""
     return nil
   end
@@ -111,22 +343,69 @@ function Connection:read_until(delimiter: string,
 end
 
 function Connection:write(data: string)
-  uv.net_write(self.handle, data)
+  validate(self.handle, self.loop, "write to")
+  local stream = self.handle:as_stream_t()
+  if not uv.is_writable(stream) then raise "cannot write after Connection shutdown" end
+  if #data == 0 then return end
+  local request = uv.write_t.new()
+  local buffers = {uv.buf_t.from_string(data)}
+  case async.await<|nil, integer|>(function (resolve, reject, fatal)
+    local callback = function (_: uv.write_t, status: integer)
+      do
+        if status < 0 then reject(status) else resolve(nil) end
+      catch fatal(error, traceback); raise end
+    end
+    local status = uv.write(request, stream, buffers, callback)
+    if status < 0 then reject(status) end
+  end)
+  when success() then
+  when error(code) then raise operation_error(code, "net.write")
+  end
 end
 
 function Connection:shutdown()
-  uv.net_shutdown(self.handle)
+  validate(self.handle, self.loop, "shut down")
+  local stream = self.handle:as_stream_t()
+  if not uv.is_writable(stream) then return end
+  local request = uv.shutdown_t.new()
+  case async.await<|nil, integer|>(function (resolve, reject, fatal)
+    local callback = function (_: uv.shutdown_t, status: integer)
+      do
+        if status < 0 then reject(status) else resolve(nil) end
+      catch fatal(error, traceback); raise end
+    end
+    local status = uv.shutdown(request, stream, callback)
+    if status < 0 then reject(status) end
+  end)
+  when success() then
+  when error(code) then raise operation_error(code, "net.shutdown")
+  end
 end
 
 function Connection:close()
   self.excess = ""
-  uv.net_close(self.handle)
+  if is_closed(self.handle:as_handle_t()) then return end
+  validate(self.handle, self.loop, "close")
+  self.input:close()
 end
 
 function Server:accept(): Connection
-  return Connection(uv.net_accept(self.handle), "")
+  if self.failure ~= nil then raise self.failure end
+  validate(self.handle, self.loop, "accept on")
+  async.await<|nil, nil|>(function (resolve, _reject, _fatal) resolve(nil) end)
+  if self.clients:has_waiter() then raise "Server already has a waiting accept Task" end
+  local result = self.clients:next()
+  if self.failure ~= nil then raise self.failure end
+  case result
+  when item(connection) then return connection
+  when error(failure) then raise failure
+  when ended() then raise operation_error(uv.ECANCELED, "net.accept")
+  when closed() then raise operation_error(uv.ECANCELED, "net.accept")
+  end
 end
 
 function Server:close()
-  uv.net_close(self.handle)
+  if is_closed(self.handle:as_handle_t()) then return end
+  validate(self.handle, self.loop, "close")
+  self.clients:close()
 end

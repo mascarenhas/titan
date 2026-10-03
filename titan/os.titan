@@ -1,4 +1,9 @@
-local uv = import "uv.titan"
+local uv = import "uv"
+local async = import "async"
+local iteration = import "iteration"
+foreign import "os_platform.h"
+foreign import "os_environment.h"
+foreign type ParentStdioProbe = titan_parent_stdio_probe
 local string = import "string"
 foreign import "time.h"
 foreign import "locale.h"
@@ -34,19 +39,19 @@ record ExitStatus
 end
 
 record SpawnConfig
-  local handle: uv.uv_spawn_config
+  local handle: ProcessConfig
 end
 
 type SpawnOption = function (SpawnConfig): (integer)
 
 record InputStream
-  local handle: uv.uv_stdio_t?
+  local handle: Stdio?
   local parent_descriptor: integer
   local excess: string
 end
 
 record OutputStream
-  local handle: uv.uv_stdio_t?
+  local handle: Stdio?
   local parent_descriptor: integer
 end
 
@@ -55,7 +60,7 @@ end
 -- contains the private pipe/TTY handle union; provenance and ownership remain
 -- ordinary metadata and never determine the native stream kind.
 record Process
-  local handle: uv.uv_process_t
+  local handle: ProcessOwner
   stdin: OutputStream?
   stdout: InputStream?
   stderr: InputStream?
@@ -189,18 +194,18 @@ local function locale_category(name: string): foreign int
   raise "invalid locale category '" .. name .. "'"
 end
 
-local function parent_stdio(descriptor: integer): uv.uv_stdio_t
+local function parent_stdio(descriptor: integer): Stdio
   if descriptor < 0 or descriptor > 2 then
     raise "internal parent stdio descriptor is invalid"
   end
-  return uv.os_parent_stdio(descriptor)
+  return os_parent_stdio(descriptor)
 end
 
-local function input_handle(stream: InputStream): uv.uv_stdio_t
+local function input_handle(stream: InputStream): Stdio
   if stream.parent_descriptor < 0 then
     local captured? = stream.handle
     if not captured then raise "InputStream is closed" end
-    return captured as uv.uv_stdio_t
+    return captured as Stdio
   end
   local handle = parent_stdio(stream.parent_descriptor)
   local previous? = stream.handle
@@ -211,11 +216,11 @@ local function input_handle(stream: InputStream): uv.uv_stdio_t
   return handle
 end
 
-local function output_handle(stream: OutputStream): uv.uv_stdio_t
+local function output_handle(stream: OutputStream): Stdio
   if stream.parent_descriptor < 0 then
     local captured? = stream.handle
     if not captured then raise "OutputStream is closed" end
-    return captured as uv.uv_stdio_t
+    return captured as Stdio
   end
   local handle = parent_stdio(stream.parent_descriptor)
   stream.handle = handle
@@ -234,7 +239,7 @@ local function read_stream(stream: InputStream): string?
     stream.excess = ""
     return result
   end
-  return uv.os_stdio_read(handle)
+  return os_stdio_read(handle)
 end
 
 local function read_input_until(stream: InputStream, delimiter: string,
@@ -284,7 +289,7 @@ local function read_input_until(stream: InputStream, delimiter: string,
 end
 
 function clock(): float
-  return uv.os_clock()
+  return os_clock()
 end
 
 function difftime(later: integer, earlier: integer): float
@@ -304,7 +309,7 @@ function date(format: string?, timestamp: integer?): value
     actual_format = string.sub(actual_format, 2)
   end
 
-  local instant = uv.os_time() as foreign time_t
+  local instant = os_time() as foreign time_t
   if timestamp then
     instant = (timestamp as integer) as foreign time_t
   end
@@ -366,7 +371,7 @@ function time(year: integer?, month: integer?, day: integer?,
     if isdst == true or isdst == false then
       raise "time requires year, month, and day together"
     end
-    return uv.os_time()
+    return os_time()
   end
   if not year or not month or not day then
     raise "time requires year, month, and day together"
@@ -401,87 +406,87 @@ function time(year: integer?, month: integer?, day: integer?,
 end
 
 function getenv(name: string): string?
-  return uv.os_getenv(name)
+  return os_getenv(name)
 end
 
 function setenv(name: string, contents: string)
-  uv.os_setenv(name, contents)
+  os_setenv(name, contents)
 end
 
 function unsetenv(name: string)
-  uv.os_unsetenv(name)
+  os_unsetenv(name)
 end
 
 function cwd(): string
-  return uv.current_directory("os.cwd")
+  return current_directory("os.cwd")
 end
 
 function chdir(path: string)
-  uv.change_directory(path, "os.chdir")
+  change_directory(path, "os.chdir")
 end
 
 function homedir(): string
-  return uv.os_homedir()
+  return os_homedir()
 end
 
 function tmpdir(): string
-  return uv.os_tmpdir()
+  return os_tmpdir()
 end
 
 function hostname(): string
-  return uv.os_hostname()
+  return os_hostname()
 end
 
 function exepath(): string
-  return uv.os_exepath()
+  return os_exepath()
 end
 
 function pid(): integer
-  return uv.os_pid()
+  return os_pid()
 end
 
 function ppid(): integer
-  return uv.os_ppid()
+  return os_ppid()
 end
 
 function with_stdin(config: SpawnConfig): integer
-  return uv.configure_capture(config.handle, 0)
+  return configure_capture(config.handle, 0)
 end
 
 function with_stdout(config: SpawnConfig): integer
-  return uv.configure_capture(config.handle, 1)
+  return configure_capture(config.handle, 1)
 end
 
 function with_stderr(config: SpawnConfig): integer
-  return uv.configure_capture(config.handle, 2)
+  return configure_capture(config.handle, 2)
 end
 
 function with_parent_stdin(config: SpawnConfig): integer
-  return uv.configure_parent(config.handle, 0)
+  return configure_parent(config.handle, 0)
 end
 
 function with_parent_stdout(config: SpawnConfig): integer
-  return uv.configure_parent(config.handle, 1)
+  return configure_parent(config.handle, 1)
 end
 
 function with_parent_stderr(config: SpawnConfig): integer
-  return uv.configure_parent(config.handle, 2)
+  return configure_parent(config.handle, 2)
 end
 
 function with_merged_output(config: SpawnConfig): integer
-  return uv.os_spawn_config_with_merged_output(config.handle)
+  return os_spawn_config_with_merged_output(config.handle)
 end
 
 function with_env(name: string, contents: string): SpawnOption
   return function (config: SpawnConfig): integer
-    return uv.os_spawn_config_with_env(config.handle, name, contents)
+    return os_spawn_config_with_env(config.handle, name, contents)
   end
 end
 
 function spawn(file: string, args: {string},
                ...: SpawnOption): Process
-  local config = SpawnConfig(uv.os_spawn_config_new())
-  defer uv.os_spawn_config_close(config.handle)
+  local config = SpawnConfig(os_spawn_config_new())
+  defer os_spawn_config_close(config.handle)
   local status = with_stdin(config)
   if status >= 0 then status = with_stdout(config) end
   if status >= 0 then status = with_stderr(config) end
@@ -492,69 +497,73 @@ function spawn(file: string, args: {string},
     index = index + 1
   end
   if status < 0 then
-    uv.os_spawn_config_error(config.handle, status)
+    os_spawn_config_error(config.handle, status)
   end
   local process_handle, raw_stdin?, raw_stdout?, raw_stderr? =
-    uv.os_process_spawn_with_config(file, args, config.handle)
+    os_process_spawn_with_config(file, args, config.handle)
 
   local input: OutputStream? = nil
   if raw_stdin then
-    local stdio = raw_stdin as uv.uv_stdio_t
+    local stdio = raw_stdin as Stdio
     input = OutputStream { handle = stdio, parent_descriptor = -1 }
   end
 
   local output: InputStream? = nil
   if raw_stdout then
-    local stdio = raw_stdout as uv.uv_stdio_t
+    local stdio = raw_stdout as Stdio
     output = InputStream { handle = stdio, parent_descriptor = -1, excess = "" }
   end
 
   local diagnostics: InputStream? =
-    (function (stderr: uv.uv_stdio_t?, stdout: uv.uv_stdio_t?,
+    (function (stderr: Stdio?, stdout: Stdio?,
                output: InputStream?): InputStream?
       if not stderr then return nil end
       if stdout and stderr == stdout then return output end
       return InputStream { handle = stderr, parent_descriptor = -1, excess = "" }
     end)(raw_stderr, raw_stdout, output)
 
-  return Process {
+  local result = Process {
     handle = process_handle,
     stdin = input,
     stdout = output,
     stderr = diagnostics,
   }
+  local empty_slots: {SpawnSlot} = {}
+  config.handle.slots = empty_slots
+  config.handle.consumed = true
+  return result
 end
 
 -- Only io.popen selects shell syntax. Ordinary spawn keeps libuv's normal argv
 -- quoting; the source-private option is not part of the public SpawnOption API.
 local function with_shell_arguments(config: SpawnConfig): integer
-  return uv.os_spawn_config_for_shell(config.handle)
+  return os_spawn_config_for_shell(config.handle)
 end
 
 local function spawn_shell(command: string): Process
-  local file, args = uv.os_shell_command(command)
+  local file, args = os_shell_command(command)
   return spawn(file, args, with_stdin, with_merged_output, with_shell_arguments)
 end
 
 function Process:wait(): ExitStatus
-  local code, signal_number = uv.os_process_wait(self.handle)
+  local code, signal_number = os_process_wait(self.handle)
   return ExitStatus {
     code = code,
-    signal = uv.signal_name(signal_number),
+    signal = signal_name(signal_number),
     signal_number = signal_number,
   }
 end
 
 function Process:kill(signal: string)
-  uv.os_process_kill(self.handle, signal)
+  os_process_kill(self.handle, signal)
 end
 
 function Process:is_running(): boolean
-  return uv.os_process_is_running(self.handle)
+  return os_process_is_running(self.handle)
 end
 
 function OutputStream:write(data: string)
-  uv.os_stdio_write(output_handle(self), data)
+  os_stdio_write(output_handle(self), data)
 end
 
 function OutputStream:close()
@@ -562,11 +571,11 @@ function OutputStream:close()
   local captured? = self.handle
   if not captured then return end
   self.handle = nil
-  uv.os_stdio_close(captured as uv.uv_stdio_t)
+  os_stdio_close(captured as Stdio)
 end
 
 function OutputStream:is_tty(): boolean
-  return uv.os_stdio_is_tty(output_handle(self))
+  return os_stdio_is_tty(output_handle(self))
 end
 
 function InputStream:read(): string?
@@ -585,19 +594,858 @@ function InputStream:close()
   if not captured then return end
   self.handle = nil
   self.excess = ""
-  uv.os_stdio_close(captured as uv.uv_stdio_t)
+  os_stdio_close(captured as Stdio)
 end
 
 function InputStream:is_tty(): boolean
-  return uv.os_stdio_is_tty(input_handle(self))
+  return os_stdio_is_tty(input_handle(self))
 end
 
 function exit(code: integer?)
   local actual_code = 0
   if code then actual_code = code as integer end
-  uv.os_exit(actual_code)
+  os_exit(actual_code)
 end
 
 function wait_signal(name: string): string
-  return uv.os_wait_signal(name)
+  return os_wait_signal(name)
+end
+
+-- Domain ownership stays here. Public uv owns native callback storage; async
+-- owns waits and subscription queues, never process or stdio policy.
+local record Stdio
+  native: uv.stream_t
+  loop: uv.loop_t
+  reads: async.BufferedSubscription<|string, async.OperationError|>?
+end
+
+local union SpawnSlot
+  inherit(Stdio)
+  capture(Stdio)
+  merged(child: Stdio, parent: Stdio)
+end
+
+local record SpawnEnvironmentEntry
+  name: string
+  contents: string
+end
+
+local record ProcessConfig
+  loop: uv.loop_t
+  options: uv.process_options_t
+  slots: {SpawnSlot}
+  environment: {SpawnEnvironmentEntry}
+  consumed: boolean
+end
+
+local record ProcessOwner
+  native: uv.process_t
+  loop: uv.loop_t
+  result: ExitStatus?
+  exits: async.CoalescingSubscription<|ExitStatus, async.OperationError|>?
+end
+
+local parent_loop: uv.loop_t? = nil
+local cached_parent_stdio: {Stdio} = {}
+
+local function make_error(code: integer, operation: string): async.OperationError
+  return async.OperationError(code, uv.err_name(code), uv.strerror(code), operation)
+end
+
+local function check_status(code: integer, operation: string)
+  if code < 0 then raise make_error(code, operation) end
+end
+
+local function platform_status(code: integer): integer
+  if code >= 0 then return uv.translate_sys_error(code) end
+  if code == ffi.TITAN_OS_ENOBUFS then return uv.ENOBUFS end
+  if code == ffi.TITAN_OS_ENOMEM then return uv.ENOMEM end
+  if code == ffi.TITAN_OS_EINVAL then return uv.EINVAL end
+  if code == ffi.TITAN_OS_ENAMETOOLONG then return uv.ENAMETOOLONG end
+  if code == ffi.TITAN_OS_EBADF then return uv.EBADF end
+  if code == ffi.TITAN_OS_EMFILE then return uv.EMFILE end
+  if code == ffi.TITAN_OS_ENOTSUP then return uv.ENOTSUP end
+  if code == ffi.TITAN_OS_ENOSYS then return uv.ENOSYS end
+  return uv.UNKNOWN
+end
+
+local function signal_number(name: string): integer
+  local result: integer? = nil
+  if name == "hup" then result = uv.SIGHUP end
+  if name == "int" then result = uv.SIGINT end
+  if name == "quit" then result = uv.SIGQUIT end
+  if name == "kill" then result = uv.SIGKILL end
+  if name == "term" then result = uv.SIGTERM end
+  if name == "usr1" then result = uv.SIGUSR1 end
+  if name == "usr2" then result = uv.SIGUSR2 end
+  return result or 0
+end
+
+local function signal_name(signum: integer): string?
+  if signum == 0 then return nil end
+  for _, name in iteration.ipairs({"hup", "int", "quit", "kill", "term", "usr1", "usr2"}) do
+    if signal_number(name) == signum then return name end
+  end
+  return nil
+end
+
+local function os_sized_buffer(query: function (integer): (integer, string?, integer), operation: string): string?
+  local capacity = 256
+  while true do
+    local status, result?, needed = query(capacity)
+    if status >= 0 then return result end
+    if status == uv.ENOENT then return nil end
+    if status ~= uv.ENOBUFS then raise make_error(status, operation) end
+    capacity = needed
+  end
+  return nil
+end
+
+local function os_clock(): float
+  local status, usage? = uv.getrusage()
+  check_status(status, "os.clock")
+  return usage.ru_utime.tv_sec as float + (usage.ru_utime.tv_usec as float) / 1000000.0 +
+    usage.ru_stime.tv_sec as float + (usage.ru_stime.tv_usec as float) / 1000000.0
+end
+
+local function os_time(): integer
+  local status, current? = uv.gettimeofday()
+  check_status(status, "os.current_time")
+  return current.tv_sec
+end
+
+local function os_getenv(name: string): string?
+  checked_text(name, "os.getenv")
+  return os_sized_buffer(function (capacity: integer): (integer, string?, integer)
+    return uv.os_getenv(name, capacity)
+  end, "os.getenv")
+end
+local function os_setenv(name: string, contents: string)
+  checked_text(name, "os.setenv")
+  checked_text(contents, "os.setenv")
+  check_status(uv.os_setenv(name, contents), "os.setenv")
+end
+local function os_unsetenv(name: string)
+  checked_text(name, "os.unsetenv")
+  check_status(uv.os_unsetenv(name), "os.unsetenv")
+end
+local function current_directory(operation: string): string
+  return os_sized_buffer(uv.cwd, operation) as string
+end
+local function change_directory(path: string, operation: string)
+  checked_text(path, operation)
+  check_status(uv.chdir(path), operation)
+end
+local function os_homedir(): string
+  return os_sized_buffer(uv.os_homedir, "os.homedir") as string
+end
+local function os_tmpdir(): string
+  return os_sized_buffer(uv.os_tmpdir, "os.tmpdir") as string
+end
+local function os_hostname(): string
+  return os_sized_buffer(uv.os_gethostname, "os.hostname") as string
+end
+local function os_exepath(): string
+  if not uv.setup_process_args() then
+    raise "os.exepath is only available in a compiled Titan program"
+  end
+  return os_sized_buffer(function (capacity: integer): (integer, string?, integer)
+    local status, result?, used = uv.exepath(capacity)
+    if status >= 0 and used == capacity - 1 then return uv.ENOBUFS, nil, capacity * 2 end
+    return status, result, used
+  end, "os.exepath") as string
+end
+local function os_pid(): integer return uv.os_getpid() end
+local function os_ppid(): integer return uv.os_getppid() end
+local function os_exit(code: integer) async.request_exit(code) end
+
+local function validate_stdio(stream: Stdio)
+  async.running()
+  if stream.loop ~= async.current_loop() then raise "stdio stream belongs to a different async Runtime" end
+end
+
+local function close_native(handle: uv.handle_t)
+  if stream_is_closed(handle) then return end
+  case async.await_cleanup<|nil, async.OperationError|>(function (resolve, reject, fatal)
+    uv.close(handle, function (_: uv.handle_t)
+      resolve(nil)
+    catch fatal(error, traceback); raise end)
+  end)
+  when success() then
+  when error(failure) then raise failure
+  end
+end
+
+local function discard_unpublished_stdio(stream: Stdio?)
+  if stream ~= nil and not stream_is_closed(stream.native:as_handle_t()) then
+    uv.close(stream.native:as_handle_t(), nil)
+  end
+end
+
+local function new_pipe_stdio(loop: uv.loop_t): (integer, Stdio?)
+  local pipe = uv.pipe_t.new()
+  local stream = Stdio(pipe:as_stream_t(), loop, nil)
+  local status = uv.pipe_init(loop, pipe, 0)
+  if status < 0 then return status, nil end
+  return 0, stream
+end
+
+local function start_stream_read(stream: Stdio, operation: string)
+  if stream.reads ~= nil then return end
+  stream.reads = async.BufferedSubscription<|string, async.OperationError|>.new(function (publish, fail, finish)
+    local actions = async.SubscriptionActions<|string|>(function ()
+      if not stream_is_closed(stream.native:as_handle_t()) then uv.read_stop(stream.native) end
+    end, function (drain)
+      drain()
+      close_native(stream.native:as_handle_t())
+    end)
+    if stream_is_closed(stream.native:as_handle_t()) then finish(); return actions end
+    local status = uv.read_start(stream.native,
+      function (_, size): uv.buf_t return uv.buf_t.allocate(size) end,
+      function (_, count, buffer)
+        if count == 0 then return end
+        if count > 0 then publish(buffer:to_string(count)); return end
+        uv.read_stop(stream.native)
+        discard_unpublished_stdio(stream)
+        if count == uv.EOF then finish() else fail(make_error(count, "stdio.read")) end
+      end)
+    if status < 0 then
+      discard_unpublished_stdio(stream)
+      fail(make_error(status, operation))
+    end
+    return actions
+  end)
+end
+
+local function os_stdio_read(stream: Stdio): string?
+  validate_stdio(stream)
+  cancellation_point()
+  start_stream_read(stream, "stdio.read.start")
+  if stream.reads:has_waiter() then raise "stream already has a waiting reader" end
+  case stream.reads:next()
+  when item(chunk) then return chunk
+  when error(failure) then raise failure
+  when ended() then return nil
+  when closed() then return nil
+  end
+end
+
+local function os_stdio_write(stream: Stdio, data: string)
+  validate_stdio(stream)
+  case async.await<|nil, async.OperationError|>(function (resolve, reject, fatal)
+    if stream_is_closed(stream.native:as_handle_t()) then raise "cannot write to a closed stream" end
+    if #data == 0 then resolve(nil); return end
+    local request = uv.write_t.new()
+    local status = uv.write(request, stream.native, {uv.buf_t.from_string(data)}, function (_: uv.write_t, result: integer)
+      if result < 0 then reject(make_error(result, "stdio.write")) else resolve(nil) end
+    catch fatal(error, traceback); raise end)
+    if status < 0 then reject(make_error(status, "stdio.write")) end
+  end)
+  when success() then
+  when error(failure) then raise failure
+  end
+end
+
+local function os_stdio_close(stream: Stdio)
+  validate_stdio(stream)
+  if stream.reads ~= nil then stream.reads:close()
+  else close_native(stream.native:as_handle_t()) end
+end
+
+local function os_stdio_is_tty(stream: Stdio): boolean
+  validate_stdio(stream)
+  case stream.native
+  when tty() then return true
+  else return false
+  end
+end
+
+local function os_wait_signal(name: string): string
+  local signum = signal_number(name)
+  if signum <= 0 or name == "kill" then raise "unsupported waitable signal name '" .. name .. "'" end
+  cancellation_point()
+  local signal = uv.signal_t.new()
+  local initialized = false
+  local published = false
+  defer if initialized and not published then close_native(signal:as_handle_t()) end
+  local subscription = async.CoalescingSubscription<|string, async.OperationError|>.new(function (publish, fail, finish)
+    local actions = async.SubscriptionActions<|string|>(function ()
+      if not stream_is_closed(signal:as_handle_t()) then uv.signal_stop(signal) end
+    end, function (drain) drain(); close_native(signal:as_handle_t()) end)
+    check_status(uv.signal_init(async.current_loop(), signal), "signal.init")
+    initialized = true
+    check_status(uv.signal_start_oneshot(signal, function (_, result)
+      publish(signal_name(result) as string)
+      finish()
+    end, signum), "signal.start")
+    return actions
+  end)
+  published = true
+  defer subscription:close()
+  case subscription:next()
+  when item(result) then return result
+  when error(failure) then raise failure
+  else raise "signal subscription ended without a signal"
+  end
+end
+
+local function slot_child(slot: SpawnSlot): Stdio
+  case slot
+  when inherit(stream) then return stream
+  when capture(stream) then return stream
+  when merged{child} then return child
+  end
+end
+
+local function slot_parent(slot: SpawnSlot): Stdio?
+  case slot
+  when inherit() then return nil
+  when capture(stream) then return stream
+  when merged{parent} then return parent
+  end
+end
+
+local function slot_merged_child(slot: SpawnSlot): Stdio?
+  case slot
+  when merged{child} then return child
+  else return nil
+  end
+end
+
+local function duplicate_descriptor(
+    descriptor: foreign int): foreign int
+  local duplicate = foreign int.new_array(1)
+  local cloexec_failed = foreign int.new_array(1)
+  local status = platform_status(ffi.titan_duplicate_parent_descriptor(
+      descriptor, duplicate, cloexec_failed))
+  if status < 0 then
+    ffi.titan_close_parent_duplicate(duplicate[0])
+    local operation = "stdio.parent.duplicate"
+    if cloexec_failed[0] ~= 0 then
+      operation = "stdio.parent.duplicate.cloexec"
+    end
+    raise make_error(status, operation)
+  end
+  return duplicate[0]
+end
+
+local function parent_stdio_kind_error(code: integer, descriptor: integer,
+                                       probe: string): async.OperationError
+  local failure = make_error(code, "stdio.parent.kind")
+  failure.message = "fd " .. descriptor .. ": " .. probe .. ": " ..
+                    failure.message
+  return failure
+end
+
+local function parent_stdio_pipe_hint(descriptor: integer): boolean
+  local configured? = os_getenv("TITAN_STDIO_PIPE_FDS")
+  if not configured then return false end
+  local hint = configured as string
+  if #hint == 0 or #hint % 2 == 0 then return false end
+  local bytes = hint as foreign const *char
+  local selected = false
+  for index = 0, #hint - 1 do
+    local byte = bytes[index] as integer
+    if index % 2 == 0 then
+      -- Only single ASCII fd digits 0, 1, and 2 are valid tokens. Validate
+      -- the whole list before trusting any selected descriptor.
+      if byte < 48 or byte > 50 then return false end
+      if byte == descriptor + 48 then selected = true end
+    elseif byte ~= 44 then
+      return false
+    end
+  end
+  return selected
+end
+
+local function parent_stdio_kind(descriptor: integer): uv.handle_type
+  local fd = descriptor as foreign int
+  local guessed = uv.guess_handle(descriptor)
+  case guessed
+  when tty() then return guessed
+  when named_pipe() then return guessed
+  when unknown() then
+  else
+    raise parent_stdio_kind_error(uv.ENOTSUP, descriptor,
+      "uv_guess_handle classified unsupported kind " .. (uv.handle_type_name(guessed) or "unknown"))
+  end
+
+  -- uv_guess_handle does not promise errno; its isatty probe can leave an
+  -- unrelated value behind. Inspect this UNKNOWN fd explicitly.
+  local probe = foreign ParentStdioProbe.new()
+  ffi.titan_probe_parent_stdio(fd, probe)
+  if probe.status ~= 0 then
+    raise parent_stdio_kind_error(platform_status(probe.status), descriptor,
+                                   probe.operation as string)
+  end
+  if probe.is_socket == 0 then
+    raise parent_stdio_kind_error(uv.ENOTSUP, descriptor,
+                                   "fstat did not identify a socket")
+  end
+  local name_errno = probe.name_errno as integer
+  local type_errno = probe.type_errno as integer
+
+  -- Both probes run even when the first fails: any available contradiction
+  -- defeats launcher knowledge about the missing metadata.
+  if name_errno == 0 and probe.is_unix == 0 then
+    raise parent_stdio_kind_error(uv.ENOTSUP, descriptor,
+      "getsockname reported family " .. (probe.family as integer))
+  end
+  if type_errno == 0 and probe.is_stream == 0 then
+    raise parent_stdio_kind_error(uv.ENOTSUP, descriptor,
+      "getsockopt(SO_TYPE) did not identify SOCK_STREAM")
+  end
+  if name_errno ~= 0 and name_errno ~= ffi.EPERM and
+     name_errno ~= ffi.EACCES then
+    raise parent_stdio_kind_error(uv.translate_sys_error(name_errno),
+                                   descriptor, "getsockname")
+  end
+  if type_errno ~= 0 and type_errno ~= ffi.EPERM and
+     type_errno ~= ffi.EACCES then
+    raise parent_stdio_kind_error(uv.translate_sys_error(type_errno),
+                                   descriptor, "getsockopt(SO_TYPE)")
+  end
+  if name_errno == 0 and type_errno == 0 then
+    raise parent_stdio_kind_error(uv.ENOTSUP, descriptor,
+      "uv_guess_handle remained unknown with inspectable socket metadata")
+  end
+  if parent_stdio_pipe_hint(descriptor) then return uv.NAMED_PIPE end
+
+  local missing_probe = "getsockname"
+  local denied_errno = name_errno
+  if denied_errno == 0 then
+    missing_probe = "getsockopt(SO_TYPE)"
+    denied_errno = type_errno
+  end
+  raise parent_stdio_kind_error(uv.translate_sys_error(denied_errno),
+    descriptor, missing_probe ..
+      " denied without a valid TITAN_STDIO_PIPE_FDS hint for this fd")
+end
+
+
+local function initialize_parent_stdio(loop: uv.loop_t, descriptor: integer): Stdio
+  if parent_loop ~= loop then parent_loop = loop; cached_parent_stdio = {} end
+  local cached? = cached_parent_stdio[descriptor + 1]
+  if cached ~= nil and not stream_is_closed(cached.native:as_handle_t()) then return cached end
+  cached_parent_stdio[descriptor + 1] = nil
+  local kind = parent_stdio_kind(descriptor)
+  local duplicate = duplicate_descriptor(descriptor as foreign int)
+  defer ffi.titan_close_parent_duplicate(duplicate)
+  local stream: Stdio? = nil
+  local keep = false
+  defer if not keep then discard_unpublished_stdio(stream) end
+  local tty = false
+  case kind
+  when tty() then tty = true
+  else
+  end
+  if tty then
+    local native = uv.tty_t.new()
+    local owner = Stdio(native:as_stream_t(), loop, nil)
+    check_status(uv.tty_init(loop, native, duplicate as integer, 0), "stdio.parent.init")
+    stream = owner
+    local status, actual? = uv.fileno(native:as_handle_t())
+    check_status(status, "stdio.parent.fileno")
+    if actual:to_integer() ~= uv.get_osfhandle(duplicate as integer):to_integer() then
+      check_status(platform_status(ffi.titan_close_parent_duplicate(duplicate)), "stdio.parent.duplicate.close")
+    end
+    duplicate = -1 as foreign int
+  else
+    local status = 0
+    status, stream = new_pipe_stdio(loop)
+    check_status(status, "stdio.parent.init")
+    case stream.native
+    when pipe(native) then status = uv.pipe_open(native, duplicate as integer)
+    else raise "expected pipe stream"
+    end
+    check_status(status, "stdio.parent.open")
+    if ffi.TITAN_OS_WINDOWS ~= 0 then
+      local actual: uv.os_fd_t? = nil
+      status, actual = uv.fileno(stream.native:as_handle_t())
+      check_status(status, "stdio.parent.fileno")
+      if actual:to_integer() ~= uv.get_osfhandle(duplicate as integer):to_integer() then
+        check_status(platform_status(ffi.titan_close_parent_duplicate(duplicate)), "stdio.parent.duplicate.close")
+      end
+    end
+    duplicate = -1 as foreign int
+  end
+  cached_parent_stdio[descriptor + 1] = stream
+  keep = true
+  return stream
+end
+
+local function os_parent_stdio(descriptor: integer): Stdio
+  async.running()
+  return initialize_parent_stdio(async.current_loop(), descriptor)
+end
+
+local function validate_config(state: ProcessConfig): integer
+  async.running()
+  local loop = async.current_loop()
+  if state.consumed or state.loop ~= loop then
+    return uv.EINVAL
+  end
+  return 0
+end
+
+local function discard_slot(candidate: SpawnSlot?,
+                            keep_a: SpawnSlot?, keep_b: SpawnSlot?)
+  if not candidate or candidate == keep_a or candidate == keep_b then return end
+  local slot = candidate as SpawnSlot
+  case slot
+  when inherit() then
+    return
+  when capture(stream) then
+    discard_unpublished_stdio(stream)
+  when merged{child, parent} then
+    discard_unpublished_stdio(child)
+    discard_unpublished_stdio(parent)
+  end
+end
+
+local function bind_slot(state: ProcessConfig, index: integer,
+                         slot: SpawnSlot, flags: integer)
+  state.options.stdio[index + 1] = uv.stdio_container_t(flags,
+    uv.stdio_data_t.stream(slot_child(slot).native))
+end
+
+local function config_slot(state: ProcessConfig,
+                           descriptor: integer): SpawnSlot?
+  return state.slots[descriptor + 1]
+end
+
+local function configure_slot(state: ProcessConfig,
+                              descriptor: integer,
+                              slot: SpawnSlot, flags: integer)
+  local old? = config_slot(state, descriptor)
+  defer if slot ~= config_slot(state, 0) and slot ~= config_slot(state, 1) and
+      slot ~= config_slot(state, 2) then discard_slot(slot, nil, nil) end
+  bind_slot(state, descriptor, slot, flags)
+  state.slots[descriptor + 1] = slot
+  if old ~= config_slot(state, 0) and
+     old ~= config_slot(state, 1) and
+     old ~= config_slot(state, 2) then
+    discard_slot(old, nil, nil)
+  end
+end
+
+local function discard_config_streams(state: ProcessConfig)
+  local stdin? = config_slot(state, 0)
+  local stdout? = config_slot(state, 1)
+  local stderr? = config_slot(state, 2)
+  state.slots = {}
+  discard_slot(stdin, stdout, stderr)
+  discard_slot(stdout, stderr, nil)
+  discard_slot(stderr, nil, nil)
+end
+
+local function config_capture(
+    state: ProcessConfig): (integer, SpawnSlot?)
+  local status, stream? = new_pipe_stdio(state.loop)
+  if status < 0 then return status, nil end
+  local captured = stream as Stdio
+  local keep = false
+  defer if not keep then discard_unpublished_stdio(captured) end
+  local slot = SpawnSlot.capture(captured)
+  keep = true
+  return 0, slot
+end
+
+local function prepare_inherited_stdio(state: ProcessConfig,
+                                       descriptor: integer):
+                                       (integer, SpawnSlot?)
+  local prepared: Stdio? = nil
+  do
+    prepared = initialize_parent_stdio(state.loop, descriptor)
+  catch
+    if error is async.OperationError then
+      local failure = error as async.OperationError
+      return failure.code, nil
+    end
+    raise
+  end
+  return 0, SpawnSlot.inherit(prepared as Stdio)
+end
+
+
+local function config_merged_output(state: ProcessConfig): (integer, SpawnSlot?)
+  local status, parent? = new_pipe_stdio(state.loop)
+  if status < 0 then return status, nil end
+  local child: Stdio? = nil
+  local keep = false
+  defer if not keep then discard_unpublished_stdio(parent); discard_unpublished_stdio(child) end
+  status, child = new_pipe_stdio(state.loop)
+  if status < 0 then return status, nil end
+  local fd0, fd1 = -1, -1
+  defer do ffi.titan_close_parent_duplicate(fd0); ffi.titan_close_parent_duplicate(fd1) end
+  status, fd0, fd1 = uv.pipe(uv.NONBLOCK_PIPE, 0)
+  if status < 0 then return status, nil end
+  case parent.native
+  when pipe(native) then status = uv.pipe_open(native, fd0)
+  else raise "expected pipe stream"
+  end
+  if status < 0 then return status, nil end
+  fd0 = -1
+  case child.native
+  when pipe(native) then status = uv.pipe_open(native, fd1)
+  else raise "expected pipe stream"
+  end
+  if status < 0 then return status, nil end
+  fd1 = -1
+  status = uv.stream_set_blocking(child.native, 1)
+  if status < 0 then return status, nil end
+  local slot = SpawnSlot.merged(child, parent)
+  keep = true
+  return 0, slot
+end
+
+local function os_spawn_config_new(): ProcessConfig
+  async.running()
+  if async.is_closing() then
+    raise "cannot configure a Process while async Runtime is shutting down"
+  end
+  return ProcessConfig(async.current_loop(), uv.process_options_t.new("", {}), {}, {}, false)
+end
+
+local function configure_capture(config: ProcessConfig,
+                                 descriptor: integer): integer
+  local status = validate_config(config)
+  if status < 0 then return status end
+  local captured: SpawnSlot? = nil
+  status, captured = config_capture(config)
+  if status < 0 then return status end
+  local slot = captured as SpawnSlot
+  if descriptor == 0 then
+    configure_slot(config, descriptor, slot,
+                   uv.CREATE_PIPE | uv.READABLE_PIPE)
+    return 0
+  end
+  configure_slot(config, descriptor, slot,
+                 uv.CREATE_PIPE | uv.WRITABLE_PIPE)
+  return 0
+end
+
+local function configure_parent(config: ProcessConfig,
+                                descriptor: integer): integer
+  local status = validate_config(config)
+  if status < 0 then return status end
+  local parent: SpawnSlot? = nil
+  status, parent = prepare_inherited_stdio(config, descriptor)
+  if status < 0 then return status end
+  local slot = parent as SpawnSlot
+  configure_slot(config, descriptor, slot, uv.INHERIT_STREAM)
+  return 0
+end
+
+local function os_spawn_config_with_merged_output(
+    config: ProcessConfig): integer
+  local status = validate_config(config)
+  if status < 0 then return status end
+  local merged: SpawnSlot? = nil
+  status, merged = config_merged_output(config)
+  if status >= 0 then
+    local slot = merged as SpawnSlot
+    configure_slot(config, 1, slot, uv.INHERIT_STREAM)
+    configure_slot(config, 2, slot, uv.INHERIT_STREAM)
+  end
+  return status
+end
+
+local function os_spawn_config_for_shell(config: ProcessConfig): integer
+  local status = validate_config(config)
+  if status < 0 then return status end
+  if ffi.TITAN_OS_WINDOWS ~= 0 then
+    config.options.flags = uv.PROCESS_WINDOWS_VERBATIM_ARGUMENTS
+  end
+  return 0
+end
+
+local function os_spawn_config_with_env(config: ProcessConfig,
+                                         name: string,
+                                         contents: string): integer
+  local status = validate_config(config)
+  if status < 0 then return status end
+  if #name == 0 or contains_nul(name) or contains_nul(contents) then
+    return uv.EINVAL
+  end
+  local bytes = name as foreign const *unsigned char
+  local byte_index = 0
+  while byte_index < #name do
+    if bytes[byte_index] == 61 then return uv.EINVAL end
+    byte_index = byte_index + 1
+  end
+  local entry = SpawnEnvironmentEntry(name, contents)
+  local index = 1
+  while index <= #config.environment do
+    local equal = ffi.titan_process_environment_name_equal(
+        config.environment[index].name, name) as integer
+    if equal < 0 then return platform_status(equal) end
+    if equal == 1 then
+      config.environment[index] = entry
+      return 0
+    end
+    index = index + 1
+  end
+  config.environment[#config.environment + 1] = entry
+  return 0
+end
+
+local function os_spawn_config_close(config: ProcessConfig)
+  if config.consumed then return end
+  async.running()
+  local loop = async.current_loop()
+  if config.loop ~= loop then
+    raise "SpawnConfig belongs to a different async Runtime"
+  end
+  config.consumed = true
+  discard_config_streams(config)
+end
+
+local function os_spawn_config_error(config: ProcessConfig, status: integer)
+  os_spawn_config_close(config)
+  raise make_error(status, "process.spawn.config")
+end
+
+
+local function contains_nul(text: string): boolean
+  for index = 1, #text do if byte_at(text, index) == 0 then return true end end
+  return false
+end
+
+local function os_shell_command(command: string): (string, {string})
+  if ffi.TITAN_OS_WINDOWS == 0 then return "/bin/sh", {"-c", command} end
+  local capacity = 256
+  local directory = ""
+  while true do
+    local bytes = foreign char.new_array(capacity)
+    local sizes = foreign size_t.new_array(1)
+    sizes[0] = capacity
+    local status = platform_status(ffi.titan_process_system_directory(bytes, sizes))
+    if status == uv.ENOBUFS then capacity = sizes[0] as integer
+    else
+      check_status(status, "process.shell.directory")
+      directory = bytes as string
+      break
+    end
+  end
+  return directory .. "\\cmd.exe", {"/d", "/s", "/c", '"' .. command .. '"'}
+end
+
+local function spawn_environment(config: ProcessConfig): {string}?
+  if #config.environment == 0 then return nil end
+  local status, entries?, count = uv.os_environ()
+  check_status(status, "process.spawn.environment")
+  local result: {string} = {}
+  for index = 1, count do
+    local inherited = entries[index]
+    local replaced = false
+    for _, option in iteration.ipairs(config.environment) do
+      local equal = ffi.titan_process_environment_name_equal(inherited.name, option.name) as integer
+      if equal < 0 then check_status(platform_status(equal), "process.spawn.environment") end
+      if equal == 1 then replaced = true; break end
+    end
+    if not replaced then result[#result + 1] = inherited.name .. "=" .. inherited.value end
+  end
+  for _, entry in iteration.ipairs(config.environment) do result[#result + 1] = entry.name .. "=" .. entry.contents end
+  return result
+end
+
+local function os_process_spawn_with_config(file: string, args: {string}, config: ProcessConfig): (ProcessOwner, Stdio?, Stdio?, Stdio?)
+  check_status(validate_config(config), "process.spawn.config")
+  local stdin_slot? = config_slot(config, 0)
+  local stdout_slot? = config_slot(config, 1)
+  local stderr_slot? = config_slot(config, 2)
+  if stdin_slot == nil or stdout_slot == nil or stderr_slot == nil then os_spawn_config_error(config, uv.EINVAL) end
+  if async.is_closing() then
+    raise "cannot spawn a Process while async Runtime is shutting down"
+  end
+  if contains_nul(file) then raise make_error(uv.EINVAL, "process.spawn.file") end
+  for _, arg in iteration.ipairs(args) do if contains_nul(arg) then raise make_error(uv.EINVAL, "process.spawn.argument") end end
+  local argument_zero = file
+  if ffi.TITAN_OS_WINDOWS ~= 0 and (config.options.flags & uv.PROCESS_WINDOWS_VERBATIM_ARGUMENTS) ~= 0 then
+    argument_zero = '"' .. file .. '"'
+  end
+  local arguments = {argument_zero}
+  for _, arg in iteration.ipairs(args) do arguments[#arguments + 1] = arg end
+  config.options.file = file
+  config.options.args = arguments
+  config.options.env = spawn_environment(config)
+  local process = ProcessOwner(uv.process_t.new(), config.loop, nil, nil)
+  process.exits = async.CoalescingSubscription<|ExitStatus, async.OperationError|>.new(function (publish, fail, finish)
+    -- Cancelling a wait detaches only that waiter. The accepted child remains
+    -- owned until its exit callback reaps it and closes the process handle.
+    local actions = async.SubscriptionActions<|ExitStatus|>(function () end, function (drain) drain() end)
+    config.options.exit_cb = function (_: uv.process_t, code: integer, signum: integer)
+      local result = ExitStatus(code, signal_name(signum), signum)
+      process.result = result
+      uv.close(process.native:as_handle_t(), nil)
+      publish(result)
+      finish()
+    end
+    return actions
+  end)
+  local status = uv.spawn(config.loop, process.native, config.options)
+  if status < 0 then
+    close_native(process.native:as_handle_t())
+    raise make_error(status, "process.spawn")
+  end
+  local stdin? = slot_parent(stdin_slot)
+  local stdout? = slot_parent(stdout_slot)
+  local stderr? = slot_parent(stderr_slot)
+  discard_unpublished_stdio(slot_merged_child(stdout_slot))
+  discard_unpublished_stdio(slot_merged_child(stderr_slot))
+  -- Everything is still lexically owned by config until read registration
+  -- and the result tuple are ready for publication.
+  if stdout ~= nil then start_stream_read(stdout, "process.stdout.read.start") end
+  if stderr ~= nil and stderr ~= stdout then start_stream_read(stderr, "process.stderr.read.start") end
+  return process, stdin, stdout, stderr
+end
+
+local function validate_process(process: ProcessOwner)
+  async.running()
+  if process.loop ~= async.current_loop() then raise "Process belongs to a different async Runtime" end
+end
+
+local function os_process_wait(process: ProcessOwner): (integer, integer)
+  validate_process(process)
+  cancellation_point()
+  if process.result ~= nil then
+    return process.result.code, process.result.signal_number
+  end
+  if process.exits:has_waiter() then raise "Process already has a waiting Task" end
+  case process.exits:next()
+  when item(result) then return result.code, result.signal_number
+  when error(failure) then raise failure
+  else raise "Process exited without a result"
+  end
+end
+
+local function os_process_is_running(process: ProcessOwner): boolean
+  validate_process(process)
+  return process.result == nil and uv.is_active(process.native:as_handle_t())
+end
+
+local function os_process_kill(process: ProcessOwner, signal: string)
+  validate_process(process)
+  local signum = signal_number(signal)
+  if signum <= 0 then raise "unsupported process signal name '" .. signal .. "'" end
+  if not os_process_is_running(process) then raise "cannot signal an exited Process" end
+  local status = uv.process_kill(process.native, signum)
+  if status < 0 and status ~= uv.ESRCH then raise make_error(status, "process.kill") end
+end
+
+local function stream_is_closed(handle: uv.handle_t): boolean
+  return not handle:is_initialized() or uv.is_closing(handle)
+end
+
+local function checked_text(text: string, operation: string)
+  if contains_nul(text) then raise make_error(uv.EINVAL, operation) end
+end
+
+-- Match the ordinary-wait boundary before a lazy native source is started.
+local function cancellation_point()
+  case async.await<|nil, async.OperationError|>(function (resolve, reject, fatal) resolve(nil) end)
+  when success() then
+  when error(failure) then raise failure
+  end
 end
