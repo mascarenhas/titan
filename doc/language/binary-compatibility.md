@@ -103,6 +103,10 @@ end
 Adding the first private field or overriding `new` therefore rejects this
 literal consumer at load time. An override with the same signature can remain
 compatible with an ordinary `model.Point(...)` or `model.Point.new(...)` caller.
+A generated constructor call used in a constant module variable initializer
+also requires the default constructor, including when nested inside another
+constant expression. An override would invalidate the initializer's
+constant-expression guarantee, so that consumer rejects it at load time.
 A call that fuses fresh native storage into the record's own allocation also
 relies on the generated default and rejects an override; that construction
 preserves the buffer's lifetime as part of its record.
@@ -111,8 +115,9 @@ function and reads `x` or `y` can remain compatible. See
 [Native storage](nominal-storage.md) for storage and ownership rules.
 
 Providers built before the literal-construction capability was introduced need
-rebuilding for newly compiled literal consumers. Older consumer binaries only
-recorded a `new` dependency and do not enforce the override restriction.
+rebuilding for newly compiled literal, constant-initializer, or fused-storage
+consumers. Older consumer binaries only recorded a `new` dependency and do not
+enforce the override restriction.
 
 ## Private union variants and control flow
 

@@ -115,6 +115,36 @@ describe("binary dependency usage", function()
         assert.same({}, tree._binary_usage.provider.records.Item.functions)
     end)
 
+    it("requires default construction for direct and nested constant initializers", function()
+        for _, initializer in ipairs({
+            "item: p.Item = p.Item(42)",
+            "items: {p.Item} = {p.Item.new(42)}",
+            "record Wrapper item: p.Item end; item = Wrapper(p.Item{number = 42})",
+        }) do
+            local tree = check({
+                provider = [[record Item number: integer end]],
+                consumer = 'local p = import "provider"\n' .. initializer,
+            })
+            assert.is_true(tree._binary_usage.provider.records.Item.literal)
+            assert.same({new = true}, tree._binary_usage.provider.records.Item.functions)
+        end
+    end)
+
+    it("keeps ordinary calls independent of default construction authority", function()
+        local tree = check({
+            provider = [[record Item number: integer end]],
+            consumer = [[
+                local p = import "provider"
+                factory: function(): p.Item = function(): p.Item return p.Item(1) end
+                item: p.Item?
+                function make(): p.Item return p.Item.new(2) end
+                do item = p.Item{number = 3} end
+            ]],
+        })
+        assert.is_nil(tree._binary_usage.provider.records.Item.literal)
+        assert.same({new = true}, tree._binary_usage.provider.records.Item.functions)
+    end)
+
     it("tracks concrete methods used only by implicit Interface conversion", function()
         local tree = check({
             provider = [[

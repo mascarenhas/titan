@@ -524,6 +524,12 @@ function isconst(node)
             for _, arg in ipairs(call_argument_expressions(node.args)) do
                 const = const and isconst(arg)
             end
+            if const and node._nominal_constructor
+               and node._nominal_constructor.kind == "record" then
+                -- A replacement custom `new` would invalidate this proof even
+                -- when its callable signature remains unchanged.
+                node._binary_constant_constructor = true
+            end
             return const
         else
             return false

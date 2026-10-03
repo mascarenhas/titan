@@ -864,6 +864,20 @@ int main(void) {
         runs("assert(consumer.run() == 42)")
     end)
 
+    it("rejects overriding a constructor used in a constant module initializer", function()
+        local image = fixture("record Box n: integer end", [[
+            local p = import "bc180_provider"
+            box: p.Box = p.Box(41)
+            function run(): integer return box.n end
+        ]])
+        runs("assert(consumer.run() == 41)")
+        replace([[
+            record Box n: integer end
+            function Box.new(n: integer): Box return {n = n + 1} end
+        ]], image)
+        rejects("Box.literal")
+    end)
+
     it("requires raw construction authority for a DSO constructor with fused native storage", function()
         local image = fixture("record Buffer const data: foreign *int end", [[
             foreign import "spec/fixtures/nominal_allocation_probe.h"

@@ -82,6 +82,14 @@ consumer, including when the override has the same signature. Ordinary calls
 depend on `new`'s callable signature and can accept that replacement. See
 [binary compatibility](binary-compatibility.md#construction-and-closed-union-proofs).
 
+When `isconst` accepts a generated record call in a module variable initializer,
+it marks that call with `_binary_constant_constructor`. Usage collection then
+requires the same `literal` capability: replacing `new` with arbitrary code
+would invalidate the initializer's constant-expression proof. The marker is
+set by the proof itself, so calls nested inside the initializer are covered
+without treating calls in a lambda body or a computed `do` initializer as
+constant construction.
+
 Code generation retains ordinary calls across a separate record provider
 boundary, so replacing a generated `new` with a compatible override changes
 the implementation used by an unchanged consumer. Local, source-linked, and
@@ -94,10 +102,10 @@ consumer runs. The final link's existing static-dependency classification owns
 the call-versus-inline choice.
 
 Providers built before this capability was emitted need rebuilding for new
-literal consumers. Historical consumers represented literals as a `new`
-dependency and cannot distinguish a same-signature override from an ordinary
-compatible replacement. This additional semantic check does not change ABI 2
-or language-server API 1.
+literal, constant-initializer, and fused-storage consumers. Historical consumers
+represented literals as a `new` dependency and cannot distinguish a
+same-signature override from an ordinary compatible replacement. This additional
+semantic check does not change ABI 2 or language-server API 1.
 
 ## Lua namespace calls
 

@@ -101,6 +101,15 @@ calls to a separate provider use its callable implementation; fused-storage
 calls retain direct construction to preserve their ownership contract, and
 therefore reject a replacement constructor override.
 
+Generated record calls accepted by `isconst` as constant module variable
+initializers also require this capability. The checker marks each accepted
+call with `_binary_constant_constructor`, including nested constructor calls,
+and usage collection retains that proof requirement. Lambda bodies and
+computed `do` initializers do not participate in this constant-expression
+proof; ordinary calls there continue to depend only on `new`'s signature.
+New consumers with this proof require providers rebuilt to publish the
+capability.
+
 The case checker retains its existing `_always_returns` inference. When all
 arms terminate and complete variant coverage supplies the non-fallthrough
 proof, `_binary_closed_union` records the relied-upon union. The usage manifest
