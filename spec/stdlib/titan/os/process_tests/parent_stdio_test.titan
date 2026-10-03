@@ -1,5 +1,4 @@
-function test_parent_stdin_exists_before_module_initialization(
-    _context: test.Context)
+local function check_parent_stdin(wait_for_close: boolean)
   runtime_test.run(function ()
     local workspace = fs.tmpname()
     fs.unlink(workspace)
@@ -16,12 +15,22 @@ function test_parent_stdin_exists_before_module_initialization(
                 "could not compile parent-stdin fixture: " .. output)
 
     local result_path = workspace .. "/parent-stdin.result"
-    local status = command.system({
-      command.program(workspace, "os_parent_stdin_app"), result_path,
-    }, nil, nil, nil, "first|second")
+    local arguments = {command.program(workspace, "os_parent_stdin_app"), result_path}
+    if wait_for_close then arguments[#arguments + 1] = "wait-for-close" end
+    local status = command.system(arguments, nil, nil, nil, "first|second")
     local report = fs.read_file(result_path)
     defer fs.unlink(result_path)
     test.assert(status == 0 and report == "OK:parent-input-ok",
                 "parent-stdin fixture failed: " .. report)
   end)
+end
+
+function test_parent_stdin_exists_before_module_initialization(
+    _context: test.Context)
+  check_parent_stdin(false)
+end
+
+function test_parent_stdin_keeps_buffered_bytes_after_native_close(
+    _context: test.Context)
+  check_parent_stdin(true)
 end

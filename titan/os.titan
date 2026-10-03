@@ -207,8 +207,15 @@ local function input_handle(stream: InputStream): Stdio
     if not captured then raise "InputStream is closed" end
     return captured as Stdio
   end
-  local handle = parent_stdio(stream.parent_descriptor)
   local previous? = stream.handle
+  if previous ~= nil then
+    async.running()
+    -- EOF may retire the native duplicate before the subscription and this
+    -- facade have delivered their buffered bytes. Keep that read owner for
+    -- this Runtime; a later Runtime gets a fresh wrapper and empty excess.
+    if previous.loop == async.current_loop() then return previous end
+  end
+  local handle = parent_stdio(stream.parent_descriptor)
   if not previous or previous ~= handle then
     stream.excess = ""
   end
