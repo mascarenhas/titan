@@ -14,9 +14,8 @@ and build/cache profiles prevent reuse of the older unpatched source or archive.
 
 As checked on 2026-10-03, libuv 1.53.0 and development commit
 `49b1c064714b412d7f7a2f5e7146c977554e57f9` still contain the redundant removal.
-System mode consumes its library unchanged: use an up-to-date system libuv and
-check whether its package includes this correction. An up-to-date version alone
-does not yet remove the exposure. Bundled mode includes the fix.
+Titan always builds the pinned source with this correction. System libuv is
+not a supported dependency policy.
 
 Sources:
 

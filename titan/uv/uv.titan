@@ -1,92 +1,3608 @@
+local iteration = import "iteration"
 foreign import "uv.h"
 foreign import "lua.h"
-foreign import "lauxlib.h"
 foreign import "titan/ffi.h"
-foreign import "string.h"
-foreign import "unistd.h"
-foreign import "signal_platform.h"
-foreign import "errno.h"
-local coroutine = import "coroutine"
+foreign import "callback.h"
+foreign type CallbackEntry = function (*lua_State, *Udata, *CClosure, *Udata, *Udata): void
 
--- Exact native entries carried by the Titan closures stored in callback-owner
--- record slots. The foreign libuv callbacks below recover and invoke these
--- entries without changing the closure protocol.
-foreign type UvNoargCallbackEntry = function (*lua_State, *Udata, *CClosure, *Udata): void
-foreign type UvIntegerCallbackEntry = function (*lua_State, *Udata, *CClosure, *Udata, lua_Integer): void
-foreign type UvTwoIntegerCallbackEntry = function (*lua_State, *Udata, *CClosure, *Udata, lua_Integer, lua_Integer): void
-foreign type UvSizePointerCallbackEntry = function (*lua_State, *Udata, *CClosure, *Udata, size_t, *void): void
-foreign type UvIntegerPointerCallbackEntry = function (*lua_State, *Udata, *CClosure, *Udata, lua_Integer, *void): void
-foreign type UvPointerCallbackEntry = function (*lua_State, *Udata, *CClosure, *Udata, *void): void
-
--- titan.uv is deliberately a thin callback/continuation adapter. There is one
--- tag identity per module instance and one outer uv_run driver per Runtime.
--- A callback may buffer persistent state or resume a Task. A resumed Task can
--- consume immediate outcomes until its next callback-bearing operation is
--- accepted, then returns to the non-reentrant event loop.
-local UV_TAG: value = {}
 local main_thread: foreign *lua_State = nil
-local active_runtime: Runtime? = nil
-local program_args_ready = false
+local driving: loop_t? = nil
+local inline_dispatch_depth: integer = 0
+local walking_depth: integer = 0
+local loops: {loop_t: boolean} = {}
+local const HANDLE_FRESH = 0
+local const HANDLE_LIVE = 1
+local const HANDLE_RETIRED = 2
 
-record Error
-  error: value
-  traceback: string
+record loop_t
+  local walk_callback: (function (handle_t, value): ())?
+  local walk_argument: value
+  local inline_depth: integer
+  local walk_depth: integer
+  local walk_handler: function (loop_t, foreign *uv_handle_t): ()
+  local native: foreign uv_loop_t
+  local state: foreign *lua_State
+  local initialized: boolean
+  local handles: {value: boolean}
+  local requests: {value: boolean}
+  local failure_count: integer
+  local failure_error: value
+  local failure_trace: string
+  local secondary_errors: integer
+  local userdata: value
 end
 
-record OperationError
-  code: integer
-  name: string
-  message: string
-  operation: string
+record timer_t
+  local native: foreign uv_timer_t
+  local phase: integer
+  local loop: loop_t?
+  local callback: (function (timer_t): ())?
+  local close_callback: (function (handle_t): ())?
+  local handler: function (timer_t, loop_t): ()
+  local close_handler: function (timer_t, loop_t): ()
+  local userdata: value
 end
 
-local function bootstrap(main_callable: function ({string}): (integer),
-                         args: {string}): integer
-  local result = 1
-  local task = run_internal(function (): ()
-    result = main_callable(args)
-  end)
-  loop()
-  local exit_code? = task.runtime.exit_code
-  if exit_code then return exit_code as integer end
-  local succeeded = task:status():has_succeeded()
-  if succeeded then return result end
-  -- An uncaught Task error has already been reported with its traceback. The
-  -- standalone bootstrap still needs a conventional unsuccessful exit code.
-  return 1
+union handle_t
+  process(owner: process_t)
+  tcp(owner: tcp_t)
+  pipe(owner: pipe_t)
+  tty(owner: tty_t)
+  udp(owner: udp_t)
+  fs_event(owner: fs_event_t)
+  fs_poll(owner: fs_poll_t)
+  timer(owner: timer_t)
+  idle(owner: idle_t)
+  prepare(owner: prepare_t)
+  check(owner: check_t)
+  async(owner: async_t)
+  signal(owner: signal_t)
+  poll(owner: poll_t)
 end
 
--- A generated entrypoint publishes its original argc/argv before loading any
--- module. uv_setup_args may replace argv, so publish the configured pointer
--- back to the entrypoint exactly once.
-local function setup_program_args(): boolean
+local function current_main(): foreign *lua_State
   local top = ffi.lua_gettop(L)
   defer ffi.lua_settop(L, top)
-  ffi.lua_getfield(L, ffi.LUA_REGISTRYINDEX, ffi.TITAN_MAIN_ARGC_KEY)
-  if ffi.lua_type(L, -1) == ffi.LUA_TNIL then return false end
-  local argc = ffi.lua_tointegerx(L, -1, nil) as foreign int
-  ffi.lua_getfield(L, ffi.LUA_REGISTRYINDEX, ffi.TITAN_MAIN_ARGV_KEY)
-  local argv = ffi.lua_touserdata(L, -1) as foreign *(*char)
-  local configured = ffi.uv_setup_args(argc, argv)
-  ffi.lua_pushlightuserdata(L, configured as foreign *void)
-  ffi.lua_setfield(L, ffi.LUA_REGISTRYINDEX, ffi.TITAN_MAIN_ARGV_KEY)
-  return true
+  if ffi.lua_checkstack(L, 1) == 0 then raise "cannot reserve main lookup" end
+  ffi.lua_rawgeti(L, ffi.LUA_REGISTRYINDEX,
+                 ffi.LUA_RIDX_MAINTHREAD as foreign lua_Integer)
+  return ffi.lua_tothread(L, -1)
 end
 
--- libuv reports closed-stream writes as errors only when SIGPIPE does not
--- terminate the process first. Preserve inherited application policy and
--- change only the default Unix disposition.
-local function ignore_sigpipe_if_default(): integer
-  return ffi.titan_uv_ignore_sigpipe_if_default()
+function loop_t.new(): loop_t
+  local native = foreign uv_loop_t.new()
+  local owner: loop_t = {
+    native = native,
+    inline_depth = 0,
+    walk_callback = nil, walk_argument = nil, walk_depth = 0, walk_handler = walk_deliver,
+    state = main_thread,
+    initialized = false,
+    handles = {}, requests = {},
+    failure_count = 0, failure_error = nil, failure_trace = "", secondary_errors = 0,
+    userdata = nil,
+  }
+  return owner
 end
+
+function loop_init(loop: loop_t): integer
+  if loop.initialized then return ffi.UV_EBUSY end
+  loops[loop] = true
+  local status = ffi.uv_loop_init(loop.native) as integer
+  if status < 0 then loops[loop] = nil; return status end
+  loop.initialized = true
+  ffi.uv_loop_set_data(loop.native, loop as foreign *void)
+  return status
+end
+
+function loop_close(loop: loop_t): integer
+  if not loop.initialized then return ffi.UV_EINVAL end
+  if driving == loop or loop.walk_depth > 0 or loop.inline_depth > 0 then return ffi.UV_EBUSY end
+  if iteration.next(loop.handles, nil) ~= nil or iteration.next(loop.requests, nil) ~= nil then
+    return ffi.UV_EBUSY
+  end
+  local status = ffi.uv_loop_close(loop.native) as integer
+  if status == 0 then loop.initialized = false; loops[loop] = nil end
+  return status
+end
+
+function loop_alive(loop: loop_t): boolean
+  if not loop.initialized then return false end
+  return ffi.uv_loop_alive(loop.native) ~= 0
+end
+
+local function rethrow(loop: loop_t)
+  if loop.failure_count == 0 then return end
+  local err = loop.failure_error
+  local trace = loop.failure_trace
+  loop.secondary_errors = loop.failure_count - 1
+  loop.failure_count = 0
+  loop.failure_error = false
+  loop.failure_trace = ""
+  local top = ffi.lua_gettop(L)
+  defer ffi.lua_settop(L, top)
+  if ffi.lua_checkstack(L, 2) == 0 then raise "cannot reserve error handoff" end
+  ffi.lua_pushtvalue(L, trace)
+  ffi.lua_setfield(L, ffi.LUA_REGISTRYINDEX, ffi.TITAN_BACKTRACE_KEY)
+  ffi.lua_pushboolean(L, 1)
+  ffi.lua_setfield(L, ffi.LUA_REGISTRYINDEX, ffi.TITAN_TRACE_PINNED)
+  raise err
+end
+
+function run(loop: loop_t, mode: run_mode?): integer
+  if not loop.initialized then return ffi.UV_EINVAL end
+  if L ~= main_thread then raise "uv.run requires the owning main Lua thread" end
+  if driving or walking_depth > 0 or inline_dispatch_depth > 0 then raise "uv.run cannot reenter the event loop" end
+  if ffi.lua_checkstack(L, ffi.LUA_MINSTACK) == 0 then
+    raise "cannot reserve native callback stack"
+  end
+  local native_mode = ffi.UV_RUN_DEFAULT
+  case mode or RUN_DEFAULT
+  when default() then native_mode = ffi.UV_RUN_DEFAULT
+  when once() then native_mode = ffi.UV_RUN_ONCE
+  when nowait() then native_mode = ffi.UV_RUN_NOWAIT
+  end
+  driving = loop
+  defer do driving = nil end
+  loop.secondary_errors = 0
+  local result = ffi.uv_run(loop.native, native_mode) as integer
+  rethrow(loop)
+  return result
+end
+
+
+function loop_t:secondary_error_count(): integer
+  return self.secondary_errors
+end
+
+local function timer_deliver(owner: timer_t, loop: loop_t)
+  local callback? = owner.callback
+  if callback ~= nil then callback(owner) end
+catch
+  -- No allocating Titan helper entry may run outside this catch boundary.
+  if loop.failure_count == 0 then
+    loop.failure_error = error
+    loop.failure_trace = traceback
+  end
+  loop.failure_count = loop.failure_count + 1
+  ffi.uv_stop(loop.native)
+end
+
+local function timer_closed(owner: timer_t, loop: loop_t)
+  loop.handles[owner] = nil
+  owner.phase = HANDLE_RETIRED
+  local callback? = owner.close_callback
+  owner.callback = nil
+  owner.close_callback = nil
+  if callback ~= nil then callback(handle_t.timer(owner)) end
+catch
+  -- No allocating Titan helper entry may run outside this catch boundary.
+  if loop.failure_count == 0 then
+    loop.failure_error = error
+    loop.failure_trace = traceback
+  end
+  loop.failure_count = loop.failure_count + 1
+  ffi.uv_stop(loop.native)
+end
+
+foreign function timer_callback(native: *uv_timer_t)
+  local base = native as foreign *uv_handle_t
+  local owner = ffi.uv_handle_get_data(base) as foreign *Udata
+  local loop = ffi.uv_loop_get_data(ffi.uv_handle_get_loop(base)) as foreign *Udata
+  local L = ffi.titan_record_field(loop, "loop_t", "state")
+  local handler = ffi.lmacro_clCvalue(
+      ffi.titan_record_field(owner, "timer_t", "handler"))
+  local module = ffi.lmacro_uvalue(handler.upvalue[0])
+  local entry = ffi.lmacro_pvalue(handler.upvalue[2]) as foreign CallbackEntry
+  local top = ffi.lua_gettop(L)
+  ffi.titan_uv_push_owner(L, owner)
+  entry(L, module, handler, owner, loop)
+  ffi.lua_settop(L, top)
+end
+
+foreign function timer_close_callback(base: *uv_handle_t)
+  local owner = ffi.uv_handle_get_data(base) as foreign *Udata
+  local loop = ffi.uv_loop_get_data(ffi.uv_handle_get_loop(base)) as foreign *Udata
+  local L = ffi.titan_record_field(loop, "loop_t", "state")
+  local handler = ffi.lmacro_clCvalue(
+      ffi.titan_record_field(owner, "timer_t", "close_handler"))
+  local module = ffi.lmacro_uvalue(handler.upvalue[0])
+  local entry = ffi.lmacro_pvalue(handler.upvalue[2]) as foreign CallbackEntry
+  local top = ffi.lua_gettop(L)
+  -- Exact Udata conversion is rooted before the handler retires its old map key.
+  ffi.titan_uv_push_owner(L, owner)
+  entry(L, module, handler, owner, loop)
+  ffi.lua_settop(L, top)
+end
+
+function timer_t.new(): timer_t
+  local native = foreign uv_timer_t.new()
+  return {
+    native = native,
+    phase = HANDLE_FRESH, loop = nil,
+    callback = nil, close_callback = nil,
+    handler = timer_deliver, close_handler = timer_closed, userdata = nil,
+  }
+end
+
+function timer_t:as_handle_t(): handle_t
+  return handle_t.timer(self)
+end
+
+function timer_init(loop: loop_t, timer: timer_t): integer
+  if not loop.initialized or timer.phase == HANDLE_LIVE then return ffi.UV_EINVAL end
+  loop.handles[timer] = true
+  timer.loop = loop
+  local status = ffi.uv_timer_init(loop.native, timer.native) as integer
+  if status < 0 then loop.handles[timer] = nil; timer.loop = nil; return status end
+  timer.phase = HANDLE_LIVE
+  ffi.uv_handle_set_data(timer.native as foreign *uv_handle_t, timer as foreign *void)
+  return status
+end
+
+function timer_start(timer: timer_t, callback: function (timer_t): (),
+                     timeout: integer, repeat_ms: integer): integer
+  if timer.phase ~= HANDLE_LIVE then return ffi.UV_EINVAL end
+  if ffi.uv_is_closing(timer.native as foreign *uv_handle_t) ~= 0 then return ffi.UV_EINVAL end
+  if timeout < 0 or repeat_ms < 0 then return ffi.UV_EINVAL end
+  timer.callback = callback
+  return ffi.uv_timer_start(timer.native, timer_callback,
+                           timeout as foreign uint64_t,
+                           repeat_ms as foreign uint64_t)
+end
+
+function timer_stop(timer: timer_t): integer
+  if timer.phase ~= HANDLE_LIVE then return ffi.UV_EINVAL end
+  return ffi.uv_timer_stop(timer.native)
+end
+
+function close(handle: handle_t, callback: (function (handle_t): ())?)
+  case handle
+  when timer(owner) then
+    if owner.phase ~= HANDLE_LIVE then raise "handle is not initialized" end
+    local native = owner.native as foreign *uv_handle_t
+    if ffi.uv_is_closing(native) ~= 0 then raise "handle is closing" end
+    owner.close_callback = callback
+    ffi.uv_close(native, timer_close_callback)
+  when process(owner) then
+    if owner.phase ~= HANDLE_LIVE then raise "handle is not initialized" end
+    local native = owner.native as foreign *uv_handle_t
+    if ffi.uv_is_closing(native) ~= 0 then raise "handle is closing" end
+    owner.close_callback = callback
+    ffi.uv_close(native, process_close_callback)
+  when tcp(owner) then
+    if owner.phase ~= HANDLE_LIVE then raise "handle is not initialized" end
+    local native = owner.native as foreign *uv_handle_t
+    if ffi.uv_is_closing(native) ~= 0 then raise "handle is closing" end
+    owner.close_callback = callback
+    ffi.uv_close(native, tcp_close_callback)
+  when pipe(owner) then
+    if owner.phase ~= HANDLE_LIVE then raise "handle is not initialized" end
+    local native = owner.native as foreign *uv_handle_t
+    if ffi.uv_is_closing(native) ~= 0 then raise "handle is closing" end
+    owner.close_callback = callback
+    ffi.uv_close(native, pipe_close_callback)
+  when tty(owner) then
+    if owner.phase ~= HANDLE_LIVE then raise "handle is not initialized" end
+    local native = owner.native as foreign *uv_handle_t
+    if ffi.uv_is_closing(native) ~= 0 then raise "handle is closing" end
+    owner.close_callback = callback
+    ffi.uv_close(native, tty_close_callback)
+  when udp(owner) then
+    if owner.phase ~= HANDLE_LIVE then raise "handle is not initialized" end
+    local native = owner.native as foreign *uv_handle_t
+    if ffi.uv_is_closing(native) ~= 0 then raise "handle is closing" end
+    owner.close_callback = callback
+    ffi.uv_close(native, udp_close_callback)
+  when fs_event(owner) then
+    if owner.phase ~= HANDLE_LIVE then raise "handle is not initialized" end
+    local native = owner.native as foreign *uv_handle_t
+    if ffi.uv_is_closing(native) ~= 0 then raise "handle is closing" end
+    owner.close_callback = callback
+    ffi.uv_close(native, fs_event_close_callback)
+  when fs_poll(owner) then
+    if owner.phase ~= HANDLE_LIVE then raise "handle is not initialized" end
+    local native = owner.native as foreign *uv_handle_t
+    if ffi.uv_is_closing(native) ~= 0 then raise "handle is closing" end
+    owner.close_callback = callback
+    ffi.uv_close(native, fs_poll_close_callback)
+  when idle(owner) then
+    if owner.phase ~= HANDLE_LIVE then raise "handle is not initialized" end
+    local native = owner.native as foreign *uv_handle_t
+    if ffi.uv_is_closing(native) ~= 0 then raise "handle is closing" end
+    owner.close_callback = callback
+    ffi.uv_close(native, idle_close_callback)
+  when prepare(owner) then
+    if owner.phase ~= HANDLE_LIVE then raise "handle is not initialized" end
+    local native = owner.native as foreign *uv_handle_t
+    if ffi.uv_is_closing(native) ~= 0 then raise "handle is closing" end
+    owner.close_callback = callback
+    ffi.uv_close(native, prepare_close_callback)
+  when check(owner) then
+    if owner.phase ~= HANDLE_LIVE then raise "handle is not initialized" end
+    local native = owner.native as foreign *uv_handle_t
+    if ffi.uv_is_closing(native) ~= 0 then raise "handle is closing" end
+    owner.close_callback = callback
+    ffi.uv_close(native, check_close_callback)
+  when async(owner) then
+    if owner.phase ~= HANDLE_LIVE then raise "handle is not initialized" end
+    local native = owner.native as foreign *uv_handle_t
+    if ffi.uv_is_closing(native) ~= 0 then raise "handle is closing" end
+    owner.close_callback = callback
+    ffi.uv_close(native, async_close_callback)
+  when signal(owner) then
+    if owner.phase ~= HANDLE_LIVE then raise "handle is not initialized" end
+    local native = owner.native as foreign *uv_handle_t
+    if ffi.uv_is_closing(native) ~= 0 then raise "handle is closing" end
+    owner.close_callback = callback
+    ffi.uv_close(native, signal_close_callback)
+  when poll(owner) then
+    if owner.phase ~= HANDLE_LIVE then raise "handle is not initialized" end
+    local native = owner.native as foreign *uv_handle_t
+    if ffi.uv_is_closing(native) ~= 0 then raise "handle is closing" end
+    owner.close_callback = callback
+    ffi.uv_close(native, poll_close_callback)
+  end
+end
+
+function unref(handle: handle_t)
+  case handle
+  when timer(owner) then
+    if owner.phase ~= HANDLE_LIVE then raise "handle is not initialized" end
+    ffi.uv_unref(owner.native as foreign *uv_handle_t)
+  when process(owner) then
+    if owner.phase ~= HANDLE_LIVE then raise "handle is not initialized" end
+    ffi.uv_unref(owner.native as foreign *uv_handle_t)
+  when tcp(owner) then
+    if owner.phase ~= HANDLE_LIVE then raise "handle is not initialized" end
+    ffi.uv_unref(owner.native as foreign *uv_handle_t)
+  when pipe(owner) then
+    if owner.phase ~= HANDLE_LIVE then raise "handle is not initialized" end
+    ffi.uv_unref(owner.native as foreign *uv_handle_t)
+  when tty(owner) then
+    if owner.phase ~= HANDLE_LIVE then raise "handle is not initialized" end
+    ffi.uv_unref(owner.native as foreign *uv_handle_t)
+  when udp(owner) then
+    if owner.phase ~= HANDLE_LIVE then raise "handle is not initialized" end
+    ffi.uv_unref(owner.native as foreign *uv_handle_t)
+  when fs_event(owner) then
+    if owner.phase ~= HANDLE_LIVE then raise "handle is not initialized" end
+    ffi.uv_unref(owner.native as foreign *uv_handle_t)
+  when fs_poll(owner) then
+    if owner.phase ~= HANDLE_LIVE then raise "handle is not initialized" end
+    ffi.uv_unref(owner.native as foreign *uv_handle_t)
+  when idle(owner) then
+    if owner.phase ~= HANDLE_LIVE then raise "handle is not initialized" end
+    ffi.uv_unref(owner.native as foreign *uv_handle_t)
+  when prepare(owner) then
+    if owner.phase ~= HANDLE_LIVE then raise "handle is not initialized" end
+    ffi.uv_unref(owner.native as foreign *uv_handle_t)
+  when check(owner) then
+    if owner.phase ~= HANDLE_LIVE then raise "handle is not initialized" end
+    ffi.uv_unref(owner.native as foreign *uv_handle_t)
+  when async(owner) then
+    if owner.phase ~= HANDLE_LIVE then raise "handle is not initialized" end
+    ffi.uv_unref(owner.native as foreign *uv_handle_t)
+  when signal(owner) then
+    if owner.phase ~= HANDLE_LIVE then raise "handle is not initialized" end
+    ffi.uv_unref(owner.native as foreign *uv_handle_t)
+  when poll(owner) then
+    if owner.phase ~= HANDLE_LIVE then raise "handle is not initialized" end
+    ffi.uv_unref(owner.native as foreign *uv_handle_t)
+  end
+end
+
+record fs_t
+  local native: foreign uv_fs_t
+  local loop: loop_t?
+  local pending: boolean
+  local dirty: boolean
+  local path: string?
+  local new_path: string?
+  local directory: dir_t?
+  local native_dirents: (owned uv_dirent_t[])?
+  local buffers: {buf_t}?
+  local native_buffers: (owned uv_buf_t[])?
+  local callback: (function (fs_t): ())?
+  local handler: function (fs_t, loop_t): ()
+  local userdata: value
+end
+
+union req_t
+  connect(owner: connect_t)
+  write(owner: write_t)
+  shutdown(owner: shutdown_t)
+  udp_send(owner: udp_send_t)
+  getaddrinfo(owner: getaddrinfo_t)
+  getnameinfo(owner: getnameinfo_t)
+  fs(owner: fs_t)
+  work(owner: work_t)
+  random(owner: random_t)
+end
+
+record timespec_t
+  tv_sec: integer
+  tv_nsec: integer
+end
+
+record stat_t
+  st_dev: integer
+  st_mode: integer
+  st_nlink: integer
+  st_uid: integer
+  st_gid: integer
+  st_rdev: integer
+  st_ino: integer
+  st_size: integer
+  st_blksize: integer
+  st_blocks: integer
+  st_flags: integer
+  st_gen: integer
+  st_atim: timespec_t
+  st_mtim: timespec_t
+  st_ctim: timespec_t
+  st_birthtim: timespec_t
+end
+
+local function fs_deliver(owner: fs_t, loop: loop_t)
+  local directory? = owner.directory
+  if directory ~= nil then
+    local kind = ffi.uv_fs_get_type(owner.native)
+    if kind == ffi.UV_FS_OPENDIR then
+      if ffi.uv_fs_get_result(owner.native) >= 0 then
+        directory.native = ffi.uv_fs_get_ptr(owner.native) as foreign *uv_dir_t
+      end
+    elseif kind == ffi.UV_FS_CLOSEDIR then
+      if ffi.uv_fs_get_result(owner.native) >= 0 then directory.native = nil end
+      directory.busy = false
+    end
+  end
+  loop.requests[owner] = nil
+  owner.pending = false
+  local callback? = owner.callback
+  owner.callback = nil
+  if callback ~= nil then callback(owner) end
+catch
+  -- No allocating Titan helper entry may run outside this catch boundary.
+  if loop.failure_count == 0 then
+    loop.failure_error = error
+    loop.failure_trace = traceback
+  end
+  loop.failure_count = loop.failure_count + 1
+  ffi.uv_stop(loop.native)
+end
+
+foreign function fs_callback(native: *uv_fs_t)
+  local owner = ffi.uv_req_get_data(native as foreign *uv_req_t) as foreign *Udata
+  local loop = ffi.uv_loop_get_data(native.loop) as foreign *Udata
+  local L = ffi.titan_record_field(loop, "loop_t", "state")
+  local handler = ffi.lmacro_clCvalue(
+      ffi.titan_record_field(owner, "fs_t", "handler"))
+  local module = ffi.lmacro_uvalue(handler.upvalue[0])
+  local entry = ffi.lmacro_pvalue(handler.upvalue[2]) as foreign CallbackEntry
+  local top = ffi.lua_gettop(L)
+  ffi.titan_uv_push_owner(L, owner)
+  entry(L, module, handler, owner, loop)
+  ffi.lua_settop(L, top)
+end
+
+function fs_t.new(): fs_t
+  local native = foreign uv_fs_t.new()
+  native.fs_type = ffi.UV_FS_UNKNOWN
+  return {
+    native = native, loop = nil, pending = false, dirty = false, path = nil, new_path = nil, directory = nil, native_dirents = nil, buffers = nil, native_buffers = nil,
+    callback = nil, handler = fs_deliver, userdata = nil,
+  }
+end
+
+function fs_t:as_req_t(): req_t
+  return req_t.fs(self)
+end
+
+function req_t:get_data(): value
+  case self
+  when connect(owner) then return owner.userdata
+  when write(owner) then return owner.userdata
+  when shutdown(owner) then return owner.userdata
+  when udp_send(owner) then return owner.userdata
+  when getaddrinfo(owner) then return owner.userdata
+  when getnameinfo(owner) then return owner.userdata
+  when fs(owner) then return owner.userdata
+  when work(owner) then return owner.userdata
+  when random(owner) then return owner.userdata
+  end
+end
+
+function req_t:set_data(data: value)
+  case self
+  when connect(owner) then owner.userdata = data
+  when write(owner) then owner.userdata = data
+  when shutdown(owner) then owner.userdata = data
+  when udp_send(owner) then owner.userdata = data
+  when getaddrinfo(owner) then owner.userdata = data
+  when getnameinfo(owner) then owner.userdata = data
+  when fs(owner) then owner.userdata = data
+  when work(owner) then owner.userdata = data
+  when random(owner) then owner.userdata = data
+  end
+end
+
+function cancel(request: req_t): integer
+  case request
+  when connect() then return ffi.UV_EINVAL
+  when write() then return ffi.UV_EINVAL
+  when shutdown() then return ffi.UV_EINVAL
+  when udp_send() then return ffi.UV_EINVAL
+  when getaddrinfo(owner) then
+    if not owner.pending then return ffi.UV_EINVAL end
+    return ffi.uv_cancel(owner.native as foreign *uv_req_t)
+  when getnameinfo(owner) then
+    if not owner.pending then return ffi.UV_EINVAL end
+    return ffi.uv_cancel(owner.native as foreign *uv_req_t)
+  when fs(owner) then
+    if not owner.pending then return ffi.UV_EINVAL end
+    return ffi.uv_cancel(owner.native as foreign *uv_req_t)
+  when work(owner) then
+    if not owner.pending then return ffi.UV_EINVAL end
+    local native = owner.native as foreign *uv_work_t
+    return ffi.uv_cancel(native as foreign *uv_req_t)
+  when random(owner) then
+    if not owner.pending then return ffi.UV_EINVAL end
+    return ffi.uv_cancel(owner.native as foreign *uv_req_t)
+  end
+end
+
+local function fs_prepare(loop: loop_t?, request: fs_t,
+                           callback: (function (fs_t): ())?, path: string?):
+    (integer, foreign *uv_loop_t, foreign uv_fs_cb)
+  if request.pending or request.dirty then return ffi.UV_EBUSY, nil, nil end
+  local native_loop: foreign *uv_loop_t = nil
+  local native_callback: foreign uv_fs_cb = nil
+  if loop then native_loop = loop.native end
+  if callback ~= nil then
+    if not loop or not loop.initialized then return ffi.UV_EINVAL, nil, nil end
+    native_callback = fs_callback
+    -- All potentially allocating setup precedes native acceptance.
+    loop.requests[request] = true
+    request.pending = true
+  end
+  request.loop = loop
+  request.path = path
+  request.callback = callback
+  request.dirty = true
+  ffi.uv_req_set_data(request.native as foreign *uv_req_t,
+                      request as foreign *void)
+  return 0, native_loop, native_callback
+end
+
+function fs_stat(loop: loop_t?, request: fs_t, path: string,
+                  callback: (function (fs_t): ())?): integer
+  local status, native_loop, native_callback = fs_prepare(loop, request, callback, path)
+  if status < 0 then return status end
+  local result = ffi.uv_fs_stat(
+      native_loop, request.native, path, native_callback) as integer
+  if result < 0 and request.pending then
+    local owner_loop = request.loop as loop_t
+    owner_loop.requests[request] = nil
+    request.pending = false
+    request.callback = nil
+  end
+  return result
+end
+
+function fs_open(loop: loop_t?, request: fs_t, path: string,
+                  flags: integer, mode: integer,
+                  callback: (function (fs_t): ())?): integer
+  local native_flags = flags as foreign int
+  local native_mode = mode as foreign int
+  local status, native_loop, native_callback = fs_prepare(loop, request, callback, path)
+  if status < 0 then return status end
+  local result = ffi.uv_fs_open(
+      native_loop, request.native, path, native_flags,
+      native_mode, native_callback) as integer
+  if result < 0 and request.pending then
+    local owner_loop = request.loop as loop_t
+    owner_loop.requests[request] = nil
+    request.pending = false
+    request.callback = nil
+  end
+  return result
+end
+
+function fs_close(loop: loop_t?, request: fs_t, file: integer,
+                   callback: (function (fs_t): ())?): integer
+  local native_file = file as foreign uv_file
+  local status, native_loop, native_callback = fs_prepare(loop, request, callback, nil)
+  if status < 0 then return status end
+  local result = ffi.uv_fs_close(
+      native_loop, request.native, native_file,
+      native_callback) as integer
+  if result < 0 and request.pending then
+    local owner_loop = request.loop as loop_t
+    owner_loop.requests[request] = nil
+    request.pending = false
+    request.callback = nil
+  end
+  return result
+end
+
+function fs_get_result(request: fs_t): integer
+  if request.pending then raise "FS request is pending" end
+  return ffi.uv_fs_get_result(request.native)
+end
+
+function fs_get_statbuf(request: fs_t): stat_t
+  if request.pending or not request.dirty then raise "FS result is unavailable" end
+  if ffi.uv_fs_get_result(request.native) < 0 then raise "FS stat request failed" end
+  local kind = ffi.uv_fs_get_type(request.native)
+  if kind ~= ffi.UV_FS_STAT and kind ~= ffi.UV_FS_FSTAT and kind ~= ffi.UV_FS_LSTAT then
+    raise "FS request has no stat result"
+  end
+  local native = ffi.uv_fs_get_statbuf(request.native)
+  return stat_copy(native)
+end
+
+function fs_get_path(request: fs_t): string?
+  if request.pending then raise "FS request is pending" end
+  if not request.dirty then return nil end
+  local path = ffi.uv_fs_get_path(request.native)
+  if not path then return nil end
+  return path as string
+end
+
+function fs_req_cleanup(request: fs_t)
+  if request.pending then raise "FS request is pending" end
+  if not request.dirty then return end
+  local kind = ffi.uv_fs_get_type(request.native)
+  local directory? = request.directory
+  -- Cancelled CLOSEDIR never consumed the separately owned directory. Unix
+  -- cleanup otherwise frees req.ptr blindly; detach it before request cleanup.
+  if kind == ffi.UV_FS_CLOSEDIR then request.native.ptr = nil end
+  ffi.uv_fs_req_cleanup(request.native)
+  if directory ~= nil and kind == ffi.UV_FS_READDIR then
+    directory.native.dirents = nil
+    directory.native.nentries = 0
+    directory.busy = false
+  end
+  request.directory = nil
+  request.native_dirents = nil
+  request.new_path = nil
+  request.dirty = false
+  request.path = nil
+  request.buffers = nil
+  request.native_buffers = nil
+end
+
+const FS_O_RDONLY: integer?
+const FS_O_RDWR: integer?
+const FS_O_WRONLY: integer?
+const FS_O_CREAT: integer?
+const FS_O_TRUNC: integer?
+
+foreign import "work-native-proposal.h"
+foreign type WorkFunction = function (*void): void
+foreign type WorkCallbackEntry = function (
+    *lua_State, *Udata, *CClosure, *Udata, *Udata, lua_Integer): void
+
+record work_t
+  local native: foreign titan_issue194_work_storage
+  local loop: loop_t?
+  local pending: boolean
+  local argument_owner: value
+  local callback: (function (work_t, integer): ())?
+  local handler: function (work_t, loop_t, integer): ()
+  local userdata: value
+end
+
+
+local function work_deliver(owner: work_t, loop: loop_t, status: integer)
+  -- Native work has completed. Retire exactly the old registration before
+  -- user code can resubmit this owner, possibly on a different loop.
+  loop.requests[owner] = nil
+  owner.pending = false
+  local _argument_owner = owner.argument_owner
+  owner.argument_owner = nil
+  local callback? = owner.callback
+  owner.callback = nil
+  owner.native.worker = nil
+  owner.native.arg = nil
+  -- The old argument graph stays in this handler frame through user delivery;
+  -- request reuse may independently install a new graph.
+  if callback ~= nil then callback(owner, status) end
+catch
+  -- This is the originating loop, even if the callback requeued owner.
+  -- No allocating Titan helper entry may run outside this catch boundary.
+  if loop.failure_count == 0 then
+    loop.failure_error = error
+    loop.failure_trace = traceback
+  end
+  loop.failure_count = loop.failure_count + 1
+  ffi.uv_stop(loop.native)
+end
+
+foreign function work_worker_callback(request: *uv_work_t)
+  -- request is the first member of the final embedded native storage.
+  -- Only native fields are read; no Lua/Titan/GC or req.data access occurs.
+  local storage = request as foreign *titan_issue194_work_storage
+  local worker = storage.worker
+  worker(storage.arg)
+end
+
+foreign function work_after_callback(request: *uv_work_t, status: int)
+  local owner = ffi.uv_req_get_data(
+      request as foreign *uv_req_t) as foreign *Udata
+  local loop = ffi.uv_loop_get_data(request.loop) as foreign *Udata
+  local L = ffi.titan_record_field(loop, "loop_t", "state")
+  local handler = ffi.lmacro_clCvalue(
+      ffi.titan_record_field(owner, "work_t", "handler"))
+  local module = ffi.lmacro_uvalue(handler.upvalue[0])
+  local entry = ffi.lmacro_pvalue(handler.upvalue[2]) as foreign WorkCallbackEntry
+  local top = ffi.lua_gettop(L)
+  -- Root the exact concrete userdata before work_deliver removes its map key.
+  -- Never leave a trailing root deletion or field clear after user delivery.
+  ffi.titan_uv_push_owner(L, owner)
+  entry(L, module, handler, owner, loop, status as foreign lua_Integer)
+  ffi.lua_settop(L, top)
+end
+
+function work_t.new(): work_t
+  -- Construct final packed owner before libuv receives any address. No
+  -- initialized uv_work_t is copied or moved between Titan owners.
+  local native = foreign titan_issue194_work_storage.new()
+  return {
+    native = native,
+    loop = nil, pending = false, callback = nil, argument_owner = nil,
+    handler = work_deliver, userdata = nil,
+  }
+end
+
+function work_t:as_req_t(): req_t
+  return req_t.work(self)
+end
+
+function work_t:get_loop(): loop_t?
+  return self.loop
+end
+
+function queue_work(loop: loop_t, req: work_t, worker: foreign function (*void): void,
+                    arg: foreign *void,
+                    after_work: (function (work_t, integer): ())?,
+                    argument_owner: value): integer
+  if not loop.initialized then return ffi.UV_EINVAL end
+  if req.pending then return ffi.UV_EBUSY end
+  -- The internal callback is always nonnull, so reject a null public worker
+  -- here to retain libuv's invalid-worker contract.
+  if not worker then return ffi.UV_EINVAL end
+
+  -- All allocations and callable adjustments precede acceptance. The map
+  -- insertion is first: allocation failure leaves this request unmodified.
+  local previous_loop? = req.loop
+  loop.requests[req] = true
+  req.loop = loop
+  req.pending = true
+  req.callback = after_work
+  req.argument_owner = argument_owner
+  req.native.worker = worker
+  req.native.arg = arg
+  local native = req.native as foreign *uv_work_t
+  ffi.uv_req_set_data(native as foreign *uv_req_t, req as foreign *void)
+  local status = ffi.uv_queue_work(
+      loop.native, native, work_worker_callback, work_after_callback) as integer
+  if status ~= 0 then
+    -- Rejection promises no native callback. There is no concurrently accepted
+    -- worker touching this storage on this branch.
+    loop.requests[req] = nil
+    req.pending = false
+    req.loop = previous_loop
+    req.callback = nil
+    req.argument_owner = nil
+    req.native.worker = nil
+    req.native.arg = nil
+  end
+  return status
+end
+
+
+function req_get_data(req: req_t): value
+  return req:get_data()
+end
+
+function req_set_data(req: req_t, data: value)
+  req:set_data(data)
+end
+
+foreign import "limits.h"
+
+record buf_t
+  local native: foreign uv_buf_t
+  local const storage: foreign char[]
+  local keepalive: value
+  local writable: boolean
+end
+
+function buf_t.allocate(capacity: integer): buf_t
+  if capacity < 0 or capacity > ffi.UINT_MAX as integer then
+    raise "buffer capacity is outside native range"
+  end
+  local owner = buf_t(foreign uv_buf_t.new(),
+                      foreign char.new_array(capacity), nil, true)
+  owner.native = ffi.uv_buf_init(owner.storage, capacity as foreign unsigned int)
+  return owner
+end
+
+function buf_init(base: string, length: integer): buf_t
+  if length < 0 or length > #base or length > ffi.UINT_MAX as integer then
+    raise "buffer length is outside string/native range"
+  end
+  local owner = buf_t(foreign uv_buf_t.new(), nil, base, false)
+  owner.native = ffi.uv_buf_init(base as foreign *char,
+                                length as foreign unsigned int)
+  return owner
+end
+
+function buf_t.from_string(base: string): buf_t
+  return buf_init(base, #base)
+end
+
+function buf_t:length(): integer
+  return self.native.len as integer
+end
+
+function buf_t:is_writable(): boolean
+  return self.writable
+end
+
+-- Indices are one-based like ordinary Titan byte/Array APIs. A slice retains
+-- its original allocation/string transitively; it never rewrites that owner.
+function buf_t:slice(first: integer, length: integer): buf_t
+  local capacity = self.native.len as integer
+  if first < 1 or length < 0 or first - 1 > capacity - length then
+    raise "buffer slice is out of bounds"
+  end
+  local owner = buf_t(foreign uv_buf_t.new(), nil, self, self.writable)
+  owner.native = ffi.uv_buf_init(
+      self.native.base + (first - 1) as foreign ptrdiff_t,
+      length as foreign unsigned int)
+  return owner
+end
+
+function buf_t:get(index: integer): integer
+  if index < 1 or index > self.native.len as integer then
+    raise "buffer index is out of bounds"
+  end
+  local bytes = self.native.base as foreign *unsigned char
+  return bytes[index - 1] as integer
+end
+
+function buf_t:set(index: integer, byte: integer)
+  if not self.writable then raise "buffer is read-only" end
+  if index < 1 or index > self.native.len as integer or byte < 0 or byte > 255 then
+    raise "buffer byte/index is out of bounds"
+  end
+  local bytes = self.native.base as foreign *unsigned char
+  bytes[index - 1] = byte as foreign unsigned char
+end
+
+function buf_t:to_string(length: integer): string
+  if length < 0 or length > self.native.len as integer then
+    raise "buffer string length is out of bounds"
+  end
+  local top = ffi.lua_gettop(L)
+  defer ffi.lua_settop(L, top)
+  if ffi.lua_checkstack(L, 1) == 0 then raise "cannot reserve buffer copy stack" end
+  ffi.lua_pushlstring(L, self.native.base, length as foreign size_t)
+  local result: value = ffi.lua_totvalue(L, -1)
+  return result as string
+end
+
+local function fs_buffer_snapshot(buffers: {buf_t}, writable: boolean):
+    (integer, (owned uv_buf_t[])?, {buf_t}?)
+  local count = #buffers
+  if count > ffi.UINT_MAX as integer then return ffi.UV_EINVAL, nil, nil end
+  local native = foreign uv_buf_t.new_array(count)
+  local retained: {buf_t} = {}
+  for i = 1, count do
+    local buffer = buffers[i]
+    if writable and not buffer.writable then return ffi.UV_EINVAL, nil, nil end
+    native[i - 1] = buffer.native[0]
+    retained[i] = buffer
+  end
+  return 0, native, retained
+end
+
+function fs_read(loop: loop_t?, request: fs_t, file: integer,
+                  buffers: {buf_t}, offset: integer,
+                  callback: (function (fs_t): ())?): integer
+  if request.pending or request.dirty then return ffi.UV_EBUSY end
+  local prepared, native?, retained? = fs_buffer_snapshot(buffers, true)
+  if prepared < 0 then return prepared end
+  local native_data = (native as owned uv_buf_t[]) as foreign *uv_buf_t
+  local count = #(retained as {buf_t})
+  local native_file = file as foreign uv_file
+  local native_offset = offset as foreign int64_t
+  local native_count = count as foreign unsigned int
+  local status, native_loop, native_callback = fs_prepare(loop, request, callback, nil)
+  if status < 0 then return status end
+  request.buffers = retained
+  request.native_buffers = native
+  local result = ffi.uv_fs_read(native_loop, request.native,
+      native_file, native_data,
+      native_count, native_offset,
+      native_callback) as integer
+  if result < 0 and request.pending then
+    local owner_loop = request.loop as loop_t
+    owner_loop.requests[request] = nil
+    request.pending = false
+    request.callback = nil
+  end
+  return result
+end
+
+function fs_write(loop: loop_t?, request: fs_t, file: integer,
+                   buffers: {buf_t}, offset: integer,
+                   callback: (function (fs_t): ())?): integer
+  if request.pending or request.dirty then return ffi.UV_EBUSY end
+  local prepared, native?, retained? = fs_buffer_snapshot(buffers, false)
+  if prepared < 0 then return prepared end
+  local native_data = (native as owned uv_buf_t[]) as foreign *uv_buf_t
+  local count = #(retained as {buf_t})
+  local native_file = file as foreign uv_file
+  local native_offset = offset as foreign int64_t
+  local native_count = count as foreign unsigned int
+  local status, native_loop, native_callback = fs_prepare(loop, request, callback, nil)
+  if status < 0 then return status end
+  request.buffers = retained
+  request.native_buffers = native
+  local result = ffi.uv_fs_write(native_loop, request.native,
+      native_file, native_data,
+      native_count, native_offset,
+      native_callback) as integer
+  if result < 0 and request.pending then
+    local owner_loop = request.loop as loop_t
+    owner_loop.requests[request] = nil
+    request.pending = false
+    request.callback = nil
+  end
+  return result
+end
+
+union run_mode
+  default()
+  once()
+  nowait()
+end
+const RUN_DEFAULT = run_mode.default()
+const RUN_ONCE = run_mode.once()
+const RUN_NOWAIT = run_mode.nowait()
+
+union loop_option
+  block_signal()
+  metrics_idle_time()
+  use_io_uring_sqpoll()
+end
+
+record metrics_t
+  loop_count: integer
+  events: integer
+  events_waiting: integer
+end
+
+local function loop_require(loop: loop_t)
+  if not loop.initialized then raise "loop is not initialized" end
+end
+
+function loop_size(): integer
+  return ffi.uv_loop_size() as foreign lua_Integer
+end
+
+function loop_configure(loop: loop_t, option: loop_option, signum: integer?): integer
+  if not loop.initialized then return ffi.UV_EINVAL end
+  case option
+  when block_signal() then
+    if signum == nil then return ffi.UV_EINVAL end
+    return ffi.uv_loop_configure(loop.native, ffi.UV_LOOP_BLOCK_SIGNAL,
+                                 signum as foreign int)
+  when metrics_idle_time() then
+    return ffi.uv_loop_configure(loop.native, ffi.UV_METRICS_IDLE_TIME)
+  when use_io_uring_sqpoll() then
+    return ffi.uv_loop_configure(loop.native, ffi.UV_LOOP_USE_IO_URING_SQPOLL as foreign uv_loop_option)
+  end
+end
+
+function loop_fork(loop: loop_t): integer
+  if not loop.initialized then return ffi.UV_EINVAL end
+  return ffi.uv_loop_fork(loop.native)
+end
+
+function stop(loop: loop_t)
+  loop_require(loop)
+  ffi.uv_stop(loop.native)
+end
+
+function update_time(loop: loop_t)
+  loop_require(loop)
+  ffi.uv_update_time(loop.native)
+end
+
+function now(loop: loop_t): integer
+  loop_require(loop)
+  return ffi.uv_now(loop.native) as foreign lua_Integer
+end
+
+function backend_fd(loop: loop_t): integer
+  loop_require(loop)
+  return ffi.uv_backend_fd(loop.native)
+end
+
+function backend_timeout(loop: loop_t): integer
+  loop_require(loop)
+  return ffi.uv_backend_timeout(loop.native)
+end
+
+function loop_get_data(loop: loop_t): value
+  return loop.userdata
+end
+
+function loop_set_data(loop: loop_t, data: value)
+  loop.userdata = data
+end
+
+function metrics_idle_time(loop: loop_t): integer
+  loop_require(loop)
+  return ffi.uv_metrics_idle_time(loop.native) as foreign lua_Integer
+end
+
+function metrics_info(loop: loop_t): (integer, metrics_t?)
+  if not loop.initialized then return ffi.UV_EINVAL, nil end
+  local native = foreign uv_metrics_t.new()
+  local status: integer = ffi.uv_metrics_info(loop.native, native)
+  if status < 0 then return status, nil end
+  return status, metrics_t(native.loop_count as foreign lua_Integer,
+                            native.events as foreign lua_Integer,
+                            native.events_waiting as foreign lua_Integer)
+end
+
+local function handle_native(handle: handle_t): foreign *uv_handle_t
+  case handle
+  when timer(owner) then
+    if owner.phase ~= HANDLE_LIVE then raise "handle is not initialized" end
+    return owner.native as foreign *uv_handle_t
+  when process(owner) then
+    if owner.phase ~= HANDLE_LIVE then raise "handle is not initialized" end
+    return owner.native as foreign *uv_handle_t
+  when tcp(owner) then
+    if owner.phase ~= HANDLE_LIVE then raise "handle is not initialized" end
+    return owner.native as foreign *uv_handle_t
+  when pipe(owner) then
+    if owner.phase ~= HANDLE_LIVE then raise "handle is not initialized" end
+    return owner.native as foreign *uv_handle_t
+  when tty(owner) then
+    if owner.phase ~= HANDLE_LIVE then raise "handle is not initialized" end
+    return owner.native as foreign *uv_handle_t
+  when udp(owner) then
+    if owner.phase ~= HANDLE_LIVE then raise "handle is not initialized" end
+    return owner.native as foreign *uv_handle_t
+  when fs_event(owner) then
+    if owner.phase ~= HANDLE_LIVE then raise "handle is not initialized" end
+    return owner.native as foreign *uv_handle_t
+  when fs_poll(owner) then
+    if owner.phase ~= HANDLE_LIVE then raise "handle is not initialized" end
+    return owner.native as foreign *uv_handle_t
+  when idle(owner) then
+    if owner.phase ~= HANDLE_LIVE then raise "handle is not initialized" end
+    return owner.native as foreign *uv_handle_t
+  when prepare(owner) then
+    if owner.phase ~= HANDLE_LIVE then raise "handle is not initialized" end
+    return owner.native as foreign *uv_handle_t
+  when check(owner) then
+    if owner.phase ~= HANDLE_LIVE then raise "handle is not initialized" end
+    return owner.native as foreign *uv_handle_t
+  when async(owner) then
+    if owner.phase ~= HANDLE_LIVE then raise "handle is not initialized" end
+    return owner.native as foreign *uv_handle_t
+  when signal(owner) then
+    if owner.phase ~= HANDLE_LIVE then raise "handle is not initialized" end
+    return owner.native as foreign *uv_handle_t
+  when poll(owner) then
+    if owner.phase ~= HANDLE_LIVE then raise "handle is not initialized" end
+    return owner.native as foreign *uv_handle_t
+  end
+end
+
+local function handle_t:pointer(): foreign *uv_handle_t
+  case self
+  when timer(owner) then
+    if owner.phase ~= HANDLE_LIVE then return nil end
+    return owner.native as foreign *uv_handle_t
+  when process(owner) then
+    if owner.phase ~= HANDLE_LIVE then return nil end
+    return owner.native as foreign *uv_handle_t
+  when tcp(owner) then
+    if owner.phase ~= HANDLE_LIVE then return nil end
+    return owner.native as foreign *uv_handle_t
+  when pipe(owner) then
+    if owner.phase ~= HANDLE_LIVE then return nil end
+    return owner.native as foreign *uv_handle_t
+  when tty(owner) then
+    if owner.phase ~= HANDLE_LIVE then return nil end
+    return owner.native as foreign *uv_handle_t
+  when udp(owner) then
+    if owner.phase ~= HANDLE_LIVE then return nil end
+    return owner.native as foreign *uv_handle_t
+  when fs_event(owner) then
+    if owner.phase ~= HANDLE_LIVE then return nil end
+    return owner.native as foreign *uv_handle_t
+  when fs_poll(owner) then
+    if owner.phase ~= HANDLE_LIVE then return nil end
+    return owner.native as foreign *uv_handle_t
+  when idle(owner) then
+    if owner.phase ~= HANDLE_LIVE then return nil end
+    return owner.native as foreign *uv_handle_t
+  when prepare(owner) then
+    if owner.phase ~= HANDLE_LIVE then return nil end
+    return owner.native as foreign *uv_handle_t
+  when check(owner) then
+    if owner.phase ~= HANDLE_LIVE then return nil end
+    return owner.native as foreign *uv_handle_t
+  when async(owner) then
+    if owner.phase ~= HANDLE_LIVE then return nil end
+    return owner.native as foreign *uv_handle_t
+  when signal(owner) then
+    if owner.phase ~= HANDLE_LIVE then return nil end
+    return owner.native as foreign *uv_handle_t
+  when poll(owner) then
+    if owner.phase ~= HANDLE_LIVE then return nil end
+    return owner.native as foreign *uv_handle_t
+  end
+end
+
+function handle_t:is_initialized(): boolean
+  -- Native initialization can establish a close obligation even when an
+  -- operation reports failure. Closing remains initialized until its callback.
+  return self:pointer() ~= nil
+end
+
+function handle_get_data(handle: handle_t): value
+  case handle
+  when timer(owner) then return owner.userdata
+  when process(owner) then return owner.userdata
+  when tcp(owner) then return owner.userdata
+  when pipe(owner) then return owner.userdata
+  when tty(owner) then return owner.userdata
+  when udp(owner) then return owner.userdata
+  when fs_event(owner) then return owner.userdata
+  when fs_poll(owner) then return owner.userdata
+  when idle(owner) then return owner.userdata
+  when prepare(owner) then return owner.userdata
+  when check(owner) then return owner.userdata
+  when async(owner) then return owner.userdata
+  when signal(owner) then return owner.userdata
+  when poll(owner) then return owner.userdata
+  end
+end
+
+function handle_set_data(handle: handle_t, data: value)
+  case handle
+  when timer(owner) then owner.userdata = data
+  when process(owner) then owner.userdata = data
+  when tcp(owner) then owner.userdata = data
+  when pipe(owner) then owner.userdata = data
+  when tty(owner) then owner.userdata = data
+  when udp(owner) then owner.userdata = data
+  when fs_event(owner) then owner.userdata = data
+  when fs_poll(owner) then owner.userdata = data
+  when idle(owner) then owner.userdata = data
+  when prepare(owner) then owner.userdata = data
+  when check(owner) then owner.userdata = data
+  when async(owner) then owner.userdata = data
+  when signal(owner) then owner.userdata = data
+  when poll(owner) then owner.userdata = data
+  end
+end
+
+function handle_get_loop(handle: handle_t): loop_t
+  case handle
+  when timer(owner) then return owner.loop as loop_t
+  when process(owner) then return owner.loop as loop_t
+  when tcp(owner) then return owner.loop as loop_t
+  when pipe(owner) then return owner.loop as loop_t
+  when tty(owner) then return owner.loop as loop_t
+  when udp(owner) then return owner.loop as loop_t
+  when fs_event(owner) then return owner.loop as loop_t
+  when fs_poll(owner) then return owner.loop as loop_t
+  when idle(owner) then return owner.loop as loop_t
+  when prepare(owner) then return owner.loop as loop_t
+  when check(owner) then return owner.loop as loop_t
+  when async(owner) then return owner.loop as loop_t
+  when signal(owner) then return owner.loop as loop_t
+  when poll(owner) then return owner.loop as loop_t
+  end
+end
+
+function ref(handle: handle_t)
+  ffi.uv_ref(handle_native(handle))
+end
+
+function has_ref(handle: handle_t): boolean
+  return ffi.uv_has_ref(handle_native(handle)) ~= 0
+end
+
+function is_active(handle: handle_t): boolean
+  return ffi.uv_is_active(handle_native(handle)) ~= 0
+end
+
+function is_closing(handle: handle_t): boolean
+  return ffi.uv_is_closing(handle_native(handle)) ~= 0
+end
+
+function send_buffer_size(handle: handle_t, size: integer): (integer, integer)
+  local native_size = size as foreign int
+  local status: integer = ffi.uv_send_buffer_size(handle_native(handle), native_size)
+  return status, native_size
+end
+
+function recv_buffer_size(handle: handle_t, size: integer): (integer, integer)
+  local native_size = size as foreign int
+  local status: integer = ffi.uv_recv_buffer_size(handle_native(handle), native_size)
+  return status, native_size
+end
+
+function timer_again(timer: timer_t): integer
+  if timer.phase ~= HANDLE_LIVE then return ffi.UV_EINVAL end
+  if ffi.uv_is_closing(timer.native as foreign *uv_handle_t) ~= 0 then return ffi.UV_EINVAL end
+  return ffi.uv_timer_again(timer.native)
+end
+
+function timer_set_repeat(timer: timer_t, repeat_ms: integer)
+  if timer.phase ~= HANDLE_LIVE then raise "timer is not initialized" end
+  ffi.uv_timer_set_repeat(timer.native, repeat_ms as foreign uint64_t)
+end
+
+function timer_get_repeat(timer: timer_t): integer
+  if timer.phase ~= HANDLE_LIVE then raise "timer is not initialized" end
+  return ffi.uv_timer_get_repeat(timer.native) as foreign lua_Integer
+end
+
+function timer_get_due_in(timer: timer_t): integer
+  if timer.phase ~= HANDLE_LIVE then raise "timer is not initialized" end
+  return ffi.uv_timer_get_due_in(timer.native) as foreign lua_Integer
+end
+
+local function handle_from_native(native: foreign *uv_handle_t): handle_t
+  local owner = ffi.uv_handle_get_data(native) as foreign *Udata
+  local boxed: value = owner
+  if ffi.uv_handle_get_type(native) == ffi.UV_TIMER then
+    return handle_t.timer(boxed as timer_t)
+  end
+  if ffi.uv_handle_get_type(native) == ffi.UV_IDLE then
+    return handle_t.idle(boxed as idle_t)
+  end
+  if ffi.uv_handle_get_type(native) == ffi.UV_PREPARE then
+    return handle_t.prepare(boxed as prepare_t)
+  end
+  if ffi.uv_handle_get_type(native) == ffi.UV_CHECK then
+    return handle_t.check(boxed as check_t)
+  end
+  if ffi.uv_handle_get_type(native) == ffi.UV_ASYNC then
+    return handle_t.async(boxed as async_t)
+  end
+  if ffi.uv_handle_get_type(native) == ffi.UV_SIGNAL then
+    return handle_t.signal(boxed as signal_t)
+  end
+  if ffi.uv_handle_get_type(native) == ffi.UV_POLL then
+    return handle_t.poll(boxed as poll_t)
+  end
+  if ffi.uv_handle_get_type(native) == ffi.UV_FS_EVENT then
+    return handle_t.fs_event(boxed as fs_event_t)
+  end
+  if ffi.uv_handle_get_type(native) == ffi.UV_FS_POLL then
+    return handle_t.fs_poll(boxed as fs_poll_t)
+  end
+  if ffi.uv_handle_get_type(native) == ffi.UV_TCP then
+    return handle_t.tcp(boxed as tcp_t)
+  end
+  if ffi.uv_handle_get_type(native) == ffi.UV_NAMED_PIPE then
+    return handle_t.pipe(boxed as pipe_t)
+  end
+  if ffi.uv_handle_get_type(native) == ffi.UV_TTY then
+    return handle_t.tty(boxed as tty_t)
+  end
+  if ffi.uv_handle_get_type(native) == ffi.UV_UDP then
+    return handle_t.udp(boxed as udp_t)
+  end
+  if ffi.uv_handle_get_type(native) == ffi.UV_PROCESS then return handle_t.process(boxed as process_t) end
+  raise "unsupported native handle type"
+end
+
+local function walk_deliver(loop: loop_t, native: foreign *uv_handle_t)
+  local callback = loop.walk_callback as function (handle_t, value): ()
+  callback(handle_from_native(native), loop.walk_argument)
+catch
+  if loop.failure_count == 0 then
+    loop.failure_error = error
+    loop.failure_trace = traceback
+  end
+  loop.failure_count = loop.failure_count + 1
+  ffi.uv_stop(loop.native)
+end
+
+foreign type WalkEntry = function (*lua_State, *Udata, *CClosure, *Udata, *uv_handle_t): void
+foreign function walk_callback(native: *uv_handle_t, arg: *void)
+  local loop = arg as foreign *Udata
+  local owner = ffi.uv_handle_get_data(native) as foreign *Udata
+  local L = ffi.titan_record_field(loop, "loop_t", "state")
+  local handler = ffi.lmacro_clCvalue(ffi.titan_record_field(loop, "loop_t", "walk_handler"))
+  local module = ffi.lmacro_uvalue(handler.upvalue[0])
+  local entry = ffi.lmacro_pvalue(handler.upvalue[2]) as foreign WalkEntry
+  local top = ffi.lua_gettop(L)
+  ffi.titan_uv_push_owner(L, owner)
+  entry(L, module, handler, loop, native)
+  ffi.lua_settop(L, top)
+end
+
+function walk(loop: loop_t, callback: function (handle_t, value): (), arg: value)
+  loop_require(loop)
+  if L ~= main_thread then raise "uv.walk requires the owning main Lua thread" end
+  if ffi.lua_checkstack(L, ffi.LUA_MINSTACK) == 0 then raise "cannot reserve native callback stack" end
+  local saved_callback? = loop.walk_callback
+  local saved_argument = loop.walk_argument
+  local saved_count = loop.failure_count
+  local saved_error = loop.failure_error
+  local saved_trace = loop.failure_trace
+  defer do
+    loop.walk_depth = loop.walk_depth - 1
+    walking_depth = walking_depth - 1
+    loop.walk_callback = saved_callback
+    loop.walk_argument = saved_argument
+    loop.failure_count = saved_count
+    loop.failure_error = saved_error
+    loop.failure_trace = saved_trace
+  end
+  loop.walk_callback = callback
+  loop.walk_argument = arg
+  loop.failure_count = 0
+  loop.failure_error = nil
+  loop.failure_trace = ""
+  loop.walk_depth = loop.walk_depth + 1
+  walking_depth = walking_depth + 1
+  ffi.uv_walk(loop.native, walk_callback, loop as foreign *void)
+  rethrow(loop)
+end
+
+record idle_t
+  local native: foreign uv_idle_t
+  local phase: integer
+  local loop: loop_t?
+  local callback: (function (idle_t): ())?
+  local close_callback: (function (handle_t): ())?
+  local handler: function (idle_t, loop_t): ()
+  local close_handler: function (idle_t, loop_t): ()
+  local userdata: value
+end
+
+local function idle_deliver(owner: idle_t, loop: loop_t)
+  local callback? = owner.callback
+  if callback ~= nil then callback(owner) end
+catch
+  if loop.failure_count == 0 then
+    loop.failure_error = error
+    loop.failure_trace = traceback
+  end
+  loop.failure_count = loop.failure_count + 1
+  ffi.uv_stop(loop.native)
+end
+
+local function idle_closed(owner: idle_t, loop: loop_t)
+  loop.handles[owner] = nil
+  owner.phase = HANDLE_RETIRED
+  local callback? = owner.close_callback
+  owner.callback = nil
+  owner.close_callback = nil
+  if callback ~= nil then callback(handle_t.idle(owner)) end
+catch
+  if loop.failure_count == 0 then
+    loop.failure_error = error
+    loop.failure_trace = traceback
+  end
+  loop.failure_count = loop.failure_count + 1
+  ffi.uv_stop(loop.native)
+end
+
+foreign function idle_callback(native: *uv_idle_t)
+  local base = native as foreign *uv_handle_t
+  local owner = ffi.uv_handle_get_data(base) as foreign *Udata
+  local loop = ffi.uv_loop_get_data(ffi.uv_handle_get_loop(base)) as foreign *Udata
+  local L = ffi.titan_record_field(loop, "loop_t", "state")
+  local handler = ffi.lmacro_clCvalue(ffi.titan_record_field(owner, "idle_t", "handler"))
+  local module = ffi.lmacro_uvalue(handler.upvalue[0])
+  local entry = ffi.lmacro_pvalue(handler.upvalue[2]) as foreign CallbackEntry
+  local top = ffi.lua_gettop(L)
+  ffi.titan_uv_push_owner(L, owner)
+  entry(L, module, handler, owner, loop)
+  ffi.lua_settop(L, top)
+end
+
+foreign function idle_close_callback(base: *uv_handle_t)
+  local owner = ffi.uv_handle_get_data(base) as foreign *Udata
+  local loop = ffi.uv_loop_get_data(ffi.uv_handle_get_loop(base)) as foreign *Udata
+  local L = ffi.titan_record_field(loop, "loop_t", "state")
+  local handler = ffi.lmacro_clCvalue(ffi.titan_record_field(owner, "idle_t", "close_handler"))
+  local module = ffi.lmacro_uvalue(handler.upvalue[0])
+  local entry = ffi.lmacro_pvalue(handler.upvalue[2]) as foreign CallbackEntry
+  local top = ffi.lua_gettop(L)
+  ffi.titan_uv_push_owner(L, owner)
+  entry(L, module, handler, owner, loop)
+  ffi.lua_settop(L, top)
+end
+
+function idle_t.new(): idle_t
+  local native = foreign uv_idle_t.new()
+  return {native = native, phase = HANDLE_FRESH, loop = nil,
+          callback = nil, close_callback = nil,
+          handler = idle_deliver, close_handler = idle_closed, userdata = nil}
+end
+
+function idle_t:as_handle_t(): handle_t
+  return handle_t.idle(self)
+end
+
+function idle_init(loop: loop_t, handle: idle_t): integer
+  if not loop.initialized or handle.phase == HANDLE_LIVE then return ffi.UV_EINVAL end
+  loop.handles[handle] = true
+  handle.loop = loop
+  local status: integer = ffi.uv_idle_init(loop.native, handle.native)
+  if status < 0 then loop.handles[handle] = nil; handle.loop = nil; return status end
+  handle.phase = HANDLE_LIVE
+  ffi.uv_handle_set_data(handle.native as foreign *uv_handle_t, handle as foreign *void)
+
+  return status
+end
+
+function idle_start(handle: idle_t, callback: function (idle_t): ()): integer
+  if handle.phase ~= HANDLE_LIVE then return ffi.UV_EINVAL end
+  if ffi.uv_is_closing(handle.native as foreign *uv_handle_t) ~= 0 then return ffi.UV_EINVAL end
+  if ffi.uv_is_active(handle.native as foreign *uv_handle_t) ~= 0 then return 0 end
+  local old_callback? = handle.callback
+  handle.callback = callback
+  local status: integer = ffi.uv_idle_start(handle.native, idle_callback)
+  if status < 0 then handle.callback = old_callback end
+  return status
+end
+
+function idle_stop(handle: idle_t): integer
+  if handle.phase ~= HANDLE_LIVE then return ffi.UV_EINVAL end
+  if ffi.uv_is_closing(handle.native as foreign *uv_handle_t) ~= 0 then return ffi.UV_EINVAL end
+  return ffi.uv_idle_stop(handle.native)
+end
+
+record prepare_t
+  local native: foreign uv_prepare_t
+  local phase: integer
+  local loop: loop_t?
+  local callback: (function (prepare_t): ())?
+  local close_callback: (function (handle_t): ())?
+  local handler: function (prepare_t, loop_t): ()
+  local close_handler: function (prepare_t, loop_t): ()
+  local userdata: value
+end
+
+local function prepare_deliver(owner: prepare_t, loop: loop_t)
+  local callback? = owner.callback
+  if callback ~= nil then callback(owner) end
+catch
+  if loop.failure_count == 0 then
+    loop.failure_error = error
+    loop.failure_trace = traceback
+  end
+  loop.failure_count = loop.failure_count + 1
+  ffi.uv_stop(loop.native)
+end
+
+local function prepare_closed(owner: prepare_t, loop: loop_t)
+  loop.handles[owner] = nil
+  owner.phase = HANDLE_RETIRED
+  local callback? = owner.close_callback
+  owner.callback = nil
+  owner.close_callback = nil
+  if callback ~= nil then callback(handle_t.prepare(owner)) end
+catch
+  if loop.failure_count == 0 then
+    loop.failure_error = error
+    loop.failure_trace = traceback
+  end
+  loop.failure_count = loop.failure_count + 1
+  ffi.uv_stop(loop.native)
+end
+
+foreign function prepare_callback(native: *uv_prepare_t)
+  local base = native as foreign *uv_handle_t
+  local owner = ffi.uv_handle_get_data(base) as foreign *Udata
+  local loop = ffi.uv_loop_get_data(ffi.uv_handle_get_loop(base)) as foreign *Udata
+  local L = ffi.titan_record_field(loop, "loop_t", "state")
+  local handler = ffi.lmacro_clCvalue(ffi.titan_record_field(owner, "prepare_t", "handler"))
+  local module = ffi.lmacro_uvalue(handler.upvalue[0])
+  local entry = ffi.lmacro_pvalue(handler.upvalue[2]) as foreign CallbackEntry
+  local top = ffi.lua_gettop(L)
+  ffi.titan_uv_push_owner(L, owner)
+  entry(L, module, handler, owner, loop)
+  ffi.lua_settop(L, top)
+end
+
+foreign function prepare_close_callback(base: *uv_handle_t)
+  local owner = ffi.uv_handle_get_data(base) as foreign *Udata
+  local loop = ffi.uv_loop_get_data(ffi.uv_handle_get_loop(base)) as foreign *Udata
+  local L = ffi.titan_record_field(loop, "loop_t", "state")
+  local handler = ffi.lmacro_clCvalue(ffi.titan_record_field(owner, "prepare_t", "close_handler"))
+  local module = ffi.lmacro_uvalue(handler.upvalue[0])
+  local entry = ffi.lmacro_pvalue(handler.upvalue[2]) as foreign CallbackEntry
+  local top = ffi.lua_gettop(L)
+  ffi.titan_uv_push_owner(L, owner)
+  entry(L, module, handler, owner, loop)
+  ffi.lua_settop(L, top)
+end
+
+function prepare_t.new(): prepare_t
+  local native = foreign uv_prepare_t.new()
+  return {native = native, phase = HANDLE_FRESH, loop = nil,
+          callback = nil, close_callback = nil,
+          handler = prepare_deliver, close_handler = prepare_closed, userdata = nil}
+end
+
+function prepare_t:as_handle_t(): handle_t
+  return handle_t.prepare(self)
+end
+
+function prepare_init(loop: loop_t, handle: prepare_t): integer
+  if not loop.initialized or handle.phase == HANDLE_LIVE then return ffi.UV_EINVAL end
+  loop.handles[handle] = true
+  handle.loop = loop
+  local status: integer = ffi.uv_prepare_init(loop.native, handle.native)
+  if status < 0 then loop.handles[handle] = nil; handle.loop = nil; return status end
+  handle.phase = HANDLE_LIVE
+  ffi.uv_handle_set_data(handle.native as foreign *uv_handle_t, handle as foreign *void)
+
+  return status
+end
+
+function prepare_start(handle: prepare_t, callback: function (prepare_t): ()): integer
+  if handle.phase ~= HANDLE_LIVE then return ffi.UV_EINVAL end
+  if ffi.uv_is_closing(handle.native as foreign *uv_handle_t) ~= 0 then return ffi.UV_EINVAL end
+  if ffi.uv_is_active(handle.native as foreign *uv_handle_t) ~= 0 then return 0 end
+  local old_callback? = handle.callback
+  handle.callback = callback
+  local status: integer = ffi.uv_prepare_start(handle.native, prepare_callback)
+  if status < 0 then handle.callback = old_callback end
+  return status
+end
+
+function prepare_stop(handle: prepare_t): integer
+  if handle.phase ~= HANDLE_LIVE then return ffi.UV_EINVAL end
+  if ffi.uv_is_closing(handle.native as foreign *uv_handle_t) ~= 0 then return ffi.UV_EINVAL end
+  return ffi.uv_prepare_stop(handle.native)
+end
+
+record check_t
+  local native: foreign uv_check_t
+  local phase: integer
+  local loop: loop_t?
+  local callback: (function (check_t): ())?
+  local close_callback: (function (handle_t): ())?
+  local handler: function (check_t, loop_t): ()
+  local close_handler: function (check_t, loop_t): ()
+  local userdata: value
+end
+
+local function check_deliver(owner: check_t, loop: loop_t)
+  local callback? = owner.callback
+  if callback ~= nil then callback(owner) end
+catch
+  if loop.failure_count == 0 then
+    loop.failure_error = error
+    loop.failure_trace = traceback
+  end
+  loop.failure_count = loop.failure_count + 1
+  ffi.uv_stop(loop.native)
+end
+
+local function check_closed(owner: check_t, loop: loop_t)
+  loop.handles[owner] = nil
+  owner.phase = HANDLE_RETIRED
+  local callback? = owner.close_callback
+  owner.callback = nil
+  owner.close_callback = nil
+  if callback ~= nil then callback(handle_t.check(owner)) end
+catch
+  if loop.failure_count == 0 then
+    loop.failure_error = error
+    loop.failure_trace = traceback
+  end
+  loop.failure_count = loop.failure_count + 1
+  ffi.uv_stop(loop.native)
+end
+
+foreign function check_callback(native: *uv_check_t)
+  local base = native as foreign *uv_handle_t
+  local owner = ffi.uv_handle_get_data(base) as foreign *Udata
+  local loop = ffi.uv_loop_get_data(ffi.uv_handle_get_loop(base)) as foreign *Udata
+  local L = ffi.titan_record_field(loop, "loop_t", "state")
+  local handler = ffi.lmacro_clCvalue(ffi.titan_record_field(owner, "check_t", "handler"))
+  local module = ffi.lmacro_uvalue(handler.upvalue[0])
+  local entry = ffi.lmacro_pvalue(handler.upvalue[2]) as foreign CallbackEntry
+  local top = ffi.lua_gettop(L)
+  ffi.titan_uv_push_owner(L, owner)
+  entry(L, module, handler, owner, loop)
+  ffi.lua_settop(L, top)
+end
+
+foreign function check_close_callback(base: *uv_handle_t)
+  local owner = ffi.uv_handle_get_data(base) as foreign *Udata
+  local loop = ffi.uv_loop_get_data(ffi.uv_handle_get_loop(base)) as foreign *Udata
+  local L = ffi.titan_record_field(loop, "loop_t", "state")
+  local handler = ffi.lmacro_clCvalue(ffi.titan_record_field(owner, "check_t", "close_handler"))
+  local module = ffi.lmacro_uvalue(handler.upvalue[0])
+  local entry = ffi.lmacro_pvalue(handler.upvalue[2]) as foreign CallbackEntry
+  local top = ffi.lua_gettop(L)
+  ffi.titan_uv_push_owner(L, owner)
+  entry(L, module, handler, owner, loop)
+  ffi.lua_settop(L, top)
+end
+
+function check_t.new(): check_t
+  local native = foreign uv_check_t.new()
+  return {native = native, phase = HANDLE_FRESH, loop = nil,
+          callback = nil, close_callback = nil,
+          handler = check_deliver, close_handler = check_closed, userdata = nil}
+end
+
+function check_t:as_handle_t(): handle_t
+  return handle_t.check(self)
+end
+
+function check_init(loop: loop_t, handle: check_t): integer
+  if not loop.initialized or handle.phase == HANDLE_LIVE then return ffi.UV_EINVAL end
+  loop.handles[handle] = true
+  handle.loop = loop
+  local status: integer = ffi.uv_check_init(loop.native, handle.native)
+  if status < 0 then loop.handles[handle] = nil; handle.loop = nil; return status end
+  handle.phase = HANDLE_LIVE
+  ffi.uv_handle_set_data(handle.native as foreign *uv_handle_t, handle as foreign *void)
+
+  return status
+end
+
+function check_start(handle: check_t, callback: function (check_t): ()): integer
+  if handle.phase ~= HANDLE_LIVE then return ffi.UV_EINVAL end
+  if ffi.uv_is_closing(handle.native as foreign *uv_handle_t) ~= 0 then return ffi.UV_EINVAL end
+  if ffi.uv_is_active(handle.native as foreign *uv_handle_t) ~= 0 then return 0 end
+  local old_callback? = handle.callback
+  handle.callback = callback
+  local status: integer = ffi.uv_check_start(handle.native, check_callback)
+  if status < 0 then handle.callback = old_callback end
+  return status
+end
+
+function check_stop(handle: check_t): integer
+  if handle.phase ~= HANDLE_LIVE then return ffi.UV_EINVAL end
+  if ffi.uv_is_closing(handle.native as foreign *uv_handle_t) ~= 0 then return ffi.UV_EINVAL end
+  return ffi.uv_check_stop(handle.native)
+end
+
+record async_t
+  local native: foreign uv_async_t
+  local phase: integer
+  local loop: loop_t?
+  local callback: (function (async_t): ())?
+  local close_callback: (function (handle_t): ())?
+  local handler: function (async_t, loop_t): ()
+  local close_handler: function (async_t, loop_t): ()
+  local userdata: value
+end
+
+local function async_deliver(owner: async_t, loop: loop_t)
+  local callback? = owner.callback
+  if callback ~= nil then callback(owner) end
+catch
+  if loop.failure_count == 0 then
+    loop.failure_error = error
+    loop.failure_trace = traceback
+  end
+  loop.failure_count = loop.failure_count + 1
+  ffi.uv_stop(loop.native)
+end
+
+local function async_closed(owner: async_t, loop: loop_t)
+  loop.handles[owner] = nil
+  owner.phase = HANDLE_RETIRED
+  local callback? = owner.close_callback
+  owner.callback = nil
+  owner.close_callback = nil
+  if callback ~= nil then callback(handle_t.async(owner)) end
+catch
+  if loop.failure_count == 0 then
+    loop.failure_error = error
+    loop.failure_trace = traceback
+  end
+  loop.failure_count = loop.failure_count + 1
+  ffi.uv_stop(loop.native)
+end
+
+foreign function async_callback(native: *uv_async_t)
+  local base = native as foreign *uv_handle_t
+  local owner = ffi.uv_handle_get_data(base) as foreign *Udata
+  local loop = ffi.uv_loop_get_data(ffi.uv_handle_get_loop(base)) as foreign *Udata
+  local L = ffi.titan_record_field(loop, "loop_t", "state")
+  local handler = ffi.lmacro_clCvalue(ffi.titan_record_field(owner, "async_t", "handler"))
+  local module = ffi.lmacro_uvalue(handler.upvalue[0])
+  local entry = ffi.lmacro_pvalue(handler.upvalue[2]) as foreign CallbackEntry
+  local top = ffi.lua_gettop(L)
+  ffi.titan_uv_push_owner(L, owner)
+  entry(L, module, handler, owner, loop)
+  ffi.lua_settop(L, top)
+end
+
+foreign function async_close_callback(base: *uv_handle_t)
+  local owner = ffi.uv_handle_get_data(base) as foreign *Udata
+  local loop = ffi.uv_loop_get_data(ffi.uv_handle_get_loop(base)) as foreign *Udata
+  local L = ffi.titan_record_field(loop, "loop_t", "state")
+  local handler = ffi.lmacro_clCvalue(ffi.titan_record_field(owner, "async_t", "close_handler"))
+  local module = ffi.lmacro_uvalue(handler.upvalue[0])
+  local entry = ffi.lmacro_pvalue(handler.upvalue[2]) as foreign CallbackEntry
+  local top = ffi.lua_gettop(L)
+  ffi.titan_uv_push_owner(L, owner)
+  entry(L, module, handler, owner, loop)
+  ffi.lua_settop(L, top)
+end
+
+function async_t.new(): async_t
+  local native = foreign uv_async_t.new()
+  return {native = native, phase = HANDLE_FRESH, loop = nil,
+          callback = nil, close_callback = nil,
+          handler = async_deliver, close_handler = async_closed, userdata = nil}
+end
+
+function async_t:as_handle_t(): handle_t
+  return handle_t.async(self)
+end
+
+function async_init(loop: loop_t, handle: async_t, callback: (function (async_t): ())?): integer
+  if not loop.initialized or handle.phase == HANDLE_LIVE then return ffi.UV_EINVAL end
+  loop.handles[handle] = true
+  handle.loop = loop
+  local status: integer = ffi.uv_async_init(loop.native, handle.native, async_callback)
+  if status < 0 then loop.handles[handle] = nil; handle.loop = nil; return status end
+  handle.phase = HANDLE_LIVE
+  ffi.uv_handle_set_data(handle.native as foreign *uv_handle_t, handle as foreign *void)
+  handle.callback = callback
+  return status
+end
+
+function async_send(handle: async_t): integer
+  if handle.phase ~= HANDLE_LIVE then return ffi.UV_EINVAL end
+  if ffi.uv_is_closing(handle.native as foreign *uv_handle_t) ~= 0 then return ffi.UV_EINVAL end
+  return ffi.uv_async_send(handle.native)
+end
+
+function async_t:borrow(): foreign *void
+  if self.phase ~= HANDLE_LIVE then raise "async handle is not initialized" end
+  if ffi.uv_is_closing(self.native as foreign *uv_handle_t) ~= 0 then raise "async handle is closing" end
+  return self.native as foreign *void
+end
+
+foreign function async_send_native(handle: *void): int
+  return ffi.uv_async_send(handle as foreign *uv_async_t)
+end
+
+function async_send_function(): foreign function (*void): int
+  return async_send_native
+end
+
+record signal_t
+  local native: foreign uv_signal_t
+  local phase: integer
+  local loop: loop_t?
+  local callback: (function (signal_t, integer): ())?
+  local close_callback: (function (handle_t): ())?
+  local handler: function (signal_t, loop_t, integer): ()
+  local close_handler: function (signal_t, loop_t): ()
+  local userdata: value
+end
+
+local function signal_deliver(owner: signal_t, loop: loop_t, signum: integer)
+  local callback? = owner.callback
+  if callback ~= nil then callback(owner, signum) end
+catch
+  if loop.failure_count == 0 then
+    loop.failure_error = error
+    loop.failure_trace = traceback
+  end
+  loop.failure_count = loop.failure_count + 1
+  ffi.uv_stop(loop.native)
+end
+
+local function signal_closed(owner: signal_t, loop: loop_t)
+  loop.handles[owner] = nil
+  owner.phase = HANDLE_RETIRED
+  local callback? = owner.close_callback
+  owner.callback = nil
+  owner.close_callback = nil
+  if callback ~= nil then callback(handle_t.signal(owner)) end
+catch
+  if loop.failure_count == 0 then
+    loop.failure_error = error
+    loop.failure_trace = traceback
+  end
+  loop.failure_count = loop.failure_count + 1
+  ffi.uv_stop(loop.native)
+end
+
+foreign type SignalEntry = function (*lua_State, *Udata, *CClosure, *Udata, *Udata, lua_Integer): void
+
+foreign function signal_callback(native: *uv_signal_t, signum: int)
+  local base = native as foreign *uv_handle_t
+  local owner = ffi.uv_handle_get_data(base) as foreign *Udata
+  local loop = ffi.uv_loop_get_data(ffi.uv_handle_get_loop(base)) as foreign *Udata
+  local L = ffi.titan_record_field(loop, "loop_t", "state")
+  local handler = ffi.lmacro_clCvalue(ffi.titan_record_field(owner, "signal_t", "handler"))
+  local module = ffi.lmacro_uvalue(handler.upvalue[0])
+  local entry = ffi.lmacro_pvalue(handler.upvalue[2]) as foreign SignalEntry
+  local top = ffi.lua_gettop(L)
+  ffi.titan_uv_push_owner(L, owner)
+  entry(L, module, handler, owner, loop, signum as foreign lua_Integer)
+  ffi.lua_settop(L, top)
+end
+
+foreign function signal_close_callback(base: *uv_handle_t)
+  local owner = ffi.uv_handle_get_data(base) as foreign *Udata
+  local loop = ffi.uv_loop_get_data(ffi.uv_handle_get_loop(base)) as foreign *Udata
+  local L = ffi.titan_record_field(loop, "loop_t", "state")
+  local handler = ffi.lmacro_clCvalue(ffi.titan_record_field(owner, "signal_t", "close_handler"))
+  local module = ffi.lmacro_uvalue(handler.upvalue[0])
+  local entry = ffi.lmacro_pvalue(handler.upvalue[2]) as foreign CallbackEntry
+  local top = ffi.lua_gettop(L)
+  ffi.titan_uv_push_owner(L, owner)
+  entry(L, module, handler, owner, loop)
+  ffi.lua_settop(L, top)
+end
+
+function signal_t.new(): signal_t
+  local native = foreign uv_signal_t.new()
+  return {native = native, phase = HANDLE_FRESH, loop = nil,
+          callback = nil, close_callback = nil,
+          handler = signal_deliver, close_handler = signal_closed, userdata = nil}
+end
+
+function signal_t:as_handle_t(): handle_t
+  return handle_t.signal(self)
+end
+
+function signal_t:get_signum(): integer
+  if self.phase ~= HANDLE_LIVE then raise "signal handle is not initialized" end
+  return self.native.signum as integer
+end
+
+function signal_init(loop: loop_t, handle: signal_t): integer
+  if not loop.initialized or handle.phase == HANDLE_LIVE then return ffi.UV_EINVAL end
+  loop.handles[handle] = true
+  handle.loop = loop
+  local status: integer = ffi.uv_signal_init(loop.native, handle.native)
+  if status < 0 then loop.handles[handle] = nil; handle.loop = nil; return status end
+  handle.phase = HANDLE_LIVE
+  ffi.uv_handle_set_data(handle.native as foreign *uv_handle_t, handle as foreign *void)
+
+  return status
+end
+
+function signal_start(handle: signal_t, callback: function (signal_t, integer): (), signum: integer): integer
+  if handle.phase ~= HANDLE_LIVE then return ffi.UV_EINVAL end
+  if ffi.uv_is_closing(handle.native as foreign *uv_handle_t) ~= 0 then return ffi.UV_EINVAL end
+  local native_signum = signum as foreign int
+  local old_callback? = handle.callback
+  handle.callback = callback
+  local status: integer = ffi.uv_signal_start(handle.native, signal_callback, native_signum)
+  if status < 0 then handle.callback = old_callback end
+  return status
+end
+
+function signal_start_oneshot(handle: signal_t, callback: function (signal_t, integer): (), signum: integer): integer
+  if handle.phase ~= HANDLE_LIVE then return ffi.UV_EINVAL end
+  if ffi.uv_is_closing(handle.native as foreign *uv_handle_t) ~= 0 then return ffi.UV_EINVAL end
+  local native_signum = signum as foreign int
+  local old_callback? = handle.callback
+  handle.callback = callback
+  local status: integer = ffi.uv_signal_start_oneshot(handle.native, signal_callback, native_signum)
+  if status < 0 then handle.callback = old_callback end
+  return status
+end
+
+function signal_stop(handle: signal_t): integer
+  if handle.phase ~= HANDLE_LIVE then return ffi.UV_EINVAL end
+  if ffi.uv_is_closing(handle.native as foreign *uv_handle_t) ~= 0 then return ffi.UV_EINVAL end
+  return ffi.uv_signal_stop(handle.native)
+end
+
+record poll_t
+  local ready: boolean
+  local native: foreign uv_poll_t
+  local phase: integer
+  local loop: loop_t?
+  local callback: (function (poll_t, integer, integer): ())?
+  local close_callback: (function (handle_t): ())?
+  local handler: function (poll_t, loop_t, integer, integer): ()
+  local close_handler: function (poll_t, loop_t): ()
+  local userdata: value
+end
+
+local function poll_deliver(owner: poll_t, loop: loop_t, status: integer, events: integer)
+  local callback? = owner.callback
+  if callback ~= nil then callback(owner, status, events) end
+catch
+  if loop.failure_count == 0 then
+    loop.failure_error = error
+    loop.failure_trace = traceback
+  end
+  loop.failure_count = loop.failure_count + 1
+  ffi.uv_stop(loop.native)
+end
+
+local function poll_closed(owner: poll_t, loop: loop_t)
+  loop.handles[owner] = nil
+  owner.phase = HANDLE_RETIRED
+  owner.ready = false
+  local callback? = owner.close_callback
+  owner.callback = nil
+  owner.close_callback = nil
+  if callback ~= nil then callback(handle_t.poll(owner)) end
+catch
+  if loop.failure_count == 0 then
+    loop.failure_error = error
+    loop.failure_trace = traceback
+  end
+  loop.failure_count = loop.failure_count + 1
+  ffi.uv_stop(loop.native)
+end
+
+foreign type PollEntry = function (*lua_State, *Udata, *CClosure, *Udata, *Udata, lua_Integer, lua_Integer): void
+
+foreign function poll_callback(native: *uv_poll_t, status: int, events: int)
+  local base = native as foreign *uv_handle_t
+  local owner = ffi.uv_handle_get_data(base) as foreign *Udata
+  local loop = ffi.uv_loop_get_data(ffi.uv_handle_get_loop(base)) as foreign *Udata
+  local L = ffi.titan_record_field(loop, "loop_t", "state")
+  local handler = ffi.lmacro_clCvalue(ffi.titan_record_field(owner, "poll_t", "handler"))
+  local module = ffi.lmacro_uvalue(handler.upvalue[0])
+  local entry = ffi.lmacro_pvalue(handler.upvalue[2]) as foreign PollEntry
+  local top = ffi.lua_gettop(L)
+  ffi.titan_uv_push_owner(L, owner)
+  entry(L, module, handler, owner, loop, status as foreign lua_Integer, events as foreign lua_Integer)
+  ffi.lua_settop(L, top)
+end
+
+foreign function poll_close_callback(base: *uv_handle_t)
+  local owner = ffi.uv_handle_get_data(base) as foreign *Udata
+  local loop = ffi.uv_loop_get_data(ffi.uv_handle_get_loop(base)) as foreign *Udata
+  local L = ffi.titan_record_field(loop, "loop_t", "state")
+  local handler = ffi.lmacro_clCvalue(ffi.titan_record_field(owner, "poll_t", "close_handler"))
+  local module = ffi.lmacro_uvalue(handler.upvalue[0])
+  local entry = ffi.lmacro_pvalue(handler.upvalue[2]) as foreign CallbackEntry
+  local top = ffi.lua_gettop(L)
+  ffi.titan_uv_push_owner(L, owner)
+  entry(L, module, handler, owner, loop)
+  ffi.lua_settop(L, top)
+end
+
+function poll_t.new(): poll_t
+  local native = foreign uv_poll_t.new()
+  return {ready = false, native = native, phase = HANDLE_FRESH, loop = nil,
+          callback = nil, close_callback = nil,
+          handler = poll_deliver, close_handler = poll_closed, userdata = nil}
+end
+
+function poll_t:as_handle_t(): handle_t
+  return handle_t.poll(self)
+end
+
+function poll_init(loop: loop_t, handle: poll_t, file: integer): integer
+  if not loop.initialized or handle.phase == HANDLE_LIVE then return ffi.UV_EINVAL end
+  local native_file = file as foreign int
+  ffi.memset(handle.native, 0, foreign uv_poll_t.sizeof)
+  handle.ready = false
+  loop.handles[handle] = true
+  handle.loop = loop
+  local status: integer = ffi.uv_poll_init(loop.native, handle.native, native_file)
+  if ffi.uv_handle_get_type(handle.native as foreign *uv_handle_t) ~= ffi.UV_POLL then
+    loop.handles[handle] = nil; handle.loop = nil; return status
+  end
+  -- Windows can fail after native registration. Such owners remain closeable
+  -- and rooted, but starting their incompletely initialized requests is invalid.
+  handle.ready = status == 0
+  handle.phase = HANDLE_LIVE
+  ffi.uv_handle_set_data(handle.native as foreign *uv_handle_t, handle as foreign *void)
+
+  return status
+end
+
+function poll_start(handle: poll_t, callback: function (poll_t, integer, integer): (), events: integer): integer
+  if handle.phase ~= HANDLE_LIVE or not handle.ready then return ffi.UV_EINVAL end
+  if ffi.uv_is_closing(handle.native as foreign *uv_handle_t) ~= 0 then return ffi.UV_EINVAL end
+  local allowed = (ffi.UV_READABLE as integer) | (ffi.UV_WRITABLE as integer) |
+                  (ffi.UV_DISCONNECT as integer) | (ffi.UV_PRIORITIZED as integer)
+  if (events & ~allowed) ~= 0 then return ffi.UV_EINVAL end
+  local native_events = events as foreign int
+  local old_callback? = handle.callback
+  handle.callback = callback
+  local status: integer = ffi.uv_poll_start(handle.native, native_events, poll_callback)
+  if status < 0 then handle.callback = old_callback end
+  return status
+end
+
+function poll_stop(handle: poll_t): integer
+  if handle.phase ~= HANDLE_LIVE or not handle.ready then return ffi.UV_EINVAL end
+  if ffi.uv_is_closing(handle.native as foreign *uv_handle_t) ~= 0 then return ffi.UV_EINVAL end
+  return ffi.uv_poll_stop(handle.native)
+end
+
+union handle_type
+  unknown()
+  async()
+  check()
+  fs_event()
+  fs_poll()
+  handle()
+  idle()
+  named_pipe()
+  poll()
+  prepare()
+  process()
+  stream()
+  tcp()
+  timer()
+  tty()
+  udp()
+  signal()
+  file()
+end
+
+const UNKNOWN_HANDLE = handle_type.unknown()
+const ASYNC = handle_type.async()
+const CHECK = handle_type.check()
+const FS_EVENT = handle_type.fs_event()
+const FS_POLL = handle_type.fs_poll()
+const HANDLE = handle_type.handle()
+const IDLE = handle_type.idle()
+const NAMED_PIPE = handle_type.named_pipe()
+const POLL = handle_type.poll()
+const PREPARE = handle_type.prepare()
+const PROCESS = handle_type.process()
+const STREAM = handle_type.stream()
+const TCP = handle_type.tcp()
+const TIMER = handle_type.timer()
+const TTY = handle_type.tty()
+const UDP = handle_type.udp()
+const SIGNAL = handle_type.signal()
+const FILE = handle_type.file()
+
+local function handle_type_native(kind: handle_type): foreign uv_handle_type
+  case kind
+  when unknown() then return ffi.UV_UNKNOWN_HANDLE
+  when async() then return ffi.UV_ASYNC
+  when check() then return ffi.UV_CHECK
+  when fs_event() then return ffi.UV_FS_EVENT
+  when fs_poll() then return ffi.UV_FS_POLL
+  when handle() then return ffi.UV_HANDLE
+  when idle() then return ffi.UV_IDLE
+  when named_pipe() then return ffi.UV_NAMED_PIPE
+  when poll() then return ffi.UV_POLL
+  when prepare() then return ffi.UV_PREPARE
+  when process() then return ffi.UV_PROCESS
+  when stream() then return ffi.UV_STREAM
+  when tcp() then return ffi.UV_TCP
+  when timer() then return ffi.UV_TIMER
+  when tty() then return ffi.UV_TTY
+  when udp() then return ffi.UV_UDP
+  when signal() then return ffi.UV_SIGNAL
+  when file() then return ffi.UV_FILE
+  end
+end
+
+local function handle_type_from_native(kind: foreign uv_handle_type): handle_type
+  if kind == ffi.UV_UNKNOWN_HANDLE then return handle_type.unknown() end
+  if kind == ffi.UV_ASYNC then return handle_type.async() end
+  if kind == ffi.UV_CHECK then return handle_type.check() end
+  if kind == ffi.UV_FS_EVENT then return handle_type.fs_event() end
+  if kind == ffi.UV_FS_POLL then return handle_type.fs_poll() end
+  if kind == ffi.UV_HANDLE then return handle_type.handle() end
+  if kind == ffi.UV_IDLE then return handle_type.idle() end
+  if kind == ffi.UV_NAMED_PIPE then return handle_type.named_pipe() end
+  if kind == ffi.UV_POLL then return handle_type.poll() end
+  if kind == ffi.UV_PREPARE then return handle_type.prepare() end
+  if kind == ffi.UV_PROCESS then return handle_type.process() end
+  if kind == ffi.UV_STREAM then return handle_type.stream() end
+  if kind == ffi.UV_TCP then return handle_type.tcp() end
+  if kind == ffi.UV_TIMER then return handle_type.timer() end
+  if kind == ffi.UV_TTY then return handle_type.tty() end
+  if kind == ffi.UV_UDP then return handle_type.udp() end
+  if kind == ffi.UV_SIGNAL then return handle_type.signal() end
+  if kind == ffi.UV_FILE then return handle_type.file() end
+  raise "unknown native handle_type"
+end
+
+function handle_size(kind: handle_type): integer
+  return ffi.uv_handle_size(handle_type_native(kind)) as foreign lua_Integer
+end
+
+function handle_type_name(kind: handle_type): string?
+  local name = ffi.uv_handle_type_name(handle_type_native(kind))
+  if not name then return nil end
+  return name as string
+end
+
+union req_type
+  unknown()
+  req()
+  connect()
+  write()
+  shutdown()
+  udp_send()
+  fs()
+  work()
+  getaddrinfo()
+  getnameinfo()
+  random()
+end
+
+const UNKNOWN_REQ = req_type.unknown()
+const REQ = req_type.req()
+const CONNECT = req_type.connect()
+const WRITE = req_type.write()
+const SHUTDOWN = req_type.shutdown()
+const UDP_SEND = req_type.udp_send()
+const FS = req_type.fs()
+const WORK = req_type.work()
+const GETADDRINFO = req_type.getaddrinfo()
+const GETNAMEINFO = req_type.getnameinfo()
+const RANDOM = req_type.random()
+
+local function req_type_native(kind: req_type): foreign uv_req_type
+  case kind
+  when unknown() then return ffi.UV_UNKNOWN_REQ
+  when req() then return ffi.UV_REQ
+  when connect() then return ffi.UV_CONNECT
+  when write() then return ffi.UV_WRITE
+  when shutdown() then return ffi.UV_SHUTDOWN
+  when udp_send() then return ffi.UV_UDP_SEND
+  when fs() then return ffi.UV_FS
+  when work() then return ffi.UV_WORK
+  when getaddrinfo() then return ffi.UV_GETADDRINFO
+  when getnameinfo() then return ffi.UV_GETNAMEINFO
+  when random() then return ffi.UV_RANDOM
+  end
+end
+
+local function req_type_from_native(kind: foreign uv_req_type): req_type
+  if kind == ffi.UV_UNKNOWN_REQ then return req_type.unknown() end
+  if kind == ffi.UV_REQ then return req_type.req() end
+  if kind == ffi.UV_CONNECT then return req_type.connect() end
+  if kind == ffi.UV_WRITE then return req_type.write() end
+  if kind == ffi.UV_SHUTDOWN then return req_type.shutdown() end
+  if kind == ffi.UV_UDP_SEND then return req_type.udp_send() end
+  if kind == ffi.UV_FS then return req_type.fs() end
+  if kind == ffi.UV_WORK then return req_type.work() end
+  if kind == ffi.UV_GETADDRINFO then return req_type.getaddrinfo() end
+  if kind == ffi.UV_GETNAMEINFO then return req_type.getnameinfo() end
+  if kind == ffi.UV_RANDOM then return req_type.random() end
+  raise "unknown native req_type"
+end
+
+function req_size(kind: req_type): integer
+  return ffi.uv_req_size(req_type_native(kind)) as foreign lua_Integer
+end
+
+function req_type_name(kind: req_type): string?
+  local name = ffi.uv_req_type_name(req_type_native(kind))
+  if not name then return nil end
+  return name as string
+end
+
+function handle_get_type(handle: handle_t): handle_type
+  return handle_type_from_native(ffi.uv_handle_get_type(handle_native(handle)))
+end
+
+function req_get_type(req: req_t): req_type
+  case req
+  when connect(owner) then return req_type_from_native(ffi.uv_req_get_type(owner.native as foreign *uv_req_t))
+  when write(owner) then return req_type_from_native(ffi.uv_req_get_type(owner.native as foreign *uv_req_t))
+  when shutdown(owner) then return req_type_from_native(ffi.uv_req_get_type(owner.native as foreign *uv_req_t))
+  when udp_send(owner) then return req_type_from_native(ffi.uv_req_get_type(owner.native as foreign *uv_req_t))
+  when getaddrinfo(owner) then return req_type_from_native(ffi.uv_req_get_type(owner.native as foreign *uv_req_t))
+  when getnameinfo(owner) then return req_type_from_native(ffi.uv_req_get_type(owner.native as foreign *uv_req_t))
+  when fs(owner) then return req_type_from_native(ffi.uv_req_get_type(owner.native as foreign *uv_req_t))
+  when work(owner) then return req_type_from_native(ffi.uv_req_get_type(owner.native as foreign *uv_req_t))
+  when random(owner) then return req_type_from_native(ffi.uv_req_get_type(owner.native as foreign *uv_req_t))
+  end
+end
+
+function guess_handle(file: integer): handle_type
+  return handle_type_from_native(ffi.uv_guess_handle(file as foreign uv_file))
+end
+
+record random_t
+  local native: foreign uv_random_t
+  local pending: boolean
+  local loop: loop_t?
+  local buffer: buf_t?
+  local callback: (function (random_t, integer, buf_t, integer): ())?
+  local handler: function (random_t, loop_t, integer, integer): ()
+  local userdata: value
+end
+
+local function random_deliver(owner: random_t, loop: loop_t,
+                              status: integer, length: integer)
+  loop.requests[owner] = nil
+  owner.pending = false
+  owner.loop = nil
+  local buffer = owner.buffer as buf_t
+  local callback? = owner.callback
+  owner.callback = nil
+  owner.buffer = nil
+  if callback ~= nil then callback(owner, status, buffer, length) end
+catch
+  if loop.failure_count == 0 then
+    loop.failure_error = error
+    loop.failure_trace = traceback
+  end
+  loop.failure_count = loop.failure_count + 1
+  ffi.uv_stop(loop.native)
+end
+
+foreign type RandomEntry = function (*lua_State, *Udata, *CClosure, *Udata, *Udata, lua_Integer, lua_Integer): void
+foreign function random_callback(native: *uv_random_t, status: int, buf: *void, buflen: size_t)
+  local owner = ffi.uv_req_get_data(native as foreign *uv_req_t) as foreign *Udata
+  local loop = ffi.uv_loop_get_data(native.loop) as foreign *Udata
+  local L = ffi.titan_record_field(loop, "loop_t", "state")
+  local handler = ffi.lmacro_clCvalue(ffi.titan_record_field(owner, "random_t", "handler"))
+  local module = ffi.lmacro_uvalue(handler.upvalue[0])
+  local entry = ffi.lmacro_pvalue(handler.upvalue[2]) as foreign RandomEntry
+  local top = ffi.lua_gettop(L)
+  ffi.titan_uv_push_owner(L, owner)
+  entry(L, module, handler, owner, loop,
+        status as foreign lua_Integer, buflen as foreign lua_Integer)
+  ffi.lua_settop(L, top)
+end
+
+function random_t.new(): random_t
+  local native = foreign uv_random_t.new()
+  return {native = native, pending = false, loop = nil, buffer = nil,
+          callback = nil, handler = random_deliver, userdata = nil}
+end
+
+function random_t:as_req_t(): req_t
+  return req_t.random(self)
+end
+
+function random(loop: loop_t?, request: random_t?, buffer: buf_t,
+                 length: integer, flags: integer,
+                 callback: (function (random_t, integer, buf_t, integer): ())?): integer
+  if not buffer.writable or length < 0 or length > buffer.native.len as integer then
+    return ffi.UV_EINVAL
+  end
+  local native_length = length as foreign size_t
+  local native_flags = flags as foreign unsigned int
+  if callback == nil then
+    return ffi.uv_random(nil, nil, buffer.native.base, native_length, native_flags, nil)
+  end
+  if not loop or not loop.initialized or not request then return ffi.UV_EINVAL end
+  local req = request as random_t
+  local owner_loop = loop as loop_t
+  if req.pending then return ffi.UV_EBUSY end
+  owner_loop.requests[req] = true
+  req.pending = true
+  req.loop = owner_loop
+  req.buffer = buffer
+  req.callback = callback
+  ffi.uv_req_set_data(req.native as foreign *uv_req_t, req as foreign *void)
+  local status: integer = ffi.uv_random(owner_loop.native, req.native,
+      buffer.native.base, native_length, native_flags, random_callback)
+  if status < 0 then
+    owner_loop.requests[req] = nil
+    req.pending = false
+    req.loop = nil
+    req.buffer = nil
+    req.callback = nil
+  end
+  return status
+end
+
+local function stat_copy(native: foreign const *uv_stat_t): stat_t
+  return stat_t {
+    st_dev = (native.st_dev as foreign lua_Integer) as integer, st_mode = (native.st_mode as foreign lua_Integer) as integer,
+    st_nlink = (native.st_nlink as foreign lua_Integer) as integer, st_uid = (native.st_uid as foreign lua_Integer) as integer,
+    st_gid = (native.st_gid as foreign lua_Integer) as integer, st_rdev = (native.st_rdev as foreign lua_Integer) as integer,
+    st_ino = (native.st_ino as foreign lua_Integer) as integer, st_size = (native.st_size as foreign lua_Integer) as integer,
+    st_blksize = (native.st_blksize as foreign lua_Integer) as integer, st_blocks = (native.st_blocks as foreign lua_Integer) as integer,
+    st_flags = (native.st_flags as foreign lua_Integer) as integer, st_gen = (native.st_gen as foreign lua_Integer) as integer,
+    st_atim = timespec_t(native.st_atim.tv_sec as integer, native.st_atim.tv_nsec as integer),
+    st_mtim = timespec_t(native.st_mtim.tv_sec as integer, native.st_mtim.tv_nsec as integer),
+    st_ctim = timespec_t(native.st_ctim.tv_sec as integer, native.st_ctim.tv_nsec as integer),
+    st_birthtim = timespec_t(native.st_birthtim.tv_sec as integer, native.st_birthtim.tv_nsec as integer),
+  }
+end
+
+record fs_event_t
+  local native: foreign uv_fs_event_t
+  local phase: integer
+  local loop: loop_t?
+  local callback: (function (fs_event_t, string?, integer, integer): ())?
+  local close_callback: (function (handle_t): ())?
+  local handler: function (fs_event_t, loop_t, foreign const *char, integer, integer): ()
+  local close_handler: function (fs_event_t, loop_t): ()
+  local path: string?
+  local userdata: value
+end
+
+local function fs_event_deliver(owner: fs_event_t, loop: loop_t, filename: foreign const *char, events: integer, status: integer)
+  local callback? = owner.callback
+  local name: string? = nil
+  if filename then name = filename as string end
+  if callback ~= nil then callback(owner, name, events, status) end
+catch
+  if loop.failure_count == 0 then
+    loop.failure_error = error
+    loop.failure_trace = traceback
+  end
+  loop.failure_count = loop.failure_count + 1
+  ffi.uv_stop(loop.native)
+end
+
+local function fs_event_closed(owner: fs_event_t, loop: loop_t)
+  loop.handles[owner] = nil
+  owner.phase = HANDLE_RETIRED
+  local callback? = owner.close_callback
+  owner.callback = nil
+  owner.close_callback = nil
+  owner.path = nil
+  if callback ~= nil then callback(handle_t.fs_event(owner)) end
+catch
+  if loop.failure_count == 0 then
+    loop.failure_error = error
+    loop.failure_trace = traceback
+  end
+  loop.failure_count = loop.failure_count + 1
+  ffi.uv_stop(loop.native)
+end
+
+foreign type FsEventEntry = function (*lua_State, *Udata, *CClosure, *Udata, *Udata, const *char, lua_Integer, lua_Integer): void
+
+foreign function fs_event_callback(native: *uv_fs_event_t, filename: const *char, events: int, status: int)
+  local base = native as foreign *uv_handle_t
+  local owner = ffi.uv_handle_get_data(base) as foreign *Udata
+  local loop = ffi.uv_loop_get_data(ffi.uv_handle_get_loop(base)) as foreign *Udata
+  local L = ffi.titan_record_field(loop, "loop_t", "state")
+  local handler = ffi.lmacro_clCvalue(ffi.titan_record_field(owner, "fs_event_t", "handler"))
+  local module = ffi.lmacro_uvalue(handler.upvalue[0])
+  local entry = ffi.lmacro_pvalue(handler.upvalue[2]) as foreign FsEventEntry
+  local top = ffi.lua_gettop(L)
+  ffi.titan_uv_push_owner(L, owner)
+  entry(L, module, handler, owner, loop, filename, events as foreign lua_Integer, status as foreign lua_Integer)
+  ffi.lua_settop(L, top)
+end
+
+foreign function fs_event_close_callback(base: *uv_handle_t)
+  local owner = ffi.uv_handle_get_data(base) as foreign *Udata
+  local loop = ffi.uv_loop_get_data(ffi.uv_handle_get_loop(base)) as foreign *Udata
+  local L = ffi.titan_record_field(loop, "loop_t", "state")
+  local handler = ffi.lmacro_clCvalue(ffi.titan_record_field(owner, "fs_event_t", "close_handler"))
+  local module = ffi.lmacro_uvalue(handler.upvalue[0])
+  local entry = ffi.lmacro_pvalue(handler.upvalue[2]) as foreign CallbackEntry
+  local top = ffi.lua_gettop(L)
+  ffi.titan_uv_push_owner(L, owner)
+  entry(L, module, handler, owner, loop)
+  ffi.lua_settop(L, top)
+end
+
+function fs_event_t.new(): fs_event_t
+  local native = foreign uv_fs_event_t.new()
+  return {native = native, phase = HANDLE_FRESH, loop = nil,
+          callback = nil, close_callback = nil,
+          handler = fs_event_deliver, close_handler = fs_event_closed, path = nil, userdata = nil}
+end
+
+function fs_event_t:as_handle_t(): handle_t
+  return handle_t.fs_event(self)
+end
+
+function fs_event_init(loop: loop_t, handle: fs_event_t): integer
+  if not loop.initialized or handle.phase == HANDLE_LIVE then return ffi.UV_EINVAL end
+  loop.handles[handle] = true
+  handle.loop = loop
+  local status: integer = ffi.uv_fs_event_init(loop.native, handle.native)
+  if status < 0 then loop.handles[handle] = nil; handle.loop = nil; return status end
+  handle.phase = HANDLE_LIVE
+  ffi.uv_handle_set_data(handle.native as foreign *uv_handle_t, handle as foreign *void)
+  return status
+end
+
+function fs_event_start(handle: fs_event_t, callback: function (fs_event_t, string?, integer, integer): (),
+                      path: string, flags: integer): integer
+  if handle.phase ~= HANDLE_LIVE then return ffi.UV_EINVAL end
+  if ffi.uv_is_closing(handle.native as foreign *uv_handle_t) ~= 0 then return ffi.UV_EINVAL end
+  local native_option = flags as foreign unsigned int
+  local old_callback? = handle.callback
+  local old_path? = handle.path
+  handle.callback = callback
+  handle.path = path
+  local status: integer = ffi.uv_fs_event_start(handle.native, fs_event_callback, path, native_option)
+  if status < 0 then handle.callback = old_callback; handle.path = old_path end
+  return status
+end
+
+function fs_event_stop(handle: fs_event_t): integer
+  if handle.phase ~= HANDLE_LIVE then return ffi.UV_EINVAL end
+  if ffi.uv_is_closing(handle.native as foreign *uv_handle_t) ~= 0 then return ffi.UV_EINVAL end
+  return ffi.uv_fs_event_stop(handle.native)
+end
+
+function fs_event_getpath(handle: fs_event_t, capacity: integer): (integer, string?, integer)
+  if handle.phase ~= HANDLE_LIVE then return ffi.UV_EINVAL, nil, capacity end
+  local native_size = capacity as foreign size_t
+  local buffer = foreign char.new_array(capacity)
+  local status: integer = ffi.uv_fs_event_getpath(handle.native, buffer, native_size)
+  if status < 0 then return status, nil, native_size end
+  return status, (buffer as foreign *char) as string, native_size
+end
+
+record fs_poll_t
+  local native: foreign uv_fs_poll_t
+  local phase: integer
+  local loop: loop_t?
+  local callback: (function (fs_poll_t, integer, stat_t?, stat_t?): ())?
+  local close_callback: (function (handle_t): ())?
+  local handler: function (fs_poll_t, loop_t, integer, foreign const *uv_stat_t, foreign const *uv_stat_t): ()
+  local close_handler: function (fs_poll_t, loop_t): ()
+  local path: string?
+  local userdata: value
+end
+
+local function fs_poll_deliver(owner: fs_poll_t, loop: loop_t, status: integer, prev: foreign const *uv_stat_t, curr: foreign const *uv_stat_t)
+  local callback? = owner.callback
+  local previous: stat_t? = nil
+  local current: stat_t? = nil
+  if status == 0 then previous = stat_copy(prev); current = stat_copy(curr) end
+  if callback ~= nil then callback(owner, status, previous, current) end
+catch
+  if loop.failure_count == 0 then
+    loop.failure_error = error
+    loop.failure_trace = traceback
+  end
+  loop.failure_count = loop.failure_count + 1
+  ffi.uv_stop(loop.native)
+end
+
+local function fs_poll_closed(owner: fs_poll_t, loop: loop_t)
+  loop.handles[owner] = nil
+  owner.phase = HANDLE_RETIRED
+  local callback? = owner.close_callback
+  owner.callback = nil
+  owner.close_callback = nil
+  owner.path = nil
+  if callback ~= nil then callback(handle_t.fs_poll(owner)) end
+catch
+  if loop.failure_count == 0 then
+    loop.failure_error = error
+    loop.failure_trace = traceback
+  end
+  loop.failure_count = loop.failure_count + 1
+  ffi.uv_stop(loop.native)
+end
+
+foreign type FsPollEntry = function (*lua_State, *Udata, *CClosure, *Udata, *Udata, lua_Integer, const *uv_stat_t, const *uv_stat_t): void
+
+foreign function fs_poll_callback(native: *uv_fs_poll_t, status: int, prev: const *uv_stat_t, curr: const *uv_stat_t)
+  local base = native as foreign *uv_handle_t
+  local owner = ffi.uv_handle_get_data(base) as foreign *Udata
+  local loop = ffi.uv_loop_get_data(ffi.uv_handle_get_loop(base)) as foreign *Udata
+  local L = ffi.titan_record_field(loop, "loop_t", "state")
+  local handler = ffi.lmacro_clCvalue(ffi.titan_record_field(owner, "fs_poll_t", "handler"))
+  local module = ffi.lmacro_uvalue(handler.upvalue[0])
+  local entry = ffi.lmacro_pvalue(handler.upvalue[2]) as foreign FsPollEntry
+  local top = ffi.lua_gettop(L)
+  ffi.titan_uv_push_owner(L, owner)
+  entry(L, module, handler, owner, loop, status as foreign lua_Integer, prev, curr)
+  ffi.lua_settop(L, top)
+end
+
+foreign function fs_poll_close_callback(base: *uv_handle_t)
+  local owner = ffi.uv_handle_get_data(base) as foreign *Udata
+  local loop = ffi.uv_loop_get_data(ffi.uv_handle_get_loop(base)) as foreign *Udata
+  local L = ffi.titan_record_field(loop, "loop_t", "state")
+  local handler = ffi.lmacro_clCvalue(ffi.titan_record_field(owner, "fs_poll_t", "close_handler"))
+  local module = ffi.lmacro_uvalue(handler.upvalue[0])
+  local entry = ffi.lmacro_pvalue(handler.upvalue[2]) as foreign CallbackEntry
+  local top = ffi.lua_gettop(L)
+  ffi.titan_uv_push_owner(L, owner)
+  entry(L, module, handler, owner, loop)
+  ffi.lua_settop(L, top)
+end
+
+function fs_poll_t.new(): fs_poll_t
+  local native = foreign uv_fs_poll_t.new()
+  return {native = native, phase = HANDLE_FRESH, loop = nil,
+          callback = nil, close_callback = nil,
+          handler = fs_poll_deliver, close_handler = fs_poll_closed, path = nil, userdata = nil}
+end
+
+function fs_poll_t:as_handle_t(): handle_t
+  return handle_t.fs_poll(self)
+end
+
+function fs_poll_init(loop: loop_t, handle: fs_poll_t): integer
+  if not loop.initialized or handle.phase == HANDLE_LIVE then return ffi.UV_EINVAL end
+  loop.handles[handle] = true
+  handle.loop = loop
+  local status: integer = ffi.uv_fs_poll_init(loop.native, handle.native)
+  if status < 0 then loop.handles[handle] = nil; handle.loop = nil; return status end
+  handle.phase = HANDLE_LIVE
+  ffi.uv_handle_set_data(handle.native as foreign *uv_handle_t, handle as foreign *void)
+  return status
+end
+
+function fs_poll_start(handle: fs_poll_t, callback: function (fs_poll_t, integer, stat_t?, stat_t?): (),
+                      path: string, interval: integer): integer
+  if handle.phase ~= HANDLE_LIVE then return ffi.UV_EINVAL end
+  if ffi.uv_is_closing(handle.native as foreign *uv_handle_t) ~= 0 then return ffi.UV_EINVAL end
+  if ffi.uv_is_active(handle.native as foreign *uv_handle_t) ~= 0 then return 0 end
+  local native_option = interval as foreign unsigned int
+  local old_callback? = handle.callback
+  local old_path? = handle.path
+  handle.callback = callback
+  handle.path = path
+  local status: integer = ffi.uv_fs_poll_start(handle.native, fs_poll_callback, path, native_option)
+  if status < 0 then handle.callback = old_callback; handle.path = old_path end
+  return status
+end
+
+function fs_poll_stop(handle: fs_poll_t): integer
+  if handle.phase ~= HANDLE_LIVE then return ffi.UV_EINVAL end
+  if ffi.uv_is_closing(handle.native as foreign *uv_handle_t) ~= 0 then return ffi.UV_EINVAL end
+  return ffi.uv_fs_poll_stop(handle.native)
+end
+
+function fs_poll_getpath(handle: fs_poll_t, capacity: integer): (integer, string?, integer)
+  if handle.phase ~= HANDLE_LIVE then return ffi.UV_EINVAL, nil, capacity end
+  local native_size = capacity as foreign size_t
+  local buffer = foreign char.new_array(capacity)
+  local status: integer = ffi.uv_fs_poll_getpath(handle.native, buffer, native_size)
+  if status < 0 then return status, nil, native_size end
+  return status, (buffer as foreign *char) as string, native_size
+end
+
+-- Every dir_t is one explicit native directory owner. Request cleanup releases
+-- request results only. An open dir_t requires a separate successful closedir.
+record dir_t
+  local native: foreign *uv_dir_t
+  local busy: boolean
+end
+
+function dir_t.new(): dir_t
+  return { native = nil, busy = false }
+end
+
+record dirent_t
+  name: string
+  type: dirent_type_t
+end
+
+union dirent_type_t
+  unknown()
+  file()
+  directory()
+  link()
+  fifo()
+  socket()
+  character()
+  block()
+end
+
+record statfs_t
+  f_type: integer
+  f_bsize: integer
+  f_blocks: integer
+  f_bfree: integer
+  f_bavail: integer
+  f_files: integer
+  f_ffree: integer
+  f_frsize: integer
+  f_spare: {integer}
+end
+
+union fs_ptr_t
+  stat(result: stat_t)
+  directory(result: dir_t)
+  entries(result: {dirent_t})
+  statfs(result: statfs_t)
+  path(result: string)
+  scandir(request: fs_t)
+end
+
+union fs_type_t
+  unknown()
+  custom()
+  open()
+  close()
+  read()
+  write()
+  sendfile()
+  stat()
+  lstat()
+  fstat()
+  ftruncate()
+  utime()
+  futime()
+  access()
+  chmod()
+  fchmod()
+  fsync()
+  fdatasync()
+  unlink()
+  rmdir()
+  mkdir()
+  mkdtemp()
+  rename()
+  scandir()
+  link()
+  symlink()
+  readlink()
+  chown()
+  fchown()
+  realpath()
+  copyfile()
+  lchown()
+  opendir()
+  readdir()
+  closedir()
+  statfs()
+  mkstemp()
+  lutime()
+end
+
+function fs_get_type(request: fs_t): fs_type_t
+  if request.pending then raise "FS request is pending" end
+  local kind = ffi.uv_fs_get_type(request.native)
+  if kind == ffi.UV_FS_UNKNOWN then return fs_type_t.unknown() end
+  if kind == ffi.UV_FS_CUSTOM then return fs_type_t.custom() end
+  if kind == ffi.UV_FS_OPEN then return fs_type_t.open() end
+  if kind == ffi.UV_FS_CLOSE then return fs_type_t.close() end
+  if kind == ffi.UV_FS_READ then return fs_type_t.read() end
+  if kind == ffi.UV_FS_WRITE then return fs_type_t.write() end
+  if kind == ffi.UV_FS_SENDFILE then return fs_type_t.sendfile() end
+  if kind == ffi.UV_FS_STAT then return fs_type_t.stat() end
+  if kind == ffi.UV_FS_LSTAT then return fs_type_t.lstat() end
+  if kind == ffi.UV_FS_FSTAT then return fs_type_t.fstat() end
+  if kind == ffi.UV_FS_FTRUNCATE then return fs_type_t.ftruncate() end
+  if kind == ffi.UV_FS_UTIME then return fs_type_t.utime() end
+  if kind == ffi.UV_FS_FUTIME then return fs_type_t.futime() end
+  if kind == ffi.UV_FS_ACCESS then return fs_type_t.access() end
+  if kind == ffi.UV_FS_CHMOD then return fs_type_t.chmod() end
+  if kind == ffi.UV_FS_FCHMOD then return fs_type_t.fchmod() end
+  if kind == ffi.UV_FS_FSYNC then return fs_type_t.fsync() end
+  if kind == ffi.UV_FS_FDATASYNC then return fs_type_t.fdatasync() end
+  if kind == ffi.UV_FS_UNLINK then return fs_type_t.unlink() end
+  if kind == ffi.UV_FS_RMDIR then return fs_type_t.rmdir() end
+  if kind == ffi.UV_FS_MKDIR then return fs_type_t.mkdir() end
+  if kind == ffi.UV_FS_MKDTEMP then return fs_type_t.mkdtemp() end
+  if kind == ffi.UV_FS_RENAME then return fs_type_t.rename() end
+  if kind == ffi.UV_FS_SCANDIR then return fs_type_t.scandir() end
+  if kind == ffi.UV_FS_LINK then return fs_type_t.link() end
+  if kind == ffi.UV_FS_SYMLINK then return fs_type_t.symlink() end
+  if kind == ffi.UV_FS_READLINK then return fs_type_t.readlink() end
+  if kind == ffi.UV_FS_CHOWN then return fs_type_t.chown() end
+  if kind == ffi.UV_FS_FCHOWN then return fs_type_t.fchown() end
+  if kind == ffi.UV_FS_REALPATH then return fs_type_t.realpath() end
+  if kind == ffi.UV_FS_COPYFILE then return fs_type_t.copyfile() end
+  if kind == ffi.UV_FS_LCHOWN then return fs_type_t.lchown() end
+  if kind == ffi.UV_FS_OPENDIR then return fs_type_t.opendir() end
+  if kind == ffi.UV_FS_READDIR then return fs_type_t.readdir() end
+  if kind == ffi.UV_FS_CLOSEDIR then return fs_type_t.closedir() end
+  if kind == ffi.UV_FS_STATFS then return fs_type_t.statfs() end
+  if kind == ffi.UV_FS_MKSTEMP then return fs_type_t.mkstemp() end
+  if kind == ffi.UV_FS_LUTIME then return fs_type_t.lutime() end
+  return fs_type_t.unknown()
+end
+
+function fs_get_loop(request: fs_t): loop_t?
+  return request.loop
+end
+
+function fs_get_system_error(request: fs_t): integer
+  if request.pending then raise "FS request is pending" end
+  return ffi.uv_fs_get_system_error(request.native) as integer
+end
+
+local function fs_dirent_type(kind: foreign uv_dirent_type_t): dirent_type_t
+  if kind == ffi.UV_DIRENT_UNKNOWN then return dirent_type_t.unknown() end
+  if kind == ffi.UV_DIRENT_FILE then return dirent_type_t.file() end
+  if kind == ffi.UV_DIRENT_DIR then return dirent_type_t.directory() end
+  if kind == ffi.UV_DIRENT_LINK then return dirent_type_t.link() end
+  if kind == ffi.UV_DIRENT_FIFO then return dirent_type_t.fifo() end
+  if kind == ffi.UV_DIRENT_SOCKET then return dirent_type_t.socket() end
+  if kind == ffi.UV_DIRENT_CHAR then return dirent_type_t.character() end
+  if kind == ffi.UV_DIRENT_BLOCK then return dirent_type_t.block() end
+  return dirent_type_t.unknown()
+end
+
+function fs_get_dir(request: fs_t): dir_t
+  if request.pending or not request.dirty then raise "FS result is unavailable" end
+  if ffi.uv_fs_get_type(request.native) ~= ffi.UV_FS_OPENDIR or
+      ffi.uv_fs_get_result(request.native) < 0 then raise "FS request has no directory result" end
+  return request.directory as dir_t
+end
+
+function fs_get_entries(request: fs_t): {dirent_t}
+  if request.pending or not request.dirty then raise "FS result is unavailable" end
+  if ffi.uv_fs_get_type(request.native) ~= ffi.UV_FS_READDIR or
+      ffi.uv_fs_get_result(request.native) < 0 then raise "FS request has no directory entries" end
+  local entries = request.native_dirents as owned uv_dirent_t[]
+  local count = ffi.uv_fs_get_result(request.native) as integer
+  local result: {dirent_t} = {}
+  for i = 1, count do
+    result[i] = dirent_t(entries[i - 1].name as string,
+                        fs_dirent_type(entries[i - 1].type))
+  end
+  return result
+end
+
+function fs_get_string(request: fs_t): string
+  if request.pending or not request.dirty then raise "FS result is unavailable" end
+  local kind = ffi.uv_fs_get_type(request.native)
+  if (kind ~= ffi.UV_FS_READLINK and kind ~= ffi.UV_FS_REALPATH) or
+      ffi.uv_fs_get_result(request.native) < 0 then raise "FS request has no string result" end
+  return (ffi.uv_fs_get_ptr(request.native) as foreign *char) as string
+end
+
+function fs_get_statfs(request: fs_t): statfs_t
+  if request.pending or not request.dirty then raise "FS result is unavailable" end
+  if ffi.uv_fs_get_type(request.native) ~= ffi.UV_FS_STATFS or
+      ffi.uv_fs_get_result(request.native) < 0 then raise "FS request has no statfs result" end
+  local native = ffi.uv_fs_get_ptr(request.native) as foreign *uv_statfs_t
+  return statfs_t {
+    f_type = (native.f_type as foreign lua_Integer) as integer,
+    f_bsize = (native.f_bsize as foreign lua_Integer) as integer,
+    f_blocks = (native.f_blocks as foreign lua_Integer) as integer,
+    f_bfree = (native.f_bfree as foreign lua_Integer) as integer,
+    f_bavail = (native.f_bavail as foreign lua_Integer) as integer,
+    f_files = (native.f_files as foreign lua_Integer) as integer,
+    f_ffree = (native.f_ffree as foreign lua_Integer) as integer,
+    f_frsize = (native.f_frsize as foreign lua_Integer) as integer,
+    f_spare = {(native.f_spare[0] as foreign lua_Integer) as integer,
+               (native.f_spare[1] as foreign lua_Integer) as integer,
+               (native.f_spare[2] as foreign lua_Integer) as integer},
+  }
+end
+
+function fs_scandir_next(request: fs_t): (integer, dirent_t?)
+  if request.pending or not request.dirty then raise "FS result is unavailable" end
+  if ffi.uv_fs_get_type(request.native) ~= ffi.UV_FS_SCANDIR then
+    raise "FS request has no scandir result"
+  end
+  local native = foreign uv_dirent_t.new()
+  local status = ffi.uv_fs_scandir_next(request.native, native) as integer
+  if status < 0 then return status, nil end
+  return status, dirent_t(native.name as string, fs_dirent_type(native.type))
+end
+
+function fs_get_ptr(request: fs_t): fs_ptr_t?
+  if request.pending then raise "FS request is pending" end
+  if not request.dirty or not ffi.uv_fs_get_ptr(request.native) then return nil end
+  local kind = ffi.uv_fs_get_type(request.native)
+  if kind == ffi.UV_FS_STAT or kind == ffi.UV_FS_LSTAT or kind == ffi.UV_FS_FSTAT then
+    return fs_ptr_t.stat(fs_get_statbuf(request))
+  elseif kind == ffi.UV_FS_OPENDIR then
+    return fs_ptr_t.directory(fs_get_dir(request))
+  elseif kind == ffi.UV_FS_READDIR then
+    return fs_ptr_t.entries(fs_get_entries(request))
+  elseif kind == ffi.UV_FS_STATFS then
+    return fs_ptr_t.statfs(fs_get_statfs(request))
+  elseif kind == ffi.UV_FS_READLINK or kind == ffi.UV_FS_REALPATH then
+    return fs_ptr_t.path(fs_get_string(request))
+  elseif kind == ffi.UV_FS_SCANDIR then
+    return fs_ptr_t.scandir(request)
+  end
+  -- Other FS operations expose no documented typed ptr payload. In particular
+  -- CLOSEDIR's pending/cancelled borrowed directory is not a result object.
+  return nil
+end
+
+function fs_unlink(loop: loop_t?, request: fs_t, path: string,
+    callback: (function (fs_t): ())?): integer
+  local status, native_loop, native_callback = fs_prepare(loop, request, callback, path)
+  if status < 0 then return status end
+  local result = ffi.uv_fs_unlink(native_loop, request.native, path, native_callback) as integer
+  if result < 0 and request.pending then
+    local owner_loop = request.loop as loop_t
+    owner_loop.requests[request] = nil
+    request.pending = false
+    request.callback = nil
+  end
+  return result
+end
+
+function fs_mkdtemp(loop: loop_t?, request: fs_t, path: string,
+    callback: (function (fs_t): ())?): integer
+  local status, native_loop, native_callback = fs_prepare(loop, request, callback, path)
+  if status < 0 then return status end
+  local result = ffi.uv_fs_mkdtemp(native_loop, request.native, path, native_callback) as integer
+  if result < 0 and request.pending then
+    local owner_loop = request.loop as loop_t
+    owner_loop.requests[request] = nil
+    request.pending = false
+    request.callback = nil
+  end
+  return result
+end
+
+function fs_mkstemp(loop: loop_t?, request: fs_t, path: string,
+    callback: (function (fs_t): ())?): integer
+  local status, native_loop, native_callback = fs_prepare(loop, request, callback, path)
+  if status < 0 then return status end
+  local result = ffi.uv_fs_mkstemp(native_loop, request.native, path, native_callback) as integer
+  if result < 0 and request.pending then
+    local owner_loop = request.loop as loop_t
+    owner_loop.requests[request] = nil
+    request.pending = false
+    request.callback = nil
+  end
+  return result
+end
+
+function fs_rmdir(loop: loop_t?, request: fs_t, path: string,
+    callback: (function (fs_t): ())?): integer
+  local status, native_loop, native_callback = fs_prepare(loop, request, callback, path)
+  if status < 0 then return status end
+  local result = ffi.uv_fs_rmdir(native_loop, request.native, path, native_callback) as integer
+  if result < 0 and request.pending then
+    local owner_loop = request.loop as loop_t
+    owner_loop.requests[request] = nil
+    request.pending = false
+    request.callback = nil
+  end
+  return result
+end
+
+function fs_lstat(loop: loop_t?, request: fs_t, path: string,
+    callback: (function (fs_t): ())?): integer
+  local status, native_loop, native_callback = fs_prepare(loop, request, callback, path)
+  if status < 0 then return status end
+  local result = ffi.uv_fs_lstat(native_loop, request.native, path, native_callback) as integer
+  if result < 0 and request.pending then
+    local owner_loop = request.loop as loop_t
+    owner_loop.requests[request] = nil
+    request.pending = false
+    request.callback = nil
+  end
+  return result
+end
+
+function fs_readlink(loop: loop_t?, request: fs_t, path: string,
+    callback: (function (fs_t): ())?): integer
+  local status, native_loop, native_callback = fs_prepare(loop, request, callback, path)
+  if status < 0 then return status end
+  local result = ffi.uv_fs_readlink(native_loop, request.native, path, native_callback) as integer
+  if result < 0 and request.pending then
+    local owner_loop = request.loop as loop_t
+    owner_loop.requests[request] = nil
+    request.pending = false
+    request.callback = nil
+  end
+  return result
+end
+
+function fs_realpath(loop: loop_t?, request: fs_t, path: string,
+    callback: (function (fs_t): ())?): integer
+  local status, native_loop, native_callback = fs_prepare(loop, request, callback, path)
+  if status < 0 then return status end
+  local result = ffi.uv_fs_realpath(native_loop, request.native, path, native_callback) as integer
+  if result < 0 and request.pending then
+    local owner_loop = request.loop as loop_t
+    owner_loop.requests[request] = nil
+    request.pending = false
+    request.callback = nil
+  end
+  return result
+end
+
+function fs_statfs(loop: loop_t?, request: fs_t, path: string,
+    callback: (function (fs_t): ())?): integer
+  local status, native_loop, native_callback = fs_prepare(loop, request, callback, path)
+  if status < 0 then return status end
+  local result = ffi.uv_fs_statfs(native_loop, request.native, path, native_callback) as integer
+  if result < 0 and request.pending then
+    local owner_loop = request.loop as loop_t
+    owner_loop.requests[request] = nil
+    request.pending = false
+    request.callback = nil
+  end
+  return result
+end
+
+function fs_mkdir(loop: loop_t?, request: fs_t, path: string, mode: integer,
+    callback: (function (fs_t): ())?): integer
+  local native_mode = mode as foreign int
+  local status, native_loop, native_callback = fs_prepare(loop, request, callback, path)
+  if status < 0 then return status end
+  local result = ffi.uv_fs_mkdir(native_loop, request.native, path, native_mode, native_callback) as integer
+  if result < 0 and request.pending then
+    local owner_loop = request.loop as loop_t
+    owner_loop.requests[request] = nil
+    request.pending = false
+    request.callback = nil
+  end
+  return result
+end
+
+function fs_access(loop: loop_t?, request: fs_t, path: string, mode: integer,
+    callback: (function (fs_t): ())?): integer
+  local native_mode = mode as foreign int
+  local status, native_loop, native_callback = fs_prepare(loop, request, callback, path)
+  if status < 0 then return status end
+  local result = ffi.uv_fs_access(native_loop, request.native, path, native_mode, native_callback) as integer
+  if result < 0 and request.pending then
+    local owner_loop = request.loop as loop_t
+    owner_loop.requests[request] = nil
+    request.pending = false
+    request.callback = nil
+  end
+  return result
+end
+
+function fs_chmod(loop: loop_t?, request: fs_t, path: string, mode: integer,
+    callback: (function (fs_t): ())?): integer
+  local native_mode = mode as foreign int
+  local status, native_loop, native_callback = fs_prepare(loop, request, callback, path)
+  if status < 0 then return status end
+  local result = ffi.uv_fs_chmod(native_loop, request.native, path, native_mode, native_callback) as integer
+  if result < 0 and request.pending then
+    local owner_loop = request.loop as loop_t
+    owner_loop.requests[request] = nil
+    request.pending = false
+    request.callback = nil
+  end
+  return result
+end
+
+function fs_scandir(loop: loop_t?, request: fs_t, path: string, flags: integer,
+    callback: (function (fs_t): ())?): integer
+  local native_flags = flags as foreign int
+  local status, native_loop, native_callback = fs_prepare(loop, request, callback, path)
+  if status < 0 then return status end
+  local result = ffi.uv_fs_scandir(native_loop, request.native, path, native_flags, native_callback) as integer
+  if result < 0 and request.pending then
+    local owner_loop = request.loop as loop_t
+    owner_loop.requests[request] = nil
+    request.pending = false
+    request.callback = nil
+  end
+  return result
+end
+
+function fs_fstat(loop: loop_t?, request: fs_t, file: integer,
+    callback: (function (fs_t): ())?): integer
+  local native_file = file as foreign uv_file
+  local status, native_loop, native_callback = fs_prepare(loop, request, callback, nil)
+  if status < 0 then return status end
+  local result = ffi.uv_fs_fstat(native_loop, request.native, native_file, native_callback) as integer
+  if result < 0 and request.pending then
+    local owner_loop = request.loop as loop_t
+    owner_loop.requests[request] = nil
+    request.pending = false
+    request.callback = nil
+  end
+  return result
+end
+
+function fs_fsync(loop: loop_t?, request: fs_t, file: integer,
+    callback: (function (fs_t): ())?): integer
+  local native_file = file as foreign uv_file
+  local status, native_loop, native_callback = fs_prepare(loop, request, callback, nil)
+  if status < 0 then return status end
+  local result = ffi.uv_fs_fsync(native_loop, request.native, native_file, native_callback) as integer
+  if result < 0 and request.pending then
+    local owner_loop = request.loop as loop_t
+    owner_loop.requests[request] = nil
+    request.pending = false
+    request.callback = nil
+  end
+  return result
+end
+
+function fs_fdatasync(loop: loop_t?, request: fs_t, file: integer,
+    callback: (function (fs_t): ())?): integer
+  local native_file = file as foreign uv_file
+  local status, native_loop, native_callback = fs_prepare(loop, request, callback, nil)
+  if status < 0 then return status end
+  local result = ffi.uv_fs_fdatasync(native_loop, request.native, native_file, native_callback) as integer
+  if result < 0 and request.pending then
+    local owner_loop = request.loop as loop_t
+    owner_loop.requests[request] = nil
+    request.pending = false
+    request.callback = nil
+  end
+  return result
+end
+
+function fs_rename(loop: loop_t?, request: fs_t, path: string, new_path: string,
+    callback: (function (fs_t): ())?): integer
+  local status, native_loop, native_callback = fs_prepare(loop, request, callback, path)
+  if status < 0 then return status end
+  request.new_path = new_path
+  local result = ffi.uv_fs_rename(native_loop, request.native, path, new_path, native_callback) as integer
+  if result < 0 and request.pending then
+    local owner_loop = request.loop as loop_t
+    owner_loop.requests[request] = nil
+    request.pending = false
+    request.callback = nil
+  end
+  return result
+end
+
+function fs_link(loop: loop_t?, request: fs_t, path: string, new_path: string,
+    callback: (function (fs_t): ())?): integer
+  local status, native_loop, native_callback = fs_prepare(loop, request, callback, path)
+  if status < 0 then return status end
+  request.new_path = new_path
+  local result = ffi.uv_fs_link(native_loop, request.native, path, new_path, native_callback) as integer
+  if result < 0 and request.pending then
+    local owner_loop = request.loop as loop_t
+    owner_loop.requests[request] = nil
+    request.pending = false
+    request.callback = nil
+  end
+  return result
+end
+
+function fs_copyfile(loop: loop_t?, request: fs_t, path: string, new_path: string, flags: integer,
+    callback: (function (fs_t): ())?): integer
+  local native_flags = flags as foreign int
+  local status, native_loop, native_callback = fs_prepare(loop, request, callback, path)
+  if status < 0 then return status end
+  request.new_path = new_path
+  local result = ffi.uv_fs_copyfile(native_loop, request.native, path, new_path, native_flags, native_callback) as integer
+  if result < 0 and request.pending then
+    local owner_loop = request.loop as loop_t
+    owner_loop.requests[request] = nil
+    request.pending = false
+    request.callback = nil
+  end
+  return result
+end
+
+function fs_symlink(loop: loop_t?, request: fs_t, path: string, new_path: string, flags: integer,
+    callback: (function (fs_t): ())?): integer
+  local native_flags = flags as foreign int
+  local status, native_loop, native_callback = fs_prepare(loop, request, callback, path)
+  if status < 0 then return status end
+  request.new_path = new_path
+  local result = ffi.uv_fs_symlink(native_loop, request.native, path, new_path, native_flags, native_callback) as integer
+  if result < 0 and request.pending then
+    local owner_loop = request.loop as loop_t
+    owner_loop.requests[request] = nil
+    request.pending = false
+    request.callback = nil
+  end
+  return result
+end
+
+function fs_ftruncate(loop: loop_t?, request: fs_t, file: integer, offset: integer,
+    callback: (function (fs_t): ())?): integer
+  local native_file = file as foreign uv_file
+  local native_offset = offset as foreign int64_t
+  local status, native_loop, native_callback = fs_prepare(loop, request, callback, nil)
+  if status < 0 then return status end
+  local result = ffi.uv_fs_ftruncate(native_loop, request.native, native_file, native_offset, native_callback) as integer
+  if result < 0 and request.pending then
+    local owner_loop = request.loop as loop_t
+    owner_loop.requests[request] = nil
+    request.pending = false
+    request.callback = nil
+  end
+  return result
+end
+
+function fs_sendfile(loop: loop_t?, request: fs_t, out_fd: integer, in_fd: integer, in_offset: integer, length: integer,
+    callback: (function (fs_t): ())?): integer
+  local native_out_fd = out_fd as foreign uv_file
+  local native_in_fd = in_fd as foreign uv_file
+  local native_in_offset = in_offset as foreign int64_t
+  local native_length = length as foreign size_t
+  local status, native_loop, native_callback = fs_prepare(loop, request, callback, nil)
+  if status < 0 then return status end
+  local result = ffi.uv_fs_sendfile(native_loop, request.native, native_out_fd, native_in_fd, native_in_offset, native_length, native_callback) as integer
+  if result < 0 and request.pending then
+    local owner_loop = request.loop as loop_t
+    owner_loop.requests[request] = nil
+    request.pending = false
+    request.callback = nil
+  end
+  return result
+end
+
+function fs_utime(loop: loop_t?, request: fs_t, path: string, atime: float, mtime: float,
+    callback: (function (fs_t): ())?): integer
+  local native_atime = atime as foreign double
+  local native_mtime = mtime as foreign double
+  local status, native_loop, native_callback = fs_prepare(loop, request, callback, path)
+  if status < 0 then return status end
+  local result = ffi.uv_fs_utime(native_loop, request.native, path, native_atime, native_mtime, native_callback) as integer
+  if result < 0 and request.pending then
+    local owner_loop = request.loop as loop_t
+    owner_loop.requests[request] = nil
+    request.pending = false
+    request.callback = nil
+  end
+  return result
+end
+
+function fs_lutime(loop: loop_t?, request: fs_t, path: string, atime: float, mtime: float,
+    callback: (function (fs_t): ())?): integer
+  local native_atime = atime as foreign double
+  local native_mtime = mtime as foreign double
+  local status, native_loop, native_callback = fs_prepare(loop, request, callback, path)
+  if status < 0 then return status end
+  local result = ffi.uv_fs_lutime(native_loop, request.native, path, native_atime, native_mtime, native_callback) as integer
+  if result < 0 and request.pending then
+    local owner_loop = request.loop as loop_t
+    owner_loop.requests[request] = nil
+    request.pending = false
+    request.callback = nil
+  end
+  return result
+end
+
+function fs_futime(loop: loop_t?, request: fs_t, file: integer, atime: float, mtime: float,
+    callback: (function (fs_t): ())?): integer
+  local native_file = file as foreign uv_file
+  local native_atime = atime as foreign double
+  local native_mtime = mtime as foreign double
+  local status, native_loop, native_callback = fs_prepare(loop, request, callback, nil)
+  if status < 0 then return status end
+  local result = ffi.uv_fs_futime(native_loop, request.native, native_file, native_atime, native_mtime, native_callback) as integer
+  if result < 0 and request.pending then
+    local owner_loop = request.loop as loop_t
+    owner_loop.requests[request] = nil
+    request.pending = false
+    request.callback = nil
+  end
+  return result
+end
+
+function fs_fchmod(loop: loop_t?, request: fs_t, file: integer, mode: integer,
+    callback: (function (fs_t): ())?): integer
+  local native_file = file as foreign uv_file
+  local native_mode = mode as foreign int
+  local status, native_loop, native_callback = fs_prepare(loop, request, callback, nil)
+  if status < 0 then return status end
+  local result = ffi.uv_fs_fchmod(native_loop, request.native, native_file, native_mode, native_callback) as integer
+  if result < 0 and request.pending then
+    local owner_loop = request.loop as loop_t
+    owner_loop.requests[request] = nil
+    request.pending = false
+    request.callback = nil
+  end
+  return result
+end
+
+function fs_chown(loop: loop_t?, request: fs_t, path: string, uid: integer, gid: integer,
+    callback: (function (fs_t): ())?): integer
+  local native_uid: foreign uv_uid_t = 0
+  if uid == -1 then native_uid = (-1 as foreign int) as foreign uv_uid_t
+  else native_uid = uid as foreign uv_uid_t end
+  local native_gid: foreign uv_gid_t = 0
+  if gid == -1 then native_gid = (-1 as foreign int) as foreign uv_gid_t
+  else native_gid = gid as foreign uv_gid_t end
+  local status, native_loop, native_callback = fs_prepare(loop, request, callback, path)
+  if status < 0 then return status end
+  local result = ffi.uv_fs_chown(native_loop, request.native, path, native_uid, native_gid, native_callback) as integer
+  if result < 0 and request.pending then
+    local owner_loop = request.loop as loop_t
+    owner_loop.requests[request] = nil
+    request.pending = false
+    request.callback = nil
+  end
+  return result
+end
+
+function fs_lchown(loop: loop_t?, request: fs_t, path: string, uid: integer, gid: integer,
+    callback: (function (fs_t): ())?): integer
+  local native_uid: foreign uv_uid_t = 0
+  if uid == -1 then native_uid = (-1 as foreign int) as foreign uv_uid_t
+  else native_uid = uid as foreign uv_uid_t end
+  local native_gid: foreign uv_gid_t = 0
+  if gid == -1 then native_gid = (-1 as foreign int) as foreign uv_gid_t
+  else native_gid = gid as foreign uv_gid_t end
+  local status, native_loop, native_callback = fs_prepare(loop, request, callback, path)
+  if status < 0 then return status end
+  local result = ffi.uv_fs_lchown(native_loop, request.native, path, native_uid, native_gid, native_callback) as integer
+  if result < 0 and request.pending then
+    local owner_loop = request.loop as loop_t
+    owner_loop.requests[request] = nil
+    request.pending = false
+    request.callback = nil
+  end
+  return result
+end
+
+function fs_fchown(loop: loop_t?, request: fs_t, file: integer, uid: integer, gid: integer,
+    callback: (function (fs_t): ())?): integer
+  local native_file = file as foreign uv_file
+  local native_uid: foreign uv_uid_t = 0
+  if uid == -1 then native_uid = (-1 as foreign int) as foreign uv_uid_t
+  else native_uid = uid as foreign uv_uid_t end
+  local native_gid: foreign uv_gid_t = 0
+  if gid == -1 then native_gid = (-1 as foreign int) as foreign uv_gid_t
+  else native_gid = gid as foreign uv_gid_t end
+  local status, native_loop, native_callback = fs_prepare(loop, request, callback, nil)
+  if status < 0 then return status end
+  local result = ffi.uv_fs_fchown(native_loop, request.native, native_file, native_uid, native_gid, native_callback) as integer
+  if result < 0 and request.pending then
+    local owner_loop = request.loop as loop_t
+    owner_loop.requests[request] = nil
+    request.pending = false
+    request.callback = nil
+  end
+  return result
+end
+
+function fs_opendir(loop: loop_t?, request: fs_t, path: string,
+    callback: (function (fs_t): ())?): integer
+  if request.pending or request.dirty then return ffi.UV_EBUSY end
+  -- Preallocate the public owner before native code can allocate a directory.
+  local directory = dir_t.new()
+  local status, native_loop, native_callback = fs_prepare(loop, request, callback, path)
+  if status < 0 then return status end
+  request.directory = directory
+  local result = ffi.uv_fs_opendir(native_loop, request.native, path, native_callback) as integer
+  if callback == nil and result >= 0 then
+    directory.native = ffi.uv_fs_get_ptr(request.native) as foreign *uv_dir_t
+  end
+  if result < 0 and request.pending then
+    local owner_loop = request.loop as loop_t
+    owner_loop.requests[request] = nil
+    request.pending = false
+    request.callback = nil
+  end
+  return result
+end
+
+function fs_readdir(loop: loop_t?, request: fs_t, directory: dir_t, capacity: integer,
+    callback: (function (fs_t): ())?): integer
+  if request.pending or request.dirty or directory.busy then return ffi.UV_EBUSY end
+  if not directory.native or capacity < 0 or capacity > ffi.UINT_MAX as integer then
+    return ffi.UV_EINVAL
+  end
+  local native_capacity = capacity as foreign size_t
+  local entries = foreign uv_dirent_t.new_array(capacity)
+  local native_entries = entries as foreign *uv_dirent_t
+  local status, native_loop, native_callback = fs_prepare(loop, request, callback, nil)
+  if status < 0 then return status end
+  request.directory = directory
+  request.native_dirents = entries
+  directory.native.dirents = native_entries
+  directory.native.nentries = native_capacity
+  directory.busy = true
+  local result = ffi.uv_fs_readdir(native_loop, request.native, directory.native, native_callback) as integer
+  if result < 0 and request.pending then
+    local owner_loop = request.loop as loop_t
+    owner_loop.requests[request] = nil
+    request.pending = false
+    request.callback = nil
+  end
+  -- READDIR owns its entry allocation through cleanup even after completion
+  -- or immediate rejection. Another read or close must wait for that cleanup.
+  return result
+end
+
+function fs_closedir(loop: loop_t?, request: fs_t, directory: dir_t,
+    callback: (function (fs_t): ())?): integer
+  if request.pending or request.dirty or directory.busy then return ffi.UV_EBUSY end
+  if not directory.native then return ffi.UV_EINVAL end
+  local status, native_loop, native_callback = fs_prepare(loop, request, callback, nil)
+  if status < 0 then return status end
+  request.directory = directory
+  directory.busy = true
+  local result = ffi.uv_fs_closedir(native_loop, request.native, directory.native, native_callback) as integer
+  if callback == nil or result < 0 then
+    if result >= 0 then directory.native = nil end
+    directory.busy = false
+  end
+  if result < 0 and request.pending then
+    local owner_loop = request.loop as loop_t
+    owner_loop.requests[request] = nil
+    request.pending = false
+    request.callback = nil
+  end
+  return result
+end
+
+foreign import "fs-native-proposal.h"
+const FS_COPYFILE_EXCL: integer?
+const FS_COPYFILE_FICLONE: integer?
+const FS_COPYFILE_FICLONE_FORCE: integer?
+const FS_SYMLINK_DIR: integer?
+const FS_SYMLINK_JUNCTION: integer?
+const FS_O_APPEND: integer?
+const FS_O_EXCL: integer?
+const FS_O_SYNC: integer?
+const FS_O_DSYNC: integer?
+const FS_O_NONBLOCK: integer?
+const FS_O_DIRECT: integer?
+const FS_O_DIRECTORY: integer?
+const FS_O_NOFOLLOW: integer?
+const FS_O_NOATIME: integer?
+const FS_F_OK: integer?
+const FS_R_OK: integer?
+const FS_W_OK: integer?
+const FS_X_OK: integer?
+const FS_O_EXLOCK: integer?
+const FS_O_NOCTTY: integer?
+const FS_O_SYMLINK: integer?
+const FS_O_FILEMAP: integer?
+const FS_O_RANDOM: integer?
+const FS_O_SEQUENTIAL: integer?
+const FS_O_SHORT_LIVED: integer?
+const FS_O_TEMPORARY: integer?
+const FS_UTIME_NOW: float?
+const FS_UTIME_OMIT: float?
+
 
 do
-  local sigpipe_status = ignore_sigpipe_if_default()
-  if sigpipe_status < 0 then
-    raise make_error(sigpipe_status, "runtime.sigpipe")
-  end
-  main_thread = main_thread_state()
-  program_args_ready = setup_program_args()
-  ffi.lua_pushtvalue(L, bootstrap)
-  ffi.lua_setfield(L, ffi.LUA_REGISTRYINDEX, ffi.TITAN_MAIN_BOOTSTRAP_KEY)
+  main_thread = current_main()
+  TCP_IPV6ONLY = ffi.UV_TCP_IPV6ONLY as integer
+  TCP_REUSEPORT = ffi.UV_TCP_REUSEPORT as integer
+  UDP_IPV6ONLY = ffi.UV_UDP_IPV6ONLY as integer
+  UDP_PARTIAL = ffi.UV_UDP_PARTIAL as integer
+  UDP_REUSEADDR = ffi.UV_UDP_REUSEADDR as integer
+  UDP_MMSG_CHUNK = ffi.UV_UDP_MMSG_CHUNK as integer
+  UDP_MMSG_FREE = ffi.UV_UDP_MMSG_FREE as integer
+  UDP_LINUX_RECVERR = ffi.UV_UDP_LINUX_RECVERR as integer
+  UDP_REUSEPORT = ffi.UV_UDP_REUSEPORT as integer
+  UDP_RECVMMSG = ffi.UV_UDP_RECVMMSG as integer
+  AF_UNSPEC = ffi.AF_UNSPEC as integer
+  AF_INET = ffi.AF_INET as integer
+  AF_INET6 = ffi.AF_INET6 as integer
+  SOCK_STREAM = ffi.SOCK_STREAM as integer
+  SOCK_DGRAM = ffi.SOCK_DGRAM as integer
+  SOCK_RAW = ffi.SOCK_RAW as integer
+  IPPROTO_TCP = ffi.IPPROTO_TCP as integer
+  IPPROTO_UDP = ffi.IPPROTO_UDP as integer
+  AI_PASSIVE = ffi.AI_PASSIVE as integer
+  AI_CANONNAME = ffi.AI_CANONNAME as integer
+  AI_NUMERICHOST = ffi.AI_NUMERICHOST as integer
+  AI_NUMERICSERV = ffi.AI_NUMERICSERV as integer
+  AI_V4MAPPED = ffi.AI_V4MAPPED as integer
+  AI_ALL = ffi.AI_ALL as integer
+  AI_ADDRCONFIG = ffi.AI_ADDRCONFIG as integer
+  NI_NUMERICHOST = ffi.NI_NUMERICHOST as integer
+  NI_NUMERICSERV = ffi.NI_NUMERICSERV as integer
+  NI_NOFQDN = ffi.NI_NOFQDN as integer
+  NI_NAMEREQD = ffi.NI_NAMEREQD as integer
+  NI_DGRAM = ffi.NI_DGRAM as integer
+  THREAD_NO_FLAGS = ffi.UV_THREAD_NO_FLAGS
+  THREAD_HAS_STACK_SIZE = ffi.UV_THREAD_HAS_STACK_SIZE
+  THREAD_PRIORITY_HIGHEST = ffi.UV_THREAD_PRIORITY_HIGHEST
+  THREAD_PRIORITY_ABOVE_NORMAL = ffi.UV_THREAD_PRIORITY_ABOVE_NORMAL
+  THREAD_PRIORITY_NORMAL = ffi.UV_THREAD_PRIORITY_NORMAL
+  THREAD_PRIORITY_BELOW_NORMAL = ffi.UV_THREAD_PRIORITY_BELOW_NORMAL
+  THREAD_PRIORITY_LOWEST = ffi.UV_THREAD_PRIORITY_LOWEST
+  FS_O_RDONLY = ffi.UV_FS_O_RDONLY as integer
+  FS_O_RDWR = ffi.UV_FS_O_RDWR as integer
+  FS_O_WRONLY = ffi.UV_FS_O_WRONLY as integer
+  FS_O_CREAT = ffi.UV_FS_O_CREAT as integer
+  FS_O_TRUNC = ffi.UV_FS_O_TRUNC as integer
+  FS_COPYFILE_EXCL = ffi.UV_FS_COPYFILE_EXCL as integer
+  FS_COPYFILE_FICLONE = ffi.UV_FS_COPYFILE_FICLONE as integer
+  FS_COPYFILE_FICLONE_FORCE = ffi.UV_FS_COPYFILE_FICLONE_FORCE as integer
+  FS_SYMLINK_DIR = ffi.UV_FS_SYMLINK_DIR as integer
+  FS_SYMLINK_JUNCTION = ffi.UV_FS_SYMLINK_JUNCTION as integer
+  FS_O_APPEND = ffi.UV_FS_O_APPEND as integer
+  FS_O_EXCL = ffi.UV_FS_O_EXCL as integer
+  FS_O_SYNC = ffi.UV_FS_O_SYNC as integer
+  FS_O_DSYNC = ffi.UV_FS_O_DSYNC as integer
+  FS_O_NONBLOCK = ffi.UV_FS_O_NONBLOCK as integer
+  FS_O_DIRECT = ffi.UV_FS_O_DIRECT as integer
+  FS_O_DIRECTORY = ffi.UV_FS_O_DIRECTORY as integer
+  FS_O_NOFOLLOW = ffi.UV_FS_O_NOFOLLOW as integer
+  FS_O_NOATIME = ffi.UV_FS_O_NOATIME as integer
+  FS_F_OK = ffi.F_OK as integer
+  FS_R_OK = ffi.R_OK as integer
+  FS_W_OK = ffi.W_OK as integer
+  FS_X_OK = ffi.X_OK as integer
+  FS_O_EXLOCK = ffi.UV_FS_O_EXLOCK as integer
+  FS_O_NOCTTY = ffi.UV_FS_O_NOCTTY as integer
+  FS_O_SYMLINK = ffi.UV_FS_O_SYMLINK as integer
+  FS_O_FILEMAP = ffi.UV_FS_O_FILEMAP as integer
+  FS_O_RANDOM = ffi.UV_FS_O_RANDOM as integer
+  FS_O_SEQUENTIAL = ffi.UV_FS_O_SEQUENTIAL as integer
+  FS_O_SHORT_LIVED = ffi.UV_FS_O_SHORT_LIVED as integer
+  FS_O_TEMPORARY = ffi.UV_FS_O_TEMPORARY as integer
+  FS_UTIME_NOW = ffi.titan_uv_fs_utime_now() as float
+  FS_UTIME_OMIT = ffi.titan_uv_fs_utime_omit() as float
+  CHANGE = ffi.UV_CHANGE as integer
+  CREATE_PIPE = ffi.UV_CREATE_PIPE as integer
+  DISCONNECT = ffi.UV_DISCONNECT as integer
+  E2BIG = ffi.UV_E2BIG as integer
+  EACCES = ffi.UV_EACCES as integer
+  EADDRINUSE = ffi.UV_EADDRINUSE as integer
+  EADDRNOTAVAIL = ffi.UV_EADDRNOTAVAIL as integer
+  EAFNOSUPPORT = ffi.UV_EAFNOSUPPORT as integer
+  EAGAIN = ffi.UV_EAGAIN as integer
+  EAI_ADDRFAMILY = ffi.UV_EAI_ADDRFAMILY as integer
+  EAI_AGAIN = ffi.UV_EAI_AGAIN as integer
+  EAI_BADFLAGS = ffi.UV_EAI_BADFLAGS as integer
+  EAI_BADHINTS = ffi.UV_EAI_BADHINTS as integer
+  EAI_CANCELED = ffi.UV_EAI_CANCELED as integer
+  EAI_FAIL = ffi.UV_EAI_FAIL as integer
+  EAI_FAMILY = ffi.UV_EAI_FAMILY as integer
+  EAI_MEMORY = ffi.UV_EAI_MEMORY as integer
+  EAI_NODATA = ffi.UV_EAI_NODATA as integer
+  EAI_NONAME = ffi.UV_EAI_NONAME as integer
+  EAI_OVERFLOW = ffi.UV_EAI_OVERFLOW as integer
+  EAI_PROTOCOL = ffi.UV_EAI_PROTOCOL as integer
+  EAI_SERVICE = ffi.UV_EAI_SERVICE as integer
+  EAI_SOCKTYPE = ffi.UV_EAI_SOCKTYPE as integer
+  EALREADY = ffi.UV_EALREADY as integer
+  EBADF = ffi.UV_EBADF as integer
+  EBUSY = ffi.UV_EBUSY as integer
+  ECANCELED = ffi.UV_ECANCELED as integer
+  ECHARSET = ffi.UV_ECHARSET as integer
+  ECONNABORTED = ffi.UV_ECONNABORTED as integer
+  ECONNREFUSED = ffi.UV_ECONNREFUSED as integer
+  ECONNRESET = ffi.UV_ECONNRESET as integer
+  EDESTADDRREQ = ffi.UV_EDESTADDRREQ as integer
+  EEXIST = ffi.UV_EEXIST as integer
+  EFAULT = ffi.UV_EFAULT as integer
+  EFBIG = ffi.UV_EFBIG as integer
+  EFTYPE = ffi.UV_EFTYPE as integer
+  EHOSTDOWN = ffi.UV_EHOSTDOWN as integer
+  EHOSTUNREACH = ffi.UV_EHOSTUNREACH as integer
+  EILSEQ = ffi.UV_EILSEQ as integer
+  EINTR = ffi.UV_EINTR as integer
+  EINVAL = ffi.UV_EINVAL as integer
+  EIO = ffi.UV_EIO as integer
+  EISCONN = ffi.UV_EISCONN as integer
+  EISDIR = ffi.UV_EISDIR as integer
+  ELOOP = ffi.UV_ELOOP as integer
+  EMFILE = ffi.UV_EMFILE as integer
+  EMLINK = ffi.UV_EMLINK as integer
+  EMSGSIZE = ffi.UV_EMSGSIZE as integer
+  ENAMETOOLONG = ffi.UV_ENAMETOOLONG as integer
+  ENETDOWN = ffi.UV_ENETDOWN as integer
+  ENETUNREACH = ffi.UV_ENETUNREACH as integer
+  ENFILE = ffi.UV_ENFILE as integer
+  ENOBUFS = ffi.UV_ENOBUFS as integer
+  ENODATA = ffi.UV_ENODATA as integer
+  ENODEV = ffi.UV_ENODEV as integer
+  ENOENT = ffi.UV_ENOENT as integer
+  ENOEXEC = ffi.UV_ENOEXEC as integer
+  ENOMEM = ffi.UV_ENOMEM as integer
+  ENONET = ffi.UV_ENONET as integer
+  ENOPROTOOPT = ffi.UV_ENOPROTOOPT as integer
+  ENOSPC = ffi.UV_ENOSPC as integer
+  ENOSYS = ffi.UV_ENOSYS as integer
+  ENOTCONN = ffi.UV_ENOTCONN as integer
+  ENOTDIR = ffi.UV_ENOTDIR as integer
+  ENOTEMPTY = ffi.UV_ENOTEMPTY as integer
+  ENOTSOCK = ffi.UV_ENOTSOCK as integer
+  ENOTSUP = ffi.UV_ENOTSUP as integer
+  ENOTTY = ffi.UV_ENOTTY as integer
+  ENXIO = ffi.UV_ENXIO as integer
+  EOF = ffi.UV_EOF as integer
+  EOVERFLOW = ffi.UV_EOVERFLOW as integer
+  EPERM = ffi.UV_EPERM as integer
+  EPIPE = ffi.UV_EPIPE as integer
+  EPROTO = ffi.UV_EPROTO as integer
+  EPROTONOSUPPORT = ffi.UV_EPROTONOSUPPORT as integer
+  EPROTOTYPE = ffi.UV_EPROTOTYPE as integer
+  ERANGE = ffi.UV_ERANGE as integer
+  EREMOTEIO = ffi.UV_EREMOTEIO as integer
+  EROFS = ffi.UV_EROFS as integer
+  ESHUTDOWN = ffi.UV_ESHUTDOWN as integer
+  ESOCKTNOSUPPORT = ffi.UV_ESOCKTNOSUPPORT as integer
+  ESPIPE = ffi.UV_ESPIPE as integer
+  ESRCH = ffi.UV_ESRCH as integer
+  ETIMEDOUT = ffi.UV_ETIMEDOUT as integer
+  ETXTBSY = ffi.UV_ETXTBSY as integer
+  EUNATCH = ffi.UV_EUNATCH as integer
+  EXDEV = ffi.UV_EXDEV as integer
+  FS_EVENT_RECURSIVE = ffi.UV_FS_EVENT_RECURSIVE as integer
+  FS_EVENT_STAT = ffi.UV_FS_EVENT_STAT as integer
+  FS_EVENT_WATCH_ENTRY = ffi.UV_FS_EVENT_WATCH_ENTRY as integer
+  IF_NAMESIZE = ffi.UV_IF_NAMESIZE as integer
+  IGNORE = ffi.UV_IGNORE as integer
+  INHERIT_FD = ffi.UV_INHERIT_FD as integer
+  INHERIT_STREAM = ffi.UV_INHERIT_STREAM as integer
+  MAXHOSTNAMESIZE = ffi.UV_MAXHOSTNAMESIZE as integer
+  OVERLAPPED_PIPE = ffi.UV_OVERLAPPED_PIPE as integer
+  PRIORITIZED = ffi.UV_PRIORITIZED as integer
+  PRIORITY_ABOVE_NORMAL = ffi.UV_PRIORITY_ABOVE_NORMAL as integer
+  PRIORITY_BELOW_NORMAL = ffi.UV_PRIORITY_BELOW_NORMAL as integer
+  PRIORITY_HIGH = ffi.UV_PRIORITY_HIGH as integer
+  PRIORITY_HIGHEST = ffi.UV_PRIORITY_HIGHEST as integer
+  PRIORITY_LOW = ffi.UV_PRIORITY_LOW as integer
+  PRIORITY_NORMAL = ffi.UV_PRIORITY_NORMAL as integer
+  PROCESS_DETACHED = ffi.UV_PROCESS_DETACHED as integer
+  PROCESS_SETGID = ffi.UV_PROCESS_SETGID as integer
+  PROCESS_SETUID = ffi.UV_PROCESS_SETUID as integer
+  PROCESS_WINDOWS_FILE_PATH_EXACT_NAME = ffi.UV_PROCESS_WINDOWS_FILE_PATH_EXACT_NAME as integer
+  PROCESS_WINDOWS_HIDE = ffi.UV_PROCESS_WINDOWS_HIDE as integer
+  PROCESS_WINDOWS_HIDE_CONSOLE = ffi.UV_PROCESS_WINDOWS_HIDE_CONSOLE as integer
+  PROCESS_WINDOWS_HIDE_GUI = ffi.UV_PROCESS_WINDOWS_HIDE_GUI as integer
+  PROCESS_WINDOWS_VERBATIM_ARGUMENTS = ffi.UV_PROCESS_WINDOWS_VERBATIM_ARGUMENTS as integer
+  READABLE_PIPE = ffi.UV_READABLE_PIPE as integer
+  RENAME = ffi.UV_RENAME as integer
+  UNKNOWN = ffi.UV_UNKNOWN as integer
+  VERSION_HEX = ffi.UV_VERSION_HEX as integer
+  VERSION_IS_RELEASE = ffi.UV_VERSION_IS_RELEASE as integer
+  VERSION_MAJOR = ffi.UV_VERSION_MAJOR as integer
+  VERSION_MINOR = ffi.UV_VERSION_MINOR as integer
+  VERSION_PATCH = ffi.UV_VERSION_PATCH as integer
+  WRITABLE_PIPE = ffi.UV_WRITABLE_PIPE as integer
+  VERSION_SUFFIX = ffi.UV_VERSION_SUFFIX as string
+  AF_UNIX = platform_constant("AF_UNIX")
+  S_IRUSR = platform_constant("S_IRUSR")
+  S_IWUSR = platform_constant("S_IWUSR")
+  S_IXUSR = platform_constant("S_IXUSR")
+  S_IRGRP = platform_constant("S_IRGRP")
+  S_IWGRP = platform_constant("S_IWGRP")
+  S_IXGRP = platform_constant("S_IXGRP")
+  S_IROTH = platform_constant("S_IROTH")
+  S_IWOTH = platform_constant("S_IWOTH")
+  S_IXOTH = platform_constant("S_IXOTH")
+  S_IFMT = platform_constant("S_IFMT")
+  S_IFREG = platform_constant("S_IFREG")
+  S_IFDIR = platform_constant("S_IFDIR")
+  S_IFLNK = platform_constant("S_IFLNK")
+  S_IFSOCK = platform_constant("S_IFSOCK")
+  S_IFIFO = platform_constant("S_IFIFO")
+  S_IFCHR = platform_constant("S_IFCHR")
+  S_IFBLK = platform_constant("S_IFBLK")
+  F_OK = platform_constant("F_OK")
+  R_OK = platform_constant("R_OK")
+  W_OK = platform_constant("W_OK")
+  X_OK = platform_constant("X_OK")
+  SIGABRT = platform_constant("SIGABRT")
+  SIGALRM = platform_constant("SIGALRM")
+  SIGBREAK = platform_constant("SIGBREAK")
+  SIGBUS = platform_constant("SIGBUS")
+  SIGCHLD = platform_constant("SIGCHLD")
+  SIGCONT = platform_constant("SIGCONT")
+  SIGFPE = platform_constant("SIGFPE")
+  SIGHUP = platform_constant("SIGHUP")
+  SIGILL = platform_constant("SIGILL")
+  SIGINT = platform_constant("SIGINT")
+  SIGIO = platform_constant("SIGIO")
+  SIGIOT = platform_constant("SIGIOT")
+  SIGKILL = platform_constant("SIGKILL")
+  SIGPIPE = platform_constant("SIGPIPE")
+  SIGPOLL = platform_constant("SIGPOLL")
+  SIGPROF = platform_constant("SIGPROF")
+  SIGPWR = platform_constant("SIGPWR")
+  SIGQUIT = platform_constant("SIGQUIT")
+  SIGSEGV = platform_constant("SIGSEGV")
+  SIGSTKFLT = platform_constant("SIGSTKFLT")
+  SIGSTOP = platform_constant("SIGSTOP")
+  SIGSYS = platform_constant("SIGSYS")
+  SIGTERM = platform_constant("SIGTERM")
+  SIGTRAP = platform_constant("SIGTRAP")
+  SIGTSTP = platform_constant("SIGTSTP")
+  SIGTTIN = platform_constant("SIGTTIN")
+  SIGTTOU = platform_constant("SIGTTOU")
+  SIGURG = platform_constant("SIGURG")
+  SIGUSR1 = platform_constant("SIGUSR1")
+  SIGUSR2 = platform_constant("SIGUSR2")
+  SIGVTALRM = platform_constant("SIGVTALRM")
+  SIGWINCH = platform_constant("SIGWINCH")
+  SIGXCPU = platform_constant("SIGXCPU")
+  SIGXFSZ = platform_constant("SIGXFSZ")
+  SIGRTMIN = platform_constant("SIGRTMIN")
+  SIGRTMAX = platform_constant("SIGRTMAX")
+  ERRNO_MAX = ffi.UV_ERRNO_MAX as integer
+  HANDLE_TYPE_MAX = ffi.UV_HANDLE_TYPE_MAX as integer
+  REQ_TYPE_MAX = ffi.UV_REQ_TYPE_MAX as integer
 end

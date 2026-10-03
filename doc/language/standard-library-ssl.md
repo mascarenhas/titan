@@ -236,11 +236,11 @@ end
 
 ## Availability and limits
 
-Linux and macOS are supported. The default build downloads, verifies, and
+Linux and macOS are supported. The default build uses system OpenSSL 3.0 or
+newer; see the repository build instructions for its development package and
+`pkg-config` setup. `OPENSSL_MODE=bundled` instead downloads, verifies, and
 statically carries the pinned OpenSSL 3.5.7 release in the coordinated
-standard-library provider. A system OpenSSL 3.0 or newer may be selected with
-`OPENSSL_MODE=system`; see the repository build instructions for the required
-development package and `pkg-config` setup.
+standard-library provider.
 
 This initial module has no mTLS, ALPN selection API, certificate callbacks,
 session-cache controls, cipher configuration, key logging, or access to the

@@ -167,30 +167,17 @@ end
 
 ## Availability
 
-Linux and macOS are supported. The default build downloads, verifies, and
-statically links the pinned libuv release:
+Linux and macOS are supported. The build downloads, verifies, and
+statically links the pinned, patched libuv release:
 
 ```sh
 make libuv
 "$PREFIX/bin/luarocks" make
 ```
 
-For a system development package, install libuv and `pkg-config`, then use:
-
-```sh
-LIBUV_MODE=system make libuv
-LIBUV_MODE=system "$PREFIX/bin/luarocks" make
-```
-
-Use an up-to-date system package. The bundled Unix build includes a
-[failed-spawn cleanup correction](../../vendor/libuv/README.md) that upstream
-1.53.0 still lacks as checked on 2026-10-03. System mode uses the installed
-library unchanged, so its package must supply the fix to avoid that exposure.
-
-Typical packages are `libuv1-dev pkg-config` on Debian/Ubuntu,
-`libuv-devel pkgconf-pkg-config` on Fedora, and `libuv pkgconf` through
-Homebrew on macOS. Applications importing the installed binary `net` module do
-not need libuv headers at compile time; all libuv and callback-shim linkage
+The Unix build includes a [failed-spawn cleanup correction](../../vendor/libuv/README.md).
+System libuv is not supported. Applications importing the installed binary
+`net` module do not need libuv headers at compile time; all libuv and callback-shim linkage
 remains in the combined standard-library provider
 `$ROCKS_TREE/lib/titan/0.6/titan.so`. The supported installation currently
 sets `ROCKS_TREE == PREFIX`; the former owns Titan's SDK/stdlib while the latter

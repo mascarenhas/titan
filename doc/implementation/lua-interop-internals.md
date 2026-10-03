@@ -1006,12 +1006,10 @@ SDK. Installed mode uses `lib/titan/0.6/libtitan.a`, the separate
 SDK/rocks-tree root; checkout mode uses the same archive contract with local
 `libtitan.a`, separate local
 `libbacktrace.a`, and local `liblua.a`. Generic links do not receive libuv
-merely from the SDK, but selecting bundled standard `titan.a` carries its
+merely from the SDK, but selecting standard `titan.a` carries its
 private libuv payload into an executable. The combined standard build receives
-that private archive as payload in both `titan.so` and `titan.a`; system mode
-instead repeats ordered pkg-config link flags at final link and never copies
-them into `titan.a`. The private bundled archive is not installed in the SDK;
-bundled-mode extension DSOs leave their `uv_*` calls unresolved:
+that private archive as payload in both `titan.so` and `titan.a`. The private
+archive is not installed in the SDK; extension DSOs leave their `uv_*` calls unresolved:
 
 * **Preload registration, not eager loading.** The C `main` creates a
   state and runs `luaL_openlibs`. `titan_init_paths` then parses the inherited

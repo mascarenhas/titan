@@ -9,7 +9,6 @@ local parser = require "titan-compiler.parser"
 local source_inventory = require "spec.support.source_inventory"
 local staticmetadata = require "titan-compiler.staticmetadata"
 
-local PKG_CONFIG = "sh spec/fixtures/libuv/fake-pkg-config.sh"
 local UV_MAIN_SOURCE = "titan/uv/uv.titan"
 local STDLIB_TYPES_FIXTURE =
 "spec/fixtures/stdlib/titan_stdlib_types.lua"
@@ -615,6 +614,11 @@ local function run_stdlib_dry_make(argv)
     local prepared = root .. "/prepared"
     write_file(prepared, "prepared for a read-only Make dry run\n")
 
+    local openssl_selected = false
+    for _, argument in ipairs(argv) do
+        if argument:match("^OPENSSL_MODE=") then openssl_selected = true end
+    end
+    if not openssl_selected then table.insert(argv, "OPENSSL_MODE=bundled") end
     table.insert(argv, "PREFIX=" .. root)
     table.insert(argv, "MAKE=false")
     for _, variable in ipairs({
@@ -642,41 +646,27 @@ local function run_stdlib_dry_make(argv)
     return ok, output, why, code
 end
 
-local function run_make(host, environment)
-    local argv = {
-        "make", "--no-print-directory", "-s", "LIBUV_MODE=system",
-        "HOST_OS=" .. host, "LIBUV_PKG_CONFIG=" .. PKG_CONFIG,
-        "libuv-config",
-    }
-    local words = {}
-    for _, word in ipairs(argv) do table.insert(words, quote(word)) end
-    local command = table.concat(words, " ")
-    if environment then command = environment .. " " .. command end
-    local pipe = assert(io.popen(command .. " 2>&1"))
-    local output = pipe:read("*a")
-    local ok, why, code = pipe:close()
-    return ok == true, output, why, code
+local function run_make(host)
+    return run_argv({
+        "make", "--no-print-directory", "-s", "HOST_OS=" .. host,
+        "--old-file=libuv-build/libuv.a", "libuv-config",
+    })
 end
 
-local function run_uv_dry_run(mode, host, source, openssl_mode,
-                              openssl_pkg_config)
+local function run_uv_dry_run(host, source, openssl_mode, openssl_pkg_config)
     local argv = {
         "make", "--no-print-directory", "-n",
         "-W", source or UV_MAIN_SOURCE,
-        "LIBUV_MODE=" .. mode,
         "HOST_OS=" .. (host or "Linux"),
-        "LIBUV_PKG_CONFIG=" .. PKG_CONFIG,
         "CC=ccache cc",
         "AR=review-ar",
         "RANLIB=review-ranlib",
         "TITAN_EXTRA_CPPFLAGS=-DUSER_CPP=1",
         "TITAN_EXTRA_CFLAGS=-DUSER_C=1",
         "TITAN_EXTRA_LDFLAGS=-Wl,user-link",
+        "OPENSSL_MODE=" .. (openssl_mode or "bundled"),
         "stdlib",
     }
-    if openssl_mode then
-        table.insert(argv, #argv, "OPENSSL_MODE=" .. openssl_mode)
-    end
     if openssl_pkg_config then
         table.insert(argv, #argv,
             "OPENSSL_PKG_CONFIG=" .. openssl_pkg_config)
@@ -855,8 +845,8 @@ describe("libuv Makefile configuration", function()
                 write_file(root .. "/" .. source, "build input\n")
             end
             local argv = { "make", "--no-print-directory", "-s", "-j4", "-C", root,
-                "MAKE=false", "PREFIX=" .. root, "LIBUV_MODE=system",
-                "OPENSSL_MODE=system", "LIBUV_PKG_CONFIG=true", "OPENSSL_PKG_CONFIG=true",
+                "MAKE=false", "PREFIX=" .. root,
+                "OPENSSL_MODE=system", "OPENSSL_PKG_CONFIG=true",
                 "TITANC=sh ./fake-titanc", "STDLIB_CONFIG_STAMP=build.config",
                 "STDLIB_COMPILER_PREREQS=prepared", "STDLIB_TOOL_PREREQS=prepared",
                 "STDLIB_NATIVE_PREREQS=prepared", "STDLIB_PLATFORM_PREREQS=prepared",
@@ -892,7 +882,7 @@ describe("libuv Makefile configuration", function()
             for _, output in ipairs(outputs) do
                 assert.equal(old + 1, lfs.attributes(root .. "/" .. output, "modification"))
             end
-            assert(lfs.touch(root .. "/titan/uv/task.titan", old + 2, old + 2))
+            assert(lfs.touch(root .. "/titan/uv/tcp.titan", old + 2, old + 2))
             assert.same({ uv = true, async = true, timer = true, os = true, io = true,
                 fs = true, net = true, ssl = true, http = true, lua = true,
                 reflect = true, sqlite3 = true, json = true }, build())
@@ -993,8 +983,9 @@ esac
                 "-u", "ROCK_LUA", "-u", "STDLIB_USE_INSTALLED_RUNTIME",
                 "make", "--no-print-directory", "-s", "-C", root,
                 "PREFIX=" .. prefix, "HOST_OS=Linux",
-                "LIBUV_MODE=system", "OPENSSL_MODE=system",
-                "LIBUV_PKG_CONFIG=true", "OPENSSL_PKG_CONFIG=true",
+                "STDLIB_PLATFORM_PREREQS=prepared",
+                "OPENSSL_MODE=system",
+                "OPENSSL_PKG_CONFIG=true",
                 "STDLIB_MODULES=math", "STDLIB_ROOTS=titan.math",
                 "STDLIB_TITAN_SOURCES=titan/math.titan",
                 "STDLIB_GENERATED_FOREIGN_HEADERS=titan/math.ffi.h",
@@ -2919,16 +2910,15 @@ exit 64
             if not tested then error(test_error, 0) end
         end)
 
-    it("preserves complete pkg-config flags and Linux feature macros",
+    it("uses bundled headers, payload and Linux feature macros",
         function()
             local ok, output, why, code = run_make("Linux")
             assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
                 tostring(code) .. ")")
             assert.truthy(output:find(
-                "LIBUV_CPPFLAGS=-I/opt/libuv/include -DUV_FAKE_PKG=1 " ..
-                "-D_GNU_SOURCE", 1, true), output)
+                "LIBUV_CPPFLAGS=-Ilibuv-v1.52.1/include -D_GNU_SOURCE", 1, true), output)
             assert.truthy(output:find(
-                "LIBUV_LDFLAGS=-L/opt/libuv/lib -luv -pthread -ldl -lrt",
+                "LIBUV_LDFLAGS=-lpthread -lrt",
                 1, true), output)
         end)
 
@@ -2937,26 +2927,38 @@ exit 64
         assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
             tostring(code) .. ")")
         assert.truthy(output:find(
-            "LIBUV_CPPFLAGS=-I/opt/libuv/include -DUV_FAKE_PKG=1",
+            "LIBUV_CPPFLAGS=-Ilibuv-v1.52.1/include",
             1, true), output)
         assert.falsy(output:find("-D_GNU_SOURCE", 1, true), output)
     end)
 
-    it("fails early with platform package instructions when libuv is absent",
-        function()
-            local ok, output = run_make("Linux", "env FAKE_LIBUV_MISSING=1")
+    it("rejects obsolete libuv mode selection before any build", function()
+        for _, mode in ipairs({ "system", "bundled" }) do
+            local ok, output = run_argv({
+                "make", "--no-print-directory", "LIBUV_MODE=" .. mode,
+                "help",
+            })
             assert.falsy(ok, output)
-            assert.truthy(output:find("cannot find the libuv development package",
+            assert.truthy(output:find(
+                "LIBUV_MODE is no longer supported; Titan always bundles patched libuv",
                 1, true), output)
-            assert.truthy(output:find("libuv1-dev", 1, true), output)
-            assert.truthy(output:find("libuv-devel", 1, true), output)
-            assert.truthy(output:find("brew install libuv pkgconf", 1, true),
-                output)
-        end)
+        end
+    end)
+
+    it("defaults only OpenSSL to its system provider", function()
+        local ok, output = run_argv({
+            "env", "-u", "OPENSSL_MODE", "make", "--no-print-directory", "-s",
+            "--eval=print-native-policy: ; @echo $(OPENSSL_MODE) $(LIBUV_EXTRA_OBJECTS) $(LLHTTP_ARCHIVE) $(SQLITE3_ARCHIVE)",
+            "print-native-policy",
+        })
+        assert.truthy(ok, output)
+        assert.equal("system libuv-build/libuv.a llhttp-build/libtitan-llhttp.a " ..
+            "sqlite3-build/libtitan-sqlite3.a\n", output)
+    end)
 
     it("builds one provider pair with native support and one libuv policy",
         function()
-            local ok, output, why, code = run_uv_dry_run("bundled")
+            local ok, output, why, code = run_uv_dry_run()
             assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
                 tostring(code) .. ")")
             local command, normalized = stdlib_command(output)
@@ -2986,31 +2988,7 @@ exit 64
             assert.equal(1, count_plain(command, bundled_flags), command)
             assert.equal(1, count_plain(command, "libuv-build/libuv.a"), command)
 
-            ok, output, why, code = run_uv_dry_run("system")
-            assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
-                tostring(code) .. ")")
-            command, normalized = stdlib_command(output)
-            assert.truthy(command:find(
-                    "./titanc --source-first --incremental " .. table.concat(STDLIB_ROOTS, " "), 1, true),
-                command)
-            assert.equal(1, count_plain(command,
-                "-X titan-runtime/ltitanlib.o " ..
-                "lpeglabel-build/libtitan-lpeglabel.a " ..
-                HTTP_SSL_BUNDLED_PAYLOAD), command)
-            assert.falsy(command:find("titan_uv.o", 1, true), command)
-            assert.falsy(command:find("libuv-build/libuv.a", 1, true), command)
-            assert.truthy(command:find(
-                "TITAN_EXTRA_CPPFLAGS='-DUSER_CPP=1 " ..
-                LPEGLABEL_INCLUDE .. " " .. LLHTTP_NATIVE_INCLUDE .. " " ..
-                SQLITE3_NATIVE_INCLUDE .. " " .. BUNDLED_OPENSSL_INCLUDES ..
-                " -I/opt/libuv/include -DUV_FAKE_PKG=1 -D_GNU_SOURCE'",
-                1, true), command)
-            local system_flags =
-            [[TITAN_EXTRA_LDFLAGS='-Wl,user-link -L/opt/libuv/lib -luv -pthread -ldl -lrt -lpthread']]
-            assert.equal(1, count_plain(command, system_flags), command)
-            assert.equal(1, count_plain(command, " -luv "), command)
-
-            ok, output, why, code = run_uv_dry_run("bundled", "Darwin")
+            ok, output, why, code = run_uv_dry_run("Darwin")
             assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
                 tostring(code) .. ")")
             command = stdlib_command(output)
@@ -3044,7 +3022,7 @@ esac
 
         local tested, test_error = xpcall(function()
             ok, output, why, code = run_uv_dry_run(
-                "bundled", "Linux", nil, "system", fake_pkg_config)
+                "Linux", nil, "system", fake_pkg_config)
             assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
                 tostring(code) .. ")")
             local command = stdlib_command(output)
@@ -3103,7 +3081,7 @@ esac
             end
             for _, source in ipairs(sources) do
                 local ok, output, why, code =
-                    run_uv_dry_run("bundled", "Linux", source)
+                    run_uv_dry_run("Linux", source)
                 assert.truthy(ok, source .. ": " .. output .. "\n(" ..
                     tostring(why) .. ", " .. tostring(code) .. ")")
                 local command, normalized = stdlib_command(output)
@@ -3198,8 +3176,6 @@ printf 'build\n' >> %s
                 return run_argv({
                     "make", "--no-print-directory", "-s",
                     "HOST_OS=Linux",
-                    "LIBUV_MODE=system",
-                    "LIBUV_PKG_CONFIG=" .. PKG_CONFIG,
                     "PREFIX=" .. root,
                     "TITAN_LUA=" .. prefix .. "/bin/lua",
                     "TITANC=" .. fake_titanc,
@@ -4489,7 +4465,7 @@ done
             end
 
             local mode_smoke =
-                read_file("spec/support/ci_libuv_mode_smoke.sh")
+                read_file("spec/support/ci_dependency_mode_smoke.sh")
             for _, contract in ipairs({
                 'RUNTIME_ARCHIVE="$LIBRARY_ROOT/libtitan.a"',
                 'test ! -e "$PREFIX/lib/libtitan.a"',
@@ -4536,26 +4512,16 @@ done
                 'ssl.Error.new(',
                 'url.parse("https://localhost:8443/static?q=1")',
                 "system.exepath()",
-                '"$LIBUV_PKG_CONFIG" --static --libs libuv',
-                '"$libdir/libuv.a" "$libdir/libuv_a.a"',
-                "TITAN_SYSTEM_STATIC_LIBUV_ARCHIVE",
-                "must name an absolute regular nonlink file",
                 '"$OPENSSL_PKG_CONFIG" --cflags openssl',
                 '"$OPENSSL_PKG_CONFIG" --libs openssl',
                 "has_openssl_dependency",
                 "defines_ssl_do_handshake",
-                "driver.compile_archive_validation_image(",
-                "build_static_system_provider_image",
-                'if ! defines_uv_version "$static_provider"',
-                'if defines_uv_version "$STATIC_ARCHIVE"',
                 "has_public_lpeglabel_symbol",
                 "has_unprefixed_lpeglabel_definition",
                 "require_no_lpeglabel_dependency",
-                "build_and_run_static_titan system-static",
                 '"$executable" "$marker" "$TITAN_PROCESS_SMOKE_CHILD"',
                 'if ! defines_uv_version "$executable"',
-                'if defines_uv_version "$STATIC_ARCHIVE"',
-                "LIBUV_MODE=system OPENSSL_MODE=system",
+                "OPENSSL_MODE=system",
             }) do
                 assert.truthy(mode_smoke:find(contract, 1, true), contract)
             end
@@ -4817,11 +4783,11 @@ done
             assert.truthy(stdlib_job:find(
                 'static_archive="${provider%.so}.a"', 1, true), stdlib_job)
             assert.truthy(stdlib_job:find(
-                "ci_libuv_mode_smoke.sh bundled", 1, true), stdlib_job)
+                "ci_dependency_mode_smoke.sh bundled", 1, true), stdlib_job)
             assert.truthy(stdlib_job:find(
-                "ci_libuv_mode_smoke.sh system", 1, true), stdlib_job)
+                "ci_dependency_mode_smoke.sh system", 1, true), stdlib_job)
             assert.truthy(stdlib_job:find(
-                "LIBUV_MODE=system OPENSSL_MODE=system", 1, true), stdlib_job)
+                "OPENSSL_MODE=system", 1, true), stdlib_job)
             assert.truthy(stdlib_job:find(
                 "archive: false", 1, true), stdlib_job)
             assert.truthy(stdlib_job:find(
@@ -4885,7 +4851,7 @@ done
                 "- name: Run all stdlib/runtime tests without coverage",
                 pack_index, true))
             local bundled_index = assert(stdlib_job:find(
-                "- name: Smoke-test bundled libuv source image",
+                "- name: Smoke-test bundled dependency source image",
                 tests_index, true))
             local regular_save_index = assert(stdlib_job:find(
                 "- name: Save regular Linux C-probe results",
@@ -4899,7 +4865,7 @@ done
                 1, true))
             local system_index = assert(stdlib_job:find(
                 "- name: Canary source-rock installation with system " ..
-                "libuv and OpenSSL", regular_save_index, true))
+                "OpenSSL", regular_save_index, true))
             local upload_index = assert(stdlib_job:find(
                 "- name: Upload prepared Linux tree", system_index, true))
             assert.is_true(pack_index < tests_index, stdlib_job)
@@ -5042,7 +5008,7 @@ done
             assert.equal(1, count_literal(macos_job,
                 "ci_stdlib_snapshot.sh restore"), macos_job)
             assert.equal(1, count_literal(macos_job,
-                "ci_libuv_mode_smoke.sh"), macos_job)
+                "ci_dependency_mode_smoke.sh"), macos_job)
             assert.falsy(macos_job:find('luacov "', 1, true), macos_job)
             assert.falsy(macos_job:find("id-token: write", 1, true),
                 macos_job)
@@ -5087,10 +5053,9 @@ done
                 "Build the pinned private llhttp support",
                 "Build the pinned bundled OpenSSL support",
                 "run: make openssl",
-                "Canary source-rock installation with system libuv and OpenSSL",
-                "LIBUV_MODE=system OPENSSL_MODE=system",
+                "Canary source-rock installation with system OpenSSL",
                 "OPENSSL_MODE=system",
-                "brew install cmake libuv openssl@3 pkgconf",
+                "brew install cmake openssl@3 pkgconf",
                 "test_ssl_http_fresh_process_sanitizer_composition$",
                 "libssl-dev", "perl",
             }) do
@@ -5101,9 +5066,8 @@ done
                 'MAKEFLAGS: "-j2"'), workflow)
             assert.equal(1, count_literal(workflow,
                 'TITAN_JOBS: "2"'), workflow)
-            assert.equal(2, select(2, workflow:gsub(
-                'TITAN_SYSTEM_STATIC_LIBUV_ARCHIVE=' ..
-                '"%$GITHUB_WORKSPACE/libuv%-build/libuv[.]a"', "")))
+            assert.falsy(workflow:find("TITAN_SYSTEM_STATIC_LIBUV_ARCHIVE", 1, true))
+            assert.truthy(workflow:find("OPENSSL_MODE: bundled", 1, true))
             assert.truthy(workflow:find(
                 "--name='standalone-prefix source installation installs one " ..
                 "matching Lua and Titan SDK before the standard images'",

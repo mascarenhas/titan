@@ -89,9 +89,10 @@ Header lookup mirrors C include intent:
 
 The compiler selects Lua and Titan headers from its configured SDK; it never
 searches parent directories for a compiler checkout. The installed SDK also
-contains `llhttp.h`, `sqlite3.h`, and, in bundled mode, the public libuv and
-OpenSSL headers matching its standard provider. System libuv/OpenSSL mode uses
-the system headers and removes the corresponding bundled headers on reinstall.
+contains `llhttp.h`, `sqlite3.h`, and the public libuv headers matching its
+standard provider. The default system OpenSSL mode uses system headers.
+Bundled OpenSSL mode stages matching public headers; reinstalling in system
+OpenSSL mode removes only that bundled OpenSSL header tree.
 
 Portable C primitive types are built into Titan's type grammar and do not need
 a header import. `titan/ffi.h` instead exposes the opaque Lua state type
@@ -943,7 +944,7 @@ compiler extensions may fail with a compile-time parse error.
 
 ### Direct libuv extensions
 
-Bundled Titan gives libuv one complete dynamic process owner: the combined
+Titan gives libuv one complete dynamic process owner: the combined
 standard-library provider `titan.so`; the paired `titan.a` carries the same
 libuv objects for static Titan consumers. Its SDK installs `uv.h` and the
 `uv/` headers, but not the private libuv archive used as payload for that
@@ -972,12 +973,11 @@ classification, or provider-specific Titan loader is involved. The compiler's
 separate interface-inspection loader remains
 `RTLD_LAZY | RTLD_LOCAL`.
 
-This bundled Titan path supports ordinary function calls through lazy binding.
+This Titan path supports ordinary function calls through lazy binding.
 It does not support native constructors, imported libuv data, or taken function
 addresses that create eager relocations: those are needed while the extension
-is being mapped, before its generated initializer can load `uv`. Use the system
-mode below or arrange for the embedding process to preload the provider when
-one of those forms is required.
+is being mapped, before its generated initializer can load `uv`. Arrange for
+the embedding process to preload the provider when one of those forms is required.
 
 Lua code that requires the extension directly must establish the provider
 first:
@@ -994,7 +994,7 @@ canonical `titan.so` with `RTLD_LAZY | RTLD_GLOBAL` before invoking
 `luaopen_titan_uv`. The support load itself uses Lua's ordinary C searcher and
 is eager/local; the separate global handle cache deliberately performs the
 promotion. This works with stock Lua 5.5 on both Linux and macOS without a
-`loadlib.c` patch or self-loading provider. A stock host can use the bundled
+`loadlib.c` patch or self-loading provider. A stock host can use the
 direct-extension contract when its `LUA_PATH_5_5` finds the generated loader
 and its `LUA_CPATH_5_5` finds the canonical DSO (see
 [Running with a stock Lua](modules.md#running-with-a-stock-lua)).
@@ -1003,16 +1003,6 @@ this route also supports its eager relocations and native constructors. The
 global symbols can resolve a Lua-only extension even if it omitted the Titan
 `uv` import, but the import remains mandatory for a Titan module that must also
 work through Titan's runtime loader.
-
-With `LIBUV_MODE=system`, an extension may instead consume the same shared
-library selected for Titan by passing the complete pkg-config output through
-the normal flag channels:
-
-```sh
-TITAN_EXTRA_CPPFLAGS="$(pkg-config --cflags libuv)" \
-TITAN_EXTRA_LDFLAGS="$(pkg-config --libs libuv)" \
-titanc my.libuv_extension
-```
 
 Do not statically embed Titan's bundled archive in an extension. Even an
 identical archive version would create another libuv instance with separate

@@ -225,13 +225,13 @@ directory semantics with ad hoc Titan traversal would change trust policy.
 
 ## Build and provider composition
 
-The default build pins OpenSSL 3.5.7, verifies its release tarball, and builds
+`OPENSSL_MODE=bundled` pins OpenSSL 3.5.7, verifies its release tarball, and builds
 static PIC `libssl.a` and `libcrypto.a` with the OpenSSL 3.0 API floor. They are
 private standard-provider payload: their objects are force-carried into the
 combined DSO and flattened into the corresponding static provider rather than
 installed as Titan runtime-SDK archives.
 
-`OPENSSL_MODE=system` instead requires `pkg-config` metadata for OpenSSL 3.0 or
+The default `OPENSSL_MODE=system` requires `pkg-config` metadata for OpenSSL 3.0 or
 newer. Its ordered link result remains a final-link input and must be repeated
 by static consumers; it is not copied into `titan.a`. Because the module uses
 OpenSSL directly, neither mode builds, carries, or installs an SSL adapter

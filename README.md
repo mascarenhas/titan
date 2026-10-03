@@ -35,7 +35,9 @@ publication; install the `clang-format` package on Debian/Ubuntu,
 `clang-tools-extra` on Fedora, or `brew install clang-format` on macOS for that
 opt-in mode. `CLANG_FORMAT` selects a different compatible command.
 
-For example:
+Install the build tools and OpenSSL development package described under
+[Libuv setup](#libuv-setup) and [OpenSSL and llhttp setup](#openssl-and-llhttp-setup).
+Then, for example:
 
 ```sh
 make lua PREFIX="$HOME/.local/titan/my-project"
@@ -148,7 +150,7 @@ The installed files used to compile Titan code include:
 | `$ROCKS_TREE/include/minicoro.h`, `titan.h` | Non-Lua top-level SDK headers |
 | `$ROCKS_TREE/include/titan/ffi.h` | Namespaced portable FFI and audited Lua-internal bridge header |
 | `$ROCKS_TREE/lib/titan/0.6/titan.so` | The dynamic standard-library provider: native `require "titan"` support plus twenty-one independent logical modules from `titan.coroutine` through `titan.json` |
-| `$ROCKS_TREE/lib/titan/0.6/titan.a` | The self-describing static form of the same twenty-one logical standard modules, plus native support, private LPegLabel/llhttp/SQLite payload, and bundled libuv/OpenSSL payload when those modes are selected |
+| `$ROCKS_TREE/lib/titan/0.6/titan.a` | The self-describing static form of the same twenty-one logical standard modules, plus native support and private LPegLabel/libuv/llhttp/SQLite payload, with OpenSSL payload when bundled OpenSSL is selected |
 | `$ROCKS_TREE/share/lua/5.5/titan/{coroutine,uv,async,timer,io,fs,net,ssl,url,http,os,peg,string,math,lua,iteration,gc,test,reflect,sqlite3,json}.lua` | Generated logical-module loader shims that map the canonical provider globally and invoke their exact `luaopen_titan_*` entries |
 | `$ROCKS_TREE/share/titan/0.6/src/titan/test.titan` | Canonical compiler-data source used for the source-private native test-runner protocol |
 
@@ -157,12 +159,11 @@ ABI-2 standard image. `titan.io` owns the shared Interface vocabulary and
 I/O helpers; bare native support adds the twenty-second DSO opener without adding
 a logical metadata key.
 
-Bundled-libuv installs also contain `$ROCKS_TREE/include/uv.h` and
+Installs also contain `$ROCKS_TREE/include/uv.h` and
 `$ROCKS_TREE/include/uv/`. The bundled `libuv.a` is a private build artifact:
 its objects are carried into the canonical `titan.so` and `titan.a`, but the
 libuv archive itself is not installed or exported as part of the Titan SDK.
-System mode uses the selected system libuv as a final-link input instead. The
-standard logical modules have independent state and entries inside both
+The standard logical modules have independent state and entries inside both
 provider forms; installation does not create child DSO aliases, symbolic
 links, hard links, or copied DSOs. The combined `titan.so` supplies the
 dynamic process's one complete libuv provider.
@@ -178,11 +179,12 @@ source-defined foreign functions in the generated `titan.http` object, so there
 is no HTTP adapter input. The TLS module calls OpenSSL directly through Titan's
 C FFI and uses either the pinned bundled OpenSSL objects or the system-mode
 final-link result. Neither the private llhttp archive nor bundled OpenSSL
-headers or archives become public Titan runtime-SDK libraries.
+archives become public Titan runtime-SDK libraries. Bundled OpenSSL headers
+are staged in the SDK only when that mode is selected.
 
 ## Libuv setup
 
-Titan's async standard library uses libuv. The supported default is a pinned
+Titan's async standard library uses a pinned, patched
 libuv 1.52.1 static PIC build, so neither the compiler nor the resulting
 standard modules depend on an unversioned system libuv at runtime. Install a C
 compiler, CMake, tar, a downloader, and a SHA-256 tool, then let the Makefile
@@ -204,33 +206,13 @@ make libuv
 
 The install sequence above builds this bundled copy before installing Titan.
 It includes a [small Unix spawn cleanup correction](vendor/libuv/README.md).
-To use a system development package instead, install it with pkg-config and
-select the optional mode consistently for both steps:
+This is the only libuv dependency policy; system libuv is not supported.
+Remove obsolete `LIBUV_MODE` overrides: the build rejects any nonempty value.
+Run `make libuv-config` to inspect the pinned source, include flags, archive,
+and platform support libraries. The Makefile records the compiler and flags
+so changes rebuild the libuv-facing objects without a manual clean.
 
-```sh
-# Ubuntu/Debian
-sudo apt-get install libuv1-dev pkg-config
-# Fedora
-sudo dnf install libuv-devel pkgconf-pkg-config
-# macOS (Homebrew's prefix is discovered through pkg-config)
-brew install libuv pkgconf
-
-LIBUV_MODE=system make libuv
-LIBUV_MODE=system "$PREFIX/bin/luarocks" make
-```
-
-System mode requires libuv 1.43.0 or newer and consumes the complete ordered
-`pkg-config --cflags/--libs` output. Run `make libuv-config` to inspect the
-effective mode, include flags, archive, and support libraries; `make help`
-lists the related targets and setup hints. The Makefile records the effective
-mode, compiler, and flags, so switching between bundled and system mode
-rebuilds the libuv-facing objects without requiring a manual clean.
-
-Use system mode only with an up-to-date package. As checked on 2026-10-03,
-upstream libuv 1.53.0 still has the failed-spawn cleanup defect corrected in the
-bundled build; check whether the system package includes that correction.
-
-In bundled mode, the combined `titan.so` is the sole complete dynamic libuv
+The combined `titan.so` is the sole complete dynamic libuv
 provider, while `titan.a` carries the same bundled libuv objects for static
 Titan consumers.
 A compiled Titan extension DSO that directly `foreign import`s `uv.h` must also import the
@@ -254,7 +236,7 @@ local runtime = import "uv"
 foreign import "uv.h"
 ```
 
-This Titan-side bundled contract covers ordinary function calls, whose
+This Titan-side contract covers ordinary function calls, whose
 bindings can remain lazy. Native constructors run before the generated module
 initializer, while imported data and function-address relocations are eager;
 do not use those forms unless the embedding process has already made the
@@ -283,9 +265,7 @@ also supports its eager libuv relocations and native constructors. It can make
 the native symbols available even to a Lua-only extension that omitted the
 Titan `uv` import, but such a module does not satisfy the Titan-side contract.
 
-System mode may instead link the extension against the same
-pkg-config-selected shared libuv used by `titan.so`. In either mode, never
-embed the bundled `libuv.a` in another DSO: it is private to the standard
+Never embed the bundled `libuv.a` in another DSO: it is private to the standard
 provider and a second static embedding would create a second native libuv
 instance.
 
@@ -296,19 +276,8 @@ own runtime archive.
 
 ## OpenSSL and llhttp setup
 
-`titan.ssl` uses OpenSSL and `titan.http` uses llhttp. The default build pins,
-downloads, verifies, and statically builds OpenSSL 3.5.7 and llhttp 9.4.3.
-llhttp is always private and bundled. In addition to the libuv tools above,
-the bundled OpenSSL build requires Perl:
-
-```sh
-make openssl
-make llhttp
-```
-
-To use a system OpenSSL 3.0 or newer, install its development package and
-pkg-config metadata, then select that mode consistently for the provider
-build:
+`titan.ssl` uses system OpenSSL 3.0 or newer by default. Install its development
+package and `pkg-config` metadata before building the standard provider:
 
 ```sh
 # Ubuntu/Debian
@@ -318,9 +287,22 @@ sudo dnf install openssl-devel pkgconf-pkg-config
 # macOS
 brew install openssl@3 pkgconf
 
-OPENSSL_MODE=system make openssl
-OPENSSL_MODE=system "$PREFIX/bin/luarocks" make
+make openssl
+"$PREFIX/bin/luarocks" make
 ```
+
+`OPENSSL_MODE=bundled` selects the pinned OpenSSL 3.5.7 static PIC build
+instead. It downloads and verifies the release and requires Perl in addition
+to the libuv build tools. Keep the selection consistent for both steps:
+
+```sh
+OPENSSL_MODE=bundled make openssl
+OPENSSL_MODE=bundled "$PREFIX/bin/luarocks" make
+```
+
+`titan.http` always uses the private, pinned llhttp 9.4.3 parser.
+`make llhttp` downloads, verifies, and builds it; there is no system llhttp mode.
+SQLite likewise uses only its pinned private amalgamation.
 
 The no-override TLS client API uses OpenSSL's compiled default certificate
 paths; it is not a portable wrapper around every platform's native trust
@@ -572,7 +554,7 @@ optional null sentinels preserve null-valued container entries.
 asynchronous prepared statements, owned rows and cursors, reflection binding
 and mapping, and explicit transactions. SQLite runs in libuv's native worker
 pool, with cancellation-insensitive resource retirement. Its private pinned
-amalgamation enters both provider forms in either libuv/OpenSSL mode.
+amalgamation enters both provider forms in either OpenSSL mode.
 GC-backed
 owners can attach table/full-userdata finalizers
 without discarding an existing metatable. Make compiles the twenty-one logical
@@ -581,10 +563,8 @@ incremental `titanc` link. Source contributors, imported objects/headers,
 compiler inputs, and build configuration drive recompilation. The high-level libuv
 facades explicitly import `uv.titan` for their private collaboration edges; the
 source graph is statically resolved
-inside the paired `titan.so` and `titan.a` providers. Bundled mode carries
-libuv's objects into both forms; system mode keeps the pkg-config-selected
-library as a repeated final-link input. The private LPegLabel objects enter
-both forms in either libuv mode. Twenty-one generated Lua loaders expose the
+inside the paired `titan.so` and `titan.a` providers. Both forms carry the
+private libuv and LPegLabel objects. Twenty-one generated Lua loaders expose the
 qualified logical entries.
 Its source is the reviewed folder ensemble rooted at `titan/uv/uv.titan`, with
 `file.titan`, `os.titan`, `process.titan`, `runtime.titan`, `task.titan`, and

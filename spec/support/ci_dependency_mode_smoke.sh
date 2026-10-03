@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 
 # Exercise both installed standard-library provider forms under the bundled
-# and system libuv/OpenSSL policies. Besides the ordinary Lua/API smokes, this
-# proves that titan.a matches titan.so and can load io and run
+# and system OpenSSL policies. Libuv, llhttp and SQLite are always bundled.
+# Besides the ordinary Lua/API smokes, this proves titan.a matches titan.so and
+# can load io and run
 # async/timer/fs/net/ssl/url/http/os plus PEG/string behavior in a compiled Titan
 # application while the dynamic provider and generated shims are out of search
-# reach. System mode additionally exercises the host's ordinary pkg-config
-# settings and an explicit static libuv archive selection.
+# reach. System mode exercises the host's ordinary OpenSSL pkg-config settings.
 
 set -euo pipefail
 
@@ -31,10 +31,8 @@ STATIC_ARCHIVE="$LIBRARY_ROOT/titan.a"
 RUNTIME_ARCHIVE="$LIBRARY_ROOT/libtitan.a"
 TEST_SUPPORT_SOURCE="$PREFIX/share/titan/0.6/src/titan/test.titan"
 PROCESS_CHILD_SUPPLIED=${TITAN_PROCESS_SMOKE_CHILD:+1}
-LIBUV_PKG_CONFIG=${LIBUV_PKG_CONFIG:-pkg-config}
 OPENSSL_PKG_CONFIG=${OPENSSL_PKG_CONFIG:-pkg-config}
 OPENSSL_MODE=${OPENSSL_MODE:-bundled}
-STATIC_SYSTEM_LIBUV_ARCHIVE=${TITAN_SYSTEM_STATIC_LIBUV_ARCHIVE:-}
 
 case "$OPENSSL_MODE" in
     bundled|system) ;;
@@ -44,24 +42,14 @@ case "$OPENSSL_MODE" in
         ;;
 esac
 
-if [[ -n $STATIC_SYSTEM_LIBUV_ARCHIVE ]]; then
-    if [[ $STATIC_SYSTEM_LIBUV_ARCHIVE != /* ||
-          ! -f $STATIC_SYSTEM_LIBUV_ARCHIVE ||
-          -L $STATIC_SYSTEM_LIBUV_ARCHIVE ]]; then
-        echo "TITAN_SYSTEM_STATIC_LIBUV_ARCHIVE must name an absolute regular nonlink file" >&2
-        exit 2
-    fi
-fi
-
 test -x "$LUA"
 test -x "$TITANC"
 
 case "$(uname -s)" in
     Darwin)
         platform=macos
-        libuv_pkgconfig="$(brew --prefix libuv)/lib/pkgconfig"
         openssl_pkgconfig="$(brew --prefix openssl@3)/lib/pkgconfig"
-        export PKG_CONFIG_PATH="$libuv_pkgconfig:$openssl_pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
+        export PKG_CONFIG_PATH="$openssl_pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
         bundled_cppflags="-I$PREFIX/include"
         bundled_ldflags="-lpthread"
         ;;
@@ -71,12 +59,12 @@ case "$(uname -s)" in
         bundled_ldflags="-lpthread -lrt"
         ;;
     *)
-        echo "unsupported libuv smoke platform: $(uname -s)" >&2
+        echo "unsupported dependency smoke platform: $(uname -s)" >&2
         exit 2
         ;;
 esac
 
-SMOKE_TMP=$(mktemp -d "${TMPDIR:-/tmp}/titan-libuv-mode-smoke.XXXXXX")
+SMOKE_TMP=$(mktemp -d "${TMPDIR:-/tmp}/titan-dependency-mode-smoke.XXXXXX")
 PROVIDER_HIDDEN="$LIBRARY_ROOT/.titan.so.libuv-smoke-hidden.$$"
 SHIMS_HIDDEN="$SHIM_ROOT/.titan.libuv-smoke-hidden.$$"
 
@@ -321,62 +309,6 @@ defines_ssl_do_handshake() {
     '
 }
 
-system_libuv_flags() {
-    local linkage=${1:-ordinary}
-    local candidate libdir static_archive pkg_static_flags
-
-    system_cppflags=$("$LIBUV_PKG_CONFIG" --cflags libuv)
-    if [[ $linkage == ordinary ]]; then
-        system_ldflags=$("$LIBUV_PKG_CONFIG" --libs libuv)
-    elif [[ $linkage == static ]]; then
-        # `pkg-config --static` adds private dependencies but an ordinary
-        # `-luv` still lets the linker prefer a DSO. Select an explicit
-        # archive while retaining the package's private dependencies. Official
-        # CI supplies a known-PIC archive for the provider-DSO proof; a clean
-        # installed-prefix invocation needs only its host archive for the
-        # executable proof and has no checkout-local dependency.
-        static_archive=$STATIC_SYSTEM_LIBUV_ARCHIVE
-        if [[ -z $static_archive ]]; then
-            libdir=$("$LIBUV_PKG_CONFIG" --variable=libdir libuv)
-            for candidate in "$libdir/libuv.a" "$libdir/libuv_a.a"; do
-                if [[ -f $candidate && ! -L $candidate ]]; then
-                    static_archive=$candidate
-                    break
-                fi
-            done
-        fi
-        if [[ -z $static_archive ]]; then
-            echo "no regular static libuv archive is available for the explicit system-mode setting" >&2
-            exit 1
-        fi
-
-        pkg_static_flags=$("$LIBUV_PKG_CONFIG" --static --libs libuv)
-        system_ldflags=$("$LUA" -E - \
-            "$static_archive" "$pkg_static_flags" <<'LUA'
-local archive, flags = ...
-local cdriver = require "c-parser.cdriver"
-local words, split_error = cdriver.split_shell_words(flags)
-assert(words, split_error)
-local quoted = { assert(cdriver.shell_quote(archive)) }
-for _, word in ipairs(words) do
-    -- The explicit archive replaces the public -luv selection; retain its -L
-    -- and every private/platform dependency in their original order.
-    if word ~= "-luv" then
-        quoted[#quoted + 1] = assert(cdriver.shell_quote(word))
-    end
-end
-io.write(table.concat(quoted, " "))
-LUA
-        )
-    else
-        echo "unsupported system libuv linkage setting: $linkage" >&2
-        exit 2
-    fi
-    if [[ $platform == linux ]]; then
-        system_cppflags="${system_cppflags:+$system_cppflags }-D_GNU_SOURCE"
-    fi
-}
-
 system_openssl_flags() {
     system_openssl_cppflags=$(
         "$OPENSSL_PKG_CONFIG" --cflags openssl
@@ -390,22 +322,13 @@ build_process_child() {
     local mode=$1
     if [[ -n $PROCESS_CHILD_SUPPLIED ]]; then return; fi
 
-    local cppflags ldflags
     local cc_words cpp_words ld_words
     read -r -a cc_words <<<"${CC:-cc}"
-    if [[ $mode == bundled ]]; then
-        cpp_words=("-I$PREFIX/include")
-        ld_words=("$STATIC_ARCHIVE" "-lpthread")
-        if [[ $platform == linux ]]; then
-            cpp_words+=("-D_GNU_SOURCE")
-            ld_words+=("-lrt" "-ldl" "-lm")
-        fi
-    else
-        system_libuv_flags
-        cppflags=$system_cppflags
-        ldflags=$system_ldflags
-        read -r -a cpp_words <<<"$cppflags"
-        read -r -a ld_words <<<"$ldflags"
+    cpp_words=("-I$PREFIX/include")
+    ld_words=("$STATIC_ARCHIVE" "-lpthread")
+    if [[ $platform == linux ]]; then
+        cpp_words+=("-D_GNU_SOURCE")
+        ld_words+=("-lrt" "-ldl" "-lm")
     fi
 
     # CI uses a single compiler executable (cc/clang). Word splitting also
@@ -417,66 +340,6 @@ build_process_child() {
         spec/fixtures/stdlib/native/os_process_child.c \
         "${ld_words[@]}" -o "$TITAN_PROCESS_SMOKE_CHILD"
     export TITAN_PROCESS_SMOKE_CHILD
-}
-
-build_static_system_provider_image() {
-    local mode_dir="$SMOKE_TMP/system-static-provider"
-    local static_provider="$mode_dir/titan.so"
-    local provider_ldflags
-    if [[ -z $STATIC_SYSTEM_LIBUV_ARCHIVE ]]; then
-        echo "RESULT static system provider smoke skipped (no explicit PIC archive)"
-        return
-    fi
-    mkdir -p "$mode_dir"
-    system_libuv_flags static
-    provider_ldflags=$system_ldflags
-    if [[ $OPENSSL_MODE == system ]]; then
-        system_openssl_flags
-        provider_ldflags="${provider_ldflags:+$provider_ldflags }$system_openssl_ldflags"
-    fi
-
-    # Reuse the production archive-backed validation path: it force-loads the
-    # exact published Titan member set through the provider DSO link policy.
-    # Supplying the explicit system archive here proves the provider side of
-    # the same final-link setting later repeated by the standalone consumer.
-    env -u LUA_PATH -u LUA_CPATH -u LUA_PATH_5_5 -u LUA_CPATH_5_5 \
-        TITAN_ROCKS_ROOT="$PREFIX" TITAN_RUNTIME_PREBUILT=1 \
-        TITAN_EXTRA_LDFLAGS="$provider_ldflags" \
-        "$LUA" -E - "$STATIC_ARCHIVE" "$static_provider" <<'LUA'
-local archive, output = ...
-local driver = require "titan-compiler.driver"
-local linked, term, code =
-    driver.compile_archive_validation_image(output, archive, nil, false)
-if not linked then
-    error("cannot link static-system provider image: " ..
-        tostring(term) .. " (" .. tostring(code) .. ")", 0)
-end
-LUA
-
-    compare_archive_and_dso_metadata "$STATIC_ARCHIVE" "$static_provider"
-    if has_public_lpeglabel_symbol "$static_provider"; then
-        echo "static system-libuv provider exports a private LPegLabel symbol" >&2
-        exit 1
-    fi
-    require_no_lpeglabel_dependency "$static_provider"
-    require_no_sqlite3_dependency "$static_provider"
-    if has_libuv_dependency "$static_provider"; then
-        echo "static system-libuv provider depends on a libuv DSO" >&2
-        exit 1
-    fi
-    if ! defines_uv_version "$static_provider"; then
-        echo "static system-libuv provider did not absorb reachable libuv objects" >&2
-        exit 1
-    fi
-    if defines_uv_version "$STATIC_ARCHIVE"; then
-        echo "static system-libuv provider link copied libuv into installed titan.a" >&2
-        exit 1
-    fi
-    if [[ $OPENSSL_MODE == system ]] &&
-       ! has_openssl_dependency "$static_provider"; then
-        echo "static system-libuv provider omitted its system OpenSSL dependency" >&2
-        exit 1
-    fi
 }
 
 run_mode_smoke() {
@@ -610,7 +473,7 @@ function main(args: {string}): integer
   local process_child = args[2]
   check(not testing.testing() and not testing.verbose(),
         "titan.test reported an active runner in a production executable")
-  local envname = "TITAN_STATIC_LIBUV_MODE_SMOKE"
+  local envname = "TITAN_STATIC_PROVIDER_SMOKE"
   local original: string? = system.getenv(envname)
   defer
     if original then
@@ -762,21 +625,8 @@ function main(args: {string}): integer
 end
 TITAN
 
-    if [[ $mode == bundled ]]; then
-        cppflags=$bundled_cppflags
-        ldflags=$bundled_ldflags
-    elif [[ $mode == system ]]; then
-        system_libuv_flags ordinary
-        cppflags=$system_cppflags
-        ldflags=$system_ldflags
-    elif [[ $mode == system-static ]]; then
-        system_libuv_flags static
-        cppflags=$system_cppflags
-        ldflags=$system_ldflags
-    else
-        echo "unsupported static Titan smoke mode: $mode" >&2
-        exit 2
-    fi
+    cppflags=$bundled_cppflags
+    ldflags=$bundled_ldflags
 
     if [[ $OPENSSL_MODE == system ]]; then
         system_openssl_flags
@@ -820,29 +670,13 @@ TITAN
         echo "system OpenSSL static Titan executable has no OpenSSL dependency" >&2
         exit 1
     fi
-    if [[ $mode == bundled ]]; then
-        if has_libuv_dependency "$executable"; then
-            echo "bundled static Titan executable depends on a libuv DSO" >&2
-            exit 1
-        fi
-    elif [[ $mode == system && ${SYSTEM_LIBUV_SHARED:-0} == 1 ]]; then
-        if ! has_libuv_dependency "$executable"; then
-            echo "system shared-libuv executable has no libuv dependency" >&2
-            exit 1
-        fi
-    elif [[ $mode == system-static ]]; then
-        if has_libuv_dependency "$executable"; then
-            echo "static system-libuv executable depends on a libuv DSO" >&2
-            exit 1
-        fi
-        if ! defines_uv_version "$executable"; then
-            echo "static system-libuv executable did not absorb reachable libuv objects" >&2
-            exit 1
-        fi
-        if defines_uv_version "$STATIC_ARCHIVE"; then
-            echo "static system-libuv setting copied libuv into installed titan.a" >&2
-            exit 1
-        fi
+    if has_libuv_dependency "$executable"; then
+        echo "static Titan executable depends on a libuv DSO" >&2
+        exit 1
+    fi
+    if ! defines_uv_version "$executable"; then
+        echo "static Titan executable did not absorb reachable libuv objects" >&2
+        exit 1
     fi
 }
 
@@ -868,7 +702,7 @@ check_openssl_policy() {
     fi
 }
 
-check_bundled_mode() {
+check_dependency_mode() {
     check_canonical_container
     compare_archive_and_dso_metadata
     if has_public_lpeglabel_symbol "$PROVIDER"; then
@@ -888,59 +722,24 @@ check_bundled_mode() {
     fi
     defines_uv_version "$PROVIDER"
     defines_uv_version "$STATIC_ARCHIVE"
-    build_process_child bundled
-    run_mode_smoke bundled
-    build_and_run_static_titan bundled
+    build_process_child "$OPENSSL_MODE"
+    run_mode_smoke "$OPENSSL_MODE"
+    build_and_run_static_titan "$OPENSSL_MODE"
 }
 
-check_system_mode() {
-    check_canonical_container
-    compare_archive_and_dso_metadata
-    if has_public_lpeglabel_symbol "$PROVIDER"; then
-        echo "system titan.so exports a private LPegLabel symbol" >&2
-        exit 1
-    fi
-    if has_unprefixed_lpeglabel_definition "$STATIC_ARCHIVE"; then
-        echo "system titan.a contains an unprefixed LPegLabel definition" >&2
-        exit 1
-    fi
-    require_no_lpeglabel_dependency "$PROVIDER"
-    require_no_sqlite3_dependency "$PROVIDER"
-    check_openssl_policy
-    if defines_uv_version "$STATIC_ARCHIVE"; then
-        echo "system libuv was copied into installed titan.a" >&2
-        exit 1
-    fi
-    SYSTEM_LIBUV_SHARED=0
-    if has_libuv_dependency "$PROVIDER"; then
-        SYSTEM_LIBUV_SHARED=1
-    elif [[ -n ${CI:-} ]]; then
-        echo "CI system mode did not select the apt/brew shared libuv" >&2
-        exit 1
-    fi
-    export SYSTEM_LIBUV_SHARED
-    build_process_child system
-    run_mode_smoke system
-    build_and_run_static_titan system
-    build_static_system_provider_image
-    build_and_run_static_titan system-static
-}
-
+# Scope selects only OpenSSL. The libuv payload remains bundled in both forms.
 case "$scope" in
-    bundled)
-        check_bundled_mode
-        ;;
-    system)
-        check_system_mode
+    bundled|system)
+        OPENSSL_MODE=$scope
+        check_dependency_mode
         ;;
     both)
-        check_bundled_mode
-        # The paired publisher transactionally replaces both native forms and
-        # all generated shims. CI may finish in system mode; its earlier
-        # bundled artifact/smokes already consumed the bundled generation.
-        LIBUV_MODE=system OPENSSL_MODE=system \
-            "$PREFIX/bin/luarocks" make --force
+        OPENSSL_MODE=bundled
+        check_dependency_mode
+        # The paired publisher replaces both native forms and all generated
+        # shims. The earlier bundled smoke consumes that generation first.
+        OPENSSL_MODE=system "$PREFIX/bin/luarocks" make --force
         OPENSSL_MODE=system
-        check_system_mode
+        check_dependency_mode
         ;;
 esac

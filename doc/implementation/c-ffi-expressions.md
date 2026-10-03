@@ -242,8 +242,8 @@ probe-cache identity beyond the literal text emitted into the probe.
 SDK staging waits for its native header producers. Bundled OpenSSL's public
 include directory combines ordinary source headers with generated configured
 headers; copying only its build directory loses required public includes.
-System reinstall removes that bundled directory, as it does bundled libuv
-headers. The SDK always installs the public llhttp and SQLite headers.
+The default system OpenSSL mode removes only that bundled directory on
+reinstall. The SDK always installs the public libuv, llhttp, and SQLite headers.
 
 Each uncached candidate first validates its baseline translation unit. The
 checker also validates the module's combined C environment after extraction,

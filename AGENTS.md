@@ -125,7 +125,7 @@ change them only when their own compatibility rules require it.
 - **CI runs Linux on every push and the complete macOS suite only on manual
   dispatch.** Complete macOS validation is a **pre-merge check**. Prefer the
   complete local macOS VM gates, including runtime/packaging/compiler tests and
-  both production modes, with exact source and architecture evidence. The hosted
+  both OpenSSL production modes, with exact source and architecture evidence. The hosted
   workflow is a manual fallback; never trigger that costly run without an
   explicit maintainer request for macOS CI.
   Opening or updating a PR alone does not authorize dispatch; an explicit macOS
@@ -175,21 +175,21 @@ change them only when their own compatibility rules require it.
   aggregate native Titan suite also remains one fast executable.
 
   1. `test-linux-stdlib` is the prepared-tree producer. It prepares a clean
-     ABI-2 prefix, builds and installs the optimized bundled provider, and
-     packs the complete prepared tree before tests or a system-mode reinstall.
+     ABI-2 prefix, builds and installs the optimized bundled-OpenSSL provider, and
+     packs the complete prepared tree before tests or a system-OpenSSL reinstall.
      It then runs, without LuaCov, the retained root build/runtime/packaging
      specs and the one 25-root native stdlib executable through `make
      stdlib-test`; there are no standard-library Lua boundary specs.
      Disposable generated fixtures and test objects use `-O0`; purpose-built
      native harnesses retain their explicit flags, and the provider packed for
      consumers remains optimized. After the uncovered tests it builds the
-     child-process fixture, runs the bundled production smoke, reinstalls the
-     source rock with system libuv/OpenSSL at `-O0`, reruns only the two
+     child-process fixture, runs the bundled-OpenSSL production smoke, reinstalls the
+     source rock with system OpenSSL at `-O0`, reruns only the two
      mode-dependent SDK-layout/external-DSO promotion cases from
      `rockspec_spec.lua`, and runs the full system production smoke with
      optimized consumers. The bundled smoke and packed canonical provider also
      remain optimized. It uploads the already packed artifact only after both
-     provider modes pass. Never repack the live system-linked tree.
+     OpenSSL modes pass. Never repack the live system-OpenSSL tree.
   2. `test-linux-compiler` is the sole regular-artifact consumer. It needs the
      stdlib producer, restores that full tree on the same x86_64 Ubuntu target,
      and extracts four cache-free worker copies without their `.lua` trees. The
@@ -235,7 +235,7 @@ change them only when their own compatibility rules require it.
   exception to that full-tree transfer: exclude it from the tar and snapshot it
   independently in the regular producer, sanitizer, and macOS jobs with
   `ubicloud/cache@v4`. The regular producer uses explicit restore/save actions
-  and saves after the bundled tests and smoke but before the system-libuv/OpenSSL
+  and saves after the bundled tests and smoke but before the system-OpenSSL
   canary can add records from another provider configuration. The other lanes
   save at job end. Those producing lanes have distinct OS/architecture keys
   whose immutable primary ends in the commit SHA and whose stable restore
@@ -288,10 +288,10 @@ change them only when their own compatibility rules require it.
   before `ci_test_groups.sh compiler-uncovered`. Snapshot the runtime archive,
   canonical `titan.so`/`titan.a`, conditional dSYM, all twenty-one shims, and the
   canonical test-support source before compiler tests, then restore them before
-  the bundled/system production smokes. Keep the real x86_64/arm64 universal
+  the bundled/system OpenSSL production smokes. Keep the real x86_64/arm64 universal
   Mach-O archive lookup and repackaging proof here rather than replacing it
   with a host-only synthetic check. The complete macOS run, including both
-  libuv modes, remains optimized. Compiler and language specs must not delete
+  OpenSSL modes, remains optimized. Compiler and language specs must not delete
   the shared checkout runtime archive merely to force recompilation; Make owns
   that dependency state. The coroutine suite is the isolated restoration
   exception described below.
@@ -340,10 +340,10 @@ change them only when their own compatibility rules require it.
   `titan.o` and `minicoro.o`; `ltitanlib.o` is outside that archive and is
   the sole input to the private bootstrap. The non-Lua headers staged under
   `$ROCKS_TREE/include` are `minicoro.h`, `titan.h`, `titan/ffi.h`,
-  `llhttp.h`, and `sqlite3.h`; bundled mode also stages `uv.h`, `uv/`, and
+  `llhttp.h`, `sqlite3.h`, `uv.h`, and `uv/`. Bundled OpenSSL mode also stages
   the complete public `openssl/` headers (ordinary source and configured
-  generated headers). System reinstall removes the corresponding bundled
-  libuv/OpenSSL headers. The private native dependency archives are never
+  generated headers). The default system OpenSSL mode removes only the bundled
+  OpenSSL headers on reinstall. The private native dependency archives are never
   installed separately.
   The pinned, privately namespaced LPegLabel build produces
   `lpeglabel-build/libtitan-lpeglabel.a` with exactly `lplcap.o`, `lplcode.o`,
@@ -368,14 +368,15 @@ change them only when their own compatibility rules require it.
   `titan/{math,lua,iteration,gc,test,reflect}.titan`. Each logical
   module
   remains independent, but the physical outputs are the paired `titan.so` and
-  self-describing `titan.a`. In bundled mode the pinned private `libuv.a`
+  self-describing `titan.a`. The pinned private `libuv.a` always
   follows the LPegLabel archive in that same `-X` payload, followed by the
-  private llhttp and SQLite archives, then the bundled OpenSSL archives used
+  private llhttp and SQLite archives, then any bundled OpenSSL archives used
   directly by `titan.ssl`. The compiler force-carries all bundled payload into
-  the DSO and flattens it into the archive. In system mode the LPegLabel
-  archive and private llhttp/SQLite archives remain present while
-  pkg-config's ordered libuv and OpenSSL results remain final-link inputs, must
-  be repeated by static consumers, and are never copied into `titan.a`.
+  the DSO and flattens it into the archive. Libuv, llhttp, and SQLite have no
+  system mode. OpenSSL defaults to `OPENSSL_MODE=system`: its ordered pkg-config
+  result remains a final-link input, must be repeated by static consumers,
+  and is never copied into `titan.a`. `OPENSSL_MODE=bundled` selects the pinned
+  private OpenSSL archives instead. CI selects both OpenSSL modes explicitly.
 
   The hook delegates to `install-stdlib`, retaining checkout objects, providers,
   shims, and completion state for a no-op subsequent `make stdlib`. Both select
@@ -603,8 +604,8 @@ publication, physical composition, rollback, and the real macOS universal
 archive gate belong in `spec/coder/multi_module_libraries_spec.lua`.
 Canonical stdlib pair ownership stays in `spec/libuv_build_spec.lua`,
 `spec/rockspec_spec.lua`, and `spec/stdlib_installer_spec.lua`; production
-bundled/system static smokes stay in
-`spec/support/ci_libuv_mode_smoke.sh`.
+bundled/system OpenSSL static smokes stay in
+`spec/support/ci_dependency_mode_smoke.sh`.
 
 All driver/artifact paths inside specs are relative to the repo-root CWD (not
 the spec file), so subdir specs still run from repo root. The shared
@@ -830,11 +831,11 @@ in one incremental final-link process, stages
 `<root>/lib/titan/0.6/{titan.so,titan.a}`, and installs twenty-one generated shims
 below `<root>/share/lua/5.5/titan/`. The archive advertises exactly twenty-one
 logical metadata keys; its metadata-free payload begins with `ltitanlib.o` and
-the private five-member LPegLabel archive, followed by the selected libuv
-payload, the private llhttp archive, and the selected OpenSSL
+the private five-member LPegLabel archive, followed by the pinned libuv
+payload, the private llhttp and SQLite archives, and any bundled OpenSSL
 payload used directly by `titan.ssl`. Bundled archives are flattened into
 `titan.a`;
-system-mode dependencies remain final-link inputs. The DSO exposes those
+system OpenSSL dependencies remain final-link inputs. The DSO exposes those
 twenty-one protocols plus bare `luaopen_titan` support, for twenty-two
 `luaopen_*` entries total. `titan.io`
 owns the standard Interface vocabulary and high-level I/O helpers.
@@ -899,7 +900,7 @@ glob that can remove user-authored files.
 The stdlib configuration/completion stamps own the provider pair as one build:
 they record the archive name, effective `AR`/`RANLIB`,
 embedded-format/coder inputs, full `-X` payload, LPegLabel source/archive
-identity, libuv mode, platform support, and existing
+identity, OpenSSL mode, platform support, and existing
 compiler/source/flag inputs. Every warm `make stdlib` rescans `titan.a` for the
 exact twenty-one logical keys without changing pair mtimes; a missing or corrupt
 archive invalidates completion and rebuilds both forms. CI's
@@ -1560,11 +1561,8 @@ substitution, recursive; error on missing keys). Key facts:
   canonical-path per-state cache and performs `RTLD_LAZY | RTLD_GLOBAL` even
   when Lua or compiler `_loadlib` already opened the image; for combined
   `titan.so` this promotes Lua's initial eager/local support mapping. It never
-  calls `dlclose`. System mode leaves libuv as pkg-config/user-selected final
-  link policy: `titan.a` retains unresolved `uv_*`, a static consumer repeats
-  the same setting, and two DSOs may instead bind the same selected shared
-  libuv. The private bundled `libuv.a` must never be linked into an extension
-  DSO or installed separately.
+  calls `dlclose`. The private bundled `libuv.a` must never be linked into an
+  extension DSO or installed separately.
   Lua's shim-driven global promotion occurs before the extension is mapped, so that
   path also supports eager relocations and native constructors. It can resolve
   native symbols for a Lua-only extension without a Titan `uv` import, but the

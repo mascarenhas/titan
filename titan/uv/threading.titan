@@ -1,0 +1,230 @@
+foreign import "uv.h"
+foreign import "thread-native.h"
+foreign import "string.h"
+
+local const THREAD_FRESH = 0
+local const THREAD_JOINABLE = 1
+local const THREAD_BORROWED = 2
+local const THREAD_RETIRED = 3
+local thread_roots: {thread_t: boolean} = {}
+
+const THREAD_NO_FLAGS: integer?
+const THREAD_HAS_STACK_SIZE: integer?
+const THREAD_PRIORITY_HIGHEST: integer?
+const THREAD_PRIORITY_ABOVE_NORMAL: integer?
+const THREAD_PRIORITY_NORMAL: integer?
+const THREAD_PRIORITY_BELOW_NORMAL: integer?
+const THREAD_PRIORITY_LOWEST: integer?
+
+record thread_options_t
+  flags: integer
+  stack_size: integer
+end
+
+record thread_t
+  local native: foreign titan_issue194_thread_storage
+  local phase: integer
+  local argument_owner: value
+end
+
+function thread_t.new(): thread_t
+  local native = foreign titan_issue194_thread_storage.new()
+  return { native = native, phase = THREAD_FRESH, argument_owner = nil }
+end
+
+local function thread_t:begin_create(argument_owner: value)
+  -- The only allocating store precedes native acceptance. The complete owner
+  -- graph must cover argument and every borrowed pointer reachable from it.
+  thread_roots[self] = true
+  self.argument_owner = argument_owner
+end
+
+function thread_t:create(entry: foreign function(*void): void,
+                         argument: foreign *void,
+                         argument_owner: value): integer
+  if self.phase ~= THREAD_FRESH and self.phase ~= THREAD_RETIRED then return ffi.UV_EBUSY end
+  if not entry then return ffi.UV_EINVAL end
+  self:begin_create(argument_owner)
+  local status = ffi.uv_thread_create(self.native as foreign *uv_thread_t, entry,
+                                      argument) as integer
+  -- No allocations, user calls, or ownership change can precede this commit.
+  if status == 0 then
+    self.phase = THREAD_JOINABLE
+  else
+    thread_roots[self] = nil
+    self.argument_owner = nil
+  end
+  return status
+end
+
+function thread_t:create_ex(options: thread_options_t,
+                            entry: foreign function(*void): void,
+                            argument: foreign *void,
+                            argument_owner: value): integer
+  if self.phase ~= THREAD_FRESH and self.phase ~= THREAD_RETIRED then return ffi.UV_EBUSY end
+  if not entry then return ffi.UV_EINVAL end
+  -- Range validation and complete options construction precede root/acceptance.
+  local native_options = foreign uv_thread_options_t.new()
+  native_options.flags = options.flags
+  native_options.stack_size = options.stack_size
+  self:begin_create(argument_owner)
+  local status = ffi.uv_thread_create_ex(self.native as foreign *uv_thread_t, native_options,
+                                         entry, argument) as integer
+  if status == 0 then
+    self.phase = THREAD_JOINABLE
+  else
+    thread_roots[self] = nil
+    self.argument_owner = nil
+  end
+  return status
+end
+
+function thread_t:join(): integer
+  if self.phase ~= THREAD_JOINABLE then return ffi.UV_EINVAL end
+  -- This blocks the current OS thread, including the whole Lua event loop.
+  local status = ffi.uv_thread_join(self.native as foreign *uv_thread_t) as integer
+  if status == 0 then
+    self.phase = THREAD_RETIRED
+    self.argument_owner = nil
+    thread_roots[self] = nil
+  end
+  return status
+end
+
+
+-- Native startup owns copies of entry/argument, never this identifier storage.
+-- A nil argument_owner explicitly borrows externally retained argument memory.
+-- Join-owned GC graphs cannot transfer to a detached worker without a terminal
+-- notification, so that case must still join.
+function thread_t:detach(): integer
+  if self.phase ~= THREAD_JOINABLE then return ffi.UV_EINVAL end
+  if self.argument_owner ~= nil then return ffi.UV_EBUSY end
+  local status = ffi.uv_thread_detach(self.native as foreign *uv_thread_t) as integer
+  if status == 0 then
+    self.phase = THREAD_RETIRED
+    thread_roots[self] = nil
+  end
+  return status
+end
+
+function thread_self(): thread_t
+  local owner = thread_t()
+  owner.native.thread = ffi.uv_thread_self()
+  owner.phase = THREAD_BORROWED
+  return owner
+end
+
+local function thread_t:is_live(): boolean
+  return self.phase == THREAD_JOINABLE or self.phase == THREAD_BORROWED
+end
+
+function thread_t:equal(other: thread_t): boolean
+  if not self:is_live() or not other:is_live() then
+    raise "thread_equal requires live thread identifiers"
+  end
+  return ffi.uv_thread_equal(self.native.thread, other.native.thread) ~= 0
+end
+
+function thread_t:getpriority(): (integer, integer?)
+  if not self:is_live() then return ffi.UV_EINVAL, nil end
+  local priority: foreign int = 0
+  local status = ffi.uv_thread_getpriority(self.native.thread, priority) as integer
+  if status ~= 0 then return status, nil end
+  return status, priority
+end
+
+function thread_t:setpriority(priority: integer): integer
+  if not self:is_live() then return ffi.UV_EINVAL end
+  return ffi.uv_thread_setpriority(self.native.thread, priority)
+end
+
+function thread_t:getname(capacity: integer): (integer, string?)
+  if not self:is_live() then return ffi.UV_EINVAL, nil end
+  if capacity <= 0 then return ffi.UV_EINVAL, nil end
+  local buffer: owned char[] = foreign char.new_array(capacity)
+  local status = ffi.uv_thread_getname(self.native as foreign *uv_thread_t, buffer, capacity) as integer
+  if status ~= 0 then return status, nil end
+  return status, (buffer as foreign *char) as string
+end
+
+function thread_setname(name: string): integer
+  if ffi.strlen(name) ~= #name then return ffi.UV_EINVAL end
+  return ffi.uv_thread_setname(name)
+end
+
+function thread_getcpu(): integer
+  return ffi.uv_thread_getcpu()
+end
+
+-- These native calls have no header-dependent arguments. Returning their
+-- exact C entries makes current-worker naming/CPU queries usable from a raw
+-- C carrier without calling ordinary Titan methods on that worker.
+function thread_setname_function(): foreign function(const *char): int
+  return ffi.uv_thread_setname
+end
+
+function thread_getcpu_function(): foreign function(): int
+  return ffi.uv_thread_getcpu
+end
+
+
+
+function thread_t:getaffinity(mask: owned char[]): integer
+  if not self:is_live() then return ffi.UV_EINVAL end
+  return ffi.uv_thread_getaffinity(self.native as foreign *uv_thread_t, mask, #mask)
+end
+
+function thread_t:setaffinity(mask: owned char[], oldmask: (owned char[])?): integer
+  if not self:is_live() then return ffi.UV_EINVAL end
+  if oldmask ~= nil then
+    local previous: owned char[] = oldmask
+    if #previous < #mask then return ffi.UV_EINVAL end
+    return ffi.uv_thread_setaffinity(self.native as foreign *uv_thread_t, mask, previous, #mask)
+  end
+  return ffi.uv_thread_setaffinity(self.native as foreign *uv_thread_t, mask, nil, #mask)
+end
+
+
+function thread_create(thread: thread_t, entry: foreign function(*void): void,
+                       argument: foreign *void, argument_owner: value): integer
+  return thread:create(entry, argument, argument_owner)
+end
+
+function thread_create_ex(thread: thread_t, options: thread_options_t,
+                          entry: foreign function(*void): void,
+                          argument: foreign *void, argument_owner: value): integer
+  return thread:create_ex(options, entry, argument, argument_owner)
+end
+
+function thread_join(thread: thread_t): integer
+  return thread:join()
+end
+
+function thread_detach(thread: thread_t): integer
+  return thread:detach()
+end
+
+function thread_equal(left: thread_t, right: thread_t): boolean
+  return left:equal(right)
+end
+
+function thread_getpriority(thread: thread_t): (integer, integer?)
+  return thread:getpriority()
+end
+
+function thread_setpriority(thread: thread_t, priority: integer): integer
+  return thread:setpriority(priority)
+end
+
+function thread_getname(thread: thread_t, capacity: integer): (integer, string?)
+  return thread:getname(capacity)
+end
+
+function thread_getaffinity(thread: thread_t, mask: owned char[]): integer
+  return thread:getaffinity(mask)
+end
+
+function thread_setaffinity(thread: thread_t, mask: owned char[],
+                            oldmask: (owned char[])?): integer
+  return thread:setaffinity(mask, oldmask)
+end

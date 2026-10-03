@@ -166,7 +166,7 @@ describe("compiled-module ABI version", function()
         assert.truthy(workflow:find(
             'READLINE_MODE: system', 1, true))
         assert.truthy(workflow:find(
-            "libssl-dev libtinfo-dev libuv1-dev", 1, true))
+            "libssl-dev libtinfo-dev perl", 1, true))
         assert.truthy(workflow:find(
             "readline-8.3-p3.config", 1, true))
         assert.truthy(workflow:find(

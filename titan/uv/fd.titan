@@ -1,0 +1,77 @@
+foreign import "fd-native.h"
+
+-- Borrowed OS descriptor/handle token. Native adoption/duplication rules belong
+-- to the operation; collecting this token never closes the descriptor.
+record os_fd_t
+  local native: foreign titan_uv_fd_storage
+end
+
+function os_fd_t.from_integer(identifier: integer): os_fd_t
+  local native = foreign titan_uv_fd_storage.new()
+  local status = ffi.titan_uv_fd_from_integer(identifier, native)
+  if status < 0 then raise "OS file identifier is out of range" end
+  return {native = native}
+end
+
+function os_fd_t:to_integer(): integer
+  return ffi.titan_uv_fd_integer(self.native.value)
+end
+
+function fileno(handle: handle_t): (integer, os_fd_t?)
+  local pointer = handle:pointer()
+  if pointer == nil then return ffi.UV_EINVAL, nil end
+  local native = foreign titan_uv_fd_storage.new()
+  local owner: os_fd_t = {native = native}
+  local output = foreign uv_os_fd_t.new_array(1)
+  local status: integer = ffi.uv_fileno(pointer, output)
+  owner.native.value = output[0]
+  if status < 0 then return status, nil end
+  return status, owner
+end
+
+function get_osfhandle(file: integer): os_fd_t
+  local fd = file as foreign int
+  local native = foreign titan_uv_fd_storage.new()
+  native.value = ffi.uv_get_osfhandle(fd)
+  return {native = native}
+end
+
+-- On Windows a successful call transfers this handle to a CRT descriptor.
+-- Unix returns the input descriptor unchanged. The token itself is a borrow.
+function open_osfhandle(handle: os_fd_t): integer
+  return ffi.uv_open_osfhandle(handle.native.value)
+end
+
+function poll_init_socket(loop: loop_t, handle: poll_t, socket: os_sock_t): integer
+  if not loop.initialized or handle.phase == HANDLE_LIVE then return ffi.UV_EINVAL end
+  ffi.memset(handle.native, 0, foreign uv_poll_t.sizeof)
+  handle.ready = false
+  loop.handles[handle] = true
+  handle.loop = loop
+  local status: integer = ffi.uv_poll_init_socket(loop.native, handle.native, socket.native)
+  if ffi.uv_handle_get_type(handle.native as foreign *uv_handle_t) ~= ffi.UV_POLL then
+    loop.handles[handle] = nil; handle.loop = nil; return status
+  end
+  -- Windows can fail after native registration. Such owners remain closeable
+  -- and rooted, but starting their incompletely initialized requests is invalid.
+  handle.ready = status == 0
+  handle.phase = HANDLE_LIVE
+  ffi.uv_handle_set_data(handle.native as foreign *uv_handle_t, handle as foreign *void)
+  return status
+end
+
+function if_indextoname(index: integer, buffer: buf_t): (integer, integer)
+  if not buffer.writable then return ffi.UV_EINVAL, buffer.native.len as integer end
+  local native_index = index as foreign unsigned int
+  local size: foreign size_t = buffer.native.len as integer
+  local status: integer = ffi.uv_if_indextoname(native_index, buffer.native.base, size)
+  return status, size
+end
+
+function if_indextoiid(index: integer, buffer: buf_t): (integer, integer)
+  if not buffer.writable then return ffi.UV_EINVAL, buffer.native.len as integer end
+  local native_index = index as foreign unsigned int
+  local size: foreign size_t = buffer.native.len as integer
+  local status: integer = ffi.uv_if_indextoiid(native_index, buffer.native.base, size)
+  return status, size
+end

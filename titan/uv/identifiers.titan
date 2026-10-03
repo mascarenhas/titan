@@ -1,0 +1,16 @@
+-- Public socket identity with exact private native width. This is a borrowed
+-- token, not a socket destructor. Successful tcp/udp_open adopts its descriptor.
+record os_sock_t
+  local native: foreign uv_os_sock_t
+end
+
+function os_sock_t.from_integer(socket: integer): os_sock_t
+  local native = socket as foreign uv_os_sock_t
+  return {native = native}
+end
+
+-- Explicit observation can reject an unsigned native value above MAXINTEGER;
+-- the original token remains usable by tcp_open/udp_open without conversion.
+function os_sock_t:to_integer(): integer
+  return self.native as integer
+end

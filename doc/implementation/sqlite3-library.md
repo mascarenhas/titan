@@ -17,10 +17,9 @@ RANLIB, optimization/sanitizer inputs and `SQLITE_THREADSAFE=1` to build the
 private PIC/hidden archive `sqlite3-build/libtitan-sqlite3.a`.
 
 This payload follows private llhttp in the shared provider link and is carried
-into both `titan.so` and `titan.a`, in both bundled and system libuv/OpenSSL
-modes. There is no system SQLite mode, SQLite child DSO, installed SQLite
-header, or independently installed private archive. Its declarations are
-needed only during the source standard-provider build. Private symbol
+into both `titan.so` and `titan.a`, in both OpenSSL modes. There is no system
+SQLite mode, SQLite child DSO, or independently installed private archive.
+The matching public `sqlite3.h` is staged in the compiler SDK. Private symbol
 visibility follows the existing bundled native payload policy.
 
 SQLite is one logical standard module in the combined provider, which has

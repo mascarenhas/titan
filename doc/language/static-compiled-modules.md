@@ -252,7 +252,8 @@ payload. Its five objects are carried into both forms for `titan.peg` and
 it does not advertise a Titan logical metadata key.
 
 The private SQLite amalgamation archive is metadata-free payload in both
-libuv/OpenSSL modes; its header and archive remain private source-build inputs.
+OpenSSL modes; its header is staged in the SDK, while its archive remains a
+private source-build input.
 See the [SQLite library](standard-library-sqlite3.md).
 
 The private llhttp archive is likewise metadata-free payload; the generated
@@ -260,26 +261,12 @@ The private llhttp archive is likewise metadata-free payload; the generated
 adapter. `titan.ssl` uses OpenSSL directly and adds no adapter object. Bundled-OpenSSL
 mode carries the pinned OpenSSL objects into both provider forms.
 System-OpenSSL mode leaves the pkg-config-selected libraries as final-link
-inputs, so a static consumer must repeat that ordered link result just as it
-does for system libuv.
+inputs, so a static consumer must repeat that ordered link result.
 
-In bundled-libuv mode, the pinned libuv archive is native provider payload. Its
+The pinned, patched libuv archive is always native provider payload. Its
 objects are carried into both `titan.so` and `titan.a`, so a `--static`
 standard-library consumer can run without a Titan or libuv DSO after supplying
 the documented platform libraries.
-
-In system-libuv mode, the selected pkg-config/user setting remains a final-link
-input and libuv is never copied into `titan.a`. Repeat the same setting when
-linking a static Titan consumer:
-
-```sh
-TITAN_EXTRA_LDFLAGS="$(pkg-config --libs libuv)" titanc --static app
-```
-
-If that setting selects shared libuv, the resulting executable keeps a libuv
-DSO dependency. If it deliberately selects a static system library, the
-system linker may absorb reachable libuv objects into the final image. “System
-mode” does not itself mean dynamic.
 
 ## Supported containers
 

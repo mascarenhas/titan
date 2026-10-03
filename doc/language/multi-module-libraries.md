@@ -301,14 +301,15 @@ The compiler also installs canonical test support source at
 the generated runner's explicit `import "titan.test.titan"` collaboration edge,
 not another logical provider.
 
-The DSO is also the installation's one complete dynamic libuv provider; in
-bundled mode the archive carries the same private libuv object payload. Both
+The DSO is also the installation's one complete dynamic libuv provider; the
+archive carries the same private libuv object payload. Both
 forms also carry the private, metadata-free LPegLabel objects used through
 `titan.peg` by `titan.string` and `titan.url`, plus the llhttp objects and
 narrow callback adapter used by `titan.http`. `titan.ssl` calls OpenSSL
-directly; bundled mode carries its OpenSSL objects.
-None of those private
-archives or headers is an installed SDK library. There are
+directly; system OpenSSL is the default, while bundled OpenSSL mode carries
+its OpenSSL objects.
+None of those private archives is an installed SDK library. The SDK includes
+public libuv, llhttp, and SQLite headers, plus OpenSSL headers in bundled mode. There are
 no production child DSOs, aliases, symbolic links, hard links, or Lua-facing
 copies. `require "titan.async"` and `import "async"` still select the same
 logical module and state; only their physical provider has been combined.

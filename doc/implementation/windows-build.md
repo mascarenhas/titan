@@ -158,6 +158,8 @@ checksum-verified sources recorded in `vendor/windows-native/dependencies.tsv`.
 Those pins match the ordinary Makefile. CMake/Ninja build the first three;
 OpenSSL uses its upstream `mingw64` configuration, Perl, Make, and
 `llvm-windres`. No independently built MSYS2 native-library binaries are used.
+This experimental Windows SDK keeps its separate pinned OpenSSL DLL build;
+the Unix `OPENSSL_MODE=system` default does not select Windows dependencies.
 
 ```sh
 make -f Makefile.windows native-source-check

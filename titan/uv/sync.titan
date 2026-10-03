@@ -1,0 +1,643 @@
+-- Candidate only: ordinary calls belong to the owning Lua thread.
+-- Borrowed C helpers operate solely on native storage; retain each owner
+-- through all worker uses and join before destroy/delete. No finalizers.
+foreign import "sync_storage.h"
+
+local const SYNC_FRESH = 0
+local const SYNC_LIVE = 1
+local const SYNC_RETIRED = 2
+
+record mutex_t
+    local const storage: foreign titan_issue194_mutex_storage
+    local state: integer
+end
+
+function mutex_t.new(): mutex_t
+    local storage = foreign titan_issue194_mutex_storage.new()
+    return { storage = storage, state = SYNC_FRESH }
+end
+
+local function mutex_t:require_live()
+    if self.state ~= SYNC_LIVE then raise "uv.mutex: not initialized or already destroyed" end
+end
+
+local function mutex_t:require_fresh()
+    if self.state ~= SYNC_FRESH then raise "uv.mutex: initialization requires fresh owner" end
+end
+
+function mutex_t:borrow(): foreign *void
+    self:require_live()
+    return self.storage
+end
+
+function mutex_t:init(): integer
+    self:require_fresh()
+    local status: integer = ffi.uv_mutex_init(self.storage as foreign *uv_mutex_t)
+    if status == 0 then self.state = SYNC_LIVE end
+    return status
+end
+
+function mutex_t:init_recursive(): integer
+    self:require_fresh()
+    local status: integer = ffi.uv_mutex_init_recursive(self.storage as foreign *uv_mutex_t)
+    if status == 0 then self.state = SYNC_LIVE end
+    return status
+end
+
+function mutex_t:destroy()
+    self:require_live()
+    ffi.uv_mutex_destroy(self.storage as foreign *uv_mutex_t)
+    self.state = SYNC_RETIRED
+end
+
+function mutex_t:lock()
+    self:require_live()
+    ffi.uv_mutex_lock(self.storage as foreign *uv_mutex_t)
+end
+
+foreign function native_mutex_lock(native: *void): void
+    ffi.uv_mutex_lock(native as foreign *uv_mutex_t)
+end
+
+function mutex_t.lock_function(): foreign function(*void): void
+    return native_mutex_lock
+end
+
+function mutex_t:trylock(): integer
+    self:require_live()
+    return ffi.uv_mutex_trylock(self.storage as foreign *uv_mutex_t)
+end
+
+foreign function native_mutex_trylock(native: *void): int
+    return ffi.uv_mutex_trylock(native as foreign *uv_mutex_t)
+end
+
+function mutex_t.trylock_function(): foreign function(*void): int
+    return native_mutex_trylock
+end
+
+function mutex_t:unlock()
+    self:require_live()
+    ffi.uv_mutex_unlock(self.storage as foreign *uv_mutex_t)
+end
+
+foreign function native_mutex_unlock(native: *void): void
+    ffi.uv_mutex_unlock(native as foreign *uv_mutex_t)
+end
+
+function mutex_t.unlock_function(): foreign function(*void): void
+    return native_mutex_unlock
+end
+
+record rwlock_t
+    local const storage: foreign titan_issue194_rwlock_storage
+    local state: integer
+end
+
+function rwlock_t.new(): rwlock_t
+    local storage = foreign titan_issue194_rwlock_storage.new()
+    return { storage = storage, state = SYNC_FRESH }
+end
+
+local function rwlock_t:require_live()
+    if self.state ~= SYNC_LIVE then raise "uv.rwlock: not initialized or already destroyed" end
+end
+
+local function rwlock_t:require_fresh()
+    if self.state ~= SYNC_FRESH then raise "uv.rwlock: initialization requires fresh owner" end
+end
+
+function rwlock_t:borrow(): foreign *void
+    self:require_live()
+    return self.storage
+end
+
+function rwlock_t:init(): integer
+    self:require_fresh()
+    local status: integer = ffi.uv_rwlock_init(self.storage as foreign *uv_rwlock_t)
+    if status == 0 then self.state = SYNC_LIVE end
+    return status
+end
+
+function rwlock_t:destroy()
+    self:require_live()
+    ffi.uv_rwlock_destroy(self.storage as foreign *uv_rwlock_t)
+    self.state = SYNC_RETIRED
+end
+
+function rwlock_t:rdlock()
+    self:require_live()
+    ffi.uv_rwlock_rdlock(self.storage as foreign *uv_rwlock_t)
+end
+
+foreign function native_rwlock_rdlock(native: *void): void
+    ffi.uv_rwlock_rdlock(native as foreign *uv_rwlock_t)
+end
+
+function rwlock_t.rdlock_function(): foreign function(*void): void
+    return native_rwlock_rdlock
+end
+
+function rwlock_t:tryrdlock(): integer
+    self:require_live()
+    return ffi.uv_rwlock_tryrdlock(self.storage as foreign *uv_rwlock_t)
+end
+
+foreign function native_rwlock_tryrdlock(native: *void): int
+    return ffi.uv_rwlock_tryrdlock(native as foreign *uv_rwlock_t)
+end
+
+function rwlock_t.tryrdlock_function(): foreign function(*void): int
+    return native_rwlock_tryrdlock
+end
+
+function rwlock_t:rdunlock()
+    self:require_live()
+    ffi.uv_rwlock_rdunlock(self.storage as foreign *uv_rwlock_t)
+end
+
+foreign function native_rwlock_rdunlock(native: *void): void
+    ffi.uv_rwlock_rdunlock(native as foreign *uv_rwlock_t)
+end
+
+function rwlock_t.rdunlock_function(): foreign function(*void): void
+    return native_rwlock_rdunlock
+end
+
+function rwlock_t:wrlock()
+    self:require_live()
+    ffi.uv_rwlock_wrlock(self.storage as foreign *uv_rwlock_t)
+end
+
+foreign function native_rwlock_wrlock(native: *void): void
+    ffi.uv_rwlock_wrlock(native as foreign *uv_rwlock_t)
+end
+
+function rwlock_t.wrlock_function(): foreign function(*void): void
+    return native_rwlock_wrlock
+end
+
+function rwlock_t:trywrlock(): integer
+    self:require_live()
+    return ffi.uv_rwlock_trywrlock(self.storage as foreign *uv_rwlock_t)
+end
+
+foreign function native_rwlock_trywrlock(native: *void): int
+    return ffi.uv_rwlock_trywrlock(native as foreign *uv_rwlock_t)
+end
+
+function rwlock_t.trywrlock_function(): foreign function(*void): int
+    return native_rwlock_trywrlock
+end
+
+function rwlock_t:wrunlock()
+    self:require_live()
+    ffi.uv_rwlock_wrunlock(self.storage as foreign *uv_rwlock_t)
+end
+
+foreign function native_rwlock_wrunlock(native: *void): void
+    ffi.uv_rwlock_wrunlock(native as foreign *uv_rwlock_t)
+end
+
+function rwlock_t.wrunlock_function(): foreign function(*void): void
+    return native_rwlock_wrunlock
+end
+
+record sem_t
+    local const storage: foreign titan_issue194_sem_storage
+    local state: integer
+end
+
+function sem_t.new(): sem_t
+    local storage = foreign titan_issue194_sem_storage.new()
+    return { storage = storage, state = SYNC_FRESH }
+end
+
+local function sem_t:require_live()
+    if self.state ~= SYNC_LIVE then raise "uv.sem: not initialized or already destroyed" end
+end
+
+local function sem_t:require_fresh()
+    if self.state ~= SYNC_FRESH then raise "uv.sem: initialization requires fresh owner" end
+end
+
+function sem_t:borrow(): foreign *void
+    self:require_live()
+    return self.storage
+end
+
+function sem_t:init(value: integer): integer
+    self:require_fresh()
+    local status: integer = ffi.uv_sem_init(self.storage as foreign *uv_sem_t, value)
+    if status == 0 then self.state = SYNC_LIVE end
+    return status
+end
+
+function sem_t:destroy()
+    self:require_live()
+    ffi.uv_sem_destroy(self.storage as foreign *uv_sem_t)
+    self.state = SYNC_RETIRED
+end
+
+function sem_t:post()
+    self:require_live()
+    ffi.uv_sem_post(self.storage as foreign *uv_sem_t)
+end
+
+foreign function native_sem_post(native: *void): void
+    ffi.uv_sem_post(native as foreign *uv_sem_t)
+end
+
+function sem_t.post_function(): foreign function(*void): void
+    return native_sem_post
+end
+
+function sem_t:wait()
+    self:require_live()
+    ffi.uv_sem_wait(self.storage as foreign *uv_sem_t)
+end
+
+foreign function native_sem_wait(native: *void): void
+    ffi.uv_sem_wait(native as foreign *uv_sem_t)
+end
+
+function sem_t.wait_function(): foreign function(*void): void
+    return native_sem_wait
+end
+
+function sem_t:trywait(): integer
+    self:require_live()
+    return ffi.uv_sem_trywait(self.storage as foreign *uv_sem_t)
+end
+
+foreign function native_sem_trywait(native: *void): int
+    return ffi.uv_sem_trywait(native as foreign *uv_sem_t)
+end
+
+function sem_t.trywait_function(): foreign function(*void): int
+    return native_sem_trywait
+end
+
+record cond_t
+    local const storage: foreign titan_issue194_cond_storage
+    local state: integer
+end
+
+function cond_t.new(): cond_t
+    local storage = foreign titan_issue194_cond_storage.new()
+    return { storage = storage, state = SYNC_FRESH }
+end
+
+local function cond_t:require_live()
+    if self.state ~= SYNC_LIVE then raise "uv.cond: not initialized or already destroyed" end
+end
+
+local function cond_t:require_fresh()
+    if self.state ~= SYNC_FRESH then raise "uv.cond: initialization requires fresh owner" end
+end
+
+function cond_t:borrow(): foreign *void
+    self:require_live()
+    return self.storage
+end
+
+function cond_t:init(): integer
+    self:require_fresh()
+    local status: integer = ffi.uv_cond_init(self.storage as foreign *uv_cond_t)
+    if status == 0 then self.state = SYNC_LIVE end
+    return status
+end
+
+function cond_t:destroy()
+    self:require_live()
+    ffi.uv_cond_destroy(self.storage as foreign *uv_cond_t)
+    self.state = SYNC_RETIRED
+end
+
+function cond_t:signal()
+    self:require_live()
+    ffi.uv_cond_signal(self.storage as foreign *uv_cond_t)
+end
+
+foreign function native_cond_signal(native: *void): void
+    ffi.uv_cond_signal(native as foreign *uv_cond_t)
+end
+
+function cond_t.signal_function(): foreign function(*void): void
+    return native_cond_signal
+end
+
+function cond_t:broadcast()
+    self:require_live()
+    ffi.uv_cond_broadcast(self.storage as foreign *uv_cond_t)
+end
+
+foreign function native_cond_broadcast(native: *void): void
+    ffi.uv_cond_broadcast(native as foreign *uv_cond_t)
+end
+
+function cond_t.broadcast_function(): foreign function(*void): void
+    return native_cond_broadcast
+end
+
+record barrier_t
+    local const storage: foreign titan_issue194_barrier_storage
+    local state: integer
+end
+
+function barrier_t.new(): barrier_t
+    local storage = foreign titan_issue194_barrier_storage.new()
+    return { storage = storage, state = SYNC_FRESH }
+end
+
+local function barrier_t:require_live()
+    if self.state ~= SYNC_LIVE then raise "uv.barrier: not initialized or already destroyed" end
+end
+
+local function barrier_t:require_fresh()
+    if self.state ~= SYNC_FRESH then raise "uv.barrier: initialization requires fresh owner" end
+end
+
+function barrier_t:borrow(): foreign *void
+    self:require_live()
+    return self.storage
+end
+
+function barrier_t:init(count: integer): integer
+    self:require_fresh()
+    local status: integer = ffi.uv_barrier_init(self.storage as foreign *uv_barrier_t, count)
+    if status == 0 then self.state = SYNC_LIVE end
+    return status
+end
+
+function barrier_t:destroy()
+    self:require_live()
+    ffi.uv_barrier_destroy(self.storage as foreign *uv_barrier_t)
+    self.state = SYNC_RETIRED
+end
+
+function barrier_t:wait(): integer
+    self:require_live()
+    return ffi.uv_barrier_wait(self.storage as foreign *uv_barrier_t)
+end
+
+foreign function native_barrier_wait(native: *void): int
+    return ffi.uv_barrier_wait(native as foreign *uv_barrier_t)
+end
+
+function barrier_t.wait_function(): foreign function(*void): int
+    return native_barrier_wait
+end
+
+record key_t
+    local const storage: foreign titan_issue194_key_storage
+    local state: integer
+end
+
+function key_t.new(): key_t
+    local storage = foreign titan_issue194_key_storage.new()
+    return { storage = storage, state = SYNC_FRESH }
+end
+
+local function key_t:require_live()
+    if self.state ~= SYNC_LIVE then raise "uv.key: not initialized or already destroyed" end
+end
+
+local function key_t:require_fresh()
+    if self.state ~= SYNC_FRESH then raise "uv.key: initialization requires fresh owner" end
+end
+
+function key_t:borrow(): foreign *void
+    self:require_live()
+    return self.storage
+end
+
+function key_t:create(): integer
+    self:require_fresh()
+    local status: integer = ffi.uv_key_create(self.storage as foreign *uv_key_t)
+    if status == 0 then self.state = SYNC_LIVE end
+    return status
+end
+
+function key_t:delete()
+    self:require_live()
+    ffi.uv_key_delete(self.storage as foreign *uv_key_t)
+    self.state = SYNC_RETIRED
+end
+
+-- Wait releases and reacquires the supplied locked mutex. Check the predicate
+-- in a loop: native conditions permit spurious wakeups. Timeout is relative ns.
+function cond_t:wait(mutex: mutex_t)
+    self:require_live()
+    mutex:require_live()
+    ffi.uv_cond_wait(self.storage as foreign *uv_cond_t, mutex.storage as foreign *uv_mutex_t)
+end
+
+function cond_t:timedwait(mutex: mutex_t, timeout_ns: foreign unsigned long long): integer
+    self:require_live()
+    mutex:require_live()
+    return ffi.uv_cond_timedwait(self.storage as foreign *uv_cond_t, mutex.storage as foreign *uv_mutex_t, timeout_ns as foreign uint64_t)
+end
+
+foreign function native_cond_wait(cond: *void, mutex: *void): void
+    ffi.uv_cond_wait(cond as foreign *uv_cond_t, mutex as foreign *uv_mutex_t)
+end
+
+foreign function native_cond_timedwait(cond: *void, mutex: *void, timeout_ns: unsigned long long): int
+    return ffi.uv_cond_timedwait(cond as foreign *uv_cond_t, mutex as foreign *uv_mutex_t, timeout_ns as foreign uint64_t)
+end
+
+function cond_t.wait_function(): foreign function(*void, *void): void
+    return native_cond_wait
+end
+
+function cond_t.timedwait_function(): foreign function(*void, *void, unsigned long long): int
+    return native_cond_timedwait
+end
+
+-- TLS stores a raw pointer per native thread. The caller separately retains
+-- the pointed-to allocation until overwrite, thread exit, or key deletion.
+function key_t:get(): foreign *void
+    self:require_live()
+    return ffi.uv_key_get(self.storage as foreign *uv_key_t)
+end
+
+function key_t:set(value: foreign *void)
+    self:require_live()
+    ffi.uv_key_set(self.storage as foreign *uv_key_t, value)
+end
+
+foreign function native_key_get(key: *void): *void
+    return ffi.uv_key_get(key as foreign *uv_key_t)
+end
+
+foreign function native_key_set(key: *void, value: *void): void
+    ffi.uv_key_set(key as foreign *uv_key_t, value)
+end
+
+function key_t.get_function(): foreign function(*void): *void
+    return native_key_get
+end
+
+function key_t.set_function(): foreign function(*void, *void): void
+    return native_key_set
+end
+
+-- Canonical native-prefix-drop module functions.
+function mutex_init(owner: mutex_t): integer
+    return owner:init()
+end
+
+function mutex_init_recursive(owner: mutex_t): integer
+    return owner:init_recursive()
+end
+
+function mutex_destroy(owner: mutex_t)
+    owner:destroy()
+end
+
+function mutex_lock(owner: mutex_t)
+    owner:lock()
+end
+
+function mutex_trylock(owner: mutex_t): integer
+    return owner:trylock()
+end
+
+function mutex_unlock(owner: mutex_t)
+    owner:unlock()
+end
+
+function rwlock_init(owner: rwlock_t): integer
+    return owner:init()
+end
+
+function rwlock_destroy(owner: rwlock_t)
+    owner:destroy()
+end
+
+function rwlock_rdlock(owner: rwlock_t)
+    owner:rdlock()
+end
+
+function rwlock_tryrdlock(owner: rwlock_t): integer
+    return owner:tryrdlock()
+end
+
+function rwlock_rdunlock(owner: rwlock_t)
+    owner:rdunlock()
+end
+
+function rwlock_wrlock(owner: rwlock_t)
+    owner:wrlock()
+end
+
+function rwlock_trywrlock(owner: rwlock_t): integer
+    return owner:trywrlock()
+end
+
+function rwlock_wrunlock(owner: rwlock_t)
+    owner:wrunlock()
+end
+
+function sem_init(owner: sem_t, value: integer): integer
+    return owner:init(value)
+end
+
+function sem_destroy(owner: sem_t)
+    owner:destroy()
+end
+
+function sem_post(owner: sem_t)
+    owner:post()
+end
+
+function sem_wait(owner: sem_t)
+    owner:wait()
+end
+
+function sem_trywait(owner: sem_t): integer
+    return owner:trywait()
+end
+
+function cond_init(owner: cond_t): integer
+    return owner:init()
+end
+
+function cond_destroy(owner: cond_t)
+    owner:destroy()
+end
+
+function cond_signal(owner: cond_t)
+    owner:signal()
+end
+
+function cond_broadcast(owner: cond_t)
+    owner:broadcast()
+end
+
+function barrier_init(owner: barrier_t, count: integer): integer
+    return owner:init(count)
+end
+
+function barrier_destroy(owner: barrier_t)
+    owner:destroy()
+end
+
+function barrier_wait(owner: barrier_t): integer
+    return owner:wait()
+end
+
+function key_create(owner: key_t): integer
+    return owner:create()
+end
+
+function key_delete(owner: key_t)
+    owner:delete()
+end
+
+function cond_wait(owner: cond_t, mutex: mutex_t)
+    owner:wait(mutex)
+end
+
+function cond_timedwait(owner: cond_t, mutex: mutex_t, timeout_ns: foreign unsigned long long): integer
+    return owner:timedwait(mutex, timeout_ns)
+end
+
+function key_get(owner: key_t): foreign *void
+    return owner:get()
+end
+
+function key_set(owner: key_t, value: foreign *void)
+    owner:set(value)
+end
+
+-- The guard is initialized in final packed storage using UV_ONCE_INIT. It has
+-- no destroy operation and cannot be reset; allocate a new owner for a new guard.
+record once_t
+    local const storage: foreign titan_issue194_once_storage
+end
+
+function once_t.new(): once_t
+    local storage = foreign titan_issue194_once_storage.new()
+    local owner: once_t = { storage = storage }
+    ffi.titan_issue194_once_init(owner.storage)
+    return owner
+end
+
+function once_t:borrow(): foreign *void
+    return self.storage
+end
+
+function once(guard: once_t, callback: foreign function(): void)
+    if not callback then raise "uv.once: callback is null" end
+    ffi.uv_once(guard.storage as foreign *uv_once_t, callback)
+end
+
+foreign function native_once(guard: *void, callback: function(): void): void
+    ffi.uv_once(guard as foreign *uv_once_t, callback)
+end
+
+function once_function(): foreign function(*void, function(): void): void
+    return native_once
+end

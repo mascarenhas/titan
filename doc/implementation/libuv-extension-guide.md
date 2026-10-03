@@ -31,22 +31,18 @@ started synchronously; its variants consume buffered events, install a waiter,
 or await close. A synchronous libuv function needs no variant, callback owner,
 or source-defined foreign callback.
 
-## Start from the pinned source and compatibility floor
+## Start from the pinned source
 
-`Makefile` is authoritative for both libuv versions:
-
-- `LIBUV_VERSION` selects the audited bundled source, currently 1.52.1; and
-- `LIBUV_MIN_VERSION` is the oldest accepted system libuv, currently 1.43.0.
+`Makefile` is authoritative for `LIBUV_VERSION`, the audited bundled source,
+currently 1.52.1. Titan always builds this source; there is no system libuv mode.
 
 The bundled Unix source has one [local spawn cleanup
 correction](../../vendor/libuv/README.md). Checksum-verified extraction applies
 the patch before recording a versioned stamp; the build profile and CI cache
 identities distinguish patched archives. Keep the patch, extraction stamp and
-cache identities synchronized. System mode never applies this correction to the
-external library; recommend an up-to-date package and document any remaining
-upstream exposure.
+cache identities synchronized.
 
-Run `make LIBUV_MODE=bundled libuv`, then read the prospective function in both
+Run `make libuv`, then read the prospective function in both
 `libuv-v1.52.1/include/uv.h` and its chapter under
 `libuv-v1.52.1/docs/src/`. The header gives the exact callback typedef and
 native ownership surface. Determine the callback cardinality and thread,
@@ -55,11 +51,10 @@ requirement, stop/close behavior, and version-added note. Start with the prose
 documentation; where it is silent, inspect the pinned Linux and macOS source
 and tests rather than guessing or consulting an arbitrary installed version.
 
-A function newer than the system minimum cannot be called unconditionally
-while the current system-mode policy remains. Either use an API available at
-the minimum or deliberately raise that minimum and validate both bundled and
-system modes. Do not hide an unavailable symbol behind a forwarding shim or a
-run-time identity trick.
+Use APIs present in the pinned source and audit each supported platform.
+Adding a newer API requires a deliberate pin update and its native validation.
+Do not hide an unavailable symbol behind a forwarding shim or a run-time
+identity trick.
 
 The supported targets are Linux and macOS. Prefer the public portable libuv
 operation to a POSIX alternative. A restricted Titan `foreign function` is the ordinary boundary for a callback
@@ -709,17 +704,17 @@ the native executable; `make stdlib-test` performs the complete gate from
 scratch. A `TITAN_FILTER` selects cases at run time; it does not rebuild or
 narrow the 25-root executable.
 
-The real installation path and both link policies remain release boundaries:
+The real installation path and both OpenSSL policies remain release boundaries:
 
 ```sh
-"$PREFIX/bin/luarocks" make titan-0.6.0-1.rockspec
-PREFIX="$PREFIX" bash spec/support/ci_libuv_mode_smoke.sh both
+OPENSSL_MODE=bundled "$PREFIX/bin/luarocks" make titan-0.6.0-1.rockspec
+PREFIX="$PREFIX" bash spec/support/ci_dependency_mode_smoke.sh both
 ```
 
 The `both` invocation deliberately republishes the isolated prefix in
-system-libuv mode after checking bundled mode. Use a throwaway absolute prefix,
-not a developer installation that must remain bundled. Pass `bundled` instead
-for a quicker check that leaves the prefix unchanged.
+system OpenSSL mode after checking bundled OpenSSL. Libuv, llhttp, and SQLite
+remain bundled throughout. Use a throwaway absolute prefix. Pass `bundled`
+for a quicker check of an already bundled-OpenSSL installation without changing it.
 
 ## Review checklist
 
@@ -728,8 +723,7 @@ header, docs, implementation, and tests:
 
 - the public facade needs the operation and either hides its FFI types or uses
   only the deliberately portable contextual C closure;
-- the function exists at the system-version floor or that floor is deliberately
-  raised;
+- the function exists in the pinned libuv version on each supported platform;
 - the operation is correctly classified as synchronous, one-shot, or
   persistent multi-shot;
 - one-shot submission rejection cannot later call its callback;
@@ -747,7 +741,8 @@ header, docs, implementation, and tests:
   `Immediate` outcomes but returns after the next accepted callback-bearing
   submission or Task termination, without calling `uv_run`;
 - high-level behavior tests run outside LuaCov; and
-- bundled and system-libuv production modes remain valid.
+- bundled and system OpenSSL production modes remain valid with the same
+  private libuv, llhttp, and SQLite payload.
 
 ## API coverage snapshot
 
@@ -825,7 +820,7 @@ version, and OS/miscellaneous helpers.
 ### Reproducing the snapshot
 
 Run this Bash fragment from the repository root after
-`make LIBUV_MODE=bundled libuv`. It derives the pinned source directory,
+`make libuv`. It derives the pinned source directory,
 intersects public names with production references, discovers concrete owner
 candidates, and prints every per-chapter ratio:
 

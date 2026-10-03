@@ -123,11 +123,12 @@ LUAROCKS_CONFIG_FILE := $(PREFIX)/etc/luarocks/config-$(LUA_ABI_VERSION).lua
 LUAROCKS_CONFIG_POLICY := titan-system-tree-toolchain-v2
 
 # The standard library is released against one audited libuv version.  The
-# bundled PIC archive is the default so a clean Linux/macOS checkout does not
+# bundled PIC archive is required so a clean Linux/macOS checkout does not
 # silently pick up whichever libuv happens to be installed on the host.
-LIBUV_MODE        ?= bundled
+ifneq ($(strip $(LIBUV_MODE)),)
+  $(error LIBUV_MODE is no longer supported; Titan always bundles patched libuv)
+endif
 LIBUV_VERSION     := 1.52.1
-LIBUV_MIN_VERSION := 1.43.0
 LIBUV_SRC_DIR     := libuv-v$(LIBUV_VERSION)
 LIBUV_BUILD_DIR   := libuv-build
 LIBUV_BUILD_CONFIG := $(LIBUV_BUILD_DIR)/.titan-libuv-build-config
@@ -137,7 +138,6 @@ LIBUV_SHA256      := 66d511b9e6e334c0e62279eb234fbfb2b3110b1479c09b95b44c7afca8c
 LIBUV_BUNDLED_LIB := $(LIBUV_BUILD_DIR)/libuv.a
 LIBUV_PATCH_FILE  := vendor/libuv/libuv-1.52.1-spawn-close.patch
 LIBUV_EXTRACTED   := $(LIBUV_SRC_DIR)/.titan-extracted-spawn-close-v1
-LIBUV_PKG_CONFIG  ?= pkg-config
 LIBUV_BUILD_TYPE  ?= Release
 LIBUV_BUILD_PROFILE ?= static-pic-release-tests-off-v2
 LIBUV_CMAKE_FLAGS := -DLIBUV_BUILD_SHARED=OFF -DBUILD_TESTING=OFF \
@@ -190,10 +190,10 @@ SQLITE3_CPPFLAGS      := -I$(abspath $(SQLITE3_SRC_DIR))
 SQLITE3_CFLAGS        := -std=c99 -fPIC -fvisibility=hidden -DSQLITE_THREADSAFE=1
 SQLITE3_BUILD_CFLAGS  ?=
 
-# The bundled OpenSSL release is the reproducible default.  System mode uses
-# pkg-config only for compilation/final linking and deliberately carries no
-# host OpenSSL archive into Titan's static provider.
-OPENSSL_MODE          ?= bundled
+# Prefer the system OpenSSL package. The optional pinned bundled release gives
+# reproducible and instrumented builds their own native payload. System mode
+# uses pkg-config for compilation/final linking and carries no host archive.
+OPENSSL_MODE          ?= system
 OPENSSL_VERSION       := 3.5.7
 OPENSSL_MIN_VERSION   := 3.0.0
 OPENSSL_SRC_DIR       := openssl-$(OPENSSL_VERSION)
@@ -244,56 +244,24 @@ else
   OPENSSL_PROVIDER_LDFLAGS :=
 endif
 
-# These are the complete libuv inputs consumed by the later standard-library
-# rule. In bundled mode libuv's archive joins the compiler's ordered -X
-# payload so both canonical provider forms carry the same native closure. In
-# system mode pkg-config's ordered linker output stays a final-link input and
-# no system archive is copied into Titan's static provider.
-ifeq ($(LIBUV_MODE),bundled)
-  LIBUV_LIB           := $(LIBUV_BUNDLED_LIB)
-  LIBUV_INCLUDE_DIR   := $(LIBUV_SRC_DIR)/include
-  LIBUV_CPPFLAGS      := -I$(LIBUV_INCLUDE_DIR)
-  LIBUV_CFLAGS        := -fno-strict-aliasing
-  LIBUV_EXTRA_OBJECTS := $(LIBUV_LIB)
-  ifeq ($(HOST_OS),Darwin)
-    LIBUV_LINK_LIBS := pthread
-  else ifeq ($(HOST_OS),Linux)
-    LIBUV_CPPFLAGS  += -D_GNU_SOURCE
-    # The compiler's ordinary runtime baseline already supplies -ldl and -lm.
-    LIBUV_LINK_LIBS := pthread rt
-  else
-    LIBUV_LINK_LIBS :=
-  endif
-  LIBUV_LDFLAGS := $(addprefix -l,$(LIBUV_LINK_LIBS))
-  LIBUV_PROVIDER_LDFLAGS := $(LIBUV_LDFLAGS)
-else ifeq ($(LIBUV_MODE),system)
-  LIBUV_LIB           :=
-  LIBUV_INCLUDE_DIR   :=
-  LIBUV_CPPFLAGS       = $(strip $(shell $(LIBUV_PKG_CONFIG) --cflags libuv 2>/dev/null))
-  LIBUV_CFLAGS        := -fno-strict-aliasing
-  LIBUV_EXTRA_OBJECTS :=
-  LIBUV_LINK_LIBS     :=
-  LIBUV_LDFLAGS        = $(strip $(shell $(LIBUV_PKG_CONFIG) --libs libuv 2>/dev/null))
-  LIBUV_PROVIDER_LDFLAGS = $(LIBUV_LDFLAGS)
+# Libuv always joins the compiler's ordered -X payload, so both canonical
+# provider forms carry the same patched native implementation.
+LIBUV_LIB           := $(LIBUV_BUNDLED_LIB)
+LIBUV_INCLUDE_DIR   := $(LIBUV_SRC_DIR)/include
+LIBUV_CPPFLAGS      := -I$(LIBUV_INCLUDE_DIR)
+LIBUV_CFLAGS        := -fno-strict-aliasing
+LIBUV_EXTRA_OBJECTS := $(LIBUV_LIB)
+ifeq ($(HOST_OS),Darwin)
+  LIBUV_LINK_LIBS := pthread
+else ifeq ($(HOST_OS),Linux)
+  LIBUV_CPPFLAGS  += -D_GNU_SOURCE
+  # Linux libuv uses pthreads and clock APIs from librt on older glibc.
+  LIBUV_LINK_LIBS := pthread rt
 else
-  LIBUV_LIB           :=
-  LIBUV_INCLUDE_DIR   :=
-  LIBUV_CPPFLAGS      :=
-  LIBUV_CFLAGS        :=
-  LIBUV_EXTRA_OBJECTS :=
-  LIBUV_LINK_LIBS     :=
-  LIBUV_LDFLAGS       :=
-  LIBUV_PROVIDER_LDFLAGS :=
+  LIBUV_LINK_LIBS :=
 endif
-
-# uv.h needs the feature-test macro before every header under Titan's strict
-# C99 mode on Linux, independent of whether libuv itself is bundled or found by
-# pkg-config. (The bundled branch already adds it above.)
-ifeq ($(HOST_OS),Linux)
-  ifeq ($(LIBUV_MODE),system)
-    LIBUV_CPPFLAGS += -D_GNU_SOURCE
-  endif
-endif
+LIBUV_LDFLAGS := $(addprefix -l,$(LIBUV_LINK_LIBS))
+LIBUV_PROVIDER_LDFLAGS := $(LIBUV_LDFLAGS)
 
 # The Lua build target ("linux-readline", "macosx", ...) is taken from `uname`
 # but can be overridden on the command line: `make lua LUA_PLATFORM=bsd`.
@@ -364,15 +332,38 @@ LPEGLABEL_LUA_HEADERS = $(ROCK_LUA_HEADERS)
 
 UV_TITAN_SOURCES := \
 	titan/uv/uv.titan \
-	titan/uv/file.titan \
-	titan/uv/os.titan \
+	titan/uv/address.titan \
+	titan/uv/callbacks.titan \
+	titan/uv/capabilities.titan \
+	titan/uv/constants.titan \
+	titan/uv/data.titan \
+	titan/uv/dll.titan \
+	titan/uv/dns.titan \
+	titan/uv/fd.titan \
+	titan/uv/identifiers.titan \
+	titan/uv/pipe_tty.titan \
+	titan/uv/platform_constants.titan \
 	titan/uv/process.titan \
-	titan/uv/runtime.titan \
-	titan/uv/task.titan \
+	titan/uv/stream_ops.titan \
+	titan/uv/stream_owners.titan \
+	titan/uv/sync.titan \
 	titan/uv/tcp.titan \
-	titan/uv/work.titan
-UV_TITAN_HEADERS := titan/uv/process_environment.h \
-	titan/uv/process_platform.h titan/uv/signal_platform.h
+	titan/uv/threading.titan \
+	titan/uv/udp.titan \
+	titan/uv/utilities.titan
+UV_TITAN_HEADERS := \
+	titan/uv/address-native.h \
+	titan/uv/callback.h \
+	titan/uv/data_native.h \
+	titan/uv/fd-native.h \
+	titan/uv/fs-native-proposal.h \
+	titan/uv/network-native.h \
+	titan/uv/platform-constants.h \
+	titan/uv/sync_storage.h \
+	titan/uv/thread-native.h \
+	titan/uv/utility_bits.h \
+	titan/uv/version-native.h \
+	titan/uv/work-native-proposal.h
 STDLIB_HTTP_SOURCES := titan/http/http.titan titan/http/client.titan \
 	titan/http/headers.titan titan/http/native.titan \
 	titan/http/server.titan
@@ -425,7 +416,7 @@ stdlib_stem = $(if $(STDLIB_STEM_$(1)),$(STDLIB_STEM_$(1)),titan/$(1))
 stdlib_outputs = $(call stdlib_stem,$(1)).o $(call stdlib_stem,$(1)).c $(filter $(call stdlib_stem,$(1)).%,$(STDLIB_GENERATED_FOREIGN_HEADERS))
 STDLIB_MODULE_OBJECTS := $(foreach module,$(STDLIB_MODULES),$(call stdlib_stem,$(module)).o)
 STDLIB_IMPORTS_coroutine :=
-STDLIB_IMPORTS_uv := coroutine
+STDLIB_IMPORTS_uv := iteration
 STDLIB_IMPORTS_async := uv string
 STDLIB_IMPORTS_timer := uv
 STDLIB_IMPORTS_io := os string
@@ -547,7 +538,7 @@ RECURSIVE_WRAPPER_GUARD = flags=$${MAKEFLAGS%% *}; case "$$flags" in -*) ;; *q*)
 	check-readline-tools luarocks libbacktrace libuv libuv-config llhttp \
 	check-llhttp-tools sqlite3 check-sqlite3-tools openssl openssl-config check-openssl-tools \
 	check-system-openssl invalid-openssl-mode lpeglabel \
-	check-libuv-tools check-system-libuv invalid-libuv-mode runtime titan \
+	check-libuv-tools runtime titan \
 	stage-titan-bootstrap install-titan-sdk stdlib stdlib-objects install-stdlib \
 	publish-stdlib \
 	rock-post-install rock-test test rock-build \
@@ -567,19 +558,18 @@ help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | \
 	  awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-20s\033[0m %s\n", $$1, $$2}'
 	@echo
-	@echo "make all and make stdlib use bundled libuv $(LIBUV_VERSION), OpenSSL"
-	@echo "$(OPENSSL_VERSION), and llhttp $(LLHTTP_VERSION) by default. Use"
-	@echo "LIBUV_MODE=system and/or OPENSSL_MODE=system to select pkg-config"
-	@echo "libraries (libuv >= $(LIBUV_MIN_VERSION), OpenSSL >= $(OPENSSL_MIN_VERSION))."
+	@echo "make all and make stdlib bundle patched libuv $(LIBUV_VERSION) and llhttp"
+	@echo "$(LLHTTP_VERSION). OpenSSL uses pkg-config's system package by default"
+	@echo "(>= $(OPENSSL_MIN_VERSION)); OPENSSL_MODE=bundled builds $(OPENSSL_VERSION)."
 	@echo "All builds require a C compiler. titanc --pretty-print additionally needs"
 	@echo "clang-format. Bundled dependencies need CMake, Perl, git, tar, curl/wget,"
 	@echo "and sha256sum/shasum (macOS: xcode-select --install; brew install cmake)."
 	@echo "A usable system Readline is preferred; otherwise make lua builds pinned"
 	@echo "GNU Readline $(READLINE_RELEASE) into PREFIX automatically; that fallback also"
 	@echo "needs a linkable curses, tinfo, or termcap provider. Optional system packages:"
-	@echo "Ubuntu/Debian libreadline-dev libuv1-dev libssl-dev pkg-config; Fedora"
-	@echo "readline-devel libuv-devel openssl-devel pkgconf-pkg-config; macOS brew"
-	@echo "install libuv openssl@3 pkgconf. Add clang-format only for --pretty-print."
+	@echo "Ubuntu/Debian libreadline-dev libssl-dev pkg-config; Fedora"
+	@echo "readline-devel openssl-devel pkgconf-pkg-config; macOS brew"
+	@echo "install openssl@3 pkgconf. Add clang-format only for --pretty-print."
 	@echo "llhttp and SQLite $(SQLITE3_VERSION) are always bundled."
 	@echo "For a standalone installation, choose one writable PREFIX and run:"
 	@echo "  make lua PREFIX=/path"
@@ -587,7 +577,7 @@ help: ## Show this help
 	@echo "  make luarocks && luarocks make"
 	@echo "Later Make commands detect PREFIX from Titan's Lua on PATH."
 
-libuv: ## Build/validate libuv (bundled by default; LIBUV_MODE=system is optional)
+libuv: ## Build the pinned bundled libuv with Titan's Unix cleanup correction
 
 readline: $(READLINE_SELECTION_CONFIG) ## Select system Readline or provision the prefix-local fallback
 
@@ -1202,7 +1192,6 @@ $(LIBBT_LIB): $(LIBBT_BUILD_CONFIG)
 			CFLAGS=$(call make_shell_quote,$(LIBBT_CFLAGS))
 	@if test -f "$(LIBBT_DIR)/Makefile"; then $(MAKE) -C "$(LIBBT_DIR)"; fi
 
-ifeq ($(LIBUV_MODE),bundled)
 libuv: $(LIBUV_LIB)
 
 check-libuv-tools:
@@ -1320,41 +1309,7 @@ $(LIBUV_LIB): $(LIBUV_EXTRACTED) $(LIBUV_BUILD_CONFIG)
 	}
 	@touch "$@"
 
-else ifeq ($(LIBUV_MODE),system)
-libuv: check-system-libuv
-
-check-system-libuv:
-	@if ! command -v "$(firstword $(LIBUV_PKG_CONFIG))" >/dev/null 2>&1; then \
-	  echo "ERROR: pkg-config is required for LIBUV_MODE=system." >&2; \
-	  echo "  Ubuntu/Debian: sudo apt-get install libuv1-dev pkg-config" >&2; \
-	  echo "  Fedora: sudo dnf install libuv-devel pkgconf-pkg-config" >&2; \
-	  echo "  macOS: brew install libuv pkgconf" >&2; exit 1; \
-	fi
-	@if ! $(LIBUV_PKG_CONFIG) --exists libuv; then \
-	  echo "ERROR: pkg-config cannot find the libuv development package." >&2; \
-	  echo "  Ubuntu/Debian: sudo apt-get install libuv1-dev pkg-config" >&2; \
-	  echo "  Fedora: sudo dnf install libuv-devel pkgconf-pkg-config" >&2; \
-	  echo "  macOS: brew install libuv pkgconf" >&2; \
-	  echo "Homebrew may install libuv outside default compiler paths; its pkg-config output is required." >&2; exit 1; \
-	fi
-	@if ! $(LIBUV_PKG_CONFIG) --atleast-version="$(LIBUV_MIN_VERSION)" libuv; then \
-	  found=`$(LIBUV_PKG_CONFIG) --modversion libuv 2>/dev/null || echo unknown`; \
-	  echo "ERROR: system libuv $$found is too old; need >= $(LIBUV_MIN_VERSION)." >&2; exit 1; \
-	fi
-	@echo "==> Using system libuv `$(LIBUV_PKG_CONFIG) --modversion libuv`"
-	@echo "    LIBUV_CPPFLAGS=$(LIBUV_CPPFLAGS)"
-	@echo "    LIBUV_LDFLAGS=$(LIBUV_LDFLAGS)"
-
-else
-libuv: invalid-libuv-mode
-
-invalid-libuv-mode:
-	@echo "ERROR: unsupported LIBUV_MODE='$(LIBUV_MODE)'; choose 'bundled' or 'system'." >&2
-	@exit 1
-endif
-
 libuv-config: libuv ## Print the effective libuv compiler and linker inputs
-	@echo "LIBUV_MODE=$(LIBUV_MODE)"
 	@echo "LIBUV_VERSION=$(LIBUV_VERSION)"
 	@echo "LIBUV_BUILD_TYPE=$(LIBUV_BUILD_TYPE)"
 	@echo "LIBUV_INCLUDE_DIR=$(LIBUV_INCLUDE_DIR)"
@@ -2080,8 +2035,7 @@ stage-titan-bootstrap: $(TITAN_BOOTSTRAP_SO)
 titan: lpeglabel libbacktrace libuv openssl llhttp sqlite3 $(TITAN_RUNTIME_LIB) $(TITAN_BOOTSTRAP_SO) ## Build Titan's native runtime and Lua bootstrap
 	@if test -n "$(strip $(ROCKS_TREE))"; then \
 	  $(MAKE) --no-print-directory install-titan-sdk \
-		ROCKS_TREE=$(call make_shell_quote,$(ROCKS_TREE)) \
-		LIBUV_MODE=$(call make_shell_quote,$(LIBUV_MODE)); \
+		ROCKS_TREE=$(call make_shell_quote,$(ROCKS_TREE)); \
 	fi
 
 # PREFIX owns installed Lua. Stage that SDK into a separate ROCKS_TREE, while
@@ -2115,12 +2069,7 @@ install-titan-sdk: $(TITAN_RUNTIME_LIB) $(TITAN_BOOTSTRAP_SO) $(TITAN_RUNTIME_LU
 	install -m 0644 $(TITAN_SDK_ROOT_HEADERS) "$$rocks_tree/include/"; \
 	install -m 0644 $(TITAN_SDK_NAMESPACED_HEADERS) \
 		"$$rocks_tree/include/titan/"; \
-	if test "$(LIBUV_MODE)" != system; then \
-	  cp -R "$(LIBUV_SRC_DIR)/include/." "$$rocks_tree/include/"; \
-	else \
-	  rm -f "$$rocks_tree/include/uv.h"; \
-	  rm -rf "$$rocks_tree/include/uv"; \
-	fi; \
+	cp -R "$(LIBUV_SRC_DIR)/include/." "$$rocks_tree/include/"; \
 	if test "$(OPENSSL_MODE)" != system; then \
 	  mkdir -p "$$rocks_tree/include/openssl"; \
 	  install -m 0644 $(OPENSSL_SRC_DIR)/include/openssl/*.h \
@@ -2136,9 +2085,9 @@ install-titan-sdk: $(TITAN_RUNTIME_LIB) $(TITAN_BOOTSTRAP_SO) $(TITAN_RUNTIME_LU
 # provider. The install recipe above removes copies left by older SDKs so
 # extensions cannot create a second native instance. The post-install build
 # consumes the installed Titan runtime archive rather than smuggling source-tree
-# runtime objects into standard modules. System libuv remains an ordered final
-# link input; bundled mode gets headers from the staged SDK and gives the private
-# archive to titanc through the same -X payload as ltitanlib.o and the private
+# runtime objects into standard modules. Libuv headers come from the staged SDK,
+# and its private archive goes to titanc through the same -X payload as
+# ltitanlib.o and the private
 # LPegLabel archive.
 ifeq ($(STDLIB_USE_INSTALLED_RUNTIME),1)
   STDLIB_PLATFORM_PREREQS := libuv openssl
@@ -2148,13 +2097,8 @@ ifeq ($(STDLIB_USE_INSTALLED_RUNTIME),1)
   STDLIB_BOOTSTRAP_PREREQ :=
   STDLIB_RUNTIME_ARCHIVE_PREREQ :=
   STDLIB_TOOL_PREREQS :=
-  ifeq ($(LIBUV_MODE),system)
-    STDLIB_UV_CPPFLAGS := $(LIBUV_CPPFLAGS)
-    STDLIB_UV_LDFLAGS := $(LIBUV_PROVIDER_LDFLAGS)
-  else
-    STDLIB_UV_CPPFLAGS := $(filter-out -I$(LIBUV_INCLUDE_DIR),$(LIBUV_CPPFLAGS))
-    STDLIB_UV_LDFLAGS := $(LIBUV_PROVIDER_LDFLAGS)
-  endif
+  STDLIB_UV_CPPFLAGS := $(filter-out -I$(LIBUV_INCLUDE_DIR),$(LIBUV_CPPFLAGS))
+  STDLIB_UV_LDFLAGS := $(LIBUV_PROVIDER_LDFLAGS)
   STDLIB_UV_CFLAGS := $(LIBUV_CFLAGS)
 else
   STDLIB_PLATFORM_PREREQS := libuv openssl
@@ -2193,11 +2137,7 @@ else
 	$(TITAN_SDK_ROOT_HEADERS) $(TITAN_SDK_NAMESPACED_HEADERS) \
 	$(TITAN_RUNTIME_LUA_HEADERS)
 endif
-ifeq ($(LIBUV_MODE),bundled)
-  STDLIB_UV_HEADER_DIRS = $(if $(filter 1,$(STDLIB_USE_INSTALLED_RUNTIME)),$(STDLIB_ROCKS_ROOT)/include,$(LIBUV_INCLUDE_DIR))
-else
-  STDLIB_UV_HEADER_DIRS = $(shell $(LIBUV_PKG_CONFIG) --variable=includedir libuv 2>/dev/null)
-endif
+STDLIB_UV_HEADER_DIRS = $(if $(filter 1,$(STDLIB_USE_INSTALLED_RUNTIME)),$(STDLIB_ROCKS_ROOT)/include,$(LIBUV_INCLUDE_DIR))
 ifeq ($(OPENSSL_MODE),bundled)
   STDLIB_OPENSSL_HEADER_DIRS = $(OPENSSL_SRC_DIR)/include $(OPENSSL_BUILD_DIR)/include
 else
@@ -2312,7 +2252,6 @@ $(STDLIB_CONFIG_STAMP): FORCE $(STDLIB_NATIVE_IDENTITY_PREREQS)
 		$(call make_shell_quote,TITAN_EXTRA_CFLAGS=$(TITAN_EXTRA_CFLAGS)) \
 		$(call make_shell_quote,TITAN_EXTRA_LDFLAGS=$(TITAN_EXTRA_LDFLAGS)) \
 		$(call make_shell_quote,TITAN_NO_LINE_DIRECTIVES=$(TITAN_NO_LINE_DIRECTIVES)) \
-		$(call make_shell_quote,LIBUV_MODE=$(LIBUV_MODE)) \
 		$(call make_shell_quote,LIBUV_VERSION=$(LIBUV_VERSION)) \
 		$(call make_shell_quote,STDLIB_UV_CPPFLAGS=$(STDLIB_UV_CPPFLAGS)) \
 		$(call make_shell_quote,STDLIB_UV_CFLAGS=$(STDLIB_UV_CFLAGS)) \

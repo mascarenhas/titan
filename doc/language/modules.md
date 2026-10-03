@@ -779,9 +779,6 @@ loader, and invokes the exact `luaopen_titan_uv` entry. The promotion is needed
 because Lua's ordinary C searcher initially maps the same image eager/local for
 the bare support load.
 
-System-mode extensions may instead link the same shared libuv selected by
-pkg-config.
-
 Because this explicit Lua preload establishes the provider before the
 extension is mapped, the Lua route also supports eager relocations and native
 constructors. It can resolve native symbols for a Lua-only extension without a

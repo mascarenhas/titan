@@ -415,6 +415,5 @@ source-private provider identity, callable symbol hierarchy, callback
 ownership, const/member state, wrapper slots, and qualified Array runtime
 state. See [Dense Arrays](dense-arrays.md#abi-boundary).
 
-Bundled libuv enters as shared `-X` provider payload and is present in both
-native forms. System libuv remains a repeated final-link setting and never
-enters `titan.a`.
+The pinned, patched libuv archive always enters as shared `-X` provider
+payload and is present in both native forms.

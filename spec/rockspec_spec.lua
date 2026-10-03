@@ -391,21 +391,12 @@ describe("standalone-prefix source installation", function()
         assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
             tostring(code) .. "): installed libbacktrace.a")
 
-        local expected_libuv_mode = os.getenv("TITAN_EXPECT_LIBUV_MODE")
-            or "bundled"
-        if expected_libuv_mode == "system" then
-            assert.falsy(lfs.symlinkattributes(PREFIX .. "/lib/libuv.a"))
-            assert.falsy(lfs.symlinkattributes(PREFIX .. "/include/uv.h"))
-            assert.falsy(lfs.symlinkattributes(PREFIX .. "/include/uv"))
-        else
-            assert.equal("bundled", expected_libuv_mode)
-            assert.falsy(lfs.symlinkattributes(PREFIX .. "/lib/libuv.a"))
-            assert_file(PREFIX .. "/include/uv.h")
-            assert_file(PREFIX .. "/include/uv/version.h")
-        end
+        assert.falsy(lfs.symlinkattributes(PREFIX .. "/lib/libuv.a"))
+        assert_file(PREFIX .. "/include/uv.h")
+        assert_file(PREFIX .. "/include/uv/version.h")
 
         local expected_openssl_mode = os.getenv("TITAN_EXPECT_OPENSSL_MODE")
-            or "bundled"
+            or os.getenv("OPENSSL_MODE") or "system"
         if expected_openssl_mode == "system" then
             assert_absent(PREFIX .. "/include/openssl")
         else
@@ -1608,7 +1599,10 @@ inspect-lua-sdk:
             "env", "-u", "MAKEFLAGS", "-u", "MFLAGS", "-u", "MAKEOVERRIDES",
             "CCACHE_DISABLE=1", "make", "--no-print-directory",
             "-f", repository .. "/Makefile", "PREFIX=" .. PREFIX,
-            "ROCKS_TREE=" .. stage, "LIBUV_MODE=system", "OPENSSL_MODE=system",
+            "ROCKS_TREE=" .. stage, "OPENSSL_MODE=system",
+            "LIBUV_LIB=" .. repository .. "/libuv-build/libuv.a",
+            "LIBUV_SRC_DIR=" .. repository .. "/libuv-v1.52.1",
+            "--old-file=" .. repository .. "/libuv-build/libuv.a",
             "LIBBT_DIR=" .. repository .. "/libbacktrace",
             "LIBBT_LIB=" .. libbacktrace,
             "LLHTTP_HEADER=" .. llhttp_header, "SQLITE3_HEADER=" .. sqlite_header,
@@ -1625,7 +1619,7 @@ inspect-lua-sdk:
             "titan-runtime/libtitan.a", "titan-runtime/bootstrap/titan.so",
             "lpeglabel-build/libtitan-lpeglabel.a",
             "sdk/lib/titan/0.6/libtitan.a", "sdk/lib/titan/0.6/titan.so",
-            "sdk/include/titan/ffi.h",
+            "sdk/include/titan/ffi.h", "sdk/include/uv.h", "sdk/include/uv/version.h",
         }) do
             assert_file(workspace .. "/" .. artifact)
         end

@@ -1,0 +1,262 @@
+foreign import "network-native.h"
+
+function listen(stream: stream_t, backlog: integer, callback: connection_cb): integer
+  local native = stream:pointer()
+  local native_backlog = backlog as foreign int
+  if native == nil then return ffi.UV_EINVAL end
+  case stream
+  when tcp(owner) then
+    local old? = owner.connection_callback
+    owner.connection_callback = callback
+    local status = ffi.uv_listen(native, native_backlog, tcp_connection_callback) as integer
+    if status < 0 then owner.connection_callback = old end
+    return status
+  when pipe(owner) then
+    local old? = owner.connection_callback
+    owner.connection_callback = callback
+    owner.eligibility.available = 0
+    local status = ffi.uv_listen(native, native_backlog, pipe_connection_callback) as integer
+    if status < 0 then owner.connection_callback = old end
+    return status
+  when tty(owner) then
+    -- Windows native dispatch asserts for TTY instead of returning status.
+    return ffi.UV_EINVAL
+  end
+end
+
+function accept(server: stream_t, client: handle_t): integer
+  local native_server = server:pointer()
+  local native_client = client:pointer()
+  if native_server == nil or native_client == nil then return ffi.UV_EINVAL end
+  if ffi.uv_handle_get_loop(native_server as foreign *uv_handle_t) ~=
+     ffi.uv_handle_get_loop(native_client as foreign *uv_handle_t) then return ffi.UV_EINVAL end
+  if ffi.uv_is_closing(native_client) ~= 0 then return ffi.UV_EINVAL end
+  if ffi.titan_uv_accept_compatible(native_server, native_client) == 0 then return ffi.UV_EINVAL end
+  case server
+  when pipe(owner) then owner.eligibility.available = 0
+  else
+  end
+  case client
+  when pipe(owner) then owner.eligibility.available = 0
+  else
+  end
+  return ffi.uv_accept(native_server, native_client as foreign *uv_stream_t)
+end
+
+function read_start(stream: stream_t, alloc_callback: alloc_cb, read_callback: read_cb): integer
+  local native = stream:pointer()
+  if native == nil then return ffi.UV_EINVAL end
+  case stream
+  when tcp(owner) then
+    local old_alloc? = owner.alloc_callback
+    local old_read? = owner.read_callback
+    owner.alloc_callback = alloc_callback
+    owner.read_callback = read_callback
+    local status = ffi.uv_read_start(native, tcp_alloc_callback, tcp_read_callback) as integer
+    if status < 0 then owner.alloc_callback = old_alloc; owner.read_callback = old_read end
+    return status
+  when pipe(owner) then
+    local old_alloc? = owner.alloc_callback
+    local old_read? = owner.read_callback
+    owner.alloc_callback = alloc_callback
+    owner.read_callback = read_callback
+    owner.eligibility.available = 0
+    local status = ffi.uv_read_start(native, pipe_alloc_callback, pipe_read_callback) as integer
+    if status < 0 then owner.alloc_callback = old_alloc; owner.read_callback = old_read end
+    return status
+  when tty(owner) then
+    local old_alloc? = owner.alloc_callback
+    local old_read? = owner.read_callback
+    owner.alloc_callback = alloc_callback
+    owner.read_callback = read_callback
+    if ffi.titan_uv_network_is_windows() == 0 then
+      local status = ffi.uv_read_start(native, tty_alloc_callback, tty_read_callback) as integer
+      if status < 0 then owner.alloc_callback = old_alloc; owner.read_callback = old_read end
+      return status
+    end
+    -- Native Windows TTY reads can allocate and deliver ENOBUFS inline.
+    -- Capture the originating loop before any callback can mutate the handle.
+    local loop = owner.loop as loop_t
+    if L ~= main_thread then
+      owner.alloc_callback = old_alloc; owner.read_callback = old_read
+      raise "TTY read_start requires the owning main Lua thread"
+    end
+    if ffi.lua_checkstack(L, ffi.LUA_MINSTACK) == 0 then
+      owner.alloc_callback = old_alloc; owner.read_callback = old_read
+      raise "cannot reserve native callback stack"
+    end
+    local saved_count = loop.failure_count
+    local saved_error = loop.failure_error
+    local saved_trace = loop.failure_trace
+    defer do
+      inline_dispatch_depth = inline_dispatch_depth - 1
+      loop.inline_depth = loop.inline_depth - 1
+      loop.failure_count = saved_count
+      loop.failure_error = saved_error
+      loop.failure_trace = saved_trace
+    end
+    loop.failure_count = 0
+    loop.failure_error = nil
+    loop.failure_trace = ""
+    inline_dispatch_depth = inline_dispatch_depth + 1
+    loop.inline_depth = loop.inline_depth + 1
+    local status = ffi.uv_read_start(native, tty_alloc_callback, tty_read_callback) as integer
+    if status < 0 then owner.alloc_callback = old_alloc; owner.read_callback = old_read end
+    -- Accepted ownership survives an inline callback error.
+    rethrow(loop)
+    return status
+  end
+end
+
+function read_stop(stream: stream_t): integer
+  local native = stream:pointer()
+  if native == nil then return ffi.UV_EINVAL end
+  case stream
+  when pipe(owner) then owner.eligibility.available = 0
+  else
+  end
+  local status = ffi.uv_read_stop(native) as integer
+  -- Preserve native status, including Windows TTY cancellation errors. Keep
+  -- the allocation until native paired delivery or close.
+  case stream
+  when tcp(owner) then owner.alloc_callback = nil; owner.read_callback = nil
+  when pipe(owner) then owner.alloc_callback = nil; owner.read_callback = nil
+  when tty(owner) then owner.alloc_callback = nil; owner.read_callback = nil
+  end
+  return status
+end
+
+function is_readable(stream: stream_t): boolean
+  local native = stream:pointer()
+  if native == nil then return false end
+  return ffi.uv_is_readable(native) ~= 0
+end
+
+function is_writable(stream: stream_t): boolean
+  local native = stream:pointer()
+  if native == nil then return false end
+  return ffi.uv_is_writable(native) ~= 0
+end
+
+function stream_set_blocking(stream: stream_t, blocking: integer): integer
+  local native = stream:pointer()
+  local mode = blocking as foreign int
+  if native == nil then return ffi.UV_EINVAL end
+  case stream
+  when pipe(owner) then owner.eligibility.available = 0
+  else
+  end
+  return ffi.uv_stream_set_blocking(native, mode)
+end
+
+function stream_get_write_queue_size(stream: stream_t): integer
+  local native = stream:pointer()
+  if native == nil then raise "stream is not initialized" end
+  return ffi.uv_stream_get_write_queue_size(native) as foreign lua_Integer
+end
+
+-- A handle view preserves libuv's documented Unix UDP send_handle support;
+-- UDP remains outside the stream_t hierarchy.
+local function transfer_pointer(handle: handle_t?): foreign *uv_stream_t
+  if handle == nil then return nil end
+  local native = handle:pointer()
+  if native == nil then raise "transferred handle is not initialized" end
+  if ffi.uv_is_closing(native) ~= 0 then raise "transferred handle is closing" end
+  local kind = ffi.uv_handle_get_type(native)
+  if kind ~= ffi.UV_TCP and kind ~= ffi.UV_NAMED_PIPE and kind ~= ffi.UV_UDP then
+    raise "transferred handle must be TCP, pipe or UDP"
+  end
+  return native as foreign *uv_stream_t
+end
+
+function write2(req: write_t, stream: stream_t, buffers: {buf_t},
+                 send_handle: handle_t?, callback: write_cb?): integer
+  if req.pending then return ffi.UV_EBUSY end
+  local native_stream = stream:pointer()
+  local loop? = stream:owner_loop()
+  if native_stream == nil or loop == nil then return ffi.UV_EINVAL end
+  local native_send = transfer_pointer(send_handle)
+  local prepared, native?, retained? = fs_buffer_snapshot(buffers, false)
+  if prepared < 0 then return prepared end
+  local native_buffers = (native as owned uv_buf_t[]) as foreign *uv_buf_t
+  local count = #(retained as {buf_t}) as foreign unsigned int
+  loop.requests[req] = true
+  req.loop = loop
+  req.pending = true
+  req.stream = stream
+  req.send_stream = send_handle
+  req.buffers = retained
+  req.native_buffers = native
+  req.callback = callback
+  ffi.uv_req_set_data(req.native as foreign *uv_req_t, req as foreign *void)
+  case stream
+  when pipe(owner) then owner.eligibility.available = 0
+  else
+  end
+  local status = ffi.uv_write2(req.native, native_stream, native_buffers, count,
+                               native_send, network_write_callback) as integer
+  if status < 0 then
+    loop.requests[req] = nil
+    req.pending = false
+    req.loop = nil
+    req.stream = nil
+    req.send_stream = nil
+    req.buffers = nil
+    req.native_buffers = nil
+    req.callback = nil
+  end
+  return status
+end
+
+function write(req: write_t, stream: stream_t, buffers: {buf_t}, callback: write_cb?): integer
+  return write2(req, stream, buffers, nil, callback)
+end
+
+function try_write2(stream: stream_t, buffers: {buf_t}, send_handle: handle_t?): integer
+  local native_stream = stream:pointer()
+  if native_stream == nil then return ffi.UV_EINVAL end
+  local native_send = transfer_pointer(send_handle)
+  local prepared, native?, retained? = fs_buffer_snapshot(buffers, false)
+  if prepared < 0 then return prepared end
+  local native_buffers = (native as owned uv_buf_t[]) as foreign *uv_buf_t
+  local count = #(retained as {buf_t}) as foreign unsigned int
+  if native_send ~= nil then
+    local status = ffi.titan_uv_try_write2_source_status(native_send)
+    if status < 0 then return status end
+  end
+  case stream
+  when pipe(owner) then owner.eligibility.available = 0
+  else
+  end
+  return ffi.uv_try_write2(native_stream, native_buffers, count, native_send)
+end
+
+function try_write(stream: stream_t, buffers: {buf_t}): integer
+  return try_write2(stream, buffers, nil)
+end
+
+function shutdown(req: shutdown_t, stream: stream_t, callback: shutdown_cb?): integer
+  if req.pending then return ffi.UV_EBUSY end
+  local native_stream = stream:pointer()
+  local loop? = stream:owner_loop()
+  if native_stream == nil or loop == nil then return ffi.UV_EINVAL end
+  loop.requests[req] = true
+  req.loop = loop
+  req.pending = true
+  req.stream = stream
+  req.callback = callback
+  ffi.uv_req_set_data(req.native as foreign *uv_req_t, req as foreign *void)
+  case stream
+  when pipe(owner) then owner.eligibility.available = 0
+  else
+  end
+  local status = ffi.uv_shutdown(req.native, native_stream, network_shutdown_callback) as integer
+  if status < 0 then
+    loop.requests[req] = nil
+    req.pending = false
+    req.loop = nil
+    req.stream = nil
+    req.callback = nil
+  end
+  return status
+end

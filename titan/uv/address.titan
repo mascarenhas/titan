@@ -1,0 +1,188 @@
+-- Candidate contributor; same logical module as the foundation.
+foreign import "string.h"
+foreign import "address-native.h"
+
+record sockaddr_t
+  local native: foreign sockaddr_storage
+  local native_length: integer
+end
+
+local function sockaddr_t:pointer(): foreign *sockaddr
+  if self.native_length == 0 then raise "socket address is incomplete" end
+  return self.native as foreign *sockaddr
+end
+
+local function sockaddr_copy_sized(native: foreign const *sockaddr,
+                                    length: integer): sockaddr_t?
+  if native == nil then return nil end
+  if length < ffi.titan_sockaddr_family_size() as integer or
+      length > foreign sockaddr_storage.sizeof then
+    return nil
+  end
+  local storage = foreign sockaddr_storage.new()
+  local result = sockaddr_t(storage, length)
+  ffi.memcpy(result.native, native, length as foreign size_t)
+  return result
+end
+
+local function sockaddr_copy(native: foreign const *sockaddr): sockaddr_t?
+  if native == nil then return nil end
+  local length = 0
+  if native.sa_family == ffi.AF_INET then
+    length = foreign sockaddr_in.sizeof as integer
+  elseif native.sa_family == ffi.AF_INET6 then
+    length = foreign sockaddr_in6.sizeof as integer
+  else
+    -- Native UDP callbacks carry no address length. recvmmsg provides only
+    -- sockaddr_in6 backing, even for other datagram families; guessing a
+    -- sockaddr_un/storage length here would overread. Preserve nonnull address
+    -- presence and the family without pretending the remaining bytes exist.
+    local storage = foreign sockaddr_storage.new()
+    local result = sockaddr_t(storage, 0)
+    result.native.ss_family = native.sa_family
+    return result
+  end
+  return sockaddr_copy_sized(native, length)
+end
+
+function ip4_addr(ip: string, port: integer): (integer, sockaddr_t?)
+  local native_port = port as foreign int
+  local native = foreign sockaddr_storage.new()
+  local owner = sockaddr_t(native, foreign sockaddr_in.sizeof as integer)
+  local status = ffi.uv_ip4_addr(ip, native_port,
+      owner.native as foreign *sockaddr_in) as integer
+  if status < 0 then return status, nil end
+  return status, owner
+end
+
+function ip6_addr(ip: string, port: integer): (integer, sockaddr_t?)
+  local native_port = port as foreign int
+  local native = foreign sockaddr_storage.new()
+  local owner = sockaddr_t(native, foreign sockaddr_in6.sizeof as integer)
+  local status = ffi.uv_ip6_addr(ip, native_port,
+      owner.native as foreign *sockaddr_in6) as integer
+  if status < 0 then return status, nil end
+  return status, owner
+end
+
+function ip4_name(address: sockaddr_t): (integer, string?)
+  if address.native.ss_family ~= ffi.AF_INET then return ffi.UV_EAFNOSUPPORT, nil end
+  local text = foreign char.new_array(16)
+  local status = ffi.uv_ip4_name(address.native as foreign *sockaddr_in,
+                                text, 16) as integer
+  if status < 0 then return status, nil end
+  return status, (text as foreign *char) as string
+end
+
+function ip6_name(address: sockaddr_t): (integer, string?)
+  if address.native.ss_family ~= ffi.AF_INET6 then return ffi.UV_EAFNOSUPPORT, nil end
+  local text = foreign char.new_array(46)
+  local status = ffi.uv_ip6_name(address.native as foreign *sockaddr_in6,
+                                text, 46) as integer
+  if status < 0 then return status, nil end
+  return status, (text as foreign *char) as string
+end
+
+function ip_name(address: sockaddr_t): (integer, string?)
+  local text = foreign char.new_array(46)
+  local status = ffi.uv_ip_name(address:pointer(), text, 46) as integer
+  if status < 0 then return status, nil end
+  return status, (text as foreign *char) as string
+end
+
+function sockaddr_t:family(): integer
+  return self.native.ss_family as integer
+end
+
+function sockaddr_t:is_complete(): boolean
+  return self.native_length ~= 0
+end
+
+function sockaddr_t:byte_length(): integer
+  return self.native_length
+end
+
+function sockaddr_t:raw_bytes(): string?
+  if self.native_length == 0 then return nil end
+  local bytes: owned unsigned char[] = foreign unsigned char.new_array(self.native_length)
+  ffi.memcpy(bytes, self.native, self.native_length as foreign size_t)
+  return bytes as string
+end
+
+function sockaddr_t:port(): integer
+  if self.native.ss_family == ffi.AF_INET then
+    local address = self.native as foreign *sockaddr_in
+    return ffi.ntohs(address.sin_port) as integer
+  end
+  if self.native.ss_family ~= ffi.AF_INET6 then raise "IP address required" end
+  local address = self.native as foreign *sockaddr_in6
+  return ffi.ntohs(address.sin6_port) as integer
+end
+
+-- Flowinfo uses the native field's numeric representation; no bits are dropped.
+function sockaddr_t:flowinfo(): integer
+  if self.native.ss_family ~= ffi.AF_INET6 then return 0 end
+  return (self.native as foreign *sockaddr_in6).sin6_flowinfo as integer
+end
+
+function sockaddr_t:scope_id(): integer
+  if self.native.ss_family ~= ffi.AF_INET6 then return 0 end
+  return (self.native as foreign *sockaddr_in6).sin6_scope_id as integer
+end
+
+function sockaddr_t:set_flowinfo(value: integer)
+  if self.native.ss_family ~= ffi.AF_INET6 then raise "IPv6 address required" end
+  (self.native as foreign *sockaddr_in6).sin6_flowinfo = value as foreign uint32_t
+end
+
+function sockaddr_t:set_scope_id(value: integer)
+  if self.native.ss_family ~= ffi.AF_INET6 then raise "IPv6 address required" end
+  (self.native as foreign *sockaddr_in6).sin6_scope_id = value as foreign uint32_t
+end
+
+function sockaddr_t:address_bytes(): string
+  if self.native.ss_family == ffi.AF_INET then
+    local bytes: owned unsigned char[] = foreign unsigned char.new_array(4)
+    local address = self.native as foreign *sockaddr_in
+    ffi.memcpy(bytes, address.sin_addr, 4)
+    return bytes as string
+  end
+  if self.native.ss_family ~= ffi.AF_INET6 then raise "IP address required" end
+  local bytes: owned unsigned char[] = foreign unsigned char.new_array(16)
+  local address = self.native as foreign *sockaddr_in6
+  ffi.memcpy(bytes, address.sin6_addr, 16)
+  return bytes as string
+end
+
+-- inet_pton/ntop operate on address bytes, not sockaddr storage.
+function inet_pton(af: integer, source: string): (integer, string?)
+  local native_af = af as foreign int
+  local length = 0
+  if native_af == ffi.AF_INET then length = 4
+  elseif native_af == ffi.AF_INET6 then length = 16
+  else return ffi.UV_EAFNOSUPPORT, nil end
+  local bytes: owned unsigned char[] = foreign unsigned char.new_array(length)
+  local status = ffi.uv_inet_pton(native_af, source, bytes) as integer
+  if status < 0 then return status, nil end
+  return status, bytes as string
+end
+
+function inet_ntop(af: integer, source: string): (integer, string?)
+  local native_af = af as foreign int
+  if native_af == ffi.AF_INET then
+    if #source ~= 4 then return ffi.UV_EINVAL, nil end
+  elseif native_af == ffi.AF_INET6 then
+    if #source ~= 16 then return ffi.UV_EINVAL, nil end
+  else return ffi.UV_EAFNOSUPPORT, nil end
+  local text = foreign char.new_array(46)
+  local status = ffi.uv_inet_ntop(native_af, source, text, 46) as integer
+  if status < 0 then return status, nil end
+  return status, (text as foreign *char) as string
+end
+
+-- BSD's native sa_len field; absent on systems without that field.
+function sockaddr_t:sa_len(): integer?
+  local length = ffi.titan_sockaddr_length_field(self.native as foreign *sockaddr) as integer
+  if length < 0 then return nil end
+  return length
+end

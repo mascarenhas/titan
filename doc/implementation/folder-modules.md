@@ -279,7 +279,7 @@ titanc titan.coroutine titan.uv titan.async titan.timer titan.io titan.fs titan.
   -X titan-runtime/ltitanlib.o lpeglabel-build/libtitan-lpeglabel.a \
      libuv-build/libuv.a llhttp-build/libtitan-llhttp.a \
      sqlite3-build/libtitan-sqlite3.a \
-     openssl-build/libssl.a openssl-build/libcrypto.a  # bundled modes
+     openssl-build/libssl.a openssl-build/libcrypto.a  # OPENSSL_MODE=bundled
 ```
 
 Generated `titan/uv/uv.c`, `titan/uv/uv.o`, and the callback-bearing
@@ -291,12 +291,11 @@ installed. The one logical `titan.uv` object, its one generated
 `titan/uv.lua` shim, and the remaining twenty logical modules (twenty-one in
 total) reside in the physical `titan.so`/`titan.a` pair. The private
 five-member LPegLabel archive is shared metadata-free payload for the
-`titan.peg`/`titan.string` folder modules. Bundled mode then supplies the
-private libuv archive, so its
-members enter both provider forms;
-system mode repeats the configured final-link setting for the DSO and does not
-copy it into `titan.a` (and omits `libuv-build/libuv.a` from the command).
-That setting may itself select a shared or static system library. Higher
+`titan.peg`/`titan.string` folder modules. The private libuv archive always
+follows it, so its members enter both provider forms. The command above uses
+bundled OpenSSL. The default system OpenSSL mode omits only its two OpenSSL
+archives and repeats the ordered pkg-config link settings for the DSO; static
+consumers must repeat those settings too. Higher
 `async`/`timer`/`fs`/`net`/`os`/`sqlite3` modules still import
 the independent logical `titan.uv` protocol, but their calls are direct
 because all twenty-one source roots are linked together. The high-level

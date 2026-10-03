@@ -12,6 +12,8 @@ env:
   MAKEFLAGS: "-j2"
   TITAN_JOBS: "2"
   TITAN_ABI_VERSION: "2"
+  # Keep canonical and sanitizer providers bundled; the canary tests system OpenSSL.
+  OPENSSL_MODE: bundled
 
 jobs:
   # Build and install the regular Linux tree once, run every uncovered
@@ -115,7 +117,7 @@ jobs:
             ubuntu-24.04-${{ runner.arch }}-openssl-${{ env.OPENSSL_VERSION }}-${{ env.OPENSSL_SHA256 }}-
 
       - name: Install regular build dependencies
-        run: sudo apt-get update && sudo apt-get install -y cmake curl libssl-dev libtinfo-dev libuv1-dev perl pkg-config
+        run: sudo apt-get update && sudo apt-get install -y cmake curl libssl-dev libtinfo-dev perl pkg-config
 
       - name: Prepare the standalone prefix
         run: |
@@ -303,11 +305,11 @@ jobs:
             .lua/bin/lua -e 'require("spec.support.os_test_support").process_child(assert(os.getenv("TITAN_PROCESS_SMOKE_DIR")))'
           echo "TITAN_PROCESS_SMOKE_CHILD=$process_smoke_dir/process_child" >> "$GITHUB_ENV"
 
-      - name: Smoke-test bundled libuv source image
+      - name: Smoke-test bundled dependency source image
         # The following installed-rock canary owns the Linux system-mode build;
-        # do not compile the same system uv/OpenSSL image twice on this billed
+        # do not compile the same system OpenSSL image twice on this billed
         # runner.
-        run: bash spec/support/ci_libuv_mode_smoke.sh bundled
+        run: bash spec/support/ci_dependency_mode_smoke.sh bundled
 
       - name: Save regular Linux C-probe results
         uses: ubicloud/cache/save@v4
@@ -322,19 +324,18 @@ jobs:
       # against the bundled image. The two focused rockspec cases own the
       # mode-dependent SDK layout and external-DSO promotion boundaries; the
       # production smoke owns the complete installed runtime behavior.
-      - name: Canary source-rock installation with system libuv and OpenSSL
+      - name: Canary source-rock installation with system OpenSSL
         run: |
-          LIBUV_MODE=system OPENSSL_MODE=system TITAN_EXTRA_CFLAGS='-O0 -fno-lto' \
+          OPENSSL_MODE=system TITAN_EXTRA_CFLAGS='-O0 -fno-lto' \
             TITAN_EXTRA_LDFLAGS=-fno-lto \
             luarocks make --force
-          TITAN_EXPECT_LIBUV_MODE=system TITAN_EXPECT_OPENSSL_MODE=system \
+          TITAN_EXPECT_OPENSSL_MODE=system \
             TITAN_PROBE_CACHE_DISABLE=1 \
             "$PREFIX/bin/busted" -o gtest -v spec/rockspec_spec.lua \
               --name='standalone-prefix source installation installs one matching Lua and Titan SDK before the standard images' \
               --name='standalone-prefix source installation loads direct libuv calls lazily for Titan and explicitly for Lua'
-          TITAN_SYSTEM_STATIC_LIBUV_ARCHIVE="$GITHUB_WORKSPACE/libuv-build/libuv.a" \
-            OPENSSL_MODE=system \
-            bash spec/support/ci_libuv_mode_smoke.sh system
+          OPENSSL_MODE=system \
+            bash spec/support/ci_dependency_mode_smoke.sh system
 
       - name: Upload prepared Linux tree
         uses: actions/upload-artifact@v7
