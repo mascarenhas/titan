@@ -1,13 +1,12 @@
-local uv = import "uv.titan"
-local string = import "string"
-foreign import "uv.h"
-foreign import "lua.h"
-foreign import "titan/ffi.h"
+local async = import "titan.async"
+local uv = import "titan.uv"
+local string = import "titan.string"
+foreign import "fs_platform.h"
 
 local READ_CHUNK_BYTES = 64 * 1024
 
 record File
-  local handle: foreign uv_file
+  local handle: integer
   local excess: string
 end
 
@@ -21,72 +20,150 @@ record Stat
   modified_nanoseconds: integer
 end
 
-foreign type FsNoargCallbackEntry = function (*lua_State, *Udata, *CClosure, *Udata): void
-foreign type FsEventCallbackEntry = function (*lua_State, *Udata, *CClosure, *Udata, const *char, lua_Integer, lua_Integer): void
-
-local record RealpathRequest
-  local const handle: foreign uv_fs_t
-  local callback: function (RealpathRequest): ()
-  local waiter: uv.Task?
-  local failed: boolean
-  local payload: value
+local function operation_error(code: integer, operation: string): async.OperationError
+  return async.OperationError(code, uv.err_name(code), uv.strerror(code), operation)
 end
 
-local record WatchRegistration
-  local const handle: foreign uv_fs_event_t
-  local callback: function (WatchRegistration, foreign const *char, integer, integer): ()
-  local runtime: uv.Runtime
-  local path: string
-  local directory: boolean
-  local index: integer
-  -- Slot in Runtime.handle_roots; zero after ownership moves to close_cb.
-  local runtime_root_index: integer
+local function check_status(code: integer, operation: string)
+  if code < 0 then raise operation_error(code, operation) end
 end
 
-local record WatcherNotification
-  local registration: WatchRegistration
-  local filename: string?
-  local events: integer
-  local status: integer
+local function checked_path(path: string, operation: string): string
+  if string.find(path, "\0", 1, true) then
+    raise operation_error(uv.EINVAL as integer, operation)
+  end
+  return path
 end
 
-local realpath_roots: {RealpathRequest: boolean} = {}
-
-foreign function fs_realpath_cb(request: *uv_fs_t)
-  local owner = ffi.uv_req_get_data(
-      request as foreign *uv_req_t) as foreign *Udata
-  local callback = ffi.lmacro_clCvalue(
-      ffi.titan_record_field(owner, "RealpathRequest", "callback"))
-  local L = ffi.uv_loop_get_data(request.loop) as foreign *lua_State
-  local module = ffi.lmacro_uvalue(callback.upvalue[0])
-  local entry = ffi.lmacro_pvalue(
-      callback.upvalue[2]) as foreign FsNoargCallbackEntry
-  local top = ffi.lua_gettop(L)
-  entry(L, module, callback, owner)
-  ffi.lua_settop(L, top)
+-- Each accepted request owns its continuation and borrowed inputs until its
+-- callback. Copy all results before cleaning the public request owner.
+local function perform<|T|>(operation: string,
+    submit: function (uv.loop_t, uv.fs_t, function (uv.fs_t): ()): (integer),
+    decode: function (uv.fs_t, integer): (T)): T
+  local request = uv.fs_t.new()
+  local outcome = async.await<|T, integer|>(function (
+      resolve: function (T): (), reject: function (integer): (),
+      fatal: function (value, string): ())
+    local callback = function (completed: uv.fs_t)
+      local copying = false
+      do
+        local result = uv.fs_get_result(completed)
+        if result < 0 then
+          uv.fs_req_cleanup(completed)
+          reject(result)
+          return
+        end
+        copying = true
+        local copied = decode(completed, result)
+        copying = false
+        uv.fs_req_cleanup(completed)
+        resolve(copied)
+      catch
+        if copying and error is async.OperationError then
+          uv.fs_req_cleanup(completed)
+          reject((error as async.OperationError).code)
+          return
+        end
+        raise
+      end
+    catch
+      uv.fs_req_cleanup(completed)
+      fatal(error, traceback)
+      raise
+    end
+    local status = submit(async.current_loop(), request, callback)
+    if status < 0 then
+      uv.fs_req_cleanup(request)
+      reject(status)
+    end
+  end)
+  case outcome
+  when success(result) then return result
+  when error(code) then raise operation_error(code, operation)
+  end
 end
 
-foreign function fs_watcher_event_cb(handle: *uv_fs_event_t,
-                                      filename: const *char,
-                                      events: int,
-                                      status: int)
-  local native_handle = handle as foreign *uv_handle_t
-  local owner = ffi.uv_handle_get_data(native_handle) as foreign *Udata
-  local callback = ffi.lmacro_clCvalue(
-      ffi.titan_record_field(owner, "WatchRegistration", "callback"))
-  local loop = ffi.uv_handle_get_loop(native_handle)
-  local L = ffi.uv_loop_get_data(loop) as foreign *lua_State
-  local module = ffi.lmacro_uvalue(callback.upvalue[0])
-  local entry = ffi.lmacro_pvalue(
-      callback.upvalue[2]) as foreign FsEventCallbackEntry
-  local top = ffi.lua_gettop(L)
-  entry(L, module, callback, owner, filename,
-        events as foreign lua_Integer, status as foreign lua_Integer)
-  ffi.lua_settop(L, top)
+-- Resource-producing completions attach the descriptor to an existing File
+-- before calling a decoder whose prologue or result copy may allocate.
+local function acquire<|T|>(file: File, operation: string,
+    submit: function (uv.loop_t, uv.fs_t, function (uv.fs_t): ()): (integer),
+    decode: function (uv.fs_t): (T)): T
+  local request = uv.fs_t.new()
+  local outcome = async.await<|T, integer|>(function (
+      resolve: function (T): (), reject: function (integer): (),
+      fatal: function (value, string): ())
+    local callback = function (completed: uv.fs_t)
+      local result = uv.fs_get_result(completed)
+      if result >= 0 then file.handle = result end
+      if result < 0 then
+        uv.fs_req_cleanup(completed)
+        reject(result)
+      else
+        local copied = decode(completed)
+        uv.fs_req_cleanup(completed)
+        resolve(copied)
+      end
+    catch
+      uv.fs_req_cleanup(completed)
+      fatal(error, traceback)
+      raise
+    end
+    local status = submit(async.current_loop(), request, callback)
+    if status < 0 then uv.fs_req_cleanup(request); reject(status) end
+  end)
+  case outcome
+  when success(result) then return result
+  when error(code) then raise operation_error(code, operation)
+  end
+end
+
+local function count_result(_: uv.fs_t, count: integer): integer
+  return count
+end
+
+local function open_flags(mode: string): integer
+  if mode == "r" or mode == "rb" then return uv.FS_O_RDONLY as integer end
+  if mode == "w" or mode == "wb" then
+    return (uv.FS_O_WRONLY as integer) | (uv.FS_O_CREAT as integer) |
+           (uv.FS_O_TRUNC as integer)
+  end
+  if mode == "a" or mode == "ab" then
+    return (uv.FS_O_WRONLY as integer) | (uv.FS_O_CREAT as integer) |
+           (uv.FS_O_APPEND as integer)
+  end
+  if mode == "r+" or mode == "r+b" or mode == "rb+" then
+    return uv.FS_O_RDWR as integer
+  end
+  if mode == "w+" or mode == "w+b" or mode == "wb+" then
+    return (uv.FS_O_RDWR as integer) | (uv.FS_O_CREAT as integer) |
+           (uv.FS_O_TRUNC as integer)
+  end
+  if mode == "a+" or mode == "a+b" or mode == "ab+" then
+    return (uv.FS_O_RDWR as integer) | (uv.FS_O_CREAT as integer) |
+           (uv.FS_O_APPEND as integer)
+  end
+  raise "invalid file mode '" .. mode .. "'"
+end
+
+local function File:require_open()
+  if self.handle < 0 then raise "File is closed" end
 end
 
 function open(path: string, mode: string): File
-  return File(uv.fs_open(path, mode), "")
+  checked_path(path, "fs.open")
+  local flags = open_flags(mode)
+  local file = File(-1, "")
+  do
+    return acquire<|File|>(file, "fs.open", function (loop: uv.loop_t,
+        request: uv.fs_t, callback: function (uv.fs_t): ()): integer
+      return uv.fs_open(loop, request, path, flags, 438, callback)
+    end, function (_: uv.fs_t): File
+      return file
+    end)
+  catch
+    file:close_with("fs.open.abandon.close")
+    raise
+  end
 end
 
 function File:read(max_bytes: integer?): string?
@@ -95,7 +172,7 @@ function File:read(max_bytes: integer?): string?
   if requested <= 0 then
     raise "file read size must be positive"
   end
-  if (self.handle as integer) < 0 then
+  if self.handle < 0 then
     self.excess = ""
     return nil
   end
@@ -106,12 +183,19 @@ function File:read(max_bytes: integer?): string?
     self.excess = string.sub(self.excess, length + 1)
     return result
   end
-  return uv.fs_read(self.handle, requested)
+  local buffer = uv.buf_t.allocate(requested)
+  return perform<|string?|>("fs.read", function (loop: uv.loop_t,
+      request: uv.fs_t, callback: function (uv.fs_t): ()): integer
+    return uv.fs_read(loop, request, self.handle, {buffer}, -1, callback)
+  end, function (_: uv.fs_t, count: integer): string?
+    if count == 0 then return nil end
+    return buffer:to_string(count)
+  end)
 end
 
 function File:read_until(delimiter: string,
                          chop: boolean?): string?
-  if (self.handle as integer) < 0 then
+  if self.handle < 0 then
     self.excess = ""
     return nil
   end
@@ -155,36 +239,74 @@ function File:read_until(delimiter: string,
 end
 
 function File:write(data: string): integer
+  self:require_open()
   local length = #data
-  if length == 0 then return uv.fs_write(self.handle, data, 0) end
+  if length == 0 then return 0 end
+  local buffer = uv.buf_t.from_string(data)
   local offset = 0
   while offset < length do
-    local written = uv.fs_write(self.handle, data, offset)
+    local remainder = buffer:slice(offset + 1, length - offset)
+    local written = perform<|integer|>("fs.write", function (loop: uv.loop_t,
+        request: uv.fs_t, callback: function (uv.fs_t): ()): integer
+      return uv.fs_write(loop, request, self.handle, {remainder}, -1, callback)
+    end, count_result)
     offset = offset + written
   end
   return offset
 end
 
 function File:flush()
-  uv.fs_flush(self.handle)
+  self:require_open()
+  perform<|integer|>("fs.flush", function (loop: uv.loop_t,
+      request: uv.fs_t, callback: function (uv.fs_t): ()): integer
+    return uv.fs_fsync(loop, request, self.handle, callback)
+  end, count_result)
 end
 
-function File:close()
+local function File:close_with(operation: string)
   self.excess = ""
-  if (self.handle as integer) < 0 then return end
+  if self.handle < 0 then return end
+  local request = uv.fs_t.new()
   local descriptor = self.handle
-  local operation = uv.FsCloseCall { file = descriptor, accepted = false }
-  self.handle = -1 as foreign uv_file
+  local accepted = false
+  self.handle = -1
   do
-    uv.fs_close(operation)
+    local outcome = async.await_cleanup<|integer, integer|>(function (
+        resolve: function (integer): (), reject: function (integer): (),
+        fatal: function (value, string): ())
+      local callback = function (completed: uv.fs_t)
+        local result = uv.fs_get_result(completed)
+        uv.fs_req_cleanup(completed)
+        if result < 0 then reject(result) else resolve(result) end
+      catch
+        uv.fs_req_cleanup(completed)
+        fatal(error, traceback)
+        raise
+      end
+      local status = uv.fs_close(async.current_loop(), request, descriptor, callback)
+      if status < 0 then
+        uv.fs_req_cleanup(request)
+        reject(status)
+      else
+        accepted = true
+      end
+    end)
+    case outcome
+    when success() then
+    when error(code) then raise operation_error(code, operation)
+    end
   catch
-    if not operation.accepted then self.handle = descriptor end
+    if not accepted then self.handle = descriptor end
     raise
   end
 end
 
+function File:close()
+  self:close_with("fs.close")
+end
+
 function File:is_closed(): boolean
-  return (self.handle as integer) < 0
+  return self.handle < 0
 end
 
 function read_file(path: string): string
@@ -205,27 +327,31 @@ function write_file(path: string, data: string)
 end
 
 local function missing_path(failure: value): boolean
-  if failure is uv.OperationError then
-    local operation = failure as uv.OperationError
-    return operation.code == (ffi.UV_ENOENT as integer)
+  if failure is async.OperationError then
+    return (failure as async.OperationError).code == uv.ENOENT as integer
   end
   return false
 end
 
+local function stat_result(request: uv.fs_t, _: integer): Stat
+  local info = uv.fs_get_statbuf(request)
+  local kind = "other"
+  local file_type = info.st_mode & (uv.S_IFMT as integer)
+  if file_type == uv.S_IFREG as integer then kind = "file"
+  elseif file_type == uv.S_IFDIR as integer then kind = "directory"
+  elseif uv.S_IFLNK ~= nil and file_type == uv.S_IFLNK as integer then kind = "symlink"
+  end
+  return Stat(info.st_size, kind, info.st_mode, info.st_dev, info.st_ino,
+              info.st_mtim.tv_sec, info.st_mtim.tv_nsec)
+end
+
 function stat(path: string): Stat?
+  checked_path(path, "fs.stat")
   do
-    local size, kind, mode, device, inode,
-      modified_seconds, modified_nanoseconds =
-      uv.fs_stat(path)
-    return Stat {
-      size = size,
-      kind = kind,
-      mode = mode,
-      device = device,
-      inode = inode,
-      modified_seconds = modified_seconds,
-      modified_nanoseconds = modified_nanoseconds,
-    }
+    return perform<|Stat|>("fs.stat", function (loop: uv.loop_t,
+        request: uv.fs_t, callback: function (uv.fs_t): ()): integer
+      return uv.fs_stat(loop, request, path, callback)
+    end, stat_result)
   catch
     if missing_path(error) then return nil end
     raise
@@ -233,128 +359,132 @@ function stat(path: string): Stat?
 end
 
 function lstat(path: string): Stat?
+  checked_path(path, "fs.lstat")
   do
-    local size, kind, mode, device, inode,
-      modified_seconds, modified_nanoseconds =
-      uv.fs_lstat(path)
-    return Stat {
-      size = size,
-      kind = kind,
-      mode = mode,
-      device = device,
-      inode = inode,
-      modified_seconds = modified_seconds,
-      modified_nanoseconds = modified_nanoseconds,
-    }
+    return perform<|Stat|>("fs.lstat", function (loop: uv.loop_t,
+        request: uv.fs_t, callback: function (uv.fs_t): ()): integer
+      return uv.fs_lstat(loop, request, path, callback)
+    end, stat_result)
   catch
     if missing_path(error) then return nil end
     raise
   end
 end
 
+local function sized_path(operation: string,
+    query: function (integer): (integer, string?, integer)): string
+  local capacity = 256
+  while true do
+    local status, result?, actual = query(capacity)
+    if status >= 0 then return result as string end
+    if status == uv.ENOBUFS as integer then capacity = actual
+    elseif status == uv.ENOENT as integer then return result as string
+    else raise operation_error(status, operation)
+    end
+  end
+end
+
 function tmpname(): string
-  return uv.fs_tmpname()
+  local template = sized_path("fs.tmpname", uv.os_tmpdir) .. "/titan-fs-XXXXXX"
+  local file = File(-1, "")
+  defer file:close_with("fs.tmpname.close")
+  return acquire<|string|>(file, "fs.tmpname", function (loop: uv.loop_t,
+      request: uv.fs_t, callback: function (uv.fs_t): ()): integer
+    return uv.fs_mkstemp(loop, request, template, callback)
+  end, function (request: uv.fs_t): string
+    return uv.fs_get_path(request) as string
+  end)
 end
 
 function tmpdir(): string
-  return uv.os_tmpdir()
+  return sized_path("os.tmpdir", uv.os_tmpdir)
 end
 
 function homedir(): string
-  return uv.os_homedir()
+  return sized_path("os.homedir", uv.os_homedir)
 end
 
 function pwd(): string
-  return uv.current_directory("fs.pwd")
+  return sized_path("fs.pwd", uv.cwd)
 end
 
 function chdir(path: string)
-  uv.change_directory(path, "fs.chdir")
+  check_status(uv.chdir(checked_path(path, "fs.chdir")), "fs.chdir")
 end
 
 function mkdir(path: string)
-  uv.fs_mkdir(path)
+  checked_path(path, "fs.mkdir")
+  perform<|integer|>("fs.mkdir", function (loop: uv.loop_t,
+      request: uv.fs_t, callback: function (uv.fs_t): ()): integer
+    return uv.fs_mkdir(loop, request, path, 511, callback)
+  end, count_result)
 end
 
 function unlink(path: string)
-  uv.fs_unlink(path)
+  checked_path(path, "fs.unlink")
+  perform<|integer|>("fs.unlink", function (loop: uv.loop_t,
+      request: uv.fs_t, callback: function (uv.fs_t): ()): integer
+    return uv.fs_unlink(loop, request, path, callback)
+  end, count_result)
 end
 
 function rmdir(path: string)
-  uv.fs_rmdir(path)
+  checked_path(path, "fs.rmdir")
+  perform<|integer|>("fs.rmdir", function (loop: uv.loop_t,
+      request: uv.fs_t, callback: function (uv.fs_t): ()): integer
+    return uv.fs_rmdir(loop, request, path, callback)
+  end, count_result)
 end
 
 function rename(from: string, to: string)
-  uv.fs_rename(from, to)
+  checked_path(from, "fs.rename")
+  checked_path(to, "fs.rename")
+  perform<|integer|>("fs.rename", function (loop: uv.loop_t,
+      request: uv.fs_t, callback: function (uv.fs_t): ()): integer
+    return uv.fs_rename(loop, request, from, to, callback)
+  end, count_result)
 end
 
 function list(path: string): {string}
-  return uv.fs_list(path)
-end
-
-local function RealpathRequest:root()
-  realpath_roots[self] = true
-end
-
-local function RealpathRequest:unroot()
-  realpath_roots[self] = nil
-end
-
-local function RealpathRequest:finish()
-  local waiter? = self.waiter
-  self.waiter = nil
-  local failed, payload = (function (request: RealpathRequest): (boolean, value)
-    defer ffi.uv_fs_req_cleanup(request.handle)
-    local result = ffi.uv_fs_get_result(request.handle) as integer
-    if result < 0 then return true, uv.make_error(result, "fs.realpath") end
-    local resolved = ffi.uv_fs_get_ptr(
-        request.handle) as foreign const *char
-    return false, resolved as string
-  catch
-    return true, error
-  end)(self)
-
-  self.failed = failed
-  self.payload = payload
-  self:unroot()
-  if waiter then uv.resume_condition_waiter_from_callback(waiter) end
+  checked_path(path, "fs.list")
+  return perform<|{string}|>("fs.list", function (loop: uv.loop_t,
+      request: uv.fs_t, callback: function (uv.fs_t): ()): integer
+    return uv.fs_scandir(loop, request, path, 0, callback)
+  end, function (request: uv.fs_t, _: integer): {string}
+    local names: {string} = {}
+    while true do
+      local status, entry? = uv.fs_scandir_next(request)
+      if status == uv.EOF as integer then break end
+      check_status(status, "fs.list")
+      names[#names + 1] = entry.name
+    end
+    return names
+  end)
 end
 
 function realpath(path: string): string
-  local task = uv.running_task()
-  local runtime = task.runtime
-  uv.accepting_work(runtime, "resolve a filesystem path")
-  local checked = uv.checked_text(path, "fs.realpath")
-  local resume_token = uv.ResumeToken("fs.realpath")
-  local callback = function (request: RealpathRequest)
-    request:finish()
-  end
-  local request = RealpathRequest {
-    handle = foreign uv_fs_t.new(),
-    callback = callback,
-    waiter = task,
-    failed = false,
-    payload = nil,
-  }
-  local native = request.handle
-  local cancel_action = function ()
-    if request.waiter == task then request.waiter = nil end
-  end
-  defer cancel_action()
-  request:root()
-  ffi.uv_req_set_data((native as foreign *uv_fs_t) as foreign *uv_req_t,
-                        request as foreign *void)
-  local status = ffi.uv_fs_realpath(
-      runtime.loop, native, checked, fs_realpath_cb)
-  if status < 0 then
-    ffi.uv_fs_req_cleanup(native)
-    request:unroot()
-    raise uv.make_error(status, "fs.realpath")
-  end
+  checked_path(path, "fs.realpath")
+  return perform<|string|>("fs.realpath", function (loop: uv.loop_t,
+      request: uv.fs_t, callback: function (uv.fs_t): ()): integer
+    return uv.fs_realpath(loop, request, path, callback)
+  end, function (request: uv.fs_t, _: integer): string
+    return uv.fs_get_string(request)
+  end)
+end
 
-  uv.suspend(resume_token, cancel_action)
-  if request.failed then raise request.payload end
-  return request.payload as string
+local record WatchRegistration
+  local handle: uv.fs_event_t
+  local view: uv.handle_t
+  local path: string
+  local directory: boolean
+  local index: integer
+end
+
+local record WatcherNotification
+  local registration: WatchRegistration
+  local filename: string?
+  local events: integer
+  local status: integer
 end
 
 local WATCHER_IDLE = 0
@@ -363,12 +493,11 @@ local WATCHER_CLEARING = 2
 local WATCHER_POLLING_CLEARING = 3
 
 record Watcher
-  local runtime: uv.Runtime
+  local loop: uv.loop_t
   local registrations: {WatchRegistration}
   local paths: {string: WatchRegistration}
-  local notifications: {WatcherNotification}
-  local waiter: uv.Task?
-  local resume_token: uv.ResumeToken?
+  local subscription: async.BufferedSubscription<|WatcherNotification, integer|>
+  local publish: function (WatcherNotification): (boolean)
   local operation_state: integer
 end
 
@@ -376,49 +505,15 @@ union WatcherEvent
   created(string)
   deleted(string)
   modified(string)
-  error(uv.OperationError)
+  error(async.OperationError)
 end
 
-local function Watcher:wake()
-  local waiter? = self.waiter
-  if not waiter then return end
-  local resume_token = self.resume_token
-  self.waiter = nil
-  self.resume_token = nil
-  waiter:resume(resume_token)
-end
-
-local function Watcher:wake_from_callback()
-  local waiter? = self.waiter
-  if not waiter then return end
-  self.waiter = nil
-  self.resume_token = nil
-  uv.resume_condition_waiter_from_callback(waiter)
-end
-
-local function Watcher:fail_from_callback(failure: value,
-                                            trace: string)
-  local waiter? = self.waiter
-  if waiter then
-    self.waiter = nil
-    self.resume_token = nil
-    uv.fail_task_at_callback_boundary(waiter, failure, trace)
-  else
-    uv.report_task_error(failure, trace)
-  end
-end
-
-local function Watcher:require_active_runtime()
-  local active? = uv.active_runtime
-  if not active or active ~= self.runtime then
-    raise "Watcher Runtime is not active"
-  end
-  uv.accepting_work(self.runtime, "use a filesystem watcher")
-end
-
-local function Watcher:require_running_task(): uv.Task
-  self:require_active_runtime()
-  return uv.running_task()
+local function Watcher:require_running_task()
+  local loop: uv.loop_t? = nil
+  do loop = async.current_loop()
+  catch raise "Watcher Runtime is not active" end
+  if loop ~= self.loop then raise "Watcher Runtime is not active" end
+  async.running()
 end
 
 local function Watcher:remove_registration(
@@ -432,80 +527,65 @@ local function Watcher:remove_registration(
   last.index = index
   self.registrations[last_index] = nil
   registration.index = 0
-  if #self.registrations == 0 then self:wake() end
+  if #self.registrations == 0 then self.subscription:wake_batch() end
 end
 
 local function WatchRegistration:stop()
-  local status = ffi.uv_fs_event_stop(self.handle)
-  if status < 0 then raise uv.make_error(status, "fs.watcher.stop") end
+  check_status(uv.fs_event_stop(self.handle), "fs.watcher.stop")
 end
 
 local function WatchRegistration:close(wait: boolean)
-  local handle =
-    (self.handle as foreign *uv_fs_event_t) as foreign *uv_handle_t
-  if wait then
-    uv.wait_handle_close(self.runtime, handle, self,
-                         self.runtime_root_index)
-  else
-    uv.close_handle(self.runtime, handle, self,
-                    self.runtime_root_index, nil, nil)
-  end
-  self.runtime_root_index = 0
+  if not wait then uv.close(self.view); return end
+  async.await_cleanup<|boolean, integer|>(function (
+      resolve: function (boolean): (), _reject: function (integer): (),
+      fatal: function (value, string): ())
+    local callback = function (_: uv.handle_t)
+      resolve(true)
+    catch
+      fatal(error, traceback)
+      raise
+    end
+    uv.close(self.view, callback)
+  end)
 end
 
-local function Watcher:receive_event(
-    registration: WatchRegistration,
-    filename: foreign const *char,
-    events: integer, status: integer)
-  local copied: string? = nil
-  if filename then copied = filename as string end
-  self.notifications[#self.notifications + 1] =
-    WatcherNotification {
-      registration = registration,
-      filename = copied,
-      events = events,
-      status = status,
-    }
-  self:wake_from_callback()
+local function Watcher:retire_registration(registration: WatchRegistration)
+  if registration.index == 0 then return end
+  -- Empty-batch wake can fail while preparing its scheduled continuation.
+  -- Keep native close armed before removing the last domain-owned index.
+  defer registration:close(true)
+  self:remove_registration(registration)
 end
 
 local function Watcher:new_registration(
     path: string, directory: boolean): WatchRegistration
-  local runtime = self.runtime
-  local callback = function (registration: WatchRegistration,
-                             filename: foreign const *char,
+  local handle = uv.fs_event_t.new()
+  local registration = WatchRegistration(handle, handle:as_handle_t(), path,
+                                          directory, #self.registrations + 1)
+  local callback = function (_: uv.fs_event_t, filename: string?,
                              events: integer, status: integer)
-    do
-      self:receive_event(registration, filename, events, status)
-    catch
-      self:fail_from_callback(error, traceback)
-    end
+    self.publish(WatcherNotification(registration, filename, events, status))
   end
-  local registration = WatchRegistration {
-    handle = foreign uv_fs_event_t.new(),
-    callback = callback,
-    runtime = runtime,
-    path = path,
-    directory = directory,
-    index = 0,
-    runtime_root_index = 0,
-  }
-  local native = registration.handle
-  registration.runtime_root_index = uv.root_handle(runtime, registration)
-  local init_status = ffi.uv_fs_event_init(runtime.loop, native)
-  if init_status < 0 then
-    uv.unroot_handle(runtime, registration.runtime_root_index)
-    registration.runtime_root_index = 0
-    raise uv.make_error(init_status, "fs.watcher.init")
+  -- Publish domain indexes before native acceptance; no callback can run until
+  -- the next loop turn. Failed initialization/start rolls back these indexes.
+  self.registrations[registration.index] = registration
+  do self.paths[path] = registration
+  catch
+    self.registrations[registration.index] = nil
+    registration.index = 0
+    raise
   end
-  local handle = (native as foreign *uv_fs_event_t) as foreign *uv_handle_t
-  ffi.uv_handle_set_data(
-      handle, registration as foreign *void)
-  local start_status = ffi.uv_fs_event_start(
-      native, fs_watcher_event_cb, path, 0)
-  if start_status < 0 then
-    registration:close(false)
-    raise uv.make_error(start_status, "fs.watcher.watch")
+  local initialized = false
+  do
+    local init_status = uv.fs_event_init(self.loop, handle)
+    if init_status < 0 then raise operation_error(init_status, "fs.watcher.init") end
+    initialized = true
+    local start_status = uv.fs_event_start(handle, callback, path, 0)
+    if start_status < 0 then raise operation_error(start_status, "fs.watcher.watch") end
+  catch
+    defer if initialized then registration:close(false) end
+    self:remove_registration(registration)
+    raise
   end
   return registration
 end
@@ -527,17 +607,20 @@ local function Watcher:find_registration(
 end
 
 function watcher(): Watcher
-  local task = uv.running_task()
-  uv.accepting_work(task.runtime, "create a filesystem watcher")
-  return Watcher {
-    runtime = task.runtime,
-    registrations = {},
-    paths = {},
-    notifications = {},
-    waiter = nil,
-    resume_token = nil,
-    operation_state = WATCHER_IDLE,
-  }
+  async.running()
+  local publish: (function (WatcherNotification): (boolean))? = nil
+  local subscription = async.BufferedSubscription<|WatcherNotification, integer|>(
+      function (send: function (WatcherNotification): (boolean),
+          _fail: function (integer): (boolean), _finish: function (): (boolean)):
+          async.SubscriptionActions<|WatcherNotification|>
+        publish = send
+        -- Registrations are dynamic domain resources. clear retires those
+        -- handles but keeps this notification transport reusable.
+        return async.SubscriptionActions<|WatcherNotification|>(function () end,
+            function (_drain: function (): (async.SubscriptionBatch<|WatcherNotification|>)) end)
+      end)
+  return Watcher(async.current_loop(), {}, {}, subscription, publish,
+                 WATCHER_IDLE)
 end
 
 function Watcher:watch(path: string)
@@ -548,14 +631,10 @@ function Watcher:watch(path: string)
 
   local info? = stat(canonical)
   if not info then
-    raise uv.make_error(ffi.UV_ENOENT as integer,
+    raise operation_error(uv.ENOENT as integer,
                         "fs.watcher.watch")
   end
-  local registration = self:new_registration(
-      canonical, info.kind == "directory")
-  registration.index = #self.registrations + 1
-  self.registrations[registration.index] = registration
-  self.paths[canonical] = registration
+  self:new_registration(canonical, info.kind == "directory")
 end
 
 function Watcher:stop(path: string)
@@ -564,8 +643,7 @@ function Watcher:stop(path: string)
   local registration? = self:find_registration(path)
   if not registration then return end
   registration:stop()
-  self:remove_registration(registration)
-  registration:close(true)
+  self:retire_registration(registration)
 end
 
 function Watcher:is_watching(path: string): boolean
@@ -602,15 +680,14 @@ function Watcher:clear()
   while #self.registrations > 0 do
     local registration = self.registrations[#self.registrations]
     registration:stop()
-    self:remove_registration(registration)
-    registration:close(true)
+    self:retire_registration(registration)
   end
 end
 
 local function WatchRegistration:event_path(
     filename: string?): string
   if not self.directory or not filename then return self.path end
-  local separator = ffi.LUA_DIRSEP as string
+  local separator = ffi.TITAN_FS_DIRSEP as string
   if string.sub(self.path, -1) == separator then return self.path .. filename end
   return self.path .. separator .. filename
 end
@@ -621,16 +698,15 @@ local function Watcher:map_notification(
     local registration = notification.registration
     if notification.status < 0 then
       if registration.index > 0 then
-        self:remove_registration(registration)
-        registration:close(true)
+        self:retire_registration(registration)
       end
       return WatcherEvent.error(
-          uv.make_error(notification.status, "fs.watcher"))
+          operation_error(notification.status, "fs.watcher"))
     end
 
     local path = registration:event_path(notification.filename)
     local renamed =
-      (notification.events & (ffi.UV_RENAME as integer)) ~= 0
+      (notification.events & (uv.RENAME as integer)) ~= 0
     local exists = true
     if registration.directory then
       if not lstat(registration.path) then
@@ -645,42 +721,33 @@ local function Watcher:map_notification(
     if not exists and path == registration.path and
        registration.index > 0 then
       registration:stop()
-      self:remove_registration(registration)
-      registration:close(true)
+      self:retire_registration(registration)
     end
     if not exists then return WatcherEvent.deleted(path) end
     if renamed then return WatcherEvent.created(path) end
     return WatcherEvent.modified(path)
   catch
-    if error is uv.OperationError then
-      return WatcherEvent.error(error as uv.OperationError)
+    if error is async.OperationError then
+      return WatcherEvent.error(error as async.OperationError)
     end
     raise
   end
 end
 
-local function Watcher:drain_notifications(): {WatcherEvent}
-  local notifications = self.notifications
-  self.notifications = {}
+local function Watcher:drain_notifications(
+    notifications: async.SubscriptionBatch<|WatcherNotification|>): {WatcherEvent}
   local events: {WatcherEvent} = {}
-  while #notifications > 0 do
-    for index = 1, #notifications do
-      events[#events + 1] = self:map_notification(notifications[index])
+  while notifications.count > 0 do
+    for index = 1, notifications.count do
+      events[#events + 1] = self:map_notification(notifications:get(index))
     end
-
-    local crosses_retirement = (function (
-        pending: {WatcherNotification}): boolean
-      for index = 1, #pending do
-        if pending[index].registration.index == 0 then return true end
-      end
-      return false
-    end)(self.notifications)
-    if not crosses_retirement then return events end
-
-    -- Preserve callback order by pulling the whole follow-on batch into this
-    -- poll when any notification crossed a registration's retirement.
-    notifications = self.notifications
-    self.notifications = {}
+    -- Pull the entire follow-on FIFO only if any callback crossed retirement;
+    -- live-only notifications stay queued for the next poll.
+    local following? = self.subscription:drain_if(function (item: WatcherNotification): boolean
+      return item.registration.index == 0
+    end)
+    if following == nil then return events end
+    notifications = following
   end
   return events
 end
@@ -705,28 +772,15 @@ local function Watcher:finish_poll()
 end
 
 function Watcher:poll(): {WatcherEvent}
-  local task = self:require_running_task()
+  self:require_running_task()
   self:begin_poll()
   defer self:finish_poll()
-
-  if #self.notifications > 0 then
-    return self:drain_notifications()
+  if #self.registrations == 0 then
+    return self:drain_notifications(self.subscription:drain_pending())
   end
-  if #self.registrations == 0 then return {} end
-
-  local resume_token = uv.ResumeToken("fs.watcher")
-  local cancel_action = function ()
-    if self.waiter == task and self.resume_token == resume_token then
-      self.waiter = nil
-      self.resume_token = nil
-    end
+  case self.subscription:next_batch()
+  when batch(notifications) then return self:drain_notifications(notifications)
+  when error(code) then raise operation_error(code, "fs.watcher")
+  else return {}
   end
-  defer cancel_action()
-  self.resume_token = resume_token
-  self.waiter = task
-  uv.suspend(resume_token, cancel_action)
-  if #self.notifications > 0 then
-    return self:drain_notifications()
-  end
-  return {}
 end

@@ -402,7 +402,7 @@ STDLIB_GENERATED_FFI_HEADERS := $(addsuffix .ffi.h, \
 	titan/sqlite3/sqlite3 titan/json/json)
 STDLIB_GENERATED_FOREIGN_HEADERS := $(STDLIB_GENERATED_FFI_HEADERS) \
 	titan/coroutine.titan.h \
-	titan/fs.titan.h titan/uv/uv.titan.h titan/http/http.titan.h \
+	titan/uv/uv.titan.h titan/http/http.titan.h \
 	titan/sqlite3/sqlite3.titan.h
 # One native compilation unit per logical module, including folder ensembles.
 # This reviewed import graph owns rebuild propagation and parallel ordering;
@@ -421,7 +421,7 @@ STDLIB_IMPORTS_uv := iteration
 STDLIB_IMPORTS_async := uv coroutine string
 STDLIB_IMPORTS_timer := async uv
 STDLIB_IMPORTS_io := os string
-STDLIB_IMPORTS_fs := uv string
+STDLIB_IMPORTS_fs := async uv string
 STDLIB_IMPORTS_net := uv string
 STDLIB_IMPORTS_ssl := async fs net string gc
 STDLIB_IMPORTS_url := peg string
@@ -2146,7 +2146,7 @@ else
 endif
 STDLIB_C_INPUTS_uv = $(UV_TITAN_HEADERS) $(foreach dir,$(STDLIB_UV_HEADER_DIRS),$(wildcard $(dir)/uv.h $(dir)/uv/*.h))
 STDLIB_C_INPUTS_async = titan/async_signal_platform.h
-STDLIB_C_INPUTS_fs = $(STDLIB_C_INPUTS_uv)
+STDLIB_C_INPUTS_fs = titan/fs_platform.h
 STDLIB_C_INPUTS_peg = $(LPEGLABEL_HEADERS)
 STDLIB_C_INPUTS_string = $(STRING_TITAN_HEADERS)
 STDLIB_C_INPUTS_http = $(LLHTTP_HEADER)
