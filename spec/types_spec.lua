@@ -2,6 +2,35 @@ local types = require "titan-compiler.types"
 
 describe("Titan types", function()
 
+    it("preserves custom record constructors through metadata rewrites", function()
+        local plain = types.Record("sample.Box", {}, {}, {}, 0)
+        assert.is_false(plain.custom_constructor)
+        assert.equal("Record('sample.Box',{},{},{},0)", types.serialize(plain))
+        local custom = types.Record("sample.Box", {}, {}, {}, 0, nil, nil, true)
+        assert.is_false(types.equals(plain, custom))
+        local rebuilt = assert(load("return " .. types.serialize(custom),
+            "custom record metadata", "t", types))()
+        assert.is_true(rebuilt.custom_constructor)
+        assert.is_true(types.equals(custom, rebuilt))
+        assert.is_true(types.erase(custom).custom_constructor)
+
+        local scope = types.GenericScope("sample", "sample.Box", nil,
+            "owner", "record")
+        local parameter = types.Parameter(scope, 1, "T", nil)
+        local generic = types.Record("sample.Box", {
+            types.Field("sample.Box", "item", parameter, 0, false),
+        }, {}, {}, 1, scope, {types.TypeParameter("T", nil)}, true)
+        local closed = types.substitute(generic, scope, {types.Integer()})
+        assert.is_true(closed.custom_constructor)
+        assert.equal("Type.Integer", closed.fields[1].type._tag)
+        local erased = types.erase(generic)
+        assert.is_true(erased.custom_constructor)
+        assert.equal("Type.Value", erased.fields[1].type._tag)
+        rebuilt = assert(load("return " .. types.serialize(generic),
+            "generic custom record metadata", "t", types))()
+        assert.is_true(types.equals(generic, rebuilt))
+    end)
+
     it("keeps a module's selected physical provider out of its interface",
        function()
         local module = types.Module("pkg.child", {})

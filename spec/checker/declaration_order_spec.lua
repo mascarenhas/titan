@@ -167,7 +167,10 @@ describe("top-level declaration order", function()
 
         assert_error("redeclaration of record function 'Box%.new'", [[
             function Box.new(): Box
-                return Box.new(1)
+                return { n = 1 }
+            end
+            function Box.new(): Box
+                return { n = 2 }
             end
             record Box
                 n: integer

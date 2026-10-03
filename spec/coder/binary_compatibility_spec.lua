@@ -822,7 +822,7 @@ int main(void) {
         runs("assert(consumer.run() == 42)")
     end)
 
-    it("rejects removal of public new used implicitly by a record literal", function()
+    it("rejects removal of record literal authority by a private field", function()
         local image = fixture("record Box n: integer end", [[
             local p = import "bc180_provider"
             function run(): integer
@@ -832,7 +832,62 @@ int main(void) {
         ]])
         runs("assert(consumer.run() == 42)")
         replace("record Box n: integer; local hidden: string end", image)
-        rejects("new")
+        rejects("literal")
+    end)
+
+    it("rejects replacing literal authority with a same-signature custom new", function()
+        local image = fixture("record Box n: integer end", [[
+            local p = import "bc180_provider"
+            function run(): integer
+                local box: p.Box = {n = 42}
+                return box.n
+            end
+        ]])
+        runs("assert(consumer.run() == 42)")
+        replace([[
+            record Box n: integer end
+            function Box.new(n: integer): Box return {n = n + 1} end
+        ]], image)
+        rejects("Box.literal")
+    end)
+
+    it("allows an unchanged direct new consumer to use a same-signature override", function()
+        local image = fixture("record Box n: integer end", [[
+            local p = import "bc180_provider"
+            function run(): integer return p.Box.new(41).n end
+        ]])
+        runs("assert(consumer.run() == 41)")
+        replace([[
+            record Box n: integer end
+            function Box.new(n: integer): Box return {n = n + 1} end
+        ]], image)
+        runs("assert(consumer.run() == 42)")
+    end)
+
+    it("requires raw construction authority for a DSO constructor with fused native storage", function()
+        local image = fixture("record Buffer const data: foreign *int end", [[
+            foreign import "spec/fixtures/nominal_allocation_probe.h"
+            local p = import "bc180_provider"
+            function make(): (p.Buffer, integer)
+                ffi.nominal_probe_begin(L)
+                local buffer = p.Buffer(foreign int.new_array(3))
+                local allocations = ffi.nominal_probe_end(L)
+                buffer.data[0] = 42
+                return buffer, allocations
+            end
+            function read(buffer: p.Buffer): integer return buffer.data[0] end
+        ]])
+        runs([[
+            local buffer, allocations = consumer.make()
+            assert(allocations == 1)
+            collectgarbage('collect')
+            assert(consumer.read(buffer) == 42)
+        ]])
+        replace([[
+            record Buffer const data: foreign *int end
+            function Buffer.new(data: foreign *int): Buffer return {data = data} end
+        ]], image)
+        rejects("Buffer.literal")
     end)
 
     it("tracks a bound method even when no direct method call exists", function()

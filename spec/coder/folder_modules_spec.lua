@@ -383,6 +383,66 @@ assert(dotted.answer() == 42)
         assert.truthy(ok, output)
     end)
 
+    it("shares one custom record constructor across distinct contributors", function()
+        local folder = source_root .. "/customparts"
+        write_file(folder .. "/customparts.titan", [[
+calls: integer = 0
+
+function from_main(): integer
+    return Box(1).value
+end
+
+function constructor_from_main(): function(integer): Box
+    return Box.new
+end
+]])
+        write_file(folder .. "/a-record.titan", [[
+record Box
+    local value: integer
+end
+
+function Box:read(): integer
+    return self.value
+end
+]])
+        write_file(folder .. "/b-constructor.titan", [[
+function Box.new(input: integer): Box
+    calls = calls + 1
+    return {value = input + 10}
+end
+]])
+        write_file(folder .. "/c-caller.titan", [[
+function from_contributor(): integer
+    return Box{input = 2}.value
+end
+
+function constructor_from_contributor(): function(integer): Box
+    return Box.new
+end
+]])
+
+        compile("customparts")
+        for _, basename in ipairs({"a-record", "b-constructor", "c-caller"}) do
+            assert.is_nil(lfs.attributes(folder .. "/" .. basename .. ".c"))
+            assert.is_nil(lfs.attributes(folder .. "/" .. basename .. ".o"))
+        end
+        local script = string.format([[
+package.cpath = %q .. "/?.so;" .. package.cpath
+local folder = require "customparts"
+assert(folder.calls == 0)
+assert(folder.from_main() == 11)
+assert(folder.from_contributor() == 12)
+assert(folder.Box(3):read() == 13)
+assert(folder.calls == 3)
+local constructor = folder.constructor_from_main()
+assert(constructor == folder.constructor_from_contributor())
+assert(constructor == folder.Box.new)
+assert(constructor(4):read() == 14 and folder.calls == 4)
+]], workspace)
+        local ok, output = run({LUA, "-e", script}, workspace)
+        assert.truthy(ok, output)
+    end)
+
     it("uses a collision-free executable for a folder main", function()
         local folder = source_root .. "/programs/folderapp"
         write_file(folder .. "/folderapp.titan", [[

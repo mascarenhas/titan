@@ -88,9 +88,9 @@ A replacement can add, remove, reorder, or change private fields while
 preserving a referenced record's public shape. Consumers that receive the
 record and access its public fields can continue to use it.
 
-Construction has an additional dependency. A record's synthesized `new` is
-public only when its fields are all public. Constructing an imported record
-with a literal counts as using that `new` constructor:
+Construction has an additional dependency. Constructing an imported record
+with a raw literal requires that its fields remain all public and that `new`
+remain the generated default:
 
 ```titan
 local model = import "model"
@@ -100,11 +100,19 @@ function make(): model.Point
 end
 ```
 
-Adding the first private field to `model.Point` therefore rejects this old
-consumer at load time. It removes the public construction operation on which
-the consumer relies. A consumer that only receives a `Point` from a provider
+Adding the first private field or overriding `new` therefore rejects this
+literal consumer at load time. An override with the same signature can remain
+compatible with an ordinary `model.Point(...)` or `model.Point.new(...)` caller.
+A call that fuses fresh native storage into the record's own allocation also
+relies on the generated default and rejects an override; that construction
+preserves the buffer's lifetime as part of its record.
+A consumer that only receives a `Point` from a provider
 function and reads `x` or `y` can remain compatible. See
 [Native storage](nominal-storage.md) for storage and ownership rules.
+
+Providers built before the literal-construction capability was introduced need
+rebuilding for newly compiled literal consumers. Older consumer binaries only
+recorded a `new` dependency and do not enforce the override restriction.
 
 ## Private union variants and control flow
 

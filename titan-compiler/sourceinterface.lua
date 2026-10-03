@@ -134,6 +134,7 @@ local SCHEMAS = {
         { "functions", "type_map" }, { "methods", "type_map" },
         { "nfields", "atom" }, { "scope", "maybe_type" },
         { "typeparams", "type_list_default" }, { "islocal", "flag" },
+        { "custom_constructor", "flag" },
     },
     ["Type.Union"] = {
         { "name", "atom" }, { "variants", "indexed_type_list" },

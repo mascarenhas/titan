@@ -122,7 +122,11 @@ checkvar = util.make_visitor({
         local written_exp = node.exp
         local nominal_field_projection = false
         if node.exp._tag == "Ast.ExpVar" then
-            generic_checkvar_for_expression(node.exp, st, errors)
+            if node.exp._generic_var_prechecked then
+                node.exp._generic_var_prechecked = nil
+            else
+                generic_checkvar_for_expression(node.exp, st, errors)
+            end
             if node.exp.var._decl then node.exp.var._decl._used = true end
             node.exp._type = node.exp.var._type
         else

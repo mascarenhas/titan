@@ -291,7 +291,7 @@ function coder._function_prefix(modname, name)
 end
 
 function coder._nominal_metamethod_name(fqtn, role)
-    assert(role == "index" or role == "newindex",
+    assert(role == "index" or role == "newindex" or role == "call",
         "unknown nominal metamethod role")
     return coder._nominal_function_prefix(fqtn, "meta_" .. role)
 end

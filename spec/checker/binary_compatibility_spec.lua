@@ -103,7 +103,7 @@ describe("binary dependency usage", function()
         assert.equal("owner", tree._binary_modules.owner.name)
     end)
 
-    it("treats contextual record construction as a new reference", function()
+    it("tracks contextual record construction independently of new calls", function()
         local tree = check({
             provider = [[record Item number: integer end]],
             consumer = [[
@@ -111,7 +111,8 @@ describe("binary dependency usage", function()
                 function make(): p.Item return {number = 42} end
             ]],
         })
-        assert.is_true(tree._binary_usage.provider.records.Item.functions.new)
+        assert.is_true(tree._binary_usage.provider.records.Item.literal)
+        assert.same({}, tree._binary_usage.provider.records.Item.functions)
     end)
 
     it("tracks concrete methods used only by implicit Interface conversion", function()

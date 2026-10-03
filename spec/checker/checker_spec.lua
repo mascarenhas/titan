@@ -2604,6 +2604,154 @@ describe("Titan typecheck of records", function()
         ]])
     end)
 
+    it("calls record namespaces through their generated constructors", function()
+        assert_type_check([[
+            record Point x: float; y: float end
+            record Label text: string end
+            local record Private text: string end
+            type Alias = Point
+            p = Point(1, 2)
+            function use(Point: integer): float
+                local named = M.Point { y = 4, x = 3 }
+                local aliased = Alias(5, 6)
+                local text = Label "label"
+                local private = Private "private"
+                return named.x + aliased.y + #text.text + #private.text + Point
+            end
+        ]])
+    end)
+
+    it("replaces generated record constructors regardless of declaration order", function()
+        assert_type_check([[
+            function Before.new(text: string): (Before, integer)
+                return { number = #text }, #text
+            end
+            record Before number: integer end
+            record After local number: integer end
+            function After.new(text: string): After
+                return { number = #text }
+            end
+            function use(): integer
+                local before, size = Before "hello"
+                local after = After { text = "world" }
+                return before.number + after.number + size
+            end
+        ]])
+    end)
+
+    it("permits arbitrary result types and ordinary generic and variadic constructors", function()
+        assert_type_check([[
+            record Identity ignored: integer end
+            function Identity.new<|T|>(item: T): T return item end
+            record Relay ignored: integer end
+            function Relay.new(...: integer): (...: integer) return ... end
+            record Sink ignored: integer end
+            function Sink.new(item: string) end
+            function use(): integer
+                Sink "discarded"
+                local result = Identity(42)
+                local first, second = Relay(1, 2)
+                return result + first + second
+            end
+        ]])
+    end)
+
+    it("keeps custom constructor parameters independent of record fields", function()
+        local ok, err, tree = run_checker([[
+            record Box item: integer end
+            function Box.new(item: integer): Box return { item = item + 1 } end
+            function use(): Box return Box { item = 2 } end
+        ]])
+        assert.truthy(ok, err)
+        local constructor, use
+        for _, node in ipairs(tree) do
+            if node._tag == "Ast.TopLevelStatic" and not node._ignore then
+                constructor = node
+            elseif node._tag == "Ast.TopLevelFunc" and node.name == "use" then
+                use = node
+            end
+        end
+        assert.equal("Checker.Parameter", constructor.params[1]._decl._tag)
+        assert.falsy(use.block.stats[1].exps[1]._nominal_constructor)
+    end)
+
+    it("does not treat a same-signature custom constructor as a constant initializer", function()
+        assert_type_error("initialization must be constant", [[
+            record Box item: integer end
+            function Box.new(item: integer): Box return { item = item + 1 } end
+            local box = Box(1)
+        ]])
+    end)
+
+    it("still rejects duplicate explicit constructors and unrelated namespace calls", function()
+        assert_type_error("redeclaration of record function 'Box.new'", [[
+            record Box item: integer end
+            function Box.new(item: integer): Box return { item = item } end
+            function Box.new(item: integer): Box return { item = item } end
+        ]])
+        assert_type_error("is not a function", [[
+            union Choice yes(integer) end
+            function use(): Choice return Choice(1) end
+        ]])
+    end)
+
+    it("honors custom constructor visibility through public and explicit source imports", function()
+        local provider = [[
+            record Public local item: integer end
+            function Public.new(item: integer): Public return { item = item } end
+            record Private item: integer end
+            local function Private.new(item: integer): Private return { item = item } end
+        ]]
+        for _, view in ipairs({ "source", "compiled" }) do
+            local ok, err = run_checker_modules({
+                provider = provider,
+                consumer = [[
+                    local p = import "provider"
+                    function use(): p.Public return p.Public(1) end
+                ]],
+            }, "consumer", { interface = view })
+            assert.truthy(ok, err)
+            ok, err = run_checker_modules({
+                provider = provider,
+                consumer = [[
+                    local p = import "provider"
+                    function use(): p.Private return p.Private(1) end
+                ]],
+            }, "consumer", { interface = view })
+            assert.falsy(ok)
+            assert.match("record function", err)
+        end
+        local ok, err = run_checker_modules({
+            provider = provider,
+            consumer = [[
+                local p = import "provider.titan"
+                function use(): p.Private return p.Private(1) end
+            ]],
+        }, "consumer", { interface = "source" })
+        assert.truthy(ok, err)
+    end)
+
+    it("restricts overridden record literals to their defining module", function()
+        for _, view in ipairs({ "source", "compiled" }) do
+            for _, import in ipairs({ "provider", "provider.titan" }) do
+                local ok, err = run_checker_modules({
+                    provider = [[
+                        record Box item: integer end
+                        function Box.new(item: integer): Box
+                            return { item = item + 1 }
+                        end
+                    ]],
+                    consumer = string.format([[
+                        local p = import %q
+                        function use(): p.Box return { item = 1 } end
+                    ]], import),
+                }, "consumer", { interface = view })
+                assert.falsy(ok)
+                assert.match("outside module 'provider' because it has a custom constructor", err)
+            end
+        end
+    end)
+
     it("doesn't typecheck invalid dot operation in record", function()
         assert_type_error("invalid record function 'nope'", [[
             record Point x: float; y:float end

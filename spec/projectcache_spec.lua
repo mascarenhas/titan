@@ -103,6 +103,33 @@ describe("declared project manifests", function()
         end)
     end
 
+    it("retains custom constructor authority through a cached source interface", function()
+        local provider = load_module("custom_provider", [[
+            record Box<|T|> item: T end
+            function Box.new(item: T): Box<|T|> return {item = item} end
+            record Hidden item: integer end
+            local function Hidden.new(): Hidden return {item = 1} end
+        ]])
+        local payload = assert(driver.encode_project_entry(provider))
+        driver.imported, types.registry = {}, {}
+        local restored = assert(driver.decode_project_entry(payload, {
+            module_name = "custom_provider",
+            project_files = { [provider.filename] = true },
+        }))
+        assert.is_true(restored.type.members.Box.type.custom_constructor)
+        assert.is_true(restored.type.members.Hidden.type.custom_constructor)
+        assert.is_true(restored.type.members.Hidden.type.functions.new.islocal)
+        assert.is_true(restored.declared_registry["custom_provider.Hidden"].custom_constructor)
+        local consumer = load_module("custom_consumer", [[
+            local provider = import "custom_provider"
+            function answer(): integer
+                return provider.Box<|integer|>.new(42).item
+            end
+        ]], {custom_provider = restored})
+        assert.is_table(consumer.ast)
+        assert.equal(restored, driver.imported.custom_provider)
+    end)
+
     it("hydrates a private generic source entry and reuses it on the next edit", function()
         local provider = load_module("provider", [[
             record Box<|A|> item: A end

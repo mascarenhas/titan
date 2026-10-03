@@ -2415,6 +2415,9 @@ local function canonical_owner_application(nominal, owner)
 end
 
 local function validate_record_interface(record, context, seen)
+    if type(record.custom_constructor) ~= "boolean" then
+        return nil, "record has a noncanonical custom constructor flag"
+    end
     if not context or context.kind ~= "module-member"
        or record.name ~= context.modname .. "." .. context.name
        or record.islocal
@@ -2484,10 +2487,11 @@ local function validate_record_interface(record, context, seen)
     end
 
     local constructor = record.functions.new
-    if not constructor and record.nfields == nfields then
+    if not record.custom_constructor and not constructor
+       and record.nfields == nfields then
         return nil, "all-public record is missing its constructor"
     end
-    if constructor then
+    if constructor and not record.custom_constructor then
         if record.nfields ~= nfields
            or constructor.scope ~= nil
            or #constructor.typeparams ~= 0

@@ -687,6 +687,24 @@ checkexp = util.make_visitor({
             or argtag == "Ast.ArgsNamedMethod")
 
         if not method then
+            if node.exp._type._tag == "Type.Record" then
+                -- Calling the namespace is exactly selecting its ordinary
+                -- static `new`: visibility, named arguments and generic
+                -- inference remain owned by the existing selector/call path.
+                local namespace = node.exp
+                if #(node.typeargs or {}) > 0 then
+                    namespace._nominal_typeargs = node.typeargs
+                    namespace._nominal_typeargs_loc = namespace.loc
+                    node.typeargs = {}
+                end
+                namespace._generic_var_prechecked = true
+                node.exp = ast.ExpVar(namespace.loc,
+                    ast.VarDot(namespace.loc, namespace, "new"))
+                generic_checkvar_for_expression(node.exp, st, errors)
+                node.exp._type = node.exp.var._type
+                if node.exp.var._decl then node.exp.var._decl._used = true end
+                written_exp = node.exp
+            end
             node._nominal_constructor = checker._direct_nominal_constructor(node)
             local ftype = generic_instantiate_direct_call(
                 node, node.exp._type, st, errors, demand)

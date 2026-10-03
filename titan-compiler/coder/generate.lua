@@ -251,8 +251,41 @@ function coder.generate(modname, ast, static_deps, abi, emit_line_directives, op
             and (node._tag == "Ast.TopLevelRecord"
                 or node._tag == "Ast.TopLevelUnion") then
             local slot = tlcontext.nominal_namespace_slots[node._type.name]
+            local callmeta = ""
+            local constructor = node._type.functions.new
+            if node._tag == "Ast.TopLevelRecord"
+                and constructor and not constructor.islocal then
+                local callname = coder._nominal_metamethod_name(
+                    node._type.name, "call")
+                table.insert(code, render([[
+                    static int $CALLNAME_finish(lua_State *L, int status,
+                                                lua_KContext context) {
+                        (void)status;
+                        (void)context;
+                        return lua_gettop(L);
+                    }
+                    static int $CALLNAME(lua_State *L) {
+                        /* Replace the namespace receiver with its constructor;
+                           every argument and result retains ordinary Lua call
+                           adjustment, including nils and flexible results. */
+                        lua_getfield(L, 1, "new");
+                        lua_replace(L, 1);
+                        lua_callk(L, lua_gettop(L) - 1, LUA_MULTRET, 0,
+                                  $CALLNAME_finish);
+                        return lua_gettop(L);
+                    }
+                ]], { CALLNAME = callname,
+                    CALLNAME_finish = callname .. "_finish" }))
+                callmeta = render([[
+                    lua_newtable(L);
+                    lua_pushcfunction(L, $CALLNAME);
+                    lua_setfield(L, -2, "__call");
+                    lua_setmetatable(L, -2);
+                ]], { CALLNAME = callname })
+            end
             table.insert(funcs, render([[
                 lua_newtable(L);
+                $CALLMETA
                 {
                   // set nominal_metatable[TITAN_MT_STATICS] = <statics table>
                   TValue _vmeta;
@@ -273,6 +306,7 @@ function coder.generate(modname, ast, static_deps, abi, emit_line_directives, op
             ]], {
                 NAME = c_string_literal(node._type.name),
                 SLOT = c_integer_literal(slot),
+                CALLMETA = callmeta,
             }))
             if not node.islocal then
                 register_readonly_member(node.name, slot)

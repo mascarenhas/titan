@@ -533,7 +533,8 @@ local function record_constructor_parameter(declaration, index, name)
     if declaration._tag ~= "Type.StaticMethod" or declaration.name ~= "new"
        then return nil end
     local owner = types.registry[declaration.fqtn]
-    if not owner or owner._tag ~= "Type.Record" then return nil end
+    if not owner or owner._tag ~= "Type.Record"
+       or owner.custom_constructor then return nil end
     local field = owner.fields[index]
     if field and field.name == name then return field end
     for _, candidate in ipairs(owner.fields or {}) do

@@ -2225,8 +2225,17 @@ function codevaluecall(ctx, node)
 end
 
 function codecall(ctx, node)
-    if node._nominal_constructor then
-        return coder._codenominalcall(ctx, node)
+    local constructor = node._nominal_constructor
+    if constructor then
+        local module = constructor.owner.name:match("^(.*)%.[^.]+$")
+        -- A separate record provider owns `new`'s replaceable implementation.
+        -- Fresh native storage is the exception: its argument plans require
+        -- raw construction and the checker records that capability explicitly.
+        if constructor.kind ~= "record" or module == ctx.module
+           or ctx.tlcontext.static_deps[module] == true
+           or next(constructor.allocation_plans) ~= nil then
+            return coder._codenominalcall(ctx, node)
+        end
     end
     if coder._immediate_function(node) then
         return codeimmediatecall(ctx, node)

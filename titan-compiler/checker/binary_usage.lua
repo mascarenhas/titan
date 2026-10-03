@@ -163,8 +163,18 @@ function binary_collect_usage(tree, st, registry)
                 local owner = registry[node._type.fqtn]
                 if owner and owner._tag == "Type.Record" then
                     local used = nominal_usage(owner.name)
-                    if used then used.functions.new = true end
+                    if used then used.literal = true end
                 end
+            end
+            local constructor = tag == "Ast.ExpCall"
+                and node._nominal_constructor
+            if constructor and constructor.kind == "record"
+               and next(constructor.allocation_plans) ~= nil then
+                -- Fused native arguments allocate inside the record itself;
+                -- this call relies on generated raw construction just as a
+                -- literal does, rather than only on `new`'s callable contract.
+                local used = nominal_usage(constructor.owner.name)
+                if used then used.literal = true end
             end
             if node._binary_closed_union then
                 local used = nominal_usage(node._binary_closed_union)

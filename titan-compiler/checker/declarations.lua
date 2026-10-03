@@ -475,7 +475,8 @@ function isconstructor(node)
     if not owner or owner.functions[decl.name] ~= decl then
         return false
     elseif owner._tag == "Type.Record" then
-        if decl.name ~= "new" or #decl.params ~= #owner.fields then
+        if owner.custom_constructor or decl.name ~= "new"
+           or #decl.params ~= #owner.fields then
             return false
         end
         for index, field in ipairs(owner.fields) do
@@ -1070,7 +1071,8 @@ toplevel_visitor = util.make_visitor({
                 end
             end
             node._type = types.Record(fqtn, fields, {}, {}, #fields,
-                node._generic_scope, node._generic_typeparams)
+                node._generic_scope, node._generic_typeparams,
+                node._custom_constructor and true or false)
             node._type._generic_parameters = node._generic_parameters
             node._type.islocal = node.islocal and true or false
             node._type._source_complete = true
@@ -1536,6 +1538,15 @@ end
 
 function collect_nominal_constructors(ast)
     local constructors = {}
+    local custom_records = {}
+    local superseded = {}
+    for _, node in ipairs(ast) do
+        if not node._ignore and node._tag == "Ast.TopLevelStatic"
+           and node.name == "new" and not node._record_constructor
+           and not node._union_constructor then
+            custom_records[node.class] = true
+        end
+    end
     for index, node in ipairs(ast) do
         if node._tag == "Ast.TopLevelRecord" then
             local constructor = ast[index + 1]
@@ -1543,8 +1554,14 @@ function collect_nominal_constructors(ast)
                and constructor._record_constructor then
                 assert(constructor.class == node.name and
                        constructor.name == "new")
-                if node._ignore then constructor._ignore = true end
-                constructors[#constructors + 1] = constructor
+                node._custom_constructor = custom_records[node.name]
+                if node._custom_constructor then
+                    superseded[#superseded + 1] = index + 1
+                elseif node._ignore then
+                    constructor._ignore = true
+                else
+                    constructors[#constructors + 1] = constructor
+                end
             end
         elseif node._tag == "Ast.TopLevelUnion" then
             local offset = 1
@@ -1562,6 +1579,11 @@ function collect_nominal_constructors(ast)
                 offset = offset + 1
             end
         end
+    end
+    -- A successful checked AST contains only real callable declarations.
+    -- `_ignore` is error recovery, not a second hidden constructor lifetime.
+    for index = #superseded, 1, -1 do
+        table.remove(ast, superseded[index])
     end
     return constructors
 end

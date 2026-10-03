@@ -7,6 +7,7 @@
 # change materially. Recorded file times exclude process/startup overhead.
 1 spec/abi_spec.lua 2.661
 1 spec/binary_compatibility_spec.lua 0.100
+4 spec/coder/record_constructors_spec.lua 1.000
 3 spec/cdeclarator_spec.lua 0.034
 1 spec/cdefines_spec.lua 0.045
 2 spec/cdriver_spec.lua 184.496

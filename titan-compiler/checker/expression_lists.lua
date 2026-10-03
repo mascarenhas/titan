@@ -1342,6 +1342,14 @@ function generic_resolve_named_record_constructor_context(
         return nil
     end
 
+    if record.custom_constructor
+       and nominal_module(record.name) ~= st.modname then
+        node._type = invalid(errors, node.loc,
+            "cannot construct record type '%s' outside module '%s' because it has a custom constructor",
+            context.fqtn, nominal_module(context.fqtn))
+        return nil
+    end
+
     local visible_fields = visible_record_fields(record, st)
     if (record.nfields or #record.fields) > #visible_fields then
         node._type = invalid(errors, node.loc,

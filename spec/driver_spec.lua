@@ -1490,6 +1490,81 @@ assert(driver.PROBE_CACHE_DIRECTORY == nil)
     end)
 end)
 
+describe("record constructor compiled-interface validation", function()
+    local modname, owner = "constructor_metadata", "constructor_metadata.Box"
+
+    local function module(constructor, custom, nfields)
+        local record = types.Record(owner, {
+            types.Field(owner, "item", types.Integer(), 0, false),
+        }, constructor and {new = constructor} or {}, {}, nfields or 1,
+            nil, nil, custom)
+        return types.Module(modname, {
+            types.ModuleMember(modname, "Box", record, nil),
+        }), record
+    end
+
+    it("accepts arbitrary public custom new signatures and private omissions", function()
+        local scope = types.GenericScope(modname, owner, "new", "static", "static")
+        local parameter = types.Parameter(scope, 1, "T", nil)
+        local signatures = {
+            types.StaticMethod(owner, "new", {}, {}, nil, nil, {}),
+            types.StaticMethod(owner, "new", {types.String()},
+                {types.Integer(), types.String()}, types.Value(), types.String(),
+                {"text"}),
+            types.StaticMethod(owner, "new", {parameter}, {parameter},
+                nil, nil, {"value"}, scope, {types.TypeParameter("T", nil)}),
+        }
+        for _, constructor in ipairs(signatures) do
+            for _, count in ipairs({1, 2}) do
+                local original = module(constructor, true, count)
+                local decoded, err = driver.decode_module_interface(
+                    types.serialize(original), modname, "custom new metadata")
+                assert.truthy(decoded, err)
+                assert.is_true(decoded.members.Box.type.custom_constructor)
+                assert.is_true(types.equals(original, decoded))
+            end
+        end
+        local original = module(nil, true)
+        local decoded, err = driver.decode_module_interface(
+            types.serialize(original), modname, "private new metadata")
+        assert.truthy(decoded, err)
+        assert.is_true(decoded.members.Box.type.custom_constructor)
+        assert.is_nil(decoded.members.Box.type.functions.new)
+    end)
+
+    it("retains synthesized constructor shape checks and validates the override flag", function()
+        local original, record = module(nil, false)
+        local ok, err = driver.validate_module_interface(original, modname)
+        assert.is_nil(ok)
+        assert.matches("all-public record is missing its constructor", err, 1, true)
+        record.functions.new = types.StaticMethod(owner, "new", {}, {}, nil, nil, {})
+        ok, err = driver.validate_module_interface(original, modname)
+        assert.is_nil(ok)
+        assert.matches("record constructor does not match its owner", err, 1, true)
+        for _, invalid in ipairs({"true", 1}) do
+            record.custom_constructor = invalid
+            ok, err = driver.validate_module_interface(original, modname)
+            assert.is_nil(ok)
+            assert.matches("noncanonical custom constructor flag", err, 1, true)
+        end
+        record.custom_constructor = nil
+        ok, err = driver.validate_module_interface(original, modname)
+        assert.is_nil(ok)
+        assert.matches("noncanonical custom constructor flag", err, 1, true)
+    end)
+
+    it("includes override authority in the source interface identity", function()
+        local modtype, record = module(nil, false)
+        modtype._source = true
+        modtype.source_members = modtype.members
+        modtype.source_type_members = {}
+        local entry = {kind = "source", type = modtype, c_header_dependencies = {}}
+        local before = assert(sourceinterface.serialize(entry))
+        record.custom_constructor = true
+        assert.not_equal(before, assert(sourceinterface.serialize(entry)))
+    end)
+end)
+
 describe("Array compiled-interface validation", function()
     local modname = "array_metadata"
 

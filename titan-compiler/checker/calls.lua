@@ -11,7 +11,8 @@ function checker._direct_nominal_constructor(node)
     if not declaration or declaration._tag ~= "Type.StaticMethod" then return nil end
     local owner = types.registry[declaration.fqtn]
     local variant, slots
-    if owner and owner._tag == "Type.Record" and declaration.name == "new" then
+    if owner and owner._tag == "Type.Record" and not owner.custom_constructor
+       and declaration.name == "new" then
         slots = owner.fields
     elseif owner and owner._tag == "Type.Union" then
         variant = owner.variants[declaration.name]

@@ -174,6 +174,12 @@ canonical fields/variants and validates the adjacent parser node against it.
 This prevents double quantification without moving desugaring, changing AST
 order, or giving constructors a second independent signature.
 
+An explicit record static `new` suppresses the synthetic declaration instead
+and gets the ordinary owner/member generic scopes. Bare record calls lower to
+that same member selection, moving written call type arguments onto the owner
+namespace. The record's `custom_constructor` flag survives both declared and
+erased graphs; see [record constructors](record-constructors.md).
+
 ## Surface type metadata algebra
 
 Generic-aware checking uses declaration descriptors that never reach ordinary

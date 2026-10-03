@@ -179,6 +179,33 @@ describe("binary dependency compatibility", function()
         reject(constructor, metadata, "records.Item.functions.new")
     end)
 
+    it("requires literal authority independently of a same-signature custom new", function()
+        local name = "provider.Item"
+        local original = types.Record(name, {field(name, "count", types.Integer(), 0)}, {
+            new = types.StaticMethod(name, "new", {types.Integer()},
+                {types.Nominal(name)}, nil, nil, {"count"}),
+        }, {}, 1)
+        local literal, expected = checker(owner_module(original), {
+            records = {Item = {literal = true}},
+        })
+        assert.is_true(expected.records.Item.literal)
+        assert.same({}, expected.records.Item.functions)
+        local called = checker(owner_module(original), {
+            records = {Item = {functions = {new = true}}},
+        })
+        local accessor = checker(owner_module(original), {records = {Item = {}}})
+        literal(check_metadata(owner_module(original)))
+        original.custom_constructor = true
+        local replacement = check_metadata(owner_module(original))
+        assert.is_false(replacement.records.Item.literal)
+        reject(literal, replacement, "records.Item.literal")
+        called(replacement)
+        accessor(replacement)
+        replacement.records.Item.literal = nil
+        reject(literal, replacement, "records.Item.literal")
+        called(replacement)
+    end)
+
     it("checks public union shape and requires total inventory only for closed proofs", function()
         local name = "provider.Item"
         local ready = types.Variant(name, "ready", {field(name, "value", types.Integer(), 1)}, 0)
