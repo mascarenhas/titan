@@ -145,17 +145,18 @@ function test_fs_concurrent_reads_preserve_buffers_through_gc_and_cancellation(
     local expected = support.make_boundary_payload()
     fs.write_file(path, expected)
     local first = fs.open(path, "rb")
-    defer first:close()
+    runtime_test.cleanup(function () first:close() end)
     local second = fs.open(path, "rb")
-    defer second:close()
-    local token = async.ResumeToken.new("filesystem read start")
-    local first_ready, second_ready = false, false
+    runtime_test.cleanup(function () second:close() end)
+    local start_first: (function (nil): ())? = nil
+    local start_second: (function (nil): ())? = nil
     local first_submitted, second_submitted = false, false
     local cancelled_delivered = false
     local received: string? = nil
     local cancelled = async.run<|value, value|>(function (): value
-      first_ready = true
-      async.suspend(token)
+      async.await<|nil, nil|>(function (resolve, _reject, _fatal)
+        start_first = resolve
+      end)
       first_submitted = true
       first:read(65536)
       cancelled_delivered = true
@@ -163,8 +164,9 @@ function test_fs_concurrent_reads_preserve_buffers_through_gc_and_cancellation(
     end)
     task_support.cleanup_task(cancelled, "cancelled filesystem read cleanup")
     local survivor = async.run<|value, value|>(function (): value
-      second_ready = true
-      async.suspend(token)
+      async.await<|nil, nil|>(function (resolve, _reject, _fatal)
+        start_second = resolve
+      end)
       second_submitted = true
       local contents = ""
       while true do
@@ -177,21 +179,50 @@ function test_fs_concurrent_reads_preserve_buffers_through_gc_and_cancellation(
       return nil
     end)
     task_support.cleanup_task(survivor, "surviving filesystem read cleanup")
-    while not first_ready or not second_ready do timer.yield() end
+    -- Release unused gates before Task joins, then close files only after both
+    -- readers finish. Cancellation prevents cleanup from starting a new read.
+    runtime_test.cleanup(function ()
+      if start_first ~= nil then
+        local release = start_first
+        start_first = nil
+        cancelled:cancel(async.CancellationReason.simple("unused filesystem read gate"))
+        release(nil)
+      end
+    end)
+    runtime_test.cleanup(function ()
+      if start_second ~= nil then
+        local release = start_second
+        start_second = nil
+        survivor:cancel(async.CancellationReason.simple("unused filesystem read gate"))
+        release(nil)
+      end
+    end)
+    while start_first == nil or start_second == nil do timer.yield() end
 
-    -- Resume requests deferred entry. Observe each body reaching its native
-    -- read before checking submission and cancelling the first waiter.
-    cancelled:resume(token)
-    survivor:resume(token)
     test.assert(not first_submitted and not second_submitted,
-                "resume entered a filesystem reader inline")
-    while not first_submitted or not second_submitted do timer.yield() end
-    test.assert(cancelled:status():as_string() == "waiting" and
-                survivor:status():as_string() == "waiting",
-                "filesystem reads did not suspend after submission")
-    cancelled:cancel(async.CancellationReason.simple("cancel pending read"))
-    gc.collect()
-    gc.collect()
+                "filesystem readers passed their start gates")
+    -- Registration runs outside a Task, so each gate settles synchronously
+    -- through the real File:read submission. No UV completion can interleave
+    -- before this registration returns, even if a worker has finished reading.
+    async.await<|nil, nil|>(function (resolve, _reject, _fatal)
+      local release_first, release_second = start_first, start_second
+      start_first = nil
+      release_first(nil)
+      start_second = nil
+      release_second(nil)
+      test.assert(first_submitted and second_submitted and
+                  cancelled:status():as_string() == "waiting" and
+                  survivor:status():as_string() == "waiting",
+                  "filesystem reads did not suspend after submission")
+      cancelled:cancel(async.CancellationReason.simple("cancel pending read"))
+      gc.collect()
+      gc.collect()
+      test.assert(cancelled:status():as_string() == "waiting" and
+                  survivor:status():as_string() == "waiting" and
+                  not cancelled_delivered and received == nil,
+                  "filesystem reads advanced before their completion callbacks")
+      resolve(nil)
+    end)
     async.join(cancelled)
     async.join(survivor)
     test.assert(cancelled:status():has_cancelled() and not cancelled_delivered,
