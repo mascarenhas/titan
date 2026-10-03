@@ -1,0 +1,70 @@
+-- Regression oracle: capture the public connection Task in a handler,
+-- then cancel it while its next keep-alive header acquisition is pending.
+local io = import "io"
+
+local function cancelled_header_parent(encrypted: boolean, first_port: integer)
+  runtime_test.run(function ()
+    local owner: async.Task? = nil
+    local handled = false
+    local handler: http.Handler = function (_: http.Request, response: http.Response)
+      test.assert(owner == nil, "unexpected second HTTP handler")
+      owner = async.running()
+      response:set_header("Content-Length", "0")
+      response:close()
+      handled = true
+    end
+    local listen = function (): (http.Server, integer)
+      if encrypted then return support.https_listen(first_port, handler, 10000) end
+      return support.http_listen(first_port, handler, 10000)
+    end
+    local server, port = listen()
+    defer server:close()
+    local serving = async.run<|nil, value|>(function (): nil server:serve(); return nil end)
+    defer task_support.cancel_and_join_task(serving, "private HTTP listener cleanup")
+    local connect = function (): io.ReaderWriterCloser
+      if encrypted then return ssl.connect("127.0.0.1", port, support.TRUST_ROOT) end
+      return net.connect("127.0.0.1", port)
+    end
+    local client = connect()
+    defer client:close()
+    client:write("GET /prime HTTP/1.1\r\nHost: localhost\r\n\r\nG")
+    test.assert(client:read_until("\r\n\r\n", false) ~= nil,
+                "priming response did not arrive")
+    while not handled do timer.yield() end
+    test.assert(owner ~= nil, "handler omitted its public Task")
+    local parent = owner as async.Task
+    task_support.cleanup_task(parent, "private HTTP connection cleanup")
+    -- The response is complete and a partial next request remains buffered.
+    -- Allow its reader/deadline children to register before cancellation.
+    timer.yield()
+    timer.yield()
+    test.assert(parent:status():as_string() == "waiting",
+                "connection parent was not waiting for the next header")
+    local reason = async.CancellationReason<|value|>.complex(false)
+    parent:cancel(reason)
+    local saw_eof = false
+    do
+      saw_eof = client:read() == nil
+      test.assert(not encrypted, "TLS parent cancellation claimed clean EOF")
+    catch
+      if not encrypted or not (error is ssl.Error) then raise end
+      saw_eof = (error as ssl.Error).name == "TLS_TRUNCATED_EOF"
+    end
+    test.assert(saw_eof, "cancelled connection parent did not close its transport")
+    case async.join(parent)
+    when cancelled(actual) then test.assert(actual == reason, "parent cancellation reason changed")
+    else raise "connection parent did not retire as cancelled"
+    end
+    client:close()
+    server:close()
+    test.assert(async.join(serving):has_succeeded(), "listener failed after parent cancellation")
+  end)
+end
+
+function test_cancelled_header_parent_plain(_context: test.Context)
+  cancelled_header_parent(false, 58000)
+end
+
+function test_cancelled_header_parent_tls(_context: test.Context)
+  cancelled_header_parent(true, 58200)
+end

@@ -337,10 +337,9 @@ local function read_request_with_idle_timeout(
   local deadline = async.run(function (): nil
     timer.sleep(timeout)
   end)
-  defer do
-    defer await_terminal_cleanup(deadline)
-    deadline:cancel(cleanup_reason)
-  end
+  -- The timer-only loser owns no parser or transport state. Cancel it on
+  -- every exit without adding a scheduling turn before buffered requests.
+  defer deadline:cancel(cleanup_reason)
   local raced = async.race_two(reader, deadline)
   case raced
   when first(status) then
