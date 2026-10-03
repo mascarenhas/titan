@@ -305,18 +305,42 @@ local function accept_request_expectation(
   return false
 end
 
+-- Shared parser/transport state cannot be released until its owning child has
+-- finished, including when the parent is already cancelled or shutting down.
+local function await_terminal_cleanup<|A, B|>(task: async.Task<|A, B|>)
+  if task:status():has_finished() then return end
+  local remove: (function (): ())? = nil
+  defer do if remove ~= nil then remove() end end
+  async.await_cleanup<|nil, nil|>(function (resolve, _, fatal)
+    remove = task:add_terminal_listener(function (_: async.TaskStatus<|A, B|>)
+      do resolve(nil)
+      catch fatal(error, traceback); raise end
+    end)
+  end)
+end
+
 local function read_request_with_idle_timeout(
     parser: Parser, server: Server): Request?
   local encrypted = server.encrypted
   local timeout = server.idle_timeout_ms
   if timeout == 0 then return read_request(parser, encrypted) end
 
+  local cleanup_reason = async.CancellationReason<|value|>.simple(
+    "HTTP request header wait stopped")
   local reader = async.run<|Request?, value|>(function (): Request?
     return read_request(parser, encrypted)
   end)
+  defer do
+    defer await_terminal_cleanup(reader)
+    reader:cancel(cleanup_reason)
+  end
   local deadline = async.run(function (): nil
     timer.sleep(timeout)
   end)
+  defer do
+    defer await_terminal_cleanup(deadline)
+    deadline:cancel(cleanup_reason)
+  end
   local raced = async.race_two(reader, deadline)
   case raced
   when first(status) then
@@ -328,7 +352,6 @@ local function read_request_with_idle_timeout(
   when second() then
     reader:cancel(async.CancellationReason.simple(
       "HTTP idle timeout expired"))
-    async.join(reader)
     -- A successful deadline is the ordinary idle-timeout path. A failed or
     -- cancelled child has already reported its exact failure, so this
     -- connection Task only performs peer cleanup and returns.
@@ -337,10 +360,11 @@ local function read_request_with_idle_timeout(
 end
 
 local function serve_connection(connection: io.ReaderWriterCloser,
-                                server: Server)
+                                server: Server, started: function (): ())
+  defer connection:close()
+  started()
   local parser = new_request_parser(connection)
   defer close_parser(parser)
-  defer connection:close()
   while true do
     -- Snapshot the current setting for this request-header acquisition.
     -- Setter calls affect the next loop iteration, never an in-flight read.
@@ -435,9 +459,42 @@ function Server:serve()
     end
     local connection = accepted as io.ReaderWriterCloser
     local server = self
-    async.run(function (): nil
-      serve_connection(connection, server)
-    end)
+    -- run only accepts a deferred start. Keep this connection owned until the
+    -- child has armed its close defer, or has terminated without entering it.
+    local transferred = false
+    do
+      defer do if not transferred then connection:close() end end
+      local child: async.Task<|nil, value|>? = nil
+      defer do
+        if child ~= nil and not transferred then
+          defer await_terminal_cleanup(child)
+          child:cancel(async.CancellationReason.simple(
+            "HTTP connection handoff stopped"))
+        end
+      end
+      local remove: (function (): ())? = nil
+      defer do if remove ~= nil then remove() end end
+      async.await_cleanup<|nil, nil|>(function (resolve, _, fatal)
+        local notified = false
+        local notify = function ()
+          if notified then return end
+          resolve(nil)
+          notified = true
+        end
+        local started = function ()
+          transferred = true
+          notify()
+        end
+        child = async.run<|nil, value|>(function (): nil
+          serve_connection(connection, server, started)
+          return nil
+        end)
+        remove = child:add_terminal_listener(function (_: async.TaskStatus<|nil, value|>)
+          do notify()
+          catch fatal(error, traceback); raise end
+        end)
+      end)
+    end
   end
 end
 
