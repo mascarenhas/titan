@@ -511,6 +511,12 @@ local function render_enum_selection_source(context, declaration_type, question)
     lines[#lines + 1] =
         "__attribute__((used, aligned(1), section(\".titan.cprobe\")))"
     lines[#lines + 1] = "#endif"
+    -- This array is a serialized object-section answer, never runtime storage.
+    -- Clang ASan redzones would otherwise pad its exact twelve-byte payload,
+    -- just as they would the public/source metadata sections.
+    lines[#lines + 1] = "#if defined(__clang__)"
+    lines[#lines + 1] = "__attribute__((no_sanitize(\"address\")))"
+    lines[#lines + 1] = "#endif"
     lines[#lines + 1] = "static const unsigned char " ..
         probe_identifier("enum_result") .. "[] = {"
     lines[#lines + 1] = "    84, 73, 84, 69, 78, 85, 77, 0, 1, 12,"
