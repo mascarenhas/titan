@@ -1,0 +1,365 @@
+-- One-shot registration, payload, cancellation, and continuation contracts.
+foreign import "async_stack_probe.h"
+
+local function await_test_later(action: function (): ())
+  local timer = uv.timer_t.new()
+  local handle = timer:as_handle_t()
+  local closed = function (_: uv.handle_t) action() end
+  local fired = function (_: uv.timer_t) uv.close(handle, closed) end
+  test.assert(uv.timer_init(async.current_loop(), timer) == 0, "timer init")
+  local status = uv.timer_start(timer, fired, 0, 0)
+  if status < 0 then uv.close(handle); raise "timer start" end
+end
+
+local function await_test_expect_error(action: function (): (), expected: string)
+  local caught = false
+  do action() catch caught = error == expected end
+  test.assert(caught, "operation did not raise the expected error")
+end
+
+local function await_test_payloads(): integer
+  local passed = 0
+  local await_success_nil = async.await<|nil, nil|>(function (resolve: function (nil): (), reject: function (nil): ())
+    resolve(nil)
+  end)
+  case await_success_nil
+  when success(item) then test.assert(item == nil, "await_success_nil payload"); passed = passed + 1
+  else raise "await_success_nil tag"
+  end
+  local await_success_false = async.await<|boolean, boolean|>(function (resolve: function (boolean): (), reject: function (boolean): ())
+    resolve(false)
+  end)
+  case await_success_false
+  when success(item) then test.assert(item == false, "await_success_false payload"); passed = passed + 1
+  else raise "await_success_false tag"
+  end
+  local await_error_nil = async.await<|nil, nil|>(function (resolve: function (nil): (), reject: function (nil): ())
+    reject(nil)
+  end)
+  case await_error_nil
+  when error(item) then test.assert(item == nil, "await_error_nil payload"); passed = passed + 1
+  else raise "await_error_nil tag"
+  end
+  local await_error_false = async.await<|boolean, boolean|>(function (resolve: function (boolean): (), reject: function (boolean): ())
+    reject(false)
+  end)
+  case await_error_false
+  when error(item) then test.assert(item == false, "await_error_false payload"); passed = passed + 1
+  else raise "await_error_false tag"
+  end
+  local await_cancellable_success_nil = async.await_cancellable<|nil, nil|>(function (resolve: function (nil): (), reject: function (nil): ()): uv.req_t?
+    resolve(nil)
+    return nil
+  end)
+  case await_cancellable_success_nil
+  when success(item) then test.assert(item == nil, "await_cancellable_success_nil payload"); passed = passed + 1
+  else raise "await_cancellable_success_nil tag"
+  end
+  local await_cancellable_success_false = async.await_cancellable<|boolean, boolean|>(function (resolve: function (boolean): (), reject: function (boolean): ()): uv.req_t?
+    resolve(false)
+    return nil
+  end)
+  case await_cancellable_success_false
+  when success(item) then test.assert(item == false, "await_cancellable_success_false payload"); passed = passed + 1
+  else raise "await_cancellable_success_false tag"
+  end
+  local await_cancellable_error_nil = async.await_cancellable<|nil, nil|>(function (resolve: function (nil): (), reject: function (nil): ()): uv.req_t?
+    reject(nil)
+    return nil
+  end)
+  case await_cancellable_error_nil
+  when error(item) then test.assert(item == nil, "await_cancellable_error_nil payload"); passed = passed + 1
+  else raise "await_cancellable_error_nil tag"
+  end
+  local await_cancellable_error_false = async.await_cancellable<|boolean, boolean|>(function (resolve: function (boolean): (), reject: function (boolean): ()): uv.req_t?
+    reject(false)
+    return nil
+  end)
+  case await_cancellable_error_false
+  when error(item) then test.assert(item == false, "await_cancellable_error_false payload"); passed = passed + 1
+  else raise "await_cancellable_error_false tag"
+  end
+  local await_cleanup_success_nil = async.await_cleanup<|nil, nil|>(function (resolve: function (nil): (), reject: function (nil): ())
+    resolve(nil)
+  end)
+  case await_cleanup_success_nil
+  when success(item) then test.assert(item == nil, "await_cleanup_success_nil payload"); passed = passed + 1
+  else raise "await_cleanup_success_nil tag"
+  end
+  local await_cleanup_success_false = async.await_cleanup<|boolean, boolean|>(function (resolve: function (boolean): (), reject: function (boolean): ())
+    resolve(false)
+  end)
+  case await_cleanup_success_false
+  when success(item) then test.assert(item == false, "await_cleanup_success_false payload"); passed = passed + 1
+  else raise "await_cleanup_success_false tag"
+  end
+  local await_cleanup_error_nil = async.await_cleanup<|nil, nil|>(function (resolve: function (nil): (), reject: function (nil): ())
+    reject(nil)
+  end)
+  case await_cleanup_error_nil
+  when error(item) then test.assert(item == nil, "await_cleanup_error_nil payload"); passed = passed + 1
+  else raise "await_cleanup_error_nil tag"
+  end
+  local await_cleanup_error_false = async.await_cleanup<|boolean, boolean|>(function (resolve: function (boolean): (), reject: function (boolean): ())
+    reject(false)
+  end)
+  case await_cleanup_error_false
+  when error(item) then test.assert(item == false, "await_cleanup_error_false payload"); passed = passed + 1
+  else raise "await_cleanup_error_false tag"
+  end
+  return passed
+end
+
+
+function test_generic_await_preserves_typed_nil_and_false(context: test.Context)
+  runtime_test.run(function ()
+    test.assert(await_test_payloads() == 12, "payload matrix incomplete")
+  end)
+end
+
+function test_generic_await_inline_continuations_keep_bounded_stack(context: test.Context)
+  runtime_test.run(function ()
+    local probe: owned *AsyncStackProbe = foreign AsyncStackProbe.new()
+    ffi.titan_async_stack_reset(probe)
+    local prefix_span = 0
+    for index = 1, 10000 do
+      local result = async.await<|integer, string|>(function (resolve, _reject, _fatal)
+        resolve(index)
+      end)
+      case result
+      when success(number) then test.assert(number == index, "inline success payload")
+      else raise "inline success tag"
+      end
+      local rejected = async.await<|integer, integer|>(function (_resolve, reject, _fatal)
+        reject(index)
+      end)
+      case rejected
+      when error(number) then test.assert(number == index, "inline rejection payload")
+      else raise "inline rejection tag"
+      end
+      ffi.titan_async_stack_sample(probe)
+      if index == 100 then prefix_span = ffi.titan_async_stack_span(probe) as integer end
+    end
+    -- Compare sampled stack addresses at one call site after warmup. This is
+    -- a growth regression oracle, not a platform-independent peak-stack size.
+    local final_span = ffi.titan_async_stack_span(probe) as integer
+    test.assert(final_span <= prefix_span + 4096,
+        "inline continuation stack grew with the number of operations")
+  end)
+end
+
+function test_generic_await_pre_cancellation_and_shielded_cleanup(context: test.Context)
+  runtime_test.run(function ()
+    local first = async.CancellationReason<|value|>.complex(false)
+    local ordinary_registered = false
+    local ordinary_caught = false
+    local ordinary_reason = false
+    local cancellable_registered = false
+    local cancellable_cancelled = false
+    local cancellable_reason = false
+    local cleanup_registered = 0
+    local cleanup_success = false
+    local cleanup_error = false
+    local cleanup_inline = false
+    local end_reached = false
+    local cancelled = async.run<|value, value|>(function (): value
+      local self = async.running()
+      self:cancel(first)
+      self:cancel(async.CancellationReason<|value|>.simple("later reason"))
+      do
+        async.await<|nil, nil|>(function (resolve: function (nil): (), _reject: function (nil): ())
+          ordinary_registered = true
+          resolve(nil)
+        end)
+      catch
+        ordinary_caught = true
+        ordinary_reason = error == first
+      end
+      local stopped = async.await_cancellable<|nil, nil|>(function (resolve: function (nil): (), _reject: function (nil): ()): uv.req_t?
+        cancellable_registered = true
+        resolve(nil)
+        return nil
+      end)
+      case stopped
+      when cancelled(reason) then cancellable_cancelled = true; cancellable_reason = reason == first
+      else raise "pre-cancelled await_cancellable did not return cancelled"
+      end
+      local inline_result = async.await_cleanup<|nil, nil|>(function (resolve: function (nil): (), _reject: function (nil): ())
+        cleanup_registered = cleanup_registered + 1
+        resolve(nil)
+      end)
+      case inline_result
+      when success(item) then cleanup_inline = item == nil
+      else raise "inline cleanup cancelled"
+      end
+      local success_result = async.await_cleanup<|boolean, nil|>(function (resolve: function (boolean): (), _reject: function (nil): ())
+        cleanup_registered = cleanup_registered + 1
+        await_test_later(function () resolve(false) end)
+      end)
+      case success_result
+      when success(item) then cleanup_success = item == false
+      else raise "deferred cleanup success cancelled"
+      end
+      local error_result = async.await_cleanup<|boolean, nil|>(function (_resolve: function (boolean): (), reject: function (nil): ())
+        cleanup_registered = cleanup_registered + 1
+        await_test_later(function () reject(nil) end)
+      end)
+      case error_result
+      when error(item) then cleanup_error = item == nil
+      else raise "deferred cleanup error cancelled"
+      end
+      end_reached = true
+      return nil
+    end)
+    async.join(cancelled)
+    test.assert(not ordinary_registered and ordinary_caught and ordinary_reason, "ordinary pre-cancellation did not suppress registration and inject first reason")
+    test.assert(not cancellable_registered and cancellable_cancelled and cancellable_reason, "cancellable pre-cancellation did not suppress registration and return first reason")
+    test.assert(cleanup_registered == 3 and cleanup_inline and cleanup_success and cleanup_error and end_reached, "cleanup did not submit and finish through sticky cancellation")
+    case cancelled:status()
+    when cancelled(reason) then test.assert(reason == first, "terminal cancellation lost first reason")
+    else raise "sticky cancellation lost terminal status"
+    end
+  end)
+end
+
+function test_generic_await_rejects_duplicate_and_stale_resolvers(context: test.Context)
+  local old_resolve: (function (integer): ())? = nil
+  local new_resolve: (function (integer): ())? = nil
+  local entered_new = false
+  local finished = 0
+  local second_settled = false
+  local target = async.run<|nil, value|>(function (): nil
+    local first = async.await<|integer, string|>(function (resolve, _reject, _fatal)
+      old_resolve = resolve
+      resolve(1)
+      await_test_expect_error(function () resolve(99) end, "async operation already settled")
+    end)
+    case first
+    when success(number) then test.assert(number == 1, "first result overwritten")
+    else raise "first result tag"
+    end
+    local second = async.await<|integer, string|>(function (resolve, _reject, _fatal)
+      new_resolve = resolve
+      entered_new = true
+    end)
+    case second
+    when success(number) then test.assert(number == 2, "stale resolver entered new wait")
+    else raise "second result tag"
+    end
+    finished = finished + 1
+    return nil
+  end)
+  local sender = async.run<|nil, value|>(function (): nil
+    defer do
+      if new_resolve and not second_settled and not target:status():has_finished() then
+        second_settled = true
+        new_resolve(2)
+      end
+    end
+    while not entered_new do
+      test.assert(not target:status():has_finished(), "target finished before second registration")
+      async.yield()
+    end
+    await_test_expect_error(function () old_resolve(100) end, "async operation already settled")
+    test.assert(target:status():as_string() == "waiting", "stale resolution resumed Task")
+    new_resolve(2)
+    second_settled = true
+    test.assert(finished == 0, "peer settlement reentered Task inline")
+    await_test_expect_error(function () new_resolve(3) end, "async operation already settled")
+    return nil
+  end)
+  async.loop()
+  test.assert(target:status():has_succeeded(), "target failed")
+  test.assert(sender:status():has_succeeded(), "sender failed")
+  test.assert(finished == 1, "multiple continuation entries")
+  await_test_expect_error(function () old_resolve(4) end, "async operation already settled")
+end
+
+
+local function await_test_pending_cancellation(cleanup: boolean)
+  local first = async.CancellationReason<|value|>.complex(false)
+  local resolve_pending: (function (boolean): ())? = nil
+  local registered, returned, callback_completed, caught = false, false, false, false
+  local target = async.run<|value, value|>(function (): value
+    local register = function (resolve: function (boolean): (), _reject: function (nil): (), _fatal: function (value, string): ())
+      resolve_pending = resolve
+      registered = true
+    end
+    do
+      if cleanup then
+        local result = async.await_cleanup<|boolean, nil|>(register)
+        case result
+        when success(value) then returned = value == false
+        else raise "pending cleanup lost success"
+        end
+      else
+        async.await<|boolean, nil|>(register)
+        returned = true
+      end
+    catch
+      caught = error == first
+    end
+    return nil
+  end)
+  while not registered do async.yield() end
+  target:cancel(first)
+  target:cancel(async.CancellationReason.simple("later cancellation"))
+  test.assert(target:status():as_string() == "waiting" and not returned and not caught,
+      "pending cancellation resumed before operation completion")
+  callback_completed = true
+  resolve_pending(false)
+  test.assert(not returned and not caught, "peer completion reentered waiting Task")
+  local status = async.join(target)
+  case status
+  when cancelled(reason) then test.assert(reason == first, "pending cancellation changed first reason")
+  else raise "pending cancellation lost terminal status"
+  end
+  test.assert(callback_completed and returned == cleanup and caught ~= cleanup,
+      "pending operation used the wrong cancellation policy")
+end
+
+function test_generic_await_pending_cancellation_waits_for_completion(context: test.Context)
+  runtime_test.run(function ()
+    await_test_pending_cancellation(false)
+    await_test_pending_cancellation(true)
+    local first = async.CancellationReason<|value|>.complex(false)
+    local submitted, callback_completed, returned_cancelled = false, false, false
+    local target = async.run<|value, value|>(function (): value
+      local owner = async.running()
+      local result = async.await_cancellable<|integer, string|>(function (resolve, reject, fatal): uv.req_t?
+        local request = uv.fs_t.new()
+        local native = request:as_req_t()
+        local callback = function (_: uv.fs_t)
+          local status = uv.fs_get_result(request)
+          uv.fs_req_cleanup(request)
+          do
+            callback_completed = true
+            resolve(status)
+          catch
+            fatal(error, traceback)
+            raise
+          end
+        end
+        local status = uv.fs_stat(async.current_loop(), request, ".", callback)
+        if status < 0 then uv.fs_req_cleanup(request); reject(uv.strerror(status)); return nil end
+        submitted = true
+        -- No event-loop turn separates native acceptance from cancellation.
+        -- Whether uv.cancel wins or returns busy, the callback owns retirement.
+        owner:cancel(first)
+        return native
+      end)
+      case result
+      when cancelled(reason) then returned_cancelled = reason == first and callback_completed
+      else raise "accepted cancellable operation ignored cancellation"
+      end
+      return nil
+    end)
+    local status = async.join(target)
+    test.assert(submitted and callback_completed and returned_cancelled,
+        "cancellable wait returned before its accepted request callback")
+    case status
+    when cancelled(reason) then test.assert(reason == first, "cancellable terminal reason changed")
+    else raise "cancellable terminal status changed"
+    end
+  end)
+end

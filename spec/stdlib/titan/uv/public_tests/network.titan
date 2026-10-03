@@ -1,0 +1,204 @@
+-- Promoted from the independently exercised public stream and UDP clients.
+local function open_pipe_pair(loop: uv.loop_t): (uv.pipe_t, uv.pipe_t)
+  local status, rd, wr = uv.pipe(uv.NONBLOCK_PIPE, uv.NONBLOCK_PIPE)
+  success(status)
+  defer if rd >= 0 then close_file(rd) end
+  defer if wr >= 0 then close_file(wr) end
+  local reader = uv.pipe_t()
+  local writer = uv.pipe_t()
+  success(uv.pipe_init(loop, reader, 0))
+  success(uv.pipe_init(loop, writer, 0))
+  success(uv.pipe_open(reader, rd))
+  rd = -1
+  success(uv.pipe_open(writer, wr))
+  wr = -1
+  return reader, writer
+end
+
+function test_tcp_public_views_write_shutdown_and_eof(_context: test.Context)
+  local loop = new_loop()
+  defer finish_loop(loop)
+  local listener = uv.tcp_t()
+  success(uv.tcp_init(loop, listener))
+  local address_status, address? = uv.ip4_addr("127.0.0.1", 0)
+  success(address_status)
+  success(uv.tcp_bind(listener, address, 0))
+  local accepts, connects, writes, shutdowns, eof = 0, 0, 0, 0, 0
+  local received = ""
+  success(uv.listen(listener:as_stream_t(), 1, function (server, status)
+    success(status)
+    accepts = accepts + 1
+    local peer = uv.tcp_t()
+    success(uv.tcp_init(loop, peer))
+    success(uv.accept(server, peer:as_handle_t()))
+    uv.close(listener:as_handle_t())
+    local named, remote?, _size = uv.tcp_getpeername(peer)
+    success(named)
+    test.assert(remote:family() == uv.AF_INET and remote:port() > 0)
+    success(uv.read_start(peer:as_stream_t(),
+      function (_handle, _suggested) return uv.buf_t.allocate(2) end,
+      function (stream, count, buffer)
+        if count > 0 then
+          received = received .. buffer:to_string(count)
+        elseif count < 0 then
+          test.assert(count == uv.EOF)
+          eof = eof + 1
+          success(uv.read_stop(stream))
+          uv.close(peer:as_handle_t())
+        end
+        collect()
+      end))
+  end))
+  local named, actual?, _size = uv.tcp_getsockname(listener)
+  success(named)
+  test.assert(actual:port() > 0)
+  local client = uv.tcp_t()
+  success(uv.tcp_init(loop, client))
+  success(uv.tcp_nodelay(client, 1))
+  success(uv.tcp_connect(uv.connect_t(), client, actual,
+    function (_connected: uv.connect_t, status: integer)
+      success(status)
+      connects = connects + 1
+      local buffers = {uv.buf_t.from_string("TCP\0bytes")}
+      success(uv.write(uv.write_t(), client:as_stream_t(), buffers,
+        function (_written: uv.write_t, write_status: integer)
+          success(write_status)
+          writes = writes + 1
+          success(uv.shutdown(uv.shutdown_t(), client:as_stream_t(),
+            function (_request: uv.shutdown_t, shutdown_status: integer)
+              success(shutdown_status)
+              shutdowns = shutdowns + 1
+              uv.close(client:as_handle_t())
+            end))
+        end))
+      buffers[1] = uv.buf_t.from_string("replaced vector")
+      collect()
+    end))
+  success(uv.run(loop))
+  test.assert(accepts == 1 and connects == 1 and writes == 1 and shutdowns == 1 and eof == 1)
+  test.assert(received == "TCP\0bytes")
+end
+
+function test_pipe_read_restart_preserves_paired_buffer(_context: test.Context)
+  local loop = new_loop()
+  defer finish_loop(loop)
+  local reader, writer = open_pipe_pair(loop)
+  local input = reader:as_stream_t()
+  local output = writer:as_stream_t()
+  local first_allocs, first_reads, next_reads = 0, 0, 0
+  local seen = ""
+  local next_read: uv.read_cb = function (handle, count, buffer)
+    test.assert(count > 0, "unexpected restarted read status")
+    seen = seen .. buffer:to_string(count)
+    next_reads = next_reads + 1
+    test.assert(uv.read_stop(handle) == 0, "stop restarted read")
+    uv.close(reader:as_handle_t(), nil)
+    uv.close(writer:as_handle_t(), nil)
+    gc.collect()
+  end
+  test.assert(uv.read_start(input,
+    function (handle, suggested)
+      first_allocs = first_allocs + 1
+      local buffer = uv.buf_t.allocate(3)
+      gc.collect()
+      return buffer
+    end,
+    function (handle, count, buffer)
+      test.assert(count > 0, "unexpected first read status")
+      seen = seen .. buffer:to_string(count)
+      first_reads = first_reads + 1
+      test.assert(uv.read_stop(handle) == 0, "stop first read")
+      test.assert(uv.read_start(handle,
+        function (current, suggested) return uv.buf_t.allocate(3) end,
+        next_read) == 0, "restart inside read callback")
+      gc.collect()
+      test.assert(buffer:to_string(count) == "one", "first allocation lost during callback")
+    end) == 0, "start first read")
+  test.assert(uv.read_start(input,
+    function (handle, suggested): uv.buf_t
+      raise "rejected active start replaced allocator"
+    end,
+    function (handle, count, buffer) raise "rejected active start replaced reader" end) < 0,
+    "active read start must reject")
+  -- Windows named pipes return EAGAIN from try_write; accepted writes use the
+  -- portable callback path on every platform.
+  local written = 0
+  success(uv.write(uv.write_t(), output, {uv.buf_t.from_string("onetwo")},
+    function (_request: uv.write_t, status: integer)
+      success(status)
+      written = written + 1
+    end))
+  gc.collect()
+  test.assert(uv.run(loop) == 0, "read and close run")
+  test.assert(first_allocs == 1 and first_reads == 1 and next_reads == 1, "read callback counts")
+  test.assert(seen == "onetwo", "read restart changed bytes")
+  test.assert(written == 1)
+end
+
+local function allocate(handle: uv.handle_t, suggested: integer): uv.buf_t
+  return uv.buf_t.allocate(suggested)
+end
+
+local function bound(loop: uv.loop_t, flags: integer): (uv.udp_t, uv.sockaddr_t)
+  local receiver = uv.udp_t.new()
+  test.assert(uv.udp_init_ex(loop, receiver, flags) == 0)
+  local status, address? = uv.ip4_addr("127.0.0.1", 0)
+  test.assert(status == 0)
+  test.assert(uv.udp_bind(receiver, address, 0) == 0)
+  local result, actual? = uv.udp_getsockname(receiver)
+  test.assert(result == 0)
+  return receiver, actual
+end
+
+function test_empty_datagram_and_reused_request(context: test.Context)
+  local loop = new_loop()
+  defer finish_loop(loop)
+  local receiver, address = bound(loop, 0)
+  local sender = uv.udp_t.new()
+  test.assert(uv.udp_init(loop, sender) == 0)
+  local seen = 0
+  local sends = 0
+  local closed = 0
+  test.assert(uv.udp_recv_start(receiver, allocate,
+    function (owner, nread, buffer, peer, flags)
+      gc.collect()
+      if peer ~= nil then
+        seen = seen + 1
+        test.assert(flags == 0)
+        if seen == 1 then
+          test.assert(nread == 0 and buffer ~= nil, "empty packet has address and buffer")
+        else
+          test.assert(nread == 4 and buffer:to_string(nread) == "\0A\255B")
+          test.assert(uv.udp_recv_stop(owner) == 0)
+          uv.close(owner:as_handle_t(), function (view: uv.handle_t) closed = closed + 1 end)
+        end
+      end
+    end) == 0)
+  local request = uv.udp_send_t.new()
+  local buffers = {uv.buf_t.from_string("")}
+  test.assert(uv.udp_send(request, sender, {}, address, nil) == uv.EINVAL)
+  test.assert(uv.udp_get_send_queue_count(sender) == 0)
+  -- NULL destination on an unconnected handle must reject without callback.
+  test.assert(uv.udp_send(request, sender, buffers, nil, nil) < 0)
+  test.assert(uv.udp_send(request, sender, buffers, address,
+    function (completed: uv.udp_send_t, status: integer)
+      test.assert(status == 0 and completed:get_handle() == sender)
+      sends = sends + 1
+      gc.collect()
+      local second_buffers = {uv.buf_t.from_string("_\0A\255B_"):slice(2, 4)}
+      test.assert(uv.udp_send(completed, sender, second_buffers, address,
+        function (again: uv.udp_send_t, result: integer)
+          test.assert(result == 0 and again == request and again:get_handle() == sender)
+          sends = sends + 1
+          gc.collect()
+          uv.close(sender:as_handle_t(), function (view: uv.handle_t) closed = closed + 1 end)
+        end) == 0)
+      second_buffers[1] = uv.buf_t.from_string("mutated second vector")
+      gc.collect()
+    end) == 0)
+  buffers[1] = uv.buf_t.from_string("mutated caller vector")
+  gc.collect()
+  test.assert(uv.cancel(request:as_req_t()) < 0)
+  test.assert(uv.run(loop) == 0)
+  test.assert(seen == 2 and sends == 2 and closed == 2)
+end

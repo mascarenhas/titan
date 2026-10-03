@@ -37,6 +37,47 @@ local function cleanup_process(process: system.Process)
   do process:wait() catch end
 end
 
+function test_stream_cancelled_reader_allows_immediate_replacement(
+    _context: test.Context)
+  runtime_test.run(function ()
+    local process = system.spawn(process_support.child_path(), {"echo-count", "1"})
+    defer cleanup_process(process)
+    local input = process_support.required_output(process.stdin, "gated stdin")
+    local output = process_support.required_input(process.stdout, "gated stdout")
+    local reason = async.CancellationReason.simple("replace captured reader")
+    local observed: value = nil
+    local old = async.run<|value, value|>(function (): value
+      do output:read() catch observed = error end
+      return nil
+    end)
+    task_support.cleanup_task(old, "old captured reader cleanup")
+    process_support.wait_until_waiting(old, "old captured reader")
+    expect_cancelled_process_operation(function () output:read() end,
+                                       "pending captured reader cancellation")
+    test.assert(old:status():as_string() == "waiting",
+                "cancelled competitor disturbed the captured reader")
+
+    local release = async.run<|value, value|>(function (): value
+      async.join(old)
+      input:write("R")
+      input:close()
+      return nil
+    end)
+    task_support.cleanup_task(release, "captured read release cleanup")
+    old:cancel(reason)
+    test.assert(observed == nil, "old captured reader unwound before replacement")
+    -- The successor waits before the old reader unwinds and before the byte
+    -- is released, detecting either a stale reservation or a stale defer.
+    test.assert(output:read() == "R" and not output:read(),
+                "replacement captured reader lost its byte or EOF")
+    async.join(release)
+    test.assert(old:status():has_cancelled() and observed == reason,
+                "old captured reader lost its cancellation reason")
+    test.assert(release:status():has_succeeded(), "captured read release failed")
+    process_support.assert_normal(process:wait(), "replacement captured reader")
+  end)
+end
+
 function test_stream_facades_capture_merge_inheritance_options_and_interfaces(
     _context: test.Context)
   runtime_test.run(function ()

@@ -150,11 +150,13 @@ function test_fs_concurrent_reads_preserve_buffers_through_gc_and_cancellation(
     defer second:close()
     local token = async.ResumeToken.new("filesystem read start")
     local first_ready, second_ready = false, false
+    local first_submitted, second_submitted = false, false
     local cancelled_delivered = false
     local received: string? = nil
     local cancelled = async.run<|value, value|>(function (): value
       first_ready = true
       async.suspend(token)
+      first_submitted = true
       first:read(65536)
       cancelled_delivered = true
       return nil
@@ -163,6 +165,7 @@ function test_fs_concurrent_reads_preserve_buffers_through_gc_and_cancellation(
     local survivor = async.run<|value, value|>(function (): value
       second_ready = true
       async.suspend(token)
+      second_submitted = true
       local contents = ""
       while true do
         local chunk? = second:read()
@@ -176,10 +179,13 @@ function test_fs_concurrent_reads_preserve_buffers_through_gc_and_cancellation(
     task_support.cleanup_task(survivor, "surviving filesystem read cleanup")
     while not first_ready or not second_ready do timer.yield() end
 
-    -- resume runs synchronously until each read submits and suspends. No
-    -- event-loop turn can deliver either completion before cancellation/GC.
+    -- Resume requests deferred entry. Observe each body reaching its native
+    -- read before checking submission and cancelling the first waiter.
     cancelled:resume(token)
     survivor:resume(token)
+    test.assert(not first_submitted and not second_submitted,
+                "resume entered a filesystem reader inline")
+    while not first_submitted or not second_submitted do timer.yield() end
     test.assert(cancelled:status():as_string() == "waiting" and
                 survivor:status():as_string() == "waiting",
                 "filesystem reads did not suspend after submission")
@@ -534,7 +540,7 @@ function test_fs_independent_continuations(context: test.Context)
       realpath_resume_error = error as string
     end
     test.assert(realpath_resume_error ==
-                "Task resume token mismatch (expected source: fs.realpath)" and
+                "Task resume token mismatch (expected source: unknown source)" and
                 cancelled:status():as_string() == "waiting" and
                 cancelled_realpath == nil,
                 "an unrelated token changed the one-shot realpath wait")
@@ -599,7 +605,7 @@ function test_fs_condition_waiter_tokens_and_callback_progress(
       stale_error = error as string
     end
     test.assert(stale_error ==
-                "Task resume token mismatch (expected source: fs.watcher)" and
+                "Task resume token mismatch (expected source: subscription)" and
                 watcher_task:status():as_string() == "waiting",
                 "stale gate token changed the watcher poll")
 
@@ -823,7 +829,7 @@ function test_fs_watcher_poll_waiter_protocol(context: test.Context)
       resume_error = error as string
     end
     test.assert(resume_error ==
-                "Task resume token mismatch (expected source: fs.watcher)" and
+                "Task resume token mismatch (expected source: subscription)" and
                 first:status():as_string() == "waiting" and
                 first_result == nil and watcher:is_watching(path),
                 "an unrelated token changed a blocked poll")
@@ -880,7 +886,7 @@ function test_fs_watcher_poll_waiter_protocol(context: test.Context)
       repeated_resume_error = error as string
     end
     test.assert(repeated_resume_error ==
-                "Task resume token mismatch (expected source: fs.watcher)" and
+                "Task resume token mismatch (expected source: subscription)" and
                 cleared:status():as_string() == "waiting" and
                 cleared_result == nil,
                 "a repeated blocked poll did not establish its token guard")
@@ -931,5 +937,118 @@ function test_fs_watcher_runtime_ownership(context: test.Context)
     expect_failure(function ()
       stale:poll()
     end, "watcher remained usable after its Runtime stopped")
+  end)
+end
+
+function test_fs_close_before_acceptance_restores_ownership(context: test.Context)
+  local root = support.new_workspace(context)
+  local path = root .. "/close-restore.dat"
+  support.cleanup_path(context, path)
+  support.write_file_synchronously(path, "retained")
+  local held: fs.File? = nil
+  context:cleanup(function ()
+    if held and not held:is_closed() then
+      runtime_test.run(function () held:close() end)
+    end
+  end)
+  runtime_test.run(function () held = fs.open(path, "r") end)
+
+  expect_failure(function () held:close() end,
+                 "File close outside a Task unexpectedly succeeded")
+  test.assert(not held:is_closed(),
+              "rejected File close abandoned its descriptor before acceptance")
+  runtime_test.run(function ()
+    test.assert(held:read() == "retained",
+                "File close did not restore a usable descriptor")
+    held:close()
+    test.assert(held:is_closed(), "restored File did not close")
+  end)
+end
+
+function test_fs_accepted_close_error_keeps_file_closed(context: test.Context)
+  runtime_test.run(function ()
+    support.require_descriptor_inventory()
+    local root = support.new_workspace(context)
+    local path = root .. "/accepted-close.dat"
+    support.cleanup_path(context, path)
+    fs.write_file(path, "terminal")
+    local file = fs.open(path, "r")
+    defer file:close()
+    local descriptor = support.file_descriptor(path)
+    test.assert(descriptor >= 0, "could not observe the fixture descriptor")
+    -- Only the uniquely owned fixture descriptor is invalidated. No Task or
+    -- asynchronous operation can open a replacement before File submits close.
+    support.close_descriptor(descriptor)
+    local rejected = false
+    do
+      file:close()
+    catch
+      if error is async.OperationError then
+        local failure: async.OperationError = error
+        rejected = failure.name == "EBADF" and failure.operation == "fs.close"
+      end
+    end
+    test.assert(rejected and file:is_closed(),
+                "accepted close failure restored invalid descriptor ownership")
+    file:close()
+    test.assert(support.file_descriptor(path) == -1,
+                "failed close left a fixture descriptor open")
+  end)
+end
+
+function test_fs_cancelled_open_retires_unpublished_descriptor(context: test.Context)
+  runtime_test.run(function ()
+    support.require_descriptor_inventory()
+    local root = support.new_workspace(context)
+    local path = root .. "/cancel-open.dat"
+    support.cleanup_path(context, path)
+    fs.write_file(path, "owned")
+    test.assert(support.file_descriptor(path) == -1,
+                "open cancellation fixture already has an open descriptor")
+    local submitted, published = false, false
+    local opener = async.run<|value, value|>(function (): value
+      submitted = true
+      local file = fs.open(path, "r")
+      defer file:close()
+      published = true
+      return nil
+    end)
+    task_support.cleanup_task(opener, "cancelled filesystem open cleanup")
+    while not submitted do timer.yield() end
+    test.assert(opener:status():as_string() == "waiting" and not published,
+                "open did not wait for its accepted request")
+    local reason = async.CancellationReason<|value|>.simple("cancel accepted open")
+    opener:cancel(reason)
+    gc.collect()
+    async.join(opener)
+    local cancelled, actual? = opener:status():has_cancelled()
+    test.assert(cancelled and actual == reason and not published,
+                "cancelled open published its File or lost its cancellation reason")
+    test.assert(support.file_descriptor(path) == -1,
+                "cancelled open leaked its unpublished descriptor")
+  end)
+end
+
+function test_fs_close_completes_with_pending_cancellation(context: test.Context)
+  runtime_test.run(function ()
+    local root = support.new_workspace(context)
+    local path = root .. "/cancel-close.dat"
+    support.cleanup_path(context, path)
+    fs.write_file(path, "owned")
+    local file = fs.open(path, "r")
+    defer file:close()
+    local reason = async.CancellationReason<|value|>.simple("cleanup File close")
+    local close_completed = false
+    local closer = async.run<|value, value|>(function (): value
+      async.running():cancel(reason)
+      file:close()
+      close_completed = true
+      return nil
+    end)
+    task_support.cleanup_task(closer, "cancelled filesystem close cleanup")
+    async.join(closer)
+    local cancelled, actual? = closer:status():has_cancelled()
+    test.assert(cancelled and actual == reason and close_completed and file:is_closed(),
+                "pending cancellation prevented File ownership cleanup")
   end)
 end

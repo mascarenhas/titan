@@ -288,12 +288,30 @@ function test_resume_token_reports_unknown_source(context: test.Context)
   end)
 end
 
+-- Keep this fixture a one-shot callback wait. timer.sleep intentionally uses
+-- a subscription now, whose explicit suspension has its own token source.
+local function wait_for_native_callback(milliseconds: integer)
+  async.await<|nil, nil|>(function (resolve, _reject, fatal)
+    local timer = uv.timer_t.new()
+    local handle = timer:as_handle_t()
+    local closed = function (_: uv.handle_t)
+      do resolve(nil)
+      catch fatal(error, traceback); raise end
+    end
+    local fired = function (_: uv.timer_t) uv.close(handle, closed) end
+    test.assert(uv.timer_init(async.current_loop(), timer) == 0,
+        "native-wait timer initialization failed")
+    local status = uv.timer_start(timer, fired, milliseconds, 0)
+    if status < 0 then uv.close(handle); raise "native-wait timer start failed" end
+  end)
+end
+
 function test_resume_token_cannot_wake_native_callback_wait(
     context: test.Context)
   runtime_test.run(function ()
     local completed = false
     local target = async.run<|nil, value|>(function (): nil
-      timer.sleep(50)
+      wait_for_native_callback(50)
       completed = true
       return nil
     end)
@@ -331,7 +349,7 @@ function test_retired_resume_token_cannot_wake_next_native_wait(
         resumed_mismatch = error as string
       end
       phase = 2
-      timer.sleep(60000)
+      wait_for_native_callback(50)
       phase = 3
       return nil
     end)

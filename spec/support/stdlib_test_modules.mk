@@ -7,7 +7,7 @@ TITAN_STDLIB_TEST_PROGRAM_OUTPUT := test/tests
 TITAN_STDLIB_TEST_ROOTS := $(TITAN_STDLIB_TEST_PROGRAM_ROOT) \
 	coroutine.tests iteration.tests gc.tests lua.tests math.tests peg.tests \
 	string.core_test string.format_pack_test string.regex_test async.tests \
-	uv.task_tests io.tests fs.tests timer.tests net.tests ssl.tests http.tests \
+	uv.task_tests uv.public_tests io.tests fs.tests timer.tests net.tests ssl.tests http.tests \
 	url.tests os.tests os.process_tests uv.runtime_tests reflect.tests sqlite3.tests json.tests
 
 .PHONY: print-stdlib-test-roots
@@ -55,6 +55,7 @@ TITAN_TEST_MODULES := async.test_support \
 	test.tests \
 	timer.tests \
 	url.tests \
+	uv.public_tests \
 	uv.runtime_tests \
 	uv.task_test_support \
 	uv.task_tests
@@ -65,8 +66,11 @@ TITAN_TEST_IMPORTS_async.test_support :=
 TITAN_TEST_SOURCES_async.tests := spec/stdlib/titan/async/tests/tests.titan \
 	spec/stdlib/titan/async/tests/all_join_test.titan \
 	spec/stdlib/titan/async/tests/any_race_test.titan \
+	spec/stdlib/titan/async/tests/await_test.titan \
 	spec/stdlib/titan/async/tests/channel_test.titan \
+	spec/stdlib/titan/async/tests/fatal_test.titan \
 	spec/stdlib/titan/async/tests/foreign_work_test.titan \
+	spec/stdlib/titan/async/tests/subscription_test.titan \
 	spec/stdlib/titan/async/tests/task_test.titan
 TITAN_TEST_IMPORTS_async.tests := async.test_support support.async support.runtime
 TITAN_TEST_FOREIGN_async.tests := 1
@@ -98,6 +102,7 @@ TITAN_TEST_IMPORTS_http.test_support := support.runtime
 TITAN_TEST_SOURCES_http.tests := spec/stdlib/titan/http/tests/tests.titan \
 	spec/stdlib/titan/http/tests/client_behavior.titan \
 	spec/stdlib/titan/http/tests/eof_behavior.titan \
+	spec/stdlib/titan/http/tests/parent_cancel_test.titan \
 	spec/stdlib/titan/http/tests/sanitizer_process_test.titan \
 	spec/stdlib/titan/http/tests/server_behavior.titan \
 	spec/stdlib/titan/http/tests/test_cases.titan \
@@ -221,6 +226,16 @@ TITAN_TEST_IMPORTS_timer.tests := support.async support.runtime
 TITAN_TEST_SOURCES_url.tests := spec/stdlib/titan/url/tests.titan
 TITAN_TEST_IMPORTS_url.tests :=
 
+TITAN_TEST_SOURCES_uv.public_tests := spec/stdlib/titan/uv/public_tests/public_tests.titan \
+	spec/stdlib/titan/uv/public_tests/lifecycle.titan \
+	spec/stdlib/titan/uv/public_tests/requests.titan \
+	spec/stdlib/titan/uv/public_tests/network.titan \
+	spec/stdlib/titan/uv/public_tests/process.titan \
+	spec/stdlib/titan/uv/public_tests/workers.titan \
+	spec/stdlib/titan/uv/public_tests/outputs.titan
+TITAN_TEST_IMPORTS_uv.public_tests :=
+TITAN_TEST_FOREIGN_uv.public_tests := 1
+
 TITAN_TEST_SOURCES_uv.runtime_tests := spec/stdlib/titan/uv/runtime_tests.titan
 TITAN_TEST_IMPORTS_uv.runtime_tests := support.command support.common support.runtime
 
@@ -239,6 +254,7 @@ TITAN_TEST_C_INPUTS_io.test_support := spec/stdlib/titan/io/print_capture.h
 TITAN_TEST_C_INPUTS_lua.test_support := spec/stdlib/titan/lua/source_fixture.h
 TITAN_TEST_C_INPUTS_os.test_support := spec/stdlib/titan/os/time_support.h
 TITAN_TEST_C_INPUTS_reflect.tests := spec/stdlib/titan/reflect/reflection_recursive.h
-TITAN_TEST_C_INPUTS_async.tests = $(TITAN_TEST_BUILD_DIR)/async_foreign_work.h
+TITAN_TEST_C_INPUTS_async.tests = $(TITAN_TEST_BUILD_DIR)/async_foreign_work.h \
+	spec/stdlib/titan/async/tests/async_stack_probe.h
 TITAN_TEST_C_INPUTS_uv.runtime_tests = $(TITAN_TEST_BUILD_DIR)/uv_stdio_probe.h
 TITAN_TEST_C_INPUTS_lua.tests = $(TITAN_TEST_BUILD_DIR)/uv_stdio_probe.h

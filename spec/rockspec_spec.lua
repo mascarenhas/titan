@@ -572,17 +572,44 @@ int titan_sdk_headers(void) { return LUA_VERSION_NUM + SQLITE_VERSION_NUMBER; }
             "vendor/lpeglabel/UPSTREAM.md",
             "titan/coroutine.titan",
             "titan/uv/uv.titan",
-            "titan/uv/file.titan",
-            "titan/uv/os.titan",
+            "titan/uv/address.titan",
+            "titan/uv/callbacks.titan",
+            "titan/uv/capabilities.titan",
+            "titan/uv/constants.titan",
+            "titan/uv/data.titan",
+            "titan/uv/dll.titan",
+            "titan/uv/dns.titan",
+            "titan/uv/fd.titan",
+            "titan/uv/identifiers.titan",
+            "titan/uv/pipe_tty.titan",
+            "titan/uv/platform_constants.titan",
             "titan/uv/process.titan",
-            "titan/uv/runtime.titan",
-            "titan/uv/task.titan",
+            "titan/uv/startup.titan",
+            "titan/uv/stream_ops.titan",
+            "titan/uv/stream_owners.titan",
+            "titan/uv/sync.titan",
             "titan/uv/tcp.titan",
-            "titan/uv/work.titan",
+            "titan/uv/threading.titan",
+            "titan/uv/udp.titan",
+            "titan/uv/utilities.titan",
+            "titan/uv/address-native.h",
+            "titan/uv/callback.h",
+            "titan/uv/data_native.h",
+            "titan/uv/fd-native.h",
+            "titan/uv/fs-native-proposal.h",
+            "titan/uv/network-native.h",
+            "titan/uv/platform-constants.h",
+            "titan/uv/sync_storage.h",
+            "titan/uv/thread-native.h",
+            "titan/uv/utility_bits.h",
+            "titan/uv/version-native.h",
+            "titan/uv/work-native-proposal.h",
             "titan/async.titan",
+            "titan/async_signal_platform.h",
             "titan/timer.titan",
             "titan/io.titan",
             "titan/fs.titan",
+            "titan/fs_platform.h",
             "titan/net.titan",
             "titan/ssl.titan",
             "titan/url.titan",
@@ -700,6 +727,8 @@ int titan_sdk_headers(void) { return LUA_VERSION_NUM + SQLITE_VERSION_NUMBER; }
             "spec/fixtures/ssl/server-key.pem",
             "spec/fixtures/ssl/wrong-server.pem",
             "titan/os.titan",
+            "titan/os_platform.h",
+            "titan/os_environment.h",
             "titan/peg/peg.titan",
             "titan/peg/combinators.titan",
             "titan/peg/native.titan",
@@ -749,6 +778,15 @@ int titan_sdk_headers(void) { return LUA_VERSION_NUM + SQLITE_VERSION_NUMBER; }
             "THIRD_PARTY_NOTICES.md",
         }) do
             assert.truthy(contains_suffix(expected), expected)
+        end
+        for _, retired in ipairs({
+            "titan/uv/file.titan",
+            "titan/uv/os.titan",
+            "titan/uv/runtime.titan",
+            "titan/uv/task.titan",
+            "titan/uv/work.titan",
+        }) do
+            assert.falsy(contains_suffix(retired), retired)
         end
         for path in pairs(unpacked_files) do
             assert.falsy(path:find("/lpeglabel-build/", 1, true), path)
@@ -909,7 +947,8 @@ int titan_sdk_headers(void) { return LUA_VERSION_NUM + SQLITE_VERSION_NUMBER; }
 local support = assert(package.loadlib(%q, "luaopen_titan"))()
 assert(type(support._loadlibglobal) == "function")
 assert(support._loadlib(%q, "titan_uv_abi"))
-]], canonical, canonical)
+assert(support._loadlib(%q, "titan_async_abi"))
+]], canonical, canonical, canonical)
         ok, output, why, code = run(clean_environment({ LUA, "-e", probe }))
         assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
             tostring(code) .. ")")
@@ -971,9 +1010,9 @@ assert(support._loadlib(%q, "titan_uv_abi"))
             local testing = require "titan.test"
             local json = require "titan.json"
             local builtin_string = require "string"
-            -- Requiring only the public facade must initialize uv globally.
-            -- The returned uv-owned Task resolves its methods transitively;
-            -- consumers do not import or require uv just to call them.
+            -- Requiring async initializes its public uv dependency globally.
+            -- The returned async-owned Task resolves its methods through the
+            -- combined provider without a separate uv require by the consumer.
             local transitive_result
             local transitive = async.run(function()
                 timer.yield()
@@ -1098,6 +1137,7 @@ assert(support._loadlib(%q, "titan_uv_abi"))
         workspace = temporary_directory("installed-compiler")
         local source = assert(io.open(workspace .. "/installed.titan", "wb"))
         source:write([[
+local async = import "async"
 local timer = import "timer"
 local ssl = import "ssl"
 local url = import "url"
@@ -1108,6 +1148,14 @@ local function accepts_tls(_connection: ssl.Connection): boolean
 end
 
 function main(args: {string}): integer
+  case async.await<|integer, string|>(function (resolve, _reject, _fatal)
+    resolve(42)
+  end)
+  when success(answer) then
+    if answer ~= 42 then return 1 end
+  when error(_message) then
+    return 1
+  end
   timer.sleep(0)
   local parsed?, parse_error? =
     url.parse("https://example.com/short-import")
@@ -1146,7 +1194,10 @@ end
         assert_file(workspace .. "/installed")
         local generated = read_file(workspace .. "/installed.c")
         assert.truthy(generated:find(
+            'titan_module_provider(L, "titan.async", "titan.so")', 1, true), generated)
+        assert.truthy(generated:find(
             'titan_module_provider(L, "titan.timer", "titan.so")', 1, true), generated)
+        assert.falsy(generated:find("/titan/async.so", 1, true), generated)
         assert.falsy(generated:find("/titan/timer.so", 1, true), generated)
         assert.falsy(generated:find("/titan/ssl.so", 1, true), generated)
         assert.falsy(generated:find("/titan/url.so", 1, true), generated)
@@ -1183,9 +1234,9 @@ foreign import "provider_probe.h"
 local uv = import "uv"
 
 function check(): boolean
-  local marker = uv.Error.new(nil, "")
+  local marker = uv.timer_t.new()
   return (ffi.titan_uv_provider_probe() as integer) == 0 and
-         marker.traceback == ""
+         not marker:as_handle_t():is_initialized()
 end
 ]])
         write_file(workspace .. "/lua_direct_uv.titan", [[
@@ -1278,7 +1329,8 @@ assert(package.searchpath("titan.uv", package.cpath) == nil)
 local uv = require "titan.uv"
 local direct_uv = require "lua_direct_uv"
 assert(direct_uv.check())
-assert(type(uv.Error.new) == "function")
+local marker = uv.timer_t.new()
+assert(not marker:as_handle_t():is_initialized())
 ]], STDLIB_SHIMDIR .. "/uv.lua", STDLIB_PROVIDER)
         local lua_path = table.concat({
             LUA_SHAREDIR .. "/?.lua",

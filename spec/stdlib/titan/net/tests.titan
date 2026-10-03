@@ -7,6 +7,106 @@ local timer = import "timer"
 local support = import "net.test_support.titan"
 local task_support = import "support.async.titan"
 
+local function expect_cancelled_net_operation(action: function (): (),
+                                              label: string)
+  local reason = async.CancellationReason.simple(label)
+  local observed: value = nil
+  local competitor = async.run<|value, value|>(function (): value
+    async.running():cancel(reason)
+    do action() catch observed = error end
+    return nil
+  end)
+  task_support.cleanup_task(competitor, label .. " cleanup")
+  async.join(competitor)
+  -- A cancelled Task can swallow assertions raised in its own body.
+  test.assert(competitor:status():has_cancelled() and observed == reason,
+              label .. " was replaced by a contention diagnostic")
+end
+
+function test_net_cancelled_reader_allows_immediate_replacement(
+    context: test.Context)
+  runtime_test.run(function ()
+    local server, port = support.listen_available(28100)
+    support.cleanup_server(context, server)
+    local connection = net.connect("127.0.0.1", port)
+    support.cleanup_connection(context, connection)
+    local peer = server:accept()
+    support.cleanup_connection(context, peer)
+    local reason = async.CancellationReason.simple("replace TCP reader")
+    local observed: value = nil
+    local old = async.run<|value, value|>(function (): value
+      do connection:read() catch observed = error end
+      return nil
+    end)
+    task_support.cleanup_task(old, "old TCP reader cleanup")
+    while old:status():as_string() == "ready" do timer.yield() end
+    test.assert(old:status():as_string() == "waiting", "TCP reader did not wait")
+    expect_cancelled_net_operation(function () connection:read() end,
+                                   "pending TCP reader cancellation")
+    test.assert(old:status():as_string() == "waiting",
+                "cancelled competitor disturbed the TCP reader")
+
+    local sender = async.run<|value, value|>(function (): value
+      async.join(old)
+      peer:write("replacement\0")
+      peer:shutdown()
+      return nil
+    end)
+    task_support.cleanup_task(sender, "replacement TCP sender cleanup")
+    old:cancel(reason)
+    test.assert(observed == nil, "old TCP reader unwound before replacement")
+    -- Register the successor before yielding. Data arrives only after the old
+    -- reader unwinds, so its defer must preserve the successor's reservation.
+    test.assert(connection:read_until("\0", true) == "replacement" and
+                not connection:read(), "replacement TCP reader lost data or EOF")
+    async.join(sender)
+    test.assert(old:status():has_cancelled() and observed == reason,
+                "old TCP reader lost its cancellation reason")
+    test.assert(sender:status():has_succeeded(), "replacement TCP sender failed")
+  end)
+end
+
+function test_net_cancelled_acceptor_allows_immediate_replacement(
+    context: test.Context)
+  runtime_test.run(function ()
+    local server, port = support.listen_available(28200)
+    support.cleanup_server(context, server)
+    local reason = async.CancellationReason.simple("replace TCP acceptor")
+    local observed: value = nil
+    local old = async.run<|value, value|>(function (): value
+      do server:accept() catch observed = error end
+      return nil
+    end)
+    task_support.cleanup_task(old, "old TCP acceptor cleanup")
+    while old:status():as_string() == "ready" do timer.yield() end
+    test.assert(old:status():as_string() == "waiting", "TCP acceptor did not wait")
+    expect_cancelled_net_operation(function () server:accept() end,
+                                   "pending TCP acceptor cancellation")
+    test.assert(old:status():as_string() == "waiting",
+                "cancelled competitor disturbed the TCP acceptor")
+
+    local connector = async.run<|value, value|>(function (): value
+      async.join(old)
+      local connection = net.connect("127.0.0.1", port)
+      defer connection:close()
+      connection:write("replacement\0")
+      return nil
+    end)
+    task_support.cleanup_task(connector, "replacement TCP connector cleanup")
+    old:cancel(reason)
+    test.assert(observed == nil, "old TCP acceptor unwound before replacement")
+    -- No join or yield may separate cancellation from this new accept.
+    local connection = server:accept()
+    support.cleanup_connection(context, connection)
+    test.assert(connection:read_until("\0", true) == "replacement",
+                "replacement TCP acceptor lost its connection")
+    async.join(connector)
+    test.assert(old:status():has_cancelled() and observed == reason,
+                "old TCP acceptor lost its cancellation reason")
+    test.assert(connector:status():has_succeeded(), "replacement connector failed")
+  end)
+end
+
 function test_net_exchanges_binary_streams_through_tcp(
     context: test.Context)
   runtime_test.run(function ()
