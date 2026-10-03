@@ -2399,8 +2399,9 @@ include $(TITAN_TEST_MODULE_MANIFEST)
 TITAN_TEST_BUILD_DIR ?= .titan-tests
 TITAN_TEST_EXECUTABLE := $(TITAN_TEST_BUILD_DIR)/$(TITAN_STDLIB_TEST_PROGRAM_OUTPUT)
 # The suite deadline includes fresh child-fixture compilation at the selected
-# optimization level, including Linux LTO. Focused gates may set a lower bound.
-TITAN_TEST_TIMEOUT ?= 300
+# optimization level, including Linux LTO, across all 26 test roots.
+# Focused gates may set a lower bound.
+TITAN_TEST_TIMEOUT ?= 600
 TEST_TITANC ?= titanc
 TEST_LUA ?= lua
 BUSTED ?= busted

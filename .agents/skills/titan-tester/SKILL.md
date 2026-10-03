@@ -831,9 +831,9 @@ runs from `.titan-tests/` with the same absolute `spec/stdlib/titan` tree.
 Make builds native fixtures separately and retains generated outputs for
 incremental reuse; explicit `make clean` removes them. The run target returns
 to the repository root because fixtures rely on that CWD. It supervises the
-aggregate in a separate process group with a default 300-second deadline,
-including fresh child-fixture compilation with O3/Linux LTO. It streams merged
-output through a pipe and preserves exit status. `TITAN_TEST_TIMEOUT` can
+aggregate in a separate process group with a default 600-second deadline for
+all 26 roots, including repeated fresh child-fixture compilation with O3/Linux
+LTO. It streams merged output through a pipe and preserves exit status. `TITAN_TEST_TIMEOUT` can
 override the budget for a justified environment; focused CI shutdown checks
 retain their explicit 15-second limit.
 
