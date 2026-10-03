@@ -50,6 +50,10 @@ describe("Windows compiler path integration", function()
         })
     end
 
+    it("preserves lexical Windows path rules through the shared standalone oracle", function()
+        dofile("spec/fixtures/windows_serial/verify_paths.lua")
+    end)
+
     it("serializes fully qualified Windows header paths without rewriting identities", function()
         local paths = {
             "C:/SDK 日本/include/lua.h",
@@ -425,6 +429,119 @@ describe("Windows launcher filenames", function()
         for name, fn in pairs(saved) do driver[name] = fn end
         driver.remove_path(directory)
         assert.truthy(ran, failure)
+    end)
+end)
+
+describe("Windows provider export inventory", function()
+    it("exports only the module protocol in stable linker order", function()
+        local expected = {
+            "luaopen_pkg_alpha", "luaopen_pkg_zeta",
+            "pkg_alpha_abi", "pkg_alpha_abi_value", "pkg_alpha_compatibility",
+            "pkg_alpha_init", "pkg_alpha_layouts", "pkg_alpha_types",
+            "pkg_zeta_abi", "pkg_zeta_abi_value", "pkg_zeta_compatibility",
+            "pkg_zeta_init", "pkg_zeta_layouts", "pkg_zeta_types",
+        }
+        local definition, names = driver.windows_provider_exports({
+            "pkg.zeta", "pkg.alpha",
+        })
+        assert.same(expected, names)
+        assert.equal("EXPORTS\n    " .. table.concat(expected, "\n    ") .. "\n",
+            definition)
+        local reordered, reordered_names = driver.windows_provider_exports({
+            "pkg.alpha", "pkg.zeta",
+        })
+        assert.equal(definition, reordered)
+        assert.same(expected, reordered_names)
+    end)
+
+    it("rejects repeated modules and colliding mangled identities", function()
+        for _, modules in ipairs({
+            { "pkg.alpha", "pkg.alpha" },
+            { "pkg.alpha", "pkg_alpha" },
+            { "pkg-alpha", "pkg_alpha" },
+        }) do
+            assert.has_error(function()
+                driver.windows_provider_exports(modules)
+            end, "duplicate Windows module export pkg_alpha_abi_value")
+        end
+    end)
+end)
+
+describe("Windows launcher generation", function()
+    local platform = require "titan-compiler.platform"
+    local previous_windows
+    before_each(function()
+        previous_windows = platform.windows
+        platform.windows = true
+    end)
+    after_each(function()
+        platform.windows = previous_windows
+    end)
+
+    it("keeps the provider, ABI and opener identities when the launcher is renamed", function()
+        local original_loader
+        for _, display in ipairs({ "original.exe", "renamed.exe" }) do
+            local source = driver.entrypoint_contents("pkg.main-module", display,
+                { provider = "pkg/bundle.dll" })
+            local compact = source:gsub("%s+", " ")
+            local selected = assert(compact:find(
+                'titan_module_provider(L, "pkg.main-module", "pkg/bundle.dll")',
+                1, true))
+            local checked = assert(compact:find(
+                'titan_check_module_abi(L, provider, "pkg_main_module_abi", "pkg/bundle.dll")',
+                1, true))
+            local opened = assert(compact:find(
+                'titan_module_symbol(L, provider, "luaopen_pkg_main_module")',
+                1, true))
+            assert.is_true(selected < checked and checked < opened)
+            assert.matches('lua_pushcfunction(L, titan_open_main);', source, 1, true)
+            assert.matches('lua_setfield(L, -2, "pkg.main-module");', source, 1, true)
+            assert.matches('"' .. display .. '", message)', source, 1, true)
+            assert.not_matches('int luaopen_pkg_main_module(', source, 1, true)
+            local loader = assert(source:match(
+                "static int titan_open_main%(lua_State %*L%) %b{}"))
+            if original_loader then assert.equal(original_loader, loader) end
+            original_loader = loader
+        end
+    end)
+
+    it("preserves literal display and provider bytes through template rendering", function()
+        local display = assert(driver.windows_launcher_name("pkg.main",
+            "ação $MODNAME ${UNKNOWN} 9"))
+        local source = driver.entrypoint_contents("pkg.main", display, {
+            provider = [[bundle\ação\$MODNAME.dll]],
+        })
+        local display_literal = [["a\303\247\303\243o \044MODNAME \044{UNKNOWN} 9.exe"]]
+        local provider_literal = [["bundle\134a\303\247\303\243o\134\044MODNAME.dll"]]
+        assert.matches(display_literal .. ", message)", source, 1, true)
+        assert.matches('"pkg.main", ' .. provider_literal, source, 1, true)
+        assert.matches('"pkg_main_abi", ' .. provider_literal, source, 1, true)
+        assert.not_matches("$MODNAME", source, 1, true)
+        assert.not_matches("${UNKNOWN}", source, 1, true)
+    end)
+
+    it("keeps module loading and argument setup while selecting the bootstrap policy", function()
+        for _, direct in ipairs({ false, true }) do
+            local source = driver.entrypoint_contents("pkg.main", nil, {
+                provider = "pkg/main.dll", no_uv_bootstrap = direct,
+            })
+            assert.matches('"main", message)', source, 1, true)
+            local arguments = assert(source:find("TITAN_MAIN_ARGV_KEY", 1, true))
+            local require_main = assert(source:find('lua_pushliteral(L, "pkg.main");', 1, true))
+            local bootstrap = assert(source:find(
+                "lua_getfield(L, LUA_REGISTRYINDEX, TITAN_MAIN_BOOTSTRAP_KEY);", 1, true))
+            assert.is_true(arguments < require_main and require_main < bootstrap)
+            assert.matches("if (" .. (direct and "1" or "0") ..
+                " || lua_isnil(L, -1))", source, 1, true)
+            assert.matches("lua_call(L, 1, 1);", source, 1, true)
+            assert.matches("lua_call(L, 2, 1);", source, 1, true)
+        end
+    end)
+
+    it("requires the selected provider instead of deriving it from the display name", function()
+        assert.has_error(function()
+            driver.entrypoint_contents("pkg.main", "renamed.exe")
+        end, "Windows entrypoint requires an explicit provider")
     end)
 end)
 

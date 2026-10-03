@@ -85,6 +85,11 @@ The ordinary explicit current-directory Lua module templates remain available.
 The Windows resolver uses the wide executable-path API and converts to UTF-8;
 it does not substitute the Lua DLL's own directory or the POSIX parent meaning.
 
+Generated launcher diagnostics and provider paths preserve their supplied bytes
+in C string literals, including Unicode and literal `$` sequences. These values
+are escaped before recursive template expansion; they cannot become compiler
+template substitutions.
+
 The controlled Windows Lua loader accepts UTF-8 module paths, rejects invalid
 UTF-8 and embedded NUL arguments, resolves the requested provider with
 `GetFullPathNameW`, and calls `LoadLibraryExW` with only

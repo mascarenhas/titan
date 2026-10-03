@@ -105,6 +105,7 @@ for _, value in ipairs({
     "//?/C:/file", [[\\.\PhysicalDrive0]], [[\\?\C:relative]],
     [[\\?\C:\bad/slash]], [[\\?\UNC\server]], [[\\?\GLOBALROOT\Device\X]],
     [[\\?\Volume{not-a-guid}\file]],
+    [[\\?\Volume{g0ac8cd8-bd4b-11f1-af3e-fa5e484244a2}\file]],
 }) do
     failure(path.normalize, "invalid_path", value)
 end
