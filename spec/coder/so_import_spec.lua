@@ -899,15 +899,15 @@ describe(".so-only cross-module imports", function()
         bf:close()
         assert.match(
             'titan_module_provider%s*%(%s*L,%s*"alias_provider",%s*"alias_provider%.so"%s*%)', facade_c)
-        -- A direct synthesized constructor uses the reconstructed public
-        -- payload and the owner's metatable instead of loading a call entry.
-        assert.not_match(
+        -- Dynamic constructor calls use the owner's replaceable implementation,
+        -- including when the currently loaded constructor is synthesized.
+        assert.match(
             'titan_module_symbol%s*%(%s*L,%s*alias_provider_provider,%s*'
                 .. symbol_literal("alias_provider_\\u2133_Foo_\\u2131_new_titanstatic")
                 .. '%s*%)',
             facade_c)
 
-        assert.match(
+        assert.not_match(
             'luaL_getmetatable%s*%(%s*L,%s*"Titan record alias_provider%.Foo metatable"%s*%)',
             facade_c)
 
