@@ -446,13 +446,15 @@ jobs:
         run: |
           luacov "titan%-compiler/" "titanc$"
           grep "Summary" -B1 -A1000 luacov.report.out
+          lua spec/support/prepare_codecov_report.lua \
+            luacov.report.out luacov.codecov.out
 
       - name: Upload compiler coverage to Codecov
         uses: codecov/codecov-action@v7
         with:
           disable_search: true
           fail_ci_if_error: true
-          files: ./luacov.report.out
+          files: ./luacov.codecov.out
           name: compiler
           use_oidc: true
 

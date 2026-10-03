@@ -528,7 +528,15 @@ only focused native-memory cases and does not publish coverage. This includes
 both async-I/O and coroutine behavior, which must still run in full in the
 regular uncovered job. The repository `.luacov` limits debug-hook collection to
 the same compiler and `titanc` paths emitted by the one report command; test
-source itself is not coverage. Keep those filters aligned. If a library suite
+source itself is not coverage. Keep those filters aligned. The merged coverage
+job preserves the original `luacov.report.out` and uploads a separate
+`luacov.codecov.out`: `spec/support/prepare_codecov_report.lua` changes only the
+extensionless `titanc` section heading to `titanc.lua`, then `.codecov.yml`
+maps that report alias back to tracked `titanc`. Codecov's LuaCov parser does
+not recognize extensionless section headings; uploading the original report
+would merge CLI coverage into the preceding compiler file. Do not rename the
+executable or change how tests invoke it for this reporting workaround.
+If a library suite
 exposes a compiler coverage gap, add a small focused compiler/checker test for
 that code path
 instead of covering the library integration suite.

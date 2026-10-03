@@ -108,6 +108,7 @@
 /spec/stdlib/titan/**/*.c
 /luacov.stats.out
 /luacov.report.out
+/luacov.codecov.out
 
 # Local trees for testing and experimentation
 /.local-builds/

@@ -4631,7 +4631,7 @@ done
                 assert.equal(1,
                     count_literal(job, "fail_ci_if_error: true"), job)
                 assert.equal(1,
-                    count_literal(job, "files: ./luacov.report.out"), job)
+                    count_literal(job, "files: ./luacov.codecov.out"), job)
                 assert.equal(1, count_literal(job,
                     "\n          name: " .. upload_name .. "\n"), job)
                 assert.equal(1, count_literal(job, "use_oidc: true"), job)
@@ -5010,6 +5010,12 @@ done
                 "- name: Generate compiler coverage report",
                 coverage_merge_index, true))
             assert.is_true(coverage_merge_index < coverage_report_index)
+            assert.truthy(coverage_job:find(
+                "lua spec/support/prepare_codecov_report.lua", 1, true))
+            assert.truthy(coverage_job:find(
+                "luacov.report.out luacov.codecov.out", 1, true))
+            assert.truthy(read_file(".codecov.yml"):find(
+                '"^titanc[.]lua$::titanc"', 1, true))
             assert.falsy(coverage_job:find("always()", 1, true))
             assert.falsy(coverage_job:find("continue-on-error", 1, true))
             assert.falsy(coverage_job:find("ci_test_groups.sh", 1, true))
@@ -5246,8 +5252,8 @@ done
                     assert.is_true(tonumber(seconds) >= 0)
                 end
             end
-            assert.same({ 32, 36, 31, 43 }, shard_counts)
-            assert.equal(142, assigned_count)
+            assert.same({ 32, 36, 32, 43 }, shard_counts)
+            assert.equal(143, assigned_count)
 
             local stress_partition = read_file(
                 "spec/support/ci_compiler_stress_files.txt")
