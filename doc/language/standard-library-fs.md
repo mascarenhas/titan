@@ -284,18 +284,13 @@ returns an empty Array immediately. Only one Task may poll a given Watcher at a
 time. Tasks that mutate one Watcher concurrently must coordinate those calls
 externally. Cancelling a blocked poll detaches only that Task's waiter. It does
 not discard buffered events or stop registrations that another Task may poll.
-Each blocked poll owns a fresh private resume token whose diagnostic source is
-`fs.watcher` and suspends once. An unrelated caller's token passed to the
-blocked Task's public `resume(token)` raises `Task resume token mismatch
-(expected source: fs.watcher)` in that caller and neither wakes the poll nor
-changes its state. Only that poll invocation's exact private token authorizes
-its facade-owned wake; native event callbacks retain their separate tokenless
-continuation path. A normal wake already establishes the result condition: the
-callback has buffered a notification, or the facade has removed the last
-registration. The external-coordination requirement above keeps that condition
-stable until the deferred continuation runs. After `stop` or `clear` removes
-the final registration, wait for the awakened poll to return before registering
-another path on that Watcher.
+The subscription keeps one reader reservation until that wait exits, including
+while a wake is queued. Public `Task:resume` is not a filesystem completion API;
+a token unrelated to that exact internal wait raises in its caller and cannot
+finish the poll. Native events publish notifications, while removing the final
+registration wakes the pending batch reader. After `stop` or `clear` removes
+that final registration, wait for the awakened poll to return before registering
+another path on the Watcher.
 
 Classification may suspend while more native callbacks are copied. If one of
 those callbacks belongs to a registration retired by the current `poll`, that

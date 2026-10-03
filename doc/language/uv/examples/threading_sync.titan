@@ -1,0 +1,76 @@
+local uv = import "titan.uv"
+
+foreign function fill(argument: *void): void
+  local item = argument as foreign *int
+  item[0] = 42
+end
+
+foreign function initialize_once(): void
+  -- A real initializer may call C-only functions here. It cannot enter Lua.
+end
+
+local function check(status: integer)
+  if status < 0 then raise uv.strerror(status) end
+end
+
+function main(args: {string}): integer
+  -- These are blocking native primitives. Use the returned C-only entries
+  -- inside a native carrier; ordinary Titan wrappers run on the Lua thread.
+  local mutex = uv.mutex_t()
+  check(uv.mutex_init(mutex))
+  defer uv.mutex_destroy(mutex)
+  local condition = uv.cond_t()
+  check(uv.cond_init(condition))
+  defer uv.cond_destroy(condition)
+  uv.mutex_lock(mutex)
+  local waited = uv.cond_timedwait(condition, mutex, 1000000)
+  uv.mutex_unlock(mutex)
+  -- A timed wait can wake spuriously. Application code must check a predicate.
+  if waited ~= 0 and waited ~= uv.ETIMEDOUT then check(waited) end
+
+  local rwlock = uv.rwlock_t()
+  check(uv.rwlock_init(rwlock))
+  defer uv.rwlock_destroy(rwlock)
+  uv.rwlock_rdlock(rwlock)
+  uv.rwlock_rdunlock(rwlock)
+  uv.rwlock_wrlock(rwlock)
+  uv.rwlock_wrunlock(rwlock)
+
+  local semaphore = uv.sem_t()
+  check(uv.sem_init(semaphore, 0))
+  defer uv.sem_destroy(semaphore)
+  uv.sem_post(semaphore)
+  uv.sem_wait(semaphore)
+  local barrier = uv.barrier_t()
+  check(uv.barrier_init(barrier, 1))
+  defer uv.barrier_destroy(barrier)
+  if uv.barrier_wait(barrier) <= 0 then return 1 end
+
+  local once = uv.once_t()
+  uv.once(once, initialize_once)
+  uv.once(once, initialize_once) -- The native initializer runs at most once.
+
+  local packet: owned int[] = foreign int.new_array(1)
+  local key = uv.key_t()
+  check(uv.key_create(key))
+  defer uv.key_delete(key)
+  uv.key_set(key, packet)
+  if uv.key_get(key) ~= (packet as foreign *void) then return 1 end
+  uv.key_set(key, nil) -- The TLS pointer itself never owned packet.
+
+  local thread = uv.thread_t()
+  -- Prepare cleanup before submission; publish acceptance before any helper
+  -- call. Joining publishes writes and releases the argument_owner graph.
+  local accepted, joined = false, false
+  local finish_thread = function ()
+    if accepted and not joined then check(uv.thread_join(thread)) end
+  end
+  defer finish_thread()
+  local created = uv.thread_create(thread, fill, packet, packet)
+  accepted = created >= 0
+  check(created)
+  check(uv.thread_join(thread))
+  joined = true
+  if packet[0] ~= 42 then return 1 end
+  return 0
+end

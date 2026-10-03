@@ -16,7 +16,7 @@ local ssl = require "titan.ssl"
 ```
 
 TLS is an ordinary high-level standard-library layer, not an addition to
-Titan's private libuv binding. Its operations call `net.Connection` methods
+Titan's low-level libuv binding. Its operations call `net.Connection` methods
 and therefore must run inside an async Task, under the same loop-driving rules
 as `net`.
 
@@ -244,5 +244,5 @@ standard-library provider.
 
 This initial module has no mTLS, ALPN selection API, certificate callbacks,
 session-cache controls, cipher configuration, key logging, or access to the
-underlying `net.Connection`. It intentionally leaves the private `titan.uv`
-module unchanged.
+underlying `net.Connection`. TLS composes over public `net` operations; it
+does not expose the lower-level UV owner.

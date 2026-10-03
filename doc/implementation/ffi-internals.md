@@ -217,7 +217,10 @@ eligible primitive carrier pointer types with `__builtin_types_compatible_p`.
 Stable IDs 1–11 identify the ordered canonical carriers independently of the
 filtered list. A 12-byte versioned array in ELF/COFF `.titan.cprobe` or Mach-O
 `__DATA,__titancprobe` records the match count and matching-ID sum. It is marked
-`used` and byte-aligned. After `-c`, the bounded object reader requires one
+`used` and byte-aligned. Under Clang only, the inert serialized array also has
+`no_sanitize("address")`, so ASan cannot pad its exact 12-byte section payload
+with global redzones. This excludes only the object-file answer bytes;
+generated runtime code remains instrumented. After `-c`, the bounded object reader requires one
 initialized, uncompressed, relocation-free section with the exact payload;
 the service extracts it before cleanup. A successful compiler exit without a
 valid answer is infrastructure failure, not a selected carrier. No linking,

@@ -1,0 +1,43 @@
+family	native_name	public_representation	disposition	purpose
+address family	AF_UNSPEC	AF_UNSPEC	public constant	TCP/UDP init flags, DNS hints, inet_ntop/pton
+address family	AF_INET	AF_INET	public constant	TCP/UDP init flags, DNS hints, inet_ntop/pton
+address family	AF_INET6	AF_INET6	public constant	TCP/UDP init flags, DNS hints, inet_ntop/pton
+address family	AF_UNIX	AF_UNIX	public constant	TCP/UDP init flags, DNS hints, inet_ntop/pton
+socket type/protocol	SOCK_STREAM	SOCK_STREAM	public constant	socketpair and DNS hints
+socket type/protocol	SOCK_DGRAM	SOCK_DGRAM	public constant	socketpair and DNS hints
+socket type/protocol	IPPROTO_TCP	IPPROTO_TCP	public constant	socketpair and DNS hints
+socket type/protocol	IPPROTO_UDP	IPPROTO_UDP	public constant	socketpair and DNS hints
+DNS hints	AI_PASSIVE	AI_PASSIVE	public constant	platform-dependent input flags; public vocabulary must offer usable constants
+DNS hints	AI_CANONNAME	AI_CANONNAME	public constant	platform-dependent input flags; public vocabulary must offer usable constants
+DNS hints	AI_NUMERICHOST	AI_NUMERICHOST	public constant	platform-dependent input flags; public vocabulary must offer usable constants
+DNS hints	AI_NUMERICSERV	AI_NUMERICSERV	public constant	platform-dependent input flags; public vocabulary must offer usable constants
+DNS hints	AI_ADDRCONFIG	AI_ADDRCONFIG	public constant	platform-dependent input flags; public vocabulary must offer usable constants
+DNS hints	AI_V4MAPPED	AI_V4MAPPED	public constant	platform-dependent input flags; public vocabulary must offer usable constants
+DNS hints	AI_ALL	AI_ALL	public constant	platform-dependent input flags; public vocabulary must offer usable constants
+reverse DNS	NI_NAMEREQD	NI_NAMEREQD	public constant	getnameinfo flags
+reverse DNS	NI_NUMERICHOST	NI_NUMERICHOST	public constant	getnameinfo flags
+reverse DNS	NI_NUMERICSERV	NI_NUMERICSERV	public constant	getnameinfo flags
+reverse DNS	NI_NOFQDN	NI_NOFQDN	public constant	getnameinfo flags
+reverse DNS	NI_DGRAM	NI_DGRAM	public constant	getnameinfo flags
+access	F_OK	FS_F_OK	public constant	fs_access mode
+access	R_OK	FS_R_OK	public constant	fs_access mode
+access	W_OK	FS_W_OK	public constant	fs_access mode
+access	X_OK	FS_X_OK	public constant	fs_access mode
+permissions/type	S_IRUSR	S_IRUSR	public constant	stat/chmod/open/mkdir usable results/inputs; platform differences explicit
+permissions/type	S_IWUSR	S_IWUSR	public constant	stat/chmod/open/mkdir usable results/inputs; platform differences explicit
+permissions/type	S_IXUSR	S_IXUSR	public constant	stat/chmod/open/mkdir usable results/inputs; platform differences explicit
+permissions/type	S_IRGRP	S_IRGRP	public constant	stat/chmod/open/mkdir usable results/inputs; platform differences explicit
+permissions/type	S_IWGRP	S_IWGRP	public constant	stat/chmod/open/mkdir usable results/inputs; platform differences explicit
+permissions/type	S_IXGRP	S_IXGRP	public constant	stat/chmod/open/mkdir usable results/inputs; platform differences explicit
+permissions/type	S_IROTH	S_IROTH	public constant	stat/chmod/open/mkdir usable results/inputs; platform differences explicit
+permissions/type	S_IWOTH	S_IWOTH	public constant	stat/chmod/open/mkdir usable results/inputs; platform differences explicit
+permissions/type	S_IXOTH	S_IXOTH	public constant	stat/chmod/open/mkdir usable results/inputs; platform differences explicit
+permissions/type	S_IFMT	S_IFMT	public constant	stat/chmod/open/mkdir usable results/inputs; platform differences explicit
+permissions/type	S_IFREG	S_IFREG	public constant	stat/chmod/open/mkdir usable results/inputs; platform differences explicit
+permissions/type	S_IFDIR	S_IFDIR	public constant	stat/chmod/open/mkdir usable results/inputs; platform differences explicit
+permissions/type	S_IFLNK	S_IFLNK	public constant	stat/chmod/open/mkdir usable results/inputs; platform differences explicit
+permissions/type	S_IFSOCK	S_IFSOCK	public constant	stat/chmod/open/mkdir usable results/inputs; platform differences explicit
+permissions/type	S_IFIFO	S_IFIFO	public constant	stat/chmod/open/mkdir usable results/inputs; platform differences explicit
+permissions/type	S_IFCHR	S_IFCHR	public constant	stat/chmod/open/mkdir usable results/inputs; platform differences explicit
+permissions/type	S_IFBLK	S_IFBLK	public constant	stat/chmod/open/mkdir usable results/inputs; platform differences explicit
+signals	SIG*	SIGABRT, SIGALRM, SIGBREAK, SIGBUS, SIGCHLD, SIGCONT, SIGFPE, SIGHUP, SIGILL, SIGINT, SIGIO, SIGIOT, SIGKILL, SIGNAL, SIGPIPE, SIGPOLL, SIGPROF, SIGPWR, SIGQUIT, SIGRTMAX, SIGRTMIN, SIGSEGV, SIGSTKFLT, SIGSTOP, SIGSYS, SIGTERM, SIGTRAP, SIGTSTP, SIGTTIN, SIGTTOU, SIGURG, SIGUSR1, SIGUSR2, SIGVTALRM, SIGWINCH, SIGXCPU, SIGXFSZ	platform vocabulary list	signal_start, kill, process_kill, loop BLOCK_SIGNAL; private native helper may enumerate supported signal constants

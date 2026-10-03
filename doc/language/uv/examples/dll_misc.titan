@@ -1,0 +1,59 @@
+local uv = import "titan.uv"
+
+local function check(status: integer)
+  if status < 0 then raise uv.strerror(status) end
+end
+
+function main(args: {string}): integer
+  if #args ~= 1 then return 2 end -- Path to example_library's shared image.
+  local library = uv.lib_t()
+  -- Both successful and failed open attempts need dlclose; fresh close is safe.
+  defer uv.dlclose(library)
+  if uv.dlopen(args[1], library) ~= 0 then raise uv.dlerror(library) end
+  local lookup, symbol? = uv.dlsym(library, "example_value")
+  if lookup ~= 0 then raise uv.dlerror(library) end
+  local pointer = symbol:pointer()
+  if pointer == nil then raise "example symbol unexpectedly has a null address" end
+  -- This exact C signature is supplied by our own example_library.c contract.
+  -- A symbol lookup cannot infer a C function's type or make a wrong cast safe.
+  local value_function = pointer as foreign function(): int
+  if value_function() ~= 42 then return 1 end
+
+  local clock_status, clock? = uv.clock_gettime(uv.clock_id.monotonic())
+  check(clock_status)
+  if clock == nil or clock.tv_nsec < 0 then return 1 end
+  local wall_status, wall? = uv.gettimeofday()
+  check(wall_status)
+  if wall == nil or wall.tv_usec < 0 then return 1 end
+  local name_status, name? = uv.os_uname()
+  check(name_status)
+  if name == nil or #name.sysname == 0 then return 1 end
+  local path_status, path?, path_length = uv.cwd(4096)
+  check(path_status)
+  if path == nil or #path == 0 then return 1 end
+
+  -- These are ordinary copies. Matching native snapshot frees happen inside
+  -- their wrappers before return; there is no public free_* call to remember.
+  local cpu_status, cpus?, cpu_count = uv.cpu_info()
+  check(cpu_status)
+  if cpus == nil or #cpus ~= cpu_count then return 1 end
+  local env_status, environment?, env_count = uv.os_environ()
+  check(env_status)
+  if environment == nil or #environment ~= env_count then return 1 end
+  local passwd_status, passwd? = uv.os_get_passwd()
+  check(passwd_status)
+  if passwd == nil or #passwd.homedir == 0 then return 1 end
+  if uv.available_parallelism() < 1 or uv.os_getpid() <= 0 then return 1 end
+
+  local units = uv.wtf8_length_as_utf16("Titan")
+  local utf16 = uv.wtf8_to_utf16("Titan", units)
+  local measured, no_text?, byte_count = uv.utf16_to_wtf8(utf16, -1, nil)
+  check(measured)
+  if no_text ~= nil then return 1 end
+  local converted, text?, written = uv.utf16_to_wtf8(utf16, -1, byte_count)
+  check(converted)
+  if text ~= "Titan" or written ~= 5 then return 1 end
+  -- The library stays open through the last function-pointer call. Explicit
+  -- close invalidates symbol:pointer(), even when the symbol remains referenced.
+  return 0
+end

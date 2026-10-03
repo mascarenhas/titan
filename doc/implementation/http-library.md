@@ -177,9 +177,16 @@ deferred transport close makes that rejection safe without parser reuse.
 ## Server Tasks and the interface conversion boundary
 
 `Server:serve` owns the accept loop. Each accepted connection is converted to
-`io.ReaderWriterCloser` and passed to a fresh `async.run` Task, so different
-connections can progress independently while requests on one connection stay
-ordered.
+`io.ReaderWriterCloser` and scheduled in a fresh `async.run` Task. The accept
+loop retains lexical close ownership until the child acknowledges that its own
+close defer is armed. An `await_cleanup` startup wait and terminal listener
+cover both normal entry and termination before entry. Failed scheduling or
+registration leaves fallback cancellation, terminal draining, and close with
+the accept loop. No yield count proves ownership transfer.
+
+The child arms connection close before acknowledgment and parser construction,
+so even parser construction failure has a transport owner. Different connection
+Tasks then progress independently while each one's requests remain ordered.
 
 The high-level constructors keep required values before optional configuration:
 plain `listen` takes host and handler before optional port, backlog, and idle
@@ -209,7 +216,7 @@ policy.
 suspending transport close, then records transport completion after that call
 returns. `Server:close` similarly marks the high-level listener closed before
 delegating to `net.Server` or `ssl.Server`, then records listener completion
-after the delegate returns. Those underlying close Calls are
+after the delegate returns. Those underlying ownership-retiring close operations are
 cancellation-insensitive: pending cancellation neither prevents submission
 nor replaces their ordinary callback completion. Cleanup therefore finishes,
 the completion flag is recorded, and only then can the Task publish terminal
@@ -242,12 +249,19 @@ same outcome back to an incomplete-message error.
 At the start of each serial request iteration, the connection Task snapshots
 the Server's `idle_timeout_ms`. Zero reads directly. A positive value starts a
 header-reader Task and timer Task and uses `async.race_two`. Reader success
-cancels the timer-only deadline and detaches its cancellation cleanup; its
-libuv timer close can finish in the background because it owns no parser or
-transport state. Deadline success cancels and `async.join`s the reader before
-the parent unwinds, because that child owns the parser/connection operation and
-an SSL read retains the connection's serialized busy state until cancellation
-cleanup completes. Reader success supplies the `Request?`; timer success is an
+requests cancellation of the timer-only deadline. Its unconditional cancellation
+defer remains installed for every exit; cancellation is idempotent. The timer's
+native close can finish in the background because it owns no parser or
+transport state, so no terminal join is added. The reader is always owned by a cancel-and-terminal-cleanup defer, including
+when parent cancellation interrupts the race or creation of the deadline fails.
+Its terminal wait uses `async.await_cleanup` plus a removable public terminal
+listener, so pending parent cancellation cannot release shared parser/connection
+state before the child has finished. Deadline success requests reader
+cancellation with the timeout reason; the same defer drains its completion.
+An SSL read retains the connection's serialized busy state until that cleanup
+finishes. The timer-only child has unconditional cancellation cleanup but is
+not joined: it owns no shared parser/transport state, and waiting for it would
+change observable successful-reader ordering. Reader success supplies the `Request?`; timer success is an
 ordinary silent connection return. A failed child has already emitted its
 Task-local error and traceback, so the parent applies the same ownership rule
 to its peer and returns instead of raising the same failure a second time.

@@ -1,0 +1,75 @@
+local uv = import "titan.uv"
+
+local function check(status: integer)
+  if status < 0 then raise uv.strerror(status) end
+end
+
+local function close_handles(loop: uv.loop_t)
+  uv.walk(loop, function (handle: uv.handle_t, argument: value)
+    if not uv.is_closing(handle) then uv.close(handle, nil) end
+  end, nil)
+end
+
+function main(args: {string}): integer
+  -- Deprecated heap-loop helpers are deliberately absent. This program uses
+  -- the public final owner plus explicit init/close alternative.
+  if uv.has_api("loop_new") or uv.has_api("loop_delete") then return 1 end
+  if uv.version() <= 0 or #uv.version_string() == 0 then return 1 end
+  if uv.loop_size() <= 0 then return 1 end
+
+  local loop = uv.loop_t()
+  check(uv.loop_init(loop))
+  local closing = false
+  local finish = function ()
+    closing = true
+    close_handles(loop)
+    uv.run(loop, nil) -- Retire native close callbacks before closing the loop.
+    check(uv.loop_close(loop))
+  end
+  defer finish()
+
+  local idle = uv.idle_t()
+  check(uv.idle_init(loop, idle))
+  local prepare = uv.prepare_t()
+  check(uv.prepare_init(loop, prepare))
+  local after_poll = uv.check_t()
+  check(uv.check_init(loop, after_poll))
+  local notification = uv.async_t()
+  local saw_idle, saw_prepare, saw_check, saw_async = false, false, false, false
+  check(uv.async_init(loop, notification, function (owner: uv.async_t)
+    if not closing then saw_async = true end
+  end))
+  local deadline = uv.timer_t()
+  check(uv.timer_init(loop, deadline))
+
+  -- Stop does not release an initialized owner. The deferred walk also closes
+  -- any handles whose start operation rejects below.
+  check(uv.idle_start(idle, function (owner: uv.idle_t)
+    if not closing then saw_idle = true end
+  end))
+  check(uv.prepare_start(prepare, function (owner: uv.prepare_t)
+    if not closing then saw_prepare = true end
+  end))
+  check(uv.check_start(after_poll, function (owner: uv.check_t)
+    if not closing then saw_check = true end
+  end))
+  check(uv.async_send(notification))
+  check(uv.async_send(notification)) -- Sends may coalesce into one callback.
+  uv.handle_set_data(notification:as_handle_t(), "notification")
+  if uv.handle_get_data(notification:as_handle_t()) ~= "notification" then
+    return 1
+  end
+  check(uv.timer_start(deadline, function (owner: uv.timer_t)
+    closing = true
+    close_handles(loop)
+  end, 10, 0))
+  uv.run(loop, nil)
+
+  local status, metrics? = uv.metrics_info(loop)
+  check(status)
+  if metrics == nil or metrics.loop_count <= 0 then return 1 end
+  if not saw_idle or not saw_prepare or not saw_check or not saw_async then
+    return 1
+  end
+  return 0
+end

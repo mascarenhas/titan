@@ -205,8 +205,9 @@ Runtime. Test bodies, subtests, and cleanup callbacks may then suspend directly
 and must not call `async.loop` recursively.
 
 Passing `--no-uv-bootstrap` selects explicit ownership instead. The entrypoint
-calls the runner's `main(args)` directly even though `titan.uv` still initializes
-and leaves its bootstrap hook installed. A test that needs asynchronous work
+calls the runner's `main(args)` directly even though an imported `titan.async`
+still initializes, performs its startup policy, and leaves its bootstrap hook
+installed. A test that needs asynchronous work
 must start a Task with `async.run`, call `async.loop`, and finish every
 Runtime-bound Task and handle before that loop returns. Runner
 `Context:cleanup` occurs later and is therefore suitable only for resources

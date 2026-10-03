@@ -320,7 +320,7 @@ metadata keys.
 The private LPegLabel archive and its headers remain source-build inputs; they
 are not installed in the compiler/runtime SDK. The callback-bearing
 `titan/coroutine.titan.h`, `titan/uv/uv.titan.h`,
-`titan/fs.titan.h`, and `titan/http/http.titan.h` companions are
+`titan/http/http.titan.h`, and `titan/sqlite3/sqlite3.titan.h` companions are
 likewise generated source-build intermediates: they are available before the
 standard objects compile but never become provider members, publication-stage
 artifacts, or installed headers.

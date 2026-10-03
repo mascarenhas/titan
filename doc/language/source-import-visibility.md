@@ -154,7 +154,7 @@ that a compiled provider and the selected source were built from different
 public APIs.
 
 The generic source overlay is compiler-only and is not a serialized interface
-format. ABI 2 covers the source-local `titan.uv` public/private boundary, its
+format. ABI 2 covers the source-local public/private boundary, each module's
 reconstructible public closure prefix, every module's physical-provider
 identity slot, source-defined foreign collaboration, the callable-name
 hierarchy, generic declarations, and current public standard-library and const

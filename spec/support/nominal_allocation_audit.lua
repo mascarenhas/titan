@@ -1,5 +1,7 @@
--- Reproduce issue #174's storage-allocation audit without changing the provider.
--- Run from the checkout with its current installed Lua/SDK. The optional first
+-- Historical issue #174 audit, tied to commit 641aade0 (PR #179). Issue #194
+-- replaced the owners/factories measured below. Reproduce in a separate checkout
+-- of that revision with its matching installed Lua/SDK, not a current provider.
+-- The optional first
 -- argument is a new output directory; --prepare-only just writes the replicas,
 -- and --audit-only additionally checks existing generated C without compiling.
 local lfs = require "lfs"
@@ -7,6 +9,11 @@ local cdriver = require "c-parser.cdriver"
 local layout = require "titan-compiler.nominallayout"
 local prefix = require("spec.support.installed_prefix").active()
 local root = assert(lfs.currentdir())
+local historical_runtime = io.open(root .. "/titan/uv/runtime.titan", "rb")
+assert(historical_runtime,
+    "historical allocation audit requires commit 641aade0 and its matching SDK; " ..
+    "its pre-issue-194 owner factories are absent from this checkout")
+historical_runtime:close()
 local prepare_only = arg[1] == "--prepare-only"
 local audit_only = arg[1] == "--audit-only"
 local directory = arg[(prepare_only or audit_only) and 2 or 1]

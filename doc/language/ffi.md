@@ -942,71 +942,33 @@ when generated C is compiled. This is the supported way to provide `-I` and
 preprocessed header with its own C99 grammar. Headers using unsupported
 compiler extensions may fail with a compile-time parse error.
 
-### Direct libuv extensions
+### Native provider linkage
 
-Titan gives libuv one complete dynamic process owner: the combined
-standard-library provider `titan.so`; the paired `titan.a` carries the same
-libuv objects for static Titan consumers. Its SDK installs `uv.h` and the
-`uv/` headers, but not the private libuv archive used as payload for that
-provider pair. A Titan extension DSO that calls functions declared by `uv.h`
-must import
-`titan.uv` (normally through its short spelling) in addition to importing the
-header:
+Use the [public UV module](standard-library-uv.md) for libuv clients and
+callback adapters. Its owners, values, and callbacks are ordinary compiled
+Titan declarations; they require neither `uv.h` nor binding-source access.
 
-```titan
-local runtime = import "uv"
-foreign import "uv.h"
-```
+The standard provider owns Titan's bundled libuv instance. Its `titan.so`
+exports the native symbols, and the paired `titan.a` carries the same native
+objects for static composition. The SDK headers also support building the
+binding and bounded native integration probes. Header installation is not a
+reason for a public Titan adapter to reproduce native owner layouts or bypass
+UV's callback, lifetime, and thread contracts.
 
-Build that extension without `-luv` and without a `libuv.a` linker input. Its
-`uv_*` references remain unresolved in the DSO. The bundled archive carried
-into the standard provider pair is private and is not installed as part of the
-Titan SDK.
-Titan uses the same `RTLD_LAZY | RTLD_GLOBAL` runtime loader for this extension
-as for every compiled dependency. Lazy binding lets the extension map with
-unresolved libuv function calls. Its generated initializer then loads the
-explicit `uv` import globally before Titan code can make one of those calls.
-`RTLD_NOW` would fail while mapping the extension, before the initializer could
-load the provider, while a provider loaded `RTLD_LOCAL` would not be visible to
-the extension's lazy bindings. No special interface marker, compiler
-classification, or provider-specific Titan loader is involved. The compiler's
-separate interface-inspection loader remains
-`RTLD_LAZY | RTLD_LOCAL`.
+The repository's packaging loader fixture has a separate native C probe which
+includes `uv.h`, exposes one operation through a narrow `provider_probe.h`,
+and leaves `uv_random` unresolved in its DSO. The Titan fixture imports that
+narrow header and public `uv`; its initializer loads the combined provider
+before the native lazy call binds. A Lua variant explicitly loads `titan.uv`
+through its generated shim before mapping the probe. That sequence also
+satisfies eager native relocations, while ordinary Titan function-call loading
+uses the general lazy/global runtime loader. This is evidence about native
+provider linkage, not a public libuv adapter recipe.
 
-This Titan path supports ordinary function calls through lazy binding.
-It does not support native constructors, imported libuv data, or taken function
-addresses that create eager relocations: those are needed while the extension
-is being mapped, before its generated initializer can load `uv`. Arrange for
-the embedding process to preload the provider when one of those forms is required.
-
-Lua code that requires the extension directly must establish the provider
-first:
-
-```lua
-local uv = require "titan.uv"
-local extension = require "my.libuv_extension"
-```
-
-The generated `titan/uv.lua` loader resolves the physical provider name
-`titan` through `package.cpath`, obtains the native support table with
-`require "titan"`, and asks that table's internal loader to reopen/promote the
-canonical `titan.so` with `RTLD_LAZY | RTLD_GLOBAL` before invoking
-`luaopen_titan_uv`. The support load itself uses Lua's ordinary C searcher and
-is eager/local; the separate global handle cache deliberately performs the
-promotion. This works with stock Lua 5.5 on both Linux and macOS without a
-`loadlib.c` patch or self-loading provider. A stock host can use the
-direct-extension contract when its `LUA_PATH_5_5` finds the generated loader
-and its `LUA_CPATH_5_5` finds the canonical DSO (see
-[Running with a stock Lua](modules.md#running-with-a-stock-lua)).
-Because Lua performs this explicit global load before mapping the extension,
-this route also supports its eager relocations and native constructors. The
-global symbols can resolve a Lua-only extension even if it omitted the Titan
-`uv` import, but the import remains mandatory for a Titan module that must also
-work through Titan's runtime loader.
-
-Do not statically embed Titan's bundled archive in an extension. Even an
-identical archive version would create another libuv instance with separate
-process-global state.
+Do not embed another copy of Titan's bundled archive in an extension. Even an
+identical archive creates another native instance with separate process-global
+state. See [the implementation loader](../implementation/lua-interop-internals.md#4-generated-shim-lazyglobal-loading-and-promotion)
+for cache and promotion details.
 
 ## Current Limitations
 

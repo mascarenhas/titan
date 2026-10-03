@@ -119,11 +119,14 @@ and twenty-one generated logical-module shims below
 preferred compiled-format pass; Lua requires use a generated shim and the DSO
 form.
 
-`titan.uv` is the private Runtime and native-provider layer. `titan.async`
-explicitly imports it as `uv.titan` and exposes the public asynchronous facade,
-including transparent aliases of uv-owned record types. The timer/fs/net/os/sqlite3
-modules use the same explicit spelling for their low-level plumbing, so all six
-consumers share one Runtime and one canonical libuv provider image.
+`titan.uv` is the public low-level binding to the bundled libuv provider.
+`titan.async` owns the Runtime and its public Task, result, error, and
+subscription types. Async, timer, fs, net, os, and sqlite3 import the ordinary
+compiled `titan.uv` interface; none requires a source-private UV scheduler.
+All twenty-one modules share the canonical physical provider pair while
+retaining their separate logical and nominal identities. See the
+[public binding reference](../language/standard-library-uv.md) and
+[async implementation](libuv-runtime.md).
 
 For source convenience, the parser first removes one terminal explicit-source
 marker, `.titan`, and then desugars the twenty-one short standard-library imports
@@ -1170,15 +1173,18 @@ no-main path.
 See [Validated publication and generated
 shims](multi-module-libraries.md#validated-publication-and-generated-shims).
 
-An extension DSO that directly calls `uv_*` remains an ordinary
-case. Its source imports `titan.uv` and foreign-imports `uv.h`, leaving ordinary
-libuv calls unresolved. Compiler inspection maps it lazy/local; generated
-runtime import maps its selected provider lazy/global, and the initializer
-loads the combined standard `titan.so` before those calls bind. Native
-constructors, imported data, and taken function addresses still need eager
-resolution and need the embedding process to preload the provider. The private
-bundled archive is shared standard-provider payload: it is force-loaded into `titan.so` and
-flattened into `titan.a`, never linked into a general extension.
+Ordinary UV clients import the [public compiled module](../language/standard-library-uv.md)
+and do not foreign-import `uv.h`. The packaging loader fixture in
+`spec/rockspec_spec.lua` deliberately exercises a different boundary: its
+`provider_probe.c` includes `uv.h` and makes an unresolved native `uv_random`
+call; its Titan source foreign-imports only the one-function
+`provider_probe.h` and imports public `uv`. This is a native loader probe, not
+an adapter recipe. Compiler inspection maps the DSO lazy/local; generated
+runtime import maps its selected provider lazy/global, so standard-provider
+initialization precedes the probe's native function call. Eager relocations and
+native constructors still require provider loading before the probe DSO is
+mapped. The bundled archive remains payload of `titan.so`/`titan.a`; the fixture
+does not embed a second libuv instance.
 
 ## Linking a standalone program: `driver.compile_program`
 
@@ -1275,9 +1281,11 @@ error alerts):
 * **`pmain`** first publishes the original `argc` integer and `argv` pointer
   under `TITAN_MAIN_ARGC_KEY` and `TITAN_MAIN_ARGV_KEY`, then calls global
   `require("$MODNAME")` and retrieves and retains that module's `main`
-  callable. A transitive `titan.uv` initialization can therefore call
-  `uv_setup_args` in the canonical provider and replace the private `argv`
-  slot with the pointer returned by libuv. After `require`, `pmain` rereads
+  callable. Async initialization calls the public idempotent
+  `uv.setup_process_args()` helper, which uses only those original entrypoint
+  values and replaces the private `argv` slot with the pointer returned by
+  libuv. A low-level UV client can call the same helper explicitly; an ordinary
+  Lua host without the entrypoint registry contract receives false. After `require`, `pmain` rereads
   that pointer and builds an Array with capacity `argc - 1`. It copies
   `argv[i]` to logical index `i` only for `i = 1 .. argc-1`; the executable
   name is omitted. A Titan `main(args: {string}): integer` therefore sees

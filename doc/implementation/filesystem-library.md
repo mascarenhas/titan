@@ -1,120 +1,102 @@
 # Filesystem-library implementation
 
-The public `titan.fs` module is a high-level facade over the private
-`titan.uv` continuation runtime. Ordinary file descriptors still use the
-filesystem `Call` variants in `titan/uv/file.titan`; canonical-path resolution
-and persistent filesystem watching are implemented in `titan/fs.titan`
-because their public policy belongs to the facade.
+`titan.fs` owns high-level File and Watcher policy using ordinary compiled
+imports of public `titan.async`, `titan.uv`, and `titan.string`. Its only native
+include is the small path-separator definition in `fs_platform.h`. Native
+filesystem requests, callbacks and borrowed-storage roots belong to UV;
+Task waits and subscription queues belong to async. See the
+[filesystem API](../language/standard-library-fs.md),
+[public UV filesystem operations](../language/uv/functions/fs.md), and
+[generic runtime](libuv-runtime.md).
 
-This chapter covers the missing-path metadata rule, `realpath`, watcher
-callback ownership, drain-time event classification, and native-handle close
-protocol. The user-visible API and its best-effort notification contract are
-in the [filesystem standard-library chapter](../language/standard-library-fs.md).
+## One-shot requests and File ownership
+
+`perform<T>` constructs one public `uv.fs_t` and registers its submission with
+ordinary `async.await<T, integer>`. The terminal callback reads the native
+result, copies any request-owned strings/stat/scandir data, calls
+`uv.fs_req_cleanup`, and settles the typed result. Expected native failures
+become `async.OperationError` with the public operation label; unexpected
+callback failures clean the consumed request, invoke the exact wait's fatal
+capability, and rethrow to the UV boundary. Immediate rejection cleans the
+unaccepted request and rejects inline.
+
+`acquire<T>` handles operations that produce a descriptor. It puts a successful
+native result into an existing, still-unpublished File before result decoding
+or resolver publication. `open` owns abandonment close lexically; `tmpname`
+also closes the newly acquired descriptor before returning its generated path.
+Cancellation after native success can therefore unwind without leaking an
+unpublished descriptor. The descriptor remains separate from request memory:
+request cleanup never closes it.
+
+`File:close_with` uses `await_cleanup`. It builds the request and acceptance
+state, takes the descriptor out of the File, and restores it only if submission
+failed before native acceptance. An accepted close leaves the File terminal,
+including when native completion reports an error. Pending Task cancellation
+does not skip the close or replace its completion. Close also clears retained
+delimiter excess. It does not serialize unrelated in-flight operations; callers
+still coordinate use of one descriptor.
+
+Reads allocate writable public buffers and copy exactly the completed byte
+count. Each accepted request retains its buffer independently through callback
+return. The default read size is 64 KiB; zero bytes is EOF. Retained delimiter
+excess can satisfy a read synchronously. Writes use read-only string-backed
+buffer views and resubmit the unconsumed suffix after a short write, preserving
+1-based slice indices and exact borrowed lifetime. File mode mapping and native
+creation permissions remain in this module.
 
 ## Metadata and canonical paths
 
-`stat` and `lstat` call the existing private `uv.fs_stat` and `uv.fs_lstat`
-operations. Their facade catches an `OperationError` only when its code is
-`UV_ENOENT`; that one result becomes `nil`. Every other error is re-raised with
-its original value and traceback. The two public result types are therefore
-`Stat?`. The private result copies libuv's `st_dev` and `st_ino` into the
-public `Stat.device` and `Stat.inode` fields as an opaque equality-only pair,
-alongside size, kind, mode, and modification time. Keeping the pair on the
-asynchronous result lets higher-level compiler I/O preserve physical identity
-without falling back to blocking Lua filesystem calls.
+`stat` and `lstat` copy public UV `stat_t` results into the existing `Stat`
+shape. Only `uv.ENOENT` becomes nil; every other failure preserves its
+structured error/traceback. `device` and `inode` retain the complete unsigned
+native bit patterns through Titan's signed integer channel and form an opaque
+equality pair. They are not portable ordering or size values.
 
-`realpath` owns one `owned *uv_fs_t` in a local `RealpathRequest`. The request
-also stores its exact Titan callback, optional Task waiter, failure flag, and
-result payload. Accepted requests are keys in the traced
-module-local `{RealpathRequest: boolean}` Map until their terminal callback,
-independently of the suspended continuation stack.
-
-The source-defined `fs_realpath_cb` follows the standard foreign callback
-sequence: it recovers the owner through `uv_req_get_data`, reads the callback
-closure through `ffi.titan_record_field`, obtains the main Lua state from the
-request loop, invokes the closure's exact native entry, and restores the Lua
-stack top. The ordinary Titan handler copies `uv_fs_get_ptr` to a Titan string
-before `uv_fs_req_cleanup`, removes the Map root, and records the result. While
-the request still has a waiter it calls the source-private tokenless
-`resume_condition_waiter_from_callback`; a native callback never calls public
-`Task:resume(token)` and never receives a `ResumeToken`.
-
-The facade creates one fresh private token with diagnostic source
-`"fs.realpath"` and suspends exactly once with it. The accepted request has one
-authoritative callback, which publishes the failure/result before its tokenless
-wake, so a normal continuation already has the terminal payload. The optional
-cancellation action and its scope cleanup are established before libuv can
-accept the request. The action detaches the exact waiter synchronously; the
-Task's suspension closure then uses its captured token for the deferred
-cancellation wake. No request callback or other producer receives that token.
-It authorizes only retirement of this explicit suspension and is not a general
-capability for the native request. Titan's cooperative execution means no
-libuv callback can interleave with the detach. The short accepted request is
-not sent through `uv_cancel`; its eventual callback still performs cleanup
-without resuming the Task. A negative submission result cleans and unroots the
-request immediately because libuv will not call it back.
+`realpath` is an ordinary one-shot await over `uv.fs_realpath`; it copies the
+request's string before cleanup. It no longer owns a separate native callback,
+Task token, or request-root Map. `list` similarly copies each scandir entry
+before request cleanup. Path validation rejects embedded NUL before native
+submission. Host-directory and executable-path helpers use the public UV
+capacity/status APIs with explicit native ENOBUFS handling; process argument
+setup is shared through `uv.setup_process_args` where required.
 
 ## Watcher ownership
 
-A public `Watcher` is permanently associated with the active `Runtime` at
-construction. It owns a dense Array of registrations, a canonical-path Map,
-a raw-notification Array, at most one polling Task, the optional private
-`ResumeToken` for that active poll, and one integer operation state covering
-idle, polling, clearing, and poll-plus-clear overlap. Operations first prove
-that the same Runtime remains active; there is no generation reset or cross-
-Runtime reuse path.
+A public Watcher stores its exact Runtime loop, a dense registration Array,
+canonical-path Map, one `BufferedSubscription<WatcherNotification, integer>`,
+its publish function, and the existing four-state operation guard. Every
+operation checks that the active Runtime still has that same loop, then checks
+Task context. A later Runtime never rebinds an old watcher.
 
-Each local `WatchRegistration` owns exactly the state needed by one
-`uv_fs_event_t`:
+Each `WatchRegistration` owns a public `uv.fs_event_t`, a prebuilt handle view,
+canonical path, directory flag, and dense index. The callback receives copied
+filename text from UV and publishes one notification; it does no filesystem I/O
+or event classification. The public UV owner roots native callback state until
+close, so fs needs no native callback header or separate GC root table.
 
-- GC-owned native handle storage;
-- the exact event callback closure;
-- its Runtime and callback-root index;
-- canonical watched path and directory/file flag; and
-- its dense Watcher index.
+Construction prepares the owner, view, closure, and domain indexes before native
+init/start. Init status is checked directly, then initialized ownership is
+committed before start. No fallible allocation is placed after a successful
+start before the registration returns. Rejection rolls back indexes and closes
+an initialized partial registration. Close is deferred before index removal
+because an empty-batch wake can itself fail while scheduling a continuation.
 
-The complete registration is placed in `Runtime.handle_roots` before
-`uv_fs_event_init`, so the native handle and everything its callback reads stay
-reachable. An init rejection removes that root because libuv never accepted
-the handle. A start rejection transfers it to ordinary asynchronous close
-ownership. Acceptance from `uv_fs_event_start` is not a backend-readiness
-callback: on Darwin, libuv creates the FSEvents stream asynchronously on its CF
-thread. Native watcher cases therefore let the Runtime settle after registration
-before issuing the mutation under test; the facade does not claim replay of an
-event that predates native subscription.
+The subscription supplies its queue and exact one-reader reservation. A blocked
+poll uses `next_batch`; cancellation detaches that reader and preserves native
+registrations and queued events. Removing the final registration calls
+`wake_batch`, allowing the current poll to return an empty batch without ending
+the reusable subscription. With no registrations, poll uses `drain_pending`
+instead of waiting. The Watcher operation guard remains necessary while a
+detached batch is classified across asynchronous metadata calls.
 
-`fs_watcher_event_cb` recovers the registration from handle data and the main
-Lua state from the handle's loop. Its Titan handler copies the nullable
-filename while libuv owns it and appends one `WatcherNotification` containing
-the registration, copied filename, event mask, and status. It then clears the
-installed poller and its current token before waking through the tokenless
-condition-waiter callback helper. The callback does not perform filesystem I/O
-and does not synchronously block the event loop. If copying or queue
-publication raises, the outer handler clears the same waiter/token pair before
-failing that exact Task at the callback boundary.
-
-Each blocking `poll` creates a fresh token with source `"fs.watcher"`, stores it
-beside the exact waiter, and passes it with an exact-waiter detach action to one
-explicit suspension. Facade state changes such as retiring the last
-registration clear the waiter/token pair and resume the poller with that token;
-native events still use the callback helper above. Cancellation clears the
-pair before the Task's stored-token wake, and scope cleanup repeats that
-idempotent detach on every other exit. A different public token raises in its
-caller as `Task resume token mismatch (expected source: fs.watcher)` and cannot
-end the poll.
-
-A native callback has already appended a notification before its tokenless
-wake. A facade wake happens only after the last registration is removed. These
-are monotonic postconditions under the public requirement that Tasks externally
-coordinate concurrent Watcher mutations, so a normal continuation does not
-defensively resuspend. In particular, a caller that removes the last
-registration waits for the awakened poll before re-registering a path.
-Cancellation unwinds instead. Shared registrations and every buffered
-notification remain available to the next polling Task.
+A successful event start is acceptance, not backend readiness. On Darwin,
+FSEvents activation occurs asynchronously on its native CF thread; the API does
+not replay mutations that predate that subscription. Native tests must establish
+readiness/progress rather than assume an exact number of Task yields.
 
 ## One-to-one drain mapping
 
-`poll` detaches the currently buffered raw Array and installs a fresh one before
+`poll` detaches the currently buffered subscription batch before
 classification, so callbacks that arrive while `lstat` is pending append to a
 follow-on batch. It maps every `WatcherNotification` to exactly one result:
 
@@ -136,10 +118,10 @@ is no raw-batch rollback or watcher reset.
 
 Mapping a deletion can stop a registration, and mapping a native error can
 retire and close one, after callbacks from that registration have already
-entered the follow-on Array. After each detached batch is mapped, the drain
-scans the fresh Array. If any notification now names a registration whose dense
+entered the follow-on queue. After each detached batch is mapped, the drain
+scans the fresh queue. If any notification now names a registration whose dense
 index is zero, the drain detaches and maps that entire follow-on batch in
-callback order before returning. Pulling the complete Array, instead of
+callback order before returning. Pulling the complete batch, instead of
 filtering only the retired registration's records, preserves callback order
 across registrations. A batch containing only live registrations remains
 buffered for the next `poll`.
@@ -152,63 +134,39 @@ registration, in which case the same rule repeats. No raw notification is
 discarded or merged, and a retirement-causing `poll` leaves no already-copied
 event for that retired registration to leak into the next call.
 
-## Stopping and closing handles
+## Stopping, retirement, and close
 
-Stopping and closing are separate local `WatchRegistration` methods. `stop`
-checks `uv_fs_event_stop`. A successfully stopped or callback-retired
-registration leaves the Watcher's path Map and dense Array before any yielding
-close wait, so a concurrent clear cannot claim it a second time. `close(wait)`
-then transfers the rooted registration to the shared close machinery; start
-rejection uses the nonwaiting form, while public `stop`, `clear`, native-status
-retirement, and watched-root deletion use the waiting form.
+`WatchRegistration:stop` checks the native stop result. A retiring registration
+leaves the path Map and dense Array before any yielding close, preventing a
+concurrent clear from claiming it again. Native close is already armed in a
+defer before that removal or its wake notification can raise.
 
-The operation state rejects a new poll and a second clear while clear is in
-progress. Its four transitions retain the polling half when clear finishes
-first and retain the clearing half when the prior poll finishes first; completed
-clear remains idempotent.
+The waiting close uses `async.await_cleanup` with the prebuilt public handle
+view; its protected close callback resolves only after UV retires the native
+lifetime. Partial start rollback uses nonwaiting `uv.close`, whose public owner
+still retains itself until close completion. Native callbacks do not receive
+or use `Task:resume` tokens.
 
-A waiting close yields the private, cancellation-insensitive
-`HandleCloseCall`. Its dispatcher runs while the Task is already suspended,
-calls `close_handle`, and returns only from `uv_close` completion. This is why
-the high-level method neither treats public `Task:resume(token)` as a
-native completion nor adds a second scheduler or close-waiter queue.
+The four operation states are idle, polling, clearing, and polling-plus-clearing.
+They preserve the still-running half when the other operation finishes first,
+and reject a new poll or second clear during clear. `clear` retires domain
+registrations but deliberately leaves the notification subscription reusable;
+its subscription producer has no independent native handle to close. Runtime
+shutdown finally walks remaining handles only after Tasks and their cleanup
+have retired.
 
-`begin_close` first checks `uv_is_closing`. An already-closing handle is not
-submitted to `uv_close` a second time. Otherwise one `CloseOwner` takes the old
-callback root, overwrites handle data for `uv_close_cb`, retains the original
-registration through close, and invokes the waiting completion only after the
-close callback has released that owner. Runtime shutdown's `uv_walk` already
-skips closing handles and remains the fallback for a live watcher that
-application code did not clear.
+## Compiled boundary and validation
 
-## Generated boundary and validation
+The fs consumer includes no libuv header and defines no restricted foreign
+callback. Its one generated object calls the public UV/async protocols just as
+an independently compiled library could. The tiny platform-separator header
+has no libuv storage, callback, or scheduler dependency.
 
-The two restricted foreign declarations generate `titan/fs.titan.h` alongside
-the module C source. The header is a source-build intermediate: Make cleanup
-and `.gitignore` own it, and it is not installed. `titan/fs.o` defines
-`fs_realpath_cb` and `fs_watcher_event_cb` and directly references only the
-reviewed public libuv entry points; no C shim or runtime callback dispatcher is
-added.
-
-Behavioral coverage lives in `spec/stdlib/titan/fs/tests.titan` and runs in the
-native aggregate outside LuaCov. Build-boundary coverage in
-`spec/libuv_build_spec.lua` checks the exact callback declarations, generated
-symbols, direct libuv references, close guard, and combined-provider ownership.
-The serialized standard-library fixture pins the appended public
-`titan.fs` interface.
-
-These changes are ABI-visible. In particular, `stat` and `lstat` return
-`Stat?`, changing their exact raw C return carrier from `Udata *` to `TValue`.
-The explicit-suspension protocol also exposes `ResumeToken`, requires that token
-in `titan.async.suspend(token, ...)` and `Task:resume(token)`, and retains the optional
-`SuspendCancelAction` as the second suspend parameter; the source-private
-`titan.uv` entry has the same exact parameters. Both serialized public
-interfaces and native signatures therefore require the current compiled-module ABI. A mismatched
-provider is rejected before either boundary is used rather than migrated or
-adapted.
-
-The current ABI also adds `device` and `inode` to the
-serialized public `Stat` record. Libuv exposes both as unsigned 64-bit values;
-the implementation carries their complete bit patterns through Lua's signed
-integer carrier. They may therefore appear negative and are meaningful only as
-an equality pair.
+Native behavior belongs in `spec/stdlib/titan/fs/tests.titan`: binary and
+delimiter I/O, modes and validation, metadata/locations, symlinks, independent
+continuations, watcher canonicalization and retirement, cancellation, Runtime
+ownership, and close acceptance. Public compiled-client coverage must also
+exercise accepted-open abandonment, preaccept-close restoration, and accepted
+close errors. Schema fixtures retain File/Stat/Watcher declarations and the
+canonical `async.OperationError` nominal owner. These ownership tests complement
+rather than replace the complete provider, compiler and platform gates.

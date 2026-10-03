@@ -473,10 +473,11 @@ callback boundaries:
   `titan/coroutine.titan` and assigns it directly to `mco_desc.func`.
   `titan-runtime/minicoro.c` now owns only the one `MINICORO_IMPL`
   translation unit and the fixed raw-Lua tag comparator.
-* Six `titan.uv` contributors (`file`, `os`, `process`, `runtime`, `task`, and
-  `tcp`) define thirteen exact callbacks: filesystem, signal, process exit,
-  write, alloc, read, close, walk, timer, DNS, connect, shutdown, and
-  connection.
+* The `titan.uv` folder contributors define exact native callbacks for the
+  public low-level loop, handle, stream, request, process, and worker operations.
+  Ordinary Titan callbacks remain main-thread entries; C-only workers, thread
+  entries, and once callbacks have separate foreign signatures and cannot call
+  into Titan or Lua.
 * `titan/http/native.titan` defines the eight synchronous llhttp data and
   completion callbacks. The private llhttp archive still contains exactly
   `llhttp.o`, `http.o`, and `api.o`; there is no separate HTTP adapter object.
@@ -490,22 +491,30 @@ typed inline definitions of `lua_totvalue`, `lua_pushtvalue`, `lua_togco`, and
 `titan_newthread`, so trusted source modules do not depend on separate runtime
 exports for those bridges.
 
-Each uv/HTTP callback preserves the reviewed owner protocol in source: recover
-the exact already-traced owner and callback closure, recover the loop/main Lua
-state and module from their fixed slots, read the closure's native entry through
-an exact `foreign function(...): ...` type, save the stack top, invoke the entry with
-the original closure as `_fn`, and restore the top. The owner remains reachable
-through its runtime/parser ownership throughout the callback, so pushing the
-same userdata would add no GC protection. The
-filesystem path deliberately passes only its owner; its Titan handler reads the
-result through `uv_fs_get_result`. No event-kind dispatcher, registry callback
-table, or compatibility shim replaces the deleted C files.
+Each UV/HTTP callback recovers the exact owner and callback closure, the
+owning main Lua state and module, and the closure's native entry through an
+exact `foreign function(...): ...` type. It invokes that entry with the original
+closure as `_fn` and preserves the Lua stack top. UV callbacks pin the owner and
+old callback frame while user code runs, even when the terminal callback retires
+the old request or close registration and reuses its concrete owner. Retiring an
+old frame cannot clear a new registration. Persistent callbacks preserve their
+live registration until stop/close according to the operation's native contract.
+Callback exceptions latch the original error and trace, complete mandatory
+native bookkeeping, and are rethrown only after returning across the native
+boundary. The synchronous HTTP parser retains its own parser-owner protocol.
+
+High-level fs/net/os/timer modules use ordinary Titan callbacks through the
+compiled UV interface, so they do not duplicate the raw C-to-Titan bridge or
+reach source-private callback fields. Their Task adapters use public async
+registration and subscription APIs. See the
+[extension guide](libuv-extension-guide.md) for the exact native pin, request,
+and terminal-callback ownership rules.
 
 The runtime SDK archive consequently has exactly `titan.o` and `minicoro.o`.
 Its installed namespaced header set is only `titan/ffi.h`, alongside top-level
 `minicoro.h` and `titan.h` (and the separately governed
 bundled libuv headers). The standard provider payload is `ltitanlib.o`, private
-LPegLabel, the selected libuv payload, private llhttp, and the selected OpenSSL
+LPegLabel, the bundled libuv payload, private llhttp/SQLite, and the selected OpenSSL
 payload; it has no `titan_uv.o`, `titan/coro.h`, `titan/uv.h`, or
 `titan_httpshim.o`.
 

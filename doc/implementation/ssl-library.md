@@ -14,9 +14,8 @@ high-level `fs` and `net` modules. Explicit path reads go through
 `fs.read_file`; network traffic drives only `net`'s public `read`, `write`,
 `shutdown`, `close`, and `accept` methods.
 
-This feature makes no change to `titan.uv`, adds no TLS call to its private
-continuation union, and does not import it. The existing networking module is
-treated as fixed language-level substrate. A TLS operation suspends only when
+TLS does not import `titan.uv` or add a scheduler operation. The networking
+module's public resource and cleanup contracts are its transport substrate. A TLS operation suspends only when
 the wrapped high-level `net.Connection` suspends.
 
 `titan/ssl.titan` directly imports OpenSSL's public `err.h`, `x509v3.h`,

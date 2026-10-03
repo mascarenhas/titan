@@ -611,7 +611,9 @@ length, match count, and carrier identifier sum. This is an object-producing
 compile; it does not link or execute target code. The shared bounded object
 reader locates one initialized, uncompressed, relocation-free section and
 rejects objects larger than 16 MiB before reading them. Invalid or missing
-payloads are retryable infrastructure failures and are not cached.
+payloads are retryable infrastructure failures and are not cached. Clang marks
+only this inert serialized array `no_sanitize("address")` to prevent ASan global
+redzones from changing its exact size; runtime instrumentation remains enabled.
 
 Exactly one match selects its carrier. Zero and multiple matches are valid
 completed query answers and yield the checker's unsupported/ambiguous carrier

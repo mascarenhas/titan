@@ -21,8 +21,10 @@ Lua `pcall` or Titan's inline catch/finally boundary.
 The handler stores the raw rendered traceback in
 `registry[TITAN_BACKTRACE_KEY]`: frame lines only, with no error message,
 no `stack traceback:` header, and no presentation tabs. The error value
-itself is not wrapped: Lua `pcall`, Titan's catch-local `error`, and any
-re-raise see the exact Lua value that was raised.
+itself is not wrapped by the handler. After the handler returns, Lua 5.5's
+`luaG_errormsg` replaces a nil error object with `"<no error object>"` before
+throwing. Lua `pcall`, Titan's catch-local `error`, and any re-raise observe
+that caught Lua error value; other values, including false, remain unchanged.
 
 ### Trace pinning
 

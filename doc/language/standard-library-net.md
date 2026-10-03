@@ -134,11 +134,10 @@ accept waiter with an error.
 
 ## Errors
 
-Immediate and asynchronous libuv failures raise the same provider-owned error
-record, re-exported through the transparent facade alias
+Immediate and asynchronous libuv failures raise the public async-owned record
 `async.OperationError`. Its fields are `code: integer`, `name: string`,
-`message: string`, and `operation: string`. Like every alias to a record with a
-public constructor, it can be called directly as `async.OperationError(...)`
+`message: string`, and `operation: string`. Its public constructor can be
+called directly as `async.OperationError(...)`
 (or explicitly through `async.OperationError.new`); ordinary callers normally receive these values
 from the operation that failed.
 
@@ -177,7 +176,7 @@ make libuv
 
 The Unix build includes a [failed-spawn cleanup correction](../../vendor/libuv/README.md).
 System libuv is not supported. Applications importing the installed binary
-`net` module do not need libuv headers at compile time; all libuv and callback-shim linkage
+`net` module do not need libuv headers at compile time; all native libuv and callback linkage
 remains in the combined standard-library provider
 `$ROCKS_TREE/lib/titan/0.6/titan.so`. The supported installation currently
 sets `ROCKS_TREE == PREFIX`; the former owns Titan's SDK/stdlib while the latter
@@ -188,5 +187,7 @@ The [`ssl` standard module](standard-library-ssl.md) wraps this public
 Connection and Server API with OpenSSL memory BIOs. It does not reach through
 `net` to private libuv handles.
 
-UDP, Unix-domain/named pipes, socket options, and endpoint-inspection APIs are
-follow-ups.
+This high-level `net` module does not expose UDP, Unix-domain/named pipes,
+socket options, or endpoint inspection. The public
+[`uv` binding](standard-library-uv.md) provides those native operations for
+low-level clients and adapters.

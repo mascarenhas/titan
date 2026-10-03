@@ -1,0 +1,29 @@
+local uv = import "titan.uv"
+
+function main(args: {string}): integer
+  local loop = uv.loop_t()
+  if uv.loop_init(loop) < 0 then return 1 end
+  local timer = uv.timer_t()
+  if uv.timer_init(loop, timer) < 0 then
+    uv.loop_close(loop)
+    return 1
+  end
+  local calls = 0
+  local status = uv.timer_start(timer,
+    function (owner: uv.timer_t)
+      calls = calls + 1
+      uv.close(owner:as_handle_t(), nil)
+    end, 1, 0)
+  if status < 0 then
+    -- Rejected start does not undo the already initialized handle.
+    uv.close(timer:as_handle_t(), nil)
+    uv.run(loop, nil)
+    uv.loop_close(loop)
+    return 1
+  end
+  -- The one-shot callback closes its handle; this also drains close completion.
+  uv.run(loop, nil)
+  if uv.loop_close(loop) < 0 then return 1 end
+  if calls ~= 1 then return 1 end
+  return 0
+end

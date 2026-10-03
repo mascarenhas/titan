@@ -352,11 +352,12 @@ The module exports three mutable stream variables:
 - `os.stdout: OutputStream` writes descriptor 1; and
 - `os.stderr: OutputStream` writes descriptor 2.
 
-These are stable high-level records rather than handles borrowed from the
-first event loop that touches them. Each operation resolves the current
-Runtime's lazily initialized pipe-or-TTY owner. A retained stream therefore
-rebinds safely after one `async.run`/`async.loop` session ends and another
-begins, without returning buffered input from the previous Runtime.
+These are stable high-level records with lazily initialized pipe-or-TTY owners
+for the current Runtime. Parent input retains its read owner throughout that
+Runtime, including queued bytes and delimiter excess after native EOF closes
+the duplicate. A retained stream rebinds after one `async.run`/`async.loop`
+session ends and another begins, without returning buffered input from the
+previous Runtime.
 
 Process stdio supports TTY and named-pipe descriptors. A descriptor classified
 by libuv as a regular file, TCP socket, or another kind is rejected instead of
@@ -392,13 +393,14 @@ the Unix socket-metadata fallback and `TITAN_STDIO_PIPE_FDS` hint do not apply.
 The wrapper owns a non-inheritable duplicate of the actual Windows handle,
 leaving the original parent stream open when the Runtime ends.
 
-The Runtime caches each successfully initialized parent wrapper. The launcher
+The Runtime caches each usable initialized parent wrapper. The launcher
 must update or clear the hint when replacing inherited descriptors; changing
-the variable after a wrapper has been initialized does not reclassify it.
+the variable while a cached wrapper remains usable does not reclassify it.
 
-The raw parent descriptors remain owned by the host process. Each Runtime owns
-one stream wrapper over a close-on-exec duplicate, whose teardown cannot close
-the original descriptor. A `with_parent_*` configurator installs that wrapper
+The raw parent descriptors remain owned by the host process. A native parent
+wrapper owns a close-on-exec duplicate, whose teardown cannot close the
+original descriptor. A `with_parent_*` configurator obtains a usable cached
+wrapper, creating a replacement if the earlier native wrapper retired, and installs it
 with `UV_INHERIT_STREAM`; libuv gives the child a duplicate of the descriptor
 used by the stream. The wrapper stays owned by the Runtime, and several
 children may inherit the same parent stream.
@@ -409,8 +411,10 @@ for a child before either reader actually asks for them.
 
 Closing any of the three stable parent stream facades is an idempotent no-op.
 It neither closes the Runtime-owned duplicate nor changes later operations on
-the facade; Runtime teardown alone retires that Runtime's wrapper. This is
-distinct from closing a captured child endpoint.
+the facade. Native EOF or a read error may retire an input duplicate earlier;
+the same Runtime's input facade and subscription still retain buffered bytes
+until reads consume them. Runtime cleanup retires remaining native wrappers.
+This is distinct from closing a captured child endpoint.
 
 `InputStream` satisfies the standard `io.Reader`, `io.Closer`, and
 `io.ReaderCloser` Interfaces exactly.
@@ -427,7 +431,7 @@ stream write ordering; Titan adds no operation queue. An empty write is a
 checked no-op. The request retains the original immutable string until its
 eventual callback while libuv borrows, but does not mutate, its bytes.
 Cancelling the Task does not release that owner early or kill the child.
-On Unix, loading `titan.uv` changes a default `SIGPIPE` disposition to ignored
+On Unix, loading `titan.async` changes a default `SIGPIPE` disposition to ignored
 so a child that closes stdin produces the ordinary libuv write error instead
 of terminating the parent process. An already ignored signal or an
 application-installed handler is preserved.
@@ -521,9 +525,10 @@ not reap the child and does not replace `wait`. Code that conditionally signals
 a Process can use it immediately before `kill`; neither operation yields
 between the observation and signal request.
 
-If a Runtime finishes while a child is still alive, its cleanup Task discovers
-the `uv_process_t` watcher through `uv_walk` and closes it like any other
-handle. `uv_close` retires the watcher but does not signal, wait for, or reap
+After the Runtime's Tasks have retired, the async driver discovers remaining
+public process handles through `uv.walk` and closes them like other handles.
+If a child is still alive at that point, closing its watcher does not own the
+child's lifecycle. `uv_close` retires the watcher but does not signal, wait for, or reap
 the child; the child may outlive the Runtime. Programs that require termination
 or reaping must explicitly call `kill` and `wait` while that Runtime is active.
 

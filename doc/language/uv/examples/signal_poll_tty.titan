@@ -1,0 +1,151 @@
+local uv = import "titan.uv"
+
+local function check(status: integer)
+  if status < 0 then raise uv.strerror(status) end
+end
+
+local function note(text: string)
+  local request = uv.fs_t()
+  defer uv.fs_req_cleanup(request)
+  local bytes = uv.buf_t.from_string(text .. "\n")
+  local written = uv.fs_write(nil, request, 1, {bytes}, -1, nil)
+  check(written)
+  if written ~= bytes:length() then raise "short diagnostic write" end
+end
+
+local function close_file(fd: integer)
+  if fd < 0 then return end
+  local request = uv.fs_t()
+  defer uv.fs_req_cleanup(request)
+  check(uv.fs_close(nil, request, fd, nil))
+end
+
+local function close_handles(loop: uv.loop_t)
+  uv.walk(loop, function (handle: uv.handle_t, argument: value)
+    if not uv.is_closing(handle) then uv.close(handle, nil) end
+  end, nil)
+end
+
+function main(args: {string}): integer
+  local pipe_status, read_fd, write_fd = uv.pipe(uv.NONBLOCK_PIPE, uv.NONBLOCK_PIPE)
+  check(pipe_status)
+  defer close_file(read_fd)
+  defer close_file(write_fd)
+  local loop = uv.loop_t()
+  check(uv.loop_init(loop))
+  local closing = false
+  local finish = function ()
+    closing = true
+    close_handles(loop)
+    uv.run(loop, nil)
+    check(uv.loop_close(loop))
+  end
+  defer finish()
+  local poll, signal, tty = uv.poll_t(), uv.signal_t(), uv.tty_t()
+  local deadline = uv.timer_t()
+  check(uv.timer_init(loop, deadline))
+  local poll_done, signal_done = true, true
+  local complete = function ()
+    if poll_done and signal_done then
+      closing = true
+      close_handles(loop)
+    end
+  end
+
+  -- Poll borrows this descriptor; closing the poll owner never closes the fd.
+  -- Pipe polling is a native platform feature (Windows generally needs sockets).
+  local poll_status = uv.poll_init(loop, poll, read_fd)
+  if poll_status < 0 then
+    if poll_status ~= uv.ENOSYS and poll_status ~= uv.ENOTSUP and
+       poll_status ~= uv.ENOTSOCK and poll_status ~= uv.EINVAL then
+      check(poll_status)
+    end
+    note("SKIP pipe polling: " .. uv.err_name(poll_status))
+    -- Partial native initialization can remain closeable even on error.
+    local view = poll:as_handle_t()
+    if view:is_initialized() then uv.close(view, nil) end
+  else
+    poll_done = false
+    check(uv.poll_start(poll,
+      function (owner: uv.poll_t, status: integer, events: integer)
+        if closing then return end
+        check(status)
+        if (events & uv.READABLE) == 0 then return end
+        local request = uv.fs_t()
+        defer uv.fs_req_cleanup(request)
+        local bytes = uv.buf_t.allocate(1)
+        local count = uv.fs_read(nil, request, read_fd, {bytes}, -1, nil)
+        if count == uv.EAGAIN then return end -- Readiness is only advisory.
+        check(count)
+        if count ~= 1 or bytes:to_string(1) ~= "p" then
+          raise "unexpected poll input"
+        end
+        check(uv.poll_stop(owner))
+        uv.close(owner:as_handle_t(), nil)
+        poll_done = true
+        complete()
+      end, uv.READABLE))
+    local request = uv.fs_t()
+    defer uv.fs_req_cleanup(request)
+    local written = uv.fs_write(nil, request, write_fd,
+      {uv.buf_t.from_string("p")}, -1, nil)
+    if written ~= 1 then check(written); raise "short pipe write" end
+  end
+
+  if uv.SIGUSR1 == nil then
+    note("SKIP SIGUSR1: native constant unavailable")
+  else
+    check(uv.signal_init(loop, signal))
+    local started = uv.signal_start(signal,
+      function (owner: uv.signal_t, signum: integer)
+        if closing then return end
+        if signum ~= uv.SIGUSR1 then raise "unexpected signal" end
+        check(uv.signal_stop(owner))
+        uv.close(owner:as_handle_t(), nil)
+        signal_done = true
+        complete()
+      end, uv.SIGUSR1)
+    if started < 0 then
+      if started ~= uv.ENOSYS and started ~= uv.ENOTSUP and
+         started ~= uv.EINVAL then check(started) end
+      note("SKIP SIGUSR1: " .. uv.err_name(started))
+      uv.close(signal:as_handle_t(), nil)
+    else
+      signal_done = false
+      check(uv.kill(uv.os_getpid(), uv.SIGUSR1))
+    end
+  end
+
+  -- Enum results are nominal union values: match their variant, not identity.
+  local input_is_tty = false
+  case uv.guess_handle(0)
+  when tty() then input_is_tty = true
+  else input_is_tty = false
+  end
+  if not input_is_tty then
+    note("SKIP TTY: stdin is not a terminal")
+  else
+    -- Descriptor handling follows native TTY init rules; this standalone
+    -- example does not use stdin after the TTY owner is retired.
+    local initialized = uv.tty_init(loop, tty, 0, 1)
+    if initialized < 0 then
+      if initialized ~= uv.ENOSYS and initialized ~= uv.ENOTSUP and
+         initialized ~= uv.ENOTTY and initialized ~= uv.EINVAL then
+        check(initialized)
+      end
+      note("SKIP TTY init: " .. uv.err_name(initialized))
+    else
+      local status, width, height = uv.tty_get_winsize(tty)
+      check(status)
+      note("TTY dimensions: " .. width .. "x" .. height)
+      uv.close(tty:as_handle_t(), nil)
+    end
+  end
+  check(uv.timer_start(deadline, function (owner: uv.timer_t)
+    if not closing then raise "signal/poll example timed out" end
+  end, 5000, 0))
+  complete()
+  uv.run(loop, nil)
+  if not poll_done or not signal_done then return 1 end
+  return 0
+end

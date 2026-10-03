@@ -510,7 +510,7 @@ separate traced result slot; no global per-type writer registry is involved.
 Generated startup stores C `argv[1..argc-1]` at Titan positions `1..argc-1`,
 sets length to `argc - 1`, and never writes user data at key 0.
 
-Both direct startup and `titan.uv.bootstrap` push the canonical proxy into the
+Both direct startup and the private `titan.async` bootstrap push the canonical proxy into the
 module's Lua entry wrapper. The wrapper validates/unboxes it before calling
 the exact native `main` with `Table *`. Consequently the executable name is
 not in the Array, `args[0]` is nil, and `#args == argc - 1`.

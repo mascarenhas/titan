@@ -1,0 +1,123 @@
+local async = import "titan.async"
+local uv = import "titan.uv"
+
+-- Documentation example: minimal read-only adapter using public APIs.
+record File
+  local descriptor: integer
+end
+
+local function operation_error(code: integer, operation: string): async.OperationError
+  return async.OperationError(code, uv.err_name(code), uv.strerror(code), operation)
+end
+
+local function close_on(file: File, loop: uv.loop_t)
+  if file.descriptor < 0 then return end
+  local request = uv.fs_t.new()
+  local descriptor = file.descriptor
+  local accepted = false
+  file.descriptor = -1
+  do
+    local outcome = async.await_cleanup<|integer, integer|>(function (
+        resolve: function (integer): (), reject: function (integer): (),
+        fatal: function (value, string): ())
+      local callback = function (completed: uv.fs_t)
+        local result = uv.fs_get_result(completed)
+        uv.fs_req_cleanup(completed)
+        if result < 0 then reject(result) else resolve(result) end
+      catch
+        uv.fs_req_cleanup(completed)
+        fatal(error, traceback)
+        raise
+      end
+      local status = uv.fs_close(loop, request, descriptor, callback)
+      if status < 0 then
+        uv.fs_req_cleanup(request)
+        reject(status)
+      else
+        accepted = true
+      end
+    end)
+    case outcome
+    when success() then
+    when error(code) then raise operation_error(code, "fs.close")
+    end
+  catch
+    if not accepted then file.descriptor = descriptor end
+    raise
+  end
+end
+
+function File:close()
+  if self.descriptor < 0 then return end
+  close_on(self, async.current_loop())
+end
+
+function File:is_closed(): boolean
+  return self.descriptor < 0
+end
+
+function open(path: string): File
+  local file = File(-1)
+  local request = uv.fs_t.new()
+  do
+    local outcome = async.await<|File, integer|>(function (
+        resolve: function (File): (), reject: function (integer): (),
+        fatal: function (value, string): ())
+      local callback = function (completed: uv.fs_t)
+        local result = uv.fs_get_result(completed)
+        -- Own the acquired descriptor before request cleanup or Task resumption.
+        if result >= 0 then file.descriptor = result end
+        uv.fs_req_cleanup(completed)
+        if result < 0 then reject(result) else resolve(file) end
+      catch
+        uv.fs_req_cleanup(completed)
+        fatal(error, traceback)
+        raise
+      end
+      local status = uv.fs_open(async.current_loop(), request, path,
+          uv.FS_O_RDONLY as integer, 0, callback)
+      if status < 0 then
+        uv.fs_req_cleanup(request)
+        reject(status)
+      end
+    end)
+    case outcome
+    when success(opened) then return opened
+    when error(code) then raise operation_error(code, "fs.open")
+    end
+  catch
+    -- await can raise cancellation after successful native acquisition.
+    file:close()
+    raise
+  end
+end
+
+function File:read(max_bytes: integer): string?
+  if max_bytes <= 0 then raise "file read size must be positive" end
+  if self.descriptor < 0 then return nil end
+  local request = uv.fs_t.new()
+  local buffer = uv.buf_t.allocate(max_bytes)
+  local outcome = async.await<|string?, integer|>(function (
+      resolve: function (string?): (), reject: function (integer): (),
+      fatal: function (value, string): ())
+    local callback = function (completed: uv.fs_t)
+      local result = uv.fs_get_result(completed)
+      local bytes: string? = nil
+      if result > 0 then bytes = buffer:to_string(result) end
+      uv.fs_req_cleanup(completed)
+      if result < 0 then reject(result) else resolve(bytes) end
+    catch
+      uv.fs_req_cleanup(completed)
+      fatal(error, traceback)
+      raise
+    end
+    local status = uv.fs_read(async.current_loop(), request, self.descriptor,
+        {buffer}, -1, callback)
+    if status < 0 then uv.fs_req_cleanup(request); reject(status) end
+  end)
+  case outcome
+  when success(bytes) then return bytes
+  when error(code) then raise operation_error(code, "fs.read")
+  end
+end
+

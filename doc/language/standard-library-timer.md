@@ -70,5 +70,12 @@ function four_ticks(): integer
 end
 ```
 
-A session also closes any Ticker that application code leaves open once no
-live Task remains.
+Cancelling a Task waiting in `tick()` detaches that waiter; it does not close
+the shared Ticker. A later Task can wait on it. The one-reader reservation stays
+held until a queued tick is delivered, so a second overlapping waiter is still
+rejected during that interval. Close uses cancellation-insensitive cleanup for
+the native handle; it remains usable from a cancelled Task's cleanup.
+
+A live Ticker belongs to the Runtime that created it. It cannot be used for
+native work in another Runtime. A session closes any Ticker that application
+code leaves open once no live Task remains.

@@ -48,7 +48,11 @@ function fail_with_value(v: value)
 end
 ```
 
-From Lua, `pcall` receives exactly the raised value:
+Lua 5.5 normalizes a raised `nil` error object to the string
+`"<no error object>"`; Titan `catch` and Lua `pcall` observe that string.
+Other raised values, including `false`, retain their value. This normalization
+applies to raised exceptions, not ordinary nil results or typed rejection data.
+For example, `pcall` receives the raised string unchanged:
 
 ```lua
 local ok, err = pcall(m.fail, "ada")
@@ -148,7 +152,8 @@ end
 ```
 
 Titan can also catch errors raised by Lua functions it calls. The caught
-`error` value is whatever Lua raised, and `traceback` is still a string.
+`error` value follows the normalization rule above, and `traceback` is still
+a string.
 
 An uncaught error in a standalone Titan executable is reported by the
 generated top-level handler: it prints `<progname>: <error message>`,
