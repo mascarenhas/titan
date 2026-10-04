@@ -1,6 +1,20 @@
 -- Public UV ciphertext relay. Stopping its frontend read establishes genuine
 -- TCP backpressure after opening without exposing net/SSL internals.
 
+foreign import "pressure-native.h"
+
+local function pressure_mss(socket: uv.tcp_t): string
+  local descriptor_status, descriptor? = uv.fileno(socket:as_handle_t())
+  test.assert(descriptor_status >= 0 and descriptor ~= nil,
+              "could not borrow the fixture-owned pressure socket descriptor")
+  local observed = foreign int.new_array(1)
+  local status: integer = ffi.titan_websocket_fixture_mss(descriptor:to_integer(), observed)
+  local actual: integer = observed[0]
+  test.assert(status == 0 or (status == 1 and actual == 256),
+    string.format("could not set/query pressure socket MSS: status=%d observed=%d", status, actual))
+  return string.format("pressure_mss(applied=%s value=%d)", string.tostring(status == 1), actual)
+end
+
 local record CloseWait
   handle: uv.handle_t
   done: async.Completion<|CloseWait, nil, nil|>?
@@ -162,6 +176,7 @@ local function stopped_socket_peer(port: integer,
   when error(status) then raise uv.err_name(status)
   else
   end
+  profile = profile .. " after_SYN=" .. pressure_mss(socket)
   return socket, profile
 end
 
@@ -269,6 +284,7 @@ local record Proxy
   local backend_shutdown: boolean
   local initial_front_send: integer
   local initial_front_receive: integer
+  local front_mss: string
 end
 
 local function relay(proxy: Proxy, front: uv.tcp_t, backend_port: integer): value
@@ -381,7 +397,7 @@ local function new_proxy(backend_port: integer): Proxy
   local bound_status, bound? = uv.tcp_getsockname(listener)
   test.assert(bound_status >= 0)
   local proxy = Proxy(bound:port(), listener, nil, nil, nil, nil, nil, false,
-                      0, nil, false, true, false, 0, false, 0, 0)
+                      0, nil, false, true, false, 0, false, 0, 0, "")
   local status = uv.listen(listener:as_stream_t(), 1,
     function (_: uv.stream_t, accepted_status: integer)
       test.assert(accepted_status >= 0 and proxy.front == nil)
@@ -389,6 +405,7 @@ local function new_proxy(backend_port: integer): Proxy
       test.assert(uv.tcp_init(loop, front) >= 0)
       test.assert(uv.accept(listener:as_stream_t(), front:as_handle_t()) >= 0)
       proxy.front = front
+      proxy.front_mss = pressure_mss(front)
       local front_send_status, front_send = uv.send_buffer_size(front:as_handle_t(), 0)
       local front_receive_status, front_receive = uv.recv_buffer_size(front:as_handle_t(), 0)
       test.assert(front_send_status >= 0 and front_send > 0 and
@@ -407,6 +424,7 @@ end
 
 local function Proxy:stop_input()
   test.assert(self.front ~= nil and self.incoming ~= nil)
+  self.front_mss = pressure_mss(self.front)
   local status = uv.recv_buffer_size(self.front:as_handle_t(), 4096)
   test.assert(status >= 0, "could not constrain proxy OS receive buffer")
   self.input_stopped = true
@@ -427,10 +445,10 @@ local function Proxy:diagnostic(): string
   local receiver = "absent"
   if self.sender then sender = self.sender:status():as_string() end
   if self.receiver then receiver = self.receiver:status():as_string() end
-  return string.format("frontend_eof=%s forwarded=%d pending=%d backend_shutdown=%s sender=%s receiver=%s closing=%s initial_front_send=%d initial_front_recv=%d",
+  return string.format("frontend_eof=%s forwarded=%d pending=%d backend_shutdown=%s sender=%s receiver=%s closing=%s initial_front_send=%d initial_front_recv=%d %s",
     string.tostring(self.frontend_eof), self.forwarded_bytes, self.pending_bytes,
     string.tostring(self.backend_shutdown), sender, receiver, string.tostring(self.closing),
-    self.initial_front_send, self.initial_front_receive)
+    self.initial_front_send, self.initial_front_receive, self.front_mss)
 end
 
 local function Proxy:close()

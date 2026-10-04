@@ -30,6 +30,16 @@ local function constrain_owned_sockets(receive: boolean, stop_reads: boolean): (
       case handle
       when tcp(owner) then
         if handle:is_initialized() and not uv.is_closing(handle) then
+          local mss_profile = "unconnected"
+          local peer_status = uv.tcp_getpeername(owner)
+          if peer_status >= 0 then
+            -- Nagle's ACK-delayed tail is not a stopped-window pressure
+            -- witness. Acknowledge this public setter on connected senders
+            -- before priming/filling; listeners have no connected peer.
+            test.assert(uv.tcp_nodelay(owner, 1) >= 0,
+                        "could not disable Nagle on a connected fixture-owned TCP socket")
+            mss_profile = pressure_mss(owner) .. " nodelay=set"
+          end
           local send_set = uv.send_buffer_size(handle, 1024)
           local receive_set = 0
           if receive then receive_set = uv.recv_buffer_size(handle, 1024) end
@@ -41,7 +51,7 @@ local function constrain_owned_sockets(receive: boolean, stop_reads: boolean): (
                       "could not set/query isolated owned TCP socket buffers")
           if stop_reads then test.assert(uv.read_stop(owner:as_stream_t()) >= 0) end
           count = count + 1
-          profile:write(string.format("tcp%d(send=%d recv=%d) ", count, send_size, receive_size))
+          profile:write(string.format("tcp%d(send=%d recv=%d %s) ", count, send_size, receive_size, mss_profile))
         end
       else
       end
@@ -120,6 +130,7 @@ local function verified_small_window_tls_peer(port: integer,
   local address_status, address? = uv.ip4_addr("127.0.0.1", port)
   test.assert(address_status >= 0)
   transport:connect_address(address)
+  profile = profile .. " after_SYN=" .. pressure_mss(owned_connected_socket(nil, port))
   local tls = ssl.client(transport, "localhost", TRUST_ROOT)
   runtime_test.cleanup(function () tls:abort() end)
   publish_abort(function () tls:abort() end)
@@ -356,6 +367,37 @@ local function blocked_output_case(secure: boolean, trigger: string)
     timer.sleep(1); async.checkpoint()
   elseif trigger == "peer_close" then
     raw.stream:write(frame(8, close_bytes(1000, "peer")))
+    local code?, _reason? = connection:close_status()
+    while code == nil and not watchdog_fired do
+      timer.sleep(10)
+      code, _reason = connection:close_status()
+    end
+    test.assert(code == 1000 and not watchdog_fired,
+      "fixture did not acknowledge peer Close behind accepted native output; " .. diagnostic())
+    -- Acknowledged peer Close has committed the public closing state: no
+    -- future data frame can be admitted, and the reciprocal Close waits for
+    -- the current frame. A still-waiting writer with continuously positive
+    -- native output therefore cannot substitute successive data frames.
+    -- Prove that held frame across real loop/timer progress before waiting
+    -- for the unchanged control deadline. Losing it is fixture setup failure.
+    local held_pending = pending_output_bytes(client_socket)
+    local held_started = fixture_time_ms()
+    local held_samples = 0
+    while not watchdog_fired do
+      test.assert(held_pending > 0 and not write_returned and write_failure == nil and
+                  writer:status():as_string() == "waiting",
+        string.format("fixture lost the current accepted native frame after peer Close: queue=%d held_ms=%d samples=%d; %s",
+          held_pending, fixture_time_ms() - held_started, held_samples, diagnostic()))
+      held_samples = held_samples + 1
+      if fixture_time_ms() - held_started >= 250 then break end
+      timer.sleep(10)
+      held_pending = pending_output_bytes(client_socket)
+    end
+    test.assert(not watchdog_fired and fixture_time_ms() - held_started >= 250 and
+                held_samples >= 2 and held_pending > 0 and not write_returned and
+                write_failure == nil and writer:status():as_string() == "waiting",
+      string.format("fixture did not hold the current accepted native frame after peer Close: queue=%d held_ms=%d samples=%d; %s",
+        held_pending, fixture_time_ms() - held_started, held_samples, diagnostic()))
   else
     raw.stream:write("\xc1\0") -- protocol-failure Close queues behind native output
   end
@@ -545,10 +587,21 @@ local function blocked_server_opening_case(secure: boolean, cancel: boolean)
   -- native timer; total discarded bytes are capped independently of the body.
   local discarded = 0
   local discard_steps = 0
+  local discard_limit = 256 * 1024
   while not entered and not setup_fired and priming_failure == nil do
-    test.assert(discarded < 256 * 1024,
-                "priming release exhausted its 256 KiB discard ceiling; " .. setup_diagnostic())
-    discarded = discarded + discard_socket_step(peer_socket, 1024)
+    local remaining = discard_limit - discarded
+    if remaining == 0 then
+      -- The last permitted native read may have released the pending HTTP
+      -- terminator, but its ACK/completion need not have run yet. Admit no
+      -- more reads; the existing setup watchdog bounds this final wait.
+      while not entered and not setup_fired and priming_failure == nil do timer.sleep(1) end
+      test.assert(entered and not setup_fired and priming_failure == nil,
+        "priming release exhausted its 256 KiB discard ceiling; " .. setup_diagnostic())
+      break
+    end
+    local step_bytes = 1024
+    if step_bytes > remaining then step_bytes = remaining end
+    discarded = discarded + discard_socket_step(peer_socket, step_bytes)
     discard_steps = discard_steps + 1
     timer.sleep(1)
   end

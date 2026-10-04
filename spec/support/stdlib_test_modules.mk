@@ -277,3 +277,4 @@ TITAN_TEST_SOURCES_websocket.tests := spec/stdlib/titan/websocket/tests/tests.ti
 	spec/stdlib/titan/websocket/tests/backpressure.titan \
 	spec/stdlib/titan/websocket/tests/backpressure_test.titan
 TITAN_TEST_IMPORTS_websocket.tests := support.async support.runtime
+TITAN_TEST_C_INPUTS_websocket.tests := spec/stdlib/titan/websocket/tests/pressure-native.h
