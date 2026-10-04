@@ -92,7 +92,8 @@ def case_id(row):
 
 
 def fairness_sufficient(result):
-    return (result["wall_seconds"] >= .25 and
+    return (result.get("sampling", {}).get("truncated") is False and
+            result["wall_seconds"] >= .25 and
             result["one_ms_timer_interarrival"]["samples"] >= 100)
 
 
@@ -385,7 +386,7 @@ class Runner:
         self.audit(); self.quiet()
         rows = []
         for tasks in (1,16,64,256):
-            count, cap = 1000, min(200000, 4000000 // tasks - 1)
+            count, cap = 1000, 200000
             while True:
                 row = dict(transport=self.args.transport, role=self.args.role, operation="fairness",
                     size=32, count=count, kind="binary", fragment=0, phase="steady", cleanup="abort",
@@ -393,9 +394,13 @@ class Runner:
                 result = self.run(row, False)
                 fairness = result["result"]["fairness"]
                 sufficient = fairness_sufficient(fairness)
-                rows.append(dict(calibration=not sufficient and count < cap,
+                truncated = fairness["sampling"]["truncated"]
+                terminal = sufficient or truncated or count == cap
+                reason = ("sample_capacity" if truncated else "sufficient" if sufficient
+                          else "message_cap" if count == cap else "calibration")
+                rows.append(dict(calibration=not terminal, stop_reason=reason,
                                  sufficient_samples=sufficient, **result))
-                if sufficient or count == cap: break
+                if terminal: break
                 count = min(cap, count * 2)
         path = self.output / f"fairness-{time.time_ns()}.json"
         self.helper.write_json(path, dict(rows=rows))

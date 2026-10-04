@@ -1,18 +1,27 @@
 # WebSocket benchmark preparation
 
 Independent issue193 fixtures. Status: **final5 full allocation/lifetime matrix
-397/397 complete; all397 Lua ledgers match independent heap bytes exactly**.
-Fresh compilation/audit, allocator cleanup9/9, exact TLS failure replay and bounded
-smoke68/68 passed. Full prefix audits are unchanged. Complete diagnostic history,
+397/397 complete; all 397 Lua ledgers match independent heap bytes exactly**.
+The accepted combined export contains 272 final strict-tail/control-header rows
+and 125 unaffected originals, each with its actual source/build provenance.
+Both earlier 272-row revalidations and original 397 outputs remain preserved.
+Fresh compilation/audit, allocator cleanup 9/9, exact TLS failure replay and bounded
+smoke 68/68 passed. Full prefix audits are unchanged. Complete diagnostic history,
 including the original checkpoint3 SIGSEGV, remains preserved. No timing/fairness
-run has been authorized; instrumented clocks do not support timing claims.
+run has completed; a finite quiet lane is authorized after final source review
+and process checks. Instrumented clocks do not support timing claims.
 
-All397 public endpoint weak references were absent after final release. Eight
+All 397 public endpoint weak references were absent after final release. Eight
 GC-stopped rows deliberately held a closed endpoint through the first forced-GC
-snapshot; 1000-message rows retained about69/71/152/154MB of Lua heap growth there.
-A separately authorized eight-row second/third-GC diagnostic while endpoints
-remain held is pending. Weak release alone does not classify that material
-post-close observation. No ownership or queue-bound conclusion is inferred yet.
+snapshot; 1000-message rows retained about 69/71/152/154 MB of Lua heap growth there.
+A separately authorized eight-row diagnostic, using a private Lua runner copy,
+kept endpoints strongly held through two additional collections. Actual Lua heap
+fell to 1.9–2.0 MB after the second collection; the third changed it by 64 bytes.
+The matched 1000-minus-zero residual was 9/75/74/139 KB. This supports coroutine
+owner finalization latency for the large first-collection residual. Later heap
+samples have no allocation ledger because the probe restores its hook first.
+The original 397 measurements and executed payloads are preserved unchanged in
+their build snapshot; the staged harness now contains the focused B1/B2 fixes.
 
 The previously failing raw TLS repeated-session row now passes against final5.
 Six intentional errors exited1 after allocator restoration and three no-network
@@ -25,7 +34,12 @@ unused test support), 15 native inputs and exact compile argv. Direct site notes
 exclude unused test support. The amended native-fixture receipt is diagnostic;
 production/provider hashes remain unchanged and the accepted original b56 native
 run is separately preserved. The current matrix scope is Lua allocation/lifetime
-accounting. Timing/fairness and held-endpoint multi-GC classification are pending.
+accounting. Timing/fairness remains pending execution. Independent review resolved
+B1 abort-tail validation, B2 fairness sample capacity and R1 extended-length
+control-prefix validation. Host 16/16 and two real-native-probe capacity boundary
+regressions pass; the final peer's 272 affected WebSocket rows pass. Common
+fairness callback definitions change startup heap overhead, which remains each
+row's actual baseline; ordinary allocation bodies never invoke those callbacks.
 
 This directory is staged privately for owner integration into
 `spec/bench/websocket/`. It makes no production changes and does not alter the
@@ -37,6 +51,11 @@ the issue193 durable plan and [performance contract](https://github.com/mascaren
 `bench.titan` is one private typed consumer of installed public APIs.
 `peer.py` runs a separately supervised finite raw WS/TCP/TLS peer on loopback,
 verifies outgoing masks, lengths, fragment types and bytes, and services controls.
+After the application budget it rejects any observed data/continuation opcode,
+even a single-byte prefix followed by EOF/reset. The explicit abort policy permits
+empty transport end and interruption during a valid control/Close prefix; fully
+received trailing controls are rejected. Graceful completion requires the exact
+normal Close exchange and rejects interrupted frames.
 Titan client rows measure masked writes and unmasked reads; Titan HTTP-handler
 server rows measure unmasked writes and masked reads. WSS uses the checked-in
 CA, certificate and key; both clients verify `localhost`. Server setup includes
@@ -131,10 +150,14 @@ then runs without caller yields, alongside 1/16/64/256 yield-sampling Tasks and
 a raw repeating 1-ms UV timer. The reused native probe uses preallocated arrays
 to report per-Task yield-return intervals and timer interarrival p50/p95/p99/max.
 Timer interarrival is not deadline lateness. Tracer/timer startup and terminal
-drain contribute a small fixed sampling overhead. GC runs after the latency
-snapshot. Calibration seeks 250 ms and 100 timer intervals, capped at 200,000
-messages and the sample budget; insufficient/empty samples are explicitly
-marked. Native sample arrays are overhead and contribute to process RSS.
+drain contribute sampling overhead. A Lua callback wrapper counts actual sampler
+returns, caps recorded yield/timer intervals at the unchanged native capacities,
+and reports observed/recorded/dropped intervals. Saturation marks the distribution
+truncated and insufficient, then stops that lane's calibration. Message count
+does not bound scheduler turns. GC runs after the latency snapshot. Calibration
+seeks 250 ms and 100 timer intervals, capped at 200,000 messages; missing/empty
+or truncated samples are explicitly insufficient. Wrapper counter updates and
+native sample arrays are fixture overhead; arrays contribute to process RSS.
 
 This bounded submission profile does not establish queue bounds, stability
 under indefinite producers, zero-copy messages, or starvation freedom for all

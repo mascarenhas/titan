@@ -69,6 +69,8 @@ class Wire:
         if first & 0x70 or bool(second & 0x80) != masked:
             raise ValueError("RSV or role mask mismatch")
         opcode, final, length = first & 15, bool(first & 0x80), second & 127
+        if opcode >= 8 and (not final or length > 125):
+            raise ValueError("invalid control frame header")
         if length == 126:
             length = struct.unpack("!H", self.exact(2))[0]
             if length < 126:
@@ -134,7 +136,21 @@ def fixture_client_context(ca):
 
 
 def finish(wire, peer_client, graceful):
-    # Graceful sends Close from Titan. Abort must end without additional data.
+    # Reject even a one-byte extra application-frame prefix. On abort, a
+    # transport end during a valid control/Close prefix is permitted; a fully
+    # received trailing control is rejected under this fixture's exact policy.
+    try:
+        first = wire.exact(1)
+    except (EOFError, ConnectionResetError, ssl.SSLEOFError):
+        if graceful:
+            raise
+        return
+    opcode = first[0] & 15
+    if opcode in (0, 1, 2):
+        raise ValueError("application frame after declared message budget")
+    if first[0] & 0x70 or not first[0] & 0x80 or opcode not in (8, 9, 10):
+        raise ValueError("invalid trailing control frame prefix")
+    wire.buffer = first + wire.buffer
     try:
         opcode, final, data = wire.receive(not peer_client)
     except (EOFError, ConnectionResetError, ssl.SSLEOFError):

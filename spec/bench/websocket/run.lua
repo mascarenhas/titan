@@ -4,6 +4,42 @@ local bench = require 'bench'
 local function load_probe(path, entry) return assert(package.loadlib(path, entry))() end
 local probe = load_probe(assert(os.getenv('MEASURE_PROBE')), 'luaopen_alloc_probe')
 local latency = load_probe(assert(os.getenv('MEASURE_LATENCY_PROBE')), 'luaopen_latency_probe')
+local sampling
+local function begin_sampling(tasks, iterations)
+  latency.start(tasks, iterations)
+  sampling = {yield_capacity=tasks*iterations, timer_capacity=1000000,
+    yield_intervals_observed=0, timer_intervals_observed=0,
+    yield_intervals_recorded=0, timer_intervals_recorded=0,
+    yield_intervals_dropped=0, timer_intervals_dropped=0, truncated=false,
+    seen={}}
+  for owner=0,tasks do sampling.seen[owner] = false end
+end
+local function bounded_sample(owner)
+  assert(sampling and sampling.seen[owner] ~= nil, 'sample owner out of range')
+  if not sampling.seen[owner] then
+    sampling.seen[owner] = true
+    latency.sample(owner)
+    return
+  end
+  if owner == 0 then
+    sampling.timer_intervals_observed = sampling.timer_intervals_observed + 1
+    if sampling.timer_intervals_recorded == sampling.timer_capacity then
+      sampling.timer_intervals_dropped = sampling.timer_intervals_dropped + 1
+      sampling.truncated = true
+      return
+    end
+    sampling.timer_intervals_recorded = sampling.timer_intervals_recorded + 1
+  else
+    sampling.yield_intervals_observed = sampling.yield_intervals_observed + 1
+    if sampling.yield_intervals_recorded == sampling.yield_capacity then
+      sampling.yield_intervals_dropped = sampling.yield_intervals_dropped + 1
+      sampling.truncated = true
+      return
+    end
+    sampling.yield_intervals_recorded = sampling.yield_intervals_recorded + 1
+  end
+  latency.sample(owner)
+end
 local payload = string.rep('x', config.size)
 local weak = setmetatable({}, {__mode='v'})
 local held
@@ -58,7 +94,7 @@ local succeeded, failure = pcall(function()
   task = bench.launch(config.transport, config.role, config.operation, config.count,
     config.port, payload, config.kind, config.cleanup, config.ca, config.certificate,
     config.key, config.preload_marker, config.tasks or 1, ready, body_done, closed,
-    latency.start, latency.sample, listening)
+    begin_sampling, bounded_sample, listening)
   async.loop()
   status = task:status()
   if status:as_string() ~= 'succeeded' then
@@ -67,7 +103,11 @@ local succeeded, failure = pcall(function()
   end
   for name, count in pairs(boundaries) do assert(count == 1, 'incorrect boundary: '..name) end
   task, status = nil, nil
-  if config.operation == 'fairness' then fairness = latency.finish() end
+  if config.operation == 'fairness' then
+    fairness = latency.finish()
+    sampling.seen = nil
+    fairness.sampling = sampling
+  end
   result = assert(finish_measurement(), 'measurement never started')
 end)
 if not succeeded then
