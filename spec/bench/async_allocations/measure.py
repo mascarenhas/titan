@@ -201,7 +201,7 @@ class Runner:
         for module in ("bench", "latency"):
             shutil.copy2(CODE / (module + ".titan"), self.work / (module + ".titan"))
             argv = [str(self.lua), str(CODE / "compile_guard.lua"), self.config["compiler_script"],
-                    str(self.work / (module + ".titan")), "-v", "--tree", str(self.work), module]
+                    "./" + module + ".titan", "-v", "--tree", ".", module]
             if self.config["link_libraries"]:
                 argv += ["-l", self.config["link_libraries"]]
             self.command("compile-" + module, argv, 300)

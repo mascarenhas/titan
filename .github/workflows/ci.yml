@@ -782,6 +782,8 @@ jobs:
             make titan-stdlib-test-run TITAN_FILTER='test_completion_'
           bash spec/support/ci_sanitizer_capture.sh async-ready-queue-tests \
             make titan-stdlib-test-run TITAN_FILTER='test_ready_queue_'
+          bash spec/support/ci_sanitizer_capture.sh async-wake-rollback-tests \
+            make titan-stdlib-test-run TITAN_FILTER='wake_failure_'
           bash spec/support/ci_sanitizer_capture.sh uv-scalar-write-tests \
             make titan-stdlib-test-run TITAN_FILTER='test_scalar_write_'
           bash spec/support/ci_sanitizer_capture.sh uv-concrete-data-tests \

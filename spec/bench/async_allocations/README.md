@@ -7,6 +7,9 @@ private measurement consumers. It never prepares or installs a provider.
 Linux is the validated platform. macOS command/RSS handling is included but
 needs an actual macOS run; Windows is unsupported.
 
+The [issue 196 results](../../../doc/implementation/async-allocation-results.md)
+record the compared builds, allocation counts, heap measurements, and limits.
+
 Keep output outside the source checkout. Use one fresh output directory for
 each prefix, and an explicit shared fixture path when comparing providers.
 For the Linux system-OpenSSL configuration used by issue 196:
@@ -29,6 +32,8 @@ The runner invokes the prefix's Lua plus the underlying compiler script, so
 copied absolute-path launcher wrappers cannot select another installation.
 The compile guard permits exactly the requested benchmark source and rejects
 any `.titan` source fallback while importing installed modules.
+Consumer builds use the same relative source spelling in each private working
+directory, so lane-specific paths do not change diagnostic-string allocations.
 `--source-manifest` attaches a frozen source manifest's hash to the build
 receipt. It does not establish the provider/source correspondence itself.
 

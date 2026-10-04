@@ -5311,7 +5311,7 @@ done
 
             assert.equal(1, count_literal(sanitizer_job,
                 "make titan-stdlib-test-build"), sanitizer_job)
-            assert.equal(25, count_literal(sanitizer_job,
+            assert.equal(26, count_literal(sanitizer_job,
                 "make titan-stdlib-test-run"), sanitizer_job)
             for _, filter in ipairs({
                 "TITAN_FILTER='test_lua_host_roots_coroutine_" ..
@@ -5322,6 +5322,7 @@ done
                 "TITAN_FILTER='^uv%.runtime_tests%.'",
                 "TITAN_FILTER='test_completion_'",
                 "TITAN_FILTER='test_ready_queue_'",
+                "TITAN_FILTER='wake_failure_'",
                 "TITAN_FILTER='test_scalar_write_'",
                 "TITAN_FILTER='test_concrete_'",
                 "TITAN_FILTER='test_net_received_chunks_remain_immutable'",

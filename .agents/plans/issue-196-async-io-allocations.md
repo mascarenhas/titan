@@ -1,6 +1,8 @@
 # Issue 196: async and I/O allocation implementation
 
-Status: implementation authorized after the clean CI handoff on 2026-10-03.
+Status: implemented, with matched measurements, independent review, and local
+platform validation complete. Stacked PR #197 records final-head CI and remains
+unmerged.
 
 ## Authorization and baseline
 
@@ -86,6 +88,33 @@ O0 generic-async probe are historical evidence, not a timing baseline.
      sanitizer gates. Record architecture and exclusions honestly.
    - Publish the follow-up PR with actual head and CI evidence; do not merge the
      baseline or follow-up PR without explicit authorization.
+
+## Delivery evidence
+
+Implementation selected one lazy Task-owned Completion cell with a checked
+operation number after the fresh/reused prototype, lifetime tests, and exact
+registrar/capture/context measurements. The direct yield path uses the shared
+Runtime FIFO without a per-yield Completion or result object. Native domain
+contexts retain accepted work through terminal callbacks and cleanup.
+
+The checked-in [results](../../doc/implementation/async-allocation-results.md)
+and [portable harness](../../spec/bench/async_allocations/README.md) record the
+matched O3/fat-LTO baseline, 122 allocation comparisons, 48 canonical Completion
+processes, 36 extra-collection controls, TCP retention, exact generated-C
+inspection, and the quiet 538-process wall/CPU/latency experiment. The report
+carries short-sample flags, native-allocation exclusions and the 65,632-byte
+idle-reader cache cost.
+
+Linux optimized native tests and the final async rollback ensemble pass. Local
+macOS x86_64 runtime/packaging/compiler tests and both optimized OpenSSL modes
+pass; universal-archive evidence does not imply arm64 runtime execution. Local
+Windows x64 O0/O3 aggregate and source-free consumers pass with classified
+platform exclusions. Focused local ASan/UBSan and both rollback supplements pass.
+Independent implementation, ownership, public-client, generated-C, and measurement
+reviews are preserved with the original failures and corrected runs. All platform
+runs are bound to the producing source; later report/fixture changes are recorded
+separately. PR #195 and [PR #197](https://github.com/mascarenhas/titan/pull/197)
+remain open and unmerged. No hosted macOS workflow was dispatched.
 
 ## Ownership
 

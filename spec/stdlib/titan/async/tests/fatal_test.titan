@@ -1,3 +1,5 @@
+local rollback_gc = import "titan.gc"
+
 -- These cases deliberately fail a Runtime and verify its next session.
 -- The callback's raw error and original traceback must survive generic E.
 local record FatalMarker
@@ -534,4 +536,201 @@ function test_generic_await_fatal_keeps_dependency_wakes_runnable(context: test.
       "fatal shutdown discarded the Task wake needed to release foreign work")
   fatal_test_fresh_session()
   context:log("END expected dependent-worker fatal diagnostic")
+end
+
+-- Deliberate fault injection, not ordinary borrowed-loop handle management.
+-- Exactly two Tasks enter the initial FIFO drain. The first reserves a wait;
+-- the last closes the currently unarmed Runtime wake, then catches admission
+-- failure before installing a shielded acknowledgment for its native close.
+local record WakeRepair
+  owner: uv.timer_t?
+  loop: uv.loop_t?
+  data: value
+  ack: async.Completion<|WakeRepair, nil, nil|>?
+  number: integer
+  repaired: boolean
+  closed: integer
+end
+
+local function capture_wake(repair: WakeRepair)
+  repair.loop = async.current_loop()
+  local count = 0
+  uv.walk(repair.loop as uv.loop_t, function (handle: uv.handle_t, _: value)
+    case handle
+    when timer(owner) then
+      count = count + 1
+      repair.owner = owner
+      repair.data = uv.timer_get_data(owner)
+    else
+    end
+  end)
+  test.assert(count == 1 and repair.owner ~= nil and repair.data ~= nil,
+      "fault injection must capture the sole Runtime timer on the main thread")
+end
+
+local function break_wake(repair: WakeRepair)
+  uv.timer_close(repair.owner as uv.timer_t, function (owner: uv.timer_t)
+    local done = repair.ack as async.Completion<|WakeRepair, nil, nil|>
+    local number = repair.number
+    repair.ack = nil
+    do
+      test.assert(uv.timer_init(repair.loop as uv.loop_t, owner) == 0,
+          "shared wake reinitialization failed")
+      uv.timer_set_data(owner, repair.data)
+      repair.closed = repair.closed + 1
+      repair.repaired = true
+      -- This outside-Task settlement synchronously resumes the injector. Its
+      -- retry therefore executes in a peer Task and must enqueue once again.
+      done:resolve(number, nil)
+    catch done:fatal(number, error, traceback); raise end
+  end)
+end
+
+local function start_repair_ack(
+    done: async.Completion<|WakeRepair, nil, nil|>, number: integer): uv.req_t?
+  local repair = done:context(number)
+  repair.ack = done
+  repair.number = number
+  return nil
+end
+
+local function await_repair(repair: WakeRepair)
+  local result = async.await_cleanup_with<|WakeRepair, nil, nil|>(repair, start_repair_ack)
+  case result
+  when success(_) then
+  else raise "native repair acknowledgment failed" end
+  test.assert(repair.repaired and repair.closed == 1,
+      "injector resumed without its one completed native repair")
+end
+
+local function check_arm_failure(failure: value)
+  test.assert(failure is async.OperationError, "wake rejection was not an OperationError")
+  local operation = failure as async.OperationError
+  test.assert(operation.operation == "runtime.timer.start" and operation.code == (uv.EINVAL as integer),
+      "fault did not reject the exact shared-wake arm")
+  test.assert(not async.is_closing(), "caught admission failure fatally closed the Runtime")
+end
+
+function test_peer_completion_wake_failure_rolls_back_then_retries(_context: test.Context)
+  local repair = WakeRepair(nil, nil, nil, nil, 0, false, 0)
+  local saved: async.Completion<|string, integer, string|>? = nil
+  local number = 0
+  local deliveries = 0
+  local rejected = false
+  local consumer = async.run<|nil, nil|>(function (): nil
+    local result = async.await_with<|string, integer, string|>("original operation",
+        function (done, operation_number): uv.req_t?
+          saved = done
+          number = operation_number
+          return nil
+        end)
+    deliveries = deliveries + 1
+    case result
+    when error(message) then
+      test.assert(message == "accepted retry", "failed attempt overwrote the retry outcome")
+    else raise "failed success attempt was committed" end
+    return nil
+  end)
+  local injector = async.run<|nil, nil|>(function (): nil
+    test.assert(saved ~= nil and consumer:status():as_string() == "waiting", "consumer did not reserve its wait first")
+    local done = saved as async.Completion<|string, integer, string|>
+    break_wake(repair)
+    do done:resolve(number, 17)
+    catch check_arm_failure(error); rejected = true end
+    test.assert(rejected and deliveries == 0 and consumer:status():as_string() == "waiting",
+        "failed peer admission advanced the consumer")
+    test.assert(done:context(number) == "original operation", "failed admission retired the operation")
+    await_repair(repair)
+    test.assert(not async.is_closing() and deliveries == 0, "repair changed the pending consumer")
+    done:reject(number, "accepted retry")
+    test.assert(deliveries == 0 and consumer:status():as_string() == "waiting", "peer retry delivered inline")
+    return nil
+  end)
+  capture_wake(repair)
+  async.loop()
+  test.assert(rejected and deliveries == 1 and repair.closed == 1,
+      "peer rollback/retry did not deliver exactly once")
+  test.assert(consumer:status():has_succeeded() and injector:status():has_succeeded(),
+      "peer rollback/retry failed or cancelled a Task")
+end
+
+local record PublicationItem
+  id: integer
+  disposed: boolean
+end
+
+local function rejected_publication(send: function (PublicationItem): (boolean),
+    weak_roots: {value: value}): boolean
+  local item = PublicationItem(1, false)
+  weak_roots["rejected"] = item
+  local rejected = false
+  do send(item)
+  catch
+    check_arm_failure(error)
+    rejected = true
+    item.disposed = true
+  end
+  test.assert(rejected and item.disposed, "failed publication did not return producer ownership")
+  return rejected
+end
+
+function test_subscription_wake_failure_restores_publication_and_reservation(_context: test.Context)
+  local repair = WakeRepair(nil, nil, nil, nil, 0, false, 0)
+  local publish: (function (PublicationItem): (boolean))? = nil
+  local close_count = 0
+  local stream = async.BufferedSubscription<|PublicationItem, nil|>(
+      function (send, _fail, _finish): async.SubscriptionActions<|PublicationItem|>
+        publish = send
+        return async.SubscriptionActions<|PublicationItem|>(function () end,
+            function (drain: function (): (async.SubscriptionBatch<|PublicationItem|>))
+              close_count = close_count + 1
+              test.assert(drain().count == 0, "closed subscription still owned a publication")
+            end)
+      end)
+  local weak_roots: {value: value} = {}
+  rollback_gc.weak(weak_roots)
+  local accepted_item = PublicationItem(2, false)
+  local deliveries = 0
+  local rejected = false
+  local consumer = async.run<|nil, nil|>(function (): nil
+    defer stream:close()
+    case stream:next_batch()
+    when batch(items) then
+      test.assert(items.count == 1 and items:get(1) == accepted_item,
+          "failed publication leaked or retry duplicated an item")
+      test.assert(rejected and weak_roots["rejected"] == nil, "failed publication retained producer ownership")
+      deliveries = deliveries + 1
+      accepted_item.disposed = true
+    else raise "subscription retry did not deliver its exact batch" end
+    return nil
+  end)
+  local injector = async.run<|nil, nil|>(function (): nil
+    test.assert(stream:has_waiter() and consumer:status():as_string() == "waiting", "reader did not reserve its wait first")
+    break_wake(repair)
+    rejected = rejected_publication(publish, weak_roots)
+    test.assert(rejected and deliveries == 0 and consumer:status():as_string() == "waiting",
+        "failed publication advanced the reader")
+    test.assert(stream:has_waiter(), "failed notification released the reader reservation")
+    -- The helper's strong local is gone. Check before destructive draining:
+    -- count-only rollback must not hide a stale item root in the backing array.
+    rollback_gc.collect()
+    rollback_gc.collect()
+    test.assert(weak_roots["rejected"] == nil, "failed publication retained its rejected item")
+    test.assert(stream:drain_pending().count == 0, "failed publication left an owned queue item")
+    await_repair(repair)
+    test.assert(not async.is_closing() and stream:has_waiter() and deliveries == 0,
+        "repair lost the original pending reader")
+    test.assert(publish(accepted_item), "repaired publication was not accepted")
+    test.assert(stream:has_waiter() and deliveries == 0,
+        "accepted peer publication released its reservation or delivered inline")
+    return nil
+  end)
+  capture_wake(repair)
+  async.loop()
+  test.assert(rejected and deliveries == 1 and close_count == 1 and repair.closed == 1,
+      "subscription rollback/retry did not retire exactly once")
+  test.assert(weak_roots["rejected"] == nil and accepted_item.disposed and not stream:has_waiter(),
+      "publication ownership or reader reservation survived retirement")
+  test.assert(consumer:status():has_succeeded() and injector:status():has_succeeded(),
+      "subscription rollback/retry failed or cancelled a Task")
 end
