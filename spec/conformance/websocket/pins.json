@@ -16,7 +16,9 @@
   ],
   "read_limit_bytes": 33554432,
   "case_timeout_seconds": 600,
-  "run_timeout_seconds": 21600,
-  "budget_status": "provisional; record full-run measurements before delivery",
+  "run_timeout_seconds": 900,
+  "evidence_limit_bytes": 104857600,
+  "budget_status": "measured full602; 600s case ceiling covers suite480s deadlines, 900s role and100MiB evidence ceilings retain diagnostic margin independently of performance scores",
+  "measurement": "measurement.json",
   "all_cases_sha256": "3ac7f4831a99c8da900305df6da8c68baa969a7174ff749804ad14111ce16323"
 }

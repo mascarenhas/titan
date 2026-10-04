@@ -12,6 +12,7 @@ import socket
 import subprocess
 import sys
 import tarfile
+import threading
 import time
 import urllib.request
 import uuid
@@ -72,10 +73,29 @@ def unused_port():
         return listener.getsockname()[1]
 
 
-def wait_ready(process, port, *, http=False, timeout=30):
+def evidence_size(root):
+    size = 0
+    for path in root.rglob("*"):
+        try:
+            if path.is_file():
+                size += path.stat().st_size
+        except FileNotFoundError:
+            # Compiler temporary files may retire during a live size sample.
+            # The final report checker separately requires every case file.
+            continue
+    return size
+
+
+def assert_evidence_budget(root, limit):
+    if root is not None and evidence_size(root) > limit:
+        raise RuntimeError("evidence size budget exceeded; full conformance not proven")
+
+
+def wait_ready(process, port, *, http=False, timeout=30, evidence_root=None, evidence_limit_bytes=None):
     end = time.monotonic() + timeout
     opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
     while time.monotonic() < end:
+        assert_evidence_budget(evidence_root, evidence_limit_bytes)
         if process.poll() is not None:
             raise RuntimeError("peer exited before readiness; see its log")
         try:
@@ -96,6 +116,7 @@ class Processes:
     def __init__(self, docker, root, env):
         self.docker, self.root, self.env = docker, root, env
         self.children = []
+        self.log_pumps = {}
         self.containers = []
         self.commands = read_json(root / "commands.json") if (root / "commands.json").exists() else []
 
@@ -103,9 +124,26 @@ class Processes:
         log = (self.root / (name + ".log")).open("wb")
         try:
             process = subprocess.Popen(list(map(str, argv)), cwd=cwd, env=self.env,
-                                       stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
-        finally:
+                                       stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                       start_new_session=True)
+        except Exception:
             log.close()
+            raise
+        failures = []
+        def pump():
+            # Titan's asynchronous stdio requires a pipe/TTY. Drain continuously
+            # into disk-backed evidence so neither logs nor pipe pressure stall
+            # the peer. Join this owned thread when retiring the child group.
+            try:
+                with log, process.stdout:
+                    while block := process.stdout.read1(65536):
+                        log.write(block)
+                        log.flush()
+            except Exception as error:
+                failures.append(str(error))
+        thread = threading.Thread(target=pump, name="log-" + name, daemon=True)
+        self.log_pumps[process] = (thread, failures)
+        thread.start()
         self.children.append(process)
         self.commands.append({"argv": list(map(str, argv)), "cwd": str(cwd) if cwd else None,
                               "pid": process.pid, "log": name + ".log"})
@@ -131,6 +169,12 @@ class Processes:
             pass
         process.wait(timeout=5)
         self.children.remove(process)
+        thread, failures = self.log_pumps.pop(process)
+        thread.join(timeout=5)
+        if thread.is_alive():
+            raise RuntimeError("owned log pipe did not reach EOF after child-group retirement")
+        if failures:
+            raise RuntimeError("owned log capture failed: " + "; ".join(failures))
 
     def stop_container(self, name):
         result = subprocess.run([self.docker, "rm", "-f", name], stdout=subprocess.PIPE,
@@ -163,14 +207,19 @@ def rss_bytes(pid):
         return 0
 
 
-def wait_measured(process, *, timeout, events=None, case_timeout=600, observed_processes=()):
+def wait_measured(process, *, timeout, events=None, case_timeout=600, observed_processes=(),
+                  evidence_root=None, evidence_limit_bytes=None):
     started = time.monotonic()
     phase_started = started
     phase_line = None
     phase = None
+    evidence_sampled = started - 1
     peak_rss = {str(peer.pid): 0 for peer in (process, *observed_processes)}
     while process.poll() is None:
         now = time.monotonic()
+        if now - evidence_sampled >= 1:
+            assert_evidence_budget(evidence_root, evidence_limit_bytes)
+            evidence_sampled = now
         for peer in observed_processes:
             if peer.poll() is not None:
                 raise RuntimeError("required peer exited during run; see logs")
@@ -189,6 +238,7 @@ def wait_measured(process, *, timeout, events=None, case_timeout=600, observed_p
                 raise RuntimeError("client case/progress deadline exceeded: " + repr(phase))
         time.sleep(0.2)
     elapsed = time.monotonic() - started
+    assert_evidence_budget(evidence_root, evidence_limit_bytes)
     if process.returncode:
         raise RuntimeError("owned process exited " + str(process.returncode) + "; see logs")
     return {"wall_seconds": elapsed, "sampled_peak_rss_bytes": peak_rss}
@@ -229,6 +279,7 @@ def main():
     manifest = load_manifest()
     run_timeout = args.run_timeout or pins["run_timeout_seconds"]
     case_timeout = args.case_timeout or pins["case_timeout_seconds"]
+    evidence_limit = pins["evidence_limit_bytes"]
     if case_timeout < 600 or run_timeout < case_timeout:
         parser.error("case timeout must be at least 600s (suite cases reach 480s); run timeout must be longer")
     prefix, checkout = args.prefix.resolve(), args.checkout.resolve()
@@ -241,32 +292,36 @@ def main():
         (root / child).mkdir()
     for source in HERE.glob("*.py"):
         shutil.copy2(source, root / "harness" / source.name)
-    for source in (HERE / "pins.json", HERE / "expected.json", HERE / "README.md"):
+    for source in (HERE / "pins.json", HERE / "expected.json", HERE / "README.md", HERE / "measurement.json"):
         shutil.copy2(source, root / "harness" / source.name)
     for source in (HERE / "fixtures").glob("*.titan"):
         shutil.copy2(source, root / "fixtures" / source.name)
     env = os.environ.copy()
-    for key in ("LUA_PATH", "LUA_CPATH", "LUA_PATH_5_5", "LUA_CPATH_5_5", "TITAN_ROCKS_ROOT"):
+    for key in ("LUA_PATH", "LUA_CPATH", "LUA_PATH_5_5", "LUA_CPATH_5_5",
+                "TITAN_ROCKS_ROOT", "TITAN_PATH", "TITAN_PATH_0_6", "TITAN_PREFIX"):
         env.pop(key, None)
     env.update(PATH=str(prefix / "bin") + os.pathsep + env.get("PATH", ""),
                TMPDIR=str(root / "tmp"), CCACHE_DIR=str(root / "ccache"),
-               TITAN_PROBE_CACHE_DISABLE="1", TITAN_JOBS="1")
+               TITAN_PROBE_CACHE_DISABLE="1", TITAN_JOBS="1",
+               TITAN_PATH_0_6=str(prefix / "lib/titan/0.6"))
     processes = Processes(args.docker, root, env)
     def interrupted(_signal, _frame):
         raise KeyboardInterrupt
     signal.signal(signal.SIGTERM, interrupted)
     summary = {"passed": False, "output": str(root), "started_utc": stamp,
-               "budgets": {"run_timeout_seconds": run_timeout, "case_timeout_seconds": case_timeout},
+               "budgets": {"run_timeout_seconds": run_timeout, "case_timeout_seconds": case_timeout,
+                           "evidence_limit_bytes": evidence_limit},
                "selected_per_role": len(manifest["selected_cases"]),
                "excluded_cases": manifest["excluded_cases"], "roles": {}}
     started = time.monotonic()
+    measured_budget = dict(evidence_root=root, evidence_limit_bytes=evidence_limit)
     try:
         source = source_identity(checkout)
         if source["branch"] != "codex/issue-193-websocket":
             raise RuntimeError("checkout branch differs from authorized implementation branch")
         identity = prefix_identity(prefix)
         save(root / "consumer-environment.json", {key: env[key] for key in
-             ("PATH", "TMPDIR", "CCACHE_DIR", "TITAN_PROBE_CACHE_DISABLE", "TITAN_JOBS")})
+             ("PATH", "TMPDIR", "CCACHE_DIR", "TITAN_PROBE_CACHE_DISABLE", "TITAN_JOBS", "TITAN_PATH_0_6")})
         save(root / "source-identity.json", source)
         save(root / "prefix-identity.json", identity)
         image_metadata = json.loads(command([args.docker, "image", "inspect", pins["image"]]))
@@ -296,7 +351,7 @@ def main():
         for fixture in ("echo_server", "case_driver"):
             build = processes.start([prefix / "bin/titanc", "--jobs", "1", "--tree", root / "fixtures", fixture],
                                     "compile-" + fixture, cwd=root / "fixtures")
-            wait_measured(build, timeout=600)
+            wait_measured(build, timeout=600, **measured_budget)
             processes.stop_process(build)
         summary["compile_wall_seconds"] = time.monotonic() - build_started
         executables = {name: sha256(root / "fixtures" / name) for name in ("echo_server", "case_driver")}
@@ -320,12 +375,12 @@ def main():
                     raise RuntimeError("installed provider changed before role execution")
                 if role == "server":
                     echo = processes.start([root / "fixtures/echo_server", str(server_port), cap], "titan-server")
-                    wait_ready(echo, server_port, http=True)
+                    wait_ready(echo, server_port, http=True, **measured_budget)
                     name = "titan-ws-" + stamp.lower() + "-fuzzingclient"
                     processes.containers.append(name)
                     fuzzing = processes.start(docker_run(args.docker, pins["image"], name,
                                                         root / "config", root / "reports", "fuzzingclient"), "fuzzingclient")
-                    measured = wait_measured(fuzzing, timeout=run_timeout, observed_processes=(echo,))
+                    measured = wait_measured(fuzzing, timeout=run_timeout, observed_processes=(echo,), **measured_budget)
                     processes.stop_container(name)
                     processes.stop_process(fuzzing)
                     processes.stop_process(echo)
@@ -335,12 +390,12 @@ def main():
                     processes.containers.append(name)
                     fuzzing = processes.start(docker_run(args.docker, pins["image"], name,
                                                         root / "config", root / "reports", "fuzzingserver"), "fuzzingserver")
-                    wait_ready(fuzzing, fuzz_port)
+                    wait_ready(fuzzing, fuzz_port, **measured_budget)
                     events = root / "client-events.jsonl"
                     driver = processes.start([root / "fixtures/case_driver", "ws://127.0.0.1:" + str(fuzz_port),
                                               client_agent, root / "harness/expected.json", events, cap], "titan-client")
                     measured = wait_measured(driver, timeout=run_timeout, events=events,
-                                             case_timeout=case_timeout, observed_processes=(fuzzing,))
+                                             case_timeout=case_timeout, observed_processes=(fuzzing,), **measured_budget)
                     processes.stop_process(driver)
                     audit_driver_events(events, selected)
                     processes.stop_container(name)
@@ -375,7 +430,10 @@ def main():
             summary["cleanup_error"] = str(error)
             summary["passed"] = False
         summary["wall_seconds"] = time.monotonic() - started
-        summary["evidence_bytes_before_archive"] = sum(path.stat().st_size for path in root.rglob("*") if path.is_file())
+        summary["evidence_bytes_before_archive"] = evidence_size(root)
+        if summary["evidence_bytes_before_archive"] > evidence_limit:
+            summary["error"] = "evidence size budget exceeded"
+            summary["passed"] = False
         save(root / "summary.json", summary)
         evidence = {str(path.relative_to(root)): sha256(path) for path in sorted(root.rglob("*"))
                     if path.is_file() and "ccache" not in path.relative_to(root).parts and "tmp" not in path.relative_to(root).parts}

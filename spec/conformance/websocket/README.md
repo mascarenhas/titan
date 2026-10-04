@@ -28,7 +28,8 @@ python3 run.py --prefix /tmp/titan-193-prefix \
 ```
 
 Use a disk-backed output root. `run.py` creates a fresh unique directory, compiles
-both fixtures as installed consumers in that directory, and runs fuzzingclient
+both fixtures as installed consumers in that directory, sets `TITAN_PATH_0_6`
+to the frozen prefix's absolute provider directory, and runs fuzzingclient
 against the Titan echo server followed by the Titan case driver against
 fuzzingserver. The driver fetches `/getCaseCount`, checks the exact dotted ID from
 `/getCaseInfo` before each ordinal, echoes complete text/binary messages, continues
@@ -38,11 +39,20 @@ closure. It logs every case start and end, and the parent audits exact coverage.
 Every child has an owned process group and every container has a unique owned
 name. The parent bounds readiness and total execution, retires/kills/joins owned
 processes on all exits, and attempts the other full role after a role fails.
-The provisional per-case ceiling is 600 seconds, exceeding the suite's 480-second
-case deadlines; the provisional full-role ceiling is six hours. CLI overrides
-may raise budgets or set a full-role budget no shorter than the per-case ceiling.
-Pin final budgets after recording a measured full run. Performance duration is
-evidence, not a score-based conformance threshold. A timeout is a failed run.
+The pinned per-case ceiling is 600 seconds, exceeding the suite's 480-second
+case deadlines; the full-role ceiling is 15 minutes. A measured complete 602-case
+final provider5 run took 68.3 seconds and produced 22.5 MB of evidence before archival. The
+evidence ceiling is 100 MiB, checked during compilation, readiness and execution;
+crossing it fails the run and retires owned processes. `measurement.json`
+records accepted final production commit `2bf8aae5`, provider5, source/argv
+receipts, reports and archive identities. The final measurements came from a busy
+host while other integration gates ran. These
+generous bounds retain over 25 times the measured slowest-role duration and
+over four times the observed evidence size. The 600-second case bound preserves
+the pinned runner's 480-second large-case deadlines even though the measured
+maximum case took 1.046 seconds.
+CLI overrides may raise budgets or set a full-role budget no shorter than the per-case ceiling.
+Performance duration is evidence, not a score-based conformance threshold. A timeout is a failed run.
 
 `check_reports.py` rejects missing/malformed/empty reports, duplicate JSON keys,
 wrong/extra agents, missing/extra cases, absent or rejected `behavior` and

@@ -49,6 +49,22 @@ class OrchestrationTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "exited 7"):
             wait_measured(child, timeout=5)
 
+    def test_child_uses_drained_log_pipe_and_retirement_joins_capture(self):
+        child = self.processes.start([sys.executable, "-c",
+            "import os, stat; assert stat.S_ISFIFO(os.fstat(1).st_mode); print('stdout'); os.write(2, b'stderr\\n')"], "logged")
+        wait_measured(child, timeout=5)
+        self.processes.stop_process(child)
+        self.assertEqual(set((self.root / "logged.log").read_text().splitlines()), {"stdout", "stderr"})
+        self.assertEqual(self.processes.log_pumps, {})
+
+    def test_evidence_budget_fails_and_cleanup_joins_child(self):
+        child = self.sleeper()
+        (self.root / "oversize").write_bytes(b"x" * 1024)
+        with self.assertRaisesRegex(RuntimeError, "evidence size budget exceeded"):
+            wait_measured(child, timeout=5, evidence_root=self.root, evidence_limit_bytes=512)
+        self.processes.close()
+        self.assertIsNotNone(child.poll())
+
     def test_driver_evidence_requires_exact_order_and_completion(self):
         path = self.root / "events.jsonl"
         cases = ["1.1.1", "7.7.8"]
