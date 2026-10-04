@@ -1,14 +1,31 @@
 # WebSocket benchmark preparation
 
-Independent issue193 fixtures. Status: **consumer and probe compilation passed
-against owner-authorized checkpoint3; no runtime probes or measurements**.
-The guard admitted exactly one consumer source and compiled public imports.
-Full prefix pre/post-build and final audits passed unchanged. Initial execution
-awaits native PASS, test-dependency preparation completion, and the owner's next
-signal; quiet timing follows a separate coordinated window. Prefix dependency
-additions require a fresh immutable build/audit receipt before execution. No
-readiness is inferred from files appearing in `/tmp/titan-193-prefix`,
-installation logs, or a process exiting successfully.
+Independent issue193 fixtures. Status: **final5 full allocation/lifetime matrix
+397/397 complete; all397 Lua ledgers match independent heap bytes exactly**.
+Fresh compilation/audit, allocator cleanup9/9, exact TLS failure replay and bounded
+smoke68/68 passed. Full prefix audits are unchanged. Complete diagnostic history,
+including the original checkpoint3 SIGSEGV, remains preserved. No timing/fairness
+run has been authorized; instrumented clocks do not support timing claims.
+
+All397 public endpoint weak references were absent after final release. Eight
+GC-stopped rows deliberately held a closed endpoint through the first forced-GC
+snapshot; 1000-message rows retained about69/71/152/154MB of Lua heap growth there.
+A separately authorized eight-row second/third-GC diagnostic while endpoints
+remain held is pending. Weak release alone does not classify that material
+post-close observation. No ownership or queue-bound conclusion is inferred yet.
+
+The previously failing raw TLS repeated-session row now passes against final5.
+Six intentional errors exited1 after allocator restoration and three no-network
+phase controls completed with exact heap accounting. This supports the harness
+cleanup without proving the cause of the original crash.
+
+Final5 is bound to verified provider/source/native receipts: five prefix keys,
+98 production sources, 46 generated C/object files (22 production units plus
+unused test support), 15 native inputs and exact compile argv. Direct site notes
+exclude unused test support. The amended native-fixture receipt is diagnostic;
+production/provider hashes remain unchanged and the accepted original b56 native
+run is separately preserved. The current matrix scope is Lua allocation/lifetime
+accounting. Timing/fairness and held-endpoint multi-GC classification are pending.
 
 This directory is staged privately for owner integration into
 `spec/bench/websocket/`. It makes no production changes and does not alter the
@@ -40,7 +57,11 @@ on every exit. The prefix is fingerprinted before/after build and at batch
 boundaries; selected provider/Lua identities and payload hashes are checked per
 row. Output is forbidden inside the prefix, source checkout or harness source.
 Certificates are copied into private output before compilation. No root outputs
-or shared caches are written.
+or shared caches are written. Errors after probe startup stop the body if needed
+and finish the probe before being rethrown, so Lua shutdown does not keep the
+allocator callback pointing into an unloaded probe DSO. `cleanup_regression.py`
+checks active-hook API and Task errors with both GC settings; failed runs emit
+no successful allocation result. Its injected Tasks test the harness error path.
 
 ## Allocation and lifetime rows
 
@@ -64,7 +85,9 @@ session retirement returns. Every row keeps accounting through Runtime drain,
 releases the Task/status roots, then forces GC. Server session-body teardown
 ends before the HTTP parent/listener drain, which remains in the probe's
 after-close snapshot. The Lua callback bridge and sideband marker are fixture
-overhead; report zero controls without hiding them.
+overhead; report zero controls without hiding them. Repeated server sessions use
+an exact listener-generation sideband to prevent reconnecting into the previous
+listener before it retires. Session totals include that coordination overhead.
 
 The unchanged allocator hook records successful requested Lua-byte traffic,
 userdata/function/string/table counts, live/peak Lua bytes, after-close and
@@ -136,15 +159,18 @@ python3 measure.py build --repo "$TITAN_CHECKOUT" --output "$PRIVATE_OUTPUT" \
 python3 measure.py audit --repo "$TITAN_CHECKOUT" --output "$PRIVATE_OUTPUT"
 ```
 
-Next, the owner supplies a quiet-window JSON (disabled example provided) with
-start/expiry epoch seconds and a note about VM and build/test activity. Readiness
-does not authorize overlapping measurements. Each row checks that window; the
-runner archives host process/load snapshots without unrelated command arguments.
-It cannot inspect activity inside VMs. Only after that confirmation:
+For initial instrumented smoke/allocation work, the owner separately sets
+`allocations_ready` after correctness and exact frozen-provider readiness.
+That signal can permit allocation accounting on a busy host; its clocks are
+not used for timing claims. The owner must also supply a quiet-window JSON
+(disabled example provided) for uninstrumented timing/fairness, with start/expiry
+epoch seconds and a note about VM and build/test activity. Each timing/fairness
+row checks that window and archives host process/load snapshots without unrelated
+command arguments. The runner cannot inspect activity inside VMs.
 
 ```sh
-python3 measure.py allocations --repo "$TITAN_CHECKOUT" --output "$PRIVATE_OUTPUT" \
-  --quiet-note "$OWNER_QUIET_JSON"
+python3 cleanup_regression.py --repo "$TITAN_CHECKOUT" --output "$PRIVATE_OUTPUT"
+python3 measure.py allocations --repo "$TITAN_CHECKOUT" --output "$PRIVATE_OUTPUT"
 python3 summarize.py "$PRIVATE_OUTPUT/allocations-EXACT_TIMESTAMP.json"
 python3 measure.py timing --repo "$TITAN_CHECKOUT" --output "$PRIVATE_OUTPUT" \
   --quiet-note "$OWNER_QUIET_JSON" --transport wss --role client --operation write --size 65536
@@ -153,8 +179,8 @@ python3 measure.py fairness --repo "$TITAN_CHECKOUT" --output "$PRIVATE_OUTPUT" 
 ```
 
 Run both roles over WS and WSS for fairness and selected timing workloads, and
-archive final prefix audits. The 397-process plan remains runtime-unverified;
-do a bounded owner-approved smoke before a full batch. Linux is the first
-compilation target. Benchmark workloads have not run on Linux, macOS or Windows;
-Windows is unsupported by the reused POSIX probes. Do not infer
-new platform support from the historical async harness.
+archive final prefix audits. The full 397-process allocation/lifetime plan completed against final5
+after the bounded smoke passed. Preserve those outputs; further runs require
+the current owner directive and immutable identities. Diagnostic workloads compiled and ran on Linux. No benchmark run
+has validated macOS or Windows; Windows is unsupported by the reused POSIX
+probes. Do not infer platform support from the historical async harness.

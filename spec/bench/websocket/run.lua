@@ -7,7 +7,31 @@ local latency = load_probe(assert(os.getenv('MEASURE_LATENCY_PROBE')), 'luaopen_
 local payload = string.rep('x', config.size)
 local weak = setmetatable({}, {__mode='v'})
 local held
+local measurement_started = false
+local measurement_body_stopped = false
+local function start_measurement()
+  probe.start(config.instrumented, config.gc_stopped)
+  measurement_started = true
+end
+local function stop_measurement()
+  probe.stop_body()
+  measurement_body_stopped = true
+end
+local function finish_measurement()
+  if not measurement_started then return end
+  if not measurement_body_stopped then stop_measurement() end
+  local result = probe.finish()
+  measurement_started = false
+  return result
+end
 local boundaries = {ready=0, body_done=0, closed=0}
+local listener_generation = 0
+local function listening()
+  listener_generation = listener_generation + 1
+  local file = assert(io.open(config.listen_marker, 'w'))
+  assert(file:write('listening:'..listener_generation..'\n'))
+  assert(file:close())
+end
 local function ready(endpoint)
   boundaries.ready = boundaries.ready + 1
   weak[1] = endpoint
@@ -16,34 +40,44 @@ local function ready(endpoint)
     local file = assert(io.open(config.go_marker, 'w'))
     assert(file:write('go\n')); assert(file:close())
   end
-  if config.phase == 'steady' or config.phase == 'sessions' then probe.start(config.instrumented, config.gc_stopped) end
-  if config.phase == 'setup' then probe.stop_body() end
+  if config.phase == 'steady' or config.phase == 'sessions' then start_measurement() end
+  if config.phase == 'setup' then stop_measurement() end
 end
 local function body_done()
   boundaries.body_done = boundaries.body_done + 1
-  if config.phase == 'steady' or config.phase == 'sessions' then probe.stop_body() end
-  if config.phase == 'teardown' then probe.start(config.instrumented, config.gc_stopped) end
+  if config.phase == 'steady' or config.phase == 'sessions' then stop_measurement() end
+  if config.phase == 'teardown' then start_measurement() end
 end
 local function closed()
   boundaries.closed = boundaries.closed + 1
-  if config.phase == 'teardown' then probe.stop_body() end
+  if config.phase == 'teardown' then stop_measurement() end
 end
-if config.phase == 'setup' then probe.start(config.instrumented, config.gc_stopped) end
-local task = bench.launch(config.transport, config.role, config.operation, config.count,
-  config.port, payload, config.kind, config.cleanup, config.ca, config.certificate,
-  config.key, config.preload_marker, config.tasks or 1, ready, body_done, closed,
-  latency.start, latency.sample)
-async.loop()
-local status = task:status()
-if status:as_string() ~= 'succeeded' then
-  local failed, failure = status:has_failed()
-  error(failed and failure.traceback or 'benchmark did not succeed')
+local task, status, fairness, result
+local succeeded, failure = pcall(function()
+  if config.phase == 'setup' then start_measurement() end
+  task = bench.launch(config.transport, config.role, config.operation, config.count,
+    config.port, payload, config.kind, config.cleanup, config.ca, config.certificate,
+    config.key, config.preload_marker, config.tasks or 1, ready, body_done, closed,
+    latency.start, latency.sample, listening)
+  async.loop()
+  status = task:status()
+  if status:as_string() ~= 'succeeded' then
+    local failed, task_failure = status:has_failed()
+    error(failed and task_failure.traceback or 'benchmark did not succeed')
+  end
+  for name, count in pairs(boundaries) do assert(count == 1, 'incorrect boundary: '..name) end
+  task, status = nil, nil
+  if config.operation == 'fairness' then fairness = latency.finish() end
+  result = assert(finish_measurement(), 'measurement never started')
+end)
+if not succeeded then
+  task, status = nil, nil
+  -- Restore the allocator before an error reaches Lua shutdown and unloads
+  -- the probe DSO. Failed runs never emit a successful measurement result.
+  local cleaned, cleanup_failure = pcall(finish_measurement)
+  if not cleaned then error(tostring(failure)..'\nallocator cleanup failed: '..tostring(cleanup_failure), 0) end
+  error(failure, 0)
 end
-for name, count in pairs(boundaries) do assert(count == 1, 'incorrect boundary: '..name) end
-task, status = nil, nil
-local fairness
-if config.operation == 'fairness' then fairness = latency.finish() end
-local result = probe.finish()
 assert(result.postgc_ledger_error_bytes == 0, 'allocator ledger differs from Lua heap')
 result.closed_endpoint_held_through_postgc = config.retain_endpoint
 result.endpoint_reachable_after_postgc = weak[1] ~= nil

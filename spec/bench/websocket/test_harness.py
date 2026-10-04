@@ -4,9 +4,11 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
 
 import measure
 import peer
+import ssl
 import summarize
 
 
@@ -74,6 +76,32 @@ class HarnessTests(unittest.TestCase):
                          one_ms_timer_interarrival={"samples":100})))
         self.assertTrue(measure.fairness_sufficient(dict(wall_seconds=.3,
                         one_ms_timer_interarrival={"samples":100})))
+
+    def test_allocation_authorization_does_not_authorize_quiet_timing(self):
+        runner = measure.Runner.__new__(measure.Runner)
+        runner.ready = dict(owner_thread_id=measure.OWNER, consumer_compile_ready=True)
+        with self.assertRaisesRegex(ValueError, "runtime/allocation readiness"):
+            runner.allocation_authorization()
+        runner.ready["allocations_ready"] = True
+        runner.args = argparse.Namespace(quiet_note=None)
+        with self.assertRaisesRegex(ValueError, "quiet-window note"):
+            runner.quiet()
+
+    def test_peer_fixture_context_keeps_chain_and_hostname_verification(self):
+        context = peer.fixture_client_context("/var/home/mascarenhas/Code/titan/spec/fixtures/ssl/ca.pem")
+        self.assertEqual(context.verify_mode, ssl.CERT_REQUIRED)
+        self.assertTrue(context.check_hostname)
+        self.assertFalse(context.verify_flags & ssl.VERIFY_X509_STRICT)
+
+    def test_raw_tls_broken_pipe_is_only_tolerated_after_byte_budget(self):
+        class BrokenStream:
+            def recv(self, _count): raise BrokenPipeError("post-abort TLS output")
+        config = dict(transport="tls", role="client", operation="write",
+                      size=0, count=0, go_marker="unused")
+        with patch("peer.wait_marker"):
+            self.assertEqual(peer.exercise(BrokenStream(), config)["bytes"], 0)
+            with self.assertRaises(BrokenPipeError):
+                peer.exercise(BrokenStream(), config | dict(size=1, count=1))
 
     def test_slope_report_and_incomplete_rejection(self):
         rows = []

@@ -124,6 +124,15 @@ def wait_marker(path, text):
     raise TimeoutError("sideband marker missing")
 
 
+def fixture_client_context(ca):
+    context = ssl.create_default_context(cafile=ca)
+    # Existing native CA fixtures predate Python's default strict-extension
+    # profile. Keep chain + hostname verification, matching their Titan use.
+    context.verify_flags &= ~ssl.VERIFY_X509_STRICT
+    assert context.verify_mode == ssl.CERT_REQUIRED and context.check_hostname
+    return context
+
+
 def finish(wire, peer_client, graceful):
     # Graceful sends Close from Titan. Abort must end without additional data.
     try:
@@ -158,11 +167,13 @@ def exercise(stream, config):
                 if not chunk or chunk != b"x" * len(chunk):
                     raise ValueError("wrong measured raw output")
                 remaining -= len(chunk)
-        # Drain until explicit retirement; no raw TLS close_notify is expected.
+        # Drain only after the exact byte budget. A deliberate TLS abort can
+        # reset input or fail a post-handshake output attempted by SSL recv.
+        # No raw TLS close_notify is expected.
         try:
             if stream.recv(1):
                 raise ValueError("raw endpoint exceeded byte budget")
-        except (ConnectionResetError, ssl.SSLEOFError):
+        except (ConnectionResetError, BrokenPipeError, ssl.SSLEOFError):
             pass
         return {"messages": count, "frames": None, "bytes": count * len(payload)}
     opcode = 1 if config["kind"] == "text" else 2
@@ -220,7 +231,7 @@ def run(config):
     context = None
     if secure:
         if client:
-            context = ssl.create_default_context(cafile=config["ca"])
+            context = fixture_client_context(config["ca"])
         else:
             context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
             context.load_cert_chain(config["certificate"], config["key"])
@@ -231,8 +242,8 @@ def run(config):
         listener.settimeout(30)
         Path(config["listen_marker"]).write_text("listening\n")
     try:
-        for _ in range(sessions):
-            results.append(run_session(config, per_session, client, context, listener))
+        for index in range(sessions):
+            results.append(run_session(config, per_session, client, context, listener, index + 1))
     finally:
         if listener is not None:
             listener.close()
@@ -240,8 +251,9 @@ def run(config):
             "python_version":sys.version, "peer_openssl":ssl.OPENSSL_VERSION}
 
 
-def run_session(config, per_session, client, context, listener):
+def run_session(config, per_session, client, context, listener, generation):
     if client:
+        wait_marker(config["listen_marker"], f"listening:{generation}\n")
         deadline = time.monotonic() + 30
         while True:
             try:

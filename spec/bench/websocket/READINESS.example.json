@@ -1,6 +1,7 @@
 {
   "owner_thread_id": "01a1054f-c6d4-7253-9868-ee6198900e08",
   "consumer_compile_ready": false,
+  "allocations_ready": false,
   "frozen_inputs": false,
   "prefix": "/tmp/titan-193-prefix",
   "provider_sha256": "OWNER_SUPPLIED_EXACT_SHA256",

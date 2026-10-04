@@ -156,15 +156,31 @@ class Runner:
         return dict(payloads={name: self.helper.digest(CODE / name) for name in PAYLOADS},
                     reused={name: self.helper.digest(self.reuse / name) for name in REUSED})
 
-    def command(self, label, argv, cwd=None, timeout=300):
+    def command(self, label, argv, cwd=None, timeout=300, watched_peer=None):
         stem = self.logs / f"{time.time_ns()}-{label}"
         started = time.time()
         process = subprocess.Popen(argv, cwd=cwd or self.work, env=self.env,
             stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             start_new_session=True)
         timed_out = False
+        peer_failed = False
         try:
-            out, err = process.communicate(timeout=timeout)
+            deadline = time.monotonic() + timeout
+            while True:
+                if watched_peer is not None and watched_peer.poll() not in (None, 0):
+                    peer_failed = True
+                    if process.poll() is None: os.killpg(process.pid, signal.SIGTERM)
+                    try: out, err = process.communicate(timeout=3)
+                    except subprocess.TimeoutExpired:
+                        os.killpg(process.pid, signal.SIGKILL); out, err = process.communicate()
+                    break
+                remaining = deadline - time.monotonic()
+                if remaining <= 0: raise subprocess.TimeoutExpired(argv, timeout)
+                try:
+                    out, err = process.communicate(timeout=min(.1, remaining) if watched_peer else remaining)
+                    break
+                except subprocess.TimeoutExpired:
+                    if not watched_peer: raise
         except subprocess.TimeoutExpired:
             timed_out = True
             os.killpg(process.pid, signal.SIGTERM)
@@ -177,11 +193,12 @@ class Runner:
         stem.with_suffix(".stderr").write_bytes(err)
         receipt = dict(argv=argv, environment=self.env, cwd=str(cwd or self.work),
             started=started, exit_code=process.returncode, timeout=timed_out,
+            peer_failed_before_consumer_exit=peer_failed,
             supervisor_wall_seconds=time.time() - started, inputs=self.hashes(),
             stdout_sha256=self.helper.digest(stem.with_suffix(".stdout")),
             stderr_sha256=self.helper.digest(stem.with_suffix(".stderr")))
         self.helper.write_json(stem.with_suffix(".json"), receipt)
-        if timed_out or process.returncode:
+        if timed_out or peer_failed or process.returncode:
             raise RuntimeError(f"command failed: {stem.with_suffix('.json')}\n{err.decode(errors='replace')[-1500:]}")
         return out, str(stem.with_suffix(".json"))
 
@@ -252,8 +269,17 @@ class Runner:
         path = self.logs / f"{time.time_ns()}-quiet.json"
         self.helper.write_json(path, dict(note=note, host=self.helper.snapshot_host()))
 
+    def allocation_authorization(self):
+        if (self.ready.get("owner_thread_id") != OWNER or
+                self.ready.get("allocations_ready") is not True):
+            raise ValueError("allocation run blocked: explicit owner runtime/allocation readiness required")
+        path = self.logs / f"{time.time_ns()}-allocation-authorization.json"
+        self.helper.write_json(path, dict(owner_readiness=self.ready,
+            host=self.helper.snapshot_host(), quiet_timing_authorized=False))
+
     def run(self, row, instrumented=True):
-        self.quiet()
+        if instrumented: self.allocation_authorization()
+        else: self.quiet()
         # Fast identities each row, full immutable prefix audit at batch boundaries.
         if self.hashes() != self.manifest["inputs"]:
             raise RuntimeError("measurement inputs changed")
@@ -287,7 +313,7 @@ class Runner:
                             raise RuntimeError(f"peer did not listen; logs in {lane}")
                         time.sleep(0.001)
             stdout, receipt = self.command("consumer", [str(self.prefix / "bin/lua"),
-                str(CODE / "run.lua"), str(lane / "case.lua")], timeout=180)
+                str(CODE / "run.lua"), str(lane / "case.lua")], timeout=180, watched_peer=peer)
             if peer is not None:
                 peer.wait(timeout=10)
                 if peer.returncode:
@@ -308,7 +334,7 @@ class Runner:
         return dict(case=row, result=result, consumer_receipt=receipt, peer_receipt=str(lane / "peer-receipt.json"))
 
     def allocations(self):
-        self.audit(); self.quiet()
+        self.audit(); self.allocation_authorization()
         rows = []
         path = self.output / f"allocations-{time.time_ns()}.json"
         plan = matrix()

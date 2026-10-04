@@ -175,14 +175,15 @@ function launch(transport: string, role: string, operation: string,
                 ready: function (value): (), body_done: function (): (),
                 closed: function (): (),
                 begin: function (integer, integer): (),
-                sample: function (integer): ()): async.Task<|nil, nil|>
+                sample: function (integer): (),
+                listening: function (): ()): async.Task<|nil, nil|>
   return async.run<|nil, nil|>(function (): nil
     if operation == "sessions" then
       ready(nil)
       for _ = 1, count do
         succeeded(M.launch(transport, role, "read", 0, port, payload, kind,
           cleanup, ca, certificate, key, marker, tasks_count, ignore_endpoint,
-          ignore_boundary, ignore_boundary, begin, sample))
+          ignore_boundary, ignore_boundary, begin, sample, listening))
       end
       body_done()
       closed()
@@ -240,6 +241,7 @@ function launch(transport: string, role: string, operation: string,
       if secure then listener = http.listen_tls("127.0.0.1", certificate, handler, key, port)
       else listener = http.listen("127.0.0.1", handler, port) end
       defer listener:close()
+      listening()
       local serving = async.run<|nil, nil|>(function (): nil listener:serve(); return nil end)
       if not state.done then
         state.waiter = async.running()
@@ -252,6 +254,7 @@ function launch(transport: string, role: string, operation: string,
     elseif secure then
       local listener = ssl.listen("127.0.0.1", port, certificate, key)
       defer listener:close()
+      listening()
       local connection = listener:accept()
       defer connection:abort()
       connection:handshake()
@@ -264,6 +267,7 @@ function launch(transport: string, role: string, operation: string,
     else
       local listener = net.listen("127.0.0.1", port)
       defer listener:close()
+      listening()
       local connection = listener:accept()
       defer connection:close()
       ready(connection)
