@@ -173,6 +173,9 @@ local record Proxy
   local restart_input: (function (): ())?
   local input_stopped: boolean
   local input_paused: boolean
+  local frontend_eof: boolean
+  local forwarded_bytes: integer
+  local backend_shutdown: boolean
 end
 
 local function relay(proxy: Proxy, front: uv.tcp_t, backend_port: integer): value
@@ -199,7 +202,8 @@ local function relay(proxy: Proxy, front: uv.tcp_t, backend_port: integer): valu
           end
         elseif count < 0 then
           uv.read_stop(stream)
-          if count == uv.EOF then finish() else fail(uv.err_name(count)) end
+          if count == uv.EOF then proxy.frontend_eof = true; finish()
+          else fail(uv.err_name(count)) end
         end
       end
     proxy.restart_input = function ()
@@ -244,10 +248,20 @@ local function relay(proxy: Proxy, front: uv.tcp_t, backend_port: integer): valu
         proxy.pending_bytes = proxy.pending_bytes - #bytes
         if proxy.pending_bytes <= 65536 and not proxy.input_stopped then proxy.restart_input() end
         backend:write(bytes)
+        proxy.forwarded_bytes = proxy.forwarded_bytes + #bytes
       when error(failure) then
         if not proxy.closing then raise failure end
         return nil
-      else return nil
+      when ended() then
+        -- BufferedSubscription returns every retained item before ended().
+        -- Forward the original FIN only after all accepted relay writes have
+        -- completed; abort/explicit close must not masquerade as this boundary.
+        test.assert(proxy.frontend_eof and proxy.pending_bytes == 0,
+                    "proxy ended before draining retained frontend bytes")
+        backend:shutdown()
+        proxy.backend_shutdown = true
+        return nil
+      when closed() then return nil
       end
     end
   catch
@@ -265,7 +279,8 @@ local function new_proxy(backend_port: integer): Proxy
   test.assert(uv.tcp_bind(listener, address, 0) >= 0)
   local bound_status, bound? = uv.tcp_getsockname(listener)
   test.assert(bound_status >= 0)
-  local proxy = Proxy(bound:port(), listener, nil, nil, nil, nil, nil, false, 0, nil, false, true)
+  local proxy = Proxy(bound:port(), listener, nil, nil, nil, nil, nil, false,
+                      0, nil, false, true, false, 0, false)
   local status = uv.listen(listener:as_stream_t(), 1,
     function (_: uv.stream_t, accepted_status: integer)
       test.assert(accepted_status >= 0 and proxy.front == nil)
@@ -298,6 +313,16 @@ local function Proxy:resume_input()
   test.assert(status >= 0 and size > 0)
   self.input_stopped = false
   self.restart_input()
+end
+
+local function Proxy:diagnostic(): string
+  local sender = "absent"
+  local receiver = "absent"
+  if self.sender then sender = self.sender:status():as_string() end
+  if self.receiver then receiver = self.receiver:status():as_string() end
+  return string.format("frontend_eof=%s forwarded=%d pending=%d backend_shutdown=%s sender=%s receiver=%s closing=%s",
+    string.tostring(self.frontend_eof), self.forwarded_bytes, self.pending_bytes,
+    string.tostring(self.backend_shutdown), sender, receiver, string.tostring(self.closing))
 end
 
 local function Proxy:close()

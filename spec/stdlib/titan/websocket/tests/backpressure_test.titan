@@ -11,6 +11,35 @@ local function listen_raw_tls(): (ssl.Server, integer)
   raise "WebSocket backpressure TLS fixture exhausted loopback ports"
 end
 
+local function fixture_time_ms(): integer
+  local loop = async.current_loop()
+  uv.update_time(loop)
+  return uv.now(loop)
+end
+
+local function fixture_failure(failure: value): string
+  if failure is websocket.Error then
+    local actual = failure as websocket.Error
+    return string.format("websocket.Error(kind=%s operation=%s message=%s close_code=%s)",
+      actual.kind, actual.operation, actual.message, string.tostring(actual.close_code))
+  elseif failure is websocket.HandshakeError then
+    local actual = failure as websocket.HandshakeError
+    return string.format("websocket.HandshakeError(message=%s status=%s)",
+      actual.message, string.tostring(actual.status))
+  elseif failure is ssl.Error then
+    local actual = failure as ssl.Error
+    return string.format("ssl.Error(name=%s operation=%s message=%s)",
+      actual.name, actual.operation, actual.message)
+  elseif failure is async.OperationError then
+    local actual = failure as async.OperationError
+    return string.format("async.OperationError(name=%s operation=%s message=%s)",
+      actual.name, actual.operation, actual.message)
+  elseif failure is async.CancellationReason then
+    return "async.CancellationReason(" .. string.tostring(failure) .. ")"
+  end
+  return string.tostring(failure)
+end
+
 local function blocked_output_case(secure: boolean, trigger: string)
   local backend_port = 0
   local accept: function (): (io.ReaderWriterCloser) = function (): io.ReaderWriterCloser raise "unset accept" end
@@ -110,6 +139,8 @@ local function blocked_output_case(secure: boolean, trigger: string)
   test.assert(not write_returned and writer:status():as_string() == "waiting",
               "fixture did not establish stopped-socket output backpressure")
   local watchdog_fired = false
+  local watchdog_started = fixture_time_ms()
+  local drain_started = 0
   local watchdog = async.run<|value, value|>(function (): value
     timer.sleep(8000)
     watchdog_fired = true
@@ -138,6 +169,7 @@ local function blocked_output_case(secure: boolean, trigger: string)
     test.assert(not shutdown_returned and shutdown:status():as_string() == "waiting",
                 "shutdown did not overlap receive Close behind the held frame")
     proxy:resume_input()
+    drain_started = fixture_time_ms()
     peer:resume(hold)
     assert_succeeded(reader, "overlapping Close reader wrapper")
     assert_succeeded(shutdown, "overlapping shutdown wrapper")
@@ -146,7 +178,15 @@ local function blocked_output_case(secure: boolean, trigger: string)
                 not write_returned and write_failure is websocket.Error and
                 (write_failure as websocket.Error).kind == "state" and not watchdog_fired,
                 "overlapping Close fabricated a transport failure or failed clean progress")
-    assert_succeeded(peer, "exactly one outgoing Close raw peer")
+    do assert_succeeded(peer, "exactly one outgoing Close raw peer")
+    catch
+      raise string.format("overlapping Close raw peer failed: %s; watchdog=%s elapsed_ms=%d drain_ms=%d; %s",
+        fixture_failure(error), string.tostring(watchdog_fired),
+        fixture_time_ms() - watchdog_started, fixture_time_ms() - drain_started,
+        proxy:diagnostic())
+    end
+    test.assert(not watchdog_fired,
+      "overlapping Close raw peer depended on watchdog retirement; " .. proxy:diagnostic())
     watchdog:cancel(async.CancellationReason.simple("overlapping Close test completed"))
     async.join(watchdog)
     connection:close(); proxy:close()
@@ -252,6 +292,9 @@ local function blocked_server_opening_case(secure: boolean, cancel: boolean)
   local done = false
   local transferred = false
   local failure: value = nil
+  local opening_started = 0
+  local pending_at_ms = 0
+  local cancel_at_ms = 0
   local preflight = async.ResumeToken("accepted HTTP opening preflight")
   local handler: http.Handler = function (request: http.Request, response: http.Response)
     handler_task = async.running()
@@ -260,6 +303,7 @@ local function blocked_server_opening_case(secure: boolean, cancel: boolean)
     entered = true
     async.suspend(preflight)
     accepting = true
+    opening_started = fixture_time_ms()
     do
       local connection = websocket.accept(request, response,
         websocket.AcceptOptions { handshake_timeout = 1000 })
@@ -319,13 +363,19 @@ local function blocked_server_opening_case(secure: boolean, cancel: boolean)
   test.assert(pending > 0 and not done and not transferred and
               handler_task:status():as_string() == "waiting",
               "platform buffered the entire bounded 101; no accepted native output was pending")
+  pending_at_ms = fixture_time_ms() - opening_started
   gc.collect()
   if cancel then
     local reason = async.CancellationReason.simple("cancel accepted native 101 output")
+    cancel_at_ms = fixture_time_ms() - opening_started
+    local before_status = handler_task:status():as_string()
     handler_task:cancel(reason)
     async.join(handler_task)
     test.assert(handler_task:status():has_cancelled() and failure == reason,
-                "server opening cancellation lost its original reason")
+      string.format("server opening cancellation lost its original reason: status=%s before_cancel=%s actual=%s same_reason=%s pending=%d pending_at_ms=%d cancel_at_ms=%d joined_at_ms=%d watchdog=%s",
+        handler_task:status():as_string(), before_status, fixture_failure(failure),
+        string.tostring(failure == reason), pending, pending_at_ms, cancel_at_ms,
+        fixture_time_ms() - opening_started, string.tostring(watchdog_fired)))
   else
     while not done do async.yield() end
     assert_succeeded(handler_task, "server opening timeout wrapper")
