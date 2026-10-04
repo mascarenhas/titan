@@ -529,9 +529,17 @@ function main(args: {string}): integer
 
     local dial_options: value = websocket.DialOptions()
     local accept_options: value = qualified_websocket.AcceptOptions()
+    local text_marker = false
+    local binary_marker = false
+    case websocket.TEXT
+    when text() then text_marker = true
+    end
+    case websocket.BINARY
+    when binary() then binary_marker = true
+    end
     check(dial_options is websocket.DialOptions and
           accept_options is websocket.AcceptOptions and
-          websocket.TEXT:has_text() and websocket.BINARY:has_binary(),
+          text_marker and binary_marker,
           "static WebSocket provider initialization failed")
     local websocket_url?, websocket_url_error? = url.parse("wss://localhost/socket")
     check(websocket_url_error == nil and websocket_url.scheme == "wss" and

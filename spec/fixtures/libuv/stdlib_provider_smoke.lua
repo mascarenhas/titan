@@ -114,7 +114,11 @@ assert(type(http) == "userdata")
 assert(type(websocket) == "userdata")
 assert(type(websocket.DialOptions()) == "userdata")
 assert(type(websocket.AcceptOptions()) == "userdata")
-assert(websocket.TEXT:has_text() and websocket.BINARY:has_binary())
+assert(getmetatable(websocket.TEXT) ==
+    "Titan union titan.websocket.MessageType")
+assert(getmetatable(websocket.BINARY) ==
+    "Titan union titan.websocket.MessageType")
+assert(websocket.TEXT ~= websocket.BINARY)
 assert(type(testing) == "userdata")
 assert(type(sqlite3) == "userdata")
 assert(type(json) == "userdata")
