@@ -5,6 +5,30 @@ local const TRUST_ROOT = "spec/fixtures/ssl/ca.pem"
 local type SessionAction = function (websocket.Connection): ()
 local type PeerAction = function (Wire): ()
 
+local function fixture_failure(failure: value): string
+  if failure is websocket.Error then
+    local actual = failure as websocket.Error
+    return string.format("websocket.Error(kind=%s operation=%s message=%s close_code=%s)",
+      actual.kind, actual.operation, actual.message, string.tostring(actual.close_code))
+  elseif failure is websocket.HandshakeError then
+    local actual = failure as websocket.HandshakeError
+    return string.format("websocket.HandshakeError(message=%s status=%s)",
+      actual.message, string.tostring(actual.status))
+  elseif failure is ssl.Error then
+    local actual = failure as ssl.Error
+    return string.format("ssl.Error(name=%s operation=%s message=%s)",
+      actual.name, actual.operation, actual.message)
+  elseif failure is async.OperationError then
+    local actual = failure as async.OperationError
+    return string.format("async.OperationError(name=%s operation=%s message=%s)",
+      actual.name, actual.operation, actual.message)
+  elseif failure is async.CancellationReason then
+    return "async.CancellationReason(" .. string.tostring(failure) .. ")"
+  end
+  return string.tostring(failure)
+end
+
+
 local function expect_error(action: function (): ()): value
   local caught = false
   local result: value = nil
@@ -15,11 +39,13 @@ end
 
 local function assert_ws_error(failure: value, kind: string, operation: string,
                               code: integer?)
-  test.assert(failure is websocket.Error, "expected nominal websocket.Error")
+  local diagnostic = string.format("expected websocket.Error(kind=%s operation=%s close_code=%s); actual=%s",
+    kind, operation, string.tostring(code), fixture_failure(failure))
+  test.assert(failure is websocket.Error, "expected nominal websocket.Error; " .. diagnostic)
   local actual = failure as websocket.Error
   test.assert(actual.kind == kind and actual.operation == operation and
               actual.close_code == code and #actual.message > 0,
-              "WebSocket error fields differ from the contract")
+              "WebSocket error fields differ from the contract; " .. diagnostic)
 end
 
 local function assert_text(kind: websocket.MessageType?, data: string?, expected: string)
