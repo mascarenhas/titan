@@ -51,26 +51,50 @@ local function constrain_owned_sockets(receive: boolean, stop_reads: boolean): (
   return count, profile:drain()
 end
 
-local function owned_pending_output_bytes(): integer
+-- Public connected endpoint addresses identify a unique fixture-owned socket.
+-- A listening socket has no peer and cannot satisfy this lookup.
+local function owned_connected_socket(local_port: integer?, peer_port: integer?): uv.tcp_t
   local loop = async.current_loop()
-  return on_main(function (): integer
-    local pending = 0
+  local selected: uv.tcp_t? = nil
+  local matches = on_main(function (): integer
+    local count = 0
     uv.walk(loop, function (handle: uv.handle_t, _argument: value)
       case handle
       when tcp(owner) then
         if handle:is_initialized() and not uv.is_closing(handle) then
-          pending = pending + uv.stream_get_write_queue_size(owner:as_stream_t())
+          local own_status, own? = uv.tcp_getsockname(owner)
+          local peer_status, peer? = uv.tcp_getpeername(owner)
+          if own_status >= 0 and own ~= nil and peer_status >= 0 and peer ~= nil and
+             (local_port == nil or own:port() == local_port) and
+             (peer_port == nil or peer:port() == peer_port) then
+            selected = owner
+            count = count + 1
+          end
         end
       else
       end
     end, nil)
-    return pending
+    return count
+  end)
+  test.assert(matches == 1,
+    string.format("owned connected TCP lookup was ambiguous: local_port=%s peer_port=%s matches=%d",
+      string.tostring(local_port), string.tostring(peer_port), matches))
+  local socket? = selected
+  return socket
+end
+
+local function pending_output_bytes(socket: uv.tcp_t): integer
+  return on_main(function (): integer
+    if not socket:as_handle_t():is_initialized() or uv.is_closing(socket:as_handle_t()) then return 0 end
+    return uv.stream_get_write_queue_size(socket:as_stream_t())
   end)
 end
 
-local function verified_small_window_tls_peer(port: integer): (ssl.Connection, string)
+local function verified_small_window_tls_peer(port: integer,
+    publish_abort: function (function (): ()): ()): (ssl.Connection, string)
   local transport = net.Connection.new()
   runtime_test.cleanup(function () transport:close() end)
+  publish_abort(function () transport:close() end)
   local loop = async.current_loop()
   local profile = ""
   -- Only this newly constructed public Connection is unbound. Walk public
@@ -98,6 +122,7 @@ local function verified_small_window_tls_peer(port: integer): (ssl.Connection, s
   transport:connect_address(address)
   local tls = ssl.client(transport, "localhost", TRUST_ROOT)
   runtime_test.cleanup(function () tls:abort() end)
+  publish_abort(function () tls:abort() end)
   tls:handshake()
   return tls, profile
 end
@@ -176,6 +201,7 @@ local function blocked_output_case(secure: boolean, trigger: string)
   end
   local connection = websocket.connect(scheme .. "://localhost:" .. proxy.port .. "/blocked", options)
   runtime_test.cleanup(function () connection:close() end)
+  local client_socket = owned_connected_socket(nil, proxy.port)
   local read_failure: value = nil
   local reader = async.run<|value, value|>(function (): value
     do connection:read() catch read_failure = error end
@@ -204,16 +230,42 @@ local function blocked_output_case(secure: boolean, trigger: string)
   -- fragments need in the healthy lane. Then require actual suspended output.
   for _ = 1, 4096 do timer.yield() end
   gc.collect()
-  local admitted_pending = owned_pending_output_bytes()
-  for _ = 1, 32 do
-    if admitted_pending > 0 or write_returned or write_failure ~= nil then break end
-    async.yield()
-    admitted_pending = owned_pending_output_bytes()
+  -- A positive queue in one turn may only be a tail waiting for a delayed
+  -- kernel ACK. Let the writer keep filling the stopped receive window and
+  -- require continuous native pressure across real loop/timer progress before
+  -- any of the protocol-operation deadlines starts.
+  local pressure_started = fixture_time_ms()
+  local pressure_since = 0
+  local pressure_samples = 0
+  local admitted_pending = pending_output_bytes(client_socket)
+  local previous_pending = 0
+  while fixture_time_ms() - pressure_started < 3000 do
+    if admitted_pending > 0 and not write_returned and write_failure == nil and
+       writer:status():as_string() == "waiting" then
+      if admitted_pending < previous_pending then
+        pressure_since = 0
+        pressure_samples = 0
+      end
+      if pressure_since == 0 then pressure_since = fixture_time_ms() end
+      pressure_samples = pressure_samples + 1
+      if fixture_time_ms() - pressure_since >= 250 then break end
+    else
+      pressure_since = 0
+      pressure_samples = 0
+      if write_returned or write_failure ~= nil then break end
+    end
+    previous_pending = admitted_pending
+    timer.sleep(10)
+    admitted_pending = pending_output_bytes(client_socket)
   end
-  test.assert(admitted_pending > 0 and not write_returned and writer:status():as_string() == "waiting",
-    string.format("fixture did not establish accepted native output backpressure: queue=%d writer=%s returned=%s failure=%s elapsed_ms=%d buffers=%s; %s",
+  local pressure_ms = 0
+  if pressure_since > 0 then pressure_ms = fixture_time_ms() - pressure_since end
+  test.assert(pressure_ms >= 250 and pressure_samples >= 2 and admitted_pending > 0 and
+              not write_returned and writer:status():as_string() == "waiting",
+    string.format("fixture did not establish persistent accepted native output backpressure: queue=%d writer=%s returned=%s failure=%s elapsed_ms=%d pressure_ms=%d samples=%d buffers=%s; %s",
       admitted_pending, writer:status():as_string(), string.tostring(write_returned),
-      fixture_failure(write_failure), fixture_time_ms() - writer_started, socket_profile,
+      fixture_failure(write_failure), fixture_time_ms() - writer_started, pressure_ms,
+      pressure_samples, socket_profile,
       proxy:diagnostic()))
   local watchdog_fired = false
   local watchdog_started = fixture_time_ms()
@@ -227,8 +279,9 @@ local function blocked_output_case(secure: boolean, trigger: string)
   end)
   task_support.cleanup_task(watchdog, "stalled-output watchdog cleanup")
   local diagnostic = function (): string
-    return string.format("trigger=%s elapsed_ms=%d admitted_queue=%d writer=%s returned=%s write_failure=%s reader=%s read_failure=%s watchdog=%s buffers=%s; %s",
+    return string.format("trigger=%s elapsed_ms=%d admitted_queue=%d pressure_ms=%d pressure_samples=%d writer=%s returned=%s write_failure=%s reader=%s read_failure=%s watchdog=%s buffers=%s; %s",
       trigger, fixture_time_ms() - watchdog_started, admitted_pending,
+      pressure_ms, pressure_samples,
       writer:status():as_string(), string.tostring(write_returned), fixture_failure(write_failure),
       reader:status():as_string(), fixture_failure(read_failure), string.tostring(watchdog_fired),
       socket_profile, proxy:diagnostic())
@@ -241,7 +294,7 @@ local function blocked_output_case(secure: boolean, trigger: string)
       code, _reason = connection:close_status()
     end
     test.assert(code == 1000, "reader did not acknowledge peer Close behind blocked output; " .. diagnostic())
-    local held_pending = owned_pending_output_bytes()
+    local held_pending = pending_output_bytes(client_socket)
     test.assert(held_pending > 0 and not write_returned and writer:status():as_string() == "waiting",
       string.format("fixture lost the held native frame before overlapping shutdown: queue=%d; %s",
         held_pending, diagnostic()))
@@ -339,6 +392,14 @@ local function blocked_server_opening_case(secure: boolean, cancel: boolean)
   local opening_timeout = 1000
   if cancel then opening_timeout = 4000 end
   local handler_task: async.Task? = nil
+  local priming = false
+  local stop_priming = false
+  local priming_writing = false
+  local priming_closed = false
+  local priming_chunks = 0
+  local priming_bytes = 0
+  local priming_failure: value = nil
+  local priming_profile = ""
   local entered = false
   local accepting = false
   local done = false
@@ -351,6 +412,33 @@ local function blocked_server_opening_case(secure: boolean, cancel: boolean)
   local preflight = async.ResumeToken("accepted HTTP opening preflight")
   local handler: http.Handler = function (request: http.Request, response: http.Response)
     handler_task = async.running()
+    if request.target == "/pressure-prime" then
+      -- A real keep-alive response consumes the previously advertised TCP
+      -- window. Only one bounded body chunk is submitted at a time. The
+      -- caller acknowledges a persistently unresolved chunk, then asks this
+      -- handler to stop after that chunk and the ordinary chunk terminator.
+      local sockets, profile = constrain_owned_sockets(true, false)
+      test.assert(sockets >= 3, "priming handler did not own both connected endpoints; " .. profile)
+      priming_profile = profile
+      priming = true
+      response:set_header("Connection", "keep-alive")
+      local chunk = string.rep("p", 4096)
+      do
+        while not stop_priming do
+          test.assert(priming_chunks < 2048,
+                      "HTTP priming exhausted its 8 MiB body ceiling without acknowledged pressure")
+          priming_chunks = priming_chunks + 1
+          priming_writing = true
+          response:write(chunk)
+          priming_writing = false
+          priming_bytes = priming_bytes + #chunk
+          async.yield()
+        end
+        response:close()
+        priming_closed = true
+      catch priming_failure = error; raise end
+      return
+    end
     -- Stay below the intentional 64 KiB HTTP upgrade-output ceiling.
     response:set_header("X-Opening-Pressure", string.rep("h", 55 * 1024))
     entered = true
@@ -380,13 +468,29 @@ local function blocked_server_opening_case(secure: boolean, cancel: boolean)
   local write_request: function (string): () = function (_bytes: string) raise "unset opening writer" end
   local abort: function (): () = function () end
   local preconnect_profile = ""
+  local setup_fired = false
+  local setup_started = fixture_time_ms()
+  local setup_watchdog = async.run<|value, value|>(function (): value
+    timer.sleep(8000)
+    setup_fired = true
+    abort()
+    listener:close()
+    if handler_task then
+      handler_task:cancel(async.CancellationReason.simple("HTTP priming setup watchdog"))
+    end
+    return nil
+  end)
+  task_support.cleanup_task(setup_watchdog, "HTTP priming setup watchdog cleanup")
+  -- Publish the current public abort capability before connect/handshake can
+  -- suspend, so the setup watchdog also bounds those initial native waits.
+  local publish_abort = function (close: function (): ()) abort = close end
   if secure then
-    local tls, profile = verified_small_window_tls_peer(port)
+    local tls, profile = verified_small_window_tls_peer(port, publish_abort)
     preconnect_profile = profile
     write_request = function (bytes: string) tls:write(bytes) end
     abort = function () tls:abort() end
   else
-    local tcp, profile = stopped_socket_peer(port)
+    local tcp, profile = stopped_socket_peer(port, publish_abort)
     preconnect_profile = profile
     write_request = function (bytes: string) write_socket(tcp, bytes) end
     abort = function () close_handle(tcp:as_handle_t()) end
@@ -395,15 +499,76 @@ local function blocked_server_opening_case(secure: boolean, cancel: boolean)
     abort()
     if handler_task then task_support.cancel_and_join_task(handler_task, "blocked opening handler cleanup") end
   end)
+  local peer_socket = owned_connected_socket(nil, port)
+  -- Verified TLS is complete. Stop its native input before sending both
+  -- requests; no TLS read is performed after any ciphertext is discarded.
+  test.assert(uv.read_stop(peer_socket:as_stream_t()) >= 0)
+  write_request("GET /pressure-prime HTTP/1.1\r\nHost: localhost:" .. port ..
+                "\r\nConnection: keep-alive\r\n\r\n" .. opening_request(port))
+  while not priming and not setup_fired do timer.sleep(1) end
+  test.assert(priming and not setup_fired,
+              "ordinary HTTP priming handler was not acknowledged within its finite setup budget")
+  local server_socket = owned_connected_socket(port, nil)
+  local setup_diagnostic = function (): string
+    return string.format("elapsed_ms=%d chunks=%d completed_body=%d writing=%s closed=%s failure=%s handler=%s setup_watchdog=%s buffers=%s",
+      fixture_time_ms() - setup_started, priming_chunks, priming_bytes,
+      string.tostring(priming_writing), string.tostring(priming_closed), fixture_failure(priming_failure),
+      handler_task:status():as_string(), string.tostring(setup_fired), priming_profile)
+  end
+  local priming_pending = pending_output_bytes(server_socket)
+  local priming_since = 0
+  local previous_priming_pending = 0
+  local previous_priming_chunks = priming_chunks
+  while not setup_fired and priming_failure == nil do
+    if priming_pending > 0 and priming_writing and handler_task:status():as_string() == "waiting" then
+      if priming_pending < previous_priming_pending or priming_chunks ~= previous_priming_chunks then
+        priming_since = 0
+      end
+      if priming_since == 0 then priming_since = fixture_time_ms() end
+      if fixture_time_ms() - priming_since >= 250 then break end
+    else priming_since = 0 end
+    previous_priming_pending = priming_pending
+    previous_priming_chunks = priming_chunks
+    timer.sleep(10)
+    priming_pending = pending_output_bytes(server_socket)
+  end
+  local priming_pressure_ms = 0
+  if priming_since > 0 then priming_pressure_ms = fixture_time_ms() - priming_since end
+  test.assert(priming_pressure_ms >= 250 and priming_pending > 0 and priming_writing and
+              not setup_fired and priming_failure == nil,
+    string.format("HTTP priming did not establish stable unresolved accepted output: queue=%d pressure_ms=%d; %s",
+      priming_pending, priming_pressure_ms, setup_diagnostic()))
+  stop_priming = true
+  -- Free only small native receive steps to finish the already pending chunk
+  -- and HTTP terminator. The next handler stays suspended at preflight, so
+  -- these reads cannot consume any 101 output. Every step has its own 100 ms
+  -- native timer; total discarded bytes are capped independently of the body.
+  local discarded = 0
+  local discard_steps = 0
+  while not entered and not setup_fired and priming_failure == nil do
+    test.assert(discarded < 256 * 1024,
+                "priming release exhausted its 256 KiB discard ceiling; " .. setup_diagnostic())
+    discarded = discarded + discard_socket_step(peer_socket, 1024)
+    discard_steps = discard_steps + 1
+    timer.sleep(1)
+  end
+  test.assert(entered and priming_closed and not priming_writing and not setup_fired and
+              priming_failure == nil and pending_output_bytes(server_socket) == 0,
+    string.format("priming release did not reach acknowledged Upgrade preflight: discarded=%d steps=%d entered=%s; %s",
+      discarded, discard_steps, string.tostring(entered), setup_diagnostic()))
+  test.assert(uv.read_stop(peer_socket:as_stream_t()) >= 0)
+  setup_watchdog:cancel(async.CancellationReason.simple("HTTP priming setup completed"))
+  async.join(setup_watchdog)
+  -- A completed TCP connect does not promise delivery of the listener's
+  -- accepted callback. The handler acknowledgment proves the server exists.
   local initial_sockets, initial_profile = constrain_owned_sockets(true, false)
   initial_profile = "listener_before_SYN=" .. listener_profile .. " client_before_SYN=" ..
-                    preconnect_profile .. " after_handshake=" .. initial_profile
+                    preconnect_profile .. " after_request_ack=" .. initial_profile ..
+                    string.format(" priming(queue=%d pressure_ms=%d chunks=%d body=%d discarded=%d steps=%d setup_ms=%d)",
+                      priming_pending, priming_pressure_ms, priming_chunks, priming_bytes,
+                      discarded, discard_steps, fixture_time_ms() - setup_started)
   test.assert(initial_sockets >= 3,
-              "isolated opening runtime did not own both peers and listener; " .. initial_profile)
-  -- Never read the HTTP response. TLS has already completed; the handler
-  -- preflight acknowledges delivery of the complete client opening request.
-  write_request(opening_request(port))
-  while not entered do async.yield() end
+              "isolated opening runtime did not own both peers and listener after request acknowledgment; " .. initial_profile)
   local stopped_sockets, stopped_profile = constrain_owned_sockets(true, true)
   test.assert(stopped_sockets >= 3, "stopped opening runtime lost owned TCP handles; " .. stopped_profile)
   local watchdog_fired = false
@@ -419,10 +584,10 @@ local function blocked_server_opening_case(secure: boolean, cancel: boolean)
   task_support.cleanup_task(watchdog, "blocked opening watchdog cleanup")
   handler_task:resume(preflight)
   while not accepting do async.yield() end
-  local pending = owned_pending_output_bytes()
+  local pending = pending_output_bytes(server_socket)
   while pending == 0 and not done do
     async.yield()
-    pending = owned_pending_output_bytes()
+    pending = pending_output_bytes(server_socket)
   end
   test.assert(pending > 0 and not done and not transferred and
               handler_task:status():as_string() == "waiting",
