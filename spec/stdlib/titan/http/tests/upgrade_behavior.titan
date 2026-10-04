@@ -261,6 +261,7 @@ local function run_upgrade_server(first_port: integer,
       local extra = http.headers(nil)
       extra:add("X-Accepted", "yes")
       local upgraded = response:upgrade(request, protocol, extra)
+      response:abort() -- HTTP has transferred ownership; this must be a no-op.
       assert_http_error(function () request:read() end, "exchange has ended")
       assert_http_error(function () response:write("HTTP body") end, "exchange has ended")
       session = async.run<|nil, value|>(function (): nil
@@ -551,5 +552,172 @@ function test_upgrade_expectation_rejects_before_interim_output(context: test.Co
   end)
   context:run("missing_upgrade", function (_: test.Context)
     reject_upgrade_expectation(59400, "Connection: Upgrade\r\n")
+  end)
+end
+
+function test_response_abort_skips_output_and_unread_body_drain(_: test.Context)
+  runtime_test.run(function ()
+    local finished, wait_finished, close_finished = async.channel<|boolean|>(1)
+    defer close_finished()
+    local server, port = support.http_listen(59800,
+      function (request: http.Request, response: http.Response)
+        response:abort()
+        response:abort()
+        response:close()
+        assert_http_error(function () request:read() end, "exchange has ended")
+        assert_http_error(function () response:write("late") end, "exchange has ended")
+        finished(true)
+      end)
+    defer server:close()
+    local serving = async.run<|nil, value|>(function (): nil server:serve(); return nil end)
+    defer task_support.cancel_and_join_task(serving, "HTTP response abort cleanup")
+    local connection = net.connect("127.0.0.1", port)
+    defer connection:close()
+    connection:write("POST /abort HTTP/1.1\r\nHost: example.test\r\n" ..
+                     "Content-Length: 100\r\n\r\n")
+    test.assert(connection:read() == nil, "abort sent output or waited for an unread body")
+    test.assert(wait_finished(), "abort did not retire the exchange")
+  end)
+end
+
+function test_response_abort_truncates_stream_and_preserves_later_exchange(_: test.Context)
+  runtime_test.run(function ()
+    local previous: http.Response? = nil
+    local server, port = support.http_listen(59900,
+      function (request: http.Request, response: http.Response)
+        if request.target == "/first" then
+          previous = response
+          response:set_header("Content-Length", "0")
+        else
+          previous:abort() -- A completed response cannot close this exchange.
+          if request.target == "/length" then response:set_header("Content-Length", "20") end
+          response:write("partial")
+          response:abort()
+        end
+      end)
+    defer server:close()
+    local serving = async.run<|nil, value|>(function (): nil server:serve(); return nil end)
+    defer task_support.cancel_and_join_task(serving, "HTTP response stream abort cleanup")
+    local connection = net.connect("127.0.0.1", port)
+    defer connection:close()
+    connection:write("GET /first HTTP/1.1\r\nHost: example.test\r\n\r\n")
+    test.assert(support.contains(connection:read_until("\r\n\r\n", false), "Content-Length: 0\r\n"))
+    connection:write("GET /stream HTTP/1.1\r\nHost: example.test\r\n\r\n")
+    local output = string.writer()
+    for chunk in connection:read do output:write(chunk) end
+    local bytes = output:drain()
+    test.assert(support.contains(bytes, "HTTP/1.1 200 OK\r\n"), "stale response closed the later exchange")
+    test.assert(support.contains(bytes, "\r\n7\r\npartial\r\n"), "abort lost committed output")
+    test.assert(not support.contains(bytes, "\r\n0\r\n\r\n"), "abort finished a truncated stream")
+    previous:abort() -- Retained responses stay harmless after transport retirement.
+    local short = net.connect("127.0.0.1", port)
+    defer short:close()
+    short:write("GET /length HTTP/1.1\r\nHost: example.test\r\n\r\n")
+    local short_output = string.writer()
+    for chunk in short:read do short_output:write(chunk) end
+    test.assert(support.contains(short_output:drain(), "Content-Length: 20\r\n"),
+                "abort retried a short fixed-length response")
+  end)
+end
+
+local function response_abort_pending_body(encrypted: boolean)
+  runtime_test.run(function ()
+    local publish, receive, close = async.channel<|http.Response|>(1)
+    defer close()
+    local finished, wait_finished, close_finished = async.channel<|boolean|>(1)
+    defer close_finished()
+    local handler: http.Handler = function (request: http.Request, response: http.Response)
+        publish(response)
+        local failed = false
+        do request:read()
+        catch failed = true
+        end
+        finished(failed)
+      end
+    local listen = function (): (http.Server, integer)
+      if encrypted then return support.https_listen(60200, handler, 0) end
+      return support.http_listen(60000, handler)
+    end
+    local server, port = listen()
+    defer server:close()
+    local serving = async.run<|nil, value|>(function (): nil server:serve(); return nil end)
+    defer task_support.cancel_and_join_task(serving, "HTTP pending body abort cleanup")
+    local connect = function (): io.ReaderWriterCloser
+      if encrypted then return ssl.connect("127.0.0.1", port, support.TRUST_ROOT) end
+      return net.connect("127.0.0.1", port)
+    end
+    local connection = connect()
+    defer connection:close()
+    connection:write("POST /blocked HTTP/1.1\r\nHost: example.test\r\n" ..
+                     "Content-Length: 100\r\n\r\n")
+    local response = receive()
+    local reason = async.CancellationReason.simple("cancelled abort owner")
+    local aborting = async.run<|nil, value|>(function (): nil
+      async.running():cancel(reason)
+      response:abort()
+      return nil
+    end)
+    defer task_support.cancel_and_join_task(aborting, "HTTP cancelled abort cleanup")
+    test.assert(async.join(aborting):has_cancelled(), "abort cleared owner cancellation")
+    test.assert(wait_finished(), "pending body read did not fail on abort")
+    if encrypted then
+      local observed = "no error"
+      do connection:read()
+      catch
+        if error is ssl.Error then observed = (error as ssl.Error).name else raise end
+      end
+      test.assert(observed == "TLS_TRUNCATED_EOF", "HTTP abort performed graceful TLS close: " .. observed)
+    else
+      test.assert(connection:read() == nil, "cancelled abort did not retire the accepted transport")
+    end
+  end)
+end
+
+function test_response_abort_retires_pending_body_read_despite_cancellation(_: test.Context)
+  response_abort_pending_body(false)
+end
+
+function test_response_abort_retires_pending_tls_body_read_despite_cancellation(_: test.Context)
+  response_abort_pending_body(true)
+end
+
+function test_response_pending_headers_are_immutable_and_abortable(_: test.Context)
+  runtime_test.run(function ()
+    local publish, receive, close = async.channel<|http.Response|>(1)
+    defer close()
+    local finished, wait_finished, close_finished = async.channel<|boolean|>(1)
+    defer close_finished()
+    local owner: async.Task? = nil
+    local release: (function (nil): ())? = nil
+    local server, port = support.http_listen(60100,
+      function (_request: http.Request, response: http.Response)
+        owner = async.running()
+        publish(response)
+        async.await<|nil, nil|>(function (resolve, _reject, _fatal) release = resolve end)
+        do response:send_headers()
+        catch
+          -- The test owner interrupts this pending output deliberately.
+        end
+        finished(true)
+      end)
+    defer server:close()
+    local serving = async.run<|nil, value|>(function (): nil server:serve(); return nil end)
+    defer task_support.cancel_and_join_task(serving, "HTTP header abort cleanup")
+    local connection = net.connect("127.0.0.1", port)
+    defer connection:close()
+    connection:write("GET /blocked HTTP/1.1\r\nHost: example.test\r\n\r\n")
+    local response = receive()
+    async.await<|nil, nil|>(function (resolve, _reject, _fatal)
+      local start = release
+      release = nil
+      start(nil) -- Reach native header submission before any UV callback runs.
+      test.assert(owner:status():as_string() == "waiting", "header writer did not suspend before mutation checks")
+      assert_http_error(function () response:set_status(500) end, "already been sent")
+      assert_http_error(function () response:add_header("X-Late", "yes") end, "already been sent")
+      assert_http_error(function () response:set_header("X-Late", "yes") end, "already been sent")
+      resolve(nil)
+    end)
+    response:abort()
+    test.assert(wait_finished(), "abort did not release the pending header writer")
   end)
 end

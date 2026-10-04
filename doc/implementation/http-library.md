@@ -316,6 +316,21 @@ connection Task. Deferred parser and transport closers run while the accept
 loop and other Tasks remain live, following the ordinary Task-local error
 policy.
 
+`Response:abort` uses the existing `Exchange.active` ownership guard. It marks
+the exchange inactive and the response closed before invoking the exchange's
+captured public transport-abort capability. No new transport identity lookup,
+native handle, or duplicated retirement state is needed. The server checks
+that guard after handler return and skips response finishing and request-body
+draining for an aborted exchange. Its existing deferred parser/transport
+cleanup remains responsible for final retirement. An inactive retained
+response cannot affect a later keep-alive exchange or an upgraded stream.
+TCP close and TLS abort retain their cancellation-insensitive contracts.
+Ordinary header output reserves `headers_sent` before its first transport write,
+so a failed or pending header write cannot be retried with mutated status or
+fields. Informational `100 Continue` does not reserve the final response.
+Upgrade output rechecks the live exchange after its supervised writer returns,
+before transferring ownership, because a sibling may have aborted it meanwhile.
+
 `ClientResponse:close` marks its Titan parser closed before calling the
 suspending transport close, then records transport completion after that call
 returns. `Server:close` similarly marks the high-level listener closed before
