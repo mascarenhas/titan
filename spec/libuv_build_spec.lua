@@ -1890,17 +1890,27 @@ int main(void) {
 
     it("keeps filesystem request cleanup before settlement and watchers on scoped generic batches", function()
         local source = read_file("titan/fs.titan")
-        local first = assert(source:find("local function perform<|T|>", 1, true))
-        local last = assert(source:find("local function acquire<|T|>", first, true))
-        local perform = source:sub(first, last - 1)
-        assert_ordered(perform, "local request = uv.fs_t.new()", "async.await<|T, integer|>",
-            "local copied = decode(completed, result)", "uv.fs_req_cleanup(completed)", "resolve(copied)")
-        assert_ordered(perform, "fatal(error, traceback)", "raise")
+        local first = assert(source:find("local function file_completed<|T|>", 1, true))
+        local last = assert(source:find("local function start_file<|T|>", first, true))
+        local completed = source:sub(first, last - 1)
+        assert_ordered(completed, "local done = operation.done", "local number = operation.number",
+            "request:set_data(nil)", "operation.done = nil",
+            "local copied = operation.decode(request, result)", "uv.fs_req_cleanup(request)",
+            "done:resolve(number, copied)")
+        assert_ordered(completed, "done:fatal(number, error, traceback)", "raise")
+        assert_ordered(source, "local function perform<|T|>",
+            "FileOperation<|T|>(uv.fs_t.new(), submit, decode, nil, 0)",
+            "async.await_with<|FileOperation<|T|>, T, integer|>(context, start_file)")
         assert_ordered(source, "function realpath(path: string): string",
             'perform<|string|>("fs.realpath"', "uv.fs_realpath(loop, request, path, callback)",
             "uv.fs_get_string(request)")
-        assert_ordered(source, "local function WatchRegistration:close(wait: boolean)",
-            "async.await_cleanup<|boolean, integer|>", "uv.close(self.view, callback)")
+        assert_ordered(source, "local function watch_closed(handle: uv.handle_t)",
+            "local number = registration.close_number", "registration.close_done = nil",
+            "uv.handle_set_data(handle, nil)", "done:resolve(number, true)")
+        assert_ordered(source, "local function start_watch_close(",
+            "uv.close(registration.view, watch_closed)",
+            "local function WatchRegistration:close(wait: boolean)",
+            "async.await_cleanup_with<|WatchRegistration, boolean, integer|>(self, start_watch_close)")
         assert_ordered(source, "local function Watcher:retire_registration(",
             "defer registration:close(true)", "self:remove_registration(registration)")
         assert.truthy(source:find("async.BufferedSubscription<|WatcherNotification, integer|>", 1, true))
@@ -5301,7 +5311,7 @@ done
 
             assert.equal(1, count_literal(sanitizer_job,
                 "make titan-stdlib-test-build"), sanitizer_job)
-            assert.equal(19, count_literal(sanitizer_job,
+            assert.equal(25, count_literal(sanitizer_job,
                 "make titan-stdlib-test-run"), sanitizer_job)
             for _, filter in ipairs({
                 "TITAN_FILTER='test_lua_host_roots_coroutine_" ..
@@ -5310,6 +5320,12 @@ done
                 "TITAN_FILTER='test_fs_'",
                 "TITAN_FILTER='^uv%.task_tests%.'",
                 "TITAN_FILTER='^uv%.runtime_tests%.'",
+                "TITAN_FILTER='test_completion_'",
+                "TITAN_FILTER='test_ready_queue_'",
+                "TITAN_FILTER='test_scalar_write_'",
+                "TITAN_FILTER='test_concrete_'",
+                "TITAN_FILTER='test_net_received_chunks_remain_immutable'",
+                "TITAN_FILTER='test_net_overlapping_writes_'",
                 "TITAN_FILTER='test_run_foreign_'",
                 "TITAN_FILTER='test_signal_watcher_'",
                 "TITAN_FILTER='test_ssl_http_fresh_process_sanitizer_composition$'",

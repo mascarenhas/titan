@@ -1,0 +1,144 @@
+local async = import "async"
+local timer = import "timer"
+local fs = import "fs"
+local os = import "os"
+
+local function success_nil(resolve: function (nil): (), _reject: function (nil): (), _fatal: function (value, string): ())
+  resolve(nil)
+end
+local function error_nil(_resolve: function (nil): (), reject: function (nil): (), _fatal: function (value, string): ())
+  reject(nil)
+end
+local function success_false(resolve: function (boolean): (), _reject: function (boolean): (), _fatal: function (value, string): ())
+  resolve(false)
+end
+local function error_false(_resolve: function (boolean): (), reject: function (boolean): (), _fatal: function (value, string): ())
+  reject(false)
+end
+local function stop_source()
+end
+local function close_source(drain: function (): (async.SubscriptionBatch<|boolean|>))
+  drain()
+end
+local function empty_producer(_publish: function (boolean): (boolean), _fail: function (nil): (boolean), _finish: function (): (boolean)): async.SubscriptionActions<|boolean|>
+  return async.SubscriptionActions<|boolean|>(stop_source, close_source)
+end
+
+function launch(mode: string, count: integer, path: string, start: function (): (), stop: function (): ()): async.Task<|nil, nil|>
+  return async.run<|nil, nil|>(function (): nil
+    if mode == "os_write" then
+      local process = os.spawn("/bin/sh", {"-c", "cat >/dev/null"})
+      local input = process.stdin as os.OutputStream
+      local output = process.stdout as os.InputStream
+      local errors = process.stderr as os.InputStream
+      defer output:close()
+      defer errors:close()
+      start()
+      for i = 1, count do input:write("abcdefghijklmnopqrstuvwxyz012345") end
+      stop()
+      input:close()
+      local status = process:wait()
+      if status.code ~= 0 or status.signal_number ~= 0 then raise "write child failed" end
+    elseif mode == "fs_write" then
+      local file = fs.open("/dev/null", "w")
+      defer file:close()
+      start()
+      for i = 1, count do
+        if file:write("abcdefghijklmnopqrstuvwxyz012345") ~= 32 then raise "short file write" end
+      end
+      stop()
+    elseif mode == "subscription_next" then
+      local publish: (function (boolean): (boolean))? = nil
+      local subscription = async.BufferedSubscription<|boolean, nil|>(function (send: function (boolean): (boolean), _fail: function (nil): (boolean), _finish: function (): (boolean)): async.SubscriptionActions<|boolean|>
+        publish = send
+        return async.SubscriptionActions<|boolean|>(stop_source, close_source)
+      end)
+      defer subscription:close()
+      local send = publish as function (boolean): (boolean)
+      start()
+      for i = 1, count do
+        if not send(false) then raise "rejected publication" end
+        case subscription:next()
+        when item(item) then if item then raise "wrong subscription payload" end
+        else raise "wrong subscription outcome"
+        end
+      end
+      stop()
+    else
+      start()
+      for i = 1, count do
+        if mode == "control" then
+        elseif mode == "yield" then async.yield()
+        elseif mode == "yield_observed" then
+          local old = async.running():status()
+          async.yield()
+          local current = async.running():status()
+          if old == current or current:as_string() ~= "running" then raise "status identity" end
+        elseif mode == "inline_success_nil" then
+          case async.await<|nil, nil|>(success_nil)
+          when success(item) then if item ~= nil then raise "nil success" end
+          else raise "success tag" end
+        elseif mode == "inline_error_nil" then
+          case async.await<|nil, nil|>(error_nil)
+          when error(item) then if item ~= nil then raise "nil error" end
+          else raise "error tag" end
+        elseif mode == "inline_success_false" then
+          case async.await<|boolean, boolean|>(success_false)
+          when success(item) then if item then raise "false success" end
+          else raise "success tag" end
+        elseif mode == "inline_error_false" then
+          case async.await<|boolean, boolean|>(error_false)
+          when error(item) then if item then raise "false error" end
+          else raise "error tag" end
+        elseif mode == "cleanup_inline" then
+          case async.await_cleanup<|nil, nil|>(success_nil)
+          when success(item) then if item ~= nil then raise "cleanup nil" end
+          else raise "cleanup tag" end
+        elseif mode == "timer_sleep" then timer.sleep(0)
+        elseif mode == "fs_stat" then
+          if fs.stat(path) == nil then raise "missing fixture" end
+        elseif mode == "fs_reject" then
+          local caught = false
+          do
+            local file = fs.open(path .. ".missing", "r")
+            file:close()
+          catch caught = error is async.OperationError end
+          if not caught then raise "expected file rejection" end
+        elseif mode == "cleanup_close" then
+          local file = fs.open("/dev/null", "r")
+          file:close()
+        elseif mode == "subscription_setup" then
+          local subscription = async.BufferedSubscription<|boolean, nil|>(empty_producer)
+          subscription:close()
+        elseif mode == "cancel_queued" then
+          local child = async.run<|nil, nil|>(function (): nil raise "cancelled queued child ran" end)
+          child:cancel()
+          case async.join(child)
+          when cancelled() then
+          else raise "expected queued cancellation" end
+        elseif mode == "cancel_running" then
+          local entered = false
+          local cleaned = false
+          local token = async.ResumeToken("measurement")
+          local child = async.run<|nil, nil|>(function (): nil
+            defer do async.await_cleanup<|nil, nil|>(success_nil); cleaned = true end
+            entered = true
+            async.suspend(token)
+            raise "cancelled suspended child continued"
+          end)
+          while not entered do async.yield() end
+          child:cancel()
+          case async.join(child)
+          when cancelled() then if not cleaned then raise "cleanup missing" end
+          else raise "expected running cancellation" end
+        else raise "unknown benchmark mode" end
+      end
+      stop()
+    end
+    return nil
+  end)
+end
+
+function child_args(): {string}
+  return {"-c", "cat >/dev/null"}
+end

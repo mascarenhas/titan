@@ -26,7 +26,9 @@ or Task operation.
 HTTP obtains every byte from the public `io.ReaderWriterCloser` view of either
 a `net.Connection` or an `ssl.Connection`, and writes through that same view.
 URL parsing calls the independent public `titan.url` module without an
-HTTP-specific C bridge. The module neither imports nor changes `titan.uv`.
+HTTP-specific C bridge. The server imports public `titan.uv` only for the
+`uv.req_t?` return type of named Completion registrars. It adds no native
+network boundary and does not change UV.
 
 ## Synchronous llhttp callback bridge
 
@@ -290,9 +292,9 @@ nor adds native state to simulate one.
 The deadline is absolute from that iteration's start and does not reset on
 partial header bytes. The setter changes only later iterations. Handler work,
 request bodies, automatic draining, and response writes remain outside the
-policy. The implementation uses only high-level `async`, `timer`, and public
-connection operations; it neither imports nor changes `titan.uv` and adds no
-connection-local watchdog or generation protocol.
+policy. Transport and scheduling use high-level `async`, `timer`, and public
+connection operations. The UV import supplies the registrar return type;
+there is no connection-local watchdog or generation protocol.
 
 ## Native build and provider composition
 

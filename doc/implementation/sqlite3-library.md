@@ -103,11 +103,14 @@ process-global shutdown.
 ## Cancellation
 
 Public ordinary work goes through `async.run_foreign`. A local cleanup adapter
-uses public `uv.work_t` and `uv.queue_work` inside `async.await_cleanup`. Its
-explicit `argument_owner` retains the owned packet through worker completion
-and the entire after-work callback frame. The callback translates a native
-status with the existing `async.run_foreign` operation label, settles the exact
-wait, and uses fatal-and-rethrow for unexpected terminal callback failures.
+uses public `uv.work_t` and `uv.queue_work` inside `async.await_cleanup_with`.
+Its `CleanupWork` context records the completion and operation number, while
+the explicit `argument_owner` retains the owned packet through worker completion
+and the entire after-work callback frame. The named callback saves that exact
+completion and number, clears the old request association, translates a native
+status with the existing `async.run_foreign` operation label, and settles the
+saved operation. Unexpected terminal failures use the saved capability's
+fatal method and rethrow.
 Accepted native work remains owned until after-work completion in both paths;
 neither uses `uv_cancel` or `sqlite3_interrupt`. Reset, finalize, close, and
 unpublished-result retirement use this cleanup adapter without mutating Task

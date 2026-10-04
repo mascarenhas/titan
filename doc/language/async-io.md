@@ -1144,8 +1144,9 @@ completion while cancellation remains pending. An accepted one-shot request
 and its buffer storage remain alive through its promised callback. A
 subscription wait detaches and wakes through its deferred token continuation
 rather than resuming inside the Task that requested cancellation. An
-explicitly suspended Task is likewise woken through its coalesced Task-owned
-timer, so deferred listener removal runs normally as cancellation unwinds it.
+explicitly suspended Task likewise receives one coalesced continuation in the
+Runtime's FIFO, so deferred listener removal runs normally as cancellation
+unwinds it.
 
 ## Resources and shutdown
 

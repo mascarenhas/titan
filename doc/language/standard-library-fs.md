@@ -233,10 +233,10 @@ provider is rejected rather than migrated or adapted.
 returns the canonical absolute path. The complete path must exist. It rejects
 embedded NUL bytes and raises `async.OperationError` for a missing or otherwise
 unresolvable path. Like metadata operations, it runs inside the current Task.
-If the current Task is cancelled while the short native request is pending,
-its waiter is detached before the next-turn cancellation wake. The result is
-not delivered, but the accepted request still reaches its callback and
-cleanup.
+If the current Task is cancelled while the native request is pending, it stays
+waiting until the terminal callback has copied the result and cleaned the
+request. Delivery then raises the Task's first cancellation reason instead of
+returning the path.
 
 `mkdir(path)` requests mode `0777`, subject to the process umask. `unlink(path)`
 removes a file or symbolic link; it does not stand in for directory removal.
