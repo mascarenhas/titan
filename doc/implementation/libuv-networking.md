@@ -11,26 +11,39 @@ delimiter parsing, and application-visible errors.
 A `Connection` retains one `uv.tcp_t`, its owning loop, delimiter excess, a
 `BufferedSubscription<|string, value|>`, and lazy-read state. A `Server` retains
 one `uv.tcp_t`, its loop, a `BufferedSubscription<|Connection, value|>`, and an
-optional saved failure. These remain private fields of the public net records.
+optional saved failure. Both cache their public handle and stream views once
+during construction; operations still query current native initialization,
+closing, and writability state. These remain private fields of the public net
+records.
 The TLS implementation composes over these public records and never obtains
 their low-level owner; see [TLS implementation](ssl-library.md).
 
 ## One-shot request adapters
 
 DNS, connect, write, and shutdown submit public request owners through
-`async.await`. Each registration receives typed `resolve` and `reject`
-capabilities plus `fatal(error, traceback)`. A negative immediate native status
-rejects the operation without expecting a callback. Accepted requests retain
-all native owners and callback captures through their terminal completion.
+`async.await_with`. Each operation has a private input context, a named
+registrar, and a named native callback. Registration stores the Task-owned
+`Completion` and its captured suspension number in that context, then attaches
+the context to the exclusive request's userdata. Concrete request data methods
+avoid allocating generic request views. A negative immediate native status
+clears that attachment and rejects without expecting a callback. Accepted
+requests retain their context and native inputs through terminal completion.
 Cancellation remains pending until that native retirement; it does not release
 borrowed buffers early or change the public method's result into a native
 cancellation API.
 
-Every terminal callback wraps its result handling and resolver/rejecter call in
-a catch that calls the exact registration's `fatal` capability and then bare
-rethrows. An unexpected callback exception therefore reaches both the owning
-Wait and the outer native-driver boundary, preserving the original error and
-trace. It is not converted into an ordinary operation error.
+Every terminal callback snapshots its context, Completion, and captured number,
+then clears request userdata and the context's Completion reference before
+settlement can resume the Task. It wraps result handling and settlement in a
+catch that calls `completion:fatal(number, error, traceback)` and bare rethrows.
+An unexpected callback exception therefore reaches both the owning wait and the
+outer native-driver boundary, preserving the original error and trace. It is
+not converted into an ordinary operation error. Callbacks never read a later
+operation's number from the reusable Completion.
+
+The contexts replace the input captures of the former registrars; they are
+still one allocation per operation. Writes keep independent contexts and
+requests, so an overlapping call cannot overwrite another callback's number.
 
 DNS validates host text and submits `uv.getaddrinfo` with `AF_UNSPEC`,
 `SOCK_STREAM`, `IPPROTO_TCP`, and `AI_NUMERICSERV`. The public binding copies
@@ -47,10 +60,15 @@ socket; the native owner remains rooted until close completion. `listen`
 selects backlog 128 when absent and validates the positive native integer range
 before submission.
 
-Each write owns one `uv.write_t` and a buffer view retaining the immutable
-Titan string. Async writes snapshot the native vector descriptors and retain
-the payload owners; mutating the descriptor Array later cannot retarget a
-submitted write. Libuv provides write ordering, so net adds no writer queue.
+Each write owns one fresh `uv.write_t` and submits its immutable Titan string
+through `uv.write_string`. The public request retains the string and contains
+its scalar native descriptor, avoiding the buffer view and descriptor Arrays
+needed by a vector write. Net calls the nonallocating `uv.buf_check_length`
+before ordinary await admission, retaining the previous native-range error
+precedence even for an already cancelled Task. The terminal UV callback roots the old string before
+clearing request fields or calling Titan code. Overlapping writes retain
+independent requests and payloads; cancellation never recycles a live request.
+Libuv provides write ordering, so net adds no writer queue.
 Shutdown uses one `uv.shutdown_t`; subsequent shutdown is a no-op once the
 native stream is no longer writable.
 
@@ -58,12 +76,21 @@ native stream is no longer writable.
 
 A connection constructs its subscription and producer callbacks before native
 TCP initialization. It starts `uv.read_start` only when the first ordinary read
-needs native input. The allocation callback returns a writable `uv.buf_t`; the
-public binding retains the paired buffer and handles allocation-callback
-failure across the native boundary.
+needs native input. The allocation callback lazily creates a writable
+`uv.buf_t` and reuses it across callbacks, growing only to a maximum retained
+capacity of 64 KiB. Suggestions outside the positive bounded range select that
+cap. An idle open reader can retain at most 64 KiB of scratch storage; EOF,
+error, producer stop, and explicit close drop the Connection's reference. The
+public binding independently retains each allocation/read pair and handles
+allocation-callback failure across the native boundary.
+Runtime teardown closes raw handles without invoking Connection methods. A
+retained Connection can therefore retain its bounded scratch buffer afterward;
+the closed read/close paths clear that reference without native I/O.
 
-A positive read copies the exact byte prefix into a Titan string and publishes
-it. Zero-byte notifications publish nothing. EOF or a negative status stops
+A positive read copies the exact byte prefix into a fresh immutable Titan
+string before publishing it; reusing scratch storage cannot change earlier
+chunks. This scratch cap does not bound the subscription's queued strings.
+Zero-byte notifications publish nothing. EOF or a negative status stops
 native reading and ends or fails the subscription. Previously queued bytes
 remain readable before the terminal EOF/error. Net retains only delimiter
 excess outside the subscription; there is no second native-input queue or
@@ -71,12 +98,12 @@ extra reader lock. The literal delimiter algorithm still handles boundaries
 split across chunks and preserves bytes after a match.
 
 Closed/excess fast paths retain their existing order. A read which needs the
-subscription validates its Task and owning Runtime, then uses an inline
-ordinary await as its cancellation checkpoint before checking
-`input:has_waiter()`. Pending cancellation therefore wins over the existing
-`Connection already has a waiting reader` diagnostic. A live checkpoint
-settles inline without an event-loop turn. The subscription's authoritative
-reservation remains held through deferred wake delivery; cancellation removes
+subscription validates its Task and owning Runtime, then calls
+`async.checkpoint()` before checking `input:has_waiter()`. Pending cancellation
+therefore wins over the existing
+`Connection already has a waiting reader` diagnostic. A successful checkpoint
+returns directly without a wait, status transition, or event-loop turn. The
+subscription's authoritative reservation remains held through deferred wake delivery; cancellation removes
 that reservation synchronously, allowing a replacement reader immediately.
 Cancelling one reader leaves the shared native read source active.
 
@@ -105,7 +132,10 @@ while live I/O checks the current Task and exact owning Runtime.
 
 Connection close discards delimiter excess and closes its subscription. The
 producer's stop action ends native reading; its close action drains unread
-bytes and uses `async.await_cleanup` for native close completion. Server close
+bytes and uses `async.await_cleanup_with` for native close completion. The
+generic close path owns a private context containing the handle, Completion,
+and captured number; handle userdata carries it to the named close callback.
+Server close
 uses the same pattern while explicitly disposing queued connections. Cleanup
 waits retire ownership even when the closing Task already has sticky
 cancellation. Subscription close does not provide a second join barrier for
@@ -114,6 +144,7 @@ another concurrent caller: the first closer owns its cleanup work.
 Runtime teardown belongs to async. After Tasks and accepted operations have
 retired, it walks remaining public native handles and closes them before closing
 the loop. Net has no Runtime networking registry, operation dispatcher, raw
-socket fallback, or per-operation generation counter. Compiler, native library,
+socket fallback, or domain-generated operation counter. The captured suspension
+number belongs to async. Compiler, native library,
 packaging, sanitizer, and platform gates validate their respective boundaries;
 API coverage alone does not imply every native backend has been executed.

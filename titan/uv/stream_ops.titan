@@ -212,6 +212,40 @@ function write(req: write_t, stream: stream_t, buffers: {buf_t}, callback: write
   return write2(req, stream, buffers, nil, callback)
 end
 
+function write_string(req: write_t, stream: stream_t, data: string,
+                      callback: write_cb?): integer
+  if req.pending then return ffi.UV_EBUSY end
+  local native_stream = stream:pointer()
+  local loop? = stream:owner_loop()
+  if native_stream == nil or loop == nil then return ffi.UV_EINVAL end
+  buf_check_length(data, #data)
+  req.string_buffer = ffi.uv_buf_init(data as foreign *char,
+                                     #data as foreign unsigned int)
+  loop.requests[req] = true
+  req.loop = loop
+  req.pending = true
+  req.stream = stream
+  req.send_stream = nil
+  req.string_data = data
+  req.callback = callback
+  ffi.uv_req_set_data(req.native as foreign *uv_req_t, req as foreign *void)
+  case stream
+  when pipe(owner) then owner.eligibility.available = 0
+  else
+  end
+  local status = ffi.uv_write(req.native, native_stream, req.string_buffer, 1,
+                              network_write_callback) as integer
+  if status < 0 then
+    loop.requests[req] = nil
+    req.pending = false
+    req.loop = nil
+    req.stream = nil
+    req.string_data = nil
+    req.callback = nil
+  end
+  return status
+end
+
 function try_write2(stream: stream_t, buffers: {buf_t}, send_handle: handle_t?): integer
   local native_stream = stream:pointer()
   if native_stream == nil then return ffi.UV_EINVAL end

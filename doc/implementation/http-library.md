@@ -179,10 +179,20 @@ deferred transport close makes that rejection safe without parser reuse.
 `Server:serve` owns the accept loop. Each accepted connection is converted to
 `io.ReaderWriterCloser` and scheduled in a fresh `async.run` Task. The accept
 loop retains lexical close ownership until the child acknowledges that its own
-close defer is armed. An `await_cleanup` startup wait and terminal listener
+close defer is armed. An `await_cleanup_with` startup wait and terminal listener
 cover both normal entry and termination before entry. Failed scheduling or
 registration leaves fallback cancellation, terminal draining, and close with
 the accept loop. No yield count proves ownership transfer.
+
+A private handoff context holds the connection, Server, child, transfer flag,
+notification flag, and listener remover. Its named registrar captures the
+Completion and exact suspension number in the acknowledgment callbacks; those
+callbacks keep using that number even if settlement starts another wait on
+the parent Task. Connection-close fallback is installed before allocating the
+context. The notification flag is committed only after successful settlement,
+and the terminal listener is still removed by lexical cleanup. Child-entry,
+acknowledgment, notification, and terminal-listener closures remain part of the
+handoff; naming the registrar does not remove their ownership roles.
 
 The child arms connection close before acknowledgment and parser construction,
 so even parser construction failure has a transport owner. Different connection
@@ -254,10 +264,13 @@ defer remains installed for every exit; cancellation is idempotent. The timer's
 native close can finish in the background because it owns no parser or
 transport state, so no terminal join is added. The reader is always owned by a cancel-and-terminal-cleanup defer, including
 when parent cancellation interrupts the race or creation of the deadline fails.
-Its terminal wait uses `async.await_cleanup` plus a removable public terminal
+Its terminal wait uses `async.await_cleanup_with` plus a removable public terminal
 listener, so pending parent cancellation cannot release shared parser/connection
 state before the child has finished. Deadline success requests reader
 cancellation with the timeout reason; the same defer drains its completion.
+A small context holds the child and listener remover for a named registrar.
+The retained terminal-listener closure captures its Completion and suspension
+number directly, and lexical cleanup removes it on every exit.
 An SSL read retains the connection's serialized busy state until that cleanup
 finishes. The timer-only child has unconditional cancellation cleanup but is
 not joined: it owns no shared parser/transport state, and waiting for it would

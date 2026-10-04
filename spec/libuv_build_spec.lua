@@ -1403,7 +1403,9 @@ done
         local async_exports = {}
         for _, name in ipairs(public_declarations("titan/async.titan")) do async_exports[name] = true end
         for _, name in ipairs({"Error", "OperationError", "ResumeToken", "CancellationReason",
-                "TaskStatus", "Task", "await", "await_cancellable", "await_cleanup",
+                "TaskStatus", "Task", "Completion", "checkpoint",
+                "await_with", "await_cancellable_with", "await_cleanup_with",
+                "await", "await_cancellable", "await_cleanup",
                 "BufferedSubscription", "CoalescingSubscription"}) do
             assert.truthy(async_exports[name], name)
         end
@@ -1434,14 +1436,10 @@ done
         for _, contract in ipairs({
             "record ResumeToken", "const source: string?", "union CancellationReason<|B|>",
             "union TaskStatus<|A, B|>", "record Task<|A, B|>", "local record Runtime",
-            "local record Wait", "local record Operation<|T, E|>",
             "function run<|A, B|>(func: function (): (A)): Task<|A, B|>",
             "function running(): Task<|value, value|>",
             "function await<|T, E|>", "function await_cancellable<|T, E|>",
             "function await_cleanup<|T, E|>", "function (value, string): ()",
-            "Operation<|T, E|>(register, WAIT_ORDINARY)",
-            "Operation<|T, E|>(op, WAIT_CANCELLABLE)",
-            "Operation<|T, E|>(register, WAIT_CLEANUP)",
             "function Task:resume(token: ResumeToken)",
             "Task resume token mismatch (expected source: ",
             "type SuspendCancelAction = function (): ()",
@@ -1479,8 +1477,8 @@ done
         local foreign_stop = assert(async:find("\nfunction channel", foreign_start, true))
         local work = async:sub(foreign_start, foreign_stop - 1)
         assert_ordered(work, 'if not f then raise "async.run_foreign callback must not be NULL" end',
-            "local request = uv.work_t.new()", "await<|value, OperationError|>",
-            'operation_error(status, "async.run_foreign")', "uv.queue_work(current_loop()")
+            "uv.work_t.new()", "await_with<|ForeignWork, value, OperationError|>")
+        assert.truthy(async:find("uv.queue_work(current_loop()", 1, true))
         assert.falsy(work:find("await_cancellable", 1, true), work)
         assert.falsy(async:find("type Task = uv.", 1, true), async)
         local http = read_file("titan/http/server.titan")
@@ -2078,27 +2076,10 @@ int main(void) {
         end
     end)
 
-    it("retires deferred wake timers before action and sleep resources before returning", function()
-        local async = read_file("titan/async.titan")
-        local first = assert(async:find("local function schedule(runtime: Runtime", 1, true))
-        local last = assert(async:find("\nfunction Task:cancel", first, true))
-        local schedule = async:sub(first, last - 1)
-        assert_ordered(schedule, "local closed = function (_: uv.handle_t) action() end",
-            "local fired = function (_: uv.timer_t) uv.close(handle, closed) end",
-            "uv.timer_init(runtime.loop, timer)", "uv.timer_start(timer, fired, 0, 0)",
-            "if status < 0 then uv.close(handle)")
-        local uv = read_file(UV_MAIN_SOURCE)
-        first = assert(uv:find("local function timer_closed(", 1, true))
-        last = assert(uv:find("\nforeign function timer_callback", first, true))
-        local closed = uv:sub(first, last - 1)
-        assert_ordered(closed, "loop.handles[owner] = nil", "owner.phase = HANDLE_RETIRED",
-            "owner.callback = nil", "owner.close_callback = nil", "callback(handle_t.timer(owner))")
-        local timer = read_file("titan/timer.titan")
-        assert_ordered(timer, "local function close_timer(", "async.await_cleanup<|nil, async.OperationError|>",
-            "uv.close(ticker.timer:as_handle_t(), closed)")
-        assert_ordered(timer, "function sleep(milliseconds: integer)", "local timer = start_timer(milliseconds, 0)",
-            "defer timer:close()", "timer.subscription:next()")
-    end)
+    -- Scheduling and sleep ownership are executable native contracts in
+    -- async/tests/task_test.titan, async/tests/fatal_test.titan and timer/tests.
+    -- The old source-string test required one timer/close callback per wake;
+    -- the Runtime now owns one shared wake and an intrusive FIFO.
 
     it("retires explicit suspension and the exact Wait before terminal listeners", function()
         local task = read_file("titan/async.titan")
@@ -2302,7 +2283,7 @@ int main(void) {
                 "standalone titan.uv metadata fixture is stale")
 
             for _, record_name in ipairs({
-                "ChannelReader", "ChannelWriter",
+                "ChannelReader", "ChannelWriter", "Completion",
             }) do
                 local qualified = "titan.async." .. record_name
                 assert.truthy(expected.async:find(

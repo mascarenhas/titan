@@ -66,6 +66,71 @@ local function fatal_test_fs_cleanup(done: function (): (), resolve: function (i
   test.assert(uv.fs_stat(async.current_loop(), request, ".", callback) == 0, "stat submission failed")
 end
 
+function test_ready_queue_recovers_after_shared_wake_failure(context: test.Context)
+  local marker = FatalMarker(196, "")
+  local blocker = uv.timer_t.new()
+  local trigger = uv.timer_t.new()
+  local cleanup_started, cleanup_closed = false, false
+  local keeper = async.run<|nil, value|>(function (): nil
+    test.assert(uv.timer_init(async.current_loop(), blocker) == 0, "blocker init failed")
+    test.assert(uv.timer_start(blocker, function (_: uv.timer_t) end, 60000, 60000) == 0,
+        "blocker start failed")
+    defer do
+      cleanup_started = true
+      async.await_cleanup<|nil, nil|>(function (resolve, _reject, fatal)
+        uv.timer_close(blocker, function (_: uv.timer_t)
+          cleanup_closed = true
+          do resolve(nil) catch fatal(error, traceback); raise end
+        end)
+      end)
+    end
+    while true do async.yield() end
+    return nil
+  end)
+  local origin = async.run<|nil, value|>(function (): nil
+    async.await<|nil, nil|>(function (_resolve, _reject, fatal)
+      test.assert(uv.timer_init(async.current_loop(), trigger) == 0, "failure trigger init failed")
+      local fired = function (owner: uv.timer_t)
+        uv.timer_close(owner)
+        -- Deliberate fault injection: ordinary clients may only manage their
+        -- own handles on this borrowed loop. Close the sole other timer to
+        -- make Runtime wake rearming fail with queued work still outstanding.
+        local broken = 0
+        uv.walk(async.current_loop(), function (handle: uv.handle_t, _: value)
+          case handle
+          when timer(timer_owner) then
+            if timer_owner ~= blocker and timer_owner ~= trigger and not uv.is_closing(handle) then
+              uv.timer_close(timer_owner)
+              broken = broken + 1
+            end
+          else
+          end
+        end)
+        test.assert(broken == 1, "fault injection did not find one shared wake")
+        fatal_test_terminal_failure(marker, fatal)
+      end
+      test.assert(uv.timer_start(trigger, fired, 0, 0) == 0, "failure trigger start failed")
+    end)
+    return nil
+  end)
+  local queued: {async.Task<|nil, nil|>} = {}
+  for index = 1, 130 do
+    queued[index] = async.run<|nil, nil|>(function (): nil
+      async.yield()
+      return nil
+    end)
+  end
+  fatal_test_drive_failure(marker)
+  test.assert(cleanup_started and cleanup_closed,
+      "failed shared wake stranded cleanup behind another referenced handle")
+  test.assert(keeper:status():has_cancelled() and origin:status():has_finished(),
+      "failed shared wake lost its active Tasks")
+  for index = 1, #queued do
+    test.assert(queued[index]:status():has_finished(), "remaining ready entry was lost")
+  end
+  runtime_test.run(function () async.yield() end)
+end
+
 
 local function fatal_test_exact_orphan_wait()
   local marker = FatalMarker(2, "")

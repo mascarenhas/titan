@@ -17,6 +17,61 @@ local function await_test_expect_error(action: function (): (), expected: string
   test.assert(caught, "operation did not raise the expected error")
 end
 
+function test_checkpoint_is_synchronous_and_requires_a_running_task(context: test.Context)
+  await_test_expect_error(function () async.checkpoint() end,
+      "async Runtime is not active")
+  runtime_test.run(function ()
+    local peer_started = false
+    local peer = async.run<|nil, nil|>(function (): nil
+      peer_started = true
+      return nil
+    end)
+    task_support.cleanup_task(peer, "checkpoint peer cleanup")
+    local current = async.running()
+    local before = current:status()
+    async.checkpoint()
+    test.assert(not peer_started and current:status() == before,
+        "checkpoint scheduled another Task or changed the current status")
+    local result = async.await<|nil, nil|>(function (resolve, _reject, _fatal)
+      await_test_expect_error(function () async.checkpoint() end,
+          "asynchronous operation must be called from an async Task")
+      resolve(nil)
+    end)
+    case result
+    when success() then
+    else raise "checkpoint registration check changed the await result"
+    end
+    test.assert(async.join(peer):has_succeeded() and peer_started,
+        "checkpoint lost deferred Task startup")
+  end)
+end
+
+function test_checkpoint_raises_the_first_sticky_cancellation_reason(context: test.Context)
+  runtime_test.run(function ()
+    local first = async.CancellationReason<|value|>.complex(false)
+    local observations = 0
+    local target = async.run<|nil, value|>(function (): nil
+      local current = async.running()
+      current:cancel(first)
+      current:cancel(async.CancellationReason.simple("later checkpoint reason"))
+      for index = 1, 2 do
+        local caught = false
+        do async.checkpoint() catch caught = error == first end
+        test.assert(caught, "checkpoint lost the first cancellation identity")
+        observations = observations + 1
+      end
+      return nil
+    end)
+    task_support.cleanup_task(target, "checkpoint cancelled Task cleanup")
+    case async.join(target)
+    when cancelled(reason) then
+      test.assert(reason == first and observations == 2,
+          "checkpoint changed terminal cancellation or skipped a repeated check")
+    else raise "checkpoint cancelled Task lost its terminal state"
+    end
+  end)
+end
+
 local function await_test_payloads(): integer
   local passed = 0
   local await_success_nil = async.await<|nil, nil|>(function (resolve: function (nil): (), reject: function (nil): ())

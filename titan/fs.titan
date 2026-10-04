@@ -37,46 +37,69 @@ end
 
 -- Each accepted request owns its continuation and borrowed inputs until its
 -- callback. Copy all results before cleaning the public request owner.
+local record FileOperation<|T|>
+  local request: uv.fs_t
+  local submit: function (uv.loop_t, uv.fs_t, function (uv.fs_t): ()): (integer)
+  local decode: function (uv.fs_t, integer): (T)
+  local done: async.Completion<|FileOperation<|T|>, T, integer|>?
+  local number: integer
+end
+
+local function file_completed<|T|>(request: uv.fs_t)
+  local operation: FileOperation<|T|> = request:get_data()
+  local done = operation.done as async.Completion<|FileOperation<|T|>, T, integer|>
+  local number = operation.number
+  request:set_data(nil)
+  operation.done = nil
+  do
+    local copying = false
+    do
+      local result = uv.fs_get_result(request)
+      if result < 0 then
+        uv.fs_req_cleanup(request)
+        done:reject(number, result)
+        return
+      end
+      copying = true
+      local copied = operation.decode(request, result)
+      copying = false
+      uv.fs_req_cleanup(request)
+      done:resolve(number, copied)
+    catch
+      if copying and error is async.OperationError then
+        uv.fs_req_cleanup(request)
+        done:reject(number, (error as async.OperationError).code)
+        return
+      end
+      raise
+    end
+  catch
+    uv.fs_req_cleanup(request)
+    done:fatal(number, error, traceback)
+    raise
+  end
+end
+
+local function start_file<|T|>(done: async.Completion<|FileOperation<|T|>, T, integer|>, number: integer): uv.req_t?
+  local operation = done:context(number)
+  operation.done = done
+  operation.number = number
+  operation.request:set_data(operation)
+  local status = operation.submit(async.current_loop(), operation.request, file_completed)
+  if status < 0 then
+    operation.request:set_data(nil)
+    operation.done = nil
+    uv.fs_req_cleanup(operation.request)
+    done:reject(number, status)
+  end
+  return nil
+end
+
 local function perform<|T|>(operation: string,
     submit: function (uv.loop_t, uv.fs_t, function (uv.fs_t): ()): (integer),
     decode: function (uv.fs_t, integer): (T)): T
-  local request = uv.fs_t.new()
-  local outcome = async.await<|T, integer|>(function (
-      resolve: function (T): (), reject: function (integer): (),
-      fatal: function (value, string): ())
-    local callback = function (completed: uv.fs_t)
-      local copying = false
-      do
-        local result = uv.fs_get_result(completed)
-        if result < 0 then
-          uv.fs_req_cleanup(completed)
-          reject(result)
-          return
-        end
-        copying = true
-        local copied = decode(completed, result)
-        copying = false
-        uv.fs_req_cleanup(completed)
-        resolve(copied)
-      catch
-        if copying and error is async.OperationError then
-          uv.fs_req_cleanup(completed)
-          reject((error as async.OperationError).code)
-          return
-        end
-        raise
-      end
-    catch
-      uv.fs_req_cleanup(completed)
-      fatal(error, traceback)
-      raise
-    end
-    local status = submit(async.current_loop(), request, callback)
-    if status < 0 then
-      uv.fs_req_cleanup(request)
-      reject(status)
-    end
-  end)
+  local context = FileOperation<|T|>(uv.fs_t.new(), submit, decode, nil, 0)
+  local outcome = async.await_with<|FileOperation<|T|>, T, integer|>(context, start_file)
   case outcome
   when success(result) then return result
   when error(code) then raise operation_error(code, operation)
@@ -85,32 +108,59 @@ end
 
 -- Resource-producing completions attach the descriptor to an existing File
 -- before calling a decoder whose prologue or result copy may allocate.
+local record AcquireOperation<|T|>
+  local file: File
+  local request: uv.fs_t
+  local submit: function (uv.loop_t, uv.fs_t, function (uv.fs_t): ()): (integer)
+  local decode: function (uv.fs_t): (T)
+  local done: async.Completion<|AcquireOperation<|T|>, T, integer|>?
+  local number: integer
+end
+
+local function acquired<|T|>(request: uv.fs_t)
+  local operation: AcquireOperation<|T|> = request:get_data()
+  local done = operation.done as async.Completion<|AcquireOperation<|T|>, T, integer|>
+  local number = operation.number
+  request:set_data(nil)
+  operation.done = nil
+  do
+    local result = uv.fs_get_result(request)
+    if result >= 0 then operation.file.handle = result end
+    if result < 0 then
+      uv.fs_req_cleanup(request)
+      done:reject(number, result)
+    else
+      local copied = operation.decode(request)
+      uv.fs_req_cleanup(request)
+      done:resolve(number, copied)
+    end
+  catch
+    uv.fs_req_cleanup(request)
+    done:fatal(number, error, traceback)
+    raise
+  end
+end
+
+local function start_acquire<|T|>(done: async.Completion<|AcquireOperation<|T|>, T, integer|>, number: integer): uv.req_t?
+  local operation = done:context(number)
+  operation.done = done
+  operation.number = number
+  operation.request:set_data(operation)
+  local status = operation.submit(async.current_loop(), operation.request, acquired)
+  if status < 0 then
+    operation.request:set_data(nil)
+    operation.done = nil
+    uv.fs_req_cleanup(operation.request)
+    done:reject(number, status)
+  end
+  return nil
+end
+
 local function acquire<|T|>(file: File, operation: string,
     submit: function (uv.loop_t, uv.fs_t, function (uv.fs_t): ()): (integer),
     decode: function (uv.fs_t): (T)): T
-  local request = uv.fs_t.new()
-  local outcome = async.await<|T, integer|>(function (
-      resolve: function (T): (), reject: function (integer): (),
-      fatal: function (value, string): ())
-    local callback = function (completed: uv.fs_t)
-      local result = uv.fs_get_result(completed)
-      if result >= 0 then file.handle = result end
-      if result < 0 then
-        uv.fs_req_cleanup(completed)
-        reject(result)
-      else
-        local copied = decode(completed)
-        uv.fs_req_cleanup(completed)
-        resolve(copied)
-      end
-    catch
-      uv.fs_req_cleanup(completed)
-      fatal(error, traceback)
-      raise
-    end
-    local status = submit(async.current_loop(), request, callback)
-    if status < 0 then uv.fs_req_cleanup(request); reject(status) end
-  end)
+  local context = AcquireOperation<|T|>(file, uv.fs_t.new(), submit, decode, nil, 0)
+  local outcome = async.await_with<|AcquireOperation<|T|>, T, integer|>(context, start_acquire)
   case outcome
   when success(result) then return result
   when error(code) then raise operation_error(code, operation)
@@ -263,40 +313,61 @@ function File:flush()
   end, count_result)
 end
 
+local record FileClose
+  local request: uv.fs_t
+  local descriptor: integer
+  local accepted: boolean
+  local done: async.Completion<|FileClose, integer, integer|>?
+  local number: integer
+end
+
+local function file_closed(request: uv.fs_t)
+  local close: FileClose = request:get_data()
+  local done = close.done as async.Completion<|FileClose, integer, integer|>
+  local number = close.number
+  request:set_data(nil)
+  close.done = nil
+  do
+    local result = uv.fs_get_result(request)
+    uv.fs_req_cleanup(request)
+    if result < 0 then done:reject(number, result) else done:resolve(number, result) end
+  catch
+    uv.fs_req_cleanup(request)
+    done:fatal(number, error, traceback)
+    raise
+  end
+end
+
+local function start_file_close(done: async.Completion<|FileClose, integer, integer|>, number: integer): uv.req_t?
+  local close = done:context(number)
+  close.done = done
+  close.number = number
+  close.request:set_data(close)
+  local status = uv.fs_close(async.current_loop(), close.request, close.descriptor, file_closed)
+  if status < 0 then
+    close.request:set_data(nil)
+    close.done = nil
+    uv.fs_req_cleanup(close.request)
+    done:reject(number, status)
+  else
+    close.accepted = true
+  end
+  return nil
+end
+
 local function File:close_with(operation: string)
   self.excess = ""
   if self.handle < 0 then return end
-  local request = uv.fs_t.new()
-  local descriptor = self.handle
-  local accepted = false
+  local close = FileClose(uv.fs_t.new(), self.handle, false, nil, 0)
   self.handle = -1
   do
-    local outcome = async.await_cleanup<|integer, integer|>(function (
-        resolve: function (integer): (), reject: function (integer): (),
-        fatal: function (value, string): ())
-      local callback = function (completed: uv.fs_t)
-        local result = uv.fs_get_result(completed)
-        uv.fs_req_cleanup(completed)
-        if result < 0 then reject(result) else resolve(result) end
-      catch
-        uv.fs_req_cleanup(completed)
-        fatal(error, traceback)
-        raise
-      end
-      local status = uv.fs_close(async.current_loop(), request, descriptor, callback)
-      if status < 0 then
-        uv.fs_req_cleanup(request)
-        reject(status)
-      else
-        accepted = true
-      end
-    end)
+    local outcome = async.await_cleanup_with<|FileClose, integer, integer|>(close, start_file_close)
     case outcome
     when success() then
     when error(code) then raise operation_error(code, operation)
     end
   catch
-    if not accepted then self.handle = descriptor end
+    if not close.accepted then self.handle = close.descriptor end
     raise
   end
 end
@@ -478,6 +549,8 @@ local record WatchRegistration
   local path: string
   local directory: boolean
   local index: integer
+  local close_done: async.Completion<|WatchRegistration, boolean, integer|>?
+  local close_number: integer
 end
 
 local record WatcherNotification
@@ -534,19 +607,33 @@ local function WatchRegistration:stop()
   check_status(uv.fs_event_stop(self.handle), "fs.watcher.stop")
 end
 
+local function watch_closed(handle: uv.handle_t)
+  local registration: WatchRegistration = uv.handle_get_data(handle)
+  local done = registration.close_done as async.Completion<|WatchRegistration, boolean, integer|>
+  local number = registration.close_number
+  registration.close_done = nil
+  uv.handle_set_data(handle, nil)
+  do done:resolve(number, true)
+  catch done:fatal(number, error, traceback); raise end
+end
+
+local function start_watch_close(done: async.Completion<|WatchRegistration, boolean, integer|>, number: integer): uv.req_t?
+  local registration = done:context(number)
+  registration.close_done = done
+  registration.close_number = number
+  uv.handle_set_data(registration.view, registration)
+  do uv.close(registration.view, watch_closed)
+  catch
+    registration.close_done = nil
+    uv.handle_set_data(registration.view, nil)
+    raise
+  end
+  return nil
+end
+
 local function WatchRegistration:close(wait: boolean)
   if not wait then uv.close(self.view); return end
-  async.await_cleanup<|boolean, integer|>(function (
-      resolve: function (boolean): (), _reject: function (integer): (),
-      fatal: function (value, string): ())
-    local callback = function (_: uv.handle_t)
-      resolve(true)
-    catch
-      fatal(error, traceback)
-      raise
-    end
-    uv.close(self.view, callback)
-  end)
+  async.await_cleanup_with<|WatchRegistration, boolean, integer|>(self, start_watch_close)
 end
 
 local function Watcher:retire_registration(registration: WatchRegistration)
@@ -561,7 +648,7 @@ local function Watcher:new_registration(
     path: string, directory: boolean): WatchRegistration
   local handle = uv.fs_event_t.new()
   local registration = WatchRegistration(handle, handle:as_handle_t(), path,
-                                          directory, #self.registrations + 1)
+                                          directory, #self.registrations + 1, nil, 0)
   local callback = function (_: uv.fs_event_t, filename: string?,
                              events: integer, status: integer)
     self.publish(WatcherNotification(registration, filename, events, status))

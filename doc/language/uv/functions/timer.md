@@ -5,6 +5,28 @@ Complete public example: [timer_example](../examples/timer_example.titan). See t
 
 The signatures use ordinary public `titan.uv` types. Read the [ownership contracts](../CONTRACT-NOTES.md) before submitting native work. Status values and callback results remain distinct.
 
+## Concrete timer data and close
+
+```titan
+function timer_get_data(timer: timer_t): value
+function timer_set_data(timer: timer_t, data: value)
+function timer_close(timer: timer_t, callback: timer_cb?)
+```
+
+These Titan convenience functions operate directly on the concrete timer, without
+constructing a `handle_t` view. The data functions access the same traced public
+slot as `handle_get_data` and `handle_set_data`; fresh owners contain nil, and
+data remains accessible after close. Native `.data` remains reserved by UV.
+
+`timer_close` has the same native lifetime, deferred callback timing, and errors
+as `close`, but passes the original `timer_t` directly to its callback. A fresh
+or retired timer raises `"handle is not initialized"`; a closing timer raises
+`"handle is closing"`. The owner is retired before the callback and remains
+rooted through callback return. The callback may reinitialize that same owner.
+Callback errors are caught and rethrown by `run`, as for generic close. A nil
+callback still closes and retires the timer. Generic `walk`/`close` remains valid
+for timers using these accessors.
+
 ## timer_again
 
 `uv_timer_again` — **canonical exported function**
@@ -164,4 +186,3 @@ function timer_stop(timer: timer_t): integer
 **Availability:** Pinned patched libuv 1.52.1 only; native OS/kernel support and native error statuses still apply.
 
 **Native declaration:** [pinned libuv](https://github.com/libuv/libuv/blob/v1.52.1/include/uv.h#L981).
-

@@ -1,6 +1,6 @@
 # Supplemental public API reference
 
-These 188 declarations complement the 305 canonical native wrappers. Constructors and owner methods are also grouped with their type in [types](types.md). Every entry uses the public signature; private native fields are omitted. See [ownership contracts](CONTRACT-NOTES.md) for the owner, buffer, callback, and native worker rules.
+These 205 declarations complement the 305 canonical native wrappers. Constructors and owner methods are also grouped with their type in [types](types.md). Every entry uses the public signature; private native fields are omitted. See [ownership contracts](CONTRACT-NOTES.md) for the owner, buffer, callback, and native worker rules.
 
 ## addrinfo_result_t:entries
 
@@ -1798,3 +1798,156 @@ skips Task wrapping of main, not module initialization or argument setup.
 
 This safe helper does not accept an arbitrary Array of strings and does not
 export native `uv_setup_args`. See [the process setup omission](functions/misc.md#setup_args).
+
+
+## timer_close
+
+Close the concrete timer with a direct timer callback. See [timer data and close](functions/timer.md#concrete-timer-data-and-close) for lifetime, errors, and callback-time reinitialization.
+
+```titan
+function timer_close(timer: timer_t, callback: timer_cb?)
+```
+
+
+## timer_get_data
+
+Read the same traced public data as the generic handle accessor without allocating a handle view. Native data remains reserved by UV.
+
+```titan
+function timer_get_data(timer: timer_t): value
+```
+
+
+## timer_set_data
+
+Replace the traced public data slot without allocating a handle view. Data remains accessible after close; native data remains reserved by UV.
+
+```titan
+function timer_set_data(timer: timer_t, data: value)
+```
+
+
+## write_string
+
+Write one complete immutable binary string, using an embedded descriptor and retaining the old string through the native callback even when the request is reused. See [scalar string writes](functions/stream.md#write_string) for bounds and rejection rules.
+
+```titan
+function write_string(req: write_t, stream: stream_t, data: string, callback: write_cb?): integer
+```
+
+
+## write_t:get_data
+
+Read the same traced public data as the generic request accessor without allocating a request view.
+
+```titan
+function write_t:get_data(): value
+```
+
+
+## write_t:set_data
+
+Replace the traced public data slot without allocating a request view. This does not change reserved native data or pending-request ownership.
+
+```titan
+function write_t:set_data(data: value)
+```
+
+
+## buf_check_length
+
+Validate the exact `buf_init` string/native byte-count bounds without allocating a buffer. Invalid input raises `"buffer length is outside string/native range"`. Adapters may validate before async admission.
+
+```titan
+function buf_check_length(base: string, length: integer)
+```
+
+
+## connect_t:get_data
+
+Read the same traced public data as the generic request accessor without allocating a request view. The initial value is nil; fresh, pending and completed owners share the same slot.
+
+```titan
+function connect_t:get_data(): value
+```
+
+
+## connect_t:set_data
+
+Replace the existing traced public data slot; nil clears it. This does not change reserved native data or pending-request ownership. See [concrete request data](functions/request.md#concrete-request-data).
+
+```titan
+function connect_t:set_data(data: value)
+```
+
+
+## fs_t:get_data
+
+Read the same traced public data as the generic request accessor without allocating a request view. The initial value is nil; fresh, pending and completed owners share the same slot.
+
+```titan
+function fs_t:get_data(): value
+```
+
+
+## fs_t:set_data
+
+Replace the existing traced public data slot; nil clears it. This does not change reserved native data or pending-request ownership. See [concrete request data](functions/request.md#concrete-request-data).
+
+```titan
+function fs_t:set_data(data: value)
+```
+
+
+## getaddrinfo_t:get_data
+
+Read the same traced public data as the generic request accessor without allocating a request view. The initial value is nil; fresh, pending and completed owners share the same slot.
+
+```titan
+function getaddrinfo_t:get_data(): value
+```
+
+
+## getaddrinfo_t:set_data
+
+Replace the existing traced public data slot; nil clears it. This does not change reserved native data or pending-request ownership. See [concrete request data](functions/request.md#concrete-request-data).
+
+```titan
+function getaddrinfo_t:set_data(data: value)
+```
+
+
+## shutdown_t:get_data
+
+Read the same traced public data as the generic request accessor without allocating a request view. The initial value is nil; fresh, pending and completed owners share the same slot.
+
+```titan
+function shutdown_t:get_data(): value
+```
+
+
+## shutdown_t:set_data
+
+Replace the existing traced public data slot; nil clears it. This does not change reserved native data or pending-request ownership. See [concrete request data](functions/request.md#concrete-request-data).
+
+```titan
+function shutdown_t:set_data(data: value)
+```
+
+
+## work_t:get_data
+
+Read the same traced public data as the generic request accessor without allocating a request view. The initial value is nil; fresh, pending and completed owners share the same slot.
+
+```titan
+function work_t:get_data(): value
+```
+
+
+## work_t:set_data
+
+Replace the existing traced public data slot; nil clears it. This does not change reserved native data or pending-request ownership. See [concrete request data](functions/request.md#concrete-request-data).
+
+```titan
+function work_t:set_data(data: value)
+```

@@ -38,6 +38,7 @@ record timer_t
   local loop: loop_t?
   local callback: (function (timer_t): ())?
   local close_callback: (function (handle_t): ())?
+  local typed_close_callback: timer_cb?
   local handler: function (timer_t, loop_t): ()
   local close_handler: function (timer_t, loop_t): ()
   local userdata: value
@@ -171,9 +172,15 @@ local function timer_closed(owner: timer_t, loop: loop_t)
   loop.handles[owner] = nil
   owner.phase = HANDLE_RETIRED
   local callback? = owner.close_callback
+  local typed_callback? = owner.typed_close_callback
   owner.callback = nil
   owner.close_callback = nil
-  if callback ~= nil then callback(handle_t.timer(owner)) end
+  owner.typed_close_callback = nil
+  if typed_callback ~= nil then
+    typed_callback(owner)
+  elseif callback ~= nil then
+    callback(handle_t.timer(owner))
+  end
 catch
   -- No allocating Titan helper entry may run outside this catch boundary.
   if loop.failure_count == 0 then
@@ -219,7 +226,7 @@ function timer_t.new(): timer_t
   return {
     native = native,
     phase = HANDLE_FRESH, loop = nil,
-    callback = nil, close_callback = nil,
+    callback = nil, close_callback = nil, typed_close_callback = nil,
     handler = timer_deliver, close_handler = timer_closed, userdata = nil,
   }
 end
@@ -255,12 +262,30 @@ function timer_stop(timer: timer_t): integer
   return ffi.uv_timer_stop(timer.native)
 end
 
+function timer_get_data(timer: timer_t): value
+  return timer.userdata
+end
+
+function timer_set_data(timer: timer_t, data: value)
+  timer.userdata = data
+end
+
+function timer_close(timer: timer_t, callback: timer_cb?)
+  if timer.phase ~= HANDLE_LIVE then raise "handle is not initialized" end
+  local native = timer.native as foreign *uv_handle_t
+  if ffi.uv_is_closing(native) ~= 0 then raise "handle is closing" end
+  timer.close_callback = nil
+  timer.typed_close_callback = callback
+  ffi.uv_close(native, timer_close_callback)
+end
+
 function close(handle: handle_t, callback: (function (handle_t): ())?)
   case handle
   when timer(owner) then
     if owner.phase ~= HANDLE_LIVE then raise "handle is not initialized" end
     local native = owner.native as foreign *uv_handle_t
     if ffi.uv_is_closing(native) ~= 0 then raise "handle is closing" end
+    owner.typed_close_callback = nil
     owner.close_callback = callback
     ffi.uv_close(native, timer_close_callback)
   when process(owner) then
@@ -496,6 +521,14 @@ end
 
 function fs_t:as_req_t(): req_t
   return req_t.fs(self)
+end
+
+function fs_t:get_data(): value
+  return self.userdata
+end
+
+function fs_t:set_data(data: value)
+  self.userdata = data
 end
 
 function req_t:get_data(): value
@@ -759,6 +792,14 @@ function work_t:as_req_t(): req_t
   return req_t.work(self)
 end
 
+function work_t:get_data(): value
+  return self.userdata
+end
+
+function work_t:set_data(data: value)
+  self.userdata = data
+end
+
 function work_t:get_loop(): loop_t?
   return self.loop
 end
@@ -829,10 +870,14 @@ function buf_t.allocate(capacity: integer): buf_t
   return owner
 end
 
-function buf_init(base: string, length: integer): buf_t
+function buf_check_length(base: string, length: integer)
   if length < 0 or length > #base or length > ffi.UINT_MAX as integer then
     raise "buffer length is outside string/native range"
   end
+end
+
+function buf_init(base: string, length: integer): buf_t
+  buf_check_length(base, length)
   local owner = buf_t(foreign uv_buf_t.new(), nil, base, false)
   owner.native = ffi.uv_buf_init(base as foreign *char,
                                 length as foreign unsigned int)

@@ -629,8 +629,22 @@ end
 -- owns waits and subscription queues, never process or stdio policy.
 local record Stdio
   native: uv.stream_t
+  handle: uv.handle_t
   loop: uv.loop_t
   reads: async.BufferedSubscription<|string, async.OperationError|>?
+end
+
+local record CloseOperation
+  handle: uv.handle_t
+  completion: async.Completion<|CloseOperation, nil, async.OperationError|>?
+  number: integer
+end
+
+local record WriteOperation
+  stream: Stdio
+  data: string
+  completion: async.Completion<|WriteOperation, nil, async.OperationError|>?
+  number: integer
 end
 
 local union SpawnSlot
@@ -779,27 +793,45 @@ local function validate_stdio(stream: Stdio)
   if stream.loop ~= async.current_loop() then raise "stdio stream belongs to a different async Runtime" end
 end
 
+local function native_closed(handle: uv.handle_t)
+  local context = uv.handle_get_data(handle) as CloseOperation
+  local completion = context.completion as async.Completion<|CloseOperation, nil, async.OperationError|>
+  local number = context.number
+  uv.handle_set_data(handle, nil)
+  context.completion = nil
+  do completion:resolve(number, nil)
+  catch completion:fatal(number, error, traceback); raise end
+end
+
+local function start_close(
+    completion: async.Completion<|CloseOperation, nil, async.OperationError|>,
+    number: integer): uv.req_t?
+  local context = completion:context(number)
+  context.completion = completion
+  context.number = number
+  uv.handle_set_data(context.handle, context)
+  uv.close(context.handle, native_closed)
+  return nil
+end
+
 local function close_native(handle: uv.handle_t)
   if stream_is_closed(handle) then return end
-  case async.await_cleanup<|nil, async.OperationError|>(function (resolve, reject, fatal)
-    uv.close(handle, function (_: uv.handle_t)
-      resolve(nil)
-    catch fatal(error, traceback); raise end)
-  end)
+  case async.await_cleanup_with<|CloseOperation, nil, async.OperationError|>(
+    CloseOperation(handle, nil, 0), start_close)
   when success() then
   when error(failure) then raise failure
   end
 end
 
 local function discard_unpublished_stdio(stream: Stdio?)
-  if stream ~= nil and not stream_is_closed(stream.native:as_handle_t()) then
-    uv.close(stream.native:as_handle_t(), nil)
+  if stream ~= nil and not stream_is_closed(stream.handle) then
+    uv.close(stream.handle, nil)
   end
 end
 
 local function new_pipe_stdio(loop: uv.loop_t): (integer, Stdio?)
   local pipe = uv.pipe_t.new()
-  local stream = Stdio(pipe:as_stream_t(), loop, nil)
+  local stream = Stdio(pipe:as_stream_t(), pipe:as_handle_t(), loop, nil)
   local status = uv.pipe_init(loop, pipe, 0)
   if status < 0 then return status, nil end
   return 0, stream
@@ -809,12 +841,12 @@ local function start_stream_read(stream: Stdio, operation: string)
   if stream.reads ~= nil then return end
   stream.reads = async.BufferedSubscription<|string, async.OperationError|>.new(function (publish, fail, finish)
     local actions = async.SubscriptionActions<|string|>(function ()
-      if not stream_is_closed(stream.native:as_handle_t()) then uv.read_stop(stream.native) end
+      if not stream_is_closed(stream.handle) then uv.read_stop(stream.native) end
     end, function (drain)
       drain()
-      close_native(stream.native:as_handle_t())
+      close_native(stream.handle)
     end)
-    if stream_is_closed(stream.native:as_handle_t()) then finish(); return actions end
+    if stream_is_closed(stream.handle) then finish(); return actions end
     local status = uv.read_start(stream.native,
       function (_, size): uv.buf_t return uv.buf_t.allocate(size) end,
       function (_, count, buffer)
@@ -834,7 +866,7 @@ end
 
 local function os_stdio_read(stream: Stdio): string?
   validate_stdio(stream)
-  cancellation_point()
+  async.checkpoint()
   start_stream_read(stream, "stdio.read.start")
   if stream.reads:has_waiter() then raise "stream already has a waiting reader" end
   case stream.reads:next()
@@ -845,17 +877,41 @@ local function os_stdio_read(stream: Stdio): string?
   end
 end
 
+local function stdio_written(request: uv.write_t, status: integer)
+  local context = request:get_data() as WriteOperation
+  local completion = context.completion as async.Completion<|WriteOperation, nil, async.OperationError|>
+  local number = context.number
+  request:set_data(nil)
+  context.completion = nil
+  do
+    if status < 0 then completion:reject(number, make_error(status, "stdio.write"))
+    else completion:resolve(number, nil) end
+  catch completion:fatal(number, error, traceback); raise end
+end
+
+local function start_stdio_write(
+    completion: async.Completion<|WriteOperation, nil, async.OperationError|>,
+    number: integer): uv.req_t?
+  local context = completion:context(number)
+  if stream_is_closed(context.stream.handle) then raise "cannot write to a closed stream" end
+  if #context.data == 0 then completion:resolve(number, nil); return nil end
+  local request = uv.write_t.new()
+  context.completion = completion
+  context.number = number
+  request:set_data(context)
+  local status = uv.write_string(request, context.stream.native, context.data, stdio_written)
+  if status < 0 then
+    request:set_data(nil)
+    context.completion = nil
+    completion:reject(number, make_error(status, "stdio.write"))
+  end
+  return nil
+end
+
 local function os_stdio_write(stream: Stdio, data: string)
   validate_stdio(stream)
-  case async.await<|nil, async.OperationError|>(function (resolve, reject, fatal)
-    if stream_is_closed(stream.native:as_handle_t()) then raise "cannot write to a closed stream" end
-    if #data == 0 then resolve(nil); return end
-    local request = uv.write_t.new()
-    local status = uv.write(request, stream.native, {uv.buf_t.from_string(data)}, function (_: uv.write_t, result: integer)
-      if result < 0 then reject(make_error(result, "stdio.write")) else resolve(nil) end
-    catch fatal(error, traceback); raise end)
-    if status < 0 then reject(make_error(status, "stdio.write")) end
-  end)
+  case async.await_with<|WriteOperation, nil, async.OperationError|>(
+    WriteOperation(stream, data, nil, 0), start_stdio_write)
   when success() then
   when error(failure) then raise failure
   end
@@ -864,7 +920,7 @@ end
 local function os_stdio_close(stream: Stdio)
   validate_stdio(stream)
   if stream.reads ~= nil then stream.reads:close()
-  else close_native(stream.native:as_handle_t()) end
+  else close_native(stream.handle) end
 end
 
 local function os_stdio_is_tty(stream: Stdio): boolean
@@ -878,7 +934,7 @@ end
 local function os_wait_signal(name: string): string
   local signum = signal_number(name)
   if signum <= 0 or name == "kill" then raise "unsupported waitable signal name '" .. name .. "'" end
-  cancellation_point()
+  async.checkpoint()
   local signal = uv.signal_t.new()
   local initialized = false
   local published = false
@@ -1041,7 +1097,7 @@ end
 local function initialize_parent_stdio(loop: uv.loop_t, descriptor: integer): Stdio
   if parent_loop ~= loop then parent_loop = loop; cached_parent_stdio = {} end
   local cached? = cached_parent_stdio[descriptor + 1]
-  if cached ~= nil and not stream_is_closed(cached.native:as_handle_t()) then return cached end
+  if cached ~= nil and not stream_is_closed(cached.handle) then return cached end
   cached_parent_stdio[descriptor + 1] = nil
   local kind = parent_stdio_kind(descriptor)
   local duplicate = duplicate_descriptor(descriptor as foreign int)
@@ -1056,10 +1112,10 @@ local function initialize_parent_stdio(loop: uv.loop_t, descriptor: integer): St
   end
   if tty then
     local native = uv.tty_t.new()
-    local owner = Stdio(native:as_stream_t(), loop, nil)
+    local owner = Stdio(native:as_stream_t(), native:as_handle_t(), loop, nil)
     check_status(uv.tty_init(loop, native, duplicate as integer, 0), "stdio.parent.init")
     stream = owner
-    local status, actual? = uv.fileno(native:as_handle_t())
+    local status, actual? = uv.fileno(owner.handle)
     check_status(status, "stdio.parent.fileno")
     if actual:to_integer() ~= uv.get_osfhandle(duplicate as integer):to_integer() then
       check_status(platform_status(ffi.titan_close_parent_duplicate(duplicate)), "stdio.parent.duplicate.close")
@@ -1076,7 +1132,7 @@ local function initialize_parent_stdio(loop: uv.loop_t, descriptor: integer): St
     check_status(status, "stdio.parent.open")
     if ffi.TITAN_OS_WINDOWS ~= 0 then
       local actual: uv.os_fd_t? = nil
-      status, actual = uv.fileno(stream.native:as_handle_t())
+      status, actual = uv.fileno(stream.handle)
       check_status(status, "stdio.parent.fileno")
       if actual:to_integer() ~= uv.get_osfhandle(duplicate as integer):to_integer() then
         check_status(platform_status(ffi.titan_close_parent_duplicate(duplicate)), "stdio.parent.duplicate.close")
@@ -1394,15 +1450,18 @@ local function os_process_spawn_with_config(file: string, args: {string}, config
   local rollback = false
   local term = signal_number("term")
   local kill = signal_number("kill")
-  local resolve: (function (nil): ())? = nil
-  local fatal: (function (value, string): ())? = nil
+  local completion: async.Completion<|ProcessOwner, nil, async.OperationError|>? = nil
+  local completion_number = 0
   -- Native close callbacks run after root retirement. A callback may precede
   -- wait registration, so registration also checks this exact same condition.
   local retired = function (_: uv.handle_t)
-    if resolve ~= nil and not handle:is_initialized() and
+    local done? = completion
+    local number = completion_number
+    if done ~= nil and not handle:is_initialized() and
         not timer_handle:is_initialized() then
-      do resolve(nil)
-      catch fatal(error, traceback); raise end
+      completion = nil
+      do done:resolve(number, nil)
+      catch done:fatal(number, error, traceback); raise end
     end
   end
   local escalate = function (_: uv.timer_t)
@@ -1411,11 +1470,10 @@ local function os_process_spawn_with_config(file: string, args: {string}, config
     end
     uv.close(timer_handle, retired)
   end
-  local register = function (done: function (nil): (),
-                            _reject: function (async.OperationError): (),
-                            failed: function (value, string): ())
-    resolve = done
-    fatal = failed
+  local register = function (done: async.Completion<|ProcessOwner, nil, async.OperationError|>,
+                            number: integer): uv.req_t?
+    completion = done
+    completion_number = number
     if handle:is_initialized() and not uv.is_closing(handle) and uv.is_active(handle) then
       -- Native timer_start is allocation-free and cannot reject this live,
       -- non-closing timer, prebuilt callback and fixed nonnegative interval.
@@ -1428,6 +1486,7 @@ local function os_process_spawn_with_config(file: string, args: {string}, config
       if not stream_is_closed(timer_handle) then uv.close(timer_handle, retired) end
       retired(handle)
     end
+    return nil
   end
   config.cleanup = function (published: boolean)
     if published then
@@ -1436,7 +1495,7 @@ local function os_process_spawn_with_config(file: string, args: {string}, config
     end
     rollback = true
     defer do
-      case async.await_cleanup<|nil, async.OperationError|>(register)
+      case async.await_cleanup_with<|ProcessOwner, nil, async.OperationError|>(process, register)
       when success() then
       when error(failure) then raise failure
       end
@@ -1485,7 +1544,7 @@ end
 
 local function os_process_wait(process: ProcessOwner): (integer, integer)
   validate_process(process)
-  cancellation_point()
+  async.checkpoint()
   if process.result ~= nil then
     return process.result.code, process.result.signal_number
   end
@@ -1517,12 +1576,4 @@ end
 
 local function checked_text(text: string, operation: string)
   if contains_nul(text) then raise make_error(uv.EINVAL, operation) end
-end
-
--- Match the ordinary-wait boundary before a lazy native source is started.
-local function cancellation_point()
-  case async.await<|nil, async.OperationError|>(function (resolve, reject, fatal) resolve(nil) end)
-  when success() then
-  when error(failure) then raise failure
-  end
 end

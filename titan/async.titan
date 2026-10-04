@@ -10,6 +10,7 @@ local string = import "titan.string"
 type SuspendCancelAction = function (): ()
 
 local ASYNC_TAG: value = {}
+local YIELD_TAG: value = {}
 local active_runtime: Runtime? = nil
 local const WAIT_ORDINARY = 0
 local const WAIT_CANCELLABLE = 1
@@ -21,6 +22,15 @@ local const WAIT_RETIRED = 3
 local const OUTCOME_SUCCESS = 0
 local const OUTCOME_ERROR = 1
 local const OUTCOME_FATAL = 2
+local const TASK_READY = 0
+local const TASK_RUNNING = 1
+local const TASK_WAITING = 2
+local const TASK_FINISHED = 3
+local const READY_START = 0
+local const READY_DELIVER = 1
+local const READY_RESUME = 2
+local const READY_YIELD = 3
+local const READY_BATCH_LIMIT = 64
 
 record Error
   error: value
@@ -157,13 +167,11 @@ union AllFiveError<|A1, B1, A2, B2, A3, B3, A4, B4, A5, B5|>
   fifth(TaskStatus<|A5, B5|>)
 end
 
-local record Operation<|T, E|>
-  local register: function (function (T): (), function (E): (), function (value, string): ()): (uv.req_t?)
-  local policy: integer
-end
-
-local record Wait
+record Completion<|C, T, E|>
+  local stored_context: C
+  local register: (function (Completion<|C, T, E|>, integer): (uv.req_t?))?
   local task: Task
+  local epoch: integer
   local policy: integer
   local phase: integer
   local kind: integer
@@ -171,9 +179,12 @@ local record Wait
   local request: uv.req_t?
 end
 
+local type Wait = Completion<|value, value, value|>
+
 local record Orphan
   local task: Task
   local wait: Wait?
+  local epoch: integer
 end
 
 local record TerminalRegistration<|A, B|>
@@ -183,6 +194,11 @@ end
 
 local record Runtime
   local loop: uv.loop_t
+  local wake: uv.timer_t
+  local ready_head: Task?
+  local ready_tail: Task?
+  local ready_count: integer
+  local wake_armed: boolean
   local tasks: {Task}
   local next_task: integer
   local current_task: Task?
@@ -196,9 +212,17 @@ end
 record Task<|A, B|>
   local root: coroutine.Coroutine
   local runtime: Runtime
-  local state: TaskStatus<|A, B|>
+  local phase: integer
+  local state: TaskStatus<|A, B|>?
+  local epoch: integer
+  local ready_next: Task?
+  local ready_queued: boolean
+  local ready_kind: integer
+  local ready_epoch: integer
+  local ready_wait: Wait?
   local cancel_value: CancellationReason<|B|>?
   local wait: Wait?
+  local completion: Wait?
   local root_index: integer
   local terminal_registrations: {TerminalRegistration<|A, B|>}
   local suspended: boolean
@@ -249,11 +273,17 @@ function TaskStatus:has_cancelled(): (boolean, CancellationReason<|B|>?)
 end
 
 function Task:status(): TaskStatus<|A, B|>
+  if self.state == nil then
+    if self.phase == TASK_READY then self.state = TaskStatus<|A, B|>.ready()
+    elseif self.phase == TASK_RUNNING then self.state = TaskStatus<|A, B|>.running()
+    elseif self.phase == TASK_WAITING then self.state = TaskStatus<|A, B|>.waiting()
+    else raise "finished Task has no terminal status" end
+  end
   return self.state
 end
 
 function Task:add_terminal_listener(listener: function (TaskStatus<|A, B|>): ()): function (): ()
-  if self.state:has_finished() then return function () end end
+  if self.phase == TASK_FINISHED then return function () end end
   local registration = TerminalRegistration<|A, B|> {listener = listener, live = true}
   self.terminal_registrations[#self.terminal_registrations + 1] = registration
   local task = self
@@ -308,9 +338,17 @@ local function rethrow_failure(failure: Error)
 end
 
 local function new_runtime(): Runtime
-  local runtime = Runtime {loop = uv.loop_t.new(), tasks = {}, next_task = 1,
+  local runtime = Runtime {loop = uv.loop_t.new(), wake = uv.timer_t.new(),
+    ready_head = nil, ready_tail = nil, ready_count = 0, wake_armed = false,
+    tasks = {}, next_task = 1,
     current_task = nil, driving = false, closing = false, failure = nil, shutdown_cancelled = false, exit_code = nil}
   check_status(uv.loop_init(runtime.loop), "runtime.loop.init")
+  local status = uv.timer_init(runtime.loop, runtime.wake)
+  if status < 0 then
+    uv.loop_close(runtime.loop)
+    raise operation_error(status, "runtime.timer.init")
+  end
+  uv.timer_set_data(runtime.wake, runtime)
   return runtime
 end
 
@@ -344,6 +382,15 @@ function running(): Task<|value, value|>
   return task
 end
 
+-- Admission for synchronous work that already has no scheduling boundary.
+-- Keep the same precedence as an ordinary await before registration.
+function checkpoint()
+  local task = running()
+  local reason? = task.cancel_value
+  if reason ~= nil then raise reason end
+  if task.runtime.closing then raise (task.runtime.failure as Error).error end
+end
+
 local function clear_suspension(task: Task)
   task.suspended = false
   task.resume_token = nil
@@ -351,11 +398,34 @@ local function clear_suspension(task: Task)
   task.suspend_cancel = nil
 end
 
+local function set_phase(task: Task, phase: integer)
+  task.phase = phase
+  task.state = nil
+end
+
+local function begin_suspension(task: Task)
+  if task.epoch == (ffi.LUA_MAXINTEGER as integer) then
+    raise "async Task suspension epoch exhausted"
+  end
+  task.epoch = task.epoch + 1
+end
+
+local function release_completion(wait: Wait)
+  wait.stored_context = nil
+  wait.register = nil
+  wait.payload = nil
+  wait.request = nil
+end
+
 local function finish_task(task: Task, state: TaskStatus)
+  -- An exceptional Result allocation can occur after task.wait was detached.
+  local cached? = task.completion
+  if cached ~= nil then cached.phase = WAIT_RETIRED; release_completion(cached) end
   clear_suspension(task)
   local wait? = task.wait
-  if wait ~= nil then wait.phase = WAIT_RETIRED; wait.request = nil end
+  if wait ~= nil then wait.phase = WAIT_RETIRED; release_completion(wait) end
   task.wait = nil
+  task.phase = TASK_FINISHED
   task.state = state
   local listeners = task.terminal_registrations
   task.terminal_registrations = {}
@@ -464,12 +534,15 @@ end
 local function deliver_wait(wait: Wait)
   if wait.phase ~= WAIT_SETTLED then raise "async operation is not settled" end
   local task = wait.task
-  if task.wait ~= wait then raise "stale async operation settlement" end
+  if task.wait ~= wait or task.epoch ~= wait.epoch then
+    raise "stale async operation settlement"
+  end
   wait.phase = WAIT_RETIRED
   wait.request = nil
   task.wait = nil
   clear_suspension(task)
   local failed, payload = wait_result(wait)
+  release_completion(wait)
   advance_task(task, failed, payload)
 end
 
@@ -477,13 +550,16 @@ local function settle(wait: Wait, kind: integer, payload: value)
   if wait.phase == WAIT_SETTLED or wait.phase == WAIT_RETIRED then
     raise "async operation already settled"
   end
+  if wait.task.wait ~= wait or wait.task.epoch ~= wait.epoch then
+    raise "stale async operation settlement"
+  end
   local registering = wait.phase == WAIT_REGISTERING
   local deferred = not registering and wait.task.runtime.current_task ~= nil
   -- A peer Task cannot advance this Task inline. Accept its deferred wake
   -- before committing settlement: synchronous scheduling failure leaves the
-  -- exact pending wait available for retry or shutdown. The timer cannot run
+  -- exact pending wait available for retry or shutdown. The wake cannot run
   -- until this call returns; only nonallocating field writes follow acceptance.
-  if deferred then schedule(wait.task.runtime, function () deliver_wait(wait) end) end
+  if deferred then enqueue_ready(wait.task, READY_DELIVER, wait) end
   wait.kind = kind
   wait.payload = payload
   wait.phase = WAIT_SETTLED
@@ -506,7 +582,7 @@ local function fatal(wait: Wait, error: value, trace: string)
     cancel_shutdown_tasks(runtime, task)
     return
   end
-  if wait.phase ~= WAIT_PENDING or task.wait ~= wait then
+  if wait.phase ~= WAIT_PENDING or task.wait ~= wait or task.epoch ~= wait.epoch then
     fail_runtime(runtime, error, trace)
     return
   end
@@ -516,6 +592,7 @@ local function fatal(wait: Wait, error: value, trace: string)
   wait.request = nil
   task.wait = nil
   clear_suspension(task)
+  release_completion(wait)
   fail_runtime(runtime, error, trace)
   cancel_shutdown_tasks(runtime, task)
   do advance_task(task, true, error)
@@ -530,7 +607,7 @@ local function advance_task(task: Task, failed: boolean, payload: value)
   local next_failed = failed
   local next_payload = payload
   while true do
-    task.state = TaskStatus.running()
+    set_phase(task, TASK_RUNNING)
     local yielded: value = nil
     do yielded = resume_root(task, next_failed, next_payload)
     catch finish_failure(task, error, traceback); return end
@@ -540,73 +617,181 @@ local function advance_task(task: Task, failed: boolean, payload: value)
       else finish_task(task, TaskStatus.succeeded(yielded)) end
       return
     end
-    local operation = yielded as Operation<|value, value|>
+    local yielding = yielded == YIELD_TAG
+    local operation: Wait? = nil
+    local policy = WAIT_ORDINARY
+    if not yielding then
+      operation = yielded as Wait
+      policy = operation.policy
+    end
     local reason? = task.cancel_value
-    if operation.policy ~= WAIT_CLEANUP and reason ~= nil then
-      if operation.policy == WAIT_CANCELLABLE then
+    if policy ~= WAIT_CLEANUP and reason ~= nil then
+      if operation ~= nil then operation.phase = WAIT_RETIRED; release_completion(operation) end
+      if policy == WAIT_CANCELLABLE then
         next_failed = false
         next_payload = CancellableResult<|value, value|>.cancelled(reason)
       else next_failed = true; next_payload = reason end
-    elseif operation.policy ~= WAIT_CLEANUP and task.runtime.closing then
+    elseif policy ~= WAIT_CLEANUP and task.runtime.closing then
+      if operation ~= nil then operation.phase = WAIT_RETIRED; release_completion(operation) end
       next_failed = true
       next_payload = (task.runtime.failure as Error).error
     else
-      local wait = Wait {task = task, policy = operation.policy,
-        phase = WAIT_REGISTERING, kind = OUTCOME_SUCCESS, payload = nil, request = nil}
-      local resolve = function (value: value) settle(wait, OUTCOME_SUCCESS, value) end
-      local reject = function (value: value) settle(wait, OUTCOME_ERROR, value) end
-      local fail = function (error: value, trace: string) fatal(wait, error, trace) end
-      task.wait = wait
-      task.state = TaskStatus.waiting()
-      local request: uv.req_t? = nil
-      local registration_failed = false
-      do request = operation.register(resolve, reject, fail)
+      -- Both exhaustion and a failed wake arm belong to this suspended call.
+      -- Feed them through the same bounded trampoline as registration errors.
+      local admitted = true
+      do begin_suspension(task)
       catch
-        wait.phase = WAIT_RETIRED
-        wait.request = nil
-        task.wait = nil
-        clear_suspension(task)
-        registration_failed = true
+        admitted = false
+        if operation ~= nil then operation.phase = WAIT_RETIRED; release_completion(operation) end
         next_failed = true
         next_payload = error
       end
-      if not registration_failed then
-        if wait.phase == WAIT_SETTLED then
-          wait.phase = WAIT_RETIRED
-          task.wait = nil
-          clear_suspension(task)
-          next_failed, next_payload = wait_result(wait)
-        elseif operation.policy == WAIT_CANCELLABLE and request == nil then
-          wait.phase = WAIT_RETIRED
-          task.wait = nil
-          clear_suspension(task)
-          next_failed = true
-          next_payload = "cancellable registration returned nil without settling"
-        else
-          wait.request = request
-          wait.phase = WAIT_PENDING
-          if operation.policy == WAIT_CANCELLABLE and task.cancel_value ~= nil then
-            uv.cancel(request as uv.req_t)
+      if admitted then
+        set_phase(task, TASK_WAITING)
+        if yielding then
+          do
+            enqueue_ready(task, READY_YIELD, nil)
+            return
+          catch
+            next_failed = true
+            next_payload = error
           end
-          return
+        else
+          local wait = operation as Wait
+          wait.epoch = task.epoch
+          task.wait = wait
+          local request: uv.req_t? = nil
+          local registration_failed = false
+          do
+            local start = wait.register
+            request = start(wait, wait.epoch)
+          catch
+            wait.phase = WAIT_RETIRED
+            release_completion(wait)
+            task.wait = nil
+            clear_suspension(task)
+            registration_failed = true
+            next_failed = true
+            next_payload = error
+          end
+          wait.register = nil
+          if not registration_failed then
+            if wait.phase == WAIT_SETTLED then
+              wait.phase = WAIT_RETIRED
+              task.wait = nil
+              clear_suspension(task)
+              next_failed, next_payload = wait_result(wait)
+              release_completion(wait)
+            elseif policy == WAIT_CANCELLABLE and request == nil then
+              wait.phase = WAIT_RETIRED
+              task.wait = nil
+              clear_suspension(task)
+              next_failed = true
+              next_payload = "cancellable registration returned nil without settling"
+              release_completion(wait)
+            else
+              wait.request = request
+              wait.phase = WAIT_PENDING
+              if policy == WAIT_CANCELLABLE and task.cancel_value ~= nil then
+                uv.cancel(request as uv.req_t)
+              end
+              return
+            end
+          end
         end
       end
     end
   end
 end
 
-local function schedule(runtime: Runtime, action: function (): ())
-  local timer = uv.timer_t.new()
-  local handle = timer:as_handle_t()
-  local closed = function (_: uv.handle_t) action() end
-  local fired = function (_: uv.timer_t) uv.close(handle, closed) end
-  check_status(uv.timer_init(runtime.loop, timer), "runtime.timer.init")
-  local status = uv.timer_start(timer, fired, 0, 0)
-  if status < 0 then uv.close(handle); raise operation_error(status, "runtime.timer.start") end
+local function arm_ready(runtime: Runtime)
+  if runtime.wake_armed then return end
+  check_status(uv.timer_start(runtime.wake, ready_tick, 0, 0), "runtime.timer.start")
+  runtime.wake_armed = true
+end
+
+local function enqueue_ready(task: Task, kind: integer, wait: Wait?)
+  if task.ready_queued then raise "async Task already has a queued continuation" end
+  local runtime = task.runtime
+  -- Only nonallocating fields change after wake acceptance. Callers commit
+  -- settlement or resume_pending after this returns, so failure is retryable.
+  do arm_ready(runtime)
+  catch
+    if runtime.failure == nil then raise end
+    -- During fatal shutdown the outer driver also drains accepted ready work
+    -- before blocking, even if the shared native wake is no longer usable.
+  end
+  task.ready_next = nil
+  task.ready_kind = kind
+  task.ready_epoch = task.epoch
+  task.ready_wait = wait
+  task.ready_queued = true
+  local tail? = runtime.ready_tail
+  if tail == nil then runtime.ready_head = task
+  else tail.ready_next = task end
+  runtime.ready_tail = task
+  runtime.ready_count = runtime.ready_count + 1
+end
+
+local function drain_ready(runtime: Runtime)
+  local count = runtime.ready_count
+  if count > READY_BATCH_LIMIT then count = READY_BATCH_LIMIT end
+  for index = 1, count do
+    local task = runtime.ready_head as Task
+    local kind = task.ready_kind
+    local epoch = task.ready_epoch
+    local wait? = task.ready_wait
+    runtime.ready_head = task.ready_next
+    runtime.ready_count = runtime.ready_count - 1
+    if runtime.ready_head == nil then runtime.ready_tail = nil end
+    -- A continuation may immediately requeue the same Task. No code after
+    -- entry may read or clear these old mutable queue fields.
+    task.ready_next = nil
+    task.ready_queued = false
+    task.ready_kind = READY_START
+    task.ready_epoch = 0
+    task.ready_wait = nil
+    if task.phase ~= TASK_FINISHED and task.epoch == epoch and task.wait == wait then
+      if kind == READY_START or kind == READY_YIELD then
+        local reason? = task.cancel_value
+        if reason ~= nil then advance_task(task, true, reason)
+        else advance_task(task, false, nil) end
+      elseif kind == READY_DELIVER then
+        deliver_wait(wait)
+      elseif kind == READY_RESUME then
+        settle(wait, OUTCOME_SUCCESS, nil)
+      else raise "invalid async queued continuation" end
+    end
+  end
+end
+
+local function ready_tick(timer: uv.timer_t)
+  local runtime: Runtime = uv.timer_get_data(timer)
+  runtime.wake_armed = false
+  local failed = false
+  do drain_ready(runtime)
+  catch
+    failed = true
+    fail_runtime(runtime, error, traceback)
+  end
+  -- Undispatched entries remain linked and rooted even after delivery fails.
+  -- Preserve the first error if the replacement wake also fails.
+  if runtime.ready_head ~= nil and not runtime.wake_armed then
+    do arm_ready(runtime)
+    catch
+      failed = true
+      fail_runtime(runtime, error, traceback)
+    end
+  end
+  if failed then rethrow_failure(runtime.failure) end
+end
+
+local function ready_closed(timer: uv.timer_t)
+  uv.timer_set_data(timer, nil)
 end
 
 function Task:cancel(reason: CancellationReason<|B|>?)
-  if self.state:has_finished() or self.cancel_value ~= nil then return end
+  if self.phase == TASK_FINISHED or self.cancel_value ~= nil then return end
   local actual? = reason
   if actual == nil then actual = CancellationReason.simple("cancelled") end
   self.cancel_value = actual
@@ -628,61 +813,129 @@ function Task:resume(token: ResumeToken)
     if expected ~= nil then source = expected.source or source end
     raise "Task resume token mismatch (expected source: " .. source .. ")"
   end
-  if not self.suspended or self.resume_pending or self.state:has_finished() then return end
-  local task = self
+  if not self.suspended or self.resume_pending or self.phase == TASK_FINISHED then return end
   local wait = self.wait as Wait
+  enqueue_ready(self as Task<|value, value|>, READY_RESUME, wait)
   self.resume_pending = true
-  do
-    schedule(self.runtime, function () settle(wait, OUTCOME_SUCCESS, nil) end)
-  catch self.resume_pending = false; raise end
+end
+
+
+function Completion:context(number: integer): C
+  if self.epoch ~= number or number == 0 then raise "stale async operation number" end
+  if self.phase == WAIT_RETIRED then raise "retired async operation context" end
+  return self.stored_context
+end
+
+function Completion:resolve(number: integer, result: T)
+  if self.epoch ~= number or number == 0 then raise "stale async operation number" end
+  settle(self as Wait, OUTCOME_SUCCESS, result)
+end
+
+function Completion:reject(number: integer, error: E)
+  if self.epoch ~= number or number == 0 then raise "stale async operation number" end
+  settle(self as Wait, OUTCOME_ERROR, error)
+end
+
+function Completion:fatal(number: integer, error: value, trace: string)
+  if self.epoch ~= number or number == 0 then
+    if self.task.runtime.current_task ~= nil then raise "async fatal callback must run outside an async Task" end
+    fail_runtime(self.task.runtime, error, trace)
+    return
+  end
+  fatal(self as Wait, error, trace)
+end
+
+local function completion<|C, T, E|>(context: C, start: function (Completion<|C, T, E|>, integer): (uv.req_t?), policy: integer): Completion<|C, T, E|>
+  local task = running()
+  local saved? = task.completion
+  if saved == nil then
+    local created = Completion<|C, T, E|> {stored_context = context, register = start,
+      task = task, epoch = 0, policy = policy, phase = WAIT_REGISTERING,
+      kind = OUTCOME_SUCCESS, payload = nil, request = nil}
+    task.completion = created as Wait
+    return created
+  end
+  local reused = saved as Completion<|C, T, E|>
+  reused.epoch = 0
+  reused.stored_context = context
+  reused.register = start
+  reused.policy = policy
+  reused.phase = WAIT_REGISTERING
+  reused.kind = OUTCOME_SUCCESS
+  reused.payload = nil
+  reused.request = nil
+  return reused
+end
+
+function await_with<|C, T, E|>(context: C, start: function (Completion<|C, T, E|>, integer): (uv.req_t?)): Result<|T, E|>
+  return coroutine.yield(completion(context, start, WAIT_ORDINARY), ASYNC_TAG) as Result<|T, E|>
+end
+
+function await_cleanup_with<|C, T, E|>(context: C, start: function (Completion<|C, T, E|>, integer): (uv.req_t?)): Result<|T, E|>
+  return coroutine.yield(completion(context, start, WAIT_CLEANUP), ASYNC_TAG) as Result<|T, E|>
+end
+
+function await_cancellable_with<|C, T, E|>(context: C, start: function (Completion<|C, T, E|>, integer): (uv.req_t?)): CancellableResult<|T, E|>
+  return coroutine.yield(completion(context, start, WAIT_CANCELLABLE), ASYNC_TAG) as CancellableResult<|T, E|>
+end
+
+
+local function legacy_settle(done: Wait, number: integer, kind: integer, payload: value)
+  -- Old closure capabilities belonged to a retired fresh Wait, and duplicate
+  -- invocation kept this diagnostic even after a successor was registered.
+  if done.epoch ~= number then raise "async operation already settled" end
+  settle(done, kind, payload)
+end
+
+local function old_start<|T, E|>(done: Completion<|function (function (T): (), function (E): (), function (value, string): ()): (uv.req_t?), T, E|>, number: integer): uv.req_t?
+  local op = done:context(number)
+  return op(function (result: T) legacy_settle(done as Wait, number, OUTCOME_SUCCESS, result) end,
+      function (error: E) legacy_settle(done as Wait, number, OUTCOME_ERROR, error) end,
+      function (error: value, trace: string) done:fatal(number, error, trace) end)
+end
+
+local function old_void_start<|T, E|>(done: Completion<|function (function (T): (), function (E): (), function (value, string): ()): (), T, E|>, number: integer): uv.req_t?
+  local op = done:context(number)
+  op(function (result: T) legacy_settle(done as Wait, number, OUTCOME_SUCCESS, result) end,
+      function (error: E) legacy_settle(done as Wait, number, OUTCOME_ERROR, error) end,
+      function (error: value, trace: string) done:fatal(number, error, trace) end)
+  return nil
 end
 
 function await<|T, E|>(op: function (function (T): (), function (E): (), function (value, string): ()): ()): Result<|T, E|>
-  running()
-  local register = function (resolve: function (T): (), reject: function (E): (), fail: function (value, string): ()): uv.req_t?
-    op(resolve, reject, fail)
-    return nil
-  end
-  return coroutine.yield(Operation<|T, E|>(register, WAIT_ORDINARY), ASYNC_TAG) as Result<|T, E|>
+  return await_with<|function (function (T): (), function (E): (), function (value, string): ()): (), T, E|>(op, old_void_start)
 end
 
 function await_cleanup<|T, E|>(op: function (function (T): (), function (E): (), function (value, string): ()): ()): Result<|T, E|>
-  running()
-  local register = function (resolve: function (T): (), reject: function (E): (), fail: function (value, string): ()): uv.req_t?
-    op(resolve, reject, fail)
-    return nil
-  end
-  return coroutine.yield(Operation<|T, E|>(register, WAIT_CLEANUP), ASYNC_TAG) as Result<|T, E|>
+  return await_cleanup_with<|function (function (T): (), function (E): (), function (value, string): ()): (), T, E|>(op, old_void_start)
 end
 
 function await_cancellable<|T, E|>(op: function (function (T): (), function (E): (), function (value, string): ()): (uv.req_t?)): CancellableResult<|T, E|>
-  running()
-  return coroutine.yield(Operation<|T, E|>(op, WAIT_CANCELLABLE), ASYNC_TAG) as CancellableResult<|T, E|>
+  return await_cancellable_with<|function (function (T): (), function (E): (), function (value, string): ()): (uv.req_t?), T, E|>(op, old_start)
 end
 
 function yield()
-  local result = await<|value, value|>(function (resolve: function (value): (), _: function (value): (), fail: function (value, string): ())
-    schedule(active_runtime as Runtime, function ()
-      do resolve(nil)
-      catch fail(error, traceback); raise end
-    end)
-  end)
-  case result
-  when error(failure) then raise failure
-  else
-  end
+  running()
+  coroutine.yield(YIELD_TAG, ASYNC_TAG)
+end
+
+local function start_suspend(done: Completion<|ResumeToken, value, value|>, number: integer): uv.req_t?
+  local token = done:context(number)
+  local task = done.task
+  task.suspended = true
+  task.resume_token = token
+  task.resume_pending = false
+  return nil
 end
 
 function suspend(token: ResumeToken, cancel_action: (function (): ())?)
   local task = running()
-  local register = function (_resolve: function (value): (), _reject: function (value): (), _fail: function (value, string): ()): uv.req_t?
-    task.suspended = true
-    task.resume_token = token
-    task.resume_pending = false
-    task.suspend_cancel = cancel_action
-    return nil
-  end
-  local result = coroutine.yield(Operation<|value, value|>(register, WAIT_ORDINARY), ASYNC_TAG) as Result<|value, value|>
+  -- The token remains unpublished until registration accepts this suspension.
+  -- Even a finalizer during Completion construction must see a wrong-time
+  -- resume as a mismatch. Rejection and setup errors clear the staged action.
+  task.suspend_cancel = cancel_action
+  defer clear_suspension(task)
+  local result = await_with<|ResumeToken, value, value|>(token, start_suspend)
   case result
   when error(failure) then raise failure
   else
@@ -693,31 +946,39 @@ function run<|A, B|>(func: function (): (A)): Task<|A, B|>
   local runtime = ensure_runtime()
   if runtime.closing or runtime.exit_code ~= nil then raise "cannot start a Task while async Runtime is shutting down" end
   local root = coroutine.create(function (_: value): value return func() end, ASYNC_TAG)
-  local task = Task<|A, B|> {root = root, runtime = runtime, state = TaskStatus.ready(),
-    cancel_value = nil, wait = nil, root_index = runtime.next_task,
+  local task = Task<|A, B|> {root = root, runtime = runtime, phase = TASK_READY, state = nil,
+    epoch = 0, ready_next = nil, ready_queued = false, ready_kind = READY_START,
+    ready_epoch = 0, ready_wait = nil,
+    cancel_value = nil, wait = nil, completion = nil, root_index = runtime.next_task,
     terminal_registrations = {}, suspended = false, resume_token = nil,
     resume_pending = false, suspend_cancel = nil}
   local erased = task as Task<|value, value|>
   runtime.tasks[runtime.next_task] = erased
   runtime.next_task = runtime.next_task + 1
-  do schedule(runtime, function ()
-    local reason? = erased.cancel_value
-    if reason ~= nil then advance_task(erased, true, reason)
-    else advance_task(erased, false, nil) end
-  end)
+  do enqueue_ready(erased, READY_START, nil)
   catch finish_failure(erased, error, traceback); raise end
   return task
 end
 
 local function close_handles(runtime: Runtime)
   uv.walk(runtime.loop, function (handle: uv.handle_t, _: value)
-    if not uv.is_closing(handle) then uv.close(handle) end
+    if not uv.is_closing(handle) then
+      case handle
+      when timer(owner) then
+        if owner == runtime.wake then uv.timer_close(owner, ready_closed)
+        else uv.close(handle) end
+      else uv.close(handle)
+      end
+    end
   end)
 end
 
 local function fail_runtime(runtime: Runtime, error: value, trace: string)
   if runtime.failure == nil then runtime.failure = Error(error, trace) end
   runtime.closing = true
+  -- The failing callback may have stopped or closed the borrowed loop's wake
+  -- handle. Revalidate it before the driver can block on unrelated handles.
+  runtime.wake_armed = false
   if runtime.driving then uv.stop(runtime.loop) end
 end
 
@@ -736,7 +997,7 @@ local function unwind_orphans(runtime: Runtime)
   local stranded: {Orphan} = {}
   for index = 1, runtime.next_task - 1 do
     local task? = runtime.tasks[index]
-    if task ~= nil then stranded[#stranded + 1] = Orphan(task, task.wait) end
+    if task ~= nil then stranded[#stranded + 1] = Orphan(task, task.wait, task.epoch) end
   end
   -- Cancellation may queue legitimate explicit wakes or settle another
   -- captured wait. Never reinterpret a newer wait as one from this snapshot.
@@ -745,9 +1006,10 @@ local function unwind_orphans(runtime: Runtime)
     local orphan = stranded[index]
     local task = orphan.task
     local wait? = orphan.wait
-    if not task.state:has_finished() and task.wait == wait and not task.resume_pending and
+    if task.phase ~= TASK_FINISHED and task.epoch == orphan.epoch and
+        task.wait == wait and not task.ready_queued and not task.resume_pending and
         (wait == nil or wait.phase == WAIT_PENDING) then
-      if wait ~= nil then wait.phase = WAIT_RETIRED; wait.request = nil end
+      if wait ~= nil then wait.phase = WAIT_RETIRED; release_completion(wait) end
       task.wait = nil
       clear_suspension(task)
       local failure = runtime.failure as Error
@@ -766,16 +1028,37 @@ function loop()
   defer runtime.driving = false
   while true do
     if runtime.failure ~= nil then cancel_shutdown_tasks(runtime, nil) end
+    if runtime.ready_head ~= nil and not runtime.wake_armed then
+      local wake_failed = false
+      do arm_ready(runtime)
+      catch
+        wake_failed = true
+        fail_runtime(runtime, error, traceback)
+      end
+      if wake_failed then
+        cancel_shutdown_tasks(runtime, nil)
+        -- An unrelated referenced handle may need one of these continuations
+        -- to close it. Recover ready work before a blocking uv.run, not only
+        -- once native liveness reaches zero. Pending native waits stay owned.
+        do drain_ready(runtime) catch fail_runtime(runtime, error, traceback) end
+      end
+    end
     -- Task-owned cleanup may have accepted a handle-based wait. Leave its
     -- completion and scheduler wakes intact until every Task has unwound.
-    if not has_tasks(runtime) then
+    if not has_tasks(runtime) and runtime.ready_head == nil then
       runtime.closing = true
       do close_handles(runtime) catch fail_runtime(runtime, error, traceback) end
     end
-    do uv.run(runtime.loop)
+    local mode = uv.RUN_DEFAULT
+    if runtime.ready_head ~= nil and not runtime.wake_armed then mode = uv.RUN_NOWAIT end
+    do uv.run(runtime.loop, mode)
     catch fail_runtime(runtime, error, traceback) end
     if not uv.loop_alive(runtime.loop) then
-      if has_tasks(runtime) then
+      if runtime.ready_head ~= nil then
+        -- Accepted work remains in the ready queue. The next outer iteration
+        -- rearms it or recovers a bounded batch before classifying orphans.
+        runtime.wake_armed = false
+      elseif has_tasks(runtime) then
         if runtime.failure == nil then fail_runtime(runtime, "libuv loop became idle while async Tasks were waiting", "") end
         unwind_orphans(runtime)
       else
@@ -785,6 +1068,7 @@ function loop()
         if not uv.loop_alive(runtime.loop) then
           local status = uv.loop_close(runtime.loop)
           if status == 0 then
+            uv.timer_set_data(runtime.wake, nil)
             active_runtime = nil
             local failure? = runtime.failure
             if failure ~= nil then rethrow_failure(failure) end
@@ -801,19 +1085,45 @@ function version(): string
   return uv.version_string()
 end
 
+local record ForeignWork
+  local request: uv.work_t
+  local worker: foreign function (*void): void
+  local argument: foreign *void
+  local done: Completion<|ForeignWork, value, OperationError|>?
+  local number: integer
+end
+
+local function foreign_work_completed(request: uv.work_t, status: integer)
+  local work: ForeignWork = request:get_data()
+  local done = work.done as Completion<|ForeignWork, value, OperationError|>
+  local number = work.number
+  request:set_data(nil)
+  work.done = nil
+  do
+    if status < 0 then done:reject(number, operation_error(status, "async.run_foreign"))
+    else done:resolve(number, nil) end
+  catch done:fatal(number, error, traceback); raise end
+end
+
+local function start_foreign_work(done: Completion<|ForeignWork, value, OperationError|>, number: integer): uv.req_t?
+  local work = done:context(number)
+  work.done = done
+  work.number = number
+  work.request:set_data(work)
+  local status = uv.queue_work(current_loop(), work.request, work.worker,
+      work.argument, foreign_work_completed, nil)
+  if status < 0 then
+    work.request:set_data(nil)
+    work.done = nil
+    done:reject(number, operation_error(status, "async.run_foreign"))
+  end
+  return nil
+end
+
 function run_foreign(f: foreign function (*void): void, arg: foreign *void)
   if not f then raise "async.run_foreign callback must not be NULL" end
-  local request = uv.work_t.new()
-  local result = await<|value, OperationError|>(function (resolve: function (value): (), reject: function (OperationError): (), fail: function (value, string): ())
-    local callback = function (_: uv.work_t, status: integer)
-      do
-        if status < 0 then reject(operation_error(status, "async.run_foreign"))
-        else resolve(nil) end
-      catch fail(error, traceback); raise end
-    end
-    local status = uv.queue_work(current_loop(), request, f, arg, callback, nil)
-    if status < 0 then reject(operation_error(status, "async.run_foreign")) end
-  end)
+  local work = ForeignWork(uv.work_t.new(), f, arg, nil, 0)
+  local result = await_with<|ForeignWork, value, OperationError|>(work, start_foreign_work)
   case result
   when error(failure) then raise failure
   else
@@ -1004,20 +1314,24 @@ function any_two<|A1, B1, A2, B2|>(
   reject_running(current, second)
 
   local terminal_count = 0
-  case first:status()
-  when succeeded(result) then return AnyTwoResult<|A1, A2|>.first(result)
-  when failed() then
-    terminal_count = terminal_count + 1
-  when cancelled() then
-    terminal_count = terminal_count + 1
+  if first.phase == TASK_FINISHED then
+    case first:status()
+    when succeeded(result) then return AnyTwoResult<|A1, A2|>.first(result)
+    when failed() then
+      terminal_count = terminal_count + 1
+    when cancelled() then
+      terminal_count = terminal_count + 1
+    end
   end
 
-  case second:status()
-  when succeeded(result) then return AnyTwoResult<|A1, A2|>.second(result)
-  when failed() then
-    terminal_count = terminal_count + 1
-  when cancelled() then
-    terminal_count = terminal_count + 1
+  if second.phase == TASK_FINISHED then
+    case second:status()
+    when succeeded(result) then return AnyTwoResult<|A1, A2|>.second(result)
+    when failed() then
+      terminal_count = terminal_count + 1
+    when cancelled() then
+      terminal_count = terminal_count + 1
+    end
   end
 
   if terminal_count == 2 then return AnyTwoResult<|A1, A2|>.none() end
@@ -1091,28 +1405,34 @@ function any_three<|A1, B1, A2, B2, A3, B3|>(
   reject_running(current, third)
 
   local terminal_count = 0
-  case first:status()
-  when succeeded(result) then return AnyThreeResult<|A1, A2, A3|>.first(result)
-  when failed() then
-    terminal_count = terminal_count + 1
-  when cancelled() then
-    terminal_count = terminal_count + 1
+  if first.phase == TASK_FINISHED then
+    case first:status()
+    when succeeded(result) then return AnyThreeResult<|A1, A2, A3|>.first(result)
+    when failed() then
+      terminal_count = terminal_count + 1
+    when cancelled() then
+      terminal_count = terminal_count + 1
+    end
   end
 
-  case second:status()
-  when succeeded(result) then return AnyThreeResult<|A1, A2, A3|>.second(result)
-  when failed() then
-    terminal_count = terminal_count + 1
-  when cancelled() then
-    terminal_count = terminal_count + 1
+  if second.phase == TASK_FINISHED then
+    case second:status()
+    when succeeded(result) then return AnyThreeResult<|A1, A2, A3|>.second(result)
+    when failed() then
+      terminal_count = terminal_count + 1
+    when cancelled() then
+      terminal_count = terminal_count + 1
+    end
   end
 
-  case third:status()
-  when succeeded(result) then return AnyThreeResult<|A1, A2, A3|>.third(result)
-  when failed() then
-    terminal_count = terminal_count + 1
-  when cancelled() then
-    terminal_count = terminal_count + 1
+  if third.phase == TASK_FINISHED then
+    case third:status()
+    when succeeded(result) then return AnyThreeResult<|A1, A2, A3|>.third(result)
+    when failed() then
+      terminal_count = terminal_count + 1
+    when cancelled() then
+      terminal_count = terminal_count + 1
+    end
   end
 
   if terminal_count == 3 then return AnyThreeResult<|A1, A2, A3|>.none() end
@@ -1212,36 +1532,44 @@ function any_four<|A1, B1, A2, B2, A3, B3, A4, B4|>(
   reject_running(current, fourth)
 
   local terminal_count = 0
-  case first:status()
-  when succeeded(result) then return AnyFourResult<|A1, A2, A3, A4|>.first(result)
-  when failed() then
-    terminal_count = terminal_count + 1
-  when cancelled() then
-    terminal_count = terminal_count + 1
+  if first.phase == TASK_FINISHED then
+    case first:status()
+    when succeeded(result) then return AnyFourResult<|A1, A2, A3, A4|>.first(result)
+    when failed() then
+      terminal_count = terminal_count + 1
+    when cancelled() then
+      terminal_count = terminal_count + 1
+    end
   end
 
-  case second:status()
-  when succeeded(result) then return AnyFourResult<|A1, A2, A3, A4|>.second(result)
-  when failed() then
-    terminal_count = terminal_count + 1
-  when cancelled() then
-    terminal_count = terminal_count + 1
+  if second.phase == TASK_FINISHED then
+    case second:status()
+    when succeeded(result) then return AnyFourResult<|A1, A2, A3, A4|>.second(result)
+    when failed() then
+      terminal_count = terminal_count + 1
+    when cancelled() then
+      terminal_count = terminal_count + 1
+    end
   end
 
-  case third:status()
-  when succeeded(result) then return AnyFourResult<|A1, A2, A3, A4|>.third(result)
-  when failed() then
-    terminal_count = terminal_count + 1
-  when cancelled() then
-    terminal_count = terminal_count + 1
+  if third.phase == TASK_FINISHED then
+    case third:status()
+    when succeeded(result) then return AnyFourResult<|A1, A2, A3, A4|>.third(result)
+    when failed() then
+      terminal_count = terminal_count + 1
+    when cancelled() then
+      terminal_count = terminal_count + 1
+    end
   end
 
-  case fourth:status()
-  when succeeded(result) then return AnyFourResult<|A1, A2, A3, A4|>.fourth(result)
-  when failed() then
-    terminal_count = terminal_count + 1
-  when cancelled() then
-    terminal_count = terminal_count + 1
+  if fourth.phase == TASK_FINISHED then
+    case fourth:status()
+    when succeeded(result) then return AnyFourResult<|A1, A2, A3, A4|>.fourth(result)
+    when failed() then
+      terminal_count = terminal_count + 1
+    when cancelled() then
+      terminal_count = terminal_count + 1
+    end
   end
 
   if terminal_count == 4 then return AnyFourResult<|A1, A2, A3, A4|>.none() end
@@ -1368,44 +1696,54 @@ function any_five<|A1, B1, A2, B2, A3, B3, A4, B4, A5, B5|>(
   reject_running(current, fifth)
 
   local terminal_count = 0
-  case first:status()
-  when succeeded(result) then return AnyFiveResult<|A1, A2, A3, A4, A5|>.first(result)
-  when failed() then
-    terminal_count = terminal_count + 1
-  when cancelled() then
-    terminal_count = terminal_count + 1
+  if first.phase == TASK_FINISHED then
+    case first:status()
+    when succeeded(result) then return AnyFiveResult<|A1, A2, A3, A4, A5|>.first(result)
+    when failed() then
+      terminal_count = terminal_count + 1
+    when cancelled() then
+      terminal_count = terminal_count + 1
+    end
   end
 
-  case second:status()
-  when succeeded(result) then return AnyFiveResult<|A1, A2, A3, A4, A5|>.second(result)
-  when failed() then
-    terminal_count = terminal_count + 1
-  when cancelled() then
-    terminal_count = terminal_count + 1
+  if second.phase == TASK_FINISHED then
+    case second:status()
+    when succeeded(result) then return AnyFiveResult<|A1, A2, A3, A4, A5|>.second(result)
+    when failed() then
+      terminal_count = terminal_count + 1
+    when cancelled() then
+      terminal_count = terminal_count + 1
+    end
   end
 
-  case third:status()
-  when succeeded(result) then return AnyFiveResult<|A1, A2, A3, A4, A5|>.third(result)
-  when failed() then
-    terminal_count = terminal_count + 1
-  when cancelled() then
-    terminal_count = terminal_count + 1
+  if third.phase == TASK_FINISHED then
+    case third:status()
+    when succeeded(result) then return AnyFiveResult<|A1, A2, A3, A4, A5|>.third(result)
+    when failed() then
+      terminal_count = terminal_count + 1
+    when cancelled() then
+      terminal_count = terminal_count + 1
+    end
   end
 
-  case fourth:status()
-  when succeeded(result) then return AnyFiveResult<|A1, A2, A3, A4, A5|>.fourth(result)
-  when failed() then
-    terminal_count = terminal_count + 1
-  when cancelled() then
-    terminal_count = terminal_count + 1
+  if fourth.phase == TASK_FINISHED then
+    case fourth:status()
+    when succeeded(result) then return AnyFiveResult<|A1, A2, A3, A4, A5|>.fourth(result)
+    when failed() then
+      terminal_count = terminal_count + 1
+    when cancelled() then
+      terminal_count = terminal_count + 1
+    end
   end
 
-  case fifth:status()
-  when succeeded(result) then return AnyFiveResult<|A1, A2, A3, A4, A5|>.fifth(result)
-  when failed() then
-    terminal_count = terminal_count + 1
-  when cancelled() then
-    terminal_count = terminal_count + 1
+  if fifth.phase == TASK_FINISHED then
+    case fifth:status()
+    when succeeded(result) then return AnyFiveResult<|A1, A2, A3, A4, A5|>.fifth(result)
+    when failed() then
+      terminal_count = terminal_count + 1
+    when cancelled() then
+      terminal_count = terminal_count + 1
+    end
   end
 
   if terminal_count == 5 then return AnyFiveResult<|A1, A2, A3, A4, A5|>.none() end
@@ -1551,19 +1889,17 @@ function race_two<|A1, B1, A2, B2|>(
   reject_running(current, first)
   reject_running(current, second)
 
-  local first_status = first:status()
-  if first_status:has_finished() then
-    return RaceTwoResult<|A1, B1, A2, B2|>.first(first_status)
+  if first.phase == TASK_FINISHED then
+    return RaceTwoResult<|A1, B1, A2, B2|>.first(first:status())
   end
-  local second_status = second:status()
-  if second_status:has_finished() then
-    return RaceTwoResult<|A1, B1, A2, B2|>.second(second_status)
+  if second.phase == TASK_FINISHED then
+    return RaceTwoResult<|A1, B1, A2, B2|>.second(second:status())
   end
 
   local resume_token = ResumeToken("async.race_two")
   local waiting = current
   local winner = 0
-  local result = TaskStatus<|value, value|>.ready()
+  local result: TaskStatus<|value, value|>? = nil
 
   local first_listener = function (status: TaskStatus<|A1, B1|>)
     if winner ~= 0 then return end
@@ -1599,23 +1935,20 @@ function race_three<|A1, B1, A2, B2, A3, B3|>(
   reject_running(current, second)
   reject_running(current, third)
 
-  local first_status = first:status()
-  if first_status:has_finished() then
-    return RaceThreeResult<|A1, B1, A2, B2, A3, B3|>.first(first_status)
+  if first.phase == TASK_FINISHED then
+    return RaceThreeResult<|A1, B1, A2, B2, A3, B3|>.first(first:status())
   end
-  local second_status = second:status()
-  if second_status:has_finished() then
-    return RaceThreeResult<|A1, B1, A2, B2, A3, B3|>.second(second_status)
+  if second.phase == TASK_FINISHED then
+    return RaceThreeResult<|A1, B1, A2, B2, A3, B3|>.second(second:status())
   end
-  local third_status = third:status()
-  if third_status:has_finished() then
-    return RaceThreeResult<|A1, B1, A2, B2, A3, B3|>.third(third_status)
+  if third.phase == TASK_FINISHED then
+    return RaceThreeResult<|A1, B1, A2, B2, A3, B3|>.third(third:status())
   end
 
   local resume_token = ResumeToken("async.race_three")
   local waiting = current
   local winner = 0
-  local result = TaskStatus<|value, value|>.ready()
+  local result: TaskStatus<|value, value|>? = nil
 
   local first_listener = function (status: TaskStatus<|A1, B1|>)
     if winner ~= 0 then return end
@@ -1664,27 +1997,23 @@ function race_four<|A1, B1, A2, B2, A3, B3, A4, B4|>(
   reject_running(current, third)
   reject_running(current, fourth)
 
-  local first_status = first:status()
-  if first_status:has_finished() then
-    return RaceFourResult<|A1, B1, A2, B2, A3, B3, A4, B4|>.first(first_status)
+  if first.phase == TASK_FINISHED then
+    return RaceFourResult<|A1, B1, A2, B2, A3, B3, A4, B4|>.first(first:status())
   end
-  local second_status = second:status()
-  if second_status:has_finished() then
-    return RaceFourResult<|A1, B1, A2, B2, A3, B3, A4, B4|>.second(second_status)
+  if second.phase == TASK_FINISHED then
+    return RaceFourResult<|A1, B1, A2, B2, A3, B3, A4, B4|>.second(second:status())
   end
-  local third_status = third:status()
-  if third_status:has_finished() then
-    return RaceFourResult<|A1, B1, A2, B2, A3, B3, A4, B4|>.third(third_status)
+  if third.phase == TASK_FINISHED then
+    return RaceFourResult<|A1, B1, A2, B2, A3, B3, A4, B4|>.third(third:status())
   end
-  local fourth_status = fourth:status()
-  if fourth_status:has_finished() then
-    return RaceFourResult<|A1, B1, A2, B2, A3, B3, A4, B4|>.fourth(fourth_status)
+  if fourth.phase == TASK_FINISHED then
+    return RaceFourResult<|A1, B1, A2, B2, A3, B3, A4, B4|>.fourth(fourth:status())
   end
 
   local resume_token = ResumeToken("async.race_four")
   local waiting = current
   local winner = 0
-  local result = TaskStatus<|value, value|>.ready()
+  local result: TaskStatus<|value, value|>? = nil
 
   local first_listener = function (status: TaskStatus<|A1, B1|>)
     if winner ~= 0 then return end
@@ -1747,31 +2076,26 @@ function race_five<|A1, B1, A2, B2, A3, B3, A4, B4, A5, B5|>(
   reject_running(current, fourth)
   reject_running(current, fifth)
 
-  local first_status = first:status()
-  if first_status:has_finished() then
-    return RaceFiveResult<|A1, B1, A2, B2, A3, B3, A4, B4, A5, B5|>.first(first_status)
+  if first.phase == TASK_FINISHED then
+    return RaceFiveResult<|A1, B1, A2, B2, A3, B3, A4, B4, A5, B5|>.first(first:status())
   end
-  local second_status = second:status()
-  if second_status:has_finished() then
-    return RaceFiveResult<|A1, B1, A2, B2, A3, B3, A4, B4, A5, B5|>.second(second_status)
+  if second.phase == TASK_FINISHED then
+    return RaceFiveResult<|A1, B1, A2, B2, A3, B3, A4, B4, A5, B5|>.second(second:status())
   end
-  local third_status = third:status()
-  if third_status:has_finished() then
-    return RaceFiveResult<|A1, B1, A2, B2, A3, B3, A4, B4, A5, B5|>.third(third_status)
+  if third.phase == TASK_FINISHED then
+    return RaceFiveResult<|A1, B1, A2, B2, A3, B3, A4, B4, A5, B5|>.third(third:status())
   end
-  local fourth_status = fourth:status()
-  if fourth_status:has_finished() then
-    return RaceFiveResult<|A1, B1, A2, B2, A3, B3, A4, B4, A5, B5|>.fourth(fourth_status)
+  if fourth.phase == TASK_FINISHED then
+    return RaceFiveResult<|A1, B1, A2, B2, A3, B3, A4, B4, A5, B5|>.fourth(fourth:status())
   end
-  local fifth_status = fifth:status()
-  if fifth_status:has_finished() then
-    return RaceFiveResult<|A1, B1, A2, B2, A3, B3, A4, B4, A5, B5|>.fifth(fifth_status)
+  if fifth.phase == TASK_FINISHED then
+    return RaceFiveResult<|A1, B1, A2, B2, A3, B3, A4, B4, A5, B5|>.fifth(fifth:status())
   end
 
   local resume_token = ResumeToken("async.race_five")
   local waiting = current
   local winner = 0
-  local result = TaskStatus<|value, value|>.ready()
+  local result: TaskStatus<|value, value|>? = nil
 
   local first_listener = function (status: TaskStatus<|A1, B1|>)
     if winner ~= 0 then return end
@@ -1842,23 +2166,27 @@ function all_two<|A1, B1, A2, B2|>(
 
   local completed = 0
   local first_result: value = nil
-  local first_status = first:status()
-  case first_status
-  when succeeded(result) then
-    first_result = result
-    completed = completed + 1
-  when failed() then raise AllTwoError<|A1, B1, A2, B2|>.first(first_status)
-  when cancelled() then raise AllTwoError<|A1, B1, A2, B2|>.first(first_status)
+  if first.phase == TASK_FINISHED then
+    local first_status = first:status()
+    case first_status
+    when succeeded(result) then
+      first_result = result
+      completed = completed + 1
+    when failed() then raise AllTwoError<|A1, B1, A2, B2|>.first(first_status)
+    when cancelled() then raise AllTwoError<|A1, B1, A2, B2|>.first(first_status)
+    end
   end
 
   local second_result: value = nil
-  local second_status = second:status()
-  case second_status
-  when succeeded(result) then
-    second_result = result
-    completed = completed + 1
-  when failed() then raise AllTwoError<|A1, B1, A2, B2|>.second(second_status)
-  when cancelled() then raise AllTwoError<|A1, B1, A2, B2|>.second(second_status)
+  if second.phase == TASK_FINISHED then
+    local second_status = second:status()
+    case second_status
+    when succeeded(result) then
+      second_result = result
+      completed = completed + 1
+    when failed() then raise AllTwoError<|A1, B1, A2, B2|>.second(second_status)
+    when cancelled() then raise AllTwoError<|A1, B1, A2, B2|>.second(second_status)
+    end
   end
 
   if completed == 2 then
@@ -1868,7 +2196,7 @@ function all_two<|A1, B1, A2, B2|>(
   local resume_token = ResumeToken("async.all_two")
   local waiting = current
   local rejected = 0
-  local rejection = TaskStatus<|value, value|>.ready()
+  local rejection: TaskStatus<|value, value|>? = nil
 
   local first_listener = function (status: TaskStatus<|A1, B1|>)
     if rejected ~= 0 then return end
@@ -1931,33 +2259,39 @@ function all_three<|A1, B1, A2, B2, A3, B3|>(
 
   local completed = 0
   local first_result: value = nil
-  local first_status = first:status()
-  case first_status
-  when succeeded(result) then
-    first_result = result
-    completed = completed + 1
-  when failed() then raise AllThreeError<|A1, B1, A2, B2, A3, B3|>.first(first_status)
-  when cancelled() then raise AllThreeError<|A1, B1, A2, B2, A3, B3|>.first(first_status)
+  if first.phase == TASK_FINISHED then
+    local first_status = first:status()
+    case first_status
+    when succeeded(result) then
+      first_result = result
+      completed = completed + 1
+    when failed() then raise AllThreeError<|A1, B1, A2, B2, A3, B3|>.first(first_status)
+    when cancelled() then raise AllThreeError<|A1, B1, A2, B2, A3, B3|>.first(first_status)
+    end
   end
 
   local second_result: value = nil
-  local second_status = second:status()
-  case second_status
-  when succeeded(result) then
-    second_result = result
-    completed = completed + 1
-  when failed() then raise AllThreeError<|A1, B1, A2, B2, A3, B3|>.second(second_status)
-  when cancelled() then raise AllThreeError<|A1, B1, A2, B2, A3, B3|>.second(second_status)
+  if second.phase == TASK_FINISHED then
+    local second_status = second:status()
+    case second_status
+    when succeeded(result) then
+      second_result = result
+      completed = completed + 1
+    when failed() then raise AllThreeError<|A1, B1, A2, B2, A3, B3|>.second(second_status)
+    when cancelled() then raise AllThreeError<|A1, B1, A2, B2, A3, B3|>.second(second_status)
+    end
   end
 
   local third_result: value = nil
-  local third_status = third:status()
-  case third_status
-  when succeeded(result) then
-    third_result = result
-    completed = completed + 1
-  when failed() then raise AllThreeError<|A1, B1, A2, B2, A3, B3|>.third(third_status)
-  when cancelled() then raise AllThreeError<|A1, B1, A2, B2, A3, B3|>.third(third_status)
+  if third.phase == TASK_FINISHED then
+    local third_status = third:status()
+    case third_status
+    when succeeded(result) then
+      third_result = result
+      completed = completed + 1
+    when failed() then raise AllThreeError<|A1, B1, A2, B2, A3, B3|>.third(third_status)
+    when cancelled() then raise AllThreeError<|A1, B1, A2, B2, A3, B3|>.third(third_status)
+    end
   end
 
   if completed == 3 then
@@ -1968,7 +2302,7 @@ function all_three<|A1, B1, A2, B2, A3, B3|>(
   local resume_token = ResumeToken("async.all_three")
   local waiting = current
   local rejected = 0
-  local rejection = TaskStatus<|value, value|>.ready()
+  local rejection: TaskStatus<|value, value|>? = nil
 
   local first_listener = function (status: TaskStatus<|A1, B1|>)
     if rejected ~= 0 then return end
@@ -2056,43 +2390,51 @@ function all_four<|A1, B1, A2, B2, A3, B3, A4, B4|>(
 
   local completed = 0
   local first_result: value = nil
-  local first_status = first:status()
-  case first_status
-  when succeeded(result) then
-    first_result = result
-    completed = completed + 1
-  when failed() then raise AllFourError<|A1, B1, A2, B2, A3, B3, A4, B4|>.first(first_status)
-  when cancelled() then raise AllFourError<|A1, B1, A2, B2, A3, B3, A4, B4|>.first(first_status)
+  if first.phase == TASK_FINISHED then
+    local first_status = first:status()
+    case first_status
+    when succeeded(result) then
+      first_result = result
+      completed = completed + 1
+    when failed() then raise AllFourError<|A1, B1, A2, B2, A3, B3, A4, B4|>.first(first_status)
+    when cancelled() then raise AllFourError<|A1, B1, A2, B2, A3, B3, A4, B4|>.first(first_status)
+    end
   end
 
   local second_result: value = nil
-  local second_status = second:status()
-  case second_status
-  when succeeded(result) then
-    second_result = result
-    completed = completed + 1
-  when failed() then raise AllFourError<|A1, B1, A2, B2, A3, B3, A4, B4|>.second(second_status)
-  when cancelled() then raise AllFourError<|A1, B1, A2, B2, A3, B3, A4, B4|>.second(second_status)
+  if second.phase == TASK_FINISHED then
+    local second_status = second:status()
+    case second_status
+    when succeeded(result) then
+      second_result = result
+      completed = completed + 1
+    when failed() then raise AllFourError<|A1, B1, A2, B2, A3, B3, A4, B4|>.second(second_status)
+    when cancelled() then raise AllFourError<|A1, B1, A2, B2, A3, B3, A4, B4|>.second(second_status)
+    end
   end
 
   local third_result: value = nil
-  local third_status = third:status()
-  case third_status
-  when succeeded(result) then
-    third_result = result
-    completed = completed + 1
-  when failed() then raise AllFourError<|A1, B1, A2, B2, A3, B3, A4, B4|>.third(third_status)
-  when cancelled() then raise AllFourError<|A1, B1, A2, B2, A3, B3, A4, B4|>.third(third_status)
+  if third.phase == TASK_FINISHED then
+    local third_status = third:status()
+    case third_status
+    when succeeded(result) then
+      third_result = result
+      completed = completed + 1
+    when failed() then raise AllFourError<|A1, B1, A2, B2, A3, B3, A4, B4|>.third(third_status)
+    when cancelled() then raise AllFourError<|A1, B1, A2, B2, A3, B3, A4, B4|>.third(third_status)
+    end
   end
 
   local fourth_result: value = nil
-  local fourth_status = fourth:status()
-  case fourth_status
-  when succeeded(result) then
-    fourth_result = result
-    completed = completed + 1
-  when failed() then raise AllFourError<|A1, B1, A2, B2, A3, B3, A4, B4|>.fourth(fourth_status)
-  when cancelled() then raise AllFourError<|A1, B1, A2, B2, A3, B3, A4, B4|>.fourth(fourth_status)
+  if fourth.phase == TASK_FINISHED then
+    local fourth_status = fourth:status()
+    case fourth_status
+    when succeeded(result) then
+      fourth_result = result
+      completed = completed + 1
+    when failed() then raise AllFourError<|A1, B1, A2, B2, A3, B3, A4, B4|>.fourth(fourth_status)
+    when cancelled() then raise AllFourError<|A1, B1, A2, B2, A3, B3, A4, B4|>.fourth(fourth_status)
+    end
   end
 
   if completed == 4 then
@@ -2103,7 +2445,7 @@ function all_four<|A1, B1, A2, B2, A3, B3, A4, B4|>(
   local resume_token = ResumeToken("async.all_four")
   local waiting = current
   local rejected = 0
-  local rejection = TaskStatus<|value, value|>.ready()
+  local rejection: TaskStatus<|value, value|>? = nil
 
   local first_listener = function (status: TaskStatus<|A1, B1|>)
     if rejected ~= 0 then return end
@@ -2216,53 +2558,63 @@ function all_five<|A1, B1, A2, B2, A3, B3, A4, B4, A5, B5|>(
 
   local completed = 0
   local first_result: value = nil
-  local first_status = first:status()
-  case first_status
-  when succeeded(result) then
-    first_result = result
-    completed = completed + 1
-  when failed() then raise AllFiveError<|A1, B1, A2, B2, A3, B3, A4, B4, A5, B5|>.first(first_status)
-  when cancelled() then raise AllFiveError<|A1, B1, A2, B2, A3, B3, A4, B4, A5, B5|>.first(first_status)
+  if first.phase == TASK_FINISHED then
+    local first_status = first:status()
+    case first_status
+    when succeeded(result) then
+      first_result = result
+      completed = completed + 1
+    when failed() then raise AllFiveError<|A1, B1, A2, B2, A3, B3, A4, B4, A5, B5|>.first(first_status)
+    when cancelled() then raise AllFiveError<|A1, B1, A2, B2, A3, B3, A4, B4, A5, B5|>.first(first_status)
+    end
   end
 
   local second_result: value = nil
-  local second_status = second:status()
-  case second_status
-  when succeeded(result) then
-    second_result = result
-    completed = completed + 1
-  when failed() then raise AllFiveError<|A1, B1, A2, B2, A3, B3, A4, B4, A5, B5|>.second(second_status)
-  when cancelled() then raise AllFiveError<|A1, B1, A2, B2, A3, B3, A4, B4, A5, B5|>.second(second_status)
+  if second.phase == TASK_FINISHED then
+    local second_status = second:status()
+    case second_status
+    when succeeded(result) then
+      second_result = result
+      completed = completed + 1
+    when failed() then raise AllFiveError<|A1, B1, A2, B2, A3, B3, A4, B4, A5, B5|>.second(second_status)
+    when cancelled() then raise AllFiveError<|A1, B1, A2, B2, A3, B3, A4, B4, A5, B5|>.second(second_status)
+    end
   end
 
   local third_result: value = nil
-  local third_status = third:status()
-  case third_status
-  when succeeded(result) then
-    third_result = result
-    completed = completed + 1
-  when failed() then raise AllFiveError<|A1, B1, A2, B2, A3, B3, A4, B4, A5, B5|>.third(third_status)
-  when cancelled() then raise AllFiveError<|A1, B1, A2, B2, A3, B3, A4, B4, A5, B5|>.third(third_status)
+  if third.phase == TASK_FINISHED then
+    local third_status = third:status()
+    case third_status
+    when succeeded(result) then
+      third_result = result
+      completed = completed + 1
+    when failed() then raise AllFiveError<|A1, B1, A2, B2, A3, B3, A4, B4, A5, B5|>.third(third_status)
+    when cancelled() then raise AllFiveError<|A1, B1, A2, B2, A3, B3, A4, B4, A5, B5|>.third(third_status)
+    end
   end
 
   local fourth_result: value = nil
-  local fourth_status = fourth:status()
-  case fourth_status
-  when succeeded(result) then
-    fourth_result = result
-    completed = completed + 1
-  when failed() then raise AllFiveError<|A1, B1, A2, B2, A3, B3, A4, B4, A5, B5|>.fourth(fourth_status)
-  when cancelled() then raise AllFiveError<|A1, B1, A2, B2, A3, B3, A4, B4, A5, B5|>.fourth(fourth_status)
+  if fourth.phase == TASK_FINISHED then
+    local fourth_status = fourth:status()
+    case fourth_status
+    when succeeded(result) then
+      fourth_result = result
+      completed = completed + 1
+    when failed() then raise AllFiveError<|A1, B1, A2, B2, A3, B3, A4, B4, A5, B5|>.fourth(fourth_status)
+    when cancelled() then raise AllFiveError<|A1, B1, A2, B2, A3, B3, A4, B4, A5, B5|>.fourth(fourth_status)
+    end
   end
 
   local fifth_result: value = nil
-  local fifth_status = fifth:status()
-  case fifth_status
-  when succeeded(result) then
-    fifth_result = result
-    completed = completed + 1
-  when failed() then raise AllFiveError<|A1, B1, A2, B2, A3, B3, A4, B4, A5, B5|>.fifth(fifth_status)
-  when cancelled() then raise AllFiveError<|A1, B1, A2, B2, A3, B3, A4, B4, A5, B5|>.fifth(fifth_status)
+  if fifth.phase == TASK_FINISHED then
+    local fifth_status = fifth:status()
+    case fifth_status
+    when succeeded(result) then
+      fifth_result = result
+      completed = completed + 1
+    when failed() then raise AllFiveError<|A1, B1, A2, B2, A3, B3, A4, B4, A5, B5|>.fifth(fifth_status)
+    when cancelled() then raise AllFiveError<|A1, B1, A2, B2, A3, B3, A4, B4, A5, B5|>.fifth(fifth_status)
+    end
   end
 
   if completed == 5 then
@@ -2274,7 +2626,7 @@ function all_five<|A1, B1, A2, B2, A3, B3, A4, B4, A5, B5|>(
   local resume_token = ResumeToken("async.all_five")
   local waiting = current
   local rejected = 0
-  local rejection = TaskStatus<|value, value|>.ready()
+  local rejection: TaskStatus<|value, value|>? = nil
 
   local first_listener = function (status: TaskStatus<|A1, B1|>)
     if rejected ~= 0 then return end
@@ -2400,12 +2752,11 @@ end
 function join<|A, B|>(task: Task<|A, B|>): TaskStatus<|A, B|>
   local current = running()
   reject_running(current, task)
-  local status = task:status()
-  if status:has_finished() then return status end
+  if task.phase == TASK_FINISHED then return task:status() end
 
   local resume_token = ResumeToken("async.join")
   local waiting = current
-  local result = TaskStatus<|value, value|>.ready()
+  local result: TaskStatus<|value, value|>? = nil
   local listener = function (terminal_status: TaskStatus<|A, B|>)
     result = terminal_status
     waiting:resume(resume_token)
@@ -2425,16 +2776,14 @@ function join_two<|A1, B1, A2, B2|>(
   reject_running(current, second)
 
   local completed = 0
-  local first_result = TaskStatus<|value, value|>.ready()
-  local first_status = first:status()
-  if first_status:has_finished() then
-    first_result = first_status
+  local first_result: TaskStatus<|value, value|>? = nil
+  if first.phase == TASK_FINISHED then
+    first_result = first:status()
     completed = completed + 1
   end
-  local second_result = TaskStatus<|value, value|>.ready()
-  local second_status = second:status()
-  if second_status:has_finished() then
-    second_result = second_status
+  local second_result: TaskStatus<|value, value|>? = nil
+  if second.phase == TASK_FINISHED then
+    second_result = second:status()
     completed = completed + 1
   end
   if completed == 2 then
@@ -2444,7 +2793,7 @@ function join_two<|A1, B1, A2, B2|>(
   local resume_token = ResumeToken("async.join_two")
   local waiting = current
   local first_listener = function (status: TaskStatus<|A1, B1|>)
-    if first_result:has_finished() then return end
+    if first_result ~= nil then return end
     first_result = status
     completed = completed + 1
     if completed == 2 then waiting:resume(resume_token) end
@@ -2453,7 +2802,7 @@ function join_two<|A1, B1, A2, B2|>(
   defer remove_first_listener()
 
   local second_listener = function (status: TaskStatus<|A2, B2|>)
-    if second_result:has_finished() then return end
+    if second_result ~= nil then return end
     second_result = status
     completed = completed + 1
     if completed == 2 then waiting:resume(resume_token) end
@@ -2475,22 +2824,19 @@ function join_three<|A1, B1, A2, B2, A3, B3|>(
   reject_running(current, third)
 
   local completed = 0
-  local first_result = TaskStatus<|value, value|>.ready()
-  local first_status = first:status()
-  if first_status:has_finished() then
-    first_result = first_status
+  local first_result: TaskStatus<|value, value|>? = nil
+  if first.phase == TASK_FINISHED then
+    first_result = first:status()
     completed = completed + 1
   end
-  local second_result = TaskStatus<|value, value|>.ready()
-  local second_status = second:status()
-  if second_status:has_finished() then
-    second_result = second_status
+  local second_result: TaskStatus<|value, value|>? = nil
+  if second.phase == TASK_FINISHED then
+    second_result = second:status()
     completed = completed + 1
   end
-  local third_result = TaskStatus<|value, value|>.ready()
-  local third_status = third:status()
-  if third_status:has_finished() then
-    third_result = third_status
+  local third_result: TaskStatus<|value, value|>? = nil
+  if third.phase == TASK_FINISHED then
+    third_result = third:status()
     completed = completed + 1
   end
   if completed == 3 then
@@ -2501,7 +2847,7 @@ function join_three<|A1, B1, A2, B2, A3, B3|>(
   local resume_token = ResumeToken("async.join_three")
   local waiting = current
   local first_listener = function (status: TaskStatus<|A1, B1|>)
-    if first_result:has_finished() then return end
+    if first_result ~= nil then return end
     first_result = status
     completed = completed + 1
     if completed == 3 then waiting:resume(resume_token) end
@@ -2510,7 +2856,7 @@ function join_three<|A1, B1, A2, B2, A3, B3|>(
   defer remove_first_listener()
 
   local second_listener = function (status: TaskStatus<|A2, B2|>)
-    if second_result:has_finished() then return end
+    if second_result ~= nil then return end
     second_result = status
     completed = completed + 1
     if completed == 3 then waiting:resume(resume_token) end
@@ -2519,7 +2865,7 @@ function join_three<|A1, B1, A2, B2, A3, B3|>(
   defer remove_second_listener()
 
   local third_listener = function (status: TaskStatus<|A3, B3|>)
-    if third_result:has_finished() then return end
+    if third_result ~= nil then return end
     third_result = status
     completed = completed + 1
     if completed == 3 then waiting:resume(resume_token) end
@@ -2544,28 +2890,24 @@ function join_four<|A1, B1, A2, B2, A3, B3, A4, B4|>(
   reject_running(current, fourth)
 
   local completed = 0
-  local first_result = TaskStatus<|value, value|>.ready()
-  local first_status = first:status()
-  if first_status:has_finished() then
-    first_result = first_status
+  local first_result: TaskStatus<|value, value|>? = nil
+  if first.phase == TASK_FINISHED then
+    first_result = first:status()
     completed = completed + 1
   end
-  local second_result = TaskStatus<|value, value|>.ready()
-  local second_status = second:status()
-  if second_status:has_finished() then
-    second_result = second_status
+  local second_result: TaskStatus<|value, value|>? = nil
+  if second.phase == TASK_FINISHED then
+    second_result = second:status()
     completed = completed + 1
   end
-  local third_result = TaskStatus<|value, value|>.ready()
-  local third_status = third:status()
-  if third_status:has_finished() then
-    third_result = third_status
+  local third_result: TaskStatus<|value, value|>? = nil
+  if third.phase == TASK_FINISHED then
+    third_result = third:status()
     completed = completed + 1
   end
-  local fourth_result = TaskStatus<|value, value|>.ready()
-  local fourth_status = fourth:status()
-  if fourth_status:has_finished() then
-    fourth_result = fourth_status
+  local fourth_result: TaskStatus<|value, value|>? = nil
+  if fourth.phase == TASK_FINISHED then
+    fourth_result = fourth:status()
     completed = completed + 1
   end
   if completed == 4 then
@@ -2576,7 +2918,7 @@ function join_four<|A1, B1, A2, B2, A3, B3, A4, B4|>(
   local resume_token = ResumeToken("async.join_four")
   local waiting = current
   local first_listener = function (status: TaskStatus<|A1, B1|>)
-    if first_result:has_finished() then return end
+    if first_result ~= nil then return end
     first_result = status
     completed = completed + 1
     if completed == 4 then waiting:resume(resume_token) end
@@ -2585,7 +2927,7 @@ function join_four<|A1, B1, A2, B2, A3, B3, A4, B4|>(
   defer remove_first_listener()
 
   local second_listener = function (status: TaskStatus<|A2, B2|>)
-    if second_result:has_finished() then return end
+    if second_result ~= nil then return end
     second_result = status
     completed = completed + 1
     if completed == 4 then waiting:resume(resume_token) end
@@ -2594,7 +2936,7 @@ function join_four<|A1, B1, A2, B2, A3, B3, A4, B4|>(
   defer remove_second_listener()
 
   local third_listener = function (status: TaskStatus<|A3, B3|>)
-    if third_result:has_finished() then return end
+    if third_result ~= nil then return end
     third_result = status
     completed = completed + 1
     if completed == 4 then waiting:resume(resume_token) end
@@ -2603,7 +2945,7 @@ function join_four<|A1, B1, A2, B2, A3, B3, A4, B4|>(
   defer remove_third_listener()
 
   local fourth_listener = function (status: TaskStatus<|A4, B4|>)
-    if fourth_result:has_finished() then return end
+    if fourth_result ~= nil then return end
     fourth_result = status
     completed = completed + 1
     if completed == 4 then waiting:resume(resume_token) end
@@ -2630,34 +2972,29 @@ function join_five<|A1, B1, A2, B2, A3, B3, A4, B4, A5, B5|>(
   reject_running(current, fifth)
 
   local completed = 0
-  local first_result = TaskStatus<|value, value|>.ready()
-  local first_status = first:status()
-  if first_status:has_finished() then
-    first_result = first_status
+  local first_result: TaskStatus<|value, value|>? = nil
+  if first.phase == TASK_FINISHED then
+    first_result = first:status()
     completed = completed + 1
   end
-  local second_result = TaskStatus<|value, value|>.ready()
-  local second_status = second:status()
-  if second_status:has_finished() then
-    second_result = second_status
+  local second_result: TaskStatus<|value, value|>? = nil
+  if second.phase == TASK_FINISHED then
+    second_result = second:status()
     completed = completed + 1
   end
-  local third_result = TaskStatus<|value, value|>.ready()
-  local third_status = third:status()
-  if third_status:has_finished() then
-    third_result = third_status
+  local third_result: TaskStatus<|value, value|>? = nil
+  if third.phase == TASK_FINISHED then
+    third_result = third:status()
     completed = completed + 1
   end
-  local fourth_result = TaskStatus<|value, value|>.ready()
-  local fourth_status = fourth:status()
-  if fourth_status:has_finished() then
-    fourth_result = fourth_status
+  local fourth_result: TaskStatus<|value, value|>? = nil
+  if fourth.phase == TASK_FINISHED then
+    fourth_result = fourth:status()
     completed = completed + 1
   end
-  local fifth_result = TaskStatus<|value, value|>.ready()
-  local fifth_status = fifth:status()
-  if fifth_status:has_finished() then
-    fifth_result = fifth_status
+  local fifth_result: TaskStatus<|value, value|>? = nil
+  if fifth.phase == TASK_FINISHED then
+    fifth_result = fifth:status()
     completed = completed + 1
   end
   if completed == 5 then
@@ -2669,7 +3006,7 @@ function join_five<|A1, B1, A2, B2, A3, B3, A4, B4, A5, B5|>(
   local resume_token = ResumeToken("async.join_five")
   local waiting = current
   local first_listener = function (status: TaskStatus<|A1, B1|>)
-    if first_result:has_finished() then return end
+    if first_result ~= nil then return end
     first_result = status
     completed = completed + 1
     if completed == 5 then waiting:resume(resume_token) end
@@ -2678,7 +3015,7 @@ function join_five<|A1, B1, A2, B2, A3, B3, A4, B4, A5, B5|>(
   defer remove_first_listener()
 
   local second_listener = function (status: TaskStatus<|A2, B2|>)
-    if second_result:has_finished() then return end
+    if second_result ~= nil then return end
     second_result = status
     completed = completed + 1
     if completed == 5 then waiting:resume(resume_token) end
@@ -2687,7 +3024,7 @@ function join_five<|A1, B1, A2, B2, A3, B3, A4, B4, A5, B5|>(
   defer remove_second_listener()
 
   local third_listener = function (status: TaskStatus<|A3, B3|>)
-    if third_result:has_finished() then return end
+    if third_result ~= nil then return end
     third_result = status
     completed = completed + 1
     if completed == 5 then waiting:resume(resume_token) end
@@ -2696,7 +3033,7 @@ function join_five<|A1, B1, A2, B2, A3, B3, A4, B4, A5, B5|>(
   defer remove_third_listener()
 
   local fourth_listener = function (status: TaskStatus<|A4, B4|>)
-    if fourth_result:has_finished() then return end
+    if fourth_result ~= nil then return end
     fourth_result = status
     completed = completed + 1
     if completed == 5 then waiting:resume(resume_token) end
@@ -2705,7 +3042,7 @@ function join_five<|A1, B1, A2, B2, A3, B3, A4, B4, A5, B5|>(
   defer remove_fourth_listener()
 
   local fifth_listener = function (status: TaskStatus<|A5, B5|>)
-    if fifth_result:has_finished() then return end
+    if fifth_result ~= nil then return end
     fifth_result = status
     completed = completed + 1
     if completed == 5 then waiting:resume(resume_token) end

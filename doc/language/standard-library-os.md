@@ -441,7 +441,8 @@ Each nonempty write to a captured `process.stdin` immediately submits its own
 stream write ordering; Titan adds no operation queue. An empty write is a
 checked no-op. The request retains the original immutable string until its
 eventual callback while libuv borrows, but does not mutate, its bytes.
-Cancelling the Task does not release that owner early or kill the child.
+Overlapping calls retain independent requests and strings. Cancelling the Task
+does not release that owner early or kill the child.
 On Unix, loading `titan.async` changes a default `SIGPIPE` disposition to ignored
 so a child that closes stdin produces the ordinary libuv write error instead
 of terminating the parent process. An already ignored signal or an
@@ -487,8 +488,8 @@ Separately captured stdout and stderr have independent low-level waiters, so
 the two pipes can be drained concurrently. Merged output has one stream and
 therefore one waiter. A second Task that tries to wait on the same stream is
 rejected; there is no additional facade lock or read queue. Cancelling a
-waiting read detaches only its waiter, wakes that Task through its own later
-timer callback, and leaves the physical read active for another Task.
+waiting read detaches only its waiter, wakes that Task on a later loop turn,
+and leaves the physical read active for another Task.
 
 Closing a captured `InputStream` is idempotent. It stops and closes that
 parent-side read pipe, discards facade excess and buffered native input, wakes
@@ -510,9 +511,9 @@ described above.
 
 `wait` returns after the operating system has reaped the child. Only one Task
 may wait at a time; cancelling it does not kill the child, and a replacement
-Task may wait. The cancelled Task is resumed by its own later libuv timer
-callback rather than synchronously by the cancelling Task. Exit status is
-retained, so later sequential waits return a fresh `ExitStatus` immediately.
+Task may wait. The cancelled Task is resumed on a later loop turn rather than
+synchronously by the cancelling Task. Exit status is retained, so later
+sequential waits return a fresh `ExitStatus` immediately.
 On normal exit, `signal` is `nil` and `signal_number` is zero. Signal
 termination preserves its native number and uses a canonical lowercase name
 when it belongs to the documented common subset; an unknown signal has

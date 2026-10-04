@@ -721,17 +721,17 @@ idempotent remover in `defer`; they do not add a scheduler join protocol or
 collect operands into a Task Array. Do not restore nullable-waiter or
 "resumed too early" guards around that single authorized suspension. Retain
 winner, rejection, and counter checks that arbitrate results independently of
-waking; the existing `join*` per-position `has_finished` checks are unrelated
+waking; the existing `join*` per-position terminal-result checks are unrelated
 local idempotence, not premature-resume guards. Terminal
 publication stores the final `TaskStatus`, detaches the registration Array as a
 stable snapshot, installs an empty live list, clears snapshot ownership, then
 invokes every snapshot listener sequentially on the main thread with
 per-listener empty catches. A
 deciding listener calls `Task:resume(token)` with that exact token, which
-synchronously installs one coalesced target-owned zero timer. Repeated calls
+synchronously accepts one coalesced entry in the Runtime ready queue. Repeated calls
 with the same installed token coalesce; a different token or any token outside
-that suspension raises in the caller. Its `timer_cb` submits `uv_close`, and
-only `close_cb` clears the suspended/token/pending state before resuming the
+that suspension raises in the caller. The Runtime's shared zero-timer callback
+clears the old queue entry and suspended/token/pending state before resuming the
 target. The same authorized wake must handle external cancellation of an
 explicitly suspended Task, and `resume(token)` must work from either terminal
 notification or another running Task without resuming inline. Ordinary native
@@ -741,7 +741,7 @@ subscription; they cannot complete an unrelated wait through public
 explicit token-bearing suspend/resume, token identity and wrong-time rejection,
 listener order/error isolation/removal including removal during delivery,
 cancellation-time defer cleanup, correct-token coalescing, native-wait
-isolation, and close-before-resume.
+isolation, bounded FIFO delivery, and native cleanup before ownership retirement.
 HTTP idle-timeout coverage must preserve its ownership asymmetry: reader-win
 paths cancel and detach the timer-only deadline, while deadline-win paths
 cancel and join the reader before parser/connection/TLS-busy teardown.
@@ -1912,8 +1912,16 @@ function in that hook.
 
 Async owns Task, TaskStatus, Error, OperationError, CancellationReason and
 ResumeToken nominal identities, as well as its Runtime and one generic operation
-state. `await`, `await_cleanup`, and `await_cancellable` register through
-resolve/reject/fatal capabilities. Inline settlement resumes only after
+state. `Completion<|C,T,E|>` is opaque Task-owned reusable storage; `_with`
+registrars receive that cell plus a checked, nonwrapping suspension number.
+Capture the supplied number and use it for context/resolve/reject/fatal. Context
+access ends at retirement; callback locals or independent rollback owners must
+retain state needed after settlement or registration failure. Clear old private
+request-data associations before settlement can enter a successor. All three
+`_with` registrars return `uv.req_t?`; ordinary and cleanup policies do not
+implicitly cancel returned requests. The convenience `await`, `await_cleanup`,
+and `await_cancellable` facades keep their resolve/reject/fatal closures over
+the same core. Inline settlement resumes only after
 registration returns and immediate chains use an iterative trampoline. Accepted
 work and borrowed data remain owned through their promised terminal callback;
 requesting cancellation never releases them early. A consumed callback's
@@ -1965,11 +1973,11 @@ combinators preserve the independent generic type pair of every named operand,
 install a separate listener for each still-relevant operand, suspend once with
 one fresh private token per invocation, and call every idempotent remover in
 `defer`. The deciding listener calls the suspended Task's synchronous,
-coalescing `resume(token)` with that same token, which installs its target-owned
-close-before-resume zero timer and returns. There is no public Waiter,
-`uv_check_t`, Runtime `uv_idle_t`,
-polling loop, phase bridge, taskless timer, scheduler queue, join protocol, or
-generation fence. Never collapse the separate typed operands into a `{Task}`
+coalescing `resume(token)` with that same token, which accepts its Runtime queue
+entry and returns. The shared zero timer drains a finite FIFO batch, clearing
+each old node before continuation and checking the captured suspension epoch.
+There is no public Waiter, `uv_check_t`, Runtime `uv_idle_t`, polling loop,
+phase bridge, or scheduler join protocol. Never collapse the separate typed operands into a `{Task}`
 helper. Only `join`
 has a unary form; unary `any`/`race`/`all` would be mere result repackaging and
 are intentionally absent. The combinators do not cancel unfinished inputs.

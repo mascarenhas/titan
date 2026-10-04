@@ -281,6 +281,35 @@ function write(req: write_t, stream: stream_t, buffers: {buf_t}, callback: write
 **Native declaration:** [pinned libuv](https://github.com/libuv/libuv/blob/v1.52.1/include/uv.h#L550).
 
 
+## write_string
+
+```titan
+function write_string(req: write_t, stream: stream_t, data: string, callback: write_cb?): integer
+```
+
+Queue the complete immutable string as one write, including embedded NUL bytes
+and an empty string. This Titan convenience function follows `write` status,
+callback, ordering, pipe eligibility, and request-reuse rules. A pending request
+returns `EBUSY`; an uninitialized stream returns `EINVAL`. A string longer than
+native `UINT_MAX` raises `"buffer length is outside string/native range"` before
+submission. Native rejection returns its negative status, releases the attempted
+registration, and owes no callback.
+
+The request embeds one buffer descriptor and retains the string until the native
+callback returns, without a `buf_t` or descriptor/owner Arrays. The old string
+remains rooted while a completion callback reuses the request or raises. The
+request can alternate scalar and vector writes after each completion begins.
+There is no handle transfer; use `write2` for that operation.
+
+`write_t:get_data(): value` and `write_t:set_data(data: value)` access the same
+public traced slot as `req_t:get_data`/`set_data`, without constructing a request
+view. The slot begins as nil and is independent of native callback ownership.
+
+`buf_check_length(base: string, length: integer)` validates `0 <= length <=
+#base` and `length <= UINT_MAX` with the same error as `buf_init`, without
+constructing a buffer. Adapters can use it before async admission to preserve
+their input-validation precedence without retaining a temporary buffer view.
+
 ## write2
 
 `uv_write2` — **canonical exported function**
@@ -302,4 +331,3 @@ function write2(req: write_t, stream: stream_t, buffers: {buf_t}, send_handle: h
 **Availability:** Pinned patched libuv 1.52.1 only; native OS/kernel support and native error statuses still apply.
 
 **Native declaration:** [pinned libuv](https://github.com/libuv/libuv/blob/v1.52.1/include/uv.h#L555).
-

@@ -778,6 +778,18 @@ jobs:
             make titan-stdlib-test-run TITAN_FILTER='^uv%.task_tests%.'
           bash spec/support/ci_sanitizer_capture.sh uv-runtime-tests \
             make titan-stdlib-test-run TITAN_FILTER='^uv%.runtime_tests%.'
+          bash spec/support/ci_sanitizer_capture.sh async-completion-tests \
+            make titan-stdlib-test-run TITAN_FILTER='test_completion_'
+          bash spec/support/ci_sanitizer_capture.sh async-ready-queue-tests \
+            make titan-stdlib-test-run TITAN_FILTER='test_ready_queue_'
+          bash spec/support/ci_sanitizer_capture.sh uv-scalar-write-tests \
+            make titan-stdlib-test-run TITAN_FILTER='test_scalar_write_'
+          bash spec/support/ci_sanitizer_capture.sh uv-concrete-data-tests \
+            make titan-stdlib-test-run TITAN_FILTER='test_concrete_'
+          bash spec/support/ci_sanitizer_capture.sh net-owned-buffer-tests \
+            make titan-stdlib-test-run TITAN_FILTER='test_net_received_chunks_remain_immutable'
+          bash spec/support/ci_sanitizer_capture.sh net-overlapping-write-tests \
+            make titan-stdlib-test-run TITAN_FILTER='test_net_overlapping_writes_'
           bash spec/support/ci_sanitizer_capture.sh foreign-work-tests \
             make titan-stdlib-test-run TITAN_FILTER='test_run_foreign_'
           bash spec/support/ci_sanitizer_capture.sh signal-owner-tests \

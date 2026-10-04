@@ -53,12 +53,40 @@ the caller's suspended stack. Data getters/setters provide a separate traced
 Titan `value`; native `.data` remains reserved for callback owner recovery.
 Public data must never overwrite that private association.
 
+The concrete `fs_t`, `work_t`, `getaddrinfo_t`, `connect_t`, `write_t`, and
+`shutdown_t` data methods directly read or assign that owner's existing
+`userdata` field. They share its ordinary tracing and write barrier with the
+generic `req_t` methods; no extra slot, request view, or native ownership state
+is introduced. Named callbacks can recover their context through the concrete
+owner they already receive. Clearing public data never retires pending native
+work.
+
 On terminal completion, the bridge retires the old registration before calling
 user code while keeping the old owner, callback and borrowed graph rooted
 through the complete callback frame. This permits legal callback-time reuse
 without allowing the new operation to overwrite storage still needed by the
 old native invocation. Close completion similarly retires the old handle
 lifetime before a supported reinitialization.
+
+The concrete timer helpers avoid constructing generic handle views for scheduler
+data and close. `timer_close` stores an ordinary `timer_cb` separately from the
+generic close callback. The terminal handler snapshots and clears both callback
+slots before dispatch; typed close passes the existing owner directly, while
+generic close retains its existing `handle_t` callback contract. A named exact
+`timer_cb` therefore needs neither a forwarding closure nor a union view.
+
+`write_string` stores one `uv_buf_t` inside `write_t` and retains the immutable
+string in a separate traced field. It shares the allocation-free
+`buf_check_length` check with `buf_init` before acceptance; an adapter may call
+that check earlier when its contract validates inputs before async admission.
+The foreign write callback pushes the old string onto its Lua
+stack before calling the protected Titan handler, alongside the existing vector
+owner and descriptor roots. The handler clears the old string field before
+calling user code. Consequently callback-time scalar/vector request reuse cannot
+erase the old native frame's byte root, including when user code raises after
+submitting its successor. Immediate native rejection clears the attempted string
+registration. Concrete write data methods read/write the existing public slot;
+they do not construct `req_t` views or expose native `.data`.
 
 Init and rejection rules belong to each native API. A simple failed initializer
 usually establishes no lifetime, but partial poll initialization can leave a
@@ -98,15 +126,29 @@ An adapter allocates its request owner and rollback state, then calls one of:
 
 | Wait | Policy |
 | --- | --- |
-| `async.await` | Ordinary operation; pending cancellation skips submission, accepted work finishes before cancellation is delivered. |
-| `async.await_cancellable` | Return the accepted public request view so cancellation can attempt native `uv.cancel`; terminal completion still owns retirement. |
-| `async.await_cleanup` | Ownership retirement proceeds despite pending Task cancellation and during Runtime shutdown. |
+| `async.await_with` / `async.await` | Ordinary operation; pending cancellation skips submission, accepted work finishes before cancellation is delivered. |
+| `async.await_cancellable_with` / `async.await_cancellable` | Return the accepted public request view so cancellation can attempt native `uv.cancel`; terminal completion still owns retirement. |
+| `async.await_cleanup_with` / `async.await_cleanup` | Ownership retirement proceeds despite pending Task cancellation and during Runtime shutdown. |
 
-The registration closure runs outside Task context. Capture Task-only state
+The registrar runs outside Task context. Capture Task-only state
 before awaiting; use `async.current_loop()` in registration to borrow the active
-loop. Registration receives typed resolve/reject and the third
-`fatal(error, traceback)` capability for that exact Wait. Inline settlement is
-valid: the trampoline resumes the Task only after registration returns.
+loop. Prefer a named `_with` registrar taking
+`Completion<|Context, Result, Error|>` plus the integer operation number. Every
+`_with` registrar returns `uv.req_t?`; ordinary and cleanup may return nil and
+never implicitly cancel a returned request. The older facade receives typed
+resolve/reject and `fatal(error, traceback)` closures. Inline settlement is valid:
+the trampoline resumes the Task only after registration returns.
+
+The Task reuses its Completion storage. Snapshot its exact number and context
+at registration, retain them independently through native completion, and pass
+the saved number to `context`, `resolve`, `reject`, and `fatal`. Context access
+ends at retirement or registration failure. A stale number cannot settle a
+successor; stale fatal still reports Runtime failure without treating the
+successor's native work as completed. Callback locals or independently owned
+rollback state must retain context needed after settlement. An exclusive UV
+data slot can carry a per-operation context, but clear its old association
+before settlement and never overwrite caller-owned slots. Concurrent requests
+need separate owners; no stream-wide completion slot is implied.
 
 Prepare callbacks, view conversions, borrowed-buffer retention, and rollback
 before accepting native work. A native rejection with no callback cleans its
@@ -141,6 +183,8 @@ ownership and preaccept-close restoration. `fatal` is outside typed E and is
 legal only outside a running Task after native ownership is safe. It must be
 followed by bare rethrow so the outer UV boundary also records the failure.
 Never use it to release a still-pending request or as a generic error logger.
+The `_with` spelling is `done:fatal(number, error, traceback)` with the captured
+number; apply the same protected cleanup/settlement and bare rethrow protocol.
 
 File close demonstrates the acceptance split: consume the published descriptor
 before cleanup submission, restore it only when submission was not accepted,

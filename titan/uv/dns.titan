@@ -157,6 +157,14 @@ function getaddrinfo_t:as_req_t(): req_t
   return req_t.getaddrinfo(self)
 end
 
+function getaddrinfo_t:get_data(): value
+  return self.userdata
+end
+
+function getaddrinfo_t:set_data(data: value)
+  self.userdata = data
+end
+
 function getaddrinfo_t:get_loop(): loop_t?
   return self.loop
 end

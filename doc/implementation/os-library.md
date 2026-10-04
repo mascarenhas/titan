@@ -20,7 +20,7 @@ SIGPIPE policy; importing UV alone applies neither.
 
 | Owner | Responsibility |
 | --- | --- |
-| `Stdio` | One public `uv.stream_t`, its owning loop, and optional buffered read subscription. |
+| `Stdio` | One public `uv.stream_t`, its cached `uv.handle_t` view, owning loop, and optional buffered read subscription. |
 | `ProcessConfig` | Public process options, stdio slots, environment overlays, owning loop, and consumed state. |
 | `ProcessOwner` | One `uv.process_t`, owning loop, retained exit result, and coalescing exit subscription. |
 | Public `InputStream` / `OutputStream` | Stable parent-descriptor identity or a captured Stdio, plus InputStream delimiter excess. |
@@ -31,7 +31,8 @@ stream's concrete kind is represented by `uv.stream_t`'s alternatives; parent or
 child provenance does not guess its native kind. Live process and captured
 stream operations retain explicit current-Task and same-Runtime checks.
 Terminal closed-facade behavior stays idempotent where the public API specifies
-it.
+it. A cached view preserves its native owner; operations still query current
+initialization and closing state instead of caching liveness.
 
 ## Reads, writes, and signals
 
@@ -39,19 +40,34 @@ A native input source publishes copied byte strings through
 `BufferedSubscription`. Buffered bytes precede EOF or a terminal error. Zero
 read notifications do not produce items. The subscription supplies the single
 reader reservation; `has_waiter()` gives the domain its established contention
-diagnostic without a shadow flag. Ordinary cancellation is checked before
-contention and before accepting a lazy read source. Cancelling one waiter
-removes its reservation synchronously and leaves the shared source alive.
+diagnostic without a shadow flag. `async.checkpoint()` checks ordinary
+cancellation at the established admission point before contention and before
+accepting a lazy read source, without constructing a wait or changing Task
+status. Cancelling one waiter removes its reservation synchronously and leaves
+the shared source alive.
 
-Writes submit a public request through ordinary `async.await`, retaining its
-buffers until terminal completion. Close uses `async.await_cleanup`, preserving
-the native close obligation under sticky Task cancellation. Unexpected terminal
-callback failures call that exact registration's `fatal(error, traceback)` and
-bare rethrow; ordinary negative statuses become `async.OperationError` with the
-existing operation label.
+Writes submit a fresh public request through ordinary `async.await_with` and
+`uv.write_string`. A private per-write context supplies the Stdio and string to
+a named registrar. Closed-stream validation and the empty-write fast path stay
+inside registration, after ordinary cancellation admission; the native request
+is constructed only for a nonempty write. The request retains the original binary string and embeds
+its scalar descriptor through terminal completion, without per-write buffer
+views or descriptor Arrays. Overlapping writes have independent requests;
+their terminal UV callbacks root each old payload before clearing request
+fields. Each context also captures the Task-owned Completion and its exact
+suspension number, and the request's userdata carries that context to a named
+callback. Close uses `async.await_cleanup_with` and its own handle context,
+preserving the native close obligation under sticky Task cancellation. Named
+terminal callbacks snapshot their Completion and number, then clear userdata
+and the context's Completion reference before settlement can resume the Task.
+Unexpected terminal callback failures call
+`completion:fatal(number, error, traceback)` and bare rethrow; ordinary negative
+statuses become `async.OperationError` with the existing operation label. The
+per-write context replaces a captured registrar; overlapping writes retain
+independent contexts and requests instead of sharing a mutable stream slot.
 
-`wait_signal` validates the symbolic signal, performs its ordinary cancellation
-checkpoint, and uses a coalescing subscription over a one-shot `uv.signal_t`.
+`wait_signal` validates the symbolic signal, calls `async.checkpoint()`, and
+uses a coalescing subscription over a one-shot `uv.signal_t`.
 The producer owns stop/close and partial-initialization rollback. Lexical cleanup
 closes the subscription after delivery or cancellation; the signal handle is
 never a Task-owned scheduler special case.
@@ -114,7 +130,7 @@ uses a nested protected cleanup followed by bare rethrow. This preserves the
 original error and traceback across yielding cleanup and secondary failures.
 Config commits its consumed state and detaches the capability before invoking
 it. Rollback selects its exit callback branch before discarding streams, and a
-defer guarantees the cancellation-shielded `async.await_cleanup` even if stream
+defer guarantees the cancellation-shielded `async.await_cleanup_with` even if stream
 discard fails. The branch skips ExitStatus construction and subscription
 publication, retaining the native watcher through the actual exit and close.
 
@@ -128,6 +144,11 @@ owners. Registration checks for already completed retirement as well. Negative
 signal results never abandon an active watcher: 30 seconds bounds the grace
 period, not exit completion if signaling fails. No cleanup Task, saved-PID
 poller, extra scheduler queue, or ProcessOwner state is introduced.
+This cold rollback path retains its captured registration, retirement,
+escalation, and Config-cleanup closures. Its shared state holds one Completion
+and the number captured at registration; retirement snapshots and clears that
+capability before settlement. The existing process exit and subscription
+callbacks remain unchanged.
 
 Native spawn failure follows actual handle state: an uninitialized process
 needs no close, an initialized inactive process must close, and an active
@@ -138,7 +159,7 @@ documented in the [public process policy](../language/uv/PROCESS-POLICY.md).
 The exit callback records the `ExitStatus`, closes the process handle, publishes
 the coalesced result, and ends the subscription. Wait cancellation detaches only
 the waiter: the accepted child remains retained until exit/reap. Repeated waits
-return the stored result. A wait performs its ordinary cancellation checkpoint
+return the stored result. A wait calls `async.checkpoint()`
 before cached-result delivery and before the existing competing-wait diagnostic.
 `is_running` and `kill` keep the same Runtime checks and symbolic signal policy;
 closing captured streams does not kill the child.

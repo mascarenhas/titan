@@ -1,3 +1,79 @@
+local record RequestDataMarker
+  id: integer
+end
+
+local function install_request_data(write_data: function (value): (),
+                                    weak: {value: value}, index: integer)
+  local marker = RequestDataMarker(index)
+  weak[index] = marker
+  write_data(marker)
+end
+
+local function check_request_data_identity(view: uv.req_t,
+    read_data: function (): value, weak: {value: value}, index: integer)
+  test.assert(read_data() == weak[index], "concrete request data changed identity")
+  test.assert(view:get_data() == weak[index], "generic request view changed data identity")
+end
+
+local function check_concrete_request_data(view: uv.req_t,
+    read_data: function (): value, write_data: function (value): ())
+  test.assert(read_data() == nil and view:get_data() == nil)
+  write_data(false)
+  test.assert(view:get_data() == false, "concrete setter lost false payload")
+  view:set_data(nil)
+  test.assert(read_data() == nil, "generic setter did not clear concrete data")
+  local weak: {value: value} = {}
+  gc.weak(weak)
+  install_request_data(write_data, weak, 1)
+  collect()
+  assert_retained(weak, 1)
+  check_request_data_identity(view, read_data, weak, 1)
+  view:set_data(nil)
+  collect()
+  test.assert(weak[1] == nil, "generic clearing retained concrete request data")
+  install_request_data(function (data: value) view:set_data(data) end, weak, 2)
+  collect()
+  assert_retained(weak, 2)
+  check_request_data_identity(view, read_data, weak, 2)
+  write_data(nil)
+  test.assert(view:get_data() == nil, "concrete setter did not clear generic data")
+  collect()
+  test.assert(weak[2] == nil, "concrete clearing retained generic request data")
+end
+
+function test_concrete_request_data_matches_generic_views(context: test.Context)
+  context:run("fs", function (_child: test.Context)
+    local request = uv.fs_t()
+    check_concrete_request_data(request:as_req_t(),
+      function (): value return request:get_data() end,
+      function (data: value) request:set_data(data) end)
+  end)
+  context:run("work", function (_child: test.Context)
+    local request = uv.work_t()
+    check_concrete_request_data(request:as_req_t(),
+      function (): value return request:get_data() end,
+      function (data: value) request:set_data(data) end)
+  end)
+  context:run("getaddrinfo", function (_child: test.Context)
+    local request = uv.getaddrinfo_t()
+    check_concrete_request_data(request:as_req_t(),
+      function (): value return request:get_data() end,
+      function (data: value) request:set_data(data) end)
+  end)
+  context:run("connect", function (_child: test.Context)
+    local request = uv.connect_t()
+    check_concrete_request_data(request:as_req_t(),
+      function (): value return request:get_data() end,
+      function (data: value) request:set_data(data) end)
+  end)
+  context:run("shutdown", function (_child: test.Context)
+    local request = uv.shutdown_t()
+    check_concrete_request_data(request:as_req_t(),
+      function (): value return request:get_data() end,
+      function (data: value) request:set_data(data) end)
+  end)
+end
+
 local function close_file(file: integer)
   local request = uv.fs_t()
   defer uv.fs_req_cleanup(request)

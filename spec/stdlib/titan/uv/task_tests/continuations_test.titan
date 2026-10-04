@@ -175,10 +175,10 @@ function test_explicit_resume_runs_after_resumer_returns(
   end)
 end
 
-function test_explicit_resume_waits_for_zero_timer_close(
+function test_explicit_resume_preserves_io_without_phase_ordering(
     context: test.Context)
   runtime_test.run(function ()
-    local trace = ""
+    local resumed = 0
     local server, port = support.listen_available(32000)
     defer server:close()
     local accepted: net.Connection? = nil
@@ -197,37 +197,33 @@ function test_explicit_resume_waits_for_zero_timer_close(
     defer peer:close()
 
     local resume_token =
-      async.ResumeToken.new("zero-timer close ordering test")
+      async.ResumeToken.new("explicit resume with native I/O test")
     local target = async.run<|value, value|>(function (): value
       async.suspend(resume_token)
-      trace = trace .. "target"
+      resumed = resumed + 1
       return nil
     end)
-    task_support.cleanup_task(target, "close-order target cleanup")
+    task_support.cleanup_task(target, "native I/O resume target cleanup")
     while target:status():as_string() == "ready" do timer.yield() end
     test.assert(target:status():as_string() == "waiting",
-                "close-order target did not explicitly suspend")
+                "native I/O resume target did not explicitly suspend")
 
-    -- peer:read resumes this test Task from the poll phase. Its reply write
-    -- completion therefore runs in libuv's post-poll pending phase. Start the
-    -- target's zero timer and the client read from that callback: timer_cb runs
-    -- in the trailing timer phase, while the reply waits for the next poll.
-    -- Resuming from timer_cb would produce target>read; close_cb produces
-    -- read>target.
+    -- Schedule the explicit wake while native I/O is in progress. Both must
+    -- complete, without requiring a relative order between native phases.
     client:write("signal")
     test.assert(peer:read() == "signal", "loopback signal changed")
     peer:write("reply")
     target:resume(resume_token)
+    test.assert(target:status():as_string() == "waiting" and resumed == 0,
+                "Task:resume resumed its target synchronously during native I/O")
     test.assert(client:read() == "reply", "loopback reply changed")
-    trace = trace .. "read>"
+    test.assert(async.join(target):has_succeeded(),
+                "native I/O resume target did not finish")
 
     peer:close()
     client:close()
     server:close()
-    test.assert(target:status():as_string() == "succeeded",
-                "close-order target did not finish")
-    test.assert(trace == "read>target",
-                "suspended Task resumed before its zero timer closed")
+    test.assert(resumed == 1, "explicit resume skipped or repeated its continuation")
   end)
 end
 

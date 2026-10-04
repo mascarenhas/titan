@@ -5,6 +5,21 @@ Complete public example: [work_random](../examples/work_random.titan). See the
 
 Accepted request storage and all required inputs survive until terminal native completion, independent of user GC or cancellation. Old registration retires before user callback and owner remains rooted through callback return. cancel is supported only for FS, getaddrinfo/getnameinfo, random, and work, and successful cancellation still requires terminal completion.
 
+## Concrete request data
+
+`fs_t`, `work_t`, `getaddrinfo_t`, `connect_t`, `write_t`, and `shutdown_t`
+provide `get_data(): value` and `set_data(data: value)` methods. They access
+the same traced public slot as `req_t:get_data` and `req_t:set_data`, without
+constructing a request view. A value set through either form is immediately
+visible through the other with the same identity. The initial value is nil;
+false is an ordinary payload, and setting nil clears the slot.
+
+These methods work before submission, while pending, after completion, and
+after filesystem request cleanup. The stored value remains traced until it is
+replaced, cleared, or the request owner becomes unreachable. Changing this
+public data does not change the reserved native `.data` association or release
+pending-request ownership. See [request types and signatures](../types.md).
+
 ## cancel
 
 `uv_cancel` — **canonical exported function**
@@ -141,4 +156,3 @@ function req_type_name(kind: req_type): string?
 **Availability:** Pinned patched libuv 1.52.1 only; native OS/kernel support and native error statuses still apply.
 
 **Native declaration:** [pinned libuv](https://github.com/libuv/libuv/blob/v1.52.1/include/uv.h#L494).
-

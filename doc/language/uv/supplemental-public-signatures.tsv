@@ -10,6 +10,7 @@ barrier_t:borrow	function barrier_t:borrow(): foreign *void	titan/uv/sync.titan:
 barrier_t:destroy	function barrier_t:destroy()	titan/uv/sync.titan:373	
 barrier_t:init	function barrier_t:init(count: integer): integer	titan/uv/sync.titan:366	count: INPUT integer value; checked native narrowing occurs before native ownership is accepted.
 barrier_t:wait	function barrier_t:wait(): integer	titan/uv/sync.titan:379	
+buf_check_length	function buf_check_length(base: string, length: integer)	titan/uv/uv.titan:857	base: INPUT immutable byte string; length: INPUT byte count between zero, string length and native UINT_MAX; invalid input raises before allocation.
 buf_t.allocate	function buf_t.allocate(capacity: integer): buf_t	titan/uv/uv.titan:822	capacity: INPUT integer value; checked native narrowing occurs before native ownership is accepted.
 buf_t.from_string	function buf_t.from_string(base: string): buf_t	titan/uv/uv.titan:842	base: INPUT immutable byte string retained by the returned readonly buffer view, including embedded NUL bytes; the borrow outlives this constructor call.
 buf_t:get	function buf_t:get(index: integer): integer	titan/uv/uv.titan:868	index: INPUT integer value; checked native narrowing occurs before native ownership is accepted.
@@ -34,7 +35,9 @@ cond_t:timedwait	function cond_t:timedwait(mutex: mutex_t, timeout_ns: foreign u
 cond_t:wait	function cond_t:wait(mutex: mutex_t)	titan/uv/sync.titan:430	mutex: INPUT/OUTPUT initialized native synchronization owner; caller coordinates external native users and lifetime; destroy/delete only after quiescence.
 connect_t.new	function connect_t.new(): connect_t	titan/uv/stream_owners.titan:568	
 connect_t:as_req_t	function connect_t:as_req_t(): req_t	titan/uv/stream_owners.titan:574	
+connect_t:get_data	function connect_t:get_data(): value	titan/uv/stream_owners.titan:578	Reads the existing traced public request data slot without a request view.
 connect_t:handle	function connect_t:handle(): stream_t?	titan/uv/stream_owners.titan:578	
+connect_t:set_data	function connect_t:set_data(data: value)	titan/uv/stream_owners.titan:582	data: INPUT traced public value; nil clears it without changing reserved native data or pending ownership.
 dir_t.new	function dir_t.new(): dir_t	titan/uv/uv.titan:2584	
 fs_event_t.new	function fs_event_t.new(): fs_event_t	titan/uv/uv.titan:2401	
 fs_event_t:as_handle_t	function fs_event_t:as_handle_t(): handle_t	titan/uv/uv.titan:2408	
@@ -47,10 +50,14 @@ fs_poll_t.new	function fs_poll_t.new(): fs_poll_t	titan/uv/uv.titan:2525
 fs_poll_t:as_handle_t	function fs_poll_t:as_handle_t(): handle_t	titan/uv/uv.titan:2532	
 fs_t.new	function fs_t.new(): fs_t	titan/uv/uv.titan:488	
 fs_t:as_req_t	function fs_t:as_req_t(): req_t	titan/uv/uv.titan:497	
+fs_t:get_data	function fs_t:get_data(): value	titan/uv/uv.titan:526	Reads the existing traced public request data slot without a request view.
+fs_t:set_data	function fs_t:set_data(data: value)	titan/uv/uv.titan:530	data: INPUT traced public value; nil clears it without changing reserved native data or pending ownership.
 getaddrinfo_t.new	function getaddrinfo_t.new(): getaddrinfo_t	titan/uv/dns.titan:149	
 getaddrinfo_t:addrinfo	function getaddrinfo_t:addrinfo(): (integer, addrinfo_result_t?)	titan/uv/dns.titan:164	
 getaddrinfo_t:as_req_t	function getaddrinfo_t:as_req_t(): req_t	titan/uv/dns.titan:156	
+getaddrinfo_t:get_data	function getaddrinfo_t:get_data(): value	titan/uv/dns.titan:160	Reads the existing traced public request data slot without a request view.
 getaddrinfo_t:get_loop	function getaddrinfo_t:get_loop(): loop_t?	titan/uv/dns.titan:160	
+getaddrinfo_t:set_data	function getaddrinfo_t:set_data(data: value)	titan/uv/dns.titan:164	data: INPUT traced public value; nil clears it without changing reserved native data or pending ownership.
 getnameinfo_t.new	function getnameinfo_t.new(): getnameinfo_t	titan/uv/dns.titan:272	
 getnameinfo_t:as_req_t	function getnameinfo_t:as_req_t(): req_t	titan/uv/dns.titan:279	
 getnameinfo_t:get_loop	function getnameinfo_t:get_loop(): loop_t?	titan/uv/dns.titan:283	
@@ -133,9 +140,12 @@ sem_t:init	function sem_t:init(value: integer): integer	titan/uv/sync.titan:229	
 sem_t:post	function sem_t:post()	titan/uv/sync.titan:242	
 sem_t:trywait	function sem_t:trywait(): integer	titan/uv/sync.titan:268	
 sem_t:wait	function sem_t:wait()	titan/uv/sync.titan:255	
+setup_process_args	function setup_process_args(): boolean	titan/uv/startup.titan:8	No arguments; original generated-entrypoint argc/argv only. Returns false without that host contract; true after idempotent setup.
 shutdown_t.new	function shutdown_t.new(): shutdown_t	titan/uv/stream_owners.titan:684	
 shutdown_t:as_req_t	function shutdown_t:as_req_t(): req_t	titan/uv/stream_owners.titan:690	
+shutdown_t:get_data	function shutdown_t:get_data(): value	titan/uv/stream_owners.titan:717	Reads the existing traced public request data slot without a request view.
 shutdown_t:handle	function shutdown_t:handle(): stream_t?	titan/uv/stream_owners.titan:694	
+shutdown_t:set_data	function shutdown_t:set_data(data: value)	titan/uv/stream_owners.titan:721	data: INPUT traced public value; nil clears it without changing reserved native data or pending ownership.
 signal_t.new	function signal_t.new(): signal_t	titan/uv/uv.titan:1866	
 signal_t:as_handle_t	function signal_t:as_handle_t(): handle_t	titan/uv/uv.titan:1873	
 signal_t:get_signum	function signal_t:get_signum(): integer	titan/uv/uv.titan:1877	
@@ -169,6 +179,9 @@ thread_t:getpriority	function thread_t:getpriority(): (integer, integer?)	titan/
 thread_t:join	function thread_t:join(): integer	titan/uv/threading.titan:82	
 thread_t:setaffinity	function thread_t:setaffinity(mask: owned char[], oldmask: (owned char[])?): integer	titan/uv/threading.titan:177	mask: INPUT owned byte array; capacity is its Array length, retained by caller through native operation.; oldmask: OUTPUT owned byte array; capacity is its Array length, retained by caller through native operation. Optional nil is meaningful; see contract.
 thread_t:setpriority	function thread_t:setpriority(priority: integer): integer	titan/uv/threading.titan:136	priority: INPUT integer value; checked native narrowing occurs before native ownership is accepted.
+timer_close	function timer_close(timer: timer_t, callback: timer_cb?)	titan/uv/uv.titan:273	timer: INPUT/OUTPUT initialized concrete owner; callback: INPUT optional ordinary timer callable; retirement precedes callback and owner survives callback return.
+timer_get_data	function timer_get_data(timer: timer_t): value	titan/uv/uv.titan:265	timer: INPUT concrete timer owner; reads its traced public data slot without a handle view.
+timer_set_data	function timer_set_data(timer: timer_t, data: value)	titan/uv/uv.titan:269	timer: INPUT/OUTPUT concrete timer owner; data: INPUT traced public value, independent of reserved native data.
 timer_t.new	function timer_t.new(): timer_t	titan/uv/uv.titan:217	
 timer_t:as_handle_t	function timer_t:as_handle_t(): handle_t	titan/uv/uv.titan:227	
 tty_t.new	function tty_t.new(): tty_t	titan/uv/stream_owners.titan:364	
@@ -181,9 +194,13 @@ udp_t.new	function udp_t.new(): udp_t	titan/uv/udp.titan:195
 udp_t:as_handle_t	function udp_t:as_handle_t(): handle_t	titan/uv/udp.titan:203	
 work_t.new	function work_t.new(): work_t	titan/uv/uv.titan:747	
 work_t:as_req_t	function work_t:as_req_t(): req_t	titan/uv/uv.titan:758	
+work_t:get_data	function work_t:get_data(): value	titan/uv/uv.titan:795	Reads the existing traced public request data slot without a request view.
 work_t:get_loop	function work_t:get_loop(): loop_t?	titan/uv/uv.titan:762	
+work_t:set_data	function work_t:set_data(data: value)	titan/uv/uv.titan:799	data: INPUT traced public value; nil clears it without changing reserved native data or pending ownership.
+write_string	function write_string(req: write_t, stream: stream_t, data: string, callback: write_cb?): integer	titan/uv/stream_ops.titan:215	req: INPUT/OUTPUT nonpending request; stream: INPUT initialized stream; data: INPUT immutable binary string retained through callback return; callback: INPUT optional ordinary completion callable.
 write_t.new	function write_t.new(): write_t	titan/uv/stream_owners.titan:625	
 write_t:as_req_t	function write_t:as_req_t(): req_t	titan/uv/stream_owners.titan:632	
+write_t:get_data	function write_t:get_data(): value	titan/uv/stream_owners.titan:643	Reads the traced public request data slot without a request view.
 write_t:handle	function write_t:handle(): stream_t?	titan/uv/stream_owners.titan:636	
 write_t:send_handle	function write_t:send_handle(): handle_t?	titan/uv/stream_owners.titan:728	
-setup_process_args	function setup_process_args(): boolean	titan/uv/startup.titan:8	No arguments; original generated-entrypoint argc/argv only. Returns false without that host contract; true after idempotent setup.
+write_t:set_data	function write_t:set_data(data: value)	titan/uv/stream_owners.titan:647	data: INPUT traced public value, independent of reserved native data.
