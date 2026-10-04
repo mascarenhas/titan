@@ -119,7 +119,7 @@ assert(require "os" == lua_os)
 
 The same qualified Lua identity applies to every standard module, including
 `titan.coroutine`, `titan.async`, `titan.timer`, `titan.io`, `titan.fs`,
-`titan.net`, `titan.ssl`, `titan.url`, `titan.http`, `titan.os`, `titan.peg`,
+`titan.net`, `titan.ssl`, `titan.url`, `titan.http`, `titan.websocket`, `titan.os`, `titan.peg`,
 `titan.string`, `titan.math`, `titan.lua`, `titan.iteration`, `titan.gc`, and
 `titan.test`, `titan.reflect`, `titan.sqlite3`, and `titan.json`. The public
 low-level `titan.uv` binding uses the same canonical identity. All standard modules support

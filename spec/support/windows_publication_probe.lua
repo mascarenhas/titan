@@ -15,14 +15,16 @@ local function write(path, bytes)
   local f = assert(io.open(path, "wb")); assert(f:write(bytes)); assert(f:close())
 end
 local old = read(root .. "/support.dll")
-for _, mode in ipairs({ "normal", "rollback", "mapped", "alias" }) do
+for _, mode in ipairs({ "normal", "rollback", "new-companion", "mapped", "alias" }) do
   local prefix = root .. "/" .. mode
   local image, shim, source = prefix .. "-provider.dll", prefix .. ".lua", prefix .. "-source.dll"
-  write(image, old); write(shim, "old shim"); write(source, old .. "new overlay")
+  write(image, old)
+  if mode ~= "new-companion" then write(shim, "old shim") end
+  write(source, old .. "new overlay")
   local held
   if mode == "mapped" then held = assert(package.loadlib(image, "luaopen_titan")) end
   local options
-  if mode == "rollback" then options = { after_commit = function(i)
+  if mode == "rollback" or mode == "new-companion" then options = { after_commit = function(i)
     if i == 2 then return nil, "injected final failure" end
     return true
   end } end
@@ -34,7 +36,12 @@ for _, mode in ipairs({ "normal", "rollback", "mapped", "alias" }) do
   else
     assert(not ok, "expected protected failure")
     assert(read(image) == old, "previous image bytes changed")
-    assert(read(shim) == "old shim", "previous shim bytes changed")
+    if mode == "new-companion" then
+      local restored, _, code = support._win_stat(shim, false)
+      assert(not restored and (code == 2 or code == 3), "new shim survived rollback")
+    else
+      assert(read(shim) == "old shim", "previous shim bytes changed")
+    end
   end
   if held then assert(type(held()) == "table") end
 end

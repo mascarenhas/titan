@@ -149,12 +149,12 @@ The installed files used to compile Titan code include:
 | `$ROCKS_TREE/lib/libbacktrace.a` | The separate vendored native unwinder/symbolizer archive |
 | `$ROCKS_TREE/include/minicoro.h`, `titan.h` | Non-Lua top-level SDK headers |
 | `$ROCKS_TREE/include/titan/ffi.h` | Namespaced portable FFI and audited Lua-internal bridge header |
-| `$ROCKS_TREE/lib/titan/0.6/titan.so` | The dynamic standard-library provider: native `require "titan"` support plus twenty-one independent logical modules from `titan.coroutine` through `titan.json` |
-| `$ROCKS_TREE/lib/titan/0.6/titan.a` | The self-describing static form of the same twenty-one logical standard modules, plus native support and private LPegLabel/libuv/llhttp/SQLite payload, with OpenSSL payload when bundled OpenSSL is selected |
-| `$ROCKS_TREE/share/lua/5.5/titan/{coroutine,uv,async,timer,io,fs,net,ssl,url,http,os,peg,string,math,lua,iteration,gc,test,reflect,sqlite3,json}.lua` | Generated logical-module loader shims that map the canonical provider globally and invoke their exact `luaopen_titan_*` entries |
+| `$ROCKS_TREE/lib/titan/0.6/titan.so` | The dynamic standard-library provider: native `require "titan"` support plus twenty-two independent logical modules from `titan.coroutine` through `titan.json` |
+| `$ROCKS_TREE/lib/titan/0.6/titan.a` | The self-describing static form of the same twenty-two logical standard modules, plus native support and private LPegLabel/libuv/llhttp/SQLite payload, with OpenSSL payload when bundled OpenSSL is selected |
+| `$ROCKS_TREE/share/lua/5.5/titan/{coroutine,uv,async,timer,io,fs,net,ssl,url,http,websocket,os,peg,string,math,lua,iteration,gc,test,reflect,sqlite3,json}.lua` | Generated logical-module loader shims that map the canonical provider globally and invoke their exact `luaopen_titan_*` entries |
 | `$ROCKS_TREE/share/titan/0.6/src/titan/test.titan` | Canonical compiler-data source used for the source-private native test-runner protocol |
 
-The twenty-one-module pair, shims, and test support source are the coordinated
+The twenty-two-module pair, shims, and test support source are the coordinated
 ABI-2 standard image. `titan.io` owns the shared Interface vocabulary and
 I/O helpers; bare native support adds the twenty-second DSO opener without adding
 a logical metadata key.
@@ -314,7 +314,7 @@ For the Titan-owned interpreter at `$PREFIX/bin/lua`, the default
 `$PREFIX/lib/titan/0.6/?.so` before `$PREFIX/lib/lua/5.5/?.so`. The first
 template lets the generated `titan.*` loaders find the canonical provider; the
 second remains the root-discovery anchor. The default `package.path` finds all
-twenty-one loaders under `$PREFIX/share/lua/5.5/titan/`. Here `PREFIX` is
+twenty-two loaders under `$PREFIX/share/lua/5.5/titan/`. Here `PREFIX` is
 resolved from the running interpreter, so these paths follow a moved tree.
 In the currently supported layout `ROCKS_TREE == PREFIX`, so `titanc` can use
 the first entry ending in
@@ -372,13 +372,13 @@ image. After LuaRocks deploys the compiler, the source-only `post_install` hook
 calls `make install-stdlib` with that `titanc`, using the same dependency graph,
 checkout outputs, and completion stamp as a later `make stdlib`. Each logical module owns an object and its generated headers;
 unchanged objects are reused. One final incremental invocation links all
-twenty-one roots, with private LPegLabel, selected libuv, HTTP/llhttp, SQLite,
+twenty-two roots, with private LPegLabel, selected libuv, HTTP/llhttp, SQLite,
 and TLS/OpenSSL payload after `ltitanlib.o`. The publisher validates the paired
 providers, generated loaders, and exact `titan.test` compiler source, prepares
 private destination copies, and publishes them with rollback, committing
 `titan.a` before `titan.so` and using the DSO rename as the final commit point.
 Publication recognizes the bootstrap and current complete pair as recoverable
-states in the active `0.6` library namespace; twenty-one modules are the current
+states in the active `0.6` library namespace; twenty-two modules are the current
 installed contract. No earlier Titan installation is a migration source.
 There is no separate Make install pass or pre-install hook. The provider,
 generated loaders, and SDK files remain
@@ -546,6 +546,9 @@ iteration, and GC control live in `titan.math`, `titan.lua`, `titan.iteration`, 
 `titan.gc`; `titan.test` supplies native test contexts and assertions.
 [`titan.reflect`](doc/language/standard-library-reflect.md) inspects runtime
 values, nominal schemas, and public fields.
+[`titan.websocket`](doc/language/standard-library-websocket.md) implements
+message-oriented WS/WSS clients and HTTP-handler upgrades with direct-style
+read/write, control frames, finite read limits, and explicit session cleanup.
 [`titan.json`](doc/language/standard-library-json.md) encodes ordinary values
 and decodes explicit reflected schemas, including records and tagged unions.
 Its PEG parser reports labeled errors with byte positions and line/column;
@@ -557,7 +560,7 @@ pool, with cancellation-insensitive resource retirement. Its private pinned
 amalgamation enters both provider forms in either OpenSSL mode.
 GC-backed
 owners can attach table/full-userdata finalizers
-without discarding an existing metatable. Make compiles the twenty-one logical
+without discarding an existing metatable. Make compiles the twenty-two logical
 modules through separate object targets, then passes all roots to one
 incremental `titanc` link. Source contributors, imported objects/headers,
 compiler inputs, and build configuration drive recompilation. The high-level libuv
@@ -709,8 +712,8 @@ under `spec/stdlib/` and no root-level standard-library boundary specs.
 Module-owned standard-library behavior, including fresh-process and host-stdio
 cases, lives under `spec/stdlib/titan/`: compiled Titan parents launch focused
 standalone fixtures through C99 `system`, consume explicit temporary result
-files, and clean them with `defer`. The Makefile names all 25 test roots
-explicitly. It compiles the 42 test/helper modules and shared `titan.test`
+files, and clean them with `defer`. The Makefile names all 27 test roots
+explicitly. It compiles the explicit test/helper modules and shared `titan.test`
 support through separate `titanc -c --test --incremental` targets, then links
 one test executable with `--test --incremental`. `make titan-stdlib-test-build`
 places that executable and synthetic runner outputs below `.titan-tests/`;
@@ -881,9 +884,9 @@ need the SDL2 development headers installed.
 
 `make clean` removes generated build and test artifacts (object files, generated
 C, compiled modules, coverage data), including nested `titan/uv/uv.c` and
-`titan/uv/uv.o`, the `titan/http`, `titan/peg`, and `titan/string` folder-main
+`titan/uv/uv.o`, the `titan/http`, `titan/websocket`, `titan/peg`, and `titan/string` folder-main
 outputs, and
-the twenty-one known generated standard-library loaders, while
+the twenty-two known generated standard-library loaders, while
 keeping source files and downloaded dependency trees.
 `make distclean` additionally removes the downloaded or cloned Lua, GNU
 Readline, LuaRocks, libbacktrace, libuv, OpenSSL, and llhttp source/build trees

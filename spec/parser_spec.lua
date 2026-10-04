@@ -2652,6 +2652,10 @@ end]])
             { _tag = "Ast.TopLevelImport", localname = "uv",
               modname = "titan.uv", source_required = true },
         })
+        assert_program_ast([[ local websocket = import "websocket.titan" ]], {
+            { _tag = "Ast.TopLevelImport", localname = "websocket",
+              modname = "titan.websocket", source_required = true },
+        })
         assert_program_ast([[ local foo = import "foo.titan.titan" ]], {
             { _tag = "Ast.TopLevelImport", localname = "foo",
               modname = "foo.titan", source_required = true },
@@ -2662,7 +2666,7 @@ end]])
        function()
         local names = {
             "coroutine", "uv", "async", "timer", "io", "fs", "net", "ssl",
-            "url", "http", "os", "peg", "string", "test", "sqlite3", "json",
+            "url", "http", "websocket", "os", "peg", "string", "test", "sqlite3", "json",
         }
         for _, name in ipairs(names) do
             assert_program_ast(

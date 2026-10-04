@@ -16,20 +16,20 @@ local UV_TYPES_FIXTURE =
 "spec/fixtures/libuv/titan_uv_types.lua"
 local STDLIB_MODULES = {
     "coroutine", "uv", "async", "timer", "io", "fs", "net", "ssl",
-    "url", "http", "os", "peg", "string", "math", "lua", "iteration", "gc",
+    "url", "http", "websocket", "os", "peg", "string", "math", "lua", "iteration", "gc",
     "test", "reflect", "sqlite3", "json",
 }
 local STDLIB_ROOTS = {
     "titan.coroutine", "titan.uv", "titan.async", "titan.timer",
     "titan.io", "titan.fs", "titan.net", "titan.ssl", "titan.url",
-    "titan.http", "titan.os", "titan.peg", "titan.string", "titan.math",
+    "titan.http", "titan.websocket", "titan.os", "titan.peg", "titan.string", "titan.math",
     "titan.lua", "titan.iteration", "titan.gc", "titan.test", "titan.reflect",
     "titan.sqlite3", "titan.json",
 }
 local STDLIB_SHIMS = {
     "titan/coroutine.lua", "titan/uv.lua", "titan/async.lua",
     "titan/timer.lua", "titan/io.lua", "titan/fs.lua", "titan/net.lua",
-    "titan/ssl.lua", "titan/url.lua", "titan/http.lua", "titan/os.lua",
+    "titan/ssl.lua", "titan/url.lua", "titan/http.lua", "titan/websocket.lua", "titan/os.lua",
     "titan/peg.lua", "titan/string.lua", "titan/math.lua", "titan/lua.lua",
     "titan/iteration.lua", "titan/gc.lua", "titan/test.lua", "titan/reflect.lua",
     "titan/sqlite3.lua", "titan/json.lua",
@@ -527,6 +527,7 @@ local function stdlib_source_files()
     local source_ensembles = {
         ["$(UV_TITAN_SOURCES)"] = "UV_TITAN_SOURCES",
         ["$(STDLIB_HTTP_SOURCES)"] = "STDLIB_HTTP_SOURCES",
+        ["$(WEBSOCKET_TITAN_SOURCES)"] = "WEBSOCKET_TITAN_SOURCES",
         ["$(SQLITE3_TITAN_SOURCES)"] = "SQLITE3_TITAN_SOURCES",
         ["$(JSON_TITAN_SOURCES)"] = "JSON_TITAN_SOURCES",
     }
@@ -813,7 +814,7 @@ describe("libuv Makefile configuration", function()
                     "sqlite3.config", "sqlite3-archive.config", "sqlite3.a" }) do
                 inputs[#inputs + 1] = name
             end
-            local folders = { uv = true, http = true, peg = true,
+            local folders = { uv = true, http = true, websocket = true, peg = true,
                 string = true, sqlite3 = true, json = true }
             local callbacks = { coroutine = true, uv = true, fs = true,
                 http = true, sqlite3 = true }
@@ -898,7 +899,7 @@ describe("libuv Makefile configuration", function()
             end
             assert(lfs.touch(root .. "/titan/uv/tcp.titan", old + 2, old + 2))
             assert.same({ uv = true, async = true, timer = true, os = true, io = true,
-                fs = true, net = true, ssl = true, http = true, lua = true,
+                fs = true, net = true, ssl = true, http = true, websocket = true, lua = true,
                 reflect = true, sqlite3 = true, json = true }, build())
             assert.same({}, build())
             assert(os.remove(root .. "/titan/test.ffi.h"))
@@ -1986,7 +1987,10 @@ int main(void) {
                 "titan/net.titan", "titan/ssl.titan", "titan/url.titan",
                 "titan/http/http.titan", "titan/http/client.titan",
                 "titan/http/headers.titan", "titan/http/native.titan",
-                "titan/http/server.titan",
+                "titan/http/server.titan", "titan/http/upgrade.titan",
+                "titan/websocket/websocket.titan", "titan/websocket/handshake.titan",
+                "titan/websocket/connection.titan", "titan/websocket/frames.titan",
+                "titan/websocket/utf8.titan", "titan/websocket/native.titan",
                 "titan/os.titan",
                 "titan/peg/peg.titan",
                 "titan/peg/combinators.titan", "titan/peg/native.titan",
@@ -2284,11 +2288,11 @@ int main(void) {
             }, public_declarations(path))
         end)
 
-    it("pins current metadata for all twenty-one standard modules",
+    it("pins current metadata for all twenty-two standard modules",
         function()
             local expected = assert(loadfile(STDLIB_TYPES_FIXTURE))()
             local expected_uv = assert(loadfile(UV_TYPES_FIXTURE))()
-            assert.equal(21, #STDLIB_ROOTS)
+            assert.equal(22, #STDLIB_ROOTS)
             assert.equal(expected.uv, expected_uv,
                 "standalone titan.uv metadata fixture is stale")
 
@@ -2326,11 +2330,11 @@ int main(void) {
             end
         end)
 
-    it("exports twenty-two DSO openers for twenty-one standard modules",
+    it("exports twenty-three DSO openers for twenty-two standard modules",
         function()
-            assert.equal(21, #STDLIB_MODULES)
-            assert.equal(21, #STDLIB_ROOTS)
-            assert.equal(21, #STDLIB_SHIMS)
+            assert.equal(22, #STDLIB_MODULES)
+            assert.equal(22, #STDLIB_ROOTS)
+            assert.equal(22, #STDLIB_SHIMS)
 
             local container = installed_stdlib_container()
             local ok, output, why, code = run_argv(tool_argv(
@@ -2354,7 +2358,7 @@ int main(void) {
                     found[symbol] = true
                 end
             end
-            assert.equal(22, (function()
+            assert.equal(23, (function()
                 local count = 0
                 for _ in pairs(found) do count = count + 1 end
                 return count
@@ -2971,7 +2975,7 @@ esac
                 "titan/net.titan", "titan/ssl.titan", "titan/url.titan",
                 "titan/http/http.titan", "titan/http/client.titan",
                 "titan/http/headers.titan", "titan/http/native.titan",
-                "titan/http/server.titan",
+                "titan/http/server.titan", "titan/http/upgrade.titan",
                 "titan/os.titan",
                 "titan/peg/peg.titan",
                 "titan/peg/combinators.titan", "titan/peg/native.titan",
@@ -2987,6 +2991,7 @@ esac
             }
             for _, ensemble in ipairs({
                 "UV_TITAN_SOURCES", "SQLITE3_TITAN_SOURCES", "JSON_TITAN_SOURCES",
+                "WEBSOCKET_TITAN_SOURCES",
                 "SQLITE3_TITAN_HEADERS", "STRING_TITAN_HEADERS",
             }) do
                 for _, source in ipairs(makefile_words(ensemble)) do
@@ -4373,7 +4378,8 @@ done
                 'rm -f "$test_source"',
                 '"$shim_dir/io.lua"',
                 '"$shim_dir/fs.lua" "$shim_dir/net.lua" "$shim_dir/ssl.lua"',
-                '"$shim_dir/url.lua" "$shim_dir/http.lua" "$shim_dir/os.lua"',
+                '"$shim_dir/url.lua" "$shim_dir/http.lua" "$shim_dir/websocket.lua"',
+                '"$shim_dir/os.lua"',
             }) do
                 assert.truthy(snapshot:find(contract, 1, true), contract)
             end
@@ -4391,6 +4397,8 @@ done
                 'local ssl = import "ssl"',
                 'local url = import "url"',
                 'local http = import "http"',
+                'local websocket = import "websocket"',
+                'local qualified_websocket = import "titan.websocket"',
                 'local system = import "os"',
                 'local peg = import "peg"',
                 'local strings = import "string"',
@@ -4467,6 +4475,7 @@ done
                 'local ssl = require "titan.ssl"',
                 'local url = require "titan.url"',
                 'local http = require "titan.http"',
+                'local websocket = require "titan.websocket"',
                 'local math = require "titan.math"',
                 'local lua = require "titan.lua"',
                 'local iteration = require "titan.iteration"',
@@ -4992,7 +5001,7 @@ done
                 1, true), workflow)
             assert.truthy(workflow:find(
                 "for module in coroutine uv async timer io fs net ssl url " ..
-                "http os peg string math lua iteration gc test reflect sqlite3 json; do",
+                "http websocket os peg string math lua iteration gc test reflect sqlite3 json; do",
                 1, true), workflow)
             assert.truthy(workflow:find(
                 "share/titan/0.6/src/titan/test.titan", 1, true), workflow)
@@ -5311,7 +5320,7 @@ done
 
             assert.equal(1, count_literal(sanitizer_job,
                 "make titan-stdlib-test-build"), sanitizer_job)
-            assert.equal(26, count_literal(sanitizer_job,
+            assert.equal(36, count_literal(sanitizer_job,
                 "make titan-stdlib-test-run"), sanitizer_job)
             for _, filter in ipairs({
                 "TITAN_FILTER='test_lua_host_roots_coroutine_" ..
@@ -5330,6 +5339,16 @@ done
                 "TITAN_FILTER='test_run_foreign_'",
                 "TITAN_FILTER='test_signal_watcher_'",
                 "TITAN_FILTER='test_ssl_http_fresh_process_sanitizer_composition$'",
+                "TITAN_FILTER='test_ssl_simultaneous_large_duplex_preserves_bytes$'",
+                "TITAN_FILTER='test_ssl_cancel_backpressured_write_aborts_before_native_drain$'",
+                "TITAN_FILTER='test_upgrade_server_transfers_binary_excess_and_handler_lifetime$'",
+                "TITAN_FILTER='test_upgrade_opening_cancellation_aborts_before_output_drain$'",
+                "TITAN_FILTER='test_received_message_strings_survive_later_reads_and_forced_gc$'",
+                "TITAN_FILTER='test_partial_utf8_message_cancellation_retires_ownership$'",
+                "TITAN_FILTER='test_admitted_idle_read_cancellation_terminalizes_ws_and_wss$'",
+                "TITAN_FILTER='test_close_interrupts_active_read_without_joining_its_caller$'",
+                "TITAN_FILTER='test_shutdown_takes_receive_progress_after_reader_returns_data$'",
+                "TITAN_FILTER='test_stopped_socket_output_aborts_before_native_drain$'",
                 "TITAN_FILTER='^reflect%.tests%.'",
                 "TITAN_FILTER='^sqlite3%.tests%.'",
                 "TITAN_FILTER='^json%.tests%.test_mapping_" ..
@@ -5365,6 +5384,40 @@ done
             }) do
                 assert.equal(1, count_literal(json_sanitizer_step,
                     "ci_sanitizer_capture.sh " .. label .. " "), label)
+            end
+            for _, ownership in ipairs({
+                {
+                    "Run native TLS/HTTP sanitizer gate", "TLS/HTTP",
+                    {
+                        "ssl-duplex", "ssl-backpressure",
+                        "http-upgrade-handoff", "http-upgrade-abort",
+                    },
+                },
+                {
+                    "Run native WebSocket ownership sanitizer gate", "WebSocket",
+                    {
+                        "websocket-message-gc", "websocket-partial-utf8",
+                        "websocket-read-cancel", "websocket-active-close",
+                        "websocket-receive-progress", "websocket-backpressure",
+                    },
+                },
+            }) do
+                local step = named_step(sanitizer_job, ownership[1])
+                for _, label in ipairs(ownership[3]) do
+                    assert.equal(1, count_literal(step,
+                        "ci_sanitizer_capture.sh " .. label .. " "), label)
+                    assert.equal(2, count_literal(step, label), label)
+                end
+                assert.truthy(step:find(
+                    "grep -Eq '^\\[==========\\] [1-9][0-9]* tests? ran\\.$'",
+                    1, true), step)
+                assert.truthy(step:find(
+                    '"$TITAN_SANITIZER_LOG_DIR/$ownership_log.log"',
+                    1, true), step)
+                assert.truthy(step:find(ownership[2] ..
+                    " ownership sanitizer filter ran no tests:",
+                    1, true), step)
+                assert.truthy(step:find("exit 1", 1, true), step)
             end
             for _, removed in ipairs({
                 "spec/stdlib/uv_native_handles_spec.lua",
@@ -5452,6 +5505,10 @@ done
                 },
                 {
                     "Run native TLS/HTTP sanitizer gate",
+                    { "make titan-stdlib-test-run" },
+                },
+                {
+                    "Run native WebSocket ownership sanitizer gate",
                     { "make titan-stdlib-test-run" },
                 },
                 {

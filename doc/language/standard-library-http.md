@@ -48,10 +48,16 @@ function request(method: string, source_url: string,
 function get(source_url: string, supplied_headers: Headers?,
              ca_file: string?): ClientResponse
 
+function request_upgrade_on(connection: io.ReaderWriterCloser,
+                            abort: function (): (), source_url: string,
+                            protocol: string,
+                            supplied_headers: Headers?): ClientResponse
+
 function ClientResponse:read(): string?
 function ClientResponse:read_until(delimiter: string,
                                    chop: boolean?): string?
 function ClientResponse:close()
+function ClientResponse:take_upgrade(): io.ReaderWriterCloser
 
 type Handler = function (Request, Response): ()
 
@@ -76,6 +82,10 @@ function Response:headers(): Headers
 function Response:send_headers()
 function Response:write(data: string)
 function Response:close()
+function Response:upgrade(request_value: Request, protocol: string,
+                          supplied_headers: Headers?): io.ReaderWriterCloser
+function Response:reject_upgrade(request_value: Request, status: integer,
+                                 supplied_headers: Headers?)
 
 record Server
 
@@ -86,6 +96,7 @@ function listen_tls(host: string, certificate_file: string, handler: Handler,
                     private_key_file: string?, port: integer?,
                     backlog: integer?, idle_timeout: integer?): Server
 function Server:idle_timeout(timeout: integer?): integer
+function Server:header_limit(limit: integer?): integer
 function Server:serve()
 function Server:close()
 ```
@@ -166,7 +177,7 @@ staged `100-continue` state machine. The client always sets
 `get` is `request` with method `GET` and no body. It does not attach semantics
 to any other method name.
 
-The response parser consumes any informational 1xx responses before returning
+The ordinary response parser consumes informational 1xx responses before returning
 the final response. `status`, `reason`, `version`, and `headers` are then
 available while its body remains streaming. `read` returns decoded body chunks
 with HTTP chunk framing removed; `read_until` has the ordinary binary
@@ -178,6 +189,10 @@ parser. Response trailers, when present, are appended to the same ordered
 Reading through body EOF closes the parser and transport. `close()` lets the
 caller discard the remaining response and is idempotent. The client has no
 connection pool and never reuses its connection.
+
+An ordinary `request` or `get` rejects protocol upgrades. It also explicitly
+rejects `ws` and `wss` source URLs; use the
+[`websocket` module](standard-library-websocket.md) for those schemes.
 
 The response becomes logically closed before its transport close can suspend.
 Transport close is cancellation-insensitive: if Task cancellation is pending
@@ -226,21 +241,26 @@ connection teardown.
 For HTTPS, the timeout cancels the in-flight high-level SSL read. The SSL
 connection's documented cancellation rule terminalizes its TLS engine, so the
 peer observes `ssl.Error` with name `TLS_TRUNCATED_EOF`, not authenticated
-`close_notify` EOF. There is currently no high-level SSL operation that can
-interrupt a busy read and then perform graceful TLS shutdown; adding that
-capability is an SSL-composition gap, not a reason for HTTP to reach into
-`uv`.
+`close_notify` EOF. Cancelling admitted TLS input remains terminal even though
+TLS now supports one concurrent application reader and writer.
 
 The handler is called as soon as the request line and headers are complete,
 without waiting for the HTTP parser to consume the complete body.
-If the request has exactly one `Expect` field whose optional surrounding
-whitespace and case-insensitive value are `100-continue`, the server first
+If the request does not advertise an upgrade and has exactly one `Expect`
+field whose optional surrounding whitespace and case-insensitive value are
+`100-continue`, the server first
 writes `HTTP/1.1 100 Continue` and then calls the handler. This lets a handler
 stream a body from a client that deliberately withholds it until the interim
 response arrives. Any unsupported, combined, or repeated expectation receives
 a final `417 Expectation Failed` with `Content-Length: 0` and
 `Connection: close`; the handler is not called and the server does not wait
-for the rejected body.
+for the rejected body. A request advertising an `Upgrade` field or a
+`Connection` upgrade token receives a bodyless `400 Bad Request` for any
+Expect, even when its counterpart field is missing. The server also sends this
+400 when such a complete opening has a missing, repeated, or invalid Host
+authority, an invalid request URL, or a version other than HTTP/1.1. These
+checks precede Request construction and handler dispatch. No interim response
+is emitted, and HTTP closes without waiting for a declared body.
 `Request:read` and `read_until` stream the decoded body and hide Content-Length
 and chunk framing. If the handler returns
 without consuming the complete body, the server drains the remainder before
@@ -306,29 +326,95 @@ Server remain independent.
 ## Strictness and limits
 
 Parsing uses llhttp in strict mode. Malformed or truncated messages,
-conflicting framing, unsupported HTTP versions, and protocol upgrades are
-errors. Strict llhttp owns received header-name, header-value, and
+conflicting framing, and unsupported HTTP versions are errors. Strict llhttp owns received header-name, header-value, and
 Content-Length grammar. Titan's public header/request/response APIs separately
 validate values before serializing them. Because llhttp treats a received
 reason phrase as opaque bytes up to its line ending, Titan also applies the
 field-value byte repertoire before exposing any informational or final
-response reason. HTTP/2, WebSockets, and every other Upgrade protocol are out
-of scope. The server has no routing abstraction: one Handler receives every
+response reason. HTTP/2 remains outside this API. The server has no routing abstraction: one Handler receives every
 request and can dispatch on `Request.url`, `Host`, method, or path itself.
 
-Headers are accumulated before a request or response object is returned, and
-this version configures no header-byte or field-count limit. A handler can
-reject the parsed collection but cannot impose a pre-parse cap through this
-API. Body data remains streaming, so the handler can impose its own accepted
-body size while reading. Deployments that require an earlier header cap must
-enforce it outside this Server abstraction.
+The server limits each start line and header block to 64 KiB by default.
+`Server:header_limit(limit)` installs a finite positive byte limit and returns
+the previous setting; nil reads the current setting. The connection snapshots
+the limit at the start of each request, so a setter affects subsequent header
+acquisitions. The count includes leading empty lines, separators, and line
+endings. The parser bounds input before copying header text and stops counting
+at the first complete header boundary. A coalesced request body or upgraded
+protocol suffix does not count against that header limit. Exceeding it closes
+the accepted connection before invoking its handler. There is no separate
+field-count limit. Body data remains streaming and has an application-defined
+size policy. Ordinary client responses retain their existing streaming parser;
+the explicit upgrade client uses the finite opening limits below.
 
 The server timeout covers only request-line and header acquisition. It does
-not cover handler work, request-body reads, automatic body drain, or response
-writes. Applications can compose their own Task/timer policy around those
+not cover handler work, request-body reads, automatic body drain, or ordinary
+response writes. It also bounds the server's bodyless malformed-upgrade
+rejection output before handler dispatch. Applications can compose their own Task/timer policy around those
 operations with the public `async` combinators. A body timeout must also
 unwind the handler; merely closing the listener does not stop an accepted
 connection or bypass the automatic drain performed after a handler returns.
+
+## Protocol upgrade and ownership
+
+`request_upgrade_on` performs one bodyless GET on an already connected stream.
+It performs no DNS lookup, TCP connection, or TLS handshake. Supply the public
+cancellation-insensitive retirement action while the concrete transport is
+known: `plain:close` for `net.Connection`, or `secure:abort` for
+`ssl.Connection`. The URL is an absolute `http` or `https` URL used for the
+normalized target and Host authority. Supplied headers are copied, body framing
+and Expect are rejected, and Connection/Upgrade are set to the chosen protocol.
+The protocol is a token name with an optional `/token` version. Upgrade offers
+may contain a comma-separated list such as `websocket, IRC/6.9`; matching folds
+ASCII letters in protocol names and compares version tokens exactly.
+After argument validation, HTTP owns the supplied stream through failure,
+rejection, or successful transfer.
+
+Opening responses have a 64 KiB cap per start-line-plus-header block, and at
+most sixteen interim responses may precede the final response. A 101 response
+is returned as a pending upgrade; ordinary body reads fail. The caller validates
+its protocol-specific response, then calls `take_upgrade()` exactly once.
+Closing a pending response invokes its abort action. A non-101 final response
+retains ordinary streaming body reads for rejection inspection, with the same
+abort ownership on close. A malformed opening always retires parser and stream.
+
+`Response:upgrade` checks that its Request belongs to the same live exchange,
+that no response bytes have been sent, and that the request offers the selected
+HTTP/1.1 upgrade without an HTTP body. It copies existing unsent response
+headers and appends validated copies of supplied headers,
+sets Connection/Upgrade, writes exactly one 101 header block without body
+framing, and returns an owning `io.ReaderWriterCloser`. Header output is bounded
+to 64 KiB. All fallible construction precedes output, and ownership transfers
+without suspension after output succeeds. Failure or cancellation during output
+aborts under the HTTP owner before waiting for accepted I/O to retire.
+
+`Response:reject_upgrade` applies the same live-pair and unsent-output checks
+even when malformed request fields did not register a parser upgrade. It
+accepts statuses 400 through 599, preserves unsent response fields and appends
+validated copies of supplied headers, emits one
+bounded response with Content-Length zero and Connection close, and retires the
+transport. It skips unread-body drain. This lets protocol validation reject an
+invalid opening without accidentally sending the Response's default 200 or
+reading untrusted protocol bytes as an HTTP body.
+
+The returned stream first consumes unread parser bytes, preserving embedded
+NUL and other binary values. Its `read_until` finds delimiters across that
+prefix and later transport input. Its `close()` is immediate, idempotent,
+cancellation-insensitive transport retirement; it does not perform WebSocket or
+TLS protocol shutdown. A transferred Request rejects further body reads, and
+the Response rejects further output. HTTP never resumes or resets the parser
+after transfer and its outer connection cleanup disarms close ownership.
+
+The handler must immediately defer the returned stream's close or give it a
+new explicit owner. It may return after transferring the stream to another
+owned Task; HTTP does not close that session on handler return. A candidate
+that the handler does not upgrade receives the handler's ordinary response
+and closes, without parsing or draining the upgraded-protocol suffix.
+`Server:close` continues to stop only the listener. It does not keep a registry
+of transferred sessions. A nonzero HTTP idle timeout bounds slow header
+acquisition; protocol opening and session deadlines are separate policies.
+Upgrade I/O failures preserve the original error value and traceback through
+the supervising Task's transport cleanup.
 
 ## Example
 

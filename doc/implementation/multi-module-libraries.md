@@ -304,7 +304,7 @@ Lua process and requires exactly one support table exposing `_loadlib` and
 proof.
 
 The production standard library is the canonical example. One compiler
-invocation names all twenty-one logical roots and publishes root `titan.so` and
+invocation names all twenty-two logical roots and publishes root `titan.so` and
 `titan.a`. Internal standard imports are direct. `ltitanlib.o` is shared `-X`
 payload and supplies bare `luaopen_titan` without adding a logical metadata
 key. The private namespaced five-member LPegLabel archive follows it as
@@ -313,9 +313,9 @@ llhttp and SQLite archives, and finally any bundled OpenSSL payload used directl
 `titan.ssl`. The eight HTTP callback definitions already live in the generated
 `titan.http` object; there is no adapter object. Bundled archives are
 force-carried into the DSO and flattened into the archive; system OpenSSL settings remain final-link inputs
-and are never copied into `titan.a`. The DSO exports twenty-two Lua entries
-(`luaopen_titan` plus the twenty-one logical entries); both forms define the
-twenty-one logical protocols, and the archive advertises exactly twenty-one
+and are never copied into `titan.a`. The DSO exports twenty-three Lua entries
+(`luaopen_titan` plus the twenty-two logical entries); both forms define the
+twenty-two logical protocols, and the archive advertises exactly twenty-two
 metadata keys.
 The private LPegLabel archive and its headers remain source-build inputs; they
 are not installed in the compiler/runtime SDK. The callback-bearing
@@ -341,9 +341,9 @@ object. The exact `titan/test.titan` used by this generation is copied
 into the same private stage. The hook then executes the source-only
 `scripts/stdlib_installer.lua` directly with the installed Lua; the publisher
 is not an installed compiler module. The script rescans `titan.a`, requires
-the exact twenty-one-key set, compares embedded metadata with the staged DSO and a
+the exact twenty-two-key set, compares embedded metadata with the staged DSO and a
 fresh-process archive-backed validation image, validates bare
-`luaopen_titan`, the twenty-one exact shims, the exact test-support source, and
+`luaopen_titan`, the twenty-two exact shims, the exact test-support source, and
 the macOS dSYM, then publishes the
 paired bundle with the DSO last. It recognizes bootstrap-only and current
 complete-pair predecessors in that same namespace. Injected failures restore
@@ -352,13 +352,13 @@ effort and cannot turn the coherent install into a reported hook failure.
 The publisher does not implement cross-version migration or cleanup.
 
 The canonical installed files are the provider pair (plus the DSO's macOS
-dSYM), twenty-one Lua shims, and the canonical test-support source:
+dSYM), twenty-two Lua shims, and the canonical test-support source:
 
 ```text
 <root>/lib/titan/0.6/titan.so
 <root>/lib/titan/0.6/titan.a
 <root>/lib/titan/0.6/titan.so.dSYM          # macOS only
-<root>/share/lua/5.5/titan/{coroutine,uv,async,timer,io,fs,net,ssl,url,http,os,peg,string,math,lua,iteration,gc,test,reflect,sqlite3,json}.lua
+<root>/share/lua/5.5/titan/{coroutine,uv,async,timer,io,fs,net,ssl,url,http,websocket,os,peg,string,math,lua,iteration,gc,test,reflect,sqlite3,json}.lua
 <root>/share/titan/0.6/src/titan/test.titan
 ```
 
@@ -367,11 +367,11 @@ manifest owns the compiler Lua/script files; `luarocks remove` does not claim
 to remove Titan library-package artifacts.
 
 The checkout Make graph has one provider-pair completion/configuration stamp.
-All twenty-one flat/folder source sets, native inputs, effective
+All twenty-two flat/folder source sets, native inputs, effective
 `CC`/`AR`/`RANLIB`, embedded-format inputs, OpenSSL mode, dependency
 identities, and extra flags are prerequisites. The
 DSO, archive, conditional dSYM, and every shim must exist; every warm
-invocation rescans `titan.a` for the exact twenty-one-key set without changing pair
+invocation rescans `titan.a` for the exact twenty-two-key set without changing pair
 mtimes. `make clean` removes only exact known generated outputs. Production
 library tests treat the combined set as read-only. CI snapshots and restores
 the checkout runtime archive plus the installed DSO/archive/dSYM/shims and

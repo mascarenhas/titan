@@ -62,6 +62,7 @@
 /titan/*.c
 /titan/uv/*.c
 /titan/http/http.c
+/titan/websocket/websocket.c
 /titan/peg/peg.c
 /titan/string/string.c
 /titan/coroutine.titan.h
@@ -84,6 +85,7 @@
 /titan/ssl.lua
 /titan/url.lua
 /titan/http.lua
+/titan/websocket.lua
 /titan/os.lua
 /titan/peg.lua
 /titan/string.lua

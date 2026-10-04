@@ -1,10 +1,10 @@
 # URL standard library
 
-The `url` standard module parses and normalizes absolute HTTP and HTTPS URLs,
+The `url` standard module parses and normalizes absolute HTTP, HTTPS, WS and WSS URLs,
 including URLs supplied as separate scheme, authority, and request-target
 components. It is synchronous and performs no network I/O: callers can use
 the parsed value for HTTP, routing, validation, logging, or another layer that
-consumes HTTP(S) endpoint identifiers. Titan source uses the short import:
+consumes HTTP(S) or WebSocket endpoint identifiers. Titan source uses the short import:
 
 ```titan
 local url = import "url"
@@ -71,7 +71,7 @@ joined. The stable `kind` values and corresponding message details are:
 
 | `kind` | Detail |
 | --- | --- |
-| `scheme` | `expected an HTTP or HTTPS scheme` |
+| `scheme` | `expected an HTTP, HTTPS, WS or WSS scheme` |
 | `scheme_separator` | `expected ':' after the scheme` |
 | `authority_separator` | `expected '//' before the authority` |
 | `userinfo` | `user information is unsupported` |
@@ -86,7 +86,7 @@ joined. The stable `kind` values and corresponding message details are:
 | `origin_form` | `expected an origin-form request target beginning with '/'` |
 | `fragment` | `fragments are unsupported` |
 | `url_tail` | `unexpected byte in the path or query` |
-| `url` | `invalid absolute HTTP URL` |
+| `url` | `invalid absolute HTTP or WebSocket URL` |
 
 `message` combines that identifier and position with its detail:
 
@@ -107,7 +107,7 @@ URL parse error [zone] at byte 14: expected a nonempty zone identifier after '%2
 
 `parse_request(scheme, authority, target)` builds the same normalized `Url`
 from the three components which an HTTP server receives independently. The
-scheme must be exactly `http` or `https`, compared case-insensitively; an
+scheme must be exactly `http`, `https`, `ws` or `wss`, compared case-insensitively; an
 invalid separate scheme reports `scheme` at byte 1. The authority must be one
 complete authority: an unescaped `/`, `?`, or `#` is an
 `authority_tail` error instead of being allowed to consume part of `target`.
@@ -122,7 +122,7 @@ percent-escape, normalization, and structured-error behavior stay identical.
 
 ## Accepted URLs
 
-This iteration accepts an absolute `http://` or `https://` URL with an
+This iteration accepts an absolute `http://`, `https://`, `ws://` or `wss://` URL with an
 authority and nonempty host. User information and fragments are deliberately
 unsupported. The host grammar accepts RFC 3986 registered names, IPv4
 addresses, bracketed IPv6 addresses, and bracketed IPvFuture literals. IPv6
@@ -133,8 +133,8 @@ The returned fields are normalized:
 
 - `scheme` is lowercase;
 - `host` is the connection and TLS-identity spelling, without URI brackets;
-- `port` is the explicit port or the effective default, 80 for HTTP and 443
-  for HTTPS;
+- `port` is the explicit port or the effective default, 80 for HTTP/WS and 443
+  for HTTPS/WSS;
 - `path` is `/` when the source path is empty;
 - `query` distinguishes an absent query from a present empty query;
 - `target` is the origin-form path plus the optional `?query`; and
@@ -144,6 +144,11 @@ The returned fields are normalized:
 An explicit port must contain decimal digits and have value `1..65535`. Its
 presence is preserved in `authority` even when it equals the scheme's default.
 `host_header()` returns `authority`.
+
+The scheme is preserved after normalization: parsing `wss://` does not turn
+it into `https://`. The WebSocket client derives its HTTP opening target from
+this value. Ordinary HTTP entry points accept only HTTP/HTTPS and reject WS/WSS
+before acquiring a transport.
 
 For an IP literal, `host` omits brackets because it is suitable for DNS/TCP
 and TLS identity handling, while `authority` preserves them. A zoned address

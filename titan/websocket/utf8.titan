@@ -1,0 +1,61 @@
+-- Unicode scalar validation carries only the valid continuation interval.
+-- The first continuation handles E0/ED/F0/F4 restrictions; later bytes use
+-- 80..BF. State survives transport and frame boundaries without copying.
+local record Utf8
+  remaining: integer
+  lower: integer
+  upper: integer
+end
+local function Utf8:reset()
+  self.remaining = 0; self.lower = 128; self.upper = 191
+end
+local function Utf8:feed(bytes: string)
+  local input = bytes as foreign const *unsigned char
+  for index = 0, #bytes - 1 do
+    local byte: integer = input[index]
+    if self.remaining > 0 then
+      if byte < self.lower or byte > self.upper then
+        raise wire_error("utf8", "invalid UTF-8 continuation", 1007)
+      end
+      self.remaining = self.remaining - 1
+      self.lower = 128; self.upper = 191
+    elseif byte < 128 then
+      -- ASCII includes embedded NUL.
+    elseif byte >= 194 and byte <= 223 then
+      self.remaining = 1
+    elseif byte >= 224 and byte <= 239 then
+      self.remaining = 2
+      if byte == 224 then self.lower = 160 end
+      if byte == 237 then self.upper = 159 end
+    elseif byte >= 240 and byte <= 244 then
+      self.remaining = 3
+      if byte == 240 then self.lower = 144 end
+      if byte == 244 then self.upper = 143 end
+    else
+      raise wire_error("utf8", "invalid UTF-8 leading byte", 1007)
+    end
+  end
+end
+local function Utf8:finish()
+  if self.remaining ~= 0 then
+    raise wire_error("utf8", "incomplete UTF-8 message", 1007)
+  end
+end
+local function validate_text(bytes: string, operation: string)
+  local state = Utf8(0, 128, 191)
+  local first = 1
+  while first <= #bytes do
+    local last = first + WORK_BYTES - 1
+    if last > #bytes then last = #bytes end
+    state:feed(string.sub(bytes, first, last))
+    first = last + 1
+    if first <= #bytes then async.yield() end
+  end
+  state:finish()
+catch
+  if error is Error then
+    local failure = error as Error
+    raise Error(failure.kind, operation, failure.message, nil)
+  end
+  raise
+end

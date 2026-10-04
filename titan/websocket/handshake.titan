@@ -1,0 +1,475 @@
+local const TOKEN_PATTERN = "^[!#$%&'*+.^_`|~0-9A-Za-z-]+$"
+local const RESERVED_HEADERS: {string: boolean} = {
+  ["host"] = true, ["connection"] = true, ["upgrade"] = true,
+  ["content-length"] = true, ["transfer-encoding"] = true, ["expect"] = true,
+  ["sec-websocket-key"] = true, ["sec-websocket-version"] = true,
+  ["sec-websocket-accept"] = true, ["sec-websocket-protocol"] = true,
+  ["sec-websocket-extensions"] = true,
+}
+local function ascii_lower(text: string): string
+  local result = string.gsub(text, "[A-Z]", function (letter: string): string
+    return string.char(octet(letter, 1) + 32)
+  end, nil)
+  return result
+end
+local function trim(text: string): string
+  local first = 1; local last = #text
+  while first <= last and (octet(text, first) == 32 or octet(text, first) == 9) do first = first + 1 end
+  while last >= first and (octet(text, last) == 32 or octet(text, last) == 9) do last = last - 1 end
+  return string.sub(text, first, last)
+end
+local function copy_protocols(supplied: ({string})?): {string}
+  local result: {string} = {}; local seen: {string: boolean} = {}
+  if supplied then
+    for index = 1, #supplied do
+      local token = supplied[index]
+      if not string.match(token, TOKEN_PATTERN) or seen[token] then
+        raise "invalid or duplicate WebSocket subprotocol"
+      end
+      seen[token] = true; result[index] = token
+    end
+  end
+  return result
+end
+local function copy_dial_headers(supplied: http.Headers?): http.Headers
+  local result = http.headers(nil)
+  if supplied then
+    local entries = supplied:all()
+    for index = 1, #entries do
+      local entry = entries[index]
+      if RESERVED_HEADERS[ascii_lower(entry.name)] then
+        raise "WebSocket dial headers contain a reserved handshake field"
+      end
+      result:add(entry.name, entry.contents)
+    end
+  end
+  return result
+end
+local function normalized_origin(contents: string): string?
+  if contents == "null" or trim(contents) ~= contents then return nil end
+  local parsed?, problem? = url.parse(contents .. "/")
+  if problem or not parsed or parsed.path ~= "/" or parsed.query ~= nil or
+     (parsed.scheme ~= "http" and parsed.scheme ~= "https") then return nil end
+  return parsed.scheme .. "\0" .. parsed.host .. "\0" .. parsed.port
+end
+local function copy_origins(supplied: ({string})?): {string}
+  local result: {string} = {}
+  if supplied then
+    for index = 1, #supplied do
+      local normalized? = normalized_origin(supplied[index])
+      if not normalized then raise "invalid allowed WebSocket origin" end
+      result[index] = normalized
+    end
+  end
+  return result
+end
+local function singleton(headers: http.Headers, name: string): string?
+  local values = headers:values(name)
+  if #values ~= 1 then return nil end
+  return trim(values[1])
+end
+local function tokens(headers: http.Headers, name: string,
+                      duplicate_error: boolean): {string}
+  local result: {string} = {}; local seen: {string: boolean} = {}
+  local values = headers:values(name)
+  for index = 1, #values do
+    for piece in string.split(values[index], ",") do
+      local token = trim(piece)
+      if #token > 0 or name ~= "Connection" then
+        if not string.match(token, TOKEN_PATTERN) or (duplicate_error and seen[token]) then
+          raise HandshakeError("invalid " .. name .. " token list", nil, nil)
+        end
+        result[#result + 1] = token; seen[token] = true
+      end
+    end
+  end
+  return result
+end
+local function upgrade_protocols(headers: http.Headers): {string}
+  local result: {string} = {}
+  local values = headers:values("Upgrade")
+  for index = 1, #values do
+    for piece in string.split(values[index], ",") do
+      local item = trim(piece)
+      -- Header acquisition bounds this HTTP list, including ignored empty items.
+      if #item > 0 then
+        local slash? = string.find(item, "/", 1)
+        local valid = false
+        if slash then
+          local name = string.sub(item, 1, slash - 1)
+          local version = string.sub(item, slash + 1)
+          valid = string.match(name, TOKEN_PATTERN) ~= nil and
+                  string.match(version, TOKEN_PATTERN) ~= nil
+        else
+          valid = string.match(item, TOKEN_PATTERN) ~= nil
+        end
+        if not valid then raise HandshakeError("invalid Upgrade protocol list", nil, nil) end
+        result[#result + 1] = item
+      end
+    end
+  end
+  return result
+end
+local function has_token(headers: http.Headers, name: string, wanted: string): boolean
+  local offered: {string} = {}
+  if name == "Upgrade" then offered = upgrade_protocols(headers)
+  else offered = tokens(headers, name, false) end
+  for index = 1, #offered do
+    if ascii_lower(offered[index]) == wanted then return true end
+  end
+  return false
+end
+local function valid_key(key: string): boolean
+  if #key ~= 24 or not string.match(key, "^[A-Za-z0-9+/]+==$" ) then return false end
+  local tail = string.sub(key, 22, 22)
+  return tail == "A" or tail == "Q" or tail == "g" or tail == "w"
+end
+local function token_byte(byte: integer): boolean
+  if byte >= 48 and byte <= 57 then return true end
+  if byte >= 65 and byte <= 90 then return true end
+  if byte >= 97 and byte <= 122 then return true end
+  return string.find("!#$%&'*+-.^_`|~", string.char(byte), 1) ~= nil
+end
+local function join_protocols(protocols: {string}): string
+  local output = string.writer()
+  for index = 1, #protocols do
+    if index > 1 then output:write(", ") end
+    output:write(protocols[index])
+  end
+  return output:drain()
+end
+-- RFC6455 extension-list grammar is checked even though none is negotiated.
+local function validate_extensions(headers: http.Headers)
+  local values = headers:values("Sec-WebSocket-Extensions")
+  for item = 1, #values do
+    local contents = values[item]
+    local position = 1
+    local need_extension = true
+    while position <= #contents do
+      while position <= #contents and (octet(contents, position) == 32 or octet(contents, position) == 9) do position = position + 1 end
+      local first = position
+      while position <= #contents and token_byte(octet(contents, position)) do position = position + 1 end
+      if first == position then raise HandshakeError("invalid WebSocket extension syntax", nil, nil) end
+      need_extension = false
+      while true do
+        while position <= #contents and (octet(contents, position) == 32 or octet(contents, position) == 9) do position = position + 1 end
+        if position > #contents or octet(contents, position) ~= 59 then break end
+        position = position + 1
+        while position <= #contents and (octet(contents, position) == 32 or octet(contents, position) == 9) do position = position + 1 end
+        first = position
+        while position <= #contents and token_byte(octet(contents, position)) do position = position + 1 end
+        if first == position then raise HandshakeError("invalid WebSocket extension parameter", nil, nil) end
+        while position <= #contents and (octet(contents, position) == 32 or octet(contents, position) == 9) do position = position + 1 end
+        if position <= #contents and octet(contents, position) == 61 then
+          position = position + 1
+          while position <= #contents and (octet(contents, position) == 32 or octet(contents, position) == 9) do position = position + 1 end
+          if position <= #contents and octet(contents, position) == 34 then
+            position = position + 1
+            local decoded = string.writer()
+            local finished = false
+            while position <= #contents do
+              local byte = octet(contents, position); position = position + 1
+              if byte == 34 then finished = true; break end
+              if byte == 92 then
+                if position > #contents then break end
+                byte = octet(contents, position); position = position + 1
+              end
+              -- An extension quoted-string must unescape to token characters.
+              if not token_byte(byte) then raise HandshakeError("invalid quoted extension token", nil, nil) end
+              decoded:write(string.char(byte))
+            end
+            if not finished or #decoded:drain() == 0 then raise HandshakeError("unterminated or empty extension value", nil, nil) end
+          else
+            first = position
+            while position <= #contents and token_byte(octet(contents, position)) do position = position + 1 end
+            if first == position then raise HandshakeError("missing extension parameter value", nil, nil) end
+          end
+        end
+      end
+      if position <= #contents then
+        if octet(contents, position) ~= 44 then raise HandshakeError("invalid extension separator", nil, nil) end
+        position = position + 1; need_extension = true
+      end
+    end
+    if need_extension then raise HandshakeError("empty WebSocket extension offer", nil, nil) end
+  end
+end
+local function no_body(headers: http.Headers): boolean
+  if #headers:values("Transfer-Encoding") > 0 or #headers:values("Expect") > 0 then return false end
+  local lengths = headers:values("Content-Length")
+  if #lengths == 0 then return true end
+  if #lengths ~= 1 then return false end
+  local length = trim(lengths[1])
+  return string.match(length, "^0+$") ~= nil
+end
+local function validate_server_opening(request: http.Request, options: AcceptOptions): (string, string?)
+  if request.method ~= "GET" or request.version ~= "HTTP/1.1" then
+    raise HandshakeError("WebSocket requires GET over HTTP/1.1", 400, nil)
+  end
+  local host? = singleton(request.headers, "Host")
+  if not host or #host == 0 or not has_token(request.headers, "Upgrade", "websocket") or
+     not has_token(request.headers, "Connection", "upgrade") or not no_body(request.headers) then
+    raise HandshakeError("malformed WebSocket opening", 400, nil)
+  end
+  local version? = singleton(request.headers, "Sec-WebSocket-Version")
+  if not version then raise HandshakeError("missing or duplicate WebSocket version", 400, nil) end
+  if version ~= "13" then raise HandshakeError("unsupported WebSocket version", 426, nil) end
+  local key? = singleton(request.headers, "Sec-WebSocket-Key")
+  if not key or not valid_key(key) then raise HandshakeError("invalid WebSocket key", 400, nil) end
+  validate_extensions(request.headers)
+  local origins = request.headers:values("Origin")
+  if #origins > 0 then
+    if #origins ~= 1 then raise HandshakeError("multiple WebSocket origins", 403, nil) end
+    local origin? = normalized_origin(trim(origins[1]))
+    if not origin then raise HandshakeError("malformed WebSocket origin", 403, nil) end
+    local same = request.url.scheme .. "\0" .. request.url.host .. "\0" .. request.url.port
+    local allowed = origin == same
+    for index = 1, #options.origins do if origin == options.origins[index] then allowed = true end end
+    if not allowed then raise HandshakeError("WebSocket origin denied", 403, nil) end
+  end
+  local offered = tokens(request.headers, "Sec-WebSocket-Protocol", true)
+  local selected: string? = nil
+  for index = 1, #options.protocols do
+    local wanted = options.protocols[index]
+    for candidate = 1, #offered do if wanted == offered[candidate] then selected = wanted; break end end
+    if selected then break end
+  end
+  return key, selected
+end
+
+function accept(request: http.Request, response: http.Response,
+                options: AcceptOptions?): Connection
+  local policy = options or AcceptOptions(nil, nil, nil, nil)
+  -- Snapshot the ordinary response before protocol-owned output. Headers()
+  -- checks output admission without committing bytes.
+  local existing = response:headers():all()
+  for index = 1, #existing do
+    if RESERVED_HEADERS[ascii_lower(existing[index].name)] then
+      raise "WebSocket response contains a reserved handshake field"
+    end
+  end
+  async.checkpoint()
+  local owner = new_connection(nil, false, nil, policy.limit)
+  local opening = Opening(nil, nil, nil, nil, nil, nil, "", false, nil, "", nil, nil, false)
+  supervise_opening(opening, policy.timeout, function ()
+    local key = ""; local selected: string? = nil
+    do
+      key, selected = validate_server_opening(request, policy)
+    catch
+      if not (error is HandshakeError) then raise end
+      local failure = error as HandshakeError
+      local status = failure.status or 400
+      local fields = http.headers(nil)
+      if status == 426 then fields:set("Sec-WebSocket-Version", "13") end
+      response:reject_upgrade(request, status, fields)
+      raise HandshakeError(failure.message, status, fields)
+    end
+    local fields = http.headers(nil)
+    fields:set("Sec-WebSocket-Accept", accept_digest(key))
+    if selected then fields:set("Sec-WebSocket-Protocol", selected) end
+    local stream = response:upgrade(request, "websocket", fields)
+    owner.stream = stream; owner.protocol = selected
+    opening.result = owner
+  end)
+  return owner
+end
+
+local function verify_client_opening(response: http.ClientResponse, key: string,
+                                    protocols: {string}): string?
+  if response.status ~= 101 then
+    raise HandshakeError("WebSocket server rejected opening", response.status, http.headers(response.headers:all()))
+  end
+  local upgrades = upgrade_protocols(response.headers)
+  if response.version ~= "HTTP/1.1" or #upgrades ~= 1 or
+     ascii_lower(upgrades[1]) ~= "websocket" or
+     not has_token(response.headers, "Connection", "upgrade") or
+     singleton(response.headers, "Sec-WebSocket-Accept") ~= accept_digest(key) or
+     not no_body(response.headers) or #response.headers:values("Content-Length") ~= 0 or
+     #response.headers:values("Sec-WebSocket-Extensions") ~= 0 then
+    raise HandshakeError("invalid WebSocket upgrade response", 101, http.headers(response.headers:all()))
+  end
+  local selection? = singleton(response.headers, "Sec-WebSocket-Protocol")
+  local count = #response.headers:values("Sec-WebSocket-Protocol")
+  if count > 0 then
+    if not selection or not string.match(selection, TOKEN_PATTERN) then
+      raise HandshakeError("invalid selected WebSocket subprotocol", 101, http.headers(response.headers:all()))
+    end
+    local offered = false
+    for index = 1, #protocols do if protocols[index] == selection then offered = true end end
+    if not offered then raise HandshakeError("unoffered WebSocket subprotocol", 101, http.headers(response.headers:all())) end
+  end
+  return selection
+catch
+  if error is HandshakeError then
+    local failure = error as HandshakeError
+    if failure.status == nil then
+      async.Error(HandshakeError(failure.message, response.status,
+        http.headers(response.headers:all())), traceback):raise()
+    end
+  end
+  raise
+end
+
+local record Opening
+  tcp: net.Connection?
+  tls: ssl.Connection?
+  response: http.ClientResponse?
+  result: Connection?
+  child: (async.Task<|nil, value|>)?
+  task: (async.Task<|nil, value|>)?
+  key: string
+  expired: boolean
+  parent: async.Task?
+  trace: string
+  failure: value
+  token: async.ResumeToken?
+  waiting: boolean
+end
+local openings: {uv.loop_t: {string: async.Task<|nil, value|>}} = {}
+local function Opening:abort()
+  if self.result then self.result:close()
+  elseif self.tls then self.tls:abort()
+  elseif self.tcp then self.tcp:close()
+  elseif self.response then self.response:close() end
+end
+local function Opening:wake()
+  if self.waiting then self.waiting = false; self.parent:resume(self.token) end
+end
+local function supervise_opening(opening: Opening, timeout: integer,
+                                 body: function (): ())
+  opening.parent = async.running(); opening.token = async.ResumeToken("WebSocket opening")
+  opening.task = async.run<|nil, value|>(function (): nil
+    do body()
+    catch opening.failure = error; opening.trace = traceback end
+    return nil
+  end)
+  local task = opening.task
+  local remove = task:add_terminal_listener(function (_: async.TaskStatus<|nil, value|>) opening:wake() end)
+  defer remove()
+  local deadline = async.run<|nil, value|>(function (): nil
+    timer.sleep(timeout); opening.expired = true; opening:wake(); return nil
+  end)
+  defer deadline:cancel(async.CancellationReason.simple("WebSocket opening completed"))
+  while not task:status():has_finished() and not opening.expired do
+    opening.waiting = true
+    async.suspend(opening.token, function () opening.waiting = false end)
+  end
+  opening.waiting = false
+  if opening.expired then raise timeout_error("websocket.open") end
+  async.checkpoint()
+  if opening.failure ~= nil then async.Error(opening.failure, opening.trace):raise() end
+catch
+  opening.waiting = false
+  local task? = opening.task
+  if task then task:cancel(async.CancellationReason.simple("WebSocket opening stopped")) end
+  do opening:abort() catch end
+  if task then drain_task(task) end
+  do opening:abort() catch end
+  raise
+end
+local function destination_key(address: uv.sockaddr_t): string
+  local bytes = address:address_bytes()
+  local scope = address:scope_id()
+  if #bytes == 16 and string.sub(bytes, 1, 12) == string.rep("\0", 10) .. "\255\255" then
+    bytes = string.sub(bytes, 13); scope = 0
+  end
+  return string.char(#bytes) .. bytes .. ":" .. address:port() .. ":" .. scope
+end
+local function Opening:attempt(address: uv.sockaddr_t, parsed: url.Url, policy: DialOptions, key: string)
+  local parent = async.running()
+  local token = async.ResumeToken("WebSocket transport opening")
+  local waiting = false
+  self.child = async.run<|nil, value|>(function (): nil
+    do
+      self.key = "connect"
+      self.tcp = net.Connection()
+      self.tcp:connect_address(address)
+      self.key = "http"
+      local stream: io.ReaderWriterCloser = self.tcp
+      local abort: function (): () = self.tcp:close
+      if parsed.scheme == "wss" then
+        self.key = "tls"
+        self.tls = ssl.client(self.tcp, parsed.host, policy.ca_file)
+        self.tls:handshake()
+        stream = self.tls; abort = self.tls:abort
+      end
+      local fields = http.headers(policy.headers:all())
+      fields:set("Sec-WebSocket-Version", "13"); fields:set("Sec-WebSocket-Key", key)
+      if #policy.protocols > 0 then fields:set("Sec-WebSocket-Protocol", join_protocols(policy.protocols)) end
+      local scheme = "http"
+      if parsed.scheme == "wss" then scheme = "https" end
+      self.response = http.request_upgrade_on(stream, abort, scheme .. "://" .. parsed.authority .. parsed.target,
+                                               "websocket", fields)
+      local selected? = verify_client_opening(self.response, key, policy.protocols)
+      local owner = new_connection(nil, true, selected, policy.limit)
+      owner.stream = self.response:take_upgrade()
+      self.result = owner
+    catch self.failure = error; self.trace = traceback end
+    return nil
+  end)
+  local child = self.child
+  local remove = child:add_terminal_listener(function (_: async.TaskStatus<|nil, value|>)
+    if waiting then waiting = false; parent:resume(token) end
+  end)
+  defer remove()
+  while not child:status():has_finished() do
+    waiting = true
+    async.suspend(token, function () waiting = false end)
+  end
+catch
+  local child? = self.child
+  if child then child:cancel(async.CancellationReason.simple("WebSocket attempt stopped")) end
+  do self:abort() catch end
+  if child then drain_task(child) end
+  raise
+end
+
+function connect(source_url: string, options: DialOptions?): Connection
+  local parsed?, problem? = url.parse(source_url)
+  if problem then raise problem end
+  if parsed.scheme ~= "ws" and parsed.scheme ~= "wss" then raise "WebSocket URL must use ws or wss" end
+  local policy = options or DialOptions(nil, nil, nil, nil, nil)
+  async.checkpoint()
+  local opening = Opening(nil, nil, nil, nil, nil, nil, "", false, nil, "", nil, nil, false)
+  local loop = async.current_loop()
+  supervise_opening(opening, policy.timeout, function ()
+    local key = base64(random_bytes(16))
+    local addresses = net.resolve(parsed.host, parsed.port)
+    local last_error: value = nil
+    for index = 1, #addresses do
+      local address = addresses[index]
+      local identity = destination_key(address)
+      while true do
+        local bucket? = openings[loop]
+        if not bucket then bucket = {}; openings[loop] = bucket end
+        local incumbent? = bucket[identity]
+        if not incumbent then bucket[identity] = opening.task; break end
+        async.join(incumbent)
+      end
+      do
+        defer do
+          local bucket? = openings[loop]
+          if bucket and bucket[identity] == opening.task then
+            bucket[identity] = nil
+            local occupied = false
+            -- Registry entries are removed eagerly; no completed result/Task
+            -- is retained in an otherwise empty runtime bucket.
+            for _, _value in iteration.pairs(bucket) do occupied = true; break end
+            if not occupied then openings[loop] = nil end
+          end
+        end
+        opening:attempt(address, parsed, policy, key)
+        if opening.result then return end
+        last_error = opening.failure
+        local tcp_only = opening.key == "connect"
+        do opening:abort() catch end
+        opening.tcp = nil; opening.tls = nil; opening.response = nil
+        if not tcp_only or not (last_error is async.OperationError) then async.Error(last_error, opening.trace):raise() end
+        opening.failure = nil
+      end
+    end
+    if last_error ~= nil then async.Error(last_error, opening.trace):raise() end
+    raise "no TCP addresses for WebSocket destination"
+  end)
+  return opening.result
+end

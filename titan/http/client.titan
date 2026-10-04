@@ -5,6 +5,8 @@ record ClientResponse
   headers: Headers
   local parser: Parser
   local connection: io.ReaderWriterCloser
+  local abort: function (): ()
+  local upgrade_pending: boolean
   local closed: boolean
   local connection_closed: boolean
 end
@@ -72,6 +74,9 @@ local function final_response_headers(parser: Parser)
     if parser.status_number < 100 then
       raise "HTTP server returned an invalid status code"
     end
+    if parser.status_number == 101 then
+      raise "HTTP protocol upgrades require request_upgrade_on"
+    end
     validate_reason(parser.reason_text)
     while parser_read(parser) do end
     parser_reset_message(parser)
@@ -110,6 +115,8 @@ function request(method: string, source_url: string,
       headers = exact.parsed_headers,
       parser = exact,
       connection = connection,
+      abort = connection:close,
+      upgrade_pending = false,
       closed = false,
       connection_closed = false,
     }
@@ -129,7 +136,86 @@ function get(source_url: string, supplied_headers: Headers?,
   return request("GET", source_url, supplied_headers, nil, ca_file)
 end
 
+function request_upgrade_on(connection: io.ReaderWriterCloser,
+                             abort: function (): (), source_url: string,
+                             protocol: string,
+                             supplied_headers: Headers?): ClientResponse
+  validate_upgrade_protocol(protocol)
+  local parsed_url = parse_url_or_raise(source_url)
+  local request_headers = client_request_headers(
+    parsed_url, validate_upgrade_headers(supplied_headers), nil)
+  request_headers:set("Connection", "Upgrade")
+  request_headers:set("Upgrade", protocol)
+  local builder = string.writer()
+  builder:write("GET " .. parsed_url.target .. " HTTP/1.1\r\n")
+  builder:write(render_headers(request_headers))
+  builder:write("\r\n")
+  local output = builder:drain()
+  -- Argument validation precedes adoption. From this point the supplied
+  -- transport is owned by HTTP through failure, rejection or one-shot take.
+  local parser: Parser? = nil
+  do
+    local exact = new_response_parser(connection, false)
+    parser = exact
+    exact.allow_upgrade = true
+    exact.header_limit = 65536
+    return supervised_upgrade_io<|ClientResponse|>(abort,
+      function (): ClientResponse
+        connection:write(output)
+        local interim = 0
+        while true do
+          if not ensure_parser_headers(exact) then
+            raise "HTTP message ended before it was complete"
+          end
+          validate_reason(exact.reason_text)
+          if exact.status_number == 101 or exact.status_number >= 200 then break end
+          if exact.status_number < 100 then
+            raise "HTTP server returned an invalid status code"
+          end
+          interim = interim + 1
+          if interim > 16 then raise "HTTP upgrade received too many interim responses" end
+          while parser_read(exact) do end
+          parser_reset_message(exact)
+        end
+        if exact.status_number > 999 then
+          raise "HTTP server returned an invalid final status code"
+        end
+        return ClientResponse {
+          status = exact.status_number,
+          reason = exact.reason_text,
+          version = "HTTP/1.1",
+          headers = exact.parsed_headers,
+          parser = exact,
+          connection = connection,
+          abort = abort,
+          upgrade_pending = exact.status_number == 101,
+          closed = false,
+          connection_closed = false,
+        }
+      end)
+  catch
+    if parser then close_parser(parser) end
+    do abort() catch end
+    raise
+  end
+end
+
+function ClientResponse:take_upgrade(): io.ReaderWriterCloser
+  if self.closed or not self.upgrade_pending then
+    raise "HTTP response has no pending upgrade"
+  end
+  local stream = new_upgraded_stream(Transport(self.connection, self.abort), self.parser)
+  local view: io.ReaderWriterCloser = stream
+  self.parser.input_excess = ""
+  close_parser(self.parser)
+  self.upgrade_pending = false
+  self.closed = true
+  self.connection_closed = true
+  return view
+end
+
 function ClientResponse:read(): string?
+  if self.upgrade_pending then raise "HTTP upgraded response has no readable body" end
   if self.closed then return nil end
   do
     local chunk? = parser_read(self.parser)
@@ -146,6 +232,7 @@ end
 
 function ClientResponse:read_until(delimiter: string,
                                    chop: boolean?): string?
+  if self.upgrade_pending then raise "HTTP upgraded response has no readable body" end
   if self.closed then return nil end
   do
     local result? = parser_read_until(self.parser, delimiter, chop)
@@ -167,7 +254,7 @@ function ClientResponse:close()
     self.closed = true
   end
   if not self.connection_closed then
-    self.connection:close()
+    self.abort()
     self.connection_closed = true
   end
 end

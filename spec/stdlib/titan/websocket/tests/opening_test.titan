@@ -1,0 +1,373 @@
+local function reject_server_opening(request: function (integer): (string), status: integer)
+  local completed = false
+  local failure: value = nil
+  local handler: http.Handler = function (incoming: http.Request, response: http.Response)
+    do
+      local connection = websocket.accept(incoming, response)
+      connection:close()
+      failure = "invalid server opening was accepted"
+    catch failure = error end
+    completed = true
+  end
+  local listener, port = listen_http(handler, false)
+  runtime_test.cleanup(function () listener:close() end)
+  local serving = async.run<|value, value|>(function (): value listener:serve(); return nil end)
+  runtime_test.cleanup(function ()
+    listener:close()
+    task_support.cancel_and_join_task(serving, "opening rejection listener cleanup")
+  end)
+  local connection = net.connect("127.0.0.1", port)
+  runtime_test.cleanup(function () connection:close() end)
+  connection:write(request(port))
+  local wire = Wire(connection, "", "")
+  local headers = wire:headers()
+  test.assert(string.sub(headers, 1, 12) == "HTTP/1.1 " .. status,
+              "server rejection used wrong HTTP status")
+  if status == 426 then
+    test.assert(header_value(headers, "Sec-WebSocket-Version") == "13",
+                "version rejection did not advertise 13")
+  end
+  while not completed do timer.yield() end
+  test.assert(failure is websocket.HandshakeError, "accept lost nominal handshake rejection")
+  local rejection = failure as websocket.HandshakeError
+  test.assert(rejection.status == status and rejection.headers ~= nil and #rejection.message > 0,
+              "caught accept rejection did not retain status and headers")
+  test.assert(connection:read() == nil, "caught rejection reused the opening connection")
+end
+
+function test_accept_snapshots_allowed_origins_with_default_port_normalization(_context: test.Context)
+  runtime_test.run(function ()
+    local origins: {string} = {"https://allowed.example:443"}
+    local options = websocket.AcceptOptions { allowed_origins = origins }
+    origins[1] = "https://mutated.example"
+    with_server(function (connection: websocket.Connection)
+      connection:read()
+    end, function (wire: Wire)
+      wire.stream:write(frame(8, "", true)); assert_close(wire, nil, false)
+    end, options, false, "Origin: https://allowed.example\r\n")
+  end)
+end
+
+local function reject_client_opening(response: function (string): (string), status: integer)
+  local listener, port = listen_raw()
+  runtime_test.cleanup(function () listener:close() end)
+  local transport: net.Connection? = nil
+  local closed = false
+  local actual_response = ""
+  local peer = async.run<|value, value|>(function (): value
+    local connection = listener:accept()
+    transport = connection
+    defer connection:close()
+    local wire = Wire(connection, "", "")
+    local headers = wire:headers()
+    local key? = header_value(headers, "Sec-WebSocket-Key")
+    actual_response = response(accept_value(key))
+    connection:write(actual_response)
+    closed = connection:read() == nil
+    return nil
+  end)
+  runtime_test.cleanup(function ()
+    listener:close()
+    if transport then transport:close() end
+    task_support.cancel_and_join_task(peer, "client rejection peer cleanup")
+  end)
+  local failure = expect_error(function ()
+    local connection = websocket.connect("ws://127.0.0.1:" .. port .. "/reject")
+    connection:close()
+  end)
+  test.assert(failure is websocket.HandshakeError, "connect lost nominal handshake rejection")
+  local rejection = failure as websocket.HandshakeError
+  test.assert(rejection.status == status and rejection.headers ~= nil and #rejection.message > 0,
+              "client rejection discarded response metadata")
+  test.assert(rejection.headers:get("Upgrade") == header_value(actual_response, "Upgrade") and
+              rejection.headers:get("Connection") == header_value(actual_response, "Connection"),
+              "client grammar rejection replaced the actual response headers")
+  assert_succeeded(peer, "client rejection peer")
+  test.assert(closed, "rejected client opening leaked its owned transport")
+end
+
+local record BadOpening
+  name: string
+  build: function (integer): (string)
+  status: integer
+end
+
+function test_accept_rejects_invalid_opening_and_completes_response(context: test.Context)
+  local cases: {BadOpening} = {
+    BadOpening("wrong_method", function (port: integer): string
+      return "POST" .. string.sub(opening_request(port), 4)
+    end, 400),
+    BadOpening("wrong_version", function (port: integer): string
+      local request = opening_request(port)
+      local first, last = string.find(request, "Sec-WebSocket-Version: 13")
+      return string.sub(request, 1, first - 1) .. "Sec-WebSocket-Version: 12" .. string.sub(request, last + 1)
+    end, 426),
+    BadOpening("duplicate_key", function (port: integer): string
+      return opening_request(port, "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n")
+    end, 400),
+    BadOpening("duplicate_version", function (port: integer): string
+      return opening_request(port, "Sec-WebSocket-Version: 13\r\n")
+    end, 400),
+    BadOpening("short_nonce", function (port: integer): string
+      local request = opening_request(port)
+      local first, last = string.find(request, "dGhlIHNhbXBsZSBub25jZQ==")
+      return string.sub(request, 1, first - 1) .. "YQ==" .. string.sub(request, last + 1)
+    end, 400),
+    BadOpening("request_body", function (port: integer): string
+      return opening_request(port, "Content-Length: 1\r\n") .. "x"
+    end, 400),
+    BadOpening("cross_origin", function (port: integer): string
+      return opening_request(port, "Origin: https://other.example\r\n")
+    end, 403),
+    BadOpening("origin_port_differs", function (port: integer): string
+      return opening_request(port, "Origin: http://127.0.0.1:" .. (port + 1) .. "\r\n")
+    end, 403),
+    BadOpening("duplicate_origin", function (port: integer): string
+      return opening_request(port, "Origin: http://127.0.0.1:" .. port ..
+                                  "\r\nOrigin: http://127.0.0.1:" .. port .. "\r\n")
+    end, 403),
+    BadOpening("null_origin", function (port: integer): string
+      return opening_request(port, "Origin: null\r\n")
+    end, 403),
+    BadOpening("malformed_extension", function (port: integer): string
+      return opening_request(port, "Sec-WebSocket-Extensions: permessage-deflate; =bad\r\n")
+    end, 400),
+    BadOpening("empty_extension", function (port: integer): string
+      return opening_request(port, "Sec-WebSocket-Extensions: permessage-deflate,\r\n")
+    end, 400),
+  }
+  for index = 1, #cases do
+    local item = cases[index]
+    context:run(item.name, function (_child: test.Context)
+      runtime_test.run(function () reject_server_opening(item.build, item.status) end)
+    end)
+  end
+end
+
+local function expect_upgrade_prefilter_case(secure: boolean, variant: string?)
+  local entered = false
+  local handler: http.Handler = function (request: http.Request, response: http.Response)
+    entered = true
+    local connection = websocket.accept(request, response)
+    connection:close()
+  end
+  local listener, port = listen_http(handler, secure)
+  runtime_test.cleanup(function () listener:close() end)
+  local serving = async.run<|value, value|>(function (): value listener:serve(); return nil end)
+  runtime_test.cleanup(function ()
+    listener:close()
+    task_support.cancel_and_join_task(serving, "Expect upgrade listener cleanup")
+  end)
+  local stream: io.ReaderWriterCloser? = nil
+  local abort: function (): () = function () end
+  if secure then
+    local tls = ssl.connect("localhost", port, TRUST_ROOT)
+    stream = tls
+    abort = function () tls:abort() end
+  else
+    local tcp = net.connect("127.0.0.1", port)
+    stream = tcp
+    abort = function () tcp:close() end
+  end
+  runtime_test.cleanup(abort)
+  local watchdog_fired = false
+  local watchdog = async.run<|value, value|>(function (): value
+    timer.sleep(2000)
+    watchdog_fired = true
+    abort()
+    return nil
+  end)
+  task_support.cleanup_task(watchdog, "Expect upgrade watchdog cleanup")
+  -- Advertise a body, deliberately never send it, and never acknowledge any
+  -- interim response. A final closing 400 must precede handler/body admission.
+  local request = opening_request(port, "Expect: 100-continue\r\nContent-Length: 1\r\n")
+  if variant then
+    request = opening_request(port, "Content-Length: 1\r\n")
+    if variant == "missing_host" then
+      local host = "Host: 127.0.0.1:" .. port .. "\r\n"
+      local first, last = string.find(request, host)
+      request = string.sub(request, 1, first - 1) .. string.sub(request, last + 1)
+    elseif variant == "duplicate_host" then
+      request = opening_request(port, "Content-Length: 1\r\nHost: 127.0.0.1:" .. port .. "\r\n")
+    else
+      local first, last = string.find(request, "HTTP/1.1")
+      request = string.sub(request, 1, first - 1) .. "HTTP/1.0" .. string.sub(request, last + 1)
+    end
+  end
+  stream:write(request)
+  local wire = Wire(stream, "", "")
+  local headers = wire:headers()
+  test.assert(string.sub(headers, 1, 12) == "HTTP/1.1 400" and
+              string.find(headers, "100 Continue") == nil and
+              header_value(headers, "Content-Length") == "0" and
+              header_value(headers, "Connection") == "close" and
+              wire.input == "" and not entered,
+              "Upgrade prefilter entered handler, emitted 100, or waited for withheld body")
+  assert_transport_retired(stream, secure)
+  test.assert(not entered and not watchdog_fired,
+              "Expect prefilter waited for the withheld body before retirement")
+  watchdog:cancel(async.CancellationReason.simple("Expect prefilter test completed"))
+  async.join(watchdog)
+end
+
+function test_invalid_http_upgrade_is_rejected_before_websocket_handler(context: test.Context)
+  local variants: {string} = {"missing_host", "duplicate_host", "http10"}
+  for index = 1, #variants do
+    local variant = variants[index]
+    context:run("ws_" .. variant, function (_child: test.Context)
+      runtime_test.run(function () expect_upgrade_prefilter_case(false, variant) end)
+    end)
+    context:run("wss_" .. variant, function (_child: test.Context)
+      runtime_test.run(function () expect_upgrade_prefilter_case(true, variant) end)
+    end)
+  end
+end
+
+function test_upgrade_expect_is_prefiltered_without_handler_or_body_drain(context: test.Context)
+  context:run("ws", function (_child: test.Context)
+    runtime_test.run(function () expect_upgrade_prefilter_case(false) end)
+  end)
+  context:run("wss", function (_child: test.Context)
+    runtime_test.run(function () expect_upgrade_prefilter_case(true) end)
+  end)
+end
+
+function test_connect_rejects_invalid_response_and_retires_transport(context: test.Context)
+  local cases: {BadFrame} = {
+    BadFrame("wrong_accept", "Sec-WebSocket-Accept: wrong\r\n"),
+    BadFrame("duplicate_accept", "Sec-WebSocket-Accept: @ACCEPT@\r\nSec-WebSocket-Accept: @ACCEPT@\r\n"),
+    BadFrame("unsolicited_extension", "Sec-WebSocket-Accept: @ACCEPT@\r\nSec-WebSocket-Extensions: permessage-deflate\r\n"),
+    BadFrame("unoffered_protocol", "Sec-WebSocket-Accept: @ACCEPT@\r\nSec-WebSocket-Protocol: Chat\r\n"),
+    BadFrame("multiple_upgrade_selection", "Sec-WebSocket-Accept: @ACCEPT@\r\n"),
+    BadFrame("duplicate_upgrade_selection", "Sec-WebSocket-Accept: @ACCEPT@\r\n"),
+    BadFrame("invalid_upgrade_grammar", "Sec-WebSocket-Accept: @ACCEPT@\r\n"),
+    BadFrame("invalid_connection_grammar", "Sec-WebSocket-Accept: @ACCEPT@\r\n"),
+  }
+  for index = 1, #cases do
+    local item = cases[index]
+    context:run(item.name, function (_child: test.Context)
+      runtime_test.run(function ()
+        reject_client_opening(function (accept: string): string
+          local builder = string.writer()
+          local start = 1
+          while true do
+            local first?, last? = string.find(item.bytes, "@ACCEPT@", start)
+            if not first then builder:write(string.sub(item.bytes, start)); break end
+            builder:write(string.sub(item.bytes, start, first - 1)); builder:write(accept)
+            start = last + 1
+          end
+          local upgrade = "websocket"
+          if item.name == "multiple_upgrade_selection" then upgrade = "websocket, other"
+          elseif item.name == "duplicate_upgrade_selection" then upgrade = "websocket, websocket"
+          elseif item.name == "invalid_upgrade_grammar" then upgrade = "websocket/" end
+          local connection = "Upgrade"
+          if item.name == "invalid_connection_grammar" then connection = "Upgrade, bogus;parameter" end
+          return "HTTP/1.1 101 Switching Protocols\r\nUpgrade: " .. upgrade .. "\r\nConnection: " .. connection .. "\r\n" ..
+                 builder:drain() .. "\r\n"
+        end, 101)
+      end)
+    end)
+  end
+end
+
+function test_accepts_complete_upgrade_token_version_grammar(_context: test.Context)
+  runtime_test.run(function ()
+    with_server(function (connection: websocket.Connection) connection:read() end,
+      function (wire: Wire)
+        wire.stream:write(frame(8, "", true)); assert_close(wire, nil, false)
+      end, nil, false, nil, nil, "websocket, IRC/6.9")
+  end)
+end
+
+function test_accept_ignores_empty_http_upgrade_and_connection_elements(_context: test.Context)
+  runtime_test.run(function ()
+    with_server(function (connection: websocket.Connection) connection:read() end,
+      function (wire: Wire)
+        wire.stream:write(frame(8, "", true)); assert_close(wire, nil, false)
+      end, nil, false, nil, nil, "websocket,, IRC/6.9", ", Upgrade")
+  end)
+end
+
+function test_connect_ignores_empty_http_upgrade_and_connection_elements(_context: test.Context)
+  runtime_test.run(function ()
+    with_client(function (wire: Wire)
+      wire.stream:write(frame(8, "")); assert_close(wire, nil, true)
+    end, function (connection: websocket.Connection)
+      local kind?, data? = connection:read()
+      test.assert(kind == nil and data == nil, "valid101 empty HTTP list elements were rejected")
+    end, nil, nil, nil, "websocket,", ", Upgrade")
+  end)
+end
+
+function test_connect_retains_non_101_status_and_response_headers(_context: test.Context)
+  runtime_test.run(function ()
+    reject_client_opening(function (_accept: string): string
+      return "HTTP/1.1 403 Forbidden\r\nX-Rejection: denied\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+    end, 403)
+  end)
+end
+
+function test_accept_copies_subprotocol_options_and_ignores_valid_extensions(_context: test.Context)
+  runtime_test.run(function ()
+    local protocols: {string} = {"chat", "other"}
+    local options = websocket.AcceptOptions { subprotocols = protocols }
+    protocols[1] = "mutated"
+    with_server(function (connection: websocket.Connection)
+      test.assert(connection:subprotocol() == "chat", "accepted options retained caller protocol array")
+      connection:read()
+    end, function (wire: Wire)
+      wire.stream:write(frame(8, "", true))
+      assert_close(wire, nil, false)
+    end, options, false,
+      "Sec-WebSocket-Protocol: Chat, chat\r\nSec-WebSocket-Extensions: permessage-deflate; client_max_window_bits\r\n")
+  end)
+end
+
+function test_connect_copies_headers_and_subprotocol_arrays(_context: test.Context)
+  runtime_test.run(function ()
+    local headers = http.headers()
+    headers:set("X-Copied", "original")
+    local protocols: {string} = {"chat"}
+    local options = websocket.DialOptions { headers = headers, subprotocols = protocols }
+    headers:set("X-Copied", "mutated"); protocols[1] = "mutated"
+    with_client(function (wire: Wire)
+      test.assert(header_value(wire.opening, "X-Copied") == "original" and
+                  header_value(wire.opening, "Sec-WebSocket-Protocol") == "chat",
+                  "DialOptions retained mutable caller headers or protocol array")
+      test.assert(header_value(wire.opening, "Sec-WebSocket-Extensions") == nil,
+                  "client offered an unsupported extension")
+      wire.stream:write(frame(8, ""))
+      assert_close(wire, nil, true)
+    end, function (connection: websocket.Connection)
+      test.assert(connection:subprotocol() == "chat", "client lost case-sensitive protocol selection")
+      connection:read()
+    end, options, nil, "Sec-WebSocket-Protocol: chat\r\n")
+  end)
+end
+
+local record InvalidOption
+  name: string
+  action: function (): ()
+end
+
+function test_option_constructors_validate_limits_tokens_origins_and_reserved_headers(context: test.Context)
+  local cases: {InvalidOption} = {
+    InvalidOption("dial_zero_limit", function () websocket.DialOptions { read_limit = 0 } end),
+    InvalidOption("accept_negative_limit", function () websocket.AcceptOptions { read_limit = -1 } end),
+    InvalidOption("dial_zero_timeout", function () websocket.DialOptions { handshake_timeout = 0 } end),
+    InvalidOption("accept_zero_timeout", function () websocket.AcceptOptions { handshake_timeout = 0 } end),
+    InvalidOption("invalid_subprotocol", function () websocket.DialOptions { subprotocols = {"bad protocol"} } end),
+    InvalidOption("duplicate_subprotocol", function () websocket.AcceptOptions { subprotocols = {"chat", "chat"} } end),
+    InvalidOption("invalid_origin", function () websocket.AcceptOptions { allowed_origins = {"http://example.com/path"} } end),
+    InvalidOption("reserved_key", function ()
+      websocket.DialOptions { headers = http.headers({http.Header("Sec-WebSocket-Key", "reserved")}) }
+    end),
+    InvalidOption("reserved_connection", function ()
+      websocket.DialOptions { headers = http.headers({http.Header("cOnNeCtIoN", "close")}) }
+    end),
+  }
+  for index = 1, #cases do
+    local item = cases[index]
+    context:run(item.name, function (_child: test.Context) expect_error(item.action) end)
+  end
+end

@@ -54,6 +54,7 @@ local standard_imports = {
     ssl = "titan.ssl",
     url = "titan.url",
     http = "titan.http",
+    websocket = "titan.websocket",
     os = "titan.os",
     peg = "titan.peg",
     string = "titan.string",

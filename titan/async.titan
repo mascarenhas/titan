@@ -337,6 +337,10 @@ local function rethrow_failure(failure: Error)
   raise failure.error
 end
 
+function Error:raise()
+  rethrow_failure(self)
+end
+
 local function new_runtime(): Runtime
   local runtime = Runtime {loop = uv.loop_t.new(), wake = uv.timer_t.new(),
     ready_head = nil, ready_tail = nil, ready_count = 0, wake_armed = false,

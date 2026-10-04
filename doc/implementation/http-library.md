@@ -18,6 +18,7 @@ titan/http/client.titan     one-request client and ClientResponse
 titan/http/headers.titan    ordered public Headers value
 titan/http/native.titan     private parser owner and callback event Array
 titan/http/server.titan     Request, Response, and per-connection serving
+titan/http/upgrade.titan    owned upgrade stream, opening supervisor, handoff
 ```
 
 The only HTTP-owned native boundary is the eight synchronous source
@@ -110,6 +111,83 @@ configures llhttp's response semantics before all informational/final parsing;
 case-distinct extension methods retain ordinary body semantics. Reading body
 EOF releases the parser and the one-use transport.
 
+## Bounded opening and protocol takeover
+
+Each server request snapshots `Server.header_limit_bytes`, defaulting to
+65536. The explicit upgrade client uses the same bound per response header
+block. Ordinary client response parsing retains its prior policy. Before
+`llhttp_execute`, HTTP limits the native span to the remaining raw header
+budget, then counts the actual consumed offset. This bounds callback event
+copies before they allocate attacker-controlled text and counts all raw bytes,
+including leading lines, the start line, punctuation, and line endings. The
+first header-complete pause ends accounting; bytes beyond that pause remain
+in `input_excess`, including a coalesced binary protocol suffix. Reset clears
+the header count for the next block. An incomplete header block that exhausts
+its budget raises before another parse or transport read. The upgrade client
+also rejects a seventeenth interim response.
+
+Request parsers retain llhttp's upgrade indication. Complete header acquisition
+is separate from HTTP/1.1 version validation: an Upgrade field, a Connection
+upgrade token, or llhttp's indication selects the opening prefilter. Before
+constructing a Request, it validates HTTP/1.1, one Host field, the public
+`url.parse_request` result, and absence of Expect. Semantic failure sends a
+fixed bodyless 400 and closes without dispatch or body drain. Acquisition I/O
+and Task failures are outside these synchronous checks and keep their own
+error and cancellation outcomes. Valid candidates reach the ordinary handler.
+Ordinary HTTP response parsers continue rejecting upgrades.
+`request_upgrade_on` uses an upgrade-enabled response parser, stops at 101, and
+returns a pending ClientResponse instead of draining it as informational input.
+Its supplied public abort action is retained before transport erasure; HTTP
+does not dial. A pending 101 rejects body reads. `take_upgrade` constructs the
+owning stream and Interface view before committing one-shot transfer, clears
+the parser's suffix ownership, closes parser state, and disarms the response's
+transport close. Non-101 responses keep their streaming body and abort owner.
+
+The server records one `Exchange` identity per request/response pair. That
+owner holds the parser, concrete-captured transport capability, live state,
+response-output state, and transfer/rejection state. `Response:upgrade` checks
+exact Exchange identity, live state, and no prior output, including an emitted
+100 Continue. It checks Upgrade/Connection, rejects HTTP body framing, and
+prepares validated 101 bytes plus the owning stream and Interface before
+output begins. A successful write is followed by a nonyielding transfer commit.
+Request body and Response output operations then reject reuse. The connection
+Task skips response finishing, body draining, parser reset, and its outer
+transport close when transferred. An unaccepted candidate instead completes
+the handler's ordinary closing response and returns at the first header pause;
+its opaque suffix is never parsed as HTTP.
+
+`reject_upgrade` validates the same live pair even for malformed openings that
+llhttp did not classify as upgrades. It accepts a 400..599 status and copied
+headers without supplied framing, adds Content-Length zero and Connection
+close, and writes one bounded rejection. It marks the exchange rejected,
+closes the parser, retires transport, and tells the connection loop to skip
+body drain. Both success and rejection output blocks have a 64 KiB cap.
+Both paths start from copied unsent Response fields and append copied supplied
+fields, preserving handler header customization before controlling framing and
+Connection/Upgrade.
+
+Suspending upgrade I/O runs in an owned child with a cancellation-sensitive
+parent join. The parent's lexical cleanup remains independently runnable while
+the child awaits accepted transport output. On interruption it invokes the
+captured abort action before requesting child cancellation and draining the
+child with `await_terminal_cleanup`. This order lets cancellation retire
+backpressured accepted native writes before releasing parser or immutable
+output state. Child exceptions retain an `async.Error` containing the exact
+value and origin traceback; the parent uses `Error:raise` after cleanup.
+Cleanup failures do not replace an earlier failure. No operation
+joins an unrelated handler or session Task.
+
+The opaque `UpgradedStream` retains `Transport` (the public
+ReaderWriterCloser plus abort action) and the unread immutable prefix. Its
+first reads consume that prefix before transport reads. Delimiter search
+retains a delimiter-length tail across prefix/transport boundaries and stores
+only input following the delimiter as new prefix. It admits one stream reader
+and forwards writes directly. Closing marks it closed, discards prefix, and
+invokes abort, including when its reader is suspended. HTTP captures
+`net.Connection:close` or `ssl.Connection:abort` while the concrete accepted
+type is known. There is no identity inspection, private TLS/UV access, or
+native socket bypass.
+
 ## Headers, URL consumption, and framing
 
 Headers use an Array of public `Header` records. Lookup performs ASCII folding
@@ -121,6 +199,12 @@ Cached `string` regex matching validates token names and rejects field values
 containing controls other than HTAB or containing DEL. The parser appends
 fields only on llhttp's complete value event, after trimming optional
 whitespace.
+
+Upgrade fields use a separate protocol-name[/protocol-version] parser, so a
+versioned offer does not invalidate another offered protocol. Matching folds
+only the protocol name and compares version tokens exactly. Connection keeps
+its bare-token option grammar. Both upgrade entry points validate their selected
+protocol with the Upgrade grammar before adopting a transport or writing bytes.
 
 Strict llhttp already applies the same name/value checks to received fields
 and parses inbound Content-Length syntax and framing. Titan repeats the
@@ -137,6 +221,9 @@ call `url.parse` for an absolute client URL and `url.parse_request` for a
 separate scheme, Host authority, and origin-form target, raise the structured
 `url.Error` when parsing fails, and otherwise unwrap the `url.Url`. HTTP does
 not re-export either record or either parse function.
+Absolute client entry points additionally require exactly `http` or `https`,
+so URL's additive `ws`/`wss` policy cannot route a secure WebSocket URL through
+plain HTTP transport selection.
 
 The client connects with normalized `Url.host`, uses normalized
 `Url.authority` when it generates an absent Host field, and sends normalized
@@ -175,11 +262,16 @@ field and writes the exact interim response synchronously. Every other value,
 comma-combined value, or repeated field produces a framed zero-length 417 and
 returns from the connection loop without draining the declared body. The
 deferred transport close makes that rejection safe without parser reuse.
+Upgrade-indicated requests carrying any Expect take the preconstruction
+bodyless 400 path described above. Checking both parsed fields also covers
+malformed openings that llhttp does not classify as upgrades, preventing 100
+output before a handler's one-shot upgrade or rejection.
 
 ## Server Tasks and the interface conversion boundary
 
 `Server:serve` owns the accept loop. Each accepted connection is converted to
-`io.ReaderWriterCloser` and scheduled in a fresh `async.run` Task. The accept
+`io.ReaderWriterCloser`, paired with its public abort capability, and scheduled
+in a fresh `async.run` Task. The accept
 loop retains lexical close ownership until the child acknowledges that its own
 close defer is armed. An `await_cleanup_with` startup wait and terminal listener
 cover both normal entry and termination before entry. Failed scheduling or
@@ -266,6 +358,10 @@ defer remains installed for every exit; cancellation is idempotent. The timer's
 native close can finish in the background because it owns no parser or
 transport state, so no terminal join is added. The reader is always owned by a cancel-and-terminal-cleanup defer, including
 when parent cancellation interrupts the race or creation of the deadline fails.
+Before draining an unfinished reader, the parent calls the
+captured public transport abort. A reader may own malformed-upgrade rejection
+output whose accepted native write cannot detach; abort lets that output retire
+before the shared parser and connection are released.
 Its terminal wait uses `async.await_cleanup_with` plus a removable public terminal
 listener, so pending parent cancellation cannot release shared parser/connection
 state before the child has finished. Deadline success requests reader
@@ -273,7 +369,7 @@ cancellation with the timeout reason; the same defer drains its completion.
 A small context holds the child and listener remover for a named registrar.
 The retained terminal-listener closure captures its Completion and suspension
 number directly, and lexical cleanup removes it on every exit.
-An SSL read retains the connection's serialized busy state until that cleanup
+An SSL read retains its directional operation scope until that cleanup
 finishes. The timer-only child has unconditional cancellation cleanup but is
 not joined: it owns no shared parser/transport state, and waiting for it would
 change observable successful-reader ordering. Reader success supplies the `Request?`; timer success is an
@@ -283,16 +379,16 @@ to its peer and returns instead of raising the same failure a second time.
 
 On HTTPS, cancelling the child read follows `ssl.Connection`'s existing
 terminal cancellation path: it frees the TLS engine and closes the transport
-without `close_notify`, so the remote peer observes `TLS_TRUNCATED_EOF`. The
-current high-level SSL surface cannot interrupt its serialized busy read and
-then initiate graceful shutdown. A clean-alert timeout would therefore require
-a new SSL-level composition primitive; HTTP neither reaches through to `uv`
-nor adds native state to simulate one.
+without `close_notify`, so the remote peer observes `TLS_TRUNCATED_EOF`.
+TLS cancellation remains terminal under the full-duplex contract. HTTP neither
+reaches through to `uv` nor adds native state to simulate a graceful timeout.
 
 The deadline is absolute from that iteration's start and does not reset on
 partial header bytes. The setter changes only later iterations. Handler work,
-request bodies, automatic draining, and response writes remain outside the
-policy. Transport and scheduling use high-level `async`, `timer`, and public
+request bodies, automatic draining, and ordinary response writes remain outside
+the policy. The pre-handler malformed-upgrade output uses the existing upgrade
+I/O supervisor inside the header reader, so the same absolute deadline covers
+its completion. Transport and scheduling use high-level `async`, `timer`, and public
 connection operations. The UV import supplies the registrar return type;
 there is no connection-local watchdog or generation protocol.
 
@@ -308,8 +404,8 @@ as runtime-SDK files.
 
 The HTTP root adds one logical protocol, archive key, generated shim, and
 `luaopen_titan_http`. The coordinated current image, including `titan.test`, `titan.reflect`,
-`titan.sqlite3`, and `titan.json`, has twenty-one logical
-modules and shims with twenty-two DSO openers including bare `luaopen_titan`
+`titan.sqlite3`, and `titan.json`, has twenty-two logical
+modules and shims with twenty-three DSO openers including bare `luaopen_titan`
 support. The complete image
 lives in the `0.6` library namespace; earlier installations are not publication
 predecessors.

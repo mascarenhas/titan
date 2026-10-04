@@ -1,0 +1,176 @@
+-- Public UV ciphertext relay. Stopping its frontend read establishes genuine
+-- TCP backpressure after TLS negotiation without exposing net/SSL internals.
+local async = import "async"
+local uv = import "uv"
+local net = import "net"
+local test = import "test"
+local task_support = import "support.async.titan"
+
+local record CloseWait
+  handle: uv.handle_t
+  done: async.Completion<|CloseWait, nil, nil|>?
+  number: integer
+end
+
+local function closed(handle: uv.handle_t)
+  local waiter = uv.handle_get_data(handle) as CloseWait
+  uv.handle_set_data(handle, nil)
+  waiter.done:resolve(waiter.number, nil)
+end
+
+local function start_close(done: async.Completion<|CloseWait, nil, nil|>,
+                           number: integer): uv.req_t?
+  local waiter = done:context(number)
+  waiter.done = done
+  waiter.number = number
+  uv.handle_set_data(waiter.handle, waiter)
+  uv.close(waiter.handle, closed)
+  return nil
+end
+
+local function close_handle(handle: uv.handle_t)
+  if not uv.is_closing(handle) then
+    async.await_cleanup_with(CloseWait(handle, nil, 0), start_close)
+  end
+end
+
+local record WriteWait
+  request: uv.write_t
+  stream: uv.stream_t
+  bytes: string
+  done: async.Completion<|WriteWait, nil, integer|>?
+  number: integer
+end
+
+local function written(request: uv.write_t, status: integer)
+  local waiter = request:get_data() as WriteWait
+  request:set_data(nil)
+  if status < 0 then waiter.done:reject(waiter.number, status)
+  else waiter.done:resolve(waiter.number, nil) end
+end
+
+local function start_write(done: async.Completion<|WriteWait, nil, integer|>,
+                           number: integer): uv.req_t?
+  local waiter = done:context(number)
+  waiter.done = done
+  waiter.number = number
+  waiter.request:set_data(waiter)
+  local status = uv.write_string(waiter.request, waiter.stream, waiter.bytes,
+                                 written)
+  if status < 0 then
+    waiter.request:set_data(nil)
+    done:reject(number, status)
+  end
+  return nil
+end
+
+record Proxy
+  const port: integer
+  local listener: uv.tcp_t
+  local front: uv.tcp_t?
+  local backend: net.Connection?
+  local incoming: async.BufferedSubscription<|string, value|>?
+  local sender: async.Task?
+  local receiver: async.Task?
+  local closing: boolean
+end
+
+local function relay(proxy: Proxy, front: uv.tcp_t, backend_port: integer): value
+  local backend = net.connect("127.0.0.1", backend_port)
+  proxy.backend = backend
+  local stream = front:as_stream_t()
+  local incoming = async.BufferedSubscription<|string, value|>(function (publish, fail, finish)
+    local status = uv.read_start(stream,
+      function (_handle: uv.handle_t, _suggested: integer): uv.buf_t
+        return uv.buf_t.allocate(65536)
+      end,
+      function (_: uv.stream_t, count: integer, buffer: uv.buf_t?)
+        if count > 0 then publish(buffer:to_string(count))
+        elseif count < 0 then
+          uv.read_stop(stream)
+          if count == uv.EOF then finish() else fail(uv.err_name(count)) end
+        end
+      end)
+    test.assert(status >= 0)
+    return async.SubscriptionActions<|string|>(function () uv.read_stop(stream) end,
+      function (drain: function (): async.SubscriptionBatch<|string|>) drain() end)
+  end)
+  proxy.incoming = incoming
+  local receiver = async.run<|value, value|>(function (): value
+    do
+      while true do
+        local bytes? = backend:read()
+        if bytes == nil then return nil end
+        case async.await_with(WriteWait(uv.write_t.new(), stream, bytes, nil, 0),
+                               start_write)
+        when error(status) then
+          if proxy.closing then return nil end
+          raise uv.err_name(status)
+        else
+        end
+      end
+    catch
+      if not proxy.closing then raise end
+    end
+    return nil
+  end)
+  proxy.receiver = receiver
+  task_support.cleanup_task(receiver, "TLS proxy receiver")
+  do
+    while true do
+      case incoming:next()
+      when item(bytes) then backend:write(bytes)
+      when error(failure) then
+        if not proxy.closing then raise failure end
+        return nil
+      else return nil
+      end
+    end
+  catch
+    if not proxy.closing then raise end
+  end
+  return nil
+end
+
+function new(backend_port: integer): Proxy
+  local loop = async.current_loop()
+  local listener = uv.tcp_t.new()
+  test.assert(uv.tcp_init(loop, listener) >= 0)
+  local address_status, address? = uv.ip4_addr("127.0.0.1", 0)
+  test.assert(address_status >= 0)
+  test.assert(uv.tcp_bind(listener, address, 0) >= 0)
+  local bound_status, bound? = uv.tcp_getsockname(listener)
+  test.assert(bound_status >= 0)
+  local proxy = Proxy(bound:port(), listener, nil, nil, nil, nil, nil, false)
+  local status = uv.listen(listener:as_stream_t(), 1,
+    function (_: uv.stream_t, accepted_status: integer)
+      test.assert(accepted_status >= 0 and proxy.front == nil)
+      local front = uv.tcp_t.new()
+      test.assert(uv.tcp_init(loop, front) >= 0)
+      test.assert(uv.accept(listener:as_stream_t(), front:as_handle_t()) >= 0)
+      proxy.front = front
+      local sender = async.run<|value, value|>(function (): value
+        return relay(proxy, front, backend_port)
+      end)
+      proxy.sender = sender
+      task_support.cleanup_task(sender, "TLS proxy sender")
+    end)
+  test.assert(status >= 0)
+  return proxy
+end
+
+function Proxy:stop_input()
+  test.assert(self.front ~= nil and self.incoming ~= nil)
+  test.assert(uv.read_stop(self.front:as_stream_t()) >= 0)
+end
+
+function Proxy:close()
+  if self.closing then return end
+  self.closing = true
+  if self.incoming ~= nil then self.incoming:close() end
+  if self.backend ~= nil then self.backend:close() end
+  if self.front ~= nil then close_handle(self.front:as_handle_t()) end
+  close_handle(self.listener:as_handle_t())
+  if self.sender ~= nil then async.join(self.sender) end
+  if self.receiver ~= nil then async.join(self.receiver) end
+end

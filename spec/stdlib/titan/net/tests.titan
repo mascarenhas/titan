@@ -4,6 +4,7 @@ local async = import "async"
 local gc = import "gc"
 local stream = import "io"
 local net = import "net"
+local uv = import "uv"
 local strings = import "string"
 local timer = import "timer"
 local support = import "net.test_support.titan"
@@ -432,5 +433,79 @@ function test_net_validates_endpoints_and_wakes_pending_accept(
     buffered_peer:close()
     buffered_client:close()
     buffered_server:close()
+  end)
+end
+
+function test_net_resolved_address_dialing(context: test.Context)
+  runtime_test.run(function ()
+    local server, port = support.listen_available(28600)
+    support.cleanup_server(context, server)
+    local addresses = net.resolve("127.0.0.1", port)
+    test.assert(#addresses > 0, "resolver returned no TCP address")
+    local address = addresses[1]
+    test.assert(address:is_complete() and address:family() == uv.AF_INET and
+                address:port() == port and #address:address_bytes() == 4,
+                "resolver did not retain an owned address")
+    gc.collect()
+    local connection = net.Connection()
+    support.cleanup_connection(context, connection)
+    support.expect_failure(function () connection:read() end,
+                           "unconnected endpoint admitted reading")
+    support.expect_failure(function () connection:write("") end,
+                           "unconnected endpoint admitted writing")
+    support.expect_failure(function () connection:shutdown() end,
+                           "unconnected endpoint admitted shutdown")
+    connection:connect_address(address)
+    support.expect_failure(function () connection:connect_address(address) end,
+                           "connected endpoint admitted a second connect")
+    local peer = server:accept()
+    support.cleanup_connection(context, peer)
+    peer:write("resolved\0")
+    test.assert(connection:read_until("\0", true) == "resolved",
+                "address-aware transport lost binary data")
+    local fresh = net.Connection.new()
+    fresh:close()
+    fresh:close()
+    test.assert(fresh:read() == nil, "closed fresh endpoint did not return EOF")
+    support.expect_failure(function () fresh:connect_address(address) end,
+                           "closed endpoint admitted connect")
+  end)
+end
+
+function test_net_preowned_connect_close_and_contention(context: test.Context)
+  runtime_test.run(function ()
+    local server, port = support.listen_available(28700)
+    support.cleanup_server(context, server)
+    local addresses = net.resolve("127.0.0.1", port)
+    local connection = net.Connection()
+    support.cleanup_connection(context, connection)
+    local observed: value = nil
+    local begin_dial: (function (nil): ())? = nil
+    local dialer = async.run<|value, value|>(function (): value
+      async.await<|nil, nil|>(function (resolve, _reject, _fatal)
+        begin_dial = resolve
+      end)
+      do connection:connect_address(addresses[1]) catch observed = error end
+      return nil
+    end)
+    task_support.cleanup_task(dialer, "preowned TCP connect cleanup")
+    while begin_dial == nil do timer.yield() end
+    -- Settling the gate synchronously reaches the native connect wait before
+    -- any UV completion can interleave. Resume this owner in the same turn so
+    -- a fast loopback connect cannot finish before contention and close.
+    async.await<|nil, nil|>(function (resolve, _reject, _fatal)
+      local release = begin_dial
+      begin_dial = nil
+      release(nil)
+      test.assert(dialer:status():as_string() == "waiting" and observed == nil,
+                  "TCP dial did not reach its native wait")
+      resolve(nil)
+    end)
+    support.expect_failure(function () connection:connect_address(addresses[1]) end,
+                           "endpoint admitted concurrent connect")
+    connection:close()
+    async.join(dialer)
+    test.assert(observed is async.OperationError,
+                "closing pending connect did not report a transport error")
   end)
 end

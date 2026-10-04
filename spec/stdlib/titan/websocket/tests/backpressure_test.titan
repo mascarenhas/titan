@@ -1,0 +1,354 @@
+local function listen_raw_tls(): (ssl.Server, integer)
+  local port = 42500
+  for _ = 1, 100 do
+    do return ssl.listen("127.0.0.1", port, CERTIFICATE, PRIVATE_KEY), port
+    catch
+      if error is async.OperationError and (error as async.OperationError).name == "EADDRINUSE" then
+        port = port + 1
+      else raise end
+    end
+  end
+  raise "WebSocket backpressure TLS fixture exhausted loopback ports"
+end
+
+local function blocked_output_case(secure: boolean, trigger: string)
+  local backend_port = 0
+  local accept: function (): (io.ReaderWriterCloser) = function (): io.ReaderWriterCloser raise "unset accept" end
+  local abort_backend: function (): () = function () end
+  local close_listener: function (): () = function () end
+  if secure then
+    local listener, port = listen_raw_tls()
+    backend_port = port
+    close_listener = function () listener:close() end
+    accept = function (): io.ReaderWriterCloser
+      local tls = listener:accept()
+      abort_backend = function () tls:abort() end
+      tls:handshake()
+      return tls
+    end
+  else
+    local listener, port = listen_raw()
+    backend_port = port
+    close_listener = function () listener:close() end
+    accept = function (): io.ReaderWriterCloser
+      local tcp = listener:accept()
+      abort_backend = function () tcp:close() end
+      return tcp
+    end
+  end
+  runtime_test.cleanup(close_listener)
+  local raw: Wire? = nil
+  local acknowledged = false
+  local hold = async.ResumeToken("WebSocket stopped socket peer")
+  local peer = async.run<|value, value|>(function (): value
+    local stream = accept()
+    defer abort_backend()
+    local wire = Wire(stream, "", "")
+    raw = wire
+    wire:open_server()
+    wire.stream:write(frame(9, "before-stop"))
+    local pong = wire:frame()
+    test.assert(pong.opcode == 10 and pong.masked and pong.payload == "before-stop",
+                "client receive admission was not acknowledged before stopping OS reads")
+    acknowledged = true
+    async.suspend(hold)
+    if trigger == "close_overlap" then
+      local fragments = 0
+      while true do
+        local output = wire:frame()
+        test.assert(output.masked, "client output behind blocked frame lost masking")
+        if output.opcode == 8 then
+          test.assert(string.sub(output.payload, 1, 2) == close_bytes(1000),
+                      "overlapping Close changed the actual peer status")
+          break
+        end
+        fragments = fragments + 1
+        test.assert(fragments <= 1024 and (output.opcode == 2 or output.opcode == 0),
+                    "blocked binary output had unexpected framing")
+      end
+      test.assert(wire.input == "", "overlapping read/shutdown emitted a second Close")
+      assert_transport_retired(wire.stream, secure)
+    end
+    return nil
+  end)
+  runtime_test.cleanup(function ()
+    abort_backend()
+    task_support.cancel_and_join_task(peer, "stopped socket peer cleanup")
+  end)
+  local proxy = new_proxy(backend_port)
+  runtime_test.cleanup(function () proxy:close() end)
+  local scheme = "ws"
+  local options: websocket.DialOptions? = nil
+  if secure then
+    scheme = "wss"
+    options = websocket.DialOptions { ca_file = TRUST_ROOT }
+  end
+  local connection = websocket.connect(scheme .. "://localhost:" .. proxy.port .. "/blocked", options)
+  runtime_test.cleanup(function () connection:close() end)
+  local read_failure: value = nil
+  local reader = async.run<|value, value|>(function (): value
+    do connection:read() catch read_failure = error end
+    return nil
+  end)
+  cleanup_operation(connection, reader, "stopped-output reader cleanup")
+  while not acknowledged do timer.yield() end
+  proxy:stop_input()
+  local write_returned = false
+  local write_failure: value = nil
+  local writer = async.run<|value, value|>(function (): value
+    do
+      connection:write(websocket.BINARY, string.rep("blocked\0", 2 * 1024 * 1024))
+      write_returned = true
+    catch write_failure = error end
+    return nil
+  end)
+  cleanup_operation(connection, writer, "stopped-output writer cleanup")
+  -- With UV input stopped, allow more cooperative turns than the 1024
+  -- fragments need in the healthy lane. Then require actual suspended output.
+  for _ = 1, 4096 do timer.yield() end
+  gc.collect()
+  test.assert(not write_returned and writer:status():as_string() == "waiting",
+              "fixture did not establish stopped-socket output backpressure")
+  local watchdog_fired = false
+  local watchdog = async.run<|value, value|>(function (): value
+    timer.sleep(8000)
+    watchdog_fired = true
+    proxy:close()
+    connection:close()
+    return nil
+  end)
+  task_support.cleanup_task(watchdog, "stalled-output watchdog cleanup")
+  if trigger == "close_overlap" then
+    raw.stream:write(frame(8, close_bytes(1000, "peer")))
+    local code?, _reason? = connection:close_status()
+    while code == nil and not watchdog_fired do
+      async.yield()
+      code, _reason = connection:close_status()
+    end
+    test.assert(code == 1000, "reader did not acknowledge peer Close behind blocked output")
+    local shutdown_failure: value = nil
+    local shutdown_returned = false
+    local shutdown = async.run<|value, value|>(function (): value
+      do connection:shutdown(1000, "local", 5000); shutdown_returned = true
+      catch shutdown_failure = error end
+      return nil
+    end)
+    cleanup_operation(connection, shutdown, "overlapping shutdown cleanup")
+    for _ = 1, 3 do async.yield() end
+    test.assert(not shutdown_returned and shutdown:status():as_string() == "waiting",
+                "shutdown did not overlap receive Close behind the held frame")
+    proxy:resume_input()
+    peer:resume(hold)
+    assert_succeeded(reader, "overlapping Close reader wrapper")
+    assert_succeeded(shutdown, "overlapping shutdown wrapper")
+    assert_succeeded(writer, "closing blocked writer wrapper")
+    test.assert(read_failure == nil and shutdown_failure == nil and shutdown_returned and
+                not write_returned and write_failure is websocket.Error and
+                (write_failure as websocket.Error).kind == "state" and not watchdog_fired,
+                "overlapping Close fabricated a transport failure or failed clean progress")
+    assert_succeeded(peer, "exactly one outgoing Close raw peer")
+    watchdog:cancel(async.CancellationReason.simple("overlapping Close test completed"))
+    async.join(watchdog)
+    connection:close(); proxy:close()
+    return
+  end
+  if trigger == "cancel_write" then
+    local reason = async.CancellationReason.simple("cancel native accepted WebSocket output")
+    writer:cancel(reason)
+    async.join(writer)
+    test.assert(writer:status():has_cancelled() and write_failure == reason,
+                "accepted output cancellation lost exact reason")
+  elseif trigger == "close" then
+    connection:close()
+  elseif trigger == "ping" then
+    assert_ws_error(expect_error(function () connection:ping(30) end), "timeout", "websocket.ping", nil)
+    timer.sleep(1); async.checkpoint()
+  elseif trigger == "shutdown" then
+    assert_ws_error(expect_error(function () connection:shutdown(1000, "", 30) end),
+                    "timeout", "websocket.shutdown", nil)
+    timer.sleep(1); async.checkpoint()
+  elseif trigger == "peer_close" then
+    raw.stream:write(frame(8, close_bytes(1000, "peer")))
+  else
+    raw.stream:write("\xc1\0") -- protocol-failure Close queues behind native output
+  end
+  assert_succeeded(reader, "stopped-output reader wrapper")
+  if trigger ~= "cancel_write" then assert_succeeded(writer, "stopped-output writer wrapper") end
+  test.assert(not write_returned and write_failure ~= nil and read_failure ~= nil and not watchdog_fired,
+              "protocol operation drained blocked native output before abort or missed its deadline")
+  if trigger == "protocol_close" then
+    assert_ws_error(read_failure, "protocol", "websocket.read", 1002)
+  end
+  watchdog:cancel(async.CancellationReason.simple("stopped-output test completed"))
+  async.join(watchdog)
+  connection:close()
+  proxy:close()
+  peer:resume(hold)
+  assert_succeeded(peer, "stopped socket peer")
+end
+
+function test_stopped_socket_output_aborts_before_native_drain(context: test.Context)
+  local triggers: {string} = {"cancel_write", "close", "ping", "shutdown", "peer_close", "protocol_close", "close_overlap"}
+  for index = 1, #triggers do
+    local trigger = triggers[index]
+    context:run("ws_" .. trigger, function (_child: test.Context)
+      runtime_test.run(function () blocked_output_case(false, trigger) end)
+    end)
+    context:run("wss_" .. trigger, function (_child: test.Context)
+      runtime_test.run(function () blocked_output_case(true, trigger) end)
+    end)
+  end
+end
+
+-- This fixture creates its own Runtime and owns every TCP handle walked here.
+-- Handle union cases, socket buffers and queue sizes are public UV APIs; no
+-- HTTP/net/TLS implementation fields or identity mapping are consulted.
+local function constrain_opening_sockets(stop_reads: boolean): integer
+  local loop = async.current_loop()
+  return on_main(function (): integer
+  local count = 0
+  uv.walk(loop, function (handle: uv.handle_t, _argument: value)
+    case handle
+    when tcp(owner) then
+      if not uv.is_closing(handle) then
+        local send_status, send_size = uv.send_buffer_size(handle, 1024)
+        local receive_status, receive_size = uv.recv_buffer_size(handle, 1024)
+        test.assert(send_status >= 0 and send_size > 0 and
+                    receive_status >= 0 and receive_size > 0,
+                    "could not constrain owned opening socket buffers")
+        if stop_reads then
+          test.assert(uv.read_stop(owner:as_stream_t()) >= 0)
+        end
+        count = count + 1
+      end
+    else
+    end
+  end, nil)
+  return count
+  end)
+end
+
+local function pending_opening_bytes(): integer
+  local loop = async.current_loop()
+  return on_main(function (): integer
+  local pending = 0
+  uv.walk(loop, function (handle: uv.handle_t, _argument: value)
+    case handle
+    when tcp(owner) then
+      if not uv.is_closing(handle) then
+        pending = pending + uv.stream_get_write_queue_size(owner:as_stream_t())
+      end
+    else
+    end
+  end, nil)
+  return pending
+  end)
+end
+
+local function blocked_server_opening_case(secure: boolean, cancel: boolean)
+  local handler_task: async.Task? = nil
+  local entered = false
+  local accepting = false
+  local done = false
+  local transferred = false
+  local failure: value = nil
+  local preflight = async.ResumeToken("accepted HTTP opening preflight")
+  local handler: http.Handler = function (request: http.Request, response: http.Response)
+    handler_task = async.running()
+    -- Stay below the intentional 64 KiB HTTP upgrade-output ceiling.
+    response:set_header("X-Opening-Pressure", string.rep("h", 55 * 1024))
+    entered = true
+    async.suspend(preflight)
+    accepting = true
+    do
+      local connection = websocket.accept(request, response,
+        websocket.AcceptOptions { handshake_timeout = 1000 })
+      transferred = true
+      connection:close()
+    catch failure = error end
+    if not cancel then timer.sleep(1); async.checkpoint() end
+    done = true
+  end
+  local listener, port = listen_http(handler, secure)
+  runtime_test.cleanup(function () listener:close() end)
+  local serving = async.run<|value, value|>(function (): value listener:serve(); return nil end)
+  runtime_test.cleanup(function ()
+    listener:close()
+    task_support.cancel_and_join_task(serving, "blocked opening listener cleanup")
+  end)
+  local write_request: function (string): () = function (_bytes: string) raise "unset opening writer" end
+  local abort: function (): () = function () end
+  if secure then
+    local tls = ssl.connect("localhost", port, TRUST_ROOT)
+    write_request = function (bytes: string) tls:write(bytes) end
+    abort = function () tls:abort() end
+  else
+    local tcp = stopped_socket_peer(port)
+    write_request = function (bytes: string) write_socket(tcp, bytes) end
+    abort = function () close_handle(tcp:as_handle_t()) end
+  end
+  runtime_test.cleanup(function ()
+    abort()
+    if handler_task then task_support.cancel_and_join_task(handler_task, "blocked opening handler cleanup") end
+  end)
+  test.assert(constrain_opening_sockets(false) >= 3,
+              "isolated opening runtime did not own both peers and listener")
+  -- Never read the HTTP response. TLS has already completed; the handler
+  -- preflight acknowledges delivery of the complete client opening request.
+  write_request(opening_request(port))
+  while not entered do async.yield() end
+  test.assert(constrain_opening_sockets(true) >= 3)
+  local watchdog_fired = false
+  local watchdog = async.run<|value, value|>(function (): value
+    timer.sleep(5000)
+    watchdog_fired = true
+    -- Closing this public peer forces native accepted output to retire before
+    -- any fixture joins, even if production cancellation/deadline is broken.
+    abort()
+    listener:close()
+    return nil
+  end)
+  task_support.cleanup_task(watchdog, "blocked opening watchdog cleanup")
+  handler_task:resume(preflight)
+  while not accepting do async.yield() end
+  local pending = pending_opening_bytes()
+  while pending == 0 and not done do
+    async.yield()
+    pending = pending_opening_bytes()
+  end
+  test.assert(pending > 0 and not done and not transferred and
+              handler_task:status():as_string() == "waiting",
+              "platform buffered the entire bounded 101; no accepted native output was pending")
+  gc.collect()
+  if cancel then
+    local reason = async.CancellationReason.simple("cancel accepted native 101 output")
+    handler_task:cancel(reason)
+    async.join(handler_task)
+    test.assert(handler_task:status():has_cancelled() and failure == reason,
+                "server opening cancellation lost its original reason")
+  else
+    while not done do async.yield() end
+    assert_succeeded(handler_task, "server opening timeout wrapper")
+    assert_ws_error(failure, "timeout", "websocket.open", nil)
+  end
+  test.assert(not transferred and not watchdog_fired,
+              "blocked 101 transferred ownership or failed bounded retirement")
+  watchdog:cancel(async.CancellationReason.simple("blocked opening test completed"))
+  async.join(watchdog)
+  abort()
+end
+
+function test_server_opening_aborts_pending_101_before_transfer(context: test.Context)
+  context:run("ws_timeout", function (_child: test.Context)
+    runtime_test.run(function () blocked_server_opening_case(false, false) end)
+  end)
+  context:run("wss_timeout", function (_child: test.Context)
+    runtime_test.run(function () blocked_server_opening_case(true, false) end)
+  end)
+  context:run("ws_cancel", function (_child: test.Context)
+    runtime_test.run(function () blocked_server_opening_case(false, true) end)
+  end)
+  context:run("wss_cancel", function (_child: test.Context)
+    runtime_test.run(function () blocked_server_opening_case(true, true) end)
+  end)
+end

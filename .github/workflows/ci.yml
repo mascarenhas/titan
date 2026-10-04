@@ -165,7 +165,7 @@ jobs:
             clean_titan_environment \
               "$PREFIX/bin/luarocks" remove titan --force
           fi
-          for module in coroutine uv async timer io fs net ssl url http os peg string math lua iteration gc test reflect sqlite3 json; do
+          for module in coroutine uv async timer io fs net ssl url http websocket os peg string math lua iteration gc test reflect sqlite3 json; do
             rm -f "$PREFIX/share/lua/5.5/titan/$module.lua"
           done
           rm -f "$PREFIX/share/titan/0.6/src/titan/test.titan"
@@ -712,7 +712,7 @@ jobs:
           test -f "$TITAN_STDLIB_DIAGNOSTIC_SNAPSHOT/manifest.txt"
           test -f "$snapshot_provider" && test ! -L "$snapshot_provider"
           cmp "$snapshot_provider" "$provider"
-          for module in coroutine uv async timer io fs net ssl url http os peg string math lua iteration gc test reflect sqlite3 json; do
+          for module in coroutine uv async timer io fs net ssl url http websocket os peg string math lua iteration gc test reflect sqlite3 json; do
             test -f "$PREFIX/share/lua/5.5/titan/$module.lua"
           done
           test -f "$PREFIX/share/titan/0.6/src/titan/test.titan" &&
@@ -802,6 +802,56 @@ jobs:
           bash spec/support/ci_sanitizer_capture.sh ssl-http \
             make titan-stdlib-test-run \
               TITAN_FILTER='test_ssl_http_fresh_process_sanitizer_composition$'
+          bash spec/support/ci_sanitizer_capture.sh ssl-duplex \
+            make titan-stdlib-test-run \
+              TITAN_FILTER='test_ssl_simultaneous_large_duplex_preserves_bytes$'
+          bash spec/support/ci_sanitizer_capture.sh ssl-backpressure \
+            make titan-stdlib-test-run \
+              TITAN_FILTER='test_ssl_cancel_backpressured_write_aborts_before_native_drain$'
+          bash spec/support/ci_sanitizer_capture.sh http-upgrade-handoff \
+            make titan-stdlib-test-run \
+              TITAN_FILTER='test_upgrade_server_transfers_binary_excess_and_handler_lifetime$'
+          bash spec/support/ci_sanitizer_capture.sh http-upgrade-abort \
+            make titan-stdlib-test-run \
+              TITAN_FILTER='test_upgrade_opening_cancellation_aborts_before_output_drain$'
+          for ownership_log in ssl-duplex ssl-backpressure \
+              http-upgrade-handoff http-upgrade-abort; do
+            if ! grep -Eq '^\[==========\] [1-9][0-9]* tests? ran\.$' \
+                "$TITAN_SANITIZER_LOG_DIR/$ownership_log.log"; then
+              echo "TLS/HTTP ownership sanitizer filter ran no tests: $ownership_log" >&2
+              exit 1
+            fi
+          done
+
+      - name: Run native WebSocket ownership sanitizer gate
+        run: |
+          bash spec/support/ci_sanitizer_capture.sh websocket-message-gc \
+            make titan-stdlib-test-run \
+              TITAN_FILTER='test_received_message_strings_survive_later_reads_and_forced_gc$'
+          bash spec/support/ci_sanitizer_capture.sh websocket-partial-utf8 \
+            make titan-stdlib-test-run \
+              TITAN_FILTER='test_partial_utf8_message_cancellation_retires_ownership$'
+          bash spec/support/ci_sanitizer_capture.sh websocket-read-cancel \
+            make titan-stdlib-test-run \
+              TITAN_FILTER='test_admitted_idle_read_cancellation_terminalizes_ws_and_wss$'
+          bash spec/support/ci_sanitizer_capture.sh websocket-active-close \
+            make titan-stdlib-test-run \
+              TITAN_FILTER='test_close_interrupts_active_read_without_joining_its_caller$'
+          bash spec/support/ci_sanitizer_capture.sh websocket-receive-progress \
+            make titan-stdlib-test-run \
+              TITAN_FILTER='test_shutdown_takes_receive_progress_after_reader_returns_data$'
+          bash spec/support/ci_sanitizer_capture.sh websocket-backpressure \
+            make titan-stdlib-test-run \
+              TITAN_FILTER='test_stopped_socket_output_aborts_before_native_drain$'
+          for ownership_log in websocket-message-gc websocket-partial-utf8 \
+              websocket-read-cancel websocket-active-close \
+              websocket-receive-progress websocket-backpressure; do
+            if ! grep -Eq '^\[==========\] [1-9][0-9]* tests? ran\.$' \
+                "$TITAN_SANITIZER_LOG_DIR/$ownership_log.log"; then
+              echo "WebSocket ownership sanitizer filter ran no tests: $ownership_log" >&2
+              exit 1
+            fi
+          done
 
       - name: Run native SQLite sanitizer gate
         run: |

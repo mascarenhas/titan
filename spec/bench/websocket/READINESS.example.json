@@ -1,0 +1,15 @@
+{
+  "owner_thread_id": "01a1054f-c6d4-7253-9868-ee6198900e08",
+  "consumer_compile_ready": false,
+  "frozen_inputs": false,
+  "prefix": "/tmp/titan-193-prefix",
+  "provider_sha256": "OWNER_SUPPLIED_EXACT_SHA256",
+  "source_manifest": "/absolute/path/to/owner-frozen-source-manifest.json",
+  "source_manifest_sha256": "OWNER_SUPPLIED_EXACT_SHA256",
+  "optimization": "optimized",
+  "openssl_mode": "OWNER_SUPPLIED_MODE",
+  "cc": "OWNER_SUPPLIED_MATCHING_CC_COMMAND",
+  "ar": "OWNER_SUPPLIED_MATCHING_AR_COMMAND",
+  "ranlib": "OWNER_SUPPLIED_MATCHING_RANLIB_COMMAND",
+  "provider_source_correspondence": "Owner attests these exact installed bytes were produced from this frozen source manifest; archive compile and native dependency receipts alongside this file."
+}

@@ -1,0 +1,180 @@
+local record BadFrame
+  name: string
+  bytes: string
+end
+
+function test_close_during_fragmented_input_discards_unfinished_message(_context: test.Context)
+  runtime_test.run(function ()
+    with_server(function (connection: websocket.Connection)
+      local kind?, bytes? = connection:read()
+      test.assert(kind == nil and bytes == nil, "Close delivered an unfinished fragment")
+      local code?, reason? = connection:close_status()
+      test.assert(code == 1000 and reason == "stop", "fragmented-input Close lost status")
+    end, function (wire: Wire)
+      wire.stream:write(frame(1, "unfinished\xe2", true, false) .. frame(8, close_bytes(1000, "stop"), true))
+      assert_close(wire, 1000, false)
+    end)
+  end)
+end
+
+function test_server_rejects_malformed_frame_structure(context: test.Context)
+  local cases: {BadFrame} = {
+    BadFrame("unmasked_client", frame(1, "x")),
+    BadFrame("rsv1", "\xc1\x80"),
+    BadFrame("rsv2", "\xa1\x80"),
+    BadFrame("rsv3", "\x91\x80"),
+    BadFrame("reserved_data_opcode", "\x83\x80"),
+    BadFrame("reserved_control_opcode", "\x8b\x80"),
+    BadFrame("fragmented_ping", frame(9, "", true, false)),
+    BadFrame("oversized_ping", "\x89\xfe"),
+    BadFrame("oversized_close", "\x88\xfe"),
+    BadFrame("unexpected_continuation", frame(0, "", true)),
+    BadFrame("interrupted_fragment", frame(1, "a", true, false) .. frame(2, "b", true)),
+    BadFrame("nonminimal_16bit", "\x82\xfe\0\x7d"),
+    BadFrame("nonminimal_64bit", "\x82\xff\0\0\0\0\0\0\xff\xff"),
+    BadFrame("signed_64bit", "\x82\xff\x80\0\0\0\0\0\0\0"),
+    BadFrame("one_byte_close", frame(8, "x", true)),
+  }
+  for index = 1, #cases do
+    local item = cases[index]
+    context:run(item.name, function (_child: test.Context)
+      runtime_test.run(function () server_receives_error(item.bytes, "protocol", 1002) end)
+    end)
+  end
+end
+
+function test_client_rejects_masked_server_frame(_context: test.Context)
+  runtime_test.run(function ()
+    with_client(function (wire: Wire)
+      wire.stream:write(frame(2, "masked", true))
+      assert_close(wire, 1002, true)
+    end, function (connection: websocket.Connection)
+      assert_ws_error(expect_error(function () connection:read() end), "protocol", "websocket.read", 1002)
+    end)
+  end)
+end
+
+function test_server_rejects_invalid_utf8_scalar_sequences(context: test.Context)
+  local cases: {BadFrame} = {
+    BadFrame("lone_continuation", "\x80"), BadFrame("overlong_two", "\xc0\xaf"),
+    BadFrame("overlong_three", "\xe0\x80\x80"), BadFrame("surrogate", "\xed\xa0\x80"),
+    BadFrame("above_unicode_max", "\xf4\x90\x80\x80"), BadFrame("invalid_lead", "\xf5\x80\x80\x80"),
+    BadFrame("incomplete_fin", "\xf0\x9f\x98"), BadFrame("wrong_continuation", "\xe2A\xac"),
+  }
+  for index = 1, #cases do
+    local item = cases[index]
+    context:run(item.name, function (_child: test.Context)
+      runtime_test.run(function () server_receives_error(frame(1, item.bytes, true), "utf8", 1007) end)
+    end)
+  end
+end
+
+function test_server_validates_utf8_close_reason(_context: test.Context)
+  runtime_test.run(function ()
+    server_receives_error(frame(8, close_bytes(1000, "\xed\xa0\x80"), true), "utf8", 1007)
+  end)
+end
+
+function test_server_rejects_reserved_and_unassigned_close_codes(context: test.Context)
+  local codes: {integer} = {0, 999, 1004, 1005, 1006, 1015, 1016, 2999, 5000, 65535}
+  for index = 1, #codes do
+    local code = codes[index]
+    context:run("code_" .. code, function (_child: test.Context)
+      runtime_test.run(function ()
+        server_receives_error(frame(8, close_bytes(code), true), "protocol", 1002)
+      end)
+    end)
+  end
+end
+
+function test_server_preserves_modern_and_application_peer_close_codes(context: test.Context)
+  local codes: {integer} = {1000, 1001, 1002, 1003, 1007, 1008, 1009, 1011, 1012, 1013, 1014, 3000, 4999}
+  for index = 1, #codes do
+    local code = codes[index]
+    context:run("code_" .. code, function (_child: test.Context)
+      runtime_test.run(function ()
+        with_server(function (connection: websocket.Connection)
+          local kind?, bytes? = connection:read()
+          test.assert(kind == nil and bytes == nil, "valid peer Close produced data")
+          local actual?, reason? = connection:close_status()
+          test.assert(actual == code and reason == "peer", "peer close_status changed")
+        end, function (wire: Wire)
+          wire.stream:write(frame(8, close_bytes(code, "peer"), true))
+          assert_close(wire, code, false)
+        end)
+      end)
+    end)
+  end
+end
+
+function test_server_receives_1010_but_replies_with_1000(_context: test.Context)
+  runtime_test.run(function ()
+    with_server(function (connection: websocket.Connection)
+      connection:read()
+      local code?, reason? = connection:close_status()
+      test.assert(code == 1010 and reason == "extension", "server lost actual incoming 1010")
+    end, function (wire: Wire)
+      wire.stream:write(frame(8, close_bytes(1010, "extension"), true))
+      assert_close(wire, 1000, false)
+    end)
+  end)
+end
+
+function test_client_tolerates_received_1010(_context: test.Context)
+  runtime_test.run(function ()
+    with_client(function (wire: Wire)
+      wire.stream:write(frame(8, close_bytes(1010, "extension")))
+      assert_close(wire, 1010, true)
+    end, function (connection: websocket.Connection)
+      connection:read()
+      local code?, reason? = connection:close_status()
+      test.assert(code == 1010 and reason == "extension", "client rejected or rewrote received 1010")
+    end)
+  end)
+end
+
+function test_transport_eof_without_close_is_abnormal(_context: test.Context)
+  runtime_test.run(function ()
+    with_server(function (connection: websocket.Connection)
+      assert_ws_error(expect_error(function () connection:read() end), "abnormal", "websocket.read", nil)
+      local code?, reason? = connection:close_status()
+      test.assert(code == nil and reason == nil, "abnormal EOF synthesized on-wire 1006")
+    end, function (wire: Wire) wire.stream:close() end)
+  end)
+end
+function test_protocol_failure_preserves_first_identity_and_trace_on_later_calls(_context: test.Context)
+  runtime_test.run(function ()
+    with_server(function (connection: websocket.Connection)
+      local first: value = nil
+      local first_trace = ""
+      do connection:read()
+      catch first = error; first_trace = traceback end
+      assert_ws_error(first, "protocol", "websocket.read", 1002)
+      test.assert(#first_trace > 0, "protocol failure lost its original trace")
+      if string.find(first_trace, "titan/websocket/") ~= nil or
+          string.find(first_trace, "titan\\websocket\\") ~= nil then
+        test.assert(string.find(first_trace, "frames.titan") ~= nil,
+                    "symbolic trace did not retain the incoming frame origin")
+      end
+      local operations: {function (): ()} = {
+        function () connection:read() end,
+        function () connection:write(websocket.BINARY, "later") end,
+        function () connection:ping(1000) end,
+        function () connection:shutdown(1000, "", 1000) end,
+      }
+      for index = 1, #operations do
+        local later: value = nil
+        local later_trace = ""
+        do operations[index]()
+        catch later = error; later_trace = traceback end
+        test.assert(later == first and later_trace == first_trace,
+                    "later operation replaced the first protocol cause or trace")
+      end
+      connection:close(); connection:close()
+    end, function (wire: Wire)
+      wire.stream:write("\xc1\x80abcd")
+      assert_close(wire, 1002, false)
+      test.assert(wire.stream:read() == nil, "protocol retirement kept native transport alive")
+    end)
+  end)
+end

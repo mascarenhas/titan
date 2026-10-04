@@ -9,11 +9,13 @@ record Request
   version: string
   headers: Headers
   local parser: Parser
+  local exchange: Exchange
   local ended: boolean
 end
 
 record Response
   local connection: io.ReaderWriterCloser
+  local exchange: Exchange
   local request_method: string
   local request_keep_alive: boolean
   local response_headers: Headers
@@ -34,6 +36,7 @@ record Server
   local encrypted: boolean
   local handler: Handler
   local idle_timeout_ms: integer
+  local header_limit_bytes: integer
   local closed: boolean
   local listener_closed: boolean
 end
@@ -50,14 +53,51 @@ local function request_url(parser: Parser,
     scheme, hosts[1], parser.target_text)
 end
 
+local function reject_parsed_upgrade(parser: Parser, transport: Transport)
+  -- Header acquisition is complete, so no native parse owns this storage.
+  -- Keep rejection output inside the header-reader's absolute deadline.
+  close_parser(parser)
+  defer do
+    do transport.abort() catch end
+  end
+  supervised_upgrade_io<|nil|>(transport.abort, function (): nil
+    transport.connection:write("HTTP/1.1 400 Bad Request\r\n" ..
+      "Content-Length: 0\r\nConnection: close\r\n\r\n")
+    return nil
+  end)
+end
+
 local function read_request(parser: Parser,
-                            encrypted: boolean): Request?
+                            encrypted: boolean,
+                            transport: Transport): Request?
   -- EOF in an idle request parser is a normal peer disconnect. Header
   -- acquisition reports false only for that case; every partial request
   -- raises instead.
-  if not ensure_parser_headers(parser) then return nil end
+  if not acquire_parser_headers(parser) then return nil end
   if #parser.method_text == 0 then raise "HTTP request has no method" end
-  local parsed_url = request_url(parser, encrypted)
+  local upgrade_offer = parser.upgrade or
+    #parser.parsed_headers:values("Upgrade") > 0 or
+    header_has_token(parser.parsed_headers, "Connection", "upgrade")
+  local parsed_url: url.Url? = nil
+  if upgrade_offer then
+    local hosts = parser.parsed_headers:values("Host")
+    if parser.major == 1 and parser.minor == 1 and #hosts == 1 then
+      local scheme = "http"
+      if encrypted then scheme = "https" end
+      -- This public, synchronous parse returns semantic URL diagnostics;
+      -- transport and Task failures never enter a malformed-opening catch.
+      parsed_url = url.parse_request(scheme, hosts[1], parser.target_text)
+    end
+    if parsed_url == nil or #parser.parsed_headers:values("Expect") > 0 then
+      reject_parsed_upgrade(parser, transport)
+      return nil
+    end
+  else
+    if parser.major ~= 1 or parser.minor ~= 1 then
+      raise "only HTTP/1.1 messages are supported"
+    end
+    parsed_url = request_url(parser, encrypted)
+  end
   return Request {
     method = parser.method_text,
     target = parser.target_text,
@@ -65,11 +105,14 @@ local function read_request(parser: Parser,
     version = "HTTP/1.1",
     headers = parser.parsed_headers,
     parser = parser,
+    exchange = Exchange(transport, parser, true, false, false, false),
     ended = false,
   }
 end
 
 function Request:read(): string?
+  if not self.exchange.active then raise "HTTP request exchange has ended" end
+  if self.parser.upgrade then raise "HTTP upgrade request has no readable body" end
   if self.ended then return nil end
   local chunk? = parser_read(self.parser)
   if not chunk then self.ended = true end
@@ -78,6 +121,8 @@ end
 
 function Request:read_until(delimiter: string,
                             chop: boolean?): string?
+  if not self.exchange.active then raise "HTTP request exchange has ended" end
+  if self.parser.upgrade then raise "HTTP upgrade request has no readable body" end
   if self.ended then return nil end
   local result? = parser_read_until(self.parser, delimiter, chop)
   if not result then self.ended = true end
@@ -132,6 +177,7 @@ local function new_response(connection: io.ReaderWriterCloser,
                             request_value: Request): Response
   return Response {
     connection = connection,
+    exchange = request_value.exchange,
     request_method = request_value.method,
     request_keep_alive = request_value.parser.keep_alive,
     response_headers = headers(nil),
@@ -142,12 +188,13 @@ local function new_response(connection: io.ReaderWriterCloser,
     body_allowed = true,
     content_length = nil,
     written = 0,
-    keep_alive = request_value.parser.keep_alive,
+    keep_alive = request_value.parser.keep_alive and not request_value.parser.upgrade,
     closed = false,
   }
 end
 
 function Response:set_status(status: integer, reason: string?)
+  if not self.exchange.active then raise "HTTP response exchange has ended" end
   if self.headers_sent then
     raise "HTTP response headers have already been sent"
   end
@@ -162,6 +209,7 @@ function Response:set_status(status: integer, reason: string?)
 end
 
 function Response:add_header(name: string, contents: string)
+  if not self.exchange.active then raise "HTTP response exchange has ended" end
   if self.headers_sent then
     raise "HTTP response headers have already been sent"
   end
@@ -169,6 +217,7 @@ function Response:add_header(name: string, contents: string)
 end
 
 function Response:set_header(name: string, contents: string)
+  if not self.exchange.active then raise "HTTP response exchange has ended" end
   if self.headers_sent then
     raise "HTTP response headers have already been sent"
   end
@@ -238,6 +287,7 @@ local function prepare_response_headers(response: Response)
 end
 
 function Response:send_headers()
+  if self.exchange.transferred then raise "HTTP response was upgraded" end
   if self.headers_sent then return end
   if self.closed then raise "HTTP response is closed" end
   prepare_response_headers(self)
@@ -246,11 +296,13 @@ function Response:send_headers()
                 " " .. self.reason_text .. "\r\n")
   builder:write(render_headers(self.response_headers))
   builder:write("\r\n")
+  self.exchange.output_started = true
   self.connection:write(builder:drain())
   self.headers_sent = true
 end
 
 function Response:write(data: string)
+  if not self.exchange.active then raise "HTTP response exchange has ended" end
   if self.closed then raise "HTTP response is closed" end
   if not self.headers_sent then self:send_headers() end
   if not self.body_allowed then
@@ -296,6 +348,7 @@ local function accept_request_expectation(
   if #expectations == 1 and
      lower_header_name(trim_header_value(expectations[1])) ==
        "100-continue" then
+    request_value.exchange.output_started = true
     connection:write("HTTP/1.1 100 Continue\r\n\r\n")
     return true
   end
@@ -338,19 +391,24 @@ local function await_terminal_cleanup<|A, B|>(task: async.Task<|A, B|>)
 end
 
 local function read_request_with_idle_timeout(
-    parser: Parser, server: Server): Request?
+    parser: Parser, server: Server, transport: Transport): Request?
   local encrypted = server.encrypted
   local timeout = server.idle_timeout_ms
-  if timeout == 0 then return read_request(parser, encrypted) end
+  if timeout == 0 then return read_request(parser, encrypted, transport) end
 
   local cleanup_reason = async.CancellationReason<|value|>.simple(
     "HTTP request header wait stopped")
   local reader = async.run<|Request?, value|>(function (): Request?
-    return read_request(parser, encrypted)
+    return read_request(parser, encrypted, transport)
   end)
   defer do
-    defer await_terminal_cleanup(reader)
-    reader:cancel(cleanup_reason)
+    if not reader:status():has_finished() then
+      -- The reader may now own bounded malformed-upgrade output as well as
+      -- input. Retire accepted native output before joining that ownership.
+      defer await_terminal_cleanup(reader)
+      do transport.abort() catch end
+      reader:cancel(cleanup_reason)
+    end
   end
   local deadline = async.run(function (): nil
     timer.sleep(timeout)
@@ -376,40 +434,51 @@ local function read_request_with_idle_timeout(
   end
 end
 
-local function serve_connection(connection: io.ReaderWriterCloser,
+local function serve_connection(transport: Transport,
                                 server: Server, started: function (): ())
-  defer connection:close()
+  local connection = transport.connection
+  local exchange: Exchange? = nil
+  defer do
+    if exchange == nil or not exchange.transferred then connection:close() end
+  end
   started()
   local parser = new_request_parser(connection)
   defer close_parser(parser)
   while true do
     -- Snapshot the current setting for this request-header acquisition.
     -- Setter calls affect the next loop iteration, never an in-flight read.
-    local request? = read_request_with_idle_timeout(parser, server)
+    parser.header_limit = server.header_limit_bytes
+    local request? = read_request_with_idle_timeout(parser, server, transport)
     if not request then return end
     local request_value = request as Request
+    exchange = request_value.exchange
     local response = new_response(connection, request_value)
     if not accept_request_expectation(
         connection, request_value, response) then
       return
     end
     server.handler(request_value, response)
+    if exchange.transferred or exchange.rejected then return end
     response:close()
+    -- An upgrade candidate rejected by the handler ends this connection at
+    -- its header boundary; llhttp must never parse the protocol suffix.
+    if parser.upgrade then exchange.active = false; return end
     drain_request(request_value)
+    exchange.active = false
     if not parser.keep_alive or not response.keep_alive then return end
     parser_reset_message(parser)
   end
 end
 
-local function accept_connection(server: Server): io.ReaderWriterCloser
+local function accept_connection(server: Server): Transport
   if server.encrypted then
     local connection = (server.secure as ssl.Server):accept()
     local channel: io.ReaderWriterCloser = connection
-    return channel
+    return Transport(channel, connection:abort)
   end
   local connection = (server.plain as net.Server):accept()
   local channel: io.ReaderWriterCloser = connection
-  return channel
+  return Transport(channel, connection:close)
 end
 
 function listen(host: string, handler: Handler, port: integer?,
@@ -427,6 +496,7 @@ function listen(host: string, handler: Handler, port: integer?,
     encrypted = false,
     handler = handler,
     idle_timeout_ms = actual_idle_timeout,
+    header_limit_bytes = 65536,
     closed = false,
     listener_closed = false,
   }
@@ -448,6 +518,7 @@ function listen_tls(host: string, certificate_file: string, handler: Handler,
     encrypted = true,
     handler = handler,
     idle_timeout_ms = actual_idle_timeout,
+    header_limit_bytes = 65536,
     closed = false,
     listener_closed = false,
   }
@@ -464,8 +535,17 @@ function Server:idle_timeout(timeout: integer?): integer
   return previous
 end
 
+function Server:header_limit(limit: integer?): integer
+  local previous = self.header_limit_bytes
+  if limit ~= nil then
+    if limit < 1 then raise "HTTP header limit must be positive" end
+    self.header_limit_bytes = limit
+  end
+  return previous
+end
+
 local record ConnectionHandoff
-  connection: io.ReaderWriterCloser
+  transport: Transport
   server: Server
   transferred: boolean
   child: async.Task<|nil, value|>?
@@ -487,7 +567,7 @@ local function start_connection_handoff(
     notify()
   end
   context.child = async.run<|nil, value|>(function (): nil
-    serve_connection(context.connection, context.server, started)
+    serve_connection(context.transport, context.server, started)
     return nil
   end)
   context.remove = context.child:add_terminal_listener(function (_: async.TaskStatus<|nil, value|>)
@@ -500,14 +580,15 @@ end
 function Server:serve()
   if self.closed then raise "HTTP Server is closed" end
   while not self.closed do
-    local accepted: io.ReaderWriterCloser? = nil
+    local accepted: Transport? = nil
     do
       accepted = accept_connection(self)
     catch
       if self.closed then return end
       raise
     end
-    local connection = accepted as io.ReaderWriterCloser
+    local transport = accepted as Transport
+    local connection = transport.connection
     -- run only accepts a deferred start. Keep this connection owned until the
     -- child has armed its close defer, or has terminated without entering it.
     local handoff: ConnectionHandoff? = nil
@@ -515,7 +596,7 @@ function Server:serve()
       defer do
         if handoff == nil or not handoff.transferred then connection:close() end
       end
-      local context = ConnectionHandoff(connection, self, false, nil, nil, false)
+      local context = ConnectionHandoff(transport, self, false, nil, nil, false)
       handoff = context
       defer do
         local child? = context.child

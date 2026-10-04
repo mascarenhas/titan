@@ -1,0 +1,312 @@
+-- Public UV ciphertext relay. Stopping its frontend read establishes genuine
+-- TCP backpressure after opening without exposing net/SSL internals.
+
+local record CloseWait
+  handle: uv.handle_t
+  done: async.Completion<|CloseWait, nil, nil|>?
+  number: integer
+end
+
+local function closed(handle: uv.handle_t)
+  local waiter = uv.handle_get_data(handle) as CloseWait
+  uv.handle_set_data(handle, nil)
+  waiter.done:resolve(waiter.number, nil)
+end
+
+local function start_close(done: async.Completion<|CloseWait, nil, nil|>,
+                           number: integer): uv.req_t?
+  local waiter = done:context(number)
+  waiter.done = done
+  waiter.number = number
+  uv.handle_set_data(waiter.handle, waiter)
+  uv.close(waiter.handle, closed)
+  return nil
+end
+
+local function close_handle(handle: uv.handle_t)
+  if handle:is_initialized() and not uv.is_closing(handle) then
+    async.await_cleanup_with(CloseWait(handle, nil, 0), start_close)
+  end
+end
+
+-- Public uv.walk deliberately requires the loop's main Lua thread. An owned
+-- timer callback runs there; its Completion settles only after handle close.
+local record MainWait
+  timer: uv.timer_t
+  loop: uv.loop_t
+  action: function (): (integer)
+  done: async.Completion<|MainWait, integer, async.Error|>?
+  number: integer
+  result: integer
+  failure: async.Error?
+end
+
+local function main_closed(handle: uv.handle_t)
+  local waiter = uv.handle_get_data(handle) as MainWait
+  uv.handle_set_data(handle, nil)
+  if waiter.failure then waiter.done:reject(waiter.number, waiter.failure)
+  else waiter.done:resolve(waiter.number, waiter.result) end
+end
+
+local function main_action(timer: uv.timer_t)
+  local waiter = uv.timer_get_data(timer) as MainWait
+  do waiter.result = waiter.action()
+  catch waiter.failure = async.Error(error, traceback) end
+  uv.close(timer:as_handle_t(), main_closed)
+end
+
+local function start_main(done: async.Completion<|MainWait, integer, async.Error|>,
+                          number: integer): uv.req_t?
+  local waiter = done:context(number)
+  waiter.done = done; waiter.number = number
+  test.assert(uv.timer_init(waiter.loop, waiter.timer) >= 0)
+  uv.timer_set_data(waiter.timer, waiter)
+  local status = uv.timer_start(waiter.timer, main_action, 0, 0)
+  if status < 0 then
+    waiter.failure = async.Error(uv.err_name(status), "")
+    uv.close(waiter.timer:as_handle_t(), main_closed)
+  end
+  return nil
+end
+
+local function on_main(action: function (): (integer)): integer
+  case async.await_with(MainWait(uv.timer_t.new(), async.current_loop(), action,
+                                 nil, 0, 0, nil), start_main)
+  when success(result) then return result
+  when error(failure) then failure:raise()
+  end
+  raise "unreachable main-thread fixture action"
+end
+
+local record WriteWait
+  request: uv.write_t
+  stream: uv.stream_t
+  bytes: string
+  done: async.Completion<|WriteWait, nil, integer|>?
+  number: integer
+end
+
+local function written(request: uv.write_t, status: integer)
+  local waiter = request:get_data() as WriteWait
+  request:set_data(nil)
+  if status < 0 then waiter.done:reject(waiter.number, status)
+  else waiter.done:resolve(waiter.number, nil) end
+end
+
+local function start_write(done: async.Completion<|WriteWait, nil, integer|>,
+                           number: integer): uv.req_t?
+  local waiter = done:context(number)
+  waiter.done = done
+  waiter.number = number
+  waiter.request:set_data(waiter)
+  local status = uv.write_string(waiter.request, waiter.stream, waiter.bytes,
+                                 written)
+  if status < 0 then
+    waiter.request:set_data(nil)
+    done:reject(number, status)
+  end
+  return nil
+end
+
+local record ConnectWait
+  request: uv.connect_t
+  socket: uv.tcp_t
+  address: uv.sockaddr_t
+  done: async.Completion<|ConnectWait, nil, integer|>?
+  number: integer
+end
+
+local function connected(request: uv.connect_t, status: integer)
+  local waiter = request:get_data() as ConnectWait
+  request:set_data(nil)
+  if status < 0 then waiter.done:reject(waiter.number, status)
+  else waiter.done:resolve(waiter.number, nil) end
+end
+
+local function start_connect(done: async.Completion<|ConnectWait, nil, integer|>,
+                             number: integer): uv.req_t?
+  local waiter = done:context(number)
+  waiter.done = done; waiter.number = number
+  waiter.request:set_data(waiter)
+  local status = uv.tcp_connect(waiter.request, waiter.socket, waiter.address, connected)
+  if status < 0 then waiter.request:set_data(nil); done:reject(number, status) end
+  return nil
+end
+
+local function stopped_socket_peer(port: integer): uv.tcp_t
+  local socket = uv.tcp_t.new()
+  test.assert(uv.tcp_init(async.current_loop(), socket) >= 0)
+  runtime_test.cleanup(function () close_handle(socket:as_handle_t()) end)
+  -- Bind creates the public socket before connect. Constrain the receive
+  -- window before its initial TCP advertisement, rather than after the SYN.
+  local bind_status, bind_address? = uv.ip4_addr("127.0.0.1", 0)
+  test.assert(bind_status >= 0 and uv.tcp_bind(socket, bind_address, 0) >= 0)
+  local send_status, send_size = uv.send_buffer_size(socket:as_handle_t(), 1024)
+  local receive_status, receive_size = uv.recv_buffer_size(socket:as_handle_t(), 1024)
+  test.assert(send_status >= 0 and send_size > 0 and receive_status >= 0 and receive_size > 0)
+  local address_status, address? = uv.ip4_addr("127.0.0.1", port)
+  test.assert(address_status >= 0)
+  case async.await_with(ConnectWait(uv.connect_t.new(), socket, address, nil, 0), start_connect)
+  when error(status) then raise uv.err_name(status)
+  else
+  end
+  return socket
+end
+
+local function write_socket(socket: uv.tcp_t, bytes: string)
+  case async.await_with(WriteWait(uv.write_t.new(), socket:as_stream_t(), bytes, nil, 0), start_write)
+  when error(status) then raise uv.err_name(status)
+  else
+  end
+end
+
+local record Proxy
+  const port: integer
+  local listener: uv.tcp_t
+  local front: uv.tcp_t?
+  local backend: net.Connection?
+  local incoming: async.BufferedSubscription<|string, value|>?
+  local sender: async.Task?
+  local receiver: async.Task?
+  local closing: boolean
+  local pending_bytes: integer
+  local restart_input: (function (): ())?
+  local input_stopped: boolean
+  local input_paused: boolean
+end
+
+local function relay(proxy: Proxy, front: uv.tcp_t, backend_port: integer): value
+  local backend = net.connect("127.0.0.1", backend_port)
+  proxy.backend = backend
+  local stream = front:as_stream_t()
+  local incoming = async.BufferedSubscription<|string, value|>(function (publish, fail, finish)
+    local allocate: uv.alloc_cb = function (_handle: uv.handle_t, _suggested: integer): uv.buf_t
+        return uv.buf_t.allocate(65536)
+      end
+    local deliver: uv.read_cb = function (_: uv.stream_t, count: integer, buffer: uv.buf_t?)
+        if count > 0 then
+          -- Only opening traffic is relayed before stop_input. Keep the
+          -- queued handshake bytes finite even if the fixture regresses.
+          proxy.pending_bytes = proxy.pending_bytes + count
+          if proxy.pending_bytes > 256 * 1024 then
+            uv.read_stop(stream)
+            fail("WebSocket proxy exceeded its pending opening-byte limit")
+          else
+            if proxy.pending_bytes >= 128 * 1024 then
+              uv.read_stop(stream); proxy.input_paused = true
+            end
+            publish(buffer:to_string(count))
+          end
+        elseif count < 0 then
+          uv.read_stop(stream)
+          if count == uv.EOF then finish() else fail(uv.err_name(count)) end
+        end
+      end
+    proxy.restart_input = function ()
+      if proxy.input_paused then
+        test.assert(uv.read_start(stream, allocate, deliver) >= 0)
+        proxy.input_paused = false
+      end
+    end
+    proxy.restart_input()
+    return async.SubscriptionActions<|string|>(function () uv.read_stop(stream) end,
+      function (drain: function (): async.SubscriptionBatch<|string|>) drain() end)
+  end)
+  proxy.incoming = incoming
+  local receiver = async.run<|value, value|>(function (): value
+    local received_bytes = 0
+    do
+      while true do
+        local bytes? = backend:read()
+        if bytes == nil then return nil end
+        received_bytes = received_bytes + #bytes
+        test.assert(received_bytes <= 256 * 1024,
+                    "WebSocket proxy exceeded its finite reverse-control budget")
+        case async.await_with(WriteWait(uv.write_t.new(), stream, bytes, nil, 0),
+                               start_write)
+        when error(status) then
+          if proxy.closing then return nil end
+          raise uv.err_name(status)
+        else
+        end
+      end
+    catch
+      if not proxy.closing then raise end
+    end
+    return nil
+  end)
+  proxy.receiver = receiver
+  task_support.cleanup_task(receiver, "WebSocket proxy receiver")
+  do
+    while true do
+      case incoming:next()
+      when item(bytes) then
+        proxy.pending_bytes = proxy.pending_bytes - #bytes
+        if proxy.pending_bytes <= 65536 and not proxy.input_stopped then proxy.restart_input() end
+        backend:write(bytes)
+      when error(failure) then
+        if not proxy.closing then raise failure end
+        return nil
+      else return nil
+      end
+    end
+  catch
+    if not proxy.closing then raise end
+  end
+  return nil
+end
+
+local function new_proxy(backend_port: integer): Proxy
+  local loop = async.current_loop()
+  local listener = uv.tcp_t.new()
+  test.assert(uv.tcp_init(loop, listener) >= 0)
+  local address_status, address? = uv.ip4_addr("127.0.0.1", 0)
+  test.assert(address_status >= 0)
+  test.assert(uv.tcp_bind(listener, address, 0) >= 0)
+  local bound_status, bound? = uv.tcp_getsockname(listener)
+  test.assert(bound_status >= 0)
+  local proxy = Proxy(bound:port(), listener, nil, nil, nil, nil, nil, false, 0, nil, false, true)
+  local status = uv.listen(listener:as_stream_t(), 1,
+    function (_: uv.stream_t, accepted_status: integer)
+      test.assert(accepted_status >= 0 and proxy.front == nil)
+      local front = uv.tcp_t.new()
+      test.assert(uv.tcp_init(loop, front) >= 0)
+      test.assert(uv.accept(listener:as_stream_t(), front:as_handle_t()) >= 0)
+      proxy.front = front
+      local sender = async.run<|value, value|>(function (): value
+        return relay(proxy, front, backend_port)
+      end)
+      proxy.sender = sender
+      task_support.cleanup_task(sender, "WebSocket proxy sender")
+    end)
+  test.assert(status >= 0)
+  return proxy
+end
+
+local function Proxy:stop_input()
+  test.assert(self.front ~= nil and self.incoming ~= nil)
+  local status = uv.recv_buffer_size(self.front:as_handle_t(), 4096)
+  test.assert(status >= 0, "could not constrain proxy OS receive buffer")
+  self.input_stopped = true
+  test.assert(uv.read_stop(self.front:as_stream_t()) >= 0)
+  self.input_paused = true
+end
+
+local function Proxy:resume_input()
+  test.assert(not self.closing and self.restart_input ~= nil)
+  local status, size = uv.recv_buffer_size(self.front:as_handle_t(), 256 * 1024)
+  test.assert(status >= 0 and size > 0)
+  self.input_stopped = false
+  self.restart_input()
+end
+
+local function Proxy:close()
+  if self.closing then return end
+  self.closing = true
+  if self.incoming ~= nil then self.incoming:close() end
+  if self.backend ~= nil then self.backend:close() end
+  if self.front ~= nil then close_handle(self.front:as_handle_t()) end
+  close_handle(self.listener:as_handle_t())
+  if self.sender ~= nil then async.join(self.sender) end
+  if self.receiver ~= nil then async.join(self.receiver) end
+end

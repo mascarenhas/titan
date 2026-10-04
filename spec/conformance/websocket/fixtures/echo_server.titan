@@ -1,0 +1,42 @@
+local http = import "http"
+local io = import "io"
+local math = import "math"
+local os = import "os"
+local strings = import "string"
+local websocket = import "websocket"
+
+function main(args: {string}): integer
+  if #args ~= 2 then raise "usage: echo_server PORT READ_LIMIT_BYTES" end
+  local port = math.tointeger(args[1])
+  local limit = math.tointeger(args[2])
+  if not port or port < 1 or port > 65535 or not limit or limit < 16777216 then
+    raise "invalid conformance port/read limit"
+  end
+  local options = websocket.AcceptOptions { read_limit = limit }
+  local server = http.listen("127.0.0.1", function (request: http.Request, response: http.Response)
+    if request.target == "/health" then
+      response:set_header("Content-Length", "5")
+      response:write("ready")
+      return
+    end
+    local connection = websocket.accept(request, response, options)
+    defer connection:close()
+    while true do
+      local kind?, data? = connection:read()
+      if kind == nil then
+        if data ~= nil then raise "read returned data without a message type" end
+        return
+      end
+      if data == nil then raise "read returned a message type without data" end
+      connection:write(kind, data)
+    end
+  catch
+    -- Malformed peers deliberately raise. The external report gate judges each
+    -- case, including the closing behavior, while the listener serves later cases.
+    os.stderr:write("session ended: " .. strings.tostring(error) .. "\n")
+  end, port)
+  defer server:close()
+  io.print("listening", port, "read_limit", limit)
+  server:serve()
+  return 0
+end

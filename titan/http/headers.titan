@@ -165,6 +165,53 @@ local function validate_http_token(token: string, subject: string)
   end
 end
 
+-- Upgrade uses protocol-name ["/" protocol-version], unlike Connection's
+-- bare token options. Names are ASCII case-insensitive; versions are exact.
+local function upgrade_protocol_parts(protocol: string): (string?, string?)
+  local slash? = string.find(protocol, "/", 1, true)
+  if not slash then
+    if string.match(protocol, HTTP_TOKEN_PATTERN) then return protocol, nil end
+    return nil, nil
+  end
+  local name = string.sub(protocol, 1, slash - 1)
+  local version = string.sub(protocol, slash + 1)
+  if not string.match(name, HTTP_TOKEN_PATTERN) or
+      not string.match(version, HTTP_TOKEN_PATTERN) then
+    return nil, nil
+  end
+  return name, version
+end
+
+local function validate_upgrade_protocol(protocol: string)
+  if #protocol == 0 then raise "HTTP upgrade protocol must not be empty" end
+  local name?, _version? = upgrade_protocol_parts(protocol)
+  if not name then raise "HTTP upgrade protocol contains an invalid byte" end
+end
+
+local function upgrade_header_has_protocol(headers_value: Headers,
+                                           wanted: string): boolean
+  local wanted_name?, wanted_version? = upgrade_protocol_parts(wanted)
+  if not wanted_name then return false end
+  local matched = false
+  local fields = headers_value:values("Upgrade")
+  for index = 1, #fields do
+    for item in string.split(fields[index], ",") do
+      local protocol = trim_header_value(item)
+      -- HTTP list recipients ignore empty elements; every actual protocol
+      -- entry still has to follow the Upgrade grammar.
+      if #protocol > 0 then
+        local name?, version? = upgrade_protocol_parts(protocol)
+        if not name then return false end
+        if lower_header_name(name) == lower_header_name(wanted_name) and
+            version == wanted_version then
+          matched = true
+        end
+      end
+    end
+  end
+  return matched
+end
+
 local function render_headers(headers_value: Headers): string
   local builder = string.writer()
   local entries = headers_value:all()

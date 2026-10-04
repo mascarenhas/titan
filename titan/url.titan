@@ -23,7 +23,7 @@ record Error
 end
 
 -- This is the RFC 3986 grammar specialized at its public boundary for an
--- absolute HTTP URL: an authority and nonempty host are required, userinfo and
+-- absolute HTTP or WebSocket URL: an authority and nonempty host are required, userinfo and
 -- fragments are rejected, and an explicit port must contain decimal digits.
 -- Semantic checks below restrict the scheme and the numeric port range. The
 -- module compiles this source once in its initializer. The three request-part
@@ -147,10 +147,10 @@ local function url_pattern(): peg.Pattern
 end
 
 local function scheme_pattern(): peg.Pattern
-  -- A separately supplied scheme is exactly HTTP or HTTPS. The outer choice
+  -- A separately supplied scheme is HTTP, HTTPS, WS or WSS. The outer choice
   -- makes every mismatch report the start of this virtual-URL component.
   return peg.compile(
-    "([Hh][Tt][Tt][Pp] [Ss]? !.) / %{scheme}")
+    "(([Hh][Tt][Tt][Pp] / [Ww][Ss]) [Ss]? !.) / %{scheme}")
 end
 
 local function authority_pattern(): peg.Pattern
@@ -164,7 +164,7 @@ local function origin_pattern(): peg.Pattern
 end
 
 local function url_parse_detail(kind: string): string
-  if kind == "scheme" then return "expected an HTTP or HTTPS scheme"
+  if kind == "scheme" then return "expected an HTTP, HTTPS, WS or WSS scheme"
   elseif kind == "scheme_separator" then
     return "expected ':' after the scheme"
   elseif kind == "authority_separator" then
@@ -192,7 +192,7 @@ local function url_parse_detail(kind: string): string
   elseif kind == "url_tail" then
     return "unexpected byte in the path or query"
   end
-  return "invalid absolute HTTP URL"
+  return "invalid absolute HTTP or WebSocket URL"
 end
 
 local function url_parse_error(kind: string, position: integer): Error
@@ -317,9 +317,9 @@ function parse(source: string): (Url?, Error?)
   local parts = captured as {value: value}
   local scheme = normalize_component(parts["scheme"] as string, true)
   local default_port = 0
-  if scheme == "http" then
+  if scheme == "http" or scheme == "ws" then
     default_port = 80
-  elseif scheme == "https" then
+  elseif scheme == "https" or scheme == "wss" then
     default_port = 443
   else
     local position = parts["scheme_position"] as integer

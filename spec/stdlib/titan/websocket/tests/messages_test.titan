@@ -1,0 +1,232 @@
+function test_server_prefetched_binary_and_empty_messages(_context: test.Context)
+  runtime_test.run(function ()
+    with_server(function (connection: websocket.Connection)
+      local kind?, bytes? = connection:read()
+      assert_binary(kind, bytes, "\0\xff\x80suffix")
+      local empty_kind?, empty? = connection:read()
+      assert_text(empty_kind, empty, "")
+      local done_kind?, done? = connection:read()
+      test.assert(done_kind == nil and done == nil, "valid Close did not end messages")
+      local code?, reason? = connection:close_status()
+      test.assert(code == 1000 and reason == "bye", "peer Close status changed")
+    end, function (wire: Wire)
+      assert_close(wire, 1000, false)
+    end, nil, false, nil,
+      frame(2, "\0\xff\x80suffix", true) .. frame(1, "", true) ..
+      frame(8, close_bytes(1000, "bye"), true))
+  end)
+end
+
+function test_client_prefetched_frame_and_masked_empty_writes(_context: test.Context)
+  runtime_test.run(function ()
+    with_client(function (wire: Wire)
+      local text = wire:frame()
+      local binary = wire:frame()
+      test.assert(text.opcode == 1 and text.masked and text.final and text.payload == "",
+                  "client empty text frame is wrong")
+      test.assert(binary.opcode == 2 and binary.masked and binary.final and binary.payload == "\0\xff",
+                  "client binary mask changed bytes")
+      test.assert(text.mask ~= binary.mask, "client reused a mask for consecutive frames")
+      wire.stream:write(frame(8, ""))
+      assert_close(wire, nil, true)
+    end, function (connection: websocket.Connection)
+      local kind?, data? = connection:read()
+      assert_binary(kind, data, "\0prefetched\xff")
+      connection:write(websocket.MessageType.text(), "")
+      connection:write(websocket.BINARY, "\0\xff")
+      local done_kind?, done? = connection:read()
+      test.assert(done_kind == nil and done == nil, "empty Close did not end client read")
+      local code?, reason? = connection:close_status()
+      test.assert(code == nil and reason == nil, "empty Close synthesized peer status")
+    end, nil, frame(2, "\0prefetched\xff"))
+  end)
+end
+
+function test_valid_unicode_scalar_boundaries_survive_one_byte_fragments(_context: test.Context)
+  runtime_test.run(function ()
+    local payload = "\0\x7f\xc2\x80\xdf\xbf\xe0\xa0\x80\xed\x9f\xbf" ..
+                    "\xee\x80\x80\xef\xbf\xbf\xf0\x90\x80\x80\xf4\x8f\xbf\xbf"
+    with_server(function (connection: websocket.Connection)
+      local kind?, data? = connection:read()
+      assert_text(kind, data, payload)
+      connection:read()
+    end, function (wire: Wire)
+      local output = string.writer()
+      for index = 1, #payload do
+        local opcode = 0
+        if index == 1 then opcode = 1 end
+        output:write(frame(opcode, string.sub(payload, index, index), true, index == #payload))
+      end
+      output:write(frame(8, "", true))
+      wire.stream:write(output:drain())
+      assert_close(wire, nil, false)
+    end)
+  end)
+end
+
+local function outgoing_fragments(wire: Wire, expected: string, masked: boolean)
+  local output = string.writer()
+  local count = 0
+  while true do
+    local received = wire:frame()
+    count = count + 1
+    local opcode = 0
+    if count == 1 then opcode = 2 end
+    test.assert(received.opcode == opcode and received.masked == masked and
+                #received.payload <= 16 * 1024, "outgoing fragments violated role/opcode/16-KiB limit")
+    output:write(received.payload)
+    if received.final then break end
+  end
+  test.assert(count >= 5 and output:drain() == expected, "outgoing fragmentation lost message bytes")
+end
+
+function test_server_large_binary_write_fragments_without_interleaving(_context: test.Context)
+  runtime_test.run(function ()
+    local payload = string.rep("\0\xff", 32768) .. "tail"
+    with_server(function (connection: websocket.Connection)
+      connection:write(websocket.BINARY, payload)
+      connection:read()
+    end, function (wire: Wire)
+      outgoing_fragments(wire, payload, false)
+      wire.stream:write(frame(8, "", true)); assert_close(wire, nil, false)
+    end)
+  end)
+end
+
+function test_client_large_binary_write_masks_all_fragments(_context: test.Context)
+  runtime_test.run(function ()
+    local payload = string.rep("\0\xff", 32768) .. "tail"
+    with_client(function (wire: Wire)
+      outgoing_fragments(wire, payload, true)
+      wire.stream:write(frame(8, "")); assert_close(wire, nil, true)
+    end, function (connection: websocket.Connection)
+      connection:write(websocket.BINARY, payload)
+      connection:read()
+    end)
+  end)
+end
+
+function test_server_fragmented_utf8_with_interleaved_full_ping(_context: test.Context)
+  runtime_test.run(function ()
+    local ping = string.rep("\0\xffP", 41) .. "\x80!"
+    with_server(function (connection: websocket.Connection)
+      local kind?, bytes? = connection:read()
+      assert_text(kind, bytes, "A\xf0\x9f\x98\x80Z")
+      connection:read()
+    end, function (wire: Wire)
+      wire.stream:write(frame(1, "A\xf0", true, false) .. frame(9, ping, true) ..
+                        frame(0, "", true, false) .. frame(0, "\x9f\x98\x80Z", true))
+      local pong = wire:frame()
+      test.assert(pong.opcode == 10 and pong.final and not pong.masked and pong.payload == ping,
+                  "Ping interleaved in fragmented UTF-8 lost identical Pong bytes")
+      wire.stream:write(frame(8, "", true))
+      assert_close(wire, nil, false)
+    end)
+  end)
+end
+
+function test_server_reads_all_header_mask_and_first_payload_splits(context: test.Context)
+  local payload = string.rep("x", 126)
+  local encoded = frame(2, payload, true)
+  -- Distinct named splits exercise the two-byte header, extended length,
+  -- all four mask bytes and payload boundaries without relying on TCP chunks.
+  for split = 1, 9 do
+    local boundary = split
+    context:run("split_" .. boundary, function (_child: test.Context)
+      runtime_test.run(function ()
+        with_server(function (connection: websocket.Connection)
+          local kind?, bytes? = connection:read()
+          assert_binary(kind, bytes, payload)
+          connection:write(websocket.TEXT, "ack")
+          connection:read()
+        end, function (wire: Wire)
+          wire.stream:write(string.sub(encoded, 1, boundary))
+          -- A scheduled peer yields between writes; the parser may also
+          -- receive them coalesced, which is legal and covered separately.
+          timer.yield()
+          wire.stream:write(string.sub(encoded, boundary + 1))
+          test.assert(wire:frame().payload == "ack", "split frame was not delivered")
+          wire.stream:write(frame(8, "", true))
+          assert_close(wire, nil, false)
+        end)
+      end)
+    end)
+  end
+end
+
+function test_server_accepts_canonical_payload_length_boundaries(context: test.Context)
+  local sizes: {integer} = {0, 1, 125, 126, 65535, 65536}
+  for index = 1, #sizes do
+    local length = sizes[index]
+    context:run("bytes_" .. length, function (_child: test.Context)
+      runtime_test.run(function ()
+        local payload = string.rep("\0\xff", length // 2) .. string.rep("x", length % 2)
+        with_server(function (connection: websocket.Connection)
+          local kind?, bytes? = connection:read()
+          assert_binary(kind, bytes, payload)
+          connection:read()
+        end, function (wire: Wire)
+          wire.stream:write(frame(2, payload, true) .. frame(8, "", true))
+          assert_close(wire, nil, false)
+        end)
+      end)
+    end)
+  end
+end
+
+function test_tiny_message_limit_keeps_full_controls_independent(_context: test.Context)
+  runtime_test.run(function ()
+    local ping = string.rep("p", 125)
+    with_server(function (connection: websocket.Connection)
+      local kind?, data? = connection:read()
+      assert_text(kind, data, "x")
+      connection:read()
+    end, function (wire: Wire)
+      wire.stream:write(frame(1, "", true, false) .. frame(9, ping, true) ..
+                        frame(10, ping, true) .. frame(0, "x", true) ..
+                        frame(8, close_bytes(1000, string.rep("r", 123)), true))
+      test.assert(wire:frame().payload == ping, "125-byte Pong violated tiny data budget")
+      assert_close(wire, 1000, false)
+    end, websocket.AcceptOptions { read_limit = 1 })
+  end)
+end
+
+function test_message_limit_accumulates_fragments_and_ignores_controls(_context: test.Context)
+  runtime_test.run(function ()
+    server_receives_error(frame(1, "a", true, false) .. frame(10, "ignored", true) ..
+                          frame(0, "b", true), "limit", 1009,
+                          websocket.AcceptOptions { read_limit = 1 })
+  end)
+end
+
+function test_default_limit_rejects_declared_oversize_before_payload(_context: test.Context)
+  runtime_test.run(function ()
+    -- 1 MiB + 1, no mask or payload: rejection must happen at declared size.
+    server_receives_error("\x82\xff\0\0\0\0\0\x10\0\x01", "limit", 1009)
+  end)
+end
+
+function test_received_message_strings_survive_later_reads_and_forced_gc(_context: test.Context)
+  runtime_test.run(function ()
+    local first = string.rep("first\0\xff", 4000)
+    local second = string.rep("second\0\x80", 5000)
+    with_server(function (connection: websocket.Connection)
+      local first_kind?, retained? = connection:read()
+      assert_binary(first_kind, retained, first)
+      gc.collect()
+      connection:write(websocket.TEXT, "next")
+      local second_kind?, later? = connection:read()
+      assert_binary(second_kind, later, second)
+      gc.collect()
+      test.assert(retained == first, "later read or GC changed retained message bytes")
+      connection:read()
+      gc.collect()
+      test.assert(retained == first and later == second, "Close retirement invalidated returned strings")
+    end, function (wire: Wire)
+      wire.stream:write(frame(2, first, true))
+      test.assert(wire:frame().payload == "next", "message ownership phases lost acknowledgement")
+      wire.stream:write(frame(2, second, true) .. frame(8, "", true))
+      assert_close(wire, nil, false)
+    end)
+  end)
+end

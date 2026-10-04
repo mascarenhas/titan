@@ -674,10 +674,10 @@ contain absolute paths, so this module-path behavior alone does not make an
 entire installed toolchain relocatable.
 
 The standard-library names `coroutine`, `uv`, `async`, `timer`, `io`, `fs`,
-`net`, `ssl`, `url`, `http`, `os`, `peg`, `string`, `test`, `lua`, `math`, `gc`,
+`net`, `ssl`, `url`, `http`, `websocket`, `os`, `peg`, `string`, `test`, `lua`, `math`, `gc`,
 `iteration`, `reflect`, `sqlite3`, and `json` are parser sugar for the qualified module names
 `titan.coroutine`, `titan.uv`, `titan.async`, `titan.timer`, `titan.io`,
-`titan.fs`, `titan.net`, `titan.ssl`, `titan.url`, `titan.http`, `titan.os`,
+`titan.fs`, `titan.net`, `titan.ssl`, `titan.url`, `titan.http`, `titan.websocket`, `titan.os`,
 `titan.peg`, `titan.string`, `titan.test`, `titan.lua`, `titan.math`, `titan.gc`,
 `titan.iteration`, `titan.reflect`, `titan.sqlite3`, and `titan.json`.
 

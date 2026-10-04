@@ -7,6 +7,10 @@ local string = import "string"
 -- One lazy scratch buffer is reused across paired native reads. A connection
 -- left idle retains at most this many scratch bytes; public chunks are copies.
 local const READ_BUFFER_IDLE_CAPACITY = 64 * 1024
+local const CONNECTION_UNCONNECTED = 0
+local const CONNECTION_CONNECTING = 1
+local const CONNECTION_CONNECTED = 2
+local const CONNECTION_FAILED = 3
 
 record Connection
   local handle: uv.tcp_t
@@ -18,6 +22,7 @@ record Connection
   local start_read: (function (): integer)?
   local started: boolean
   local read_buffer: uv.buf_t?
+  local phase: integer
 end
 
 record Server
@@ -44,6 +49,7 @@ local record ResolveOperation
   hints: uv.addrinfo_hints_t
   completion: async.Completion<|ResolveOperation, {uv.sockaddr_t}, integer|>?
   number: integer
+  request_view: uv.req_t
 end
 
 local record ConnectOperation
@@ -128,7 +134,11 @@ local function new_connection(loop: uv.loop_t): Connection
   local tcp = uv.tcp_t.new()
   local stream = tcp:as_stream_t()
   local handle = tcp:as_handle_t()
-  local connection = Connection(tcp, handle, stream, loop, "", nil, nil, false, nil)
+  local connection: Connection = {
+    handle = tcp, handle_view = handle, stream = stream, loop = loop,
+    excess = "", input = nil, start_read = nil, started = false,
+    read_buffer = nil, phase = CONNECTION_UNCONNECTED,
+  }
   connection.input = async.BufferedSubscription<|string, value|>(function (publish, fail, finish)
     local stop = function ()
       if connection.started then uv.read_stop(stream) end
@@ -214,7 +224,8 @@ local function start_resolve(
     context.completion = nil
     completion:reject(number, status)
   end
-  return nil
+  if status < 0 then return nil end
+  return context.request_view
 end
 
 local function resolve_addresses(host: string, port: integer): {uv.sockaddr_t}
@@ -228,11 +239,13 @@ local function resolve_addresses(host: string, port: integer): {uv.sockaddr_t}
     local _, retained = request:addrinfo()
     uv.freeaddrinfo(retained)
   end
-  local result = async.await_with<|ResolveOperation, {uv.sockaddr_t}, integer|>(
-    ResolveOperation(loop, request, host, port, hints, nil, 0), start_resolve)
+  local request_view = request:as_req_t()
+  local result = async.await_cancellable_with<|ResolveOperation, {uv.sockaddr_t}, integer|>(
+    ResolveOperation(loop, request, host, port, hints, nil, 0, request_view), start_resolve)
   case result
   when success(addresses) then return addresses
   when error(code) then raise operation_error(code, "net.resolve")
+  when cancelled(reason) then raise reason
   end
 end
 
@@ -345,6 +358,7 @@ local function new_server(loop: uv.loop_t): Server
       client = new_connection(loop)
       local accepted = uv.accept(stream, client.handle_view)
       if accepted < 0 then fail_server(server, operation_error(accepted, "net.accept")); return end
+      client.phase = CONNECTION_CONNECTED
       if publish(client) then client = nil end
     catch
       fail_server(server, error)
@@ -381,6 +395,9 @@ local function read(connection: Connection): string?
     connection.read_buffer = nil
     return nil
   end
+  if connection.phase ~= CONNECTION_CONNECTED then
+    raise "cannot read from an unconnected TCP Connection"
+  end
   if #connection.excess > 0 then
     local result = connection.excess
     connection.excess = ""
@@ -402,25 +419,59 @@ local function read(connection: Connection): string?
   end
 end
 
-function connect(host: string, port: integer): Connection
+function resolve(host: string, port: integer): {uv.sockaddr_t}
   check_host(host)
   check_connect_port(port)
   async.running()
+  return resolve_addresses(host, port)
+end
+
+function Connection.new(): Connection
+  async.running()
+  async.checkpoint()
+  return new_connection(async.current_loop())
+end
+
+function Connection:connect_address(address: uv.sockaddr_t)
+  validate(self.handle_view, self.loop, "connect")
+  async.checkpoint()
+  if self.phase ~= CONNECTION_UNCONNECTED then
+    raise "TCP Connection has already attempted connect"
+  end
+  if not address:is_complete() or
+     (address:family() ~= uv.AF_INET and address:family() ~= uv.AF_INET6) then
+    raise "TCP connect requires a complete IPv4 or IPv6 address"
+  end
+  check_connect_port(address:port())
+  local request = uv.connect_t.new()
+  self.phase = CONNECTION_CONNECTING
+  do
+    case async.await_with<|ConnectOperation, nil, integer|>(
+      ConnectOperation(request, self.handle, address, nil, 0), start_connect)
+    when success() then
+    when error(code) then raise operation_error(code, "net.connect")
+    end
+    if is_closed(self.handle_view) then
+      raise operation_error(uv.ECANCELED, "net.connect")
+    end
+    self.phase = CONNECTION_CONNECTED
+  catch
+    self.phase = CONNECTION_FAILED
+    raise
+  end
+end
+
+function connect(host: string, port: integer): Connection
+  local addresses = resolve(host, port)
   local loop = async.current_loop()
-  local addresses = resolve_addresses(host, port)
   local last_failure: value = nil
   for index = 1, #addresses do
     local connection = new_connection(loop)
     local transferred = false
     do
       defer if not transferred then abandon(connection) end
-      local request = uv.connect_t.new()
       local address = addresses[index]
-      case async.await_with<|ConnectOperation, nil, integer|>(
-        ConnectOperation(request, connection.handle, address, nil, 0), start_connect)
-      when success() then
-      when error(code) then raise operation_error(code, "net.connect")
-      end
+      connection:connect_address(address)
       transferred = true
       return connection
     catch
@@ -472,6 +523,9 @@ function Connection:read_until(delimiter: string,
     self.read_buffer = nil
     return nil
   end
+  if self.phase ~= CONNECTION_CONNECTED then
+    raise "cannot read from an unconnected TCP Connection"
+  end
   if #delimiter == 0 then raise "read delimiter must not be empty" end
 
   local builder = string.writer()
@@ -516,6 +570,9 @@ end
 
 function Connection:write(data: string)
   validate(self.handle_view, self.loop, "write to")
+  if self.phase ~= CONNECTION_CONNECTED then
+    raise "cannot write to an unconnected TCP Connection"
+  end
   local stream = self.stream
   if not uv.is_writable(stream) then raise "cannot write after Connection shutdown" end
   if #data == 0 then return end
@@ -530,6 +587,9 @@ end
 
 function Connection:shutdown()
   validate(self.handle_view, self.loop, "shut down")
+  if self.phase ~= CONNECTION_CONNECTED then
+    raise "cannot shut down an unconnected TCP Connection"
+  end
   local stream = self.stream
   if not uv.is_writable(stream) then return end
   local request = uv.shutdown_t.new()
