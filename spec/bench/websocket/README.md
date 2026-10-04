@@ -1,4 +1,4 @@
-# WebSocket benchmark preparation
+# WebSocket benchmark harness
 
 Independent issue193 fixtures. Status: **final5 full allocation/lifetime matrix
 397/397 complete; all 397 Lua ledgers match independent heap bytes exactly**.
@@ -7,11 +7,20 @@ and 125 unaffected originals, each with its actual source/build provenance.
 Both earlier 272-row revalidations and original 397 outputs remain preserved.
 Fresh compilation/audit, allocator cleanup 9/9, exact TLS failure replay and bounded
 smoke 68/68 passed. Full prefix audits are unchanged. Complete diagnostic history,
-including the original checkpoint3 SIGSEGV, remains preserved. No timing/fairness
-run has completed; a finite quiet lane is authorized after final source review
-and process checks. Instrumented clocks do not support timing claims.
+including the original checkpoint3 SIGSEGV, remains preserved. The finite final-R1
+background-qualified timing/fairness run completed 556 rows in 610.90 seconds:
+16 paired timing profiles and 16 finite sampler profiles. Both
+`quiet_host_proven=false` and `host_quiet_claim=false`; VMs remained running.
+Only 2/16 timing pairs kept every repeat in both lanes at least 250 ms; all short
+lanes are insufficient and no ratios are claimed. All 16 fairness profiles meet
+the finite duration/sample/capacity checks without truncation. Instrumented
+clocks do not support timing claims. See the separate results chapter and
+`background-summary-final5.json` for exact scope, clocks, counts and provenance.
 
-All 397 public endpoint weak references were absent after final release. Eight
+All 397 rows report an empty weak slot after final release. The 368 ordinary
+connection rows actually populate that slot; 24 session rows and five
+no-connection controls pass nil and do not track nested endpoint reachability.
+Eight
 GC-stopped rows deliberately held a closed endpoint through the first forced-GC
 snapshot; 1000-message rows retained about 69/71/152/154 MB of Lua heap growth there.
 A separately authorized eight-row diagnostic, using a private Lua runner copy,
@@ -21,7 +30,7 @@ The matched 1000-minus-zero residual was 9/75/74/139 KB. This supports coroutine
 owner finalization latency for the large first-collection residual. Later heap
 samples have no allocation ledger because the probe restores its hook first.
 The original 397 measurements and executed payloads are preserved unchanged in
-their build snapshot; the staged harness now contains the focused B1/B2 fixes.
+their build snapshot; the harness contains the reviewed B1/B2/R1 fixes.
 
 The previously failing raw TLS repeated-session row now passes against final5.
 Six intentional errors exited1 after allocator restoration and three no-network
@@ -34,7 +43,8 @@ unused test support), 15 native inputs and exact compile argv. Direct site notes
 exclude unused test support. The amended native-fixture receipt is diagnostic;
 production/provider hashes remain unchanged and the accepted original b56 native
 run is separately preserved. The current matrix scope is Lua allocation/lifetime
-accounting. Timing/fairness remains pending execution. Independent review resolved
+accounting. Separate uninstrumented timing/fairness observations remain explicitly
+background-qualified. Independent review resolved
 B1 abort-tail validation, B2 fairness sample capacity and R1 extended-length
 control-prefix validation. Host 16/16 and two real-native-probe capacity boundary
 regressions pass; the final peer's 272 affected WebSocket rows pass. Common
@@ -131,9 +141,19 @@ records whether the endpoint is collected. This tests endpoint reachability,
 not every internal context or fragment root. Native ownership/finalizer tests
 remain necessary; allocations and aggregate GC totals do not replace them.
 
-## Quiet timing and buffered fairness
+## Timing and finite buffered fairness
 
-All compilation happens before an owner-agreed quiet interval. `timing` runs
+All compilation happens before an owner-approved finite activity window. The
+completed run used a private coordination wrapper recording QEMU CPU activity,
+rejecting overlapping native/compiler/test jobs, and reserving 225 seconds before
+its effective expiry for existing-supervisor cleanup. Original zero-row attempts
+remain preserved: a quiet attempt stopped on QEMU CPU activity; the first
+background attempt stopped on nine added prefix cache records. The owner
+preserved/removed exactly those additions, proved all original 1,618 prefix
+entries matched, and authorized one fresh attempt. No baseline was rebased and
+no automatic repeat occurred. The successful window has been released.
+
+`timing` runs
 uninstrumented consumers, calibrates one common count for the WS/raw pair until
 both bodies reach 250 ms or the declared cap, labels/excludes calibration and
 warmup, alternates pair order over seven repeats, and reports wall/process CPU
@@ -152,8 +172,9 @@ to report per-Task yield-return intervals and timer interarrival p50/p95/p99/max
 Timer interarrival is not deadline lateness. Tracer/timer startup and terminal
 drain contribute sampling overhead. A Lua callback wrapper counts actual sampler
 returns, caps recorded yield/timer intervals at the unchanged native capacities,
-and reports observed/recorded/dropped intervals. Saturation marks the distribution
-truncated and insufficient, then stops that lane's calibration. Message count
+and reports observed/recorded/dropped intervals. Dropped samples mark the distribution
+truncated and insufficient, then stop that lane's calibration. Full capacity
+without dropped samples remains valid subject to the duration and timer-sample checks. Message count
 does not bound scheduler turns. GC runs after the latency snapshot. Calibration
 seeks 250 ms and 100 timer intervals, capped at 200,000 messages; missing/empty
 or truncated samples are explicitly insufficient. Wrapper counter updates and

@@ -150,6 +150,12 @@ must leave issue 196's frozen benchmark matrix/results unchanged, and separate
 setup, steady message handling, controls, fragmentation and teardown for
 plain/verified TLS sessions.
 
+The [allocation and lifetime results](websocket-allocation-results.md) record
+the measured costs and collector behavior. [Timing and fairness observations](websocket-benchmark-results.md)
+record the finite background-qualified scheduling and paired-body measurements.
+[WebSocket validation](websocket-validation.md)
+identifies the tested sources, providers, platforms and remaining gates.
+
 Protocol references: [RFC 6455](https://www.rfc-editor.org/rfc/rfc6455.html),
 [case-sensitive subprotocols](https://www.rfc-editor.org/rfc/rfc7936.html),
 [close registry](https://www.iana.org/assignments/websocket/websocket.xhtml),
