@@ -133,10 +133,7 @@ local function start_connect(done: async.Completion<|ConnectWait, nil, integer|>
   return nil
 end
 
-local function stopped_socket_peer(port: integer): uv.tcp_t
-  local socket = uv.tcp_t.new()
-  test.assert(uv.tcp_init(async.current_loop(), socket) >= 0)
-  runtime_test.cleanup(function () close_handle(socket:as_handle_t()) end)
+local function small_window_socket(socket: uv.tcp_t): string
   -- Bind creates the public socket before connect. Constrain the receive
   -- window before its initial TCP advertisement, rather than after the SYN.
   local bind_status, bind_address? = uv.ip4_addr("127.0.0.1", 0)
@@ -144,13 +141,26 @@ local function stopped_socket_peer(port: integer): uv.tcp_t
   local send_status, send_size = uv.send_buffer_size(socket:as_handle_t(), 1024)
   local receive_status, receive_size = uv.recv_buffer_size(socket:as_handle_t(), 1024)
   test.assert(send_status >= 0 and send_size > 0 and receive_status >= 0 and receive_size > 0)
+  local actual_send_status, actual_send = uv.send_buffer_size(socket:as_handle_t(), 0)
+  local actual_receive_status, actual_receive = uv.recv_buffer_size(socket:as_handle_t(), 0)
+  test.assert(actual_send_status >= 0 and actual_send > 0 and
+              actual_receive_status >= 0 and actual_receive > 0,
+              "could not query pre-SYN owned socket buffers")
+  return string.format("pre_SYN(send=%d recv=%d)", actual_send, actual_receive)
+end
+
+local function stopped_socket_peer(port: integer): (uv.tcp_t, string)
+  local socket = uv.tcp_t.new()
+  test.assert(uv.tcp_init(async.current_loop(), socket) >= 0)
+  runtime_test.cleanup(function () close_handle(socket:as_handle_t()) end)
+  local profile = small_window_socket(socket)
   local address_status, address? = uv.ip4_addr("127.0.0.1", port)
   test.assert(address_status >= 0)
   case async.await_with(ConnectWait(uv.connect_t.new(), socket, address, nil, 0), start_connect)
   when error(status) then raise uv.err_name(status)
   else
   end
-  return socket
+  return socket, profile
 end
 
 local function write_socket(socket: uv.tcp_t, bytes: string)
@@ -176,6 +186,8 @@ local record Proxy
   local frontend_eof: boolean
   local forwarded_bytes: integer
   local backend_shutdown: boolean
+  local initial_front_send: integer
+  local initial_front_receive: integer
 end
 
 local function relay(proxy: Proxy, front: uv.tcp_t, backend_port: integer): value
@@ -277,10 +289,18 @@ local function new_proxy(backend_port: integer): Proxy
   local address_status, address? = uv.ip4_addr("127.0.0.1", 0)
   test.assert(address_status >= 0)
   test.assert(uv.tcp_bind(listener, address, 0) >= 0)
+  -- The accepted frontend inherits these buffers and advertises its small
+  -- receive window in the SYN. Resizing only after opening cannot retract
+  -- window space already advertised to the WebSocket client's kernel.
+  test.assert(uv.send_buffer_size(listener:as_handle_t(), 1024) >= 0)
+  test.assert(uv.recv_buffer_size(listener:as_handle_t(), 1024) >= 0)
+  local send_status, send_size = uv.send_buffer_size(listener:as_handle_t(), 0)
+  local receive_status, receive_size = uv.recv_buffer_size(listener:as_handle_t(), 0)
+  test.assert(send_status >= 0 and send_size > 0 and receive_status >= 0 and receive_size > 0)
   local bound_status, bound? = uv.tcp_getsockname(listener)
   test.assert(bound_status >= 0)
   local proxy = Proxy(bound:port(), listener, nil, nil, nil, nil, nil, false,
-                      0, nil, false, true, false, 0, false)
+                      0, nil, false, true, false, 0, false, 0, 0)
   local status = uv.listen(listener:as_stream_t(), 1,
     function (_: uv.stream_t, accepted_status: integer)
       test.assert(accepted_status >= 0 and proxy.front == nil)
@@ -288,6 +308,12 @@ local function new_proxy(backend_port: integer): Proxy
       test.assert(uv.tcp_init(loop, front) >= 0)
       test.assert(uv.accept(listener:as_stream_t(), front:as_handle_t()) >= 0)
       proxy.front = front
+      local front_send_status, front_send = uv.send_buffer_size(front:as_handle_t(), 0)
+      local front_receive_status, front_receive = uv.recv_buffer_size(front:as_handle_t(), 0)
+      test.assert(front_send_status >= 0 and front_send > 0 and
+                  front_receive_status >= 0 and front_receive > 0)
+      proxy.initial_front_send = front_send
+      proxy.initial_front_receive = front_receive
       local sender = async.run<|value, value|>(function (): value
         return relay(proxy, front, backend_port)
       end)
@@ -320,9 +346,10 @@ local function Proxy:diagnostic(): string
   local receiver = "absent"
   if self.sender then sender = self.sender:status():as_string() end
   if self.receiver then receiver = self.receiver:status():as_string() end
-  return string.format("frontend_eof=%s forwarded=%d pending=%d backend_shutdown=%s sender=%s receiver=%s closing=%s",
+  return string.format("frontend_eof=%s forwarded=%d pending=%d backend_shutdown=%s sender=%s receiver=%s closing=%s initial_front_send=%d initial_front_recv=%d",
     string.tostring(self.frontend_eof), self.forwarded_bytes, self.pending_bytes,
-    string.tostring(self.backend_shutdown), sender, receiver, string.tostring(self.closing))
+    string.tostring(self.backend_shutdown), sender, receiver, string.tostring(self.closing),
+    self.initial_front_send, self.initial_front_receive)
 end
 
 local function Proxy:close()

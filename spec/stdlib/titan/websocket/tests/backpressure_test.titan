@@ -68,6 +68,40 @@ local function owned_pending_output_bytes(): integer
   end)
 end
 
+local function verified_small_window_tls_peer(port: integer): (ssl.Connection, string)
+  local transport = net.Connection.new()
+  runtime_test.cleanup(function () transport:close() end)
+  local loop = async.current_loop()
+  local profile = ""
+  -- Only this newly constructed public Connection is unbound. Walk public
+  -- TCP state in our isolated Runtime; do not inspect its opaque fields.
+  local fresh = on_main(function (): integer
+    local count = 0
+    uv.walk(loop, function (handle: uv.handle_t, _argument: value)
+      case handle
+      when tcp(owner) then
+        if handle:is_initialized() and not uv.is_closing(handle) then
+          local status = uv.tcp_getsockname(owner)
+          if status < 0 then
+            profile = small_window_socket(owner)
+            count = count + 1
+          end
+        end
+      else
+      end
+    end, nil)
+    return count
+  end)
+  test.assert(fresh == 1, "isolated TLS opening runtime did not expose exactly one fresh owned TCP handle")
+  local address_status, address? = uv.ip4_addr("127.0.0.1", port)
+  test.assert(address_status >= 0)
+  transport:connect_address(address)
+  local tls = ssl.client(transport, "localhost", TRUST_ROOT)
+  runtime_test.cleanup(function () tls:abort() end)
+  tls:handshake()
+  return tls, profile
+end
+
 local function blocked_output_case(secure: boolean, trigger: string)
   local backend_port = 0
   local accept: function (): (io.ReaderWriterCloser) = function (): io.ReaderWriterCloser raise "unset accept" end
@@ -335,6 +369,9 @@ local function blocked_server_opening_case(secure: boolean, cancel: boolean)
   end
   local listener, port = listen_http(handler, secure)
   runtime_test.cleanup(function () listener:close() end)
+  local listener_sockets, listener_profile = constrain_owned_sockets(true, false)
+  test.assert(listener_sockets == 1,
+              "opening Runtime did not own exactly its listener before any TCP SYN; " .. listener_profile)
   local serving = async.run<|value, value|>(function (): value listener:serve(); return nil end)
   runtime_test.cleanup(function ()
     listener:close()
@@ -342,12 +379,15 @@ local function blocked_server_opening_case(secure: boolean, cancel: boolean)
   end)
   local write_request: function (string): () = function (_bytes: string) raise "unset opening writer" end
   local abort: function (): () = function () end
+  local preconnect_profile = ""
   if secure then
-    local tls = ssl.connect("localhost", port, TRUST_ROOT)
+    local tls, profile = verified_small_window_tls_peer(port)
+    preconnect_profile = profile
     write_request = function (bytes: string) tls:write(bytes) end
     abort = function () tls:abort() end
   else
-    local tcp = stopped_socket_peer(port)
+    local tcp, profile = stopped_socket_peer(port)
+    preconnect_profile = profile
     write_request = function (bytes: string) write_socket(tcp, bytes) end
     abort = function () close_handle(tcp:as_handle_t()) end
   end
@@ -356,6 +396,8 @@ local function blocked_server_opening_case(secure: boolean, cancel: boolean)
     if handler_task then task_support.cancel_and_join_task(handler_task, "blocked opening handler cleanup") end
   end)
   local initial_sockets, initial_profile = constrain_owned_sockets(true, false)
+  initial_profile = "listener_before_SYN=" .. listener_profile .. " client_before_SYN=" ..
+                    preconnect_profile .. " after_handshake=" .. initial_profile
   test.assert(initial_sockets >= 3,
               "isolated opening runtime did not own both peers and listener; " .. initial_profile)
   -- Never read the HTTP response. TLS has already completed; the handler
