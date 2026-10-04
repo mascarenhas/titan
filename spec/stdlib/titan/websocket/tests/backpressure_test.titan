@@ -581,13 +581,21 @@ local function blocked_server_opening_case(secure: boolean, cancel: boolean)
     string.format("HTTP priming did not establish stable unresolved accepted output: queue=%d pressure_ms=%d; %s",
       priming_pending, priming_pressure_ms, setup_diagnostic()))
   stop_priming = true
+  local frozen_priming_chunks = priming_chunks
   -- Free only small native receive steps to finish the already pending chunk
   -- and HTTP terminator. The next handler stays suspended at preflight, so
   -- these reads cannot consume any 101 output. Every step has its own 100 ms
-  -- native timer; total discarded bytes are capped independently of the body.
+  -- native timer. Freeze the submitted count, including the pending chunk:
+  -- completing it may require draining previously accepted body bytes beyond
+  -- the old fixed 256 KiB cap. Each 4096-byte body write has eight HTTP chunk
+  -- framing bytes and fits one TLS write piece; 1024 bytes conservatively
+  -- cover its framing/record overhead with the fixture's default TLS context.
+  -- Add a fixed 64 KiB for response headers, terminator and residual TLS
+  -- session output. The original 2048-chunk ceiling bounds this wire budget
+  -- to 10 MiB + 64 KiB; the unchanged setup watchdog also bounds release time.
   local discarded = 0
   local discard_steps = 0
-  local discard_limit = 256 * 1024
+  local discard_limit = frozen_priming_chunks * (4096 + 1024) + 64 * 1024
   while not entered and not setup_fired and priming_failure == nil do
     local remaining = discard_limit - discarded
     if remaining == 0 then
@@ -596,7 +604,8 @@ local function blocked_server_opening_case(secure: boolean, cancel: boolean)
       -- more reads; the existing setup watchdog bounds this final wait.
       while not entered and not setup_fired and priming_failure == nil do timer.sleep(1) end
       test.assert(entered and not setup_fired and priming_failure == nil,
-        "priming release exhausted its 256 KiB discard ceiling; " .. setup_diagnostic())
+        string.format("priming release exhausted its frozen wire-byte ceiling: limit=%d frozen_chunks=%d discarded=%d; %s",
+          discard_limit, frozen_priming_chunks, discarded, setup_diagnostic()))
       break
     end
     local step_bytes = 1024
@@ -606,9 +615,10 @@ local function blocked_server_opening_case(secure: boolean, cancel: boolean)
     timer.sleep(1)
   end
   test.assert(entered and priming_closed and not priming_writing and not setup_fired and
-              priming_failure == nil and pending_output_bytes(server_socket) == 0,
-    string.format("priming release did not reach acknowledged Upgrade preflight: discarded=%d steps=%d entered=%s; %s",
-      discarded, discard_steps, string.tostring(entered), setup_diagnostic()))
+              priming_failure == nil and priming_chunks == frozen_priming_chunks and
+              pending_output_bytes(server_socket) == 0,
+    string.format("priming release did not reach acknowledged Upgrade preflight: discarded=%d limit=%d frozen_chunks=%d steps=%d entered=%s; %s",
+      discarded, discard_limit, frozen_priming_chunks, discard_steps, string.tostring(entered), setup_diagnostic()))
   test.assert(uv.read_stop(peer_socket:as_stream_t()) >= 0)
   setup_watchdog:cancel(async.CancellationReason.simple("HTTP priming setup completed"))
   async.join(setup_watchdog)
@@ -617,9 +627,9 @@ local function blocked_server_opening_case(secure: boolean, cancel: boolean)
   local initial_sockets, initial_profile = constrain_owned_sockets(true, false)
   initial_profile = "listener_before_SYN=" .. listener_profile .. " client_before_SYN=" ..
                     preconnect_profile .. " after_request_ack=" .. initial_profile ..
-                    string.format(" priming(queue=%d pressure_ms=%d chunks=%d body=%d discarded=%d steps=%d setup_ms=%d)",
+                    string.format(" priming(queue=%d pressure_ms=%d chunks=%d body=%d discarded=%d limit=%d frozen_chunks=%d steps=%d setup_ms=%d)",
                       priming_pending, priming_pressure_ms, priming_chunks, priming_bytes,
-                      discarded, discard_steps, fixture_time_ms() - setup_started)
+                      discarded, discard_limit, frozen_priming_chunks, discard_steps, fixture_time_ms() - setup_started)
   test.assert(initial_sockets >= 3,
               "isolated opening runtime did not own both peers and listener after request acknowledgment; " .. initial_profile)
   local stopped_sockets, stopped_profile = constrain_owned_sockets(true, true)
