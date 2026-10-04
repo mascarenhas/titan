@@ -2122,7 +2122,7 @@ int main(void) {
         assert.same({ "err.h", "x509v3.h", "pem.h", "ssl.h" },
             openssl_headers)
         assert.truthy(ssl:find(
-            "local trust_data = fs.read_file", 1, true), ssl)
+            "explicit_client_context(fs.read_file(ca_file))", 1, true), ssl)
         assert.truthy(ssl:find(
             "local certificate_data = fs.read_file", 1, true), ssl)
         assert.truthy(ssl:find(
@@ -2154,19 +2154,25 @@ int main(void) {
         }) do
             assert.falsy(ssl:find(retired, 1, true), retired)
         end
-        assert.falsy(ssl:find('import "uv"', 1, true), ssl)
+        assert.truthy(ssl:find('local uv = import "uv"', 1, true), ssl)
+        assert.falsy(ssl:find('foreign import "uv.h"', 1, true), ssl)
+        assert.falsy(ssl:find('uv.fs_', 1, true), ssl)
         assert.falsy(ssl:find('foreign import "lua.h"', 1, true), ssl)
 
         assert.same({
-            "DefaultClientContextOwner", "PemBlock",
+            "DefaultClientContextOwner", "ProgressWait", "Operation",
+            "CleanupWait", "ChildDrain", "PemBlock",
             "CertificateResult", "PrivateKeyResult",
         }, local_record_declarations("titan/ssl.titan"))
+        assert.same({ "OperationResult" },
+            local_union_declarations("titan/ssl.titan"))
         local public = {}
         for _, name in ipairs(public_declarations("titan/ssl.titan")) do
             public[name] = true
         end
         for _, helper in ipairs({
-            "DefaultClientContextOwner", "PemBlock",
+            "DefaultClientContextOwner", "ProgressWait", "Operation",
+            "CleanupWait", "ChildDrain", "OperationResult", "PemBlock",
             "CertificateResult", "PrivateKeyResult",
         }) do
             assert.falsy(public[helper], helper .. " leaked into ssl ABI")

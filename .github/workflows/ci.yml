@@ -830,19 +830,19 @@ jobs:
               TITAN_FILTER='test_received_message_strings_survive_later_reads_and_forced_gc$'
           bash spec/support/ci_sanitizer_capture.sh websocket-partial-utf8 \
             make titan-stdlib-test-run \
-              TITAN_FILTER='test_partial_utf8_message_cancellation_retires_ownership$'
+              TITAN_FILTER='test_partial_utf8_message_cancellation_retires_ownership'
           bash spec/support/ci_sanitizer_capture.sh websocket-read-cancel \
             make titan-stdlib-test-run \
-              TITAN_FILTER='test_admitted_idle_read_cancellation_terminalizes_ws_and_wss$'
+              TITAN_FILTER='test_admitted_idle_read_cancellation_terminalizes_ws_and_wss'
           bash spec/support/ci_sanitizer_capture.sh websocket-active-close \
             make titan-stdlib-test-run \
               TITAN_FILTER='test_close_interrupts_active_read_without_joining_its_caller$'
           bash spec/support/ci_sanitizer_capture.sh websocket-receive-progress \
             make titan-stdlib-test-run \
-              TITAN_FILTER='test_shutdown_takes_receive_progress_after_reader_returns_data$'
+              TITAN_FILTER='test_shutdown_takes_receive_progress_after_reader_returns_data'
           bash spec/support/ci_sanitizer_capture.sh websocket-backpressure \
             make titan-stdlib-test-run \
-              TITAN_FILTER='test_stopped_socket_output_aborts_before_native_drain$'
+              TITAN_FILTER='test_stopped_socket_output_aborts_before_native_drain'
           for ownership_log in websocket-message-gc websocket-partial-utf8 \
               websocket-read-cancel websocket-active-close \
               websocket-receive-progress websocket-backpressure; do
