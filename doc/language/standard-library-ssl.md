@@ -16,7 +16,7 @@ local ssl = require "titan.ssl"
 ```
 
 TLS is an ordinary high-level standard-library layer, not an addition to
-Titan's private libuv binding. Its operations call `net.Connection` methods
+Titan's low-level libuv binding. Its operations call `net.Connection` methods
 and therefore must run inside an async Task, under the same loop-driving rules
 as `net`.
 
@@ -236,13 +236,13 @@ end
 
 ## Availability and limits
 
-Linux and macOS are supported. The default build downloads, verifies, and
+Linux and macOS are supported. The default build uses system OpenSSL 3.0 or
+newer; see the repository build instructions for its development package and
+`pkg-config` setup. `OPENSSL_MODE=bundled` instead downloads, verifies, and
 statically carries the pinned OpenSSL 3.5.7 release in the coordinated
-standard-library provider. A system OpenSSL 3.0 or newer may be selected with
-`OPENSSL_MODE=system`; see the repository build instructions for the required
-development package and `pkg-config` setup.
+standard-library provider.
 
 This initial module has no mTLS, ALPN selection API, certificate callbacks,
 session-cache controls, cipher configuration, key logging, or access to the
-underlying `net.Connection`. It intentionally leaves the private `titan.uv`
-module unchanged.
+underlying `net.Connection`. TLS composes over public `net` operations; it
+does not expose the lower-level UV owner.

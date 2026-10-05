@@ -756,9 +756,9 @@ payload. The complete key inventory:
 | `TITAN_ROOT_KEY` (`"9efb91a8-4a1b-4bdb-aa6b-b84d9ed1dd77"`) | the normalized Titan SDK/rocks-tree root cached by `titan_init_paths`/`pushroot`; current supported installs discover it through the equal Lua `PREFIX` |
 | `TITAN_PATH_KEY` (`"ec10e486-d8fd-11e7-87f4-e7e9581a929c"`) | the resolved Titan search path (cached by `pushpath`) |
 | `TITAN_LIBS_KEY` (`"ecfc9174-d8fd-11e7-8be2-abbaa3ded45f"`) | the dlopen-handle cache table (below) |
-| `TITAN_MAIN_BOOTSTRAP_KEY` (`"41c48a97-55a5-4514-a76f-79ab028ae6e0"`) | an optional async standalone hook installed by the canonical `uv` module |
+| `TITAN_MAIN_BOOTSTRAP_KEY` (`"41c48a97-55a5-4514-a76f-79ab028ae6e0"`) | an optional standalone hook installed by the canonical `titan.async` module |
 | `TITAN_MAIN_ARGC_KEY` (`"fd9c8d85-f521-4052-92e6-8af5c349e5bb"`) | the original process argument count published by a generated standalone entrypoint before module initialization |
-| `TITAN_MAIN_ARGV_KEY` (`"fc1376f3-2cb7-48d4-969c-c02df930cf68"`) | the original process argument vector, replaced with the pointer returned by `uv_setup_args` when canonical `titan.uv` initializes |
+| `TITAN_MAIN_ARGV_KEY` (`"fc1376f3-2cb7-48d4-969c-c02df930cf68"`) | the original process argument vector, replaced with the pointer returned by `uv_setup_args` when public `uv.setup_process_args()` runs; `titan.async` initialization invokes that helper |
 | `TITAN_BT_STATE_KEY` (`"a222927d-0e7b-4f7a-93d9-1a6ce7111a5c"`) | registry-owned userdata containing the shared per-state `backtrace_state *`; invalidation clears the slot so the next capture resnapshots loaded objects without mutable per-DSO C globals |
 | `TITAN_BACKTRACE_KEY` (`"57d80578-2534-4856-ad3b-bde8cba4c445"`) | the last error's raw merged backtrace string |
 | `TITAN_TRACE_APPEND_KEY` (`"4f895b66-bae0-4e97-afb3-83a31f2f9e96"`) | temporary coroutine trace handoff slot used before appending resume/error propagation frames |
@@ -910,14 +910,16 @@ request while the operating-system loader may reuse the mapped image.
 
 The installed standard layout has paired providers at
 `<root>/lib/titan/0.6/{titan.so,titan.a}` and twenty-one generated shims below
-`<root>/share/lua/5.5/titan/`; the shims use the DSO form. A direct-libuv
-extension explicitly imports
-`uv` and foreign-imports `uv.h`; Titan runtime initialization loads the
-combined provider before lazy function calls bind. A Lua caller loads
-`titan.uv` first through its generated shim. The shim route globalizes the
-provider before the extension is mapped and can therefore also satisfy eager
-relocations and constructors. Neither path has libuv-specific metadata or a
-provider-specific runtime loader.
+`<root>/share/lua/5.5/titan/`; the shims use the DSO form. Ordinary clients use
+the compiled public `uv` API without `uv.h`. The native loader fixture in
+`spec/rockspec_spec.lua` instead links a C `provider_probe.c` which includes
+`uv.h` and calls `uv_random`; its Titan module imports only the probe's narrow
+`provider_probe.h` plus public `uv`. Runtime initialization loads the combined
+provider before that probe's lazy native call binds. Its Lua variant loads
+`titan.uv` first through the generated shim, globalizing the provider before
+the probe DSO is mapped and satisfying eager relocations or constructors too.
+This fixture tests native linkage; neither route adds libuv-specific metadata
+or a provider-specific runtime loader.
 
 Dynamic imports resolve native function addresses through the canonical logical
 provider and retain them in the importing module's per-state native payload.
@@ -935,9 +937,9 @@ wrapper ensures is active in `L->errfunc`. When an error is raised during
 the call, it builds **one unified, intermingled, innermost→outer stack
 trace** mixing pure-Lua and Titan frames in call order, stores it in the
 registry under `TITAN_BACKTRACE_KEY`, then restores the stack top and
-returns the **original** error object unchanged — a Lua-side `pcall` sees
-exactly the error Titan raised, and the backtrace is retrieved out of
-band.
+returns the **original** error object unchanged. Lua 5.5 then normalizes a nil
+error object to `"<no error object>"` before throwing; a Lua-side `pcall` sees
+that caught Lua error value. The backtrace is retrieved out of band.
 
 The stored trace is the raw frame list only: one line per frame, with no
 error message, no `stack traceback:` header, and no presentation tabs.
@@ -1006,12 +1008,10 @@ SDK. Installed mode uses `lib/titan/0.6/libtitan.a`, the separate
 SDK/rocks-tree root; checkout mode uses the same archive contract with local
 `libtitan.a`, separate local
 `libbacktrace.a`, and local `liblua.a`. Generic links do not receive libuv
-merely from the SDK, but selecting bundled standard `titan.a` carries its
+merely from the SDK, but selecting standard `titan.a` carries its
 private libuv payload into an executable. The combined standard build receives
-that private archive as payload in both `titan.so` and `titan.a`; system mode
-instead repeats ordered pkg-config link flags at final link and never copies
-them into `titan.a`. The private bundled archive is not installed in the SDK;
-bundled-mode extension DSOs leave their `uv_*` calls unresolved:
+that private archive as payload in both `titan.so` and `titan.a`. The private
+archive is not installed in the SDK; extension DSOs leave their `uv_*` calls unresolved:
 
 * **Preload registration, not eager loading.** The C `main` creates a
   state and runs `luaL_openlibs`. `titan_init_paths` then parses the inherited
@@ -1026,8 +1026,11 @@ bundled-mode extension DSOs leave their `uv_*` calls unresolved:
 * **`pmain`** publishes the original `argc` and `argv` under
   `TITAN_MAIN_ARGC_KEY` and `TITAN_MAIN_ARGV_KEY`, then calls
   `require("<modname>")` and retrieves and retains its `main` callable. A
-  transitive canonical `titan.uv` initialization calls `uv_setup_args` once
-  and stores its possibly replaced `argv` pointer back in the registry.
+  transitive `titan.async` initialization calls public
+  `uv.setup_process_args()`. That idempotent helper uses the original
+  entrypoint arguments, calls `uv_setup_args`, and stores its possibly replaced
+  `argv` pointer back in the registry. Importing `titan.uv` alone does not call
+  it or install a Task bootstrap.
   `pmain` rereads that pointer, creates the standalone
   `DynamicCoercionPlan(string)` writer closure, then builds an Array with that
   writer and capacity `argc - 1` and stores `argv[i]` at logical index `i` for

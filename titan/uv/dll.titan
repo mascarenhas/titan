@@ -1,0 +1,93 @@
+foreign import "uv.h"
+foreign import "string.h"
+
+local const LIB_FRESH = 0
+local const LIB_FAILED = 1
+local const LIB_OPEN = 2
+local const LIB_CLOSED = 3
+
+-- A library owns one open attempt. Closing is terminal: an old symbol cannot become valid
+-- again after loading a different image into the same owner.
+record lib_t
+  local native: foreign uv_lib_t
+  local state: integer
+end
+
+record symbol_t
+  local owner: lib_t
+  local address: foreign *void
+end
+
+local function dll_require_cstring(text: string, label: string)
+  if ffi.memchr(text, 0, #text) then
+    raise label .. " contains an embedded NUL"
+  end
+end
+
+function lib_t.new(): lib_t
+  local native = foreign uv_lib_t.new()
+  return { native = native, state = LIB_FRESH }
+end
+
+function lib_t:dlopen(filename: string): integer
+  if self.state ~= LIB_FRESH then
+    raise "lib_t:dlopen requires a fresh library owner"
+  end
+  dll_require_cstring(filename, "lib_t:dlopen filename")
+  -- The final packed owner exists before native initialization. Both return
+  -- paths owe dlclose: a failed native open may allocate error text.
+  local status: integer = ffi.uv_dlopen(filename, self.native)
+  if status == 0 then self.state = LIB_OPEN else self.state = LIB_FAILED end
+  return status
+end
+
+function lib_t:dlsym(name: string): (integer, symbol_t?)
+  if self.state ~= LIB_OPEN then raise "lib_t:dlsym requires an open library" end
+  dll_require_cstring(name, "lib_t:dlsym name")
+  local address: foreign *void = nil
+  local status: integer = ffi.uv_dlsym(self.native, name, address)
+  if status ~= 0 then return status, nil end
+  -- Native success may have a NULL address. Presence of symbol_t, not the
+  -- address's truthiness, distinguishes that case from lookup failure.
+  return status, symbol_t(self, address)
+end
+
+function lib_t:dlerror(): string
+  -- Native libuv returns a non-NULL "no error" string when there is no error.
+  -- Copy it now; the native allocation can change on another lookup/close.
+  return ffi.uv_dlerror(self.native) as string
+end
+
+function lib_t:dlclose()
+  if self.state == LIB_CLOSED then return end
+  self.state = LIB_CLOSED
+  -- Zero-initialized fresh storage is harmless to close. Failed-open storage
+  -- needs this same call to free its native error allocation.
+  ffi.uv_dlclose(self.native)
+end
+
+function symbol_t:pointer(): foreign *void
+  if self.owner.state ~= LIB_OPEN then raise "symbol_t:pointer requires an open library" end
+  return self.address
+end
+
+function symbol_t:library(): lib_t
+  return self.owner
+end
+
+-- Match the native argument order: filename precedes the output library owner.
+function dlopen(filename: string, library: lib_t): integer
+  return library:dlopen(filename)
+end
+
+function dlclose(library: lib_t)
+  library:dlclose()
+end
+
+function dlsym(library: lib_t, name: string): (integer, symbol_t?)
+  return library:dlsym(name)
+end
+
+function dlerror(library: lib_t): string
+  return library:dlerror()
+end

@@ -787,16 +787,10 @@ compatibility or migration protocol.
 
 ## Generic asynchronous Tasks and channels
 
-The `async` facade exports constructor-preserving aliases of the owners in
-`titan.uv`, so the ordinary public spellings are applicable:
-
-```titan
-type CancellationReason = uv.CancellationReason
-type TaskStatus = uv.TaskStatus
-type Task = uv.Task
-type ResumeToken = uv.ResumeToken
-type SuspendCancelAction = function (): ()
-```
+The `async` module owns `Task`, `TaskStatus`, `CancellationReason`, and
+`ResumeToken`; import it with `local async = import "async"` and use those
+names through that ordinary public interface. `SuspendCancelAction` is the
+non-generic callable alias `function (): ()`.
 
 `Task<|A, B|>` is an opaque generic record. The public generic shapes are:
 

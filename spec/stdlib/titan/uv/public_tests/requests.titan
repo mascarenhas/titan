@@ -1,0 +1,214 @@
+local function close_file(file: integer)
+  local request = uv.fs_t()
+  defer uv.fs_req_cleanup(request)
+  success(uv.fs_close(nil, request, file))
+end
+
+local function remove_file(path: string)
+  local request = uv.fs_t()
+  defer uv.fs_req_cleanup(request)
+  success(uv.fs_unlink(nil, request, path))
+end
+
+local function fixture_file(): string
+  local request = uv.fs_t()
+  defer uv.fs_req_cleanup(request)
+  local file = uv.fs_mkstemp(nil, request, "uv-public-XXXXXX")
+  test.assert(file >= 0)
+  defer close_file(file)
+  local path = uv.fs_get_path(request)
+  local transferred = false
+  defer if not transferred then remove_file(path) end
+  uv.fs_req_cleanup(request)
+  local bytes = "public\0UV\255\n"
+  test.assert(uv.fs_write(nil, request, file, {uv.buf_t.from_string(bytes)}, 0) == #bytes)
+  transferred = true
+  return path
+end
+
+local function submit_file_chain(loop: uv.loop_t, path: string, weak: {value: value},
+                                files: {integer}, delivered: function (): ())
+  local request = uv.fs_t()
+  weak[1] = request
+  uv.req_set_data(request:as_req_t(), "request user data")
+  success(uv.fs_stat(loop, request, path, function (current: uv.fs_t)
+    test.assert(uv.fs_get_loop(current) == loop)
+    success(uv.fs_get_result(current))
+    test.assert(uv.fs_get_statbuf(current).st_size == 11)
+    uv.fs_req_cleanup(current)
+    delivered()
+    success(uv.fs_open(loop, current, path, uv.FS_O_RDONLY, 0, function (opened: uv.fs_t)
+      local file = uv.fs_get_result(opened)
+      test.assert(file >= 0)
+      files[1] = file
+      -- Cleaning request memory must not close the descriptor it produced.
+      uv.fs_req_cleanup(opened)
+      delivered()
+      local buffer = uv.buf_t.allocate(32)
+      weak[2] = buffer
+      local buffers = {buffer}
+      success(uv.fs_read(loop, opened, file, buffers, 0, function (read: uv.fs_t)
+        collect()
+        local completed_buffer: uv.buf_t = weak[2]
+        local count = uv.fs_get_result(read)
+        test.assert(count == 11 and completed_buffer:to_string(count) == "public\0UV\255\n")
+        test.assert(uv.req_get_data(read:as_req_t()) == "request user data")
+        uv.fs_req_cleanup(read)
+        delivered()
+        local submitted = uv.fs_close(loop, read, file, function (closed: uv.fs_t)
+          test.assert(closed == weak[1], "resubmission changed the request owner")
+          success(uv.fs_get_result(closed))
+          uv.fs_req_cleanup(closed)
+          delivered()
+          collect()
+          assert_retained(weak, 1)
+        end)
+        if submitted == 0 then files[1] = -1 end
+        success(submitted)
+        collect()
+      end))
+      buffers[1] = uv.buf_t.from_string("caller replaced its vector")
+      collect()
+    end))
+    collect()
+  end))
+end
+
+function test_fs_callback_reuse_keeps_new_registration_and_buffers(_context: test.Context)
+  local path = fixture_file()
+  defer remove_file(path)
+  local files = {-1}
+  defer if files[1] >= 0 then close_file(files[1]) end
+  local loop = new_loop()
+  defer finish_loop(loop)
+  local weak: {value: value} = {}
+  gc.weak(weak)
+  local calls = 0
+  submit_file_chain(loop, path, weak, files, function () calls = calls + 1 end)
+  collect()
+  assert_retained(weak, 1)
+  test.assert(calls == 0)
+  test.assert(uv.loop_close(loop) == uv.EBUSY, "accepted request did not keep loop busy")
+  success(uv.run(loop))
+  test.assert(calls == 4)
+  collect()
+  test.assert(weak[1] == nil and weak[2] == nil, "completed request retained its native owners")
+end
+
+function test_fs_rejection_and_async_native_error_have_distinct_cleanup(_context: test.Context)
+  local path = fixture_file()
+  defer remove_file(path)
+  local loop = new_loop()
+  defer finish_loop(loop)
+  local request = uv.fs_t()
+  defer uv.fs_req_cleanup(request)
+  local calls = 0
+  -- Immutable output storage is binding rejection: there is no callback.
+  test.assert(uv.fs_read(loop, request, -1, {uv.buf_t.from_string("read-only")}, 0,
+    function (_request: uv.fs_t) calls = calls + 1 end) == uv.EINVAL)
+  success(uv.run(loop))
+  test.assert(calls == 0)
+  success(uv.fs_open(loop, request, path .. ".missing", uv.FS_O_RDONLY, 0,
+    function (current: uv.fs_t)
+      calls = calls + 1
+      test.assert(uv.fs_get_result(current) == uv.ENOENT)
+      uv.fs_req_cleanup(current)
+      success(uv.fs_stat(nil, current, path))
+      test.assert(uv.fs_get_statbuf(current).st_size == 11)
+      uv.fs_req_cleanup(current)
+    end))
+  success(uv.run(loop))
+  test.assert(calls == 1)
+end
+
+function test_dns_copied_addresses_survive_explicit_result_release(_context: test.Context)
+  local loop = new_loop()
+  defer finish_loop(loop)
+  local request = uv.getaddrinfo_t()
+  local hints = uv.addrinfo_hints_t(uv.AI_NUMERICHOST | uv.AI_NUMERICSERV,
+                                  uv.AF_INET, uv.SOCK_STREAM, uv.IPPROTO_TCP)
+  success(uv.getaddrinfo(loop, request, nil, "127.0.0.1", "1234", hints))
+  local status, result? = request:addrinfo()
+  success(status)
+  test.assert(result ~= nil)
+  defer uv.freeaddrinfo(result)
+  local entries = result:entries()
+  test.assert(#entries == 1)
+  local entry = entries[1]
+  test.assert(entry.ai_family == uv.AF_INET and entry.ai_socktype == uv.SOCK_STREAM)
+  test.assert(entry.ai_protocol == uv.IPPROTO_TCP and #entry.ai_addr_bytes == entry.ai_addrlen)
+  local address = entry.ai_addr
+  uv.freeaddrinfo(result)
+  uv.freeaddrinfo(result)
+  collect()
+  test.assert(address:port() == 1234)
+  expect_error(function () result:entries() end, "addrinfo result was released")
+  local reverse = uv.getnameinfo_t()
+  success(uv.getnameinfo(loop, reverse, nil, address, uv.NI_NUMERICHOST | uv.NI_NUMERICSERV))
+  local reverse_status, host?, service? = reverse:result()
+  success(reverse_status)
+  test.assert(host == "127.0.0.1" and service == "1234")
+end
+
+function test_dns_callback_error_preserves_result_cleanup(_context: test.Context)
+  local loop = new_loop()
+  defer finish_loop(loop)
+  local request = uv.getaddrinfo_t()
+  local result: uv.addrinfo_result_t? = nil
+  defer uv.freeaddrinfo(result)
+  local calls = 0
+  success(uv.getaddrinfo(loop, request, function (current: uv.getaddrinfo_t,
+                                                status: integer, output: uv.addrinfo_result_t?)
+    success(status)
+    test.assert(current == request)
+    result = output
+    calls = calls + 1
+    raise "DNS callback sentinel"
+  end, "127.0.0.1", "1234",
+    uv.addrinfo_hints_t(uv.AI_NUMERICHOST | uv.AI_NUMERICSERV,
+                       uv.AF_INET, uv.SOCK_STREAM, uv.IPPROTO_TCP)))
+  expect_error(function () uv.run(loop) end, "DNS callback sentinel")
+  test.assert(calls == 1 and result ~= nil)
+  collect()
+  test.assert(result:entries()[1].ai_addr:port() == 1234)
+  uv.freeaddrinfo(result)
+  success(uv.run(loop))
+end
+
+local function check_address_port(context: test.Context, name: string, port: integer)
+  context:run(name .. "_ipv4", function (_child: test.Context)
+    local status, address? = uv.ip4_addr("127.0.0.1", port)
+    success(status)
+    test.assert(address:port() == port, "IPv4 port changed byte order")
+  end)
+  context:run(name .. "_ipv6", function (_child: test.Context)
+    local status, address? = uv.ip6_addr("::1", port)
+    success(status)
+    test.assert(address:port() == port, "IPv6 port changed byte order")
+  end)
+end
+
+function test_address_port_uses_native_byte_order(context: test.Context)
+  check_address_port(context, "zero", 0)
+  check_address_port(context, "one", 1)
+  check_address_port(context, "mixed_bytes", 0x1234)
+  check_address_port(context, "maximum", 65535)
+end
+
+function test_ipv6_fields_preserve_unsigned_values(context: test.Context)
+  local status, address? = uv.ip6_addr("::1", 1234)
+  success(status)
+  test.assert(address:family() == uv.AF_INET6)
+  context:run("flowinfo", function (_child: test.Context)
+    address:set_flowinfo(0xffffffff)
+    test.assert(address:flowinfo() == 0xffffffff)
+    address:set_flowinfo(0)
+    test.assert(address:flowinfo() == 0)
+  end)
+  context:run("scope_id", function (_child: test.Context)
+    address:set_scope_id(0xffffffff)
+    test.assert(address:scope_id() == 0xffffffff)
+    address:set_scope_id(0)
+    test.assert(address:scope_id() == 0)
+  end)
+end

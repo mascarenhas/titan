@@ -1,0 +1,130 @@
+-- These callbacks are deliberately C-only. The public work/thread APIs accept
+-- portable C pointers; no libuv header, layout, or Titan/Lua worker entry is used.
+foreign function increment_cell(argument: *void)
+  local cell = argument as foreign *int
+  cell[0] = cell[0] + 1
+end
+
+local function assert_cell(weak: {value: value}, key: value, expected: integer)
+  local cell: owned int[] = weak[key]
+  test.assert(cell[0] == expected, "native completion did not publish worker writes")
+end
+
+local function start_thread(weak: {value: value})
+  local cell: owned int[] = foreign int.new_array(1)
+  cell[0] = 41
+  local thread = uv.thread_t()
+  weak[1] = thread
+  weak[2] = cell
+  success(uv.thread_create(thread, increment_cell, cell, cell))
+  test.assert(uv.thread_create(thread, increment_cell, cell, cell) == uv.EBUSY)
+end
+
+local function join_thread(weak: {value: value})
+  local thread: uv.thread_t = weak[1]
+  local cell: owned int[] = weak[2]
+  success(uv.thread_join(thread))
+  test.assert(cell[0] == 42)
+  test.assert(uv.thread_join(thread) == uv.EINVAL)
+  -- Retirement permits another native lifetime on the same public token.
+  success(uv.thread_create(thread, increment_cell, cell, cell))
+  success(uv.thread_join(thread))
+  test.assert(cell[0] == 43)
+end
+
+function test_thread_roots_argument_graph_until_join_and_allows_reuse(_context: test.Context)
+  local weak: {value: value} = {}
+  gc.weak(weak)
+  start_thread(weak)
+  collect()
+  assert_retained(weak, 1)
+  assert_retained(weak, 2)
+  join_thread(weak)
+  collect()
+  test.assert(weak[1] == nil and weak[2] == nil, "joined thread retained its owner graph")
+end
+
+local function resubmit_work(loop: uv.loop_t, request: uv.work_t, weak: {value: value},
+                            delivered: function (): ())
+  local cell: owned int[] = foreign int.new_array(1)
+  cell[0] = 80
+  weak[3] = cell
+  success(uv.queue_work(loop, request, increment_cell, cell,
+    function (current: uv.work_t, status: integer)
+      success(status)
+      test.assert(current == weak[1] and current:get_loop() == loop)
+      assert_cell(weak, 3, 81)
+      delivered()
+      collect()
+      assert_retained(weak, 3)
+    end, cell))
+end
+
+local function submit_work(first: uv.loop_t, second: uv.loop_t,
+                           weak: {value: value}, delivered: function (): ())
+  local request = uv.work_t()
+  local cell: owned int[] = foreign int.new_array(1)
+  cell[0] = 40
+  weak[1] = request
+  weak[2] = cell
+  success(uv.queue_work(first, request, increment_cell, cell,
+    function (current: uv.work_t, status: integer)
+      success(status)
+      assert_cell(weak, 2, 41)
+      delivered()
+      resubmit_work(second, current, weak, delivered)
+      collect()
+      assert_retained(weak, 2)
+      assert_retained(weak, 3)
+      raise "work callback sentinel"
+    end, cell))
+  test.assert(uv.queue_work(first, request, increment_cell, cell, nil, cell) == uv.EBUSY)
+end
+
+function test_work_reuse_retains_both_arguments_and_reports_to_original_loop(_context: test.Context)
+  local first = new_loop()
+  local second: uv.loop_t? = nil
+  defer do
+    defer if second ~= nil then finish_loop(second) end
+    finish_loop(first)
+  end
+  second = new_loop()
+  local weak: {value: value} = {}
+  gc.weak(weak)
+  local calls = 0
+  submit_work(first, second, weak, function () calls = calls + 1 end)
+  collect()
+  assert_retained(weak, 1)
+  assert_retained(weak, 2)
+  expect_error(function () uv.run(first) end, "work callback sentinel")
+  test.assert(calls == 1)
+  collect()
+  test.assert(weak[2] == nil, "old work argument survived its callback return")
+  assert_retained(weak, 1)
+  assert_retained(weak, 3)
+  success(uv.run(second))
+  test.assert(calls == 2)
+  collect()
+  test.assert(weak[1] == nil and weak[3] == nil, "new work registration did not retire")
+end
+
+function test_sync_native_rejection_preserves_fresh_owner(_context: test.Context)
+  local barrier = uv.barrier_t()
+  test.assert(uv.barrier_init(barrier, 0) == uv.EINVAL)
+  success(uv.barrier_init(barrier, 1))
+  test.assert(uv.barrier_wait(barrier) == 1)
+  uv.barrier_destroy(barrier)
+  expect_error(function () uv.barrier_wait(barrier) end,
+               "uv.barrier: not initialized or already destroyed")
+  local mutex = uv.mutex_t()
+  success(uv.mutex_init(mutex))
+  defer uv.mutex_destroy(mutex)
+  success(uv.mutex_trylock(mutex))
+  uv.mutex_unlock(mutex)
+  local semaphore = uv.sem_t()
+  success(uv.sem_init(semaphore, 0))
+  defer uv.sem_destroy(semaphore)
+  test.assert(uv.sem_trywait(semaphore) == uv.EAGAIN)
+  uv.sem_post(semaphore)
+  success(uv.sem_trywait(semaphore))
+end

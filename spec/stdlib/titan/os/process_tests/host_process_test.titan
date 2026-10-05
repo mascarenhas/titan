@@ -6,6 +6,59 @@ local function with_process_child(body: ProcessChildCase)
   end)
 end
 
+local function expect_cancelled_process_operation(action: function (): (),
+                                                  label: string)
+  local reason = async.CancellationReason.simple(label)
+  local observed: value = nil
+  local competitor = async.run<|value, value|>(function (): value
+    async.running():cancel(reason)
+    do action() catch observed = error end
+    return nil
+  end)
+  task_support.cleanup_task(competitor, label .. " cleanup")
+  async.join(competitor)
+  -- Keep the assertion outside the cancelled Task, where it cannot be swallowed.
+  test.assert(competitor:status():has_cancelled() and observed == reason,
+              label .. " was replaced by a contention diagnostic")
+end
+
+function test_process_cancelled_waiter_allows_immediate_replacement(
+    _context: test.Context)
+  with_process_child(function (child: string)
+    local process = system.spawn(child, {"echo"})
+    defer cleanup_process(process)
+    local input = process_support.required_output(process.stdin, "gated stdin")
+    local reason = async.CancellationReason.simple("replace Process waiter")
+    local observed: value = nil
+    local old = async.run<|value, value|>(function (): value
+      do process:wait() catch observed = error end
+      return nil
+    end)
+    task_support.cleanup_task(old, "old Process waiter cleanup")
+    process_support.wait_until_waiting(old, "old Process waiter")
+    expect_cancelled_process_operation(function () process:wait() end,
+                                       "pending Process waiter cancellation")
+    test.assert(old:status():as_string() == "waiting" and process:is_running(),
+                "cancelled competitor disturbed the Process waiter")
+
+    local release = async.run<|value, value|>(function (): value
+      async.join(old)
+      input:close()
+      return nil
+    end)
+    task_support.cleanup_task(release, "Process exit release cleanup")
+    old:cancel(reason)
+    test.assert(observed == nil, "old Process waiter unwound before replacement")
+    -- Enter the successor before yielding; the child exits only after the old
+    -- waiter's defer has run, and must still deliver to the successor.
+    process_support.assert_normal(process:wait(), "replacement Process waiter")
+    async.join(release)
+    test.assert(old:status():has_cancelled() and observed == reason,
+                "old Process waiter lost its cancellation reason")
+    test.assert(release:status():has_succeeded(), "Process exit release failed")
+  end)
+end
+
 local function restore_process_environment(name: string, original: string?)
   if original then
     system.setenv(name, original as string)
@@ -383,4 +436,38 @@ function test_native_exit_codes(context: test.Context)
   native_exit_case(context, "one_twenty_six", 126)
   native_exit_case(context, "one_twenty_seven", 127)
   native_exit_case(context, "nine_thousand_nine", 9009)
+end
+
+-- Public failure preservation before native acceptance. Accepted-child
+-- rollback is covered separately by the private instrumented-provider oracle.
+function test_spawn_option_false_failure_preserves_original_trace(
+    _context: test.Context)
+  runtime_test.run(function ()
+    local original_trace = ""
+    local rejected = function (_config: system.SpawnConfig): integer
+      do
+        raise false
+      catch
+        original_trace = traceback
+        raise
+      end
+    end
+    local caught = false
+    do
+      system.spawn(process_support.child_path(), {"exit", "0"}, rejected)
+    catch
+      caught = true
+      test.assert(error == false, "SpawnOption false payload changed")
+      test.assert(#original_trace > 0 and traceback == original_trace,
+                  "SpawnOption original traceback changed during cleanup")
+    end
+    test.assert(caught, "throwing SpawnOption unexpectedly published a Process")
+
+    -- A fresh ordinary spawn remains usable in that same Runtime after the
+    -- failed Config has unwound. This is a control, not an injected rollback.
+    local process = system.spawn(process_support.child_path(), {"exit", "0"})
+    defer cleanup_process(process)
+    process_support.close_process_streams(process)
+    process_support.assert_normal(process:wait(), "post-option-failure child")
+  end)
 end

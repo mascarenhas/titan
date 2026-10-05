@@ -2,6 +2,7 @@
 local test = import "test"
 local runtime_test = import "support.runtime.titan"
 local async = import "async"
+local uv = import "uv"
 local timer = import "timer"
 local support = import "async.test_support.titan"
 local task_support = import "support.async.titan"

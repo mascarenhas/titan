@@ -254,22 +254,19 @@ identity.
 
 ## `titan.uv` dogfooding
 
-The production `titan.uv` source is the folder ensemble
-`titan/uv/uv.titan`, `file.titan`, `os.titan`, `process.titan`,
-`runtime.titan`, `task.titan`, `tcp.titan`, and `work.titan`. The main file owns shared
-imports, shared constants, module state, bootstrap setup, program-argument
-setup, the sole initializer, and the public `Error` and `OperationError`
-records. `task.titan` owns the public `CancellationReason`, `TaskStatus`, and
-`Task` declarations alongside their implementations. Every other contributor
-declaration is source-private. Its related high-level module (`async`, `timer`,
-`net`, `os`, or `fs`) writes `import "uv.titan"` to select it through an
-explicit source import; no
-such owner or bridge is serialized into the compiled `titan.uv` interface.
-The Makefile declares this set explicitly as `UV_TITAN_SOURCES`; it does not use a
-wildcard, so adding a production source changes the reviewed build graph.
-Every listed source is a prerequisite of the one combined standard-library
-completion target. The production compiler invocation names all twenty-one logical
-roots:
+The production `titan.uv` folder ensemble is enumerated by the Makefile's
+`UV_TITAN_SOURCES`; the set is explicit rather than a wildcard. Its canonical
+`uv.titan` shares a logical module with contributors for callbacks, constants,
+data records, addresses, descriptors, streams, TCP/UDP, DNS, processes,
+threading, synchronization, dynamic libraries, startup, and utilities.
+Every listed source is a prerequisite of the combined standard-library build.
+
+The module exposes its low-level owners, views, callbacks, operations, and copied
+values through an ordinary compiled interface. `titan.async` owns the scheduler,
+Task/error/result/subscription declarations and automatic main hook in its own
+logical module. Async and the domain libraries consume public UV declarations
+without explicit source imports or a shared source-private operation union.
+The production compiler invocation names all twenty-one logical roots:
 
 ```sh
 titanc titan.coroutine titan.uv titan.async titan.timer titan.io titan.fs titan.net \
@@ -279,30 +276,26 @@ titanc titan.coroutine titan.uv titan.async titan.timer titan.io titan.fs titan.
   -X titan-runtime/ltitanlib.o lpeglabel-build/libtitan-lpeglabel.a \
      libuv-build/libuv.a llhttp-build/libtitan-llhttp.a \
      sqlite3-build/libtitan-sqlite3.a \
-     openssl-build/libssl.a openssl-build/libcrypto.a  # bundled modes
+     openssl-build/libssl.a openssl-build/libcrypto.a  # OPENSSL_MODE=bundled
 ```
 
 Generated `titan/uv/uv.c`, `titan/uv/uv.o`, and the callback-bearing
 `titan/uv/uv.titan.h` are build artifacts and are removed by `make clean`.
-The flat high-level `titan.fs` root likewise generates
-`titan/fs.titan.h` for its canonical-path and watcher callbacks. No
-contributor C/object/header, DSO, archive, or contributor shim is built or
-installed. The one logical `titan.uv` object, its one generated
+The flat high-level `titan.fs` root uses public UV callbacks and does not
+emit a foreign-callback header. No contributor C/object/header, DSO, archive,
+or contributor shim is built or installed. The one logical `titan.uv` object, its one generated
 `titan/uv.lua` shim, and the remaining twenty logical modules (twenty-one in
 total) reside in the physical `titan.so`/`titan.a` pair. The private
 five-member LPegLabel archive is shared metadata-free payload for the
-`titan.peg`/`titan.string` folder modules. Bundled mode then supplies the
-private libuv archive, so its
-members enter both provider forms;
-system mode repeats the configured final-link setting for the DSO and does not
-copy it into `titan.a` (and omits `libuv-build/libuv.a` from the command).
-That setting may itself select a shared or static system library. Higher
+`titan.peg`/`titan.string` folder modules. The private libuv archive always
+follows it, so its members enter both provider forms. The command above uses
+bundled OpenSSL. The default system OpenSSL mode omits only its two OpenSSL
+archives and repeats the ordered pkg-config link settings for the DSO; static
+consumers must repeat those settings too. Higher
 `async`/`timer`/`fs`/`net`/`os`/`sqlite3` modules still import
 the independent logical `titan.uv` protocol, but their calls are direct
-because all twenty-one source roots are linked together. The high-level
-`titan.fs` object additionally references the public libuv filesystem and
-watcher functions used by its canonical-path and watcher implementation,
-including its two source callbacks. `titan.ssl` reaches the
+because all twenty-one source roots are linked together. The high-level `titan.fs` object uses the public UV filesystem and watcher
+wrappers; their source-defined native callbacks remain in the UV object. `titan.ssl` reaches the
 runtime only through public `titan.net`, and `titan.http` only through the
 public net/SSL/I/O/async layers; `titan.url` is synchronous composition over
 `titan.peg` and `titan.string`.

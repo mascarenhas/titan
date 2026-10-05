@@ -5,6 +5,7 @@
 #include <fcntl.h>
 #include <io.h>
 #include <stdio.h>
+#include <signal.h>
 #include <stdlib.h>
 #include <string.h>
 #include <wchar.h>
@@ -87,9 +88,34 @@ static int argv_env_cwd(int argc, char **argv, wchar_t **wide_argv) {
   return fflush(stdout) == 0 ? 0 : 6;
 }
 
+/* Arm this native thread-pool deadline before READY. It remains independent
+ * of a blocked stdout write or the main thread's sleep. It targets only self. */
+static VOID CALLBACK rollback_deadline(PVOID argument, BOOLEAN fired) {
+  (void)argument;
+  (void)fired;
+  TerminateProcess(GetCurrentProcess(), 90);
+}
+
 static int run(int argc, char **argv, wchar_t **wide_argv) {
   int index;
   if (argc < 2) return 2;
+  if (strcmp(argv[1], "rollback-bounded") == 0 && argc == 3) {
+    int ignore_term = strcmp(argv[2], "ignore") == 0;
+    if (!ignore_term && strcmp(argv[2], "default") != 0) return 2;
+    HANDLE deadline = NULL;
+    if (signal(SIGTERM, ignore_term ? SIG_IGN : SIG_DFL) == SIG_ERR) return 3;
+    if (!CreateTimerQueueTimer(&deadline, NULL, rollback_deadline, NULL,
+                              40000, 0, WT_EXECUTEONLYONCE)) return 3;
+    if (fputs("ROLLBACK_READY\n", stdout) == EOF || fflush(stdout) != 0) {
+      DeleteTimerQueueTimer(NULL, deadline, INVALID_HANDLE_VALUE);
+      return 3;
+    }
+    /* Native Windows uv_process_kill(SIGTERM) uses TerminateProcess, so it
+     * can terminate this child despite the CRT signal disposition above. */
+    Sleep(40000);
+    DeleteTimerQueueTimer(NULL, deadline, INVALID_HANDLE_VALUE);
+    return 90;
+  }
   if (strcmp(argv[1], "argv-env-cwd") == 0) return argv_env_cwd(argc, argv, wide_argv);
   if (strcmp(argv[1], "environment") == 0) {
     for (index = 2; index < argc; index++) {

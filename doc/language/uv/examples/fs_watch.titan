@@ -1,0 +1,139 @@
+local uv = import "titan.uv"
+
+local function check(status: integer)
+  if status < 0 then raise uv.strerror(status) end
+end
+
+local function close_file(fd: integer)
+  local request = uv.fs_t()
+  defer uv.fs_req_cleanup(request)
+  local status = uv.fs_close(nil, request, fd, nil)
+  check(status)
+end
+
+local function write_file(path: string, text: string)
+  local opened = uv.fs_t()
+  defer uv.fs_req_cleanup(opened)
+  local fd = -1
+  local finish = function ()
+    if fd >= 0 then close_file(fd) end
+  end
+  defer finish()
+  fd = uv.fs_open(nil, opened, path,
+    uv.FS_O_WRONLY | uv.FS_O_CREAT | uv.FS_O_TRUNC, 384, nil)
+  check(fd)
+  local bytes = uv.buf_t.from_string(text)
+  local offset = 0
+  while offset < #text do
+    local request = uv.fs_t()
+    defer uv.fs_req_cleanup(request)
+    local written = uv.fs_write(nil, request, fd,
+      {bytes:slice(offset + 1, #text - offset)}, offset, nil)
+    check(written)
+    if written == 0 then raise "file write made no progress" end
+    offset = offset + written
+  end
+end
+
+local function remove_path(path: string, directory: boolean)
+  local request = uv.fs_t()
+  local status = 0
+  if directory then status = uv.fs_rmdir(nil, request, path, nil)
+  else status = uv.fs_unlink(nil, request, path, nil) end
+  defer uv.fs_req_cleanup(request)
+  if status ~= uv.ENOENT then check(status) end
+end
+
+local function close_handles(loop: uv.loop_t)
+  uv.walk(loop, function (handle: uv.handle_t, argument: value)
+    if not uv.is_closing(handle) then uv.close(handle, nil) end
+  end, nil)
+end
+
+function main(args: {string}): integer
+  local tmp_status, temporary?, tmp_length = uv.os_tmpdir(4096)
+  check(tmp_status)
+  local directory_request = uv.fs_t()
+  local directory_status = uv.fs_mkdtemp(nil, directory_request,
+    temporary .. "/titan-uv-example-XXXXXX", nil)
+  defer uv.fs_req_cleanup(directory_request)
+  check(directory_status)
+  local directory = uv.fs_get_path(directory_request) as string
+  defer remove_path(directory, true)
+  local path = directory .. "/watched.txt"
+  defer remove_path(path, false)
+  write_file(path, "before")
+
+  local loop = uv.loop_t()
+  check(uv.loop_init(loop))
+  local closing = false
+  local finish = function ()
+    closing = true
+    close_handles(loop)
+    uv.run(loop, nil)
+    check(uv.loop_close(loop))
+  end
+  defer finish()
+  local event = uv.fs_event_t()
+  check(uv.fs_event_init(loop, event))
+  local poll = uv.fs_poll_t()
+  check(uv.fs_poll_init(loop, poll))
+  local mutation, deadline = uv.timer_t(), uv.timer_t()
+  check(uv.timer_init(loop, mutation))
+  check(uv.timer_init(loop, deadline))
+  local saw_event, saw_poll, saw_stat = false, false, false
+  local copied_stat: uv.stat_t?
+  local copied_name: string?
+  local complete = function ()
+    if saw_event and saw_poll and saw_stat then
+      closing = true
+      close_handles(loop)
+    end
+  end
+  check(uv.fs_event_start(event,
+    function (owner: uv.fs_event_t, filename: string?, flags: integer, status: integer)
+      if closing then return end
+      check(status)
+      copied_name = filename -- The string is copied before this callback.
+      saw_event = true
+      complete()
+    end, path, 0))
+  check(uv.fs_poll_start(poll,
+    function (owner: uv.fs_poll_t, status: integer,
+              previous: uv.stat_t?, current: uv.stat_t?)
+      if closing then return end
+      check(status)
+      copied_stat = current -- The snapshot survives watcher close.
+      saw_poll = true
+      complete()
+    end, path, 10))
+
+  local request = uv.fs_t()
+  local submitted = uv.fs_stat(loop, request, path,
+    function (owner: uv.fs_t)
+      defer uv.fs_req_cleanup(owner)
+      if closing then return end
+      check(uv.fs_get_result(owner))
+      copied_stat = uv.fs_get_statbuf(owner)
+      saw_stat = true
+      complete()
+    end)
+  if submitted < 0 then
+    uv.fs_req_cleanup(request) -- Immediate native rejection owes no callback.
+    check(submitted)
+  end
+  check(uv.timer_start(mutation, function (owner: uv.timer_t)
+    if closing then return end
+    write_file(path, "after-update")
+    uv.close(owner:as_handle_t(), nil)
+  end, 100, 0))
+  check(uv.timer_start(deadline, function (owner: uv.timer_t)
+    if not closing then raise "filesystem watcher example timed out" end
+  end, 3000, 0))
+  uv.run(loop, nil)
+  if not saw_event or not saw_poll or not saw_stat or copied_stat == nil then
+    return 1
+  end
+  if copied_stat.st_size <= 0 then return 1 end
+  return 0
+end

@@ -1,0 +1,11 @@
+--- a/src/unix/process.c
++++ b/src/unix/process.c
+@@ -1073,7 +1073,7 @@
+   return exec_errorno;
+ 
+ error:
+-  uv__queue_remove(&process->handle_queue);
++  /* uv_spawn initializes the handle even on failure; uv_close owns removal. */
+   if (pipes != NULL) {
+     for (i = 0; i < stdio_count; i++) {
+       if (i < options->stdio_count)

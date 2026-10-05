@@ -1,6 +1,6 @@
 # Shared native standard-library behavior
 
-Linux, macOS, and native Windows compile the same 25 explicit test roots from
+Linux, macOS, and native Windows compile the same 26 explicit test roots from
 `spec/support/stdlib_test_modules.mk`. Each owner retains its common test bodies
 and assertions. Platform differences belong in narrow fixtures or named,
 classified skips; there is no separate Windows case allowlist.

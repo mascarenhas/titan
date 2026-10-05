@@ -1,25 +1,109 @@
-local uv = import "uv.titan"
+local async = import "async"
+local uv = import "uv"
 
 record Ticker
-  local handle: uv.uv_timer_t
+  local timer: uv.timer_t
+  local loop: uv.loop_t
+  local subscription: async.CoalescingSubscription<|boolean, async.OperationError|>?
+  local closed: boolean
+end
+
+local function operation_error(status: integer, operation: string): async.OperationError
+  return async.OperationError(status, uv.err_name(status), uv.strerror(status), operation)
+end
+
+local function check_work()
+  -- This inline ordinary boundary rejects cancellation/shutdown before a
+  -- persistent producer accepts its handle. No event-loop turn is required.
+  async.await<|nil, nil|>(function (resolve, _reject, _fatal) resolve(nil) end)
+end
+
+local function close_timer(ticker: Ticker)
+  local result = async.await_cleanup<|nil, async.OperationError|>(function (resolve, _reject, fatal)
+    local closed = function (_: uv.handle_t)
+      do resolve(nil)
+      catch fatal(error, traceback); raise end
+    end
+    uv.close(ticker.timer:as_handle_t(), closed)
+  end)
+  case result
+  when error(failure) then raise failure
+  else
+  end
+end
+
+local function start_timer(milliseconds: integer, repeat_time: integer): Ticker
+  local loop = async.current_loop()
+  local timer = uv.timer_t.new()
+  local handle = timer:as_handle_t()
+  local ticker: Ticker = {timer = timer, loop = loop, subscription = nil,
+    closed = false}
+  local subscription = async.CoalescingSubscription<|boolean, async.OperationError|>(
+    function (publish, _fail, _finish): async.SubscriptionActions<|boolean|>
+      local fired = function (_: uv.timer_t) publish(true) end
+      local stop = function ()
+        local status = uv.timer_stop(timer)
+        if status < 0 then raise operation_error(status, "timer.stop") end
+      end
+      local close = function (_drain: function (): (async.SubscriptionBatch<|boolean|>))
+        ticker.closed = true
+        close_timer(ticker)
+      end
+      local actions = async.SubscriptionActions<|boolean|>(stop, close)
+      local initialized = false
+      local accepted = false
+      defer do
+        if initialized and not accepted then uv.close(handle) end
+      end
+      local status = uv.timer_init(loop, timer)
+      if status < 0 then raise operation_error(status, "timer.init") end
+      initialized = true
+      status = uv.timer_start(timer, fired, milliseconds, repeat_time)
+      if status < 0 then raise operation_error(status, "timer.start") end
+      accepted = true
+      return actions
+    end)
+  ticker.subscription = subscription
+  return ticker
 end
 
 function sleep(milliseconds: integer)
-  uv.sleep(milliseconds)
+  check_work()
+  if milliseconds < 0 then raise operation_error(uv.EINVAL, "timer.sleep") end
+  local timer = start_timer(milliseconds, 0)
+  defer timer:close()
+  local outcome = timer.subscription:next()
+  case outcome
+  when item() then
+  when error(failure) then raise failure
+  else
+  end
 end
 
 function yield()
-  uv.yield()
+  async.yield()
 end
 
 function ticker(milliseconds: integer): Ticker
-  return Ticker(uv.ticker(milliseconds))
+  if milliseconds <= 0 then raise "ticker interval must be positive" end
+  check_work()
+  return start_timer(milliseconds, milliseconds)
 end
 
 function Ticker:tick(): boolean
-  return uv.ticker_tick(self.handle)
+  check_work()
+  if self.closed or self.loop ~= async.current_loop() then return false end
+  if self.subscription:has_waiter() then raise "Ticker already has a waiting Task" end
+  local outcome = self.subscription:next()
+  case outcome
+  when item(value) then return value
+  when error(failure) then raise failure
+  else return false
+  end
 end
 
 function Ticker:close()
-  uv.ticker_close(self.handle)
+  async.running()
+  if self.closed or self.loop ~= async.current_loop() then return end
+  self.subscription:close()
 end

@@ -308,11 +308,11 @@ invocation names all twenty-one logical roots and publishes root `titan.so` and
 `titan.a`. Internal standard imports are direct. `ltitanlib.o` is shared `-X`
 payload and supplies bare `luaopen_titan` without adding a logical metadata
 key. The private namespaced five-member LPegLabel archive follows it as
-metadata-free payload. The selected libuv payload follows it, then the private
-llhttp archive, and finally the selected OpenSSL payload used directly by
+metadata-free payload. The pinned libuv payload follows it, then the private
+llhttp and SQLite archives, and finally any bundled OpenSSL payload used directly by
 `titan.ssl`. The eight HTTP callback definitions already live in the generated
 `titan.http` object; there is no adapter object. Bundled archives are
-force-carried into the DSO and flattened into the archive; system-mode libuv/OpenSSL settings remain final-link inputs
+force-carried into the DSO and flattened into the archive; system OpenSSL settings remain final-link inputs
 and are never copied into `titan.a`. The DSO exports twenty-two Lua entries
 (`luaopen_titan` plus the twenty-one logical entries); both forms define the
 twenty-one logical protocols, and the archive advertises exactly twenty-one
@@ -320,7 +320,7 @@ metadata keys.
 The private LPegLabel archive and its headers remain source-build inputs; they
 are not installed in the compiler/runtime SDK. The callback-bearing
 `titan/coroutine.titan.h`, `titan/uv/uv.titan.h`,
-`titan/fs.titan.h`, and `titan/http/http.titan.h` companions are
+`titan/http/http.titan.h`, and `titan/sqlite3/sqlite3.titan.h` companions are
 likewise generated source-build intermediates: they are available before the
 standard objects compile but never become provider members, publication-stage
 artifacts, or installed headers.
@@ -368,14 +368,14 @@ to remove Titan library-package artifacts.
 
 The checkout Make graph has one provider-pair completion/configuration stamp.
 All twenty-one flat/folder source sets, native inputs, effective
-`CC`/`AR`/`RANLIB`, embedded-format inputs, libuv/OpenSSL modes, dependency
+`CC`/`AR`/`RANLIB`, embedded-format inputs, OpenSSL mode, dependency
 identities, and extra flags are prerequisites. The
 DSO, archive, conditional dSYM, and every shim must exist; every warm
 invocation rescans `titan.a` for the exact twenty-one-key set without changing pair
 mtimes. `make clean` removes only exact known generated outputs. Production
 library tests treat the combined set as read-only. CI snapshots and restores
 the checkout runtime archive plus the installed DSO/archive/dSYM/shims and
-canonical compiler source around compiler groups; its system-libuv/system-OpenSSL smoke replaces the whole
+canonical compiler source around compiler groups; its system-OpenSSL smoke replaces the whole
 paired generation rather than one logical child, while the prepared artifact retains the
 bundled generation.
 

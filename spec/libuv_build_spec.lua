@@ -9,7 +9,6 @@ local parser = require "titan-compiler.parser"
 local source_inventory = require "spec.support.source_inventory"
 local staticmetadata = require "titan-compiler.staticmetadata"
 
-local PKG_CONFIG = "sh spec/fixtures/libuv/fake-pkg-config.sh"
 local UV_MAIN_SOURCE = "titan/uv/uv.titan"
 local STDLIB_TYPES_FIXTURE =
 "spec/fixtures/stdlib/titan_stdlib_types.lua"
@@ -89,166 +88,170 @@ local HTTP_FOREIGN_CALLBACKS = {
 }
 local STDLIB_CONTAINER = "titan.so"
 local STDLIB_STATIC_ARCHIVE = "titan.a"
+-- Reviewed loop callback ABI and native-only entry inventory. New entries require review.
 local UV_FOREIGN_CALLBACKS = {
-    {
-        name = "uv_fs_cb",
-        source = "titan/uv/file.titan",
-        record = "uv_fs_t",
-        field = "callback",
-        call = "entry(L, module, callback, owner)"
-    },
-    {
-        name = "uv_signal_cb",
-        source = "titan/uv/os.titan",
-        record = "uv_signal_t",
-        field = "callback",
-        call = "entry(L, module, callback, owner, signum as foreign lua_Integer)"
-    },
-    {
-        name = "uv_process_exit_cb",
-        source = "titan/uv/process.titan",
-        record = "uv_process_t",
-        field = "exit_callback",
-        call = "entry(L, module, callback, owner, " ..
-            "exit_status as foreign lua_Integer, term_signal as foreign lua_Integer)"
-    },
-    {
-        name = "uv_write_cb",
-        source = "titan/uv/runtime.titan",
-        record = "StreamWriteOwner",
-        field = "callback",
-        call = "entry(L, module, callback, owner, status as foreign lua_Integer)"
-    },
-    {
-        name = "uv_tcp_alloc_cb",
-        source = "titan/uv/runtime.titan",
-        record = "uv_tcp_t",
-        field = "alloc_callback",
-        call = "entry(L, module, callback, owner, suggested_size, " ..
-            "buf as foreign *void)"
-    },
-    {
-        name = "uv_tcp_read_cb",
-        source = "titan/uv/runtime.titan",
-        record = "uv_tcp_t",
-        field = "read_callback",
-        call = "entry(L, module, callback, owner, nread as foreign lua_Integer)"
-    },
-    {
-        name = "uv_stdio_alloc_cb",
-        source = "titan/uv/runtime.titan",
-        record = "uv_stdio_t",
-        field = "alloc_callback",
-        call = "entry(L, module, callback, owner, suggested_size, " ..
-            "buf as foreign *void)"
-    },
-    {
-        name = "uv_stdio_read_cb",
-        source = "titan/uv/runtime.titan",
-        record = "uv_stdio_t",
-        field = "read_callback",
-        call = "entry(L, module, callback, owner, nread as foreign lua_Integer)"
-    },
-    {
-        name = "uv_close_cb",
-        source = "titan/uv/runtime.titan",
-        record = "CloseOwner",
-        field = "callback",
-        call = "entry(L, module, callback, owner)"
-    },
-    {
-        name = "uv_walk_cb",
-        source = "titan/uv/runtime.titan",
-        record = "WalkOwner",
-        field = "callback",
-        call = "entry(L, module, callback, owner, " ..
-            "handle as foreign *void)"
-    },
-    {
-        name = "uv_timer_cb",
-        source = "titan/uv/task.titan",
-        record = "TimerOwner",
-        field = "callback",
-        call = "entry(L, module, callback, owner)"
-    },
-    {
-        name = "uv_ticker_cb",
-        source = "titan/uv/task.titan",
-        record = "uv_timer_t",
-        field = "callback",
-        call = "entry(L, module, callback, owner)"
-    },
-    {
-        name = "uv_getaddrinfo_cb",
-        source = "titan/uv/tcp.titan",
-        record = "uv_getaddrinfo_t",
-        field = "callback",
-        call = "entry(L, module, callback, owner, status as foreign lua_Integer, " ..
-            "result as foreign *void)"
-    },
-    {
-        name = "uv_connect_cb",
-        source = "titan/uv/tcp.titan",
-        record = "uv_connect_t",
-        field = "callback",
-        call = "entry(L, module, callback, owner, status as foreign lua_Integer)"
-    },
-    {
-        name = "uv_shutdown_cb",
-        source = "titan/uv/tcp.titan",
-        record = "uv_shutdown_t",
-        field = "callback",
-        call = "entry(L, module, callback, owner, status as foreign lua_Integer)"
-    },
-    {
-        name = "uv_connection_cb",
-        source = "titan/uv/tcp.titan",
-        record = "uv_tcp_t",
-        field = "connection_callback",
-        call = "entry(L, module, callback, owner, status as foreign lua_Integer)"
-    },
-    {
-        name = "uv_work_cb",
-        source = "titan/uv/work.titan",
-        worker = true,
-    },
-    {
-        name = "uv_after_work_cb",
-        source = "titan/uv/work.titan",
-        record = "WorkOwner",
-        field = "callback",
-        call = "entry(L, module, callback, owner, status as foreign lua_Integer)"
-    },
+    { name = "getaddrinfo_callback", source = "titan/uv/dns.titan",
+      record = "getaddrinfo_t", field = "handler", handler = "getaddrinfo_deliver", owner = "owner",
+      call = "entry(L, module, handler, owner, loop, status as foreign lua_Integer, result)" },
+    { name = "getnameinfo_callback", source = "titan/uv/dns.titan",
+      record = "getnameinfo_t", field = "handler", handler = "getnameinfo_deliver", owner = "owner",
+      call = "entry(L, module, handler, owner, loop, status as foreign lua_Integer, hostname, service)" },
+    { name = "process_callback", source = "titan/uv/process.titan",
+      record = "process_t", field = "handler", handler = "process_deliver", owner = "owner",
+      call = "entry(L, module, handler, owner, loop, exit_status as foreign lua_Integer, term_signal as foreign lua_Integer)" },
+    { name = "process_close_callback", source = "titan/uv/process.titan",
+      record = "process_t", field = "close_handler", handler = "process_closed", owner = "owner",
+      call = "entry(L, module, handler, owner, loop)" },
+    { name = "tcp_connection_callback", source = "titan/uv/stream_owners.titan",
+      record = "tcp_t", field = "connection_handler", handler = "tcp_connection_deliver", owner = "owner",
+      call = "entry(L, module, handler, owner, loop, status as foreign lua_Integer)" },
+    { name = "tcp_alloc_callback", source = "titan/uv/stream_owners.titan",
+      record = "tcp_t", field = "alloc_handler", handler = "tcp_alloc_deliver", owner = "owner",
+      call = "entry(L, module, handler, owner, loop, suggested_size as foreign lua_Integer, output)" },
+    { name = "tcp_read_callback", source = "titan/uv/stream_owners.titan",
+      record = "tcp_t", field = "read_handler", handler = "tcp_read_deliver", owner = "owner",
+      call = "entry(L, module, handler, owner, loop, nread as foreign lua_Integer, buffer)" },
+    { name = "tcp_close_callback", source = "titan/uv/stream_owners.titan",
+      record = "tcp_t", field = "close_handler", handler = "tcp_closed", owner = "owner",
+      call = "entry(L, module, handler, owner, loop)" },
+    { name = "pipe_connection_callback", source = "titan/uv/stream_owners.titan",
+      record = "pipe_t", field = "connection_handler", handler = "pipe_connection_deliver", owner = "owner",
+      call = "entry(L, module, handler, owner, loop, status as foreign lua_Integer)" },
+    { name = "pipe_alloc_callback", source = "titan/uv/stream_owners.titan",
+      record = "pipe_t", field = "alloc_handler", handler = "pipe_alloc_deliver", owner = "owner",
+      call = "entry(L, module, handler, owner, loop, suggested_size as foreign lua_Integer, output)" },
+    { name = "pipe_read_callback", source = "titan/uv/stream_owners.titan",
+      record = "pipe_t", field = "read_handler", handler = "pipe_read_deliver", owner = "owner",
+      call = "entry(L, module, handler, owner, loop, nread as foreign lua_Integer, buffer)" },
+    { name = "pipe_close_callback", source = "titan/uv/stream_owners.titan",
+      record = "pipe_t", field = "close_handler", handler = "pipe_closed", owner = "owner",
+      call = "entry(L, module, handler, owner, loop)" },
+    { name = "tty_connection_callback", source = "titan/uv/stream_owners.titan",
+      record = "tty_t", field = "connection_handler", handler = "tty_connection_deliver", owner = "owner",
+      call = "entry(L, module, handler, owner, loop, status as foreign lua_Integer)" },
+    { name = "tty_alloc_callback", source = "titan/uv/stream_owners.titan",
+      record = "tty_t", field = "alloc_handler", handler = "tty_alloc_deliver", owner = "owner",
+      call = "entry(L, module, handler, owner, loop, suggested_size as foreign lua_Integer, output)" },
+    { name = "tty_read_callback", source = "titan/uv/stream_owners.titan",
+      record = "tty_t", field = "read_handler", handler = "tty_read_deliver", owner = "owner",
+      call = "entry(L, module, handler, owner, loop, nread as foreign lua_Integer, buffer)" },
+    { name = "tty_close_callback", source = "titan/uv/stream_owners.titan",
+      record = "tty_t", field = "close_handler", handler = "tty_closed", owner = "owner",
+      call = "entry(L, module, handler, owner, loop)" },
+    { name = "network_connect_callback", source = "titan/uv/stream_owners.titan",
+      record = "connect_t", field = "handler", handler = "connect_deliver", owner = "owner",
+      call = "entry(L, module, handler, owner, loop, status as foreign lua_Integer)" },
+    { name = "network_write_callback", source = "titan/uv/stream_owners.titan",
+      record = "write_t", field = "handler", handler = "write_deliver", owner = "owner",
+      call = "entry(L, module, handler, owner, loop, status as foreign lua_Integer)" },
+    { name = "network_shutdown_callback", source = "titan/uv/stream_owners.titan",
+      record = "shutdown_t", field = "handler", handler = "shutdown_deliver", owner = "owner",
+      call = "entry(L, module, handler, owner, loop, status as foreign lua_Integer)" },
+    { name = "udp_alloc_callback", source = "titan/uv/udp.titan",
+      record = "udp_t", field = "alloc_handler", handler = "udp_allocate", owner = "owner",
+      call = "entry(L, module, handler, owner, loop, suggested, output)" },
+    { name = "udp_recv_callback", source = "titan/uv/udp.titan",
+      record = "udp_t", field = "recv_handler", handler = "udp_receive", owner = "owner",
+      call = "entry(L, module, handler, owner, loop, nread, buffer, address, flags)" },
+    { name = "udp_close_callback", source = "titan/uv/udp.titan",
+      record = "udp_t", field = "close_handler", handler = "udp_closed", owner = "owner",
+      call = "entry(L, module, handler, owner, loop)" },
+    { name = "udp_send_callback", source = "titan/uv/udp.titan",
+      record = "udp_send_t", field = "handler", handler = "udp_sent", owner = "owner",
+      call = "entry(L, module, handler, owner, loop, status)" },
+    { name = "timer_callback", source = "titan/uv/uv.titan",
+      record = "timer_t", field = "handler", handler = "timer_deliver", owner = "owner",
+      call = "entry(L, module, handler, owner, loop)" },
+    { name = "timer_close_callback", source = "titan/uv/uv.titan",
+      record = "timer_t", field = "close_handler", handler = "timer_closed", owner = "owner",
+      call = "entry(L, module, handler, owner, loop)" },
+    { name = "fs_callback", source = "titan/uv/uv.titan",
+      record = "fs_t", field = "handler", handler = "fs_deliver", owner = "owner",
+      call = "entry(L, module, handler, owner, loop)" },
+    { name = "work_after_callback", source = "titan/uv/uv.titan",
+      record = "work_t", field = "handler", handler = "work_deliver", owner = "owner",
+      call = "entry(L, module, handler, owner, loop, status as foreign lua_Integer)" },
+    { name = "walk_callback", source = "titan/uv/uv.titan",
+      record = "loop_t", field = "walk_handler", handler = "walk_deliver", owner = "loop",
+      call = "entry(L, module, handler, loop, native)" },
+    { name = "idle_callback", source = "titan/uv/uv.titan",
+      record = "idle_t", field = "handler", handler = "idle_deliver", owner = "owner",
+      call = "entry(L, module, handler, owner, loop)" },
+    { name = "idle_close_callback", source = "titan/uv/uv.titan",
+      record = "idle_t", field = "close_handler", handler = "idle_closed", owner = "owner",
+      call = "entry(L, module, handler, owner, loop)" },
+    { name = "prepare_callback", source = "titan/uv/uv.titan",
+      record = "prepare_t", field = "handler", handler = "prepare_deliver", owner = "owner",
+      call = "entry(L, module, handler, owner, loop)" },
+    { name = "prepare_close_callback", source = "titan/uv/uv.titan",
+      record = "prepare_t", field = "close_handler", handler = "prepare_closed", owner = "owner",
+      call = "entry(L, module, handler, owner, loop)" },
+    { name = "check_callback", source = "titan/uv/uv.titan",
+      record = "check_t", field = "handler", handler = "check_deliver", owner = "owner",
+      call = "entry(L, module, handler, owner, loop)" },
+    { name = "check_close_callback", source = "titan/uv/uv.titan",
+      record = "check_t", field = "close_handler", handler = "check_closed", owner = "owner",
+      call = "entry(L, module, handler, owner, loop)" },
+    { name = "async_callback", source = "titan/uv/uv.titan",
+      record = "async_t", field = "handler", handler = "async_deliver", owner = "owner",
+      call = "entry(L, module, handler, owner, loop)" },
+    { name = "async_close_callback", source = "titan/uv/uv.titan",
+      record = "async_t", field = "close_handler", handler = "async_closed", owner = "owner",
+      call = "entry(L, module, handler, owner, loop)" },
+    { name = "signal_callback", source = "titan/uv/uv.titan",
+      record = "signal_t", field = "handler", handler = "signal_deliver", owner = "owner",
+      call = "entry(L, module, handler, owner, loop, signum as foreign lua_Integer)" },
+    { name = "signal_close_callback", source = "titan/uv/uv.titan",
+      record = "signal_t", field = "close_handler", handler = "signal_closed", owner = "owner",
+      call = "entry(L, module, handler, owner, loop)" },
+    { name = "poll_callback", source = "titan/uv/uv.titan",
+      record = "poll_t", field = "handler", handler = "poll_deliver", owner = "owner",
+      call = "entry(L, module, handler, owner, loop, status as foreign lua_Integer, events as foreign lua_Integer)" },
+    { name = "poll_close_callback", source = "titan/uv/uv.titan",
+      record = "poll_t", field = "close_handler", handler = "poll_closed", owner = "owner",
+      call = "entry(L, module, handler, owner, loop)" },
+    { name = "random_callback", source = "titan/uv/uv.titan",
+      record = "random_t", field = "handler", handler = "random_deliver", owner = "owner",
+      call = "entry(L, module, handler, owner, loop, status as foreign lua_Integer, buflen as foreign lua_Integer)" },
+    { name = "fs_event_callback", source = "titan/uv/uv.titan",
+      record = "fs_event_t", field = "handler", handler = "fs_event_deliver", owner = "owner",
+      call = "entry(L, module, handler, owner, loop, filename, events as foreign lua_Integer, status as foreign lua_Integer)" },
+    { name = "fs_event_close_callback", source = "titan/uv/uv.titan",
+      record = "fs_event_t", field = "close_handler", handler = "fs_event_closed", owner = "owner",
+      call = "entry(L, module, handler, owner, loop)" },
+    { name = "fs_poll_callback", source = "titan/uv/uv.titan",
+      record = "fs_poll_t", field = "handler", handler = "fs_poll_deliver", owner = "owner",
+      call = "entry(L, module, handler, owner, loop, status as foreign lua_Integer, prev, curr)" },
+    { name = "fs_poll_close_callback", source = "titan/uv/uv.titan",
+      record = "fs_poll_t", field = "close_handler", handler = "fs_poll_closed", owner = "owner",
+      call = "entry(L, module, handler, owner, loop)" },
 }
-local FS_FOREIGN_CALLBACKS = {
-    {
-        name = "fs_realpath_cb",
-        record = "RealpathRequest",
-        field = "callback",
-        call = "entry(L, module, callback, owner)"
-    },
-    {
-        name = "fs_watcher_event_cb",
-        record = "WatchRegistration",
-        field = "callback",
-        call = "entry(L, module, callback, owner, filename, " ..
-            "events as foreign lua_Integer, status as foreign lua_Integer)"
-    },
-}
-local FS_DIRECT_LIBUV_CALLS = {
-    "uv_fs_event_init",
-    "uv_fs_event_start",
-    "uv_fs_event_stop",
-    "uv_fs_get_ptr",
-    "uv_fs_get_result",
-    "uv_fs_realpath",
-    "uv_fs_req_cleanup",
-    "uv_handle_get_data",
-    "uv_handle_get_loop",
-    "uv_handle_set_data",
-    "uv_loop_get_data",
-    "uv_req_get_data",
-    "uv_req_set_data",
+-- Simple C forwarding helpers may live in the generated foreign header as
+-- static inline definitions. Their linkage names need not appear in nm output.
+local UV_NATIVE_ENTRIES = {
+    { name = "consume_spawn_pipes", source = "titan/uv/process.titan" },
+    { name = "native_mutex_lock", source = "titan/uv/sync.titan" },
+    { name = "native_mutex_trylock", inline = true, source = "titan/uv/sync.titan" },
+    { name = "native_mutex_unlock", source = "titan/uv/sync.titan" },
+    { name = "native_rwlock_rdlock", source = "titan/uv/sync.titan" },
+    { name = "native_rwlock_tryrdlock", inline = true, source = "titan/uv/sync.titan" },
+    { name = "native_rwlock_rdunlock", source = "titan/uv/sync.titan" },
+    { name = "native_rwlock_wrlock", source = "titan/uv/sync.titan" },
+    { name = "native_rwlock_trywrlock", inline = true, source = "titan/uv/sync.titan" },
+    { name = "native_rwlock_wrunlock", source = "titan/uv/sync.titan" },
+    { name = "native_sem_post", source = "titan/uv/sync.titan" },
+    { name = "native_sem_wait", source = "titan/uv/sync.titan" },
+    { name = "native_sem_trywait", inline = true, source = "titan/uv/sync.titan" },
+    { name = "native_cond_signal", source = "titan/uv/sync.titan" },
+    { name = "native_cond_broadcast", source = "titan/uv/sync.titan" },
+    { name = "native_barrier_wait", inline = true, source = "titan/uv/sync.titan" },
+    { name = "native_cond_wait", source = "titan/uv/sync.titan" },
+    { name = "native_cond_timedwait", inline = true, source = "titan/uv/sync.titan" },
+    { name = "native_key_get", inline = true, source = "titan/uv/sync.titan" },
+    { name = "native_key_set", source = "titan/uv/sync.titan" },
+    { name = "native_once", source = "titan/uv/sync.titan" },
+    { name = "work_worker_callback", source = "titan/uv/uv.titan" },
+    { name = "async_send_native", inline = true, source = "titan/uv/uv.titan" },
 }
 local LEGACY_UV_CALLBACKS = {
     "titan_uvshim_signal_cb",
@@ -283,13 +286,23 @@ local DIRECT_LIBUV_CALLS = {
     "uv_shutdown",
     "uv_signal_init",
     "uv_signal_start_oneshot",
-    "uv_tcp_init",
+    "uv_tcp_init_ex",
     "uv_tcp_bind",
     "uv_tcp_connect",
     "uv_translate_sys_error",
     "uv_spawn",
     "uv_walk",
-    "uv_write",
+    "uv_write2",
+    "uv_fs_event_init",
+    "uv_fs_event_start",
+    "uv_fs_event_stop",
+    "uv_fs_get_ptr",
+    "uv_fs_realpath",
+    "uv_fs_req_cleanup",
+    "uv_handle_get_data",
+    "uv_handle_get_loop",
+    "uv_loop_get_data",
+    "uv_req_get_data",
 }
 -- The conditional policy reads and updates the inherited action directly; its
 -- one external host call remains visible in the generated object.
@@ -615,6 +628,11 @@ local function run_stdlib_dry_make(argv)
     local prepared = root .. "/prepared"
     write_file(prepared, "prepared for a read-only Make dry run\n")
 
+    local openssl_selected = false
+    for _, argument in ipairs(argv) do
+        if argument:match("^OPENSSL_MODE=") then openssl_selected = true end
+    end
+    if not openssl_selected then table.insert(argv, "OPENSSL_MODE=bundled") end
     table.insert(argv, "PREFIX=" .. root)
     table.insert(argv, "MAKE=false")
     for _, variable in ipairs({
@@ -642,41 +660,27 @@ local function run_stdlib_dry_make(argv)
     return ok, output, why, code
 end
 
-local function run_make(host, environment)
-    local argv = {
-        "make", "--no-print-directory", "-s", "LIBUV_MODE=system",
-        "HOST_OS=" .. host, "LIBUV_PKG_CONFIG=" .. PKG_CONFIG,
-        "libuv-config",
-    }
-    local words = {}
-    for _, word in ipairs(argv) do table.insert(words, quote(word)) end
-    local command = table.concat(words, " ")
-    if environment then command = environment .. " " .. command end
-    local pipe = assert(io.popen(command .. " 2>&1"))
-    local output = pipe:read("*a")
-    local ok, why, code = pipe:close()
-    return ok == true, output, why, code
+local function run_make(host)
+    return run_argv({
+        "make", "--no-print-directory", "-s", "HOST_OS=" .. host,
+        "--old-file=libuv-build/libuv.a", "libuv-config",
+    })
 end
 
-local function run_uv_dry_run(mode, host, source, openssl_mode,
-                              openssl_pkg_config)
+local function run_uv_dry_run(host, source, openssl_mode, openssl_pkg_config)
     local argv = {
         "make", "--no-print-directory", "-n",
         "-W", source or UV_MAIN_SOURCE,
-        "LIBUV_MODE=" .. mode,
         "HOST_OS=" .. (host or "Linux"),
-        "LIBUV_PKG_CONFIG=" .. PKG_CONFIG,
         "CC=ccache cc",
         "AR=review-ar",
         "RANLIB=review-ranlib",
         "TITAN_EXTRA_CPPFLAGS=-DUSER_CPP=1",
         "TITAN_EXTRA_CFLAGS=-DUSER_C=1",
         "TITAN_EXTRA_LDFLAGS=-Wl,user-link",
+        "OPENSSL_MODE=" .. (openssl_mode or "bundled"),
         "stdlib",
     }
-    if openssl_mode then
-        table.insert(argv, #argv, "OPENSSL_MODE=" .. openssl_mode)
-    end
     if openssl_pkg_config then
         table.insert(argv, #argv,
             "OPENSSL_PKG_CONFIG=" .. openssl_pkg_config)
@@ -855,8 +859,8 @@ describe("libuv Makefile configuration", function()
                 write_file(root .. "/" .. source, "build input\n")
             end
             local argv = { "make", "--no-print-directory", "-s", "-j4", "-C", root,
-                "MAKE=false", "PREFIX=" .. root, "LIBUV_MODE=system",
-                "OPENSSL_MODE=system", "LIBUV_PKG_CONFIG=true", "OPENSSL_PKG_CONFIG=true",
+                "MAKE=false", "PREFIX=" .. root,
+                "OPENSSL_MODE=system", "OPENSSL_PKG_CONFIG=true",
                 "TITANC=sh ./fake-titanc", "STDLIB_CONFIG_STAMP=build.config",
                 "STDLIB_COMPILER_PREREQS=prepared", "STDLIB_TOOL_PREREQS=prepared",
                 "STDLIB_NATIVE_PREREQS=prepared", "STDLIB_PLATFORM_PREREQS=prepared",
@@ -892,7 +896,7 @@ describe("libuv Makefile configuration", function()
             for _, output in ipairs(outputs) do
                 assert.equal(old + 1, lfs.attributes(root .. "/" .. output, "modification"))
             end
-            assert(lfs.touch(root .. "/titan/uv/task.titan", old + 2, old + 2))
+            assert(lfs.touch(root .. "/titan/uv/tcp.titan", old + 2, old + 2))
             assert.same({ uv = true, async = true, timer = true, os = true, io = true,
                 fs = true, net = true, ssl = true, http = true, lua = true,
                 reflect = true, sqlite3 = true, json = true }, build())
@@ -993,8 +997,9 @@ esac
                 "-u", "ROCK_LUA", "-u", "STDLIB_USE_INSTALLED_RUNTIME",
                 "make", "--no-print-directory", "-s", "-C", root,
                 "PREFIX=" .. prefix, "HOST_OS=Linux",
-                "LIBUV_MODE=system", "OPENSSL_MODE=system",
-                "LIBUV_PKG_CONFIG=true", "OPENSSL_PKG_CONFIG=true",
+                "STDLIB_PLATFORM_PREREQS=prepared",
+                "OPENSSL_MODE=system",
+                "OPENSSL_PKG_CONFIG=true",
                 "STDLIB_MODULES=math", "STDLIB_ROOTS=titan.math",
                 "STDLIB_TITAN_SOURCES=titan/math.titan",
                 "STDLIB_GENERATED_FOREIGN_HEADERS=titan/math.ffi.h",
@@ -1348,95 +1353,99 @@ done
             end
             table.sort(normalized)
             assert.same(discovered_uv_sources(), normalized)
+            assert.same({
+                "titan/uv/address-native.h",
+                "titan/uv/callback.h",
+                "titan/uv/data_native.h",
+                "titan/uv/fd-native.h",
+                "titan/uv/fs-native-proposal.h",
+                "titan/uv/network-native.h",
+                "titan/uv/platform-constants.h",
+                "titan/uv/sync_storage.h",
+                "titan/uv/thread-native.h",
+                "titan/uv/utility_bits.h",
+                "titan/uv/version-native.h",
+                "titan/uv/work-native-proposal.h",
+            }, makefile_words("UV_TITAN_HEADERS"))
         end)
 
-    it("changes only an inherited default SIGPIPE disposition", function()
-        local uv = read_file(UV_MAIN_SOURCE)
-        for _, contract in ipairs({
-            'foreign import "signal_platform.h"',
-            "return ffi.titan_uv_ignore_sigpipe_if_default()",
-            "local sigpipe_status = ignore_sigpipe_if_default()",
-            "if sigpipe_status < 0 then",
-            'raise make_error(sigpipe_status, "runtime.sigpipe")',
-        }) do
-            assert.truthy(uv:find(contract, 1, true), contract)
-        end
-        assert.falsy(uv:find("Sigset", 1, true), uv)
-        local platform = read_file("titan/uv/signal_platform.h")
-        assert_ordered(platform,
-            "#else",
-            "struct sigaction current;",
-            "if (sigaction(SIGPIPE, NULL, &current) != 0)",
-            "return uv_translate_sys_error(errno);",
-            "if (current.sa_handler != SIG_DFL)",
-            "return 0;",
-            "current.sa_handler = SIG_IGN;",
-            "if (sigaction(SIGPIPE, &current, NULL) != 0)",
-            "return uv_translate_sys_error(errno);")
-        assert.falsy(platform:find("sigemptyset", 1, true), platform)
-    end)
-
-    it("keeps only async's nominal dependencies public in uv", function()
-        assert.same({
-            "Error", "Error.new", "OperationError", "OperationError.new",
-        }, public_declarations("titan/uv/uv.titan"))
-        assert.same({
-            "ResumeToken", "ResumeToken.new",
-            "CancellationReason", "CancellationReason.simple",
-            "CancellationReason.complex", "TaskStatus", "TaskStatus.ready",
-            "TaskStatus.running", "TaskStatus.waiting",
-            "TaskStatus.succeeded", "TaskStatus.failed",
-            "TaskStatus.cancelled", "TaskStatus:as_string",
-            "TaskStatus:has_finished", "TaskStatus:has_succeeded",
-            "TaskStatus:has_failed", "TaskStatus:has_cancelled", "Task",
-            "Task:status", "Task:add_terminal_listener",
-            "Task:cancel", "Task:resume",
-        }, public_declarations("titan/uv/task.titan"))
-        for _, contributor in ipairs({
-            "file", "os", "process", "runtime", "tcp", "work",
-        }) do
-            assert.same({}, public_declarations(
-                "titan/uv/" .. contributor .. ".titan"))
-        end
-    end)
-
-    it("keeps generic Tasks over an all-value uv Runtime", function()
-        local task = read_file("titan/uv/task.titan")
-        for _, contract in ipairs({
-            "record ResumeToken",
-            "const source: string?",
-            "union CancellationReason<|B|>",
-            "union TaskStatus<|A, B|>",
-            "record Task<|A, B|>",
-            "local record TerminalRegistration<|A, B|>",
-            "listener: function (TaskStatus<|A, B|>): ()): function (): ()",
-            "local record SuspendCall",
-            "local token: ResumeToken",
-            "local cancel_action: CancelAction?",
-            "local resume_token: ResumeToken?",
-            "function Task:resume(token: ResumeToken)",
-            "Task resume token mismatch (expected source: ",
-            "local function resume_task_from_callback(task: Task, " ..
-            "failed: boolean,",
-            "local function suspend(token: ResumeToken, " ..
-            "cancel_action: CancelAction?)",
-            "local function run_internal(func: function (): (value)): " ..
-            "Task<|value, value|>",
-            "Task<|value, value|> {",
-        }) do
-            assert.truthy(task:find(contract, 1, true), contract)
-        end
-        assert.falsy(task:find("remove_terminal_listener", 1, true), task)
-
+    it("keeps inherited SIGPIPE policy in async and argc/argv setup in public UV", function()
         local async = read_file("titan/async.titan")
         for _, contract in ipairs({
+            'foreign import "async_signal_platform.h"',
+            "local native_error = ffi.titan_async_ignore_sigpipe_if_default()",
+            "if native_error ~= 0 then",
+            'check_status(uv.translate_sys_error(native_error), "runtime.sigpipe")',
+            "uv.setup_process_args()",
+        }) do assert.truthy(async:find(contract, 1, true), contract) end
+        local platform = read_file("titan/async_signal_platform.h")
+        assert_ordered(platform, "#else", "struct sigaction current;",
+            "if (sigaction(SIGPIPE, NULL, &current) != 0)", "return errno;",
+            "if (current.sa_handler != SIG_DFL)", "return 0;",
+            "current.sa_handler = SIG_IGN;",
+            "if (sigaction(SIGPIPE, &current, NULL) != 0)", "return errno;")
+        for _, forbidden in ipairs({"sigemptyset", "uv.h", "uv_translate_sys_error"}) do
+            assert.falsy(platform:find(forbidden, 1, true), forbidden)
+        end
+        local startup = read_file("titan/uv/startup.titan")
+        assert_ordered(startup, "function setup_process_args(): boolean",
+            "if process_args_ready then return true end",
+            "ffi.TITAN_MAIN_ARGC_KEY", "if ffi.lua_type(L, -1) == ffi.LUA_TNIL then return false end",
+            "ffi.TITAN_MAIN_ARGV_KEY", "ffi.uv_setup_args(argc, argv)",
+            "ffi.lua_pushlightuserdata(L, configured)", "ffi.TITAN_MAIN_ARGV_KEY",
+            "process_args_ready = true")
+        for _, path in ipairs(discovered_uv_sources()) do
+            assert.falsy(read_file(path):find("sigaction", 1, true), path)
+        end
+    end)
+
+    it("keeps public UV independent of Task policy and owns nominal async types in async", function()
+        local async_exports = {}
+        for _, name in ipairs(public_declarations("titan/async.titan")) do async_exports[name] = true end
+        for _, name in ipairs({"Error", "OperationError", "ResumeToken", "CancellationReason",
+                "TaskStatus", "Task", "await", "await_cancellable", "await_cleanup",
+                "BufferedSubscription", "CoalescingSubscription"}) do
+            assert.truthy(async_exports[name], name)
+        end
+        local uv_exports = {}
+        for _, path in ipairs(discovered_uv_sources()) do
+            for _, name in ipairs(public_declarations(path)) do uv_exports[name] = true end
+            for _, node in ipairs(parsed_source(path)) do
+                if node._tag == "Ast.TopLevelImport" then
+                    assert.not_equal("titan.async", node.modname, path)
+                end
+            end
+            for _, forbidden in ipairs({"record Task", "record Runtime", "record Call",
+                    "ResumeToken", "CancellationReason", "TaskStatus"}) do
+                assert.falsy(read_file(path):find(forbidden, 1, true), path .. ": " .. forbidden)
+            end
+        end
+        for _, name in ipairs({"loop_t", "handle_t", "req_t", "buf_t", "timer_t", "fs_t",
+                "work_t", "tcp_t", "process_t", "run", "close", "cancel", "queue_work"}) do
+            assert.truthy(uv_exports[name], name)
+        end
+        for _, name in ipairs({"Error", "OperationError", "Task", "Runtime", "Call"}) do
+            assert.falsy(uv_exports[name], name)
+        end
+    end)
+
+    it("keeps generic Tasks and ordinary, cancellable and cleanup waits in async", function()
+        local async = read_file("titan/async.titan")
+        for _, contract in ipairs({
+            "record ResumeToken", "const source: string?", "union CancellationReason<|B|>",
+            "union TaskStatus<|A, B|>", "record Task<|A, B|>", "local record Runtime",
+            "local record Wait", "local record Operation<|T, E|>",
             "function run<|A, B|>(func: function (): (A)): Task<|A, B|>",
-            "function run_foreign(f: foreign function (*void): void, arg: foreign *void)",
             "function running(): Task<|value, value|>",
-            "type ResumeToken = uv.ResumeToken",
+            "function await<|T, E|>", "function await_cancellable<|T, E|>",
+            "function await_cleanup<|T, E|>", "function (value, string): ()",
+            "Operation<|T, E|>(register, WAIT_ORDINARY)",
+            "Operation<|T, E|>(op, WAIT_CANCELLABLE)",
+            "Operation<|T, E|>(register, WAIT_CLEANUP)",
+            "function Task:resume(token: ResumeToken)",
+            "Task resume token mismatch (expected source: ",
             "type SuspendCancelAction = function (): ()",
-            "function suspend(token: ResumeToken,",
-            "cancel_action: SuspendCancelAction?)",
+            "function suspend(token: ResumeToken, cancel_action: (function (): ())?)",
             "function channel<|T|>(size: integer?):",
             "ResumeToken(\"channel\")",
             "local transfer: {T} = {}",
@@ -1466,18 +1475,17 @@ done
         }) do
             assert.truthy(async:find(contract, 1, true), contract)
         end
-
-        local work = read_file("titan/uv/work.titan")
-        assert.truthy(work:find(
-            'if status == 0 then return nil end', 1, true))
-        assert.falsy(work:find(
-            'submitted(task, status, "async.run_foreign")', 1, true))
-
+        local foreign_start = assert(async:find("function run_foreign(", 1, true))
+        local foreign_stop = assert(async:find("\nfunction channel", foreign_start, true))
+        local work = async:sub(foreign_start, foreign_stop - 1)
+        assert_ordered(work, 'if not f then raise "async.run_foreign callback must not be NULL" end',
+            "local request = uv.work_t.new()", "await<|value, OperationError|>",
+            'operation_error(status, "async.run_foreign")', "uv.queue_work(current_loop()")
+        assert.falsy(work:find("await_cancellable", 1, true), work)
+        assert.falsy(async:find("type Task = uv.", 1, true), async)
         local http = read_file("titan/http/server.titan")
-        assert.truthy(http:find(
-            "async.run<|Request?, value|>(", 1, true), http)
-        assert.truthy(http:find(
-            "async.run(function (): nil", 1, true), http)
+        assert.truthy(http:find("async.run<|Request?, value|>(", 1, true), http)
+        assert.truthy(http:find("async.run(function (): nil", 1, true), http)
     end)
 
     it("keeps the reviewed HTTP source list equal to the folder ensemble",
@@ -1691,70 +1699,60 @@ int main(void) {
 
     it("defines the exact libuv callbacks in generated Titan code",
         function()
-            local declarations = {}
-            local contents = {}
-            local seen_sources = {}
-            for _, callback in ipairs(UV_FOREIGN_CALLBACKS) do
-                if not seen_sources[callback.source] then
-                    seen_sources[callback.source] = true
-                    local source = read_file(callback.source)
-                    contents[#contents + 1] = source
-                    local ast, parse_error = parser.parse(
-                        callback.source, source)
-                    assert.truthy(ast, parse_error and
-                        parser.error_to_string(parse_error))
-                    for _, node in ipairs(ast) do
-                        if node._tag == "Ast.TopLevelForeignFunc" then
-                            declarations[#declarations + 1] = node.name
-                        end
+            local declarations, contents, expected = {}, {}, {}
+            for _, path in ipairs(discovered_uv_sources()) do
+                contents[#contents + 1] = read_file(path)
+                for _, node in ipairs(parsed_source(path)) do
+                    if node._tag == "Ast.TopLevelForeignFunc" then
+                        declarations[#declarations + 1] = node.name
                     end
-                end
-                local source = read_file(callback.source)
-                local marker = "foreign function " .. callback.name .. "("
-                local first = assert(source:find(marker, 1, true), marker)
-                local last = assert(source:find("\nend", first, true), marker)
-                local body = source:sub(first, last):gsub("%s+", " ")
-                if callback.worker then
-                    for _, contract in ipairs({
-                        "ffi.uv_req_get_data",
-                        "carrier[1] as foreign WorkFunction",
-                        "local arg = carrier[2]",
-                        "f(arg)",
-                    }) do
-                        assert.truthy(body:find(contract, 1, true), body)
-                    end
-                    for _, forbidden in ipairs({
-                        "carrier[0]", "owner.uv", "callback.upvalue",
-                        "ffi.uv_loop_get_data", "ffi.lua_", "ffi.titan_ffi_",
-                        "ffi.titan_record_field",
-                    }) do
-                        assert.falsy(body:find(forbidden, 1, true), body)
-                    end
-                else
-                    assert.truthy(body:find(
-                        'ffi.titan_record_field(owner, "' .. callback.record ..
-                        '", "' .. callback.field .. '")', 1, true), body)
-                    assert.falsy(body:find("owner.uv[", 1, true), body)
-                    assert.truthy(body:find(
-                        "callback.upvalue[0]", 1, true), body)
-                    assert.truthy(body:find(
-                        "callback.upvalue[2]", 1, true), body)
-                    assert.truthy(body:find(
-                        "ffi.uv_loop_get_data", 1, true), body)
-                    assert.falsy(body:find(
-                        "titan_ffi_pushudata", 1, true), body)
-                    assert.truthy(body:find(
-                        callback.call, 1, true), body)
-                    assert.truthy(body:find(
-                        "ffi.lua_settop(L, top)", 1, true), body)
                 end
             end
-            local expected = {}
             for _, callback in ipairs(UV_FOREIGN_CALLBACKS) do
                 expected[#expected + 1] = callback.name
+                local source = read_file(callback.source)
+                local first = assert(source:find("foreign function " .. callback.name .. "(", 1, true))
+                local last = assert(source:find("\nend", first, true))
+                local body = source:sub(first, last):gsub("%s+", " ")
+                assert.truthy(body:find('ffi.titan_record_field(' .. callback.owner .. ', "' ..
+                    callback.record .. '", "' .. callback.field .. '")', 1, true), body)
+                assert.truthy(body:find("handler.upvalue[0]", 1, true), body)
+                assert.truthy(body:find("handler.upvalue[2]", 1, true), body)
+                assert.truthy(body:find('ffi.titan_record_field(loop, "loop_t", "state")', 1, true), body)
+                assert_ordered(body, "local top = ffi.lua_gettop(L)",
+                    "ffi.titan_uv_push_owner(L, owner)", callback.call, "ffi.lua_settop(L, top)")
+                local handler_first = assert(source:find("local function " .. callback.handler .. "(", 1, true))
+                local handler_last = assert(source:find("\nend", handler_first, true))
+                local handler = source:sub(handler_first, handler_last)
+                assert_ordered(handler, "\ncatch", "if loop.failure_count == 0 then",
+                    "loop.failure_error = error", "loop.failure_trace = traceback",
+                    "loop.failure_count = loop.failure_count + 1", "ffi.uv_stop(loop.native)")
+                assert.truthy(source:find(callback.field .. " = " .. callback.handler, 1, true), callback.name)
+                for _, forbidden in ipairs({"owner.uv[", "titan_ffi_pushudata", "async.", "Task"}) do
+                    assert.falsy(body:find(forbidden, 1, true), body)
+                end
             end
+            for _, entry in ipairs(UV_NATIVE_ENTRIES) do
+                expected[#expected + 1] = entry.name
+                local source = read_file(entry.source)
+                local first = assert(source:find("foreign function " .. entry.name .. "(", 1, true))
+                local last = assert(source:find("\nend", first, true))
+                local body = source:sub(first, last)
+                for _, forbidden in ipairs({"ffi.lua_", "ffi.titan_ffi_", "ffi.titan_uv_push_owner",
+                        "upvalue[", "entry(L", "async.", "Task"}) do
+                    assert.falsy(body:find(forbidden, 1, true), body)
+                end
+                if entry.name == "work_worker_callback" then
+                    assert.truthy(body:find("local storage = request as foreign *titan_issue194_work_storage", 1, true))
+                    assert.truthy(body:find("worker(storage.arg)", 1, true))
+                    for _, forbidden in ipairs({"ffi.titan_record_field", "ffi.uv_req_get_data", "ffi.uv_loop_get_data"}) do
+                        assert.falsy(body:find(forbidden, 1, true), body)
+                    end
+                end
+            end
+            table.sort(expected)
+            table.sort(declarations)
             assert.same(expected, declarations)
-
             local all_sources = table.concat(contents, "\n")
             for _, legacy in ipairs(LEGACY_UV_CALLBACKS) do
                 assert.falsy(all_sources:find(legacy, 1, true), legacy)
@@ -1772,16 +1770,36 @@ int main(void) {
             assert.same({ "$(RUNTIME_O)", "$(MINICORO_O)" },
                 makefile_words("TITAN_RUNTIME_OBJECTS"))
 
+        end)
+
+    it("keeps native UV symbols and callback entrypoints in the canonical provider", function()
             local logical_object = "titan/uv/uv.o"
             assert.truthy(file_exists(logical_object), logical_object)
             local ok, output, why, code = run_argv(tool_argv(
                 "NM", "nm", logical_object))
             assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
                 tostring(code) .. ")")
-            for _, callback in ipairs(UV_FOREIGN_CALLBACKS) do
-                local symbol = coder_names._linkage_symbol_name(
-                    coder_names._foreign_func_name("titan.uv", callback.name))
-                assert.truthy(nm_has_symbol(output, symbol), symbol)
+            local entries = {}
+            for _, entry in ipairs(UV_FOREIGN_CALLBACKS) do entries[#entries + 1] = entry end
+            for _, entry in ipairs(UV_NATIVE_ENTRIES) do entries[#entries + 1] = entry end
+            local foreign_header = read_file("titan/uv/uv.titan.h")
+            for _, callback in ipairs(entries) do
+                local c_name = coder_names._foreign_func_name("titan.uv", callback.name)
+                if callback.inline then
+                    -- Require the emitted definition, not only a prototype;
+                    -- an optimizer may inline or internalize this C-only shim.
+                    local defined = false
+                    for line in foreign_header:gmatch("[^\r\n]+") do
+                        if line:match("^static inline ") and
+                                line:find(c_name .. "(", 1, true) and line:match("{%s*$") then
+                            defined = true
+                        end
+                    end
+                    assert.truthy(defined, "missing inline definition: " .. c_name)
+                else
+                    local symbol = coder_names._linkage_symbol_name(c_name)
+                    assert.truthy(nm_has_symbol(output, symbol), symbol)
+                end
             end
 
             ok, output, why, code = run_argv(tool_argv(
@@ -1797,8 +1815,13 @@ int main(void) {
                     logical_object .. ": " .. function_name)
             end
             for _, function_name in ipairs(SIGPIPE_EXTERNAL_HOST_CALLS) do
-                assert.truthy(nm_has_symbol(output, function_name),
+                assert.falsy(nm_has_symbol(output, function_name),
                     logical_object .. ": " .. function_name)
+            end
+            local async_ok, async_output = run_argv(tool_argv("NM", "nm", "-u", "titan/async.o"))
+            assert.truthy(async_ok, async_output)
+            for _, function_name in ipairs(SIGPIPE_EXTERNAL_HOST_CALLS) do
+                assert.truthy(nm_has_symbol(async_output, function_name), function_name)
             end
             for _, retired in ipairs({
                 RETIRED_UV_WRAPPERS, RETIRED_UV_HELPERS,
@@ -1835,126 +1858,62 @@ int main(void) {
             end
         end)
 
-    it("defines the filesystem callbacks in the high-level module", function()
-        local source_path = "titan/fs.titan"
-        local source = read_file(source_path)
-        local ast, parse_error = parser.parse(source_path, source)
-        assert.truthy(ast, parse_error and
-            parser.error_to_string(parse_error))
-        local declarations = {}
-        for _, node in ipairs(ast) do
-            if node._tag == "Ast.TopLevelForeignFunc" then
-                declarations[#declarations + 1] = node.name
+    it("keeps domain callbacks above public UV and raw libuv symbols inside its binding", function()
+        for _, module in ipairs({"async", "timer", "fs", "net", "os", "sqlite3"}) do
+            for _, path in ipairs(stdlib_source_files()) do
+                if path:match("^titan/([^/.]+)") == module then
+                    local source = read_file(path)
+                    assert.falsy(source:find('foreign import "uv.h"', 1, true), path)
+                    assert.falsy(source:find("ffi.uv_", 1, true), path)
+                    for _, node in ipairs(parsed_source(path)) do
+                        if node._tag == "Ast.TopLevelImport" then
+                            assert.falsy(node.modname:match("^titan%.uv%."), path .. ": " .. node.modname)
+                            assert.falsy(node.modname:match("^titan%.async%."), path .. ": " .. node.modname)
+                        end
+                    end
+                end
+            end
+            local object = module == "sqlite3" and "titan/sqlite3/sqlite3.o" or "titan/" .. module .. ".o"
+            local ok, output = run_argv(tool_argv("NM", "nm", "-u", object))
+            assert.truthy(ok, output)
+            for symbol in output:gmatch("[^\r\n]+") do
+                assert.falsy(symbol:match("%s_?uv_[%w_]+$"), object .. ": " .. symbol)
             end
         end
-        local expected = {}
-        for _, callback in ipairs(FS_FOREIGN_CALLBACKS) do
-            expected[#expected + 1] = callback.name
-            local marker = "foreign function " .. callback.name .. "("
-            local first = assert(source:find(marker, 1, true), marker)
-            local last = assert(source:find("\nend", first, true), marker)
-            local body = source:sub(first, last):gsub("%s+", " ")
-            assert.truthy(body:find(
-                'ffi.titan_record_field(owner, "' .. callback.record ..
-                '", "' .. callback.field .. '")', 1, true), body)
-            assert.falsy(body:find("owner.uv[", 1, true), body)
-            assert.truthy(body:find("callback.upvalue[0]", 1, true), body)
-            assert.truthy(body:find("callback.upvalue[2]", 1, true), body)
-            assert.truthy(body:find("ffi.uv_loop_get_data", 1, true), body)
-            assert.truthy(body:find(callback.call, 1, true), body)
-            assert.truthy(body:find("ffi.lua_settop(L, top)", 1, true), body)
-        end
-        assert.same(expected, declarations)
-        local _, condition_wakes = source:gsub(
-            "uv%.resume_condition_waiter_from_callback%(", "")
-        assert.equal(2, condition_wakes)
-        assert.falsy(source:find(
-            "uv.resume_task_from_callback", 1, true))
-
-        local object = "titan/fs.o"
-        assert.truthy(file_exists(object), object)
-        local ok, output, why, code = run_argv(tool_argv("NM", "nm", object))
-        assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
-            tostring(code) .. ")")
-        for _, callback in ipairs(FS_FOREIGN_CALLBACKS) do
-            local symbol = coder_names._linkage_symbol_name(
-                coder_names._foreign_func_name("titan.fs", callback.name))
-            assert.truthy(nm_has_symbol(output, symbol), symbol)
-        end
-
-        ok, output, why, code = run_argv(tool_argv("NM", "nm", "-u", object))
-        assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
-            tostring(code) .. ")")
-        for _, function_name in ipairs(FS_DIRECT_LIBUV_CALLS) do
-            assert.truthy(nm_has_symbol(output, function_name),
-                object .. ": " .. function_name)
-        end
-
-        local makefile = read_file("Makefile")
-        assert.truthy(makefile:find("titan/fs.titan.h", 1, true))
+        assert.same({}, (function ()
+            local entries = {}
+            for _, node in ipairs(parsed_source("titan/fs.titan")) do
+                if node._tag == "Ast.TopLevelForeignFunc" then entries[#entries + 1] = node.name end
+            end
+            return entries
+        end)())
+        assert.falsy(read_file("Makefile"):find("titan/fs.titan.h", 1, true))
     end)
 
-    it("keeps filesystem explicit condition waits one-shot and scoped",
-        function()
-            local source = read_file("titan/fs.titan")
-
-            local request_start = assert(source:find(
-                "local record RealpathRequest", 1, true))
-            local request_stop = assert(source:find(
-                "\nend", request_start, true))
-            local request = source:sub(request_start, request_stop - 1)
-            assert.falsy(request:find("completed", 1, true), request)
-
-            local realpath_start = assert(source:find(
-                "function realpath(path: string): string", 1, true))
-            local realpath_stop = assert(source:find(
-                "\nlocal WATCHER_IDLE", realpath_start, true))
-            local realpath = source:sub(realpath_start, realpath_stop - 1)
-            assert_ordered(realpath,
-                'local resume_token = uv.ResumeToken("fs.realpath")',
-                "local cancel_action = function ()",
-                "defer cancel_action()",
-                "local status = ffi.uv_fs_realpath(",
-                "uv.suspend(resume_token, cancel_action)")
-            assert.equal(1, count_plain(realpath, "uv.suspend("), realpath)
-            assert.falsy(realpath:find("while ", 1, true), realpath)
-
-            local watcher_start = assert(source:find(
-                "\nrecord Watcher\n", 1, true)) + 1
-            local watcher_stop = assert(source:find(
-                "\nend", watcher_start, true))
-            local watcher = source:sub(watcher_start, watcher_stop - 1)
-            assert.truthy(watcher:find(
-                "local resume_token: uv.ResumeToken?", 1, true), watcher)
-
-            local wake_start = assert(source:find(
-                "local function Watcher:wake()", 1, true))
-            local wake_stop = assert(source:find(
-                "\nend", wake_start, true))
-            local wake = source:sub(wake_start, wake_stop - 1)
-            assert_ordered(wake,
-                "local resume_token = self.resume_token",
-                "self.waiter = nil",
-                "self.resume_token = nil",
-                "waiter:resume(resume_token)")
-
-            local poll_start = assert(source:find(
-                "function Watcher:poll(): {WatcherEvent}", 1, true))
-            local poll = source:sub(poll_start)
-            assert_ordered(poll,
-                'local resume_token = uv.ResumeToken("fs.watcher")',
-                "local cancel_action = function ()",
-                "defer cancel_action()",
-                "self.resume_token = resume_token",
-                "self.waiter = task",
-                "uv.suspend(resume_token, cancel_action)")
-            assert.truthy(poll:find(
-                "self.waiter == task and self.resume_token == resume_token",
-                1, true), poll)
-            assert.equal(1, count_plain(poll, "uv.suspend("), poll)
-            assert.falsy(poll:find(
-                "while #self.notifications", 1, true), poll)
-        end)
+    it("keeps filesystem request cleanup before settlement and watchers on scoped generic batches", function()
+        local source = read_file("titan/fs.titan")
+        local first = assert(source:find("local function perform<|T|>", 1, true))
+        local last = assert(source:find("local function acquire<|T|>", first, true))
+        local perform = source:sub(first, last - 1)
+        assert_ordered(perform, "local request = uv.fs_t.new()", "async.await<|T, integer|>",
+            "local copied = decode(completed, result)", "uv.fs_req_cleanup(completed)", "resolve(copied)")
+        assert_ordered(perform, "fatal(error, traceback)", "raise")
+        assert_ordered(source, "function realpath(path: string): string",
+            'perform<|string|>("fs.realpath"', "uv.fs_realpath(loop, request, path, callback)",
+            "uv.fs_get_string(request)")
+        assert_ordered(source, "local function WatchRegistration:close(wait: boolean)",
+            "async.await_cleanup<|boolean, integer|>", "uv.close(self.view, callback)")
+        assert_ordered(source, "local function Watcher:retire_registration(",
+            "defer registration:close(true)", "self:remove_registration(registration)")
+        assert.truthy(source:find("async.BufferedSubscription<|WatcherNotification, integer|>", 1, true))
+        local poll_start = assert(source:find("function Watcher:poll(): {WatcherEvent}", 1, true))
+        local poll = source:sub(poll_start)
+        assert_ordered(poll, "self:begin_poll()", "defer self:finish_poll()",
+            "self.subscription:drain_pending()", "self.subscription:next_batch()",
+            "self:drain_notifications(notifications)")
+        assert.equal(1, count_plain(poll, "self.subscription:next_batch()"))
+        assert.falsy(poll:find("while ", 1, true), poll)
+    end)
 
     it("keeps the reviewed standard-library roots, sources, and shims exact",
         function()
@@ -1993,10 +1952,27 @@ int main(void) {
 
             assert.same({
                 "titan/coroutine.titan",
-                "titan/uv/uv.titan", "titan/uv/file.titan",
-                "titan/uv/os.titan", "titan/uv/process.titan",
-                "titan/uv/runtime.titan", "titan/uv/task.titan",
-                "titan/uv/tcp.titan", "titan/uv/work.titan",
+                "titan/uv/uv.titan",
+                "titan/uv/address.titan",
+                "titan/uv/callbacks.titan",
+                "titan/uv/capabilities.titan",
+                "titan/uv/constants.titan",
+                "titan/uv/data.titan",
+                "titan/uv/dll.titan",
+                "titan/uv/dns.titan",
+                "titan/uv/fd.titan",
+                "titan/uv/identifiers.titan",
+                "titan/uv/pipe_tty.titan",
+                "titan/uv/platform_constants.titan",
+                "titan/uv/process.titan",
+                "titan/uv/startup.titan",
+                "titan/uv/stream_ops.titan",
+                "titan/uv/stream_owners.titan",
+                "titan/uv/sync.titan",
+                "titan/uv/tcp.titan",
+                "titan/uv/threading.titan",
+                "titan/uv/udp.titan",
+                "titan/uv/utilities.titan",
                 "titan/async.titan",
                 "titan/timer.titan", "titan/io.titan", "titan/fs.titan",
                 "titan/net.titan", "titan/ssl.titan", "titan/url.titan",
@@ -2053,7 +2029,7 @@ int main(void) {
             expected[#expected + 1] = stem .. ".ffi.h"
         end
         for _, header in ipairs({
-            "titan/coroutine.titan.h", "titan/fs.titan.h",
+            "titan/coroutine.titan.h",
             "titan/uv/uv.titan.h", "titan/http/http.titan.h",
             "titan/sqlite3/sqlite3.titan.h",
         }) do
@@ -2083,146 +2059,62 @@ int main(void) {
             assert.same({ "titan/gc.titan" }, callers)
         end)
 
-    it("keeps parser-sugared standard-library imports short",
-        function()
-            for _, source in ipairs(stdlib_source_files()) do
-                local contents = read_file(source)
-                for _, module in ipairs(STDLIB_MODULES) do
-                    local long = 'import "titan.' .. module .. '"'
-                    assert.falsy(contents:find(long, 1, true),
-                        source .. " uses " .. long)
+    it("uses ordinary public module imports for async domains", function()
+        for _, source in ipairs(stdlib_source_files()) do
+            for _, node in ipairs(parsed_source(source)) do
+                if node._tag == "Ast.TopLevelImport" then
+                    assert.falsy(node.modname:match("^titan%.uv%."), source .. ": " .. node.modname)
+                    assert.falsy(node.modname:match("^titan%.async%."), source .. ": " .. node.modname)
                 end
             end
-
-            for _, source in ipairs({
-                "titan/async.titan", "titan/timer.titan",
-                "titan/fs.titan", "titan/net.titan", "titan/os.titan",
-            }) do
-                local contents = read_file(source)
-                assert.truthy(contents:find(
-                    'import "uv.titan"', 1, true), source)
-                assert.falsy(contents:find(
-                    'import "uv"', 1, true), source)
-                assert.falsy(contents:find(
-                    'import "titan.uv.titan"', 1, true), source)
+        end
+        for _, source in ipairs({"titan/async.titan", "titan/timer.titan", "titan/fs.titan",
+                "titan/net.titan", "titan/os.titan"}) do
+            local imports = {}
+            for _, node in ipairs(parsed_source(source)) do
+                if node._tag == "Ast.TopLevelImport" then imports[node.modname] = true end
             end
-
-            local ssl = read_file("titan/ssl.titan")
-            for _, dependency in ipairs({ "async", "fs", "net", "string" }) do
-                assert.truthy(ssl:find(
-                    'import "' .. dependency .. '"', 1, true), dependency)
-                assert.falsy(ssl:find(
-                    'import "titan.' .. dependency .. '"', 1, true), dependency)
-            end
-            local http = read_file("titan/http/http.titan")
-            for _, dependency in ipairs({
-                "async", "io", "net", "ssl", "string", "url",
-            }) do
-                assert.truthy(http:find(
-                    'import "' .. dependency .. '"', 1, true), dependency)
-                assert.falsy(http:find(
-                    'import "titan.' .. dependency .. '"', 1, true), dependency)
-            end
-            local url = read_file("titan/url.titan")
-            for _, dependency in ipairs({ "peg", "string" }) do
-                assert.truthy(url:find(
-                    'import "' .. dependency .. '"', 1, true), dependency)
-                assert.falsy(url:find(
-                    'import "titan.' .. dependency .. '"', 1, true), dependency)
-            end
-        end)
-
-    it("resumes one-shot timer Tasks only from close completion", function()
-        local task_source = read_file("titan/uv/task.titan")
-        local condition_start = assert(task_source:find(
-            "local function resume_condition_waiter_from_callback(",
-            1, true))
-        local condition_stop = assert(task_source:find(
-            "\nend", condition_start, true))
-        local condition = task_source:sub(
-            condition_start, condition_stop - 1)
-        assert.matches("if task.resume_pending then return end",
-            condition, 1, true)
-        assert.matches(
-            "resume_task_from_callback(task, false, nil)",
-            condition, 1, true)
-        assert.not_matches("ResumeToken", condition, 1, true)
-        assert.not_matches("task:resume", condition, 1, true)
-
-        local timer_start = assert(task_source:find(
-            "local function start_timer(", 1, true))
-        local timer_stop = assert(task_source:find(
-            "\n-- Resume is meaningful only for an explicit async.suspend.",
-            timer_start, true))
-        local timer_body = task_source:sub(timer_start, timer_stop - 1)
-        local completion_start = assert(timer_body:find(
-            "local completion = function ()", 1, true))
-        local callback_start = assert(timer_body:find(
-            "local callback = function (owner: TimerOwner)", 1, true))
-        local completion = timer_body:sub(
-            completion_start, callback_start - 1)
-        local timer_callback = timer_body:sub(callback_start)
-
-        assert.matches("if terminal(task.state) then", completion, 1, true)
-        assert.matches("task.resume_token = nil", completion, 1, true)
-        assert.matches("task.resume_pending = false", completion, 1, true)
-        assert.matches("resume_task_from_callback", completion, 1, true)
-        assert.matches("begin_close", timer_callback, 1, true)
-        assert.matches("owner.root_index, completion", timer_callback, 1,
-            true)
-        assert.not_matches("resume_task_from_callback", timer_callback, 1,
-            true)
-
-        local runtime_source = read_file("titan/uv/runtime.titan")
-        local close_start = assert(runtime_source:find(
-            "local function begin_close(", 1, true))
-        local close_stop = assert(runtime_source:find(
-            "\nlocal function close_handle(", close_start, true))
-        local close_body = runtime_source:sub(close_start, close_stop - 1)
-        local closing = assert(close_body:find(
-            "ffi.uv_is_closing(handle)", 1, true))
-        local root = assert(close_body:find(
-            "root_handle(runtime, owner)", 1, true))
-        local unroot = assert(close_body:find(
-            "unroot_handle(runtime, owner.root_index)", 1, true))
-        local complete = assert(close_body:find("completion()", 1, true))
-        local submit = assert(close_body:find(
-            "ffi.uv_close(handle, uv_close_cb)", 1, true))
-        assert.is_true(closing < root)
-        assert.is_true(unroot < complete)
-        assert.is_true(complete < submit)
+            assert.truthy(imports["titan.uv"], source)
+        end
     end)
 
-    it("retires explicit suspension before terminal listeners", function()
-        local task = read_file("titan/uv/task.titan")
-        local clear_start = assert(task:find(
-            "local function clear_explicit_suspension(task: Task)",
-            1, true))
-        local clear_stop = assert(task:find("\nend", clear_start, true))
-        local clear = task:sub(clear_start, clear_stop - 1)
-        for _, assignment in ipairs({
-            "task.suspended = false",
-            "task.resume_token = nil",
-            "task.resume_pending = false",
-        }) do
-            assert.matches(assignment, clear, 1, true)
-        end
+    it("retires deferred wake timers before action and sleep resources before returning", function()
+        local async = read_file("titan/async.titan")
+        local first = assert(async:find("local function schedule(runtime: Runtime", 1, true))
+        local last = assert(async:find("\nfunction Task:cancel", first, true))
+        local schedule = async:sub(first, last - 1)
+        assert_ordered(schedule, "local closed = function (_: uv.handle_t) action() end",
+            "local fired = function (_: uv.timer_t) uv.close(handle, closed) end",
+            "uv.timer_init(runtime.loop, timer)", "uv.timer_start(timer, fired, 0, 0)",
+            "if status < 0 then uv.close(handle)")
+        local uv = read_file(UV_MAIN_SOURCE)
+        first = assert(uv:find("local function timer_closed(", 1, true))
+        last = assert(uv:find("\nforeign function timer_callback", first, true))
+        local closed = uv:sub(first, last - 1)
+        assert_ordered(closed, "loop.handles[owner] = nil", "owner.phase = HANDLE_RETIRED",
+            "owner.callback = nil", "owner.close_callback = nil", "callback(handle_t.timer(owner))")
+        local timer = read_file("titan/timer.titan")
+        assert_ordered(timer, "local function close_timer(", "async.await_cleanup<|nil, async.OperationError|>",
+            "uv.close(ticker.timer:as_handle_t(), closed)")
+        assert_ordered(timer, "function sleep(milliseconds: integer)", "local timer = start_timer(milliseconds, 0)",
+            "defer timer:close()", "timer.subscription:next()")
+    end)
 
-        local finish_start = assert(task:find(
-            "local function finish_user_task(task: Task, state: TaskStatus)",
-            1, true))
-        local finish_stop = assert(task:find(
-            "\n-- A cancellation request is authoritative", finish_start,
-            true))
-        local finish = task:sub(finish_start, finish_stop - 1)
-        local retired = assert(finish:find(
-            "clear_explicit_suspension(task)", 1, true))
-        local notified = assert(finish:find(
-            "notify_terminal(task, state)", 1, true))
-        local unrooted = assert(finish:find(
-            "retire_task(task, state)", 1, true))
-        assert.is_true(retired < notified)
-        assert.is_true(notified < unrooted)
+    it("retires explicit suspension and the exact Wait before terminal listeners", function()
+        local task = read_file("titan/async.titan")
+        local first = assert(task:find("local function clear_suspension(task: Task)", 1, true))
+        local last = assert(task:find("\nend", first, true))
+        local clear = task:sub(first, last - 1)
+        for _, assignment in ipairs({"task.suspended = false", "task.resume_token = nil",
+                "task.resume_pending = false", "task.suspend_cancel = nil"}) do
+            assert.truthy(clear:find(assignment, 1, true), assignment)
+        end
+        first = assert(task:find("local function finish_task(task: Task, state: TaskStatus)", 1, true))
+        last = assert(task:find("\nend", first, true))
+        local finish = task:sub(first, last - 1)
+        assert_ordered(finish, "clear_suspension(task)", "wait.phase = WAIT_RETIRED",
+            "task.wait = nil", "task.state = state", "listeners[index].live = false",
+            "listeners[index].listener(state)", "task.runtime.tasks[task.root_index] = nil")
     end)
 
     it("keeps SSL path loading high-level and PEM owners private", function()
@@ -2524,15 +2416,18 @@ int main(void) {
                 "function lstat(path: string): Stat?", 1, true))
             assert_ordered(source,
                 "function tmpname(): string",
-                "return uv.fs_tmpname()",
+                'local template = sized_path("fs.tmpname", uv.os_tmpdir)',
+                'defer file:close_with("fs.tmpname.close")',
+                "return uv.fs_mkstemp(loop, request, template, callback)",
+                "return uv.fs_get_path(request) as string",
                 "function tmpdir(): string",
-                "return uv.os_tmpdir()",
+                'return sized_path("os.tmpdir", uv.os_tmpdir)',
                 "function homedir(): string",
-                "return uv.os_homedir()",
+                'return sized_path("os.homedir", uv.os_homedir)',
                 "function pwd(): string",
-                'return uv.current_directory("fs.pwd")',
+                'return sized_path("fs.pwd", uv.cwd)',
                 "function chdir(path: string)",
-                'uv.change_directory(path, "fs.chdir")')
+                'check_status(uv.chdir(checked_path(path, "fs.chdir")), "fs.chdir")')
         end)
 
     it("pins the public os process and stdio facade", function()
@@ -2919,16 +2814,15 @@ exit 64
             if not tested then error(test_error, 0) end
         end)
 
-    it("preserves complete pkg-config flags and Linux feature macros",
+    it("uses bundled headers, payload and Linux feature macros",
         function()
             local ok, output, why, code = run_make("Linux")
             assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
                 tostring(code) .. ")")
             assert.truthy(output:find(
-                "LIBUV_CPPFLAGS=-I/opt/libuv/include -DUV_FAKE_PKG=1 " ..
-                "-D_GNU_SOURCE", 1, true), output)
+                "LIBUV_CPPFLAGS=-Ilibuv-v1.52.1/include -D_GNU_SOURCE", 1, true), output)
             assert.truthy(output:find(
-                "LIBUV_LDFLAGS=-L/opt/libuv/lib -luv -pthread -ldl -lrt",
+                "LIBUV_LDFLAGS=-lpthread -lrt",
                 1, true), output)
         end)
 
@@ -2937,26 +2831,57 @@ exit 64
         assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
             tostring(code) .. ")")
         assert.truthy(output:find(
-            "LIBUV_CPPFLAGS=-I/opt/libuv/include -DUV_FAKE_PKG=1",
+            "LIBUV_CPPFLAGS=-Ilibuv-v1.52.1/include",
             1, true), output)
         assert.falsy(output:find("-D_GNU_SOURCE", 1, true), output)
     end)
 
-    it("fails early with platform package instructions when libuv is absent",
-        function()
-            local ok, output = run_make("Linux", "env FAKE_LIBUV_MISSING=1")
+    it("rejects obsolete libuv mode selection before any build", function()
+        for _, mode in ipairs({ "system", "bundled" }) do
+            local ok, output = run_argv({
+                "make", "--no-print-directory", "LIBUV_MODE=" .. mode,
+                "help",
+            })
             assert.falsy(ok, output)
-            assert.truthy(output:find("cannot find the libuv development package",
+            assert.truthy(output:find(
+                "LIBUV_MODE is no longer supported; Titan always bundles patched libuv",
                 1, true), output)
-            assert.truthy(output:find("libuv1-dev", 1, true), output)
-            assert.truthy(output:find("libuv-devel", 1, true), output)
-            assert.truthy(output:find("brew install libuv pkgconf", 1, true),
-                output)
-        end)
+        end
+    end)
+
+    it("defaults only OpenSSL to its system provider", function()
+        for _, inherited in ipairs({
+            {},
+            {
+                "OPENSSL_MODE=bundled",
+                "MAKEFLAGS=-j --jobserver-auth=998,999 -- OPENSSL_MODE=bundled",
+                "MFLAGS=-j --jobserver-auth=998,999",
+                "GNUMAKEFLAGS=--warn-undefined-variables",
+                "MAKELEVEL=1", "MAKEOVERRIDES=OPENSSL_MODE=bundled",
+            },
+        }) do
+            local argv = { "env", table.unpack(inherited) }
+            -- This standalone defaults query cannot use a parent Make
+            -- jobserver through the Lua pipe or inherit its command overrides.
+            for _, argument in ipairs({
+                "env", "-u", "OPENSSL_MODE", "-u", "MAKEFLAGS",
+                "-u", "MFLAGS", "-u", "GNUMAKEFLAGS", "-u", "MAKELEVEL",
+                "-u", "MAKEOVERRIDES", "make", "--no-print-directory", "-s",
+                "--eval=print-native-policy: ; @echo $(OPENSSL_MODE) $(LIBUV_EXTRA_OBJECTS) $(LLHTTP_ARCHIVE) $(SQLITE3_ARCHIVE)",
+                "print-native-policy",
+            }) do
+                argv[#argv + 1] = argument
+            end
+            local ok, output = run_argv(argv)
+            assert.truthy(ok, output)
+            assert.equal("system libuv-build/libuv.a llhttp-build/libtitan-llhttp.a " ..
+                "sqlite3-build/libtitan-sqlite3.a\n", output)
+        end
+    end)
 
     it("builds one provider pair with native support and one libuv policy",
         function()
-            local ok, output, why, code = run_uv_dry_run("bundled")
+            local ok, output, why, code = run_uv_dry_run()
             assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
                 tostring(code) .. ")")
             local command, normalized = stdlib_command(output)
@@ -2986,31 +2911,7 @@ exit 64
             assert.equal(1, count_plain(command, bundled_flags), command)
             assert.equal(1, count_plain(command, "libuv-build/libuv.a"), command)
 
-            ok, output, why, code = run_uv_dry_run("system")
-            assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
-                tostring(code) .. ")")
-            command, normalized = stdlib_command(output)
-            assert.truthy(command:find(
-                    "./titanc --source-first --incremental " .. table.concat(STDLIB_ROOTS, " "), 1, true),
-                command)
-            assert.equal(1, count_plain(command,
-                "-X titan-runtime/ltitanlib.o " ..
-                "lpeglabel-build/libtitan-lpeglabel.a " ..
-                HTTP_SSL_BUNDLED_PAYLOAD), command)
-            assert.falsy(command:find("titan_uv.o", 1, true), command)
-            assert.falsy(command:find("libuv-build/libuv.a", 1, true), command)
-            assert.truthy(command:find(
-                "TITAN_EXTRA_CPPFLAGS='-DUSER_CPP=1 " ..
-                LPEGLABEL_INCLUDE .. " " .. LLHTTP_NATIVE_INCLUDE .. " " ..
-                SQLITE3_NATIVE_INCLUDE .. " " .. BUNDLED_OPENSSL_INCLUDES ..
-                " -I/opt/libuv/include -DUV_FAKE_PKG=1 -D_GNU_SOURCE'",
-                1, true), command)
-            local system_flags =
-            [[TITAN_EXTRA_LDFLAGS='-Wl,user-link -L/opt/libuv/lib -luv -pthread -ldl -lrt -lpthread']]
-            assert.equal(1, count_plain(command, system_flags), command)
-            assert.equal(1, count_plain(command, " -luv "), command)
-
-            ok, output, why, code = run_uv_dry_run("bundled", "Darwin")
+            ok, output, why, code = run_uv_dry_run("Darwin")
             assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
                 tostring(code) .. ")")
             command = stdlib_command(output)
@@ -3044,7 +2945,7 @@ esac
 
         local tested, test_error = xpcall(function()
             ok, output, why, code = run_uv_dry_run(
-                "bundled", "Linux", nil, "system", fake_pkg_config)
+                "Linux", nil, "system", fake_pkg_config)
             assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
                 tostring(code) .. ")")
             local command = stdlib_command(output)
@@ -3103,7 +3004,7 @@ esac
             end
             for _, source in ipairs(sources) do
                 local ok, output, why, code =
-                    run_uv_dry_run("bundled", "Linux", source)
+                    run_uv_dry_run("Linux", source)
                 assert.truthy(ok, source .. ": " .. output .. "\n(" ..
                     tostring(why) .. ", " .. tostring(code) .. ")")
                 local command, normalized = stdlib_command(output)
@@ -3198,8 +3099,6 @@ printf 'build\n' >> %s
                 return run_argv({
                     "make", "--no-print-directory", "-s",
                     "HOST_OS=Linux",
-                    "LIBUV_MODE=system",
-                    "LIBUV_PKG_CONFIG=" .. PKG_CONFIG,
                     "PREFIX=" .. root,
                     "TITAN_LUA=" .. prefix .. "/bin/lua",
                     "TITANC=" .. fake_titanc,
@@ -4489,7 +4388,7 @@ done
             end
 
             local mode_smoke =
-                read_file("spec/support/ci_libuv_mode_smoke.sh")
+                read_file("spec/support/ci_dependency_mode_smoke.sh")
             for _, contract in ipairs({
                 'RUNTIME_ARCHIVE="$LIBRARY_ROOT/libtitan.a"',
                 'test ! -e "$PREFIX/lib/libtitan.a"',
@@ -4536,26 +4435,16 @@ done
                 'ssl.Error.new(',
                 'url.parse("https://localhost:8443/static?q=1")',
                 "system.exepath()",
-                '"$LIBUV_PKG_CONFIG" --static --libs libuv',
-                '"$libdir/libuv.a" "$libdir/libuv_a.a"',
-                "TITAN_SYSTEM_STATIC_LIBUV_ARCHIVE",
-                "must name an absolute regular nonlink file",
                 '"$OPENSSL_PKG_CONFIG" --cflags openssl',
                 '"$OPENSSL_PKG_CONFIG" --libs openssl',
                 "has_openssl_dependency",
                 "defines_ssl_do_handshake",
-                "driver.compile_archive_validation_image(",
-                "build_static_system_provider_image",
-                'if ! defines_uv_version "$static_provider"',
-                'if defines_uv_version "$STATIC_ARCHIVE"',
                 "has_public_lpeglabel_symbol",
                 "has_unprefixed_lpeglabel_definition",
                 "require_no_lpeglabel_dependency",
-                "build_and_run_static_titan system-static",
                 '"$executable" "$marker" "$TITAN_PROCESS_SMOKE_CHILD"',
                 'if ! defines_uv_version "$executable"',
-                'if defines_uv_version "$STATIC_ARCHIVE"',
-                "LIBUV_MODE=system OPENSSL_MODE=system",
+                "OPENSSL_MODE=system",
             }) do
                 assert.truthy(mode_smoke:find(contract, 1, true), contract)
             end
@@ -4817,11 +4706,11 @@ done
             assert.truthy(stdlib_job:find(
                 'static_archive="${provider%.so}.a"', 1, true), stdlib_job)
             assert.truthy(stdlib_job:find(
-                "ci_libuv_mode_smoke.sh bundled", 1, true), stdlib_job)
+                "ci_dependency_mode_smoke.sh bundled", 1, true), stdlib_job)
             assert.truthy(stdlib_job:find(
-                "ci_libuv_mode_smoke.sh system", 1, true), stdlib_job)
+                "ci_dependency_mode_smoke.sh system", 1, true), stdlib_job)
             assert.truthy(stdlib_job:find(
-                "LIBUV_MODE=system OPENSSL_MODE=system", 1, true), stdlib_job)
+                "OPENSSL_MODE=system", 1, true), stdlib_job)
             assert.truthy(stdlib_job:find(
                 "archive: false", 1, true), stdlib_job)
             assert.truthy(stdlib_job:find(
@@ -4885,7 +4774,7 @@ done
                 "- name: Run all stdlib/runtime tests without coverage",
                 pack_index, true))
             local bundled_index = assert(stdlib_job:find(
-                "- name: Smoke-test bundled libuv source image",
+                "- name: Smoke-test bundled dependency source image",
                 tests_index, true))
             local regular_save_index = assert(stdlib_job:find(
                 "- name: Save regular Linux C-probe results",
@@ -4899,7 +4788,7 @@ done
                 1, true))
             local system_index = assert(stdlib_job:find(
                 "- name: Canary source-rock installation with system " ..
-                "libuv and OpenSSL", regular_save_index, true))
+                "OpenSSL", regular_save_index, true))
             local upload_index = assert(stdlib_job:find(
                 "- name: Upload prepared Linux tree", system_index, true))
             assert.is_true(pack_index < tests_index, stdlib_job)
@@ -5042,7 +4931,7 @@ done
             assert.equal(1, count_literal(macos_job,
                 "ci_stdlib_snapshot.sh restore"), macos_job)
             assert.equal(1, count_literal(macos_job,
-                "ci_libuv_mode_smoke.sh"), macos_job)
+                "ci_dependency_mode_smoke.sh"), macos_job)
             assert.falsy(macos_job:find('luacov "', 1, true), macos_job)
             assert.falsy(macos_job:find("id-token: write", 1, true),
                 macos_job)
@@ -5087,10 +4976,9 @@ done
                 "Build the pinned private llhttp support",
                 "Build the pinned bundled OpenSSL support",
                 "run: make openssl",
-                "Canary source-rock installation with system libuv and OpenSSL",
-                "LIBUV_MODE=system OPENSSL_MODE=system",
+                "Canary source-rock installation with system OpenSSL",
                 "OPENSSL_MODE=system",
-                "brew install cmake libuv openssl@3 pkgconf",
+                "brew install cmake openssl@3 pkgconf",
                 "test_ssl_http_fresh_process_sanitizer_composition$",
                 "libssl-dev", "perl",
             }) do
@@ -5101,9 +4989,8 @@ done
                 'MAKEFLAGS: "-j2"'), workflow)
             assert.equal(1, count_literal(workflow,
                 'TITAN_JOBS: "2"'), workflow)
-            assert.equal(2, select(2, workflow:gsub(
-                'TITAN_SYSTEM_STATIC_LIBUV_ARCHIVE=' ..
-                '"%$GITHUB_WORKSPACE/libuv%-build/libuv[.]a"', "")))
+            assert.falsy(workflow:find("TITAN_SYSTEM_STATIC_LIBUV_ARCHIVE", 1, true))
+            assert.truthy(workflow:find("OPENSSL_MODE: bundled", 1, true))
             assert.truthy(workflow:find(
                 "--name='standalone-prefix source installation installs one " ..
                 "matching Lua and Titan SDK before the standard images'",
@@ -5307,7 +5194,7 @@ done
                 'SANITIZER_LIBUV_SHA256: "66d511b9e6e334c0e62279eb234fbfb2b' ..
                 '3110b1479c09b95b44c7afca8cff9e7"',
                 'LIBUV_BUILD_PROFILE: "static-pic-debug-tests-off-' ..
-                'asan-ubsan-v1"',
+                'asan-ubsan-v2"',
                 'SANITIZER_LLHTTP_VERSION: "9.4.3"',
                 'SANITIZER_LLHTTP_SHA256: "1eb813c7437b31a87496a1cd3ed79f007' ..
                 '46720f5e7e29c79b42c02cb69f36c39"',
@@ -5316,6 +5203,7 @@ done
                 '1984552a3c8e4aa11a24aa31aeac98e8"',
                 "id: sanitizer-native-cache-key",
                 "sha256sum vendor/lua/lua-5.5.1-relocatable.patch",
+                "sha256sum vendor/libuv/libuv-1.52.1-spawn-close.patch",
                 "git ls-remote",
                 "libbacktrace.git HEAD",
                 'cc_target="$(cc -dumpmachine)"',
@@ -5371,6 +5259,7 @@ done
             for _, fingerprint in ipairs({
                 "titan_abi=$TITAN_ABI_VERSION",
                 "lua_patch=$lua_patch_sha256",
+                "libuv_patch=$libuv_patch_sha256",
                 "libuv_profile=$LIBUV_BUILD_PROFILE",
                 "sqlite3=$SANITIZER_SQLITE3_VERSION:$SANITIZER_SQLITE3_SHA256",
                 "sqlite3_cflags=$SQLITE3_BUILD_CFLAGS",

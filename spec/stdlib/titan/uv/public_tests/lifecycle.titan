@@ -1,0 +1,314 @@
+local common = import "support.common.titan"
+
+local function install_unref_timer(loop: uv.loop_t, weak: {value: value})
+  local timer = uv.timer_t()
+  success(uv.timer_init(loop, timer))
+  weak[1] = timer
+  uv.handle_set_data(timer:as_handle_t(), "public user data")
+  success(uv.timer_start(timer, function () raise "unreferenced timer fired" end, 0, 0))
+  uv.unref(timer:as_handle_t())
+end
+
+local function stop_weak_timer(weak: {value: value})
+  local timer: uv.timer_t = weak[1]
+  success(uv.timer_stop(timer))
+end
+
+local function close_weak_timer(loop: uv.loop_t, weak: {value: value},
+                                closed: function (): ())
+  local timer: uv.timer_t = weak[1]
+  test.assert(uv.handle_get_data(timer:as_handle_t()) == "public user data")
+  test.assert(uv.handle_get_loop(timer:as_handle_t()) == loop)
+  test.assert(uv.loop_close(loop) == uv.EBUSY)
+  uv.close(timer:as_handle_t(), function (handle: uv.handle_t)
+    test.assert(not handle:is_initialized(), "close callback preceded retirement")
+    collect()
+    assert_retained(weak, 1)
+    closed()
+  end)
+end
+
+function test_stopped_unref_handle_rooted_until_close(_context: test.Context)
+  local loop = new_loop()
+  defer finish_loop(loop)
+  local weak: {value: value} = {}
+  gc.weak(weak)
+  install_unref_timer(loop, weak)
+  collect()
+  assert_retained(weak, 1)
+  test.assert(not uv.loop_alive(loop))
+  success(uv.run(loop))
+  stop_weak_timer(weak)
+  collect()
+  assert_retained(weak, 1)
+  local closed = 0
+  close_weak_timer(loop, weak, function () closed = closed + 1 end)
+  collect()
+  assert_retained(weak, 1)
+  success(uv.run(loop))
+  test.assert(closed == 1)
+  collect()
+  test.assert(weak[1] == nil, "closed handle retained its native root")
+end
+
+function test_close_callback_can_reinitialize_same_owner(_context: test.Context)
+  local loop = new_loop()
+  defer finish_loop(loop)
+  local timer = uv.timer_t()
+  success(uv.timer_init(loop, timer))
+  local fired, closed = 0, 0
+  uv.close(timer:as_handle_t(), function (view: uv.handle_t)
+    closed = closed + 1
+    test.assert(not view:is_initialized())
+    test.assert(uv.loop_close(loop) == uv.EBUSY)
+    success(uv.timer_init(loop, timer))
+    success(uv.timer_start(timer, function (owner: uv.timer_t)
+      test.assert(owner == timer)
+      fired = fired + 1
+      uv.close(owner:as_handle_t(), function (_view: uv.handle_t) closed = closed + 1 end)
+    end, 0, 0))
+    collect()
+  end)
+  success(uv.run(loop))
+  test.assert(fired == 1 and closed == 2, "new lifetime was lost during old close retirement")
+end
+
+function test_walk_is_synchronous_and_loop_driving_cannot_reenter(_context: test.Context)
+  local loop = new_loop()
+  defer finish_loop(loop)
+  local timer = uv.timer_t()
+  success(uv.timer_init(loop, timer))
+  local visited = 0
+  uv.walk(loop, function (view: uv.handle_t, argument: value)
+    test.assert(argument == "walk user data")
+    test.assert(uv.handle_get_loop(view) == loop)
+    test.assert(uv.loop_close(loop) == uv.EBUSY)
+    expect_error(function () uv.run(loop) end, "uv.run cannot reenter the event loop")
+    visited = visited + 1
+  end, "walk user data")
+  test.assert(visited == 1, "walk deferred its callback")
+  success(uv.timer_start(timer, function (owner: uv.timer_t)
+    expect_error(function () uv.run(loop) end, "uv.run cannot reenter the event loop")
+    uv.close(owner:as_handle_t())
+  end, 0, 0))
+  success(uv.run(loop))
+end
+
+local record TimerReceiver
+  calls: integer
+end
+
+local function TimerReceiver:receive(owner: uv.timer_t)
+  self.calls = self.calls + 1
+  uv.close(owner:as_handle_t())
+end
+
+function test_callbacks_use_ordinary_callable_adaptation(context: test.Context)
+  context:run("adjusted_titan_closure", function (_child: test.Context)
+    local loop = new_loop()
+    defer finish_loop(loop)
+    local timer = uv.timer_t()
+    success(uv.timer_init(loop, timer))
+    local calls = 0
+    success(uv.timer_start(timer, function ()
+      calls = calls + 1
+      uv.close(timer:as_handle_t())
+    end, 0, 0))
+    test.assert(calls == 0, "callback ran before explicit loop driving")
+    success(uv.run(loop))
+    test.assert(calls == 1)
+  end)
+  context:run("bound_titan_method", function (_child: test.Context)
+    local loop = new_loop()
+    defer finish_loop(loop)
+    local timer = uv.timer_t()
+    success(uv.timer_init(loop, timer))
+    local receiver = TimerReceiver(0)
+    success(uv.timer_start(timer, receiver:receive, 0, 0))
+    success(uv.run(loop))
+    test.assert(receiver.calls == 1)
+  end)
+  context:run("lua_callable_table", function (_child: test.Context)
+    local loop = new_loop()
+    defer finish_loop(loop)
+    local timer = uv.timer_t()
+    success(uv.timer_init(loop, timer))
+    local calls = 0
+    local make = lua.load([[local callback = ...
+      return setmetatable({}, {__call = function(_, owner) callback(owner) end})]])
+    local callback: function (uv.timer_t): () = make(function (owner: uv.timer_t)
+      calls = calls + 1
+      test.assert(owner == timer)
+      uv.close(owner:as_handle_t())
+    end)
+    success(uv.timer_start(timer, callback, 0, 0))
+    collect()
+    success(uv.run(loop))
+    test.assert(calls == 1)
+  end)
+  context:run("lua_c_function", function (_child: test.Context)
+    local loop = new_loop()
+    defer finish_loop(loop)
+    local timer = uv.timer_t()
+    success(uv.timer_init(loop, timer))
+    local get_error = lua.load("return error")
+    local callback: function (uv.timer_t): () = get_error()
+    success(uv.timer_start(timer, callback, 0, 0))
+    expect_error(function () uv.run(loop) end, timer)
+    test.assert(timer:as_handle_t():is_initialized())
+  end)
+end
+
+local function callback_failure(context: test.Context, payload: value, expected: value)
+  local loop = new_loop()
+  defer finish_loop(loop)
+  local timer = uv.timer_t()
+  success(uv.timer_init(loop, timer))
+  success(uv.timer_start(timer, function (owner: uv.timer_t)
+    uv.close(owner:as_handle_t())
+    raise payload
+  end, 0, 0))
+  local caught = false
+  do
+    uv.run(loop)
+  catch
+    caught = true
+    test.assert(error == expected, "callback error value changed at run boundary")
+    test.assert(#traceback > 0, "callback traceback was lost")
+    local trace = traceback
+    context:run("symbolic_frame", function (_child: test.Context)
+      if common.is_windows() then
+        test.skip("unsupported: native Windows tracebacks retain raw addresses without Titan symbols")
+      end
+      test.assert(strings.find(trace, "callback_failure", 1, true) ~= nil,
+                  "callback traceback lost its Titan frame")
+    end)
+  end
+  test.assert(caught, "callback failure was swallowed")
+  success(uv.run(loop))
+end
+
+function test_callback_errors_preserve_false_nil_and_trace(context: test.Context)
+  context:run("false", function (child: test.Context) callback_failure(child, false, false) end)
+  context:run("nil", function (child: test.Context)
+    -- Lua 5.5 normalizes a raised nil before Titan's catch sees it.
+    callback_failure(child, nil, "<no error object>")
+  end)
+  context:run("string", function (child: test.Context)
+    callback_failure(child, "callback sentinel", "callback sentinel")
+  end)
+end
+
+local function failing_close(loop: uv.loop_t, failure: value,
+                             observe: function (value): ())
+  local timer = uv.timer_t()
+  success(uv.timer_init(loop, timer))
+  uv.close(timer:as_handle_t(), function (_handle: uv.handle_t)
+    observe(failure)
+    raise failure
+  end)
+end
+
+function test_first_callback_failure_survives_secondary_failure(_context: test.Context)
+  local loop = new_loop()
+  defer finish_loop(loop)
+  local calls = 0
+  local first: value = nil
+  local observe = function (failure: value)
+    if calls == 0 then first = failure end
+    calls = calls + 1
+  end
+  failing_close(loop, false, observe)
+  failing_close(loop, "other callback failure", observe)
+  local caught = false
+  do
+    uv.run(loop)
+  catch
+    caught = true
+    test.assert(error == first, "later callback replaced the first failure")
+  end
+  test.assert(caught and calls == 2 and loop:secondary_error_count() == 1)
+  success(uv.run(loop))
+  test.assert(loop:secondary_error_count() == 0)
+end
+
+function test_owner_created_on_disposable_lua_thread_uses_main(_context: test.Context)
+  local loop: uv.loop_t? = nil
+  defer if loop ~= nil then finish_loop(loop) end
+  local is_main = lua.load("local _, main = coroutine.running(); return main")
+  local calls = 0
+  local create_on_thread = lua.load([[local create, drive = ...
+    local thread = coroutine.create(function()
+      create()
+      local ok, err = pcall(drive)
+      assert(not ok and err == "uv.run requires the owning main Lua thread")
+    end)
+    assert(coroutine.resume(thread))
+    assert(coroutine.status(thread) == "dead")
+    return thread]])
+  local weak: {value: value} = {}
+  gc.weak(weak)
+  -- The helper frame releases the returned Lua thread before collection.
+  local create = function ()
+    loop = new_loop()
+    local timer = uv.timer_t()
+    success(uv.timer_init(loop, timer))
+    success(uv.timer_start(timer, function (owner: uv.timer_t)
+      local main: boolean = is_main()
+      test.assert(main, "callback used its creator's Lua thread")
+      calls = calls + 1
+      uv.close(owner:as_handle_t())
+    end, 0, 0))
+  end
+  save_lua_thread(weak, create_on_thread, create, function () uv.run(loop) end)
+  collect()
+  test.assert(weak[1] == nil, "loop retained the disposable caller thread")
+  success(uv.run(loop))
+  test.assert(calls == 1)
+end
+
+local function save_lua_thread(weak: {value: value},
+    chunk: function (...: value): (...: value),
+    create: function (): (), drive: function (): ())
+  weak[1] = chunk(create, drive)
+end
+
+function test_loop_phases_async_notification_and_metrics(_context: test.Context)
+  local loop = new_loop()
+  defer finish_loop(loop)
+  success(uv.loop_configure(loop, uv.METRICS_IDLE_TIME))
+  uv.loop_set_data(loop, false)
+  local idle, prepare, check, notification = uv.idle_t(), uv.prepare_t(), uv.check_t(), uv.async_t()
+  success(uv.idle_init(loop, idle))
+  success(uv.prepare_init(loop, prepare))
+  success(uv.check_init(loop, check))
+  local idles, prepares, checks, notifications = 0, 0, 0, 0
+  success(uv.idle_start(idle, function (owner)
+    idles = idles + 1
+    success(uv.idle_stop(owner))
+    uv.close(owner:as_handle_t())
+  end))
+  success(uv.prepare_start(prepare, function (owner)
+    prepares = prepares + 1
+    success(uv.prepare_stop(owner))
+    uv.close(owner:as_handle_t())
+  end))
+  success(uv.check_start(check, function (owner)
+    checks = checks + 1
+    success(uv.check_stop(owner))
+    uv.close(owner:as_handle_t())
+  end))
+  success(uv.async_init(loop, notification, function (owner: uv.async_t)
+    notifications = notifications + 1
+    test.assert(uv.loop_get_data(loop) == false)
+    uv.close(owner:as_handle_t())
+  end))
+  success(uv.async_send(notification))
+  success(uv.async_send(notification))
+  test.assert(idles == 0 and prepares == 0 and checks == 0 and notifications == 0)
+  success(uv.run(loop))
+  test.assert(idles == 1 and prepares == 1 and checks == 1 and notifications == 1)
+  local status, metrics? = uv.metrics_info(loop)
+  success(status)
+  test.assert(metrics ~= nil and metrics.loop_count > 0 and uv.metrics_idle_time(loop) >= 0)
+end

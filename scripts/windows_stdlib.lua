@@ -63,7 +63,8 @@ if mode == "validate" then
         local allowed = { ["lua-5.5.1.dll"] = true, ["libuv-1.dll"] = true,
             ["libllhttp-9.4.dll"] = true, ["libsqlite3-0.dll"] = true,
             ["libssl-3-x64.dll"] = true, ["libcrypto-3-x64.dll"] = true,
-            ["kernel32.dll"] = true, ["bcrypt.dll"] = true, ["ucrtbase.dll"] = true }
+            ["kernel32.dll"] = true, ["bcrypt.dll"] = true, ["ws2_32.dll"] = true,
+            ["ucrtbase.dll"] = true }
         for name in report:gmatch("\n  Name: ([^\r\n]+)") do
             count = count + 1; local lower = name:lower()
             assert(allowed[lower] or lower:match("^api%-ms%-win%-crt%-[%w%-]+%.dll$"),

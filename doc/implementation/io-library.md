@@ -81,8 +81,8 @@ os.spawn("/bin/sh", {"-c", command},
 
 The Windows branch obtains the absolute `cmd.exe` path with
 `GetSystemDirectoryW` and uses `/d /s /c`. It encloses the caller's command in
-the shell's outer quotes and uses a private libuv verbatim-argument transport
-to preserve that command payload. It does not consult `COMSPEC`. Ordinary
+the shell's outer quotes and uses the OS module's verbatim-argument option for
+public `uv.spawn` to preserve that command payload. It does not consult `COMSPEC`. Ordinary
 `os.spawn` retains its existing argument transport.
 
 Both shell branches use the existing asynchronous process owner and captured

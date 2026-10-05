@@ -1,0 +1,54 @@
+local uv = import "titan.uv"
+
+-- This body is raw C and runs on a foreign worker. It cannot capture Titan
+-- values or call Lua/Titan. The ordinary submitting code owns the pointed bytes.
+foreign function double_value(argument: *void): void
+  local item = argument as foreign *int
+  item[0] = item[0] * 2
+end
+
+local function check(status: integer)
+  if status < 0 then raise uv.strerror(status) end
+end
+
+function main(args: {string}): integer
+  local loop = uv.loop_t()
+  check(uv.loop_init(loop))
+  local finish = function ()
+    -- Neither accepted work nor random storage may retire before completion.
+    uv.run(loop, nil)
+    check(uv.loop_close(loop))
+  end
+  defer finish()
+
+  local packet: owned int[] = foreign int.new_array(1)
+  packet[0] = 21
+  local work = uv.work_t()
+  local work_finished, random_finished = false, false
+  local work_status, random_status = 0, 0
+  local status = uv.queue_work(loop, work, double_value, packet,
+    function (owner: uv.work_t, result: integer)
+      work_status = result
+      work_finished = true
+    end, packet) -- argument_owner roots the complete borrowed argument graph.
+  check(status) -- Rejection promises no callback and leaves packet with us.
+
+  local random = uv.random_t()
+  local bytes = uv.buf_t.allocate(32)
+  uv.req_set_data(random:as_req_t(), "random destination")
+  check(uv.random(loop, random, bytes, bytes:length(), 0,
+    function (owner: uv.random_t, result: integer,
+              output: uv.buf_t, length: integer)
+      random_status = result
+      random_finished = true
+      -- A saved output view would retain its backing bytes after this return.
+      if result == 0 and length ~= 32 then random_status = uv.EINVAL end
+    end))
+  uv.run(loop, nil)
+  check(work_status)
+  check(random_status)
+  if not work_finished or not random_finished or packet[0] ~= 42 then return 1 end
+  if #bytes:to_string(32) ~= 32 then return 1 end
+  if uv.req_get_data(random:as_req_t()) ~= "random destination" then return 1 end
+  return 0
+end

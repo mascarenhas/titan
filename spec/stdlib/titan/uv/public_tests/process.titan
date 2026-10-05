@@ -1,0 +1,130 @@
+local function exit_options(first: uv.pipe_t, second: uv.pipe_t?): uv.process_options_t
+  local file = "/bin/sh"
+  local args = {"sh", "-c", "exit 0"}
+  if common.is_windows() then
+    local found, shell?, _size = uv.os_getenv("ComSpec", 32768)
+    if found ~= 0 or shell == nil then
+      test.skip("capability: Windows command interpreter is unavailable in ComSpec")
+    end
+    file = shell
+    args = {shell, "/d", "/c", "exit 0"}
+  end
+  local options = uv.process_options_t(file, args)
+  options.stdio = {
+    {flags = uv.IGNORE, data = uv.stdio_data_t.fd(-1)},
+    {flags = uv.CREATE_PIPE | uv.WRITABLE_PIPE, data = uv.stdio_data_t.stream(first:as_stream_t())},
+  }
+  if second ~= nil then
+    options.stdio[3] = {
+      flags = uv.CREATE_PIPE | uv.WRITABLE_PIPE,
+      data = uv.stdio_data_t.stream(second:as_stream_t()),
+    }
+  end
+  return options
+end
+
+local function fresh_pipe(loop: uv.loop_t): uv.pipe_t
+  local pipe = uv.pipe_t()
+  success(uv.pipe_init(loop, pipe, 0))
+  return pipe
+end
+
+local function reject_create(loop: uv.loop_t, pipe: uv.pipe_t)
+  local process = uv.process_t()
+  local options = exit_options(pipe, nil)
+  options.exit_cb = function (_owner: uv.process_t, _status: integer, _signal: integer)
+    raise "rejected spawn delivered an exit callback"
+  end
+  test.assert(uv.spawn(loop, process, options) == uv.EINVAL)
+  test.assert(not process:as_handle_t():is_initialized(), "binding rejection reached native spawn")
+end
+
+local function accept_create(loop: uv.loop_t, first: uv.pipe_t, second: uv.pipe_t?)
+  local process = uv.process_t()
+  local options = exit_options(first, second)
+  local exits = 0
+  options.exit_cb = function (owner: uv.process_t, status: integer, signal: integer)
+    test.assert(owner == process and status == 0 and signal == 0)
+    exits = exits + 1
+    uv.close(owner:as_handle_t())
+  end
+  success(uv.spawn(loop, process, options))
+  reject_create(loop, first)
+  if second ~= nil then reject_create(loop, second) end
+  uv.close(first:as_handle_t())
+  if second ~= nil then uv.close(second:as_handle_t()) end
+  success(uv.run(loop))
+  test.assert(exits == 1)
+end
+
+function test_spawn_pipe_preflight_is_atomic(context: test.Context)
+  context:run("duplicate_owner", function (_child: test.Context)
+    local loop = new_loop()
+    defer finish_loop(loop)
+    local first = fresh_pipe(loop)
+    local second = fresh_pipe(loop)
+    local process = uv.process_t()
+    test.assert(uv.spawn(loop, process, exit_options(first, first)) == uv.EINVAL)
+    test.assert(not process:as_handle_t():is_initialized())
+    accept_create(loop, first, second)
+  end)
+  context:run("later_invalid_flags", function (_child: test.Context)
+    local loop = new_loop()
+    defer finish_loop(loop)
+    local first = fresh_pipe(loop)
+    local second = fresh_pipe(loop)
+    local process = uv.process_t()
+    local options = exit_options(first, second)
+    options.stdio[4] = {flags = 0x40000000, data = uv.stdio_data_t.fd(-1)}
+    test.assert(uv.spawn(loop, process, options) == uv.EINVAL)
+    test.assert(not process:as_handle_t():is_initialized())
+    accept_create(loop, first, second)
+  end)
+end
+
+function test_pipe_mutation_consumes_freshness_until_close_reinit(_context: test.Context)
+  local loop = new_loop()
+  defer finish_loop(loop)
+  local pipe = fresh_pipe(loop)
+  -- Even a successful no-op native mutation ends CREATE_PIPE eligibility.
+  success(uv.read_stop(pipe:as_stream_t()))
+  reject_create(loop, pipe)
+  test.assert(uv.pipe_init(loop, pipe, 0) == uv.EINVAL)
+  uv.close(pipe:as_handle_t())
+  success(uv.run(loop))
+  success(uv.pipe_init(loop, pipe, 0))
+  uv.unref(pipe:as_handle_t())
+  test.assert(not uv.has_ref(pipe:as_handle_t()))
+  uv.ref(pipe:as_handle_t())
+  test.assert(uv.has_ref(pipe:as_handle_t()))
+  test.assert(uv.handle_get_loop(pipe:as_handle_t()) == loop)
+  uv.pipe_getsockname(pipe, uv.buf_t.allocate(64))
+  uv.pipe_getpeername(pipe, uv.buf_t.allocate(64))
+  -- These read-only queries preserve the new native lifetime's eligibility.
+  accept_create(loop, pipe, nil)
+end
+
+function test_failed_exec_preserves_process_close_obligation(_context: test.Context)
+  local path = fixture_file()
+  defer remove_file(path)
+  local loop = new_loop()
+  defer finish_loop(loop)
+  local first = fresh_pipe(loop)
+  local second = fresh_pipe(loop)
+  local process = uv.process_t()
+  local options = exit_options(first, second)
+  -- This is an ordinary missing executable, not malformed native stdio.
+  options.file = path .. ".missing"
+  options.exit_cb = function (_owner: uv.process_t, _status: integer, _signal: integer)
+    raise "failed exec delivered an exit callback"
+  end
+  test.assert(uv.spawn(loop, process, options) == uv.ENOENT)
+  test.assert(process:as_handle_t():is_initialized(), "failed spawn lost its close obligation")
+  reject_create(loop, first)
+  reject_create(loop, second)
+  uv.close(process:as_handle_t())
+  uv.close(first:as_handle_t())
+  uv.close(second:as_handle_t())
+  success(uv.run(loop))
+  test.assert(not process:as_handle_t():is_initialized())
+end

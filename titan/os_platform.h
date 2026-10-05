@@ -1,0 +1,215 @@
+#ifndef TITAN_OS_PLATFORM_H
+#define TITAN_OS_PLATFORM_H
+
+#include <errno.h>
+#include <stddef.h>
+
+
+/* Positive statuses are native errno/Win32 errors. Negative values identify
+ * only the synthetic conditions below; Titan maps them to public uv errors. */
+#define TITAN_OS_ENOBUFS (-1)
+#define TITAN_OS_ENOMEM (-2)
+#define TITAN_OS_EINVAL (-3)
+#define TITAN_OS_ENAMETOOLONG (-4)
+#define TITAN_OS_EBADF (-5)
+#define TITAN_OS_EMFILE (-6)
+#define TITAN_OS_UNKNOWN (-7)
+#define TITAN_OS_ENOTSUP (-8)
+#define TITAN_OS_ENOSYS (-9)
+
+/* Titan cannot conditionally import platform headers. Keep OS descriptor
+ * representation and metadata probes here; Titan still owns classification,
+ * diagnostics, descriptor cleanup, and all asynchronous stream ownership. */
+typedef struct titan_parent_stdio_probe {
+  int status;
+  const char *operation;
+  int is_socket;
+  int family;
+  int is_unix;
+  int is_stream;
+  int name_errno;
+  int type_errno;
+} titan_parent_stdio_probe;
+
+#ifdef _WIN32
+#define TITAN_OS_WINDOWS 1
+#include <io.h>
+#include <limits.h>
+#include <stdint.h>
+#include <stdlib.h>
+#include <windows.h>
+
+/* Match libuv's sized UTF-8 buffer convention. GetSystemDirectoryW reports
+ * WCHAR counts, including NUL only when the supplied capacity is too small. */
+static inline int titan_process_system_directory(char *buffer, size_t *size) {
+  UINT capacity = GetSystemDirectoryW(NULL, 0);
+  WCHAR *wide;
+  UINT length;
+  int bytes, status;
+  if (capacity == 0) return (int)GetLastError();
+  for (;;) {
+    if ((size_t)capacity > SIZE_MAX / sizeof(WCHAR)) return TITAN_OS_ENOMEM;
+    wide = (WCHAR *)malloc((size_t)capacity * sizeof(WCHAR));
+    if (wide == NULL) return TITAN_OS_ENOMEM;
+    length = GetSystemDirectoryW(wide, capacity);
+    if (length == 0) {
+      status = (int)GetLastError();
+      free(wide);
+      return status;
+    }
+    if (length < capacity) break;
+    free(wide);
+    if (length == UINT_MAX) return TITAN_OS_ENAMETOOLONG;
+    capacity = length + 1;
+  }
+  bytes = WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, wide, -1,
+                               NULL, 0, NULL, NULL);
+  if (bytes == 0) {
+    status = (int)GetLastError();
+    free(wide);
+    return status;
+  }
+  if (*size < (size_t)bytes) {
+    *size = (size_t)bytes;
+    free(wide);
+    return TITAN_OS_ENOBUFS;
+  }
+  if (WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, wide, -1,
+                         buffer, bytes, NULL, NULL) == 0) {
+    status = (int)GetLastError();
+    free(wide);
+    return status;
+  }
+  free(wide);
+  *size = (size_t)bytes - 1;
+  return 0;
+}
+
+static inline int titan_duplicate_parent_descriptor(int descriptor,
+                                                    int *duplicate,
+                                                    int *cloexec_failed) {
+  HANDLE source = (HANDLE)_get_osfhandle(descriptor);
+  HANDLE copy;
+  *duplicate = -1;
+  *cloexec_failed = 0;
+  if (source == INVALID_HANDLE_VALUE)
+    return TITAN_OS_EBADF;
+  if (!DuplicateHandle(GetCurrentProcess(), source, GetCurrentProcess(),
+                       &copy, 0, FALSE, DUPLICATE_SAME_ACCESS))
+    return (int)GetLastError();
+  *duplicate = _open_osfhandle((intptr_t)copy, 0);
+  if (*duplicate < 0) {
+    int saved_errno = errno;
+    CloseHandle(copy);
+    /* uv_translate_sys_error expects a Win32 error on Windows, not errno.
+     * uv_open_osfhandle delegates to the CRT, whose documented failures are
+     * EMFILE and EINVAL. Keep those domains distinct. */
+    if (saved_errno == EMFILE) return TITAN_OS_EMFILE;
+    if (saved_errno == EINVAL) return TITAN_OS_EINVAL;
+    return TITAN_OS_UNKNOWN;
+  }
+  return 0;
+}
+
+static inline int titan_close_parent_duplicate(int descriptor) {
+  if (descriptor < 0) return 0;
+  /* uv_fs_close intentionally preserves descriptors 0..2 on Windows. An
+   * owned duplicate can occupy one of those slots when another std fd was
+   * closed; release that owned CRT descriptor as well as its OS handle. */
+  if (_close(descriptor) == 0) return 0;
+  return errno == EBADF ? TITAN_OS_EBADF : TITAN_OS_UNKNOWN;
+}
+
+static inline void titan_probe_parent_stdio(int descriptor,
+                                            titan_parent_stdio_probe *probe) {
+  HANDLE handle = (HANDLE)_get_osfhandle(descriptor);
+  DWORD kind, error;
+  /* Windows has no POSIX socket-evidence fallback. Only status/operation are
+   * valid in this branch: unknown native handles never become guessed pipes. */
+  probe->operation = "GetFileType";
+  if (handle == INVALID_HANDLE_VALUE) {
+    probe->status = TITAN_OS_EBADF;
+    return;
+  }
+  SetLastError(ERROR_SUCCESS);
+  kind = GetFileType(handle);
+  error = GetLastError();
+  probe->status = kind == FILE_TYPE_UNKNOWN && error != ERROR_SUCCESS
+      ? (int)error : TITAN_OS_ENOTSUP;
+}
+#else
+#define TITAN_OS_WINDOWS 0
+#include <fcntl.h>
+#include <sys/socket.h>
+#include <sys/stat.h>
+#include <unistd.h>
+
+static inline int titan_process_system_directory(char *buffer, size_t *size) {
+  (void)buffer;
+  (void)size;
+  return TITAN_OS_ENOSYS;
+}
+
+static inline int titan_duplicate_parent_descriptor(int descriptor,
+                                                    int *duplicate,
+                                                    int *cloexec_failed) {
+  int status;
+  *cloexec_failed = 0;
+  do {
+    *duplicate = dup(descriptor);
+  } while (*duplicate < 0 && errno == EINTR);
+  if (*duplicate < 0)
+    return errno;
+  do {
+    status = fcntl(*duplicate, F_SETFD, FD_CLOEXEC);
+  } while (status < 0 && errno == EINTR);
+  if (status < 0) {
+    *cloexec_failed = 1;
+    return errno;
+  }
+  return 0;
+}
+
+static inline int titan_close_parent_duplicate(int descriptor) {
+  if (descriptor < 0) return 0;
+  /* close may have released the descriptor even on EINTR; never retry it. */
+  if (close(descriptor) == 0) return 0;
+  return errno;
+}
+
+static inline void titan_probe_parent_stdio(int descriptor,
+                                            titan_parent_stdio_probe *probe) {
+  struct stat metadata;
+  struct sockaddr_storage address;
+  socklen_t address_size = sizeof(address);
+  int socket_type;
+  socklen_t type_size = sizeof(socket_type);
+  int name_status, type_status;
+  probe->operation = "fstat";
+  if (fstat(descriptor, &metadata) != 0) {
+    probe->status = errno;
+    return;
+  }
+  probe->status = 0;
+  probe->is_socket = (metadata.st_mode & S_IFMT) == S_IFSOCK;
+  if (!probe->is_socket)
+    return;
+
+  name_status = getsockname(descriptor, (struct sockaddr *)&address,
+                           &address_size);
+  probe->name_errno = name_status != 0 ? errno : 0;
+  type_status = getsockopt(descriptor, SOL_SOCKET, SO_TYPE,
+                          &socket_type, &type_size);
+  probe->type_errno = type_status != 0 ? errno : 0;
+  /* Read result storage only when its exact native probe succeeded. */
+  if (name_status == 0) {
+    probe->family = address.ss_family;
+    probe->is_unix = address.ss_family == AF_UNIX;
+  }
+  if (type_status == 0)
+    probe->is_stream = type_size == sizeof(socket_type) &&
+                       socket_type == SOCK_STREAM;
+}
+#endif
+
+#endif

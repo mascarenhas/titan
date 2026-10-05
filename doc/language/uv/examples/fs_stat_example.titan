@@ -1,0 +1,19 @@
+local uv = import "titan.uv"
+
+-- Native synchronous form: this needs neither a loop nor Tasks.
+function file_size(path: string): (integer, integer?)
+  local request = uv.fs_t()
+  local status = uv.fs_stat(nil, request, path, nil)
+  -- Cleanup frees request-owned memory on both success and native rejection.
+  defer uv.fs_req_cleanup(request)
+  if status < 0 then return status, nil end
+  local info = uv.fs_get_statbuf(request)
+  return 0, info.st_size
+end
+
+function main(args: {string}): integer
+  if #args < 1 then return 2 end
+  local status, size? = file_size(args[1])
+  if status < 0 or size == nil then return 1 end
+  return 0
+end

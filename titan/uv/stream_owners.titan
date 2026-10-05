@@ -1,0 +1,730 @@
+foreign import "network-native.h"
+-- Candidate stream concrete owners and exact callbacks. Common foundation
+-- modifications are confined to network.titan and recorded in INTEGRATION.md.
+foreign type NetworkStatusEntry = function (*lua_State, *Udata, *CClosure, *Udata, *Udata, lua_Integer): void
+foreign type NetworkAllocEntry = function (*lua_State, *Udata, *CClosure, *Udata, *Udata, lua_Integer, *uv_buf_t): void
+foreign type NetworkReadEntry = function (*lua_State, *Udata, *CClosure, *Udata, *Udata, lua_Integer, const *uv_buf_t): void
+
+type alloc_cb = function (handle_t, integer): (buf_t)
+type read_cb = function (stream_t, integer, buf_t?): ()
+type connection_cb = function (stream_t, integer): ()
+type connect_cb = function (connect_t, integer): ()
+type write_cb = function (write_t, integer): ()
+type shutdown_cb = function (shutdown_t, integer): ()
+
+union stream_t
+  tcp(owner: tcp_t)
+  pipe(owner: pipe_t)
+  tty(owner: tty_t)
+end
+
+record tcp_t
+  local native: foreign uv_tcp_t
+  local phase: integer
+  local loop: loop_t?
+  local connection_callback: connection_cb?
+  local alloc_callback: alloc_cb?
+  local read_callback: read_cb?
+  local read_buffer: buf_t?
+  local close_callback: (function (handle_t): ())?
+  local connection_handler: function (tcp_t, loop_t, integer): ()
+  local alloc_handler: function (tcp_t, loop_t, integer, foreign *uv_buf_t): ()
+  local read_handler: function (tcp_t, loop_t, integer, foreign const *uv_buf_t): ()
+  local close_handler: function (tcp_t, loop_t): ()
+  local userdata: value
+end
+
+function tcp_t.new(): tcp_t
+  local native = foreign uv_tcp_t.new()
+  return {native = native, phase = HANDLE_FRESH, loop = nil,
+    connection_callback = nil, alloc_callback = nil, read_callback = nil,
+    read_buffer = nil, close_callback = nil, userdata = nil,
+    connection_handler = tcp_connection_deliver, alloc_handler = tcp_alloc_deliver,
+    read_handler = tcp_read_deliver, close_handler = tcp_closed}
+end
+
+function tcp_t:as_handle_t(): handle_t
+  return handle_t.tcp(self)
+end
+
+function tcp_t:as_stream_t(): stream_t
+  return stream_t.tcp(self)
+end
+
+local function tcp_t:valid(): boolean
+  return self.phase == HANDLE_LIVE and ffi.uv_is_closing(self.native as foreign *uv_handle_t) == 0
+end
+
+local function tcp_connection_deliver(owner: tcp_t, loop: loop_t, status: integer)
+  local callback? = owner.connection_callback
+  if callback ~= nil then callback(stream_t.tcp(owner), status) end
+catch
+  if loop.failure_count == 0 then
+    loop.failure_error = error
+    loop.failure_trace = traceback
+  end
+  loop.failure_count = loop.failure_count + 1
+  ffi.uv_stop(loop.native)
+end
+
+local function tcp_alloc_deliver(owner: tcp_t, loop: loop_t,
+                                    suggested_size: integer, output: foreign *uv_buf_t)
+  output.base = nil
+  output.len = 0
+  local callback? = owner.alloc_callback
+  if callback == nil then return end
+  local buffer = callback(handle_t.tcp(owner), suggested_size)
+  if not buffer.writable then raise "read allocation must be writable" end
+  owner.read_buffer = buffer
+  output[0] = buffer.native[0]
+catch
+  if loop.failure_count == 0 then
+    loop.failure_error = error
+    loop.failure_trace = traceback
+  end
+  loop.failure_count = loop.failure_count + 1
+  ffi.uv_stop(loop.native)
+end
+
+local function tcp_read_deliver(owner: tcp_t, loop: loop_t,
+                                   nread: integer, native: foreign const *uv_buf_t)
+  -- Detach the allocation before user code can stop and restart reading.
+  local buffer? = owner.read_buffer
+  owner.read_buffer = nil
+  local callback? = owner.read_callback
+  if native == nil or native.base == nil then buffer = nil end
+  if callback ~= nil then callback(stream_t.tcp(owner), nread, buffer) end
+catch
+  if loop.failure_count == 0 then
+    loop.failure_error = error
+    loop.failure_trace = traceback
+  end
+  loop.failure_count = loop.failure_count + 1
+  ffi.uv_stop(loop.native)
+end
+
+local function tcp_closed(owner: tcp_t, loop: loop_t)
+  loop.handles[owner] = nil
+  owner.phase = HANDLE_RETIRED
+  -- Keep the original loop observable through close; init replaces it.
+  local callback? = owner.close_callback
+  owner.connection_callback = nil
+  owner.alloc_callback = nil
+  owner.read_callback = nil
+  owner.read_buffer = nil
+  owner.close_callback = nil
+  if callback ~= nil then callback(handle_t.tcp(owner)) end
+catch
+  if loop.failure_count == 0 then
+    loop.failure_error = error
+    loop.failure_trace = traceback
+  end
+  loop.failure_count = loop.failure_count + 1
+  ffi.uv_stop(loop.native)
+end
+
+foreign function tcp_connection_callback(native: *uv_stream_t, status: int)
+  local base = native as foreign *uv_handle_t
+  local owner = ffi.uv_handle_get_data(base) as foreign *Udata
+  local loop = ffi.uv_loop_get_data(ffi.uv_handle_get_loop(base)) as foreign *Udata
+  local L = ffi.titan_record_field(loop, "loop_t", "state")
+  local handler = ffi.lmacro_clCvalue(ffi.titan_record_field(owner, "tcp_t", "connection_handler"))
+  local module = ffi.lmacro_uvalue(handler.upvalue[0])
+  local entry = ffi.lmacro_pvalue(handler.upvalue[2]) as foreign NetworkStatusEntry
+  local top = ffi.lua_gettop(L)
+  ffi.titan_uv_push_owner(L, owner)
+  entry(L, module, handler, owner, loop, status as foreign lua_Integer)
+  ffi.lua_settop(L, top)
+end
+
+foreign function tcp_alloc_callback(native: *uv_handle_t, suggested_size: size_t, output: *uv_buf_t)
+  local base = native as foreign *uv_handle_t
+  local owner = ffi.uv_handle_get_data(base) as foreign *Udata
+  local loop = ffi.uv_loop_get_data(ffi.uv_handle_get_loop(base)) as foreign *Udata
+  local L = ffi.titan_record_field(loop, "loop_t", "state")
+  local handler = ffi.lmacro_clCvalue(ffi.titan_record_field(owner, "tcp_t", "alloc_handler"))
+  local module = ffi.lmacro_uvalue(handler.upvalue[0])
+  local entry = ffi.lmacro_pvalue(handler.upvalue[2]) as foreign NetworkAllocEntry
+  local top = ffi.lua_gettop(L)
+  ffi.titan_uv_push_owner(L, owner)
+  entry(L, module, handler, owner, loop, suggested_size as foreign lua_Integer, output)
+  ffi.lua_settop(L, top)
+end
+
+foreign function tcp_read_callback(native: *uv_stream_t, nread: ssize_t, buffer: const *uv_buf_t)
+  local base = native as foreign *uv_handle_t
+  local owner = ffi.uv_handle_get_data(base) as foreign *Udata
+  local loop = ffi.uv_loop_get_data(ffi.uv_handle_get_loop(base)) as foreign *Udata
+  local L = ffi.titan_record_field(loop, "loop_t", "state")
+  local handler = ffi.lmacro_clCvalue(ffi.titan_record_field(owner, "tcp_t", "read_handler"))
+  local module = ffi.lmacro_uvalue(handler.upvalue[0])
+  local entry = ffi.lmacro_pvalue(handler.upvalue[2]) as foreign NetworkReadEntry
+  local top = ffi.lua_gettop(L)
+  ffi.titan_uv_push_owner(L, owner)
+  ffi.lua_pushtvalue(L, ffi.titan_record_field(owner, "tcp_t", "read_buffer"))
+  entry(L, module, handler, owner, loop, nread as foreign lua_Integer, buffer)
+  ffi.lua_settop(L, top)
+end
+
+foreign function tcp_close_callback(native: *uv_handle_t)
+  local base = native as foreign *uv_handle_t
+  local owner = ffi.uv_handle_get_data(base) as foreign *Udata
+  local loop = ffi.uv_loop_get_data(ffi.uv_handle_get_loop(base)) as foreign *Udata
+  local L = ffi.titan_record_field(loop, "loop_t", "state")
+  local handler = ffi.lmacro_clCvalue(ffi.titan_record_field(owner, "tcp_t", "close_handler"))
+  local module = ffi.lmacro_uvalue(handler.upvalue[0])
+  local entry = ffi.lmacro_pvalue(handler.upvalue[2]) as foreign CallbackEntry
+  local top = ffi.lua_gettop(L)
+  ffi.titan_uv_push_owner(L, owner)
+  entry(L, module, handler, owner, loop)
+  ffi.lua_settop(L, top)
+end
+
+record pipe_t
+  local native: foreign uv_pipe_t
+  local phase: integer
+  local eligibility: foreign titan_uv_pipe_eligibility
+  local loop: loop_t?
+  local connection_callback: connection_cb?
+  local alloc_callback: alloc_cb?
+  local read_callback: read_cb?
+  local read_buffer: buf_t?
+  local close_callback: (function (handle_t): ())?
+  local connection_handler: function (pipe_t, loop_t, integer): ()
+  local alloc_handler: function (pipe_t, loop_t, integer, foreign *uv_buf_t): ()
+  local read_handler: function (pipe_t, loop_t, integer, foreign const *uv_buf_t): ()
+  local close_handler: function (pipe_t, loop_t): ()
+  local userdata: value
+end
+
+function pipe_t.new(): pipe_t
+  local native = foreign uv_pipe_t.new()
+  local eligibility = foreign titan_uv_pipe_eligibility.new()
+  return {native = native, phase = HANDLE_FRESH, eligibility = eligibility, loop = nil,
+    connection_callback = nil, alloc_callback = nil, read_callback = nil,
+    read_buffer = nil, close_callback = nil, userdata = nil,
+    connection_handler = pipe_connection_deliver, alloc_handler = pipe_alloc_deliver,
+    read_handler = pipe_read_deliver, close_handler = pipe_closed}
+end
+
+function pipe_t:as_handle_t(): handle_t
+  return handle_t.pipe(self)
+end
+
+function pipe_t:as_stream_t(): stream_t
+  return stream_t.pipe(self)
+end
+
+local function pipe_t:valid(): boolean
+  return self.phase == HANDLE_LIVE and ffi.uv_is_closing(self.native as foreign *uv_handle_t) == 0
+end
+
+local function pipe_connection_deliver(owner: pipe_t, loop: loop_t, status: integer)
+  local callback? = owner.connection_callback
+  if callback ~= nil then callback(stream_t.pipe(owner), status) end
+catch
+  if loop.failure_count == 0 then
+    loop.failure_error = error
+    loop.failure_trace = traceback
+  end
+  loop.failure_count = loop.failure_count + 1
+  ffi.uv_stop(loop.native)
+end
+
+local function pipe_alloc_deliver(owner: pipe_t, loop: loop_t,
+                                    suggested_size: integer, output: foreign *uv_buf_t)
+  output.base = nil
+  output.len = 0
+  local callback? = owner.alloc_callback
+  if callback == nil then return end
+  local buffer = callback(handle_t.pipe(owner), suggested_size)
+  if not buffer.writable then raise "read allocation must be writable" end
+  owner.read_buffer = buffer
+  output[0] = buffer.native[0]
+catch
+  if loop.failure_count == 0 then
+    loop.failure_error = error
+    loop.failure_trace = traceback
+  end
+  loop.failure_count = loop.failure_count + 1
+  ffi.uv_stop(loop.native)
+end
+
+local function pipe_read_deliver(owner: pipe_t, loop: loop_t,
+                                   nread: integer, native: foreign const *uv_buf_t)
+  -- Detach the allocation before user code can stop and restart reading.
+  local buffer? = owner.read_buffer
+  owner.read_buffer = nil
+  local callback? = owner.read_callback
+  if native == nil or native.base == nil then buffer = nil end
+  if callback ~= nil then callback(stream_t.pipe(owner), nread, buffer) end
+catch
+  if loop.failure_count == 0 then
+    loop.failure_error = error
+    loop.failure_trace = traceback
+  end
+  loop.failure_count = loop.failure_count + 1
+  ffi.uv_stop(loop.native)
+end
+
+local function pipe_closed(owner: pipe_t, loop: loop_t)
+  loop.handles[owner] = nil
+  owner.phase = HANDLE_RETIRED
+  owner.eligibility.available = 0
+  -- Keep the original loop observable through close; init replaces it.
+  local callback? = owner.close_callback
+  owner.connection_callback = nil
+  owner.alloc_callback = nil
+  owner.read_callback = nil
+  owner.read_buffer = nil
+  owner.close_callback = nil
+  if callback ~= nil then callback(handle_t.pipe(owner)) end
+catch
+  if loop.failure_count == 0 then
+    loop.failure_error = error
+    loop.failure_trace = traceback
+  end
+  loop.failure_count = loop.failure_count + 1
+  ffi.uv_stop(loop.native)
+end
+
+foreign function pipe_connection_callback(native: *uv_stream_t, status: int)
+  local base = native as foreign *uv_handle_t
+  local owner = ffi.uv_handle_get_data(base) as foreign *Udata
+  local loop = ffi.uv_loop_get_data(ffi.uv_handle_get_loop(base)) as foreign *Udata
+  local L = ffi.titan_record_field(loop, "loop_t", "state")
+  local handler = ffi.lmacro_clCvalue(ffi.titan_record_field(owner, "pipe_t", "connection_handler"))
+  local module = ffi.lmacro_uvalue(handler.upvalue[0])
+  local entry = ffi.lmacro_pvalue(handler.upvalue[2]) as foreign NetworkStatusEntry
+  local top = ffi.lua_gettop(L)
+  ffi.titan_uv_push_owner(L, owner)
+  entry(L, module, handler, owner, loop, status as foreign lua_Integer)
+  ffi.lua_settop(L, top)
+end
+
+foreign function pipe_alloc_callback(native: *uv_handle_t, suggested_size: size_t, output: *uv_buf_t)
+  local base = native as foreign *uv_handle_t
+  local owner = ffi.uv_handle_get_data(base) as foreign *Udata
+  local loop = ffi.uv_loop_get_data(ffi.uv_handle_get_loop(base)) as foreign *Udata
+  local L = ffi.titan_record_field(loop, "loop_t", "state")
+  local handler = ffi.lmacro_clCvalue(ffi.titan_record_field(owner, "pipe_t", "alloc_handler"))
+  local module = ffi.lmacro_uvalue(handler.upvalue[0])
+  local entry = ffi.lmacro_pvalue(handler.upvalue[2]) as foreign NetworkAllocEntry
+  local top = ffi.lua_gettop(L)
+  ffi.titan_uv_push_owner(L, owner)
+  entry(L, module, handler, owner, loop, suggested_size as foreign lua_Integer, output)
+  ffi.lua_settop(L, top)
+end
+
+foreign function pipe_read_callback(native: *uv_stream_t, nread: ssize_t, buffer: const *uv_buf_t)
+  local base = native as foreign *uv_handle_t
+  local owner = ffi.uv_handle_get_data(base) as foreign *Udata
+  local loop = ffi.uv_loop_get_data(ffi.uv_handle_get_loop(base)) as foreign *Udata
+  local L = ffi.titan_record_field(loop, "loop_t", "state")
+  local handler = ffi.lmacro_clCvalue(ffi.titan_record_field(owner, "pipe_t", "read_handler"))
+  local module = ffi.lmacro_uvalue(handler.upvalue[0])
+  local entry = ffi.lmacro_pvalue(handler.upvalue[2]) as foreign NetworkReadEntry
+  local top = ffi.lua_gettop(L)
+  ffi.titan_uv_push_owner(L, owner)
+  ffi.lua_pushtvalue(L, ffi.titan_record_field(owner, "pipe_t", "read_buffer"))
+  entry(L, module, handler, owner, loop, nread as foreign lua_Integer, buffer)
+  ffi.lua_settop(L, top)
+end
+
+foreign function pipe_close_callback(native: *uv_handle_t)
+  local base = native as foreign *uv_handle_t
+  local owner = ffi.uv_handle_get_data(base) as foreign *Udata
+  local loop = ffi.uv_loop_get_data(ffi.uv_handle_get_loop(base)) as foreign *Udata
+  local L = ffi.titan_record_field(loop, "loop_t", "state")
+  local handler = ffi.lmacro_clCvalue(ffi.titan_record_field(owner, "pipe_t", "close_handler"))
+  local module = ffi.lmacro_uvalue(handler.upvalue[0])
+  local entry = ffi.lmacro_pvalue(handler.upvalue[2]) as foreign CallbackEntry
+  local top = ffi.lua_gettop(L)
+  ffi.titan_uv_push_owner(L, owner)
+  entry(L, module, handler, owner, loop)
+  ffi.lua_settop(L, top)
+end
+
+record tty_t
+  local native: foreign uv_tty_t
+  local phase: integer
+  local loop: loop_t?
+  local connection_callback: connection_cb?
+  local alloc_callback: alloc_cb?
+  local read_callback: read_cb?
+  local read_buffer: buf_t?
+  local close_callback: (function (handle_t): ())?
+  local connection_handler: function (tty_t, loop_t, integer): ()
+  local alloc_handler: function (tty_t, loop_t, integer, foreign *uv_buf_t): ()
+  local read_handler: function (tty_t, loop_t, integer, foreign const *uv_buf_t): ()
+  local close_handler: function (tty_t, loop_t): ()
+  local userdata: value
+end
+
+function tty_t.new(): tty_t
+  local native = foreign uv_tty_t.new()
+  return {native = native, phase = HANDLE_FRESH, loop = nil,
+    connection_callback = nil, alloc_callback = nil, read_callback = nil,
+    read_buffer = nil, close_callback = nil, userdata = nil,
+    connection_handler = tty_connection_deliver, alloc_handler = tty_alloc_deliver,
+    read_handler = tty_read_deliver, close_handler = tty_closed}
+end
+
+function tty_t:as_handle_t(): handle_t
+  return handle_t.tty(self)
+end
+
+function tty_t:as_stream_t(): stream_t
+  return stream_t.tty(self)
+end
+
+local function tty_t:valid(): boolean
+  return self.phase == HANDLE_LIVE and ffi.uv_is_closing(self.native as foreign *uv_handle_t) == 0
+end
+
+local function tty_connection_deliver(owner: tty_t, loop: loop_t, status: integer)
+  local callback? = owner.connection_callback
+  if callback ~= nil then callback(stream_t.tty(owner), status) end
+catch
+  if loop.failure_count == 0 then
+    loop.failure_error = error
+    loop.failure_trace = traceback
+  end
+  loop.failure_count = loop.failure_count + 1
+  ffi.uv_stop(loop.native)
+end
+
+local function tty_alloc_deliver(owner: tty_t, loop: loop_t,
+                                    suggested_size: integer, output: foreign *uv_buf_t)
+  output.base = nil
+  output.len = 0
+  local callback? = owner.alloc_callback
+  if callback == nil then return end
+  local buffer = callback(handle_t.tty(owner), suggested_size)
+  if not buffer.writable then raise "read allocation must be writable" end
+  owner.read_buffer = buffer
+  output[0] = buffer.native[0]
+catch
+  if loop.failure_count == 0 then
+    loop.failure_error = error
+    loop.failure_trace = traceback
+  end
+  loop.failure_count = loop.failure_count + 1
+  ffi.uv_stop(loop.native)
+end
+
+local function tty_read_deliver(owner: tty_t, loop: loop_t,
+                                   nread: integer, native: foreign const *uv_buf_t)
+  -- Detach the allocation before user code can stop and restart reading.
+  local buffer? = owner.read_buffer
+  owner.read_buffer = nil
+  local callback? = owner.read_callback
+  if native == nil or native.base == nil then buffer = nil end
+  if callback ~= nil then callback(stream_t.tty(owner), nread, buffer) end
+catch
+  if loop.failure_count == 0 then
+    loop.failure_error = error
+    loop.failure_trace = traceback
+  end
+  loop.failure_count = loop.failure_count + 1
+  ffi.uv_stop(loop.native)
+end
+
+local function tty_closed(owner: tty_t, loop: loop_t)
+  loop.handles[owner] = nil
+  owner.phase = HANDLE_RETIRED
+  -- Keep the original loop observable through close; init replaces it.
+  local callback? = owner.close_callback
+  owner.connection_callback = nil
+  owner.alloc_callback = nil
+  owner.read_callback = nil
+  owner.read_buffer = nil
+  owner.close_callback = nil
+  if callback ~= nil then callback(handle_t.tty(owner)) end
+catch
+  if loop.failure_count == 0 then
+    loop.failure_error = error
+    loop.failure_trace = traceback
+  end
+  loop.failure_count = loop.failure_count + 1
+  ffi.uv_stop(loop.native)
+end
+
+foreign function tty_connection_callback(native: *uv_stream_t, status: int)
+  local base = native as foreign *uv_handle_t
+  local owner = ffi.uv_handle_get_data(base) as foreign *Udata
+  local loop = ffi.uv_loop_get_data(ffi.uv_handle_get_loop(base)) as foreign *Udata
+  local L = ffi.titan_record_field(loop, "loop_t", "state")
+  local handler = ffi.lmacro_clCvalue(ffi.titan_record_field(owner, "tty_t", "connection_handler"))
+  local module = ffi.lmacro_uvalue(handler.upvalue[0])
+  local entry = ffi.lmacro_pvalue(handler.upvalue[2]) as foreign NetworkStatusEntry
+  local top = ffi.lua_gettop(L)
+  ffi.titan_uv_push_owner(L, owner)
+  entry(L, module, handler, owner, loop, status as foreign lua_Integer)
+  ffi.lua_settop(L, top)
+end
+
+foreign function tty_alloc_callback(native: *uv_handle_t, suggested_size: size_t, output: *uv_buf_t)
+  local base = native as foreign *uv_handle_t
+  local owner = ffi.uv_handle_get_data(base) as foreign *Udata
+  local loop = ffi.uv_loop_get_data(ffi.uv_handle_get_loop(base)) as foreign *Udata
+  local L = ffi.titan_record_field(loop, "loop_t", "state")
+  local handler = ffi.lmacro_clCvalue(ffi.titan_record_field(owner, "tty_t", "alloc_handler"))
+  local module = ffi.lmacro_uvalue(handler.upvalue[0])
+  local entry = ffi.lmacro_pvalue(handler.upvalue[2]) as foreign NetworkAllocEntry
+  local top = ffi.lua_gettop(L)
+  ffi.titan_uv_push_owner(L, owner)
+  entry(L, module, handler, owner, loop, suggested_size as foreign lua_Integer, output)
+  ffi.lua_settop(L, top)
+end
+
+foreign function tty_read_callback(native: *uv_stream_t, nread: ssize_t, buffer: const *uv_buf_t)
+  local base = native as foreign *uv_handle_t
+  local owner = ffi.uv_handle_get_data(base) as foreign *Udata
+  local loop = ffi.uv_loop_get_data(ffi.uv_handle_get_loop(base)) as foreign *Udata
+  local L = ffi.titan_record_field(loop, "loop_t", "state")
+  local handler = ffi.lmacro_clCvalue(ffi.titan_record_field(owner, "tty_t", "read_handler"))
+  local module = ffi.lmacro_uvalue(handler.upvalue[0])
+  local entry = ffi.lmacro_pvalue(handler.upvalue[2]) as foreign NetworkReadEntry
+  local top = ffi.lua_gettop(L)
+  ffi.titan_uv_push_owner(L, owner)
+  ffi.lua_pushtvalue(L, ffi.titan_record_field(owner, "tty_t", "read_buffer"))
+  entry(L, module, handler, owner, loop, nread as foreign lua_Integer, buffer)
+  ffi.lua_settop(L, top)
+end
+
+foreign function tty_close_callback(native: *uv_handle_t)
+  local base = native as foreign *uv_handle_t
+  local owner = ffi.uv_handle_get_data(base) as foreign *Udata
+  local loop = ffi.uv_loop_get_data(ffi.uv_handle_get_loop(base)) as foreign *Udata
+  local L = ffi.titan_record_field(loop, "loop_t", "state")
+  local handler = ffi.lmacro_clCvalue(ffi.titan_record_field(owner, "tty_t", "close_handler"))
+  local module = ffi.lmacro_uvalue(handler.upvalue[0])
+  local entry = ffi.lmacro_pvalue(handler.upvalue[2]) as foreign CallbackEntry
+  local top = ffi.lua_gettop(L)
+  ffi.titan_uv_push_owner(L, owner)
+  entry(L, module, handler, owner, loop)
+  ffi.lua_settop(L, top)
+end
+
+local function stream_t:pointer(): foreign *uv_stream_t
+  case self
+
+  when tcp(owner) then
+    if not owner:valid() then return nil end
+    return owner.native as foreign *uv_stream_t
+
+  when pipe(owner) then
+    if not owner:valid() then return nil end
+    return owner.native as foreign *uv_stream_t
+
+  when tty(owner) then
+    if not owner:valid() then return nil end
+    return owner.native as foreign *uv_stream_t
+
+  end
+end
+
+local function stream_t:owner_loop(): loop_t?
+  case self
+
+  when tcp(owner) then
+    if not owner:valid() then return nil end
+    return owner.loop
+
+  when pipe(owner) then
+    if not owner:valid() then return nil end
+    return owner.loop
+
+  when tty(owner) then
+    if not owner:valid() then return nil end
+    return owner.loop
+
+  end
+end
+
+function stream_t:as_handle_t(): handle_t
+  case self
+
+  when tcp(owner) then return handle_t.tcp(owner)
+
+  when pipe(owner) then return handle_t.pipe(owner)
+
+  when tty(owner) then return handle_t.tty(owner)
+
+  end
+end
+
+record connect_t
+  local native: foreign uv_connect_t
+  local loop: loop_t?
+  local pending: boolean
+  local stream: stream_t?
+  local callback: connect_cb?
+  local handler: function (connect_t, loop_t, integer): ()
+  local userdata: value
+end
+
+function connect_t.new(): connect_t
+  local native = foreign uv_connect_t.new()
+  return {native = native, loop = nil, pending = false, stream = nil,
+    callback = nil, handler = connect_deliver, userdata = nil}
+end
+
+function connect_t:as_req_t(): req_t
+  return req_t.connect(self)
+end
+
+function connect_t:handle(): stream_t?
+  return self.stream
+end
+
+local function connect_deliver(owner: connect_t, loop: loop_t, status: integer)
+  loop.requests[owner] = nil
+  owner.pending = false
+  owner.loop = nil
+  local callback? = owner.callback
+  owner.callback = nil
+  if callback ~= nil then callback(owner, status) end
+catch
+  if loop.failure_count == 0 then
+    loop.failure_error = error
+    loop.failure_trace = traceback
+  end
+  loop.failure_count = loop.failure_count + 1
+  ffi.uv_stop(loop.native)
+end
+
+foreign function network_connect_callback(native: *uv_connect_t, status: int)
+  local owner = ffi.uv_req_get_data(native as foreign *uv_req_t) as foreign *Udata
+  local base = native.handle as foreign *uv_handle_t
+  local loop = ffi.uv_loop_get_data(ffi.uv_handle_get_loop(base)) as foreign *Udata
+  local L = ffi.titan_record_field(loop, "loop_t", "state")
+  local handler = ffi.lmacro_clCvalue(ffi.titan_record_field(owner, "connect_t", "handler"))
+  local module = ffi.lmacro_uvalue(handler.upvalue[0])
+  local entry = ffi.lmacro_pvalue(handler.upvalue[2]) as foreign NetworkStatusEntry
+  local top = ffi.lua_gettop(L)
+  ffi.titan_uv_push_owner(L, owner)
+  entry(L, module, handler, owner, loop, status as foreign lua_Integer)
+  ffi.lua_settop(L, top)
+end
+
+record write_t
+  local native: foreign uv_write_t
+  local loop: loop_t?
+  local pending: boolean
+  local stream: stream_t?
+  local buffers: {buf_t}?
+  local native_buffers: (owned uv_buf_t[])?
+  local send_stream: handle_t?
+  local callback: write_cb?
+  local handler: function (write_t, loop_t, integer): ()
+  local userdata: value
+end
+
+function write_t.new(): write_t
+  local native = foreign uv_write_t.new()
+  return {native = native, loop = nil, pending = false, stream = nil,
+    buffers = nil, native_buffers = nil, send_stream = nil,
+    callback = nil, handler = write_deliver, userdata = nil}
+end
+
+function write_t:as_req_t(): req_t
+  return req_t.write(self)
+end
+
+function write_t:handle(): stream_t?
+  return self.stream
+end
+
+local function write_deliver(owner: write_t, loop: loop_t, status: integer)
+  loop.requests[owner] = nil
+  owner.pending = false
+  owner.loop = nil
+  local callback? = owner.callback
+  owner.callback = nil
+  owner.buffers = nil
+  owner.native_buffers = nil
+  if callback ~= nil then callback(owner, status) end
+catch
+  if loop.failure_count == 0 then
+    loop.failure_error = error
+    loop.failure_trace = traceback
+  end
+  loop.failure_count = loop.failure_count + 1
+  ffi.uv_stop(loop.native)
+end
+
+foreign function network_write_callback(native: *uv_write_t, status: int)
+  local owner = ffi.uv_req_get_data(native as foreign *uv_req_t) as foreign *Udata
+  local base = native.handle as foreign *uv_handle_t
+  local loop = ffi.uv_loop_get_data(ffi.uv_handle_get_loop(base)) as foreign *Udata
+  local L = ffi.titan_record_field(loop, "loop_t", "state")
+  local handler = ffi.lmacro_clCvalue(ffi.titan_record_field(owner, "write_t", "handler"))
+  local module = ffi.lmacro_uvalue(handler.upvalue[0])
+  local entry = ffi.lmacro_pvalue(handler.upvalue[2]) as foreign NetworkStatusEntry
+  local top = ffi.lua_gettop(L)
+  ffi.titan_uv_push_owner(L, owner)
+  ffi.lua_pushtvalue(L, ffi.titan_record_field(owner, "write_t", "buffers"))
+  ffi.lua_pushtvalue(L, ffi.titan_record_field(owner, "write_t", "native_buffers"))
+  entry(L, module, handler, owner, loop, status as foreign lua_Integer)
+  ffi.lua_settop(L, top)
+end
+
+record shutdown_t
+  local native: foreign uv_shutdown_t
+  local loop: loop_t?
+  local pending: boolean
+  local stream: stream_t?
+  local callback: shutdown_cb?
+  local handler: function (shutdown_t, loop_t, integer): ()
+  local userdata: value
+end
+
+function shutdown_t.new(): shutdown_t
+  local native = foreign uv_shutdown_t.new()
+  return {native = native, loop = nil, pending = false, stream = nil,
+    callback = nil, handler = shutdown_deliver, userdata = nil}
+end
+
+function shutdown_t:as_req_t(): req_t
+  return req_t.shutdown(self)
+end
+
+function shutdown_t:handle(): stream_t?
+  return self.stream
+end
+
+local function shutdown_deliver(owner: shutdown_t, loop: loop_t, status: integer)
+  loop.requests[owner] = nil
+  owner.pending = false
+  owner.loop = nil
+  local callback? = owner.callback
+  owner.callback = nil
+  if callback ~= nil then callback(owner, status) end
+catch
+  if loop.failure_count == 0 then
+    loop.failure_error = error
+    loop.failure_trace = traceback
+  end
+  loop.failure_count = loop.failure_count + 1
+  ffi.uv_stop(loop.native)
+end
+
+foreign function network_shutdown_callback(native: *uv_shutdown_t, status: int)
+  local owner = ffi.uv_req_get_data(native as foreign *uv_req_t) as foreign *Udata
+  local base = native.handle as foreign *uv_handle_t
+  local loop = ffi.uv_loop_get_data(ffi.uv_handle_get_loop(base)) as foreign *Udata
+  local L = ffi.titan_record_field(loop, "loop_t", "state")
+  local handler = ffi.lmacro_clCvalue(ffi.titan_record_field(owner, "shutdown_t", "handler"))
+  local module = ffi.lmacro_uvalue(handler.upvalue[0])
+  local entry = ffi.lmacro_pvalue(handler.upvalue[2]) as foreign NetworkStatusEntry
+  local top = ffi.lua_gettop(L)
+  ffi.titan_uv_push_owner(L, owner)
+  entry(L, module, handler, owner, loop, status as foreign lua_Integer)
+  ffi.lua_settop(L, top)
+end
+
+function write_t:send_handle(): handle_t?
+  return self.send_stream
+end

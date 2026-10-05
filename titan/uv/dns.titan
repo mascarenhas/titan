@@ -1,0 +1,329 @@
+foreign type GetaddrinfoEntry = function (
+    *lua_State, *Udata, *CClosure, *Udata, *Udata, lua_Integer, *addrinfo): void
+foreign type GetnameinfoEntry = function (
+    *lua_State, *Udata, *CClosure, *Udata, *Udata, lua_Integer,
+    const *char, const *char): void
+
+-- These external socket domains are integer-valued system macros, not libuv
+-- enums. Flags remain combinable integers. Initializers merge into root do.
+const AF_UNSPEC: integer?
+const AF_INET: integer?
+const AF_INET6: integer?
+const SOCK_STREAM: integer?
+const SOCK_DGRAM: integer?
+const SOCK_RAW: integer?
+const IPPROTO_TCP: integer?
+const IPPROTO_UDP: integer?
+const AI_PASSIVE: integer?
+const AI_CANONNAME: integer?
+const AI_NUMERICHOST: integer?
+const AI_NUMERICSERV: integer?
+const AI_V4MAPPED: integer?
+const AI_ALL: integer?
+const AI_ADDRCONFIG: integer?
+const NI_NUMERICHOST: integer?
+const NI_NUMERICSERV: integer?
+const NI_NOFQDN: integer?
+const NI_NAMEREQD: integer?
+const NI_DGRAM: integer?
+
+record addrinfo_hints_t
+  ai_flags: integer
+  ai_family: integer
+  ai_socktype: integer
+  ai_protocol: integer
+end
+
+-- Each entry is an independent copied value. Array ordering replaces ai_next.
+-- ai_addr_bytes/ai_addrlen preserve even unknown native address families.
+record addrinfo_t
+  ai_flags: integer
+  ai_family: integer
+  ai_socktype: integer
+  ai_protocol: integer
+  ai_addrlen: integer
+  ai_addr: sockaddr_t?
+  ai_addr_bytes: string?
+  ai_canonname: string?
+end
+
+record addrinfo_result_t
+  local native: foreign *addrinfo
+  local copied: {addrinfo_t}?
+  local released: boolean
+end
+
+function addrinfo_result_t:entries(): {addrinfo_t}
+  if self.released then raise "addrinfo result was released" end
+  if self.copied ~= nil then return self.copied as {addrinfo_t} end
+  local entries: {addrinfo_t} = {}
+  local node = self.native
+  while node ~= nil do
+    local address: sockaddr_t? = nil
+    local bytes: string? = nil
+    local canonical: string? = nil
+    local size = node.ai_addrlen as integer
+    if node.ai_addr ~= nil then
+      -- Do not infer all addresses are IPv4/IPv6 or truncate opaque outputs.
+      local raw: owned unsigned char[] = foreign unsigned char.new_array(size)
+      ffi.memcpy(raw, node.ai_addr, size as foreign size_t)
+      bytes = raw as string
+      address = sockaddr_copy_sized(node.ai_addr, size)
+    end
+    if node.ai_canonname ~= nil then canonical = node.ai_canonname as string end
+    entries[#entries + 1] = addrinfo_t {
+      ai_flags = node.ai_flags as integer,
+      ai_family = node.ai_family as integer,
+      ai_socktype = node.ai_socktype as integer,
+      ai_protocol = node.ai_protocol as integer,
+      ai_addrlen = size, ai_addr = address, ai_addr_bytes = bytes,
+      ai_canonname = canonical,
+    }
+    node = node.ai_next
+  end
+  self.copied = entries
+  return entries
+end
+
+function freeaddrinfo(result: addrinfo_result_t?)
+  if result == nil then return end
+  local owner = result as addrinfo_result_t
+  if owner.released then return end
+  ffi.uv_freeaddrinfo(owner.native)
+  owner.native = nil
+  owner.released = true
+end
+
+record getaddrinfo_t
+  local native: foreign uv_getaddrinfo_t
+  local loop: loop_t?
+  local pending: boolean
+  local result: addrinfo_result_t?
+  local result_status: integer
+  local callback: (function (getaddrinfo_t, integer, addrinfo_result_t?): ())?
+  local handler: function (getaddrinfo_t, loop_t, integer, foreign *addrinfo): ()
+  local userdata: value
+end
+
+local function getaddrinfo_deliver(owner: getaddrinfo_t, loop: loop_t,
+                                   status: integer, native: foreign *addrinfo)
+  -- Commit the independently owned native allocation before anything can raise.
+  -- It remains reachable from request:addrinfo() even if copying fails.
+  local result = owner.result as addrinfo_result_t
+  result.native = native
+  owner.result_status = status
+  loop.requests[owner] = nil
+  owner.pending = false
+  local callback? = owner.callback
+  owner.callback = nil
+  local output: addrinfo_result_t? = nil
+  if status == 0 then
+    output = result
+    result:entries()
+  end
+  if callback ~= nil then callback(owner, status, output) end
+catch
+  if loop.failure_count == 0 then
+    loop.failure_error = error
+    loop.failure_trace = traceback
+  end
+  loop.failure_count = loop.failure_count + 1
+  ffi.uv_stop(loop.native)
+end
+
+foreign function getaddrinfo_callback(native: *uv_getaddrinfo_t,
+                                       status: int, result: *addrinfo)
+  local owner = ffi.uv_req_get_data(native as foreign *uv_req_t) as foreign *Udata
+  local loop = ffi.uv_loop_get_data(native.loop) as foreign *Udata
+  local L = ffi.titan_record_field(loop, "loop_t", "state")
+  local handler = ffi.lmacro_clCvalue(
+      ffi.titan_record_field(owner, "getaddrinfo_t", "handler"))
+  local module = ffi.lmacro_uvalue(handler.upvalue[0])
+  local entry = ffi.lmacro_pvalue(handler.upvalue[2]) as foreign GetaddrinfoEntry
+  local top = ffi.lua_gettop(L)
+  ffi.titan_uv_push_owner(L, owner)
+  entry(L, module, handler, owner, loop, status as foreign lua_Integer, result)
+  ffi.lua_settop(L, top)
+end
+
+function getaddrinfo_t.new(): getaddrinfo_t
+  local native = foreign uv_getaddrinfo_t.new()
+  return { native = native, loop = nil, pending = false, result = nil,
+           result_status = 0, callback = nil, handler = getaddrinfo_deliver,
+           userdata = nil }
+end
+
+function getaddrinfo_t:as_req_t(): req_t
+  return req_t.getaddrinfo(self)
+end
+
+function getaddrinfo_t:get_loop(): loop_t?
+  return self.loop
+end
+
+function getaddrinfo_t:addrinfo(): (integer, addrinfo_result_t?)
+  if self.pending then return ffi.UV_EBUSY, nil end
+  if self.result_status ~= 0 then return self.result_status, nil end
+  return self.result_status, self.result
+end
+
+function getaddrinfo(loop: loop_t, request: getaddrinfo_t,
+    callback: (function (getaddrinfo_t, integer, addrinfo_result_t?): ())?,
+    node: string?, service: string?, hints: addrinfo_hints_t?): integer
+  if not loop.initialized then return ffi.UV_EINVAL end
+  if request.pending then return ffi.UV_EBUSY end
+  local native_node: foreign const *char = nil
+  local native_service: foreign const *char = nil
+  if node ~= nil then native_node = node as string end
+  if service ~= nil then native_service = service as string end
+  local native_hints = foreign addrinfo.new()
+  local hints_pointer: foreign const *addrinfo = nil
+  if hints ~= nil then
+    native_hints.ai_flags = hints.ai_flags as foreign int
+    native_hints.ai_family = hints.ai_family as foreign int
+    native_hints.ai_socktype = hints.ai_socktype as foreign int
+    native_hints.ai_protocol = hints.ai_protocol as foreign int
+    hints_pointer = native_hints
+  end
+  local result = addrinfo_result_t(nil, nil, false)
+  local native_callback: foreign uv_getaddrinfo_cb = nil
+  if callback ~= nil then
+    native_callback = getaddrinfo_callback
+    loop.requests[request] = true
+  end
+  request.result = result
+  request.result_status = 0
+  local previous_loop? = request.loop
+  request.loop = loop
+  request.callback = callback
+  request.pending = callback ~= nil
+  ffi.uv_req_set_data(request.native as foreign *uv_req_t,
+                      request as foreign *void)
+  local status = ffi.uv_getaddrinfo(loop.native, request.native,
+      native_callback, native_node, native_service, hints_pointer) as integer
+  -- No allocating helper/callable adaptation after native acceptance.
+  if callback == nil then
+    request.result_status = status
+    -- A synchronous lookup failure may still initialize the native request;
+    -- validation/allocation rejection may leave its previous loop untouched.
+    if request.native.loop ~= loop.native then request.loop = previous_loop end
+    if status == 0 then result.native = request.native.addrinfo end
+  elseif status < 0 then
+    loop.requests[request] = nil
+    request.pending = false
+    request.loop = previous_loop
+    request.callback = nil
+    request.result_status = status
+  end
+  return status
+end
+
+record getnameinfo_t
+  local native: foreign uv_getnameinfo_t
+  local loop: loop_t?
+  local pending: boolean
+  local result_status: integer
+  local completed: boolean
+  local callback: (function (getnameinfo_t, integer, string?, string?): ())?
+  local handler: function (getnameinfo_t, loop_t, integer,
+                           foreign const *char, foreign const *char): ()
+  local userdata: value
+end
+
+local function getnameinfo_deliver(owner: getnameinfo_t, loop: loop_t,
+    status: integer, hostname: foreign const *char, service: foreign const *char)
+  loop.requests[owner] = nil
+  owner.pending = false
+  owner.completed = true
+  owner.result_status = status
+  local callback? = owner.callback
+  owner.callback = nil
+  -- Copy both request-borrowed strings before user code may reuse request.
+  local copied_host: string? = nil
+  local copied_service: string? = nil
+  if hostname ~= nil then copied_host = hostname as string end
+  if service ~= nil then copied_service = service as string end
+  if callback ~= nil then callback(owner, status, copied_host, copied_service) end
+catch
+  if loop.failure_count == 0 then
+    loop.failure_error = error
+    loop.failure_trace = traceback
+  end
+  loop.failure_count = loop.failure_count + 1
+  ffi.uv_stop(loop.native)
+end
+
+foreign function getnameinfo_callback(native: *uv_getnameinfo_t, status: int,
+    hostname: const *char, service: const *char)
+  local owner = ffi.uv_req_get_data(native as foreign *uv_req_t) as foreign *Udata
+  local loop = ffi.uv_loop_get_data(native.loop) as foreign *Udata
+  local L = ffi.titan_record_field(loop, "loop_t", "state")
+  local handler = ffi.lmacro_clCvalue(
+      ffi.titan_record_field(owner, "getnameinfo_t", "handler"))
+  local module = ffi.lmacro_uvalue(handler.upvalue[0])
+  local entry = ffi.lmacro_pvalue(handler.upvalue[2]) as foreign GetnameinfoEntry
+  local top = ffi.lua_gettop(L)
+  ffi.titan_uv_push_owner(L, owner)
+  entry(L, module, handler, owner, loop, status as foreign lua_Integer,
+        hostname, service)
+  ffi.lua_settop(L, top)
+end
+
+function getnameinfo_t.new(): getnameinfo_t
+  local native = foreign uv_getnameinfo_t.new()
+  return { native = native, loop = nil, pending = false, result_status = 0,
+           completed = false, callback = nil, handler = getnameinfo_deliver,
+           userdata = nil }
+end
+
+function getnameinfo_t:as_req_t(): req_t
+  return req_t.getnameinfo(self)
+end
+
+function getnameinfo_t:get_loop(): loop_t?
+  return self.loop
+end
+
+function getnameinfo_t:result(): (integer, string?, string?)
+  if self.pending then return ffi.UV_EBUSY, nil, nil end
+  if not self.completed then return ffi.UV_EINVAL, nil, nil end
+  if self.result_status < 0 then return self.result_status, nil, nil end
+  return self.result_status,
+      (self.native.host as foreign *char) as string,
+      (self.native.service as foreign *char) as string
+end
+
+function getnameinfo(loop: loop_t, request: getnameinfo_t,
+    callback: (function (getnameinfo_t, integer, string?, string?): ())?,
+    address: sockaddr_t, flags: integer): integer
+  if not loop.initialized then return ffi.UV_EINVAL end
+  if request.pending then return ffi.UV_EBUSY end
+  local native_flags = flags as foreign int
+  local native_address = address:pointer()
+  local native_callback: foreign uv_getnameinfo_cb = nil
+  if callback ~= nil then
+    native_callback = getnameinfo_callback
+    loop.requests[request] = true
+  end
+  local previous_loop? = request.loop
+  request.loop = loop
+  request.callback = callback
+  request.pending = callback ~= nil
+  request.completed = false
+  ffi.uv_req_set_data(request.native as foreign *uv_req_t,
+                      request as foreign *void)
+  local status = ffi.uv_getnameinfo(loop.native, request.native,
+      native_callback, native_address, native_flags) as integer
+  if callback == nil then
+    request.result_status = status
+    request.completed = true
+    if request.native.loop ~= loop.native then request.loop = previous_loop end
+  elseif status < 0 then
+    loop.requests[request] = nil
+    request.pending = false
+    request.loop = previous_loop
+    request.callback = nil
+    request.result_status = status
+  end
+  return status
+end

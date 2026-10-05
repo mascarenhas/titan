@@ -502,7 +502,7 @@ titanc [--print-ast] [--pretty-print] [-v] [-j jobs] [--static] [--test] \
   initializes every imported module and preserves the installed bootstrap
   registry value, but calls `main(args)` directly instead of invoking that
   value. This is an explicit lifecycle-ownership option, not a way to disable
-  `titan.uv` initialization.
+  `titan.async` initialization or its process-startup policy.
 * `--no-line-directives` omits Titan source `#line` directives from generated
   C, so native compiler and sanitizer diagnostics use physical generated-C
   coordinates. By default diagnostics are attributed to Titan source.
@@ -694,9 +694,10 @@ source for logical module `titan.uv`; neither spelling creates a module whose
 name or manifest key ends in `.titan`.
 
 Application scheduling uses `import "async"` (or Lua's
-`require "titan.async"`). `titan.uv` is the private Runtime/libuv plumbing
-module and remains directly importable only for standard-library internals and
-the direct-libuv extension contract below.
+`require "titan.async"`). The public [low-level libuv binding](standard-library-uv.md)
+is available through `import "uv"` or `require "titan.uv"`. It exposes explicit
+loops, native owners, callbacks, and utility operations; importing it alone
+does not create an async Runtime or install the Task bootstrap.
 
 Lua's `require`, for its part, finds a generated logical loader through
 `package.path`; that loader finds its physical provider through
@@ -754,41 +755,14 @@ provider from being displaced accidentally by source files in `./titan`.
 Changing `TITAN_PATH` so the installed provider is hidden deliberately selects
 a different module graph.
 
-Windows DLLs that call libuv link the SDK's native dependency import libraries;
-the unresolved-symbol contract below applies to Linux and macOS.
-
-On Linux and macOS, a binary extension DSO may use that ordering to call bundled
-libuv directly.
-Its source must both `import "uv"` and `foreign import "uv.h"`, and its link
-must leave `uv_*` unresolved rather than adding `-luv` or a static archive.
-Titan maps every compiled runtime dependency with
-`RTLD_LAZY | RTLD_GLOBAL`. Lazy binding lets the extension's ordinary
-unresolved libuv calls remain unbound until its generated initializer loads the
-explicit `uv` import globally. `RTLD_NOW` would fail before that initializer
-could run, while a provider loaded `RTLD_LOCAL` later would not satisfy the
-extension's lazy bindings. There is no libuv-specific dependency
-classification or loader path; the compiler's distinct interface-inspection
-loader remains `RTLD_LAZY | RTLD_LOCAL`. This Titan-side contract does not
-cover native constructors, imported data, or taken function addresses whose
-relocations must resolve while the extension is being mapped. A Lua caller
-loading the extension directly must first run `require "titan.uv"`. Like every
-generated logical loader, `titan/uv.lua` finds the physical `titan` provider
-through `package.cpath`, obtains the native support table with
-`require "titan"`, promotes the canonical `titan.so` through its lazy/global
-loader, and invokes the exact `luaopen_titan_uv` entry. The promotion is needed
-because Lua's ordinary C searcher initially maps the same image eager/local for
-the bare support load.
-
-System-mode extensions may instead link the same shared libuv selected by
-pkg-config.
-
-Because this explicit Lua preload establishes the provider before the
-extension is mapped, the Lua route also supports eager relocations and native
-constructors. It can resolve native symbols for a Lua-only extension without a
-Titan `uv` import; the import is nevertheless required for the same module to
-work through Titan's runtime loader. See
-[Direct libuv extensions](ffi.md#direct-libuv-extensions) for the build
-contract.
+Ordinary libuv clients use the [public `uv` module](standard-library-uv.md).
+They do not need a native header or direct C call to consume its compiled API.
+The implementation's native loader fixture separately checks that a narrow C
+probe can resolve bundled libuv symbols through the same lazy/global provider
+loading used by other dependencies. Its C file owns the `uv.h` include; its
+Titan source sees only the probe header and public `uv`. That packaging test is
+not the client extension interface. See
+[native provider linkage](ffi.md#native-provider-linkage) for the distinction.
 
 A statically linked dependency is still a module of its own from Lua's point
 of view. Its generated logical loader points at the enclosing provider, so if
@@ -848,9 +822,11 @@ bootstrap is not shown (see [Error handling](error-handling.md)).
 
 Before it loads the main module, the generated entrypoint publishes the
 process's original `argc` and `argv`. If a transitive import initializes
-`titan.uv`, that canonical provider calls libuv's required `uv_setup_args`
-once and returns its possibly replaced argument vector to the entrypoint before
-the `args` table is built. This startup contract is also why
+`titan.async`, its initializer calls public `uv.setup_process_args()`. That
+helper calls libuv's `uv_setup_args` once and returns its possibly replaced
+argument vector to the entrypoint before the `args` Array is built. Importing
+`titan.uv` alone applies no startup policy; an explicit low-level caller may
+call the helper while the original entrypoint argument contract is available. This startup contract is also why
 [`os.exepath`](standard-library-os.md#directories-and-host-identity) is
 available in compiled Titan programs but not when the standard module is
 loaded by a Lua or other embedding host.

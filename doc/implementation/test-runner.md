@@ -234,7 +234,7 @@ lifecycle protocol.
 
 ## Repository dogfooding
 
-The shared `spec/support/stdlib_test_modules.mk` manifest names 25 module-owned
+The shared `spec/support/stdlib_test_modules.mk` manifest names 26 module-owned
 roots under `spec/stdlib/titan/`, used by Linux, macOS, and native Windows.
 The same reviewed inventory names their test/helper compilation units, folder
 contributors, and direct source imports. On Unix, Make compiles shared
@@ -244,7 +244,7 @@ contributors, and direct source imports. On Unix, Make compiles shared
 command runs from `.titan-tests/` with the same absolute source tree and flags.
 The shared support output is `titan/test__test_support.o` within that directory.
 
-One final Unix `--test --incremental --no-uv-bootstrap` invocation keeps all 25
+One final Unix `--test --incremental --no-uv-bootstrap` invocation keeps all 26
 roots explicit and discovers the complete source/object closure. The designated
 first root, `test.tests`, owns `.titan-tests/test/tests`; the current synthetic
 runner, entrypoint, and Darwin dSYM are also owned there. Ordinary module
@@ -255,7 +255,7 @@ A no-op `titan-stdlib-test-build` invokes neither the compiler nor the linker.
 
 `make titan-stdlib-test-run` returns to the repository root before executing,
 because several fixtures use repository-relative paths. `TITAN_FILTER` supplies
-one Lua pattern to this already built executable; it never changes the 25-root
+one Lua pattern to this already built executable; it never changes the 26-root
 compile. `make titan-stdlib-test` composes build and run, while the split leaf
 targets let sanitizer and focused development runs reuse one build in multiple
 fresh processes. `BUSTED_FILTER` is independent and belongs to
@@ -298,9 +298,9 @@ because it reinstalls the current compiler and provider before testing;
 
 `run_with_timeout.sh` uses Bash monitor mode to give the executable its own
 process group and polls it at a coarse interval. Make's default
-`TITAN_TEST_TIMEOUT=300` covers the whole suite, including fresh child-fixture
-compilation under O3/LTO. Explicit overrides, including the 15-second CI
-shutdown check, remain independent of that default. At the deadline it sends
+`TITAN_TEST_TIMEOUT=600` covers all 26 test roots, including repeated fresh
+child-fixture compilation under O3/LTO. Explicit overrides, including the
+15-second CI shutdown check, remain independent of that default. At the deadline it sends
 `TERM`, then `KILL` after a short grace period, maps the timeout to status 124,
 and otherwise preserves the child's status. Make streams combined
 stdout/stderr through a pipe rather than redirecting either stream to a regular

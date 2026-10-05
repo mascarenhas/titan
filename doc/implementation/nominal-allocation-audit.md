@@ -1,29 +1,57 @@
 # Native storage allocation audit
 
-The issue #174 migrations were checked with two independent forms of evidence:
-allocator measurements of storage replicas and inspection of the actual generated
-standard-library factories. The reproduction is
-[`spec/support/nominal_allocation_audit.lua`](../../spec/support/nominal_allocation_audit.lua).
+The current public UV/async architecture separates native owners from Task,
+Wait, operation, subscription, and domain owners. An allocation audit must
+identify exactly which of those layers it counts. A low native-storage count
+does not measure the complete allocation cost of a public operation.
 
-Run it from a checkout whose standard provider and installed compiler/SDK have
-just been rebuilt together. Use the same current compiler revision even while
-the prerelease version and ABI markers remain unchanged. The output directory
-must not exist:
+## Auditing the current architecture
 
-```sh
-PREFIX=/tmp/titan-174-validation \
-  /tmp/titan-174-validation/bin/lua \
-  spec/support/nominal_allocation_audit.lua /tmp/titan-storage-audit
-```
+Start from a provider and compiler/SDK built from the same source revision and
+build configuration. Record their source hashes and generated C before running
+disposable measurements. Review the public UV constructors and native callbacks
+in `titan/uv/`, async's generic Operation/Wait/subscription creation, and the
+actual fs/net/os/timer/SQLite/HTTP adapter being measured. Each has separate
+allocation and lifetime responsibilities.
 
-The script snapshots `titan/uv/uv.c`, `titan/http/http.c`, and `titan/fs.c` before
-compiling its disposable module. It uses the installed compiler, the prebuilt
-runtime, and libuv's Linux `-D_GNU_SOURCE` header context. It changes no checkout
-source, generated module, or installed provider. `--prepare-only` writes the
-replicas without compiling; `--audit-only` also checks existing generated C
-without building or executing the replicas.
+For native storage, inspect the generated allocation extent and the address
+passed to native initialization or request submission. They must refer to the
+final owner; later copying an initialized native handle into another record is
+not equivalent. Count callbacks, descriptor/buffer retention, scheduling timers,
+queue nodes, and domain/result records separately when measuring a complete
+operation. Callback-frame pins and retained request arguments are lifetime
+requirements, not duplicate owner identities to discard for a lower count.
 
-## What the measurements mean
+The repository helper
+[`spec/support/nominal_allocation_audit.lua`](../../spec/support/nominal_allocation_audit.lua)
+is an archived reproduction tied to commit `641aade0` (PR #179). Reproduce it
+in a separate checkout of that revision with its matching installed Lua and SDK.
+The current helper checks for the historical source layout and rejects this
+checkout before attempting its old factory assertions. It combines storage
+replicas with assertions about exact generated factory names; it is not a
+current-architecture allocation benchmark. The former `new_fs_request`, `WorkCall:dispatch`, and
+`os_spawn_config_new` factories below belong to the pre-public-UV architecture;
+renaming those checks would not establish equivalent current coverage. Current
+allocation results require fresh measurements and generated-source evidence;
+none are inferred from the table below.
+
+## Scope of the retained evidence
+
+The rest of this chapter records the issue #174 migration before the public UV
+binding and async-owned Runtime. Its factory names, script output files,
+collaborator exclusions, counts, and machine/compiler identity describe that
+historical source state only. They are retained to explain the native-storage
+technique, not as instructions to run the old factory audit against today's
+provider or as current production allocation claims.
+
+The historical script saved `titan/uv/uv.c`, `titan/http/http.c`, and `titan/fs.c`
+and compiled disposable replicas with the matching installed SDK. Its
+`--prepare-only` and `--audit-only` modes and generated-factory assertions must
+be read in that historical context. No historical count below proves that the
+current generic async layer or domain adapters allocate the same number of
+objects.
+
+## Historical issue #174 measurements
 
 The allocator interceptor counts fresh `LUA_TUSERDATA` requests after module
 initialization. Baseline replicas construct the former separate owned C objects
@@ -80,7 +108,7 @@ the target's Lua/C layout. Zero length still reserves a distinct aligned tail
 address. The generated `NativeIntArray.make` body is also checked for exactly one
 `luaS_newudata` and no temporary backing allocation.
 
-## Evidence from the real factories
+## Historical generated-factory evidence
 
 `canonical-fixed-factories.c.txt` retains the actual HTTP, filesystem, and libuv
 factory bodies. Each must allocate the appropriate native payload directly, with
@@ -106,8 +134,8 @@ and request submission uses the final request member. Spawn options point to the
 configuration's own stdio tail, and work request data points to its owner's
 carrier. No initialized handle is subsequently copied to a new owner.
 
-The output directory also retains `measurements.md`, `compile.log`, the exact
+The historical output directory also retained `measurements.md`, `compile.log`, the exact
 replica source, `native-array-c.txt`, and all three canonical C snapshots, so
 counts and source inspection can be reviewed against the same generated code.
-Behavior, cancellation, cleanup, rooting, and callback lifetime remain covered
-by the native standard-library and sanitizer suites.
+These historical storage measurements do not establish current callback,
+cancellation, cleanup, rooting, or whole-operation allocation behavior.

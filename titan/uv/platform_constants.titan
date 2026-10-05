@@ -1,0 +1,67 @@
+foreign import "platform-constants.h"
+
+-- Absence means the native platform does not define this vocabulary.
+const AF_UNIX: integer?
+const S_IRUSR: integer?
+const S_IWUSR: integer?
+const S_IXUSR: integer?
+const S_IRGRP: integer?
+const S_IWGRP: integer?
+const S_IXGRP: integer?
+const S_IROTH: integer?
+const S_IWOTH: integer?
+const S_IXOTH: integer?
+const S_IFMT: integer?
+const S_IFREG: integer?
+const S_IFDIR: integer?
+const S_IFLNK: integer?
+const S_IFSOCK: integer?
+const S_IFIFO: integer?
+const S_IFCHR: integer?
+const S_IFBLK: integer?
+const F_OK: integer?
+const R_OK: integer?
+const W_OK: integer?
+const X_OK: integer?
+const SIGABRT: integer?
+const SIGALRM: integer?
+const SIGBREAK: integer?
+const SIGBUS: integer?
+const SIGCHLD: integer?
+const SIGCONT: integer?
+const SIGFPE: integer?
+const SIGHUP: integer?
+const SIGILL: integer?
+const SIGINT: integer?
+const SIGIO: integer?
+const SIGIOT: integer?
+const SIGKILL: integer?
+const SIGPIPE: integer?
+const SIGPOLL: integer?
+const SIGPROF: integer?
+const SIGPWR: integer?
+const SIGQUIT: integer?
+const SIGSEGV: integer?
+const SIGSTKFLT: integer?
+const SIGSTOP: integer?
+const SIGSYS: integer?
+const SIGTERM: integer?
+const SIGTRAP: integer?
+const SIGTSTP: integer?
+const SIGTTIN: integer?
+const SIGTTOU: integer?
+const SIGURG: integer?
+const SIGUSR1: integer?
+const SIGUSR2: integer?
+const SIGVTALRM: integer?
+const SIGWINCH: integer?
+const SIGXCPU: integer?
+const SIGXFSZ: integer?
+const SIGRTMIN: integer?
+const SIGRTMAX: integer?
+
+local function platform_constant(name: string): integer?
+  local output: foreign int = 0
+  if ffi.titan_uv_platform_constant(name, output) == 0 then return nil end
+  return output
+end

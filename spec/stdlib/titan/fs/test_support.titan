@@ -1,6 +1,8 @@
 -- Filesystem fixture ownership for fs.tests.
 local test = import "test"
 local fs = import "fs"
+local uv = import "uv"
+local strings = import "string"
 local system = import "os"
 local common = import "support.common.titan"
 foreign import "stdlib.h"
@@ -77,4 +79,44 @@ local function make_boundary_payload(): string
   storage[prefix_length + 4] = 105
   storage[prefix_length + 5] = 108
   return (storage as string) .. "\r\n\255"
+end
+
+local function require_descriptor_inventory()
+  local directory? = fs.stat("/dev/fd")
+  if not directory or directory.kind ~= "directory" then
+    test.skip("capability: process descriptor inventory at /dev/fd is unavailable")
+  end
+end
+
+local function file_descriptor(path: string): integer
+  local wanted = fs.stat(path)
+  -- Linux and Darwin both expose /dev/fd. Match physical file identity through
+  -- public fstat results rather than relying on platform-specific link text.
+  local entries = fs.list("/dev/fd")
+  for index = 1, #entries do
+    local name = entries[index]
+    local descriptor = 0
+    for digit = 1, #name do
+      local byte = strings.byte(name, digit)
+      test.assert(byte >= 48 and byte <= 57,
+                  "descriptor inventory contains a nonnumeric entry")
+      descriptor = descriptor * 10 + byte - 48
+    end
+    local request = uv.fs_t.new()
+    defer uv.fs_req_cleanup(request)
+    if uv.fs_fstat(nil, request, descriptor) >= 0 then
+      local found = uv.fs_get_statbuf(request)
+      if found.st_dev == wanted.device and found.st_ino == wanted.inode then
+        return descriptor
+      end
+    end
+  end
+  return -1
+end
+
+local function close_descriptor(descriptor: integer)
+  local request = uv.fs_t.new()
+  defer uv.fs_req_cleanup(request)
+  test.assert(uv.fs_close(nil, request, descriptor) == 0,
+              "could not close the native fixture descriptor")
 end

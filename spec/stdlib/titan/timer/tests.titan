@@ -3,25 +3,48 @@ local runtime_test = import "support.runtime.titan"
 local async = import "async"
 local stream = import "io"
 local timer = import "timer"
+local uv = import "uv"
 local gc = import "gc"
 local task_support = import "support.async.titan"
+
+local function native_handle_count(): integer
+  -- Walk on the loop's main thread without advancing it. Cleanup registration
+  -- also permits observing native retirement when cancellation is pending.
+  local outcome = async.await_cleanup<|integer, nil|>(function (resolve, _reject, _fatal)
+    local count = 0
+    uv.walk(async.current_loop(), function (_handle: uv.handle_t, _: value)
+      count = count + 1
+    end)
+    resolve(count)
+  end)
+  case outcome
+  when success(count) then return count
+  else raise "native handle inventory failed"
+  end
+end
 
 function test_timer_yield_and_sleep(_context: test.Context)
   runtime_test.run(function ()
     timer.yield()
     timer.sleep(0)
+    test.assert(native_handle_count() == 0,
+                "zero sleep returned before its native timer closed")
     timer.sleep(2)
+    test.assert(native_handle_count() == 0,
+                "sleep returned before its native timer closed")
 
     local rejected = false
     do
       timer.sleep(-1)
     catch
       local failure = error as async.OperationError
-      test.assert(failure.operation == "timer.sleep",
-                  "negative sleep reported the wrong operation")
+      test.assert(failure.operation == "timer.sleep" and failure.name == "EINVAL",
+                  "negative sleep reported the wrong operation or native error")
       rejected = true
     end
     test.assert(rejected, "negative sleep was accepted")
+    test.assert(native_handle_count() == 0,
+                "negative sleep initialized a native timer")
   end)
 end
 
@@ -48,11 +71,13 @@ function test_timer_ticker_waited_and_retained_ticks(
     closer:close()
     closer:close()
     test.assert(not ticker:tick(), "closed Ticker produced another tick")
+    test.assert(native_handle_count() == 0,
+                "Ticker close returned before native retirement")
   end)
 end
 
 function test_timer_ticker_pending_close_and_invalid_period(
-    context: test.Context)
+    _context: test.Context)
   runtime_test.run(function ()
     local ticker = timer.ticker(10000)
     defer ticker:close()
@@ -71,7 +96,7 @@ function test_timer_ticker_pending_close_and_invalid_period(
     do
       ticker:tick()
     catch
-      competing_waiter_rejected = true
+      competing_waiter_rejected = error == "Ticker already has a waiting Task"
     end
     test.assert(competing_waiter_rejected,
                 "Ticker accepted a second waiting Task")
@@ -88,9 +113,11 @@ function test_timer_ticker_pending_close_and_invalid_period(
     do
       timer.ticker(0)
     catch
-      invalid = true
+      invalid = error == "ticker interval must be positive"
     end
     test.assert(invalid, "Ticker accepted a nonpositive interval")
+    test.assert(native_handle_count() == 0,
+                "closed or rejected Ticker left a native handle")
   end)
 end
 
@@ -98,7 +125,9 @@ function test_timer_sleep_owner_survives_collection_until_close(
     _context: test.Context)
   runtime_test.run(function ()
     local resumed = false
+    local unwound = false
     local sleeper = async.run<|value, value|>(function (): value
+      defer unwound = true
       timer.sleep(60000)
       resumed = true
       return nil
@@ -107,12 +136,110 @@ function test_timer_sleep_owner_survives_collection_until_close(
     while sleeper:status():as_string() == "ready" do timer.yield() end
     test.assert(sleeper:status():as_string() == "waiting",
                 "one-shot timer did not suspend")
+    test.assert(native_handle_count() == 1,
+                "accepted sleep did not own its native timer")
 
     gc.collect()
-    sleeper:cancel(async.CancellationReason.simple("close collected timer"))
+    local reason = async.CancellationReason<|value|>.simple("close collected timer")
+    sleeper:cancel(reason)
+    test.assert(not unwound, "sleep cancellation entered its Task inline")
     gc.collect()
     async.join(sleeper)
-    test.assert(sleeper:status():has_cancelled() and not resumed,
+    local cancelled, actual? = sleeper:status():has_cancelled()
+    test.assert(cancelled and actual == reason and unwound and not resumed,
                 "collected timer owner lost its close continuation")
+    test.assert(native_handle_count() == 0,
+                "cancelled sleep retained its native timer")
+  end)
+end
+
+function test_timer_ticker_replaces_cancelled_waiter_before_unwind(
+    _context: test.Context)
+  runtime_test.run(function ()
+    local ticker = timer.ticker(60000)
+    defer ticker:close()
+    local unwound, delivered = false, false
+    local old = async.run<|value, value|>(function (): value
+      defer unwound = true
+      ticker:tick()
+      delivered = true
+      return nil
+    end)
+    task_support.cleanup_task(old, "replaced Ticker waiter cleanup")
+    while old:status():as_string() == "ready" do timer.yield() end
+    test.assert(old:status():as_string() == "waiting",
+                "old Ticker waiter did not suspend")
+
+    old:cancel(async.CancellationReason.simple("replace Ticker waiter"))
+    test.assert(not unwound, "Ticker cancellation unwound its waiter inline")
+    local observer = async.run<|value, value|>(function (): value
+      defer ticker:close()
+      async.join(old)
+      test.assert(unwound and old:status():has_cancelled() and not delivered,
+                  "old Ticker waiter did not unwind through cancellation")
+      local rejected = false
+      do
+        ticker:tick()
+      catch
+        rejected = error == "Ticker already has a waiting Task"
+      end
+      test.assert(rejected,
+                  "old waiter cleanup detached the replacement or changed its diagnostic")
+      return nil
+    end)
+    task_support.cleanup_task(observer, "replacement Ticker observer cleanup")
+
+    -- No scheduler turn separates cancellation from this direct replacement.
+    -- The observer closes the long-lived timer after checking its reservation.
+    test.assert(not ticker:tick(), "replacement did not observe the observer's close")
+    async.join(observer)
+    test.assert(observer:status():has_succeeded(),
+                "replacement Ticker observer failed")
+    test.assert(native_handle_count() == 0,
+                "replacement Ticker retained its native handle")
+  end)
+end
+
+function test_timer_cancellation_precedes_competing_waiter_error(
+    _context: test.Context)
+  runtime_test.run(function ()
+    local ticker = timer.ticker(60000)
+    defer ticker:close()
+    local ticked = true
+    local waiter = async.run<|value, value|>(function (): value
+      ticked = ticker:tick()
+      return nil
+    end)
+    task_support.cleanup_task(waiter, "cancelled competitor Ticker waiter cleanup")
+    while waiter:status():as_string() == "ready" do timer.yield() end
+    test.assert(waiter:status():as_string() == "waiting",
+                "Ticker waiter did not suspend before the cancelled competitor")
+
+    local reason = async.CancellationReason<|value|>.simple("cancelled tick caller")
+    local observed: value = nil
+    local close_completed = false
+    local competitor = async.run<|value, value|>(function (): value
+      async.running():cancel(reason)
+      do
+        ticker:tick()
+      catch
+        observed = error
+      end
+      ticker:close()
+      close_completed = true
+      return nil
+    end)
+    task_support.cleanup_task(competitor, "cancelled Ticker competitor cleanup")
+    async.join(competitor)
+    local cancelled, actual? = competitor:status():has_cancelled()
+    test.assert(observed == reason and cancelled and actual == reason,
+                "competing Ticker diagnostic took priority over pending cancellation")
+    test.assert(close_completed,
+                "pending cancellation prevented Ticker ownership cleanup")
+    async.join(waiter)
+    test.assert(waiter:status():has_succeeded() and not ticked,
+                "cancelled caller's close did not release the existing Ticker waiter")
+    test.assert(native_handle_count() == 0,
+                "cancelled Ticker close retained its native handle")
   end)
 end

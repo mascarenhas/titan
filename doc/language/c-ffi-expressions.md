@@ -133,24 +133,24 @@ normally.
 ## Contextual object-pointer conversions
 
 C libraries often expose related opaque structures as different pointer types
-and require the caller to use a cast. Libuv handles are a familiar example:
-converting `uv_tcp_t *` to `uv_handle_t *` is a documented C cast convention,
-not inheritance or a subtype relationship in Titan.
+and require the caller to use a cast. For example, a C library may document
+converting `Widget *` to `Object *`. That is a C cast convention, not inheritance
+or a subtype relationship in Titan.
 
 Titan admits such conversions only in a context that already supplies the
 destination C pointer type:
 
 ```lua
-local function close_tcp(tcp: foreign *uv_tcp_t)
-    ffi.uv_close(tcp, nil)                 -- parameter supplies *uv_handle_t
+local function close_widget(widget: foreign *Widget)
+    ffi.destroy_object(widget)            -- parameter supplies *Object
 end
 
-local function as_handle(tcp: foreign *uv_tcp_t): foreign *uv_handle_t
-    return tcp                            -- return type supplies the target
+local function as_object(widget: foreign *Widget): foreign *Object
+    return widget                          -- return type supplies the target
 end
 
-local function explicit(tcp: foreign *uv_tcp_t): foreign *uv_handle_t
-    return tcp as foreign *uv_handle_t
+local function explicit(widget: foreign *Widget): foreign *Object
+    return widget as foreign *Object
 end
 ```
 
@@ -497,13 +497,13 @@ Top-level enum constants and supported object-like macros are direct members of
 the foreign module:
 
 ```lua
-foreign import "uv.h"
+foreign import "errno.h"
 foreign import "signal.h"
 
 local function imported_constants(): integer
-    local cancelled = ffi.UV_ECANCELED
-    local readable = ffi.UV_READABLE
-    return (cancelled as integer) + (readable as integer)
+    local missing = ffi.ENOENT
+    local denied = ffi.EACCES
+    return (missing as integer) + (denied as integer)
 end
 
 local function signal_handlers_differ(): boolean

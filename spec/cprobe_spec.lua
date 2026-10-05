@@ -2659,6 +2659,35 @@ describe("whole-question enum carrier selection", function()
         return assert(service:module_context({}))
     end
 
+    it("reads the exact enum payload with Clang address sanitizer enabled", function()
+        local strategy = compiler_io.new_sync()
+        if not strategy:run({ "clang", "--version" }).ok then
+            pending("Clang is required for the sanitized enum object probe")
+            return
+        end
+        local root = temporary_directory()
+        local header = root .. "/enum-carrier.h"
+        write_file(header, "enum probe_enum { NEGATIVE = -1, POSITIVE = 1 };\n")
+        local service = assert(cprobe.new_service({
+            io = strategy, compiler_argv = { "clang" },
+            include_dirs = driver.foreign_include_dirs(),
+            cflags = { "-fsanitize=address,undefined", "-fno-lto",
+                "-Wall", "-Wextra", "-Werror" },
+        }))
+        local ok, failure = xpcall(function()
+            local module = assert(service:module_context({ includes = {
+                { include_kind = "quote", include_name = header },
+            } }))
+            local result = module:select_enum_carrier(int_enum, all_ids)
+            assert.equal("success", result.status, result.message)
+            assert.same({ kind = "enum_carrier", match_count = 1,
+                carrier_id = 6 }, result.selection)
+        end, debug.traceback)
+        assert.is_true(service:close())
+        remove_directory(root)
+        assert.is_true(ok, failure)
+    end)
+
     it("compiles one selection candidate, forces object output, and copies cache answers", function()
         local service, state = fake_selection_service({ syntax_only = true },
             object_bytes(payload(1, 6)))

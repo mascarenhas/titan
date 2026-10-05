@@ -2,8 +2,34 @@ local fs = import "fs"
 local stream = import "io"
 local system = import "os"
 local str = import "string"
+local async = import "async"
+local timer = import "timer"
+local uv = import "uv"
 
-local function exercise_parent_stdin()
+local function drain_stdin_native_close()
+  local input: uv.handle_t? = nil
+  -- Registration runs on the owning main Lua thread after this Task yields.
+  case async.await_cleanup<|nil, nil|>(function (resolve, _reject, _fatal)
+    uv.walk(async.current_loop(), function (handle: uv.handle_t, _: value)
+      case handle
+      when pipe() then
+        if input ~= nil then raise "unexpected second parent pipe" end
+        input = handle
+      else
+      end
+    end)
+    resolve(nil)
+  end)
+  when success() then
+  else raise "parent stdin native inventory failed"
+  end
+  if input ~= nil then
+    local handle = input as uv.handle_t
+    while handle:is_initialized() do timer.yield() end
+  end
+end
+
+local function exercise_parent_stdin(wait_for_close: boolean)
   local reader: stream.ReaderCloser = system.stdin
   local writer: stream.Writer = system.stdout
   local diagnostics: stream.Writer = system.stderr
@@ -13,6 +39,7 @@ local function exercise_parent_stdin()
   if system.stdin:read_until("|", true) ~= "first" then
     raise "parent stdin delimiter read changed"
   end
+  if wait_for_close then drain_stdin_native_close() end
   if system.stdin:read() ~= "second" then
     raise "parent stdin retained bytes changed"
   end
@@ -27,7 +54,7 @@ function main(arguments: {string}): integer
   local succeeded = true
   local result = "parent-input-ok"
   do
-    exercise_parent_stdin()
+    exercise_parent_stdin(arguments[2] == "wait-for-close")
   catch
     succeeded = false
     result = str.tostring(error) .. "\n" .. traceback

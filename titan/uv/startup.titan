@@ -1,0 +1,25 @@
+-- Contributor to the public uv folder module. The generated entrypoint alone
+-- publishes these registry values, before it initializes any Titan modules.
+local process_args_ready = false
+
+-- Configure only the original generated-entrypoint argc/argv. Return false in
+-- a Lua host, where that contract is absent. A successful call is idempotent;
+-- uv_setup_args may replace argv, and main must consume that replacement.
+function setup_process_args(): boolean
+  if process_args_ready then return true end
+  local top = ffi.lua_gettop(L)
+  defer ffi.lua_settop(L, top)
+  if ffi.lua_checkstack(L, 3) == 0 then
+    raise "cannot reserve Lua stack for process argument setup"
+  end
+  ffi.lua_getfield(L, ffi.LUA_REGISTRYINDEX, ffi.TITAN_MAIN_ARGC_KEY)
+  if ffi.lua_type(L, -1) == ffi.LUA_TNIL then return false end
+  local argc = ffi.lua_tointegerx(L, -1, nil) as foreign int
+  ffi.lua_getfield(L, ffi.LUA_REGISTRYINDEX, ffi.TITAN_MAIN_ARGV_KEY)
+  local argv = ffi.lua_touserdata(L, -1) as foreign *(*char)
+  local configured = ffi.uv_setup_args(argc, argv)
+  ffi.lua_pushlightuserdata(L, configured)
+  ffi.lua_setfield(L, ffi.LUA_REGISTRYINDEX, ffi.TITAN_MAIN_ARGV_KEY)
+  process_args_ready = true
+  return true
+end

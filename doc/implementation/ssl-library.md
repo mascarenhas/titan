@@ -14,9 +14,8 @@ high-level `fs` and `net` modules. Explicit path reads go through
 `fs.read_file`; network traffic drives only `net`'s public `read`, `write`,
 `shutdown`, `close`, and `accept` methods.
 
-This feature makes no change to `titan.uv`, adds no TLS call to its private
-continuation union, and does not import it. The existing networking module is
-treated as fixed language-level substrate. A TLS operation suspends only when
+TLS does not import `titan.uv` or add a scheduler operation. The networking
+module's public resource and cleanup contracts are its transport substrate. A TLS operation suspends only when
 the wrapped high-level `net.Connection` suspends.
 
 `titan/ssl.titan` directly imports OpenSSL's public `err.h`, `x509v3.h`,
@@ -225,13 +224,13 @@ directory semantics with ad hoc Titan traversal would change trust policy.
 
 ## Build and provider composition
 
-The default build pins OpenSSL 3.5.7, verifies its release tarball, and builds
+`OPENSSL_MODE=bundled` pins OpenSSL 3.5.7, verifies its release tarball, and builds
 static PIC `libssl.a` and `libcrypto.a` with the OpenSSL 3.0 API floor. They are
 private standard-provider payload: their objects are force-carried into the
 combined DSO and flattened into the corresponding static provider rather than
 installed as Titan runtime-SDK archives.
 
-`OPENSSL_MODE=system` instead requires `pkg-config` metadata for OpenSSL 3.0 or
+The default `OPENSSL_MODE=system` requires `pkg-config` metadata for OpenSSL 3.0 or
 newer. Its ordered link result remains a final-link input and must be repeated
 by static consumers; it is not copied into `titan.a`. Because the module uses
 OpenSSL directly, neither mode builds, carries, or installs an SSL adapter

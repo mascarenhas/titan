@@ -234,7 +234,7 @@ LuaRocks C-module owner. The source-rock hook validates, publishes, and rolls
 back the same complete pair and exact shim inventory.
 
 Public behavior lives under `spec/stdlib/titan/json/tests/`, as the explicit
-`json.tests` root in the 25-root aggregate, without LuaCov. The existing Titan
+`json.tests` root in the 26-root aggregate, without LuaCov. The existing Titan
 parser spec tests only shorthand normalization. Packaging/native-build specs
 own exact sources, module protocols, metadata fixtures, installed shims, and
 rollback. Lua/provider and static production smokes exercise dynamic decoding,

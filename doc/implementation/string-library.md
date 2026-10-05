@@ -41,7 +41,7 @@ public `titan.gc` surface to configure their weak caches. `titan.string` uses
 the typed PEG surface but has no async-runtime dependency. The dependency runs
 the other way: `titan.async` uses this module's public byte operations and
 synchronous writer for its channel-backed string adapters. `titan.string`
-never reaches the embedded PEG engine or private uv continuation layer through
+never reaches the embedded PEG engine or async Runtime through
 a raw escape hatch. Both
 `titan.net` and `titan.os` dogfood the literal
 `titan.string.find` and byte-preserving `titan.string.sub` operations.
@@ -50,7 +50,7 @@ compiles and executes its labeled grammar, while `titan.string` supplies its
 writer and byte-preserving normalization helpers. Neither dependency exposes
 private engine or storage state to URL.
 The adapter state and close rules are documented with their owner in
-[The libuv continuation runtime](libuv-runtime.md#string-specialized-channel-adapters).
+[Async channel-backed string streams](../language/async-io.md#channel-backed-string-streams).
 Production places all twenty-one logical modules and LPegLabel in one static
 bundle.
 

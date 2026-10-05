@@ -1,0 +1,447 @@
+-- UDP contributor. Shared foundation changes are in integration.patch only.
+foreign type UDPAllocEntry = function (*lua_State, *Udata, *CClosure, *Udata, *Udata, size_t, *uv_buf_t): void
+foreign type UDPRecvEntry = function (*lua_State, *Udata, *CClosure, *Udata, *Udata, ssize_t, const *uv_buf_t, const *sockaddr, unsigned int): void
+foreign type UDPSendEntry = function (*lua_State, *Udata, *CClosure, *Udata, *Udata, int): void
+
+union membership
+  LEAVE_GROUP()
+  JOIN_GROUP()
+end
+
+local function membership_native(member: membership): foreign uv_membership
+  case member
+  when LEAVE_GROUP() then return ffi.UV_LEAVE_GROUP
+  when JOIN_GROUP() then return ffi.UV_JOIN_GROUP
+  end
+end
+
+const UDP_IPV6ONLY: integer?
+const UDP_PARTIAL: integer?
+const UDP_REUSEADDR: integer?
+const UDP_MMSG_CHUNK: integer?
+const UDP_MMSG_FREE: integer?
+const UDP_LINUX_RECVERR: integer?
+const UDP_REUSEPORT: integer?
+const UDP_RECVMMSG: integer?
+
+record udp_t
+  local native: foreign uv_udp_t
+  local phase: integer
+  local loop: loop_t?
+  local alloc_callback: (function (handle_t, integer): (buf_t))?
+  local recv_callback: (function (udp_t, integer, buf_t?, sockaddr_t?, integer): ())?
+  local close_callback: (function (handle_t): ())?
+  local recv_buffer: buf_t?
+  local alloc_handler: function (udp_t, loop_t, foreign size_t, foreign *uv_buf_t): ()
+  local recv_handler: function (udp_t, loop_t, foreign ssize_t, foreign const *uv_buf_t, foreign const *sockaddr, foreign unsigned int): ()
+  local close_handler: function (udp_t, loop_t): ()
+  local userdata: value
+end
+
+record udp_send_t
+  local native: foreign uv_udp_send_t
+  local loop: loop_t?
+  local pending: boolean
+  local handle: udp_t?
+  local buffers: {buf_t}?
+  local native_buffers: (owned uv_buf_t[])?
+  local callback: (function (udp_send_t, integer): ())?
+  local handler: function (udp_send_t, loop_t, foreign int): ()
+  local userdata: value
+end
+
+local function udp_allocate(owner: udp_t, loop: loop_t, suggested: foreign size_t,
+                            output: foreign *uv_buf_t)
+  -- Native output starts empty, including every allocation/conversion failure.
+  output.base = nil
+  output.len = 0
+  owner.recv_buffer = nil
+  local callback = owner.alloc_callback
+  local buffer = callback(handle_t.udp(owner), suggested as integer)
+  if not buffer.writable then raise "UDP receive buffer must be writable" end
+  owner.recv_buffer = buffer
+  output[0] = buffer.native[0]
+catch
+  if loop.failure_count == 0 then
+    loop.failure_error = error
+    loop.failure_trace = traceback
+  end
+  loop.failure_count = loop.failure_count + 1
+  ffi.uv_stop(loop.native)
+end
+
+local function udp_receive(owner: udp_t, loop: loop_t, nread: foreign ssize_t,
+                           native: foreign const *uv_buf_t,
+                           address: foreign const *sockaddr,
+                           flags: foreign unsigned int)
+  local retained? = owner.recv_buffer
+  -- CHUNK borrows part of the original allocation; the terminal FREE/error
+  -- retires that borrow before user delivery. A stopped recvmmsg batch may omit
+  -- FREE; recv_stop retains the allocation until the next alloc or close.
+  if (flags as integer & UDP_MMSG_CHUNK) == 0 then owner.recv_buffer = nil end
+  local buffer: buf_t? = nil
+  if native ~= nil and native.base ~= nil and retained ~= nil then
+    local offset = (native.base - retained.native.base) as integer
+    buffer = retained:slice(offset + 1, native.len as integer)
+  end
+  local copied? = sockaddr_copy(address)
+  local callback? = owner.recv_callback
+  if callback ~= nil then callback(owner, nread as integer, buffer, copied, flags as integer) end
+catch
+  if loop.failure_count == 0 then
+    loop.failure_error = error
+    loop.failure_trace = traceback
+  end
+  loop.failure_count = loop.failure_count + 1
+  ffi.uv_stop(loop.native)
+end
+
+local function udp_closed(owner: udp_t, loop: loop_t)
+  loop.handles[owner] = nil
+  owner.phase = HANDLE_RETIRED
+  -- Keep the original loop observable through close; init replaces it.
+  local callback? = owner.close_callback
+  owner.alloc_callback = nil
+  owner.recv_callback = nil
+  owner.close_callback = nil
+  owner.recv_buffer = nil
+  if callback ~= nil then callback(handle_t.udp(owner)) end
+catch
+  if loop.failure_count == 0 then
+    loop.failure_error = error
+    loop.failure_trace = traceback
+  end
+  loop.failure_count = loop.failure_count + 1
+  ffi.uv_stop(loop.native)
+end
+
+local function udp_sent(owner: udp_send_t, loop: loop_t, status: foreign int)
+  loop.requests[owner] = nil
+  owner.pending = false
+  owner.loop = nil
+  -- Keep the old buffer closure through actual callback return, independent
+  -- of the new fields installed if user code resubmits this same request.
+  local retained? = owner.buffers
+  local native? = owner.native_buffers
+  local callback? = owner.callback
+  owner.buffers = nil
+  owner.native_buffers = nil
+  owner.callback = nil
+  if callback ~= nil then callback(owner, status as integer) end
+catch
+  if loop.failure_count == 0 then
+    loop.failure_error = error
+    loop.failure_trace = traceback
+  end
+  loop.failure_count = loop.failure_count + 1
+  ffi.uv_stop(loop.native)
+end
+
+foreign function udp_alloc_callback(base: *uv_handle_t, suggested: size_t, output: *uv_buf_t)
+  local owner = ffi.uv_handle_get_data(base) as foreign *Udata
+  local loop = ffi.uv_loop_get_data(ffi.uv_handle_get_loop(base)) as foreign *Udata
+  local L = ffi.titan_record_field(loop, "loop_t", "state")
+  local handler = ffi.lmacro_clCvalue(ffi.titan_record_field(owner, "udp_t", "alloc_handler"))
+  local module = ffi.lmacro_uvalue(handler.upvalue[0])
+  local entry = ffi.lmacro_pvalue(handler.upvalue[2]) as foreign UDPAllocEntry
+  local top = ffi.lua_gettop(L)
+  ffi.titan_uv_push_owner(L, owner)
+  entry(L, module, handler, owner, loop, suggested, output)
+  ffi.lua_settop(L, top)
+end
+
+foreign function udp_recv_callback(native: *uv_udp_t, nread: ssize_t, buffer: const *uv_buf_t, address: const *sockaddr, flags: unsigned int)
+  local owner = ffi.uv_handle_get_data(native as foreign *uv_handle_t) as foreign *Udata
+  local loop = ffi.uv_loop_get_data(ffi.uv_handle_get_loop(native as foreign *uv_handle_t)) as foreign *Udata
+  local L = ffi.titan_record_field(loop, "loop_t", "state")
+  local handler = ffi.lmacro_clCvalue(ffi.titan_record_field(owner, "udp_t", "recv_handler"))
+  local module = ffi.lmacro_uvalue(handler.upvalue[0])
+  local entry = ffi.lmacro_pvalue(handler.upvalue[2]) as foreign UDPRecvEntry
+  local top = ffi.lua_gettop(L)
+  ffi.titan_uv_push_owner(L, owner)
+  ffi.lua_pushtvalue(L, ffi.titan_record_field(owner, "udp_t", "recv_buffer"))
+  entry(L, module, handler, owner, loop, nread, buffer, address, flags)
+  ffi.lua_settop(L, top)
+end
+
+foreign function udp_close_callback(base: *uv_handle_t)
+  local owner = ffi.uv_handle_get_data(base) as foreign *Udata
+  local loop = ffi.uv_loop_get_data(ffi.uv_handle_get_loop(base)) as foreign *Udata
+  local L = ffi.titan_record_field(loop, "loop_t", "state")
+  local handler = ffi.lmacro_clCvalue(ffi.titan_record_field(owner, "udp_t", "close_handler"))
+  local module = ffi.lmacro_uvalue(handler.upvalue[0])
+  local entry = ffi.lmacro_pvalue(handler.upvalue[2]) as foreign CallbackEntry
+  local top = ffi.lua_gettop(L)
+  ffi.titan_uv_push_owner(L, owner)
+  entry(L, module, handler, owner, loop)
+  ffi.lua_settop(L, top)
+end
+
+foreign function udp_send_callback(native: *uv_udp_send_t, status: int)
+  local owner = ffi.uv_req_get_data(native as foreign *uv_req_t) as foreign *Udata
+  local loop = ffi.uv_loop_get_data(ffi.uv_handle_get_loop(native.handle as foreign *uv_handle_t)) as foreign *Udata
+  local L = ffi.titan_record_field(loop, "loop_t", "state")
+  local handler = ffi.lmacro_clCvalue(ffi.titan_record_field(owner, "udp_send_t", "handler"))
+  local module = ffi.lmacro_uvalue(handler.upvalue[0])
+  local entry = ffi.lmacro_pvalue(handler.upvalue[2]) as foreign UDPSendEntry
+  local top = ffi.lua_gettop(L)
+  ffi.titan_uv_push_owner(L, owner)
+  ffi.lua_pushtvalue(L, ffi.titan_record_field(owner, "udp_send_t", "buffers"))
+  ffi.lua_pushtvalue(L, ffi.titan_record_field(owner, "udp_send_t", "native_buffers"))
+  entry(L, module, handler, owner, loop, status)
+  ffi.lua_settop(L, top)
+end
+
+function udp_t.new(): udp_t
+  local native = foreign uv_udp_t.new()
+  return {native = native, phase = HANDLE_FRESH, loop = nil,
+          alloc_callback = nil, recv_callback = nil, close_callback = nil,
+          recv_buffer = nil, alloc_handler = udp_allocate,
+          recv_handler = udp_receive, close_handler = udp_closed, userdata = nil}
+end
+
+function udp_t:as_handle_t(): handle_t
+  return handle_t.udp(self)
+end
+
+local function udp_t:usable(): boolean
+  return self.phase == HANDLE_LIVE and ffi.uv_is_closing(self.native as foreign *uv_handle_t) == 0
+end
+
+function udp_init_ex(loop: loop_t, handle: udp_t, flags: integer): integer
+  if not loop.initialized or handle.phase == HANDLE_LIVE then return ffi.UV_EINVAL end
+  local native_flags = flags as foreign unsigned int
+  loop.handles[handle] = true
+  handle.loop = loop
+  local status = ffi.uv_udp_init_ex(loop.native, handle.native, native_flags) as integer
+  if status < 0 then loop.handles[handle] = nil; handle.loop = nil; return status end
+  handle.phase = HANDLE_LIVE
+  ffi.uv_handle_set_data(handle.native as foreign *uv_handle_t, handle as foreign *void)
+  return status
+end
+
+function udp_init(loop: loop_t, handle: udp_t): integer
+  return udp_init_ex(loop, handle, 0)
+end
+
+function udp_open(handle: udp_t, socket: os_sock_t): integer
+  if not handle:usable() then return ffi.UV_EINVAL end
+  local native_socket = socket.native
+  return ffi.uv_udp_open(handle.native, native_socket)
+end
+
+function udp_open_ex(handle: udp_t, socket: os_sock_t, flags: integer): integer
+  if not handle:usable() then return ffi.UV_EINVAL end
+  local native_socket = socket.native
+  local native_flags = flags as foreign unsigned int
+  return ffi.uv_udp_open_ex(handle.native, native_socket, native_flags)
+end
+
+function udp_bind(handle: udp_t, address: sockaddr_t, flags: integer): integer
+  if not handle:usable() then return ffi.UV_EINVAL end
+  local native_flags = flags as foreign unsigned int
+  local native_address = address:pointer()
+  return ffi.uv_udp_bind(handle.native, native_address, native_flags)
+end
+
+function udp_connect(handle: udp_t, address: sockaddr_t?): integer
+  if not handle:usable() then return ffi.UV_EINVAL end
+  local native_address: foreign *sockaddr = nil
+  if address ~= nil then native_address = address:pointer() end
+  return ffi.uv_udp_connect(handle.native, native_address)
+end
+
+function udp_getpeername(handle: udp_t): (integer, sockaddr_t?, integer)
+  if not handle:usable() then return ffi.UV_EINVAL, nil, 0 end
+  local native = foreign sockaddr_storage.new()
+  local length = foreign int.new_array(1)
+  length[0] = foreign sockaddr_storage.sizeof as foreign int
+  local status = ffi.uv_udp_getpeername(handle.native, native as foreign *sockaddr, length) as integer
+  if status < 0 then return status, nil, length[0] as integer end
+  return status, sockaddr_copy_sized(native as foreign const *sockaddr, length[0] as integer), length[0] as integer
+end
+
+function udp_getsockname(handle: udp_t): (integer, sockaddr_t?, integer)
+  if not handle:usable() then return ffi.UV_EINVAL, nil, 0 end
+  local native = foreign sockaddr_storage.new()
+  local length = foreign int.new_array(1)
+  length[0] = foreign sockaddr_storage.sizeof as foreign int
+  local status = ffi.uv_udp_getsockname(handle.native, native as foreign *sockaddr, length) as integer
+  if status < 0 then return status, nil, length[0] as integer end
+  return status, sockaddr_copy_sized(native as foreign const *sockaddr, length[0] as integer), length[0] as integer
+end
+
+function udp_set_membership(handle: udp_t, multicast_addr: string,
+                            interface_addr: string?, member: membership): integer
+  if not handle:usable() then return ffi.UV_EINVAL end
+  local native_member = membership_native(member)
+  local native_interface: foreign const *char = nil
+  if interface_addr ~= nil then native_interface = interface_addr as foreign const *char end
+  return ffi.uv_udp_set_membership(handle.native, multicast_addr, native_interface, native_member)
+end
+
+function udp_set_source_membership(handle: udp_t, multicast_addr: string,
+                                   interface_addr: string?, source_addr: string,
+                                   member: membership): integer
+  if not handle:usable() then return ffi.UV_EINVAL end
+  local native_member = membership_native(member)
+  local native_interface: foreign const *char = nil
+  if interface_addr ~= nil then native_interface = interface_addr as foreign const *char end
+  return ffi.uv_udp_set_source_membership(handle.native, multicast_addr, native_interface, source_addr, native_member)
+end
+
+function udp_set_multicast_interface(handle: udp_t, interface_addr: string?): integer
+  if not handle:usable() then return ffi.UV_EINVAL end
+  local native_interface: foreign const *char = nil
+  if interface_addr ~= nil then native_interface = interface_addr as foreign const *char end
+  return ffi.uv_udp_set_multicast_interface(handle.native, native_interface)
+end
+
+function udp_set_multicast_loop(handle: udp_t, on: integer): integer
+  if not handle:usable() then return ffi.UV_EINVAL end
+  local native_value = on as foreign int
+  return ffi.uv_udp_set_multicast_loop(handle.native, native_value)
+end
+
+function udp_set_multicast_ttl(handle: udp_t, ttl: integer): integer
+  if not handle:usable() then return ffi.UV_EINVAL end
+  local native_value = ttl as foreign int
+  return ffi.uv_udp_set_multicast_ttl(handle.native, native_value)
+end
+
+function udp_set_broadcast(handle: udp_t, on: integer): integer
+  if not handle:usable() then return ffi.UV_EINVAL end
+  local native_value = on as foreign int
+  return ffi.uv_udp_set_broadcast(handle.native, native_value)
+end
+
+function udp_set_ttl(handle: udp_t, ttl: integer): integer
+  if not handle:usable() then return ffi.UV_EINVAL end
+  local native_value = ttl as foreign int
+  return ffi.uv_udp_set_ttl(handle.native, native_value)
+end
+
+function udp_send_t.new(): udp_send_t
+  local native = foreign uv_udp_send_t.new()
+  return {native = native, loop = nil, pending = false, handle = nil,
+          buffers = nil, native_buffers = nil, callback = nil,
+          handler = udp_sent, userdata = nil}
+end
+
+function udp_send_t:as_req_t(): req_t
+  return req_t.udp_send(self)
+end
+
+function udp_send_t:get_handle(): udp_t?
+  return self.handle
+end
+
+function udp_send(request: udp_send_t, handle: udp_t, buffers: {buf_t},
+                  address: sockaddr_t?, callback: (function (udp_send_t, integer): ())?): integer
+  if request.pending then return ffi.UV_EBUSY end
+  if not handle:usable() then return ffi.UV_EINVAL end
+  -- Unix libuv asserts on zero vectors in assertion-enabled builds. A single
+  -- zero-length buffer is a valid empty datagram and remains accepted.
+  if #buffers == 0 then return ffi.UV_EINVAL end
+  local status, native?, retained? = fs_buffer_snapshot(buffers, false)
+  if status < 0 then return status end
+  local native_data = (native as owned uv_buf_t[]) as foreign *uv_buf_t
+  local native_count = #(retained as {buf_t}) as foreign unsigned int
+  local native_address: foreign *sockaddr = nil
+  if address ~= nil then native_address = address:pointer() end
+  local loop = handle.loop
+  loop.requests[request] = true
+  request.pending = true
+  request.loop = loop
+  request.handle = handle
+  request.buffers = retained
+  request.native_buffers = native
+  request.callback = callback
+  ffi.uv_req_set_data(request.native as foreign *uv_req_t, request as foreign *void)
+  local result = ffi.uv_udp_send(request.native, handle.native, native_data,
+      native_count, native_address, udp_send_callback) as integer
+  if result < 0 then
+    loop.requests[request] = nil
+    request.pending = false
+    request.loop = nil
+    request.handle = nil
+    request.buffers = nil
+    request.native_buffers = nil
+    request.callback = nil
+  end
+  return result
+end
+
+function udp_try_send(handle: udp_t, buffers: {buf_t}, address: sockaddr_t?): integer
+  if not handle:usable() then return ffi.UV_EINVAL end
+  local status, native?, retained? = fs_buffer_snapshot(buffers, false)
+  if status < 0 then return status end
+  local native_data = (native as owned uv_buf_t[]) as foreign *uv_buf_t
+  local native_count = #(retained as {buf_t}) as foreign unsigned int
+  local native_address: foreign *sockaddr = nil
+  if address ~= nil then native_address = address:pointer() end
+  return ffi.uv_udp_try_send(handle.native, native_data, native_count, native_address)
+end
+
+function udp_try_send2(handle: udp_t, buffers: {{buf_t}}, addresses: {sockaddr_t?}, flags: integer): integer
+  if not handle:usable() then return ffi.UV_EINVAL end
+  local count = #buffers
+  if count > ffi.UINT_MAX as integer or #addresses > count then return ffi.UV_EINVAL end
+  local native_count = count as foreign unsigned int
+  local native_flags = flags as foreign unsigned int
+  local vectors = foreign (*uv_buf_t).new_array(count)
+  local lengths = foreign unsigned int.new_array(count)
+  local destinations = foreign (*sockaddr).new_array(count)
+  local native_buffers: {owned uv_buf_t[]} = {}
+  local retained: {{buf_t}} = {}
+  local retained_addresses: {sockaddr_t?} = {}
+  for i = 1, count do
+    local status, native?, roots? = fs_buffer_snapshot(buffers[i], false)
+    if status < 0 then return status end
+    local exact_native = native as owned uv_buf_t[]
+    local exact_roots = roots as {buf_t}
+    native_buffers[i] = exact_native
+    retained[i] = exact_roots
+    vectors[i - 1] = exact_native as foreign *uv_buf_t
+    lengths[i - 1] = #exact_roots as foreign unsigned int
+    local address? = addresses[i]
+    retained_addresses[i] = address
+    destinations[i - 1] = nil
+    if address ~= nil then destinations[i - 1] = address:pointer() end
+  end
+  return ffi.uv_udp_try_send2(handle.native, native_count, vectors, lengths, destinations, native_flags)
+end
+
+function udp_recv_start(handle: udp_t, alloc_callback: function (handle_t, integer): (buf_t),
+                        recv_callback: function (udp_t, integer, buf_t?, sockaddr_t?, integer): ()): integer
+  if not handle:usable() then return ffi.UV_EINVAL end
+  local status = ffi.uv_udp_recv_start(handle.native, udp_alloc_callback, udp_recv_callback) as integer
+  if status == 0 then
+    handle.alloc_callback = alloc_callback
+    handle.recv_callback = recv_callback
+  end
+  return status
+end
+
+function udp_recv_stop(handle: udp_t): integer
+  if not handle:usable() then return ffi.UV_EINVAL end
+  local status = ffi.uv_udp_recv_stop(handle.native) as integer
+  if status == 0 then handle.alloc_callback = nil; handle.recv_callback = nil end
+  return status
+end
+
+function udp_using_recvmmsg(handle: udp_t): boolean
+  if not handle:usable() then return false end
+  return ffi.uv_udp_using_recvmmsg(handle.native) ~= 0
+end
+
+function udp_get_send_queue_size(handle: udp_t): integer
+  if not handle:usable() then raise "UDP handle is not initialized or closing" end
+  return (ffi.uv_udp_get_send_queue_size(handle.native) as foreign lua_Integer) as integer
+end
+
+function udp_get_send_queue_count(handle: udp_t): integer
+  if not handle:usable() then raise "UDP handle is not initialized or closing" end
+  return (ffi.uv_udp_get_send_queue_count(handle.native) as foreign lua_Integer) as integer
+end
+

@@ -1,0 +1,183 @@
+const CHANGE: integer?
+const CREATE_PIPE: integer?
+const DISCONNECT: integer?
+const E2BIG: integer?
+const EACCES: integer?
+const EADDRINUSE: integer?
+const EADDRNOTAVAIL: integer?
+const EAFNOSUPPORT: integer?
+const EAGAIN: integer?
+const EAI_ADDRFAMILY: integer?
+const EAI_AGAIN: integer?
+const EAI_BADFLAGS: integer?
+const EAI_BADHINTS: integer?
+const EAI_CANCELED: integer?
+const EAI_FAIL: integer?
+const EAI_FAMILY: integer?
+const EAI_MEMORY: integer?
+const EAI_NODATA: integer?
+const EAI_NONAME: integer?
+const EAI_OVERFLOW: integer?
+const EAI_PROTOCOL: integer?
+const EAI_SERVICE: integer?
+const EAI_SOCKTYPE: integer?
+const EALREADY: integer?
+const EBADF: integer?
+const EBUSY: integer?
+const ECANCELED: integer?
+const ECHARSET: integer?
+const ECONNABORTED: integer?
+const ECONNREFUSED: integer?
+const ECONNRESET: integer?
+const EDESTADDRREQ: integer?
+const EEXIST: integer?
+const EFAULT: integer?
+const EFBIG: integer?
+const EFTYPE: integer?
+const EHOSTDOWN: integer?
+const EHOSTUNREACH: integer?
+const EILSEQ: integer?
+const EINTR: integer?
+const EINVAL: integer?
+const EIO: integer?
+const EISCONN: integer?
+const EISDIR: integer?
+const ELOOP: integer?
+const EMFILE: integer?
+const EMLINK: integer?
+const EMSGSIZE: integer?
+const ENAMETOOLONG: integer?
+const ENETDOWN: integer?
+const ENETUNREACH: integer?
+const ENFILE: integer?
+const ENOBUFS: integer?
+const ENODATA: integer?
+const ENODEV: integer?
+const ENOENT: integer?
+const ENOEXEC: integer?
+const ENOMEM: integer?
+const ENONET: integer?
+const ENOPROTOOPT: integer?
+const ENOSPC: integer?
+const ENOSYS: integer?
+const ENOTCONN: integer?
+const ENOTDIR: integer?
+const ENOTEMPTY: integer?
+const ENOTSOCK: integer?
+const ENOTSUP: integer?
+const ENOTTY: integer?
+const ENXIO: integer?
+const EOF: integer?
+const EOVERFLOW: integer?
+const EPERM: integer?
+const EPIPE: integer?
+const EPROTO: integer?
+const EPROTONOSUPPORT: integer?
+const EPROTOTYPE: integer?
+const ERANGE: integer?
+const EREMOTEIO: integer?
+const EROFS: integer?
+const ESHUTDOWN: integer?
+const ESOCKTNOSUPPORT: integer?
+const ESPIPE: integer?
+const ESRCH: integer?
+const ETIMEDOUT: integer?
+const ETXTBSY: integer?
+const EUNATCH: integer?
+const EXDEV: integer?
+const FS_EVENT_RECURSIVE: integer?
+const FS_EVENT_STAT: integer?
+const FS_EVENT_WATCH_ENTRY: integer?
+const IF_NAMESIZE: integer?
+const IGNORE: integer?
+const INHERIT_FD: integer?
+const INHERIT_STREAM: integer?
+const MAXHOSTNAMESIZE: integer?
+const OVERLAPPED_PIPE: integer?
+const PRIORITIZED: integer?
+const PRIORITY_ABOVE_NORMAL: integer?
+const PRIORITY_BELOW_NORMAL: integer?
+const PRIORITY_HIGH: integer?
+const PRIORITY_HIGHEST: integer?
+const PRIORITY_LOW: integer?
+const PRIORITY_NORMAL: integer?
+const PROCESS_DETACHED: integer?
+const PROCESS_SETGID: integer?
+const PROCESS_SETUID: integer?
+const PROCESS_WINDOWS_FILE_PATH_EXACT_NAME: integer?
+const PROCESS_WINDOWS_HIDE: integer?
+const PROCESS_WINDOWS_HIDE_CONSOLE: integer?
+const PROCESS_WINDOWS_HIDE_GUI: integer?
+const PROCESS_WINDOWS_VERBATIM_ARGUMENTS: integer?
+const READABLE_PIPE: integer?
+const RENAME: integer?
+const UNKNOWN: integer?
+const VERSION_HEX: integer?
+const VERSION_IS_RELEASE: integer?
+const VERSION_MAJOR: integer?
+const VERSION_MINOR: integer?
+const VERSION_PATCH: integer?
+const WRITABLE_PIPE: integer?
+const DIRENT_BLOCK = dirent_type_t.block()
+const DIRENT_CHAR = dirent_type_t.character()
+const DIRENT_DIR = dirent_type_t.directory()
+const DIRENT_FIFO = dirent_type_t.fifo()
+const DIRENT_FILE = dirent_type_t.file()
+const DIRENT_LINK = dirent_type_t.link()
+const DIRENT_SOCKET = dirent_type_t.socket()
+const DIRENT_UNKNOWN = dirent_type_t.unknown()
+const FS_ACCESS = fs_type_t.access()
+const FS_CHMOD = fs_type_t.chmod()
+const FS_CHOWN = fs_type_t.chown()
+const FS_CLOSE = fs_type_t.close()
+const FS_CLOSEDIR = fs_type_t.closedir()
+const FS_COPYFILE = fs_type_t.copyfile()
+const FS_CUSTOM = fs_type_t.custom()
+const FS_FCHMOD = fs_type_t.fchmod()
+const FS_FCHOWN = fs_type_t.fchown()
+const FS_FDATASYNC = fs_type_t.fdatasync()
+const FS_FSTAT = fs_type_t.fstat()
+const FS_FSYNC = fs_type_t.fsync()
+const FS_FTRUNCATE = fs_type_t.ftruncate()
+const FS_FUTIME = fs_type_t.futime()
+const FS_LCHOWN = fs_type_t.lchown()
+const FS_LINK = fs_type_t.link()
+const FS_LSTAT = fs_type_t.lstat()
+const FS_LUTIME = fs_type_t.lutime()
+const FS_MKDIR = fs_type_t.mkdir()
+const FS_MKDTEMP = fs_type_t.mkdtemp()
+const FS_MKSTEMP = fs_type_t.mkstemp()
+const FS_OPEN = fs_type_t.open()
+const FS_OPENDIR = fs_type_t.opendir()
+const FS_READ = fs_type_t.read()
+const FS_READDIR = fs_type_t.readdir()
+const FS_READLINK = fs_type_t.readlink()
+const FS_REALPATH = fs_type_t.realpath()
+const FS_RENAME = fs_type_t.rename()
+const FS_RMDIR = fs_type_t.rmdir()
+const FS_SCANDIR = fs_type_t.scandir()
+const FS_SENDFILE = fs_type_t.sendfile()
+const FS_STAT = fs_type_t.stat()
+const FS_STATFS = fs_type_t.statfs()
+const FS_SYMLINK = fs_type_t.symlink()
+const FS_UNKNOWN = fs_type_t.unknown()
+const FS_UNLINK = fs_type_t.unlink()
+const FS_UTIME = fs_type_t.utime()
+const FS_WRITE = fs_type_t.write()
+const JOIN_GROUP = membership.JOIN_GROUP()
+const LEAVE_GROUP = membership.LEAVE_GROUP()
+const LOOP_BLOCK_SIGNAL = loop_option.block_signal()
+const LOOP_USE_IO_URING_SQPOLL = loop_option.use_io_uring_sqpoll()
+const METRICS_IDLE_TIME = loop_option.metrics_idle_time()
+const TTY_MODE_IO = tty_mode_t.TTY_MODE_IO()
+const TTY_MODE_NORMAL = tty_mode_t.TTY_MODE_NORMAL()
+const TTY_MODE_RAW = tty_mode_t.TTY_MODE_RAW()
+const TTY_MODE_RAW_VT = tty_mode_t.TTY_MODE_RAW_VT()
+const TTY_SUPPORTED = tty_vtermstate_t.TTY_SUPPORTED()
+const TTY_UNSUPPORTED = tty_vtermstate_t.TTY_UNSUPPORTED()
+const VERSION_SUFFIX: string?
+
+-- Native numeric bounds, not handle/request variants.
+const ERRNO_MAX: integer?
+const HANDLE_TYPE_MAX: integer?
+const REQ_TYPE_MAX: integer?

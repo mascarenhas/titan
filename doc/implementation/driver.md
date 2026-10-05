@@ -119,11 +119,14 @@ and twenty-one generated logical-module shims below
 preferred compiled-format pass; Lua requires use a generated shim and the DSO
 form.
 
-`titan.uv` is the private Runtime and native-provider layer. `titan.async`
-explicitly imports it as `uv.titan` and exposes the public asynchronous facade,
-including transparent aliases of uv-owned record types. The timer/fs/net/os/sqlite3
-modules use the same explicit spelling for their low-level plumbing, so all six
-consumers share one Runtime and one canonical libuv provider image.
+`titan.uv` is the public low-level binding to the bundled libuv provider.
+`titan.async` owns the Runtime and its public Task, result, error, and
+subscription types. Async, timer, fs, net, os, and sqlite3 import the ordinary
+compiled `titan.uv` interface; none requires a source-private UV scheduler.
+All twenty-one modules share the canonical physical provider pair while
+retaining their separate logical and nominal identities. See the
+[public binding reference](../language/standard-library-uv.md) and
+[async implementation](libuv-runtime.md).
 
 For source convenience, the parser first removes one terminal explicit-source
 marker, `.titan`, and then desugars the twenty-one short standard-library imports
@@ -1170,16 +1173,18 @@ no-main path.
 See [Validated publication and generated
 shims](multi-module-libraries.md#validated-publication-and-generated-shims).
 
-A bundled-mode extension DSO that directly calls `uv_*` remains an ordinary
-case. Its source imports `titan.uv` and foreign-imports `uv.h`, leaving ordinary
-libuv calls unresolved. Compiler inspection maps it lazy/local; generated
-runtime import maps its selected provider lazy/global, and the initializer
-loads the combined standard `titan.so` before those calls bind. Native
-constructors, imported data, and taken function addresses still need eager
-resolution and cannot rely on initializer ordering. System mode may instead
-link the same pkg-config-selected shared libuv. The private bundled archive is
-shared standard-provider payload: it is force-loaded into `titan.so` and
-flattened into `titan.a`, never linked into a general extension.
+Ordinary UV clients import the [public compiled module](../language/standard-library-uv.md)
+and do not foreign-import `uv.h`. The packaging loader fixture in
+`spec/rockspec_spec.lua` deliberately exercises a different boundary: its
+`provider_probe.c` includes `uv.h` and makes an unresolved native `uv_random`
+call; its Titan source foreign-imports only the one-function
+`provider_probe.h` and imports public `uv`. This is a native loader probe, not
+an adapter recipe. Compiler inspection maps the DSO lazy/local; generated
+runtime import maps its selected provider lazy/global, so standard-provider
+initialization precedes the probe's native function call. Eager relocations and
+native constructors still require provider loading before the probe DSO is
+mapped. The bundled archive remains payload of `titan.so`/`titan.a`; the fixture
+does not embed a second libuv instance.
 
 ## Linking a standalone program: `driver.compile_program`
 
@@ -1276,9 +1281,11 @@ error alerts):
 * **`pmain`** first publishes the original `argc` integer and `argv` pointer
   under `TITAN_MAIN_ARGC_KEY` and `TITAN_MAIN_ARGV_KEY`, then calls global
   `require("$MODNAME")` and retrieves and retains that module's `main`
-  callable. A transitive `titan.uv` initialization can therefore call
-  `uv_setup_args` in the canonical provider and replace the private `argv`
-  slot with the pointer returned by libuv. After `require`, `pmain` rereads
+  callable. Async initialization calls the public idempotent
+  `uv.setup_process_args()` helper, which uses only those original entrypoint
+  values and replaces the private `argv` slot with the pointer returned by
+  libuv. A low-level UV client can call the same helper explicitly; an ordinary
+  Lua host without the entrypoint registry contract receives false. After `require`, `pmain` rereads
   that pointer and builds an Array with capacity `argc - 1`. It copies
   `argv[i]` to logical index `i` only for `i = 1 .. argc-1`; the executable
   name is omitted. A Titan `main(args: {string}): integer` therefore sees
@@ -1364,7 +1371,7 @@ Executable mode keeps the broader established final-link behavior. Runtime and
 callback-shim objects are not normally passed this way: both checkout and
 installed builds select them from `libtitan.a`. The standard provider's
 `ltitanlib.o` is the deliberate support payload. Bundled libuv joins it in
-`-X`; system libuv remains a final-link setting.
+`-X` in every build.
 
 `--incremental` enables source-object metadata reuse, and `-c/--compile-only`
 stops after object/header emission. Compile-only roots always rebuild; the
@@ -1419,7 +1426,7 @@ titanc --source-first --incremental \
   -X titan-runtime/ltitanlib.o lpeglabel-build/libtitan-lpeglabel.a \
      libuv-build/libuv.a llhttp-build/libtitan-llhttp.a \
      sqlite3-build/libtitan-sqlite3.a \
-     openssl-build/libssl.a openssl-build/libcrypto.a  # bundled modes
+     openssl-build/libssl.a openssl-build/libcrypto.a  # OPENSSL_MODE=bundled
 ```
 
 The provider prefix is `titan`, so checkout output is `titan.so`, `titan.a`,
@@ -1429,13 +1436,14 @@ initializer; `ltitanlib.o` supplies the twenty-second entry, `luaopen_titan`, an
 support table without adding an archive metadata key. The `titan.uv` folder
 still generates only `titan/uv/uv.c`/`.o`, and no contributor shim. The
 five-member LPegLabel archive is force-carried into both providers after
-`ltitanlib.o` but contributes no logical metadata. Bundled mode puts the private
+`ltitanlib.o` but contributes no logical metadata. The build puts the private
 libuv archive after it in the shared `-X` payload, followed by the private
-llhttp and SQLite archives and then the bundled OpenSSL archives used directly by
+llhttp and SQLite archives and then any bundled OpenSSL archives used directly by
 `titan.ssl`.
-System mode omits the selected libuv/OpenSSL archives, keeps their
+The default system OpenSSL mode omits only the OpenSSL archives, keeps their
 pkg-config-selected settings as repeated final-link inputs, and never copies
-them into `titan.a`; the llhttp and SQLite archives remain private payload in either mode.
+them into `titan.a`; libuv, llhttp, and SQLite remain private payload in either
+OpenSSL mode.
 The eight llhttp callbacks are source-defined in the generated `titan.http`
 object, so there is no HTTP adapter object.
 
@@ -1478,7 +1486,7 @@ publication cannot invalidate the retained build. `STDLIB_USE_INSTALLED_RUNTIME=
 selects the checkout compiler/runtime explicitly.
 
 The shared publication recipe uses the same effective native toolchain, extra
-flags, rocks root, runtime mode, and libuv/OpenSSL policies as compilation.
+flags, rocks root, runtime mode, and OpenSSL policy as compilation.
 Optional sanitizer snapshots capture the retained provider and exact generated
 C/object pairs before publication or tests can replace them. The publisher validates the twenty-two Lua entries, twenty-one logical
 protocols, exact twenty-one-key archive metadata, three-way
@@ -1639,8 +1647,8 @@ The staged non-Lua SDK headers under `<root>/include` are `minicoro.h`,
 `titan.h`, `titan/ffi.h`, `llhttp.h`, and `sqlite3.h`. Bundled libuv also
 installs `uv.h` and `uv/`; bundled OpenSSL installs the complete public
 `openssl/` tree, combining ordinary source headers with generated configuration
-headers. Reinstalling in system mode removes the corresponding bundled libuv
-and OpenSSL headers so subsequent checks use the selected system headers.
+headers. Reinstalling in the default system OpenSSL mode removes only the
+bundled OpenSSL headers so subsequent OpenSSL checks use the system headers.
 Checkout developer mode selects the corresponding local archive and headers so
 runtime edits can be tested before reinstalling.
 
@@ -1906,7 +1914,7 @@ the explicit public-header input for its native helper builds.
 | `TITAN_EXTRA_CFLAGS` / `driver.EXTRA_CFLAGS` | environment / `driver.lua` | empty | Parsed compilation-only flags, after fixed defaults; never used by final links. |
 | `TITAN_EXTRA_LDFLAGS` / `driver.EXTRA_LDFLAGS` | environment / `driver.lua` | empty | Parsed ordered linker inputs appended to final module and program links. |
 | shared-library flags | `shared_flag()` | `-shared`; on Darwin `-shared -undefined dynamic_lookup` | Platform from `driver.UNAME`, populated lazily by `driver.configure_foreign_c(context)` through `context.io:run({"uname"})`. |
-| installed link set | `driver.installed_link_inputs` / `append_runtime_libraries` | Unix: `<root>/lib/titan/0.6/libtitan.a` + separate `<root>/lib/libbacktrace.a` + `<root>/lib/liblua.a` + platform libraries; Windows: `libtitan.a` + `<root>/lib/liblua-5.5.1.dll.a` + `-lbcrypt` | Used by provider DSOs and programs; Linux adds `-ldl`, and Linux/macOS add `-lm`. These common final inputs are not copied into Unix package archives. The Unix standard build separately supplies bundled libuv as `-X` payload to both `titan.so` and `titan.a`; system mode keeps explicit pkg-config link flags at final link. |
+| installed link set | `driver.installed_link_inputs` / `append_runtime_libraries` | Unix: `<root>/lib/titan/0.6/libtitan.a` + separate `<root>/lib/libbacktrace.a` + `<root>/lib/liblua.a` + platform libraries; Windows: `libtitan.a` + `<root>/lib/liblua-5.5.1.dll.a` + `-lbcrypt` | Used by provider DSOs and programs; Linux adds `-ldl`, and Linux/macOS add `-lm`. These common final inputs are not copied into Unix package archives. The Unix standard build always supplies pinned libuv as `-X` payload to both `titan.so` and `titan.a`; system OpenSSL keeps explicit pkg-config link flags at final link. |
 | checkout link set | `driver.source_link_inputs` / `append_runtime_libraries` | local `libtitan.a` + separate local `libbacktrace.a` + local `liblua.a` + `-ldl -lm` | Preserves the writable source-development path while using the same archive contract; it never links `titan.o` directly. |
 | `TITAN_ROOT_DEFAULT` / `TITAN_LUA_CPATH_SUFFIX` | `titan.h`/`titan.c` | `/usr/local` / `/lib/lua/5.5/?.so` | Legacy run-time root fallback and exact template suffix used for root discovery. |
 | `titan_init_paths` | generated standalone entrypoint / `titan.c` | root parsed from inherited `package.cpath` | Caches the root and Titan module path and ensures `<root>/lib/titan/0.6/?.so` is in `package.cpath`; Titan-owned Lua has it first by default, with `<root>` inferred from the running executable. |

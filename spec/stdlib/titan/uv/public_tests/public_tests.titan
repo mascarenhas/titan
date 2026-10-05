@@ -1,0 +1,48 @@
+-- Public callback-only libuv behavior. The aggregate uses --no-uv-bootstrap;
+-- these cases own and drive their loops without creating async Tasks.
+local uv = import "uv"
+local test = import "test"
+local gc = import "gc"
+local lua = import "lua"
+local strings = import "string"
+
+local function success(status: integer)
+  test.assert(status == 0, "unexpected native status: " .. status)
+end
+
+local function expect_error(action: function (): (), expected: value)
+  local caught = false
+  do
+    action()
+  catch
+    caught = true
+    test.assert(error == expected, "unexpected raised value")
+  end
+  test.assert(caught, "operation did not raise")
+end
+
+local function new_loop(): uv.loop_t
+  local loop = uv.loop_t()
+  success(uv.loop_init(loop))
+  return loop
+end
+
+local function finish_loop(loop: uv.loop_t)
+  uv.walk(loop, function (handle: uv.handle_t, _argument: value)
+    if not uv.is_closing(handle) then uv.close(handle) end
+  end, nil)
+  success(uv.run(loop))
+  test.assert(not uv.loop_alive(loop), "cleanup left native work alive")
+  success(uv.loop_close(loop))
+end
+
+local function collect()
+  gc.collect()
+  gc.collect()
+end
+
+-- Observations must leave their own Titan frame before the next collection;
+-- otherwise observing a weak entry itself gives it a temporary strong root.
+local function assert_retained(weak: {value: value}, key: value)
+  test.assert(weak[key] ~= nil, "accepted native owner was collected")
+end

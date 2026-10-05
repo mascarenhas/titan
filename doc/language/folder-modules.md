@@ -231,29 +231,29 @@ publication and archive resolution.
 
 ## The standard `titan.uv` module
 
-Titan dogfoods this layout in its private libuv plumbing module:
+Titan dogfoods this layout in its public low-level libuv binding:
 
 ```
 titan/uv/
-  uv.titan          # shared prelude/state, bootstrap, Error/OperationError
-  file.titan        # source-private filesystem request/descriptor machinery
-  os.titan          # source-private OS/signal machinery
-  process.titan     # source-private process/pipe machinery
-  runtime.titan     # source-private Runtime and loop machinery
-  task.titan        # public Task/status types plus private task/timer machinery
-  tcp.titan         # source-private TCP/network machinery
+  uv.titan          # shared state, core owners, loop/handle/request operations
+  callbacks.titan   # public callback aliases
+  constants.titan   # native constants and tagged alternatives
+  data.titan        # copied native value records
+  dns.titan         # DNS requests and copied addresses
+  process.titan     # process options, stdio, spawn, and exit callbacks
+  startup.titan     # original generated-entrypoint argument setup
+  stream_ops.titan  # public stream operations
+  stream_owners.titan
+  ...               # address, descriptor, pipe/TTY, TCP, UDP, and utility APIs
 ```
 
-The main source keeps the shared prelude, module state, bootstrap, sole
-initializer, and the public `Error` and `OperationError` records. `task.titan`
-owns the other three public nominal types: `CancellationReason`, `TaskStatus`,
-and `Task`. The filesystem, OS, process, Runtime, timer, and TCP bridges and
-their native owner records are local declarations. The six high-level source
-modules `titan.async`, `titan.timer`, `titan.net`, `titan.os`, `titan.fs`, and
-`titan.sqlite3`
-write `import "uv.titan"` to select those locals through explicit source edges;
-they are not members of the compiled `titan.uv` interface. An ordinary
-`import "uv"`, even when source-resolved, remains public-only.
+The Makefile's `UV_TITAN_SOURCES` explicitly lists all contributors. They share
+one module scope and one initializer. Public native owners, callbacks, data
+records, constants, functions, and methods form the ordinary compiled `uv`
+interface. Async, timer, fs, net, os, and sqlite3 use `import "uv"` or its
+qualified spelling; no source marker is needed to use that interface.
+`titan.async` separately owns the Runtime and Task/error/subscription records.
+See the [UV reference](standard-library-uv.md) for the complete public surface.
 
 These files are one logical module and therefore produce one object and one
 `titan/uv.lua` loader, never one artifact per contributor. The production

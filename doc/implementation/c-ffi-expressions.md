@@ -242,8 +242,8 @@ probe-cache identity beyond the literal text emitted into the probe.
 SDK staging waits for its native header producers. Bundled OpenSSL's public
 include directory combines ordinary source headers with generated configured
 headers; copying only its build directory loses required public includes.
-System reinstall removes that bundled directory, as it does bundled libuv
-headers. The SDK always installs the public llhttp and SQLite headers.
+The default system OpenSSL mode removes only that bundled directory on
+reinstall. The SDK always installs the public libuv, llhttp, and SQLite headers.
 
 Each uncached candidate first validates its baseline translation unit. The
 checker also validates the module's combined C environment after extraction,
@@ -611,7 +611,9 @@ length, match count, and carrier identifier sum. This is an object-producing
 compile; it does not link or execute target code. The shared bounded object
 reader locates one initialized, uncompressed, relocation-free section and
 rejects objects larger than 16 MiB before reading them. Invalid or missing
-payloads are retryable infrastructure failures and are not cached.
+payloads are retryable infrastructure failures and are not cached. Clang marks
+only this inert serialized array `no_sanitize("address")` to prevent ASan global
+redzones from changing its exact size; runtime instrumentation remains enabled.
 
 Exactly one match selects its carrier. Zero and multiple matches are valid
 completed query answers and yield the checker's unsupported/ambiguous carrier

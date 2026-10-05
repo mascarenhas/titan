@@ -125,7 +125,7 @@ change them only when their own compatibility rules require it.
 - **CI runs Linux on every push and the complete macOS suite only on manual
   dispatch.** Complete macOS validation is a **pre-merge check**. Prefer the
   complete local macOS VM gates, including runtime/packaging/compiler tests and
-  both production modes, with exact source and architecture evidence. The hosted
+  both OpenSSL production modes, with exact source and architecture evidence. The hosted
   workflow is a manual fallback; never trigger that costly run without an
   explicit maintainer request for macOS CI.
   Opening or updating a PR alone does not authorize dispatch; an explicit macOS
@@ -175,21 +175,21 @@ change them only when their own compatibility rules require it.
   aggregate native Titan suite also remains one fast executable.
 
   1. `test-linux-stdlib` is the prepared-tree producer. It prepares a clean
-     ABI-2 prefix, builds and installs the optimized bundled provider, and
-     packs the complete prepared tree before tests or a system-mode reinstall.
+     ABI-2 prefix, builds and installs the optimized bundled-OpenSSL provider, and
+     packs the complete prepared tree before tests or a system-OpenSSL reinstall.
      It then runs, without LuaCov, the retained root build/runtime/packaging
-     specs and the one 25-root native stdlib executable through `make
+     specs and the one 26-root native stdlib executable through `make
      stdlib-test`; there are no standard-library Lua boundary specs.
      Disposable generated fixtures and test objects use `-O0`; purpose-built
      native harnesses retain their explicit flags, and the provider packed for
      consumers remains optimized. After the uncovered tests it builds the
-     child-process fixture, runs the bundled production smoke, reinstalls the
-     source rock with system libuv/OpenSSL at `-O0`, reruns only the two
+     child-process fixture, runs the bundled-OpenSSL production smoke, reinstalls the
+     source rock with system OpenSSL at `-O0`, reruns only the two
      mode-dependent SDK-layout/external-DSO promotion cases from
      `rockspec_spec.lua`, and runs the full system production smoke with
      optimized consumers. The bundled smoke and packed canonical provider also
      remain optimized. It uploads the already packed artifact only after both
-     provider modes pass. Never repack the live system-linked tree.
+     OpenSSL modes pass. Never repack the live system-OpenSSL tree.
   2. `test-linux-compiler` is the sole regular-artifact consumer. It needs the
      stdlib producer, restores that full tree on the same x86_64 Ubuntu target,
      and extracts four cache-free worker copies without their `.lua` trees. The
@@ -235,7 +235,7 @@ change them only when their own compatibility rules require it.
   exception to that full-tree transfer: exclude it from the tar and snapshot it
   independently in the regular producer, sanitizer, and macOS jobs with
   `ubicloud/cache@v4`. The regular producer uses explicit restore/save actions
-  and saves after the bundled tests and smoke but before the system-libuv/OpenSSL
+  and saves after the bundled tests and smoke but before the system-OpenSSL
   canary can add records from another provider configuration. The other lanes
   save at job end. Those producing lanes have distinct OS/architecture keys
   whose immutable primary ends in the commit SHA and whose stable restore
@@ -288,10 +288,10 @@ change them only when their own compatibility rules require it.
   before `ci_test_groups.sh compiler-uncovered`. Snapshot the runtime archive,
   canonical `titan.so`/`titan.a`, conditional dSYM, all twenty-one shims, and the
   canonical test-support source before compiler tests, then restore them before
-  the bundled/system production smokes. Keep the real x86_64/arm64 universal
+  the bundled/system OpenSSL production smokes. Keep the real x86_64/arm64 universal
   Mach-O archive lookup and repackaging proof here rather than replacing it
   with a host-only synthetic check. The complete macOS run, including both
-  libuv modes, remains optimized. Compiler and language specs must not delete
+  OpenSSL modes, remains optimized. Compiler and language specs must not delete
   the shared checkout runtime archive merely to force recompilation; Make owns
   that dependency state. The coroutine suite is the isolated restoration
   exception described below.
@@ -340,10 +340,10 @@ change them only when their own compatibility rules require it.
   `titan.o` and `minicoro.o`; `ltitanlib.o` is outside that archive and is
   the sole input to the private bootstrap. The non-Lua headers staged under
   `$ROCKS_TREE/include` are `minicoro.h`, `titan.h`, `titan/ffi.h`,
-  `llhttp.h`, and `sqlite3.h`; bundled mode also stages `uv.h`, `uv/`, and
+  `llhttp.h`, `sqlite3.h`, `uv.h`, and `uv/`. Bundled OpenSSL mode also stages
   the complete public `openssl/` headers (ordinary source and configured
-  generated headers). System reinstall removes the corresponding bundled
-  libuv/OpenSSL headers. The private native dependency archives are never
+  generated headers). The default system OpenSSL mode removes only the bundled
+  OpenSSL headers on reinstall. The private native dependency archives are never
   installed separately.
   The pinned, privately namespaced LPegLabel build produces
   `lpeglabel-build/libtitan-lpeglabel.a` with exactly `lplcap.o`, `lplcode.o`,
@@ -368,14 +368,15 @@ change them only when their own compatibility rules require it.
   `titan/{math,lua,iteration,gc,test,reflect}.titan`. Each logical
   module
   remains independent, but the physical outputs are the paired `titan.so` and
-  self-describing `titan.a`. In bundled mode the pinned private `libuv.a`
+  self-describing `titan.a`. The pinned private `libuv.a` always
   follows the LPegLabel archive in that same `-X` payload, followed by the
-  private llhttp and SQLite archives, then the bundled OpenSSL archives used
+  private llhttp and SQLite archives, then any bundled OpenSSL archives used
   directly by `titan.ssl`. The compiler force-carries all bundled payload into
-  the DSO and flattens it into the archive. In system mode the LPegLabel
-  archive and private llhttp/SQLite archives remain present while
-  pkg-config's ordered libuv and OpenSSL results remain final-link inputs, must
-  be repeated by static consumers, and are never copied into `titan.a`.
+  the DSO and flattens it into the archive. Libuv, llhttp, and SQLite have no
+  system mode. OpenSSL defaults to `OPENSSL_MODE=system`: its ordered pkg-config
+  result remains a final-link input, must be repeated by static consumers,
+  and is never copied into `titan.a`. `OPENSSL_MODE=bundled` selects the pinned
+  private OpenSSL archives instead. CI selects both OpenSSL modes explicitly.
 
   The hook delegates to `install-stdlib`, retaining checkout objects, providers,
   shims, and completion state for a no-op subsequent `make stdlib`. Both select
@@ -482,7 +483,7 @@ make install-stdlib                                 # build if needed, validate,
 make stdlib-test                                    # complete retained stdlib/runtime category without coverage
 make busted-test BUSTED_FILTER='for loop'           # Busted only
 make titan-stdlib-test TITAN_FILTER='^net[.]tests[.]' # build/run the aggregate native suite
-make titan-stdlib-test-build                        # build all 25 roots once under .titan-tests
+make titan-stdlib-test-build                        # build all 26 roots once under .titan-tests
 make titan-stdlib-test-run TITAN_FILTER='^ssl[.]tests[.]' # reuse that executable
 luarocks make && bash spec/support/ci_test_groups.sh compiler  # complete covered compiler/language group
 make clean                                           # remove generated artifacts; `make distclean` also removes downloaded Lua/Readline/LuaRocks/libbacktrace/libuv/OpenSSL/llhttp trees
@@ -603,8 +604,8 @@ publication, physical composition, rollback, and the real macOS universal
 archive gate belong in `spec/coder/multi_module_libraries_spec.lua`.
 Canonical stdlib pair ownership stays in `spec/libuv_build_spec.lua`,
 `spec/rockspec_spec.lua`, and `spec/stdlib_installer_spec.lua`; production
-bundled/system static smokes stay in
-`spec/support/ci_libuv_mode_smoke.sh`.
+bundled/system OpenSSL static smokes stay in
+`spec/support/ci_dependency_mode_smoke.sh`.
 
 All driver/artifact paths inside specs are relative to the repo-root CWD (not
 the spec file), so subdir specs still run from repo root. The shared
@@ -624,14 +625,14 @@ Helpers pull in luassert explicitly (`require 'luassert'`) because a
 `helpers.verbose = true` (was a per-file `local verbose`) to print `cc`
 command lines and keep generated `.c` files.
 
-Native standard-library behavior lives in 25 module-owned roots under
+Native standard-library behavior lives in 26 module-owned roots under
 `spec/stdlib/titan/`. `TITAN_STDLIB_TEST_ROOTS` in
 `spec/support/stdlib_test_modules.mk` names every root explicitly and is shared
 by Linux, macOS, and native Windows;
 `make titan-stdlib-test-build` builds the explicit test/support object DAG in
 `spec/support/stdlib_test_modules.mk` with `titanc -c --test --incremental`,
 then invokes `titanc --test --incremental --no-uv-bootstrap` from
-`.titan-tests/` to combine all 25 roots into the executable. Every command uses
+`.titan-tests/` to combine all 26 roots into the executable. Every command uses
 the same absolute source tree and shared test-support object. Source-first lookup
 does not expose locals through ordinary imports; the generated runner uses
 `import "titan.test.titan"` for its private protocol. The runner is
@@ -643,7 +644,7 @@ root, `test.tests`, owns the one `.titan-tests/test/tests` executable and its
 synthetic support/runner/entrypoint artifacts. Execute it from the repository root with
 `make titan-stdlib-test-run`, because fixtures rely on that CWD; `make
 titan-stdlib-test` performs both steps. `TITAN_FILTER` adds one run-time Lua
-pattern but still compiles all 25 roots. The separate build/run targets let CI
+pattern but still compiles all 26 roots. The separate build/run targets let CI
 and ASan reuse one executable for several fresh filtered processes without
 reintroducing native groups.
 
@@ -734,8 +735,9 @@ only `close_cb` clears the suspended/token/pending state before resuming the
 target. The same authorized wake must handle external cancellation of an
 explicitly suspended Task, and `resume(token)` must work from either terminal
 notification or another running Task without resuming inline. Ordinary native
-operation callbacks use the private tokenless continuation helper and cannot
-be completed through public `Task:resume`. Coverage must prove `async.running`,
+operation callbacks settle their exact generic await or publish through a
+subscription; they cannot complete an unrelated wait through public
+`Task:resume`. Coverage must prove `async.running`,
 explicit token-bearing suspend/resume, token identity and wrong-time rejection,
 listener order/error isolation/removal including removal during delivery,
 cancellation-time defer cleanup, correct-token coalescing, native-wait
@@ -830,11 +832,11 @@ in one incremental final-link process, stages
 `<root>/lib/titan/0.6/{titan.so,titan.a}`, and installs twenty-one generated shims
 below `<root>/share/lua/5.5/titan/`. The archive advertises exactly twenty-one
 logical metadata keys; its metadata-free payload begins with `ltitanlib.o` and
-the private five-member LPegLabel archive, followed by the selected libuv
-payload, the private llhttp archive, and the selected OpenSSL
+the private five-member LPegLabel archive, followed by the pinned libuv
+payload, the private llhttp and SQLite archives, and any bundled OpenSSL
 payload used directly by `titan.ssl`. Bundled archives are flattened into
 `titan.a`;
-system-mode dependencies remain final-link inputs. The DSO exposes those
+system OpenSSL dependencies remain final-link inputs. The DSO exposes those
 twenty-one protocols plus bare `luaopen_titan` support, for twenty-two
 `luaopen_*` entries total. `titan.io`
 owns the standard Interface vocabulary and high-level I/O helpers.
@@ -899,7 +901,7 @@ glob that can remove user-authored files.
 The stdlib configuration/completion stamps own the provider pair as one build:
 they record the archive name, effective `AR`/`RANLIB`,
 embedded-format/coder inputs, full `-X` payload, LPegLabel source/archive
-identity, libuv mode, platform support, and existing
+identity, OpenSSL mode, platform support, and existing
 compiler/source/flag inputs. Every warm `make stdlib` rescans `titan.a` for the
 exact twenty-one logical keys without changing pair mtimes; a missing or corrupt
 archive invalidates completion and rebuilds both forms. CI's
@@ -1007,7 +1009,7 @@ returns, and nested boxing preserve the same proxy and writer; none compares
 or replaces writer identity. Do not query the registry or load a
 proxy/uservalue to address the outer Array, and do not treat the writer as a
 runtime element-type tag.
-Both direct and `titan.uv.bootstrap` standalone paths place arguments only at
+Both direct and `titan.async.bootstrap` standalone paths place arguments only at
 positive indices, set the explicit length, and pass the proxy to the generated
 Lua entry wrapper, which unboxes before calling exact native `main`. The
 standalone driver supplies the dedicated construction writer for this
@@ -1278,9 +1280,11 @@ and comes from written opt-in plus loader provenance, never metadata, registry
 state, static co-residence, or another module's import. Source-private variables
 and closures use the canonical producer state; generated importers verify the
 exact physical producer identity before reading a private slot.
-The six source facades `titan.async`, `titan.timer`, `titan.fs`, `titan.net`,
-`titan.os`, and `titan.sqlite3` therefore write `import "uv.titan"`; an ordinary `import "uv"`
-never exposes `titan.uv` locals.
+Libuv adapters use ordinary compiled `import "uv"` plus public generic async
+operations. Only `titan.uv` imports libuv through the FFI, including transitive
+native headers/types/helpers. Do not use `uv.titan` or `async.titan` to reach
+private scheduler or binding state. Unrelated native boundaries and explicitly
+chosen source collaboration in other modules retain the language rule above.
 
 Titan aliases occupy a module-wide type-only namespace in `symtab`, resolve
 transparently to their RHS `Type.*` value, and never create a run-time member.
@@ -1560,11 +1564,8 @@ substitution, recursive; error on missing keys). Key facts:
   canonical-path per-state cache and performs `RTLD_LAZY | RTLD_GLOBAL` even
   when Lua or compiler `_loadlib` already opened the image; for combined
   `titan.so` this promotes Lua's initial eager/local support mapping. It never
-  calls `dlclose`. System mode leaves libuv as pkg-config/user-selected final
-  link policy: `titan.a` retains unresolved `uv_*`, a static consumer repeats
-  the same setting, and two DSOs may instead bind the same selected shared
-  libuv. The private bundled `libuv.a` must never be linked into an extension
-  DSO or installed separately.
+  calls `dlclose`. The private bundled `libuv.a` must never be linked into an
+  extension DSO or installed separately.
   Lua's shim-driven global promotion occurs before the extension is mapped, so that
   path also supports eager relocations and native constructors. It can resolve
   native symbols for a Lua-only extension without a Titan `uv` import, but the
@@ -1882,77 +1883,74 @@ result is borrowed: retaining the C pointer does not keep the Titan object
 alive. Do not add `lua_pushtvalue`/`lua_togco` helpers or parallel storage just
 to recover an identity already represented by this cast.
 
-The current `titan.uv` sources import `UV_E*` enumerators directly and call public
-libuv operations directly, including process, stat, DNS traversal/release,
-bind, and connect submission. Their plain-C libuv-shaped callbacks are
-source-defined foreign functions in the owning semantic contributors. Each
-callback recovers the exact rooted owner and invokes its exact Titan handler;
-there is no runtime shim header, generic dispatcher, or event-kind argument.
-Normalized-address storage remains deliberately overprovisioned. Titan
-initializes public `uv_buf_t` fields directly through the FFI, using Titan's
-documented direct `string`-to-`char *` conversion for libuv's historically
-mutable spelling of borrowed write bytes. The callback owner retains the
-original string throughout that exceptional asynchronous borrow.
+The public `titan.uv` binding owns all libuv FFI. It exposes explicit status,
+lifecycle, cleanup and ordinary Titan callback values; it does not depend on
+Tasks. Only internal exact native bridges recover rooted concrete owners and
+call known generated handlers. Those handlers invoke arbitrary public callbacks
+through ordinary callable semantics, including supported Lua callables. Native
+`.data` is binding-owned; public userdata occupies a separate traced slot.
+Generic handle/stream/request views retain the same concrete owner and never
+copy initialized native state. Binding-owned roots survive until close or
+accepted-request completion; the callback frame retains its owner through the
+actual return to C even after settlement makes it reusable.
 
-The conditional inherited-`SIGPIPE` policy is implemented in
-`titan/uv/uv.titan` through direct `signal.h`/`errno.h` FFI calls and
-`uv_translate_sys_error`. Operational
-libuv wrappers, including the old DNS/address helpers, must not return.
-Generated standard-module objects own the callback definitions; the runtime
-exposes no retired operational helper. Generated modules and runtimes built for
-different ABIs must not be mixed.
+Libuv is pinned patched bundled 1.52.1 only. Keep its failed-spawn cleanup patch
+and fresh-only CREATE_PIPE eligibility contract. System OpenSSL remains the
+preferred separate policy, with explicit bundled OpenSSL supported. Only UV's
+source/header ensemble imports native libuv; consumers use ordinary compiled
+UV imports, generic await and subscriptions. No operation-specific Call union,
+dispatch taxonomy, source-private facade import, or Task pending-owner protocol
+remains to extend.
 
-Ordinary libuv handles, requests, read buffers, and normalized address arrays
-are owned directly by source-level `owned *T`/`owned T[]` fields. There is one
-module-instance coroutine tag for every uv Task; the yielded `Call` union, not
-the tag, selects the operation. A wrapper exists only to hide an unexportable
-FFI value and retain values required through its callbacks. Multi-shot handles
-may also carry their natural buffer/latest result and at most one waiter.
-One-shot request owners retain the native request and exact callback; the
-callback closure captures the suspended Task and borrowed arguments until
-completion. Write callbacks retain the original immutable Titan strings while
-libuv borrows their bytes; libuv copies the submitted `uv_buf_t` descriptors,
-not their payloads. Libuv copies
-asynchronous filesystem paths and DNS text during submission, while `uv_spawn`
-consumes file/argv synchronously, so keep originals rooted only for the actual
-borrow interval. A direct alloc callback cannot unwind an allocation exception
-through libuv: return the zero buffer, preserve the exact exception, and
-deliver it through the required paired read callback; do not add a recovery
-status or a defensive missing-alloc branch. Do not add `FooControl` layers,
-wrapper-on-wrapper state records, uniform nil-padded owner layouts, Task-side
-operation queues, or a second handle registry. The minicoro object remains the
-sole intentional custom `lua_newuserdatauv` allocation in the standard
-library. Capacity-sized
-backing arrays must not be cast wholesale to strings when only a logical
-prefix is valid.
+The inherited-SIGPIPE policy now belongs to `titan/async.titan` and its narrow
+platform helper, which use unrelated signal/errno facts plus public UV error
+translation. Public `uv.setup_process_args()` provides the standalone-only
+process-argument initialization; callback-only UV import never activates async
+bootstrap. The compiler invokes a generic registry hook when one was installed
+while loading the program graph; `titan.async` installs its private bootstrap
+function in that hook.
 
-The Runtime's sparse `handle_roots` is only the C-to-Titan callback live-owner
-set and is never traversed. Its sparse `task_roots` is the intentional Task
-inventory: it determines when the last user Task finishes and lets `os.exit`
-cancel the others. The first `os.exit` request fixes the exit code and cancels
-every user Task, including its requester; that cancellation stays pending if
-user code catches it and is injected again before the next yielded operation
-can be dispatched. Do not reintroduce a parallel active-Task counter.
+Async owns Task, TaskStatus, Error, OperationError, CancellationReason and
+ResumeToken nominal identities, as well as its Runtime and one generic operation
+state. `await`, `await_cleanup`, and `await_cancellable` register through
+resolve/reject/fatal capabilities. Inline settlement resumes only after
+registration returns and immediate chains use an iterative trampoline. Accepted
+work and borrowed data remain owned through their promised terminal callback;
+requesting cancellation never releases them early. A consumed callback's
+unexpected failure calls its exact fatal capability with the original trace,
+then re-raises through the public UV boundary. A stale capability cannot settle
+a successor wait. Cleanup await permits resource retirement during cancellation
+or shutdown without changing the sticky final Task cancellation reason.
 
-Only top-level `async.loop` or the standalone bootstrap may call `uv_run`; the
-loop is non-reentrant, and an operation callback normally resumes one
-continuation, dispatches the next yielded operation, and returns. A condition
-callback that publishes through owner state retains that direct path unless a
-public-resume timer already owns the continuation; it then leaves that timer as
-the sole wake rather than advancing into a later suspension. If a callback
-failure retires the Task first, that timer's completion clears its pending bit
-and does not reenter the terminal coroutine. Every one-shot timer callback
-instead submits `uv_close`; only `close_cb`, after the native owner is released,
-resumes its suspended Task. Explicit Task resume, external
-cancellation of `async.suspend`, repeating-ticker delivery, and other deferred
-continuations may use such a Task-owned one-shot timer. The delivery is
-callback-deferred but does not promise one exact libuv iteration. An uncaught
-error retires and logs only its Task; the task-root set decides whether it was
-the last user Task. Public Task state is the `TaskStatus` union with live
-`ready`/`running`/`waiting` variants plus exact success, `Error` failure, and
-terminal `CancellationReason` payloads. `Task:cancel` stores its first reason
-privately until terminal `cancelled` and invokes the current cancellation
-action without a public `cancelling` state.
+Persistent domains own resources and use CoalescingSubscription for discardable
+latest-state events or BufferedSubscription for every event, including resource
+bearing values. Both own their exact single-reader reservation. A notified
+waiter keeps its reservation through delivery; cancellation detaches it
+synchronously, and old deferred cleanup cannot detach a successor. Use
+has_waiter rather than a shadow domain flag. Stop retains buffered events;
+close blocks ordinary transfer and gives the producer a drain callback to
+retire unread resources. Nil/false remain real payloads through explicit tags
+and counted batches. Raw callbacks do no blocking filesystem classification.
+
+Native callbacks never preempt ordinary Titan statements. Explicit synchronous
+callback-producing UV calls, such as walk and Windows TTY read startup, obey
+their own timing contract. Loop driving is non-reentrant across loops. Async
+drives only its Runtime loop; callback-only programs may create and drive a
+separate public UV loop without Tasks. Binding callbacks contain ordinary
+exceptions, preserve the first value and traceback, stop driving, and rethrow
+after run/walk returns; native ownership remains available for explicit cleanup.
+Fatal VM stack exhaustion is outside this recovery promise. Foreign-thread
+callbacks access only C data and never enter Lua/Titan.
+
+UV roots are ownership sets, not a domain resource registry. Async shutdown uses
+public uv.walk; native is_closing is authoritative only while the handle is
+initialized. Use is_initialized to guard a fresh or retired owner, without
+copying closing state. Runtime Tasks form the intentional live Task inventory;
+do not add a parallel active counter. First os.exit fixes the exit code and
+requests cancellation of every user Task, including its requester; cleanup still
+finishes before the Runtime exits. Ordinary Task errors retain their established
+terminal/reporting behavior. Task cancellation remains first-reason-wins, with
+no intermediate public cancelling state.
 
 `Task<|A,B|>`, `TaskStatus<|A,B|>`, and `CancellationReason<|B|>` are the public
 owners, while Runtime roots, waiters, callbacks, and `running()` deliberately

@@ -820,98 +820,48 @@ source providers likewise expose one native owner/entry per declaration.
 
 ## Generic async implementation
 
-`titan.uv` owns the generic Task, status, cancellation, and listener
-declarations. `titan.async` exports constructor-preserving aliases of those
-owners and owns the public `run`, combinator, and `channel<|T|>` schemes. The
-provider-owned surface owners are:
+`titan.async` owns the generic Task, status, cancellation, result, and
+subscription declarations together with the public `run`, combinator, and
+`channel<|T|>` schemes. These are ordinary public nominal owners; `titan.uv`
+contains the lower-level native owners and callbacks. Moving an owner between
+logical modules changes its nominal identity: consumers built against a former
+`uv.Task` owner must be rebuilt. This change does not introduce an ABI number
+change or an alias which preserves the former identity.
 
-```titan
-record ResumeToken
-    const source: string?
-end
+`Task<|A, B|>` retains its root coroutine, Runtime, concrete status and optional
+cancellation reason, one private `Wait`, root-array index, terminal-listener
+registrations, and explicit-suspension state. `TerminalRegistration<|A, B|>`
+stores the adjusted listener and its live bit. `ResumeToken` is a separate
+non-generic nominal owner with `const source: string?`: all Task applications
+store the same optional token type and compare it by record identity. The
+source text diagnoses an explicit-resume mismatch; the token carries no generic
+application witness.
 
-union CancellationReason<|B|>
-    simple(string)
-    complex(B)
-end
+The token boundaries are `suspend(token: ResumeToken,
+cancel_action: SuspendCancelAction?)` and `Task:resume(token: ResumeToken)`.
+Closing or erasing `A` and `B` never changes either signature. Runtime inventory
+and dispatch use `Task<|value, value|>` views of the same userdata. Public
+`run<|A, B|>(func: function (): (A)): Task<|A, B|>` creates its Task, then retains
+that same Task through an all-value view in the Runtime's root Array.
+There is no existential Task, private application descriptor, or runtime
+recovery of `A` and `B`.
 
-union TaskStatus<|A, B|>
-    ready()
-    running()
-    waiting()
-    succeeded(A)
-    failed(Error)
-    cancelled(CancellationReason<|B|>)
-end
+A callback annotated `function (): (nil)` infers `A = nil`; a complete explicit
+application or surrounding result context can supply that application to an
+unannotated callback. Bare return or fallthrough supplies one nil to an exact
+`function (): (nil)` callable by ordinary return adjustment. Terminal success
+and complex cancellation retain their erased value; a later concrete projection
+inserts the strict `A` or `B` guard.
 
-record Task<|A, B|>
-    local root: coroutine.Coroutine
-    local runtime: Runtime
-    local state: TaskStatus<|A, B|>
-    local cancel_value: CancellationReason<|B|>?
-    local cancel_action: CancelAction?
-    local pending: value
-    local root_index: integer
-    local cleanup: boolean
-    local terminal_registrations: {TerminalRegistration<|A, B|>}
-    local suspended: boolean
-    local resume_token: ResumeToken?
-    local resume_pending: boolean
-    local pending_cancellation_affected: boolean
-end
-
-local record TerminalRegistration<|A, B|>
-    local listener: function (TaskStatus<|A, B|>): ()
-    local live: boolean
-end
-```
-
-Every Task field remains in the canonical owner. The generic registration
-record stores the exact adjusted listener and its live bit. `ResumeToken` is a
-separate non-generic nominal owner: all `Task<|A, B|>` applications store the same
-optional token type, compare it by record identity, and use its optional source
-only to diagnose a public explicit-resume mismatch. It is not an application
-witness and does not participate in erased payload guards.
-
-The facade re-exports that constructor namespace exactly as
-`type ResumeToken = uv.ResumeToken`. Its non-generic boundaries are
-`suspend(token: ResumeToken, cancel_action: SuspendCancelAction?)` and
-`Task:resume(token: ResumeToken)`; closing or erasing `A` and `B` never changes
-either signature.
-
-The Runtime remains concretely all-value:
-
-```text
-task_roots     : {Task<|value, value|>}
-current_task   : Task<|value,value|>?
-libuv owners   : Task<|value, value|>
-running_task() : Task<|value, value|>
-```
-
-Runtime creation spells `Task<|value,value|>.new` explicitly to state its
-all-value storage invariant; the final carrier rule would choose the same
-application without evidence. There is no existential Task, wildcard, private
-application descriptor, or ambient recovery of `A`/`B`. A public `Task<|A, B|>` is
-a shallow view of the same userdata.
-
-The source-private operational entry remains monomorphic:
-
-```text
-local function run_internal(func: function (): (value)): Task<|value, value|>
-```
-
-Public `async.run<|A, B|>(func: function (): (A)): Task<|A, B|>` adapts the callback to the
-real `function (): (value)` erased shape, calls `run_internal`, and returns the same Task
-userdata through the owner-erased view. A callback annotated `function (): (nil)`
-infers `A = nil`; a complete explicit application or surrounding result context
-can instead supply that application to an unannotated callback. Once the
-callback has the exact `function (): (nil)` shape, bare return or fallthrough supplies one
-nil by ordinary return adjustment; this is not a generic special case. The
-coroutine stores its raw result in `TaskStatus<|value,value|>.succeeded`; a later concrete success
-projection inserts the strict `A` guard. Complex cancellation likewise stores a
-raw `value` in `CancellationReason<|value|>.complex` and guards only at a concrete
-`B` projection. Scheduler inventory, coroutine dispatch, pending operations,
-cancellation actions, libuv callbacks, and cleanup helpers stay monomorphic.
+The public `Result<|T, E|>` and `CancellableResult<|T, E|>` unions retain their
+exact success/error payload applications. `Operation<|T, E|>` captures the
+adjusted registration callback, while a pending private `Wait` stores erased
+payload and state. The fatal callback transports an arbitrary error value and
+trace separately from `E`. Subscription queues likewise retain erased values
+and explicit counts, then project through `SubscriptionBatch<|T|>:get`; nil
+payloads therefore do not become queue holes or alter the count. These are
+ordinary generic callable/record conversions, not extra runtime witnesses.
+See [async implementation](libuv-runtime.md) for the wait and queue lifetimes.
 
 Public `async.channel<|T|>(size)` declares `{T}` storage and returns
 `(function (T): (), function (): (T), function (): ())`. Because `size` provides no evidence for `T`,

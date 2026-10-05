@@ -158,6 +158,8 @@ checksum-verified sources recorded in `vendor/windows-native/dependencies.tsv`.
 Those pins match the ordinary Makefile. CMake/Ninja build the first three;
 OpenSSL uses its upstream `mingw64` configuration, Perl, Make, and
 `llvm-windres`. No independently built MSYS2 native-library binaries are used.
+This experimental Windows SDK keeps its separate pinned OpenSSL DLL build;
+the Unix `OPENSSL_MODE=system` default does not select Windows dependencies.
 
 ```sh
 make -f Makefile.windows native-source-check
@@ -276,6 +278,11 @@ private bootstrap, leaving the destination provider unmapped by the publisher.
 The accepted predecessor is absent, support-only, or the complete current
 21-module provider; unfamiliar files are rejected.
 
+The provider links the system Winsock import library `ws2_32` for the private
+UV address helper's byte-order conversion. Its PE import audit permits
+`WS2_32.dll` explicitly. Ordinary compiled Titan clients call the provider and
+do not need this import library or private UV headers themselves.
+
 The installed files are `lib/titan/0.6/titan.dll`, the 21 shims under
 `share/lua/5.5/titan`, and `share/titan/0.6/src/titan/test.titan`. No Titan `.a`
 provider or Titan import library is published. `--static` is unsupported on
@@ -302,7 +309,7 @@ make -f Makefile.windows titan-stdlib-test-run \
 pattern without narrowing compilation; omit it for complete validation. The
 compatibility entrypoint `scripts/check_windows_stdlib_behavior.sh WORKSPACE SDK`
 also builds and runs the full shared suite. There is no separate Windows case
-allowlist: `spec/support/stdlib_test_modules.mk` supplies the same 25 explicit
+allowlist: `spec/support/stdlib_test_modules.mk` supplies the same 26 explicit
 roots to all three platforms, including filesystem, SQLite, and local watchers.
 
 The build copies the supplied SDK and authored fixtures into its marked

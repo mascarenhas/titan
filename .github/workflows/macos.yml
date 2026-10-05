@@ -24,9 +24,10 @@ jobs:
       TITAN_JOBS: "3"
       # Keep the one complete cross-platform gate on the same fallback path.
       READLINE_MODE: bundled
+      OPENSSL_MODE: bundled
       LIBUV_VERSION: "1.52.1"
       # Bump when any CMake option that affects the cached archive changes.
-      LIBUV_BUILD_PROFILE: "static-pic-release-tests-off-v1"
+      LIBUV_BUILD_PROFILE: "static-pic-release-tests-off-v2"
       LLHTTP_VERSION: "9.4.3"
       LLHTTP_SHA256: "1eb813c7437b31a87496a1cd3ed79f00746720f5e7e29c79b42c02cb69f36c39"
       LLHTTP_BUILD_PROFILE: "static-pic-hidden-c99-v1"
@@ -68,7 +69,7 @@ jobs:
             libuv-v${{ env.LIBUV_VERSION }}
             libuv-v${{ env.LIBUV_VERSION }}.tar.gz
             libuv-build
-          key: macos-latest-${{ runner.arch }}-libuv-${{ env.LIBUV_VERSION }}-${{ env.LIBUV_BUILD_PROFILE }}
+          key: macos-latest-${{ runner.arch }}-libuv-${{ env.LIBUV_VERSION }}-${{ env.LIBUV_BUILD_PROFILE }}-${{ hashFiles('vendor/libuv/*.patch') }}
           restore-keys: |
             macos-latest-${{ runner.arch }}-libuv-${{ env.LIBUV_VERSION }}-${{ env.LIBUV_BUILD_PROFILE }}-
 
@@ -106,7 +107,7 @@ jobs:
             macos-latest-${{ runner.arch }}-openssl-${{ env.OPENSSL_VERSION }}-${{ env.OPENSSL_SHA256 }}-
 
       - name: Install system dependencies (macOS)
-        run: brew install cmake libuv openssl@3 pkgconf
+        run: brew install cmake openssl@3 pkgconf
 
       - name: Build the bundled Lua 5.5 source tree
         run: |
@@ -213,9 +214,7 @@ jobs:
 
       # Run this after the bundled test suite. The smoke first exercises the
       # existing self-contained provider pair, then rebuilds titan.so/titan.a
-      # against the platform libuv and OpenSSL packages; the job can end in
+      # against the platform OpenSSL package; the job can end in
       # system mode without another build.
-      - name: Smoke-test bundled and system libuv/OpenSSL modes
-        run: |
-          TITAN_SYSTEM_STATIC_LIBUV_ARCHIVE="$GITHUB_WORKSPACE/libuv-build/libuv.a" \
-            bash spec/support/ci_libuv_mode_smoke.sh
+      - name: Smoke-test bundled and system OpenSSL modes
+        run: bash spec/support/ci_dependency_mode_smoke.sh

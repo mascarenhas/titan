@@ -48,7 +48,7 @@ function test_runtime_shutdown_closes_native_handles_but_not_files(
   end
   test.assert(close_failure == "async Runtime is not active",
               "File close outside a Runtime lost its rejection")
-  assert_symbolic_frame(context, close_trace, "in titan.uv.fs_close")
+  assert_symbolic_frame(context, close_trace, "in titan.async.running")
   test.assert(not file:is_closed(),
               "rejected close changed the retained File state")
 

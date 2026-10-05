@@ -17,10 +17,9 @@ RANLIB, optimization/sanitizer inputs and `SQLITE_THREADSAFE=1` to build the
 private PIC/hidden archive `sqlite3-build/libtitan-sqlite3.a`.
 
 This payload follows private llhttp in the shared provider link and is carried
-into both `titan.so` and `titan.a`, in both bundled and system libuv/OpenSSL
-modes. There is no system SQLite mode, SQLite child DSO, installed SQLite
-header, or independently installed private archive. Its declarations are
-needed only during the source standard-provider build. Private symbol
+into both `titan.so` and `titan.a`, in both OpenSSL modes. There is no system
+SQLite mode, SQLite child DSO, or independently installed private archive.
+The matching public `sqlite3.h` is staged in the compiler SDK. Private symbol
 visibility follows the existing bundled native payload policy.
 
 SQLite is one logical standard module in the combined provider, which has
@@ -103,12 +102,16 @@ process-global shutdown.
 
 ## Cancellation
 
-Public ordinary work goes through `async.run_foreign`. A narrow source-private
-`uv.run_foreign_cleanup` uses a distinct cancellation-insensitive Call variant
-but shares the same WorkCall carrier, request owner, dispatcher and callbacks.
-It follows the existing close-operation policy. Accepted native work remains
-owned until after-work completion in both paths; neither uses `uv_cancel` or
-`sqlite3_interrupt`.
+Public ordinary work goes through `async.run_foreign`. A local cleanup adapter
+uses public `uv.work_t` and `uv.queue_work` inside `async.await_cleanup`. Its
+explicit `argument_owner` retains the owned packet through worker completion
+and the entire after-work callback frame. The callback translates a native
+status with the existing `async.run_foreign` operation label, settles the exact
+wait, and uses fatal-and-rethrow for unexpected terminal callback failures.
+Accepted native work remains owned until after-work completion in both paths;
+neither uses `uv_cancel` or `sqlite3_interrupt`. Reset, finalize, close, and
+unpublished-result retirement use this cleanup adapter without mutating Task
+flags or accessing a source-private UV scheduler.
 
 Cleanup can submit and receive ordinary completion during cancellation unwind.
 This is not general Task shielding: ordinary operations still receive the
