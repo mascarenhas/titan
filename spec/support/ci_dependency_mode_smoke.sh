@@ -397,8 +397,23 @@ local sqlite3 = import "sqlite3"
 local json = import "json"
 local reflect = import "reflect"
 
+foreign import "openssl/sha.h"
+
 local function check(condition: boolean, message: string)
   if not condition then raise message end
+end
+
+local function check_openssl_link()
+  -- A consumer can call OpenSSL directly even without using titan.ssl's TLS
+  -- entry points. System mode must supply its final-link flags for this call.
+  local digest: owned unsigned char[] =
+    foreign unsigned char.new_array(ffi.SHA256_DIGEST_LENGTH)
+  check(ffi.SHA256("abc", 3, digest) ~= nil,
+        "static consumer SHA256 failed")
+  check((digest as string) ==
+        "\xba\x78\x16\xbf\x8f\x01\xcf\xea\x41\x41\x40\xde\x5d\xae\x22\x23" ..
+        "\xb0\x03\x61\xa3\x96\x17\x7a\x9c\xb4\x10\xff\x61\xf2\x00\x15\xad",
+        "static consumer SHA256 changed digest bytes")
 end
 
 local function active(task: async.Task): boolean
@@ -474,6 +489,7 @@ end
 function main(args: {string}): integer
   local marker = args[1]
   local process_child = args[2]
+  check_openssl_link()
   check(not testing.testing() and not testing.verbose(),
         "titan.test reported an active runner in a production executable")
   local envname = "TITAN_STATIC_PROVIDER_SMOKE"

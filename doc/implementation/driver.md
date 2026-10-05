@@ -1444,6 +1444,14 @@ The default system OpenSSL mode omits only the OpenSSL archives, keeps their
 pkg-config-selected settings as repeated final-link inputs, and never copies
 them into `titan.a`; libuv, llhttp, and SQLite remain private payload in either
 OpenSSL mode.
+Static consumers pass the ordered `pkg-config --libs openssl` result through
+`TITAN_EXTRA_LDFLAGS`; both the executable-context archive probe and final
+program link append those inputs after the consumer and provider objects.
+Foreign headers provide declarations, not link directives. A direct application
+FFI call such as `SHA256` therefore needs the same system inputs even when no
+TLS operation makes an OpenSSL reference reachable from `titan.ssl`. The
+production dependency-mode smoke checks this direct consumer call in both
+OpenSSL modes.
 The eight llhttp callbacks are source-defined in the generated `titan.http`
 object, so there is no HTTP adapter object.
 

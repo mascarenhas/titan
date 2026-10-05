@@ -280,6 +280,20 @@ newer; see the repository build instructions for its development package and
 statically carries the pinned OpenSSL 3.5.7 release in the coordinated
 standard-library provider.
 
+When linking an executable with `--static` against a system-OpenSSL provider,
+repeat the system library inputs at final link:
+
+```sh
+TITAN_EXTRA_CPPFLAGS="$(pkg-config --cflags openssl)" \
+TITAN_EXTRA_LDFLAGS="$(pkg-config --libs openssl)" \
+  titanc --static app.main
+```
+
+`--static` selects Titan archives; it does not make system OpenSSL static or
+infer foreign-library inputs from its headers. The same inputs are required
+when an application calls OpenSSL directly through the FFI, such as `SHA256`.
+Bundled providers carry the matching OpenSSL objects in `titan.a`.
+
 This initial module has no mTLS, ALPN selection API, certificate callbacks,
 session-cache controls, cipher configuration, key logging, or access to the
 underlying `net.Connection`. TLS composes over public `net` operations; it

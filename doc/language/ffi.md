@@ -981,7 +981,9 @@ for cache and promotion details.
   contextual primitive descriptors and pointer, foreign-function-pointer, and
   owned graphs built entirely from them can appear in exported compiled-module
   interfaces.
-* Function-like macros are not imported. Object-like macros are values only
+* Function-like macros are not imported. When a real function declaration has
+  the same name, calls select that declaration and bypass the macro wrapper.
+  Object-like macros are values only
   through bounded recognized expression forms, including supported
   integer-constant expressions and typed dereferenced accessors, or when they
   fully expand to an outer cast to a supported scalar type. A pure dotted

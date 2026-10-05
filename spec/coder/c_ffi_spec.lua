@@ -1528,13 +1528,13 @@ describe("C FFI code generation", function()
                 return body, restored
             end
 
-            assert_rebased("direct_void", "ffi_direct_void%(%)")
-            assert_rebased("direct_scalar", "ffi_direct_scalar%(%)")
+            assert_rebased("direct_void", "%(ffi_direct_void%)%(%)")
+            assert_rebased("direct_scalar", "%(ffi_direct_scalar%)%(%)")
             assert_rebased("pointer_void", "_tmp_%d+%(%);")
             assert_rebased("pointer_scalar", "= _tmp_%d+%(%);")
 
             for _, case in ipairs({
-                { "direct_anchor", "ffi_touch_value%([^;]*%);" },
+                { "direct_anchor", "%(ffi_touch_value%)%([^;]*%);" },
                 { "pointer_anchor", "_tmp_%d+%([^;]*%);" },
             }) do
                 local body, restored = assert_rebased(case[1], case[2])
@@ -1548,7 +1548,7 @@ describe("C FFI code generation", function()
             local base = assert(init:find("StkId _base = L->top.p;", 1, true))
             local baseoff = assert(init:find(
                 "ptrdiff_t _base_off = savestack(L, _base);", base, true))
-            local direct = assert(init:find("ffi_direct_scalar%(%)", baseoff))
+            local direct = assert(init:find("%(ffi_direct_scalar%)%(%)", baseoff))
             local direct_rebase = assert(init:find(rebase, direct, true))
             local pointer = assert(init:find("= _tmp_%d+%(%);", direct_rebase))
             local pointer_rebase = assert(init:find(rebase, pointer, true))

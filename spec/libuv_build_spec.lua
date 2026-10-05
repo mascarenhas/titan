@@ -4601,7 +4601,7 @@ done
             assert.equal(1, count_literal(stdlib_job,
                 "runs-on: ubicloud-standard-2"), stdlib_job)
             assert.equal(1, count_literal(stdlib_job,
-                "timeout-minutes: 30"), stdlib_job)
+                "timeout-minutes: 45"), stdlib_job)
             assert.equal(1, count_literal(stdlib_job,
                 "contents: read"), stdlib_job)
             assert.falsy(stdlib_job:find("id-token: write", 1, true),

@@ -322,7 +322,11 @@ function coder._foreign_reference_name(reference)
     if reference.source then
         return coder._foreign_func_name(reference.module, reference.name)
     end
-    return reference.name
+    -- The checker selected a real C declaration, not a function-like macro
+    -- with the same spelling. Parenthesizing its designator keeps that exact
+    -- prototype in ordinary calls, restricted foreign bodies, and callbacks.
+    -- Object-like aliases still expand normally inside the parentheses.
+    return "(" .. reference.name .. ")"
 end
 
 function func_luaname(modname, name, _)
