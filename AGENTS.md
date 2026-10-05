@@ -137,7 +137,8 @@ change them only when their own compatibility rules require it.
   `gh workflow run macos.yml --ref <branch>`. The separate
   `macos.yml` workflow is manual-only; `ci.yml` runs Linux jobs on pushes.
   The regular push graph has exactly three standard `ubuntu-24.04` jobs. The
-  stdlib producer and compiler consumer retain explicit 30-minute timeouts; the
+  stdlib producer has 45 minutes for its optimized build, complete runtime suite,
+  and both production dependency smokes; the compiler consumer retains 30 minutes. The
   independent sanitizer has 35 minutes so a cold native-dependency cache miss
   remains a valid build under the same two-CPU bound. Linux jobs export
   `MAKEFLAGS=-j2` and `TITAN_JOBS=2`, matching the two CPUs on standard private-repository

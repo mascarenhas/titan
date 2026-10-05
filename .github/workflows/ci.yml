@@ -23,7 +23,8 @@ jobs:
     name: stdlib (ubuntu-24.04, build+all-no-coverage)
     if: github.event_name == 'push'
     runs-on: ubicloud-standard-2
-    timeout-minutes: 30
+    # The optimized producer also runs both production dependency smokes.
+    timeout-minutes: 45
     permissions:
       contents: read
     env:
