@@ -142,8 +142,8 @@ lua-build: $(call make_path,$(LUA_CONFIG)) $(call make_path,$(LUA_RESOURCE))
 	+$(MAKE) -j1 -C $(call quote,$(LUA_SOURCE)) mingw ALL=lua.exe \
 	  CC=$(call quote,$(CC) -std=c99) \
 	  CFLAGS=$(call quote,$(LUA_CPPFLAGS) $(LUA_CFLAGS) -DLUA_BUILD_AS_DLL) \
-	  MYLDFLAGS=$(call quote,$(LUA_LDFLAGS) -Wl,--no-insert-timestamp) \
-	  MYDLLFLAGS=$(call quote,$(LUA_LDFLAGS) -Wl,--exclude-all-symbols -Wl,--no-insert-timestamp) \
+	  MYLDFLAGS=$(call quote,$(LUA_LDFLAGS) -Xlinker --no-insert-timestamp) \
+	  MYDLLFLAGS=$(call quote,$(LUA_LDFLAGS) -Xlinker --exclude-all-symbols -Xlinker --no-insert-timestamp) \
 	  LUA_IMPLIB=liblua-$(LUA_VERSION).dll.a MYLUAOBJS=lua-windows.res MINGW_STRIP=
 	@mkdir -p $(call quote,$(WINDOWS_BUILD_ROOT)/bin) $(call quote,$(WINDOWS_BUILD_ROOT)/lib)
 	cp -p $(call quote,$(LUA_SOURCE)/lua.exe) $(call quote,$(LUA_SOURCE)/lua55.dll) $(call quote,$(WINDOWS_BUILD_ROOT)/bin/)

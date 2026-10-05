@@ -1766,6 +1766,43 @@ describe("relocatable Lua build configuration", function()
         return tools .. ":" .. (os.getenv("PATH") or "/usr/bin:/bin"), marker
     end
 
+    it("preserves Windows Lua linker options in recursive Make arguments", function()
+        workspace = temporary_directory("windows-lua-link-argv")
+        local repository = assert(lfs.currentdir())
+        local root = workspace .. "/windows-build"
+        -- Recursive recipes execute under -n, while the preparation targets
+        -- marked old and all ordinary recipes remain untouched.
+        local ok, output = run({
+            "env", "-u", "MAKEFLAGS", "-u", "MFLAGS",
+            "-u", "MAKEOVERRIDES", "-u", "MAKELEVEL", "-u", "GNUMAKEFLAGS",
+            "make", "--no-print-directory", "-n",
+            "-f", repository .. "/Makefile.windows",
+            "WINDOWS_BUILD_ROOT=" .. root,
+            "MAKE=printf '<%s>\\n'",
+            "LUA_LDFLAGS=-Lsentinel -Wl,--as-needed",
+            "--old-file=" .. root .. "/lua-objects/.configuration",
+            "--old-file=" .. root .. "/lua-5.5.1/src/lua-windows.res",
+            "lua-build",
+        }, repository)
+        assert.truthy(ok, output)
+
+        local function arguments(name)
+            local value = assert(output:match(
+                "\n<" .. name .. "=(.-)>\n"), output)
+            return assert(cdriver.split_shell_words(value))
+        end
+        assert.same({
+            "-Lsentinel", "-Wl,--as-needed",
+            "-Xlinker", "--no-insert-timestamp",
+        }, arguments("MYLDFLAGS"))
+        assert.same({
+            "-Lsentinel", "-Wl,--as-needed",
+            "-Xlinker", "--exclude-all-symbols",
+            "-Xlinker", "--no-insert-timestamp",
+        }, arguments("MYDLLFLAGS"))
+        assert_absent(root)
+    end)
+
     it("requires initialized Lua sources before changing either build tree",
     function()
         workspace = temporary_directory("lua-source-required")

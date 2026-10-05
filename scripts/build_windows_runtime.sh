@@ -114,7 +114,7 @@ perl -0777 -e '
   for my $name (@names) {
     $name=lc $name;
     die "Forbidden runtime DLL: $name\n" unless
-      $name =~ /^(kernel32|bcrypt|ucrtbase|lua-5[.]5[.]1)[.]dll$/ ||
+      $name =~ /^(kernel32|bcrypt|ucrtbase|lua55)[.]dll$/ ||
       $name =~ /^api-ms-win-crt-[a-z0-9-]+[.]dll$/;
   }
 ' "$stage/bootstrap.imports"

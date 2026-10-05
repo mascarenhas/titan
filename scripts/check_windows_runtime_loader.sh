@@ -32,7 +32,7 @@ common=(-std=c99 -O2 -Wall -Wextra -Wno-unused-function \
 lua_import="$prefix/lib/liblua-5.5.1.dll.a"
 "${compiler[@]}" "${common[@]}" -c titan-runtime/titan.c -o "$check_root/titan.o"
 "${compiler[@]}" "${common[@]}" -shared -Wl,--exclude-all-symbols \
-  titan-runtime/ltitanlib.c "$lua_import" -o "$providers/titan.dll"
+  titan-runtime/ltitanlib.c "$lua_import" -lbcrypt -o "$providers/titan.dll"
 fixture=spec/fixtures/windows/runtime_loader_provider.c
 for variant in provider dependency bad missing null; do
   defines=()
@@ -63,6 +63,7 @@ for file in "$providers/"*.dll "$runtime/bin/"*.dll "$runtime/bin/runtime-loader
   report="$check_root/$(basename "$file").imports"
   llvm-readobj --coff-imports "$file" > "$report"
   perl -0777 -e '
+    my $support = $ARGV[0] =~ /titan[.]dll[.]imports$/;
     my $text = <>;
     die "Expected x64 COFF image in import report\n"
       unless $text =~ /^Format: COFF-x86-64\r?$/m;
@@ -71,7 +72,8 @@ for file in "$providers/"*.dll "$runtime/bin/"*.dll "$runtime/bin/runtime-loader
     for my $name (@names) {
       $name = lc $name;
       die "Unexpected native runtime dependency: $name\n"
-        unless $name eq "kernel32.dll" || $name eq "lua55.dll" ||
+        unless $name eq "kernel32.dll" || ($support && $name eq "bcrypt.dll") ||
+               $name eq "lua55.dll" ||
                $name eq "titan-loader-dependency.dll" || $name eq "ucrtbase.dll" ||
                $name =~ /^api-ms-win-crt-[a-z0-9-]+\.dll$/;
     }
