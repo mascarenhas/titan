@@ -852,6 +852,121 @@ describe("generic declarations and explicit calls", function()
         ]])
     end)
 
+    it("does not recover private union variant owners under the default public policy",
+    function()
+        local variant = types.Variant("test.Choice", "hidden", {
+            types.Field("test.Choice", "item", types.Nominal("private_owner.Payload"), 1, false),
+        }, 0)
+        variant.islocal = true
+        local union = types.Union("test.Choice", { variant }, {}, {}, 1)
+        assert.is_true(checker_core.register_referenced_nominals(
+            union, function()
+                error("public recovery attempted a private variant's owner")
+            end, {}))
+    end)
+
+    it("recovers a cached tableloader producer's direct source owner without changing ordinary aliases",
+    function()
+        local sources = {
+            owner = [[
+                interface Show function render(): string end
+                record Printer text: string end
+                local function Printer:render(): string return self.text end
+            ]],
+            producer = [[
+                local owner = import "owner.titan"
+                record Box<|T: owner.Show|> item: T end
+                record Application local box: Box<|owner.Printer|> end
+                function create(): Application
+                    return { box = Box<|owner.Printer|>(owner.Printer("hello")) }
+                end
+            ]],
+            consumer = [[
+                local producer = import "producer.titan"
+                function answer(): string return producer.create().box.item.text end
+            ]],
+        }
+        local entries = {}
+        local function check(modules)
+            types.registry = {}
+            local loader = driver.tableloader(modules, entries, {}, { analysis_only = true })
+            local ok, result, errors = loader("consumer")
+            assert(driver.close_loader(loader))
+            assert.is_true(ok, result)
+            return errors
+        end
+        local function no_errors(errors)
+            assert.equal(0, #errors, table.concat(errors, "\n"))
+        end
+        no_errors(check(sources))
+        local producer, owner = entries.producer, entries.owner
+        assert.is_not_equal(owner.type, owner.source_type)
+
+        entries = { producer = producer, owner = owner }
+        no_errors(check({ consumer = sources.consumer }))
+        assert.equal(owner, entries.owner)
+
+        entries = { producer = producer, owner = owner }
+        local private_call = sources.consumer:gsub("box.item.text", "box.item:render()")
+        local errors = check({ consumer = 'local public = import "owner"\n' .. private_call })
+        assert.matches("method 'owner.Printer:render' is local to module 'owner'",
+            table.concat(errors, "\n"), 1, true)
+        assert.is_false(entries.consumer.ast[1]._source_import)
+        assert.equal(owner.type, entries.consumer.ast[1]._type)
+
+        -- A source edge cannot reuse a binary-only cache selection. The source
+        -- is still available even though this invocation has not parsed it yet.
+        entries = { producer = producer, owner = {
+            kind = "dynamic", type = owner.type, filename = "owner.so",
+        } }
+        no_errors(check({ owner = sources.owner, consumer = sources.consumer }))
+        assert.equal("source", entries.owner.kind)
+        assert.is_table(entries.owner.source_type)
+
+        -- Recovering another retained source producer must use that producer's
+        -- own direct edges, rather than the outer producer's source imports.
+        local outer = [[
+            local owner = import 'owner'
+            local producer = import 'producer.titan'
+            function expose(item: owner.Printer): owner.Printer return item end
+            record Shell local app: producer.Application end
+            function create(): Shell return { app = producer.create() } end
+        ]]
+        local outer_consumer = [[
+            local outer = import 'outer.titan'
+            function probe() local app = outer.create() end
+        ]]
+        entries = { producer = producer, owner = owner }
+        no_errors(check({ outer = outer, consumer = outer_consumer }))
+        local outer_entry = entries.outer
+        entries = { outer = outer_entry, producer = producer, owner = owner }
+        no_errors(check({ consumer = outer_consumer }))
+        -- The outer public signature recovers the owner's public view first.
+        -- Nominal recovery is best-effort after a load failure, so confirm the
+        -- nested producer's private owner actually recovered too.
+        assert.is_table(types.registry["owner.Printer"].methods.render)
+        assert.is_true(types.registry["owner.Printer"]._source_complete)
+
+        entries = { producer = producer }
+        errors = check({
+            owner = sources.owner:gsub(
+                "local function Printer:render%(%)%: string return self.text end", ""),
+            consumer = sources.consumer,
+        })
+        assert.matches("does not satisfy constraint 'owner.Show'",
+            table.concat(errors, "\n"), 1, true)
+
+        -- The producer's direct permission validates only its private graph.
+        -- Exporting that same constrained application remains unrecoverable.
+        entries = { owner = owner }
+        errors = check({
+            producer = sources.producer .. "\nfunction expose(item: Box<|owner.Printer|>) end\n",
+            consumer = sources.consumer,
+        })
+        assert.matches("does not satisfy constraint 'owner.Show'",
+            table.concat(errors, "\n"), 1, true)
+    end)
+
     it("smart-reconstructs every explicit owner and callable application",
     function()
         assert_error("type of map key cannot be nil", [[

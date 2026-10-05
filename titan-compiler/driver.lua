@@ -60,6 +60,26 @@ function driver.project_entries_registry(entries, options)
     return projectcache.registry(entries, options)
 end
 
+-- Recovered private signatures are validated with the producer's own direct
+-- source capabilities. Keep this loader provenance separate from the public
+-- Type.Module projection and from the consumer's symbol-table permissions.
+local function source_import_permissions(entry)
+    local permissions = {}
+    if entry.ast then
+        for _, node in ipairs(entry.ast) do
+            if not node._ignore and node._tag == "Ast.TopLevelImport"
+               and node._source_import then
+                permissions[node.modname] = true
+            end
+        end
+    else
+        for _, name in ipairs(entry.source_imports or {}) do
+            permissions[name] = true
+        end
+    end
+    return permissions
+end
+
 function driver.compiler_cache_stats(options)
     local context = options and options.context
     local strategy = context and context.io
@@ -4481,7 +4501,8 @@ function driver.defaultloader(static_deps, options)
         object_loaded[modname] = true
         static_deps[modname] = true
         local registered, register_error = checker.register_module_interface(
-            modname, entry.type, loader, modname, {}, true, {})
+            modname, entry.type, loader, modname, {}, true, {},
+            source_import_permissions(entry))
         if not registered then return false, register_error end
         if context.probe_verbose then
             io.stderr:write("Titan object hit ", modname, ": ", object_path, "\n")
@@ -4635,6 +4656,7 @@ function driver.defaultloader(static_deps, options)
             ffi_header = entry.ffi_header,
             checking_ffi_header = entry.checking_ffi_header,
             ffi_header_descriptor = ast._ffi_header,
+            source_permissions = source_import_permissions(entry),
         }
     end
 
@@ -5007,6 +5029,7 @@ function driver.defaultloader(static_deps, options)
                 info.ffi_header = mod.ffi_header
                 info.checking_ffi_header = mod.checking_ffi_header
                 info.ffi_header_descriptor = mod.ffi_header_descriptor or mod.ast and mod.ast._ffi_header
+                info.source_permissions = source_import_permissions(mod)
             end
             return true, mod.type, {}, info
         end
@@ -5553,8 +5576,22 @@ function driver.tableloader(modtable, imported, deps, options)
         return request and request.kind == "source-import"
     end
 
-    local function selected_interface(mod, request)
-        if (source_view or source_requested(request)) and
+    local function source_owner_requested(modname, request)
+        if not request or request.kind ~= "nominal-owner"
+           or type(request.exposer) ~= "string" then return false end
+        local producer = imported[request.exposer]
+        return type(producer) == "table" and producer.kind == "source"
+            and producer.source_type ~= nil
+            and source_import_permissions(producer)[modname] == true
+    end
+
+    local function selected_interface(modname, mod, request)
+        -- A retained source producer may need an owner's private signatures to
+        -- validate its own declarations. Recover that owner's source view only
+        -- through the producer's checked direct source edge. Ordinary aliases
+        -- keep the separately serialized public view and consumer permissions.
+        if (source_view or source_requested(request)
+            or source_owner_requested(modname, request)) and
            mod.kind == "source" and mod.source_type then
             return mod.source_type, {
                 kind = "source",
@@ -5565,6 +5602,7 @@ function driver.tableloader(modtable, imported, deps, options)
                 ffi_header = mod.ffi_header,
                 checking_ffi_header = mod.checking_ffi_header,
                 ffi_header_descriptor = mod.ast and mod.ast._ffi_header,
+                source_permissions = source_import_permissions(mod),
             }
         end
         return mod.type, { kind = mod.kind == "source"
@@ -5576,6 +5614,8 @@ function driver.tableloader(modtable, imported, deps, options)
             return false, "invalid logical Titan module name " ..
                 string.format("%q", modname)
         end
+        local source_required = source_requested(request)
+            or source_owner_requested(modname, request)
         if imported[modname] == CIRCULAR_MARK then
             imported[modname] = nil
             return false, "circular reference to module"
@@ -5590,7 +5630,7 @@ function driver.tableloader(modtable, imported, deps, options)
         end
         if imported[modname] then
             local mod = imported[modname]
-            if source_requested(request) and
+            if source_required and
                (mod.kind ~= "source" or not mod.source_type) then
                 if modtable[modname] == nil then
                     return false,
@@ -5603,14 +5643,14 @@ function driver.tableloader(modtable, imported, deps, options)
                     remember_used_compiled_interface(
                         context, modname, mod.type)
                 end
-                local modtype, info = selected_interface(mod, request)
+                local modtype, info = selected_interface(modname, mod, request)
                 return true, modtype, {}, info
             end
         end
         local modf = "./" .. modname .. ".titan"
         local input = modtable[modname]
         if input == nil then
-            local message = request and request.kind == "source-import"
+            local message = source_required
                 and ("source module '" .. modname .. "' not found")
                 or ("module '" .. modname .. "' not found")
             return false, message
@@ -5643,7 +5683,7 @@ function driver.tableloader(modtable, imported, deps, options)
             }
             deps[modname] = true
             local modtype, info = selected_interface(
-                imported[modname], request)
+                modname, imported[modname], request)
             return true, modtype, errors, info
         end
 
@@ -5665,7 +5705,7 @@ function driver.tableloader(modtable, imported, deps, options)
             checking_ffi_header = ffi_descriptor and ffi_descriptor.filename,
         }
         deps[modname] = true
-        local modtype, info = selected_interface(imported[modname], request)
+        local modtype, info = selected_interface(modname, imported[modname], request)
         return true, modtype, errors, info
     end
     loader_contexts[loader] = {

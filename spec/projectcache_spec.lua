@@ -57,6 +57,226 @@ describe("declared project manifests", function()
         end
     end
 
+    local function check_project(root, sources, retained)
+        driver.imported, types.registry = {}, {}
+        local overrides = {}
+        for name, source in pairs(sources) do
+            local filename = "/tmp/titan-project-cache-" .. name .. ".titan"
+            overrides[name] = {
+                kind = "generated", main = filename, files = { filename },
+                contents = { [filename] = source },
+            }
+        end
+        local loader = driver.defaultloader({}, {
+            analysis_only = true, source_roots = { [root] = true },
+            source_overrides = overrides, cached_source_entries = retained,
+        })
+        loaders[#loaders + 1] = loader
+        local ok, result, errors = loader(root)
+        assert.is_true(ok, result)
+        return errors
+    end
+
+    local function retain_project(mode)
+        local retained = {}
+        for name, entry in pairs(driver.imported) do
+            if entry.kind == "source" then
+                if mode == "compact" then
+                    retained[name] = assert(driver.compact_project_entry(entry))
+                else
+                    retained[name] = assert(driver.decode_project_entry(
+                        assert(driver.encode_project_entry(entry))))
+                end
+                assert_declarations_only(retained[name])
+            end
+        end
+        return retained
+    end
+
+    local function assert_no_errors(errors)
+        assert.equal(0, #errors, table.concat(errors, "\n"))
+    end
+
+    local function assert_error(errors, message)
+        assert.is_true(#errors > 0)
+        assert.matches(message, table.concat(errors, "\n"), 1, true)
+    end
+
+    local buffer_source = [[
+        record BufferStore local text: string end
+        function create(): BufferStore return { text = "ok" } end
+        function BufferStore:inputs(): string return self.text end
+    ]]
+    local application_source = [[
+        local buffer = import "private_buffer"
+        record Application local const buffers: buffer.BufferStore end
+        function create(): Application return { buffers = buffer.create() } end
+    ]]
+    local consumer_source = [[
+        local application = import "private_application.titan"
+        function answer(): string return application.create().buffers:inputs() end
+    ]]
+
+    for _, mode in ipairs({ "compact", "encoded" }) do
+        it("recovers a private field's transitive owner from " .. mode
+            .. " source declarations without a seeded registry", function()
+            assert_no_errors(check_project("private_consumer", {
+                private_buffer = buffer_source,
+                private_application = application_source,
+                private_consumer = consumer_source,
+            }))
+            local retained = retain_project(mode)
+            assert_no_errors(check_project("private_consumer", {
+                private_consumer = consumer_source,
+            }, retained))
+            assert.equal(retained.private_application, driver.imported.private_application)
+            assert.equal(retained.private_buffer, driver.imported.private_buffer)
+            assert.equal(retained.private_buffer.type.members.BufferStore.type,
+                types.registry["private_buffer.BufferStore"])
+        end)
+
+        it("uses a dirty transitive owner's current methods with " .. mode
+            .. " private field declarations", function()
+            assert_no_errors(check_project("private_application", {
+                private_buffer = buffer_source,
+                private_application = application_source,
+            }))
+            local retained = retain_project(mode)
+            local changed = [[
+                record BufferStore local text: string end
+                function create(): BufferStore return { text = "ok" } end
+            ]]
+            local expected = "method 'inputs' not found in record 'private_buffer.BufferStore'"
+            local cold = check_project("private_consumer", {
+                private_buffer = changed,
+                private_application = application_source,
+                private_consumer = consumer_source,
+            })
+            assert_error(cold, expected)
+            local warm = check_project("private_consumer", {
+                private_buffer = changed,
+                private_consumer = consumer_source,
+            }, { private_application = retained.private_application })
+            assert_error(warm, expected)
+            assert.equal(retained.private_application, driver.imported.private_application)
+            assert.is_nil(types.registry["private_buffer.BufferStore"].methods.inputs)
+            assert.equal(driver.imported.private_buffer.type.members.BufferStore.type,
+                types.registry["private_buffer.BufferStore"])
+        end)
+
+        it("keeps a recovered private field hidden from an ordinary " .. mode
+            .. " source import", function()
+            assert_no_errors(check_project("private_application", {
+                private_buffer = buffer_source,
+                private_application = application_source,
+            }))
+            local retained = retain_project(mode)
+            local errors = check_project("private_consumer", {
+                private_consumer = consumer_source:gsub("private_application.titan", "private_application"),
+            }, retained)
+            assert_error(errors, "field 'buffers' not found in record 'private_application.Application'")
+        end)
+
+        for _, surface in ipairs({ "method", "static", "variant" }) do
+            it("recovers owners reached only through a private " .. surface
+                .. " in " .. mode .. " source declarations", function()
+                local declaration, answer
+                if surface == "method" then
+                    declaration = [[
+                        record Application end
+                        function create(): Application return {} end
+                        local function Application:buffers(): buffer.BufferStore
+                            return buffer.create()
+                        end
+                    ]]
+                    answer = "return application.create():buffers():inputs()"
+                elseif surface == "static" then
+                    declaration = [[
+                        record Application end
+                        local function Application.buffers(): buffer.BufferStore
+                            return buffer.create()
+                        end
+                    ]]
+                    answer = "return application.Application.buffers():inputs()"
+                else
+                    declaration = [[
+                        union Result local buffered(buffer.BufferStore) missing() end
+                        function create(): Result return Result.buffered(buffer.create()) end
+                    ]]
+                    answer = [[
+                        case application.create()
+                        when buffered(store) then return store:inputs()
+                        when missing() then return ""
+                        end
+                    ]]
+                end
+                local provider = 'local buffer = import "private_buffer"\n' .. declaration
+                local consumer = 'local application = import "private_application.titan"\n'
+                    .. "function answer(): string\n" .. answer .. "\nend\n"
+                assert_no_errors(check_project("private_consumer", {
+                    private_buffer = buffer_source,
+                    private_application = provider,
+                    private_consumer = consumer,
+                }))
+                local retained = retain_project(mode)
+                assert_no_errors(check_project("private_consumer", {
+                    private_consumer = consumer,
+                }, retained))
+                assert.equal(retained.private_application, driver.imported.private_application)
+                assert.equal(retained.private_buffer, driver.imported.private_buffer)
+                assert.is_table(types.registry["private_buffer.BufferStore"])
+            end)
+        end
+
+        it("validates private generic signatures with the producer's direct source permissions in "
+            .. mode .. " declarations", function()
+            local owner = [[
+                interface Show function render(): string end
+                record Printer text: string end
+                local function Printer:render(): string return self.text end
+            ]]
+            local application = [[
+                local owner = import "private_owner.titan"
+                record Box<|T: owner.Show|> item: T end
+                record Application local box: Box<|owner.Printer|> end
+                function create(): Application
+                    return { box = Box<|owner.Printer|>(owner.Printer("hello")) }
+                end
+            ]]
+            local consumer = [[
+                local application = import "private_application.titan"
+                function answer(): string return application.create().box.item.text end
+            ]]
+            assert_no_errors(check_project("private_consumer", {
+                private_owner = owner,
+                private_application = application,
+                private_consumer = consumer,
+            }))
+            local retained = retain_project(mode)
+            assert_no_errors(check_project("private_consumer", {
+                private_consumer = consumer,
+            }, retained))
+            assert.equal(retained.private_application, driver.imported.private_application)
+            assert.equal(retained.private_owner, driver.imported.private_owner)
+
+            local private_call = consumer:gsub("box.item.text", "box.item:render()")
+            assert_error(check_project("private_consumer", {
+                private_consumer = private_call,
+            }, retained), "method 'private_owner.Printer:render' is local to module 'private_owner'")
+            assert_no_errors(check_project("private_consumer", {
+                private_consumer = 'local owner = import "private_owner.titan"\n' .. private_call,
+            }, retained))
+
+            local changed_owner = owner:gsub(
+                "local function Printer:render%(%)%: string return self.text end", "")
+            assert_error(check_project("private_consumer", {
+                private_owner = changed_owner,
+                private_consumer = consumer,
+            }, { private_application = retained.private_application }),
+                "does not satisfy constraint 'private_owner.Show'")
+        end)
+    end
+
     for _, windows in ipairs({ false, true }) do
         it("round-trips exact " .. (windows and "Windows" or "Unix")
             .. " header identities in declared manifests", function()
