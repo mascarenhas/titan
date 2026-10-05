@@ -52,9 +52,9 @@ sign or a saved PID.
 
 The approved bundled Unix libuv fix keeps failed-spawn handle registration consistent with the required later close. It is a native dependency repair, not a binding rule that skips close or infers ownership from a particular error number. The patch removes the premature error-path handle-queue removal so normal uv_close owns the single removal. A libuv version number alone does not identify this local bundled repair.
 
-Titan supports only its pinned, patched libuv 1.52.1 dependency. There is no
+Titan supports only its pinned, patched libuv 1.53.0 dependency. There is no
 system libuv mode. The checked-in patch is
-[`libuv-1.52.1-spawn-close.patch`](../../../vendor/libuv/libuv-1.52.1-spawn-close.patch)
+[`libuv-1.53.0-spawn-close.patch`](../../../vendor/libuv/libuv-1.53.0-spawn-close.patch)
 and the build verifies the expected source before applying it. A version number
 alone does not identify that repair. Ordinary close behavior applies after
 native spawn handoff, including a failed spawn.

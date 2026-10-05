@@ -153,7 +153,7 @@ runtime gates.
 ## Private native dependency SDK
 
 The experimental `native` target uses the same CLANG64/UCRT compiler to build
-libuv 1.52.1, llhttp 9.4.3, SQLite 3.53.4, and OpenSSL 3.5.7 from the pinned,
+libuv 1.53.0, llhttp 9.4.3, SQLite 3.53.4, and OpenSSL 3.5.7 from the pinned,
 checksum-verified sources recorded in `vendor/windows-native/dependencies.tsv`.
 Those pins match the ordinary Makefile. CMake/Ninja build the first three;
 OpenSSL uses its upstream `mingw64` configuration, Perl, Make, and

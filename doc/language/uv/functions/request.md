@@ -5,6 +5,10 @@ Complete public example: [work_random](../examples/work_random.titan). See the
 
 Accepted request storage and all required inputs survive until terminal native completion, independent of user GC or cancellation. Old registration retires before user callback and owner remains rooted through callback return. cancel is supported only for FS, getaddrinfo/getnameinfo, random, and work, and successful cancellation still requires terminal completion.
 
+Libuv 1.53.0 adds native write cancellation. Titan's `cancel` continues to
+return `EINVAL` for write requests, and the native `uv_write_nwritten` byte
+count query has [no public wrapper](../coverage.md#unavailable-direct-wrappers).
+
 ## Concrete request data
 
 `fs_t`, `work_t`, `getaddrinfo_t`, `connect_t`, `write_t`, and `shutdown_t`
@@ -38,9 +42,9 @@ function cancel(request: req_t): integer
 
 **Cancellation:** not applicable or unsupported by uv_cancel
 
-**Availability:** Pinned patched libuv 1.52.1 only; native OS/kernel support and native error statuses still apply.
+**Availability:** Pinned patched libuv 1.53.0 only; native OS/kernel support and native error statuses still apply.
 
-**Native declaration:** [pinned libuv](https://github.com/libuv/libuv/blob/v1.52.1/include/uv.h#L1200).
+**Native declaration:** [pinned libuv](https://github.com/libuv/libuv/blob/v1.53.0/include/uv.h#L1216).
 
 
 ## req_get_data
@@ -61,9 +65,9 @@ function req_get_data(req: req_t): value
 
 **Cancellation:** not applicable or unsupported by uv_cancel
 
-**Availability:** Pinned patched libuv 1.52.1 only; native OS/kernel support and native error statuses still apply.
+**Availability:** Pinned patched libuv 1.53.0 only; native OS/kernel support and native error statuses still apply.
 
-**Native declaration:** [pinned libuv](https://github.com/libuv/libuv/blob/v1.52.1/include/uv.h#L491).
+**Native declaration:** [pinned libuv](https://github.com/libuv/libuv/blob/v1.53.0/include/uv.h#L491).
 
 
 ## req_get_type
@@ -84,9 +88,9 @@ function req_get_type(req: req_t): req_type
 
 **Cancellation:** not applicable or unsupported by uv_cancel
 
-**Availability:** Pinned patched libuv 1.52.1 only; native OS/kernel support and native error statuses still apply.
+**Availability:** Pinned patched libuv 1.53.0 only; native OS/kernel support and native error statuses still apply.
 
-**Native declaration:** [pinned libuv](https://github.com/libuv/libuv/blob/v1.52.1/include/uv.h#L493).
+**Native declaration:** [pinned libuv](https://github.com/libuv/libuv/blob/v1.53.0/include/uv.h#L493).
 
 
 ## req_set_data
@@ -107,9 +111,9 @@ function req_set_data(req: req_t, data: value)
 
 **Cancellation:** not applicable or unsupported by uv_cancel
 
-**Availability:** Pinned patched libuv 1.52.1 only; native OS/kernel support and native error statuses still apply.
+**Availability:** Pinned patched libuv 1.53.0 only; native OS/kernel support and native error statuses still apply.
 
-**Native declaration:** [pinned libuv](https://github.com/libuv/libuv/blob/v1.52.1/include/uv.h#L492).
+**Native declaration:** [pinned libuv](https://github.com/libuv/libuv/blob/v1.53.0/include/uv.h#L492).
 
 
 ## req_size
@@ -130,9 +134,9 @@ function req_size(kind: req_type): integer
 
 **Cancellation:** not applicable or unsupported by uv_cancel
 
-**Availability:** Pinned patched libuv 1.52.1 only; native OS/kernel support and native error statuses still apply.
+**Availability:** Pinned patched libuv 1.53.0 only; native OS/kernel support and native error statuses still apply.
 
-**Native declaration:** [pinned libuv](https://github.com/libuv/libuv/blob/v1.52.1/include/uv.h#L490).
+**Native declaration:** [pinned libuv](https://github.com/libuv/libuv/blob/v1.53.0/include/uv.h#L490).
 
 
 ## req_type_name
@@ -153,6 +157,6 @@ function req_type_name(kind: req_type): string?
 
 **Cancellation:** not applicable or unsupported by uv_cancel
 
-**Availability:** Pinned patched libuv 1.52.1 only; native OS/kernel support and native error statuses still apply.
+**Availability:** Pinned patched libuv 1.53.0 only; native OS/kernel support and native error statuses still apply.
 
-**Native declaration:** [pinned libuv](https://github.com/libuv/libuv/blob/v1.52.1/include/uv.h#L494).
+**Native declaration:** [pinned libuv](https://github.com/libuv/libuv/blob/v1.53.0/include/uv.h#L494).

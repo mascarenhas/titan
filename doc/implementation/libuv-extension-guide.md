@@ -14,11 +14,14 @@ the native operation itself lacks a suitable public binding.
 
 ## Start from the pinned native contract
 
-Titan always builds the pinned, patched libuv 1.52.1 source. Check its header,
+Titan always builds the pinned, patched libuv 1.53.0 source. Check its header,
 upstream documentation, and supported-platform implementations for the exact
 lifecycle. The checked-in [native patch](../../vendor/libuv/README.md) repairs
 failed Unix spawn close ownership. An unpatched system library or its version
 number is not a substitute for this dependency.
+
+Unicode size queries forward the native result. With libuv 1.53.0,
+`wtf8_length_as_utf16` returns `uv.EINVAL` for malformed WTF-8 input.
 
 For every proposed operation, determine:
 

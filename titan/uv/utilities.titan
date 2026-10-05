@@ -1,5 +1,5 @@
 -- Isolated candidate for the public titan.uv utility family.
--- Native libuv 1.52.1; no C-header types cross the public interface.
+-- Native libuv 1.53.0; no C-header types cross the public interface.
 foreign import "uv.h"
 foreign import "utility_bits.h"
 

@@ -32,7 +32,7 @@ jobs:
       TITAN_PREFIX: ${{ github.workspace }}/.lua
       # Exercise the immutable/minimal-host path in the regular Linux build.
       READLINE_MODE: bundled
-      LIBUV_VERSION: "1.52.1"
+      LIBUV_VERSION: "1.53.0"
       # Bump when any CMake option that affects the cached archive changes.
       LIBUV_BUILD_PROFILE: "static-pic-release-tests-off-v2"
       LLHTTP_VERSION: "9.4.3"
@@ -481,8 +481,8 @@ jobs:
       AR: ar
       RANLIB: ranlib
       SANITIZER_LUA_VERSION: "5.5.1"
-      SANITIZER_LIBUV_VERSION: "1.52.1"
-      SANITIZER_LIBUV_SHA256: "66d511b9e6e334c0e62279eb234fbfb2b3110b1479c09b95b44c7afca8cff9e7"
+      SANITIZER_LIBUV_VERSION: "1.53.0"
+      SANITIZER_LIBUV_SHA256: "cb0d6dd2128d5a95bd242c6cc982a24fe608fa93da57b6b4ec763b0018c53e64"
       SANITIZER_LLHTTP_VERSION: "9.4.3"
       SANITIZER_LLHTTP_SHA256: "1eb813c7437b31a87496a1cd3ed79f00746720f5e7e29c79b42c02cb69f36c39"
       SANITIZER_SQLITE3_VERSION: "3.53.4"
@@ -557,7 +557,7 @@ jobs:
           done
           inputs="$RUNNER_TEMP/titan-sanitizer-native-cache-inputs"
           lua_patch_sha256="$(sha256sum vendor/lua/lua-5.5.1-relocatable.patch | cut -d' ' -f1)"
-          libuv_patch_sha256="$(sha256sum vendor/libuv/libuv-1.52.1-spawn-close.patch | cut -d' ' -f1)"
+          libuv_patch_sha256="$(sha256sum vendor/libuv/libuv-1.53.0-spawn-close.patch | cut -d' ' -f1)"
           {
             printf '%s\n' \
               "schema=$SANITIZER_NATIVE_CACHE_SCHEMA" \

@@ -23,9 +23,9 @@ function fs_access(loop: loop_t?, request: fs_t, path: string, mode: integer, ca
 
 **Cancellation:** FS (accepted async only)
 
-**Availability:** Pinned patched libuv 1.52.1 only; native OS/kernel support and native error statuses still apply.
+**Availability:** Pinned patched libuv 1.53.0 only; native OS/kernel support and native error statuses still apply.
 
-**Native declaration:** [pinned libuv](https://github.com/libuv/libuv/blob/v1.52.1/include/uv.h#L1591).
+**Native declaration:** [pinned libuv](https://github.com/libuv/libuv/blob/v1.53.0/include/uv.h#L1607).
 
 
 ## fs_chmod
@@ -46,9 +46,9 @@ function fs_chmod(loop: loop_t?, request: fs_t, path: string, mode: integer, cal
 
 **Cancellation:** FS (accepted async only)
 
-**Availability:** Pinned patched libuv 1.52.1 only; native OS/kernel support and native error statuses still apply.
+**Availability:** Pinned patched libuv 1.53.0 only; native OS/kernel support and native error statuses still apply.
 
-**Native declaration:** [pinned libuv](https://github.com/libuv/libuv/blob/v1.52.1/include/uv.h#L1596).
+**Native declaration:** [pinned libuv](https://github.com/libuv/libuv/blob/v1.53.0/include/uv.h#L1612).
 
 
 ## fs_chown
@@ -69,9 +69,9 @@ function fs_chown(loop: loop_t?, request: fs_t, path: string, uid: integer, gid:
 
 **Cancellation:** FS (accepted async only)
 
-**Availability:** Pinned patched libuv 1.52.1 only; native OS/kernel support and native error statuses still apply.
+**Availability:** Pinned patched libuv 1.53.0 only; native OS/kernel support and native error statuses still apply.
 
-**Native declaration:** [pinned libuv](https://github.com/libuv/libuv/blob/v1.52.1/include/uv.h#L1662).
+**Native declaration:** [pinned libuv](https://github.com/libuv/libuv/blob/v1.53.0/include/uv.h#L1678).
 
 
 ## fs_close
@@ -92,9 +92,9 @@ function fs_close(loop: loop_t?, request: fs_t, file: integer, callback: (functi
 
 **Cancellation:** FS (accepted async only)
 
-**Availability:** Pinned patched libuv 1.52.1 only; native OS/kernel support and native error statuses still apply.
+**Availability:** Pinned patched libuv 1.53.0 only; native OS/kernel support and native error statuses still apply.
 
-**Native declaration:** [pinned libuv](https://github.com/libuv/libuv/blob/v1.52.1/include/uv.h#L1470).
+**Native declaration:** [pinned libuv](https://github.com/libuv/libuv/blob/v1.53.0/include/uv.h#L1486).
 
 
 ## fs_closedir
@@ -115,9 +115,9 @@ function fs_closedir(loop: loop_t?, request: fs_t, directory: dir_t, callback: (
 
 **Cancellation:** FS (accepted async only)
 
-**Availability:** Pinned patched libuv 1.52.1 only; native OS/kernel support and native error statuses still apply.
+**Availability:** Pinned patched libuv 1.53.0 only; native OS/kernel support and native error statuses still apply.
 
-**Native declaration:** [pinned libuv](https://github.com/libuv/libuv/blob/v1.52.1/include/uv.h#L1554).
+**Native declaration:** [pinned libuv](https://github.com/libuv/libuv/blob/v1.53.0/include/uv.h#L1570).
 
 
 ## fs_copyfile
@@ -138,9 +138,9 @@ function fs_copyfile(loop: loop_t?, request: fs_t, path: string, new_path: strin
 
 **Cancellation:** FS (accepted async only)
 
-**Availability:** Pinned patched libuv 1.52.1 only; native OS/kernel support and native error statuses still apply.
+**Availability:** Pinned patched libuv 1.53.0 only; native OS/kernel support and native error statuses still apply.
 
-**Native declaration:** [pinned libuv](https://github.com/libuv/libuv/blob/v1.52.1/include/uv.h#L1516).
+**Native declaration:** [pinned libuv](https://github.com/libuv/libuv/blob/v1.53.0/include/uv.h#L1532).
 
 
 ## fs_fchmod
@@ -161,9 +161,9 @@ function fs_fchmod(loop: loop_t?, request: fs_t, file: integer, mode: integer, c
 
 **Cancellation:** FS (accepted async only)
 
-**Availability:** Pinned patched libuv 1.52.1 only; native OS/kernel support and native error statuses still apply.
+**Availability:** Pinned patched libuv 1.53.0 only; native OS/kernel support and native error statuses still apply.
 
-**Native declaration:** [pinned libuv](https://github.com/libuv/libuv/blob/v1.52.1/include/uv.h#L1657).
+**Native declaration:** [pinned libuv](https://github.com/libuv/libuv/blob/v1.53.0/include/uv.h#L1673).
 
 
 ## fs_fchown
@@ -184,9 +184,9 @@ function fs_fchown(loop: loop_t?, request: fs_t, file: integer, uid: integer, gi
 
 **Cancellation:** FS (accepted async only)
 
-**Availability:** Pinned patched libuv 1.52.1 only; native OS/kernel support and native error statuses still apply.
+**Availability:** Pinned patched libuv 1.53.0 only; native OS/kernel support and native error statuses still apply.
 
-**Native declaration:** [pinned libuv](https://github.com/libuv/libuv/blob/v1.52.1/include/uv.h#L1668).
+**Native declaration:** [pinned libuv](https://github.com/libuv/libuv/blob/v1.53.0/include/uv.h#L1684).
 
 
 ## fs_fdatasync
@@ -207,9 +207,9 @@ function fs_fdatasync(loop: loop_t?, request: fs_t, file: integer, callback: (fu
 
 **Cancellation:** FS (accepted async only)
 
-**Availability:** Pinned patched libuv 1.52.1 only; native OS/kernel support and native error statuses still apply.
+**Availability:** Pinned patched libuv 1.53.0 only; native OS/kernel support and native error statuses still apply.
 
-**Native declaration:** [pinned libuv](https://github.com/libuv/libuv/blob/v1.52.1/include/uv.h#L1575).
+**Native declaration:** [pinned libuv](https://github.com/libuv/libuv/blob/v1.53.0/include/uv.h#L1591).
 
 
 ## fs_fstat
@@ -230,9 +230,9 @@ function fs_fstat(loop: loop_t?, request: fs_t, file: integer, callback: (functi
 
 **Cancellation:** FS (accepted async only)
 
-**Availability:** Pinned patched libuv 1.52.1 only; native OS/kernel support and native error statuses still apply.
+**Availability:** Pinned patched libuv 1.53.0 only; native OS/kernel support and native error statuses still apply.
 
-**Native declaration:** [pinned libuv](https://github.com/libuv/libuv/blob/v1.52.1/include/uv.h#L1562).
+**Native declaration:** [pinned libuv](https://github.com/libuv/libuv/blob/v1.53.0/include/uv.h#L1578).
 
 
 ## fs_fsync
@@ -253,9 +253,9 @@ function fs_fsync(loop: loop_t?, request: fs_t, file: integer, callback: (functi
 
 **Cancellation:** FS (accepted async only)
 
-**Availability:** Pinned patched libuv 1.52.1 only; native OS/kernel support and native error statuses still apply.
+**Availability:** Pinned patched libuv 1.53.0 only; native OS/kernel support and native error statuses still apply.
 
-**Native declaration:** [pinned libuv](https://github.com/libuv/libuv/blob/v1.52.1/include/uv.h#L1571).
+**Native declaration:** [pinned libuv](https://github.com/libuv/libuv/blob/v1.53.0/include/uv.h#L1587).
 
 
 ## fs_ftruncate
@@ -276,9 +276,9 @@ function fs_ftruncate(loop: loop_t?, request: fs_t, file: integer, offset: integ
 
 **Cancellation:** FS (accepted async only)
 
-**Availability:** Pinned patched libuv 1.52.1 only; native OS/kernel support and native error statuses still apply.
+**Availability:** Pinned patched libuv 1.53.0 only; native OS/kernel support and native error statuses still apply.
 
-**Native declaration:** [pinned libuv](https://github.com/libuv/libuv/blob/v1.52.1/include/uv.h#L1579).
+**Native declaration:** [pinned libuv](https://github.com/libuv/libuv/blob/v1.53.0/include/uv.h#L1595).
 
 
 ## fs_futime
@@ -299,9 +299,9 @@ function fs_futime(loop: loop_t?, request: fs_t, file: integer, atime: float, mt
 
 **Cancellation:** FS (accepted async only)
 
-**Availability:** Pinned patched libuv 1.52.1 only; native OS/kernel support and native error statuses still apply.
+**Availability:** Pinned patched libuv 1.53.0 only; native OS/kernel support and native error statuses still apply.
 
-**Native declaration:** [pinned libuv](https://github.com/libuv/libuv/blob/v1.52.1/include/uv.h#L1609).
+**Native declaration:** [pinned libuv](https://github.com/libuv/libuv/blob/v1.53.0/include/uv.h#L1625).
 
 
 ## fs_get_path
@@ -322,9 +322,9 @@ function fs_get_path(request: fs_t): string?
 
 **Cancellation:** not applicable; this operation submits no request
 
-**Availability:** Pinned patched libuv 1.52.1 only; native OS/kernel support and native error statuses still apply.
+**Availability:** Pinned patched libuv 1.53.0 only; native OS/kernel support and native error statuses still apply.
 
-**Native declaration:** [pinned libuv](https://github.com/libuv/libuv/blob/v1.52.1/include/uv.h#L1466).
+**Native declaration:** [pinned libuv](https://github.com/libuv/libuv/blob/v1.53.0/include/uv.h#L1482).
 
 
 ## fs_get_ptr
@@ -345,9 +345,9 @@ function fs_get_ptr(request: fs_t): fs_ptr_t?
 
 **Cancellation:** not applicable; this operation submits no request
 
-**Availability:** Pinned patched libuv 1.52.1 only; native OS/kernel support and native error statuses still apply.
+**Availability:** Pinned patched libuv 1.53.0 only; native OS/kernel support and native error statuses still apply.
 
-**Native declaration:** [pinned libuv](https://github.com/libuv/libuv/blob/v1.52.1/include/uv.h#L1465).
+**Native declaration:** [pinned libuv](https://github.com/libuv/libuv/blob/v1.53.0/include/uv.h#L1481).
 
 
 ## fs_get_result
@@ -368,9 +368,9 @@ function fs_get_result(request: fs_t): integer
 
 **Cancellation:** not applicable; this operation submits no request
 
-**Availability:** Pinned patched libuv 1.52.1 only; native OS/kernel support and native error statuses still apply.
+**Availability:** Pinned patched libuv 1.53.0 only; native OS/kernel support and native error statuses still apply.
 
-**Native declaration:** [pinned libuv](https://github.com/libuv/libuv/blob/v1.52.1/include/uv.h#L1463).
+**Native declaration:** [pinned libuv](https://github.com/libuv/libuv/blob/v1.53.0/include/uv.h#L1479).
 
 
 ## fs_get_statbuf
@@ -391,9 +391,9 @@ function fs_get_statbuf(request: fs_t): stat_t
 
 **Cancellation:** not applicable; this operation submits no request
 
-**Availability:** Pinned patched libuv 1.52.1 only; native OS/kernel support and native error statuses still apply.
+**Availability:** Pinned patched libuv 1.53.0 only; native OS/kernel support and native error statuses still apply.
 
-**Native declaration:** [pinned libuv](https://github.com/libuv/libuv/blob/v1.52.1/include/uv.h#L1467).
+**Native declaration:** [pinned libuv](https://github.com/libuv/libuv/blob/v1.53.0/include/uv.h#L1483).
 
 
 ## fs_get_system_error
@@ -414,9 +414,9 @@ function fs_get_system_error(request: fs_t): integer
 
 **Cancellation:** not applicable; this operation submits no request
 
-**Availability:** Pinned patched libuv 1.52.1 only; native OS/kernel support and native error statuses still apply.
+**Availability:** Pinned patched libuv 1.53.0 only; native OS/kernel support and native error statuses still apply.
 
-**Native declaration:** [pinned libuv](https://github.com/libuv/libuv/blob/v1.52.1/include/uv.h#L1464).
+**Native declaration:** [pinned libuv](https://github.com/libuv/libuv/blob/v1.53.0/include/uv.h#L1480).
 
 
 ## fs_get_type
@@ -437,9 +437,9 @@ function fs_get_type(request: fs_t): fs_type_t
 
 **Cancellation:** not applicable; this operation submits no request
 
-**Availability:** Pinned patched libuv 1.52.1 only; native OS/kernel support and native error statuses still apply.
+**Availability:** Pinned patched libuv 1.53.0 only; native OS/kernel support and native error statuses still apply.
 
-**Native declaration:** [pinned libuv](https://github.com/libuv/libuv/blob/v1.52.1/include/uv.h#L1462).
+**Native declaration:** [pinned libuv](https://github.com/libuv/libuv/blob/v1.53.0/include/uv.h#L1478).
 
 
 ## fs_lchown
@@ -460,9 +460,9 @@ function fs_lchown(loop: loop_t?, request: fs_t, path: string, uid: integer, gid
 
 **Cancellation:** FS (accepted async only)
 
-**Availability:** Pinned patched libuv 1.52.1 only; native OS/kernel support and native error statuses still apply.
+**Availability:** Pinned patched libuv 1.53.0 only; native OS/kernel support and native error statuses still apply.
 
-**Native declaration:** [pinned libuv](https://github.com/libuv/libuv/blob/v1.52.1/include/uv.h#L1674).
+**Native declaration:** [pinned libuv](https://github.com/libuv/libuv/blob/v1.53.0/include/uv.h#L1690).
 
 
 ## fs_link
@@ -483,9 +483,9 @@ function fs_link(loop: loop_t?, request: fs_t, path: string, new_path: string, c
 
 **Cancellation:** FS (accepted async only)
 
-**Availability:** Pinned patched libuv 1.52.1 only; native OS/kernel support and native error statuses still apply.
+**Availability:** Pinned patched libuv 1.53.0 only; native OS/kernel support and native error statuses still apply.
 
-**Native declaration:** [pinned libuv](https://github.com/libuv/libuv/blob/v1.52.1/include/uv.h#L1625).
+**Native declaration:** [pinned libuv](https://github.com/libuv/libuv/blob/v1.53.0/include/uv.h#L1641).
 
 
 ## fs_lstat
@@ -506,9 +506,9 @@ function fs_lstat(loop: loop_t?, request: fs_t, path: string, callback: (functio
 
 **Cancellation:** FS (accepted async only)
 
-**Availability:** Pinned patched libuv 1.52.1 only; native OS/kernel support and native error statuses still apply.
+**Availability:** Pinned patched libuv 1.53.0 only; native OS/kernel support and native error statuses still apply.
 
-**Native declaration:** [pinned libuv](https://github.com/libuv/libuv/blob/v1.52.1/include/uv.h#L1621).
+**Native declaration:** [pinned libuv](https://github.com/libuv/libuv/blob/v1.53.0/include/uv.h#L1637).
 
 
 ## fs_lutime
@@ -529,9 +529,9 @@ function fs_lutime(loop: loop_t?, request: fs_t, path: string, atime: float, mti
 
 **Cancellation:** FS (accepted async only)
 
-**Availability:** Pinned patched libuv 1.52.1 only; native OS/kernel support and native error statuses still apply.
+**Availability:** Pinned patched libuv 1.53.0 only; native OS/kernel support and native error statuses still apply.
 
-**Native declaration:** [pinned libuv](https://github.com/libuv/libuv/blob/v1.52.1/include/uv.h#L1615).
+**Native declaration:** [pinned libuv](https://github.com/libuv/libuv/blob/v1.53.0/include/uv.h#L1631).
 
 
 ## fs_mkdir
@@ -552,9 +552,9 @@ function fs_mkdir(loop: loop_t?, request: fs_t, path: string, mode: integer, cal
 
 **Cancellation:** FS (accepted async only)
 
-**Availability:** Pinned patched libuv 1.52.1 only; native OS/kernel support and native error statuses still apply.
+**Availability:** Pinned patched libuv 1.53.0 only; native OS/kernel support and native error statuses still apply.
 
-**Native declaration:** [pinned libuv](https://github.com/libuv/libuv/blob/v1.52.1/include/uv.h#L1522).
+**Native declaration:** [pinned libuv](https://github.com/libuv/libuv/blob/v1.53.0/include/uv.h#L1538).
 
 
 ## fs_mkdtemp
@@ -575,9 +575,9 @@ function fs_mkdtemp(loop: loop_t?, request: fs_t, path: string, callback: (funct
 
 **Cancellation:** FS (accepted async only)
 
-**Availability:** Pinned patched libuv 1.52.1 only; native OS/kernel support and native error statuses still apply.
+**Availability:** Pinned patched libuv 1.53.0 only; native OS/kernel support and native error statuses still apply.
 
-**Native declaration:** [pinned libuv](https://github.com/libuv/libuv/blob/v1.52.1/include/uv.h#L1527).
+**Native declaration:** [pinned libuv](https://github.com/libuv/libuv/blob/v1.53.0/include/uv.h#L1543).
 
 
 ## fs_mkstemp
@@ -598,9 +598,9 @@ function fs_mkstemp(loop: loop_t?, request: fs_t, path: string, callback: (funct
 
 **Cancellation:** FS (accepted async only)
 
-**Availability:** Pinned patched libuv 1.52.1 only; native OS/kernel support and native error statuses still apply.
+**Availability:** Pinned patched libuv 1.53.0 only; native OS/kernel support and native error statuses still apply.
 
-**Native declaration:** [pinned libuv](https://github.com/libuv/libuv/blob/v1.52.1/include/uv.h#L1531).
+**Native declaration:** [pinned libuv](https://github.com/libuv/libuv/blob/v1.53.0/include/uv.h#L1547).
 
 
 ## fs_open
@@ -621,9 +621,9 @@ function fs_open(loop: loop_t?, request: fs_t, path: string, flags: integer, mod
 
 **Cancellation:** FS (accepted async only)
 
-**Availability:** Pinned patched libuv 1.52.1 only; native OS/kernel support and native error statuses still apply.
+**Availability:** Pinned patched libuv 1.53.0 only; native OS/kernel support and native error statuses still apply.
 
-**Native declaration:** [pinned libuv](https://github.com/libuv/libuv/blob/v1.52.1/include/uv.h#L1474).
+**Native declaration:** [pinned libuv](https://github.com/libuv/libuv/blob/v1.53.0/include/uv.h#L1490).
 
 
 ## fs_opendir
@@ -644,9 +644,9 @@ function fs_opendir(loop: loop_t?, request: fs_t, path: string, callback: (funct
 
 **Cancellation:** FS (accepted async only)
 
-**Availability:** Pinned patched libuv 1.52.1 only; native OS/kernel support and native error statuses still apply.
+**Availability:** Pinned patched libuv 1.53.0 only; native OS/kernel support and native error statuses still apply.
 
-**Native declaration:** [pinned libuv](https://github.com/libuv/libuv/blob/v1.52.1/include/uv.h#L1546).
+**Native declaration:** [pinned libuv](https://github.com/libuv/libuv/blob/v1.53.0/include/uv.h#L1562).
 
 
 ## fs_read
@@ -667,9 +667,9 @@ function fs_read(loop: loop_t?, request: fs_t, file: integer, buffers: {buf_t}, 
 
 **Cancellation:** FS (accepted async only)
 
-**Availability:** Pinned patched libuv 1.52.1 only; native OS/kernel support and native error statuses still apply.
+**Availability:** Pinned patched libuv 1.53.0 only; native OS/kernel support and native error statuses still apply.
 
-**Native declaration:** [pinned libuv](https://github.com/libuv/libuv/blob/v1.52.1/include/uv.h#L1480).
+**Native declaration:** [pinned libuv](https://github.com/libuv/libuv/blob/v1.53.0/include/uv.h#L1496).
 
 
 ## fs_readdir
@@ -690,9 +690,9 @@ function fs_readdir(loop: loop_t?, request: fs_t, directory: dir_t, capacity: in
 
 **Cancellation:** FS (accepted async only)
 
-**Availability:** Pinned patched libuv 1.52.1 only; native OS/kernel support and native error statuses still apply.
+**Availability:** Pinned patched libuv 1.53.0 only; native OS/kernel support and native error statuses still apply.
 
-**Native declaration:** [pinned libuv](https://github.com/libuv/libuv/blob/v1.52.1/include/uv.h#L1550).
+**Native declaration:** [pinned libuv](https://github.com/libuv/libuv/blob/v1.53.0/include/uv.h#L1566).
 
 
 ## fs_readlink
@@ -713,9 +713,9 @@ function fs_readlink(loop: loop_t?, request: fs_t, path: string, callback: (func
 
 **Cancellation:** FS (accepted async only)
 
-**Availability:** Pinned patched libuv 1.52.1 only; native OS/kernel support and native error statuses still apply.
+**Availability:** Pinned patched libuv 1.53.0 only; native OS/kernel support and native error statuses still apply.
 
-**Native declaration:** [pinned libuv](https://github.com/libuv/libuv/blob/v1.52.1/include/uv.h#L1649).
+**Native declaration:** [pinned libuv](https://github.com/libuv/libuv/blob/v1.53.0/include/uv.h#L1665).
 
 
 ## fs_realpath
@@ -736,9 +736,9 @@ function fs_realpath(loop: loop_t?, request: fs_t, path: string, callback: (func
 
 **Cancellation:** FS (accepted async only)
 
-**Availability:** Pinned patched libuv 1.52.1 only; native OS/kernel support and native error statuses still apply.
+**Availability:** Pinned patched libuv 1.53.0 only; native OS/kernel support and native error statuses still apply.
 
-**Native declaration:** [pinned libuv](https://github.com/libuv/libuv/blob/v1.52.1/include/uv.h#L1653).
+**Native declaration:** [pinned libuv](https://github.com/libuv/libuv/blob/v1.53.0/include/uv.h#L1669).
 
 
 ## fs_rename
@@ -759,9 +759,9 @@ function fs_rename(loop: loop_t?, request: fs_t, path: string, new_path: string,
 
 **Cancellation:** FS (accepted async only)
 
-**Availability:** Pinned patched libuv 1.52.1 only; native OS/kernel support and native error statuses still apply.
+**Availability:** Pinned patched libuv 1.53.0 only; native OS/kernel support and native error statuses still apply.
 
-**Native declaration:** [pinned libuv](https://github.com/libuv/libuv/blob/v1.52.1/include/uv.h#L1566).
+**Native declaration:** [pinned libuv](https://github.com/libuv/libuv/blob/v1.53.0/include/uv.h#L1582).
 
 
 ## fs_req_cleanup
@@ -782,9 +782,9 @@ function fs_req_cleanup(request: fs_t)
 
 **Cancellation:** not applicable; this operation submits no request
 
-**Availability:** Pinned patched libuv 1.52.1 only; native OS/kernel support and native error statuses still apply.
+**Availability:** Pinned patched libuv 1.53.0 only; native OS/kernel support and native error statuses still apply.
 
-**Native declaration:** [pinned libuv](https://github.com/libuv/libuv/blob/v1.52.1/include/uv.h#L1469).
+**Native declaration:** [pinned libuv](https://github.com/libuv/libuv/blob/v1.53.0/include/uv.h#L1485).
 
 
 ## fs_rmdir
@@ -805,9 +805,9 @@ function fs_rmdir(loop: loop_t?, request: fs_t, path: string, callback: (functio
 
 **Cancellation:** FS (accepted async only)
 
-**Availability:** Pinned patched libuv 1.52.1 only; native OS/kernel support and native error statuses still apply.
+**Availability:** Pinned patched libuv 1.53.0 only; native OS/kernel support and native error statuses still apply.
 
-**Native declaration:** [pinned libuv](https://github.com/libuv/libuv/blob/v1.52.1/include/uv.h#L1535).
+**Native declaration:** [pinned libuv](https://github.com/libuv/libuv/blob/v1.53.0/include/uv.h#L1551).
 
 
 ## fs_scandir
@@ -828,9 +828,9 @@ function fs_scandir(loop: loop_t?, request: fs_t, path: string, flags: integer, 
 
 **Cancellation:** FS (accepted async only)
 
-**Availability:** Pinned patched libuv 1.52.1 only; native OS/kernel support and native error statuses still apply.
+**Availability:** Pinned patched libuv 1.53.0 only; native OS/kernel support and native error statuses still apply.
 
-**Native declaration:** [pinned libuv](https://github.com/libuv/libuv/blob/v1.52.1/include/uv.h#L1539).
+**Native declaration:** [pinned libuv](https://github.com/libuv/libuv/blob/v1.53.0/include/uv.h#L1555).
 
 
 ## fs_scandir_next
@@ -851,9 +851,9 @@ function fs_scandir_next(request: fs_t): (integer, dirent_t?)
 
 **Cancellation:** not applicable; this operation submits no request
 
-**Availability:** Pinned patched libuv 1.52.1 only; native OS/kernel support and native error statuses still apply.
+**Availability:** Pinned patched libuv 1.53.0 only; native OS/kernel support and native error statuses still apply.
 
-**Native declaration:** [pinned libuv](https://github.com/libuv/libuv/blob/v1.52.1/include/uv.h#L1544).
+**Native declaration:** [pinned libuv](https://github.com/libuv/libuv/blob/v1.53.0/include/uv.h#L1560).
 
 
 ## fs_sendfile
@@ -874,9 +874,9 @@ function fs_sendfile(loop: loop_t?, request: fs_t, out_fd: integer, in_fd: integ
 
 **Cancellation:** FS (accepted async only)
 
-**Availability:** Pinned patched libuv 1.52.1 only; native OS/kernel support and native error statuses still apply.
+**Availability:** Pinned patched libuv 1.53.0 only; native OS/kernel support and native error statuses still apply.
 
-**Native declaration:** [pinned libuv](https://github.com/libuv/libuv/blob/v1.52.1/include/uv.h#L1584).
+**Native declaration:** [pinned libuv](https://github.com/libuv/libuv/blob/v1.53.0/include/uv.h#L1600).
 
 
 ## fs_stat
@@ -897,9 +897,9 @@ function fs_stat(loop: loop_t?, request: fs_t, path: string, callback: (function
 
 **Cancellation:** FS (accepted async only)
 
-**Availability:** Pinned patched libuv 1.52.1 only; native OS/kernel support and native error statuses still apply.
+**Availability:** Pinned patched libuv 1.53.0 only; native OS/kernel support and native error statuses still apply.
 
-**Native declaration:** [pinned libuv](https://github.com/libuv/libuv/blob/v1.52.1/include/uv.h#L1558).
+**Native declaration:** [pinned libuv](https://github.com/libuv/libuv/blob/v1.53.0/include/uv.h#L1574).
 
 
 ## fs_statfs
@@ -920,9 +920,9 @@ function fs_statfs(loop: loop_t?, request: fs_t, path: string, callback: (functi
 
 **Cancellation:** FS (accepted async only)
 
-**Availability:** Pinned patched libuv 1.52.1 only; native OS/kernel support and native error statuses still apply.
+**Availability:** Pinned patched libuv 1.53.0 only; native OS/kernel support and native error statuses still apply.
 
-**Native declaration:** [pinned libuv](https://github.com/libuv/libuv/blob/v1.52.1/include/uv.h#L1680).
+**Native declaration:** [pinned libuv](https://github.com/libuv/libuv/blob/v1.53.0/include/uv.h#L1696).
 
 
 ## fs_symlink
@@ -943,9 +943,9 @@ function fs_symlink(loop: loop_t?, request: fs_t, path: string, new_path: string
 
 **Cancellation:** FS (accepted async only)
 
-**Availability:** Pinned patched libuv 1.52.1 only; native OS/kernel support and native error statuses still apply.
+**Availability:** Pinned patched libuv 1.53.0 only; native OS/kernel support and native error statuses still apply.
 
-**Native declaration:** [pinned libuv](https://github.com/libuv/libuv/blob/v1.52.1/include/uv.h#L1643).
+**Native declaration:** [pinned libuv](https://github.com/libuv/libuv/blob/v1.53.0/include/uv.h#L1659).
 
 
 ## fs_unlink
@@ -966,9 +966,9 @@ function fs_unlink(loop: loop_t?, request: fs_t, path: string, callback: (functi
 
 **Cancellation:** FS (accepted async only)
 
-**Availability:** Pinned patched libuv 1.52.1 only; native OS/kernel support and native error statuses still apply.
+**Availability:** Pinned patched libuv 1.53.0 only; native OS/kernel support and native error statuses still apply.
 
-**Native declaration:** [pinned libuv](https://github.com/libuv/libuv/blob/v1.52.1/include/uv.h#L1487).
+**Native declaration:** [pinned libuv](https://github.com/libuv/libuv/blob/v1.53.0/include/uv.h#L1503).
 
 
 ## fs_utime
@@ -989,9 +989,9 @@ function fs_utime(loop: loop_t?, request: fs_t, path: string, atime: float, mtim
 
 **Cancellation:** FS (accepted async only)
 
-**Availability:** Pinned patched libuv 1.52.1 only; native OS/kernel support and native error statuses still apply.
+**Availability:** Pinned patched libuv 1.53.0 only; native OS/kernel support and native error statuses still apply.
 
-**Native declaration:** [pinned libuv](https://github.com/libuv/libuv/blob/v1.52.1/include/uv.h#L1603).
+**Native declaration:** [pinned libuv](https://github.com/libuv/libuv/blob/v1.53.0/include/uv.h#L1619).
 
 
 ## fs_write
@@ -1012,9 +1012,9 @@ function fs_write(loop: loop_t?, request: fs_t, file: integer, buffers: {buf_t},
 
 **Cancellation:** FS (accepted async only)
 
-**Availability:** Pinned patched libuv 1.52.1 only; native OS/kernel support and native error statuses still apply.
+**Availability:** Pinned patched libuv 1.53.0 only; native OS/kernel support and native error statuses still apply.
 
-**Native declaration:** [pinned libuv](https://github.com/libuv/libuv/blob/v1.52.1/include/uv.h#L1491).
+**Native declaration:** [pinned libuv](https://github.com/libuv/libuv/blob/v1.53.0/include/uv.h#L1507).
 
 
 ## get_osfhandle
@@ -1035,9 +1035,9 @@ function get_osfhandle(file: integer): os_fd_t
 
 **Cancellation:** not applicable or unsupported by uv_cancel
 
-**Availability:** Pinned patched libuv 1.52.1 only; native OS/kernel support and native error statuses still apply.
+**Availability:** Pinned patched libuv 1.53.0 only; native OS/kernel support and native error statuses still apply.
 
-**Native declaration:** [pinned libuv](https://github.com/libuv/libuv/blob/v1.52.1/include/uv.h#L1288).
+**Native declaration:** [pinned libuv](https://github.com/libuv/libuv/blob/v1.53.0/include/uv.h#L1304).
 
 
 ## open_osfhandle
@@ -1058,7 +1058,7 @@ function open_osfhandle(handle: os_fd_t): integer
 
 **Cancellation:** not applicable or unsupported by uv_cancel
 
-**Availability:** Pinned patched libuv 1.52.1 only; native OS/kernel support and native error statuses still apply.
+**Availability:** Pinned patched libuv 1.53.0 only; native OS/kernel support and native error statuses still apply.
 
-**Native declaration:** [pinned libuv](https://github.com/libuv/libuv/blob/v1.52.1/include/uv.h#L1289).
+**Native declaration:** [pinned libuv](https://github.com/libuv/libuv/blob/v1.53.0/include/uv.h#L1305).
 

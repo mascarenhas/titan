@@ -1690,7 +1690,7 @@ inspect-lua-sdk:
             "-f", repository .. "/Makefile", "PREFIX=" .. PREFIX,
             "ROCKS_TREE=" .. stage, "OPENSSL_MODE=system",
             "LIBUV_LIB=" .. repository .. "/libuv-build/libuv.a",
-            "LIBUV_SRC_DIR=" .. repository .. "/libuv-v1.52.1",
+            "LIBUV_SRC_DIR=" .. repository .. "/libuv-v1.53.0",
             "--old-file=" .. repository .. "/libuv-build/libuv.a",
             "LIBBT_DIR=" .. repository .. "/libbacktrace",
             "LIBBT_LIB=" .. libbacktrace,

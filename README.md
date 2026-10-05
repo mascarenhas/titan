@@ -185,7 +185,7 @@ are staged in the SDK only when that mode is selected.
 ## Libuv setup
 
 Titan's async standard library uses a pinned, patched
-libuv 1.52.1 static PIC build, so neither the compiler nor the resulting
+libuv 1.53.0 static PIC build, so neither the compiler nor the resulting
 standard modules depend on an unversioned system libuv at runtime. Install a C
 compiler, CMake, tar, a downloader, and a SHA-256 tool, then let the Makefile
 fetch, verify, and build it:

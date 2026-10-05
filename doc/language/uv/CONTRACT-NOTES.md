@@ -1,6 +1,6 @@
 # Ownership and value contracts
 
-Use ordinary `import "titan.uv"` to access these public types. The provider uses pinned, patched libuv 1.52.1. `has_api("tcp_connect")` queries the canonical exported wrapper set, without the `uv_` prefix; it does not promise OS/kernel support. Platform constants can be nil when the native platform omits them. The [coverage map](coverage.md) explains the unavailable wrappers and internal copied-result cleanup.
+Use ordinary `import "titan.uv"` to access these public types. The provider uses pinned, patched libuv 1.53.0. `has_api("tcp_connect")` queries the canonical exported wrapper set, without the `uv_` prefix; it does not promise OS/kernel support. Platform constants can be nil when the native platform omits them. The [coverage map](coverage.md) explains the unavailable wrappers and internal copied-result cleanup.
 
 ## Objects and native storage
 
@@ -52,6 +52,9 @@ Persistent callbacks may rearm or stop their resources according to native seman
 Read/receive/random destinations must be writable. Passing immutable string storage for native output is rejected before submission. Async vector operations snapshot descriptors and retain every underlying owner. Mutating the caller's Array after acceptance does not retarget the native request, but mutating borrowed byte contents before completion is still an application race. A result getter that copies bytes or records produces ordinary values surviving native cleanup.
 
 Stream receive callbacks receive the actual count and an optional retained buffer. UDP receive distinguishes an empty datagram (nonnull peer, zero bytes) from a no-data notification. Truncated packets retain the PARTIAL flag. MMSG_CHUNK slices retain the original allocation; MMSG_FREE retires it. Native stop during a CHUNK can suppress FREE, so the binding retains the allocation until the next allocation or close. A saved slice retains its parent independently.
+
+With `UDP_RECVMMSG` enabled, allocation callbacks must return buffers whose
+lengths are positive multiples of 64 KiB, as required by libuv 1.53.0.
 
 `udp_send` rejects an empty vector before registration. One zero-length `buf_t` is the supported empty-datagram representation. `udp_try_send` rejects an empty vector, and `udp_try_send2` rejects an empty outer batch. An empty inner vector in a nonempty try-send2 batch retains native platform behavior: Linux may send an empty datagram; Windows returns EINVAL for that packet.
 
