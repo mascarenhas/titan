@@ -2,3 +2,7 @@
 	path = lua-5.5.1
 	url = https://github.com/mascarenhas/lua-5.5.1.git
 	ignore = untracked
+[submodule "titan-skills"]
+	path = .agents/skills
+	url = https://github.com/mascarenhas/titan-skills.git
+	ignore = untracked
