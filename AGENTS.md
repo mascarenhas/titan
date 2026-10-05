@@ -9,6 +9,8 @@ Before writing, editing, or reviewing any `.titan` source, read the project-loca
 Titan basics cartridge; do not reconstruct Titan from memories of Lua, TypeScript,
 Go, or C. Load the relevant peer cartridge as well:
 
+- `titan-application` for application repository startup, build layout, initial
+  ignore rules, and executable delivery checks;
 - `titan-tester` for native tests, test-layer placement, filtering, and fixtures;
 - `titan-async` for Tasks, timers, cancellation, libuv callbacks, and native
   ownership;
