@@ -14,7 +14,7 @@ the native operation itself lacks a suitable public binding.
 
 ## Start from the pinned native contract
 
-Titan always builds the pinned, patched libuv 1.52.1 source. Check its header,
+Titan always builds the pinned, patched libuv 1.53.0 source. Check its header,
 upstream documentation, and supported-platform implementations for the exact
 lifecycle. The checked-in [native patch](../../vendor/libuv/README.md) repairs
 failed Unix spawn close ownership. An unpatched system library or its version

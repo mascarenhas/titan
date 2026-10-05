@@ -23,9 +23,9 @@ function backend_fd(loop: loop_t): integer
 
 **Cancellation:** not applicable or unsupported by uv_cancel
 
-**Availability:** Pinned patched libuv 1.52.1 only; native OS/kernel support and native error statuses still apply.
+**Availability:** Pinned patched libuv 1.53.0 only; native OS/kernel support and native error statuses still apply.
 
-**Native declaration:** [pinned libuv](https://github.com/libuv/libuv/blob/v1.52.1/include/uv.h#L320).
+**Native declaration:** [pinned libuv](https://github.com/libuv/libuv/blob/v1.53.0/include/uv.h#L320).
 
 
 ## backend_timeout
@@ -46,9 +46,9 @@ function backend_timeout(loop: loop_t): integer
 
 **Cancellation:** not applicable or unsupported by uv_cancel
 
-**Availability:** Pinned patched libuv 1.52.1 only; native OS/kernel support and native error statuses still apply.
+**Availability:** Pinned patched libuv 1.53.0 only; native OS/kernel support and native error statuses still apply.
 
-**Native declaration:** [pinned libuv](https://github.com/libuv/libuv/blob/v1.52.1/include/uv.h#L321).
+**Native declaration:** [pinned libuv](https://github.com/libuv/libuv/blob/v1.53.0/include/uv.h#L321).
 
 
 ## default_loop
@@ -63,9 +63,9 @@ This native function has no direct public wrapper.
 
 **Cancellation:** not applicable or unsupported by uv_cancel
 
-**Availability:** Pinned patched libuv 1.52.1 only; native OS/kernel support and native error statuses still apply.
+**Availability:** Pinned patched libuv 1.53.0 only; native OS/kernel support and native error statuses still apply.
 
-**Native declaration:** [pinned libuv](https://github.com/libuv/libuv/blob/v1.52.1/include/uv.h#L290).
+**Native declaration:** [pinned libuv](https://github.com/libuv/libuv/blob/v1.53.0/include/uv.h#L290).
 
 ## loop_alive
 
@@ -85,9 +85,9 @@ function loop_alive(loop: loop_t): boolean
 
 **Cancellation:** not applicable or unsupported by uv_cancel
 
-**Availability:** Pinned patched libuv 1.52.1 only; native OS/kernel support and native error statuses still apply.
+**Availability:** Pinned patched libuv 1.53.0 only; native OS/kernel support and native error statuses still apply.
 
-**Native declaration:** [pinned libuv](https://github.com/libuv/libuv/blob/v1.52.1/include/uv.h#L306).
+**Native declaration:** [pinned libuv](https://github.com/libuv/libuv/blob/v1.53.0/include/uv.h#L306).
 
 
 ## loop_close
@@ -108,9 +108,9 @@ function loop_close(loop: loop_t): integer
 
 **Cancellation:** not applicable or unsupported by uv_cancel
 
-**Availability:** Pinned patched libuv 1.52.1 only; native OS/kernel support and native error statuses still apply.
+**Availability:** Pinned patched libuv 1.53.0 only; native OS/kernel support and native error statuses still apply.
 
-**Native declaration:** [pinned libuv](https://github.com/libuv/libuv/blob/v1.52.1/include/uv.h#L292).
+**Native declaration:** [pinned libuv](https://github.com/libuv/libuv/blob/v1.53.0/include/uv.h#L292).
 
 
 ## loop_configure
@@ -131,9 +131,9 @@ function loop_configure(loop: loop_t, option: loop_option, signum: integer?): in
 
 **Cancellation:** not applicable or unsupported by uv_cancel
 
-**Availability:** Pinned patched libuv 1.52.1 only; native OS/kernel support and native error statuses still apply.
+**Availability:** Pinned patched libuv 1.53.0 only; native OS/kernel support and native error statuses still apply.
 
-**Native declaration:** [pinned libuv](https://github.com/libuv/libuv/blob/v1.52.1/include/uv.h#L307).
+**Native declaration:** [pinned libuv](https://github.com/libuv/libuv/blob/v1.53.0/include/uv.h#L307).
 
 
 ## loop_fork
@@ -154,9 +154,9 @@ function loop_fork(loop: loop_t): integer
 
 **Cancellation:** not applicable or unsupported by uv_cancel
 
-**Availability:** Pinned patched libuv 1.52.1 only; native OS/kernel support and native error statuses still apply.
+**Availability:** Pinned patched libuv 1.53.0 only; native OS/kernel support and native error statuses still apply.
 
-**Native declaration:** [pinned libuv](https://github.com/libuv/libuv/blob/v1.52.1/include/uv.h#L308).
+**Native declaration:** [pinned libuv](https://github.com/libuv/libuv/blob/v1.53.0/include/uv.h#L308).
 
 
 ## loop_get_data
@@ -177,9 +177,9 @@ function loop_get_data(loop: loop_t): value
 
 **Cancellation:** not applicable or unsupported by uv_cancel
 
-**Availability:** Pinned patched libuv 1.52.1 only; native OS/kernel support and native error statuses still apply.
+**Availability:** Pinned patched libuv 1.53.0 only; native OS/kernel support and native error statuses still apply.
 
-**Native declaration:** [pinned libuv](https://github.com/libuv/libuv/blob/v1.52.1/include/uv.h#L1958).
+**Native declaration:** [pinned libuv](https://github.com/libuv/libuv/blob/v1.53.0/include/uv.h#L1974).
 
 
 ## loop_init
@@ -200,9 +200,9 @@ function loop_init(loop: loop_t): integer
 
 **Cancellation:** not applicable or unsupported by uv_cancel
 
-**Availability:** Pinned patched libuv 1.52.1 only; native OS/kernel support and native error statuses still apply.
+**Availability:** Pinned patched libuv 1.53.0 only; native OS/kernel support and native error statuses still apply.
 
-**Native declaration:** [pinned libuv](https://github.com/libuv/libuv/blob/v1.52.1/include/uv.h#L291).
+**Native declaration:** [pinned libuv](https://github.com/libuv/libuv/blob/v1.53.0/include/uv.h#L291).
 
 
 ## loop_set_data
@@ -223,9 +223,9 @@ function loop_set_data(loop: loop_t, data: value)
 
 **Cancellation:** not applicable or unsupported by uv_cancel
 
-**Availability:** Pinned patched libuv 1.52.1 only; native OS/kernel support and native error statuses still apply.
+**Availability:** Pinned patched libuv 1.53.0 only; native OS/kernel support and native error statuses still apply.
 
-**Native declaration:** [pinned libuv](https://github.com/libuv/libuv/blob/v1.52.1/include/uv.h#L1959).
+**Native declaration:** [pinned libuv](https://github.com/libuv/libuv/blob/v1.53.0/include/uv.h#L1975).
 
 
 ## loop_size
@@ -244,9 +244,9 @@ function loop_size(): integer
 
 **Cancellation:** not applicable or unsupported by uv_cancel
 
-**Availability:** Pinned patched libuv 1.52.1 only; native OS/kernel support and native error statuses still apply.
+**Availability:** Pinned patched libuv 1.53.0 only; native OS/kernel support and native error statuses still apply.
 
-**Native declaration:** [pinned libuv](https://github.com/libuv/libuv/blob/v1.52.1/include/uv.h#L305).
+**Native declaration:** [pinned libuv](https://github.com/libuv/libuv/blob/v1.53.0/include/uv.h#L305).
 
 
 ## now
@@ -267,9 +267,9 @@ function now(loop: loop_t): integer
 
 **Cancellation:** not applicable or unsupported by uv_cancel
 
-**Availability:** Pinned patched libuv 1.52.1 only; native OS/kernel support and native error statuses still apply.
+**Availability:** Pinned patched libuv 1.53.0 only; native OS/kernel support and native error statuses still apply.
 
-**Native declaration:** [pinned libuv](https://github.com/libuv/libuv/blob/v1.52.1/include/uv.h#L318).
+**Native declaration:** [pinned libuv](https://github.com/libuv/libuv/blob/v1.53.0/include/uv.h#L318).
 
 
 ## run
@@ -290,9 +290,9 @@ function run(loop: loop_t, mode: run_mode?): integer
 
 **Cancellation:** not applicable or unsupported by uv_cancel
 
-**Availability:** Pinned patched libuv 1.52.1 only; native OS/kernel support and native error statuses still apply.
+**Availability:** Pinned patched libuv 1.53.0 only; native OS/kernel support and native error statuses still apply.
 
-**Native declaration:** [pinned libuv](https://github.com/libuv/libuv/blob/v1.52.1/include/uv.h#L310).
+**Native declaration:** [pinned libuv](https://github.com/libuv/libuv/blob/v1.53.0/include/uv.h#L310).
 
 
 ## stop
@@ -313,9 +313,9 @@ function stop(loop: loop_t)
 
 **Cancellation:** not applicable or unsupported by uv_cancel
 
-**Availability:** Pinned patched libuv 1.52.1 only; native OS/kernel support and native error statuses still apply.
+**Availability:** Pinned patched libuv 1.53.0 only; native OS/kernel support and native error statuses still apply.
 
-**Native declaration:** [pinned libuv](https://github.com/libuv/libuv/blob/v1.52.1/include/uv.h#L311).
+**Native declaration:** [pinned libuv](https://github.com/libuv/libuv/blob/v1.53.0/include/uv.h#L311).
 
 
 ## update_time
@@ -336,9 +336,9 @@ function update_time(loop: loop_t)
 
 **Cancellation:** not applicable or unsupported by uv_cancel
 
-**Availability:** Pinned patched libuv 1.52.1 only; native OS/kernel support and native error statuses still apply.
+**Availability:** Pinned patched libuv 1.53.0 only; native OS/kernel support and native error statuses still apply.
 
-**Native declaration:** [pinned libuv](https://github.com/libuv/libuv/blob/v1.52.1/include/uv.h#L317).
+**Native declaration:** [pinned libuv](https://github.com/libuv/libuv/blob/v1.53.0/include/uv.h#L317).
 
 
 ## walk
@@ -359,7 +359,7 @@ function walk(loop: loop_t, callback: function (handle_t, value): (), arg: value
 
 **Cancellation:** not applicable or unsupported by uv_cancel
 
-**Availability:** Pinned patched libuv 1.52.1 only; native OS/kernel support and native error statuses still apply.
+**Availability:** Pinned patched libuv 1.53.0 only; native OS/kernel support and native error statuses still apply.
 
-**Native declaration:** [pinned libuv](https://github.com/libuv/libuv/blob/v1.52.1/include/uv.h#L498).
+**Native declaration:** [pinned libuv](https://github.com/libuv/libuv/blob/v1.53.0/include/uv.h#L498).
 

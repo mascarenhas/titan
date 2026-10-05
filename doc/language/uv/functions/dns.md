@@ -23,9 +23,9 @@ function freeaddrinfo(result: addrinfo_result_t?)
 
 **Cancellation:** not applicable or unsupported by uv_cancel
 
-**Availability:** Pinned patched libuv 1.52.1 only; native OS/kernel support and native error statuses still apply.
+**Availability:** Pinned patched libuv 1.53.0 only; native OS/kernel support and native error statuses still apply.
 
-**Native declaration:** [pinned libuv](https://github.com/libuv/libuv/blob/v1.52.1/include/uv.h#L1008).
+**Native declaration:** [pinned libuv](https://github.com/libuv/libuv/blob/v1.53.0/include/uv.h#L1024).
 
 
 ## getaddrinfo
@@ -46,9 +46,9 @@ function getaddrinfo(loop: loop_t, request: getaddrinfo_t, callback: (function (
 
 **Cancellation:** yes: accepted async request only; callback still required
 
-**Availability:** Pinned patched libuv 1.52.1 only; native OS/kernel support and native error statuses still apply.
+**Availability:** Pinned patched libuv 1.53.0 only; native OS/kernel support and native error statuses still apply.
 
-**Native declaration:** [pinned libuv](https://github.com/libuv/libuv/blob/v1.52.1/include/uv.h#L1002).
+**Native declaration:** [pinned libuv](https://github.com/libuv/libuv/blob/v1.53.0/include/uv.h#L1018).
 
 
 ## getnameinfo
@@ -69,7 +69,7 @@ function getnameinfo(loop: loop_t, request: getnameinfo_t, callback: (function (
 
 **Cancellation:** yes: accepted async request only; callback still required
 
-**Availability:** Pinned patched libuv 1.52.1 only; native OS/kernel support and native error statuses still apply.
+**Availability:** Pinned patched libuv 1.53.0 only; native OS/kernel support and native error statuses still apply.
 
-**Native declaration:** [pinned libuv](https://github.com/libuv/libuv/blob/v1.52.1/include/uv.h#L1024).
+**Native declaration:** [pinned libuv](https://github.com/libuv/libuv/blob/v1.53.0/include/uv.h#L1040).
 

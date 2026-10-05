@@ -21,9 +21,9 @@ function version(): integer
 
 **Cancellation:** not applicable or unsupported by uv_cancel
 
-**Availability:** Pinned patched libuv 1.52.1 only; native OS/kernel support and native error statuses still apply.
+**Availability:** Pinned patched libuv 1.53.0 only; native OS/kernel support and native error statuses still apply.
 
-**Native declaration:** [pinned libuv](https://github.com/libuv/libuv/blob/v1.52.1/include/uv.h#L275).
+**Native declaration:** [pinned libuv](https://github.com/libuv/libuv/blob/v1.53.0/include/uv.h#L275).
 
 
 ## version_string
@@ -42,7 +42,7 @@ function version_string(): string
 
 **Cancellation:** not applicable or unsupported by uv_cancel
 
-**Availability:** Pinned patched libuv 1.52.1 only; native OS/kernel support and native error statuses still apply.
+**Availability:** Pinned patched libuv 1.53.0 only; native OS/kernel support and native error statuses still apply.
 
-**Native declaration:** [pinned libuv](https://github.com/libuv/libuv/blob/v1.52.1/include/uv.h#L276).
+**Native declaration:** [pinned libuv](https://github.com/libuv/libuv/blob/v1.53.0/include/uv.h#L276).
 

@@ -1899,7 +1899,7 @@ copy initialized native state. Binding-owned roots survive until close or
 accepted-request completion; the callback frame retains its owner through the
 actual return to C even after settlement makes it reusable.
 
-Libuv is pinned patched bundled 1.52.1 only. Keep its failed-spawn cleanup patch
+Libuv is pinned patched bundled 1.53.0 only. Keep its failed-spawn cleanup patch
 and fresh-only CREATE_PIPE eligibility contract. System OpenSSL remains the
 preferred separate policy, with explicit bundled OpenSSL supported. Only UV's
 source/header ensemble imports native libuv; consumers use ordinary compiled

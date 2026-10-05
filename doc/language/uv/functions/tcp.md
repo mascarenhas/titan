@@ -23,9 +23,9 @@ function socketpair(kind: integer, protocol: integer, flags0: integer, flags1: i
 
 **Cancellation:** not applicable or unsupported by uv_cancel
 
-**Availability:** Pinned patched libuv 1.52.1 only; native OS/kernel support and native error statuses still apply.
+**Availability:** Pinned patched libuv 1.53.0 only; native OS/kernel support and native error statuses still apply.
 
-**Native declaration:** [pinned libuv](https://github.com/libuv/libuv/blob/v1.52.1/include/uv.h#L514).
+**Native declaration:** [pinned libuv](https://github.com/libuv/libuv/blob/v1.53.0/include/uv.h#L514).
 
 
 ## tcp_bind
@@ -46,9 +46,9 @@ function tcp_bind(handle: tcp_t, addr: sockaddr_t, flags: integer): integer
 
 **Cancellation:** not applicable or unsupported by uv_cancel
 
-**Availability:** Pinned patched libuv 1.52.1 only; native OS/kernel support and native error statuses still apply.
+**Availability:** Pinned patched libuv 1.53.0 only; native OS/kernel support and native error statuses still apply.
 
-**Native declaration:** [pinned libuv](https://github.com/libuv/libuv/blob/v1.52.1/include/uv.h#L628).
+**Native declaration:** [pinned libuv](https://github.com/libuv/libuv/blob/v1.53.0/include/uv.h#L643).
 
 
 ## tcp_close_reset
@@ -69,9 +69,9 @@ function tcp_close_reset(handle: tcp_t, callback: (function (handle_t): ())?): i
 
 **Cancellation:** not applicable or unsupported by uv_cancel
 
-**Availability:** Pinned patched libuv 1.52.1 only; native OS/kernel support and native error statuses still apply.
+**Availability:** Pinned patched libuv 1.53.0 only; native OS/kernel support and native error statuses still apply.
 
-**Native declaration:** [pinned libuv](https://github.com/libuv/libuv/blob/v1.52.1/include/uv.h#L637).
+**Native declaration:** [pinned libuv](https://github.com/libuv/libuv/blob/v1.53.0/include/uv.h#L652).
 
 
 ## tcp_connect
@@ -92,9 +92,9 @@ function tcp_connect(req: connect_t, handle: tcp_t, addr: sockaddr_t, callback: 
 
 **Cancellation:** not applicable or unsupported by uv_cancel
 
-**Availability:** Pinned patched libuv 1.52.1 only; native OS/kernel support and native error statuses still apply.
+**Availability:** Pinned patched libuv 1.53.0 only; native OS/kernel support and native error statuses still apply.
 
-**Native declaration:** [pinned libuv](https://github.com/libuv/libuv/blob/v1.52.1/include/uv.h#L638).
+**Native declaration:** [pinned libuv](https://github.com/libuv/libuv/blob/v1.53.0/include/uv.h#L653).
 
 
 ## tcp_getpeername
@@ -115,9 +115,9 @@ function tcp_getpeername(handle: tcp_t): (integer, sockaddr_t?, integer)
 
 **Cancellation:** not applicable or unsupported by uv_cancel
 
-**Availability:** Pinned patched libuv 1.52.1 only; native OS/kernel support and native error statuses still apply.
+**Availability:** Pinned patched libuv 1.53.0 only; native OS/kernel support and native error statuses still apply.
 
-**Native declaration:** [pinned libuv](https://github.com/libuv/libuv/blob/v1.52.1/include/uv.h#L634).
+**Native declaration:** [pinned libuv](https://github.com/libuv/libuv/blob/v1.53.0/include/uv.h#L649).
 
 
 ## tcp_getsockname
@@ -138,9 +138,9 @@ function tcp_getsockname(handle: tcp_t): (integer, sockaddr_t?, integer)
 
 **Cancellation:** not applicable or unsupported by uv_cancel
 
-**Availability:** Pinned patched libuv 1.52.1 only; native OS/kernel support and native error statuses still apply.
+**Availability:** Pinned patched libuv 1.53.0 only; native OS/kernel support and native error statuses still apply.
 
-**Native declaration:** [pinned libuv](https://github.com/libuv/libuv/blob/v1.52.1/include/uv.h#L631).
+**Native declaration:** [pinned libuv](https://github.com/libuv/libuv/blob/v1.53.0/include/uv.h#L646).
 
 
 ## tcp_init
@@ -161,9 +161,9 @@ function tcp_init(loop: loop_t, handle: tcp_t): integer
 
 **Cancellation:** not applicable or unsupported by uv_cancel
 
-**Availability:** Pinned patched libuv 1.52.1 only; native OS/kernel support and native error statuses still apply.
+**Availability:** Pinned patched libuv 1.53.0 only; native OS/kernel support and native error statuses still apply.
 
-**Native declaration:** [pinned libuv](https://github.com/libuv/libuv/blob/v1.52.1/include/uv.h#L598).
+**Native declaration:** [pinned libuv](https://github.com/libuv/libuv/blob/v1.53.0/include/uv.h#L613).
 
 
 ## tcp_init_ex
@@ -184,9 +184,9 @@ function tcp_init_ex(loop: loop_t, handle: tcp_t, flags: integer): integer
 
 **Cancellation:** not applicable or unsupported by uv_cancel
 
-**Availability:** Pinned patched libuv 1.52.1 only; native OS/kernel support and native error statuses still apply.
+**Availability:** Pinned patched libuv 1.53.0 only; native OS/kernel support and native error statuses still apply.
 
-**Native declaration:** [pinned libuv](https://github.com/libuv/libuv/blob/v1.52.1/include/uv.h#L599).
+**Native declaration:** [pinned libuv](https://github.com/libuv/libuv/blob/v1.53.0/include/uv.h#L614).
 
 
 ## tcp_keepalive
@@ -207,9 +207,9 @@ function tcp_keepalive(handle: tcp_t, enable: integer, delay: integer): integer
 
 **Cancellation:** not applicable or unsupported by uv_cancel
 
-**Availability:** Pinned patched libuv 1.52.1 only; native OS/kernel support and native error statuses still apply.
+**Availability:** Pinned patched libuv 1.53.0 only; native OS/kernel support and native error statuses still apply.
 
-**Native declaration:** [pinned libuv](https://github.com/libuv/libuv/blob/v1.52.1/include/uv.h#L602).
+**Native declaration:** [pinned libuv](https://github.com/libuv/libuv/blob/v1.53.0/include/uv.h#L617).
 
 
 ## tcp_keepalive_ex
@@ -230,9 +230,9 @@ function tcp_keepalive_ex(handle: tcp_t, on: integer, idle: integer, intvl: inte
 
 **Cancellation:** not applicable or unsupported by uv_cancel
 
-**Availability:** Pinned patched libuv 1.52.1 only; native OS/kernel support and native error statuses still apply.
+**Availability:** Pinned patched libuv 1.53.0 only; native OS/kernel support and native error statuses still apply.
 
-**Native declaration:** [pinned libuv](https://github.com/libuv/libuv/blob/v1.52.1/include/uv.h#L605).
+**Native declaration:** [pinned libuv](https://github.com/libuv/libuv/blob/v1.53.0/include/uv.h#L620).
 
 
 ## tcp_nodelay
@@ -253,9 +253,9 @@ function tcp_nodelay(handle: tcp_t, enable: integer): integer
 
 **Cancellation:** not applicable or unsupported by uv_cancel
 
-**Availability:** Pinned patched libuv 1.52.1 only; native OS/kernel support and native error statuses still apply.
+**Availability:** Pinned patched libuv 1.53.0 only; native OS/kernel support and native error statuses still apply.
 
-**Native declaration:** [pinned libuv](https://github.com/libuv/libuv/blob/v1.52.1/include/uv.h#L601).
+**Native declaration:** [pinned libuv](https://github.com/libuv/libuv/blob/v1.53.0/include/uv.h#L616).
 
 
 ## tcp_open
@@ -276,9 +276,9 @@ function tcp_open(handle: tcp_t, socket: os_sock_t): integer
 
 **Cancellation:** not applicable or unsupported by uv_cancel
 
-**Availability:** Pinned patched libuv 1.52.1 only; native OS/kernel support and native error statuses still apply.
+**Availability:** Pinned patched libuv 1.53.0 only; native OS/kernel support and native error statuses still apply.
 
-**Native declaration:** [pinned libuv](https://github.com/libuv/libuv/blob/v1.52.1/include/uv.h#L600).
+**Native declaration:** [pinned libuv](https://github.com/libuv/libuv/blob/v1.53.0/include/uv.h#L615).
 
 
 ## tcp_simultaneous_accepts
@@ -299,7 +299,7 @@ function tcp_simultaneous_accepts(handle: tcp_t, enable: integer): integer
 
 **Cancellation:** not applicable or unsupported by uv_cancel
 
-**Availability:** Pinned patched libuv 1.52.1 only; native OS/kernel support and native error statuses still apply.
+**Availability:** Pinned patched libuv 1.53.0 only; native OS/kernel support and native error statuses still apply.
 
-**Native declaration:** [pinned libuv](https://github.com/libuv/libuv/blob/v1.52.1/include/uv.h#L610).
+**Native declaration:** [pinned libuv](https://github.com/libuv/libuv/blob/v1.53.0/include/uv.h#L625).
 

@@ -23,9 +23,9 @@ function err_name(err: integer): string
 
 **Cancellation:** not applicable or unsupported by uv_cancel
 
-**Availability:** Pinned patched libuv 1.52.1 only; native OS/kernel support and native error statuses still apply.
+**Availability:** Pinned patched libuv 1.53.0 only; native OS/kernel support and native error statuses still apply.
 
-**Native declaration:** [pinned libuv](https://github.com/libuv/libuv/blob/v1.52.1/include/uv.h#L428).
+**Native declaration:** [pinned libuv](https://github.com/libuv/libuv/blob/v1.53.0/include/uv.h#L428).
 
 
 ## err_name_r
@@ -46,9 +46,9 @@ function err_name_r(err: integer, capacity: integer): string
 
 **Cancellation:** not applicable or unsupported by uv_cancel
 
-**Availability:** Pinned patched libuv 1.52.1 only; native OS/kernel support and native error statuses still apply.
+**Availability:** Pinned patched libuv 1.53.0 only; native OS/kernel support and native error statuses still apply.
 
-**Native declaration:** [pinned libuv](https://github.com/libuv/libuv/blob/v1.52.1/include/uv.h#L429).
+**Native declaration:** [pinned libuv](https://github.com/libuv/libuv/blob/v1.53.0/include/uv.h#L429).
 
 
 ## strerror
@@ -69,9 +69,9 @@ function strerror(err: integer): string
 
 **Cancellation:** not applicable or unsupported by uv_cancel
 
-**Availability:** Pinned patched libuv 1.52.1 only; native OS/kernel support and native error statuses still apply.
+**Availability:** Pinned patched libuv 1.53.0 only; native OS/kernel support and native error statuses still apply.
 
-**Native declaration:** [pinned libuv](https://github.com/libuv/libuv/blob/v1.52.1/include/uv.h#L425).
+**Native declaration:** [pinned libuv](https://github.com/libuv/libuv/blob/v1.53.0/include/uv.h#L425).
 
 
 ## strerror_r
@@ -92,9 +92,9 @@ function strerror_r(err: integer, capacity: integer): string
 
 **Cancellation:** not applicable or unsupported by uv_cancel
 
-**Availability:** Pinned patched libuv 1.52.1 only; native OS/kernel support and native error statuses still apply.
+**Availability:** Pinned patched libuv 1.53.0 only; native OS/kernel support and native error statuses still apply.
 
-**Native declaration:** [pinned libuv](https://github.com/libuv/libuv/blob/v1.52.1/include/uv.h#L426).
+**Native declaration:** [pinned libuv](https://github.com/libuv/libuv/blob/v1.53.0/include/uv.h#L426).
 
 
 ## translate_sys_error
@@ -115,7 +115,7 @@ function translate_sys_error(sys_errno: integer): integer
 
 **Cancellation:** not applicable or unsupported by uv_cancel
 
-**Availability:** Pinned patched libuv 1.52.1 only; native OS/kernel support and native error statuses still apply.
+**Availability:** Pinned patched libuv 1.53.0 only; native OS/kernel support and native error statuses still apply.
 
-**Native declaration:** [pinned libuv](https://github.com/libuv/libuv/blob/v1.52.1/include/uv.h#L423).
+**Native declaration:** [pinned libuv](https://github.com/libuv/libuv/blob/v1.53.0/include/uv.h#L423).
 

@@ -8,7 +8,7 @@ set(BUILD_TESTING OFF CACHE BOOL "" FORCE)
 set(LIBUV_BUILD_SHARED ON CACHE BOOL "" FORCE)
 set(LLHTTP_BUILD_SHARED_LIBS ON CACHE BOOL "" FORCE)
 set(LLHTTP_BUILD_STATIC_LIBS OFF CACHE BOOL "" FORCE)
-add_subdirectory("${TITAN_SOURCE_ROOT}/libuv-v1.52.1" libuv EXCLUDE_FROM_ALL)
+add_subdirectory("${TITAN_SOURCE_ROOT}/libuv-v1.53.0" libuv EXCLUDE_FROM_ALL)
 add_subdirectory("${TITAN_SOURCE_ROOT}/llhttp-release-v9.4.3" llhttp EXCLUDE_FROM_ALL)
 set_target_properties(uv PROPERTIES RUNTIME_OUTPUT_NAME uv-1 ARCHIVE_OUTPUT_NAME uv)
 set_target_properties(llhttp_shared PROPERTIES RUNTIME_OUTPUT_NAME llhttp-9.4 ARCHIVE_OUTPUT_NAME llhttp)
@@ -33,9 +33,9 @@ add_custom_target(titan-native-libraries DEPENDS uv llhttp_shared sqlite3)
 install(TARGETS uv llhttp_shared sqlite3
   RUNTIME DESTINATION bin COMPONENT TitanNativeSDK
   ARCHIVE DESTINATION lib COMPONENT TitanNativeSDK)
-install(FILES "${TITAN_SOURCE_ROOT}/libuv-v1.52.1/include/uv.h"
+install(FILES "${TITAN_SOURCE_ROOT}/libuv-v1.53.0/include/uv.h"
   "${TITAN_SOURCE_ROOT}/llhttp-release-v9.4.3/include/llhttp.h"
   "${TITAN_SOURCE_ROOT}/sqlite-autoconf-3530400/sqlite3.h"
   DESTINATION include COMPONENT TitanNativeSDK)
-install(DIRECTORY "${TITAN_SOURCE_ROOT}/libuv-v1.52.1/include/uv"
+install(DIRECTORY "${TITAN_SOURCE_ROOT}/libuv-v1.53.0/include/uv"
   DESTINATION include COMPONENT TitanNativeSDK FILES_MATCHING PATTERN "*.h")

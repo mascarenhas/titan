@@ -26,7 +26,7 @@ function pipe_init(loop: loop_t, handle: pipe_t, ipc: integer): integer
   local native_owner = handle as foreign *void
   loop.handles[handle] = true
   handle.loop = loop
-  -- 1.52.1 Unix and Windows pipe_init have no rejection path.
+  -- 1.53.0 Unix and Windows pipe_init have no rejection path.
   local status: integer = ffi.uv_pipe_init(loop.native, handle.native, native_ipc)
   if status < 0 then loop.handles[handle] = nil; handle.loop = nil; return status end
   handle.phase = HANDLE_LIVE

@@ -2821,7 +2821,7 @@ exit 64
             assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
                 tostring(code) .. ")")
             assert.truthy(output:find(
-                "LIBUV_CPPFLAGS=-Ilibuv-v1.52.1/include -D_GNU_SOURCE", 1, true), output)
+                "LIBUV_CPPFLAGS=-Ilibuv-v1.53.0/include -D_GNU_SOURCE", 1, true), output)
             assert.truthy(output:find(
                 "LIBUV_LDFLAGS=-lpthread -lrt",
                 1, true), output)
@@ -2832,7 +2832,7 @@ exit 64
         assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
             tostring(code) .. ")")
         assert.truthy(output:find(
-            "LIBUV_CPPFLAGS=-Ilibuv-v1.52.1/include",
+            "LIBUV_CPPFLAGS=-Ilibuv-v1.53.0/include",
             1, true), output)
         assert.falsy(output:find("-D_GNU_SOURCE", 1, true), output)
     end)
@@ -2902,7 +2902,7 @@ exit 64
                 "TITAN_EXTRA_CPPFLAGS='-DUSER_CPP=1 " ..
                 LPEGLABEL_INCLUDE .. " " .. LLHTTP_NATIVE_INCLUDE .. " " ..
                 SQLITE3_NATIVE_INCLUDE .. " " .. BUNDLED_OPENSSL_INCLUDES ..
-                " -Ilibuv-v1.52.1/include -D_GNU_SOURCE'",
+                " -Ilibuv-v1.53.0/include -D_GNU_SOURCE'",
                 1, true), command)
             assert.truthy(command:find(
                 [[TITAN_EXTRA_CFLAGS='-DUSER_C=1 -fno-strict-aliasing']],
@@ -2964,7 +2964,7 @@ esac
                 SQLITE3_NATIVE_INCLUDE ..
                 " -I/opt/openssl/include -DOPENSSL_FAKE_PKG=1 " ..
                 "-DOPENSSL_API_COMPAT=30000 " ..
-                "-Ilibuv-v1.52.1/include -D_GNU_SOURCE'", 1, true), command)
+                "-Ilibuv-v1.53.0/include -D_GNU_SOURCE'", 1, true), command)
             assert.equal(1, count_plain(command,
                     [[TITAN_EXTRA_LDFLAGS='-Wl,user-link -lpthread -lrt -L/opt/openssl/lib -lssl -lcrypto']]),
                 command)
@@ -5196,9 +5196,9 @@ done
                 'SANITIZER_NATIVE_CACHE_SCHEMA: "v2"',
                 "CC: cc", "AR: ar", "RANLIB: ranlib",
                 'SANITIZER_LUA_VERSION: "5.5.1"',
-                'SANITIZER_LIBUV_VERSION: "1.52.1"',
-                'SANITIZER_LIBUV_SHA256: "66d511b9e6e334c0e62279eb234fbfb2b' ..
-                '3110b1479c09b95b44c7afca8cff9e7"',
+                'SANITIZER_LIBUV_VERSION: "1.53.0"',
+                'SANITIZER_LIBUV_SHA256: "cb0d6dd2128d5a95bd242c6cc982a24f' ..
+                'e608fa93da57b6b4ec763b0018c53e64"',
                 'LIBUV_BUILD_PROFILE: "static-pic-debug-tests-off-' ..
                 'asan-ubsan-v2"',
                 'SANITIZER_LLHTTP_VERSION: "9.4.3"',
@@ -5209,7 +5209,7 @@ done
                 '1984552a3c8e4aa11a24aa31aeac98e8"',
                 "id: sanitizer-native-cache-key",
                 "sha256sum vendor/lua/lua-5.5.1-relocatable.patch",
-                "sha256sum vendor/libuv/libuv-1.52.1-spawn-close.patch",
+                "sha256sum vendor/libuv/libuv-1.53.0-spawn-close.patch",
                 "git ls-remote",
                 "libbacktrace.git HEAD",
                 'cc_target="$(cc -dumpmachine)"',

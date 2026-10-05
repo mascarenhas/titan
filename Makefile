@@ -128,15 +128,15 @@ LUAROCKS_CONFIG_POLICY := titan-system-tree-toolchain-v2
 ifneq ($(strip $(LIBUV_MODE)),)
   $(error LIBUV_MODE is no longer supported; Titan always bundles patched libuv)
 endif
-LIBUV_VERSION     := 1.52.1
+LIBUV_VERSION     := 1.53.0
 LIBUV_SRC_DIR     := libuv-v$(LIBUV_VERSION)
 LIBUV_BUILD_DIR   := libuv-build
 LIBUV_BUILD_CONFIG := $(LIBUV_BUILD_DIR)/.titan-libuv-build-config
 LIBUV_TARBALL     := $(LIBUV_SRC_DIR).tar.gz
 LIBUV_URL         := https://dist.libuv.org/dist/v$(LIBUV_VERSION)/$(LIBUV_TARBALL)
-LIBUV_SHA256      := 66d511b9e6e334c0e62279eb234fbfb2b3110b1479c09b95b44c7afca8cff9e7
+LIBUV_SHA256      := cb0d6dd2128d5a95bd242c6cc982a24fe608fa93da57b6b4ec763b0018c53e64
 LIBUV_BUNDLED_LIB := $(LIBUV_BUILD_DIR)/libuv.a
-LIBUV_PATCH_FILE  := vendor/libuv/libuv-1.52.1-spawn-close.patch
+LIBUV_PATCH_FILE  := vendor/libuv/libuv-1.53.0-spawn-close.patch
 LIBUV_EXTRACTED   := $(LIBUV_SRC_DIR)/.titan-extracted-spawn-close-v1
 LIBUV_BUILD_TYPE  ?= Release
 LIBUV_BUILD_PROFILE ?= static-pic-release-tests-off-v2

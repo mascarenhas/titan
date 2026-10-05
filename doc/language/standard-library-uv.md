@@ -10,7 +10,7 @@ neither the binding's source files nor a C `uv.h` import. Use the higher-level
 Use `uv` when implementing an adapter or using a native operation those modules
 do not expose.
 
-The provider contains Titan's pinned, patched **libuv 1.52.1**. System libuv is
+The provider contains Titan's pinned, patched **libuv 1.53.0**. System libuv is
 not a supported dependency. OS and kernel restrictions still apply: an exported
 function can return an unsupported-operation status on a particular platform.
 `uv.has_api("tcp_connect")` checks whether a canonical wrapper is exported; it
@@ -164,10 +164,12 @@ cover owner methods and Titan-specific helpers, including
 
 ## Coverage and deliberate omissions
 
-The [coverage map](uv/coverage.md) accounts for all **318** native functions in
-the pinned header: 305 canonical wrappers, eight deliberately unavailable
+The [coverage map](uv/coverage.md) accounts for all **319** native functions in
+the pinned header: 305 canonical wrappers, nine unavailable
 wrappers, and five native free functions performed internally after copying
-public results. The separately documented startup helper uses the generated
+public results. Libuv 1.53.0's new `uv_write_nwritten` query has no Titan wrapper
+yet, and `cancel` continues to reject write requests. The separately documented
+startup helper uses the generated
 entrypoint's original argument storage; it is not an arbitrary `uv_setup_args`
 wrapper. Type, field, callback, macro, and platform-constant mappings accompany
 the function inventory. Coverage does not remove platform-specific native

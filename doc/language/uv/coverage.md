@@ -1,8 +1,8 @@
 # Native API coverage
 
-The public reference maps the pinned libuv 1.52.1 header to Titan declarations.
-The complete [function table](function-dispositions.tsv) contains 318 distinct
-native functions: 305 canonical exported wrappers, eight unavailable direct
+The public reference maps the pinned libuv 1.53.0 header to Titan declarations.
+The complete [function table](function-dispositions.tsv) contains 319 distinct
+native functions: 305 canonical exported wrappers, nine unavailable direct
 wrappers, and five native frees performed internally after public results are
 copied. It records exact signatures, parameter and native-pointer roles,
 return/ownership rules, callback timing/thread, cancellation, cleanup, platform
@@ -20,8 +20,8 @@ as additional native C functions.
 
 ## Unavailable direct wrappers
 
-These omissions preserve explicit ownership rather than exposing unsafe native
-pointers or process-global policy as ordinary module operations.
+Eight omissions preserve explicit ownership of native pointers or process-global
+policy. The newly added native write-progress query has no Titan wrapper yet.
 
 | Native function | Reason and public alternative |
 | --- | --- |
@@ -33,6 +33,7 @@ pointers or process-global policy as ordinary module operations.
 | `uv_print_all_handles` | Diagnostic FILE* API has no approved public FILE owner. walk supplies typed handle inspection without inventing FILE* ownership. |
 | `uv_replace_allocator` | Process-global before-first-use or globally quiescent allocator policy and thread-safe C-only hooks need ownership outside a reusable Lua-state module. |
 | `uv_setup_args` | Requires true process-start argv/title memory and once-only global setup. An Array of copied Titan strings does not satisfy that memory contract. The separate `setup_process_args()` helper uses only the generated entrypoint's original argc/argv and returns false in a Lua host. |
+| `uv_write_nwritten` | Added by libuv 1.53.0; no Titan wrapper currently exposes the byte count, which is valid only inside the native write callback. Titan's `cancel` also continues to reject write requests. |
 
 ## Internal native cleanup
 
@@ -48,7 +49,7 @@ functions are not exported. This differs from `freeaddrinfo`, whose explicit
 
 | Inventory | Coverage |
 | --- | --- |
-| [Nonfunction dispositions](nonfunction-dispositions.tsv) | All 542 native inventory rows, including platform variants, enum values, and C-only layout/export machinery. |
+| [Nonfunction dispositions](nonfunction-dispositions.tsv) | All 541 native inventory rows, including platform variants, enum values, and C-only layout/export machinery. |
 | [Value fields](public-field-dispositions.tsv) | All 117 native field obligations across 24 value types, represented as copied public fields, accessors, or Array order/length. |
 | [Documented native members](documented-member-dispositions.tsv) | All 44 documented handle/request/options members; reserved native data has separate traced public data access. |
 | [All public fields](all-public-fields.tsv) | The exact exported record fields, including copied address bytes. |
@@ -61,7 +62,7 @@ combinable flags remain integers. Platform constants are nil only when the
 selected native platform has no definition. Pinned constants with optional
 source annotations are initialized immutable values, not runtime capability
 queries. `has_api` accepts only canonical native-wrapper names without `uv_`;
-it returns false for the eight omissions, five internal frees, unknown names,
+it returns false for the nine omissions, five internal frees, unknown names,
 and supplemental helper names.
 
 This inventory describes API coverage and representation. Individual platform

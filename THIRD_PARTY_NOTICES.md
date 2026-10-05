@@ -36,7 +36,7 @@ incorporates the provider into Titan's compiler or standard-library artifacts.
 ## libuv
 
 Titan's standard-library binary artifacts may statically incorporate libuv
-1.52.1, obtained from <https://dist.libuv.org/dist/v1.52.1/>. Libuv is
+1.53.0, obtained from <https://dist.libuv.org/dist/v1.53.0/>. Libuv is
 distributed under the MIT license; its unmodified license text is distributed
 as `LICENSES/libuv-LICENSE` (or in the installer's corresponding license
 directory).
