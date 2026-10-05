@@ -179,6 +179,7 @@ function Response:upgrade(request_value: Request, protocol: string,
   local stream = new_upgraded_stream(self.exchange.transport, self.exchange.parser)
   local view: io.ReaderWriterCloser = stream
   self:write_upgrade_output(output)
+  if not self.exchange.active then raise "HTTP response exchange has ended" end
   -- Fallible construction and all suspension precede this ownership commit.
   self.exchange.transferred = true
   self.exchange.active = false

@@ -82,6 +82,7 @@ function Response:headers(): Headers
 function Response:send_headers()
 function Response:write(data: string)
 function Response:close()
+function Response:abort()
 function Response:upgrade(request_value: Request, protocol: string,
                           supplied_headers: Headers?): io.ReaderWriterCloser
 function Response:reject_upgrade(request_value: Request, status: integer,
@@ -287,8 +288,10 @@ as separate inputs so one cannot consume the other.
 Each `Response` begins as `200 OK` with empty headers. `set_status` accepts a
 final status from 200 through 999 and an optional reason phrase. A supplied
 reason has the same permitted byte repertoire as a field value. Header and
-status mutation is allowed only before headers are sent. `headers()` returns a
-copy, so changing that copy does not mutate the Response.
+status mutation is allowed only before the final header write starts, including
+when that write later fails. Abort the exchange instead of retrying failed
+header output with a different status. `headers()` returns a copy, so changing
+that copy does not mutate the Response.
 
 `send_headers()` commits the status line and headers and is idempotent.
 `write()` implicitly sends them, then writes one binary body chunk. When an
@@ -354,6 +357,16 @@ rejection output before handler dispatch. Applications can compose their own Tas
 operations with the public `async` combinators. A body timeout must also
 unwind the handler; merely closing the listener does not stop an accepted
 connection or bypass the automatic drain performed after a handler returns.
+
+`Response:abort()` ends the live request/response exchange and retires its
+accepted TCP or TLS transport without sending headers, a chunk terminator, or
+draining an unread request body. Use it when a streaming response fails after
+output has started, or when an application deadline must interrupt accepted
+body/output I/O. Catch the interrupted operation's failure in its owner before
+joining it. Abort is idempotent and cancellation-insensitive. It is a no-op for
+a completed exchange or a response whose transport was transferred by
+`upgrade`; retaining an old response cannot close a later keep-alive exchange.
+Ordinary `close()` still finishes HTTP framing and can suspend on output.
 
 ## Protocol upgrade and ownership
 

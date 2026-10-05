@@ -90,6 +90,16 @@ shared support output rather than the default first-root-specific support
 stem. See [Separate native test executables](incremental-compilation.md#separate-native-test-executables)
 for the complete sequence and Make-owned invalidation contract.
 
+A native test executable may still need a shared standard provider with
+`--static`. The canonical source-owned `titan.test` overlaps the keys carried
+by the combined `titan.a`; whole-provider composition then selects matching
+DSO dependencies rather than linking a duplicate `titan.test` implementation.
+Set `TITAN_PATH_0_6` to the installed `lib/titan/0.6` directory when that shared
+provider is outside the runtime search path. This test configuration does not
+imply that an ordinary application executable has the same dependency. Verify
+application delivery with its own build and a relocated execution that cannot
+find the compiler or Titan provider. See [Static compiled modules](static-compiled-modules.md).
+
 Only translation units that own a discovered test receive
 `-fno-optimize-sibling-calls`, preserving useful native frames for
 [`location`](#location-and-failure-traces). Production source dependencies,

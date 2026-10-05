@@ -299,8 +299,8 @@ function Response:send_headers()
   builder:write(render_headers(self.response_headers))
   builder:write("\r\n")
   self.exchange.output_started = true
-  self.connection:write(builder:drain())
   self.headers_sent = true
+  self.connection:write(builder:drain())
 end
 
 function Response:write(data: string)
@@ -336,6 +336,16 @@ function Response:close()
     self.connection:write("0\r\n\r\n")
   end
   self.closed = true
+end
+
+function Response:abort()
+  -- The live exchange is the ownership guard: a retained response must never
+  -- close a later keep-alive exchange or an already transferred upgrade.
+  if not self.exchange.active then return end
+  self.exchange.active = false
+  self.closed = true
+  self.keep_alive = false
+  self.exchange.transport.abort()
 end
 
 -- A client using Expect: 100-continue deliberately withholds its body until
@@ -460,7 +470,7 @@ local function serve_connection(transport: Transport,
       return
     end
     server.handler(request_value, response)
-    if exchange.transferred or exchange.rejected then return end
+    if not exchange.active then return end
     response:close()
     -- An upgrade candidate rejected by the handler ends this connection at
     -- its header boundary; llhttp must never parse the protocol suffix.

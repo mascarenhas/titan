@@ -572,6 +572,13 @@ executable. The folder program's `__main` suffix avoids colliding with its
 source directory; the logical module name and entrypoint path remain
 unchanged.
 
+Different working directories do not isolate source-adjacent C/object outputs.
+When building the same sources with different compiler modes or flags, stage a
+separate source tree for each configuration and point `--tree` at that copy.
+For example, an application build and a `--test` build can select different
+compiled dependencies; concurrent invocations must not overwrite the same
+source objects. The build system owns those source copies and invalidation.
+
 An installed compiler links `<root>/lib/titan/0.6/libtitan.a`; compiler development
 directly from the repository lazily rebuilds and links
 `titan-runtime/libtitan.a`. Both archives contain exactly `titan.o` and `minicoro.o`; source-defined
