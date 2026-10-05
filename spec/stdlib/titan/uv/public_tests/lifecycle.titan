@@ -1,5 +1,63 @@
 local common = import "support.common.titan"
 
+local record ConcreteTimerState
+  loop: uv.loop_t
+  closed: integer
+end
+
+local function concrete_timer_closed(timer: uv.timer_t)
+  local state = uv.timer_get_data(timer) as ConcreteTimerState
+  test.assert(not timer:as_handle_t():is_initialized())
+  state.closed = state.closed + 1
+  if state.closed == 1 then
+    success(uv.timer_init(state.loop, timer))
+    uv.timer_close(timer, concrete_timer_closed)
+  else
+    -- Generic shutdown remains compatible with a reused typed-close owner.
+    success(uv.timer_init(state.loop, timer))
+    uv.close(timer:as_handle_t())
+  end
+  collect()
+end
+
+function test_concrete_timer_data_and_close_reuse(_context: test.Context)
+  local loop = new_loop()
+  defer finish_loop(loop)
+  local timer = uv.timer_t()
+  test.assert(uv.timer_get_data(timer) == nil)
+  uv.timer_set_data(timer, false)
+  test.assert(uv.handle_get_data(timer:as_handle_t()) == false)
+  local state = ConcreteTimerState(loop, 0)
+  uv.handle_set_data(timer:as_handle_t(), state)
+  test.assert(uv.timer_get_data(timer) == state)
+  expect_error(function () uv.timer_close(timer) end, "handle is not initialized")
+  success(uv.timer_init(loop, timer))
+  uv.timer_close(timer, concrete_timer_closed)
+  expect_error(function () uv.timer_close(timer) end, "handle is closing")
+  collect()
+  success(uv.run(loop))
+  test.assert(state.closed == 2 and not timer:as_handle_t():is_initialized())
+  uv.timer_set_data(timer, nil)
+  test.assert(uv.timer_get_data(timer) == nil)
+end
+
+function test_concrete_timer_close_callback_failure(_context: test.Context)
+  local loop = new_loop()
+  defer finish_loop(loop)
+  local timer = uv.timer_t()
+  success(uv.timer_init(loop, timer))
+  uv.timer_close(timer, function (owner: uv.timer_t)
+    test.assert(owner == timer and not owner:as_handle_t():is_initialized())
+    collect()
+    raise false
+  end)
+  expect_error(function () uv.run(loop) end, false)
+  test.assert(not timer:as_handle_t():is_initialized())
+  success(uv.timer_init(loop, timer))
+  uv.walk(loop, function (handle: uv.handle_t, _data: value) uv.close(handle) end, nil)
+  success(uv.run(loop))
+end
+
 local function install_unref_timer(loop: uv.loop_t, weak: {value: value})
   local timer = uv.timer_t()
   success(uv.timer_init(loop, timer))

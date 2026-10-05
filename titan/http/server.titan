@@ -1,3 +1,5 @@
+local uv = import "uv"
+
 type Handler = function (Request, Response): ()
 
 record Request
@@ -307,16 +309,32 @@ end
 
 -- Shared parser/transport state cannot be released until its owning child has
 -- finished, including when the parent is already cancelled or shutting down.
+local record TerminalCleanup<|A, B|>
+  task: async.Task<|A, B|>
+  remove: (function (): ())?
+end
+
+local function start_terminal_cleanup<|A, B|>(
+    completion: async.Completion<|TerminalCleanup<|A, B|>, nil, nil|>,
+    number: integer): uv.req_t?
+  local context = completion:context(number)
+  context.remove = context.task:add_terminal_listener(function (_: async.TaskStatus<|A, B|>)
+    do completion:resolve(number, nil)
+    catch completion:fatal(number, error, traceback); raise end
+  end)
+  return nil
+end
+
 local function await_terminal_cleanup<|A, B|>(task: async.Task<|A, B|>)
   if task:status():has_finished() then return end
-  local remove: (function (): ())? = nil
-  defer do if remove ~= nil then remove() end end
-  async.await_cleanup<|nil, nil|>(function (resolve, _, fatal)
-    remove = task:add_terminal_listener(function (_: async.TaskStatus<|A, B|>)
-      do resolve(nil)
-      catch fatal(error, traceback); raise end
-    end)
-  end)
+  local context = TerminalCleanup<|A, B|>(task, nil)
+  defer do
+    local remove? = context.remove
+    context.remove = nil
+    if remove ~= nil then remove() end
+  end
+  async.await_cleanup_with<|TerminalCleanup<|A, B|>, nil, nil|>(
+    context, start_terminal_cleanup)
 end
 
 local function read_request_with_idle_timeout(
@@ -446,6 +464,39 @@ function Server:idle_timeout(timeout: integer?): integer
   return previous
 end
 
+local record ConnectionHandoff
+  connection: io.ReaderWriterCloser
+  server: Server
+  transferred: boolean
+  child: async.Task<|nil, value|>?
+  remove: (function (): ())?
+  notified: boolean
+end
+
+local function start_connection_handoff(
+    completion: async.Completion<|ConnectionHandoff, nil, nil|>,
+    number: integer): uv.req_t?
+  local context = completion:context(number)
+  local notify = function ()
+    if context.notified then return end
+    completion:resolve(number, nil)
+    context.notified = true
+  end
+  local started = function ()
+    context.transferred = true
+    notify()
+  end
+  context.child = async.run<|nil, value|>(function (): nil
+    serve_connection(context.connection, context.server, started)
+    return nil
+  end)
+  context.remove = context.child:add_terminal_listener(function (_: async.TaskStatus<|nil, value|>)
+    do notify()
+    catch completion:fatal(number, error, traceback); raise end
+  end)
+  return nil
+end
+
 function Server:serve()
   if self.closed then raise "HTTP Server is closed" end
   while not self.closed do
@@ -457,42 +508,31 @@ function Server:serve()
       raise
     end
     local connection = accepted as io.ReaderWriterCloser
-    local server = self
     -- run only accepts a deferred start. Keep this connection owned until the
     -- child has armed its close defer, or has terminated without entering it.
-    local transferred = false
+    local handoff: ConnectionHandoff? = nil
     do
-      defer do if not transferred then connection:close() end end
-      local child: async.Task<|nil, value|>? = nil
       defer do
-        if child ~= nil and not transferred then
+        if handoff == nil or not handoff.transferred then connection:close() end
+      end
+      local context = ConnectionHandoff(connection, self, false, nil, nil, false)
+      handoff = context
+      defer do
+        local child? = context.child
+        context.child = nil
+        if child ~= nil and not context.transferred then
           defer await_terminal_cleanup(child)
           child:cancel(async.CancellationReason.simple(
             "HTTP connection handoff stopped"))
         end
       end
-      local remove: (function (): ())? = nil
-      defer do if remove ~= nil then remove() end end
-      async.await_cleanup<|nil, nil|>(function (resolve, _, fatal)
-        local notified = false
-        local notify = function ()
-          if notified then return end
-          resolve(nil)
-          notified = true
-        end
-        local started = function ()
-          transferred = true
-          notify()
-        end
-        child = async.run<|nil, value|>(function (): nil
-          serve_connection(connection, server, started)
-          return nil
-        end)
-        remove = child:add_terminal_listener(function (_: async.TaskStatus<|nil, value|>)
-          do notify()
-          catch fatal(error, traceback); raise end
-        end)
-      end)
+      defer do
+        local remove? = context.remove
+        context.remove = nil
+        if remove ~= nil then remove() end
+      end
+      async.await_cleanup_with<|ConnectionHandoff, nil, nil|>(
+        context, start_connection_handoff)
     end
   end
 end

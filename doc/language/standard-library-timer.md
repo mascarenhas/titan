@@ -26,8 +26,14 @@ These functions must be called from a running
 timer fires. Negative durations raise. `sleep(0)` is valid and yields until a
 callback on a later event-loop turn.
 
-`yield()` is equivalent to a zero-duration Task delay. It is cooperative
-scheduling, not a Lua coroutine yield.
+Pending cancellation is checked before validating the duration. Cancellation
+of an accepted sleep wakes its Task and closes that sleep's native timer;
+normal return and cancellation unwind both wait for native close completion.
+Sleep does not expose a shared Ticker or leave a recurring producer behind.
+
+`yield()` is the same cooperative scheduling point as `async.yield()`: it
+appends the Task to the Runtime's bounded FIFO ready queue. It has no promised
+delay or exact libuv phase. Use `sleep` for an actual duration.
 
 ```titan
 local timer = import "timer"

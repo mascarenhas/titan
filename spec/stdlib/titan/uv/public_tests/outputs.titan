@@ -73,3 +73,23 @@ function test_failed_library_open_retains_copied_error_and_requires_close(_conte
   expect_error(function () uv.dlopen(path, library) end,
                "lib_t:dlopen requires a fresh library owner")
 end
+function test_has_api_reports_only_canonical_native_wrappers(context: test.Context)
+  context:run("canonical_wrappers", function (_child: test.Context)
+    test.assert(uv.has_api("timer_start") and uv.has_api("write") and
+        uv.has_api("req_get_data"), "canonical native wrapper is unavailable")
+  end)
+  context:run("supplemental_helpers", function (_child: test.Context)
+    test.assert(not uv.has_api("buf_check_length") and
+        not uv.has_api("timer_close") and not uv.has_api("timer_get_data") and
+        not uv.has_api("timer_set_data") and not uv.has_api("write_string"),
+        "supplemental helper was reported as a canonical native wrapper")
+  end)
+  context:run("concrete_data_methods", function (_child: test.Context)
+    test.assert(not uv.has_api("fs_t:get_data") and not uv.has_api("fs_t:set_data") and
+        not uv.has_api("work_t:get_data") and not uv.has_api("work_t:set_data") and
+        not uv.has_api("getaddrinfo_t:get_data") and not uv.has_api("getaddrinfo_t:set_data") and
+        not uv.has_api("connect_t:get_data") and not uv.has_api("connect_t:set_data") and
+        not uv.has_api("shutdown_t:get_data") and not uv.has_api("shutdown_t:set_data"),
+        "concrete request method was reported as a canonical native wrapper")
+  end)
+end

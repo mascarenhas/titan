@@ -8,8 +8,8 @@ OS, and SQLite adapters own their domain records and result/resource policies.
 
 The old private UV `Call` union, per-operation dispatch methods, Task association,
 and domain-operation router are removed from this architecture. Adding an async
-operation does not add a new scheduler variant. A registration closure expresses
-its one native submission and receives capabilities for its exact wait.
+operation does not add a new scheduler variant. A registrar expresses its one
+native submission and receives a typed Completion with its exact operation number.
 
 ## Module and type ownership
 
@@ -30,16 +30,16 @@ The generic runtime stores these private layers:
 
 | Owner | Responsibility |
 | --- | --- |
-| `Runtime` | One public `uv.loop_t`, sparse live Tasks, current Task, driver/closing state, first fatal error/trace, exit status. |
-| `Task` | One coroutine, public status, first cancellation reason, current exact Wait, terminal listeners, optional explicit suspend token/detacher. |
-| `Operation<|T,E|>` | One registration and ordinary/cancellable/cleanup policy yielded by a Task. |
-| `Wait` | One Task, policy, phase, outcome, payload, and optional accepted public request view. |
+| `Runtime` | One public `uv.loop_t`, one reusable zero timer, FIFO head/tail/count, sparse live Tasks, current Task, driver/closing state, first fatal error/trace, exit status. |
+| `Task` | One coroutine, scalar phase and optional public status snapshot, checked suspension epoch, intrusive ready node, first cancellation reason, current exact Wait, terminal listeners, optional explicit suspend token/detacher. |
+| `Completion<|C,T,E|>` | One lazily allocated reusable cell per Task: scoped context, registrar, Task, captured suspension epoch, policy, phase, outcome/payload and optional accepted request. |
+| `Wait` | The private all-value Completion view; it has the same owner, not another record. |
 | Subscription `Core` | Queue, explicit count, terminal state, one reserved waiter, producer actions, cleanup drain capability. |
 | Public UV owner | Native request/handle storage and callback rooting until its defined native terminal boundary. |
 | Domain owner | Resources obtained from native completion, facade state, sharing rules, and lexical cleanup. |
 
-There is no operation-generation key, native-request introspection to recover a
-Task, additional scheduler-ready queue, or async Task table inside UV.
+Suspension epochs and the ready queue belong to async. UV has no Task table,
+scheduler queue, or native-request introspection to recover a Task.
 
 ## Driver and registration trampoline
 
@@ -52,21 +52,49 @@ continuation runs to yield, return, or error without another loop callback
 interrupting it. The Runtime sets `current_task` only around coroutine entry
 and clears it before registration and terminal notification.
 
-`run(func)` roots a ready Task and schedules a zero timer. Its timer callback
-submits `uv.close`; the close callback retires the native timer before entering
-the Task. Yield and correct-token explicit resumes use the same close-before-
-continuation protocol. The public `run<|A,B|>` result and the Runtime's all-value
-view refer to the same Task owner.
+`run(func)` roots a ready Task and appends its startup to the Runtime FIFO.
+Yield, correct-token explicit resumes, and peer-Task settlement use the same
+queue. Its normally referenced zero timer is active only while work is queued.
+Named typed timer callbacks recover the Runtime from traced timer data without
+constructing handle views or forwarding closures. The public `run<|A,B|>`
+result and the Runtime's all-value view refer to the same Task owner.
 
-Each await constructs one generic Operation and yields it with the private tag.
-The driver checks cancellation policy before invoking registration. It creates
-a Wait in REGISTERING phase, stores it on the Task, and passes closures for
-resolve, reject, and fatal. The Task is now waiting, but `async.running()` is
+Queue acceptance arms a needed wake before changing any node or reservation.
+Only nonallocating field updates follow success. Each callback snapshots the
+initial count, capped at 64. It pops and clears each node before entering a
+continuation, retaining local copies of its intent, epoch and exact Wait.
+Reentrant Task requeue cannot be erased by old-node cleanup. Cancelled and stale
+entries still consume their place in the initial batch; new entries wait for
+another callback. Undispatched entries remain linked and rooted after failure.
+
+Private `yield()` yields one canonical marker, without an Operation, Wait,
+capability closure or discarded Result. The driver checks admission, advances
+the Task's suspension epoch, and queues it. Every admitted suspension advances
+that epoch; reaching `LUA_MAXINTEGER` raises at the suspended call rather than
+wrapping. Queue delivery and orphan snapshots validate both epoch and exact
+Wait, including an absent Wait for private yield. Failed admission or enqueue
+returns through the bounded coroutine trampoline.
+
+Each `_with` await initializes the Task's Completion and yields it with the
+private tag. The driver checks cancellation policy, advances the checked Task
+epoch, installs that exact cell as its Wait, and calls the registrar with the
+cell and captured epoch. All registrars return `uv.req_t?`; a named registrar's
+nominal Completion argument retains one erased native callable shape, avoiding
+a concrete-context adapter. The callback-triple APIs wrap this same core and
+retain their three closure capabilities and any callable adjustment cost.
+The Task is now waiting, but `async.running()` is
 absent while registration executes. `current_loop()` accesses the active
 Runtime loop without creating or driving it. `is_closing()` reads that same
 active Runtime's closing flag, raises if there is no active Runtime, and has no
 Task-context or cancellation check. Synchronous domain construction uses it when
 shutdown admission must be rejected without adding an ordinary await boundary.
+
+`checkpoint()` provides the same running-Task, first-cancellation-reason, then
+Runtime-failure admission order for synchronous domain paths. It does not
+construct an Operation, Wait, capability closures, result or transient status,
+and does not yield. Domain callers retain their existing validation, reader
+reservation and lazy-start ordering around this check. Cleanup paths remain
+exempt from ordinary admission.
 
 The usual lifecycle is:
 
@@ -86,12 +114,33 @@ acceptance while leaving a callback borrowing released state; partial native
 rollback is the adapter's responsibility.
 
 Normal terminal settlement outside a Task can deliver immediately. Settlement
-from a different running Task first accepts a deferred timer wake and then
+from a different running Task first accepts a deferred queued wake and then
 commits the settled state using nonallocating field writes. If scheduling fails,
 the Wait remains pending so retry/shutdown can still address it. Delivery checks
-that the Wait is SETTLED and remains exactly `task.wait`; it clears the request,
+that the Wait is SETTLED, remains exactly `task.wait`, and has the current
+suspension epoch; it clears the request,
 Wait, token, and explicit-suspension state before entering the continuation.
 Duplicate settlement raises rather than mutating an unrelated wait.
+
+Completion reuse checks both owner and epoch. Initialization temporarily uses
+epoch zero, which no public method accepts, and registration publishes the
+newly checked number. A callback captures this number at registration; looking
+up the current wait later would confuse an old callback with a successor.
+Retirement materializes the public tagged Result, then clears context,
+registrar, request and payload before resuming the coroutine. Terminal Task
+cleanup clears its cached cell even if result allocation failed after removing
+`task.wait`. A retained completed Task or stale Completion does not retain old
+operation context. The numeric counter never wraps at `LUA_MAXINTEGER`.
+
+`context(number)` is available only for the matching, unretired operation.
+Callbacks and partial-acceptance rollback must independently root any context
+needed after settlement or registration failure. This is an ownership contract,
+not an inference that retiring a wait proves native work ended. A private UV
+data slot may hold a domain context plus Completion/number; terminal callbacks
+copy these to local roots and detach the old slot before settling. Fresh
+request/context allocations still count, and a shared stream cannot supply one
+completion slot to overlapping writes. The legacy closures preserve their
+existing duplicate-settlement diagnostic even after the cell is reused.
 
 ## Wait policies and native ownership
 
@@ -108,9 +157,10 @@ CancellableResult exposes the current Task's all-value cancellation reason.
 Cancellable registration returns nil only after inline settlement. An unsettled
 nil return is a protocol error. Native `uv.cancel` success or failure never
 retires the Wait or releases borrowed storage; only the request's terminal
-callback does so. Ordinary and cleanup registrations return no request view to
-the async layer; their native owners remain retained by public UV and the
-suspended lexical state.
+callback does so. Ordinary and cleanup `_with` registrations may return a
+request view or nil; their policy never implicitly cancels that view. Avoid
+allocating it when unnecessary. Their native owners remain retained by public
+UV and suspended lexical state.
 
 Task cancellation retains its first reason and overrides final Task success or
 failure. Cleanup shielding changes submission/result delivery, not this terminal
@@ -119,8 +169,8 @@ Runtime failure; cleanup operations remain available to retire ownership.
 
 ## Operation-local fatal callback association
 
-Every await registration receives `fatal(error: value, trace: string)` alongside
-resolve/reject. It captures that Wait. This is an out-of-band exception channel,
+Every Completion registration may call `fatal(number, error, trace)`; the
+callback-triple facade supplies the corresponding captured closure. This is an out-of-band exception channel,
 not generic rejection and not a public native cancellation handle. An adapter
 protects its terminal callback, captures borrowed/acquired results into owned
 state, performs explicit request cleanup, calls fatal from catch, then uses
@@ -145,6 +195,9 @@ native operation depends on that cleanup.
 During REGISTERING, fatal stores a fatal outcome and leaves advancement to the
 registration trampoline. After SETTLED or RETIRED, it only records Runtime
 failure; it must not replace the settled payload or touch the Task's new Wait.
+An old number on a reused cell likewise only records failure: it never treats
+the successor's native request as consumed. Ordinary shutdown cancellation and
+terminal ownership still govern that successor.
 The first-error latch is separate from the once-only shutdown-cancellation pass.
 When already driving, latching failure calls `uv.stop` so the outer driver can
 cancel/unwind Tasks before waiting indefinitely for unrelated accepted work.
@@ -157,11 +210,14 @@ universal recovery from every foreign callback mistake or memory failure.
 
 ## Explicit suspend, Task status, listeners, and combinators
 
-`SuspendCancelAction` remains `function():()`. Suspend installs the caller's
-exact ResumeToken, a nonyielding detacher, and one ordinary Wait. Task.resume
+`SuspendCancelAction` remains `function():()`. Suspend uses its ResumeToken as
+Completion context and a named registrar. It stages the detacher, then publishes
+the exact token only after admission; even a GC finalizer during cell setup
+cannot observe an admitted suspension prematurely. A lexical defer clears
+staged state if construction or admission fails. Task.resume
 checks identity before any finished/pending shortcut. Matching pending wakes
 coalesce; equal source strings do not authorize a different token. A failed
-scheduling attempt clears `resume_pending`, and completion retires the old token
+scheduling attempt leaves `resume_pending` unset, and completion retires the old token
 before a new wait can be installed.
 
 Cancelling an explicit suspension invokes its detacher and schedules the
@@ -172,7 +228,11 @@ removal during delivery cannot suppress a captured listener. Individual listener
 exceptions are swallowed so later listeners still run. Registering after
 termination does not replay the terminal event.
 
-TaskStatus ready/running/waiting remain unfinished, while succeeded/failed/
+The private scalar phase drives internal finished checks. Each transition
+invalidates the optional nonterminal status cache, and `status()` constructs
+its snapshot on first observation. Repeated reads share that snapshot; later
+transitions never mutate or reuse it. Terminal snapshots and listener delivery
+remain eager. TaskStatus ready/running/waiting remain unfinished, while succeeded/failed/
 cancelled remain terminal. Predicate booleans are authoritative even for nil or
 false payloads. Uncaught Task exceptions are reported and stored in Error with
 the caught Lua error value and raw trace; they do not alone fail the Runtime.
@@ -267,22 +327,39 @@ a Task. Synchronization of shared native bytes remains the caller's job. The
 libuv worker pool is shared with other native work and async adds no new queue
 or thread policy. Ordinary cancellation never detaches the accepted job.
 
+The named foreign-work registrar and callback use a private per-job context in
+the public work request's traced data. They detach the old association before
+settlement and retain the captured operation number through fatal reporting.
 Ownership-retiring foreign work uses public `uv.queue_work` registered through
-`await_cleanup`. The old source-private `uv.run_foreign_cleanup` and its router
+`await_cleanup_with`. SQLite's context and UV argument owner retain its packet.
+The old source-private `uv.run_foreign_cleanup` and its router
 variant are unnecessary. Adapters still retain arguments, interpret their native
 results, and dispose of unpublished result resources lexically.
+
+`timer.sleep` owns a dedicated one-shot timer and explicit ResumeToken, with
+named typed callbacks. Firing and cancellation coalesce through Task.resume;
+a deferred cleanup Completion waits for native timer close before returning
+or finishing cancellation unwind. It does not construct a Ticker/subscription.
+Ticker remains a persistent coalescing subscription and uses the typed close
+callback only for ownership retirement. The public timing/cancellation
+contracts remain unchanged; neither promises an exact libuv phase.
 
 ## Shutdown and process control
 
 A first callback/driver failure sets closing, latches the original Error, and
 stops an active UV run. A separate once-only pass cancels remaining Tasks. Task
-cleanup may need native requests or scheduler timers, so a blanket handle walk
-must wait until all Tasks have retired. Accepted callbacks remain authoritative.
+cleanup may need native requests or queued continuations, so a blanket handle
+walk waits until all Tasks and ready entries have retired. Accepted callbacks
+remain authoritative. A failed shared wake leaves ready entries rooted; the
+outer driver drains a bounded recovery batch before blocking on unrelated
+native handles, preserving the first failure. Pending native waits still await
+their real completion. Borrowers must not manipulate Runtime-owned handles.
 
-When native loop liveness is false but Tasks remain, the driver snapshots pairs
-of `(Task, exact Wait)`, requests shutdown cancellation, and unwinds only an
-unchanged pending Wait (or unchanged absent Wait) without an explicit scheduled
-resume. Cleanup can settle another captured Wait or install a newer one; the
+When native loop liveness is false and the ready queue is empty but Tasks
+remain, the driver snapshots `(Task, exact Wait, epoch)`, requests shutdown
+cancellation, and unwinds only an unchanged pending Wait (or unchanged absent
+Wait) with the same epoch and no queued continuation or explicit resume.
+Cleanup can settle another captured Wait or install a newer one; the
 snapshot must not retire those changed/settled waits. This permits useful
 lexical cleanup while avoiding a stale Task-only orphan snapshot.
 

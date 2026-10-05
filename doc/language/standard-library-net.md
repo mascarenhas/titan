@@ -73,8 +73,14 @@ use grow.
 `read()` returns the facade's retained delimiter excess first. Otherwise it
 returns the oldest native chunk already buffered, or waits for the next
 positive callback and returns that callback's nonempty binary string. Chunk
-boundaries are timing-dependent. It returns `nil` at EOF or after explicit
-close, and later reads remain at EOF. A reset or other read error stops the
+boundaries are timing-dependent. Each returned chunk is an immutable copy;
+later receives cannot change its bytes. The Connection may reuse up to 64 KiB
+of private scratch storage while reading, separately from the unbounded queue
+of completed chunks. It releases that scratch storage on EOF, error, or
+explicit close. A Connection retained after Runtime teardown can retain that
+bounded scratch storage until it is closed, read again, or collected.
+It returns `nil` at EOF or after explicit close, and later reads remain at EOF.
+A reset or other read error stops the
 watcher and remains stored; after earlier buffered chunks have been drained,
 later reads raise that error until the Connection is closed.
 
@@ -92,9 +98,9 @@ Connection.
 
 The low-level stream has at most one suspended reader. A second Task that tries
 to wait on the same Connection is rejected; no separate facade lock or queue is
-added. Cancelling a waiting reader detaches only that waiter, wakes it through
-its own later timer callback, and leaves the physical read watcher and shared
-Connection available to another Task.
+added. Cancelling a waiting reader detaches only that waiter, wakes it on a
+later loop turn, and leaves the physical read watcher and shared Connection
+available to another Task.
 
 ## Writing, shutdown, and close
 
@@ -102,7 +108,8 @@ Writes are ordered per Connection by libuv itself. Titan submits one
 `uv_write_t` per call instead of maintaining another queue. `write` returns
 only after that request's callback and retains the original immutable input
 while libuv borrows its complete binary payload. An empty write still checks
-that the Connection and its write side are usable.
+that the Connection and its write side are usable. Overlapping writes keep
+independent requests and strings until their own terminal callbacks.
 
 `shutdown` uses libuv's `uv_shutdown`, which completes after earlier writes,
 then leaves the read side open until EOF, error, or `close`. Repeated shutdown

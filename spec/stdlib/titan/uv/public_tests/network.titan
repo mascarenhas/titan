@@ -15,6 +15,153 @@ local function open_pipe_pair(loop: uv.loop_t): (uv.pipe_t, uv.pipe_t)
   return reader, writer
 end
 
+local record ScalarWriteState
+  writer: uv.pipe_t
+  stream: uv.stream_t
+  request: uv.write_t
+  completions: integer
+end
+
+local function scalar_write_completed(request: uv.write_t, status: integer)
+  success(status)
+  local state = request:get_data() as ScalarWriteState
+  test.assert(request == state.request and request:handle() == state.stream)
+  state.completions = state.completions + 1
+  if state.completions == 1 then
+    success(uv.write_string(request, state.stream, strings.rep("C\0D", 16000),
+                            scalar_write_completed))
+  elseif state.completions == 2 then
+    success(uv.write(request, state.stream, {uv.buf_t.from_string("vector\0tail")},
+                     scalar_write_completed))
+  elseif state.completions == 3 then
+    success(uv.write_string(request, state.stream, "", scalar_write_completed))
+  else
+    uv.close(state.writer:as_handle_t())
+  end
+  collect()
+end
+
+local function submit_first_scalar(state: ScalarWriteState)
+  success(uv.write_string(state.request, state.stream, strings.rep("A\0B\255", 20000),
+                          scalar_write_completed))
+end
+
+function test_scalar_write_length_validation(_context: test.Context)
+  uv.buf_check_length("", 0)
+  uv.buf_check_length("A\0B", 0)
+  uv.buf_check_length("A\0B", 3)
+  expect_error(function () uv.buf_check_length("A\0B", -1) end,
+               "buffer length is outside string/native range")
+  expect_error(function () uv.buf_check_length("A\0B", 4) end,
+               "buffer length is outside string/native range")
+  expect_error(function () uv.buf_check_length("A\0B", 4294967296) end,
+               "buffer length is outside string/native range")
+  test.assert(uv.buf_init("A\0B", 3):to_string(3) == "A\0B")
+  expect_error(function () uv.buf_init("A\0B", 4) end,
+               "buffer length is outside string/native range")
+end
+
+function test_scalar_write_binary_gc_and_request_reuse(_context: test.Context)
+  local loop = new_loop()
+  defer finish_loop(loop)
+  local reader, writer = open_pipe_pair(loop)
+  local request = uv.write_t()
+  test.assert(request:get_data() == nil)
+  request:set_data(false)
+  test.assert(request:as_req_t():get_data() == false)
+  local state = ScalarWriteState(writer, writer:as_stream_t(), request, 0)
+  request:as_req_t():set_data(state)
+  test.assert(request:get_data() == state)
+  local received = ""
+  local eof = 0
+  success(uv.read_start(reader:as_stream_t(),
+    function (_handle: uv.handle_t, _suggested: integer): uv.buf_t
+      return uv.buf_t.allocate(4096)
+    end,
+    function (stream: uv.stream_t, count: integer, buffer: uv.buf_t?)
+      if count > 0 then
+        received = received .. buffer:to_string(count)
+      elseif count < 0 then
+        test.assert(count == uv.EOF)
+        eof = eof + 1
+        success(uv.read_stop(stream))
+        uv.close(reader:as_handle_t())
+      end
+      collect()
+    end))
+  submit_first_scalar(state)
+  test.assert(uv.write_string(request, state.stream, "busy", nil) == uv.EBUSY)
+  test.assert(uv.write(request, state.stream, {}, nil) == uv.EBUSY)
+  collect()
+  success(uv.run(loop))
+  test.assert(state.completions == 4 and eof == 1)
+  test.assert(received == strings.rep("A\0B\255", 20000) ..
+                           strings.rep("C\0D", 16000) .. "vector\0tail")
+  request:set_data(nil)
+  test.assert(request:get_data() == nil)
+end
+
+function test_scalar_write_rejection_does_not_claim_request(_context: test.Context)
+  local loop = new_loop()
+  defer finish_loop(loop)
+  local request = uv.write_t()
+  local invalid = uv.pipe_t()
+  local calls = 0
+  local callback: uv.write_cb = function (_request: uv.write_t, status: integer)
+    success(status)
+    calls = calls + 1
+  end
+  test.assert(uv.write_string(request, invalid:as_stream_t(), "fresh", callback) == uv.EINVAL)
+  success(uv.pipe_init(loop, invalid, 0))
+  test.assert(uv.write_string(request, invalid:as_stream_t(), "unopened", callback) < 0)
+  test.assert(calls == 0 and request:handle() == nil)
+  uv.close(invalid:as_handle_t())
+  local reader, writer = open_pipe_pair(loop)
+  success(uv.write_string(request, writer:as_stream_t(), "", callback))
+  collect()
+  success(uv.run(loop))
+  test.assert(calls == 1)
+end
+
+function test_scalar_write_callback_failure_preserves_successor(_context: test.Context)
+  local loop = new_loop()
+  defer finish_loop(loop)
+  local reader, writer = open_pipe_pair(loop)
+  local stream = writer:as_stream_t()
+  local request = uv.write_t()
+  local received = ""
+  local calls = 0
+  success(uv.read_start(reader:as_stream_t(),
+    function (_handle, _suggested) return uv.buf_t.allocate(4096) end,
+    function (input, count, buffer)
+      if count > 0 then
+        received = received .. buffer:to_string(count)
+      elseif count < 0 then
+        test.assert(count == uv.EOF)
+        success(uv.read_stop(input))
+        uv.close(reader:as_handle_t())
+      end
+      collect()
+    end))
+  success(uv.write_string(request, stream, "old\0", function (completed: uv.write_t, status: integer)
+    success(status)
+    calls = calls + 1
+    success(uv.write_string(completed, stream, strings.rep("next\0", 20000),
+      function (again: uv.write_t, result: integer)
+        success(result)
+        test.assert(again == request)
+        calls = calls + 1
+        uv.close(writer:as_handle_t())
+      end))
+    collect()
+    raise false
+  end))
+  expect_error(function () uv.run(loop) end, false)
+  collect()
+  success(uv.run(loop))
+  test.assert(calls == 2 and received == "old\0" .. strings.rep("next\0", 20000))
+end
+
 function test_tcp_public_views_write_shutdown_and_eof(_context: test.Context)
   local loop = new_loop()
   defer finish_loop(loop)

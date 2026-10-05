@@ -196,7 +196,9 @@ end
 ```titan
 function connect_t.new(): connect_t
 function connect_t:as_req_t(): req_t
+function connect_t:get_data(): value
 function connect_t:handle(): stream_t?
+function connect_t:set_data(data: value)
 ```
 
 
@@ -361,6 +363,8 @@ end
 ```titan
 function fs_t.new(): fs_t
 function fs_t:as_req_t(): req_t
+function fs_t:get_data(): value
+function fs_t:set_data(data: value)
 ```
 
 
@@ -430,7 +434,9 @@ end
 function getaddrinfo_t.new(): getaddrinfo_t
 function getaddrinfo_t:addrinfo(): (integer, addrinfo_result_t?)
 function getaddrinfo_t:as_req_t(): req_t
+function getaddrinfo_t:get_data(): value
 function getaddrinfo_t:get_loop(): loop_t?
+function getaddrinfo_t:set_data(data: value)
 ```
 
 
@@ -981,7 +987,9 @@ end
 ```titan
 function shutdown_t.new(): shutdown_t
 function shutdown_t:as_req_t(): req_t
+function shutdown_t:get_data(): value
 function shutdown_t:handle(): stream_t?
+function shutdown_t:set_data(data: value)
 ```
 
 
@@ -1341,7 +1349,9 @@ end
 ```titan
 function work_t.new(): work_t
 function work_t:as_req_t(): req_t
+function work_t:get_data(): value
 function work_t:get_loop(): loop_t?
+function work_t:set_data(data: value)
 ```
 
 
@@ -1362,8 +1372,10 @@ end
 ```titan
 function write_t.new(): write_t
 function write_t:as_req_t(): req_t
+function write_t:get_data(): value
 function write_t:handle(): stream_t?
 function write_t:send_handle(): handle_t?
+function write_t:set_data(data: value)
 ```
 
 

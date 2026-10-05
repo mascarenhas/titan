@@ -622,6 +622,7 @@ int titan_sdk_headers(void) { return LUA_VERSION_NUM + SQLITE_VERSION_NUMBER; }
             "spec/stdlib/titan/async/tests/all_join_test.titan",
             "spec/stdlib/titan/async/tests/any_race_test.titan",
             "spec/stdlib/titan/async/tests/channel_test.titan",
+            "spec/stdlib/titan/async/tests/completion_test.titan",
             "spec/stdlib/titan/async/tests/foreign_work_test.titan",
             "spec/stdlib/titan/async/tests/task_test.titan",
             "spec/stdlib/titan/async/tests/tests.titan",

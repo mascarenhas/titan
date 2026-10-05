@@ -1,8 +1,10 @@
 local test = import "test"
 local runtime_test = import "support.runtime.titan"
 local async = import "async"
+local gc = import "gc"
 local stream = import "io"
 local net = import "net"
+local strings = import "string"
 local timer = import "timer"
 local support = import "net.test_support.titan"
 local task_support = import "support.async.titan"
@@ -159,6 +161,196 @@ function test_net_exchanges_binary_streams_through_tcp(
     local closer: stream.Closer = server
     closer:close()
     closer:close()
+  end)
+end
+
+function test_net_received_chunks_remain_immutable_through_gc_and_cancellation(
+    _context: test.Context)
+  runtime_test.run(function ()
+    local server, port = support.listen_available(28300)
+    support.cleanup_server(_context, server)
+    local connection = net.connect("127.0.0.1", port)
+    support.cleanup_connection(_context, connection)
+    local peer = server:accept()
+    support.cleanup_connection(_context, peer)
+    local first_payload = strings.rep("first\0\255", 20000)
+    local second_payload = strings.rep("second\0\128", 20000)
+    local sender = async.run<|value, value|>(function (): value
+      peer:write(first_payload)
+      test.assert(peer:read_until("\n", true) == "next",
+                  "TCP receive phases lost their acknowledgement")
+      peer:write(second_payload)
+      peer:shutdown()
+      return nil
+    end)
+    runtime_test.cleanup(function ()
+      sender:cancel(async.CancellationReason.simple("TCP receive sender cleanup"))
+      -- Closing retires an accepted write even if an assertion prevented the
+      -- receiver from draining the peer's output. Cancellation alone cannot.
+      peer:close()
+      connection:close()
+      async.join(sender)
+    end)
+
+    local first_chunks: {string} = {}
+    local first_length = 0
+    while first_length < #first_payload do
+      local chunk? = connection:read()
+      if not chunk then raise "TCP first receive phase ended early" end
+      first_chunks[#first_chunks + 1] = chunk
+      first_length = first_length + #chunk
+      gc.collect()
+    end
+    test.assert(first_length == #first_payload,
+                "TCP second receive phase preceded its acknowledgement")
+
+    local reason = async.CancellationReason.simple("cancel between TCP receive phases")
+    local observed: value = nil
+    local blocked = async.run<|value, value|>(function (): value
+      do connection:read() catch observed = error end
+      return nil
+    end)
+    task_support.cleanup_task(blocked, "TCP receive waiter cleanup")
+    -- All first-phase bytes were consumed and the sender requires our explicit
+    -- acknowledgement before producing more, so this wait cannot finish early.
+    while blocked:status():as_string() == "ready" do timer.yield() end
+    test.assert(blocked:status():as_string() == "waiting",
+                "TCP receive waiter did not suspend between phases")
+    blocked:cancel(reason)
+    gc.collect()
+    gc.collect()
+    async.join(blocked)
+    local cancelled, actual? = blocked:status():has_cancelled()
+    test.assert(cancelled and actual == reason and observed == reason,
+                "TCP receive waiter lost its cancellation reason")
+
+    connection:write("next\n")
+    local second_chunks: {string} = {}
+    while true do
+      local chunk? = connection:read()
+      if not chunk then break end
+      second_chunks[#second_chunks + 1] = chunk
+      gc.collect()
+    end
+    async.join(sender)
+    test.assert(sender:status():has_succeeded(), "TCP receive sender failed")
+    test.assert(not connection:read(), "TCP receive EOF was not sticky")
+    gc.collect()
+    gc.collect()
+
+    -- Keep each original chunk until later native receives and EOF have reused
+    -- and retired the receive storage. TCP chunk boundaries remain unspecified.
+    local first_result, second_result = "", ""
+    for index = 1, #first_chunks do first_result = first_result .. first_chunks[index] end
+    for index = 1, #second_chunks do second_result = second_result .. second_chunks[index] end
+    test.assert(first_result == first_payload and second_result == second_payload,
+                "later TCP receives, cancellation, or EOF changed retained binary chunks")
+  end)
+end
+
+function test_net_overlapping_writes_preserve_bytes_through_gc_and_cancellation(
+    _context: test.Context)
+  runtime_test.run(function ()
+    local server, port = support.listen_available(28400)
+    support.cleanup_server(_context, server)
+    local connection = net.connect("127.0.0.1", port)
+    support.cleanup_connection(_context, connection)
+    local peer = server:accept()
+    support.cleanup_connection(_context, peer)
+    local start_first: (function (nil): ())? = nil
+    local start_second: (function (nil): ())? = nil
+    local first_piece, second_piece = "first\0\255", "second\0\128"
+    local repetitions = 32768
+    local first_submitted, second_submitted = false, false
+    local first_returned, second_returned = false, false
+    local second: async.Task<|value, value|>? = nil
+    local first = async.run<|value, value|>(function (): value
+      async.await<|nil, nil|>(function (resolve, _reject, _fatal)
+        start_first = resolve
+      end)
+      first_submitted = true
+      connection:write(strings.rep(first_piece, repetitions))
+      first_returned = true
+      return nil
+    end)
+    runtime_test.cleanup(function ()
+      first:cancel(async.CancellationReason.simple("first TCP writer cleanup"))
+      if second ~= nil then
+        second:cancel(async.CancellationReason.simple("second TCP writer cleanup"))
+      end
+      -- Cancel before releasing unused gates, so cleanup cannot start a write.
+      if start_first ~= nil then
+        local release = start_first
+        start_first = nil
+        release(nil)
+      end
+      if start_second ~= nil then
+        local release = start_second
+        start_second = nil
+        release(nil)
+      end
+      -- Retire accepted writes before joining, including when the peer has not
+      -- drained enough bytes to let native write callbacks complete normally.
+      connection:close()
+      peer:close()
+      async.join(first)
+      if second ~= nil then async.join(second) end
+    end)
+    second = async.run<|value, value|>(function (): value
+      async.await<|nil, nil|>(function (resolve, _reject, _fatal)
+        start_second = resolve
+      end)
+      second_submitted = true
+      connection:write(strings.rep(second_piece, repetitions))
+      second_returned = true
+      return nil
+    end)
+    while start_first == nil or start_second == nil do timer.yield() end
+
+    local reason = async.CancellationReason.simple("cancel accepted TCP write")
+    -- Registration runs outside a Task: settling each gate synchronously
+    -- reaches its real write submission before any UV completion can interleave.
+    async.await<|nil, nil|>(function (resolve, _reject, _fatal)
+      local release_first, release_second = start_first, start_second
+      start_first = nil
+      release_first(nil)
+      start_second = nil
+      release_second(nil)
+      test.assert(first_submitted and second_submitted and
+                  first:status():as_string() == "waiting" and
+                  second:status():as_string() == "waiting",
+                  "overlapping TCP writes did not both await their callbacks")
+      first:cancel(reason)
+      gc.collect()
+      gc.collect()
+      test.assert(first:status():as_string() == "waiting" and
+                  second:status():as_string() == "waiting" and
+                  not first_returned and not second_returned,
+                  "TCP writes advanced before their completion callbacks")
+      resolve(nil)
+    end)
+
+    -- Drain while the writes are pending; joining before reading could fill
+    -- the socket buffers. Each writer constructed its own temporary payload.
+    local received = ""
+    while #received < (#first_piece + #second_piece) * repetitions do
+      local chunk? = peer:read()
+      if not chunk then raise "overlapping TCP writes ended early" end
+      received = received .. chunk
+      gc.collect()
+    end
+    async.join(first)
+    async.join(second)
+    local cancelled, actual? = first:status():has_cancelled()
+    test.assert(cancelled and actual == reason and not first_returned,
+                "accepted TCP write lost cancellation or returned normally")
+    test.assert(second:status():has_succeeded() and second_returned,
+                "cancelling one TCP write disturbed the overlapping writer")
+    test.assert(received == strings.rep(first_piece, repetitions) ..
+                            strings.rep(second_piece, repetitions),
+                "overlapping TCP writes changed binary bytes or submission order")
+    connection:shutdown()
+    test.assert(not peer:read(), "TCP shutdown did not follow the accepted writes")
   end)
 end
 

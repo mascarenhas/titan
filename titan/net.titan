@@ -4,22 +4,69 @@ local string = import "string"
 
 -- Stream payloads are binary strings, so delimiter handling uses the string
 -- library's length-aware literal search and slicing operations.
+-- One lazy scratch buffer is reused across paired native reads. A connection
+-- left idle retains at most this many scratch bytes; public chunks are copies.
+local const READ_BUFFER_IDLE_CAPACITY = 64 * 1024
 
 record Connection
   local handle: uv.tcp_t
+  local handle_view: uv.handle_t
+  local stream: uv.stream_t
   local loop: uv.loop_t
   local excess: string
   local input: async.BufferedSubscription<|string, value|>?
   local start_read: (function (): integer)?
   local started: boolean
+  local read_buffer: uv.buf_t?
 end
 
 record Server
   local handle: uv.tcp_t
+  local handle_view: uv.handle_t
+  local stream: uv.stream_t
   local loop: uv.loop_t
   local clients: async.BufferedSubscription<|Connection, value|>?
   local failure: value
   local start_listen: (function (integer): integer)?
+end
+
+local record CloseOperation
+  handle: uv.handle_t
+  completion: async.Completion<|CloseOperation, nil, nil|>?
+  number: integer
+end
+
+local record ResolveOperation
+  loop: uv.loop_t
+  request: uv.getaddrinfo_t
+  host: string
+  port: integer
+  hints: uv.addrinfo_hints_t
+  completion: async.Completion<|ResolveOperation, {uv.sockaddr_t}, integer|>?
+  number: integer
+end
+
+local record ConnectOperation
+  request: uv.connect_t
+  tcp: uv.tcp_t
+  address: uv.sockaddr_t
+  completion: async.Completion<|ConnectOperation, nil, integer|>?
+  number: integer
+end
+
+local record WriteOperation
+  request: uv.write_t
+  stream: uv.stream_t
+  data: string
+  completion: async.Completion<|WriteOperation, nil, integer|>?
+  number: integer
+end
+
+local record ShutdownOperation
+  request: uv.shutdown_t
+  stream: uv.stream_t
+  completion: async.Completion<|ShutdownOperation, nil, integer|>?
+  number: integer
 end
 
 local function is_closed(handle: uv.handle_t): boolean
@@ -34,31 +81,46 @@ local function check_status(code: integer, operation: string)
   if code < 0 then raise operation_error(code, operation) end
 end
 
-local function validate(handle: uv.tcp_t, loop: uv.loop_t, operation: string)
+local function validate(handle: uv.handle_t, loop: uv.loop_t, operation: string)
   async.running()
   if loop ~= async.current_loop() then
     raise "TCP resource belongs to a different async Runtime"
   end
-  if is_closed(handle:as_handle_t()) then
+  if is_closed(handle) then
     raise "cannot " .. operation .. " a closed TCP resource"
   end
 end
 
+local function closed(handle: uv.handle_t)
+  local context = uv.handle_get_data(handle) as CloseOperation
+  local completion = context.completion as async.Completion<|CloseOperation, nil, nil|>
+  local number = context.number
+  uv.handle_set_data(handle, nil)
+  context.completion = nil
+  do completion:resolve(number, nil)
+  catch completion:fatal(number, error, traceback); raise end
+end
+
+local function start_close(completion: async.Completion<|CloseOperation, nil, nil|>,
+                           number: integer): uv.req_t?
+  local context = completion:context(number)
+  context.completion = completion
+  context.number = number
+  uv.handle_set_data(context.handle, context)
+  uv.close(context.handle, closed)
+  return nil
+end
+
 local function close_handle(handle: uv.handle_t)
   if is_closed(handle) then return end
-  async.await_cleanup<|nil, nil|>(function (resolve, _reject, fatal)
-    local callback = function (_: uv.handle_t)
-      do resolve(nil)
-      catch fatal(error, traceback); raise end
-    end
-    uv.close(handle, callback)
-  end)
+  async.await_cleanup_with<|CloseOperation, nil, nil|>(
+    CloseOperation(handle, nil, 0), start_close)
 end
 
 -- Unpublished sockets have no reader. Native close retains their owner; failed
 -- connection candidates and queued accepts need not await each close callback.
 local function abandon(connection: Connection)
-  local handle = connection.handle:as_handle_t()
+  local handle = connection.handle_view
   if not is_closed(handle) then uv.close(handle) end
 end
 
@@ -66,10 +128,12 @@ local function new_connection(loop: uv.loop_t): Connection
   local tcp = uv.tcp_t.new()
   local stream = tcp:as_stream_t()
   local handle = tcp:as_handle_t()
-  local connection = Connection(tcp, loop, "", nil, nil, false)
+  local connection = Connection(tcp, handle, stream, loop, "", nil, nil, false, nil)
   connection.input = async.BufferedSubscription<|string, value|>(function (publish, fail, finish)
     local stop = function ()
       if connection.started then uv.read_stop(stream) end
+      -- Public UV independently retains any outstanding allocation/read pair.
+      connection.read_buffer = nil
     end
     local close = function (drain: function (): async.SubscriptionBatch<|string|>)
       drain()
@@ -77,7 +141,16 @@ local function new_connection(loop: uv.loop_t): Connection
     end
     local actions = async.SubscriptionActions<|string|>(stop, close)
     local allocate = function (_: uv.handle_t, suggested: integer): uv.buf_t
-      return uv.buf_t.allocate(suggested)
+      local capacity = suggested
+      if capacity < 1 or capacity > READ_BUFFER_IDLE_CAPACITY then
+        capacity = READ_BUFFER_IDLE_CAPACITY
+      end
+      local buffer? = connection.read_buffer
+      if buffer == nil or buffer:length() < capacity then
+        buffer = uv.buf_t.allocate(capacity)
+        connection.read_buffer = buffer
+      end
+      return buffer
     end
     local receive = function (_: uv.stream_t, count: integer, buffer: uv.buf_t?)
       if count == 0 then return end
@@ -85,6 +158,7 @@ local function new_connection(loop: uv.loop_t): Connection
         publish(buffer:to_string(count))
       else
         uv.read_stop(stream)
+        connection.read_buffer = nil
         if count == uv.EOF then finish()
         else fail(operation_error(count, "net.read")) end
       end
@@ -98,6 +172,51 @@ local function new_connection(loop: uv.loop_t): Connection
   return connection
 end
 
+local function resolved(request: uv.getaddrinfo_t, status: integer,
+                        native: uv.addrinfo_result_t?)
+  local context = request:get_data() as ResolveOperation
+  local completion = context.completion as async.Completion<|ResolveOperation, {uv.sockaddr_t}, integer|>
+  local number = context.number
+  request:set_data(nil)
+  context.completion = nil
+  do
+    local addresses: {uv.sockaddr_t} = {}
+    do
+      defer uv.freeaddrinfo(native)
+      if status >= 0 then
+        local entries = native:entries()
+        for index = 1, #entries do
+          local entry = entries[index]
+          if entry.ai_addr ~= nil and
+             (entry.ai_family == uv.AF_INET or entry.ai_family == uv.AF_INET6) then
+            addresses[#addresses + 1] = entry.ai_addr
+          end
+        end
+      end
+    end
+    if status < 0 then completion:reject(number, status)
+    elseif #addresses == 0 then completion:reject(number, uv.EADDRNOTAVAIL)
+    else completion:resolve(number, addresses) end
+  catch completion:fatal(number, error, traceback); raise end
+end
+
+local function start_resolve(
+    completion: async.Completion<|ResolveOperation, {uv.sockaddr_t}, integer|>,
+    number: integer): uv.req_t?
+  local context = completion:context(number)
+  context.completion = completion
+  context.number = number
+  context.request:set_data(context)
+  local status = uv.getaddrinfo(context.loop, context.request, resolved,
+    context.host, "" .. context.port, context.hints)
+  if status < 0 then
+    context.request:set_data(nil)
+    context.completion = nil
+    completion:reject(number, status)
+  end
+  return nil
+end
+
 local function resolve_addresses(host: string, port: integer): {uv.sockaddr_t}
   if string.find(host, "\0") ~= nil then raise operation_error(uv.EINVAL, "net.resolve") end
   local loop = async.current_loop()
@@ -109,42 +228,100 @@ local function resolve_addresses(host: string, port: integer): {uv.sockaddr_t}
     local _, retained = request:addrinfo()
     uv.freeaddrinfo(retained)
   end
-  local result = async.await<|{uv.sockaddr_t}, integer|>(function (resolve, reject, fatal)
-    local callback = function (_: uv.getaddrinfo_t, status: integer, native: uv.addrinfo_result_t?)
-      do
-        local addresses: {uv.sockaddr_t} = {}
-        do
-          defer uv.freeaddrinfo(native)
-          if status >= 0 then
-            local entries = native:entries()
-            for index = 1, #entries do
-              local entry = entries[index]
-              if entry.ai_addr ~= nil and
-                 (entry.ai_family == uv.AF_INET or entry.ai_family == uv.AF_INET6) then
-                addresses[#addresses + 1] = entry.ai_addr
-              end
-            end
-          end
-        end
-        if status < 0 then reject(status)
-        elseif #addresses == 0 then reject(uv.EADDRNOTAVAIL)
-        else resolve(addresses) end
-      catch fatal(error, traceback); raise end
-    end
-    local status = uv.getaddrinfo(loop, request, callback, host, "" .. port, hints)
-    if status < 0 then reject(status) end
-  end)
+  local result = async.await_with<|ResolveOperation, {uv.sockaddr_t}, integer|>(
+    ResolveOperation(loop, request, host, port, hints, nil, 0), start_resolve)
   case result
   when success(addresses) then return addresses
   when error(code) then raise operation_error(code, "net.resolve")
   end
 end
 
+local function connected(request: uv.connect_t, status: integer)
+  local context = request:get_data() as ConnectOperation
+  local completion = context.completion as async.Completion<|ConnectOperation, nil, integer|>
+  local number = context.number
+  request:set_data(nil)
+  context.completion = nil
+  do
+    if status < 0 then completion:reject(number, status)
+    else completion:resolve(number, nil) end
+  catch completion:fatal(number, error, traceback); raise end
+end
+
+local function start_connect(completion: async.Completion<|ConnectOperation, nil, integer|>,
+                             number: integer): uv.req_t?
+  local context = completion:context(number)
+  context.completion = completion
+  context.number = number
+  context.request:set_data(context)
+  local status = uv.tcp_connect(context.request, context.tcp, context.address, connected)
+  if status < 0 then
+    context.request:set_data(nil)
+    context.completion = nil
+    completion:reject(number, status)
+  end
+  return nil
+end
+
+local function written(request: uv.write_t, status: integer)
+  local context = request:get_data() as WriteOperation
+  local completion = context.completion as async.Completion<|WriteOperation, nil, integer|>
+  local number = context.number
+  request:set_data(nil)
+  context.completion = nil
+  do
+    if status < 0 then completion:reject(number, status)
+    else completion:resolve(number, nil) end
+  catch completion:fatal(number, error, traceback); raise end
+end
+
+local function start_write(completion: async.Completion<|WriteOperation, nil, integer|>,
+                           number: integer): uv.req_t?
+  local context = completion:context(number)
+  context.completion = completion
+  context.number = number
+  context.request:set_data(context)
+  local status = uv.write_string(context.request, context.stream, context.data, written)
+  if status < 0 then
+    context.request:set_data(nil)
+    context.completion = nil
+    completion:reject(number, status)
+  end
+  return nil
+end
+
+local function shut_down(request: uv.shutdown_t, status: integer)
+  local context = request:get_data() as ShutdownOperation
+  local completion = context.completion as async.Completion<|ShutdownOperation, nil, integer|>
+  local number = context.number
+  request:set_data(nil)
+  context.completion = nil
+  do
+    if status < 0 then completion:reject(number, status)
+    else completion:resolve(number, nil) end
+  catch completion:fatal(number, error, traceback); raise end
+end
+
+local function start_shutdown(completion: async.Completion<|ShutdownOperation, nil, integer|>,
+                              number: integer): uv.req_t?
+  local context = completion:context(number)
+  context.completion = completion
+  context.number = number
+  context.request:set_data(context)
+  local status = uv.shutdown(context.request, context.stream, shut_down)
+  if status < 0 then
+    context.request:set_data(nil)
+    context.completion = nil
+    completion:reject(number, status)
+  end
+  return nil
+end
+
 local function fail_server(server: Server, failure: value)
   server.failure = failure
   local pending = server.clients:drain_pending()
   for index = 1, pending.count do abandon(pending:get(index)) end
-  local handle = server.handle:as_handle_t()
+  local handle = server.handle_view
   if not is_closed(handle) then uv.close(handle) end
   server.clients:stop()
 end
@@ -152,7 +329,8 @@ end
 local function new_server(loop: uv.loop_t): Server
   local tcp = uv.tcp_t.new()
   local handle = tcp:as_handle_t()
-  local server = Server(tcp, loop, nil, nil, nil)
+  local stream = tcp:as_stream_t()
+  local server = Server(tcp, handle, stream, loop, nil, nil, nil)
   server.clients = async.BufferedSubscription<|Connection, value|>(function (publish, _fail, _finish)
     local actions = async.SubscriptionActions<|Connection|>(function () end,
       function (drain: function (): async.SubscriptionBatch<|Connection|>)
@@ -165,7 +343,7 @@ local function new_server(loop: uv.loop_t): Server
       defer if client ~= nil then abandon(client) end
       if status < 0 then fail_server(server, operation_error(status, "net.accept")); return end
       client = new_connection(loop)
-      local accepted = uv.accept(tcp:as_stream_t(), client.handle:as_handle_t())
+      local accepted = uv.accept(stream, client.handle_view)
       if accepted < 0 then fail_server(server, operation_error(accepted, "net.accept")); return end
       if publish(client) then client = nil end
     catch
@@ -173,7 +351,7 @@ local function new_server(loop: uv.loop_t): Server
       raise
     end
     server.start_listen = function (backlog: integer): integer
-      return uv.listen(tcp:as_stream_t(), backlog, callback)
+      return uv.listen(stream, backlog, callback)
     end
     return actions
   end)
@@ -198,8 +376,9 @@ local function check_listen_port(port: integer)
 end
 
 local function read(connection: Connection): string?
-  if is_closed(connection.handle:as_handle_t()) then
+  if is_closed(connection.handle_view) then
     connection.excess = ""
+    connection.read_buffer = nil
     return nil
   end
   if #connection.excess > 0 then
@@ -207,10 +386,9 @@ local function read(connection: Connection): string?
     connection.excess = ""
     return result
   end
-  validate(connection.handle, connection.loop, "read from")
-  -- The old ordinary wait injected cancellation before checking reader
-  -- contention or accepting the first persistent read.
-  async.await<|nil, nil|>(function (resolve, _reject, _fatal) resolve(nil) end)
+  validate(connection.handle_view, connection.loop, "read from")
+  -- Admit cancellation before reader contention or the first persistent read.
+  async.checkpoint()
   if connection.input:has_waiter() then raise "Connection already has a waiting reader" end
   if not connection.started then
     check_status(connection.start_read(), "net.read.start")
@@ -238,15 +416,8 @@ function connect(host: string, port: integer): Connection
       defer if not transferred then abandon(connection) end
       local request = uv.connect_t.new()
       local address = addresses[index]
-      case async.await<|nil, integer|>(function (resolve, reject, fatal)
-        local callback = function (_: uv.connect_t, status: integer)
-          do
-            if status < 0 then reject(status) else resolve(nil) end
-          catch fatal(error, traceback); raise end
-        end
-        local status = uv.tcp_connect(request, connection.handle, address, callback)
-        if status < 0 then reject(status) end
-      end)
+      case async.await_with<|ConnectOperation, nil, integer|>(
+        ConnectOperation(request, connection.handle, address, nil, 0), start_connect)
       when success() then
       when error(code) then raise operation_error(code, "net.connect")
       end
@@ -279,7 +450,7 @@ function listen(host: string, port: integer,
     local server = new_server(loop)
     local transferred = false
     defer if not transferred then
-      local handle = server.handle:as_handle_t()
+      local handle = server.handle_view
       if not is_closed(handle) then uv.close(handle) end
     end
     local status = uv.tcp_bind(server.handle, addresses[index], 0)
@@ -296,8 +467,9 @@ end
 
 function Connection:read_until(delimiter: string,
                                chop: boolean?): string?
-  if is_closed(self.handle:as_handle_t()) then
+  if is_closed(self.handle_view) then
     self.excess = ""
+    self.read_buffer = nil
     return nil
   end
   if #delimiter == 0 then raise "read delimiter must not be empty" end
@@ -343,40 +515,26 @@ function Connection:read_until(delimiter: string,
 end
 
 function Connection:write(data: string)
-  validate(self.handle, self.loop, "write to")
-  local stream = self.handle:as_stream_t()
+  validate(self.handle_view, self.loop, "write to")
+  local stream = self.stream
   if not uv.is_writable(stream) then raise "cannot write after Connection shutdown" end
   if #data == 0 then return end
   local request = uv.write_t.new()
-  local buffers = {uv.buf_t.from_string(data)}
-  case async.await<|nil, integer|>(function (resolve, reject, fatal)
-    local callback = function (_: uv.write_t, status: integer)
-      do
-        if status < 0 then reject(status) else resolve(nil) end
-      catch fatal(error, traceback); raise end
-    end
-    local status = uv.write(request, stream, buffers, callback)
-    if status < 0 then reject(status) end
-  end)
+  uv.buf_check_length(data, #data)
+  case async.await_with<|WriteOperation, nil, integer|>(
+    WriteOperation(request, stream, data, nil, 0), start_write)
   when success() then
   when error(code) then raise operation_error(code, "net.write")
   end
 end
 
 function Connection:shutdown()
-  validate(self.handle, self.loop, "shut down")
-  local stream = self.handle:as_stream_t()
+  validate(self.handle_view, self.loop, "shut down")
+  local stream = self.stream
   if not uv.is_writable(stream) then return end
   local request = uv.shutdown_t.new()
-  case async.await<|nil, integer|>(function (resolve, reject, fatal)
-    local callback = function (_: uv.shutdown_t, status: integer)
-      do
-        if status < 0 then reject(status) else resolve(nil) end
-      catch fatal(error, traceback); raise end
-    end
-    local status = uv.shutdown(request, stream, callback)
-    if status < 0 then reject(status) end
-  end)
+  case async.await_with<|ShutdownOperation, nil, integer|>(
+    ShutdownOperation(request, stream, nil, 0), start_shutdown)
   when success() then
   when error(code) then raise operation_error(code, "net.shutdown")
   end
@@ -384,15 +542,16 @@ end
 
 function Connection:close()
   self.excess = ""
-  if is_closed(self.handle:as_handle_t()) then return end
-  validate(self.handle, self.loop, "close")
+  self.read_buffer = nil
+  if is_closed(self.handle_view) then return end
+  validate(self.handle_view, self.loop, "close")
   self.input:close()
 end
 
 function Server:accept(): Connection
   if self.failure ~= nil then raise self.failure end
-  validate(self.handle, self.loop, "accept on")
-  async.await<|nil, nil|>(function (resolve, _reject, _fatal) resolve(nil) end)
+  validate(self.handle_view, self.loop, "accept on")
+  async.checkpoint()
   if self.clients:has_waiter() then raise "Server already has a waiting accept Task" end
   local result = self.clients:next()
   if self.failure ~= nil then raise self.failure end
@@ -405,7 +564,7 @@ function Server:accept(): Connection
 end
 
 function Server:close()
-  if is_closed(self.handle:as_handle_t()) then return end
-  validate(self.handle, self.loop, "close")
+  if is_closed(self.handle_view) then return end
+  validate(self.handle_view, self.loop, "close")
   self.clients:close()
 end

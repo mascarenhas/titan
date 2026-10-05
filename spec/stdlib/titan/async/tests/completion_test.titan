@@ -1,0 +1,400 @@
+-- Public contextual completion capabilities and their operation-scoped lifetime.
+local record CompletionTestContext
+  number: integer
+  text: string
+end
+
+local function completion_test_raises(action: function (): ())
+  local caught = false
+  do action() catch caught = true end
+  test.assert(caught, "stale or invalid Completion operation was accepted")
+end
+
+local function completion_test_later(milliseconds: integer, action: function (): ())
+  local owner = uv.timer_t.new()
+  local closed = function (_: uv.timer_t) action() end
+  local fired = function (timer: uv.timer_t) uv.timer_close(timer, closed) end
+  test.assert(uv.timer_init(async.current_loop(), owner) == 0, "completion timer init")
+  local status = uv.timer_start(owner, fired, milliseconds, 0)
+  if status < 0 then uv.timer_close(owner); raise "completion timer start" end
+end
+
+local function completion_test_success_nil(done: async.Completion<|integer, nil, nil|>, number: integer): uv.req_t?
+  test.assert(done:context(number) == 41, "integer context changed")
+  done:resolve(number, nil)
+  return nil
+end
+
+local function completion_test_error_nil(done: async.Completion<|integer, nil, nil|>, number: integer): uv.req_t?
+  test.assert(done:context(number) == 41, "integer context changed")
+  done:reject(number, nil)
+  return nil
+end
+
+local function completion_test_success_false(done: async.Completion<|boolean, boolean, boolean|>, number: integer): uv.req_t?
+  test.assert(not done:context(number), "false context changed")
+  done:resolve(number, false)
+  return nil
+end
+
+local function completion_test_error_false(done: async.Completion<|boolean, boolean, boolean|>, number: integer): uv.req_t?
+  test.assert(not done:context(number), "false context changed")
+  done:reject(number, false)
+  return nil
+end
+
+function test_completion_preserves_typed_nil_false_and_all_wait_policies(context: test.Context)
+  runtime_test.run(function ()
+    case async.await_with<|integer, nil, nil|>(41, completion_test_success_nil)
+    when success(item) then test.assert(item == nil, "ordinary nil success")
+    else raise "ordinary nil success tag" end
+    case async.await_with<|integer, nil, nil|>(41, completion_test_error_nil)
+    when error(item) then test.assert(item == nil, "ordinary nil error")
+    else raise "ordinary nil error tag" end
+    case async.await_with<|boolean, boolean, boolean|>(false, completion_test_success_false)
+    when success(item) then test.assert(not item, "ordinary false success")
+    else raise "ordinary false success tag" end
+    case async.await_with<|boolean, boolean, boolean|>(false, completion_test_error_false)
+    when error(item) then test.assert(not item, "ordinary false error")
+    else raise "ordinary false error tag" end
+
+    case async.await_cancellable_with<|integer, nil, nil|>(41, completion_test_success_nil)
+    when success(item) then test.assert(item == nil, "cancellable nil success")
+    else raise "cancellable nil success tag" end
+    case async.await_cancellable_with<|integer, nil, nil|>(41, completion_test_error_nil)
+    when error(item) then test.assert(item == nil, "cancellable nil error")
+    else raise "cancellable nil error tag" end
+    case async.await_cancellable_with<|boolean, boolean, boolean|>(false, completion_test_success_false)
+    when success(item) then test.assert(not item, "cancellable false success")
+    else raise "cancellable false success tag" end
+    case async.await_cancellable_with<|boolean, boolean, boolean|>(false, completion_test_error_false)
+    when error(item) then test.assert(not item, "cancellable false error")
+    else raise "cancellable false error tag" end
+
+    case async.await_cleanup_with<|integer, nil, nil|>(41, completion_test_success_nil)
+    when success(item) then test.assert(item == nil, "cleanup nil success")
+    else raise "cleanup nil success tag" end
+    case async.await_cleanup_with<|integer, nil, nil|>(41, completion_test_error_nil)
+    when error(item) then test.assert(item == nil, "cleanup nil error")
+    else raise "cleanup nil error tag" end
+    case async.await_cleanup_with<|boolean, boolean, boolean|>(false, completion_test_success_false)
+    when success(item) then test.assert(not item, "cleanup false success")
+    else raise "cleanup false success tag" end
+    case async.await_cleanup_with<|boolean, boolean, boolean|>(false, completion_test_error_false)
+    when error(item) then test.assert(not item, "cleanup false error")
+    else raise "cleanup false error tag" end
+  end)
+end
+
+function test_completion_same_stack_successor_has_independent_typed_context(context: test.Context)
+  runtime_test.run(function ()
+    local second_registered, first_checked, second_completed = false, false, false
+    local first = async.await_with<|CompletionTestContext, integer, nil|>(
+        CompletionTestContext(17, "first"), function (done, number): uv.req_t?
+      completion_test_later(0, function ()
+        local saved = done:context(number)
+        do
+          done:resolve(number, saved.number)
+          test.assert(second_registered, "settlement did not enter the next registration")
+          test.assert(saved.text == "first", "saved old context changed during resumption")
+          completion_test_raises(function () done:context(number) end)
+          completion_test_raises(function () done:resolve(number, 99) end)
+          completion_test_raises(function () done:reject(number, nil) end)
+          first_checked = true
+        catch done:fatal(number, error, traceback); raise end
+      end)
+      return nil
+    end)
+    case first
+    when success(item) then test.assert(item == 17, "first typed result changed")
+    else raise "first typed result tag" end
+
+    local second = async.await_with<|string, boolean, integer|>("second", function (done, number): uv.req_t?
+      second_registered = true
+      completion_test_later(1, function ()
+        do
+          test.assert(first_checked and done:context(number) == "second", "successor context changed")
+          second_completed = true
+          done:resolve(number, false)
+        catch done:fatal(number, error, traceback); raise end
+      end)
+      return nil
+    end)
+    case second
+    when success(item) then test.assert(not item and second_completed, "successor result changed")
+    else raise "successor typed result tag" end
+  end)
+end
+
+function test_completion_retired_context_is_released_with_task_and_capability_retained(context: test.Context)
+  runtime_test.run(function ()
+    local finalized = false
+    local saved: async.Completion<|{string: value}, nil, nil|>? = nil
+    local operation_number = 0
+    local target = async.run<|nil, nil|>(function (): nil
+      local payload_context: {string: value} = {["payload"] = "released with the operation"}
+      support.mark_finalizable(payload_context, function (_: value) finalized = true end)
+      async.await_with<|{string: value}, nil, nil|>(payload_context, function (done, number): uv.req_t?
+        saved = done
+        operation_number = number
+        done:resolve(number, nil)
+        return nil
+      end)
+      return nil
+    end)
+    task_support.cleanup_task(target, "Completion retained-context cleanup")
+    test.assert(async.join(target):has_succeeded(), "retained-context Task failed")
+    support.collect_garbage()
+    support.collect_garbage()
+    test.assert(finalized, "finished Task or retired capability retained the context")
+    completion_test_raises(function () saved:context(operation_number) end)
+    completion_test_raises(function () saved:resolve(operation_number, nil) end)
+    test.assert(target:status():has_succeeded(), "retired capability changed terminal Task state")
+  end)
+end
+
+function test_completion_registration_is_outside_task_and_exception_beats_inline_result(context: test.Context)
+  completion_test_raises(function ()
+    async.await_with<|integer, nil, nil|>(41, completion_test_success_nil)
+  end)
+  runtime_test.run(function ()
+    local returned = false
+    local marker = CompletionTestContext(23, "registration exception")
+    local caught = false
+    do
+      async.await_with<|CompletionTestContext, nil, nil|>(marker, function (done, number): uv.req_t?
+        test.assert(done:context(number) == marker, "registration context identity")
+        completion_test_raises(function () async.running() end)
+        completion_test_raises(function () async.yield() end)
+        completion_test_raises(function () async.loop() end)
+        done:resolve(number, nil)
+        test.assert(not returned, "inline result resumed before registration returned")
+        raise marker
+        return nil
+      end)
+      returned = true
+    catch caught = error == marker end
+    test.assert(caught and not returned, "inline result overrode registration exception")
+    completion_test_raises(function ()
+      async.await_cancellable_with<|nil, nil, nil|>(nil, function (_done, _number): uv.req_t?
+        return nil
+      end)
+    end)
+    -- The compatibility facade keeps its original payload and exception rules.
+    case async.await<|boolean, nil|>(function (resolve, _reject, _fatal) resolve(false) end)
+    when success(item) then test.assert(not item, "legacy payload changed")
+    else raise "legacy result tag" end
+  end)
+end
+
+function test_completion_pre_cancellation_skips_registration_but_allows_cleanup(context: test.Context)
+  runtime_test.run(function ()
+    local first = async.CancellationReason<|value|>.complex(false)
+    local registrations = 0
+    local cleanup_returned = false
+    local target = async.run<|nil, value|>(function (): nil
+      async.running():cancel(first)
+      async.running():cancel(async.CancellationReason.simple("later"))
+      local caught = false
+      do
+        async.await_with<|nil, nil, nil|>(nil, function (done, number): uv.req_t?
+          registrations = registrations + 1
+          done:resolve(number, nil)
+          return nil
+        end)
+      catch caught = error == first end
+      test.assert(caught, "ordinary Completion lost the first cancellation")
+      case async.await_cancellable_with<|nil, nil, nil|>(nil, function (done, number): uv.req_t?
+        registrations = registrations + 1
+        done:resolve(number, nil)
+        return nil
+      end)
+      when cancelled(reason) then test.assert(reason == first, "cancellable reason changed")
+      else raise "pre-cancelled Completion result tag" end
+      case async.await_cleanup_with<|boolean, boolean, boolean|>(false, function (done, number): uv.req_t?
+        registrations = registrations + 1
+        done:resolve(number, done:context(number))
+        return nil
+      end)
+      when success(item) then test.assert(not item, "cleanup payload changed")
+      else raise "cleanup Completion result tag" end
+      cleanup_returned = true
+      return nil
+    end)
+    task_support.cleanup_task(target, "Completion pre-cancel cleanup")
+    case async.join(target)
+    when cancelled(reason) then test.assert(reason == first, "terminal cancellation changed")
+    else raise "Completion cancellation ceased to be sticky" end
+    test.assert(registrations == 1 and cleanup_returned,
+        "pre-cancelled ordinary work was registered or cleanup did not return")
+  end)
+end
+
+function test_completion_cancellation_waits_for_accepted_native_request(context: test.Context)
+  runtime_test.run(function ()
+    local first = async.CancellationReason<|value|>.complex(false)
+    local submitted, completed, returned_cancelled = false, false, false
+    local target = async.run<|nil, value|>(function (): nil
+      local owner = async.running()
+      local result = async.await_cancellable_with<|uv.fs_t, integer, string|>(uv.fs_t.new(), function (done, number): uv.req_t?
+        local request = done:context(number)
+        local view = request:as_req_t()
+        local callback = function (_: uv.fs_t)
+          local status = uv.fs_get_result(request)
+          uv.fs_req_cleanup(request)
+          do
+            completed = true
+            done:resolve(number, status)
+          catch done:fatal(number, error, traceback); raise end
+        end
+        local status = uv.fs_stat(async.current_loop(), request, ".", callback)
+        if status < 0 then
+          uv.fs_req_cleanup(request)
+          done:reject(number, uv.strerror(status))
+          return nil
+        end
+        submitted = true
+        owner:cancel(first)
+        return view
+      end)
+      case result
+      when cancelled(reason) then returned_cancelled = reason == first and completed
+      else raise "accepted Completion ignored cancellation" end
+      return nil
+    end)
+    task_support.cleanup_task(target, "Completion accepted-request cleanup")
+    case async.join(target)
+    when cancelled(reason) then test.assert(reason == first, "accepted request cancellation changed")
+    else raise "accepted request lost cancellation status" end
+    test.assert(submitted and completed and returned_cancelled, "Completion abandoned native ownership")
+  end)
+end
+
+function test_completion_registration_rollback_keeps_its_own_context_until_callback(context: test.Context)
+  runtime_test.run(function ()
+    local rollback_finished = false
+    local stale: async.Completion<|CompletionTestContext, nil, nil|>? = nil
+    local stale_number = 0
+    local successor: async.Completion<|integer, integer, nil|>? = nil
+    local successor_number = 0
+    local caught = false
+    do
+      async.await_with<|CompletionTestContext, nil, nil|>(
+          CompletionTestContext(29, "pending native rollback"), function (done, number): uv.req_t?
+        local saved_context = done:context(number)
+        stale, stale_number = done, number
+        completion_test_later(0, function ()
+          do
+            test.assert(saved_context.number == 29 and saved_context.text == "pending native rollback",
+                "partial-acceptance rollback lost its saved context")
+            completion_test_raises(function () done:context(number) end)
+            rollback_finished = true
+            -- The new cleanup operation waits for this independently owned
+            -- rollback callback; no timing assumption orders two timers.
+            local next = successor as async.Completion<|integer, integer, nil|>
+            local next_number = successor_number
+            next:resolve(next_number, next:context(next_number))
+          catch
+            if successor ~= nil then successor:fatal(successor_number, error, traceback)
+            else done:fatal(number, error, traceback) end
+            raise
+          end
+        end)
+        raise "registration failed after accepting rollback"
+        return nil
+      end)
+    catch caught = error == "registration failed after accepting rollback" end
+    test.assert(caught, "registration failure was not delivered to its Task")
+    support.collect_garbage()
+    local result = async.await_cleanup_with<|integer, integer, nil|>(31, function (done, number): uv.req_t?
+      successor, successor_number = done, number
+      return nil
+    end)
+    case result
+    when success(item) then test.assert(item == 31 and rollback_finished, "rollback corrupted successor context")
+    else raise "rollback successor result tag" end
+    completion_test_raises(function () stale:resolve(stale_number, nil) end)
+  end)
+end
+
+function test_completion_peer_settlement_defers_delivery_and_preserves_legacy_stale_error(context: test.Context)
+  runtime_test.run(function ()
+    local done: async.Completion<|nil, boolean, nil|>? = nil
+    local number = 0
+    local returned = false
+    local settled = false
+    local old_resolve: (function (nil): ())? = nil
+    local target = async.run<|nil, nil|>(function (): nil
+      async.await<|nil, nil|>(function (resolve, _reject, _fatal)
+        old_resolve = resolve
+        resolve(nil)
+      end)
+      local result = async.await_with<|nil, boolean, nil|>(nil, function (capability, operation_number): uv.req_t?
+        done, number = capability, operation_number
+        return nil
+      end)
+      case result
+      when success(item) then test.assert(not item, "peer completion payload")
+      else raise "peer completion result tag" end
+      returned = true
+      return nil
+    end)
+    task_support.cleanup_task(target, "Completion peer cleanup")
+    runtime_test.cleanup(function ()
+      if done ~= nil and not settled then
+        done:resolve(number, false)
+        settled = true
+      end
+    end)
+    while done == nil do
+      test.assert(not target:status():has_finished(), "peer target failed before registration")
+      async.yield()
+    end
+    await_test_expect_error(function () old_resolve(nil) end, "async operation already settled")
+    completion_test_raises(function () done:fatal(number, "wrong Task context", "") end)
+    done:resolve(number, false)
+    settled = true
+    test.assert(not returned, "peer Completion reentered its waiting Task")
+    completion_test_raises(function () done:reject(number, nil) end)
+    test.assert(async.join(target):has_succeeded() and returned, "deferred Completion was lost")
+  end)
+end
+
+function test_completion_late_fatal_preserves_successor_cleanup_and_first_error(context: test.Context)
+  local marker = FatalMarker(1960, "")
+  local successor_registered, successor_completed, successor_returned = false, false, false
+  local target = async.run<|nil, value|>(function (): nil
+    async.await_with<|nil, nil, nil|>(nil, function (done, number): uv.req_t?
+      completion_test_later(0, function ()
+        done:resolve(number, nil)
+        test.assert(successor_registered, "old terminal callback did not enter successor cleanup")
+        do fatal_test_fatal_origin(marker)
+        catch
+          marker.source_trace = traceback
+          done:fatal(number, error, traceback)
+          raise
+        end
+      end)
+      return nil
+    end)
+    local result = async.await_cleanup_with<|string, string, nil|>("new cleanup", function (done, number): uv.req_t?
+      successor_registered = true
+      completion_test_later(1, function ()
+        do
+          local value = done:context(number)
+          successor_completed = true
+          done:resolve(number, value)
+        catch done:fatal(number, error, traceback); raise end
+      end)
+      return nil
+    end)
+    case result
+    when success(item) then successor_returned = item == "new cleanup"
+    else raise "late fatal changed successor cleanup result" end
+    return nil
+  end)
+  fatal_test_drive_failure(marker)
+  test.assert(successor_completed and successor_returned, "old fatal abandoned accepted cleanup")
+  test.assert(target:status():has_cancelled(), "late fatal lost Runtime shutdown cancellation")
+  runtime_test.run(function () async.yield() end)
+end

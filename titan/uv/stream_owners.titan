@@ -575,6 +575,14 @@ function connect_t:as_req_t(): req_t
   return req_t.connect(self)
 end
 
+function connect_t:get_data(): value
+  return self.userdata
+end
+
+function connect_t:set_data(data: value)
+  self.userdata = data
+end
+
 function connect_t:handle(): stream_t?
   return self.stream
 end
@@ -616,6 +624,8 @@ record write_t
   local stream: stream_t?
   local buffers: {buf_t}?
   local native_buffers: (owned uv_buf_t[])?
+  local string_buffer: foreign uv_buf_t
+  local string_data: string?
   local send_stream: handle_t?
   local callback: write_cb?
   local handler: function (write_t, loop_t, integer): ()
@@ -624,8 +634,10 @@ end
 
 function write_t.new(): write_t
   local native = foreign uv_write_t.new()
+  local string_buffer = foreign uv_buf_t.new()
   return {native = native, loop = nil, pending = false, stream = nil,
-    buffers = nil, native_buffers = nil, send_stream = nil,
+    buffers = nil, native_buffers = nil,
+    string_buffer = string_buffer, string_data = nil, send_stream = nil,
     callback = nil, handler = write_deliver, userdata = nil}
 end
 
@@ -637,6 +649,14 @@ function write_t:handle(): stream_t?
   return self.stream
 end
 
+function write_t:get_data(): value
+  return self.userdata
+end
+
+function write_t:set_data(data: value)
+  self.userdata = data
+end
+
 local function write_deliver(owner: write_t, loop: loop_t, status: integer)
   loop.requests[owner] = nil
   owner.pending = false
@@ -645,6 +665,7 @@ local function write_deliver(owner: write_t, loop: loop_t, status: integer)
   owner.callback = nil
   owner.buffers = nil
   owner.native_buffers = nil
+  owner.string_data = nil
   if callback ~= nil then callback(owner, status) end
 catch
   if loop.failure_count == 0 then
@@ -667,6 +688,8 @@ foreign function network_write_callback(native: *uv_write_t, status: int)
   ffi.titan_uv_push_owner(L, owner)
   ffi.lua_pushtvalue(L, ffi.titan_record_field(owner, "write_t", "buffers"))
   ffi.lua_pushtvalue(L, ffi.titan_record_field(owner, "write_t", "native_buffers"))
+  -- The old immutable bytes survive callback-time request reuse and errors.
+  ffi.lua_pushtvalue(L, ffi.titan_record_field(owner, "write_t", "string_data"))
   entry(L, module, handler, owner, loop, status as foreign lua_Integer)
   ffi.lua_settop(L, top)
 end
@@ -689,6 +712,14 @@ end
 
 function shutdown_t:as_req_t(): req_t
   return req_t.shutdown(self)
+end
+
+function shutdown_t:get_data(): value
+  return self.userdata
+end
+
+function shutdown_t:set_data(data: value)
+  self.userdata = data
 end
 
 function shutdown_t:handle(): stream_t?

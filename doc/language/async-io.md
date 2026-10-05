@@ -105,13 +105,21 @@ complete pair, for example `async.run<|string, value|>(func)`; there is no parti
 type-argument list. `running()` deliberately returns the bare all-value Task,
 not an inferred application.
 
-`async.run<|A, B|>(func)` creates and roots a Task, registers a zero-duration
-libuv timer, and returns without calling `func`. The Runtime retains an
-all-value view of that same Task while its public type preserves `A` and `B`.
-The timer callback submits `uv_close`; its close callback releases the timer owner and only then starts the
-Task on a later event-loop turn. Every one-shot timer uses this close-before-
-resume order. Calling `run` from another Task is valid and still does not run
-the new Task inline.
+`async.run<|A, B|>(func)` creates and roots a Task, queues its startup, and
+returns without calling `func`. The Runtime retains an all-value view of that
+same Task while its public type preserves `A` and `B`. One Runtime-owned
+zero-duration timer services a FIFO queue of Task startups, explicit yields,
+signal resumes, and peer-Task settlements. Each callback handles at most 64
+entries present at its start; newly queued work waits for a later callback.
+This gives other native callbacks opportunities to run during sustained Task
+activity. Calling `run` from another Task is valid and still does not run the
+new Task inline. Scheduling no longer creates and closes a timer per wake;
+ordering relative to unrelated native close callbacks can therefore differ.
+
+`Task:status()` returns a snapshot. Repeated observations during one state
+transition return the same snapshot; a later transition gets a fresh snapshot,
+even if its tag is again `running` or `waiting`. Retained snapshots never
+change. Unobserved nonterminal transitions do not construct public snapshots.
 
 `async.run_foreign(f, arg)` submits the C function pointer and argument to
 libuv's process-wide worker pool and suspends the current Task until the
@@ -229,11 +237,11 @@ module contract. Both serialized `titan.async` metadata and the exact native
 signatures include them. A mismatched ABI-2 provider is rejected rather than
 migrated or adapted.
 
-The first correct-token wake request uses a zero-duration timer owned by the
-target Task; later requests before delivery coalesce. The timer callback
-initiates `uv_close`, and the close callback releases the timer owner before
-resuming the Task. This guarantees callback-deferred delivery but does not
-promise one exact libuv iteration.
+The first correct-token wake request appends the target Task to the Runtime's
+ready queue; later requests before delivery coalesce. Acceptance arms a needed
+shared wake before committing the request. Delivery clears the old suspension
+and queue entry before resuming the Task. This guarantees callback-deferred
+delivery but does not promise one exact libuv iteration.
 
 ## Adapting callbacks with await
 
@@ -254,6 +262,22 @@ union CancellableResult<|T, E|>
   cancelled(CancellationReason<|value|>)
 end
 
+record Completion<|C, T, E|> -- opaque; no public constructor
+function Completion:context(number: integer): C
+function Completion:resolve(number: integer, result: T)
+function Completion:reject(number: integer, error: E)
+function Completion:fatal(number: integer, error: value, traceback: string)
+
+function await_with<|C, T, E|>(context: C,
+    start: function (Completion<|C, T, E|>, integer): (uv.req_t?)):
+    Result<|T, E|>
+function await_cleanup_with<|C, T, E|>(context: C,
+    start: function (Completion<|C, T, E|>, integer): (uv.req_t?)):
+    Result<|T, E|>
+function await_cancellable_with<|C, T, E|>(context: C,
+    start: function (Completion<|C, T, E|>, integer): (uv.req_t?)):
+    CancellableResult<|T, E|>
+
 function await<|T, E|>(op: function (
     function (T): (), function (E): (), function (value, string): ()): ()):
     Result<|T, E|>
@@ -265,10 +289,58 @@ function await_cancellable<|T, E|>(op: function (
     (uv.req_t?)): CancellableResult<|T, E|>
 function current_loop(): uv.loop_t
 function is_closing(): boolean
+function checkpoint()
 function request_exit(code: integer)
 ```
 
-Every registration receives three capabilities for its exact wait:
+The `_with` forms pass one typed Completion and an operation number to `start`.
+Prefer a named module function: it can obtain its inputs from
+`done:context(number)` without allocating a captured registrar or three
+capability closures. All three registrars have the same `uv.req_t?` return
+shape. Ordinary and cleanup forms may return nil; returning a request there
+does not request native cancellation. Only the cancellable form requires an
+accepted request unless already settled inline. Construct a required request
+view before native acceptance.
+
+A Task reuses its private Completion storage. Each suspension has a checked,
+increasing operation number. Capture the number supplied to this registration
+alongside its Completion; never infer it from current Task state. `context`,
+`resolve`, and `reject` reject a mismatched number. A duplicate settlement also
+raises. Numbers do not wrap: exhausted suspension numbering raises
+`async Task suspension epoch exhausted` before registration or enqueue.
+
+Context access is scoped to the matching operation. Retirement clears the
+context, registrar, request and payload before a continuation can start another
+operation. Save context into callback locals or independently owned rollback
+state **before** settlement or a registration exception. In particular, a
+callback may settle A, synchronously run its Task into B, and then encounter an
+exception while A's callback is still returning. Its saved `done` and A's
+number remain the correct arguments for `fatal`; its context must already be
+rooted locally. A stale `fatal` records Runtime failure without treating B as
+A's completed native operation. Native ownership and normal shutdown
+cancellation still apply to B.
+
+For example, this complete adapter uses a canonical registrar and preserves
+the public tagged result:
+
+```titan
+local async = import "async"
+local uv = import "uv"
+
+local function start_double(done: async.Completion<|integer, integer, nil|>,
+                             number: integer): uv.req_t?
+  local input = done:context(number)
+  done:resolve(number, input * 2)
+  return nil
+end
+
+function double(input: integer): async.Result<|integer, nil|>
+  return async.await_with<|integer, integer, nil|>(input, start_double)
+end
+```
+
+The callback-triple forms remain convenience facades over the same core.
+Their registrations receive three capabilities for the exact operation:
 `resolve(value: T)`, `reject(error: E)`, and
 `fatal(error: value, traceback: string)`. The first two settle an expected
 outcome once. The third reports an unexpected exception after that operation's
@@ -282,12 +354,23 @@ current Task or any Task-only state before calling await when the adapter needs
 it. `current_loop()` is valid during registration and callbacks. It returns the
 active Runtime's public loop owner and raises when there is no active Runtime;
 it does not create a Runtime or enter the loop. Treat that loop as borrowed.
-The async driver owns its `uv.run` and final `uv.loop_close` calls. Like
+The async driver owns its `uv.run` and final `uv.loop_close` calls, together
+with its internal wake handle. Adapters may manage handles they created on the
+loop; walking the borrowed loop does not authorize stopping, closing, or
+unreferencing Runtime-owned handles. Like
 `current_loop`, `is_closing()` raises when no Runtime is active; otherwise it
 returns the Runtime's closing flag without requiring a Task or checking pending
 Task cancellation. It is a synchronous admission query, not a suspension or
 cancellation boundary. Requesting process exit is separate from a fatal closing
 Runtime; code must not infer the exit policy from this flag alone.
+
+`checkpoint()` requires a running Task, raises its first pending cancellation
+reason, then checks for Runtime shutdown, in that order. It returns normally
+when ordinary work is admissible. It neither yields nor changes Task status,
+registers a wait, or permits another Task or native callback to run. Use it at
+an existing admission boundary before transferring buffered resources; use
+`yield()` when a scheduling boundary is intended. Cleanup operations use
+`await_cleanup_with` or `await_cleanup` and do not acquire an ordinary checkpoint.
 
 Registration must either settle inline or arrange a later completion. Inline
 resolve/reject stores the outcome until registration returns; it does not
@@ -309,9 +392,9 @@ The await policy determines how pending Task cancellation is delivered:
 
 | Form | Cancellation pending before registration | After native acceptance | Completion with cancellation pending |
 | --- | --- | --- | --- |
-| `await` | Skip registration and raise the first reason. | Retain the operation; do not implicitly cancel it. | Wait for terminal completion, then raise that reason. |
-| `await_cancellable` | Skip registration and return `cancelled(reason)`. | Attempt `uv.cancel` on the returned request; retain it regardless of the attempt's result. | Wait for terminal completion, then return `cancelled(reason)`. |
-| `await_cleanup` | Run registration. | Retain the operation without requesting native cancellation. | Return the ordinary success/error result. |
+| `await_with` / `await` | Skip registration and raise the first reason. | Retain the operation; do not implicitly cancel it. | Wait for terminal completion, then raise that reason. |
+| `await_cancellable_with` / `await_cancellable` | Skip registration and return `cancelled(reason)`. | Attempt `uv.cancel` on the returned request; retain it regardless of the attempt's result. | Wait for terminal completion, then return `cancelled(reason)`. |
+| `await_cleanup_with` / `await_cleanup` | Run registration. | Retain the operation without requesting native cancellation. | Return the ordinary success/error result. |
 
 For cancellable registration, return the public `uv.req_t` view of the one
 accepted request. Return nil only after settling inline; nil with an unsettled
@@ -381,6 +464,15 @@ callback has no exact-wait association: the driver can stop and clean up, but
 cannot infer which accepted operation the callback belonged to. Custom adapters
 must follow the explicit catch/fatal/rethrow protocol when consuming one-shot
 completions.
+
+With Completion, the same protocol is `done:fatal(number, error, traceback)`
+followed by bare `raise`. Snapshot the exact capability, number, and required
+context before settlement. If a privately owned UV data slot carries them,
+detach its old association before settlement; clearing it afterward could
+erase a successor's state. A new context record, captured number, bound method
+such as `done.resolve`, or native view has its own allocation cost. Reuse
+existing domain state only when its ownership and concurrency permit it;
+overlapping writes require independent request and completion associations.
 
 ### A public-only File adapter
 
@@ -797,10 +889,12 @@ async knows Tasks and waits; domain adapters decide how native results become
 application values.
 
 Scheduling a Task, yielding, and explicitly resuming a token-bound suspension
-use one-shot timers. Their timer callback submits close; the close callback
-retires the owner before advancing the Task. This promises deferred delivery,
-not an exact libuv iteration. Ordinary callback settlement can enter its Task
-continuation directly, while settlement from another running Task is deferred.
+append to one Runtime FIFO driven by its reusable zero timer. A callback drains
+at most 64 entries that were present when it began; it detaches each old entry
+before advancing the Task. New work waits for a later callback. This promises
+deferred delivery, not an exact libuv iteration. Ordinary callback settlement
+can enter its Task continuation directly, while settlement from another running
+Task is deferred.
 CPU-heavy code that neither finishes nor yields blocks the event loop.
 
 Persistent sources publish into coalescing or buffered subscriptions. A queued
@@ -1050,8 +1144,9 @@ completion while cancellation remains pending. An accepted one-shot request
 and its buffer storage remain alive through its promised callback. A
 subscription wait detaches and wakes through its deferred token continuation
 rather than resuming inside the Task that requested cancellation. An
-explicitly suspended Task is likewise woken through its coalesced Task-owned
-timer, so deferred listener removal runs normally as cancellation unwinds it.
+explicitly suspended Task likewise receives one coalesced continuation in the
+Runtime's FIFO, so deferred listener removal runs normally as cancellation
+unwinds it.
 
 ## Resources and shutdown
 

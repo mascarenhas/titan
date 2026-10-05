@@ -68,6 +68,7 @@ TITAN_TEST_SOURCES_async.tests := spec/stdlib/titan/async/tests/tests.titan \
 	spec/stdlib/titan/async/tests/any_race_test.titan \
 	spec/stdlib/titan/async/tests/await_test.titan \
 	spec/stdlib/titan/async/tests/channel_test.titan \
+	spec/stdlib/titan/async/tests/completion_test.titan \
 	spec/stdlib/titan/async/tests/fatal_test.titan \
 	spec/stdlib/titan/async/tests/foreign_work_test.titan \
 	spec/stdlib/titan/async/tests/subscription_test.titan \

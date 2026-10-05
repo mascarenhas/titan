@@ -16,6 +16,113 @@ end
 
 -- Task identity, explicit suspension, synchronous resume scheduling, and
 -- terminal notification are the primitives beneath every combinator.
+function test_ready_queue_preserves_fifo_and_services_native_work(context: test.Context)
+  local order: {integer} = {}
+  local tasks: {async.Task<|nil, nil|>} = {}
+  for index = 1, 130 do
+    local id = index
+    tasks[index] = async.run<|nil, nil|>(function (): nil
+      for round = 1, 4 do
+        order[#order + 1] = id
+        if round < 4 then async.yield() end
+      end
+      return nil
+    end)
+  end
+  local observed = 0
+  local observer = uv.timer_t.new()
+  test.assert(uv.timer_init(async.current_loop(), observer) == 0,
+      "queue observer timer initialization failed")
+  local fired = function (owner: uv.timer_t)
+    observed = #order
+    uv.timer_close(owner)
+  end
+  test.assert(uv.timer_start(observer, fired, 0, 0) == 0,
+      "queue observer timer submission failed")
+  async.loop()
+  test.assert(observed > 0 and observed < 130,
+      "ready queue did not bound its initial batch before native work")
+  test.assert(#order == 520, "ready queue lost a requeued Task")
+  for round = 0, 3 do
+    for index = 1, 130 do
+      test.assert(order[round * 130 + index] == index,
+          "ready queue changed FIFO order during same-Task requeue")
+    end
+  end
+  for index = 1, #tasks do
+    test.assert(tasks[index]:status():has_succeeded(), "queued Task failed")
+  end
+end
+
+function test_observed_task_status_snapshots_keep_transition_identity(context: test.Context)
+  local running_first: async.TaskStatus? = nil
+  local running_second: async.TaskStatus? = nil
+  local waiting_first: async.TaskStatus? = nil
+  local waiting_second: async.TaskStatus? = nil
+  local target = async.run<|value, value|>(function (): value
+    local current = async.running()
+    running_first = current:status()
+    test.assert(running_first == current:status(), "running snapshot was not cached")
+    async.yield()
+    running_second = current:status()
+    test.assert(running_second == current:status(), "new running snapshot was not cached")
+    async.yield()
+    return nil
+  end)
+  local ready = target:status()
+  test.assert(ready == target:status(), "ready snapshot was not cached")
+  local observer = async.run<|nil, nil|>(function (): nil
+    waiting_first = target:status()
+    test.assert(waiting_first == target:status(), "waiting snapshot was not cached")
+    async.yield()
+    waiting_second = target:status()
+    test.assert(waiting_second == target:status(), "new waiting snapshot was not cached")
+    return nil
+  end)
+  async.loop()
+  test.assert(target:status():has_succeeded() and observer:status():has_succeeded(),
+      "status observation Tasks did not succeed")
+  test.assert(ready:as_string() == "ready" and
+      running_first:as_string() == "running" and running_second:as_string() == "running" and
+      waiting_first:as_string() == "waiting" and waiting_second:as_string() == "waiting",
+      "a retained status snapshot changed its tag")
+  test.assert(running_first ~= running_second and waiting_first ~= waiting_second,
+      "different transitions reused an observed status identity")
+  test.assert(target:status() == target:status(), "terminal snapshot was not stable")
+end
+
+function test_queued_yield_observes_first_cancellation_without_resuming_twice(context: test.Context)
+  local reason = async.CancellationReason<|value|>.complex(false)
+  local caught = 0
+  local continued = false
+  local target = async.run<|nil, value|>(function (): nil
+    do async.yield()
+    catch
+      test.assert(error == reason, "queued yield changed cancellation identity")
+      caught = caught + 1
+    end
+    do async.yield()
+    catch
+      test.assert(error == reason, "later yield changed sticky cancellation identity")
+      caught = caught + 1
+    end
+    continued = true
+    return nil
+  end)
+  local cancelling = async.run<|nil, nil|>(function (): nil
+    target:cancel(reason)
+    target:cancel(async.CancellationReason.simple("second reason"))
+    return nil
+  end)
+  async.loop()
+  case target:status()
+  when cancelled(actual) then test.assert(actual == reason, "terminal cancellation identity changed")
+  else raise "queued yield lost terminal cancellation"
+  end
+  test.assert(caught == 2 and continued and cancelling:status():has_succeeded(),
+      "queued cancellation skipped or duplicated continuation")
+end
+
 function test_task_primitives_and_terminal_listeners(context: test.Context)
   runtime_test.run(function ()
     local self_task: async.Task? = nil

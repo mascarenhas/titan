@@ -37,6 +37,111 @@ local function cleanup_process(process: system.Process)
   do process:wait() catch end
 end
 
+function test_stream_overlapping_writes_retain_binary_strings_through_cancellation(
+    _context: test.Context)
+  runtime_test.run(function ()
+    local repetitions = 32768
+    local process = system.spawn(process_support.child_path(),
+      {"echo-count", strings.format("%d", repetitions * 10)})
+    runtime_test.cleanup(function () cleanup_process(process) end)
+    local input = process_support.required_output(process.stdin, "overlapping stdin")
+    local output = process_support.required_input(process.stdout, "overlapping stdout")
+    local first_gate: (function (nil): ())? = nil
+    local second_gate: (function (nil): ())? = nil
+    local first_submitted, second_submitted = false, false
+    local first_returned, second_returned = false, false
+    local observed: value = nil
+    local reason = async.CancellationReason.simple("cancel accepted captured write")
+    local first = async.run<|value, value|>(function (): value
+      async.await<|nil, nil|>(function (resolve, _reject, _fatal)
+        first_gate = resolve
+      end)
+      local data = strings.rep("A\0x\r\n", repetitions)
+      first_submitted = true
+      do
+        input:write(data)
+        first_returned = true
+      catch observed = error end
+      return nil
+    end)
+    task_support.cleanup_task(first, "first captured writer cleanup")
+    local second = async.run<|value, value|>(function (): value
+      async.await<|nil, nil|>(function (resolve, _reject, _fatal)
+        second_gate = resolve
+      end)
+      local data = strings.rep("B\0y\n\r", repetitions)
+      second_submitted = true
+      input:write(data)
+      second_returned = true
+      return nil
+    end)
+    task_support.cleanup_task(second, "second captured writer cleanup")
+    runtime_test.cleanup(function ()
+      if first_gate ~= nil then
+        local release = first_gate
+        first_gate = nil
+        first:cancel(async.CancellationReason.simple("unused captured write gate"))
+        release(nil)
+      end
+    end)
+    runtime_test.cleanup(function ()
+      if second_gate ~= nil then
+        local release = second_gate
+        second_gate = nil
+        second:cancel(async.CancellationReason.simple("unused captured write gate"))
+        release(nil)
+      end
+    end)
+    -- Cancel before closing; a failed assertion must still retire native
+    -- writes even if the child stopped draining stdin. Gate cleanup and joins
+    -- run afterward, before process reaping and the other stream cleanup.
+    runtime_test.cleanup(function ()
+      if task_support.active(first) then first:cancel(reason) end
+      if task_support.active(second) then
+        second:cancel(async.CancellationReason.simple("captured writer cleanup"))
+      end
+      input:close()
+    end)
+    while first_gate == nil or second_gate == nil do async.yield() end
+    -- Registration runs outside a Task. Both gates resume through submission,
+    -- and no native write callback can interleave before registration returns.
+    async.await<|nil, nil|>(function (resolve, _reject, _fatal)
+      local release_first, release_second = first_gate, second_gate
+      first_gate = nil
+      release_first(nil)
+      second_gate = nil
+      release_second(nil)
+      test.assert(first_submitted and second_submitted and
+                  first:status():as_string() == "waiting" and
+                  second:status():as_string() == "waiting",
+                  "captured writers did not suspend after native submission")
+      first:cancel(reason)
+      gc.collect()
+      gc.collect()
+      test.assert(first:status():as_string() == "waiting" and
+                  second:status():as_string() == "waiting" and
+                  not first_returned and not second_returned and observed == nil,
+                  "captured writes advanced before terminal callbacks")
+      resolve(nil)
+    end)
+    async.join(first)
+    async.join(second)
+    input:close()
+    local received = process_support.read_all(output)
+    gc.collect()
+    local expected = strings.rep("A\0x\r\n", repetitions) ..
+                     strings.rep("B\0y\n\r", repetitions)
+    test.assert(first:status():has_cancelled() and observed == reason and
+                not first_returned,
+                "accepted captured write lost its sticky cancellation")
+    test.assert(second:status():has_succeeded() and second_returned,
+                "overlapping captured write did not complete independently")
+    test.assert(received == expected,
+                "overlapping captured writes lost ordered binary string bytes")
+    process_support.assert_normal(process:wait(), "overlapping captured writes")
+  end)
+end
+
 function test_stream_cancelled_reader_allows_immediate_replacement(
     _context: test.Context)
   runtime_test.run(function ()
