@@ -18,7 +18,7 @@ else
   printf '%s\n' titan-windows-runtime-v1 > "$work/.titan-runtime-owner"
 fi
 [[ -f $prefix/etc/titan/lua-5.5.1-windows.config &&
-   -f $prefix/lib/liblua-5.5.1.dll.a && -f $prefix/bin/lua-5.5.1.dll ]]
+   -f $prefix/lib/liblua-5.5.1.dll.a && -f $prefix/bin/lua55.dll ]]
 stage=$(mktemp -d "$work/.stage.XXXXXX")
 trap 'rm -rf "$stage"' EXIT
 : "${CC:=clang}" "${AR:=llvm-ar}" "${RANLIB:=llvm-ranlib}"
@@ -49,7 +49,7 @@ sources=(titan-runtime/titan.c titan-runtime/minicoro.c titan-runtime/ltitanlib.
   scripts/build_windows_runtime.sh)
 for name in "${peg_sources[@]}"; do sources+=("vendor/lpeglabel/$name.c"); done
 sources+=(vendor/lpeglabel/*.h "$prefix/src/lua-5.5.1/"*.h
-  "$prefix/lib/liblua-5.5.1.dll.a" "$prefix/bin/lua-5.5.1.dll")
+  "$prefix/lib/liblua-5.5.1.dll.a" "$prefix/bin/lua55.dll")
 {
   printf '%s\n' titan-windows-runtime-v1 "PREFIX=$prefix" \
     "CC=$CC" "AR=$AR" "RANLIB=$RANLIB" "CFLAGS=$RUNTIME_CFLAGS" \

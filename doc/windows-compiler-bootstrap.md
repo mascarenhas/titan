@@ -4,10 +4,19 @@ The Windows-only `Makefile.windows.compiler` fragment is included by
 `Makefile.windows`. In the approved MSYS2 CLANG64 environment, `compiler`
 prepares the controlled Lua SDK, checksummed compiler prerequisites, native
 entry point, and Lua compiler modules. `compiler-check` exercises an isolated
-copy. These targets do not change the POSIX Makefile or Lua launcher.
+copy. Initialize the pinned `lua-5.5.1/` Git submodule before running these
+targets:
+
+```sh
+git submodule update --init --recursive
+```
+
+Lua sources come from the checkout's submodule commit. The Windows build uses
+a separate source-only copy and applies no patches or source transformations.
+These targets do not change the POSIX Makefile or Lua launcher.
 
 The installed layout is `bin/titanc.exe`, `bin/titanc.lua`, the existing
-`bin/lua.exe` and `bin/lua-5.5.1.dll`, compiler Lua modules under
+`bin/lua.exe` and `bin/lua55.dll`, compiler Lua modules under
 `share/lua/5.5`, and `lfs.dll`/`lpeglabel.dll` under `lib/lua/5.5`.
 The Lua CLI source remains the repository's `titanc`; the `.lua` suffix avoids
 MSYS2's implicit `.exe` filename handling during installation. Module staging
@@ -25,6 +34,11 @@ explicitly, rather than treating `arg[-1]` as another Lua interpreter.
 The executable manifest opts into UTF-8 and long paths and requires no
 elevation. Lua's existing executable-relative module-path expansion locates
 the modules. The bootstrap neither changes PATH nor spawns a command shell.
+Native module dependencies use the ordinary Windows DLL search order, including
+the invoking process's PATH. Lua's module paths select the module file; they do
+not replace that native dependency resolution. The shared runtime keeps the
+standard Lua 5.5 DLL name, `lua55.dll`.
+
 The build-time shell and compiler are MSYS2 tools; the delivered launcher and
 its two native Lua prerequisites must import only the controlled Lua DLL and
 Windows/UCRT DLLs. The PE check rejects other imports, including toolchain

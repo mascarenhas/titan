@@ -114,8 +114,7 @@ static HMODULE titan_win_load_library(lua_State *L, const char *filename,
         return library;
     }
     lua_pop(L, 1);
-    library = LoadLibraryExW(absolute, NULL,
-        LOAD_LIBRARY_SEARCH_APPLICATION_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32);
+    library = LoadLibraryExW(absolute, NULL, 0);
     if (library == NULL) goto failed;
     lua_pushvalue(L, top + 3);
     lua_pushlightuserdata(L, library);
@@ -126,9 +125,6 @@ failed:
     error = GetLastError();
     lua_settop(L, top);
     titan_win_loader_error(L, "cannot load library", filename, error);
-    lua_pushliteral(L, "; native dependencies must be available in the "
-        "application executable directory or System32");
-    lua_concat(L, 2);
     return NULL;
 }
 

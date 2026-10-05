@@ -2550,12 +2550,12 @@ int main(void) {
             end
         end)
 
-    it("reextracts pristine Lua and gives titanc exact shim ownership",
+    it("uses initialized Lua sources and gives titanc exact shim ownership",
         function()
             local makefile = read_file("Makefile")
             for _, contract in ipairs({
-                "LUA_EXTRACTED    := $(LUA_DIR)/.titan-extracted-v3",
-                'rm -rf "$(LUA_DIR)"',
+                "LUA_SOURCE_READY := $(LUA_DIR)/src/lua.h",
+                "git submodule update --init",
                 "STDLIB_SHIMS := titan/coroutine.lua titan/uv.lua",
                 'package.cpath="./titan-runtime/bootstrap/?.so;" .. package.cpath',
                 "rm -f $(STDLIB_SHIMS)",
@@ -2568,6 +2568,10 @@ int main(void) {
             end
             assert.falsy(makefile:find(
                 'strcmp(sym, "luaopen_titan_uv")', 1, true), makefile)
+            for _, forbidden in ipairs({ "LUA_EXTRACTED", "LUA_TARBALL",
+                    "LUA_PATCH_FILE", 'git apply --directory="$(LUA_DIR)"' }) do
+                assert.falsy(makefile:find(forbidden, 1, true), forbidden)
+            end
         end)
 
     it("keys every runtime object and archive member to the selected Lua SDK",
@@ -5208,7 +5212,7 @@ done
                 'SANITIZER_OPENSSL_SHA256: "a8c0d28a529ca480f9f36cf5792e2cd2' ..
                 '1984552a3c8e4aa11a24aa31aeac98e8"',
                 "id: sanitizer-native-cache-key",
-                "sha256sum vendor/lua/lua-5.5.1-relocatable.patch",
+                'lua_revision="$(git rev-parse HEAD:lua-5.5.1)"',
                 "sha256sum vendor/libuv/libuv-1.53.0-spawn-close.patch",
                 "git ls-remote",
                 "libbacktrace.git HEAD",
@@ -5219,7 +5223,6 @@ done
                 "uses: ubicloud/cache/restore@v4",
                 "path: |",
                 "lua-${{ env.SANITIZER_LUA_VERSION }}",
-                "lua-${{ env.SANITIZER_LUA_VERSION }}.tar.gz",
                 "libbacktrace",
                 "libuv-v${{ env.SANITIZER_LIBUV_VERSION }}",
                 "libuv-v${{ env.SANITIZER_LIBUV_VERSION }}.tar.gz",
@@ -5264,7 +5267,7 @@ done
                 "sanitizer%-native%-cache%-key%.outputs%.digest }}"))
             for _, fingerprint in ipairs({
                 "titan_abi=$TITAN_ABI_VERSION",
-                "lua_patch=$lua_patch_sha256",
+                "lua_revision=$lua_revision",
                 "libuv_patch=$libuv_patch_sha256",
                 "libuv_profile=$LIBUV_BUILD_PROFILE",
                 "sqlite3=$SANITIZER_SQLITE3_VERSION:$SANITIZER_SQLITE3_SHA256",

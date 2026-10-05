@@ -1838,9 +1838,11 @@ the same `nil, message, stage` result shape. Neither helper calls `dlclose`.
 
 ## Lua installation and executable-relative search paths
 
-`make lua` configures the pinned `luaconf.h` with `LUA_ROOT "!/"`, retaining
-the Titan provider template before the ordinary Lua C-module template. In
-`loadlib.c`'s `LUA_USE_DLOPEN` branch, Titan replaces the no-op `setprogdir`
+`make lua` compiles the Titan Lua fork pinned by
+the `lua-5.5.1` Git submodule, without applying patches or rewriting source files.
+Windows copies the same submodule sources unchanged into its separate build tree. Its POSIX `luaconf.h` sets
+`LUA_ROOT "!/"`, retaining the Titan provider template before the ordinary Lua
+C-module template. In `loadlib.c`'s `LUA_USE_DLOPEN` branch, the fork replaces the no-op `setprogdir`
 macro with a function that expands every `LUA_EXEC_DIR` (`!`) occurrence in
 the string on top of the Lua stack, then removes the original string. This
 applies to both default module paths and environment overrides containing
@@ -1850,11 +1852,13 @@ Linux obtains the actual executable through `/proc/self/exe`; macOS obtains
 it with `_NSGetExecutablePath` and canonicalizes it with `realpath` before
 stripping directory components. The parent of the executable's directory is
 the module-path root: `<root>/bin/lua` uses `<root>`. Symlink launch paths and
-the working directory do not select another installation. The patch leaves
+the working directory do not select another installation. The POSIX change leaves
 Lua's native loader flags and Titan's separate lazy/local and lazy/global
 helpers unchanged.
 
-The patched Lua source bytes are independent of `PREFIX`. Make still records
+The Lua source bytes are identical across platforms and independent of `PREFIX`.
+The Windows implementation and DLL annotations are selected by the source's
+platform guards at compilation. Make still records
 the destination prefix, platform, native tools, Readline selection, and build
 flags in its configuration stamp; changing those inputs cleans the matching
 Lua objects and installs the resulting archive, public headers, and internal

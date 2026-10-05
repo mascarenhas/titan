@@ -58,21 +58,5 @@ my $data = capture($readobj, '--coff-directives', "$temporary/lctype.o");
 die "Lua internal data definition does not export DATA\n"
     unless $data =~ /-export:luai_ctype_,data/;
 
-# Producer-only numeric changes must fail before compiling an incompatible DLL.
-{
-    open my $save_stderr, '>&', \*STDERR or die $!;
-    open STDERR, '>', "$temporary/numeric-override.err" or die $!;
-    my $status = system($clang, @target, '-DTITAN_LUA_BUILD_DLL', '-DLUA_32BITS',
-        '-std=c99', '-fsyntax-only', $fixture);
-    open STDERR, '>&', $save_stderr or die $!;
-    close $save_stderr;
-    die "producer-only Lua numeric override was accepted\n" if $status == 0;
-    open my $diagnostic, '<', "$temporary/numeric-override.err" or die $!;
-    local $/;
-    my $message = <$diagnostic>;
-    die "numeric override did not fail at the configured ABI guard\n"
-        unless $message =~ /controlled Lua DLL requires its installed default numeric configuration/;
-}
-
-print "Windows Lua headers: four C consumer modes, C++ opener, producer declarations, real COFF DATA export, and numeric ABI guard passed\n";
+print "Windows Lua headers: four C consumer modes, C++ opener, producer declarations, real COFF DATA export passed\n";
 print "This checks COFF/header ownership only; it does not build or run the Windows Lua DLL.\n";

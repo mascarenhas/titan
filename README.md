@@ -53,19 +53,24 @@ without a compatible Lua, the default remains `/usr/local`. Detection ignores
 Lua init and module-path overrides. A symlinked prefix such as `/home` retains
 its launch-path spelling when it names the same physical installation.
 
-`make lua` fetches the
-[Lua 5.5.1 sources](https://www.lua.org/ftp/lua-5.5.1.tar.gz) and configures
-`lua-5.5.1/src/luaconf.h` with `LUA_ROOT "!/"`. A small `loadlib.c` patch
-expands `!` in Lua's module search paths to the parent of the actual
+Initialize the `lua-5.5.1` Git submodule with
+`git submodule update --init --recursive` (or clone Titan with
+`--recurse-submodules`). `make lua` builds that pinned
+[Titan Lua fork](https://github.com/mascarenhas/lua-5.5.1) directly without
+patching or rewriting its sources. Windows uses the same submodule and an
+unchanged source copy in its separate build tree.
+
+The fork resolves `!` in POSIX module search paths to the parent of the actual
 executable's directory. An interpreter at `<root>/bin/lua` therefore finds
 its modules under `<root>`, including after that tree is moved or the
 interpreter is invoked through a symlink. Linux reads `/proc/self/exe`;
 macOS uses `_NSGetExecutablePath` and resolves the executable with `realpath`.
-The patched Lua sources are identical across installation prefixes. This
-changes search-path expansion only: generated logical-module loaders still
-use Titan's native lazy/global helper to map or promote their physical
-provider. The build then
-compiles Lua with `MYCFLAGS=-fPIC` and
+Windows retains Lua's stock executable-directory expansion and DLL loading.
+These search paths do not change the operating system's dependency lookup.
+Generated logical-module loaders use Titan's native lazy/global helper to map
+or promote their physical provider.
+
+`make lua` compiles Lua with `MYCFLAGS=-fPIC` and
 installs it under the prefix. It also installs the Lua `.c` and `.h` sources
 under `$PREFIX/src/lua-5.5.1/`. Consequently the
 installed `liblua.a`, the internal headers Titan-generated C uses, and the
@@ -80,7 +85,7 @@ package), the build verifies and unpacks the pinned GNU Readline 8.3 base
 archive, applies the checked-in combination of its first three official
 patches, configures it with the same `PREFIX`, and installs its headers, static
 archive, documentation, and license under a private prefix-local directory
-before building Lua. Parallel Make completes Lua extraction before writing the
+before building Lua. Parallel Make checks the initialized Lua sources before writing the
 selection file inside that tree; fallback compilation may remain parallel, but
 Readline's upstream install pass is serialized because its archive replacement
 rules race. The applied patch and license are checksum-bound to the selection

@@ -8,7 +8,6 @@ local READLINE_PATCH =
     REPO_ROOT .. "/vendor/readline/readline-8.3-p1-p3.patch"
 local READLINE_LICENSE = REPO_ROOT .. "/LICENSES/readline-LICENSE"
 local READLINE_UPSTREAM = REPO_ROOT .. "/vendor/readline/UPSTREAM.md"
-local LUA_PATCH = REPO_ROOT .. "/vendor/lua/lua-5.5.1-relocatable.patch"
 local OLD_MTIME = 946684800
 
 local HOST_CC = os.getenv("CC") or "cc"
@@ -154,12 +153,10 @@ describe("GNU Readline selection", function()
         prefix = workspace .. "/prefix"
         selection_config =
             workspace .. "/lua-5.5.1/.titan-readline-8.3-p3.config"
-        -- The real selection file belongs to the extracted Lua tree. Supply a
-        -- bounded fake extraction so these provider probes remain offline.
-        make_directory(workspace .. "/lua-5.5.1")
-        write_file(workspace .. "/lua-5.5.1.tar.gz", "test archive\n")
-        write_file(workspace .. "/lua-5.5.1/.titan-extracted-v3",
-            "test extraction\n")
+        -- These probes need an initialized source directory, not a Lua build.
+        make_directory(workspace .. "/lua-5.5.1/src")
+        write_file(workspace .. "/lua-5.5.1/src/lua.h", "Lua header fixture\n")
+        write_file(workspace .. "/lua-5.5.1/src/Makefile", "# Lua Makefile fixture\n")
     end)
 
     after_each(function()
@@ -171,7 +168,7 @@ describe("GNU Readline selection", function()
             "env", "CCACHE_DISABLE=1",
             "make", "--no-print-directory", "-f", MAKEFILE,
             "PREFIX=" .. prefix,
-            "LUA_PATCH_FILE=" .. LUA_PATCH,
+            "LUA_DIR=lua-5.5.1",
             "LUA_PLATFORM=linux-readline",
             "READLINE_PKG_CONFIG=false",
             "LUA_CC=" .. HOST_CC,
@@ -345,7 +342,7 @@ void add_history(const char *line) { (void)line; }
             '$(MAKE) -j1 -C "$(READLINE_BUILD_DIR)" install;',
             1, true))
         assert.truthy(makefile:find(
-            "$(READLINE_SELECTION_CONFIG): $(LUA_EXTRACTED) FORCE",
+            "$(READLINE_SELECTION_CONFIG): $(LUA_SOURCE_READY) FORCE",
             1, true))
     end)
 end)

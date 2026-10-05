@@ -192,13 +192,11 @@ The Windows runtime checks each logical module's `_abi_value` before calling
 its Lua metadata entries or initializer. Windows providers must supply that
 query, even though it remains optional for existing Unix ABI-2 providers.
 Executables, the controlled Lua DLL, and native dependency DLLs share `bin`;
-Titan provider DLLs belong in `lib/titan/0.6`. For explicit Lua and Titan module
-loads, dependency-search flags add only the executable directory and System32;
-they do not add the current directory, provider directory, or global `PATH`.
-Windows still applies its already-loaded-module, KnownDLL, and API-set rules.
-These flags do not constrain initial EXE imports, which Windows resolves before
-runtime initialization. Titan's Lua interpreter, compiler frontend, and
-application launchers must retain their adjacent controlled Lua DLL.
+Titan provider DLLs belong in `lib/titan/0.6`. Lua's `package.cpath` and Titan's
+module paths select provider files. Their native dependencies follow ordinary
+Windows DLL lookup, including process `PATH`; selecting a provider does not
+change that lookup. Titan's Lua interpreter, compiler frontend, and application
+launchers retain their adjacent `lua55.dll`.
 `TITAN_PATH_0_6` takes
 precedence over `TITAN_PATH`; an explicitly empty value disables the fallback
 Titan path.

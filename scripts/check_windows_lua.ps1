@@ -12,11 +12,14 @@ $runtime = Join-Path $probeRoot ('runtime ' + [char]0x00fc + ' space')
 $provider = Join-Path $probeRoot ('providers ' + [char]0x00e9)
 $lua = Join-Path $runtime 'bin\lua.exe'
 $script = Join-Path $probeRoot 'probe.lua'
-$canary = Join-Path $provider 'canary.dll'
+$canary = Join-Path $provider 'titan_loader_canary.dll'
 $dependency = Join-Path $runtime 'bin\titan_lua_loader_dependency.dll'
 $disabled = $dependency + '.disabled'
+$dependencyPath = Join-Path $probeRoot 'path'
+$pathDependency = Join-Path $dependencyPath 'titan_lua_loader_dependency.dll'
 if (!(Test-Path -LiteralPath $dependency -PathType Leaf) -or
-    (Test-Path -LiteralPath $disabled)) {
+    (Test-Path -LiteralPath $disabled) -or
+    (Test-Path -LiteralPath $pathDependency)) {
     throw 'Expected a completed native lua-check with its original canary files'
 }
 function Invoke-CheckedLua {
@@ -28,24 +31,31 @@ function Invoke-CheckedLua {
 }
 $originalPath = $env:PATH
 $originalLocation = Get-Location
-$moved = $false
+$currentDependency = $dependency
 try {
-    $env:PATH = Join-Path $probeRoot 'path'
+    $env:PATH = $dependencyPath
     Set-Location -LiteralPath (Join-Path $probeRoot 'cwd')
     Move-Item -LiteralPath $dependency -Destination $disabled
-    $moved = $true
+    $currentDependency = $disabled
     Invoke-CheckedLua -LuaArguments @('-E', $script, $canary, 'reject')
-    Move-Item -LiteralPath $disabled -Destination $dependency
-    $moved = $false
+    Move-Item -LiteralPath $disabled -Destination $pathDependency
+    $currentDependency = $pathDependency
+    Invoke-CheckedLua -LuaArguments @('-E', $script, $canary, 'accept')
+    Move-Item -LiteralPath $pathDependency -Destination $dependency
+    $currentDependency = $dependency
     Invoke-CheckedLua -LuaArguments @('-E', $script, $canary, 'accept')
     Set-Location -LiteralPath $provider
-    Invoke-CheckedLua -LuaArguments @('-E', $script, '.\canary.dll', 'accept')
-    Write-Output 'Clean PowerShell Lua relocation and controlled DLL search passed'
+    Invoke-CheckedLua -LuaArguments @('-E', $script, '.\titan_loader_canary.dll', 'accept')
+    Write-Output 'Clean PowerShell Lua relocation and ordinary Windows DLL search passed'
 }
 finally {
-    if ($moved) {
-        Move-Item -LiteralPath $disabled -Destination $dependency
+    try {
+        if ($currentDependency -ne $dependency) {
+            Move-Item -LiteralPath $currentDependency -Destination $dependency
+        }
     }
-    $env:PATH = $originalPath
-    Set-Location -LiteralPath $originalLocation.Path
+    finally {
+        $env:PATH = $originalPath
+        Set-Location -LiteralPath $originalLocation.Path
+    }
 }

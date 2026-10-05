@@ -16,9 +16,9 @@ while ($text =~ /^(Import|Export) \{\r?\n(.*?)^\}/msg) {
     die "unnamed PE entry\n" unless defined $name;
     if ($kind eq 'Export') { push @exports, $name; next; }
     $name = lc $name;
-    $lua++ if $name eq 'lua-5.5.1.dll';
+    $lua++ if $name eq 'lua55.dll';
     die "unexpected dependency $name in $image\n" unless
-        $name eq 'lua-5.5.1.dll' || $name eq 'kernel32.dll' ||
+        $name eq 'lua55.dll' || $name eq 'kernel32.dll' ||
         $name eq 'ucrtbase.dll' || $name =~ /^api-ms-win-crt-[a-z0-9-]+[.]dll$/;
 }
 die "missing controlled Lua import\n" unless $lua == 1;

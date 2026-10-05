@@ -366,7 +366,7 @@ describe("standalone-prefix source installation", function()
             public_config)
         local _, titan_cdir_definitions = public_config:gsub(
             "#define LUA_TITAN_CDIR", "")
-        assert.equal(1, titan_cdir_definitions, public_config)
+        assert.equal(2, titan_cdir_definitions, public_config)
         local _, titan_cpath_templates = public_config:gsub(
             'LUA_TITAN_CDIR%s+"%?%.so;"', "")
         assert.equal(1, titan_cpath_templates, public_config)
@@ -477,7 +477,19 @@ int titan_sdk_headers(void) { return LUA_VERSION_NUM + SQLITE_VERSION_NUMBER; }
             -- `--cached` reports index entries intentionally deleted by the
             -- worktree under test. They are not part of the source inventory
             -- being packed and have no pathname to copy.
-            if path ~= "" and lfs.symlinkattributes(path, "mode") then
+            if path == "lua-5.5.1" and
+                    lfs.symlinkattributes(path, "mode") == "directory" then
+                local listed, files = run({ "git", "-C", path,
+                    "ls-files", "-z" })
+                assert.truthy(listed, files)
+                for source in (files .. "\0"):gmatch("(.-)%z") do
+                    if source ~= "" then
+                        copy_tree(path .. "/" .. source,
+                            source_repository .. "/" .. path .. "/" .. source)
+                        copied = copied + 1
+                    end
+                end
+            elseif path ~= "" and lfs.symlinkattributes(path, "mode") then
                 copy_tree(path, source_repository .. "/" .. path)
                 copied = copied + 1
             end
@@ -550,7 +562,12 @@ int titan_sdk_headers(void) { return LUA_VERSION_NUM + SQLITE_VERSION_NUMBER; }
             return false
         end
         for _, expected in ipairs({
-            "vendor/lua/lua-5.5.1-relocatable.patch",
+            ".gitmodules",
+            "vendor/lua/UPSTREAM.md",
+            "lua-5.5.1/src/Makefile",
+            "lua-5.5.1/src/lua.h",
+            "lua-5.5.1/src/luaconf.h",
+            "lua-5.5.1/src/loadlib.c",
             "vendor/lpeglabel/lplcap.c",
             "vendor/lpeglabel/lplcap.h",
             "vendor/lpeglabel/lplcode.c",
@@ -1656,13 +1673,12 @@ inspect-lua-sdk:
             "env", "-u", "MAKEFLAGS", "-u", "MFLAGS", "-u", "MAKEOVERRIDES",
             "LC_ALL=C", "make", "--no-print-directory",
             "-f", repository .. "/Makefile", "PREFIX=" .. incomplete,
-            "LUA_URL=file:///titan-test-must-not-download-lua", "runtime",
+            "runtime",
         }, workspace)
         assert.falsy(ok, output)
         assert.truthy(output:find("No rule to make target", 1, true), output)
         assert.truthy(output:find(incomplete .. "/lib/liblua.a", 1, true), output)
         assert_absent(workspace .. "/lua-5.5.1")
-        assert_absent(workspace .. "/lua-5.5.1.tar.gz")
     end)
 
     it("builds and stages native targets without a checkout Lua tree",
@@ -1682,8 +1698,8 @@ inspect-lua-sdk:
         local llhttp_header = PREFIX .. "/include/llhttp.h"
         local sqlite_header = PREFIX .. "/include/sqlite3.h"
         -- Reuse only the unrelated prepared native dependencies. Lua's own
-        -- targets remain fully active, so an accidental provisioning edge
-        -- fails against the deliberately unavailable URL below.
+        -- targets remain fully active, so an accidental source dependency
+        -- fails against the deliberately absent checkout Lua tree.
         local ok, output = run({
             "env", "-u", "MAKEFLAGS", "-u", "MFLAGS", "-u", "MAKEOVERRIDES",
             "CCACHE_DISABLE=1", "make", "--no-print-directory",
@@ -1697,13 +1713,11 @@ inspect-lua-sdk:
             "LLHTTP_HEADER=" .. llhttp_header, "SQLITE3_HEADER=" .. sqlite_header,
             "--old-file=" .. libbacktrace,
             "--old-file=" .. llhttp_header, "--old-file=" .. sqlite_header,
-            "LUA_URL=file:///titan-test-must-not-download-lua",
             "CFLAGS=-std=c99 -O0 -fPIC", "ROCK_CFLAGS=-O0 -fPIC",
             "runtime", "lpeglabel", "install-titan-sdk",
         }, workspace)
         assert.truthy(ok, output)
         assert_absent(workspace .. "/lua-5.5.1")
-        assert_absent(workspace .. "/lua-5.5.1.tar.gz")
         for _, artifact in ipairs({
             "titan-runtime/libtitan.a", "titan-runtime/bootstrap/titan.so",
             "lpeglabel-build/libtitan-lpeglabel.a",
@@ -1739,57 +1753,188 @@ describe("relocatable Lua build configuration", function()
         if workspace then remove_tree(workspace); workspace = nil end
     end)
 
-    it("keeps patched sources prefix independent and an unchanged build warm",
+    local function prohibit_source_fetch()
+        local tools = workspace .. "/tools"
+        local marker = workspace .. "/source-fetch-used"
+        make_directory(tools)
+        for _, name in ipairs({ "git", "curl", "wget" }) do
+            local command = tools .. "/" .. name
+            write_file(command, "#!/bin/sh\n: > " .. quote(marker) .. "\nexit 91\n")
+            local ok, output = run({ "chmod", "+x", command })
+            assert.truthy(ok, output)
+        end
+        return tools .. ":" .. (os.getenv("PATH") or "/usr/bin:/bin"), marker
+    end
+
+    it("requires initialized Lua sources before changing either build tree",
+    function()
+        workspace = temporary_directory("lua-source-required")
+        local tools_path, fetch_marker = prohibit_source_fetch()
+        local repository = assert(lfs.currentdir())
+        local source = workspace .. "/lua-5.5.1"
+        local windows_root = workspace .. "/windows-build"
+        local windows_source = windows_root .. "/lua-5.5.1/src"
+        make_directory(source .. "/src")
+        make_directory(windows_source)
+        write_file(source .. "/src/loadlib.c", "existing source sentinel\n")
+        write_file(windows_source .. "/loadlib.c", "existing Windows stage\n")
+        write_file(windows_source .. "/.titan-windows-source", "existing stage stamp\n")
+        local ok, output = run({ "env", "PATH=" .. tools_path,
+            "make", "--no-print-directory", "-f",
+            repository .. "/Makefile", "PREFIX=" .. workspace .. "/prefix",
+            "LUA_DIR=lua-5.5.1",
+            "lua-5.5.1/src/.titan-build-config" }, workspace)
+        assert.falsy(ok, output)
+        assert.truthy(output:find("git submodule update --init", 1, true), output)
+        assert_absent(source .. "/src/.titan-build-config")
+        ok, output = run({ "env", "PATH=" .. tools_path,
+            "make", "--no-print-directory", "-f",
+            repository .. "/Makefile.windows", "PREFIX=" .. workspace .. "/prefix",
+            "LUA_DIR=" .. source, "WINDOWS_BUILD_ROOT=" .. windows_root,
+            "lua-source" }, repository)
+        assert.falsy(ok, output)
+        assert.truthy(output:find("git submodule update --init", 1, true), output)
+        assert.equal("existing source sentinel\n", read_file(source .. "/src/loadlib.c"))
+        assert.equal("existing Windows stage\n", read_file(windows_source .. "/loadlib.c"))
+        assert.equal("existing stage stamp\n",
+            read_file(windows_source .. "/.titan-windows-source"))
+        assert_absent(fetch_marker)
+    end)
+
+    it("shares canonical Lua sources across platforms and keeps unchanged builds warm",
     function()
         workspace = temporary_directory("lua-configuration")
+        local tools_path, fetch_marker = prohibit_source_fetch()
         local repository = assert(lfs.currentdir())
         local first_prefix = workspace .. "/first-prefix"
         local second_prefix = workspace .. "/second-prefix"
-        copy_tree("lua-5.5.1.tar.gz", workspace .. "/lua-5.5.1.tar.gz")
+        local unix_tree = workspace .. "/lua-5.5.1"
+        local source_dir = unix_tree .. "/src/"
+        local function source_contents(directory)
+            local sources = {}
+            for name in lfs.dir(directory) do
+                if name:match("%.[ch]$") or name == "lua.hpp" or name == "Makefile" then
+                    sources[name] = read_file(directory .. "/" .. name)
+                end
+            end
+            assert.truthy(next(sources), directory)
+            return sources
+        end
+        local canonical_sources = source_contents(repository .. "/lua-5.5.1/src")
+        make_directory(unix_tree .. "/src")
+        for name, contents in pairs(canonical_sources) do
+            write_file(source_dir .. name, contents)
+        end
 
         local function configure(prefix)
-            local ok, output = run({
-                "env", "CCACHE_DISABLE=1", "make", "--no-print-directory",
+            local configured, log = run({
+                "env", "PATH=" .. tools_path, "CCACHE_DISABLE=1",
+                "make", "--no-print-directory",
                 "-f", repository .. "/Makefile", "PREFIX=" .. prefix,
-                "LUA_PATCH_FILE=" .. repository ..
-                    "/vendor/lua/lua-5.5.1-relocatable.patch",
+                "LUA_DIR=lua-5.5.1",
                 "LUA_PLATFORM=posix", "READLINE_MODE=auto",
                 "lua-5.5.1/src/.titan-build-config",
             }, workspace)
+            assert.truthy(configured, log)
+        end
+
+        configure(first_prefix)
+        assert.same(canonical_sources, source_contents(source_dir))
+        for name, source in pairs(canonical_sources) do
+            assert.falsy(source:find(first_prefix, 1, true), name)
+        end
+        local windows_root = workspace .. "/windows-build"
+        local windows_source = windows_root .. "/lua-5.5.1/src"
+        local function stage_windows()
+            local ok, output = run({ "env", "PATH=" .. tools_path,
+                "make", "--no-print-directory", "-f",
+                repository .. "/Makefile.windows", "PREFIX=" .. first_prefix,
+                "LUA_DIR=" .. unix_tree, "WINDOWS_BUILD_ROOT=" .. windows_root,
+                "lua-source" }, repository)
             assert.truthy(ok, output)
         end
+        stage_windows()
+        assert.same(canonical_sources, source_contents(windows_source))
+        assert_absent(unix_tree .. "/.git")
 
-        configure(first_prefix)
-        local source_dir = workspace .. "/lua-5.5.1/src/"
-        local source_paths = { "luaconf.h", "loadlib.c" }
-        local sources = {}
-        for _, name in ipairs(source_paths) do
-            sources[name] = read_file(source_dir .. name)
-            assert.falsy(sources[name]:find(first_prefix, 1, true), name)
+        local config = assert(canonical_sources["luaconf.h"])
+        for _, contract in ipairs({
+            '#define LUA_ROOT "!/"',
+            '#define LUA_EXEC_DIR            "!"',
+            '#define LUA_LDIR\t"!\\\\..\\\\share\\\\lua\\\\" LUA_VDIR "\\\\"',
+            '#define LUA_CDIR\t"!\\\\..\\\\lib\\\\lua\\\\" LUA_VDIR "\\\\"',
+            '#define LUA_TITAN_CDIR\t"!\\\\..\\\\lib\\\\titan\\\\0.6\\\\"',
+            '#define LUA_LDIR\tLUA_ROOT "share/lua/" LUA_VDIR "/"',
+            '#define LUA_CDIR\tLUA_ROOT "lib/lua/" LUA_VDIR "/"',
+            '#define LUA_TITAN_CDIR\tLUA_ROOT "lib/titan/0.6/"',
+        }) do
+            assert.truthy(config:find(contract, 1, true), contract)
         end
-        assert.truthy(sources["luaconf.h"]:find(
-            '#define LUA_ROOT "!/"', 1, true))
+        local loadlib = assert(canonical_sources["loadlib.c"])
+        for _, contract in ipairs({
+            '_NSGetExecutablePath(exe_path, &size)',
+            'readlink("/proc/self/exe", exe_path, sizeof(exe_path))',
+        }) do
+            assert.truthy(loadlib:find(contract, 1, true), contract)
+        end
+        assert.is_nil(canonical_sources["titan_windows_loadlib.h"])
+
         local marker = source_dir .. "lapi.o"
+        local windows_marker = windows_source .. "/lapi.o"
+        write_file(windows_marker, "keep warm Windows stage\n")
         write_file(marker, "keep existing Lua objects on a warm build\n")
         local old_mtime = 946684800
-        for _, name in ipairs({ "luaconf.h", "loadlib.c", ".titan-build-config" }) do
-            assert.truthy(lfs.touch(source_dir .. name, old_mtime, old_mtime))
+        for name in pairs(canonical_sources) do
+            assert.truthy(lfs.touch(source_dir .. name,
+                old_mtime, old_mtime))
         end
+        assert.truthy(lfs.touch(source_dir .. ".titan-build-config",
+            old_mtime, old_mtime))
 
+        local windows_stamp = windows_source .. "/.titan-windows-source"
+        assert.truthy(lfs.touch(windows_stamp, old_mtime, old_mtime))
         configure(first_prefix)
         assert_file(marker)
-        for _, name in ipairs({ "luaconf.h", "loadlib.c", ".titan-build-config" }) do
+        stage_windows()
+        assert_file(windows_marker)
+        assert.equal(old_mtime, lfs.attributes(windows_stamp, "modification"))
+        for name in pairs(canonical_sources) do
             assert.equal(old_mtime, lfs.attributes(source_dir .. name,
                 "modification"), name)
         end
+        assert.equal(old_mtime, lfs.attributes(
+            source_dir .. ".titan-build-config", "modification"))
 
         configure(second_prefix)
         assert_absent(marker)
         assert.truthy(read_file(source_dir .. ".titan-build-config"):find(
             "PREFIX=" .. second_prefix, 1, true))
-        for _, name in ipairs(source_paths) do
-            assert.equal(sources[name], read_file(source_dir .. name), name)
+        assert.same(canonical_sources, source_contents(source_dir))
+        for name in pairs(canonical_sources) do
+            assert.equal(old_mtime, lfs.attributes(source_dir .. name,
+                "modification"), name)
         end
+        -- Source, header, and recipe content invalidate outputs even when
+        -- their timestamps are unchanged.
+        for _, name in ipairs({ "lapi.c", "luaconf.h", "Makefile" }) do
+            local config_before = read_file(source_dir .. ".titan-build-config")
+            local comment = name == "Makefile" and
+                "\n# private recipe change for build-input validation\n" or
+                "\n/* private source change for build-input validation */\n"
+            canonical_sources[name] = canonical_sources[name] .. comment
+            write_file(source_dir .. name, canonical_sources[name])
+            assert.truthy(lfs.touch(source_dir .. name, old_mtime, old_mtime))
+            write_file(marker, "stale object after source edit\n")
+            write_file(windows_marker, "stale Windows stage after source edit\n")
+            configure(second_prefix)
+            assert_absent(marker)
+            assert.not_equal(config_before, read_file(source_dir .. ".titan-build-config"))
+            assert.same(canonical_sources, source_contents(source_dir))
+            stage_windows()
+            assert_absent(windows_marker)
+            assert.same(canonical_sources, source_contents(windows_source))
+        end
+        assert_absent(fetch_marker)
     end)
 end)
 

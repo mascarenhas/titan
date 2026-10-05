@@ -65,7 +65,10 @@ one of Titan's language-level value representations.
 ### Source, build, and installation identity
 
 `Makefile`, `titan-compiler/driver.lua`, the C preprocessor driver, fixtures,
-and installed-layout tests now select `lua-5.5.1`. Linux uses upstream's new
+and installed-layout tests now select `lua-5.5.1`. Both native build paths
+consume the same Titan Lua fork pinned by the `lua-5.5.1` Git submodule
+without applying patches or rewriting source. Platform guards select its
+POSIX and Windows implementations during compilation. Linux uses upstream's new
 `linux-readline` target, while macOS keeps upstream's `macosx` target, whose
 5.5.1 `luaconf.h` now enables readline itself. Before either build, Titan
 compile-links a host Readline probe. When development files are absent, it
@@ -248,7 +251,7 @@ special case was added.
 | `src/lgc.c` | Stack-aware nil store and pending-finalizer guard. **Inherited.** |
 | `src/llex.c` | Tests numeric `LUA_COMPAT_GLOBAL`. **No dependency.** |
 | `src/llimits.h` | Numeric-operation defaults consume `L`. Floating-for advancement was **adapted**. |
-| `src/loadlib.c` | Source-module loads use explicit binary/text mode. **Inherited**; Titan's separate POSIX `setprogdir` patch changes executable-relative search paths only. |
+| `src/loadlib.c` | Source-module loads use explicit binary/text mode. **Inherited**; the Titan fork's POSIX `setprogdir` changes executable-relative search paths only. Its Windows loader remains stock; Titan's provider directories are configured in `LUA_CPATH_DEFAULT`. |
 | `src/lobject.h` | Adds `setnilvalue2s`. Generated stack writes were **adapted**. |
 | `src/lopcodes.c` | Corrects top-use bookkeeping for `OP_VARARGPREP`. **No dependency** because Titan does not emit or inspect Lua bytecode. |
 | `src/lopcodes.h` | Makes `luaP_isOT` a test macro and revises opcode-mode descriptions. **No Titan references.** |

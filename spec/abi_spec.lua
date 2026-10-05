@@ -58,6 +58,9 @@ describe("compiled-module ABI version", function()
         f = assert(io.open("Makefile", "r"))
         local makefile = f:read("*a")
         f:close()
+        f = assert(io.open(".gitmodules", "r"))
+        local submodules = f:read("*a")
+        f:close()
         f = assert(io.open(".github/workflows/ci.yml", "r"))
         local linux_workflow = f:read("*a")
         f:close()
@@ -98,11 +101,10 @@ describe("compiled-module ABI version", function()
         assert.equal("0.6.0", driver.TITAN_VERSION)
         assert.equal("0.6", driver.TITAN_LIBRARY_VERSION)
         assert.equal("_0_6", driver.TITAN_LIBRARY_VERSION_SUFFIX)
-        assert.truthy(makefile:find(
-            "LUA_VERSION      ?= 5.5.1", 1, true))
-        assert.truthy(makefile:find(
-            "LUA_URL          := https://drive.google.com/uc?export=download&id=15oUbOJpvI7JGPK9CEYD38p06ahPywPpQ",
-            1, true))
+        assert.match("LUA_VERSION%s*:?=%s*5%.5%.1", makefile)
+        assert.match("LUA_SOURCE_READY%s*:?=%s*%$%(LUA_DIR%)/src/lua[.]h", makefile)
+        assert.match("path%s*=%s*lua%-5%.5%.1", submodules)
+        assert.match("url%s*=%s*https://github%.com/mascarenhas/lua%-5%.5%.1[.]git", submodules)
         assert.truthy(makefile:find(
             "else ifeq ($(HOST_OS),Linux)\n    LUA_PLATFORM := linux-readline",
             1, true))
@@ -121,10 +123,10 @@ describe("compiled-module ABI version", function()
             "70cbc596c0a7b3a35fabb8a05711a60e2695bd2d06a4e2f46f6f168f84403f96",
             1, true))
         assert.truthy(makefile:find(
-            "$(LUA_BUILD_CONFIG): $(LUA_EXTRACTED) " ..
+            "$(LUA_BUILD_CONFIG): $(LUA_SOURCE_READY) " ..
             "$(READLINE_SELECTION_CONFIG)", 1, true))
         assert.truthy(makefile:find(
-            "$(READLINE_SELECTION_CONFIG): $(LUA_EXTRACTED) FORCE",
+            "$(READLINE_SELECTION_CONFIG): $(LUA_SOURCE_READY) FORCE",
             1, true))
         assert.truthy(makefile:find(
             '$(MAKE) -j1 -C "$(READLINE_BUILD_DIR)" install;',

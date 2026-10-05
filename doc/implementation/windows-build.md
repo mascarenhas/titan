@@ -3,12 +3,20 @@
 `Makefile.windows` builds the experimental native x64 Windows SDK, including
 controlled Lua, native dependency DLLs, the compiler and embedded runtime.
 Run it in the MSYS2 **CLANG64** environment with its
-UCRT Clang, LLVM resource tools, Bash, Make, Perl, tar, curl, and ordinary Unix
-file utilities. It uses a dedicated `windows-build/` source/object tree and
-never reuses the Unix `lua-5.5.1/` build tree. Compilation is initially serial.
-The ordinary Makefile and Linux/macOS build remain separate.
+UCRT Clang, LLVM resource tools, Bash, GNU Make 4.3 or newer, Perl, tar, curl,
+and ordinary Unix
+file utilities. The [Titan Lua fork](https://github.com/mascarenhas/lua-5.5.1)
+is a Git submodule at `lua-5.5.1/`, pinned by the Titan checkout's submodule
+commit. Initialize it after cloning or updating the checkout. The Unix build
+compiles directly in that submodule. Windows copies only its `.c`, `.h`,
+`lua.hpp`, and `Makefile` source files into a dedicated `windows-build/` tree,
+then delegates compilation to the fork's existing `src/Makefile` `mingw` target.
+The source bytes stay unchanged. All Titan changes are already in the fork;
+Lua's platform guards select the implementation at compilation. Compilation is
+initially serial. The native build rules remain separate.
 
 ```sh
+git submodule update --init --recursive
 make -f Makefile.windows lua PREFIX=/c/Titan/sdk
 make -f Makefile.windows lua-check PREFIX=/c/Titan/sdk
 ```
@@ -32,14 +40,20 @@ archive remain SDK build inputs. This workflow does not install LuaRocks.
 
 ## One controlled Lua DLL and its SDK
 
-The pinned Lua 5.5.1 tarball is checksum-verified before extraction. A source
-transformer creates a separate configured source tree; it rejects changed
-upstream anchors. The recipe produces and installs:
+The recipe uses the pinned Lua 5.5.1 submodule and installs matching sources
+without applying patches or transforming their contents. Its separate Windows
+copy keeps objects out of the submodule's Unix build tree. The Windows
+`loadlib.c` backend remains upstream Lua's implementation. Lua owns its
+Windows object and link rules, including the paired DLL and GNU import-library
+outputs. Titan compiles its process manifest as an interpreter-only resource,
+passes the native flags, and retains SDK installation and checks. Configuration
+changes clean the private Lua outputs before regenerating that resource.
+The recipe produces and installs:
 
 | Path below `PREFIX` | Content |
 | --- | --- |
 | `bin/lua.exe` | Interpreter with a UTF-8 process manifest |
-| `bin/lua-5.5.1.dll` | One shared Lua runtime, including pinned internals |
+| `bin/lua55.dll` | One shared Lua runtime, including pinned internals and the standard Lua DLL name |
 | `lib/liblua-5.5.1.dll.a` | Import library for that DLL |
 | `include/` | Matching configured public headers |
 | `src/lua-5.5.1/` | All matching configured C sources and headers |
@@ -59,11 +73,9 @@ Lua's own built-in opener declarations use `LUALIB_API` so consumers import
 them. Automatic export of other global symbols is disabled at DLL link time.
 Titan's embedded helper functions remain a separate runtime contract.
 
-The controlled configuration uses 64-bit Lua integers and double-precision
-numbers. Producer-only numeric overrides are rejected by the installed
-configuration header. Build flags are for ordinary optimization, diagnostics,
-and instrumentation; changing Lua configuration or internal layouts requires
-a corresponding reviewed SDK source change, not a command-line-only variant.
+The supplied build uses Lua's default 64-bit integers and double-precision
+numbers. Lua and its consumers must use the same numeric configuration and
+internal layouts, as with upstream Lua.
 The consumer gate calls `luaL_checkversion` as well as exercising internal
 functions and comparing all four imported data addresses with the loaded DLL.
 
@@ -82,33 +94,28 @@ Windows `!` retains upstream's **running executable directory** meaning.
 Configured Lua defaults resolve `!..` to the SDK prefix and search
 `share/lua/5.5` for Lua source, `lib/titan/0.6` then `lib/lua/5.5` for modules.
 The ordinary explicit current-directory Lua module templates remain available.
-The Windows resolver uses the wide executable-path API and converts to UTF-8;
-it does not substitute the Lua DLL's own directory or the POSIX parent meaning.
+Lua retains its upstream executable-directory expansion. The shipped
+executables declare a UTF-8 process code page for their Windows ANSI APIs;
+Titan's own provider-path handling uses the wide Windows APIs.
 
 Generated launcher diagnostics and provider paths preserve their supplied bytes
 in C string literals, including Unicode and literal `$` sequences. These values
 are escaped before recursive template expansion; they cannot become compiler
 template substitutions.
 
-The controlled Windows Lua loader accepts UTF-8 module paths, rejects invalid
-UTF-8 and embedded NUL arguments, resolves the requested provider with
-`GetFullPathNameW`, and calls `LoadLibraryExW` with only
-`LOAD_LIBRARY_SEARCH_APPLICATION_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32`.
-Consequently a module may be explicitly selected from another directory, but
-its dependencies must already be loaded or resolve through Windows' system
-mechanisms, the EXE directory, or System32. The loader does not add the provider
-directory, CWD, PATH, or user DLL directories to that dependency search, and
-makes no process-wide DLL search mutation. Buffers use Lua allocation so error
-unwinding cannot leak native allocations. Windows' loader still owns its
-standard already-loaded-module/KnownDLL/API-set behavior.
+Lua's `package.cpath` selects the module file, and `package.loadlib` uses
+upstream `LoadLibraryExA` with its default zero flags. Titan's explicit module
+loader resolves its provider path and calls `LoadLibraryExW` with zero flags.
+Native dependencies follow the ordinary Windows DLL search order, including
+the executable directory, system locations, current directory, and the process
+`PATH`. The provider-search paths remain separate from native dependency
+resolution, and neither loader changes the process DLL search directories.
 
-This policy controls Lua's explicit dynamic loads; Titan's explicit module
-loader uses the same dependency-search flags. Titan's `lua.exe`, `titanc.exe`,
-and application launchers import `lua-5.5.1.dll` before runtime initialization.
-These flags do **not** constrain initial EXE
-import resolution when its adjacent Lua DLL is absent. The distribution must
-retain the controlled Lua DLL beside each of these EXEs. Arbitrary long-path
-support is not promised.
+Titan's `lua.exe`, `titanc.exe`, and application launchers import `lua55.dll`
+before runtime initialization. The distribution retains that shared Lua runtime
+beside its executables. The standard DLL name lets Lua 5.5 binary modules use
+the same runtime when their architecture and Lua configuration match. Arbitrary
+long-path support is not promised.
 
 The executable embeds per-process UTF-8 `activeCodePage` and `longPathAware`
 manifest declarations for Windows 11. This build does not change machine code
@@ -118,7 +125,7 @@ See [Microsoft's long-path requirements](https://learn.microsoft.com/en-us/windo
 Real Unicode command-line,
 filesystem, module, and process behavior must be tested with CLANG64/UCRT.
 See [Microsoft's UTF-8 process guidance](https://learn.microsoft.com/en-us/windows/apps/design/globalizing/use-utf8-code-page)
-and [DLL search flags](https://learn.microsoft.com/en-us/windows/win32/api/libloaderapi/nf-libloaderapi-loadlibraryexw).
+and [Windows DLL search order](https://learn.microsoft.com/en-us/windows/win32/dlls/dynamic-link-library-search-order).
 
 ## Verification boundaries
 
@@ -132,11 +139,15 @@ On native CLANG64, `lua-check` verifies the exact DLL export inventory, imports,
 installed source/header bytes, and a real SDK consumer. It then relocates the
 runtime into a path containing spaces and non-ASCII characters, runs from a
 different CWD without toolchain PATH entries, and loads Lua and native modules.
-A separate canary fails when its dependency exists only in the provider
-folder, CWD, and PATH; a fresh process succeeds after that dependency is placed
-beside `lua.exe`. Relative explicit provider paths are checked too. The separate PowerShell
-gate repeats those checks using native Windows paths and process-local PATH
-restriction; it does not depend on MSYS argument conversion.
+A separate canary fails when its dependency is absent from the native search
+locations. Fresh processes then load it with that dependency only on the
+process `PATH`, and only beside `lua.exe`. The canary exercises ordinary
+`package.cpath`, `require`, and `package.loadlib`, including a relative explicit
+provider path. The separate PowerShell gate repeats those checks using native
+Windows paths and a temporary process-local `PATH`; it does not depend on MSYS
+argument conversion. The Titan runtime loader gate checks the same missing,
+`PATH`, and executable-directory dependency cases while retaining its provider
+identity and `TITAN_PATH` checks.
 
 The import allowlist checks regular and delay imports of the EXE, its sole
 private Lua DLL, and the SDK consumer. It permits only the named Windows
@@ -231,7 +242,7 @@ for its argument, relocation, initialization, and dependency checks.
 `minicoro.o`, plus the separate support-only `titan.dll` from `ltitanlib.o`.
 The private, namespaced LPegLabel archive contains exactly its five upstream
 translation units and remains build payload. All objects use the installed,
-configured Lua source headers and matching `lua-5.5.1.dll` import library.
+configured Lua source headers and matching `lua55.dll` import library.
 Only the runtime archive and public runtime/FFI headers are installed as SDK
 files; private Windows loader/filesystem headers and the PEG archive stay in
 the build tree. Third-party notices and license texts are staged under

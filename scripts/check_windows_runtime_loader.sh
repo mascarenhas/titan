@@ -14,7 +14,7 @@ providers="$runtime/lib/titan/0.6"
 hostile_cwd="$check_root/cwd"
 hostile_path="$check_root/path"
 mkdir -p "$runtime/bin" "$providers" "$hostile_cwd" "$hostile_path"
-cp "$prefix/bin/lua-5.5.1.dll" "$runtime/bin/"
+cp "$prefix/bin/lua55.dll" "$runtime/bin/"
 
 # Parse the configured compiler as argv; never evaluate shell input.
 CC=${CC:-clang} perl -MText::ParseWords=shellwords -e \
@@ -49,8 +49,8 @@ done
 "${compiler[@]}" "${common[@]}" spec/fixtures/windows/runtime_loader_probe.c \
   "$check_root/titan.o" "$lua_import" -o "$runtime/bin/runtime-loader-probe.exe"
 
-# An ordinary native dependency is deliberately present beside the provider,
-# in CWD, and on PATH, but absent from bin for the first fresh-process test.
+# The dependency initially exists outside every Windows DLL search directory.
+# Fresh processes distinguish missing, process-PATH, and executable-bin lookup.
 "${compiler[@]}" -shared -O2 -Wl,--exclude-all-symbols \
   -Xlinker --out-implib -Xlinker "$check_root/dependency.dll.a" \
   spec/fixtures/windows/runtime_loader_dependency.c \
@@ -58,9 +58,6 @@ done
 "${compiler[@]}" -shared -O2 -Wl,--exclude-all-symbols \
   spec/fixtures/windows/runtime_loader_native.c "$check_root/dependency.dll.a" \
   -o "$providers/fixture-native.dll"
-for destination in "$providers" "$hostile_cwd" "$hostile_path"; do
-  cp "$check_root/titan-loader-dependency.dll" "$destination/"
-done
 
 for file in "$providers/"*.dll "$runtime/bin/"*.dll "$runtime/bin/runtime-loader-probe.exe"; do
   report="$check_root/$(basename "$file").imports"
@@ -74,7 +71,7 @@ for file in "$providers/"*.dll "$runtime/bin/"*.dll "$runtime/bin/runtime-loader
     for my $name (@names) {
       $name = lc $name;
       die "Unexpected native runtime dependency: $name\n"
-        unless $name eq "kernel32.dll" || $name eq "lua-5.5.1.dll" ||
+        unless $name eq "kernel32.dll" || $name eq "lua55.dll" ||
                $name eq "titan-loader-dependency.dll" || $name eq "ucrtbase.dll" ||
                $name =~ /^api-ms-win-crt-[a-z0-9-]+\.dll$/;
     }
@@ -83,6 +80,9 @@ done
 
 unset TITAN_PATH TITAN_PATH_0_6 LUA_PATH LUA_CPATH LUA_PATH_5_5 LUA_CPATH_5_5
 (cd "$hostile_cwd"; PATH="$hostile_path" "$runtime/bin/runtime-loader-probe.exe" reject-native)
+cp "$check_root/titan-loader-dependency.dll" "$hostile_path/"
+(cd "$hostile_cwd"; PATH="$hostile_path" "$runtime/bin/runtime-loader-probe.exe")
+rm "$hostile_path/titan-loader-dependency.dll"
 cp "$check_root/titan-loader-dependency.dll" "$runtime/bin/"
 (cd "$hostile_cwd"; PATH="$hostile_path" "$runtime/bin/runtime-loader-probe.exe")
 provider_windows=$(cygpath -w "$providers")

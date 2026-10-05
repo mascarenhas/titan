@@ -11,7 +11,7 @@ generated=$(cd "$3" && pwd)
 check_root=$(mktemp -d "$build_root/launcher.XXXXXX")
 runtime="$check_root/launcher ü space"
 mkdir -p "$runtime/bin" "$runtime/lib/titan/0.6/fixture" "$check_root/cwd"
-cp "$prefix/bin/lua-5.5.1.dll" "$runtime/bin/"
+cp "$prefix/bin/lua55.dll" "$runtime/bin/"
 mapfile -t plan < "$generated/plan.txt"
 mapfile -t system_libraries < "$generated/system-libraries.txt"
 [[ ${#plan[@]} == 3 ]]
@@ -66,7 +66,7 @@ for file in "$runtime/bin/"*.exe "$runtime/lib/titan/0.6/fixture/launcher.dll"; 
     for my $name (@names) {
       $name=lc $name;
       die "Unexpected launcher dependency: $name\n" unless $name eq "kernel32.dll" ||
-        $name eq "lua-5.5.1.dll" || $name eq "ucrtbase.dll" || $name eq "bcrypt.dll" ||
+        $name eq "lua55.dll" || $name eq "ucrtbase.dll" || $name eq "bcrypt.dll" ||
         $name =~ /^api-ms-win-crt-[a-z0-9-]+\.dll$/;
     }
   ' "$report"
