@@ -1,6 +1,18 @@
 local core = require "titan-compiler.checker.core"
 local _ENV = core
 
+local function recovery_interface_key(modname, exposer)
+    exposer = exposer or modname
+    local exposer_key
+    if type(exposer) == "table" then
+        exposer_key = exposer.static_archive or exposer.filename or
+            exposer.name or tostring(exposer)
+    else
+        exposer_key = tostring(exposer)
+    end
+    return exposer_key .. "\0" .. modname
+end
+
 -- Walk a recovered interface type and, for every Nominal or forwarding
 -- GenericAlias that names another module, recover that module before
 -- reconciling generic arity and canonical binder projections. This preserves
@@ -46,7 +58,11 @@ end
 
 function checker._recover_referenced_module(
         modname, loader, seen, exposing_module, interface_seen)
-    local module_key = "\0module-interface:" .. modname
+    -- An owner's selected view depends on its exposing producer. In particular,
+    -- an ordinary edge may recover the public view before another producer's
+    -- checked direct source edge requires the complete declaration surface.
+    local module_key = "\0module-interface:" ..
+        recovery_interface_key(modname, exposing_module)
     if seen[module_key] then return seen[module_key] end
 
     local memo = { pending = true }
@@ -141,6 +157,7 @@ function register_referenced_nominals(
             or "<recovered-interface>",
         method_visible = function(method) return not method.islocal end,
         field_visible = function(field) return not field.islocal end,
+        variant_visible = function(variant) return not variant.islocal end,
         generic_scope_bindings = {},
     }
     constraint_policy.generic_scope_bindings =
@@ -324,7 +341,8 @@ function register_referenced_nominals(
         if ok then ok, err = visit_binders(t.typeparams) end
         if ok then
             for _, field in ipairs(t.fields or {}) do
-                if not field.islocal then
+                if not constraint_policy.field_visible
+                   or constraint_policy.field_visible(field) then
                     ok, err = visit(field.type)
                     if not ok then break end
                 end
@@ -332,7 +350,8 @@ function register_referenced_nominals(
         end
         if ok then
             for _, fn in pairs(t.functions or {}) do
-                if not fn.islocal then
+                if not constraint_policy.method_visible
+                   or constraint_policy.method_visible(fn) then
                     ok, err = visit(fn)
                     if not ok then break end
                 end
@@ -340,7 +359,8 @@ function register_referenced_nominals(
         end
         if ok then
             for _, method in pairs(t.methods or {}) do
-                if not method.islocal then
+                if not constraint_policy.method_visible
+                   or constraint_policy.method_visible(method) then
                     ok, err = visit(method)
                     if not ok then break end
                 end
@@ -351,7 +371,8 @@ function register_referenced_nominals(
         if ok then ok, err = visit_binders(t.typeparams) end
         if ok then
             for _, variant in ipairs(t.variants or {}) do
-                if not variant.islocal then
+                if not constraint_policy.variant_visible
+                   or constraint_policy.variant_visible(variant) then
                     for _, part in ipairs(variant.parts) do
                         ok, err = visit(part.type)
                         if not ok then break end
@@ -362,7 +383,8 @@ function register_referenced_nominals(
         end
         if ok then
             for _, fn in pairs(t.functions or {}) do
-                if not fn.islocal then
+                if not constraint_policy.method_visible
+                   or constraint_policy.method_visible(fn) then
                     ok, err = visit(fn)
                     if not ok then break end
                 end
@@ -370,7 +392,8 @@ function register_referenced_nominals(
         end
         if ok then
             for _, method in pairs(t.methods or {}) do
-                if not method.islocal then
+                if not constraint_policy.method_visible
+                   or constraint_policy.method_visible(method) then
                     ok, err = visit(method)
                     if not ok then break end
                 end
@@ -551,17 +574,10 @@ end
 
 function checker.register_module_interface(
         modname, type_or_error, loader, exposer, interface_seen,
-        trusted_source, reference_seen)
+        trusted_source, reference_seen, source_permissions)
     exposer = exposer or modname
     interface_seen = interface_seen or {}
-    local exposer_key
-    if type(exposer) == "table" then
-        exposer_key = exposer.static_archive or exposer.filename or
-            exposer.name or tostring(exposer)
-    else
-        exposer_key = tostring(exposer)
-    end
-    local interface_key = exposer_key .. "\0" .. modname
+    local interface_key = recovery_interface_key(modname, exposer)
     if interface_seen[interface_key] then return true end
 
     -- Normalize before publishing either the interface-seen success marker or
@@ -580,13 +596,20 @@ function checker.register_module_interface(
     interface_seen[interface_key] = true
 
     local seen = reference_seen or {}
-    local module_key = "\0module-interface:" .. modname
+    local module_key = "\0module-interface:" .. interface_key
     local module_memo = seen[module_key]
     if not module_memo then
         module_memo = {}
         seen[module_key] = module_memo
     end
     module_memo.module = type_or_error
+    if trusted_source then
+        -- Source traversal switches to the recovered producer's own context.
+        -- Publish its self view there too so recursive owner references share
+        -- the pending interface instead of selecting a public projection.
+        seen["\0module-interface:" ..
+            recovery_interface_key(modname, modname)] = module_memo
+    end
 
     -- Type-only re-exports do not copy a nominal's static closures into the
     -- facade module. Stamp the canonical descriptors with their deterministic
@@ -638,39 +661,56 @@ function checker.register_module_interface(
         end
     end
 
-    for view_index, view in ipairs(member_views) do
-        local policy = { visibility = modname }
-        if view_index == 1 then
-            policy.method_visible = function(method)
-                return not method.islocal
-            end
-            policy.field_visible = function(field)
-                return not field.islocal
+    -- A source interface validates declarations belonging to its own producer,
+    -- including that producer's direct source edges. Preserve the original
+    -- exposer only for binary recovery's physical provider provenance.
+    local recovery_exposer = trusted_source and modname or exposer
+    local function register_views(members, type_members, policy)
+        for _, view in ipairs(members) do
+            for _, member in ipairs(view) do
+                local registered, register_error = register_referenced_nominals(
+                    member.type or member, loader, seen,
+                    recovery_exposer, interface_seen, nil, policy)
+                if not registered then return nil, register_error end
             end
         end
-        for _, member in ipairs(view) do
-            local registered, register_error = register_referenced_nominals(
-                member.type or member, loader, seen,
-                exposer, interface_seen, nil, policy)
-            if not registered then return nil, register_error end
+        for _, view in ipairs(type_members) do
+            for _, member in pairs(view) do
+                local registered, register_error = register_referenced_nominals(
+                    member, loader, seen, recovery_exposer, interface_seen,
+                    nil, policy)
+                if not registered then return nil, register_error end
+            end
         end
+        return true
     end
-    for view_index, view in ipairs(type_views) do
-        local policy = { visibility = modname }
-        if view_index == 1 then
-            policy.method_visible = function(method)
-                return not method.islocal
-            end
-            policy.field_visible = function(field)
-                return not field.islocal
-            end
+
+    -- Prove the public projection before any permissive source traversal.
+    local registered, register_error = register_views(
+        { type_or_error.members or {} }, { type_or_error.type_members or {} }, {
+            visibility = modname,
+            method_visible = function(method) return not method.islocal end,
+            field_visible = function(field) return not field.islocal end,
+            variant_visible = function(variant) return not variant.islocal end,
+        })
+    if not registered then return nil, register_error end
+    if trusted_source then
+        -- Public owners also contain private fields, variants and signatures.
+        -- Resolve their owners through the active loader rather than installing
+        -- carried registry views which may describe a dirty dependency. Generic
+        -- constraints retain the producer's direct source-import permissions;
+        -- this validation policy never grants those permissions to consumers.
+        local function source_visible(member)
+            local owner = member.fqtn and nominal_module(member.fqtn)
+            return not member.islocal or owner == modname
+                or source_permissions and source_permissions[owner] ~= nil
         end
-        for _, member in pairs(view) do
-            local registered, register_error = register_referenced_nominals(
-                member, loader, seen, exposer, interface_seen,
-                nil, policy)
-            if not registered then return nil, register_error end
-        end
+        return register_views(member_views, type_views, {
+            visibility = modname,
+            method_visible = source_visible,
+            field_visible = source_visible,
+            variant_visible = source_visible,
+        })
     end
     return true
 end
@@ -683,7 +723,8 @@ function checker.checkimport(modname, loader, request)
         request and request.interface_seen,
         import_info and import_info.kind == "source"
             and type_or_error._source == true,
-        request and request.reference_seen)
+        request and request.reference_seen,
+        import_info and import_info.source_permissions)
     if not registered then return nil, register_error end
     binary_remember_module(type_or_error)
     return type_or_error, errors, import_info

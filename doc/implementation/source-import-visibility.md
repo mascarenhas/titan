@@ -83,6 +83,27 @@ descriptor is canonical type information, not authority: every local lookup
 also checks the current symbol table's explicit direct-owner capability. This
 keeps mixed public/explicit and source/binary loading order-independent.
 
+Interface registration first validates the public projection with public-only
+member visibility, then traverses the complete trusted source declarations.
+That second pass includes private fields, variants and callable signatures on
+public nominal owners, as well as local top-level declarations. Referenced
+owners are recovered through the active loader, so a retained declaration
+manifest cannot substitute its carried owner view for a changed dependency.
+The source pass validates generic constraints with the producer's own direct
+source-import permissions. Fresh checking supplies its symbol-table imports;
+loader results reconstruct the same permissions from checked import annotations
+or a compact entry's retained `source_imports`. These permissions stay within
+interface validation and never enter the consumer's symbol table.
+The table loader uses the same proven producer edge to select an owner's source
+view during nominal recovery, while ordinary import aliases retain the public
+view. If the owner is cached as a binary interface, that edge requires its
+current source before validating the producer's private declarations.
+Nested source recovery uses each recovered producer's own direct edges; the
+outer importer's permissions do not substitute for that producer's provenance.
+Owner recovery memoization includes the exposing context, so a public view
+selected by an earlier ordinary edge cannot satisfy a later producer's source
+edge. Validation still checks the public projection before private declarations.
+
 ## Checker staging
 
 The import pass records the earliest explicit source edge per owner.

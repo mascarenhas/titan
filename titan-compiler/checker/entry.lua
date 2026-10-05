@@ -81,7 +81,8 @@ function checker.check(modname, ast, subject, filename, loader, options)
             -- not rely on source-private methods omitted by serialization.
             local registered, registration_error =
                 checker.register_module_interface(
-                    modname, ast._type, loader, modname, {}, true, {})
+                    modname, ast._type, loader, modname, {}, true, {},
+                    st.source_imports)
             if not registered then
                 checker.typeerror(errors,
                     (ast[1] and ast[1].loc) or { line = 1, column = 1 },
