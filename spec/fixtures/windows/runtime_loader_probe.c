@@ -106,9 +106,9 @@ int main(int argc, char **argv) {
     /* Each dependency-search canary runs in a fresh process. A successful
     ** earlier mapping must not satisfy the negative test from loader state. */
     if (argc == 2 && strcmp(argv[1], "reject-native") == 0) {
-        expect_error(L, open_native, "", "native dependencies must be available");
+        expect_error(L, open_native, "", "Windows error 126");
         lua_close(L);
-        puts("Windows native dependency search rejection ok");
+        puts("Windows absent native dependency diagnostic ok");
         return 0;
     }
     if (argc == 2 && strcmp(argv[1], "reject-empty") == 0) {

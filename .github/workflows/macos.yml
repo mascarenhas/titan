@@ -41,6 +41,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@v6
+        with:
+          submodules: true
 
       # As on Linux, omit the installed private Readline root so the one
       # pre-merge macOS run validates a clean fallback build.

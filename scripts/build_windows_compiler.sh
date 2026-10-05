@@ -10,7 +10,7 @@ mapfile -d '' -t cc < <(perl -MText::ParseWords=shellwords -e 'print "$_\0" for 
 mapfile -d '' -t rc < <(perl -MText::ParseWords=shellwords -e 'print "$_\0" for shellwords($ENV{RC})')
 [[ ${#cc[@]} -gt 0 && ${#rc[@]} -gt 0 ]]
 [[ -f "$prefix/etc/titan/lua-5.5.1-windows.config" ]]
-[[ -f "$prefix/bin/lua-5.5.1.dll" && -f "$prefix/lib/liblua-5.5.1.dll.a" ]]
+[[ -f "$prefix/bin/lua55.dll" && -f "$prefix/lib/liblua-5.5.1.dll.a" ]]
 mkdir -p "$build/compiler-objects" "$prefix/lib/lua/5.5" "$prefix/share/lua/5.5"
 objects=$build/compiler-objects
 source=$build/compiler-src

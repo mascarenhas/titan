@@ -9,7 +9,7 @@ prefix=$(cd "$2" && pwd)
 perl scripts/windows_compiler_receipt.pl check "$prefix"
 source_root=$(pwd)
 [[ -f titan/coroutine.titan && -f titan/json/json.titan ]]
-[[ -f $prefix/bin/titanc.exe && -f $prefix/bin/lua-5.5.1.dll &&
+[[ -f $prefix/bin/titanc.exe && -f $prefix/bin/lua55.dll &&
    -f $prefix/etc/titan/lua-5.5.1-windows.config &&
    -f $build_root/runtime/ltitanlib.o && -f $build_root/runtime/libtitan-lpeglabel.a ]]
 modules=(coroutine uv async timer io fs net ssl url http websocket os peg string math lua iteration gc test reflect sqlite3 json)

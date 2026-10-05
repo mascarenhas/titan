@@ -11,7 +11,7 @@ CC="$CC" perl -MText::ParseWords=shellwords -e \
   'my @a=shellwords($ENV{CC}); die "Invalid compiler command\n" unless @a; print "$_\0" for @a' > "$check/compiler.argv"
 mapfile -d '' -t compiler < "$check/compiler.argv"
 mkdir "$check/bin" "$check/unrelated"
-cp "$prefix/bin/lua-5.5.1.dll" "$check/bin/"
+cp "$prefix/bin/lua55.dll" "$check/bin/"
 "${compiler[@]}" -std=c99 -O2 -Wall -Wextra -Werror \
   -I "$prefix/include" -I "$prefix/src/lua-5.5.1" -I vendor/lpeglabel \
   spec/fixtures/windows/runtime_sdk_probe.c \

@@ -22,17 +22,13 @@ override PREFIX := $(abspath $(PREFIX))
 
 # Must match the Lua source layout resolved by titan-compiler/driver.lua and
 # spec/support/helpers.lua, so don't override this unless those consumers move
-# with it — the variable primarily keeps the download/install paths below DRY.
-LUA_VERSION      ?= 5.5.1
+# with it — the variable keeps the source/install paths below consistent.
+TITAN_MAKEFILE_DIR := $(dir $(abspath $(lastword $(MAKEFILE_LIST))))
+LUA_VERSION      := 5.5.1
 LUA_ABI_VERSION  ?= 5.5
 LUA_DIR          := lua-$(LUA_VERSION)
-LUA_TARBALL      := $(LUA_DIR).tar.gz
-LUA_URL          := https://drive.google.com/uc?export=download&id=15oUbOJpvI7JGPK9CEYD38p06ahPywPpQ
-# Version the extraction stamp when Titan's policy for the downloaded source
-# tree changes. v3 adds executable-relative POSIX package paths. Global provider
-# visibility still belongs to generated shims and Titan's lazy/global helper.
-LUA_PATCH_FILE   := vendor/lua/lua-5.5.1-relocatable.patch
-LUA_EXTRACTED    := $(LUA_DIR)/.titan-extracted-v3
+LUA_SOURCE_READY := $(LUA_DIR)/src/lua.h
+LUA_SOURCE_FILES := $(wildcard $(LUA_DIR)/src/*.c $(LUA_DIR)/src/*.h $(LUA_DIR)/src/lua.hpp) $(LUA_DIR)/src/Makefile
 LUA_BUILD_CONFIG := $(LUA_DIR)/src/.titan-build-config
 LUA_LIB          := $(LUA_DIR)/src/liblua.a
 LUA_BIN          := $(PREFIX)/bin/lua
@@ -593,10 +589,9 @@ lua: $(LUA_INSTALL_STAMP) ## Build and install Titan's prefix-configured Lua
 # configuration mtime when its result and inputs are unchanged. This keeps a
 # warm `make lua` quiet while noticing a host development package appearing or
 # disappearing. The system probe deliberately omits PREFIX: a previously
-# provisioned fallback is not misclassified as a host installation. The
-# selection file lives inside the generated Lua tree, so extraction must finish
-# before a parallel build may create it.
-$(READLINE_SELECTION_CONFIG): $(LUA_EXTRACTED) FORCE
+# provisioned fallback is not misclassified as a host installation.
+# The selection file lives in the Lua submodule's build tree.
+$(READLINE_SELECTION_CONFIG): $(LUA_SOURCE_READY) FORCE
 	@set -e; \
 	mkdir -p "$(@D)"; \
 	base="$@.base"; probe="$@.probe"; probe_source="$@.probe.c"; \
@@ -969,35 +964,24 @@ $(LUA_INSTALL_STAMP): $(LUA_LIB) $(LUA_BUILD_CONFIG)
 	mkdir -p "$(LUA_SOURCE_INSTALL_DIR)"
 	install -m 0644 $(LUA_DIR)/src/*.c $(LUA_DIR)/src/*.h \
 		"$(LUA_SOURCE_INSTALL_DIR)/"
+	rm -f "$(LUA_SOURCE_INSTALL_DIR)/titan_windows_loadlib.h"
 	mkdir -p "$(@D)"
 	touch "$@"
 
-$(LUA_TARBALL):
-	@echo "==> Downloading $(LUA_URL)"
-	@if command -v curl >/dev/null 2>&1; then \
-	  curl -fL -o "$@" "$(LUA_URL)"; \
-	elif command -v wget >/dev/null 2>&1; then \
-	  wget -O "$@" "$(LUA_URL)"; \
-	else \
-	  echo "ERROR: need 'curl' or 'wget' to download Lua" >&2; exit 1; \
-	fi
+# Source checkout belongs to Git, never to a build recipe. Prepared CI copies
+# may contain the same plain sources without Git metadata.
+$(LUA_SOURCE_READY):
+	@echo "ERROR: Lua source is missing; initialize the Lua submodule."
+	@echo "Run: git submodule update --init --recursive"
+	@exit 1
 
-$(LUA_EXTRACTED): $(LUA_TARBALL) $(LUA_PATCH_FILE)
-	@echo "==> Replacing generated Lua source tree from $(LUA_TARBALL)"
-	rm -rf "$(LUA_DIR)"
-	tar zxf "$(LUA_TARBALL)"
-	git apply --directory="$(LUA_DIR)" "$(LUA_PATCH_FILE)"
-	@touch "$@"
-
-# Lua's own Makefile does not track source/header dependencies.  This content
-# stamp configures luaconf.h with Titan's installation paths and cleans Lua
-# objects whenever that configuration or any effective native-build input
-# changes. An unchanged invocation preserves the stamp mtime and leaves the
-# already-built interpreter warm. The patched sources are prefix-independent;
-# PREFIX remains a build input for native dependencies and installation.
-$(LUA_BUILD_CONFIG): $(LUA_EXTRACTED) $(READLINE_SELECTION_CONFIG) FORCE
-	@tmp="$@.tmp"; header="$(LUA_DIR)/src/luaconf.h"; \
-	tmp_header="$$header.titan.tmp"; \
+# Track every source/header byte as well as the effective native-build inputs.
+# This also invalidates objects after source changes with unchanged mtimes.
+# An unchanged invocation preserves the stamp mtime and keeps the build warm.
+# The fork's sources are installed unchanged; PREFIX remains a build input for
+# native dependencies and installation.
+$(LUA_BUILD_CONFIG): $(LUA_SOURCE_READY) $(READLINE_SELECTION_CONFIG) FORCE
+	@set -e; tmp="$@.tmp"; \
 	changed="$@.changed"; \
 	rm -f "$$changed"; \
 	{ printf '%s\n' \
@@ -1012,34 +996,14 @@ $(LUA_BUILD_CONFIG): $(LUA_EXTRACTED) $(READLINE_SELECTION_CONFIG) FORCE
 		$(call make_shell_quote,TITAN_LIBRARY_VERSION=$(TITAN_LIBRARY_VERSION)); } \
 		> "$$tmp"; \
 	cat "$(READLINE_SELECTION_CONFIG)" >> "$$tmp"; \
-	awk -v titan_library=$(call make_shell_quote,$(TITAN_LIBRARY_VERSION)) \
-	  '$$1 == "#define" && $$2 == "LUA_TITAN_CDIR" { next } \
-	   { if ($$1 == "#define" && index($$2, "LUA_ROOT") == 1) { \
-	       print "#define LUA_ROOT \"!/\""; next; \
-	     } \
-	     if ($$1 == "#define" && $$2 == "LUA_CDIR" && \
-	         index($$0, "LUA_ROOT") != 0) { \
-	       print; \
-	       printf("#define LUA_TITAN_CDIR%cLUA_ROOT %clib/titan/%s/%c\n", \
-	              9, 34, titan_library, 34); \
-	       next; \
-	     } \
-	     line = $$0; \
-	     gsub(/LUA_TITAN_CDIR[ \t]*"[?][.]so;"[ \t]*/, "", line); \
-	     if (line ~ /LUA_CDIR[ \t]*"[?][.]so;"/) { \
-	       sub(/LUA_CDIR[ \t]*"[?][.]so;"/, \
-	           "LUA_TITAN_CDIR \"?.so;\" LUA_CDIR \"?.so;\"", line); \
-	     } \
-	     print line; }' "$$header" > "$$tmp_header"; \
-	grep -q '^#define LUA_ROOT' "$$tmp_header"; \
-	grep -q '^#define LUA_TITAN_CDIR' "$$tmp_header"; \
-	test "$$(grep -Ec 'LUA_TITAN_CDIR[[:space:]]*"[?][.]so;"' "$$tmp_header")" -eq 1; \
-	if test -r "$@" && cmp -s "$$tmp" "$@" && \
-	   cmp -s "$$tmp_header" "$$header"; then \
-	  rm -f "$$tmp" "$$tmp_header"; \
+	(cd "$(LUA_DIR)/src"; \
+	  if command -v sha256sum >/dev/null 2>&1; then \
+	    sha256sum $(notdir $(LUA_SOURCE_FILES)); \
+	  else shasum -a 256 $(notdir $(LUA_SOURCE_FILES)); fi) >> "$$tmp"; \
+	if test -r "$@" && cmp -s "$$tmp" "$@"; then \
+	  rm -f "$$tmp"; \
 	else \
-	  echo "==> Configuring Lua for Titan paths"; \
-	  mv -f "$$tmp_header" "$$header"; \
+	  echo "==> Configuring Lua native build inputs"; \
 	  mv -f "$$tmp" "$$changed"; \
 	fi
 	@if test -r "$@.changed"; then \
@@ -2400,7 +2364,7 @@ rock-post-install:
 # longer builds stdlib before LuaRocks has deployed the compiler.
 rock-build: titan
 
-TITAN_TEST_MODULE_MANIFEST := $(dir $(abspath $(lastword $(MAKEFILE_LIST))))spec/support/stdlib_test_modules.mk
+TITAN_TEST_MODULE_MANIFEST := $(TITAN_MAKEFILE_DIR)spec/support/stdlib_test_modules.mk
 include $(TITAN_TEST_MODULE_MANIFEST)
 TITAN_TEST_BUILD_DIR ?= .titan-tests
 TITAN_TEST_EXECUTABLE := $(TITAN_TEST_BUILD_DIR)/$(TITAN_STDLIB_TEST_PROGRAM_OUTPUT)
@@ -2661,9 +2625,11 @@ clean: ## Remove generated build/test artifacts (keeps the Lua tree)
 	rm -f *.c *.o *.so test
 	rm -f luacov.stats.out luacov.report.out
 
-clean-lua: ## Remove the downloaded Lua source tree(s) and tarball
-	rm -rf $(LUA_DIR) lua-5.*/
-	rm -f $(LUA_TARBALL) lua-5.*.tar.gz
+clean-lua: ## Remove Lua build artifacts and the checkout-local install; preserve the submodule
+	@if test -f "$(LUA_DIR)/Makefile"; then $(MAKE) -C "$(LUA_DIR)" clean; fi
+	rm -f "$(LUA_BUILD_CONFIG)" "$(LUA_BUILD_CONFIG).changed" \
+		"$(READLINE_SELECTION_CONFIG)" "$(READLINE_INSTALL_STAMP)"
+	rm -f lua-5.*.tar.gz
 	rm -rf .lua
 
 clean-readline: ## Remove the bundled Readline source/build trees and release archive

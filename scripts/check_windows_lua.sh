@@ -12,7 +12,7 @@ mkdir -p "$check_root"
 
 # The reviewed default-source export inventory is independently derived from
 # the pinned public/internal declarations, including all four exported arrays.
-llvm-readobj --coff-exports "$prefix/bin/lua-5.5.1.dll" > "$check_root/exports.txt"
+llvm-readobj --coff-exports "$prefix/bin/lua55.dll" > "$check_root/exports.txt"
 perl -ne 'print "$1\n" if /^  Name: ([^\r\n]+)\r?$/' "$check_root/exports.txt" | LC_ALL=C sort > "$check_root/export-names.txt"
 diff -u spec/fixtures/windows/lua-5.5.1-exports.txt "$check_root/export-names.txt"
 if grep -F 'ForwardedTo:' "$check_root/exports.txt"; then
@@ -34,14 +34,14 @@ inspect_imports() {
     for my $name (@names) {
       $name = lc $name;
       die "Unexpected Lua runtime dependency: $name\n"
-        unless $name eq "kernel32.dll" || $name eq "lua-5.5.1.dll" ||
+        unless $name eq "kernel32.dll" || $name eq "lua55.dll" ||
                $name eq "ucrtbase.dll" || $name =~ /^api-ms-win-crt-[a-z0-9-]+\.dll$/;
     }
   ' "$report"
 }
-inspect_imports "$prefix/bin/lua-5.5.1.dll" "$check_root/lua-dll-imports.txt"
+inspect_imports "$prefix/bin/lua55.dll" "$check_root/lua-dll-imports.txt"
 inspect_imports "$prefix/bin/lua.exe" "$check_root/lua-exe-imports.txt"
-grep -F 'Name: lua-5.5.1.dll' "$check_root/lua-exe-imports.txt" >/dev/null
+grep -F 'Name: lua55.dll' "$check_root/lua-exe-imports.txt" >/dev/null
 
 # Preserve exact installed SDK bytes, including internal and public config.
 for file in "$build_root/lua-5.5.1/src/"*.c "$build_root/lua-5.5.1/src/"*.h \
@@ -66,6 +66,7 @@ done
   -o "$check_root/lua-sdk-probe.dll" "$check_root/consumer.o" \
   "$prefix/lib/liblua-5.5.1.dll.a"
 inspect_imports "$check_root/lua-sdk-probe.dll" "$check_root/consumer-imports.txt"
+grep -F 'Name: lua55.dll' "$check_root/consumer-imports.txt" >/dev/null
 llvm-readobj --coff-exports "$check_root/lua-sdk-probe.dll" | \
   perl -ne 'print "$1\n" if /^  Name: ([^\r\n]+)\r?$/' > "$check_root/consumer-exports.txt"
 printf '%s\n' luaopen_titan_lua_sdk_probe > "$check_root/expected-consumer-exports.txt"
@@ -86,7 +87,7 @@ hostile_cwd="$probe_root/cwd"
 hostile_path="$probe_root/path"
 mkdir -p "$runtime/bin" "$runtime/lib/lua/5.5" "$runtime/share/lua/5.5" \
   "$provider" "$hostile_cwd" "$hostile_path"
-cp "$prefix/bin/lua.exe" "$prefix/bin/lua-5.5.1.dll" "$runtime/bin/"
+cp "$prefix/bin/lua.exe" "$prefix/bin/lua55.dll" "$runtime/bin/"
 cp "$check_root/lua-sdk-probe.dll" "$runtime/lib/lua/5.5/titan_lua_sdk_probe.dll"
 printf '%s\n' 'return "relocated UTF-8 Lua source"' > "$runtime/share/lua/5.5/relocation_é.lua"
 cp spec/fixtures/windows/lua_loader_probe.lua "$probe_root/probe.lua"
@@ -94,21 +95,23 @@ cp spec/fixtures/windows/lua_loader_probe.lua "$probe_root/probe.lua"
   -Xlinker --out-implib -Xlinker "$probe_root/loader-dependency.dll.a" \
   -o "$probe_root/titan_lua_loader_dependency.dll" spec/fixtures/windows/lua_loader_dependency.c
 "${compiler[@]}" -shared -O2 -Wl,--exclude-all-symbols -I "$prefix/include" \
-  -o "$provider/canary.dll" spec/fixtures/windows/lua_loader_canary.c \
+  -o "$provider/titan_loader_canary.dll" spec/fixtures/windows/lua_loader_canary.c \
   "$probe_root/loader-dependency.dll.a" "$prefix/lib/liblua-5.5.1.dll.a"
-for destination in "$provider" "$hostile_cwd" "$hostile_path"; do
-  cp "$probe_root/titan_lua_loader_dependency.dll" "$destination/"
-done
-# Each invocation is fresh: an earlier successful load cannot satisfy a later
-# negative lookup from Windows' already-loaded module list.
+# Each invocation is fresh: an earlier mapping cannot satisfy a later lookup.
+# The dependency is initially absent from every Windows DLL search directory.
 (cd "$hostile_cwd"; PATH="$hostile_path" "$runtime/bin/lua.exe" -E \
-  "$probe_root/probe.lua" "$provider/canary.dll" reject)
+  "$probe_root/probe.lua" "$provider/titan_loader_canary.dll" reject)
+# A native dependency on process PATH follows the ordinary Windows search.
+cp "$probe_root/titan_lua_loader_dependency.dll" "$hostile_path/"
+(cd "$hostile_cwd"; PATH="$hostile_path" "$runtime/bin/lua.exe" -E \
+  "$probe_root/probe.lua" "$provider/titan_loader_canary.dll" accept)
+rm "$hostile_path/titan_lua_loader_dependency.dll"
 cp "$probe_root/titan_lua_loader_dependency.dll" "$runtime/bin/"
 (cd "$hostile_cwd"; PATH="$hostile_path" "$runtime/bin/lua.exe" -E \
-  "$probe_root/probe.lua" "$provider/canary.dll" accept)
-# Relative provider requests remain intentional, while dependencies stay scoped.
+  "$probe_root/probe.lua" "$provider/titan_loader_canary.dll" accept)
+# Relative requests use the same module and ordinary native dependency rules.
 (cd "$provider"; PATH="$hostile_path" "$runtime/bin/lua.exe" -E \
-  "$probe_root/probe.lua" './canary.dll' accept)
+  "$probe_root/probe.lua" './titan_loader_canary.dll' accept)
 
 # This marker is written only after all native shell checks pass. The separate
 # PowerShell gate reads the exact latest successful fixture directory.

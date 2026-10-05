@@ -16,7 +16,7 @@ LUAMOD_API int luaopen_titan_lua_sdk_probe(lua_State *L) {
     const void *addresses[] = {
         lua_ident, luai_ctype_, luaP_opmodes, luaT_typenames_
     };
-    HMODULE library = GetModuleHandleW(L"lua-5.5.1.dll");
+    HMODULE library = GetModuleHandleW(L"lua55.dll");
     unsigned int index;
     luaL_checkversion(L);
     if (library == NULL)

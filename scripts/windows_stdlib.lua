@@ -69,7 +69,7 @@ if mode == "validate" then
     end
     local function valid_imports(path)
         local report, count = read(path), 0
-        local allowed = { ["lua-5.5.1.dll"] = true, ["libuv-1.dll"] = true,
+        local allowed = { ["lua55.dll"] = true, ["libuv-1.dll"] = true,
             ["libllhttp-9.4.dll"] = true, ["libsqlite3-0.dll"] = true,
             ["libssl-3-x64.dll"] = true, ["libcrypto-3-x64.dll"] = true,
             ["kernel32.dll"] = true, ["bcrypt.dll"] = true, ["ws2_32.dll"] = true,

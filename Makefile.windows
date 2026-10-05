@@ -26,34 +26,27 @@ PREFIX ?= $(CURDIR)/.windows-sdk
 WINDOWS_BUILD_ROOT ?= $(CURDIR)/windows-build
 
 LUA_VERSION := 5.5.1
-LUA_ARCHIVE := lua-$(LUA_VERSION).tar.gz
-LUA_URL := https://www.lua.org/ftp/$(LUA_ARCHIVE)
-LUA_SHA256 := 1c4b4068d67061f2a2231ad2b5422e77acea1487ea9890f6320af614f4373dce
+LUA_DIR := lua-$(LUA_VERSION)
+LUA_SOURCE_READY := $(LUA_DIR)/src/lua.h
 LUA_SOURCE := $(WINDOWS_BUILD_ROOT)/lua-$(LUA_VERSION)/src
 LUA_READY := $(LUA_SOURCE)/.titan-windows-source
-LUA_CONFIGURE := scripts/configure_windows_lua.pl
 LUA_OBJECT_DIR := $(WINDOWS_BUILD_ROOT)/lua-objects
 LUA_CONFIG := $(LUA_OBJECT_DIR)/.configuration
-LUA_DLL := $(WINDOWS_BUILD_ROOT)/bin/lua-$(LUA_VERSION).dll
+# Retain Lua's standard DLL identity for independently built binary modules.
+LUA_DLL := $(WINDOWS_BUILD_ROOT)/bin/lua55.dll
 LUA_IMPORT := $(WINDOWS_BUILD_ROOT)/lib/liblua-$(LUA_VERSION).dll.a
 LUA_EXE := $(WINDOWS_BUILD_ROOT)/bin/lua.exe
-LUA_RESOURCE := $(LUA_OBJECT_DIR)/lua.res
+LUA_RESOURCE := $(LUA_SOURCE)/lua-windows.res
 LUA_MANIFEST := vendor/lua/lua-$(LUA_VERSION)-windows.manifest
 LUA_RC_SOURCE := vendor/lua/lua-$(LUA_VERSION)-windows.rc
 
-# Stock Lua's CORE_O and LIB_O; neither lua.c nor luac.c produces the DLL.
-LUA_CORE := lapi lcode lctype ldebug ldo ldump lfunc lgc llex lmem lobject \
-	lopcodes lparser lstate lstring ltable ltm lundump lvm lzio
-LUA_LIBRARIES := lauxlib lbaselib lcorolib ldblib liolib lmathlib loadlib \
-	loslib lstrlib ltablib lutf8lib linit
-LUA_OBJECTS := $(foreach name,$(LUA_CORE) $(LUA_LIBRARIES),$(call make_path,$(LUA_OBJECT_DIR)/$(name).o))
 
 .PHONY: help lua-source lua-source-check lua-build lua lua-check check-windows-toolchain FORCE
 help:
 	@echo 'Windows CLANG64/UCRT x64 targets (serial compilation):'
-	@echo '  lua-source  verify and configure the dedicated Lua source stage'
+	@echo '  lua-source  copy the Lua submodule sources unchanged into the Windows source stage'
 	@echo '  lua-source-check  test configured headers with Clang COFF objects (also on Linux)'
-	@echo '  lua-build   build lua-5.5.1.dll, its import library, and lua.exe'
+	@echo '  lua-build   build lua55.dll, its import library, and lua.exe'
 	@echo '  lua         install those files and the complete matching Lua SDK'
 	@echo '  lua-check   check native exports/imports and exercise SDK consumers'
 	@echo '  native-source-check  check configured native headers with Clang COFF objects'
@@ -74,26 +67,31 @@ help:
 
 FORCE:
 
-$(LUA_ARCHIVE):
-	@temporary=$(call quote,$@.tmp); trap 'rm -f "$$temporary"' EXIT; \
-	curl --fail --location --output "$$temporary" $(call quote,$(LUA_URL)); \
-	perl -MDigest::SHA=sha256_hex -e 'local $$/; open my $$f,"<:raw",$$ARGV[0] or die $$!; die "Lua checksum mismatch\n" unless sha256_hex(<$$f>) eq $$ARGV[1]' \
-	  "$$temporary" $(call quote,$(LUA_SHA256)); \
-	mv "$$temporary" $(call quote,$@)
+$(call make_path,$(LUA_SOURCE_READY)):
+	@echo 'ERROR: Lua source is missing; initialize the Lua submodule.'
+	@echo 'Run: git submodule update --init --recursive'
+	@exit 1
 
-# A fresh verified extraction prevents accidentally using the configured Unix
-# Lua tree. Only our stamped generated tree may be replaced on a recipe change.
-$(call make_path,$(LUA_READY)): $(LUA_ARCHIVE) $(LUA_CONFIGURE) vendor/lua/titan_windows_loadlib.h
-	@perl -MDigest::SHA=sha256_hex -e 'local $$/; open my $$f,"<:raw",$$ARGV[0] or die $$!; die "Lua checksum mismatch\n" unless sha256_hex(<$$f>) eq $$ARGV[1]' \
-	  $(call quote,$(LUA_ARCHIVE)) $(call quote,$(LUA_SHA256))
-	@mkdir -p $(call quote,$(WINDOWS_BUILD_ROOT)); \
+# Copy source files only: Unix objects and Git metadata never enter this tree.
+# The content stamp notices source changes independently of their mtimes.
+$(call make_path,$(LUA_READY)): FORCE $(call make_path,$(LUA_SOURCE_READY))
+	@set -e; mkdir -p $(call quote,$(WINDOWS_BUILD_ROOT)); \
 	stage=$$(mktemp -d $(call quote,$(WINDOWS_BUILD_ROOT)/.lua-source.XXXXXX)); \
 	trap 'rm -rf "$$stage"' EXIT; \
-	tar -xzf $(call quote,$(LUA_ARCHIVE)) -C "$$stage"; \
-	perl $(call quote,$(LUA_CONFIGURE)) "$$stage/lua-$(LUA_VERSION)/src"; \
-	printf '%s\n' $(call quote,$(LUA_SHA256)) > "$$stage/lua-$(LUA_VERSION)/src/.titan-windows-source"; \
+	mkdir -p "$$stage/lua-$(LUA_VERSION)/src"; \
+	cp $(call quote,$(LUA_DIR)/src/)*.c $(call quote,$(LUA_DIR)/src/)*.h \
+	  $(call quote,$(LUA_DIR)/src/lua.hpp) $(call quote,$(LUA_DIR)/src/Makefile) \
+	  "$$stage/lua-$(LUA_VERSION)/src/"; \
+	(cd "$$stage/lua-$(LUA_VERSION)/src"; \
+	  perl -MDigest::SHA=sha256_hex -e 'for my $$p (@ARGV) { open my $$f,"<:raw",$$p or die $$!; local $$/; print sha256_hex(<$$f>),"  ",$$p,"\n"; }' *.c *.h lua.hpp Makefile) \
+	  > "$$stage/lua-$(LUA_VERSION)/src/.titan-windows-source"; \
 	if test -e $(call quote,$(WINDOWS_BUILD_ROOT)/lua-$(LUA_VERSION)); then \
 	  test -f $(call quote,$(LUA_READY)) || { echo 'Refusing to replace an unstamped Lua source directory' >&2; exit 1; }; \
+	  same=yes; \
+	  for source in "$$stage/lua-$(LUA_VERSION)/src/"*; do \
+	    if ! cmp -s "$$source" $(call quote,$(LUA_SOURCE)/)"$${source##*/}"; then same=no; break; fi; \
+	  done; \
+	  if test "$$same" = yes && cmp -s "$$stage/lua-$(LUA_VERSION)/src/.titan-windows-source" $(call quote,$(LUA_READY)); then exit 0; fi; \
 	  rm -rf $(call quote,$(WINDOWS_BUILD_ROOT)/lua-$(LUA_VERSION)); \
 	fi; \
 	mv "$$stage/lua-$(LUA_VERSION)" $(call quote,$(WINDOWS_BUILD_ROOT)/lua-$(LUA_VERSION))
@@ -117,40 +115,40 @@ $(call make_path,$(LUA_CONFIG)): FORCE $(call make_path,$(LUA_READY)) Makefile.w
 	@mkdir -p $(call quote,$(LUA_OBJECT_DIR)); \
 	temporary=$(call quote,$@.tmp); trap 'rm -f "$$temporary"' EXIT; \
 	{ printf '%s\n' 'titan-windows-lua-v1' \
-	    'source-sha256=$(LUA_SHA256)' 'lua-dll=lua-5.5.1.dll' \
+	    'lua-dll=lua55.dll' \
 	    $(call quote,CC=$(CC)) $(call quote,RC=$(RC)) \
 	    $(call quote,CPPFLAGS=$(LUA_CPPFLAGS)) $(call quote,CFLAGS=$(LUA_CFLAGS)) \
 	    $(call quote,LDFLAGS=$(LUA_LDFLAGS)); \
 	  $(CC) --version; $(CC) -dumpmachine; \
 	  perl -MDigest::SHA=sha256_hex -e 'for my $$p (@ARGV) { open my $$f,"<:raw",$$p or die $$!; local $$/; print sha256_hex(<$$f>),"  ",$$p,"\n"; }' \
-	    Makefile.windows $(call quote,$(LUA_CONFIGURE)) $(call quote,$(LUA_MANIFEST)); \
+	    Makefile.windows $(call quote,$(LUA_MANIFEST)); \
 	  (cd $(call quote,$(LUA_SOURCE)); \
-	    perl -MDigest::SHA=sha256_hex -e 'for my $$p (@ARGV) { open my $$f,"<:raw",$$p or die $$!; local $$/; print sha256_hex(<$$f>),"  src/",$$p,"\n"; }' *.c *.h lua.hpp); \
+	    perl -MDigest::SHA=sha256_hex -e 'for my $$p (@ARGV) { open my $$f,"<:raw",$$p or die $$!; local $$/; print sha256_hex(<$$f>),"  src/",$$p,"\n"; }' *.c *.h lua.hpp Makefile); \
 	} > "$$temporary"; \
-	if ! cmp -s "$$temporary" $(call quote,$@); then mv "$$temporary" $(call quote,$@); fi
+	if ! cmp -s "$$temporary" $(call quote,$@); then \
+	  $(MAKE) -C $(call quote,$(LUA_SOURCE)) clean LUA_A=lua55.dll LUA_T=lua.exe LUAC_T=luac.exe \
+	    LUA_IMPLIB=liblua-$(LUA_VERSION).dll.a MYLUAOBJS=lua-windows.res; \
+	  mv "$$temporary" $(call quote,$@); \
+	fi
 
-$(LUA_OBJECTS): $(call make_path,$(LUA_OBJECT_DIR)/%.o): $(call make_path,$(LUA_READY)) $(call make_path,$(LUA_CONFIG))
-	$(CC) -std=c99 $(LUA_CPPFLAGS) $(LUA_CFLAGS) -DTITAN_LUA_BUILD_DLL \
-	  -c $(call quote,$(LUA_SOURCE)/$*.c) -o $(call quote,$@)
+# Resource generation follows configuration cleanup: Lua's clean owns its
+# extra interpreter objects as well as ordinary objects and linked outputs.
+$(call make_path,$(LUA_RESOURCE)): $(call make_path,$(LUA_CONFIG)) $(LUA_RC_SOURCE) $(LUA_MANIFEST)
+	$(RC) -FO $(call quote,$@) $(call quote,$(LUA_RC_SOURCE))
 
-$(call make_path,$(LUA_OBJECT_DIR)/lua.o): $(call make_path,$(LUA_READY)) $(call make_path,$(LUA_CONFIG))
-	$(CC) -std=c99 $(LUA_CPPFLAGS) $(LUA_CFLAGS) \
-	  -c $(call quote,$(LUA_SOURCE)/lua.c) -o $(call quote,$@)
-
-$(call make_path,$(LUA_RESOURCE)): $(LUA_RC_SOURCE) $(LUA_MANIFEST) $(call make_path,$(LUA_CONFIG))
-	$(RC) -I vendor/lua -FO $(call quote,$@) $(call quote,$(LUA_RC_SOURCE))
-
-$(call make_path,$(LUA_DLL)) $(call make_path,$(LUA_IMPORT)) &: $(LUA_OBJECTS) $(call make_path,$(LUA_CONFIG))
+# Lua owns its platform object/link graph. Titan supplies the process manifest,
+# native flags, SDK paths, and publication checks without altering any source.
+lua-build: $(call make_path,$(LUA_CONFIG)) $(call make_path,$(LUA_RESOURCE))
+	+$(MAKE) -j1 -C $(call quote,$(LUA_SOURCE)) mingw ALL=lua.exe \
+	  CC=$(call quote,$(CC) -std=c99) \
+	  CFLAGS=$(call quote,$(LUA_CPPFLAGS) $(LUA_CFLAGS) -DLUA_BUILD_AS_DLL) \
+	  MYLDFLAGS=$(call quote,$(LUA_LDFLAGS) -Xlinker --no-insert-timestamp) \
+	  MYDLLFLAGS=$(call quote,$(LUA_LDFLAGS) -Xlinker --exclude-all-symbols -Xlinker --no-insert-timestamp) \
+	  LUA_IMPLIB=liblua-$(LUA_VERSION).dll.a MYLUAOBJS=lua-windows.res MINGW_STRIP=
 	@mkdir -p $(call quote,$(WINDOWS_BUILD_ROOT)/bin) $(call quote,$(WINDOWS_BUILD_ROOT)/lib)
-	$(CC) -shared $(LUA_LDFLAGS) -Wl,--exclude-all-symbols -Wl,--no-insert-timestamp \
-	  -Xlinker --out-implib -Xlinker $(call quote,$(LUA_IMPORT)) \
-	  -o $(call quote,$(LUA_DLL)) $(foreach name,$(LUA_CORE) $(LUA_LIBRARIES),$(call quote,$(LUA_OBJECT_DIR)/$(name).o))
-
-$(call make_path,$(LUA_EXE)): $(call make_path,$(LUA_OBJECT_DIR)/lua.o) $(call make_path,$(LUA_RESOURCE)) $(call make_path,$(LUA_IMPORT)) $(call make_path,$(LUA_DLL))
-	$(CC) $(LUA_LDFLAGS) -Wl,--no-insert-timestamp -o $(call quote,$@) \
-	  $(call quote,$(LUA_OBJECT_DIR)/lua.o) $(call quote,$(LUA_RESOURCE)) $(call quote,$(LUA_IMPORT))
-
-lua-build: $(call make_path,$(LUA_EXE))
+	cp -p $(call quote,$(LUA_SOURCE)/lua.exe) $(call quote,$(LUA_SOURCE)/lua55.dll) $(call quote,$(WINDOWS_BUILD_ROOT)/bin/)
+	cp -p $(call quote,$(LUA_SOURCE)/liblua-$(LUA_VERSION).dll.a) $(call quote,$(LUA_IMPORT))
+	rm -f $(call quote,$(WINDOWS_BUILD_ROOT)/bin/lua-$(LUA_VERSION).dll)
 
 # Headers and all configured sources are part of the compiler SDK contract.
 # No static Lua archive is built or installed.
@@ -163,6 +161,8 @@ lua: lua-build
 	install -m 0644 $(foreach header,lua.h luaconf.h lualib.h lauxlib.h lua.hpp,$(call quote,$(LUA_SOURCE)/$(header))) $(call quote,$(PREFIX)/include/)
 	install -m 0644 $(call quote,$(LUA_SOURCE))/*.c $(call quote,$(LUA_SOURCE))/*.h \
 	  $(call quote,$(LUA_SOURCE)/lua.hpp) $(call quote,$(PREFIX)/src/lua-$(LUA_VERSION)/)
+	rm -f $(call quote,$(PREFIX)/bin/lua-$(LUA_VERSION).dll) \
+	  $(call quote,$(PREFIX)/src/lua-$(LUA_VERSION)/titan_windows_loadlib.h)
 	install -m 0644 $(call quote,$(LUA_CONFIG)) $(call quote,$(PREFIX)/etc/titan/lua-$(LUA_VERSION)-windows.config)
 
 lua-check: lua

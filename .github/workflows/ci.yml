@@ -49,6 +49,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@v6
+        with:
+          submodules: true
 
       # Cache only the LuaRocks-managed portion of the standalone prefix. Lua,
       # native SDK archives, and the standard container/shims are rebuilt from
@@ -366,6 +368,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@v6
+        with:
+          submodules: true
 
       - name: Download prepared Linux tree
         uses: actions/download-artifact@v8
@@ -417,6 +421,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@v6
+        with:
+          submodules: true
 
       - name: Download prepared Linux tree
         uses: actions/download-artifact@v8
@@ -522,6 +528,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@v6
+        with:
+          submodules: true
 
       - name: Configure sanitizer diagnostics
         run: |
@@ -557,14 +565,14 @@ jobs:
             test -n "$value"
           done
           inputs="$RUNNER_TEMP/titan-sanitizer-native-cache-inputs"
-          lua_patch_sha256="$(sha256sum vendor/lua/lua-5.5.1-relocatable.patch | cut -d' ' -f1)"
+          lua_revision="$(git rev-parse HEAD:lua-5.5.1)"
           libuv_patch_sha256="$(sha256sum vendor/libuv/libuv-1.53.0-spawn-close.patch | cut -d' ' -f1)"
           {
             printf '%s\n' \
               "schema=$SANITIZER_NATIVE_CACHE_SCHEMA" \
               "titan_abi=$TITAN_ABI_VERSION" \
               "lua=$SANITIZER_LUA_VERSION" \
-              "lua_patch=$lua_patch_sha256" \
+              "lua_revision=$lua_revision" \
               "libbacktrace=$libbacktrace_rev" \
               "libuv=$SANITIZER_LIBUV_VERSION:$SANITIZER_LIBUV_SHA256" \
               "libuv_patch=$libuv_patch_sha256" \
@@ -612,7 +620,6 @@ jobs:
           path: |
             .lua
             lua-${{ env.SANITIZER_LUA_VERSION }}
-            lua-${{ env.SANITIZER_LUA_VERSION }}.tar.gz
             libbacktrace
             libuv-v${{ env.SANITIZER_LIBUV_VERSION }}
             libuv-v${{ env.SANITIZER_LIBUV_VERSION }}.tar.gz
@@ -662,7 +669,6 @@ jobs:
           path: |
             .lua
             lua-${{ env.SANITIZER_LUA_VERSION }}
-            lua-${{ env.SANITIZER_LUA_VERSION }}.tar.gz
             libbacktrace
             libuv-v${{ env.SANITIZER_LIBUV_VERSION }}
             libuv-v${{ env.SANITIZER_LIBUV_VERSION }}.tar.gz

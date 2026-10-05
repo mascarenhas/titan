@@ -97,12 +97,18 @@ change them only when their own compatibility rules require it.
   `PREFIX=$HOME/.local/titan/titan-dev` for the initial `make lua`. Once its
   `bin` is on `PATH`, Make detects the Titan Lua prefix without Lua init/path
   overrides; an explicit `PREFIX` wins and `/usr/local` remains the fallback.
-  Directory aliases retain their launch spelling when physically equivalent. `make lua` configures Lua 5.5.1's
-  `LUA_ROOT` to `"!/"` and patches POSIX `loadlib.c` search-path expansion to
+  Directory aliases retain their launch spelling when physically equivalent.
+  Initialize the pinned `lua-5.5.1` submodule with `git submodule update --init
+  --recursive`. `make lua` compiles the Titan Lua fork directly, and
+  `Makefile.windows` copies those same sources unchanged to its separate build
+  tree. The fork sets POSIX `LUA_ROOT` to `"!/"` and implements
+  POSIX `loadlib.c` search-path expansion to
   resolve `!` from the actual executable's directory parent (`<root>/bin/lua`
   uses `<root>`). Linux uses `/proc/self/exe`; macOS canonicalizes
-  `_NSGetExecutablePath` with `realpath`. The patched Lua source bytes do not
-  depend on `PREFIX`; configuration stamps still track prefix and native-build
+  `_NSGetExecutablePath` with `realpath`. All Titan changes, including the
+  Windows DLL exports and SDK annotations, live in that fork behind compilation
+  guards. Build recipes never patch or rewrite its source. The source bytes do
+  not depend on `PREFIX`; configuration stamps still track prefix and native-build
   inputs for rebuilding and installation. LuaRocks configuration and command
   wrappers can retain absolute paths, so this is Lua module-path relocation,
   not a complete binary-distribution contract. The
@@ -302,7 +308,8 @@ change them only when their own compatibility rules require it.
   that dependency state. The coroutine suite is the isolated restoration
   exception described below.
 - **A local Titan prefix prepared by `make lua`.** The checkout keeps the
-  gitignored `./lua-5.5.1` build tree, while the installation contains the
+  pinned `./lua-5.5.1` source submodule and its Unix build outputs, while the
+  installation contains the
   same internal sources, including the configured `luaconf.h`, under
   `$PREFIX/src/lua-5.5.1/` and the
   matching `$PREFIX/lib/liblua.a`. Generated C includes Lua internal headers
