@@ -1,0 +1,417 @@
+local record Work
+  connection: Connection
+  operation: string
+  task: (async.Task<|nil, value|>)?
+  parent: async.Task
+  parent_token: async.ResumeToken
+  parent_waiting: boolean
+  parent_cancelled: boolean
+  token: async.ResumeToken
+  waiting: boolean
+  deadline: (async.Task<|nil, value|>)?
+  expired: boolean
+  admitted: boolean
+  output_pending: boolean
+  failure: value
+  trace: string
+  kind: MessageType?
+  data: string?
+end
+
+record Connection
+  local stream: io.ReaderWriterCloser?
+  local client: boolean
+  local protocol: string?
+  local limit: integer
+  local input: string
+  local cursor: integer
+  local message_kind: MessageType?
+  local message_bytes: integer
+  local message: string.StringWriter
+  local unicode: Utf8
+  local reader: Work?
+  local writer: Work?
+  local frame: Work?
+  local pong: Work?
+  local ping_work: Work?
+  local shutdown_work: Work?
+  local ping_token: string?
+  local ping_received: boolean
+  local close_sent: boolean
+  local close_received: boolean
+  local peer_code: integer?
+  local peer_reason: string?
+  local closing: boolean
+  local terminal: boolean
+  local failure: async.Error?
+  local works: {Work}
+  local retirement: (async.Task<|nil, value|>)?
+end
+
+local function new_connection(stream: io.ReaderWriterCloser?, client: boolean,
+                              protocol: string?, limit: integer): Connection
+  return {
+    stream = stream, client = client, protocol = protocol, limit = limit,
+    input = "", cursor = 1, message_kind = nil, message_bytes = 0,
+    message = string.writer(), unicode = Utf8(0, 128, 191),
+    reader = nil, writer = nil, frame = nil, pong = nil, ping_work = nil,
+    shutdown_work = nil, ping_token = nil, ping_received = false,
+    close_sent = false, close_received = false, peer_code = nil, peer_reason = nil,
+    closing = false, terminal = false, failure = nil, works = {}, retirement = nil,
+  }
+end
+
+local record Drain
+  task: async.Task<|nil, value|>
+  remove: (function (): ())?
+end
+local function register_drain(done: async.Completion<|Drain, nil, nil|>,
+                             number: integer): uv.req_t?
+  local drain = done:context(number)
+  drain.remove = drain.task:add_terminal_listener(function (_: async.TaskStatus<|nil, value|>)
+    do done:resolve(number, nil)
+    catch done:fatal(number, error, traceback); raise end
+  end)
+  return nil
+end
+local function drain_task(task: async.Task<|nil, value|>)
+  if task:status():has_finished() then return end
+  local drain = Drain(task, nil)
+  defer do
+    local remove? = drain.remove
+    drain.remove = nil
+    if remove then remove() end
+  end
+  async.await_cleanup_with<|Drain, nil, nil|>(drain, register_drain)
+end
+
+local function Work:wake()
+  if self.waiting then
+    self.waiting = false
+    self.task:resume(self.token)
+  end
+end
+local function Work:wake_parent()
+  if self.parent_waiting then
+    self.parent_waiting = false
+    self.parent:resume(self.parent_token)
+  end
+end
+local function Work:wait()
+  self.waiting = true
+  defer do self.waiting = false end
+  async.suspend(self.token, function () self.waiting = false end)
+end
+local function Work:stop_deadline()
+  local deadline? = self.deadline
+  self.deadline = nil
+  if deadline then
+    deadline:cancel(async.CancellationReason.simple("WebSocket control completed"))
+  end
+end
+local function Work:start_deadline(milliseconds: integer)
+  if self.deadline then return end
+  self.deadline = async.run<|nil, value|>(function (): nil
+    timer.sleep(milliseconds)
+    self.expired = true
+    self:wake_parent()
+    return nil
+  end)
+end
+local function Connection:wake_waiters()
+  for index = 1, #self.works do self.works[index]:wake() end
+end
+local function Connection:check_open(operation: string)
+  if self.terminal then
+    if self.failure ~= nil then self.failure:raise() end
+    raise state_error(operation, "WebSocket is closed")
+  end
+end
+local function Connection:release(work: Work)
+  if self.reader == work then self.reader = nil end
+  if self.writer == work then self.writer = nil end
+  if self.frame == work then self.frame = nil end
+  if self.pong == work then self.pong = nil end
+  if self.ping_work == work then self.ping_work = nil; self.ping_token = nil end
+  if self.shutdown_work == work then self.shutdown_work = nil end
+  local retained: {Work} = {}
+  for index = 1, #self.works do
+    local other = self.works[index]
+    if other ~= work then retained[#retained + 1] = other end
+  end
+  self.works = retained
+  self:wake_waiters()
+end
+local function Connection:retire(cause: value, source_trace: string?)
+  if not self.terminal and self.failure == nil and cause ~= nil then
+    if source_trace ~= nil then
+      self.failure = async.Error(cause, source_trace)
+    else
+      do raise cause
+      catch self.failure = async.Error(error, traceback) end
+    end
+  end
+  if not self.retirement then
+    self.terminal = true; self.closing = true
+    self:wake_waiters()
+    local scopes = self.works
+    self.retirement = async.run<|nil, value|>(function (): nil
+      -- Closing the public HTTP stream invokes the captured TCP/TLS abort.
+      -- It precedes all native-work drains and never waits for caller Tasks.
+      do if self.stream then self.stream:close() end
+      catch if self.failure == nil then self.failure = async.Error(error, traceback) end end
+      for index = 1, #scopes do
+        local task? = scopes[index].task
+        if task then drain_task(task) end
+      end
+      self.input = ""; self.cursor = 1
+      self.message = string.writer(); self.message_kind = nil
+      return nil
+    end)
+  end
+  drain_task(self.retirement)
+end
+
+local function new_work(connection: Connection, operation: string): Work
+  return {
+    connection = connection, operation = operation, task = nil,
+    parent = async.running(), parent_token = async.ResumeToken(operation),
+    parent_waiting = false, parent_cancelled = false, token = async.ResumeToken(operation .. " reservation"),
+    waiting = false, deadline = nil, expired = false, admitted = false, output_pending = true,
+    failure = nil, trace = "", kind = nil, data = nil,
+  }
+end
+
+local function Work:execute(body: function (): (), timeout: integer?)
+  local connection = self.connection
+  connection.works[#connection.works + 1] = self
+  self.task = async.run<|nil, value|>(function (): nil
+    defer connection:release(self)
+    do
+      async.checkpoint()
+      body()
+    catch
+      self.failure = error; self.trace = traceback
+    end
+    return nil
+  end)
+  local task = self.task
+  local remove = task:add_terminal_listener(function (_: async.TaskStatus<|nil, value|>)
+    self:wake_parent()
+  end)
+  defer remove()
+  defer self:stop_deadline()
+  if timeout then self:start_deadline(timeout) end
+  while not task:status():has_finished() and not self.expired do
+    self.parent_waiting = true
+    async.suspend(self.parent_token, function ()
+      self.parent_waiting = false; self.parent_cancelled = true
+    end)
+  end
+  self.parent_waiting = false
+  if self.expired then
+    local failure = timeout_error(self.operation)
+    task:cancel(async.CancellationReason.simple("WebSocket deadline expired"))
+    do raise failure
+    catch
+      connection:retire(error, traceback)
+      drain_task(task)
+      raise
+    end
+  end
+  case task:status()
+  when failed(failure) then self.failure = failure.error; self.trace = failure.traceback
+  when cancelled(reason) then self.failure = reason
+  when succeeded(_) then
+  else raise "WebSocket operation child did not retire"
+  end
+  if self.failure ~= nil then
+    if not self.admitted and self.operation ~= "websocket.shutdown" then
+      async.Error(self.failure, self.trace):raise()
+    end
+    if self.failure is Error then
+      local failure = self.failure as Error
+      if failure.kind == "state" and connection.closing and not connection.terminal then
+        async.Error(self.failure, self.trace):raise()
+      end
+    end
+    -- A read-side wire error may still send its mandated bounded Close.
+    if self.failure is Error and not connection.terminal then
+      local failure = self.failure as Error
+      if failure.close_code then
+        connection.closing = true
+        if connection.failure == nil then connection.failure = async.Error(failure, self.trace) end
+        do connection:failure_close(failure.close_code)
+        catch end
+      end
+    end
+    connection:retire(self.failure, self.trace)
+    async.Error(self.failure, self.trace):raise()
+  end
+catch
+  local task? = self.task
+  if not task then self.connection:release(self) end
+  local pending = task ~= nil and not task:status():has_finished()
+  if pending then task:cancel(async.CancellationReason.simple("WebSocket operation stopped")) end
+  if (self.parent_cancelled or pending or not task) and
+      (self.admitted or self.operation == "websocket.shutdown" or self.expired) then
+    do self.connection:retire(error, traceback) catch end
+  end
+  if task then drain_task(task) end
+  raise
+end
+
+function Connection:subprotocol(): string?
+  return self.protocol
+end
+function Connection:close_status(): (integer?, string?)
+  return self.peer_code, self.peer_reason
+end
+function Connection:close()
+  self:retire(nil)
+end
+
+local function Connection:take_frame(work: Work, opcode: integer): boolean
+  while true do
+    if opcode == 8 and self.close_sent then return false end
+    self:check_open(work.operation)
+    local higher = false
+    if opcode < 8 then
+      if self.closing then raise state_error(work.operation, "WebSocket is closing") end
+      higher = (self.shutdown_work ~= nil and not self.close_sent) or self.pong ~= nil or
+               (self.ping_work ~= nil and self.ping_work.output_pending)
+    elseif opcode == 9 then
+      if self.closing then raise state_error(work.operation, "WebSocket is closing") end
+      higher = (self.shutdown_work ~= nil and not self.close_sent) or self.pong ~= nil
+    elseif opcode == 10 then
+      higher = self.shutdown_work ~= nil and not self.close_sent
+    end
+    if self.frame == nil and not higher then self.frame = work; return true end
+    work:wait()
+  end
+end
+local function Connection:send_frame(work: Work, opcode: integer,
+                                     final: boolean, bytes: string)
+  if not self:take_frame(work, opcode) then return end
+  defer do
+    if self.frame == work then self.frame = nil end
+    self:wake_waiters()
+  end
+  if opcode == 8 and self.close_sent then return end
+  local frame = encode_frame(self.client, opcode, final, bytes)
+  work.admitted = true
+  self.stream:write(frame)
+  if opcode == 8 then self.close_sent = true end
+end
+
+function Connection:write(kind: MessageType, data: string)
+  async.checkpoint()
+  self:check_open("websocket.write")
+  if self.closing then raise state_error("websocket.write", "WebSocket is closing") end
+  if self.writer then raise state_error("websocket.write", "another data writer is active") end
+  local work = new_work(self, "websocket.write")
+  self.writer = work
+  work:execute(function ()
+    local opcode = 1
+    case kind
+    when text() then validate_text(data, "websocket.write")
+    when binary() then opcode = 2
+    end
+    local first = 1
+    repeat
+      local last = first + FRAME_BYTES - 1
+      if last > #data then last = #data end
+      self:send_frame(work, opcode, last == #data, string.sub(data, first, last))
+      first = last + 1; opcode = 0
+      if first <= #data then async.yield() end
+    until first > #data
+  end, nil)
+end
+
+function Connection:read(): (MessageType?, string?)
+  async.checkpoint()
+  if self.failure then self.failure:raise() end
+  if self.close_received and self.close_sent then return nil, nil end
+  self:check_open("websocket.read")
+  if self.shutdown_work then raise state_error("websocket.read", "WebSocket shutdown owns receive progress") end
+  if self.reader then raise state_error("websocket.read", "another reader is active") end
+  local work = new_work(self, "websocket.read")
+  self.reader = work
+  work:execute(function ()
+    local kind?, data? = self:read_message(work)
+    work.kind = kind; work.data = data
+  end, nil)
+  if self.close_received and self.close_sent then self:retire(nil) end
+  return work.kind, work.data
+end
+
+function Connection:ping(timeout_ms: integer?)
+  local timeout = positive(timeout_ms, CONTROL_TIMEOUT, "WebSocket Ping timeout")
+  async.checkpoint(); self:check_open("websocket.ping")
+  if self.closing then raise state_error("websocket.ping", "WebSocket is closing") end
+  if self.ping_work then raise state_error("websocket.ping", "another Ping waiter is active") end
+  local work = new_work(self, "websocket.ping")
+  local token = random_bytes(16)
+  self.ping_work = work; self.ping_token = token; self.ping_received = false
+  work:execute(function ()
+    self:send_frame(work, 9, true, token)
+    work.output_pending = false; self:wake_waiters()
+    while not self.ping_received do
+      self:check_open("websocket.ping")
+      if self.close_received then raise state_error("websocket.ping", "peer closed before Pong") end
+      work:wait()
+    end
+  end, timeout)
+end
+
+local function valid_close_code(code: integer): boolean
+  if code >= 1000 and code <= 1003 then return true end
+  if code >= 1007 and code <= 1014 then return true end
+  return code >= 3000 and code <= 4999
+end
+local function close_payload(code: integer, reason: string, client: boolean): string
+  if not valid_close_code(code) or (not client and code == 1010) then
+    raise state_error("websocket.shutdown", "invalid outgoing Close status")
+  end
+  if #reason > 123 then raise state_error("websocket.shutdown", "Close reason exceeds 123 bytes") end
+  validate_text(reason, "websocket.shutdown")
+  return string.char(code >> 8, code & 255) .. reason
+end
+function Connection:shutdown(code: integer?, reason: string?, timeout_ms: integer?)
+  local timeout = positive(timeout_ms, CONTROL_TIMEOUT, "WebSocket shutdown timeout")
+  local payload = close_payload(code or 1000, reason or "", self.client)
+  async.checkpoint()
+  if self.failure then self.failure:raise() end
+  if self.close_received and self.close_sent then self:retire(nil); return end
+  self:check_open("websocket.shutdown")
+  if self.shutdown_work then raise state_error("websocket.shutdown", "another shutdown is active") end
+  local work = new_work(self, "websocket.shutdown")
+  self.shutdown_work = work; self.closing = true
+  self:wake_waiters()
+  work:execute(function ()
+    local discarded = 0
+    if not self.close_sent then self:send_frame(work, 8, true, payload) end
+    while not self.close_received do
+      if not self.reader or self.reader == work then
+        self.reader = work
+        self:read_message(work)
+        discarded = discarded + 1
+        if discarded >= FRAME_BUDGET and not self.close_received then
+          discarded = 0; async.yield()
+        end
+      else
+        work:wait()
+      end
+      if not self.close_received then self:check_open("websocket.shutdown") end
+    end
+  end, timeout)
+  self:retire(nil)
+end
+
+local function Connection:failure_close(code: integer)
+  if self.close_sent or self.terminal then return end
+  local work = new_work(self, "websocket.protocol-close")
+  work:execute(function ()
+    self:send_frame(work, 8, true, close_payload(code, "", self.client))
+  end, CONTROL_TIMEOUT)
+end

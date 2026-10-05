@@ -14,9 +14,11 @@ high-level `fs` and `net` modules. Explicit path reads go through
 `fs.read_file`; network traffic drives only `net`'s public `read`, `write`,
 `shutdown`, `close`, and `accept` methods.
 
-TLS does not import `titan.uv` or add a scheduler operation. The networking
-module's public resource and cleanup contracts are its transport substrate. A TLS operation suspends only when
-the wrapped high-level `net.Connection` suspends.
+TLS imports public `titan.uv` only for the generic Completion registrar's
+`uv.req_t?` type. It owns no libuv handle/request and adds no scheduler operation.
+The public net resource/cleanup contracts remain the transport substrate.
+Operation parents wait through public async exact suspension and terminal
+listeners; internal I/O children perform the suspending net operations.
 
 `titan/ssl.titan` directly imports OpenSSL's public `err.h`, `x509v3.h`,
 `pem.h`, and `ssl.h` headers. There is no SSL-owned integration header. Their
@@ -137,15 +139,16 @@ or OpenSSL pointer crosses the module's public interface.
 
 Bytes read from `net.Connection` are copied into the input BIO with exact
 lengths. Bytes pending in the output BIO are copied into GC-owned Titan strings
-in bounded pieces before being passed to `net.Connection:write`. Neither path
+as one complete immutable engine-step batch before one immediate
+`net.Connection:write` submission. Neither path
 uses NUL termination for application data.
 
 ## Driving the state machine
 
 The Connection has explicit handshaking, open, write-shutdown, peer-closed,
-shutdown, failed, and closed states. Its first server-side I/O calls the same
-handshake driver as explicit `handshake`; a client reaches open state inside
-`connect`.
+shutdown, terminating, failed, and closed states. Its first server-side I/O calls the same
+handshake driver as explicit `handshake`, as does the first I/O on an adopted
+client. A client reaches open state inside `connect`.
 
 Each OpenSSL action follows one loop:
 
@@ -170,19 +173,58 @@ rather than silently changing call semantics.
 retains only the suffix after a matched delimiter on the Connection. It does
 not inspect TCP or TLS record boundaries.
 
-## Serialization, cancellation, and failure
+## Duplex admission, cancellation, and failure
 
-One `busy` bit admits exactly one public TLS operation. It is set across every
-OpenSSL transition and every suspending `net` call, so another Task cannot
-advance the same SSL/BIO pair concurrently. This is intentionally not a
-reader/writer split: handshake and post-handshake traffic can make either
-nominal direction consume input and produce output.
+The Connection owns reader, writer and exclusive control operation slots.
+Each public admission reserves its slot until its parent wrapper epilogue.
+Each internal child independently marks engine access live or retired; this
+single scope fact, rather than user Task termination, controls SSL/BIO freeing.
+One child per public call includes all record pieces and retries. There is no
+per-record worker, persistent pump or second TLS output queue.
 
-A raised OpenSSL, network, or cancellation value moves the connection to the
-failed state, frees its SSL/BIO engine, and best-effort closes the net
-transport. The close call is cancellation-insensitive, so pending Task
-cancellation does not suppress that cleanup; if close itself reports a
-transport error, the original TLS failure remains authoritative.
+OpenSSL engine calls, immediate `SSL_get_error`, saved diagnostics and complete
+output-BIO detachment run synchronously without yielding. A complete immutable
+ciphertext batch goes directly to one net.write before a Task switch, preserving
+submission order. Detaching output followed by failed admission is terminal.
+One operation owns the lazy handshake. One encrypted-input feeder reads TCP;
+other directions install exact cancellable ResumeToken reservations. Feeding
+clears ownership and wakes them to retry the engine, without promising that
+another engine step has left input unread. WANT_WRITE reserves an exclusive
+retry owner across yields; other operations may complete an already admitted
+input feed and relinquish feeder ownership before waiting on that retry gate.
+The exact plaintext piece, pointer and length survive every write retry.
+
+A public parent waits on its child's terminal listener with one private token,
+checks already-terminal status, and removes the exact listener on every exit.
+Its cancellation action only detaches that wait. When resumed by cancellation,
+the parent elects or joins terminal cleanup, cancels its child, closes TCP
+before draining engine scopes, then shield-drains its owned child. This makes
+accepted backpressured writes interruptible even though their native callback
+cannot be abandoned. Original external cancellation remains sticky.
+An internal operation saves its nominal error and original traceback in
+`async.Error` before cleanup yields. The public parent uses `Error:raise()`
+after coordinated cleanup, preserving the failing engine frame without
+reporting a caught operation error as an uncaught internal Task failure.
+Client adoption and trust-context setup likewise save the traced error before
+freeing the partial engine/context or closing TCP, then hand it back after
+cleanup. The `connect` convenience wrapper preserves a handshake failure
+through its final abort.
+
+The first terminal caller publishes terminating before yielding and wakes all
+progress waits. Every child retires feeder/retry/handshake permissions and its
+engine scope before waiting for shared cleanup. The elected owner alone closes
+TCP, waits through named `await_cleanup_with` registrars for scopes to retire,
+frees SSL/BIO once, clears buffers and publishes closed after graceful close or
+failed after abort/failure. Followers wait on that
+same completion. No cleanup owner joins a child whose epilogue can wait for
+cleanup; public abort drains captured children only after publication. User
+Tasks may catch their SSL error and continue without delaying cleanup.
+
+Graceful shutdown/close stay exclusive. Authenticated peer EOF stops new writers
+but preserves an already admitted writer's exact retry. The reader waits for
+that writer scope before reciprocal alert/TCP half-close. WANT_READ after peer
+EOF cannot make future progress and becomes terminal. Explicit abort skips the
+alert exchange and reports stable `TLS_INTERRUPTED` on sibling operations.
 
 On transport EOF, the input memory BIO changes from retry semantics to a real
 zero return. OpenSSL `SSL_ERROR_ZERO_RETURN` records an authenticated peer
@@ -246,9 +288,11 @@ generated Lua shim, and `luaopen_titan_ssl` to the coordinated provider.
 The public `fs` and `net` surfaces are sufficient for explicit path loading and
 the entire TLS record and handshake state machine. No blocker required a direct
 libuv operation, native filesystem escape hatch, or native socket escape hatch.
-The deliberate limitation is concurrency: without a higher-level duplex
-coordination abstraction, the SSL record serializes the one state machine
-rather than promising simultaneous reader and writer Tasks.
+Public direction slots and exact async coordination provide simultaneous
+reader/writer progress while synchronous engine access remains serialized by
+the cooperative runtime. `client` factors context/identity setup from `connect`
+and adopts the exact preselected transport without a handshake or second DNS
+lookup; `connect` preserves trust preparation before dialing.
 
 The focused non-LuaCov standard-library tests use checked-in local CA and
 certificate fixtures to exercise combined full-chain/key and split PEM files,

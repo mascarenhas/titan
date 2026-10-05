@@ -45,7 +45,7 @@ artifacts=(
     "$shim_dir/async.lua" "$shim_dir/timer.lua"
     "$shim_dir/io.lua"
     "$shim_dir/fs.lua" "$shim_dir/net.lua" "$shim_dir/ssl.lua"
-    "$shim_dir/url.lua" "$shim_dir/http.lua" "$shim_dir/os.lua"
+    "$shim_dir/url.lua" "$shim_dir/http.lua" "$shim_dir/websocket.lua" "$shim_dir/os.lua"
     "$shim_dir/peg.lua" "$shim_dir/string.lua"
     "$shim_dir/math.lua" "$shim_dir/lua.lua"
     "$shim_dir/iteration.lua" "$shim_dir/gc.lua" "$shim_dir/test.lua"
@@ -118,7 +118,7 @@ remove_installed_artifacts() {
         "$shim_dir/async.lua" "$shim_dir/timer.lua" \
         "$shim_dir/io.lua" \
         "$shim_dir/fs.lua" "$shim_dir/net.lua" "$shim_dir/ssl.lua" \
-        "$shim_dir/url.lua" "$shim_dir/http.lua" "$shim_dir/os.lua" \
+        "$shim_dir/url.lua" "$shim_dir/http.lua" "$shim_dir/websocket.lua" "$shim_dir/os.lua" \
         "$shim_dir/peg.lua" "$shim_dir/string.lua" \
         "$shim_dir/math.lua" "$shim_dir/lua.lua" \
         "$shim_dir/iteration.lua" "$shim_dir/gc.lua" "$shim_dir/test.lua" \

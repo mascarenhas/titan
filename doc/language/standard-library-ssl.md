@@ -33,6 +33,9 @@ end
 record Connection
 record Server
 
+function client(transport: net.Connection, host: string,
+                ca_file: string?): Connection
+
 function connect(host: string, port: integer,
                  ca_file: string?): Connection
 
@@ -48,6 +51,7 @@ function Connection:read_until(delimiter: string,
 function Connection:write(data: string)
 function Connection:shutdown()
 function Connection:close()
+function Connection:abort()
 
 function Server:accept(): Connection
 function Server:close()
@@ -68,6 +72,16 @@ paths are text and may not contain an embedded NUL. Application payloads and
 read delimiters are binary strings.
 
 ## Verified client connections
+
+`client(transport, host, ca_file)` adopts an already connected TCP transport,
+selects trust, and configures verified TLS without performing a network
+handshake. Call `handshake()` explicitly or let the first read/write drive it.
+The original `host` controls SNI and certificate identity even when TCP dialed
+a numeric resolved address. Empty hosts and invalid text arguments fail before ownership
+transfers. After validation, the TLS call owns cleanup on any failure, including
+trust-file loading, which may suspend. The caller performs no further raw I/O.
+An opening supervisor may retain TCP solely as abort authority until adoption
+returns; after that use the TLS owner's `abort()`.
 
 `connect` selects trust, establishes a `net.Connection`, configures a client
 TLS state machine, and completes its handshake before returning. It requires
@@ -173,10 +187,18 @@ be split into TLS-sized pieces internally, but one call remains one ordered
 high-level operation. OpenSSL retry conditions never change the bytes or
 length of the piece being retried.
 
-A `Connection` permits only one active TLS operation at a time. Concurrent
-reads, concurrent writes, or a read and write from separate Tasks on the same
-connection are rejected. This is stricter than plain `net.Connection`: one
-OpenSSL state machine and its two memory BIOs are advanced serially.
+A `Connection` permits one reader (`read` or `read_until`) and one writer at
+once. A quiet reader does not prevent an unsolicited write. A second reader
+or writer raises before admission without disturbing the admitted operation.
+Explicit `handshake`, `shutdown`, and graceful `close` require a quiescent
+connection and exclude application I/O until they finish. When first I/O
+starts a lazy handshake, one direction drives it and the other waits for the
+same verified result.
+
+An admitted operation owns one internal I/O Task. Its public caller remains
+runnable on cancellation, closes the transport before draining that child,
+and releases the direction after cleanup. Cancellation after admission is
+terminal for the TLS connection; it is not a detachable reusable read.
 
 ## TLS shutdown and EOF
 
@@ -184,6 +206,12 @@ OpenSSL state machine and its two memory BIOs are advanced serially.
 network connection, and shuts down the TCP write side. It is idempotent. The
 read side remains available so the peer's authenticated shutdown can still be
 observed; output after shutdown is rejected.
+
+A received `close_notify` closes new write admission. An already admitted
+writer may finish its exact pending pieces; the reader waits for that engine
+scope to retire before sending the reciprocal alert. A writer that still needs
+new protected input after the peer alert fails rather than waiting indefinitely.
+If the local side has already shut down, no second alert is sent.
 
 A received `close_notify` is normal EOF, so `read` and `read_until` eventually
 return `nil`. A bare transport EOF without `close_notify` is instead a
@@ -202,6 +230,14 @@ reports that error. A TLS, transport, or cancellation failure terminalizes
 the TLS connection and best-effort closes its transport; later I/O cannot
 resume the failed state machine.
 
+`abort()` stops admission, interrupts both directions and skips `close_notify`.
+It closes TCP before waiting for internal engine scopes, frees the engine once,
+and waits for the captured internal I/O Tasks to retire. It needs no peer
+cooperation and remains usable with pending Task cancellation. Concurrent abort
+callers share the same cleanup completion; subsequent aborts are no-ops. Native
+writes and their immutable bytes remain owned through their callbacks. A sibling
+operation interrupted by abort raises `ssl.Error` named `TLS_INTERRUPTED`.
+
 ## Errors
 
 TLS and certificate failures raise `ssl.Error`, whose `operation` names the
@@ -213,6 +249,8 @@ explicit CA, certificate, or key paths and errors from the wrapped TCP
 connection retain the [`async.OperationError`](async-io.md) value supplied by
 `fs` or `net`, except that `ECONNRESET` from a TLS input read is normalized to
 `TLS_TRUNCATED_EOF` as described above.
+Operations and client adoption preserve that error value and its original
+failing operation traceback through resource cleanup.
 
 ## Example
 

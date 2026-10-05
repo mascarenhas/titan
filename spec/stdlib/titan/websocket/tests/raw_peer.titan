@@ -1,0 +1,237 @@
+-- Independent wire codec: never import websocket internals or private UV.
+local record Wire
+  stream: io.ReaderWriterCloser
+  input: string
+  opening: string
+end
+
+local record Frame
+  opcode: integer
+  final: boolean
+  masked: boolean
+  payload: string
+  mask: string?
+end
+
+local function byte_at(bytes: string, index: integer): integer
+  local byte = string.byte(bytes, index)
+  return byte
+end
+
+local function Wire:exact(count: integer): string
+  while #self.input < count do
+    local part? = self.stream:read()
+    if part == nil then raise "raw peer reached EOF before expected bytes" end
+    self.input = self.input .. part
+  end
+  local result = string.sub(self.input, 1, count)
+  self.input = string.sub(self.input, count + 1)
+  return result
+end
+
+local function Wire:headers(): string
+  while true do
+    local first?, last? = string.find(self.input, "\r\n\r\n")
+    if first then
+      local result = string.sub(self.input, 1, last)
+      self.input = string.sub(self.input, last + 1)
+      return result
+    end
+    local part? = self.stream:read()
+    if part == nil then raise "raw peer reached EOF during HTTP headers" end
+    self.input = self.input .. part
+    test.assert(#self.input < 256 * 1024, "raw peer header exceeded fixture cap")
+  end
+end
+
+local function xor_mask(payload: string, mask: string): string
+  local result = string.writer()
+  for index = 1, #payload do
+    result:write(string.char(byte_at(payload, index) ~
+                            byte_at(mask, ((index - 1) % 4) + 1)))
+  end
+  return result:drain()
+end
+
+local function frame(opcode: integer, payload: string, masked: boolean?,
+                     final: boolean?): string
+  local first = opcode
+  if final ~= false then first = first | 128 end
+  local flag = 0
+  if masked then flag = 128 end
+  local length = #payload
+  local header = ""
+  if length <= 125 then
+    header = string.char(first, flag | length)
+  elseif length <= 65535 then
+    header = string.char(first, flag | 126, length >> 8, length & 255)
+  else
+    header = string.char(first, flag | 127, 0, 0, 0, 0,
+                         (length >> 24) & 255, (length >> 16) & 255,
+                         (length >> 8) & 255, length & 255)
+  end
+  if masked then
+    local mask = "\x13\x37\0\xff"
+    return header .. mask .. xor_mask(payload, mask)
+  end
+  return header .. payload
+end
+
+local function Wire:frame(): Frame
+  local header = self:exact(2)
+  local first = byte_at(header, 1)
+  local second = byte_at(header, 2)
+  test.assert((first & 112) == 0, "provider emitted unnegotiated RSV bits")
+  local count = second & 127
+  if count == 126 then
+    local size = self:exact(2)
+    count = byte_at(size, 1) * 256 + byte_at(size, 2)
+    test.assert(count >= 126, "provider emitted noncanonical 16-bit length")
+  elseif count == 127 then
+    local size = self:exact(8)
+    test.assert(byte_at(size, 1) < 128, "provider emitted signed frame length")
+    count = 0
+    for index = 1, 8 do count = (count << 8) | byte_at(size, index) end
+    test.assert(count >= 65536, "provider emitted noncanonical 64-bit length")
+  end
+  test.assert(count <= 2 * 1024 * 1024, "raw peer frame exceeded fixture cap")
+  local masked = (second & 128) ~= 0
+  local key = ""
+  if masked then key = self:exact(4) end
+  local payload = self:exact(count)
+  if masked then payload = xor_mask(payload, key) end
+  local mask: string? = nil
+  if masked then mask = key end
+  return Frame(first & 15, (first & 128) ~= 0, masked, payload, mask)
+end
+
+local function close_bytes(code: integer, reason: string?): string
+  return string.char(code >> 8, code & 255) .. (reason or "")
+end
+
+local function assert_close(wire: Wire, code: integer?, masked: boolean)
+  local response = wire:frame()
+  test.assert(response.opcode == 8 and response.final and response.masked == masked,
+              "expected a final role-correct Close frame")
+  if code then
+    test.assert(#response.payload >= 2 and
+                byte_at(response.payload, 1) * 256 +
+                byte_at(response.payload, 2) == code, "wrong on-wire Close code")
+  else
+    test.assert(response.payload == "", "empty Close acquired a status code")
+  end
+end
+
+local function header_value(headers: string, name: string): string?
+  local start = 1
+  while true do
+    local first?, last? = string.find(headers, "\r\n", start)
+    if not last then return nil end
+    local line = string.sub(headers, start, last - 2)
+    local colon? = string.find(line, ":")
+    if colon and string.lower(string.sub(line, 1, colon - 1)) == string.lower(name) then
+      local contents = string.sub(line, colon + 1)
+      while string.sub(contents, 1, 1) == " " do contents = string.sub(contents, 2) end
+      return contents
+    end
+    start = last + 1
+  end
+end
+
+-- Portable SHA-1 fixture for the independent server's opening response.
+-- Production uses EVP; this oracle uses Titan integer operations only.
+local function rotate32(word: integer, count: integer): integer
+  return ((word << count) | ((word & 0xffffffff) >> (32 - count))) & 0xffffffff
+end
+
+local function network32(word: integer): string
+  return string.char((word >> 24) & 255, (word >> 16) & 255,
+                     (word >> 8) & 255, word & 255)
+end
+
+local function sha1(input: string): string
+  local padded = input .. "\x80"
+  while #padded % 64 ~= 56 do padded = padded .. "\0" end
+  padded = padded .. network32(0) .. network32(#input * 8)
+  local h0, h1, h2, h3, h4 = 0x67452301, 0xefcdab89, 0x98badcfe, 0x10325476, 0xc3d2e1f0
+  for offset = 1, #padded, 64 do
+    local words: {integer} = {}
+    for index = 1, 16 do
+      local pos = offset + (index - 1) * 4
+      words[index] = (byte_at(padded, pos) << 24) | (byte_at(padded, pos + 1) << 16) |
+                     (byte_at(padded, pos + 2) << 8) | byte_at(padded, pos + 3)
+    end
+    for index = 17, 80 do
+      words[index] = rotate32(words[index - 3] ~ words[index - 8] ~
+                              words[index - 14] ~ words[index - 16], 1)
+    end
+    local a, b, c, d, e = h0, h1, h2, h3, h4
+    for index = 1, 80 do
+      local f, k = 0, 0
+      if index <= 20 then f = (b & c) | ((~b) & d); k = 0x5a827999
+      elseif index <= 40 then f = b ~ c ~ d; k = 0x6ed9eba1
+      elseif index <= 60 then f = (b & c) | (b & d) | (c & d); k = 0x8f1bbcdc
+      else f = b ~ c ~ d; k = 0xca62c1d6 end
+      local next = (rotate32(a, 5) + f + e + k + words[index]) & 0xffffffff
+      e = d; d = c; c = rotate32(b, 30); b = a; a = next
+    end
+    h0 = (h0 + a) & 0xffffffff; h1 = (h1 + b) & 0xffffffff
+    h2 = (h2 + c) & 0xffffffff; h3 = (h3 + d) & 0xffffffff
+    h4 = (h4 + e) & 0xffffffff
+  end
+  return network32(h0) .. network32(h1) .. network32(h2) .. network32(h3) .. network32(h4)
+end
+
+local function base64(input: string): string
+  local alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
+  local output = string.writer()
+  for index = 1, #input, 3 do
+    local a = byte_at(input, index)
+    local b, c = 0, 0
+    if index + 1 <= #input then b = byte_at(input, index + 1) end
+    if index + 2 <= #input then c = byte_at(input, index + 2) end
+    local word = (a << 16) | (b << 8) | c
+    for shift = 18, 0, -6 do
+      if (shift == 6 and index + 1 > #input) or (shift == 0 and index + 2 > #input) then
+        output:write("=")
+      else
+        local pos = ((word >> shift) & 63) + 1
+        output:write(string.sub(alphabet, pos, pos))
+      end
+    end
+  end
+  return output:drain()
+end
+
+local function accept_value(key: string): string
+  return base64(sha1(key .. "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"))
+end
+
+local function opening_request(port: integer, extra: string?, upgrade: string?, connection: string?): string
+  return "GET /wire?query=yes HTTP/1.1\r\nHost: 127.0.0.1:" .. port ..
+         "\r\nUpgrade: " .. (upgrade or "websocket") .. "\r\nConnection: " ..
+         (connection or "keep-alive, Upgrade") .. "\r\n" ..
+         "Sec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n" ..
+         (extra or "") .. "\r\n"
+end
+
+local function Wire:open_client(port: integer, extra: string?, suffix: string?, upgrade: string?, connection: string?)
+  self.stream:write(opening_request(port, extra, upgrade, connection) .. (suffix or ""))
+  local headers = self:headers()
+  test.assert(string.sub(headers, 1, 12) == "HTTP/1.1 101", "server did not upgrade")
+  test.assert(header_value(headers, "Sec-WebSocket-Accept") == "s3pPLMBiTxaQ9kYGzzhZRbK+xOo=",
+              "RFC opening accept vector changed")
+end
+
+local function Wire:open_server(suffix: string?, extra: string?, upgrade: string?, connection: string?)
+  local headers = self:headers()
+  self.opening = headers
+  test.assert(string.sub(headers, 1, 4) == "GET ", "client opening was not GET")
+  local key? = header_value(headers, "Sec-WebSocket-Key")
+  test.assert(key ~= nil, "client omitted opening nonce")
+  test.assert(accept_value("dGhlIHNhbXBsZSBub25jZQ==") == "s3pPLMBiTxaQ9kYGzzhZRbK+xOo=",
+              "independent SHA-1/base64 fixture failed RFC vector")
+  self.stream:write("HTTP/1.1 101 Switching Protocols\r\nUpgrade: " .. (upgrade or "websocket") .. "\r\n" ..
+                    "Connection: " .. (connection or "Upgrade") .. "\r\nSec-WebSocket-Accept: " .. accept_value(key) ..
+                    "\r\n" .. (extra or "") .. "\r\n" .. (suffix or ""))
+end

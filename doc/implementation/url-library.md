@@ -27,8 +27,8 @@ MIT license recorded in `THIRD_PARTY_NOTICES.md` and
 
 The module initializer calls four private grammar constructors once and stores
 the resulting `peg.Pattern` values. `http_url_pattern` is the complete absolute
-URL grammar. `request_scheme_pattern` accepts exactly case-insensitive `http`
-or `https`, so delimiters in that separately supplied component cannot consume
+URL grammar. `request_scheme_pattern` accepts exactly case-insensitive `http`,
+`https`, `ws` or `wss`, so delimiters in that separately supplied component cannot consume
 the authority. `request_authority_pattern` recognizes `[^/?#]*` followed by
 the end of the separately received authority and labels a delimiter or other
 tail as `authority_tail`. It deliberately permits `@`: the complete grammar
@@ -89,7 +89,7 @@ proceed; both standalone URL entry points remain nonthrowing.
 The URL root adds one logical protocol, archive metadata key, generated shim,
 and `luaopen_titan_url` entry to the coordinated provider. The later additions
 of the independent `titan.test` and `titan.reflect` modules make the current
-image twenty-one logical modules and shims with twenty-two DSO openers including
+image twenty-two logical modules and shims with twenty-three DSO openers including
 bare `luaopen_titan`.
 The complete image is published in the `0.6` library namespace; earlier Titan
 installations are not migrated or cleaned up.
@@ -99,3 +99,10 @@ normalization cases, tuple exclusivity, exact `Error` fields, and the separate
 authority/origin-form boundary matrix. HTTP tests separately prove client
 propagation of the structured failure value plus server consumption of
 normalized URLs and rejection of malformed Host authorities.
+
+
+The absolute and separate-component parser both admit `ws` and `wss`, using the
+same RFC 3986 grammar, normalization and policy diagnostics. Their effective
+ports are 80 and 443. `scheme` retains the normalized original protocol. HTTP
+entry points perform their own HTTP/HTTPS scheme admission; accepting a WSS URL
+in the shared parser cannot select ordinary TCP for a secure request.

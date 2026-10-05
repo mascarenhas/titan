@@ -1,0 +1,252 @@
+-- The HTTP owner captures transport retirement before Interface erasure.
+-- Upgraded streams own only that public capability and unread binary input;
+-- they never rediscover the concrete TCP/TLS type.
+local record Transport
+  connection: io.ReaderWriterCloser
+  abort: function (): ()
+end
+
+local record Exchange
+  transport: Transport
+  parser: Parser
+  active: boolean
+  transferred: boolean
+  output_started: boolean
+  rejected: boolean
+end
+
+local record UpgradedStream
+  transport: Transport
+  prefix: string
+  closed: boolean
+  reading: boolean
+end
+
+local function UpgradedStream:read_chunk(): string?
+  if self.closed then return nil end
+  if #self.prefix > 0 then
+    local result = self.prefix
+    self.prefix = ""
+    return result
+  end
+  return self.transport.connection:read()
+end
+
+function UpgradedStream:read(): string?
+  async.checkpoint()
+  if self.reading then raise "HTTP upgraded stream already has a reader" end
+  self.reading = true
+  defer do self.reading = false end
+  return self:read_chunk()
+end
+
+function UpgradedStream:read_until(delimiter: string, chop: boolean?): string?
+  if #delimiter == 0 then raise "read delimiter must not be empty" end
+  async.checkpoint()
+  if self.reading then raise "HTTP upgraded stream already has a reader" end
+  self.reading = true
+  defer do self.reading = false end
+  local builder = string.writer()
+  local tail = ""
+  while true do
+    local chunk? = self:read_chunk()
+    if chunk == nil then
+      builder:write(tail)
+      local result = builder:drain()
+      if #result == 0 then return nil end
+      return result
+    end
+    local boundary = tail .. chunk
+    local first? = string.find(boundary, delimiter)
+    if first then
+      local last = first + #delimiter - 1
+      local result_last = last
+      if chop then result_last = first - 1 end
+      builder:write(string.sub(boundary, 1, result_last))
+      self.prefix = string.sub(boundary, last + 1)
+      return builder:drain()
+    end
+    local keep = #delimiter - 1
+    if keep > #boundary then keep = #boundary end
+    local committed = #boundary - keep
+    builder:write(string.sub(boundary, 1, committed))
+    tail = string.sub(boundary, committed + 1)
+  end
+end
+
+function UpgradedStream:write(data: string)
+  if self.closed then raise "HTTP upgraded stream is closed" end
+  self.transport.connection:write(data)
+end
+
+function UpgradedStream:close()
+  if self.closed then return end
+  self.closed = true
+  self.prefix = ""
+  self.transport.abort()
+end
+
+local function new_upgraded_stream(transport: Transport,
+                                   parser: Parser): UpgradedStream
+  return UpgradedStream(transport, parser.input_excess, false, false)
+end
+
+local record UpgradeOutcome<|A|>
+  succeeded: boolean
+  result: A?
+  failure: async.Error?
+end
+
+-- The parent waits cancellation-sensitively while the child owns accepted
+-- output/input. It can therefore abort the transport before draining a child
+-- whose native write itself cannot detach on cancellation.
+local function supervised_upgrade_io<|A|>(abort: function (): (),
+    operation: function (): (A)): A
+  async.checkpoint()
+  local child = async.run<|UpgradeOutcome<|A|>, value|>(function (): UpgradeOutcome<|A|>
+    return UpgradeOutcome<|A|>(true, operation(), nil)
+  catch
+    return UpgradeOutcome<|A|>(false, nil, async.Error(error, traceback))
+  end)
+  defer do
+    if not child:status():has_finished() then
+      defer await_terminal_cleanup(child)
+      do abort() catch end
+      child:cancel(async.CancellationReason.simple("HTTP upgrade stopped"))
+    end
+  end
+  case async.join(child)
+  when succeeded(outcome) then
+    if not outcome.succeeded then outcome.failure:raise() end
+    return outcome.result
+  when failed(failure) then
+    failure:raise()
+  when cancelled(reason) then
+    raise reason
+  else
+    raise "HTTP upgrade I/O did not finish"
+  end
+  raise "HTTP upgrade I/O did not finish"
+end
+
+local function validate_upgrade_headers(supplied: Headers?): Headers
+  local result = copy_headers(supplied)
+  if #result:values("Content-Length") > 0 or
+      #result:values("Transfer-Encoding") > 0 then
+    raise "HTTP upgrade must not include body framing"
+  end
+  return result
+end
+
+local function Response:upgrade_headers(supplied: Headers?): Headers
+  local result = copy_headers(self.response_headers)
+  if supplied then
+    local entries = supplied:all()
+    for index = 1, #entries do
+      local entry = entries[index]
+      result:add(entry.name, entry.contents)
+    end
+  end
+  if #result:values("Content-Length") > 0 or
+      #result:values("Transfer-Encoding") > 0 then
+    raise "HTTP upgrade must not include body framing"
+  end
+  return result
+end
+
+function Response:upgrade(request_value: Request, protocol: string,
+                           supplied_headers: Headers?): io.ReaderWriterCloser
+  validate_upgrade_protocol(protocol)
+  self:validate_upgrade_exchange(request_value)
+  if request_value.version ~= "HTTP/1.1" or
+      not header_has_token(request_value.headers, "Connection", "upgrade") or
+      not upgrade_header_has_protocol(request_value.headers, protocol) then
+    raise "HTTP request does not offer the requested upgrade"
+  end
+  local lengths = request_value.headers:values("Content-Length")
+  if #request_value.headers:values("Transfer-Encoding") > 0 or
+      (#lengths > 0 and decimal_header(lengths[1], "HTTP Content-Length") ~= 0) then
+    raise "HTTP upgrade request must not have a body"
+  end
+  local selected = self:upgrade_headers(supplied_headers)
+  selected:set("Connection", "Upgrade")
+  selected:set("Upgrade", protocol)
+  local builder = string.writer()
+  builder:write("HTTP/1.1 101 Switching Protocols\r\n")
+  builder:write(render_headers(selected))
+  builder:write("\r\n")
+  local output = builder:drain()
+  local stream = new_upgraded_stream(self.exchange.transport, self.exchange.parser)
+  local view: io.ReaderWriterCloser = stream
+  self:write_upgrade_output(output)
+  -- Fallible construction and all suspension precede this ownership commit.
+  self.exchange.transferred = true
+  self.exchange.active = false
+  self.headers_sent = true
+  self.closed = true
+  self.status_number = 101
+  self.reason_text = "Switching Protocols"
+  self.response_headers = selected
+  self.exchange.parser.input_excess = ""
+  close_parser(self.exchange.parser)
+  return view
+end
+
+local function Response:validate_upgrade_exchange(request_value: Request)
+  if self.exchange ~= request_value.exchange or
+      not self.exchange.active or self.exchange.transferred then
+    raise "HTTP upgrade requires the same live request and response"
+  end
+  if self.headers_sent or self.closed or self.exchange.output_started then
+    raise "HTTP upgrade requires an unsent response"
+  end
+end
+
+local function Response:write_upgrade_output(output: string)
+  if #output > 65536 then raise "HTTP upgrade output headers exceed 64 KiB" end
+  -- Reserve the response's output phase before scheduling its writer. No
+  -- second upgrade or ordinary response output may overlap the pending block.
+  self.exchange.output_started = true
+  self.headers_sent = true
+  self.closed = true
+  do
+    supervised_upgrade_io<|nil|>(self.exchange.transport.abort,
+      function (): nil
+        self.connection:write(output)
+        return nil
+      end)
+  catch
+    do self.exchange.transport.abort() catch end
+    self.exchange.active = false
+    self.closed = true
+    close_parser(self.exchange.parser)
+    raise
+  end
+end
+
+function Response:reject_upgrade(request_value: Request, status: integer,
+                                  supplied_headers: Headers?)
+  self:validate_upgrade_exchange(request_value)
+  if status < 400 or status > 599 then
+    raise "HTTP upgrade rejection status must be between 400 and 599"
+  end
+  local selected = self:upgrade_headers(supplied_headers)
+  selected:set("Content-Length", "0")
+  selected:set("Connection", "close")
+  local reason = default_reason(status)
+  local builder = string.writer()
+  builder:write("HTTP/1.1 " .. status .. " " .. reason .. "\r\n")
+  builder:write(render_headers(selected))
+  builder:write("\r\n")
+  self:write_upgrade_output(builder:drain())
+  self.exchange.active = false
+  self.exchange.rejected = true
+  self.headers_sent = true
+  self.closed = true
+  self.keep_alive = false
+  self.status_number = status
+  self.reason_text = reason
+  self.response_headers = selected
+  close_parser(self.exchange.parser)
+  self.exchange.transport.abort()
+end

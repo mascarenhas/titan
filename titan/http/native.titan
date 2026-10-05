@@ -41,6 +41,10 @@ local record Parser
   local message_complete_callback: function (Parser): (foreign int)
   local connection: io.ReaderWriterCloser
   local response_to_head: boolean
+  local allow_upgrade: boolean
+  local upgrade: boolean
+  local header_limit: integer
+  local header_bytes: integer
   local events: {Event}
   local callback_failed: boolean
   local callback_error: value
@@ -341,6 +345,10 @@ local function new_parser(connection: io.ReaderWriterCloser,
     message_complete_callback = message_complete_callback,
     connection = connection,
     response_to_head = response_to_head,
+    allow_upgrade = false,
+    upgrade = false,
+    header_limit = math.maxinteger,
+    header_bytes = 0,
     events = {},
     callback_failed = false,
     callback_error = nil,
@@ -383,7 +391,10 @@ end
 
 local function new_request_parser(
     connection: io.ReaderWriterCloser): Parser
-  return new_parser(connection, ffi.HTTP_REQUEST, false)
+  local parser = new_parser(connection, ffi.HTTP_REQUEST, false)
+  parser.allow_upgrade = true
+  parser.header_limit = 65536
+  return parser
 end
 
 local function new_response_parser(connection: io.ReaderWriterCloser,
@@ -427,7 +438,8 @@ local function drain_events(parser: Parser)
       parser.major = queued.major
       parser.minor = queued.minor
       parser.keep_alive = queued.keep_alive
-      if queued.upgrade then
+      parser.upgrade = queued.upgrade
+      if queued.upgrade and not parser.allow_upgrade then
         raise "HTTP protocol upgrades are unsupported"
       end
       parser.method_text = native_string(
@@ -469,25 +481,40 @@ local function execute_input(parser: Parser, input: string)
   ffi.lua_pushtvalue(L, input)
   defer ffi.lua_settop(L, top)
   local bytes = input as foreign const *char
+  -- Limit the native span before callbacks copy attacker-controlled text.
+  -- Count punctuation and leading lines as well as callback text. A headers
+  -- pause stops counting before any coalesced upgraded-protocol suffix.
+  local span = #input
+  local opening = not parser.headers_complete
+  if opening and span > parser.header_limit - parser.header_bytes then
+    span = parser.header_limit - parser.header_bytes
+  end
   local status = ffi.llhttp_execute(
-    parser.native, bytes, #input as foreign size_t)
+    parser.native, bytes, span as foreign size_t)
   parser.last_error = status as integer
   local consumed = (function (
       parser: Parser, input: string, bytes: foreign const *char,
-      status: foreign llhttp_errno_t): integer
-    if status == ffi.HPE_OK then return #input end
+      status: foreign llhttp_errno_t, span: integer): integer
+    if status == ffi.HPE_OK then return span end
     local position = ffi.llhttp_get_error_pos(parser.native)
     if position == nil then return 0 end
-    if position < bytes or position > bytes + #input then
+    if position < bytes or position > bytes + span then
       raise "HTTP parser reported an invalid consumed offset"
     end
     return (position - bytes) as integer
-  end)(parser, input, bytes, status)
+  end)(parser, input, bytes, status, span)
   if consumed < #input then
     parser.input_excess = string.sub(input, consumed + 1)
   end
   raise_callback_failure(parser)
   drain_events(parser)
+  if opening then
+    parser.header_bytes = parser.header_bytes + consumed
+    if not parser.headers_complete and
+        parser.header_bytes >= parser.header_limit then
+      raise "HTTP start line and headers exceed the configured limit"
+    end
+  end
   if status == ffi.HPE_PAUSED_UPGRADE or
       status == ffi.HPE_PAUSED_H2_UPGRADE then
     raise "HTTP protocol upgrades are unsupported"
@@ -556,7 +583,7 @@ local function advance_parser(parser: Parser)
   end
 end
 
-local function ensure_parser_headers(parser: Parser): boolean
+local function acquire_parser_headers(parser: Parser): boolean
   while not parser.headers_complete do
     -- Only EOF before any bytes of this message is an idle disconnect. Any
     -- input falls through to the existing incomplete-message error.
@@ -565,6 +592,11 @@ local function ensure_parser_headers(parser: Parser): boolean
     end
     advance_parser(parser)
   end
+  return true
+end
+
+local function ensure_parser_headers(parser: Parser): boolean
+  if not acquire_parser_headers(parser) then return false end
   if parser.major ~= 1 or parser.minor ~= 1 then
     raise "only HTTP/1.1 messages are supported"
   end
@@ -649,6 +681,8 @@ local function parser_reset_message(parser: Parser)
   parser.major = 0
   parser.minor = 0
   parser.keep_alive = false
+  parser.upgrade = false
+  parser.header_bytes = 0
   parser.headers_complete = false
   parser.message_complete = false
   parser.input_seen = false

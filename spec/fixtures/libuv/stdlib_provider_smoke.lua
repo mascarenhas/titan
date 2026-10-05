@@ -14,6 +14,7 @@ local net = require "titan.net"
 local ssl = require "titan.ssl"
 local url = require "titan.url"
 local http = require "titan.http"
+local websocket = require "titan.websocket"
 local system = require "titan.os"
 local peg = require "titan.peg"
 local strings = require "titan.string"
@@ -110,6 +111,14 @@ assert(type(uv) == "userdata")
 assert(type(net) == "userdata")
 assert(type(ssl) == "userdata")
 assert(type(http) == "userdata")
+assert(type(websocket) == "userdata")
+assert(type(websocket.DialOptions()) == "userdata")
+assert(type(websocket.AcceptOptions()) == "userdata")
+assert(getmetatable(websocket.TEXT) ==
+    "Titan union titan.websocket.MessageType")
+assert(getmetatable(websocket.BINARY) ==
+    "Titan union titan.websocket.MessageType")
+assert(websocket.TEXT ~= websocket.BINARY)
 assert(type(testing) == "userdata")
 assert(type(sqlite3) == "userdata")
 assert(type(json) == "userdata")

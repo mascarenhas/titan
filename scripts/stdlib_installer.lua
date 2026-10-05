@@ -27,7 +27,7 @@ local installer = {}
 
 local MODULES = {
     "coroutine", "uv", "async", "timer", "io", "fs", "net", "ssl",
-    "url", "http", "os", "peg", "string", "math", "lua", "iteration", "gc",
+    "url", "http", "websocket", "os", "peg", "string", "math", "lua", "iteration", "gc",
     "test", "reflect", "sqlite3", "json",
 }
 

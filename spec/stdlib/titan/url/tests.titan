@@ -3,7 +3,7 @@ local string = import "string"
 local url = import "url"
 
 local function error_detail(kind: string): string
-  if kind == "scheme" then return "expected an HTTP or HTTPS scheme"
+  if kind == "scheme" then return "expected an HTTP, HTTPS, WS or WSS scheme"
   elseif kind == "scheme_separator" then
     return "expected ':' after the scheme"
   elseif kind == "authority_separator" then
@@ -31,7 +31,7 @@ local function error_detail(kind: string): string
   elseif kind == "url_tail" then
     return "unexpected byte in the path or query"
   end
-  return "invalid absolute HTTP URL"
+  return "invalid absolute HTTP or WebSocket URL"
 end
 
 local function expected_message(kind: string, position: integer): string
@@ -250,4 +250,24 @@ function test_url_normalization_and_errors(context: test.Context)
   expect_error("http://[::%25]/", "zone", 14)
   expect_error("http://host/bad%x0percent", "percent_escape", 17)
   expect_error("http://host/%s", "percent_escape", 14)
+end
+
+function test_websocket_url_schemes(_context: test.Context)
+  local plain = parse_valid("Ws://EXAMPLE.COM:00080/a%2fb?empty=")
+  test.assert(plain.scheme == "ws" and plain.host == "example.com" and
+              plain.port == 80 and plain.authority == "example.com:80" and
+              plain.target == "/a%2Fb?empty=", "WS normalization changed")
+  local secure = parse_valid("WSS://[::1]/")
+  test.assert(secure.scheme == "wss" and secure.port == 443 and
+              secure.host == "::1" and secure.authority == "[::1]",
+              "WSS default port or IPv6 authority changed")
+  local request = parse_request_valid("wss", "LOCALHOST:443", "/socket?")
+  test.assert(request.scheme == "wss" and request.target == "/socket?" and
+              request.query == "", "WebSocket component URL changed")
+  expect_rejected("ws://user@host/")
+  expect_rejected("wss://host/#fragment")
+  expect_rejected("ws://host:0/")
+  expect_rejected("wss://host/%xx")
+  expect_rejected("ws://host/line\r\n")
+  expect_rejected("wss://host/zero\0")
 end

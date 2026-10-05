@@ -17,7 +17,7 @@ trap 'rm -rf "$stage"' EXIT
 cp titan.dll "$stage/titan.dll"
 cp "$build_root/runtime/titan.dll" "$stage/support.dll"
 cp titan/test.titan "$stage/test.titan"
-modules=(coroutine uv async timer io fs net ssl url http os peg string math lua iteration gc test reflect sqlite3 json)
+modules=(coroutine uv async timer io fs net ssl url http websocket os peg string math lua iteration gc test reflect sqlite3 json)
 for module in "${modules[@]}"; do
   [[ -f titan/$module.lua && ! -L titan/$module.lua ]]
   cp "titan/$module.lua" "$stage/$module.lua"
@@ -26,6 +26,7 @@ llvm-readobj --coff-exports "$stage/titan.dll" > "$stage/provider.exports"
 llvm-readobj --coff-imports "$stage/titan.dll" > "$stage/provider.imports"
 if [[ -e $prefix/lib/titan/0.6/titan.dll ]]; then
   llvm-readobj --coff-exports "$prefix/lib/titan/0.6/titan.dll" > "$stage/previous.exports"
+  llvm-readobj --coff-imports "$prefix/lib/titan/0.6/titan.dll" > "$stage/previous.imports"
 fi
 export TITAN_ROCKS_ROOT="$(cygpath -m "$prefix")" TITAN_RUNTIME_PREBUILT=1
 export MSYS2_ARG_CONV_EXCL='*'

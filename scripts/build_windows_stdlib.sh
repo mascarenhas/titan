@@ -12,7 +12,7 @@ source_root=$(pwd)
 [[ -f $prefix/bin/titanc.exe && -f $prefix/bin/lua-5.5.1.dll &&
    -f $prefix/etc/titan/lua-5.5.1-windows.config &&
    -f $build_root/runtime/ltitanlib.o && -f $build_root/runtime/libtitan-lpeglabel.a ]]
-modules=(coroutine uv async timer io fs net ssl url http os peg string math lua iteration gc test reflect sqlite3 json)
+modules=(coroutine uv async timer io fs net ssl url http websocket os peg string math lua iteration gc test reflect sqlite3 json)
 roots=()
 for module in "${modules[@]}"; do roots+=("titan.$module"); done
 winprefix=$(cygpath -m "$prefix")
@@ -35,4 +35,4 @@ export MSYS2_ARG_CONV_EXCL='*'
   "${roots[@]}" -X "$winbuild/runtime/ltitanlib.o" "$winbuild/runtime/libtitan-lpeglabel.a"
 [[ -f titan.dll ]]
 for module in "${modules[@]}"; do [[ -f titan/$module.lua ]]; done
-echo 'Built the Windows standard-library DLL and 21 generated shims.'
+echo 'Built the Windows standard-library DLL and 22 generated shims.'

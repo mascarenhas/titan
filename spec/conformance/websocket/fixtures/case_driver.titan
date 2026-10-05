@@ -1,0 +1,113 @@
+local fs = import "fs"
+local json = import "json"
+local math = import "math"
+local strings = import "string"
+local websocket = import "websocket"
+
+local function unreserved_query_byte(byte: integer): boolean
+  if byte >= 65 and byte <= 90 then return true end
+  if byte >= 97 and byte <= 122 then return true end
+  if byte >= 48 and byte <= 57 then return true end
+  return byte == 45 or byte == 46 or byte == 95 or byte == 126
+end
+
+local function quoted_query(subject: string): string
+  local output = strings.writer()
+  for index = 1, #subject do
+    local byte: integer = strings.byte(subject, index, index)
+    if unreserved_query_byte(byte) then
+      output:write(strings.char(byte))
+    else
+      output:write(strings.format("%%%02X", byte))
+    end
+  end
+  return output:drain()
+end
+
+local function event(file: fs.File, phase: string, ordinal: integer, case_id: string, detail: string)
+  local message: {string: value} = {
+    ["phase"] = phase, ["ordinal"] = ordinal, ["id"] = case_id, ["detail"] = detail,
+  }
+  file:write(json.encode(message) .. "\n")
+  file:flush()
+end
+
+local function metadata(source_url: string, options: websocket.DialOptions): string
+  local connection = websocket.connect(source_url, options)
+  defer connection:close()
+  local kind?, payload? = connection:read()
+  if kind == nil or payload == nil then raise "missing runner metadata message" end
+  case kind
+  when text() then
+  else raise "runner metadata must be text"
+  end
+  local next_kind?, next_data? = connection:read()
+  if next_kind ~= nil or next_data ~= nil then raise "extra runner metadata message" end
+  return payload
+end
+
+local function run_case(source_url: string, options: websocket.DialOptions): string
+  local connection = websocket.connect(source_url, options)
+  defer connection:close()
+  while true do
+    local kind?, data? = connection:read()
+    if kind == nil then
+      if data ~= nil then raise "read returned data without a message type" end
+      return "peer-close"
+    end
+    if data == nil then raise "read returned a message type without data" end
+    connection:write(kind, data)
+  end
+catch
+  -- Expected malformed-frame cases must not prevent later cases from running.
+  -- A caught failure never earns a conformance pass; reports remain authoritative.
+  if error is websocket.Error then
+    local failure: websocket.Error = error
+    return failure.kind .. ": " .. failure.message
+  end
+  return "error: " .. strings.tostring(error)
+end
+
+local function update_reports(source_url: string, options: websocket.DialOptions)
+  local connection = websocket.connect(source_url, options)
+  defer connection:close()
+  while true do
+    local kind?, data? = connection:read()
+    if kind == nil then
+      if data ~= nil then raise "unexpected updateReports result" end
+      return
+    end
+    raise "updateReports should close without a data message"
+  end
+end
+
+function main(args: {string}): integer
+  if #args ~= 5 then raise "usage: case_driver BASE_URL AGENT EXPECTED_JSON EVENTS_JSONL READ_LIMIT_BYTES" end
+  local base = args[1]
+  local agent = quoted_query(args[2])
+  local manifest: {string: value} = json.decode(fs.read_file(args[3]))
+  local selected: {value} = manifest["selected_cases"]
+  if #selected == 0 then raise "empty expected case selection" end
+  local limit = math.tointeger(args[5])
+  if not limit or limit < 16777216 then raise "conformance cap must permit 16MiB messages" end
+  local options = websocket.DialOptions { read_limit = limit }
+  local events = fs.open(args[4], "w")
+  defer events:close()
+  event(events, "metadata-start", 0, "", "")
+  local count: integer = json.decode(metadata(base .. "/getCaseCount", options))
+  if count ~= #selected then raise "runner case count differs from pinned selection" end
+  event(events, "case-count", count, "", "")
+  for ordinal = 1, count do
+    local expected: string = selected[ordinal]
+    event(events, "case-start", ordinal, expected, "")
+    local info: {string: value} = json.decode(metadata(base .. "/getCaseInfo?case=" .. ordinal, options))
+    local actual: string = info["id"]
+    if actual ~= expected then raise "runner ordinal/case ID mismatch" end
+    local outcome = run_case(base .. "/runCase?case=" .. ordinal .. "&agent=" .. agent, options)
+    event(events, "case-end", ordinal, actual, outcome)
+  end
+  event(events, "reports-start", count, "", "")
+  update_reports(base .. "/updateReports?agent=" .. agent, options)
+  event(events, "complete", count, "", "")
+  return 0
+end

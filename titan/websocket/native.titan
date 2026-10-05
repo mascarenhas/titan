@@ -1,0 +1,31 @@
+foreign import "openssl/evp.h"
+foreign import "stddef.h"
+
+-- The entire native boundary is synchronous crypto over immutable input and
+-- an explicit byte owner. No SSL engine or libuv FFI escapes its owner module.
+local function base64(bytes: string): string
+  local length = 4 * ((#bytes + 2) // 3)
+  local output = foreign unsigned char.new_array(length + 1)
+  local written: integer = ffi.EVP_EncodeBlock(output, bytes, #bytes)
+  if written ~= length then raise "WebSocket base64 encoding failed" end
+  return string.sub(output as string, 1, length)
+end
+local function accept_digest(key: string): string
+  local input = key .. "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
+  local output: owned unsigned char[] = foreign unsigned char.new_array(20)
+  local length = foreign unsigned int.new()
+  if ffi.EVP_Digest(input, #input, output, length, ffi.EVP_sha1(), nil) ~= 1 or
+     (length as foreign *unsigned int)[0] ~= 20 then
+    raise "WebSocket opening digest failed"
+  end
+  return base64(output as string)
+end
+local function random_bytes(length: integer): string
+  local output = uv.buf_t.allocate(length)
+  local status = uv.random(nil, nil, output, length, 0, nil)
+  if status < 0 then
+    raise async.OperationError(status, uv.err_name(status), uv.strerror(status),
+                               "websocket.random")
+  end
+  return output:to_string(length)
+end

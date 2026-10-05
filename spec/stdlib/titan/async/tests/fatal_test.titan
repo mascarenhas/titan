@@ -734,3 +734,21 @@ function test_subscription_wake_failure_restores_publication_and_reservation(_co
   test.assert(consumer:status():has_succeeded() and injector:status():has_succeeded(),
       "subscription rollback/retry failed or cancelled a Task")
 end
+
+function test_saved_error_raise_preserves_value_and_trace(context: test.Context)
+  local marker = FatalMarker.new(193, "original supervised trace")
+  local caught: value = nil
+  local original = ""
+  do
+    async.Error(marker, marker.source_trace):raise()
+  catch
+    caught = error
+    original = traceback
+  end
+  test.assert(caught == marker, "saved-error raise changed nominal identity")
+  test.assert(original == marker.source_trace, "saved-error raise replaced trace")
+  local later = ""
+  do raise "later independent error"
+  catch later = traceback end
+  test.assert(later ~= marker.source_trace, "pinned trace escaped one handoff")
+end

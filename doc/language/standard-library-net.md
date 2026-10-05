@@ -24,6 +24,9 @@ loop thread; CPU-bound code still blocks other I/O until it yields.
 record Connection
 record Server
 
+function resolve(host: string, port: integer): {uv.sockaddr_t}
+function Connection.new(): Connection
+function Connection:connect_address(address: uv.sockaddr_t)
 function connect(host: string, port: integer): Connection
 function listen(host: string, port: integer,
                 backlog: integer?): Server
@@ -39,14 +42,32 @@ function Server:accept(): Connection
 function Server:close()
 ```
 
-`Connection` and `Server` are opaque nominal records. Applications cannot
-construct them or inspect their native handles.
+`Connection` and `Server` are opaque nominal records. Applications cannot inspect their native handles. `Connection.new()` creates
+an initialized, unconnected endpoint in the current Runtime; `Server` has no
+public constructor.
 
 `Connection`'s `read`, `read_until`, `write`, and `close` shapes exactly
 satisfy all seven [`io` Interfaces](standard-library-io.md). `Server`
 incidentally satisfies `io.Closer` through its exact `close()` method.
 
 ## Connecting and listening
+
+`resolve(host, port)` returns copied, owned public `uv.sockaddr_t` values in
+resolver order, restricted to IPv4/IPv6 TCP addresses. It accepts a nonempty
+host without NUL and ports `1..65535`. Address values retain their bytes after
+the native DNS result has been freed. DNS cancellation requests native request
+cancellation and still waits for its actual callback; cancellation of already
+running resolver work can fail, so safe retirement may extend a deadline.
+
+For a protocol that needs to own a socket before dialing, create
+`net.Connection()`, immediately defer its `close()`, then call
+`connect_address(address)` with one complete IPv4/IPv6 address and a nonzero
+port. This does no second DNS query. Only connect and close are valid before a
+successful dial. Repeat or concurrent connect attempts fail; a failed attempt
+leaves the endpoint unusable until close. A supervisor can close the known
+endpoint while its connect is pending, then drain the connecting Task. The
+native request and selected address remain retained through its callback.
+
 
 `connect` resolves `host` asynchronously and considers IPv4 and IPv6 TCP
 addresses in resolver order. A failed candidate has its ordinary asynchronous

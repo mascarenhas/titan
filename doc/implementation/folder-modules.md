@@ -266,11 +266,11 @@ values through an ordinary compiled interface. `titan.async` owns the scheduler,
 Task/error/result/subscription declarations and automatic main hook in its own
 logical module. Async and the domain libraries consume public UV declarations
 without explicit source imports or a shared source-private operation union.
-The production compiler invocation names all twenty-one logical roots:
+The production compiler invocation names all twenty-two logical roots:
 
 ```sh
 titanc titan.coroutine titan.uv titan.async titan.timer titan.io titan.fs titan.net \
-  titan.ssl titan.url titan.http titan.os \
+  titan.ssl titan.url titan.http titan.websocket titan.os \
   titan.peg titan.string \
   titan.math titan.lua titan.iteration titan.gc titan.test titan.reflect titan.sqlite3 titan.json \
   -X titan-runtime/ltitanlib.o lpeglabel-build/libtitan-lpeglabel.a \
@@ -284,7 +284,7 @@ Generated `titan/uv/uv.c`, `titan/uv/uv.o`, and the callback-bearing
 The flat high-level `titan.fs` root uses public UV callbacks and does not
 emit a foreign-callback header. No contributor C/object/header, DSO, archive,
 or contributor shim is built or installed. The one logical `titan.uv` object, its one generated
-`titan/uv.lua` shim, and the remaining twenty logical modules (twenty-one in
+`titan/uv.lua` shim, and the remaining twenty-one logical modules (twenty-two in
 total) reside in the physical `titan.so`/`titan.a` pair. The private
 five-member LPegLabel archive is shared metadata-free payload for the
 `titan.peg`/`titan.string` folder modules. The private libuv archive always
@@ -294,13 +294,13 @@ archives and repeats the ordered pkg-config link settings for the DSO; static
 consumers must repeat those settings too. Higher
 `async`/`timer`/`fs`/`net`/`os`/`sqlite3` modules still import
 the independent logical `titan.uv` protocol, but their calls are direct
-because all twenty-one source roots are linked together. The high-level `titan.fs` object uses the public UV filesystem and watcher
+because all twenty-two source roots are linked together. The high-level `titan.fs` object uses the public UV filesystem and watcher
 wrappers; their source-defined native callbacks remain in the UV object. `titan.ssl` reaches the
 runtime only through public `titan.net`, and `titan.http` only through the
 public net/SSL/I/O/async layers; `titan.url` is synchronous composition over
 `titan.peg` and `titan.string`.
 
-`titan.http`, `titan.peg`, and `titan.string` apply the same folder-module
+`titan.http`, `titan.websocket`, `titan.peg`, and `titan.string` apply the same folder-module
 rules: each has one canonical main, immediate contributors sharing
 module-private scope, one generated C/object pair, and one logical shim.
 `titan.http`, like `titan.uv`, keeps public declarations with their semantic

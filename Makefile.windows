@@ -63,7 +63,7 @@ help:
 	@echo '  compiler-check  validate the native frontend and compiler dependencies'
 	@echo '  runtime     build/install the runtime SDK and seed an absent support DLL'
 	@echo '  runtime-check  validate runtime consumers, rebuilds and provider preservation'
-	@echo '  stdlib      compile the 21 Windows roots into titan.dll and exact shims'
+	@echo '  stdlib      compile the 22 Windows roots into titan.dll and exact shims'
 	@echo '  stdlib-check  validate the staged DLL, metadata, shims and PE inventory'
 	@echo '  install-stdlib  build, validate and publish the Windows DLL-only provider'
 	@echo '  publish-stdlib  validate and publish an already built Windows provider'

@@ -1,0 +1,188 @@
+-- FFI here is only portable synchronous byte access to rooted Titan strings
+-- and explicit arrays. Transport/native callback ownership stays in uv/net.
+local function octet(bytes: string, position: integer): integer
+  local input = bytes as foreign const *unsigned char
+  return input[position - 1]
+end
+local function mask_bytes(bytes: string, mask: string, offset: integer): string
+  local input = bytes as foreign const *unsigned char
+  local key = mask as foreign const *unsigned char
+  local output = foreign unsigned char.new_array(#bytes)
+  for index = 0, #bytes - 1 do
+    output[index] = (input[index] as integer ~ key[(offset + index) % 4] as integer)
+  end
+  return output as string
+end
+local function encode_frame(client: boolean, opcode: integer,
+                             final: boolean, payload: string): string
+  local first = opcode
+  if final then first = first | 128 end
+  local masked = 0
+  if client then masked = 128 end
+  local length = #payload
+  local header = ""
+  if length <= 125 then
+    header = string.char(first, masked | length)
+  elseif length <= 65535 then
+    header = string.char(first, masked | 126, length >> 8, length & 255)
+  else
+    header = string.char(first, masked | 127, 0, 0, 0, 0,
+                         (length >> 24) & 255, (length >> 16) & 255,
+                         (length >> 8) & 255, length & 255)
+  end
+  if client then
+    local mask = random_bytes(4)
+    return header .. mask .. mask_bytes(payload, mask, 0)
+  end
+  return header .. payload
+end
+
+local function Connection:input_part(work: Work, wanted: integer): string
+  while self.cursor > #self.input do
+    self:check_open(work.operation)
+    work.admitted = true
+    local chunk? = self.stream:read()
+    if chunk == nil then
+      raise Error("abnormal", work.operation, "transport ended before WebSocket Close", nil)
+    end
+    self.input = chunk; self.cursor = 1
+  end
+  local count = #self.input - self.cursor + 1
+  if count > wanted then count = wanted end
+  local bytes = string.sub(self.input, self.cursor, self.cursor + count - 1)
+  self.cursor = self.cursor + count
+  -- Consuming prefetched bytes also crosses the protocol-progress boundary.
+  work.admitted = true
+  return bytes
+end
+local function Connection:input_exact(work: Work, length: integer): string
+  local builder = string.writer()
+  local remaining = length
+  while remaining > 0 do
+    local bytes = self:input_part(work, remaining)
+    builder:write(bytes); remaining = remaining - #bytes
+  end
+  return builder:drain()
+end
+
+local function Connection:receive_close(work: Work, payload: string)
+  if #payload == 1 then raise wire_error("protocol", "one-byte Close payload", 1002) end
+  local code: integer? = nil
+  local reason: string? = nil
+  if #payload >= 2 then
+    code = octet(payload, 1) * 256 + octet(payload, 2)
+    if not valid_close_code(code) then raise wire_error("protocol", "invalid Close status", 1002) end
+    reason = string.sub(payload, 3)
+    local unicode = Utf8(0, 128, 191)
+    unicode:feed(reason); unicode:finish()
+  end
+  self.close_received = true; self.peer_code = code; self.peer_reason = reason
+  self.closing = true; self:wake_waiters()
+  if not self.close_sent then
+    work:start_deadline(CONTROL_TIMEOUT)
+    local response = payload
+    if not self.client and code == 1010 then response = close_payload(1000, reason or "", false) end
+    self:send_frame(work, 8, true, response)
+  end
+end
+
+local function Connection:read_message(work: Work): (MessageType?, string?)
+  local frames = 0
+  local budget = 0
+  while not self.close_received do
+    local header = self:input_exact(work, 2)
+    local first = octet(header, 1)
+    local second = octet(header, 2)
+    local final = (first & 128) ~= 0
+    local opcode = first & 15
+    local masked = (second & 128) ~= 0
+    local length = second & 127
+    local control = opcode >= 8
+    if (first & 112) ~= 0 then raise wire_error("protocol", "unsolicited RSV bits", 1002) end
+    if opcode ~= 0 and opcode ~= 1 and opcode ~= 2 and
+       opcode ~= 8 and opcode ~= 9 and opcode ~= 10 then
+      raise wire_error("protocol", "reserved frame opcode", 1002)
+    end
+    if masked == self.client then raise wire_error("protocol", "incorrect frame masking for peer role", 1002) end
+    if control and (not final or length > 125) then
+      raise wire_error("protocol", "fragmented or oversized control frame", 1002)
+    end
+    if length == 126 then
+      local extended = self:input_exact(work, 2)
+      length = octet(extended, 1) * 256 + octet(extended, 2)
+      if length < 126 then raise wire_error("protocol", "nonminimal frame length", 1002) end
+    elseif length == 127 then
+      local extended = self:input_exact(work, 8)
+      if octet(extended, 1) >= 128 then raise wire_error("protocol", "frame length high bit is set", 1002) end
+      length = 0
+      for index = 1, 8 do length = (length << 8) | octet(extended, index) end
+      if length < 65536 then raise wire_error("protocol", "nonminimal frame length", 1002) end
+    end
+    if not control then
+      if opcode == 0 then
+        if not self.message_kind then raise wire_error("protocol", "unexpected continuation", 1002) end
+      else
+        if self.message_kind then raise wire_error("protocol", "data frame interrupts fragmented message", 1002) end
+        if opcode == 1 then self.message_kind = TEXT else self.message_kind = BINARY end
+        self.message_bytes = 0; self.unicode:reset()
+      end
+      if length > self.limit - self.message_bytes then
+        raise wire_error("limit", "incoming message exceeds read limit", 1009)
+      end
+      self.message_bytes = self.message_bytes + length
+    end
+    local mask = ""
+    if masked then mask = self:input_exact(work, 4) end
+    local control_builder = string.writer()
+    local offset = 0
+    while offset < length do
+      local count = length - offset
+      if count > WORK_BYTES then count = WORK_BYTES end
+      local payload = self:input_part(work, count)
+      if masked then payload = mask_bytes(payload, mask, offset) end
+      offset = offset + #payload
+      if control then
+        control_builder:write(payload)
+      else
+        case self.message_kind
+        when text() then self.unicode:feed(payload)
+        when binary() then
+        end
+        self.message:write(payload)
+      end
+      budget = budget + #payload
+      if budget >= WORK_BYTES then
+        budget = 0; async.yield(); self:check_open(work.operation)
+      end
+    end
+    frames = frames + 1
+    if control then
+      local payload = control_builder:drain()
+      if opcode == 8 then
+        self:receive_close(work, payload)
+        return nil, nil
+      elseif opcode == 9 then
+        self.pong = work
+        work:start_deadline(CONTROL_TIMEOUT)
+        self:send_frame(work, 10, true, payload)
+        self.pong = nil
+        if work.operation == "websocket.read" then work:stop_deadline() end
+        self:wake_waiters()
+      elseif self.ping_token == payload then
+        self.ping_received = true
+        self:wake_waiters()
+      end
+    elseif final then
+      case self.message_kind
+      when text() then self.unicode:finish()
+      when binary() then
+      end
+      local kind? = self.message_kind
+      local data = self.message:drain()
+      self.message_kind = nil; self.message_bytes = 0
+      return kind, data
+    end
+    if frames >= FRAME_BUDGET then frames = 0; async.yield(); self:check_open(work.operation) end
+  end
+  return nil, nil
+end

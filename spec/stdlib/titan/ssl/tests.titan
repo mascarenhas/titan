@@ -1,7 +1,9 @@
 local test = import "test"
 local runtime_test = import "support.runtime.titan"
+local common = import "support.common.titan"
 local async = import "async"
 local fs = import "fs"
+local gc = import "gc"
 local stream = import "io"
 local net = import "net"
 local ssl = import "ssl"
@@ -9,6 +11,7 @@ local string = import "string"
 local timer = import "timer"
 local support = import "ssl.test_support.titan"
 local net_support = import "net.test_support.titan"
+local backpressure = import "ssl.backpressure_support.titan"
 local task_support = import "support.async.titan"
 
 function test_ssl_combined_pem_and_binary_record_exchange(
@@ -164,10 +167,8 @@ function test_ssl_distinguishes_truncated_transport_from_clean_eof(
     while not handshake_done do timer.yield() end
     peer:cancel(async.CancellationReason.simple(
       "intentional abrupt TLS peer"))
-    -- Keep one application record in flight while the cancelled peer closes.
-    -- Kernels may present FIN or RST; the TLS layer must normalize both to the
-    -- same unauthenticated truncation boundary.
-    client:write("wake-cancelled-peer")
+    -- The runnable SSL parent now aborts its native read without requiring
+    -- application bytes from the peer to release cancellation.
     while task_support.active(peer) do timer.yield() end
     test.assert(peer:status():as_string() == "cancelled",
                 "abrupt TLS peer did not finish through cancellation")
@@ -330,5 +331,416 @@ function test_ssl_rejects_missing_empty_and_malformed_pem(
     end
     test.assert(malformed_private_key,
                 "malformed trailing private-key PEM was accepted")
+  end)
+end
+
+-- The peer sends nothing until the unsolicited write arrives. This would
+-- deadlock with whole-operation TLS serialization, irrespective of timing.
+function test_ssl_pending_read_allows_write_and_rejects_duplicate_direction(
+    context: test.Context)
+  runtime_test.run(function ()
+    local server, port = support.listen_available(45000, support.CERTIFICATE,
+                                                 support.PRIVATE_KEY)
+    defer server:close()
+    local peer = async.run<|value, value|>(function (): value
+      local connection = server:accept()
+      defer connection:abort()
+      test.assert(connection:read_until("\n", true) == "request")
+      connection:write("response\n")
+      return nil
+    end)
+    task_support.cleanup_task(peer, "duplex TLS peer")
+    local connection = ssl.connect("localhost", port, support.TRUST_ROOT)
+    defer connection:abort()
+    local reply: string? = nil
+    local reader = async.run<|value, value|>(function (): value
+      reply = connection:read_until("\n", true)
+      return nil
+    end)
+    task_support.cleanup_task(reader, "duplex TLS reader")
+    while reader:status():as_string() ~= "waiting" do timer.yield() end
+    local duplicate_failed = false
+    do connection:read() catch duplicate_failed = true end
+    test.assert(duplicate_failed, "duplicate TLS reader was admitted")
+    local shutdown_failed = false
+    do connection:shutdown() catch shutdown_failed = true end
+    test.assert(shutdown_failed, "TLS shutdown ignored live reader")
+    local close_failed = false
+    do connection:close() catch close_failed = true end
+    test.assert(close_failed, "graceful TLS close ignored live reader")
+    connection:write("request\n")
+    async.join(reader)
+    test.assert(reader:status():has_succeeded() and reply == "response",
+                "quiet reader prevented unsolicited TLS write")
+    async.join(peer)
+    test.assert(peer:status():has_succeeded())
+  end)
+end
+
+function test_ssl_simultaneous_large_duplex_preserves_bytes(
+    context: test.Context)
+  runtime_test.run(function ()
+    local server, port = support.listen_available(45100, support.CERTIFICATE,
+                                                 support.PRIVATE_KEY)
+    defer server:close()
+    local first = string.rep("client\0", 65536)
+    local second = string.rep("server\0", 65536)
+    local peer = async.run<|value, value|>(function (): value
+      local connection = server:accept()
+      defer connection:abort()
+      local writer = async.run<|value, value|>(function (): value
+        connection:write(second .. "\n")
+        return nil
+      end)
+      task_support.cleanup_task(writer, "duplex TLS server writer")
+      test.assert(connection:read_until("\n", true) == first)
+      async.join(writer)
+      test.assert(writer:status():has_succeeded())
+      return nil
+    end)
+    task_support.cleanup_task(peer, "large duplex TLS peer")
+    local connection = ssl.connect("localhost", port, support.TRUST_ROOT)
+    defer connection:abort()
+    local writer = async.run<|value, value|>(function (): value
+      connection:write(first .. "\n")
+      return nil
+    end)
+    task_support.cleanup_task(writer, "duplex TLS client writer")
+    test.assert(connection:read_until("\n", true) == second,
+                "simultaneous TLS output changed bytes")
+    async.join(writer)
+    test.assert(writer:status():has_succeeded())
+    async.join(peer)
+    test.assert(peer:status():has_succeeded())
+  end)
+end
+
+function test_ssl_abort_interrupts_reader_without_waiting_for_user_task(
+    context: test.Context)
+  runtime_test.run(function ()
+    local server, port = support.listen_available(45200, support.CERTIFICATE,
+                                                 support.PRIVATE_KEY)
+    defer server:close()
+    local peer_ready = false
+    local peer_token = async.ResumeToken.new("ssl.abort.peer")
+    local peer = async.run<|value, value|>(function (): value
+      local connection = server:accept()
+      defer connection:abort()
+      connection:handshake()
+      peer_ready = true
+      async.suspend(peer_token)
+      return nil
+    end)
+    task_support.cleanup_task(peer, "TLS abort peer")
+    local connection = ssl.connect("localhost", port, support.TRUST_ROOT)
+    defer connection:abort()
+    while not peer_ready do timer.yield() end
+    local reader_caught = false
+    local keep_alive = async.ResumeToken.new("ssl.abort.user")
+    local reader = async.run<|value, value|>(function (): value
+      do
+        connection:read()
+      catch
+        test.assert(error is ssl.Error and
+                    (error as ssl.Error).name == "TLS_INTERRUPTED")
+        reader_caught = true
+      end
+      async.suspend(keep_alive)
+      return nil
+    end)
+    task_support.cleanup_task(reader, "TLS abort reader")
+    while reader:status():as_string() ~= "waiting" do timer.yield() end
+    gc.collect()
+    local first = async.run<|value, value|>(function (): value
+      connection:abort()
+      return nil
+    end)
+    local second = async.run<|value, value|>(function (): value
+      connection:abort()
+      return nil
+    end)
+    task_support.cleanup_task(first, "TLS first abort")
+    task_support.cleanup_task(second, "TLS second abort")
+    async.join_two(first, second)
+    test.assert(first:status():has_succeeded() and second:status():has_succeeded(),
+                "concurrent TLS abort callers did not share cleanup")
+    while not reader_caught do timer.yield() end
+    test.assert(not reader:status():has_finished(),
+                "abort waited for the arbitrary user Task to finish")
+    connection:abort()
+    reader:resume(keep_alive)
+    peer:resume(peer_token)
+    async.join_two(reader, peer)
+    test.assert(reader:status():has_succeeded() and peer:status():has_succeeded())
+  end)
+end
+
+function test_ssl_client_adopts_numeric_transport_with_original_identity(
+    context: test.Context)
+  runtime_test.run(function ()
+    local server, port = support.listen_available(45300, support.WRONG_CERTIFICATE,
+                                                 support.PRIVATE_KEY)
+    defer server:close()
+    local peer = async.run<|value, value|>(function (): value
+      local connection = server:accept()
+      defer connection:abort()
+      test.assert(connection:read_until("\n", true) == "adopted")
+      connection:write("verified\n")
+      return nil
+    end)
+    task_support.cleanup_task(peer, "TLS adopted peer")
+    local transport = net.connect("127.0.0.1", port)
+    local invalid = false
+    do ssl.client(transport, "", support.TRUST_ROOT) catch invalid = true end
+    test.assert(invalid, "empty adopted TLS identity disabled verification")
+    invalid = false
+    do ssl.client(transport, "not\0host", support.TRUST_ROOT) catch invalid = true end
+    test.assert(invalid, "NUL adopted TLS identity was accepted")
+    -- Invalid identities must leave the caller's TCP owner available.
+    local connection = ssl.client(transport, "not-localhost.invalid", support.TRUST_ROOT)
+    defer connection:abort()
+    -- No server handshake is required before client returns: adoption configures
+    -- the owner, and this explicit call drives the ordinary verified handshake.
+    connection:handshake()
+    connection:write("adopted\n")
+    test.assert(connection:read_until("\n", true) == "verified")
+    async.join(peer)
+    test.assert(peer:status():has_succeeded())
+    local rejected_peer = async.run<|value, value|>(function (): value
+      local accepted = server:accept()
+      defer accepted:abort()
+      local rejected = false
+      do accepted:handshake() catch rejected = true end
+      test.assert(rejected, "server accepted rejected adopted TLS identity")
+      return nil
+    end)
+    task_support.cleanup_task(rejected_peer, "TLS rejected adoption peer")
+    local mismatch = ssl.client(net.connect("127.0.0.1", port), "localhost",
+                                support.TRUST_ROOT)
+    defer mismatch:abort()
+    local rejected = false
+    do mismatch:handshake() catch
+      test.assert(error is ssl.Error and
+                  (error as ssl.Error).name == "CERTIFICATE_VERIFY_FAILED")
+      rejected = true
+    end
+    test.assert(rejected, "numeric transport replaced the original TLS identity")
+    async.join(rejected_peer)
+    test.assert(rejected_peer:status():has_succeeded())
+  end)
+end
+
+function test_ssl_cancel_backpressured_write_aborts_before_native_drain(
+    context: test.Context)
+  runtime_test.run(function ()
+    local server, port = support.listen_available(45400, support.CERTIFICATE,
+                                                 support.PRIVATE_KEY)
+    defer server:close()
+    local peer_ready = false
+    local hold_peer = async.ResumeToken.new("ssl.backpressure.peer")
+    local peer = async.run<|value, value|>(function (): value
+      local connection = server:accept()
+      defer connection:abort()
+      connection:handshake()
+      peer_ready = true
+      -- Keep the connected socket open but service no application reads.
+      async.suspend(hold_peer)
+      return nil
+    end)
+    task_support.cleanup_task(peer, "TLS backpressure peer")
+    local proxy = backpressure.new(port)
+    defer proxy:close()
+    local connection = ssl.connect("localhost", proxy.port, support.TRUST_ROOT)
+    defer connection:abort()
+    while not peer_ready do timer.yield() end
+    proxy:stop_input()
+    local reader_interrupted = false
+    local reader = async.run<|value, value|>(function (): value
+      do connection:read() catch
+        test.assert(error is ssl.Error and
+                    (error as ssl.Error).name == "TLS_INTERRUPTED")
+        reader_interrupted = true
+      end
+      return nil
+    end)
+    task_support.cleanup_task(reader, "TLS backpressure sibling reader")
+    while reader:status():as_string() ~= "waiting" do timer.yield() end
+    local write_returned = false
+    local writer = async.run<|value, value|>(function (): value
+      connection:write(string.rep("blocked\0", 5 * 1024 * 1024))
+      write_returned = true
+      return nil
+    end)
+    task_support.cleanup_task(writer, "TLS backpressured writer")
+    -- More event-loop opportunities than TLS pieces, with the peer explicitly
+    -- suspended, allow all unbackpressured submissions to finish first.
+    for _ = 1, 4096 do timer.sleep(0) end
+    gc.collect()
+    test.assert(not write_returned and writer:status():as_string() == "waiting",
+                "TLS peer did not establish write backpressure")
+    local duplicate_failed = false
+    do connection:write("duplicate writer") catch duplicate_failed = true end
+    test.assert(duplicate_failed and not write_returned,
+                "duplicate TLS write disturbed the admitted writer")
+    local watchdog_fired = false
+    local watchdog = async.run<|value, value|>(function (): value
+      timer.sleep(5000)
+      watchdog_fired = true
+      connection:abort()
+      return nil
+    end)
+    task_support.cleanup_task(watchdog, "TLS cancellation watchdog")
+    writer:cancel(async.CancellationReason.simple("cancel stalled TLS output"))
+    async.join(writer)
+    test.assert(writer:status():as_string() == "cancelled" and not watchdog_fired,
+                "TLS cancellation joined native output before aborting TCP")
+    watchdog:cancel(async.CancellationReason.simple("TLS cancellation completed"))
+    async.join(watchdog)
+    connection:abort()
+    async.join(reader)
+    test.assert(reader_interrupted and reader:status():has_succeeded(),
+                "TLS write cancellation did not interrupt its sibling reader")
+    peer:resume(hold_peer)
+    async.join(peer)
+    test.assert(peer:status():has_succeeded())
+  end)
+end
+
+function test_ssl_peer_alert_preserves_admitted_large_write(context: test.Context)
+  runtime_test.run(function ()
+    local server, port = support.listen_available(45600, support.CERTIFICATE,
+                                                 support.PRIVATE_KEY)
+    defer server:close()
+    local payload = string.rep("body\0", 512 * 1024)
+    local writer_finished = false
+    local peer = async.run<|value, value|>(function (): value
+      local connection = server:accept()
+      defer connection:abort()
+      test.assert(connection:read_until("\n", true) == "prefix")
+      connection:shutdown()
+      test.assert(not writer_finished,
+                  "peer alert did not overlap the admitted multi-piece writer")
+      test.assert(connection:read_until("\0END", true) == payload,
+                  "peer alert discarded or reordered admitted TLS write bytes")
+      test.assert(connection:read() == nil,
+                  "peer did not receive the reciprocal authenticated TLS EOF")
+      return nil
+    end)
+    task_support.cleanup_task(peer, "TLS half-close peer")
+    local connection = ssl.connect("localhost", port, support.TRUST_ROOT)
+    defer connection:abort()
+    local writer = async.run<|value, value|>(function (): value
+      connection:write("prefix\n" .. payload .. "\0END")
+      writer_finished = true
+      return nil
+    end)
+    task_support.cleanup_task(writer, "TLS half-close admitted writer")
+    while writer:status():as_string() ~= "waiting" do timer.yield() end
+    local reader = async.run<|value, value|>(function (): value
+      test.assert(connection:read() == nil,
+                  "peer close_notify did not remain authenticated EOF")
+      return nil
+    end)
+    task_support.cleanup_task(reader, "TLS half-close reader")
+    async.join(writer)
+    async.join(reader)
+    async.join(peer)
+    test.assert(writer:status():has_succeeded() and reader:status():has_succeeded() and
+                peer:status():has_succeeded(), "duplex TLS half-close failed")
+    local rejected = false
+    do connection:write("after EOF") catch rejected = true end
+    test.assert(rejected, "peer close_notify admitted a new TLS writer")
+  end)
+end
+
+function test_ssl_supervised_failure_preserves_original_trace(
+    context: test.Context)
+  runtime_test.run(function ()
+    local server, port = support.listen_available(45500, support.WRONG_CERTIFICATE,
+                                                 support.PRIVATE_KEY)
+    defer server:close()
+    local peer = async.run<|value, value|>(function (): value
+      local accepted = server:accept()
+      defer accepted:abort()
+      do accepted:handshake() catch end
+      return nil
+    end)
+    task_support.cleanup_task(peer, "TLS traceback peer")
+    local connection = ssl.client(net.connect("127.0.0.1", port), "localhost",
+                                   support.TRUST_ROOT)
+    defer connection:abort()
+    local caught: value = nil
+    local original_trace = ""
+    do connection:handshake() catch
+      caught = error
+      original_trace = traceback
+    end
+    test.assert(caught is ssl.Error and
+                (caught as ssl.Error).name == "CERTIFICATE_VERIFY_FAILED" and
+                (caught as ssl.Error).operation == "ssl.handshake.verify",
+                "TLS supervisor replaced the nominal SSL failure")
+    test.assert(#original_trace > 0, "TLS supervisor lost the operation traceback")
+    context:run("symbolic_frame", function (_context: test.Context)
+      if common.is_windows() then
+        test.skip("unsupported: native Windows tracebacks retain raw addresses without Titan symbols")
+      end
+      test.assert(string.find(original_trace, "titan.ssl.handshake_locked", 1) ~= nil,
+                  "TLS supervisor replaced the original failing operation trace")
+    end)
+    async.join(peer)
+    test.assert(peer:status():has_succeeded())
+  end)
+end
+
+function test_ssl_client_adoption_preserves_trust_failure_trace(context: test.Context)
+  runtime_test.run(function ()
+    local server, port = net_support.listen_available(45700)
+    defer server:close()
+    local missing = support.temporary_path(context)
+    fs.unlink(missing)
+    local empty = support.temporary_path(context)
+    for index = 1, 2 do
+      local peer = async.run<|value, value|>(function (): value
+        local accepted = server:accept()
+        defer accepted:close()
+        test.assert(accepted:read() == nil,
+                    "failed TLS adoption did not retire its TCP owner")
+        return nil
+      end)
+      task_support.cleanup_task(peer, "TLS trust failure peer")
+      local transport = net.connect("127.0.0.1", port)
+      local ca_file = missing
+      if index == 2 then ca_file = empty end
+      local caught: value = nil
+      local original_trace = ""
+      do ssl.client(transport, "localhost", ca_file) catch
+        caught = error
+        original_trace = traceback
+      end
+      local expected_frame = "titan.fs.read_file"
+      if index == 1 then
+        test.assert(caught is async.OperationError and
+                    (caught as async.OperationError).name == "ENOENT" and
+                    (caught as async.OperationError).operation == "fs.open",
+                    "TLS adoption replaced the nominal filesystem failure")
+      else
+        test.assert(caught is ssl.Error and
+                    (caught as ssl.Error).operation == "ssl.client.trust",
+                    "TLS adoption replaced the nominal trust failure")
+        expected_frame = "titan.ssl.load_ca_certificates"
+      end
+      test.assert(#original_trace > 0, "TLS adoption lost its trust failure traceback")
+      local subtest = "missing_ca_frame"
+      if index == 2 then subtest = "bad_ca_frame" end
+      context:run(subtest, function (_context: test.Context)
+        if common.is_windows() then
+          test.skip("unsupported: native Windows tracebacks retain raw addresses without Titan symbols")
+        end
+        test.assert(string.find(original_trace, expected_frame, 1) ~= nil,
+                    "TLS adoption replaced the original trust failure frame")
+      end)
+      async.join(peer)
+      test.assert(peer:status():has_succeeded())
+    end
   end)
 end

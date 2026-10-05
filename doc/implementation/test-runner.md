@@ -234,7 +234,7 @@ lifecycle protocol.
 
 ## Repository dogfooding
 
-The shared `spec/support/stdlib_test_modules.mk` manifest names 26 module-owned
+The shared `spec/support/stdlib_test_modules.mk` manifest names 27 module-owned
 roots under `spec/stdlib/titan/`, used by Linux, macOS, and native Windows.
 The same reviewed inventory names their test/helper compilation units, folder
 contributors, and direct source imports. On Unix, Make compiles shared
@@ -244,7 +244,7 @@ contributors, and direct source imports. On Unix, Make compiles shared
 command runs from `.titan-tests/` with the same absolute source tree and flags.
 The shared support output is `titan/test__test_support.o` within that directory.
 
-One final Unix `--test --incremental --no-uv-bootstrap` invocation keeps all 26
+One final Unix `--test --incremental --no-uv-bootstrap` invocation keeps all 27
 roots explicit and discovers the complete source/object closure. The designated
 first root, `test.tests`, owns `.titan-tests/test/tests`; the current synthetic
 runner, entrypoint, and Darwin dSYM are also owned there. Ordinary module
@@ -255,7 +255,7 @@ A no-op `titan-stdlib-test-build` invokes neither the compiler nor the linker.
 
 `make titan-stdlib-test-run` returns to the repository root before executing,
 because several fixtures use repository-relative paths. `TITAN_FILTER` supplies
-one Lua pattern to this already built executable; it never changes the 26-root
+one Lua pattern to this already built executable; it never changes the 27-root
 compile. `make titan-stdlib-test` composes build and run, while the split leaf
 targets let sanitizer and focused development runs reuse one build in multiple
 fresh processes. `BUSTED_FILTER` is independent and belongs to
@@ -298,7 +298,7 @@ because it reinstalls the current compiler and provider before testing;
 
 `run_with_timeout.sh` uses Bash monitor mode to give the executable its own
 process group and polls it at a coarse interval. Make's default
-`TITAN_TEST_TIMEOUT=600` covers all 26 test roots, including repeated fresh
+`TITAN_TEST_TIMEOUT=600` covers all 27 test roots, including repeated fresh
 child-fixture compilation under O3/LTO. Explicit overrides, including the
 15-second CI shutdown check, remain independent of that default. At the deadline it sends
 `TERM`, then `KILL` after a short grace period, maps the timeout to status 124,
@@ -375,9 +375,9 @@ macOS gate remains manually dispatched before merge.
 
 ## Packaging and compatibility
 
-`titan.test` is the eighteenth ordinary logical module in the combined
-`titan.so`/`titan.a` pair, yielding twenty-two `luaopen_*` entries including bare
-support. Its generated Lua shim is published with the other twenty. The
+`titan.test` is an ordinary logical module in the combined
+`titan.so`/`titan.a` pair, yielding twenty-three `luaopen_*` entries including bare
+support. Its generated Lua shim is published with the other twenty-one. The
 canonical private source is a compiler-data artifact, not another run-time
 module and not a LuaRocks manifest C module. `stdlib_installer.lua` validates,
 backs up, commits, and rolls it back in the same recoverable transaction before

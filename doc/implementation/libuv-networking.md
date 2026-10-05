@@ -148,3 +148,25 @@ socket fallback, or domain-generated operation counter. The captured suspension
 number belongs to async. Compiler, native library,
 packaging, sanitizer, and platform gates validate their respective boundaries;
 API coverage alone does not imply every native backend has been executed.
+
+
+## Resolved-address TCP ownership
+
+`net.resolve` exposes the resolver's existing copied public socket addresses.
+Its named registrar creates the request view before `uv.getaddrinfo` acceptance
+and returns that exact view to `await_cancellable_with`. The callback copies
+address values and frees addrinfo before settling; lexical cleanup also frees
+any result retained by a failing binding conversion. A cancellation request
+never releases accepted native work early, and running DNS can outlast an
+opening timeout while its callback retires.
+
+`net.Connection.new` allocates an initialized endpoint with an explicit
+unconnected phase. `connect_address` validates Runtime/address/port and
+cancellation before admitting the single attempt, then sets connecting before
+the native await. Accepted server sockets and successful dials enter connected;
+failed or cancelled dials enter failed. Read/write/shutdown require connected,
+while close retires every phase. A known endpoint can therefore be closed by an
+independently runnable opening supervisor before that supervisor drains its
+pending connect child. `net.connect` composes the same one-address method over
+one resolution, preserving resolver-order fallback and asynchronous abandonment
+of unpublished failed candidates.

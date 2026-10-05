@@ -1,0 +1,229 @@
+function test_eof_during_partial_frame_is_abnormal(context: test.Context)
+  local cases: {BadFrame} = {
+    BadFrame("first_header_byte", "\x82"),
+    BadFrame("extended_length", "\x82\xfe\0"),
+    BadFrame("partial_mask", "\x82\x81ab"),
+    BadFrame("partial_payload", "\x82\x83abcd"),
+    BadFrame("unfinished_fragment", frame(1, "pending", true, false)),
+  }
+  for index = 1, #cases do
+    local item = cases[index]
+    context:run(item.name, function (_child: test.Context)
+      runtime_test.run(function ()
+        with_server(function (connection: websocket.Connection)
+          assert_ws_error(expect_error(function () connection:read() end), "abnormal", "websocket.read", nil)
+        end, function (wire: Wire)
+          wire.stream:write(item.bytes)
+          wire.stream:close()
+        end)
+      end)
+    end)
+  end
+end
+
+local function fragmented_cancel_case(secure: boolean)
+  local progressed = false
+  with_server(function (connection: websocket.Connection)
+    local reason = async.CancellationReason.simple("cancel partially assembled UTF-8 message")
+    local observed: value = nil
+    local reader = async.run<|value, value|>(function (): value
+      do connection:read() catch observed = error end
+      return nil
+    end)
+    cleanup_operation(connection, reader, "partial message reader cleanup")
+    while not progressed do timer.yield() end
+    gc.collect()
+    reader:cancel(reason)
+    async.join(reader)
+    test.assert(reader:status():has_cancelled() and observed == reason,
+                "fragment cancellation lost original reason or completed partial text")
+    connection:close()
+    gc.collect()
+  end, function (wire: Wire)
+    wire.stream:write(frame(1, "prefix\xe2", true, false) .. frame(9, "fragment-proof", true))
+    local pong = wire:frame()
+    test.assert(pong.opcode == 10 and pong.payload == "fragment-proof",
+                "partial-message receive state was not reached")
+    -- This Pong proves the partial data and UTF-8 state were consumed.
+    progressed = true
+    assert_transport_retired(wire.stream, secure)
+  end, nil, secure)
+end
+
+function test_partial_utf8_message_cancellation_retires_ownership(context: test.Context)
+  context:run("ws", function (_child: test.Context)
+    runtime_test.run(function () fragmented_cancel_case(false) end)
+  end)
+  context:run("wss", function (_child: test.Context)
+    runtime_test.run(function () fragmented_cancel_case(true) end)
+  end)
+end
+
+local function verified_wss_pair()
+  local ready = false
+  local server_done = false
+  local server_failure: value = nil
+  local server_connection: websocket.Connection? = nil
+  local handler_task: async.Task? = nil
+  local handler: http.Handler = function (request: http.Request, response: http.Response)
+    handler_task = async.running()
+    do
+      local connection = websocket.accept(request, response)
+      server_connection = connection
+      defer connection:close()
+      local retained: string? = nil
+      local reader = async.run<|value, value|>(function (): value
+        local kind?, data? = connection:read()
+        assert_binary(kind, data, "client\0\xff")
+        retained = data
+        return nil
+      end)
+      cleanup_operation(connection, reader, "verified wss reader cleanup")
+      -- Client sends a Ping first; its received Pong proves this read is
+      -- actively servicing TLS input when the unsolicited data write starts.
+      while not ready do timer.yield() end
+      connection:write(websocket.TEXT, "unsolicited")
+      assert_succeeded(reader, "verified wss blocked reader")
+      gc.collect()
+      test.assert(retained == "client\0\xff", "duplex TLS changed retained binary bytes")
+      connection:read()
+    catch server_failure = error end
+    server_done = true
+  end
+  local listener, port = listen_http(handler, true)
+  runtime_test.cleanup(function () listener:close() end)
+  local serving = async.run<|value, value|>(function (): value listener:serve(); return nil end)
+  runtime_test.cleanup(function ()
+    listener:close()
+    task_support.cancel_and_join_task(serving, "verified wss listener cleanup")
+  end)
+  local client = websocket.connect("wss://localhost:" .. port .. "/verified",
+                                   websocket.DialOptions { ca_file = TRUST_ROOT })
+  runtime_test.cleanup(function ()
+    client:close()
+    if server_connection then server_connection:close() end
+    if handler_task then task_support.cancel_and_join_task(handler_task, "verified wss handler cleanup") end
+  end)
+  local received: string? = nil
+  local reading = async.run<|value, value|>(function (): value
+    local kind?, bytes? = client:read()
+    assert_text(kind, bytes, "unsolicited")
+    received = bytes
+    return nil
+  end)
+  cleanup_operation(client, reading, "verified wss client reader cleanup")
+  client:ping(1000)
+  ready = true
+  assert_succeeded(reading, "verified wss client read")
+  client:write(websocket.BINARY, "client\0\xff")
+  client:shutdown(1000, "done", 1000)
+  while not server_done do timer.yield() end
+  if server_failure ~= nil then raise server_failure end
+  assert_succeeded(handler_task, "verified wss handler")
+  test.assert(received == "unsolicited", "verified wss client lost text")
+end
+
+function test_verified_wss_client_and_server_allow_blocked_read_plus_write(_context: test.Context)
+  runtime_test.run(function () verified_wss_pair() end)
+end
+
+function test_repeated_runtime_sessions_do_not_retain_protocol_reservations(context: test.Context)
+  for session = 1, 3 do
+    local number = session
+    context:run("session_" .. number, function (_child: test.Context)
+      runtime_test.run(function ()
+        with_client(function (wire: Wire)
+          wire.stream:write(frame(1, "fresh-" .. number) .. frame(8, ""))
+          assert_close(wire, nil, true)
+        end, function (connection: websocket.Connection)
+          local kind?, bytes? = connection:read()
+          assert_text(kind, bytes, "fresh-" .. number)
+          connection:read()
+          connection:close(); connection:close()
+        end)
+      end)
+      gc.collect()
+    end)
+  end
+end
+
+function test_outgoing_invalid_text_is_rejected_before_any_frame(_context: test.Context)
+  runtime_test.run(function ()
+    with_server(function (connection: websocket.Connection)
+      local failure = expect_error(function () connection:write(websocket.TEXT, "\xed\xa0\x80") end)
+      assert_ws_error(failure, "utf8", "websocket.write", nil)
+      connection:write(websocket.TEXT, "healthy-after-invalid")
+      connection:shutdown(1000, "", 1000)
+    end, function (wire: Wire)
+      local output = wire:frame()
+      test.assert(output.opcode == 1 and output.final and
+                  output.payload == "healthy-after-invalid",
+                  "invalid text emitted bytes or retired the healthy connection")
+      assert_close(wire, 1000, false)
+      wire.stream:write(frame(8, close_bytes(1000, ""), true))
+    end)
+  end)
+end
+
+local function validation_reservation_case(secure: boolean, cancel: boolean)
+  with_server(function (connection: websocket.Connection)
+    -- The invalid final byte prohibits all output from this writer. The long
+    -- valid prefix requires many cooperative validation turns, while the public
+    -- caller's waiting status acknowledges its installed owned child.
+    local input = string.rep("v", 16 * 1024 * 1024) .. "\xff"
+    local started = false
+    local returned = false
+    local failure: value = nil
+    local writer = async.run<|value, value|>(function (): value
+      started = true
+      do connection:write(websocket.TEXT, input); returned = true
+      catch failure = error end
+      return nil
+    end)
+    cleanup_operation(connection, writer, "pre-output validation writer cleanup")
+    while not started do async.yield() end
+    async.yield()
+    test.assert(not returned and not writer:status():has_finished() and
+                writer:status():as_string() == "waiting",
+                "long text writer did not suspend before protocol output")
+    if cancel then
+      local reason = async.CancellationReason.simple("cancel pre-output text validation")
+      writer:cancel(reason)
+      async.join(writer)
+      test.assert(writer:status():has_cancelled() and failure == reason,
+                  "pre-output cancellation lost the original reason")
+    else
+      assert_ws_error(expect_error(function ()
+        connection:write(websocket.TEXT, "competitor")
+      end), "state", "websocket.write", nil)
+      assert_succeeded(writer, "invalid long text writer wrapper")
+      assert_ws_error(failure, "utf8", "websocket.write", nil)
+    end
+    timer.sleep(1); async.checkpoint()
+    gc.collect()
+    connection:write(websocket.TEXT, "healthy-after-validation")
+    connection:shutdown(1000, "", 1000)
+  end, function (wire: Wire)
+    local output = wire:frame()
+    test.assert(output.opcode == 1 and output.final and
+                output.payload == "healthy-after-validation",
+                "validation emitted bytes or detached the healthy transport")
+    assert_close(wire, 1000, false)
+    wire.stream:write(frame(8, close_bytes(1000, ""), true))
+  end, nil, secure)
+end
+
+function test_text_validation_reserves_writer_and_cancellation_detaches(context: test.Context)
+  context:run("ws_duplicate", function (_child: test.Context)
+    runtime_test.run(function () validation_reservation_case(false, false) end)
+  end)
+  context:run("wss_duplicate", function (_child: test.Context)
+    runtime_test.run(function () validation_reservation_case(true, false) end)
+  end)
+  context:run("ws_cancel", function (_child: test.Context)
+    runtime_test.run(function () validation_reservation_case(false, true) end)
+  end)
+  context:run("wss_cancel", function (_child: test.Context)
+    runtime_test.run(function () validation_reservation_case(true, true) end)
+  end)
+end

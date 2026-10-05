@@ -4,7 +4,7 @@
 # and system OpenSSL policies. Libuv, llhttp and SQLite are always bundled.
 # Besides the ordinary Lua/API smokes, this proves titan.a matches titan.so and
 # can load io and run
-# async/timer/fs/net/ssl/url/http/os plus PEG/string behavior in a compiled Titan
+# async/timer/fs/net/ssl/url/http/websocket/os plus PEG/string behavior in a compiled Titan
 # application while the dynamic provider and generated shims are out of search
 # reach. System mode exercises the host's ordinary OpenSSL pkg-config settings.
 
@@ -103,7 +103,7 @@ check_canonical_container() {
         test -f "$PROVIDER.dSYM/Contents/Resources/DWARF/titan.so"
     fi
 
-    for module in coroutine uv async timer io fs net ssl url http os peg string math lua iteration gc test reflect sqlite3 json; do
+    for module in coroutine uv async timer io fs net ssl url http websocket os peg string math lua iteration gc test reflect sqlite3 json; do
         local shim="$SHIM_ROOT/titan/$module.lua"
 
         test -f "$shim"
@@ -142,6 +142,7 @@ local expected = {
     ["titan.ssl"] = true,
     ["titan.url"] = true,
     ["titan.http"] = true,
+    ["titan.websocket"] = true,
     ["titan.os"] = true,
     ["titan.peg"] = true,
     ["titan.string"] = true,
@@ -382,6 +383,8 @@ local net = import "net"
 local ssl = import "ssl"
 local url = import "url"
 local http = import "http"
+local websocket = import "websocket"
+local qualified_websocket = import "titan.websocket"
 local system = import "os"
 local peg = import "peg"
 local strings = import "string"
@@ -523,6 +526,24 @@ function main(args: {string}): integer
     check(not gc.paused() and gc.count() > 0,
           "static GC resume or count behavior failed")
     check_sqlite_provider()
+
+    local dial_options: value = websocket.DialOptions()
+    local accept_options: value = qualified_websocket.AcceptOptions()
+    local text_marker = false
+    local binary_marker = false
+    case websocket.TEXT
+    when text() then text_marker = true
+    end
+    case websocket.BINARY
+    when binary() then binary_marker = true
+    end
+    check(dial_options is websocket.DialOptions and
+          accept_options is websocket.AcceptOptions and
+          text_marker and binary_marker,
+          "static WebSocket provider initialization failed")
+    local websocket_url?, websocket_url_error? = url.parse("wss://localhost/socket")
+    check(websocket_url_error == nil and websocket_url.scheme == "wss" and
+          websocket_url.port == 443, "static WSS URL parsing failed")
 
     local tls_error = ssl.Error.new(
       0, "STATIC_SSL_READY", "static SSL module loaded", "static-smoke")

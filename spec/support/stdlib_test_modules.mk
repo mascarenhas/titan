@@ -7,7 +7,7 @@ TITAN_STDLIB_TEST_PROGRAM_OUTPUT := test/tests
 TITAN_STDLIB_TEST_ROOTS := $(TITAN_STDLIB_TEST_PROGRAM_ROOT) \
 	coroutine.tests iteration.tests gc.tests lua.tests math.tests peg.tests \
 	string.core_test string.format_pack_test string.regex_test async.tests \
-	uv.task_tests uv.public_tests io.tests fs.tests timer.tests net.tests ssl.tests http.tests \
+	uv.task_tests uv.public_tests io.tests fs.tests timer.tests net.tests ssl.tests http.tests websocket.tests \
 	url.tests os.tests os.process_tests uv.runtime_tests reflect.tests sqlite3.tests json.tests
 
 .PHONY: print-stdlib-test-roots
@@ -42,6 +42,7 @@ TITAN_TEST_MODULES := async.test_support \
 	peg.tests \
 	reflect.tests \
 	sqlite3.tests \
+	ssl.backpressure_support \
 	ssl.test_support \
 	ssl.tests \
 	string.core_test \
@@ -58,7 +59,8 @@ TITAN_TEST_MODULES := async.test_support \
 	uv.public_tests \
 	uv.runtime_tests \
 	uv.task_test_support \
-	uv.task_tests
+	uv.task_tests \
+	websocket.tests
 
 TITAN_TEST_SOURCES_async.test_support := spec/stdlib/titan/async/test_support.titan
 TITAN_TEST_IMPORTS_async.test_support :=
@@ -107,7 +109,8 @@ TITAN_TEST_SOURCES_http.tests := spec/stdlib/titan/http/tests/tests.titan \
 	spec/stdlib/titan/http/tests/sanitizer_process_test.titan \
 	spec/stdlib/titan/http/tests/server_behavior.titan \
 	spec/stdlib/titan/http/tests/test_cases.titan \
-	spec/stdlib/titan/http/tests/timeout_tls_behavior.titan
+	spec/stdlib/titan/http/tests/timeout_tls_behavior.titan \
+	spec/stdlib/titan/http/tests/upgrade_behavior.titan
 TITAN_TEST_IMPORTS_http.tests := http.test_support support.async support.command support.runtime
 
 TITAN_TEST_SOURCES_io.test_support := spec/stdlib/titan/io/test_support.titan
@@ -188,11 +191,14 @@ TITAN_TEST_SOURCES_sqlite3.tests := spec/stdlib/titan/sqlite3/tests/tests.titan 
 	spec/stdlib/titan/sqlite3/tests/worker_test.titan
 TITAN_TEST_IMPORTS_sqlite3.tests := support.async support.command support.runtime
 
+TITAN_TEST_SOURCES_ssl.backpressure_support := spec/stdlib/titan/ssl/backpressure_support.titan
+TITAN_TEST_IMPORTS_ssl.backpressure_support := support.async
+
 TITAN_TEST_SOURCES_ssl.test_support := spec/stdlib/titan/ssl/test_support.titan
 TITAN_TEST_IMPORTS_ssl.test_support := support.runtime
 
 TITAN_TEST_SOURCES_ssl.tests := spec/stdlib/titan/ssl/tests.titan
-TITAN_TEST_IMPORTS_ssl.tests := net.test_support ssl.test_support support.async support.runtime
+TITAN_TEST_IMPORTS_ssl.tests := net.test_support ssl.backpressure_support ssl.test_support support.async support.common support.runtime
 
 TITAN_TEST_SOURCES_string.core_test := spec/stdlib/titan/string/core_test.titan
 TITAN_TEST_IMPORTS_string.core_test := string.test_support
@@ -259,3 +265,16 @@ TITAN_TEST_C_INPUTS_async.tests = $(TITAN_TEST_BUILD_DIR)/async_foreign_work.h \
 	spec/stdlib/titan/async/tests/async_stack_probe.h
 TITAN_TEST_C_INPUTS_uv.runtime_tests = $(TITAN_TEST_BUILD_DIR)/uv_stdio_probe.h
 TITAN_TEST_C_INPUTS_lua.tests = $(TITAN_TEST_BUILD_DIR)/uv_stdio_probe.h
+
+TITAN_TEST_SOURCES_websocket.tests := spec/stdlib/titan/websocket/tests/tests.titan \
+	spec/stdlib/titan/websocket/tests/raw_peer.titan \
+	spec/stdlib/titan/websocket/tests/fixtures.titan \
+	spec/stdlib/titan/websocket/tests/messages_test.titan \
+	spec/stdlib/titan/websocket/tests/protocol_test.titan \
+	spec/stdlib/titan/websocket/tests/opening_test.titan \
+	spec/stdlib/titan/websocket/tests/lifecycle_test.titan \
+	spec/stdlib/titan/websocket/tests/ownership_test.titan \
+	spec/stdlib/titan/websocket/tests/backpressure.titan \
+	spec/stdlib/titan/websocket/tests/backpressure_test.titan
+TITAN_TEST_IMPORTS_websocket.tests := support.async support.runtime
+TITAN_TEST_C_INPUTS_websocket.tests := spec/stdlib/titan/websocket/tests/pressure-native.h

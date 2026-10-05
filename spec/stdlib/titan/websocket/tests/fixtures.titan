@@ -1,0 +1,231 @@
+local const CERTIFICATE = "spec/fixtures/ssl/server.pem"
+local const PRIVATE_KEY = "spec/fixtures/ssl/server-key.pem"
+local const TRUST_ROOT = "spec/fixtures/ssl/ca.pem"
+
+local type SessionAction = function (websocket.Connection): ()
+local type PeerAction = function (Wire): ()
+
+local function fixture_failure(failure: value): string
+  if failure is websocket.Error then
+    local actual = failure as websocket.Error
+    return string.format("websocket.Error(kind=%s operation=%s message=%s close_code=%s)",
+      actual.kind, actual.operation, actual.message, string.tostring(actual.close_code))
+  elseif failure is websocket.HandshakeError then
+    local actual = failure as websocket.HandshakeError
+    return string.format("websocket.HandshakeError(message=%s status=%s)",
+      actual.message, string.tostring(actual.status))
+  elseif failure is ssl.Error then
+    local actual = failure as ssl.Error
+    return string.format("ssl.Error(name=%s operation=%s message=%s)",
+      actual.name, actual.operation, actual.message)
+  elseif failure is async.OperationError then
+    local actual = failure as async.OperationError
+    return string.format("async.OperationError(name=%s operation=%s message=%s)",
+      actual.name, actual.operation, actual.message)
+  elseif failure is async.CancellationReason then
+    return "async.CancellationReason(" .. string.tostring(failure) .. ")"
+  end
+  return string.tostring(failure)
+end
+
+
+local function expect_error(action: function (): ()): value
+  local caught = false
+  local result: value = nil
+  do action() catch caught = true; result = error end
+  test.assert(caught, "expected operation to raise")
+  return result
+end
+
+local function assert_ws_error(failure: value, kind: string, operation: string,
+                              code: integer?)
+  local diagnostic = string.format("expected websocket.Error(kind=%s operation=%s close_code=%s); actual=%s",
+    kind, operation, string.tostring(code), fixture_failure(failure))
+  test.assert(failure is websocket.Error, "expected nominal websocket.Error; " .. diagnostic)
+  local actual = failure as websocket.Error
+  test.assert(actual.kind == kind and actual.operation == operation and
+              actual.close_code == code and #actual.message > 0,
+              "WebSocket error fields differ from the contract; " .. diagnostic)
+end
+
+local function assert_text(kind: websocket.MessageType?, data: string?, expected: string)
+  test.assert(kind ~= nil and data ~= nil, "message pair was absent or inconsistent")
+  local text = false
+  case kind when text() then text = true when binary() then end
+  test.assert(text and data == expected, "text message kind or bytes changed")
+end
+
+local function assert_terminal_trace(connection: websocket.Connection,
+                                     first: value, first_trace: string)
+  test.assert(first ~= nil and #first_trace > 0, "terminal cause lost its original trace")
+  local operations: {function (): ()} = {
+    function () connection:read() end,
+    function () connection:write(websocket.BINARY, "later") end,
+    function () connection:ping(1000) end,
+    function () connection:shutdown(1000, "", 1000) end,
+  }
+  for index = 1, #operations do
+    local later: value = nil
+    local later_trace = ""
+    do operations[index]()
+    catch later = error; later_trace = traceback end
+    test.assert(later == first and later_trace == first_trace,
+                "later operation replaced the first terminal error or trace")
+  end
+end
+
+local function assert_binary(kind: websocket.MessageType?, data: string?, expected: string)
+  test.assert(kind ~= nil and data ~= nil, "message pair was absent or inconsistent")
+  local binary = false
+  case kind when binary() then binary = true when text() then end
+  test.assert(binary and data == expected, "binary message kind or bytes changed")
+end
+
+local function assert_succeeded(task: async.Task, label: string)
+  local state = async.join(task)
+  if state:has_failed() then
+    local _, failure? = state:has_failed()
+    raise failure.error
+  end
+  test.assert(state:has_succeeded(), label .. " ended " .. state:as_string())
+end
+
+local function assert_transport_retired(stream: io.ReaderWriterCloser, secure: boolean)
+  local retired = false
+  do retired = stream:read() == nil
+  catch
+    -- WebSocket close()/cancellation aborts TLS without close_notify.
+    -- A verified raw TLS peer therefore observes truncation, not clean TLS EOF.
+    if secure and error is ssl.Error then
+      retired = (error as ssl.Error).name == "TLS_TRUNCATED_EOF"
+    else raise end
+  end
+  test.assert(retired, "terminal WebSocket operation did not retire transport")
+end
+
+local record ServerFixture
+  connection: websocket.Connection?
+  handler: async.Task?
+  done: boolean
+  failure: value
+end
+
+local function listen_http(handler: http.Handler, secure: boolean): (http.Server, integer)
+  local port = 42100
+  for _ = 1, 100 do
+    do
+      if secure then
+        return http.listen_tls("127.0.0.1", CERTIFICATE, handler, PRIVATE_KEY, port), port
+      end
+      return http.listen("127.0.0.1", handler, port), port
+    catch
+      if error is async.OperationError and (error as async.OperationError).name == "EADDRINUSE" then
+        port = port + 1
+      else raise end
+    end
+  end
+  raise "WebSocket fixture exhausted loopback ports"
+end
+
+local function listen_raw(): (net.Server, integer)
+  local port = 42300
+  for _ = 1, 100 do
+    do return net.listen("127.0.0.1", port), port
+    catch
+      if error is async.OperationError and (error as async.OperationError).name == "EADDRINUSE" then
+        port = port + 1
+      else raise end
+    end
+  end
+  raise "WebSocket raw fixture exhausted loopback ports"
+end
+
+local function with_server(action: SessionAction, peer: PeerAction,
+                           options: websocket.AcceptOptions?, secure: boolean?,
+                           extra: string?, suffix: string?, upgrade: string?, connection_header: string?)
+  local state = ServerFixture(nil, nil, false, nil)
+  local handler: http.Handler = function (request: http.Request, response: http.Response)
+    state.handler = async.running()
+    do
+      local connection = websocket.accept(request, response, options)
+      state.connection = connection
+      defer connection:close()
+      action(connection)
+    catch state.failure = error end
+    state.done = true
+  end
+  local listener, port = listen_http(handler, secure or false)
+  runtime_test.cleanup(function () listener:close() end)
+  local serving = async.run<|value, value|>(function (): value listener:serve(); return nil end)
+  runtime_test.cleanup(function ()
+    listener:close()
+    task_support.cancel_and_join_task(serving, "WebSocket listener cleanup")
+  end)
+  local stream: io.ReaderWriterCloser? = nil
+  local abort: function (): () = function () end
+  if secure then
+    local tls = ssl.connect("localhost", port, TRUST_ROOT)
+    stream = tls
+    abort = function () tls:abort() end
+  else
+    local tcp = net.connect("127.0.0.1", port)
+    stream = tcp
+    abort = function () tcp:close() end
+  end
+  -- Abort transport before joining any accepted output owner on every exit.
+  runtime_test.cleanup(function ()
+    abort()
+    if state.connection then state.connection:close() end
+    if state.handler then task_support.cancel_and_join_task(state.handler, "WebSocket handler cleanup") end
+  end)
+  local wire = Wire(stream, "", "")
+  wire:open_client(port, extra, suffix, upgrade, connection_header)
+  peer(wire)
+  while not state.done do timer.yield() end
+  if state.failure ~= nil then raise state.failure end
+  assert_succeeded(state.handler, "WebSocket handler")
+end
+
+local function with_client(peer: PeerAction, action: SessionAction,
+                           options: websocket.DialOptions?, suffix: string?,
+                           extra: string?, upgrade: string?, connection_header: string?)
+  local listener, port = listen_raw()
+  runtime_test.cleanup(function () listener:close() end)
+  local transport: net.Connection? = nil
+  local worker = async.run<|value, value|>(function (): value
+    local accepted = listener:accept()
+    transport = accepted
+    defer accepted:close()
+    local wire = Wire(accepted, "", "")
+    wire:open_server(suffix, extra, upgrade, connection_header)
+    peer(wire)
+    return nil
+  end)
+  runtime_test.cleanup(function ()
+    listener:close()
+    if transport then transport:close() end
+    task_support.cancel_and_join_task(worker, "WebSocket raw server cleanup")
+  end)
+  local connection = websocket.connect("ws://127.0.0.1:" .. port .. "/wire?query=yes", options)
+  runtime_test.cleanup(function () connection:close() end)
+  action(connection)
+  assert_succeeded(worker, "WebSocket raw server")
+end
+
+local function cleanup_operation(connection: websocket.Connection, task: async.Task,
+                                  label: string)
+  runtime_test.cleanup(function ()
+    connection:close()
+    task_support.cancel_and_join_task(task, label)
+  end)
+end
+
+local function server_receives_error(bytes: string, kind: string, code: integer,
+                                     options: websocket.AcceptOptions?)
+  with_server(function (connection: websocket.Connection)
+    assert_ws_error(expect_error(function () connection:read() end), kind, "websocket.read", code)
+  end, function (wire: Wire)
+    wire.stream:write(bytes)
+    assert_close(wire, code, false)
+  end, options)
+end

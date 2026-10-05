@@ -1,0 +1,710 @@
+local function listen_raw_tls(): (ssl.Server, integer)
+  local port = 42500
+  for _ = 1, 100 do
+    do return ssl.listen("127.0.0.1", port, CERTIFICATE, PRIVATE_KEY), port
+    catch
+      if error is async.OperationError and (error as async.OperationError).name == "EADDRINUSE" then
+        port = port + 1
+      else raise end
+    end
+  end
+  raise "WebSocket backpressure TLS fixture exhausted loopback ports"
+end
+
+local function fixture_time_ms(): integer
+  local loop = async.current_loop()
+  uv.update_time(loop)
+  return uv.now(loop)
+end
+
+
+-- This fixture creates its own Runtime and owns every TCP handle walked here.
+-- Query with zero AFTER each setter: a setter's in/out argument is not evidence
+-- of the kernel's effective buffer, especially with platform socket minima.
+local function constrain_owned_sockets(receive: boolean, stop_reads: boolean): (integer, string)
+  local loop = async.current_loop()
+  local profile = string.writer()
+  local count = on_main(function (): integer
+    local count = 0
+    uv.walk(loop, function (handle: uv.handle_t, _argument: value)
+      case handle
+      when tcp(owner) then
+        if handle:is_initialized() and not uv.is_closing(handle) then
+          local mss_profile = "unconnected"
+          local peer_status = uv.tcp_getpeername(owner)
+          if peer_status >= 0 then
+            -- Nagle's ACK-delayed tail is not a stopped-window pressure
+            -- witness. Acknowledge this public setter on connected senders
+            -- before priming/filling; listeners have no connected peer.
+            test.assert(uv.tcp_nodelay(owner, 1) >= 0,
+                        "could not disable Nagle on a connected fixture-owned TCP socket")
+            mss_profile = pressure_mss(owner) .. " nodelay=set"
+          end
+          local send_set = uv.send_buffer_size(handle, 1024)
+          local receive_set = 0
+          if receive then receive_set = uv.recv_buffer_size(handle, 1024) end
+          local send_status, send_size = uv.send_buffer_size(handle, 0)
+          local receive_status, receive_size = uv.recv_buffer_size(handle, 0)
+          test.assert(send_set >= 0 and receive_set >= 0 and
+                      send_status >= 0 and send_size > 0 and
+                      receive_status >= 0 and receive_size > 0,
+                      "could not set/query isolated owned TCP socket buffers")
+          if stop_reads then test.assert(uv.read_stop(owner:as_stream_t()) >= 0) end
+          count = count + 1
+          profile:write(string.format("tcp%d(send=%d recv=%d %s) ", count, send_size, receive_size, mss_profile))
+        end
+      else
+      end
+    end, nil)
+    return count
+  end)
+  return count, profile:drain()
+end
+
+-- Public connected endpoint addresses identify a unique fixture-owned socket.
+-- A listening socket has no peer and cannot satisfy this lookup.
+local function owned_connected_socket(local_port: integer?, peer_port: integer?): uv.tcp_t
+  local loop = async.current_loop()
+  local selected: uv.tcp_t? = nil
+  local matches = on_main(function (): integer
+    local count = 0
+    uv.walk(loop, function (handle: uv.handle_t, _argument: value)
+      case handle
+      when tcp(owner) then
+        if handle:is_initialized() and not uv.is_closing(handle) then
+          local own_status, own? = uv.tcp_getsockname(owner)
+          local peer_status, peer? = uv.tcp_getpeername(owner)
+          if own_status >= 0 and own ~= nil and peer_status >= 0 and peer ~= nil and
+             (local_port == nil or own:port() == local_port) and
+             (peer_port == nil or peer:port() == peer_port) then
+            selected = owner
+            count = count + 1
+          end
+        end
+      else
+      end
+    end, nil)
+    return count
+  end)
+  test.assert(matches == 1,
+    string.format("owned connected TCP lookup was ambiguous: local_port=%s peer_port=%s matches=%d",
+      string.tostring(local_port), string.tostring(peer_port), matches))
+  local socket? = selected
+  return socket
+end
+
+local function pending_output_bytes(socket: uv.tcp_t): integer
+  return on_main(function (): integer
+    if not socket:as_handle_t():is_initialized() or uv.is_closing(socket:as_handle_t()) then return 0 end
+    return uv.stream_get_write_queue_size(socket:as_stream_t())
+  end)
+end
+
+local function verified_small_window_tls_peer(port: integer,
+    publish_abort: function (function (): ()): ()): (ssl.Connection, string)
+  local transport = net.Connection.new()
+  runtime_test.cleanup(function () transport:close() end)
+  publish_abort(function () transport:close() end)
+  local loop = async.current_loop()
+  local profile = ""
+  -- Only this newly constructed public Connection is unbound. Walk public
+  -- TCP state in our isolated Runtime; do not inspect its opaque fields.
+  local fresh = on_main(function (): integer
+    local count = 0
+    uv.walk(loop, function (handle: uv.handle_t, _argument: value)
+      case handle
+      when tcp(owner) then
+        if handle:is_initialized() and not uv.is_closing(handle) then
+          local status = uv.tcp_getsockname(owner)
+          if status < 0 then
+            profile = small_window_socket(owner)
+            count = count + 1
+          end
+        end
+      else
+      end
+    end, nil)
+    return count
+  end)
+  test.assert(fresh == 1, "isolated TLS opening runtime did not expose exactly one fresh owned TCP handle")
+  local address_status, address? = uv.ip4_addr("127.0.0.1", port)
+  test.assert(address_status >= 0)
+  transport:connect_address(address)
+  profile = profile .. " after_SYN=" .. pressure_mss(owned_connected_socket(nil, port))
+  local tls = ssl.client(transport, "localhost", TRUST_ROOT)
+  runtime_test.cleanup(function () tls:abort() end)
+  publish_abort(function () tls:abort() end)
+  tls:handshake()
+  return tls, profile
+end
+
+local function blocked_output_case(secure: boolean, trigger: string)
+  local backend_port = 0
+  local accept: function (): (io.ReaderWriterCloser) = function (): io.ReaderWriterCloser raise "unset accept" end
+  local abort_backend: function (): () = function () end
+  local close_listener: function (): () = function () end
+  if secure then
+    local listener, port = listen_raw_tls()
+    backend_port = port
+    close_listener = function () listener:close() end
+    accept = function (): io.ReaderWriterCloser
+      local tls = listener:accept()
+      abort_backend = function () tls:abort() end
+      tls:handshake()
+      return tls
+    end
+  else
+    local listener, port = listen_raw()
+    backend_port = port
+    close_listener = function () listener:close() end
+    accept = function (): io.ReaderWriterCloser
+      local tcp = listener:accept()
+      abort_backend = function () tcp:close() end
+      return tcp
+    end
+  end
+  runtime_test.cleanup(close_listener)
+  local raw: Wire? = nil
+  local acknowledged = false
+  local hold = async.ResumeToken("WebSocket stopped socket peer")
+  local peer = async.run<|value, value|>(function (): value
+    local stream = accept()
+    defer abort_backend()
+    local wire = Wire(stream, "", "")
+    raw = wire
+    wire:open_server()
+    wire.stream:write(frame(9, "before-stop"))
+    local pong = wire:frame()
+    test.assert(pong.opcode == 10 and pong.masked and pong.payload == "before-stop",
+                "client receive admission was not acknowledged before stopping OS reads")
+    acknowledged = true
+    async.suspend(hold)
+    if trigger == "close_overlap" then
+      local fragments = 0
+      while true do
+        local output = wire:frame()
+        test.assert(output.masked, "client output behind blocked frame lost masking")
+        if output.opcode == 8 then
+          test.assert(string.sub(output.payload, 1, 2) == close_bytes(1000),
+                      "overlapping Close changed the actual peer status")
+          break
+        end
+        fragments = fragments + 1
+        test.assert(fragments <= 1024 and (output.opcode == 2 or output.opcode == 0),
+                    "blocked binary output had unexpected framing")
+      end
+      test.assert(wire.input == "", "overlapping read/shutdown emitted a second Close")
+      assert_transport_retired(wire.stream, secure)
+    end
+    return nil
+  end)
+  runtime_test.cleanup(function ()
+    abort_backend()
+    task_support.cancel_and_join_task(peer, "stopped socket peer cleanup")
+  end)
+  local proxy = new_proxy(backend_port)
+  runtime_test.cleanup(function () proxy:close() end)
+  local scheme = "ws"
+  local options: websocket.DialOptions? = nil
+  if secure then
+    scheme = "wss"
+    options = websocket.DialOptions { ca_file = TRUST_ROOT }
+  end
+  local connection = websocket.connect(scheme .. "://localhost:" .. proxy.port .. "/blocked", options)
+  runtime_test.cleanup(function () connection:close() end)
+  local client_socket = owned_connected_socket(nil, proxy.port)
+  local read_failure: value = nil
+  local reader = async.run<|value, value|>(function (): value
+    do connection:read() catch read_failure = error end
+    return nil
+  end)
+  cleanup_operation(connection, reader, "stopped-output reader cleanup")
+  while not acknowledged do timer.yield() end
+  proxy:stop_input()
+  -- Bound kernel-accepted backlog before the first binary frame is admitted.
+  -- Every walked socket belongs to this isolated fixture Runtime; no private
+  -- connection identity or production state is consulted.
+  local sockets, socket_profile = constrain_owned_sockets(false, false)
+  test.assert(sockets >= 6, "stopped-output fixture did not own both peer pairs and listeners")
+  local writer_started = fixture_time_ms()
+  local write_returned = false
+  local write_failure: value = nil
+  local writer = async.run<|value, value|>(function (): value
+    do
+      connection:write(websocket.BINARY, string.rep("blocked\0", 2 * 1024 * 1024))
+      write_returned = true
+    catch write_failure = error end
+    return nil
+  end)
+  cleanup_operation(connection, writer, "stopped-output writer cleanup")
+  -- With UV input stopped, allow more cooperative turns than the 1024
+  -- fragments need in the healthy lane. Then require actual suspended output.
+  for _ = 1, 4096 do timer.yield() end
+  gc.collect()
+  -- A positive queue in one turn may only be a tail waiting for a delayed
+  -- kernel ACK. Let the writer keep filling the stopped receive window and
+  -- require continuous native pressure across real loop/timer progress before
+  -- any of the protocol-operation deadlines starts.
+  local pressure_started = fixture_time_ms()
+  local pressure_since = 0
+  local pressure_samples = 0
+  local admitted_pending = pending_output_bytes(client_socket)
+  local previous_pending = 0
+  while fixture_time_ms() - pressure_started < 3000 do
+    if admitted_pending > 0 and not write_returned and write_failure == nil and
+       writer:status():as_string() == "waiting" then
+      if admitted_pending < previous_pending then
+        pressure_since = 0
+        pressure_samples = 0
+      end
+      if pressure_since == 0 then pressure_since = fixture_time_ms() end
+      pressure_samples = pressure_samples + 1
+      if fixture_time_ms() - pressure_since >= 250 then break end
+    else
+      pressure_since = 0
+      pressure_samples = 0
+      if write_returned or write_failure ~= nil then break end
+    end
+    previous_pending = admitted_pending
+    timer.sleep(10)
+    admitted_pending = pending_output_bytes(client_socket)
+  end
+  local pressure_ms = 0
+  if pressure_since > 0 then pressure_ms = fixture_time_ms() - pressure_since end
+  test.assert(pressure_ms >= 250 and pressure_samples >= 2 and admitted_pending > 0 and
+              not write_returned and writer:status():as_string() == "waiting",
+    string.format("fixture did not establish persistent accepted native output backpressure: queue=%d writer=%s returned=%s failure=%s elapsed_ms=%d pressure_ms=%d samples=%d buffers=%s; %s",
+      admitted_pending, writer:status():as_string(), string.tostring(write_returned),
+      fixture_failure(write_failure), fixture_time_ms() - writer_started, pressure_ms,
+      pressure_samples, socket_profile,
+      proxy:diagnostic()))
+  local watchdog_fired = false
+  local watchdog_started = fixture_time_ms()
+  local drain_started = 0
+  local watchdog = async.run<|value, value|>(function (): value
+    timer.sleep(8000)
+    watchdog_fired = true
+    proxy:close()
+    connection:close()
+    return nil
+  end)
+  task_support.cleanup_task(watchdog, "stalled-output watchdog cleanup")
+  local diagnostic = function (): string
+    return string.format("trigger=%s elapsed_ms=%d admitted_queue=%d pressure_ms=%d pressure_samples=%d writer=%s returned=%s write_failure=%s reader=%s read_failure=%s watchdog=%s buffers=%s; %s",
+      trigger, fixture_time_ms() - watchdog_started, admitted_pending,
+      pressure_ms, pressure_samples,
+      writer:status():as_string(), string.tostring(write_returned), fixture_failure(write_failure),
+      reader:status():as_string(), fixture_failure(read_failure), string.tostring(watchdog_fired),
+      socket_profile, proxy:diagnostic())
+  end
+  if trigger == "close_overlap" then
+    raw.stream:write(frame(8, close_bytes(1000, "peer")))
+    local code?, _reason? = connection:close_status()
+    while code == nil and not watchdog_fired do
+      async.yield()
+      code, _reason = connection:close_status()
+    end
+    test.assert(code == 1000, "reader did not acknowledge peer Close behind blocked output; " .. diagnostic())
+    local held_pending = pending_output_bytes(client_socket)
+    test.assert(held_pending > 0 and not write_returned and writer:status():as_string() == "waiting",
+      string.format("fixture lost the held native frame before overlapping shutdown: queue=%d; %s",
+        held_pending, diagnostic()))
+    local shutdown_failure: value = nil
+    local shutdown_returned = false
+    local shutdown = async.run<|value, value|>(function (): value
+      do connection:shutdown(1000, "local", 5000); shutdown_returned = true
+      catch shutdown_failure = error end
+      return nil
+    end)
+    cleanup_operation(connection, shutdown, "overlapping shutdown cleanup")
+    for _ = 1, 3 do async.yield() end
+    test.assert(not shutdown_returned and shutdown:status():as_string() == "waiting",
+      string.format("shutdown did not overlap receive Close behind the held frame: shutdown=%s returned=%s failure=%s held_queue=%d; %s",
+        shutdown:status():as_string(), string.tostring(shutdown_returned), fixture_failure(shutdown_failure),
+        held_pending, diagnostic()))
+    proxy:resume_input()
+    drain_started = fixture_time_ms()
+    peer:resume(hold)
+    assert_succeeded(reader, "overlapping Close reader wrapper")
+    assert_succeeded(shutdown, "overlapping shutdown wrapper")
+    assert_succeeded(writer, "closing blocked writer wrapper")
+    test.assert(read_failure == nil and shutdown_failure == nil and shutdown_returned and
+                not write_returned and write_failure is websocket.Error and
+                (write_failure as websocket.Error).kind == "state" and not watchdog_fired,
+      string.format("overlapping Close fabricated a transport failure or failed clean progress: shutdown=%s returned=%s failure=%s; %s",
+        shutdown:status():as_string(), string.tostring(shutdown_returned), fixture_failure(shutdown_failure), diagnostic()))
+    do assert_succeeded(peer, "exactly one outgoing Close raw peer")
+    catch
+      raise string.format("overlapping Close raw peer failed: %s; watchdog=%s elapsed_ms=%d drain_ms=%d; %s",
+        fixture_failure(error), string.tostring(watchdog_fired),
+        fixture_time_ms() - watchdog_started, fixture_time_ms() - drain_started,
+        diagnostic())
+    end
+    test.assert(not watchdog_fired,
+      "overlapping Close raw peer depended on watchdog retirement; " .. diagnostic())
+    watchdog:cancel(async.CancellationReason.simple("overlapping Close test completed"))
+    async.join(watchdog)
+    connection:close(); proxy:close()
+    return
+  end
+  if trigger == "cancel_write" then
+    local reason = async.CancellationReason.simple("cancel native accepted WebSocket output")
+    writer:cancel(reason)
+    async.join(writer)
+    test.assert(writer:status():has_cancelled() and write_failure == reason,
+      "accepted output cancellation lost exact reason; " .. diagnostic())
+  elseif trigger == "close" then
+    connection:close()
+  elseif trigger == "ping" then
+    local failure = expect_error(function () connection:ping(30) end)
+    do assert_ws_error(failure, "timeout", "websocket.ping", nil)
+    catch raise fixture_failure(error) .. "; " .. diagnostic() end
+    timer.sleep(1); async.checkpoint()
+  elseif trigger == "shutdown" then
+    local failure = expect_error(function () connection:shutdown(1000, "", 30) end)
+    do assert_ws_error(failure, "timeout", "websocket.shutdown", nil)
+    catch raise fixture_failure(error) .. "; " .. diagnostic() end
+    timer.sleep(1); async.checkpoint()
+  elseif trigger == "peer_close" then
+    raw.stream:write(frame(8, close_bytes(1000, "peer")))
+    local code?, _reason? = connection:close_status()
+    while code == nil and not watchdog_fired do
+      timer.sleep(10)
+      code, _reason = connection:close_status()
+    end
+    test.assert(code == 1000 and not watchdog_fired,
+      "fixture did not acknowledge peer Close behind accepted native output; " .. diagnostic())
+    -- Acknowledged peer Close has committed the public closing state: no
+    -- future data frame can be admitted, and the reciprocal Close waits for
+    -- the current frame. A still-waiting writer with continuously positive
+    -- native output therefore cannot substitute successive data frames.
+    -- Prove that held frame across real loop/timer progress before waiting
+    -- for the unchanged control deadline. Losing it is fixture setup failure.
+    local held_pending = pending_output_bytes(client_socket)
+    local held_started = fixture_time_ms()
+    local held_samples = 0
+    while not watchdog_fired do
+      test.assert(held_pending > 0 and not write_returned and write_failure == nil and
+                  writer:status():as_string() == "waiting",
+        string.format("fixture lost the current accepted native frame after peer Close: queue=%d held_ms=%d samples=%d; %s",
+          held_pending, fixture_time_ms() - held_started, held_samples, diagnostic()))
+      held_samples = held_samples + 1
+      if fixture_time_ms() - held_started >= 250 then break end
+      timer.sleep(10)
+      held_pending = pending_output_bytes(client_socket)
+    end
+    test.assert(not watchdog_fired and fixture_time_ms() - held_started >= 250 and
+                held_samples >= 2 and held_pending > 0 and not write_returned and
+                write_failure == nil and writer:status():as_string() == "waiting",
+      string.format("fixture did not hold the current accepted native frame after peer Close: queue=%d held_ms=%d samples=%d; %s",
+        held_pending, fixture_time_ms() - held_started, held_samples, diagnostic()))
+  else
+    raw.stream:write("\xc1\0") -- protocol-failure Close queues behind native output
+  end
+  assert_succeeded(reader, "stopped-output reader wrapper")
+  if trigger ~= "cancel_write" then assert_succeeded(writer, "stopped-output writer wrapper") end
+  test.assert(not write_returned and write_failure ~= nil and read_failure ~= nil and not watchdog_fired,
+    "protocol operation drained blocked native output before abort or missed its deadline; " .. diagnostic())
+  if trigger == "protocol_close" then
+    do assert_ws_error(read_failure, "protocol", "websocket.read", 1002)
+    catch raise fixture_failure(error) .. "; " .. diagnostic() end
+  end
+  watchdog:cancel(async.CancellationReason.simple("stopped-output test completed"))
+  async.join(watchdog)
+  connection:close()
+  proxy:close()
+  peer:resume(hold)
+  assert_succeeded(peer, "stopped socket peer")
+end
+
+function test_stopped_socket_output_aborts_before_native_drain(context: test.Context)
+  local triggers: {string} = {"cancel_write", "close", "ping", "shutdown", "peer_close", "protocol_close", "close_overlap"}
+  for index = 1, #triggers do
+    local trigger = triggers[index]
+    context:run("ws_" .. trigger, function (_child: test.Context)
+      runtime_test.run(function () blocked_output_case(false, trigger) end)
+    end)
+    context:run("wss_" .. trigger, function (_child: test.Context)
+      runtime_test.run(function () blocked_output_case(true, trigger) end)
+    end)
+  end
+end
+
+local function blocked_server_opening_case(secure: boolean, cancel: boolean)
+  local opening_timeout = 1000
+  if cancel then opening_timeout = 4000 end
+  local handler_task: async.Task? = nil
+  local priming = false
+  local stop_priming = false
+  local priming_writing = false
+  local priming_closed = false
+  local priming_chunks = 0
+  local priming_bytes = 0
+  local priming_failure: value = nil
+  local priming_profile = ""
+  local entered = false
+  local accepting = false
+  local done = false
+  local transferred = false
+  local failure: value = nil
+  local opening_started = 0
+  local pending_at_ms = 0
+  local cancel_at_ms = 0
+  local finished_at_ms = 0
+  local preflight = async.ResumeToken("accepted HTTP opening preflight")
+  local handler: http.Handler = function (request: http.Request, response: http.Response)
+    handler_task = async.running()
+    if request.target == "/pressure-prime" then
+      -- A real keep-alive response consumes the previously advertised TCP
+      -- window. Only one bounded body chunk is submitted at a time. The
+      -- caller acknowledges a persistently unresolved chunk, then asks this
+      -- handler to stop after that chunk and the ordinary chunk terminator.
+      local sockets, profile = constrain_owned_sockets(true, false)
+      test.assert(sockets >= 3, "priming handler did not own both connected endpoints; " .. profile)
+      priming_profile = profile
+      priming = true
+      response:set_header("Connection", "keep-alive")
+      local chunk = string.rep("p", 4096)
+      do
+        while not stop_priming do
+          test.assert(priming_chunks < 2048,
+                      "HTTP priming exhausted its 8 MiB body ceiling without acknowledged pressure")
+          priming_chunks = priming_chunks + 1
+          priming_writing = true
+          response:write(chunk)
+          priming_writing = false
+          priming_bytes = priming_bytes + #chunk
+          async.yield()
+        end
+        response:close()
+        priming_closed = true
+      catch priming_failure = error; raise end
+      return
+    end
+    -- Stay below the intentional 64 KiB HTTP upgrade-output ceiling.
+    response:set_header("X-Opening-Pressure", string.rep("h", 55 * 1024))
+    entered = true
+    async.suspend(preflight)
+    accepting = true
+    opening_started = fixture_time_ms()
+    do
+      local connection = websocket.accept(request, response,
+        websocket.AcceptOptions { handshake_timeout = opening_timeout })
+      transferred = true
+      connection:close()
+    catch failure = error end
+    finished_at_ms = fixture_time_ms() - opening_started
+    if not cancel then timer.sleep(1); async.checkpoint() end
+    done = true
+  end
+  local listener, port = listen_http(handler, secure)
+  runtime_test.cleanup(function () listener:close() end)
+  local listener_sockets, listener_profile = constrain_owned_sockets(true, false)
+  test.assert(listener_sockets == 1,
+              "opening Runtime did not own exactly its listener before any TCP SYN; " .. listener_profile)
+  local serving = async.run<|value, value|>(function (): value listener:serve(); return nil end)
+  runtime_test.cleanup(function ()
+    listener:close()
+    task_support.cancel_and_join_task(serving, "blocked opening listener cleanup")
+  end)
+  local write_request: function (string): () = function (_bytes: string) raise "unset opening writer" end
+  local abort: function (): () = function () end
+  local preconnect_profile = ""
+  local setup_fired = false
+  local setup_started = fixture_time_ms()
+  local setup_watchdog = async.run<|value, value|>(function (): value
+    timer.sleep(8000)
+    setup_fired = true
+    abort()
+    listener:close()
+    if handler_task then
+      handler_task:cancel(async.CancellationReason.simple("HTTP priming setup watchdog"))
+    end
+    return nil
+  end)
+  task_support.cleanup_task(setup_watchdog, "HTTP priming setup watchdog cleanup")
+  -- Publish the current public abort capability before connect/handshake can
+  -- suspend, so the setup watchdog also bounds those initial native waits.
+  local publish_abort = function (close: function (): ()) abort = close end
+  if secure then
+    local tls, profile = verified_small_window_tls_peer(port, publish_abort)
+    preconnect_profile = profile
+    write_request = function (bytes: string) tls:write(bytes) end
+    abort = function () tls:abort() end
+  else
+    local tcp, profile = stopped_socket_peer(port, publish_abort)
+    preconnect_profile = profile
+    write_request = function (bytes: string) write_socket(tcp, bytes) end
+    abort = function () close_handle(tcp:as_handle_t()) end
+  end
+  runtime_test.cleanup(function ()
+    abort()
+    if handler_task then task_support.cancel_and_join_task(handler_task, "blocked opening handler cleanup") end
+  end)
+  local peer_socket = owned_connected_socket(nil, port)
+  -- Verified TLS is complete. Stop its native input before sending both
+  -- requests; no TLS read is performed after any ciphertext is discarded.
+  test.assert(uv.read_stop(peer_socket:as_stream_t()) >= 0)
+  write_request("GET /pressure-prime HTTP/1.1\r\nHost: localhost:" .. port ..
+                "\r\nConnection: keep-alive\r\n\r\n" .. opening_request(port))
+  while not priming and not setup_fired do timer.sleep(1) end
+  test.assert(priming and not setup_fired,
+              "ordinary HTTP priming handler was not acknowledged within its finite setup budget")
+  local server_socket = owned_connected_socket(port, nil)
+  local setup_diagnostic = function (): string
+    return string.format("elapsed_ms=%d chunks=%d completed_body=%d writing=%s closed=%s failure=%s handler=%s setup_watchdog=%s buffers=%s",
+      fixture_time_ms() - setup_started, priming_chunks, priming_bytes,
+      string.tostring(priming_writing), string.tostring(priming_closed), fixture_failure(priming_failure),
+      handler_task:status():as_string(), string.tostring(setup_fired), priming_profile)
+  end
+  local priming_pending = pending_output_bytes(server_socket)
+  local priming_since = 0
+  local previous_priming_pending = 0
+  local previous_priming_chunks = priming_chunks
+  while not setup_fired and priming_failure == nil do
+    if priming_pending > 0 and priming_writing and handler_task:status():as_string() == "waiting" then
+      if priming_pending < previous_priming_pending or priming_chunks ~= previous_priming_chunks then
+        priming_since = 0
+      end
+      if priming_since == 0 then priming_since = fixture_time_ms() end
+      if fixture_time_ms() - priming_since >= 250 then break end
+    else priming_since = 0 end
+    previous_priming_pending = priming_pending
+    previous_priming_chunks = priming_chunks
+    timer.sleep(10)
+    priming_pending = pending_output_bytes(server_socket)
+  end
+  local priming_pressure_ms = 0
+  if priming_since > 0 then priming_pressure_ms = fixture_time_ms() - priming_since end
+  test.assert(priming_pressure_ms >= 250 and priming_pending > 0 and priming_writing and
+              not setup_fired and priming_failure == nil,
+    string.format("HTTP priming did not establish stable unresolved accepted output: queue=%d pressure_ms=%d; %s",
+      priming_pending, priming_pressure_ms, setup_diagnostic()))
+  stop_priming = true
+  local frozen_priming_chunks = priming_chunks
+  -- Free only small native receive steps to finish the already pending chunk
+  -- and HTTP terminator. The next handler stays suspended at preflight, so
+  -- these reads cannot consume any 101 output. Every step has its own 100 ms
+  -- native timer. Freeze the submitted count, including the pending chunk:
+  -- completing it may require draining previously accepted body bytes beyond
+  -- the old fixed 256 KiB cap. Each 4096-byte body write has eight HTTP chunk
+  -- framing bytes and fits one TLS write piece; 1024 bytes conservatively
+  -- cover its framing/record overhead with the fixture's default TLS context.
+  -- Add a fixed 64 KiB for response headers, terminator and residual TLS
+  -- session output. The original 2048-chunk ceiling bounds this wire budget
+  -- to 10 MiB + 64 KiB; the unchanged setup watchdog also bounds release time.
+  local discarded = 0
+  local discard_steps = 0
+  local discard_limit = frozen_priming_chunks * (4096 + 1024) + 64 * 1024
+  while not entered and not setup_fired and priming_failure == nil do
+    local remaining = discard_limit - discarded
+    if remaining == 0 then
+      -- The last permitted native read may have released the pending HTTP
+      -- terminator, but its ACK/completion need not have run yet. Admit no
+      -- more reads; the existing setup watchdog bounds this final wait.
+      while not entered and not setup_fired and priming_failure == nil do timer.sleep(1) end
+      test.assert(entered and not setup_fired and priming_failure == nil,
+        string.format("priming release exhausted its frozen wire-byte ceiling: limit=%d frozen_chunks=%d discarded=%d; %s",
+          discard_limit, frozen_priming_chunks, discarded, setup_diagnostic()))
+      break
+    end
+    local step_bytes = 1024
+    if step_bytes > remaining then step_bytes = remaining end
+    discarded = discarded + discard_socket_step(peer_socket, step_bytes)
+    discard_steps = discard_steps + 1
+    timer.sleep(1)
+  end
+  test.assert(entered and priming_closed and not priming_writing and not setup_fired and
+              priming_failure == nil and priming_chunks == frozen_priming_chunks and
+              pending_output_bytes(server_socket) == 0,
+    string.format("priming release did not reach acknowledged Upgrade preflight: discarded=%d limit=%d frozen_chunks=%d steps=%d entered=%s; %s",
+      discarded, discard_limit, frozen_priming_chunks, discard_steps, string.tostring(entered), setup_diagnostic()))
+  test.assert(uv.read_stop(peer_socket:as_stream_t()) >= 0)
+  setup_watchdog:cancel(async.CancellationReason.simple("HTTP priming setup completed"))
+  async.join(setup_watchdog)
+  -- A completed TCP connect does not promise delivery of the listener's
+  -- accepted callback. The handler acknowledgment proves the server exists.
+  local initial_sockets, initial_profile = constrain_owned_sockets(true, false)
+  initial_profile = "listener_before_SYN=" .. listener_profile .. " client_before_SYN=" ..
+                    preconnect_profile .. " after_request_ack=" .. initial_profile ..
+                    string.format(" priming(queue=%d pressure_ms=%d chunks=%d body=%d discarded=%d limit=%d frozen_chunks=%d steps=%d setup_ms=%d)",
+                      priming_pending, priming_pressure_ms, priming_chunks, priming_bytes,
+                      discarded, discard_limit, frozen_priming_chunks, discard_steps, fixture_time_ms() - setup_started)
+  test.assert(initial_sockets >= 3,
+              "isolated opening runtime did not own both peers and listener after request acknowledgment; " .. initial_profile)
+  local stopped_sockets, stopped_profile = constrain_owned_sockets(true, true)
+  test.assert(stopped_sockets >= 3, "stopped opening runtime lost owned TCP handles; " .. stopped_profile)
+  local watchdog_fired = false
+  local watchdog = async.run<|value, value|>(function (): value
+    timer.sleep(5000)
+    watchdog_fired = true
+    -- Closing this public peer forces native accepted output to retire before
+    -- any fixture joins, even if production cancellation/deadline is broken.
+    abort()
+    listener:close()
+    return nil
+  end)
+  task_support.cleanup_task(watchdog, "blocked opening watchdog cleanup")
+  handler_task:resume(preflight)
+  while not accepting do async.yield() end
+  local pending = pending_output_bytes(server_socket)
+  while pending == 0 and not done do
+    async.yield()
+    pending = pending_output_bytes(server_socket)
+  end
+  test.assert(pending > 0 and not done and not transferred and
+              handler_task:status():as_string() == "waiting",
+    string.format("platform buffered the entire bounded 101; no accepted native output was pending: status=%s actual=%s queue=%d done=%s transferred=%s elapsed_ms=%d budget_ms=%d watchdog=%s initial_buffers=%s stopped_buffers=%s",
+      handler_task:status():as_string(), fixture_failure(failure), pending, string.tostring(done),
+      string.tostring(transferred), fixture_time_ms() - opening_started, opening_timeout,
+      string.tostring(watchdog_fired), initial_profile, stopped_profile))
+  pending_at_ms = fixture_time_ms() - opening_started
+  gc.collect()
+  if cancel then
+    local reason = async.CancellationReason.simple("cancel accepted native 101 output")
+    cancel_at_ms = fixture_time_ms() - opening_started
+    local before_status = handler_task:status():as_string()
+    handler_task:cancel(reason)
+    async.join(handler_task)
+    test.assert(handler_task:status():has_cancelled() and failure == reason,
+      string.format("server opening cancellation lost its original reason: status=%s before_cancel=%s actual=%s same_reason=%s pending=%d pending_at_ms=%d cancel_at_ms=%d joined_at_ms=%d finished_at_ms=%d budget_ms=%d watchdog=%s transferred=%s initial_buffers=%s stopped_buffers=%s",
+        handler_task:status():as_string(), before_status, fixture_failure(failure),
+        string.tostring(failure == reason), pending, pending_at_ms, cancel_at_ms,
+        fixture_time_ms() - opening_started, finished_at_ms, opening_timeout,
+        string.tostring(watchdog_fired), string.tostring(transferred), initial_profile, stopped_profile))
+  else
+    while not done do async.yield() end
+    do
+      assert_succeeded(handler_task, "server opening timeout wrapper")
+      assert_ws_error(failure, "timeout", "websocket.open", nil)
+    catch
+      raise string.format("server opening timeout oracle failed: assertion=%s actual=%s status=%s pending=%d pending_at_ms=%d finished_at_ms=%d joined_at_ms=%d budget_ms=%d transferred=%s watchdog=%s initial_buffers=%s stopped_buffers=%s",
+        fixture_failure(error), fixture_failure(failure), handler_task:status():as_string(), pending,
+        pending_at_ms, finished_at_ms, fixture_time_ms() - opening_started, opening_timeout,
+        string.tostring(transferred), string.tostring(watchdog_fired), initial_profile, stopped_profile)
+    end
+  end
+  test.assert(not transferred and not watchdog_fired,
+    string.format("blocked 101 transferred ownership or failed bounded retirement: status=%s actual=%s pending=%d pending_at_ms=%d finished_at_ms=%d joined_at_ms=%d budget_ms=%d transferred=%s watchdog=%s initial_buffers=%s stopped_buffers=%s",
+      handler_task:status():as_string(), fixture_failure(failure), pending, pending_at_ms,
+      finished_at_ms, fixture_time_ms() - opening_started, opening_timeout,
+      string.tostring(transferred), string.tostring(watchdog_fired), initial_profile, stopped_profile))
+  watchdog:cancel(async.CancellationReason.simple("blocked opening test completed"))
+  async.join(watchdog)
+  abort()
+end
+
+function test_server_opening_aborts_pending_101_before_transfer(context: test.Context)
+  context:run("ws_timeout", function (_child: test.Context)
+    runtime_test.run(function () blocked_server_opening_case(false, false) end)
+  end)
+  context:run("wss_timeout", function (_child: test.Context)
+    runtime_test.run(function () blocked_server_opening_case(true, false) end)
+  end)
+  context:run("ws_cancel", function (_child: test.Context)
+    runtime_test.run(function () blocked_server_opening_case(false, true) end)
+  end)
+  context:run("wss_cancel", function (_child: test.Context)
+    runtime_test.run(function () blocked_server_opening_case(true, true) end)
+  end)
+end

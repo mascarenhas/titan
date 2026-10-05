@@ -399,3 +399,12 @@ Task, drives the Runtime until every Task and native cleanup has retired, then
 returns the first requested exit code, main's successful integer, or failure
 status. Explicit-drive clients continue to use `--no-uv-bootstrap` and pair
 `run` with `loop` themselves.
+
+### Supervised error handoff
+
+The public `async.Error:raise()` method uses the existing runtime error-handoff
+helper: install the captured trace with the runtime's pinned-trace marker, then
+raise the original value. Domain supervisors can retain an ordinary `Error`
+carrier during cancellation-insensitive cleanup and propagate it after abort
+and drain without losing child-operation frames or reporting an uncaught
+internal worker failure. This adds no new Lua/native boundary.

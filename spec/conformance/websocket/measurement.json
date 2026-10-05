@@ -1,0 +1,83 @@
+{
+  "accepted_evidence_archive_filename": "20261004T075227Z-16651ca98b.accepted.tar.gz",
+  "accepted_final_production": true,
+  "archive_bytes": 2414453,
+  "archive_filename": "20261004T075227Z-16651ca98b.tar.gz",
+  "archive_sha256": "765f0c6ac19434ea38b93d3669e5ed1861eea51280e6035dffdfe74687c6d842",
+  "budgets": {
+    "case_timeout_seconds": 600,
+    "evidence_limit_bytes": 104857600,
+    "run_timeout_seconds": 900
+  },
+  "classification": "accepted final production conformance (provider5)",
+  "compile_argv_sha256": "c2f0063b8e8e25c5c2eb52790e33dfb2547869e6d1c579bd288f8fad5cac29a8",
+  "compile_wall_seconds": 7.835909402987454,
+  "evidence_bytes_before_archive": 22529265,
+  "gate": "Autobahn uncompressed base cases in both roles",
+  "native_source_commit": "b56e0688e9cde4be375b4c563006b828749bb855",
+  "notes": [
+    "All 301 selected cases executed in each role; only the exact 216 compression cases in families 12/13 excluded.",
+    "Both behavior and behaviorClose strictly accepted; informational cases exactly 7.1.6, 7.13.1 and 7.13.2 per role.",
+    "Final production HTTP amendment 2bf8 and native corpus b56 exact source keys matched before and after all 602 cases.",
+    "Timing measured on a busy host with other integration gates; no quiet-window benchmark or performance-score threshold.",
+    "RSS is sampled Titan process RSS, excluding container memory and not a retained-memory measurement.",
+    "600 seconds per case preserves the pinned suite\u2019s 480-second deadlines; 900 seconds per role and 100 MiB of evidence retain diagnostic margin.",
+    "All owned groups and containers absent; provider5 hold released after strict report, source, provider and archive verification."
+  ],
+  "owner_provider_source_commit": "2bf8aae5cdb599173cfd67a640209840a7a81e1f",
+  "prefix_hold_released": true,
+  "production_snapshot_audit_counts": {
+    "generated_units": 46,
+    "native_inputs": 15,
+    "production_sources": 98,
+    "websocket_native_sources": 10
+  },
+  "production_source_commit": "2bf8aae5cdb599173cfd67a640209840a7a81e1f",
+  "provider_archive_sha256": "78e462767fe6af88f614b31c9aa3a037b601749e66661a4217105c32bac85c71",
+  "provider_receipt_sha256": "e623486c33aee206454ddc1c047a8b74974c7748d06153aced7e8ff082c57792",
+  "provider_sha256": "ba0e5cdfcb6124dcbdd88ff40d18d26b6153311763b7a63999d3d4d98ceea4c1",
+  "roles": {
+    "client": {
+      "agent": "titan-client-ba0e5cdfcb61-20261004t075227z-16651ca98b",
+      "informational": [
+        "7.1.6",
+        "7.13.1",
+        "7.13.2"
+      ],
+      "max_case_duration_ms": 1007,
+      "passed": true,
+      "report_files": {
+        "html": 302,
+        "json": 302
+      },
+      "role_wall_seconds": 30.826515299035236,
+      "sampled_titan_peak_rss_bytes": 176357376,
+      "selected": 301,
+      "sum_case_duration_ms": 16384
+    },
+    "server": {
+      "agent": "titan-server-ba0e5cdfcb61-20261004t075227z-16651ca98b",
+      "informational": [
+        "7.1.6",
+        "7.13.1",
+        "7.13.2"
+      ],
+      "max_case_duration_ms": 1046,
+      "passed": true,
+      "report_files": {
+        "html": 302,
+        "json": 302
+      },
+      "role_wall_seconds": 27.36109152698191,
+      "sampled_titan_peak_rss_bytes": 167698432,
+      "selected": 301,
+      "sum_case_duration_ms": 13896
+    }
+  },
+  "run_id": "20261004T075227Z-16651ca98b",
+  "schema": 1,
+  "source_commit": "c8409fd11e5bfa3798642e738ed38b95e680ea32",
+  "summary_sha256": "29957663e9261b68711f8fdc5e6dc04a3ee4daeab7615b069df6025909ba01e9",
+  "verification_sha256": "4a44de0f44696c1356fef9d504c8b86f504956431212d4b9e173509fe915d558",
+  "wall_seconds": 68.28685884794686
+}

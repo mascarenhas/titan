@@ -367,25 +367,28 @@ UV_TITAN_HEADERS := \
 	titan/uv/work-native-proposal.h
 STDLIB_HTTP_SOURCES := titan/http/http.titan titan/http/client.titan \
 	titan/http/headers.titan titan/http/native.titan \
-	titan/http/server.titan
+	titan/http/server.titan titan/http/upgrade.titan
 SQLITE3_TITAN_SOURCES := titan/sqlite3/sqlite3.titan titan/sqlite3/bindings.titan \
 	titan/sqlite3/row.titan titan/sqlite3/worker.titan
 SQLITE3_TITAN_HEADERS := titan/sqlite3/native.h
 STRING_TITAN_HEADERS := titan/string/format_native.h
+WEBSOCKET_TITAN_SOURCES := titan/websocket/websocket.titan titan/websocket/handshake.titan \
+	titan/websocket/connection.titan titan/websocket/frames.titan \
+	titan/websocket/utf8.titan titan/websocket/native.titan
 JSON_TITAN_SOURCES := titan/json/json.titan titan/json/parser.titan \
 	titan/json/decoder.titan titan/json/writer.titan titan/json/numbers.titan
-STDLIB_MODULES := coroutine uv async timer io fs net ssl url http os peg string \
+STDLIB_MODULES := coroutine uv async timer io fs net ssl url http websocket os peg string \
 	math lua iteration gc test reflect sqlite3 json
 STDLIB_SOS     := $(addsuffix .so,$(STDLIB_MODULES))
 STDLIB_QUALIFIED_SOS := $(addprefix titan/,$(STDLIB_SOS))
 STDLIB_ROOTS := titan.coroutine titan.uv titan.async titan.timer \
-	titan.io titan.fs titan.net titan.ssl titan.url titan.http titan.os \
+	titan.io titan.fs titan.net titan.ssl titan.url titan.http titan.websocket titan.os \
 	titan.peg titan.string \
 	titan.math titan.lua titan.iteration titan.gc titan.test titan.reflect titan.sqlite3 titan.json
 STDLIB_TITAN_SOURCES := titan/coroutine.titan $(UV_TITAN_SOURCES) \
 	titan/async.titan titan/timer.titan titan/io.titan titan/fs.titan \
 	titan/net.titan titan/ssl.titan titan/url.titan \
-	$(STDLIB_HTTP_SOURCES) titan/os.titan \
+	$(STDLIB_HTTP_SOURCES) $(WEBSOCKET_TITAN_SOURCES) titan/os.titan \
 	titan/peg/peg.titan titan/peg/combinators.titan \
 	titan/peg/native.titan \
 	titan/peg/relabel.titan titan/peg/relabel_parser.titan \
@@ -397,8 +400,8 @@ STDLIB_TITAN_SOURCES := titan/coroutine.titan $(UV_TITAN_SOURCES) \
 	titan/test.titan titan/reflect.titan $(SQLITE3_TITAN_SOURCES) \
 	$(JSON_TITAN_SOURCES)
 STDLIB_GENERATED_FFI_HEADERS := $(addsuffix .ffi.h, \
-	$(addprefix titan/,$(filter-out uv http peg string sqlite3 json,$(STDLIB_MODULES))) \
-	titan/uv/uv titan/http/http titan/peg/peg titan/string/string \
+	$(addprefix titan/,$(filter-out uv http websocket peg string sqlite3 json,$(STDLIB_MODULES))) \
+	titan/uv/uv titan/http/http titan/websocket/websocket titan/peg/peg titan/string/string \
 	titan/sqlite3/sqlite3 titan/json/json)
 STDLIB_GENERATED_FOREIGN_HEADERS := $(STDLIB_GENERATED_FFI_HEADERS) \
 	titan/coroutine.titan.h \
@@ -409,6 +412,7 @@ STDLIB_GENERATED_FOREIGN_HEADERS := $(STDLIB_GENERATED_FFI_HEADERS) \
 # titanc's object fast path deliberately does not track dependency freshness.
 STDLIB_STEM_uv := titan/uv/uv
 STDLIB_STEM_http := titan/http/http
+STDLIB_STEM_websocket := titan/websocket/websocket
 STDLIB_STEM_peg := titan/peg/peg
 STDLIB_STEM_string := titan/string/string
 STDLIB_STEM_sqlite3 := titan/sqlite3/sqlite3
@@ -423,9 +427,10 @@ STDLIB_IMPORTS_timer := async uv
 STDLIB_IMPORTS_io := os string
 STDLIB_IMPORTS_fs := async uv string
 STDLIB_IMPORTS_net := async uv string
-STDLIB_IMPORTS_ssl := async fs net string gc
+STDLIB_IMPORTS_ssl := async fs net string gc uv
 STDLIB_IMPORTS_url := peg string
 STDLIB_IMPORTS_http := async io math net ssl string timer url uv
+STDLIB_IMPORTS_websocket := async gc http io iteration net ssl string timer url uv
 STDLIB_IMPORTS_os := async uv iteration string
 STDLIB_IMPORTS_peg := gc
 STDLIB_IMPORTS_string := peg gc
@@ -439,7 +444,7 @@ STDLIB_IMPORTS_sqlite3 := async uv reflect string math
 STDLIB_IMPORTS_json := reflect string math peg iteration
 STDLIB_SHIMS := titan/coroutine.lua titan/uv.lua titan/async.lua \
 	titan/timer.lua titan/io.lua titan/fs.lua titan/net.lua titan/ssl.lua \
-	titan/url.lua titan/http.lua titan/os.lua \
+	titan/url.lua titan/http.lua titan/websocket.lua titan/os.lua \
 	titan/peg.lua titan/string.lua titan/math.lua titan/lua.lua \
 	titan/iteration.lua titan/gc.lua titan/test.lua titan/reflect.lua titan/sqlite3.lua titan/json.lua
 STDLIB_CONTAINER := titan.so
@@ -2152,6 +2157,7 @@ STDLIB_C_INPUTS_peg = $(LPEGLABEL_HEADERS)
 STDLIB_C_INPUTS_string = $(STRING_TITAN_HEADERS)
 STDLIB_C_INPUTS_http = $(LLHTTP_HEADER)
 STDLIB_C_INPUTS_ssl = $(foreach dir,$(STDLIB_OPENSSL_HEADER_DIRS),$(wildcard $(dir)/openssl/*.h))
+STDLIB_C_INPUTS_websocket = $(foreach dir,$(STDLIB_OPENSSL_HEADER_DIRS),$(wildcard $(dir)/openssl/*.h))
 STDLIB_C_INPUTS_sqlite3 = $(SQLITE3_HEADER) $(SQLITE3_TITAN_HEADERS)
 
 # The command is identical for object builds and the final link. Only the
@@ -2290,7 +2296,7 @@ $(STDLIB_CONFIG_STAMP): FORCE $(STDLIB_NATIVE_IDENTITY_PREREQS)
 
 # FORCE runs the inexpensive completeness check on every invocation. The
 # final link runs only when an object/input changed or a public output is
-# absent. All twenty-one objects supply their metadata to this one paired
+# absent. All twenty-two objects supply their metadata to this one paired
 # provider. The warm check rescans the archive without rewriting either output.
 $(STDLIB_COMPLETION_STAMP): FORCE $(STDLIB_MODULE_OBJECTS) \
 		$(STDLIB_COMPILER_PREREQS) $(STDLIB_CONFIG_STAMP) \
@@ -2399,7 +2405,7 @@ include $(TITAN_TEST_MODULE_MANIFEST)
 TITAN_TEST_BUILD_DIR ?= .titan-tests
 TITAN_TEST_EXECUTABLE := $(TITAN_TEST_BUILD_DIR)/$(TITAN_STDLIB_TEST_PROGRAM_OUTPUT)
 # The suite deadline includes fresh child-fixture compilation at the selected
-# optimization level, including Linux LTO, across all 26 test roots.
+# optimization level, including Linux LTO, across all 27 test roots.
 # Focused gates may set a lower bound.
 TITAN_TEST_TIMEOUT ?= 600
 TEST_TITANC ?= titanc
@@ -2637,6 +2643,7 @@ clean: ## Remove generated build/test artifacts (keeps the Lua tree)
 	rm -f titan/*.c titan/*.o
 	rm -f titan/uv/*.c titan/uv/*.o
 	rm -f titan/http/http.c titan/http/http.o
+	rm -f titan/websocket/websocket.c titan/websocket/websocket.o
 	rm -f titan/peg/peg.c titan/peg/peg.o
 	rm -f titan/string/string.c titan/string/string.o
 	rm -f titan/json/json.c titan/json/json.o

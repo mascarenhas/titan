@@ -14,14 +14,17 @@ foreign import "titan/ffi.h"
 
 local function parse_url_or_raise(source: string): url.Url
   local parsed?, parse_error? = url.parse(source)
-  if parse_error then raise parse_error as url.Error end
-  return parsed as url.Url
+  if parse_error then raise parse_error end
+  if parsed.scheme ~= "http" and parsed.scheme ~= "https" then
+    raise url.Error(1, "scheme", "HTTP requires an http or https URL")
+  end
+  return parsed
 end
 
 local function parse_request_url_or_raise(
     scheme: string, authority: string, target: string): url.Url
   local parsed?, parse_error? =
     url.parse_request(scheme, authority, target)
-  if parse_error then raise parse_error as url.Error end
-  return parsed as url.Url
+  if parse_error then raise parse_error end
+  return parsed
 end

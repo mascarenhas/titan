@@ -1,4 +1,5 @@
 local async = import "async"
+local uv = import "uv"
 local fs = import "fs"
 local net = import "net"
 local string = import "string"
@@ -19,6 +20,7 @@ local STATE_OPEN = "open"
 local STATE_WRITE_SHUTDOWN = "write-shutdown"
 local STATE_PEER_CLOSED = "peer-closed"
 local STATE_SHUTDOWN = "shutdown"
+local STATE_TERMINATING = "terminating"
 local STATE_FAILED = "failed"
 local STATE_CLOSED = "closed"
 
@@ -61,6 +63,35 @@ record Error
   operation: string
 end
 
+local union OperationResult
+  success(string?)
+  failure(async.Error)
+end
+
+local record ProgressWait
+  task: async.Task<|value, value|>
+  token: async.ResumeToken
+end
+
+-- Admission belongs to the public parent until its epilogue. Engine access
+-- belongs to the internal child and retires before shared cleanup can settle.
+local record Operation
+  kind: string
+  engine_live: boolean
+  child: async.Task<|OperationResult, value|>?
+  progress: ProgressWait?
+end
+
+local record CleanupWait
+  done: async.Completion<|Connection, value, value|>
+  number: integer
+end
+
+local record ChildDrain
+  child: async.Task<|OperationResult, value|>
+  remove: (function (): ())?
+end
+
 record Connection
   local transport: net.Connection
   local handle: foreign *SSL
@@ -68,7 +99,14 @@ record Connection
   local output: foreign *BIO
   local client: boolean
   local state: string
-  local busy: boolean
+  local reader: Operation?
+  local writer: Operation?
+  local control: Operation?
+  local handshaker: Operation?
+  local feeder: Operation?
+  local retry: Operation?
+  local cleanup_waiters: {CleanupWait}
+  local scope_waiters: {CleanupWait}
   local transport_eof: boolean
   local transport_shutdown: boolean
   local transport_closed: boolean
@@ -262,61 +300,276 @@ local function close_transport(connection: Connection)
   connection.transport_closed = true
 end
 
-local function fail_connection(connection: Connection, failure: value)
-  connection.state = STATE_FAILED
-  free_engine(connection)
-  -- Transport close is cancellation-insensitive and still runs for a Task
-  -- with pending cancellation. Preserve the original TLS failure if the close
-  -- itself reports a transport error.
-  do
-    close_transport(connection)
-  catch
-  end
-  raise failure
-end
-
-local function begin_operation(connection: Connection,
-                               operation: string): boolean
-  if connection.state == STATE_CLOSED then return false end
-  if connection.busy then
-    raise operation .. ": SSL Connection already has an operation in progress"
-  end
-  connection.busy = true
-  return true
+local function interrupted(operation: string): Error
+  return Error {code = 0, name = "TLS_INTERRUPTED",
+    message = "TLS Connection was interrupted", operation = operation}
 end
 
 local function require_engine(connection: Connection, operation: string)
-  if connection.state == STATE_FAILED then
-    raise operation .. ": SSL Connection has failed"
-  end
-  if not connection.handle then
-    raise operation .. ": SSL Connection is closed"
+  if connection.state == STATE_TERMINATING or not connection.handle then
+    raise interrupted(operation)
   end
 end
 
-local function drain_output(connection: Connection): integer
-  local total = 0
-  local pending = ffi.BIO_ctrl_pending(connection.output) as integer
-  while pending > 0 do
-    local requested = pending
-    if requested > TLS_RECORD_BYTES then requested = TLS_RECORD_BYTES end
-    local buffer = foreign char.new_array(requested)
-    local lengths = foreign size_t.new_array(1)
-    lengths[0] = 0 as foreign size_t
-    ffi.ERR_clear_error()
-    local ok = ffi.BIO_read_ex(
-        connection.output, buffer,
-        requested as foreign size_t, lengths)
-    if ok ~= 1 or lengths[0] == 0 then
-      raise openssl_error("ssl.output.read",
-                          "failed to drain the TLS output BIO")
-    end
-    local length = lengths[0] as integer
-    connection.transport:write(bytes_string(buffer, length))
-    total = total + length
-    pending = ffi.BIO_ctrl_pending(connection.output) as integer
+local function wake_operation(operation: Operation?)
+  if operation == nil then return end
+  local waiter? = operation.progress
+  operation.progress = nil
+  if waiter ~= nil then waiter.task:resume(waiter.token) end
+end
+
+local function wake_progress(connection: Connection)
+  wake_operation(connection.reader)
+  wake_operation(connection.writer)
+  wake_operation(connection.control)
+end
+
+local function wait_progress(connection: Connection, operation: Operation)
+  require_engine(connection, "ssl." .. operation.kind)
+  local waiter = ProgressWait(async.running(), async.ResumeToken.new("ssl.progress"))
+  operation.progress = waiter
+  local detach = function ()
+    if operation.progress == waiter then operation.progress = nil end
   end
-  return total
+  defer detach()
+  async.suspend(waiter.token, detach)
+  require_engine(connection, "ssl." .. operation.kind)
+end
+
+local function scopes_retired(connection: Connection): boolean
+  return (connection.reader == nil or not connection.reader.engine_live) and
+         (connection.writer == nil or not connection.writer.engine_live) and
+         (connection.control == nil or not connection.control.engine_live)
+end
+
+local function settle_cleanup(waiters: {CleanupWait})
+  for index = 1, #waiters do
+    local waiter = waiters[index]
+    waiter.done:resolve(waiter.number, nil)
+  end
+end
+
+local function retire_scope(connection: Connection, operation: Operation)
+  operation.engine_live = false
+  operation.progress = nil
+  if connection.handshaker == operation then connection.handshaker = nil end
+  if connection.feeder == operation then connection.feeder = nil end
+  if connection.retry == operation then connection.retry = nil end
+  wake_progress(connection)
+  if scopes_retired(connection) and #connection.scope_waiters > 0 then
+    local waiters = connection.scope_waiters
+    connection.scope_waiters = {}
+    settle_cleanup(waiters)
+  end
+end
+
+local function start_cleanup(done: async.Completion<|Connection, value, value|>,
+                             number: integer): uv.req_t?
+  local connection = done:context(number)
+  if connection.state == STATE_CLOSED or connection.state == STATE_FAILED then done:resolve(number, nil)
+  else
+    connection.cleanup_waiters[#connection.cleanup_waiters + 1] = CleanupWait(done, number)
+  end
+  return nil
+end
+
+local function start_scopes(done: async.Completion<|Connection, value, value|>,
+                            number: integer): uv.req_t?
+  local connection = done:context(number)
+  if scopes_retired(connection) then done:resolve(number, nil)
+  else connection.scope_waiters[#connection.scope_waiters + 1] = CleanupWait(done, number) end
+  return nil
+end
+
+local function cancel_operation(operation: Operation?)
+  if operation ~= nil and operation.child ~= nil and
+     (operation.child as async.Task<|value, value|>) ~= async.running() then
+    operation.child:cancel(async.CancellationReason.simple("TLS transport retirement"))
+  end
+end
+
+-- This core never joins an internal Task: its child may be waiting for this
+-- very completion. Only engine-scope retirement is the quiescence condition.
+local function terminate(connection: Connection, graceful: boolean)
+  if connection.state == STATE_CLOSED or connection.state == STATE_FAILED then return end
+  if connection.state == STATE_TERMINATING then
+    async.await_cleanup_with(connection, start_cleanup)
+    return
+  end
+  connection.state = STATE_TERMINATING
+  wake_progress(connection)
+  cancel_operation(connection.reader)
+  cancel_operation(connection.writer)
+  cancel_operation(connection.control)
+  do close_transport(connection) catch end
+  if not scopes_retired(connection) then
+    async.await_cleanup_with(connection, start_scopes)
+  end
+  free_engine(connection)
+  if graceful then connection.state = STATE_CLOSED
+  else connection.state = STATE_FAILED end
+  local waiters = connection.cleanup_waiters
+  connection.cleanup_waiters = {}
+  settle_cleanup(waiters)
+end
+
+local function start_child_drain(
+    done: async.Completion<|ChildDrain, async.TaskStatus<|OperationResult, value|>, value|>,
+    number: integer): uv.req_t?
+  local drain = done:context(number)
+  drain.remove = drain.child:add_terminal_listener(function (
+      status: async.TaskStatus<|OperationResult, value|>)
+    done:resolve(number, status)
+  end)
+  local status = drain.child:status()
+  if status:has_finished() then done:resolve(number, status) end
+  return nil
+end
+
+local function drain_child(child: async.Task<|OperationResult, value|>)
+  if child:status():has_finished() then return end
+  local drain = ChildDrain(child, nil)
+  defer (function () if drain.remove ~= nil then drain.remove() end end)()
+  async.await_cleanup_with(drain, start_child_drain)
+end
+
+local function begin_operation(connection: Connection, kind: string): Operation?
+  if connection.state == STATE_CLOSED then return nil end
+  if connection.state == STATE_TERMINATING or connection.state == STATE_FAILED then
+    raise interrupted("ssl." .. kind)
+  end
+  if connection.control ~= nil or
+     (kind == "read" and connection.reader ~= nil) or
+     (kind == "write" and connection.writer ~= nil) or
+     (kind ~= "read" and kind ~= "write" and
+      (connection.reader ~= nil or connection.writer ~= nil)) then
+    raise "ssl." .. kind .. ": SSL Connection already has an operation in progress"
+  end
+  if kind == "write" and
+     (connection.state == STATE_WRITE_SHUTDOWN or
+      connection.state == STATE_PEER_CLOSED or connection.state == STATE_SHUTDOWN) then
+    raise "ssl.write: SSL Connection is shutting down"
+  end
+  local operation = Operation(kind, false, nil, nil)
+  if kind == "read" then connection.reader = operation
+  elseif kind == "write" then connection.writer = operation
+  else connection.control = operation end
+  return operation
+end
+
+local function release_operation(connection: Connection, operation: Operation)
+  if connection.reader == operation then connection.reader = nil end
+  if connection.writer == operation then connection.writer = nil end
+  if connection.control == operation then connection.control = nil end
+  wake_progress(connection)
+end
+
+local function supervise(connection: Connection, operation: Operation,
+                          body: function (): (string?)): string?
+  defer release_operation(connection, operation)
+  local child = async.run<|OperationResult, value|>(function (): OperationResult
+    do
+      if connection.state == STATE_TERMINATING or connection.state == STATE_CLOSED or
+         connection.state == STATE_FAILED then
+        raise interrupted("ssl." .. operation.kind)
+      end
+      operation.engine_live = true
+      local result? = body()
+      retire_scope(connection, operation)
+      return OperationResult.success(result)
+    catch
+      local failure = async.Error(error, traceback)
+      retire_scope(connection, operation)
+      terminate(connection, false)
+      return OperationResult.failure(failure)
+    end
+  end)
+  operation.child = child
+  local parent = async.running()
+  local token = async.ResumeToken.new("ssl.operation")
+  local waiting = false
+  local remove = child:add_terminal_listener(function (_: async.TaskStatus<|OperationResult, value|>)
+    if waiting then
+      waiting = false
+      parent:resume(token)
+    end
+  end)
+  defer remove()
+  do
+    if not child:status():has_finished() then
+      waiting = true
+      local detach = function () waiting = false end
+      async.suspend(token, detach)
+    end
+  catch
+    local failure = async.Error(error, traceback)
+    waiting = false
+    child:cancel(async.CancellationReason.simple("TLS operation cancelled"))
+    terminate(connection, false)
+    drain_child(child)
+    failure:raise()
+  end
+  drain_child(child)
+  case child:status()
+  when succeeded(result) then
+    case result
+    when success(bytes) then return bytes
+    when failure(failure) then failure:raise()
+    end
+  when failed(failure) then failure:raise()
+  when cancelled(_) then raise interrupted("ssl." .. operation.kind)
+  else raise "SSL child did not finish"
+  end
+  return nil
+end
+
+local function engine_gate(connection: Connection, operation: Operation)
+  require_engine(connection, "ssl." .. operation.kind)
+  while connection.retry ~= nil and connection.retry ~= operation do
+    wait_progress(connection, operation)
+  end
+end
+
+local function retry_owner(connection: Connection, operation: Operation, code: integer)
+  if code == ffi.SSL_ERROR_WANT_WRITE then connection.retry = operation
+  elseif connection.retry == operation then
+    connection.retry = nil
+    wake_progress(connection)
+  end
+end
+
+-- Detach the entire step's output without yielding, then submit exactly one
+-- immutable batch. net.write accepts before its first suspension, preserving
+-- engine-step submission order across independently progressing directions.
+local function drain_output(connection: Connection): integer
+  require_engine(connection, "ssl.output")
+  local pending = ffi.BIO_ctrl_pending(connection.output) as integer
+  if pending == 0 then return 0 end
+  local buffer: owned char[] = foreign char.new_array(pending)
+  local lengths = foreign size_t.new_array(1)
+  lengths[0] = 0 as foreign size_t
+  ffi.ERR_clear_error()
+  local ok = ffi.BIO_read_ex(connection.output, buffer,
+                            pending as foreign size_t, lengths)
+  if ok ~= 1 or (lengths[0] as integer) ~= pending then
+    raise openssl_error("ssl.output.read", "failed to detach the TLS output BIO")
+  end
+  local batch = buffer as string
+  connection.transport:write(batch)
+  require_engine(connection, "ssl.output")
+  return pending
+end
+
+local function drain_step(connection: Connection, code: integer,
+                           failure: Error): integer
+  do return drain_output(connection)
+  catch
+    if code == ffi.SSL_ERROR_SSL or code == ffi.SSL_ERROR_SYSCALL then
+      raise failure
+    end
+    raise error
+  end
+  return 0
 end
 
 -- BIO_set_mem_eof_return is a public function-like macro unavailable to the
@@ -333,7 +586,17 @@ local function mark_transport_eof(connection: Connection)
   set_memory_bio_eof_return(connection.input, 0)
 end
 
-local function feed_input(connection: Connection, operation: string)
+local function feed_input(connection: Connection, owner: Operation, operation: string)
+  require_engine(connection, operation)
+  if connection.feeder ~= nil then
+    wait_progress(connection, owner)
+    return
+  end
+  connection.feeder = owner
+  defer (function ()
+    if connection.feeder == owner then connection.feeder = nil end
+    wake_progress(connection)
+  end)()
   if connection.transport_eof then return end
   local encrypted: string? = (function (
       connection: Connection, operation: string): string?
@@ -353,6 +616,7 @@ local function feed_input(connection: Connection, operation: string)
     end
     raise error
   end)(connection, operation)
+  require_engine(connection, operation)
   if not encrypted then
     mark_transport_eof(connection)
     return
@@ -376,13 +640,16 @@ local function feed_input(connection: Connection, operation: string)
   end
 end
 
-local function want_retry(connection: Connection, code: integer,
+local function want_retry(connection: Connection, owner: Operation, code: integer,
                           operation: string, drained: integer): boolean
   if code == ffi.SSL_ERROR_WANT_READ then
     if connection.transport_eof then
       raise truncated_eof_error(code, operation)
     end
-    feed_input(connection, operation)
+    if connection.state == STATE_PEER_CLOSED then
+      raise interrupted(operation)
+    end
+    feed_input(connection, owner, operation)
     return true
   elseif code == ffi.SSL_ERROR_WANT_WRITE then
     if drained == 0 then
@@ -398,55 +665,69 @@ local function want_retry(connection: Connection, code: integer,
   return false
 end
 
-local function handshake_locked(connection: Connection)
+local function handshake_locked(connection: Connection, owner: Operation)
+  while connection.state == STATE_HANDSHAKING and
+        connection.handshaker ~= nil and connection.handshaker ~= owner do
+    wait_progress(connection, owner)
+  end
   require_engine(connection, "ssl.handshake")
   if connection.state ~= STATE_HANDSHAKING then return end
+  connection.handshaker = owner
 
   while true do
+    engine_gate(connection, owner)
     ffi.ERR_clear_error()
     local result = ffi.SSL_do_handshake(connection.handle)
     if result == 1 then
-      drain_output(connection)
+      retry_owner(connection, owner, ffi.SSL_ERROR_NONE)
       if connection.client then
         local verification =
           ffi.SSL_get_verify_result(connection.handle) as integer
         if verification ~= ffi.X509_V_OK then
-          raise verify_error(verification)
+          local failure = verify_error(verification)
+          drain_step(connection, ffi.SSL_ERROR_SSL, failure)
+          raise failure
         end
       end
+      drain_output(connection)
       connection.state = STATE_OPEN
+      connection.handshaker = nil
+      wake_progress(connection)
       return
     end
 
     -- SSL_get_error must be the first OpenSSL call after the failed operation.
     local code = ffi.SSL_get_error(connection.handle, result) as integer
+    retry_owner(connection, owner, code)
+    local failure = operation_error(connection, code, "ssl.handshake")
     if connection.client then
       local verification =
         ffi.SSL_get_verify_result(connection.handle) as integer
       if verification ~= ffi.X509_V_OK then
-        raise verify_error(verification)
+        failure = verify_error(verification)
       end
     end
-    local failure = operation_error(connection, code, "ssl.handshake")
-    local drained = drain_output(connection)
-    if not want_retry(connection, code, "ssl.handshake", drained) then
+    local drained = drain_step(connection, code, failure)
+    if not want_retry(connection, owner, code, "ssl.handshake", drained) then
       raise failure
     end
   end
 end
 
-local function send_shutdown_locked(connection: Connection)
+local function send_shutdown_locked(connection: Connection, owner: Operation)
   if connection.state == STATE_WRITE_SHUTDOWN or
      connection.state == STATE_SHUTDOWN then return end
   require_engine(connection, "ssl.shutdown")
   if connection.state == STATE_HANDSHAKING then
-    handshake_locked(connection)
+    handshake_locked(connection, owner)
   end
 
   while true do
+    engine_gate(connection, owner)
     ffi.ERR_clear_error()
     local result = ffi.SSL_shutdown(connection.handle)
     if result >= 0 then
+      retry_owner(connection, owner, ffi.SSL_ERROR_NONE)
       drain_output(connection)
       if result == 1 or connection.state == STATE_PEER_CLOSED then
         connection.state = STATE_SHUTDOWN
@@ -457,8 +738,9 @@ local function send_shutdown_locked(connection: Connection)
     end
 
     local code = ffi.SSL_get_error(connection.handle, result) as integer
+    retry_owner(connection, owner, code)
     local failure = operation_error(connection, code, "ssl.shutdown")
-    local drained = drain_output(connection)
+    local drained = drain_step(connection, code, failure)
     if code == ffi.SSL_ERROR_WANT_READ then
       local flags = ffi.SSL_get_shutdown(connection.handle)
       if (flags & ffi.SSL_SENT_SHUTDOWN) ~= 0 then
@@ -466,7 +748,7 @@ local function send_shutdown_locked(connection: Connection)
         break
       end
     end
-    if not want_retry(connection, code, "ssl.shutdown", drained) then
+    if not want_retry(connection, owner, code, "ssl.shutdown", drained) then
       raise failure
     end
   end
@@ -477,7 +759,7 @@ local function send_shutdown_locked(connection: Connection)
   end
 end
 
-local function read_locked(connection: Connection): string?
+local function read_locked(connection: Connection, owner: Operation): string?
   require_engine(connection, "ssl.read")
   if #connection.excess > 0 then
     local result = connection.excess
@@ -486,10 +768,11 @@ local function read_locked(connection: Connection): string?
   end
   if connection.state == STATE_PEER_CLOSED or
      connection.state == STATE_SHUTDOWN then return nil end
-  handshake_locked(connection)
+  handshake_locked(connection, owner)
 
   local buffer = foreign char.new_array(TLS_RECORD_BYTES)
   while true do
+    engine_gate(connection, owner)
     local lengths = foreign size_t.new_array(1)
     lengths[0] = 0 as foreign size_t
     ffi.ERR_clear_error()
@@ -497,21 +780,30 @@ local function read_locked(connection: Connection): string?
         connection.handle, buffer,
         TLS_RECORD_BYTES as foreign size_t, lengths)
     if result == 1 then
+      retry_owner(connection, owner, ffi.SSL_ERROR_NONE)
       drain_output(connection)
       local length = lengths[0] as integer
       if length > 0 then return bytes_string(buffer, length) end
     else
       local code = ffi.SSL_get_error(connection.handle, result) as integer
       local failure = operation_error(connection, code, "ssl.read")
-      local drained = drain_output(connection)
+      retry_owner(connection, owner, code)
+      -- Peer EOF stops write admission before any output network wait.
       if code == ffi.SSL_ERROR_ZERO_RETURN then
         if connection.state == STATE_WRITE_SHUTDOWN then
           connection.state = STATE_SHUTDOWN
         else
           connection.state = STATE_PEER_CLOSED
         end
+        wake_progress(connection)
+      end
+      local drained = drain_step(connection, code, failure)
+      if code == ffi.SSL_ERROR_ZERO_RETURN then
+        while connection.writer ~= nil and connection.writer.engine_live do
+          wait_progress(connection, owner)
+        end
         do
-          send_shutdown_locked(connection)
+          send_shutdown_locked(connection, owner)
         catch
           local shutdown_failure = error
           -- Receipt of close_notify is authenticated EOF. If our reciprocal
@@ -528,7 +820,7 @@ local function read_locked(connection: Connection): string?
           end
         end
         return nil
-      elseif not want_retry(connection, code, "ssl.read", drained) then
+      elseif not want_retry(connection, owner, code, "ssl.read", drained) then
         raise failure
       end
     end
@@ -536,9 +828,10 @@ local function read_locked(connection: Connection): string?
   return nil
 end
 
-local function write_piece_locked(connection: Connection, piece: string)
+local function write_piece_locked(connection: Connection, owner: Operation, piece: string)
   local bytes = piece as foreign const *char
   while true do
+    engine_gate(connection, owner)
     local lengths = foreign size_t.new_array(1)
     lengths[0] = 0 as foreign size_t
     ffi.ERR_clear_error()
@@ -546,6 +839,7 @@ local function write_piece_locked(connection: Connection, piece: string)
         connection.handle, bytes,
         #piece as foreign size_t, lengths)
     if result == 1 then
+      retry_owner(connection, owner, ffi.SSL_ERROR_NONE)
       if (lengths[0] as integer) ~= #piece then
         raise Error {
           code = 0,
@@ -560,29 +854,30 @@ local function write_piece_locked(connection: Connection, piece: string)
 
     -- Keep `piece`, its pointer, and its exact length unchanged across retry.
     local code = ffi.SSL_get_error(connection.handle, result) as integer
+    retry_owner(connection, owner, code)
     local failure = operation_error(connection, code, "ssl.write")
-    local drained = drain_output(connection)
-    if not want_retry(connection, code, "ssl.write", drained) then
+    local drained = drain_step(connection, code, failure)
+    if not want_retry(connection, owner, code, "ssl.write", drained) then
       raise failure
     end
   end
 end
 
-local function write_locked(connection: Connection, data: string)
+local function write_locked(connection: Connection, owner: Operation, data: string)
   require_engine(connection, "ssl.write")
   if connection.state == STATE_WRITE_SHUTDOWN or
      connection.state == STATE_SHUTDOWN or
      connection.state == STATE_PEER_CLOSED then
     raise "ssl.write: SSL Connection is shutting down"
   end
-  handshake_locked(connection)
+  handshake_locked(connection, owner)
 
   local offset = 1
   while offset <= #data do
     local last = offset + TLS_RECORD_BYTES - 1
     if last > #data then last = #data end
     local piece = string.sub(data, offset, last)
-    write_piece_locked(connection, piece)
+    write_piece_locked(connection, owner, piece)
     offset = last + 1
   end
 end
@@ -628,7 +923,9 @@ local function new_connection(transport: net.Connection,
     output = output,
     client = client,
     state = STATE_HANDSHAKING,
-    busy = false,
+    reader = nil, writer = nil, control = nil,
+    handshaker = nil, feeder = nil, retry = nil,
+    cleanup_waiters = {}, scope_waiters = {},
     transport_eof = false,
     transport_shutdown = false,
     transport_closed = false,
@@ -952,9 +1249,10 @@ local function explicit_client_context(data: string): foreign *SSL_CTX
   do
     load_ca_certificates(context, data)
   catch
-    local failure = error
+    local failure = async.Error(error, traceback)
     ffi.SSL_CTX_free(context)
-    raise failure
+    failure:raise()
+    raise "saved TLS trust failure unexpectedly returned"
   end
   return context
 end
@@ -1102,26 +1400,14 @@ local function configure_server_name(handle: foreign *SSL, host: string)
   end
 end
 
-function connect(host: string, port: integer,
-                 ca_file: string?): Connection
-  checked_text(host, "ssl.connect.host")
-  if ca_file then checked_text(ca_file as string, "ssl.connect.ca-file") end
+local function client_context(ca_file: string?): foreign *SSL_CTX
+  if ca_file ~= nil then return explicit_client_context(fs.read_file(ca_file)) end
+  return acquire_default_client_context()
+end
 
-  local context = (function (ca_file: string?): foreign *SSL_CTX
-    if ca_file then
-      local trust_data = fs.read_file(ca_file as string)
-      return explicit_client_context(trust_data)
-    end
-    return acquire_default_client_context()
-  end)(ca_file)
-  defer ffi.SSL_CTX_free(context)
-  local transport = net.connect(host, port)
-  local connection: Connection? = nil
-  do
-    connection = new_connection(transport, context, true)
-    local exact = connection as Connection
+local function configure_client(connection: Connection, host: string)
     ffi.ERR_clear_error()
-    local parameters = ffi.SSL_get0_param(exact.handle)
+    local parameters = ffi.SSL_get0_param(connection.handle)
     if not parameters then
       raise openssl_error("ssl.connect.verify-host",
                           "failed to access peer verification parameters")
@@ -1134,31 +1420,71 @@ function connect(host: string, port: integer,
       -- A failed IP parse is the ordinary DNS-name branch, not the error
       -- context for SSL_set1_host.
       ffi.ERR_clear_error()
-      if ffi.SSL_set1_host(exact.handle, host) ~= 1 then
+      if ffi.SSL_set1_host(connection.handle, host) ~= 1 then
         raise openssl_error("ssl.connect.verify-host",
                             "failed to configure peer-name verification")
       end
     end
     ffi.SSL_set_hostflags(
-        exact.handle,
+        connection.handle,
         ffi.X509_CHECK_FLAG_NO_PARTIAL_WILDCARDS as
           foreign unsigned int)
     if not ip_identity then
-      configure_server_name(exact.handle, host)
+      configure_server_name(connection.handle, host)
     end
-    exact:handshake()
-    return exact
+end
+
+local function adopt_client(transport: net.Connection, context: foreign *SSL_CTX,
+                            host: string): Connection
+  local connection: Connection? = nil
+  do
+    connection = new_connection(transport, context, true)
+    configure_client(connection, host)
+    return connection
   catch
-    local failure = error
-    if connection then
-      local exact = connection as Connection
-      free_engine(exact)
-    end
-    do
-      transport:close()
-    catch
-    end
-    raise failure
+    local failure = async.Error(error, traceback)
+    if connection ~= nil then free_engine(connection) end
+    do transport:close() catch end
+    failure:raise()
+    raise "saved TLS adoption failure unexpectedly returned"
+  end
+end
+
+function client(transport: net.Connection, host: string,
+                ca_file: string?): Connection
+  checked_text(host, "ssl.client.host")
+  if #host == 0 then raise "ssl.client: host must not be empty" end
+  if ca_file ~= nil then checked_text(ca_file, "ssl.client.ca-file") end
+  -- Ownership transfers only after argument validation. Trust loading may
+  -- suspend; the opening supervisor may retain TCP solely as abort authority.
+  do
+    local context = client_context(ca_file)
+    defer ffi.SSL_CTX_free(context)
+    return adopt_client(transport, context, host)
+  catch
+    local failure = async.Error(error, traceback)
+    do transport:close() catch end
+    failure:raise()
+    raise "saved TLS trust failure unexpectedly returned"
+  end
+end
+
+function connect(host: string, port: integer,
+                 ca_file: string?): Connection
+  checked_text(host, "ssl.connect.host")
+  if ca_file ~= nil then checked_text(ca_file, "ssl.connect.ca-file") end
+  -- Preserve existing validation/trust-before-dial order.
+  local context = client_context(ca_file)
+  defer ffi.SSL_CTX_free(context)
+  local connection = adopt_client(net.connect(host, port), context, host)
+  do
+    connection:handshake()
+    return connection
+  catch
+    local failure = async.Error(error, traceback)
+    connection:abort()
+    failure:raise()
+    raise "saved TLS connection failure unexpectedly returned"
   end
 end
 
@@ -1200,37 +1526,31 @@ function listen(host: string, port: integer, certificate_file: string,
 end
 
 function Connection:handshake()
-  if not begin_operation(self, "ssl.handshake") then return end
-  defer self.busy = false
-  do
-    handshake_locked(self)
-  catch
-    fail_connection(self, error)
-  end
+  local operation? = begin_operation(self, "handshake")
+  if operation == nil then return end
+  supervise(self, operation, function (): string?
+    handshake_locked(self, operation)
+    return nil
+  end)
 end
 
 function Connection:read(): string?
-  if not begin_operation(self, "ssl.read") then return nil end
-  defer self.busy = false
-  do
-    return read_locked(self)
-  catch
-    fail_connection(self, error)
-  end
-  return nil
+  local operation? = begin_operation(self, "read")
+  if operation == nil then return nil end
+  return supervise(self, operation, function (): string?
+    return read_locked(self, operation)
+  end)
 end
 
-function Connection:read_until(delimiter: string,
-                               chop: boolean?): string?
+function Connection:read_until(delimiter: string, chop: boolean?): string?
   if #delimiter == 0 then raise "read delimiter must not be empty" end
-  if not begin_operation(self, "ssl.read_until") then return nil end
-  defer self.busy = false
-
-  do
+  local operation? = begin_operation(self, "read")
+  if operation == nil then return nil end
+  return supervise(self, operation, function (): string?
     local builder = string.writer()
     local tail = ""
     while true do
-      local chunk? = read_locked(self)
+      local chunk? = read_locked(self, operation)
       if not chunk then
         if #tail > 0 then builder:write(tail) end
         local result = builder:drain()
@@ -1264,77 +1584,58 @@ function Connection:read_until(delimiter: string,
       end
       tail = string.sub(boundary, committed + 1)
     end
-  catch
-    fail_connection(self, error)
-  end
-  return nil
+    return nil
+  end)
 end
 
 function Connection:write(data: string)
-  if not begin_operation(self, "ssl.write") then
-    raise "ssl.write: SSL Connection is closed"
-  end
-  defer self.busy = false
-  do
-    write_locked(self, data)
-  catch
-    fail_connection(self, error)
-  end
+  local operation? = begin_operation(self, "write")
+  if operation == nil then raise "ssl.write: SSL Connection is closed" end
+  supervise(self, operation, function (): string?
+    write_locked(self, operation, data)
+    return nil
+  end)
 end
 
 function Connection:shutdown()
-  if not begin_operation(self, "ssl.shutdown") then return end
-  defer self.busy = false
-  do
-    send_shutdown_locked(self)
-  catch
-    fail_connection(self, error)
-  end
+  local operation? = begin_operation(self, "shutdown")
+  if operation == nil then return end
+  supervise(self, operation, function (): string?
+    send_shutdown_locked(self, operation)
+    return nil
+  end)
+end
+
+function Connection:abort()
+  local reader? = self.reader
+  local writer? = self.writer
+  local control? = self.control
+  terminate(self, false)
+  if reader ~= nil and reader.child ~= nil then drain_child(reader.child) end
+  if writer ~= nil and writer.child ~= nil then drain_child(writer.child) end
+  if control ~= nil and control.child ~= nil then drain_child(control.child) end
 end
 
 function Connection:close()
-  if self.transport_closed and not self.handle then
-    self.state = STATE_CLOSED
-    return
-  end
-  if self.busy then
-    raise "ssl.close: SSL Connection already has an operation in progress"
-  end
-  self.busy = true
-  defer self.busy = false
-
-  local failed = false
-  local failure: value = nil
-  if self.handle and self.state ~= STATE_FAILED and
-     self.state ~= STATE_HANDSHAKING then
-    do
-      send_shutdown_locked(self)
-    catch
-      local shutdown_failure = error
-      -- The alert bytes have already been drained before net.shutdown. If
-      -- the peer closes in that narrow window, libuv reports ENOTCONN for
-      -- the redundant TCP half-close. Closing this TLS owner is still
-      -- complete; explicit shutdown keeps reporting the same error.
-      if not (shutdown_failure is async.OperationError and
-              (shutdown_failure as async.OperationError).name == "ENOTCONN" and
-              (shutdown_failure as async.OperationError).operation ==
-                "net.shutdown") then
-        failed = true
-        failure = shutdown_failure
+  if self.state == STATE_CLOSED or self.state == STATE_FAILED then return end
+  local operation? = begin_operation(self, "close")
+  if operation == nil then return end
+  supervise(self, operation, function (): string?
+    if self.state ~= STATE_HANDSHAKING then
+      do
+        send_shutdown_locked(self, operation)
+      catch
+        if not (error is async.OperationError and
+                (error as async.OperationError).name == "ENOTCONN" and
+                (error as async.OperationError).operation == "net.shutdown") then
+          raise error
+        end
       end
     end
-  end
-  free_engine(self)
-  self.state = STATE_CLOSED
-  do
-    close_transport(self)
-  catch
-    if not failed then
-      failed = true
-      failure = error
-    end
-  end
-  if failed then raise failure end
+    retire_scope(self, operation)
+    terminate(self, true)
+    return nil
+  end)
 end
 
 function Server:accept(): Connection

@@ -1,0 +1,93 @@
+local async = import "async"
+local gc = import "gc"
+local http = import "http"
+local io = import "io"
+local iteration = import "iteration"
+local net = import "net"
+local ssl = import "ssl"
+local string = import "string"
+local timer = import "timer"
+local url = import "url"
+local uv = import "uv"
+
+local const DEFAULT_LIMIT = 1024 * 1024
+local const OPEN_TIMEOUT = 10000
+local const CONTROL_TIMEOUT = 5000
+local const FRAME_BYTES = 16 * 1024
+local const WORK_BYTES = 64 * 1024
+local const FRAME_BUDGET = 32
+
+union MessageType
+  text()
+  binary()
+end
+const TEXT = MessageType.text()
+const BINARY = MessageType.binary()
+
+record Error
+  const kind: string
+  const operation: string
+  const message: string
+  const close_code: integer?
+end
+record HandshakeError
+  const message: string
+  const status: integer?
+  const headers: http.Headers?
+end
+
+record DialOptions
+  local headers: http.Headers
+  local ca_file: string?
+  local protocols: {string}
+  local limit: integer
+  local timeout: integer
+end
+record AcceptOptions
+  local protocols: {string}
+  local origins: {string}
+  local limit: integer
+  local timeout: integer
+end
+
+local function positive(supplied: integer?, fallback: integer,
+                        subject: string): integer
+  local result = supplied or fallback
+  if result <= 0 then raise subject .. " must be positive" end
+  return result
+end
+
+function DialOptions.new(headers: http.Headers?, ca_file: string?,
+                         subprotocols: ({string})?, read_limit: integer?,
+                         handshake_timeout: integer?): DialOptions
+  return {
+    headers = copy_dial_headers(headers), ca_file = ca_file,
+    protocols = copy_protocols(subprotocols),
+    limit = positive(read_limit, DEFAULT_LIMIT, "WebSocket read limit"),
+    timeout = positive(handshake_timeout, OPEN_TIMEOUT, "WebSocket opening timeout"),
+  }
+end
+
+function AcceptOptions.new(subprotocols: ({string})?,
+                           allowed_origins: ({string})?, read_limit: integer?,
+                           handshake_timeout: integer?): AcceptOptions
+  return {
+    protocols = copy_protocols(subprotocols), origins = copy_origins(allowed_origins),
+    limit = positive(read_limit, DEFAULT_LIMIT, "WebSocket read limit"),
+    timeout = positive(handshake_timeout, OPEN_TIMEOUT, "WebSocket opening timeout"),
+  }
+end
+
+local function state_error(operation: string, message: string): Error
+  return Error("state", operation, message, nil)
+end
+local function wire_error(kind: string, message: string, code: integer): Error
+  return Error(kind, "websocket.read", message, code)
+end
+local function timeout_error(operation: string): Error
+  return Error("timeout", operation, "WebSocket deadline expired", nil)
+end
+
+do
+  gc.ephemeron(openings as {value: value})
+end

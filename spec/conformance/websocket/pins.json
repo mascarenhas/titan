@@ -1,0 +1,24 @@
+{
+  "schema": 1,
+  "image": "docker.io/crossbario/autobahn-testsuite@sha256:519915fb568b04c9383f70a1c405ae3ff44ab9e35835b085239c258b6fac3074",
+  "source_revision": "6ed6f439dc7ed0d7432fe2cf7481b110905ecc5c",
+  "version": "25.10.1",
+  "platform": "linux/amd64",
+  "excluded_groups": [
+    12,
+    13
+  ],
+  "exclusion_reason": "WebSocket v1 does not negotiate permessage-deflate; all compression cases in exact groups 12 and 13 are outside its contract.",
+  "informational_cases": [
+    "7.1.6",
+    "7.13.1",
+    "7.13.2"
+  ],
+  "read_limit_bytes": 33554432,
+  "case_timeout_seconds": 600,
+  "run_timeout_seconds": 900,
+  "evidence_limit_bytes": 104857600,
+  "budget_status": "measured full602; 600s case ceiling covers suite480s deadlines, 900s role and100MiB evidence ceilings retain diagnostic margin independently of performance scores",
+  "measurement": "measurement.json",
+  "all_cases_sha256": "3ac7f4831a99c8da900305df6da8c68baa969a7174ff749804ad14111ce16323"
+}

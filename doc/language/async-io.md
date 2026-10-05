@@ -64,7 +64,7 @@ function TaskStatus:has_cancelled(): (boolean, CancellationReason<|B|>?)
 
 Async owns the following public declarations:
 
-```titan
+```text
 record ResumeToken
   const source: string?
 end
@@ -73,6 +73,7 @@ record Error
   error: value
   traceback: string
 end
+function Error:raise()
 
 record OperationError
   code: integer
@@ -1126,6 +1127,15 @@ An uncaught `OperationError` report includes the operation, symbolic error
 name, numeric code, and message before the traceback. Other raised values use
 Lua's ordinary string conversion. Rendering preserves the original error
 value in the failed Task even if conversion itself fails.
+
+### Preserving supervised errors
+
+`async.Error(error, traceback):raise()` raises the original value with its saved
+traceback. Use it when an owned I/O child catches a failure, returns it to its
+supervisor without an uncaught Task diagnostic, and the supervisor retires
+resources before propagating that same failure. It preserves nominal error
+identity and the original failing operation's frames; it does not cancel Tasks
+or transform the value into an `async.Error` at the catch boundary.
 
 `cancel(reason)` is sticky and preserves the first `CancellationReason<|B|>`
 directly in the Task. Nil selects
