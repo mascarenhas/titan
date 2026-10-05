@@ -1322,7 +1322,7 @@ function wtf8_length_as_utf16(text: string): integer
 
 **Inputs and outputs:** text: INPUT immutable text/byte owner; native C-string conventions apply where the operation takes text. The binding retains or copies bytes for accepted asynchronous uses; synchronous borrows end on return.
 
-**Result, lifetime and cleanup:** Return type: integer. Examines NUL-terminated WTF-8 text synchronously. Returns the UTF-16 unit count including its terminating NUL, or -1 for malformed input. No native allocation escapes.
+**Result, lifetime and cleanup:** Return type: integer. Examines NUL-terminated WTF-8 text synchronously. Returns the UTF-16 unit count including its terminating NUL, or EINVAL for malformed input. No native allocation escapes.
 
 **Callbacks:** none. no callback
 

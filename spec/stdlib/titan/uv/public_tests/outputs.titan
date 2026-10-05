@@ -52,7 +52,8 @@ function test_unicode_lengths_binary_data_and_native_truncation(_context: test.C
   test.assert(uv.wtf8_length_as_utf16("A\0B") == 2)
   local prefix = uv.wtf8_to_utf16("A\0B", 2)
   test.assert(#prefix == 2 and prefix[1] == 65 and prefix[2] == 0)
-  test.assert(uv.wtf8_length_as_utf16("\xFF") == -1)
+  test.assert(uv.wtf8_length_as_utf16("\xFF") == uv.EINVAL,
+      "malformed WTF-8 must return EINVAL")
   expect_error(function () uv.wtf8_to_utf16("\xFF", 1) end, "invalid WTF-8 input")
 end
 
