@@ -220,14 +220,14 @@ describe("unsafe C object-pointer conversion code generation", function()
 
             local pointer_tmp = assert(csrc:match(
                 "ffi_mutable_callback_pointer (_tmp_%d+)"
-                    .. " = ffi_get_mutable_pointer%(%);"))
+                    .. " = %(ffi_get_mutable_pointer%)%(%);"))
             local capture = "ffi_mutable_callback_pointer " .. pointer_tmp
-                .. " = ffi_get_mutable_pointer();"
+                .. " = (ffi_get_mutable_pointer)();"
             local capture_at = assert(csrc:find(capture, 1, true))
             local rebase_at = assert(csrc:find(
                 "_base = restorestack(L, _base_off);",
                 capture_at + #capture, true))
-            local converted_call = "ffi_accept_const_pointer("
+            local converted_call = "(ffi_accept_const_pointer)("
                 .. "((ffi_const_callback_pointer)(" .. pointer_tmp .. ")))"
             assert(csrc:find(converted_call, rebase_at + 1, true))
 
@@ -336,7 +336,7 @@ describe("unsafe C object-pointer conversion code generation", function()
             local csrc = h.compile_and_read_c(source)
             local normalized_c = csrc:gsub("%s+", " ")
             assert.matches(
-                "ffi_write_unsafe_gc_value%(%s*L,%s*.-"
+                "%(ffi_write_unsafe_gc_value%)%(%s*L,%s*.-"
                     .. "ffi_unrelated_value%s*%*.-"
                     .. "_local_raw_%d+",
                 normalized_c)
@@ -417,10 +417,10 @@ describe("unsafe C object-pointer conversion code generation", function()
             assert.matches(
                 "((ffi_request *)(_param_fs))", csrc, 1, true)
             assert.matches(
-                "ffi_close(((ffi_handle *)((&(_local_tcp_1))))",
+                "(ffi_close)(((ffi_handle *)((&(_local_tcp_1))))",
                 csrc, 1, true)
             assert.matches(
-                "ffi_cancel%(%(%(ffi_request %*%).-_local_fs_%d+",
+                "%(ffi_cancel%)%(%(%(ffi_request %*%).-_local_fs_%d+",
                 csrc)
         end)
     end)

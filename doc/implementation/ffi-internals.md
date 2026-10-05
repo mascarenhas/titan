@@ -6,6 +6,12 @@ and emits direct C expressions in `coder.lua`. The generated translation unit
 includes the same header, so the host C compiler sees the real prototypes; the
 Lua-side pipeline exists to typecheck Titan source before code generation.
 
+Imported C function designators are emitted in parentheses, for example
+`(memchr)(...)`, in both ordinary Titan calls and restricted foreign bodies.
+This preserves the checked declaration when a header also defines a same-name
+function-like macro, such as glibc's const-generic string wrappers. Object-like
+function aliases retain normal preprocessing; no macro-call inference is added.
+
 For user-facing behavior see [the C FFI](../language/ffi.md),
 [C FFI declarations and expressions](../language/c-ffi-expressions.md),
 [Foreign functions](../language/foreign-functions.md), and

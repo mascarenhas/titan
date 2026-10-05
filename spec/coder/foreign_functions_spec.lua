@@ -39,6 +39,66 @@ end
 describe("source-defined foreign functions", function()
     after_each(cleanup)
 
+    it("calls imported declarations without expanding same-name function macros", function()
+        h.with_extra_cflags({"-O3", "-Wall", "-Werror"}, function()
+            with_header([[
+                int ffi_declared_value = 41;
+                int ffi_shadow_value = 99;
+                static int *ffi_declared_pointer(void) {
+                    return &ffi_declared_value;
+                }
+                static int ffi_declared_add(int value) { return value + 2; }
+                #define ffi_declared_pointer() ((const int *)&ffi_shadow_value)
+                #define ffi_declared_add(value) ((value) + 100)
+                #define ffi_declared_alias ffi_declared_add
+            ]], function(header)
+                h.run_coder([[
+                    foreign import "]] .. header .. [["
+
+                    function ordinary(): integer
+                        return ffi.ffi_declared_pointer()[0]
+                    end
+                    foreign function raw(): int
+                        return ffi.ffi_declared_pointer()[0]
+                    end
+                    function source_body(): integer
+                        return raw()
+                    end
+                    function direct(): integer
+                        return ffi.ffi_declared_add(7)
+                    end
+                    function alias(): integer
+                        return ffi.ffi_declared_alias(7)
+                    end
+                    function indirect(): integer
+                        local callback: foreign function(int): int = ffi.ffi_declared_add
+                        return callback(7)
+                    end
+                ]], [[
+                    assert(test.ordinary() == 41)
+                    assert(test.source_body() == 41)
+                    assert(test.direct() == 9 and test.indirect() == 9)
+                    assert(test.alias() == 9)
+                ]])
+            end)
+        end)
+    end)
+
+    it("preserves the string.h prototype under const-generic feature macros", function()
+        h.with_extra_cflags({"-D_GNU_SOURCE", "-O3", "-Wall", "-Werror"}, function()
+            h.run_coder([[
+                foreign import "string.h"
+                function contains_nul(text: string): boolean
+                    return ffi.memchr(text, 0, #text) ~= nil
+                end
+            ]], [[
+                assert(not test.contains_nul("ordinary"))
+                assert(not test.contains_nul(""))
+                assert(test.contains_nul("before\0after"))
+            ]])
+        end)
+    end)
+
     it("emits both reserved module headers and the UCN entry family", function()
         with_header([[
             #ifdef TITAN_TEST_FOREIGN_HEADER_SEEN

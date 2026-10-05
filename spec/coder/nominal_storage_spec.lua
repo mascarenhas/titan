@@ -11,6 +11,46 @@ end
 describe("native nominal storage", function()
     after_each(clean)
 
+    it("terminates nil-force failure before optimized nominal field access", function()
+        h.with_extra_cflags({"-O3", "-Werror=array-bounds"}, function()
+            h.run_coder([[
+                record Point
+                    label: string
+                    preceding: integer
+                    x: integer
+                end
+                function guarded(point: Point?, preceding: integer): integer
+                    if point == nil or point.preceding ~= preceding then return 0 end
+                    return point.x
+                end
+                function read(point: Point?): integer
+                    return point.x
+                end
+                function write(point: Point?)
+                    point.x = 42
+                end
+                function recover(point: Point?): integer
+                    return point.x
+                catch
+                    return 17
+                end
+            ]], [[
+                local point = test.Point("present", 3, 9)
+                assert(test.guarded(point, 3) == 9)
+                assert(test.guarded(point, 4) == 0)
+                assert(test.guarded(nil, 3) == 0)
+                assert(test.read(point) == 9)
+                test.write(point)
+                assert(point.x == 42 and test.recover(point) == 42)
+                for _, operation in ipairs({test.read, test.write}) do
+                    local ok, err = pcall(operation, nil)
+                    assert(not ok and err:find("expected test.Point but found nil", 1, true))
+                end
+                assert(test.recover(nil) == 17)
+            ]])
+        end)
+    end)
+
     it("keeps raw fields out of UVs and public GC slots before private slots", function()
         h.run_coder([[
             record Mixed

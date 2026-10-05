@@ -260,7 +260,7 @@ describe("named C tag code generation", function()
                 "FFI_AI_NUMERICSERV",
                 coder_names._foreign_func_name("test", "dns_callback"),
                 coder_names._foreign_func_name("test", "connect_callback"),
-                "ffi_getaddrinfo(", "ffi_tcp_connect(",
+                "(ffi_getaddrinfo)(", "(ffi_tcp_connect)(",
             }) do
                 assert.matches(spelling, csrc, 1, true)
             end

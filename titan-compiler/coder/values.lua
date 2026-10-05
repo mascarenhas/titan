@@ -16,11 +16,16 @@ checkandset = nil
 -- whatever render vars the caller's enclosing template happens to define. The
 -- `$LINE`/`$FILE`/etc. placeholders left in $PARAMS are still filled by that
 -- enclosing template (ignore_missing=true keeps them intact here).
+-- Lua declares luaL_error as returning int even though it always raises. The
+-- C99 abort fallback makes this branch terminal for the native optimizer too;
+-- otherwise it can join a failed Option force with a zero-initialized result
+-- and diagnose the following nominal field access as an out-of-bounds read.
 function codethrow(loc, template, params)
     local line = loc and emitline({ loc = loc }) or ""
     return render([[
         $LINEDIR
         luaL_error(L, "$TEMPLATE", $PARAMS);
+        abort();
     ]], {
         LINEDIR = line,
         TEMPLATE = template,

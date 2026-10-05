@@ -26,6 +26,14 @@ itself is not wrapped by the handler. After the handler returns, Lua 5.5's
 throwing. Lua `pcall`, Titan's catch-local `error`, and any re-raise observe
 that caught Lua error value; other values, including false, remain unchanged.
 
+Generated checked failures call `luaL_error` at the original Titan source line
+and then emit `abort()`. Lua's public declaration returns `int`, so the C99
+fallback makes the branch terminal for the native compiler even without a
+nonreturning attribute. Lua always raises first; the fallback is unreachable
+in normal execution, including when a Titan `catch` or Lua `pcall` handles the
+error. This prevents optimized Option forces from retaining an impossible
+fallthrough with a zero-initialized nominal result.
+
 ### Trace pinning
 
 The registry also contains `TITAN_TRACE_PINNED`, a boolean pin flag. The
