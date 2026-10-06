@@ -34,6 +34,8 @@ jobs:
       TITAN_PREFIX: ${{ github.workspace }}/.lua
       # Exercise the immutable/minimal-host path in the regular Linux build.
       READLINE_MODE: bundled
+      # GNU lists this mirror; the pinned source checksum remains required.
+      READLINE_URL: https://mirror.csclub.uwaterloo.ca/gnu/readline/readline-8.3.tar.gz
       LIBUV_VERSION: "1.53.0"
       # Bump when any CMake option that affects the cached archive changes.
       LIBUV_BUILD_PROFILE: "static-pic-validation-tests-off-v2"
@@ -125,7 +127,7 @@ jobs:
 
       - name: Prepare the standalone prefix
         run: |
-          make lua
+          make lua READLINE_URL="$READLINE_URL"
           grep -qx 'provider=bundled' \
             "lua-5.5.1/.titan-readline-8.3-p3.config"
           test -f \
@@ -142,7 +144,7 @@ jobs:
           config_mtime="$(stat -c %Y "$config")"
           stamp_mtime="$(stat -c %Y "$stamp")"
           archive_mtime="$(stat -c %Y "$archive")"
-          make readline
+          make readline READLINE_URL="$READLINE_URL"
           test "$(stat -c %Y "$config")" = "$config_mtime"
           test "$(stat -c %Y "$stamp")" = "$stamp_mtime"
           test "$(stat -c %Y "$archive")" = "$archive_mtime"
