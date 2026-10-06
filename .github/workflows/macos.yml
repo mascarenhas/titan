@@ -4,6 +4,7 @@ on:
   workflow_dispatch:
 
 env:
+  TITAN_BUILD_PROFILE: validation
   TITAN_ABI_VERSION: "2"
 
 jobs:
@@ -27,7 +28,7 @@ jobs:
       OPENSSL_MODE: bundled
       LIBUV_VERSION: "1.53.0"
       # Bump when any CMake option that affects the cached archive changes.
-      LIBUV_BUILD_PROFILE: "static-pic-release-tests-off-v2"
+      LIBUV_BUILD_PROFILE: "static-pic-validation-tests-off-v2"
       LLHTTP_VERSION: "9.4.3"
       LLHTTP_SHA256: "1eb813c7437b31a87496a1cd3ed79f00746720f5e7e29c79b42c02cb69f36c39"
       LLHTTP_BUILD_PROFILE: "static-pic-hidden-c99-v1"
@@ -60,9 +61,9 @@ jobs:
             .lua/lib/lua/5.5
             .lua/lib/luarocks
             .lua/share/lua/5.5
-          key: macos-latest-${{ runner.arch }}-prefix-system-tree-v2-abi-${{ env.TITAN_ABI_VERSION }}-rocks-3.13.0-${{ hashFiles('titan-0.6.0-1.rockspec') }}
+          key: macos-latest-${{ runner.arch }}-${{ env.TITAN_BUILD_PROFILE }}-prefix-system-tree-v2-abi-${{ env.TITAN_ABI_VERSION }}-rocks-3.13.0-${{ hashFiles('titan-0.6.0-1.rockspec') }}
           restore-keys: |
-            macos-latest-${{ runner.arch }}-prefix-system-tree-v2-abi-${{ env.TITAN_ABI_VERSION }}-rocks-3.13.0-
+            macos-latest-${{ runner.arch }}-${{ env.TITAN_BUILD_PROFILE }}-prefix-system-tree-v2-abi-${{ env.TITAN_ABI_VERSION }}-rocks-3.13.0-
 
       - name: Cache bundled libuv source and static build
         uses: actions/cache@v5
@@ -71,9 +72,9 @@ jobs:
             libuv-v${{ env.LIBUV_VERSION }}
             libuv-v${{ env.LIBUV_VERSION }}.tar.gz
             libuv-build
-          key: macos-latest-${{ runner.arch }}-libuv-${{ env.LIBUV_VERSION }}-${{ env.LIBUV_BUILD_PROFILE }}-${{ hashFiles('vendor/libuv/*.patch') }}
+          key: macos-latest-${{ runner.arch }}-${{ env.TITAN_BUILD_PROFILE }}-libuv-${{ env.LIBUV_VERSION }}-${{ env.LIBUV_BUILD_PROFILE }}-${{ hashFiles('vendor/libuv/*.patch') }}
           restore-keys: |
-            macos-latest-${{ runner.arch }}-libuv-${{ env.LIBUV_VERSION }}-${{ env.LIBUV_BUILD_PROFILE }}-
+            macos-latest-${{ runner.arch }}-${{ env.TITAN_BUILD_PROFILE }}-libuv-${{ env.LIBUV_VERSION }}-${{ env.LIBUV_BUILD_PROFILE }}-
 
       - name: Cache bundled llhttp source and static build
         uses: actions/cache@v5
@@ -82,9 +83,9 @@ jobs:
             llhttp-release-v${{ env.LLHTTP_VERSION }}
             llhttp-release-v${{ env.LLHTTP_VERSION }}.tar.gz
             llhttp-build
-          key: macos-latest-${{ runner.arch }}-llhttp-${{ env.LLHTTP_VERSION }}-${{ env.LLHTTP_SHA256 }}-${{ env.LLHTTP_BUILD_PROFILE }}
+          key: macos-latest-${{ runner.arch }}-${{ env.TITAN_BUILD_PROFILE }}-llhttp-${{ env.LLHTTP_VERSION }}-${{ env.LLHTTP_SHA256 }}-${{ env.LLHTTP_BUILD_PROFILE }}
           restore-keys: |
-            macos-latest-${{ runner.arch }}-llhttp-${{ env.LLHTTP_VERSION }}-${{ env.LLHTTP_SHA256 }}-
+            macos-latest-${{ runner.arch }}-${{ env.TITAN_BUILD_PROFILE }}-llhttp-${{ env.LLHTTP_VERSION }}-${{ env.LLHTTP_SHA256 }}-
 
       - name: Cache bundled SQLite amalgamation and static build
         uses: actions/cache@v5
@@ -93,9 +94,9 @@ jobs:
             sqlite-autoconf-${{ env.SQLITE3_RELEASE }}
             sqlite-autoconf-${{ env.SQLITE3_RELEASE }}.tar.gz
             sqlite3-build
-          key: macos-latest-${{ runner.arch }}-sqlite3-${{ env.SQLITE3_VERSION }}-${{ env.SQLITE3_SHA256 }}-${{ env.SQLITE3_BUILD_PROFILE }}
+          key: macos-latest-${{ runner.arch }}-${{ env.TITAN_BUILD_PROFILE }}-sqlite3-${{ env.SQLITE3_VERSION }}-${{ env.SQLITE3_SHA256 }}-${{ env.SQLITE3_BUILD_PROFILE }}
           restore-keys: |
-            macos-latest-${{ runner.arch }}-sqlite3-${{ env.SQLITE3_VERSION }}-${{ env.SQLITE3_SHA256 }}-
+            macos-latest-${{ runner.arch }}-${{ env.TITAN_BUILD_PROFILE }}-sqlite3-${{ env.SQLITE3_VERSION }}-${{ env.SQLITE3_SHA256 }}-
 
       - name: Cache bundled OpenSSL source and static build
         uses: actions/cache@v5
@@ -104,9 +105,9 @@ jobs:
             openssl-${{ env.OPENSSL_VERSION }}
             openssl-${{ env.OPENSSL_VERSION }}.tar.gz
             openssl-build
-          key: macos-latest-${{ runner.arch }}-openssl-${{ env.OPENSSL_VERSION }}-${{ env.OPENSSL_SHA256 }}-${{ env.OPENSSL_BUILD_PROFILE }}
+          key: macos-latest-${{ runner.arch }}-${{ env.TITAN_BUILD_PROFILE }}-openssl-${{ env.OPENSSL_VERSION }}-${{ env.OPENSSL_SHA256 }}-${{ env.OPENSSL_BUILD_PROFILE }}
           restore-keys: |
-            macos-latest-${{ runner.arch }}-openssl-${{ env.OPENSSL_VERSION }}-${{ env.OPENSSL_SHA256 }}-
+            macos-latest-${{ runner.arch }}-${{ env.TITAN_BUILD_PROFILE }}-openssl-${{ env.OPENSSL_VERSION }}-${{ env.OPENSSL_SHA256 }}-
 
       - name: Install system dependencies (macOS)
         run: brew install cmake openssl@3 pkgconf
@@ -157,9 +158,9 @@ jobs:
         uses: ubicloud/cache@v4
         with:
           path: .lua/var/cache/titan-probes/2
-          key: titan-probes-2-${{ runner.os }}-${{ runner.arch }}-test-macos-${{ github.sha }}
+          key: titan-probes-2-${{ runner.os }}-${{ runner.arch }}-${{ env.TITAN_BUILD_PROFILE }}-test-macos-${{ github.sha }}
           restore-keys: |
-            titan-probes-2-${{ runner.os }}-${{ runner.arch }}-test-macos-
+            titan-probes-2-${{ runner.os }}-${{ runner.arch }}-${{ env.TITAN_BUILD_PROFILE }}-test-macos-
 
       # Build and install the rock so the `titan` Lua support module (ltitanlib.c,
       # required by one coder spec via `require 'titan'`) is on the Lua path.

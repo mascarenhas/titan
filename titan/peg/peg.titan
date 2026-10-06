@@ -1,3 +1,7 @@
+--- Typed byte-oriented PEG patterns, Relabel grammars, captures, and leftmost search.
+-- @module titan.peg
+-- @usage standard-library-peg.md
+
 foreign import "lua.h"
 foreign import "titan/ffi.h"
 foreign import "string.h"
@@ -62,11 +66,17 @@ local _repeat: function (value, integer): (value) = nil as value
 local _capture_replace: NativeBinary = nil as value
 local _match_success_sentinel: {value: value} = {}
 
+--- Opaque pattern owned by Titan private embedded LPegLabel engine.
+-- @usage standard-library-peg.md
 record Pattern
   local raw: value
   local tree_size: integer
 end
 
+--- Leftmost search result with an inclusive byte span and separately stored captures.
+-- @field first One-based first byte position.
+-- @field last Inclusive last byte; an empty match has last equal to first minus one.
+-- @usage standard-library-peg.md
 record Match
   first: integer
   last: integer
@@ -84,11 +94,26 @@ local record PatternMatchAttempt
   local failure_position: integer
 end
 
+--- Named grammar rule created by rule and consumed by grammar.
+-- @usage standard-library-peg.md
 record Rule
   local name: string
   local pattern: Pattern
 end
 
+--- Byte-class patterns built from the current C locale.
+-- @field alnum Letters and digits.
+-- @field alpha Letters.
+-- @field cntrl Control bytes.
+-- @field digit Decimal digits.
+-- @field graph Printable nonspace bytes.
+-- @field lower Lowercase letters.
+-- @field print Printable bytes.
+-- @field punct Punctuation bytes.
+-- @field space Whitespace bytes.
+-- @field upper Uppercase letters.
+-- @field xdigit Hexadecimal digits.
+-- @usage standard-library-peg.md
 record Locale
   alnum: Pattern
   alpha: Pattern
@@ -103,6 +128,8 @@ record Locale
   xdigit: Pattern
 end
 
+--- Named Relabel pattern or value binding supplied to compile.
+-- @usage standard-library-peg.md
 record Definition
   local name: string
   local raw: value
@@ -150,6 +177,12 @@ local function pattern_match_attempt(
   raise "embedded LPegLabel returned an invalid match result"
 end
 
+--- Attempt one anchored match and preserve every capture, including nil slots.
+-- @param subject Binary subject bytes.
+-- @param init Initial byte position; nil selects 1, zero selects after the final byte.
+-- @param ... Values available to argument captures.
+-- @return Captures or after-position on success; nil, label, absolute position on failure.
+-- @usage standard-library-peg.md
 function Pattern:match(subject: string, init: integer?,
                        ...: value): (value, ...: value)
   local attempt = pattern_match_attempt(
@@ -161,15 +194,28 @@ function Pattern:match(subject: string, init: integer?,
   return nil, attempt.failure_label, attempt.failure_position
 end
 
+--- Return exactly the stored captures without adding the matched substring.
+-- @return Capture values, including nil slots; zero results for a capture-free pattern.
+-- @usage standard-library-peg.md
 function Match:values(): (...: value)
   if self.capture_count == 0 then return end
   return ...self.captures[2, self.capture_count + 1]
 end
 
+--- Package a named pattern as a grammar rule.
+-- @param name Unique rule name.
+-- @param pattern Rule body.
+-- @return Rule value.
+-- @usage standard-library-peg.md
 function rule(name: string, pattern: Pattern): Rule
   return Rule(name, pattern)
 end
 
+--- Close named pattern references into a grammar with an explicit start rule.
+-- @param start Name of an existing start rule.
+-- @param rules Dense Array of unique named rules, at most 1000.
+-- @return Closed grammar pattern.
+-- @usage standard-library-peg.md
 function grammar(start: string,
                  rules: {Rule}): Pattern
   local total_size = 2
@@ -195,6 +241,9 @@ function grammar(start: string,
   return _pattern(_P(native), total_size)
 end
 
+--- Build byte-class patterns for the current C locale.
+-- @return Locale record containing the character classes.
+-- @usage standard-library-peg.md
 function locale(): Locale
   local native = _locale()
   return Locale {
@@ -212,6 +261,9 @@ function locale(): Locale
   }
 end
 
+--- Set the private PEG matching-stack limit for the current Lua state.
+-- @param maximum Stack limit in 1..21474836; does not affect external LPegLabel engines.
+-- @usage standard-library-peg.md
 function set_max_stack(maximum: integer)
   if maximum < 1 or maximum > MAX_STACK then
     raise "PEG maximum stack is out of range"
@@ -219,12 +271,19 @@ function set_max_stack(maximum: integer)
   _setmaxstack(maximum)
 end
 
+--- Return the version of Titan embedded LPegLabel engine.
+-- @return Engine version string.
+-- @usage standard-library-peg.md
 function version(): string
   return _version_text
 end
 
 -- Constructors and combinators.
 
+--- Match an exact binary string; an empty literal succeeds without consuming.
+-- @param text Literal bytes.
+-- @return Literal pattern.
+-- @usage standard-library-peg.md
 function literal(text: string): Pattern
   local length = #text
   local size = 1
@@ -237,6 +296,10 @@ function literal(text: string): Pattern
   return _pattern(_P(text), size)
 end
 
+--- Match a byte count or test that fewer bytes remain for a negative count.
+-- @param count Nil selects one byte; zero succeeds empty; negative -n tests fewer than n remaining bytes.
+-- @return Byte-count pattern.
+-- @usage standard-library-peg.md
 function any(count: integer?): Pattern
   local amount = 1
   if count then amount = count as integer end
@@ -255,14 +318,24 @@ function any(count: integer?): Pattern
   return _pattern(_P(amount), size)
 end
 
+--- Create a pattern that always succeeds without consuming input.
+-- @return Empty-success pattern.
+-- @usage standard-library-peg.md
 function succeed(): Pattern
   return _pattern(_P(true), 1)
 end
 
+--- Create a pattern that always fails with ordinary recoverable failure.
+-- @return Ordinary-failure pattern.
+-- @usage standard-library-peg.md
 function fail(): Pattern
   return _pattern(_P(false), 1)
 end
 
+--- Run an immediate non-yieldable matching callback at the current position.
+-- @param callback Receives subject, absolute position, and empty string; returns fail/true/new position plus captures.
+-- @return Runtime-action pattern.
+-- @usage standard-library-peg.md
 function runtime(
     callback: function (string, integer, string): (...: value)): Pattern
   local adapter:
@@ -274,10 +347,18 @@ function runtime(
   return _pattern(_P(adapter), 2)
 end
 
+--- Match one byte from a supplied binary set.
+-- @param bytes Bytes included in the set.
+-- @return Byte-set pattern.
+-- @usage standard-library-peg.md
 function set(bytes: string): Pattern
   return _pattern(_S(bytes), 5)
 end
 
+--- Match one byte in any supplied inclusive byte range.
+-- @param ... Two-byte strings giving lower and upper bounds; no ranges means failure.
+-- @return Byte-range pattern.
+-- @usage standard-library-peg.md
 function ranges(...: string): Pattern
   local index = 1
   while index <= #... do
@@ -289,6 +370,11 @@ function ranges(...: string): Pattern
   return _pattern(_R(...), 5)
 end
 
+--- Match one UTF-8 encoded code point in the inclusive range.
+-- @param first First code point.
+-- @param last Last code point; surrounding patterns remain byte-oriented.
+-- @return UTF-8 range pattern.
+-- @usage standard-library-peg.md
 function utf_range(first: integer,
                    last: integer): Pattern
   if first < 0 or last < first or last > 0x10ffff then
@@ -299,10 +385,18 @@ function utf_range(first: integer,
   return _pattern(_utfR(first, last), size)
 end
 
+--- Create an open named reference to a rule in a containing grammar.
+-- @param name Referenced rule name.
+-- @return Open rule-reference pattern.
+-- @usage standard-library-peg.md
 function variable(name: string): Pattern
   return _pattern(_V(name), 1)
 end
 
+--- Test a capture-free fixed-length pattern immediately before the current position.
+-- @param pattern Fixed-length child no wider than 255 bytes.
+-- @return Non-consuming look-behind pattern.
+-- @usage standard-library-peg.md
 function behind(pattern: Pattern): Pattern
   -- The engine remains authoritative for fixed-length/capture-free checks.
   -- Its numeric bound is validated there after Titan's tree-size projection.
@@ -310,11 +404,19 @@ function behind(pattern: Pattern): Pattern
   return _pattern(_B(pattern.raw), size)
 end
 
+--- Throw a committed failure label; the reserved label fail remains ordinary failure.
+-- @param label Exact binary failure label.
+-- @return Failure pattern.
+-- @usage standard-library-peg.md
 function throw(label: string): Pattern
   if label == "fail" then return fail() end
   return _pattern(_T(label), 1)
 end
 
+--- Match patterns in order; an empty sequence succeeds.
+-- @param ... Patterns evaluated left to right.
+-- @return Combined sequence pattern.
+-- @usage standard-library-peg.md
 function sequence(...: Pattern): Pattern
   if #... == 0 then return succeed() end
   local result = ...[1]
@@ -330,6 +432,10 @@ function sequence(...: Pattern): Pattern
   return result
 end
 
+--- Try patterns in order after ordinary failure; an empty choice fails.
+-- @param ... Ordered alternatives; committed labels escape the choice.
+-- @return Ordered-choice pattern.
+-- @usage standard-library-peg.md
 function choice(...: Pattern): Pattern
   if #... == 0 then return fail() end
   local result = ...[1]
@@ -345,6 +451,11 @@ function choice(...: Pattern): Pattern
   return result
 end
 
+--- Match the first pattern only when every exclusion fails at the same position.
+-- @param first Pattern whose bytes and captures are retained.
+-- @param ... Exclusion patterns.
+-- @return Difference pattern.
+-- @usage standard-library-peg.md
 function difference(first: Pattern,
                     ...: Pattern): Pattern
   local result = first
@@ -360,16 +471,29 @@ function difference(first: Pattern,
   return result
 end
 
+--- Test a pattern without consuming bytes or retaining its captures.
+-- @param pattern Positive predicate child.
+-- @return Positive lookahead pattern.
+-- @usage standard-library-peg.md
 function lookahead(pattern: Pattern): Pattern
   return _pattern(
     _lookahead(pattern.raw), _checked_unary(pattern, 1))
 end
 
+--- Succeed without consuming input only when the child fails.
+-- @param pattern Negative predicate child.
+-- @return Negative lookahead pattern.
+-- @usage standard-library-peg.md
 function negative(pattern: Pattern): Pattern
   return _pattern(
     _negative(pattern.raw), _checked_unary(pattern, 1))
 end
 
+--- Match at least a nonnegative number of repetitions, possessively.
+-- @param pattern Repeated child.
+-- @param count Minimum repetition count.
+-- @return Possessive repetition pattern.
+-- @usage standard-library-peg.md
 function at_least(pattern: Pattern,
                   count: integer): Pattern
   if count < 0 then raise "PEG repetition count must be nonnegative" end
@@ -377,6 +501,11 @@ function at_least(pattern: Pattern,
   return _pattern(_repeat(pattern.raw, count), size)
 end
 
+--- Match at most a nonnegative number of repetitions, possessively.
+-- @param pattern Repeated child.
+-- @param count Maximum repetition count; zero succeeds empty.
+-- @return Bounded repetition pattern.
+-- @usage standard-library-peg.md
 function at_most(pattern: Pattern,
                  count: integer): Pattern
   if count < 0 then raise "PEG repetition count must be nonnegative" end
@@ -385,25 +514,45 @@ function at_most(pattern: Pattern,
   return _pattern(_repeat(pattern.raw, -count), size)
 end
 
+--- Match zero or more repetitions without backtracking.
+-- @param pattern Repeated or optional child.
+-- @return Combined pattern.
+-- @usage standard-library-peg.md
 function zero_or_more(pattern: Pattern): Pattern
   return at_least(pattern, 0)
 end
 
+--- Match one or more repetitions without backtracking.
+-- @param pattern Repeated or optional child.
+-- @return Combined pattern.
+-- @usage standard-library-peg.md
 function one_or_more(pattern: Pattern): Pattern
   return at_least(pattern, 1)
 end
 
+--- Match the child once when possible, otherwise succeed empty.
+-- @param pattern Repeated or optional child.
+-- @return Combined pattern.
+-- @usage standard-library-peg.md
 function optional(pattern: Pattern): Pattern
   return at_most(pattern, 1)
 end
 
 -- Captures.
 
+--- Capture the matched substring followed by any nested captures.
+-- @param pattern Captured child.
+-- @return Substring-capture pattern.
+-- @usage standard-library-peg.md
 function capture(pattern: Pattern): Pattern
   return _pattern(
     _C(pattern.raw), _checked_unary(pattern, 1))
 end
 
+--- Capture supplied values without consuming input, including nil values.
+-- @param ... Constant capture values.
+-- @return Constant-capture pattern.
+-- @usage standard-library-peg.md
 function constant(...: value): Pattern
   local count = #...
   local size = 1
@@ -416,6 +565,11 @@ function constant(...: value): Pattern
   return _pattern(_Cc(...), size)
 end
 
+--- Run an immediate non-yieldable callback after matching the child.
+-- @param pattern Child providing captures, or its whole substring when capture-free.
+-- @param callback Receives subject, after-position, and captures; returns fail/true/new position plus captures.
+-- @return Match-time capture pattern.
+-- @usage standard-library-peg.md
 function match_time(
     pattern: Pattern,
     callback: function (string, integer, value, ...: value): (...: value)): Pattern
@@ -429,11 +583,19 @@ function match_time(
     _Cmt(pattern.raw, adapter), _checked_unary(pattern, 1))
 end
 
+--- Return the latest matching named group capture without consuming input.
+-- @param key Nonnil group key; an absent group raises at match time.
+-- @return Back-capture pattern.
+-- @usage standard-library-peg.md
 function back_capture(key: value): Pattern
   if key == nil then raise "PEG back-capture key must be non-nil" end
   return _pattern(_Cb(key), 2)
 end
 
+--- Capture one extra argument supplied to Pattern:match.
+-- @param index One-based argument index in 1..32767; an absent argument raises.
+-- @return Argument-capture pattern.
+-- @usage standard-library-peg.md
 function argument(index: integer): Pattern
   if index < 1 or index > MAX_SHORT then
     raise "PEG argument index is out of range"
@@ -441,20 +603,36 @@ function argument(index: integer): Pattern
   return _pattern(_Carg(index), 2)
 end
 
+--- Capture the current absolute one-based byte position.
+-- @return Position-capture pattern.
+-- @usage standard-library-peg.md
 function position(): Pattern
   return _pattern(_Cp(), 2)
 end
 
+--- Capture a string replacing child spans with their nested capture values.
+-- @param pattern Child whose captures define replacements.
+-- @return Substitution-capture pattern.
+-- @usage standard-library-peg.md
 function substitution(pattern: Pattern): Pattern
   return _pattern(
     _Cs(pattern.raw), _checked_unary(pattern, 1))
 end
 
+--- Collect anonymous captures and named groups into an ordinary Map value.
+-- @param pattern Child providing captures.
+-- @return Table-capture pattern; its result is a Map rather than a Titan Array.
+-- @usage standard-library-peg.md
 function table_capture(pattern: Pattern): Pattern
   return _pattern(
     _Ct(pattern.raw), _checked_unary(pattern, 1))
 end
 
+--- Fold delayed capture operations into one accumulator.
+-- @param pattern Child with an initial capture accumulator.
+-- @param callback Nonyielding reducer receiving accumulator and next captures; returns one accumulator.
+-- @return Fold-capture pattern.
+-- @usage standard-library-peg.md
 function fold_capture(
     pattern: Pattern,
     callback: function (value, ...: value): (value)): Pattern
@@ -467,11 +645,21 @@ function fold_capture(
     _Cf(pattern.raw, adapter), _checked_unary(pattern, 1))
 end
 
+--- Group captures anonymously or under a supplied key.
+-- @param pattern Grouped child; capture-free children supply their whole substring.
+-- @param key Named group key, or nil for an anonymous group.
+-- @return Group-capture pattern.
+-- @usage standard-library-peg.md
 function group(pattern: Pattern, key: value): Pattern
   return _pattern(
     _Cg(pattern.raw, key), _checked_unary(pattern, 1))
 end
 
+--- Select one nested capture or discard all captures.
+-- @param pattern Child providing captures.
+-- @param index 0 discards; 1..32767 selects a capture.
+-- @return Selector-capture pattern.
+-- @usage standard-library-peg.md
 function select_capture(pattern: Pattern,
                         index: integer): Pattern
   if index < 0 or index > MAX_SHORT then
@@ -482,6 +670,11 @@ function select_capture(pattern: Pattern,
     _checked_unary(pattern, 1))
 end
 
+--- Replace captures with a template using %0 for the whole match and %1..%9 for captures.
+-- @param pattern Child providing captures.
+-- @param template Capture replacement template.
+-- @return Template-capture pattern.
+-- @usage standard-library-peg.md
 function template_capture(pattern: Pattern,
                           template: string): Pattern
   return _pattern(
@@ -489,6 +682,11 @@ function template_capture(pattern: Pattern,
     _checked_unary(pattern, 1))
 end
 
+--- Look up a child capture in a Map, preserving its ordinary __index behavior.
+-- @param pattern Child supplying a key, or the whole substring when capture-free.
+-- @param lookup Capture replacement Map.
+-- @return Query-capture pattern.
+-- @usage standard-library-peg.md
 function query_capture(pattern: Pattern,
                        lookup: {value: value}): Pattern
   return _pattern(
@@ -496,6 +694,11 @@ function query_capture(pattern: Pattern,
     _checked_unary(pattern, 1))
 end
 
+--- Transform child captures with a delayed non-yieldable callback.
+-- @param pattern Child providing captures, or its whole substring when capture-free.
+-- @param callback Capture transformer; evaluation may occur zero, one, or multiple times.
+-- @return Function-capture pattern.
+-- @usage standard-library-peg.md
 function function_capture(
     pattern: Pattern,
     callback: function (value, ...: value): (...: value)): Pattern
@@ -511,6 +714,11 @@ end
 
 -- Relabel expressions and convenience operations.
 
+--- Convert a byte position to a one-based line and byte column.
+-- @param subject Source bytes; CR, LF, and CRLF are line endings.
+-- @param position Absolute position in 1..#subject+1.
+-- @return Line and byte column.
+-- @usage standard-library-peg.md
 function line_column(subject: string,
                      position: integer): (integer, integer)
   if position < 1 or position > #subject + 1 then
@@ -538,12 +746,22 @@ function line_column(subject: string,
   return line, position - line_start + 1
 end
 
+--- Create a named Relabel pattern binding for one compile call.
+-- @param name Unique definition name.
+-- @param pattern Pattern bound to %name.
+-- @return Definition value.
+-- @usage standard-library-peg.md
 function define(name: string,
                 pattern: Pattern): Definition
   return Definition(
     name, pattern.raw, pattern.tree_size)
 end
 
+--- Create a named Relabel capture replacement or callback binding.
+-- @param name Unique definition name.
+-- @param candidate Template, selector, Map, or callback; nil and false are rejected.
+-- @return Definition value.
+-- @usage standard-library-peg.md
 function define_value(name: string,
                       candidate: value): Definition
   if candidate == nil or candidate == false then
@@ -552,6 +770,11 @@ function define_value(name: string,
   return Definition(name, candidate, -1)
 end
 
+--- Compile Relabel source or return an existing Pattern unchanged.
+-- @param candidate Relabel source string or Pattern; malformed source raises a syntax diagnostic.
+-- @param definitions Optional dense Array of unique external bindings; ignored for an existing Pattern.
+-- @return Compiled Pattern; source-only compilation uses a weak cache.
+-- @usage standard-library-peg.md
 function compile(
     candidate: value,
     definitions: {Definition}?): Pattern
@@ -570,6 +793,12 @@ function compile(
   return _relabel_compile_source(source, definitions)
 end
 
+--- Search left to right for the first match at or after the initial byte position.
+-- @param subject Binary subject bytes.
+-- @param candidate Relabel source or compiled Pattern.
+-- @param init Initial byte position; nil selects 1, zero selects after the final byte.
+-- @return Match record, or nil after exhaustion or an uncaught committed label.
+-- @usage standard-library-peg.md
 function match(subject: string, candidate: value,
                init: integer?): Match?
   local compiled = compile(candidate)
@@ -592,6 +821,12 @@ function match(subject: string, candidate: value,
   return nil
 end
 
+--- Replace each accepted match with a callback result using the whole matched string.
+-- @param subject Binary subject bytes.
+-- @param candidate Relabel source or compiled Pattern.
+-- @param replacement Nonyielding function receiving the whole match and returning literal replacement bytes.
+-- @return Substituted string, without a replacement count.
+-- @usage standard-library-peg.md
 function gsub(subject: string, candidate: value,
               replacement: function (string): (string)): string
   local compiled = compile(candidate)
@@ -610,6 +845,8 @@ function gsub(subject: string, candidate: value,
   return result as string
 end
 
+--- Rebuild Relabel locale definitions and clear the definition-free source cache.
+-- @usage standard-library-peg.md
 function update_locale()
   _relabel_refresh_locale()
 end

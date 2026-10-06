@@ -1,5 +1,11 @@
 foreign import "network-native.h"
 
+--- Start listening on an initialized stream with the requested backlog.
+-- @param stream Mutable initialized stream_t owner/view; mutations preserve its single owner and reserved native data slot; close completion ends native handle lifetime.
+-- @param backlog Input integer value; checked native narrowing occurs before native ownership is accepted.
+-- @param callback Input ordinary callable, retained until the promised callback interval ends; callback argument owners are borrowed views retained through callback return.
+-- @return Native integer result with the documented lifetime and units.
+-- @usage uv/functions/stream.md#listen
 function listen(stream: stream_t, backlog: integer, callback: connection_cb): integer
   local native = stream:pointer()
   local native_backlog = backlog as foreign int
@@ -24,6 +30,11 @@ function listen(stream: stream_t, backlog: integer, callback: connection_cb): in
   end
 end
 
+--- Move one pending accepted native connection from the listening stream into an initialized compatible client owner.
+-- @param server Mutable initialized stream_t owner/view; mutations preserve its single owner and reserved native data slot; close completion ends native handle lifetime.
+-- @param client Mutable initialized handle_t owner/view; mutations preserve its single owner and reserved native data slot; close completion ends native handle lifetime.
+-- @return Native integer result with the documented lifetime and units.
+-- @usage uv/functions/stream.md#accept
 function accept(server: stream_t, client: handle_t): integer
   local native_server = server:pointer()
   local native_client = client:pointer()
@@ -43,6 +54,12 @@ function accept(server: stream_t, client: handle_t): integer
   return ffi.uv_accept(native_server, native_client as foreign *uv_stream_t)
 end
 
+--- Start stream reads using `alloc_callback` to supply writable `buf_t` storage.
+-- @param stream Mutable initialized stream_t owner/view; mutations preserve its single owner and reserved native data slot; close completion ends native handle lifetime.
+-- @param alloc_callback Input ordinary callable, retained until the promised callback interval ends; callback argument owners are borrowed views retained through callback return.
+-- @param read_callback Input ordinary callable, retained until the promised callback interval ends; callback argument owners are borrowed views retained through callback return.
+-- @return Native integer result with the documented lifetime and units.
+-- @usage uv/functions/stream.md#read_start
 function read_start(stream: stream_t, alloc_callback: alloc_cb, read_callback: read_cb): integer
   local native = stream:pointer()
   if native == nil then return ffi.UV_EINVAL end
@@ -108,6 +125,10 @@ function read_start(stream: stream_t, alloc_callback: alloc_cb, read_callback: r
   end
 end
 
+--- Stop future stream reads.
+-- @param stream Mutable initialized stream_t owner/view; mutations preserve its single owner and reserved native data slot; close completion ends native handle lifetime.
+-- @return Native integer result with the documented lifetime and units.
+-- @usage uv/functions/stream.md#read_stop
 function read_stop(stream: stream_t): integer
   local native = stream:pointer()
   if native == nil then return ffi.UV_EINVAL end
@@ -126,18 +147,31 @@ function read_stop(stream: stream_t): integer
   return status
 end
 
+--- Query whether the stream currently supports the named direction.
+-- @param stream Mutable initialized stream_t owner/view; mutations preserve its single owner and reserved native data slot; close completion ends native handle lifetime.
+-- @return Native boolean result with the documented lifetime and units.
+-- @usage uv/functions/stream.md#is_readable
 function is_readable(stream: stream_t): boolean
   local native = stream:pointer()
   if native == nil then return false end
   return ffi.uv_is_readable(native) ~= 0
 end
 
+--- Query whether the stream currently supports the named direction.
+-- @param stream Mutable initialized stream_t owner/view; mutations preserve its single owner and reserved native data slot; close completion ends native handle lifetime.
+-- @return Native boolean result with the documented lifetime and units.
+-- @usage uv/functions/stream.md#is_writable
 function is_writable(stream: stream_t): boolean
   local native = stream:pointer()
   if native == nil then return false end
   return ffi.uv_is_writable(native) ~= 0
 end
 
+--- Change the stream's native blocking mode.
+-- @param stream Mutable initialized stream_t owner/view; mutations preserve its single owner and reserved native data slot; close completion ends native handle lifetime.
+-- @param blocking Input integer value; checked native narrowing occurs before native ownership is accepted.
+-- @return Native integer result with the documented lifetime and units.
+-- @usage uv/functions/stream.md#stream_set_blocking
 function stream_set_blocking(stream: stream_t, blocking: integer): integer
   local native = stream:pointer()
   local mode = blocking as foreign int
@@ -149,6 +183,10 @@ function stream_set_blocking(stream: stream_t, blocking: integer): integer
   return ffi.uv_stream_set_blocking(native, mode)
 end
 
+--- Return the number of bytes still queued for writing on this stream.
+-- @param stream Mutable initialized stream_t owner/view; mutations preserve its single owner and reserved native data slot; close completion ends native handle lifetime.
+-- @return Native integer result with the documented lifetime and units.
+-- @usage uv/functions/stream.md#stream_get_write_queue_size
 function stream_get_write_queue_size(stream: stream_t): integer
   local native = stream:pointer()
   if native == nil then raise "stream is not initialized" end
@@ -169,6 +207,14 @@ local function transfer_pointer(handle: handle_t?): foreign *uv_stream_t
   return native as foreign *uv_stream_t
 end
 
+--- Queue a vector write and optionally transfer a native handle over an IPC pipe.
+-- @param req Mutable allocated nonpending request owner; accepted submission retains owner until its terminal callback returns; rejection owes no async callback.
+-- @param stream Mutable initialized stream_t owner/view; mutations preserve its single owner and reserved native data slot; close completion ends native handle lifetime.
+-- @param buffers Input byte owner or vector; immutable strings are valid only for input; async submission snapshots descriptors and retains owners, so Array edits cannot alter accepted I/O; do not mutate borrowed byte contents before completion.
+-- @param send_handle Mutable initialized handle_t owner/view; mutations preserve its single owner and reserved native data slot; close completion ends native handle lifetime.
+-- @param callback Input ordinary callable, retained until the promised callback interval ends; callback argument owners are borrowed views retained through callback return.
+-- @return Native integer result with the documented lifetime and units.
+-- @usage uv/functions/stream.md#write2
 function write2(req: write_t, stream: stream_t, buffers: {buf_t},
                  send_handle: handle_t?, callback: write_cb?): integer
   if req.pending then return ffi.UV_EBUSY end
@@ -208,10 +254,24 @@ function write2(req: write_t, stream: stream_t, buffers: {buf_t},
   return status
 end
 
+--- Queue one vector write.
+-- @param req Mutable allocated nonpending request owner; accepted submission retains owner until its terminal callback returns; rejection owes no async callback.
+-- @param stream Mutable initialized stream_t owner/view; mutations preserve its single owner and reserved native data slot; close completion ends native handle lifetime.
+-- @param buffers Input byte owner or vector; immutable strings are valid only for input; async submission snapshots descriptors and retains owners, so Array edits cannot alter accepted I/O; do not mutate borrowed byte contents before completion.
+-- @param callback Input ordinary callable, retained until the promised callback interval ends; callback argument owners are borrowed views retained through callback return.
+-- @return Native integer result with the documented lifetime and units.
+-- @usage uv/functions/stream.md#write
 function write(req: write_t, stream: stream_t, buffers: {buf_t}, callback: write_cb?): integer
   return write2(req, stream, buffers, nil, callback)
 end
 
+--- Write one complete immutable binary string, using an embedded descriptor and retaining the old string through the native callback even when the request is reused.
+-- @param req Native owner or typed view used by this operation.
+-- @param stream Native owner or typed view used by this operation.
+-- @param data Caller-supplied data retained or borrowed for the documented native interval.
+-- @param callback Completion callback; native acceptance determines whether delivery is promised.
+-- @return Native integer result with the documented lifetime and units.
+-- @usage uv/supplemental.md#write_string
 function write_string(req: write_t, stream: stream_t, data: string,
                       callback: write_cb?): integer
   if req.pending then return ffi.UV_EBUSY end
@@ -246,6 +306,12 @@ function write_string(req: write_t, stream: stream_t, data: string,
   return status
 end
 
+--- Attempt an immediate IPC-capable write with an optional borrowed send handle.
+-- @param stream Mutable initialized stream_t owner/view; mutations preserve its single owner and reserved native data slot; close completion ends native handle lifetime.
+-- @param buffers Input byte owner or vector; immutable strings are valid only for input; async submission snapshots descriptors and retains owners, so Array edits cannot alter accepted I/O; do not mutate borrowed byte contents before completion.
+-- @param send_handle Mutable initialized handle_t owner/view; mutations preserve its single owner and reserved native data slot; close completion ends native handle lifetime.
+-- @return Native integer result with the documented lifetime and units.
+-- @usage uv/functions/stream.md#try_write2
 function try_write2(stream: stream_t, buffers: {buf_t}, send_handle: handle_t?): integer
   local native_stream = stream:pointer()
   if native_stream == nil then return ffi.UV_EINVAL end
@@ -265,10 +331,21 @@ function try_write2(stream: stream_t, buffers: {buf_t}, send_handle: handle_t?):
   return ffi.uv_try_write2(native_stream, native_buffers, count, native_send)
 end
 
+--- Attempt an immediate vector write without queuing a request.
+-- @param stream Mutable initialized stream_t owner/view; mutations preserve its single owner and reserved native data slot; close completion ends native handle lifetime.
+-- @param buffers Input byte owner or vector; immutable strings are valid only for input; async submission snapshots descriptors and retains owners, so Array edits cannot alter accepted I/O; do not mutate borrowed byte contents before completion.
+-- @return Native integer result with the documented lifetime and units.
+-- @usage uv/functions/stream.md#try_write
 function try_write(stream: stream_t, buffers: {buf_t}): integer
   return try_write2(stream, buffers, nil)
 end
 
+--- Queue write-side shutdown behind preceding writes.
+-- @param req Mutable allocated nonpending request owner; accepted submission retains owner until its terminal callback returns; rejection owes no async callback.
+-- @param stream Mutable initialized stream_t owner/view; mutations preserve its single owner and reserved native data slot; close completion ends native handle lifetime.
+-- @param callback Input ordinary callable, retained until the promised callback interval ends; callback argument owners are borrowed views retained through callback return.
+-- @return Native integer result with the documented lifetime and units.
+-- @usage uv/functions/stream.md#shutdown
 function shutdown(req: shutdown_t, stream: stream_t, callback: shutdown_cb?): integer
   if req.pending then return ffi.UV_EBUSY end
   local native_stream = stream:pointer()

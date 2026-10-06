@@ -2,10 +2,16 @@ foreign import "fd-native.h"
 
 -- Borrowed OS descriptor/handle token. Native adoption/duplication rules belong
 -- to the operation; collecting this token never closes the descriptor.
+--- A native operating-system descriptor token.
+-- @usage uv/types.md#os_fd_t
 record os_fd_t
   local native: foreign titan_uv_fd_storage
 end
 
+--- Construct an exact-width native identifier token with checked integer conversion.
+-- @param identifier Identifier supplied to the native operation.
+-- @return Native os_fd_t result with the documented lifetime and units.
+-- @usage uv/supplemental.md#os_fd_tfrom_integer
 function os_fd_t.from_integer(identifier: integer): os_fd_t
   local native = foreign titan_uv_fd_storage.new()
   local status = ffi.titan_uv_fd_from_integer(identifier, native)
@@ -13,10 +19,18 @@ function os_fd_t.from_integer(identifier: integer): os_fd_t
   return {native = native}
 end
 
+--- Convert the exact-width native identifier to a Titan integer with checked representability.
+-- @return Native integer result with the documented lifetime and units.
+-- @usage uv/supplemental.md#os_fd_tto_integer
 function os_fd_t:to_integer(): integer
   return ffi.titan_uv_fd_integer(self.native.value)
 end
 
+--- Return `(status, descriptor?)` for an initialized handle with a native descriptor.
+-- @param handle Mutable initialized handle_t owner/view; mutations preserve its single owner and reserved native data slot; close completion ends native handle lifetime.
+-- @return Native status: zero on success, a negative libuv error on failure.
+-- @return Copied or retained os_fd_t result, or nil on failure or absence.
+-- @usage uv/functions/handle.md#fileno
 function fileno(handle: handle_t): (integer, os_fd_t?)
   local pointer = handle:pointer()
   if pointer == nil then return ffi.UV_EINVAL, nil end
@@ -29,6 +43,10 @@ function fileno(handle: handle_t): (integer, os_fd_t?)
   return status, owner
 end
 
+--- Convert a libuv integer file descriptor to its borrowed platform-native file handle token.
+-- @param file Input integer value; checked native narrowing occurs before native ownership is accepted.
+-- @return Native os_fd_t result with the documented lifetime and units.
+-- @usage uv/functions/fs.md#get_osfhandle
 function get_osfhandle(file: integer): os_fd_t
   local fd = file as foreign int
   local native = foreign titan_uv_fd_storage.new()
@@ -38,10 +56,20 @@ end
 
 -- On Windows a successful call transfers this handle to a CRT descriptor.
 -- Unix returns the input descriptor unchanged. The token itself is a borrow.
+--- Wrap a platform-native file handle in an integer descriptor using native ownership rules.
+-- @param handle Input exact-width borrowed native identifier token; collecting the token never closes/adopts its resource; see this operation's transfer rule.
+-- @return Native integer result with the documented lifetime and units.
+-- @usage uv/functions/fs.md#open_osfhandle
 function open_osfhandle(handle: os_fd_t): integer
   return ffi.uv_open_osfhandle(handle.native.value)
 end
 
+--- Initialize readiness polling for a borrowed descriptor/socket.
+-- @param loop Input initialized owning loop; accepted handles/requests retain it through retirement.
+-- @param handle Mutable final poll_t owner in fresh or retired state, before this native initialization; successful initialization establishes a close obligation.
+-- @param socket Input exact-width borrowed native identifier token; collecting the token never closes/adopts its resource; see this operation's transfer rule.
+-- @return Native integer result with the documented lifetime and units.
+-- @usage uv/functions/poll.md#poll_init_socket
 function poll_init_socket(loop: loop_t, handle: poll_t, socket: os_sock_t): integer
   if not loop.initialized or handle.phase == HANDLE_LIVE then return ffi.UV_EINVAL end
   ffi.memset(handle.native, 0, foreign uv_poll_t.sizeof)
@@ -60,6 +88,12 @@ function poll_init_socket(loop: loop_t, handle: poll_t, socket: os_sock_t): inte
   return status
 end
 
+--- Copy an interface name corresponding to an index into a writable buffer and return status and native length.
+-- @param index Input integer value; checked native narrowing occurs before native ownership is accepted.
+-- @param buffer Output writable buf_t; its byte length is capacity and native writes complete synchronously
+-- @return Native status: zero on success, a negative libuv error on failure.
+-- @return Native operation result or submission status; negative values report libuv errors.
+-- @usage uv/functions/misc.md#if_indextoname
 function if_indextoname(index: integer, buffer: buf_t): (integer, integer)
   if not buffer.writable then return ffi.UV_EINVAL, buffer.native.len as integer end
   local native_index = index as foreign unsigned int
@@ -68,6 +102,12 @@ function if_indextoname(index: integer, buffer: buf_t): (integer, integer)
   return status, size
 end
 
+--- Copy the native interface identifier corresponding to an index into a writable buffer and return status and native length.
+-- @param index Input integer value; checked native narrowing occurs before native ownership is accepted.
+-- @param buffer Output writable buf_t; its byte length is capacity and native writes complete synchronously
+-- @return Native status: zero on success, a negative libuv error on failure.
+-- @return Native operation result or submission status; negative values report libuv errors.
+-- @usage uv/functions/misc.md#if_indextoiid
 function if_indextoiid(index: integer, buffer: buf_t): (integer, integer)
   if not buffer.writable then return ffi.UV_EINVAL, buffer.native.len as integer end
   local native_index = index as foreign unsigned int

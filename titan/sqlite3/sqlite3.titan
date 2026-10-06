@@ -1,9 +1,19 @@
+--- Task-aware SQLite connections, prepared statements, streamed results, and transactions.
+-- @module titan.sqlite3
+-- @usage standard-library-sqlite3.md
+
 local async = import "async"
 local uv = import "uv"
 local reflect = import "reflect"
 local string = import "string"
 local math = import "math"
 
+--- A SQLite validation or native-operation failure with optional SQLite result codes.
+-- @field message Human-readable failure description.
+-- @field code Primary native result code, or nil when no native code is available.
+-- @field extended_code Extended SQLite result code, or nil for a nonnative validation failure.
+-- @field operation Operation that reported the failure.
+-- @usage standard-library-sqlite3.md#errors-and-cancellation
 record Error
   const message: string
   const code: integer?
@@ -11,6 +21,8 @@ record Error
   const operation: string
 end
 
+--- An owned SQLite database connection with serialized native work.
+-- @usage standard-library-sqlite3.md#connections-and-statement-lifetime
 record Connection
   local handle: foreign *sqlite3
   local statements: integer
@@ -18,12 +30,17 @@ record Connection
   local active_statement: Statement?
 end
 
+--- A reusable prepared SQL statement owned by one connection.
+-- @usage standard-library-sqlite3.md#connections-and-statement-lifetime
 record Statement
   local const connection: Connection
   local handle: foreign *sqlite3_stmt
   local parameter_count: integer
 end
 
+--- One streamed statement execution with immutable column metadata.
+-- @field columns Ordered immutable column metadata; its length includes SQL NULL cells.
+-- @usage standard-library-sqlite3.md#executing-and-querying
 record Cursor
   const columns: const {Column}
   local const statement: Statement
@@ -159,6 +176,10 @@ local function Statement:require_open(operation: string)
   end
 end
 
+--- Open a SQLite database, including the special :memory: database.
+-- @param name Database filename, URI, or :memory:.
+-- @return Owned database connection.
+-- @usage standard-library-sqlite3.md#connections-and-statement-lifetime
 function connect(name: string): Connection
   check_no_nul(name, "connect")
   -- Allocate the public shell before acquiring the native handle.
@@ -179,6 +200,10 @@ function connect(name: string): Connection
   return connection
 end
 
+--- Compile one SQL statement for repeated binding and execution.
+-- @param sql One SQL statement to prepare.
+-- @return Reusable prepared statement; close it before closing the connection.
+-- @usage standard-library-sqlite3.md#connections-and-statement-lifetime
 function Connection:prepare(sql: string): Statement
   self:reserve("prepare", true)
   defer self.busy = false
@@ -198,6 +223,8 @@ function Connection:prepare(sql: string): Statement
   return statement
 end
 
+--- Close a database connection after its statements are released.
+-- @usage standard-library-sqlite3.md#connections-and-statement-lifetime
 function Connection:close()
   if not self.handle then return end
   self:reserve("close", false)
@@ -221,6 +248,8 @@ function Connection:close()
   check_result(packet, "close")
 end
 
+--- Finalize this statement after its active cursor is released.
+-- @usage standard-library-sqlite3.md#connections-and-statement-lifetime
 function Statement:close()
   if not self.handle then return end
   self.connection:reserve("statement.close", true)
@@ -258,14 +287,21 @@ local function Connection:transaction(worker: foreign function (*void): void,
   check_result(packet, operation)
 end
 
+--- Commit an active transaction, or do nothing in autocommit mode.
+-- @usage standard-library-sqlite3.md#transactions
 function Connection:commit()
   self:transaction(sqlite_commit_worker, "commit")
 end
 
+--- Roll back an active transaction, or do nothing in autocommit mode.
+-- @usage standard-library-sqlite3.md#transactions
 function Connection:rollback()
   self:transaction(sqlite_rollback_worker, "rollback")
 end
 
+--- Read SQLite's actual transaction state.
+-- @return True when SQLite is outside an explicit transaction.
+-- @usage standard-library-sqlite3.md#transactions
 function Connection:get_autocommit(): boolean
   self:reserve("get_autocommit", true)
   defer self.busy = false
@@ -276,6 +312,9 @@ function Connection:get_autocommit(): boolean
   return packet.autocommit ~= 0
 end
 
+--- Begin a deferred transaction when false, or commit when true.
+-- @param autocommit True commits the active transaction; false begins one when needed.
+-- @usage standard-library-sqlite3.md#transactions
 function Connection:set_autocommit(autocommit: boolean)
   if autocommit then
     self:transaction(sqlite_commit_worker, "set_autocommit")
@@ -284,6 +323,10 @@ function Connection:set_autocommit(autocommit: boolean)
   end
 end
 
+--- Bind values and execute a statement without returning rows.
+-- @param ... SQL binding values in placeholder order, including nil for SQL NULL.
+-- @return Number of rows changed by this execution.
+-- @usage standard-library-sqlite3.md#executing-and-querying
 function Statement:execute(...: value): integer
   self:require_open("execute")
   self.connection:reserve("execute", false)
@@ -299,6 +342,10 @@ function Statement:execute(...: value): integer
   return packet.changes
 end
 
+--- Bind values and start a streamed query execution.
+-- @param ... SQL binding values in placeholder order, including nil for SQL NULL.
+-- @return Cursor owning this execution until exhaustion or close.
+-- @usage standard-library-sqlite3.md#executing-and-querying
 function Statement:query(...: value): Cursor
   self:require_open("query")
   self.connection:reserve("query", false)
@@ -326,6 +373,9 @@ function Statement:query(...: value): Cursor
   return cursor
 end
 
+--- Return the next copied row, or nil after exhaustion.
+-- @return Copied row, or nil after the query is exhausted.
+-- @usage standard-library-sqlite3.md#executing-and-querying
 function Cursor:fetch(): Row?
   if self.closed then
     raise Error {
@@ -370,6 +420,8 @@ function Cursor:fetch(): Row?
   return row
 end
 
+--- Retire this execution and make its prepared statement reusable.
+-- @usage standard-library-sqlite3.md#executing-and-querying
 function Cursor:close()
   if self.closed then return end
   if self.exhausted then

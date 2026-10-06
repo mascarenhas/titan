@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
+source "$(dirname "$0")/windows_build_profile.sh"
+titan_windows_profile production
 if [[ $# != 2 || ${MSYSTEM:-} != CLANG64 ]]; then
   echo 'usage (native CLANG64): build_windows_native.sh BUILD_ROOT PREFIX' >&2
   exit 2
@@ -14,12 +16,14 @@ mkdir -p "$work"
 configuration=$(mktemp "$work/.configuration.XXXXXX")
 trap 'rm -f "$configuration"' EXIT
 : "${CC:=clang}" "${CXX:=clang++}" "${AR:=llvm-ar}" "${RANLIB:=llvm-ranlib}"
-: "${NATIVE_CFLAGS:=-O2}" "${NATIVE_CPPFLAGS:=}" "${NATIVE_LDFLAGS:=}"
+titan_windows_default_flags NATIVE_CFLAGS '-O2' '-O0 -fno-lto'
+titan_windows_default_flags NATIVE_LDFLAGS '' '-O0 -fno-lto'
+: "${NATIVE_CPPFLAGS:=}"
 # CMake and OpenSSL both accept the effective command through their normal
 # environment. Changing it rebuilds the owned private directories below.
 export CC CXX AR RANLIB
 {
-  printf '%s\n' 'titan-windows-native-v1' "PREFIX=$prefix" \
+  printf '%s\n' 'titan-windows-native-v1' "PROFILE=$TITAN_BUILD_PROFILE" "PREFIX=$prefix" \
     "CC=$CC" "CXX=$CXX" "AR=$AR" "RANLIB=$RANLIB" \
     "CFLAGS=$NATIVE_CFLAGS" "CPPFLAGS=$NATIVE_CPPFLAGS" "LDFLAGS=$NATIVE_LDFLAGS"
   # Parse the compiler command without invoking shell expansion.
@@ -27,7 +31,7 @@ export CC CXX AR RANLIB
     'my @c=shellwords($ENV{CC}); die "Invalid CC\n" unless @c; system(@c,"--version")==0 or die "CC failed\n"'
   cmake --version
   perl -MDigest::SHA -e 'for my $p (@ARGV) { open my $f,"<:raw",$p or die $!; print Digest::SHA->new(256)->addfile($f)->hexdigest,"  ",$p,"\n"; }' \
-    scripts/build_windows_native.sh scripts/prepare_windows_native.pl \
+    scripts/build_windows_native.sh scripts/windows_build_profile.sh scripts/prepare_windows_native.pl \
     vendor/windows-native/dependencies.tsv vendor/windows-native/CMakeLists.txt
 } > "$configuration"
 prepare_build_directory() {

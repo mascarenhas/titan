@@ -9,6 +9,7 @@ on:
 # Match the two CPUs on standard private-repository hosted runners for Make's
 # native dependency DAG and each titanc invocation.
 env:
+  TITAN_BUILD_PROFILE: validation
   MAKEFLAGS: "-j2"
   TITAN_JOBS: "2"
   TITAN_ABI_VERSION: "2"
@@ -16,14 +17,14 @@ env:
   OPENSSL_MODE: bundled
 
 jobs:
-  # Build and install the regular Linux tree once, run every uncovered
-  # runtime/stdlib gate on that warm producer, and give the compiler/LuaCov
-  # consumers pristine copies of the optimized bundled tree.
+  # Build the isolated O0/no-LTO validation tree once, run every uncovered
+  # runtime/stdlib gate on that warm producer, and give compiler/LuaCov
+  # consumers pristine copies of the same bundled validation tree.
   test-linux-stdlib:
     name: stdlib (ubuntu-24.04, build+all-no-coverage)
     if: github.event_name == 'push'
     runs-on: ubicloud-standard-2
-    # The optimized producer also runs both production dependency smokes.
+    # The validation producer also runs both dependency-mode smokes.
     timeout-minutes: 45
     permissions:
       contents: read
@@ -33,9 +34,11 @@ jobs:
       TITAN_PREFIX: ${{ github.workspace }}/.lua
       # Exercise the immutable/minimal-host path in the regular Linux build.
       READLINE_MODE: bundled
+      # GNU lists this mirror; the pinned source checksum remains required.
+      READLINE_URL: https://mirror.csclub.uwaterloo.ca/gnu/readline/readline-8.3.tar.gz
       LIBUV_VERSION: "1.53.0"
       # Bump when any CMake option that affects the cached archive changes.
-      LIBUV_BUILD_PROFILE: "static-pic-release-tests-off-v2"
+      LIBUV_BUILD_PROFILE: "static-pic-validation-tests-off-v2"
       LLHTTP_VERSION: "9.4.3"
       LLHTTP_SHA256: "1eb813c7437b31a87496a1cd3ed79f00746720f5e7e29c79b42c02cb69f36c39"
       LLHTTP_BUILD_PROFILE: "static-pic-hidden-c99-v1"
@@ -71,9 +74,9 @@ jobs:
             .lua/lib/lua/5.5
             .lua/lib/luarocks
             .lua/share/lua/5.5
-          key: ubuntu-24.04-${{ runner.arch }}-prefix-system-tree-v2-abi-${{ env.TITAN_ABI_VERSION }}-rocks-3.13.0-${{ hashFiles('titan-0.6.0-1.rockspec') }}
+          key: ubuntu-24.04-${{ runner.arch }}-${{ env.TITAN_BUILD_PROFILE }}-prefix-system-tree-host-optimized-v1-abi-${{ env.TITAN_ABI_VERSION }}-rocks-3.13.0-${{ hashFiles('titan-0.6.0-1.rockspec') }}
           restore-keys: |
-            ubuntu-24.04-${{ runner.arch }}-prefix-system-tree-v2-abi-${{ env.TITAN_ABI_VERSION }}-rocks-3.13.0-
+            ubuntu-24.04-${{ runner.arch }}-${{ env.TITAN_BUILD_PROFILE }}-prefix-system-tree-host-optimized-v1-abi-${{ env.TITAN_ABI_VERSION }}-rocks-3.13.0-
 
       - name: Cache bundled libuv source and static build
         uses: ubicloud/cache@v4
@@ -82,9 +85,9 @@ jobs:
             libuv-v${{ env.LIBUV_VERSION }}
             libuv-v${{ env.LIBUV_VERSION }}.tar.gz
             libuv-build
-          key: ubuntu-24.04-${{ runner.arch }}-libuv-${{ env.LIBUV_VERSION }}-${{ env.LIBUV_BUILD_PROFILE }}-${{ hashFiles('vendor/libuv/*.patch') }}
+          key: ubuntu-24.04-${{ runner.arch }}-${{ env.TITAN_BUILD_PROFILE }}-libuv-${{ env.LIBUV_VERSION }}-${{ env.LIBUV_BUILD_PROFILE }}-${{ hashFiles('vendor/libuv/*.patch') }}
           restore-keys: |
-            ubuntu-24.04-${{ runner.arch }}-libuv-${{ env.LIBUV_VERSION }}-${{ env.LIBUV_BUILD_PROFILE }}-
+            ubuntu-24.04-${{ runner.arch }}-${{ env.TITAN_BUILD_PROFILE }}-libuv-${{ env.LIBUV_VERSION }}-${{ env.LIBUV_BUILD_PROFILE }}-
 
       - name: Cache bundled llhttp source and static build
         uses: ubicloud/cache@v4
@@ -93,9 +96,9 @@ jobs:
             llhttp-release-v${{ env.LLHTTP_VERSION }}
             llhttp-release-v${{ env.LLHTTP_VERSION }}.tar.gz
             llhttp-build
-          key: ubuntu-24.04-${{ runner.arch }}-llhttp-${{ env.LLHTTP_VERSION }}-${{ env.LLHTTP_SHA256 }}-${{ env.LLHTTP_BUILD_PROFILE }}
+          key: ubuntu-24.04-${{ runner.arch }}-${{ env.TITAN_BUILD_PROFILE }}-llhttp-${{ env.LLHTTP_VERSION }}-${{ env.LLHTTP_SHA256 }}-${{ env.LLHTTP_BUILD_PROFILE }}
           restore-keys: |
-            ubuntu-24.04-${{ runner.arch }}-llhttp-${{ env.LLHTTP_VERSION }}-${{ env.LLHTTP_SHA256 }}-
+            ubuntu-24.04-${{ runner.arch }}-${{ env.TITAN_BUILD_PROFILE }}-llhttp-${{ env.LLHTTP_VERSION }}-${{ env.LLHTTP_SHA256 }}-
 
       - name: Cache bundled SQLite amalgamation and static build
         uses: ubicloud/cache@v4
@@ -104,9 +107,9 @@ jobs:
             sqlite-autoconf-${{ env.SQLITE3_RELEASE }}
             sqlite-autoconf-${{ env.SQLITE3_RELEASE }}.tar.gz
             sqlite3-build
-          key: ubuntu-24.04-${{ runner.arch }}-sqlite3-${{ env.SQLITE3_VERSION }}-${{ env.SQLITE3_SHA256 }}-${{ env.SQLITE3_BUILD_PROFILE }}
+          key: ubuntu-24.04-${{ runner.arch }}-${{ env.TITAN_BUILD_PROFILE }}-sqlite3-${{ env.SQLITE3_VERSION }}-${{ env.SQLITE3_SHA256 }}-${{ env.SQLITE3_BUILD_PROFILE }}
           restore-keys: |
-            ubuntu-24.04-${{ runner.arch }}-sqlite3-${{ env.SQLITE3_VERSION }}-${{ env.SQLITE3_SHA256 }}-
+            ubuntu-24.04-${{ runner.arch }}-${{ env.TITAN_BUILD_PROFILE }}-sqlite3-${{ env.SQLITE3_VERSION }}-${{ env.SQLITE3_SHA256 }}-
 
       - name: Cache bundled OpenSSL source and static build
         uses: ubicloud/cache@v4
@@ -115,16 +118,16 @@ jobs:
             openssl-${{ env.OPENSSL_VERSION }}
             openssl-${{ env.OPENSSL_VERSION }}.tar.gz
             openssl-build
-          key: ubuntu-24.04-${{ runner.arch }}-openssl-${{ env.OPENSSL_VERSION }}-${{ env.OPENSSL_SHA256 }}-${{ env.OPENSSL_BUILD_PROFILE }}
+          key: ubuntu-24.04-${{ runner.arch }}-${{ env.TITAN_BUILD_PROFILE }}-openssl-${{ env.OPENSSL_VERSION }}-${{ env.OPENSSL_SHA256 }}-${{ env.OPENSSL_BUILD_PROFILE }}
           restore-keys: |
-            ubuntu-24.04-${{ runner.arch }}-openssl-${{ env.OPENSSL_VERSION }}-${{ env.OPENSSL_SHA256 }}-
+            ubuntu-24.04-${{ runner.arch }}-${{ env.TITAN_BUILD_PROFILE }}-openssl-${{ env.OPENSSL_VERSION }}-${{ env.OPENSSL_SHA256 }}-
 
       - name: Install regular build dependencies
         run: sudo apt-get update && sudo apt-get install -y cmake curl libssl-dev libtinfo-dev perl pkg-config
 
       - name: Prepare the standalone prefix
         run: |
-          make lua
+          make lua READLINE_URL="$READLINE_URL"
           grep -qx 'provider=bundled' \
             "lua-5.5.1/.titan-readline-8.3-p3.config"
           test -f \
@@ -141,7 +144,7 @@ jobs:
           config_mtime="$(stat -c %Y "$config")"
           stamp_mtime="$(stat -c %Y "$stamp")"
           archive_mtime="$(stat -c %Y "$archive")"
-          make readline
+          make readline READLINE_URL="$READLINE_URL"
           test "$(stat -c %Y "$config")" = "$config_mtime"
           test "$(stat -c %Y "$stamp")" = "$stamp_mtime"
           test "$(stat -c %Y "$archive")" = "$archive_mtime"
@@ -213,9 +216,9 @@ jobs:
         uses: ubicloud/cache/restore@v4
         with:
           path: .lua/var/cache/titan-probes/2
-          key: titan-probes-2-${{ runner.os }}-${{ runner.arch }}-test-linux-stdlib-${{ github.sha }}
+          key: titan-probes-2-${{ runner.os }}-${{ runner.arch }}-${{ env.TITAN_BUILD_PROFILE }}-test-linux-stdlib-${{ github.sha }}
           restore-keys: |
-            titan-probes-2-${{ runner.os }}-${{ runner.arch }}-test-linux-stdlib-
+            titan-probes-2-${{ runner.os }}-${{ runner.arch }}-${{ env.TITAN_BUILD_PROFILE }}-test-linux-stdlib-
 
       - name: Build and install the rock
         # The dependency cache may contain the preceding commit's installed
@@ -286,9 +289,9 @@ jobs:
       # preserves the Runtime-shutdown lifetime oracle's 15-second boundary.
       - name: Run all stdlib/runtime tests without coverage
         # These tests compile disposable fixtures and alternate images. The
-        # installed bundled provider packed above remains the optimized
-        # production image, and macOS repeats the complete suite at -O3.
-        # Disposable fixtures skip Linux LTO at both compile and link time.
+        # installed provider, runtime, native dependencies and child compilers
+        # use the same O0/no-LTO validation profile. The tiny LTO/default
+        # compiler smoke retains the ordinary optimized shipping contract.
         env:
           TITAN_EXTRA_CFLAGS: "-O0 -fno-lto"
           TITAN_EXTRA_LDFLAGS: "-fno-lto"
@@ -474,7 +477,7 @@ jobs:
     name: sanitizer (ubuntu-24.04, ASan+UBSan)
     if: github.event_name == 'push'
     runs-on: ubicloud-standard-2
-    timeout-minutes: 35
+    timeout-minutes: 75
     env:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
       PREFIX: ${{ github.workspace }}/.lua
@@ -500,26 +503,30 @@ jobs:
       # Generated Titan translation units are large enough that combining
       # optimization with sanitizer instrumentation can exhaust this job's
       # budget. O0 retains the complete ASan/UBSan instrumentation;
-      # Lua and bundled native dependencies remain at O1 below. Keep LTO off
+      # Lua and parser dependencies stay optimized; other native dependencies
+      # remain at O0 below. Keep LTO off
       # so saved translation-unit bytes still match the diagnostic shadow.
       SANITIZER_FLAGS: "-O0 -fno-lto -g -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer"
       # Make's content stamps deliberately revisit native dependencies from
-      # later targets, so their complete O1 configuration must remain in the
+      # later targets, so their complete configuration must remain in the
       # environment for the whole job rather than being supplied to only the
       # first build.
-      LUA_MYCFLAGS: "-fPIC -O1 -g -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer"
-      LUA_MYLDFLAGS: "-O1 -g -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer"
-      LUA_MYLIBS: "-O1 -g -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer"
-      LIBBT_CFLAGS: "-fPIC -O1 -g -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer"
+      LUA_MYCFLAGS: "-fPIC -O1 -fno-lto -g -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer"
+      LUA_MYLDFLAGS: "-O1 -fno-lto -g -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer"
+      LUA_MYLIBS: "-O1 -fno-lto -g -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer"
+      COMPILER_DEPS_CFLAGS: "-O1 -fno-lto -fPIC -g -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer"
+      COMPILER_DEPS_LDFLAGS: "-O1 -fno-lto -g -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer"
+      LPEGLABEL_BUILD_CFLAGS: "-O1 -fno-lto"
+      LIBBT_CFLAGS: "-fPIC -O0 -fno-lto -g -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer"
       LIBUV_BUILD_PROFILE: "static-pic-debug-tests-off-asan-ubsan-v2"
       LIBUV_BUILD_TYPE: Debug
-      LIBUV_BUILD_CFLAGS: "-O1 -g -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer"
-      LLHTTP_BUILD_CFLAGS: "-O1 -g -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer"
-      SQLITE3_BUILD_CFLAGS: "-O1 -g -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer"
-      OPENSSL_BUILD_CFLAGS: "-O1 -g -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer"
+      LIBUV_BUILD_CFLAGS: "-O0 -fno-lto -g -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer"
+      LLHTTP_BUILD_CFLAGS: "-O0 -fno-lto -g -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer"
+      SQLITE3_BUILD_CFLAGS: "-O0 -fno-lto -g -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer"
+      OPENSSL_BUILD_CFLAGS: "-O0 -fno-lto -g -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer"
       OPENSSL_EXTRA_CONFIGURE_FLAGS: "no-asm"
       TITAN_EXTRA_CFLAGS: "-O0 -fno-lto -g -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer"
-      TITAN_EXTRA_LDFLAGS: "-O1 -fno-lto -g -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer"
+      TITAN_EXTRA_LDFLAGS: "-O0 -fno-lto -g -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer"
       # Every Titan image intentionally embeds the vendored static Lua archive;
       # disable only ASan's cross-image ODR diagnostic for those duplicate Lua
       # globals. Address, bounds, lifetime, and leak checks remain enabled.
@@ -587,7 +594,7 @@ jobs:
               "libuv_profile=$LIBUV_BUILD_PROFILE" \
               "libuv_type=$LIBUV_BUILD_TYPE" \
               "libuv_cflags=$LIBUV_BUILD_CFLAGS" \
-              "rock_cflags=${ROCK_CFLAGS:--O2 -fPIC}" \
+              "rock_cflags=${ROCK_CFLAGS:--O0 -fno-lto -fPIC}" \
               "titan_cppflags=${TITAN_EXTRA_CPPFLAGS:-}" \
               "titan_cflags=$TITAN_EXTRA_CFLAGS" \
               "llhttp_cflags=$LLHTTP_BUILD_CFLAGS" \
@@ -633,7 +640,7 @@ jobs:
             openssl-${{ env.SANITIZER_OPENSSL_VERSION }}
             openssl-${{ env.SANITIZER_OPENSSL_VERSION }}.tar.gz
             openssl-build
-          key: titan-sanitizer-native-${{ env.SANITIZER_NATIVE_CACHE_SCHEMA }}-${{ runner.os }}-${{ runner.arch }}-${{ steps.sanitizer-native-cache-key.outputs.digest }}
+          key: titan-sanitizer-native-${{ env.SANITIZER_NATIVE_CACHE_SCHEMA }}-${{ runner.os }}-${{ runner.arch }}-${{ env.TITAN_BUILD_PROFILE }}-${{ steps.sanitizer-native-cache-key.outputs.digest }}
 
       - name: Build sanitizer-enabled native dependencies
         run: |
@@ -699,9 +706,9 @@ jobs:
         uses: ubicloud/cache@v4
         with:
           path: .lua/var/cache/titan-probes/2
-          key: titan-probes-2-${{ runner.os }}-${{ runner.arch }}-sanitizer-${{ github.sha }}
+          key: titan-probes-2-${{ runner.os }}-${{ runner.arch }}-${{ env.TITAN_BUILD_PROFILE }}-sanitizer-${{ github.sha }}
           restore-keys: |
-            titan-probes-2-${{ runner.os }}-${{ runner.arch }}-sanitizer-
+            titan-probes-2-${{ runner.os }}-${{ runner.arch }}-${{ env.TITAN_BUILD_PROFILE }}-sanitizer-
 
       - name: Build sanitizer-enabled Titan artifacts
         run: |
@@ -726,6 +733,10 @@ jobs:
             test ! -L "$PREFIX/share/titan/0.6/src/titan/test.titan"
           readelf -Ws .lua/bin/lua | grep __asan_
           readelf -Ws .lua/bin/lua | grep __ubsan_
+          for module in lpeglabel lfs; do
+            readelf -Ws "$PREFIX/lib/lua/5.5/$module.so" | grep __asan_
+            readelf -Ws "$PREFIX/lib/lua/5.5/$module.so" | grep __ubsan_
+          done
           readelf -Ws "$provider" | grep __asan_
           readelf -Ws "$provider" | grep __ubsan_
 

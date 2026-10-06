@@ -2,6 +2,7 @@ local types = require "titan-compiler.types"
 local util = require "titan-compiler.util"
 local cdeclarator = require "titan-compiler.cdeclarator"
 local platform = require "titan-compiler.platform"
+local documentation = require "titan-compiler.documentation"
 
 local sourceinterface = {}
 
@@ -210,6 +211,17 @@ local SCHEMAS = {
     },
 }
 
+-- Documentation belongs to source-visible declaration identity, including
+-- private declarations exposed by `.titan` imports. It remains detached data.
+for _, tag in ipairs({
+    "Type.Field", "Type.Variant", "Type.Method", "Type.StaticMethod",
+    "Type.Record", "Type.Union", "Type.Interface", "Type.ModuleMember",
+    "Type.ModuleVariable",
+}) do
+    local schema = SCHEMAS[tag]
+    schema[#schema + 1] = { "_documentation", "documentation" }
+end
+
 local Encoder = {}
 Encoder.__index = Encoder
 
@@ -308,12 +320,36 @@ function Encoder:type_map(value, label)
     return tuple("m", table.concat(out))
 end
 
+function Encoder:documentation(value, label)
+    if value == nil then return "n" end
+    local doc = documentation.copy(value)
+    local tags = self:list(doc.tags, label .. " tags", function(_, tag)
+        return tuple("t", atom(tag.name), atom(tag.value))
+    end)
+    return tuple("D", atom(doc.summary), atom(doc.description), tags)
+end
+
+function Encoder:documentation_map(value, label)
+    if value == nil then return "n" end
+    local docs, names = documentation.copy_map(value), {}
+    for name in pairs(docs) do names[#names + 1] = name end
+    table.sort(names, util.bytewise_less)
+    local out = { atom(#names) }
+    for _, name in ipairs(names) do
+        out[#out + 1] = atom(name)
+        out[#out + 1] = self:documentation(docs[name], label .. " member " .. name)
+    end
+    return tuple("m", table.concat(out))
+end
+
 function Encoder:field(value, spec, owner_tag)
     local name, kind = spec[1], spec[2]
     local field = value[name]
     local label = owner_tag .. " field " .. name
     if kind == "atom" then
         return atom(field, label)
+    elseif kind == "documentation" then
+        return self:documentation(field, label)
     elseif kind == "flag" then
         return atom(field == true)
     elseif kind == "type" then
@@ -434,7 +470,9 @@ local function encode_source_delta(modtype, header_inputs)
         encoder:type_map(modtype.source_type_members or {},
             "source module type members"),
         encoder:type_list(public_nominals,
-            "public nominal source views"))
+            "public nominal source views"),
+        encoder:documentation_map(modtype._type_documentation,
+            "source module type documentation"))
 end
 
 function sourceinterface.serialize(entry)

@@ -1,3 +1,7 @@
+--- Private Relabel source compilation, definitions, and syntax diagnostics.
+-- @module titan.peg
+-- @usage standard-library-peg.md
+
 -- Titan translation of LPegLabel's relabel.lua from release v1.6.2-1,
 -- commit 912b0b9e8641074408ffc2259e069b188e0c717b.
 -- Copyright (c) 2014-2022 Sérgio Medeiros. MIT terms are reproduced in

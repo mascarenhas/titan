@@ -65,6 +65,7 @@ Two facts shape everything downstream of the checker:
 
 | Chapter | Covers |
 | --- | --- |
+| [Documentation comments](documentation-comments.md) | LDoc-style summaries and tags retained for editor hover and completion. |
 | [AST and typedecl](ast-typedecl.md) | The `typedecl` constructor convention, `_tag` string dispatch, the full AST inventory (including written `ExpCast`/`ExpIs`), the decorations the checker adds, and what it costs to add a node or type. |
 | [Lexer and parser](lexer-parser.md) | Scannerless LPegLabel grammar with bounded terminal lookahead, committed alternatives, fold captures, iterative operator precedence, parse-time desugarings, semantic statement/spread boundaries, labeled errors, and transactional location tracking. |
 | [The type checker](checker.md) | Two-pass checking, scopes, checker-owned assignment/open/boundary plans, shared written cast/type-test validation, and how the checker decorates and rewrites the AST so the code generator never rediscovers a relation. |

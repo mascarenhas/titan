@@ -1,3 +1,7 @@
+--- Task-aware TCP connections, address resolution, and listeners.
+-- @module titan.net
+-- @usage standard-library-net.md
+
 local uv = import "uv"
 local async = import "async"
 local string = import "string"
@@ -12,6 +16,8 @@ local const CONNECTION_CONNECTING = 1
 local const CONNECTION_CONNECTED = 2
 local const CONNECTION_FAILED = 3
 
+--- An owned TCP byte stream with one waiting reader and ordered native writes.
+-- @usage standard-library-net.md#connecting-and-listening
 record Connection
   local handle: uv.tcp_t
   local handle_view: uv.handle_t
@@ -25,6 +31,8 @@ record Connection
   local phase: integer
 end
 
+--- An owned TCP listener with one waiting acceptor.
+-- @usage standard-library-net.md#connecting-and-listening
 record Server
   local handle: uv.tcp_t
   local handle_view: uv.handle_t
@@ -419,6 +427,11 @@ local function read(connection: Connection): string?
   end
 end
 
+--- Resolve a host and port asynchronously into typed addresses in resolver order.
+-- @param host Connection hostname, numeric IP, or local bind address.
+-- @param port Numeric TCP port.
+-- @return Copied endpoint addresses in resolver order.
+-- @usage standard-library-net.md#connecting-and-listening
 function resolve(host: string, port: integer): {uv.sockaddr_t}
   check_host(host)
   check_connect_port(port)
@@ -426,12 +439,18 @@ function resolve(host: string, port: integer): {uv.sockaddr_t}
   return resolve_addresses(host, port)
 end
 
+--- Create an unconnected TCP owner for dialing an already resolved address.
+-- @return New unconnected owner bound to the current Runtime.
+-- @usage standard-library-net.md#connecting-and-listening
 function Connection.new(): Connection
   async.running()
   async.checkpoint()
   return new_connection(async.current_loop())
 end
 
+--- Connect this fresh TCP owner to one resolved address.
+-- @param address Complete resolved endpoint address.
+-- @usage standard-library-net.md#connecting-and-listening
 function Connection:connect_address(address: uv.sockaddr_t)
   validate(self.handle_view, self.loop, "connect")
   async.checkpoint()
@@ -461,6 +480,11 @@ function Connection:connect_address(address: uv.sockaddr_t)
   end
 end
 
+--- Resolve and connect to the first reachable address in resolver order.
+-- @param host Connection hostname, numeric IP, or local bind address.
+-- @param port Numeric TCP port.
+-- @return New connected TCP stream; the caller owns closing it.
+-- @usage standard-library-net.md#connecting-and-listening
 function connect(host: string, port: integer): Connection
   local addresses = resolve(host, port)
   local loop = async.current_loop()
@@ -483,6 +507,12 @@ function connect(host: string, port: integer): Connection
   raise operation_error(uv.EADDRNOTAVAIL, "net.connect")
 end
 
+--- Listen for TCP clients on a local host and port.
+-- @param host Connection hostname, numeric IP, or local bind address.
+-- @param port Numeric TCP port.
+-- @param backlog Positive listen backlog; nil defaults to 128.
+-- @return New TCP listener; the caller owns closing it.
+-- @usage standard-library-net.md#connecting-and-listening
 function listen(host: string, port: integer,
                 backlog: integer?): Server
   check_host(host)
@@ -512,10 +542,18 @@ function listen(host: string, port: integer,
   raise operation_error(last_status, "net.listen")
 end
 
+--- Read the next buffered byte chunk, or nil at EOF.
+-- @return Copied bytes or text, or nil at EOF or when absent.
+-- @usage standard-library-net.md#reading
 function Connection:read(): string?
   return read(self)
 end
 
+--- Read through a nonempty delimiter across chunks, retaining the unused suffix.
+-- @param delimiter Nonempty byte delimiter to include or remove.
+-- @param chop Remove the delimiter when true; nil or false retains it.
+-- @return Copied bytes or text, or nil at EOF or when absent.
+-- @usage standard-library-net.md#reading
 function Connection:read_until(delimiter: string,
                                chop: boolean?): string?
   if is_closed(self.handle_view) then
@@ -568,6 +606,9 @@ function Connection:read_until(delimiter: string,
   return nil
 end
 
+--- Write immutable binary bytes and wait for native completion.
+-- @param data Immutable binary bytes to write or decode.
+-- @usage standard-library-net.md#writing-shutdown-and-close
 function Connection:write(data: string)
   validate(self.handle_view, self.loop, "write to")
   if self.phase ~= CONNECTION_CONNECTED then
@@ -585,6 +626,8 @@ function Connection:write(data: string)
   end
 end
 
+--- Finish earlier writes and half-close output while retaining input.
+-- @usage standard-library-net.md#writing-shutdown-and-close
 function Connection:shutdown()
   validate(self.handle_view, self.loop, "shut down")
   if self.phase ~= CONNECTION_CONNECTED then
@@ -600,6 +643,8 @@ function Connection:shutdown()
   end
 end
 
+--- Close both directions, discard buffered input, and release this connection.
+-- @usage standard-library-net.md#writing-shutdown-and-close
 function Connection:close()
   self.excess = ""
   self.read_buffer = nil
@@ -608,6 +653,9 @@ function Connection:close()
   self.input:close()
 end
 
+--- Wait for and return the next accepted TCP connection.
+-- @return Accepted connection whose close ownership transfers to the caller.
+-- @usage standard-library-net.md#accepting
 function Server:accept(): Connection
   if self.failure ~= nil then raise self.failure end
   validate(self.handle_view, self.loop, "accept on")
@@ -623,6 +671,8 @@ function Server:accept(): Connection
   end
 end
 
+--- Close the listener and unaccepted clients, releasing a blocked acceptor.
+-- @usage standard-library-net.md#writing-shutdown-and-close
 function Server:close()
   if is_closed(self.handle_view) then return end
   validate(self.handle_view, self.loop, "close")

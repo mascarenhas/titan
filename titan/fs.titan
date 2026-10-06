@@ -1,3 +1,7 @@
+--- Task-aware files, filesystem metadata, path operations, and change notifications.
+-- @module titan.fs
+-- @usage standard-library-fs.md
+
 local async = import "titan.async"
 local uv = import "titan.uv"
 local string = import "titan.string"
@@ -5,11 +9,22 @@ foreign import "fs_platform.h"
 
 local READ_CHUNK_BYTES = 64 * 1024
 
+--- Application-owned binary file descriptor; close it explicitly after use.
+-- @usage standard-library-fs.md
 record File
   local handle: integer
   local excess: string
 end
 
+--- Filesystem metadata with an opaque device/inode identity pair.
+-- @field size File size in bytes.
+-- @field kind file, directory, symlink, or other.
+-- @field mode Host file mode bits.
+-- @field device Opaque host device bit pattern; may be negative.
+-- @field inode Opaque host inode bit pattern; may be negative.
+-- @field modified_seconds Modification timestamp seconds.
+-- @field modified_nanoseconds Nanosecond component of the modification timestamp.
+-- @usage standard-library-fs.md
 record Stat
   size: integer
   kind: string
@@ -199,6 +214,11 @@ local function File:require_open()
   if self.handle < 0 then raise "File is closed" end
 end
 
+--- Open a binary file in a running Task; the caller owns its close.
+-- @param path File path without embedded NUL.
+-- @param mode r, w, a, or their + forms, with optional b.
+-- @return Open File.
+-- @usage standard-library-fs.md
 function open(path: string, mode: string): File
   checked_path(path, "fs.open")
   local flags = open_flags(mode)
@@ -216,6 +236,10 @@ function open(path: string, mode: string): File
   end
 end
 
+--- Read a byte chunk, returning nil only when no bytes remain at EOF.
+-- @param max_bytes Maximum chunk size; nil defaults to 64 KiB.
+-- @return Read bytes or nil at EOF.
+-- @usage standard-library-fs.md
 function File:read(max_bytes: integer?): string?
   local requested = READ_CHUNK_BYTES
   if max_bytes then requested = max_bytes end
@@ -243,6 +267,11 @@ function File:read(max_bytes: integer?): string?
   end)
 end
 
+--- Read through a delimiter, retaining bytes beyond it for the next read.
+-- @param delimiter Nonempty binary delimiter, matched across chunk boundaries.
+-- @param chop True removes the delimiter from the returned bytes.
+-- @return Delimited bytes or final suffix, or nil at EOF.
+-- @usage standard-library-fs.md
 function File:read_until(delimiter: string,
                          chop: boolean?): string?
   if self.handle < 0 then
@@ -288,6 +317,10 @@ function File:read_until(delimiter: string,
   return result
 end
 
+--- Write all supplied binary bytes to the file.
+-- @param data Bytes to write, including any embedded NUL.
+-- @return Number of bytes written.
+-- @usage standard-library-fs.md
 function File:write(data: string): integer
   self:require_open()
   local length = #data
@@ -305,6 +338,8 @@ function File:write(data: string): integer
   return offset
 end
 
+--- Flush file data to stable storage before returning.
+-- @usage standard-library-fs.md
 function File:flush()
   self:require_open()
   perform<|integer|>("fs.flush", function (loop: uv.loop_t,
@@ -372,14 +407,23 @@ local function File:close_with(operation: string)
   end
 end
 
+--- Close the owned descriptor; repeated terminal closes are safe.
+-- @usage standard-library-fs.md
 function File:close()
   self:close_with("fs.close")
 end
 
+--- Report whether the File descriptor has been closed.
+-- @return True after descriptor retirement.
+-- @usage standard-library-fs.md
 function File:is_closed(): boolean
   return self.handle < 0
 end
 
+--- Read a complete binary file and close the temporary File on every exit.
+-- @param path File path.
+-- @return Entire file contents.
+-- @usage standard-library-fs.md
 function read_file(path: string): string
   local file = open(path, "r")
   defer file:close()
@@ -391,6 +435,10 @@ function read_file(path: string): string
   return builder:drain()
 end
 
+--- Replace a file with binary bytes and close the temporary File on every exit.
+-- @param path Destination path.
+-- @param data Complete replacement contents.
+-- @usage standard-library-fs.md
 function write_file(path: string, data: string)
   local file = open(path, "w")
   defer file:close()
@@ -416,6 +464,10 @@ local function stat_result(request: uv.fs_t, _: integer): Stat
               info.st_mtim.tv_sec, info.st_mtim.tv_nsec)
 end
 
+--- Read metadata for a path, following symbolic links.
+-- @param path Path to inspect.
+-- @return Metadata, or nil for a missing path; other errors raise.
+-- @usage standard-library-fs.md
 function stat(path: string): Stat?
   checked_path(path, "fs.stat")
   do
@@ -429,6 +481,10 @@ function stat(path: string): Stat?
   end
 end
 
+--- Read metadata for a path without following its final symbolic link.
+-- @param path Path to inspect.
+-- @return Metadata, or nil for a missing path; other errors raise.
+-- @usage standard-library-fs.md
 function lstat(path: string): Stat?
   checked_path(path, "fs.lstat")
   do
@@ -455,6 +511,9 @@ local function sized_path(operation: string,
   end
 end
 
+--- Create an empty temporary file and return its caller-owned path.
+-- @return Temporary path whose file must be removed by the caller.
+-- @usage standard-library-fs.md
 function tmpname(): string
   local template = sized_path("fs.tmpname", uv.os_tmpdir) .. "/titan-fs-XXXXXX"
   local file = File(-1, "")
@@ -467,22 +526,37 @@ function tmpname(): string
   end)
 end
 
+--- Return the operating-system temporary directory.
+-- @return Directory path.
+-- @usage standard-library-fs.md
 function tmpdir(): string
   return sized_path("os.tmpdir", uv.os_tmpdir)
 end
 
+--- Return the current user home directory.
+-- @return Directory path.
+-- @usage standard-library-fs.md
 function homedir(): string
   return sized_path("os.homedir", uv.os_homedir)
 end
 
+--- Return the process current working directory.
+-- @return Directory path.
+-- @usage standard-library-fs.md
 function pwd(): string
   return sized_path("fs.pwd", uv.cwd)
 end
 
+--- Change the process-wide working directory.
+-- @param path New working directory; coordinate and restore temporary changes.
+-- @usage standard-library-fs.md
 function chdir(path: string)
   check_status(uv.chdir(checked_path(path, "fs.chdir")), "fs.chdir")
 end
 
+--- Create a directory.
+-- @param path Filesystem path without embedded NUL.
+-- @usage standard-library-fs.md
 function mkdir(path: string)
   checked_path(path, "fs.mkdir")
   perform<|integer|>("fs.mkdir", function (loop: uv.loop_t,
@@ -491,6 +565,9 @@ function mkdir(path: string)
   end, count_result)
 end
 
+--- Remove a file or symbolic link.
+-- @param path Filesystem path without embedded NUL.
+-- @usage standard-library-fs.md
 function unlink(path: string)
   checked_path(path, "fs.unlink")
   perform<|integer|>("fs.unlink", function (loop: uv.loop_t,
@@ -499,6 +576,9 @@ function unlink(path: string)
   end, count_result)
 end
 
+--- Remove an empty directory.
+-- @param path Filesystem path without embedded NUL.
+-- @usage standard-library-fs.md
 function rmdir(path: string)
   checked_path(path, "fs.rmdir")
   perform<|integer|>("fs.rmdir", function (loop: uv.loop_t,
@@ -507,6 +587,10 @@ function rmdir(path: string)
   end, count_result)
 end
 
+--- Rename or move a filesystem entry.
+-- @param from Existing path.
+-- @param to Destination path.
+-- @usage standard-library-fs.md
 function rename(from: string, to: string)
   checked_path(from, "fs.rename")
   checked_path(to, "fs.rename")
@@ -516,6 +600,10 @@ function rename(from: string, to: string)
   end, count_result)
 end
 
+--- List a directory without dot entries or an ordering guarantee.
+-- @param path Directory to list.
+-- @return Entry names excluding the dot and parent-directory entries.
+-- @usage standard-library-fs.md
 function list(path: string): {string}
   checked_path(path, "fs.list")
   return perform<|{string}|>("fs.list", function (loop: uv.loop_t,
@@ -533,6 +621,10 @@ function list(path: string): {string}
   end)
 end
 
+--- Resolve a path to its canonical absolute filesystem path.
+-- @param path Existing path to resolve.
+-- @return Canonical absolute path.
+-- @usage standard-library-fs.md
 function realpath(path: string): string
   checked_path(path, "fs.realpath")
   return perform<|string|>("fs.realpath", function (loop: uv.loop_t,
@@ -565,6 +657,8 @@ local WATCHER_POLLING = 1
 local WATCHER_CLEARING = 2
 local WATCHER_POLLING_CLEARING = 3
 
+--- Runtime-bound change watcher; Tasks must coordinate mutations externally.
+-- @usage standard-library-fs.md
 record Watcher
   local loop: uv.loop_t
   local registrations: {WatchRegistration}
@@ -574,6 +668,12 @@ record Watcher
   local operation_state: integer
 end
 
+--- One classified filesystem notification or recoverable watcher error.
+-- @field created Path created according to notification classification.
+-- @field deleted Path deleted according to notification classification.
+-- @field modified Path modified according to notification classification.
+-- @field error OperationError from notification classification.
+-- @usage standard-library-fs.md
 union WatcherEvent
   created(string)
   deleted(string)
@@ -693,6 +793,9 @@ local function Watcher:find_registration(
   return self.paths[canonical]
 end
 
+--- Create a reusable filesystem watcher in the current Task Runtime.
+-- @return Watcher bound to the current Runtime.
+-- @usage standard-library-fs.md
 function watcher(): Watcher
   async.running()
   local publish: (function (WatcherNotification): (boolean))? = nil
@@ -710,6 +813,9 @@ function watcher(): Watcher
                  WATCHER_IDLE)
 end
 
+--- Start watching an existing canonical file or directory path.
+-- @param path Existing path; duplicate registrations are ignored.
+-- @usage standard-library-fs.md
 function Watcher:watch(path: string)
   self:require_running_task()
   local canonical = realpath(path)
@@ -724,6 +830,9 @@ function Watcher:watch(path: string)
   self:new_registration(canonical, info.kind == "directory")
 end
 
+--- Stop and retire a matching path registration.
+-- @param path Registered path; an absent registration is ignored.
+-- @usage standard-library-fs.md
 function Watcher:stop(path: string)
   self:require_running_task()
   if #self.registrations == 0 then return end
@@ -733,6 +842,10 @@ function Watcher:stop(path: string)
   self:retire_registration(registration)
 end
 
+--- Check whether a path currently has a watcher registration.
+-- @param path Path to resolve and query.
+-- @return True for a live registration.
+-- @usage standard-library-fs.md
 function Watcher:is_watching(path: string): boolean
   self:require_running_task()
   if #self.registrations == 0 then return false end
@@ -760,6 +873,8 @@ local function Watcher:finish_clear()
   end
 end
 
+--- Stop and close all registrations while retaining the reusable watcher.
+-- @usage standard-library-fs.md
 function Watcher:clear()
   self:require_running_task()
   self:begin_clear()
@@ -858,6 +973,9 @@ local function Watcher:finish_poll()
   end
 end
 
+--- Wait for notifications and classify one public event per raw notification.
+-- @return Ordered event batch; notifications are hints and classification may suspend.
+-- @usage standard-library-fs.md
 function Watcher:poll(): {WatcherEvent}
   self:require_running_task()
   self:begin_poll()

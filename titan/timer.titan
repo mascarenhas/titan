@@ -1,6 +1,12 @@
+--- Task-aware one-shot delays and recurring coalescing tickers.
+-- @module titan.timer
+-- @usage standard-library-timer.md
+
 local async = import "async"
 local uv = import "uv"
 
+--- A Runtime-bound recurring timer that coalesces missed firings.
+-- @usage standard-library-timer.md#recurring-tickers
 record Ticker
   local timer: uv.timer_t
   local loop: uv.loop_t
@@ -127,6 +133,9 @@ local function close_sleep(sleep: Sleep)
   end
 end
 
+--- Suspend the current Task until a one-shot timer fires.
+-- @param milliseconds Delay or interval in milliseconds.
+-- @usage standard-library-timer.md#one-shot-delays
 function sleep(milliseconds: integer)
   check_work()
   if milliseconds < 0 then raise operation_error(uv.EINVAL, "timer.sleep") end
@@ -141,16 +150,25 @@ function sleep(milliseconds: integer)
   async.suspend(waiting.token)
 end
 
+--- Yield the current Task to a later event-loop turn.
+-- @usage standard-library-timer.md#one-shot-delays
 function yield()
   async.yield()
 end
 
+--- Create a recurring timer with a positive interval in milliseconds.
+-- @param milliseconds Delay or interval in milliseconds.
+-- @return New Runtime-bound recurring ticker; the caller owns closing it.
+-- @usage standard-library-timer.md#recurring-tickers
 function ticker(milliseconds: integer): Ticker
   if milliseconds <= 0 then raise "ticker interval must be positive" end
   check_work()
   return start_timer(milliseconds, milliseconds)
 end
 
+--- Wait for one firing, or return false after the ticker closes.
+-- @return True for a firing, or false when the ticker is closed.
+-- @usage standard-library-timer.md#recurring-tickers
 function Ticker:tick(): boolean
   check_work()
   if self.closed or self.loop ~= async.current_loop() then return false end
@@ -163,6 +181,8 @@ function Ticker:tick(): boolean
   end
 end
 
+--- Stop and retire this ticker, waking a waiting Task with false.
+-- @usage standard-library-timer.md#recurring-tickers
 function Ticker:close()
   async.running()
   if self.closed or self.loop ~= async.current_loop() then return end

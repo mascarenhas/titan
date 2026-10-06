@@ -9,6 +9,7 @@ local staticmetadata = require "titan-compiler.staticmetadata"
 local ffiheaders = require "titan-compiler.ffiheaders"
 local completion = require "titan-compiler.completion"
 local platform = require "titan-compiler.platform"
+local documentation = require "titan-compiler.documentation"
 
 local projectcache = { VERSION = 5 }
 
@@ -201,17 +202,17 @@ local function project(entry, options, strict, declarations_only)
                 local current = observations[target.path .. "\0" .. target.identity]
                 if current then target.observation = cpp.copy_header_observation(current) end
             end
-        elseif kind == "type_map" or kind == "dependencies" then
+        elseif kind == "type_map" or kind == "dependencies" or kind == "documentation_map" then
             for key, value in pairs(source) do
                 work()
                 if type(key) ~= "string" then fail("invalid declaration map key") end
                 if kind == "dependencies" then
                     if not staticmetadata.valid_module_name(key) or value ~= true then fail("invalid dependency") end
                     target[key] = true
-                else target[key] = copy(value, "type") end
+                else target[key] = copy(value, kind == "documentation_map" and "documentation" or "type") end
             end
         else
-            local element = ({ names = "string", types = "type", members = "type", inputs = "input", headers = "header", completion_facts = "completion_fact" })[kind]
+            local element = ({ names = "string", types = "type", members = "type", inputs = "input", headers = "header", completion_facts = "completion_fact", documentation_tags = "documentation_tag" })[kind]
             if not element then fail("unknown declaration role " .. tostring(kind)) end
             local count, maximum = 0, 0
             for key in pairs(source) do
@@ -263,6 +264,8 @@ local function project(entry, options, strict, declarations_only)
         end
     end
     for _, typ in ipairs(types_seen) do
+        if typ._documentation then documentation.copy(typ._documentation) end
+        if typ._type_documentation then documentation.copy_map(typ._type_documentation) end
         work()
         if typ._tag == "Type.Module" then
             if typ.name ~= entry.type.name or typ._source ~= true

@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
+source "$(dirname "$0")/windows_build_profile.sh"
+titan_windows_profile validation
 [[ $# == 2 && ${MSYSTEM:-} == CLANG64 ]]
 prefix=$(cd "$1" && pwd)
 build=$(cd "$2" && pwd)

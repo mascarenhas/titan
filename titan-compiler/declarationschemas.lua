@@ -3,12 +3,14 @@
 -- A question mark marks an optional field; all other fields are required.
 -- Hybrid member lists derive string keys from their ordered descriptors.
 local schemas = {
+    documentation = { summary = "string", description = "string", tags = "documentation_tags" },
+    documentation_tag = { name = "string", value = "string" },
     completion_fact = {
         name = "string", kind = "integer", detail = "string",
         lookup_domain = "string", lookup_key = "string", type_key = "string",
         scope_id = "integer", scope_depth = "integer", declaration_order = "integer",
         available = "boolean", islocal = "boolean", visibility = "string",
-        owner_key = "string", access_mode = "string",
+        owner_key = "string", access_mode = "string", documentation = "documentation?",
     },
     ["Type.Invalid"] = {}, ["Type.Nil"] = {}, ["Type.Void"] = {},
     ["Type.Boolean"] = {}, ["Type.Integer"] = {}, ["Type.Float"] = {},
@@ -154,6 +156,11 @@ local schemas = {
     },
 }
 for tag, schema in pairs(schemas) do
+    if tag == "Type.Module" or tag == "Type.ModuleMember" or tag == "Type.ModuleVariable"
+       or tag == "Type.Record" or tag == "Type.Union" or tag == "Type.Interface"
+       or tag == "Type.Method" or tag == "Type.StaticMethod" or tag == "Type.Field"
+       or tag == "Type.Variant" then schema._documentation = "documentation?" end
+    if tag == "Type.Module" then schema._type_documentation = "documentation_map?" end
     if tag:match("^Type%.C") then
         schema._ffi_scope, schema._c_origin_header = "string?", "include?"
     end

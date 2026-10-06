@@ -7,6 +7,21 @@ SHELL := /bin/bash
 .NOTPARALLEL:
 .DEFAULT_GOAL := help
 
+# Choose the policy before configuring any source or native object graph.
+TITAN_WINDOWS_TEST_GOALS := lua-source-check lua-check native-source-check native-check compiler-check runtime-check stdlib-check stdlib-publication-check titan-stdlib-test-build titan-stdlib-test-run titan-stdlib-test
+TITAN_BUILD_PROFILE ?= $(if $(filter $(TITAN_WINDOWS_TEST_GOALS),$(MAKECMDGOALS)),validation,production)
+ifneq ($(TITAN_BUILD_PROFILE),production)
+ifneq ($(TITAN_BUILD_PROFILE),validation)
+$(error TITAN_BUILD_PROFILE must be production or validation)
+endif
+endif
+export TITAN_BUILD_PROFILE
+TITAN_WINDOWS_VALIDATION_FLAGS := -O0 -fno-lto
+TITAN_WINDOWS_NATIVE_CFLAGS = $(if $(filter validation,$(TITAN_BUILD_PROFILE)),$(TITAN_WINDOWS_VALIDATION_FLAGS),-O2)
+TITAN_WINDOWS_NATIVE_LDFLAGS = $(if $(filter validation,$(TITAN_BUILD_PROFILE)),$(TITAN_WINDOWS_VALIDATION_FLAGS))
+# Compiler host components stay optimized while Titan validation stays at O0.
+TITAN_PROFILE_HOST_FLAGS = $(if $(filter validation,$(TITAN_BUILD_PROFILE)),-O2 -fno-lto)
+
 quote = '$(subst ','"'"',$(1))'
 empty :=
 space := $(empty) $(empty)
@@ -19,11 +34,11 @@ ifeq ($(origin RC),default)
 RC := llvm-rc
 endif
 RC ?= llvm-rc
-LUA_CFLAGS ?= -O2 -Wall -Wextra
+LUA_CFLAGS ?= $(if $(filter validation,$(TITAN_BUILD_PROFILE)),$(TITAN_PROFILE_HOST_FLAGS),-O2) -Wall -Wextra
 LUA_CPPFLAGS ?=
-LUA_LDFLAGS ?=
-PREFIX ?= $(CURDIR)/.windows-sdk
-WINDOWS_BUILD_ROOT ?= $(CURDIR)/windows-build
+LUA_LDFLAGS ?= $(TITAN_PROFILE_HOST_FLAGS)
+PREFIX ?= $(CURDIR)/$(if $(filter validation,$(TITAN_BUILD_PROFILE)),.windows-sdk-validation,.windows-sdk)
+WINDOWS_BUILD_ROOT ?= $(CURDIR)/$(if $(filter validation,$(TITAN_BUILD_PROFILE)),windows-build-validation,windows-build)
 
 LUA_VERSION := 5.5.1
 LUA_DIR := lua-$(LUA_VERSION)
@@ -116,6 +131,7 @@ $(call make_path,$(LUA_CONFIG)): FORCE $(call make_path,$(LUA_READY)) Makefile.w
 	temporary=$(call quote,$@.tmp); trap 'rm -f "$$temporary"' EXIT; \
 	{ printf '%s\n' 'titan-windows-lua-v1' \
 	    'lua-dll=lua55.dll' \
+	    $(call quote,TITAN_BUILD_PROFILE=$(TITAN_BUILD_PROFILE)) \
 	    $(call quote,CC=$(CC)) $(call quote,RC=$(RC)) \
 	    $(call quote,CPPFLAGS=$(LUA_CPPFLAGS)) $(call quote,CFLAGS=$(LUA_CFLAGS)) \
 	    $(call quote,LDFLAGS=$(LUA_LDFLAGS)); \
@@ -164,6 +180,7 @@ lua: lua-build
 	rm -f $(call quote,$(PREFIX)/bin/lua-$(LUA_VERSION).dll) \
 	  $(call quote,$(PREFIX)/src/lua-$(LUA_VERSION)/titan_windows_loadlib.h)
 	install -m 0644 $(call quote,$(LUA_CONFIG)) $(call quote,$(PREFIX)/etc/titan/lua-$(LUA_VERSION)-windows.config)
+	@printf '%s\n' $(call quote,$(TITAN_BUILD_PROFILE)) > $(call quote,$(PREFIX)/etc/titan/build-profile)
 
 lua-check: lua
 	CC=$(call quote,$(CC)) bash scripts/check_windows_lua.sh $(call quote,$(PREFIX)) $(call quote,$(WINDOWS_BUILD_ROOT))
@@ -178,9 +195,9 @@ AR := llvm-ar
 endif
 AR ?= llvm-ar
 RANLIB ?= llvm-ranlib
-NATIVE_CFLAGS ?= -O2
+NATIVE_CFLAGS ?= $(TITAN_WINDOWS_NATIVE_CFLAGS)
 NATIVE_CPPFLAGS ?=
-NATIVE_LDFLAGS ?=
+NATIVE_LDFLAGS ?= $(TITAN_WINDOWS_NATIVE_LDFLAGS)
 
 .PHONY: native-source native native-source-check
 native-source:

@@ -6,27 +6,73 @@ foreign type GetnameinfoEntry = function (
 
 -- These external socket domains are integer-valued system macros, not libuv
 -- enums. Flags remain combinable integers. Initializers merge into root do.
+--- Immutable native libuv AF_UNSPEC flag or numeric constant.
+-- @usage uv/types.md#public-constants
 const AF_UNSPEC: integer?
+--- Immutable native libuv AF_INET flag or numeric constant.
+-- @usage uv/types.md#public-constants
 const AF_INET: integer?
+--- Immutable native libuv AF_INET6 flag or numeric constant.
+-- @usage uv/types.md#public-constants
 const AF_INET6: integer?
+--- Immutable native libuv SOCK_STREAM flag or numeric constant.
+-- @usage uv/types.md#public-constants
 const SOCK_STREAM: integer?
+--- Immutable native libuv SOCK_DGRAM flag or numeric constant.
+-- @usage uv/types.md#public-constants
 const SOCK_DGRAM: integer?
+--- Immutable native libuv SOCK_RAW flag or numeric constant.
+-- @usage uv/types.md#public-constants
 const SOCK_RAW: integer?
+--- Immutable native libuv IPPROTO_TCP flag or numeric constant.
+-- @usage uv/types.md#public-constants
 const IPPROTO_TCP: integer?
+--- Immutable native libuv IPPROTO_UDP flag or numeric constant.
+-- @usage uv/types.md#public-constants
 const IPPROTO_UDP: integer?
+--- Immutable native libuv AI_PASSIVE flag or numeric constant.
+-- @usage uv/types.md#public-constants
 const AI_PASSIVE: integer?
+--- Immutable native libuv AI_CANONNAME flag or numeric constant.
+-- @usage uv/types.md#public-constants
 const AI_CANONNAME: integer?
+--- Immutable native libuv AI_NUMERICHOST flag or numeric constant.
+-- @usage uv/types.md#public-constants
 const AI_NUMERICHOST: integer?
+--- Immutable native libuv AI_NUMERICSERV flag or numeric constant.
+-- @usage uv/types.md#public-constants
 const AI_NUMERICSERV: integer?
+--- Immutable native libuv AI_V4MAPPED flag or numeric constant.
+-- @usage uv/types.md#public-constants
 const AI_V4MAPPED: integer?
+--- Immutable native libuv AI_ALL flag or numeric constant.
+-- @usage uv/types.md#public-constants
 const AI_ALL: integer?
+--- Immutable native libuv AI_ADDRCONFIG flag or numeric constant.
+-- @usage uv/types.md#public-constants
 const AI_ADDRCONFIG: integer?
+--- Immutable native libuv NI_NUMERICHOST flag or numeric constant.
+-- @usage uv/types.md#public-constants
 const NI_NUMERICHOST: integer?
+--- Immutable native libuv NI_NUMERICSERV flag or numeric constant.
+-- @usage uv/types.md#public-constants
 const NI_NUMERICSERV: integer?
+--- Immutable native libuv NI_NOFQDN flag or numeric constant.
+-- @usage uv/types.md#public-constants
 const NI_NOFQDN: integer?
+--- Immutable native libuv NI_NAMEREQD flag or numeric constant.
+-- @usage uv/types.md#public-constants
 const NI_NAMEREQD: integer?
+--- Immutable native libuv NI_DGRAM flag or numeric constant.
+-- @usage uv/types.md#public-constants
 const NI_DGRAM: integer?
 
+--- Flags, family, socket type, and protocol constraining address resolution.
+-- @field ai_flags Ai flags in the copied native result.
+-- @field ai_family Ai family in the copied native result.
+-- @field ai_socktype Ai socktype in the copied native result.
+-- @field ai_protocol Ai protocol in the copied native result.
+-- @usage uv/types.md#addrinfo_hints_t
 record addrinfo_hints_t
   ai_flags: integer
   ai_family: integer
@@ -36,6 +82,16 @@ end
 
 -- Each entry is an independent copied value. Array ordering replaces ai_next.
 -- ai_addr_bytes/ai_addrlen preserve even unknown native address families.
+--- A copied resolver entry retaining address bytes and canonical-name data.
+-- @field ai_flags entries() copies scalar fields, the optional name, sockaddr value and exact address bytes into independent public records. These survive freeaddrinfo of the separate native result owner.
+-- @field ai_family entries() copies scalar fields, the optional name, sockaddr value and exact address bytes into independent public records. These survive freeaddrinfo of the separate native result owner.
+-- @field ai_socktype entries() copies scalar fields, the optional name, sockaddr value and exact address bytes into independent public records. These survive freeaddrinfo of the separate native result owner.
+-- @field ai_protocol entries() copies scalar fields, the optional name, sockaddr value and exact address bytes into independent public records. These survive freeaddrinfo of the separate native result owner.
+-- @field ai_addrlen entries() copies scalar fields, the optional name, sockaddr value and exact address bytes into independent public records. These survive freeaddrinfo of the separate native result owner.
+-- @field ai_addr entries() copies scalar fields, the optional name, sockaddr value and exact address bytes into independent public records. These survive freeaddrinfo of the separate native result owner.
+-- @field ai_addr_bytes Ai addr bytes in the copied native result.
+-- @field ai_canonname entries() copies scalar fields, the optional name, sockaddr value and exact address bytes into independent public records. These survive freeaddrinfo of the separate native result owner.
+-- @usage uv/types.md#addrinfo_t
 record addrinfo_t
   ai_flags: integer
   ai_family: integer
@@ -47,12 +103,17 @@ record addrinfo_t
   ai_canonname: string?
 end
 
+--- An owned resolver result requiring explicit freeaddrinfo cleanup.
+-- @usage uv/types.md#addrinfo_result_t
 record addrinfo_result_t
   local native: foreign *addrinfo
   local copied: {addrinfo_t}?
   local released: boolean
 end
 
+--- Return the cached or newly copied address entries in native resolver order.
+-- @return Native {addrinfo_t} result with the documented lifetime and units.
+-- @usage uv/supplemental.md#addrinfo_result_tentries
 function addrinfo_result_t:entries(): {addrinfo_t}
   if self.released then raise "addrinfo result was released" end
   if self.copied ~= nil then return self.copied as {addrinfo_t} end
@@ -85,6 +146,9 @@ function addrinfo_result_t:entries(): {addrinfo_t}
   return entries
 end
 
+--- Free the native address-list result; nil is allowed.
+-- @param result Mutable separately owned native DNS result; freeaddrinfo releases native list explicitly; copied entries remain ordinary values.
+-- @usage uv/functions/dns.md#freeaddrinfo
 function freeaddrinfo(result: addrinfo_result_t?)
   if result == nil then return end
   local owner = result as addrinfo_result_t
@@ -94,6 +158,8 @@ function freeaddrinfo(result: addrinfo_result_t?)
   owner.released = true
 end
 
+--- Reusable native getaddrinfo request owner retained through accepted completion.
+-- @usage uv/types.md#getaddrinfo_t
 record getaddrinfo_t
   local native: foreign uv_getaddrinfo_t
   local loop: loop_t?
@@ -146,6 +212,9 @@ foreign function getaddrinfo_callback(native: *uv_getaddrinfo_t,
   ffi.lua_settop(L, top)
 end
 
+--- Allocate a fresh request owner without submitting work.
+-- @return Native getaddrinfo_t result with the documented lifetime and units.
+-- @usage uv/supplemental.md#getaddrinfo_tnew
 function getaddrinfo_t.new(): getaddrinfo_t
   local native = foreign uv_getaddrinfo_t.new()
   return { native = native, loop = nil, pending = false, result = nil,
@@ -153,28 +222,53 @@ function getaddrinfo_t.new(): getaddrinfo_t
            userdata = nil }
 end
 
+--- Return a tagged view of the same concrete owner.
+-- @return Native req_t result with the documented lifetime and units.
+-- @usage uv/supplemental.md#getaddrinfo_tas_req_t
 function getaddrinfo_t:as_req_t(): req_t
   return req_t.getaddrinfo(self)
 end
 
+--- Read the same traced public data as the generic request accessor without allocating a request view.
+-- @return Native value result with the documented lifetime and units.
+-- @usage uv/supplemental.md#getaddrinfo_tget_data
 function getaddrinfo_t:get_data(): value
   return self.userdata
 end
 
+--- Replace the existing traced public data slot; nil clears it.
+-- @param data Caller-supplied data retained or borrowed for the documented native interval.
+-- @usage uv/supplemental.md#getaddrinfo_tset_data
 function getaddrinfo_t:set_data(data: value)
   self.userdata = data
 end
 
+--- Return the request's recorded loop association, or nil when none is recorded.
+-- @return Copied or retained loop_t result, or nil on failure or absence.
+-- @usage uv/supplemental.md#getaddrinfo_tget_loop
 function getaddrinfo_t:get_loop(): loop_t?
   return self.loop
 end
 
+--- Return the retained native completion status and optional address-result owner.
+-- @return Native status: zero on success, a negative libuv error on failure.
+-- @return Copied or retained addrinfo_result_t result, or nil on failure or absence.
+-- @usage uv/supplemental.md#getaddrinfo_taddrinfo
 function getaddrinfo_t:addrinfo(): (integer, addrinfo_result_t?)
   if self.pending then return ffi.UV_EBUSY, nil end
   if self.result_status ~= 0 then return self.result_status, nil end
   return self.result_status, self.result
 end
 
+--- Resolve optional node/service with optional hints.
+-- @param loop Input initialized owning loop; accepted handles/requests retain it through retirement.
+-- @param request Mutable allocated nonpending request owner; accepted submission retains owner until its terminal callback returns; rejection owes no async callback.
+-- @param callback Input ordinary callable, retained until the promised callback interval ends; the request view remains rooted through callback return; a successful addrinfo_result_t is a separate native list with explicit freeaddrinfo lifetime.
+-- @param node Input immutable text/byte owner; native C-string conventions apply where the operation takes text.
+-- @param service Input immutable text/byte owner; native C-string conventions apply where the operation takes text.
+-- @param hints Input addrinfo_hints_t? value.
+-- @return Native integer result with the documented lifetime and units.
+-- @usage uv/functions/dns.md#getaddrinfo
 function getaddrinfo(loop: loop_t, request: getaddrinfo_t,
     callback: (function (getaddrinfo_t, integer, addrinfo_result_t?): ())?,
     node: string?, service: string?, hints: addrinfo_hints_t?): integer
@@ -226,6 +320,8 @@ function getaddrinfo(loop: loop_t, request: getaddrinfo_t,
   return status
 end
 
+--- Reusable native getnameinfo request owner retained through accepted completion.
+-- @usage uv/types.md#getnameinfo_t
 record getnameinfo_t
   local native: foreign uv_getnameinfo_t
   local loop: loop_t?
@@ -277,6 +373,9 @@ foreign function getnameinfo_callback(native: *uv_getnameinfo_t, status: int,
   ffi.lua_settop(L, top)
 end
 
+--- Allocate a fresh request owner without submitting work.
+-- @return Native getnameinfo_t result with the documented lifetime and units.
+-- @usage uv/supplemental.md#getnameinfo_tnew
 function getnameinfo_t.new(): getnameinfo_t
   local native = foreign uv_getnameinfo_t.new()
   return { native = native, loop = nil, pending = false, result_status = 0,
@@ -284,14 +383,25 @@ function getnameinfo_t.new(): getnameinfo_t
            userdata = nil }
 end
 
+--- Return a tagged view of the same concrete owner.
+-- @return Native req_t result with the documented lifetime and units.
+-- @usage uv/supplemental.md#getnameinfo_tas_req_t
 function getnameinfo_t:as_req_t(): req_t
   return req_t.getnameinfo(self)
 end
 
+--- Return the request's recorded loop association, or nil when none is recorded.
+-- @return Copied or retained loop_t result, or nil on failure or absence.
+-- @usage uv/supplemental.md#getnameinfo_tget_loop
 function getnameinfo_t:get_loop(): loop_t?
   return self.loop
 end
 
+--- Return the saved status and copied hostname/service results.
+-- @return Native status: zero on success, a negative libuv error on failure.
+-- @return Copied or retained string result, or nil on failure or absence.
+-- @return Copied or retained string result, or nil on failure or absence.
+-- @usage uv/supplemental.md#getnameinfo_tresult
 function getnameinfo_t:result(): (integer, string?, string?)
   if self.pending then return ffi.UV_EBUSY, nil, nil end
   if not self.completed then return ffi.UV_EINVAL, nil, nil end
@@ -301,6 +411,14 @@ function getnameinfo_t:result(): (integer, string?, string?)
       (self.native.service as foreign *char) as string
 end
 
+--- Resolve the typed address to host/service strings under the supplied NI_* flags.
+-- @param loop Input initialized owning loop; accepted handles/requests retain it through retirement.
+-- @param request Mutable allocated nonpending request owner; accepted submission retains owner until its terminal callback returns; rejection owes no async callback.
+-- @param callback Input ordinary callable, retained until the promised callback interval ends; the request view remains rooted through callback return; host/service arguments are copied strings.
+-- @param address Input complete typed address owner; no sockaddr pointer/header required; constructor/accessors encode family/port/bytes.
+-- @param flags Input integer value; checked native narrowing occurs before native ownership is accepted.
+-- @return Native integer result with the documented lifetime and units.
+-- @usage uv/functions/dns.md#getnameinfo
 function getnameinfo(loop: loop_t, request: getnameinfo_t,
     callback: (function (getnameinfo_t, integer, string?, string?): ())?,
     address: sockaddr_t, flags: integer): integer

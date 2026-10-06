@@ -232,6 +232,50 @@ is tested by separately compiled child programs that deliberately omit the
 option, rather than by exposing private registry state or adding a runner
 lifecycle protocol.
 
+## Validation profile and isolated SDKs
+
+`TITAN_BUILD_PROFILE` is selected before Make expands configuration stamps or
+installed SDK paths. Ordinary targets and unset compiler invocations use
+`production`; repository test entry points and the Busted/CI wrappers default
+to `validation`. An implicit validation installation uses `.lua-validation`,
+separate from the discovered active-PATH prefix. Existing ordinary prefix
+discovery remains caller-owned; use matching profile/prefix settings rather
+than republishing another profile into an active SDK. `make test` prepares and
+reinstalls the selected installation; a cold `rock-test` re-enters through that
+complete preparation so runtime/header paths are expanded after installation.
+Leaf native targets require a prepared matching prefix.
+
+Validation sets generated-C and link defaults to `-O0 -fno-lto`, including
+libtitan, libbacktrace and bundled Readline/libuv/llhttp/SQLite/OpenSSL. Lua and
+its native compiler dependencies (LPegLabel and Lua filesystem), plus private
+LPegLabel, stay at O2/no LTO so compiler and test execution remains optimized.
+Sanitizer Lua/parser dependencies use O1/no LTO with complete instrumentation;
+Titan payloads retain O0/no LTO. Generic LuaRocks CFLAGS remain O0, while
+`make luarocks` separately reconciles compiler dependencies with scoped host
+compile/link flags. Its receipt hashes installed modules, versions and Lua/tool
+inputs, replacing stale same-version modules and preserving warm builds.
+Parser-specific flags follow generic Titan extras. The SDK records its profile
+in `etc/titan/build-profile`, and configuration stamps include effective flags.
+
+The test environment reaches Busted workers, the aggregate executable and its
+fresh child compilers. Direct coder Busted fixtures also prepend cheap C/link
+flags through `spec.support.helpers` when no profile was explicitly selected.
+The small `spec/coder/lto_spec.lua` smoke clears the inherited profile and all
+cheap overrides, compiling and running cross-module providers and source-free
+consumers with the ordinary unset O3/fat-LTO defaults. Make's flag regression
+separately checks production/validation, platform defaults and explicit flags.
+The small fat-object metadata reader, foreign prototype diagnostics, nominal
+array-boundary diagnostics and `setjmp`/`longjmp` value-survival fixtures retain
+their explicit optimization levels because optimization is part of their oracle.
+Benchmark scripts keep the profiles recorded by their measurements.
+
+Production and validation prefixes are independent; source-adjacent generated
+objects still belong to one checkout. Serialize profile rebuilds or use private
+source copies. Linux and manually dispatched macOS CI prepare validation trees,
+include the profile in native/rock/probe cache keys, and share only their
+selected read-only SDK with isolated compiler workers. These internal test
+artifacts do not change normal installed production defaults.
+
 ## Repository dogfooding
 
 The shared `spec/support/stdlib_test_modules.mk` manifest names 27 module-owned
@@ -299,7 +343,7 @@ because it reinstalls the current compiler and provider before testing;
 `run_with_timeout.sh` uses Bash monitor mode to give the executable its own
 process group and polls it at a coarse interval. Make's default
 `TITAN_TEST_TIMEOUT=600` covers all 27 test roots, including repeated fresh
-child-fixture compilation under O3/LTO. Explicit overrides, including the
+child-fixture compilation under the selected profile. Explicit overrides, including the
 15-second CI shutdown check, remain independent of that default. At the deadline it sends
 `TERM`, then `KILL` after a short grace period, maps the timeout to status 124,
 and otherwise preserves the child's status. Make streams combined

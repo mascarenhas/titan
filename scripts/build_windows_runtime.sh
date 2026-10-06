@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
+source "$(dirname "$0")/windows_build_profile.sh"
+titan_windows_profile production
 if [[ $# != 2 || ${MSYSTEM:-} != CLANG64 ]]; then
   echo 'usage (native CLANG64): build_windows_runtime.sh BUILD_ROOT LUA_SDK' >&2
   exit 2
@@ -22,10 +24,12 @@ fi
 stage=$(mktemp -d "$work/.stage.XXXXXX")
 trap 'rm -rf "$stage"' EXIT
 : "${CC:=clang}" "${AR:=llvm-ar}" "${RANLIB:=llvm-ranlib}"
-: "${RUNTIME_CFLAGS:=-O2 -Wall -Wextra}" "${RUNTIME_CPPFLAGS:=}" "${RUNTIME_LDFLAGS:=}"
+titan_windows_default_flags RUNTIME_CFLAGS '-O2 -Wall -Wextra' '-O0 -fno-lto'
+titan_windows_default_flags RUNTIME_LDFLAGS '' '-O0 -fno-lto'
+: "${RUNTIME_CPPFLAGS:=}"
 export CC AR RANLIB RUNTIME_CFLAGS RUNTIME_CPPFLAGS RUNTIME_LDFLAGS
 # Parse configured command/flag strings without evaluating shell substitutions.
-for name in CC AR RANLIB RUNTIME_CFLAGS RUNTIME_CPPFLAGS RUNTIME_LDFLAGS; do
+for name in CC AR RANLIB; do
   perl -MText::ParseWords=shellwords -e \
     'my $s=$ENV{$ARGV[0]}; my @a=shellwords($s); die "Malformed argument string\n" if $s =~ /\S/ && !@a; die "Empty tool command\n" if $ARGV[0] =~ /^(CC|AR|RANLIB)$/ && !@a; print "$_\0" for @a' \
     "$name" > "$stage/$name.argv"
@@ -33,9 +37,11 @@ done
 mapfile -d '' -t compiler < "$stage/CC.argv"
 mapfile -d '' -t archiver < "$stage/AR.argv"
 mapfile -d '' -t indexer < "$stage/RANLIB.argv"
-mapfile -d '' -t cflags < "$stage/RUNTIME_CFLAGS.argv"
-mapfile -d '' -t cppflags < "$stage/RUNTIME_CPPFLAGS.argv"
-mapfile -d '' -t ldflags < "$stage/RUNTIME_LDFLAGS.argv"
+titan_windows_raw_flags "$stage" RUNTIME
+runtime_cflags=("${cflags[@]}")
+runtime_ldflags=("${ldflags[@]}")
+titan_windows_host_flags "$stage" RUNTIME LPEGLABEL_BUILD_CFLAGS
+parser_cflags=("${cflags[@]}")
 [[ $("${compiler[@]}" -dumpmachine) == x86_64-w64-windows-gnu ]]
 printf '%s\n' '#include <_mingw.h>' \
   '#if !defined(__clang__) || !defined(_WIN64) || !defined(_UCRT)' \
@@ -46,14 +52,19 @@ sources=(titan-runtime/titan.c titan-runtime/minicoro.c titan-runtime/ltitanlib.
   titan-runtime/titan.h titan-runtime/minicoro.h titan-runtime/titan/ffi.h
   titan-runtime/titan_winloader.h titan-runtime/ltitan_winfs.h
   titan-runtime/ltitan_winmeta.h titan-runtime/ltitan_wintool.h
-  scripts/build_windows_runtime.sh)
+  scripts/build_windows_runtime.sh scripts/windows_build_profile.sh)
 for name in "${peg_sources[@]}"; do sources+=("vendor/lpeglabel/$name.c"); done
 sources+=(vendor/lpeglabel/*.h "$prefix/src/lua-5.5.1/"*.h
   "$prefix/lib/liblua-5.5.1.dll.a" "$prefix/bin/lua55.dll")
 {
-  printf '%s\n' titan-windows-runtime-v1 "PREFIX=$prefix" \
+  printf '%s\n' titan-windows-runtime-v1 "PROFILE=$TITAN_BUILD_PROFILE" "PREFIX=$prefix" \
     "CC=$CC" "AR=$AR" "RANLIB=$RANLIB" "CFLAGS=$RUNTIME_CFLAGS" \
-    "CPPFLAGS=$RUNTIME_CPPFLAGS" "LDFLAGS=$RUNTIME_LDFLAGS"
+    "CPPFLAGS=$RUNTIME_CPPFLAGS" "LDFLAGS=$RUNTIME_LDFLAGS" \
+    "LPEGLABEL_BUILD_CFLAGS=$LPEGLABEL_BUILD_CFLAGS"
+  printf 'RUNTIME_C_ARG=%q\n' "${runtime_cflags[@]}"
+  printf 'RUNTIME_CPP_ARG=%q\n' "${cppflags[@]}"
+  printf 'RUNTIME_LD_ARG=%q\n' "${runtime_ldflags[@]}"
+  printf 'LPEGLABEL_C_ARG=%q\n' "${parser_cflags[@]}"
   "${compiler[@]}" --version
   "${archiver[@]}" --version
   "${indexer[@]}" --version
@@ -82,7 +93,8 @@ if [[ $warm == 1 ]]; then
   echo 'Windows runtime and private PEG payload are current.'
   exit 0
 fi
-common=(-std=c99 "${cppflags[@]}" "${cflags[@]}" -I titan-runtime -I "$prefix/src/lua-5.5.1")
+common=(-std=c99 -Wall -Wextra "${cppflags[@]}" "${runtime_cflags[@]}" -I titan-runtime -I "$prefix/src/lua-5.5.1")
+parser_common=(-std=c99 -Wall -Wextra "${cppflags[@]}" "${parser_cflags[@]}" -I titan-runtime -I "$prefix/src/lua-5.5.1")
 for name in titan minicoro ltitanlib; do
   "${compiler[@]}" "${common[@]}" -c "titan-runtime/$name.c" -o "$stage/$name.o"
 done
@@ -91,14 +103,14 @@ done
 [[ $("${archiver[@]}" t "$stage/libtitan.a") == "$expected_runtime" ]]
 peg_objects=()
 for name in "${peg_sources[@]}"; do
-  "${compiler[@]}" "${common[@]}" -I vendor/lpeglabel \
+  "${compiler[@]}" "${parser_common[@]}" -I vendor/lpeglabel \
     -c "vendor/lpeglabel/$name.c" -o "$stage/$name.o"
   peg_objects+=("$stage/$name.o")
 done
 "${archiver[@]}" qDc "$stage/libtitan-lpeglabel.a" "${peg_objects[@]}"
 "${indexer[@]}" -D "$stage/libtitan-lpeglabel.a"
 [[ $("${archiver[@]}" t "$stage/libtitan-lpeglabel.a") == "$expected_peg" ]]
-"${compiler[@]}" -shared "${ldflags[@]}" -Wl,--exclude-all-symbols -Wl,--no-insert-timestamp \
+"${compiler[@]}" -shared "${runtime_ldflags[@]}" -Wl,--exclude-all-symbols -Wl,--no-insert-timestamp \
   -o "$stage/titan.dll" "$stage/ltitanlib.o" "$prefix/lib/liblua-5.5.1.dll.a" -lbcrypt
 # Accept actual emitted targets and import tables, not just compiler identity.
 for object in "$stage/"*.o; do

@@ -323,7 +323,7 @@ build_process_child() {
     local mode=$1
     if [[ -n $PROCESS_CHILD_SUPPLIED ]]; then return; fi
 
-    local cc_words cpp_words ld_words
+    local cc_words cpp_words ld_words profile_flags
     read -r -a cc_words <<<"${CC:-cc}"
     cpp_words=("-I$PREFIX/include")
     ld_words=("$STATIC_ARCHIVE" "-lpthread")
@@ -334,9 +334,14 @@ build_process_child() {
 
     # CI uses a single compiler executable (cc/clang). Word splitting also
     # supports the common "ccache cc" configured form and pkg-config output.
+    case "${TITAN_BUILD_PROFILE:-production}" in
+        validation) profile_flags=(-O0 -fno-lto) ;;
+        production) profile_flags=(-O3) ;;
+        *) echo "TITAN_BUILD_PROFILE must be production or validation" >&2; exit 2 ;;
+    esac
     TITAN_PROCESS_SMOKE_CHILD="$SMOKE_TMP/process-child-$mode"
     CCACHE_DISABLE=1 "${cc_words[@]}" \
-        -std=c99 -O2 -Wall -Wextra -Werror \
+        -std=c99 "${profile_flags[@]}" -Wall -Wextra -Werror \
         "${cpp_words[@]}" \
         spec/fixtures/stdlib/native/os_process_child.c \
         "${ld_words[@]}" -o "$TITAN_PROCESS_SMOKE_CHILD"

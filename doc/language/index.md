@@ -47,6 +47,8 @@ use the chapters below for the normative language reference.
 
 | Chapter | Covers |
 | --- | --- |
+| [Native build profiles](build-profiles.md) | Production optimization defaults and isolated O0/no-LTO validation SDKs. |
+| [Documentation comments](documentation-comments.md) | LDoc-style summaries and tags retained for editor hover and completion. |
 | [Design philosophy and history](philosophy.md) | Why Titan exists, its core commitments, the project's history and design principles. |
 | [The type system](types.md) | All Titan types; equality, symmetric non-transitive consistency, direct coercions, gradual views, callable adjustment, the normative boundary matrix, inference, and `value`. |
 | [Const values](const-values.md) | Const locals and module variables, nil initialization, const record and Interface fields, Interface snapshots, and const-qualified Arrays with explicit shallow-copy conversion. |

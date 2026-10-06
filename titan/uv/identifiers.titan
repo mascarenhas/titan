@@ -1,9 +1,15 @@
 -- Public socket identity with exact private native width. This is a borrowed
 -- token, not a socket destructor. Successful tcp/udp_open adopts its descriptor.
+--- A native socket identifier distinct from a CRT file descriptor.
+-- @usage uv/types.md#os_sock_t
 record os_sock_t
   local native: foreign uv_os_sock_t
 end
 
+--- Construct an exact-width native identifier token with checked integer conversion.
+-- @param socket Socket supplied to the native operation.
+-- @return Native os_sock_t result with the documented lifetime and units.
+-- @usage uv/supplemental.md#os_sock_tfrom_integer
 function os_sock_t.from_integer(socket: integer): os_sock_t
   local native = socket as foreign uv_os_sock_t
   return {native = native}
@@ -11,6 +17,9 @@ end
 
 -- Explicit observation can reject an unsigned native value above MAXINTEGER;
 -- the original token remains usable by tcp_open/udp_open without conversion.
+--- Convert the exact-width native identifier to a Titan integer with checked representability.
+-- @return Native integer result with the documented lifetime and units.
+-- @usage uv/supplemental.md#os_sock_tto_integer
 function os_sock_t:to_integer(): integer
   return self.native as integer
 end

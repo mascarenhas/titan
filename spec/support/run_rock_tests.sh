@@ -6,6 +6,12 @@
 
 set -euo pipefail
 
+export TITAN_BUILD_PROFILE=${TITAN_BUILD_PROFILE-validation}
+case $TITAN_BUILD_PROFILE in
+    production|validation) ;;
+    *) echo 'TITAN_BUILD_PROFILE must be production or validation' >&2; exit 2 ;;
+esac
+
 if [[ ${TITAN_ROCK_TEST_INTERNAL:-0} == 1 ]]; then
     busted_args=()
     forwarded_count=0

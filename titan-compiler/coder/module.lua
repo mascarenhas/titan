@@ -515,7 +515,7 @@ function coderecorddec(ctx, code, initrecs, node)
         NEWINDEXNAME = coder._nominal_metamethod_name(
             node._type.name, "newindex"),
         TYPE = node._type.name,
-        TAG = c_string_literal(types.serialize(node._declared_type or node._type)),
+        TAG = c_string_literal(types.serialize_semantic(node._declared_type or node._type)),
         FIELDMAP = table.concat(fieldmap, "\n")
     }))
 end
@@ -685,7 +685,7 @@ function coder._codeuniondec(ctx, code, initnominals, node)
         NEWINDEXNAME = coder._nominal_metamethod_name(
             node._type.name, "newindex"),
         TYPE = node._type.name,
-        TAG = c_string_literal(types.serialize(node._declared_type or node._type)),
+        TAG = c_string_literal(types.serialize_semantic(node._declared_type or node._type)),
         PAYLOAD_READER = payload_reader,
         METHODMAP = table.concat(methodmap, "\n"),
     }))
@@ -1016,7 +1016,7 @@ function coder._codeinterfacedec(ctx, sigs, code, initnominals, node)
         }
     ]], {
         TYPE = interface.name,
-        TAG = c_string_literal(types.serialize(node._declared_type or interface)),
+        TAG = c_string_literal(types.serialize_semantic(node._declared_type or interface)),
         INDEXNAME = coder._nominal_metamethod_name(
             interface.name, "index"),
         NEWINDEXNAME = coder._nominal_metamethod_name(

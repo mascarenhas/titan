@@ -1,47 +1,119 @@
+--- Stream Interfaces, printing, owned line iteration, and shell-command streams.
+-- @module titan.io
+-- @usage standard-library-io.md
+
 local os = import "os.titan"
 local string = import "string"
 
+--- Readable binary stream with chunk and delimiter reads.
+-- @usage standard-library-io.md
 interface Reader
+  --- Read one binary chunk; an empty string is data and nil ends input.
+  -- @return Next chunk, or nil at EOF.
+  -- @usage standard-library-io.md
   function read(): string?
+  --- Read through a nonempty binary delimiter across chunk boundaries.
+  -- @param delimiter Delimiter bytes.
+  -- @param chop True removes the delimiter from the result.
+  -- @return Delimited bytes or final suffix, or nil at EOF.
+  -- @usage standard-library-io.md
   function read_until(delimiter: string, chop: boolean?): string?
 end
 
+--- Binary stream accepting complete byte strings.
+-- @usage standard-library-io.md
 interface Writer
+  --- Write all supplied bytes to the stream.
+  -- @param data Complete binary string to write.
+  -- @usage standard-library-io.md
   function write(data: string)
 end
 
 -- Every later close call is safe. A successful or otherwise terminal close
 -- becomes a no-op; after a pre-commit failure, a concrete resource may retry.
+--- Resource whose terminal close can safely be repeated.
+-- @usage standard-library-io.md
 interface Closer
+  --- Retire the resource; later terminal closes are safe.
+  -- @usage standard-library-io.md
   function close()
 end
 
+--- Bidirectional binary stream without close ownership.
+-- @usage standard-library-io.md
 interface ReaderWriter
+  --- Read one binary chunk; an empty string is data and nil ends input.
+  -- @return Next chunk, or nil at EOF.
+  -- @usage standard-library-io.md
   function read(): string?
+  --- Read through a nonempty binary delimiter across chunk boundaries.
+  -- @param delimiter Delimiter bytes.
+  -- @param chop True removes the delimiter from the result.
+  -- @return Delimited bytes or final suffix, or nil at EOF.
+  -- @usage standard-library-io.md
   function read_until(delimiter: string, chop: boolean?): string?
+  --- Write all supplied bytes to the stream.
+  -- @param data Complete binary string to write.
+  -- @usage standard-library-io.md
   function write(data: string)
 end
 
 -- After close reaches its terminal state, both read operations return nil.
+--- Readable stream with explicit close ownership; terminal reads return nil.
+-- @usage standard-library-io.md
 interface ReaderCloser
+  --- Read one binary chunk; an empty string is data and nil ends input.
+  -- @return Next chunk, or nil at EOF.
+  -- @usage standard-library-io.md
   function read(): string?
+  --- Read through a nonempty binary delimiter across chunk boundaries.
+  -- @param delimiter Delimiter bytes.
+  -- @param chop True removes the delimiter from the result.
+  -- @return Delimited bytes or final suffix, or nil at EOF.
+  -- @usage standard-library-io.md
   function read_until(delimiter: string, chop: boolean?): string?
+  --- Retire the resource; later terminal closes are safe.
+  -- @usage standard-library-io.md
   function close()
 end
 
+--- Writable stream with explicit close ownership.
+-- @usage standard-library-io.md
 interface WriterCloser
+  --- Write all supplied bytes to the stream.
+  -- @param data Complete binary string to write.
+  -- @usage standard-library-io.md
   function write(data: string)
+  --- Retire the resource; later terminal closes are safe.
+  -- @usage standard-library-io.md
   function close()
 end
 
 -- After close reaches its terminal state, both read operations return nil.
+--- Bidirectional binary stream with explicit close ownership; terminal reads return nil.
+-- @usage standard-library-io.md
 interface ReaderWriterCloser
+  --- Read one binary chunk; an empty string is data and nil ends input.
+  -- @return Next chunk, or nil at EOF.
+  -- @usage standard-library-io.md
   function read(): string?
+  --- Read through a nonempty binary delimiter across chunk boundaries.
+  -- @param delimiter Delimiter bytes.
+  -- @param chop True removes the delimiter from the result.
+  -- @return Delimited bytes or final suffix, or nil at EOF.
+  -- @usage standard-library-io.md
   function read_until(delimiter: string, chop: boolean?): string?
+  --- Write all supplied bytes to the stream.
+  -- @param data Complete binary string to write.
+  -- @usage standard-library-io.md
   function write(data: string)
+  --- Retire the resource; later terminal closes are safe.
+  -- @usage standard-library-io.md
   function close()
 end
 
+--- Owned shell-process stream exposing stdin and merged stdout/stderr.
+-- @usage standard-library-io.md
 record InputOutputStream
   local process: os.Process
   local input: os.OutputStream
@@ -50,6 +122,9 @@ record InputOutputStream
   local closed: boolean
 end
 
+--- Write tab-separated Lua-rendered values and a newline to os.stdout in one write.
+-- @param ... Values rendered with string.tostring; the write may suspend.
+-- @usage standard-library-io.md
 function print(...: value)
   local builder = string.writer()
   local index = 1
@@ -74,27 +149,45 @@ local function next_line(reader: ReaderCloser): string?
   return line
 end
 
+--- Iterate newline-delimited lines and transfer Reader close ownership to the loop.
+-- @param reader Reader closed after exhaustion, break, return, or error.
+-- @return Generic-for iterator tuple returning lines with newline delimiters removed.
+-- @usage standard-library-io.md
 function lines(reader: ReaderCloser):
     (function (ReaderCloser): (string?), ReaderCloser, nil,
      function (ReaderCloser): ())
   return next_line, reader, nil, close_reader
 end
 
+--- Read a chunk of merged shell stdout and stderr.
+-- @return Bytes, or nil at EOF or after terminal close.
+-- @usage standard-library-io.md
 function InputOutputStream:read(): string?
   if self.closed then return nil end
   return self.output:read()
 end
 
+--- Read merged shell output through a binary delimiter.
+-- @param delimiter Nonempty delimiter, matched across chunks.
+-- @param chop True removes the delimiter.
+-- @return Bytes or final suffix, or nil at EOF or after terminal close.
+-- @usage standard-library-io.md
 function InputOutputStream:read_until(delimiter: string,
                                       chop: boolean?): string?
   if self.closed then return nil end
   return self.output:read_until(delimiter, chop)
 end
 
+--- Write all bytes to the shell process stdin.
+-- @param data Binary bytes to send.
+-- @usage standard-library-io.md
 function InputOutputStream:write(data: string)
   self.input:write(data)
 end
 
+--- Wait for and cache the shell process terminal status.
+-- @return Process exit code and signal information.
+-- @usage standard-library-io.md
 function InputOutputStream:wait(): os.ExitStatus
   if self.status then return self.status as os.ExitStatus end
   local status = self.process:wait()
@@ -102,6 +195,8 @@ function InputOutputStream:wait(): os.ExitStatus
   return status
 end
 
+--- Close streams and terminate and wait for the shell process if still running.
+-- @usage standard-library-io.md
 function InputOutputStream:close()
   if self.closed then return end
   self.input:close()
@@ -117,6 +212,10 @@ function InputOutputStream:close()
   process_cleanup_complete = true
 end
 
+--- Run a command with platform shell syntax and capture stdin plus merged output.
+-- @param command Shell command; /bin/sh on Unix, system cmd.exe on Windows.
+-- @return Owned stream; drain output before waiting when pipe capacity can matter.
+-- @usage standard-library-io.md
 function popen(command: string): InputOutputStream
   local process = os.spawn_shell(command)
   local input? = process.stdin

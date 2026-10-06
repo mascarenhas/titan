@@ -756,6 +756,7 @@ function makemoduletype(modname, modast, st)
                 local member = types.ModuleVariable(
                     modname, tlnode.decl.name, tlnode._type,
                     tlnode.isconst and true or false)
+                member._documentation = tlnode._documentation
                 if tlnode.islocal then
                     add_source_member(member)
                 else
@@ -764,6 +765,7 @@ function makemoduletype(modname, modast, st)
             elseif tag == "Ast.TopLevelFunc" then
                 local member = types.ModuleMember(modname, tlnode.name,
                     tlnode._type, tlnode._paramnames)
+                member._documentation = tlnode._documentation
                 member._parameter_decls = tlnode._parameter_decls
                 if tlnode.islocal then
                     add_source_member(member)
@@ -773,6 +775,7 @@ function makemoduletype(modname, modast, st)
             elseif tag == "Ast.TopLevelForeignFunc" then
                 local member = types.ModuleMember(modname, tlnode.name,
                     tlnode._type, tlnode._paramnames)
+                member._documentation = tlnode._documentation
                 member._foreign_source = true
                 has_source_foreign = true
                 add_source_member(member)
@@ -780,6 +783,7 @@ function makemoduletype(modname, modast, st)
                    or tag == "Ast.TopLevelUnion" then
                 local member = types.ModuleMember(
                     modname, tlnode.name, tlnode._type, nil)
+                member._documentation = tlnode._documentation
                 if tlnode.islocal then
                     add_source_member(member)
                 else
@@ -798,6 +802,15 @@ function makemoduletype(modname, modast, st)
     end
 
     local modtype = types.Module(modname, members, type_members)
+    modtype._documentation = modast._documentation
+    local named_docs = {}
+    for _, node in ipairs(modast) do
+        if not node._ignore and node._documentation and
+           (node._tag == "Ast.TopLevelTypeAlias" or node._tag == "Ast.TopLevelInterface") then
+            named_docs[node.name] = node._documentation
+        end
+    end
+    if next(named_docs) then modtype._type_documentation = named_docs end
     modtype._source = true
     modtype.source_members = source_members
     modtype.source_type_members = source_type_members

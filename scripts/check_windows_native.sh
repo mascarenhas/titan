@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
+source "$(dirname "$0")/windows_build_profile.sh"
+titan_windows_profile validation
 if [[ $# != 2 || ${MSYSTEM:-} != CLANG64 ]]; then
   echo 'usage (native CLANG64): check_windows_native.sh PREFIX BUILD_ROOT' >&2
   exit 2
@@ -39,13 +41,14 @@ done
 CC=${CC:-clang} perl -MText::ParseWords=shellwords -e \
   'my @c=shellwords($ENV{CC}); die "Invalid CC\n" unless @c; print "$_\0" for @c' > "$check_root/compiler.argv"
 mapfile -d '' -t compiler < "$check_root/compiler.argv"
-"${compiler[@]}" -std=c99 -O2 -Wall -Wextra -Werror -I "$prefix/include" \
+titan_windows_raw_flags "$check_root" NATIVE
+"${compiler[@]}" -std=c99 -Wall -Wextra "${cppflags[@]}" "${cflags[@]}" -Werror -I "$prefix/include" \
   -c spec/fixtures/windows/native_sdk_probe.c -o "$check_root/consumer.o"
 llvm-readobj --symbols "$check_root/consumer.o" > "$check_root/consumer.symbols"
 for name in llhttp_init llhttp_execute sqlite3_open sqlite3_version uv_loop_init; do
   grep -F "Name: __imp_$name" "$check_root/consumer.symbols" >/dev/null
 done
-"${compiler[@]}" -o "$run_root/bin/native-sdk-probe.exe" "$check_root/consumer.o" \
+"${compiler[@]}" "${ldflags[@]}" -o "$run_root/bin/native-sdk-probe.exe" "$check_root/consumer.o" \
   "$prefix/lib/libuv.dll.a" "$prefix/lib/libllhttp.dll.a" "$prefix/lib/libsqlite3.dll.a" \
   "$prefix/lib/libssl.dll.a" "$prefix/lib/libcrypto.dll.a"
 inspect_imports "$run_root/bin/native-sdk-probe.exe"

@@ -23,7 +23,7 @@ end
 -- module/owner declarations. Nominal applications retain their owner identity
 -- and discard their source type arguments through the canonical erasure pass.
 local function value_type(typ)
-    return types.serialize(types.erase(typ))
+    return types.serialize_semantic(types.erase(typ))
 end
 
 local function signature(callable, paramnames)

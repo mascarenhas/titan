@@ -3,26 +3,60 @@
 foreign import "uv.h"
 foreign import "utility_bits.h"
 
+--- Select the monotonic or realtime native clock.
+-- @field monotonic Monotonic variant.
+-- @field realtime Realtime variant.
+-- @usage uv/types.md#clock_id
 union clock_id
   monotonic()
   realtime()
 end
 
+--- Copied native timeval data exposed without C-header types.
+-- @field tv_sec Copied seconds/microseconds value; native long-width limits remain platform-dependent.
+-- @field tv_usec Copied seconds/microseconds value; native long-width limits remain platform-dependent.
+-- @usage uv/types.md#timeval_t
 record timeval_t
   tv_sec: integer
   tv_usec: integer
 end
 
+--- Copied native timeval64 data exposed without C-header types.
+-- @field tv_sec Copied 64-bit seconds and 32-bit microseconds.
+-- @field tv_usec Copied 64-bit seconds and 32-bit microseconds.
+-- @usage uv/types.md#timeval64_t
 record timeval64_t
   tv_sec: integer
   tv_usec: integer
 end
 
+--- Copied native timespec64 data exposed without C-header types.
+-- @field tv_sec Copied 64-bit seconds and 32-bit nanoseconds.
+-- @field tv_nsec Copied 64-bit seconds and 32-bit nanoseconds.
+-- @usage uv/types.md#timespec64_t
 record timespec64_t
   tv_sec: integer
   tv_nsec: integer
 end
 
+--- Copied native rusage data exposed without C-header types.
+-- @field ru_utime Copied counters/times; native doc units and platform zeros retained.
+-- @field ru_stime Copied counters/times; native doc units and platform zeros retained.
+-- @field ru_maxrss Copied counters/times; native doc units and platform zeros retained.
+-- @field ru_ixrss Copied counters/times; native doc units and platform zeros retained.
+-- @field ru_idrss Copied counters/times; native doc units and platform zeros retained.
+-- @field ru_isrss Copied counters/times; native doc units and platform zeros retained.
+-- @field ru_minflt Copied counters/times; native doc units and platform zeros retained.
+-- @field ru_majflt Copied counters/times; native doc units and platform zeros retained.
+-- @field ru_nswap Copied counters/times; native doc units and platform zeros retained.
+-- @field ru_inblock Copied counters/times; native doc units and platform zeros retained.
+-- @field ru_oublock Copied counters/times; native doc units and platform zeros retained.
+-- @field ru_msgsnd Copied counters/times; native doc units and platform zeros retained.
+-- @field ru_msgrcv Copied counters/times; native doc units and platform zeros retained.
+-- @field ru_nsignals Copied counters/times; native doc units and platform zeros retained.
+-- @field ru_nvcsw Copied counters/times; native doc units and platform zeros retained.
+-- @field ru_nivcsw Copied counters/times; native doc units and platform zeros retained.
+-- @usage uv/types.md#rusage_t
 record rusage_t
   ru_utime: timeval_t
   ru_stime: timeval_t
@@ -42,6 +76,12 @@ record rusage_t
   ru_nivcsw: integer
 end
 
+--- Copied native utsname data exposed without C-header types.
+-- @field sysname Four fixed NUL-terminated arrays; copied value.
+-- @field release Four fixed NUL-terminated arrays; copied value.
+-- @field version Four fixed NUL-terminated arrays; copied value.
+-- @field machine Four fixed NUL-terminated arrays; copied value.
+-- @usage uv/types.md#utsname_t
 record utsname_t
   sysname: string
   release: string
@@ -49,7 +89,11 @@ record utsname_t
   machine: string
 end
 
+--- Typed clock_id.monotonic value for native operation selection.
+-- @usage uv/types.md#public-constants
 const CLOCK_MONOTONIC = clock_id.monotonic()
+--- Typed clock_id.realtime value for native operation selection.
+-- @usage uv/types.md#public-constants
 const CLOCK_REALTIME = clock_id.realtime()
 
 local function utility_native_clock(clock: clock_id): foreign uv_clock_id
@@ -85,26 +129,49 @@ local function utility_copy_rusage(native: foreign *uv_rusage_t): rusage_t
   }
 end
 
+--- Return the packed native libuv version integer; it does not identify Titan's local patch bytes.
+-- @return Native integer result with the documented lifetime and units.
+-- @usage uv/functions/version.md#version
 function version(): integer
   return ffi.uv_version()
 end
 
+--- Return the native libuv version string; Titan's pinned local patch is part of the build contract, not this string.
+-- @return Native string result with the documented lifetime and units.
+-- @usage uv/functions/version.md#version_string
 function version_string(): string
   return ffi.uv_version_string() as string
 end
 
+--- Convert a native system error to the libuv error domain.
+-- @param sys_errno Input integer value; checked native narrowing occurs before native ownership is accepted.
+-- @return Native integer result with the documented lifetime and units.
+-- @usage uv/functions/errors.md#translate_sys_error
 function translate_sys_error(sys_errno: integer): integer
   return ffi.uv_translate_sys_error(sys_errno)
 end
 
+--- Copy human-readable text for a libuv error code.
+-- @param err Input integer value; checked native narrowing occurs before native ownership is accepted.
+-- @return Native string result with the documented lifetime and units.
+-- @usage uv/functions/errors.md#strerror
 function strerror(err: integer): string
   return ffi.uv_strerror(err) as string
 end
 
+--- Copy the symbolic name for a libuv error code, such as ENOENT.
+-- @param err Input integer value; checked native narrowing occurs before native ownership is accepted.
+-- @return Native string result with the documented lifetime and units.
+-- @usage uv/functions/errors.md#err_name
 function err_name(err: integer): string
   return ffi.uv_err_name(err) as string
 end
 
+--- Copy libuv error text through a temporary native buffer of capacity bytes.
+-- @param err Input integer value; checked native narrowing occurs before native ownership is accepted.
+-- @param capacity Input integer value; checked native narrowing occurs before native ownership is accepted.
+-- @return Native string result with the documented lifetime and units.
+-- @usage uv/functions/errors.md#strerror_r
 function strerror_r(err: integer, capacity: integer): string
   local buffer = foreign char.new_array(capacity)
   ffi.uv_strerror_r(err, buffer, capacity)
@@ -112,6 +179,11 @@ function strerror_r(err: integer, capacity: integer): string
   return (buffer as foreign *char) as string
 end
 
+--- Copy the symbolic libuv error name through a temporary native buffer of capacity bytes.
+-- @param err Input integer value; checked native narrowing occurs before native ownership is accepted.
+-- @param capacity Input integer value; checked native narrowing occurs before native ownership is accepted.
+-- @return Native string result with the documented lifetime and units.
+-- @usage uv/functions/errors.md#err_name_r
 function err_name_r(err: integer, capacity: integer): string
   local buffer = foreign char.new_array(capacity)
   ffi.uv_err_name_r(err, buffer, capacity)
@@ -119,62 +191,117 @@ function err_name_r(err: integer, capacity: integer): string
   return (buffer as foreign *char) as string
 end
 
+--- Return the estimated amount of parallelism available to this process; this is not the number of libuv worker threads.
+-- @return Native integer result with the documented lifetime and units.
+-- @usage uv/functions/misc.md#available_parallelism
 function available_parallelism(): integer
   return ffi.uv_available_parallelism()
 end
 
+--- Return the byte capacity required for native thread-affinity masks, or a native negative status.
+-- @return Native operation result or submission status; negative values report libuv errors.
+-- @usage uv/functions/misc.md#cpumask_size
 function cpumask_size(): integer
   return ffi.uv_cpumask_size()
 end
 
+--- Return bytes of memory available to this process under native resource constraints.
+-- @return Native integer result with the documented lifetime and units.
+-- @usage uv/functions/misc.md#get_available_memory
 function get_available_memory(): integer
   return utility_u64(ffi.uv_get_available_memory())
 end
 
+--- Return the native memory constraint in bytes; zero can mean unknown or unconstrained rather than zero usable memory.
+-- @return Native integer result with the documented lifetime and units.
+-- @usage uv/functions/misc.md#get_constrained_memory
 function get_constrained_memory(): integer
   return utility_u64(ffi.uv_get_constrained_memory())
 end
 
+--- Return native free physical-memory bytes.
+-- @return Native integer result with the documented lifetime and units.
+-- @usage uv/functions/misc.md#get_free_memory
 function get_free_memory(): integer
   return utility_u64(ffi.uv_get_free_memory())
 end
 
+--- Return native total physical-memory bytes.
+-- @return Native integer result with the documented lifetime and units.
+-- @usage uv/functions/misc.md#get_total_memory
 function get_total_memory(): integer
   return utility_u64(ffi.uv_get_total_memory())
 end
 
+--- Return a high-resolution monotonic time in nanoseconds with an arbitrary origin.
+-- @return Native integer result with the documented lifetime and units.
+-- @usage uv/functions/misc.md#hrtime
 function hrtime(): integer
   return utility_u64(ffi.uv_hrtime())
 end
 
+--- Return this process's native PID.
+-- @return Native integer result with the documented lifetime and units.
+-- @usage uv/functions/misc.md#os_getpid
 function os_getpid(): integer
   return ffi.uv_os_getpid()
 end
 
+--- Return the native parent PID.
+-- @return Native integer result with the documented lifetime and units.
+-- @usage uv/functions/misc.md#os_getppid
 function os_getppid(): integer
   return ffi.uv_os_getppid()
 end
 
+--- Change the process working directory synchronously.
+-- @param dir Input immutable text/byte owner; native C-string conventions apply where the operation takes text.
+-- @return Native integer result with the documented lifetime and units.
+-- @usage uv/functions/misc.md#chdir
 function chdir(dir: string): integer
   return ffi.uv_chdir(dir)
 end
 
+--- Set the process title synchronously after process-argument setup.
+-- @param title Input immutable text/byte owner; native C-string conventions apply where the operation takes text.
+-- @return Native integer result with the documented lifetime and units.
+-- @usage uv/functions/misc.md#set_process_title
 function set_process_title(title: string): integer
   return ffi.uv_set_process_title(title)
 end
 
+--- Set a process environment variable to the supplied text value.
+-- @param name Input immutable text/byte owner; native C-string conventions apply where the operation takes text.
+-- @param value Input immutable text/byte owner; native C-string conventions apply where the operation takes text.
+-- @return Native integer result with the documented lifetime and units.
+-- @usage uv/functions/misc.md#os_setenv
 function os_setenv(name: string, value: string): integer
   return ffi.uv_os_setenv(name, value)
 end
 
+--- Remove a process environment variable.
+-- @param name Input immutable text/byte owner; native C-string conventions apply where the operation takes text.
+-- @return Native integer result with the documented lifetime and units.
+-- @usage uv/functions/misc.md#os_unsetenv
 function os_unsetenv(name: string): integer
   return ffi.uv_os_unsetenv(name)
 end
 
+--- Set the numeric process priority for pid subject to platform permissions/ranges.
+-- @param pid Input integer value; checked native narrowing occurs before native ownership is accepted.
+-- @param priority Input integer value; checked native narrowing occurs before native ownership is accepted.
+-- @return Native integer result with the documented lifetime and units.
+-- @usage uv/functions/misc.md#os_setpriority
 function os_setpriority(pid: integer, priority: integer): integer
   return ffi.uv_os_setpriority(pid, priority)
 end
 
+--- Copy the working directory using capacity bytes and return status, optional text, and native required/actual length.
+-- @param capacity Input integer value; checked native narrowing occurs before native ownership is accepted.
+-- @return Native status: zero on success, a negative libuv error on failure.
+-- @return Copied or retained string result, or nil on failure or absence.
+-- @return Native operation result or submission status; negative values report libuv errors.
+-- @usage uv/functions/misc.md#cwd
 function cwd(capacity: integer): (integer, string?, integer)
   local size: foreign size_t = capacity
   local buffer = foreign char.new_array(capacity)
@@ -183,6 +310,12 @@ function cwd(capacity: integer): (integer, string?, integer)
   return status, (buffer as foreign *char) as string, size
 end
 
+--- Copy the executable path using capacity bytes and retain the native actual-length/truncation behavior.
+-- @param capacity Input integer value; checked native narrowing occurs before native ownership is accepted.
+-- @return Native status: zero on success, a negative libuv error on failure.
+-- @return Copied or retained string result, or nil on failure or absence.
+-- @return Native integer result with the documented lifetime and units.
+-- @usage uv/functions/misc.md#exepath
 function exepath(capacity: integer): (integer, string?, integer)
   local size: foreign size_t = capacity
   local buffer = foreign char.new_array(capacity)
@@ -191,6 +324,12 @@ function exepath(capacity: integer): (integer, string?, integer)
   return status, (buffer as foreign *char) as string, size
 end
 
+--- Copy the host name into capacity bytes and preserve native required/actual length.
+-- @param capacity Input integer value; checked native narrowing occurs before native ownership is accepted.
+-- @return Native status: zero on success, a negative libuv error on failure.
+-- @return Copied or retained string result, or nil on failure or absence.
+-- @return Native integer result with the documented lifetime and units.
+-- @usage uv/functions/misc.md#os_gethostname
 function os_gethostname(capacity: integer): (integer, string?, integer)
   local size: foreign size_t = capacity
   local buffer = foreign char.new_array(capacity)
@@ -199,6 +338,12 @@ function os_gethostname(capacity: integer): (integer, string?, integer)
   return status, (buffer as foreign *char) as string, size
 end
 
+--- Copy the native home-directory path using explicit byte capacity and return native required/actual length.
+-- @param capacity Input integer value; checked native narrowing occurs before native ownership is accepted.
+-- @return Native status: zero on success, a negative libuv error on failure.
+-- @return Copied or retained string result, or nil on failure or absence.
+-- @return Native integer result with the documented lifetime and units.
+-- @usage uv/functions/misc.md#os_homedir
 function os_homedir(capacity: integer): (integer, string?, integer)
   local size: foreign size_t = capacity
   local buffer = foreign char.new_array(capacity)
@@ -207,6 +352,12 @@ function os_homedir(capacity: integer): (integer, string?, integer)
   return status, (buffer as foreign *char) as string, size
 end
 
+--- Copy the native temporary-directory path using explicit byte capacity and return native required/actual length.
+-- @param capacity Input integer value; checked native narrowing occurs before native ownership is accepted.
+-- @return Native status: zero on success, a negative libuv error on failure.
+-- @return Copied or retained string result, or nil on failure or absence.
+-- @return Native integer result with the documented lifetime and units.
+-- @usage uv/functions/misc.md#os_tmpdir
 function os_tmpdir(capacity: integer): (integer, string?, integer)
   local size: foreign size_t = capacity
   local buffer = foreign char.new_array(capacity)
@@ -215,6 +366,13 @@ function os_tmpdir(capacity: integer): (integer, string?, integer)
   return status, (buffer as foreign *char) as string, size
 end
 
+--- Read one environment variable into capacity bytes, returning status, optional value, and native required/actual length.
+-- @param name Input immutable text/byte owner; native C-string conventions apply where the operation takes text.
+-- @param capacity Input integer value; checked native narrowing occurs before native ownership is accepted.
+-- @return Native status: zero on success, a negative libuv error on failure.
+-- @return Copied or retained string result, or nil on failure or absence.
+-- @return Native operation result or submission status; negative values report libuv errors.
+-- @usage uv/functions/misc.md#os_getenv
 function os_getenv(name: string, capacity: integer): (integer, string?, integer)
   local size: foreign size_t = capacity
   local buffer = foreign char.new_array(capacity)
@@ -223,6 +381,11 @@ function os_getenv(name: string, capacity: integer): (integer, string?, integer)
   return status, (buffer as foreign *char) as string, size
 end
 
+--- Copy the process title into capacity bytes and return `(status, title?)`.
+-- @param capacity Input integer value; checked native narrowing occurs before native ownership is accepted.
+-- @return Native status: zero on success, a negative libuv error on failure.
+-- @return Copied or retained string result, or nil on failure or absence.
+-- @usage uv/functions/misc.md#get_process_title
 function get_process_title(capacity: integer): (integer, string?)
   local buffer = foreign char.new_array(capacity)
   local status: integer = ffi.uv_get_process_title(buffer, capacity)
@@ -230,6 +393,11 @@ function get_process_title(capacity: integer): (integer, string?)
   return status, (buffer as foreign *char) as string
 end
 
+--- Return status and numeric priority for pid; priority is a data value, not a bitmask.
+-- @param pid Input integer value; checked native narrowing occurs before native ownership is accepted.
+-- @return Native status: zero on success, a negative libuv error on failure.
+-- @return Copied or retained integer result, or nil on failure or absence.
+-- @usage uv/functions/misc.md#os_getpriority
 function os_getpriority(pid: integer): (integer, integer?)
   local priority: foreign int = 0
   local status: integer = ffi.uv_os_getpriority(pid, priority)
@@ -237,6 +405,10 @@ function os_getpriority(pid: integer): (integer, integer?)
   return status, priority
 end
 
+--- Return status and the process's resident-memory size in bytes.
+-- @return Native status: zero on success, a negative libuv error on failure.
+-- @return Copied or retained integer result, or nil on failure or absence.
+-- @usage uv/functions/misc.md#resident_set_memory
 function resident_set_memory(): (integer, integer?)
   local rss: foreign size_t = 0
   local status: integer = ffi.uv_resident_set_memory(rss)
@@ -244,6 +416,10 @@ function resident_set_memory(): (integer, integer?)
   return status, rss
 end
 
+--- Return status and system uptime in floating-point seconds.
+-- @return Native status: zero on success, a negative libuv error on failure.
+-- @return Copied or retained float result, or nil on failure or absence.
+-- @usage uv/functions/misc.md#uptime
 function uptime(): (integer, float?)
   local seconds: foreign double = 0.0
   local status: integer = ffi.uv_uptime(seconds)
@@ -251,6 +427,10 @@ function uptime(): (integer, float?)
   return status, seconds
 end
 
+--- Return status and copied resource-usage counters for this process.
+-- @return Native status: zero on success, a negative libuv error on failure.
+-- @return Copied or retained rusage_t result, or nil on failure or absence.
+-- @usage uv/functions/misc.md#getrusage
 function getrusage(): (integer, rusage_t?)
   local native = foreign uv_rusage_t.new()
   local status: integer = ffi.uv_getrusage(native)
@@ -258,6 +438,10 @@ function getrusage(): (integer, rusage_t?)
   return status, utility_copy_rusage(native)
 end
 
+--- Return status and copied resource-usage counters for the calling thread where supported.
+-- @return Native status: zero on success, a negative libuv error on failure.
+-- @return Copied or retained rusage_t result, or nil on failure or absence.
+-- @usage uv/functions/misc.md#getrusage_thread
 function getrusage_thread(): (integer, rusage_t?)
   local native = foreign uv_rusage_t.new()
   local status: integer = ffi.uv_getrusage_thread(native)
@@ -265,6 +449,10 @@ function getrusage_thread(): (integer, rusage_t?)
   return status, utility_copy_rusage(native)
 end
 
+--- Return status and the wall-clock time as seconds/microseconds.
+-- @return Native status: zero on success, a negative libuv error on failure.
+-- @return Copied or retained timeval64_t result, or nil on failure or absence.
+-- @usage uv/functions/misc.md#gettimeofday
 function gettimeofday(): (integer, timeval64_t?)
   local native = foreign uv_timeval64_t.new()
   local status: integer = ffi.uv_gettimeofday(native)
@@ -272,6 +460,11 @@ function gettimeofday(): (integer, timeval64_t?)
   return status, timeval64_t(native.tv_sec, native.tv_usec)
 end
 
+--- Read the selected clock and return status plus a copied seconds/nanoseconds value.
+-- @param clock Input clock_id value.
+-- @return Native status: zero on success, a negative libuv error on failure.
+-- @return Copied or retained timespec64_t result, or nil on failure or absence.
+-- @usage uv/functions/misc.md#clock_gettime
 function clock_gettime(clock: clock_id): (integer, timespec64_t?)
   local native = foreign uv_timespec64_t.new()
   local status: integer = ffi.uv_clock_gettime(utility_native_clock(clock), native)
@@ -279,12 +472,21 @@ function clock_gettime(clock: clock_id): (integer, timespec64_t?)
   return status, timespec64_t(native.tv_sec, native.tv_nsec)
 end
 
+--- Return native one-, five-, and fifteen-minute load averages.
+-- @return Native float result with the documented lifetime and units.
+-- @return Native float result with the documented lifetime and units.
+-- @return Native float result with the documented lifetime and units.
+-- @usage uv/functions/misc.md#loadavg
 function loadavg(): (float, float, float)
   local average = foreign double.new_array(3)
   ffi.uv_loadavg(average)
   return average[0], average[1], average[2]
 end
 
+--- Return status and a copied OS identity record.
+-- @return Native status: zero on success, a negative libuv error on failure.
+-- @return Copied or retained utsname_t result, or nil on failure or absence.
+-- @usage uv/functions/misc.md#os_uname
 function os_uname(): (integer, utsname_t?)
   local native = foreign uv_utsname_t.new()
   local status: integer = ffi.uv_os_uname(native)
@@ -297,6 +499,9 @@ function os_uname(): (integer, utsname_t?)
   }
 end
 
+--- Block the calling OS thread for msec milliseconds.
+-- @param msec Input integer value; checked native narrowing occurs before native ownership is accepted.
+-- @usage uv/functions/misc.md#sleep
 function sleep(msec: integer)
   ffi.uv_sleep(msec)
 end

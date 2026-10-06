@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # The full shared native suite owns a private local NTFS workspace and SDK copy.
 set -euo pipefail
+source "$(dirname "$0")/windows_build_profile.sh"
+titan_windows_profile validation
 if [[ ${MSYSTEM:-} != CLANG64 || $# -lt 2 || $# -gt 3 ||
       ( $1 != build && $1 != run ) || ( $1 == build && $# != 3 ) ]]; then
   echo 'usage (native CLANG64): windows_stdlib_tests.sh build WORKSPACE VALIDATED_SDK_PREFIX | run WORKSPACE' >&2
@@ -10,8 +12,13 @@ mode=$1
 source_root=$(cd "$(dirname "$0")/.." && pwd)
 workspace=$2
 owner=titan-windows-stdlib-tests-v1
+requested_profile=$TITAN_BUILD_PROFILE
 if [[ $mode == build ]]; then
   prefix=$(cd "$3" && pwd)
+  [[ -f $prefix/etc/titan/build-profile &&
+     $(cat "$prefix/etc/titan/build-profile") == "$TITAN_BUILD_PROFILE" ]] || {
+    echo "The supplied SDK must use the selected $TITAN_BUILD_PROFILE profile" >&2; exit 1;
+  }
   [[ -f $prefix/bin/titanc.exe && -f $prefix/bin/lua.exe &&
      -f $prefix/lib/titan/0.6/titan.dll &&
      -f $prefix/share/lua/5.5/titan/sqlite3.lua &&
@@ -105,7 +112,7 @@ if [[ $mode == build ]]; then
   winprefix=$(cygpath -m "$work/sdk")
   winnative=$(cygpath -m "$work/cwd/.titan-tests")
   export CC=${CC:-clang} AR=${AR:-llvm-ar} RANLIB=${RANLIB:-llvm-ranlib}
-  export TITAN_EXTRA_CFLAGS=${TITAN_EXTRA_CFLAGS:--O0}
+  export TITAN_EXTRA_CFLAGS=${TITAN_EXTRA_CFLAGS-}
   export TITAN_EXTRA_CPPFLAGS="${TITAN_EXTRA_CPPFLAGS:-} -DUSING_UV_SHARED=1 -I\"$winprefix/include\" -I\"$winnative\""
   # Public fixture calls use the same DLL instances as the canonical provider;
   # these import libraries are final-link inputs, never Titan -X providers.
@@ -124,8 +131,9 @@ if [[ $mode == build ]]; then
   mapfile -d '' -t compiler < "$work/CC.argv"
   mapfile -d '' -t cflags < "$work/TITAN_EXTRA_CFLAGS.argv"
   mapfile -d '' -t cppflags < "$work/TITAN_EXTRA_CPPFLAGS.argv"
+  titan_windows_raw_flags "$work" TEST
   [[ $("${compiler[@]}" -dumpmachine) == x86_64-w64-windows-gnu ]]
-  for name in CC AR RANLIB TITAN_EXTRA_CFLAGS TITAN_EXTRA_CPPFLAGS TITAN_EXTRA_LDFLAGS; do
+  for name in TITAN_BUILD_PROFILE CC AR RANLIB TITAN_EXTRA_CFLAGS TITAN_EXTRA_CPPFLAGS TITAN_EXTRA_LDFLAGS TEST_CFLAGS TEST_CPPFLAGS TEST_LDFLAGS; do
     printf 'export %s=%q\n' "$name" "${!name}"
   done > "$work/compiler.env"
   (
@@ -139,10 +147,10 @@ if [[ $mode == build ]]; then
         -c "$(cygpath -m "$source_root/spec/fixtures/stdlib/native/$fixture.c")" \
         -o "$winnative/$fixture.o"
     done
-    "${compiler[@]}" -std=c99 -O2 -Wall -Wextra -Werror -municode \
+    "${compiler[@]}" -std=c99 -Wall -Wextra -Werror "${cppflags[@]}" "${cflags[@]}" "${ldflags[@]}" -municode \
       "$(cygpath -m "$work/cwd/spec/fixtures/stdlib/native/os_process_host_child.c")" \
       -o "$winprefix/bin/process child ação 東京.exe"
-    "${compiler[@]}" -std=c99 -O2 -Wall -Wextra -Werror -municode \
+    "${compiler[@]}" -std=c99 -Wall -Wextra -Werror "${cppflags[@]}" "${cflags[@]}" "${ldflags[@]}" -municode \
       "$(cygpath -m "$work/cwd/spec/fixtures/stdlib/native/windows_test_supervisor.c")" \
       -o "$winprefix/bin/windows-test-supervisor.exe"
     export TITAN_ROCKS_ROOT="$winprefix" TITAN_RUNTIME_PREBUILT=1 TITAN_JOBS=1
@@ -155,7 +163,7 @@ if [[ $mode == build ]]; then
       "${roots[@]}" -X "$winnative/async_foreign_work.o" "$winnative/fs_fixture.o" "$winnative/uv_stdio_probe.o"
   ) 2>&1 | tee "$work/build.log"
   [[ -f $work/sdk/bin/titan-stdlib-tests.exe ]]
-  printf '%s\n' 'Windows x64 CLANG64/UCRT; shared native inventory; local NTFS' > "$work/build.complete"
+  printf '%s\n' "Windows x64 CLANG64/UCRT; shared native inventory; local NTFS; profile=$TITAN_BUILD_PROFILE" > "$work/build.complete"
   echo "Built ${#roots[@]} shared native test roots in $work"
   exit 0
 fi
@@ -163,6 +171,9 @@ fi
 [[ -f $work/build.complete && -f $work/sdk/bin/titan-stdlib-tests.exe ]]
 rm -f "$work/stdout.log" "$work/stderr.log"
 source "$work/compiler.env"
+[[ $TITAN_BUILD_PROFILE == "$requested_profile" ]] || {
+  echo 'The test workspace was built with a different profile; rebuild it first' >&2; exit 1;
+}
 winprefix=$(cygpath -m "$work/sdk")
 export TITAN_ROCKS_ROOT="$winprefix" TITAN_RUNTIME_PREBUILT=1 TITAN_JOBS=1
 # Preserve the controlled provider first and each child launcher's default

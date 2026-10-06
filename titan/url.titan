@@ -1,3 +1,7 @@
+--- Parse and normalize absolute HTTP and WebSocket URLs without performing I/O.
+-- @module titan.url
+-- @usage standard-library-url.md
+
 local peg = import "peg"
 local string = import "string"
 
@@ -6,6 +10,15 @@ local string = import "string"
 -- 0da7cadb867858f8fdf2bfbfbc92a51a7c28c3d7. Copyright (c) 2012-2016
 -- Daurnimator; see LICENSES/lpeg-patterns-LICENSE.
 
+--- Normalized URL components for dialing, TLS identity, and HTTP origin-form requests.
+-- @field scheme Lowercase normalized scheme.
+-- @field host Unbracketed connection hostname or IP address.
+-- @field port Effective numeric port, including a scheme default when omitted.
+-- @field path Normalized path; an empty source path becomes /.
+-- @field query Normalized query; nil means absent and an empty string means present but empty.
+-- @field target Origin-form path with its optional query.
+-- @field authority Normalized Host spelling with brackets and any explicit port.
+-- @usage standard-library-url.md#api
 record Url
   scheme: string
   host: string
@@ -16,6 +29,11 @@ record Url
   authority: string
 end
 
+--- A nonthrowing URL parse diagnostic with a one-based byte position.
+-- @field position One-based diagnostic byte position.
+-- @field kind Stable error-kind key.
+-- @field message Human-readable failure description.
+-- @usage standard-library-url.md#api
 record Error
   position: integer
   kind: string
@@ -301,6 +319,11 @@ local function parse_port(text: string, position: integer):
   return port, nil
 end
 
+--- Parse and normalize an absolute HTTP, HTTPS, WS, or WSS URL.
+-- @param source Absolute URL text.
+-- @return Normalized URL, or nil on failure.
+-- @return Parse diagnostic, or nil on success.
+-- @usage standard-library-url.md#api
 function parse(source: string): (Url?, Error?)
   local captured, failure_label, failure_position =
     http_url_pattern:match(source)
@@ -361,6 +384,13 @@ function parse(source: string): (Url?, Error?)
   }, nil
 end
 
+--- Validate and normalize separately received scheme, authority, and origin-form target.
+-- @param scheme HTTP or WebSocket scheme.
+-- @param authority Complete Host authority, including any brackets and port.
+-- @param target Origin-form request target beginning with /.
+-- @return Normalized request URL, or nil on failure.
+-- @return Parse diagnostic, or nil on success.
+-- @usage standard-library-url.md#separately-received-request-components
 function parse_request(scheme: string, authority: string,
                        target: string): (Url?, Error?)
   local scheme_match, scheme_label, scheme_position =
@@ -401,6 +431,9 @@ function parse_request(scheme: string, authority: string,
   return parse(source)
 end
 
+--- Return the normalized authority suitable for an HTTP Host header.
+-- @return Normalized Host header authority.
+-- @usage standard-library-url.md#api
 function Url:host_header(): string
   return self.authority
 end

@@ -2,6 +2,13 @@
 foreign import "uv.h"
 foreign import "data_native.h"
 
+--- Copied native cpu times data exposed without C-header types.
+-- @field user Independent copied counter in milliseconds; native cpu_info storage is freed internally before return.
+-- @field nice Independent copied counter in milliseconds; native cpu_info storage is freed internally before return.
+-- @field sys Independent copied counter in milliseconds; native cpu_info storage is freed internally before return.
+-- @field idle Independent copied counter in milliseconds; native cpu_info storage is freed internally before return.
+-- @field irq Independent copied counter in milliseconds; native cpu_info storage is freed internally before return.
+-- @usage uv/types.md#cpu_times_t
 record cpu_times_t
   user: integer
   nice: integer
@@ -10,12 +17,24 @@ record cpu_times_t
   irq: integer
 end
 
+--- Copied native cpu info data exposed without C-header types.
+-- @field model Independent copied record; nullable model string and nested cpu_times survive internal native cleanup. speed is MHz.
+-- @field speed Independent copied record; nullable model string and nested cpu_times survive internal native cleanup. speed is MHz.
+-- @field cpu_times Independent copied record; nullable model string and nested cpu_times survive internal native cleanup. speed is MHz.
+-- @usage uv/types.md#cpu_info_t
 record cpu_info_t
   model: string?
   speed: integer
   cpu_times: cpu_times_t
 end
 
+--- Copied native interface address data exposed without C-header types.
+-- @field name Independent copied name, six physical-address bytes, scalar flag and typed address/netmask values. Internal native cleanup occurs before return.
+-- @field phys_addr Independent copied name, six physical-address bytes, scalar flag and typed address/netmask values. Internal native cleanup occurs before return.
+-- @field is_internal Independent copied name, six physical-address bytes, scalar flag and typed address/netmask values. Internal native cleanup occurs before return.
+-- @field address Address in the copied native result.
+-- @field netmask Netmask in the copied native result.
+-- @usage uv/types.md#interface_address_t
 record interface_address_t
   name: string
   phys_addr: string
@@ -24,11 +43,22 @@ record interface_address_t
   netmask: sockaddr_t?
 end
 
+--- Copied native env item data exposed without C-header types.
+-- @field name Copied name/value strings independent of native environment allocation and later environment changes; no public free is required.
+-- @field value Copied name/value strings independent of native environment allocation and later environment changes; no public free is required.
+-- @usage uv/types.md#env_item_t
 record env_item_t
   name: string
   value: string
 end
 
+--- Copied native passwd data exposed without C-header types.
+-- @field username Independent copied strings and numeric IDs; internal native cleanup occurs before return. shell may be nil on Windows.
+-- @field uid Independent copied strings and numeric IDs; internal native cleanup occurs before return. shell may be nil on Windows.
+-- @field gid Independent copied strings and numeric IDs; internal native cleanup occurs before return. shell may be nil on Windows.
+-- @field shell Independent copied strings and numeric IDs; internal native cleanup occurs before return. shell may be nil on Windows.
+-- @field homedir Independent copied strings and numeric IDs; internal native cleanup occurs before return. shell may be nil on Windows.
+-- @usage uv/types.md#passwd_t
 record passwd_t
   username: string
   uid: integer
@@ -37,6 +67,11 @@ record passwd_t
   homedir: string
 end
 
+--- Copied native group data exposed without C-header types.
+-- @field groupname Independent copied group name, ID and Array of member strings. Internal native cleanup occurs before return.
+-- @field gid Independent copied group name, ID and Array of member strings. Internal native cleanup occurs before return.
+-- @field members Independent copied group name, ID and Array of member strings. Internal native cleanup occurs before return.
+-- @usage uv/types.md#group_t
 record group_t
   groupname: string
   gid: integer
@@ -58,6 +93,11 @@ local function data_copy_bytes(pointer: foreign const *char, length: integer): s
   return bytes as string
 end
 
+--- Return status, a copied CPU-info Array, and native count.
+-- @return Native status: zero on success, a negative libuv error on failure.
+-- @return Copied or retained {cpu_info_t} result, or nil on failure or absence.
+-- @return Native operation result or submission status; negative values report libuv errors.
+-- @usage uv/functions/misc.md#cpu_info
 function cpu_info(): (integer, {cpu_info_t}?, integer)
   local native: foreign *uv_cpu_info_t = nil
   local count: foreign int = 0
@@ -92,6 +132,11 @@ local function data_copy_address(entry: foreign *uv_interface_address_t,
   return sockaddr_copy(native)
 end
 
+--- Return status, a copied interface-address Array, and native count.
+-- @return Native status: zero on success, a negative libuv error on failure.
+-- @return Copied or retained {interface_address_t} result, or nil on failure or absence.
+-- @return Native operation result or submission status; negative values report libuv errors.
+-- @usage uv/functions/misc.md#interface_addresses
 function interface_addresses(): (integer, {interface_address_t}?, integer)
   local native: foreign *uv_interface_address_t = nil
   local count: foreign int = 0
@@ -113,6 +158,11 @@ function interface_addresses(): (integer, {interface_address_t}?, integer)
   return status, result, count
 end
 
+--- Copy all native environment entries into a Titan Array and return status/Array/count.
+-- @return Native status: zero on success, a negative libuv error on failure.
+-- @return Copied or retained {env_item_t} result, or nil on failure or absence.
+-- @return Native operation result or submission status; negative values report libuv errors.
+-- @usage uv/functions/misc.md#os_environ
 function os_environ(): (integer, {env_item_t}?, integer)
   local native: foreign *uv_env_item_t = nil
   local count: foreign int = 0
@@ -138,6 +188,10 @@ local function data_copy_passwd(native: foreign *uv_passwd_t): passwd_t
   }
 end
 
+--- Look up the current effective user and return a copied passwd record; native strings are freed internally.
+-- @return Native status: zero on success, a negative libuv error on failure.
+-- @return Copied or retained passwd_t result, or nil on failure or absence.
+-- @usage uv/functions/misc.md#os_get_passwd
 function os_get_passwd(): (integer, passwd_t?)
   local native = foreign uv_passwd_t.new()
   local status: integer = ffi.uv_os_get_passwd(native)
@@ -146,6 +200,11 @@ function os_get_passwd(): (integer, passwd_t?)
   return status, data_copy_passwd(native)
 end
 
+--- Look up uid and return a copied passwd record; native strings are freed internally.
+-- @param uid Input integer value; checked native narrowing occurs before native ownership is accepted.
+-- @return Native status: zero on success, a negative libuv error on failure.
+-- @return Copied or retained passwd_t result, or nil on failure or absence.
+-- @usage uv/functions/misc.md#os_get_passwd2
 function os_get_passwd2(uid: integer): (integer, passwd_t?)
   local native = foreign uv_passwd_t.new()
   local status: integer = ffi.uv_os_get_passwd2(native, uid)
@@ -154,6 +213,11 @@ function os_get_passwd2(uid: integer): (integer, passwd_t?)
   return status, data_copy_passwd(native)
 end
 
+--- Look up gid and return a copied group record including members; native snapshot storage is freed internally.
+-- @param gid Input integer value; checked native narrowing occurs before native ownership is accepted.
+-- @return Native status: zero on success, a negative libuv error on failure.
+-- @return Copied or retained group_t result, or nil on failure or absence.
+-- @usage uv/functions/misc.md#os_get_group
 function os_get_group(gid: integer): (integer, group_t?)
   local native = foreign uv_group_t.new()
   local status: integer = ffi.uv_os_get_group(native, gid)
@@ -185,11 +249,24 @@ local function data_utf16_input(units: {integer}, length: integer): owned uint16
   return native
 end
 
+--- Measure WTF-8 bytes required for the UTF-16 input units.
+-- @param units Input {integer} value; checked native narrowing occurs before native ownership is accepted.
+-- @param length Input integer value; checked native narrowing occurs before native ownership is accepted.
+-- @return Native integer result with the documented lifetime and units.
+-- @usage uv/functions/misc.md#utf16_length_as_wtf8
 function utf16_length_as_wtf8(units: {integer}, length: integer): integer
   local native = data_utf16_input(units, length)
   return ffi.uv_utf16_length_as_wtf8(native, length)
 end
 
+--- Convert UTF-16 input units into copied WTF-8 bytes, with an optional explicit output capacity; return status, optional output, and native output length.
+-- @param units Input {integer} value; checked native narrowing occurs before native ownership is accepted.
+-- @param length Input integer value; checked native narrowing occurs before native ownership is accepted.
+-- @param capacity Input integer? value; checked native narrowing occurs before native ownership is accepted.
+-- @return Native status: zero on success, a negative libuv error on failure.
+-- @return Copied or retained string result, or nil on failure or absence.
+-- @return Native operation result or submission status; negative values report libuv errors.
+-- @usage uv/functions/misc.md#utf16_to_wtf8
 function utf16_to_wtf8(units: {integer}, length: integer,
                         capacity: integer?): (integer, string?, integer)
   local native = data_utf16_input(units, length)
@@ -212,10 +289,19 @@ function utf16_to_wtf8(units: {integer}, length: integer,
   return status, data_copy_bytes(pointer, written), size
 end
 
+--- Measure the UTF-16 code units needed for WTF-8 text using native conversion semantics.
+-- @param text Input immutable text/byte owner; native C-string conventions apply where the operation takes text.
+-- @return Native integer result with the documented lifetime and units.
+-- @usage uv/functions/misc.md#wtf8_length_as_utf16
 function wtf8_length_as_utf16(text: string): integer
   return ffi.uv_wtf8_length_as_utf16(text)
 end
 
+--- Convert exactly length bytes of WTF-8 text to copied UTF-16 code units.
+-- @param text Input immutable text/byte owner; native C-string conventions apply where the operation takes text.
+-- @param length Input integer value; checked native narrowing occurs before native ownership is accepted.
+-- @return Native {integer} result with the documented lifetime and units.
+-- @usage uv/functions/misc.md#wtf8_to_utf16
 function wtf8_to_utf16(text: string, length: integer): {integer}
   local required: integer = ffi.uv_wtf8_length_as_utf16(text)
   if required < 0 then raise "invalid WTF-8 input" end

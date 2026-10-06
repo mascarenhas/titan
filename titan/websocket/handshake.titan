@@ -237,6 +237,12 @@ local function validate_server_opening(request: http.Request, options: AcceptOpt
   return key, selected
 end
 
+--- Validate a server opening, apply Origin and subprotocol policy, and transfer the HTTP stream.
+-- @param request Incoming HTTP upgrade request.
+-- @param response Uncommitted response belonging to the incoming request.
+-- @param options Validated opening options, or nil for defaults.
+-- @return Accepted session owning the transferred HTTP connection.
+-- @usage standard-library-websocket.md#opening-policy-and-errors
 function accept(request: http.Request, response: http.Response,
                 options: AcceptOptions?): Connection
   local policy = options or AcceptOptions(nil, nil, nil, nil)
@@ -424,6 +430,11 @@ catch
   raise
 end
 
+--- Open a WS or WSS session while preserving URL authority and verified TLS identity.
+-- @param source_url Absolute URL text.
+-- @param options Validated opening options, or nil for defaults.
+-- @return Opened session whose close ownership transfers to the caller.
+-- @usage standard-library-websocket.md#opening-policy-and-errors
 function connect(source_url: string, options: DialOptions?): Connection
   local parsed?, problem? = url.parse(source_url)
   if problem then raise problem end

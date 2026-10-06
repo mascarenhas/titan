@@ -20,6 +20,7 @@ local graphcodec = require "titan-compiler.graphcodec"
 local sha256 = require "titan-compiler.sha256"
 local ffiheaders = require "titan-compiler.ffiheaders"
 local objectmetadata = require "titan-compiler.objectmetadata"
+local documentation = require "titan-compiler.documentation"
 
 local lfs = require "lfs"
 
@@ -546,7 +547,13 @@ driver.TITAN_SOURCE_PATH = "."
 driver.EMIT_LINE_DIRECTIVES = os.getenv("TITAN_NO_LINE_DIRECTIVES") ~= "1"
 driver.TITAN_RUNTIME_PATH = "titan-runtime/"
 driver.LIBBACKTRACE_PATH = "libbacktrace"
-local base_cflags = "--std=c99 -O3 -Wall -Wno-unused-but-set-variable -Wno-unused-function -fPIC -g"
+driver.BUILD_PROFILE = os.getenv("TITAN_BUILD_PROFILE") or "production"
+local profile_error
+if driver.BUILD_PROFILE ~= "production" and driver.BUILD_PROFILE ~= "validation" then
+    profile_error = "TITAN_BUILD_PROFILE must be production or validation"
+end
+local profile_flags = driver.BUILD_PROFILE == "validation" and "-O0 -fno-lto" or "-O3"
+local base_cflags = "--std=c99 " .. profile_flags .. " -Wall -Wno-unused-but-set-variable -Wno-unused-function -fPIC -g"
 local default_cflags = base_cflags
 driver.CFLAGS = default_cflags
 
@@ -593,7 +600,7 @@ driver.EXTRA_CFLAGS, cflags_error =
     parse_extra_flags("TITAN_EXTRA_CFLAGS")
 driver.EXTRA_LDFLAGS, ldflags_error =
     parse_extra_flags("TITAN_EXTRA_LDFLAGS")
-driver._TOOLCHAIN_FLAGS_ERROR = cppflags_error or cflags_error or ldflags_error
+driver._TOOLCHAIN_FLAGS_ERROR = profile_error or cppflags_error or cflags_error or ldflags_error
 driver.TOOLCHAIN_ERROR = driver.INSTALLATION_ERROR or
     driver._TOOLCHAIN_FLAGS_ERROR
 driver.FOREIGN_C_CONFIGURATION_ID = 0
@@ -614,7 +621,7 @@ end
 
 local function select_platform_defaults(uname, is_darwin)
     local defaults = base_cflags
-    if uname == "Linux" then
+    if uname == "Linux" and driver.BUILD_PROFILE == "production" then
         -- Fat objects retain the native sections needed by the metadata and
         -- target readers, plus IR for GCC/Clang's optimizing final link.
         defaults = defaults .. " -flto=auto -ffat-lto-objects"
@@ -1028,7 +1035,7 @@ local function remember_used_compiled_interface(context, modname, modtype)
         used = {}
         context.used_compiled_interfaces[modname] = used
     end
-    used[types.serialize(modtype)] = true
+    used[types.serialize_semantic(modtype)] = true
 end
 
 local function check_used_compiled_interface(
@@ -1037,7 +1044,7 @@ local function check_used_compiled_interface(
     local used = context.used_compiled_interfaces and
         context.used_compiled_interfaces[modname]
     if not used then return end
-    local source_interface = types.serialize(source_type)
+    local source_interface = types.serialize_semantic(source_type)
     for compiled_interface in pairs(used) do
         if compiled_interface ~= source_interface then
             errors[#errors + 1] = "source module '" .. modname ..
@@ -1323,7 +1330,9 @@ function driver.completion_binary_catalog(context)
     for _, provider in ipairs(context.selected_static_providers or {}) do
         for name, entry in pairs(provider.entries) do
             result[name] = { serialized = types.serialize(entry.type),
-                kind = "static", filename = provider.archive }
+                kind = "static", filename = provider.archive,
+                documentation = entry.type._documentation and
+                    documentation.copy(entry.type._documentation) }
         end
     end
     -- Eligible embedded interfaces take precedence over filesystem providers,
@@ -1332,8 +1341,10 @@ function driver.completion_binary_catalog(context)
     if provider then
         for _, name in ipairs(provider.key_order) do
             local entry = provider.entries[name]
+            local interface = entry.type
             result[name] = { serialized = entry.types, kind = "embedded",
-                filename = provider.provider_file }
+                filename = provider.provider_file, documentation = interface and interface._documentation and
+                    documentation.copy(interface._documentation) }
         end
     end
     for name, entry in pairs(driver.imported) do
@@ -1341,7 +1352,9 @@ function driver.completion_binary_catalog(context)
             if entry.kind == "source" then result[name] = nil
             elseif entry.kind == "dynamic" or entry.kind == "static" or entry.kind == "embedded" then
                 result[name] = { serialized = types.serialize(entry.type),
-                    kind = entry.kind, filename = entry.filename or entry.static_archive or "" }
+                    kind = entry.kind, filename = entry.filename or entry.static_archive or "",
+                    documentation = entry.type._documentation and
+                        documentation.copy(entry.type._documentation) }
             end
         end
     end
@@ -4267,7 +4280,7 @@ function driver.defaultloader(static_deps, options)
                     (resolve_error and (": " .. tostring(resolve_error)) or "")
             end
             local old_type = driver.imported[name].type
-            if types.serialize(old_type) ~= types.serialize(resolved.type) then
+            if types.serialize_semantic(old_type) ~= types.serialize_semantic(resolved.type) then
                 return nil, "disk-provider fallback '" ..
                     tostring(resolved.static_archive or resolved.filename) ..
                     "' for module '" .. name ..
@@ -4342,7 +4355,7 @@ function driver.defaultloader(static_deps, options)
                         (filename and (": " .. tostring(filename)) or "")
                 end
                 local old_type = driver.imported[name].type
-                if types.serialize(old_type) ~= types.serialize(dynamic_type) then
+                if types.serialize_semantic(old_type) ~= types.serialize_semantic(dynamic_type) then
                     return nil, "dynamic-provider fallback '" .. filename ..
                         "' for module '" .. name ..
                         "' does not match static provider '" .. path .. "'"
@@ -4550,6 +4563,7 @@ function driver.defaultloader(static_deps, options)
 
             if index == 1 then
                 main_input = input
+                ast._documentation = nodes._documentation
                 if nodes[#nodes] and
                    nodes[#nodes]._module_initializer then
                     main_initializer = table.remove(nodes)
@@ -4972,7 +4986,7 @@ function driver.defaultloader(static_deps, options)
                         return false, status == "error" and value or
                             ("cached provider no longer claims module '" .. modname .. "'")
                     end
-                    if types.serialize(value) ~= types.serialize(mod.type) then
+                    if types.serialize_semantic(value) ~= types.serialize_semantic(mod.type) then
                         return false, "cached compiled interface for module '" ..
                             modname .. "' changed before native compilation"
                     end
@@ -4983,7 +4997,7 @@ function driver.defaultloader(static_deps, options)
                         context, mod.static_archive, mod.relative)
                     if not provider then return false, provider_error end
                     local metadata = provider.entries[modname]
-                    if not metadata or types.serialize(metadata.type) ~= types.serialize(mod.type) then
+                    if not metadata or types.serialize_semantic(metadata.type) ~= types.serialize_semantic(mod.type) then
                         return false, "cached compiled interface for module '" ..
                             modname .. "' changed before native compilation"
                     end

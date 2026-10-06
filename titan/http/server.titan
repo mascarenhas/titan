@@ -1,7 +1,16 @@
 local uv = import "uv"
 
+--- A callback handling one request and response on a serial HTTP exchange.
+-- @usage standard-library-http.md#servers-and-handlers
 type Handler = function (Request, Response): ()
 
+--- Parsed request metadata and its streaming request-body reader.
+-- @field method Case-sensitive HTTP request method.
+-- @field target Received origin-form request target.
+-- @field url Normalized request URL.
+-- @field version Received HTTP version.
+-- @field headers Received headers, preserving duplicates and insertion order.
+-- @usage standard-library-http.md#servers-and-handlers
 record Request
   method: string
   target: string
@@ -13,6 +22,8 @@ record Request
   local ended: boolean
 end
 
+--- The current exchange's response writer with validated status and framing.
+-- @usage standard-library-http.md#servers-and-handlers
 record Response
   local connection: io.ReaderWriterCloser
   local exchange: Exchange
@@ -30,6 +41,8 @@ record Response
   local closed: boolean
 end
 
+--- A listener running independent connection Tasks with serial keep-alive exchanges.
+-- @usage standard-library-http.md#servers-and-handlers
 record Server
   local plain: net.Server?
   local secure: ssl.Server?
@@ -112,6 +125,9 @@ local function read_request(parser: Parser,
   }
 end
 
+--- Read decoded request-body bytes, or nil at the body's end.
+-- @return Copied bytes or text, or nil at EOF or when absent.
+-- @usage standard-library-http.md#servers-and-handlers
 function Request:read(): string?
   if not self.exchange.active then raise "HTTP request exchange has ended" end
   if self.parser.upgrade then raise "HTTP upgrade request has no readable body" end
@@ -121,6 +137,11 @@ function Request:read(): string?
   return chunk
 end
 
+--- Read request-body bytes through a delimiter, retaining the unused suffix.
+-- @param delimiter Nonempty byte delimiter to include or remove.
+-- @param chop Remove the delimiter when true; nil or false retains it.
+-- @return Copied bytes or text, or nil at EOF or when absent.
+-- @usage standard-library-http.md#servers-and-handlers
 function Request:read_until(delimiter: string,
                             chop: boolean?): string?
   if not self.exchange.active then raise "HTTP request exchange has ended" end
@@ -195,6 +216,10 @@ local function new_response(connection: io.ReaderWriterCloser,
   }
 end
 
+--- Set the final status and optional reason before headers are sent.
+-- @param status Final HTTP status number.
+-- @param reason Optional HTTP reason phrase, or a WebSocket Close reason.
+-- @usage standard-library-http.md#servers-and-handlers
 function Response:set_status(status: integer, reason: string?)
   if not self.exchange.active then raise "HTTP response exchange has ended" end
   if self.headers_sent then
@@ -210,6 +235,10 @@ function Response:set_status(status: integer, reason: string?)
   self.reason_text = actual_reason
 end
 
+--- Append a validated response header before headers are sent.
+-- @param name Name used by this operation.
+-- @param contents String bytes supplied to this operation.
+-- @usage standard-library-http.md#servers-and-handlers
 function Response:add_header(name: string, contents: string)
   if not self.exchange.active then raise "HTTP response exchange has ended" end
   if self.headers_sent then
@@ -218,6 +247,10 @@ function Response:add_header(name: string, contents: string)
   self.response_headers:add(name, contents)
 end
 
+--- Replace all matching response headers before headers are sent.
+-- @param name Name used by this operation.
+-- @param contents String bytes supplied to this operation.
+-- @usage standard-library-http.md#servers-and-handlers
 function Response:set_header(name: string, contents: string)
   if not self.exchange.active then raise "HTTP response exchange has ended" end
   if self.headers_sent then
@@ -226,6 +259,9 @@ function Response:set_header(name: string, contents: string)
   self.response_headers:set(name, contents)
 end
 
+--- Return a copy of the current response headers.
+-- @return Copied response-header collection.
+-- @usage standard-library-http.md#servers-and-handlers
 function Response:headers(): Headers
   return copy_headers(self.response_headers)
 end
@@ -288,6 +324,8 @@ local function prepare_response_headers(response: Response)
   end
 end
 
+--- Validate response framing and send the status line and headers.
+-- @usage standard-library-http.md#servers-and-handlers
 function Response:send_headers()
   if self.exchange.transferred then raise "HTTP response was upgraded" end
   if self.headers_sent then return end
@@ -303,6 +341,9 @@ function Response:send_headers()
   self.connection:write(builder:drain())
 end
 
+--- Write response-body bytes, sending headers first when needed.
+-- @param data Immutable binary bytes to write or decode.
+-- @usage standard-library-http.md#servers-and-handlers
 function Response:write(data: string)
   if not self.exchange.active then raise "HTTP response exchange has ended" end
   if self.closed then raise "HTTP response is closed" end
@@ -325,6 +366,8 @@ function Response:write(data: string)
   self.written = self.written + #data
 end
 
+--- Finish response framing and enforce an exact declared content length.
+-- @usage standard-library-http.md#servers-and-handlers
 function Response:close()
   if self.closed then return end
   if not self.headers_sent then self:send_headers() end
@@ -338,6 +381,8 @@ function Response:close()
   self.closed = true
 end
 
+--- Retire this exchange's captured transport without completing framing.
+-- @usage standard-library-http.md#servers-and-handlers
 function Response:abort()
   -- The live exchange is the ownership guard: a retained response must never
   -- close a later keep-alive exchange or an already transferred upgrade.
@@ -493,6 +538,14 @@ local function accept_connection(server: Server): Transport
   return Transport(channel, connection:close)
 end
 
+--- Create an HTTP listener with the supplied request handler.
+-- @param host Connection hostname, numeric IP, or local bind address.
+-- @param handler Callback invoked once for each serial request exchange.
+-- @param port Numeric TCP port.
+-- @param backlog Positive listen backlog; nil defaults to 128.
+-- @param idle_timeout Header acquisition deadline in milliseconds; nil or zero disables it.
+-- @return HTTP listener ready for serve; the caller owns closing it.
+-- @usage standard-library-http.md#servers-and-handlers
 function listen(host: string, handler: Handler, port: integer?,
                 backlog: integer?, idle_timeout: integer?): Server
   local actual_idle_timeout = 0
@@ -514,6 +567,16 @@ function listen(host: string, handler: Handler, port: integer?,
   }
 end
 
+--- Create an HTTPS listener with a PEM certificate, key, and request handler.
+-- @param host Connection hostname, numeric IP, or local bind address.
+-- @param certificate_file PEM certificate-chain path, optionally including its private key.
+-- @param handler Callback invoked once for each serial request exchange.
+-- @param private_key_file PEM private-key path; nil uses the certificate file.
+-- @param port Numeric TCP port.
+-- @param backlog Positive listen backlog; nil defaults to 128.
+-- @param idle_timeout Header acquisition deadline in milliseconds; nil or zero disables it.
+-- @return HTTPS listener ready for serve; the caller owns closing it.
+-- @usage standard-library-http.md#servers-and-handlers
 function listen_tls(host: string, certificate_file: string, handler: Handler,
                     private_key_file: string?, port: integer?,
                     backlog: integer?, idle_timeout: integer?): Server
@@ -536,6 +599,10 @@ function listen_tls(host: string, certificate_file: string, handler: Handler,
   }
 end
 
+--- Read or update the next request-header deadline, returning its previous value.
+-- @param timeout New header deadline in milliseconds; nil only reads the current value.
+-- @return Previous header deadline in milliseconds.
+-- @usage standard-library-http.md#servers-and-handlers
 function Server:idle_timeout(timeout: integer?): integer
   local previous = self.idle_timeout_ms
   if timeout then
@@ -547,6 +614,10 @@ function Server:idle_timeout(timeout: integer?): integer
   return previous
 end
 
+--- Read or update the raw incoming header-byte limit, returning its previous value.
+-- @param limit New positive raw header-byte limit; nil only reads the current value.
+-- @return Previous raw incoming header-byte limit.
+-- @usage standard-library-http.md#strictness-and-limits
 function Server:header_limit(limit: integer?): integer
   local previous = self.header_limit_bytes
   if limit ~= nil then
@@ -589,6 +660,8 @@ local function start_connection_handoff(
   return nil
 end
 
+--- Run the accept loop and dispatch each connection to its own Task.
+-- @usage standard-library-http.md#servers-and-handlers
 function Server:serve()
   if self.closed then raise "HTTP Server is closed" end
   while not self.closed do
@@ -630,6 +703,8 @@ function Server:serve()
   end
 end
 
+--- Stop the listener and release the accept loop without joining accepted connections.
+-- @usage standard-library-http.md#servers-and-handlers
 function Server:close()
   if self.closed and self.listener_closed then return end
   if not self.closed then self.closed = true end

@@ -1,3 +1,7 @@
+--- Private size accounting shared by public PEG repetition combinators.
+-- @module titan.peg
+-- @usage standard-library-peg.md
+
 -- Shared size projections for public repetition combinators in peg.titan.
 
 local function _at_least_size(pattern: Pattern,

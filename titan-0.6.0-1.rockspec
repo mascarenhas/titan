@@ -86,6 +86,7 @@ build = {
       ["titan-compiler.sha256"] = "titan-compiler/sha256.lua",
       ["titan-compiler.graphcodec"] = "titan-compiler/graphcodec.lua",
       ["titan-compiler.declarationschemas"] = "titan-compiler/declarationschemas.lua",
+      ["titan-compiler.documentation"] = "titan-compiler/documentation.lua",
       ["titan-compiler.completion"] = "titan-compiler/completion.lua",
       ["titan-compiler.checker.completion"] = "titan-compiler/checker/completion.lua",
       ["titan-compiler.projectcache"] = "titan-compiler/projectcache.lua",

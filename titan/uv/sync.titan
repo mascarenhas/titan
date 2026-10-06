@@ -7,11 +7,16 @@ local const SYNC_FRESH = 0
 local const SYNC_LIVE = 1
 local const SYNC_RETIRED = 2
 
+--- Owned native mutex storage with explicit initialization and destruction.
+-- @usage uv/types.md#mutex_t
 record mutex_t
     local const storage: foreign titan_issue194_mutex_storage
     local state: integer
 end
 
+--- Allocate stable native storage without initializing it.
+-- @return Native mutex_t result with the documented lifetime and units.
+-- @usage uv/supplemental.md#mutex_tnew
 function mutex_t.new(): mutex_t
     local storage = foreign titan_issue194_mutex_storage.new()
     return { storage = storage, state = SYNC_FRESH }
@@ -25,11 +30,17 @@ local function mutex_t:require_fresh()
     if self.state ~= SYNC_FRESH then raise "uv.mutex: initialization requires fresh owner" end
 end
 
+--- Borrow an opaque pointer to stable native storage for a C-only carrier.
+-- @return Native foreign *void result with the documented lifetime and units.
+-- @usage uv/supplemental.md#mutex_tborrow
 function mutex_t:borrow(): foreign *void
     self:require_live()
     return self.storage
 end
 
+--- Convenience method for [`mutex_init`](functions/threading.md#mutex_init) on this owner.
+-- @return Native integer result with the documented lifetime and units.
+-- @usage uv/supplemental.md#mutex_tinit
 function mutex_t:init(): integer
     self:require_fresh()
     local status: integer = ffi.uv_mutex_init(self.storage as foreign *uv_mutex_t)
@@ -37,6 +48,9 @@ function mutex_t:init(): integer
     return status
 end
 
+--- Convenience method for [`mutex_init_recursive`](functions/threading.md#mutex_init_recursive) on this owner.
+-- @return Native integer result with the documented lifetime and units.
+-- @usage uv/supplemental.md#mutex_tinit_recursive
 function mutex_t:init_recursive(): integer
     self:require_fresh()
     local status: integer = ffi.uv_mutex_init_recursive(self.storage as foreign *uv_mutex_t)
@@ -44,12 +58,16 @@ function mutex_t:init_recursive(): integer
     return status
 end
 
+--- Convenience method for [`mutex_destroy`](functions/threading.md#mutex_destroy) on this owner.
+-- @usage uv/supplemental.md#mutex_tdestroy
 function mutex_t:destroy()
     self:require_live()
     ffi.uv_mutex_destroy(self.storage as foreign *uv_mutex_t)
     self.state = SYNC_RETIRED
 end
 
+--- Convenience method for [`mutex_lock`](functions/threading.md#mutex_lock) on this owner.
+-- @usage uv/supplemental.md#mutex_tlock
 function mutex_t:lock()
     self:require_live()
     ffi.uv_mutex_lock(self.storage as foreign *uv_mutex_t)
@@ -59,10 +77,16 @@ foreign function native_mutex_lock(native: *void): void
     ffi.uv_mutex_lock(native as foreign *uv_mutex_t)
 end
 
+--- Return the exact C-only native entry for this operation.
+-- @return Native foreign function(*void): void result with the documented lifetime and units.
+-- @usage uv/supplemental.md#mutex_tlock_function
 function mutex_t.lock_function(): foreign function(*void): void
     return native_mutex_lock
 end
 
+--- Convenience method for [`mutex_trylock`](functions/threading.md#mutex_trylock) on this owner.
+-- @return Native integer result with the documented lifetime and units.
+-- @usage uv/supplemental.md#mutex_ttrylock
 function mutex_t:trylock(): integer
     self:require_live()
     return ffi.uv_mutex_trylock(self.storage as foreign *uv_mutex_t)
@@ -72,10 +96,15 @@ foreign function native_mutex_trylock(native: *void): int
     return ffi.uv_mutex_trylock(native as foreign *uv_mutex_t)
 end
 
+--- Return the exact C-only native entry for this operation.
+-- @return Native foreign function(*void): int result with the documented lifetime and units.
+-- @usage uv/supplemental.md#mutex_ttrylock_function
 function mutex_t.trylock_function(): foreign function(*void): int
     return native_mutex_trylock
 end
 
+--- Convenience method for [`mutex_unlock`](functions/threading.md#mutex_unlock) on this owner.
+-- @usage uv/supplemental.md#mutex_tunlock
 function mutex_t:unlock()
     self:require_live()
     ffi.uv_mutex_unlock(self.storage as foreign *uv_mutex_t)
@@ -85,15 +114,23 @@ foreign function native_mutex_unlock(native: *void): void
     ffi.uv_mutex_unlock(native as foreign *uv_mutex_t)
 end
 
+--- Return the exact C-only native entry for this operation.
+-- @return Native foreign function(*void): void result with the documented lifetime and units.
+-- @usage uv/supplemental.md#mutex_tunlock_function
 function mutex_t.unlock_function(): foreign function(*void): void
     return native_mutex_unlock
 end
 
+--- Owned native rwlock storage with explicit initialization and destruction.
+-- @usage uv/types.md#rwlock_t
 record rwlock_t
     local const storage: foreign titan_issue194_rwlock_storage
     local state: integer
 end
 
+--- Allocate stable native storage without initializing it.
+-- @return Native rwlock_t result with the documented lifetime and units.
+-- @usage uv/supplemental.md#rwlock_tnew
 function rwlock_t.new(): rwlock_t
     local storage = foreign titan_issue194_rwlock_storage.new()
     return { storage = storage, state = SYNC_FRESH }
@@ -107,11 +144,17 @@ local function rwlock_t:require_fresh()
     if self.state ~= SYNC_FRESH then raise "uv.rwlock: initialization requires fresh owner" end
 end
 
+--- Borrow an opaque pointer to stable native storage for a C-only carrier.
+-- @return Native foreign *void result with the documented lifetime and units.
+-- @usage uv/supplemental.md#rwlock_tborrow
 function rwlock_t:borrow(): foreign *void
     self:require_live()
     return self.storage
 end
 
+--- Convenience method for [`rwlock_init`](functions/threading.md#rwlock_init) on this owner.
+-- @return Native integer result with the documented lifetime and units.
+-- @usage uv/supplemental.md#rwlock_tinit
 function rwlock_t:init(): integer
     self:require_fresh()
     local status: integer = ffi.uv_rwlock_init(self.storage as foreign *uv_rwlock_t)
@@ -119,12 +162,16 @@ function rwlock_t:init(): integer
     return status
 end
 
+--- Convenience method for [`rwlock_destroy`](functions/threading.md#rwlock_destroy) on this owner.
+-- @usage uv/supplemental.md#rwlock_tdestroy
 function rwlock_t:destroy()
     self:require_live()
     ffi.uv_rwlock_destroy(self.storage as foreign *uv_rwlock_t)
     self.state = SYNC_RETIRED
 end
 
+--- Convenience method for [`rwlock_rdlock`](functions/threading.md#rwlock_rdlock) on this owner.
+-- @usage uv/supplemental.md#rwlock_trdlock
 function rwlock_t:rdlock()
     self:require_live()
     ffi.uv_rwlock_rdlock(self.storage as foreign *uv_rwlock_t)
@@ -134,10 +181,16 @@ foreign function native_rwlock_rdlock(native: *void): void
     ffi.uv_rwlock_rdlock(native as foreign *uv_rwlock_t)
 end
 
+--- Return the exact C-only native entry for this operation.
+-- @return Native foreign function(*void): void result with the documented lifetime and units.
+-- @usage uv/supplemental.md#rwlock_trdlock_function
 function rwlock_t.rdlock_function(): foreign function(*void): void
     return native_rwlock_rdlock
 end
 
+--- Convenience method for [`rwlock_tryrdlock`](functions/threading.md#rwlock_tryrdlock) on this owner.
+-- @return Native integer result with the documented lifetime and units.
+-- @usage uv/supplemental.md#rwlock_ttryrdlock
 function rwlock_t:tryrdlock(): integer
     self:require_live()
     return ffi.uv_rwlock_tryrdlock(self.storage as foreign *uv_rwlock_t)
@@ -147,10 +200,15 @@ foreign function native_rwlock_tryrdlock(native: *void): int
     return ffi.uv_rwlock_tryrdlock(native as foreign *uv_rwlock_t)
 end
 
+--- Return the exact C-only native entry for this operation.
+-- @return Native foreign function(*void): int result with the documented lifetime and units.
+-- @usage uv/supplemental.md#rwlock_ttryrdlock_function
 function rwlock_t.tryrdlock_function(): foreign function(*void): int
     return native_rwlock_tryrdlock
 end
 
+--- Convenience method for [`rwlock_rdunlock`](functions/threading.md#rwlock_rdunlock) on this owner.
+-- @usage uv/supplemental.md#rwlock_trdunlock
 function rwlock_t:rdunlock()
     self:require_live()
     ffi.uv_rwlock_rdunlock(self.storage as foreign *uv_rwlock_t)
@@ -160,10 +218,15 @@ foreign function native_rwlock_rdunlock(native: *void): void
     ffi.uv_rwlock_rdunlock(native as foreign *uv_rwlock_t)
 end
 
+--- Return the exact C-only native entry for this operation.
+-- @return Native foreign function(*void): void result with the documented lifetime and units.
+-- @usage uv/supplemental.md#rwlock_trdunlock_function
 function rwlock_t.rdunlock_function(): foreign function(*void): void
     return native_rwlock_rdunlock
 end
 
+--- Convenience method for [`rwlock_wrlock`](functions/threading.md#rwlock_wrlock) on this owner.
+-- @usage uv/supplemental.md#rwlock_twrlock
 function rwlock_t:wrlock()
     self:require_live()
     ffi.uv_rwlock_wrlock(self.storage as foreign *uv_rwlock_t)
@@ -173,10 +236,16 @@ foreign function native_rwlock_wrlock(native: *void): void
     ffi.uv_rwlock_wrlock(native as foreign *uv_rwlock_t)
 end
 
+--- Return the exact C-only native entry for this operation.
+-- @return Native foreign function(*void): void result with the documented lifetime and units.
+-- @usage uv/supplemental.md#rwlock_twrlock_function
 function rwlock_t.wrlock_function(): foreign function(*void): void
     return native_rwlock_wrlock
 end
 
+--- Convenience method for [`rwlock_trywrlock`](functions/threading.md#rwlock_trywrlock) on this owner.
+-- @return Native integer result with the documented lifetime and units.
+-- @usage uv/supplemental.md#rwlock_ttrywrlock
 function rwlock_t:trywrlock(): integer
     self:require_live()
     return ffi.uv_rwlock_trywrlock(self.storage as foreign *uv_rwlock_t)
@@ -186,10 +255,15 @@ foreign function native_rwlock_trywrlock(native: *void): int
     return ffi.uv_rwlock_trywrlock(native as foreign *uv_rwlock_t)
 end
 
+--- Return the exact C-only native entry for this operation.
+-- @return Native foreign function(*void): int result with the documented lifetime and units.
+-- @usage uv/supplemental.md#rwlock_ttrywrlock_function
 function rwlock_t.trywrlock_function(): foreign function(*void): int
     return native_rwlock_trywrlock
 end
 
+--- Convenience method for [`rwlock_wrunlock`](functions/threading.md#rwlock_wrunlock) on this owner.
+-- @usage uv/supplemental.md#rwlock_twrunlock
 function rwlock_t:wrunlock()
     self:require_live()
     ffi.uv_rwlock_wrunlock(self.storage as foreign *uv_rwlock_t)
@@ -199,15 +273,23 @@ foreign function native_rwlock_wrunlock(native: *void): void
     ffi.uv_rwlock_wrunlock(native as foreign *uv_rwlock_t)
 end
 
+--- Return the exact C-only native entry for this operation.
+-- @return Native foreign function(*void): void result with the documented lifetime and units.
+-- @usage uv/supplemental.md#rwlock_twrunlock_function
 function rwlock_t.wrunlock_function(): foreign function(*void): void
     return native_rwlock_wrunlock
 end
 
+--- Owned native sem storage with explicit initialization and destruction.
+-- @usage uv/types.md#sem_t
 record sem_t
     local const storage: foreign titan_issue194_sem_storage
     local state: integer
 end
 
+--- Allocate stable native storage without initializing it.
+-- @return Native sem_t result with the documented lifetime and units.
+-- @usage uv/supplemental.md#sem_tnew
 function sem_t.new(): sem_t
     local storage = foreign titan_issue194_sem_storage.new()
     return { storage = storage, state = SYNC_FRESH }
@@ -221,11 +303,18 @@ local function sem_t:require_fresh()
     if self.state ~= SYNC_FRESH then raise "uv.sem: initialization requires fresh owner" end
 end
 
+--- Borrow an opaque pointer to stable native storage for a C-only carrier.
+-- @return Native foreign *void result with the documented lifetime and units.
+-- @usage uv/supplemental.md#sem_tborrow
 function sem_t:borrow(): foreign *void
     self:require_live()
     return self.storage
 end
 
+--- Convenience method for [`sem_init`](functions/threading.md#sem_init) on this owner.
+-- @param value Caller-supplied data retained or borrowed for the documented native interval.
+-- @return Native integer result with the documented lifetime and units.
+-- @usage uv/supplemental.md#sem_tinit
 function sem_t:init(value: integer): integer
     self:require_fresh()
     local status: integer = ffi.uv_sem_init(self.storage as foreign *uv_sem_t, value)
@@ -233,12 +322,16 @@ function sem_t:init(value: integer): integer
     return status
 end
 
+--- Convenience method for [`sem_destroy`](functions/threading.md#sem_destroy) on this owner.
+-- @usage uv/supplemental.md#sem_tdestroy
 function sem_t:destroy()
     self:require_live()
     ffi.uv_sem_destroy(self.storage as foreign *uv_sem_t)
     self.state = SYNC_RETIRED
 end
 
+--- Convenience method for [`sem_post`](functions/threading.md#sem_post) on this owner.
+-- @usage uv/supplemental.md#sem_tpost
 function sem_t:post()
     self:require_live()
     ffi.uv_sem_post(self.storage as foreign *uv_sem_t)
@@ -248,10 +341,15 @@ foreign function native_sem_post(native: *void): void
     ffi.uv_sem_post(native as foreign *uv_sem_t)
 end
 
+--- Return the exact C-only native entry for this operation.
+-- @return Native foreign function(*void): void result with the documented lifetime and units.
+-- @usage uv/supplemental.md#sem_tpost_function
 function sem_t.post_function(): foreign function(*void): void
     return native_sem_post
 end
 
+--- Convenience method for [`sem_wait`](functions/threading.md#sem_wait) on this owner.
+-- @usage uv/supplemental.md#sem_twait
 function sem_t:wait()
     self:require_live()
     ffi.uv_sem_wait(self.storage as foreign *uv_sem_t)
@@ -261,10 +359,16 @@ foreign function native_sem_wait(native: *void): void
     ffi.uv_sem_wait(native as foreign *uv_sem_t)
 end
 
+--- Return the exact C-only native entry for this operation.
+-- @return Native foreign function(*void): void result with the documented lifetime and units.
+-- @usage uv/supplemental.md#sem_twait_function
 function sem_t.wait_function(): foreign function(*void): void
     return native_sem_wait
 end
 
+--- Convenience method for [`sem_trywait`](functions/threading.md#sem_trywait) on this owner.
+-- @return Native integer result with the documented lifetime and units.
+-- @usage uv/supplemental.md#sem_ttrywait
 function sem_t:trywait(): integer
     self:require_live()
     return ffi.uv_sem_trywait(self.storage as foreign *uv_sem_t)
@@ -274,15 +378,23 @@ foreign function native_sem_trywait(native: *void): int
     return ffi.uv_sem_trywait(native as foreign *uv_sem_t)
 end
 
+--- Return the exact C-only native entry for this operation.
+-- @return Native foreign function(*void): int result with the documented lifetime and units.
+-- @usage uv/supplemental.md#sem_ttrywait_function
 function sem_t.trywait_function(): foreign function(*void): int
     return native_sem_trywait
 end
 
+--- Owned native cond storage with explicit initialization and destruction.
+-- @usage uv/types.md#cond_t
 record cond_t
     local const storage: foreign titan_issue194_cond_storage
     local state: integer
 end
 
+--- Allocate stable native storage without initializing it.
+-- @return Native cond_t result with the documented lifetime and units.
+-- @usage uv/supplemental.md#cond_tnew
 function cond_t.new(): cond_t
     local storage = foreign titan_issue194_cond_storage.new()
     return { storage = storage, state = SYNC_FRESH }
@@ -296,11 +408,17 @@ local function cond_t:require_fresh()
     if self.state ~= SYNC_FRESH then raise "uv.cond: initialization requires fresh owner" end
 end
 
+--- Borrow an opaque pointer to stable native storage for a C-only carrier.
+-- @return Native foreign *void result with the documented lifetime and units.
+-- @usage uv/supplemental.md#cond_tborrow
 function cond_t:borrow(): foreign *void
     self:require_live()
     return self.storage
 end
 
+--- Convenience method for [`cond_init`](functions/threading.md#cond_init) on this owner.
+-- @return Native integer result with the documented lifetime and units.
+-- @usage uv/supplemental.md#cond_tinit
 function cond_t:init(): integer
     self:require_fresh()
     local status: integer = ffi.uv_cond_init(self.storage as foreign *uv_cond_t)
@@ -308,12 +426,16 @@ function cond_t:init(): integer
     return status
 end
 
+--- Convenience method for [`cond_destroy`](functions/threading.md#cond_destroy) on this owner.
+-- @usage uv/supplemental.md#cond_tdestroy
 function cond_t:destroy()
     self:require_live()
     ffi.uv_cond_destroy(self.storage as foreign *uv_cond_t)
     self.state = SYNC_RETIRED
 end
 
+--- Convenience method for [`cond_signal`](functions/threading.md#cond_signal) on this owner.
+-- @usage uv/supplemental.md#cond_tsignal
 function cond_t:signal()
     self:require_live()
     ffi.uv_cond_signal(self.storage as foreign *uv_cond_t)
@@ -323,10 +445,15 @@ foreign function native_cond_signal(native: *void): void
     ffi.uv_cond_signal(native as foreign *uv_cond_t)
 end
 
+--- Return the exact C-only native entry for this operation.
+-- @return Native foreign function(*void): void result with the documented lifetime and units.
+-- @usage uv/supplemental.md#cond_tsignal_function
 function cond_t.signal_function(): foreign function(*void): void
     return native_cond_signal
 end
 
+--- Convenience method for [`cond_broadcast`](functions/threading.md#cond_broadcast) on this owner.
+-- @usage uv/supplemental.md#cond_tbroadcast
 function cond_t:broadcast()
     self:require_live()
     ffi.uv_cond_broadcast(self.storage as foreign *uv_cond_t)
@@ -336,15 +463,23 @@ foreign function native_cond_broadcast(native: *void): void
     ffi.uv_cond_broadcast(native as foreign *uv_cond_t)
 end
 
+--- Return the exact C-only native entry for this operation.
+-- @return Native foreign function(*void): void result with the documented lifetime and units.
+-- @usage uv/supplemental.md#cond_tbroadcast_function
 function cond_t.broadcast_function(): foreign function(*void): void
     return native_cond_broadcast
 end
 
+--- Owned native barrier storage with explicit initialization and destruction.
+-- @usage uv/types.md#barrier_t
 record barrier_t
     local const storage: foreign titan_issue194_barrier_storage
     local state: integer
 end
 
+--- Allocate stable native storage without initializing it.
+-- @return Native barrier_t result with the documented lifetime and units.
+-- @usage uv/supplemental.md#barrier_tnew
 function barrier_t.new(): barrier_t
     local storage = foreign titan_issue194_barrier_storage.new()
     return { storage = storage, state = SYNC_FRESH }
@@ -358,11 +493,18 @@ local function barrier_t:require_fresh()
     if self.state ~= SYNC_FRESH then raise "uv.barrier: initialization requires fresh owner" end
 end
 
+--- Borrow an opaque pointer to stable native storage for a C-only carrier.
+-- @return Native foreign *void result with the documented lifetime and units.
+-- @usage uv/supplemental.md#barrier_tborrow
 function barrier_t:borrow(): foreign *void
     self:require_live()
     return self.storage
 end
 
+--- Convenience method for [`barrier_init`](functions/threading.md#barrier_init) on this owner.
+-- @param count Count supplied to the native operation.
+-- @return Native integer result with the documented lifetime and units.
+-- @usage uv/supplemental.md#barrier_tinit
 function barrier_t:init(count: integer): integer
     self:require_fresh()
     local status: integer = ffi.uv_barrier_init(self.storage as foreign *uv_barrier_t, count)
@@ -370,12 +512,17 @@ function barrier_t:init(count: integer): integer
     return status
 end
 
+--- Convenience method for [`barrier_destroy`](functions/threading.md#barrier_destroy) on this owner.
+-- @usage uv/supplemental.md#barrier_tdestroy
 function barrier_t:destroy()
     self:require_live()
     ffi.uv_barrier_destroy(self.storage as foreign *uv_barrier_t)
     self.state = SYNC_RETIRED
 end
 
+--- Convenience method for [`barrier_wait`](functions/threading.md#barrier_wait) on this owner.
+-- @return Native integer result with the documented lifetime and units.
+-- @usage uv/supplemental.md#barrier_twait
 function barrier_t:wait(): integer
     self:require_live()
     return ffi.uv_barrier_wait(self.storage as foreign *uv_barrier_t)
@@ -385,15 +532,23 @@ foreign function native_barrier_wait(native: *void): int
     return ffi.uv_barrier_wait(native as foreign *uv_barrier_t)
 end
 
+--- Return the exact C-only native entry for this operation.
+-- @return Native foreign function(*void): int result with the documented lifetime and units.
+-- @usage uv/supplemental.md#barrier_twait_function
 function barrier_t.wait_function(): foreign function(*void): int
     return native_barrier_wait
 end
 
+--- Owned native key storage with explicit initialization and destruction.
+-- @usage uv/types.md#key_t
 record key_t
     local const storage: foreign titan_issue194_key_storage
     local state: integer
 end
 
+--- Allocate stable native storage without initializing it.
+-- @return Native key_t result with the documented lifetime and units.
+-- @usage uv/supplemental.md#key_tnew
 function key_t.new(): key_t
     local storage = foreign titan_issue194_key_storage.new()
     return { storage = storage, state = SYNC_FRESH }
@@ -407,11 +562,17 @@ local function key_t:require_fresh()
     if self.state ~= SYNC_FRESH then raise "uv.key: initialization requires fresh owner" end
 end
 
+--- Borrow an opaque pointer to stable native storage for a C-only carrier.
+-- @return Native foreign *void result with the documented lifetime and units.
+-- @usage uv/supplemental.md#key_tborrow
 function key_t:borrow(): foreign *void
     self:require_live()
     return self.storage
 end
 
+--- Convenience method for [`key_create`](functions/threading.md#key_create) on this owner.
+-- @return Native integer result with the documented lifetime and units.
+-- @usage uv/supplemental.md#key_tcreate
 function key_t:create(): integer
     self:require_fresh()
     local status: integer = ffi.uv_key_create(self.storage as foreign *uv_key_t)
@@ -419,6 +580,8 @@ function key_t:create(): integer
     return status
 end
 
+--- Convenience method for [`key_delete`](functions/threading.md#key_delete) on this owner.
+-- @usage uv/supplemental.md#key_tdelete
 function key_t:delete()
     self:require_live()
     ffi.uv_key_delete(self.storage as foreign *uv_key_t)
@@ -427,12 +590,20 @@ end
 
 -- Wait releases and reacquires the supplied locked mutex. Check the predicate
 -- in a loop: native conditions permit spurious wakeups. Timeout is relative ns.
+--- Convenience method for [`cond_wait`](functions/threading.md#cond_wait) on this owner.
+-- @param mutex Native owner or typed view used by this operation.
+-- @usage uv/supplemental.md#cond_twait
 function cond_t:wait(mutex: mutex_t)
     self:require_live()
     mutex:require_live()
     ffi.uv_cond_wait(self.storage as foreign *uv_cond_t, mutex.storage as foreign *uv_mutex_t)
 end
 
+--- Convenience method for [`cond_timedwait`](functions/threading.md#cond_timedwait) on this owner.
+-- @param mutex Native owner or typed view used by this operation.
+-- @param timeout_ns Timeout ns supplied to the native operation.
+-- @return Native integer result with the documented lifetime and units.
+-- @usage uv/supplemental.md#cond_ttimedwait
 function cond_t:timedwait(mutex: mutex_t, timeout_ns: foreign unsigned long long): integer
     self:require_live()
     mutex:require_live()
@@ -447,21 +618,33 @@ foreign function native_cond_timedwait(cond: *void, mutex: *void, timeout_ns: un
     return ffi.uv_cond_timedwait(cond as foreign *uv_cond_t, mutex as foreign *uv_mutex_t, timeout_ns as foreign uint64_t)
 end
 
+--- Return the exact C-only native entry for this operation.
+-- @return Native foreign function(*void, *void): void result with the documented lifetime and units.
+-- @usage uv/supplemental.md#cond_twait_function
 function cond_t.wait_function(): foreign function(*void, *void): void
     return native_cond_wait
 end
 
+--- Return the exact C-only native entry for this operation.
+-- @return Native foreign function(*void, *void, unsigned long long): int result with the documented lifetime and units.
+-- @usage uv/supplemental.md#cond_ttimedwait_function
 function cond_t.timedwait_function(): foreign function(*void, *void, unsigned long long): int
     return native_cond_timedwait
 end
 
 -- TLS stores a raw pointer per native thread. The caller separately retains
 -- the pointed-to allocation until overwrite, thread exit, or key deletion.
+--- Convenience method for [`key_get`](functions/threading.md#key_get) on this owner.
+-- @return Native foreign *void result with the documented lifetime and units.
+-- @usage uv/supplemental.md#key_tget
 function key_t:get(): foreign *void
     self:require_live()
     return ffi.uv_key_get(self.storage as foreign *uv_key_t)
 end
 
+--- Convenience method for [`key_set`](functions/threading.md#key_set) on this owner.
+-- @param value Caller-supplied data retained or borrowed for the documented native interval.
+-- @usage uv/supplemental.md#key_tset
 function key_t:set(value: foreign *void)
     self:require_live()
     ffi.uv_key_set(self.storage as foreign *uv_key_t, value)
@@ -475,149 +658,276 @@ foreign function native_key_set(key: *void, value: *void): void
     ffi.uv_key_set(key as foreign *uv_key_t, value)
 end
 
+--- Return the exact C-only native entry for this operation.
+-- @return Native foreign function(*void): *void result with the documented lifetime and units.
+-- @usage uv/supplemental.md#key_tget_function
 function key_t.get_function(): foreign function(*void): *void
     return native_key_get
 end
 
+--- Return the exact C-only native entry for this operation.
+-- @return Native foreign function(*void, *void): void result with the documented lifetime and units.
+-- @usage uv/supplemental.md#key_tset_function
 function key_t.set_function(): foreign function(*void, *void): void
     return native_key_set
 end
 
 -- Canonical native-prefix-drop module functions.
+--- Initialize a nonrecursive mutex.
+-- @param owner Mutable fresh final mutex_t() storage; explicit destroy/delete after native users retire.
+-- @return Native integer result with the documented lifetime and units.
+-- @usage uv/functions/threading.md#mutex_init
 function mutex_init(owner: mutex_t): integer
     return owner:init()
 end
 
+--- Initialize a mutex permitting repeated lock by its current native-thread owner.
+-- @param owner Mutable fresh final mutex_t() storage; explicit destroy/delete after native users retire.
+-- @return Native integer result with the documented lifetime and units.
+-- @usage uv/functions/threading.md#mutex_init_recursive
 function mutex_init_recursive(owner: mutex_t): integer
     return owner:init_recursive()
 end
 
+--- Destroy the initialized mutex after every native user is quiescent.
+-- @param owner Mutable initialized native synchronization owner; caller coordinates external native users and lifetime; destroy/delete only after quiescence.
+-- @usage uv/functions/threading.md#mutex_destroy
 function mutex_destroy(owner: mutex_t)
     owner:destroy()
 end
 
+--- Block the OS thread until the mutex can be acquired.
+-- @param owner Mutable initialized native synchronization owner; caller coordinates external native users and lifetime; destroy/delete only after quiescence.
+-- @usage uv/functions/threading.md#mutex_lock
 function mutex_lock(owner: mutex_t)
     owner:lock()
 end
 
+--- Attempt immediate mutex acquisition; zero acquires it and a native busy/error result leaves it unacquired.
+-- @param owner Mutable initialized native synchronization owner; caller coordinates external native users and lifetime; destroy/delete only after quiescence.
+-- @return Native integer result with the documented lifetime and units.
+-- @usage uv/functions/threading.md#mutex_trylock
 function mutex_trylock(owner: mutex_t): integer
     return owner:trylock()
 end
 
+--- Release one matching mutex acquisition by the owning native thread.
+-- @param owner Mutable initialized native synchronization owner; caller coordinates external native users and lifetime; destroy/delete only after quiescence.
+-- @usage uv/functions/threading.md#mutex_unlock
 function mutex_unlock(owner: mutex_t)
     owner:unlock()
 end
 
+--- Initialize a native reader/writer lock.
+-- @param owner Mutable fresh final rwlock_t() storage; explicit destroy/delete after native users retire.
+-- @return Native integer result with the documented lifetime and units.
+-- @usage uv/functions/threading.md#rwlock_init
 function rwlock_init(owner: rwlock_t): integer
     return owner:init()
 end
 
+--- Destroy the initialized rwlock after every native user is quiescent.
+-- @param owner Mutable initialized native synchronization owner; caller coordinates external native users and lifetime; destroy/delete only after quiescence.
+-- @usage uv/functions/threading.md#rwlock_destroy
 function rwlock_destroy(owner: rwlock_t)
     owner:destroy()
 end
 
+--- Block until a read-side lock is acquired.
+-- @param owner Mutable initialized native synchronization owner; caller coordinates external native users and lifetime; destroy/delete only after quiescence.
+-- @usage uv/functions/threading.md#rwlock_rdlock
 function rwlock_rdlock(owner: rwlock_t)
     owner:rdlock()
 end
 
+--- Attempt immediate read-side acquisition and return native success/busy status.
+-- @param owner Mutable initialized native synchronization owner; caller coordinates external native users and lifetime; destroy/delete only after quiescence.
+-- @return Native operation result or submission status; negative values report libuv errors.
+-- @usage uv/functions/threading.md#rwlock_tryrdlock
 function rwlock_tryrdlock(owner: rwlock_t): integer
     return owner:tryrdlock()
 end
 
+--- Release a matching read-side acquisition.
+-- @param owner Mutable initialized native synchronization owner; caller coordinates external native users and lifetime; destroy/delete only after quiescence.
+-- @usage uv/functions/threading.md#rwlock_rdunlock
 function rwlock_rdunlock(owner: rwlock_t)
     owner:rdunlock()
 end
 
+--- Block until the exclusive write-side lock is acquired.
+-- @param owner Mutable initialized native synchronization owner; caller coordinates external native users and lifetime; destroy/delete only after quiescence.
+-- @usage uv/functions/threading.md#rwlock_wrlock
 function rwlock_wrlock(owner: rwlock_t)
     owner:wrlock()
 end
 
+--- Attempt immediate exclusive write-side acquisition and return native success/busy status.
+-- @param owner Mutable initialized native synchronization owner; caller coordinates external native users and lifetime; destroy/delete only after quiescence.
+-- @return Native operation result or submission status; negative values report libuv errors.
+-- @usage uv/functions/threading.md#rwlock_trywrlock
 function rwlock_trywrlock(owner: rwlock_t): integer
     return owner:trywrlock()
 end
 
+--- Release a matching write-side acquisition.
+-- @param owner Mutable initialized native synchronization owner; caller coordinates external native users and lifetime; destroy/delete only after quiescence.
+-- @usage uv/functions/threading.md#rwlock_wrunlock
 function rwlock_wrunlock(owner: rwlock_t)
     owner:wrunlock()
 end
 
+--- Initialize a semaphore with the supplied nonnegative count.
+-- @param owner Mutable fresh final sem_t() storage; explicit destroy/delete after native users retire.
+-- @param value Input integer value; checked native narrowing occurs before native ownership is accepted.
+-- @return Native operation result or submission status; negative values report libuv errors.
+-- @usage uv/functions/threading.md#sem_init
 function sem_init(owner: sem_t, value: integer): integer
     return owner:init(value)
 end
 
+--- Destroy the initialized sem after every native user is quiescent.
+-- @param owner Mutable initialized native synchronization owner; caller coordinates external native users and lifetime; destroy/delete only after quiescence.
+-- @usage uv/functions/threading.md#sem_destroy
 function sem_destroy(owner: sem_t)
     owner:destroy()
 end
 
+--- Increment the semaphore and release one waiting native thread when applicable.
+-- @param owner Mutable initialized native synchronization owner; caller coordinates external native users and lifetime; destroy/delete only after quiescence.
+-- @usage uv/functions/threading.md#sem_post
 function sem_post(owner: sem_t)
     owner:post()
 end
 
+--- Block the OS thread until the semaphore can be decremented.
+-- @param owner Mutable initialized native synchronization owner; caller coordinates external native users and lifetime; destroy/delete only after quiescence.
+-- @usage uv/functions/threading.md#sem_wait
 function sem_wait(owner: sem_t)
     owner:wait()
 end
 
+--- Attempt immediate semaphore decrement; return native success or unavailable status.
+-- @param owner Mutable initialized native synchronization owner; caller coordinates external native users and lifetime; destroy/delete only after quiescence.
+-- @return Native operation result or submission status; negative values report libuv errors.
+-- @usage uv/functions/threading.md#sem_trywait
 function sem_trywait(owner: sem_t): integer
     return owner:trywait()
 end
 
+--- Initialize a condition variable; its waits require a separately initialized mutex.
+-- @param owner Mutable fresh final cond_t() storage; explicit destroy/delete after native users retire.
+-- @return Native integer result with the documented lifetime and units.
+-- @usage uv/functions/threading.md#cond_init
 function cond_init(owner: cond_t): integer
     return owner:init()
 end
 
+--- Destroy the initialized cond after every native user is quiescent.
+-- @param owner Mutable initialized native synchronization owner; caller coordinates external native users and lifetime; destroy/delete only after quiescence.
+-- @usage uv/functions/threading.md#cond_destroy
 function cond_destroy(owner: cond_t)
     owner:destroy()
 end
 
+--- Wake one native waiter, if any.
+-- @param owner Mutable initialized native synchronization owner; caller coordinates external native users and lifetime; destroy/delete only after quiescence.
+-- @usage uv/functions/threading.md#cond_signal
 function cond_signal(owner: cond_t)
     owner:signal()
 end
 
+--- Wake all native condition waiters, if any.
+-- @param owner Mutable initialized native synchronization owner; caller coordinates external native users and lifetime; destroy/delete only after quiescence.
+-- @usage uv/functions/threading.md#cond_broadcast
 function cond_broadcast(owner: cond_t)
     owner:broadcast()
 end
 
+--- Initialize a barrier for count participating native threads; count must be positive.
+-- @param owner Mutable fresh final barrier_t() storage; explicit destroy/delete after native users retire.
+-- @param count Input integer value; checked native narrowing occurs before native ownership is accepted.
+-- @return Native integer result with the documented lifetime and units.
+-- @usage uv/functions/threading.md#barrier_init
 function barrier_init(owner: barrier_t, count: integer): integer
     return owner:init(count)
 end
 
+--- Destroy the initialized barrier after every native user is quiescent.
+-- @param owner Mutable initialized native synchronization owner; caller coordinates external native users and lifetime; destroy/delete only after quiescence.
+-- @usage uv/functions/threading.md#barrier_destroy
 function barrier_destroy(owner: barrier_t)
     owner:destroy()
 end
 
+--- Block at the native barrier until all participants arrive.
+-- @param owner Mutable initialized native synchronization owner; caller coordinates external native users and lifetime; destroy/delete only after quiescence.
+-- @return Native integer result with the documented lifetime and units.
+-- @usage uv/functions/threading.md#barrier_wait
 function barrier_wait(owner: barrier_t): integer
     return owner:wait()
 end
 
+--- Create a native thread-local-storage key.
+-- @param owner Mutable fresh final key_t() storage; explicit destroy/delete after native users retire.
+-- @return Native integer result with the documented lifetime and units.
+-- @usage uv/functions/threading.md#key_create
 function key_create(owner: key_t): integer
     return owner:create()
 end
 
+--- Delete the native key after its users stop.
+-- @param owner Mutable initialized native synchronization owner; caller coordinates external native users and lifetime; destroy/delete only after quiescence.
+-- @usage uv/functions/threading.md#key_delete
 function key_delete(owner: key_t)
     owner:delete()
 end
 
+--- Atomically release the supplied locked mutex and wait, then reacquire it before returning.
+-- @param owner Mutable initialized native synchronization owner; caller coordinates external native users and lifetime; destroy/delete only after quiescence.
+-- @param mutex Mutable initialized native synchronization owner; caller coordinates external native users and lifetime; destroy/delete only after quiescence.
+-- @usage uv/functions/threading.md#cond_wait
 function cond_wait(owner: cond_t, mutex: mutex_t)
     owner:wait(mutex)
 end
 
+--- Wait with a relative unsigned nanosecond timeout while releasing/reacquiring the mutex.
+-- @param owner Mutable initialized native synchronization owner; caller coordinates external native users and lifetime; destroy/delete only after quiescence.
+-- @param mutex Mutable initialized native synchronization owner; caller coordinates external native users and lifetime; destroy/delete only after quiescence.
+-- @param timeout_ns Input foreign unsigned long long value; checked native narrowing occurs before native ownership is accepted.
+-- @return Native integer result with the documented lifetime and units.
+-- @usage uv/functions/threading.md#cond_timedwait
 function cond_timedwait(owner: cond_t, mutex: mutex_t, timeout_ns: foreign unsigned long long): integer
     return owner:timedwait(mutex, timeout_ns)
 end
 
+--- Return the raw value associated with this key on the calling native thread; nil is the null pointer.
+-- @param owner Mutable initialized native synchronization owner; caller coordinates external native users and lifetime; destroy/delete only after quiescence.
+-- @return Native foreign *void result with the documented lifetime and units.
+-- @usage uv/functions/threading.md#key_get
 function key_get(owner: key_t): foreign *void
     return owner:get()
 end
 
+--- Store a raw pointer for this key on the calling native thread.
+-- @param owner Mutable initialized native synchronization owner; caller coordinates external native users and lifetime; destroy/delete only after quiescence.
+-- @param value Input borrowed native address for explicit C-only/TLS interop; no automatic GC ownership.
+-- @usage uv/functions/threading.md#key_set
 function key_set(owner: key_t, value: foreign *void)
     owner:set(value)
 end
 
 -- The guard is initialized in final packed storage using UV_ONCE_INIT. It has
 -- no destroy operation and cannot be reset; allocate a new owner for a new guard.
+--- Native once-initialization storage retaining its explicit guard owner.
+-- @usage uv/types.md#once_t
 record once_t
     local const storage: foreign titan_issue194_once_storage
 end
 
+--- Allocate stable native once storage with its initial once state.
+-- @return Native once_t result with the documented lifetime and units.
+-- @usage uv/supplemental.md#once_tnew
 function once_t.new(): once_t
     local storage = foreign titan_issue194_once_storage.new()
     local owner: once_t = { storage = storage }
@@ -625,10 +935,17 @@ function once_t.new(): once_t
     return owner
 end
 
+--- Borrow an opaque pointer to stable native storage for a C-only carrier.
+-- @return Native foreign *void result with the documented lifetime and units.
+-- @usage uv/supplemental.md#once_tborrow
 function once_t:borrow(): foreign *void
     return self.storage
 end
 
+--- Invoke one C-only callback exactly once for the once_t guard, with native cross-thread synchronization.
+-- @param guard Mutable initialized native synchronization owner; caller coordinates external native users and lifetime; destroy/delete only after quiescence.
+-- @param callback Input C-only entry; no Lua/Titan execution from a native worker/once callback.
+-- @usage uv/functions/threading.md#once
 function once(guard: once_t, callback: foreign function(): void)
     if not callback then raise "uv.once: callback is null" end
     ffi.uv_once(guard.storage as foreign *uv_once_t, callback)
@@ -638,6 +955,9 @@ foreign function native_once(guard: *void, callback: function(): void): void
     ffi.uv_once(guard as foreign *uv_once_t, callback)
 end
 
+--- Return the C-only native once entry.
+-- @return Native foreign function(*void, function(): void): void result with the documented lifetime and units.
+-- @usage uv/supplemental.md#once_function
 function once_function(): foreign function(*void, function(): void): void
     return native_once
 end

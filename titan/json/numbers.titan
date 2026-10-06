@@ -1,3 +1,7 @@
+--- Locale-independent JSON numeric conversion helpers.
+-- @module titan.json
+-- @usage standard-library-json.md
+
 foreign import "stdlib.h"
 foreign import "locale.h"
 

@@ -1,8 +1,17 @@
+--- Typed iterators for Maps and Arrays, including Array holes.
+-- @module titan.iteration
+-- @usage standard-library-iteration.md
+
 foreign import "lua.h"
 foreign import "titan/ffi.h"
 
 -- Mirror Lua's next while keeping every temporary Lua-stack value rooted until
 -- it has been copied into Titan's traced generic result representation.
+--- Return the next Map key and value in unspecified traversal order.
+-- @param map Map to traverse.
+-- @param key Previous key, or nil to begin traversal.
+-- @return Next key and value, or nil, nil after exhaustion.
+-- @usage standard-library-iteration.md
 function next<|K, V|>(map: {K: V}, key: K?): (K?, V?)
   local top = ffi.lua_gettop(L)
   defer ffi.lua_settop(L, top)
@@ -21,6 +30,10 @@ function next<|K, V|>(map: {K: V}, key: K?): (K?, V?)
   return next_key, next_value
 end
 
+--- Create a generic-for iterator over every key and value in a Map.
+-- @param map Map to traverse; traversal order is unspecified.
+-- @return Iterator, Map state, nil initial control, and nil closer.
+-- @usage standard-library-iteration.md
 function pairs<|K, V|>(map: {K: V}):
     (function ({K: V}, K?): (K?, V?), {K: V}, nil, nil)
   return next, map, nil, nil
@@ -35,6 +48,10 @@ local function array_next<|T|>(array: {T}, index: integer):
   return next_index, array[next_index]
 end
 
+--- Iterate Array positions from 1 through its length, preserving holes.
+-- @param array Array to traverse.
+-- @return Iterator tuple yielding a nonnil index and possibly nil item.
+-- @usage standard-library-iteration.md
 function ipairs<|T|>(array: {T}):
     (function ({T}, integer): (integer?, T?), {T}, integer, nil)
   return array_next, array, 0, nil

@@ -309,6 +309,10 @@ local const supported_apis: {string: boolean} = {
   ["wtf8_to_utf16"] = true,
 }
 
+--- Return true only for an exported canonical native-wrapper name without the `uv_` prefix.
+-- @param name Name supplied to the native operation.
+-- @return Native boolean result with the documented lifetime and units.
+-- @usage uv/supplemental.md#has_api
 function has_api(name: string): boolean
   return supported_apis[name] or false
 end

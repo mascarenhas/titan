@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
+source "$(dirname "$0")/windows_build_profile.sh"
+titan_windows_profile validation
 
 if [[ $# != 2 || ${MSYSTEM:-} != CLANG64 ]]; then
   echo 'usage (native CLANG64): check_windows_runtime_loader.sh LUA_SDK BUILD_ROOT' >&2
@@ -21,17 +23,18 @@ CC=${CC:-clang} perl -MText::ParseWords=shellwords -e \
   'my @a = shellwords($ENV{CC}); die "Invalid CC command\n" unless @a; print "$_\0" for @a' \
   > "$check_root/compiler.argv"
 mapfile -d '' -t compiler < "$check_root/compiler.argv"
+titan_windows_raw_flags "$check_root" RUNTIME
 [[ $("${compiler[@]}" -dumpmachine) == x86_64-w64-windows-gnu ]]
 printf '%s\n' '#include <_mingw.h>' \
   '#if !defined(__clang__) || !defined(_WIN64) || !defined(_UCRT)' \
   '#error Expected native Clang x64 with UCRT headers' '#endif' | \
   "${compiler[@]}" -x c -E - > /dev/null
 
-common=(-std=c99 -O2 -Wall -Wextra -Wno-unused-function \
+common=(-std=c99 -Wall -Wextra "${cppflags[@]}" "${cflags[@]}" -Wno-unused-function \
   -I titan-runtime -I "$prefix/src/lua-5.5.1")
 lua_import="$prefix/lib/liblua-5.5.1.dll.a"
 "${compiler[@]}" "${common[@]}" -c titan-runtime/titan.c -o "$check_root/titan.o"
-"${compiler[@]}" "${common[@]}" -shared -Wl,--exclude-all-symbols \
+"${compiler[@]}" "${common[@]}" -shared "${ldflags[@]}" -Wl,--exclude-all-symbols \
   titan-runtime/ltitanlib.c "$lua_import" -lbcrypt -o "$providers/titan.dll"
 fixture=spec/fixtures/windows/runtime_loader_provider.c
 for variant in provider dependency bad missing null; do
@@ -42,20 +45,20 @@ for variant in provider dependency bad missing null; do
     missing) defines=(-DFIXTURE_OMIT_VALUE) ;;
     null) defines=(-DFIXTURE_ABI=NULL) ;;
   esac
-  "${compiler[@]}" "${common[@]}" "${defines[@]}" -shared -Wl,--exclude-all-symbols \
+  "${compiler[@]}" "${common[@]}" "${defines[@]}" -shared "${ldflags[@]}" -Wl,--exclude-all-symbols \
     "$fixture" "$check_root/titan.o" "$lua_import" \
     -o "$providers/fixture-$variant.dll"
 done
-"${compiler[@]}" "${common[@]}" spec/fixtures/windows/runtime_loader_probe.c \
+"${compiler[@]}" "${common[@]}" "${ldflags[@]}" spec/fixtures/windows/runtime_loader_probe.c \
   "$check_root/titan.o" "$lua_import" -o "$runtime/bin/runtime-loader-probe.exe"
 
 # The dependency initially exists outside every Windows DLL search directory.
 # Fresh processes distinguish missing, process-PATH, and executable-bin lookup.
-"${compiler[@]}" -shared -O2 -Wl,--exclude-all-symbols \
+"${compiler[@]}" "${cppflags[@]}" "${cflags[@]}" -shared "${ldflags[@]}" -Wl,--exclude-all-symbols \
   -Xlinker --out-implib -Xlinker "$check_root/dependency.dll.a" \
   spec/fixtures/windows/runtime_loader_dependency.c \
   -o "$check_root/titan-loader-dependency.dll"
-"${compiler[@]}" -shared -O2 -Wl,--exclude-all-symbols \
+"${compiler[@]}" "${cppflags[@]}" "${cflags[@]}" -shared "${ldflags[@]}" -Wl,--exclude-all-symbols \
   spec/fixtures/windows/runtime_loader_native.c "$check_root/dependency.dll.a" \
   -o "$providers/fixture-native.dll"
 

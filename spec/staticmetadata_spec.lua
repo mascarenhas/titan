@@ -533,7 +533,7 @@ static const unsigned char result[] = {84,73,84,69,78,85,77,0,1,12,
         local ok, failure = xpcall(function()
             assert(util.set_file_contents(source, code))
             local compiled = strategy:run({ "clang", "--target=x86_64-w64-windows-gnu",
-                "-std=c99", "-O2", "-Wall", "-Werror", "-c", source, "-o", output })
+                "-std=c99", "-O0", "-fno-lto", "-Wall", "-Werror", "-c", source, "-o", output })
             assert.is_true(compiled.ok, compiled.output or compiled.diagnostic)
             local bytes = assert(util.get_file_contents(output))
             local object = assert(staticmetadata.classify_object(bytes, output))

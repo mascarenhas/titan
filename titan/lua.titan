@@ -1,3 +1,7 @@
+--- Compile Lua chunks and load Lua, C, or Titan modules in the current Lua state.
+-- @module titan.lua
+-- @usage standard-library-lua.md
+
 foreign import "lua.h"
 foreign import "lauxlib.h"
 foreign import "stddef.h"
@@ -51,6 +55,12 @@ local function is_lua_function(candidate: value): boolean
   return ffi.lua_type(L, -1) == ffi.LUA_TFUNCTION
 end
 
+--- Compile Lua text or bytecode without executing it; invalid chunks raise.
+-- @param chunk Exact chunk bytes, including any embedded NUL.
+-- @param name Diagnostic chunk name; nil uses the chunk text.
+-- @param env Replacement first upvalue, or nil to keep the default environment.
+-- @return Callable preserving all arguments and results.
+-- @usage standard-library-lua.md
 function load(chunk: string, name: string?, env: value):
     function (...: value): (...: value)
   local top = ffi.lua_gettop(L)
@@ -84,6 +94,12 @@ function load(chunk: string, name: string?, env: value):
   return callable as LuaChunk
 end
 
+--- Compile Lua bytes read from a borrowed Reader without closing it.
+-- @param reader Chunk source; nonnil strings contribute bytes and nil ends input.
+-- @param name Diagnostic chunk name, or nil for the default.
+-- @param env Replacement first upvalue, or nil to retain it.
+-- @return Compiled flexible callable.
+-- @usage standard-library-lua.md
 function load_from_reader(reader: io.Reader, name: string?, env: value):
     function (...: value): (...: value)
   local builder = string.writer()
@@ -211,6 +227,10 @@ local function find_loader(modname: string,
   raise "module '" .. modname .. "' not found:" .. messages:drain()
 end
 
+--- Load a module through package searchers and the package.loaded cache.
+-- @param modname Lua module name; source loading may suspend in the current Task.
+-- @return Cached or newly loaded module value.
+-- @usage standard-library-lua.md
 function require(modname: string): value
   local loaded = registry_map(ffi.LUA_LOADED_TABLE as string)
   local cached: value = loaded[modname]
@@ -250,6 +270,11 @@ function require(modname: string): value
   return installed
 end
 
+--- Read and execute a Lua file, closing its File on every exit.
+-- @param filename Path loaded within an async Task.
+-- @param ... Arguments forwarded to the chunk.
+-- @return Every result returned by the chunk, including nil slots.
+-- @usage standard-library-lua.md
 function dofile(filename: string, ...: value): (...: value)
   local file = fs.open(filename, "r")
   defer file:close()

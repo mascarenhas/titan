@@ -2,6 +2,8 @@
 foreign import "string.h"
 foreign import "address-native.h"
 
+--- A copied typed socket address preserving family, port, bytes, and IPv6 scope.
+-- @usage uv/types.md#sockaddr_t
 record sockaddr_t
   local native: foreign sockaddr_storage
   local native_length: integer
@@ -46,6 +48,12 @@ local function sockaddr_copy(native: foreign const *sockaddr): sockaddr_t?
   return sockaddr_copy_sized(native, length)
 end
 
+--- Parse numeric IPv4 text and port 0..65535 into a copied typed sockaddr_t.
+-- @param ip Input immutable text/byte owner; native C-string conventions apply where the operation takes text.
+-- @param port Input integer value; checked native narrowing occurs before native ownership is accepted.
+-- @return Native status: zero on success, a negative libuv error on failure.
+-- @return Copied or retained sockaddr_t result, or nil on failure or absence.
+-- @usage uv/functions/misc.md#ip4_addr
 function ip4_addr(ip: string, port: integer): (integer, sockaddr_t?)
   local native_port = port as foreign int
   local native = foreign sockaddr_storage.new()
@@ -56,6 +64,12 @@ function ip4_addr(ip: string, port: integer): (integer, sockaddr_t?)
   return status, owner
 end
 
+--- Parse numeric IPv6 text and port 0..65535 into a copied typed sockaddr_t, retaining supported scope information.
+-- @param ip Input immutable text/byte owner; native C-string conventions apply where the operation takes text.
+-- @param port Input integer value; checked native narrowing occurs before native ownership is accepted.
+-- @return Native status: zero on success, a negative libuv error on failure.
+-- @return Copied or retained sockaddr_t result, or nil on failure or absence.
+-- @usage uv/functions/misc.md#ip6_addr
 function ip6_addr(ip: string, port: integer): (integer, sockaddr_t?)
   local native_port = port as foreign int
   local native = foreign sockaddr_storage.new()
@@ -66,6 +80,11 @@ function ip6_addr(ip: string, port: integer): (integer, sockaddr_t?)
   return status, owner
 end
 
+--- Return status and numeric IPv4 text for a compatible typed address.
+-- @param address Input complete typed address owner; no sockaddr pointer/header required; constructor/accessors encode family/port/bytes.
+-- @return Native status: zero on success, a negative libuv error on failure.
+-- @return Copied or retained string result, or nil on failure or absence.
+-- @usage uv/functions/misc.md#ip4_name
 function ip4_name(address: sockaddr_t): (integer, string?)
   if address.native.ss_family ~= ffi.AF_INET then return ffi.UV_EAFNOSUPPORT, nil end
   local text = foreign char.new_array(16)
@@ -75,6 +94,11 @@ function ip4_name(address: sockaddr_t): (integer, string?)
   return status, (text as foreign *char) as string
 end
 
+--- Return status and numeric IPv6 text for a compatible typed address.
+-- @param address Input complete typed address owner; no sockaddr pointer/header required; constructor/accessors encode family/port/bytes.
+-- @return Native status: zero on success, a negative libuv error on failure.
+-- @return Copied or retained string result, or nil on failure or absence.
+-- @usage uv/functions/misc.md#ip6_name
 function ip6_name(address: sockaddr_t): (integer, string?)
   if address.native.ss_family ~= ffi.AF_INET6 then return ffi.UV_EAFNOSUPPORT, nil end
   local text = foreign char.new_array(46)
@@ -84,6 +108,11 @@ function ip6_name(address: sockaddr_t): (integer, string?)
   return status, (text as foreign *char) as string
 end
 
+--- Return status and numeric IPv4/IPv6 text according to the typed address family.
+-- @param address Input complete typed address owner; no sockaddr pointer/header required; constructor/accessors encode family/port/bytes.
+-- @return Native status: zero on success, a negative libuv error on failure.
+-- @return Copied or retained string result, or nil on failure or absence.
+-- @usage uv/functions/misc.md#ip_name
 function ip_name(address: sockaddr_t): (integer, string?)
   local text = foreign char.new_array(46)
   local status = ffi.uv_ip_name(address:pointer(), text, 46) as integer
@@ -91,18 +120,30 @@ function ip_name(address: sockaddr_t): (integer, string?)
   return status, (text as foreign *char) as string
 end
 
+--- Return the native address-family integer, including on an incomplete family-only result.
+-- @return Native integer result with the documented lifetime and units.
+-- @usage uv/supplemental.md#sockaddr_tfamily
 function sockaddr_t:family(): integer
   return (self.native as foreign *sockaddr).sa_family as integer
 end
 
+--- Report whether complete native address bytes are available.
+-- @return Native boolean result with the documented lifetime and units.
+-- @usage uv/supplemental.md#sockaddr_tis_complete
 function sockaddr_t:is_complete(): boolean
   return self.native_length ~= 0
 end
 
+--- Return the known native sockaddr byte length.
+-- @return Native integer result with the documented lifetime and units.
+-- @usage uv/supplemental.md#sockaddr_tbyte_length
 function sockaddr_t:byte_length(): integer
   return self.native_length
 end
 
+--- Copy all known native sockaddr bytes, including native layout/padding; return nil for an incomplete address.
+-- @return Copied or retained string result, or nil on failure or absence.
+-- @usage uv/supplemental.md#sockaddr_traw_bytes
 function sockaddr_t:raw_bytes(): string?
   if self.native_length == 0 then return nil end
   local bytes: owned unsigned char[] = foreign unsigned char.new_array(self.native_length)
@@ -110,6 +151,9 @@ function sockaddr_t:raw_bytes(): string?
   return bytes as string
 end
 
+--- Return an IPv4/IPv6 port in host numeric order.
+-- @return Native integer result with the documented lifetime and units.
+-- @usage uv/supplemental.md#sockaddr_tport
 function sockaddr_t:port(): integer
   if self.native.ss_family == ffi.AF_INET then
     local address = self.native as foreign *sockaddr_in
@@ -121,26 +165,41 @@ function sockaddr_t:port(): integer
 end
 
 -- Flowinfo uses the native field's numeric representation; no bits are dropped.
+--- Return the IPv6 flow-info field in its native numeric representation; non-IPv6 addresses return zero.
+-- @return Native integer result with the documented lifetime and units.
+-- @usage uv/supplemental.md#sockaddr_tflowinfo
 function sockaddr_t:flowinfo(): integer
   if self.native.ss_family ~= ffi.AF_INET6 then return 0 end
   return (self.native as foreign *sockaddr_in6).sin6_flowinfo as integer
 end
 
+--- Return the IPv6 scope identifier; non-IPv6 addresses return zero.
+-- @return Native integer result with the documented lifetime and units.
+-- @usage uv/supplemental.md#sockaddr_tscope_id
 function sockaddr_t:scope_id(): integer
   if self.native.ss_family ~= ffi.AF_INET6 then return 0 end
   return (self.native as foreign *sockaddr_in6).sin6_scope_id as integer
 end
 
+--- Set the native uint32 IPv6 flow-info field with checked conversion.
+-- @param value Caller-supplied data retained or borrowed for the documented native interval.
+-- @usage uv/supplemental.md#sockaddr_tset_flowinfo
 function sockaddr_t:set_flowinfo(value: integer)
   if self.native.ss_family ~= ffi.AF_INET6 then raise "IPv6 address required" end
   (self.native as foreign *sockaddr_in6).sin6_flowinfo = value
 end
 
+--- Set the native uint32 IPv6 scope identifier with checked conversion.
+-- @param value Caller-supplied data retained or borrowed for the documented native interval.
+-- @usage uv/supplemental.md#sockaddr_tset_scope_id
 function sockaddr_t:set_scope_id(value: integer)
   if self.native.ss_family ~= ffi.AF_INET6 then raise "IPv6 address required" end
   (self.native as foreign *sockaddr_in6).sin6_scope_id = value
 end
 
+--- Copy the 4 IPv4 or 16 IPv6 address bytes, excluding port and other sockaddr fields.
+-- @return Native string result with the documented lifetime and units.
+-- @usage uv/supplemental.md#sockaddr_taddress_bytes
 function sockaddr_t:address_bytes(): string
   if self.native.ss_family == ffi.AF_INET then
     local bytes: owned unsigned char[] = foreign unsigned char.new_array(4)
@@ -156,6 +215,12 @@ function sockaddr_t:address_bytes(): string
 end
 
 -- inet_pton/ntop operate on address bytes, not sockaddr storage.
+--- Parse presentation text into copied binary IPv4/IPv6 bytes for address family af.
+-- @param af Input integer value; checked native narrowing occurs before native ownership is accepted.
+-- @param source Input immutable text/byte owner; native C-string conventions apply where the operation takes text.
+-- @return Native status: zero on success, a negative libuv error on failure.
+-- @return Copied or retained string result, or nil on failure or absence.
+-- @usage uv/functions/misc.md#inet_pton
 function inet_pton(af: integer, source: string): (integer, string?)
   local native_af = af as foreign int
   local length = 0
@@ -168,6 +233,12 @@ function inet_pton(af: integer, source: string): (integer, string?)
   return status, bytes as string
 end
 
+--- Convert copied binary IPv4/IPv6 address bytes into presentation text for address family af.
+-- @param af Input integer value; checked native narrowing occurs before native ownership is accepted.
+-- @param source Input immutable text/byte owner; native C-string conventions apply where the operation takes text.
+-- @return Native status: zero on success, a negative libuv error on failure.
+-- @return Copied or retained string result, or nil on failure or absence.
+-- @usage uv/functions/misc.md#inet_ntop
 function inet_ntop(af: integer, source: string): (integer, string?)
   local native_af = af as foreign int
   if native_af == ffi.AF_INET then
@@ -182,6 +253,9 @@ function inet_ntop(af: integer, source: string): (integer, string?)
 end
 
 -- BSD's native sa_len field; absent on systems without that field.
+--- Return the platform sockaddr length field when present, otherwise nil.
+-- @return Copied or retained integer result, or nil on failure or absence.
+-- @usage uv/supplemental.md#sockaddr_tsa_len
 function sockaddr_t:sa_len(): integer?
   local length = ffi.titan_sockaddr_length_field(self.native as foreign *sockaddr) as integer
   if length < 0 then return nil end

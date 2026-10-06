@@ -1,3 +1,7 @@
+--- Private Relabel grammar and source-budget accounting for JSON documents.
+-- @module titan.json
+-- @usage standard-library-json.md
+
 -- The grammar owns JSON structure; delayed folds build dense private nodes.
 -- Match-time callbacks only count values and container nesting.
 local record ParseBudget

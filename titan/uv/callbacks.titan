@@ -1,20 +1,58 @@
 -- Ordinary loop callbacks use standard Titan callable adaptation, including Lua.
+--- Ordinary loop-thread callback for after work delivery.
+-- @usage uv/types.md#after_work_cb
 type after_work_cb = function (work_t, integer): ()
+--- Ordinary loop-thread callback for async delivery.
+-- @usage uv/types.md#async_cb
 type async_cb = function (async_t): ()
+--- Ordinary loop-thread callback for check delivery.
+-- @usage uv/types.md#check_cb
 type check_cb = function (check_t): ()
+--- Ordinary loop-thread callback for close delivery.
+-- @usage uv/types.md#close_cb
 type close_cb = function (handle_t): ()
+--- Ordinary loop-thread callback for exit delivery.
+-- @usage uv/types.md#exit_cb
 type exit_cb = function (process_t, integer, integer): ()
+--- Ordinary loop-thread callback for fs delivery.
+-- @usage uv/types.md#fs_cb
 type fs_cb = function (fs_t): ()
+--- Ordinary loop-thread callback for fs event delivery.
+-- @usage uv/types.md#fs_event_cb
 type fs_event_cb = function (fs_event_t, string?, integer, integer): ()
+--- Ordinary loop-thread callback for fs poll delivery.
+-- @usage uv/types.md#fs_poll_cb
 type fs_poll_cb = function (fs_poll_t, integer, stat_t?, stat_t?): ()
+--- Ordinary loop-thread callback for getaddrinfo delivery.
+-- @usage uv/types.md#getaddrinfo_cb
 type getaddrinfo_cb = function (getaddrinfo_t, integer, addrinfo_result_t?): ()
+--- Ordinary loop-thread callback for getnameinfo delivery.
+-- @usage uv/types.md#getnameinfo_cb
 type getnameinfo_cb = function (getnameinfo_t, integer, string?, string?): ()
+--- Ordinary loop-thread callback for idle delivery.
+-- @usage uv/types.md#idle_cb
 type idle_cb = function (idle_t): ()
+--- Ordinary loop-thread callback for poll delivery.
+-- @usage uv/types.md#poll_cb
 type poll_cb = function (poll_t, integer, integer): ()
+--- Ordinary loop-thread callback for prepare delivery.
+-- @usage uv/types.md#prepare_cb
 type prepare_cb = function (prepare_t): ()
+--- Ordinary loop-thread callback for random delivery.
+-- @usage uv/types.md#random_cb
 type random_cb = function (random_t, integer, buf_t, integer): ()
+--- Ordinary loop-thread callback for signal delivery.
+-- @usage uv/types.md#signal_cb
 type signal_cb = function (signal_t, integer): ()
+--- Ordinary loop-thread callback for timer delivery.
+-- @usage uv/types.md#timer_cb
 type timer_cb = function (timer_t): ()
+--- Ordinary loop-thread callback for udp recv delivery.
+-- @usage uv/types.md#udp_recv_cb
 type udp_recv_cb = function (udp_t, integer, buf_t?, sockaddr_t?, integer): ()
+--- Ordinary loop-thread callback for udp send delivery.
+-- @usage uv/types.md#udp_send_cb
 type udp_send_cb = function (udp_send_t, integer): ()
+--- Ordinary loop-thread callback for walk delivery.
+-- @usage uv/types.md#walk_cb
 type walk_cb = function (handle_t, value): ()

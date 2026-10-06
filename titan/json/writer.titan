@@ -1,3 +1,7 @@
+--- Private JSON value traversal, string escaping, and output construction.
+-- @module titan.json
+-- @usage standard-library-json.md
+
 -- This UTF-8 check accepts Unicode scalar values only. JSON text never carries
 -- surrogate code points or overlong byte sequences.
 local function utf8_width(subject: string, position: integer, path: Path): integer

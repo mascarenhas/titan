@@ -1,3 +1,7 @@
+--- Low-level stackful coroutines with tagged control transfer and stable handle identity.
+-- @module titan.coroutine
+-- @usage coroutines.md
+
 foreign import "minicoro.h"
 foreign import "lua.h"
 foreign import "lauxlib.h"
@@ -33,6 +37,8 @@ local TITAN_CORO_TRANSFER_USERVALUE = 5
 local TITAN_CORO_RECORD_USERVALUE = 6
 local runtime = foreign mco_runtime.new()
 
+--- Opaque tagged coroutine created by coroutine.create; use async Tasks for scheduling.
+-- @usage coroutines.md
 record Coroutine
   local udata: value -- just for GC rooting
   local handle: foreign *mco_coro
@@ -202,6 +208,11 @@ local function yield_result_or_raise(co: foreign *mco_coro, tag: value): value
   return pop_transfer_or_raise(co, false)
 end
 
+--- Resume a suspended coroutine and return its yielded or final value.
+-- @param arg Value delivered to the coroutine.
+-- @param tag Resumer tag; nil uses the stored default tag.
+-- @return Yielded or returned value.
+-- @usage coroutines.md
 function Coroutine:resume(arg: value, tag: value): value
   local effective = effective_tag(self.default_tag, tag)
   local co = self.handle
@@ -210,6 +221,11 @@ function Coroutine:resume(arg: value, tag: value): value
   return resume_result_or_raise(co, source, effective)
 end
 
+--- Resume a suspended coroutine by raising a value at its yield point.
+-- @param err Error value injected into the coroutine.
+-- @param tag Resumer tag; nil uses the stored default tag.
+-- @return Next yielded or returned value if the coroutine handles the error.
+-- @usage coroutines.md
 function Coroutine:error(err: value, tag: value): value
   local effective = effective_tag(self.default_tag, tag)
   local co = self.handle
@@ -218,6 +234,9 @@ function Coroutine:error(err: value, tag: value): value
   return resume_result_or_raise(co, source, effective)
 end
 
+--- Query the current low-level coroutine state.
+-- @return suspended, running, normal, stacked, or dead.
+-- @usage coroutines.md
 function Coroutine:status(): string
   local status = ffi.mco_status(self.handle)
   if status == ffi.MCO_SUSPENDED then
@@ -235,6 +254,11 @@ function Coroutine:status(): string
   return "dead"
 end
 
+--- Yield a value to the nearest active resumer with the same nonnil tag.
+-- @param arg Value delivered to the matching resumer.
+-- @param tag Explicit tag compared by raw equality.
+-- @return Value supplied when the matching suspended stack resumes.
+-- @usage coroutines.md
 function yield(arg: value, tag: value): value
   if tag == nil then
     missing_yield_tag()
@@ -244,6 +268,10 @@ function yield(arg: value, tag: value): value
   return yield_result_or_raise(co, tag)
 end
 
+--- Check whether an active resumer can receive the given nonnil tag.
+-- @param tag Explicit control-transfer tag.
+-- @return True when a matching tagged yield is possible.
+-- @usage coroutines.md
 function is_yieldable(tag: value): boolean
   if tag == nil then
     missing_yield_tag()
@@ -267,6 +295,11 @@ catch
   push_transfer(co, 0, error)
 end
 
+--- Create a suspended coroutine without running its function.
+-- @param func Coroutine body receiving its initial resume argument.
+-- @param default_tag Default nonnil resume tag, or nil to require explicit tags.
+-- @return Stable public Coroutine handle.
+-- @usage coroutines.md
 function create(func: function (value): (value), default_tag: value): Coroutine
   local top = ffi.lua_gettop(L)
   defer ffi.lua_settop(L, top)
@@ -308,6 +341,9 @@ function create(func: function (value): (value), default_tag: value): Coroutine
   return co
 end
 
+--- Return the innermost currently executing Titan coroutine.
+-- @return Exact public Coroutine handle, or nil outside Titan coroutine execution.
+-- @usage coroutines.md
 function running(): Coroutine?
   local coro = ffi.mco_get_user_data(runtime.current_co) as foreign *Udata
   if coro then

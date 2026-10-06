@@ -1,19 +1,33 @@
 -- Rows contain only copied Titan values. Their native execution can be gone
 -- before get/fill runs, and NULL cells never determine the column count.
+--- Binary SQLite cell bytes, distinct from a TEXT string.
+-- @field bytes Copied binary BLOB bytes.
+-- @usage standard-library-sqlite3.md#rows-and-mapping
 record Blob
   const bytes: string
 end
 
+--- Immutable column name and optional declared SQL type.
+-- @field name Received column name; duplicates are preserved.
+-- @field declared_type Declared SQL type text, or nil for expressions without one.
+-- @usage standard-library-sqlite3.md#rows-and-mapping
 record Column
   const name: string
   const declared_type: string?
 end
 
+--- A copied result row whose cells survive cursor and connection cleanup.
+-- @field columns Ordered immutable column metadata; its length includes SQL NULL cells.
+-- @usage standard-library-sqlite3.md#rows-and-mapping
 record Row
   const columns: const {Column}
   local const cells: const {value}
 end
 
+--- Return a cell at a one-based column index; SQL NULL becomes nil.
+-- @param i One-based public field, part, or column ordinal.
+-- @return Cell value; SQL NULL becomes nil and BLOB becomes Blob.
+-- @usage standard-library-sqlite3.md#rows-and-mapping
 function Row:get(i: integer): value
   if i < 1 or i > #self.columns then
     raise Error {
@@ -99,6 +113,9 @@ catch
   }
 end
 
+--- Fill an existing mutable record from matching public column names.
+-- @param target Mutable record with public fields matching all column names.
+-- @usage standard-library-sqlite3.md#rows-and-mapping
 function Row:fill(target: value)
   local inspected = reflect.inspect(target)
   case inspected

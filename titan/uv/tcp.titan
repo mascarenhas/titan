@@ -1,8 +1,18 @@
+--- Immutable native libuv TCP_IPV6ONLY flag or numeric constant.
+-- @usage uv/types.md#public-constants
 const TCP_IPV6ONLY: integer?
+--- Immutable native libuv TCP_REUSEPORT flag or numeric constant.
+-- @usage uv/types.md#public-constants
 const TCP_REUSEPORT: integer?
 
 
 
+--- Initialize TCP with native family-selection flags.
+-- @param loop Input initialized owning loop; accepted handles/requests retain it through retirement.
+-- @param handle Mutable final tcp_t owner in fresh or retired state, before this native initialization; successful initialization establishes a close obligation.
+-- @param flags Input integer value; checked native narrowing occurs before native ownership is accepted.
+-- @return Native integer result with the documented lifetime and units.
+-- @usage uv/functions/tcp.md#tcp_init_ex
 function tcp_init_ex(loop: loop_t, handle: tcp_t, flags: integer): integer
   local native_flags = flags as foreign unsigned int
   if not loop.initialized or handle.phase == HANDLE_LIVE then return ffi.UV_EINVAL end
@@ -15,22 +25,43 @@ function tcp_init_ex(loop: loop_t, handle: tcp_t, flags: integer): integer
   return status
 end
 
+--- Initialize a TCP owner; native socket creation may be deferred until bind, connect, or adoption.
+-- @param loop Input initialized owning loop; accepted handles/requests retain it through retirement.
+-- @param handle Mutable final tcp_t owner in fresh or retired state, before this native initialization; successful initialization establishes a close obligation.
+-- @return Native integer result with the documented lifetime and units.
+-- @usage uv/functions/tcp.md#tcp_init
 function tcp_init(loop: loop_t, handle: tcp_t): integer
   return tcp_init_ex(loop, handle, ffi.AF_UNSPEC as integer)
 end
 
+--- Adopt an existing native socket into this TCP owner.
+-- @param handle Mutable initialized tcp_t owner/view; mutations preserve its single owner and reserved native data slot; close completion ends native handle lifetime.
+-- @param socket Input exact-width borrowed native identifier token; collecting the token never closes/adopts its resource; see this operation's transfer rule.
+-- @return Native integer result with the documented lifetime and units.
+-- @usage uv/functions/tcp.md#tcp_open
 function tcp_open(handle: tcp_t, socket: os_sock_t): integer
   local native_socket = socket.native
   if not handle:valid() then return ffi.UV_EINVAL end
   return ffi.uv_tcp_open(handle.native, native_socket)
 end
 
+--- Enable or disable TCP_NODELAY, controlling Nagle's algorithm; a nonzero enable value selects the native enabled state.
+-- @param handle Mutable initialized tcp_t owner/view; mutations preserve its single owner and reserved native data slot; close completion ends native handle lifetime.
+-- @param enable Input integer value; checked native narrowing occurs before native ownership is accepted.
+-- @return Native integer result with the documented lifetime and units.
+-- @usage uv/functions/tcp.md#tcp_nodelay
 function tcp_nodelay(handle: tcp_t, enable: integer): integer
   local native_enable = enable as foreign int
   if not handle:valid() then return ffi.UV_EINVAL end
   return ffi.uv_tcp_nodelay(handle.native, native_enable)
 end
 
+--- Enable/disable TCP keepalive and set its idle delay in seconds.
+-- @param handle Mutable initialized tcp_t owner/view; mutations preserve its single owner and reserved native data slot; close completion ends native handle lifetime.
+-- @param enable Input integer value; checked native narrowing occurs before native ownership is accepted.
+-- @param delay Input integer value; checked native narrowing occurs before native ownership is accepted.
+-- @return Native integer result with the documented lifetime and units.
+-- @usage uv/functions/tcp.md#tcp_keepalive
 function tcp_keepalive(handle: tcp_t, enable: integer, delay: integer): integer
   local native_enable = enable as foreign int
   local native_delay = delay as foreign unsigned int
@@ -38,6 +69,14 @@ function tcp_keepalive(handle: tcp_t, enable: integer, delay: integer): integer
   return ffi.uv_tcp_keepalive(handle.native, native_enable, native_delay)
 end
 
+--- Configure TCP keepalive with idle seconds, interval seconds, and probe count when enabled.
+-- @param handle Mutable initialized tcp_t owner/view; mutations preserve its single owner and reserved native data slot; close completion ends native handle lifetime.
+-- @param on Input integer value; checked native narrowing occurs before native ownership is accepted.
+-- @param idle Input integer value; checked native narrowing occurs before native ownership is accepted.
+-- @param intvl Input integer value; checked native narrowing occurs before native ownership is accepted.
+-- @param count Input integer value; checked native narrowing occurs before native ownership is accepted.
+-- @return Native integer result with the documented lifetime and units.
+-- @usage uv/functions/tcp.md#tcp_keepalive_ex
 function tcp_keepalive_ex(handle: tcp_t, on: integer, idle: integer,
                           intvl: integer, count: integer): integer
   local native_on = on as foreign int
@@ -49,12 +88,23 @@ function tcp_keepalive_ex(handle: tcp_t, on: integer, idle: integer,
                                  native_interval, native_count)
 end
 
+--- Enable or disable native simultaneous accept behavior.
+-- @param handle Mutable initialized tcp_t owner/view; mutations preserve its single owner and reserved native data slot; close completion ends native handle lifetime.
+-- @param enable Input integer value; checked native narrowing occurs before native ownership is accepted.
+-- @return Native integer result with the documented lifetime and units.
+-- @usage uv/functions/tcp.md#tcp_simultaneous_accepts
 function tcp_simultaneous_accepts(handle: tcp_t, enable: integer): integer
   local native_enable = enable as foreign int
   if not handle:valid() then return ffi.UV_EINVAL end
   return ffi.uv_tcp_simultaneous_accepts(handle.native, native_enable)
 end
 
+--- Bind TCP to the typed local address.
+-- @param handle Mutable initialized tcp_t owner/view; mutations preserve its single owner and reserved native data slot; close completion ends native handle lifetime.
+-- @param addr Input complete typed address owner; no sockaddr pointer/header required; constructor/accessors encode family/port/bytes.
+-- @param flags Input integer value; checked native narrowing occurs before native ownership is accepted.
+-- @return Native integer result with the documented lifetime and units.
+-- @usage uv/functions/tcp.md#tcp_bind
 function tcp_bind(handle: tcp_t, addr: sockaddr_t, flags: integer): integer
   local native_flags = flags as foreign unsigned int
   local native_addr = addr:pointer()
@@ -62,6 +112,12 @@ function tcp_bind(handle: tcp_t, addr: sockaddr_t, flags: integer): integer
   return ffi.uv_tcp_bind(handle.native, native_addr, native_flags)
 end
 
+--- Return `(status, copied_local_address?, native_length)` for the socket's bound endpoint.
+-- @param handle Mutable initialized tcp_t owner/view; mutations preserve its single owner and reserved native data slot; close completion ends native handle lifetime.
+-- @return Native status: zero on success, a negative libuv error on failure.
+-- @return Copied or retained sockaddr_t result, or nil on failure or absence.
+-- @return Native operation result or submission status; negative values report libuv errors.
+-- @usage uv/functions/tcp.md#tcp_getsockname
 function tcp_getsockname(handle: tcp_t): (integer, sockaddr_t?, integer)
   if not handle:valid() then return ffi.UV_EINVAL, nil, 0 end
   local native = foreign sockaddr_storage.new()
@@ -72,6 +128,12 @@ function tcp_getsockname(handle: tcp_t): (integer, sockaddr_t?, integer)
   return status, sockaddr_copy_sized(native as foreign const *sockaddr, size[0] as integer), size[0] as integer
 end
 
+--- Return `(status, copied_peer_address?, native_length)` for the connected peer.
+-- @param handle Mutable initialized tcp_t owner/view; mutations preserve its single owner and reserved native data slot; close completion ends native handle lifetime.
+-- @return Native status: zero on success, a negative libuv error on failure.
+-- @return Copied or retained sockaddr_t result, or nil on failure or absence.
+-- @return Native operation result or submission status; negative values report libuv errors.
+-- @usage uv/functions/tcp.md#tcp_getpeername
 function tcp_getpeername(handle: tcp_t): (integer, sockaddr_t?, integer)
   if not handle:valid() then return ffi.UV_EINVAL, nil, 0 end
   local native = foreign sockaddr_storage.new()
@@ -82,6 +144,11 @@ function tcp_getpeername(handle: tcp_t): (integer, sockaddr_t?, integer)
   return status, sockaddr_copy_sized(native as foreign const *sockaddr, size[0] as integer), size[0] as integer
 end
 
+--- Close TCP with a reset and an optional close callback.
+-- @param handle Mutable initialized tcp_t owner/view; mutations preserve its single owner and reserved native data slot; close completion ends native handle lifetime.
+-- @param callback Input ordinary callable, retained until the promised callback interval ends; callback argument owners are borrowed views retained through callback return.
+-- @return Native integer result with the documented lifetime and units.
+-- @usage uv/functions/tcp.md#tcp_close_reset
 function tcp_close_reset(handle: tcp_t, callback: (function (handle_t): ())?): integer
   if not handle:valid() then return ffi.UV_EINVAL end
   local old_callback? = handle.close_callback
@@ -91,6 +158,13 @@ function tcp_close_reset(handle: tcp_t, callback: (function (handle_t): ())?): i
   return status
 end
 
+--- Submit a connection attempt to a typed peer address.
+-- @param req Mutable allocated nonpending request owner; accepted submission retains owner until its terminal callback returns; rejection owes no async callback.
+-- @param handle Mutable initialized tcp_t owner/view; mutations preserve its single owner and reserved native data slot; close completion ends native handle lifetime.
+-- @param addr Input complete typed address owner; no sockaddr pointer/header required; constructor/accessors encode family/port/bytes.
+-- @param callback Input ordinary callable, retained until the promised callback interval ends; callback argument owners are borrowed views retained through callback return.
+-- @return Native integer result with the documented lifetime and units.
+-- @usage uv/functions/tcp.md#tcp_connect
 function tcp_connect(req: connect_t, handle: tcp_t, addr: sockaddr_t,
                        callback: connect_cb): integer
   if req.pending then return ffi.UV_EBUSY end
@@ -116,6 +190,15 @@ function tcp_connect(req: connect_t, handle: tcp_t, addr: sockaddr_t,
   return status
 end
 
+--- Start a pipe connect with explicit name length and flags.
+-- @param req Mutable allocated nonpending request owner; accepted submission retains owner until its terminal callback returns; rejection owes no async callback.
+-- @param handle Mutable initialized pipe_t owner/view; mutations preserve its single owner and reserved native data slot; close completion ends native handle lifetime.
+-- @param name Input immutable text/byte owner; native C-string conventions apply where the operation takes text.
+-- @param namelen Input integer value; checked native narrowing occurs before native ownership is accepted.
+-- @param flags Input integer value; checked native narrowing occurs before native ownership is accepted.
+-- @param callback Input ordinary callable, retained until the promised callback interval ends; callback argument owners are borrowed views retained through callback return.
+-- @return Native integer result with the documented lifetime and units.
+-- @usage uv/functions/pipe.md#pipe_connect2
 function pipe_connect2(req: connect_t, handle: pipe_t, name: string,
                         namelen: integer, flags: integer, callback: connect_cb): integer
   if req.pending then return ffi.UV_EBUSY end
@@ -144,6 +227,12 @@ function pipe_connect2(req: connect_t, handle: pipe_t, name: string,
   return status
 end
 
+--- Start the legacy void-returning pipe connect.
+-- @param req Mutable allocated nonpending request owner; accepted submission retains owner until its terminal callback returns; rejection owes no async callback.
+-- @param handle Mutable initialized pipe_t owner/view; mutations preserve its single owner and reserved native data slot; close completion ends native handle lifetime.
+-- @param name Input immutable text/byte owner; native C-string conventions apply where the operation takes text.
+-- @param callback Input ordinary callable, retained until the promised callback interval ends; callback argument owners are borrowed views retained through callback return.
+-- @usage uv/functions/pipe.md#pipe_connect
 function pipe_connect(req: connect_t, handle: pipe_t, name: string, callback: connect_cb)
   if req.pending then raise "connect request is pending" end
   if not handle:valid() then raise "pipe is not initialized" end

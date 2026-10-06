@@ -90,6 +90,25 @@ release. Do not bump this marker for prerelease compiler/language-server work.
 The generated-code ABI and persisted cache schemas are separate contracts;
 change them only when their own compatibility rules require it.
 
+## Native validation profile
+
+`TITAN_BUILD_PROFILE=production` is the unset ordinary build/install default:
+O3 with fat LTO on Linux. Repository test entry points select `validation`,
+which uses O0/no LTO for Titan runtime, provider, most native dependencies,
+generated test objects and fresh child compilers. Lua, LPegLabel (both compiler
+and private payload) and Lua filesystem stay at O2/no LTO; sanitizer host/parser
+components use O1/no LTO with complete instrumentation. `make luarocks`
+reconciles those compiler dependencies through an exact content/flags receipt. Keep SDK prefixes separate; implicit Unix
+tests use `.lua-validation`, while an explicit PREFIX remains caller-owned.
+`make test` prepares/reinstalls that SDK and cold `make rock-test` re-enters the
+complete preparation. Leaf test build/run targets need a prepared selected SDK.
+Inspect `etc/titan/build-profile` and effective argv for validation evidence.
+All profile-bearing configurations and native CI caches include profile identity.
+The tiny default/LTO compiler smoke clears validation flags and exercises the
+unchanged production defaults. Serialize builds sharing source-adjacent outputs,
+or give concurrent builds separate source copies. See
+[build profiles](doc/language/build-profiles.md).
+
 ## Prerequisites (important — the suite cannot run without these)
 
 - **Lua 5.5.** Both the compiler's own Lua code and generated C target Lua
@@ -143,9 +162,9 @@ change them only when their own compatibility rules require it.
   `gh workflow run macos.yml --ref <branch>`. The separate
   `macos.yml` workflow is manual-only; `ci.yml` runs Linux jobs on pushes.
   The regular push graph has exactly three standard `ubuntu-24.04` jobs. The
-  stdlib producer has 45 minutes for its optimized build, complete runtime suite,
+  stdlib producer has 45 minutes for its validation build, complete runtime suite,
   and both production dependency smokes; the compiler consumer retains 30 minutes. The
-  independent sanitizer has 35 minutes so a cold native-dependency cache miss
+  independent sanitizer has 75 minutes so a cold native-dependency cache miss
   remains a valid build under the same two-CPU bound. Linux jobs export
   `MAKEFLAGS=-j2` and `TITAN_JOBS=2`, matching the two CPUs on standard private-repository
   hosted runners; the macOS job
@@ -186,20 +205,21 @@ change them only when their own compatibility rules require it.
   aggregate native Titan suite also remains one fast executable.
 
   1. `test-linux-stdlib` is the prepared-tree producer. It prepares a clean
-     ABI-2 prefix, builds and installs the optimized bundled-OpenSSL provider, and
+     ABI-2 prefix, builds and installs an isolated O0/no-LTO bundled-OpenSSL validation provider, and
      packs the complete prepared tree before tests or a system-OpenSSL reinstall.
      It then runs, without LuaCov, the retained root build/runtime/packaging
      specs and the one 27-root native stdlib executable through `make
      stdlib-test`; there are no standard-library Lua boundary specs.
-     Disposable generated fixtures and test objects use `-O0`; purpose-built
-     native harnesses retain their explicit flags, and the provider packed for
-     consumers remains optimized. After the uncovered tests it builds the
+     The provider, runtime, native payload, generated fixtures and test objects
+     use `TITAN_BUILD_PROFILE=validation` (`-O0 -fno-lto` at compile and link).
+     Native caches include profile identity; the tiny default/LTO compiler
+     smoke retains the optimized shipping contract. After the uncovered tests it builds the
      child-process fixture, runs the bundled-OpenSSL production smoke, reinstalls the
      source rock with system OpenSSL at `-O0`, reruns only the two
      mode-dependent SDK-layout/external-DSO promotion cases from
-     `rockspec_spec.lua`, and runs the full system production smoke with
-     optimized consumers. The bundled smoke and packed canonical provider also
-     remain optimized. It uploads the already packed artifact only after both
+     `rockspec_spec.lua`, and runs the full system dependency-mode smoke with
+     validation consumers. The packed canonical provider also remains
+     validation; ordinary build/install defaults stay production. It uploads the already packed artifact only after both
      OpenSSL modes pass. Never repack the live system-OpenSSL tree.
   2. `test-linux-compiler` is the sole regular-artifact consumer. It needs the
      stdlib producer, restores that full tree on the same x86_64 Ubuntu target,
@@ -284,10 +304,9 @@ change them only when their own compatibility rules require it.
   reports physical C context only after saved/shadow function bytes, names,
   sizes, addresses, and `.text` membership agree; symbolization is
   section-relative to `.text` and must name the exact private shadow path. Any
-  mismatch leaves context unavailable rather than guessing. Lua,
-  libbacktrace, and libuv compile with sanitizer instrumentation at `-O1`; the
-  much larger generated Titan images and disposable fixtures use the same
-  instrumentation at `-O0`.
+  mismatch leaves context unavailable rather than guessing. Lua and its compiler dependencies use fully instrumented `-O1`; libbacktrace,
+  libuv, generated Titan images and disposable fixtures use fully instrumented
+  `-O0`. LTO remains disabled throughout.
 
   The cold `test-macos` job remains a dispatch-only fallback for the complete
   macOS pre-merge gate. A complete equivalent local VM run satisfies that gate;
@@ -303,7 +322,7 @@ change them only when their own compatibility rules require it.
   the bundled/system OpenSSL production smokes. Keep the real x86_64/arm64 universal
   Mach-O archive lookup and repackaging proof here rather than replacing it
   with a host-only synthetic check. The complete macOS run, including both
-  OpenSSL modes, remains optimized. Compiler and language specs must not delete
+  OpenSSL modes, uses the validation profile. Compiler and language specs must not delete
   the shared checkout runtime archive merely to force recompilation; Make owns
   that dependency state. The coroutine suite is the isolated restoration
   exception described below.
@@ -680,8 +699,8 @@ native executable. There are no per-suite native scripts, named host group
 selectors, root standard-library boundary specs, or Busted wrappers around
 Titan cases. `run_with_timeout.sh` gives the
 executable its own Bash process group, enforces a bounded deadline with
-`TERM`/`KILL`, and preserves its exit status. The default 300-second suite
-budget includes fresh child-fixture compilation under O3/Linux LTO;
+`TERM`/`KILL`, and preserves its exit status. The default 600-second suite
+budget includes fresh child-fixture compilation in the selected validation profile;
 `TITAN_TEST_TIMEOUT` overrides it, and focused CI shutdown checks retain their
 explicit 15-second limit. The Make recipe streams merged
 stdout/stderr through a pipe rather than a regular file, preserving the parent

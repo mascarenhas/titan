@@ -14,6 +14,7 @@ local function bind_qualified_type(node, module_decl, module_type, target,
         name = node.name,
         type = target,
         islocal = islocal and true or false,
+        _documentation = module_type._type_documentation and module_type._type_documentation[node.name],
     }
 end
 

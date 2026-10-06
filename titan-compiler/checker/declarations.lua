@@ -1,4 +1,5 @@
 local core = require "titan-compiler.checker.core"
+local documentation = require "titan-compiler.documentation"
 local _ENV = core
 
 --
@@ -1597,6 +1598,7 @@ end
 function visit_toplevel(node, st, errors, loader)
     st.current_toplevel_order = node._toplevel_order
     toplevel_visitor(node, st, errors, loader)
+    documentation.bind_declaration(node)
     st.current_toplevel_order = nil
 end
 

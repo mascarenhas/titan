@@ -3,6 +3,10 @@ foreign type UDPAllocEntry = function (*lua_State, *Udata, *CClosure, *Udata, *U
 foreign type UDPRecvEntry = function (*lua_State, *Udata, *CClosure, *Udata, *Udata, ssize_t, const *uv_buf_t, const *sockaddr, unsigned int): void
 foreign type UDPSendEntry = function (*lua_State, *Udata, *CClosure, *Udata, *Udata, int): void
 
+--- Tagged membership values for native operations.
+-- @field LEAVE_GROUP Leave group variant.
+-- @field JOIN_GROUP Join group variant.
+-- @usage uv/types.md#membership
 union membership
   LEAVE_GROUP()
   JOIN_GROUP()
@@ -15,15 +19,33 @@ local function membership_native(member: membership): foreign uv_membership
   end
 end
 
+--- Immutable native libuv UDP_IPV6ONLY flag or numeric constant.
+-- @usage uv/types.md#public-constants
 const UDP_IPV6ONLY: integer?
+--- Immutable native libuv UDP_PARTIAL flag or numeric constant.
+-- @usage uv/types.md#public-constants
 const UDP_PARTIAL: integer?
+--- Immutable native libuv UDP_REUSEADDR flag or numeric constant.
+-- @usage uv/types.md#public-constants
 const UDP_REUSEADDR: integer?
+--- Immutable native libuv UDP_MMSG_CHUNK flag or numeric constant.
+-- @usage uv/types.md#public-constants
 const UDP_MMSG_CHUNK: integer?
+--- Immutable native libuv UDP_MMSG_FREE flag or numeric constant.
+-- @usage uv/types.md#public-constants
 const UDP_MMSG_FREE: integer?
+--- Immutable native libuv UDP_LINUX_RECVERR flag or numeric constant.
+-- @usage uv/types.md#public-constants
 const UDP_LINUX_RECVERR: integer?
+--- Immutable native libuv UDP_REUSEPORT flag or numeric constant.
+-- @usage uv/types.md#public-constants
 const UDP_REUSEPORT: integer?
+--- Immutable native libuv UDP_RECVMMSG flag or numeric constant.
+-- @usage uv/types.md#public-constants
 const UDP_RECVMMSG: integer?
 
+--- Concrete udp handle owner; initialize before use and close explicitly.
+-- @usage uv/types.md#udp_t
 record udp_t
   local native: foreign uv_udp_t
   local phase: integer
@@ -38,6 +60,8 @@ record udp_t
   local userdata: value
 end
 
+--- Reusable native udp send request owner retained through accepted completion.
+-- @usage uv/types.md#udp_send_t
 record udp_send_t
   local native: foreign uv_udp_send_t
   local loop: loop_t?
@@ -192,6 +216,9 @@ foreign function udp_send_callback(native: *uv_udp_send_t, status: int)
   ffi.lua_settop(L, top)
 end
 
+--- Allocate a concrete handle owner without initializing its native lifetime.
+-- @return Native udp_t result with the documented lifetime and units.
+-- @usage uv/supplemental.md#udp_tnew
 function udp_t.new(): udp_t
   local native = foreign uv_udp_t.new()
   return {native = native, phase = HANDLE_FRESH, loop = nil,
@@ -200,6 +227,9 @@ function udp_t.new(): udp_t
           recv_handler = udp_receive, close_handler = udp_closed, userdata = nil}
 end
 
+--- Return a tagged view of the same concrete owner.
+-- @return Native handle_t result with the documented lifetime and units.
+-- @usage uv/supplemental.md#udp_tas_handle_t
 function udp_t:as_handle_t(): handle_t
   return handle_t.udp(self)
 end
@@ -208,6 +238,12 @@ local function udp_t:usable(): boolean
   return self.phase == HANDLE_LIVE and ffi.uv_is_closing(self.native as foreign *uv_handle_t) == 0
 end
 
+--- Initialize UDP with native family/receive-mode flags, including recvmmsg where supported.
+-- @param loop Input initialized owning loop; accepted handles/requests retain it through retirement.
+-- @param handle Mutable final udp_t owner in fresh or retired state, before this native initialization; successful initialization establishes a close obligation.
+-- @param flags Input integer value; checked native narrowing occurs before native ownership is accepted.
+-- @return Native integer result with the documented lifetime and units.
+-- @usage uv/functions/udp.md#udp_init_ex
 function udp_init_ex(loop: loop_t, handle: udp_t, flags: integer): integer
   if not loop.initialized or handle.phase == HANDLE_LIVE then return ffi.UV_EINVAL end
   local native_flags = flags as foreign unsigned int
@@ -220,16 +256,32 @@ function udp_init_ex(loop: loop_t, handle: udp_t, flags: integer): integer
   return status
 end
 
+--- Initialize a UDP handle; bind/connect/send can later create or select its socket.
+-- @param loop Input initialized owning loop; accepted handles/requests retain it through retirement.
+-- @param handle Mutable final udp_t owner in fresh or retired state, before this native initialization; successful initialization establishes a close obligation.
+-- @return Native integer result with the documented lifetime and units.
+-- @usage uv/functions/udp.md#udp_init
 function udp_init(loop: loop_t, handle: udp_t): integer
   return udp_init_ex(loop, handle, 0)
 end
 
+--- Adopt an existing socket into a UDP handle.
+-- @param handle Mutable initialized udp_t owner/view; mutations preserve its single owner and reserved native data slot; close completion ends native handle lifetime.
+-- @param socket Input exact-width borrowed native identifier token; collecting the token never closes/adopts its resource; see this operation's transfer rule.
+-- @return Native integer result with the documented lifetime and units.
+-- @usage uv/functions/udp.md#udp_open
 function udp_open(handle: udp_t, socket: os_sock_t): integer
   if not handle:usable() then return ffi.UV_EINVAL end
   local native_socket = socket.native
   return ffi.uv_udp_open(handle.native, native_socket)
 end
 
+--- Adopt an existing UDP socket with the explicit native adoption flags.
+-- @param handle Mutable initialized udp_t owner/view; mutations preserve its single owner and reserved native data slot; close completion ends native handle lifetime.
+-- @param socket Input exact-width borrowed native identifier token; collecting the token never closes/adopts its resource; see this operation's transfer rule.
+-- @param flags Input integer value; checked native narrowing occurs before native ownership is accepted.
+-- @return Native integer result with the documented lifetime and units.
+-- @usage uv/functions/udp.md#udp_open_ex
 function udp_open_ex(handle: udp_t, socket: os_sock_t, flags: integer): integer
   if not handle:usable() then return ffi.UV_EINVAL end
   local native_socket = socket.native
@@ -237,6 +289,12 @@ function udp_open_ex(handle: udp_t, socket: os_sock_t, flags: integer): integer
   return ffi.uv_udp_open_ex(handle.native, native_socket, native_flags)
 end
 
+--- Bind a UDP handle to a typed local address with the requested binding flags.
+-- @param handle Mutable initialized udp_t owner/view; mutations preserve its single owner and reserved native data slot; close completion ends native handle lifetime.
+-- @param address Input complete typed address owner; no sockaddr pointer/header required; constructor/accessors encode family/port/bytes.
+-- @param flags Input integer value; checked native narrowing occurs before native ownership is accepted.
+-- @return Native integer result with the documented lifetime and units.
+-- @usage uv/functions/udp.md#udp_bind
 function udp_bind(handle: udp_t, address: sockaddr_t, flags: integer): integer
   if not handle:usable() then return ffi.UV_EINVAL end
   local native_flags = flags as foreign unsigned int
@@ -244,6 +302,11 @@ function udp_bind(handle: udp_t, address: sockaddr_t, flags: integer): integer
   return ffi.uv_udp_bind(handle.native, native_address, native_flags)
 end
 
+--- Set a default UDP peer; nil disconnects that peer according to native semantics.
+-- @param handle Mutable initialized udp_t owner/view; mutations preserve its single owner and reserved native data slot; close completion ends native handle lifetime.
+-- @param address Input complete typed address owner; no sockaddr pointer/header required; constructor/accessors encode family/port/bytes.
+-- @return Native integer result with the documented lifetime and units.
+-- @usage uv/functions/udp.md#udp_connect
 function udp_connect(handle: udp_t, address: sockaddr_t?): integer
   if not handle:usable() then return ffi.UV_EINVAL end
   local native_address: foreign *sockaddr = nil
@@ -251,6 +314,12 @@ function udp_connect(handle: udp_t, address: sockaddr_t?): integer
   return ffi.uv_udp_connect(handle.native, native_address)
 end
 
+--- Return `(status, copied_peer_address?, native_length)` for the connected peer.
+-- @param handle Mutable initialized udp_t owner/view; mutations preserve its single owner and reserved native data slot; close completion ends native handle lifetime.
+-- @return Native status: zero on success, a negative libuv error on failure.
+-- @return Copied or retained sockaddr_t result, or nil on failure or absence.
+-- @return Native operation result or submission status; negative values report libuv errors.
+-- @usage uv/functions/udp.md#udp_getpeername
 function udp_getpeername(handle: udp_t): (integer, sockaddr_t?, integer)
   if not handle:usable() then return ffi.UV_EINVAL, nil, 0 end
   local native = foreign sockaddr_storage.new()
@@ -261,6 +330,12 @@ function udp_getpeername(handle: udp_t): (integer, sockaddr_t?, integer)
   return status, sockaddr_copy_sized(native as foreign const *sockaddr, length[0] as integer), length[0] as integer
 end
 
+--- Return `(status, copied_local_address?, native_length)` for the socket's bound endpoint.
+-- @param handle Mutable initialized udp_t owner/view; mutations preserve its single owner and reserved native data slot; close completion ends native handle lifetime.
+-- @return Native status: zero on success, a negative libuv error on failure.
+-- @return Copied or retained sockaddr_t result, or nil on failure or absence.
+-- @return Native operation result or submission status; negative values report libuv errors.
+-- @usage uv/functions/udp.md#udp_getsockname
 function udp_getsockname(handle: udp_t): (integer, sockaddr_t?, integer)
   if not handle:usable() then return ffi.UV_EINVAL, nil, 0 end
   local native = foreign sockaddr_storage.new()
@@ -271,6 +346,13 @@ function udp_getsockname(handle: udp_t): (integer, sockaddr_t?, integer)
   return status, sockaddr_copy_sized(native as foreign const *sockaddr, length[0] as integer), length[0] as integer
 end
 
+--- Join or leave a multicast group using the typed membership value and an optional interface address.
+-- @param handle Mutable initialized udp_t owner/view; mutations preserve its single owner and reserved native data slot; close completion ends native handle lifetime.
+-- @param multicast_addr Input immutable text/byte owner; native C-string conventions apply where the operation takes text.
+-- @param interface_addr Input immutable text/byte owner; native C-string conventions apply where the operation takes text.
+-- @param member Input membership value.
+-- @return Native integer result with the documented lifetime and units.
+-- @usage uv/functions/udp.md#udp_set_membership
 function udp_set_membership(handle: udp_t, multicast_addr: string,
                             interface_addr: string?, member: membership): integer
   if not handle:usable() then return ffi.UV_EINVAL end
@@ -280,6 +362,14 @@ function udp_set_membership(handle: udp_t, multicast_addr: string,
   return ffi.uv_udp_set_membership(handle.native, multicast_addr, native_interface, native_member)
 end
 
+--- Join or leave a source-specific multicast group; group, interface and source strings identify the membership.
+-- @param handle Mutable initialized udp_t owner/view; mutations preserve its single owner and reserved native data slot; close completion ends native handle lifetime.
+-- @param multicast_addr Input immutable text/byte owner; native C-string conventions apply where the operation takes text.
+-- @param interface_addr Input immutable text/byte owner; native C-string conventions apply where the operation takes text.
+-- @param source_addr Input immutable text/byte owner; native C-string conventions apply where the operation takes text.
+-- @param member Input membership value.
+-- @return Native integer result with the documented lifetime and units.
+-- @usage uv/functions/udp.md#udp_set_source_membership
 function udp_set_source_membership(handle: udp_t, multicast_addr: string,
                                    interface_addr: string?, source_addr: string,
                                    member: membership): integer
@@ -290,6 +380,11 @@ function udp_set_source_membership(handle: udp_t, multicast_addr: string,
   return ffi.uv_udp_set_source_membership(handle.native, multicast_addr, native_interface, source_addr, native_member)
 end
 
+--- Select the interface used for outbound multicast; nil selects native default behavior.
+-- @param handle Mutable initialized udp_t owner/view; mutations preserve its single owner and reserved native data slot; close completion ends native handle lifetime.
+-- @param interface_addr Input immutable text/byte owner; native C-string conventions apply where the operation takes text.
+-- @return Native integer result with the documented lifetime and units.
+-- @usage uv/functions/udp.md#udp_set_multicast_interface
 function udp_set_multicast_interface(handle: udp_t, interface_addr: string?): integer
   if not handle:usable() then return ffi.UV_EINVAL end
   local native_interface: foreign const *char = nil
@@ -297,30 +392,53 @@ function udp_set_multicast_interface(handle: udp_t, interface_addr: string?): in
   return ffi.uv_udp_set_multicast_interface(handle.native, native_interface)
 end
 
+--- Enable or disable loopback of outbound multicast datagrams to local receivers.
+-- @param handle Mutable initialized udp_t owner/view; mutations preserve its single owner and reserved native data slot; close completion ends native handle lifetime.
+-- @param on Input integer value; checked native narrowing occurs before native ownership is accepted.
+-- @return Native integer result with the documented lifetime and units.
+-- @usage uv/functions/udp.md#udp_set_multicast_loop
 function udp_set_multicast_loop(handle: udp_t, on: integer): integer
   if not handle:usable() then return ffi.UV_EINVAL end
   local native_value = on as foreign int
   return ffi.uv_udp_set_multicast_loop(handle.native, native_value)
 end
 
+--- Set the multicast hop limit/TTL using the native accepted range.
+-- @param handle Mutable initialized udp_t owner/view; mutations preserve its single owner and reserved native data slot; close completion ends native handle lifetime.
+-- @param ttl Input integer value; checked native narrowing occurs before native ownership is accepted.
+-- @return Native integer result with the documented lifetime and units.
+-- @usage uv/functions/udp.md#udp_set_multicast_ttl
 function udp_set_multicast_ttl(handle: udp_t, ttl: integer): integer
   if not handle:usable() then return ffi.UV_EINVAL end
   local native_value = ttl as foreign int
   return ffi.uv_udp_set_multicast_ttl(handle.native, native_value)
 end
 
+--- Enable or disable broadcast transmission.
+-- @param handle Mutable initialized udp_t owner/view; mutations preserve its single owner and reserved native data slot; close completion ends native handle lifetime.
+-- @param on Input integer value; checked native narrowing occurs before native ownership is accepted.
+-- @return Native integer result with the documented lifetime and units.
+-- @usage uv/functions/udp.md#udp_set_broadcast
 function udp_set_broadcast(handle: udp_t, on: integer): integer
   if not handle:usable() then return ffi.UV_EINVAL end
   local native_value = on as foreign int
   return ffi.uv_udp_set_broadcast(handle.native, native_value)
 end
 
+--- Set the unicast datagram hop limit/TTL using the native accepted range.
+-- @param handle Mutable initialized udp_t owner/view; mutations preserve its single owner and reserved native data slot; close completion ends native handle lifetime.
+-- @param ttl Input integer value; checked native narrowing occurs before native ownership is accepted.
+-- @return Native integer result with the documented lifetime and units.
+-- @usage uv/functions/udp.md#udp_set_ttl
 function udp_set_ttl(handle: udp_t, ttl: integer): integer
   if not handle:usable() then return ffi.UV_EINVAL end
   local native_value = ttl as foreign int
   return ffi.uv_udp_set_ttl(handle.native, native_value)
 end
 
+--- Allocate a fresh request owner without submitting work.
+-- @return Native udp_send_t result with the documented lifetime and units.
+-- @usage uv/supplemental.md#udp_send_tnew
 function udp_send_t.new(): udp_send_t
   local native = foreign uv_udp_send_t.new()
   return {native = native, loop = nil, pending = false, handle = nil,
@@ -328,14 +446,28 @@ function udp_send_t.new(): udp_send_t
           handler = udp_sent, userdata = nil}
 end
 
+--- Return a tagged view of the same concrete owner.
+-- @return Native req_t result with the documented lifetime and units.
+-- @usage uv/supplemental.md#udp_send_tas_req_t
 function udp_send_t:as_req_t(): req_t
   return req_t.udp_send(self)
 end
 
+--- Return the retained stream/handle association for this request, or nil when none is recorded.
+-- @return Copied or retained udp_t result, or nil on failure or absence.
+-- @usage uv/supplemental.md#udp_send_tget_handle
 function udp_send_t:get_handle(): udp_t?
   return self.handle
 end
 
+--- Submit one datagram from a nonempty buffer vector.
+-- @param request Mutable allocated nonpending request owner; accepted submission retains owner until its terminal callback returns; rejection owes no async callback.
+-- @param handle Mutable initialized udp_t owner/view; mutations preserve its single owner and reserved native data slot; close completion ends native handle lifetime.
+-- @param buffers Input byte owner or vector; immutable strings are valid only for input; async submission snapshots descriptors and retains owners, so Array edits cannot alter accepted I/O; do not mutate borrowed byte contents before completion.
+-- @param address Input complete typed address owner; no sockaddr pointer/header required; constructor/accessors encode family/port/bytes.
+-- @param callback Input ordinary callable, retained until the promised callback interval ends; callback argument owners are borrowed views retained through callback return.
+-- @return Native integer result with the documented lifetime and units.
+-- @usage uv/functions/udp.md#udp_send
 function udp_send(request: udp_send_t, handle: udp_t, buffers: {buf_t},
                   address: sockaddr_t?, callback: (function (udp_send_t, integer): ())?): integer
   if request.pending then return ffi.UV_EBUSY end
@@ -372,6 +504,12 @@ function udp_send(request: udp_send_t, handle: udp_t, buffers: {buf_t},
   return result
 end
 
+--- Send one datagram immediately without queuing a request.
+-- @param handle Mutable initialized udp_t owner/view; mutations preserve its single owner and reserved native data slot; close completion ends native handle lifetime.
+-- @param buffers Input byte owner or vector; immutable strings are valid only for input; async submission snapshots descriptors and retains owners, so Array edits cannot alter accepted I/O; do not mutate borrowed byte contents before completion.
+-- @param address Input complete typed address owner; no sockaddr pointer/header required; constructor/accessors encode family/port/bytes.
+-- @return Native integer result with the documented lifetime and units.
+-- @usage uv/functions/udp.md#udp_try_send
 function udp_try_send(handle: udp_t, buffers: {buf_t}, address: sockaddr_t?): integer
   if not handle:usable() then return ffi.UV_EINVAL end
   local status, native?, retained? = fs_buffer_snapshot(buffers, false)
@@ -383,6 +521,13 @@ function udp_try_send(handle: udp_t, buffers: {buf_t}, address: sockaddr_t?): in
   return ffi.uv_udp_try_send(handle.native, native_data, native_count, native_address)
 end
 
+--- Immediately send a nonempty batch of datagrams using parallel buffer/address Arrays.
+-- @param handle Mutable initialized udp_t owner/view; mutations preserve its single owner and reserved native data slot; close completion ends native handle lifetime.
+-- @param buffers Input byte owner or vector; immutable strings are valid only for input; async submission snapshots descriptors and retains owners, so Array edits cannot alter accepted I/O; do not mutate borrowed byte contents before completion.
+-- @param addresses Input complete typed address owner; no sockaddr pointer/header required; constructor/accessors encode family/port/bytes.
+-- @param flags Input integer value; checked native narrowing occurs before native ownership is accepted.
+-- @return Native integer result with the documented lifetime and units.
+-- @usage uv/functions/udp.md#udp_try_send2
 function udp_try_send2(handle: udp_t, buffers: {{buf_t}}, addresses: {sockaddr_t?}, flags: integer): integer
   if not handle:usable() then return ffi.UV_EINVAL end
   local count = #buffers
@@ -412,6 +557,12 @@ function udp_try_send2(handle: udp_t, buffers: {{buf_t}}, addresses: {sockaddr_t
   return ffi.uv_udp_try_send2(handle.native, native_count, vectors, lengths, destinations, native_flags)
 end
 
+--- Start datagram reception with writable allocation and receive callbacks.
+-- @param handle Mutable initialized udp_t owner/view; mutations preserve its single owner and reserved native data slot; close completion ends native handle lifetime.
+-- @param alloc_callback Input ordinary callable, retained until the promised callback interval ends; callback argument owners are borrowed views retained through callback return.
+-- @param recv_callback Input ordinary callable, retained until the promised callback interval ends; callback argument owners are borrowed views retained through callback return.
+-- @return Native integer result with the documented lifetime and units.
+-- @usage uv/functions/udp.md#udp_recv_start
 function udp_recv_start(handle: udp_t, alloc_callback: function (handle_t, integer): (buf_t),
                         recv_callback: function (udp_t, integer, buf_t?, sockaddr_t?, integer): ()): integer
   if not handle:usable() then return ffi.UV_EINVAL end
@@ -423,6 +574,10 @@ function udp_recv_start(handle: udp_t, alloc_callback: function (handle_t, integ
   return status
 end
 
+--- Stop native reception without closing the socket.
+-- @param handle Mutable initialized udp_t owner/view; mutations preserve its single owner and reserved native data slot; close completion ends native handle lifetime.
+-- @return Native integer result with the documented lifetime and units.
+-- @usage uv/functions/udp.md#udp_recv_stop
 function udp_recv_stop(handle: udp_t): integer
   if not handle:usable() then return ffi.UV_EINVAL end
   local status = ffi.uv_udp_recv_stop(handle.native) as integer
@@ -430,16 +585,28 @@ function udp_recv_stop(handle: udp_t): integer
   return status
 end
 
+--- Report whether this handle actually uses native recvmmsg reception, independent of requested flags.
+-- @param handle Mutable initialized udp_t owner/view; mutations preserve its single owner and reserved native data slot; close completion ends native handle lifetime.
+-- @return Native boolean result with the documented lifetime and units.
+-- @usage uv/functions/udp.md#udp_using_recvmmsg
 function udp_using_recvmmsg(handle: udp_t): boolean
   if not handle:usable() then return false end
   return ffi.uv_udp_using_recvmmsg(handle.native) ~= 0
 end
 
+--- Return bytes currently queued for UDP sending.
+-- @param handle Mutable initialized udp_t owner/view; mutations preserve its single owner and reserved native data slot; close completion ends native handle lifetime.
+-- @return Native integer result with the documented lifetime and units.
+-- @usage uv/functions/udp.md#udp_get_send_queue_size
 function udp_get_send_queue_size(handle: udp_t): integer
   if not handle:usable() then raise "UDP handle is not initialized or closing" end
   return (ffi.uv_udp_get_send_queue_size(handle.native) as foreign lua_Integer) as integer
 end
 
+--- Return requests currently queued for UDP sending.
+-- @param handle Mutable initialized udp_t owner/view; mutations preserve its single owner and reserved native data slot; close completion ends native handle lifetime.
+-- @return Native integer result with the documented lifetime and units.
+-- @usage uv/functions/udp.md#udp_get_send_queue_count
 function udp_get_send_queue_count(handle: udp_t): integer
   if not handle:usable() then raise "UDP handle is not initialized or closing" end
   return (ffi.uv_udp_get_send_queue_count(handle.native) as foreign lua_Integer) as integer

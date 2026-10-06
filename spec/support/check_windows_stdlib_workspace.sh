@@ -15,6 +15,7 @@ mkdir -p "$seed/bin" "$seed/lib/titan/0.6" "$seed/share/lua/5.5/titan" "$seed/et
 for path in bin/titanc.exe bin/lua.exe lib/titan/0.6/titan.dll share/lua/5.5/titan/sqlite3.lua etc/titan/lua-5.5.1-windows.config; do
   printf 'guard fixture %s\n' "$path" > "$seed/$path"
 done
+printf '%s\n' "${TITAN_BUILD_PROFILE-validation}" > "$seed/etc/titan/build-profile"
 for path in "$trial/owned" "$seed" "$seed/nested"; do
   printf '%s\n' titan-windows-stdlib-tests-v1 > "$path/.titan-test-owner"
   printf '%s\n' 'retained guard sentinel' > "$path/sentinel"

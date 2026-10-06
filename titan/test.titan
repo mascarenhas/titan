@@ -1,3 +1,7 @@
+--- Native test assertions, subtests, cleanup, and runner context.
+-- @module titan.test
+-- @usage standard-library-test.md
+
 foreign import "lua.h"
 foreign import "lauxlib.h"
 foreign import "titan/ffi.h"
@@ -28,14 +32,25 @@ local trace_scanner: TraceScanner? = nil
 local pattern_matcher: PatternMatcher? = nil
 local location_probe = LocationProbe()
 
+--- Report whether this call is running under a Titan test runner.
+-- @return True while a Titan test runner is active.
+-- @usage standard-library-test.md#runner-state
 function testing(): boolean
   return runner_active
 end
 
+--- Report whether an active Titan test runner requested verbose output.
+-- @return True when the active runner requested verbose output.
+-- @usage standard-library-test.md#runner-state
 function verbose(): boolean
   return runner_active and runner_is_verbose
 end
 
+--- Return the caller's filename, function name, and source line.
+-- @return Caller filename.
+-- @return Caller function name.
+-- @return Caller source line.
+-- @usage standard-library-test.md#location-and-failure-traces
 function location(): (string, string, integer)
   local filename = "<none>"
   local function_name = "<none>"
@@ -48,18 +63,27 @@ function location(): (string, string, integer)
   return filename, function_name, line
 end
 
+--- Skip the current test with an optional reason.
+-- @param reason Optional human-readable skip reason.
+-- @usage standard-library-test.md#assertions-and-skips
 function skip(reason: string?)
   if runner_active then raise SkipMarker(reason) end
   if reason then raise "test skipped: " .. (reason as string) end
   raise "test skipped"
 end
 
+--- Raise the supplied message when the assertion is false.
+-- @param check Assertion condition.
+-- @param message Optional assertion message or log contents.
+-- @usage standard-library-test.md#assertions-and-skips
 function assert(check: boolean, message: string?)
   if not check then
     raise message or "assertion failed"
   end
 end
 
+--- The current test's name, deferred subtests, logging, and LIFO cleanup scope.
+-- @usage standard-library-test.md#contexts-subtests-and-cleanup
 record Context
   local full_name: string
   local subtests: {RegisteredTest}
@@ -68,6 +92,9 @@ record Context
   local cleanups_open: boolean
 end
 
+--- Register a callback to run after this test and its descendants finish.
+-- @param f Cleanup callback run in reverse registration order.
+-- @usage standard-library-test.md#contexts-subtests-and-cleanup
 function Context:cleanup(f: Cleanup)
   if not self.cleanups_open then
     raise "cannot register cleanup after test cleanup begins"
@@ -75,10 +102,16 @@ function Context:cleanup(f: Cleanup)
   self.cleanups[#self.cleanups + 1] = f
 end
 
+--- Return this test's fully qualified name.
+-- @return Fully qualified test name.
+-- @usage standard-library-test.md#contexts-subtests-and-cleanup
 function Context:name(): string
   return self.full_name
 end
 
+--- Log a message through the active runner without changing test status.
+-- @param message Optional assertion message or log contents.
+-- @usage standard-library-test.md#contexts-subtests-and-cleanup
 function Context:log(message: string)
   if not runner_active or not runner_logger then
     raise "cannot log outside a Titan test runner"
@@ -86,6 +119,10 @@ function Context:log(message: string)
   (runner_logger as TestLogger)(self.full_name, message)
 end
 
+--- Register a named subtest to run after the current test body returns.
+-- @param name Name used by this operation.
+-- @param subtest Subtest body receiving its own Context.
+-- @usage standard-library-test.md#contexts-subtests-and-cleanup
 function Context:run(name: string, subtest: TestFunction)
   if not self.subtests_open then
     raise "cannot register subtest after test body finishes"

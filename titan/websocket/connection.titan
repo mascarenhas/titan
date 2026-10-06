@@ -18,6 +18,8 @@ local record Work
   data: string?
 end
 
+--- An owned WebSocket session with one application reader and one data writer.
+-- @usage standard-library-websocket.md#public-interface
 record Connection
   local stream: io.ReaderWriterCloser?
   local client: boolean
@@ -261,12 +263,21 @@ catch
   raise
 end
 
+--- Return the selected case-sensitive subprotocol, or nil when none was negotiated.
+-- @return Selected case-sensitive subprotocol, or nil when none was negotiated.
+-- @usage standard-library-websocket.md#public-interface
 function Connection:subprotocol(): string?
   return self.protocol
 end
+--- Return the peer's valid Close code and reason, when available.
+-- @return Received valid peer Close code, or nil when absent.
+-- @return Received peer Close reason, or nil when absent.
+-- @usage standard-library-websocket.md#public-interface
 function Connection:close_status(): (integer?, string?)
   return self.peer_code, self.peer_reason
 end
+--- Abort and retire this session idempotently, even during pending cancellation.
+-- @usage standard-library-websocket.md#reader-duty-closing-and-cancellation
 function Connection:close()
   self:retire(nil)
 end
@@ -304,6 +315,10 @@ local function Connection:send_frame(work: Work, opcode: integer,
   if opcode == 8 then self.close_sent = true end
 end
 
+--- Write one complete text or binary message, fragmenting for bounded control progress.
+-- @param kind Text or binary data-message kind.
+-- @param data Immutable binary bytes to write or decode.
+-- @usage standard-library-websocket.md#public-interface
 function Connection:write(kind: MessageType, data: string)
   async.checkpoint()
   self:check_open("websocket.write")
@@ -328,6 +343,10 @@ function Connection:write(kind: MessageType, data: string)
   end, nil)
 end
 
+--- Read one complete data message while servicing control frames.
+-- @return Data-message kind, or nil after a valid peer Close.
+-- @return Complete message bytes, or nil after a valid peer Close.
+-- @usage standard-library-websocket.md#public-interface
 function Connection:read(): (MessageType?, string?)
   async.checkpoint()
   if self.failure then self.failure:raise() end
@@ -345,6 +364,9 @@ function Connection:read(): (MessageType?, string?)
   return work.kind, work.data
 end
 
+--- Send a Ping and wait for its Pong while a concurrent reader services control frames.
+-- @param timeout_ms Positive control deadline in milliseconds; nil defaults to 5000.
+-- @usage standard-library-websocket.md#reader-duty-closing-and-cancellation
 function Connection:ping(timeout_ms: integer?)
   local timeout = positive(timeout_ms, CONTROL_TIMEOUT, "WebSocket Ping timeout")
   async.checkpoint(); self:check_open("websocket.ping")
@@ -377,6 +399,11 @@ local function close_payload(code: integer, reason: string, client: boolean): st
   validate_text(reason, "websocket.shutdown")
   return string.char(code >> 8, code & 255) .. reason
 end
+--- Perform a bounded graceful WebSocket closing handshake.
+-- @param code Optional valid Close status code; nil defaults to normal closure.
+-- @param reason Optional UTF-8 Close reason with at most 123 encoded bytes.
+-- @param timeout_ms Positive control deadline in milliseconds; nil defaults to 5000.
+-- @usage standard-library-websocket.md#reader-duty-closing-and-cancellation
 function Connection:shutdown(code: integer?, reason: string?, timeout_ms: integer?)
   local timeout = positive(timeout_ms, CONTROL_TIMEOUT, "WebSocket shutdown timeout")
   local payload = close_payload(code or 1000, reason or "", self.client)

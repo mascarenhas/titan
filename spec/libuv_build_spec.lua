@@ -732,16 +732,17 @@ describe("libuv Makefile configuration", function()
             local print_makefile = root .. "/flags.mk"
             write_file(print_makefile,
                 "print-titan-flags:\n\t@printf '%s\\n' '$(CFLAGS)'\n")
-            local function flags(host, compiler, override)
+            local function flags(host, compiler, override, profile)
                 -- This standalone query runs through a Lua pipe without the
                 -- parent Make jobserver descriptors. Isolate its settings so
                 -- stale coordination flags cannot prepend a warning to stdout.
-                local argv = { "env", "-u", "CFLAGS", "-u", "MAKEFLAGS",
+                local argv = { "env", "-u", "TITAN_BUILD_PROFILE", "-u", "CFLAGS", "-u", "MAKEFLAGS",
                     "-u", "MFLAGS", "-u", "GNUMAKEFLAGS", "-u", "MAKELEVEL",
                     "-u", "MAKEOVERRIDES", "make", "--no-print-directory", "-s", "-f", "Makefile",
                     "-f", print_makefile, "HOST_OS=" .. host, "CC=" .. compiler,
                     "print-titan-flags" }
                 if override then argv[#argv + 1] = "CFLAGS=" .. override end
+                if profile then argv[#argv + 1] = "TITAN_BUILD_PROFILE=" .. profile end
                 local ok, output = run_argv(argv)
                 assert.truthy(ok, output)
                 return output
@@ -753,12 +754,202 @@ describe("libuv Makefile configuration", function()
                 assert.matches("-O3", darwin, 1, true)
                 assert.falsy(darwin:find("-flto", 1, true), darwin)
                 assert.falsy(darwin:find("-ffat-lto-objects", 1, true), darwin)
+                assert.falsy(linux:find("-fno-lto", 1, true), linux)
+                for _, host in ipairs({ "Linux", "Darwin", "Windows" }) do
+                    local validation = flags(host, compiler, nil, "validation")
+                    assert.matches("-O0 -fno-lto", validation, 1, true)
+                    assert.falsy(validation:find("-O3", 1, true), validation)
+                    assert.falsy(validation:find("-flto", 1, true), validation)
+                    assert.falsy(validation:find("-ffat-lto-objects", 1, true), validation)
+                end
             end
             assert.equal("-O1 -DCUSTOM_DEFAULTS=1\n",
                 flags("Linux", "gcc", "-O1 -DCUSTOM_DEFAULTS=1"))
+            local valid, diagnostic = run_argv({ "make", "--no-print-directory", "-s", "-f", "Makefile",
+                "-f", print_makefile, "TITAN_BUILD_PROFILE=production validation", "print-titan-flags" })
+            assert.is_false(valid)
+            assert.matches("TITAN_BUILD_PROFILE must be production or validation", diagnostic, 1, true)
         end, debug.traceback)
         remove_tree(root)
         if not tested then error(test_error, 0) end
+    end)
+
+    it("keeps validation host tools optimized while Titan payloads remain O0", function()
+        local root = make_temp_dir()
+        local tested, test_error = xpcall(function()
+            local probe = root .. "/host-flags.mk"
+            write_file(probe, "host-flags:\n\t@printf '%s\\n' " ..
+                "'$(CFLAGS)' '$(LUA_MYCFLAGS)' '$(LUA_MYLDFLAGS)' " ..
+                "'$(ROCK_CFLAGS)' '$(READLINE_CFLAGS)' " ..
+                "'$(LPEGLABEL_BUILD_CFLAGS)' '$(COMPILER_DEPS_CFLAGS)' " ..
+                "'$(COMPILER_DEPS_LDFLAGS)'\n")
+            local ok, output = run_argv({"env", "-u", "MAKEFLAGS", "-u", "MFLAGS",
+                "-u", "MAKEOVERRIDES", "-u", "CFLAGS", "-u", "LUA_MYCFLAGS",
+                "-u", "LUA_MYLDFLAGS", "-u", "ROCK_CFLAGS", "-u", "READLINE_CFLAGS",
+                "-u", "LPEGLABEL_BUILD_CFLAGS", "-u", "COMPILER_DEPS_CFLAGS",
+                "-u", "COMPILER_DEPS_LDFLAGS", "make", "--no-print-directory",
+                "-s", "-f", "Makefile", "-f", probe, "host-flags",
+                "TITAN_BUILD_PROFILE=validation"})
+            assert.truthy(ok, output)
+            local rows = {}
+            for row in output:gmatch("[^\n]+") do rows[#rows + 1] = row end
+            assert.matches("-O0 -fno-lto", rows[1], 1, true)
+            assert.same({"-fPIC -O2 -fno-lto", "-O2 -fno-lto",
+                "-O0 -fno-lto -fPIC", "-fPIC -O0 -fno-lto",
+                "-O2 -fno-lto", "-O2 -fno-lto -fPIC", "-O2 -fno-lto"},
+                {table.unpack(rows, 2)})
+        end, debug.traceback)
+        remove_tree(root)
+        if not tested then error(test_error, 0) end
+    end)
+
+    it("reconciles optimized compiler modules by flags and contents without rebuilding warm modules", function()
+        local root = make_temp_dir()
+        local tested, test_error = xpcall(function()
+            local prefix = root .. "/host prefix"
+            local abi = assert(_VERSION:match("Lua (.+)"))
+            local lib = prefix .. "/lib/lua/" .. abi
+            local ok, output = run_argv({"mkdir", "-p", prefix .. "/bin", lib,
+                prefix .. "/etc/titan"})
+            assert.truthy(ok, output)
+            write_file(prefix .. "/rocks.receipt", "selected rocks config\n")
+            write_file(prefix .. "/lua.receipt", "selected optimized Lua\n")
+            write_file(prefix .. "/calls", "")
+            write_file(prefix .. "/luafilesystem.version", "1.6.3-1\n")
+            write_file(lib .. "/lfs.so", "old incompatible module\n")
+            write_file(prefix .. "/bin/luarocks", ([[#!/bin/sh
+set -eu
+prefix=${0%/bin/luarocks}
+case "$1" in
+  show)
+    case "$3" in
+      lpeglabel) test -f "$prefix/lpeglabel.version"; cat "$prefix/lpeglabel.version" ;;
+      luafilesystem) test -f "$prefix/luafilesystem.version"; cat "$prefix/luafilesystem.version" ;;
+    esac ;;
+  build)
+    printf '%s\n' "$@" >> "$prefix/calls"
+    case "$2" in
+      lpeglabel) module=lpeglabel; version=1.6.2-1 ;;
+      luafilesystem) module=lfs; version=1.9.0-1 ;;
+    esac
+    printf '%s\n' "$version" > "$prefix/$2.version"
+    printf 'compiled %s\n' "$*" > "$prefix/lib/lua/ABI/$module.so" ;;
+  *) exit 91 ;;
+esac
+]]):gsub("/ABI/", "/" .. abi .. "/"))
+            ok, output = run_argv({"chmod", "+x", prefix .. "/bin/luarocks"})
+            assert.truthy(ok, output)
+            local sdk = os.getenv("PREFIX") or os.getenv("TITAN_ROCKS_ROOT")
+            local lua = sdk and (sdk .. "/bin/lua") or arg[-1]
+            assert.truthy(lua, "selected Lua executable required")
+            local receipt = prefix .. "/etc/titan/compiler-dependencies.installed"
+            local function prepare(cflags, ldflags)
+                local success, log = run_argv({lua, "-E",
+                    "scripts/prepare_compiler_dependencies.lua", prefix, receipt,
+                    prefix .. "/rocks.receipt", prefix .. "/lua.receipt",
+                    "cc", "ar", "ranlib", cflags, ldflags, cflags, ldflags,
+                    "1.6.2-1"})
+                assert.truthy(success, log)
+            end
+            prepare("-O2 -fno-lto -fPIC", "-O2 -fno-lto")
+            assert.equal(2, count_plain(read_file(prefix .. "/calls"), "build\n"))
+            assert.falsy(read_file(prefix .. "/calls"):find("luafilesystem\n1.6.3-1\n", 1, true))
+            local before = read_file(receipt)
+            assert.truthy(lfs.touch(receipt, 946684800, 946684800))
+            prepare("-O2 -fno-lto -fPIC", "-O2 -fno-lto")
+            assert.equal(before, read_file(receipt))
+            assert.equal(946684800, lfs.attributes(receipt, "modification"))
+            assert.equal(2, count_plain(read_file(prefix .. "/calls"), "build\n"))
+            local instrumented = "-O1 -fno-lto -fPIC -fsanitize=address,undefined"
+            prepare(instrumented, "-O1 -fno-lto -fsanitize=address,undefined")
+            local calls = read_file(prefix .. "/calls")
+            assert.equal(4, count_plain(calls, "build\n"))
+            assert.truthy(calls:find("CFLAGS=" .. instrumented .. "\n", 1, true))
+            assert.truthy(calls:find("LDFLAGS=-O1 -fno-lto -fsanitize=address,undefined\n", 1, true))
+            write_file(lib .. "/lfs.so", "stale restored module\n")
+            prepare(instrumented, "-O1 -fno-lto -fsanitize=address,undefined")
+            assert.equal(6, count_plain(read_file(prefix .. "/calls"), "build\n"))
+            write_file(prefix .. "/lua.receipt", "changed optimized Lua configuration\n")
+            prepare(instrumented, "-O1 -fno-lto -fsanitize=address,undefined")
+            assert.equal(8, count_plain(read_file(prefix .. "/calls"), "build\n"))
+        end, debug.traceback)
+        remove_tree(root)
+        if not tested then error(test_error, 0) end
+    end)
+
+    it("expands the selected Busted executable before preserving caller command bytes", function()
+        local root = make_temp_dir()
+        local tested, test_error = xpcall(function()
+            local print_makefile = root .. "/busted-command.mk"
+            write_file(print_makefile, "print-busted-command:\n\t@printf '%s\\n' $(call make_shell_quote_value,BUSTED)\n")
+            local function query(...)
+                local argv = { "env", "-u", "BUSTED", "-u", "TITAN_BUILD_PROFILE", "-u", "MAKEFLAGS", "-u", "MFLAGS", "-u", "GNUMAKEFLAGS", "-u", "MAKELEVEL", "-u", "MAKEOVERRIDES", "make", "--no-print-directory", "-s", "-f", "Makefile", "-f", print_makefile, "PREFIX=" .. root, "print-busted-command" }
+                for _, word in ipairs({ ... }) do argv[#argv + 1] = word end
+                local ok, output = run_argv(argv)
+                assert.truthy(ok, output)
+                return output
+            end
+            assert.equal("busted\n", query())
+            assert.equal(root .. "/bin/busted\n", query("TITAN_BUILD_PROFILE=validation"))
+            assert.equal("wrapper $(literal) command\n", query("TITAN_BUILD_PROFILE=validation", "BUSTED=wrapper $(literal) command"))
+        end, debug.traceback)
+        remove_tree(root)
+        if not tested then error(test_error, 0) end
+    end)
+
+    it("isolates Windows validation SDKs and preserves production native defaults", function()
+        local root = make_temp_dir()
+        local tested, test_error = xpcall(function()
+            local print_makefile = root .. "/windows-profile.mk"
+            write_file(print_makefile, table.concat({
+                "print-windows-profile:",
+                "\t@printf '%s\\n' '$(TITAN_BUILD_PROFILE)' '$(LUA_CFLAGS)' '$(LUA_LDFLAGS)' '$(NATIVE_CFLAGS)' '$(NATIVE_LDFLAGS)' '$(RUNTIME_CFLAGS)' '$(RUNTIME_LDFLAGS)' '$(COMPILER_CFLAGS)' '$(COMPILER_LDFLAGS)' '$(PREFIX)' '$(WINDOWS_BUILD_ROOT)' ",
+                "\t@test \"$$TITAN_BUILD_PROFILE\" = '$(TITAN_BUILD_PROFILE)'", "",
+            }, "\n"))
+            local function query(...)
+                local argv = { "env", "-u", "TITAN_BUILD_PROFILE", "-u", "PREFIX", "-u", "WINDOWS_BUILD_ROOT",
+                    "-u", "MAKEFLAGS", "-u", "MFLAGS", "-u", "GNUMAKEFLAGS", "-u", "MAKELEVEL", "-u", "MAKEOVERRIDES",
+                    "make", "--no-print-directory", "-s", "-f", "Makefile.windows", "-f", print_makefile, "print-windows-profile" }
+                for _, word in ipairs({ ... }) do argv[#argv + 1] = word end
+                return run_argv(argv)
+            end
+            local ok, production = query()
+            assert.truthy(ok, production)
+            assert.matches("production\n-O2 -Wall -Wextra\n\n-O2\n\n-O2 -Wall -Wextra\n\n-O2 -Wall -Wextra\n\n", production, 1, true)
+            assert.matches("/.windows-sdk\n", production, 1, true)
+            assert.matches("/windows-build\n", production, 1, true)
+            for _, selection in ipairs({ "TITAN_BUILD_PROFILE=validation", "MAKECMDGOALS=compiler-check", "MAKECMDGOALS=titan-stdlib-test" }) do
+                local valid, validation = query(selection)
+                assert.truthy(valid, validation)
+                assert.matches("validation\n-O2 -fno-lto -Wall -Wextra\n-O2 -fno-lto\n-O0 -fno-lto\n-O0 -fno-lto\n-O0 -fno-lto -Wall -Wextra\n-O0 -fno-lto\n-O0 -fno-lto -Wall -Wextra\n-O0 -fno-lto\n", validation, 1, true)
+                assert.matches("/.windows-sdk-validation\n", validation, 1, true)
+                assert.matches("/windows-build-validation\n", validation, 1, true)
+            end
+            local overridden, explicit = query("TITAN_BUILD_PROFILE=validation", "LUA_CFLAGS=-O1 -DUSER=1", "RUNTIME_LDFLAGS=-Wl,caller", "PREFIX=/caller/sdk", "WINDOWS_BUILD_ROOT=/caller/build")
+            assert.truthy(overridden, explicit)
+            assert.matches("validation\n-O1 -DUSER=1\n", explicit, 1, true)
+            assert.matches("-Wl,caller\n", explicit, 1, true)
+            assert.matches("/caller/sdk\n/caller/build\n", explicit, 1, true)
+            local valid, diagnostic = query("TITAN_BUILD_PROFILE=production validation")
+            assert.is_false(valid)
+            assert.matches("TITAN_BUILD_PROFILE must be production or validation", diagnostic, 1, true)
+            assert.matches("etc/titan/build-profile", read_file("Makefile.windows"), 1, true)
+        end, debug.traceback)
+        remove_tree(root)
+        if not tested then error(test_error, 0) end
+    end)
+
+    it("checks portable Windows profile argv and rejects invalid test entry profiles", function()
+        local ok, output = run_argv({ "bash", "scripts/check_windows_build_profile.sh" })
+        assert.truthy(ok, output)
+        assert.matches("strict validation and idempotent flag propagation passed", output, 1, true)
+        for _, script in ipairs({ "spec/support/run_rock_tests.sh", "spec/support/ci_test_groups.sh" }) do
+            for _, profile in ipairs({ "", "production validation", "optimized" }) do
+                local accepted, diagnostic = run_argv({ "env", "TITAN_BUILD_PROFILE=" .. profile, "bash", script })
+                assert.is_false(accepted)
+                assert.matches("TITAN_BUILD_PROFILE must be production or validation", diagnostic, 1, true)
+            end
+        end
     end)
 
     it("keeps the stdlib object graph equal to all source import edges", function()
@@ -1524,7 +1715,7 @@ done
             "no-brotli", "no-autoload-config",
             "$(OPENSSL_EXTRA_CONFIGURE_FLAGS)",
         }, makefile_words("OPENSSL_CONFIGURE_FLAGS"))
-        assert.same({ "-O2", "-g", "-fPIC", "-fvisibility=hidden" },
+        assert.same({ "$(if", "$(filter", "validation,$(TITAN_BUILD_PROFILE)),$(TITAN_VALIDATION_FLAGS),-O2)", "-g", "-fPIC", "-fvisibility=hidden" },
             makefile_words("OPENSSL_REQUIRED_CFLAGS"))
         local makefile = read_file("Makefile")
         for _, contract in ipairs({
@@ -5149,8 +5340,8 @@ done
                     assert.is_true(tonumber(seconds) >= 0)
                 end
             end
-            assert.same({ 32, 36, 32, 44 }, shard_counts)
-            assert.equal(144, assigned_count)
+            assert.same({ 32, 37, 33, 44 }, shard_counts)
+            assert.equal(146, assigned_count)
 
             local stress_partition = read_file(
                 "spec/support/ci_compiler_stress_files.txt")
@@ -5175,7 +5366,7 @@ done
             assert.equal(1, count_literal(sanitizer_job,
                 "runs-on: ubicloud-standard-2"), sanitizer_job)
             assert.equal(1, count_literal(sanitizer_job,
-                "timeout-minutes: 35"), sanitizer_job)
+                "timeout-minutes: 75"), sanitizer_job)
             assert.falsy(sanitizer_job:find("id-token: write", 1, true),
                 sanitizer_job)
             assert.falsy(sanitizer_job:find(
@@ -5191,10 +5382,10 @@ done
                 'TITAN_EXTRA_CFLAGS: "-O0 -fno-lto -g ' ..
                 '-fsanitize=address,undefined'), sanitizer_job)
             assert.equal(1, count_literal(sanitizer_job,
-                'TITAN_EXTRA_LDFLAGS: "-O1 -fno-lto -g ' ..
+                'TITAN_EXTRA_LDFLAGS: "-O0 -fno-lto -g ' ..
                 '-fsanitize=address,undefined'), sanitizer_job)
             assert.equal(1, count_literal(sanitizer_job,
-                'LUA_MYCFLAGS: "-fPIC -O1 -g ' ..
+                'LUA_MYCFLAGS: "-fPIC -O1 -fno-lto -g ' ..
                 '-fsanitize=address,undefined'), sanitizer_job)
             for _, contract in ipairs({
                 'SANITIZER_NATIVE_CACHE_SCHEMA: "v2"',
@@ -5263,7 +5454,7 @@ done
             assert.truthy(sanitizer_native_restore_step:find(
                 "titan%-sanitizer%-native%-%${{ env%." ..
                 "SANITIZER_NATIVE_CACHE_SCHEMA }}%-%${{ runner%.os }}" ..
-                "%-%${{ runner%.arch }}%-%${{ steps%." ..
+                "%-%${{ runner%.arch }}%-%${{ env%.TITAN_BUILD_PROFILE }}%-%${{ steps%." ..
                 "sanitizer%-native%-cache%-key%.outputs%.digest }}"))
             for _, fingerprint in ipairs({
                 "titan_abi=$TITAN_ABI_VERSION",
@@ -5272,7 +5463,7 @@ done
                 "libuv_profile=$LIBUV_BUILD_PROFILE",
                 "sqlite3=$SANITIZER_SQLITE3_VERSION:$SANITIZER_SQLITE3_SHA256",
                 "sqlite3_cflags=$SQLITE3_BUILD_CFLAGS",
-                "rock_cflags=${ROCK_CFLAGS:--O2 -fPIC}",
+                "rock_cflags=${ROCK_CFLAGS:--O0 -fno-lto -fPIC}",
                 "titan_cppflags=${TITAN_EXTRA_CPPFLAGS:-}",
                 "titan_cflags=$TITAN_EXTRA_CFLAGS",
                 "ld_version=$ld_version",

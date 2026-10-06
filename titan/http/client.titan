@@ -1,3 +1,9 @@
+--- Received response headers and an owned streaming response body.
+-- @field status HTTP status number.
+-- @field reason HTTP reason phrase.
+-- @field version Received HTTP version.
+-- @field headers Received headers, preserving duplicates and insertion order.
+-- @usage standard-library-http.md#client-requests
 record ClientResponse
   status: integer
   reason: string
@@ -83,6 +89,14 @@ local function final_response_headers(parser: Parser)
   end
 end
 
+--- Send one HTTP request and return after final response headers arrive.
+-- @param method Case-sensitive HTTP token selecting the request method.
+-- @param source_url Absolute URL text.
+-- @param supplied_headers Optional headers copied into the outgoing message.
+-- @param body Optional in-memory request-body bytes.
+-- @param ca_file Optional PEM trust bundle replacing the default trust roots.
+-- @return Response metadata and streaming body; the caller owns closing it.
+-- @usage standard-library-http.md#client-requests
 function request(method: string, source_url: string,
                  supplied_headers: Headers?, body: string?,
                  ca_file: string?): ClientResponse
@@ -131,11 +145,25 @@ function request(method: string, source_url: string,
   end
 end
 
+--- Send one GET request and return an owned streaming response.
+-- @param source_url Absolute URL text.
+-- @param supplied_headers Optional headers copied into the outgoing message.
+-- @param ca_file Optional PEM trust bundle replacing the default trust roots.
+-- @return Response metadata and streaming body; the caller owns closing it.
+-- @usage standard-library-http.md#client-requests
 function get(source_url: string, supplied_headers: Headers?,
              ca_file: string?): ClientResponse
   return request("GET", source_url, supplied_headers, nil, ca_file)
 end
 
+--- Send an upgrade request over an owned supplied stream and await response headers.
+-- @param connection Stream whose ownership transfers to this upgrade attempt.
+-- @param abort Abort supplied to this operation.
+-- @param source_url Absolute URL text.
+-- @param protocol Protocol token for the HTTP upgrade.
+-- @param supplied_headers Optional headers copied into the outgoing message.
+-- @return Opening response owning the supplied transport until transfer or close.
+-- @usage standard-library-http.md#protocol-upgrade-and-ownership
 function request_upgrade_on(connection: io.ReaderWriterCloser,
                              abort: function (): (), source_url: string,
                              protocol: string,
@@ -200,6 +228,9 @@ function request_upgrade_on(connection: io.ReaderWriterCloser,
   end
 end
 
+--- Transfer a validated upgraded stream with any already received prefix bytes.
+-- @return Transferred stream preserving already received post-header bytes.
+-- @usage standard-library-http.md#protocol-upgrade-and-ownership
 function ClientResponse:take_upgrade(): io.ReaderWriterCloser
   if self.closed or not self.upgrade_pending then
     raise "HTTP response has no pending upgrade"
@@ -214,6 +245,9 @@ function ClientResponse:take_upgrade(): io.ReaderWriterCloser
   return view
 end
 
+--- Read decoded response-body bytes, or nil at the body's end.
+-- @return Copied bytes or text, or nil at EOF or when absent.
+-- @usage standard-library-http.md#client-requests
 function ClientResponse:read(): string?
   if self.upgrade_pending then raise "HTTP upgraded response has no readable body" end
   if self.closed then return nil end
@@ -230,6 +264,11 @@ function ClientResponse:read(): string?
   return nil
 end
 
+--- Read response bytes through a delimiter, retaining the unused suffix.
+-- @param delimiter Nonempty byte delimiter to include or remove.
+-- @param chop Remove the delimiter when true; nil or false retains it.
+-- @return Copied bytes or text, or nil at EOF or when absent.
+-- @usage standard-library-http.md#client-requests
 function ClientResponse:read_until(delimiter: string,
                                    chop: boolean?): string?
   if self.upgrade_pending then raise "HTTP upgraded response has no readable body" end
@@ -247,6 +286,8 @@ function ClientResponse:read_until(delimiter: string,
   return nil
 end
 
+--- Discard unread body bytes and retire the one-use transport.
+-- @usage standard-library-http.md#client-requests
 function ClientResponse:close()
   if self.closed and self.connection_closed then return end
   if not self.closed then

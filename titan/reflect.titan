@@ -1,3 +1,7 @@
+--- Inspect runtime values and public type descriptors without losing nominal identity.
+-- @module titan.reflect
+-- @usage standard-library-reflect.md
+
 foreign import "lua.h"
 foreign import "titan/ffi.h"
 foreign import "lobject.h"
@@ -5,6 +9,11 @@ local iteration = import "iteration"
 local lua = import "lua"
 local string = import "string"
 
+--- An inspected record retaining its owner and public field descriptors.
+-- @field n_fields Number of public fields; use one-based descriptor ordinals for access.
+-- @field value The original retained value, suitable as a reflected method receiver.
+-- @field type Erased declared type descriptor.
+-- @usage standard-library-reflect.md#records
 record RecordValue
   -- value keeps this borrowed receiver alive.
   local const udata: foreign *Udata
@@ -15,6 +24,12 @@ record RecordValue
 end
 
 
+--- An inspected union's active tag, payload arity, and retained owner.
+-- @field tag Zero-based active variant tag.
+-- @field n_parts Number of active payload parts, including nil-valued parts.
+-- @field value The original retained value, suitable as a reflected method receiver.
+-- @field type Erased declared type descriptor.
+-- @usage standard-library-reflect.md#unions
 record UnionValue
   const tag: integer
   local const udata: foreign *Udata
@@ -24,6 +39,12 @@ record UnionValue
   const type: UnionType
 end
 
+--- An inspected Interface wrapper with captured fields and its concrete owner.
+-- @field n_fields Number of public fields; use one-based descriptor ordinals for access.
+-- @field value The original retained value, suitable as a reflected method receiver.
+-- @field wrapped The original concrete record or union behind the Interface.
+-- @field type Erased declared type descriptor.
+-- @usage standard-library-reflect.md#interfaces
 record InterfaceValue
   local const udata: foreign *Udata
   const n_fields: integer
@@ -32,6 +53,27 @@ record InterfaceValue
   const type: InterfaceType
 end
 
+--- Tagged runtime-value classification preserving the exact Lua value kind.
+-- @field is_nil Nil variant.
+-- @field is_integer Integer variant.
+-- @field is_float Float variant.
+-- @field is_boolean Boolean variant.
+-- @field is_string String variant.
+-- @field is_array Array variant.
+-- @field is_const_array Const array variant.
+-- @field is_map Map variant.
+-- @field is_record Record variant.
+-- @field is_union Union variant.
+-- @field is_interface Interface variant.
+-- @field is_titan_function Titan function variant.
+-- @field is_lua_function Lua function variant.
+-- @field is_lua_c_function Lua c function variant.
+-- @field is_owned_foreign_pointer Owned foreign pointer variant.
+-- @field is_owned_foreign_array Owned foreign array variant.
+-- @field is_lua_userdata Lua userdata variant.
+-- @field is_lua_thread Lua thread variant.
+-- @field is_raw_pointer Raw pointer variant.
+-- @usage standard-library-reflect.md#inspecting-values
 union Value
   is_nil()
   is_integer(integer)
@@ -69,16 +111,30 @@ union Value
   is_raw_pointer(foreign *void)
 end
 
+--- A qualified nominal name resolved explicitly against initialized modules.
+-- @field name Qualified Titan nominal name.
+-- @usage standard-library-reflect.md#nominal-lookup-and-resolution
 record NamedType
   const name: string
 end
 
+--- The mutable, const, or maybe-const qualifier of an Array descriptor.
+-- @field is_mutable Mutable variant.
+-- @field is_const Const variant.
+-- @field is_maybe_const Maybe const variant.
+-- @usage standard-library-reflect.md#type-descriptors
 union ArrayTypeConstness
   is_mutable()
   is_const()
   is_maybe_const()
 end
 
+--- A record's qualified name, ordered public fields, and sorted callable members.
+-- @field name Qualified record name.
+-- @field fields Ordered public field descriptors.
+-- @field statics Public static-function descriptors sorted by name.
+-- @field methods Public method descriptors sorted by name.
+-- @usage standard-library-reflect.md#public-nominal-members
 record RecordType
   const name: string
   const fields: const { FieldType }
@@ -86,6 +142,12 @@ record RecordType
   const methods: const { MethodType }
 end
 
+--- A union's qualified name, public variants, and sorted callable members.
+-- @field name Qualified union name.
+-- @field variants Public variants with their dense zero-based tags.
+-- @field statics Public static-function descriptors sorted by name.
+-- @field methods Public method descriptors sorted by name.
+-- @usage standard-library-reflect.md#public-nominal-members
 record UnionType
   local const payload_reader: foreign function (*lua_State, *Udata, lua_Integer, *TValue): void
   const name: string
@@ -94,12 +156,23 @@ record UnionType
   const methods: const { MethodType }
 end
 
+--- An Interface's qualified name and ordered field and method descriptors.
+-- @field name Qualified Interface name.
+-- @field fields Ordered public field descriptors.
+-- @field methods Public method descriptors in declaration order.
+-- @usage standard-library-reflect.md#public-nominal-members
 record InterfaceType
   const name: string
   const fields: const { FieldType }
   const methods: const { MethodType }
 end
 
+--- A public field's name, logical index, erased type, and constness.
+-- @field name Declared public field name.
+-- @field index Zero-based logical field index, which may have gaps from private fields.
+-- @field type Erased declared type descriptor.
+-- @field is_const Whether the public field is read-only.
+-- @usage standard-library-reflect.md#public-nominal-members
 record FieldType
   -- Module ownership and accessor identity are captured once during hydration.
   local const module: value
@@ -111,6 +184,15 @@ record FieldType
   const is_const: boolean
 end
 
+--- A method's declared signature and callable requiring the receiver first.
+-- @field name Declared public method name.
+-- @field param_names Declared fixed parameter names in order, excluding a method receiver.
+-- @field param_descriptors Erased fixed parameter descriptors in declaration order.
+-- @field vararg_descriptor Variadic input element descriptor, or nil for fixed inputs.
+-- @field return_descriptors Erased fixed result descriptors in declaration order.
+-- @field flexret_descriptor Flexible result element descriptor, or nil for fixed results.
+-- @field callable Reflected callable; methods require the inspected receiver as the first argument.
+-- @usage standard-library-reflect.md#public-nominal-members
 record MethodType
   const name: string
   const param_names: const { string }
@@ -121,6 +203,15 @@ record MethodType
   const callable: function (value, ...: value): (...: value)
 end
 
+--- A static function's declared signature and ordinary callable.
+-- @field name Declared public static-function name.
+-- @field param_names Declared fixed parameter names in order.
+-- @field param_descriptors Erased fixed parameter descriptors in declaration order.
+-- @field vararg_descriptor Variadic input element descriptor, or nil for fixed inputs.
+-- @field return_descriptors Erased fixed result descriptors in declaration order.
+-- @field flexret_descriptor Flexible result element descriptor, or nil for fixed results.
+-- @field callable Reflected static-function callable with its ordinary arguments.
+-- @usage standard-library-reflect.md#public-nominal-members
 record StaticFunctionType
   const name: string
   const param_names: const { string }
@@ -131,11 +222,21 @@ record StaticFunctionType
   const callable: function (...: value): (...: value)
 end
 
+--- One named union payload part and its erased type descriptor.
+-- @field name Declared payload-part name, or its generated name when unnamed.
+-- @field type Erased declared type descriptor.
+-- @usage standard-library-reflect.md#public-nominal-members
 record VariantPartType
   const name: string
   const type: Type
 end
 
+--- A public union variant's name, tag, ordered parts, and constructor callable.
+-- @field name Declared public variant name.
+-- @field tag Zero-based active variant tag.
+-- @field parts Ordered named payload-part descriptors.
+-- @field callable Constructor callable returning this union variant.
+-- @usage standard-library-reflect.md#public-nominal-members
 record VariantType
   const name: string
   const tag: integer
@@ -143,6 +244,12 @@ record VariantType
   const callable: function (...: value): (value)
 end
 
+--- Fixed parameter/result descriptors and optional variadic/flexible tails.
+-- @field param_descriptors Erased fixed parameter descriptors in declaration order.
+-- @field vararg_descriptor Variadic input element descriptor, or nil for fixed inputs.
+-- @field return_descriptors Erased fixed result descriptors in declaration order.
+-- @field flexret_descriptor Flexible result element descriptor, or nil for fixed results.
+-- @usage standard-library-reflect.md#containers-and-callable-signatures
 record FunctionType
   const param_descriptors: const { Type }
   const vararg_descriptor: Type?
@@ -150,19 +257,36 @@ record FunctionType
   const flexret_descriptor: Type?
 end
 
+--- The payload descriptor for one GC-owned foreign C object.
+-- @field pointee_descriptor Owned object's C payload descriptor.
+-- @usage standard-library-reflect.md#c-type-details
 record OwnedForeignPointerType
   const pointee_descriptor: Type
 end
 
+--- The element descriptor for a counted GC-owned C array.
+-- @field elem_descriptor Owned array's C element descriptor.
+-- @usage standard-library-reflect.md#c-type-details
 record OwnedForeignArrayType
   const elem_descriptor: Type
 end
 
+--- A qualified C declaration key retaining its own hydration's declaration table.
+-- @field name Qualified C declaration key in the captured declaration table.
+-- @usage standard-library-reflect.md#c-type-details
 record ForeignNamedType
   const name: string
   local const declarations: {string: Type}
 end
 
+--- A C struct's name, fields, completeness, and flexible-array information.
+-- @field cname Resolved C declaration spelling.
+-- @field tagname C struct or union tag spelling.
+-- @field typedef Associated C typedef spelling.
+-- @field fields C field descriptors in declaration order.
+-- @field is_complete Whether the C aggregate definition is complete.
+-- @field has_fam Whether the C struct has a flexible-array member.
+-- @usage standard-library-reflect.md#c-type-details
 record ForeignStructType
   const cname: string
   const tagname: string
@@ -172,6 +296,13 @@ record ForeignStructType
   const has_fam: boolean
 end
 
+--- A C union's name, fields, and completeness.
+-- @field cname Resolved C declaration spelling.
+-- @field tagname C struct or union tag spelling.
+-- @field typedef Associated C typedef spelling.
+-- @field fields C field descriptors in declaration order.
+-- @field is_complete Whether the C aggregate definition is complete.
+-- @usage standard-library-reflect.md#c-type-details
 record ForeignUnionType
   const cname: string
   const tagname: string
@@ -180,6 +311,12 @@ record ForeignUnionType
   const is_complete: boolean
 end
 
+--- A C field's name, declared type, bitfield metadata, and flexible-array flag.
+-- @field name Declared C field name.
+-- @field type Erased declared type descriptor.
+-- @field bitfield Bitfield metadata, or nil for an ordinary C field.
+-- @field is_flexible_array Whether this field is an unsized trailing array.
+-- @usage standard-library-reflect.md#c-type-details
 record ForeignFieldType
   const name: string
   const type: Type
@@ -187,6 +324,15 @@ record ForeignFieldType
   const is_flexible_array: boolean
 end
 
+--- Lua debug metadata for an inspected Lua function.
+-- @field source Lua debug source identifier.
+-- @field short_source Abbreviated Lua debug source identifier.
+-- @field line_defined First source line of the Lua function.
+-- @field last_line_defined Last source line of the Lua function.
+-- @field what Lua debug function classification.
+-- @field is_vararg Whether the function accepts a variadic input tail.
+-- @field n_params Number of fixed Lua parameters.
+-- @usage standard-library-reflect.md#containers-and-callable-signatures
 record LuaFunctionType
   const source: string
   const short_source: string
@@ -197,6 +343,35 @@ record LuaFunctionType
   const n_params: integer
 end
 
+--- A tagged erased type schema covering Titan and foreign C types.
+-- @field is_vararg Whether the function accepts a variadic input tail.
+-- @field is_nil Nil variant.
+-- @field is_boolean Boolean variant.
+-- @field is_integer Integer variant.
+-- @field is_float Float variant.
+-- @field is_string String variant.
+-- @field is_value Value variant.
+-- @field is_named Named variant.
+-- @field is_array Array variant.
+-- @field is_map Map variant.
+-- @field is_record Record variant.
+-- @field is_union Union variant.
+-- @field is_interface Interface variant.
+-- @field is_option Option variant.
+-- @field is_function Function variant.
+-- @field is_foreign_function Foreign function variant.
+-- @field is_owned_foreign_pointer Owned foreign pointer variant.
+-- @field is_owned_foreign_array Owned foreign array variant.
+-- @field is_foreign_void Foreign void variant.
+-- @field is_foreign_named Foreign named variant.
+-- @field is_foreign_integer Foreign integer variant.
+-- @field is_foreign_float Foreign float variant.
+-- @field is_foreign_pointer Foreign pointer variant.
+-- @field is_foreign_array Foreign array variant.
+-- @field is_foreign_struct Foreign struct variant.
+-- @field is_foreign_union Foreign union variant.
+-- @field is_foreign_typedef Foreign typedef variant.
+-- @usage standard-library-reflect.md#type-descriptors
 union Type
   is_nil()
   is_boolean()
@@ -229,12 +404,21 @@ union Type
   is_foreign_typedef(name: string, target_descriptor: Type, quals: const { string })
 end
 
+--- A registered public record, union, or Interface descriptor.
+-- @field is_record Record variant.
+-- @field is_union Union variant.
+-- @field is_interface Interface variant.
+-- @usage standard-library-reflect.md#nominal-lookup-and-resolution
 union NominalType
   is_record(RecordType)
   is_union(UnionType)
   is_interface(InterfaceType)
 end
 
+--- Read a public field by its one-based descriptor ordinal.
+-- @param i One-based public field, part, or column ordinal.
+-- @return Boxed declared public field value.
+-- @usage standard-library-reflect.md#records
 function RecordValue:get(i: integer): value
   if i < 1 or i > self.n_fields then
     raise "field index " .. string.tostring(i) .. " out of bounds [1, " .. string.tostring(self.n_fields) .. "]"
@@ -246,6 +430,10 @@ function RecordValue:get(i: integer): value
   return result as value
 end
 
+--- Write a mutable public field using its normal dynamic conversion checks.
+-- @param i One-based public field, part, or column ordinal.
+-- @param v Runtime value to inspect or write.
+-- @usage standard-library-reflect.md#records
 function RecordValue:set(i: integer, v: value)
   if i < 1 or i > self.n_fields then
     raise "field index " .. string.tostring(i) .. " out of bounds [1, " .. string.tostring(self.n_fields) .. "]"
@@ -256,6 +444,10 @@ function RecordValue:set(i: integer, v: value)
   field.accessor(L, ffi.lmacro_uvalue(module), self.udata, source, 1)
 end
 
+--- Read an active variant part by its one-based payload position.
+-- @param i One-based public field, part, or column ordinal.
+-- @return Boxed active payload-part value, including nil.
+-- @usage standard-library-reflect.md#unions
 function UnionValue:get(i: integer): value
   if i < 1 or i > self.n_parts then
     raise "part index " .. string.tostring(i) .. " out of bounds [1, " .. string.tostring(self.n_parts) .. "]"
@@ -265,6 +457,10 @@ function UnionValue:get(i: integer): value
   return result as value
 end
 
+--- Read a captured Interface field by its one-based public ordinal.
+-- @param i One-based public field, part, or column ordinal.
+-- @return Boxed captured Interface field value.
+-- @usage standard-library-reflect.md#interfaces
 function InterfaceValue:get(i: integer): value
   if i < 1 or i > self.n_fields then
     raise "field index " .. string.tostring(i) .. " out of bounds [1, " .. string.tostring(self.n_fields) .. "]"
@@ -276,6 +472,9 @@ function InterfaceValue:get(i: integer): value
   return result as value
 end
 
+--- Resolve a registered nominal name, falling back to the value descriptor.
+-- @return Resolved nominal descriptor, or Type.is_value for an unknown name.
+-- @usage standard-library-reflect.md#nominal-lookup-and-resolution
 function NamedType:resolve(): Type
   local found: NominalType? = find_nominal(self.name)
   if found == nil then
@@ -292,6 +491,9 @@ function NamedType:resolve(): Type
   end
 end
 
+--- Resolve one retained C declaration, raising when its key is unknown.
+-- @return One retained C struct, union, or typedef descriptor.
+-- @usage standard-library-reflect.md#nominal-lookup-and-resolution
 function ForeignNamedType:resolve(): Type
   local resolved: Type? = self.declarations[self.name]
   if resolved == nil then
@@ -300,6 +502,9 @@ function ForeignNamedType:resolve(): Type
   return resolved
 end
 
+--- Resolve a named Titan or C descriptor once; leave all other descriptors unchanged.
+-- @return Resolved named descriptor or this unchanged structural descriptor.
+-- @usage standard-library-reflect.md#nominal-lookup-and-resolution
 function Type:resolve(): Type
   case self
   when is_named(named) then
@@ -723,6 +928,10 @@ local function get_or_hydrate_from_metatable(mt: { value: value }): Type
   return t
 end
 
+--- Look up an initialized nominal type without importing its module.
+-- @param name Name used by this operation.
+-- @return Registered nominal descriptor, or nil when the name is unknown.
+-- @usage standard-library-reflect.md#nominal-lookup-and-resolution
 function find_nominal(name: string): NominalType?
   local cached: NominalType? = nominal_cache[name]
   if cached then
@@ -1013,6 +1222,10 @@ local function init_tag_handlers()
   end
 end
 
+--- Classify a runtime value and retain its original container or nominal owner.
+-- @param v Runtime value to inspect or write.
+-- @return Tagged runtime classification retaining the inspected owner.
+-- @usage standard-library-reflect.md#inspecting-values
 function inspect(v: value): Value
   local tv: foreign TValue = v
   local tag = ffi.lmacro_ttype(tv)
