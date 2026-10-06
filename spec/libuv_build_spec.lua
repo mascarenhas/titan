@@ -732,16 +732,17 @@ describe("libuv Makefile configuration", function()
             local print_makefile = root .. "/flags.mk"
             write_file(print_makefile,
                 "print-titan-flags:\n\t@printf '%s\\n' '$(CFLAGS)'\n")
-            local function flags(host, compiler, override)
+            local function flags(host, compiler, override, profile)
                 -- This standalone query runs through a Lua pipe without the
                 -- parent Make jobserver descriptors. Isolate its settings so
                 -- stale coordination flags cannot prepend a warning to stdout.
-                local argv = { "env", "-u", "CFLAGS", "-u", "MAKEFLAGS",
+                local argv = { "env", "-u", "TITAN_BUILD_PROFILE", "-u", "CFLAGS", "-u", "MAKEFLAGS",
                     "-u", "MFLAGS", "-u", "GNUMAKEFLAGS", "-u", "MAKELEVEL",
                     "-u", "MAKEOVERRIDES", "make", "--no-print-directory", "-s", "-f", "Makefile",
                     "-f", print_makefile, "HOST_OS=" .. host, "CC=" .. compiler,
                     "print-titan-flags" }
                 if override then argv[#argv + 1] = "CFLAGS=" .. override end
+                if profile then argv[#argv + 1] = "TITAN_BUILD_PROFILE=" .. profile end
                 local ok, output = run_argv(argv)
                 assert.truthy(ok, output)
                 return output
@@ -753,12 +754,99 @@ describe("libuv Makefile configuration", function()
                 assert.matches("-O3", darwin, 1, true)
                 assert.falsy(darwin:find("-flto", 1, true), darwin)
                 assert.falsy(darwin:find("-ffat-lto-objects", 1, true), darwin)
+                assert.falsy(linux:find("-fno-lto", 1, true), linux)
+                for _, host in ipairs({ "Linux", "Darwin", "Windows" }) do
+                    local validation = flags(host, compiler, nil, "validation")
+                    assert.matches("-O0 -fno-lto", validation, 1, true)
+                    assert.falsy(validation:find("-O3", 1, true), validation)
+                    assert.falsy(validation:find("-flto", 1, true), validation)
+                    assert.falsy(validation:find("-ffat-lto-objects", 1, true), validation)
+                end
             end
             assert.equal("-O1 -DCUSTOM_DEFAULTS=1\n",
                 flags("Linux", "gcc", "-O1 -DCUSTOM_DEFAULTS=1"))
+            local valid, diagnostic = run_argv({ "make", "--no-print-directory", "-s", "-f", "Makefile",
+                "-f", print_makefile, "TITAN_BUILD_PROFILE=production validation", "print-titan-flags" })
+            assert.is_false(valid)
+            assert.matches("TITAN_BUILD_PROFILE must be production or validation", diagnostic, 1, true)
         end, debug.traceback)
         remove_tree(root)
         if not tested then error(test_error, 0) end
+    end)
+
+    it("expands the selected Busted executable before preserving caller command bytes", function()
+        local root = make_temp_dir()
+        local tested, test_error = xpcall(function()
+            local print_makefile = root .. "/busted-command.mk"
+            write_file(print_makefile, "print-busted-command:\n\t@printf '%s\\n' $(call make_shell_quote_value,BUSTED)\n")
+            local function query(...)
+                local argv = { "env", "-u", "BUSTED", "-u", "TITAN_BUILD_PROFILE", "-u", "MAKEFLAGS", "-u", "MFLAGS", "-u", "GNUMAKEFLAGS", "-u", "MAKELEVEL", "-u", "MAKEOVERRIDES", "make", "--no-print-directory", "-s", "-f", "Makefile", "-f", print_makefile, "PREFIX=" .. root, "print-busted-command" }
+                for _, word in ipairs({ ... }) do argv[#argv + 1] = word end
+                local ok, output = run_argv(argv)
+                assert.truthy(ok, output)
+                return output
+            end
+            assert.equal("busted\n", query())
+            assert.equal(root .. "/bin/busted\n", query("TITAN_BUILD_PROFILE=validation"))
+            assert.equal("wrapper $(literal) command\n", query("TITAN_BUILD_PROFILE=validation", "BUSTED=wrapper $(literal) command"))
+        end, debug.traceback)
+        remove_tree(root)
+        if not tested then error(test_error, 0) end
+    end)
+
+    it("isolates Windows validation SDKs and preserves production native defaults", function()
+        local root = make_temp_dir()
+        local tested, test_error = xpcall(function()
+            local print_makefile = root .. "/windows-profile.mk"
+            write_file(print_makefile, table.concat({
+                "print-windows-profile:",
+                "\t@printf '%s\\n' '$(TITAN_BUILD_PROFILE)' '$(LUA_CFLAGS)' '$(LUA_LDFLAGS)' '$(NATIVE_CFLAGS)' '$(NATIVE_LDFLAGS)' '$(RUNTIME_CFLAGS)' '$(RUNTIME_LDFLAGS)' '$(COMPILER_CFLAGS)' '$(COMPILER_LDFLAGS)' '$(PREFIX)' '$(WINDOWS_BUILD_ROOT)' ",
+                "\t@test \"$$TITAN_BUILD_PROFILE\" = '$(TITAN_BUILD_PROFILE)'", "",
+            }, "\n"))
+            local function query(...)
+                local argv = { "env", "-u", "TITAN_BUILD_PROFILE", "-u", "PREFIX", "-u", "WINDOWS_BUILD_ROOT",
+                    "-u", "MAKEFLAGS", "-u", "MFLAGS", "-u", "GNUMAKEFLAGS", "-u", "MAKELEVEL", "-u", "MAKEOVERRIDES",
+                    "make", "--no-print-directory", "-s", "-f", "Makefile.windows", "-f", print_makefile, "print-windows-profile" }
+                for _, word in ipairs({ ... }) do argv[#argv + 1] = word end
+                return run_argv(argv)
+            end
+            local ok, production = query()
+            assert.truthy(ok, production)
+            assert.matches("production\n-O2 -Wall -Wextra\n\n-O2\n\n-O2 -Wall -Wextra\n\n-O2 -Wall -Wextra\n\n", production, 1, true)
+            assert.matches("/.windows-sdk\n", production, 1, true)
+            assert.matches("/windows-build\n", production, 1, true)
+            for _, selection in ipairs({ "TITAN_BUILD_PROFILE=validation", "MAKECMDGOALS=compiler-check", "MAKECMDGOALS=titan-stdlib-test" }) do
+                local valid, validation = query(selection)
+                assert.truthy(valid, validation)
+                assert.matches("validation\n-O0 -fno-lto -Wall -Wextra\n-O0 -fno-lto\n-O0 -fno-lto\n-O0 -fno-lto\n-O0 -fno-lto -Wall -Wextra\n-O0 -fno-lto\n-O0 -fno-lto -Wall -Wextra\n-O0 -fno-lto\n", validation, 1, true)
+                assert.matches("/.windows-sdk-validation\n", validation, 1, true)
+                assert.matches("/windows-build-validation\n", validation, 1, true)
+            end
+            local overridden, explicit = query("TITAN_BUILD_PROFILE=validation", "LUA_CFLAGS=-O1 -DUSER=1", "RUNTIME_LDFLAGS=-Wl,caller", "PREFIX=/caller/sdk", "WINDOWS_BUILD_ROOT=/caller/build")
+            assert.truthy(overridden, explicit)
+            assert.matches("validation\n-O1 -DUSER=1\n", explicit, 1, true)
+            assert.matches("-Wl,caller\n", explicit, 1, true)
+            assert.matches("/caller/sdk\n/caller/build\n", explicit, 1, true)
+            local valid, diagnostic = query("TITAN_BUILD_PROFILE=production validation")
+            assert.is_false(valid)
+            assert.matches("TITAN_BUILD_PROFILE must be production or validation", diagnostic, 1, true)
+            assert.matches("etc/titan/build-profile", read_file("Makefile.windows"), 1, true)
+        end, debug.traceback)
+        remove_tree(root)
+        if not tested then error(test_error, 0) end
+    end)
+
+    it("checks portable Windows profile argv and rejects invalid test entry profiles", function()
+        local ok, output = run_argv({ "bash", "scripts/check_windows_build_profile.sh" })
+        assert.truthy(ok, output)
+        assert.matches("strict validation and idempotent flag propagation passed", output, 1, true)
+        for _, script in ipairs({ "spec/support/run_rock_tests.sh", "spec/support/ci_test_groups.sh" }) do
+            for _, profile in ipairs({ "", "production validation", "optimized" }) do
+                local accepted, diagnostic = run_argv({ "env", "TITAN_BUILD_PROFILE=" .. profile, "bash", script })
+                assert.is_false(accepted)
+                assert.matches("TITAN_BUILD_PROFILE must be production or validation", diagnostic, 1, true)
+            end
+        end
     end)
 
     it("keeps the stdlib object graph equal to all source import edges", function()
@@ -1524,7 +1612,7 @@ done
             "no-brotli", "no-autoload-config",
             "$(OPENSSL_EXTRA_CONFIGURE_FLAGS)",
         }, makefile_words("OPENSSL_CONFIGURE_FLAGS"))
-        assert.same({ "-O2", "-g", "-fPIC", "-fvisibility=hidden" },
+        assert.same({ "$(if", "$(filter", "validation,$(TITAN_BUILD_PROFILE)),$(TITAN_VALIDATION_FLAGS),-O2)", "-g", "-fPIC", "-fvisibility=hidden" },
             makefile_words("OPENSSL_REQUIRED_CFLAGS"))
         local makefile = read_file("Makefile")
         for _, contract in ipairs({
@@ -5191,10 +5279,10 @@ done
                 'TITAN_EXTRA_CFLAGS: "-O0 -fno-lto -g ' ..
                 '-fsanitize=address,undefined'), sanitizer_job)
             assert.equal(1, count_literal(sanitizer_job,
-                'TITAN_EXTRA_LDFLAGS: "-O1 -fno-lto -g ' ..
+                'TITAN_EXTRA_LDFLAGS: "-O0 -fno-lto -g ' ..
                 '-fsanitize=address,undefined'), sanitizer_job)
             assert.equal(1, count_literal(sanitizer_job,
-                'LUA_MYCFLAGS: "-fPIC -O1 -g ' ..
+                'LUA_MYCFLAGS: "-fPIC -O0 -fno-lto -g ' ..
                 '-fsanitize=address,undefined'), sanitizer_job)
             for _, contract in ipairs({
                 'SANITIZER_NATIVE_CACHE_SCHEMA: "v2"',
@@ -5263,7 +5351,7 @@ done
             assert.truthy(sanitizer_native_restore_step:find(
                 "titan%-sanitizer%-native%-%${{ env%." ..
                 "SANITIZER_NATIVE_CACHE_SCHEMA }}%-%${{ runner%.os }}" ..
-                "%-%${{ runner%.arch }}%-%${{ steps%." ..
+                "%-%${{ runner%.arch }}%-%${{ env%.TITAN_BUILD_PROFILE }}%-%${{ steps%." ..
                 "sanitizer%-native%-cache%-key%.outputs%.digest }}"))
             for _, fingerprint in ipairs({
                 "titan_abi=$TITAN_ABI_VERSION",
@@ -5272,7 +5360,7 @@ done
                 "libuv_profile=$LIBUV_BUILD_PROFILE",
                 "sqlite3=$SANITIZER_SQLITE3_VERSION:$SANITIZER_SQLITE3_SHA256",
                 "sqlite3_cflags=$SQLITE3_BUILD_CFLAGS",
-                "rock_cflags=${ROCK_CFLAGS:--O2 -fPIC}",
+                "rock_cflags=${ROCK_CFLAGS:--O0 -fno-lto -fPIC}",
                 "titan_cppflags=${TITAN_EXTRA_CPPFLAGS:-}",
                 "titan_cflags=$TITAN_EXTRA_CFLAGS",
                 "ld_version=$ld_version",

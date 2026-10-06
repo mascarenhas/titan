@@ -1,7 +1,7 @@
 # Included by Makefile.windows. Windows runtime and private PEG payload only.
-RUNTIME_CFLAGS ?= -O2 -Wall -Wextra
+RUNTIME_CFLAGS ?= $(TITAN_WINDOWS_NATIVE_CFLAGS) -Wall -Wextra
 RUNTIME_CPPFLAGS ?=
-RUNTIME_LDFLAGS ?=
+RUNTIME_LDFLAGS ?= $(TITAN_WINDOWS_NATIVE_LDFLAGS)
 ifeq ($(origin AR),default)
 AR := llvm-ar
 endif

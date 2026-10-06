@@ -1286,7 +1286,7 @@ local function compile_and_run(hard_memory, expose_lua_internals)
 
     local argv = assert(cdriver.split_shell_words(os.getenv("CC") or "cc"))
     for _, word in ipairs({
-        "--std=c99", hard_memory and "-O0" or "-O1", "-g",
+        "--std=c99", "-O0", "-fno-lto", "-g",
         "-Wall", "-Wextra", "-fno-optimize-sibling-calls",
         "-I.", "-Ititan-runtime", "-Ilua-5.5.1/src", "-Ilibbacktrace",
     }) do

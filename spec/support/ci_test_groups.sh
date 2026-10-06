@@ -16,6 +16,12 @@ else
     set +u
 fi
 
+export TITAN_BUILD_PROFILE=${TITAN_BUILD_PROFILE-validation}
+case $TITAN_BUILD_PROFILE in
+    production|validation) ;;
+    *) echo 'TITAN_BUILD_PROFILE must be production or validation' >&2; exit 2 ;;
+esac
+
 if [[ -z ${BUSTED:-} ]]; then
     if [[ -n ${PREFIX:-} && -x $PREFIX/bin/busted ]]; then
         BUSTED=$PREFIX/bin/busted

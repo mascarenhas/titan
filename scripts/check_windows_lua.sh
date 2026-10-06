@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
+source "$(dirname "$0")/windows_build_profile.sh"
+titan_windows_profile validation
 
 if [[ $# != 2 || ${MSYSTEM:-} != CLANG64 ]]; then
   echo 'usage (native CLANG64): check_windows_lua.sh PREFIX BUILD_ROOT' >&2
@@ -55,14 +57,15 @@ done
 # Parse quoted compiler arguments without evaluating shell syntax.
 CC=${CC:-clang} perl -MText::ParseWords=shellwords -e 'my @a = shellwords($ENV{CC}); die "Invalid CC command\n" unless @a; print "$_\0" for @a' > "$check_root/compiler.argv"
 mapfile -d '' -t compiler < "$check_root/compiler.argv"
-"${compiler[@]}" -std=c99 -O2 -Wall -Wextra -Werror \
+titan_windows_raw_flags "$check_root" LUA
+"${compiler[@]}" -std=c99 -Wall -Wextra "${cppflags[@]}" "${cflags[@]}" -Werror \
   -I "$prefix/src/lua-5.5.1" -c spec/fixtures/windows/lua_sdk_probe.c \
   -o "$check_root/consumer.o"
 llvm-readobj --symbols "$check_root/consumer.o" > "$check_root/consumer-symbols.txt"
 for name in lua_ident luai_ctype_ luaP_opmodes luaT_typenames_; do
   grep -F "Name: __imp_$name" "$check_root/consumer-symbols.txt" >/dev/null
 done
-"${compiler[@]}" -shared -Wl,--exclude-all-symbols \
+"${compiler[@]}" "${cppflags[@]}" "${cflags[@]}" -shared "${ldflags[@]}" -Wl,--exclude-all-symbols \
   -o "$check_root/lua-sdk-probe.dll" "$check_root/consumer.o" \
   "$prefix/lib/liblua-5.5.1.dll.a"
 inspect_imports "$check_root/lua-sdk-probe.dll" "$check_root/consumer-imports.txt"
@@ -91,10 +94,10 @@ cp "$prefix/bin/lua.exe" "$prefix/bin/lua55.dll" "$runtime/bin/"
 cp "$check_root/lua-sdk-probe.dll" "$runtime/lib/lua/5.5/titan_lua_sdk_probe.dll"
 printf '%s\n' 'return "relocated UTF-8 Lua source"' > "$runtime/share/lua/5.5/relocation_é.lua"
 cp spec/fixtures/windows/lua_loader_probe.lua "$probe_root/probe.lua"
-"${compiler[@]}" -shared -O2 -Wl,--exclude-all-symbols \
+"${compiler[@]}" "${cppflags[@]}" "${cflags[@]}" -shared "${ldflags[@]}" -Wl,--exclude-all-symbols \
   -Xlinker --out-implib -Xlinker "$probe_root/loader-dependency.dll.a" \
   -o "$probe_root/titan_lua_loader_dependency.dll" spec/fixtures/windows/lua_loader_dependency.c
-"${compiler[@]}" -shared -O2 -Wl,--exclude-all-symbols -I "$prefix/include" \
+"${compiler[@]}" "${cppflags[@]}" "${cflags[@]}" -shared "${ldflags[@]}" -Wl,--exclude-all-symbols -I "$prefix/include" \
   -o "$provider/titan_loader_canary.dll" spec/fixtures/windows/lua_loader_canary.c \
   "$probe_root/loader-dependency.dll.a" "$prefix/lib/liblua-5.5.1.dll.a"
 # Each invocation is fresh: an earlier mapping cannot satisfy a later lookup.

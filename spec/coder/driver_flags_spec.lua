@@ -65,7 +65,10 @@ local function titanc(overrides, ...)
 
     -- These subprocesses exercise source-checkout SDK selection even when
     -- Busted itself uses the installed SDK through its checkout profile.
-    local argv = { "env", "-u", "TITAN_ROCKS_ROOT" }
+    local argv = { "env", "-u", "TITAN_ROCKS_ROOT", "-u", "TITAN_BUILD_PROFILE" }
+    if environment.TITAN_BUILD_PROFILE then
+        table.insert(argv, "TITAN_BUILD_PROFILE=" .. environment.TITAN_BUILD_PROFILE)
+    end
     for _, name in ipairs(ENVIRONMENT_KEYS) do
         table.insert(argv, name .. "=" .. environment[name])
     end
@@ -269,6 +272,36 @@ describe("Titan driver generic build flags", function()
             end
         end
         assert.is_true(checked >= 3, output)
+    end)
+
+    it("uses validation defaults for compilation and linking before explicit overrides", function()
+        local ok, output = titanc({
+            TITAN_BUILD_PROFILE = "validation",
+            CC = "cc -DTITAN_DRIVER_CC_HONORED=1",
+            TITAN_EXTRA_CPPFLAGS = "-iquote '" .. INCLUDE .. "' " ..
+                "-DTITAN_DRIVER_CPP_BRANCH=37",
+            TITAN_EXTRA_CFLAGS = "-O1",
+            TITAN_EXTRA_LDFLAGS = "-O1",
+        }, "-v", "--tree", APPLICATION, MODULE)
+        assert.truthy(ok, output)
+        local checked = 0
+        for line in output:gmatch("[^\n]+") do
+            if line:find("'-c'", 1, true) or line:find("'-shared'", 1, true) then
+                local baseline = line:find("'-O0'", 1, true)
+                if baseline then
+                    assert.is_true(baseline < assert(line:find("'-O1'", 1, true), line))
+                    assert.truthy(line:find("'-fno-lto'", 1, true), line)
+                    assert.falsy(line:find("'-O3'", 1, true), line)
+                    assert.falsy(line:find("'-flto", 1, true), line)
+                    assert.falsy(line:find("'-ffat-lto-objects'", 1, true), line)
+                    checked = checked + 1
+                end
+            end
+        end
+        assert.is_true(checked >= 3, output)
+        local invalid, diagnostic = titanc({ TITAN_BUILD_PROFILE = "production validation" }, MODULE)
+        assert.is_false(invalid)
+        assert.matches("TITAN_BUILD_PROFILE must be production or validation", diagnostic, 1, true)
     end)
 
     it("preserves an explicitly selected compiler random seed", function()

@@ -18,19 +18,28 @@ initially serial. The native build rules remain separate.
 ```sh
 git submodule update --init --recursive
 make -f Makefile.windows lua PREFIX=/c/Titan/sdk
-make -f Makefile.windows lua-check PREFIX=/c/Titan/sdk
+make -f Makefile.windows lua-check PREFIX=/c/Titan/sdk-validation
 ```
 
 Then, from ordinary Windows PowerShell, run the separate native-launch gate
 where local script execution policy permits it:
 
 ```powershell
-powershell.exe -NoProfile -File scripts/check_windows_lua.ps1 -BuildRoot C:\path\to\checkout\windows-build
+powershell.exe -NoProfile -File scripts/check_windows_lua.ps1 -BuildRoot C:\path\to\checkout\windows-build-validation
 ```
 
 `-File` is subject to PowerShell execution policy. The gate does not change that
 policy or request a bypass; a scripts-disabled environment requires an
 authorized ordinary-command invocation of the explicit checks instead.
+
+Windows build scripts use `TITAN_BUILD_PROFILE=production` by default;
+component checks and the shared test scripts default to `validation`. Validation
+uses `-O0 -fno-lto` for native C compilation and final linking.
+Ordinary production native helpers/dependencies retain their existing O2
+defaults; the Titan driver keeps its O3 Windows production default. Explicit
+native and `TITAN_EXTRA_*` flags follow the profile defaults, preserving caller
+and sanitizer overrides. Build each profile in a separate SDK prefix and
+Windows build root; the profile is recorded in configuration receipts.
 
 The component targets have separate checks. Successful Lua tests do not imply
 that the complete compiler, standard library or language server works.
@@ -129,6 +138,10 @@ and [Windows DLL search order](https://learn.microsoft.com/en-us/windows/win32/d
 
 ## Verification boundaries
 
+`bash scripts/check_windows_build_profile.sh` checks profile selection, quoted
+flag arguments, override ordering, and invalid configurations without a Windows
+SDK or VM.
+
 `make -f Makefile.windows lua-source-check` can run on Linux with Clang and
 `llvm-readobj`. It compiles real x64 COFF header consumers in four source-role
 combinations, checks C++ opener linkage and producer annotations, and compiles
@@ -174,7 +187,7 @@ the Unix `OPENSSL_MODE=system` default does not select Windows dependencies.
 
 ```sh
 make -f Makefile.windows native-source-check
-make -f Makefile.windows native-check PREFIX=/c/Titan/sdk
+make -f Makefile.windows native-check PREFIX=/c/Titan/sdk-validation
 ```
 
 | Runtime in `bin/` | Import library in `lib/` |
@@ -224,7 +237,7 @@ or that usable certificate trust roots were loaded. These checks do not establis
 Titan stdlib behavior, network interoperability, or a Windows CA-store policy.
 
 After that gate, run the exact EXE path recorded in
-`windows-build/native-check/native-probe-path.txt` from ordinary PowerShell
+`windows-build-validation/native-check/native-probe-path.txt` from ordinary PowerShell
 with the argument in `native-config-path.txt`, a restricted process PATH, and
 another CWD as well. A native compile,
 import-closure audit, and successful native behavior checks are required before
@@ -249,7 +262,7 @@ the build tree. Third-party notices and license texts are staged under
 `share/titan/` with the runtime SDK.
 
 ```sh
-make -f Makefile.windows compiler-check runtime-check PREFIX=/c/Titan/sdk
+make -f Makefile.windows compiler-check runtime-check PREFIX=/c/Titan/sdk-validation
 ```
 
 Runtime staging seeds `lib/titan/0.6/titan.dll` only when absent. An existing
@@ -312,14 +325,17 @@ parent directories; junction/symlink destinations fail validation.
 
 ## Shared native standard-library tests
 
-After publishing the current provider, run the complete common suite from
-CLANG64. Choose a disposable workspace on a local NTFS volume:
+Build and publish a validation-profile provider into its separate SDK, then run
+the complete common suite from CLANG64. Choose a disposable workspace on a local
+NTFS volume:
 
 ```sh
+TITAN_BUILD_PROFILE=validation make -f Makefile.windows install-stdlib \
+  PREFIX=/c/Titan/sdk-validation
 make -f Makefile.windows titan-stdlib-test-build \
-  PREFIX=/c/Titan/sdk TITAN_TEST_BUILD_DIR=/c/Titan/native-tests
+  PREFIX=/c/Titan/sdk-validation TITAN_TEST_BUILD_DIR=/c/Titan/native-tests-validation
 make -f Makefile.windows titan-stdlib-test-run \
-  PREFIX=/c/Titan/sdk TITAN_TEST_BUILD_DIR=/c/Titan/native-tests
+  PREFIX=/c/Titan/sdk-validation TITAN_TEST_BUILD_DIR=/c/Titan/native-tests-validation
 ```
 
 `titan-stdlib-test` composes both steps. `TITAN_FILTER` selects a runtime Lua
@@ -330,10 +346,12 @@ allowlist: `spec/support/stdlib_test_modules.mk` supplies the same 27 explicit
 roots to all three platforms, including filesystem, SQLite, and local watchers.
 
 The build copies the supplied SDK and authored fixtures into its marked
-workspace, preserving the published SDK. It rejects unrelated existing
-directories and nonlocal or non-NTFS workspaces. Test outputs, scratch files,
-native child executables, and logs stay inside that workspace. The runner uses
-the bounded Job Object supervisor and drains both output streams, including
+workspace, preserving the published SDK. It verifies the SDK profile marker
+against the selected profile and records that profile for later run commands;
+a run with a different selected profile requires rebuilding the workspace.
+It rejects unrelated existing directories and nonlocal or non-NTFS workspaces.
+Test outputs, scratch files, native child executables, and logs stay inside that
+workspace. The runner uses the bounded Job Object supervisor and drains both output streams, including
 when the aggregate fails or times out. `TITAN_TEST_TIMEOUT` defaults to 300
 seconds. Keep the complete native exit status, including values above 255.
 The test launcher reserves 8 MiB of stack so the common deep-recursion oracles

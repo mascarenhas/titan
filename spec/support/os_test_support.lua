@@ -30,8 +30,13 @@ local function build_process_child(workspace)
     local argv = { "env", "CCACHE_DISABLE=1" }
     append(argv, shell_words(os.getenv("CC") or "cc", "CC"))
     append(argv, {
-        "-std=c99", "-O2", "-Wall", "-Wextra", "-Werror",
+        "-std=c99", "-Wall", "-Wextra", "-Werror",
     })
+    local profile = os.getenv("TITAN_BUILD_PROFILE") or "validation"
+    assert(profile == "validation" or profile == "production", "invalid TITAN_BUILD_PROFILE")
+    append(argv, profile == "validation" and { "-O0", "-fno-lto" } or { "-O3" })
+    local extra_cflags = os.getenv("TITAN_EXTRA_CFLAGS")
+    if extra_cflags and #extra_cflags > 0 then append(argv, shell_words(extra_cflags, "TITAN_EXTRA_CFLAGS")) end
     local sanitizer_cflags = os.getenv("TITAN_TEST_EXTRA_CFLAGS")
     if sanitizer_cflags and #sanitizer_cflags > 0 then
         append(argv, shell_words(sanitizer_cflags,
@@ -43,6 +48,8 @@ local function build_process_child(workspace)
         archive,
     })
     append(argv, shell_words(ldflags, "libuv LDFLAGS"))
+    local extra_ldflags = os.getenv("TITAN_EXTRA_LDFLAGS")
+    if extra_ldflags and #extra_ldflags > 0 then append(argv, shell_words(extra_ldflags, "TITAN_EXTRA_LDFLAGS")) end
     local sanitizer_ldflags = os.getenv("TITAN_TEST_EXTRA_LDFLAGS")
     if sanitizer_ldflags and #sanitizer_ldflags > 0 then
         append(argv, shell_words(sanitizer_ldflags,

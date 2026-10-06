@@ -17,6 +17,17 @@ local assert = require 'luassert'
 
 local M = {}
 
+-- A direct Busted invocation has no shell wrapper to select validation.
+-- Keep its disposable generated units cheap while honoring an explicit
+-- production profile and preserving later caller/sanitizer overrides.
+if not os.getenv("TITAN_BUILD_PROFILE") then
+    for _, name in ipairs({ "EXTRA_CFLAGS", "EXTRA_LDFLAGS" }) do
+        local flags = { "-O0", "-fno-lto" }
+        for _, flag in ipairs(driver[name] or {}) do flags[#flags + 1] = flag end
+        driver[name] = flags
+    end
+end
+
 -- Direct checker/coder specs bypass the driver's ordinary loader entrypoint.
 -- Configure their native context explicitly from the selected installation,
 -- including for default Busted runs which do not use the checkout helper.

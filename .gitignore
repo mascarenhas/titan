@@ -20,8 +20,11 @@
 
 # local lua install
 /.lua
+/.lua-validation/
 /windows-build/
+/windows-build-validation/
 /.windows-sdk/
+/.windows-sdk-validation/
 
 # libbacktrace source tree (cloned + built by `make libbacktrace`)
 /libbacktrace/

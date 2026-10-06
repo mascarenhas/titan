@@ -1421,7 +1421,7 @@ describe("automatic Lua prefix selection", function()
     local function environment(path, extra)
         local argv = { "env" }
         for _, name in ipairs({
-            "PREFIX", "MAKEFLAGS", "MFLAGS", "MAKEOVERRIDES", "MAKELEVEL",
+            "TITAN_BUILD_PROFILE", "PREFIX", "MAKEFLAGS", "MFLAGS", "MAKEOVERRIDES", "MAKELEVEL",
             "GNUMAKEFLAGS", "LUA_INIT", "LUA_INIT_5_5", "LUA_PATH",
             "LUA_PATH_5_5", "LUA_CPATH", "LUA_CPATH_5_5",
         }) do
@@ -1501,6 +1501,14 @@ inspect-prefix-sdk:
         assert_absent(prefix .. "/bin/luarocks")
         assert_absent(prefix .. "/lib/titan")
         assert_absent(prefix .. "/src")
+    end)
+
+    it("selects an independent validation prefix instead of the active PATH SDK",
+    function()
+        local prefix = workspace .. "/prefix"
+        local path = copy_lua(prefix)
+        assert.equal(prefix_output(workspace .. "/.lua-validation"),
+            inspect(path, nil, { "TITAN_BUILD_PROFILE=validation" }))
     end)
 
     it("preserves directory aliases and resolves external launcher symlinks",

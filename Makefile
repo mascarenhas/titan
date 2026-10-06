@@ -11,12 +11,26 @@
 make_shell_quote = '$(subst ','"'"',$(1))'
 make_shell_quote_value = '$(subst ','"'"',$(value $(1)))'
 
+# Validation is an explicit native-toolchain profile, including runtime and
+# provider dependencies. Choose it before Make expands the test graph.
+TITAN_TEST_GOALS := test rock-test busted-test stdlib-test stdlib-busted-test \
+	titan-stdlib-test titan-stdlib-test-build titan-stdlib-test-objects titan-stdlib-test-run
+TITAN_BUILD_PROFILE ?= $(if $(filter $(TITAN_TEST_GOALS),$(MAKECMDGOALS)),validation,production)
+ifneq ($(TITAN_BUILD_PROFILE),production)
+  ifneq ($(TITAN_BUILD_PROFILE),validation)
+    $(error TITAN_BUILD_PROFILE must be production or validation)
+  endif
+endif
+export TITAN_BUILD_PROFILE
+TITAN_VALIDATION_FLAGS := -O0 -fno-lto
+TITAN_PROFILE_NATIVE_FLAGS = $(if $(filter validation,$(TITAN_BUILD_PROFILE)),$(TITAN_VALIDATION_FLAGS))
+
 # An explicit PREFIX always wins. After the initial `make lua`, discover the
 # Titan-owned Lua on PATH without loading ambient Lua init/module overrides.
 # Keep the launch path's spelling when it names that same physical prefix.
 ifeq ($(origin PREFIX),undefined)
   _TITAN_PATH_PREFIX := $(shell sh $(call make_shell_quote,$(dir $(lastword $(MAKEFILE_LIST)))scripts/detect_lua_prefix.sh) 2>/dev/null)
-  PREFIX := $(if $(strip $(_TITAN_PATH_PREFIX)),$(_TITAN_PATH_PREFIX),/usr/local)
+  PREFIX := $(if $(filter validation,$(TITAN_BUILD_PROFILE)),$(CURDIR)/.lua-validation,$(if $(strip $(_TITAN_PATH_PREFIX)),$(_TITAN_PATH_PREFIX),/usr/local))
 endif
 override PREFIX := $(abspath $(PREFIX))
 
@@ -134,12 +148,12 @@ LIBUV_SHA256      := cb0d6dd2128d5a95bd242c6cc982a24fe608fa93da57b6b4ec763b0018c
 LIBUV_BUNDLED_LIB := $(LIBUV_BUILD_DIR)/libuv.a
 LIBUV_PATCH_FILE  := vendor/libuv/libuv-1.53.0-spawn-close.patch
 LIBUV_EXTRACTED   := $(LIBUV_SRC_DIR)/.titan-extracted-spawn-close-v1
-LIBUV_BUILD_TYPE  ?= Release
+LIBUV_BUILD_TYPE  ?= $(if $(filter validation,$(TITAN_BUILD_PROFILE)),Debug,Release)
 LIBUV_BUILD_PROFILE ?= static-pic-release-tests-off-v2
 LIBUV_CMAKE_FLAGS := -DLIBUV_BUILD_SHARED=OFF -DBUILD_TESTING=OFF \
 	-DCMAKE_POSITION_INDEPENDENT_CODE=ON \
 	-DCMAKE_BUILD_TYPE=$(LIBUV_BUILD_TYPE)
-LIBUV_BUILD_CFLAGS ?=
+LIBUV_BUILD_CFLAGS ?= $(TITAN_PROFILE_NATIVE_FLAGS)
 
 # HTTP parsing is always a private, statically carried standard-library
 # dependency.  Release archives contain the generated C parser, so the build
@@ -213,7 +227,7 @@ OPENSSL_CONFIGURE_FLAGS := --api=3.0 no-shared no-pinshared no-atexit \
 	no-apps no-tests no-docs no-legacy no-comp no-dso no-module no-quic \
 	no-zlib no-zstd no-brotli no-autoload-config \
 	$(OPENSSL_EXTRA_CONFIGURE_FLAGS)
-OPENSSL_REQUIRED_CFLAGS := -O2 -g -fPIC -fvisibility=hidden
+OPENSSL_REQUIRED_CFLAGS := $(if $(filter validation,$(TITAN_BUILD_PROFILE)),$(TITAN_VALIDATION_FLAGS),-O2) -g -fPIC -fvisibility=hidden
 
 HOST_OS   := $(shell uname -s)
 HOST_ARCH := $(shell uname -m)
@@ -280,15 +294,17 @@ CLANG_FORMAT ?= clang-format
 LUA_CC    ?= $(CC)
 LUA_AR    ?= $(AR) rcu
 LUA_RANLIB ?= $(RANLIB)
-TITAN_DEFAULT_OPTFLAGS := -O3
-ifeq ($(HOST_OS),Linux)
-  TITAN_DEFAULT_OPTFLAGS += -flto=auto -ffat-lto-objects
+TITAN_DEFAULT_OPTFLAGS := $(if $(filter validation,$(TITAN_BUILD_PROFILE)),$(TITAN_VALIDATION_FLAGS),-O3)
+ifeq ($(TITAN_BUILD_PROFILE),production)
+  ifeq ($(HOST_OS),Linux)
+    TITAN_DEFAULT_OPTFLAGS += -flto=auto -ffat-lto-objects
+  endif
 endif
 CFLAGS    ?= --std=c99 $(TITAN_DEFAULT_OPTFLAGS) -Wall -Wno-unused-but-set-variable -Wno-unused-function -fPIC -g
-LUA_MYCFLAGS  ?= -fPIC
-LUA_MYLDFLAGS ?=
+LUA_MYCFLAGS  ?= -fPIC $(TITAN_PROFILE_NATIVE_FLAGS)
+LUA_MYLDFLAGS ?= $(TITAN_PROFILE_NATIVE_FLAGS)
 LUA_MYLIBS    ?=
-LIBBT_CFLAGS  ?= -fPIC -g -O2
+LIBBT_CFLAGS  ?= -fPIC -g $(if $(filter validation,$(TITAN_BUILD_PROFILE)),$(TITAN_VALIDATION_FLAGS),-O2)
 TITAN_EXTRA_CPPFLAGS ?=
 TITAN_EXTRA_CFLAGS   ?=
 TITAN_EXTRA_LDFLAGS  ?=
@@ -466,7 +482,7 @@ TITAN_BOOTSTRAP_SO := titan-runtime/bootstrap/titan.so
 STDLIB_BOOTSTRAP_PREREQ := $(TITAN_BOOTSTRAP_SO)
 ROCK_LUA_INCDIR ?= $(PREFIX)/include
 ROCK_LUA_HEADERS = $(addprefix $(ROCK_LUA_INCDIR)/,lua.h luaconf.h lauxlib.h)
-ROCK_CFLAGS     ?= -O2 -fPIC
+ROCK_CFLAGS     ?= $(if $(filter validation,$(TITAN_BUILD_PROFILE)),$(TITAN_VALIDATION_FLAGS),-O2) -fPIC
 ROCK_LD         ?= $(CC)
 ifeq ($(HOST_OS),Darwin)
   ROCK_LIBFLAG  ?= -bundle -undefined dynamic_lookup
@@ -985,6 +1001,7 @@ $(LUA_BUILD_CONFIG): $(LUA_SOURCE_READY) $(READLINE_SELECTION_CONFIG) FORCE
 	changed="$@.changed"; \
 	rm -f "$$changed"; \
 	{ printf '%s\n' \
+		$(call make_shell_quote,TITAN_BUILD_PROFILE=$(TITAN_BUILD_PROFILE)) \
 		$(call make_shell_quote,PREFIX=$(PREFIX)) \
 		$(call make_shell_quote,LUA_PLATFORM=$(LUA_PLATFORM)) \
 		$(call make_shell_quote,LUA_CC=$(LUA_CC)) \
@@ -1059,14 +1076,16 @@ $(LUAROCKS_INSTALL_STAMP): $(LUA_INSTALL_STAMP) FORCE
 		$(call make_shell_quote,AR=$(AR)) \
 		$(call make_shell_quote,RANLIB=$(RANLIB)) \
 		$(call make_shell_quote,CONFIGURE=--prefix=$(PREFIX) --rocks-tree=$(PREFIX) --with-lua=$(PREFIX) --force-config) \
-		$(call make_shell_quote,CONFIG_POLICY=$(LUAROCKS_CONFIG_POLICY)); } \
+		$(call make_shell_quote,CONFIG_POLICY=$(LUAROCKS_CONFIG_POLICY)) \
+		$(call make_shell_quote,TITAN_BUILD_PROFILE=$(TITAN_BUILD_PROFILE)); } \
 		> "$$stamp_tmp"; \
 	TITAN_CONFIG_PREFIX=$(call make_shell_quote,$(PREFIX)) \
 	TITAN_CONFIG_LUA_VERSION=$(call make_shell_quote,$(LUA_ABI_VERSION)) \
 	TITAN_CONFIG_CC=$(call make_shell_quote,$(CC)) \
 	TITAN_CONFIG_AR=$(call make_shell_quote,$(AR)) \
 	TITAN_CONFIG_RANLIB=$(call make_shell_quote,$(RANLIB)) \
-		"$(LUA_BIN)" -e 'local p = assert(os.getenv("TITAN_CONFIG_PREFIX")); local v = assert(os.getenv("TITAN_CONFIG_LUA_VERSION")); local cc = assert(os.getenv("TITAN_CONFIG_CC")); local ar = assert(os.getenv("TITAN_CONFIG_AR")); local ranlib = assert(os.getenv("TITAN_CONFIG_RANLIB")); local function q(s) return string.format("%q", s) end; local function join(s) return p == "/" and ("/" .. s) or (p .. "/" .. s) end; io.write("-- LuaRocks configuration for Titan (system tree and native toolchain)\n\n"); io.write("rocks_trees = {\n   { name = \"system\", root = ", q(p), " };\n}\n"); io.write("variables = {\n   LUA_DIR = ", q(p), ";\n   LUA_BINDIR = ", q(join("bin")), ";\n   LUA_VERSION = ", q(v), ";\n   LUA = ", q(join("bin/lua")), ";\n   CC = ", q(cc), ";\n   LD = ", q(cc), ";\n   AR = ", q(ar), ";\n   RANLIB = ", q(ranlib), ";\n}\n")' \
+	TITAN_CONFIG_NATIVE_FLAGS=$(call make_shell_quote,$(TITAN_PROFILE_NATIVE_FLAGS)) \
+		"$(LUA_BIN)" -e 'local p = assert(os.getenv("TITAN_CONFIG_PREFIX")); local v = assert(os.getenv("TITAN_CONFIG_LUA_VERSION")); local cc = assert(os.getenv("TITAN_CONFIG_CC")); local ar = assert(os.getenv("TITAN_CONFIG_AR")); local ranlib = assert(os.getenv("TITAN_CONFIG_RANLIB")); local function q(s) return string.format("%q", s) end; local function join(s) return p == "/" and ("/" .. s) or (p .. "/" .. s) end; io.write("-- LuaRocks configuration for Titan (system tree and native toolchain)\n\n"); io.write("rocks_trees = {\n   { name = \"system\", root = ", q(p), " };\n}\n"); local native_flags = assert(os.getenv("TITAN_CONFIG_NATIVE_FLAGS")); io.write("variables = {\n"); if native_flags ~= "" then io.write("   CFLAGS = ", q(native_flags .. " -fPIC"), ";\n"); end; io.write("   LUA_DIR = ", q(p), ";\n   LUA_BINDIR = ", q(join("bin")), ";\n   LUA_VERSION = ", q(v), ";\n   LUA = ", q(join("bin/lua")), ";\n   CC = ", q(cc), ";\n   LD = ", q(cc), ";\n   AR = ", q(ar), ";\n   RANLIB = ", q(ranlib), ";\n}\n")' \
 		> "$$config_tmp"; \
 	if test -x "$(PREFIX)/bin/luarocks" && \
 	   test -r "$@" && cmp -s "$$stamp_tmp" "$@" && \
@@ -1137,6 +1156,7 @@ $(LIBBT_CLONE_STAMP):
 $(LIBBT_BUILD_CONFIG): $(LIBBT_CLONE_STAMP) FORCE
 	@tmp="$@.tmp"; changed="$@.changed"; rm -f "$$changed"; \
 	{ printf '%s\n' \
+		$(call make_shell_quote,TITAN_BUILD_PROFILE=$(TITAN_BUILD_PROFILE)) \
 		$(call make_shell_quote,HOST_OS=$(HOST_OS)) \
 		$(call make_shell_quote,HOST_ARCH=$(HOST_ARCH)) \
 		$(call make_shell_quote,CC=$(CC)) \
@@ -1249,6 +1269,7 @@ $(LIBUV_BUILD_CONFIG): FORCE
 	tmp="$${TMPDIR:-/tmp}/titan-libuv-build-config.$$$$.tmp"; \
 	trap 'rm -f "$$tmp"' 0 1 2 15; \
 	{ printf '%s\n' \
+		$(call make_shell_quote,TITAN_BUILD_PROFILE=$(TITAN_BUILD_PROFILE)) \
 		$(call make_shell_quote,HOST_OS=$(HOST_OS)) \
 		$(call make_shell_quote,HOST_ARCH=$(HOST_ARCH)) \
 		$(call make_shell_quote,CC=$(CC)) \
@@ -1357,6 +1378,7 @@ $(LLHTTP_BUILD_CONFIG): FORCE $(LLHTTP_EXTRACTED) $(LLHTTP_SOURCES) \
 	{ printf '%s\n' \
 		$(call make_shell_quote,LLHTTP_VERSION=$(LLHTTP_VERSION)) \
 		$(call make_shell_quote,LLHTTP_SHA256=$(LLHTTP_SHA256)) \
+		$(call make_shell_quote,TITAN_BUILD_PROFILE=$(TITAN_BUILD_PROFILE)) \
 		$(call make_shell_quote,HOST_OS=$(HOST_OS)) \
 		$(call make_shell_quote,HOST_ARCH=$(HOST_ARCH)) \
 		$(call make_shell_quote,CC=$(CC)) \
@@ -1509,6 +1531,7 @@ $(SQLITE3_BUILD_CONFIG): FORCE $(SQLITE3_EXTRACTED) $(SQLITE3_SOURCES) \
 	{ printf '%s\n' \
 		$(call make_shell_quote,SQLITE3_VERSION=$(SQLITE3_VERSION)) \
 		$(call make_shell_quote,SQLITE3_SHA256=$(SQLITE3_SHA256)) \
+		$(call make_shell_quote,TITAN_BUILD_PROFILE=$(TITAN_BUILD_PROFILE)) \
 		$(call make_shell_quote,HOST_OS=$(HOST_OS)) \
 		$(call make_shell_quote,HOST_ARCH=$(HOST_ARCH)) \
 		$(call make_shell_quote,CC=$(CC)) \
@@ -1658,6 +1681,7 @@ $(OPENSSL_BUILD_CONFIG): FORCE $(OPENSSL_EXTRACTED)
 	{ printf '%s\n' \
 		$(call make_shell_quote,OPENSSL_VERSION=$(OPENSSL_VERSION)) \
 		$(call make_shell_quote,OPENSSL_SHA256=$(OPENSSL_SHA256)) \
+		$(call make_shell_quote,TITAN_BUILD_PROFILE=$(TITAN_BUILD_PROFILE)) \
 		$(call make_shell_quote,HOST_OS=$(HOST_OS)) \
 		$(call make_shell_quote,HOST_ARCH=$(HOST_ARCH)) \
 		$(call make_shell_quote,CC=$(CC)) \
@@ -1754,6 +1778,7 @@ $(LPEGLABEL_BUILD_CONFIG): FORCE $(LPEGLABEL_SOURCES) $(LPEGLABEL_HEADERS) \
 	{ printf '%s\n' \
 		$(call make_shell_quote,LPEGLABEL_VERSION=$(LPEGLABEL_VERSION)) \
 		$(call make_shell_quote,LPEGLABEL_COMMIT=$(LPEGLABEL_COMMIT)) \
+		$(call make_shell_quote,TITAN_BUILD_PROFILE=$(TITAN_BUILD_PROFILE)) \
 		$(call make_shell_quote,HOST_OS=$(HOST_OS)) \
 		$(call make_shell_quote,HOST_ARCH=$(HOST_ARCH)) \
 		$(call make_shell_quote,CC=$(CC)) \
@@ -1866,6 +1891,7 @@ runtime: $(TITAN_RUNTIME_LIB) ## Build the Titan C runtime archive used by every
 $(RUNTIME_BUILD_CONFIG): FORCE
 	@tmp="$@.tmp"; \
 	{ printf '%s\n' \
+		$(call make_shell_quote,TITAN_BUILD_PROFILE=$(TITAN_BUILD_PROFILE)) \
 		$(call make_shell_quote,HOST_OS=$(HOST_OS)) \
 		$(call make_shell_quote,HOST_ARCH=$(HOST_ARCH)) \
 		$(call make_shell_quote,PREFIX=$(PREFIX)) \
@@ -1894,6 +1920,7 @@ $(RUNTIME_BUILD_CONFIG): FORCE
 $(LTITANLIB_BUILD_CONFIG): FORCE
 	@tmp="$@.tmp"; \
 	{ printf '%s\n' \
+		$(call make_shell_quote,TITAN_BUILD_PROFILE=$(TITAN_BUILD_PROFILE)) \
 		$(call make_shell_quote,HOST_OS=$(HOST_OS)) \
 		$(call make_shell_quote,HOST_ARCH=$(HOST_ARCH)) \
 		$(call make_shell_quote,PREFIX=$(PREFIX)) \
@@ -2049,7 +2076,9 @@ install-titan-sdk: $(TITAN_RUNTIME_LIB) $(TITAN_BOOTSTRAP_SO) $(TITAN_RUNTIME_LU
 	fi; \
 	install -m 0644 "$(LLHTTP_HEADER)" "$$rocks_tree/include/"; \
 	install -m 0644 "$(SQLITE3_HEADER)" "$$rocks_tree/include/"; \
-	rm -f "$$rocks_tree/lib/libuv.a"
+	rm -f "$$rocks_tree/lib/libuv.a"; \
+	mkdir -p "$$rocks_tree/etc/titan"; \
+	printf '%s\n' $(call make_shell_quote,$(TITAN_BUILD_PROFILE)) > "$$rocks_tree/etc/titan/build-profile"
 
 # The real bundled libuv archive is private input to the paired titan.so/titan.a
 # provider. The install recipe above removes copies left by older SDKs so
@@ -2187,6 +2216,7 @@ $(STDLIB_CONFIG_STAMP): FORCE $(STDLIB_NATIVE_IDENTITY_PREREQS)
 	@set -e; \
 	tmp="$@.tmp"; \
 	{ printf '%s\n' \
+		$(call make_shell_quote,TITAN_BUILD_PROFILE=$(TITAN_BUILD_PROFILE)) \
 		$(call make_shell_quote,HOST_OS=$(HOST_OS)) \
 		$(call make_shell_quote,HOST_ARCH=$(HOST_ARCH)) \
 		$(call make_shell_quote,TITAN_ABI_VERSION=$(TITAN_ABI_VERSION)) \
@@ -2369,17 +2399,19 @@ include $(TITAN_TEST_MODULE_MANIFEST)
 TITAN_TEST_BUILD_DIR ?= .titan-tests
 TITAN_TEST_EXECUTABLE := $(TITAN_TEST_BUILD_DIR)/$(TITAN_STDLIB_TEST_PROGRAM_OUTPUT)
 # The suite deadline includes fresh child-fixture compilation at the selected
-# optimization level, including Linux LTO, across all 27 test roots.
+# native profile across all 27 test roots, including fresh child compilers.
 # Focused gates may set a lower bound.
 TITAN_TEST_TIMEOUT ?= 600
-TEST_TITANC ?= titanc
-TEST_LUA ?= lua
-BUSTED ?= busted
+TEST_TITANC ?= $(if $(filter validation,$(TITAN_BUILD_PROFILE)),$(call make_shell_quote,$(PREFIX)/bin/titanc),titanc)
+TEST_LUA ?= $(if $(filter validation,$(TITAN_BUILD_PROFILE)),$(PREFIX)/bin/lua,lua)
+ifeq ($(origin BUSTED),undefined)
+BUSTED := $(if $(filter validation,$(TITAN_BUILD_PROFILE)),$(PREFIX)/bin/busted,busted)
+endif
 BUSTED_FILTER ?=
 TITAN_FILTER ?=
 TITAN_TEST_CPPFLAGS = $(if $(strip $(TITAN_EXTRA_CPPFLAGS)),$(TITAN_EXTRA_CPPFLAGS),$(TITAN_TEST_EXTRA_CPPFLAGS))
-TITAN_TEST_CFLAGS = $(if $(strip $(TITAN_EXTRA_CFLAGS)),$(TITAN_EXTRA_CFLAGS),$(TITAN_TEST_EXTRA_CFLAGS))
-TITAN_TEST_LDFLAGS = $(if $(strip $(TITAN_EXTRA_LDFLAGS)),$(TITAN_EXTRA_LDFLAGS),$(TITAN_TEST_EXTRA_LDFLAGS))
+TITAN_TEST_CFLAGS = $(strip $(TITAN_PROFILE_NATIVE_FLAGS) $(if $(strip $(TITAN_EXTRA_CFLAGS)),$(TITAN_EXTRA_CFLAGS),$(TITAN_TEST_EXTRA_CFLAGS)))
+TITAN_TEST_LDFLAGS = $(strip $(TITAN_PROFILE_NATIVE_FLAGS) $(if $(strip $(TITAN_EXTRA_LDFLAGS)),$(TITAN_EXTRA_LDFLAGS),$(TITAN_TEST_EXTRA_LDFLAGS)))
 titan_test_stem = $(patsubst %.titan,%,$(firstword $(TITAN_TEST_SOURCES_$(1))))
 titan_test_outputs = $(call titan_test_stem,$(1)).o $(call titan_test_stem,$(1)).c $(call titan_test_stem,$(1)).ffi.h $(if $(TITAN_TEST_FOREIGN_$(1)),$(call titan_test_stem,$(1)).titan.h)
 TITAN_TEST_MODULE_OBJECTS := $(foreach module,$(TITAN_TEST_MODULES),$(call titan_test_stem,$(module)).o)
@@ -2401,7 +2433,8 @@ TITAN_TEST_COMPILER_PREREQS := Makefile $(TITAN_TEST_MODULE_MANIFEST) \
 	$(TITAN_TEST_INSTALL_ROOT)/share/lua/5.5/c-parser/*.lua \
 	$(TITAN_TEST_INSTALL_ROOT)/src/$(LUA_DIR)/*.h \
 	$(TITAN_TEST_INSTALL_ROOT)/include/*.h $(TITAN_TEST_INSTALL_ROOT)/include/titan/*.h))
-TITAN_TEST_COMPILER_ENV = TITAN_EXTRA_CPPFLAGS=$(call make_shell_quote,$(strip $(TITAN_TEST_CPPFLAGS) -I.)) \
+TITAN_TEST_COMPILER_ENV = TITAN_BUILD_PROFILE=$(call make_shell_quote,$(TITAN_BUILD_PROFILE)) \
+	TITAN_EXTRA_CPPFLAGS=$(call make_shell_quote,$(strip $(TITAN_TEST_CPPFLAGS) -I.)) \
 	TITAN_EXTRA_CFLAGS=$(call make_shell_quote,$(strip $(TITAN_TEST_CFLAGS))) \
 	TITAN_EXTRA_LDFLAGS=$(call make_shell_quote,$(strip $(TITAN_TEST_LDFLAGS)))
 STDLIB_BUSTED_TESTS := \
@@ -2414,14 +2447,14 @@ STDLIB_BUSTED_TESTS := \
 	titan-stdlib-test-build titan-stdlib-test-objects titan-stdlib-test-run titan-stdlib-test
 
 busted-test: ## Run retained Busted specs, optionally with BUSTED_FILTER
-	BUSTED=$(call make_shell_quote_value,BUSTED) \
+	$(TITAN_TEST_COMPILER_ENV) BUSTED=$(call make_shell_quote_value,BUSTED) \
 		BUSTED_FILTER=$(call make_shell_quote_value,BUSTED_FILTER) \
 		TITAN_ROCK_TEST_STDLIB_SPECS=$(call make_shell_quote_value,STDLIB_BUSTED_TESTS) \
 		TITAN_ROCK_TEST_INTERNAL=1 \
 		bash spec/support/run_rock_tests.sh $(EXTRA_TEST_FLAGS)
 
 stdlib-busted-test: ## Run retained stdlib/runtime Busted specs without coverage
-	BUSTED=$(call make_shell_quote_value,BUSTED) \
+	$(TITAN_TEST_COMPILER_ENV) BUSTED=$(call make_shell_quote_value,BUSTED) \
 		BUSTED_FILTER=$(call make_shell_quote_value,BUSTED_FILTER) \
 		TITAN_ROCK_TEST_INTERNAL=1 \
 		bash spec/support/run_rock_tests.sh \
@@ -2435,7 +2468,8 @@ $(TITAN_TEST_CONFIG_STAMP): FORCE
 	  echo "ERROR: native tests require TEST_LUA from an installed Titan SDK" >&2; exit 1; \
 	}; \
 	tmp="$@.tmp"; \
-	printf '%s\n' $(call make_shell_quote,TEST_TITANC=$(TEST_TITANC)) \
+	printf '%s\n' $(call make_shell_quote,TITAN_BUILD_PROFILE=$(TITAN_BUILD_PROFILE)) \
+	  $(call make_shell_quote,TEST_TITANC=$(TEST_TITANC)) \
 	  $(call make_shell_quote,TEST_LUA=$(TEST_LUA)) \
 	  $(call make_shell_quote,CC=$(CC)) $(call make_shell_quote,AR=$(AR)) \
 	  $(call make_shell_quote,RANLIB=$(RANLIB)) \
@@ -2544,6 +2578,7 @@ titan-stdlib-test-run: ## Run the built native suite, optionally with TITAN_FILT
 	}
 	@printf '%s\n' $(TITAN_STDLIB_TEST_ROOTS) > $(call make_shell_quote,$(TITAN_TEST_BUILD_DIR)/roots.txt)
 	@status=0; \
+	$(TITAN_TEST_COMPILER_ENV) \
 	LUA_PATH_5_5="$$( $(TEST_LUA) -E -e 'io.write(package.path)' )" \
 	LUA_CPATH_5_5="$$( $(TEST_LUA) -E -e 'io.write(package.cpath)' )" \
 	TITAN_TEST_BUILD_DIR=$(call make_shell_quote,$(abspath $(TITAN_TEST_BUILD_DIR))) \
@@ -2572,8 +2607,21 @@ titan-stdlib-test: titan-stdlib-test-build ## Build and run all native Titan std
 stdlib-test: stdlib-busted-test ## Run all stdlib/runtime tests without coverage
 	$(MAKE) titan-stdlib-test
 
+# A fresh implicit validation prefix needs a complete current installation.
+# Re-enter after preparation so installed-SDK paths are expanded in a fresh
+# Make process, just as LuaRocks' ordinary test backend does.
+ifeq ($(TITAN_BUILD_PROFILE),validation)
+  ifeq ($(wildcard $(PREFIX)/bin/titanc),)
+    TITAN_ROCK_TEST_PREPARE := 1
+  endif
+endif
+ifeq ($(TITAN_ROCK_TEST_PREPARE),1)
+rock-test: ## Prepare the isolated validation SDK, then run both test domains
+	$(MAKE) test
+else
 rock-test: busted-test ## Run retained Busted specs, then native Titan stdlib tests
 	$(MAKE) titan-stdlib-test
+endif
 
 test: lua luarocks ## Build/install the rock and run the suite via `luarocks test`
 	+$(RECURSIVE_WRAPPER_GUARD) unset LUA_PATH LUA_CPATH LUA_PATH_5_5 LUA_CPATH_5_5; \

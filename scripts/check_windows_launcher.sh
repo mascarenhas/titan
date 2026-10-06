@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
+source "$(dirname "$0")/windows_build_profile.sh"
+titan_windows_profile validation
 if [[ $# != 3 || ${MSYSTEM:-} != CLANG64 ]]; then
   echo 'usage (native CLANG64): check_windows_launcher.sh LUA_SDK BUILD_ROOT GENERATED_FIXTURE' >&2
   exit 2
@@ -21,16 +23,17 @@ CC=${CC:-clang} perl -MText::ParseWords=shellwords -e \
   'my @a = shellwords($ENV{CC}); die "Invalid CC command\n" unless @a; print "$_\0" for @a' \
   > "$check_root/compiler.argv"
 mapfile -d '' -t compiler < "$check_root/compiler.argv"
+titan_windows_raw_flags "$check_root" RUNTIME
 [[ $("${compiler[@]}" -dumpmachine) == x86_64-w64-windows-gnu ]]
-common=(-std=c99 -O2 -Wall -Wextra -Wno-unused-function \
+common=(-std=c99 -Wall -Wextra "${cppflags[@]}" "${cflags[@]}" -Wno-unused-function \
   -I titan-runtime -I "$prefix/src/lua-5.5.1")
 import="$prefix/lib/liblua-5.5.1.dll.a"
 "${compiler[@]}" "${common[@]}" -c titan-runtime/titan.c -o "$check_root/titan.o"
-"${compiler[@]}" "${common[@]}" -shared -Wl,--exclude-all-symbols \
+"${compiler[@]}" "${common[@]}" -shared "${ldflags[@]}" -Wl,--exclude-all-symbols \
   -DFIXTURE_DEPENDENCY spec/fixtures/windows/runtime_loader_provider.c \
   "$check_root/titan.o" "$import" \
   -o "$runtime/lib/titan/0.6/fixture-dependency.dll"
-"${compiler[@]}" "${common[@]}" -shared -Wl,--exclude-all-symbols \
+"${compiler[@]}" "${common[@]}" -shared "${ldflags[@]}" -Wl,--exclude-all-symbols \
   spec/fixtures/windows/runtime_launcher_provider.c "$generated/launcher.def" \
   "$check_root/titan.o" "$import" "${system_libraries[@]}" -o "$runtime/${plan[2]}"
 llvm-readobj --coff-exports "$runtime/${plan[2]}" > "$check_root/provider.exports"
@@ -50,10 +53,10 @@ for variant in launcher direct; do
   "${compiler[@]}" "${common[@]}" -c "$generated/$variant.c" -o "$check_root/$variant.o"
 done
 for name in "${plan[0]}" "${plan[1]}"; do
-  "${compiler[@]}" "$check_root/launcher.o" "$check_root/titan.o" \
+  "${compiler[@]}" "${ldflags[@]}" "$check_root/launcher.o" "$check_root/titan.o" \
     "$check_root/launcher.res" "$import" "${system_libraries[@]}" -o "$runtime/$name"
 done
-"${compiler[@]}" "$check_root/direct.o" "$check_root/titan.o" \
+"${compiler[@]}" "${ldflags[@]}" "$check_root/direct.o" "$check_root/titan.o" \
   "$check_root/launcher.res" "$import" "${system_libraries[@]}" -o "$runtime/bin/direct.exe"
 cp "$runtime/${plan[0]}" "$runtime/bin/renamed.exe"
 cmp "$runtime/${plan[0]}" "$runtime/bin/renamed.exe"
@@ -83,7 +86,7 @@ run_expected bin/renamed.exe 38
 run_expected bin/direct.exe 37
 # A fresh incompatible provider must fail in the native value query, before its
 # Lua opener is called. The process has exited before replacing this image.
-"${compiler[@]}" "${common[@]}" -shared -Wl,--exclude-all-symbols \
+"${compiler[@]}" "${common[@]}" -shared "${ldflags[@]}" -Wl,--exclude-all-symbols \
   '-DFIXTURE_LAUNCHER_ABI="999"' spec/fixtures/windows/runtime_launcher_provider.c \
   "$generated/launcher.def" "$check_root/titan.o" "$import" "${system_libraries[@]}" -o "$runtime/${plan[2]}"
 status=0

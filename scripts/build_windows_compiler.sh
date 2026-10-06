@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
+source "$(dirname "$0")/windows_build_profile.sh"
+titan_windows_profile production
 [[ $# == 3 && ${MSYSTEM:-} == CLANG64 ]]
 build=$(cd "$1" && pwd)
 prefix=$(cd "$2" && pwd)
@@ -14,8 +16,9 @@ mapfile -d '' -t rc < <(perl -MText::ParseWords=shellwords -e 'print "$_\0" for 
 mkdir -p "$build/compiler-objects" "$prefix/lib/lua/5.5" "$prefix/share/lua/5.5"
 objects=$build/compiler-objects
 source=$build/compiler-src
+titan_windows_raw_flags "$objects" COMPILER
 if [[ $mode == deps ]]; then
-    "${cc[@]}" -std=c99 -O2 -Wall -Wextra -shared -Wl,--exclude-all-symbols \
+    "${cc[@]}" -std=c99 -Wall -Wextra "${cppflags[@]}" "${cflags[@]}" -shared "${ldflags[@]}" -Wl,--exclude-all-symbols \
         -Wl,--no-insert-timestamp -I "$prefix/include" \
         "$source/luafilesystem-1_9_0/src/lfs.c" "$prefix/lib/liblua-5.5.1.dll.a" \
         -o "$objects/lfs.dll"
@@ -23,7 +26,7 @@ if [[ $mode == deps ]]; then
     for file in lplcap lplcode lplprint lpltree lplvm; do
         lpeg_sources+=("$source/lpeglabel-1.6.2-1/$file.c")
     done
-    "${cc[@]}" -std=c99 -O2 -Wall -Wextra -shared -Wl,--exclude-all-symbols \
+    "${cc[@]}" -std=c99 -Wall -Wextra "${cppflags[@]}" "${cflags[@]}" -shared "${ldflags[@]}" -Wl,--exclude-all-symbols \
         -Wl,--no-insert-timestamp -I "$prefix/include" "${lpeg_sources[@]}" \
         vendor/windows-compiler/lpeglabel.def "$prefix/lib/liblua-5.5.1.dll.a" \
         -o "$objects/lpeglabel.dll"
@@ -42,12 +45,12 @@ if [[ $mode == deps ]]; then
     perl scripts/windows_compiler_receipt.pl write "$prefix" "$build"
 elif [[ $mode == compiler ]]; then
     perl scripts/windows_compiler_receipt.pl check "$prefix"
-    "${cc[@]}" -std=c99 -O2 -Wall -Wextra -Dmain=titan_lua_main \
+    "${cc[@]}" -std=c99 -Wall -Wextra "${cppflags[@]}" "${cflags[@]}" -Dmain=titan_lua_main \
         -c "$prefix/src/lua-5.5.1/lua.c" -o "$objects/lua-front-end.o"
-    "${cc[@]}" -std=c99 -O2 -Wall -Wextra -Werror \
+    "${cc[@]}" -std=c99 -Wall -Wextra "${cppflags[@]}" "${cflags[@]}" -Werror \
         -c titan-runtime/titanc_windows.c -o "$objects/titanc-windows.o"
     "${rc[@]}" -I vendor/windows-compiler -FO "$objects/titanc.res" vendor/windows-compiler/titanc.rc
-    "${cc[@]}" -municode -Wl,--no-insert-timestamp -o "$objects/titanc.exe" \
+    "${cc[@]}" "${ldflags[@]}" -municode -Wl,--no-insert-timestamp -o "$objects/titanc.exe" \
         "$objects/titanc-windows.o" "$objects/lua-front-end.o" "$objects/titanc.res" \
         "$prefix/lib/liblua-5.5.1.dll.a"
     perl scripts/check_windows_compiler_pe.pl "$objects/titanc.exe"

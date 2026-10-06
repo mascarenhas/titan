@@ -547,7 +547,13 @@ driver.TITAN_SOURCE_PATH = "."
 driver.EMIT_LINE_DIRECTIVES = os.getenv("TITAN_NO_LINE_DIRECTIVES") ~= "1"
 driver.TITAN_RUNTIME_PATH = "titan-runtime/"
 driver.LIBBACKTRACE_PATH = "libbacktrace"
-local base_cflags = "--std=c99 -O3 -Wall -Wno-unused-but-set-variable -Wno-unused-function -fPIC -g"
+driver.BUILD_PROFILE = os.getenv("TITAN_BUILD_PROFILE") or "production"
+local profile_error
+if driver.BUILD_PROFILE ~= "production" and driver.BUILD_PROFILE ~= "validation" then
+    profile_error = "TITAN_BUILD_PROFILE must be production or validation"
+end
+local profile_flags = driver.BUILD_PROFILE == "validation" and "-O0 -fno-lto" or "-O3"
+local base_cflags = "--std=c99 " .. profile_flags .. " -Wall -Wno-unused-but-set-variable -Wno-unused-function -fPIC -g"
 local default_cflags = base_cflags
 driver.CFLAGS = default_cflags
 
@@ -594,7 +600,7 @@ driver.EXTRA_CFLAGS, cflags_error =
     parse_extra_flags("TITAN_EXTRA_CFLAGS")
 driver.EXTRA_LDFLAGS, ldflags_error =
     parse_extra_flags("TITAN_EXTRA_LDFLAGS")
-driver._TOOLCHAIN_FLAGS_ERROR = cppflags_error or cflags_error or ldflags_error
+driver._TOOLCHAIN_FLAGS_ERROR = profile_error or cppflags_error or cflags_error or ldflags_error
 driver.TOOLCHAIN_ERROR = driver.INSTALLATION_ERROR or
     driver._TOOLCHAIN_FLAGS_ERROR
 driver.FOREIGN_C_CONFIGURATION_ID = 0
@@ -615,7 +621,7 @@ end
 
 local function select_platform_defaults(uname, is_darwin)
     local defaults = base_cflags
-    if uname == "Linux" then
+    if uname == "Linux" and driver.BUILD_PROFILE == "production" then
         -- Fat objects retain the native sections needed by the metadata and
         -- target readers, plus IR for GCC/Clang's optimizing final link.
         defaults = defaults .. " -flto=auto -ffat-lto-objects"
