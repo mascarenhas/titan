@@ -245,13 +245,17 @@ reinstalls the selected installation; a cold `rock-test` re-enters through that
 complete preparation so runtime/header paths are expanded after installation.
 Leaf native targets require a prepared matching prefix.
 
-Validation sets generated-C and link defaults to `-O0 -fno-lto`. Make applies
-the same default to Lua, libtitan, libbacktrace, compiler C modules and bundled
-Readline/libuv/LPegLabel/llhttp/SQLite/OpenSSL. LuaRocks' selected-prefix config
-contains validation CFLAGS, and its build/post-install subprocesses inherit the
-profile. Explicit flags remain later in argv; sanitizer recipes retain their
-instrumentation while using O0/no LTO. The SDK records its profile in
-`etc/titan/build-profile`, and configuration stamps include profile identity.
+Validation sets generated-C and link defaults to `-O0 -fno-lto`, including
+libtitan, libbacktrace and bundled Readline/libuv/llhttp/SQLite/OpenSSL. Lua and
+its native compiler dependencies (LPegLabel and Lua filesystem), plus private
+LPegLabel, stay at O2/no LTO so compiler and test execution remains optimized.
+Sanitizer Lua/parser dependencies use O1/no LTO with complete instrumentation;
+Titan payloads retain O0/no LTO. Generic LuaRocks CFLAGS remain O0, while
+`make luarocks` separately reconciles compiler dependencies with scoped host
+compile/link flags. Its receipt hashes installed modules, versions and Lua/tool
+inputs, replacing stale same-version modules and preserving warm builds.
+Parser-specific flags follow generic Titan extras. The SDK records its profile
+in `etc/titan/build-profile`, and configuration stamps include effective flags.
 
 The test environment reaches Busted workers, the aggregate executable and its
 fresh child compilers. Direct coder Busted fixtures also prepend cheap C/link

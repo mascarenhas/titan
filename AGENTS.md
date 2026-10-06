@@ -94,8 +94,11 @@ change them only when their own compatibility rules require it.
 
 `TITAN_BUILD_PROFILE=production` is the unset ordinary build/install default:
 O3 with fat LTO on Linux. Repository test entry points select `validation`,
-which uses O0/no LTO for runtime, provider, native dependencies, generated test
-objects and fresh child compilers. Keep SDK prefixes separate; implicit Unix
+which uses O0/no LTO for Titan runtime, provider, most native dependencies,
+generated test objects and fresh child compilers. Lua, LPegLabel (both compiler
+and private payload) and Lua filesystem stay at O2/no LTO; sanitizer host/parser
+components use O1/no LTO with complete instrumentation. `make luarocks`
+reconciles those compiler dependencies through an exact content/flags receipt. Keep SDK prefixes separate; implicit Unix
 tests use `.lua-validation`, while an explicit PREFIX remains caller-owned.
 `make test` prepares/reinstalls that SDK and cold `make rock-test` re-enters the
 complete preparation. Leaf test build/run targets need a prepared selected SDK.
@@ -301,9 +304,9 @@ or give concurrent builds separate source copies. See
   reports physical C context only after saved/shadow function bytes, names,
   sizes, addresses, and `.text` membership agree; symbolization is
   section-relative to `.text` and must name the exact private shadow path. Any
-  mismatch leaves context unavailable rather than guessing. Lua,
-  libbacktrace, libuv, generated Titan images and disposable fixtures all use
-  sanitizer instrumentation at `-O0` with LTO disabled.
+  mismatch leaves context unavailable rather than guessing. Lua and its compiler dependencies use fully instrumented `-O1`; libbacktrace,
+  libuv, generated Titan images and disposable fixtures use fully instrumented
+  `-O0`. LTO remains disabled throughout.
 
   The cold `test-macos` job remains a dispatch-only fallback for the complete
   macOS pre-merge gate. A complete equivalent local VM run satisfies that gate;

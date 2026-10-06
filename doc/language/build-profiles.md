@@ -12,10 +12,22 @@ TITAN_BUILD_PROFILE=validation .lua-validation/bin/luarocks make --force
 TITAN_BUILD_PROFILE=validation .lua-validation/bin/luarocks test
 ```
 
-The validation profile uses `-O0 -fno-lto` for generated code, native runtime,
-Lua, compiler C dependencies and bundled standard-library payloads. Both
-compilation and final linking use the profile. Explicit native flag overrides
-remain ordered after defaults, including sanitizer instrumentation.
+The validation profile uses `-O0 -fno-lto` for generated code, the Titan native
+runtime and bundled standard-library payloads. Lua and its compiler dependencies
+(LPegLabel and Lua filesystem), plus the private LPegLabel payload, stay optimized
+at `-O2 -fno-lto`: the Lua-written compiler and its tests execute through them.
+Sanitizer builds use `-O1 -fno-lto` for those host/parser components while retaining
+all ASan/UBSan instrumentation; Titan code and other native payloads remain O0.
+
+`make luarocks` reconciles the optimized compiler dependencies before Titan is
+installed. A receipt records their exact compile/link flags, selected versions,
+Lua/tool inputs and native module hashes. It rebuilds stale same-version modules
+and preserves unchanged modules. Generic LuaRocks CFLAGS remain O0 for the Titan
+rock's runtime build. `COMPILER_DEPS_CFLAGS/LDFLAGS` select host dependency flags,
+`LPEGLABEL_ROCK_CFLAGS/LDFLAGS` can specialize the compiler parser, and
+`LPEGLABEL_BUILD_CFLAGS` selects the private parser payload. Parser flags follow
+generic Titan extras so an O0 fixture setting cannot deoptimize the parser.
+Explicit domain overrides remain caller-owned, including sanitizer instrumentation.
 
 Use a separate prefix for each profile. The default repository test commands
 select validation and use `.lua-validation` when no `PREFIX` was supplied;

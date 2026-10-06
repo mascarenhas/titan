@@ -34,12 +34,21 @@ authorized ordinary-command invocation of the explicit checks instead.
 
 Windows build scripts use `TITAN_BUILD_PROFILE=production` by default;
 component checks and the shared test scripts default to `validation`. Validation
-uses `-O0 -fno-lto` for native C compilation and final linking.
+uses `-O0 -fno-lto` for Titan runtime, providers, native test helpers and final
+links. Lua and compiler dependencies (LuaFileSystem and LPegLabel), plus the
+private static LPegLabel payload, use `-O2 -fno-lto` to keep compilation fast.
 Ordinary production native helpers/dependencies retain their existing O2
 defaults; the Titan driver keeps its O3 Windows production default. Explicit
-native and `TITAN_EXTRA_*` flags follow the profile defaults, preserving caller
-and sanitizer overrides. Build each profile in a separate SDK prefix and
-Windows build root; the profile is recorded in configuration receipts.
+native and `TITAN_EXTRA_*` flags follow the Titan profile defaults. Host-domain
+flags follow generic flags so a test `TITAN_EXTRA_CFLAGS=-O0` does not deoptimize
+compiler dependencies. Override `LUA_CFLAGS`/`LUA_LDFLAGS`,
+`COMPILER_DEPS_CFLAGS`/`COMPILER_DEPS_LDFLAGS`,
+and `LPEGLABEL_BUILD_CFLAGS` for host components. Dynamic LPegLabel inherits
+`COMPILER_DEPS_*`; optional `LPEGLABEL_ROCK_CFLAGS`/`LPEGLABEL_ROCK_LDFLAGS`
+overrides remain last. Sanitizer builds use O1/no LTO with full instrumentation
+in the Lua, compiler-dependency and private-parser domains while keeping Titan
+at O0. Build each profile in a separate SDK prefix and Windows build root; the
+profile and effective flags are recorded in configuration receipts.
 
 The component targets have separate checks. Successful Lua tests do not imply
 that the complete compiler, standard library or language server works.
@@ -273,9 +282,12 @@ destination DLL in the publisher. This serial installer does not promise
 concurrent-writer or crash-atomic publication.
 
 The build stamp records source/header bytes, tools, flags, and the controlled
-Lua binary/import pair. Warm reuse also checks output hashes and exact archive
-member inventories. `runtime-check` links the complete runtime and private PEG
-payload into a native consumer, checks permitted PE imports, and exercises
+Lua binary/import pair, including the private parser's separate effective C
+flags. Compiler dependency argv is recorded separately in
+`compiler-objects/dependencies.configuration`; the installed source/artifact
+receipt retains its existing format. Warm reuse also checks output hashes and
+exact archive member inventories. `runtime-check` links the complete runtime
+and private PEG payload into a native consumer, checks permitted PE imports, and exercises
 Lua/PEG and explicit-runtime coroutine yield/resume/destruction. It verifies
 unchanged warm timestamps, repairs deliberately corrupted private outputs,
 and proves that staging preserves an existing valid support image with extra

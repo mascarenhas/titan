@@ -774,6 +774,109 @@ describe("libuv Makefile configuration", function()
         if not tested then error(test_error, 0) end
     end)
 
+    it("keeps validation host tools optimized while Titan payloads remain O0", function()
+        local root = make_temp_dir()
+        local tested, test_error = xpcall(function()
+            local probe = root .. "/host-flags.mk"
+            write_file(probe, "host-flags:\n\t@printf '%s\\n' " ..
+                "'$(CFLAGS)' '$(LUA_MYCFLAGS)' '$(LUA_MYLDFLAGS)' " ..
+                "'$(ROCK_CFLAGS)' '$(READLINE_CFLAGS)' " ..
+                "'$(LPEGLABEL_BUILD_CFLAGS)' '$(COMPILER_DEPS_CFLAGS)' " ..
+                "'$(COMPILER_DEPS_LDFLAGS)'\n")
+            local ok, output = run_argv({"env", "-u", "MAKEFLAGS", "-u", "MFLAGS",
+                "-u", "MAKEOVERRIDES", "-u", "CFLAGS", "-u", "LUA_MYCFLAGS",
+                "-u", "LUA_MYLDFLAGS", "-u", "ROCK_CFLAGS", "-u", "READLINE_CFLAGS",
+                "-u", "LPEGLABEL_BUILD_CFLAGS", "-u", "COMPILER_DEPS_CFLAGS",
+                "-u", "COMPILER_DEPS_LDFLAGS", "make", "--no-print-directory",
+                "-s", "-f", "Makefile", "-f", probe, "host-flags",
+                "TITAN_BUILD_PROFILE=validation"})
+            assert.truthy(ok, output)
+            local rows = {}
+            for row in output:gmatch("[^\n]+") do rows[#rows + 1] = row end
+            assert.matches("-O0 -fno-lto", rows[1], 1, true)
+            assert.same({"-fPIC -O2 -fno-lto", "-O2 -fno-lto",
+                "-O0 -fno-lto -fPIC", "-fPIC -O0 -fno-lto",
+                "-O2 -fno-lto", "-O2 -fno-lto -fPIC", "-O2 -fno-lto"},
+                {table.unpack(rows, 2)})
+        end, debug.traceback)
+        remove_tree(root)
+        if not tested then error(test_error, 0) end
+    end)
+
+    it("reconciles optimized compiler modules by flags and contents without rebuilding warm modules", function()
+        local root = make_temp_dir()
+        local tested, test_error = xpcall(function()
+            local prefix = root .. "/host prefix"
+            local abi = assert(_VERSION:match("Lua (.+)"))
+            local lib = prefix .. "/lib/lua/" .. abi
+            local ok, output = run_argv({"mkdir", "-p", prefix .. "/bin", lib,
+                prefix .. "/etc/titan"})
+            assert.truthy(ok, output)
+            write_file(prefix .. "/rocks.receipt", "selected rocks config\n")
+            write_file(prefix .. "/lua.receipt", "selected optimized Lua\n")
+            write_file(prefix .. "/calls", "")
+            write_file(prefix .. "/luafilesystem.version", "1.6.3-1\n")
+            write_file(lib .. "/lfs.so", "old incompatible module\n")
+            write_file(prefix .. "/bin/luarocks", ([[#!/bin/sh
+set -eu
+prefix=${0%/bin/luarocks}
+case "$1" in
+  show)
+    case "$3" in
+      lpeglabel) test -f "$prefix/lpeglabel.version"; cat "$prefix/lpeglabel.version" ;;
+      luafilesystem) test -f "$prefix/luafilesystem.version"; cat "$prefix/luafilesystem.version" ;;
+    esac ;;
+  build)
+    printf '%s\n' "$@" >> "$prefix/calls"
+    case "$2" in
+      lpeglabel) module=lpeglabel; version=1.6.2-1 ;;
+      luafilesystem) module=lfs; version=1.9.0-1 ;;
+    esac
+    printf '%s\n' "$version" > "$prefix/$2.version"
+    printf 'compiled %s\n' "$*" > "$prefix/lib/lua/ABI/$module.so" ;;
+  *) exit 91 ;;
+esac
+]]):gsub("/ABI/", "/" .. abi .. "/"))
+            ok, output = run_argv({"chmod", "+x", prefix .. "/bin/luarocks"})
+            assert.truthy(ok, output)
+            local sdk = os.getenv("PREFIX") or os.getenv("TITAN_ROCKS_ROOT")
+            local lua = sdk and (sdk .. "/bin/lua") or arg[-1]
+            assert.truthy(lua, "selected Lua executable required")
+            local receipt = prefix .. "/etc/titan/compiler-dependencies.installed"
+            local function prepare(cflags, ldflags)
+                local success, log = run_argv({lua, "-E",
+                    "scripts/prepare_compiler_dependencies.lua", prefix, receipt,
+                    prefix .. "/rocks.receipt", prefix .. "/lua.receipt",
+                    "cc", "ar", "ranlib", cflags, ldflags, cflags, ldflags,
+                    "1.6.2-1"})
+                assert.truthy(success, log)
+            end
+            prepare("-O2 -fno-lto -fPIC", "-O2 -fno-lto")
+            assert.equal(2, count_plain(read_file(prefix .. "/calls"), "build\n"))
+            assert.falsy(read_file(prefix .. "/calls"):find("luafilesystem\n1.6.3-1\n", 1, true))
+            local before = read_file(receipt)
+            assert.truthy(lfs.touch(receipt, 946684800, 946684800))
+            prepare("-O2 -fno-lto -fPIC", "-O2 -fno-lto")
+            assert.equal(before, read_file(receipt))
+            assert.equal(946684800, lfs.attributes(receipt, "modification"))
+            assert.equal(2, count_plain(read_file(prefix .. "/calls"), "build\n"))
+            local instrumented = "-O1 -fno-lto -fPIC -fsanitize=address,undefined"
+            prepare(instrumented, "-O1 -fno-lto -fsanitize=address,undefined")
+            local calls = read_file(prefix .. "/calls")
+            assert.equal(4, count_plain(calls, "build\n"))
+            assert.truthy(calls:find("CFLAGS=" .. instrumented .. "\n", 1, true))
+            assert.truthy(calls:find("LDFLAGS=-O1 -fno-lto -fsanitize=address,undefined\n", 1, true))
+            write_file(lib .. "/lfs.so", "stale restored module\n")
+            prepare(instrumented, "-O1 -fno-lto -fsanitize=address,undefined")
+            assert.equal(6, count_plain(read_file(prefix .. "/calls"), "build\n"))
+            write_file(prefix .. "/lua.receipt", "changed optimized Lua configuration\n")
+            prepare(instrumented, "-O1 -fno-lto -fsanitize=address,undefined")
+            assert.equal(8, count_plain(read_file(prefix .. "/calls"), "build\n"))
+        end, debug.traceback)
+        remove_tree(root)
+        if not tested then error(test_error, 0) end
+    end)
+
     it("expands the selected Busted executable before preserving caller command bytes", function()
         local root = make_temp_dir()
         local tested, test_error = xpcall(function()
@@ -818,7 +921,7 @@ describe("libuv Makefile configuration", function()
             for _, selection in ipairs({ "TITAN_BUILD_PROFILE=validation", "MAKECMDGOALS=compiler-check", "MAKECMDGOALS=titan-stdlib-test" }) do
                 local valid, validation = query(selection)
                 assert.truthy(valid, validation)
-                assert.matches("validation\n-O0 -fno-lto -Wall -Wextra\n-O0 -fno-lto\n-O0 -fno-lto\n-O0 -fno-lto\n-O0 -fno-lto -Wall -Wextra\n-O0 -fno-lto\n-O0 -fno-lto -Wall -Wextra\n-O0 -fno-lto\n", validation, 1, true)
+                assert.matches("validation\n-O2 -fno-lto -Wall -Wextra\n-O2 -fno-lto\n-O0 -fno-lto\n-O0 -fno-lto\n-O0 -fno-lto -Wall -Wextra\n-O0 -fno-lto\n-O0 -fno-lto -Wall -Wextra\n-O0 -fno-lto\n", validation, 1, true)
                 assert.matches("/.windows-sdk-validation\n", validation, 1, true)
                 assert.matches("/windows-build-validation\n", validation, 1, true)
             end
@@ -5282,7 +5385,7 @@ done
                 'TITAN_EXTRA_LDFLAGS: "-O0 -fno-lto -g ' ..
                 '-fsanitize=address,undefined'), sanitizer_job)
             assert.equal(1, count_literal(sanitizer_job,
-                'LUA_MYCFLAGS: "-fPIC -O0 -fno-lto -g ' ..
+                'LUA_MYCFLAGS: "-fPIC -O1 -fno-lto -g ' ..
                 '-fsanitize=address,undefined'), sanitizer_job)
             for _, contract in ipairs({
                 'SANITIZER_NATIVE_CACHE_SCHEMA: "v2"',

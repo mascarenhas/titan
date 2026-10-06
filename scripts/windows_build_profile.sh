@@ -58,3 +58,18 @@ titan_windows_raw_flags() {
   titan_windows_read_flags cppflags "$stage/cppflags.argv" "${category}_CPPFLAGS" TITAN_EXTRA_CPPFLAGS || return
   titan_windows_read_flags ldflags "$stage/ldflags.argv" "${category}_LDFLAGS" TITAN_EXTRA_LDFLAGS || return
 }
+
+# Host suffixes follow generic flags: test O0 extras cannot deoptimize the
+# compiler's Lua modules/private parser. Explicit host overrides remain last.
+titan_windows_host_flags() {
+  local stage=$1 category=$2 compile_suffix=$3 link_suffix=${4-}
+  titan_windows_raw_flags "$stage" "$category" || return
+  titan_windows_default_flags "$compile_suffix" '' '-O2 -fno-lto'
+  titan_windows_read_flags cflags "$stage/host-cflags.argv" \
+    "${category}_CFLAGS" TITAN_EXTRA_CFLAGS "$compile_suffix" || return
+  if [[ -n $link_suffix ]]; then
+    titan_windows_default_flags "$link_suffix" '' '-O2 -fno-lto'
+    titan_windows_read_flags ldflags "$stage/host-ldflags.argv" \
+      "${category}_LDFLAGS" TITAN_EXTRA_LDFLAGS "$link_suffix" || return
+  fi
+}

@@ -69,4 +69,44 @@ done
   fi
   [[ $(cat "$stage/malformed.log") == 'Malformed argument string: TEST_CFLAGS' ]]
 )
-echo 'Windows profile defaults, overrides, quoted/empty argv, strict validation and idempotent flag propagation passed.'
+# Host suffixes override generic test optimization while retaining argv and
+# instrumentation. The runtime link remains O0 when only its private PEG is host.
+(
+  unset HOST_CFLAGS HOST_LDFLAGS
+  export TITAN_BUILD_PROFILE=production
+  titan_windows_host_flags "$stage" TEST HOST_CFLAGS HOST_LDFLAGS
+  [[ ${cflags[*]} == '-O2' && ${#ldflags[@]} == 0 ]]
+)
+(
+  unset HOST_CFLAGS HOST_LDFLAGS
+  export TITAN_BUILD_PROFILE=validation TITAN_EXTRA_CFLAGS='-O0'
+  titan_windows_host_flags "$stage" TEST HOST_CFLAGS HOST_LDFLAGS
+  [[ ${cflags[*]} == '-O0 -fno-lto -O0 -O2 -fno-lto' &&
+     ${ldflags[*]} == '-O0 -fno-lto -O2 -fno-lto' ]]
+  first=$HOST_CFLAGS
+  titan_windows_host_flags "$stage" TEST HOST_CFLAGS HOST_LDFLAGS
+  [[ $HOST_CFLAGS == "$first" ]]
+)
+(
+  unset HOST_CFLAGS
+  export TITAN_BUILD_PROFILE=validation
+  titan_windows_host_flags "$stage" TEST HOST_CFLAGS
+  [[ ${cflags[*]} == '-O0 -fno-lto -O2 -fno-lto' &&
+     ${ldflags[*]} == '-O0 -fno-lto' ]]
+)
+(
+  export TITAN_BUILD_PROFILE=validation TITAN_EXTRA_CFLAGS='-O0 -fsanitize=address,undefined'
+  export TITAN_EXTRA_LDFLAGS='-fsanitize=address,undefined'
+  export HOST_CFLAGS='-O1 -fno-lto -fsanitize=address,undefined "-DHOST=two words"'
+  export HOST_LDFLAGS='-O1 -fno-lto -fsanitize=address,undefined'
+  titan_windows_host_flags "$stage" TEST HOST_CFLAGS HOST_LDFLAGS
+  [[ ${cflags[*]} == '-O0 -fno-lto -O0 -fsanitize=address,undefined -O2 -fno-lto -O1 -fno-lto -fsanitize=address,undefined -DHOST=two words' &&
+     ${cflags[9]} == '-DHOST=two words' ]]
+  [[ ${ldflags[*]} == '-O0 -fno-lto -fsanitize=address,undefined -O2 -fno-lto -O1 -fno-lto -fsanitize=address,undefined' ]]
+)
+(
+  export TITAN_BUILD_PROFILE=production TEST_CFLAGS='' TEST_LDFLAGS='' HOST_CFLAGS='' HOST_LDFLAGS=''
+  titan_windows_host_flags "$stage" TEST HOST_CFLAGS HOST_LDFLAGS
+  [[ ${#cflags[@]} == 0 && ${#ldflags[@]} == 0 ]]
+)
+echo 'Windows profile defaults, host optimization, overrides, quoted/empty argv, strict validation and idempotent flag propagation passed.'

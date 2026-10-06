@@ -74,9 +74,9 @@ jobs:
             .lua/lib/lua/5.5
             .lua/lib/luarocks
             .lua/share/lua/5.5
-          key: ubuntu-24.04-${{ runner.arch }}-${{ env.TITAN_BUILD_PROFILE }}-prefix-system-tree-v2-abi-${{ env.TITAN_ABI_VERSION }}-rocks-3.13.0-${{ hashFiles('titan-0.6.0-1.rockspec') }}
+          key: ubuntu-24.04-${{ runner.arch }}-${{ env.TITAN_BUILD_PROFILE }}-prefix-system-tree-host-optimized-v1-abi-${{ env.TITAN_ABI_VERSION }}-rocks-3.13.0-${{ hashFiles('titan-0.6.0-1.rockspec') }}
           restore-keys: |
-            ubuntu-24.04-${{ runner.arch }}-${{ env.TITAN_BUILD_PROFILE }}-prefix-system-tree-v2-abi-${{ env.TITAN_ABI_VERSION }}-rocks-3.13.0-
+            ubuntu-24.04-${{ runner.arch }}-${{ env.TITAN_BUILD_PROFILE }}-prefix-system-tree-host-optimized-v1-abi-${{ env.TITAN_ABI_VERSION }}-rocks-3.13.0-
 
       - name: Cache bundled libuv source and static build
         uses: ubicloud/cache@v4
@@ -503,16 +503,20 @@ jobs:
       # Generated Titan translation units are large enough that combining
       # optimization with sanitizer instrumentation can exhaust this job's
       # budget. O0 retains the complete ASan/UBSan instrumentation;
-      # Lua and bundled native dependencies also remain at O0 below. Keep LTO off
+      # Lua and parser dependencies stay optimized; other native dependencies
+      # remain at O0 below. Keep LTO off
       # so saved translation-unit bytes still match the diagnostic shadow.
       SANITIZER_FLAGS: "-O0 -fno-lto -g -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer"
       # Make's content stamps deliberately revisit native dependencies from
-      # later targets, so their complete O0 configuration must remain in the
+      # later targets, so their complete configuration must remain in the
       # environment for the whole job rather than being supplied to only the
       # first build.
-      LUA_MYCFLAGS: "-fPIC -O0 -fno-lto -g -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer"
-      LUA_MYLDFLAGS: "-O0 -fno-lto -g -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer"
-      LUA_MYLIBS: "-O0 -fno-lto -g -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer"
+      LUA_MYCFLAGS: "-fPIC -O1 -fno-lto -g -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer"
+      LUA_MYLDFLAGS: "-O1 -fno-lto -g -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer"
+      LUA_MYLIBS: "-O1 -fno-lto -g -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer"
+      COMPILER_DEPS_CFLAGS: "-O1 -fno-lto -fPIC -g -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer"
+      COMPILER_DEPS_LDFLAGS: "-O1 -fno-lto -g -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer"
+      LPEGLABEL_BUILD_CFLAGS: "-O1 -fno-lto"
       LIBBT_CFLAGS: "-fPIC -O0 -fno-lto -g -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer"
       LIBUV_BUILD_PROFILE: "static-pic-debug-tests-off-asan-ubsan-v2"
       LIBUV_BUILD_TYPE: Debug
@@ -729,6 +733,10 @@ jobs:
             test ! -L "$PREFIX/share/titan/0.6/src/titan/test.titan"
           readelf -Ws .lua/bin/lua | grep __asan_
           readelf -Ws .lua/bin/lua | grep __ubsan_
+          for module in lpeglabel lfs; do
+            readelf -Ws "$PREFIX/lib/lua/5.5/$module.so" | grep __asan_
+            readelf -Ws "$PREFIX/lib/lua/5.5/$module.so" | grep __ubsan_
+          done
           readelf -Ws "$provider" | grep __asan_
           readelf -Ws "$provider" | grep __ubsan_
 

@@ -24,6 +24,8 @@ endif
 export TITAN_BUILD_PROFILE
 TITAN_VALIDATION_FLAGS := -O0 -fno-lto
 TITAN_PROFILE_NATIVE_FLAGS = $(if $(filter validation,$(TITAN_BUILD_PROFILE)),$(TITAN_VALIDATION_FLAGS))
+# The compiler and test harness execute through Lua and native Lua modules.
+TITAN_PROFILE_HOST_FLAGS = $(if $(filter validation,$(TITAN_BUILD_PROFILE)),-O2 -fno-lto)
 
 # An explicit PREFIX always wins. After the initial `make lua`, discover the
 # Titan-owned Lua on PATH without loading ambient Lua init/module overrides.
@@ -99,9 +101,9 @@ READLINE_LICENSE_SHA256 := 8ceb4b9ee5adedde47b31e975c1d90c73ad27b6b165a1dcd80c7c
 READLINE_INSTALL_STAMP := $(LUA_DIR)/.titan-readline-$(READLINE_RELEASE).installed
 READLINE_SELECTION_CONFIG := $(LUA_DIR)/.titan-readline-$(READLINE_RELEASE).config
 READLINE_BUILD_PROFILE := static-pic-private-staged-prefix-p3-v4
-READLINE_CFLAGS      ?= $(LUA_MYCFLAGS)
+READLINE_CFLAGS      ?= $(if $(filter validation,$(TITAN_BUILD_PROFILE)),-fPIC $(TITAN_VALIDATION_FLAGS),$(LUA_MYCFLAGS))
 READLINE_CPPFLAGS    ?=
-READLINE_LDFLAGS     ?= $(LUA_MYLDFLAGS)
+READLINE_LDFLAGS     ?= $(if $(filter validation,$(TITAN_BUILD_PROFILE)),$(TITAN_VALIDATION_FLAGS),$(LUA_MYLDFLAGS))
 READLINE_ARFLAGS     ?= cr
 READLINE_HOST        ?=
 READLINE_PKG_CONFIG  ?= pkg-config
@@ -301,8 +303,8 @@ ifeq ($(TITAN_BUILD_PROFILE),production)
   endif
 endif
 CFLAGS    ?= --std=c99 $(TITAN_DEFAULT_OPTFLAGS) -Wall -Wno-unused-but-set-variable -Wno-unused-function -fPIC -g
-LUA_MYCFLAGS  ?= -fPIC $(TITAN_PROFILE_NATIVE_FLAGS)
-LUA_MYLDFLAGS ?= $(TITAN_PROFILE_NATIVE_FLAGS)
+LUA_MYCFLAGS  ?= -fPIC $(TITAN_PROFILE_HOST_FLAGS)
+LUA_MYLDFLAGS ?= $(TITAN_PROFILE_HOST_FLAGS)
 LUA_MYLIBS    ?=
 LIBBT_CFLAGS  ?= -fPIC -g $(if $(filter validation,$(TITAN_BUILD_PROFILE)),$(TITAN_VALIDATION_FLAGS),-O2)
 TITAN_EXTRA_CPPFLAGS ?=
@@ -341,6 +343,13 @@ LPEGLABEL_ARCHIVE_CONFIG := $(LPEGLABEL_BUILD_DIR)/.titan-lpeglabel-archive-conf
 LPEGLABEL_CPPFLAGS := -I$(abspath $(LPEGLABEL_VENDOR_DIR))
 LPEGLABEL_CFLAGS := -std=c99 -fPIC -fvisibility=hidden
 LPEGLABEL_LUA_HEADERS = $(ROCK_LUA_HEADERS)
+# Keep parser execution optimized even when generic Titan extras select O0.
+LPEGLABEL_BUILD_CFLAGS ?= $(TITAN_PROFILE_HOST_FLAGS)
+COMPILER_DEPS_CFLAGS ?= $(TITAN_PROFILE_HOST_FLAGS) -fPIC
+COMPILER_DEPS_LDFLAGS ?= $(TITAN_PROFILE_HOST_FLAGS)
+LPEGLABEL_ROCK_CFLAGS ?= $(COMPILER_DEPS_CFLAGS)
+LPEGLABEL_ROCK_LDFLAGS ?= $(COMPILER_DEPS_LDFLAGS)
+COMPILER_DEPS_INSTALL_STAMP := $(PREFIX)/etc/titan/compiler-dependencies.installed
 
 UV_TITAN_SOURCES := \
 	titan/uv/uv.titan \
@@ -1054,6 +1063,25 @@ $(LUA_LIB): $(LUA_BUILD_CONFIG)
 		MYLIBS="$$lua_mylibs"
 
 luarocks: $(LUAROCKS_INSTALL_STAMP) ## Install pinned LuaRocks into PREFIX
+ifeq ($(TITAN_BUILD_PROFILE),validation)
+luarocks: $(COMPILER_DEPS_INSTALL_STAMP)
+endif
+
+# Generic LuaRocks CFLAGS still own O0 Titan payloads. Only the compiler's
+# native Lua dependencies receive these separately scoped host flags. A
+# content receipt replaces stale same-version modules in an existing prefix.
+$(COMPILER_DEPS_INSTALL_STAMP): $(LUAROCKS_INSTALL_STAMP) FORCE
+	$(LUA_BIN) -E scripts/prepare_compiler_dependencies.lua \
+		$(call make_shell_quote,$(PREFIX)) $(call make_shell_quote,$@) \
+		$(call make_shell_quote,$(LUAROCKS_INSTALL_STAMP)) \
+		$(call make_shell_quote,$(LUA_BUILD_CONFIG)) \
+		$(call make_shell_quote,$(CC)) $(call make_shell_quote,$(AR)) \
+		$(call make_shell_quote,$(RANLIB)) \
+		$(call make_shell_quote,$(COMPILER_DEPS_CFLAGS)) \
+		$(call make_shell_quote,$(COMPILER_DEPS_LDFLAGS)) \
+		$(call make_shell_quote,$(LPEGLABEL_ROCK_CFLAGS)) \
+		$(call make_shell_quote,$(LPEGLABEL_ROCK_LDFLAGS)) \
+		$(call make_shell_quote,$(LPEGLABEL_VERSION))
 
 # This is a content/config migration target, not a one-time touched stamp.
 # LuaRocks' generated config includes a user tree even with --rocks-tree; Titan
@@ -1790,6 +1818,7 @@ $(LPEGLABEL_BUILD_CONFIG): FORCE $(LPEGLABEL_SOURCES) $(LPEGLABEL_HEADERS) \
 		$(call make_shell_quote,TITAN_EXTRA_CFLAGS=$(TITAN_EXTRA_CFLAGS)) \
 		$(call make_shell_quote,LPEGLABEL_CPPFLAGS=$(LPEGLABEL_CPPFLAGS)) \
 		$(call make_shell_quote,LPEGLABEL_CFLAGS=$(LPEGLABEL_CFLAGS)) \
+		$(call make_shell_quote,LPEGLABEL_BUILD_CFLAGS=$(LPEGLABEL_BUILD_CFLAGS)) \
 		$(call make_shell_quote,SOURCES=$(LPEGLABEL_SOURCES)) \
 		$(call make_shell_quote,HEADERS=$(LPEGLABEL_HEADERS)) \
 		$(call make_shell_quote,LUA_HEADERS=$(LPEGLABEL_LUA_HEADERS)); \
@@ -1808,7 +1837,7 @@ $(LPEGLABEL_BUILD_DIR)/%.o: $(LPEGLABEL_VENDOR_DIR)/%.c \
 	@mkdir -p "$(@D)"
 	$(CC) $(TITAN_EXTRA_CPPFLAGS) $(LPEGLABEL_CPPFLAGS) \
 		-I"$(ROCK_LUA_INCDIR)" $(ROCK_CFLAGS) $(LPEGLABEL_CFLAGS) \
-		$(TITAN_EXTRA_CFLAGS) -c "$<" -o "$@"
+		$(TITAN_EXTRA_CFLAGS) $(LPEGLABEL_BUILD_CFLAGS) -c "$<" -o "$@"
 
 # Probe the configured archive commands rather than assuming GNU flags. Use
 # deterministic qDc/-D only when both tools support that pair; otherwise verify

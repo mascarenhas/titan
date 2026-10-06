@@ -247,6 +247,54 @@ describe("private vendored LPegLabel build", function()
             end
         end)
 
+    it("optimizes the parser after generic validation flags and retains sanitizer instrumentation", function()
+        local workspace = temporary_directory("lpeglabel-host-flags")
+        local tested, test_error = xpcall(function()
+            local function build(name, extra, parser, optimization)
+                local build_dir = workspace .. "/" .. name
+                local ok, output = make_lpeglabel({
+                    "TITAN_BUILD_PROFILE=validation",
+                    "LPEGLABEL_BUILD_DIR=" .. build_dir,
+                    "TITAN_EXTRA_CFLAGS=" .. extra,
+                    "LPEGLABEL_BUILD_CFLAGS=" .. parser,
+                })
+                assert.truthy(ok, output)
+                local compiled = 0
+                for line in output:gmatch("[^\r\n]+") do
+                    if line:find(" -c ", 1, true) and line:find("lpl", 1, true) then
+                        local flags = assert(cdriver.split_shell_words(line))
+                        local effective
+                        for _, flag in ipairs(flags) do
+                            if flag:match("^%-O[0-3s]$") then effective = flag end
+                            assert.falsy(flag:match("^%-flto"), line)
+                        end
+                        assert.equal(optimization, effective, line)
+                        compiled = compiled + 1
+                    end
+                end
+                assert.equal(5, compiled, output)
+                local config = read_file(build_dir .. "/.titan-lpeglabel-build-config")
+                assert.truthy(config:find("LPEGLABEL_BUILD_CFLAGS=" .. parser .. "\n", 1, true))
+                return build_dir
+            end
+            build("ordinary", "-O0 -fno-lto", "-O2 -fno-lto", "-O2")
+            local host_ok, host = run({"uname", "-s"})
+            assert.truthy(host_ok, host)
+            if host:match("^%s*Linux%s*$") then
+                local instrumented = build("sanitizer",
+                    "-O0 -fno-lto -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer",
+                    "-O1 -fno-lto", "-O1")
+                local ok, symbols = run(configured_argv("NM", "nm", "-u",
+                    instrumented .. "/libtitan-lpeglabel.a"))
+                assert.truthy(ok, symbols)
+                assert.truthy(symbols:find("__asan_", 1, true), symbols)
+                assert.truthy(symbols:find("__ubsan_", 1, true), symbols)
+            end
+        end, debug.traceback)
+        remove_tree(workspace)
+        if not tested then error(test_error, 0) end
+    end)
+
     it("preserves archive and stamp mtimes on an unchanged warm build",
         function()
             ensure_archive()
