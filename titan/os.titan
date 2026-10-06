@@ -1,3 +1,7 @@
+--- Clocks, calendars, environment, process streams, signals, and child-process lifecycle.
+-- @module titan.os
+-- @usage standard-library-os.md
+
 local uv = import "uv"
 local async = import "async"
 local iteration = import "iteration"
@@ -20,6 +24,17 @@ foreign import "string.h"
 -- remains only for calendar, difference, formatting, and locale operations
 -- that libuv does not provide; this facade exposes ordinary Titan values.
 
+--- Calendar date returned by date with the *t format.
+-- @field year Calendar year.
+-- @field month Month in 1..12.
+-- @field day Day of month in 1..31.
+-- @field hour Hour in 0..23.
+-- @field min Minute in 0..59.
+-- @field sec Second, including a host-reported leap second.
+-- @field wday Weekday in 1..7, with Sunday as 1.
+-- @field yday Day of year beginning at 1.
+-- @field isdst Daylight-saving indication, or nil when unknown.
+-- @usage standard-library-os.md
 record Date
   year: integer
   month: integer
@@ -32,24 +47,37 @@ record Date
   isdst: boolean?
 end
 
+--- Terminal child-process exit code and signal information.
+-- @field code Process exit code.
+-- @field signal Signal name when recognized, otherwise nil.
+-- @field signal_number Numeric terminating signal, or zero for an ordinary exit.
+-- @usage standard-library-os.md
 record ExitStatus
   code: integer
   signal: string?
   signal_number: integer
 end
 
+--- Opaque child-process configuration borrowed by SpawnOption callbacks.
+-- @usage standard-library-os.md
 record SpawnConfig
   local handle: ProcessConfig
 end
 
+--- Child-process option callback returning a native status code.
+-- @usage standard-library-os.md
 type SpawnOption = function (SpawnConfig): (integer)
 
+--- Parent-facing readable process or standard-input stream.
+-- @usage standard-library-os.md
 record InputStream
   local handle: Stdio?
   local parent_descriptor: integer
   local excess: string
 end
 
+--- Parent-facing writable process or standard-output stream.
+-- @usage standard-library-os.md
 record OutputStream
   local handle: Stdio?
   local parent_descriptor: integer
@@ -59,6 +87,11 @@ end
 -- captured parent-facing endpoints of spawned processes. Their uv wrapper
 -- contains the private pipe/TTY handle union; provenance and ownership remain
 -- ordinary metadata and never determine the native stream kind.
+--- Spawned process with independently owned optional captured streams.
+-- @field stdin Writable child stdin endpoint, or nil when inherited.
+-- @field stdout Readable child stdout endpoint, or nil when inherited.
+-- @field stderr Readable child stderr endpoint, possibly shared with stdout, or nil.
+-- @usage standard-library-os.md
 record Process
   local handle: ProcessOwner
   stdin: OutputStream?
@@ -66,8 +99,14 @@ record Process
   stderr: InputStream?
 end
 
+--- Stable readable standard-input stream of the Titan process.
+-- @usage standard-library-os.md
 stdin: InputStream = InputStream { handle = nil, parent_descriptor = 0, excess = "" }
+--- Stable writable standard-output stream of the Titan process.
+-- @usage standard-library-os.md
 stdout: OutputStream = OutputStream { handle = nil, parent_descriptor = 1 }
+--- Stable writable standard-error stream of the Titan process.
+-- @usage standard-library-os.md
 stderr: OutputStream = OutputStream { handle = nil, parent_descriptor = 2 }
 
 local function byte_at(text: string, index: integer): integer
@@ -295,16 +334,29 @@ local function read_input_until(stream: InputStream, delimiter: string,
   return nil
 end
 
+--- Return consumed process CPU time in seconds.
+-- @return CPU seconds, rather than elapsed wall time.
+-- @usage standard-library-os.md
 function clock(): float
   return os_clock()
 end
 
+--- Return the difference between two timestamps in seconds.
+-- @param later Later timestamp.
+-- @param earlier Earlier timestamp.
+-- @return Floating-point second difference.
+-- @usage standard-library-os.md
 function difftime(later: integer, earlier: integer): float
   return ffi.difftime(
     later as foreign time_t,
     earlier as foreign time_t) as float
 end
 
+--- Format a timestamp or return a Date record using the *t format.
+-- @param format C-style format; nil selects %c and leading ! selects UTC.
+-- @param timestamp Timestamp; nil selects the current time.
+-- @return Formatted string or Date record boxed as value.
+-- @usage standard-library-os.md
 function date(format: string?, timestamp: integer?): value
   local actual_format = "%c"
   if format then actual_format = format as string end
@@ -346,6 +398,11 @@ function date(format: string?, timestamp: integer?): value
   return formatted_date(actual_format, calendar)
 end
 
+--- Query or change the process-wide locale category.
+-- @param locale Locale name, empty for environment selection, or nil to query.
+-- @param category Locale category; nil selects all.
+-- @return Selected locale name, or nil if unavailable.
+-- @usage standard-library-os.md
 function setlocale(locale: string?, category: string?): string?
   local actual_category = "all"
   if category then actual_category = category as string end
@@ -362,6 +419,16 @@ function setlocale(locale: string?, category: string?): string?
   return selected as string
 end
 
+--- Return the current timestamp or normalize a supplied local calendar date.
+-- @param year Calendar year; omit all calendar fields for the current timestamp.
+-- @param month Month number, required with a calendar year.
+-- @param day Day of month, required with a calendar year.
+-- @param hour Hour; nil defaults to noon.
+-- @param min Minute; nil defaults to zero.
+-- @param sec Second; nil defaults to zero.
+-- @param isdst Daylight-saving hint, or nil to let the host decide.
+-- @return Integer timestamp.
+-- @usage standard-library-os.md
 function time(year: integer?, month: integer?, day: integer?,
               hour: integer?, min: integer?, sec: integer?,
               isdst: boolean?): integer
@@ -412,84 +479,151 @@ function time(year: integer?, month: integer?, day: integer?,
   return instant as integer
 end
 
+--- Read a process environment variable.
+-- @param name Variable name.
+-- @return Value, or nil when absent.
+-- @usage standard-library-os.md
 function getenv(name: string): string?
   return os_getenv(name)
 end
 
+--- Set a process-wide environment variable.
+-- @param name Variable name.
+-- @param contents New value.
+-- @usage standard-library-os.md
 function setenv(name: string, contents: string)
   os_setenv(name, contents)
 end
 
+--- Remove a process-wide environment variable.
+-- @param name Variable name.
+-- @usage standard-library-os.md
 function unsetenv(name: string)
   os_unsetenv(name)
 end
 
+--- Return the process current working directory.
+-- @usage standard-library-os.md
 function cwd(): string
   return current_directory("os.cwd")
 end
 
+--- Change the process-wide working directory.
+-- @param path New directory; coordinate and restore temporary changes.
+-- @usage standard-library-os.md
 function chdir(path: string)
   change_directory(path, "os.chdir")
 end
 
+--- Return the current user home directory.
+-- @usage standard-library-os.md
 function homedir(): string
   return os_homedir()
 end
 
+--- Return the operating-system temporary directory.
+-- @usage standard-library-os.md
 function tmpdir(): string
   return os_tmpdir()
 end
 
+--- Return the current host name.
+-- @usage standard-library-os.md
 function hostname(): string
   return os_hostname()
 end
 
+--- Return the current executable path.
+-- @usage standard-library-os.md
 function exepath(): string
   return os_exepath()
 end
 
+--- Return the current process identifier.
+-- @usage standard-library-os.md
 function pid(): integer
   return os_pid()
 end
 
+--- Return the parent process identifier.
+-- @usage standard-library-os.md
 function ppid(): integer
   return os_ppid()
 end
 
+--- Capture child stdin as a writable parent endpoint.
+-- @param config Borrowed spawn configuration; pass this function as a SpawnOption.
+-- @return Zero on success or a negative native status code.
+-- @usage standard-library-os.md
 function with_stdin(config: SpawnConfig): integer
   return configure_capture(config.handle, 0)
 end
 
+--- Capture child stdout as a readable parent endpoint.
+-- @param config Borrowed spawn configuration; pass this function as a SpawnOption.
+-- @return Zero on success or a negative native status code.
+-- @usage standard-library-os.md
 function with_stdout(config: SpawnConfig): integer
   return configure_capture(config.handle, 1)
 end
 
+--- Capture child stderr as a readable parent endpoint.
+-- @param config Borrowed spawn configuration; pass this function as a SpawnOption.
+-- @return Zero on success or a negative native status code.
+-- @usage standard-library-os.md
 function with_stderr(config: SpawnConfig): integer
   return configure_capture(config.handle, 2)
 end
 
+--- Let the child inherit the parent standard input.
+-- @param config Borrowed spawn configuration; pass this function as a SpawnOption.
+-- @return Zero on success or a negative native status code.
+-- @usage standard-library-os.md
 function with_parent_stdin(config: SpawnConfig): integer
   return configure_parent(config.handle, 0)
 end
 
+--- Let the child inherit the parent standard output.
+-- @param config Borrowed spawn configuration; pass this function as a SpawnOption.
+-- @return Zero on success or a negative native status code.
+-- @usage standard-library-os.md
 function with_parent_stdout(config: SpawnConfig): integer
   return configure_parent(config.handle, 1)
 end
 
+--- Let the child inherit the parent standard error.
+-- @param config Borrowed spawn configuration; pass this function as a SpawnOption.
+-- @return Zero on success or a negative native status code.
+-- @usage standard-library-os.md
 function with_parent_stderr(config: SpawnConfig): integer
   return configure_parent(config.handle, 2)
 end
 
+--- Capture child stdout and stderr through one shared readable endpoint.
+-- @param config Borrowed spawn configuration; pass this function as a SpawnOption.
+-- @return Zero on success or a negative native status code.
+-- @usage standard-library-os.md
 function with_merged_output(config: SpawnConfig): integer
   return os_spawn_config_with_merged_output(config.handle)
 end
 
+--- Create a child-only environment override without changing the parent environment.
+-- @param name Environment variable name.
+-- @param contents Value inherited by the child instead of the parent value.
+-- @return SpawnOption applying the override.
+-- @usage standard-library-os.md
 function with_env(name: string, contents: string): SpawnOption
   return function (config: SpawnConfig): integer
     return os_spawn_config_with_env(config.handle, name, contents)
   end
 end
 
+--- Execute a child directly with explicit argv and optional stdio configuration.
+-- @param file Executable path or name.
+-- @param args Arguments excluding argv[0].
+-- @param ... SpawnOption callbacks; by default all three descriptors are captured.
+-- @return Process whose captured streams must be drained and closed by their owners.
+-- @usage standard-library-os.md
 function spawn(file: string, args: {string},
                ...: SpawnOption): Process
   local config = SpawnConfig(os_spawn_config_new())
@@ -559,6 +693,9 @@ local function spawn_shell(command: string): Process
   return spawn(file, args, with_stdin, with_merged_output, with_shell_arguments)
 end
 
+--- Wait for child termination without closing captured streams.
+-- @return Terminal exit status.
+-- @usage standard-library-os.md
 function Process:wait(): ExitStatus
   local code, signal_number = os_process_wait(self.handle)
   return ExitStatus {
@@ -568,18 +705,29 @@ function Process:wait(): ExitStatus
   }
 end
 
+--- Send a signal to the child process.
+-- @param signal Supported signal name such as term.
+-- @usage standard-library-os.md
 function Process:kill(signal: string)
   os_process_kill(self.handle, signal)
 end
 
+--- Query whether child termination has been observed.
+-- @return True while the process is running.
+-- @usage standard-library-os.md
 function Process:is_running(): boolean
   return os_process_is_running(self.handle)
 end
 
+--- Write all bytes to the process or standard-output stream.
+-- @param data Complete binary byte string.
+-- @usage standard-library-os.md
 function OutputStream:write(data: string)
   os_stdio_write(output_handle(self), data)
 end
 
+--- Close the writable stream; accepted cleanup completes despite Task cancellation.
+-- @usage standard-library-os.md
 function OutputStream:close()
   if self.parent_descriptor >= 0 then return end
   local captured? = self.handle
@@ -588,19 +736,32 @@ function OutputStream:close()
   os_stdio_close(captured as Stdio)
 end
 
+--- Check whether the writable stream is a terminal.
+-- @return True for a TTY endpoint.
+-- @usage standard-library-os.md
 function OutputStream:is_tty(): boolean
   return os_stdio_is_tty(output_handle(self))
 end
 
+--- Read a binary chunk from the process or standard-input stream.
+-- @return Bytes or nil at EOF or after terminal close.
+-- @usage standard-library-os.md
 function InputStream:read(): string?
   return read_stream(self)
 end
 
+--- Read a process stream through a binary delimiter across chunk boundaries.
+-- @param delimiter Nonempty delimiter bytes.
+-- @param chop True removes the delimiter.
+-- @return Delimited bytes or final suffix, or nil at EOF.
+-- @usage standard-library-os.md
 function InputStream:read_until(delimiter: string,
                                 chop: boolean?): string?
   return read_input_until(self, delimiter, chop)
 end
 
+--- Close the readable stream and discard its buffered suffix.
+-- @usage standard-library-os.md
 function InputStream:close()
   -- Main-process stdin is a borrowed stable facade; closing it is a no-op.
   if self.parent_descriptor >= 0 then return end
@@ -611,16 +772,26 @@ function InputStream:close()
   os_stdio_close(captured as Stdio)
 end
 
+--- Check whether the readable stream is a terminal.
+-- @return True for a TTY endpoint.
+-- @usage standard-library-os.md
 function InputStream:is_tty(): boolean
   return os_stdio_is_tty(input_handle(self))
 end
 
+--- Request graceful program exit after Task and native ownership cleanup.
+-- @param code Exit code; nil selects zero.
+-- @usage standard-library-os.md
 function exit(code: integer?)
   local actual_code = 0
   if code then actual_code = code as integer end
   os_exit(actual_code)
 end
 
+--- Wait for a named operating-system signal in the current Task.
+-- @param name Supported signal name.
+-- @return Received signal name.
+-- @usage standard-library-os.md
 function wait_signal(name: string): string
   return os_wait_signal(name)
 end

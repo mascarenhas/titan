@@ -1,3 +1,7 @@
+--- Byte strings, formatting, binary packing, in-memory streams, and regular expressions.
+-- @module titan.string
+-- @usage standard-library-string.md
+
 foreign import "lua.h"
 foreign import "lauxlib.h"
 foreign import "titan/ffi.h"
@@ -18,17 +22,25 @@ local FORMAT_PATTERN: peg.Pattern? = nil
 local REGEX_ALL_BYTES = ""
 local REGEX_PARSER: peg.Pattern? = nil
 
+--- Inclusive one-based byte positions for a match or capture.
+-- @field first Inclusive one-based first byte position.
+-- @field last Inclusive last byte position; an empty span has last < first.
+-- @usage standard-library-string.md#compiled-regular-expressions
 record Span
   first: integer
   last: integer
 end
 
+--- An immutable subject and its whole-match and capture spans.
+-- @usage standard-library-string.md#compiled-regular-expressions
 record RegexMatch
   local subject: string
   local matched_span: Span
   local groups: {Span}
 end
 
+--- A compiled byte-oriented regular expression.
+-- @usage standard-library-string.md#compiled-regular-expressions
 record Regex
   local expression: string
   local capture_count: integer
@@ -36,20 +48,34 @@ record Regex
   local anchored_start: boolean
 end
 
+--- A synchronous reader over immutable in-memory bytes.
+-- @usage standard-library-string.md#in-memory-streams
 record StringReader
   local contents: string
   local position: integer
 end
 
+--- A synchronous chunk builder with linear-time draining.
+-- @usage standard-library-string.md#in-memory-streams
 record StringWriter
   local chunks: {string}
   local length: integer
 end
 
+--- Return the number of bytes in a string.
+-- @param subject Binary byte string to inspect.
+-- @return Number of bytes in subject.
+-- @usage standard-library-string.md#byte-operations
 function len(subject: string): integer
   return #subject
 end
 
+--- Return an inclusive byte substring using Lua-style negative positions.
+-- @param subject Binary byte string to inspect.
+-- @param first One-based first byte position; negative positions count from the end.
+-- @param last Inclusive last byte position; nil selects the documented default.
+-- @return Selected byte substring.
+-- @usage standard-library-string.md#byte-operations
 function sub(subject: string, first: integer,
              last: integer?): string
   local length = #subject
@@ -62,6 +88,10 @@ function sub(subject: string, first: integer,
                        normalized_last - normalized_first + 1)
 end
 
+--- Reverse the bytes of a string.
+-- @param subject Binary byte string to inspect.
+-- @return String with its byte order reversed.
+-- @usage standard-library-string.md#byte-operations
 function reverse(subject: string): string
   local length = #subject
   if length == 0 then return "" end
@@ -75,6 +105,10 @@ function reverse(subject: string): string
   return storage as string
 end
 
+--- Lowercase bytes using the current C locale.
+-- @param subject Binary byte string to inspect.
+-- @return String with lowercase byte conversion applied.
+-- @usage standard-library-string.md#byte-operations
 function lower(subject: string): string
   local length = #subject
   if length == 0 then return "" end
@@ -90,6 +124,10 @@ function lower(subject: string): string
   return storage as string
 end
 
+--- Uppercase bytes using the current C locale.
+-- @param subject Binary byte string to inspect.
+-- @return String with uppercase byte conversion applied.
+-- @usage standard-library-string.md#byte-operations
 function upper(subject: string): string
   local length = #subject
   if length == 0 then return "" end
@@ -105,6 +143,12 @@ function upper(subject: string): string
   return storage as string
 end
 
+--- Repeat a string with an optional separator between copies.
+-- @param subject Binary byte string to inspect.
+-- @param count Number of repetitions.
+-- @param separator Bytes between repetitions; nil uses no separator.
+-- @return Repeated bytes with any supplied separator.
+-- @usage standard-library-string.md#byte-operations
 function rep(subject: string, count: integer,
              separator: string?): string
   if count <= 0 then return "" end
@@ -153,6 +197,12 @@ function rep(subject: string, count: integer,
   return storage as string
 end
 
+--- Return byte values from an inclusive range as multiple results.
+-- @param subject Binary byte string to inspect.
+-- @param first One-based first byte position; negative positions count from the end.
+-- @param last Inclusive last byte position; nil selects the documented default.
+-- @return Byte values in the selected inclusive range.
+-- @usage standard-library-string.md#byte-operations
 function byte(subject: string, first: integer?,
               last: integer?): (...: integer)
   local length = #subject
@@ -174,6 +224,10 @@ function byte(subject: string, first: integer?,
   return ...bytes
 end
 
+--- Build a binary string from byte values in 0..255.
+-- @param ... Byte values, each in 0..255.
+-- @return Binary string containing the supplied byte values.
+-- @usage standard-library-string.md#byte-operations
 function char(...: integer): string
   local length = #...
   if length == 0 then return "" end
@@ -191,6 +245,10 @@ function char(...: integer): string
   return storage as string
 end
 
+--- Convert a value through Lua's string conversion, including __tostring.
+-- @param candidate Value to convert with Lua string conversion.
+-- @return Lua string representation of the candidate.
+-- @usage standard-library-string.md#value-conversion
 function tostring(candidate: value): string
   local top = ffi.lua_gettop(L)
   defer ffi.lua_settop(L, top)
@@ -199,10 +257,17 @@ function tostring(candidate: value): string
   return ffi.lua_totvalue(L, -1) as value
 end
 
+--- Create a reader over the supplied binary string.
+-- @param contents String bytes supplied to this operation.
+-- @return New in-memory reader.
+-- @usage standard-library-string.md#in-memory-streams
 function reader(contents: string): StringReader
   return StringReader(contents, 1)
 end
 
+--- Return all remaining bytes, or nil at EOF.
+-- @return Copied bytes or text, or nil at EOF or when absent.
+-- @usage standard-library-string.md#in-memory-streams
 function StringReader:read(): string?
   if self.position > #self.contents then return nil end
   local result = sub(self.contents, self.position)
@@ -210,6 +275,11 @@ function StringReader:read(): string?
   return result
 end
 
+--- Read through a delimiter, optionally removing it from the returned bytes.
+-- @param delimiter Nonempty byte delimiter to include or remove.
+-- @param chop Remove the delimiter when true; nil or false retains it.
+-- @return Copied bytes or text, or nil at EOF or when absent.
+-- @usage standard-library-string.md#in-memory-streams
 function StringReader:read_until(delimiter: string,
                                  chop: boolean?): string?
   if self.position > #self.contents then return nil end
@@ -234,19 +304,30 @@ function StringReader:read_until(delimiter: string,
   return result
 end
 
+--- Discard remaining bytes and make future reads return nil.
+-- @usage standard-library-string.md#in-memory-streams
 function StringReader:close()
   self.contents = ""
   self.position = 1
 end
 
+--- Create an empty in-memory byte writer.
+-- @return New empty in-memory writer.
+-- @usage standard-library-string.md#in-memory-streams
 function writer(): StringWriter
   return StringWriter()
 end
 
+--- Append immutable bytes to this builder.
+-- @param data Immutable binary bytes to write or decode.
+-- @usage standard-library-string.md#in-memory-streams
 function StringWriter:write(data: string)
   builder_append(self, data)
 end
 
+--- Return the accumulated bytes and reset this builder to empty.
+-- @return Accumulated bytes, leaving this writer empty.
+-- @usage standard-library-string.md#in-memory-streams
 function StringWriter:drain(): string
   local result = builder_finish(self)
   local chunks: {string} = {}
@@ -255,11 +336,20 @@ function StringWriter:drain(): string
   return result
 end
 
+--- Discard the accumulated bytes and reset this builder.
+-- @usage standard-library-string.md#in-memory-streams
 function StringWriter:close()
 end
 
 -- Search for a literal byte sequence and return one-based inclusive bounds.
 -- This is deliberately length-aware: embedded zero bytes are ordinary data.
+--- Search for literal bytes and return inclusive match positions, or nils.
+-- @param subject Binary byte string to inspect.
+-- @param needle Literal byte sequence to find.
+-- @param init Initial one-based byte position; nil starts at the beginning.
+-- @return One-based first match position, or nil when absent.
+-- @return Inclusive last match position, or nil when absent.
+-- @usage standard-library-string.md#byte-operations
 function find(subject: string, needle: string,
               init: integer?): (integer?, integer?)
   local raw_init = 1
@@ -292,6 +382,11 @@ function find(subject: string, needle: string,
   return nil, nil
 end
 
+--- Format checked values using Lua-compatible conversion flags, widths, and precision.
+-- @param format_string Lua-compatible formatting or binary-packing specification.
+-- @param ... Values consumed by the format specification.
+-- @return Formatted string.
+-- @usage standard-library-string.md#formatting
 function format(format_string: string, ...: value): string
   local captured = FORMAT_PATTERN:match(format_string)
   if captured == nil then raise "invalid conversion to 'format'" end
@@ -310,6 +405,11 @@ function format(format_string: string, ...: value): string
   return builder_finish(builder)
 end
 
+--- Encode values into binary bytes using a Lua-compatible packing format.
+-- @param format_string Lua-compatible formatting or binary-packing specification.
+-- @param ... Values consumed by the format specification.
+-- @return Encoded binary bytes.
+-- @usage standard-library-string.md#binary-packing
 function pack(format_string: string, ...: value): string
   local state = new_pack_state(format_string)
   local builder = StringWriter()
@@ -413,6 +513,10 @@ function pack(format_string: string, ...: value): string
   return builder_finish(builder)
 end
 
+--- Return the fixed byte size of a packing format, rejecting variable-size fields.
+-- @param format_string Lua-compatible formatting or binary-packing specification.
+-- @return Fixed format size in bytes.
+-- @usage standard-library-string.md#binary-packing
 function packsize(format_string: string): integer
   local state = new_pack_state(format_string)
   local total_size = 0
@@ -430,6 +534,12 @@ function packsize(format_string: string): integer
   return total_size
 end
 
+--- Decode values from binary bytes and return the next unread byte position.
+-- @param format_string Lua-compatible formatting or binary-packing specification.
+-- @param data Immutable binary bytes to write or decode.
+-- @param initial Initial headers to validate and copy, or nil for an empty collection.
+-- @return Decoded fixed and flexible values, followed by the next unread byte position.
+-- @usage standard-library-string.md#binary-packing
 function unpack(format_string: string, data: string,
                 initial: integer?): (value, ...: value)
   local raw_initial = 1
@@ -540,6 +650,10 @@ function unpack(format_string: string, data: string,
   return ...results
 end
 
+--- Compile a byte-oriented regular expression, raising on invalid syntax.
+-- @param expression Byte-oriented regular-expression source.
+-- @return Compiled regular expression.
+-- @usage standard-library-string.md#compiled-regular-expressions
 function compile_regex(expression: string): Regex
   local parsed = parse_regex(expression)
   local projected, overflow_position =
@@ -573,14 +687,25 @@ function compile_regex(expression: string): Regex
   }
 end
 
+--- Return this regular expression's original source text.
+-- @return Original regular-expression source.
+-- @usage standard-library-string.md#compiled-regular-expressions
 function Regex:source(): string
   return self.expression
 end
 
+--- Return the number of capture groups in this expression.
+-- @return Number of capture groups.
+-- @usage standard-library-string.md#compiled-regular-expressions
 function Regex:group_count(): integer
   return self.capture_count
 end
 
+--- Search for the leftmost match from an optional byte position.
+-- @param subject Binary byte string to inspect.
+-- @param init Initial one-based byte position; nil starts at the beginning.
+-- @return Typed leftmost match, or nil when absent.
+-- @usage standard-library-string.md#compiled-regular-expressions
 function Regex:match(subject: string,
                      init: integer?): RegexMatch?
   local position, overshoot = regex_normalized_init(subject, init)
@@ -588,6 +713,11 @@ function Regex:match(subject: string,
   return regex_find_from(self, subject, position)
 end
 
+--- Iterate successive typed matches, making progress after empty matches.
+-- @param subject Binary byte string to inspect.
+-- @param init Initial one-based byte position; nil starts at the beginning.
+-- @return Iterator yielding the documented match or field values until nil.
+-- @usage standard-library-string.md#iteration-and-substitution
 function Regex:gmatch(subject: string,
                       init: integer?): function (): (RegexMatch?)
   local position, overshoot = regex_normalized_init(subject, init)
@@ -628,6 +758,13 @@ function Regex:gmatch(subject: string,
   end
 end
 
+--- Replace whole matches with callback results and return the substitution count.
+-- @param subject Binary byte string to inspect.
+-- @param replacement Callback receiving the whole match and returning replacement bytes.
+-- @param maximum Maximum substitutions; nil selects all matches.
+-- @return String after substitutions.
+-- @return Number of substitutions performed.
+-- @usage standard-library-string.md#iteration-and-substitution
 function Regex:gsub(subject: string,
                     replacement: function (string): (string),
                     maximum: integer?): (string, integer)
@@ -682,14 +819,24 @@ function Regex:gsub(subject: string,
   return builder_finish(builder), count
 end
 
+--- Return the whole match's inclusive byte span.
+-- @return Whole match byte span.
+-- @usage standard-library-string.md#compiled-regular-expressions
 function RegexMatch:span(): Span
   return Span(self.matched_span.first, self.matched_span.last)
 end
 
+--- Return the number of capture groups represented by this match.
+-- @return Number of capture groups.
+-- @usage standard-library-string.md#compiled-regular-expressions
 function RegexMatch:group_count(): integer
   return #self.groups
 end
 
+--- Return a capture span, or nil when that capture did not participate.
+-- @param index One-based capture-group index.
+-- @return Selected capture span, or nil when it did not participate.
+-- @usage standard-library-string.md#compiled-regular-expressions
 function RegexMatch:group_span(index: integer): Span?
   if index < 1 or index > #self.groups then
     raise "capture group index out of range"
@@ -699,12 +846,19 @@ function RegexMatch:group_span(index: integer): Span?
   return Span(span.first, span.last)
 end
 
+--- Return the complete matched byte string.
+-- @return Whole matched byte string.
+-- @usage standard-library-string.md#compiled-regular-expressions
 function RegexMatch:whole(): string
   return copy_interval(
     self.subject, self.matched_span.first,
     self.matched_span.last - self.matched_span.first + 1)
 end
 
+--- Return one captured string, or nil for an unmatched group.
+-- @param index One-based capture-group index.
+-- @return Captured bytes, or nil when the group did not participate.
+-- @usage standard-library-string.md#compiled-regular-expressions
 function RegexMatch:group(index: integer): string?
   local span: Span? = self:group_span(index)
   if not span then return nil end
@@ -713,6 +867,9 @@ function RegexMatch:group(index: integer): string?
     self.subject, actual.first, actual.last - actual.first + 1)
 end
 
+--- Return the whole match when there are no captures, otherwise all capture values.
+-- @return Whole match or capture values, preserving unmatched captures as nil.
+-- @usage standard-library-string.md#compiled-regular-expressions
 function RegexMatch:values(): (string?, ...: string?)
   if #self.groups == 0 then return self:whole() end
   local results: { string? } = {}
@@ -722,16 +879,33 @@ function RegexMatch:values(): (string?, ...: string?)
   return ...results
 end
 
+--- Search with a cached compiled expression and return a typed match or nil.
+-- @param subject Binary byte string to inspect.
+-- @param expression Byte-oriented regular-expression source.
+-- @param init Initial one-based byte position; nil starts at the beginning.
+-- @return Typed leftmost match, or nil when absent.
+-- @usage standard-library-string.md#compiled-regular-expressions
 function match(subject: string, expression: string,
                init: integer?): RegexMatch?
   return cached_regex(expression):match(subject, init)
 end
 
+--- Iterate typed matches using a cached compiled expression.
+-- @param subject Binary byte string to inspect.
+-- @param expression Byte-oriented regular-expression source.
+-- @param init Initial one-based byte position; nil starts at the beginning.
+-- @return Iterator yielding the documented match or field values until nil.
+-- @usage standard-library-string.md#iteration-and-substitution
 function gmatch(subject: string, expression: string,
                 init: integer?): function (): (RegexMatch?)
   return cached_regex(expression):gmatch(subject, init)
 end
 
+--- Iterate whole-match strings or capture tuples from a cached expression.
+-- @param subject Binary byte string to inspect.
+-- @param pattern Byte-oriented regular-expression source.
+-- @return Iterator yielding the documented match or field values until nil.
+-- @usage standard-library-string.md#iteration-and-substitution
 function matches(subject: string, pattern: string):
                  function (): (string?, ...: string?)
   local iterator = cached_regex(pattern):gmatch(subject, nil)
@@ -742,6 +916,11 @@ function matches(subject: string, pattern: string):
   end
 end
 
+--- Iterate byte fields separated by a regex, or individual bytes when no delimiter is given.
+-- @param subject Binary byte string to inspect.
+-- @param delimiter Regex delimiter; nil iterates individual bytes.
+-- @return Iterator yielding the documented match or field values until nil.
+-- @usage standard-library-string.md#compiled-regular-expressions
 function split(subject: string, delimiter: string?): function (): (string?)
   if not delimiter then
     local position = 1
@@ -771,6 +950,14 @@ function split(subject: string, delimiter: string?): function (): (string?)
   end
 end
 
+--- Replace whole matches through a callback using a cached compiled expression.
+-- @param subject Binary byte string to inspect.
+-- @param expression Byte-oriented regular-expression source.
+-- @param replacement Callback receiving the whole match and returning replacement bytes.
+-- @param maximum Maximum substitutions; nil selects all matches.
+-- @return String after substitutions.
+-- @return Number of substitutions performed.
+-- @usage standard-library-string.md#iteration-and-substitution
 function gsub(subject: string, expression: string,
               replacement: function (string): (string),
               maximum: integer?): (string, integer)

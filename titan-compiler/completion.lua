@@ -5,6 +5,7 @@ local lexer = require 'titan-compiler.lexer'
 local location = require 'titan-compiler.location'
 local types = require 'titan-compiler.types'
 local util = require 'titan-compiler.util'
+local documentation = require 'titan-compiler.documentation'
 local completion = { VERSION = 1, TRANSFORM_VERSION = 1 }
 local hole_name = '__titan_completion_hole'
 local token_patterns = {}
@@ -252,7 +253,9 @@ function completion.fact(name, typ, declaration, domain, owner, mode, depth, loc
         lookup_domain=domain,lookup_key=domain..':'..name,type_key=owner..':'..domain..':'..name..':'..detail,
         scope_id=depth or 0,scope_depth=depth or 0,declaration_order=declaration and declaration._toplevel_order or 0,
         available=(domain~='foreign-value' and domain~='foreign-type') or completion.foreign_available(typ,spelling_only),islocal=private and true or false,visibility=private and 'private' or 'exported',
-        owner_key=owner,access_mode=mode}
+        owner_key=owner,access_mode=mode,
+        documentation=(declaration and documentation.for_node(declaration) or typ and typ._documentation)
+            and documentation.copy(declaration and documentation.for_node(declaration) or typ._documentation)}
 end
 
 local function callable(member,bound)
@@ -269,11 +272,12 @@ completion.callable=callable
 -- Results contain no AST edges, type tables, or process-registry dependencies.
 function completion.describe(entry)
     local module=entry.source_type or entry.type
-    local result={version=completion.VERSION,module_name=module.name,candidates={}}
+    local result={version=completion.VERSION,module_name=module.name,candidates={},
+        documentation=module._documentation and documentation.copy(module._documentation)}
     if entry.completion_facts then
         for _, row in ipairs(entry.completion_facts) do
             local copied={}
-            for key,value in pairs(row) do copied[key]=value end
+            for key,value in pairs(row) do copied[key]=key=="documentation" and documentation.copy(value) or value end
             result.candidates[#result.candidates+1]=copied
         end
         return result
@@ -289,7 +293,9 @@ function completion.describe(entry)
         for _,member in ipairs(members) do add(member.name,member.type,member,'value','module:'..module.name,'dot') end
     end
     for index,members in ipairs({module.type_members or {},module.source_type_members or {}}) do
-        for name,typ in pairs(members) do add(name,typ,nil,'type','module:'..module.name,'type',index==2) end
+        for name,typ in pairs(members) do
+            add(name,typ,{_documentation=module._type_documentation and module._type_documentation[name]},'type','module:'..module.name,'type',index==2)
+        end
     end
     local owners={}
     for name,owner in pairs(entry.declared_registry or entry.ast and entry.ast._declared_registry or {}) do owners[name]=owner end

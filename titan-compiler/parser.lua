@@ -6,6 +6,7 @@ local ast = require "titan-compiler.ast"
 local lexer = require "titan-compiler.lexer"
 local location = require "titan-compiler.location"
 local syntax_errors = require "titan-compiler.syntax_errors"
+local documentation = require "titan-compiler.documentation"
 
 -- Source locations are immutable and interned for a single non-reentrant parse.
 local THIS_FILENAME, SOURCE_LOCATIONS, SOURCE_TEXT
@@ -1327,7 +1328,7 @@ function parser.parse(filename, input)
         end
         error(result, 0)
     end
-    if result then return result end
+    if result then return documentation.attach(result, input) end
     return false, { label = label, loc = location.from_pos(filename, input, position) }
 end
 

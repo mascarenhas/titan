@@ -1,6 +1,12 @@
 -- Synchronous pipe/TTY contributor. Integrate into the network folder module;
 -- concrete owners, stable callbacks and nominal views are owned by stream_owners.
 
+--- Tagged tty mode values for native operations.
+-- @field TTY_MODE_NORMAL Tty mode normal variant.
+-- @field TTY_MODE_RAW Tty mode raw variant.
+-- @field TTY_MODE_IO Tty mode io variant.
+-- @field TTY_MODE_RAW_VT Tty mode raw vt variant.
+-- @usage uv/types.md#tty_mode_t
 union tty_mode_t
   TTY_MODE_NORMAL()
   TTY_MODE_RAW()
@@ -8,6 +14,10 @@ union tty_mode_t
   TTY_MODE_RAW_VT()
 end
 
+--- Tagged tty vtermstate values for native operations.
+-- @field TTY_SUPPORTED Tty supported variant.
+-- @field TTY_UNSUPPORTED Tty unsupported variant.
+-- @usage uv/types.md#tty_vtermstate_t
 union tty_vtermstate_t
   TTY_SUPPORTED()
   TTY_UNSUPPORTED()
@@ -15,11 +25,25 @@ end
 
 -- Pinned public enum values from uv.h; Titan module constants require a
 -- literal initializer. These are combinable integer flags, not enum unions.
+--- Typed 1 value for native operation selection.
+-- @usage uv/types.md#public-constants
 const PIPE_NO_TRUNCATE: integer = 1
+--- Typed 0x40 value for native operation selection.
+-- @usage uv/types.md#public-constants
 const NONBLOCK_PIPE: integer = 0x40
+--- Typed 1 value for native operation selection.
+-- @usage uv/types.md#public-constants
 const READABLE: integer = 1
+--- Typed 2 value for native operation selection.
+-- @usage uv/types.md#public-constants
 const WRITABLE: integer = 2
 
+--- Initialize a pipe owner on a loop; nonzero `ipc` permits native handle transfer.
+-- @param loop Input initialized owning loop; accepted handles/requests retain it through retirement.
+-- @param handle Mutable final pipe_t owner in fresh or retired state, before this native initialization; successful initialization establishes a close obligation.
+-- @param ipc Input integer value; checked native narrowing occurs before native ownership is accepted.
+-- @return Native integer result with the documented lifetime and units.
+-- @usage uv/functions/pipe.md#pipe_init
 function pipe_init(loop: loop_t, handle: pipe_t, ipc: integer): integer
   if not loop.initialized or handle.phase == HANDLE_LIVE then return ffi.UV_EINVAL end
   local native_ipc = ipc as foreign int
@@ -35,6 +59,11 @@ function pipe_init(loop: loop_t, handle: pipe_t, ipc: integer): integer
   return status
 end
 
+--- Adopt a descriptor into the pipe.
+-- @param handle Mutable initialized pipe_t owner/view; mutations preserve its single owner and reserved native data slot; close completion ends native handle lifetime.
+-- @param file Input integer value; checked native narrowing occurs before native ownership is accepted.
+-- @return Native integer result with the documented lifetime and units.
+-- @usage uv/functions/pipe.md#pipe_open
 function pipe_open(handle: pipe_t, file: integer): integer
   if not handle:valid() then return ffi.UV_EINVAL end
   local native_file = file as foreign uv_file
@@ -42,12 +71,24 @@ function pipe_open(handle: pipe_t, file: integer): integer
   return ffi.uv_pipe_open(handle.native, native_file)
 end
 
+--- Bind the pipe to a native name/path.
+-- @param handle Mutable initialized pipe_t owner/view; mutations preserve its single owner and reserved native data slot; close completion ends native handle lifetime.
+-- @param name Input immutable text/byte owner; native C-string conventions apply where the operation takes text.
+-- @return Native integer result with the documented lifetime and units.
+-- @usage uv/functions/pipe.md#pipe_bind
 function pipe_bind(handle: pipe_t, name: string): integer
   if not handle:valid() then return ffi.UV_EINVAL end
   handle.eligibility.available = 0
   return ffi.uv_pipe_bind(handle.native, name)
 end
 
+--- Bind a pipe using exactly `namelen` name bytes and the supplied native flags; byte-count validation happens before native handoff.
+-- @param handle Mutable initialized pipe_t owner/view; mutations preserve its single owner and reserved native data slot; close completion ends native handle lifetime.
+-- @param name Input immutable text/byte owner; native C-string conventions apply where the operation takes text.
+-- @param namelen Input integer value; checked native narrowing occurs before native ownership is accepted.
+-- @param flags Input integer value; checked native narrowing occurs before native ownership is accepted.
+-- @return Native integer result with the documented lifetime and units.
+-- @usage uv/functions/pipe.md#pipe_bind2
 function pipe_bind2(handle: pipe_t, name: string, namelen: integer,
                     flags: integer): integer
   if not handle:valid() then return ffi.UV_EINVAL end
@@ -58,6 +99,12 @@ function pipe_bind2(handle: pipe_t, name: string, namelen: integer,
   return ffi.uv_pipe_bind2(handle.native, name, native_length, native_flags)
 end
 
+--- Copy the local/peer pipe name into a writable buffer.
+-- @param handle Mutable initialized pipe_t owner/view; mutations preserve its single owner and reserved native data slot; close completion ends native handle lifetime.
+-- @param buffer Output writable buf_t; its byte length is capacity and native writes complete synchronously
+-- @return Native status: zero on success, a negative libuv error on failure.
+-- @return Native integer result with the documented lifetime and units.
+-- @usage uv/functions/pipe.md#pipe_getsockname
 function pipe_getsockname(handle: pipe_t, buffer: buf_t): (integer, integer)
   if not handle:valid() or not buffer.writable then return ffi.UV_EINVAL, 0 end
   local length: foreign size_t = buffer.native.len as integer
@@ -65,6 +112,12 @@ function pipe_getsockname(handle: pipe_t, buffer: buf_t): (integer, integer)
   return status, length
 end
 
+--- Copy the local/peer pipe name into a writable buffer.
+-- @param handle Mutable initialized pipe_t owner/view; mutations preserve its single owner and reserved native data slot; close completion ends native handle lifetime.
+-- @param buffer Output writable buf_t; its byte length is capacity and native writes complete synchronously
+-- @return Native status: zero on success, a negative libuv error on failure.
+-- @return Native integer result with the documented lifetime and units.
+-- @usage uv/functions/pipe.md#pipe_getpeername
 function pipe_getpeername(handle: pipe_t, buffer: buf_t): (integer, integer)
   if not handle:valid() or not buffer.writable then return ffi.UV_EINVAL, 0 end
   local length: foreign size_t = buffer.native.len as integer
@@ -72,6 +125,10 @@ function pipe_getpeername(handle: pipe_t, buffer: buf_t): (integer, integer)
   return status, length
 end
 
+--- Set the number of pending pipe instances used by the native listener where supported.
+-- @param handle Mutable initialized pipe_t owner/view; mutations preserve its single owner and reserved native data slot; close completion ends native handle lifetime.
+-- @param count Input integer value; checked native narrowing occurs before native ownership is accepted.
+-- @usage uv/functions/pipe.md#pipe_pending_instances
 function pipe_pending_instances(handle: pipe_t, count: integer)
   if not handle:valid() then raise "pipe handle is not live" end
   local native_count = count as foreign int
@@ -79,16 +136,29 @@ function pipe_pending_instances(handle: pipe_t, count: integer)
   ffi.uv_pipe_pending_instances(handle.native, native_count)
 end
 
+--- Return how many native handles are pending receipt on an IPC pipe.
+-- @param handle Mutable initialized pipe_t owner/view; mutations preserve its single owner and reserved native data slot; close completion ends native handle lifetime.
+-- @return Native integer result with the documented lifetime and units.
+-- @usage uv/functions/pipe.md#pipe_pending_count
 function pipe_pending_count(handle: pipe_t): integer
   if not handle:valid() then raise "pipe handle is not live" end
   return ffi.uv_pipe_pending_count(handle.native)
 end
 
+--- Return the type of the next native handle pending receipt on an IPC pipe; initialize a compatible owner before accepting it.
+-- @param handle Mutable initialized pipe_t owner/view; mutations preserve its single owner and reserved native data slot; close completion ends native handle lifetime.
+-- @return Native handle_type result with the documented lifetime and units.
+-- @usage uv/functions/pipe.md#pipe_pending_type
 function pipe_pending_type(handle: pipe_t): handle_type
   if not handle:valid() then raise "pipe handle is not live" end
   return handle_type_from_native(ffi.uv_pipe_pending_type(handle.native))
 end
 
+--- Change native named-pipe permissions using READABLE/WRITABLE flags; support is platform-specific.
+-- @param handle Mutable initialized pipe_t owner/view; mutations preserve its single owner and reserved native data slot; close completion ends native handle lifetime.
+-- @param flags Input integer value; checked native narrowing occurs before native ownership is accepted.
+-- @return Native integer result with the documented lifetime and units.
+-- @usage uv/functions/pipe.md#pipe_chmod
 function pipe_chmod(handle: pipe_t, flags: integer): integer
   if not handle:valid() then return ffi.UV_EINVAL end
   local native_flags = flags as foreign int
@@ -98,6 +168,13 @@ end
 
 -- Outputs are CRT file descriptors on Windows, POSIX descriptors on Unix.
 -- Native writes outputs only after full success. No fallible output allocation.
+--- Create an anonymous pipe and return `(status, read_fd, write_fd)`.
+-- @param read_flags Input integer value; checked native narrowing occurs before native ownership is accepted.
+-- @param write_flags Input integer value; checked native narrowing occurs before native ownership is accepted.
+-- @return Native status: zero on success, a negative libuv error on failure.
+-- @return Native operation result or submission status; negative values report libuv errors.
+-- @return Native operation result or submission status; negative values report libuv errors.
+-- @usage uv/functions/pipe.md#pipe
 function pipe(read_flags: integer, write_flags: integer): (integer, integer, integer)
   local native_read_flags = read_flags as foreign int
   local native_write_flags = write_flags as foreign int
@@ -111,6 +188,15 @@ end
 -- Exact native socket tokens avoid narrowing Windows UINT_PTR after acquisition.
 -- Both token records are allocated before the native call. Integration must
 -- reconcile this proposal with the common native identifier representation.
+--- Create a connected pair of native sockets.
+-- @param kind Input integer value; checked native narrowing occurs before native ownership is accepted.
+-- @param protocol Input integer value; checked native narrowing occurs before native ownership is accepted.
+-- @param flags0 Input integer value; checked native narrowing occurs before native ownership is accepted.
+-- @param flags1 Input integer value; checked native narrowing occurs before native ownership is accepted.
+-- @return Native status: zero on success, a negative libuv error on failure.
+-- @return Copied or retained os_sock_t result, or nil on failure or absence.
+-- @return Copied or retained os_sock_t result, or nil on failure or absence.
+-- @usage uv/functions/tcp.md#socketpair
 function socketpair(kind: integer, protocol: integer, flags0: integer,
                      flags1: integer): (integer, os_sock_t?, os_sock_t?)
   local native_kind = kind as foreign int
@@ -130,6 +216,13 @@ function socketpair(kind: integer, protocol: integer, flags0: integer,
   return status, left, right
 end
 
+--- Initialize a terminal owner from a descriptor.
+-- @param loop Input initialized owning loop; accepted handles/requests retain it through retirement.
+-- @param handle Mutable final tty_t owner in fresh or retired state, before this native initialization; successful initialization establishes a close obligation.
+-- @param fd Input integer value; checked native narrowing occurs before native ownership is accepted.
+-- @param unused Input integer value; checked native narrowing occurs before native ownership is accepted.
+-- @return Native integer result with the documented lifetime and units.
+-- @usage uv/functions/tty.md#tty_init
 function tty_init(loop: loop_t, handle: tty_t, fd: integer, unused: integer): integer
   if not loop.initialized or handle.phase == HANDLE_LIVE then return ffi.UV_EINVAL end
   local native_fd = fd as foreign uv_file
@@ -146,6 +239,11 @@ function tty_init(loop: loop_t, handle: tty_t, fd: integer, unused: integer): in
   return status
 end
 
+--- Set the terminal input mode.
+-- @param handle Mutable initialized tty_t owner/view; mutations preserve its single owner and reserved native data slot; close completion ends native handle lifetime.
+-- @param mode Input tty_mode_t value.
+-- @return Native integer result with the documented lifetime and units.
+-- @usage uv/functions/tty.md#tty_set_mode
 function tty_set_mode(handle: tty_t, mode: tty_mode_t): integer
   if not handle:valid() then return ffi.UV_EINVAL end
   local native_mode: foreign uv_tty_mode_t = ffi.UV_TTY_MODE_NORMAL
@@ -181,10 +279,19 @@ function tty_set_mode(handle: tty_t, mode: tty_mode_t): integer
   return status
 end
 
+--- Restore terminal mode changed through libuv.
+-- @return Native integer result with the documented lifetime and units.
+-- @usage uv/functions/tty.md#tty_reset_mode
 function tty_reset_mode(): integer
   return ffi.uv_tty_reset_mode()
 end
 
+--- Return `(status, width, height)` in character cells.
+-- @param handle Mutable initialized tty_t owner/view; mutations preserve its single owner and reserved native data slot; close completion ends native handle lifetime.
+-- @return Native status: zero on success, a negative libuv error on failure.
+-- @return Native operation result or submission status; negative values report libuv errors.
+-- @return Native operation result or submission status; negative values report libuv errors.
+-- @usage uv/functions/tty.md#tty_get_winsize
 function tty_get_winsize(handle: tty_t): (integer, integer, integer)
   if not handle:valid() then return ffi.UV_EINVAL, 0, 0 end
   local width: foreign int = 0
@@ -193,6 +300,9 @@ function tty_get_winsize(handle: tty_t): (integer, integer, integer)
   return status, width, height
 end
 
+--- Set libuv's virtual-terminal support state using the tagged state value.
+-- @param state Input tty_vtermstate_t value.
+-- @usage uv/functions/tty.md#tty_set_vterm_state
 function tty_set_vterm_state(state: tty_vtermstate_t)
   case state
   when TTY_SUPPORTED() then ffi.uv_tty_set_vterm_state(ffi.UV_TTY_SUPPORTED)
@@ -200,6 +310,10 @@ function tty_set_vterm_state(state: tty_vtermstate_t)
   end
 end
 
+--- Return `(status, virtual_terminal_state?)` where supported.
+-- @return Native status: zero on success, a negative libuv error on failure.
+-- @return Copied or retained tty_vtermstate_t result, or nil on failure or absence.
+-- @usage uv/functions/tty.md#tty_get_vterm_state
 function tty_get_vterm_state(): (integer, tty_vtermstate_t?)
   local state: foreign uv_tty_vtermstate_t = ffi.UV_TTY_UNSUPPORTED
   local status: integer = ffi.uv_tty_get_vterm_state(state)
@@ -209,6 +323,9 @@ function tty_get_vterm_state(): (integer, tty_vtermstate_t?)
   raise "unrecognized native TTY virtual terminal state"
 end
 
+--- Return the pipe owner's configured IPC mode.
+-- @return Native integer result with the documented lifetime and units.
+-- @usage uv/supplemental.md#pipe_tipc
 function pipe_t:ipc(): integer
   if not self:valid() then raise "pipe handle is not live" end
   return self.native.ipc

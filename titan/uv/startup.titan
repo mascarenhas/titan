@@ -5,6 +5,9 @@ local process_args_ready = false
 -- Configure only the original generated-entrypoint argc/argv. Return false in
 -- a Lua host, where that contract is absent. A successful call is idempotent;
 -- uv_setup_args may replace argv, and main must consume that replacement.
+--- Use only the generated entrypoint's original argc/argv storage for one-time native argument/title setup.
+-- @return Native boolean result with the documented lifetime and units.
+-- @usage uv/supplemental.md#setup_process_args
 function setup_process_args(): boolean
   if process_args_ready then return true end
   local top = ffi.lua_gettop(L)

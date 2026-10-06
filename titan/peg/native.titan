@@ -1,3 +1,7 @@
+--- Private per-state bootstrap for the embedded LPegLabel engine.
+-- @module titan.peg
+-- @usage standard-library-peg.md
+
 -- Module-local LPegLabel state and raw-Lua bootstrap used by peg.titan.
 
 local function _initialize_native()

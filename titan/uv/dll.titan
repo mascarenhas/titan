@@ -8,11 +8,15 @@ local const LIB_CLOSED = 3
 
 -- A library owns one open attempt. Closing is terminal: an old symbol cannot become valid
 -- again after loading a different image into the same owner.
+--- An explicitly opened dynamic library with owned native error state.
+-- @usage uv/types.md#lib_t
 record lib_t
   local native: foreign uv_lib_t
   local state: integer
 end
 
+--- A borrowed dynamic-library symbol address; retain its library while using it.
+-- @usage uv/types.md#symbol_t
 record symbol_t
   local owner: lib_t
   local address: foreign *void
@@ -24,11 +28,18 @@ local function dll_require_cstring(text: string, label: string)
   end
 end
 
+--- Allocate a fresh library owner for one open attempt.
+-- @return Native lib_t result with the documented lifetime and units.
+-- @usage uv/supplemental.md#lib_tnew
 function lib_t.new(): lib_t
   local native = foreign uv_lib_t.new()
   return { native = native, state = LIB_FRESH }
 end
 
+--- Convenience method for [`dlopen`](functions/dll.md#dlopen) on this owner.
+-- @param filename Filename supplied to the native operation.
+-- @return Native integer result with the documented lifetime and units.
+-- @usage uv/supplemental.md#lib_tdlopen
 function lib_t:dlopen(filename: string): integer
   if self.state ~= LIB_FRESH then
     raise "lib_t:dlopen requires a fresh library owner"
@@ -41,6 +52,11 @@ function lib_t:dlopen(filename: string): integer
   return status
 end
 
+--- Convenience method for [`dlsym`](functions/dll.md#dlsym) on this owner.
+-- @param name Name supplied to the native operation.
+-- @return Native status: zero on success, a negative libuv error on failure.
+-- @return Copied or retained symbol_t result, or nil on failure or absence.
+-- @usage uv/supplemental.md#lib_tdlsym
 function lib_t:dlsym(name: string): (integer, symbol_t?)
   if self.state ~= LIB_OPEN then raise "lib_t:dlsym requires an open library" end
   dll_require_cstring(name, "lib_t:dlsym name")
@@ -52,12 +68,17 @@ function lib_t:dlsym(name: string): (integer, symbol_t?)
   return status, symbol_t(self, address)
 end
 
+--- Convenience method for [`dlerror`](functions/dll.md#dlerror) on this owner.
+-- @return Native string result with the documented lifetime and units.
+-- @usage uv/supplemental.md#lib_tdlerror
 function lib_t:dlerror(): string
   -- Native libuv returns a non-NULL "no error" string when there is no error.
   -- Copy it now; the native allocation can change on another lookup/close.
   return ffi.uv_dlerror(self.native) as string
 end
 
+--- Convenience method for [`dlclose`](functions/dll.md#dlclose) on this owner.
+-- @usage uv/supplemental.md#lib_tdlclose
 function lib_t:dlclose()
   if self.state == LIB_CLOSED then return end
   self.state = LIB_CLOSED
@@ -66,28 +87,52 @@ function lib_t:dlclose()
   ffi.uv_dlclose(self.native)
 end
 
+--- Return the borrowed native symbol address only while its library is open.
+-- @return Native foreign *void result with the documented lifetime and units.
+-- @usage uv/supplemental.md#symbol_tpointer
 function symbol_t:pointer(): foreign *void
   if self.owner.state ~= LIB_OPEN then raise "symbol_t:pointer requires an open library" end
   return self.address
 end
 
+--- Return the retained library owner associated with this symbol.
+-- @return Native lib_t result with the documented lifetime and units.
+-- @usage uv/supplemental.md#symbol_tlibrary
 function symbol_t:library(): lib_t
   return self.owner
 end
 
 -- Match the native argument order: filename precedes the output library owner.
+--- Open the named dynamic library into one fresh lib_t owner.
+-- @param filename Input immutable text/byte owner; native C-string conventions apply where the operation takes text.
+-- @param library Mutable library owner; dlopen requires fresh storage and both success and failed native open require dlclose; close is terminal.
+-- @return Native integer result with the documented lifetime and units.
+-- @usage uv/functions/dll.md#dlopen
 function dlopen(filename: string, library: lib_t): integer
   return library:dlopen(filename)
 end
 
+--- Retire the library lifetime, including native error storage from a failed open.
+-- @param library Mutable library owner; dlopen requires fresh storage and both success and failed native open require dlclose; close is terminal.
+-- @usage uv/functions/dll.md#dlclose
 function dlclose(library: lib_t)
   library:dlclose()
 end
 
+--- Look up a named symbol and return `(status, symbol?)`.
+-- @param library Mutable library owner; dlopen requires fresh storage and both success and failed native open require dlclose; close is terminal.
+-- @param name Input immutable text/byte owner; native C-string conventions apply where the operation takes text.
+-- @return Native status: zero on success, a negative libuv error on failure.
+-- @return Copied or retained symbol_t result, or nil on failure or absence.
+-- @usage uv/functions/dll.md#dlsym
 function dlsym(library: lib_t, name: string): (integer, symbol_t?)
   return library:dlsym(name)
 end
 
+--- Copy the library's last native loader diagnostic while its lifetime remains open.
+-- @param library Mutable library owner; dlopen requires fresh storage and both success and failed native open require dlclose; close is terminal.
+-- @return Native string result with the documented lifetime and units.
+-- @usage uv/functions/dll.md#dlerror
 function dlerror(library: lib_t): string
   return library:dlerror()
 end

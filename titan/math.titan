@@ -1,3 +1,7 @@
+--- Typed numerical functions, numeric conversion, and Lua-compatible pseudo-random numbers.
+-- @module titan.math
+-- @usage standard-library-math.md
+
 -- Mathematical semantics and xoshiro256** translated and adapted from
 -- src/lmathlib.c and numeric conversion from src/lobject.c/lbaselib.c in the
 -- immutable Lua 5.5.1 release:
@@ -12,9 +16,17 @@ foreign import "string.h"
 foreign import "locale.h"
 foreign import "limits.h"
 
+--- The circle constant pi as a float.
+-- @usage standard-library-math.md
 pi: float = 3.141592653589793238462643383279502884
+--- Positive floating-point infinity.
+-- @usage standard-library-math.md
 huge: float = 1e999
+--- Largest representable Titan integer for this installation.
+-- @usage standard-library-math.md
 maxinteger: integer = 0
+--- Smallest representable Titan integer for this installation.
+-- @usage standard-library-math.md
 mininteger: integer = 0
 
 local record RandomState
@@ -61,6 +73,11 @@ local function random_float(word: integer): float
   return (word >> 11) * 1.1102230246251565e-16
 end
 
+--- Compare integer bit patterns as unsigned integers.
+-- @param left Left bit pattern.
+-- @param right Right bit pattern.
+-- @return True when left is less than right in unsigned order.
+-- @usage standard-library-math.md
 function ult(left: integer, right: integer): boolean
   -- Flipping the sign bit maps unsigned order onto ordinary signed order.
   return (left ~ mininteger) < (right ~ mininteger)
@@ -80,6 +97,11 @@ local function project_random(word: integer, maximum: integer): integer
   return projected
 end
 
+--- Draw a Lua-compatible pseudo-random float or bounded integer.
+-- @param lower Nil for a float in [0,1); a lone nonzero bound selects 1..lower; zero selects all integer bits.
+-- @param upper Inclusive upper bound when lower is also supplied.
+-- @return Float for no bounds, otherwise an integer boxed as value.
+-- @usage standard-library-math.md
 function random(lower: integer?, upper: integer?): value
   -- Draw before validating the interval, matching Lua's state advancement.
   local word = next_random()
@@ -101,6 +123,11 @@ function random(lower: integer?, upper: integer?): value
   return project_random(word, high - low) + low
 end
 
+--- Seed the noncryptographic xoshiro256** generator.
+-- @param first First seed component; nil chooses a weak automatic seed.
+-- @param second Second seed component; defaults to zero when first is present.
+-- @return The two seed components actually used.
+-- @usage standard-library-math.md
 function randomseed(first: integer?, second: integer?): (integer, integer)
   local actual_first, actual_second =
     (function (first: integer?, second: integer?): (integer, integer)
@@ -114,73 +141,142 @@ function randomseed(first: integer?, second: integer?): (integer, integer)
   return actual_first, actual_second
 end
 
+--- Return the absolute value as a float.
+-- @param number Floating-point operand.
+-- @return Floating-point result.
+-- @usage standard-library-math.md
 function abs(number: float): float
   return ffi.fabs(number) as float
 end
 
+--- Return the inverse cosine in radians.
+-- @param number Floating-point operand.
+-- @return Floating-point result.
+-- @usage standard-library-math.md
 function acos(number: float): float
   return ffi.acos(number) as float
 end
 
+--- Return the inverse sine in radians.
+-- @param number Floating-point operand.
+-- @return Floating-point result.
+-- @usage standard-library-math.md
 function asin(number: float): float
   return ffi.asin(number) as float
 end
 
+--- Return the inverse tangent in radians, optionally using both coordinates.
+-- @param y Numerator or vertical coordinate.
+-- @param x Horizontal coordinate; nil uses the one-argument inverse tangent.
+-- @return Angle in radians.
+-- @usage standard-library-math.md
 function atan(y: float, x: float?): float
   local actual_x = 1.0
   if x then actual_x = x as float end
   return ffi.atan2(y, actual_x) as float
 end
 
+--- Round upward to an integral float.
+-- @param number Floating-point operand.
+-- @return Floating-point result.
+-- @usage standard-library-math.md
 function ceil(number: float): float
   return ffi.ceil(number) as float
 end
 
+--- Return the cosine of an angle in radians.
+-- @param number Floating-point operand.
+-- @return Floating-point result.
+-- @usage standard-library-math.md
 function cos(number: float): float
   return ffi.cos(number) as float
 end
 
+--- Convert an angle in radians to degrees.
+-- @param radians Angle in radians.
+-- @return Angle in degrees.
+-- @usage standard-library-math.md
 function deg(radians: float): float
   return radians * (180.0 / pi)
 end
 
+--- Return e raised to the given power.
+-- @param number Floating-point operand.
+-- @return Floating-point result.
+-- @usage standard-library-math.md
 function exp(number: float): float
   return ffi.exp(number) as float
 end
 
+--- Round downward to an integral float.
+-- @param number Floating-point operand.
+-- @return Floating-point result.
+-- @usage standard-library-math.md
 function floor(number: float): float
   return ffi.floor(number) as float
 end
 
+--- Return the floating-point remainder using a quotient rounded toward zero.
+-- @param numerator Dividend.
+-- @param denominator Divisor.
+-- @return Floating-point remainder.
+-- @usage standard-library-math.md
 function fmod(numerator: float, denominator: float): float
   return ffi.fmod(numerator, denominator) as float
 end
 
+--- Decompose a float into a mantissa and binary exponent.
+-- @param number Number to decompose.
+-- @return Floating-point mantissa and integer exponent.
+-- @usage standard-library-math.md
 function frexp(number: float): (float, integer)
   local exponent: foreign int = 0 as foreign int
   local mantissa = ffi.frexp(number, exponent) as float
   return mantissa, exponent as integer
 end
 
+--- Multiply a mantissa by two raised to an integer exponent.
+-- @param mantissa Floating-point mantissa.
+-- @param exponent Binary exponent.
+-- @return Scaled floating-point result.
+-- @usage standard-library-math.md
 function ldexp(mantissa: float, exponent: integer): float
   return ffi.ldexp(
     mantissa, exponent as foreign int) as float
 end
 
+--- Return a logarithm in the selected base.
+-- @param number Number whose logarithm is requested.
+-- @param base Logarithm base; nil selects the natural logarithm.
+-- @return Floating-point logarithm.
+-- @usage standard-library-math.md
 function log(number: float, base: float?): float
   if not base then return ffi.log(number) as float end
   local actual_base = base as float
   return (ffi.log(number) / ffi.log(actual_base)) as float
 end
 
+--- Return the base-two logarithm.
+-- @param number Floating-point operand.
+-- @return Floating-point result.
+-- @usage standard-library-math.md
 function log2(number: float): float
   return ffi.log2(number) as float
 end
 
+--- Return the base-ten logarithm.
+-- @param number Floating-point operand.
+-- @return Floating-point result.
+-- @usage standard-library-math.md
 function log10(number: float): float
   return ffi.log10(number) as float
 end
 
+--- Return the largest of one or more float operands.
+-- @param first Required first operand.
+-- @param ... Remaining operands.
+-- @return Selected floating-point operand.
+-- @usage standard-library-math.md
 function max(first: float, ...: float): float
   local result = first
   local index = 1
@@ -192,6 +288,11 @@ function max(first: float, ...: float): float
   return result
 end
 
+--- Return the smallest of one or more float operands.
+-- @param first Required first operand.
+-- @param ... Remaining operands.
+-- @return Selected floating-point operand.
+-- @usage standard-library-math.md
 function min(first: float, ...: float): float
   local result = first
   local index = 1
@@ -203,6 +304,10 @@ function min(first: float, ...: float): float
   return result
 end
 
+--- Split a float into integral and fractional parts rounded toward zero.
+-- @param number Number to split.
+-- @return Integral part and fractional part, both floats.
+-- @usage standard-library-math.md
 function modf(number: float): (float, float)
   local integral: foreign double =
     0.0 as foreign double
@@ -210,18 +315,34 @@ function modf(number: float): (float, float)
   return integral as float, fractional
 end
 
+--- Convert an angle in degrees to radians.
+-- @param degrees Angle in degrees.
+-- @return Angle in radians.
+-- @usage standard-library-math.md
 function rad(degrees: float): float
   return degrees * (pi / 180.0)
 end
 
+--- Return the sine of an angle in radians.
+-- @param number Floating-point operand.
+-- @return Floating-point result.
+-- @usage standard-library-math.md
 function sin(number: float): float
   return ffi.sin(number) as float
 end
 
+--- Return the square root.
+-- @param number Floating-point operand.
+-- @return Floating-point result.
+-- @usage standard-library-math.md
 function sqrt(number: float): float
   return ffi.sqrt(number) as float
 end
 
+--- Return the tangent of an angle in radians.
+-- @param number Floating-point operand.
+-- @return Floating-point result.
+-- @usage standard-library-math.md
 function tan(number: float): float
   return ffi.tan(number) as float
 end
@@ -410,6 +531,11 @@ local function parse_numeral(text: string): value?
   return parsed_float(text, point_position)
 end
 
+--- Convert a number or numeral string to an integer or float when possible.
+-- @param candidate Number or numeral string.
+-- @param base Optional base in 2..36; an explicit base requires a string.
+-- @return Integer or float boxed as value, or nil when conversion fails.
+-- @usage standard-library-math.md
 function tonumber(candidate: value, base: integer?): value?
   if base then
     if not (candidate is string) then
@@ -424,6 +550,10 @@ function tonumber(candidate: value, base: integer?): value?
   return nil
 end
 
+--- Convert an exact in-range number or numeral string to an integer.
+-- @param candidate Numeric value or numeral string.
+-- @return Integer result, or nil when no exact integer conversion exists.
+-- @usage standard-library-math.md
 function tointeger(candidate: value): integer?
   if candidate is integer then return candidate as integer end
   if candidate is string then

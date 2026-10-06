@@ -154,6 +154,12 @@ local function Response:upgrade_headers(supplied: Headers?): Headers
   return result
 end
 
+--- Send a protocol upgrade and transfer the prefix-preserving connection exactly once.
+-- @param request_value Request belonging to this response exchange.
+-- @param protocol Protocol token for the HTTP upgrade.
+-- @param supplied_headers Optional headers copied into the outgoing message.
+-- @return Transferred stream preserving already received post-header bytes.
+-- @usage standard-library-http.md#protocol-upgrade-and-ownership
 function Response:upgrade(request_value: Request, protocol: string,
                            supplied_headers: Headers?): io.ReaderWriterCloser
   validate_upgrade_protocol(protocol)
@@ -225,6 +231,11 @@ local function Response:write_upgrade_output(output: string)
   end
 end
 
+--- Finish a bounded bodyless rejection of this upgrade request.
+-- @param request_value Request belonging to this response exchange.
+-- @param status Final HTTP status number.
+-- @param supplied_headers Optional headers copied into the outgoing message.
+-- @usage standard-library-http.md#protocol-upgrade-and-ownership
 function Response:reject_upgrade(request_value: Request, status: integer,
                                   supplied_headers: Headers?)
   self:validate_upgrade_exchange(request_value)

@@ -5,6 +5,8 @@
 # Assign files longest-first by profile_seconds, breaking ties by path; choose
 # the least-loaded shard, breaking ties by shard number. Rebalance when costs
 # change materially. Recorded file times exclude process/startup overhead.
+2 spec/documentation_spec.lua 1.000
+3 spec/coder/documentation_spec.lua 1.000
 1 spec/abi_spec.lua 2.661
 1 spec/binary_compatibility_spec.lua 0.100
 4 spec/coder/record_constructors_spec.lua 1.000

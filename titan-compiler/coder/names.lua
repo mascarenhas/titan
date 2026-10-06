@@ -639,7 +639,7 @@ function owned_c_metatable(ctx, typ)
             slot = nextupvalue(tlcontext),
             name = display,
             registry_key = display,
-            tag = types.serialize(typ),
+            tag = types.serialize_semantic(typ),
         }
         tlcontext.owned_c_metatables[key] = entry
     end
@@ -670,7 +670,7 @@ function function_type_tag(tlcontext, ftype --[[:table]])
         entry = {
             id = tlcontext.prefix .. "functag_" .. n,
             key = key,
-            tag = types.serialize(ftype),
+            tag = types.serialize_semantic(ftype),
         }
         tlcontext.functags[key] = entry
         table.insert(tlcontext.functag_list, entry)

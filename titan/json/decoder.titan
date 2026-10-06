@@ -1,3 +1,7 @@
+--- Schema-directed conversion of private parsed JSON nodes.
+-- @module titan.json
+-- @usage standard-library-json.md
+
 local record Decoder
   const settings: Settings
   const source: string

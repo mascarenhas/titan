@@ -1,3 +1,7 @@
+--- Verified TLS connections and listeners over Task-aware TCP streams.
+-- @module titan.ssl
+-- @usage standard-library-ssl.md
+
 local async = import "async"
 local uv = import "uv"
 local fs = import "fs"
@@ -56,6 +60,12 @@ local function allocate_default_client_context_owner():
   return owner
 end
 
+--- A structured TLS or certificate failure with a stable name and operation.
+-- @field code Numeric TLS error code.
+-- @field name Stable TLS failure name, such as TLS_TRUNCATED_EOF.
+-- @field message Human-readable failure description.
+-- @field operation Operation that reported the failure.
+-- @usage standard-library-ssl.md#errors
 record Error
   code: integer
   name: string
@@ -92,6 +102,8 @@ local record ChildDrain
   remove: (function (): ())?
 end
 
+--- An owned TLS byte stream permitting one reader and one writer concurrently.
+-- @usage standard-library-ssl.md#server-connections-and-handshakes
 record Connection
   local transport: net.Connection
   local handle: foreign *SSL
@@ -113,6 +125,8 @@ record Connection
   local excess: string
 end
 
+--- An owned TLS listener whose accepted connections have independent lifetimes.
+-- @usage standard-library-ssl.md#server-connections-and-handshakes
 record Server
   local listener: net.Server
   local context: foreign *SSL_CTX
@@ -1450,6 +1464,12 @@ local function adopt_client(transport: net.Connection, context: foreign *SSL_CTX
   end
 end
 
+--- Adopt a TCP transport with verified client TLS configured for the original hostname.
+-- @param transport TCP transport whose ownership transfers to the TLS connection.
+-- @param host Connection hostname, numeric IP, or local bind address.
+-- @param ca_file Optional PEM trust bundle replacing the default trust roots.
+-- @return Lazy verified client TLS state owning the adopted TCP transport.
+-- @usage standard-library-ssl.md#verified-client-connections
 function client(transport: net.Connection, host: string,
                 ca_file: string?): Connection
   checked_text(host, "ssl.client.host")
@@ -1469,6 +1489,12 @@ function client(transport: net.Connection, host: string,
   end
 end
 
+--- Connect TCP and complete a TLS handshake with certificate and hostname verification.
+-- @param host Connection hostname, numeric IP, or local bind address.
+-- @param port Numeric TCP port.
+-- @param ca_file Optional PEM trust bundle replacing the default trust roots.
+-- @return Verified TLS connection whose handshake is complete.
+-- @usage standard-library-ssl.md#verified-client-connections
 function connect(host: string, port: integer,
                  ca_file: string?): Connection
   checked_text(host, "ssl.connect.host")
@@ -1488,6 +1514,14 @@ function connect(host: string, port: integer,
   end
 end
 
+--- Create a TLS listener from a PEM certificate chain and private key.
+-- @param host Connection hostname, numeric IP, or local bind address.
+-- @param port Numeric TCP port.
+-- @param certificate_file PEM certificate-chain path, optionally including its private key.
+-- @param private_key_file PEM private-key path; nil uses the certificate file.
+-- @param backlog Positive listen backlog; nil defaults to 128.
+-- @return New TLS listener owning its certificate context and TCP listener.
+-- @usage standard-library-ssl.md#server-connections-and-handshakes
 function listen(host: string, port: integer, certificate_file: string,
                 private_key_file: string?, backlog: integer?): Server
   checked_text(host, "ssl.listen.host")
@@ -1525,6 +1559,8 @@ function listen(host: string, port: integer, certificate_file: string,
   end
 end
 
+--- Complete the lazy TLS handshake before application I/O.
+-- @usage standard-library-ssl.md#server-connections-and-handshakes
 function Connection:handshake()
   local operation? = begin_operation(self, "handshake")
   if operation == nil then return end
@@ -1534,6 +1570,9 @@ function Connection:handshake()
   end)
 end
 
+--- Read decrypted bytes, returning nil only after authenticated TLS shutdown.
+-- @return Copied bytes or text, or nil at EOF or when absent.
+-- @usage standard-library-ssl.md#reading-and-writing
 function Connection:read(): string?
   local operation? = begin_operation(self, "read")
   if operation == nil then return nil end
@@ -1542,6 +1581,11 @@ function Connection:read(): string?
   end)
 end
 
+--- Read decrypted bytes through a delimiter, retaining the unused suffix.
+-- @param delimiter Nonempty byte delimiter to include or remove.
+-- @param chop Remove the delimiter when true; nil or false retains it.
+-- @return Copied bytes or text, or nil at EOF or when absent.
+-- @usage standard-library-ssl.md#reading-and-writing
 function Connection:read_until(delimiter: string, chop: boolean?): string?
   if #delimiter == 0 then raise "read delimiter must not be empty" end
   local operation? = begin_operation(self, "read")
@@ -1588,6 +1632,9 @@ function Connection:read_until(delimiter: string, chop: boolean?): string?
   end)
 end
 
+--- Write application bytes through TLS and wait for transport completion.
+-- @param data Immutable binary bytes to write or decode.
+-- @usage standard-library-ssl.md#reading-and-writing
 function Connection:write(data: string)
   local operation? = begin_operation(self, "write")
   if operation == nil then raise "ssl.write: SSL Connection is closed" end
@@ -1597,6 +1644,8 @@ function Connection:write(data: string)
   end)
 end
 
+--- Send close_notify and half-close TCP output while retaining the read side.
+-- @usage standard-library-ssl.md#tls-shutdown-and-eof
 function Connection:shutdown()
   local operation? = begin_operation(self, "shutdown")
   if operation == nil then return end
@@ -1606,6 +1655,8 @@ function Connection:shutdown()
   end)
 end
 
+--- Abort the transport before draining active operations and retire TLS state.
+-- @usage standard-library-ssl.md#tls-shutdown-and-eof
 function Connection:abort()
   local reader? = self.reader
   local writer? = self.writer
@@ -1616,6 +1667,8 @@ function Connection:abort()
   if control ~= nil and control.child ~= nil then drain_child(control.child) end
 end
 
+--- Best-effort perform exclusive TLS shutdown and retire the TCP transport.
+-- @usage standard-library-ssl.md#tls-shutdown-and-eof
 function Connection:close()
   if self.state == STATE_CLOSED or self.state == STATE_FAILED then return end
   local operation? = begin_operation(self, "close")
@@ -1638,6 +1691,9 @@ function Connection:close()
   end)
 end
 
+--- Accept TCP and return a TLS connection whose handshake is still lazy.
+-- @return Accepted TLS connection with a lazy handshake.
+-- @usage standard-library-ssl.md#server-connections-and-handshakes
 function Server:accept(): Connection
   if self.closed or not self.context then
     raise "ssl.accept: Server is closed"
@@ -1664,6 +1720,8 @@ function Server:accept(): Connection
   end
 end
 
+--- Close this listener while leaving accepted connections independently owned.
+-- @usage standard-library-ssl.md#server-connections-and-handshakes
 function Server:close()
   if self.closed and self.listener_closed then return end
   if not self.closed then

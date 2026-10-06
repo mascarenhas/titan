@@ -1,3 +1,7 @@
+--- Public libuv callbacks, native owners, explicit loops, and status-based operations.
+-- @module titan.uv
+-- @usage standard-library-uv.md
+
 local iteration = import "iteration"
 foreign import "uv.h"
 foreign import "lua.h"
@@ -14,6 +18,8 @@ local const HANDLE_FRESH = 0
 local const HANDLE_LIVE = 1
 local const HANDLE_RETIRED = 2
 
+--- An explicitly owned libuv event loop.
+-- @usage uv/types.md#loop_t
 record loop_t
   local walk_callback: (function (handle_t, value): ())?
   local walk_argument: value
@@ -32,6 +38,8 @@ record loop_t
   local userdata: value
 end
 
+--- Concrete timer handle owner; initialize before use and close explicitly.
+-- @usage uv/types.md#timer_t
 record timer_t
   local native: foreign uv_timer_t
   local phase: integer
@@ -44,6 +52,22 @@ record timer_t
   local userdata: value
 end
 
+--- A tagged view retaining the concrete native handle owner.
+-- @field process Process variant.
+-- @field tcp Tcp variant.
+-- @field pipe Pipe variant.
+-- @field tty Tty variant.
+-- @field udp Udp variant.
+-- @field fs_event Fs event variant.
+-- @field fs_poll Fs poll variant.
+-- @field timer Timer variant.
+-- @field idle Idle variant.
+-- @field prepare Prepare variant.
+-- @field check Check variant.
+-- @field async Async variant.
+-- @field signal Signal variant.
+-- @field poll Poll variant.
+-- @usage uv/types.md#handle_t
 union handle_t
   process(owner: process_t)
   tcp(owner: tcp_t)
@@ -70,6 +94,9 @@ local function current_main(): foreign *lua_State
   return ffi.lua_tothread(L, -1)
 end
 
+--- Allocate a loop owner without initializing native loop state.
+-- @return Native loop_t result with the documented lifetime and units.
+-- @usage uv/supplemental.md#loop_tnew
 function loop_t.new(): loop_t
   local native = foreign uv_loop_t.new()
   local owner: loop_t = {
@@ -85,6 +112,10 @@ function loop_t.new(): loop_t
   return owner
 end
 
+--- Initialize a caller-constructed loop owner.
+-- @param loop Mutable final loop_t() storage in fresh or successfully closed state; native loop is not currently initialized.
+-- @return Native integer result with the documented lifetime and units.
+-- @usage uv/functions/loop.md#loop_init
 function loop_init(loop: loop_t): integer
   if loop.initialized then return ffi.UV_EBUSY end
   loops[loop] = true
@@ -95,6 +126,10 @@ function loop_init(loop: loop_t): integer
   return status
 end
 
+--- Retire an initialized loop.
+-- @param loop Input initialized owning loop; accepted handles/requests retain it through retirement.
+-- @return Native integer result with the documented lifetime and units.
+-- @usage uv/functions/loop.md#loop_close
 function loop_close(loop: loop_t): integer
   if not loop.initialized then return ffi.UV_EINVAL end
   if driving == loop or loop.walk_depth > 0 or loop.inline_depth > 0 then return ffi.UV_EBUSY end
@@ -106,6 +141,10 @@ function loop_close(loop: loop_t): integer
   return status
 end
 
+--- Report whether the initialized loop currently has referenced active handles, active requests, or closing handles.
+-- @param loop Input allocated loop owner; this operation also accepts fresh or successfully closed storage; see its exact result contract.
+-- @return Native boolean result with the documented lifetime and units.
+-- @usage uv/functions/loop.md#loop_alive
 function loop_alive(loop: loop_t): boolean
   if not loop.initialized then return false end
   return ffi.uv_loop_alive(loop.native) ~= 0
@@ -129,6 +168,11 @@ local function rethrow(loop: loop_t)
   raise err
 end
 
+--- Drive the loop in DEFAULT, ONCE, or NOWAIT mode.
+-- @param loop Input initialized owning loop; accepted handles/requests retain it through retirement.
+-- @param mode Input run_mode? value; checked native narrowing occurs before native ownership is accepted.
+-- @return Native integer result with the documented lifetime and units.
+-- @usage uv/functions/loop.md#run
 function run(loop: loop_t, mode: run_mode?): integer
   if not loop.initialized then return ffi.UV_EINVAL end
   if L ~= main_thread then raise "uv.run requires the owning main Lua thread" end
@@ -151,6 +195,9 @@ function run(loop: loop_t, mode: run_mode?): integer
 end
 
 
+--- Return the number of later callback errors suppressed behind the first error at the native driver boundary.
+-- @return Native integer result with the documented lifetime and units.
+-- @usage uv/supplemental.md#loop_tsecondary_error_count
 function loop_t:secondary_error_count(): integer
   return self.secondary_errors
 end
@@ -221,6 +268,9 @@ foreign function timer_close_callback(base: *uv_handle_t)
   ffi.lua_settop(L, top)
 end
 
+--- Allocate a concrete handle owner without initializing its native lifetime.
+-- @return Native timer_t result with the documented lifetime and units.
+-- @usage uv/supplemental.md#timer_tnew
 function timer_t.new(): timer_t
   local native = foreign uv_timer_t.new()
   return {
@@ -231,10 +281,18 @@ function timer_t.new(): timer_t
   }
 end
 
+--- Return a tagged view of the same concrete owner.
+-- @return Native handle_t result with the documented lifetime and units.
+-- @usage uv/supplemental.md#timer_tas_handle_t
 function timer_t:as_handle_t(): handle_t
   return handle_t.timer(self)
 end
 
+--- Initialize a timer owner on the loop.
+-- @param loop Input initialized owning loop; accepted handles/requests retain it through retirement.
+-- @param timer Mutable final timer_t owner in fresh or retired state, before this native initialization; successful initialization establishes a close obligation.
+-- @return Native integer result with the documented lifetime and units.
+-- @usage uv/functions/timer.md#timer_init
 function timer_init(loop: loop_t, timer: timer_t): integer
   if not loop.initialized or timer.phase == HANDLE_LIVE then return ffi.UV_EINVAL end
   loop.handles[timer] = true
@@ -246,6 +304,13 @@ function timer_init(loop: loop_t, timer: timer_t): integer
   return status
 end
 
+--- Start or update a timer. `timeout` and `repeat_ms` are nonnegative milliseconds; repeat zero is one shot, and timeout zero schedules a later loop iteration.
+-- @param timer Mutable initialized timer_t owner/view; mutations preserve its single owner and reserved native data slot; close completion ends native handle lifetime.
+-- @param callback Input ordinary callable, retained until the promised callback interval ends; callback argument owners are borrowed views retained through callback return.
+-- @param timeout Input integer value; checked native narrowing occurs before native ownership is accepted.
+-- @param repeat_ms Input integer value; checked native narrowing occurs before native ownership is accepted.
+-- @return Native operation result or submission status; negative values report libuv errors.
+-- @usage uv/functions/timer.md#timer_start
 function timer_start(timer: timer_t, callback: function (timer_t): (),
                      timeout: integer, repeat_ms: integer): integer
   if timer.phase ~= HANDLE_LIVE then return ffi.UV_EINVAL end
@@ -257,19 +322,35 @@ function timer_start(timer: timer_t, callback: function (timer_t): (),
                            repeat_ms as foreign uint64_t)
 end
 
+--- Stop future timer firings.
+-- @param timer Mutable initialized timer_t owner/view; mutations preserve its single owner and reserved native data slot; close completion ends native handle lifetime.
+-- @return Native integer result with the documented lifetime and units.
+-- @usage uv/functions/timer.md#timer_stop
 function timer_stop(timer: timer_t): integer
   if timer.phase ~= HANDLE_LIVE then return ffi.UV_EINVAL end
   return ffi.uv_timer_stop(timer.native)
 end
 
+--- Read the same traced public data as the generic handle accessor without allocating a handle view.
+-- @param timer Native owner or typed view used by this operation.
+-- @return Native value result with the documented lifetime and units.
+-- @usage uv/supplemental.md#timer_get_data
 function timer_get_data(timer: timer_t): value
   return timer.userdata
 end
 
+--- Replace the traced public data slot without allocating a handle view.
+-- @param timer Native owner or typed view used by this operation.
+-- @param data Caller-supplied data retained or borrowed for the documented native interval.
+-- @usage uv/supplemental.md#timer_set_data
 function timer_set_data(timer: timer_t, data: value)
   timer.userdata = data
 end
 
+--- Close the concrete timer with a direct timer callback.
+-- @param timer Native owner or typed view used by this operation.
+-- @param callback Completion callback; native acceptance determines whether delivery is promised.
+-- @usage uv/supplemental.md#timer_close
 function timer_close(timer: timer_t, callback: timer_cb?)
   if timer.phase ~= HANDLE_LIVE then raise "handle is not initialized" end
   local native = timer.native as foreign *uv_handle_t
@@ -279,6 +360,10 @@ function timer_close(timer: timer_t, callback: timer_cb?)
   ffi.uv_close(native, timer_close_callback)
 end
 
+--- Begin asynchronous handle close.
+-- @param handle Mutable initialized handle_t owner/view; mutations preserve its single owner and reserved native data slot; close completion ends native handle lifetime.
+-- @param callback Input ordinary callable, retained until the promised callback interval ends; callback argument owners are borrowed views retained through callback return.
+-- @usage uv/functions/handle.md#close
 function close(handle: handle_t, callback: (function (handle_t): ())?)
   case handle
   when timer(owner) then
@@ -369,6 +454,9 @@ function close(handle: handle_t, callback: (function (handle_t): ())?)
   end
 end
 
+--- Exclude this handle from the loop's active-reference liveness test.
+-- @param handle Mutable initialized handle_t owner/view; mutations preserve its single owner and reserved native data slot; close completion ends native handle lifetime.
+-- @usage uv/functions/handle.md#unref
 function unref(handle: handle_t)
   case handle
   when timer(owner) then
@@ -416,6 +504,8 @@ function unref(handle: handle_t)
   end
 end
 
+--- A reusable filesystem request requiring explicit result cleanup before reuse.
+-- @usage uv/types.md#fs_t
 record fs_t
   local native: foreign uv_fs_t
   local loop: loop_t?
@@ -432,6 +522,17 @@ record fs_t
   local userdata: value
 end
 
+--- A tagged view retaining the concrete native request owner.
+-- @field connect Connect variant.
+-- @field write Write variant.
+-- @field shutdown Shutdown variant.
+-- @field udp_send Udp send variant.
+-- @field getaddrinfo Getaddrinfo variant.
+-- @field getnameinfo Getnameinfo variant.
+-- @field fs Fs variant.
+-- @field work Work variant.
+-- @field random Random variant.
+-- @usage uv/types.md#req_t
 union req_t
   connect(owner: connect_t)
   write(owner: write_t)
@@ -444,11 +545,33 @@ union req_t
   random(owner: random_t)
 end
 
+--- Copied native timespec data exposed without C-header types.
+-- @field tv_sec Copied seconds/nanoseconds value. Native long-width limits remain platform-dependent.
+-- @field tv_nsec Copied seconds/nanoseconds value. Native long-width limits remain platform-dependent.
+-- @usage uv/types.md#timespec_t
 record timespec_t
   tv_sec: integer
   tv_nsec: integer
 end
 
+--- Copied filesystem metadata whose fields survive request cleanup.
+-- @field st_dev Independent copied stat output, including copied timestamp records. File mode/type constants are available through the public binding.
+-- @field st_mode Independent copied stat output, including copied timestamp records. File mode/type constants are available through the public binding.
+-- @field st_nlink Independent copied stat output, including copied timestamp records. File mode/type constants are available through the public binding.
+-- @field st_uid Independent copied stat output, including copied timestamp records. File mode/type constants are available through the public binding.
+-- @field st_gid Independent copied stat output, including copied timestamp records. File mode/type constants are available through the public binding.
+-- @field st_rdev Independent copied stat output, including copied timestamp records. File mode/type constants are available through the public binding.
+-- @field st_ino Independent copied stat output, including copied timestamp records. File mode/type constants are available through the public binding.
+-- @field st_size Independent copied stat output, including copied timestamp records. File mode/type constants are available through the public binding.
+-- @field st_blksize Independent copied stat output, including copied timestamp records. File mode/type constants are available through the public binding.
+-- @field st_blocks Independent copied stat output, including copied timestamp records. File mode/type constants are available through the public binding.
+-- @field st_flags Independent copied stat output, including copied timestamp records. File mode/type constants are available through the public binding.
+-- @field st_gen Independent copied stat output, including copied timestamp records. File mode/type constants are available through the public binding.
+-- @field st_atim Independent copied stat output, including copied timestamp records. File mode/type constants are available through the public binding.
+-- @field st_mtim Independent copied stat output, including copied timestamp records. File mode/type constants are available through the public binding.
+-- @field st_ctim Independent copied stat output, including copied timestamp records. File mode/type constants are available through the public binding.
+-- @field st_birthtim Independent copied stat output, including copied timestamp records. File mode/type constants are available through the public binding.
+-- @usage uv/types.md#stat_t
 record stat_t
   st_dev: integer
   st_mode: integer
@@ -510,6 +633,9 @@ foreign function fs_callback(native: *uv_fs_t)
   ffi.lua_settop(L, top)
 end
 
+--- Allocate a fresh request owner without submitting work.
+-- @return Native fs_t result with the documented lifetime and units.
+-- @usage uv/supplemental.md#fs_tnew
 function fs_t.new(): fs_t
   local native = foreign uv_fs_t.new()
   native.fs_type = ffi.UV_FS_UNKNOWN
@@ -519,18 +645,30 @@ function fs_t.new(): fs_t
   }
 end
 
+--- Return a tagged view of the same concrete owner.
+-- @return Native req_t result with the documented lifetime and units.
+-- @usage uv/supplemental.md#fs_tas_req_t
 function fs_t:as_req_t(): req_t
   return req_t.fs(self)
 end
 
+--- Read the same traced public data as the generic request accessor without allocating a request view.
+-- @return Native value result with the documented lifetime and units.
+-- @usage uv/supplemental.md#fs_tget_data
 function fs_t:get_data(): value
   return self.userdata
 end
 
+--- Replace the existing traced public data slot; nil clears it.
+-- @param data Caller-supplied data retained or borrowed for the documented native interval.
+-- @usage uv/supplemental.md#fs_tset_data
 function fs_t:set_data(data: value)
   self.userdata = data
 end
 
+--- Return this request's separate traced Titan data value, initially nil.
+-- @return Native value result with the documented lifetime and units.
+-- @usage uv/supplemental.md#req_tget_data
 function req_t:get_data(): value
   case self
   when connect(owner) then return owner.userdata
@@ -545,6 +683,9 @@ function req_t:get_data(): value
   end
 end
 
+--- Set the separate traced Titan data value; nil clears it.
+-- @param data Caller-supplied data retained or borrowed for the documented native interval.
+-- @usage uv/supplemental.md#req_tset_data
 function req_t:set_data(data: value)
   case self
   when connect(owner) then owner.userdata = data
@@ -559,6 +700,10 @@ function req_t:set_data(data: value)
   end
 end
 
+--- Attempt cancellation of a pending cancellable request.
+-- @param request Input accepted request view; native request kind and current state decide supported/success/busy; no root is released by cancellation.
+-- @return Native integer result with the documented lifetime and units.
+-- @usage uv/functions/request.md#cancel
 function cancel(request: req_t): integer
   case request
   when connect() then return ffi.UV_EINVAL
@@ -607,6 +752,13 @@ local function fs_prepare(loop: loop_t?, request: fs_t,
   return 0, native_loop, native_callback
 end
 
+--- Read metadata following the final symbolic link; copy the completed stat value before cleanup.
+-- @param loop Input initialized owning loop; accepted handles/requests retain it through retirement.
+-- @param request Mutable allocated nonpending request owner; FS submissions also require prior cleanup; accepted submission retains owner until its terminal callback returns; rejection owes no async callback.
+-- @param path Input immutable text/byte owner; native C-string conventions apply where the operation takes text.
+-- @param callback Input ordinary callable, retained until the promised callback interval ends; callback argument owners are borrowed views retained through callback return.
+-- @return Native integer result with the documented lifetime and units.
+-- @usage uv/functions/fs.md#fs_stat
 function fs_stat(loop: loop_t?, request: fs_t, path: string,
                   callback: (function (fs_t): ())?): integer
   local status, native_loop, native_callback = fs_prepare(loop, request, callback, path)
@@ -622,6 +774,15 @@ function fs_stat(loop: loop_t?, request: fs_t, path: string,
   return result
 end
 
+--- Open path with native O_* flags and creation mode.
+-- @param loop Input initialized owning loop; accepted handles/requests retain it through retirement.
+-- @param request Mutable allocated nonpending request owner; FS submissions also require prior cleanup; accepted submission retains owner until its terminal callback returns; rejection owes no async callback.
+-- @param path Input immutable text/byte owner; native C-string conventions apply where the operation takes text.
+-- @param flags Input integer value; checked native narrowing occurs before native ownership is accepted.
+-- @param mode Input integer value; checked native narrowing occurs before native ownership is accepted.
+-- @param callback Input ordinary callable, retained until the promised callback interval ends; callback argument owners are borrowed views retained through callback return.
+-- @return Native integer result with the documented lifetime and units.
+-- @usage uv/functions/fs.md#fs_open
 function fs_open(loop: loop_t?, request: fs_t, path: string,
                   flags: integer, mode: integer,
                   callback: (function (fs_t): ())?): integer
@@ -641,6 +802,13 @@ function fs_open(loop: loop_t?, request: fs_t, path: string,
   return result
 end
 
+--- Close the supplied integer descriptor.
+-- @param loop Input initialized owning loop; accepted handles/requests retain it through retirement.
+-- @param request Mutable allocated nonpending request owner; FS submissions also require prior cleanup; accepted submission retains owner until its terminal callback returns; rejection owes no async callback.
+-- @param file Input integer value; checked native narrowing occurs before native ownership is accepted.
+-- @param callback Input ordinary callable, retained until the promised callback interval ends; callback argument owners are borrowed views retained through callback return.
+-- @return Native integer result with the documented lifetime and units.
+-- @usage uv/functions/fs.md#fs_close
 function fs_close(loop: loop_t?, request: fs_t, file: integer,
                    callback: (function (fs_t): ())?): integer
   local native_file = file as foreign uv_file
@@ -658,11 +826,19 @@ function fs_close(loop: loop_t?, request: fs_t, file: integer,
   return result
 end
 
+--- Read the completed operation's signed native result: negative status, zero success, or the documented count/descriptor.
+-- @param request Input existing fs_t owner; this synchronous operation requires nonpending state and enforces the result-kind/cleanup rules below.
+-- @return Native operation result or submission status; negative values report libuv errors.
+-- @usage uv/functions/fs.md#fs_get_result
 function fs_get_result(request: fs_t): integer
   if request.pending then raise "FS request is pending" end
   return ffi.uv_fs_get_result(request.native)
 end
 
+--- Copy the completed stat buffer into a public stat_t value that survives cleanup.
+-- @param request Input existing fs_t owner; this synchronous operation requires nonpending state and enforces the result-kind/cleanup rules below.
+-- @return Native stat_t result with the documented lifetime and units.
+-- @usage uv/functions/fs.md#fs_get_statbuf
 function fs_get_statbuf(request: fs_t): stat_t
   if request.pending or not request.dirty then raise "FS result is unavailable" end
   if ffi.uv_fs_get_result(request.native) < 0 then raise "FS stat request failed" end
@@ -674,6 +850,10 @@ function fs_get_statbuf(request: fs_t): stat_t
   return stat_copy(native)
 end
 
+--- Copy the path associated with a completed request; the returned string survives request cleanup.
+-- @param request Input existing fs_t owner; this synchronous operation requires nonpending state and enforces the result-kind/cleanup rules below.
+-- @return Copied or retained string result, or nil on failure or absence.
+-- @usage uv/functions/fs.md#fs_get_path
 function fs_get_path(request: fs_t): string?
   if request.pending then raise "FS request is pending" end
   if not request.dirty then return nil end
@@ -682,6 +862,9 @@ function fs_get_path(request: fs_t): string?
   return path as string
 end
 
+--- Release memory associated with a terminal or synchronously rejected filesystem request.
+-- @param request Input existing fs_t owner; this synchronous operation requires nonpending state and enforces the result-kind/cleanup rules below.
+-- @usage uv/functions/fs.md#fs_req_cleanup
 function fs_req_cleanup(request: fs_t)
   if request.pending then raise "FS request is pending" end
   if not request.dirty then return end
@@ -705,10 +888,20 @@ function fs_req_cleanup(request: fs_t)
   request.native_buffers = nil
 end
 
+--- Immutable native libuv FS_O_RDONLY flag or numeric constant.
+-- @usage uv/types.md#public-constants
 const FS_O_RDONLY: integer?
+--- Immutable native libuv FS_O_RDWR flag or numeric constant.
+-- @usage uv/types.md#public-constants
 const FS_O_RDWR: integer?
+--- Immutable native libuv FS_O_WRONLY flag or numeric constant.
+-- @usage uv/types.md#public-constants
 const FS_O_WRONLY: integer?
+--- Immutable native libuv FS_O_CREAT flag or numeric constant.
+-- @usage uv/types.md#public-constants
 const FS_O_CREAT: integer?
+--- Immutable native libuv FS_O_TRUNC flag or numeric constant.
+-- @usage uv/types.md#public-constants
 const FS_O_TRUNC: integer?
 
 foreign import "work-native-proposal.h"
@@ -716,6 +909,8 @@ foreign type WorkFunction = function (*void): void
 foreign type WorkCallbackEntry = function (
     *lua_State, *Udata, *CClosure, *Udata, *Udata, lua_Integer): void
 
+--- Reusable native work request owner retained through accepted completion.
+-- @usage uv/types.md#work_t
 record work_t
   local native: foreign titan_issue194_work_storage
   local loop: loop_t?
@@ -777,6 +972,9 @@ foreign function work_after_callback(request: *uv_work_t, status: int)
   ffi.lua_settop(L, top)
 end
 
+--- Allocate a fresh request owner without submitting work.
+-- @return Native work_t result with the documented lifetime and units.
+-- @usage uv/supplemental.md#work_tnew
 function work_t.new(): work_t
   -- Construct final packed owner before libuv receives any address. No
   -- initialized uv_work_t is copied or moved between Titan owners.
@@ -788,22 +986,43 @@ function work_t.new(): work_t
   }
 end
 
+--- Return a tagged view of the same concrete owner.
+-- @return Native req_t result with the documented lifetime and units.
+-- @usage uv/supplemental.md#work_tas_req_t
 function work_t:as_req_t(): req_t
   return req_t.work(self)
 end
 
+--- Read the same traced public data as the generic request accessor without allocating a request view.
+-- @return Native value result with the documented lifetime and units.
+-- @usage uv/supplemental.md#work_tget_data
 function work_t:get_data(): value
   return self.userdata
 end
 
+--- Replace the existing traced public data slot; nil clears it.
+-- @param data Caller-supplied data retained or borrowed for the documented native interval.
+-- @usage uv/supplemental.md#work_tset_data
 function work_t:set_data(data: value)
   self.userdata = data
 end
 
+--- Return the request's retained loop association, or nil when none is recorded.
+-- @return Copied or retained loop_t result, or nil on failure or absence.
+-- @usage uv/supplemental.md#work_tget_loop
 function work_t:get_loop(): loop_t?
   return self.loop
 end
 
+--- Queue C-only worker(arg) on libuv's shared worker pool.
+-- @param loop Input initialized owning loop; accepted handles/requests retain it through retirement.
+-- @param req Mutable allocated nonpending request owner; accepted submission retains owner until its terminal callback returns; rejection owes no async callback.
+-- @param worker Input C-only entry; no Lua/Titan execution from a native worker/once callback.
+-- @param arg Input borrowed native address for explicit C-only/TLS interop; no automatic GC ownership.
+-- @param after_work Input ordinary callable, retained until the promised callback interval ends; callback argument owners are borrowed views retained through callback return. nil skips only the public completion call; the internal terminal callback still retires the request.
+-- @param argument_owner Input traced argument-owner graph retained through internal terminal completion and any public after_work callback return.
+-- @return Native integer result with the documented lifetime and units.
+-- @usage uv/functions/threadpool.md#queue_work
 function queue_work(loop: loop_t, req: work_t, worker: foreign function (*void): void,
                     arg: foreign *void,
                     after_work: (function (work_t, integer): ())?,
@@ -843,16 +1062,26 @@ function queue_work(loop: loop_t, req: work_t, worker: foreign function (*void):
 end
 
 
+--- Return the separate traced Titan userdata value, initially nil.
+-- @param req Input allocated request owner/view, including fresh, pending or completed state; this is a data/type/association query, not a pending-result read or a new submission.
+-- @return Native value result with the documented lifetime and units.
+-- @usage uv/functions/request.md#req_get_data
 function req_get_data(req: req_t): value
   return req:get_data()
 end
 
+--- Replace the separate traced Titan userdata value; nil clears it.
+-- @param req Input allocated request owner/view, including fresh, pending or completed state; this is a data/type/association query, not a pending-result read or a new submission.
+-- @param data Input traced public data, stored separately from reserved native .data; nil clears the value.
+-- @usage uv/functions/request.md#req_set_data
 function req_set_data(req: req_t, data: value)
   req:set_data(data)
 end
 
 foreign import "limits.h"
 
+--- Owned or immutable byte storage with retaining slices and checked one-based access.
+-- @usage uv/types.md#buf_t
 record buf_t
   local native: foreign uv_buf_t
   local const storage: foreign char[]
@@ -860,6 +1089,10 @@ record buf_t
   local writable: boolean
 end
 
+--- Allocate a writable byte buffer of `capacity` bytes.
+-- @param capacity Byte capacity for allocation or copied native output.
+-- @return Native buf_t result with the documented lifetime and units.
+-- @usage uv/supplemental.md#buf_tallocate
 function buf_t.allocate(capacity: integer): buf_t
   if capacity < 0 or capacity > ffi.UINT_MAX as integer then
     raise "buffer capacity is outside native range"
@@ -870,12 +1103,21 @@ function buf_t.allocate(capacity: integer): buf_t
   return owner
 end
 
+--- Validate the exact `buf_init` string/native byte-count bounds without allocating a buffer.
+-- @param base Base supplied to the native operation.
+-- @param length Byte length of the selected range.
+-- @usage uv/supplemental.md#buf_check_length
 function buf_check_length(base: string, length: integer)
   if length < 0 or length > #base or length > ffi.UINT_MAX as integer then
     raise "buffer length is outside string/native range"
   end
 end
 
+--- Create a read-only buf_t view over the first length bytes of an immutable string.
+-- @param base Input immutable byte string retained by the returned readonly buffer view, including embedded NUL bytes; the borrow outlives this constructor call.
+-- @param length Input integer value; checked native narrowing occurs before native ownership is accepted.
+-- @return Native buf_t result with the documented lifetime and units.
+-- @usage uv/functions/misc.md#buf_init
 function buf_init(base: string, length: integer): buf_t
   buf_check_length(base, length)
   local owner = buf_t(foreign uv_buf_t.new(), nil, base, false)
@@ -884,20 +1126,35 @@ function buf_init(base: string, length: integer): buf_t
   return owner
 end
 
+--- Create a readonly view over the complete binary string.
+-- @param base Base supplied to the native operation.
+-- @return Native buf_t result with the documented lifetime and units.
+-- @usage uv/supplemental.md#buf_tfrom_string
 function buf_t.from_string(base: string): buf_t
   return buf_init(base, #base)
 end
 
+--- Return this view's byte length or capacity.
+-- @return Native integer result with the documented lifetime and units.
+-- @usage uv/supplemental.md#buf_tlength
 function buf_t:length(): integer
   return self.native.len as integer
 end
 
+--- Report whether this view permits native or explicit byte writes; a string-backed view is readonly.
+-- @return Native boolean result with the documented lifetime and units.
+-- @usage uv/supplemental.md#buf_tis_writable
 function buf_t:is_writable(): boolean
   return self.writable
 end
 
 -- Indices are one-based like ordinary Titan byte/Array APIs. A slice retains
 -- its original allocation/string transitively; it never rewrites that owner.
+--- Create a retained subview starting at 1-based `first` with exactly `length` bytes.
+-- @param first First supplied to the native operation.
+-- @param length Byte length of the selected range.
+-- @return Native buf_t result with the documented lifetime and units.
+-- @usage uv/supplemental.md#buf_tslice
 function buf_t:slice(first: integer, length: integer): buf_t
   local capacity = self.native.len as integer
   if first < 1 or length < 0 or first - 1 > capacity - length then
@@ -910,6 +1167,10 @@ function buf_t:slice(first: integer, length: integer): buf_t
   return owner
 end
 
+--- Read one byte as an integer in 0..255. `index` is 1-based and must lie within this view.
+-- @param index One-based byte or entry index.
+-- @return Native operation result or submission status; negative values report libuv errors.
+-- @usage uv/supplemental.md#buf_tget
 function buf_t:get(index: integer): integer
   if index < 1 or index > self.native.len as integer then
     raise "buffer index is out of bounds"
@@ -918,6 +1179,10 @@ function buf_t:get(index: integer): integer
   return bytes[index - 1] as integer
 end
 
+--- Write one byte in 0..255 at a 1-based index.
+-- @param index One-based byte or entry index.
+-- @param byte Byte supplied to the native operation.
+-- @usage uv/supplemental.md#buf_tset
 function buf_t:set(index: integer, byte: integer)
   if not self.writable then raise "buffer is read-only" end
   if index < 1 or index > self.native.len as integer or byte < 0 or byte > 255 then
@@ -927,6 +1192,10 @@ function buf_t:set(index: integer, byte: integer)
   bytes[index - 1] = byte as foreign unsigned char
 end
 
+--- Copy the first `length` bytes into an independent binary Titan string.
+-- @param length Byte length of the selected range.
+-- @return Native string result with the documented lifetime and units.
+-- @usage uv/supplemental.md#buf_tto_string
 function buf_t:to_string(length: integer): string
   if length < 0 or length > self.native.len as integer then
     raise "buffer string length is out of bounds"
@@ -954,6 +1223,15 @@ local function fs_buffer_snapshot(buffers: {buf_t}, writable: boolean):
   return 0, native, retained
 end
 
+--- Read into writable buffer vectors.
+-- @param loop Input initialized owning loop; accepted handles/requests retain it through retirement.
+-- @param request Mutable allocated nonpending request owner; FS submissions also require prior cleanup; accepted submission retains owner until its terminal callback returns; rejection owes no async callback.
+-- @param file Input integer value; checked native narrowing occurs before native ownership is accepted.
+-- @param buffers Output writable owned byte storage; caller allocates capacity, native operation writes bytes; accepted async borrow retained through terminal callback/cleanup.
+-- @param offset Input integer value; checked native narrowing occurs before native ownership is accepted.
+-- @param callback Input ordinary callable, retained until the promised callback interval ends; callback argument owners are borrowed views retained through callback return.
+-- @return Native integer result with the documented lifetime and units.
+-- @usage uv/functions/fs.md#fs_read
 function fs_read(loop: loop_t?, request: fs_t, file: integer,
                   buffers: {buf_t}, offset: integer,
                   callback: (function (fs_t): ())?): integer
@@ -982,6 +1260,15 @@ function fs_read(loop: loop_t?, request: fs_t, file: integer,
   return result
 end
 
+--- Write borrowed buffer vectors.
+-- @param loop Input initialized owning loop; accepted handles/requests retain it through retirement.
+-- @param request Mutable allocated nonpending request owner; FS submissions also require prior cleanup; accepted submission retains owner until its terminal callback returns; rejection owes no async callback.
+-- @param file Input integer value; checked native narrowing occurs before native ownership is accepted.
+-- @param buffers Input byte owner or vector; immutable strings are valid only for input; async submission snapshots descriptors and retains owners, so Array edits cannot alter accepted I/O; do not mutate borrowed byte contents before completion.
+-- @param offset Input integer value; checked native narrowing occurs before native ownership is accepted.
+-- @param callback Input ordinary callable, retained until the promised callback interval ends; callback argument owners are borrowed views retained through callback return.
+-- @return Native integer result with the documented lifetime and units.
+-- @usage uv/functions/fs.md#fs_write
 function fs_write(loop: loop_t?, request: fs_t, file: integer,
                    buffers: {buf_t}, offset: integer,
                    callback: (function (fs_t): ())?): integer
@@ -1010,21 +1297,42 @@ function fs_write(loop: loop_t?, request: fs_t, file: integer,
   return result
 end
 
+--- Whether to run until completion, one iteration, or without waiting.
+-- @field default Default variant.
+-- @field once Once variant.
+-- @field nowait Nowait variant.
+-- @usage uv/types.md#run_mode
 union run_mode
   default()
   once()
   nowait()
 end
+--- Typed run_mode.default value for native operation selection.
+-- @usage uv/types.md#public-constants
 const RUN_DEFAULT = run_mode.default()
+--- Typed run_mode.once value for native operation selection.
+-- @usage uv/types.md#public-constants
 const RUN_ONCE = run_mode.once()
+--- Typed run_mode.nowait value for native operation selection.
+-- @usage uv/types.md#public-constants
 const RUN_NOWAIT = run_mode.nowait()
 
+--- Typed loop-configuration options with native platform constraints.
+-- @field block_signal Block signal variant.
+-- @field metrics_idle_time Metrics idle time variant.
+-- @field use_io_uring_sqpoll Use io uring sqpoll variant.
+-- @usage uv/types.md#loop_option
 union loop_option
   block_signal()
   metrics_idle_time()
   use_io_uring_sqpoll()
 end
 
+--- A copied event-loop activity metrics snapshot.
+-- @field loop_count Counters; omit reserved storage.
+-- @field events Counters; omit reserved storage.
+-- @field events_waiting Counters; omit reserved storage.
+-- @usage uv/types.md#metrics_t
 record metrics_t
   loop_count: integer
   events: integer
@@ -1035,10 +1343,19 @@ local function loop_require(loop: loop_t)
   if not loop.initialized then raise "loop is not initialized" end
 end
 
+--- Return the native loop storage size in bytes.
+-- @return Native integer result with the documented lifetime and units.
+-- @usage uv/functions/loop.md#loop_size
 function loop_size(): integer
   return ffi.uv_loop_size() as foreign lua_Integer
 end
 
+--- Apply a loop option before the work that depends on it. `LOOP_BLOCK_SIGNAL` takes `signum`; idle-time metrics must be enabled before they are collected.
+-- @param loop Input initialized owning loop; accepted handles/requests retain it through retirement.
+-- @param option Input loop_option value; checked native narrowing occurs before native ownership is accepted.
+-- @param signum Input integer? value; checked native narrowing occurs before native ownership is accepted.
+-- @return Native integer result with the documented lifetime and units.
+-- @usage uv/functions/loop.md#loop_configure
 function loop_configure(loop: loop_t, option: loop_option, signum: integer?): integer
   if not loop.initialized then return ffi.UV_EINVAL end
   case option
@@ -1053,49 +1370,88 @@ function loop_configure(loop: loop_t, option: loop_option, signum: integer?): in
   end
 end
 
+--- Reinitialize the loop backend in a child after a native fork.
+-- @param loop Input initialized owning loop; accepted handles/requests retain it through retirement.
+-- @return Native integer result with the documented lifetime and units.
+-- @usage uv/functions/loop.md#loop_fork
 function loop_fork(loop: loop_t): integer
   if not loop.initialized then return ffi.UV_EINVAL end
   return ffi.uv_loop_fork(loop.native)
 end
 
+--- Request that the current or next run call stop as soon as possible.
+-- @param loop Input initialized owning loop; accepted handles/requests retain it through retirement.
+-- @usage uv/functions/loop.md#stop
 function stop(loop: loop_t)
   loop_require(loop)
   ffi.uv_stop(loop.native)
 end
 
+--- Refresh the loop's cached monotonic time.
+-- @param loop Input initialized owning loop; accepted handles/requests retain it through retirement.
+-- @usage uv/functions/loop.md#update_time
 function update_time(loop: loop_t)
   loop_require(loop)
   ffi.uv_update_time(loop.native)
 end
 
+--- Read the loop's cached monotonic time in milliseconds.
+-- @param loop Input initialized owning loop; accepted handles/requests retain it through retirement.
+-- @return Native integer result with the documented lifetime and units.
+-- @usage uv/functions/loop.md#now
 function now(loop: loop_t): integer
   loop_require(loop)
   return ffi.uv_now(loop.native) as foreign lua_Integer
 end
 
+--- Return a borrowed backend polling descriptor, or native -1 when unavailable.
+-- @param loop Input initialized owning loop; accepted handles/requests retain it through retirement.
+-- @return Native integer result with the documented lifetime and units.
+-- @usage uv/functions/loop.md#backend_fd
 function backend_fd(loop: loop_t): integer
   loop_require(loop)
   return ffi.uv_backend_fd(loop.native)
 end
 
+--- Return the next backend polling timeout in milliseconds; -1 means an indefinite wait.
+-- @param loop Input initialized owning loop; accepted handles/requests retain it through retirement.
+-- @return Native integer result with the documented lifetime and units.
+-- @usage uv/functions/loop.md#backend_timeout
 function backend_timeout(loop: loop_t): integer
   loop_require(loop)
   return ffi.uv_backend_timeout(loop.native)
 end
 
+--- Return the separate traced Titan userdata value, initially nil.
+-- @param loop Input allocated loop owner; this operation also accepts fresh or successfully closed storage; see its exact result contract.
+-- @return Native value result with the documented lifetime and units.
+-- @usage uv/functions/loop.md#loop_get_data
 function loop_get_data(loop: loop_t): value
   return loop.userdata
 end
 
+--- Replace the separate traced Titan userdata value; nil clears it.
+-- @param loop Input allocated loop owner; this operation also accepts fresh or successfully closed storage; see its exact result contract.
+-- @param data Input traced public data, stored separately from reserved native .data; nil clears the value.
+-- @usage uv/functions/loop.md#loop_set_data
 function loop_set_data(loop: loop_t, data: value)
   loop.userdata = data
 end
 
+--- Return nanoseconds spent idle in the loop's I/O provider; enable the metrics option before collecting this value.
+-- @param loop Input initialized owning loop; accepted handles/requests retain it through retirement.
+-- @return Native integer result with the documented lifetime and units.
+-- @usage uv/functions/metrics.md#metrics_idle_time
 function metrics_idle_time(loop: loop_t): integer
   loop_require(loop)
   return ffi.uv_metrics_idle_time(loop.native) as foreign lua_Integer
 end
 
+--- Copy native loop iteration/event counters into metrics_t and return `(status, value?)`.
+-- @param loop Input initialized owning loop; accepted handles/requests retain it through retirement.
+-- @return Native status: zero on success, a negative libuv error on failure.
+-- @return Copied or retained metrics_t result, or nil on failure or absence.
+-- @usage uv/functions/metrics.md#metrics_info
 function metrics_info(loop: loop_t): (integer, metrics_t?)
   if not loop.initialized then return ffi.UV_EINVAL, nil end
   local native = foreign uv_metrics_t.new()
@@ -1200,12 +1556,19 @@ local function handle_t:pointer(): foreign *uv_handle_t
   end
 end
 
+--- Report whether the concrete owner currently has an initialized native handle lifetime, including closing.
+-- @return Native boolean result with the documented lifetime and units.
+-- @usage uv/supplemental.md#handle_tis_initialized
 function handle_t:is_initialized(): boolean
   -- Native initialization can establish a close obligation even when an
   -- operation reports failure. Closing remains initialized until its callback.
   return self:pointer() ~= nil
 end
 
+--- Return the separate traced Titan userdata value, initially nil.
+-- @param handle Mutable allocated concrete owner/view in any lifetime state; traced public data does not require initialized native storage.
+-- @return Native value result with the documented lifetime and units.
+-- @usage uv/functions/handle.md#handle_get_data
 function handle_get_data(handle: handle_t): value
   case handle
   when timer(owner) then return owner.userdata
@@ -1225,6 +1588,10 @@ function handle_get_data(handle: handle_t): value
   end
 end
 
+--- Replace the separate traced Titan userdata value; nil clears it.
+-- @param handle Mutable allocated concrete owner/view in any lifetime state; traced public data does not require initialized native storage.
+-- @param data Input traced public data, stored separately from reserved native .data; nil clears the value.
+-- @usage uv/functions/handle.md#handle_set_data
 function handle_set_data(handle: handle_t, data: value)
   case handle
   when timer(owner) then owner.userdata = data
@@ -1244,6 +1611,10 @@ function handle_set_data(handle: handle_t, data: value)
   end
 end
 
+--- Return the owning loop association.
+-- @param handle Input owner/view with an established nonnil loop association; close preserves it, but a later initialization attempt can replace or clear it even on failure.
+-- @return Native loop_t result with the documented lifetime and units.
+-- @usage uv/functions/handle.md#handle_get_loop
 function handle_get_loop(handle: handle_t): loop_t
   case handle
   when timer(owner) then return owner.loop as loop_t
@@ -1263,50 +1634,93 @@ function handle_get_loop(handle: handle_t): loop_t
   end
 end
 
+--- Make this handle count toward loop liveness.
+-- @param handle Mutable initialized handle_t owner/view; mutations preserve its single owner and reserved native data slot; close completion ends native handle lifetime.
+-- @usage uv/functions/handle.md#ref
 function ref(handle: handle_t)
   ffi.uv_ref(handle_native(handle))
 end
 
+--- Report whether this handle currently counts toward keeping the loop alive.
+-- @param handle Mutable initialized handle_t owner/view; mutations preserve its single owner and reserved native data slot; close completion ends native handle lifetime.
+-- @return Native boolean result with the documented lifetime and units.
+-- @usage uv/functions/handle.md#has_ref
 function has_ref(handle: handle_t): boolean
   return ffi.uv_has_ref(handle_native(handle)) ~= 0
 end
 
+--- Report whether this handle currently has active native work.
+-- @param handle Mutable initialized handle_t owner/view; mutations preserve its single owner and reserved native data slot; close completion ends native handle lifetime.
+-- @return Native boolean result with the documented lifetime and units.
+-- @usage uv/functions/handle.md#is_active
 function is_active(handle: handle_t): boolean
   return ffi.uv_is_active(handle_native(handle)) ~= 0
 end
 
+--- Report whether close has begun for this handle.
+-- @param handle Mutable initialized handle_t owner/view; mutations preserve its single owner and reserved native data slot; close completion ends native handle lifetime.
+-- @return Native boolean result with the documented lifetime and units.
+-- @usage uv/functions/handle.md#is_closing
 function is_closing(handle: handle_t): boolean
   return ffi.uv_is_closing(handle_native(handle)) ~= 0
 end
 
+--- Query or request the native socket buffer size in bytes. `size == 0` queries, a positive size requests a change; return `(status, actual_size)` because the OS may adjust the requested amount.
+-- @param handle Mutable initialized handle_t owner/view; mutations preserve its single owner and reserved native data slot; close completion ends native handle lifetime.
+-- @param size Input integer value; checked native narrowing occurs before native ownership is accepted.
+-- @return Native status: zero on success, a negative libuv error on failure.
+-- @return Native operation result or submission status; negative values report libuv errors.
+-- @usage uv/functions/handle.md#send_buffer_size
 function send_buffer_size(handle: handle_t, size: integer): (integer, integer)
   local native_size = size as foreign int
   local status: integer = ffi.uv_send_buffer_size(handle_native(handle), native_size)
   return status, native_size
 end
 
+--- Query or request the native socket buffer size in bytes. `size == 0` queries, a positive size requests a change; return `(status, actual_size)` because the OS may adjust the requested amount.
+-- @param handle Mutable initialized handle_t owner/view; mutations preserve its single owner and reserved native data slot; close completion ends native handle lifetime.
+-- @param size Input integer value; checked native narrowing occurs before native ownership is accepted.
+-- @return Native status: zero on success, a negative libuv error on failure.
+-- @return Native operation result or submission status; negative values report libuv errors.
+-- @usage uv/functions/handle.md#recv_buffer_size
 function recv_buffer_size(handle: handle_t, size: integer): (integer, integer)
   local native_size = size as foreign int
   local status: integer = ffi.uv_recv_buffer_size(handle_native(handle), native_size)
   return status, native_size
 end
 
+--- Stop and rearm a previously started repeating timer using its repeat interval as the next delay.
+-- @param timer Mutable initialized timer_t owner/view; mutations preserve its single owner and reserved native data slot; close completion ends native handle lifetime.
+-- @return Native integer result with the documented lifetime and units.
+-- @usage uv/functions/timer.md#timer_again
 function timer_again(timer: timer_t): integer
   if timer.phase ~= HANDLE_LIVE then return ffi.UV_EINVAL end
   if ffi.uv_is_closing(timer.native as foreign *uv_handle_t) ~= 0 then return ffi.UV_EINVAL end
   return ffi.uv_timer_again(timer.native)
 end
 
+--- Set the repeat interval in milliseconds.
+-- @param timer Mutable initialized timer_t owner/view; mutations preserve its single owner and reserved native data slot; close completion ends native handle lifetime.
+-- @param repeat_ms Input integer value; checked native narrowing occurs before native ownership is accepted.
+-- @usage uv/functions/timer.md#timer_set_repeat
 function timer_set_repeat(timer: timer_t, repeat_ms: integer)
   if timer.phase ~= HANDLE_LIVE then raise "timer is not initialized" end
   ffi.uv_timer_set_repeat(timer.native, repeat_ms as foreign uint64_t)
 end
 
+--- Return the configured repeat interval in milliseconds; zero denotes a one-shot timer.
+-- @param timer Mutable initialized timer_t owner/view; mutations preserve its single owner and reserved native data slot; close completion ends native handle lifetime.
+-- @return Native integer result with the documented lifetime and units.
+-- @usage uv/functions/timer.md#timer_get_repeat
 function timer_get_repeat(timer: timer_t): integer
   if timer.phase ~= HANDLE_LIVE then raise "timer is not initialized" end
   return ffi.uv_timer_get_repeat(timer.native) as foreign lua_Integer
 end
 
+--- Return milliseconds until the timer is due relative to the loop's cached time, or zero if due/expired.
+-- @param timer Mutable initialized timer_t owner/view; mutations preserve its single owner and reserved native data slot; close completion ends native handle lifetime.
+-- @return Native integer result with the documented lifetime and units.
+-- @usage uv/functions/timer.md#timer_get_due_in
 function timer_get_due_in(timer: timer_t): integer
   if timer.phase ~= HANDLE_LIVE then raise "timer is not initialized" end
   return ffi.uv_timer_get_due_in(timer.native) as foreign lua_Integer
@@ -1384,6 +1798,11 @@ foreign function walk_callback(native: *uv_handle_t, arg: *void)
   ffi.lua_settop(L, top)
 end
 
+--- Invoke a callback synchronously for every native handle on the loop, passing the supplied Titan `arg` value.
+-- @param loop Input initialized owning loop; accepted handles/requests retain it through retirement.
+-- @param callback Input ordinary callable, retained until the promised callback interval ends; callback argument owners are borrowed views retained through callback return.
+-- @param arg Input traced callback argument retained through the synchronous walk boundary.
+-- @usage uv/functions/loop.md#walk
 function walk(loop: loop_t, callback: function (handle_t, value): (), arg: value)
   loop_require(loop)
   if L ~= main_thread then raise "uv.walk requires the owning main Lua thread" end
@@ -1413,6 +1832,8 @@ function walk(loop: loop_t, callback: function (handle_t, value): (), arg: value
   rethrow(loop)
 end
 
+--- Concrete idle handle owner; initialize before use and close explicitly.
+-- @usage uv/types.md#idle_t
 record idle_t
   local native: foreign uv_idle_t
   local phase: integer
@@ -1479,6 +1900,9 @@ foreign function idle_close_callback(base: *uv_handle_t)
   ffi.lua_settop(L, top)
 end
 
+--- Allocate a concrete handle owner without initializing its native lifetime.
+-- @return Native idle_t result with the documented lifetime and units.
+-- @usage uv/supplemental.md#idle_tnew
 function idle_t.new(): idle_t
   local native = foreign uv_idle_t.new()
   return {native = native, phase = HANDLE_FRESH, loop = nil,
@@ -1486,10 +1910,18 @@ function idle_t.new(): idle_t
           handler = idle_deliver, close_handler = idle_closed, userdata = nil}
 end
 
+--- Return a tagged view of the same concrete owner.
+-- @return Native handle_t result with the documented lifetime and units.
+-- @usage uv/supplemental.md#idle_tas_handle_t
 function idle_t:as_handle_t(): handle_t
   return handle_t.idle(self)
 end
 
+--- Initialize a idle owner on the loop.
+-- @param loop Input initialized owning loop; accepted handles/requests retain it through retirement.
+-- @param handle Mutable final idle_t owner in fresh or retired state, before this native initialization; successful initialization establishes a close obligation.
+-- @return Native integer result with the documented lifetime and units.
+-- @usage uv/functions/idle.md#idle_init
 function idle_init(loop: loop_t, handle: idle_t): integer
   if not loop.initialized or handle.phase == HANDLE_LIVE then return ffi.UV_EINVAL end
   loop.handles[handle] = true
@@ -1502,6 +1934,11 @@ function idle_init(loop: loop_t, handle: idle_t): integer
   return status
 end
 
+--- Start a persistent callback on each loop iteration while preventing the poll from sleeping.
+-- @param handle Mutable initialized idle_t owner/view; mutations preserve its single owner and reserved native data slot; close completion ends native handle lifetime.
+-- @param callback Input ordinary callable, retained until the promised callback interval ends; callback argument owners are borrowed views retained through callback return.
+-- @return Native integer result with the documented lifetime and units.
+-- @usage uv/functions/idle.md#idle_start
 function idle_start(handle: idle_t, callback: function (idle_t): ()): integer
   if handle.phase ~= HANDLE_LIVE then return ffi.UV_EINVAL end
   if ffi.uv_is_closing(handle.native as foreign *uv_handle_t) ~= 0 then return ffi.UV_EINVAL end
@@ -1513,12 +1950,18 @@ function idle_start(handle: idle_t, callback: function (idle_t): ()): integer
   return status
 end
 
+--- Stop the idle callback without closing the native handle.
+-- @param handle Mutable initialized idle_t owner/view; mutations preserve its single owner and reserved native data slot; close completion ends native handle lifetime.
+-- @return Native integer result with the documented lifetime and units.
+-- @usage uv/functions/idle.md#idle_stop
 function idle_stop(handle: idle_t): integer
   if handle.phase ~= HANDLE_LIVE then return ffi.UV_EINVAL end
   if ffi.uv_is_closing(handle.native as foreign *uv_handle_t) ~= 0 then return ffi.UV_EINVAL end
   return ffi.uv_idle_stop(handle.native)
 end
 
+--- Concrete prepare handle owner; initialize before use and close explicitly.
+-- @usage uv/types.md#prepare_t
 record prepare_t
   local native: foreign uv_prepare_t
   local phase: integer
@@ -1585,6 +2028,9 @@ foreign function prepare_close_callback(base: *uv_handle_t)
   ffi.lua_settop(L, top)
 end
 
+--- Allocate a concrete handle owner without initializing its native lifetime.
+-- @return Native prepare_t result with the documented lifetime and units.
+-- @usage uv/supplemental.md#prepare_tnew
 function prepare_t.new(): prepare_t
   local native = foreign uv_prepare_t.new()
   return {native = native, phase = HANDLE_FRESH, loop = nil,
@@ -1592,10 +2038,18 @@ function prepare_t.new(): prepare_t
           handler = prepare_deliver, close_handler = prepare_closed, userdata = nil}
 end
 
+--- Return a tagged view of the same concrete owner.
+-- @return Native handle_t result with the documented lifetime and units.
+-- @usage uv/supplemental.md#prepare_tas_handle_t
 function prepare_t:as_handle_t(): handle_t
   return handle_t.prepare(self)
 end
 
+--- Initialize a prepare owner on the loop.
+-- @param loop Input initialized owning loop; accepted handles/requests retain it through retirement.
+-- @param handle Mutable final prepare_t owner in fresh or retired state, before this native initialization; successful initialization establishes a close obligation.
+-- @return Native integer result with the documented lifetime and units.
+-- @usage uv/functions/prepare.md#prepare_init
 function prepare_init(loop: loop_t, handle: prepare_t): integer
   if not loop.initialized or handle.phase == HANDLE_LIVE then return ffi.UV_EINVAL end
   loop.handles[handle] = true
@@ -1608,6 +2062,11 @@ function prepare_init(loop: loop_t, handle: prepare_t): integer
   return status
 end
 
+--- Start a persistent callback before polling for I/O.
+-- @param handle Mutable initialized prepare_t owner/view; mutations preserve its single owner and reserved native data slot; close completion ends native handle lifetime.
+-- @param callback Input ordinary callable, retained until the promised callback interval ends; callback argument owners are borrowed views retained through callback return.
+-- @return Native integer result with the documented lifetime and units.
+-- @usage uv/functions/prepare.md#prepare_start
 function prepare_start(handle: prepare_t, callback: function (prepare_t): ()): integer
   if handle.phase ~= HANDLE_LIVE then return ffi.UV_EINVAL end
   if ffi.uv_is_closing(handle.native as foreign *uv_handle_t) ~= 0 then return ffi.UV_EINVAL end
@@ -1619,12 +2078,18 @@ function prepare_start(handle: prepare_t, callback: function (prepare_t): ()): i
   return status
 end
 
+--- Stop the prepare callback without closing the native handle.
+-- @param handle Mutable initialized prepare_t owner/view; mutations preserve its single owner and reserved native data slot; close completion ends native handle lifetime.
+-- @return Native integer result with the documented lifetime and units.
+-- @usage uv/functions/prepare.md#prepare_stop
 function prepare_stop(handle: prepare_t): integer
   if handle.phase ~= HANDLE_LIVE then return ffi.UV_EINVAL end
   if ffi.uv_is_closing(handle.native as foreign *uv_handle_t) ~= 0 then return ffi.UV_EINVAL end
   return ffi.uv_prepare_stop(handle.native)
 end
 
+--- Concrete check handle owner; initialize before use and close explicitly.
+-- @usage uv/types.md#check_t
 record check_t
   local native: foreign uv_check_t
   local phase: integer
@@ -1691,6 +2156,9 @@ foreign function check_close_callback(base: *uv_handle_t)
   ffi.lua_settop(L, top)
 end
 
+--- Allocate a concrete handle owner without initializing its native lifetime.
+-- @return Native check_t result with the documented lifetime and units.
+-- @usage uv/supplemental.md#check_tnew
 function check_t.new(): check_t
   local native = foreign uv_check_t.new()
   return {native = native, phase = HANDLE_FRESH, loop = nil,
@@ -1698,10 +2166,18 @@ function check_t.new(): check_t
           handler = check_deliver, close_handler = check_closed, userdata = nil}
 end
 
+--- Return a tagged view of the same concrete owner.
+-- @return Native handle_t result with the documented lifetime and units.
+-- @usage uv/supplemental.md#check_tas_handle_t
 function check_t:as_handle_t(): handle_t
   return handle_t.check(self)
 end
 
+--- Initialize a check owner on the loop.
+-- @param loop Input initialized owning loop; accepted handles/requests retain it through retirement.
+-- @param handle Mutable final check_t owner in fresh or retired state, before this native initialization; successful initialization establishes a close obligation.
+-- @return Native integer result with the documented lifetime and units.
+-- @usage uv/functions/check.md#check_init
 function check_init(loop: loop_t, handle: check_t): integer
   if not loop.initialized or handle.phase == HANDLE_LIVE then return ffi.UV_EINVAL end
   loop.handles[handle] = true
@@ -1714,6 +2190,11 @@ function check_init(loop: loop_t, handle: check_t): integer
   return status
 end
 
+--- Start a persistent callback after polling for I/O.
+-- @param handle Mutable initialized check_t owner/view; mutations preserve its single owner and reserved native data slot; close completion ends native handle lifetime.
+-- @param callback Input ordinary callable, retained until the promised callback interval ends; callback argument owners are borrowed views retained through callback return.
+-- @return Native integer result with the documented lifetime and units.
+-- @usage uv/functions/check.md#check_start
 function check_start(handle: check_t, callback: function (check_t): ()): integer
   if handle.phase ~= HANDLE_LIVE then return ffi.UV_EINVAL end
   if ffi.uv_is_closing(handle.native as foreign *uv_handle_t) ~= 0 then return ffi.UV_EINVAL end
@@ -1725,12 +2206,18 @@ function check_start(handle: check_t, callback: function (check_t): ()): integer
   return status
 end
 
+--- Stop the check callback without closing the native handle.
+-- @param handle Mutable initialized check_t owner/view; mutations preserve its single owner and reserved native data slot; close completion ends native handle lifetime.
+-- @return Native integer result with the documented lifetime and units.
+-- @usage uv/functions/check.md#check_stop
 function check_stop(handle: check_t): integer
   if handle.phase ~= HANDLE_LIVE then return ffi.UV_EINVAL end
   if ffi.uv_is_closing(handle.native as foreign *uv_handle_t) ~= 0 then return ffi.UV_EINVAL end
   return ffi.uv_check_stop(handle.native)
 end
 
+--- Concrete async handle owner; initialize before use and close explicitly.
+-- @usage uv/types.md#async_t
 record async_t
   local native: foreign uv_async_t
   local phase: integer
@@ -1797,6 +2284,9 @@ foreign function async_close_callback(base: *uv_handle_t)
   ffi.lua_settop(L, top)
 end
 
+--- Allocate a concrete handle owner without initializing its native lifetime.
+-- @return Native async_t result with the documented lifetime and units.
+-- @usage uv/supplemental.md#async_tnew
 function async_t.new(): async_t
   local native = foreign uv_async_t.new()
   return {native = native, phase = HANDLE_FRESH, loop = nil,
@@ -1804,10 +2294,19 @@ function async_t.new(): async_t
           handler = async_deliver, close_handler = async_closed, userdata = nil}
 end
 
+--- Return a tagged view of the same concrete owner.
+-- @return Native handle_t result with the documented lifetime and units.
+-- @usage uv/supplemental.md#async_tas_handle_t
 function async_t:as_handle_t(): handle_t
   return handle_t.async(self)
 end
 
+--- Initialize and activate a native async notification handle.
+-- @param loop Input initialized owning loop; accepted handles/requests retain it through retirement.
+-- @param handle Mutable final async_t owner in fresh or retired state, before this native initialization; successful initialization establishes a close obligation.
+-- @param callback Input ordinary callable, retained until the promised callback interval ends; callback argument owners are borrowed views retained through callback return.
+-- @return Native integer result with the documented lifetime and units.
+-- @usage uv/functions/async.md#async_init
 function async_init(loop: loop_t, handle: async_t, callback: (function (async_t): ())?): integer
   if not loop.initialized or handle.phase == HANDLE_LIVE then return ffi.UV_EINVAL end
   loop.handles[handle] = true
@@ -1820,12 +2319,19 @@ function async_init(loop: loop_t, handle: async_t, callback: (function (async_t)
   return status
 end
 
+--- Notify the loop through an initialized async handle.
+-- @param handle Mutable initialized async_t owner/view; mutations preserve its single owner and reserved native data slot; close completion ends native handle lifetime.
+-- @return Native integer result with the documented lifetime and units.
+-- @usage uv/functions/async.md#async_send
 function async_send(handle: async_t): integer
   if handle.phase ~= HANDLE_LIVE then return ffi.UV_EINVAL end
   if ffi.uv_is_closing(handle.native as foreign *uv_handle_t) ~= 0 then return ffi.UV_EINVAL end
   return ffi.uv_async_send(handle.native)
 end
 
+--- Borrow an opaque pointer to stable native storage for a C-only carrier.
+-- @return Native foreign *void result with the documented lifetime and units.
+-- @usage uv/supplemental.md#async_tborrow
 function async_t:borrow(): foreign *void
   if self.phase ~= HANDLE_LIVE then raise "async handle is not initialized" end
   if ffi.uv_is_closing(self.native as foreign *uv_handle_t) ~= 0 then raise "async handle is closing" end
@@ -1836,10 +2342,15 @@ foreign function async_send_native(handle: *void): int
   return ffi.uv_async_send(handle as foreign *uv_async_t)
 end
 
+--- Return the C-only send entry for a borrowed initialized async handle.
+-- @return Native foreign function (*void): int result with the documented lifetime and units.
+-- @usage uv/supplemental.md#async_send_function
 function async_send_function(): foreign function (*void): int
   return async_send_native
 end
 
+--- Concrete signal handle owner; initialize before use and close explicitly.
+-- @usage uv/types.md#signal_t
 record signal_t
   local native: foreign uv_signal_t
   local phase: integer
@@ -1908,6 +2419,9 @@ foreign function signal_close_callback(base: *uv_handle_t)
   ffi.lua_settop(L, top)
 end
 
+--- Allocate a concrete handle owner without initializing its native lifetime.
+-- @return Native signal_t result with the documented lifetime and units.
+-- @usage uv/supplemental.md#signal_tnew
 function signal_t.new(): signal_t
   local native = foreign uv_signal_t.new()
   return {native = native, phase = HANDLE_FRESH, loop = nil,
@@ -1915,15 +2429,26 @@ function signal_t.new(): signal_t
           handler = signal_deliver, close_handler = signal_closed, userdata = nil}
 end
 
+--- Return a tagged view of the same concrete owner.
+-- @return Native handle_t result with the documented lifetime and units.
+-- @usage uv/supplemental.md#signal_tas_handle_t
 function signal_t:as_handle_t(): handle_t
   return handle_t.signal(self)
 end
 
+--- Return the signal number currently configured in the native signal owner.
+-- @return Native integer result with the documented lifetime and units.
+-- @usage uv/supplemental.md#signal_tget_signum
 function signal_t:get_signum(): integer
   if self.phase ~= HANDLE_LIVE then raise "signal handle is not initialized" end
   return self.native.signum as integer
 end
 
+--- Initialize a signal watcher.
+-- @param loop Input initialized owning loop; accepted handles/requests retain it through retirement.
+-- @param handle Mutable final signal_t owner in fresh or retired state, before this native initialization; successful initialization establishes a close obligation.
+-- @return Native integer result with the documented lifetime and units.
+-- @usage uv/functions/signal.md#signal_init
 function signal_init(loop: loop_t, handle: signal_t): integer
   if not loop.initialized or handle.phase == HANDLE_LIVE then return ffi.UV_EINVAL end
   loop.handles[handle] = true
@@ -1936,6 +2461,12 @@ function signal_init(loop: loop_t, handle: signal_t): integer
   return status
 end
 
+--- Watch `signum` repeatedly.
+-- @param handle Mutable initialized signal_t owner/view; mutations preserve its single owner and reserved native data slot; close completion ends native handle lifetime.
+-- @param callback Input ordinary callable, retained until the promised callback interval ends; callback argument owners are borrowed views retained through callback return.
+-- @param signum Input integer value; checked native narrowing occurs before native ownership is accepted.
+-- @return Native integer result with the documented lifetime and units.
+-- @usage uv/functions/signal.md#signal_start
 function signal_start(handle: signal_t, callback: function (signal_t, integer): (), signum: integer): integer
   if handle.phase ~= HANDLE_LIVE then return ffi.UV_EINVAL end
   if ffi.uv_is_closing(handle.native as foreign *uv_handle_t) ~= 0 then return ffi.UV_EINVAL end
@@ -1947,6 +2478,12 @@ function signal_start(handle: signal_t, callback: function (signal_t, integer): 
   return status
 end
 
+--- Watch for one delivery of `signum`; native delivery makes the watcher inactive afterward.
+-- @param handle Mutable initialized signal_t owner/view; mutations preserve its single owner and reserved native data slot; close completion ends native handle lifetime.
+-- @param callback Input ordinary callable, retained until the promised callback interval ends; callback argument owners are borrowed views retained through callback return.
+-- @param signum Input integer value; checked native narrowing occurs before native ownership is accepted.
+-- @return Native integer result with the documented lifetime and units.
+-- @usage uv/functions/signal.md#signal_start_oneshot
 function signal_start_oneshot(handle: signal_t, callback: function (signal_t, integer): (), signum: integer): integer
   if handle.phase ~= HANDLE_LIVE then return ffi.UV_EINVAL end
   if ffi.uv_is_closing(handle.native as foreign *uv_handle_t) ~= 0 then return ffi.UV_EINVAL end
@@ -1958,12 +2495,18 @@ function signal_start_oneshot(handle: signal_t, callback: function (signal_t, in
   return status
 end
 
+--- Stop signal delivery and reset the native configured signal number.
+-- @param handle Mutable initialized signal_t owner/view; mutations preserve its single owner and reserved native data slot; close completion ends native handle lifetime.
+-- @return Native integer result with the documented lifetime and units.
+-- @usage uv/functions/signal.md#signal_stop
 function signal_stop(handle: signal_t): integer
   if handle.phase ~= HANDLE_LIVE then return ffi.UV_EINVAL end
   if ffi.uv_is_closing(handle.native as foreign *uv_handle_t) ~= 0 then return ffi.UV_EINVAL end
   return ffi.uv_signal_stop(handle.native)
 end
 
+--- Concrete poll handle owner; initialize before use and close explicitly.
+-- @usage uv/types.md#poll_t
 record poll_t
   local ready: boolean
   local native: foreign uv_poll_t
@@ -2034,6 +2577,9 @@ foreign function poll_close_callback(base: *uv_handle_t)
   ffi.lua_settop(L, top)
 end
 
+--- Allocate a concrete handle owner without initializing its native lifetime.
+-- @return Native poll_t result with the documented lifetime and units.
+-- @usage uv/supplemental.md#poll_tnew
 function poll_t.new(): poll_t
   local native = foreign uv_poll_t.new()
   return {ready = false, native = native, phase = HANDLE_FRESH, loop = nil,
@@ -2041,10 +2587,19 @@ function poll_t.new(): poll_t
           handler = poll_deliver, close_handler = poll_closed, userdata = nil}
 end
 
+--- Return a tagged view of the same concrete owner.
+-- @return Native handle_t result with the documented lifetime and units.
+-- @usage uv/supplemental.md#poll_tas_handle_t
 function poll_t:as_handle_t(): handle_t
   return handle_t.poll(self)
 end
 
+--- Initialize readiness polling for a borrowed descriptor/socket.
+-- @param loop Input initialized owning loop; accepted handles/requests retain it through retirement.
+-- @param handle Mutable final poll_t owner in fresh or retired state, before this native initialization; successful initialization establishes a close obligation.
+-- @param file Input integer value; checked native narrowing occurs before native ownership is accepted.
+-- @return Native integer result with the documented lifetime and units.
+-- @usage uv/functions/poll.md#poll_init
 function poll_init(loop: loop_t, handle: poll_t, file: integer): integer
   if not loop.initialized or handle.phase == HANDLE_LIVE then return ffi.UV_EINVAL end
   local native_file = file as foreign int
@@ -2065,6 +2620,12 @@ function poll_init(loop: loop_t, handle: poll_t, file: integer): integer
   return status
 end
 
+--- Watch the requested readiness bits and call `(owner, status, events)`.
+-- @param handle Mutable initialized poll_t owner/view; mutations preserve its single owner and reserved native data slot; close completion ends native handle lifetime.
+-- @param callback Input ordinary callable, retained until the promised callback interval ends; callback argument owners are borrowed views retained through callback return.
+-- @param events Input integer value; checked native narrowing occurs before native ownership is accepted.
+-- @return Native operation result or submission status; negative values report libuv errors.
+-- @usage uv/functions/poll.md#poll_start
 function poll_start(handle: poll_t, callback: function (poll_t, integer, integer): (), events: integer): integer
   if handle.phase ~= HANDLE_LIVE or not handle.ready then return ffi.UV_EINVAL end
   if ffi.uv_is_closing(handle.native as foreign *uv_handle_t) ~= 0 then return ffi.UV_EINVAL end
@@ -2079,12 +2640,36 @@ function poll_start(handle: poll_t, callback: function (poll_t, integer, integer
   return status
 end
 
+--- Stop readiness notifications without closing the poll handle or its borrowed descriptor.
+-- @param handle Mutable initialized poll_t owner/view; mutations preserve its single owner and reserved native data slot; close completion ends native handle lifetime.
+-- @return Native integer result with the documented lifetime and units.
+-- @usage uv/functions/poll.md#poll_stop
 function poll_stop(handle: poll_t): integer
   if handle.phase ~= HANDLE_LIVE or not handle.ready then return ffi.UV_EINVAL end
   if ffi.uv_is_closing(handle.native as foreign *uv_handle_t) ~= 0 then return ffi.UV_EINVAL end
   return ffi.uv_poll_stop(handle.native)
 end
 
+--- Tagged handle type values for native operations.
+-- @field unknown Unknown variant.
+-- @field async Async variant.
+-- @field check Check variant.
+-- @field fs_event Fs event variant.
+-- @field fs_poll Fs poll variant.
+-- @field handle Handle variant.
+-- @field idle Idle variant.
+-- @field named_pipe Named pipe variant.
+-- @field poll Poll variant.
+-- @field prepare Prepare variant.
+-- @field process Process variant.
+-- @field stream Stream variant.
+-- @field tcp Tcp variant.
+-- @field timer Timer variant.
+-- @field tty Tty variant.
+-- @field udp Udp variant.
+-- @field signal Signal variant.
+-- @field file File variant.
+-- @usage uv/types.md#handle_type
 union handle_type
   unknown()
   async()
@@ -2106,23 +2691,59 @@ union handle_type
   file()
 end
 
+--- Typed handle_type.unknown value for native operation selection.
+-- @usage uv/types.md#public-constants
 const UNKNOWN_HANDLE = handle_type.unknown()
+--- Typed handle_type.async value for native operation selection.
+-- @usage uv/types.md#public-constants
 const ASYNC = handle_type.async()
+--- Typed handle_type.check value for native operation selection.
+-- @usage uv/types.md#public-constants
 const CHECK = handle_type.check()
+--- Typed handle_type.fs_event value for native operation selection.
+-- @usage uv/types.md#public-constants
 const FS_EVENT = handle_type.fs_event()
+--- Typed handle_type.fs_poll value for native operation selection.
+-- @usage uv/types.md#public-constants
 const FS_POLL = handle_type.fs_poll()
+--- Typed handle_type.handle value for native operation selection.
+-- @usage uv/types.md#public-constants
 const HANDLE = handle_type.handle()
+--- Typed handle_type.idle value for native operation selection.
+-- @usage uv/types.md#public-constants
 const IDLE = handle_type.idle()
+--- Typed handle_type.named_pipe value for native operation selection.
+-- @usage uv/types.md#public-constants
 const NAMED_PIPE = handle_type.named_pipe()
+--- Typed handle_type.poll value for native operation selection.
+-- @usage uv/types.md#public-constants
 const POLL = handle_type.poll()
+--- Typed handle_type.prepare value for native operation selection.
+-- @usage uv/types.md#public-constants
 const PREPARE = handle_type.prepare()
+--- Typed handle_type.process value for native operation selection.
+-- @usage uv/types.md#public-constants
 const PROCESS = handle_type.process()
+--- Typed handle_type.stream value for native operation selection.
+-- @usage uv/types.md#public-constants
 const STREAM = handle_type.stream()
+--- Typed handle_type.tcp value for native operation selection.
+-- @usage uv/types.md#public-constants
 const TCP = handle_type.tcp()
+--- Typed handle_type.timer value for native operation selection.
+-- @usage uv/types.md#public-constants
 const TIMER = handle_type.timer()
+--- Typed handle_type.tty value for native operation selection.
+-- @usage uv/types.md#public-constants
 const TTY = handle_type.tty()
+--- Typed handle_type.udp value for native operation selection.
+-- @usage uv/types.md#public-constants
 const UDP = handle_type.udp()
+--- Typed handle_type.signal value for native operation selection.
+-- @usage uv/types.md#public-constants
 const SIGNAL = handle_type.signal()
+--- Typed handle_type.file value for native operation selection.
+-- @usage uv/types.md#public-constants
 const FILE = handle_type.file()
 
 local function handle_type_native(kind: handle_type): foreign uv_handle_type
@@ -2170,16 +2791,37 @@ local function handle_type_from_native(kind: foreign uv_handle_type): handle_typ
   raise "unknown native handle_type"
 end
 
+--- Return the native byte-size query for the selected kind.
+-- @param kind Input handle_type value.
+-- @return Native integer result with the documented lifetime and units.
+-- @usage uv/functions/handle.md#handle_size
 function handle_size(kind: handle_type): integer
   return ffi.uv_handle_size(handle_type_native(kind)) as foreign lua_Integer
 end
 
+--- Return the native name for a kind, or nil when no name is available.
+-- @param kind Input handle_type value.
+-- @return Copied or retained string result, or nil on failure or absence.
+-- @usage uv/functions/handle.md#handle_type_name
 function handle_type_name(kind: handle_type): string?
   local name = ffi.uv_handle_type_name(handle_type_native(kind))
   if not name then return nil end
   return name as string
 end
 
+--- Tagged req type values for native operations.
+-- @field unknown Unknown variant.
+-- @field req Req variant.
+-- @field connect Connect variant.
+-- @field write Write variant.
+-- @field shutdown Shutdown variant.
+-- @field udp_send Udp send variant.
+-- @field fs Fs variant.
+-- @field work Work variant.
+-- @field getaddrinfo Getaddrinfo variant.
+-- @field getnameinfo Getnameinfo variant.
+-- @field random Random variant.
+-- @usage uv/types.md#req_type
 union req_type
   unknown()
   req()
@@ -2194,16 +2836,38 @@ union req_type
   random()
 end
 
+--- Typed req_type.unknown value for native operation selection.
+-- @usage uv/types.md#public-constants
 const UNKNOWN_REQ = req_type.unknown()
+--- Typed req_type.req value for native operation selection.
+-- @usage uv/types.md#public-constants
 const REQ = req_type.req()
+--- Typed req_type.connect value for native operation selection.
+-- @usage uv/types.md#public-constants
 const CONNECT = req_type.connect()
+--- Typed req_type.write value for native operation selection.
+-- @usage uv/types.md#public-constants
 const WRITE = req_type.write()
+--- Typed req_type.shutdown value for native operation selection.
+-- @usage uv/types.md#public-constants
 const SHUTDOWN = req_type.shutdown()
+--- Typed req_type.udp_send value for native operation selection.
+-- @usage uv/types.md#public-constants
 const UDP_SEND = req_type.udp_send()
+--- Typed req_type.fs value for native operation selection.
+-- @usage uv/types.md#public-constants
 const FS = req_type.fs()
+--- Typed req_type.work value for native operation selection.
+-- @usage uv/types.md#public-constants
 const WORK = req_type.work()
+--- Typed req_type.getaddrinfo value for native operation selection.
+-- @usage uv/types.md#public-constants
 const GETADDRINFO = req_type.getaddrinfo()
+--- Typed req_type.getnameinfo value for native operation selection.
+-- @usage uv/types.md#public-constants
 const GETNAMEINFO = req_type.getnameinfo()
+--- Typed req_type.random value for native operation selection.
+-- @usage uv/types.md#public-constants
 const RANDOM = req_type.random()
 
 local function req_type_native(kind: req_type): foreign uv_req_type
@@ -2237,20 +2901,36 @@ local function req_type_from_native(kind: foreign uv_req_type): req_type
   raise "unknown native req_type"
 end
 
+--- Return the native byte-size query for the selected kind.
+-- @param kind Input req_type value; checked native narrowing occurs before native ownership is accepted.
+-- @return Native integer result with the documented lifetime and units.
+-- @usage uv/functions/request.md#req_size
 function req_size(kind: req_type): integer
   return ffi.uv_req_size(req_type_native(kind)) as foreign lua_Integer
 end
 
+--- Return the native name for a kind, or nil when no name is available.
+-- @param kind Input req_type value; checked native narrowing occurs before native ownership is accepted.
+-- @return Copied or retained string result, or nil on failure or absence.
+-- @usage uv/functions/request.md#req_type_name
 function req_type_name(kind: req_type): string?
   local name = ffi.uv_req_type_name(req_type_native(kind))
   if not name then return nil end
   return name as string
 end
 
+--- Return the tagged native handle/request kind.
+-- @param handle Mutable initialized handle_t owner/view; mutations preserve its single owner and reserved native data slot; close completion ends native handle lifetime.
+-- @return Native handle_type result with the documented lifetime and units.
+-- @usage uv/functions/handle.md#handle_get_type
 function handle_get_type(handle: handle_t): handle_type
   return handle_type_from_native(ffi.uv_handle_get_type(handle_native(handle)))
 end
 
+--- Return the tagged native handle/request kind.
+-- @param req Input allocated request owner/view, including fresh, pending or completed state; this is a data/type/association query, not a pending-result read or a new submission.
+-- @return Native req_type result with the documented lifetime and units.
+-- @usage uv/functions/request.md#req_get_type
 function req_get_type(req: req_t): req_type
   case req
   when connect(owner) then return req_type_from_native(ffi.uv_req_get_type(owner.native as foreign *uv_req_t))
@@ -2265,10 +2945,16 @@ function req_get_type(req: req_t): req_type
   end
 end
 
+--- Classify an integer descriptor into the tagged native handle kind; the query does not adopt or close it.
+-- @param file Input integer value; checked native narrowing occurs before native ownership is accepted.
+-- @return Native handle_type result with the documented lifetime and units.
+-- @usage uv/functions/misc.md#guess_handle
 function guess_handle(file: integer): handle_type
   return handle_type_from_native(ffi.uv_guess_handle(file as foreign uv_file))
 end
 
+--- Reusable native random request owner retained through accepted completion.
+-- @usage uv/types.md#random_t
 record random_t
   local native: foreign uv_random_t
   local pending: boolean
@@ -2313,16 +2999,31 @@ foreign function random_callback(native: *uv_random_t, status: int, buf: *void, 
   ffi.lua_settop(L, top)
 end
 
+--- Allocate a fresh request owner without submitting work.
+-- @return Native random_t result with the documented lifetime and units.
+-- @usage uv/supplemental.md#random_tnew
 function random_t.new(): random_t
   local native = foreign uv_random_t.new()
   return {native = native, pending = false, loop = nil, buffer = nil,
           callback = nil, handler = random_deliver, userdata = nil}
 end
 
+--- Return a tagged view of the same concrete owner.
+-- @return Native req_t result with the documented lifetime and units.
+-- @usage uv/supplemental.md#random_tas_req_t
 function random_t:as_req_t(): req_t
   return req_t.random(self)
 end
 
+--- Fill writable storage with length random bytes.
+-- @param loop Input initialized owning loop; accepted handles/requests retain it through retirement.
+-- @param request Mutable allocated nonpending request owner; accepted submission retains owner until its terminal callback returns; rejection owes no async callback.
+-- @param buffer Output writable owned byte storage; caller allocates capacity, native operation writes bytes; accepted async borrow retained through terminal callback/cleanup.
+-- @param length Input integer value; checked native narrowing occurs before native ownership is accepted.
+-- @param flags Input integer value; checked native narrowing occurs before native ownership is accepted.
+-- @param callback Input ordinary callable, retained until the promised callback interval ends; the request and buffer views remain retained through callback return; a saved buffer view retains its bytes.
+-- @return Native integer result with the documented lifetime and units.
+-- @usage uv/functions/misc.md#random
 function random(loop: loop_t?, request: random_t?, buffer: buf_t,
                  length: integer, flags: integer,
                  callback: (function (random_t, integer, buf_t, integer): ())?): integer
@@ -2371,6 +3072,8 @@ local function stat_copy(native: foreign const *uv_stat_t): stat_t
   }
 end
 
+--- Concrete fs event handle owner; initialize before use and close explicitly.
+-- @usage uv/types.md#fs_event_t
 record fs_event_t
   local native: foreign uv_fs_event_t
   local phase: integer
@@ -2443,6 +3146,9 @@ foreign function fs_event_close_callback(base: *uv_handle_t)
   ffi.lua_settop(L, top)
 end
 
+--- Allocate a concrete handle owner without initializing its native lifetime.
+-- @return Native fs_event_t result with the documented lifetime and units.
+-- @usage uv/supplemental.md#fs_event_tnew
 function fs_event_t.new(): fs_event_t
   local native = foreign uv_fs_event_t.new()
   return {native = native, phase = HANDLE_FRESH, loop = nil,
@@ -2450,10 +3156,18 @@ function fs_event_t.new(): fs_event_t
           handler = fs_event_deliver, close_handler = fs_event_closed, path = nil, userdata = nil}
 end
 
+--- Return a tagged view of the same concrete owner.
+-- @return Native handle_t result with the documented lifetime and units.
+-- @usage uv/supplemental.md#fs_event_tas_handle_t
 function fs_event_t:as_handle_t(): handle_t
   return handle_t.fs_event(self)
 end
 
+--- Initialize a fs_event_t owner on the loop.
+-- @param loop Input initialized owning loop; accepted handles/requests retain it through retirement.
+-- @param handle Mutable final fs_event_t owner in fresh or retired state, before this native initialization; successful initialization establishes a close obligation.
+-- @return Native integer result with the documented lifetime and units.
+-- @usage uv/functions/fs_event.md#fs_event_init
 function fs_event_init(loop: loop_t, handle: fs_event_t): integer
   if not loop.initialized or handle.phase == HANDLE_LIVE then return ffi.UV_EINVAL end
   loop.handles[handle] = true
@@ -2465,6 +3179,13 @@ function fs_event_init(loop: loop_t, handle: fs_event_t): integer
   return status
 end
 
+--- Watch path for native change/rename events.
+-- @param handle Mutable initialized fs_event_t owner/view; mutations preserve its single owner and reserved native data slot; close completion ends native handle lifetime.
+-- @param callback Input ordinary callable, retained until the promised callback interval ends; callback argument owners are borrowed views retained through callback return.
+-- @param path Input immutable text/byte owner; native C-string conventions apply where the operation takes text.
+-- @param flags Input integer value; checked native narrowing occurs before native ownership is accepted.
+-- @return Native integer result with the documented lifetime and units.
+-- @usage uv/functions/fs_event.md#fs_event_start
 function fs_event_start(handle: fs_event_t, callback: function (fs_event_t, string?, integer, integer): (),
                       path: string, flags: integer): integer
   if handle.phase ~= HANDLE_LIVE then return ffi.UV_EINVAL end
@@ -2479,12 +3200,23 @@ function fs_event_start(handle: fs_event_t, callback: function (fs_event_t, stri
   return status
 end
 
+--- Stop this filesystem notification source without closing its native handle.
+-- @param handle Mutable initialized fs_event_t owner/view; mutations preserve its single owner and reserved native data slot; close completion ends native handle lifetime.
+-- @return Native integer result with the documented lifetime and units.
+-- @usage uv/functions/fs_event.md#fs_event_stop
 function fs_event_stop(handle: fs_event_t): integer
   if handle.phase ~= HANDLE_LIVE then return ffi.UV_EINVAL end
   if ffi.uv_is_closing(handle.native as foreign *uv_handle_t) ~= 0 then return ffi.UV_EINVAL end
   return ffi.uv_fs_event_stop(handle.native)
 end
 
+--- Return `(status, copied_path?, native_length)` for the watched path using the supplied byte capacity.
+-- @param handle Mutable initialized fs_event_t owner/view; mutations preserve its single owner and reserved native data slot; close completion ends native handle lifetime.
+-- @param capacity Input integer value; checked native narrowing occurs before native ownership is accepted.
+-- @return Native status: zero on success, a negative libuv error on failure.
+-- @return Copied or retained string result, or nil on failure or absence.
+-- @return Native operation result or submission status; negative values report libuv errors.
+-- @usage uv/functions/fs_event.md#fs_event_getpath
 function fs_event_getpath(handle: fs_event_t, capacity: integer): (integer, string?, integer)
   if handle.phase ~= HANDLE_LIVE then return ffi.UV_EINVAL, nil, capacity end
   local native_size = capacity as foreign size_t
@@ -2494,6 +3226,8 @@ function fs_event_getpath(handle: fs_event_t, capacity: integer): (integer, stri
   return status, (buffer as foreign *char) as string, native_size
 end
 
+--- Concrete fs poll handle owner; initialize before use and close explicitly.
+-- @usage uv/types.md#fs_poll_t
 record fs_poll_t
   local native: foreign uv_fs_poll_t
   local phase: integer
@@ -2567,6 +3301,9 @@ foreign function fs_poll_close_callback(base: *uv_handle_t)
   ffi.lua_settop(L, top)
 end
 
+--- Allocate a concrete handle owner without initializing its native lifetime.
+-- @return Native fs_poll_t result with the documented lifetime and units.
+-- @usage uv/supplemental.md#fs_poll_tnew
 function fs_poll_t.new(): fs_poll_t
   local native = foreign uv_fs_poll_t.new()
   return {native = native, phase = HANDLE_FRESH, loop = nil,
@@ -2574,10 +3311,18 @@ function fs_poll_t.new(): fs_poll_t
           handler = fs_poll_deliver, close_handler = fs_poll_closed, path = nil, userdata = nil}
 end
 
+--- Return a tagged view of the same concrete owner.
+-- @return Native handle_t result with the documented lifetime and units.
+-- @usage uv/supplemental.md#fs_poll_tas_handle_t
 function fs_poll_t:as_handle_t(): handle_t
   return handle_t.fs_poll(self)
 end
 
+--- Initialize a fs_poll_t owner on the loop.
+-- @param loop Input initialized owning loop; accepted handles/requests retain it through retirement.
+-- @param handle Mutable final fs_poll_t owner in fresh or retired state, before this native initialization; successful initialization establishes a close obligation.
+-- @return Native integer result with the documented lifetime and units.
+-- @usage uv/functions/fs_poll.md#fs_poll_init
 function fs_poll_init(loop: loop_t, handle: fs_poll_t): integer
   if not loop.initialized or handle.phase == HANDLE_LIVE then return ffi.UV_EINVAL end
   loop.handles[handle] = true
@@ -2589,6 +3334,13 @@ function fs_poll_init(loop: loop_t, handle: fs_poll_t): integer
   return status
 end
 
+--- Poll path metadata at interval milliseconds.
+-- @param handle Mutable initialized fs_poll_t owner/view; mutations preserve its single owner and reserved native data slot; close completion ends native handle lifetime.
+-- @param callback Input ordinary callable, retained until the promised callback interval ends; the handle argument is an owner view; previous/current stat_t arguments are independent copies, or nil on error.
+-- @param path Input immutable text/byte owner; native C-string conventions apply where the operation takes text.
+-- @param interval Input integer value; checked native narrowing occurs before native ownership is accepted.
+-- @return Native integer result with the documented lifetime and units.
+-- @usage uv/functions/fs_poll.md#fs_poll_start
 function fs_poll_start(handle: fs_poll_t, callback: function (fs_poll_t, integer, stat_t?, stat_t?): (),
                       path: string, interval: integer): integer
   if handle.phase ~= HANDLE_LIVE then return ffi.UV_EINVAL end
@@ -2604,12 +3356,23 @@ function fs_poll_start(handle: fs_poll_t, callback: function (fs_poll_t, integer
   return status
 end
 
+--- Stop this filesystem notification source without closing its native handle.
+-- @param handle Mutable initialized fs_poll_t owner/view; mutations preserve its single owner and reserved native data slot; close completion ends native handle lifetime.
+-- @return Native integer result with the documented lifetime and units.
+-- @usage uv/functions/fs_poll.md#fs_poll_stop
 function fs_poll_stop(handle: fs_poll_t): integer
   if handle.phase ~= HANDLE_LIVE then return ffi.UV_EINVAL end
   if ffi.uv_is_closing(handle.native as foreign *uv_handle_t) ~= 0 then return ffi.UV_EINVAL end
   return ffi.uv_fs_poll_stop(handle.native)
 end
 
+--- Return `(status, copied_path?, native_length)` for the watched path using the supplied byte capacity.
+-- @param handle Mutable initialized fs_poll_t owner/view; mutations preserve its single owner and reserved native data slot; close completion ends native handle lifetime.
+-- @param capacity Input integer value; checked native narrowing occurs before native ownership is accepted.
+-- @return Native status: zero on success, a negative libuv error on failure.
+-- @return Copied or retained string result, or nil on failure or absence.
+-- @return Native operation result or submission status; negative values report libuv errors.
+-- @usage uv/functions/fs_poll.md#fs_poll_getpath
 function fs_poll_getpath(handle: fs_poll_t, capacity: integer): (integer, string?, integer)
   if handle.phase ~= HANDLE_LIVE then return ffi.UV_EINVAL, nil, capacity end
   local native_size = capacity as foreign size_t
@@ -2621,20 +3384,39 @@ end
 
 -- Every dir_t is one explicit native directory owner. Request cleanup releases
 -- request results only. An open dir_t requires a separate successful closedir.
+--- An owned open directory requiring an explicit fs_closedir operation.
+-- @usage uv/types.md#dir_t
 record dir_t
   local native: foreign *uv_dir_t
   local busy: boolean
 end
 
+--- Allocate an empty directory owner.
+-- @return Native dir_t result with the documented lifetime and units.
+-- @usage uv/supplemental.md#dir_tnew
 function dir_t.new(): dir_t
   return { native = nil, busy = false }
 end
 
+--- Copied native dirent data exposed without C-header types.
+-- @field name Independent copied name and typed entry kind, valid after request cleanup. The kind includes unknown.
+-- @field type Independent copied name and typed entry kind, valid after request cleanup. The kind includes unknown.
+-- @usage uv/types.md#dirent_t
 record dirent_t
   name: string
   type: dirent_type_t
 end
 
+--- Tagged dirent type values for native operations.
+-- @field unknown Unknown variant.
+-- @field file File variant.
+-- @field directory Directory variant.
+-- @field link Link variant.
+-- @field fifo Fifo variant.
+-- @field socket Socket variant.
+-- @field character Character variant.
+-- @field block Block variant.
+-- @usage uv/types.md#dirent_type_t
 union dirent_type_t
   unknown()
   file()
@@ -2646,6 +3428,17 @@ union dirent_type_t
   block()
 end
 
+--- Copied native statfs data exposed without C-header types.
+-- @field f_type Independent copied filesystem-statistics output, including the pinned f_frsize field. The public record additionally copies f_spare into an Array.
+-- @field f_bsize Independent copied filesystem-statistics output, including the pinned f_frsize field. The public record additionally copies f_spare into an Array.
+-- @field f_blocks Independent copied filesystem-statistics output, including the pinned f_frsize field. The public record additionally copies f_spare into an Array.
+-- @field f_bfree Independent copied filesystem-statistics output, including the pinned f_frsize field. The public record additionally copies f_spare into an Array.
+-- @field f_bavail Independent copied filesystem-statistics output, including the pinned f_frsize field. The public record additionally copies f_spare into an Array.
+-- @field f_files Independent copied filesystem-statistics output, including the pinned f_frsize field. The public record additionally copies f_spare into an Array.
+-- @field f_ffree Independent copied filesystem-statistics output, including the pinned f_frsize field. The public record additionally copies f_spare into an Array.
+-- @field f_frsize Independent copied filesystem-statistics output, including the pinned f_frsize field. The public record additionally copies f_spare into an Array.
+-- @field f_spare F spare in the copied native result.
+-- @usage uv/types.md#statfs_t
 record statfs_t
   f_type: integer
   f_bsize: integer
@@ -2658,6 +3451,14 @@ record statfs_t
   f_spare: {integer}
 end
 
+--- Tagged fs ptr values for native operations.
+-- @field stat Stat variant.
+-- @field directory Directory variant.
+-- @field entries Entries variant.
+-- @field statfs Statfs variant.
+-- @field path Path variant.
+-- @field scandir Scandir variant.
+-- @usage uv/types.md#fs_ptr_t
 union fs_ptr_t
   stat(result: stat_t)
   directory(result: dir_t)
@@ -2667,6 +3468,46 @@ union fs_ptr_t
   scandir(request: fs_t)
 end
 
+--- Tagged fs type values for native operations.
+-- @field unknown Unknown variant.
+-- @field custom Custom variant.
+-- @field open Open variant.
+-- @field close Close variant.
+-- @field read Read variant.
+-- @field write Write variant.
+-- @field sendfile Sendfile variant.
+-- @field stat Stat variant.
+-- @field lstat Lstat variant.
+-- @field fstat Fstat variant.
+-- @field ftruncate Ftruncate variant.
+-- @field utime Utime variant.
+-- @field futime Futime variant.
+-- @field access Access variant.
+-- @field chmod Chmod variant.
+-- @field fchmod Fchmod variant.
+-- @field fsync Fsync variant.
+-- @field fdatasync Fdatasync variant.
+-- @field unlink Unlink variant.
+-- @field rmdir Rmdir variant.
+-- @field mkdir Mkdir variant.
+-- @field mkdtemp Mkdtemp variant.
+-- @field rename Rename variant.
+-- @field scandir Scandir variant.
+-- @field link Link variant.
+-- @field symlink Symlink variant.
+-- @field readlink Readlink variant.
+-- @field chown Chown variant.
+-- @field fchown Fchown variant.
+-- @field realpath Realpath variant.
+-- @field copyfile Copyfile variant.
+-- @field lchown Lchown variant.
+-- @field opendir Opendir variant.
+-- @field readdir Readdir variant.
+-- @field closedir Closedir variant.
+-- @field statfs Statfs variant.
+-- @field mkstemp Mkstemp variant.
+-- @field lutime Lutime variant.
+-- @usage uv/types.md#fs_type_t
 union fs_type_t
   unknown()
   custom()
@@ -2708,6 +3549,10 @@ union fs_type_t
   lutime()
 end
 
+--- Read the request's filesystem operation kind as fs_type_t.
+-- @param request Input existing fs_t owner; this synchronous operation requires nonpending state and enforces the result-kind/cleanup rules below.
+-- @return Native fs_type_t result with the documented lifetime and units.
+-- @usage uv/functions/fs.md#fs_get_type
 function fs_get_type(request: fs_t): fs_type_t
   if request.pending then raise "FS request is pending" end
   local kind = ffi.uv_fs_get_type(request.native)
@@ -2752,10 +3597,18 @@ function fs_get_type(request: fs_t): fs_type_t
   return fs_type_t.unknown()
 end
 
+--- Return this request's retained loop association, or nil when none is recorded.
+-- @param request Native owner or typed view used by this operation.
+-- @return Copied or retained loop_t result, or nil on failure or absence.
+-- @usage uv/supplemental.md#fs_get_loop
 function fs_get_loop(request: fs_t): loop_t?
   return request.loop
 end
 
+--- Read the completed request's original platform system-error value.
+-- @param request Input existing fs_t owner; this synchronous operation requires nonpending state and enforces the result-kind/cleanup rules below.
+-- @return Native integer result with the documented lifetime and units.
+-- @usage uv/functions/fs.md#fs_get_system_error
 function fs_get_system_error(request: fs_t): integer
   if request.pending then raise "FS request is pending" end
   return ffi.uv_fs_get_system_error(request.native) as integer
@@ -2773,6 +3626,10 @@ local function fs_dirent_type(kind: foreign uv_dirent_type_t): dirent_type_t
   return dirent_type_t.unknown()
 end
 
+--- Return the directory owner from a successfully completed `fs_opendir` request before request cleanup.
+-- @param request Native owner or typed view used by this operation.
+-- @return Native dir_t result with the documented lifetime and units.
+-- @usage uv/supplemental.md#fs_get_dir
 function fs_get_dir(request: fs_t): dir_t
   if request.pending or not request.dirty then raise "FS result is unavailable" end
   if ffi.uv_fs_get_type(request.native) ~= ffi.UV_FS_OPENDIR or
@@ -2780,6 +3637,10 @@ function fs_get_dir(request: fs_t): dir_t
   return request.directory as dir_t
 end
 
+--- Copy a completed successful `fs_readdir` result into independent directory-entry records.
+-- @param request Native owner or typed view used by this operation.
+-- @return Native {dirent_t} result with the documented lifetime and units.
+-- @usage uv/supplemental.md#fs_get_entries
 function fs_get_entries(request: fs_t): {dirent_t}
   if request.pending or not request.dirty then raise "FS result is unavailable" end
   if ffi.uv_fs_get_type(request.native) ~= ffi.UV_FS_READDIR or
@@ -2794,6 +3655,10 @@ function fs_get_entries(request: fs_t): {dirent_t}
   return result
 end
 
+--- Copy a completed successful `fs_readlink` or `fs_realpath` result before request cleanup.
+-- @param request Native owner or typed view used by this operation.
+-- @return Native string result with the documented lifetime and units.
+-- @usage uv/supplemental.md#fs_get_string
 function fs_get_string(request: fs_t): string
   if request.pending or not request.dirty then raise "FS result is unavailable" end
   local kind = ffi.uv_fs_get_type(request.native)
@@ -2802,6 +3667,10 @@ function fs_get_string(request: fs_t): string
   return (ffi.uv_fs_get_ptr(request.native) as foreign *char) as string
 end
 
+--- Copy the completed successful `fs_statfs` result before request cleanup.
+-- @param request Native owner or typed view used by this operation.
+-- @return Native statfs_t result with the documented lifetime and units.
+-- @usage uv/supplemental.md#fs_get_statfs
 function fs_get_statfs(request: fs_t): statfs_t
   if request.pending or not request.dirty then raise "FS result is unavailable" end
   if ffi.uv_fs_get_type(request.native) ~= ffi.UV_FS_STATFS or
@@ -2822,6 +3691,11 @@ function fs_get_statfs(request: fs_t): statfs_t
   }
 end
 
+--- Return `(status, entry?)` from a completed scandir request.
+-- @param request Input existing fs_t owner; this synchronous operation requires nonpending state and enforces the result-kind/cleanup rules below.
+-- @return Native status: zero on success, a negative libuv error on failure.
+-- @return Copied or retained dirent_t result, or nil on failure or absence.
+-- @usage uv/functions/fs.md#fs_scandir_next
 function fs_scandir_next(request: fs_t): (integer, dirent_t?)
   if request.pending or not request.dirty then raise "FS result is unavailable" end
   if ffi.uv_fs_get_type(request.native) ~= ffi.UV_FS_SCANDIR then
@@ -2833,6 +3707,10 @@ function fs_scandir_next(request: fs_t): (integer, dirent_t?)
   return status, dirent_t(native.name as string, fs_dirent_type(native.type))
 end
 
+--- Obtain the typed result view appropriate to the completed request kind; copy or retain its documented result before cleaning the request.
+-- @param request Input existing fs_t owner; this synchronous operation requires nonpending state and enforces the result-kind/cleanup rules below.
+-- @return Copied or retained fs_ptr_t result, or nil on failure or absence.
+-- @usage uv/functions/fs.md#fs_get_ptr
 function fs_get_ptr(request: fs_t): fs_ptr_t?
   if request.pending then raise "FS request is pending" end
   if not request.dirty or not ffi.uv_fs_get_ptr(request.native) then return nil end
@@ -2855,6 +3733,13 @@ function fs_get_ptr(request: fs_t): fs_ptr_t?
   return nil
 end
 
+--- Remove a filesystem name.
+-- @param loop Input initialized owning loop; accepted handles/requests retain it through retirement.
+-- @param request Mutable allocated nonpending request owner; FS submissions also require prior cleanup; accepted submission retains owner until its terminal callback returns; rejection owes no async callback.
+-- @param path Input immutable text/byte owner; native C-string conventions apply where the operation takes text.
+-- @param callback Input ordinary callable, retained until the promised callback interval ends; callback argument owners are borrowed views retained through callback return.
+-- @return Native integer result with the documented lifetime and units.
+-- @usage uv/functions/fs.md#fs_unlink
 function fs_unlink(loop: loop_t?, request: fs_t, path: string,
     callback: (function (fs_t): ())?): integer
   local status, native_loop, native_callback = fs_prepare(loop, request, callback, path)
@@ -2869,6 +3754,13 @@ function fs_unlink(loop: loop_t?, request: fs_t, path: string,
   return result
 end
 
+--- Replace the trailing XXXXXX template with a unique directory name.
+-- @param loop Input initialized owning loop; accepted handles/requests retain it through retirement.
+-- @param request Mutable allocated nonpending request owner; FS submissions also require prior cleanup; accepted submission retains owner until its terminal callback returns; rejection owes no async callback.
+-- @param path Input immutable text/byte owner; native C-string conventions apply where the operation takes text.
+-- @param callback Input ordinary callable, retained until the promised callback interval ends; callback argument owners are borrowed views retained through callback return.
+-- @return Native integer result with the documented lifetime and units.
+-- @usage uv/functions/fs.md#fs_mkdtemp
 function fs_mkdtemp(loop: loop_t?, request: fs_t, path: string,
     callback: (function (fs_t): ())?): integer
   local status, native_loop, native_callback = fs_prepare(loop, request, callback, path)
@@ -2883,6 +3775,13 @@ function fs_mkdtemp(loop: loop_t?, request: fs_t, path: string,
   return result
 end
 
+--- Create a unique file from the trailing XXXXXX template.
+-- @param loop Input initialized owning loop; accepted handles/requests retain it through retirement.
+-- @param request Mutable allocated nonpending request owner; FS submissions also require prior cleanup; accepted submission retains owner until its terminal callback returns; rejection owes no async callback.
+-- @param path Input immutable text/byte owner; native C-string conventions apply where the operation takes text.
+-- @param callback Input ordinary callable, retained until the promised callback interval ends; callback argument owners are borrowed views retained through callback return.
+-- @return Native integer result with the documented lifetime and units.
+-- @usage uv/functions/fs.md#fs_mkstemp
 function fs_mkstemp(loop: loop_t?, request: fs_t, path: string,
     callback: (function (fs_t): ())?): integer
   local status, native_loop, native_callback = fs_prepare(loop, request, callback, path)
@@ -2897,6 +3796,13 @@ function fs_mkstemp(loop: loop_t?, request: fs_t, path: string,
   return result
 end
 
+--- Remove an empty directory at path.
+-- @param loop Input initialized owning loop; accepted handles/requests retain it through retirement.
+-- @param request Mutable allocated nonpending request owner; FS submissions also require prior cleanup; accepted submission retains owner until its terminal callback returns; rejection owes no async callback.
+-- @param path Input immutable text/byte owner; native C-string conventions apply where the operation takes text.
+-- @param callback Input ordinary callable, retained until the promised callback interval ends; callback argument owners are borrowed views retained through callback return.
+-- @return Native integer result with the documented lifetime and units.
+-- @usage uv/functions/fs.md#fs_rmdir
 function fs_rmdir(loop: loop_t?, request: fs_t, path: string,
     callback: (function (fs_t): ())?): integer
   local status, native_loop, native_callback = fs_prepare(loop, request, callback, path)
@@ -2911,6 +3817,13 @@ function fs_rmdir(loop: loop_t?, request: fs_t, path: string,
   return result
 end
 
+--- Read path metadata without following the final symbolic link.
+-- @param loop Input initialized owning loop; accepted handles/requests retain it through retirement.
+-- @param request Mutable allocated nonpending request owner; FS submissions also require prior cleanup; accepted submission retains owner until its terminal callback returns; rejection owes no async callback.
+-- @param path Input immutable text/byte owner; native C-string conventions apply where the operation takes text.
+-- @param callback Input ordinary callable, retained until the promised callback interval ends; callback argument owners are borrowed views retained through callback return.
+-- @return Native integer result with the documented lifetime and units.
+-- @usage uv/functions/fs.md#fs_lstat
 function fs_lstat(loop: loop_t?, request: fs_t, path: string,
     callback: (function (fs_t): ())?): integer
   local status, native_loop, native_callback = fs_prepare(loop, request, callback, path)
@@ -2925,6 +3838,13 @@ function fs_lstat(loop: loop_t?, request: fs_t, path: string,
   return result
 end
 
+--- Read the contents of a symbolic link.
+-- @param loop Input initialized owning loop; accepted handles/requests retain it through retirement.
+-- @param request Mutable allocated nonpending request owner; FS submissions also require prior cleanup; accepted submission retains owner until its terminal callback returns; rejection owes no async callback.
+-- @param path Input immutable text/byte owner; native C-string conventions apply where the operation takes text.
+-- @param callback Input ordinary callable, retained until the promised callback interval ends; callback argument owners are borrowed views retained through callback return.
+-- @return Native integer result with the documented lifetime and units.
+-- @usage uv/functions/fs.md#fs_readlink
 function fs_readlink(loop: loop_t?, request: fs_t, path: string,
     callback: (function (fs_t): ())?): integer
   local status, native_loop, native_callback = fs_prepare(loop, request, callback, path)
@@ -2939,6 +3859,13 @@ function fs_readlink(loop: loop_t?, request: fs_t, path: string,
   return result
 end
 
+--- Resolve a path to its native canonical absolute spelling.
+-- @param loop Input initialized owning loop; accepted handles/requests retain it through retirement.
+-- @param request Mutable allocated nonpending request owner; FS submissions also require prior cleanup; accepted submission retains owner until its terminal callback returns; rejection owes no async callback.
+-- @param path Input immutable text/byte owner; native C-string conventions apply where the operation takes text.
+-- @param callback Input ordinary callable, retained until the promised callback interval ends; callback argument owners are borrowed views retained through callback return.
+-- @return Native integer result with the documented lifetime and units.
+-- @usage uv/functions/fs.md#fs_realpath
 function fs_realpath(loop: loop_t?, request: fs_t, path: string,
     callback: (function (fs_t): ())?): integer
   local status, native_loop, native_callback = fs_prepare(loop, request, callback, path)
@@ -2953,6 +3880,13 @@ function fs_realpath(loop: loop_t?, request: fs_t, path: string,
   return result
 end
 
+--- Read filesystem statistics for the path and copy the completed typed result before cleanup.
+-- @param loop Input initialized owning loop; accepted handles/requests retain it through retirement.
+-- @param request Mutable allocated nonpending request owner; FS submissions also require prior cleanup; accepted submission retains owner until its terminal callback returns; rejection owes no async callback.
+-- @param path Input immutable text/byte owner; native C-string conventions apply where the operation takes text.
+-- @param callback Input ordinary callable, retained until the promised callback interval ends; callback argument owners are borrowed views retained through callback return.
+-- @return Native integer result with the documented lifetime and units.
+-- @usage uv/functions/fs.md#fs_statfs
 function fs_statfs(loop: loop_t?, request: fs_t, path: string,
     callback: (function (fs_t): ())?): integer
   local status, native_loop, native_callback = fs_prepare(loop, request, callback, path)
@@ -2967,6 +3901,14 @@ function fs_statfs(loop: loop_t?, request: fs_t, path: string,
   return result
 end
 
+--- Create a directory using the requested mode bits.
+-- @param loop Input initialized owning loop; accepted handles/requests retain it through retirement.
+-- @param request Mutable allocated nonpending request owner; FS submissions also require prior cleanup; accepted submission retains owner until its terminal callback returns; rejection owes no async callback.
+-- @param path Input immutable text/byte owner; native C-string conventions apply where the operation takes text.
+-- @param mode Input integer value; checked native narrowing occurs before native ownership is accepted.
+-- @param callback Input ordinary callable, retained until the promised callback interval ends; callback argument owners are borrowed views retained through callback return.
+-- @return Native integer result with the documented lifetime and units.
+-- @usage uv/functions/fs.md#fs_mkdir
 function fs_mkdir(loop: loop_t?, request: fs_t, path: string, mode: integer,
     callback: (function (fs_t): ())?): integer
   local native_mode = mode as foreign int
@@ -2982,6 +3924,14 @@ function fs_mkdir(loop: loop_t?, request: fs_t, path: string, mode: integer,
   return result
 end
 
+--- Check existence or requested access bits for a path; this does not reserve permission for a later operation.
+-- @param loop Input initialized owning loop; accepted handles/requests retain it through retirement.
+-- @param request Mutable allocated nonpending request owner; FS submissions also require prior cleanup; accepted submission retains owner until its terminal callback returns; rejection owes no async callback.
+-- @param path Input immutable text/byte owner; native C-string conventions apply where the operation takes text.
+-- @param mode Input integer value; checked native narrowing occurs before native ownership is accepted.
+-- @param callback Input ordinary callable, retained until the promised callback interval ends; callback argument owners are borrowed views retained through callback return.
+-- @return Native integer result with the documented lifetime and units.
+-- @usage uv/functions/fs.md#fs_access
 function fs_access(loop: loop_t?, request: fs_t, path: string, mode: integer,
     callback: (function (fs_t): ())?): integer
   local native_mode = mode as foreign int
@@ -2997,6 +3947,14 @@ function fs_access(loop: loop_t?, request: fs_t, path: string, mode: integer,
   return result
 end
 
+--- Change permission mode bits on the named path.
+-- @param loop Input initialized owning loop; accepted handles/requests retain it through retirement.
+-- @param request Mutable allocated nonpending request owner; FS submissions also require prior cleanup; accepted submission retains owner until its terminal callback returns; rejection owes no async callback.
+-- @param path Input immutable text/byte owner; native C-string conventions apply where the operation takes text.
+-- @param mode Input integer value; checked native narrowing occurs before native ownership is accepted.
+-- @param callback Input ordinary callable, retained until the promised callback interval ends; callback argument owners are borrowed views retained through callback return.
+-- @return Native integer result with the documented lifetime and units.
+-- @usage uv/functions/fs.md#fs_chmod
 function fs_chmod(loop: loop_t?, request: fs_t, path: string, mode: integer,
     callback: (function (fs_t): ())?): integer
   local native_mode = mode as foreign int
@@ -3012,6 +3970,14 @@ function fs_chmod(loop: loop_t?, request: fs_t, path: string, mode: integer,
   return result
 end
 
+--- Collect directory entries for repeated fs_scandir_next calls.
+-- @param loop Input initialized owning loop; accepted handles/requests retain it through retirement.
+-- @param request Mutable allocated nonpending request owner; FS submissions also require prior cleanup; accepted submission retains owner until its terminal callback returns; rejection owes no async callback.
+-- @param path Input immutable text/byte owner; native C-string conventions apply where the operation takes text.
+-- @param flags Input integer value; checked native narrowing occurs before native ownership is accepted.
+-- @param callback Input ordinary callable, retained until the promised callback interval ends; callback argument owners are borrowed views retained through callback return.
+-- @return Native integer result with the documented lifetime and units.
+-- @usage uv/functions/fs.md#fs_scandir
 function fs_scandir(loop: loop_t?, request: fs_t, path: string, flags: integer,
     callback: (function (fs_t): ())?): integer
   local native_flags = flags as foreign int
@@ -3027,6 +3993,13 @@ function fs_scandir(loop: loop_t?, request: fs_t, path: string, flags: integer,
   return result
 end
 
+--- Read metadata through an open descriptor; copy the completed stat value before request cleanup.
+-- @param loop Input initialized owning loop; accepted handles/requests retain it through retirement.
+-- @param request Mutable allocated nonpending request owner; FS submissions also require prior cleanup; accepted submission retains owner until its terminal callback returns; rejection owes no async callback.
+-- @param file Input integer value; checked native narrowing occurs before native ownership is accepted.
+-- @param callback Input ordinary callable, retained until the promised callback interval ends; callback argument owners are borrowed views retained through callback return.
+-- @return Native integer result with the documented lifetime and units.
+-- @usage uv/functions/fs.md#fs_fstat
 function fs_fstat(loop: loop_t?, request: fs_t, file: integer,
     callback: (function (fs_t): ())?): integer
   local native_file = file as foreign uv_file
@@ -3042,6 +4015,13 @@ function fs_fstat(loop: loop_t?, request: fs_t, file: integer,
   return result
 end
 
+--- Flush file data and associated metadata to stable storage according to native filesystem semantics.
+-- @param loop Input initialized owning loop; accepted handles/requests retain it through retirement.
+-- @param request Mutable allocated nonpending request owner; FS submissions also require prior cleanup; accepted submission retains owner until its terminal callback returns; rejection owes no async callback.
+-- @param file Input integer value; checked native narrowing occurs before native ownership is accepted.
+-- @param callback Input ordinary callable, retained until the promised callback interval ends; callback argument owners are borrowed views retained through callback return.
+-- @return Native integer result with the documented lifetime and units.
+-- @usage uv/functions/fs.md#fs_fsync
 function fs_fsync(loop: loop_t?, request: fs_t, file: integer,
     callback: (function (fs_t): ())?): integer
   local native_file = file as foreign uv_file
@@ -3057,6 +4037,13 @@ function fs_fsync(loop: loop_t?, request: fs_t, file: integer,
   return result
 end
 
+--- Flush file data required for retrieval to stable storage according to native filesystem semantics.
+-- @param loop Input initialized owning loop; accepted handles/requests retain it through retirement.
+-- @param request Mutable allocated nonpending request owner; FS submissions also require prior cleanup; accepted submission retains owner until its terminal callback returns; rejection owes no async callback.
+-- @param file Input integer value; checked native narrowing occurs before native ownership is accepted.
+-- @param callback Input ordinary callable, retained until the promised callback interval ends; callback argument owners are borrowed views retained through callback return.
+-- @return Native integer result with the documented lifetime and units.
+-- @usage uv/functions/fs.md#fs_fdatasync
 function fs_fdatasync(loop: loop_t?, request: fs_t, file: integer,
     callback: (function (fs_t): ())?): integer
   local native_file = file as foreign uv_file
@@ -3072,6 +4059,14 @@ function fs_fdatasync(loop: loop_t?, request: fs_t, file: integer,
   return result
 end
 
+--- Rename or move path to new_path using native filesystem semantics.
+-- @param loop Input initialized owning loop; accepted handles/requests retain it through retirement.
+-- @param request Mutable allocated nonpending request owner; FS submissions also require prior cleanup; accepted submission retains owner until its terminal callback returns; rejection owes no async callback.
+-- @param path Input immutable text/byte owner; native C-string conventions apply where the operation takes text.
+-- @param new_path Input immutable text/byte owner; native C-string conventions apply where the operation takes text.
+-- @param callback Input ordinary callable, retained until the promised callback interval ends; callback argument owners are borrowed views retained through callback return.
+-- @return Native integer result with the documented lifetime and units.
+-- @usage uv/functions/fs.md#fs_rename
 function fs_rename(loop: loop_t?, request: fs_t, path: string, new_path: string,
     callback: (function (fs_t): ())?): integer
   local status, native_loop, native_callback = fs_prepare(loop, request, callback, path)
@@ -3087,6 +4082,14 @@ function fs_rename(loop: loop_t?, request: fs_t, path: string, new_path: string,
   return result
 end
 
+--- Create new_path as a hard link to path.
+-- @param loop Input initialized owning loop; accepted handles/requests retain it through retirement.
+-- @param request Mutable allocated nonpending request owner; FS submissions also require prior cleanup; accepted submission retains owner until its terminal callback returns; rejection owes no async callback.
+-- @param path Input immutable text/byte owner; native C-string conventions apply where the operation takes text.
+-- @param new_path Input immutable text/byte owner; native C-string conventions apply where the operation takes text.
+-- @param callback Input ordinary callable, retained until the promised callback interval ends; callback argument owners are borrowed views retained through callback return.
+-- @return Native integer result with the documented lifetime and units.
+-- @usage uv/functions/fs.md#fs_link
 function fs_link(loop: loop_t?, request: fs_t, path: string, new_path: string,
     callback: (function (fs_t): ())?): integer
   local status, native_loop, native_callback = fs_prepare(loop, request, callback, path)
@@ -3102,6 +4105,15 @@ function fs_link(loop: loop_t?, request: fs_t, path: string, new_path: string,
   return result
 end
 
+--- Copy a file from path to new_path with native COPYFILE flags; native errors may leave a destination requiring application policy.
+-- @param loop Input initialized owning loop; accepted handles/requests retain it through retirement.
+-- @param request Mutable allocated nonpending request owner; FS submissions also require prior cleanup; accepted submission retains owner until its terminal callback returns; rejection owes no async callback.
+-- @param path Input immutable text/byte owner; native C-string conventions apply where the operation takes text.
+-- @param new_path Input immutable text/byte owner; native C-string conventions apply where the operation takes text.
+-- @param flags Input integer value; checked native narrowing occurs before native ownership is accepted.
+-- @param callback Input ordinary callable, retained until the promised callback interval ends; callback argument owners are borrowed views retained through callback return.
+-- @return Native integer result with the documented lifetime and units.
+-- @usage uv/functions/fs.md#fs_copyfile
 function fs_copyfile(loop: loop_t?, request: fs_t, path: string, new_path: string, flags: integer,
     callback: (function (fs_t): ())?): integer
   local native_flags = flags as foreign int
@@ -3118,6 +4130,15 @@ function fs_copyfile(loop: loop_t?, request: fs_t, path: string, new_path: strin
   return result
 end
 
+--- Create new_path as a symbolic link to path, with native flags for platform-specific link kinds.
+-- @param loop Input initialized owning loop; accepted handles/requests retain it through retirement.
+-- @param request Mutable allocated nonpending request owner; FS submissions also require prior cleanup; accepted submission retains owner until its terminal callback returns; rejection owes no async callback.
+-- @param path Input immutable text/byte owner; native C-string conventions apply where the operation takes text.
+-- @param new_path Input immutable text/byte owner; native C-string conventions apply where the operation takes text.
+-- @param flags Input integer value; checked native narrowing occurs before native ownership is accepted.
+-- @param callback Input ordinary callable, retained until the promised callback interval ends; callback argument owners are borrowed views retained through callback return.
+-- @return Native integer result with the documented lifetime and units.
+-- @usage uv/functions/fs.md#fs_symlink
 function fs_symlink(loop: loop_t?, request: fs_t, path: string, new_path: string, flags: integer,
     callback: (function (fs_t): ())?): integer
   local native_flags = flags as foreign int
@@ -3134,6 +4155,14 @@ function fs_symlink(loop: loop_t?, request: fs_t, path: string, new_path: string
   return result
 end
 
+--- Set file length to offset bytes through an open descriptor.
+-- @param loop Input initialized owning loop; accepted handles/requests retain it through retirement.
+-- @param request Mutable allocated nonpending request owner; FS submissions also require prior cleanup; accepted submission retains owner until its terminal callback returns; rejection owes no async callback.
+-- @param file Input integer value; checked native narrowing occurs before native ownership is accepted.
+-- @param offset Input integer value; checked native narrowing occurs before native ownership is accepted.
+-- @param callback Input ordinary callable, retained until the promised callback interval ends; callback argument owners are borrowed views retained through callback return.
+-- @return Native integer result with the documented lifetime and units.
+-- @usage uv/functions/fs.md#fs_ftruncate
 function fs_ftruncate(loop: loop_t?, request: fs_t, file: integer, offset: integer,
     callback: (function (fs_t): ())?): integer
   local native_file = file as foreign uv_file
@@ -3150,6 +4179,16 @@ function fs_ftruncate(loop: loop_t?, request: fs_t, file: integer, offset: integ
   return result
 end
 
+--- Copy up to length bytes from in_fd at in_offset to out_fd.
+-- @param loop Input initialized owning loop; accepted handles/requests retain it through retirement.
+-- @param request Mutable allocated nonpending request owner; FS submissions also require prior cleanup; accepted submission retains owner until its terminal callback returns; rejection owes no async callback.
+-- @param out_fd Input integer value; checked native narrowing occurs before native ownership is accepted.
+-- @param in_fd Input integer value; checked native narrowing occurs before native ownership is accepted.
+-- @param in_offset Input integer value; checked native narrowing occurs before native ownership is accepted.
+-- @param length Input integer value; checked native narrowing occurs before native ownership is accepted.
+-- @param callback Input ordinary callable, retained until the promised callback interval ends; callback argument owners are borrowed views retained through callback return.
+-- @return Native integer result with the documented lifetime and units.
+-- @usage uv/functions/fs.md#fs_sendfile
 function fs_sendfile(loop: loop_t?, request: fs_t, out_fd: integer, in_fd: integer, in_offset: integer, length: integer,
     callback: (function (fs_t): ())?): integer
   local native_out_fd = out_fd as foreign uv_file
@@ -3168,6 +4207,15 @@ function fs_sendfile(loop: loop_t?, request: fs_t, out_fd: integer, in_fd: integ
   return result
 end
 
+--- Set path access/modification times in floating-point seconds, following symbolic links.
+-- @param loop Input initialized owning loop; accepted handles/requests retain it through retirement.
+-- @param request Mutable allocated nonpending request owner; FS submissions also require prior cleanup; accepted submission retains owner until its terminal callback returns; rejection owes no async callback.
+-- @param path Input immutable text/byte owner; native C-string conventions apply where the operation takes text.
+-- @param atime Input float value; checked native narrowing occurs before native ownership is accepted.
+-- @param mtime Input float value; checked native narrowing occurs before native ownership is accepted.
+-- @param callback Input ordinary callable, retained until the promised callback interval ends; callback argument owners are borrowed views retained through callback return.
+-- @return Native integer result with the documented lifetime and units.
+-- @usage uv/functions/fs.md#fs_utime
 function fs_utime(loop: loop_t?, request: fs_t, path: string, atime: float, mtime: float,
     callback: (function (fs_t): ())?): integer
   local native_atime = atime as foreign double
@@ -3184,6 +4232,15 @@ function fs_utime(loop: loop_t?, request: fs_t, path: string, atime: float, mtim
   return result
 end
 
+--- Change a symbolic link's access/modification times without following it; times are floating-point seconds.
+-- @param loop Input initialized owning loop; accepted handles/requests retain it through retirement.
+-- @param request Mutable allocated nonpending request owner; FS submissions also require prior cleanup; accepted submission retains owner until its terminal callback returns; rejection owes no async callback.
+-- @param path Input immutable text/byte owner; native C-string conventions apply where the operation takes text.
+-- @param atime Input float value; checked native narrowing occurs before native ownership is accepted.
+-- @param mtime Input float value; checked native narrowing occurs before native ownership is accepted.
+-- @param callback Input ordinary callable, retained until the promised callback interval ends; callback argument owners are borrowed views retained through callback return.
+-- @return Native integer result with the documented lifetime and units.
+-- @usage uv/functions/fs.md#fs_lutime
 function fs_lutime(loop: loop_t?, request: fs_t, path: string, atime: float, mtime: float,
     callback: (function (fs_t): ())?): integer
   local native_atime = atime as foreign double
@@ -3200,6 +4257,15 @@ function fs_lutime(loop: loop_t?, request: fs_t, path: string, atime: float, mti
   return result
 end
 
+--- Set access/modification times through a descriptor; atime and mtime are floating-point seconds.
+-- @param loop Input initialized owning loop; accepted handles/requests retain it through retirement.
+-- @param request Mutable allocated nonpending request owner; FS submissions also require prior cleanup; accepted submission retains owner until its terminal callback returns; rejection owes no async callback.
+-- @param file Input integer value; checked native narrowing occurs before native ownership is accepted.
+-- @param atime Input float value; checked native narrowing occurs before native ownership is accepted.
+-- @param mtime Input float value; checked native narrowing occurs before native ownership is accepted.
+-- @param callback Input ordinary callable, retained until the promised callback interval ends; callback argument owners are borrowed views retained through callback return.
+-- @return Native integer result with the documented lifetime and units.
+-- @usage uv/functions/fs.md#fs_futime
 function fs_futime(loop: loop_t?, request: fs_t, file: integer, atime: float, mtime: float,
     callback: (function (fs_t): ())?): integer
   local native_file = file as foreign uv_file
@@ -3217,6 +4283,14 @@ function fs_futime(loop: loop_t?, request: fs_t, file: integer, atime: float, mt
   return result
 end
 
+--- Change mode bits through an open descriptor.
+-- @param loop Input initialized owning loop; accepted handles/requests retain it through retirement.
+-- @param request Mutable allocated nonpending request owner; FS submissions also require prior cleanup; accepted submission retains owner until its terminal callback returns; rejection owes no async callback.
+-- @param file Input integer value; checked native narrowing occurs before native ownership is accepted.
+-- @param mode Input integer value; checked native narrowing occurs before native ownership is accepted.
+-- @param callback Input ordinary callable, retained until the promised callback interval ends; callback argument owners are borrowed views retained through callback return.
+-- @return Native integer result with the documented lifetime and units.
+-- @usage uv/functions/fs.md#fs_fchmod
 function fs_fchmod(loop: loop_t?, request: fs_t, file: integer, mode: integer,
     callback: (function (fs_t): ())?): integer
   local native_file = file as foreign uv_file
@@ -3233,6 +4307,15 @@ function fs_fchmod(loop: loop_t?, request: fs_t, file: integer, mode: integer,
   return result
 end
 
+--- Change owner/group IDs on the named path, following symbolic links.
+-- @param loop Input initialized owning loop; accepted handles/requests retain it through retirement.
+-- @param request Mutable allocated nonpending request owner; FS submissions also require prior cleanup; accepted submission retains owner until its terminal callback returns; rejection owes no async callback.
+-- @param path Input immutable text/byte owner; native C-string conventions apply where the operation takes text.
+-- @param uid Input integer value; checked native narrowing occurs before native ownership is accepted.
+-- @param gid Input integer value; checked native narrowing occurs before native ownership is accepted.
+-- @param callback Input ordinary callable, retained until the promised callback interval ends; callback argument owners are borrowed views retained through callback return.
+-- @return Native integer result with the documented lifetime and units.
+-- @usage uv/functions/fs.md#fs_chown
 function fs_chown(loop: loop_t?, request: fs_t, path: string, uid: integer, gid: integer,
     callback: (function (fs_t): ())?): integer
   local native_uid: foreign uv_uid_t = 0
@@ -3253,6 +4336,15 @@ function fs_chown(loop: loop_t?, request: fs_t, path: string, uid: integer, gid:
   return result
 end
 
+--- Change owner/group IDs on the symbolic link itself rather than its target.
+-- @param loop Input initialized owning loop; accepted handles/requests retain it through retirement.
+-- @param request Mutable allocated nonpending request owner; FS submissions also require prior cleanup; accepted submission retains owner until its terminal callback returns; rejection owes no async callback.
+-- @param path Input immutable text/byte owner; native C-string conventions apply where the operation takes text.
+-- @param uid Input integer value; checked native narrowing occurs before native ownership is accepted.
+-- @param gid Input integer value; checked native narrowing occurs before native ownership is accepted.
+-- @param callback Input ordinary callable, retained until the promised callback interval ends; callback argument owners are borrowed views retained through callback return.
+-- @return Native integer result with the documented lifetime and units.
+-- @usage uv/functions/fs.md#fs_lchown
 function fs_lchown(loop: loop_t?, request: fs_t, path: string, uid: integer, gid: integer,
     callback: (function (fs_t): ())?): integer
   local native_uid: foreign uv_uid_t = 0
@@ -3273,6 +4365,15 @@ function fs_lchown(loop: loop_t?, request: fs_t, path: string, uid: integer, gid
   return result
 end
 
+--- Change owner/group IDs through an open descriptor.
+-- @param loop Input initialized owning loop; accepted handles/requests retain it through retirement.
+-- @param request Mutable allocated nonpending request owner; FS submissions also require prior cleanup; accepted submission retains owner until its terminal callback returns; rejection owes no async callback.
+-- @param file Input integer value; checked native narrowing occurs before native ownership is accepted.
+-- @param uid Input integer value; checked native narrowing occurs before native ownership is accepted.
+-- @param gid Input integer value; checked native narrowing occurs before native ownership is accepted.
+-- @param callback Input ordinary callable, retained until the promised callback interval ends; callback argument owners are borrowed views retained through callback return.
+-- @return Native integer result with the documented lifetime and units.
+-- @usage uv/functions/fs.md#fs_fchown
 function fs_fchown(loop: loop_t?, request: fs_t, file: integer, uid: integer, gid: integer,
     callback: (function (fs_t): ())?): integer
   local native_file = file as foreign uv_file
@@ -3294,6 +4395,13 @@ function fs_fchown(loop: loop_t?, request: fs_t, file: integer, uid: integer, gi
   return result
 end
 
+--- Open a directory and return it through the completed request's typed directory result.
+-- @param loop Input initialized owning loop; accepted handles/requests retain it through retirement.
+-- @param request Mutable allocated nonpending request owner; FS submissions also require prior cleanup; accepted submission retains owner until its terminal callback returns; rejection owes no async callback.
+-- @param path Input immutable text/byte owner; native C-string conventions apply where the operation takes text.
+-- @param callback Input ordinary callable, retained until the promised callback interval ends; callback argument owners are borrowed views retained through callback return.
+-- @return Native integer result with the documented lifetime and units.
+-- @usage uv/functions/fs.md#fs_opendir
 function fs_opendir(loop: loop_t?, request: fs_t, path: string,
     callback: (function (fs_t): ())?): integer
   if request.pending or request.dirty then return ffi.UV_EBUSY end
@@ -3315,6 +4423,14 @@ function fs_opendir(loop: loop_t?, request: fs_t, path: string,
   return result
 end
 
+--- Read up to capacity entries from an open directory.
+-- @param loop Input initialized owning loop; accepted handles/requests retain it through retirement.
+-- @param request Mutable allocated nonpending request owner; FS submissions also require prior cleanup; accepted submission retains owner until its terminal callback returns; rejection owes no async callback.
+-- @param directory Mutable open directory owner from fs_opendir; readdir borrows it through fs_req_cleanup, closedir separately disposes it on success.
+-- @param capacity Input integer value; checked native narrowing occurs before native ownership is accepted.
+-- @param callback Input ordinary callable, retained until the promised callback interval ends; callback argument owners are borrowed views retained through callback return.
+-- @return Native integer result with the documented lifetime and units.
+-- @usage uv/functions/fs.md#fs_readdir
 function fs_readdir(loop: loop_t?, request: fs_t, directory: dir_t, capacity: integer,
     callback: (function (fs_t): ())?): integer
   if request.pending or request.dirty or directory.busy then return ffi.UV_EBUSY end
@@ -3343,6 +4459,13 @@ function fs_readdir(loop: loop_t?, request: fs_t, directory: dir_t, capacity: in
   return result
 end
 
+--- Close an explicitly owned directory returned by fs_opendir.
+-- @param loop Input initialized owning loop; accepted handles/requests retain it through retirement.
+-- @param request Mutable allocated nonpending request owner; FS submissions also require prior cleanup; accepted submission retains owner until its terminal callback returns; rejection owes no async callback.
+-- @param directory Mutable open directory owner from fs_opendir; readdir borrows it through fs_req_cleanup, closedir separately disposes it on success.
+-- @param callback Input ordinary callable, retained until the promised callback interval ends; callback argument owners are borrowed views retained through callback return.
+-- @return Native integer result with the documented lifetime and units.
+-- @usage uv/functions/fs.md#fs_closedir
 function fs_closedir(loop: loop_t?, request: fs_t, directory: dir_t,
     callback: (function (fs_t): ())?): integer
   if request.pending or request.dirty or directory.busy then return ffi.UV_EBUSY end
@@ -3366,33 +4489,89 @@ function fs_closedir(loop: loop_t?, request: fs_t, directory: dir_t,
 end
 
 foreign import "fs-native-proposal.h"
+--- Immutable native libuv FS_COPYFILE_EXCL flag or numeric constant.
+-- @usage uv/types.md#public-constants
 const FS_COPYFILE_EXCL: integer?
+--- Immutable native libuv FS_COPYFILE_FICLONE flag or numeric constant.
+-- @usage uv/types.md#public-constants
 const FS_COPYFILE_FICLONE: integer?
+--- Immutable native libuv FS_COPYFILE_FICLONE_FORCE flag or numeric constant.
+-- @usage uv/types.md#public-constants
 const FS_COPYFILE_FICLONE_FORCE: integer?
+--- Immutable native libuv FS_SYMLINK_DIR flag or numeric constant.
+-- @usage uv/types.md#public-constants
 const FS_SYMLINK_DIR: integer?
+--- Immutable native libuv FS_SYMLINK_JUNCTION flag or numeric constant.
+-- @usage uv/types.md#public-constants
 const FS_SYMLINK_JUNCTION: integer?
+--- Immutable native libuv FS_O_APPEND flag or numeric constant.
+-- @usage uv/types.md#public-constants
 const FS_O_APPEND: integer?
+--- Immutable native libuv FS_O_EXCL flag or numeric constant.
+-- @usage uv/types.md#public-constants
 const FS_O_EXCL: integer?
+--- Immutable native libuv FS_O_SYNC flag or numeric constant.
+-- @usage uv/types.md#public-constants
 const FS_O_SYNC: integer?
+--- Immutable native libuv FS_O_DSYNC flag or numeric constant.
+-- @usage uv/types.md#public-constants
 const FS_O_DSYNC: integer?
+--- Immutable native libuv FS_O_NONBLOCK flag or numeric constant.
+-- @usage uv/types.md#public-constants
 const FS_O_NONBLOCK: integer?
+--- Immutable native libuv FS_O_DIRECT flag or numeric constant.
+-- @usage uv/types.md#public-constants
 const FS_O_DIRECT: integer?
+--- Immutable native libuv FS_O_DIRECTORY flag or numeric constant.
+-- @usage uv/types.md#public-constants
 const FS_O_DIRECTORY: integer?
+--- Immutable native libuv FS_O_NOFOLLOW flag or numeric constant.
+-- @usage uv/types.md#public-constants
 const FS_O_NOFOLLOW: integer?
+--- Immutable native libuv FS_O_NOATIME flag or numeric constant.
+-- @usage uv/types.md#public-constants
 const FS_O_NOATIME: integer?
+--- Immutable native libuv FS_F_OK flag or numeric constant.
+-- @usage uv/types.md#public-constants
 const FS_F_OK: integer?
+--- Immutable native libuv FS_R_OK flag or numeric constant.
+-- @usage uv/types.md#public-constants
 const FS_R_OK: integer?
+--- Immutable native libuv FS_W_OK flag or numeric constant.
+-- @usage uv/types.md#public-constants
 const FS_W_OK: integer?
+--- Immutable native libuv FS_X_OK flag or numeric constant.
+-- @usage uv/types.md#public-constants
 const FS_X_OK: integer?
+--- Immutable native libuv FS_O_EXLOCK flag or numeric constant.
+-- @usage uv/types.md#public-constants
 const FS_O_EXLOCK: integer?
+--- Immutable native libuv FS_O_NOCTTY flag or numeric constant.
+-- @usage uv/types.md#public-constants
 const FS_O_NOCTTY: integer?
+--- Immutable native libuv FS_O_SYMLINK flag or numeric constant.
+-- @usage uv/types.md#public-constants
 const FS_O_SYMLINK: integer?
+--- Immutable native libuv FS_O_FILEMAP flag or numeric constant.
+-- @usage uv/types.md#public-constants
 const FS_O_FILEMAP: integer?
+--- Immutable native libuv FS_O_RANDOM flag or numeric constant.
+-- @usage uv/types.md#public-constants
 const FS_O_RANDOM: integer?
+--- Immutable native libuv FS_O_SEQUENTIAL flag or numeric constant.
+-- @usage uv/types.md#public-constants
 const FS_O_SEQUENTIAL: integer?
+--- Immutable native libuv FS_O_SHORT_LIVED flag or numeric constant.
+-- @usage uv/types.md#public-constants
 const FS_O_SHORT_LIVED: integer?
+--- Immutable native libuv FS_O_TEMPORARY flag or numeric constant.
+-- @usage uv/types.md#public-constants
 const FS_O_TEMPORARY: integer?
+--- Immutable native libuv FS_UTIME_NOW flag or numeric constant.
+-- @usage uv/types.md#public-constants
 const FS_UTIME_NOW: float?
+--- Immutable native libuv FS_UTIME_OMIT flag or numeric constant.
+-- @usage uv/types.md#public-constants
 const FS_UTIME_OMIT: float?
 
 

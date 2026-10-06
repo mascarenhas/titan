@@ -198,6 +198,7 @@ checkvar = util.make_visitor({
                         name = node.name,
                         type = type_member,
                         islocal = type_member_islocal,
+                        _documentation = mod._type_documentation and mod._type_documentation[node.name],
                     }
                     node._type = namespace
                 elseif type_member._tag == "Type.Interface" then

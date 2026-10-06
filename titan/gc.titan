@@ -1,3 +1,7 @@
+--- Weak Maps, reachability finalizers, and whole-state Lua collector controls.
+-- @module titan.gc
+-- @usage standard-library-gc.md
+
 foreign import "lua.h"
 foreign import "stddef.h"
 foreign import "titan/ffi.h"
@@ -32,14 +36,24 @@ local function set_weak_mode(map: {value: value}, mode: string)
   end
 end
 
+--- Make Map values weak by updating its shared metatable in place.
+-- @param map Map whose __mode is set to v.
+-- @usage standard-library-gc.md
 function weak(map: {value: value})
   set_weak_mode(map, "v")
 end
 
+--- Give a Map weak keys with Lua ephemeron semantics.
+-- @param map Map whose shared metatable __mode is set to k.
+-- @usage standard-library-gc.md
 function ephemeron(map: {value: value})
   set_weak_mode(map, "k")
 end
 
+--- Attach a nondeterministic reachability finalizer to a table or full userdata.
+-- @param v Value to mark for finalization; existing metatable fields are preserved.
+-- @param f Callback over the exact value type; it must not yield or collect.
+-- @usage standard-library-gc.md
 function finalizable<|T|>(v: T, f: function (T): ()): ()
   local top = ffi.lua_gettop(L)
   defer ffi.lua_settop(L, top)
@@ -70,23 +84,36 @@ function finalizable<|T|>(v: T, f: function (T): ()): ()
   ffi.lua_setmetatable(L, -2)
 end
 
+--- Stop automatic garbage collection for the complete Lua state.
+-- @usage standard-library-gc.md
 function pause()
   require_gc_result(ffi.lua_gc(L, ffi.LUA_GCSTOP))
 end
 
+--- Restart automatic garbage collection for the complete Lua state.
+-- @usage standard-library-gc.md
 function resume()
   require_gc_result(ffi.lua_gc(L, ffi.LUA_GCRESTART))
 end
 
+--- Report whether automatic garbage collection is stopped.
+-- @return True when the collector is paused.
+-- @usage standard-library-gc.md
 function paused(): boolean
   return require_gc_result(
     ffi.lua_gc(L, ffi.LUA_GCISRUNNING)) == 0
 end
 
+--- Perform a complete garbage-collection cycle.
+-- @usage standard-library-gc.md
 function collect()
   require_gc_result(ffi.lua_gc(L, ffi.LUA_GCCOLLECT))
 end
 
+--- Perform one collector step with a nonnegative size.
+-- @param size Step size; nil selects zero.
+-- @return True when an incremental cycle or generational major collection finishes.
+-- @usage standard-library-gc.md
 function step(size: integer?): boolean
   local amount = 0
   if size then amount = size end
@@ -97,16 +124,25 @@ function step(size: integer?): boolean
     L, ffi.LUA_GCSTEP, amount as foreign size_t)) ~= 0
 end
 
+--- Switch the collector to incremental mode.
+-- @return True if it was already incremental.
+-- @usage standard-library-gc.md
 function incremental(): boolean
   return require_gc_result(
     ffi.lua_gc(L, ffi.LUA_GCINC)) == ffi.LUA_GCINC
 end
 
+--- Switch the collector to generational mode.
+-- @return True if it was already generational.
+-- @usage standard-library-gc.md
 function generational(): boolean
   return require_gc_result(
     ffi.lua_gc(L, ffi.LUA_GCGEN)) == ffi.LUA_GCGEN
 end
 
+--- Query current Lua-managed memory use in bytes.
+-- @return Integer byte count for the complete Lua state.
+-- @usage standard-library-gc.md
 function count(): integer
   local kilobytes = require_gc_result(
     ffi.lua_gc(L, ffi.LUA_GCCOUNT))
@@ -129,26 +165,50 @@ local function parameter(which: foreign int,
     L, ffi.LUA_GCPARAM, which, configured))
 end
 
+--- Query or set the generational minor multiplier.
+-- @param setting New value in 0..100000, or nil to query; Lua may compress the value.
+-- @return Previous parameter value.
+-- @usage standard-library-gc.md
 function minormul(setting: integer?): integer
   return parameter(ffi.LUA_GCPMINORMUL, setting)
 end
 
+--- Query or set the generational major-to-minor threshold.
+-- @param setting New value in 0..100000, or nil to query; Lua may compress the value.
+-- @return Previous parameter value.
+-- @usage standard-library-gc.md
 function majorminor(setting: integer?): integer
   return parameter(ffi.LUA_GCPMAJORMINOR, setting)
 end
 
+--- Query or set the generational minor-to-major threshold.
+-- @param setting New value in 0..100000, or nil to query; Lua may compress the value.
+-- @return Previous parameter value.
+-- @usage standard-library-gc.md
 function minormajor(setting: integer?): integer
   return parameter(ffi.LUA_GCPMINORMAJOR, setting)
 end
 
+--- Query or set the incremental pause percentage.
+-- @param setting New value in 0..100000, or nil to query; Lua may compress the value.
+-- @return Previous parameter value.
+-- @usage standard-library-gc.md
 function pause_percent(setting: integer?): integer
   return parameter(ffi.LUA_GCPPAUSE, setting)
 end
 
+--- Query or set the incremental step multiplier.
+-- @param setting New value in 0..100000, or nil to query; Lua may compress the value.
+-- @return Previous parameter value.
+-- @usage standard-library-gc.md
 function stepmul(setting: integer?): integer
   return parameter(ffi.LUA_GCPSTEPMUL, setting)
 end
 
+--- Query or set the incremental step size.
+-- @param setting New value in 0..100000, or nil to query; Lua may compress the value.
+-- @return Previous parameter value.
+-- @usage standard-library-gc.md
 function stepsize(setting: integer?): integer
   return parameter(ffi.LUA_GCPSTEPSIZE, setting)
 end

@@ -8,25 +8,48 @@ local const THREAD_BORROWED = 2
 local const THREAD_RETIRED = 3
 local thread_roots: {thread_t: boolean} = {}
 
+--- Immutable native libuv THREAD_NO_FLAGS flag or numeric constant.
+-- @usage uv/types.md#public-constants
 const THREAD_NO_FLAGS: integer?
+--- Immutable native libuv THREAD_HAS_STACK_SIZE flag or numeric constant.
+-- @usage uv/types.md#public-constants
 const THREAD_HAS_STACK_SIZE: integer?
+--- Immutable native libuv THREAD_PRIORITY_HIGHEST flag or numeric constant.
+-- @usage uv/types.md#public-constants
 const THREAD_PRIORITY_HIGHEST: integer?
+--- Immutable native libuv THREAD_PRIORITY_ABOVE_NORMAL flag or numeric constant.
+-- @usage uv/types.md#public-constants
 const THREAD_PRIORITY_ABOVE_NORMAL: integer?
+--- Immutable native libuv THREAD_PRIORITY_NORMAL flag or numeric constant.
+-- @usage uv/types.md#public-constants
 const THREAD_PRIORITY_NORMAL: integer?
+--- Immutable native libuv THREAD_PRIORITY_BELOW_NORMAL flag or numeric constant.
+-- @usage uv/types.md#public-constants
 const THREAD_PRIORITY_BELOW_NORMAL: integer?
+--- Immutable native libuv THREAD_PRIORITY_LOWEST flag or numeric constant.
+-- @usage uv/types.md#public-constants
 const THREAD_PRIORITY_LOWEST: integer?
 
+--- Copied native thread options data exposed without C-header types.
+-- @field flags Input combinable flags; byte stack size; future native growth must not leak.
+-- @field stack_size Input combinable flags; byte stack size; future native growth must not leak.
+-- @usage uv/types.md#thread_options_t
 record thread_options_t
   flags: integer
   stack_size: integer
 end
 
+--- An owned native thread token for a C-only entry and explicit join or detach.
+-- @usage uv/types.md#thread_t
 record thread_t
   local native: foreign titan_issue194_thread_storage
   local phase: integer
   local argument_owner: value
 end
 
+--- Allocate thread-token storage.
+-- @return Native thread_t result with the documented lifetime and units.
+-- @usage uv/supplemental.md#thread_tnew
 function thread_t.new(): thread_t
   local native = foreign titan_issue194_thread_storage.new()
   return { native = native, phase = THREAD_FRESH, argument_owner = nil }
@@ -39,6 +62,12 @@ local function thread_t:begin_create(argument_owner: value)
   self.argument_owner = argument_owner
 end
 
+--- Convenience method for [`thread_create`](functions/threading.md#thread_create) on this owner.
+-- @param entry Entry supplied to the native operation.
+-- @param argument Argument supplied to the native operation.
+-- @param argument_owner Argument owner supplied to the native operation.
+-- @return Native integer result with the documented lifetime and units.
+-- @usage uv/supplemental.md#thread_tcreate
 function thread_t:create(entry: foreign function(*void): void,
                          argument: foreign *void,
                          argument_owner: value): integer
@@ -57,6 +86,13 @@ function thread_t:create(entry: foreign function(*void): void,
   return status
 end
 
+--- Convenience method for [`thread_create_ex`](functions/threading.md#thread_create_ex) on this owner.
+-- @param options Native owner or typed view used by this operation.
+-- @param entry Entry supplied to the native operation.
+-- @param argument Argument supplied to the native operation.
+-- @param argument_owner Argument owner supplied to the native operation.
+-- @return Native integer result with the documented lifetime and units.
+-- @usage uv/supplemental.md#thread_tcreate_ex
 function thread_t:create_ex(options: thread_options_t,
                             entry: foreign function(*void): void,
                             argument: foreign *void,
@@ -79,6 +115,9 @@ function thread_t:create_ex(options: thread_options_t,
   return status
 end
 
+--- Convenience method for [`thread_join`](functions/threading.md#thread_join) on this owner.
+-- @return Native integer result with the documented lifetime and units.
+-- @usage uv/supplemental.md#thread_tjoin
 function thread_t:join(): integer
   if self.phase ~= THREAD_JOINABLE then return ffi.UV_EINVAL end
   -- This blocks the current OS thread, including the whole Lua event loop.
@@ -96,6 +135,9 @@ end
 -- A nil argument_owner explicitly borrows externally retained argument memory.
 -- Join-owned GC graphs cannot transfer to a detached worker without a terminal
 -- notification, so that case must still join.
+--- Convenience method for [`thread_detach`](functions/threading.md#thread_detach) on this owner.
+-- @return Native integer result with the documented lifetime and units.
+-- @usage uv/supplemental.md#thread_tdetach
 function thread_t:detach(): integer
   if self.phase ~= THREAD_JOINABLE then return ffi.UV_EINVAL end
   if self.argument_owner ~= nil then return ffi.UV_EBUSY end
@@ -107,6 +149,9 @@ function thread_t:detach(): integer
   return status
 end
 
+--- Return a borrowed identity token for the calling native thread.
+-- @return Native thread_t result with the documented lifetime and units.
+-- @usage uv/functions/threading.md#thread_self
 function thread_self(): thread_t
   local owner = thread_t()
   owner.native.thread = ffi.uv_thread_self()
@@ -118,6 +163,10 @@ local function thread_t:is_live(): boolean
   return self.phase == THREAD_JOINABLE or self.phase == THREAD_BORROWED
 end
 
+--- Convenience method for [`thread_equal`](functions/threading.md#thread_equal) on this owner.
+-- @param other Native owner or typed view used by this operation.
+-- @return Native boolean result with the documented lifetime and units.
+-- @usage uv/supplemental.md#thread_tequal
 function thread_t:equal(other: thread_t): boolean
   if not self:is_live() or not other:is_live() then
     raise "thread_equal requires live thread identifiers"
@@ -125,6 +174,10 @@ function thread_t:equal(other: thread_t): boolean
   return ffi.uv_thread_equal(self.native.thread, other.native.thread) ~= 0
 end
 
+--- Convenience method for [`thread_getpriority`](functions/threading.md#thread_getpriority) on this owner.
+-- @return Native status: zero on success, a negative libuv error on failure.
+-- @return Copied or retained integer result, or nil on failure or absence.
+-- @usage uv/supplemental.md#thread_tgetpriority
 function thread_t:getpriority(): (integer, integer?)
   if not self:is_live() then return ffi.UV_EINVAL, nil end
   local priority: foreign int = 0
@@ -133,11 +186,20 @@ function thread_t:getpriority(): (integer, integer?)
   return status, priority
 end
 
+--- Convenience method for [`thread_setpriority`](functions/threading.md#thread_setpriority) on this owner.
+-- @param priority Priority supplied to the native operation.
+-- @return Native integer result with the documented lifetime and units.
+-- @usage uv/supplemental.md#thread_tsetpriority
 function thread_t:setpriority(priority: integer): integer
   if not self:is_live() then return ffi.UV_EINVAL end
   return ffi.uv_thread_setpriority(self.native.thread, priority)
 end
 
+--- Convenience method for [`thread_getname`](functions/threading.md#thread_getname) on this owner.
+-- @param capacity Byte capacity for allocation or copied native output.
+-- @return Native status: zero on success, a negative libuv error on failure.
+-- @return Copied or retained string result, or nil on failure or absence.
+-- @usage uv/supplemental.md#thread_tgetname
 function thread_t:getname(capacity: integer): (integer, string?)
   if not self:is_live() then return ffi.UV_EINVAL, nil end
   if capacity <= 0 then return ffi.UV_EINVAL, nil end
@@ -147,11 +209,18 @@ function thread_t:getname(capacity: integer): (integer, string?)
   return status, (buffer as foreign *char) as string
 end
 
+--- Set the calling native thread's name.
+-- @param name Input immutable text/byte owner; native C-string conventions apply where the operation takes text.
+-- @return Native integer result with the documented lifetime and units.
+-- @usage uv/functions/threading.md#thread_setname
 function thread_setname(name: string): integer
   if ffi.strlen(name) ~= #name then return ffi.UV_EINVAL end
   return ffi.uv_thread_setname(name)
 end
 
+--- Return the native current CPU identifier, or the native failure result where unsupported.
+-- @return Native integer result with the documented lifetime and units.
+-- @usage uv/functions/threading.md#thread_getcpu
 function thread_getcpu(): integer
   return ffi.uv_thread_getcpu()
 end
@@ -159,21 +228,36 @@ end
 -- These native calls have no header-dependent arguments. Returning their
 -- exact C entries makes current-worker naming/CPU queries usable from a raw
 -- C carrier without calling ordinary Titan methods on that worker.
+--- Return the C-only native entry for setting the calling native thread's name.
+-- @return Native foreign function(const *char): int result with the documented lifetime and units.
+-- @usage uv/supplemental.md#thread_setname_function
 function thread_setname_function(): foreign function(const *char): int
   return ffi.uv_thread_setname
 end
 
+--- Return the C-only native entry for current CPU lookup.
+-- @return Native foreign function(): int result with the documented lifetime and units.
+-- @usage uv/supplemental.md#thread_getcpu_function
 function thread_getcpu_function(): foreign function(): int
   return ffi.uv_thread_getcpu
 end
 
 
 
+--- Convenience method for [`thread_getaffinity`](functions/threading.md#thread_getaffinity) on this owner.
+-- @param mask Mask supplied to the native operation.
+-- @return Native integer result with the documented lifetime and units.
+-- @usage uv/supplemental.md#thread_tgetaffinity
 function thread_t:getaffinity(mask: owned char[]): integer
   if not self:is_live() then return ffi.UV_EINVAL end
   return ffi.uv_thread_getaffinity(self.native as foreign *uv_thread_t, mask, #mask)
 end
 
+--- Convenience method for [`thread_setaffinity`](functions/threading.md#thread_setaffinity) on this owner.
+-- @param mask Mask supplied to the native operation.
+-- @param oldmask Oldmask supplied to the native operation.
+-- @return Native integer result with the documented lifetime and units.
+-- @usage uv/supplemental.md#thread_tsetaffinity
 function thread_t:setaffinity(mask: owned char[], oldmask: (owned char[])?): integer
   if not self:is_live() then return ffi.UV_EINVAL end
   if oldmask ~= nil then
@@ -185,45 +269,100 @@ function thread_t:setaffinity(mask: owned char[], oldmask: (owned char[])?): int
 end
 
 
+--- Start a native thread at the C-only entry(argument), retaining argument_owner until a successful join.
+-- @param thread Mutable thread identifier owner; create requires fresh/retired owner, join retains argument graph until completion, detach requires argument_owner=nil; thread_self returns a borrowed identity.
+-- @param entry Input C-only entry; no Lua/Titan execution from a native worker/once callback.
+-- @param argument Input borrowed native address for explicit C-only/TLS interop; no automatic GC ownership.
+-- @param argument_owner Input traced argument-owner graph retained through native worker completion/join.
+-- @return Native integer result with the documented lifetime and units.
+-- @usage uv/functions/threading.md#thread_create
 function thread_create(thread: thread_t, entry: foreign function(*void): void,
                        argument: foreign *void, argument_owner: value): integer
   return thread:create(entry, argument, argument_owner)
 end
 
+--- Start a native thread with thread_options_t flags/stack size and the same C-only entry and ownership contract as thread_create.
+-- @param thread Mutable thread identifier owner; create requires fresh/retired owner, join retains argument graph until completion, detach requires argument_owner=nil; thread_self returns a borrowed identity.
+-- @param options Input thread_options_t value.
+-- @param entry Input C-only entry; no Lua/Titan execution from a native worker/once callback.
+-- @param argument Input borrowed native address for explicit C-only/TLS interop; no automatic GC ownership.
+-- @param argument_owner Input traced argument-owner graph retained through native worker completion/join.
+-- @return Native integer result with the documented lifetime and units.
+-- @usage uv/functions/threading.md#thread_create_ex
 function thread_create_ex(thread: thread_t, options: thread_options_t,
                           entry: foreign function(*void): void,
                           argument: foreign *void, argument_owner: value): integer
   return thread:create_ex(options, entry, argument, argument_owner)
 end
 
+--- Block until the thread exits, then retire the join obligation and retained argument owner.
+-- @param thread Mutable thread identifier owner; create requires fresh/retired owner, join retains argument graph until completion, detach requires argument_owner=nil; thread_self returns a borrowed identity.
+-- @return Native integer result with the documented lifetime and units.
+-- @usage uv/functions/threading.md#thread_join
 function thread_join(thread: thread_t): integer
   return thread:join()
 end
 
+--- Relinquish the join obligation only for a thread created with nil argument_owner.
+-- @param thread Mutable thread identifier owner; create requires fresh/retired owner, join retains argument graph until completion, detach requires argument_owner=nil; thread_self returns a borrowed identity.
+-- @return Native integer result with the documented lifetime and units.
+-- @usage uv/functions/threading.md#thread_detach
 function thread_detach(thread: thread_t): integer
   return thread:detach()
 end
 
+--- Compare native thread identities; the result is boolean.
+-- @param left Mutable thread identifier owner; create requires fresh/retired owner, join retains argument graph until completion, detach requires argument_owner=nil; thread_self returns a borrowed identity.
+-- @param right Mutable thread identifier owner; create requires fresh/retired owner, join retains argument graph until completion, detach requires argument_owner=nil; thread_self returns a borrowed identity.
+-- @return Native boolean result with the documented lifetime and units.
+-- @usage uv/functions/threading.md#thread_equal
 function thread_equal(left: thread_t, right: thread_t): boolean
   return left:equal(right)
 end
 
+--- Return `(status, priority?)` for the specified native thread.
+-- @param thread Mutable thread identifier owner; create requires fresh/retired owner, join retains argument graph until completion, detach requires argument_owner=nil; thread_self returns a borrowed identity.
+-- @return Native status: zero on success, a negative libuv error on failure.
+-- @return Copied or retained integer result, or nil on failure or absence.
+-- @usage uv/functions/threading.md#thread_getpriority
 function thread_getpriority(thread: thread_t): (integer, integer?)
   return thread:getpriority()
 end
 
+--- Set the specified native thread's numeric priority; values are priority levels, not bit flags.
+-- @param thread Mutable thread identifier owner; create requires fresh/retired owner, join retains argument graph until completion, detach requires argument_owner=nil; thread_self returns a borrowed identity.
+-- @param priority Input integer value; checked native narrowing occurs before native ownership is accepted.
+-- @return Native integer result with the documented lifetime and units.
+-- @usage uv/functions/threading.md#thread_setpriority
 function thread_setpriority(thread: thread_t, priority: integer): integer
   return thread:setpriority(priority)
 end
 
+--- Copy a thread name into a temporary buffer of capacity bytes and return `(status, name?)`.
+-- @param thread Mutable thread identifier owner; create requires fresh/retired owner, join retains argument graph until completion, detach requires argument_owner=nil; thread_self returns a borrowed identity.
+-- @param capacity Input integer value; checked native narrowing occurs before native ownership is accepted.
+-- @return Native status: zero on success, a negative libuv error on failure.
+-- @return Copied or retained string result, or nil on failure or absence.
+-- @usage uv/functions/threading.md#thread_getname
 function thread_getname(thread: thread_t, capacity: integer): (integer, string?)
   return thread:getname(capacity)
 end
 
+--- Write the thread's affinity mask into owned char[] storage sized using cpumask_size.
+-- @param thread Mutable thread identifier owner; create requires fresh/retired owner, join retains argument graph until completion, detach requires argument_owner=nil; thread_self returns a borrowed identity.
+-- @param mask Output owned byte array; capacity is its Array length, retained by caller through native operation.
+-- @return Native integer result with the documented lifetime and units.
+-- @usage uv/functions/threading.md#thread_getaffinity
 function thread_getaffinity(thread: thread_t, mask: owned char[]): integer
   return thread:getaffinity(mask)
 end
 
+--- Apply the supplied affinity mask and optionally write the prior mask into oldmask.
+-- @param thread Mutable thread identifier owner; create requires fresh/retired owner, join retains argument graph until completion, detach requires argument_owner=nil; thread_self returns a borrowed identity.
+-- @param mask Input owned byte array; capacity is its Array length, retained by caller through native operation.
+-- @param oldmask Output owned byte array; capacity is its Array length, retained by caller through native operation.
+-- @return Native integer result with the documented lifetime and units.
+-- @usage uv/functions/threading.md#thread_setaffinity
 function thread_setaffinity(thread: thread_t, mask: owned char[],
                             oldmask: (owned char[])?): integer
   return thread:setaffinity(mask, oldmask)

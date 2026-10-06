@@ -1,6 +1,7 @@
 local typedecl = require 'titan-compiler.typedecl'
 local util = require 'titan-compiler.util'
 local maybe3 = require 'titan-compiler.maybe3'
+local documentation = require 'titan-compiler.documentation'
 
 local types = typedecl("Type", {
     Types = {
@@ -2358,6 +2359,8 @@ local function copy_scalar_metadata(source, target)
             target[key] = value
         end
     end
+    if source._documentation then target._documentation = documentation.copy(source._documentation) end
+    if source._type_documentation then target._type_documentation = documentation.copy_map(source._type_documentation) end
     return target
 end
 
@@ -5333,4 +5336,50 @@ function types.serialize(t, seen_ctypes)
     end
 end
 
+-- Documentation is an optional decoration, separate from type/ABI identity.
+function types.Documented(typ, doc, named)
+    if type(typ) ~= "table" or type(typ._tag) ~= "string" then error("invalid documented type", 2) end
+    if doc ~= nil then
+        local allowed = { ["Type.Module"]=true, ["Type.ModuleMember"]=true, ["Type.ModuleVariable"]=true,
+            ["Type.Record"]=true, ["Type.Union"]=true, ["Type.Interface"]=true,
+            ["Type.Method"]=true, ["Type.StaticMethod"]=true, ["Type.Field"]=true, ["Type.Variant"]=true }
+        if not allowed[typ._tag] then error("documentation requires a declaration identity", 2) end
+        typ._documentation = documentation.copy(doc)
+    end
+    if named ~= nil then
+        if typ._tag ~= "Type.Module" then error("type documentation requires a module", 2) end
+        local copied = documentation.copy_map(named)
+        for name in pairs(copied) do
+            if not typ.type_members[name] then error("documentation names an absent type member", 2) end
+        end
+        typ._type_documentation = copied
+    end
+    return typ
+end
+local serialize_type, suppress_documentation = types.serialize, 0
+function types.serialize(typ, seen_ctypes)
+    local result = serialize_type(typ, seen_ctypes)
+    local named
+    if suppress_documentation == 0 and typ._type_documentation then
+        named = {}
+        for name, doc in pairs(typ._type_documentation) do
+            if typ.type_members and typ.type_members[name] then named[name] = doc end
+        end
+        if not next(named) then named = nil end
+    end
+    if suppress_documentation == 0 and (typ._documentation or named) then
+        result = "Documented(" .. result .. "," ..
+            (typ._documentation and documentation.serialize(typ._documentation) or "nil") ..
+            (named and "," .. documentation.serialize_map(named) or "") .. ")"
+    end
+    return result
+end
+-- Serialization is synchronous; restore the guard on every error path.
+function types.serialize_semantic(typ)
+    suppress_documentation = suppress_documentation + 1
+    local ok, result = pcall(types.serialize, typ)
+    suppress_documentation = suppress_documentation - 1
+    if not ok then error(result, 2) end
+    return result
+end
 return types

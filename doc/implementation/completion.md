@@ -52,7 +52,10 @@ Each candidate is a scalar record with `name`, LSP integer `kind`, `detail`,
 `access_mode`. The scope array contains the active ancestry at the hole, with
 `id`, `parent_id`, `kind`, `filename`, original `byte_start`/`byte_finish` and `caret_byte`. These identifiers are local
 to the analysis. `type_key` is an opaque fact identity, not a runtime type ID.
-Candidates contain no AST or mutable compiler type tables. The host applies
+Candidates contain no AST or mutable compiler type tables. An optional
+`documentation` field holds a detached `{summary, description, tags}` document;
+all its leaves are strings. The host validates and renders this subrecord once
+when materializing scalar SQL facts. See [documentation metadata](documentation-comments.md). The host applies
 case-sensitive prefix ranking and limits after compiler visibility and binding
 selection, and qualifies every saved identity with its committed generation.
 
@@ -68,7 +71,7 @@ independent of a lexical `ffi` shadow.
 
 ## Detached saved descriptors and private preparation
 
-`completion.describe(entry)` returns `{version, module_name, candidates}` for
+`completion.describe(entry)` returns `{version, module_name, candidates, documentation?}` for
 saved indexing. Module facts use `owner_key = "module:" .. module_name`;
 nominal member facts use `"nominal:" .. fqtn`; C facts use a separate foreign
 lookup domain. Access modes distinguish `dot`, `static`, `colon` and `type`.

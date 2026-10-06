@@ -1,3 +1,7 @@
+--- RFC 6455 text and binary messages over HTTP/1.1 and verified TLS.
+-- @module titan.websocket
+-- @usage standard-library-websocket.md
+
 local async = import "async"
 local gc = import "gc"
 local http = import "http"
@@ -17,25 +21,46 @@ local const FRAME_BYTES = 16 * 1024
 local const WORK_BYTES = 64 * 1024
 local const FRAME_BUDGET = 32
 
+--- The text or binary kind of a complete WebSocket data message.
+-- @field text Text variant.
+-- @field binary Binary variant.
+-- @usage standard-library-websocket.md#public-interface
 union MessageType
   text()
   binary()
 end
+--- The text-message kind; outgoing text must contain valid UTF-8.
+-- @usage standard-library-websocket.md#public-interface
 const TEXT = MessageType.text()
+--- The binary-message kind; bytes may include embedded NUL.
+-- @usage standard-library-websocket.md#public-interface
 const BINARY = MessageType.binary()
 
+--- A WebSocket protocol, state, or deadline failure with an optional close code.
+-- @field kind Stable error-kind key.
+-- @field operation Operation that reported the failure.
+-- @field message Human-readable failure description.
+-- @field close_code Protocol Close code, or nil when no code applies.
+-- @usage standard-library-websocket.md#opening-policy-and-errors
 record Error
   const kind: string
   const operation: string
   const message: string
   const close_code: integer?
 end
+--- A rejected or failed opening handshake with optional HTTP status and headers.
+-- @field message Human-readable failure description.
+-- @field status HTTP rejection status, or nil when no response status is available.
+-- @field headers Received or emitted handshake headers, or nil when unavailable.
+-- @usage standard-library-websocket.md#opening-policy-and-errors
 record HandshakeError
   const message: string
   const status: integer?
   const headers: http.Headers?
 end
 
+--- Validated copied client-opening options with finite positive limits and deadlines.
+-- @usage standard-library-websocket.md#public-interface
 record DialOptions
   local headers: http.Headers
   local ca_file: string?
@@ -43,6 +68,8 @@ record DialOptions
   local limit: integer
   local timeout: integer
 end
+--- Validated copied server-opening, Origin, and subprotocol options.
+-- @usage standard-library-websocket.md#public-interface
 record AcceptOptions
   local protocols: {string}
   local origins: {string}
@@ -57,6 +84,14 @@ local function positive(supplied: integer?, fallback: integer,
   return result
 end
 
+--- Validate and snapshot client headers, trust, protocols, and opening limits.
+-- @param headers Application handshake headers to validate and copy.
+-- @param ca_file Optional PEM trust bundle replacing the default trust roots.
+-- @param subprotocols Ordered case-sensitive subprotocol tokens to snapshot.
+-- @param read_limit Positive incoming message-byte limit; nil defaults to 1 MiB.
+-- @param handshake_timeout Positive opening deadline in milliseconds; nil defaults to 10000.
+-- @return Validated immutable snapshot of the client options.
+-- @usage standard-library-websocket.md#public-interface
 function DialOptions.new(headers: http.Headers?, ca_file: string?,
                          subprotocols: ({string})?, read_limit: integer?,
                          handshake_timeout: integer?): DialOptions
@@ -68,6 +103,13 @@ function DialOptions.new(headers: http.Headers?, ca_file: string?,
   }
 end
 
+--- Validate and snapshot server protocols, allowed origins, and opening limits.
+-- @param subprotocols Ordered case-sensitive subprotocol tokens to snapshot.
+-- @param allowed_origins Explicit normalized origins permitted in addition to same-origin policy.
+-- @param read_limit Positive incoming message-byte limit; nil defaults to 1 MiB.
+-- @param handshake_timeout Positive opening deadline in milliseconds; nil defaults to 10000.
+-- @return Validated immutable snapshot of the server options.
+-- @usage standard-library-websocket.md#public-interface
 function AcceptOptions.new(subprotocols: ({string})?,
                            allowed_origins: ({string})?, read_limit: integer?,
                            handshake_timeout: integer?): AcceptOptions

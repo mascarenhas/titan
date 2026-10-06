@@ -5,19 +5,38 @@ foreign type NetworkStatusEntry = function (*lua_State, *Udata, *CClosure, *Udat
 foreign type NetworkAllocEntry = function (*lua_State, *Udata, *CClosure, *Udata, *Udata, lua_Integer, *uv_buf_t): void
 foreign type NetworkReadEntry = function (*lua_State, *Udata, *CClosure, *Udata, *Udata, lua_Integer, const *uv_buf_t): void
 
+--- Ordinary loop-thread callback for alloc delivery.
+-- @usage uv/types.md#alloc_cb
 type alloc_cb = function (handle_t, integer): (buf_t)
+--- Ordinary loop-thread callback for read delivery.
+-- @usage uv/types.md#read_cb
 type read_cb = function (stream_t, integer, buf_t?): ()
+--- Ordinary loop-thread callback for connection delivery.
+-- @usage uv/types.md#connection_cb
 type connection_cb = function (stream_t, integer): ()
+--- Ordinary loop-thread callback for connect delivery.
+-- @usage uv/types.md#connect_cb
 type connect_cb = function (connect_t, integer): ()
+--- Ordinary loop-thread callback for write delivery.
+-- @usage uv/types.md#write_cb
 type write_cb = function (write_t, integer): ()
+--- Ordinary loop-thread callback for shutdown delivery.
+-- @usage uv/types.md#shutdown_cb
 type shutdown_cb = function (shutdown_t, integer): ()
 
+--- A tagged view retaining a TCP, pipe, or TTY stream owner.
+-- @field tcp Tcp variant.
+-- @field pipe Pipe variant.
+-- @field tty Tty variant.
+-- @usage uv/types.md#stream_t
 union stream_t
   tcp(owner: tcp_t)
   pipe(owner: pipe_t)
   tty(owner: tty_t)
 end
 
+--- Concrete tcp handle owner; initialize before use and close explicitly.
+-- @usage uv/types.md#tcp_t
 record tcp_t
   local native: foreign uv_tcp_t
   local phase: integer
@@ -34,6 +53,9 @@ record tcp_t
   local userdata: value
 end
 
+--- Allocate a concrete handle owner without initializing its native lifetime.
+-- @return Native tcp_t result with the documented lifetime and units.
+-- @usage uv/supplemental.md#tcp_tnew
 function tcp_t.new(): tcp_t
   local native = foreign uv_tcp_t.new()
   return {native = native, phase = HANDLE_FRESH, loop = nil,
@@ -43,10 +65,16 @@ function tcp_t.new(): tcp_t
     read_handler = tcp_read_deliver, close_handler = tcp_closed}
 end
 
+--- Return a tagged view of the same concrete owner.
+-- @return Native handle_t result with the documented lifetime and units.
+-- @usage uv/supplemental.md#tcp_tas_handle_t
 function tcp_t:as_handle_t(): handle_t
   return handle_t.tcp(self)
 end
 
+--- Return a tagged view of the same concrete owner.
+-- @return Native stream_t result with the documented lifetime and units.
+-- @usage uv/supplemental.md#tcp_tas_stream_t
 function tcp_t:as_stream_t(): stream_t
   return stream_t.tcp(self)
 end
@@ -180,6 +208,8 @@ foreign function tcp_close_callback(native: *uv_handle_t)
   ffi.lua_settop(L, top)
 end
 
+--- Concrete pipe handle owner; initialize before use and close explicitly.
+-- @usage uv/types.md#pipe_t
 record pipe_t
   local native: foreign uv_pipe_t
   local phase: integer
@@ -197,6 +227,9 @@ record pipe_t
   local userdata: value
 end
 
+--- Allocate a concrete handle owner without initializing its native lifetime.
+-- @return Native pipe_t result with the documented lifetime and units.
+-- @usage uv/supplemental.md#pipe_tnew
 function pipe_t.new(): pipe_t
   local native = foreign uv_pipe_t.new()
   local eligibility = foreign titan_uv_pipe_eligibility.new()
@@ -207,10 +240,16 @@ function pipe_t.new(): pipe_t
     read_handler = pipe_read_deliver, close_handler = pipe_closed}
 end
 
+--- Return a tagged view of the same concrete owner.
+-- @return Native handle_t result with the documented lifetime and units.
+-- @usage uv/supplemental.md#pipe_tas_handle_t
 function pipe_t:as_handle_t(): handle_t
   return handle_t.pipe(self)
 end
 
+--- Return a tagged view of the same concrete owner.
+-- @return Native stream_t result with the documented lifetime and units.
+-- @usage uv/supplemental.md#pipe_tas_stream_t
 function pipe_t:as_stream_t(): stream_t
   return stream_t.pipe(self)
 end
@@ -345,6 +384,8 @@ foreign function pipe_close_callback(native: *uv_handle_t)
   ffi.lua_settop(L, top)
 end
 
+--- Concrete tty handle owner; initialize before use and close explicitly.
+-- @usage uv/types.md#tty_t
 record tty_t
   local native: foreign uv_tty_t
   local phase: integer
@@ -361,6 +402,9 @@ record tty_t
   local userdata: value
 end
 
+--- Allocate a concrete handle owner without initializing its native lifetime.
+-- @return Native tty_t result with the documented lifetime and units.
+-- @usage uv/supplemental.md#tty_tnew
 function tty_t.new(): tty_t
   local native = foreign uv_tty_t.new()
   return {native = native, phase = HANDLE_FRESH, loop = nil,
@@ -370,10 +414,16 @@ function tty_t.new(): tty_t
     read_handler = tty_read_deliver, close_handler = tty_closed}
 end
 
+--- Return a tagged view of the same concrete owner.
+-- @return Native handle_t result with the documented lifetime and units.
+-- @usage uv/supplemental.md#tty_tas_handle_t
 function tty_t:as_handle_t(): handle_t
   return handle_t.tty(self)
 end
 
+--- Return a tagged view of the same concrete owner.
+-- @return Native stream_t result with the documented lifetime and units.
+-- @usage uv/supplemental.md#tty_tas_stream_t
 function tty_t:as_stream_t(): stream_t
   return stream_t.tty(self)
 end
@@ -543,6 +593,9 @@ local function stream_t:owner_loop(): loop_t?
   end
 end
 
+--- Return a tagged view of the same concrete owner.
+-- @return Native handle_t result with the documented lifetime and units.
+-- @usage uv/supplemental.md#stream_tas_handle_t
 function stream_t:as_handle_t(): handle_t
   case self
 
@@ -555,6 +608,8 @@ function stream_t:as_handle_t(): handle_t
   end
 end
 
+--- Reusable native connect request owner retained through accepted completion.
+-- @usage uv/types.md#connect_t
 record connect_t
   local native: foreign uv_connect_t
   local loop: loop_t?
@@ -565,24 +620,39 @@ record connect_t
   local userdata: value
 end
 
+--- Allocate a fresh request owner without submitting work.
+-- @return Native connect_t result with the documented lifetime and units.
+-- @usage uv/supplemental.md#connect_tnew
 function connect_t.new(): connect_t
   local native = foreign uv_connect_t.new()
   return {native = native, loop = nil, pending = false, stream = nil,
     callback = nil, handler = connect_deliver, userdata = nil}
 end
 
+--- Return a tagged view of the same concrete owner.
+-- @return Native req_t result with the documented lifetime and units.
+-- @usage uv/supplemental.md#connect_tas_req_t
 function connect_t:as_req_t(): req_t
   return req_t.connect(self)
 end
 
+--- Read the same traced public data as the generic request accessor without allocating a request view.
+-- @return Native value result with the documented lifetime and units.
+-- @usage uv/supplemental.md#connect_tget_data
 function connect_t:get_data(): value
   return self.userdata
 end
 
+--- Replace the existing traced public data slot; nil clears it.
+-- @param data Caller-supplied data retained or borrowed for the documented native interval.
+-- @usage uv/supplemental.md#connect_tset_data
 function connect_t:set_data(data: value)
   self.userdata = data
 end
 
+--- Return the retained stream/handle association for this request, or nil when none is recorded.
+-- @return Copied or retained stream_t result, or nil on failure or absence.
+-- @usage uv/supplemental.md#connect_thandle
 function connect_t:handle(): stream_t?
   return self.stream
 end
@@ -617,6 +687,8 @@ foreign function network_connect_callback(native: *uv_connect_t, status: int)
   ffi.lua_settop(L, top)
 end
 
+--- Reusable native write request owner retained through accepted completion.
+-- @usage uv/types.md#write_t
 record write_t
   local native: foreign uv_write_t
   local loop: loop_t?
@@ -632,6 +704,9 @@ record write_t
   local userdata: value
 end
 
+--- Allocate a fresh request owner without submitting work.
+-- @return Native write_t result with the documented lifetime and units.
+-- @usage uv/supplemental.md#write_tnew
 function write_t.new(): write_t
   local native = foreign uv_write_t.new()
   local string_buffer = foreign uv_buf_t.new()
@@ -641,18 +716,30 @@ function write_t.new(): write_t
     callback = nil, handler = write_deliver, userdata = nil}
 end
 
+--- Return a tagged view of the same concrete owner.
+-- @return Native req_t result with the documented lifetime and units.
+-- @usage uv/supplemental.md#write_tas_req_t
 function write_t:as_req_t(): req_t
   return req_t.write(self)
 end
 
+--- Return the retained stream/handle association for this request, or nil when none is recorded.
+-- @return Copied or retained stream_t result, or nil on failure or absence.
+-- @usage uv/supplemental.md#write_thandle
 function write_t:handle(): stream_t?
   return self.stream
 end
 
+--- Read the same traced public data as the generic request accessor without allocating a request view.
+-- @return Native value result with the documented lifetime and units.
+-- @usage uv/supplemental.md#write_tget_data
 function write_t:get_data(): value
   return self.userdata
 end
 
+--- Replace the traced public data slot without allocating a request view.
+-- @param data Caller-supplied data retained or borrowed for the documented native interval.
+-- @usage uv/supplemental.md#write_tset_data
 function write_t:set_data(data: value)
   self.userdata = data
 end
@@ -694,6 +781,8 @@ foreign function network_write_callback(native: *uv_write_t, status: int)
   ffi.lua_settop(L, top)
 end
 
+--- Reusable native shutdown request owner retained through accepted completion.
+-- @usage uv/types.md#shutdown_t
 record shutdown_t
   local native: foreign uv_shutdown_t
   local loop: loop_t?
@@ -704,24 +793,39 @@ record shutdown_t
   local userdata: value
 end
 
+--- Allocate a fresh request owner without submitting work.
+-- @return Native shutdown_t result with the documented lifetime and units.
+-- @usage uv/supplemental.md#shutdown_tnew
 function shutdown_t.new(): shutdown_t
   local native = foreign uv_shutdown_t.new()
   return {native = native, loop = nil, pending = false, stream = nil,
     callback = nil, handler = shutdown_deliver, userdata = nil}
 end
 
+--- Return a tagged view of the same concrete owner.
+-- @return Native req_t result with the documented lifetime and units.
+-- @usage uv/supplemental.md#shutdown_tas_req_t
 function shutdown_t:as_req_t(): req_t
   return req_t.shutdown(self)
 end
 
+--- Read the same traced public data as the generic request accessor without allocating a request view.
+-- @return Native value result with the documented lifetime and units.
+-- @usage uv/supplemental.md#shutdown_tget_data
 function shutdown_t:get_data(): value
   return self.userdata
 end
 
+--- Replace the existing traced public data slot; nil clears it.
+-- @param data Caller-supplied data retained or borrowed for the documented native interval.
+-- @usage uv/supplemental.md#shutdown_tset_data
 function shutdown_t:set_data(data: value)
   self.userdata = data
 end
 
+--- Return the retained stream/handle association for this request, or nil when none is recorded.
+-- @return Copied or retained stream_t result, or nil on failure or absence.
+-- @usage uv/supplemental.md#shutdown_thandle
 function shutdown_t:handle(): stream_t?
   return self.stream
 end
@@ -756,6 +860,9 @@ foreign function network_shutdown_callback(native: *uv_shutdown_t, status: int)
   ffi.lua_settop(L, top)
 end
 
+--- Return the retained handle transferred by a write2 request, or nil for a request without one.
+-- @return Copied or retained handle_t result, or nil on failure or absence.
+-- @usage uv/supplemental.md#write_tsend_handle
 function write_t:send_handle(): handle_t?
   return self.send_stream
 end

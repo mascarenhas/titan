@@ -158,7 +158,7 @@ local function module_candidates(result,st,mod,include_source,type_only)
     for index,members in ipairs(maps) do
         for name,typ in pairs(members) do
             if not seen[name] and (type_only or checker._foreign_function_depth==0 and alias_namespace_type(typ,st)) then
-                add(result,name,typ,nil,'type','module:'..mod.name,type_only and 'type' or 'dot',0,index==2)
+                add(result,name,typ,{_documentation=mod._type_documentation and mod._type_documentation[name]},'type','module:'..mod.name,type_only and 'type' or 'dot',0,index==2)
                 seen[name]=true
             end
         end

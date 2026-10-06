@@ -27,7 +27,10 @@ local function analyze(source,modules)
     for _,row in ipairs(result.candidates) do
         names[row.name]=row
         assert.not_equal(prepared.request.name,row.name)
-        for _,value in pairs(row) do assert.not_equal('table',type(value)) end
+        for key,value in pairs(row) do
+            if key=='documentation' then assert.same(value,require('titan-compiler.documentation').copy(value))
+            else assert.not_equal('table',type(value)) end
+        end
     end
     return names,result,prepared,errors,entries
 end

@@ -1,8 +1,14 @@
+--- One HTTP header name and value preserving their original spelling.
+-- @field name Original header-name spelling.
+-- @field contents Validated header-value bytes.
+-- @usage standard-library-http.md#headers
 record Header
   name: string
   contents: string
 end
 
+--- Validated headers preserving duplicates and insertion order.
+-- @usage standard-library-http.md#headers
 record Headers
   local entries: {Header}
 end
@@ -44,6 +50,10 @@ local function same_header_name(left: string, right: string): boolean
   return lower_header_name(left) == lower_header_name(right)
 end
 
+--- Validate and copy initial headers into a new header collection.
+-- @param initial Initial headers to validate and copy, or nil for an empty collection.
+-- @return New validated header collection.
+-- @usage standard-library-http.md#headers
 function headers(initial: {Header}?): Headers
   local result = Headers({})
   if initial then
@@ -58,17 +68,29 @@ function headers(initial: {Header}?): Headers
   return result
 end
 
+--- Append a validated header, preserving existing entries of the same name.
+-- @param name HTTP header name, matched with ASCII case folding.
+-- @param contents String bytes supplied to this operation.
+-- @usage standard-library-http.md#headers
 function Headers:add(name: string, contents: string)
   validate_header_name(name)
   validate_header_value(contents)
   self.entries[#self.entries + 1] = Header(name, contents)
 end
 
+--- Remove matching names and append one validated replacement.
+-- @param name HTTP header name, matched with ASCII case folding.
+-- @param contents String bytes supplied to this operation.
+-- @usage standard-library-http.md#headers
 function Headers:set(name: string, contents: string)
   self:remove(name)
   self:add(name, contents)
 end
 
+--- Return the first case-insensitive match, or nil when absent.
+-- @param name HTTP header name, matched with ASCII case folding.
+-- @return First matching value, or nil when no header matches.
+-- @usage standard-library-http.md#headers
 function Headers:get(name: string): string?
   validate_header_name(name)
   local index = 1
@@ -80,6 +102,10 @@ function Headers:get(name: string): string?
   return nil
 end
 
+--- Return all values whose header name matches case-insensitively.
+-- @param name HTTP header name, matched with ASCII case folding.
+-- @return All matching values in insertion order.
+-- @usage standard-library-http.md#headers
 function Headers:values(name: string): {string}
   validate_header_name(name)
   local result: {string} = {}
@@ -94,6 +120,9 @@ function Headers:values(name: string): {string}
   return result
 end
 
+--- Remove every header whose name matches case-insensitively.
+-- @param name HTTP header name, matched with ASCII case folding.
+-- @usage standard-library-http.md#headers
 function Headers:remove(name: string)
   validate_header_name(name)
   local kept: {Header} = {}
@@ -108,6 +137,9 @@ function Headers:remove(name: string)
   self.entries = kept
 end
 
+--- Return copied header records in insertion order.
+-- @return Copied header records in insertion order.
+-- @usage standard-library-http.md#headers
 function Headers:all(): {Header}
   local result: {Header} = {}
   local index = 1

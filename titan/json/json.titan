@@ -1,9 +1,21 @@
+--- Synchronous RFC 8259 JSON encoding and schema-directed decoding with structured errors.
+-- @module titan.json
+-- @usage standard-library-json.md
+
 local reflect = import "reflect"
 local string = import "string"
 local math = import "math"
 local peg = import "peg"
 local iteration = import "iteration"
 
+--- Structured JSON failure with a stable code, path, and optional source position.
+-- @field code Stable failure category or grammar label.
+-- @field message Human-readable failure explanation.
+-- @field position One-based source byte position, or nil without source input.
+-- @field line One-based source line, or nil.
+-- @field column One-based byte column, or nil.
+-- @field path Semantic path beginning at $.
+-- @usage standard-library-json.md
 record Error
   const code: string
   const message: string
@@ -13,6 +25,13 @@ record Error
   const path: string
 end
 
+--- Per-call JSON encoding policy; repeated options use their last value.
+-- @field tag_field Union discriminator key, default tag.
+-- @field null_value Explicit null sentinel; nil selects the default null policy.
+-- @field max_depth Positive container depth limit, default 32.
+-- @field max_bytes Positive text byte limit, default 16 MiB.
+-- @field max_nodes Positive JSON value count limit, default 1000000.
+-- @usage standard-library-json.md
 union EncodeOption
   tag_field(name: string)
   null_value(value)
@@ -21,6 +40,14 @@ union EncodeOption
   max_nodes(integer)
 end
 
+--- Per-call JSON decoding policy; repeated options use their last value.
+-- @field tag_field Union discriminator key, default tag.
+-- @field null_value Explicit null sentinel; nil selects the default null policy.
+-- @field max_depth Positive container depth limit, default 32.
+-- @field max_bytes Positive text byte limit, default 16 MiB.
+-- @field max_nodes Positive JSON value count limit, default 1000000.
+-- @field ignore_unknown_fields Ignore unknown record fields when true; union envelope extras remain errors.
+-- @usage standard-library-json.md
 union DecodeOption
   tag_field(name: string)
   null_value(value)
@@ -122,6 +149,11 @@ local function validate_settings(settings: Settings)
   end
 end
 
+--- Encode a value using public record fields and named union payloads.
+-- @param subject Value to encode; unsupported types, cycles, and nonfinite numbers raise Error.
+-- @param ... Encoding options.
+-- @return Complete JSON document.
+-- @usage standard-library-json.md
 function encode(subject: value, ...: EncodeOption): string
   local settings = default_settings()
   for index = 1, #... do
@@ -137,6 +169,12 @@ function encode(subject: value, ...: EncodeOption): string
   return encode_value(subject, settings)
 end
 
+--- Decode one complete JSON document into dynamic values or an explicit schema.
+-- @param source UTF-8 JSON bytes; malformed input and duplicate keys raise Error.
+-- @param target Reflection schema, or nil for dynamic Arrays, Maps, and scalars.
+-- @param ... Decoding options; default null is nil and may create holes or absent Map entries.
+-- @return Decoded value; nil is a valid successful null result.
+-- @usage standard-library-json.md
 function decode(source: string, target: reflect.Type?, ...: DecodeOption): value
   local settings = default_settings()
   for index = 1, #... do

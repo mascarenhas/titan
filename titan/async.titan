@@ -1,3 +1,7 @@
+--- Cooperative Tasks, cancellation, callback waits, channels, and persistent subscriptions.
+-- @module titan.async
+-- @usage async-io.md
+
 foreign import "lua.h"
 foreign import "lauxlib.h"
 foreign import "titan/ffi.h"
@@ -7,6 +11,8 @@ local uv = import "titan.uv"
 local coroutine = import "titan.coroutine"
 local string = import "titan.string"
 
+--- Nonyielding cancellation callback that detaches one exact explicit-suspension waiter.
+-- @usage async-io.md
 type SuspendCancelAction = function (): ()
 
 local ASYNC_TAG: value = {}
@@ -32,11 +38,21 @@ local const READY_RESUME = 2
 local const READY_YIELD = 3
 local const READY_BATCH_LIMIT = 64
 
+--- Original Task error value paired with its preserved traceback.
+-- @field error Original raised value.
+-- @field traceback Traceback captured at the failure.
+-- @usage async-io.md
 record Error
   error: value
   traceback: string
 end
 
+--- Portable native-operation failure with its status and operation name.
+-- @field code Native status code.
+-- @field name Symbolic native error name.
+-- @field message Native error explanation.
+-- @field operation Operation that failed.
+-- @usage async-io.md
 record OperationError
   code: integer
   name: string
@@ -44,15 +60,30 @@ record OperationError
   operation: string
 end
 
+--- Identity capability authorizing one exact explicit Task suspension.
+-- @field source Optional diagnostic source; token comparison uses record identity.
+-- @usage async-io.md
 record ResumeToken
   const source: string?
 end
 
+--- First-wins cancellation reason with a message or typed payload.
+-- @field simple Human-readable cancellation message.
+-- @field complex Typed cancellation payload.
+-- @usage async-io.md
 union CancellationReason<|B|>
   simple(string)
   complex(B)
 end
 
+--- Immutable Task phase snapshot with typed success or cancellation payloads.
+-- @field ready Scheduled to start on a deferred turn.
+-- @field running Currently executing.
+-- @field waiting Suspended pending an operation or authorized wake.
+-- @field succeeded Successful result payload.
+-- @field failed Error value and traceback.
+-- @field cancelled Authoritative first cancellation reason.
+-- @usage async-io.md
 union TaskStatus<|A, B|>
   ready()
   running()
@@ -62,17 +93,28 @@ union TaskStatus<|A, B|>
   cancelled(CancellationReason<|B|>)
 end
 
+--- Success or expected error from a completed generic callback wait.
+-- @field success Successful operation payload.
+-- @field error Expected operation error.
+-- @usage async-io.md
 union Result<|T, E|>
   success(T)
   error(E)
 end
 
+--- Completed callback-wait outcome including sticky Task cancellation.
+-- @field success Successful operation payload.
+-- @field error Expected operation error.
+-- @field cancelled Task cancellation reason after native completion.
+-- @usage async-io.md
 union CancellableResult<|T, E|>
   success(T)
   error(E)
   cancelled(CancellationReason<|value|>)
 end
 
+--- Opaque readable string-channel endpoint created by reader_writer_channel.
+-- @usage async-io.md
 record ChannelReader
   local receive: function (): (string)
   local close_channel: function (): ()
@@ -80,17 +122,30 @@ record ChannelReader
   local closed: boolean
 end
 
+--- Opaque writable string-channel endpoint created by reader_writer_channel.
+-- @usage async-io.md
 record ChannelWriter
   local send: function (string): ()
   local close_channel: function (): ()
 end
 
+--- First successful result among 2 named Tasks, or none when all reject.
+-- @field first Success payload from the first operand.
+-- @field second Success payload from the second operand.
+-- @field none Every operand failed or was cancelled.
+-- @usage async-io.md
 union AnyTwoResult<|A1, A2|>
   first(A1)
   second(A2)
   none()
 end
 
+--- First successful result among 3 named Tasks, or none when all reject.
+-- @field first Success payload from the first operand.
+-- @field second Success payload from the second operand.
+-- @field third Success payload from the third operand.
+-- @field none Every operand failed or was cancelled.
+-- @usage async-io.md
 union AnyThreeResult<|A1, A2, A3|>
   first(A1)
   second(A2)
@@ -98,6 +153,13 @@ union AnyThreeResult<|A1, A2, A3|>
   none()
 end
 
+--- First successful result among 4 named Tasks, or none when all reject.
+-- @field first Success payload from the first operand.
+-- @field second Success payload from the second operand.
+-- @field third Success payload from the third operand.
+-- @field fourth Success payload from the fourth operand.
+-- @field none Every operand failed or was cancelled.
+-- @usage async-io.md
 union AnyFourResult<|A1, A2, A3, A4|>
   first(A1)
   second(A2)
@@ -106,6 +168,14 @@ union AnyFourResult<|A1, A2, A3, A4|>
   none()
 end
 
+--- First successful result among 5 named Tasks, or none when all reject.
+-- @field first Success payload from the first operand.
+-- @field second Success payload from the second operand.
+-- @field third Success payload from the third operand.
+-- @field fourth Success payload from the fourth operand.
+-- @field fifth Success payload from the fifth operand.
+-- @field none Every operand failed or was cancelled.
+-- @usage async-io.md
 union AnyFiveResult<|A1, A2, A3, A4, A5|>
   first(A1)
   second(A2)
@@ -115,17 +185,32 @@ union AnyFiveResult<|A1, A2, A3, A4, A5|>
   none()
 end
 
+--- First terminal status among 2 named Tasks, preserving its position.
+-- @field first Terminal TaskStatus from the first operand.
+-- @field second Terminal TaskStatus from the second operand.
+-- @usage async-io.md
 union RaceTwoResult<|A1, B1, A2, B2|>
   first(TaskStatus<|A1, B1|>)
   second(TaskStatus<|A2, B2|>)
 end
 
+--- First terminal status among 3 named Tasks, preserving its position.
+-- @field first Terminal TaskStatus from the first operand.
+-- @field second Terminal TaskStatus from the second operand.
+-- @field third Terminal TaskStatus from the third operand.
+-- @usage async-io.md
 union RaceThreeResult<|A1, B1, A2, B2, A3, B3|>
   first(TaskStatus<|A1, B1|>)
   second(TaskStatus<|A2, B2|>)
   third(TaskStatus<|A3, B3|>)
 end
 
+--- First terminal status among 4 named Tasks, preserving its position.
+-- @field first Terminal TaskStatus from the first operand.
+-- @field second Terminal TaskStatus from the second operand.
+-- @field third Terminal TaskStatus from the third operand.
+-- @field fourth Terminal TaskStatus from the fourth operand.
+-- @usage async-io.md
 union RaceFourResult<|A1, B1, A2, B2, A3, B3, A4, B4|>
   first(TaskStatus<|A1, B1|>)
   second(TaskStatus<|A2, B2|>)
@@ -133,6 +218,13 @@ union RaceFourResult<|A1, B1, A2, B2, A3, B3, A4, B4|>
   fourth(TaskStatus<|A4, B4|>)
 end
 
+--- First terminal status among 5 named Tasks, preserving its position.
+-- @field first Terminal TaskStatus from the first operand.
+-- @field second Terminal TaskStatus from the second operand.
+-- @field third Terminal TaskStatus from the third operand.
+-- @field fourth Terminal TaskStatus from the fourth operand.
+-- @field fifth Terminal TaskStatus from the fifth operand.
+-- @usage async-io.md
 union RaceFiveResult<|A1, B1, A2, B2, A3, B3, A4, B4, A5, B5|>
   first(TaskStatus<|A1, B1|>)
   second(TaskStatus<|A2, B2|>)
@@ -141,17 +233,32 @@ union RaceFiveResult<|A1, B1, A2, B2, A3, B3, A4, B4, A5, B5|>
   fifth(TaskStatus<|A5, B5|>)
 end
 
+--- Positional failure or cancellation raised when all_two cannot succeed.
+-- @field first Rejecting TaskStatus from the first operand.
+-- @field second Rejecting TaskStatus from the second operand.
+-- @usage async-io.md
 union AllTwoError<|A1, B1, A2, B2|>
   first(TaskStatus<|A1, B1|>)
   second(TaskStatus<|A2, B2|>)
 end
 
+--- Positional failure or cancellation raised when all_three cannot succeed.
+-- @field first Rejecting TaskStatus from the first operand.
+-- @field second Rejecting TaskStatus from the second operand.
+-- @field third Rejecting TaskStatus from the third operand.
+-- @usage async-io.md
 union AllThreeError<|A1, B1, A2, B2, A3, B3|>
   first(TaskStatus<|A1, B1|>)
   second(TaskStatus<|A2, B2|>)
   third(TaskStatus<|A3, B3|>)
 end
 
+--- Positional failure or cancellation raised when all_four cannot succeed.
+-- @field first Rejecting TaskStatus from the first operand.
+-- @field second Rejecting TaskStatus from the second operand.
+-- @field third Rejecting TaskStatus from the third operand.
+-- @field fourth Rejecting TaskStatus from the fourth operand.
+-- @usage async-io.md
 union AllFourError<|A1, B1, A2, B2, A3, B3, A4, B4|>
   first(TaskStatus<|A1, B1|>)
   second(TaskStatus<|A2, B2|>)
@@ -159,6 +266,13 @@ union AllFourError<|A1, B1, A2, B2, A3, B3, A4, B4|>
   fourth(TaskStatus<|A4, B4|>)
 end
 
+--- Positional failure or cancellation raised when all_five cannot succeed.
+-- @field first Rejecting TaskStatus from the first operand.
+-- @field second Rejecting TaskStatus from the second operand.
+-- @field third Rejecting TaskStatus from the third operand.
+-- @field fourth Rejecting TaskStatus from the fourth operand.
+-- @field fifth Rejecting TaskStatus from the fifth operand.
+-- @usage async-io.md
 union AllFiveError<|A1, B1, A2, B2, A3, B3, A4, B4, A5, B5|>
   first(TaskStatus<|A1, B1|>)
   second(TaskStatus<|A2, B2|>)
@@ -167,6 +281,8 @@ union AllFiveError<|A1, B1, A2, B2, A3, B3, A4, B4, A5, B5|>
   fifth(TaskStatus<|A5, B5|>)
 end
 
+--- Opaque reusable callback capability checked by its captured operation number.
+-- @usage async-io.md
 record Completion<|C, T, E|>
   local stored_context: C
   local register: (function (Completion<|C, T, E|>, integer): (uv.req_t?))?
@@ -209,6 +325,8 @@ local record Runtime
   local exit_code: integer?
 end
 
+--- Deferred cooperative computation with typed success and complex-cancellation payloads.
+-- @usage async-io.md
 record Task<|A, B|>
   local root: coroutine.Coroutine
   local runtime: Runtime
@@ -231,6 +349,9 @@ record Task<|A, B|>
   local suspend_cancel: (function (): ())?
 end
 
+--- Return the phase name without projecting generic payloads.
+-- @return ready, running, waiting, succeeded, failed, or cancelled.
+-- @usage async-io.md
 function TaskStatus:as_string(): string
   case self
   when ready() then return "ready"
@@ -242,6 +363,9 @@ function TaskStatus:as_string(): string
   end
 end
 
+--- Check whether the snapshot is succeeded, failed, or cancelled.
+-- @return True for a terminal status.
+-- @usage async-io.md
 function TaskStatus:has_finished(): boolean
   case self
   when succeeded() then return true
@@ -251,6 +375,9 @@ function TaskStatus:has_finished(): boolean
   end
 end
 
+--- Inspect a successful status without confusing a nil payload with failure.
+-- @return Success flag and optional typed result.
+-- @usage async-io.md
 function TaskStatus:has_succeeded(): (boolean, A?)
   case self
   when succeeded(result) then return true, result
@@ -258,6 +385,9 @@ function TaskStatus:has_succeeded(): (boolean, A?)
   end
 end
 
+--- Inspect whether the snapshot contains a Task failure.
+-- @return Failure flag and optional Error.
+-- @usage async-io.md
 function TaskStatus:has_failed(): (boolean, Error?)
   case self
   when failed(failure) then return true, failure
@@ -265,6 +395,9 @@ function TaskStatus:has_failed(): (boolean, Error?)
   end
 end
 
+--- Inspect whether the snapshot contains authoritative cancellation.
+-- @return Cancellation flag and optional reason.
+-- @usage async-io.md
 function TaskStatus:has_cancelled(): (boolean, CancellationReason<|B|>?)
   case self
   when cancelled(reason) then return true, reason
@@ -272,6 +405,9 @@ function TaskStatus:has_cancelled(): (boolean, CancellationReason<|B|>?)
   end
 end
 
+--- Return an immutable snapshot of the current Task phase.
+-- @return Current TaskStatus; previously returned snapshots never mutate.
+-- @usage async-io.md
 function Task:status(): TaskStatus<|A, B|>
   if self.state == nil then
     if self.phase == TASK_READY then self.state = TaskStatus<|A, B|>.ready()
@@ -282,6 +418,10 @@ function Task:status(): TaskStatus<|A, B|>
   return self.state
 end
 
+--- Register one ordered terminal observer on an unfinished Task.
+-- @param listener Nonyielding observer called outside Task execution; errors are isolated.
+-- @return Idempotent remover; an already-terminal Task does not invoke the listener.
+-- @usage async-io.md
 function Task:add_terminal_listener(listener: function (TaskStatus<|A, B|>): ()): function (): ()
   if self.phase == TASK_FINISHED then return function () end end
   local registration = TerminalRegistration<|A, B|> {listener = listener, live = true}
@@ -337,6 +477,8 @@ local function rethrow_failure(failure: Error)
   raise failure.error
 end
 
+--- Rethrow the original error value with its preserved traceback.
+-- @usage async-io.md
 function Error:raise()
   rethrow_failure(self)
 end
@@ -364,6 +506,9 @@ local function ensure_runtime(): Runtime
   return created
 end
 
+--- Borrow the active Runtime loop without creating or driving a Runtime.
+-- @return Runtime-owned loop; valid from Tasks, registration, and loop callbacks.
+-- @usage async-io.md
 function current_loop(): uv.loop_t
   local runtime? = active_runtime
   if runtime == nil then raise "async Runtime is not active" end
@@ -372,12 +517,18 @@ end
 
 -- Domain resource constructors may reject shutdown without turning their
 -- synchronous operation into a Task cancellation boundary.
+--- Query shutdown state of an already active Runtime.
+-- @return True while the Runtime is closing; does not check Task cancellation.
+-- @usage async-io.md
 function is_closing(): boolean
   local runtime? = active_runtime
   if runtime == nil then raise "async Runtime is not active" end
   return runtime.closing
 end
 
+--- Return the current Task through the all-value view; raises outside a Task.
+-- @return The same Task userdata as the typed owner view.
+-- @usage async-io.md
 function running(): Task<|value, value|>
   local runtime? = active_runtime
   if runtime == nil then raise "async Runtime is not active" end
@@ -388,6 +539,8 @@ end
 
 -- Admission for synchronous work that already has no scheduling boundary.
 -- Keep the same precedence as an ordinary await before registration.
+--- Check sticky cancellation and Runtime failure synchronously without yielding.
+-- @usage async-io.md
 function checkpoint()
   local task = running()
   local reason? = task.cancel_value
@@ -794,6 +947,9 @@ local function ready_closed(timer: uv.timer_t)
   uv.timer_set_data(timer, nil)
 end
 
+--- Request sticky cancellation without completing accepted native work early.
+-- @param reason First reason wins; nil selects simple cancellation with message cancelled.
+-- @usage async-io.md
 function Task:cancel(reason: CancellationReason<|B|>?)
   if self.phase == TASK_FINISHED or self.cancel_value ~= nil then return end
   local actual? = reason
@@ -810,6 +966,9 @@ function Task:cancel(reason: CancellationReason<|B|>?)
   end
 end
 
+--- Schedule a deferred wake for the exact token authorizing the current explicit suspension.
+-- @param token Exact ResumeToken passed to suspend; a mismatch raises in the caller.
+-- @usage async-io.md
 function Task:resume(token: ResumeToken)
   if token ~= self.resume_token then
     local source = "unknown source"
@@ -824,22 +983,39 @@ function Task:resume(token: ResumeToken)
 end
 
 
+--- Read context for the exact still-live callback operation.
+-- @param number Operation number captured with this Completion during registration.
+-- @return Typed registration context; stale numbers raise.
+-- @usage async-io.md
 function Completion:context(number: integer): C
   if self.epoch ~= number or number == 0 then raise "stale async operation number" end
   if self.phase == WAIT_RETIRED then raise "retired async operation context" end
   return self.stored_context
 end
 
+--- Settle one exact callback operation successfully.
+-- @param number Captured operation number; stale or duplicate settlement raises.
+-- @param result Successful payload; finish native cleanup before settlement.
+-- @usage async-io.md
 function Completion:resolve(number: integer, result: T)
   if self.epoch ~= number or number == 0 then raise "stale async operation number" end
   settle(self as Wait, OUTCOME_SUCCESS, result)
 end
 
+--- Settle one exact callback operation with an expected error.
+-- @param number Captured operation number; stale or duplicate settlement raises.
+-- @param error Expected operation error.
+-- @usage async-io.md
 function Completion:reject(number: integer, error: E)
   if self.epoch ~= number or number == 0 then raise "stale async operation number" end
   settle(self as Wait, OUTCOME_ERROR, error)
 end
 
+--- Report consumed terminal callback failure while preserving Runtime failure ownership.
+-- @param number Captured operation number; a late failure must not retire a successor.
+-- @param error Original unexpected raised value.
+-- @param trace Original traceback; the callback must rethrow after reporting.
+-- @usage async-io.md
 function Completion:fatal(number: integer, error: value, trace: string)
   if self.epoch ~= number or number == 0 then
     if self.task.runtime.current_task ~= nil then raise "async fatal callback must run outside an async Task" end
@@ -871,14 +1047,29 @@ local function completion<|C, T, E|>(context: C, start: function (Completion<|C,
   return reused
 end
 
+--- Register a typed callback wait and defer cancellation until accepted work completes.
+-- @param context Typed context retained until operation retirement.
+-- @param start Nonyielding registrar receiving Completion and operation number; may return nil or an accepted request.
+-- @return Tagged operation result; cancellable waits may return cancelled.
+-- @usage async-io.md
 function await_with<|C, T, E|>(context: C, start: function (Completion<|C, T, E|>, integer): (uv.req_t?)): Result<|T, E|>
   return coroutine.yield(completion(context, start, WAIT_ORDINARY), ASYNC_TAG) as Result<|T, E|>
 end
 
+--- Register a typed ownership-cleanup wait despite pending cancellation or shutdown.
+-- @param context Typed context retained until operation retirement.
+-- @param start Nonyielding registrar receiving Completion and operation number; may return nil or an accepted request.
+-- @return Tagged operation result; cancellable waits may return cancelled.
+-- @usage async-io.md
 function await_cleanup_with<|C, T, E|>(context: C, start: function (Completion<|C, T, E|>, integer): (uv.req_t?)): Result<|T, E|>
   return coroutine.yield(completion(context, start, WAIT_CLEANUP), ASYNC_TAG) as Result<|T, E|>
 end
 
+--- Register a typed wait, request native cancellation, and still await terminal completion.
+-- @param context Typed context retained until operation retirement.
+-- @param start Nonyielding registrar receiving Completion and operation number; returns the accepted request or settles inline.
+-- @return Tagged operation result; cancellable waits may return cancelled.
+-- @usage async-io.md
 function await_cancellable_with<|C, T, E|>(context: C, start: function (Completion<|C, T, E|>, integer): (uv.req_t?)): CancellableResult<|T, E|>
   return coroutine.yield(completion(context, start, WAIT_CANCELLABLE), ASYNC_TAG) as CancellableResult<|T, E|>
 end
@@ -906,18 +1097,32 @@ local function old_void_start<|T, E|>(done: Completion<|function (function (T): 
   return nil
 end
 
+--- Wait for one callback-triple operation, retaining accepted ownership through cancellation.
+-- @param op Nonyielding registrar receiving resolve, reject, and fatal callbacks; settle exactly once.
+-- @return Tagged operation result; cancellable waits may return cancelled.
+-- @usage async-io.md
 function await<|T, E|>(op: function (function (T): (), function (E): (), function (value, string): ()): ()): Result<|T, E|>
   return await_with<|function (function (T): (), function (E): (), function (value, string): ()): (), T, E|>(op, old_void_start)
 end
 
+--- Wait for ownership cleanup despite pending cancellation or Runtime shutdown.
+-- @param op Nonyielding registrar receiving resolve, reject, and fatal callbacks; settle exactly once.
+-- @return Tagged operation result; cancellable waits may return cancelled.
+-- @usage async-io.md
 function await_cleanup<|T, E|>(op: function (function (T): (), function (E): (), function (value, string): ()): ()): Result<|T, E|>
   return await_cleanup_with<|function (function (T): (), function (E): (), function (value, string): ()): (), T, E|>(op, old_void_start)
 end
 
+--- Request supported native cancellation but wait for the promised terminal callback.
+-- @param op Nonyielding registrar receiving resolve, reject, and fatal callbacks; settle exactly once.
+-- @return Tagged operation result; cancellable waits may return cancelled.
+-- @usage async-io.md
 function await_cancellable<|T, E|>(op: function (function (T): (), function (E): (), function (value, string): ()): (uv.req_t?)): CancellableResult<|T, E|>
   return await_cancellable_with<|function (function (T): (), function (E): (), function (value, string): ()): (uv.req_t?), T, E|>(op, old_start)
 end
 
+--- Yield the current Task to a callback-deferred later scheduling turn.
+-- @usage async-io.md
 function yield()
   running()
   coroutine.yield(YIELD_TAG, ASYNC_TAG)
@@ -932,6 +1137,10 @@ local function start_suspend(done: Completion<|ResumeToken, value, value|>, numb
   return nil
 end
 
+--- Suspend the current Task for explicit token-authorized coordination.
+-- @param token Identity capability shared only with authorized wake paths.
+-- @param cancel_action Optional nonyielding, nonraising action detaching the exact waiter on cancellation.
+-- @usage async-io.md
 function suspend(token: ResumeToken, cancel_action: (function (): ())?)
   local task = running()
   -- The token remains unpublished until registration accepts this suspension.
@@ -946,6 +1155,10 @@ function suspend(token: ResumeToken, cancel_action: (function (): ())?)
   end
 end
 
+--- Schedule a new Task and return before its function starts.
+-- @param func Task body producing one success payload.
+-- @return Initially ready Task; supply both success and cancellation type arguments or neither.
+-- @usage async-io.md
 function run<|A, B|>(func: function (): (A)): Task<|A, B|>
   local runtime = ensure_runtime()
   if runtime.closing or runtime.exit_code ~= nil then raise "cannot start a Task while async Runtime is shutting down" end
@@ -1022,6 +1235,8 @@ local function unwind_orphans(runtime: Runtime)
   end
 end
 
+--- Drive the active Runtime on the Lua main thread until Tasks and native cleanup finish.
+-- @usage async-io.md
 function loop()
   require_main_thread()
   local runtime? = active_runtime
@@ -1085,6 +1300,9 @@ function loop()
   end
 end
 
+--- Return the bundled libuv version string.
+-- @return Native libuv version.
+-- @usage async-io.md
 function version(): string
   return uv.version_string()
 end
@@ -1124,6 +1342,10 @@ local function start_foreign_work(done: Completion<|ForeignWork, value, Operatio
   return nil
 end
 
+--- Run one blocking C function-pointer call in the shared worker pool and wait for completion.
+-- @param f C-only function; it must never enter Titan or Lua.
+-- @param arg Native pointer whose owner remains live until after-work completion, including cancellation.
+-- @usage async-io.md
 function run_foreign(f: foreign function (*void): void, arg: foreign *void)
   if not f then raise "async.run_foreign callback must not be NULL" end
   local work = ForeignWork(uv.work_t.new(), f, arg, nil, 0)
@@ -1134,6 +1356,10 @@ function run_foreign(f: foreign function (*void): void, arg: foreign *void)
   end
 end
 
+--- Create a bounded FIFO channel with at most one blocked sender and receiver.
+-- @param size Positive capacity; nil defaults to one.
+-- @return Send, receive, and idempotent close functions; close discards buffered values.
+-- @usage async-io.md
 function channel<|T|>(size: integer?):
     (function (T): (), function (): (T), function (): ())
   local capacity = size or 1
@@ -1212,6 +1438,9 @@ function channel<|T|>(size: integer?):
   return send, receive, close
 end
 
+--- Read a string channel message or a buffered delimiter suffix.
+-- @return String chunk, or nil after reader close; empty strings are data.
+-- @usage async-io.md
 function ChannelReader:read(): string?
   if self.closed then return nil end
   if self.excess then
@@ -1222,6 +1451,11 @@ function ChannelReader:read(): string?
   return self.receive()
 end
 
+--- Read through a delimiter across string-channel message boundaries.
+-- @param delimiter Nonempty binary delimiter.
+-- @param chop True removes the delimiter.
+-- @return Delimited bytes or final suffix, or nil after reader close.
+-- @usage async-io.md
 function ChannelReader:read_until(delimiter: string,
                                   chop: boolean?): string?
   if self.closed then return nil end
@@ -1271,6 +1505,8 @@ function ChannelReader:read_until(delimiter: string,
   end
 end
 
+--- Close the string channel and discard this reader buffered suffix.
+-- @usage async-io.md
 function ChannelReader:close()
   if self.closed then return end
   self.closed = true
@@ -1278,14 +1514,23 @@ function ChannelReader:close()
   self.close_channel()
 end
 
+--- Send binary bytes through the bounded string channel.
+-- @param data String message; may suspend while the channel is full.
+-- @usage async-io.md
 function ChannelWriter:write(data: string)
   self.send(data)
 end
 
+--- Close the underlying channel while preserving any suffix already held by its reader.
+-- @usage async-io.md
 function ChannelWriter:close()
   self.close_channel()
 end
 
+--- Create opaque Reader and Writer facades over a bounded string channel.
+-- @param size Positive channel capacity; nil defaults to one.
+-- @return Paired ChannelReader and ChannelWriter.
+-- @usage async-io.md
 function reader_writer_channel(size: integer?):
     (ChannelReader, ChannelWriter)
   local send, receive, close = channel<|string|>(size)
@@ -1310,6 +1555,11 @@ end
 -- Tasks into one array would erase the independent result/cancellation type
 -- positions of the public generic Task API.
 
+--- Wait for the first success among 2 Tasks without cancelling other operands.
+-- @param first First Task; already-terminal ties choose the leftmost success.
+-- @param second Second Task; already-terminal ties choose the leftmost success.
+-- @return AnyTwoResult preserving the winner, or none when all operands reject.
+-- @usage async-io.md
 function any_two<|A1, B1, A2, B2|>(
     first: Task<|A1, B1|>, second: Task<|A2, B2|>):
     AnyTwoResult<|A1, A2|>
@@ -1399,6 +1649,12 @@ function any_two<|A1, B1, A2, B2|>(
   return AnyTwoResult<|A1, A2|>.none()
 end
 
+--- Wait for the first success among 3 Tasks without cancelling other operands.
+-- @param first First Task; already-terminal ties choose the leftmost success.
+-- @param second Second Task; already-terminal ties choose the leftmost success.
+-- @param third Third Task; already-terminal ties choose the leftmost success.
+-- @return AnyThreeResult preserving the winner, or none when all operands reject.
+-- @usage async-io.md
 function any_three<|A1, B1, A2, B2, A3, B3|>(
     first: Task<|A1, B1|>, second: Task<|A2, B2|>,
     third: Task<|A3, B3|>):
@@ -1525,6 +1781,13 @@ function any_three<|A1, B1, A2, B2, A3, B3|>(
   return AnyThreeResult<|A1, A2, A3|>.none()
 end
 
+--- Wait for the first success among 4 Tasks without cancelling other operands.
+-- @param first First Task; already-terminal ties choose the leftmost success.
+-- @param second Second Task; already-terminal ties choose the leftmost success.
+-- @param third Third Task; already-terminal ties choose the leftmost success.
+-- @param fourth Fourth Task; already-terminal ties choose the leftmost success.
+-- @return AnyFourResult preserving the winner, or none when all operands reject.
+-- @usage async-io.md
 function any_four<|A1, B1, A2, B2, A3, B3, A4, B4|>(
     first: Task<|A1, B1|>, second: Task<|A2, B2|>,
     third: Task<|A3, B3|>, fourth: Task<|A4, B4|>):
@@ -1687,6 +1950,14 @@ function any_four<|A1, B1, A2, B2, A3, B3, A4, B4|>(
   return AnyFourResult<|A1, A2, A3, A4|>.none()
 end
 
+--- Wait for the first success among 5 Tasks without cancelling other operands.
+-- @param first First Task; already-terminal ties choose the leftmost success.
+-- @param second Second Task; already-terminal ties choose the leftmost success.
+-- @param third Third Task; already-terminal ties choose the leftmost success.
+-- @param fourth Fourth Task; already-terminal ties choose the leftmost success.
+-- @param fifth Fifth Task; already-terminal ties choose the leftmost success.
+-- @return AnyFiveResult preserving the winner, or none when all operands reject.
+-- @usage async-io.md
 function any_five<|A1, B1, A2, B2, A3, B3, A4, B4, A5, B5|>(
     first: Task<|A1, B1|>, second: Task<|A2, B2|>,
     third: Task<|A3, B3|>, fourth: Task<|A4, B4|>,
@@ -1886,6 +2157,11 @@ function any_five<|A1, B1, A2, B2, A3, B3, A4, B4, A5, B5|>(
   return AnyFiveResult<|A1, A2, A3, A4, A5|>.none()
 end
 
+--- Wait for the first terminal outcome among 2 Tasks without cancelling losers.
+-- @param first First Task operand.
+-- @param second Second Task operand.
+-- @return RaceTwoResult preserving the winner position and exact terminal status.
+-- @usage async-io.md
 function race_two<|A1, B1, A2, B2|>(
     first: Task<|A1, B1|>, second: Task<|A2, B2|>):
     RaceTwoResult<|A1, B1, A2, B2|>
@@ -1930,6 +2206,12 @@ function race_two<|A1, B1, A2, B2|>(
   return RaceTwoResult<|A1, B1, A2, B2|>.second(result as TaskStatus<|A2, B2|>)
 end
 
+--- Wait for the first terminal outcome among 3 Tasks without cancelling losers.
+-- @param first First Task operand.
+-- @param second Second Task operand.
+-- @param third Third Task operand.
+-- @return RaceThreeResult preserving the winner position and exact terminal status.
+-- @usage async-io.md
 function race_three<|A1, B1, A2, B2, A3, B3|>(
     first: Task<|A1, B1|>, second: Task<|A2, B2|>,
     third: Task<|A3, B3|>):
@@ -1991,6 +2273,13 @@ function race_three<|A1, B1, A2, B2, A3, B3|>(
   return RaceThreeResult<|A1, B1, A2, B2, A3, B3|>.third(result as TaskStatus<|A3, B3|>)
 end
 
+--- Wait for the first terminal outcome among 4 Tasks without cancelling losers.
+-- @param first First Task operand.
+-- @param second Second Task operand.
+-- @param third Third Task operand.
+-- @param fourth Fourth Task operand.
+-- @return RaceFourResult preserving the winner position and exact terminal status.
+-- @usage async-io.md
 function race_four<|A1, B1, A2, B2, A3, B3, A4, B4|>(
     first: Task<|A1, B1|>, second: Task<|A2, B2|>,
     third: Task<|A3, B3|>, fourth: Task<|A4, B4|>):
@@ -2068,6 +2357,14 @@ function race_four<|A1, B1, A2, B2, A3, B3, A4, B4|>(
   return RaceFourResult<|A1, B1, A2, B2, A3, B3, A4, B4|>.fourth(result as TaskStatus<|A4, B4|>)
 end
 
+--- Wait for the first terminal outcome among 5 Tasks without cancelling losers.
+-- @param first First Task operand.
+-- @param second Second Task operand.
+-- @param third Third Task operand.
+-- @param fourth Fourth Task operand.
+-- @param fifth Fifth Task operand.
+-- @return RaceFiveResult preserving the winner position and exact terminal status.
+-- @usage async-io.md
 function race_five<|A1, B1, A2, B2, A3, B3, A4, B4, A5, B5|>(
     first: Task<|A1, B1|>, second: Task<|A2, B2|>,
     third: Task<|A3, B3|>, fourth: Task<|A4, B4|>,
@@ -2162,6 +2459,11 @@ function race_five<|A1, B1, A2, B2, A3, B3, A4, B4, A5, B5|>(
   return RaceFiveResult<|A1, B1, A2, B2, A3, B3, A4, B4, A5, B5|>.fifth(result as TaskStatus<|A5, B5|>)
 end
 
+--- Wait for 2 successes or raise the first positional rejection; operands are not cancelled.
+-- @param first First Task operand.
+-- @param second Second Task operand.
+-- @return 2 success payloads in operand order; raises AllTwoError on failure or cancellation.
+-- @usage async-io.md
 function all_two<|A1, B1, A2, B2|>(
     first: Task<|A1, B1|>, second: Task<|A2, B2|>): (A1, A2)
   local current = running()
@@ -2252,6 +2554,12 @@ function all_two<|A1, B1, A2, B2|>(
   return first_result as A1, second_result as A2
 end
 
+--- Wait for 3 successes or raise the first positional rejection; operands are not cancelled.
+-- @param first First Task operand.
+-- @param second Second Task operand.
+-- @param third Third Task operand.
+-- @return 3 success payloads in operand order; raises AllThreeError on failure or cancellation.
+-- @usage async-io.md
 function all_three<|A1, B1, A2, B2, A3, B3|>(
     first: Task<|A1, B1|>, second: Task<|A2, B2|>,
     third: Task<|A3, B3|>):
@@ -2382,6 +2690,13 @@ function all_three<|A1, B1, A2, B2, A3, B3|>(
          third_result as A3
 end
 
+--- Wait for 4 successes or raise the first positional rejection; operands are not cancelled.
+-- @param first First Task operand.
+-- @param second Second Task operand.
+-- @param third Third Task operand.
+-- @param fourth Fourth Task operand.
+-- @return 4 success payloads in operand order; raises AllFourError on failure or cancellation.
+-- @usage async-io.md
 function all_four<|A1, B1, A2, B2, A3, B3, A4, B4|>(
     first: Task<|A1, B1|>, second: Task<|A2, B2|>,
     third: Task<|A3, B3|>, fourth: Task<|A4, B4|>):
@@ -2548,6 +2863,14 @@ function all_four<|A1, B1, A2, B2, A3, B3, A4, B4|>(
          third_result as A3, fourth_result as A4
 end
 
+--- Wait for 5 successes or raise the first positional rejection; operands are not cancelled.
+-- @param first First Task operand.
+-- @param second Second Task operand.
+-- @param third Third Task operand.
+-- @param fourth Fourth Task operand.
+-- @param fifth Fifth Task operand.
+-- @return 5 success payloads in operand order; raises AllFiveError on failure or cancellation.
+-- @usage async-io.md
 function all_five<|A1, B1, A2, B2, A3, B3, A4, B4, A5, B5|>(
     first: Task<|A1, B1|>, second: Task<|A2, B2|>,
     third: Task<|A3, B3|>, fourth: Task<|A4, B4|>,
@@ -2753,6 +3076,10 @@ function all_five<|A1, B1, A2, B2, A3, B3, A4, B4, A5, B5|>(
          fifth_result as A5
 end
 
+--- Wait for one Task to finish and return its status without raising its outcome.
+-- @param task Task to observe; waiting on the current Task is rejected.
+-- @return Exact terminal TaskStatus.
+-- @usage async-io.md
 function join<|A, B|>(task: Task<|A, B|>): TaskStatus<|A, B|>
   local current = running()
   reject_running(current, task)
@@ -2772,6 +3099,11 @@ function join<|A, B|>(task: Task<|A, B|>): TaskStatus<|A, B|>
   return result as TaskStatus<|A, B|>
 end
 
+--- Wait for every one of 2 Tasks and return their terminal statuses without raising their outcomes.
+-- @param first First Task operand.
+-- @param second Second Task operand.
+-- @return 2 TaskStatus values in operand order.
+-- @usage async-io.md
 function join_two<|A1, B1, A2, B2|>(
     first: Task<|A1, B1|>, second: Task<|A2, B2|>):
     (TaskStatus<|A1, B1|>, TaskStatus<|A2, B2|>)
@@ -2818,6 +3150,12 @@ function join_two<|A1, B1, A2, B2|>(
   return first_result as TaskStatus<|A1, B1|>, second_result as TaskStatus<|A2, B2|>
 end
 
+--- Wait for every one of 3 Tasks and return their terminal statuses without raising their outcomes.
+-- @param first First Task operand.
+-- @param second Second Task operand.
+-- @param third Third Task operand.
+-- @return 3 TaskStatus values in operand order.
+-- @usage async-io.md
 function join_three<|A1, B1, A2, B2, A3, B3|>(
     first: Task<|A1, B1|>, second: Task<|A2, B2|>,
     third: Task<|A3, B3|>):
@@ -2882,6 +3220,13 @@ function join_three<|A1, B1, A2, B2, A3, B3|>(
          third_result as TaskStatus<|A3, B3|>
 end
 
+--- Wait for every one of 4 Tasks and return their terminal statuses without raising their outcomes.
+-- @param first First Task operand.
+-- @param second Second Task operand.
+-- @param third Third Task operand.
+-- @param fourth Fourth Task operand.
+-- @return 4 TaskStatus values in operand order.
+-- @usage async-io.md
 function join_four<|A1, B1, A2, B2, A3, B3, A4, B4|>(
     first: Task<|A1, B1|>, second: Task<|A2, B2|>,
     third: Task<|A3, B3|>, fourth: Task<|A4, B4|>):
@@ -2962,6 +3307,14 @@ function join_four<|A1, B1, A2, B2, A3, B3, A4, B4|>(
          third_result as TaskStatus<|A3, B3|>, fourth_result as TaskStatus<|A4, B4|>
 end
 
+--- Wait for every one of 5 Tasks and return their terminal statuses without raising their outcomes.
+-- @param first First Task operand.
+-- @param second Second Task operand.
+-- @param third Third Task operand.
+-- @param fourth Fourth Task operand.
+-- @param fifth Fifth Task operand.
+-- @return 5 TaskStatus values in operand order.
+-- @usage async-io.md
 function join_five<|A1, B1, A2, B2, A3, B3, A4, B4, A5, B5|>(
     first: Task<|A1, B1|>, second: Task<|A2, B2|>,
     third: Task<|A3, B3|>, fourth: Task<|A4, B4|>,
@@ -3062,6 +3415,9 @@ end
 
 -- Contributor to async. All Task/Runtime ownership stays inside this module;
 -- an ordinary os import calls this public operation without source privileges.
+--- Request a process exit after cancellation and native ownership cleanup.
+-- @param code Final process exit code.
+-- @usage async-io.md
 function request_exit(code: integer)
   local task = running()
   local runtime = task.runtime
@@ -3104,17 +3460,30 @@ local record Item<|T|>
   value: T
 end
 
+--- Transferred subscription items with explicit count, preserving nil and false payloads.
+-- @field count Number of items available through one-based get.
+-- @usage async-io.md
 record SubscriptionBatch<|T|>
   const count: integer
   local const first: integer
   local const items: {Item<|T|>}
 end
 
+--- Read one item from a transferred batch without using payload truthiness.
+-- @param index One-based index in 1..count.
+-- @return Exact typed item, including nil when its type permits it.
+-- @usage async-io.md
 function SubscriptionBatch:get(index: integer): T
   if index < 1 or index > self.count then raise "subscription batch index out of range" end
   return self.items[self.first + index - 1].value
 end
 
+--- One persistent-source item or terminal subscription outcome.
+-- @field item One item, including nil or false payloads.
+-- @field error Terminal producer error after queued items.
+-- @field ended Producer finished and queued items are exhausted.
+-- @field closed Subscription was closed.
+-- @usage async-io.md
 union SubscriptionResult<|T, E|>
   item(T)
   error(E)
@@ -3122,6 +3491,12 @@ union SubscriptionResult<|T, E|>
   closed()
 end
 
+--- Buffered items or a terminal persistent-source outcome.
+-- @field batch Transferred batch with explicit count.
+-- @field error Terminal producer error after queued items.
+-- @field ended Producer finished and queued items are exhausted.
+-- @field closed Subscription was closed.
+-- @usage async-io.md
 union SubscriptionBatchResult<|T, E|>
   batch(SubscriptionBatch<|T|>)
   error(E)
@@ -3129,6 +3504,10 @@ union SubscriptionBatchResult<|T, E|>
   closed()
 end
 
+--- Producer-owned stop and close actions returned during subscription registration.
+-- @field stop Synchronous nonyielding action stopping production.
+-- @field close Cleanup action receiving an unread-batch drain function for resource disposal.
+-- @usage async-io.md
 record SubscriptionActions<|T|>
   const stop: function (): ()
   const close: function (function (): (SubscriptionBatch<|T|>)): ()
@@ -3160,10 +3539,14 @@ local record Core<|T, E|>
   drain: (function (): (SubscriptionBatch<|T|>))?
 end
 
+--- Persistent source retaining only the latest safely discardable unread item.
+-- @usage async-io.md
 record CoalescingSubscription<|T, E|>
   local core: Core<|T, E|>
 end
 
+--- Persistent source retaining every unread item in publication order.
+-- @usage async-io.md
 record BufferedSubscription<|T, E|>
   local core: Core<|T, E|>
 end
@@ -3250,6 +3633,10 @@ local function Core:register(producer: function (function (T): (boolean), functi
   core.actions = actions
 end
 
+--- Register a persistent producer retaining the latest safely discardable value.
+-- @param producer Called once with publish, fail, and finish capabilities; prebuild actions and roll back partial resource acceptance.
+-- @return Registered subscription; rejected publication leaves event ownership with the producer.
+-- @usage async-io.md
 function CoalescingSubscription.new(producer: function (function (T): (boolean), function (E): (boolean), function (): (boolean)): (SubscriptionActions<|T|>)): CoalescingSubscription<|T, E|>
   local core = Core<|T, E|>(true)
   local subscription: CoalescingSubscription<|T, E|> = {core = core}
@@ -3257,6 +3644,10 @@ function CoalescingSubscription.new(producer: function (function (T): (boolean),
   return subscription
 end
 
+--- Register a persistent producer retaining the every value in order.
+-- @param producer Called once with publish, fail, and finish capabilities; prebuild actions and roll back partial resource acceptance.
+-- @return Registered subscription; rejected publication leaves event ownership with the producer.
+-- @usage async-io.md
 function BufferedSubscription.new(producer: function (function (T): (boolean), function (E): (boolean), function (): (boolean)): (SubscriptionActions<|T|>)): BufferedSubscription<|T, E|>
   local core = Core<|T, E|>(false)
   local subscription: BufferedSubscription<|T, E|> = {core = core}
@@ -3384,49 +3775,79 @@ local function Core:close()
   self:wake()
 end
 
+--- Read one persistent-source outcome with one shared reader reservation.
+-- @return Item or terminal outcome; wait cancellation leaves the producer and queued items alive.
+-- @usage async-io.md
 function CoalescingSubscription:next(): SubscriptionResult<|T, E|>
   return self.core:next()
 end
 
 -- Admission queries use the same reservation that cancellation detaches.
 -- A queued wake remains reserved until that reader leaves its wait.
+--- Query the exact active reader reservation, including an already queued wake.
+-- @return True while a next reader still owns its reservation.
+-- @usage async-io.md
 function CoalescingSubscription:has_waiter(): boolean
   return self.core.waiter ~= nil
 end
 
+--- Stop production synchronously, retaining queued items before the terminal outcome.
+-- @usage async-io.md
 function CoalescingSubscription:stop()
   self.core:stop()
 end
 
+--- Block delivery, stop production, dispose unread items, and finish producer cleanup once.
+-- @usage async-io.md
 function CoalescingSubscription:close()
   self.core:close()
 end
 
+--- Read one persistent-source outcome with one shared reader reservation.
+-- @return Item or terminal outcome; wait cancellation leaves the producer and queued items alive.
+-- @usage async-io.md
 function BufferedSubscription:next(): SubscriptionResult<|T, E|>
   return self.core:next()
 end
 
+--- Query the exact active reader reservation, including an already queued wake.
+-- @return True while a next or next_batch reader still owns its reservation.
+-- @usage async-io.md
 function BufferedSubscription:has_waiter(): boolean
   return self.core.waiter ~= nil
 end
 
+--- Read and transfer the complete queued batch with the shared reader reservation.
+-- @return Batch or terminal outcome; a domain wake may supply an empty batch.
+-- @usage async-io.md
 function BufferedSubscription:next_batch(): SubscriptionBatchResult<|T, E|>
   return self.core:next_batch()
 end
 
+--- Stop production synchronously, retaining queued items before the terminal outcome.
+-- @usage async-io.md
 function BufferedSubscription:stop()
   self.core:stop()
 end
 
+--- Block delivery, stop production, dispose unread items, and finish producer cleanup once.
+-- @usage async-io.md
 function BufferedSubscription:close()
   self.core:close()
 end
 
 -- Producer/domain control operations are synchronous and never suspend.
+--- Synchronously transfer the complete unread batch to its domain owner.
+-- @return Batch with explicit count, possibly empty.
+-- @usage async-io.md
 function BufferedSubscription:drain_pending(): SubscriptionBatch<|T|>
   return self.core:detach()
 end
 
+--- Transfer the complete unread batch only if any item satisfies a domain predicate.
+-- @param predicate Nonyielding predicate that must not mutate the subscription.
+-- @return Complete batch when any item matches, otherwise nil.
+-- @usage async-io.md
 function BufferedSubscription:drain_if(predicate: function (T): (boolean)): SubscriptionBatch<|T|>?
   local core = self.core
   for index = core.first, core.first + core.count - 1 do
@@ -3435,6 +3856,8 @@ function BufferedSubscription:drain_if(predicate: function (T): (boolean)): Subs
   return nil
 end
 
+--- Wake only a blocked batch reader, permitting an empty domain-control batch.
+-- @usage async-io.md
 function BufferedSubscription:wake_batch()
   local waiter? = self.core.waiter
   if waiter ~= nil and waiter.batch then self.core:wake() end

@@ -1,63 +1,179 @@
 foreign import "platform-constants.h"
 
 -- Absence means the native platform does not define this vocabulary.
+--- Native platform constant AF_UNIX; nil when the platform does not define it.
+-- @usage uv/types.md#public-constants
 const AF_UNIX: integer?
+--- Native platform constant S_IRUSR; nil when the platform does not define it.
+-- @usage uv/types.md#public-constants
 const S_IRUSR: integer?
+--- Native platform constant S_IWUSR; nil when the platform does not define it.
+-- @usage uv/types.md#public-constants
 const S_IWUSR: integer?
+--- Native platform constant S_IXUSR; nil when the platform does not define it.
+-- @usage uv/types.md#public-constants
 const S_IXUSR: integer?
+--- Native platform constant S_IRGRP; nil when the platform does not define it.
+-- @usage uv/types.md#public-constants
 const S_IRGRP: integer?
+--- Native platform constant S_IWGRP; nil when the platform does not define it.
+-- @usage uv/types.md#public-constants
 const S_IWGRP: integer?
+--- Native platform constant S_IXGRP; nil when the platform does not define it.
+-- @usage uv/types.md#public-constants
 const S_IXGRP: integer?
+--- Native platform constant S_IROTH; nil when the platform does not define it.
+-- @usage uv/types.md#public-constants
 const S_IROTH: integer?
+--- Native platform constant S_IWOTH; nil when the platform does not define it.
+-- @usage uv/types.md#public-constants
 const S_IWOTH: integer?
+--- Native platform constant S_IXOTH; nil when the platform does not define it.
+-- @usage uv/types.md#public-constants
 const S_IXOTH: integer?
+--- Native platform constant S_IFMT; nil when the platform does not define it.
+-- @usage uv/types.md#public-constants
 const S_IFMT: integer?
+--- Native platform constant S_IFREG; nil when the platform does not define it.
+-- @usage uv/types.md#public-constants
 const S_IFREG: integer?
+--- Native platform constant S_IFDIR; nil when the platform does not define it.
+-- @usage uv/types.md#public-constants
 const S_IFDIR: integer?
+--- Native platform constant S_IFLNK; nil when the platform does not define it.
+-- @usage uv/types.md#public-constants
 const S_IFLNK: integer?
+--- Native platform constant S_IFSOCK; nil when the platform does not define it.
+-- @usage uv/types.md#public-constants
 const S_IFSOCK: integer?
+--- Native platform constant S_IFIFO; nil when the platform does not define it.
+-- @usage uv/types.md#public-constants
 const S_IFIFO: integer?
+--- Native platform constant S_IFCHR; nil when the platform does not define it.
+-- @usage uv/types.md#public-constants
 const S_IFCHR: integer?
+--- Native platform constant S_IFBLK; nil when the platform does not define it.
+-- @usage uv/types.md#public-constants
 const S_IFBLK: integer?
+--- Native platform constant F_OK; nil when the platform does not define it.
+-- @usage uv/types.md#public-constants
 const F_OK: integer?
+--- Native platform constant R_OK; nil when the platform does not define it.
+-- @usage uv/types.md#public-constants
 const R_OK: integer?
+--- Native platform constant W_OK; nil when the platform does not define it.
+-- @usage uv/types.md#public-constants
 const W_OK: integer?
+--- Native platform constant X_OK; nil when the platform does not define it.
+-- @usage uv/types.md#public-constants
 const X_OK: integer?
+--- Native platform constant SIGABRT; nil when the platform does not define it.
+-- @usage uv/types.md#public-constants
 const SIGABRT: integer?
+--- Native platform constant SIGALRM; nil when the platform does not define it.
+-- @usage uv/types.md#public-constants
 const SIGALRM: integer?
+--- Native platform constant SIGBREAK; nil when the platform does not define it.
+-- @usage uv/types.md#public-constants
 const SIGBREAK: integer?
+--- Native platform constant SIGBUS; nil when the platform does not define it.
+-- @usage uv/types.md#public-constants
 const SIGBUS: integer?
+--- Native platform constant SIGCHLD; nil when the platform does not define it.
+-- @usage uv/types.md#public-constants
 const SIGCHLD: integer?
+--- Native platform constant SIGCONT; nil when the platform does not define it.
+-- @usage uv/types.md#public-constants
 const SIGCONT: integer?
+--- Native platform constant SIGFPE; nil when the platform does not define it.
+-- @usage uv/types.md#public-constants
 const SIGFPE: integer?
+--- Native platform constant SIGHUP; nil when the platform does not define it.
+-- @usage uv/types.md#public-constants
 const SIGHUP: integer?
+--- Native platform constant SIGILL; nil when the platform does not define it.
+-- @usage uv/types.md#public-constants
 const SIGILL: integer?
+--- Native platform constant SIGINT; nil when the platform does not define it.
+-- @usage uv/types.md#public-constants
 const SIGINT: integer?
+--- Native platform constant SIGIO; nil when the platform does not define it.
+-- @usage uv/types.md#public-constants
 const SIGIO: integer?
+--- Native platform constant SIGIOT; nil when the platform does not define it.
+-- @usage uv/types.md#public-constants
 const SIGIOT: integer?
+--- Native platform constant SIGKILL; nil when the platform does not define it.
+-- @usage uv/types.md#public-constants
 const SIGKILL: integer?
+--- Native platform constant SIGPIPE; nil when the platform does not define it.
+-- @usage uv/types.md#public-constants
 const SIGPIPE: integer?
+--- Native platform constant SIGPOLL; nil when the platform does not define it.
+-- @usage uv/types.md#public-constants
 const SIGPOLL: integer?
+--- Native platform constant SIGPROF; nil when the platform does not define it.
+-- @usage uv/types.md#public-constants
 const SIGPROF: integer?
+--- Native platform constant SIGPWR; nil when the platform does not define it.
+-- @usage uv/types.md#public-constants
 const SIGPWR: integer?
+--- Native platform constant SIGQUIT; nil when the platform does not define it.
+-- @usage uv/types.md#public-constants
 const SIGQUIT: integer?
+--- Native platform constant SIGSEGV; nil when the platform does not define it.
+-- @usage uv/types.md#public-constants
 const SIGSEGV: integer?
+--- Native platform constant SIGSTKFLT; nil when the platform does not define it.
+-- @usage uv/types.md#public-constants
 const SIGSTKFLT: integer?
+--- Native platform constant SIGSTOP; nil when the platform does not define it.
+-- @usage uv/types.md#public-constants
 const SIGSTOP: integer?
+--- Native platform constant SIGSYS; nil when the platform does not define it.
+-- @usage uv/types.md#public-constants
 const SIGSYS: integer?
+--- Native platform constant SIGTERM; nil when the platform does not define it.
+-- @usage uv/types.md#public-constants
 const SIGTERM: integer?
+--- Native platform constant SIGTRAP; nil when the platform does not define it.
+-- @usage uv/types.md#public-constants
 const SIGTRAP: integer?
+--- Native platform constant SIGTSTP; nil when the platform does not define it.
+-- @usage uv/types.md#public-constants
 const SIGTSTP: integer?
+--- Native platform constant SIGTTIN; nil when the platform does not define it.
+-- @usage uv/types.md#public-constants
 const SIGTTIN: integer?
+--- Native platform constant SIGTTOU; nil when the platform does not define it.
+-- @usage uv/types.md#public-constants
 const SIGTTOU: integer?
+--- Native platform constant SIGURG; nil when the platform does not define it.
+-- @usage uv/types.md#public-constants
 const SIGURG: integer?
+--- Native platform constant SIGUSR1; nil when the platform does not define it.
+-- @usage uv/types.md#public-constants
 const SIGUSR1: integer?
+--- Native platform constant SIGUSR2; nil when the platform does not define it.
+-- @usage uv/types.md#public-constants
 const SIGUSR2: integer?
+--- Native platform constant SIGVTALRM; nil when the platform does not define it.
+-- @usage uv/types.md#public-constants
 const SIGVTALRM: integer?
+--- Native platform constant SIGWINCH; nil when the platform does not define it.
+-- @usage uv/types.md#public-constants
 const SIGWINCH: integer?
+--- Native platform constant SIGXCPU; nil when the platform does not define it.
+-- @usage uv/types.md#public-constants
 const SIGXCPU: integer?
+--- Native platform constant SIGXFSZ; nil when the platform does not define it.
+-- @usage uv/types.md#public-constants
 const SIGXFSZ: integer?
+--- Native platform constant SIGRTMIN; nil when the platform does not define it.
+-- @usage uv/types.md#public-constants
 const SIGRTMIN: integer?
+--- Native platform constant SIGRTMAX; nil when the platform does not define it.
+-- @usage uv/types.md#public-constants
 const SIGRTMAX: integer?
 
 local function platform_constant(name: string): integer?

@@ -1,5 +1,7 @@
 foreign type ExitEntry = function (*lua_State, *Udata, *CClosure, *Udata, *Udata, lua_Integer, lua_Integer): void
 
+--- Concrete process handle owner; initialize before use and close explicitly.
+-- @usage uv/types.md#process_t
 record process_t
   local native: foreign uv_process_t
   local phase: integer
@@ -11,16 +13,35 @@ record process_t
   local userdata: value
 end
 
+--- Tagged stdio data values for native operations.
+-- @field fd Fd variant.
+-- @field stream Stream variant.
+-- @usage uv/types.md#stdio_data_t
 union stdio_data_t
   fd(file: integer)
   stream(handle: stream_t)
 end
 
+--- One child stdio entry with combinable flags and an optional stream or descriptor.
+-- @field flags Flag-discriminated input; stream owner or descriptor; create/read/write/overlapped flags combine subject to native restrictions.
+-- @field data Data in the copied native result.
+-- @usage uv/types.md#stdio_container_t
 record stdio_container_t
   flags: integer
   data: stdio_data_t
 end
 
+--- Owned process arguments, environment, stdio, and native spawn options.
+-- @field exit_cb Submission input in ordinary Titan fields/Arrays; the binding constructs any required native terminated vectors. nil env/cwd selects inheritance. The exit callback remains retained through exit; selected stdio owners keep their own handle lifetimes.
+-- @field file Submission input in ordinary Titan fields/Arrays; the binding constructs any required native terminated vectors. nil env/cwd selects inheritance. The exit callback remains retained through exit; selected stdio owners keep their own handle lifetimes.
+-- @field args Submission input in ordinary Titan fields/Arrays; the binding constructs any required native terminated vectors. nil env/cwd selects inheritance. The exit callback remains retained through exit; selected stdio owners keep their own handle lifetimes.
+-- @field env Submission input in ordinary Titan fields/Arrays; the binding constructs any required native terminated vectors. nil env/cwd selects inheritance. The exit callback remains retained through exit; selected stdio owners keep their own handle lifetimes.
+-- @field cwd Submission input in ordinary Titan fields/Arrays; the binding constructs any required native terminated vectors. nil env/cwd selects inheritance. The exit callback remains retained through exit; selected stdio owners keep their own handle lifetimes.
+-- @field flags Submission input in ordinary Titan fields/Arrays; the binding constructs any required native terminated vectors. nil env/cwd selects inheritance. The exit callback remains retained through exit; selected stdio owners keep their own handle lifetimes.
+-- @field stdio Submission input in ordinary Titan fields/Arrays; the binding constructs any required native terminated vectors. nil env/cwd selects inheritance. The exit callback remains retained through exit; selected stdio owners keep their own handle lifetimes.
+-- @field uid Submission input in ordinary Titan fields/Arrays; the binding constructs any required native terminated vectors. nil env/cwd selects inheritance. The exit callback remains retained through exit; selected stdio owners keep their own handle lifetimes.
+-- @field gid Submission input in ordinary Titan fields/Arrays; the binding constructs any required native terminated vectors. nil env/cwd selects inheritance. The exit callback remains retained through exit; selected stdio owners keep their own handle lifetimes.
+-- @usage uv/types.md#process_options_t
 record process_options_t
   exit_cb: (function (process_t, integer, integer): ())?
   file: string
@@ -33,6 +54,11 @@ record process_options_t
   gid: integer
 end
 
+--- Create process options retaining the supplied executable text and argument Array.
+-- @param file File supplied to the native operation.
+-- @param args Args supplied to the native operation.
+-- @return Native process_options_t result with the documented lifetime and units.
+-- @usage uv/supplemental.md#process_options_tnew
 function process_options_t.new(file: string, args: {string}): process_options_t
   return {exit_cb = nil, file = file, args = args, env = nil, cwd = nil,
           flags = 0, stdio = {}, uid = 0, gid = 0}
@@ -95,6 +121,9 @@ foreign function process_close_callback(base: *uv_handle_t)
   ffi.lua_settop(L, top)
 end
 
+--- Allocate a concrete handle owner without initializing its native lifetime.
+-- @return Native process_t result with the documented lifetime and units.
+-- @usage uv/supplemental.md#process_tnew
 function process_t.new(): process_t
   local native = foreign uv_process_t.new()
   return {native = native, phase = HANDLE_FRESH, loop = nil,
@@ -102,6 +131,9 @@ function process_t.new(): process_t
           handler = process_deliver, close_handler = process_closed, userdata = nil}
 end
 
+--- Return a tagged view of the same concrete owner.
+-- @return Native handle_t result with the documented lifetime and units.
+-- @usage uv/supplemental.md#process_tas_handle_t
 function process_t:as_handle_t(): handle_t
   return handle_t.process(self)
 end
@@ -125,6 +157,12 @@ foreign function consume_spawn_pipes(options: *uv_process_options_t)
   end
 end
 
+--- Start a child process from process_options_t.
+-- @param loop Input initialized owning loop; accepted handles/requests retain it through retirement.
+-- @param process Mutable final process_t owner in fresh or retired state, before this native initialization; successful initialization establishes a close obligation.
+-- @param options Input configuration record; file/args/env/cwd and stdio arrays are prepared before spawn, exit callback retained to exit, native stdio handles/descriptors follow their own lifetimes.
+-- @return Native integer result with the documented lifetime and units.
+-- @usage uv/functions/process.md#spawn
 function spawn(loop: loop_t, process: process_t, options: process_options_t): integer
   if not loop.initialized or process.phase == HANDLE_LIVE then return ffi.UV_EINVAL end
   local allowed = (ffi.UV_PROCESS_DETACHED as integer) | (ffi.UV_PROCESS_SETUID as integer) |
@@ -207,11 +245,20 @@ function spawn(loop: loop_t, process: process_t, options: process_options_t): in
   return status
 end
 
+--- Read the PID associated with the process handle.
+-- @param process Mutable initialized process_t owner/view; mutations preserve its single owner and reserved native data slot; close completion ends native handle lifetime.
+-- @return Native integer result with the documented lifetime and units.
+-- @usage uv/functions/process.md#process_get_pid
 function process_get_pid(process: process_t): integer
   if process.phase ~= HANDLE_LIVE then raise "process handle is not initialized" end
   return ffi.uv_process_get_pid(process.native) as integer
 end
 
+--- Send signum to the process represented by the handle.
+-- @param process Mutable initialized process_t owner/view; mutations preserve its single owner and reserved native data slot; close completion ends native handle lifetime.
+-- @param signum Input integer value; checked native narrowing occurs before native ownership is accepted.
+-- @return Native integer result with the documented lifetime and units.
+-- @usage uv/functions/process.md#process_kill
 function process_kill(process: process_t, signum: integer): integer
   local signal = signum as foreign int
   if process.phase ~= HANDLE_LIVE then return ffi.UV_EINVAL end
@@ -220,10 +267,17 @@ function process_kill(process: process_t, signum: integer): integer
   return ffi.uv_process_kill(process.native, signal)
 end
 
+--- Send signum to a native PID using platform process-signal semantics; no process handle is acquired.
+-- @param pid Input integer value; checked native narrowing occurs before native ownership is accepted.
+-- @param signum Input integer value; checked native narrowing occurs before native ownership is accepted.
+-- @return Native integer result with the documented lifetime and units.
+-- @usage uv/functions/process.md#kill
 function kill(pid: integer, signum: integer): integer
   return ffi.uv_kill(pid as foreign int, signum as foreign int)
 end
 
+--- Ask libuv to disable inherited stdio/handle inheritance where supported.
+-- @usage uv/functions/process.md#disable_stdio_inheritance
 function disable_stdio_inheritance()
   ffi.uv_disable_stdio_inheritance()
 end

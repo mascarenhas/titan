@@ -1,183 +1,545 @@
+--- Immutable native libuv CHANGE flag or numeric constant.
+-- @usage uv/types.md#public-constants
 const CHANGE: integer?
+--- Immutable native libuv CREATE_PIPE flag or numeric constant.
+-- @usage uv/types.md#public-constants
 const CREATE_PIPE: integer?
+--- Immutable native libuv DISCONNECT flag or numeric constant.
+-- @usage uv/types.md#public-constants
 const DISCONNECT: integer?
+--- Native libuv error code E2BIG.
+-- @usage uv/types.md#public-constants
 const E2BIG: integer?
+--- Native libuv error code EACCES.
+-- @usage uv/types.md#public-constants
 const EACCES: integer?
+--- Native libuv error code EADDRINUSE.
+-- @usage uv/types.md#public-constants
 const EADDRINUSE: integer?
+--- Native libuv error code EADDRNOTAVAIL.
+-- @usage uv/types.md#public-constants
 const EADDRNOTAVAIL: integer?
+--- Native libuv error code EAFNOSUPPORT.
+-- @usage uv/types.md#public-constants
 const EAFNOSUPPORT: integer?
+--- Native libuv error code EAGAIN.
+-- @usage uv/types.md#public-constants
 const EAGAIN: integer?
+--- Native libuv error code EAI_ADDRFAMILY.
+-- @usage uv/types.md#public-constants
 const EAI_ADDRFAMILY: integer?
+--- Native libuv error code EAI_AGAIN.
+-- @usage uv/types.md#public-constants
 const EAI_AGAIN: integer?
+--- Native libuv error code EAI_BADFLAGS.
+-- @usage uv/types.md#public-constants
 const EAI_BADFLAGS: integer?
+--- Native libuv error code EAI_BADHINTS.
+-- @usage uv/types.md#public-constants
 const EAI_BADHINTS: integer?
+--- Native libuv error code EAI_CANCELED.
+-- @usage uv/types.md#public-constants
 const EAI_CANCELED: integer?
+--- Native libuv error code EAI_FAIL.
+-- @usage uv/types.md#public-constants
 const EAI_FAIL: integer?
+--- Native libuv error code EAI_FAMILY.
+-- @usage uv/types.md#public-constants
 const EAI_FAMILY: integer?
+--- Native libuv error code EAI_MEMORY.
+-- @usage uv/types.md#public-constants
 const EAI_MEMORY: integer?
+--- Native libuv error code EAI_NODATA.
+-- @usage uv/types.md#public-constants
 const EAI_NODATA: integer?
+--- Native libuv error code EAI_NONAME.
+-- @usage uv/types.md#public-constants
 const EAI_NONAME: integer?
+--- Native libuv error code EAI_OVERFLOW.
+-- @usage uv/types.md#public-constants
 const EAI_OVERFLOW: integer?
+--- Native libuv error code EAI_PROTOCOL.
+-- @usage uv/types.md#public-constants
 const EAI_PROTOCOL: integer?
+--- Native libuv error code EAI_SERVICE.
+-- @usage uv/types.md#public-constants
 const EAI_SERVICE: integer?
+--- Native libuv error code EAI_SOCKTYPE.
+-- @usage uv/types.md#public-constants
 const EAI_SOCKTYPE: integer?
+--- Native libuv error code EALREADY.
+-- @usage uv/types.md#public-constants
 const EALREADY: integer?
+--- Native libuv error code EBADF.
+-- @usage uv/types.md#public-constants
 const EBADF: integer?
+--- Native libuv error code EBUSY.
+-- @usage uv/types.md#public-constants
 const EBUSY: integer?
+--- Native libuv error code ECANCELED.
+-- @usage uv/types.md#public-constants
 const ECANCELED: integer?
+--- Native libuv error code ECHARSET.
+-- @usage uv/types.md#public-constants
 const ECHARSET: integer?
+--- Native libuv error code ECONNABORTED.
+-- @usage uv/types.md#public-constants
 const ECONNABORTED: integer?
+--- Native libuv error code ECONNREFUSED.
+-- @usage uv/types.md#public-constants
 const ECONNREFUSED: integer?
+--- Native libuv error code ECONNRESET.
+-- @usage uv/types.md#public-constants
 const ECONNRESET: integer?
+--- Native libuv error code EDESTADDRREQ.
+-- @usage uv/types.md#public-constants
 const EDESTADDRREQ: integer?
+--- Native libuv error code EEXIST.
+-- @usage uv/types.md#public-constants
 const EEXIST: integer?
+--- Native libuv error code EFAULT.
+-- @usage uv/types.md#public-constants
 const EFAULT: integer?
+--- Native libuv error code EFBIG.
+-- @usage uv/types.md#public-constants
 const EFBIG: integer?
+--- Native libuv error code EFTYPE.
+-- @usage uv/types.md#public-constants
 const EFTYPE: integer?
+--- Native libuv error code EHOSTDOWN.
+-- @usage uv/types.md#public-constants
 const EHOSTDOWN: integer?
+--- Native libuv error code EHOSTUNREACH.
+-- @usage uv/types.md#public-constants
 const EHOSTUNREACH: integer?
+--- Native libuv error code EILSEQ.
+-- @usage uv/types.md#public-constants
 const EILSEQ: integer?
+--- Native libuv error code EINTR.
+-- @usage uv/types.md#public-constants
 const EINTR: integer?
+--- Native libuv error code EINVAL.
+-- @usage uv/types.md#public-constants
 const EINVAL: integer?
+--- Native libuv error code EIO.
+-- @usage uv/types.md#public-constants
 const EIO: integer?
+--- Native libuv error code EISCONN.
+-- @usage uv/types.md#public-constants
 const EISCONN: integer?
+--- Native libuv error code EISDIR.
+-- @usage uv/types.md#public-constants
 const EISDIR: integer?
+--- Native libuv error code ELOOP.
+-- @usage uv/types.md#public-constants
 const ELOOP: integer?
+--- Native libuv error code EMFILE.
+-- @usage uv/types.md#public-constants
 const EMFILE: integer?
+--- Native libuv error code EMLINK.
+-- @usage uv/types.md#public-constants
 const EMLINK: integer?
+--- Native libuv error code EMSGSIZE.
+-- @usage uv/types.md#public-constants
 const EMSGSIZE: integer?
+--- Native libuv error code ENAMETOOLONG.
+-- @usage uv/types.md#public-constants
 const ENAMETOOLONG: integer?
+--- Native libuv error code ENETDOWN.
+-- @usage uv/types.md#public-constants
 const ENETDOWN: integer?
+--- Native libuv error code ENETUNREACH.
+-- @usage uv/types.md#public-constants
 const ENETUNREACH: integer?
+--- Native libuv error code ENFILE.
+-- @usage uv/types.md#public-constants
 const ENFILE: integer?
+--- Native libuv error code ENOBUFS.
+-- @usage uv/types.md#public-constants
 const ENOBUFS: integer?
+--- Native libuv error code ENODATA.
+-- @usage uv/types.md#public-constants
 const ENODATA: integer?
+--- Native libuv error code ENODEV.
+-- @usage uv/types.md#public-constants
 const ENODEV: integer?
+--- Native libuv error code ENOENT.
+-- @usage uv/types.md#public-constants
 const ENOENT: integer?
+--- Native libuv error code ENOEXEC.
+-- @usage uv/types.md#public-constants
 const ENOEXEC: integer?
+--- Native libuv error code ENOMEM.
+-- @usage uv/types.md#public-constants
 const ENOMEM: integer?
+--- Native libuv error code ENONET.
+-- @usage uv/types.md#public-constants
 const ENONET: integer?
+--- Native libuv error code ENOPROTOOPT.
+-- @usage uv/types.md#public-constants
 const ENOPROTOOPT: integer?
+--- Native libuv error code ENOSPC.
+-- @usage uv/types.md#public-constants
 const ENOSPC: integer?
+--- Native libuv error code ENOSYS.
+-- @usage uv/types.md#public-constants
 const ENOSYS: integer?
+--- Native libuv error code ENOTCONN.
+-- @usage uv/types.md#public-constants
 const ENOTCONN: integer?
+--- Native libuv error code ENOTDIR.
+-- @usage uv/types.md#public-constants
 const ENOTDIR: integer?
+--- Native libuv error code ENOTEMPTY.
+-- @usage uv/types.md#public-constants
 const ENOTEMPTY: integer?
+--- Native libuv error code ENOTSOCK.
+-- @usage uv/types.md#public-constants
 const ENOTSOCK: integer?
+--- Native libuv error code ENOTSUP.
+-- @usage uv/types.md#public-constants
 const ENOTSUP: integer?
+--- Native libuv error code ENOTTY.
+-- @usage uv/types.md#public-constants
 const ENOTTY: integer?
+--- Native libuv error code ENXIO.
+-- @usage uv/types.md#public-constants
 const ENXIO: integer?
+--- Native libuv error code EOF.
+-- @usage uv/types.md#public-constants
 const EOF: integer?
+--- Native libuv error code EOVERFLOW.
+-- @usage uv/types.md#public-constants
 const EOVERFLOW: integer?
+--- Native libuv error code EPERM.
+-- @usage uv/types.md#public-constants
 const EPERM: integer?
+--- Native libuv error code EPIPE.
+-- @usage uv/types.md#public-constants
 const EPIPE: integer?
+--- Native libuv error code EPROTO.
+-- @usage uv/types.md#public-constants
 const EPROTO: integer?
+--- Native libuv error code EPROTONOSUPPORT.
+-- @usage uv/types.md#public-constants
 const EPROTONOSUPPORT: integer?
+--- Native libuv error code EPROTOTYPE.
+-- @usage uv/types.md#public-constants
 const EPROTOTYPE: integer?
+--- Native libuv error code ERANGE.
+-- @usage uv/types.md#public-constants
 const ERANGE: integer?
+--- Native libuv error code EREMOTEIO.
+-- @usage uv/types.md#public-constants
 const EREMOTEIO: integer?
+--- Native libuv error code EROFS.
+-- @usage uv/types.md#public-constants
 const EROFS: integer?
+--- Native libuv error code ESHUTDOWN.
+-- @usage uv/types.md#public-constants
 const ESHUTDOWN: integer?
+--- Native libuv error code ESOCKTNOSUPPORT.
+-- @usage uv/types.md#public-constants
 const ESOCKTNOSUPPORT: integer?
+--- Native libuv error code ESPIPE.
+-- @usage uv/types.md#public-constants
 const ESPIPE: integer?
+--- Native libuv error code ESRCH.
+-- @usage uv/types.md#public-constants
 const ESRCH: integer?
+--- Native libuv error code ETIMEDOUT.
+-- @usage uv/types.md#public-constants
 const ETIMEDOUT: integer?
+--- Native libuv error code ETXTBSY.
+-- @usage uv/types.md#public-constants
 const ETXTBSY: integer?
+--- Native libuv error code EUNATCH.
+-- @usage uv/types.md#public-constants
 const EUNATCH: integer?
+--- Native libuv error code EXDEV.
+-- @usage uv/types.md#public-constants
 const EXDEV: integer?
+--- Immutable native libuv FS_EVENT_RECURSIVE flag or numeric constant.
+-- @usage uv/types.md#public-constants
 const FS_EVENT_RECURSIVE: integer?
+--- Immutable native libuv FS_EVENT_STAT flag or numeric constant.
+-- @usage uv/types.md#public-constants
 const FS_EVENT_STAT: integer?
+--- Immutable native libuv FS_EVENT_WATCH_ENTRY flag or numeric constant.
+-- @usage uv/types.md#public-constants
 const FS_EVENT_WATCH_ENTRY: integer?
+--- Immutable native libuv IF_NAMESIZE flag or numeric constant.
+-- @usage uv/types.md#public-constants
 const IF_NAMESIZE: integer?
+--- Immutable native libuv IGNORE flag or numeric constant.
+-- @usage uv/types.md#public-constants
 const IGNORE: integer?
+--- Immutable native libuv INHERIT_FD flag or numeric constant.
+-- @usage uv/types.md#public-constants
 const INHERIT_FD: integer?
+--- Immutable native libuv INHERIT_STREAM flag or numeric constant.
+-- @usage uv/types.md#public-constants
 const INHERIT_STREAM: integer?
+--- Immutable native libuv MAXHOSTNAMESIZE flag or numeric constant.
+-- @usage uv/types.md#public-constants
 const MAXHOSTNAMESIZE: integer?
+--- Immutable native libuv OVERLAPPED_PIPE flag or numeric constant.
+-- @usage uv/types.md#public-constants
 const OVERLAPPED_PIPE: integer?
+--- Immutable native libuv PRIORITIZED flag or numeric constant.
+-- @usage uv/types.md#public-constants
 const PRIORITIZED: integer?
+--- Immutable native libuv PRIORITY_ABOVE_NORMAL flag or numeric constant.
+-- @usage uv/types.md#public-constants
 const PRIORITY_ABOVE_NORMAL: integer?
+--- Immutable native libuv PRIORITY_BELOW_NORMAL flag or numeric constant.
+-- @usage uv/types.md#public-constants
 const PRIORITY_BELOW_NORMAL: integer?
+--- Immutable native libuv PRIORITY_HIGH flag or numeric constant.
+-- @usage uv/types.md#public-constants
 const PRIORITY_HIGH: integer?
+--- Immutable native libuv PRIORITY_HIGHEST flag or numeric constant.
+-- @usage uv/types.md#public-constants
 const PRIORITY_HIGHEST: integer?
+--- Immutable native libuv PRIORITY_LOW flag or numeric constant.
+-- @usage uv/types.md#public-constants
 const PRIORITY_LOW: integer?
+--- Immutable native libuv PRIORITY_NORMAL flag or numeric constant.
+-- @usage uv/types.md#public-constants
 const PRIORITY_NORMAL: integer?
+--- Immutable native libuv PROCESS_DETACHED flag or numeric constant.
+-- @usage uv/types.md#public-constants
 const PROCESS_DETACHED: integer?
+--- Immutable native libuv PROCESS_SETGID flag or numeric constant.
+-- @usage uv/types.md#public-constants
 const PROCESS_SETGID: integer?
+--- Immutable native libuv PROCESS_SETUID flag or numeric constant.
+-- @usage uv/types.md#public-constants
 const PROCESS_SETUID: integer?
+--- Immutable native libuv PROCESS_WINDOWS_FILE_PATH_EXACT_NAME flag or numeric constant.
+-- @usage uv/types.md#public-constants
 const PROCESS_WINDOWS_FILE_PATH_EXACT_NAME: integer?
+--- Immutable native libuv PROCESS_WINDOWS_HIDE flag or numeric constant.
+-- @usage uv/types.md#public-constants
 const PROCESS_WINDOWS_HIDE: integer?
+--- Immutable native libuv PROCESS_WINDOWS_HIDE_CONSOLE flag or numeric constant.
+-- @usage uv/types.md#public-constants
 const PROCESS_WINDOWS_HIDE_CONSOLE: integer?
+--- Immutable native libuv PROCESS_WINDOWS_HIDE_GUI flag or numeric constant.
+-- @usage uv/types.md#public-constants
 const PROCESS_WINDOWS_HIDE_GUI: integer?
+--- Immutable native libuv PROCESS_WINDOWS_VERBATIM_ARGUMENTS flag or numeric constant.
+-- @usage uv/types.md#public-constants
 const PROCESS_WINDOWS_VERBATIM_ARGUMENTS: integer?
+--- Immutable native libuv READABLE_PIPE flag or numeric constant.
+-- @usage uv/types.md#public-constants
 const READABLE_PIPE: integer?
+--- Immutable native libuv RENAME flag or numeric constant.
+-- @usage uv/types.md#public-constants
 const RENAME: integer?
+--- Immutable native libuv UNKNOWN flag or numeric constant.
+-- @usage uv/types.md#public-constants
 const UNKNOWN: integer?
+--- Immutable native libuv VERSION_HEX flag or numeric constant.
+-- @usage uv/types.md#public-constants
 const VERSION_HEX: integer?
+--- Immutable native libuv VERSION_IS_RELEASE flag or numeric constant.
+-- @usage uv/types.md#public-constants
 const VERSION_IS_RELEASE: integer?
+--- Immutable native libuv VERSION_MAJOR flag or numeric constant.
+-- @usage uv/types.md#public-constants
 const VERSION_MAJOR: integer?
+--- Immutable native libuv VERSION_MINOR flag or numeric constant.
+-- @usage uv/types.md#public-constants
 const VERSION_MINOR: integer?
+--- Immutable native libuv VERSION_PATCH flag or numeric constant.
+-- @usage uv/types.md#public-constants
 const VERSION_PATCH: integer?
+--- Immutable native libuv WRITABLE_PIPE flag or numeric constant.
+-- @usage uv/types.md#public-constants
 const WRITABLE_PIPE: integer?
+--- Typed dirent_type_t.block value for native operation selection.
+-- @usage uv/types.md#public-constants
 const DIRENT_BLOCK = dirent_type_t.block()
+--- Typed dirent_type_t.character value for native operation selection.
+-- @usage uv/types.md#public-constants
 const DIRENT_CHAR = dirent_type_t.character()
+--- Typed dirent_type_t.directory value for native operation selection.
+-- @usage uv/types.md#public-constants
 const DIRENT_DIR = dirent_type_t.directory()
+--- Typed dirent_type_t.fifo value for native operation selection.
+-- @usage uv/types.md#public-constants
 const DIRENT_FIFO = dirent_type_t.fifo()
+--- Typed dirent_type_t.file value for native operation selection.
+-- @usage uv/types.md#public-constants
 const DIRENT_FILE = dirent_type_t.file()
+--- Typed dirent_type_t.link value for native operation selection.
+-- @usage uv/types.md#public-constants
 const DIRENT_LINK = dirent_type_t.link()
+--- Typed dirent_type_t.socket value for native operation selection.
+-- @usage uv/types.md#public-constants
 const DIRENT_SOCKET = dirent_type_t.socket()
+--- Typed dirent_type_t.unknown value for native operation selection.
+-- @usage uv/types.md#public-constants
 const DIRENT_UNKNOWN = dirent_type_t.unknown()
+--- Typed fs_type_t.access value for native operation selection.
+-- @usage uv/types.md#public-constants
 const FS_ACCESS = fs_type_t.access()
+--- Typed fs_type_t.chmod value for native operation selection.
+-- @usage uv/types.md#public-constants
 const FS_CHMOD = fs_type_t.chmod()
+--- Typed fs_type_t.chown value for native operation selection.
+-- @usage uv/types.md#public-constants
 const FS_CHOWN = fs_type_t.chown()
+--- Typed fs_type_t.close value for native operation selection.
+-- @usage uv/types.md#public-constants
 const FS_CLOSE = fs_type_t.close()
+--- Typed fs_type_t.closedir value for native operation selection.
+-- @usage uv/types.md#public-constants
 const FS_CLOSEDIR = fs_type_t.closedir()
+--- Typed fs_type_t.copyfile value for native operation selection.
+-- @usage uv/types.md#public-constants
 const FS_COPYFILE = fs_type_t.copyfile()
+--- Typed fs_type_t.custom value for native operation selection.
+-- @usage uv/types.md#public-constants
 const FS_CUSTOM = fs_type_t.custom()
+--- Typed fs_type_t.fchmod value for native operation selection.
+-- @usage uv/types.md#public-constants
 const FS_FCHMOD = fs_type_t.fchmod()
+--- Typed fs_type_t.fchown value for native operation selection.
+-- @usage uv/types.md#public-constants
 const FS_FCHOWN = fs_type_t.fchown()
+--- Typed fs_type_t.fdatasync value for native operation selection.
+-- @usage uv/types.md#public-constants
 const FS_FDATASYNC = fs_type_t.fdatasync()
+--- Typed fs_type_t.fstat value for native operation selection.
+-- @usage uv/types.md#public-constants
 const FS_FSTAT = fs_type_t.fstat()
+--- Typed fs_type_t.fsync value for native operation selection.
+-- @usage uv/types.md#public-constants
 const FS_FSYNC = fs_type_t.fsync()
+--- Typed fs_type_t.ftruncate value for native operation selection.
+-- @usage uv/types.md#public-constants
 const FS_FTRUNCATE = fs_type_t.ftruncate()
+--- Typed fs_type_t.futime value for native operation selection.
+-- @usage uv/types.md#public-constants
 const FS_FUTIME = fs_type_t.futime()
+--- Typed fs_type_t.lchown value for native operation selection.
+-- @usage uv/types.md#public-constants
 const FS_LCHOWN = fs_type_t.lchown()
+--- Typed fs_type_t.link value for native operation selection.
+-- @usage uv/types.md#public-constants
 const FS_LINK = fs_type_t.link()
+--- Typed fs_type_t.lstat value for native operation selection.
+-- @usage uv/types.md#public-constants
 const FS_LSTAT = fs_type_t.lstat()
+--- Typed fs_type_t.lutime value for native operation selection.
+-- @usage uv/types.md#public-constants
 const FS_LUTIME = fs_type_t.lutime()
+--- Typed fs_type_t.mkdir value for native operation selection.
+-- @usage uv/types.md#public-constants
 const FS_MKDIR = fs_type_t.mkdir()
+--- Typed fs_type_t.mkdtemp value for native operation selection.
+-- @usage uv/types.md#public-constants
 const FS_MKDTEMP = fs_type_t.mkdtemp()
+--- Typed fs_type_t.mkstemp value for native operation selection.
+-- @usage uv/types.md#public-constants
 const FS_MKSTEMP = fs_type_t.mkstemp()
+--- Typed fs_type_t.open value for native operation selection.
+-- @usage uv/types.md#public-constants
 const FS_OPEN = fs_type_t.open()
+--- Typed fs_type_t.opendir value for native operation selection.
+-- @usage uv/types.md#public-constants
 const FS_OPENDIR = fs_type_t.opendir()
+--- Typed fs_type_t.read value for native operation selection.
+-- @usage uv/types.md#public-constants
 const FS_READ = fs_type_t.read()
+--- Typed fs_type_t.readdir value for native operation selection.
+-- @usage uv/types.md#public-constants
 const FS_READDIR = fs_type_t.readdir()
+--- Typed fs_type_t.readlink value for native operation selection.
+-- @usage uv/types.md#public-constants
 const FS_READLINK = fs_type_t.readlink()
+--- Typed fs_type_t.realpath value for native operation selection.
+-- @usage uv/types.md#public-constants
 const FS_REALPATH = fs_type_t.realpath()
+--- Typed fs_type_t.rename value for native operation selection.
+-- @usage uv/types.md#public-constants
 const FS_RENAME = fs_type_t.rename()
+--- Typed fs_type_t.rmdir value for native operation selection.
+-- @usage uv/types.md#public-constants
 const FS_RMDIR = fs_type_t.rmdir()
+--- Typed fs_type_t.scandir value for native operation selection.
+-- @usage uv/types.md#public-constants
 const FS_SCANDIR = fs_type_t.scandir()
+--- Typed fs_type_t.sendfile value for native operation selection.
+-- @usage uv/types.md#public-constants
 const FS_SENDFILE = fs_type_t.sendfile()
+--- Typed fs_type_t.stat value for native operation selection.
+-- @usage uv/types.md#public-constants
 const FS_STAT = fs_type_t.stat()
+--- Typed fs_type_t.statfs value for native operation selection.
+-- @usage uv/types.md#public-constants
 const FS_STATFS = fs_type_t.statfs()
+--- Typed fs_type_t.symlink value for native operation selection.
+-- @usage uv/types.md#public-constants
 const FS_SYMLINK = fs_type_t.symlink()
+--- Typed fs_type_t.unknown value for native operation selection.
+-- @usage uv/types.md#public-constants
 const FS_UNKNOWN = fs_type_t.unknown()
+--- Typed fs_type_t.unlink value for native operation selection.
+-- @usage uv/types.md#public-constants
 const FS_UNLINK = fs_type_t.unlink()
+--- Typed fs_type_t.utime value for native operation selection.
+-- @usage uv/types.md#public-constants
 const FS_UTIME = fs_type_t.utime()
+--- Typed fs_type_t.write value for native operation selection.
+-- @usage uv/types.md#public-constants
 const FS_WRITE = fs_type_t.write()
+--- Typed membership.JOIN_GROUP value for native operation selection.
+-- @usage uv/types.md#public-constants
 const JOIN_GROUP = membership.JOIN_GROUP()
+--- Typed membership.LEAVE_GROUP value for native operation selection.
+-- @usage uv/types.md#public-constants
 const LEAVE_GROUP = membership.LEAVE_GROUP()
+--- Typed loop_option.block_signal value for native operation selection.
+-- @usage uv/types.md#public-constants
 const LOOP_BLOCK_SIGNAL = loop_option.block_signal()
+--- Typed loop_option.use_io_uring_sqpoll value for native operation selection.
+-- @usage uv/types.md#public-constants
 const LOOP_USE_IO_URING_SQPOLL = loop_option.use_io_uring_sqpoll()
+--- Typed loop_option.metrics_idle_time value for native operation selection.
+-- @usage uv/types.md#public-constants
 const METRICS_IDLE_TIME = loop_option.metrics_idle_time()
+--- Typed tty_mode_t.TTY_MODE_IO value for native operation selection.
+-- @usage uv/types.md#public-constants
 const TTY_MODE_IO = tty_mode_t.TTY_MODE_IO()
+--- Typed tty_mode_t.TTY_MODE_NORMAL value for native operation selection.
+-- @usage uv/types.md#public-constants
 const TTY_MODE_NORMAL = tty_mode_t.TTY_MODE_NORMAL()
+--- Typed tty_mode_t.TTY_MODE_RAW value for native operation selection.
+-- @usage uv/types.md#public-constants
 const TTY_MODE_RAW = tty_mode_t.TTY_MODE_RAW()
+--- Typed tty_mode_t.TTY_MODE_RAW_VT value for native operation selection.
+-- @usage uv/types.md#public-constants
 const TTY_MODE_RAW_VT = tty_mode_t.TTY_MODE_RAW_VT()
+--- Typed tty_vtermstate_t.TTY_SUPPORTED value for native operation selection.
+-- @usage uv/types.md#public-constants
 const TTY_SUPPORTED = tty_vtermstate_t.TTY_SUPPORTED()
+--- Typed tty_vtermstate_t.TTY_UNSUPPORTED value for native operation selection.
+-- @usage uv/types.md#public-constants
 const TTY_UNSUPPORTED = tty_vtermstate_t.TTY_UNSUPPORTED()
+--- Immutable native libuv VERSION_SUFFIX flag or numeric constant.
+-- @usage uv/types.md#public-constants
 const VERSION_SUFFIX: string?
 
 -- Native numeric bounds, not handle/request variants.
+--- Native libuv error code ERRNO_MAX.
+-- @usage uv/types.md#public-constants
 const ERRNO_MAX: integer?
+--- Immutable native libuv HANDLE_TYPE_MAX flag or numeric constant.
+-- @usage uv/types.md#public-constants
 const HANDLE_TYPE_MAX: integer?
+--- Immutable native libuv REQ_TYPE_MAX flag or numeric constant.
+-- @usage uv/types.md#public-constants
 const REQ_TYPE_MAX: integer?
