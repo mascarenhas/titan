@@ -475,7 +475,7 @@ jobs:
     name: sanitizer (ubuntu-24.04, ASan+UBSan)
     if: github.event_name == 'push'
     runs-on: ubicloud-standard-2
-    timeout-minutes: 35
+    timeout-minutes: 75
     env:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
       PREFIX: ${{ github.workspace }}/.lua

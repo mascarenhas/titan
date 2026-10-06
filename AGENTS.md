@@ -161,7 +161,7 @@ or give concurrent builds separate source copies. See
   The regular push graph has exactly three standard `ubuntu-24.04` jobs. The
   stdlib producer has 45 minutes for its validation build, complete runtime suite,
   and both production dependency smokes; the compiler consumer retains 30 minutes. The
-  independent sanitizer has 35 minutes so a cold native-dependency cache miss
+  independent sanitizer has 75 minutes so a cold native-dependency cache miss
   remains a valid build under the same two-CPU bound. Linux jobs export
   `MAKEFLAGS=-j2` and `TITAN_JOBS=2`, matching the two CPUs on standard private-repository
   hosted runners; the macOS job
