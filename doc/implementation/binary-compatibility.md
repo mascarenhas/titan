@@ -295,9 +295,9 @@ the EXE links only its entrypoint, manifest resource, embedded Titan runtime,
 and the controlled Lua import library. Neither output links a Titan module
 import library. The SDK runtime archive remains `libtitan.a`; Windows uses the
 matching `lib/liblua55.a` plus the separate SDK `lib/libbacktrace.a` for
-PE/COFF source attribution, and omits Unix `dl` and `m`. Windows links include
-the system `bcrypt` import library and select static unwind linkage with
-`-static-libgcc`, avoiding an additional toolchain runtime DLL.
+PE/COFF source attribution, and omits Unix `dl` and `m`. Windows links select
+static unwind linkage with `-static-libgcc`, avoiding an additional toolchain
+runtime DLL.
 
 `windows_program_paths` derives `bin/<logical-module>.exe` and
 `lib/titan/0.6/<logical/module>.dll`. `--launcher-name` changes only the EXE

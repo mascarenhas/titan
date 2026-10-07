@@ -1,7 +1,6 @@
 -- Native gate against a private installed compiler snapshot and matching SDK.
 assert(package.config:sub(1, 1) == "\\", "native Windows Lua is required")
-local sdk, helper, clang, parent = assert(arg[1]), assert(arg[2]), assert(arg[3]), assert(arg[4])
-package.loaded.titan = assert(package.loadlib(helper, "luaopen_winfs_test"))()
+local sdk, clang, parent = assert(arg[1]), assert(arg[2]), assert(arg[3])
 local platform = require "titan-compiler.platform"
 local driver = require "titan-compiler.driver"
 local compiler_io = require "titan-compiler.io"
@@ -9,29 +8,24 @@ local cdriver = require "c-parser.cdriver"
 local cprobe = require "titan-compiler.cprobe"
 local lfs = require "lfs"
 local sync = compiler_io.new_sync()
-local function same_file(a, b)
-    a, b = assert(sync:stat(a)), assert(sync:stat(b))
-    return a.device == b.device and a.inode == b.inode
+local function same_path(a, b)
+    return platform.path.normalize(assert(sync:absolute(a))):lower() ==
+        platform.path.normalize(assert(sync:absolute(b))):lower()
 end
 local context = driver.new_resolver_context()
 assert(driver.initialize_layout(context))
 assert(driver.initialize_platform(context))
 assert(driver.INSTALLED and not driver.SOURCE_CHECKOUT)
-assert(same_file(driver.INSTALL_PATHS.root, sdk))
-assert(same_file(driver.INSTALL_PATHS.lua_source, sdk .. "/src/lua-5.5.1"))
-assert(same_file(driver.INSTALL_PATHS.liblua, sdk .. "/lib/liblua55.a"))
+assert(same_path(driver.INSTALL_PATHS.root, sdk))
+assert(same_path(driver.INSTALL_PATHS.lua_source, sdk .. "/src/lua-5.5.1"))
+assert(same_path(driver.INSTALL_PATHS.liblua, sdk .. "/lib/liblua55.a"))
 assert(driver.INSTALL_PATHS.lua_cpath:sub(-5) == "?.dll")
 assert(table.concat(driver.module_binary_candidates("one.two.leaf"), ";") ==
     "one.dll;one/two.dll;one/two/leaf.dll")
 assert(driver.close_resolver_context(context))
--- The fixture DLL deliberately lacks luaopen_titan. A fresh validation process
--- must reach that exact symbol check through the installed bin/lua.exe, even
--- for both the LuaRocks script and native compiler launchers.
-local valid_support, support_error = driver.validate_titan_support(helper)
-assert(valid_support == nil and support_error:find("cannot load luaopen_titan", 1, true),
-    tostring(support_error))
+assert(driver.validate_titan_support(sdk .. "/lib/titan/0.6/titan.dll"))
 
-local root = assert(package.loaded.titan._win_reserve_sibling(parent .. "/driver-path-gate", true))
+local root = assert(sync:reserve_sibling(parent .. "/driver-path-gate", true))
 local unicode = root .. "/headers ação-日本語-😀"
 assert(lfs.mkdir(unicode))
 local child = unicode .. "/child.h"
@@ -53,7 +47,8 @@ local okay, problem = xpcall(function()
         assert(#include.c_header_dependencies == 2)
         for _, input in ipairs(include.c_header_dependencies) do
             assert(platform.is_absolute(input.path), input.path)
-            assert(input.observation.physical_identity:find("win32-", 1, true))
+            assert(input.observation == nil)
+            assert(type(input.identity) == "string" and input.identity ~= "")
         end
     end
     service = assert(cprobe.new_service({ compiler_argv = { clang },

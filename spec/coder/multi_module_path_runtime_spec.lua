@@ -276,9 +276,9 @@ assert(consumer.answer() == 112)
 local found = assert(package.searchpath("route.item", package.cpath))
 local expected = %q
 if package.config:sub(1, 1) == "\\" then
-    local filesystem = require "titan"
-    assert(assert(filesystem._win_realpath(found)):lower() ==
-        assert(filesystem._win_realpath(expected)):lower())
+    local filesystem = require("titan-compiler.io").new_sync()
+    assert(assert(filesystem:realpath(found)):lower() ==
+        assert(filesystem:realpath(expected)):lower())
 else
     assert(found == expected)
 end
@@ -297,9 +297,9 @@ assert(item.root_one_only() == 11)
 local found = assert(package.searchpath("route.item", package.cpath))
 local expected = %q
 if package.config:sub(1, 1) == "\\" then
-    local filesystem = require "titan"
-    assert(assert(filesystem._win_realpath(found)):lower() ==
-        assert(filesystem._win_realpath(expected)):lower())
+    local filesystem = require("titan-compiler.io").new_sync()
+    assert(assert(filesystem:realpath(found)):lower() ==
+        assert(filesystem:realpath(expected)):lower())
 else
     assert(found == expected)
 end

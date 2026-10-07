@@ -356,7 +356,7 @@ describe("generated module C header inputs", function()
                         if input.kind == "file" then found[input.path] = true end
                     end
                 end
-                assert.is_true(found[authored])
+                assert.is_true(found[cpp.absolute_lookup_path(authored, cwd, strategy)])
                 assert.is_true(found[cpp.absolute_lookup_path(neighbor, cwd, strategy)])
                 assert.is_true(found[cpp.absolute_lookup_path(escaped, cwd, strategy)])
                 assert.is_true(ffiheaders.close(state))
@@ -529,21 +529,19 @@ describe("mtime-first C header validation", function()
         assert.equal(1, world.reads)
     end)
 
-    it("retains lossless opaque Windows IDs through header observations", function()
-        local world, input = fixture({ "win32-volume:fffffffffffffffe",
-            "win32-file:ffffffffffffffff0000000000000001" })
-        local current, err, changed = validate(world, input)
-        assert.is_nil(err); assert.is_false(changed)
-        assert.same(input, current)
-        assert.equal(0, world.reads)
-        world.attributes.inode = "win32-file:ffffffffffffffff0000000000000002"
-        current, err, changed = validate(world, input)
-        assert.is_nil(err); assert.is_true(changed)
-        assert.not_equal(input.observation.physical_identity,
-            current.observation.physical_identity)
-        assert.equal(1, world.reads)
-        assert.equal(1, world.hashes)
-        assert.is_false(select(3, validate(world, current)))
+    it("reads header contents when filesystem identity is unavailable", function()
+        local world, input = fixture()
+        world.attributes.device, world.attributes.inode = nil, nil
+        local current = assert(validate(world, input))
+        assert.is_nil(current.observation)
+        world.contents = "typedef long observed_type;\n"
+        local updated, err, changed = validate(world, current)
+        assert.is_nil(err)
+        assert.is_true(changed)
+        assert.not_equal(current.identity, updated.identity)
+        assert.is_nil(updated.observation)
+        assert.equal(2, world.reads)
+        assert.equal(2, world.hashes)
     end)
 
     it("detects missing files without attempting a content read", function()

@@ -28,6 +28,8 @@ spelling avoids LuaRocks 3.13.0's incorrect Clang-specific MinGW export option.
 It also enables `fs_use_modules`, so LuaRocks uses its bundled LuaFileSystem
 for recursive copies. Its default MSYS2 command backend passes a quoted Windows
 wildcard to MSYS `cp`, which fails for directory installs such as Penlight.
+The configuration selects CMake's Ninja generator for native rock dependencies;
+install CMake and Ninja in the CLANG64 environment.
 The target checks only for `bin/luarocks.exe`; an existing installation is the user's responsibility.
 The `compiler` target selects that configuration and invokes ordinary
 `luarocks make`:
@@ -54,8 +56,9 @@ The same setting in PowerShell is
 The configuration supplies Lua 5.5 and the SDK tree, so ordinary standalone
 commands need no repeated Lua-version or tree options.
 
-The rockspec installs LPegLabel, LuaFileSystem, inspect, and argparse through
-LuaRocks. Their own rockspecs build the native modules; Titan keeps its private
+The rockspec installs LPegLabel, LuaFileSystem, inspect, argparse, and Windows
+subprocess support through `luv` using LuaRocks. Their own rockspecs build the
+native modules; Titan keeps its private
 namespaced PEG payload separate. LuaRocks records and manages the compiler and
 these dependencies through its ordinary rock manifests. There is no separate
 Titan compiler-dependency receipt or duplicate compiler module inventory.

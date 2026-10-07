@@ -5,9 +5,9 @@ local platform = require "titan-compiler.platform"
 local publication = require "titan-compiler.windows_publication"
 local util = require "titan-compiler.util"
 
+local compiler_io = require "titan-compiler.io"
 local function replace(from, to)
-    if platform.windows then return platform.native("_win_replace", from, to) end
-    return os.rename(from, to)
+    return compiler_io.new_sync():rename(from, to)
 end
 
 describe("Windows file publication transaction", function()
@@ -38,10 +38,10 @@ describe("Windows file publication transaction", function()
         local sequence = 0
         fs = {
             stat = function(path)
-                if platform.windows then return platform.native("_win_stat", path, false) end
                 local attr, err, code = lfs.symlinkattributes(path)
                 if not attr then return nil, err, code end
-                return { kind = attr.mode, device = attr.dev, inode = attr.ino }
+                return { kind = attr.mode, device = not platform.windows and attr.dev or nil,
+                    inode = not platform.windows and attr.ino or nil }
             end,
             reserve = function(path)
                 sequence = sequence + 1
@@ -129,6 +129,22 @@ describe("Windows file publication transaction", function()
             return true
         end })
         assert.is_nil(ok); assert.matches("injected final failure", err, 1, true)
+        unchanged()
+    end)
+
+    it("restores the predecessor when deletion succeeds but replacement fails", function()
+        local attempted = false
+        fs.replace = function(from, to)
+            if to == image and not attempted then
+                attempted = true
+                assert(fs.remove(to))
+                return nil, "injected rename failure after deletion"
+            end
+            return replace(from, to)
+        end
+        local ok, err = publication.publish(entries(), fs)
+        assert.is_nil(ok)
+        assert.matches("injected rename failure after deletion", err, 1, true)
         unchanged()
     end)
 

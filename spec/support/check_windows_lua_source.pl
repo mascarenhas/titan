@@ -19,8 +19,9 @@ for my $name (qw(LUA_CFLAGS TITAN_EXTRA_CFLAGS)) {
 }
 my $temporary = tempdir('titan-lua-coff-XXXXXX', TMPDIR => 1, CLEANUP => 1);
 my $fixture = 'spec/fixtures/windows/lua_annotations.c';
-my @imports = qw(lua_gettop luaopen_base luaO_ceillog2
+my @imports = qw(lua_gettop luaL_checkversion_ luaL_openselectedlibs luaopen_base luaO_ceillog2
                  lua_ident luai_ctype_ luaP_opmodes luaT_typenames_);
+my $import_pattern = join '|', map { quotemeta $_ } @imports;
 
 sub capture {
     my @command = @_;
@@ -33,28 +34,28 @@ sub capture {
 
 my @target = ('--target=x86_64-w64-windows-gnu', "-I$source");
 my @modes = ([], ['-DLUA_CORE'], ['-DLUA_LIB'], ['-DLUA_CORE', '-DLUA_LIB']);
-for my $number (0 .. $#modes) {
-    my $object = "$temporary/consumer-$number.o";
-    capture($clang, @target, @{$modes[$number]}, '-std=c99', @cflags,
-        '-Werror', '-c', $fixture, '-o', $object);
-    my $symbols = capture($readobj, '--symbols', '--coff-directives', $object);
-    die "consumer is not x86_64 COFF\n" unless $symbols =~ /Format: COFF-x86-64/;
-    for my $name (@imports) {
-        die "consumer mode $number does not import $name through its IAT\n"
-            unless $symbols =~ /Name: __imp_\Q$name\E(?:\r?\n)/;
+for my $language (['C', '-std=c99'], ['C++', '-x', 'c++', '-std=c++11']) {
+    my ($label, @language_flags) = @$language;
+    for my $number (0 .. $#modes) {
+        my $object = "$temporary/consumer-$label-$number.o";
+        capture($clang, @target, @{$modes[$number]}, @language_flags, @cflags,
+            '-Werror', '-c', $fixture, '-o', $object);
+        my $symbols = capture($readobj, '--symbols', '--coff-directives', $object);
+        die "$label consumer is not x86_64 COFF\n" unless $symbols =~ /Format: COFF-x86-64/;
+        for my $name (@imports) {
+            die "$label consumer mode $number does not import $name through its IAT\n"
+                unless $symbols =~ /Name: __imp_\Q$name\E(?:\r?\n)/;
+        }
+        die "$label consumer entry point lost its C export name\n"
+            unless $symbols =~ /-export:luaopen_titan_annotation_probe(?:\s|$)/;
+        die "$label consumer unexpectedly exports Lua-owned symbols\n"
+            if $symbols =~ /-export:(?:$import_pattern)(?:\s|$)/;
+        my $library_export = $symbols =~ /-export:titan_annotation_library_probe(?:\s|$)/;
+        my $library_mode = grep { $_ eq '-DLUA_LIB' } @{$modes[$number]};
+        die "$label consumer mode $number has incorrect external library export ownership\n"
+            unless !!$library_export == !!$library_mode;
     }
-    die "consumer entry point is not exported\n"
-        unless $symbols =~ /-export:luaopen_titan_annotation_probe(?:\s|$)/;
-    die "consumer unexpectedly exports Lua-owned symbols\n"
-        if $symbols =~ /-export:(?:lua_gettop|luaopen_base|luaO_ceillog2|lua_ident|luai_ctype_|luaP_opmodes|luaT_typenames_)(?:\s|$)/;
 }
-
-# The same entry-point macro must retain C linkage in C++ consumers.
-capture($clang, @target, '-DLUA_LIB', '-x', 'c++', '-std=c++11', @cflags, '-Werror',
-    '-c', $fixture, '-o', "$temporary/consumer-cpp.o");
-my $cpp = capture($readobj, '--symbols', '--coff-directives', "$temporary/consumer-cpp.o");
-die "C++ module opener lost its C export name\n"
-    unless $cpp =~ /-export:luaopen_titan_annotation_probe(?:\s|$)/;
 
 my $producer = capture($clang, @target, '-DTITAN_LUA_BUILD_DLL',
     '-E', '-P', $fixture);
@@ -69,5 +70,5 @@ my $data = capture($readobj, '--coff-directives', "$temporary/lctype.o");
 die "Lua internal data definition does not export DATA\n"
     unless $data =~ /-export:luai_ctype_,data/;
 
-print "Windows Lua headers: four C consumer modes, C++ opener, producer declarations, real COFF DATA export passed\n";
+print "Windows Lua headers: four C/C++ consumer modes, auxiliary IAT imports, external library exports, producer declarations, real COFF DATA export passed\n";
 print "This checks COFF/header ownership only; it does not build or run the Windows Lua DLL.\n";

@@ -17,9 +17,7 @@ local function open_support(path)
     local opener = assert(package.loadlib(path, "luaopen_titan"))
     local values = table.pack(opener())
     assert(values.n == 1 and type(values[1]) == "table", "invalid Titan support table")
-    for _, name in ipairs({ "_loadlib", "_loadlibglobal", "_abivalue", "_win_tmpname",
-        "_win_reserve_sibling", "_win_replace", "_win_stat", "_win_realpath",
-        "_win_abspath", "_win_resolve_executable" }) do
+    for _, name in ipairs({ "_loadlib", "_loadlibglobal", "_abivalue" }) do
         assert(type(values[1][name]) == "function", "missing Titan support helper " .. name)
     end
     return values[1]

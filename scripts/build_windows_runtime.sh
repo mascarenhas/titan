@@ -78,5 +78,5 @@ fi
 if needs_build "$work/titan.dll" "$work/ltitanlib.o" "$prefix/lib/liblua55.a"; then
   write_output "$work/titan.dll" "${compiler[@]}" -shared "${runtime_ldflags[@]}" \
     -Wl,--exclude-all-symbols -Wl,--no-insert-timestamp \
-    -o "$work/titan.dll" "$work/ltitanlib.o" "$prefix/lib/liblua55.a" -lbcrypt
+    -o "$work/titan.dll" "$work/ltitanlib.o" "$prefix/lib/liblua55.a"
 fi

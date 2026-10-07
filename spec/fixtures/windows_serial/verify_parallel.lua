@@ -1,16 +1,13 @@
--- Native-only private support probe. No installed SDK module is replaced.
--- lua.exe verify_parallel.lua <private-winfs-test.dll> <argv-oracle.exe> <owned-parent>
+-- Native Windows compiler process adapter probe.
+-- lua.exe verify_parallel.lua <argv-oracle.exe> <owned-parent>
 assert(package.config:sub(1, 1) == "\\", "native Windows Lua is required")
 package.path = "./?.lua;./?/init.lua;" .. package.path
 local path = require "titan-compiler.path"
-local platform = require "titan-compiler.platform"
 local lfs = require "lfs"
-local support = assert(package.loadlib(assert(arg[1]), "luaopen_winfs_test"))()
-local oracle, parent = assert(arg[2]), assert(arg[3])
+local process = require "titan-compiler.process"
+local oracle, parent = assert(arg[1]), assert(arg[2])
 local root = path.join(parent, "parallel probe 日本語 😀")
 assert(lfs.mkdir(root), "probe workspace must be newly owned")
-local original_native = platform.native
-platform.native = function(name, ...) return assert(support[name], name)(...) end
 local next_log = 0
 local function read(filename)
     local file = assert(io.open(filename, "rb"))
@@ -22,27 +19,26 @@ local function spawn(batch, index, arguments)
     local err = path.join(root, tostring(next_log) .. ".stderr")
     local argv = { oracle }
     for _, value in ipairs(arguments) do argv[#argv + 1] = value end
-    local command, executable = platform.windows_process_command(argv)
-    assert(command, executable)
-    assert(support._win_compile_spawn(batch, index, executable, command, out, err))
+    batch.probes[index] = assert(batch:spawn(argv, out, err, index))
     return out, err
 end
 local function finish(batch, index, status)
-    local ok, why, code = support._win_compile_finish(batch, index)
+    local ok, why, code = batch.probes[index]:wait()
     assert(why == "exit" and code == status, tostring(why) .. ":" .. tostring(code))
     assert((ok == true) == (status == 0), "exit success differs")
 end
 local function with_batch(body)
-    local batch = assert(support._win_compile_new())
+    local batch = assert(process.new_batch())
+    batch.probes = {}
     local result = table.pack(pcall(body, batch))
-    assert(support._win_compile_close(batch))
+    assert(batch:close())
     assert(result[1], result[2])
     return table.unpack(result, 2, result.n)
 end
 local function single(arguments, status)
     return with_batch(function(batch)
         local out, err = spawn(batch, 1, arguments)
-        assert(support._win_compile_wait(batch) == 1)
+        assert(batch:wait() == 1)
         finish(batch, 1, status)
         return read(out), read(err)
     end)
@@ -80,46 +76,15 @@ local passed, message = xpcall(function()
         local release = path.join(root, "release first worker")
         spawn(batch, 1, { "--wait-file", release })
         spawn(batch, 2, { "--sleep", "10" })
-        assert(support._win_compile_wait(batch) == 2, "completion waited in launch order")
+        assert(batch:wait() == 2, "completion waited in launch order")
         finish(batch, 2, 0)
         local file = assert(io.open(release, "wb")); assert(file:close())
-        assert(support._win_compile_wait(batch) == 1)
+        assert(batch:wait() == 1)
         finish(batch, 1, 0)
     end)
     print("native worker wait-any order 2,1 passed with two running processes")
 
-    with_batch(function(batch)
-        for index = 1, 70 do
-            spawn(batch, index, { "--exit", "0" })
-            assert(support._win_compile_wait(batch) == index)
-            -- Retain all 70 completed process/wait records until the end.
-            -- At most one process is running; this tests the handle-count limit.
-        end
-        for index = 1, 70 do finish(batch, index, 0) end
-    end)
-    print("native worker 70 retained wait records passed (one running process)")
-
-    for _, mode in ipairs({ "close", "gc" }) do
-        local batch = assert(support._win_compile_new())
-        local out = spawn(batch, 1, { "--spawn" })
-        assert(support._win_compile_wait(batch) == 1)
-        finish(batch, 1, 0)
-        local pid = assert(read(out):match("^(%d+)\n$"), "missing owned descendant PID")
-        single({ "--alive", pid }, 0)
-        if mode == "close" then
-            assert(support._win_compile_close(batch))
-            assert(support._win_compile_close(batch), "close must be idempotent")
-        else
-            local weak = setmetatable({ batch }, { __mode = "v" })
-            batch = nil
-            collectgarbage("collect"); collectgarbage("collect")
-            assert(weak[1] == nil, "batch was unexpectedly retained")
-        end
-        single({ "--alive", pid }, 1)
-        print("native worker " .. mode .. " reaped owned descendant " .. pid)
-    end
 end, debug.traceback)
-platform.native = original_native
 collectgarbage("collect"); collectgarbage("collect")
 for name in lfs.dir(root) do
     if name ~= "." and name ~= ".." then assert(os.remove(path.join(root, name))) end

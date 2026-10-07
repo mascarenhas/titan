@@ -17,7 +17,7 @@ local file = assert(io.open(prefix .. '/etc/luarocks/config-5.5.lua', 'w'))
 local function setting(name, value)
   assert(file:write(name, ' = ', string.format('%q', value), ',\n'))
 end
-assert(file:write('lua_version = "5.5"\nfs_use_modules = true\nrocks_trees = { ', string.format('%q', prefix), ' }\n'))
+assert(file:write('lua_version = "5.5"\nfs_use_modules = true\ncmake_generator = "Ninja"\nrocks_trees = { ', string.format('%q', prefix), ' }\n'))
 assert(file:write('variables = {\n'))
 for name, value in pairs {
   LUA = prefix .. '/bin/lua.exe', LUA_DIR = prefix,

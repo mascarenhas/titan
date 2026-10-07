@@ -282,59 +282,6 @@ describe("Windows compiler path integration", function()
         assert.matches("native access denied", err, 1, true)
     end)
 
-    it("rejects differently named outputs with the same opaque native identity", function()
-        compiler_io.new_sync = function()
-            return {
-                stat = function()
-                    return { kind = "file", device = "win32-volume:feed",
-                        inode = "win32-file:full-opaque-identifier" }
-                end,
-                realpath = function(_, filename)
-                    return "\\\\?\\" .. filename:gsub("/", "\\")
-                end,
-            }
-        end
-        local okay, err = pcall(driver.compile_modules, {
-            { modname = "one", mod = { compiled = "C:/work/one.o" } },
-            { modname = "two", mod = { compiled = "C:/work/two.o" } },
-        }, 1)
-        assert.is_false(okay)
-        assert.matches("share object output", err, 1, true)
-    end)
-
-    it("resolves existing prefixes before comparing future output aliases", function()
-        compiler_io.new_sync = function()
-            return {
-                stat = function(_, filename)
-                    if filename == "C:/first" or filename == "C:/alias" then
-                        return { kind = "directory" }
-                    end
-                end,
-                realpath = function(_, filename)
-                    assert.is_true(filename == "C:/first" or filename == "C:/alias")
-                    return [[\\?\D:\real-directory]]
-                end,
-            }
-        end
-        local okay, err = pcall(driver.compile_modules, {
-            { modname = "one", mod = { compiled = "C:/first/result.o" } },
-            { modname = "two", mod = { compiled = "C:/alias/result.o" } },
-        }, 1)
-        assert.is_false(okay)
-        assert.matches("share object output", err, 1, true)
-    end)
-
-    it("propagates output metadata failures instead of assuming distinct files", function()
-        compiler_io.new_sync = function()
-            return { stat = function() return nil, "native metadata denied" end }
-        end
-        local okay, err = pcall(driver.compile_modules, {
-            { modname = "one", mod = { compiled = "C:/work/result.o" } },
-        }, 1)
-        assert.is_false(okay)
-        assert.matches("native metadata denied", err, 1, true)
-    end)
-
     it("stops ancestor creation at the drive root and keeps stage separators", function()
         local existing = { ["C:/"] = true }
         local created = {}
@@ -348,18 +295,15 @@ describe("Windows compiler path integration", function()
                     existing[filename] = true
                     return true
                 end,
+                tmpname = function() return "C:/temporary/stage" end,
+                unlink = function() return true end,
             }
         end
-        platform.native = function(name, filename, directory)
-            assert.equal("_win_reserve_sibling", name)
-            assert.equal([[C:\new\child\provider.dll.stage]], filename)
-            assert.is_true(directory)
-            return [[\\?\C:\new\child\.stage]]
-        end
-        local staged = assert(driver.staged_library_output(
-            [[C:\new\child\provider.dll]]))
-        assert.equal([[\\?\C:\new\child\.stage\provider.dll]], staged)
-        assert.same({ "C:/new", "C:/new/child" }, created)
+        platform.native = function() error("unexpected native filesystem helper") end
+        local staged = assert(driver.staged_library_output("C:/new/child/provider.dll"))
+        assert.equal("C:/new/child/provider.dll.stage.tmp.stage/provider.dll", staged)
+        assert.same({ "C:/new", "C:/new/child",
+            "C:/new/child/provider.dll.stage.tmp.stage" }, created)
     end)
 end)
 
@@ -461,12 +405,6 @@ describe("Windows launcher filenames", function()
                 return { stat = function() return { kind = "directory" } end }
             end
             platform.windows = true
-            platform.native = function(operation, ...)
-                if operation == "_win_resolve_executable" then
-                    return "C:/launcher-model/tools/" .. select(1, ...)
-                end
-                return previous_native(operation, ...)
-            end
             local options = { module_names = { "app", "archive" },
                 archive_entries = entries, archive_names = names,
                 validate_titan_support = true }
@@ -2462,19 +2400,14 @@ describe("generated C formatting", function()
 
         util.set_file_contents = original_set_file_contents
         driver.format_generated_file = function() return true end
-        if platform.windows then
-            platform.native = function(operation, ...)
-                if operation == "_win_replace" then
-                    return nil, "injected stage rename failure"
-                end
-                return original_native(operation, ...)
-            end
-        else
-            os.rename = function()
-                return nil, "injected stage rename failure"
-            end
+        local previous_sync = compiler_io.new_sync
+        compiler_io.new_sync = function()
+            local strategy = previous_sync()
+            strategy.rename = function() return nil, "injected stage rename failure" end
+            return strategy
         end
         ok, err = driver.write_foreign_header_plan(plan)
+        compiler_io.new_sync = previous_sync
         assert.is_nil(ok)
         assert.matches("injected stage rename failure", err, 1, true)
         assert.equal(old, assert(original_get_file_contents(header)))
@@ -8891,10 +8824,10 @@ describe("Windows driver dispatch", function()
         local strategy = {
             tmpname = function()
                 calls[#calls + 1] = "reserve"
-                return "C:\\temporary\\owned-reservation"
+                return "C:/temporary/owned-reservation"
             end,
             unlink = function(_, path, finish_cleanup)
-                assert.equal("C:\\temporary\\owned-reservation", path)
+                assert.equal("C:/temporary/owned-reservation", path)
                 assert.is_true(finish_cleanup)
                 calls[#calls + 1] = "release"
                 return true
@@ -8911,13 +8844,12 @@ describe("Windows driver dispatch", function()
         local file = assert(io.open(path, "wb"))
         assert(file:write("previous shim")); assert(file:close())
         compiler_io.new_sync = function()
-            return { stat = function() return { kind = "directory" } end }
+            return {
+                stat = function() return { kind = "directory" } end,
+                tmpname = function() return nil, "reservation denied" end,
+            }
         end
-        platform.native = function(name, destination)
-            assert.equal("_win_reserve_sibling", name)
-            assert.equal(path, destination)
-            return nil, "reservation denied"
-        end
+        platform.native = function() error("unexpected native filesystem helper") end
         local completed, failure = pcall(function()
             local ok, err = driver.write_module_shims({
                 { filename = path, contents = "replacement shim" },

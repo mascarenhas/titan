@@ -129,29 +129,30 @@ describe("compiler I/O strategy", function()
         assert.is_true(strategy:unlink(empty))
 
         local function reject_rename()
-            return nil, "injected atomic rename failure"
+            return nil, "injected rename failure"
         end
         local function check_replacement()
             local replaced, replace_err = strategy:write_file(source, "replacement")
             assert.is_nil(replaced)
-            assert.matches("injected atomic rename failure", replace_err, 1, true)
+            assert.matches("injected rename failure", replace_err, 1, true)
         end
+        with_overrides(os, { rename = reject_rename }, check_replacement)
         if platform.windows then
-            local native = platform.native
-            with_overrides(platform, { native = function(name, ...)
-                if name == "_win_replace" then return reject_rename() end
-                return native(name, ...)
-            end }, check_replacement)
+            assert.is_false(strategy:readable(source))
+            assert.is_true(strategy:write_file(source, bytes))
         else
-            with_overrides(os, { rename = reject_rename }, check_replacement)
+            assert.equal(bytes, assert(strategy:read_file(source)))
         end
-        assert.equal(bytes, assert(strategy:read_file(source)))
 
         local metadata = assert(strategy:stat(source))
-        assert.same({
-            "device", "inode", "kind", "mode", "modified_nanoseconds",
-            "modified_seconds", "size",
-        }, (function()
+        local expected_keys = {
+            "kind", "mode", "modified_nanoseconds", "modified_seconds", "size",
+        }
+        if not platform.windows then
+            table.insert(expected_keys, 1, "inode")
+            table.insert(expected_keys, 1, "device")
+        end
+        assert.same(expected_keys, (function()
             local keys = {}
             for key in pairs(metadata) do keys[#keys + 1] = key end
             table.sort(keys)
@@ -161,10 +162,8 @@ describe("compiler I/O strategy", function()
         assert.equal(#bytes, metadata.size)
         assert.equal(0x8000, metadata.mode & 0xF000)
         if platform.windows then
-            assert.is_string(metadata.device)
-            assert.is_string(metadata.inode)
-            assert.is_true(#metadata.device > 0)
-            assert.is_true(#metadata.inode > 0)
+            assert.is_nil(metadata.device)
+            assert.is_nil(metadata.inode)
         else
             assert.is_number(metadata.device)
             assert.is_number(metadata.inode)
@@ -177,8 +176,12 @@ describe("compiler I/O strategy", function()
         local hard_link = directory .. "/source-hard-link.bin"
         assert(lfs.link(source, hard_link))
         local hard_link_metadata = assert(strategy:stat(hard_link))
-        assert.equal(metadata.device, hard_link_metadata.device)
-        assert.equal(metadata.inode, hard_link_metadata.inode)
+        assert.equal(bytes, assert(strategy:read_file(hard_link)))
+        assert.equal(metadata.size, hard_link_metadata.size)
+        if not platform.windows then
+            assert.equal(metadata.device, hard_link_metadata.device)
+            assert.equal(metadata.inode, hard_link_metadata.inode)
+        end
         assert.is_true(strategy:unlink(hard_link))
 
         local entries = assert(strategy:list(directory))
@@ -217,8 +220,17 @@ describe("compiler I/O strategy", function()
 
         assert.equal("file", assert(strategy:stat(link)).kind)
         assert.equal("symlink", assert(strategy:lstat(link)).kind)
-        assert.equal(assert(strategy:realpath(target)),
-            assert(strategy:realpath(link)))
+        if platform.windows then
+            assert.equal(assert(strategy:absolute(target)),
+                assert(strategy:realpath(target)))
+            assert.equal(assert(strategy:absolute(link)),
+                assert(strategy:realpath(link)))
+            assert.not_equal(assert(strategy:realpath(target)),
+                assert(strategy:realpath(link)))
+        else
+            assert.equal(assert(strategy:realpath(target)),
+                assert(strategy:realpath(link)))
+        end
 
         local actual = root .. "/actual"
         local nested = actual .. "/nested"
@@ -228,12 +240,17 @@ describe("compiler I/O strategy", function()
         assert.is_true(strategy:write_file(sibling, "sibling bytes"))
         local directory_link = root .. "/directory-link"
         assert(lfs.link(nested, directory_link, true))
-        assert.equal(assert(strategy:realpath(nested)),
-            assert(strategy:realpath(directory_link)))
         if platform.windows then
+            assert.equal(assert(strategy:absolute(directory_link)),
+                assert(strategy:realpath(directory_link)))
+            assert.not_equal(assert(strategy:realpath(nested)),
+                assert(strategy:realpath(directory_link)))
             -- Win32 resolves dot-dot before traversing the directory link.
             sibling = root .. "/sibling"
             assert.is_true(strategy:write_file(sibling, "lexical sibling bytes"))
+        else
+            assert.equal(assert(strategy:realpath(nested)),
+                assert(strategy:realpath(directory_link)))
         end
         assert.equal(assert(strategy:realpath(sibling)),
             assert(strategy:realpath(directory_link .. "/../sibling")))
@@ -520,15 +537,8 @@ describe("compiler I/O strategy", function()
     end)
 
     it("normalizes command transport failures", function()
-        for _, windows in ipairs({ false, true }) do
-            with_overrides(platform, {
-                windows = windows,
-                native = function(name, path)
-                    assert.equal("_win_resolve_executable", name)
-                    assert.equal("tool.exe", path)
-                    return "C:/tools/tool.exe"
-                end,
-            }, function()
+        for _, windows in ipairs({ false }) do
+            with_overrides(platform, { windows = windows }, function()
                 local strategy = compiler_io.new_sync()
 
                 with_overrides(io, {
@@ -584,196 +594,125 @@ end)
 -- These host tests exercise dispatch and result contracts. The Windows shell
 -- representation itself is gated separately by the real native argv oracle.
 describe("Windows synchronous compiler I/O", function()
-    it("renders direct native worker argv with CRT quoting and no cmd expansion", function()
-        local resolved = [[C:\tools with spaces\clang.exe]]
-        local calls = {}
-        with_overrides(platform, { native = function(name, word)
-            calls[#calls + 1] = { name, word }
-            return resolved
-        end }, function()
-            local command, executable = platform.windows_process_command({
-                "clang", "", "two words", 'quote"inside', [[C:\trailing\]],
-                "%PATH% !PATH! &|<>()^", "日本語 😀",
-            })
-            assert.equal(resolved, executable)
-            assert.equal([["C:\tools with spaces\clang.exe" "" "two words" "quote\"inside" "C:\trailing\\" "%PATH% !PATH! &|<>()^" "日本語 😀"]], command)
-            assert.same({ { "_win_resolve_executable", "clang.exe" } }, calls)
-            local argument = string.rep("x", 9000)
-            command = assert(platform.windows_process_command({ "clang.exe", argument }))
-            assert.equal('"' .. resolved .. '" "' .. argument .. '"', command)
-        end)
+    it("renders configured worker argv without resolving or changing the executable", function()
+        local command, executable = platform.windows_process_command({
+            "clang", "", "two words", 'quote"inside', [[C:\trailing\]],
+            "%PATH% !PATH! &|<>()^", "日本語 😀",
+        })
+        assert.equal("clang", executable)
+        assert.equal([["clang" "" "two words" "quote\"inside" "C:\trailing\\" "%PATH% !PATH! &|<>()^" "日本語 😀"]], command)
+        local argument = string.rep("x", 9000)
+        assert.equal('"clang.exe" "' .. argument .. '"',
+            platform.windows_process_command({ "clang.exe", argument }))
+        for _, executable_name in ipairs({ "missing.exe", "clang.bat", "clang.cmd" }) do
+            assert.equal(executable_name,
+                select(2, platform.windows_process_command({ executable_name })))
+        end
     end)
 
-    it("rejects malformed direct worker argv before native process creation", function()
-        with_overrides(platform, { native = function(name, word)
-            assert.equal("_win_resolve_executable", name)
-            if word == "missing.exe" then return nil, "injected executable lookup failure" end
-            return "C:/tools/clang.exe"
-        end }, function()
-            for _, case in ipairs({
-                { false, "nonempty argument array" },
-                { {}, "nonempty argument array" },
-                { { "" }, "executable is empty" },
-                { { "clang.bat" }, "not a batch wrapper" },
-                { { "clang.cmd" }, "not a batch wrapper" },
-                { { "clang.exe", false }, "must be a string" },
-                { { "clang.exe", "bad\0argument" }, "NUL byte" },
-                { { "clang.exe", "line\nbreak" }, "line breaks" },
-                { { "clang.exe", "\255" }, "valid UTF-8" },
-                { { "clang.exe", extra = "value" }, "dense argument array" },
-                { { "missing.exe" }, "injected executable lookup failure" },
-            }) do
-                local command, err = platform.windows_process_command(case[1])
-                assert.is_nil(command)
-                assert.matches(case[2], err, 1, true)
-            end
-        end)
+    it("rejects malformed argument arrays before process creation", function()
+        for _, case in ipairs({
+            { false, "nonempty argument array" },
+            { {}, "nonempty argument array" },
+            { { "clang.exe", false }, "must be a string" },
+            { { "clang.exe", "bad\0argument" }, "NUL byte" },
+            { { "clang.exe", extra = "value" }, "dense argument array" },
+        }) do
+            local command, err = platform.windows_process_command(case[1])
+            assert.is_nil(command)
+            assert.matches(case[2], err, 1, true)
+        end
     end)
 
-    it("preserves opaque file IDs and distinguishes missing from query errors", function()
-        local metadata = { kind = "file", mode = 0x8000, size = 4294967419,
-            device = "win32-volume:fffffffffffffffe",
-            inode = "win32-file:ffffffffffffffff0000000000000001",
-            modified_seconds = 1790816523, modified_nanoseconds = 123456700 }
+    it("uses LuaFileSystem metadata and lexical existing paths on Windows", function()
+        local attributes = { mode = "file", permissions = "rw-rw-rw-",
+            size = 4294967419, dev = 7, ino = 0, modification = 1790816523 }
+        local metadata = { kind = "file", mode = 0x81B6, size = 4294967419,
+            modified_seconds = 1790816523, modified_nanoseconds = 0 }
         local calls = {}
-        with_overrides(platform, { windows = true, native = function(name, path, follow)
-            calls[#calls + 1] = { name, path, follow }
+        local function query(name, path)
+            calls[#calls + 1] = { name, path }
             if path == "absent" then return nil, "not found", 2 end
-            if path == "absent-parent/child" then return nil, "not found", 3 end
-            if path == "denied" then return nil, "access denied", 5 end
-            if path == "junction" then return nil, "untrusted mount point", 448 end
-            if name == "_win_realpath" then return [[\\?\C:\owned\file]] end
-            return metadata
-        end }, function()
-            local strategy = compiler_io.new_sync()
-            assert.equal(metadata, strategy:stat("file"))
-            assert.equal(metadata, strategy:lstat("file"))
-            assert.same({ "_win_stat", "file", true }, calls[1])
-            assert.same({ "_win_stat", "file", false }, calls[2])
-            assert.equal([[\\?\C:\owned\file]], strategy:realpath("file"))
-            for _, path in ipairs({ "absent", "absent-parent/child" }) do
-                local attributes, err = strategy:stat(path)
-                assert.is_nil(attributes); assert.is_nil(err)
-            end
-            local attributes, err = strategy:stat("denied")
-            assert.is_nil(attributes); assert.equal("access denied", err)
-            attributes, err = strategy:stat("junction")
-            assert.is_nil(attributes); assert.equal("untrusted mount point", err)
-        end)
-    end)
-
-    it("captures binary output and preserves native exit statuses", function()
-        with_overrides(platform, { windows = true, native = function(name, path)
-            assert.equal("_win_resolve_executable", name)
-            if path == "missing-native-command.exe" then
-                return nil, "executable not found", 2
-            end
-            return "C:/tools/" .. path
-        end }, function()
-            local status = 143
-            with_overrides(io, { popen = function(command, mode)
-                assert.equal("rb", mode)
-                assert.matches('set "LANG=C"&&set "LC_ALL=C"&&', command, 1, true)
-                return {
-                    read = function() return "A\r\nB\0C\26D\255" end,
-                    close = function() return nil, "exit", status end,
-                }
-            end }, function()
+            if path == "absent-parent/child" then return nil, "not found", 2 end
+            if path == "denied" then return nil, "access denied", 13 end
+            return attributes
+        end
+        with_overrides(platform, { windows = true }, function()
+            with_overrides(lfs, {
+                attributes = function(path) return query("stat", path) end,
+                symlinkattributes = function(path) return query("lstat", path) end,
+                currentdir = function() return "C:/work" end,
+            }, function()
                 local strategy = compiler_io.new_sync()
-                local result = strategy:run({ "clang.exe", "-c", "file with spaces.c" })
-                assert.is_true(result.started)
-                assert.is_false(result.ok)
-                assert.equal("exit", result.why)
-                assert.equal(143, result.status)
-                assert.is_false(result.interrupted)
-                assert.is_nil(result.signal)
-                assert.is_nil(result.shell_status)
-                assert.equal("A\r\nB\0C\26D\255", result.output)
-
-                for _, code in ipairs({ 1, 126, 127, 9009 }) do
-                    status = code
-                    result = strategy:run({ "clang.exe" })
-                    assert.is_true(result.started)
-                    assert.is_false(result.ok)
-                    assert.equal(code, result.status)
-                    assert.equal("exit", result.why)
-                    assert.is_false(result.interrupted)
+                assert.same(metadata, strategy:stat("file"))
+                assert.same(metadata, strategy:lstat("file"))
+                assert.same({ "stat", "file" }, calls[1])
+                assert.same({ "lstat", "file" }, calls[2])
+                assert.equal("C:/owned/file",
+                    strategy:realpath([[C:\owned\child\..\file]]))
+                for _, path in ipairs({ "absent", "absent-parent/child" }) do
+                    local absent, err = strategy:stat(path)
+                    assert.is_nil(absent); assert.is_nil(err)
+                    local canonical, canonical_err = strategy:realpath(path)
+                    assert.is_nil(canonical)
+                    assert.matches("does not exist", canonical_err, 1, true)
                 end
-
-                status = 9009
-                result = strategy:run({ "missing-native-command.exe" })
-                assert.is_false(result.started)
-                assert.is_false(result.ok)
-                assert.is_nil(result.status)
-                assert.equal("executable not found", result.diagnostic)
+                local absent, err = strategy:stat("denied")
+                assert.is_nil(absent); assert.equal("access denied", err)
             end)
         end)
     end)
 
-    it("rejects unsafe command representations before opening a pipe", function()
-        with_overrides(platform, { windows = true, native = function(name, path)
-            assert.equal("_win_resolve_executable", name)
-            if path == "missing-native-command.exe" then
-                return nil, "executable not found", 2
-            end
-            return "C:/tools/" .. path
-        end }, function()
-            with_overrides(io, { popen = function()
-                error("invalid command reached the shell")
+    it("passes Windows argv and options directly to the process dependency", function()
+        local process = require "titan-compiler.process"
+        local argv = { "clang", "file with spaces.c", 'quote"inside',
+            "%PATH% !PATH!", "line\nbreak", string.rep("x", 9000) }
+        local options = { stderr_to_stdout = false }
+        local expected = { started = true, ok = false, status = 256,
+            why = "exit", interrupted = false, output = "A\r\nB\0C\26D\255" }
+        with_overrides(platform, { windows = true }, function()
+            with_overrides(process, { capture = function(actual, settings)
+                assert.same(argv, actual)
+                assert.equal(options, settings)
+                return expected
             end }, function()
-                local strategy = compiler_io.new_sync()
-                for _, argv in ipairs({
-                    { "clang.exe", "line\nbreak" },
-                    { "clang.exe", "line\rbreak" },
-                    { "clang.exe", "invalid\255UTF-8" },
-                    { "wrapper.cmd", "argument" },
-                    { "wrapper.BAT", "argument" },
-                    { "wrapper.ps1", "argument" },
-                    { "", "argument" },
-                    { "clang.exe", string.rep("x", 8192) },
-                }) do
-                    local result = strategy:run(argv)
-                    assert.is_false(result.started)
-                    assert.is_false(result.ok)
-                    assert.is_string(result.diagnostic)
-                    assert.is_nil(result.command)
-                end
+                assert.equal(expected, compiler_io.new_sync():run(argv, options))
             end)
         end)
     end)
 
-    it("reserves beside the destination and preserves it on replacement failure", function()
+    it("reserves beside the destination and cleans up a failed replacement", function()
         local root = workspace()
         local path = root .. "/existing.bin"
-        local temporary = root .. "/reserved.tmp"
+        local temporary_directory = root .. "/temporary"
+        assert(lfs.mkdir(temporary_directory))
+        local temporary_path = temporary_directory .. "/reserved.tmp"
+        local sibling = root .. "/reserved.tmp"
         local old = assert(io.open(path, "wb"))
         assert(old:write("old contents")); assert(old:close())
         local calls = {}
         local ok, failure = pcall(function()
-            with_overrides(platform, {
-                windows = true,
-                native = function(name, first, second)
-                    calls[#calls + 1] = { name, first, second }
-                    if name == "_win_reserve_sibling" then
-                        assert.equal(path, first)
-                        local file = assert(io.open(temporary, "wb"))
-                        assert(file:close())
-                        return temporary
-                    elseif name == "_win_replace" then
-                        assert.equal(temporary, first)
-                        assert.equal(path, second)
-                        return nil, "replacement denied"
-                    end
-                    error("unexpected native operation " .. name)
-                end,
-            }, function()
+            with_overrides(platform, { windows = true }, function()
                 local strategy = compiler_io.new_sync()
-                local written, err = strategy:write_file(path, "new contents")
-                assert.is_nil(written)
-                assert.equal("replacement denied", err)
-                assert.equal("old contents", assert(strategy:read_file(path)))
-                assert.is_nil(lfs.attributes(temporary))
-                assert.equal(2, #calls)
+                strategy.tmpname = function()
+                    local file = assert(io.open(temporary_path, "wb"))
+                    assert(file:close())
+                    return temporary_path
+                end
+                with_overrides(os, { rename = function(from, to)
+                    calls[#calls + 1] = { from, to }
+                    assert.equal(sibling, from)
+                    assert.equal(path, to)
+                    return nil, "replacement denied"
+                end }, function()
+                    local written, err = strategy:write_file(path, "new contents")
+                    assert.is_nil(written)
+                    assert.equal("replacement denied", err)
+                    assert.is_nil(lfs.attributes(path))
+                    assert.is_nil(lfs.attributes(temporary_path))
+                    assert.is_nil(lfs.attributes(sibling))
+                    assert.same({ { sibling, path } }, calls)
+                end)
             end)
         end)
         remove_tree(root)

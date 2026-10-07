@@ -24,7 +24,10 @@ dependencies = {
    "lpeglabel >= 1.5.0",
    "inspect >= 3.1.0",
    "argparse >= 0.5.0",
-   "luafilesystem >= 1.7.0"
+   "luafilesystem >= 1.7.0",
+   platforms = {
+      windows = { "luv >= 1.52.1" }
+   }
 }
 test_dependencies = {
    "busted >= 2.0",
@@ -149,6 +152,7 @@ build = {
       ["titan-compiler.foreigntypes"] = "titan-compiler/foreigntypes.lua",
       ["titan-compiler.io"] = "titan-compiler/io.lua",
       ["titan-compiler.platform"] = "titan-compiler/platform.lua",
+      ["titan-compiler.process"] = "titan-compiler/process.lua",
       ["titan-compiler.path"] = "titan-compiler/path.lua",
             ["titan-compiler.windows_path"] = "titan-compiler/windows_path.lua",
       ["titan-compiler.windows_publication"] = "titan-compiler/windows_publication.lua",

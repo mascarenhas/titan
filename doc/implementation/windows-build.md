@@ -4,7 +4,7 @@
 controlled Lua, native dependency DLLs, the compiler and embedded runtime.
 Run it in the MSYS2 **CLANG64** environment with its
 UCRT Clang, LLVM resource tools, Bash, native GNU Make 4.3 or newer
-(`mingw32-make`), Perl, Git, tar,
+(`mingw32-make`), CMake, Ninja, Perl, Git, tar,
 curl, unzip, and ordinary Unix file utilities. The [Titan Lua fork](https://github.com/mascarenhas/lua-5.5.1)
 is a Git submodule at `lua-5.5.1/`, pinned by the Titan checkout's submodule
 commit. Initialize it after cloning or updating the checkout. The Unix build
@@ -70,6 +70,8 @@ The Windows Titan backend publishes DLLs and does not implement Titan
 static-provider emission or selection. Native dependency import libraries and the embedded runtime
 archive remain SDK build inputs. The standalone LuaRocks 3.13.0 executable
 installs compiler dependencies and the Titan source rock into the Lua prefix.
+Windows also installs `luv` for compiler subprocesses; its ordinary LuaRocks
+build uses CMake and a bundled libuv independently of Titan's stdlib libuv.
 
 Plain `luarocks test` runs the complete native stdlib suite, the six retained
 runtime/packaging specs, and all compiler/language specs in four private NTFS
@@ -83,8 +85,8 @@ arguments retain the single-process route. Native Job Objects contain and clean
 worker descendants.
 
 The compiler itself honors `titanc --jobs N` and `TITAN_JOBS=N`. Parallel object
-commands launch directly through `CreateProcessW`; threadpool waits report
-actual completion to the common scheduler. Larger units start first, a completed
+commands launch through the stock LuaRocks `luv` dependency; its exit callbacks
+report actual completion to the common scheduler. Larger units start first, a completed
 child frees its slot immediately, and diagnostics replay in request order. See
 [driver process transports](driver.md#experimental-windows-process-transports).
 
@@ -119,8 +121,11 @@ Only the DLL's translation units define `TITAN_LUA_BUILD_DLL`. `LUA_CORE` and
 functions, internal functions, and the four internal/public arrays explicitly
 export from the producer and import through consumers' IATs. `LUAMOD_API`
 independently exports a third-party module's opener, with C linkage in C++;
-Lua's own built-in opener declarations use `LUALIB_API` so consumers import
-them. Automatic export of other global symbols is disabled at DLL link time.
+Lua's built-in openers and auxiliary API declare `LUA_API`, so external
+libraries import them too. External libraries built with `LUA_LIB` use
+`LUALIB_API` to export their own functions while their `LUA_API` calls still
+import from Lua.
+Automatic export of other global symbols is disabled at DLL link time.
 Titan's embedded helper functions remain a separate runtime contract.
 
 The supplied build uses Lua's default 64-bit integers and double-precision

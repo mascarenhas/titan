@@ -572,12 +572,12 @@ backend-specific records, arrays, error objects, or task handles.
 | Method | Result and contract |
 | --- | --- |
 | `cwd()` | `pathname, nil` or `nil, message`. Returns the process working directory as an absolute pathname without changing it. |
-| `realpath(path)` | `pathname, nil` or `nil, message`. Canonicalizes an existing path to an absolute pathname, following symbolic links. |
+| `realpath(path)` | `pathname, nil` or `nil, message`. Returns an absolute existing path. POSIX resolves symbolic links; the synchronous Windows implementation normalizes the lexical spelling. |
 | `stat(path)` | `metadata, nil`, `nil, nil` for a clean missing path, or `nil, message`. Follows the final symbolic link. |
 | `lstat(path)` | The same result convention as `stat`, but describes the final symbolic link itself. |
 | `readable(path)` | One boolean. `true` means the path can be opened for binary reading; absence, invalid input, and ordinary open failures are `false`. |
 | `read_file(path, max_bytes?)` | `bytes, nil` or `nil, message`. Without a bound, reads the complete file as a binary-safe Lua string. A bound must be a nonnegative integer; the method returns the complete file when its size is at most that bound, or exactly the first `max_bytes + 1` bytes when it is larger. This optional form lets bounded decoders detect overflow without materializing an unbounded replacement. |
-| `write_file(path, bytes)` | `true, nil` or `nil, message`. Publishes only complete contents: an observer may see the previous file or the complete replacement, never a partially written destination. Failure and cancellation must not leak the strategy's sibling temporary. If cancellation races the final rename, the destination may contain either complete version. |
+| `write_file(path, bytes)` | `true, nil` or `nil, message`. Publishes only complete contents: an observer sees complete file contents. Windows replacement may briefly leave the destination absent between removal and rename. Failure and cancellation must not leak the strategy's sibling temporary. If cancellation races the final rename, the destination may contain either complete version. |
 | `list(path)` | A dense one-based array of entry basenames, or `nil, message`. `.` and `..` are excluded and order is unspecified. |
 | `mkdir(path, remove_if_cancelled?)` | `true, nil` or `nil, message`. Creates one directory; its parent must already exist. The optional ownership rule is described below. |
 | `unlink(path, remove_if_cancelled?)` | `true, nil` or `nil, message`. Removes a non-directory path without following its final symbolic link. The optional ownership rule is described below. |
@@ -587,11 +587,12 @@ backend-specific records, arrays, error objects, or task handles.
 | `run(argv, options?)` | One normalized result table. `argv` is a nonempty dense array of strings, not a shell-fragment interface. `LANG` and `LC_ALL` are fixed to `C`. `options.stderr_to_stdout` defaults to `true`; when false, only stdout is captured and stderr remains on the compiler process's stderr. |
 | `yield()` | No arguments or results. This is the cooperative post-module checkpoint; the synchronous implementation is a no-op. |
 
-`stat` and `lstat` metadata has exactly the Lua-facing fields `kind`, `size`,
-`mode`, `device`, `inode`, `modified_seconds`, and `modified_nanoseconds`.
-`device` and `inode` are integers that form an opaque physical-file identity
+`stat` and `lstat` metadata has the Lua-facing fields `kind`, `size`,
+`mode`, `modified_seconds`, and `modified_nanoseconds`, plus optional `device`
+and `inode`. When present, the latter form an opaque physical-file identity
 pair: clients compare the pair only for equality and must not interpret either
-component. `kind` is `file`,
+component. The synchronous Windows strategy omits them; LuaFileSystem does not
+provide useful Windows file identities. `kind` is `file`,
 `directory`, `symlink`, or `other`; `size` and the timestamps are integers,
 nanoseconds are in `[0, 1000000000)`, and `mode` carries the POSIX file-type
 and permission bits used by filesystem/header identity code.
@@ -600,9 +601,10 @@ and permission bits used by filesystem/header identity code.
 A completed process also supplies integer `status`, string `why` (`exit` or
 `signal`), boolean `interrupted`, the reproducible quoted `command`, and binary
 string `output`. Signal termination sets `interrupted`, uses the signal number
-as `status`, and may additionally publish `signal` and `shell_status`. Argument,
-spawn, capture, or wait failures set `started == false` and may omit fields
-that could not be established. A normal zero exit is the only successful
+as `status`, and may additionally publish `signal` and `shell_status`. Argument
+or spawn failures set `started == false`; capture or wait failures after a
+successful launch retain `started == true`. Failures may omit fields that could
+not be established. A normal zero exit is the only successful
 result.
 
 The optional `true` arguments on `unlink` and `mkdir` are ownership
@@ -1016,9 +1018,9 @@ invocation-wide source-header plan when the CLI owns the compilation:
 
 Windows, Linux and macOS use the same generated-C scheduling bound,
 larger-first launch order, immediate slot refilling and request-order diagnostic
-replay. Windows uses a private native process batch; Linux and macOS use the
-POSIX completion FIFO described below. The compiler bootstrap does not depend
-on libuv.
+replay. Windows uses the stock LuaRocks `luv` process API; Linux and macOS use
+the POSIX completion FIFO described below. Windows' luv bundles its own libuv
+and is independent of the Titan stdlib libuv payload.
 
 The native-tool strings, and `CLANG_FORMAT` when `--pretty-print` actually
 selects it, are parsed into dense argument arrays with a small shell-word grammar
@@ -1934,7 +1936,7 @@ the explicit public-header input for its native helper builds.
 | `TITAN_EXTRA_CFLAGS` / `driver.EXTRA_CFLAGS` | environment / `driver.lua` | empty | Parsed compilation-only flags, after fixed defaults; never used by final links. |
 | `TITAN_EXTRA_LDFLAGS` / `driver.EXTRA_LDFLAGS` | environment / `driver.lua` | empty | Parsed ordered linker inputs appended to final module and program links. |
 | shared-library flags | `shared_flag()` | `-shared`; on Darwin `-shared -undefined dynamic_lookup` | Platform from `driver.UNAME`, populated lazily by `driver.configure_foreign_c(context)` through `context.io:run({"uname"})`. |
-| installed link set | `driver.installed_link_inputs` / `append_runtime_libraries` | Unix: `<root>/lib/titan/0.6/libtitan.a` + separate `<root>/lib/libbacktrace.a` + `<root>/lib/liblua.a` + platform libraries; Windows: `libtitan.a` + `<root>/lib/libbacktrace.a` + `<root>/lib/liblua55.a` + `-lbcrypt -static-libgcc` | Used by provider DSOs and programs; Linux adds `-ldl`, and Linux/macOS add `-lm`. These common final inputs are not copied into Unix package archives. The Unix standard build always supplies pinned libuv as `-X` payload to both `titan.so` and `titan.a`; system OpenSSL keeps explicit pkg-config link flags at final link. |
+| installed link set | `driver.installed_link_inputs` / `append_runtime_libraries` | Unix: `<root>/lib/titan/0.6/libtitan.a` + separate `<root>/lib/libbacktrace.a` + `<root>/lib/liblua.a` + platform libraries; Windows: `libtitan.a` + `<root>/lib/libbacktrace.a` + `<root>/lib/liblua55.a` + `-static-libgcc` | Used by provider DSOs and programs; Linux adds `-ldl`, and Linux/macOS add `-lm`. These common final inputs are not copied into Unix package archives. The Unix standard build always supplies pinned libuv as `-X` payload to both `titan.so` and `titan.a`; system OpenSSL keeps explicit pkg-config link flags at final link. |
 | checkout link set | `driver.source_link_inputs` / `append_runtime_libraries` | local `libtitan.a` + separate local `libbacktrace.a` + local `liblua.a` + `-ldl -lm` | Preserves the writable source-development path while using the same archive contract; it never links `titan.o` directly. |
 | `TITAN_ROOT_DEFAULT` / `TITAN_LUA_CPATH_SUFFIX` | `titan.h`/`titan.c` | `/usr/local` / `/lib/lua/5.5/?.so` | Legacy run-time root fallback and exact template suffix used for root discovery. |
 | `titan_init_paths` | generated standalone entrypoint / `titan.c` | root parsed from inherited `package.cpath` | Caches the root and Titan module path and ensures `<root>/lib/titan/0.6/?.so` is in `package.cpath`; Titan-owned Lua has it first by default, with `<root>` inferred from the running executable. |
@@ -1957,99 +1959,53 @@ through the injected strategy, while native Windows initializes as `Windows`
 without that subprocess. This host choice does not replace the generated
 object's authoritative target fingerprint.
 
-The Windows-only command renderer accepts already parsed argv. It represents
-C-runtime quote/backslash rules, then protects the representation from `cmd`
-metacharacter interpretation. The executable position uses Windows separators;
-extensionless tools explicitly select `.exe`, avoiding implicit PATHEXT batch
-selection. `.exe` and `.com` are native tool forms; explicit batch/script
-filenames fail before execution. A fixed `set` prefix supplies `LANG=C` and
-`LC_ALL=C`. The Unix command renderers remain unchanged.
+Configured tool names reach the process transport unchanged. Titan does not
+resolve executables, append extensions, or inspect binary formats before launch.
+The operating system reports lookup and execution failures. Serial
+inherited-output commands retain `os.execute`; their renderer applies C-runtime
+quoting followed by `cmd` escaping and sets `LANG=C` and `LC_ALL=C`.
 
-Before rendering, `_win_resolve_executable` resolves the first parsed word with
-`GetFullPathNameW` for explicit paths or the documented `SearchPathW` order for
-bare names. It does not change the process search mode, consult `PATHEXT`, or
-execute a probe. `GetBinaryTypeW` rejects directories, scripts and non-native
-images; the returned absolute pathname becomes argv[0]. These checks distinguish
-lookup/access failures from ordinary child exit values but do not eliminate the
-race between lookup and launch. The initial cmd transport rejects explicit
-`\\?\` executable spellings: native lookup can validate them but the shell
-cannot launch the tested form. It does not silently strip their namespace.
-Ordinary installation roots retain their ordinary normalized spelling, including
-when the controlled Lua cpath starts with `bin/..`. See Microsoft's [SearchPathW contract](https://learn.microsoft.com/en-us/windows/win32/api/processenv/nf-processenv-searchpathw)
-and [GetBinaryTypeW contract](https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-getbinarytypew).
+Captured Windows commands and parallel generated-C workers use the stock `luv`
+LuaRocks dependency. `uv.spawn` receives the parsed argument array, cwd and child
+environment; libuv owns Windows executable search and argument quoting. Capture
+uses a binary pipe, sharing its writer for merged stdout/stderr when requested.
+Parallel workers write separate stdout/stderr files, so compiler output cannot
+fill an unread pipe while the scheduler waits. Exit callbacks queue the completed
+request index; `uv.run("once")` delivers whichever child finishes first. Larger
+units start first and each completion frees its slot immediately. Diagnostics
+still replay in request order.
 
-Serial inherited-output commands still use `os.execute`. Captured commands
-still use `io.popen`, with `rb` on Windows so CRLF, NUL, and Ctrl-Z bytes are not
-translated. Windows statuses are not decoded as POSIX signals. All native exits,
-including 1, 126, 127 and 9009, retain `started=true` and their exact value. The
-semantic-probe classifier conservatively reserves out-of-contract statuses as
-infrastructure failures rather than persisting rejection evidence. These shell
-transports do not provide the same direct child-launch evidence as a process API.
+The adapter closes process and pipe handles after completion and retains the
+native exit value, including 256 and 9009. Launch failures are distinct from
+child exit statuses. Windows exits are not decoded as POSIX signals. The common
+scheduler waits for launched compilers before returning from an error. Process
+tree termination is left to the external test runner. These changes preserve
+the compiler-I/O API and generated Titan ABI; the POSIX transports retain their
+existing FIFO completion and shell-status behavior.
 
-Parallel generated-C commands use `CreateProcessW` directly.
-`windows_process_command` renders the same validated native executable and
-arguments with CRT quoting, without cmd escaping. A copied Unicode environment
-sets `LANG` and `LC_ALL` to `C`, preserving other variables and per-drive cwd
-entries. A restricted inherited-handle list contains only NUL stdin and the
-separate stdout/stderr log handles. The native command line is limited to
-32,767 UTF-16 code units including its terminator; serial cmd commands retain
-their 8,191-byte limit.
+The synchronous compiler filesystem implementation uses LuaFileSystem and Lua's
+ordinary file operations. Windows `realpath` checks that the path exists and
+returns its normalized absolute lexical spelling. It does not resolve links or
+query handle-based file identities. `stat` and `lstat` normalize LuaFileSystem's
+size, kind, mode and modification time; Windows device/inode fields are absent
+because LuaFileSystem does not expose useful Windows file identities. C-header
+validation therefore reads and hashes the file instead of using the optional
+identity-and-timestamp shortcut. Injected strategies keep their existing API-1
+surface and may still supply physical identities.
 
-Each batch owns a completion port and a Job Object. A child starts suspended,
-joins the job, and then resumes. A one-shot threadpool wait posts its request
-index when the process exits; the Lua scheduler consumes whichever index
-arrives first. This avoids the 64-handle bound of `WaitForMultipleObjects`.
-Reaping preserves the exact native exit status. Closing or collecting a batch
-terminates its remaining descendants, waits for termination, disarms and drains
-callbacks, and closes the completion port last. Callbacks never access Lua.
-The Job Object uses ordinary nested-job inheritance without breakaway. These
-private support functions change neither the compiler-I/O API nor the generated
-Titan ABI. See Microsoft’s [CreateProcessW](https://learn.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-createprocessw),
-[threadpool waits](https://learn.microsoft.com/en-us/windows/win32/api/threadpoolapiset/nf-threadpoolapiset-setthreadpoolwait),
-and [nested jobs](https://learn.microsoft.com/en-us/windows/win32/procthread/nested-jobs) contracts.
-
-The synchronous Windows filesystem implementation lazily acquires private
-helpers from native support. `_win_tmpname` reserves a caller-owned regular file;
-`_win_reserve_sibling` reserves a regular file or directory directly beside a
-destination. Names contain 128 OS-random bits and use exclusive creation.
-`_win_replace` performs one same-volume replacement without a delete-before-move
-or cross-volume copy fallback. Paths are converted explicitly between UTF-8 and
-UTF-16. All helpers and their bcrypt import are Windows-only; Unix bootstrap
-contents and dependencies stay unchanged. The injected compiler-I/O required
-surface stays unchanged, and injected strategies retain their temporary-file
-ownership and cancellation behavior.
-
-`_win_stat(path, follow)` reports the same seven compiler-I/O fields, using
-lossless tagged strings for device/file identity. Full `FileIdInfo` volume and
-128-bit file IDs are preferred. Only unsupported-query errors on the positively
-identified `VirtIO-FS` filesystem permit the approved fallback: actual
-handle-reported volume GUID plus the full legacy 64-bit file index. No zero
-volume serial, pathname, hash, case folding or truncated ID substitutes for
-identity. Size and 100ns timestamps remain Lua integers; mode contains type bits
-only. Symlinks and junctions have deliberate lstat semantics; unknown reparse
-tags and failed traversal are errors. `_win_realpath` returns the exact
-OS-resolved extended spelling separately from identity. `_win_abspath` uses
-`GetFullPathNameW` for the default process's per-drive resolution; injected
-strategies may provide optional `absolute` capability instead, with no required
-API surface change. Pure Windows path operations preserve case, Unicode and
-authored observation components, distinguish drive/UNC/extended roots, and
-never supply physical identity. Missing Win32 errors
-2/3 become `nil,nil` only at the synchronous stat/lstat boundary; access and
-query errors remain visible. The existing persisted physical identity is already
-an opaque string, so no cache-schema or API-1 marker change is needed.
-
-On the tested VM, NTFS junction-follow reports error 448 (untrusted mount
-point), including junctions created with Windows' `mklink`. That error remains
-explicit; no security setting is changed. VirtIO-FS does not provide the tested
-hardlink, junction and sparse-file operations. Regular live file bytes and
-stable file identities work on the share. Share long-path and notification
-limitations remain separate platform boundaries.
+Temporary names come from `os.tmpname`; Windows puts the leaf beneath `TEMP` or
+`TMP` and creates the caller-owned file with `io.open`. Sibling stages use that
+basename beside the destination. Windows replacement removes an existing
+destination before `os.rename`, so a failed rename can leave the destination
+absent. These ordinary operations rely on the programmer to avoid concurrent
+writes to the same outputs. Provider publication retains its caught-failure
+rollback and copies predecessors before committing replacements.
 
 `spec/fixtures/windows_serial/` contains actual Windows transport and filesystem
 oracles. Host tests cover dispatch, validation, and status normalization but do
 not establish Windows quoting or filesystem semantics. Run the native oracles
-with the edited compiler files and exact helper header on guest-local NTFS,
-then repeat the filesystem gate on the shared workspace. Unicode input also
+with the edited compiler files on guest-local NTFS, then repeat the filesystem
+gate on the shared workspace. Unicode input also
 requires the controlled Lua executable's UTF-8 startup policy; changing only
 the locale after startup does not repair initial narrow argv. The fixtures
 record the remaining platform gates separately from Linux regression results.

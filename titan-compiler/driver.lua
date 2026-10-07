@@ -140,37 +140,7 @@ end
 -- This preserves POSIX symlink/.. resolution for alias and containment checks
 -- while retaining every not-yet-created destination component.
 local function physical_absolute_filename(filename)
-    if platform.windows then
-        local strategy = compiler_io.new_sync()
-        local raw = assert(absolute_filename(filename, strategy))
-        local extended = assert(platform.path.kind(raw)):match("^extended_") ~= nil
-        local candidate, unresolved = raw, {}
-        while candidate do
-            local attributes, stat_error = strategy:stat(candidate)
-            assert(not stat_error, stat_error)
-            if attributes then
-                local resolved = assert(strategy:realpath(candidate))
-                for _, leaf in ipairs(unresolved) do
-                    -- Ordinary unresolved dot components retain ordinary
-                    -- traversal after the existing prefix has been resolved.
-                    -- An extended input instead owns literal dot semantics.
-                    if not extended and leaf == ".." then
-                        resolved = platform.parent(resolved) or resolved
-                    elseif extended or (leaf ~= "." and leaf ~= "") then
-                        resolved = assert(platform.join(resolved, leaf))
-                    end
-                end
-                return resolved
-            end
-            local parent, leaf = platform.parent(candidate)
-            if not parent then break end
-            table.insert(unresolved, 1, leaf)
-            candidate = parent
-        end
-        -- There is no existing prefix to query. This is an output spelling,
-        -- not a fabricated file identity; later creation reports the failure.
-        return assert(normalize_absolute_path(raw))
-    end
+    if platform.windows then return normalized_absolute_filename(filename) end
     local raw = absolute_filename(filename)
     local previous = lfs.currentdir()
     local unresolved = {}
@@ -215,17 +185,7 @@ local function physical_absolute_filename(filename)
 end
 
 local function same_existing_file(left, right)
-    if platform.windows then
-        local strategy = compiler_io.new_sync()
-        local left_attr, left_error = strategy:stat(left)
-        local right_attr, right_error = strategy:stat(right)
-        assert(not left_error, left_error)
-        assert(not right_error, right_error)
-        return left_attr and right_attr and
-            left_attr.device ~= nil and left_attr.inode ~= nil and
-            left_attr.device == right_attr.device and
-            left_attr.inode == right_attr.inode or false
-    end
+    if platform.windows then return false end
     local left_attr = lfs.attributes(left)
     local right_attr = lfs.attributes(right)
     return left_attr and right_attr and
@@ -1135,8 +1095,7 @@ local function command_argv(argv)
 end
 
 local function rename_output(from, to)
-    if platform.windows then return platform.native("_win_replace", from, to) end
-    return os.rename(from, to)
+    return compiler_io.new_sync():rename(from, to)
 end
 
 local function run_argv(argv, verbose)
@@ -5885,7 +5844,7 @@ end
 function driver.installed_link_inputs(paths, is_darwin)
     if platform.windows then
         return { paths.libtitan, paths.libbacktrace, paths.liblua,
-            "-lbcrypt", "-static-libgcc" }
+            "-static-libgcc" }
     end
     local inputs = {
         paths.libtitan,
@@ -5906,7 +5865,7 @@ function driver.source_link_inputs(lua_source_path)
             driver.TITAN_RUNTIME_PATH .. "libtitan.a",
             lua_source_path .. "/../../lib/libbacktrace.a",
             lua_source_path .. "/../../lib/liblua55.a",
-            "-lbcrypt", "-static-libgcc",
+            "-static-libgcc",
         }
     end
     return {
@@ -6481,26 +6440,18 @@ local function replay_compile_output(filename, stream)
 end
 
 local function create_compile_log()
-    local called, path, err
-    if platform.windows then
-        called, path, err = pcall(platform.native, "_win_tmpname")
-    else
-        called, path = pcall(os.tmpname)
-    end
-    if not called then return nil, path end
-    if not path then return nil, err or "os.tmpname returned no path" end
-    return path
+    return compiler_io.new_sync():tmpname()
 end
 
 local function create_compile_notification()
     if platform.windows then
-        local batch, err = platform.native("_win_compile_new")
+        local batch, err = require("titan-compiler.process").new_batch()
         if not batch then return nil, err end
         return {
             batch = batch,
             file = {
-                read = function() return platform.native("_win_compile_wait", batch) end,
-                close = function() return platform.native("_win_compile_close", batch) end,
+                read = function() return batch:wait() end,
+                close = function() return batch:close() end,
             },
         }
     end
@@ -6605,19 +6556,15 @@ local function launch_prepared_compile(
                 return nil, show_err
             end
         end
-        local called, launched, err = pcall(platform.native, "_win_compile_spawn",
-            notification.batch, completion_index, executable, command,
-            stdout_path, stderr_path)
+        local called, launched, err = pcall(notification.batch.spawn,
+            notification.batch, prepared.args, stdout_path, stderr_path, completion_index)
         if not called or not launched then
             protected_remove(stdout_path)
             protected_remove(stderr_path)
             return nil, called and err or launched
         end
         return {
-            pipe = { close = function()
-                return platform.native("_win_compile_finish",
-                    notification.batch, completion_index)
-            end },
+            pipe = launched,
             stdout_path = stdout_path,
             stderr_path = stderr_path,
         }
@@ -7415,35 +7362,18 @@ ensure_output_parent = function(filename)
 end
 
 function driver.sibling_temporary_path(filename, strategy)
-    if platform.windows and strategy == nil then
-        return platform.native("_win_reserve_sibling", filename)
-    end
-    local unique
-    if strategy then
-        local temporary_error
-        unique, temporary_error = strategy:tmpname()
-        if not unique then return nil, temporary_error end
-        -- tmpname's contract leaves one caller-owned regular file. Release it
-        -- immediately, with no intervening cancellation point at which the
-        -- unique path could be lost before ownership reaches the sibling.
-        local removed, remove_error = strategy:unlink(unique, true)
-        if not removed then return nil, remove_error end
-    else
-        unique = os.tmpname()
-        if not unique then return nil, "os.tmpname returned no path" end
-        os.remove(unique)
-    end
-    unique = unique:match(platform.windows and "([^/\\]+)$" or "([^/]+)$")
-        or unique:gsub("[^%w]", "_")
-    return filename .. ".tmp." .. unique
+    strategy = strategy or compiler_io.new_sync()
+    local unique, temporary_error = strategy:tmpname()
+    if not unique then return nil, temporary_error end
+    local removed, remove_error = strategy:unlink(unique, true)
+    if not removed then return nil, remove_error end
+    return filename .. ".tmp." .. path.basename(unique)
 end
 
 local function sibling_temporary_directory(filename)
-    if platform.windows then
-        return platform.native("_win_reserve_sibling", filename, true)
-    end
-    local directory = driver.sibling_temporary_path(filename)
-    local made, err = lfs.mkdir(directory)
+    local directory, temporary_error = driver.sibling_temporary_path(filename)
+    if not directory then return nil, temporary_error end
+    local made, err = compiler_io.new_sync():mkdir(directory)
     if not made then return nil, err end
     return directory
 end
@@ -8414,10 +8344,9 @@ end
 -- fresh process so package.loaded or a compiler-side support table cannot make
 -- an unrelated/stub luaopen_titan appear valid.
 local function validation_temporary_pair()
-    if not platform.windows then return os.tmpname(), os.tmpname() end
-    local script, script_error = platform.native("_win_tmpname")
+    local script, script_error = create_compile_log()
     if not script then return nil, script_error end
-    local result, result_error = platform.native("_win_tmpname")
+    local result, result_error = create_compile_log()
     if not result then
         os.remove(script)
         return nil, result_error
@@ -9087,7 +9016,7 @@ end
 -- the Unix pair publisher, this path never opens either provider in this Lua
 -- state. Retiring shims for removed logical modules is currently unsupported.
 function driver.publish_windows_provider(staged, destination, shim_plans, provider)
-    local support = require "titan"
+    local filesystem = compiler_io.new_sync()
     local entries = {}
     for _, plan in ipairs(shim_plans) do
         local ok, err = ensure_output_parent(plan.filename)
@@ -9097,9 +9026,12 @@ function driver.publish_windows_provider(staged, destination, shim_plans, provid
     end
     entries[#entries + 1] = { source = staged, destination = destination }
     return require("titan-compiler.windows_publication").publish(entries, {
-        stat = function(path) return support._win_stat(path, false) end,
-        reserve = support._win_reserve_sibling,
-        replace = support._win_replace,
+        stat = function(filename)
+            local metadata, err = filesystem:lstat(filename)
+            return metadata, err, metadata == nil and err == nil and 2 or nil
+        end,
+        reserve = function(filename) return filesystem:reserve_sibling(filename) end,
+        replace = function(from, to) return filesystem:rename(from, to) end,
         remove = os.remove,
     }, {
         validate_existing = function(entry, existing)

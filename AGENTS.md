@@ -361,8 +361,8 @@ or give concurrent builds separate source copies. See
   target copies Lua's matching internal sources and headers. Clean Lua objects
   and remove or replace the installed program before changing native inputs.
 - **Lua deps and rock installation**: `$PREFIX/bin/luarocks make
-  titan-0.6.0-1.rockspec` installs lpeglabel, inspect, argparse, luafilesystem,
-  then deploys the compiler/runtime SDK and the combined standard library. The
+  titan-0.6.0-1.rockspec` installs lpeglabel, inspect, argparse, luafilesystem
+  (plus luv for Windows compiler subprocesses), then deploys the compiler/runtime SDK and the combined standard library. The
   rockspec keeps `build_target = "titan"`, disables LuaRocks' separate Make
   install pass, derives `ROCKS_TREE` from `$(SCRIPTS_DIR)/..`, and does not own
   a manifest C module named `titan`. `make titan` builds `libtitan.a`, the

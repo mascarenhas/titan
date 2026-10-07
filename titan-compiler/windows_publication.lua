@@ -70,9 +70,11 @@ function publication.publish(entries, fs, options)
             destinations[key] = true
             local existing = regular(entry.destination, true)
             if entry.source then
+                need(entry.source:gsub("\\", "/"):lower() ~= key,
+                    "publication source aliases destination: " .. entry.destination)
                 local source = regular(entry.source)
-                need(not existing or source.device ~= existing.device or
-                    source.inode ~= existing.inode,
+                need(not existing or source.device == nil or source.inode == nil or
+                    source.device ~= existing.device or source.inode ~= existing.inode,
                     "publication source aliases destination: " .. entry.destination)
             end
             if options.validate_existing then
@@ -106,6 +108,7 @@ function publication.publish(entries, fs, options)
         -- The caller orders the provider last, after its exact shim/source set.
         for index, item in ipairs(prepared) do
             if not item.unchanged and item.stage then
+                item.replacement_attempted = true
                 need(fs.replace(item.stage, item.public))
                 item.stage = nil
                 item.committed = true
@@ -126,7 +129,14 @@ function publication.publish(entries, fs, options)
     if not completed then
         for index = #prepared, 1, -1 do
             local item = prepared[index]
-            if item.committed then
+            local restore = item.committed
+            if not restore and item.backup and item.replacement_attempted then
+                -- Ordinary Windows replacement can delete the destination
+                -- before a failed rename. A mapped image remains present.
+                local existing, _, code = fs.stat(item.public)
+                restore = not existing and (code == 2 or code == 3)
+            end
+            if restore then
                 if item.backup then
                     if record(fs.replace(item.backup, item.public)) then
                         item.backup = nil

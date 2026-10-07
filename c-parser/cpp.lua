@@ -144,6 +144,7 @@ local function physical_header(path, strategy)
     local nanoseconds = followed and followed.modified_nanoseconds
     local observation
     if followed and followed.kind == "file"
+       and followed.device ~= nil and followed.inode ~= nil
        and math.type(seconds) == "integer"
        and math.type(nanoseconds) == "integer"
        and nanoseconds >= 0 and nanoseconds < 1000000000 then

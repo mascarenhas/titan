@@ -8,6 +8,7 @@ local installed_prefix = require "spec.support.installed_prefix"
 local lfs = require "lfs"
 local parser = require "titan-compiler.parser"
 local platform = require "titan-compiler.platform"
+local process = require "titan-compiler.process"
 local types = require "titan-compiler.types"
 
 local ROOT = lfs.currentdir()
@@ -225,41 +226,46 @@ describe("parallel generated-C compilation", function()
     local previous_execute
     local previous_popen
     local previous_open
-    local previous_native
-    local native_overrides
+    local previous_new_sync
+    local previous_new_batch
+    local batch_overrides
     local diagnostic_stream
 
     local function original_compile_tmpname()
-        if platform.windows then return previous_native("_win_tmpname") end
+        if platform.windows then return previous_new_sync():tmpname() end
         return previous_tmpname()
     end
 
     local function override_tmpname(callback)
-        if platform.windows then native_overrides._win_tmpname = callback
+        if platform.windows then
+            compiler_io.new_sync = function(...)
+                local strategy = previous_new_sync(...)
+                strategy.tmpname = function() return callback() end
+                return strategy
+            end
         else os.tmpname = callback end
     end
 
     local function restore_tmpname()
         os.tmpname = previous_tmpname
-        native_overrides._win_tmpname = nil
+        compiler_io.new_sync = previous_new_sync
     end
 
     local function override_launch(callback)
-        if platform.windows then native_overrides._win_compile_spawn = callback
+        if platform.windows then batch_overrides.spawn = callback
         else io.popen = callback end
     end
 
     local function restore_launch()
         io.popen = previous_popen
-        native_overrides._win_compile_spawn = nil
+        batch_overrides.spawn = nil
     end
 
     local function record_launches(launched)
         if platform.windows then
-            override_launch(function(batch, index, executable, command, ...)
-                launched[#launched + 1] = command
-                return previous_native("_win_compile_spawn",
-                    batch, index, executable, command, ...)
+            override_launch(function(original, batch, argv, ...)
+                launched[#launched + 1] = shell_command(argv)
+                return original(batch, argv, ...)
             end)
         else
             override_launch(function(command, mode)
@@ -277,12 +283,20 @@ describe("parallel generated-C compilation", function()
         previous_execute = os.execute
         previous_popen = io.popen
         previous_open = io.open
-        previous_native = platform.native
-        native_overrides = {}
+        previous_new_sync = compiler_io.new_sync
+        previous_new_batch = process.new_batch
+        batch_overrides = {}
         if platform.windows then
-            platform.native = function(name, ...)
-                if native_overrides[name] then return native_overrides[name](...) end
-                return previous_native(name, ...)
+            process.new_batch = function(...)
+                local batch, err = previous_new_batch(...)
+                if not batch then return nil, err end
+                for name, callback in pairs(batch_overrides) do
+                    local original = batch[name]
+                    batch[name] = function(self, ...)
+                        return callback(original, self, ...)
+                    end
+                end
+                return batch
             end
         end
         prepare_workspace()
@@ -295,7 +309,7 @@ describe("parallel generated-C compilation", function()
         os.execute = previous_execute
         restore_launch()
         io.open = previous_open
-        platform.native = previous_native
+        process.new_batch = previous_new_batch
         if diagnostic_stream and io.type(diagnostic_stream) == "file" then
             diagnostic_stream:close()
         end
@@ -478,6 +492,10 @@ describe("parallel generated-C compilation", function()
     end)
 
     it("rejects object-output symlink aliases", function()
+        if platform.windows then
+            pending("Windows uses lexical output paths")
+            return
+        end
         local available, message = filesystem.symlink_capability()
         if not available then
             pending(message)
@@ -524,6 +542,10 @@ describe("parallel generated-C compilation", function()
     end)
 
     it("rejects object-output hardlink aliases", function()
+        if platform.windows then
+            pending("LuaFileSystem does not provide Windows file identity")
+            return
+        end
         local requests = checked_requests()
         copy_file(requests[1].mod.filename,
             source_root .. "/batch/one.o")
@@ -569,7 +591,7 @@ describe("parallel generated-C compilation", function()
         local temporary_path
         local fifo_command
         if platform.windows then
-            native_overrides._win_compile_new = function()
+            process.new_batch = function()
                 return nil, "injected completion creation failure"
             end
         else
@@ -608,7 +630,7 @@ describe("parallel generated-C compilation", function()
         configure_counting_compiler()
         local temporary_path
         if platform.windows then
-            native_overrides._win_compile_new = function()
+            process.new_batch = function()
                 error("injected completion open failure", 0)
             end
         else
@@ -648,7 +670,7 @@ describe("parallel generated-C compilation", function()
             return path
         end)
         if platform.windows then
-            native_overrides._win_compile_wait = function()
+            batch_overrides.wait = function()
                 return nil, "injected completion read failure"
             end
         else
@@ -689,8 +711,8 @@ describe("parallel generated-C compilation", function()
     it("reports completion channel cleanup failures after reaping", function()
         configure_counting_compiler()
         if platform.windows then
-            native_overrides._win_compile_close = function(batch)
-                assert(previous_native("_win_compile_close", batch))
+            batch_overrides.close = function(original, batch)
+                assert(original(batch))
                 return nil, "injected completion close failure"
             end
         else
@@ -724,9 +746,9 @@ describe("parallel generated-C compilation", function()
         configure_counting_compiler(nil, nil, math.min(JOBS, 3))
         local requests = requests_with_headers()
         local temporary_logs = {}
-        -- POSIX reserves each object and a FIFO before the logs; Windows
-        -- reserves object siblings through a separate native operation.
-        local calls = platform.windows and 0 or -#requests
+        -- Both platforms reserve object siblings before the logs; POSIX also
+        -- reserves the completion FIFO before its first log.
+        local calls = -#requests
         override_tmpname(function()
             calls = calls + 1
             if calls == (platform.windows and 3 or 4) then
@@ -762,10 +784,12 @@ describe("parallel generated-C compilation", function()
         configure_counting_compiler(nil, nil, math.min(JOBS, 3))
         local requests = requests_with_headers()
         local temporary_logs = {}
-        local calls = platform.windows and 0 or -#requests
+        local calls = -#requests
         override_tmpname(function()
             calls = calls + 1
-            if calls == (platform.windows and 2 or 3) then return nil end
+            if calls == (platform.windows and 2 or 3) then
+                return nil, "injected missing temporary path"
+            end
             local path = original_compile_tmpname()
             temporary_logs[#temporary_logs + 1] = path
             return path
@@ -775,7 +799,7 @@ describe("parallel generated-C compilation", function()
         restore_tmpname()
         assert.falsy(results[1].ok)
         assert.truthy(tostring(results[1].err):find(
-            "os.tmpname returned no path", 1, true), tostring(results[1].err))
+            "injected missing temporary path", 1, true), tostring(results[1].err))
         for index = 2, 4 do
             assert.truthy(results[index].ok, results[index].err)
         end
@@ -858,7 +882,7 @@ describe("parallel generated-C compilation", function()
         configure_counting_compiler(nil, nil, math.min(JOBS, 3))
         local requests = requests_with_headers()
         local temporary_logs = {}
-        local calls = platform.windows and 0 or -#requests
+        local calls = -#requests
         override_tmpname(function()
             calls = calls + 1
             if calls == (platform.windows and 1 or 2) then
