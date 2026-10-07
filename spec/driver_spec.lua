@@ -7224,8 +7224,11 @@ end
         assert.same(observed,
             assert(driver.restat_c_header_dependencies(
                 observed, { io = restat_io })))
-        assert.equal(0, read_paths[outer] or 0)
-        assert.equal(0, read_paths[late_selected] or 0)
+        -- Windows LuaFileSystem has no physical identity to certify an
+        -- unchanged file, so restatting must read and hash its contents.
+        local expected_reads = platform.windows and 1 or 0
+        assert.equal(expected_reads, read_paths[outer] or 0)
+        assert.equal(expected_reads, read_paths[late_selected] or 0)
 
         write_file(late_selected,
             "typedef long titan_driver_selected_header;\n")

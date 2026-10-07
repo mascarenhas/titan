@@ -287,7 +287,11 @@ describe("compiler I/O strategy", function()
         assert.is_false(success.interrupted)
         assert.equal("C|C|A\0B|diagnostic", success.output)
         assert.equal(success.output, success.diagnostic)
-        assert.matches("2>&1$", success.command)
+        if platform.windows then
+            assert.is_nil(success.command:find("2>&1", 1, true))
+        else
+            assert.matches("2>&1$", success.command)
+        end
 
         local separate = strategy:run({ "sh", "-c", "printf stdout" }, {
             stderr_to_stdout = false,
