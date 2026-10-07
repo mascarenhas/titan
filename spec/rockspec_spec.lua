@@ -533,7 +533,7 @@ int titan_sdk_headers(void) { return LUA_VERSION_NUM + SQLITE_VERSION_NUMBER; }
             -- `--cached` reports index entries intentionally deleted by the
             -- worktree under test. They are not part of the source inventory
             -- being packed and have no pathname to copy.
-            if path == "lua-5.5.1" and
+            if (path == "lua-5.5.1" or path == ".agents/skills") and
                     lfs.symlinkattributes(path, "mode") == "directory" then
                 local listed, files = run({ "git", "-C", path,
                     "ls-files", "-z" })
@@ -624,6 +624,7 @@ int titan_sdk_headers(void) { return LUA_VERSION_NUM + SQLITE_VERSION_NUMBER; }
         end
         for _, expected in ipairs({
             ".gitmodules",
+            ".agents/skills/titan-programmer/SKILL.md",
             "Makefile.win",
             "scripts/install_windows_luarocks.sh",
             "scripts/prepare_windows_native.pl",
