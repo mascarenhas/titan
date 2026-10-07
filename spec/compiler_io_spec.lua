@@ -1,6 +1,7 @@
 local temporary = require "spec.support.temporary"
 local compiler_io = require "titan-compiler.io"
 local platform = require "titan-compiler.platform"
+local paths = require "titan-compiler.path"
 local lfs = require "lfs"
 local filesystem = require "spec.support.filesystem"
 
@@ -640,7 +641,11 @@ describe("Windows synchronous compiler I/O", function()
         with_overrides(platform, { windows = true }, function()
             with_overrides(lfs, {
                 attributes = function(path) return query("stat", path) end,
-                symlinkattributes = function(path) return query("lstat", path) end,
+                symlinkattributes = function(path)
+                    if path == "absent" then return nil, "No error", 0 end
+                    if path == "denied" then return nil, "stale errno", 2 end
+                    return query("lstat", path)
+                end,
                 currentdir = function() return "C:/work" end,
             }, function()
                 local strategy = compiler_io.new_sync()
@@ -648,16 +653,20 @@ describe("Windows synchronous compiler I/O", function()
                 assert.same(metadata, strategy:lstat("file"))
                 assert.same({ "stat", "file" }, calls[1])
                 assert.same({ "lstat", "file" }, calls[2])
-                assert.equal("C:/owned/file",
+                assert.equal(paths.normalize("C:/owned/file"),
                     strategy:realpath([[C:\owned\child\..\file]]))
                 for _, path in ipairs({ "absent", "absent-parent/child" }) do
                     local absent, err = strategy:stat(path)
+                    assert.is_nil(absent); assert.is_nil(err)
+                    absent, err = strategy:lstat(path)
                     assert.is_nil(absent); assert.is_nil(err)
                     local canonical, canonical_err = strategy:realpath(path)
                     assert.is_nil(canonical)
                     assert.matches("does not exist", canonical_err, 1, true)
                 end
                 local absent, err = strategy:stat("denied")
+                assert.is_nil(absent); assert.equal("access denied", err)
+                absent, err = strategy:lstat("denied")
                 assert.is_nil(absent); assert.equal("access denied", err)
             end)
         end)
@@ -687,7 +696,7 @@ describe("Windows synchronous compiler I/O", function()
         local temporary_directory = root .. "/temporary"
         assert(lfs.mkdir(temporary_directory))
         local temporary_path = temporary_directory .. "/reserved.tmp"
-        local sibling = root .. "/reserved.tmp"
+        local sibling = paths.join(root, "reserved.tmp")
         local old = assert(io.open(path, "wb"))
         assert(old:write("old contents")); assert(old:close())
         local calls = {}

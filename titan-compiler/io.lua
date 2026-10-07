@@ -57,6 +57,13 @@ local function lfs_attributes(path, follow)
     local called, attributes, err, code = pcall(fn, path)
     if not called then return nil, tostring(attributes) end
     if attributes then return attributes end
+    if platform.windows and not follow then
+        -- Windows symlinkattributes leaves errno stale on lookup failure.
+        -- Ordinary stat distinguishes a missing path from an access error.
+        local followed, follow_err = lfs_attributes(path, true)
+        if not followed then return nil, follow_err end
+        return nil, operation_error("lstat", err)
+    end
     if missing_errno(code) then return nil, nil end
     return nil, operation_error(follow and "stat" or "lstat", err)
 end
