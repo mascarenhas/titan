@@ -38,10 +38,8 @@ describe("Windows file publication transaction", function()
         local sequence = 0
         fs = {
             stat = function(path)
-                local attr, err, code = lfs.symlinkattributes(path)
-                if not attr then return nil, err, code end
-                return { kind = attr.mode, device = not platform.windows and attr.dev or nil,
-                    inode = not platform.windows and attr.ino or nil }
+                local attr, err = compiler_io.new_sync():lstat(path)
+                return attr, err, not attr and not err and 2 or nil
             end,
             reserve = function(path)
                 sequence = sequence + 1

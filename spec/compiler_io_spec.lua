@@ -633,6 +633,10 @@ describe("Windows synchronous compiler I/O", function()
         local calls = {}
         local function query(name, path)
             calls[#calls + 1] = { name, path }
+            if path == "symlink" and name == "lstat" then
+                return { mode = "link", permissions = "---------", size = 0,
+                    modification = attributes.modification }
+            end
             if path == "absent" then return nil, "not found", 2 end
             if path == "absent-parent/child" then return nil, "not found", 2 end
             if path == "denied" then return nil, "access denied", 13 end
@@ -641,10 +645,12 @@ describe("Windows synchronous compiler I/O", function()
         with_overrides(platform, { windows = true }, function()
             with_overrides(lfs, {
                 attributes = function(path) return query("stat", path) end,
-                symlinkattributes = function(path)
+                symlinkattributes = function(path, field)
+                    assert.is_string(field)
                     if path == "absent" then return nil, "No error", 0 end
                     if path == "denied" then return nil, "stale errno", 2 end
-                    return query("lstat", path)
+                    local attributes, err, code = query("lstat", path)
+                    return attributes and attributes[field], err, code
                 end,
                 currentdir = function() return "C:/work" end,
             }, function()
@@ -653,6 +659,7 @@ describe("Windows synchronous compiler I/O", function()
                 assert.same(metadata, strategy:lstat("file"))
                 assert.same({ "stat", "file" }, calls[1])
                 assert.same({ "lstat", "file" }, calls[2])
+                assert.equal("symlink", assert(strategy:lstat("symlink")).kind)
                 assert.equal(paths.normalize("C:/owned/file"),
                     strategy:realpath([[C:\owned\child\..\file]]))
                 for _, path in ipairs({ "absent", "absent-parent/child" }) do

@@ -52,18 +52,26 @@ local function missing_errno(code)
     return code == 2
 end
 
+local function windows_link_attributes(path)
+    -- The table form tries to resolve directory targets and can throw in LFS.
+    -- Scalar queries also preserve metadata for dangling links.
+    -- Ordinary stat supplies reliable errno for failed lookups.
+    local mode = lfs.symlinkattributes(path, "mode")
+    if mode ~= "link" then return lfs.attributes(path) end
+    return {
+        mode = mode,
+        permissions = lfs.symlinkattributes(path, "permissions"),
+        size = lfs.symlinkattributes(path, "size"),
+        modification = lfs.symlinkattributes(path, "modification"),
+    }
+end
+
 local function lfs_attributes(path, follow)
-    local fn = follow and lfs.attributes or lfs.symlinkattributes
+    local fn = follow and lfs.attributes or
+        (platform.windows and windows_link_attributes or lfs.symlinkattributes)
     local called, attributes, err, code = pcall(fn, path)
     if not called then return nil, tostring(attributes) end
     if attributes then return attributes end
-    if platform.windows and not follow then
-        -- Windows symlinkattributes leaves errno stale on lookup failure.
-        -- Ordinary stat distinguishes a missing path from an access error.
-        local followed, follow_err = lfs_attributes(path, true)
-        if not followed then return nil, follow_err end
-        return nil, operation_error("lstat", err)
-    end
     if missing_errno(code) then return nil, nil end
     return nil, operation_error(follow and "stat" or "lstat", err)
 end
@@ -423,7 +431,7 @@ function Sync:rename(from, to)
     if not valid_from then return nil, from_err end
     local valid_to, to_err = checked_path(to)
     if not valid_to then return nil, to_err end
-    if platform.windows and lfs.symlinkattributes(to) then
+    if platform.windows and lfs.symlinkattributes(to, "mode") then
         -- Windows' ordinary rename does not replace an existing destination.
         local removed, remove_err = call_mutation("unlink", lua_os.remove, to)
         if not removed then return nil, remove_err end
