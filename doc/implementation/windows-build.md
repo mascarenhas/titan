@@ -350,8 +350,8 @@ select static LLVM unwind support through `-static-libgcc`. The
 lookup and uses actual relocated image addresses; Titan refreshes snapshots
 after provider loads instead of using persistent loader notifications.
 The runtime and libbacktrace archives, public runtime/FFI headers, and matching
-backtrace headers are installed as SDK files. Private Windows loader/filesystem
-headers and the PEG archive stay in the build tree. Third-party notices and license texts are staged under
+backtrace headers are installed as SDK files. The private Windows loader
+header and the PEG archive stay in the build tree. Third-party notices and license texts are staged under
 `share/titan/` with the runtime SDK.
 
 ```sh

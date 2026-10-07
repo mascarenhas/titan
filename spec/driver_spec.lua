@@ -7304,7 +7304,7 @@ typedef double titan_driver_symlink_value;
                 header_input_identity(restatted, "search", selected_lookup))
         end)
         local removed, remove_error = true
-        if lfs.symlinkattributes(link) then
+        if lfs.symlinkattributes(link, "mode") then
             removed, remove_error = os.remove(link)
         end
         assert.truthy(completed, failure)

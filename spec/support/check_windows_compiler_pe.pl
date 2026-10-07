@@ -5,6 +5,7 @@ my $allow_extra = @ARGV && $ARGV[0] eq '--allow-extra-exports';
 shift @ARGV if $allow_extra;
 my ($image, @expected) = @ARGV;
 die "usage: check_windows_compiler_pe.pl [--allow-extra-exports] IMAGE [EXPORT ...]\n" unless defined $image;
+my $luv = grep { $_ eq 'luaopen_luv' } @expected;
 open my $pipe, '-|', 'llvm-readobj', '--coff-imports', '--coff-exports', $image or die $!;
 local $/;
 my $text = <$pipe>;
@@ -21,7 +22,8 @@ while ($text =~ /^(Import|Export) \{\r?\n(.*?)^\}/msg) {
     $lua++ if $name eq 'lua55.dll';
     die "unexpected dependency $name in $image\n" unless
         $name eq 'lua55.dll' || $name eq 'kernel32.dll' ||
-        $name eq 'ucrtbase.dll' || $name =~ /^api-ms-win-crt-[a-z0-9-]+[.]dll$/;
+        $name eq 'ucrtbase.dll' || $name =~ /^api-ms-win-crt-[a-z0-9-]+[.]dll$/ ||
+        ($luv && $name =~ /^(?:ws2_32|advapi32|iphlpapi|userenv|shell32|ole32|dbghelp|user32)[.]dll$/);
 }
 die "missing controlled Lua import\n" unless $lua == 1;
 if ($allow_extra) {
