@@ -78,22 +78,21 @@ local function parse_decls(src)
 end
 
 describe("c preprocessor (cpp)", function()
-    it("removes only standalone dot components from absolute lookup paths",
+    it("uses native spelling for absolute lookup paths",
     function()
         if platform.windows then
-            -- Windows lookup preserves authored components for the native
-            -- filesystem, including the link before an ensuing '..'.
-            assert.equal("C:/work//root/./header.h",
+            -- Windows absolute paths use lexical normalization.
+            assert.equal("C:/work/root/header.h",
                 cpp.absolute_lookup_path("./header.h", "C:/work//root"))
-            assert.equal("C:/sdk/link/../include/./api.h",
+            assert.equal("C:/sdk/include/api.h",
                 cpp.absolute_lookup_path(
                     "C:/sdk/link/../include/./api.h", "C:/ignored"))
-            assert.equal("//server/share//./api.h",
+            assert.equal("//server/share/api.h",
                 cpp.absolute_lookup_path(
                     [[\\server\share\\.\api.h]], "C:/ignored"))
             assert.equal("C:/server/share.h",
                 cpp.absolute_lookup_path("/server/share.h", "C:/ignored"))
-            assert.equal("C:/sdk///link/../include/api.h",
+            assert.equal("C:/sdk/include/api.h",
                 cpp.absolute_lookup_path(
                     "C:/sdk///link/../include/api.h", "C:/ignored"))
             return

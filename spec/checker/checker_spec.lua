@@ -2133,19 +2133,26 @@ describe("Titan type checker", function()
         -- with nil (mtime_bin >= nil) when a .so exists but no .titan does.
         local lfs = require 'lfs'
         local real = lfs.attributes
+        local suffix = require("titan-compiler.platform").windows and
+            "%.dll$" or "%.so$"
+        local compiled = { mode = "file", size = 0, modification = 12345,
+            permissions = "rw-r--r--", dev = 1, ino = 1 }
         lfs.attributes = function(f, attr)
-            if tostring(f):match("%.so$") then return 12345
-            elseif tostring(f):match("%.titan$") then return nil
+            if tostring(f):match(suffix) then
+                if attr then return compiled[attr] end
+                return compiled
+            elseif tostring(f):match("%.titan$") then
+                return nil, "No such file or directory", 2
             else return real(f, attr) end
         end
         driver.imported = {}
         local loader = driver.defaultloader()
-        local ok = pcall(driver.with_loader, loader, function(loader)
+        local ok, err = pcall(driver.with_loader, loader, function(loader)
             return loader("no_such_titan_module")
         end)
         lfs.attributes = real
         driver.imported = {}
-        assert.truthy(ok, "driver crashed comparing a number with nil")
+        assert.truthy(ok, err)
     end)
 
     it("fails on circular module references", function ()

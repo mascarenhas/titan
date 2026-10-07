@@ -5,6 +5,7 @@ local types = require "titan-compiler.types"
 local foreigntypes = require "titan-compiler.foreigntypes"
 local cdriver = require "c-parser.cdriver"
 local cpp = require "c-parser.cpp"
+local platform = require "titan-compiler.platform"
 
 describe("module foreign conversion payloads", function()
     local imported, registry, original_convert, conversions
@@ -466,7 +467,7 @@ describe("module foreign conversion payloads", function()
         assert.equal(cancellation, err)
     end)
 
-    it("refreshes same-content touches through metadata while preserving both graphs", function()
+    it("validates same-content touches while preserving both graphs", function()
         local path = header("cached.h", "typedef int touched_type;\n")
         local source = [[
             foreign import "cached.h"
@@ -499,13 +500,25 @@ describe("module foreign conversion payloads", function()
         assert.equal(1, stats.conversion.hits)
         assert.equal(interface, assert(driver.serialize_source_interface(touched)))
         assert.same(original, payloads)
-        assert.is_true((refreshes["c-header-v6"] or 0) > 0)
-        assert.equal(1, refreshes["ffi-conversion-v7"])
+        if platform.windows then
+            -- Without physical IDs there are no saved observations to refresh.
+            assert.equal(0, refreshes["c-header-v6"] or 0)
+            assert.equal(0, refreshes["ffi-conversion-v7"] or 0)
+        else
+            assert.is_true((refreshes["c-header-v6"] or 0) > 0)
+            assert.equal(1, refreshes["ffi-conversion-v7"])
+        end
         local _, warm = check(source)
         assert.equal(count, conversions)
-        assert.equal(0, warm.headers.file_reads)
-        assert.equal(0, warm.headers.file_hashes)
-        assert.equal(1, refreshes["ffi-conversion-v7"])
+        if platform.windows then
+            assert.is_true(warm.headers.file_reads > 0)
+            assert.is_true(warm.headers.file_hashes > 0)
+            assert.equal(0, refreshes["ffi-conversion-v7"] or 0)
+        else
+            assert.equal(0, warm.headers.file_reads)
+            assert.equal(0, warm.headers.file_hashes)
+            assert.equal(1, refreshes["ffi-conversion-v7"])
+        end
     end)
 
     it("replays a fresh source-import context after its provider body changes", function()

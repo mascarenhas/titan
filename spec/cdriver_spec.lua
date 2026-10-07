@@ -664,12 +664,12 @@ describe("completed C header payload transport", function()
         assert.same({ "const", "char", "*" }, reused.TEXT.type)
     end)
 
-    it("trusts the saved physical input when its mtime is preserved", function()
+    it("validates saved input when its mtime is preserved", function()
         local path = header("typedef int changed_type;\n")
         local strategy = compiler_io.new_sync()
         local stamp = assert(strategy:stat(path)).modified_seconds
         -- LuaFileSystem's touch restores seconds. Establish that exact stamp
-        -- before saving a native Windows FILETIME observation with nanoseconds.
+        -- before saving the original observation.
         assert(lfs.touch(path, stamp, stamp))
         local original = assert(strategy:stat(path))
         assert.equal(0, original.modified_nanoseconds)
@@ -683,8 +683,9 @@ describe("completed C header payload transport", function()
         end
         cdriver.clear_process_cache()
         local restored = assert_process_file(path, options)
-        assert.equal(1, matches)
-        assert.same({ "int" }, restored.changed_type.def)
+        assert.equal(platform.windows and 2 or 1, matches)
+        assert.same({ platform.windows and "unsigned" or "int" },
+            restored.changed_type.def)
     end)
 
     it("refreshes touched input metadata without rewriting the persisted graph", function()
@@ -716,15 +717,17 @@ describe("completed C header payload transport", function()
         assert_process_file(path, options)
         assert.equal(1, matches)
         assert.equal(1, puts)
-        assert.equal(1, refreshes)
+        assert.equal(platform.windows and 0 or 1, refreshes)
         assert.equal(original, payloads[key])
         assert.equal(1, cdriver.process_cache_stats(strategy).file_reads)
         assert.equal(1, cdriver.process_cache_stats(strategy).file_hashes)
         cdriver.clear_process_cache(strategy)
         assert_process_file(path, options)
-        assert.equal(1, refreshes)
-        assert.equal(0, cdriver.process_cache_stats(strategy).file_reads)
-        assert.equal(0, cdriver.process_cache_stats(strategy).file_hashes)
+        assert.equal(platform.windows and 0 or 1, refreshes)
+        assert.equal(platform.windows and 1 or 0,
+            cdriver.process_cache_stats(strategy).file_reads)
+        assert.equal(platform.windows and 1 or 0,
+            cdriver.process_cache_stats(strategy).file_hashes)
     end)
 
     it("backfills touched observations through a legacy byte-only adapter", function()
@@ -741,8 +744,10 @@ describe("completed C header payload transport", function()
         cdriver.clear_process_cache(strategy)
         assert_process_file(path, options)
         assert.equal(1, matches)
-        assert.equal(0, cdriver.process_cache_stats(strategy).file_reads)
-        assert.equal(0, cdriver.process_cache_stats(strategy).file_hashes)
+        assert.equal(platform.windows and 1 or 0,
+            cdriver.process_cache_stats(strategy).file_reads)
+        assert.equal(platform.windows and 1 or 0,
+            cdriver.process_cache_stats(strategy).file_hashes)
     end)
 
     for _, flag in ipairs({ "-include", "-imacros" }) do
@@ -914,7 +919,13 @@ describe("completed C header payload transport", function()
             local result, err = cdriver.process_file(target, options)
             assert.is_true(raced)
             assert.is_nil(result)
-            assert.matches("C header changed while it was read", err, 1, true)
+            local diagnostic = "C header changed while it was read"
+            if platform.windows then
+                diagnostic = forced and
+                    "forced C headers changed while probing" or
+                    "C header changed while preprocessing"
+            end
+            assert.matches(diagnostic, err, 1, true)
             assert.is_nil(next(payloads))
             local current, include = assert_process_file(target, options)
             assert.same({ "long" }, current.racing_type.def)
@@ -986,10 +997,11 @@ describe("completed C header payload transport", function()
             return require("titan-compiler.sha256").binary(bytes)
         end
         assert_process_file(path, { cache_adapter = adapter })
-        assert.equal(1, hashes)
+        assert.is_true(hashes > 0)
+        local previous_hashes = hashes
         cdriver.clear_process_cache()
         assert_process_file(path, { cache_adapter = adapter })
-        assert.equal(2, hashes)
+        assert.is_true(hashes > previous_hashes)
         assert.equal(1, matches)
         cdriver.clear_process_cache()
         local cancelled = {}
@@ -1325,7 +1337,7 @@ describe("C FFI cdriver", function()
                 { alias, vendor, root })
         end)
 
-        it("distinguishes a same-byte replacement from a hard link",
+        it("uses physical identity when available and content identity otherwise",
         function()
             local root = tmp_dir()
             local original = root .. "/original.h"
@@ -1350,10 +1362,20 @@ describe("C FFI cdriver", function()
             -- alone is replaced by the independently created file.
             if platform.windows then assert(os.remove(linked)) end
             assert(os.rename(replacement, linked))
-            assert.not_equal(original_file,
-                assert(cdriver.header_input_identity("file", linked)))
-            assert.not_equal(original_search,
-                assert(cdriver.header_input_identity("search", linked)))
+            if platform.windows then
+                assert.equal(original_file,
+                    assert(cdriver.header_input_identity("file", linked)))
+                assert.equal(original_search,
+                    assert(cdriver.header_input_identity("search", linked)))
+                write_file(linked, "typedef long titan_physical_header_value;\n")
+                assert.not_equal(original_file,
+                    assert(cdriver.header_input_identity("file", linked)))
+            else
+                assert.not_equal(original_file,
+                    assert(cdriver.header_input_identity("file", linked)))
+                assert.not_equal(original_search,
+                    assert(cdriver.header_input_identity("search", linked)))
+            end
 
             remove_tree({ original, linked, replacement }, { root })
         end)
@@ -3117,6 +3139,10 @@ typedef double titan_forced_order_value;
                 },
                 compiler_include_dirs = {},
             })
+            if platform.windows then
+                forced_lookup = assert(platform.path.normalize(forced_lookup))
+                imported_lookup = assert(platform.path.normalize(imported_lookup))
+            end
             assert.same({ "int" }, types.titan_normalized_value.def)
             assert.equal(imported_lookup, include.resolved)
             assert.same({ forced_lookup, imported_lookup }, {

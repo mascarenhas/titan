@@ -27,8 +27,8 @@ local prefix_lua = os.getenv("PREFIX") and
 local LUA = prefix_lua and file_exists(prefix_lua) and prefix_lua
     or (platform.windows and "lua.exe" or "lua")
 
-local function run(argv)
-    local result = compiler_io.new_sync():run(argv)
+local function run(argv, options)
+    local result = compiler_io.new_sync():run(argv, options)
     local output = result.output or result.diagnostic or ""
     if platform.windows then
         output = output:gsub("\r\n", "\n")
@@ -114,21 +114,24 @@ local function titanc(overrides, ...)
 
     -- These subprocesses exercise source-checkout SDK selection even when
     -- Busted itself uses the installed SDK through its checkout profile.
-    local argv = { platform.windows and "env.exe" or "env", "-u", "TITAN_BUILD_PROFILE" }
+    local argv, options = {}, nil
     -- Windows owns its SDK in a separate native build tree; the checkout does
     -- not contain the Unix runtime archive selected by these probes on Unix.
     if platform.windows then
-        argv[#argv + 1] = "TITAN_ROCKS_ROOT=" ..
+        environment.TITAN_BUILD_PROFILE = environment.TITAN_BUILD_PROFILE or false
+        environment.TITAN_ROCKS_ROOT =
             require("spec.support.installed_prefix").active()
+        options = { env = environment }
     else
+        argv = { "env", "-u", "TITAN_BUILD_PROFILE" }
         argv[#argv + 1] = "-u"
         argv[#argv + 1] = "TITAN_ROCKS_ROOT"
-    end
-    if environment.TITAN_BUILD_PROFILE then
-        table.insert(argv, "TITAN_BUILD_PROFILE=" .. environment.TITAN_BUILD_PROFILE)
-    end
-    for _, name in ipairs(ENVIRONMENT_KEYS) do
-        table.insert(argv, name .. "=" .. environment[name])
+        if environment.TITAN_BUILD_PROFILE then
+            table.insert(argv, "TITAN_BUILD_PROFILE=" .. environment.TITAN_BUILD_PROFILE)
+        end
+        for _, name in ipairs(ENVIRONMENT_KEYS) do
+            table.insert(argv, name .. "=" .. environment[name])
+        end
     end
     table.insert(argv, LUA)
     table.insert(argv, "-e")
@@ -147,7 +150,7 @@ local function titanc(overrides, ...)
         end
     end
     for _, argument in ipairs(arguments) do table.insert(argv, argument) end
-    return run(argv)
+    return run(argv, options)
 end
 
 local ARTIFACTS = {

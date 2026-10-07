@@ -170,7 +170,7 @@ local function run_lua(cwd, titan_path, package_path, cpath_roots, code)
         "TITAN_PATH_0_6=" .. titan_path,
         "TITAN_PATH=",
         LUA, "-e", string.format([[
-package.path = %q
+package.path = %q .. ";" .. package.path
 package.cpath = %q
 %s
 ]], path.to_slash(path.join(package_path, "?.lua")), table.concat(cpath, ";"), code),

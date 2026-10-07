@@ -25,8 +25,7 @@ end
 
 function cpp.absolute_lookup_path(path, cwd, strategy)
     if platform.windows then
-        -- Preserve authored dot components and physical lookup spelling. Only
-        -- the native/injected filesystem determines the observed file ID.
+        -- Windows absolute paths use lexical normalization.
         return assert(platform.absolute(path, cwd, strategy or default_io))
     end
     if path:sub(1, 1) ~= SEP then path = path_join(cwd, path) end

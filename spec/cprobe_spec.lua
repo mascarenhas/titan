@@ -2421,7 +2421,11 @@ describe("source-only probe cache", function()
         assert.equal(3, #first_state.calls)
         local original_input = first_include.c_header_dependencies[1]
         assert.equal(header, original_input.path)
-        assert.is_table(original_input.observation)
+        if platform.windows then
+            assert.is_nil(original_input.observation)
+        else
+            assert.is_table(original_input.observation)
+        end
         assert.is_true(first:close())
 
         write_file(header, "typedef long observed_type;\n")
@@ -2430,8 +2434,12 @@ describe("source-only probe cache", function()
         assert.same({ "long" }, changed_types.observed_type.def)
         local changed_input = changed_include.c_header_dependencies[1]
         assert.not_equal(original_input.identity, changed_input.identity)
-        assert.not_equal(original_input.observation.modified_seconds,
-            changed_input.observation.modified_seconds)
+        if platform.windows then
+            assert.is_nil(changed_input.observation)
+        else
+            assert.not_equal(original_input.observation.modified_seconds,
+                changed_input.observation.modified_seconds)
+        end
         for _, pair in ipairs({ { accepted, cached_accept }, { rejected, cached_reject } }) do
             assert.equal(pair[1].source, pair[2].source)
             assert.equal(pair[1].key, pair[2].key)
@@ -2446,8 +2454,13 @@ describe("source-only probe cache", function()
         local warm_types = parse_and_probe(third)
         assert.same({ "long" }, warm_types.observed_type.def)
         local after = cdriver.process_cache_stats(strategy)
-        assert.equal(before.file_reads, after.file_reads)
-        assert.equal(before.file_hashes, after.file_hashes)
+        if platform.windows then
+            assert.is_true(after.file_reads > before.file_reads)
+            assert.is_true(after.file_hashes > before.file_hashes)
+        else
+            assert.equal(before.file_reads, after.file_reads)
+            assert.equal(before.file_hashes, after.file_hashes)
+        end
         assert.equal(0, #third_state.calls)
         assert.is_true(third:close())
         cdriver.clear_process_cache(strategy)
