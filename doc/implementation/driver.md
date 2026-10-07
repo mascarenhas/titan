@@ -86,9 +86,12 @@ policy rather than an inherent identity. The rock's internal
 `TITAN_ROCKS_ROOT` setting identifies `ROCKS_TREE` during source installation
 and its post-install standard build. Otherwise, when the compiler is not
 running from the Titan source checkout, the driver scans `package.cpath` from
-left to right and uses the first literal template ending in
-`/lib/lua/5.5/?.so`, stripping that suffix. This discovery relies on the
-currently supported equal-root layout. The resulting Titan root selects the
+left to right for the first literal template ending in
+`/lib/titan/0.6/?.so` (`?.dll` on Windows), stripping that suffix. If none exists,
+it repeats the scan for the ordinary `/lib/lua/5.5/?.so` template. Preferring
+Titan's current version avoids selecting LuaRocks' prepended user-tree path;
+other Titan versions and suffix lookalikes do not match. This discovery relies
+on the currently supported equal-root layout. The resulting Titan root selects the
 matching `src/lua-5.5.1`, `include`, `lib/liblua.a`,
 `lib/titan/0.6/libtitan.a`,
 `lib/libbacktrace.a`, and every compiled Titan module. Test mode additionally
@@ -1250,7 +1253,8 @@ error alerts):
 
 * **`main`** creates a fresh `lua_State`, opens the standard libraries, and
   calls `titan_init_paths`. That parses the inherited `package.cpath` for the
-  first `/lib/lua/5.5/?.so` template, initializes the root and Titan module
+  first `/lib/titan/0.6/?.so` template, falling back to the ordinary
+  `/lib/lua/5.5/?.so` template, initializes the root and Titan module
   path in the registry, and
   ensures `<root>/lib/titan/0.6/?.so` is in `package.cpath`; the configured
   Titan-owned Lua already places it before the `lib/lua` templates. It then
@@ -1709,7 +1713,8 @@ separate-DSO imports use the selective compatibility protocol instead.
 * **`pushroot(L)` / `titan_init_paths(L)`** normalize and cache the Titan
   SDK/rocks-tree root under `TITAN_ROOT_KEY`. After `luaL_openlibs`, a compiled
   executable scans the inherited
-  `package.cpath` for the first entry ending in `/lib/lua/5.5/?.so`, falling
+  `package.cpath` for the first entry ending in `/lib/titan/0.6/?.so`, then
+  `/lib/lua/5.5/?.so` as a bootstrap fallback, falling
   back to `/usr/local` only when no such entry exists. `titan_init_paths` also
   ensures the exact `<root>/lib/titan/0.6/?.so` template is in
   `package.cpath` and eagerly initializes the Titan loader path. The configured
@@ -1722,7 +1727,8 @@ separate-DSO imports use the selective compatibility protocol instead.
   `TITAN_PATH_VAR TITAN_LIBRARY_VERSION_SUFFIX`), then `getenv("TITAN_PATH")`,
   then `".;<root>/lib/titan/0.6"`, where `<root>` is recovered from
   the first literal `package.cpath` template ending in
-  `/lib/lua/5.5/?.so` (or `/usr/local` as the legacy fallback). A `;;` in
+  `/lib/titan/0.6/?.so`, falling back to `/lib/lua/5.5/?.so` and then
+  `/usr/local`. A `;;` in
   the environment value is replaced by that default path (two
   `luaL_gsub` passes through a `\1` placeholder), so
   `TITAN_PATH="/opt/titan;;"` means "look in `/opt/titan`, then the
@@ -1892,7 +1898,7 @@ the explicit public-header input for its native helper builds.
 | `TITAN_PATH_0_6` | `driver.lua` (compile time), `titan.c` `pushpath` (run time) | unset | Versioned module search path; wins over `TITAN_PATH`. |
 | `TITAN_PATH` | same | unset | Module search path; `;;` expands to the ordinary default at compile time and run time. |
 | `TITAN_ROCKS_ROOT` | `driver.lua`, source-rock post-install Make invocation | unset | Internal normalized `ROCKS_TREE` override used while the just-deployed compiler builds the standard modules; not a public deployment setting. |
-| `driver.TITAN_ROOT` | `driver.lua` | internal override, otherwise first `package.cpath` entry ending `/lib/lua/5.5/?.so` | Titan SDK/rocks-tree root. Module loading only parses absolute roots lexically; resolver initialization normalizes relative roots through `context.io`. Package-path discovery relies on the currently supported `ROCKS_TREE == PREFIX` layout. |
+| `driver.TITAN_ROOT` | `driver.lua` | internal override, otherwise first current Titan `package.cpath` template (`/lib/titan/0.6/?.so`), then the ordinary Lua template (`/lib/lua/5.5/?.so`); Windows uses `?.dll` | Titan SDK/rocks-tree root. Module loading only parses absolute roots lexically; resolver initialization normalizes relative roots through `context.io`. Package-path discovery relies on the currently supported `ROCKS_TREE == PREFIX` layout. |
 | `driver.SOURCE_CHECKOUT` / `driver.INSTALLED` | `driver.initialize_layout(context)` | detected from checkout files unless the internal root is set | Select the writable checkout SDK/archive inputs or read-only installed SDK inputs. Detection is lazy and uses `context.io`; before resolver initialization the module exposes only a provisional lexical checkout layout. |
 | `driver.INSTALL_PATHS` | `driver.installed_paths` | paths below `driver.TITAN_ROOT` | Holds `lua_source`, `include`, `lib`, `libtitan`, `libbacktrace`, `liblua`, `titan_bin`, and `lua_cpath`; bundled `libuv.a` is deliberately not an installed SDK path. |
 | `driver.TITAN_BIN_PATH` | `driver.lua` | `TITAN_PATH_0_6`, `TITAN_PATH`, or `.;<root>/lib/titan/0.6` in installed mode | Roots for root-major, shallow-to-exact compiled-provider search; checkout mode retains the legacy `/usr/local` fallback. |

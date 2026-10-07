@@ -195,6 +195,7 @@ describe("Windows compiler path integration", function()
 
     it("extracts the controlled Lua cpath without confusing Titan providers", function()
         assert.equal("C:/SDK/bin/..", driver.root_from_package_cpath(table.concat({
+            [[C:\Users\dev\.luarocks\lib\lua\5.5\?.dll]],
             [[C:\SDK\bin\..\lib\titan\0.6\?.dll]],
             [[C:\Wrong\lib\lua\5.5\?.so]],
             [[C:\SDK\bin\..\lib\lua\5.5\?.dll]],
@@ -1283,8 +1284,10 @@ describe("compiler installation discovery", function()
         assert.is_nil(value.IS_DARWIN)
     end)
 
-    posix_model_it("uses the first literal Lua 5.5 C-module prefix", function()
+    posix_model_it("prefers the current Titan provider over LuaRocks' user tree", function()
         local cpath = table.concat({
+            "/home/dev/.luarocks/lib/lua/5.5/?.so",
+            "/old/lib/titan/0.5/?.so",
             "/first prefix/lib/titan/0.6/?.so",
             "/wrong/lib/lua/5.4/?.so",
             "/also-wrong/lib/lua/5.5/?.dylib",
@@ -1293,6 +1296,15 @@ describe("compiler installation discovery", function()
         }, ";")
         assert.equal("/first prefix",
             driver.root_from_package_cpath(cpath))
+    end)
+
+    posix_model_it("falls back to the first ordinary Lua template during bootstrap", function()
+        assert.equal("/lua/prefix", driver.root_from_package_cpath(table.concat({
+            "/old/lib/titan/0.5/?.so",
+            "/wrong/lib/titan/0.6/?.so.debug",
+            "/lua/prefix/lib/lua/5.5/?.so",
+            "/second/lib/lua/5.5/?.so",
+        }, ";")))
     end)
 
     posix_model_it("rejects suffix lookalikes and handles the filesystem root", function()

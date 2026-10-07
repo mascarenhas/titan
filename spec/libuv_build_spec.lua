@@ -376,19 +376,13 @@ local FFI_RETIRED_HELPERS = {
     "titan_uvshim_dup_cloexec",
 }
 
-local function prefix_from_cpath(cpath)
-    return installed_prefix.from_cpath(cpath)
-end
-
 local function installed_stdlib_container()
-    local prefix = assert(prefix_from_cpath(package.cpath),
-        "cannot find the active Lua prefix in package.cpath")
+    local prefix = installed_prefix.active()
     return prefix .. "/lib/titan/0.6/" .. INSTALLED_STDLIB_CONTAINER
 end
 
 local function installed_stdlib_archive()
-    local prefix = assert(prefix_from_cpath(package.cpath),
-        "cannot find the active Lua prefix in package.cpath")
+    local prefix = installed_prefix.active()
     return prefix .. "/lib/titan/0.6/" .. STDLIB_STATIC_ARCHIVE
 end
 
@@ -3280,7 +3274,7 @@ fi
             end
             local root = make_temp_dir()
             local tested, test_error = xpcall(function()
-                local prefix = assert(prefix_from_cpath(package.cpath))
+                local prefix = installed_prefix.active()
                 local launcher = prefix .. "/bin/busted"
                 local installed_types =
                     prefix .. "/share/lua/5.5/titan-compiler/types.lua"
@@ -3541,7 +3535,7 @@ exec make "$@"
                 argv[#argv + 1] = "--busted-filter=focus$tail"
                 argv[#argv + 1] = "--titan-filter=native$tail"
                 argv[#argv + 1] = "--prefix=" ..
-                    assert(require("titan-compiler.driver").TITAN_ROOT)
+                    installed_prefix.active()
                 local ok = run_argv(argv)
                 assert.falsy(ok)
                 assert.equal("selected\n", read_file(make_log))
@@ -5267,7 +5261,8 @@ done
                 "steps.sanitizer-native-cache.outputs.cache-primary-key",
                 "steps.sanitizer-native-cache.outputs.cache-hit != 'true'",
                 'test ! -e "$PREFIX/bin/luarocks"',
-                'test ! -e "$PREFIX/lib/titan"',
+                'find "$PREFIX/lib/titan" ! -type d -print -quit',
+                'test -z "$titan_entries"',
                 'test ! -e "$PREFIX/var/cache/titan-probes"',
             }) do
                 assert.truthy(sanitizer_job:find(contract, 1, true), contract)

@@ -652,8 +652,11 @@ and uses `!..` for the SDK root; see the [Windows relocation rules](../implement
   `TITAN_PATH_0_6`, or `TITAN_PATH` if that is unset. Otherwise the default
   is `.;<root>/lib/titan/0.6`. An installed `titanc` recovers `<root>` from
   the first literal `package.cpath` entry ending in
-  `/lib/lua/5.5/?.so`. For logical `a.b.c`, the default performs a complete
-  pass over `a.so`, `a/b.so`, and exact `a/b/c.so`, then a complete pass over
+  `/lib/titan/0.6/?.so` (`?.dll` on Windows), falling back to the first ordinary
+  `/lib/lua/5.5/?.so` template during bootstrap. This keeps LuaRocks' preceding
+  user-tree templates from selecting the wrong SDK. For logical `a.b.c`, the
+  default performs a complete pass over `a.so`, `a/b.so`, and exact `a/b/c.so`,
+  then a complete pass over
   the corresponding `.a` paths; `--static` swaps those passes. A file in an
   earlier root shadows the same relative candidate in later roots within its
   format, while an unrelated ancestor container can advance to a deeper
@@ -810,7 +813,8 @@ the initialization recursion. Any compiled-in module outside that closure and
 an unused archive sibling remain absent from the preload table.
 
 After `luaL_openlibs`, the executable parses the
-inherited `package.cpath` for its `/lib/lua/5.5/?.so` entry, adds
+inherited `package.cpath` for its current `/lib/titan/0.6/?.so` entry
+(with the ordinary `/lib/lua/5.5/?.so` entry as a bootstrap fallback), adds
 `<root>/lib/titan/0.6/?.so` if it is absent, and initializes the Titan module
 path from that same root. Deploy the standard provider and loaders as described
 under [where modules are found](#where-modules-are-found). The linked Lua

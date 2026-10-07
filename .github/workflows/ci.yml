@@ -483,10 +483,8 @@ jobs:
       # remain at O0 below. Keep LTO off
       # so saved translation-unit bytes still match the diagnostic shadow.
       SANITIZER_FLAGS: "-O0 -fno-lto -g -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer"
-      # Make's content stamps deliberately revisit native dependencies from
-      # later targets, so their complete configuration must remain in the
-      # environment for the whole job rather than being supplied to only the
-      # first build.
+      # Keep instrumentation in the job environment so recursive Make and
+      # LuaRocks builds receive the same sanitizer flags throughout the job.
       LUA_MYCFLAGS: "-fPIC -O1 -fno-lto -g -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer"
       LUA_MYLDFLAGS: "-O1 -fno-lto -g -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer"
       LUA_MYLIBS: "-O1 -fno-lto -g -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer"
@@ -639,7 +637,10 @@ jobs:
           test -f openssl-build/libssl.a
           test -f openssl-build/libcrypto.a
           test ! -e "$PREFIX/bin/luarocks"
-          test ! -e "$PREFIX/lib/titan"
+          # Lua creates its versioned search directory during installation.
+          # Only installed Titan artifacts belong beyond this cache boundary.
+          titan_entries="$(find "$PREFIX/lib/titan" ! -type d -print -quit)"
+          test -z "$titan_entries"
           test ! -e "$PREFIX/var/cache/titan-probes"
 
       - name: Save sanitizer native dependencies

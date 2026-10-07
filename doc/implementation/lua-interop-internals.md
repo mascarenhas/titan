@@ -1015,7 +1015,8 @@ archive is not installed in the SDK; extension DSOs leave their `uv_*` calls unr
 
 * **Preload registration, not eager loading.** The C `main` creates a
   state and runs `luaL_openlibs`. `titan_init_paths` then parses the inherited
-  `package.cpath` for the first `/lib/lua/5.5/?.so` entry, initializes the
+  `package.cpath` for the first current `/lib/titan/0.6/?.so` entry,
+  falls back to `/lib/lua/5.5/?.so` during bootstrap, and initializes the
   Titan module-path default from that root, and ensures
   `<root>/lib/titan/0.6/?.so` is present in `package.cpath`. The
   executable-relative Titan-owned Lua already places that template before its

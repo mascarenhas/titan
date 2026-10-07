@@ -182,6 +182,59 @@ describe("selective binary dependency compatibility", function()
         generated = {}
     end)
 
+    if not platform.windows then
+        it("derives the runtime SDK root from Titan's C-path before LuaRocks' user tree", function()
+            run_native_harness([[
+#include <string.h>
+
+static void check_root(const char *cpath, const char *expected_root,
+                       const char *expected_template) {
+    lua_State *L = luaL_newstate();
+    assert(L != NULL);
+    luaL_openlibs(L);
+    lua_getglobal(L, "package");
+    lua_pushstring(L, cpath);
+    lua_setfield(L, -2, "cpath");
+    lua_pop(L, 1);
+
+    int top = lua_gettop(L);
+    titan_init_paths(L);
+    assert(lua_gettop(L) == top);
+    lua_getfield(L, LUA_REGISTRYINDEX, TITAN_ROOT_KEY);
+    assert(lua_type(L, -1) == LUA_TSTRING);
+    assert(strcmp(lua_tostring(L, -1), expected_root) == 0);
+    lua_pop(L, 1);
+    lua_getglobal(L, "package");
+    lua_getfield(L, -1, "cpath");
+    assert(strstr(lua_tostring(L, -1), expected_template) != NULL);
+    lua_pop(L, 2);
+    assert(lua_gettop(L) == top);
+    lua_close(L);
+}
+
+int main(void) {
+    check_root(
+        "/home/dev/.luarocks/lib/lua/5.5/?.so;"
+        "/first prefix/lib/titan/" TITAN_LIBRARY_VERSION "/?.so;"
+        "/second/lib/titan/" TITAN_LIBRARY_VERSION "/?.so;"
+        "/first prefix/lib/lua/5.5/?.so",
+        "/first prefix",
+        "/first prefix/lib/titan/" TITAN_LIBRARY_VERSION "/?.so");
+    check_root(
+        "/old/lib/titan/0.5/?.so;"
+        "/lookalike/lib/titan/" TITAN_LIBRARY_VERSION "/?.so.debug;"
+        "/bootstrap/lib/lua/5.5/?.so;/second/lib/lua/5.5/?.so",
+        "/bootstrap",
+        "/bootstrap/lib/titan/" TITAN_LIBRARY_VERSION "/?.so");
+    check_root("/lib/titan/" TITAN_LIBRARY_VERSION "/?.so;"
+               "/later/lib/lua/5.5/?.so", "/",
+               "/lib/titan/" TITAN_LIBRARY_VERSION "/?.so");
+    return 0;
+}
+]])
+        end)
+    end
+
     it("exposes a Lua-independent ABI value through the canonical provider", function()
         build({ {
             name = "bc180_provider",

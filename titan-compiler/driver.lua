@@ -233,33 +233,39 @@ local function same_existing_file(left, right)
         left_attr.dev == right_attr.dev and left_attr.ino == right_attr.ino
 end
 
--- Return the installation prefix encoded by the first canonical Lua C-module
--- template. Deliberately do not accept a merely similar template: this is the
--- one layout established by Titan's prefix-owned Lua installation.
+-- LuaRocks prepends its user tree to package.cpath. Prefer the current Titan
+-- provider template, which identifies the SDK owned by the Lua installation;
+-- fall back to the ordinary Lua template during bootstrap.
 function driver.root_from_package_cpath(cpath)
     if type(cpath) ~= "string" then return nil end
-    local suffix = lua_cpath_suffix()
-    for template in (cpath .. ";"):gmatch("(.-);") do
-        local matched = template
-        if platform.windows then
-            -- Match separators without changing the returned extended-root
-            -- spelling or interpreting executable-relative ".." components.
-            matched = template:gsub("\\", "/")
-        end
-        if #matched >= #suffix and matched:sub(-#suffix) == suffix then
-            local root = template:sub(1, #template - #suffix)
+    local suffixes = {
+        "/lib/titan/" .. driver.TITAN_LIBRARY_VERSION .. "/?" ..
+            (platform.windows and ".dll" or ".so"),
+        lua_cpath_suffix(),
+    }
+    for _, suffix in ipairs(suffixes) do
+        for template in (cpath .. ";"):gmatch("(.-);") do
+            local matched = template
             if platform.windows then
-                if root:match("^[A-Za-z]:$") then root = root .. "/" end
-                if root == "" then return nil end
-                local spelling = platform.path.separators(root)
-                if not spelling and root:sub(1, 4) == "\\\\?\\" then
-                    -- Removing the suffix also removed the separator that is
-                    -- part of an extended drive or volume-GUID root.
-                    spelling = platform.path.separators(root .. "\\")
-                end
-                return spelling
+                -- Match separators without changing the returned extended-root
+                -- spelling or interpreting executable-relative ".." components.
+                matched = template:gsub("\\", "/")
             end
-            return root ~= "" and root or "/"
+            if #matched >= #suffix and matched:sub(-#suffix) == suffix then
+                local root = template:sub(1, #template - #suffix)
+                if platform.windows then
+                    if root:match("^[A-Za-z]:$") then root = root .. "/" end
+                    if root == "" then return nil end
+                    local spelling = platform.path.separators(root)
+                    if not spelling and root:sub(1, 4) == "\\\\?\\" then
+                        -- Removing the suffix also removed the separator that is
+                        -- part of an extended drive or volume-GUID root.
+                        spelling = platform.path.separators(root .. "\\")
+                    end
+                    return spelling
+                end
+                return root ~= "" and root or "/"
+            end
         end
     end
     return nil

@@ -47,6 +47,16 @@ describe("installed-prefix test support", function()
         assert.equal(absolute("tmp/explicit"), installed_prefix.active())
     end)
 
+    it("finds the Titan SDK after a stock LuaRocks user-tree template", function()
+        set_environment({})
+        package.cpath = table.concat({
+            absolute("home/dev/.luarocks/lib/lua/5.5/?") .. suffix,
+            absolute("sdk/lib/titan/0.6/?") .. suffix,
+            absolute("sdk/lib/lua/5.5/?") .. suffix,
+        }, ";")
+        assert.equal(absolute("sdk"), installed_prefix.active())
+    end)
+
     it("uses the test override and then the active Lua path as fallbacks",
        function()
         set_environment({

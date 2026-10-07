@@ -952,32 +952,38 @@ static int push_package_cpath_root(lua_State *L) {
     lua_getglobal(L, "package");
     if(lua_istable(L, -1) && lua_getfield(L, -1, "cpath") == LUA_TSTRING) {
         size_t path_len;
-        const size_t suffix_len = sizeof(TITAN_LUA_CPATH_SUFFIX) - 1;
+        const char *suffixes[] = {
+            "/lib/titan/" TITAN_LIBRARY_VERSION "/?.so",
+            TITAN_LUA_CPATH_SUFFIX
+        };
         const char *path = lua_tolstring(L, -1, &path_len);
-        const char *entry = path;
         const char *limit = path + path_len;
-        while(entry <= limit) {
-            const char *end = memchr(entry, ';', (size_t)(limit - entry));
-            size_t entry_len;
-            size_t root_len;
-            if(end == NULL) end = limit;
-            entry_len = (size_t)(end - entry);
-            if(entry_len >= suffix_len &&
-               memcmp(entry + entry_len - suffix_len,
-                      TITAN_LUA_CPATH_SUFFIX, suffix_len) == 0) {
-                root_len = entry_len - suffix_len;
-                while(root_len > 1 && entry[root_len - 1] == '/') root_len--;
-                if(root_len == 0) {
-                    lua_pushliteral(L, "/");
-                } else {
-                    lua_pushlstring(L, entry, root_len);
+        for(size_t i = 0; i < sizeof(suffixes) / sizeof(suffixes[0]); i++) {
+            const size_t suffix_len = strlen(suffixes[i]);
+            const char *entry = path;
+            while(entry <= limit) {
+                const char *end = memchr(entry, ';', (size_t)(limit - entry));
+                size_t entry_len;
+                size_t root_len;
+                if(end == NULL) end = limit;
+                entry_len = (size_t)(end - entry);
+                if(entry_len >= suffix_len &&
+                   memcmp(entry + entry_len - suffix_len,
+                          suffixes[i], suffix_len) == 0) {
+                    root_len = entry_len - suffix_len;
+                    while(root_len > 1 && entry[root_len - 1] == '/') root_len--;
+                    if(root_len == 0) {
+                        lua_pushliteral(L, "/");
+                    } else {
+                        lua_pushlstring(L, entry, root_len);
+                    }
+                    lua_replace(L, top + 1);
+                    lua_settop(L, top + 1);
+                    return 1;
                 }
-                lua_replace(L, top + 1);
-                lua_settop(L, top + 1);
-                return 1;
+                if(end == limit) break;
+                entry = end + 1;
             }
-            if(end == limit) break;
-            entry = end + 1;
         }
     }
     lua_settop(L, top);

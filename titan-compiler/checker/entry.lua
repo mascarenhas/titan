@@ -40,8 +40,7 @@ function checker.check(modname, ast, subject, filename, loader, options)
     st.target_profile_provider = options.target_profile_provider
     st.probe_service_provider = options.probe_service_provider
     if filename then
-        st.source_dir = platform.windows and platform.parent(filename)
-            or filename:match("^(.*)/[^/]*$")
+        st.source_dir = platform.parent(filename)
         if not st.source_dir or st.source_dir == "" then
             st.source_dir = "."
         end

@@ -776,8 +776,10 @@ once under `M`. All contributors share one namespace; top-level `local` is
 module-private, never file-private. An immediate constituent cannot be imported
 as an apparent flat child once source lookup reaches its parent folder, but a
 genuine deeper folder child remains legal. It recovers the Titan
-SDK/rocks-tree root from the first `package.cpath` template ending in
-`/lib/lua/5.5/?.so`; that works because the supported install currently sets
+SDK/rocks-tree root from the first current Titan `package.cpath` template
+ending in `/lib/titan/0.6/?.so` (`?.dll` on Windows), with the ordinary
+`/lib/lua/5.5/?.so` template as a bootstrap fallback. This skips LuaRocks' preceding
+user-tree templates and works because the supported install currently sets
 `ROCKS_TREE == PREFIX`, not because the two owners are inherently identical.
 Compiled-module lookup defaults to `.;<root>/lib/titan/0.6`, with
 `TITAN_PATH_0_6`/`TITAN_PATH` overriding it and `;;` inserting that ordinary
