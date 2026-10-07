@@ -234,7 +234,7 @@ lifecycle protocol.
 
 ## Validation profile and isolated SDKs
 
-`TITAN_BUILD_PROFILE` is selected before Make expands configuration stamps or
+`TITAN_BUILD_PROFILE` is selected before Make expands native flags or
 installed SDK paths. Ordinary targets and unset compiler invocations use
 `production`; repository test entry points and the Busted/CI wrappers default
 to `validation`. An implicit validation installation uses `.lua-validation`,
@@ -246,16 +246,19 @@ complete preparation so runtime/header paths are expanded after installation.
 Leaf native targets require a prepared matching prefix.
 
 Validation sets generated-C and link defaults to `-O0 -fno-lto`, including
-libtitan, libbacktrace and bundled Readline/libuv/llhttp/SQLite/OpenSSL. Lua and
+libtitan, libbacktrace and bundled libuv/llhttp/SQLite/OpenSSL. Lua and
 its native compiler dependencies (LPegLabel and Lua filesystem), plus private
 LPegLabel, stay at O2/no LTO so compiler and test execution remains optimized.
 Sanitizer Lua/parser dependencies use O1/no LTO with complete instrumentation;
-Titan payloads retain O0/no LTO. Generic LuaRocks CFLAGS remain O0, while
-`make luarocks` separately reconciles compiler dependencies with scoped host
-compile/link flags. Its receipt hashes installed modules, versions and Lua/tool
-inputs, replacing stale same-version modules and preserving warm builds.
+Titan payloads retain O0/no LTO. The Titan rock receives separate O0 runtime
+flags while ordinary Lua dependencies use stock LuaRocks defaults. Sanitizer CI
+explicitly installs LPegLabel and Lua filesystem with instrumented host flags
+before the Titan rock. Lua/LuaRocks bootstrap targets check installed program
+existence only; their source/configuration rebuilds remain caller-owned.
 Parser-specific flags follow generic Titan extras. The SDK records its profile
-in `etc/titan/build-profile`, and configuration stamps include effective flags.
+in `etc/titan/build-profile`. Ordinary native builds use source/header
+prerequisites; callers clean their output directories after changing build flags
+or toolchains. `make clean-stdlib` clears the paired provider and module outputs.
 
 The test environment reaches Busted workers, the aggregate executable and its
 fresh child compilers. Direct coder Busted fixtures also prepend cheap C/link
@@ -278,7 +281,7 @@ artifacts do not change normal installed production defaults.
 
 ## Repository dogfooding
 
-The shared `spec/support/stdlib_test_modules.mk` manifest names 27 module-owned
+The shared `spec/support/stdlib_test_modules.mk` manifest names 28 module-owned
 roots under `spec/stdlib/titan/`, used by Linux, macOS, and native Windows.
 The same reviewed inventory names their test/helper compilation units, folder
 contributors, and direct source imports. On Unix, Make compiles shared
@@ -288,7 +291,7 @@ contributors, and direct source imports. On Unix, Make compiles shared
 command runs from `.titan-tests/` with the same absolute source tree and flags.
 The shared support output is `titan/test__test_support.o` within that directory.
 
-One final Unix `--test --incremental --no-uv-bootstrap` invocation keeps all 27
+One final Unix `--test --incremental --no-uv-bootstrap` invocation keeps all 28
 roots explicit and discovers the complete source/object closure. The designated
 first root, `test.tests`, owns `.titan-tests/test/tests`; the current synthetic
 runner, entrypoint, and Darwin dSYM are also owned there. Ordinary module
@@ -299,7 +302,7 @@ A no-op `titan-stdlib-test-build` invokes neither the compiler nor the linker.
 
 `make titan-stdlib-test-run` returns to the repository root before executing,
 because several fixtures use repository-relative paths. `TITAN_FILTER` supplies
-one Lua pattern to this already built executable; it never changes the 27-root
+one Lua pattern to this already built executable; it never changes the 28-root
 compile. `make titan-stdlib-test` composes build and run, while the split leaf
 targets let sanitizer and focused development runs reuse one build in multiple
 fresh processes. `BUSTED_FILTER` is independent and belongs to
@@ -342,7 +345,7 @@ because it reinstalls the current compiler and provider before testing;
 
 `run_with_timeout.sh` uses Bash monitor mode to give the executable its own
 process group and polls it at a coarse interval. Make's default
-`TITAN_TEST_TIMEOUT=600` covers all 27 test roots, including repeated fresh
+`TITAN_TEST_TIMEOUT=600` covers all 28 test roots, including repeated fresh
 child-fixture compilation under the selected profile. Explicit overrides, including the
 15-second CI shutdown check, remain independent of that default. At the deadline it sends
 `TERM`, then `KILL` after a short grace period, maps the timeout to status 124,
@@ -357,8 +360,8 @@ and keep the expectation owned by the case that produces it.
 
 ### Platform portability and complete execution
 
-`Makefile.windows.stdlib` provides the same build/run leaf targets through
-`scripts/windows_stdlib_tests.sh`. It compiles every root serially with the
+`Makefile.win` provides the same build/run leaf targets through
+`spec/support/windows_stdlib_tests.sh`. It compiles every root serially with the
 native CLANG64/UCRT SDK in a marked, disposable local NTFS workspace. The
 workspace contains a private SDK copy, test sources, authored child fixtures,
 generated objects, logs, and scratch paths. Windows retains its Job Object
@@ -368,7 +371,7 @@ preserves the complete native exit status. The aggregate still uses
 `--no-uv-bootstrap`; fresh child tests select their own bootstrap normally.
 
 The platform runners audit named results with
-`scripts/check_stdlib_test_output.lua`. An unfiltered run must execute every
+`spec/support/check_stdlib_test_output.lua`. An unfiltered run must execute every
 manifest owner, and named terminal results must match the runner's summary.
 Empty selections, duplicate results, unclassified skips, unfinished cases,
 and unfinished fixture portability fail the gate. A filter affects execution
@@ -381,13 +384,15 @@ continues to accept arbitrary reasons):
   POSIX user signals, Unix-domain stdio sockets, or Windows DWORD exit codes;
 - `capability: ` for a probed environment limitation, such as an unavailable
   locale or Windows symbolic-link privilege;
-- `unsupported: ` for a production API limitation, such as Windows native
-  source-frame attribution;
+- `unsupported: ` for a documented production API that Titan has not implemented
+  on that platform; lack of test evidence alone does not justify this label;
 - `portability: ` for an unfinished test fixture; this records the gap but
   deliberately fails a complete validation gate.
 
-Keep the exclusion at the smallest independent assertion. An unsupported
-symbolic traceback frame must not skip the surrounding bootstrap behavior.
+Keep the exclusion at the smallest independent assertion and cite the actual
+platform or implementation limitation. Native source-frame assertions run on
+Windows through libbacktrace; they must not be excluded merely because the
+original port had not exercised them.
 Port compile-time and link-time dependencies before adding runtime conditions:
 every root and its native fixtures must compile on every platform. The async
 foreign-work and SQLite fixtures use Windows synchronization or POSIX
@@ -420,14 +425,24 @@ macOS gate remains manually dispatched before merge.
 ## Packaging and compatibility
 
 `titan.test` is an ordinary logical module in the combined
-`titan.so`/`titan.a` pair, yielding twenty-three `luaopen_*` entries including bare
-support. Its generated Lua shim is published with the other twenty-one. The
-canonical private source is a compiler-data artifact, not another run-time
-module and not a LuaRocks manifest C module. `stdlib_installer.lua` validates,
-backs up, commits, and rolls it back in the same recoverable transaction before
-renaming `titan.so` last.
+`titan.so`/`titan.a` pair. The current provider has twenty-four `luaopen_*`
+entries including bare support and twenty-three generated logical-module shims.
+The canonical private source is a compiler-data artifact, not another run-time
+module or a LuaRocks manifest C module. Standard installation copies that exact
+source with the provider pair and shims. Explicit packaging tests check the
+installed artifacts.
 
 The addition did not change an existing native calling convention, module
-state layout, or serialized schema. The current publisher accepts only its
-bootstrap or complete current state; earlier Titan installations are not
-active-layout predecessors or migration sources.
+state layout, or serialized schema. Use a fresh installation after ABI changes; earlier Titan installations are
+not migration sources.
+
+The unfiltered Windows LuaRocks backend uses the same four compiler/language
+partitions in private NTFS checkout copies after its six retained serial specs
+and native aggregate pass. It defaults to two workers and accepts
+`TITAN_ROCK_TEST_JOBS=1` through `4`. The shard containing explicit compiler
+parallelism tests runs without other shards active. Workers inherit private
+TEMP/TMP, run installed Lua and Busted against the shared read-only SDK, and
+are supervised by native Job Objects. Windows uses MSYS2's `/tmp` as a short
+scratch base so nested fixture paths fit ordinary Win32 filename limits;
+Unix workers retain the caller's `TMPDIR`. Busted filters or appended arguments
+select the ordinary single-process route.

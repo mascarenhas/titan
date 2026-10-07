@@ -1,9 +1,10 @@
+local temporary = require "spec.support.temporary"
 require "titan-compiler.coder.core"
 local h = require "spec.support.helpers"
 local coder_names = require "titan-compiler.coder.names"
 
 local function with_header(contents, fn)
-    local header = os.tmpname() .. ".h"
+    local header = temporary.name(".h")
     local file = assert(io.open(header, "w"))
     file:write(contents)
     file:close()

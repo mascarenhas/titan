@@ -1,10 +1,17 @@
 local assert = require "luassert"
 local cdriver = require "c-parser.cdriver"
+local compiler_io = require "titan-compiler.io"
+local driver = require "titan-compiler.driver"
+local platform = require "titan-compiler.platform"
 local lfs = require "lfs"
 
-local REPO = lfs.currentdir()
+local REPO = assert(lfs.currentdir())
+if platform.windows then REPO = assert(platform.path.normalize(REPO)) end
 local PREFIX = require("spec.support.installed_prefix").active()
-local LUA = PREFIX .. "/bin/lua"
+local SHARED_SUFFIX = platform.windows and ".dll" or ".so"
+local LUA = PREFIX .. "/bin/lua" .. (platform.windows and ".exe" or "")
+local INSTALLED_TITANC = PREFIX .. (platform.windows and
+    "/lib/luarocks/rocks-5.5/titan/0.6.0-1/bin/titanc" or "/bin/titanc")
 local USE_CHECKOUT_COMPILER =
     os.getenv("TITAN_TEST_USE_CHECKOUT_COMPILER") == "1"
 
@@ -12,22 +19,52 @@ local function exists(path)
     return lfs.attributes(path, "mode") ~= nil
 end
 
-local function quote_argv(argv)
-    local quoted = {}
-    for index, argument in ipairs(argv) do
-        quoted[index] = assert(cdriver.shell_quote(argument))
+local function run(argv, cwd)
+    local command = { table.unpack(argv) }
+    local scripts = {}
+    if platform.windows then
+        if command[1] == "env" then command[1] = "env.exe" end
+        for index = 1, #command - 1 do
+            if command[index] == "-e" and command[index + 1]:find("[\r\n]") then
+                local script = assert(compiler_io.new_sync():tmpname())
+                local file = assert(io.open(script, "wb"))
+                assert(file:write(command[index + 1]))
+                assert(file:close())
+                scripts[#scripts + 1] = script
+                command[index] = script
+                table.remove(command, index + 1)
+                break
+            end
+        end
     end
-    return table.concat(quoted, " ")
+    local previous = assert(lfs.currentdir())
+    assert.truthy(lfs.chdir(cwd))
+    local called, result = pcall(function()
+        return compiler_io.new_sync():run(command)
+    end)
+    assert.truthy(lfs.chdir(previous))
+    for _, script in ipairs(scripts) do os.remove(script) end
+    assert.truthy(called, result)
+    local output = result.output or result.diagnostic or ""
+    if platform.windows then
+        output = output:gsub("\r\n", "\n")
+        output = output:gsub('%^"(.-)%^"', function(word)
+            return assert(cdriver.shell_quote((word:gsub("%^(.)", "%1"))))
+        end)
+    end
+    return result.started and result.ok, output, result.why, result.status
 end
 
-local function run(argv, cwd)
-    local previous = lfs.currentdir()
-    assert.truthy(lfs.chdir(cwd))
-    local pipe = assert(io.popen(quote_argv(argv) .. " 2>&1", "r"))
-    local output = pipe:read("*a")
-    local ok, why, code = pipe:close()
-    assert.truthy(lfs.chdir(previous))
-    return ok == true, output, why, code
+local function temporary_workspace()
+    local path = assert(compiler_io.new_sync():tmpname())
+    assert.truthy(os.remove(path))
+    assert.truthy(lfs.mkdir(path))
+    if platform.windows then path = assert(platform.path.normalize(path)) end
+    return path
+end
+
+local function shared_path(workspace, stem)
+    return workspace .. "/" .. stem .. SHARED_SUFFIX
 end
 
 local function make_directory(path)
@@ -83,7 +120,7 @@ end
 
 local function compiler_argv(workspace, source_root, ...)
     local installed = not USE_CHECKOUT_COMPILER and
-        PREFIX and exists(PREFIX .. "/bin/titanc")
+        PREFIX and exists(INSTALLED_TITANC)
     local argv = {
         "env",
         "-u", "LUA_PATH", "-u", "LUA_PATH_5_5",
@@ -96,21 +133,22 @@ local function compiler_argv(workspace, source_root, ...)
     table.insert(argv, "CCACHE_DISABLE=1")
     -- Opt-in formatting coverage must not make the ordinary test/CI lane
     -- depend on clang-format being installed.
-    table.insert(argv, "CLANG_FORMAT=true")
+    table.insert(argv, "CLANG_FORMAT=" .. (platform.windows and "true.exe" or "true"))
     table.insert(argv, "TITAN_PATH_0_6=" .. workspace)
     table.insert(argv, "TITAN_PATH=")
     if PREFIX then
-        table.insert(argv, "PATH=" .. PREFIX .. "/bin:" ..
+        table.insert(argv, "PATH=" .. PREFIX .. "/bin" .. (platform.windows and ";" or ":") ..
             (os.getenv("PATH") or "/usr/bin:/bin"))
     end
 
     if installed then
-        table.insert(argv, PREFIX .. "/bin/titanc")
+        if platform.windows then table.insert(argv, LUA) end
+        table.insert(argv, INSTALLED_TITANC)
     else
         assert.truthy(PREFIX,
             "set PREFIX or TITAN_TEST_PREFIX for native compiler tests")
         table.insert(argv, "TITAN_ROCKS_ROOT=" .. PREFIX)
-        table.insert(argv, "LUA_CPATH=" .. REPO .. "/?.so;;")
+        table.insert(argv, "LUA_CPATH=" .. REPO .. "/?" .. SHARED_SUFFIX .. ";;")
         table.insert(argv, LUA)
         table.insert(argv, "-e")
         table.insert(argv, string.format(
@@ -134,7 +172,7 @@ local function compile_with_environment(
     local argv = compiler_argv(workspace, source_root, ...)
     local command_index
     for index, argument in ipairs(argv) do
-        if argument == PREFIX .. "/bin/titanc" or argument == LUA then
+        if argument == INSTALLED_TITANC or argument == LUA then
             command_index = index
             break
         end
@@ -158,9 +196,9 @@ local function run_lua(workspace, code)
         "-u", "LUA_PATH_5_5", "-u", "LUA_CPATH_5_5",
         LUA, "-e", string.format([[
 package.path = %q .. "/?.lua;" .. package.path
-package.cpath = %q .. "/?.so;" .. %q .. "/?.so;" .. package.cpath
+package.cpath = %q .. "/?" .. %q .. ";" .. %q .. "/?" .. %q .. ";" .. package.cpath
 %s
-]], workspace, workspace, REPO, code),
+]], workspace, workspace, SHARED_SUFFIX, REPO, SHARED_SUFFIX, code),
     }, workspace)
 end
 
@@ -169,9 +207,7 @@ describe("public compiler module grouping", function()
     local source_root
 
     before_each(function()
-        workspace = os.tmpname()
-        assert.truthy(os.remove(workspace))
-        assert.truthy(lfs.mkdir(workspace))
+        workspace = temporary_workspace()
         source_root = workspace .. "/source"
         make_directory(source_root)
     end)
@@ -194,12 +230,15 @@ end
             tostring(code) .. ")")
 
         assert.equal("file", lfs.attributes(
-            workspace .. "/single/item.so", "mode"))
-        assert.equal("file", lfs.attributes(
-            workspace .. "/single/item.a", "mode"))
+            shared_path(workspace, "single/item"), "mode"))
+        if platform.windows then
+            assert.is_nil(lfs.attributes(workspace .. "/single/item.a", "mode"))
+        else
+            assert.equal("file", lfs.attributes(workspace .. "/single/item.a", "mode"))
+        end
         assert.equal("file", lfs.attributes(
             workspace .. "/single/item.lua", "mode"))
-        assert.is_nil(lfs.attributes(workspace .. "/single.so", "mode"))
+        assert.is_nil(lfs.attributes(shared_path(workspace, "single"), "mode"))
 
         local shim = read_file(workspace .. "/single/item.lua")
         assert.truthy(shim:find(
@@ -219,9 +258,9 @@ end
             end
         end
         assert.equal(1, compile_lines, output)
-        -- The public DSO and the private archive-validation image each link
-        -- once; duplicate CLI roots must not add another compile or link.
-        assert.equal(2, link_lines, output)
+        -- Unix also links a private archive-validation image. Duplicate CLI
+        -- roots must not add another compile or provider link on either host.
+        assert.equal(platform.windows and 1 or 2, link_lines, output)
 
         ok, output = run_lua(workspace, [[
 local item = require "single.item"
@@ -251,12 +290,12 @@ end
         assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
             tostring(code) .. ")")
 
-        assert.equal("file", lfs.attributes(workspace .. "/group.so", "mode"))
+        assert.equal("file", lfs.attributes(shared_path(workspace, "group"), "mode"))
         assert.equal("file", lfs.attributes(workspace .. "/group.lua", "mode"))
         assert.equal("file", lfs.attributes(
             workspace .. "/group/child.lua", "mode"))
         assert.is_nil(lfs.attributes(
-            workspace .. "/group/child.so", "mode"))
+            shared_path(workspace, "group/child"), "mode"))
 
         for _, shim_path in ipairs({
             workspace .. "/group.lua",
@@ -296,7 +335,7 @@ end
             tostring(code) .. ")")
 
         assert.equal("file", lfs.attributes(
-            workspace .. "/folder/unit.so", "mode"))
+            shared_path(workspace, "folder/unit"), "mode"))
         assert.equal("file", lfs.attributes(
             workspace .. "/folder/unit.lua", "mode"))
         assert.same({ workspace .. "/folder/unit.lua" },
@@ -308,7 +347,7 @@ end
             folder .. "/part.c",
             folder .. "/part.o",
             workspace .. "/folder/unit/part.lua",
-            workspace .. "/folder/unit/part.so",
+            shared_path(workspace, "folder/unit/part"),
         }) do
             assert.is_nil(lfs.attributes(path, "mode"), path)
         end
@@ -419,20 +458,33 @@ end
         assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
             tostring(code) .. ")")
 
-        assert.equal("file", lfs.attributes(workspace .. "/application",
-            "mode"))
+        local paths = platform.windows and
+            assert(driver.windows_program_paths("application")) or nil
+        local executable = workspace .. "/" ..
+            (paths and paths.executable or "application")
+        assert.equal("file", lfs.attributes(executable, "mode"))
         local entrypoint = workspace .. "/application__entrypoint.c"
         assert.equal("file", lfs.attributes(entrypoint, "mode"))
-        assert.same({}, collect_files(workspace, ".so"))
+        assert.same(paths and { workspace .. "/" .. paths.provider } or {},
+            collect_files(workspace, SHARED_SUFFIX))
         assert.same({}, collect_files(workspace, ".lua"))
 
-        ok, output, why, code = run({
-            "env", "TITAN_PATH_0_6=.;" .. PREFIX .. "/lib/titan/0.6",
-            workspace .. "/application",
-        }, workspace)
+        local program_argv = {
+            "env", "TITAN_PATH_0_6=" ..
+                (platform.windows and "./lib/titan/0.6;" or "") ..
+                ".;" .. PREFIX .. "/lib/titan/0.6",
+            "PATH=" .. PREFIX .. "/bin" .. (platform.windows and ";" or ":") ..
+                (os.getenv("PATH") or "/usr/bin:/bin"),
+            executable,
+        }
+        if platform.windows then
+            -- Preserve the native provider list when env.exe launches the EXE.
+            table.insert(program_argv, 2, "MSYS2_ENV_CONV_EXCL=TITAN_PATH_0_6")
+        end
+        ok, output, why, code = run(program_argv, workspace)
         assert.falsy(ok)
         assert.equal("", output)
         assert.equal("exit", why)
-        assert.equal(27, code)
+        assert.equal(27, code, output)
     end)
 end)

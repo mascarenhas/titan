@@ -1,33 +1,30 @@
 local assert = require "luassert"
-local cdriver = require "c-parser.cdriver"
+local compiler_io = require "titan-compiler.io"
 local lfs = require "lfs"
 local objectmetadata = require "titan-compiler.objectmetadata"
+local platform = require "titan-compiler.platform"
 local staticmetadata = require "titan-compiler.staticmetadata"
 
 local PREFIX = require("spec.support.installed_prefix").active()
-local LUA = PREFIX .. "/bin/lua"
+local LUA = PREFIX .. (platform.windows and "/bin/lua.exe" or "/bin/lua")
 local REPOSITORY = assert(lfs.currentdir())
+if platform.windows then REPOSITORY = assert(platform.path.normalize(REPOSITORY)) end
 local CC = os.getenv("CC") or "cc"
 local SENTINEL = "titan_lto_unresolved_without_optimization"
 
-local function quote(arguments)
-    local result = {}
-    for index, argument in ipairs(arguments) do
-        result[index] = assert(cdriver.shell_quote(argument))
-    end
-    return table.concat(result, " ")
-end
-
 local function run(arguments)
-    local pipe = assert(io.popen(quote(arguments) .. " 2>&1", "r"))
-    local output = assert(pipe:read("*a"))
-    local ok, why, code = pipe:close()
-    return ok == true, output, why, code
+    local result = compiler_io.new_sync():run(arguments)
+    local output = result.output or result.diagnostic or ""
+    if platform.windows then output = output:gsub("\r\n", "\n") end
+    return result.ok, output, result.why, result.status
 end
 
-local platform_ok, platform = run({ "uname", "-s" })
-assert.truthy(platform_ok, platform)
-local LINUX = platform:match("Linux") ~= nil
+local LINUX = false
+if not platform.windows then
+    local platform_ok, platform_name = run({ "uname", "-s" })
+    assert.truthy(platform_ok, platform_name)
+    LINUX = platform_name:match("Linux") ~= nil
+end
 
 local function mkdir(path)
     if lfs.attributes(path, "mode") == "directory" then return end
@@ -68,7 +65,7 @@ describe("Titan link-time optimization", function()
 
     before_each(function()
         if not LINUX then return end
-        workspace = os.tmpname()
+        workspace = assert(compiler_io.new_sync():tmpname())
         assert(os.remove(workspace))
         source_root = workspace .. "/sources"
         mkdir(source_root)

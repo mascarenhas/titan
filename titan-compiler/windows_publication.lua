@@ -25,6 +25,26 @@ local function copy_file(source, destination)
     return input_ok and output_ok, input_error or output_error
 end
 
+local function same_file_contents(left, right)
+    local input = io.open(left, "rb")
+    if not input then return false end
+    local existing = io.open(right, "rb")
+    if not existing then input:close(); return false end
+    local same = true
+    while true do
+        local bytes, read_error = input:read(65536)
+        local previous, previous_error = existing:read(65536)
+        if read_error or previous_error or bytes ~= previous then
+            same = false
+            break
+        end
+        if not bytes then break end
+    end
+    input:close()
+    existing:close()
+    return same
+end
+
 function publication.publish(entries, fs, options)
     options = options or {}
     local prepared = {}
@@ -70,20 +90,22 @@ function publication.publish(entries, fs, options)
                 else
                     need(copy_file(assert(entry.source), item.stage))
                 end
+                item.unchanged = existing and
+                    same_file_contents(item.stage, item.public)
             end
         end
         -- Copy predecessors without renaming them. Windows can rename a mapped
         -- image, but rejects replacing that image; keep it at the public path
         -- until the replacement itself succeeds.
         for _, item in ipairs(prepared) do
-            if regular(item.public, true) then
+            if not item.unchanged and regular(item.public, true) then
                 item.backup = need(fs.reserve(item.public))
                 need(copy_file(item.public, item.backup))
             end
         end
         -- The caller orders the provider last, after its exact shim/source set.
         for index, item in ipairs(prepared) do
-            if item.stage then
+            if not item.unchanged and item.stage then
                 need(fs.replace(item.stage, item.public))
                 item.stage = nil
                 item.committed = true
@@ -91,7 +113,9 @@ function publication.publish(entries, fs, options)
                 need(fs.remove(item.public))
                 item.committed = true
             end
-            if options.after_commit then need(options.after_commit(index, item.public)) end
+            if not item.unchanged and options.after_commit then
+                need(options.after_commit(index, item.public))
+            end
         end
     end)
     local cleanup_errors = {}

@@ -126,8 +126,8 @@ display names:
 * `anonymous function at <file>.titan:<definition-line>`
 
 `loadlib` invalidates the cached libbacktrace state after a successful
-slow-path `dlopen`, because libbacktrace snapshots the process' loaded
-objects when the state is created. A Titan module loaded by Lua's own
+slow-path provider load, because libbacktrace snapshots the process' loaded
+objects on its first symbol lookup. A Titan module loaded by Lua's own
 `require` also invalidates from its generated `luaopen_*`, since that
 path bypasses Titan's `loadlib`.
 
@@ -142,6 +142,16 @@ pointers into the DSO whose libbacktrace copy created it; Titan never `dlclose`s
 dependency handles during the process lifetime, and a Lua C-library handle
 remains mapped until its state closes, after which that registry cache cannot
 be used. This keeps the cache per Lua state without mutable per-DSO C globals.
+
+Windows uses libbacktrace's PE/COFF reader and the LLVM static unwinder. The
+Windows dependency patch relocates COFF symbols to each loaded image's actual
+base and bounds symbol lookup to that image's extent. It disables
+the upstream DLL notification callback, which retains transient callback data
+and parses images under the loader lock. Titan's existing load/open
+invalidation refreshes the module snapshot outside that boundary. The shared
+Windows loader clears the registry slot only when it maps a new image,
+including when the support-only bootstrap performs the load. Source filenames
+accept both Windows path separators before runtime/interpreter filtering.
 
 ## Frontend representation
 

@@ -1,6 +1,10 @@
+local temporary = require "spec.support.temporary"
 local assert = require "luassert"
 local cdriver = require "c-parser.cdriver"
 local lfs = require "lfs"
+local compiler_io = require "titan-compiler.io"
+local platform = require "titan-compiler.platform"
+local installed_prefix = require "spec.support.installed_prefix"
 
 local VENDOR = "vendor/lpeglabel"
 local ARCHIVE = "lpeglabel-build/libtitan-lpeglabel.a"
@@ -37,14 +41,15 @@ local function quote(word)
 end
 
 local function run(argv, cwd)
-    local words = {}
-    for index, word in ipairs(argv) do words[index] = quote(word) end
-    local command = table.concat(words, " ")
-    if cwd then command = "cd " .. quote(cwd) .. " && " .. command end
-    local pipe = assert(io.popen(command .. " 2>&1", "r"))
-    local output = pipe:read("*a")
-    local ok, why, code = pipe:close()
-    return ok == true, output, why, code
+    local previous = cwd and assert(lfs.currentdir()) or nil
+    if cwd then assert.truthy(lfs.chdir(cwd)) end
+    local called, result = pcall(function()
+        return compiler_io.new_sync():run(argv)
+    end)
+    if previous then assert.truthy(lfs.chdir(previous)) end
+    assert.truthy(called, result)
+    return result.ok, result.output or result.diagnostic or "",
+        result.why, result.status
 end
 
 local function configured_argv(environment, fallback, ...)
@@ -107,23 +112,36 @@ local function remove_tree(path)
 end
 
 local function temporary_directory(label)
-    local path = os.tmpname() .. "-titan-" .. label
+    local path = temporary.name("-titan-" .. label)
     os.remove(path)
     assert.truthy(lfs.mkdir(path))
     return path
 end
 
-local function prefix_from_cpath(cpath)
-    for template in (cpath .. ";"):gmatch("(.-);") do
-        local root = template:match("^(.*)/lib/lua/5%.5/%?%.so$")
-        if root then return root end
-    end
-end
+local PREFIX = installed_prefix.active()
+local windows_workspace
 
-local PREFIX = (os.getenv("PREFIX") or prefix_from_cpath(package.cpath) or "")
-    :gsub("/+$", "")
-assert.equal("/", PREFIX:sub(1, 1),
-    "LPegLabel build specs require an absolute standalone Titan PREFIX")
+local function build_windows_parser(directory, debug_build)
+    make_directory(directory)
+    local objects = {}
+    for _, member in ipairs(EXPECTED_MEMBERS) do
+        local object = directory .. "/" .. member
+        local argv = configured_argv("CC", "clang.exe", "-std=c99",
+            "-O2", "-fno-lto", "-I", PREFIX .. "/src/lua-5.5.1",
+            "-I", VENDOR, "-c", VENDOR .. "/" ..
+            member:gsub("%.o$", ".c"), "-o", object)
+        if debug_build then argv[#argv + 1] = "-DLPEG_DEBUG" end
+        local ok, output = run(argv)
+        assert.truthy(ok, output)
+        objects[#objects + 1] = object
+    end
+    local archive = directory .. "/libtitan-lpeglabel.a"
+    local argv = configured_argv("AR", "llvm-ar", "rcs", archive)
+    for _, object in ipairs(objects) do argv[#argv + 1] = object end
+    local ok, output = run(argv)
+    assert.truthy(ok, output)
+    return archive
+end
 
 local function make_lpeglabel(extra)
     local argv = {
@@ -137,6 +155,13 @@ local function make_lpeglabel(extra)
 end
 
 local function ensure_archive()
+    if platform.windows then
+        if not windows_workspace then
+            windows_workspace = temporary_directory("lpeglabel-native")
+            ARCHIVE = build_windows_parser(windows_workspace)
+        end
+        return
+    end
     local ok, output, why, code = make_lpeglabel()
     assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
         tostring(code) .. ")")
@@ -156,6 +181,27 @@ local function archive_members(path)
     return members
 end
 
+local function private_definitions(output, expected)
+    local found = {}
+    for line in output:gmatch("[^\r\n]+") do
+        local kind, symbol = line:match("%s([A-Za-z])%s+([^%s]+)%s*$")
+        if kind and kind:upper() ~= "U" then
+            local reference = platform.windows and
+                symbol:match("^%.refptr%.(.+)$")
+            if reference then
+                -- COFF read-only pointer slots reference the private definitions.
+                assert.equal("R", kind:upper(), line)
+                assert.truthy(expected[reference], line)
+            else
+                if symbol:sub(1, 1) == "_" then symbol = symbol:sub(2) end
+                assert.truthy(symbol:match("^titan_lpeglabel_"), line)
+                found[symbol] = true
+            end
+        end
+    end
+    return found
+end
+
 local function executable_script(path, contents)
     write_file(path, contents)
     local ok, output, why, code = run({ "chmod", "u+x", path })
@@ -164,6 +210,9 @@ local function executable_script(path, contents)
 end
 
 describe("private vendored LPegLabel build", function()
+    teardown(function()
+        if windows_workspace then remove_tree(windows_workspace) end
+    end)
     it("records the exact revision and keeps the namespace patch centralized",
         function()
             local upstream = read_file(VENDOR .. "/UPSTREAM.md")
@@ -212,16 +261,8 @@ describe("private vendored LPegLabel build", function()
                 run(configured_argv("NM", "nm", "-g", ARCHIVE))
             assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
                 tostring(code) .. ")")
-            local found = {}
-            for line in output:gmatch("[^\r\n]+") do
-                local kind, symbol = line:match("%s([A-Za-z])%s+([^%s]+)%s*$")
-                if kind and kind:upper() ~= "U" then
-                    if symbol:sub(1, 1) == "_" then symbol = symbol:sub(2) end
-                    assert.truthy(symbol:match("^titan_lpeglabel_"), line)
-                    found[symbol] = true
-                end
-            end
-            assert.same(EXPECTED_SYMBOLS, found)
+            assert.same(EXPECTED_SYMBOLS,
+                private_definitions(output, EXPECTED_SYMBOLS))
             assert.falsy(output:find("luaopen_lpeglabel", 1, true), output)
 
             local host_ok, host_output = run({ "uname", "-s" })
@@ -248,6 +289,10 @@ describe("private vendored LPegLabel build", function()
         end)
 
     it("optimizes the parser after generic validation flags and retains sanitizer instrumentation", function()
+        if platform.windows then
+            pending("Unix Make parser profile and sanitizer configuration")
+            return
+        end
         local workspace = temporary_directory("lpeglabel-host-flags")
         local tested, test_error = xpcall(function()
             local function build(name, extra, parser, optimization)
@@ -273,8 +318,6 @@ describe("private vendored LPegLabel build", function()
                     end
                 end
                 assert.equal(5, compiled, output)
-                local config = read_file(build_dir .. "/.titan-lpeglabel-build-config")
-                assert.truthy(config:find("LPEGLABEL_BUILD_CFLAGS=" .. parser .. "\n", 1, true))
                 return build_dir
             end
             build("ordinary", "-O0 -fno-lto", "-O2 -fno-lto", "-O2")
@@ -295,13 +338,15 @@ describe("private vendored LPegLabel build", function()
         if not tested then error(test_error, 0) end
     end)
 
-    it("preserves archive and stamp mtimes on an unchanged warm build",
+    it("preserves archive mtimes on an unchanged warm build",
         function()
+            if platform.windows then
+                pending("Unix Make parser archive")
+                return
+            end
             ensure_archive()
             local paths = {
                 ARCHIVE,
-                "lpeglabel-build/.titan-lpeglabel-build-config",
-                "lpeglabel-build/.titan-lpeglabel-archive-config",
             }
             local before = {}
             for _, path in ipairs(paths) do
@@ -316,123 +361,22 @@ describe("private vendored LPegLabel build", function()
             end
         end)
 
-    it("detects same-mtime content changes and portable archive tools",
-        function()
-            local workspace = temporary_directory("lpeglabel-build")
-            local vendor = workspace .. "/vendor"
-            local build = workspace .. "/build"
-            local ar_log = workspace .. "/ar.log"
-            local ranlib_log = workspace .. "/ranlib.log"
-            local ar_wrapper = workspace .. "/ar"
-            local ranlib_wrapper = workspace .. "/ranlib"
-            local original_ar =
-                assert(cdriver.split_shell_words(os.getenv("AR") or "ar"))
-            local original_ranlib =
-                assert(cdriver.split_shell_words(os.getenv("RANLIB") or "ranlib"))
-
-            local function command_string(argv)
-                local words = {}
-                for index, word in ipairs(argv) do words[index] = quote(word) end
-                return table.concat(words, " ")
-            end
-
-            local tested, test_error = xpcall(function()
-                copy_tree(VENDOR, vendor)
-                write_file(ar_log, "")
-                write_file(ranlib_log, "")
-                executable_script(ar_wrapper, string.format([[#!/bin/sh
-printf '%%s\n' "$*" >> %s
-if [ "${1-}" = qDc ]; then
-  shift
-  set -- qc "$@"
-fi
-exec %s "$@"
-]], quote(ar_log), command_string(original_ar)))
-                executable_script(ranlib_wrapper, string.format([[#!/bin/sh
-printf '%%s\n' "$*" >> %s
-if [ "${1-}" = -D ]; then exit 64; fi
-exec %s "$@"
-]], quote(ranlib_log), command_string(original_ranlib)))
-
-                local arguments = {
-                    "LPEGLABEL_VENDOR_DIR=" .. vendor,
-                    "LPEGLABEL_BUILD_DIR=" .. build,
-                    "AR=" .. ar_wrapper,
-                    "RANLIB=" .. ranlib_wrapper,
-                }
-                local ok, output, why, code = make_lpeglabel(arguments)
-                assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
-                    tostring(code) .. ")")
-                local archive = build .. "/libtitan-lpeglabel.a"
-                assert.same(EXPECTED_MEMBERS, archive_members(archive))
-                local config =
-                    read_file(build .. "/.titan-lpeglabel-archive-config")
-                assert.truthy(config:find("AR_MODE=qc\n", 1, true), config)
-                assert.truthy(config:find(
-                    "RANLIB_MODE=ordinary\n", 1, true), config)
-                assert.truthy(config:find("DETERMINISTIC=no\n", 1, true), config)
-                assert.truthy(read_file(ar_log):find("qDc", 1, true))
-                assert.truthy(read_file(ranlib_log):find("-D", 1, true))
-
-                local archive_mtime =
-                    assert(lfs.attributes(archive, "modification"))
-                ok, output, why, code = make_lpeglabel(arguments)
-                assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
-                    tostring(code) .. ")")
-                assert.equal(archive_mtime,
-                    assert(lfs.attributes(archive, "modification")))
-
-                local extra_object = workspace .. "/extra.o"
-                copy_tree(build .. "/lplcap.o", extra_object)
-                local corrupt_argv = {}
-                for _, word in ipairs(original_ar) do
-                    corrupt_argv[#corrupt_argv + 1] = word
-                end
-                for _, word in ipairs({ "qc", archive, extra_object }) do
-                    corrupt_argv[#corrupt_argv + 1] = word
-                end
-                ok, output, why, code = run(corrupt_argv)
-                assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
-                    tostring(code) .. ")")
-                assert.same({
-                    "lplcap.o", "lplcode.o", "lplprint.o", "lpltree.o", "lplvm.o",
-                    "extra.o",
-                }, archive_members(archive))
-                ok, output, why, code = make_lpeglabel(arguments)
-                assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
-                    tostring(code) .. ")")
-                assert.same(EXPECTED_MEMBERS, archive_members(archive))
-
-                local header = vendor .. "/lpltypes.h"
-                local header_mtime =
-                    assert(lfs.attributes(header, "modification"))
-                write_file(header, read_file(header) ..
-                    "\n/* content-stamp invalidation probe */\n")
-                assert.truthy(lfs.touch(header, header_mtime, header_mtime))
-                ok, output, why, code = run({ "sleep", "1" })
-                assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
-                    tostring(code) .. ")")
-                ok, output, why, code = make_lpeglabel(arguments)
-                assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
-                    tostring(code) .. ")")
-                assert.truthy(assert(lfs.attributes(archive, "modification")) >
-                    archive_mtime)
-                assert.same(EXPECTED_MEMBERS, archive_members(archive))
-            end, debug.traceback)
-            remove_tree(workspace)
-            if not tested then error(test_error, 0) end
-        end)
 
     it("prefixes every definition enabled by the debug build", function()
         local workspace = temporary_directory("lpeglabel-debug")
         local build = workspace .. "/build"
         local tested, test_error = xpcall(function()
-            local ok, output, why, code = make_lpeglabel({
-                "LPEGLABEL_BUILD_DIR=" .. build,
-                "TITAN_EXTRA_CFLAGS=-DLPEG_DEBUG",
-            })
-            assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
-                tostring(code) .. ")")
+            local ok, output, why, code
+            if platform.windows then
+                build_windows_parser(build, true)
+            else
+                ok, output, why, code = make_lpeglabel({
+                    "LPEGLABEL_BUILD_DIR=" .. build,
+                    "TITAN_EXTRA_CFLAGS=-DLPEG_DEBUG",
+                })
+                assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
+                    tostring(code) .. ")")
+            end
 
             local expected = {}
             for symbol in pairs(EXPECTED_SYMBOLS) do expected[symbol] = true end
@@ -443,19 +387,7 @@ exec %s "$@"
                 "NM", "nm", "-g", build .. "/libtitan-lpeglabel.a"))
             assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
                 tostring(code) .. ")")
-            local found = {}
-            for line in output:gmatch("[^\r\n]+") do
-                local kind, symbol =
-                    line:match("%s([A-Za-z])%s+([^%s]+)%s*$")
-                if kind and kind:upper() ~= "U" then
-                    if symbol:sub(1, 1) == "_" then
-                        symbol = symbol:sub(2)
-                    end
-                    assert.truthy(symbol:match("^titan_lpeglabel_"), line)
-                    found[symbol] = true
-                end
-            end
-            assert.same(expected, found)
+            assert.same(expected, private_definitions(output, expected))
         end, debug.traceback)
         remove_tree(workspace)
         if not tested then error(test_error, 0) end
@@ -465,7 +397,8 @@ exec %s "$@"
         function()
             ensure_archive()
             local workspace = temporary_directory("lpeglabel-harness")
-            local executable = workspace .. "/lpeglabel-private-harness"
+            local executable = workspace .. "/lpeglabel-private-harness" ..
+                (platform.windows and ".exe" or "")
             local host_ok, host_output = run({ "uname", "-s" })
             assert.truthy(host_ok, host_output)
             local host = assert(host_output:match("^%s*(%S+)"))
@@ -474,7 +407,9 @@ exec %s "$@"
                 "CC", "cc", "-std=c99", "-Wall", "-Wextra", "-Werror",
                 "-I", PREFIX .. "/include", "-I", VENDOR,
                 "spec/fixtures/stdlib/native/lpeglabel_private_harness.c",
-                ARCHIVE, PREFIX .. "/lib/liblua.a", "-lm")
+                ARCHIVE, PREFIX .. "/lib/" ..
+                    (platform.windows and "liblua55.a" or "liblua.a"))
+            if not platform.windows then compile[#compile + 1] = "-lm" end
             if host == "Linux" then compile[#compile + 1] = "-ldl" end
             compile[#compile + 1] = "-o"
             compile[#compile + 1] = executable
@@ -502,12 +437,15 @@ exec %s "$@"
         function()
             ensure_archive()
             local workspace = temporary_directory("lpeglabel-utf8-guard")
-            local executable = workspace .. "/lpeglabel-utf8-guard"
+            local executable = workspace .. "/lpeglabel-utf8-guard" ..
+                (platform.windows and ".exe" or "")
             local compile = configured_argv(
                 "CC", "cc", "-std=c99", "-Wall", "-Wextra",
                 "-I", PREFIX .. "/include", "-I", VENDOR,
                 "spec/fixtures/stdlib/native/lpeglabel_utf8_guard_harness.c",
-                ARCHIVE, PREFIX .. "/lib/liblua.a", "-lm")
+                ARCHIVE, PREFIX .. "/lib/" ..
+                    (platform.windows and "liblua55.a" or "liblua.a"))
+            if not platform.windows then compile[#compile + 1] = "-lm" end
             local host_ok, host_output = run({ "uname", "-s" })
             assert.truthy(host_ok, host_output)
             if host_output:match("^%s*Linux%s*$") then
@@ -538,11 +476,8 @@ exec %s "$@"
             "$(LPEGLABEL_BUILD_DIR)/libtitan-lpeglabel.a",
             "LPEGLABEL_CFLAGS := -std=c99 -fPIC -fvisibility=hidden",
             "lpeglabel: $(LPEGLABEL_ARCHIVE)",
-            "$(LPEGLABEL_BUILD_CONFIG): FORCE $(LPEGLABEL_SOURCES) " ..
-            "$(LPEGLABEL_HEADERS)",
-            "$(LUA_INSTALL_STAMP)",
+            "$(LUA_SDK_PREREQ)",
             "rm -f $(LPEGLABEL_OBJECTS) $(LPEGLABEL_ARCHIVE)",
-            "$(LPEGLABEL_BUILD_CONFIG) $(LPEGLABEL_ARCHIVE_CONFIG)",
             'rmdir "$(LPEGLABEL_BUILD_DIR)" 2>/dev/null || true',
         }) do
             assert.truthy(makefile:find(contract, 1, true), contract)

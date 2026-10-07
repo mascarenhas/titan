@@ -1,3 +1,4 @@
+local temporary = require "spec.support.temporary"
 -- Typechecker regressions for tail-only Array, integer-Map, and input-vararg
 -- spreads. Parser-only syntax coverage lives in spec/parser_spec.lua; these
 -- cases pin subject/bound validation plus finite/open expression-list demand.
@@ -20,7 +21,7 @@ local function find_function(tree, name)
 end
 
 local function with_header(contents, body)
-    local header = os.tmpname() .. ".h"
+    local header = temporary.name(".h")
     local file = assert(io.open(header, "w"))
     assert(file:write(contents))
     assert(file:close())

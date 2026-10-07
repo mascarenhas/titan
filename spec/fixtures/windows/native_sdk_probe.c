@@ -59,7 +59,8 @@ int main(int argc, char **argv) {
     CHECK(sqlite3_finalize(statement) == SQLITE_OK && sqlite3_close(database) == SQLITE_OK);
     CHECK(OpenSSL_version_num() == OPENSSL_VERSION_NUMBER);
     CHECK(argc == 2);
-    CHECK(strcmp(OPENSSL_info(OPENSSL_INFO_CONFIG_DIR), argv[1]) == 0);
+    if (strcmp(argv[1], "system") != 0)
+        CHECK(strcmp(OPENSSL_info(OPENSSL_INFO_CONFIG_DIR), argv[1]) == 0);
     CHECK(EVP_Digest("abc", 3, digest, &digest_size, EVP_sha256(), NULL) == 1);
     CHECK(digest_size == sizeof(expected) && memcmp(digest, expected, sizeof(expected)) == 0);
     tls = SSL_CTX_new(TLS_method());

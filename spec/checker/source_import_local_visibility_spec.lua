@@ -1,3 +1,4 @@
+local temporary = require "spec.support.temporary"
 local checker = require "titan-compiler.checker"
 local driver = require "titan-compiler.driver"
 local parser = require "titan-compiler.parser"
@@ -448,7 +449,7 @@ describe("source-import local visibility (checker)", function()
     end)
 
     it("defers source-qualified composite enum aliases to their use", function()
-        local header = os.tmpname() .. ".h"
+        local header = temporary.name(".h")
         local file = assert(io.open(header, "w"))
         file:write([[
             typedef enum { SOURCE_ALIAS_ZERO = 0,
@@ -492,7 +493,7 @@ describe("source-import local visibility (checker)", function()
     end)
 
     it("retains source-private C header dependencies on the consumer AST", function()
-        local header = os.tmpname() .. "-source-probe-inputs.h"
+        local header = temporary.name("-source-probe-inputs.h")
         local file = assert(io.open(header, "wb"))
         assert(file:write([[
             struct SourceProbeInputLeft { int value; };
@@ -503,7 +504,7 @@ describe("source-import local visibility (checker)", function()
 
         -- Forced includes belong to the parsed header dependency closure and
         -- must follow the source-private types into the consumer.
-        local forced_header = os.tmpname() .. "-source-probe-forced.h"
+        local forced_header = temporary.name("-source-probe-forced.h")
         local forced_file = assert(io.open(forced_header, "wb"))
         assert(forced_file:write(
             "#define SOURCE_PROBE_FORCED_INPUT 1\n"))

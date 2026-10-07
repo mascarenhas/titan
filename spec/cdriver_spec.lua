@@ -2,8 +2,10 @@ local lfs = require "lfs"
 
 local cdriver = require "c-parser.cdriver"
 local compiler_io = require "titan-compiler.io"
+local platform = require "titan-compiler.platform"
 local ffiheaders = require "titan-compiler.ffiheaders"
 local cprobe = require "titan-compiler.cprobe"
+local filesystem = require "spec.support.filesystem"
 
 local function write_file(filename, contents)
     local previous = lfs.attributes(filename, "modification")
@@ -15,14 +17,18 @@ local function write_file(filename, contents)
 end
 
 local function tmp_header(contents)
-    local filename = os.tmpname() .. ".h"
+    local filename = assert(compiler_io.new_sync():tmpname())
+    assert(os.remove(filename))
+    if platform.windows then filename = assert(platform.path.normalize(filename)) end
+    filename = filename .. ".h"
     write_file(filename, contents)
     return filename
 end
 
 local function tmp_dir()
-    local dirname = os.tmpname()
-    os.remove(dirname)
+    local dirname = assert(compiler_io.new_sync():tmpname())
+    assert(os.remove(dirname))
+    if platform.windows then dirname = assert(platform.path.normalize(dirname)) end
     assert(lfs.mkdir(dirname))
     return dirname
 end
@@ -40,6 +46,15 @@ local function remove_tree(files, dirs)
     for i = #(dirs or {}), 1, -1 do
         lfs.rmdir(dirs[i])
     end
+end
+
+local function require_symlink_capability()
+    local available, message = filesystem.symlink_capability()
+    if not available then
+        pending(message)
+        return false
+    end
+    return true
 end
 
 local function assert_process_file(filename, options)
@@ -149,8 +164,14 @@ describe("generated module C header inputs", function()
                 _ffi_header_descriptor = dependency },
         }, root .. "/main.titan"))
         local original_read, generated_reads = state.io.read_file, 0
+        local function spelling(filename)
+            return platform.windows and assert(platform.path.separators(filename)) or filename
+        end
+        local header_spelling, dependency_spelling =
+            spelling(header.filename), spelling(dependency.filename)
         function state.io:read_file(filename)
-            if filename == header.filename or filename == dependency.filename then
+            local lookup = spelling(filename)
+            if lookup == header_spelling or lookup == dependency_spelling then
                 generated_reads = generated_reads + 1
             end
             return original_read(self, filename)
@@ -235,13 +256,19 @@ describe("generated module C header inputs", function()
         local sha256 = require "titan-compiler.sha256"
         local previous = platform.windows
         local ok, failure = pcall(function()
-            for _, fixture in ipairs({
+            local fixtures = {
                 { windows = true, root = [[C:\audit\temp]] },
                 { windows = true, root = "C:/audit/temp" },
                 { windows = true, root = [[\\server\share\temp]] },
                 { windows = true, root = [[\\?\C:\audit\temp]] },
-                { windows = false, root = "/audit/temp" },
-            }) do
+            }
+            -- The preprocessor captures the host's POSIX separator on import.
+            -- A Windows host can exercise every Windows namespace here, but
+            -- toggling platform.windows alone does not create a POSIX backend.
+            if not previous then
+                fixtures[#fixtures + 1] = { windows = false, root = "/audit/temp" }
+            end
+            for _, fixture in ipairs(fixtures) do
                 platform.windows = fixture.windows
                 local root = fixture.root
                 local cwd = fixture.windows and "C:/project" or "/project"
@@ -641,11 +668,21 @@ describe("completed C header payload transport", function()
 
     it("trusts the saved physical input when its mtime is preserved", function()
         local path = header("typedef int changed_type;\n")
-        local options = { cache_adapter = adapter }
+        local strategy = compiler_io.new_sync()
+        local stamp = assert(strategy:stat(path)).modified_seconds
+        -- LuaFileSystem's touch restores seconds. Establish that exact stamp
+        -- before saving a native Windows FILETIME observation with nanoseconds.
+        assert(lfs.touch(path, stamp, stamp))
+        local original = assert(strategy:stat(path))
+        assert.equal(0, original.modified_nanoseconds)
+        local options = { io = strategy, cache_adapter = adapter }
         assert_process_file(path, options)
-        local stamp = assert(lfs.attributes(path, "modification"))
         write_file(path, "typedef unsigned changed_type;\n")
         assert(lfs.touch(path, stamp, stamp))
+        local current = assert(strategy:stat(path))
+        for _, field in ipairs({ "modified_seconds", "modified_nanoseconds", "device", "inode" }) do
+            assert.equal(original[field], current[field], field)
+        end
         cdriver.clear_process_cache()
         local restored = assert_process_file(path, options)
         assert.equal(1, matches)
@@ -805,6 +842,7 @@ describe("completed C header payload transport", function()
     end)
 
     it("invalidates forced symlink retargets and never stores missing inputs", function()
+        if not require_symlink_capability() then return end
         local cpp = require "c-parser.cpp"
         local first = header("#define LINKED_TYPE int\n")
         local second = header("#define LINKED_TYPE long\n")
@@ -971,6 +1009,7 @@ describe("completed C header payload transport", function()
     end)
 
     it("retains direct symlink identity even when the target bytes are identical", function()
+        if not require_symlink_capability() then return end
         local path = header("typedef int link_type;\n")
         local link = path .. ".link"
         assert(lfs.link(path, link, true))
@@ -1188,6 +1227,7 @@ describe("C FFI cdriver", function()
 
         it("preserves symlink traversal when absolutizing include paths",
         function()
+            if not require_symlink_capability() then return end
             local root = tmp_dir()
             local source = mkdir(root, "source")
             local first = mkdir(root, "first")
@@ -1257,6 +1297,7 @@ describe("C FFI cdriver", function()
         end)
 
         it("preserves a symlinked header's quoted-include origin", function()
+            if not require_symlink_capability() then return end
             local root = tmp_dir()
             local alias = mkdir(root, "alias")
             local vendor = mkdir(root, "vendor")
@@ -1306,6 +1347,10 @@ describe("C FFI cdriver", function()
                 assert(cdriver.header_input_identity("search", linked)))
 
             write_file(replacement, contents)
+            -- The Windows CRT rename refuses an existing destination. The
+            -- original pathname keeps the shared file alive while this link
+            -- alone is replaced by the independently created file.
+            if platform.windows then assert(os.remove(linked)) end
             assert(os.rename(replacement, linked))
             assert.not_equal(original_file,
                 assert(cdriver.header_input_identity("file", linked)))
@@ -1367,6 +1412,7 @@ describe("C FFI cdriver", function()
         end)
 
         it("distinguishes broken and followed include symlinks", function()
+            if not require_symlink_capability() then return end
             local root = tmp_dir()
             local target = root .. "/future.h"
             local link = root .. "/candidate.h"
@@ -3171,8 +3217,10 @@ typedef double fixed_mode_selection;
             write_file(compiler, "#!/bin/sh\nexec cc -I" .. quoted_bindir
                 .. " -DTITAN_WRAPPER_CC=1 \"$@\"\n")
             local quoted_compiler = assert(cdriver.shell_quote(compiler))
-            local chmod_ok = os.execute("chmod +x " .. quoted_compiler)
-            assert.truthy(chmod_ok)
+            if not platform.windows then
+                local result = compiler_io.new_sync():run({ "chmod", "+x", compiler })
+                assert.truthy(result.ok, result.output or result.diagnostic)
+            end
             write_file(header, [[
 #ifdef TITAN_WRAPPER_CC
 typedef int compiler_selection;
@@ -3182,7 +3230,7 @@ typedef double compiler_selection;
 ]])
 
             local wrapped, include = assert_process_file("compiler_config.h", {
-                compiler = quoted_compiler,
+                compiler = platform.windows and { "bash.exe", compiler } or quoted_compiler,
                 language_mode = "c99",
                 cppflags = {},
             })

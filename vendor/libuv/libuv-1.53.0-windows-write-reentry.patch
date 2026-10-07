@@ -1,0 +1,13 @@
+--- a/src/win/pipe.c
++++ b/src/win/pipe.c
+@@ -1845,7 +1845,9 @@
+   } else if (handle->flags & UV_HANDLE_NON_OVERLAPPED_PIPE) {
+     req->write_buffer = write_buf;
+     uv__insert_non_overlapped_write_req(handle, req);
+-    if (handle->stream.conn.write_reqs_pending == 0) {
++    /* The completed request remains counted while its callback runs, but a
++     * callback can queue another write when there is no active worker. */
++    if (handle->pipe.conn.non_overlapped_write_active == NULL) {
+       uv__queue_non_overlapped_write(handle);
+       /* There shouldn't have been any queued writes before, so we should have
+        * dispatched the request we just added. Sanity check the state

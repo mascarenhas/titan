@@ -7,13 +7,13 @@ local checker = require "titan-compiler.checker"
 local driver = require "titan-compiler.driver"
 
 driver.TITAN_SOURCE_PATH = source_root
-driver.LUA_SOURCE_PATH = repo .. "/lua-5.5.1/src/"
+driver.LUA_SOURCE_PATH = assert(arg[5])
 driver.TITAN_RUNTIME_PATH = assert(arg[4]) .. "/"
 driver.LIBBACKTRACE_PATH = repo .. "/libbacktrace"
 driver.configure_foreign_c()
 
 local extra_objects = {}
-for index = 5, #arg do
+for index = 6, #arg do
     extra_objects[#extra_objects + 1] = arg[index]
 end
 

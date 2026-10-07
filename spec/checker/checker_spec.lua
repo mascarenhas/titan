@@ -1,3 +1,4 @@
+local temporary = require "spec.support.temporary"
 local types = require 'titan-compiler.types'
 local driver = require 'titan-compiler.driver'
 local util = require 'titan-compiler.util'
@@ -11,7 +12,7 @@ local assert_ast = h.assert_ast
 local check_errs = h.check_errs
 
 local function with_header(contents, fn)
-    local header = os.tmpname() .. ".h"
+    local header = temporary.name(".h")
     local file = assert(io.open(header, "w"))
     assert(file:write(contents))
     assert(file:close())
@@ -2076,7 +2077,7 @@ describe("Titan type checker", function()
     end)
 
     it("can check typedef'd enum constants imported by the FFI", function()
-        local header = os.tmpname() .. ".h"
+        local header = temporary.name(".h")
         local fd = assert(io.open(header, "w"))
         fd:write("typedef enum { RED, GREEN, BLUE } Color;\n")
         fd:close()
@@ -2108,7 +2109,7 @@ describe("Titan type checker", function()
         -- importer skips that member while the rest of the header still
         -- imports; referencing the skipped member is a clean "not found"
         -- error, never a checker/codegen crash.
-        local header = os.tmpname() .. ".h"
+        local header = temporary.name(".h")
         local fd = assert(io.open(header, "w"))
         fd:write("float _Complex frob(float _Complex x);\nint dbl(int x);\n")
         fd:close()

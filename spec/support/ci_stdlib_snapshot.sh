@@ -38,7 +38,6 @@ test_source=$prefix_rel/share/titan/0.6/src/titan/test.titan
 
 artifacts=(
     titan-runtime/libtitan.a
-    titan-runtime/.titan-runtime-archive-build-config
     "$provider"
     "$static_archive"
     "$shim_dir/coroutine.lua" "$shim_dir/uv.lua"
@@ -46,7 +45,7 @@ artifacts=(
     "$shim_dir/io.lua"
     "$shim_dir/fs.lua" "$shim_dir/net.lua" "$shim_dir/ssl.lua"
     "$shim_dir/url.lua" "$shim_dir/http.lua" "$shim_dir/websocket.lua" "$shim_dir/os.lua"
-    "$shim_dir/peg.lua" "$shim_dir/string.lua"
+    "$shim_dir/path.lua" "$shim_dir/peg.lua" "$shim_dir/string.lua"
     "$shim_dir/math.lua" "$shim_dir/lua.lua"
     "$shim_dir/iteration.lua" "$shim_dir/gc.lua" "$shim_dir/test.lua"
     "$shim_dir/reflect.lua" "$shim_dir/sqlite3.lua" "$shim_dir/json.lua"
@@ -119,7 +118,7 @@ remove_installed_artifacts() {
         "$shim_dir/io.lua" \
         "$shim_dir/fs.lua" "$shim_dir/net.lua" "$shim_dir/ssl.lua" \
         "$shim_dir/url.lua" "$shim_dir/http.lua" "$shim_dir/websocket.lua" "$shim_dir/os.lua" \
-        "$shim_dir/peg.lua" "$shim_dir/string.lua" \
+        "$shim_dir/path.lua" "$shim_dir/peg.lua" "$shim_dir/string.lua" \
         "$shim_dir/math.lua" "$shim_dir/lua.lua" \
         "$shim_dir/iteration.lua" "$shim_dir/gc.lua" "$shim_dir/test.lua" \
         "$shim_dir/reflect.lua" "$shim_dir/sqlite3.lua" "$shim_dir/json.lua"

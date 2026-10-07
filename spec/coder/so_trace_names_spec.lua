@@ -12,10 +12,13 @@
 -- not statically linked — see build_so_chain) and asserts the trace shows the
 -- dep's qualified `<module>.<func>` name, proving the cross-`.so` name merge.
 local h = require 'spec.support.helpers'
+local platform = require 'titan-compiler.platform'
 local build_so_chain, call = h.build_so_chain, h.call
+
 
 describe(".so-only cross-module trace names", function()
     after_each(function ()
+        if platform.windows then return end
         os.execute("rm -rf *.o *.so *.dSYM")
         os.execute("rm -f *.c")
     end)

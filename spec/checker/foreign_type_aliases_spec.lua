@@ -1,9 +1,10 @@
+local temporary = require "spec.support.temporary"
 local h = require "spec.support.helpers"
 local types = require "titan-compiler.types"
 local parser = require "titan-compiler.parser"
 
 local function with_header(contents, body)
-    local path = os.tmpname() .. ".h"
+    local path = temporary.name(".h")
     local file = assert(io.open(path, "w"))
     assert(file:write(contents))
     assert(file:close())

@@ -1,10 +1,10 @@
+local temporary = require "spec.support.temporary"
 local assert = require "luassert"
 local cdriver = require "c-parser.cdriver"
 local lfs = require "lfs"
-
-local function quote(word)
-    return assert(cdriver.shell_quote(word))
-end
+local compiler_io = require "titan-compiler.io"
+local platform = require "titan-compiler.platform"
+local installed_prefix = require "spec.support.installed_prefix"
 
 local function write_file(path, contents)
     local file = assert(io.open(path, "wb"))
@@ -40,7 +40,7 @@ local function remove_tree(path)
 end
 
 local function make_temp_dir()
-    local path = assert(os.tmpname()) .. "-dense-array-runtime"
+    local path = assert(temporary.name()) .. "-dense-array-runtime"
     os.remove(path)
     assert.truthy(lfs.mkdir(path))
     return path
@@ -54,21 +54,23 @@ local function append_words(argv, words, label)
 end
 
 local function run_argv(argv, environment)
-    local words = {}
-    for _, word in ipairs(argv) do words[#words + 1] = quote(word) end
-    local command = table.concat(words, " ")
-    if environment then command = environment .. " " .. command end
-    local pipe = assert(io.popen(command .. " 2>&1"))
-    local output = pipe:read("*a")
-    local ok, why, code = pipe:close()
-    return ok == true, output, why, code
+    if environment then
+        local words = assert(cdriver.split_shell_words(environment))
+        local wrapped = { "env" }
+        for _, word in ipairs(words) do wrapped[#wrapped + 1] = word end
+        for _, word in ipairs(argv) do wrapped[#wrapped + 1] = word end
+        argv = wrapped
+    end
+    local result = compiler_io.new_sync():run(argv)
+    return result.ok, result.output or result.diagnostic or "",
+        result.why, result.status
 end
 
 local function host_os()
-    local pipe = assert(io.popen("uname -s"))
-    local output = assert(pipe:read("*l"))
-    assert.truthy(pipe:close())
-    return output
+    if platform.windows then return "Windows" end
+    local ok, output = run_argv({ "uname", "-s" })
+    assert.truthy(ok, output)
+    return output:match("[^\r\n]+")
 end
 
 local HARNESS = [=[
@@ -1280,24 +1282,35 @@ local LUA_SOURCES = {
 local function compile_and_run(hard_memory, expose_lua_internals)
     local root = make_temp_dir()
     local source = root .. "/dense_array_runtime.c"
-    local executable = root .. "/dense_array_runtime"
-    local platform = host_os()
+    local executable = root .. "/dense_array_runtime" ..
+        (platform.windows and ".exe" or "")
+    local host = host_os()
+    local prefix = installed_prefix.active()
+    local lua_source = prefix .. "/src/lua-5.5.1"
     write_file(source, HARNESS)
 
     local argv = assert(cdriver.split_shell_words(os.getenv("CC") or "cc"))
     for _, word in ipairs({
         "--std=c99", "-O0", "-fno-lto", "-g",
         "-Wall", "-Wextra", "-fno-optimize-sibling-calls",
-        "-I.", "-Ititan-runtime", "-Ilua-5.5.1/src", "-Ilibbacktrace",
+        "-I.", "-Ititan-runtime", "-I" .. lua_source,
     }) do
         argv[#argv + 1] = word
     end
+    argv[#argv + 1] = '-DTITAN_VDIR="0.6"'
+    argv[#argv + 1] = platform.windows and
+        "-I" .. prefix .. "/include" or "-Ilibbacktrace"
     if hard_memory then
         argv[#argv + 1] = "-DHARDMEMTESTS"
         argv[#argv + 1] = "-DLUA_USE_APICHECK"
         argv[#argv + 1] = "-DTITAN_ARRAY_HARDMEM_PROBE"
-        argv[#argv + 1] = platform == "Darwin"
-            and "-DLUA_USE_MACOSX" or "-DLUA_USE_LINUX"
+        if platform.windows then
+            -- This private executable owns the Lua sources it compiles.
+            argv[#argv + 1] = "-DTITAN_LUA_BUILD_DLL"
+        else
+            argv[#argv + 1] = host == "Darwin"
+                and "-DLUA_USE_MACOSX" or "-DLUA_USE_LINUX"
+        end
     end
     if expose_lua_internals then
         local header = root .. "/lua_exports.h"
@@ -1309,7 +1322,7 @@ local function compile_and_run(hard_memory, expose_lua_internals)
         argv[#argv + 1] = "-include"
         argv[#argv + 1] = header
         argv[#argv + 1] = "-DTITAN_RUNTIME_VISIBILITY_PROBE"
-        argv[#argv + 1] = platform == "Darwin"
+        argv[#argv + 1] = host == "Darwin"
             and "-Wl,-export_dynamic" or "-Wl,--export-dynamic"
     end
     append_words(argv, os.getenv("TITAN_TEST_EXTRA_CFLAGS"),
@@ -1318,21 +1331,27 @@ local function compile_and_run(hard_memory, expose_lua_internals)
     argv[#argv + 1] = "titan-runtime/titan.c"
     if hard_memory then
         for _, stem in ipairs(LUA_SOURCES) do
-            argv[#argv + 1] = "lua-5.5.1/src/" .. stem .. ".c"
+            argv[#argv + 1] = lua_source .. "/" .. stem .. ".c"
         end
     else
-        argv[#argv + 1] = "lua-5.5.1/src/liblua.a"
+        argv[#argv + 1] = prefix .. (platform.windows and
+            "/lib/liblua55.a" or "/lib/liblua.a")
     end
-    for _, word in ipairs({
-        "libbacktrace/.libs/libbacktrace.a", "-o", executable,
-    }) do
-        argv[#argv + 1] = word
+    if platform.windows then
+        argv[#argv + 1] = prefix .. "/lib/libbacktrace.a"
+        argv[#argv + 1] = "-static-libgcc"
+    else
+        argv[#argv + 1] = "libbacktrace/.libs/libbacktrace.a"
     end
+    argv[#argv + 1] = "-o"
+    argv[#argv + 1] = executable
     append_words(argv, os.getenv("TITAN_TEST_EXTRA_LDFLAGS"),
         "TITAN_TEST_EXTRA_LDFLAGS")
-    argv[#argv + 1] = "-lm"
-    if platform ~= "Darwin" then argv[#argv + 1] = "-ldl" end
-    argv[#argv + 1] = "-pthread"
+    if not platform.windows then
+        argv[#argv + 1] = "-lm"
+        if host ~= "Darwin" then argv[#argv + 1] = "-ldl" end
+        argv[#argv + 1] = "-pthread"
+    end
 
     local ok, output, why, code =
         run_argv(argv, "CCACHE_DISABLE=1")
@@ -1398,6 +1417,10 @@ describe("dense Array stock-Lua runtime", function()
 
     it("keeps embedded runtime helpers private when Lua internals are exposed",
         function()
+            if platform.windows then
+                pending("ELF/Mach-O executable symbol visibility uses dlsym")
+                return
+            end
             compile_and_run(false, true)
         end)
 end)

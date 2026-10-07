@@ -1,12 +1,17 @@
 local assert = require "luassert"
 local cdriver = require "c-parser.cdriver"
+local compiler_io = require "titan-compiler.io"
+local driver = require "titan-compiler.driver"
 local lfs = require "lfs"
+local platform = require "titan-compiler.platform"
 
 local NAMESPACE = "incremental_cli_fixture"
 local APP = "incremental_cli_app"
 local OTHER = "incremental_cli_other"
 local ROOTS = { NAMESPACE, APP, OTHER }
 local REPOSITORY = assert(lfs.currentdir())
+if platform.windows then REPOSITORY = assert(platform.path.normalize(REPOSITORY)) end
+local SHARED_SUFFIX = platform.windows and ".dll" or ".so"
 local workspace
 
 local function exists(path)
@@ -53,22 +58,34 @@ local function command(argv)
 end
 
 local function run(argv)
-    local pipe = assert(io.popen(command(argv) .. " 2>&1", "r"))
-    local output = assert(pipe:read("*a"))
-    local ok, why, code = pipe:close()
-    return ok == true, output, why, code
+    argv = { table.unpack(argv) }
+    if platform.windows and argv[1] == "env" then argv[1] = "env.exe" end
+    local result = compiler_io.new_sync():run(argv)
+    local output = result.output or result.diagnostic or ""
+    if platform.windows then output = output:gsub("\r\n", "\n") end
+    return result.started and result.ok, output, result.why, result.status
 end
 
-local prefix = os.getenv("PREFIX")
-if not prefix or prefix == "" then prefix = os.getenv("TITAN_ROCKS_ROOT") end
--- Make exports an empty TITAN_ROCKS_ROOT when no override was requested.
-if not prefix or prefix == "" then
-    for template in package.cpath:gmatch("[^;]+") do
-        prefix = template:match("^(.*)/lib/lua/5[.]5/[?][.]so$")
-        if prefix then break end
-    end
+local prefix = require("spec.support.installed_prefix").active()
+local LUA = prefix .. "/bin/lua" .. (platform.windows and ".exe" or "")
+
+local function program_path(name)
+    if not platform.windows then return "./" .. name end
+    return assert(driver.windows_program_paths((name:gsub("/", ".")))).executable
 end
-local LUA = prefix and exists(prefix .. "/bin/lua") and prefix .. "/bin/lua" or "lua"
+
+local function run_program(name, ...)
+    local argv = { "env", "TITAN_PATH_0_6=" ..
+        (platform.windows and "./lib/titan/0.6;" or "") ..
+        ".;" .. prefix .. "/lib/titan/0.6",
+        "PATH=" .. prefix .. "/bin" .. (platform.windows and ";" or ":") ..
+            (os.getenv("PATH") or ""), program_path(name) }
+    if platform.windows then
+        table.insert(argv, 2, "MSYS2_ENV_CONV_EXCL=TITAN_PATH_0_6")
+    end
+    for _, value in ipairs({ ... }) do argv[#argv + 1] = value end
+    return run(argv)
+end
 
 local function compiler_arguments()
     -- Match the existing CLI specs: exercise this checkout's CLI and compiler
@@ -80,7 +97,7 @@ local function compiler_arguments()
         LUA, "-E", "-e",
         string.format("package.path = %q .. package.path; package.cpath = %q .. package.cpath",
             REPOSITORY .. "/?.lua;" .. REPOSITORY .. "/?/init.lua;",
-            REPOSITORY .. "/titan-runtime/bootstrap/?.so;"),
+            REPOSITORY .. "/titan-runtime/bootstrap/?" .. SHARED_SUFFIX .. ";"),
         REPOSITORY .. "/titanc", "--tree", workspace,
     }
 end
@@ -105,7 +122,7 @@ local function source(name, contents, folder)
 end
 
 local function exit_code(name, expected)
-    local ok, output, why, code = run({ "./" .. name })
+    local ok, output, why, code = run_program(name)
     assert.equal("exit", why, output)
     assert.equal(expected, code, output)
     assert.equal(expected == 0, ok, output)
@@ -117,8 +134,9 @@ end
 
 describe("incremental and separate compilation (CLI)", function()
     before_each(function()
-        workspace = os.tmpname()
+        workspace = assert(compiler_io.new_sync():tmpname())
         assert(os.remove(workspace))
+        if platform.windows then workspace = assert(platform.path.normalize(workspace)) end
         mkdir(workspace)
     end)
 
@@ -128,6 +146,17 @@ describe("incremental and separate compilation (CLI)", function()
             for _, suffix in ipairs({ "", ".so", ".so.dSYM", ".a", ".lua", ".dSYM",
                 "__entrypoint.c", "__entrypoint.o", "__main", "__main.dSYM" }) do
                 remove(root .. suffix)
+            end
+            if platform.windows then
+                remove(root .. ".dll")
+                remove(root .. ".dll.def")
+                local paths = assert(driver.windows_program_paths(root))
+                remove(paths.executable)
+                remove(paths.provider)
+                remove(paths.provider .. ".def")
+                for _, suffix in ipairs({ ".c", ".o", ".manifest", ".rc", ".res" }) do
+                    remove(root .. "__entrypoint" .. suffix)
+                end
             end
         end
     end)
@@ -142,7 +171,7 @@ describe("incremental and separate compilation (CLI)", function()
         end
         for _, name in ipairs({ APP, OTHER }) do
             assert.is_false(exists(name))
-            assert.is_false(exists(name .. ".so"))
+            assert.is_false(exists(name .. SHARED_SUFFIX))
             assert.is_false(exists(name .. ".a"))
             assert.is_false(exists(name .. ".lua"))
             assert.is_false(exists(name .. "__entrypoint.c"))
@@ -280,8 +309,37 @@ describe("incremental and separate compilation (CLI)", function()
         local stem = source(APP, main(31))
         compiled("-c", APP)
         local wrapper = workspace .. "/failing-cc.sh"
-        local real_cc = command(assert(cdriver.split_shell_words(os.getenv("CC") or "cc")))
-        write(wrapper, table.concat({
+        local real_cc = assert(cdriver.split_shell_words(os.getenv("CC") or
+            (platform.windows and "clang.exe" or "cc")))
+        local wrapper_command
+        if platform.windows then
+            wrapper = workspace .. "/failing-cc.lua"
+            local quoted_cc = {}
+            for _, value in ipairs(real_cc) do quoted_cc[#quoted_cc + 1] = string.format("%q", value) end
+            write(wrapper, string.format([[
+package.path = %q .. package.path
+local arguments = { %s }
+local output, selected
+for index, value in ipairs(arg) do
+    if arg[index - 1] == "-o" then output = value end
+    if value == %q then selected = true end
+    arguments[#arguments + 1] = value
+end
+if selected then
+    local file = assert(io.open(assert(output), "wb"))
+    assert(file:write("partial native object\n"))
+    assert(file:close())
+    io.stderr:write("intentional module compiler failure\n")
+    os.exit(1)
+end
+local result = require("titan-compiler.io").new_sync():run(arguments)
+io.stdout:write(result.output or result.diagnostic or "")
+os.exit(result.ok and 0 or result.status or 1)
+]], REPOSITORY .. "/?.lua;" .. REPOSITORY .. "/?/init.lua;",
+                table.concat(quoted_cc, ", "), stem .. ".c"))
+            wrapper_command = command({ LUA, wrapper })
+        else
+            write(wrapper, table.concat({
             "#!/bin/sh",
             "fixture_output=",
             "fixture_previous=",
@@ -297,11 +355,13 @@ describe("incremental and separate compilation (CLI)", function()
             '    printf "intentional module compiler failure\\n" >&2',
             "    exit 1",
             "fi",
-            "exec " .. real_cc .. ' "$@"',
+            "exec " .. command(real_cc) .. ' "$@"',
             "",
         }, "\n"))
+            wrapper_command = command({ "sh", wrapper })
+        end
         local argv = compiler_arguments()
-        table.insert(argv, 2, "CC=sh " .. assert(cdriver.shell_quote(wrapper)))
+        table.insert(argv, 2, "CC=" .. wrapper_command)
         argv[#argv + 1], argv[#argv + 2], argv[#argv + 3] = "-c", "--incremental", APP
         local ok, output = run(argv)
         assert.is_false(ok)
@@ -341,6 +401,10 @@ describe("incremental and separate compilation (CLI)", function()
     end)
 
     it("links separately built app objects with the stdlib and another library", function()
+        if platform.windows then
+            pending("Titan static-provider linking is unsupported on Windows")
+            return
+        end
         local library = NAMESPACE .. ".library"
         local helper = APP .. ".helper"
         local application = APP .. ".main"
@@ -426,7 +490,7 @@ describe("incremental and separate compilation (CLI)", function()
         local ok, result = xpcall(function()
             -- A fresh source build already supports the indirect method call.
             compiled("--test", APP)
-            local ran, output = run({ "env", provider_path, "./" .. APP })
+            local ran, output = run_program(APP)
             assert.is_true(ran, output)
             assert.matches("[  PASSED  ] 1 test.", output, 1, true)
 
@@ -436,7 +500,7 @@ describe("incremental and separate compilation (CLI)", function()
             output = compiled("--test", "--incremental", "-v", APP)
             assert.matches("Titan object hit " .. APP .. ":", output, 1, true)
             assert.matches("Titan object hit " .. wrapper .. ":", output, 1, true)
-            ran, output = run({ "env", provider_path, "./" .. APP })
+            ran, output = run_program(APP)
             assert.is_true(ran, output)
             assert.matches("[  PASSED  ] 1 test.", output, 1, true)
 
@@ -452,7 +516,7 @@ describe("incremental and separate compilation (CLI)", function()
                     assert.matches("Titan object hit " .. name .. ":", output, 1, true)
                 end
                 for filename, bytes in pairs(saved) do assert.equal(bytes, read(filename)) end
-                ran, output = run({ "env", provider_path, "./" .. roots[1] })
+                ran, output = run_program(roots[1])
                 assert.is_true(ran, output)
                 assert.matches("[  PASSED  ] 2 tests.", output, 1, true)
                 assert.matches(APP .. ".test_indirect", output, 1, true)
@@ -514,7 +578,7 @@ describe("incremental and separate compilation (CLI)", function()
                 assert.equal(contents, read(path), path)
                 assert.equal(future, lfs.attributes(path, "modification"), path)
             end
-            local run_ok, run_output = run({ "./" .. APP })
+            local run_ok, run_output = run_program(APP)
             assert.is_true(run_ok, run_output)
             assert.matches("[  PASSED  ] 2 tests.", run_output, 1, true)
             write(second_stem .. ".titan", [[
@@ -524,7 +588,7 @@ describe("incremental and separate compilation (CLI)", function()
             ]])
             compiled("-c", "--test", "--incremental", OTHER)
             compiled("--test", "--incremental", APP, OTHER)
-            run_ok, run_output = run({ "./" .. APP, "--verbose" })
+            run_ok, run_output = run_program(APP, "--verbose")
             assert.is_true(run_ok, run_output)
             assert.matches("[  PASSED  ] 3 tests.", run_output, 1, true)
             assert.matches(OTHER .. ".test_added", run_output, 1, true)
@@ -536,6 +600,10 @@ describe("incremental and separate compilation (CLI)", function()
     end)
 
     it("builds a parallel Make DAG and propagates changed inline foreign bodies", function()
+        if platform.windows then
+            pending("This Unix Make fixture publishes the unsupported Titan archive provider")
+            return
+        end
         local base = NAMESPACE .. ".base"
         local left = NAMESPACE .. ".left"
         local right = NAMESPACE .. ".right"

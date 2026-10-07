@@ -106,9 +106,7 @@ while IFS= read -r test_file; do
         spec/libuv_build_spec.lua | \
         spec/lpeglabel_build_spec.lua | \
         spec/minicoro_spec.lua | \
-        spec/readline_build_spec.lua | \
-        spec/rockspec_spec.lua | \
-        spec/stdlib_installer_spec.lua)
+        spec/rockspec_spec.lua)
             # The prepared-tree producer and complete macOS lane run these
             # runtime, packaging, and standard-library specs without LuaCov.
             ;;

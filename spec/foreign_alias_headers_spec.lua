@@ -1,3 +1,4 @@
+local temporary = require "spec.support.temporary"
 local driver = require "titan-compiler.driver"
 local ffiheaders = require "titan-compiler.ffiheaders"
 local types = require "titan-compiler.types"
@@ -57,7 +58,7 @@ describe("foreign alias header manifests", function()
     end)
 
     it("retains raw payload scopes through restored transitive source headers", function()
-        local path = os.tmpname() .. ".h"
+        local path = temporary.name(".h")
         headers[#headers + 1] = path
         local file = assert(io.open(path, "w"))
         assert(file:write("struct restored_raw { int member; };\n"))

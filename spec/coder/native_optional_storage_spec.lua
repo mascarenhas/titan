@@ -1,10 +1,11 @@
+local temporary = require "spec.support.temporary"
 local h = require "spec.support.helpers"
 
 local modules = {"test", "optional_provider", "optional_consumer"}
 local header
 
 local function precise_header()
-    header = os.tmpname() .. ".h"
+    header = temporary.name(".h")
     local out = assert(io.open(header, "w"))
     out:write([[
         #include <float.h>

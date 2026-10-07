@@ -103,7 +103,7 @@ check_canonical_container() {
         test -f "$PROVIDER.dSYM/Contents/Resources/DWARF/titan.so"
     fi
 
-    for module in coroutine uv async timer io fs net ssl url http websocket os peg string math lua iteration gc test reflect sqlite3 json; do
+    for module in coroutine uv async timer io fs net ssl url http websocket os path peg string math lua iteration gc test reflect sqlite3 json; do
         local shim="$SHIM_ROOT/titan/$module.lua"
 
         test -f "$shim"
@@ -144,6 +144,7 @@ local expected = {
     ["titan.http"] = true,
     ["titan.websocket"] = true,
     ["titan.os"] = true,
+    ["titan.path"] = true,
     ["titan.peg"] = true,
     ["titan.string"] = true,
     ["titan.math"] = true,
@@ -391,6 +392,7 @@ local http = import "http"
 local websocket = import "websocket"
 local qualified_websocket = import "titan.websocket"
 local system = import "os"
+local path = import "path"
 local peg = import "peg"
 local strings = import "string"
 local math = import "math"
@@ -512,6 +514,8 @@ function main(args: {string}): integer
     check(system.pid() > 0 and #system.cwd() > 0 and
           #system.exepath() > 0,
           "static os identity behavior failed")
+    check(path.basename(path.join("tmp", "provider")) == "provider",
+          "static path provider failed")
     check_json_provider()
     check(#peg.version() > 0,
           "static PEG native engine initialization failed")
@@ -780,6 +784,7 @@ case "$scope" in
         check_dependency_mode
         # The paired publisher replaces both native forms and all generated
         # shims. The earlier bundled smoke consumes that generation first.
+        make clean-stdlib
         OPENSSL_MODE=system "$PREFIX/bin/luarocks" make --force
         OPENSSL_MODE=system
         check_dependency_mode

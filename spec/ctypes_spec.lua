@@ -1,10 +1,11 @@
+local temporary = require "spec.support.temporary"
 local cdriver = require "c-parser.cdriver"
 local c99 = require "c-parser.c99"
 local ctypes = require "c-parser.ctypes"
 local cpp = require "c-parser.cpp"
 
 local function with_header(contents, fn)
-    local header = os.tmpname() .. ".h"
+    local header = temporary.name(".h")
     local f = assert(io.open(header, "w"))
     f:write(contents)
     f:close()

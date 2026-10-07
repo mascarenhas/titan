@@ -1,4 +1,4 @@
--- Host properties and the Windows serial command transport. This module does
+-- Host properties and Windows command transports. This module does
 -- no filesystem/process work on import; native support is acquired only when
 -- a synchronous Windows filesystem operation actually needs it.
 local platform = {
@@ -133,6 +133,39 @@ function platform.windows_command(argv, merge_stderr)
         return nil, "Windows command exceeds the 8191-byte transport limit"
     end
     return command
+end
+
+-- Direct CreateProcessW argv for parallel compiler workers. The CRT consumes
+-- these quotes once; shell metacharacters have no command-interpreter meaning.
+function platform.windows_process_command(argv)
+    if type(argv) ~= "table" or #argv == 0 then
+        return nil, "command must be a nonempty argument array"
+    end
+    local words, executable = {}
+    for index = 1, #argv do
+        local word, err = checked_word(argv[index], index)
+        if not word then return nil, err end
+        if index == 1 then
+            if word == "" then return nil, "command executable is empty" end
+            local extension = word:lower():match("([.][^./\\]+)$")
+            if extension == nil then
+                word = word .. ".exe"
+            elseif extension ~= ".exe" and extension ~= ".com" then
+                return nil, "Windows compiler commands require a native " ..
+                    "executable, not a batch wrapper"
+            end
+            executable, err = platform.native("_win_resolve_executable", word)
+            if not executable then return nil, err end
+            word = executable
+        end
+        words[index] = crt_argument(word)
+    end
+    for key in pairs(argv) do
+        if type(key) ~= "number" or key < 1 or key > #argv or key % 1 ~= 0 then
+            return nil, "command must be a dense argument array"
+        end
+    end
+    return table.concat(words, " "), executable
 end
 
 function platform.native(name, ...)

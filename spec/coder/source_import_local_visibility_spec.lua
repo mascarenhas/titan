@@ -1,6 +1,9 @@
+local temporary = require "spec.support.temporary"
 local lfs = require "lfs"
 local h = require "spec.support.helpers"
 local driver = require "titan-compiler.driver"
+local platform = require "titan-compiler.platform"
+local SHARED_SUFFIX = platform.windows and ".dll" or ".so"
 
 local generated_modules = {}
 
@@ -20,7 +23,8 @@ end
 
 local function clean_generated_modules()
     for name in pairs(generated_modules) do
-        for _, suffix in ipairs({ ".c", ".o", ".so", ".a", ".ffi.h", ".titan.h" }) do
+        for _, suffix in ipairs({ ".c", ".o", ".so", ".dll", ".def", ".dll.def",
+                                 ".a", ".ffi.h", ".titan.h" }) do
             remove_tree(name .. suffix)
         end
         remove_tree(name .. ".so.dSYM")
@@ -173,9 +177,9 @@ describe("source-import local visibility (end-to-end)", function()
             ]],
         }, owner)
 
-        local old_provider = os.tmpname() .. "-source-identity-owner.so"
+        local old_provider = temporary.name("-source-identity-owner" .. SHARED_SUFFIX)
         local file = assert(io.open(old_provider, "wb"))
-        assert(file:write(read_file(owner .. ".so")))
+        assert(file:write(read_file(owner .. SHARED_SUFFIX)))
         assert(file:close())
 
         generate({
@@ -251,7 +255,7 @@ describe("source-import local visibility (end-to-end)", function()
     end)
 
     it("preserves producer-owned C identity across source calls", function()
-        local header = os.tmpname() .. "-source-owned-runtime.h"
+        local header = temporary.name("-source-owned-runtime.h")
         local file = assert(io.open(header, "wb"))
         assert(file:write([[
 #pragma once

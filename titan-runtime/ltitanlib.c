@@ -1,6 +1,9 @@
 #if !defined(_XOPEN_SOURCE)
 #define _XOPEN_SOURCE 700
 #endif
+#if defined(_WIN32) && !defined(_WIN32_WINNT)
+#define _WIN32_WINNT 0x0602
+#endif
 
 #include "lua.h"
 #include "lauxlib.h"
@@ -11,6 +14,7 @@
 #include "ltitan_winfs.h"
 #include "ltitan_winmeta.h"
 #include "ltitan_wintool.h"
+#include "ltitan_winprocess.h"
 #else
 #include <dlfcn.h>
 #endif
@@ -313,6 +317,11 @@ static const luaL_Reg titanlib[] = {
   { "_win_realpath", titan_winfs_realpath },
   { "_win_abspath", titan_winfs_abspath },
   { "_win_resolve_executable", titan_winfs_resolve_executable },
+  { "_win_compile_new", titan_winprocess_new },
+  { "_win_compile_spawn", titan_winprocess_spawn },
+  { "_win_compile_wait", titan_winprocess_wait },
+  { "_win_compile_finish", titan_winprocess_finish },
+  { "_win_compile_close", titan_winprocess_close },
 #endif
   { NULL, NULL }
 };

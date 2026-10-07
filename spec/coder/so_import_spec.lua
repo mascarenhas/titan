@@ -17,8 +17,14 @@ local lfs = require 'lfs'
 local coder_core = require 'titan-compiler.coder.core'
 local coder_names = require 'titan-compiler.coder.names'
 local driver = require 'titan-compiler.driver'
+local cdriver = require 'c-parser.cdriver'
+local compiler_io = require 'titan-compiler.io'
+local platform = require 'titan-compiler.platform'
 local call = h.call
 local generated_modules = {}
+local function provider_pattern(pattern)
+    return (pattern:gsub("%%%.so", platform.windows and "%%.dll" or "%%.so"))
+end
 
 local function symbol_literal(c_spelling)
     return coder_core.c_string_literal(
@@ -52,6 +58,9 @@ describe(".so-only cross-module imports", function()
             remove_tree(name .. ".c")
             remove_tree(name .. ".o")
             remove_tree(name .. ".so")
+            remove_tree(name .. ".dll")
+            remove_tree(name .. ".dll.def")
+            remove_tree(name .. ".lua")
             remove_tree(name .. ".a")
             remove_tree(name .. ".so.dSYM")
         end
@@ -819,9 +828,9 @@ describe(".so-only cross-module imports", function()
         local generated = f:read("*a")
         f:close()
         assert.match(
-            'titan_module_provider%s*%(%s*L,%s*"tbaz",%s*"tbaz%.so"%s*%)', generated)
+            provider_pattern('titan_module_provider%s*%(%s*L,%s*"tbaz",%s*"tbaz%.so"%s*%)'), generated)
         assert.not_match(
-            'titan_module_provider%s*%(%s*L,%s*"tfoo",%s*"tfoo%.so"%s*%)', generated)
+            provider_pattern('titan_module_provider%s*%(%s*L,%s*"tfoo",%s*"tfoo%.so"%s*%)'), generated)
         assert.match(
             'titan_module_symbol%s*%(%s*L,%s*tfoo_provider,%s*'
                 .. symbol_literal("tfoo_\\u2133_Point_\\u2131_move_titanmethod")
@@ -898,7 +907,7 @@ describe(".so-only cross-module imports", function()
         local facade_c = bf:read("*a")
         bf:close()
         assert.match(
-            'titan_module_provider%s*%(%s*L,%s*"alias_provider",%s*"alias_provider%.so"%s*%)', facade_c)
+            provider_pattern('titan_module_provider%s*%(%s*L,%s*"alias_provider",%s*"alias_provider%.so"%s*%)'), facade_c)
         -- Dynamic constructor calls use the owner's replaceable implementation,
         -- including when the currently loaded constructor is synthesized.
         assert.match(
@@ -915,9 +924,9 @@ describe(".so-only cross-module imports", function()
         local consumer_c = cf:read("*a")
         cf:close()
         assert.match(
-            'titan_module_provider%s*%(%s*L,%s*"alias_facade",%s*"alias_facade%.so"%s*%)', consumer_c)
+            provider_pattern('titan_module_provider%s*%(%s*L,%s*"alias_facade",%s*"alias_facade%.so"%s*%)'), consumer_c)
         assert.not_match(
-            'titan_module_provider%s*%(%s*L,%s*"alias_provider",%s*"alias_provider%.so"%s*%)', consumer_c)
+            provider_pattern('titan_module_provider%s*%(%s*L,%s*"alias_provider",%s*"alias_provider%.so"%s*%)'), consumer_c)
         assert.match(
             'titan_module_provider%s*%(%s*L,%s*"alias_provider",%s*NULL%s*%)',
             consumer_c)
@@ -1376,18 +1385,30 @@ describe(".so-only cross-module imports", function()
         f:write([[
             typedef struct lua_State lua_State;
             extern const char *lua_pushstring(lua_State *L, const char *s);
+            const char *notype_provider_abi_value(void) { return "2"; }
             int notype_provider_abi(lua_State *L) {
                 lua_pushstring(L, "2");
                 return 1;
             }
         ]])
         f:close()
-        local shared = driver.IS_DARWIN and "-shared -undefined dynamic_lookup"
-            or "-shared"
-        local cok = os.execute(table.concat({
-            driver.CC, "-fPIC", shared, "-o", "notype_provider.so", "notype_provider.c"
-        }, " "))
-        assert.truthy(cok, "could not compile fake provider without compatibility")
+        local argv = assert(cdriver.split_shell_words(driver.CC))
+        if not platform.windows then argv[#argv + 1] = "-fPIC" end
+        argv[#argv + 1] = "-shared"
+        if driver.IS_DARWIN then
+            argv[#argv + 1] = "-undefined"
+            argv[#argv + 1] = "dynamic_lookup"
+        end
+        if platform.windows then argv[#argv + 1] = "-Wl,--export-all-symbols" end
+        for _, argument in ipairs({ "-o",
+                "notype_provider" .. (platform.windows and ".dll" or ".so"),
+                "notype_provider.c" }) do argv[#argv + 1] = argument end
+        if platform.windows then
+            local prefix = require("spec.support.installed_prefix").active()
+            argv[#argv + 1] = assert(driver.installed_paths(prefix)).liblua
+        end
+        local result = compiler_io.new_sync():run(argv)
+        assert.truthy(result.ok, result.output or result.diagnostic)
 
         local rok, out = call("string", [[
             local ok, err = pcall(require, "notype_consumer")

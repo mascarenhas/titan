@@ -16,6 +16,7 @@ local lfs = require 'lfs'
 local checker = require 'titan-compiler.checker'
 local types = require 'titan-compiler.types'
 local generated_modules = {}
+local built_dependencies = {}
 
 local function remove_tree(path)
     local mode = lfs.symlinkattributes(path, "mode")
@@ -40,13 +41,27 @@ local function clean_generated_modules()
         remove_tree(name .. ".so.dSYM")
     end
     generated_modules = {}
+    built_dependencies = {}
 end
 
 local function so_check(deps, ...)
+    local unbuilt = {}
     for _, dep in ipairs(deps) do
         generated_modules[dep.name] = true
+        if built_dependencies[dep.name] then
+            assert.equal(built_dependencies[dep.name], dep.src,
+                "compiled dependency must remain unchanged within a test case")
+        else
+            unbuilt[#unbuilt + 1] = dep
+        end
     end
-    return h.check_against_so(deps, ...)
+    -- Windows keeps metadata DLLs mapped for the process lifetime. Reuse each
+    -- case's immutable providers while checking its different importers.
+    local errs, mtype = h.check_against_so(unbuilt, ...)
+    for _, dep in ipairs(unbuilt) do
+        built_dependencies[dep.name] = dep.src
+    end
+    return errs, mtype
 end
 
 describe("typechecker rehydration of .so-only imports", function()

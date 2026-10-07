@@ -239,7 +239,7 @@ $ROCKS_TREE/lib/titan/0.6/titan.so
 $ROCKS_TREE/lib/titan/0.6/titan.a
 ```
 
-Both contain the twenty-two `titan.*` logical standard modules, including
+Both contain the twenty-three `titan.*` logical standard modules, including
 `titan.io`, `titan.ssl`, `titan.url`, `titan.http`, `titan.websocket`, `titan.test`, and
 `titan.sqlite3` and `titan.json`, under
 ABI 2. The DSO also
@@ -277,5 +277,7 @@ published provider archive is a regular single-architecture archive for that
 active target.
 
 Thin archives, nested archives, raw non-object members, LTO/bitcode members,
-COFF/Windows libraries, and cross-target multi-output builds are not supported
-in this version.
+COFF/Windows Titan providers, and cross-target multi-output builds are not
+supported in this version. The native-input reader already parses ordinary
+COFF metadata objects, but the Windows driver does not publish or select Titan
+static providers. It still links native static archives and import libraries.

@@ -1,31 +1,39 @@
 # Experimental Windows build
 
-`Makefile.windows` builds the experimental native x64 Windows SDK, including
+`Makefile.win` builds the experimental native x64 Windows SDK, including
 controlled Lua, native dependency DLLs, the compiler and embedded runtime.
 Run it in the MSYS2 **CLANG64** environment with its
-UCRT Clang, LLVM resource tools, Bash, GNU Make 4.3 or newer, Perl, tar, curl,
-and ordinary Unix
-file utilities. The [Titan Lua fork](https://github.com/mascarenhas/lua-5.5.1)
+UCRT Clang, LLVM resource tools, Bash, native GNU Make 4.3 or newer
+(`mingw32-make`), Perl, Git, tar,
+curl, unzip, and ordinary Unix file utilities. The [Titan Lua fork](https://github.com/mascarenhas/lua-5.5.1)
 is a Git submodule at `lua-5.5.1/`, pinned by the Titan checkout's submodule
 commit. Initialize it after cloning or updating the checkout. The Unix build
-compiles directly in that submodule. Windows copies only its `.c`, `.h`,
-`lua.hpp`, and `Makefile` source files into a dedicated `windows-build/` tree,
-then delegates compilation to the fork's existing `src/Makefile` `mingw` target.
+compiles directly in that submodule. Windows copies the source and installation Makefiles, `.c`, `.h`, `lua.hpp`,
+and manual pages into a dedicated `windows-build/` tree, then delegates
+compilation to the fork's `mingw` target and installation to its `install`
+target. Both receive `TITAN_LIBRARY_VERSION` and `PREFIX`. The fork installer
+also supports native Windows GNU Make with `cmd.exe` and no Unix utilities.
 The source bytes stay unchanged. All Titan changes are already in the fork;
-Lua's platform guards select the implementation at compilation. Compilation is
-initially serial. The native build rules remain separate.
+Lua's platform guards select the implementation at compilation. Generated-C
+compilation honors `titanc --jobs` and `TITAN_JOBS`; its default is one. All Windows definitions live in this one Makefile: its direct default
+is help, while LuaRocks selects `titan` and `rock-post-install`. Native GNU Make
+(including `mingw-w64-x86_64-make`) needs drive-letter paths; MSYS Make uses MSYS
+paths. The Makefile converts `PREFIX`, `ROCKS_TREE`, and `WINDOWS_BUILD_ROOT`
+for the selected Make implementation. The native Make executable supplied by
+`mingw-w64-x86_64-make` can drive the CLANG64 compiler; selecting Make does not
+select the compiler or change its UCRT target.
 
 ```sh
 git submodule update --init --recursive
-make -f Makefile.windows lua PREFIX=/c/Titan/sdk
-make -f Makefile.windows lua-check PREFIX=/c/Titan/sdk-validation
+mingw32-make -f Makefile.win lua PREFIX=/c/Titan/sdk
+mingw32-make -f Makefile.win lua-check PREFIX=/c/Titan/sdk-validation
 ```
 
 Then, from ordinary Windows PowerShell, run the separate native-launch gate
 where local script execution policy permits it:
 
 ```powershell
-powershell.exe -NoProfile -File scripts/check_windows_lua.ps1 -BuildRoot C:\path\to\checkout\windows-build-validation
+powershell.exe -NoProfile -File spec/support/check_windows_lua.ps1 -BuildRoot C:\path\to\checkout\windows-build-validation
 ```
 
 `-File` is subject to PowerShell execution policy. The gate does not change that
@@ -43,18 +51,42 @@ native and `TITAN_EXTRA_*` flags follow the Titan profile defaults. Host-domain
 flags follow generic flags so a test `TITAN_EXTRA_CFLAGS=-O0` does not deoptimize
 compiler dependencies. Override `LUA_CFLAGS`/`LUA_LDFLAGS`,
 `COMPILER_DEPS_CFLAGS`/`COMPILER_DEPS_LDFLAGS`,
-and `LPEGLABEL_BUILD_CFLAGS` for host components. Dynamic LPegLabel inherits
-`COMPILER_DEPS_*`; optional `LPEGLABEL_ROCK_CFLAGS`/`LPEGLABEL_ROCK_LDFLAGS`
-overrides remain last. Sanitizer builds use O1/no LTO with full instrumentation
+and `LPEGLABEL_BUILD_CFLAGS` for host components. Dynamic LPegLabel uses the compiler-dependency flags configured in LuaRocks. Sanitizer builds use O1/no LTO with full instrumentation
 in the Lua, compiler-dependency and private-parser domains while keeping Titan
 at O0. Build each profile in a separate SDK prefix and Windows build root; the
-profile and effective flags are recorded in configuration receipts.
+selected profile is recorded in `etc/titan/build-profile`. Clean the selected
+private build directory when changing tools, flags, SDK inputs, or profile.
+Ordinary builds rely on source/header timestamps and the tools' own build state;
+they do not reconcile saved configuration or repair modified artifacts. Lua
+bootstrap checks only for `PREFIX/bin/lua.exe`; remove that file and clean the
+private Lua objects before rebuilding with different sources or flags.
 
-The component targets have separate checks. Successful Lua tests do not imply
+The component targets have separate explicit checks under `spec/support`;
+ordinary build and install recipes do not run artifact inspection.
+`toolchain-check` checks the CLANG64/UCRT compiler selection. The other
+component targets have separate checks. Successful Lua tests do not imply
 that the complete compiler, standard library or language server works.
-Windows Titan providers use DLLs; static Titan-provider emission and linking
-are unsupported. Native dependency import libraries and the embedded runtime
-archive remain SDK build inputs. This workflow does not install LuaRocks.
+The Windows Titan backend publishes DLLs and does not implement Titan
+static-provider emission or selection. Native dependency import libraries and the embedded runtime
+archive remain SDK build inputs. The standalone LuaRocks 3.13.0 executable
+installs compiler dependencies and the Titan source rock into the Lua prefix.
+
+Plain `luarocks test` runs the complete native stdlib suite, the six retained
+runtime/packaging specs, and all compiler/language specs in four private NTFS
+checkout copies. Windows defaults to two concurrent compiler-test workers;
+`TITAN_ROCK_TEST_JOBS=1` through `4` selects the bound. Each worker uses the
+installed SDK read-only and has private source outputs, TEMP and TMP under
+MSYS2's short `/tmp` scratch base. The shard
+containing explicit parallel-compilation tests runs alone so its chosen native
+job bound does not overlap another shard. Ordinary Busted filters or appended
+arguments retain the single-process route. Native Job Objects contain and clean
+worker descendants.
+
+The compiler itself honors `titanc --jobs N` and `TITAN_JOBS=N`. Parallel object
+commands launch directly through `CreateProcessW`; threadpool waits report
+actual completion to the common scheduler. Larger units start first, a completed
+child frees its slot immediately, and diagnostics replay in request order. See
+[driver process transports](driver.md#experimental-windows-process-transports).
 
 ## One controlled Lua DLL and its SDK
 
@@ -64,18 +96,18 @@ copy keeps objects out of the submodule's Unix build tree. The Windows
 `loadlib.c` backend remains upstream Lua's implementation. Lua owns its
 Windows object and link rules, including the paired DLL and GNU import-library
 outputs. Titan compiles its process manifest as an interpreter-only resource,
-passes the native flags, and retains SDK installation and checks. Configuration
-changes clean the private Lua outputs before regenerating that resource.
+passes the native flags, and delegates SDK installation to Lua. Existing
+installed interpreters are reused without configuration or build receipts.
 The recipe produces and installs:
 
 | Path below `PREFIX` | Content |
 | --- | --- |
 | `bin/lua.exe` | Interpreter with a UTF-8 process manifest |
+| `bin/luac.exe` | Lua bytecode compiler |
 | `bin/lua55.dll` | One shared Lua runtime, including pinned internals and the standard Lua DLL name |
-| `lib/liblua-5.5.1.dll.a` | Import library for that DLL |
+| `lib/liblua55.a` | Import library for that DLL |
 | `include/` | Matching configured public headers |
 | `src/lua-5.5.1/` | All matching configured C sources and headers |
-| `etc/titan/lua-5.5.1-windows.config` | Source, toolchain, flags, and configuration identities |
 
 Compiler SDK installations retain headers and matching source directories;
 language-server installations retain the headers required for analysis.
@@ -109,9 +141,10 @@ archive. `luaH_mainposition` is excluded because upstream guards it with
 ## Relocation and native library loading
 
 Windows `!` retains upstream's **running executable directory** meaning.
-Configured Lua defaults resolve `!..` to the SDK prefix and search
-`share/lua/5.5` for Lua source, `lib/titan/0.6` then `lib/lua/5.5` for modules.
-The ordinary explicit current-directory Lua module templates remain available.
+The fork retains upstream Windows Lua-source search paths and adds
+`!\\..\\share\\lua\\5.5` for LuaRocks modules. Native module searches retain the
+executable directory and add `!\\..\\lib\\lua\\5.5` and
+`!\\..\\lib\\titan\\0.6`.
 Lua retains its upstream executable-directory expansion. The shipped
 executables declare a UTF-8 process code page for their Windows ANSI APIs;
 Titan's own provider-path handling uses the wide Windows APIs.
@@ -129,7 +162,7 @@ the executable directory, system locations, current directory, and the process
 `PATH`. The provider-search paths remain separate from native dependency
 resolution, and neither loader changes the process DLL search directories.
 
-Titan's `lua.exe`, `titanc.exe`, and application launchers import `lua55.dll`
+Titan's `lua.exe` and application launchers import `lua55.dll`
 before runtime initialization. The distribution retains that shared Lua runtime
 beside its executables. The standard DLL name lets Lua 5.5 binary modules use
 the same runtime when their architecture and Lua configuration match. Arbitrary
@@ -147,11 +180,11 @@ and [Windows DLL search order](https://learn.microsoft.com/en-us/windows/win32/d
 
 ## Verification boundaries
 
-`bash scripts/check_windows_build_profile.sh` checks profile selection, quoted
+`bash spec/support/check_windows_build_profile.sh` checks profile selection, quoted
 flag arguments, override ordering, and invalid configurations without a Windows
 SDK or VM.
 
-`make -f Makefile.windows lua-source-check` can run on Linux with Clang and
+`make -f Makefile.win lua-source-check` can run on Linux with Clang and
 `llvm-readobj`. It compiles real x64 COFF header consumers in four source-role
 combinations, checks C++ opener linkage and producer annotations, and compiles
 an actual Lua data definition. It neither substitutes Windows SDK headers nor
@@ -186,17 +219,35 @@ runtime gates.
 ## Private native dependency SDK
 
 The experimental `native` target uses the same CLANG64/UCRT compiler to build
-libuv 1.53.0, llhttp 9.4.3, SQLite 3.53.4, and OpenSSL 3.5.7 from the pinned,
+libuv 1.53.0, llhttp 9.4.3, and SQLite 3.53.4 with CMake/Ninja from the pinned,
 checksum-verified sources recorded in `vendor/windows-native/dependencies.tsv`.
-Those pins match the ordinary Makefile. CMake/Ninja build the first three;
-OpenSSL uses its upstream `mingw64` configuration, Perl, Make, and
-`llvm-windres`. No independently built MSYS2 native-library binaries are used.
-This experimental Windows SDK keeps its separate pinned OpenSSL DLL build;
-the Unix `OPENSSL_MODE=system` default does not select Windows dependencies.
+Those pins match the ordinary Makefile. OpenSSL defaults to
+`OPENSSL_MODE=system`, using an already installed binary SDK. Install
+[`mingw-w64-clang-x86_64-openssl`](https://packages.msys2.org/packages/mingw-w64-clang-x86_64-openssl)
+with `pacman -S mingw-w64-clang-x86_64-openssl`, or set `OPENSSL_PREFIX` to a
+compatible x64 UCRT/GNU OpenSSL 3 SDK. The default prefix is CLANG64's
+`MINGW_PREFIX` (normally `/clang64`). The native installer copies its two DLLs,
+matching GNU import libraries, and configured public headers into the Titan
+SDK. It does not download or compile OpenSSL in this mode.
+
+`OPENSSL_MODE=bundled` selects the pinned OpenSSL 3.5.7 source build with its
+upstream `mingw64` configuration, Perl, MSYS GNU Make (`pacman -S make`), and
+`llvm-windres`. This optional upstream build invokes `make` from the CLANG64
+shell; the Titan Makefile and LuaRocks use the selected native GNU Make. Both modes
+deliver the same runtime and import-library names below. Changing OpenSSL mode
+or system prefix does not rebuild the other native dependencies. Clean the
+private OpenSSL build directory before changing its configured flags or prefix.
+Verified acquisition completion remains separate from build configuration: cold
+source preparation verifies the pinned archives and applies the libuv write
+reentry patch and DLL header annotations before marking each source complete.
 
 ```sh
-make -f Makefile.windows native-source-check
-make -f Makefile.windows native-check PREFIX=/c/Titan/sdk-validation
+mingw32-make -f Makefile.win native-source-check
+mingw32-make -f Makefile.win native-check PREFIX=/c/Titan/sdk-validation
+# An alternative installed binary SDK:
+mingw32-make -f Makefile.win native OPENSSL_PREFIX=/c/OpenSSL-UCRT
+# Compile the pinned source instead:
+mingw32-make -f Makefile.win native OPENSSL_MODE=bundled
 ```
 
 | Runtime in `bin/` | Import library in `lib/` |
@@ -207,12 +258,17 @@ make -f Makefile.windows native-check PREFIX=/c/Titan/sdk-validation
 | `libcrypto-3-x64.dll` | `libcrypto.dll.a` |
 | `libssl-3-x64.dll` | `libssl.dll.a` |
 
-The runtime names express the reviewed upstream ABI versions; exact release
-and configuration identities remain pinned separately. Names are selected
+The runtime names express the reviewed upstream ABI versions. OpenSSL's system
+release is selected by the caller's installed SDK; the bundled releases and
+configurations remain pinned separately. Names are selected
 before linking, so import libraries refer to the installed DLL names. Matching
 public headers, including OpenSSL's configured generated headers, are staged
-under `include/`. The runtime gate checks OpenSSL's reported configuration
-directory against its native Windows path spelling. Upstream native static archives may exist inside private
+under `include/`. The runtime gate checks that OpenSSL's headers and runtime
+report the same version. Bundled mode also checks its reported configuration
+directory against the Titan prefix's native Windows path spelling. System
+mode retains the binary provider's configuration, module, and certificate
+paths; copying the DLLs does not relocate those paths or install certificate
+trust roots. Upstream native static archives may exist inside private
 build directories but are never installed into this SDK.
 
 The configured llhttp and SQLite Windows headers distinguish each DLL producer
@@ -222,10 +278,11 @@ SQLite's exported data use explicit imports. libuv retains upstream's
 `BUILDING_UV_SHARED`/`USING_UV_SHARED` contract. These transformations are confined
 to dedicated Windows source copies.
 
-The reviewed configuration disables OpenSSL automatic configuration, dynamic
+The bundled OpenSSL configuration disables automatic configuration, dynamic
 providers/modules, DSO loading, the legacy provider, compression, QUIC, and its
 command-line applications/tests. It keeps the built-in provider and native
-threading. The DLL is not literally inert at load time: upstream
+threading. System mode retains the binary distribution's features and defaults.
+The DLL is not literally inert at load time: upstream
 `crypto/dllmain.c` performs CPU-capability setup on process attach and thread
 cleanup on thread detach; ordinary CRT initialization also remains. The pinned
 libuv, llhttp, and SQLite sources define no project DLL entrypoint. None of
@@ -254,86 +311,101 @@ using this experimental SDK. Host COFF checks alone do not validate these DLLs.
 
 ## Runtime SDK and compiler bootstrap
 
-`Makefile.windows.compiler` builds the native UTF-16 argument frontend,
-`bin/titanc.exe`, its `bin/titanc.lua` companion, and the compiler's Lua/native
-dependencies. It stages compiler modules from the rockspec's explicit module
-inventory. See [the compiler bootstrap contract](../windows-compiler-bootstrap.md)
-for its argument, relocation, initialization, and dependency checks.
+`Makefile.win` installs the standalone LuaRocks executable and
+configures the Lua prefix as its rock tree, with CLANG64 tools and the matching
+`liblua55.a` import library. `compiler` runs the Titan rockspec through
+`luarocks make`; the rockspec selects `Makefile.win` on Windows. Its build pass
+stages the native dependencies and runtime SDK, LuaRocks deploys the declared
+compiler modules and launcher, and the post-install hook uses that deployed
+compiler to build and publish the standard library.
 
-`Makefile.windows.runtime` builds `libtitan.a` from exactly `titan.o` and
+```sh
+mingw32-make -f Makefile.win luarocks PREFIX=/c/Titan/sdk
+export LUAROCKS_CONFIG=C:/Titan/sdk/etc/luarocks/config-5.5.lua
+/c/Titan/sdk/bin/luarocks.exe --lua-version=5.5 \
+  --tree=C:/Titan/sdk make titan-0.6.0-1.rockspec
+```
+
+Users who already have compatible Lua and LuaRocks installations can run the
+last command with their own configured tree and native build tools.
+`spec/support/check_windows_compiler.sh` verifies installed dependencies, their PE
+imports, the compiler modules, and CLI loading in a relocated SDK. See
+[the source compiler installation contract](../windows-compiler-bootstrap.md).
+
+`Makefile.win` builds `libtitan.a` from exactly `titan.o` and
 `minicoro.o`, plus the separate support-only `titan.dll` from `ltitanlib.o`.
 The private, namespaced LPegLabel archive contains exactly its five upstream
 translation units and remains build payload. All objects use the installed,
-configured Lua source headers and matching `lua55.dll` import library.
-Only the runtime archive and public runtime/FFI headers are installed as SDK
-files; private Windows loader/filesystem headers and the PEG archive stay in
-the build tree. Third-party notices and license texts are staged under
+configured Lua source headers and matching `lua55.dll` import library. The
+separate static libbacktrace archive is built with upstream configure/make and
+staged at `lib/libbacktrace.a`, with `backtrace.h` and
+`backtrace-supported.h` under `include/`. Generated provider and launcher links
+select static LLVM unwind support through `-static-libgcc`. The
+[Windows PE correction](../../vendor/libbacktrace/README.md) bounds symbol
+lookup and uses actual relocated image addresses; Titan refreshes snapshots
+after provider loads instead of using persistent loader notifications.
+The runtime and libbacktrace archives, public runtime/FFI headers, and matching
+backtrace headers are installed as SDK files. Private Windows loader/filesystem
+headers and the PEG archive stay in the build tree. Third-party notices and license texts are staged under
 `share/titan/` with the runtime SDK.
 
 ```sh
-make -f Makefile.windows compiler-check runtime-check PREFIX=/c/Titan/sdk-validation
+mingw32-make -f Makefile.win compiler-check runtime-check PREFIX=/c/Titan/sdk-validation
 ```
 
-Runtime staging seeds `lib/titan/0.6/titan.dll` only when absent. An existing
-image must provide the current native support contract and is preserved,
-including when it carries the complete standard library. Validation runs in
-a separate Lua process that exits before publication, avoiding a mapped
-destination DLL in the publisher. This serial installer does not promise
-concurrent-writer or crash-atomic publication.
+Runtime staging seeds `lib/titan/0.6/titan.dll` only when absent and preserves
+any existing image, including a full standard library. It copies the runtime
+archive, public headers, license texts, and profile record directly. Callers own
+cleanup and SDK compatibility when changing native inputs.
 
-The build stamp records source/header bytes, tools, flags, and the controlled
-Lua binary/import pair, including the private parser's separate effective C
-flags. Compiler dependency argv is recorded separately in
-`compiler-objects/dependencies.configuration`; the installed source/artifact
-receipt retains its existing format. Warm reuse also checks output hashes and
-exact archive member inventories. `runtime-check` links the complete runtime
-and private PEG payload into a native consumer, checks permitted PE imports, and exercises
+The runtime build compiles three runtime and five private parser translation
+units, archives the selected objects, and links the support DLL. Source/header
+timestamps decide which outputs need rebuilding; tool or flag changes require
+caller-managed cleanup. `runtime-check` links the complete runtime and private
+PEG payload into a native consumer, checks permitted PE imports, and exercises
 Lua/PEG and explicit-runtime coroutine yield/resume/destruction. It verifies
-unchanged warm timestamps, repairs deliberately corrupted private outputs,
-and proves that staging preserves an existing valid support image with extra
-payload. These checks cover the SDK foundation; complete Titan coroutine,
-standard-library, language-server, and extension behavior require their own
-native tests.
+unchanged warm timestamps and proves that staging preserves an existing support
+image with extra payload. These checks cover the SDK foundation; complete Titan
+coroutine, standard-library, language-server, and extension behavior require
+their own native tests.
 
 ## Standard-provider build and publication
 
-`Makefile.windows.stdlib`, included by `Makefile.windows`, uses the installed
+`Makefile.win` uses the installed
 native compiler and the controlled runtime/native SDK:
 
 ```sh
-make -f Makefile.windows install-stdlib PREFIX=/c/Titan/sdk
+mingw32-make -f Makefile.win install-stdlib PREFIX=/c/Titan/sdk
 ```
 
-The initial experimental `stdlib` target compiles all 22 explicit roots serially
-from source into one `titan.dll`; it does not claim an incremental completion
-stamp. `stdlib-check` validates an existing stage, and `publish-stdlib` validates
-and installs without rebuilding it. Both use a fresh child to check exact PE
-exports, permitted imports, callable metadata against source objects, generated
-shims and `titan/test.titan`. Publication then runs separately with a copied
-private bootstrap, leaving the destination provider unmapped by the publisher.
-The accepted predecessor is absent, support-only, the exact pre-WebSocket
-21-module provider, or the complete current 22-module provider; unfamiliar
-files and incomplete inventories are rejected. The bounded 21-to-22 growth
-requires no existing WebSocket shim; publication includes the new shim in the
-same rollback transaction as every previous shim and the DLL.
-The source-only `TITAN_INSTALL_FAIL_AT=after:dso` regression hook injects a
-caught failure after the final DLL commit to verify restoration of the exact
-predecessor, including removal of the new shim.
+The `stdlib` target uses the already installed compiler and prepared
+runtime/native SDK to compile all 23 explicit roots into one `titan.dll`.
+`TITAN_JOBS` bounds generated-C compilation; checking, generation and the final
+link retain their normal order. It does not reinstall the compiler or prepare those native inputs.
+`install-stdlib` builds that provider and then copies its artifacts. The source
+rock's post-install hook uses this same route with its just-deployed compiler
+and Lua program. `publish-stdlib` copies an existing provider, its 23 generated
+shims, and `titan/test.titan` directly without rebuilding or validating them.
+
+`stdlib-check` is the separate artifact gate. It uses an isolated copy and a
+fresh Lua process to check exact PE exports, permitted imports, callable metadata
+against source objects, generated shims, and the compiler test source. Compiler
+provider publication retains its own ABI and transactional behavior;
+`compiler-publication-check` exercises that contract independently of stdlib
+installation.
 
 The provider links the system Winsock import library `ws2_32` for the private
 UV address helper's byte-order conversion. Its PE import audit permits
 `WS2_32.dll` explicitly. Ordinary compiled Titan clients call the provider and
 do not need this import library or private UV headers themselves.
 
-The installed files are `lib/titan/0.6/titan.dll`, the 22 shims under
+The installed files are `lib/titan/0.6/titan.dll`, the 23 shims under
 `share/lua/5.5/titan`, and `share/titan/0.6/src/titan/test.titan`. No Titan `.a`
 provider or Titan import library is published. `--static` is unsupported on
 Windows. Removed logical modules do not trigger automatic stale-shim cleanup;
 build such a changed provider in a fresh output directory. A DLL mapped by
-another process blocks replacement; caught publication failures restore prior
-file bytes, without promising crash atomicity or concurrent publication.
-Publication currently requires an ordinary SDK directory and ordinary internal
-parent directories; junction/symlink destinations fail validation.
+another process blocks replacement, so close it before copying a new provider.
+Ordinary stdlib installation does not back up or roll back files.
 
 ## Shared native standard-library tests
 
@@ -342,34 +414,45 @@ the complete common suite from CLANG64. Choose a disposable workspace on a local
 NTFS volume:
 
 ```sh
-TITAN_BUILD_PROFILE=validation make -f Makefile.windows install-stdlib \
+TITAN_BUILD_PROFILE=validation mingw32-make -f Makefile.win install-stdlib \
   PREFIX=/c/Titan/sdk-validation
-make -f Makefile.windows titan-stdlib-test-build \
+mingw32-make -f Makefile.win titan-stdlib-test-build \
   PREFIX=/c/Titan/sdk-validation TITAN_TEST_BUILD_DIR=/c/Titan/native-tests-validation
-make -f Makefile.windows titan-stdlib-test-run \
+mingw32-make -f Makefile.win titan-stdlib-test-run \
   PREFIX=/c/Titan/sdk-validation TITAN_TEST_BUILD_DIR=/c/Titan/native-tests-validation
 ```
 
 `titan-stdlib-test` composes both steps. `TITAN_FILTER` selects a runtime Lua
 pattern without narrowing compilation; omit it for complete validation. The
-compatibility entrypoint `scripts/check_windows_stdlib_behavior.sh WORKSPACE SDK`
+compatibility entrypoint `spec/support/check_windows_stdlib_behavior.sh WORKSPACE SDK`
 also builds and runs the full shared suite. There is no separate Windows case
-allowlist: `spec/support/stdlib_test_modules.mk` supplies the same 27 explicit
+allowlist: `spec/support/stdlib_test_modules.mk` supplies the same 28 explicit
 roots to all three platforms, including filesystem, SQLite, and local watchers.
 
 The build copies the supplied SDK and authored fixtures into its marked
-workspace, preserving the published SDK. It verifies the SDK profile marker
-against the selected profile and records that profile for later run commands;
-a run with a different selected profile requires rebuilding the workspace.
+workspace, preserving the published SDK. It records the test compilation
+profile for later run commands; a run with a different selected test profile
+requires rebuilding the workspace.
 It rejects unrelated existing directories and nonlocal or non-NTFS workspaces.
 Test outputs, scratch files, native child executables, and logs stay inside that
 workspace. The runner uses the bounded Job Object supervisor and drains both output streams, including
-when the aggregate fails or times out. `TITAN_TEST_TIMEOUT` defaults to 300
-seconds. Keep the complete native exit status, including values above 255.
+when the aggregate fails or times out. `TITAN_TEST_TIMEOUT` defaults to 1800
+seconds to accommodate the full suite's fresh-process compiler and launcher
+cases. Keep the complete native exit status, including values above 255.
 The test launcher reserves 8 MiB of stack so the common deep-recursion oracles
 also run with `-O0` providers. Fresh-process fixtures copy the selected SDK's
 runtime DLLs beside their child executables and preserve normal
 executable-relative provider lookup. Both settings are private to the harness.
+
+Standalone compiler fixtures link in a fresh Lua process, which releases the
+DLL mappings created by validation before the next fixture rebuilds that
+provider. They remove their own previous direct-module DLL so it cannot shadow
+the standalone provider under `lib/titan/0.6`.
+
+Compiler fixtures that create native symbolic links require permission from the
+Windows process token. When creation is denied, the owning cases report a
+capability skip with the creation error; the same assertions run when that
+permission is available.
 
 The output audit reports selected, passed, skipped, and failed cases, checks
 that every owner executed, and requires each exclusion to name its semantic,
@@ -381,24 +464,38 @@ platform-specific assertion is skipped. See the
 A complete provider build and unfiltered behavior run remain required; runtime,
 launcher, or publication canaries alone are insufficient. Record the source
 revision, SDK identity, native OS/architecture, provider optimization, local
-filesystem, and classified skip reasons. Repeat the shared suite with both
-`-O0` and `-O3` providers when validating the Windows port.
+filesystem, and classified skip reasons. Repeat the shared suite with providers
+from both `validation` and `production` build profiles when validating the
+Windows port. Windows production recipes use their ordinary `-O2` defaults;
+test objects retain validation flags when consuming a production SDK.
 
 ## Experimental boundaries
 
-Windows compilation is serial and the initial stdlib target rebuilds its
-explicit roots. Windows error traces retain Lua frames and raw native addresses;
-native Titan source-line attribution is not yet available. `titan.io.popen`
+The initial stdlib target rebuilds its explicit roots. Compiler checking and C
+generation run serially; independent generated-C object compilations honor the
+requested job bound through the native completion transport described above.
+Windows error traces use libbacktrace and generated DWARF to
+interleave Lua frames with native Titan filenames, lines, and function names.
+The separate static libbacktrace archive and static unwind linkage avoid an
+additional runtime DLL. `titan.io.popen`
 uses the system `cmd.exe` with `/d /s /c`, writable stdin, and merged output.
 Its command string must use native Windows shell syntax; see
 [shell commands](../language/standard-library-io.md#shell-commands). Use
 `titan.os.spawn` for direct executable and argument control. Both retain the
 existing process ownership rules, without a descendant-termination guarantee.
 
-The packaged OpenSSL configuration supplies no usable default CA roots and does
-not automatically use the Windows ROOT certificate store. Its compiled CA file
-and directory paths refer to the original build prefix; moving the SDK does not
-relocate them. Use the existing `ssl.connect(host, port, ca_file)` PEM-file
+The shared tests still need Windows equivalents for the Unix file-descriptor
+leak inventory, FIFO-based accepted-open cancellation, and USR1/USR2 delivery
+fixtures. These are coverage gaps, not evidence that native file cancellation,
+source loading, or all signal delivery is unavailable. Symbolic-link fixtures
+probe their actual creation route; a LuaFileSystem failure does not establish
+that Titan's native Windows symlink route is unavailable.
+
+Bundled OpenSSL supplies no usable default CA roots and does not automatically
+use the Windows ROOT certificate store. System mode inherits the installed
+provider's certificate and configuration defaults. Moving the SDK does not
+relocate either provider's compiled CA paths. Use the existing
+`ssl.connect(host, port, ca_file)` PEM-file
 argument, or configure `SSL_CERT_FILE` / `SSL_CERT_DIR` before starting a fresh
 process that loads `titan.ssl`. The directory override requires OpenSSL's
 subject-hash layout. These choices retain certificate and peer-name verification;

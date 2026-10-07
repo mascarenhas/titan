@@ -1,3 +1,4 @@
+local temporary = require "spec.support.temporary"
 local lfs = require "lfs"
 local assert = require "luassert"
 
@@ -6,10 +7,15 @@ local completion = require "titan-compiler.completion"
 local driver = require "titan-compiler.driver"
 local nominallayout = require "titan-compiler.nominallayout"
 local parser = require "titan-compiler.parser"
+local platform = require "titan-compiler.platform"
 local staticmetadata = require "titan-compiler.staticmetadata"
 local types = require "titan-compiler.types"
 local util = require "titan-compiler.util"
 local titan = require "titan"
+
+local function provider_path(path)
+    return (path:gsub("%.so$", platform.windows and ".dll" or ".so"))
+end
 
 -- These fixtures exercise provider identity without generating field accesses.
 local function empty_layouts(modname)
@@ -120,6 +126,25 @@ describe("static compiled-module checker provenance", function()
     local source
     local binary
     local previous
+    local native_abi_exports
+
+    -- Native ABI membership is separate from the provider's Lua callbacks.
+    local function mock_native_abi(filename, modules)
+        local exports = {}
+        for name, abi in pairs(modules) do
+            exports[driver.mangle_module_name(name) .. "_abi_value"] = abi
+        end
+        native_abi_exports[filename] = exports
+        titan._abivalue = function(found_filename, symbol)
+            local provider = assert(native_abi_exports[found_filename],
+                "unexpected native ABI provider " .. found_filename)
+            local abi = provider[symbol]
+            if abi == nil then
+                return nil, "undefined symbol: " .. symbol, "init"
+            end
+            return abi
+        end
+    end
 
     local function cache_provider(context, relative, module_types)
         local filename = binary .. "/" .. relative
@@ -155,7 +180,7 @@ describe("static compiled-module checker provenance", function()
     end
 
     before_each(function()
-        root = os.tmpname()
+        root = temporary.name()
         assert(os.remove(root))
         assert(lfs.mkdir(root))
         source = root .. "/source"
@@ -169,7 +194,9 @@ describe("static compiled-module checker provenance", function()
             imported = driver.imported,
             registry = types.registry,
             loadlib = titan._loadlib,
+            abivalue = titan._abivalue,
         }
+        native_abi_exports = {}
         driver.TITAN_SOURCE_PATH = source
         driver.TITAN_BIN_PATH = binary
         driver.imported = {}
@@ -182,6 +209,7 @@ describe("static compiled-module checker provenance", function()
         driver.imported = previous.imported
         types.registry = previous.registry
         titan._loadlib = previous.loadlib
+        titan._abivalue = previous.abivalue
         remove_tree(root)
     end)
 
@@ -616,8 +644,13 @@ end
         })
         local api = facade_interface(
             "chain.api", "Link", "chain.mid.Link")
-        local dynamic = binary .. "/chain.so"
+        local dynamic = provider_path(binary .. "/chain.so")
         write_file(dynamic, "mock multi-protocol DSO\n")
+        mock_native_abi(dynamic, {
+            ["chain.api"] = driver.TITAN_ABI_VERSION,
+            ["chain.leaf"] = driver.TITAN_ABI_VERSION,
+            ["chain.mid"] = driver.TITAN_ABI_VERSION,
+        })
         local protocols = {
             chain_api = types.serialize(api),
             chain_leaf = types.serialize(leaf),
@@ -648,7 +681,7 @@ end
         local context = driver.new_resolver_context()
         local loader = driver.defaultloader({}, { context = context })
         local modtype, errors = checker.checkimport("chain.api", loader)
-        assert.truthy(modtype)
+        assert.truthy(modtype, table.concat(errors or {}, "\n"))
         assert.equal(0, #errors)
         assert.truthy(types.registry["chain.mid.Link"])
         assert.truthy(types.registry["chain.leaf.Box"])
@@ -681,8 +714,9 @@ end
         local owner_provider = cache_provider(context, "dyn/owner.a", {
             ["dyn.owner"] = owner,
         })
-        local dynamic = binary .. "/dyn.so"
+        local dynamic = provider_path(binary .. "/dyn.so")
         write_file(dynamic, "mock exposing DSO\n")
+        mock_native_abi(dynamic, { ["dyn.facade"] = driver.TITAN_ABI_VERSION })
         local facade_types = types.serialize(facade)
         titan._loadlib = function(filename, symbol)
             assert.equal(dynamic, filename)
@@ -698,7 +732,7 @@ end
 
         local loader = driver.defaultloader({}, { context = context })
         local modtype, errors = checker.checkimport("dyn.facade", loader)
-        assert.truthy(modtype, errors)
+        assert.truthy(modtype, table.concat(errors or {}, "\n"))
         assert.equal(0, #errors)
         assert.equal("dynamic", driver.imported["dyn.facade"].kind)
         assert.is_nil(driver.imported["dyn.owner"])
@@ -751,9 +785,10 @@ end
             context, "identity/facade.a", {
                 ["identity.facade"] = facade,
             })
-        local owner_dso = binary .. "/identity/owner.so"
+        local owner_dso = provider_path(binary .. "/identity/owner.so")
         ensure_directory(binary .. "/identity")
         write_file(owner_dso, "mock independently selected owner DSO\n")
+        mock_native_abi(owner_dso, { ["identity.owner"] = driver.TITAN_ABI_VERSION })
         local serialized_owner = types.serialize(owner)
         titan._loadlib = function(filename, symbol)
             assert.equal(owner_dso, filename)
@@ -770,7 +805,7 @@ end
         local loader = driver.defaultloader({}, { context = context })
         local facade_type, facade_errors =
             checker.checkimport("identity.facade", loader)
-        assert.truthy(facade_type)
+        assert.truthy(facade_type, table.concat(facade_errors or {}, "\n"))
         assert.equal(0, #facade_errors)
         assert.is_nil(driver.imported["identity.owner"])
         assert.same({
@@ -783,7 +818,7 @@ end
 
         local owner_type, owner_errors =
             checker.checkimport("identity.owner", loader)
-        assert.truthy(owner_type)
+        assert.truthy(owner_type, table.concat(owner_errors or {}, "\n"))
         assert.equal(0, #owner_errors)
         assert.equal("dynamic", driver.imported["identity.owner"].kind)
         assert.equal(owner_dso, driver.imported["identity.owner"].filename)
@@ -1009,10 +1044,18 @@ end
             "left.facade", "Box", owner_fqtn)
         local right_facade = facade_interface(
             "right.facade", "Box", owner_fqtn)
-        local left_dso = binary .. "/left.so"
-        local right_dso = binary .. "/right.so"
+        local left_dso = provider_path(binary .. "/left.so")
+        local right_dso = provider_path(binary .. "/right.so")
         write_file(left_dso, "mock left DSO\n")
         write_file(right_dso, "mock right DSO\n")
+        mock_native_abi(left_dso, {
+            ["left.facade"] = driver.TITAN_ABI_VERSION,
+            [owner_name] = driver.TITAN_ABI_VERSION,
+        })
+        mock_native_abi(right_dso, {
+            ["right.facade"] = driver.TITAN_ABI_VERSION,
+            [owner_name] = driver.TITAN_ABI_VERSION,
+        })
         local exports = {
             [left_dso] = {
                 left_facade_types = types.serialize(left_facade),
@@ -1053,10 +1096,10 @@ end
         })
 
         local left, left_errors = checker.checkimport("left.facade", loader)
-        assert.truthy(left)
+        assert.truthy(left, table.concat(left_errors or {}, "\n"))
         assert.equal(0, #left_errors)
         local right, right_errors = checker.checkimport("right.facade", loader)
-        assert.truthy(right)
+        assert.truthy(right, table.concat(right_errors or {}, "\n"))
         assert.equal(0, #right_errors)
 
         source_roots[owner_name] = true

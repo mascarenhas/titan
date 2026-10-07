@@ -1,9 +1,12 @@
+local temporary = require "spec.support.temporary"
 local h = require "spec.support.helpers"
 local checker = require "titan-compiler.checker"
 local coder = require "titan-compiler.coder"
 local driver = require "titan-compiler.driver"
+local platform = require "titan-compiler.platform"
 
 local run_coder = h.run_coder
+local provider = "./test" .. (platform.windows and ".dll" or ".so")
 
 local function generate(source)
     h.reset(true)
@@ -15,7 +18,7 @@ local function generate(source)
 end
 
 local function with_header(contents, fn)
-    local header = os.tmpname() .. ".h"
+    local header = temporary.name(".h")
     local file = assert(io.open(header, "w"))
     file:write(contents)
     file:close()
@@ -29,16 +32,16 @@ end
 describe("flexible return code generation", function()
     after_each(function()
         if h.verbose then return end
-        os.remove("test.c")
-        os.remove("test.o")
-        os.remove("test.so")
-        for _, name in ipairs({ "flex_provider", "flex_consumer" }) do
-            os.remove(name .. ".c")
-            os.remove(name .. ".o")
-            os.remove(name .. ".so")
+        for _, name in ipairs({ "test", "flex_provider", "flex_consumer" }) do
+            for _, suffix in ipairs({ ".c", ".o", ".so", ".dll", ".dll.def",
+                                      ".lua", ".a", ".ffi.h", ".titan.h" }) do
+                os.remove(name .. suffix)
+            end
         end
-        os.execute("rm -rf test.dSYM")
-        os.execute("rm -rf flex_provider.dSYM flex_consumer.dSYM")
+        if not platform.windows then
+            os.execute("rm -rf test.dSYM")
+            os.execute("rm -rf flex_provider.dSYM flex_consumer.dSYM")
+        end
     end)
 
     it("appends the flexible pair without changing fixed-only signatures", function()
@@ -633,12 +636,18 @@ describe("flexible return code generation", function()
         with_header([[
             typedef struct lua_State lua_State;
 
-            int flex_small_zero(lua_State *L) {
+            #ifdef _WIN32
+            #define FLEX_FIXTURE_EXPORT __declspec(dllexport)
+            #else
+            #define FLEX_FIXTURE_EXPORT
+            #endif
+
+            FLEX_FIXTURE_EXPORT int flex_small_zero(lua_State *L) {
                 (void)L;
                 return 0;
             }
 
-            int flex_small_three(lua_State *L) {
+            FLEX_FIXTURE_EXPORT int flex_small_three(lua_State *L) {
                 lua_pushinteger(L, 7);
                 lua_pushinteger(L, 8);
                 lua_pushinteger(L, 9);
@@ -686,7 +695,7 @@ describe("flexible return code generation", function()
                     local f: function (boolean): (...: integer) = boxed
                     return f(present)
                 end
-            ]], [[
+            ]], "local provider = " .. string.format("%q", provider) .. [[
                 assert(select("#", test.exact()) == 3)
                 local a, b = test.exact()
                 assert(a == 1 and b == 2)
@@ -695,9 +704,9 @@ describe("flexible return code generation", function()
                 assert(test.finite() == 9)
 
                 local c_zero = assert(package.loadlib(
-                    "./test.so", "flex_small_zero"))
+                    provider, "flex_small_zero"))
                 local c_three = assert(package.loadlib(
-                    "./test.so", "flex_small_three"))
+                    provider, "flex_small_three"))
                 assert(select("#", test.c_forward(c_zero)) == 0)
                 assert(select("#", test.c_forward(c_three)) == 3)
                 local first, second = test.c_forward(c_three)
@@ -721,19 +730,25 @@ describe("flexible return code generation", function()
         with_header([[
             typedef struct lua_State lua_State;
 
+            #ifdef _WIN32
+            #define FLEX_FIXTURE_EXPORT __declspec(dllexport)
+            #else
+            #define FLEX_FIXTURE_EXPORT
+            #endif
+
             static int flex_request_anchor(void) { return 0; }
 
-            int flex_return_zero(lua_State *L) {
+            FLEX_FIXTURE_EXPORT int flex_return_zero(lua_State *L) {
                 (void)L;
                 return 0;
             }
 
-            int flex_return_nil(lua_State *L) {
+            FLEX_FIXTURE_EXPORT int flex_return_nil(lua_State *L) {
                 lua_pushnil(L);
                 return 1;
             }
 
-            int flex_return_201(lua_State *L) {
+            FLEX_FIXTURE_EXPORT int flex_return_201(lua_State *L) {
                 luaL_checkstack(L, 201, "flex_return_201");
                 for (int i = 1; i <= 201; i++) lua_pushinteger(L, i);
                 return 201;
@@ -754,7 +769,7 @@ describe("flexible return code generation", function()
                 return lua_gettop(L);
             }
 
-            int luaopen_flex_request(lua_State *L) {
+            FLEX_FIXTURE_EXPORT int luaopen_flex_request(lua_State *L) {
                 lua_pushcfunction(L, flex_request_results);
                 return 1;
             }
@@ -815,7 +830,7 @@ describe("flexible return code generation", function()
             function c_forward(f: function (): (...: value)): (...: value)
                 return f()
             end
-        ]], [[
+        ]], "local provider = " .. string.format("%q", provider) .. [[
             local exact_ok, exact_count = pcall(function()
                 return select("#", test.exact200())
             end)
@@ -840,7 +855,7 @@ describe("flexible return code generation", function()
             assert(not pcall(test.finite))
             assert(test.request_anchor() == 0)
             local request_results = assert(package.loadlib(
-                "./test.so", "luaopen_flex_request"))()
+                provider, "luaopen_flex_request"))()
             local request_ok, request_err = pcall(
                 request_results, test.nonexact, 200)
             assert(not request_ok)
@@ -856,11 +871,11 @@ describe("flexible return code generation", function()
             assert(not pcall(function() return test.nonexact() end))
 
             local c_zero = assert(package.loadlib(
-                "./test.so", "flex_return_zero"))
+                provider, "flex_return_zero"))
             local c_nil = assert(package.loadlib(
-                "./test.so", "flex_return_nil"))
+                provider, "flex_return_nil"))
             local c_many = assert(package.loadlib(
-                "./test.so", "flex_return_201"))
+                provider, "flex_return_201"))
             assert(select("#", test.c_forward(c_zero)) == 0)
             assert(select("#", test.c_forward(c_nil)) == 1)
             local c_first, c_second = test.c_forward(c_many)

@@ -51,6 +51,7 @@ local standard_imports = {
     timer = "titan.timer",
     io = "titan.io",
     fs = "titan.fs",
+    path = "titan.path",
     net = "titan.net",
     ssl = "titan.ssl",
     url = "titan.url",

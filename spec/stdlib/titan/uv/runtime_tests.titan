@@ -13,9 +13,6 @@ local function assert_symbolic_frame(context: test.Context, trace: string,
                                       frame: string)
   test.assert(#trace > 0, "failure did not retain a traceback")
   context:run("symbolic_frame", function (_context: test.Context)
-    if common.is_windows() then
-      test.skip("unsupported: native Windows tracebacks retain raw addresses without Titan symbols")
-    end
     test.assert(common.contains(trace, frame), "traceback lost its Titan frame: " .. frame)
   end)
 end

@@ -1,3 +1,4 @@
+local temporary = require "spec.support.temporary"
 local h = require "spec.support.helpers"
 
 local function clean()
@@ -95,7 +96,7 @@ describe("native nominal storage", function()
     end)
 
     it("reconstructs only the public prefix across a source-free DSO", function()
-        local header = os.tmpname() .. ".h"
+        local header = temporary.name(".h")
         local file = assert(io.open(header, "w"))
         file:write([[
             typedef struct private_native { long double precise; int tag; } private_native;
@@ -339,7 +340,7 @@ describe("native nominal storage", function()
     end)
 
     it("copies fixed objects and snapshots arrays before later argument effects", function()
-        local header = os.tmpname() .. ".h"
+        local header = temporary.name(".h")
         local file = assert(io.open(header, "w"))
         file:write([[
             typedef struct embedded_point { int x; int y; } embedded_point;
@@ -383,7 +384,7 @@ describe("native nominal storage", function()
     end)
 
     it("initializes C-qualified aggregate and array members without C assignment", function()
-        local header = os.tmpname() .. ".h"
+        local header = temporary.name(".h")
         local file = assert(io.open(header, "w"))
         file:write([[
             typedef struct const_point { int x; int y; } const_point;
@@ -423,7 +424,7 @@ describe("native nominal storage", function()
     end)
 
     it("copies qualified numeric typedefs into mutable native value carriers", function()
-        local header = os.tmpname() .. ".h"
+        local header = temporary.name(".h")
         local file = assert(io.open(header, "w"))
         file:write([[
             typedef const int const_integer;
@@ -471,7 +472,7 @@ describe("native nominal storage", function()
     end)
 
     it("copies fixed array replacements before later right-hand-side effects", function()
-        local header = os.tmpname() .. ".h"
+        local header = temporary.name(".h")
         local file = assert(io.open(header, "w"))
         file:write([[
             typedef int replacement_row[3];
@@ -507,7 +508,7 @@ describe("native nominal storage", function()
     end)
 
     it("aligns multiple array and FAM union tails after their fixed payload", function()
-        local header = os.tmpname() .. ".h"
+        local header = temporary.name(".h")
         local file = assert(io.open(header, "w"))
         file:write([[
             #include <stdint.h>
@@ -544,7 +545,7 @@ describe("native nominal storage", function()
     end)
 
     it("checks dynamic FAM extents and cumulative tail limits before later effects", function()
-        local header = os.tmpname() .. ".h"
+        local header = temporary.name(".h")
         local file = assert(io.open(header, "w"))
         file:write([[
             #include "lua.h"
@@ -635,7 +636,7 @@ describe("native nominal storage", function()
     end)
 
     it("rejects native members and tails aligned beyond Lua userdata", function()
-        local header = os.tmpname() .. ".h"
+        local header = temporary.name(".h")
         local file = assert(io.open(header, "w"))
         file:write([[
             #include "titan/ffi.h"

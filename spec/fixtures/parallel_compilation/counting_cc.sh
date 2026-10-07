@@ -22,6 +22,7 @@ unlock() {
 }
 
 if [ "$matched" = yes ]; then
+    expected=${TITAN_PARALLEL_TEST_EXPECTED:-1}
     lock
     active=0
     test ! -f "$state/active" || active=$(cat "$state/active")
@@ -38,12 +39,11 @@ if [ "$matched" = yes ]; then
     ordinal=$((started + 1))
     printf '%s\n' "$ordinal" > "$state/started"
     if [ "${TITAN_PARALLEL_TEST_MODE:-}" = refill ] &&
-            [ "$ordinal" -ge 5 ] && [ ! -f "$state/slow-finished" ]; then
+            [ "$ordinal" -gt "$expected" ] && [ ! -f "$state/slow-finished" ]; then
         : > "$state/refilled-before-slow-finished"
     fi
     unlock
 
-    expected=${TITAN_PARALLEL_TEST_EXPECTED:-1}
     attempts=0
     while :; do
         lock

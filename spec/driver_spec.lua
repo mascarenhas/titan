@@ -1,3 +1,4 @@
+local temporary = require "spec.support.temporary"
 local lfs = require "lfs"
 local assert = require "luassert"
 
@@ -15,6 +16,54 @@ local objectmetadata = require "titan-compiler.objectmetadata"
 local types = require "titan-compiler.types"
 local util = require "titan-compiler.util"
 local titan = require "titan"
+local platform = require "titan-compiler.platform"
+local paths = require "titan-compiler.path"
+
+local function fixture_path(path)
+    return platform.windows and "C:" .. path or path
+end
+
+local function posix_model_it(name, callback)
+    it(name, function()
+        local previous = platform.windows
+        local previous_driver = {}
+        for key, value in pairs(driver) do previous_driver[key] = value end
+        platform.windows = false
+        local completed, failure = xpcall(callback, debug.traceback)
+        platform.windows = previous
+        -- Layout initialization inside a POSIX model must not leave native
+        -- installed paths reinterpreted as POSIX relative paths afterwards.
+        for key in pairs(driver) do driver[key] = nil end
+        for key, value in pairs(previous_driver) do driver[key] = value end
+        assert.truthy(completed, failure)
+    end)
+end
+
+-- These assertions model the POSIX standalone writer. Its lexical
+-- hierarchy uses POSIX spellings, so a Windows host supplies the small
+-- directory-type model instead of passing fictional POSIX paths to LFS.
+-- POSIX hosts retain the real filesystem fixture below.
+local function posix_output_it(name, callback)
+    posix_model_it(name, function()
+        if package.config:sub(1, 1) ~= "\\" then return callback() end
+        local originals = {
+            currentdir = lfs.currentdir, chdir = lfs.chdir,
+            attributes = lfs.attributes, symlinkattributes = lfs.symlinkattributes,
+        }
+        local entries = {}
+        lfs.currentdir = function() return "/fixture" end
+        lfs.chdir = function() return nil, "no physical directory in the POSIX model" end
+        local function attributes(path, field)
+            local entry = entries[path]
+            if field then return entry and entry[field] end
+            return entry
+        end
+        lfs.attributes, lfs.symlinkattributes = attributes, attributes
+        local completed, failure = xpcall(function() callback(entries) end, debug.traceback)
+        for key, value in pairs(originals) do lfs[key] = value end
+        assert.truthy(completed, failure)
+    end)
+end
 
 describe("Windows compiler path integration", function()
     local platform = require "titan-compiler.platform"
@@ -167,14 +216,14 @@ describe("Windows compiler path integration", function()
         local layout = driver.installed_paths([[\\?\C:\SDK é]])
         assert.equal([[\\?\C:\SDK é\lib\titan\0.6\?.dll]], layout.lua_cpath)
         assert.equal([[\\?\C:\SDK é\src\lua-5.5.1]], layout.lua_source)
-        assert.equal([[\\?\C:\SDK é\lib\liblua-5.5.1.dll.a]], layout.liblua)
+        assert.equal([[\\?\C:\SDK é\lib\liblua55.a]], layout.liblua)
         assert.equal([[\\?\C:\SDK é\include]], layout.include)
     end)
 
     it("keeps ordinary executable-relative SDK roots in their ordinary namespace", function()
         local layout = driver.installed_paths([[C:\SDK 日本\bin\..]])
         assert.equal("C:/SDK 日本", layout.root)
-        assert.equal("C:/SDK 日本/lib/liblua-5.5.1.dll.a", layout.liblua)
+        assert.equal("C:/SDK 日本/lib/liblua55.a", layout.liblua)
         assert.equal("C:/SDK 日本/lib/titan/0.6/?.dll", layout.lua_cpath)
     end)
 
@@ -358,7 +407,7 @@ describe("Windows launcher filenames", function()
 
     it("rejects a missing DLL inventory before replacing an existing provider", function()
         local platform = require "titan-compiler.platform"
-        local filename = os.tmpname()
+        local filename = temporary.name()
         assert(util.set_file_contents(filename, "existing provider"))
         local previous = platform.windows
         platform.windows = true
@@ -373,10 +422,15 @@ describe("Windows launcher filenames", function()
     end)
 
     it("validates selected archive metadata and support before emitting a launcher", function()
+        -- Isolate this pure Windows model's runtime acceptance cache from the
+        -- shared driver used by real compiler and filesystem fixtures.
+        local driver = assert(loadfile("titan-compiler/driver.lua"))()
+        driver.INSTALLED = true
         local platform = require "titan-compiler.platform"
+        local previous_native = platform.native
         local previous_sync = compiler_io.new_sync
         local previous_windows, previous_cwd = platform.windows, lfs.currentdir()
-        local directory = os.tmpname()
+        local directory = temporary.name()
         os.remove(directory)
         assert(lfs.mkdir(directory))
         local saved, calls = {}, {}
@@ -406,6 +460,12 @@ describe("Windows launcher filenames", function()
                 return { stat = function() return { kind = "directory" } end }
             end
             platform.windows = true
+            platform.native = function(operation, ...)
+                if operation == "_win_resolve_executable" then
+                    return "C:/launcher-model/tools/" .. select(1, ...)
+                end
+                return previous_native(operation, ...)
+            end
             local options = { module_names = { "app", "archive" },
                 archive_entries = entries, archive_names = names,
                 validate_titan_support = true }
@@ -424,6 +484,7 @@ describe("Windows launcher filenames", function()
             assert.is_nil(lfs.attributes("bin/app.exe"))
         end)
         platform.windows = previous_windows
+        platform.native = previous_native
         compiler_io.new_sync = previous_sync
         assert(lfs.chdir(previous_cwd))
         for name, fn in pairs(saved) do driver[name] = fn end
@@ -730,7 +791,7 @@ describe("independent nominal layout metadata", function()
 
     after_each(function() titan._loadlib = previous_loadlib end)
 
-    it("loads separate physical plans only for native consumers", function()
+    posix_model_it("loads separate physical plans only for native consumers", function()
         local status, modtype, metadata = driver.probe_compiled_interface("physical", "physical.so")
         assert.equal("valid", status)
         assert.equal(serialized, types.serialize(modtype))
@@ -748,7 +809,7 @@ describe("independent nominal layout metadata", function()
         assert.same({ "physical_abi", "physical_types" }, requested)
     end)
 
-    it("rejects absent and invalid physical plans before native access", function()
+    posix_model_it("rejects absent and invalid physical plans before native access", function()
         layouts = nil
         local status, err = driver.probe_compiled_interface("physical", "physical.so")
         assert.equal("error", status)
@@ -932,7 +993,7 @@ describe("compiler installation discovery", function()
         assert.equal(cancellation, reason)
     end)
 
-    it("initializes uname lazily through the resolver strategy", function()
+    posix_model_it("initializes uname lazily through the resolver strategy", function()
         local strategy = compiler_io.new_sync()
         local commands = {}
         function strategy:run(argv, options)
@@ -970,7 +1031,7 @@ describe("compiler installation discovery", function()
         assert.truthy(ran, failure)
     end)
 
-    it("initializes native publication flags through a resolver strategy",
+    posix_model_it("initializes native publication flags through a resolver strategy",
     function()
         local strategy = compiler_io.new_sync()
         local commands = {}
@@ -1005,7 +1066,7 @@ describe("compiler installation discovery", function()
         assert.truthy(ran, failure)
     end)
 
-    it("surfaces resolver strategy failures at public driver boundaries",
+    posix_model_it("surfaces resolver strategy failures at public driver boundaries",
     function()
         local failed, reason = driver.source_checkout_from_driver_source(
             "@titan-compiler/driver.lua", nil, {
@@ -1117,7 +1178,7 @@ describe("compiler installation discovery", function()
         assert.is_true(driver.close_resolver_context(probe_context))
     end)
 
-    it("distinguishes realpath, stat, and provider inspection failures",
+    posix_model_it("distinguishes realpath, stat, and provider inspection failures",
     function()
         local context = driver.new_resolver_context()
         local strategy = context.io
@@ -1222,7 +1283,7 @@ describe("compiler installation discovery", function()
         assert.is_nil(value.IS_DARWIN)
     end)
 
-    it("uses the first literal Lua 5.5 C-module prefix", function()
+    posix_model_it("uses the first literal Lua 5.5 C-module prefix", function()
         local cpath = table.concat({
             "/first prefix/lib/titan/0.6/?.so",
             "/wrong/lib/lua/5.4/?.so",
@@ -1234,7 +1295,7 @@ describe("compiler installation discovery", function()
             driver.root_from_package_cpath(cpath))
     end)
 
-    it("rejects suffix lookalikes and handles the filesystem root", function()
+    posix_model_it("rejects suffix lookalikes and handles the filesystem root", function()
         assert.is_nil(driver.root_from_package_cpath(table.concat({
             "/prefix/lib/lua/5.5/?x.so",
             "/prefix/lib/lua/5.5/?.so.debug",
@@ -1245,17 +1306,23 @@ describe("compiler installation discovery", function()
         assert.is_nil(driver.root_from_package_cpath(nil))
     end)
 
-    it("gives the internal installation override precedence", function()
+    posix_model_it("gives the internal installation override precedence", function()
         assert.equal("/post-install/tree", driver.resolve_installation_root(
             "/lua/prefix/lib/lua/5.5/?.so", "/post-install/tree/"))
         assert.equal("/lua/prefix", driver.resolve_installation_root(
             "/lua/prefix/lib/lua/5.5/?.so", ""))
-        assert.equal(lfs.currentdir() .. "/normalized",
-            driver.resolve_installation_root(
+        local previous_currentdir, previous_chdir = lfs.currentdir, lfs.chdir
+        lfs.currentdir = function() return "/model/work" end
+        lfs.chdir = function() return nil, "unavailable model directory" end
+        local completed, failure = pcall(function()
+            assert.equal("/model/work/normalized", driver.resolve_installation_root(
                 nil, "./discarded/../normalized//"))
+        end)
+        lfs.currentdir, lfs.chdir = previous_currentdir, previous_chdir
+        assert.truthy(completed, failure)
     end)
 
-    it("derives the format-1 probe cache from an explicit prefix first",
+    posix_model_it("derives the format-1 probe cache from an explicit prefix first",
        function()
         local cpath = "/installed/lib/lua/5.5/?.so"
         assert.equal("/explicit/var/cache/titan-probes/" .. cprobe_cache.VERSION,
@@ -1270,16 +1337,14 @@ describe("compiler installation discovery", function()
 
     it("honors the test-only persistent-probe-cache disable switch",
        function()
-        local lua = os.getenv("PREFIX") and os.getenv("PREFIX") .. "/bin/lua"
-            or "lua"
-        local script = [[
-local driver = require "titan-compiler.driver"
-assert(driver.PROBE_CACHE_DIRECTORY == nil)
-]]
-        local command = "TITAN_PROBE_CACHE_DISABLE=1 " ..
-            assert(driver.shell_quote(lua)) .. " -e " ..
-            assert(driver.shell_quote(script))
-        assert.is_true(os.execute(command))
+        local lua = os.getenv("PREFIX") and os.getenv("PREFIX") ..
+            (platform.windows and "/bin/lua.exe" or "/bin/lua") or "lua"
+        local script = 'local driver = require "titan-compiler.driver"; ' ..
+            'assert(driver.PROBE_CACHE_DIRECTORY == nil)'
+        local result = compiler_io.new_sync():run({
+            "env", "TITAN_PROBE_CACHE_DISABLE=1", lua, "-e", script,
+        })
+        assert.truthy(result.ok, result.output or result.diagnostic)
     end)
 
     it("uses format 1 for initialized persistent probe caches",
@@ -1289,7 +1354,7 @@ assert(driver.PROBE_CACHE_DIRECTORY == nil)
         local original_getenv = os.getenv
         package.loaded[module_name] = nil
         os.getenv = function(name)
-            if name == "TITAN_PREFIX" then return "/explicit" end
+            if name == "TITAN_PREFIX" then return fixture_path("/explicit") end
             if name == "TITAN_PROBE_CACHE_DISABLE" then return nil end
             return original_getenv(name)
         end
@@ -1300,16 +1365,18 @@ assert(driver.PROBE_CACHE_DIRECTORY == nil)
         package.loaded[module_name] = loaded_driver
         assert.truthy(loaded, value)
 
-        local expected = "/explicit/var/cache/titan-probes/" .. cprobe_cache.VERSION
+        local expected = fixture_path("/explicit/var/cache/titan-probes/") .. cprobe_cache.VERSION
         assert.equal(expected, value.PROBE_CACHE_DIRECTORY)
         local context = value.new_resolver_context()
         assert.equal(expected, value.PROBE_CACHE_DIRECTORY)
         assert.is_true(value.close_resolver_context(context))
     end)
 
-    it("preserves ordinary root spelling but resolves symlink parent traversal",
+    it("preserves ordinary root spelling and native symlink parent traversal",
        function()
-        local workspace = os.tmpname()
+        local available, message = require("spec.support.filesystem").symlink_capability()
+        if not available then pending(message); return end
+        local workspace = temporary.name()
         assert(os.remove(workspace))
         assert(lfs.mkdir(workspace))
         local physical = workspace .. "/physical"
@@ -1317,19 +1384,20 @@ assert(driver.PROBE_CACHE_DIRECTORY == nil)
         assert(lfs.mkdir(physical))
         assert(lfs.mkdir(nested))
         local alias = workspace .. "/alias"
-        local command = table.concat({
-            "ln", "-s",
-            assert(driver.shell_quote(nested)),
-            assert(driver.shell_quote(alias)),
-        }, " ")
-        assert(os.execute(command))
+        assert(lfs.link(nested, alias, true))
 
         assert.equal(alias, driver.resolve_installation_root(nil, alias))
 
-        local previous = lfs.currentdir()
-        assert(lfs.chdir(physical))
-        local expected_parent = lfs.currentdir()
-        assert(lfs.chdir(previous))
+        local expected_parent
+        if platform.windows then
+            -- Ordinary Win32 roots normalize dots before filesystem traversal.
+            expected_parent = driver.resolve_installation_root(nil, workspace)
+        else
+            local previous = lfs.currentdir()
+            assert(lfs.chdir(physical))
+            expected_parent = lfs.currentdir()
+            assert(lfs.chdir(previous))
+        end
         assert.equal(expected_parent,
             driver.resolve_installation_root(nil, alias .. "/.."))
 
@@ -1337,7 +1405,7 @@ assert(driver.PROBE_CACHE_DIRECTORY == nil)
         remove_tree(workspace)
     end)
 
-    it("derives all installed compiler paths from one root", function()
+    posix_model_it("derives all installed compiler paths from one root", function()
         local paths = assert(driver.installed_paths("/opt/titan/"))
         assert.same({
             root = "/opt/titan",
@@ -1411,7 +1479,7 @@ assert(driver.PROBE_CACHE_DIRECTORY == nil)
             "minicoro.o\ntitan.o\n"))
     end)
 
-    it("links source builds through the complete runtime archive", function()
+    posix_model_it("links source builds through the complete runtime archive", function()
         assert.same({
             "titan-runtime/libtitan.a",
             "libbacktrace/.libs/libbacktrace.a",
@@ -1856,7 +1924,7 @@ describe("compiled-container path contracts", function()
         local plans, provider_path = driver.plan_module_shims(
             reserved_provider, reserved_roots)
         assert.truthy(plans)
-        assert.equal("pkg/titan.so", provider_path)
+        assert.equal("pkg/titan" .. (platform.windows and ".dll" or ".so"), provider_path)
         assert.same({ "pkg/titan/left.lua", "pkg/titan/right.lua" }, {
             plans[1].filename, plans[2].filename,
         })
@@ -1880,7 +1948,11 @@ describe("compiled-container path contracts", function()
             },
         }
         for _, case in ipairs(cases) do
-            assert.same(case[2], driver.module_binary_candidates(case[1]))
+            local expected = {}
+            for index, path in ipairs(case[2]) do
+                expected[index] = path:gsub("%.so$", platform.windows and ".dll" or ".so")
+            end
+            assert.same(expected, driver.module_binary_candidates(case[1]))
         end
         assert.same({ "a.a", "a/b.a", "a/b/c.a" },
             driver.module_compiled_candidates("a.b.c", ".a"))
@@ -1916,16 +1988,18 @@ describe("compiled-container path contracts", function()
     end)
 
     it("stages an atomic library under its final basename", function()
-        local workspace = os.tmpname()
+        local workspace = temporary.name()
         assert.truthy(os.remove(workspace))
         assert.truthy(lfs.mkdir(workspace))
-        local public = workspace .. "/nested/provider.so"
+        local basename = "provider" .. (platform.windows and ".dll" or ".so")
+        local public = workspace .. "/nested/" .. basename
         local staged, directory = driver.staged_library_output(public)
         assert.truthy(staged, directory)
-        assert.equal("provider.so", staged:match("([^/]+)$"))
-        assert.equal(workspace .. "/nested",
-            assert(directory:match("^(.*)/[^/]+$")))
-        assert.equal(directory .. "/provider.so", staged)
+        assert.equal(basename, staged:match("([^/\\]+)$"))
+        local strategy = compiler_io.new_sync()
+        assert.equal(assert(strategy:realpath(workspace .. "/nested")),
+            assert(strategy:realpath(assert(platform.parent(directory)))))
+        assert.equal(assert(platform.join(directory, basename)), staged)
         remove_tree(workspace)
     end)
 end)
@@ -2035,8 +2109,8 @@ describe("loader resolver ownership", function()
 
     it("removes source-header temporaries with or without a probe service",
     function()
-        local first = os.tmpname()
-        local second = os.tmpname()
+        local first = temporary.name()
+        local second = temporary.name()
         write_file(first, "first")
         write_file(second, "second")
         local context = {
@@ -2056,7 +2130,7 @@ describe("loader resolver ownership", function()
         assert.is_nil(lfs.symlinkattributes(first))
         assert.is_nil(lfs.symlinkattributes(second))
 
-        local third = os.tmpname()
+        local third = temporary.name()
         write_file(third, "third")
         assert.is_true(driver.close_resolver_context({
             io = compiler_io.new_sync(),
@@ -2179,6 +2253,7 @@ describe("generated C formatting", function()
     local original_format_generated_file
     local original_get_file_contents
     local original_set_file_contents
+    local original_native
 
     before_each(function()
         original_execute = os.execute
@@ -2188,6 +2263,7 @@ describe("generated C formatting", function()
         original_format_generated_file = driver.format_generated_file
         original_get_file_contents = util.get_file_contents
         original_set_file_contents = util.set_file_contents
+        original_native = platform.native
     end)
 
     after_each(function()
@@ -2198,12 +2274,13 @@ describe("generated C formatting", function()
         driver.format_generated_file = original_format_generated_file
         util.get_file_contents = original_get_file_contents
         util.set_file_contents = original_set_file_contents
+        platform.native = original_native
     end)
 
     it("does not invoke the formatter by default", function()
         os.execute = function() error("unexpected formatter execution") end
         driver.CLANG_FORMAT = "'unterminated"
-        local path = os.tmpname() .. " generated module.c"
+        local path = temporary.name(" generated module.c")
         write_file(path, "int   value;\n")
 
         assert.is_true(driver.format_generated_file(path, true))
@@ -2211,7 +2288,7 @@ describe("generated C formatting", function()
         assert(os.remove(path))
     end)
 
-    it("quotes configured argv and generated paths when opted in", function()
+    posix_model_it("quotes configured argv and generated paths when opted in", function()
         local commands = {}
         local printed = {}
         os.execute = function(command)
@@ -2220,7 +2297,7 @@ describe("generated C formatting", function()
         end
         _G.print = function(command) printed[#printed + 1] = command end
         driver.CLANG_FORMAT = "'/tools with spaces/clang-format' --Werror"
-        local path = os.tmpname() .. " generated module.c"
+        local path = temporary.name(" generated module.c")
         write_file(path, "int value;\n")
 
         assert.is_true(driver.format_generated_file(path, true, true))
@@ -2272,7 +2349,7 @@ describe("generated C formatting", function()
     end)
 
     it("normalizes line directives without invoking the formatter", function()
-        local path = os.tmpname() .. " generated.c"
+        local path = temporary.name(" generated.c")
         write_file(path, table.concat({
             '#line 7 "first.titan"',
             '',
@@ -2298,7 +2375,7 @@ describe("generated C formatting", function()
     end)
 
     it("reports normalization read and write failures", function()
-        local path = os.tmpname() .. " generated.c"
+        local path = temporary.name(" generated.c")
         local ok, err = driver.format_generated_file(path, false)
         assert.is_nil(ok)
         assert.matches("failed to normalize", err, 1, true)
@@ -2317,7 +2394,7 @@ describe("generated C formatting", function()
         assert(os.remove(path))
     end)
 
-    it("reports opted-in formatter failures before normalization", function()
+    posix_model_it("reports opted-in formatter failures before normalization", function()
         local status = 23
         os.execute = function() return nil, "exit", status end
         driver.CLANG_FORMAT = "clang-format"
@@ -2352,7 +2429,7 @@ describe("generated C formatting", function()
     end)
 
     it("preserves a generated header when staging or rename fails", function()
-        local root = os.tmpname() .. " formatter transaction"
+        local root = temporary.name(" formatter transaction")
         assert(lfs.mkdir(root))
         local header = root .. "/module.titan.h"
         local old = driver.FOREIGN_HEADER_MARKER .. "\n/* old */\n"
@@ -2373,8 +2450,17 @@ describe("generated C formatting", function()
 
         util.set_file_contents = original_set_file_contents
         driver.format_generated_file = function() return true end
-        os.rename = function()
-            return nil, "injected stage rename failure"
+        if platform.windows then
+            platform.native = function(operation, ...)
+                if operation == "_win_replace" then
+                    return nil, "injected stage rename failure"
+                end
+                return original_native(operation, ...)
+            end
+        else
+            os.rename = function()
+                return nil, "injected stage rename failure"
+            end
         end
         ok, err = driver.write_foreign_header_plan(plan)
         assert.is_nil(ok)
@@ -2385,7 +2471,7 @@ describe("generated C formatting", function()
     end)
 
     it("keeps both module headers unchanged when either formatter fails", function()
-        local root = os.tmpname()
+        local root = temporary.name()
         assert(os.remove(root))
         assert(lfs.mkdir(root))
         local header, ffi_header = root .. "/module.titan.h", root .. "/module.ffi.h"
@@ -2416,7 +2502,7 @@ describe("generated C formatting", function()
 
     it("publishes a generated header only after its staged copy formats",
     function()
-        local root = os.tmpname() .. " formatter space"
+        local root = temporary.name(" formatter space")
         assert(lfs.mkdir(root))
         local header = root .. "/module.titan.h"
         local old = driver.FOREIGN_HEADER_MARKER .. "\n/* old */\n"
@@ -2491,7 +2577,7 @@ describe("source foreign-header planning", function()
 
     it("plans dependency headers, writes owned outputs, and removes stale ones",
     function()
-        local root = os.tmpname()
+        local root = temporary.name()
         assert(os.remove(root))
         assert(lfs.mkdir(root))
         local producer_source = root .. "/producer.titan"
@@ -2570,7 +2656,7 @@ describe("source foreign-header planning", function()
     end)
 
     it("rejects shared and user-owned planned header paths", function()
-        local root = os.tmpname()
+        local root = temporary.name()
         assert(os.remove(root))
         assert(lfs.mkdir(root))
         local shared = root .. "/shared.titan"
@@ -2609,7 +2695,7 @@ describe("source foreign-header planning", function()
     end)
 
     it("uses finalized header paths for an already compiled source dependency", function()
-        local root = os.tmpname()
+        local root = temporary.name()
         assert(os.remove(root))
         assert(lfs.mkdir(root))
         local import = { _tag = "Ast.TopLevelImport", modname = "dependency",
@@ -2649,14 +2735,14 @@ describe("module checking header bundles", function()
 
     it("keeps stable content identity across fresh owners and body changes", function()
         local first_owner, second_owner = owner(), owner()
-        local observation = { path = "/project/include.h", kind = "file" }
-        local first_ast = { foreign('"/project/include.h"', { observation }) }
+        local observation = { path = fixture_path("/project/include.h"), kind = "file" }
+        local first_ast = { foreign('"' .. fixture_path("/project/include.h") .. '"', { observation }) }
         local first = assert(ffiheaders.prepare(first_owner, "pkg.main", first_ast,
-            "/project/pkg/main.titan"))
+            fixture_path("/project/pkg/main.titan")))
         local second = assert(ffiheaders.prepare(second_owner, "pkg.main", {
-            foreign('"/project/include.h"', { { path = "/changed/observation" } }),
+            foreign('"' .. fixture_path("/project/include.h") .. '"', { { path = fixture_path("/changed/observation") } }),
             { _tag = "Ast.TopLevelFunc", name = "changed_body" },
-        }, "/project/pkg/main.titan"))
+        }, fixture_path("/project/pkg/main.titan")))
         assert.not_equal(first.filename, second.filename)
         assert.equal(first.digest, second.digest)
         assert.equal(first.contents, second.contents)
@@ -2665,11 +2751,11 @@ describe("module checking header bundles", function()
         assert.equal(first.contents, assert(util.get_file_contents(first.filename)))
         assert.falsy(first.contents:find(first.bundle_root, 1, true))
         local other_origin = assert(ffiheaders.prepare(owner(), "pkg.main", first_ast,
-            "/other-project/pkg/main.titan"))
+            fixture_path("/other-project/pkg/main.titan")))
         assert.not_equal(first.digest, other_origin.digest)
         local changed = assert(ffiheaders.prepare(owner(), "pkg.main", {
-            foreign("<limits.h>"), foreign('"/project/include.h"'),
-        }, "/project/pkg/main.titan"))
+            foreign("<limits.h>"), foreign('"' .. fixture_path("/project/include.h") .. '"'),
+        }, fixture_path("/project/pkg/main.titan")))
         assert.not_equal(first.digest, changed.digest)
     end)
 
@@ -2677,10 +2763,10 @@ describe("module checking header bundles", function()
         local original = owner()
         local dependency = assert(ffiheaders.prepare(original, "shared.base", {
             foreign("<stddef.h>"),
-        }, "/project/shared/base.titan"))
+        }, fixture_path("/project/shared/base.titan")))
         local first_consumer = assert(ffiheaders.prepare(original, "app.main", {
             source(dependency), source(dependency), foreign("<limits.h>"),
-        }, "/project/app/main.titan"))
+        }, fixture_path("/project/app/main.titan")))
         assert.equal(2, #first_consumer.dependencies)
         assert.truthy(first_consumer.contents:find(
             '#include "../shared/base.ffi.h"', 1, true))
@@ -2697,7 +2783,7 @@ describe("module checking header bundles", function()
         assert.equal(replay.bundle_root, replay.dependencies[1].bundle_root)
         local second_consumer = assert(ffiheaders.prepare(owner(), "app.main", {
             source(dependency), source(dependency), foreign("<limits.h>"),
-        }, "/project/app/main.titan"))
+        }, fixture_path("/project/app/main.titan")))
         assert.equal(first_consumer.digest, second_consumer.digest)
     end)
 
@@ -2711,7 +2797,7 @@ describe("module checking header bundles", function()
             error(cancelled)
         end
         local ok, err = pcall(ffiheaders.prepare, state, "nested.deep.module", {},
-            "/project/nested/deep/module.titan")
+            fixture_path("/project/nested/deep/module.titan"))
         assert.is_false(ok)
         assert.equal(cancelled, err)
         local root = state.source_ffi_header_bundle
@@ -2733,11 +2819,11 @@ describe("module checking header bundles", function()
         end
         local ok, err = pcall(function()
             local state = owner()
-            local base = assert(ffiheaders.prepare(state, "base", {}, "/project/base.titan"))
+            local base = assert(ffiheaders.prepare(state, "base", {}, fixture_path("/project/base.titan")))
             local middle = assert(ffiheaders.prepare(state, "middle", { source(base) },
-                "/project/middle.titan"))
+                fixture_path("/project/middle.titan")))
             local main = assert(ffiheaders.prepare(state, "main", { source(middle), source(base) },
-                "/project/main.titan"))
+                fixture_path("/project/main.titan")))
             assert.equal(3, environment_hashes)
             assert.equal(main, assert(ffiheaders.materialize(state, main)))
             local replay = assert(ffiheaders.materialize(owner(), main))
@@ -2759,7 +2845,7 @@ describe("module checking header bundles", function()
     it("preserves real C include nesting, diamonds, and dependency-first macro state", function()
         local state = owner()
         local function authored(contents)
-            local path = os.tmpname()
+            local path = temporary.name()
             ffiheaders.remember_file(state, path)
             write_file(path, contents)
             return foreign('"' .. path .. '"')
@@ -2767,11 +2853,11 @@ describe("module checking header bundles", function()
         local leaf = assert(ffiheaders.prepare(state, "shared.leaf", { authored([[
             enum { bundle_include_depth = __INCLUDE_LEVEL__ };
             #define BUNDLE_SEED 17
-        ]]) }, "/project/shared/leaf.titan"))
+        ]]) }, fixture_path("/project/shared/leaf.titan")))
         local left = assert(ffiheaders.prepare(state, "branch.left", { source(leaf) },
-            "/project/branch/left.titan"))
+            fixture_path("/project/branch/left.titan")))
         local right = assert(ffiheaders.prepare(state, "branch.right", { source(leaf) },
-            "/project/branch/right.titan"))
+            fixture_path("/project/branch/right.titan")))
         local main = assert(ffiheaders.prepare(state, "app.main", {
             authored([[
                 #if BUNDLE_SEED != 17
@@ -2786,8 +2872,8 @@ describe("module checking header bundles", function()
                 #endif
                 enum { combined_result = BUNDLE_SEED + BUNDLE_SELECTED };
             ]]),
-        }, "/project/app/main.titan"))
-        local probe = os.tmpname()
+        }, fixture_path("/project/app/main.titan")))
+        local probe = temporary.name()
         ffiheaders.remember_file(state, probe)
         write_file(probe, '#include "app/main.ffi.h"\n' .. [[
             _Static_assert(bundle_include_depth == 4, "real include nesting");
@@ -2822,7 +2908,7 @@ describe("standalone output ownership", function()
         assert.matches("aliases output", err, 1, true)
     end)
 
-    it("rejects source and synthetic output collisions before compilation",
+    posix_output_it("rejects source and synthetic output collisions before compilation",
        function()
         local stems = {
             "suite__test_support",
@@ -2923,7 +3009,9 @@ describe("standalone output ownership", function()
 
     it("accepts a symlinked directory parent and canonicalizes its outputs",
        function()
-        local root = os.tmpname()
+        local available, message = require("spec.support.filesystem").symlink_capability()
+        if not available then pending(message); return end
+        local root = temporary.name()
         assert(os.remove(root))
         assert(lfs.mkdir(root))
         local physical = root .. "/physical"
@@ -2941,10 +3029,14 @@ describe("standalone output ownership", function()
         assert(lfs.rmdir(root))
     end)
 
-    it("rejects hierarchy conflicts and nonregular output leaves", function()
-        local root = os.tmpname()
-        assert(os.remove(root))
-        assert(lfs.mkdir(root))
+    posix_output_it("rejects hierarchy conflicts and nonregular output leaves", function(entries)
+        local root = entries and "/fixture/owner" or temporary.name()
+        if entries then
+            entries[root] = { mode = "directory" }
+        else
+            assert(os.remove(root))
+            assert(lfs.mkdir(root))
+        end
 
         local ok, message = driver.validate_program_output_paths({
             {
@@ -2956,14 +3048,15 @@ describe("standalone output ownership", function()
         assert.matches("path hierarchy conflict", message, 1, true)
 
         local directory_output = root .. "/support.c"
-        assert(lfs.mkdir(directory_output))
+        if entries then entries[directory_output] = { mode = "directory" }
+        else assert(lfs.mkdir(directory_output)) end
         ok, message = driver.validate_program_output_paths({
             { modname = "support", output = root .. "/support.titan" },
         }, root .. "/suite", root .. "/entrypoint.c", {})
         assert.is_nil(ok)
         assert.matches("not a regular nonlink file", message, 1, true)
 
-        remove_tree(root)
+        if not entries then remove_tree(root) end
     end)
 end)
 
@@ -2972,6 +3065,31 @@ describe("compiler module loader", function()
     local source
     local binary
     local previous
+    local native_abi_exports
+
+    local function provider_path(path)
+        return (path:gsub("%.so$", platform.windows and ".dll" or ".so"))
+    end
+
+    -- Fake providers declare the plain-C query independently of their Lua
+    -- metadata callbacks, just as real Windows providers do.
+    local function mock_native_abi(filename, modules)
+        local exports = {}
+        for name, query in pairs(modules) do
+            exports[driver.mangle_module_name(name) .. "_abi_value"] = query
+        end
+        native_abi_exports[filename] = exports
+        titan._abivalue = function(found_filename, symbol)
+            local provider = assert(native_abi_exports[found_filename],
+                "unexpected native ABI provider " .. found_filename)
+            local query = provider[symbol]
+            if query == nil then
+                return nil, "undefined symbol: " .. symbol, "init"
+            end
+            if type(query) == "function" then return query() end
+            return query
+        end
+    end
 
     local function cache_static_provider(context, filename, module_types)
         write_file(filename, "mock static provider\n")
@@ -2981,6 +3099,7 @@ describe("compiler module loader", function()
             key_order = {},
         }
         for name, modtype in pairs(module_types) do
+            modtype.file = provider_path(modtype.file)
             provider.entries[name] = {
                 type = modtype,
                 types = types.serialize(modtype),
@@ -2998,6 +3117,9 @@ describe("compiler module loader", function()
 
     local function cache_dynamic_provider(filename, module_types)
         write_file(filename, "mock dynamic provider\n")
+        local abi_values = {}
+        for name in pairs(module_types) do abi_values[name] = driver.TITAN_ABI_VERSION end
+        mock_native_abi(filename, abi_values)
         titan._loadlib = function(found_filename, symbol)
             assert.equal(filename, found_filename)
             for name, modtype in pairs(module_types) do
@@ -3264,7 +3386,7 @@ describe("compiler module loader", function()
     end)
 
     before_each(function()
-        root = os.tmpname()
+        root = temporary.name()
         assert(os.remove(root))
         assert(lfs.mkdir(root))
         source = root .. "/source"
@@ -3280,7 +3402,9 @@ describe("compiler module loader", function()
             imported = driver.imported,
             registry = types.registry,
             loadlib = titan._loadlib,
+            abivalue = titan._abivalue,
         }
+        native_abi_exports = {}
         driver.TITAN_SOURCE_PATH = source
         driver.TITAN_BIN_PATH = binary
         driver.imported = {}
@@ -3293,6 +3417,7 @@ describe("compiler module loader", function()
         driver.imported = previous.imported
         types.registry = previous.registry
         titan._loadlib = previous.loadlib
+        titan._abivalue = previous.abivalue
         remove_tree(root)
     end)
 
@@ -3881,7 +4006,9 @@ describe("compiler module loader", function()
         local ok, loaded, errors = loader(consumer)
         assert.truthy(ok, tostring(loaded))
         assert.is_true(#errors > 0)
-        assert.matches("native profile acquisition is unavailable",
+        assert.matches(platform.windows and
+            "the C probe service has no authoritative target profile" or
+            "native profile acquisition is unavailable",
             table.concat(errors, "\n"), 1, true)
         assert.is_true(native_commands > 0)
         assert.is_string(driver.imported[consumer].source_manifest)
@@ -3994,7 +4121,7 @@ describe("compiler module loader", function()
             assert.equal(0, #errors)
             assert.equal(first_provider,
                 driver.imported[name].embedded_provider)
-            first_provider.entries[name].type.file = "context-one.so"
+            first_provider.entries[name].type.file = provider_path("context-one.so")
             first_provider.entries[name].types = "context-one"
 
             -- Reusing a successfully validated raw table means reusing that
@@ -4057,11 +4184,12 @@ describe("compiler module loader", function()
     function()
         local name = "embedded.primary"
         local provider_file = root .. "/language-server"
-        local dynamic = binary .. "/embedded.so"
+        local dynamic = binary .. provider_path("/embedded.so")
         write_file(dynamic, "must not be inspected\n")
         titan._loadlib = function()
             error("disk provider was inspected before embedded metadata")
         end
+        titan._abivalue = titan._loadlib
         local context = driver.new_resolver_context({
             embedded_interface_provider = embedded_provider(provider_file, {
                 [name] = types.Module(name, {}),
@@ -4110,7 +4238,7 @@ describe("compiler module loader", function()
         local name = "sequence.none"
         local embedded_type = result_module(name, types.Integer())
         local disk_type = result_module(name, types.String())
-        cache_dynamic_provider(binary .. "/sequence.so", {
+        cache_dynamic_provider(binary .. provider_path("/sequence.so"), {
             [name] = disk_type,
         })
 
@@ -4165,7 +4293,7 @@ describe("compiler module loader", function()
         local unrequested_disk = result_module(unrequested, types.Integer())
         local unrequested_embedded = result_module(
             unrequested, types.String())
-        cache_dynamic_provider(binary .. "/sequence.so", {
+        cache_dynamic_provider(binary .. provider_path("/sequence.so"), {
             [name] = disk_type,
             [unrequested] = unrequested_disk,
         })
@@ -4417,7 +4545,7 @@ describe("compiler module loader", function()
         assert(lfs.mkdir(source .. "/sequence"))
         write_file(source .. "/sequence/overlap.titan",
             "local marker: integer = 1\n")
-        cache_dynamic_provider(binary .. "/sequence.so", {
+        cache_dynamic_provider(binary .. provider_path("/sequence.so"), {
             [other] = other_type,
         })
 
@@ -4480,7 +4608,7 @@ describe("compiler module loader", function()
         assert(lfs.mkdir(source .. "/sequence"))
         write_file(source .. "/sequence/cached_source.titan",
             "local marker: integer = 1\n")
-        cache_dynamic_provider(binary .. "/sequence.so", {
+        cache_dynamic_provider(binary .. provider_path("/sequence.so"), {
             [sibling] = sibling_type,
         })
 
@@ -4535,7 +4663,7 @@ describe("compiler module loader", function()
         assert(lfs.mkdir(source .. "/embedded"))
         write_file(source .. "/embedded/overlap.titan",
             "local marker: integer = 1\n")
-        cache_dynamic_provider(binary .. "/embedded.so", {
+        cache_dynamic_provider(binary .. provider_path("/embedded.so"), {
             [other] = types.Module(other, {}),
         })
         local context = driver.new_resolver_context({
@@ -4573,7 +4701,7 @@ describe("compiler module loader", function()
         write_file(source .. "/bundle/later.titan",
             "local marker: integer = 1\n")
         local fallback_type = types.Module("bundle.fallback", {})
-        cache_dynamic_provider(binary .. "/bundle.so", {
+        cache_dynamic_provider(binary .. provider_path("/bundle.so"), {
             ["bundle.fallback"] = fallback_type,
         })
         local context = driver.new_resolver_context({
@@ -4698,7 +4826,7 @@ describe("compiler module loader", function()
 
         local valid = {
             kind = "search",
-            path = "/virtual/source-interface.h",
+            path = fixture_path("/virtual/source-interface.h"),
             identity = "missing",
         }
         local header_cases = {
@@ -4736,7 +4864,7 @@ describe("compiler module loader", function()
             },
             {
                 headers = { valid, valid },
-                expected = "repeats search input '/virtual/source-interface.h'",
+                expected = "repeats search input '" .. fixture_path("/virtual/source-interface.h") .. "'",
             },
             {
                 headers = { valid, extra = true },
@@ -4835,7 +4963,7 @@ describe("compiler module loader", function()
             end
             local descriptor = assert(ffiheaders.prepare(owner,
                 "source_manifest_generated_origin", ast,
-                "/project/source_manifest_generated_origin.titan"))
+                fixture_path("/project/source_manifest_generated_origin.titan")))
             assert.is_true(ffiheaders.close(owner))
             return assert(cprobe.normalize_include_descriptor({
                 include_kind = "quote", include_name = descriptor.logical_name,
@@ -4871,7 +4999,7 @@ describe("compiler module loader", function()
         local header_module = source_module("source_manifest_bad_headers")
         local valid_header = {
             kind = "file",
-            path = "/virtual/direct-source-interface.h",
+            path = fixture_path("/virtual/direct-source-interface.h"),
             identity = "bytes:direct",
         }
         reject(direct(header_module, "invalid"),
@@ -5002,12 +5130,12 @@ end
         end
         local first = {
             kind = "search",
-            path = "/virtual/first.h",
+            path = fixture_path("/virtual/first.h"),
             identity = "missing",
         }
         local second = {
             kind = "file",
-            path = "/virtual/second.h",
+            path = fixture_path("/virtual/second.h"),
             identity = "bytes:one",
         }
         local baseline = manifest({ first, second })
@@ -5033,7 +5161,7 @@ end
         assert.not_equal(baseline, manifest({
             {
                 kind = first.kind,
-                path = "/virtual/renamed.h",
+                path = fixture_path("/virtual/renamed.h"),
                 identity = first.identity,
             }, second,
         }))
@@ -5075,7 +5203,7 @@ end
 
         local dependency = {
             kind = "file",
-            path = "/virtual/aggregate-origin.h",
+            path = fixture_path("/virtual/aggregate-origin.h"),
             identity = "bytes:aggregate",
         }
         aggregate._c_origin_header = {
@@ -5097,7 +5225,7 @@ end
             local name = "source_manifest_complex"
             local dependency = {
                 kind = "file",
-                path = "/virtual/source-manifest-complex.h",
+                path = fixture_path("/virtual/source-manifest-complex.h"),
                 identity = "bytes:complex",
             }
             local header = {
@@ -5513,7 +5641,7 @@ end
         local context = driver.new_resolver_context()
         local valid = {
             kind = "search",
-            path = "/virtual/header.h",
+            path = fixture_path("/virtual/header.h"),
             identity = "identity",
         }
         local cases = {
@@ -5544,7 +5672,7 @@ end
             },
             {
                 value = { valid, valid },
-                expected = "repeats search input '/virtual/header.h'",
+                expected = "repeats search input '" .. fixture_path("/virtual/header.h") .. "'",
             },
             {
                 value = { valid, extra = true },
@@ -5619,7 +5747,7 @@ end
 
         local provider_context = driver.new_resolver_context()
         function provider_context.io:lstat(path)
-            assert.equal(binary .. "/external_broken.so", path)
+            assert.equal(binary .. provider_path("/external_broken.so"), path)
             return nil, "injected provider inspection failure"
         end
         local broken = driver.resolve_external_modules({
@@ -5867,11 +5995,12 @@ end
                 return 1
             end
         ]])
-        write_file(binary .. "/titan/timer.so", "mock interface\n")
+        write_file(binary .. provider_path("/titan/timer.so"), "mock interface\n")
 
         local symbols = {}
+        mock_native_abi(binary .. provider_path("/titan/timer.so"), { ["titan.timer"] = driver.TITAN_ABI_VERSION })
         titan._loadlib = function(filename, symbol)
-            assert.equal(binary .. "/titan/timer.so", filename)
+            assert.equal(binary .. provider_path("/titan/timer.so"), filename)
             symbols[#symbols + 1] = symbol
             if symbol == "titan_timer_abi" then
                 return function() return driver.TITAN_ABI_VERSION end
@@ -5929,10 +6058,10 @@ end
         ]])
 
         local compiled_flat = types.Module("pkg.flat", {}, {})
-        cache_dynamic_provider(binary .. "/pkg/flat.so", {
+        cache_dynamic_provider(binary .. provider_path("/pkg/flat.so"), {
             ["pkg.flat"] = compiled_flat,
         })
-        write_file(binary .. "/pkg/folder.so",
+        write_file(binary .. provider_path("/pkg/folder.so"),
             "explicit source lookup must not inspect this provider\n")
 
         local loader = driver.defaultloader({}, {
@@ -5975,7 +6104,7 @@ end
         write_file(part, "local part_value: integer = 2\n")
 
         local compiled = types.Module("vendor.pkg", {}, {})
-        local provider = binary .. "/vendor.so"
+        local provider = binary .. provider_path("/vendor.so")
         cache_dynamic_provider(provider, {
             ["vendor.pkg"] = compiled,
         })
@@ -6027,7 +6156,7 @@ end
                 types.Function({}, { types.Integer() }, false, nil, nil),
                 {}),
         })
-        cache_dynamic_provider(binary .. "/provider.so", {
+        cache_dynamic_provider(binary .. provider_path("/provider.so"), {
             provider = compiled_provider,
         })
         write_file(source .. "/provider.titan", [[
@@ -6064,7 +6193,7 @@ end
     it("does not fall back to a cached compiled provider for an " ..
        "explicit-source import", function()
         local compiled = types.Module("compiled_only", {}, {})
-        cache_dynamic_provider(binary .. "/compiled_only.so", {
+        cache_dynamic_provider(binary .. provider_path("/compiled_only.so"), {
             compiled_only = compiled,
         })
         write_file(source .. "/consumer.titan", [[
@@ -6090,10 +6219,11 @@ end
                 return 7
             end
         ]])
-        write_file(binary .. "/preferred.so", "broken binary that must not open\n")
+        write_file(binary .. provider_path("/preferred.so"), "broken binary that must not open\n")
         titan._loadlib = function()
             error("source-first lookup must not probe an occupied binary")
         end
+        titan._abivalue = titan._loadlib
 
         local context = driver.new_resolver_context({ source_first = true })
         local ok, modtype, errors = driver.defaultloader({}, {
@@ -6109,9 +6239,10 @@ end
 
     it("falls back to the preferred compiled format after a source miss",
        function()
-        write_file(binary .. "/fallback.so", "mock interface\n")
+        write_file(binary .. provider_path("/fallback.so"), "mock interface\n")
+        mock_native_abi(binary .. provider_path("/fallback.so"), { fallback = driver.TITAN_ABI_VERSION })
         titan._loadlib = function(filename, symbol)
-            assert.equal(binary .. "/fallback.so", filename)
+            assert.equal(binary .. provider_path("/fallback.so"), filename)
             if symbol == "fallback_abi" then
                 return function() return driver.TITAN_ABI_VERSION end
             elseif symbol == "fallback_types" then
@@ -6162,9 +6293,10 @@ end
             fallback_static = types.Module("fallback_static", {}, {}),
             ["titan.test"] = types.Module("titan.test", {}, {}),
         })
-        write_file(binary .. "/fallback_static.so", "mock interface\n")
+        write_file(binary .. provider_path("/fallback_static.so"), "mock interface\n")
+        mock_native_abi(binary .. provider_path("/fallback_static.so"), { fallback_static = driver.TITAN_ABI_VERSION })
         titan._loadlib = function(filename, symbol)
-            assert.equal(binary .. "/fallback_static.so", filename)
+            assert.equal(binary .. provider_path("/fallback_static.so"), filename)
             if symbol == "fallback_static_abi" then
                 return function() return driver.TITAN_ABI_VERSION end
             elseif symbol == "fallback_static_types" then
@@ -6207,7 +6339,7 @@ end
             ["bundle.fallback"] = fallback_type,
             ["bundle.later"] = later_type,
         })
-        cache_dynamic_provider(binary .. "/bundle.so", {
+        cache_dynamic_provider(binary .. provider_path("/bundle.so"), {
             ["bundle.fallback"] = fallback_type,
         })
 
@@ -6246,7 +6378,7 @@ end
             ["bundle.fallback"] = fallback_type,
             ["bundle.later"] = later_type,
         })
-        cache_dynamic_provider(binary .. "/bundle.so", {
+        cache_dynamic_provider(binary .. provider_path("/bundle.so"), {
             ["bundle.fallback"] = fallback_type,
         })
 
@@ -6258,7 +6390,7 @@ end
         assert.truthy(ok)
         assert.equal(0, #errors)
         assert.equal("dynamic", driver.imported["bundle.fallback"].kind)
-        assert.equal("bundle.so", driver.imported["bundle.fallback"].type.file)
+        assert.equal(provider_path("bundle.so"), driver.imported["bundle.fallback"].type.file)
         assert.equal("source", driver.imported["bundle.later"].kind)
         assert.is_nil(static_deps["bundle.fallback"])
         local finalized, finalize_errors =
@@ -6272,10 +6404,11 @@ end
         assert(lfs.mkdir(folder))
         write_file(folder .. "/sample.titan", "local owner: integer = 1\n")
         write_file(folder .. "/child.titan", "local constituent: integer = 1\n")
-        write_file(binary .. "/titan/sample.so", "occupied binary\n")
+        write_file(binary .. provider_path("/titan/sample.so"), "occupied binary\n")
         titan._loadlib = function()
             error("blocked source must be terminal before compiled lookup")
         end
+        titan._abivalue = titan._loadlib
 
         local context = driver.new_resolver_context({ source_first = true })
         local ok, message = driver.defaultloader({}, {
@@ -6770,8 +6903,8 @@ end
 
     it("rehydrates relative cross-directory foreign headers per resolver",
     function()
-        local cwd = assert(lfs.currentdir())
-        local temporary_name = assert(os.tmpname())
+        local cwd = paths.to_slash(assert(lfs.currentdir()))
+        local temporary_name = assert(temporary.name())
         local suffix = assert(temporary_name:match("([^/]+)$"))
         assert(os.remove(temporary_name))
         local relative_root = ".driver-relative-" .. suffix
@@ -6843,7 +6976,7 @@ end
             assert.equal(provider_source_filename, retained.filename)
             assert.equal(public_header,
                 provider_info.foreign_header_probe_identity)
-            assert.equal("/", old_header:sub(1, 1))
+            assert.is_true(paths.is_absolute(old_header))
             assert.not_equal(public_header, old_header)
             assert.matches(
                 "/a/provider[.]titan[.]h$", old_header)
@@ -6894,7 +7027,7 @@ end
                 table.concat(consumer_errors, "\n"))
             local fresh_header =
                 driver.imported["a.provider"].checking_foreign_header
-            assert.equal("/", fresh_header:sub(1, 1))
+            assert.is_true(paths.is_absolute(fresh_header))
             assert.not_equal(old_header, fresh_header)
             assert.equal(relative_public_header,
                 driver.imported["a.provider"].foreign_header)
@@ -7174,6 +7307,8 @@ end
 
     it("restats exact symlinked include spellings after retargeting",
     function()
+        local available, message = require("spec.support.filesystem").symlink_capability()
+        if not available then pending(message); return end
         local first = root .. "/ffi-link-first"
         local second = root .. "/ffi-link-second"
         local lexical = root .. "/include"
@@ -7238,12 +7373,13 @@ typedef double titan_driver_symlink_value;
         assert(lfs.mkdir(second))
         assert(lfs.mkdir(first .. "/a"))
         assert(lfs.mkdir(first .. "/a/b"))
-        write_file(first .. "/a/b/c.so", "earlier exact\n")
-        write_file(second .. "/a.so", "later shallow\n")
+        write_file(first .. provider_path("/a/b/c.so"), "earlier exact\n")
+        write_file(second .. provider_path("/a.so"), "later shallow\n")
         driver.TITAN_BIN_PATH = first .. ";" .. second
 
+        mock_native_abi(first .. provider_path("/a/b/c.so"), { ["a.b.c"] = driver.TITAN_ABI_VERSION })
         titan._loadlib = function(filename, symbol)
-            assert.equal(first .. "/a/b/c.so", filename)
+            assert.equal(first .. provider_path("/a/b/c.so"), filename)
             if symbol == "a_b_c_abi" then
                 return function() return driver.TITAN_ABI_VERSION end
             elseif symbol == "a_b_c_types" then
@@ -7257,8 +7393,8 @@ typedef double titan_driver_symlink_value;
         local ok, modtype, errors = driver.defaultloader({})("a.b.c")
         assert.truthy(ok)
         assert.equal(0, #errors)
-        assert.equal("a/b/c.so", modtype.file)
-        assert.equal(first .. "/a/b/c.so",
+        assert.equal(provider_path("a/b/c.so"), modtype.file)
+        assert.equal(first .. provider_path("/a/b/c.so"),
             driver.imported["a.b.c"].filename)
     end)
 
@@ -7269,7 +7405,7 @@ typedef double titan_driver_symlink_value;
         assert(lfs.mkdir(first))
         assert(lfs.mkdir(second))
         local archive = first .. "/choice.a"
-        local dynamic = second .. "/choice.so"
+        local dynamic = second .. provider_path("/choice.so")
         write_file(dynamic, "later dynamic provider\n")
         driver.TITAN_BIN_PATH = first .. ";" .. second
 
@@ -7278,6 +7414,7 @@ typedef double titan_driver_symlink_value;
         cache_static_provider(static_context, archive, {
             choice = types.Module("choice", {}),
         })
+        mock_native_abi(dynamic, { choice = driver.TITAN_ABI_VERSION })
         titan._loadlib = function(filename, symbol)
             assert.equal(dynamic, filename)
             if symbol == "choice_abi" then
@@ -7301,7 +7438,7 @@ typedef double titan_driver_symlink_value;
         assert.truthy(ok)
         assert.equal(0, #errors)
         assert.equal("dynamic", driver.imported.choice.kind)
-        assert.equal("choice.so", modtype.file)
+        assert.equal(provider_path("choice.so"), modtype.file)
         assert.equal(dynamic, driver.imported.choice.filename)
 
         driver.imported = {}
@@ -7311,7 +7448,7 @@ typedef double titan_driver_symlink_value;
         assert.truthy(ok)
         assert.equal(0, #errors)
         assert.equal("static", driver.imported.choice.kind)
-        assert.equal("choice.so", modtype.file)
+        assert.equal(provider_path("choice.so"), modtype.file)
         assert.equal(archive, driver.imported.choice.static_archive)
     end)
 
@@ -7341,7 +7478,7 @@ typedef double titan_driver_symlink_value;
         })("a.b.c")
         assert.truthy(ok)
         assert.equal(0, #errors)
-        assert.equal("a/b/c.so", modtype.file)
+        assert.equal(provider_path("a/b/c.so"), modtype.file)
         assert.equal(earlier_exact,
             driver.imported["a.b.c"].static_archive)
         assert.equal("a/b/c.a", driver.imported["a.b.c"].relative)
@@ -7374,7 +7511,7 @@ typedef double titan_driver_symlink_value;
         })("a.b")
         assert.truthy(ok)
         assert.equal(0, #errors)
-        assert.equal("a/b.so", modtype.file)
+        assert.equal(provider_path("a/b.so"), modtype.file)
         assert.equal(unshadowed_claim,
             driver.imported["a.b"].static_archive)
         assert.equal("a/b.a", driver.imported["a.b"].relative)
@@ -7386,7 +7523,7 @@ typedef double titan_driver_symlink_value;
         local second = root .. "/static-occupancy"
         assert(lfs.mkdir(first))
         assert(lfs.mkdir(second))
-        local dynamic_nonclaim = first .. "/mixed.so"
+        local dynamic_nonclaim = first .. provider_path("/mixed.so")
         local archive = second .. "/mixed.a"
         write_file(dynamic_nonclaim, "unrelated dynamic provider\n")
         driver.TITAN_BIN_PATH = first .. ";" .. second
@@ -7395,6 +7532,7 @@ typedef double titan_driver_symlink_value;
         cache_static_provider(context, archive, {
             ["mixed.child"] = types.Module("mixed.child", {}),
         })
+        mock_native_abi(dynamic_nonclaim, {  })
         titan._loadlib = function(filename, symbol)
             assert.equal(dynamic_nonclaim, filename)
             return nil, "undefined symbol: " .. symbol, "init"
@@ -7408,12 +7546,12 @@ typedef double titan_driver_symlink_value;
         assert.equal("static", driver.imported["mixed.child"].kind)
         assert.equal(archive,
             driver.imported["mixed.child"].static_archive)
-        assert.equal("mixed/child.so", modtype.file)
+        assert.equal(provider_path("mixed/child.so"), modtype.file)
     end)
 
     it("treats an exact archive nonclaim as terminal", function()
         local archive = binary .. "/empty.a"
-        local dynamic = binary .. "/empty.so"
+        local dynamic = binary .. provider_path("/empty.so")
         write_file(dynamic, "must not be inspected\n")
         local context =
             driver.new_resolver_context({ prefer_static = true })
@@ -7421,6 +7559,7 @@ typedef double titan_driver_symlink_value;
         titan._loadlib = function()
             error("an exact static nonclaim must not fall through")
         end
+        titan._abivalue = titan._loadlib
 
         local ok, message = driver.defaultloader({}, {
             context = context,
@@ -7434,7 +7573,7 @@ typedef double titan_driver_symlink_value;
     it("rejects a claimed malformed Interface in an archive before fallback",
        function()
         local archive = binary .. "/archive_bad.a"
-        local dynamic = binary .. "/archive_bad.so"
+        local dynamic = binary .. provider_path("/archive_bad.so")
         write_file(archive, "selected static provider\n")
         write_file(dynamic, "must not be inspected\n")
         local original_scan = staticmetadata.scan_archive
@@ -7463,6 +7602,7 @@ typedef double titan_driver_symlink_value;
                 dynamic_probed = true
                 error("a dynamic provider must not hide malformed archive metadata")
             end
+            titan._abivalue = titan._loadlib
 
             local ok, message = driver.defaultloader({}, {
                 context =
@@ -7497,16 +7637,16 @@ typedef double titan_driver_symlink_value;
 
     it("validates cached dynamic owner bindings per importing object", function()
         local owner = types.Module("binding_owner", {})
-        owner.file = "binding_owner.so"
+        owner.file = provider_path("binding_owner.so")
         driver.imported.binding_owner = {
-            kind = "dynamic", type = owner, filename = binary .. "/binding_owner.so",
+            kind = "dynamic", type = owner, filename = binary .. provider_path("/binding_owner.so"),
         }
         driver.imported.direct_user = {
             kind = "source", type = types.Module("direct_user", {}),
             object_metadata = {
                 imports = {{ name = "binding_owner", source_required = false }},
                 bindings = { binding_owner = "handle" },
-                providers = { binding_owner = "binding_owner.so" },
+                providers = { binding_owner = provider_path("binding_owner.so") },
             },
         }
         driver.imported.indirect_user = {
@@ -7539,16 +7679,16 @@ typedef double titan_driver_symlink_value;
 
     it("rejects changed providers for cached imported handles", function()
         local owner = types.Module("binding_owner", {})
-        owner.file = "replacement/binding_owner.so"
+        owner.file = provider_path("replacement/binding_owner.so")
         driver.imported.binding_owner = {
-            kind = "dynamic", type = owner, filename = binary .. "/replacement.so",
+            kind = "dynamic", type = owner, filename = binary .. provider_path("/replacement.so"),
         }
         driver.imported.direct_user = {
             kind = "source", type = types.Module("direct_user", {}),
             object_metadata = {
                 imports = {{ name = "binding_owner", source_required = false }},
                 bindings = { binding_owner = "handle" },
-                providers = { binding_owner = "original/binding_owner.so" },
+                providers = { binding_owner = provider_path("original/binding_owner.so") },
             },
         }
         local context = driver.new_resolver_context()
@@ -7577,7 +7717,7 @@ typedef double titan_driver_symlink_value;
         assert.equal(0, #errors)
         assert.equal("static", driver.imported["bundle.left"].kind)
         assert.is_nil(driver.imported["bundle.right"])
-        assert.equal("bundle/left.so", modtype.file)
+        assert.equal(provider_path("bundle/left.so"), modtype.file)
         assert.is_nil(types.serialize(modtype):find(archive, 1, true))
 
         local finalized, final_errors =
@@ -7595,18 +7735,20 @@ typedef double titan_driver_symlink_value;
         assert(lfs.mkdir(first))
         assert(lfs.mkdir(second))
         assert(lfs.mkdir(second .. "/a"))
-        write_file(first .. "/a.so", "earlier nonclaim\n")
-        write_file(second .. "/a.so", "later claim must be shadowed\n")
-        write_file(second .. "/a/b.so", "later unshadowed claim\n")
+        write_file(first .. provider_path("/a.so"), "earlier nonclaim\n")
+        write_file(second .. provider_path("/a.so"), "later claim must be shadowed\n")
+        write_file(second .. provider_path("/a/b.so"), "later unshadowed claim\n")
         driver.TITAN_BIN_PATH = first .. ";" .. second
 
         local inspected = {}
+        mock_native_abi(first .. provider_path("/a.so"), {})
+        mock_native_abi(second .. provider_path("/a/b.so"), { ["a.b.c"] = driver.TITAN_ABI_VERSION })
         titan._loadlib = function(filename, symbol)
             inspected[filename] = true
-            if filename == first .. "/a.so" then
+            if filename == first .. provider_path("/a.so") then
                 return nil, "undefined symbol: " .. symbol, "init"
             end
-            assert.equal(second .. "/a/b.so", filename)
+            assert.equal(second .. provider_path("/a/b.so"), filename)
             if symbol == "a_b_c_abi" then
                 return function() return driver.TITAN_ABI_VERSION end
             elseif symbol == "a_b_c_types" then
@@ -7620,22 +7762,23 @@ typedef double titan_driver_symlink_value;
         local ok, modtype, errors = driver.defaultloader({})("a.b.c")
         assert.truthy(ok)
         assert.equal(0, #errors)
-        assert.equal("a/b.so", modtype.file)
-        assert.equal(second .. "/a/b.so",
+        assert.equal(provider_path("a/b.so"), modtype.file)
+        assert.equal(second .. provider_path("/a/b.so"),
             driver.imported["a.b.c"].filename)
-        assert.is_nil(inspected[second .. "/a.so"])
+        assert.is_nil(inspected[second .. provider_path("/a.so")])
     end)
 
     it("treats half metadata as a terminal container claim", function()
-        write_file(binary .. "/titan.so", "partial shallow claim\n")
-        write_file(binary .. "/titan/timer.so", "valid exact claim\n")
+        write_file(binary .. provider_path("/titan.so"), "partial shallow claim\n")
+        write_file(binary .. provider_path("/titan/timer.so"), "valid exact claim\n")
         local exact_probed = false
+        mock_native_abi(binary .. provider_path("/titan.so"), { ["titan.timer"] = driver.TITAN_ABI_VERSION })
         titan._loadlib = function(filename, symbol)
-            if filename == binary .. "/titan/timer.so" then
+            if filename == binary .. provider_path("/titan/timer.so") then
                 exact_probed = true
                 error("a deeper candidate must not hide a partial claim")
             end
-            assert.equal(binary .. "/titan.so", filename)
+            assert.equal(binary .. provider_path("/titan.so"), filename)
             if symbol == "titan_timer_abi" then
                 return function() return driver.TITAN_ABI_VERSION end
             end
@@ -7650,15 +7793,16 @@ typedef double titan_driver_symlink_value;
     end)
 
     it("treats types-only metadata as a terminal container claim", function()
-        write_file(binary .. "/titan.so", "partial shallow claim\n")
-        write_file(binary .. "/titan/timer.so", "valid exact claim\n")
+        write_file(binary .. provider_path("/titan.so"), "partial shallow claim\n")
+        write_file(binary .. provider_path("/titan/timer.so"), "valid exact claim\n")
         local exact_probed = false
+        mock_native_abi(binary .. provider_path("/titan.so"), {  })
         titan._loadlib = function(filename, symbol)
-            if filename == binary .. "/titan/timer.so" then
+            if filename == binary .. provider_path("/titan/timer.so") then
                 exact_probed = true
                 error("a deeper candidate must not hide a partial claim")
             end
-            assert.equal(binary .. "/titan.so", filename)
+            assert.equal(binary .. provider_path("/titan.so"), filename)
             if symbol == "titan_timer_types" then
                 return function() return "Module('titan.timer',{})" end
             end
@@ -7673,16 +7817,17 @@ typedef double titan_driver_symlink_value;
     end)
 
     it("rejects a wrong ABI before executing types metadata", function()
-        write_file(binary .. "/titan.so", "stale shallow claim\n")
-        write_file(binary .. "/titan/timer.so", "valid exact claim\n")
+        write_file(binary .. provider_path("/titan.so"), "stale shallow claim\n")
+        write_file(binary .. provider_path("/titan/timer.so"), "valid exact claim\n")
         local types_executed = false
         local exact_probed = false
+        mock_native_abi(binary .. provider_path("/titan.so"), { ["titan.timer"] = "stale" })
         titan._loadlib = function(filename, symbol)
-            if filename == binary .. "/titan/timer.so" then
+            if filename == binary .. provider_path("/titan/timer.so") then
                 exact_probed = true
                 error("a deeper candidate must not hide a stale claim")
             end
-            assert.equal(binary .. "/titan.so", filename)
+            assert.equal(binary .. provider_path("/titan.so"), filename)
             if symbol == "titan_timer_abi" then
                 return function() return "stale" end
             elseif symbol == "titan_timer_types" then
@@ -7703,7 +7848,7 @@ typedef double titan_driver_symlink_value;
     end)
 
     it("rejects invalid metadata results without falling through", function()
-        write_file(binary .. "/meta.so", "invalid metadata claims\n")
+        write_file(binary .. provider_path("/meta.so"), "invalid metadata claims\n")
 
         local cases = {
             {
@@ -7762,8 +7907,9 @@ typedef double titan_driver_symlink_value;
         }
 
         for _, case in ipairs(cases) do
+            mock_native_abi(binary .. provider_path("/meta.so"), { [case.name] = driver.TITAN_ABI_VERSION })
             titan._loadlib = function(filename, symbol)
-                assert.equal(binary .. "/meta.so", filename)
+                assert.equal(binary .. provider_path("/meta.so"), filename)
                 if symbol == driver.mangle_module_name(case.name) .. "_abi" then
                     return case.abi
                 elseif symbol == driver.mangle_module_name(case.name) ..
@@ -7777,7 +7923,7 @@ typedef double titan_driver_symlink_value;
             assert.falsy(ok)
             assert.match(case.expected, message, 1, true)
             if case.retains_claim then
-                assert.match(binary .. "/meta.so", message, 1, true)
+                assert.match(binary .. provider_path("/meta.so"), message, 1, true)
                 assert.match(case.name, message, 1, true)
             end
             assert.is_nil(driver.imported[case.name])
@@ -7785,15 +7931,16 @@ typedef double titan_driver_symlink_value;
     end)
 
     it("rejects metadata for a different logical module", function()
-        write_file(binary .. "/titan.so", "mismatched shallow claim\n")
-        write_file(binary .. "/titan/timer.so", "valid exact claim\n")
+        write_file(binary .. provider_path("/titan.so"), "mismatched shallow claim\n")
+        write_file(binary .. provider_path("/titan/timer.so"), "valid exact claim\n")
         local exact_probed = false
+        mock_native_abi(binary .. provider_path("/titan.so"), { ["titan.timer"] = driver.TITAN_ABI_VERSION })
         titan._loadlib = function(filename, symbol)
-            if filename == binary .. "/titan/timer.so" then
+            if filename == binary .. provider_path("/titan/timer.so") then
                 exact_probed = true
                 error("a deeper candidate must not hide mismatched metadata")
             end
-            assert.equal(binary .. "/titan.so", filename)
+            assert.equal(binary .. provider_path("/titan.so"), filename)
             if symbol == "titan_timer_abi" then
                 return function() return driver.TITAN_ABI_VERSION end
             elseif symbol == "titan_timer_types" then
@@ -7811,11 +7958,14 @@ typedef double titan_driver_symlink_value;
     end)
 
     it("treats a candidate open failure as a terminal error", function()
-        write_file(binary .. "/titan.so", "broken shallow image\n")
-        write_file(binary .. "/titan/timer.so", "valid exact claim\n")
+        write_file(binary .. provider_path("/titan.so"), "broken shallow image\n")
+        write_file(binary .. provider_path("/titan/timer.so"), "valid exact claim\n")
         local symbols = {}
+        mock_native_abi(binary .. provider_path("/titan.so"), {
+            ["titan.timer"] = function() return nil, "broken image", "open" end,
+        })
         titan._loadlib = function(filename, symbol)
-            assert.equal(binary .. "/titan.so", filename)
+            assert.equal(binary .. provider_path("/titan.so"), filename)
             table.insert(symbols, symbol)
             return nil, "broken image", "open"
         end
@@ -7825,16 +7975,17 @@ typedef double titan_driver_symlink_value;
         assert.match("cannot inspect compiled module 'titan.timer'", message,
             1, true)
         assert.match("broken image", message, 1, true)
-        assert.same({ "titan_timer_abi" }, symbols)
+        assert.same(platform.windows and {} or { "titan_timer_abi" }, symbols)
     end)
 
     it("uses the first valid claim without probing a duplicate", function()
         assert(lfs.mkdir(binary .. "/dup"))
-        write_file(binary .. "/dup.so", "shallow claim\n")
-        write_file(binary .. "/dup/item.so", "duplicate exact claim\n")
+        write_file(binary .. provider_path("/dup.so"), "shallow claim\n")
+        write_file(binary .. provider_path("/dup/item.so"), "duplicate exact claim\n")
         local symbols = {}
+        mock_native_abi(binary .. provider_path("/dup.so"), { ["dup.item"] = driver.TITAN_ABI_VERSION })
         titan._loadlib = function(filename, symbol)
-            assert.equal(binary .. "/dup.so", filename)
+            assert.equal(binary .. provider_path("/dup.so"), filename)
             table.insert(symbols, symbol)
             if symbol == "dup_item_abi" then
                 return function() return driver.TITAN_ABI_VERSION end
@@ -7849,15 +8000,15 @@ typedef double titan_driver_symlink_value;
         local ok, modtype, errors = driver.defaultloader({})("dup.item")
         assert.truthy(ok)
         assert.equal(0, #errors)
-        assert.equal("dup.so", modtype.file)
-        assert.equal(binary .. "/dup.so",
+        assert.equal(provider_path("dup.so"), modtype.file)
+        assert.equal(binary .. provider_path("/dup.so"),
             driver.imported["dup.item"].filename)
         assert.same({ "dup_item_abi", "dup_item_types", "dup_item_layouts" }, symbols)
     end)
 
     it("caches two logical interfaces from one physical container separately",
        function()
-        write_file(binary .. "/bundle.so", "two logical interfaces\n")
+        write_file(binary .. provider_path("/bundle.so"), "two logical interfaces\n")
         local functions = {
             bundle_left_abi = function() return driver.TITAN_ABI_VERSION end,
             bundle_left_types = function()
@@ -7871,8 +8022,9 @@ typedef double titan_driver_symlink_value;
             bundle_right_layouts = function() return empty_layouts("bundle.right") end,
         }
         local symbols = {}
+        mock_native_abi(binary .. provider_path("/bundle.so"), { ["bundle.left"] = driver.TITAN_ABI_VERSION, ["bundle.right"] = driver.TITAN_ABI_VERSION })
         titan._loadlib = function(filename, symbol)
-            assert.equal(binary .. "/bundle.so", filename)
+            assert.equal(binary .. provider_path("/bundle.so"), filename)
             table.insert(symbols, symbol)
             return assert(functions[symbol], "unexpected metadata symbol")
         end
@@ -7887,11 +8039,11 @@ typedef double titan_driver_symlink_value;
         assert.not_equal(left, right)
         assert.not_equal(driver.imported["bundle.left"],
             driver.imported["bundle.right"])
-        assert.equal("bundle.so", left.file)
-        assert.equal("bundle.so", right.file)
-        assert.equal(binary .. "/bundle.so",
+        assert.equal(provider_path("bundle.so"), left.file)
+        assert.equal(provider_path("bundle.so"), right.file)
+        assert.equal(binary .. provider_path("/bundle.so"),
             driver.imported["bundle.left"].filename)
-        assert.equal(binary .. "/bundle.so",
+        assert.equal(binary .. provider_path("/bundle.so"),
             driver.imported["bundle.right"].filename)
         assert.same({
             "bundle_left_abi", "bundle_left_types", "bundle_left_layouts",
@@ -7906,10 +8058,11 @@ typedef double titan_driver_symlink_value;
     end)
 
     it("falls back to source after clean ancestor nonclaims", function()
-        write_file(binary .. "/titan.so", "unrelated extension\n")
+        write_file(binary .. provider_path("/titan.so"), "unrelated extension\n")
         write_file(source .. "/titan/fallback.titan", [[
             function marker(): integer return 17 end
         ]])
+        mock_native_abi(binary .. provider_path("/titan.so"), {  })
         titan._loadlib = function(_, symbol)
             return nil, "undefined symbol: " .. symbol, "init"
         end
@@ -8216,9 +8369,10 @@ typedef double titan_driver_symlink_value;
         write_file(folder .. "/child.titan",
             "local constituent: integer = 1\n")
         assert(lfs.mkdir(binary .. "/titan/sample"))
-        local child_binary = binary .. "/titan/sample/child.so"
+        local child_binary = binary .. provider_path("/titan/sample/child.so")
         write_file(child_binary, "mock interface\n")
 
+        mock_native_abi(child_binary, { ["titan.sample.child"] = driver.TITAN_ABI_VERSION })
         titan._loadlib = function(filename, symbol)
             assert.equal(child_binary, filename)
             if symbol == "titan_sample_child_abi" then
@@ -8575,10 +8729,11 @@ end
     end)
 
     it("requires source for an explicit build root", function()
-        write_file(binary .. "/titan/timer.so", "existing binary\n")
+        write_file(binary .. provider_path("/titan/timer.so"), "existing binary\n")
         titan._loadlib = function()
             error("an explicit source build must not load its existing binary")
         end
+        titan._abivalue = titan._loadlib
 
         local ok, message = driver.defaultloader({}, {
             source_roots = { ["titan.timer"] = true },
@@ -8590,10 +8745,11 @@ end
     end)
 
     it("reports a missing ABI entry from the internal loader", function()
-        write_file(binary .. "/extension.so", "mock image\n")
+        write_file(binary .. provider_path("/extension.so"), "mock image\n")
         local symbols = {}
+        mock_native_abi(binary .. provider_path("/extension.so"), {  })
         titan._loadlib = function(filename, symbol)
-            assert.equal(binary .. "/extension.so", filename)
+            assert.equal(binary .. provider_path("/extension.so"), filename)
             table.insert(symbols, symbol)
             return nil, "undefined symbol: " .. symbol, "init"
         end
@@ -8648,7 +8804,7 @@ end
     end)
 end)
 
-describe("Windows serial driver dispatch", function()
+describe("Windows driver dispatch", function()
     local platform = require "titan-compiler.platform"
     local previous
 
@@ -8690,7 +8846,7 @@ describe("Windows serial driver dispatch", function()
         assert.equal(strategy, context.io)
     end)
 
-    it("uses the serial per-module path even when more jobs were requested", function()
+    it("uses the serial per-module path when one job is requested", function()
         local calls, requests = {}, {}
         compiler_io.new_sync = function()
             return {
@@ -8710,7 +8866,7 @@ describe("Windows serial driver dispatch", function()
             if name == "windows_serial.failed" then return nil, "compile rejected" end
             return true, nil, name .. ".o"
         end
-        local results = driver.compile_modules(requests, 4, false)
+        local results = driver.compile_modules(requests, 1, false)
         assert.same({ "windows_serial.first", "windows_serial.failed",
             "windows_serial.last" }, calls)
         assert.is_true(results[1].ok)
@@ -8739,7 +8895,7 @@ describe("Windows serial driver dispatch", function()
     end)
 
     it("returns reservation failures without changing existing shim contents", function()
-        local path = assert(os.tmpname())
+        local path = assert(temporary.name())
         local file = assert(io.open(path, "wb"))
         assert(file:write("previous shim")); assert(file:close())
         compiler_io.new_sync = function()

@@ -189,7 +189,9 @@ catch-local `traceback`. A bare re-raise pins that saved trace so the
 outer handler sees the original stack. A fresh `raise <exp>` builds a
 fresh trace.
 
-The merged trace uses libbacktrace and the generated C debug information.
+The merged trace uses libbacktrace and the generated C debug information
+on Linux, macOS, and Windows. Windows providers retain their DWARF sections;
+stripping that debug information prevents native source attribution.
 On macOS, the build may need `dsymutil` output for fully symbolized
 standalone executables; the test suite and CI exercise that path.
 

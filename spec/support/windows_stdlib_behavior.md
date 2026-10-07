@@ -1,6 +1,6 @@
 # Shared native standard-library behavior
 
-Linux, macOS, and native Windows compile the same 27 explicit test roots from
+Linux, macOS, and native Windows compile the same 28 explicit test roots from
 `spec/support/stdlib_test_modules.mk`. Each owner retains its common test bodies
 and assertions. Platform differences belong in narrow fixtures or named,
 classified skips; there is no separate Windows case allowlist.
@@ -17,13 +17,13 @@ make titan-stdlib-test-run
 From native MSYS2 CLANG64, after publishing a current Windows SDK/provider:
 
 ```sh
-make -f Makefile.windows titan-stdlib-test-build \
+make -f Makefile.win titan-stdlib-test-build \
   PREFIX=/c/validated-sdk TITAN_TEST_BUILD_DIR=/c/owned-ntfs-work/shared-tests
-make -f Makefile.windows titan-stdlib-test-run \
+make -f Makefile.win titan-stdlib-test-run \
   PREFIX=/c/validated-sdk TITAN_TEST_BUILD_DIR=/c/owned-ntfs-work/shared-tests
 ```
 
-The convenience command `bash scripts/check_windows_stdlib_behavior.sh
+The convenience command `bash spec/support/check_windows_stdlib_behavior.sh
 /c/owned-ntfs-work /c/validated-sdk` creates a unique child workspace under an
 existing parent and performs both steps. The supplied SDK is copied before
 compilation. It must contain the native compiler, complete `titan.dll`, stdlib
@@ -94,11 +94,11 @@ The permitted reason classifications are:
   denial, or a Windows exit value outside POSIX's eight-bit range.
 - `capability: `: an alternate numeric locale is absent or Windows cannot create
   a symbolic link without Developer Mode or the required privilege.
-- `unsupported: `: Windows native tracebacks retain raw addresses without Titan
-  symbolic source frames. Only named frame assertions are skipped; surrounding
-  error propagation, bootstrap, and cleanup behavior still executes.
 - `portability: `: an unfinished harness fixture. This is a tracked failure of
   the complete gate, not evidence that the production API is unsupported.
+
+Native traceback assertions run on Windows through libbacktrace, including
+source locations, interleaved Lua/native frames, and preserved re-raise traces.
 
 The Windows provider remains DLL-only. SQLite worker tests use the same SQLite
 DLL instance as the standard provider; Unix retains the existing static worker

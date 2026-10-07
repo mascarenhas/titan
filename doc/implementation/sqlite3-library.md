@@ -23,9 +23,9 @@ The matching public `sqlite3.h` is staged in the compiler SDK. Private symbol
 visibility follows the existing bundled native payload policy.
 
 SQLite is one logical standard module in the combined provider, which has
-twenty-two module protocols,
-twenty-two archive metadata keys/shims, and twenty-three Lua openers including bare
-support `luaopen_titan`. Source, provider validation, installer rollback,
+twenty-three module protocols,
+twenty-three archive metadata keys/shims, and twenty-four Lua openers including bare
+support `luaopen_titan`. Source, provider validation, ordinary installation,
 snapshot, native aggregate, production smoke, and CI cache manifests include
 it explicitly. Native dependency cache identities include the version,
 checksum, native toolchain and build policy; sanitizer SQLite is built with

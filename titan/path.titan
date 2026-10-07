@@ -1,0 +1,418 @@
+--- Manipulate native filesystem path spelling without performing I/O.
+-- POSIX paths use forward slashes; Windows paths accept forward slashes and
+-- backslashes and produce native backslashes. Paths are immutable byte strings.
+-- These operations preserve filename case and do not inspect files, resolve
+-- symbolic links, consult a current directory, or validate filesystem names.
+-- @module titan.path
+-- @usage standard-library-path.md
+
+-- Adapted from Go's internal/filepathlite and path/filepath algorithms.
+-- Copyright 2010, 2024 The Go Authors. All rights reserved.
+-- BSD terms are reproduced in LICENSES/go-LICENSE.
+
+local string = import "string"
+foreign import "path_platform.h"
+
+local windows = false
+
+--- Native directory separator for the platform that compiled this module.
+-- The value is "/" on POSIX and a backslash on Windows. Its nullable type
+-- permits initialization in the module's final initializer; every successful
+-- import observes an initialized, non-nil string. The value is read-only.
+-- @usage
+--   local path = import "path"
+--   local mark: string = path.separator
+-- @usage standard-library-path.md#api
+const separator: string?
+
+local function character(subject: string, index: integer): string
+  return string.sub(subject, index, index)
+end
+
+local function is_separator(byte: string): boolean
+  return byte == "/" or (windows and byte == "\\")
+end
+
+local function prefix_fold(subject: string, prefix: string): boolean
+  if #subject < #prefix then return false end
+  for index = 1, #prefix do
+    local a = character(subject, index)
+    local b = character(prefix, index)
+    if is_separator(b) then
+      if not is_separator(a) then return false end
+    elseif string.upper(a) ~= string.upper(b) then
+      return false
+    end
+  end
+  return #subject == #prefix or is_separator(character(subject, #prefix + 1))
+end
+
+local function unc_length(subject: string, prefix_length: integer): integer
+  local separators = 0
+  for index = prefix_length + 1, #subject do
+    if is_separator(character(subject, index)) then
+      separators = separators + 1
+      if separators == 2 then return index - 1 end
+    end
+  end
+  return #subject
+end
+
+local function valid_volume_length(subject: string, length: integer): integer
+  local first = 1
+  for index = 1, length + 1 do
+    if index > length or is_separator(character(subject, index)) then
+      if string.sub(subject, first, index - 1) == ".." then return 0 end
+      first = index + 1
+    end
+  end
+  return length
+end
+
+local function volume_length(subject: string): integer
+  if not windows then return 0 end
+  if #subject >= 2 and character(subject, 2) == ":" then return 2 end
+  if not is_separator(character(subject, 1)) then return 0 end
+  if prefix_fold(subject, "\\\\.") or prefix_fold(subject, "\\\\?") or
+     prefix_fold(subject, "\\??") then
+    if #subject == 3 then return 3 end
+    if prefix_fold(string.sub(subject, 5), "UNC") then
+      return valid_volume_length(subject, unc_length(subject, 8))
+    end
+    for index = 5, #subject do
+      if is_separator(character(subject, index)) then
+        return valid_volume_length(subject, index - 1)
+      end
+    end
+    return valid_volume_length(subject, #subject)
+  end
+  if #subject >= 2 and is_separator(character(subject, 2)) then
+    return valid_volume_length(subject, unc_length(subject, 2))
+  end
+  return 0
+end
+
+local function replace_separator(subject: string, from: string, to: string): string
+  local writer = string.writer()
+  local first = 1
+  for index = 1, #subject do
+    if character(subject, index) == from then
+      writer:write(string.sub(subject, first, index - 1))
+      writer:write(to)
+      first = index + 1
+    end
+  end
+  if first == 1 then return subject end
+  writer:write(string.sub(subject, first))
+  return writer:drain()
+end
+
+--- Replace native directory separators with forward slashes.
+-- On Windows, every backslash becomes "/". POSIX input is returned unchanged,
+-- including literal backslashes. Repeated separators and dot components remain
+-- intact; use normalize when lexical cleanup is also wanted.
+-- @param subject Path spelling to convert, without normalizing it.
+-- @return Forward-slash spelling on Windows, or the original POSIX bytes.
+-- @usage
+--   local path = import "path"
+--   local portable = path.to_slash(path.join("src", "main.titan"))
+--   -- portable is "src/main.titan" on either platform.
+-- @usage standard-library-path.md#api
+function to_slash(subject: string): string
+  if windows then return replace_separator(subject, "\\", "/") end
+  return subject
+end
+
+--- Replace forward slashes with native directory separators.
+-- On Windows, every "/" becomes a backslash. POSIX input is returned unchanged.
+-- This conversion does not remove repeated separators or interpret dot
+-- components, drive prefixes, or filesystem namespaces.
+-- @param subject Slash-separated path spelling to convert.
+-- @return Native separator spelling, preserving all other bytes.
+-- @usage
+--   local path = import "path"
+--   local native = path.from_slash("assets/icon.png")
+--   -- "assets/icon.png" on POSIX; [[assets\icon.png]] on Windows.
+-- @usage standard-library-path.md#api
+function from_slash(subject: string): string
+  if windows then return replace_separator(subject, "/", "\\") end
+  return subject
+end
+
+--- Return a Windows drive, UNC, or device volume prefix.
+-- Windows prefixes retain their original letter case and use native separators.
+-- A UNC server and share belong to the volume, so lexical cleanup cannot ascend
+-- above that share. POSIX always returns an empty string. The result describes
+-- spelling only; it does not establish that a drive or share exists.
+-- @param subject Path whose leading volume spelling should be extracted.
+-- @return Native Windows volume prefix, or "" when no volume is present.
+-- @usage
+--   local path = import "path"
+--   local drive = path.volume("C:/work/readme.txt")
+--   -- "C:" on Windows; "" on POSIX.
+-- @usage standard-library-path.md#api
+function volume(subject: string): string
+  return from_slash(string.sub(subject, 1, volume_length(subject)))
+end
+
+--- Report whether the path is absolute under the native path grammar.
+-- POSIX requires a leading "/". Windows recognizes rooted drive paths and
+-- UNC or device volumes; a leading separator alone and a drive-relative path
+-- such as "C:notes.txt" are not fully qualified. No current-drive lookup or
+-- filesystem resolution is performed.
+-- @param subject Path spelling to classify without normalizing it.
+-- @return True for an absolute native path; false for empty or relative input.
+-- @usage
+--   local path = import "path"
+--   local absolute = path.is_absolute("C:/work/readme.txt")
+--   -- true on Windows; false on POSIX.
+-- @usage standard-library-path.md#api
+function is_absolute(subject: string): boolean
+  if not windows then return character(subject, 1) == "/" end
+  local length = volume_length(subject)
+  if length == 0 then return false end
+  if is_separator(character(subject, 1)) and
+     is_separator(character(subject, 2)) then return true end
+  return is_separator(character(subject, length + 1))
+end
+
+--- Normalize native path spelling by removing redundant lexical components.
+-- Empty input becomes ".". Repeated separators and "." components are removed;
+-- ".." removes a preceding ordinary component, remains at the start of a
+-- relative path, and cannot ascend past a rooted path or UNC share. Windows
+-- output uses backslashes and preserves drive-relative and namespace meaning.
+-- This operation does not resolve symbolic links or prove filesystem identity.
+-- @param subject Native path spelling to normalize.
+-- @return Cleaned spelling with native separators and preserved filename case.
+-- @usage
+--   local path = import "path"
+--   local cleaned = path.normalize("src/./generated/../main.titan")
+--   -- "src/main.titan" on POSIX; [[src\main.titan]] on Windows.
+-- @usage standard-library-path.md#api
+function normalize(subject: string): string
+  local length = volume_length(subject)
+  local prefix = string.sub(subject, 1, length)
+  local tail = string.sub(subject, length + 1)
+  if tail == "" then
+    if length > 1 and is_separator(character(subject, 1)) and
+       is_separator(character(subject, 2)) then return from_slash(subject) end
+    return subject .. "."
+  end
+  local rooted = is_separator(character(tail, 1))
+  local components: {string} = {}
+  local ends: {integer} = {}
+  local count = 0
+  local first = 1
+  local written = 0
+  if rooted then written = 1 end
+  local rewritten = rooted and character(tail, 1) ~= separator
+  for index = 1, #tail + 1 do
+    if index > #tail or is_separator(character(tail, index)) then
+      local component = string.sub(tail, first, index - 1)
+      local append = false
+      if component == ".." then
+        if count > 0 and components[count] ~= ".." then
+          count = count - 1
+          if count > 0 then written = ends[count]
+          elseif rooted then written = 1
+          else written = 0 end
+        elseif not rooted then
+          append = true
+        end
+      elseif component ~= "" and component ~= "." then
+        append = true
+      end
+      if append then
+        if count > 0 then
+          if character(tail, written + 1) ~= separator then rewritten = true end
+          written = written + 1
+        end
+        for offset = 1, #component do
+          if character(component, offset) ~= character(tail, written + offset) then
+            rewritten = true
+          end
+        end
+        written = written + #component
+        count = count + 1
+        components[count] = component
+        ends[count] = written
+      end
+      first = index + 1
+    end
+  end
+  local writer = string.writer()
+  if rooted then writer:write(separator) end
+  for index = 1, count do
+    if index > 1 then writer:write(separator) end
+    writer:write(components[index])
+  end
+  local cleaned = writer:drain()
+  if cleaned == "" then
+    cleaned = "."
+    if character(tail, 1) ~= "." then rewritten = true end
+  end
+  -- Remember divergence even when '..' later removes a changed component.
+  -- Guard surviving output only, never bytes beyond its final length.
+  if windows and length == 0 and rewritten then
+    local first_component = ""
+    if count > 0 then first_component = components[1] end
+    if not rooted and string.find(first_component, ":", 1, true) then
+      cleaned = ".\\" .. cleaned
+    elseif string.sub(cleaned, 1, 3) == "\\??" then
+      cleaned = "\\." .. cleaned
+    end
+  end
+  return from_slash(prefix .. cleaned)
+end
+
+--- Split a path into its raw directory prefix and final filename component.
+-- The directory includes its final separator, and the two results concatenate
+-- to exactly the original input. A trailing separator produces an empty leaf.
+-- Windows drive or volume prefixes stay with the directory even when no final
+-- separator is present. Dot components and separator spelling are preserved.
+-- @param subject Native path spelling to split without cleanup.
+-- @return Directory prefix, including its final separator when present.
+-- @return Final filename component, possibly empty.
+-- @usage
+--   local path = import "path"
+--   local directory, filename = path.split("src//main.titan")
+--   -- directory is "src//"; filename is "main.titan".
+-- @usage standard-library-path.md#api
+function split(subject: string): (string, string)
+  local length = volume_length(subject)
+  local index = #subject
+  while index > length and not is_separator(character(subject, index)) do
+    index = index - 1
+  end
+  return string.sub(subject, 1, index), string.sub(subject, index + 1)
+end
+
+--- Return the final path component after removing trailing separators.
+-- Empty input yields ".". A root or volume with no filename yields the native
+-- separator. Windows volume prefixes are excluded from the component; POSIX
+-- treats backslashes and drive-like text as ordinary filename bytes. This
+-- function does not normalize "." or ".." components.
+-- @param subject Native path spelling whose last component is wanted.
+-- @return Final component, "." for empty input, or the separator for a root.
+-- @usage
+--   local path = import "path"
+--   local filename = path.basename("src/main.titan/")
+--   -- filename is "main.titan".
+-- @usage standard-library-path.md#api
+function basename(subject: string): string
+  if subject == "" then return "." end
+  local index = #subject
+  while index > 0 and is_separator(character(subject, index)) do
+    index = index - 1
+  end
+  local tail = string.sub(subject, 1, index)
+  tail = string.sub(tail, volume_length(tail) + 1)
+  index = #tail
+  while index > 0 and not is_separator(character(tail, index)) do
+    index = index - 1
+  end
+  local leaf = string.sub(tail, index + 1)
+  if leaf ~= "" then return leaf end
+  return separator
+end
+
+--- Return the normalized directory preceding the final path component.
+-- Empty input or a filename without a directory yields "."; a Windows
+-- drive-relative filename retains its drive prefix. A trailing separator means
+-- the whole directory spelling is normalized. Native volume and root prefixes
+-- are preserved, and filesystem entries are never inspected.
+-- @param subject Native path spelling whose directory is wanted.
+-- @return Directory spelling with native separators and redundant dots removed.
+-- @usage
+--   local path = import "path"
+--   local directory = path.dirname("src/generated/../main.titan")
+--   -- directory is "src".
+-- @usage standard-library-path.md#api
+function dirname(subject: string): string
+  local length = volume_length(subject)
+  local index = #subject
+  while index > length and not is_separator(character(subject, index)) do
+    index = index - 1
+  end
+  local directory = normalize(string.sub(subject, length + 1, index))
+  local prefix = volume(subject)
+  if directory == "." and length > 2 then return prefix end
+  return prefix .. directory
+end
+
+--- Return the final filename component's suffix beginning at its last dot.
+-- The dot is included. A filename with no dot, or input ending in a separator,
+-- yields "". A leading dot is an extension delimiter too, so ".profile" yields
+-- ".profile", and a trailing dot yields ".". Directory dots are excluded.
+-- @param subject Native path spelling to inspect without cleanup.
+-- @return Last dot and following filename bytes, or "" when absent.
+-- @usage
+--   local path = import "path"
+--   local suffix = path.extension("archive.tar.gz")
+--   -- suffix is ".gz".
+-- @usage standard-library-path.md#api
+function extension(subject: string): string
+  for index = #subject, 1, -1 do
+    local byte = character(subject, index)
+    if is_separator(byte) then break end
+    if byte == "." then return string.sub(subject, index) end
+  end
+  return ""
+end
+
+--- Join path fragments and normalize the resulting native spelling.
+-- A later rooted fragment does not discard earlier fragments. Windows joining
+-- preserves a leading drive or UNC volume, keeps "C:" plus a relative filename
+-- drive-relative, and avoids introducing a namespace from unrelated fragments.
+-- No arguments, or only empty fragments, return "" instead of ".".
+-- @param ... Path fragments in order; each argument must be a string.
+-- @return Joined and normalized native path, or "" for no nonempty fragments.
+-- @usage
+--   local path = import "path"
+--   local header = path.join("src", "..", "include", "titan.h")
+--   -- "include/titan.h" on POSIX; [[include\titan.h]] on Windows.
+-- @usage standard-library-path.md#api
+function join(...: string): string
+  local writer = string.writer()
+  local size = 0
+  local last = ""
+  for index = 1, #... do
+    local element: string = ...[index]
+    if not windows then
+      if element ~= "" then
+        if size > 0 then writer:write("/"); size = size + 1 end
+        writer:write(element)
+        size = size + #element
+      end
+    else
+      if size > 0 then
+        if is_separator(last) then
+          local first = 1
+          while is_separator(character(element, first)) do first = first + 1 end
+          element = string.sub(element, first)
+          if size == 1 and string.sub(element, 1, 2) == "??" and
+             (#element == 2 or is_separator(character(element, 3))) then
+            writer:write(".\\")
+            size = size + 2
+          end
+        elseif last ~= ":" then
+          writer:write("\\")
+          size = size + 1
+          last = "\\"
+        end
+      end
+      if element ~= "" then
+        writer:write(element)
+        size = size + #element
+        last = string.sub(element, -1)
+      end
+    end
+  end
+  if size == 0 then return "" end
+  return normalize(writer:drain())
+end
+
+do
+  windows = ffi.TITAN_PATH_WINDOWS ~= 0
+  if windows then separator = "\\" else separator = "/" end
+end

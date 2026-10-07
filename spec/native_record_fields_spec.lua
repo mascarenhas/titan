@@ -1,3 +1,4 @@
+local temporary = require "spec.support.temporary"
 local h = require "spec.support.helpers"
 local types = require "titan-compiler.types"
 
@@ -131,7 +132,7 @@ describe("trusted native record-field intrinsic", function()
     end)
 
     it("borrows embedded aggregate and array storage without copying their owner", function()
-        local header = os.tmpname() .. ".h"
+        local header = temporary.name(".h")
         local file = assert(io.open(header, "wb"))
         file:write([[
             typedef struct native_field_point { int x; } native_field_point;
@@ -189,7 +190,7 @@ describe("trusted native record-field intrinsic", function()
     end)
 
     it("reads live fields with one owner evaluation and borrows native objects", function()
-        local header = os.tmpname() .. ".h"
+        local header = temporary.name(".h")
         local file = assert(io.open(header, "wb"))
         file:write([[
             #include "titan/ffi.h"

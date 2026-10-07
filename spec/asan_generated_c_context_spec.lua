@@ -2,6 +2,7 @@ local assert = require "luassert"
 local cdriver = require "c-parser.cdriver"
 local driver = require "titan-compiler.driver"
 local lfs = require "lfs"
+local platform = require "titan-compiler.platform"
 local mapper = require "spec.support.asan_generated_c_context"
 
 local FIXTURE = "spec/fixtures/asan/generated_c_context.c"
@@ -233,6 +234,10 @@ describe("ASan generated-C context diagnostics", function()
 
         it("maps a saved DSO offset to verified generated C without rerunning",
         function()
+            if platform.windows then
+                pending("ELF BuildId and section-relative DWARF shadow verification do not apply to Windows PE providers")
+                return
+            end
             local generated, _, _, provider = compile_fixture(workspace)
             local symbol = named_symbol(provider, SYMBOL)
             local second_symbol = named_symbol(provider, SECOND_SYMBOL)
@@ -272,6 +277,10 @@ describe("ASan generated-C context diagnostics", function()
 
         it("saves generated foreign headers for later shadow compilation",
         function()
+            if platform.windows then
+                pending("ELF BuildId-verified generated-header shadow compilation does not apply to Windows PE providers")
+                return
+            end
             local generated, _, _, provider, header =
                 compile_fixture(workspace, true)
             local symbol = named_symbol(provider, SYMBOL)
@@ -297,6 +306,10 @@ describe("ASan generated-C context diagnostics", function()
         end)
 
         it("refuses mismatched BuildIds, module paths, and shadow text", function()
+            if platform.windows then
+                pending("ELF BuildId and shadow-text rejection fixtures do not apply to Windows PE providers")
+                return
+            end
             local generated, _, _, provider = compile_fixture(workspace)
             local symbol = named_symbol(provider, SYMBOL)
             local id = build_id(provider)

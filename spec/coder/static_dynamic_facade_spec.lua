@@ -1,9 +1,11 @@
+local temporary = require "spec.support.temporary"
 local assert = require "luassert"
 local cdriver = require "c-parser.cdriver"
 local coder_core = require "titan-compiler.coder.core"
 local coder_names = require "titan-compiler.coder.names"
 local driver = require "titan-compiler.driver"
 local lfs = require "lfs"
+local platform = require "titan-compiler.platform"
 local staticmetadata = require "titan-compiler.staticmetadata"
 
 local REPO = lfs.currentdir()
@@ -130,7 +132,8 @@ describe("static facade with a producer-dynamic nominal owner", function()
     local source_root
 
     before_each(function()
-        workspace = os.tmpname()
+        if platform.windows then return end
+        workspace = temporary.name()
         assert.truthy(os.remove(workspace))
         assert.truthy(lfs.mkdir(workspace))
         source_root = workspace .. "/source"
@@ -142,6 +145,10 @@ describe("static facade with a producer-dynamic nominal owner", function()
     end)
 
     it("uses a visible owner archive only for type recovery", function()
+        if platform.windows then
+            pending("Titan archive providers require ELF or Mach-O")
+            return
+        end
         write_file(source_root .. "/dynamic/owner.titan", [[
 record Box
     n: integer

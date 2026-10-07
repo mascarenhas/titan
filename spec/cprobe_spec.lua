@@ -1,3 +1,4 @@
+local temporary = require "spec.support.temporary"
 local cprobe = require "titan-compiler.cprobe"
 local cprobe_cache = require "titan-compiler.cprobe_cache"
 local cpreamble = require "titan-compiler.cpreamble"
@@ -9,6 +10,26 @@ local driver = require "titan-compiler.driver"
 local compiler_io = require "titan-compiler.io"
 local ffiheaders = require "titan-compiler.ffiheaders"
 local lfs = require "lfs"
+local platform = require "titan-compiler.platform"
+local path = require "titan-compiler.path"
+
+-- Synthetic filesystem fixtures still need fully absolute native names. Keep
+-- explicit POSIX rendering models under their own scoped platform semantics.
+local function fixture_path(posix)
+    if platform.windows then return path.to_slash(path.join("C:/", posix:sub(2))) end
+    return posix
+end
+
+local function posix_model_it(name, body)
+    it(name, function()
+        local windows = platform.windows
+        platform.windows = false
+        local result = table.pack(pcall(body))
+        platform.windows = windows
+        assert.is_true(result[1], result[2])
+        return table.unpack(result, 2, result.n)
+    end)
+end
 
 describe("quoted C header names", function()
     it("preserves literal bytes and only normalizes Windows separators", function()
@@ -23,6 +44,15 @@ describe("quoted C header names", function()
             local rendered, err = ffiheaders.quote_header("before" .. byte .. "after.h")
             assert.is_nil(rendered)
             assert.match("quoted C header name", err, 1, true)
+        end
+    end)
+
+    it("preserves extended Windows namespaces in quoted headers", function()
+        for _, name in ipairs({
+            [[\\?\C:\folder\header.h]],
+            [[\\?\UNC\server\share\header.h]],
+        }) do
+            assert.equal('"' .. name .. '"', ffiheaders.quote_header(name))
         end
     end)
 end)
@@ -48,7 +78,7 @@ local function fake_environment(run)
     local function temp_provider()
         state.created = state.created + 1
         local workspace = {
-            root = "/fake/titan probe " .. state.created,
+            root = fixture_path("/fake/titan probe " .. state.created),
         }
 
         function workspace:write(name, contents)
@@ -108,8 +138,7 @@ local function new_fake_service(options, run)
 end
 
 local function temporary_directory()
-    local path = assert(os.tmpname()) .. "-cprobe-spec"
-    os.remove(path)
+    local path = assert(temporary.name("-cprobe-spec"))
     assert(lfs.mkdir(path))
     return path
 end
@@ -163,9 +192,9 @@ local function entries(path)
     return out
 end
 
-local function remove_directory(path)
-    for _, name in ipairs(entries(path)) do assert(os.remove(path .. "/" .. name)) end
-    assert(lfs.rmdir(path))
+local function remove_directory(directory)
+    for _, name in ipairs(entries(directory)) do assert(os.remove(path.join(directory, name))) end
+    assert(lfs.rmdir(directory))
 end
 
 describe("C probe service", function()
@@ -193,7 +222,7 @@ describe("C probe service", function()
 
     it("transfers tmpname and mkdir cancellation ownership to the strategy",
     function()
-        local reservation = assert(os.tmpname())
+        local reservation = assert(temporary.name())
         local strategy = compiler_io.new_sync()
         local ordinary_unlink = strategy.unlink
         local ordinary_mkdir = strategy.mkdir
@@ -230,7 +259,7 @@ describe("C probe service", function()
 
     it("propagates cancellation while releasing a probe reservation",
     function()
-        local reservation = assert(os.tmpname())
+        local reservation = assert(temporary.name())
         local cancellation = { kind = "simulated cancellation" }
         local strategy = compiler_io.new_sync()
         local ordinary_unlink = strategy.unlink
@@ -323,7 +352,7 @@ describe("C probe service", function()
         assert.is_true(mixed_service:close())
     end)
 
-    it("is lazy and builds exact header, declarator, and command inputs",
+    posix_model_it("is lazy and builds exact header, declarator, and command inputs",
     function()
         local service, state = new_fake_service({
             compiler_argv = { "cache wrapper", "configured cc" },
@@ -870,13 +899,25 @@ describe("C probe service", function()
         assert.is_true(interrupted_service:close())
     end)
 
-    it("retries a real shell-signalled compiler instead of caching it",
+    it(platform.windows and "retries a real native out-of-range compiler exit instead of caching it"
+        or "retries a real shell-signalled compiler instead of caching it",
     function()
+        local observed = {}
         local service, state = new_fake_service({},
             function()
-                return cdriver.capture_command({
-                    "/bin/sh", "-c", "kill -TERM $$",
-                })
+                local result
+                if platform.windows then
+                    result = cdriver.capture_command({
+                        path.join(driver.TITAN_ROOT, "bin", "lua.exe"),
+                        "-e", "os.exit(9009)",
+                    })
+                    observed[#observed + 1] = result
+                else
+                    result = cdriver.capture_command({
+                        "/bin/sh", "-c", "kill -TERM $$",
+                    })
+                end
+                return result
             end)
         local module = assert(service:module_context())
         local source = cpointer("source_s")
@@ -889,10 +930,24 @@ describe("C probe service", function()
 
         assert.equal("infrastructure_failure", first.status)
         assert.equal("baseline", first.stage)
-        assert.is_true(first.interrupted)
-        assert.matches("interrupted", first.message)
         assert.equal("infrastructure_failure", second.status)
-        assert.is_true(second.interrupted)
+        if platform.windows then
+            for _, result in ipairs(observed) do
+                assert.is_true(result.started)
+                assert.is_false(result.ok)
+                assert.equal(9009, result.status)
+                assert.equal("exit", result.why)
+            end
+            for _, result in ipairs({ first, second }) do
+                assert.is_false(result.interrupted)
+                assert.equal("malformed_runner_result", result.reason)
+                assert.matches("invalid exit status", result.diagnostic, 1, true)
+            end
+        else
+            assert.is_true(first.interrupted)
+            assert.matches("interrupted", first.message)
+            assert.is_true(second.interrupted)
+        end
         assert.is_false(second.baseline_cached)
         assert.equal(2, #state.calls)
         assert.is_true(service:close())
@@ -900,8 +955,20 @@ describe("C probe service", function()
 
     it("uses portable private-object compilation by default", function()
         local root = temporary_directory()
-        local fake_compiler = root .. "/fake-compiler.sh"
-        write_file(fake_compiler, [[
+        local fake_compiler = path.join(root, platform.windows and "fake-compiler.lua" or "fake-compiler.sh")
+        local compiler
+        if platform.windows then
+            write_file(fake_compiler, [[
+local seen_compile = false
+for _, argument in ipairs(arg) do
+    if argument == "-fsyntax-only" then os.exit(97) end
+    if argument == "-c" then seen_compile = true end
+end
+os.exit(seen_compile and 0 or 98)
+]])
+            compiler = { path.join(driver.TITAN_ROOT, "bin", "lua.exe"), fake_compiler }
+        else
+            write_file(fake_compiler, [[
 seen_compile=false
 for argument do
     case "$argument" in
@@ -912,10 +979,12 @@ done
 test "$seen_compile" = true || exit 98
 exit 0
 ]])
+            compiler = { "/bin/sh", fake_compiler }
+        end
 
         local service = assert(cprobe.new_service({
             include_dirs = {},
-            compiler_argv = { "/bin/sh", fake_compiler },
+            compiler_argv = compiler,
         }))
         local module = assert(service:module_context())
         local result = module:probe_unsafe_object_pointer(
@@ -1045,7 +1114,7 @@ exit 0
             end,
             temp_provider = function()
                 return {
-                    root = "/fake/write-error",
+                    root = fixture_path("/fake/write-error"),
                     write = function()
                         error("disk vanished")
                     end,
@@ -1069,7 +1138,9 @@ exit 0
         assert.matches("cleanup also failed", close_error)
         assert.equal(1, cleanup_called)
 
-        for _, invalid_root in ipairs({ "relative/workspace", "/bad\0root" }) do
+        for _, invalid_root in ipairs({
+            "relative/workspace", fixture_path("/bad") .. "\0root",
+        }) do
             local invalid_service = assert(cprobe.new_service({
                 include_dirs = {},
                 runner = function()
@@ -1087,10 +1158,21 @@ exit 0
             local invalid_workspace, invalid_error =
                 invalid_service:_ensure_workspace()
             assert.is_nil(invalid_workspace)
-            if invalid_root:sub(1, 1) ~= "/" then
-                assert.matches("must be absolute", invalid_error, 1, true)
+            if invalid_root:find("\0", 1, true) then
+                assert.is_true(path.is_absolute(invalid_root))
+                if platform.windows then
+                    -- Native path validation rejects NUL before cprobe's
+                    -- ordered absolute-root guard reaches its own NUL check.
+                    local absolute, message, reason = platform.path.is_absolute(invalid_root)
+                    assert.is_nil(absolute)
+                    assert.matches("contains a NUL byte", message, 1, true)
+                    assert.equal("invalid_path", reason)
+                    assert.matches("must be absolute", invalid_error, 1, true)
+                else
+                    assert.matches("contains a NUL byte", invalid_error, 1, true)
+                end
             else
-                assert.matches("contains a NUL byte", invalid_error, 1, true)
+                assert.matches("must be absolute", invalid_error, 1, true)
             end
             assert.is_true(invalid_service:close())
         end
@@ -1126,7 +1208,7 @@ exit 0
 
         local release = compiler_io.new_sync()
         local release_service = service_with(release)
-        release.tmpname = function() return "/fake/reservation" end
+        release.tmpname = function() return fixture_path("/fake/reservation") end
         release.unlink = function()
             return nil, "injected release failure"
         end
@@ -1140,7 +1222,7 @@ exit 0
 
         local creation = compiler_io.new_sync()
         local creation_service = service_with(creation)
-        creation.tmpname = function() return "/fake/reservation" end
+        creation.tmpname = function() return fixture_path("/fake/reservation") end
         creation.unlink = function() return true end
         creation.mkdir = function()
             return nil, "injected creation failure"
@@ -1155,7 +1237,7 @@ exit 0
 
         local cleanup = compiler_io.new_sync()
         local cleanup_service = service_with(cleanup)
-        cleanup.tmpname = function() return "/fake/workspace-one" end
+        cleanup.tmpname = function() return fixture_path("/fake/workspace-one") end
         cleanup.unlink = function() return true end
         cleanup.mkdir = function() return true end
         assert(cleanup_service:_ensure_workspace())
@@ -1171,7 +1253,7 @@ exit 0
 
         local listing = compiler_io.new_sync()
         local listing_service = service_with(listing)
-        listing.tmpname = function() return "/fake/workspace-two" end
+        listing.tmpname = function() return fixture_path("/fake/workspace-two") end
         listing.unlink = function() return true end
         listing.mkdir = function() return true end
         assert(listing_service:_ensure_workspace())
@@ -1283,8 +1365,10 @@ struct titan_probe_target_s { int value; };
             -- Resolve past a checkout/user ccache shim: this integration
             -- exercises cprobe itself and must not depend on ccache's chosen
             -- cache directory being writable inside a test sandbox.
-            compiler_argv = lfs.attributes("/usr/bin/cc", "mode")
-                and { "/usr/bin/cc" } or (os.getenv("CC") or "cc"),
+            compiler_argv = platform.windows
+                and assert(driver.toolchain_descriptor()).compiler_argv
+                or (lfs.attributes("/usr/bin/cc", "mode")
+                    and { "/usr/bin/cc" } or (os.getenv("CC") or "cc")),
             cflags = { "-Wall", "-Werror" },
         }))
         local source = cpointer("titan_probe_source_s")
@@ -1368,7 +1452,7 @@ struct titan_probe_target_s { int value; };
 
         local encoded = assert(compiler_io.new_sync():read_file(
             first_run.cache_path))
-        assert.is_nil(encoded:find("/fake/titan probe", 1, true))
+        assert.is_nil(encoded:find(fixture_path("/fake/titan probe"), 1, true))
         assert.is_true(first:close())
 
         local second, second_state = new_fake_service({
@@ -1399,8 +1483,7 @@ struct titan_probe_target_s { int value; };
                     publications[#publications + 1] = event.publication
                 end,
             }, function(_, _, metadata)
-                local root = assert(
-                    metadata.source_path:match("^(.*)/[^/]+$"))
+                local root = path.to_slash(path.dirname(metadata.source_path))
                 local diagnostic = "unstructured workspace " .. root ..
                     " invocation " .. sequence
                 raw_diagnostics[#raw_diagnostics + 1] = diagnostic
@@ -1483,10 +1566,9 @@ struct titan_probe_target_s { int value; };
         assert.matches("~backup", first_run.diagnostic, 1, true)
         assert.matches(" backup", first_run.diagnostic, 1, true)
         assert.matches("%)backup", first_run.diagnostic)
-        assert.matches("archive /fake/titan probe %d+/",
-            first_run.diagnostic)
-        assert.matches("archive%(/fake/titan probe %d+/",
-            first_run.diagnostic)
+        local workspace_prefix = fixture_path("/fake/titan probe 1") .. "/"
+        assert.matches("archive " .. workspace_prefix, first_run.diagnostic, 1, true)
+        assert.matches("archive(" .. workspace_prefix, first_run.diagnostic, 1, true)
         assert.is_nil(lfs.attributes(first_run.cache_path))
         assert.equal("unstable_diagnostic", publications[#publications])
         local memory_run = first:_run_source(
@@ -1591,26 +1673,29 @@ struct titan_probe_target_s { int value; };
 
     it("accepts a cache-directory creation race", function()
         local strategy = compiler_io.new_sync()
+        local cache = fixture_path("/cache")
+        local cache_root = path.to_slash(path.dirname(cache))
         local service = assert(cprobe.new_service({
             io = strategy,
             include_dirs = {},
             profile = target_profile(),
-            cache_directory = "/cache",
+            cache_directory = cache,
         }))
         local cache_stats = 0
-        strategy.stat = function(_, path)
-            if path == "/" then return { kind = "directory" } end
-            assert.equal("/cache", path)
+        strategy.stat = function(_, filename)
+            if filename == cache_root then return { kind = "directory" } end
+            assert.equal(cache, filename)
             cache_stats = cache_stats + 1
             if cache_stats == 1 then return nil, "not found" end
             return { kind = "directory" }
         end
-        strategy.mkdir = function(_, path)
-            assert.equal("/cache", path)
+        strategy.mkdir = function(_, filename)
+            assert.equal(cache, filename)
             return nil, "already created concurrently"
         end
-        strategy.write_file = function(_, path, contents)
-            assert.matches("^/cache/[0-9a-f]+[.]result$", path)
+        strategy.write_file = function(_, filename, contents)
+            assert.equal(path.normalize(cache), path.normalize(path.dirname(filename)))
+            assert.matches("^[0-9a-f]+[.]result$", path.basename(filename))
             assert.equal("rejected", assert(cprobe_cache.decode(contents)).diagnostic)
             return true
         end
@@ -1685,25 +1770,27 @@ struct titan_probe_target_s { int value; };
         local strategy = compiler_io.new_sync()
         local owner = { io = strategy }
         local dependency = assert(ffiheaders.prepare(owner, "lib.dep", {},
-            "/project/lib/dep.titan"))
+            fixture_path("/project/lib/dep.titan")))
         local header = assert(ffiheaders.prepare(owner, "app.consumer", {
             { _tag = "Ast.TopLevelImport", _source_import = true,
                 _ffi_header_descriptor = dependency },
-        }, "/project/app/consumer.titan"))
+        }, fixture_path("/project/app/consumer.titan")))
         assert.is_true(ffiheaders.close(owner))
         local include = assert(cprobe.normalize_include_descriptor({
             include_kind = "quote", include_name = header.logical_name,
             resolved = header.identity, generated_header = header,
         }))
         local private_root, calls = nil, 0
-        local service = assert(cprobe.new_service({
+        local service
+        service = assert(cprobe.new_service({
             include_dirs = {},
             io = strategy, cache_directory = cache,
             runner = function(_, metadata)
                 calls = calls + 1
-                private_root = assert(metadata.source_path:match("^(.*)/[^/]+$"))
-                local consumer_path = private_root .. "/app/consumer.ffi.h"
-                local dependency_path = private_root .. "/lib/dep.ffi.h"
+                local staged = assert(service.generated_workspaces[header.digest]).header
+                private_root = staged.bundle_root
+                local consumer_path = staged.filename
+                local dependency_path = staged.dependencies[1].filename
                 assert.equal(header.contents, assert(strategy:read_file(consumer_path)))
                 assert.equal(dependency.contents, assert(strategy:read_file(dependency_path)))
                 return { started = true, ok = false, status = 1,
@@ -1715,8 +1802,8 @@ struct titan_probe_target_s { int value; };
         local result = context:validate_baseline()
         assert.equal("rejected", result.status)
         assert.equal(1, calls)
-        local expected = "In file included from /project/app/consumer.ffi.h:2,\n"
-            .. "/project/lib/dep.ffi.h:5: error: generated declaration rejected"
+        local expected = "In file included from " .. header.identity .. ":2,\n"
+            .. dependency.identity .. ":5: error: generated declaration rejected"
         assert.equal(expected, result.diagnostic)
         assert.is_nil(assert(strategy:read_file(result.cache_path)):find(private_root, 1, true))
         assert.is_true(service:close())
@@ -2264,7 +2351,7 @@ describe("source-only probe cache", function()
         local analysis = cdriver.new_process_analysis()
         local first, first_state = new_fake_service({ io = strategy, process_analysis = analysis })
         local first_module = assert(first:module_context({
-            module = "first", source_dir = "/first-project",
+            module = "first", source_dir = fixture_path("/first-project"),
             includes = { { include_kind = "angle", include_name = "api.h",
                 resolved = "/first-sdk/api.h", c_header_dependencies = {
                     { kind = "file", path = "/first-sdk/api.h", identity = "old" },
@@ -2280,7 +2367,7 @@ describe("source-only probe cache", function()
             process_analysis = analysis, compiler_argv = { "other-cc" },
             cflags = { "-DCHANGED" }, include_dirs = { "/second-sdk" } })
         local second_module = assert(second:module_context({
-            module = "second", source_dir = "/second-project",
+            module = "second", source_dir = fixture_path("/second-project"),
             includes = { { include_kind = "angle", include_name = "api.h",
                 resolved = "/second-sdk/api.h", c_header_dependencies = {
                     { kind = "file", path = "/second-sdk/api.h", identity = "new" },
@@ -2303,7 +2390,8 @@ describe("source-only probe cache", function()
         local function service()
             return new_fake_service({
                 io = strategy, profile = target_profile(),
-                compiler_argv = { "/usr/bin/cc" },
+                compiler_argv = platform.windows and assert(driver.toolchain_descriptor()).compiler_argv
+                    or { "/usr/bin/cc" },
                 cache_directory = cache,
             }, function(_, _, metadata)
                 local rejected = metadata.source:find("struct rejected_target", 1, true) ~= nil
@@ -2577,8 +2665,10 @@ enum titan_cache_enum {
 ]])
         local service = assert(cprobe.new_service({
             include_dirs = driver.foreign_include_dirs(),
-            compiler_argv = lfs.attributes("/usr/bin/cc", "mode")
-                and { "/usr/bin/cc" } or (os.getenv("CC") or "cc"),
+            compiler_argv = platform.windows
+                and assert(driver.toolchain_descriptor()).compiler_argv
+                or (lfs.attributes("/usr/bin/cc", "mode")
+                    and { "/usr/bin/cc" } or (os.getenv("CC") or "cc")),
             cflags = { "-Wall", "-Wextra", "-Werror" },
         }))
         local module = assert(service:module_context({ includes = {
@@ -2628,17 +2718,17 @@ describe("whole-question enum carrier selection", function()
         options.io = strategy
         local state
         local original_stat, original_read = strategy.stat, strategy.read_file
-        function strategy:stat(path)
-            local name = path:match("/([^/]+%.o)$")
-            if name and state and state.files[name] then
+        function strategy:stat(filename)
+            local name = path.basename(filename)
+            if name:match("[.]o$") and state and state.files[name] then
                 return { kind = "file", size = #state.files[name] }
             end
-            return original_stat(self, path)
+            return original_stat(self, filename)
         end
-        function strategy:read_file(path, limit)
-            local name = path:match("/([^/]+%.o)$")
-            if name and state and state.files[name] then return state.files[name] end
-            return original_read(self, path, limit)
+        function strategy:read_file(filename, limit)
+            local name = path.basename(filename)
+            if name:match("[.]o$") and state and state.files[name] then return state.files[name] end
+            return original_read(self, filename, limit)
         end
         local service
         service, state = new_fake_service(options, function(index, argv, metadata, files)
@@ -2648,7 +2738,7 @@ describe("whole-question enum carrier selection", function()
                     bytes = response(index, argv, metadata, files)
                 end
                 if bytes then
-                    files.files[assert(metadata.object_path):match("/([^/]+)$")] = bytes
+                    files.files[path.basename(assert(metadata.object_path))] = bytes
                 end
             end
             return { started = true, ok = true, status = 0, diagnostic = "" }

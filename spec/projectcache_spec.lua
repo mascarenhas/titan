@@ -1,3 +1,4 @@
+local temporary = require "spec.support.temporary"
 local driver = require "titan-compiler.driver"
 local types = require "titan-compiler.types"
 local parser = require "titan-compiler.parser"
@@ -5,6 +6,7 @@ local lfs = require "lfs"
 local sha256 = require "titan-compiler.sha256"
 local cpp = require "c-parser.cpp"
 local coder = require "titan-compiler.coder"
+local paths = require "titan-compiler.path"
 
 describe("declared project manifests", function()
     local previous_imported, previous_registry, loaders
@@ -618,7 +620,7 @@ describe("declared project manifests", function()
     it("overlays matching current header observations throughout a private graph", function()
         local entry = load_module("observations", "function answer(): integer return 42 end")
         local old = { modified_seconds = 100, modified_nanoseconds = 5, physical_identity = "physical" }
-        local input = { kind = "file", path = "/observed.h", identity = "semantic", observation = old }
+        local input = { kind = "file", path = paths.join(package.config:sub(1, 1) == "\\" and "C:/" or "/", "observed.h"), identity = "semantic", observation = old }
         entry.c_header_dependencies = { input }
         entry.ast._c_header_dependencies = { input }
         entry.ast[1]._nested_header_input = {
@@ -694,7 +696,7 @@ describe("declared project manifests", function()
     it("uses fresh observation baselines for later edits with retained source-import graphs", function()
         local compiler_io = require "titan-compiler.io"
         local strategy = compiler_io.new_sync()
-        local header = os.tmpname() .. ".h"
+        local header = temporary.name(".h")
         local file = assert(io.open(header, "wb"))
         assert(file:write("typedef int retained_count;\n"))
         assert(file:close())
@@ -996,7 +998,7 @@ describe("declared project manifests", function()
     end)
 
     it("checks recursive C aliases and source function pointers without native companions", function()
-        local header = os.tmpname() .. ".h"
+        local header = temporary.name(".h")
         local file = assert(io.open(header, "wb"))
         assert(file:write([[
             #ifndef TITAN_MANIFEST_C_FIXTURE

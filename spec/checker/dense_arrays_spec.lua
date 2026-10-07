@@ -1,3 +1,4 @@
+local temporary = require "spec.support.temporary"
 local h = require "spec.support.helpers"
 local types = require "titan-compiler.types"
 
@@ -6,7 +7,7 @@ local assert_type_check = h.assert_type_check
 local check_errs = h.check_errs
 
 local function with_header(contents, fn)
-    local header = os.tmpname() .. ".h"
+    local header = temporary.name(".h")
     local file = assert(io.open(header, "w"))
     assert(file:write(contents))
     assert(file:close())

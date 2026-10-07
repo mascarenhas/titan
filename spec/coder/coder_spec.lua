@@ -1,3 +1,4 @@
+local temporary = require "spec.support.temporary"
 local checker = require 'titan-compiler.checker'
 local types = require 'titan-compiler.types'
 local coder = require 'titan-compiler.coder'
@@ -5,19 +6,66 @@ local driver = require 'titan-compiler.driver'
 local util = require 'titan-compiler.util'
 local h = require 'spec.support.helpers'
 local source_inventory = require 'spec.support.source_inventory'
+local lfs = require 'lfs'
+local filesystem = require 'spec.support.filesystem'
 
 local parse = h.parse
-local compile = h.compile
 local call = h.call
 local call_app = h.call_app
-local compile_and_read_c = h.compile_and_read_c
-local run_coder = h.run_coder
-local run_coder_app = h.run_coder_app
-local generate_modules = h.generate_modules
+local generated_modules = {}
+
+local function compile(name, ...)
+    generated_modules[name] = true
+    return h.compile(name, ...)
+end
+
+local function compile_and_read_c(code, name)
+    generated_modules[name or "test"] = true
+    return h.compile_and_read_c(code, name)
+end
+
+local function run_coder(...)
+    generated_modules.test = true
+    return h.run_coder(...)
+end
+
+local function run_coder_app(...)
+    generated_modules.test = true
+    return h.run_coder_app(...)
+end
+
+local function generate_modules(modules, ...)
+    for name in pairs(modules) do generated_modules[name] = true end
+    return h.generate_modules(modules, ...)
+end
+
+local function remove_generated(path)
+    if lfs.symlinkattributes(path, "mode") == "directory" then
+        for name in lfs.dir(path) do
+            if name ~= "." and name ~= ".." then
+                remove_generated(path .. "/" .. name)
+            end
+        end
+        assert(lfs.rmdir(path))
+    else
+        assert(os.remove(path))
+    end
+end
 
 local function clean()
-    os.execute("rm -rf *.o *.so *.dSYM")
-    if not h.verbose then os.execute("rm -f *.c") end
+    -- Earlier checker specs may keep their metadata DLLs mapped. Only this
+    -- fixture's generated modules belong to its cleanup.
+    for name in pairs(generated_modules) do
+        local stem = name:gsub("[.]", "/")
+        for _, suffix in ipairs({ ".o", ".so", ".a", ".dll", ".def",
+                ".dll.def", ".so.dSYM", ".ffi.h", ".titan.h", ".c" }) do
+            local path = stem .. suffix
+            if (suffix ~= ".c" or not h.verbose) and lfs.symlinkattributes(path) then
+                remove_generated(path)
+            end
+        end
+    end
+    generated_modules = {}
 end
 
 local function generated_native_function(csrc, name)
@@ -2252,7 +2300,9 @@ describe("Titan code generator", function()
     end)
 
     it("uses quoted includes for local foreign headers", function()
-        local suffix = os.tmpname():match("[^/]+$"):gsub("%W", "_")
+        local reservation = temporary.name()
+        local suffix = reservation:match("[^/]+$"):gsub("%W", "_")
+        assert(os.remove(reservation))
         local header = "tmp_titan_ffi_local_header_" .. suffix .. ".h"
         local modname = "ffi_local_header_" .. suffix
         local f = assert(io.open(header, "w"))
@@ -2274,9 +2324,12 @@ describe("Titan code generator", function()
             local header_file = assert(io.open(modname .. ".ffi.h", "r"))
             local environment = header_file:read("*a")
             header_file:close()
-            local rendered = '#include "' .. require("lfs").currentdir()
-                .. "/" .. header .. '"'
-            assert.match(rendered, environment, 1, true)
+            local included = environment:match('#include "([^"\n]+)"')
+            assert.truthy(included, environment)
+            assert.is_true(require("titan-compiler.platform").is_absolute(included))
+            local strategy = require("titan-compiler.io").new_sync()
+            assert.equal(assert(strategy:realpath(header)),
+                assert(strategy:realpath(included)))
         end)
         os.remove(header)
         os.remove(modname .. ".ffi.h")
@@ -2284,8 +2337,10 @@ describe("Titan code generator", function()
     end)
 
     it("keeps a symlinked foreign header's quoted-include origin", function()
+        local available, message = filesystem.symlink_capability()
+        if not available then pending(message); return end
         local lfs = require "lfs"
-        local root = os.tmpname()
+        local root = temporary.name()
         os.remove(root)
         assert(lfs.mkdir(root))
         local vendor = root .. "/vendor"
@@ -2341,7 +2396,7 @@ static struct titan_symlink_origin *titan_symlink_origin_get(void) {
 
     local function assert_dollar_foreign_header(
             header_token, modname, macro, value)
-        local header = os.tmpname() .. "-" .. header_token
+        local header = temporary.name("-" .. header_token)
         local f = assert(io.open(header, "w"))
         f:write("#define " .. macro .. " " .. value .. "\n")
         f:close()

@@ -1,30 +1,81 @@
 local assert = require "luassert"
 local cdriver = require "c-parser.cdriver"
+local compiler_io = require "titan-compiler.io"
+local driver = require "titan-compiler.driver"
+local platform = require "titan-compiler.platform"
 local lfs = require "lfs"
 
-local REPO = lfs.currentdir()
+local REPO = assert(lfs.currentdir())
+if platform.windows then REPO = assert(platform.path.normalize(REPO)) end
 local PREFIX = require("spec.support.installed_prefix").active()
-local LUA = PREFIX .. "/bin/lua"
-local TITANC = PREFIX .. "/bin/titanc"
+local SHARED_SUFFIX = platform.windows and ".dll" or ".so"
+local LUA = PREFIX .. "/bin/lua" .. (platform.windows and ".exe" or "")
+local INSTALLED_TITANC = PREFIX .. (platform.windows and
+    "/lib/luarocks/rocks-5.5/titan/0.6.0-1/bin/titanc" or "/bin/titanc")
+local TITANC = INSTALLED_TITANC
 local USE_CHECKOUT_COMPILER =
     os.getenv("TITAN_TEST_USE_CHECKOUT_COMPILER") == "1"
 
-local function quote_argv(argv)
-    local quoted = {}
-    for index, argument in ipairs(argv) do
-        quoted[index] = assert(cdriver.shell_quote(argument))
+local function run(argv, cwd)
+    local command = { table.unpack(argv) }
+    local scripts = {}
+    if platform.windows then
+        if command[1] == "env" then command[1] = "env.exe" end
+        for index = 1, #command - 1 do
+            if command[index] == "-e" and command[index + 1]:find("[\r\n]") then
+                local script = assert(compiler_io.new_sync():tmpname())
+                local file = assert(io.open(script, "wb"))
+                assert(file:write(command[index + 1]))
+                assert(file:close())
+                scripts[#scripts + 1] = script
+                command[index] = script
+                table.remove(command, index + 1)
+                break
+            end
+        end
     end
-    return table.concat(quoted, " ")
+    local previous = assert(lfs.currentdir())
+    assert.truthy(lfs.chdir(cwd))
+    local called, result = pcall(function()
+        return compiler_io.new_sync():run(command)
+    end)
+    assert.truthy(lfs.chdir(previous))
+    for _, script in ipairs(scripts) do os.remove(script) end
+    assert.truthy(called, result)
+    local output = result.output or result.diagnostic or ""
+    if platform.windows then
+        output = output:gsub("\r\n", "\n")
+        output = output:gsub('%^"(.-)%^"', function(word)
+            return assert(cdriver.shell_quote((word:gsub("%^(.)", "%1"))))
+        end)
+    end
+    return result.started and result.ok, output, result.why, result.status
 end
 
-local function run(argv, cwd)
-    local previous = lfs.currentdir()
-    assert.truthy(lfs.chdir(cwd))
-    local pipe = assert(io.popen(quote_argv(argv) .. " 2>&1", "r"))
-    local output = pipe:read("*a")
-    local ok, why, code = pipe:close()
-    assert.truthy(lfs.chdir(previous))
-    return ok == true, output, why, code
+local function temporary_workspace()
+    local path = assert(compiler_io.new_sync():tmpname())
+    assert.truthy(os.remove(path))
+    assert.truthy(lfs.mkdir(path))
+    if platform.windows then path = assert(platform.path.normalize(path)) end
+    return path
+end
+
+local function shared_path(workspace, stem)
+    return workspace .. "/" .. stem .. SHARED_SUFFIX
+end
+
+local function program_path(workspace, modname, unix_relative)
+    return workspace .. "/" .. (platform.windows and
+        assert(driver.windows_program_paths(modname)).executable or unix_relative)
+end
+
+local function run_program(workspace, modname, unix_relative)
+    local provider_root = platform.windows and
+        workspace .. "/lib/titan/0.6" or workspace
+    return run({ "env", "PATH=" .. PREFIX .. "/bin" ..
+        (platform.windows and ";" or ":") .. (os.getenv("PATH") or "/usr/bin:/bin"),
+        "TITAN_PATH_0_6=" .. provider_root .. ";" .. PREFIX .. "/lib/titan/0.6",
+        program_path(workspace, modname, unix_relative) }, workspace)
 end
 
 local function make_directory(path)
@@ -87,10 +138,12 @@ describe("folder modules through the public compiler", function()
             "CCACHE_DISABLE=1",
             "TITAN_PATH_0_6=" .. workspace,
             "TITAN_PATH=",
+            "PATH=" .. PREFIX .. "/bin" .. (platform.windows and ";" or ":") ..
+                (os.getenv("PATH") or "/usr/bin:/bin"),
         }
         if USE_CHECKOUT_COMPILER then
             table.insert(argv, "TITAN_ROCKS_ROOT=" .. PREFIX)
-            table.insert(argv, "LUA_CPATH=" .. REPO .. "/?.so;;")
+            table.insert(argv, "LUA_CPATH=" .. REPO .. "/?" .. SHARED_SUFFIX .. ";;")
             table.insert(argv, LUA)
             table.insert(argv, "-e")
             table.insert(argv, string.format(
@@ -98,6 +151,7 @@ describe("folder modules through the public compiler", function()
                     REPO .. "/?/init.lua;"))
             table.insert(argv, REPO .. "/titanc")
         else
+            if platform.windows then table.insert(argv, LUA) end
             table.insert(argv, TITANC)
         end
         table.insert(argv, "--tree")
@@ -110,9 +164,7 @@ describe("folder modules through the public compiler", function()
     end
 
     setup(function()
-        workspace = os.tmpname()
-        assert.truthy(os.remove(workspace))
-        assert.truthy(lfs.mkdir(workspace))
+        workspace = temporary_workspace()
         source_root = workspace .. "/external-source"
         module_folder = source_root .. "/foldercase"
         make_directory(module_folder)
@@ -252,7 +304,7 @@ end
     end)
 
     it("emits one logical library from main-stem C and object files", function()
-        assert.equal("file", lfs.attributes(workspace .. "/foldercase.so",
+        assert.equal("file", lfs.attributes(shared_path(workspace, "foldercase"),
             "mode"))
         assert.equal("file", lfs.attributes(
             module_folder .. "/foldercase.c", "mode"))
@@ -264,7 +316,7 @@ end
             assert.is_nil(lfs.attributes(module_folder .. "/" .. basename ..
                 ".o", "mode"))
             assert.is_nil(lfs.attributes(workspace .. "/foldercase/" ..
-                basename .. ".so", "mode"))
+                basename .. SHARED_SUFFIX, "mode"))
         end
 
         local generated = read_file(module_folder .. "/foldercase.c")
@@ -294,7 +346,7 @@ end
     it("shares one API, module state, and cross-constituent Interface",
        function()
         local script = string.format([[
-package.cpath = %q .. "/?.so;" .. package.cpath
+package.cpath = %q .. "/?" .. %q .. ";" .. package.cpath
 local folder = require "foldercase"
 local consumer = require "consumer"
 assert(type(folder) == "userdata")
@@ -313,7 +365,7 @@ assert(folder.read() == 16)
 assert(folder.through_extra(37) == 37)
 assert(folder.through_interface(42) == 42)
 print("OK")
-]], workspace)
+]], workspace, SHARED_SUFFIX)
         local ok, output = run({ LUA, "-e", script }, workspace)
         assert.truthy(ok, output)
         assert.equal("OK\n", output)
@@ -327,7 +379,7 @@ print("OK")
         local lambda_raise = line_of(trace_source, 'raise "folder boom"')
         local lambda_call = line_of(trace_source, "return fail()")
         local script = string.format([==[
-package.cpath = %q .. "/?.so;" .. package.cpath
+package.cpath = %q .. "/?" .. %q .. ";" .. package.cpath
 local titan = require "titan"
 local folder = require "foldercase"
 assert(not pcall(folder.explode))
@@ -337,7 +389,7 @@ assert(trace:find(%q), trace)
 assert(trace:find(%q), trace)
 assert(not trace:find("foldercase%%.c:"), trace)
 print("OK")
-]==], workspace,
+]==], workspace, SHARED_SUFFIX,
             escape_pattern("trace.titan:" .. lambda_raise ..
                 ": in anonymous function at " .. trace_file .. ":" ..
                 lambda_definition),
@@ -368,17 +420,17 @@ end
         assert.equal("directory", lfs.attributes(
             workspace .. "/packages", "mode"))
         assert.equal("file", lfs.attributes(
-            workspace .. "/packages/dotted.so", "mode"))
+            shared_path(workspace, "packages/dotted"), "mode"))
         assert.equal("file", lfs.attributes(folder .. "/dotted.c", "mode"))
         assert.equal("file", lfs.attributes(folder .. "/dotted.o", "mode"))
         assert.is_nil(lfs.attributes(folder .. "/part.c", "mode"))
         assert.is_nil(lfs.attributes(folder .. "/part.o", "mode"))
 
         local script = string.format([[
-package.cpath = %q .. "/?.so;" .. package.cpath
+package.cpath = %q .. "/?" .. %q .. ";" .. package.cpath
 local dotted = require "packages.dotted"
 assert(dotted.answer() == 42)
-]], workspace)
+]], workspace, SHARED_SUFFIX)
         local ok, output = run({ LUA, "-e", script }, workspace)
         assert.truthy(ok, output)
     end)
@@ -427,7 +479,7 @@ end
             assert.is_nil(lfs.attributes(folder .. "/" .. basename .. ".o"))
         end
         local script = string.format([[
-package.cpath = %q .. "/?.so;" .. package.cpath
+package.cpath = %q .. "/?" .. %q .. ";" .. package.cpath
 local folder = require "customparts"
 assert(folder.calls == 0)
 assert(folder.from_main() == 11)
@@ -438,13 +490,17 @@ local constructor = folder.constructor_from_main()
 assert(constructor == folder.constructor_from_contributor())
 assert(constructor == folder.Box.new)
 assert(constructor(4):read() == 14 and folder.calls == 4)
-]], workspace)
+]], workspace, SHARED_SUFFIX)
         local ok, output = run({LUA, "-e", script}, workspace)
         assert.truthy(ok, output)
     end)
 
     for _, mode in ipairs({"dynamic", "static"}) do
         it("imports arbitrary custom constructor results from a " .. mode .. " provider", function()
+            if platform.windows and mode == "static" then
+                pending("Titan static-provider archives are unsupported on Windows")
+                return
+            end
             local provider = "factory_api_" .. mode
             local consumer = "factory_client_" .. mode
             local provider_source = source_root .. "/" .. provider .. ".titan"
@@ -462,8 +518,8 @@ type Alias = Factory
             compile(provider)
             assert.truthy(os.remove(provider_source))
             local unselected = workspace .. "/" .. provider ..
-                (mode == "dynamic" and ".a" or ".so")
-            assert.truthy(os.remove(unselected))
+                (mode == "dynamic" and ".a" or SHARED_SUFFIX)
+            if not platform.windows then assert.truthy(os.remove(unselected)) end
             assert.is_nil(lfs.attributes(provider_source))
             assert.is_nil(lfs.attributes(unselected))
             write_file(source_root .. "/" .. consumer .. ".titan", string.format([[
@@ -483,14 +539,14 @@ end
 ]], provider))
             compile(consumer)
             local script = string.format([[
-package.cpath = %q .. "/?.so;" .. package.cpath
+package.cpath = %q .. "/?" .. %q .. ";" .. package.cpath
 local consumer = require %q
 for name, expected in pairs({positional = "positional", named = "named", string_argument = "string"}) do
     local results = table.pack(consumer[name]())
     assert(results.n == 3)
     assert(results[1] == #expected and results[2] == nil and results[3] == expected)
 end
-]], workspace, consumer)
+]], workspace, SHARED_SUFFIX, consumer)
             local ok, output = run({LUA, "-e", script}, workspace)
             assert.truthy(ok, output)
         end)
@@ -515,7 +571,12 @@ end
 
         compile("programs.folderapp")
         assert.equal("file", lfs.attributes(
-            workspace .. "/programs/folderapp__main", "mode"))
+            program_path(workspace, "programs.folderapp", "programs/folderapp__main"), "mode"))
+        if platform.windows then
+            assert.equal("file", lfs.attributes(workspace .. "/" ..
+                assert(driver.windows_program_paths("programs.folderapp")).provider, "mode"))
+            assert.is_nil(lfs.attributes(workspace .. "/programs/folderapp__main", "mode"))
+        end
         assert.equal("directory", lfs.attributes(
             workspace .. "/programs", "mode"))
         assert.is_nil(lfs.attributes(
@@ -528,12 +589,11 @@ end
             folder .. "/folderapp.o", "mode"))
         assert.is_nil(lfs.attributes(folder .. "/program.c", "mode"))
 
-        local ok, output, why, code = run({
-            workspace .. "/programs/folderapp__main",
-        }, workspace)
+        local ok, output, why, code = run_program(workspace,
+            "programs.folderapp", "programs/folderapp__main")
         assert.falsy(ok)
         assert.equal("exit", why)
-        assert.equal(17, code)
+        assert.equal(17, code, output)
         assert.equal("", output)
     end)
 
@@ -544,7 +604,7 @@ function answer(): integer
 end
 ]])
         compile("flatlib")
-        assert.equal("file", lfs.attributes(workspace .. "/flatlib.so",
+        assert.equal("file", lfs.attributes(shared_path(workspace, "flatlib"),
             "mode"))
         assert.equal("file", lfs.attributes(source_root .. "/flatlib.c",
             "mode"))
@@ -557,15 +617,20 @@ function main(args: {string}): integer
 end
 ]])
         compile("flatapp")
-        assert.equal("file", lfs.attributes(workspace .. "/flatapp", "mode"))
+        assert.equal("file", lfs.attributes(
+            program_path(workspace, "flatapp", "flatapp"), "mode"))
+        if platform.windows then
+            assert.equal("file", lfs.attributes(workspace .. "/" ..
+                assert(driver.windows_program_paths("flatapp")).provider, "mode"))
+            assert.is_nil(lfs.attributes(workspace .. "/flatapp", "mode"))
+        end
         assert.equal("file", lfs.attributes(
             workspace .. "/flatapp__entrypoint.c", "mode"))
         assert.is_nil(lfs.attributes(workspace .. "/flatapp__main", "mode"))
-        local ok, output, why, code = run({ workspace .. "/flatapp" },
-            workspace)
+        local ok, output, why, code = run_program(workspace, "flatapp", "flatapp")
         assert.falsy(ok)
         assert.equal("exit", why)
-        assert.equal(19, code)
+        assert.equal(19, code, output)
         assert.equal("", output)
     end)
 end)

@@ -1,3 +1,4 @@
+local temporary = require "spec.support.temporary"
 local assert = require "luassert"
 local cdriver = require "c-parser.cdriver"
 local checker = require "titan-compiler.checker"
@@ -6,9 +7,11 @@ local lfs = require "lfs"
 local parser = require "titan-compiler.parser"
 local staticmetadata = require "titan-compiler.staticmetadata"
 local types = require "titan-compiler.types"
+local compiler_io = require "titan-compiler.io"
+local platform = require "titan-compiler.platform"
 
 local PREFIX = require("spec.support.installed_prefix").active()
-local LUA = PREFIX .. "/bin/lua"
+local LUA = PREFIX .. (platform.windows and "/bin/lua.exe" or "/bin/lua")
 
 local function quote_argv(argv)
     local quoted = {}
@@ -19,10 +22,9 @@ local function quote_argv(argv)
 end
 
 local function run(argv)
-    local pipe = assert(io.popen(quote_argv(argv) .. " 2>&1", "r"))
-    local output = pipe:read("*a")
-    local ok, why, code = pipe:close()
-    return ok == true, output, why, code
+    local result = compiler_io.new_sync():run(argv)
+    return result.ok, result.output or result.diagnostic or "",
+        result.why, result.status
 end
 
 local function configured_words(command)
@@ -84,7 +86,7 @@ local function compile_c(source, object, body, shared)
     write_file(source, body)
     local argv = configured_words(driver.CC)
     argv[#argv + 1] = shared and "-shared" or "-c"
-    argv[#argv + 1] = "-fPIC"
+    if not platform.windows then argv[#argv + 1] = "-fPIC" end
     argv[#argv + 1] = source
     argv[#argv + 1] = "-o"
     argv[#argv + 1] = object
@@ -239,6 +241,11 @@ local function patch_target_fingerprint(bytes, fingerprint)
     elseif fingerprint.format == "macho" then
         offset = 8 -- Mach-O cpusubtype
         value = fingerprint.cpusubtype ~ 1
+    elseif fingerprint.format == "coff" then
+        -- Keep an otherwise intact 64-bit COFF object, but select ARM64
+        -- instead of the native AMD64 target (or conversely).
+        local machine = fingerprint.machine == 0x8664 and 0xaa64 or 0x8664
+        return string.char(machine & 0xff, machine >> 8) .. bytes:sub(3)
     else
         error("unsupported native target in focused test: " ..
             tostring(fingerprint.format))
@@ -260,7 +267,57 @@ local function executable_script(path, contents)
     assert.truthy(ok, output)
 end
 
+-- Windows configured tools need an executable argv prefix; an extensionless
+-- POSIX shell script is not a native program. Keep the authored tool failures
+-- and argument logs in a Lua script launched by this SDK's Lua interpreter.
+local function native_tool_wrapper(path, marker, rejected_mode, command)
+    local words = {}
+    for index, word in ipairs(configured_words(command)) do
+        words[index] = string.format("%q", word)
+    end
+    write_file(path, string.format([[
+local compiler_io = require "titan-compiler.io"
+local marker = assert(io.open(%q, "ab"))
+assert(marker:write(table.concat(arg, " "), "\n"))
+assert(marker:close())
+if arg[1] == %q then os.exit(64) end
+local argv = { %s }
+for _, argument in ipairs(arg) do argv[#argv + 1] = argument end
+local result = compiler_io.new_sync():run(argv)
+local output = result.output or result.diagnostic or ""
+if output ~= "" then io.write(output) end
+os.exit(result.ok and 0 or
+    (type(result.status) == "number" and result.status or 1))
+]], marker, rejected_mode, table.concat(words, ", ")))
+    return quote_argv({ LUA, "-E", path })
+end
+
 describe("static compiled-module native containers", function()
+    local archive_cases = {
+        ["batches the exact shell-quoted AR command below one-argument limits"] =
+            "Windows archive batching still uses POSIX command-size limits",
+        ["links and validates an Interface archive-backed private image"] =
+            "Windows Titan archive-provider consumers are not implemented",
+        ["builds consumer-local callable views over an archive-selected source"] =
+            "Windows Titan archive-provider consumers are not implemented",
+    }
+    local publication_cases = {
+        ["rolls back every caught publication boundary including stale shims"] = true,
+        ["preserves an identical recursive Darwin dSYM tree"] = true,
+        ["retires only exact old-provider stale shims on successful publication"] = true,
+        ["rejects nonregular provider destinations and native input aliases"] = true,
+        ["rechecks planned shim ownership at publication"] = true,
+    }
+    local register = it
+    local function it(name, callback)
+        register(name, function(...)
+            if platform.windows and (archive_cases[name] or publication_cases[name]) then
+                pending(archive_cases[name] or "Unix paired-provider publication")
+                return
+            end
+            return callback(...)
+        end)
+    end
     local workspace
     local target_object
     local target
@@ -273,7 +330,7 @@ describe("static compiled-module native containers", function()
     local original_titan_bin_path
 
     setup(function()
-        workspace = os.tmpname() .. " static modules"
+        workspace = temporary.name(" static modules")
         make_directory(workspace)
         original_ar = driver.AR
         original_ranlib = driver.RANLIB
@@ -282,8 +339,8 @@ describe("static compiled-module native containers", function()
         target_object = compile_titan_object(workspace)
         target = assert(driver.derive_target_fingerprint(
             target_object, "fixture.target"))
-        assert.truthy(target.format == "elf" or target.format == "macho",
-            "focused suite requires an ELF or Mach-O target")
+        assert.truthy(target.format == "elf" or target.format == "macho" or
+            target.format == "coff", "unsupported native object target")
 
         plain_object = workspace .. "/-plain payload.o"
         compile_c(workspace .. "/plain payload.c", plain_object,
@@ -355,7 +412,8 @@ describe("static compiled-module native containers", function()
 
     it("publishes preload state before the package library opens", function()
         local harness = workspace .. "/preload-before-package.c"
-        local executable = workspace .. "/preload-before-package"
+        local executable = workspace .. "/preload-before-package" ..
+            (platform.windows and ".exe" or "")
         write_file(harness, [[
 #include <assert.h>
 
@@ -403,18 +461,27 @@ int main(void) {
 }
 ]])
         local compiler = configured_words(driver.CC)
-        for _, argument in ipairs({
+        local inputs = platform.windows and {
             "--std=c99", "-O0", "-g", "-Wall", "-Wextra",
-            "-Ititan-runtime", "-Ilua-5.5.1/src",
+            "-Ititan-runtime", "-I" .. PREFIX .. "/src/lua-5.5.1",
+            harness, target_object, PREFIX .. "/lib/titan/0.6/libtitan.a",
+            PREFIX .. "/lib/libbacktrace.a", PREFIX .. "/lib/liblua55.a",
+            "-static-libgcc", "-o", executable, "-lbcrypt",
+        } or {
+            "--std=c99", "-O0", "-g", "-Wall", "-Wextra",
+            "-Ititan-runtime", "-I" .. PREFIX .. "/src/lua-5.5.1",
             harness, target_object,
             "titan-runtime/libtitan.a",
             "libbacktrace/.libs/libbacktrace.a",
-            "lua-5.5.1/src/liblua.a",
+            PREFIX .. "/lib/liblua.a",
             "-o", executable, "-lm", "-pthread",
-        }) do
+        }
+        for _, argument in ipairs(inputs) do
             compiler[#compiler + 1] = argument
         end
-        if not driver.IS_DARWIN then compiler[#compiler + 1] = "-ldl" end
+        if not platform.windows and not driver.IS_DARWIN then
+            compiler[#compiler + 1] = "-ldl"
+        end
         local linked, output = run(compiler)
         assert.truthy(linked, output)
         local ran, run_output = run({ executable })
@@ -443,7 +510,7 @@ int main(void) {
         local raw = workspace .. "/raw linker script.txt"
         write_file(raw, "INPUT(-lc)\n")
 
-        local dso = workspace .. "/payload.so"
+        local dso = workspace .. (platform.windows and "/payload.dll" or "/payload.so")
         compile_c(workspace .. "/payload shared.c", dso,
             "int shared_payload(void) { return 3; }\n", true)
 
@@ -494,7 +561,10 @@ int main(void) {
 
     it("rejects raw GNU/ELF whole-archive members and retains metadata objects",
        function()
-        if driver.IS_DARWIN or target.format ~= "elf" then return end
+        if driver.IS_DARWIN or target.format ~= "elf" then
+            pending("GNU/ELF whole-archive linker semantics")
+            return
+        end
 
         local linker_version = configured_words(driver.CC)
         linker_version[#linker_version + 1] = "-Wl,--version"
@@ -567,13 +637,22 @@ int main(void) {
             "-Wl,--no-whole-archive",
         }, driver.force_load_arguments({ input_archive }, false))
 
-        local darwin = driver.force_load_arguments({
-            { path = input_archive },
-        }, true)
-        assert.equal("-Xlinker", darwin[1])
-        assert.equal("-force_load", darwin[2])
-        assert.equal("-Xlinker", darwin[3])
-        assert.equal(input_archive, darwin[4])
+        -- Darwin argument rendering is a POSIX lexical model, independent
+        -- of the host used to exercise the native archiver above.
+        local previous_windows = platform.windows
+        platform.windows = false
+        local darwin_path = "/private/input payload (reviewed).a"
+        local completed, failure = xpcall(function()
+            local darwin = driver.force_load_arguments({
+                { path = darwin_path },
+            }, true)
+            assert.equal("-Xlinker", darwin[1])
+            assert.equal("-force_load", darwin[2])
+            assert.equal("-Xlinker", darwin[3])
+            assert.equal(darwin_path, darwin[4])
+        end, debug.traceback)
+        platform.windows = previous_windows
+        assert.truthy(completed, failure)
     end)
 
     it("builds a flattened ordered archive with duplicate leaf names", function()
@@ -663,20 +742,27 @@ exec %s "$@"
         local ranlib_marker = workspace .. "/ranlib marker"
         local ar_wrapper = workspace .. "/configured ar"
         local ranlib_wrapper = workspace .. "/configured ranlib"
-        executable_script(ar_wrapper, string.format([[#!/bin/sh
+        if platform.windows then
+            driver.AR = native_tool_wrapper(ar_wrapper .. ".lua",
+                ar_marker, "qDc", original_ar)
+            driver.RANLIB = native_tool_wrapper(ranlib_wrapper .. ".lua",
+                ranlib_marker, "-D", original_ranlib)
+        else
+            executable_script(ar_wrapper, string.format([[#!/bin/sh
 printf '%%s\n' "$*" >> %s
 if [ "$1" = "qDc" ]; then exit 64; fi
 exec %s "$@"
 ]], assert(cdriver.shell_quote(ar_marker)),
-            assert(cdriver.shell_quote(configured_words(original_ar)[1]))))
-        executable_script(ranlib_wrapper, string.format([[#!/bin/sh
+                assert(cdriver.shell_quote(configured_words(original_ar)[1]))))
+            executable_script(ranlib_wrapper, string.format([[#!/bin/sh
 printf '%%s\n' "$*" >> %s
 if [ "$1" = "-D" ]; then exit 64; fi
 exec %s "$@"
 ]], assert(cdriver.shell_quote(ranlib_marker)),
-            assert(cdriver.shell_quote(configured_words(original_ranlib)[1]))))
-        driver.AR = assert(cdriver.shell_quote(ar_wrapper))
-        driver.RANLIB = assert(cdriver.shell_quote(ranlib_wrapper))
+                assert(cdriver.shell_quote(configured_words(original_ranlib)[1]))))
+            driver.AR = assert(cdriver.shell_quote(ar_wrapper))
+            driver.RANLIB = assert(cdriver.shell_quote(ranlib_wrapper))
+        end
 
         local result = assert(driver.build_static_archive(
             workspace .. "/fallback archive.a",
@@ -696,8 +782,14 @@ exec %s "$@"
         local output = workspace .. "/preserved output.a"
         write_file(output, "old output")
         local failing = workspace .. "/failing ar"
-        executable_script(failing, "#!/bin/sh\nexit 9\n")
-        driver.AR = assert(cdriver.shell_quote(failing))
+        if platform.windows then
+            failing = failing .. ".lua"
+            write_file(failing, "os.exit(9)\n")
+            driver.AR = quote_argv({ LUA, "-E", failing })
+        else
+            executable_script(failing, "#!/bin/sh\nexit 9\n")
+            driver.AR = assert(cdriver.shell_quote(failing))
+        end
 
         local result, err = driver.build_static_archive(
             output, { target_object }, {}, target, false)

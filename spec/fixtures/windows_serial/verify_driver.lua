@@ -19,14 +19,14 @@ assert(driver.initialize_platform(context))
 assert(driver.INSTALLED and not driver.SOURCE_CHECKOUT)
 assert(same_file(driver.INSTALL_PATHS.root, sdk))
 assert(same_file(driver.INSTALL_PATHS.lua_source, sdk .. "/src/lua-5.5.1"))
-assert(same_file(driver.INSTALL_PATHS.liblua, sdk .. "/lib/liblua-5.5.1.dll.a"))
+assert(same_file(driver.INSTALL_PATHS.liblua, sdk .. "/lib/liblua55.a"))
 assert(driver.INSTALL_PATHS.lua_cpath:sub(-5) == "?.dll")
 assert(table.concat(driver.module_binary_candidates("one.two.leaf"), ";") ==
     "one.dll;one/two.dll;one/two/leaf.dll")
 assert(driver.close_resolver_context(context))
 -- The fixture DLL deliberately lacks luaopen_titan. A fresh validation process
 -- must reach that exact symbol check through the installed bin/lua.exe, even
--- when the compiler's real frontend executable is titanc.exe.
+-- for both the LuaRocks script and native compiler launchers.
 local valid_support, support_error = driver.validate_titan_support(helper)
 assert(valid_support == nil and support_error:find("cannot load luaopen_titan", 1, true),
     tostring(support_error))

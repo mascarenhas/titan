@@ -62,9 +62,9 @@ local function cancelled_header_parent(encrypted: boolean, first_port: integer)
 end
 
 function test_cancelled_header_parent_plain(_context: test.Context)
-  cancelled_header_parent(false, 58000)
+  cancelled_header_parent(false, 23000)
 end
 
 function test_cancelled_header_parent_tls(_context: test.Context)
-  cancelled_header_parent(true, 58200)
+  cancelled_header_parent(true, 23200)
 end

@@ -1,3 +1,4 @@
+local temporary = dofile("spec/support/temporary.lua")
 local mode = assert(arg[1], "missing stdlib provider mode")
 assert(mode == "bundled" or mode == "system", mode)
 
@@ -16,6 +17,7 @@ local url = require "titan.url"
 local http = require "titan.http"
 local websocket = require "titan.websocket"
 local system = require "titan.os"
+local paths = require "titan.path"
 local peg = require "titan.peg"
 local strings = require "titan.string"
 local math = require "titan.math"
@@ -26,7 +28,7 @@ local testing = require "titan.test"
 local sqlite3 = require "titan.sqlite3"
 local json = require "titan.json"
 
-local path = os.tmpname()
+local path = temporary.name()
 os.remove(path)
 local parsed_url, parse_error = url.parse(
     "https://localhost:8443/provider?q=1")
@@ -122,6 +124,8 @@ assert(websocket.TEXT ~= websocket.BINARY)
 assert(type(testing) == "userdata")
 assert(type(sqlite3) == "userdata")
 assert(type(json) == "userdata")
+assert(type(paths) == "userdata")
+assert(paths.basename(paths.join("tmp", "provider")) == "provider")
 assert(not testing.testing())
 assert(not testing.verbose())
 

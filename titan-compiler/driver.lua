@@ -11,6 +11,7 @@ local cprobe_cache = require "titan-compiler.cprobe_cache"
 local csemantics = require "titan-compiler.csemantics"
 local compiler_io = require "titan-compiler.io"
 local platform = require "titan-compiler.platform"
+local path = require "titan-compiler.path"
 local sourceinterface = require "titan-compiler.sourceinterface"
 local version = require "titan-compiler.version"
 local projectcache = require "titan-compiler.projectcache"
@@ -344,7 +345,7 @@ function driver.installed_paths(root)
         libtitan = root_join(titan_lib, "libtitan.a"),
         libbacktrace = root_join(root, "lib/libbacktrace.a"),
         liblua = root_join(root, platform.windows and
-            "lib/liblua-5.5.1.dll.a" or "lib/liblua.a"),
+            "lib/liblua55.a" or "lib/liblua.a"),
         titan_bin = titan_lib,
         lua_cpath = root_join(titan_lib, platform.windows and "?.dll" or "?.so"),
         test_source = root_join(root, "share/titan/" ..
@@ -1787,8 +1788,8 @@ local function run_dsymutil(output, verbose, stable_input_basename)
     -- staged-provider invocations from the output directory and pass the
     -- stable leaf name. Darwin ld records absolute N_OSO object paths, so
     -- changing dsymutil's working directory does not change object discovery.
-    local directory, basename = output:match("^(.*)/([^/]+)$")
-    if not directory or directory == "" then
+    local directory, basename = path.split(output)
+    if directory == "" or basename == "" then
         return run_argv({ "dsymutil", output }, verbose)
     end
     local previous, current_err = lfs.currentdir()
@@ -5734,8 +5735,7 @@ function driver.close_tableloader(loader)
 end
 
 -- Native publication can run in a fresh Lua process after the compiler has
--- already produced its objects (for example stdlib_installer.lua validating a
--- staged archive). Module loading deliberately performs no subprocess I/O, so
+-- already produced its objects. Module loading performs no subprocess I/O, so
 -- recover the platform through an explicit resolver strategy when no earlier
 -- compiler operation initialized it.
 function driver.shared_library_flags(context)
@@ -5877,7 +5877,10 @@ local function check_runtime(verbose)
 end
 
 function driver.installed_link_inputs(paths, is_darwin)
-    if platform.windows then return { paths.libtitan, paths.liblua, "-lbcrypt" } end
+    if platform.windows then
+        return { paths.libtitan, paths.libbacktrace, paths.liblua,
+            "-lbcrypt", "-static-libgcc" }
+    end
     local inputs = {
         paths.libtitan,
         paths.libbacktrace,
@@ -5895,8 +5898,9 @@ function driver.source_link_inputs(lua_source_path)
     if platform.windows then
         return {
             driver.TITAN_RUNTIME_PATH .. "libtitan.a",
-            lua_source_path .. "/../../lib/liblua-5.5.1.dll.a",
-            "-lbcrypt",
+            lua_source_path .. "/../../lib/libbacktrace.a",
+            lua_source_path .. "/../../lib/liblua55.a",
+            "-lbcrypt", "-static-libgcc",
         }
     end
     return {
@@ -6471,13 +6475,29 @@ local function replay_compile_output(filename, stream)
 end
 
 local function create_compile_log()
-    local called, path = pcall(os.tmpname)
+    local called, path, err
+    if platform.windows then
+        called, path, err = pcall(platform.native, "_win_tmpname")
+    else
+        called, path = pcall(os.tmpname)
+    end
     if not called then return nil, path end
-    if not path then return nil, "os.tmpname returned no path" end
+    if not path then return nil, err or "os.tmpname returned no path" end
     return path
 end
 
 local function create_compile_notification()
+    if platform.windows then
+        local batch, err = platform.native("_win_compile_new")
+        if not batch then return nil, err end
+        return {
+            batch = batch,
+            file = {
+                read = function() return platform.native("_win_compile_wait", batch) end,
+                close = function() return platform.native("_win_compile_close", batch) end,
+            },
+        }
+    end
     local path, path_err = create_compile_log()
     if not path then return nil, path_err end
     local removed, remove_err = protected_remove(path)
@@ -6526,12 +6546,15 @@ local function close_compile_notification(notification)
     elseif not closed then
         errors[#errors + 1] = "close: " .. tostring(close_err)
     end
-    local removed, remove_err = protected_remove(notification.path)
-    if not removed then
-        errors[#errors + 1] = "remove: " .. tostring(remove_err)
+    if notification.path then
+        local removed, remove_err = protected_remove(notification.path)
+        if not removed then
+            errors[#errors + 1] = "remove: " .. tostring(remove_err)
+        end
     end
     if #errors ~= 0 then
-        return nil, "failed to clean parallel compiler completion FIFO (" ..
+        return nil, "failed to clean parallel compiler completion " ..
+            (platform.windows and "batch (" or "FIFO (") ..
             table.concat(errors, "; ") .. ")"
     end
     return true
@@ -6551,7 +6574,13 @@ end
 
 local function launch_prepared_compile(
         prepared, verbose, notification, completion_index)
-    local command, command_err = command_argv(prepared.args)
+    local command, command_err, executable
+    if platform.windows then
+        command, executable = platform.windows_process_command(prepared.args)
+        if not command then command_err = executable end
+    else
+        command, command_err = command_argv(prepared.args)
+    end
     if not command then return nil, command_err end
 
     local stdout_path, stdout_err = create_compile_log()
@@ -6560,6 +6589,32 @@ local function launch_prepared_compile(
     if not stderr_path then
         protected_remove(stdout_path)
         return nil, stderr_err
+    end
+    if platform.windows then
+        if verbose then
+            local shown, show_err = show_parallel_command(command)
+            if not shown then
+                protected_remove(stdout_path)
+                protected_remove(stderr_path)
+                return nil, show_err
+            end
+        end
+        local called, launched, err = pcall(platform.native, "_win_compile_spawn",
+            notification.batch, completion_index, executable, command,
+            stdout_path, stderr_path)
+        if not called or not launched then
+            protected_remove(stdout_path)
+            protected_remove(stderr_path)
+            return nil, called and err or launched
+        end
+        return {
+            pipe = { close = function()
+                return platform.native("_win_compile_finish",
+                    notification.batch, completion_index)
+            end },
+            stdout_path = stdout_path,
+            stderr_path = stderr_path,
+        }
     end
     local quoted_stdout, quote_err = cdriver.shell_quote(stdout_path)
     if not quoted_stdout then
@@ -6700,7 +6755,8 @@ local function run_prepared_compiles(prepared, parallelism, verbose)
         return results
     end
 
-    local notification, notification_err = create_compile_notification()
+    local created, notification, notification_err = pcall(create_compile_notification)
+    if not created then notification_err, notification = notification, nil end
     if not notification then
         for index = 1, #prepared do
             results[index] = { err = notification_err }
@@ -6862,11 +6918,6 @@ function driver.compile_modules(requests, parallelism, verbose)
     assert(type(parallelism) == "number" and parallelism >= 1 and
         parallelism % 1 == 0, "parallelism must be a positive integer")
     validate_compile_requests(requests)
-
-    if platform.windows and parallelism > 1 then
-        if verbose then print("Windows generated-C compilation is serial") end
-        parallelism = 1
-    end
 
     local results = {}
     if parallelism == 1 then
@@ -8126,6 +8177,11 @@ function driver.compile_library_output(soname, libnames, link, verbose,
     local shared, shared_error = driver.shared_library_flags()
     if not shared then return nil, shared_error end
     append_argv(args, shared)
+    if platform.windows then
+        -- COFF and PE debug-directory timestamps must not change an otherwise
+        -- identical provider when an incremental build repeats its link.
+        append_argv(args, { "-Xlinker", "--no-insert-timestamp" })
+    end
     -- Darwin otherwise derives LC_ID_DYLIB from the unique staged `-o` path,
     -- while its debug map records volatile input-object modification times.
     -- Use the eventual public identity and reproducible-link mode so unchanged

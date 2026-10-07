@@ -1,7 +1,8 @@
+local temporary = require "spec.support.temporary"
 local h = require "spec.support.helpers"
 
 local function with_header(contents, body)
-    local path = os.tmpname() .. ".h"
+    local path = temporary.name(".h")
     local file = assert(io.open(path, "wb"))
     assert(file:write(contents))
     assert(file:close())

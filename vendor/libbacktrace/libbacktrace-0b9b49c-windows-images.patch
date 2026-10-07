@@ -1,0 +1,198 @@
+--- a/pecoff.c
++++ b/pecoff.c
+@@ -62,33 +62,6 @@
+ #endif
+ #endif
+ 
+-#if defined(_ARM_)
+-#define NTAPI
+-#else
+-#define NTAPI __stdcall
+-#endif
+-
+-/* This is a simplified (but binary compatible) version of what Microsoft
+-   defines in their documentation. */
+-struct dll_notification_data
+-{
+-  ULONG reserved;
+-  /* The name as UNICODE_STRING struct. */
+-  PVOID full_dll_name;
+-  PVOID base_dll_name;
+-  PVOID dll_base;
+-  ULONG size_of_image;
+-};
+-
+-#define LDR_DLL_NOTIFICATION_REASON_LOADED 1
+-
+-typedef LONG NTSTATUS;
+-typedef VOID (CALLBACK *LDR_DLL_NOTIFICATION)(ULONG,
+-					      struct dll_notification_data*,
+-					      PVOID);
+-typedef NTSTATUS (NTAPI *LDR_REGISTER_FUNCTION)(ULONG,
+-						LDR_DLL_NOTIFICATION, PVOID,
+-						PVOID*);
+ #endif
+ 
+ /* Coff file header.  */
+@@ -501,9 +474,22 @@
+       i += asym->number_of_aux_symbols;
+     }
+ 
+-  /* End of symbols marker.  */
++  /* Bound the last function by this image, not the whole address space.
++     Otherwise the executable's final symbol can hide a later DLL's symbols.  */
+   coff_sym->name = NULL;
+-  coff_sym->address = -1;
++  coff_sym->address = libbacktrace_add_base (0, base_address);
++  for (i = 0; i < sects_num; ++i)
++    {
++      uintptr_t size = sects[i].virtual_size;
++      uintptr_t end;
++
++      if (size < sects[i].size_of_raw_data)
++        size = sects[i].size_of_raw_data;
++      end = libbacktrace_add_base ((uintptr_t) sects[i].virtual_address + size,
++                                  base_address);
++      if (end > coff_sym->address)
++        coff_sym->address = end;
++    }
+ 
+   backtrace_qsort (coff_symbols, coff_symbol_count,
+ 		   sizeof (struct coff_symbol), coff_symbol_compare);
+@@ -854,7 +840,13 @@
+       if (sdata == NULL)
+ 	goto fail;
+ 
+-      if (!coff_initialize_syminfo (state, image_base, is_64,
++      /* COFF symbol values are RVAs; use the loaded address under ASLR.
++         DWARF values below instead need the preferred-to-loaded delta.  */
++      base_address = image_base;
++#ifdef HAVE_WINDOWS_H
++      base_address.m = module_handle;
++#endif
++      if (!coff_initialize_syminfo (state, base_address, is_64,
+ 				    sects, sects_num,
+ 				    syms_view.data, syms_size,
+ 				    str_view.data, str_size,
+@@ -954,52 +946,6 @@
+   return 0;
+ }
+ 
+-#ifdef HAVE_WINDOWS_H
+-struct dll_notification_context
+-{
+-  struct backtrace_state *state;
+-  backtrace_error_callback error_callback;
+-  void *data;
+-};
+-
+-static VOID CALLBACK
+-dll_notification (ULONG reason,
+-		  struct dll_notification_data *notification_data,
+-		  PVOID context)
+-{
+-  char module_name[MAX_PATH];
+-  int descriptor;
+-  struct dll_notification_context* dll_context =
+-    (struct dll_notification_context*) context;
+-  struct backtrace_state *state = dll_context->state;
+-  void *data = dll_context->data;
+-  backtrace_error_callback error_callback = dll_context->data;
+-  fileline fileline;
+-  int found_sym;
+-  int found_dwarf;
+-  HMODULE module_handle;
+-
+-  if (reason != LDR_DLL_NOTIFICATION_REASON_LOADED)
+-    return;
+-
+-  if (!GetModuleHandleExW ((GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS
+-			    | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT),
+-			   (wchar_t*) notification_data->dll_base,
+-			   &module_handle))
+-    return;
+-
+-  if (!GetModuleFileNameA ((HMODULE) module_handle, module_name, MAX_PATH - 1))
+-    return;
+-
+-  descriptor = backtrace_open (module_name, error_callback, data, NULL);
+-
+-  if (descriptor < 0)
+-    return;
+-
+-  coff_add (state, descriptor, error_callback, data, &fileline, &found_sym,
+-	    &found_dwarf, (uintptr_t) module_handle);
+-}
+-#endif /* defined(HAVE_WINDOWS_H) */
+ 
+ /* Initialize the backtrace data we need from an ELF executable.  At
+    the ELF level, all we need to do is find the debug info
+@@ -1019,12 +965,11 @@
+ #ifdef HAVE_TLHELP32_H
+   fileline module_fileline_fn;
+   int module_found_sym;
++  int module_found_dwarf;
+   HANDLE snapshot;
+ #endif
+ 
+ #ifdef HAVE_WINDOWS_H
+-  HMODULE nt_dll_handle;
+-
+   module_handle = (uintptr_t) GetModuleHandle (NULL);
+ #endif
+ 
+@@ -1061,9 +1006,13 @@
+ 	  if (descriptor < 0)
+ 	    continue;
+ 
+-	  coff_add (state, descriptor, error_callback, data,
+-		    &module_fileline_fn, &module_found_sym, &found_dwarf,
+-		    module_handle);
++	  ret = coff_add (state, descriptor, error_callback, data,
++			  &module_fileline_fn, &module_found_sym,
++			  &module_found_dwarf, module_handle);
++	  /* The executable may have no DWARF even when a loaded DLL does.
++	     Preserve a usable dispatcher once any image supplies debug data.  */
++	  if (ret && module_found_dwarf)
++	    coff_fileline_fn = module_fileline_fn;
+ 	  if (module_found_sym)
+ 	    found_sym = 1;
+ 	}
+@@ -1072,34 +1021,9 @@
+     }
+ #endif
+ 
+-#ifdef HAVE_WINDOWS_H
+-  nt_dll_handle = GetModuleHandleW (L"ntdll.dll");
+-  if (nt_dll_handle)
+-    {
+-      LDR_REGISTER_FUNCTION register_func;
+-      const char register_name[] = "LdrRegisterDllNotification";
+-      register_func = (void*) GetProcAddress (nt_dll_handle,
+-					      register_name);
+-
+-      if (register_func)
+-	{
+-	  PVOID cookie;
+-	  struct dll_notification_context *context
+-	    = backtrace_alloc (state,
+-			       sizeof (struct dll_notification_context),
+-			       error_callback, data);
+-
+-	  if (context)
+-	    {
+-	      context->state = state;
+-	      context->data = data;
+-	      context->error_callback = error_callback;
+-
+-	      register_func (0, &dll_notification, context, &cookie);
+-	    }
+-	}
+-    }
+-#endif /* defined(HAVE_WINDOWS_H) */
++  /* Titan invalidates its shared state after ordinary provider loads.
++     Do not parse images from loader notifications: those callbacks cannot
++     safely call Win32/CRT functions and must not retain transient DATA.  */
+ 
+   if (!state->threaded)
+     {

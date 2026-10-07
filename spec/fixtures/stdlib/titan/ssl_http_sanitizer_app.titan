@@ -27,7 +27,7 @@ local function exercise(certificate: string, private_key: string)
       do (server_value as http.Server):close() end
     end
   end
-  local port = 20000 + system.pid() % 30000
+  local port = 20000 + system.pid() % 5000
   local server: http.Server? = nil
   for _ = 1, 100 do
     do

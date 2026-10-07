@@ -1,3 +1,4 @@
+local temporary = require "spec.support.temporary"
 -- Phase-A checker coverage for flexible-return schema propagation. Result-list
 -- adjustment and code generation are exercised by later feature phases.
 local checker = require 'titan-compiler.checker'
@@ -8,7 +9,7 @@ local run_checker = h.run_checker
 local check_errs = h.check_errs
 
 local function with_header(contents, fn)
-    local header = os.tmpname() .. ".h"
+    local header = temporary.name(".h")
     local file = assert(io.open(header, "w"))
     file:write(contents)
     file:close()

@@ -1,3 +1,4 @@
+local temporary = require "spec.support.temporary"
 local checker = require "titan-compiler.checker"
 local cprobe = require "titan-compiler.cprobe"
 local csemantics = require "titan-compiler.csemantics"
@@ -51,7 +52,7 @@ local function test_process_options(service)
 end
 
 local function with_header(contents, fn)
-    local header = os.tmpname() .. ".h"
+    local header = temporary.name(".h")
     local file = assert(io.open(header, "w"))
     assert(file:write(contents))
     assert(file:close())

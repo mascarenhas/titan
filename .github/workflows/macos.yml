@@ -23,8 +23,6 @@ jobs:
       # Standard macOS hosted runners expose three CPUs.
       MAKEFLAGS: "-j3"
       TITAN_JOBS: "3"
-      # Keep the one complete cross-platform gate on the same fallback path.
-      READLINE_MODE: bundled
       OPENSSL_MODE: bundled
       LIBUV_VERSION: "1.53.0"
       # Bump when any CMake option that affects the cached archive changes.
@@ -45,8 +43,7 @@ jobs:
         with:
           submodules: true
 
-      # As on Linux, omit the installed private Readline root so the one
-      # pre-merge macOS run validates a clean fallback build.
+      # Reuse dependency rocks; rebuild Lua from the pinned source submodule.
       - name: Cache standalone-prefix LuaRocks dependencies
         uses: actions/cache@v5
         with:
@@ -61,9 +58,9 @@ jobs:
             .lua/lib/lua/5.5
             .lua/lib/luarocks
             .lua/share/lua/5.5
-          key: macos-latest-${{ runner.arch }}-${{ env.TITAN_BUILD_PROFILE }}-prefix-system-tree-v2-abi-${{ env.TITAN_ABI_VERSION }}-rocks-3.13.0-${{ hashFiles('titan-0.6.0-1.rockspec') }}
+          key: macos-latest-${{ runner.arch }}-${{ env.TITAN_BUILD_PROFILE }}-prefix-stock-luarocks-v3-abi-${{ env.TITAN_ABI_VERSION }}-rocks-3.13.0-${{ hashFiles('titan-0.6.0-1.rockspec') }}
           restore-keys: |
-            macos-latest-${{ runner.arch }}-${{ env.TITAN_BUILD_PROFILE }}-prefix-system-tree-v2-abi-${{ env.TITAN_ABI_VERSION }}-rocks-3.13.0-
+            macos-latest-${{ runner.arch }}-${{ env.TITAN_BUILD_PROFILE }}-prefix-stock-luarocks-v3-abi-${{ env.TITAN_ABI_VERSION }}-rocks-3.13.0-
 
       - name: Cache bundled libuv source and static build
         uses: actions/cache@v5
@@ -110,17 +107,14 @@ jobs:
             macos-latest-${{ runner.arch }}-${{ env.TITAN_BUILD_PROFILE }}-openssl-${{ env.OPENSSL_VERSION }}-${{ env.OPENSSL_SHA256 }}-
 
       - name: Install system dependencies (macOS)
-        run: brew install cmake openssl@3 pkgconf
+        run: brew install cmake readline openssl@3 pkgconf
 
       - name: Build the bundled Lua 5.5 source tree
         run: |
-          make lua LUA_PLATFORM=macosx
-          grep -qx 'provider=bundled' \
-            "lua-5.5.1/.titan-readline-8.3-p3.config"
-          test -f \
-            "readline-build/.titan-readline-8.3-p3/lib/libreadline.a"
-          cmp LICENSES/readline-LICENSE \
-            "readline-build/.titan-readline-8.3-p3/share/licenses/COPYING"
+          readline_prefix="$(brew --prefix readline)"
+          make lua LUA_PLATFORM=macosx \
+            LUA_MYCFLAGS="-fPIC -O2 -fno-lto -I$readline_prefix/include" \
+            LUA_MYLDFLAGS="-O2 -fno-lto -L$readline_prefix/lib"
 
       # Every generated module and executable links the separate
       # ./libbacktrace/.libs/libbacktrace.a (unified stack traces). CI

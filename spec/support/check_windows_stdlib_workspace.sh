@@ -12,7 +12,8 @@ trial=$(mktemp -d "$work_parent/stdlib-workspace-guard.XXXXXX")
 trial=$(cd "$trial" && pwd)
 seed="$trial/owned/sdk"
 mkdir -p "$seed/bin" "$seed/lib/titan/0.6" "$seed/share/lua/5.5/titan" "$seed/etc/titan" "$seed/nested"
-for path in bin/titanc.exe bin/lua.exe lib/titan/0.6/titan.dll share/lua/5.5/titan/sqlite3.lua etc/titan/lua-5.5.1-windows.config; do
+mkdir -p "$seed/lib/luarocks/rocks-5.5/titan/0.6.0-1/bin"
+for path in lib/luarocks/rocks-5.5/titan/0.6.0-1/bin/titanc bin/lua.exe lib/titan/0.6/titan.dll share/lua/5.5/titan/sqlite3.lua; do
   printf 'guard fixture %s\n' "$path" > "$seed/$path"
 done
 printf '%s\n' "${TITAN_BUILD_PROFILE-validation}" > "$seed/etc/titan/build-profile"
@@ -24,7 +25,7 @@ manifest() { (cd "$trial"; find owned -type f -print0 | sort -z | xargs -0 sha25
 manifest > "$trial/before.sha256"
 reject() {
   local label=$1 work=$2 sdk=$3
-  if bash "$source_root/scripts/windows_stdlib_tests.sh" build "$work" "$sdk" > "$trial/$label.log" 2>&1; then
+  if bash "$source_root/spec/support/windows_stdlib_tests.sh" build "$work" "$sdk" > "$trial/$label.log" 2>&1; then
     echo "unexpected acceptance: $label" >&2; exit 1
   fi
   grep -F 'must be separate directory trees' "$trial/$label.log" >/dev/null

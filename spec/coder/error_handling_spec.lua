@@ -164,6 +164,7 @@ describe("raise <exp>", function()
             ok, payload = pcall(test.reraiser, payload)
             assert(not ok and payload == "body failed")
             local unpinned = titan.backtrace()
+            assert(unpinned ~= original, "fresh raise kept the original trace")
             assert(unpinned:find("in test.reraiser", 1, true),
                    "fresh raise did not regenerate at the wrapper\n" .. tostring(unpinned))
             assert(not unpinned:find("in test.fail", 1, true),
@@ -1409,6 +1410,7 @@ describe("catch", function()
             ok, err = pcall(test.fresh)
             assert(not ok and err == "fresh")
             local new = titan.backtrace()
+            assert(new ~= old, "re-raise pin leaked into next fresh error")
             assert(new:find("in test.fresh", 1, true),
                    "fresh error after re-raise did not regenerate\n" .. tostring(new))
             assert(not new:find("in test.deep", 1, true),

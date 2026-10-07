@@ -1,3 +1,4 @@
+local temporary = require "spec.support.temporary"
 local h = require "spec.support.helpers"
 local types = require "titan-compiler.types"
 
@@ -8,7 +9,7 @@ local function run_checker(code)
 end
 
 local function with_header(contents, fn)
-    local header = os.tmpname() .. ".h"
+    local header = temporary.name(".h")
     local file = assert(io.open(header, "w"))
     assert(file:write(contents))
     assert(file:close())
@@ -21,8 +22,8 @@ local function with_header(contents, fn)
 end
 
 local function with_two_headers(first_contents, second_contents, fn)
-    local first = os.tmpname() .. ".h"
-    local second = os.tmpname() .. ".h"
+    local first = temporary.name(".h")
+    local second = temporary.name(".h")
     local first_file = assert(io.open(first, "w"))
     assert(first_file:write(first_contents))
     assert(first_file:close())

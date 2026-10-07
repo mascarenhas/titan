@@ -1,3 +1,4 @@
+local temporary = require "spec.support.temporary"
 local h = require "spec.support.helpers"
 local types = require "titan-compiler.types"
 
@@ -92,7 +93,7 @@ describe("simplified grammar semantic boundaries", function()
     end)
 
     it("selects fixed arrays from target-evaluated integer macros", function()
-        local path = os.tmpname()
+        local path = temporary.name()
         local file = assert(io.open(path, "w"))
         file:write([[
             #define COUNT (2U + 3U)

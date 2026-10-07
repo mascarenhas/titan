@@ -1,7 +1,14 @@
+local temporary = require "spec.support.temporary"
 local assert = require "luassert"
 local lfs = require "lfs"
+local platform = require "titan-compiler.platform"
 local publication = require "titan-compiler.windows_publication"
 local util = require "titan-compiler.util"
+
+local function replace(from, to)
+    if platform.windows then return platform.native("_win_replace", from, to) end
+    return os.rename(from, to)
+end
 
 describe("Windows file publication transaction", function()
     local root, fs, source, shim, image
@@ -25,12 +32,13 @@ describe("Windows file publication transaction", function()
         assert.same({ "module.lua", "provider.dll", "source.dll" }, filenames())
     end
     before_each(function()
-        root = os.tmpname(); assert(os.remove(root)); assert(lfs.mkdir(root))
+        root = temporary.name(); assert(os.remove(root)); assert(lfs.mkdir(root))
         source, shim, image = root .. "/source.dll", root .. "/module.lua", root .. "/provider.dll"
         write(source, "new DLL"); write(shim, "old shim"); write(image, "old DLL")
         local sequence = 0
         fs = {
             stat = function(path)
+                if platform.windows then return platform.native("_win_stat", path, false) end
                 local attr, err, code = lfs.symlinkattributes(path)
                 if not attr then return nil, err, code end
                 return { kind = attr.mode, device = attr.dev, inode = attr.ino }
@@ -41,7 +49,7 @@ describe("Windows file publication transaction", function()
                 write(reserved, "")
                 return reserved
             end,
-            replace = os.rename,
+            replace = replace,
             remove = os.remove,
         }
     end)
@@ -59,6 +67,60 @@ describe("Windows file publication transaction", function()
             return true
         end }))
         assert.equal("new DLL", read(image))
+    end)
+
+    it("preserves unchanged files and mtimes without replacing a mapped DLL", function()
+        write(source, "old DLL")
+        local old = os.time() - 60
+        assert(lfs.touch(shim, old, old))
+        assert(lfs.touch(image, old, old))
+        fs.replace = function() return nil, "DLL is in use" end
+        assert(publication.publish({
+            { destination = shim, contents = "old shim" },
+            { destination = image, source = source },
+        }, fs, { after_commit = function()
+            error("unchanged files must not be committed")
+        end }))
+        assert.equal(old, lfs.attributes(shim, "modification"))
+        assert.equal(old, lfs.attributes(image, "modification"))
+        unchanged()
+    end)
+
+    it("publishes a changed companion while preserving an identical mapped DLL", function()
+        write(source, "old DLL")
+        local old = os.time() - 60
+        assert(lfs.touch(image, old, old))
+        fs.replace = function(from, to)
+            if to == image then return nil, "DLL is in use" end
+            return replace(from, to)
+        end
+        local commits = {}
+        assert(publication.publish(entries(), fs, { after_commit = function(index)
+            commits[#commits + 1] = index
+            return true
+        end }))
+        assert.same({ 1 }, commits)
+        assert.equal("new shim", read(shim))
+        assert.equal("old DLL", read(image))
+        assert.equal(old, lfs.attributes(image, "modification"))
+        assert.same({ "module.lua", "provider.dll", "source.dll" }, filenames())
+    end)
+
+    it("retains an unchanged companion when a changed DLL cannot be replaced", function()
+        local old = os.time() - 60
+        assert(lfs.touch(shim, old, old))
+        fs.replace = function(from, to)
+            assert.equal(image, to)
+            return nil, "DLL is in use"
+        end
+        local ok, err = publication.publish({
+            { destination = shim, contents = "old shim" },
+            { destination = image, source = source },
+        }, fs)
+        assert.is_nil(ok)
+        assert.matches("DLL is in use", err, 1, true)
+        assert.equal(old, lfs.attributes(shim, "modification"))
+        unchanged()
     end)
 
     it("restores exact previous bytes after a caught commit failure", function()
@@ -148,7 +210,7 @@ describe("Windows file publication transaction", function()
                 assert.is_nil(lfs.symlinkattributes(shim))
                 return nil, "DLL is in use"
             end
-            return os.rename(from, to)
+            return replace(from, to)
         end
         local ok, err = publication.publish(plans, fs)
         assert.is_nil(ok)
@@ -163,7 +225,7 @@ describe("Windows file publication transaction", function()
                 assert.equal("new shim", read(shim))
                 return nil, "DLL is in use"
             end
-            return os.rename(from, to)
+            return replace(from, to)
         end
         local ok, err = publication.publish(entries(), fs)
         assert.is_nil(ok)
@@ -176,7 +238,7 @@ describe("Windows file publication transaction", function()
     it("rolls back companions when the existing DLL cannot be replaced", function()
         fs.replace = function(from, to)
             if to == image then return nil, "DLL is in use" end
-            return os.rename(from, to)
+            return replace(from, to)
         end
         local ok, err = publication.publish(entries(), fs)
         assert.is_nil(ok); assert.matches("DLL is in use", err, 1, true)
@@ -186,7 +248,7 @@ describe("Windows file publication transaction", function()
     it("reports cleanup failure for an unused backup copy", function()
         fs.replace = function(from, to)
             if to == image then return nil, "DLL is in use" end
-            return os.rename(from, to)
+            return replace(from, to)
         end
         fs.remove = function(path)
             if path == image .. ".reserved.4" then
@@ -227,7 +289,7 @@ describe("Windows file publication transaction", function()
             if to == shim and from:match("reserved.3$") then
                 return nil, "cannot restore previous shim"
             end
-            return os.rename(from, to)
+            return replace(from, to)
         end
         local ok, err = publication.publish(entries(), fs)
         assert.is_nil(ok)

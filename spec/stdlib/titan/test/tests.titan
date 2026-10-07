@@ -101,9 +101,6 @@ end
 local function assert_cleanup_trace(context: test.Context, trace: string)
   test.assert(#trace > 0, "cleanup failure omitted its traceback")
   context:run("symbolic_frame", function (_context: test.Context)
-    if common.is_windows() then
-      test.skip("unsupported: native Windows tracebacks retain raw addresses without Titan symbols")
-    end
     test.assert(common.contains(trace, "cleanup_trace_origin"),
                 "cleanup failure omitted its original frame")
   end)

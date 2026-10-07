@@ -1,14 +1,21 @@
 local assert = require "luassert"
 local cdriver = require "c-parser.cdriver"
+local compiler_io = require "titan-compiler.io"
 local coder_core = require "titan-compiler.coder.core"
 local coder_names = require "titan-compiler.coder.names"
 local driver = require "titan-compiler.driver"
 local lfs = require "lfs"
+local platform = require "titan-compiler.platform"
+local path = require "titan-compiler.path"
 local staticmetadata = require "titan-compiler.staticmetadata"
 
-local REPO = lfs.currentdir()
+local REPO = assert(lfs.currentdir())
+if platform.windows then REPO = assert(platform.path.normalize(REPO)) end
 local PREFIX = require("spec.support.installed_prefix").active()
-local LUA = PREFIX .. "/bin/lua"
+local SHARED_SUFFIX = platform.windows and ".dll" or ".so"
+local LUA = PREFIX .. "/bin/lua" .. (platform.windows and ".exe" or "")
+local INSTALLED_TITANC = PREFIX .. (platform.windows and
+    "/lib/luarocks/rocks-5.5/titan/0.6.0-1/bin/titanc" or "/bin/titanc")
 local LUA_INCLUDE = PREFIX .. "/include"
 local USE_CHECKOUT_COMPILER =
     os.getenv("TITAN_TEST_USE_CHECKOUT_COMPILER") == "1"
@@ -26,13 +33,51 @@ local function quote_argv(argv)
 end
 
 local function run(argv, cwd)
-    local previous = lfs.currentdir()
+    local command = { table.unpack(argv) }
+    local scripts = {}
+    if platform.windows then
+        if command[1] == "env" then command[1] = "env.exe" end
+        for index = 1, #command - 1 do
+            if command[index] == "-e" and command[index + 1]:find("[\r\n]") then
+                local script = assert(compiler_io.new_sync():tmpname())
+                local file = assert(io.open(script, "wb"))
+                assert(file:write(command[index + 1]))
+                assert(file:close())
+                scripts[#scripts + 1] = script
+                command[index] = script
+                table.remove(command, index + 1)
+                break
+            end
+        end
+    end
+    local previous = assert(lfs.currentdir())
     assert.truthy(lfs.chdir(cwd))
-    local pipe = assert(io.popen(quote_argv(argv) .. " 2>&1", "r"))
-    local output = pipe:read("*a")
-    local ok, why, code = pipe:close()
+    local called, result = pcall(function()
+        return compiler_io.new_sync():run(command)
+    end)
     assert.truthy(lfs.chdir(previous))
-    return ok == true, output, why, code
+    for _, script in ipairs(scripts) do os.remove(script) end
+    assert.truthy(called, result)
+    local output = result.output or result.diagnostic or ""
+    if platform.windows then
+        output = output:gsub("\r\n", "\n")
+        output = output:gsub('%^"(.-)%^"', function(word)
+            return assert(cdriver.shell_quote((word:gsub("%^(.)", "%1"))))
+        end)
+    end
+    return result.started and result.ok, output, result.why, result.status
+end
+
+local function temporary_workspace()
+    local path = assert(compiler_io.new_sync():tmpname())
+    assert.truthy(os.remove(path))
+    assert.truthy(lfs.mkdir(path))
+    if platform.windows then path = assert(platform.path.normalize(path)) end
+    return path
+end
+
+local function shared_path(workspace, stem)
+    return workspace .. "/" .. stem .. SHARED_SUFFIX
 end
 
 local function make_directory(path)
@@ -112,7 +157,8 @@ local function compiler_argv(workspace, source_root, ...)
         "TITAN_PATH=",
     }
     if PREFIX then
-        table.insert(argv, "PATH=" .. PREFIX .. "/bin:" ..
+        table.insert(argv, "PATH=" .. PREFIX .. "/bin" ..
+            (platform.windows and ";" or ":") ..
             (os.getenv("PATH") or "/usr/bin:/bin"))
     end
 
@@ -120,14 +166,15 @@ local function compiler_argv(workspace, source_root, ...)
     -- prefix's next `luarocks make`; normal `luarocks test` continues to prove
     -- the installed compiler snapshot.
     local installed = not USE_CHECKOUT_COMPILER and
-        PREFIX and exists(PREFIX .. "/bin/titanc")
+        PREFIX and exists(INSTALLED_TITANC)
     if installed then
-        table.insert(argv, PREFIX .. "/bin/titanc")
+        if platform.windows then table.insert(argv, LUA) end
+        table.insert(argv, INSTALLED_TITANC)
     else
         assert.truthy(PREFIX,
             "set PREFIX or TITAN_TEST_PREFIX for native compiler tests")
         table.insert(argv, "TITAN_ROCKS_ROOT=" .. PREFIX)
-        table.insert(argv, "LUA_CPATH=" .. REPO .. "/?.so;;")
+        table.insert(argv, "LUA_CPATH=" .. REPO .. "/?" .. SHARED_SUFFIX .. ";;")
         table.insert(argv, LUA)
         table.insert(argv, "-e")
         table.insert(argv, string.format(
@@ -150,7 +197,7 @@ local function compile_with_environment(
         workspace, source_root, environment, ...)
     local argv = compiler_argv(workspace, source_root, ...)
     local command_index
-    local installed_titanc = PREFIX and (PREFIX .. "/bin/titanc")
+    local installed_titanc = INSTALLED_TITANC
     for index, argument in ipairs(argv) do
         if argument == installed_titanc or argument == LUA then
             command_index = index
@@ -176,9 +223,9 @@ local function run_lua(workspace, code)
         "-u", "LUA_PATH_5_5", "-u", "LUA_CPATH_5_5",
         LUA, "-e", string.format([[
 package.path = %q .. "/?.lua;" .. package.path
-package.cpath = %q .. "/?.so;" .. %q .. "/?.so;" .. package.cpath
+package.cpath = %q .. "/?" .. %q .. ";" .. %q .. "/?" .. %q .. ";" .. package.cpath
 %s
-]], workspace, workspace, REPO, code),
+]], workspace, workspace, SHARED_SUFFIX, REPO, SHARED_SUFFIX, code),
     }, workspace)
 end
 
@@ -279,12 +326,45 @@ local function normalize_regular_archive_header_noise(bytes)
 end
 
 local function native_symbols(workspace, filename)
-    local ok, output = run({ "nm", "-g", filename }, workspace)
+    local ok, output = run({ platform.windows and "llvm-nm.exe" or "nm", "-g", filename }, workspace)
     assert.truthy(ok, output)
     return output
 end
 
+local function native_support_object(workspace)
+    if not platform.windows then return REPO .. "/titan-runtime/ltitanlib.o" end
+    local object = path.join(workspace, "ltitanlib.o")
+    local argv = { "env", "CCACHE_DISABLE=1" }
+    for _, word in ipairs(configured_words(driver.CC)) do
+        argv[#argv + 1] = word
+    end
+    for _, flags in ipairs({ driver.EXTRA_CPPFLAGS, driver.EXTRA_CFLAGS }) do
+        for _, word in ipairs(flags) do argv[#argv + 1] = word end
+    end
+    for _, word in ipairs({
+        "-std=c99", "-fPIC", "-I", LUA_INCLUDE,
+        "-I", path.join(PREFIX, "src", "lua-5.5.1"),
+        "-c", path.join(REPO, "titan-runtime", "ltitanlib.c"),
+        "-o", object,
+    }) do
+        argv[#argv + 1] = word
+    end
+    local compiled, output = run(argv, workspace)
+    assert.truthy(compiled, output)
+    return object
+end
+
 local function run_program(workspace, relative)
+    if platform.windows then
+        local logical = relative:gsub("/", ".")
+        relative = assert(driver.windows_program_paths(logical)).executable
+        return run({ "env.exe",
+            "MSYS2_ENV_CONV_EXCL=TITAN_PATH_0_6",
+            "PATH=" .. PREFIX .. "/bin;" .. (os.getenv("PATH") or ""),
+            "TITAN_PATH_0_6=" .. workspace .. "/lib/titan/0.6;" ..
+                workspace .. ";" .. PREFIX .. "/lib/titan/0.6",
+            workspace .. "/" .. relative }, workspace)
+    end
     return run({ workspace .. "/" .. relative }, workspace)
 end
 
@@ -299,9 +379,34 @@ end
 
 local function assert_provider_pair(workspace, provider, module_names,
                                     validate_archive_protocols)
-    local dso = workspace .. "/" .. provider .. ".so"
+    local dso = shared_path(workspace, provider)
     local archive_path = workspace .. "/" .. provider .. ".a"
     assert.equal("file", lfs.attributes(dso, "mode"))
+    if platform.windows then
+        assert.is_nil(lfs.attributes(archive_path, "mode"))
+        local names = {}
+        for _, name in ipairs(module_names) do names[#names + 1] = string.format("%q", name) end
+        -- A checked provider remains mapped for a process's lifetime on
+        -- Windows. This child owns metadata reads, so later cases can rebuild
+        -- the same fixture without overwriting a mapped DLL in Busted.
+        local valid, output = run_lua(workspace, string.format([[
+local driver = require "titan-compiler.driver"
+local names = { %s }
+local entries = assert(driver.library_interface_entries(%q, names))
+assert(driver.validate_library_image(%q, names))
+local keys = {}
+for name in pairs(entries) do keys[#keys + 1] = name end
+table.sort(keys)
+for _, name in ipairs(keys) do print(name) end
+]], table.concat(names, ", "), dso, dso))
+        assert.truthy(valid, output)
+        local keys = {}
+        for name in output:gmatch("[^\r\n]+") do keys[#keys + 1] = name end
+        local expected = { table.unpack(module_names) }
+        table.sort(expected)
+        assert.same(expected, keys)
+        return { key_order = keys }
+    end
     assert.equal("file", lfs.attributes(archive_path, "mode"))
 
     local archive, archive_err =
@@ -316,7 +421,7 @@ local function assert_provider_pair(workspace, provider, module_names,
     assert.truthy(driver.validate_library_image(dso, module_names))
 
     if validate_archive_protocols then
-        local image = workspace .. "/archive-protocol-validation.so"
+        local image = shared_path(workspace, "archive-protocol-validation")
         local linked, link_term, link_code =
             driver.compile_archive_validation_image(
                 image, archive_path, nil, false)
@@ -344,9 +449,7 @@ describe("multiple logical modules through one public shared library", function(
     local verbose_output
 
     setup(function()
-        workspace = os.tmpname()
-        assert.truthy(os.remove(workspace))
-        assert.truthy(lfs.mkdir(workspace))
+        workspace = temporary_workspace()
         source_root = workspace .. "/source"
         make_directory(source_root .. "/pkg")
 
@@ -411,7 +514,7 @@ end
         if workspace then remove_tree(workspace) end
     end)
 
-    it("publishes one paired provider and emits one shim per logical source module",
+    it("publishes one physical provider and emits one shim per logical source module",
        function()
         local archive = assert_provider_pair(workspace, "pkg", {
             "pkg.left", "pkg.right", "pkg.shared",
@@ -427,7 +530,7 @@ end
             assert.equal("file", lfs.attributes(
                 workspace .. "/pkg/" .. name .. ".lua", "mode"))
             assert.is_nil(lfs.attributes(
-                workspace .. "/pkg/" .. name .. ".so", "mode"))
+                workspace .. "/pkg/" .. name .. SHARED_SUFFIX, "mode"))
 
             local shim = read_file(workspace .. "/pkg/" .. name .. ".lua")
             assert.equal("-- Generated by titanc; do not edit.",
@@ -444,7 +547,7 @@ end
                 table.insert(link_lines, line)
             end
         end
-        assert.equal(2, #link_lines, verbose_output)
+        assert.equal(platform.windows and 1 or 2, #link_lines, verbose_output)
         local provider_link
         local archive_validation_link
         for _, line in ipairs(link_lines) do
@@ -455,7 +558,7 @@ end
             end
         end
         assert.truthy(provider_link, verbose_output)
-        assert.truthy(archive_validation_link, verbose_output)
+        if not platform.windows then assert.truthy(archive_validation_link, verbose_output) end
         if driver.IS_DARWIN then
             assert.truthy(provider_link:find(
                 "'-Xlinker' '-reproducible' '-Xlinker' " ..
@@ -482,7 +585,7 @@ end
         if driver.IS_DARWIN then
             assert.truthy(archive_validation_link:find(
                 "'-force_load'", 1, true), archive_validation_link)
-        else
+        elseif not platform.windows then
             assert.truthy(archive_validation_link:find(
                 "'-Wl,--whole-archive'", 1, true), archive_validation_link)
             assert.truthy(archive_validation_link:find(
@@ -498,6 +601,10 @@ end
 
     it("rebuilds deterministic archive bytes when configured tools support D",
        function()
+        if platform.windows then
+            pending("Titan static provider archives and deterministic AR/RANLIB flags are unsupported on Windows")
+            return
+        end
         local before = read_file(workspace .. "/pkg.a")
         local ok, output, why, code = compile(
             workspace, source_root, "-v",
@@ -515,13 +622,14 @@ end
         end
     end)
 
-    it("preserves both provider mtimes on an unchanged warm rerun", function()
-        local dso = workspace .. "/pkg.so"
+    it("preserves provider mtimes on an unchanged warm rerun", function()
+        local dso = shared_path(workspace, "pkg")
         local archive = workspace .. "/pkg.a"
         local dso_bytes = read_file(dso)
-        local archive_bytes = read_file(archive)
+        local archive_bytes = not platform.windows and read_file(archive) or nil
         local dso_mtime = assert(lfs.attributes(dso, "modification"))
-        local archive_mtime = assert(lfs.attributes(archive, "modification"))
+        local archive_mtime = not platform.windows and
+            assert(lfs.attributes(archive, "modification")) or nil
         local waited, wait_output = run({ "sleep", "2" }, workspace)
         assert.truthy(waited, wait_output)
 
@@ -531,7 +639,7 @@ end
         assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
             tostring(code) .. ")")
         assert.equal(dso_bytes, read_file(dso))
-        assert.equal(archive_bytes, read_file(archive))
+        if not platform.windows then assert.equal(archive_bytes, read_file(archive)) end
         assert.same({
             dso = dso_mtime,
             archive = archive_mtime,
@@ -543,7 +651,11 @@ end
 
     it("preserves a nondeterministic ordinary archive on a warm rerun",
        function()
-        local dso = workspace .. "/pkg.so"
+        if platform.windows then
+            pending("Unix paired static-provider archive rebuilding with AR/RANLIB shell wrappers")
+            return
+        end
+        local dso = shared_path(workspace, "pkg")
         local archive = workspace .. "/pkg.a"
         local counter = workspace .. "/ordinary-ranlib-count"
         local ar_log = workspace .. "/ordinary-ar-log"
@@ -708,7 +820,11 @@ printf '%%s\n' "$count" > %s
 
     it("keeps the published pair when configured RANLIB always fails",
        function()
-        local dso = workspace .. "/pkg.so"
+        if platform.windows then
+            pending("Unix paired DSO/archive publication and static-provider RANLIB failure semantics")
+            return
+        end
+        local dso = shared_path(workspace, "pkg")
         local archive = workspace .. "/pkg.a"
         local dso_bytes = read_file(dso)
         local archive_bytes = read_file(archive)
@@ -739,6 +855,10 @@ printf '%%s\n' "$count" > %s
 
     it("derives active-target mismatch from TITAN_EXTRA_CFLAGS alone",
        function()
+        if platform.windows then
+            pending("Static provider target fingerprints with ELF/Mach-O object mutation")
+            return
+        end
         local patcher = workspace .. "/patch-target.lua"
         write_file(patcher, [[
 local path = assert(arg[1])
@@ -883,13 +1003,13 @@ end
         -- Each logical import retains the selected physical provider as its
         -- fallback. Existing-state initialization does not repeat native wiring.
         assert.equal(1, count_plain(generated,
-            'titan_module_provider(L, "pkg.left", "pkg.so")'))
+            'titan_module_provider(L, "pkg.left", "pkg' .. SHARED_SUFFIX .. '")'))
         assert.equal(1, count_plain(generated,
-            'titan_module_provider(L, "pkg.right", "pkg.so")'))
+            'titan_module_provider(L, "pkg.right", "pkg' .. SHARED_SUFFIX .. '")'))
         assert.falsy(generated:find(
-            'titan_module_provider(L, "pkg.left", "pkg/left.so")', 1, true))
+            'titan_module_provider(L, "pkg.left", "pkg/left' .. SHARED_SUFFIX .. '")', 1, true))
         assert.falsy(generated:find(
-            'titan_module_provider(L, "pkg.right", "pkg/right.so")', 1, true))
+            'titan_module_provider(L, "pkg.right", "pkg/right' .. SHARED_SUFFIX .. '")', 1, true))
         assert.truthy(generated:find('"pkg_left_abi"', 1, true), generated)
         assert.truthy(generated:find('"pkg_right_abi"', 1, true), generated)
         assert.truthy(generated:find('"pkg_left_compatibility"', 1, true), generated)
@@ -933,9 +1053,7 @@ describe("dense arrays through one shared prefix provider", function()
     local source_root
 
     before_each(function()
-        workspace = os.tmpname()
-        assert.truthy(os.remove(workspace))
-        assert.truthy(lfs.mkdir(workspace))
+        workspace = temporary_workspace()
         source_root = workspace .. "/source"
         make_directory(source_root .. "/arraypkg")
 
@@ -977,9 +1095,9 @@ end
             "arraypkg.left", "arraypkg.shared",
         }, true)
         assert.is_nil(lfs.attributes(
-            workspace .. "/arraypkg/left.so", "mode"))
+            shared_path(workspace, "arraypkg/left"), "mode"))
         assert.is_nil(lfs.attributes(
-            workspace .. "/arraypkg/shared.so", "mode"))
+            shared_path(workspace, "arraypkg/shared"), "mode"))
 
         local ok, output = run_lua(workspace, [[
 local left = require "arraypkg.left"
@@ -1000,9 +1118,7 @@ describe("native trace names across one multi-module image", function()
     local source_root
 
     before_each(function()
-        workspace = os.tmpname()
-        assert.truthy(os.remove(workspace))
-        assert.truthy(lfs.mkdir(workspace))
+        workspace = temporary_workspace()
         source_root = workspace .. "/source"
 
         write_file(source_root .. "/warmup.titan", [[
@@ -1045,9 +1161,9 @@ end
         assert_provider_pair(workspace, "trace", {
             "trace.left", "trace.right",
         })
-        assert.is_nil(lfs.attributes(workspace .. "/trace/left.so", "mode"))
+        assert.is_nil(lfs.attributes(shared_path(workspace, "trace/left"), "mode"))
         assert.is_nil(lfs.attributes(workspace .. "/trace/left.a", "mode"))
-        assert.is_nil(lfs.attributes(workspace .. "/trace/right.so", "mode"))
+        assert.is_nil(lfs.attributes(shared_path(workspace, "trace/right"), "mode"))
         assert.is_nil(lfs.attributes(workspace .. "/trace/right.a", "mode"))
 
         ok, output = run_lua(workspace, [[
@@ -1083,9 +1199,7 @@ describe("rich logical interfaces inside one shared image", function()
     local source_root
 
     before_each(function()
-        workspace = os.tmpname()
-        assert.truthy(os.remove(workspace))
-        assert.truthy(lfs.mkdir(workspace))
+        workspace = temporary_workspace()
         source_root = workspace .. "/source"
 
         write_file(source_root .. "/shape/api.titan", [[
@@ -1177,7 +1291,7 @@ end
         if workspace then remove_tree(workspace) end
     end)
 
-    it("preserves rich APIs and four-module Interface topology in both forms",
+    it("preserves rich APIs and four-module Interface topology through consumers",
        function()
         local ok, output, why, code = compile(
             workspace, source_root,
@@ -1189,15 +1303,15 @@ end
             "shape.api", "shape.consumer", "shape.facade", "shape.provider",
         })
         assert.is_nil(lfs.attributes(
-            workspace .. "/shape/provider.so", "mode"))
+            shared_path(workspace, "shape/provider"), "mode"))
         assert.is_nil(lfs.attributes(
             workspace .. "/shape/provider.a", "mode"))
         assert.is_nil(lfs.attributes(
-            workspace .. "/shape/facade.so", "mode"))
+            shared_path(workspace, "shape/facade"), "mode"))
         assert.is_nil(lfs.attributes(
             workspace .. "/shape/facade.a", "mode"))
         assert.is_nil(lfs.attributes(
-            workspace .. "/shape/api.so", "mode"))
+            shared_path(workspace, "shape/api"), "mode"))
         assert.is_nil(lfs.attributes(
             workspace .. "/shape/consumer.a", "mode"))
 
@@ -1217,10 +1331,10 @@ end
         assert_provider_pair(workspace, "consumer", { "consumer" })
 
         local generated = read_file(source_root .. "/consumer.c")
-        assert.truthy(generated:find('titan_module_provider(L, "shape.facade", "shape.so")', 1, true),
+        assert.truthy(generated:find('titan_module_provider(L, "shape.facade", "shape' .. SHARED_SUFFIX .. '")', 1, true),
             generated)
         assert.falsy(generated:find(
-            'titan_module_provider(L, "shape.facade", "shape/facade.so")', 1, true), generated)
+            'titan_module_provider(L, "shape.facade", "shape/facade' .. SHARED_SUFFIX .. '")', 1, true), generated)
         assert.truthy(generated:find(
             'titan_module_provider(L, "shape.provider", NULL)', 1, true),
             generated)
@@ -1260,24 +1374,31 @@ function main(args: {string}): integer
     end
 end
 ]])
-        ok, output, why, code = compile(
-            workspace, source_root, "--static", "shape_app")
+        local arguments = platform.windows and { "shape_app" } or { "--static", "shape_app" }
+        ok, output, why, code = compile(workspace, source_root, table.unpack(arguments))
         assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
             tostring(code) .. ")")
         local static_generated = read_file(source_root .. "/shape_app.c")
-        assert.falsy(static_generated:find(
-            'titan_module_provider(L, "shape.facade", "shape.so")', 1, true), static_generated)
-        assert.truthy(static_generated:find(
-            "extern Udata *shape_facade_init", 1, true), static_generated)
+        if platform.windows then
+            assert.truthy(static_generated:find(
+                'titan_module_provider(L, "shape.facade", "shape.dll")', 1, true), static_generated)
+        else
+            assert.falsy(static_generated:find(
+                'titan_module_provider(L, "shape.facade", "shape.so")', 1, true), static_generated)
+            assert.truthy(static_generated:find(
+                "extern Udata *shape_facade_init", 1, true), static_generated)
+        end
         assert.falsy(static_generated:find(
             "shape_api_init", 1, true), static_generated)
         assert.falsy(static_generated:find(
             "shape_consumer_init", 1, true), static_generated)
 
-        -- The standalone selected the ancestor archive even while its DSO
-        -- sibling was present. Removing that sibling proves no dynamic
-        -- Interface owner or implementer lookup remains at run time.
-        assert.truthy(os.remove(workspace .. "/shape.so"))
+        if not platform.windows then
+            -- The Unix standalone selected the ancestor archive while its
+            -- DSO sibling was present. Removing it proves no dynamic
+            -- Interface owner or implementer lookup remains at run time.
+            assert.truthy(os.remove(shared_path(workspace, "shape")))
+        end
         ok, output, why, code = run_program(workspace, "shape_app")
         assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
             tostring(code) .. ")")
@@ -1289,9 +1410,7 @@ describe("public static-provider composition", function()
     local source_root
 
     before_each(function()
-        workspace = os.tmpname()
-        assert.truthy(os.remove(workspace))
-        assert.truthy(lfs.mkdir(workspace))
+        workspace = temporary_workspace()
         source_root = workspace .. "/source"
         make_directory(source_root)
     end)
@@ -1317,6 +1436,10 @@ end
 
     it("links exact Interface archives into a standalone four-module bridge",
        function()
+        if platform.windows then
+            pending("Titan static Interface archive providers are unsupported on Windows")
+            return
+        end
         write_file(source_root .. "/exact_iface/api.titan", [[
 interface Incrementer
     function add(delta: integer): integer
@@ -1358,8 +1481,8 @@ end
         -- Leave only the terminal regular archives visible. The consumer
         -- knows the Interface owner but not the concrete provider; the bridge
         -- is the first source module to introduce both.
-        assert.truthy(os.remove(workspace .. "/exact_iface/api.so"))
-        assert.truthy(os.remove(workspace .. "/exact_iface/provider.so"))
+        assert.truthy(os.remove(shared_path(workspace, "exact_iface/api")))
+        assert.truthy(os.remove(shared_path(workspace, "exact_iface/provider")))
         write_file(source_root .. "/exact_iface/consumer.titan", [[
 local api = import "exact_iface.api"
 
@@ -1415,6 +1538,10 @@ end
 
     it("honors default/static preference, both fallbacks, and hidden-DSO execution",
        function()
+        if platform.windows then
+            pending("Titan static-provider selection and archive fallback are unsupported on Windows")
+            return
+        end
         local dynamic_build = workspace .. "/dynamic"
         local static_build = workspace .. "/static"
         local dynamic_source = dynamic_build .. "/source"
@@ -1443,7 +1570,7 @@ end
 
         local dynamic_dso = dynamic_build .. "/choice/api.so"
         local static_archive = static_build .. "/choice/api.a"
-        local selected_dso = workspace .. "/choice/api.so"
+        local selected_dso = shared_path(workspace, "choice/api")
         local selected_archive = workspace .. "/choice/api.a"
         copy_file(dynamic_dso, selected_dso)
         copy_file(static_archive, selected_archive)
@@ -1519,6 +1646,10 @@ end
 
     it("repackages complete provider membership and consumes it statically",
        function()
+        if platform.windows then
+            pending("Titan static-provider archive repackaging and standalone extraction are unsupported on Windows")
+            return
+        end
         local provider_a = workspace .. "/provider-a"
         local provider_b = workspace .. "/provider-b"
         local source_a = provider_a .. "/source"
@@ -1706,6 +1837,10 @@ end
 
     it("rejects raw members and repackages real macOS metadata objects",
        function()
+        if platform.windows then
+            pending("Mach-O universal Titan archive metadata and libtool repackaging")
+            return
+        end
         if not driver.IS_DARWIN then return end
 
         write_file(source_root .. "/fat/api.titan", [[
@@ -1806,7 +1941,7 @@ end
             "-output", universal,
         }, workspace)
         assert.truthy(ok, output)
-        assert.truthy(os.remove(workspace .. "/fat/api.so"))
+        assert.truthy(os.remove(shared_path(workspace, "fat/api")))
 
         local fat, fat_err = staticmetadata.scan_archive(
             universal, metadata_options())
@@ -1846,7 +1981,7 @@ end
         assert.same(bundle.key_order, libtool_result.key_order)
 
         assert.truthy(os.remove(universal))
-        assert.truthy(os.remove(workspace .. "/bundle/api.so"))
+        assert.truthy(os.remove(shared_path(workspace, "bundle/api")))
         write_file(source_root .. "/universal_app.titan", [[
 local api = import "bundle.api"
 
@@ -1866,6 +2001,10 @@ end
 
     it("keeps unused archive members unextracted and resolves later -X runtime references",
        function()
+        if platform.windows then
+            pending("Titan static-provider member extraction and POSIX runtime/backtrace payload references")
+            return
+        end
         local missing_header = source_root .. "/never_available.h"
         write_file(missing_header,
             "int titan_test_never_available(void);\n")
@@ -1921,7 +2060,7 @@ end
             workspace, source_root, "--static", "app", "-X", support)
         assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
             tostring(code) .. ")")
-        assert.truthy(os.remove(workspace .. "/bundle.so"))
+        assert.truthy(os.remove(shared_path(workspace, "bundle")))
         os.remove(workspace .. "/bundle/api.lua")
         os.remove(workspace .. "/bundle/unused.lua")
         ok, output, why, code = run_program(workspace, "app")
@@ -1929,7 +2068,7 @@ end
             tostring(code) .. ")")
     end)
 
-    it("carries object/archive -X payload into both forms and rejects metadata",
+    it("carries object/archive -X payload into providers and rejects metadata",
        function()
         local direct = compile_c_object(workspace, "direct-payload",
             "int direct_payload(void) { return 17; }\n")
@@ -1982,11 +2121,10 @@ end
             dso_link)
         local provider = assert_provider_pair(
             workspace, "payload/item", { "payload.item" }, true)
-        assert.equal(4, #provider.members)
-        for _, output_path in ipairs({
-            workspace .. "/payload/item.so",
-            workspace .. "/payload/item.a",
-        }) do
+        if not platform.windows then assert.equal(4, #provider.members) end
+        local outputs = { shared_path(workspace, "payload/item") }
+        if not platform.windows then outputs[#outputs + 1] = workspace .. "/payload/item.a" end
+        for _, output_path in ipairs(outputs) do
             local symbols = native_symbols(workspace, output_path)
             assert.truthy(symbols:find("direct_payload", 1, true), symbols)
             assert.truthy(symbols:find("archived_payload", 1, true), symbols)
@@ -2006,7 +2144,7 @@ end
         assert.truthy(output:find(
             "contains Titan module metadata", 1, true), output)
         assert.is_nil(lfs.attributes(
-            workspace .. "/bad/item.so", "mode"))
+            shared_path(workspace, "bad/item"), "mode"))
         assert.is_nil(lfs.attributes(
             workspace .. "/bad/item.a", "mode"))
     end)
@@ -2017,9 +2155,7 @@ describe("multi-module library preflight and native support contracts", function
     local source_root
 
     before_each(function()
-        workspace = os.tmpname()
-        assert.truthy(os.remove(workspace))
-        assert.truthy(lfs.mkdir(workspace))
+        workspace = temporary_workspace()
         source_root = workspace .. "/source"
         make_directory(source_root)
     end)
@@ -2042,9 +2178,9 @@ describe("multi-module library preflight and native support contracts", function
         for _, path in ipairs({
             source_root .. "/alpha.c", source_root .. "/alpha.o",
             source_root .. "/beta.c", source_root .. "/beta.o",
-            workspace .. "/alpha.so", workspace .. "/alpha.a",
+            shared_path(workspace, "alpha"), workspace .. "/alpha.a",
             workspace .. "/alpha.lua",
-            workspace .. "/beta.so", workspace .. "/beta.a",
+            shared_path(workspace, "beta"), workspace .. "/beta.a",
             workspace .. "/beta.lua",
         }) do
             assert.is_nil(lfs.attributes(path, "mode"), path)
@@ -2061,7 +2197,7 @@ describe("multi-module library preflight and native support contracts", function
             workspace, source_root, "foo.dep", "foo.seed")
         assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
             tostring(code) .. ")")
-        local old_provider = read_file(workspace .. "/foo.so")
+        local old_provider = read_file(shared_path(workspace, "foo"))
 
         write_file(source_root .. "/foo/left.titan", [[
 local dep = import "foo.dep"
@@ -2076,7 +2212,7 @@ function get(): integer return dep.get() + 1 end
         assert.falsy(ok)
         assert.truthy(output:find("native provider output", 1, true), output)
         assert.truthy(output:find("aliases input", 1, true), output)
-        assert.equal(old_provider, read_file(workspace .. "/foo.so"))
+        assert.equal(old_provider, read_file(shared_path(workspace, "foo")))
         assert.is_nil(lfs.attributes(
             source_root .. "/foo/left.c", "mode"))
         assert.is_nil(lfs.attributes(
@@ -2096,7 +2232,7 @@ function get(): integer return dep.get() + 1 end
             true), output)
         assert.is_nil(lfs.attributes(source_root .. "/clash/a-b.c", "mode"))
         assert.is_nil(lfs.attributes(source_root .. "/clash/a/b.c", "mode"))
-        assert.is_nil(lfs.attributes(workspace .. "/clash.so", "mode"))
+        assert.is_nil(lfs.attributes(shared_path(workspace, "clash"), "mode"))
         assert.is_nil(lfs.attributes(workspace .. "/clash.a", "mode"))
     end)
 
@@ -2302,11 +2438,11 @@ function main(args: {string}): integer
     if peer.c() == 2 then return 0 else return 1 end
 end
 ]])
-        ok, output, why, code = compile(
-            workspace, source_root, "--static", "app", "a_b")
+        local arguments = platform.windows and { "app", "a_b" } or { "--static", "app", "a_b" }
+        ok, output, why, code = compile(workspace, source_root, table.unpack(arguments))
         assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
             tostring(code) .. ")")
-        local ran, result = run({ workspace .. "/app" }, workspace)
+        local ran, result = run_program(workspace, "app")
         assert.truthy(ran, result)
     end)
 
@@ -2413,6 +2549,10 @@ end
     end)
 
     it("links a legacy ABI-2 archive without inventing an optional query export", function()
+        if platform.windows then
+            pending("Legacy Titan static archive protocol linking is unsupported on Windows")
+            return
+        end
         local legacy_workspace = workspace .. "/legacy-abi-value"
         local legacy_source = legacy_workspace .. "/source"
         local provider_stem = legacy_source .. "/luaopen/bundle/foo"
@@ -2466,7 +2606,7 @@ end
         assert.truthy(parsed, parse_error)
         assert.equal("2", parsed.entries["luaopen.bundle.foo"].abi)
         assert.truthy(os.remove(provider_stem .. ".titan"))
-        assert.truthy(os.remove(legacy_workspace .. "/luaopen/bundle/foo.so"))
+        assert.truthy(os.remove(shared_path(legacy_workspace, "luaopen/bundle/foo")))
         assert.truthy(os.remove(legacy_workspace .. "/luaopen/bundle/foo.lua"))
 
         write_file(legacy_source .. "/bundle/foo_abi_value.titan", [[
@@ -2511,7 +2651,7 @@ function probe(): integer return other.probe() end
             assert.is_nil(lfs.attributes(source_root .. "/bundle/left.c", "mode"))
             assert.is_nil(lfs.attributes(
                 source_root .. "/luaopen/bundle/foo.c", "mode"))
-            assert.is_nil(lfs.attributes(workspace .. "/bundle.so", "mode"))
+            assert.is_nil(lfs.attributes(shared_path(workspace, "bundle"), "mode"))
             assert.is_nil(lfs.attributes(workspace .. "/bundle.a", "mode"))
         end)
     end
@@ -2529,7 +2669,7 @@ function probe(): integer return other.probe() end
         assert.equal("return 'user file'\n",
             read_file(workspace .. "/owned/item.lua"))
         assert.is_nil(lfs.attributes(source_root .. "/owned/item.c", "mode"))
-        assert.is_nil(lfs.attributes(workspace .. "/owned/item.so", "mode"))
+        assert.is_nil(lfs.attributes(shared_path(workspace, "owned/item"), "mode"))
         assert.is_nil(lfs.attributes(workspace .. "/owned/item.a", "mode"))
     end)
 
@@ -2545,7 +2685,7 @@ function probe(): integer return other.probe() end
         assert.truthy(output:find(
             "linked provider 'titan' has an invalid native support entry", 1,
             true), output)
-        assert.is_nil(lfs.attributes(workspace .. "/titan.so", "mode"))
+        assert.is_nil(lfs.attributes(shared_path(workspace, "titan"), "mode"))
         assert.is_nil(lfs.attributes(workspace .. "/titan.a", "mode"))
         assert.is_nil(lfs.attributes(workspace .. "/titan/one.lua", "mode"))
         assert.is_nil(lfs.attributes(workspace .. "/titan/two.lua", "mode"))
@@ -2563,6 +2703,9 @@ do initialized = initialized + 1 end
         write_file(workspace .. "/registry-probe.c", [[
 #include "lua.h"
 #include "lauxlib.h"
+#ifdef _WIN32
+__declspec(dllexport)
+#endif
 int luaopen_probe_registry(lua_State *L) {
     int present;
     lua_getfield(L, LUA_REGISTRYINDEX, "Titan module titan.one");
@@ -2589,7 +2732,7 @@ int luaopen_probe_registry(lua_State *L) {
 
         local ok, output, why, code = compile(
             workspace, source_root, "titan.one", "titan.two",
-            "-X", REPO .. "/titan-runtime/ltitanlib.o",
+            "-X", native_support_object(workspace),
             workspace .. "/registry-probe.o")
         assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
             tostring(code) .. ")")
@@ -2597,19 +2740,19 @@ int luaopen_probe_registry(lua_State *L) {
             "titan.one", "titan.two",
         })
 
-        ok, output = run_lua(workspace, [[
+        ok, output = run_lua(workspace, string.format([[
 local support = require "titan"
 assert(type(support._loadlib) == "function")
 assert(type(support._loadlibglobal) == "function")
 local registry_probe = assert(package.loadlib(
-    "./titan.so", "luaopen_probe_registry"))
+    %q, "luaopen_probe_registry"))
 assert(registry_probe() == false)
 local one = require "titan.one"
 local two = require "titan.two"
 assert(registry_probe() == true)
 assert(one.probe() == 1)
 assert(two.probe() == 2)
-]])
+]], "./titan" .. SHARED_SUFFIX))
         assert.truthy(ok, output)
 
         -- The semantic gate owns a fresh controlled Lua process. A parent
@@ -2624,7 +2767,7 @@ local driver = require "titan-compiler.driver"
 local valid, validation_error = driver.validate_titan_support(arg[1])
 assert(valid, validation_error)
 ]], REPO .. "/?.lua;" .. REPO .. "/?/init.lua;",
-            REPO .. "/?.so;"))
+            REPO .. "/?" .. SHARED_SUFFIX .. ";"))
         local validate_argv = {
             "env", "LUA_INIT=@" .. workspace .. "/hostile-init.lua",
         }
@@ -2636,9 +2779,13 @@ assert(valid, validation_error)
         validate_argv[#validate_argv + 1] = "-E"
         validate_argv[#validate_argv + 1] =
             workspace .. "/validate-support.lua"
-        validate_argv[#validate_argv + 1] = workspace .. "/titan.so"
+        validate_argv[#validate_argv + 1] = shared_path(workspace, "titan")
         ok, output = run(validate_argv, workspace)
         assert.truthy(ok, output)
+
+        -- Windows has no Titan static-provider archive; the shared support
+        -- and fresh-process validation above remain required there.
+        if platform.windows then return end
 
         -- A shallow titan.a selected by a standalone owns the bare native
         -- support entry as well as logical titan.* protocols. Rebuild it from

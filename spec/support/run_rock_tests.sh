@@ -13,6 +13,20 @@ case $TITAN_BUILD_PROFILE in
 esac
 
 if [[ ${TITAN_ROCK_TEST_INTERNAL:-0} == 1 ]]; then
+    run_busted() {
+        if [[ ${MSYSTEM:-} == CLANG64 ]]; then
+            # LuaRocks' native .bat launcher is not a Bash program. Preserve
+            # stock Lua module paths by running its script with the selected Lua.
+            export PATH="$(cygpath -u "$PREFIX")/bin:$PATH"
+            export PREFIX=$(cygpath -m "$PREFIX")
+            local -a busted_scripts
+            busted_scripts=("$PREFIX"/lib/luarocks/rocks-5.5/busted/*/bin/busted)
+            "$PREFIX/bin/lua.exe" -e 'io.stdout:setvbuf("no"); io.stderr:setvbuf("no")' \
+                "$(cygpath -m "${busted_scripts[0]}")" "$@"
+        else
+            "${BUSTED:-busted}" "$@"
+        fi
+    }
     busted_args=()
     forwarded_count=0
     if [[ ${TITAN_ROCK_TEST_FORWARDED:-0} == 1 ]]; then
@@ -34,14 +48,14 @@ if [[ ${TITAN_ROCK_TEST_INTERNAL:-0} == 1 ]]; then
         # repository paths. Keep the retained runtime/packaging specs serial
         # before the isolated compiler workers start.
         stdlib_spec_list=${TITAN_ROCK_TEST_STDLIB_SPECS:-}
+        [[ -n $stdlib_spec_list ]] || {
+            echo "error: Make must select the retained runtime/packaging specs" >&2
+            exit 2
+        }
         stdlib_specs=()
         IFS=' ' read -r -a stdlib_specs <<< "$stdlib_spec_list"
-        if (( ${#stdlib_specs[@]} != 8 )); then
-            echo "error: invalid retained Busted spec list" >&2
-            exit 2
-        fi
         export TITAN_PROBE_CACHE_DISABLE=1
-        "${BUSTED:-busted}" "${stdlib_specs[@]}"
+        run_busted "${stdlib_specs[@]}"
         exec bash spec/support/run_parallel_compiler_tests.sh
     fi
     if [[ -n ${BUSTED_FILTER:-} ]]; then
@@ -50,15 +64,25 @@ if [[ ${TITAN_ROCK_TEST_INTERNAL:-0} == 1 ]]; then
     # Compiler specs intentionally reuse pathnames for different header worlds;
     # exact-text success markers are production build state, not test fixtures.
     export TITAN_PROBE_CACHE_DISABLE=1
-    exec "${BUSTED:-busted}" "${busted_args[@]}"
+    run_busted "${busted_args[@]}"
+    exit $?
 fi
 
 busted_filter=${BUSTED_FILTER:-}
 titan_filter=${TITAN_FILTER:-}
+make_command=make
 busted_args=()
 
 while [[ $# -gt 0 ]]; do
     case $1 in
+        --prefix=*)
+            export PREFIX=${1#*=}
+            shift
+            ;;
+        --make=*)
+            make_command=${1#*=}
+            shift
+            ;;
         --busted-filter)
             [[ $# -ge 2 ]] || {
                 echo "error: --busted-filter requires a pattern" >&2
@@ -99,4 +123,9 @@ for index in "${!busted_args[@]}"; do
     printf -v "$name" '%s' "${busted_args[$index]}"
     export "$name"
 done
-exec make rock-test
+if [[ ${MSYSTEM:-} == CLANG64 ]]; then
+    export PREFIX=$(cygpath -u "$PREFIX")
+    export PATH="$PREFIX/bin:$PATH"
+    exec "$make_command" -f Makefile.win rock-test PREFIX="$PREFIX" ROCKS_TREE="$PREFIX"
+fi
+exec "$make_command" rock-test

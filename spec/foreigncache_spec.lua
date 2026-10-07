@@ -1,3 +1,4 @@
+local temporary = require "spec.support.temporary"
 local lfs = require "lfs"
 local driver = require "titan-compiler.driver"
 local types = require "titan-compiler.types"
@@ -20,7 +21,7 @@ describe("module foreign conversion payloads", function()
     before_each(function()
         imported, registry = driver.imported, types.registry
         driver.imported, types.registry = {}, {}
-        directory = os.tmpname()
+        directory = temporary.name()
         assert(os.remove(directory))
         assert(lfs.mkdir(directory))
         files, directories, loaders, contexts, payloads, conversions = {}, {}, {}, {}, {}, 0

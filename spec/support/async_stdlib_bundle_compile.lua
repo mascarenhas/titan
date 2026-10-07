@@ -8,7 +8,6 @@ package.path = repo .. "/?.lua;" .. repo .. "/?/init.lua;" .. package.path
 
 local driver = require "titan-compiler.driver"
 driver.TITAN_SOURCE_PATH = source_root
-driver.LUA_SOURCE_PATH = repo .. "/lua-5.5.1/src/"
 driver.TITAN_RUNTIME_PATH = runtime_root .. "/"
 driver.LIBBACKTRACE_PATH = repo .. "/libbacktrace"
 

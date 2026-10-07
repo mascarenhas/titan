@@ -70,28 +70,17 @@ consume the same Titan Lua fork pinned by the `lua-5.5.1` Git submodule
 without applying patches or rewriting source. Platform guards select its
 POSIX and Windows implementations during compilation. Linux uses upstream's new
 `linux-readline` target, while macOS keeps upstream's `macosx` target, whose
-5.5.1 `luaconf.h` now enables readline itself. Before either build, Titan
-compile-links a host Readline probe. When development files are absent, it
-downloads the checksum-pinned GNU Readline 8.3 base archive and applies the
-exact vendored `vendor/readline/readline-8.3-p1-p3.patch`, a format-only
-combination of official patches 001-003. It configures the patched source with
-the same installation prefix and native tool identities, installs the whole
-dependency under a private prefix-local directory, and records that provider
-plus its detected terminal-capability link input in Lua's content stamp. The
-combined patch and checked-in license have their own verified hashes in that
-stamp. A fallback build installs into a sibling stage, validates the headers,
-license, archive, and exact final link, and only then replaces the private
-root; a failed repair therefore leaves the last known-good installation in
-place. `READLINE_HOST` provides an explicit Autoconf cross-target triplet, and
-the effective compiler, preprocessor, linker, archiver, and terminal inputs
-all participate in invalidation. Thus an immutable host does not need
-`libreadline-dev`/`readline-devel`, while hosts that provide a usable
-development library continue to use it.
+5.5.1 `luaconf.h` enables readline itself. These defaults require the host's
+Readline development files, such as `libreadline-dev` or `readline-devel`;
+Titan does not provision Readline. Select `LUA_PLATFORM=linux` or another
+upstream platform target to omit interactive Readline support.
 
-Upstream inserted whitespace between `LUA_CDIR` and its string literal in
-`LUA_CPATH_DEFAULT`. Titan's `luaconf.h` rewrite now accepts either spacing,
-inserts `LUA_TITAN_CDIR "?.so;"` exactly once, and verifies that exact-one
-postcondition before accepting the configured header.
+The Lua fork receives `TITAN_LIBRARY_VERSION` at compilation and installation,
+and its installer copies the internal `.c`/`.h` source files Titan needs into
+`$PREFIX/src/lua-5.5.1`. Unix preparation runs only when `$PREFIX/bin/lua` is
+absent. LuaRocks preparation follows the same program-existence rule and uses
+stock configure/build/install recipes. Rebuilds after configuration or source
+changes are the caller's responsibility.
 
 ### Stack-slot writes
 

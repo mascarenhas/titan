@@ -15,14 +15,16 @@ local function write(path, bytes)
   local f = assert(io.open(path, "wb")); assert(f:write(bytes)); assert(f:close())
 end
 local old = read(root .. "/support.dll")
-for _, mode in ipairs({ "normal", "rollback", "new-companion", "mapped", "alias" }) do
+for _, mode in ipairs({ "normal", "rollback", "new-companion", "mapped", "mapped-unchanged", "alias" }) do
   local prefix = root .. "/" .. mode
   local image, shim, source = prefix .. "-provider.dll", prefix .. ".lua", prefix .. "-source.dll"
   write(image, old)
   if mode ~= "new-companion" then write(shim, "old shim") end
-  write(source, old .. "new overlay")
+  write(source, mode == "mapped-unchanged" and old or old .. "new overlay")
   local held
-  if mode == "mapped" then held = assert(package.loadlib(image, "luaopen_titan")) end
+  if mode == "mapped" or mode == "mapped-unchanged" then
+    held = assert(package.loadlib(image, "luaopen_titan"))
+  end
   local options
   if mode == "rollback" or mode == "new-companion" then options = { after_commit = function(i)
     if i == 2 then return nil, "injected final failure" end
@@ -33,6 +35,8 @@ for _, mode in ipairs({ "normal", "rollback", "new-companion", "mapped", "alias"
   print(mode .. ": " .. tostring(ok) .. " " .. tostring(err))
   if mode == "normal" then
     assert(ok, err); assert(read(image) == old .. "new overlay"); assert(read(shim) == "new shim")
+  elseif mode == "mapped-unchanged" then
+    assert(ok, err); assert(read(image) == old); assert(read(shim) == "new shim")
   else
     assert(not ok, "expected protected failure")
     assert(read(image) == old, "previous image bytes changed")

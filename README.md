@@ -10,9 +10,10 @@ application programming language with a focus on performance.
 
 The installation commands and provider paths below describe Linux and macOS.
 The experimental native x64 Windows build uses MSYS2 CLANG64/UCRT and
-`Makefile.windows`; see the [Windows build and its limitations](doc/implementation/windows-build.md).
-It prepares its own SDK without LuaRocks and uses DLL providers with small
-executable launchers. Keep Windows source/output trees separate from Unix builds.
+`Makefile.win`; see the [Windows build and its limitations](doc/implementation/windows-build.md).
+It prepares the Lua SDK and uses standalone LuaRocks to install the compiler
+and standard library, with DLL providers and small executable launchers.
+Keep Windows source/output trees separate from Unix builds.
 
 Titan is the primary entry point of a Titan+Lua installation. Give each
 project its own local absolute prefix, then use that prefix's Lua, LuaRocks,
@@ -24,7 +25,7 @@ distinct ownership even in the current single-directory layout:
 * `ROCKS_TREE` owns the installed Titan rock, compiler SDK, and standard
   library.
 
-The supported developer install and CI configure LuaRocks' sole system tree so
+The supported developer install and CI configure LuaRocks' system tree so
 `ROCKS_TREE == PREFIX`. That equality is the current deployment policy, not an
 inherent requirement of what either name owns.
 
@@ -78,40 +79,26 @@ public headers used when LuaRocks builds other Lua libraries all describe the
 same Lua build. The Makefile selects `linux-readline` on
 Linux and `macosx` on Darwin; override it with
 `make lua LUA_PLATFORM=...` when necessary, and use `LUA_CC` to select Lua's
-C compiler. For those interactive targets, `make lua` first compile-links a
-small program against the host's Readline header and library. If that probe
-fails (as it does on minimal or immutable hosts without a development
-package), the build verifies and unpacks the pinned GNU Readline 8.3 base
-archive, applies the checked-in combination of its first three official
-patches, configures it with the same `PREFIX`, and installs its headers, static
-archive, documentation, and license under a private prefix-local directory
-before building Lua. Parallel Make checks the initialized Lua sources before writing the
-selection file inside that tree; fallback compilation may remain parallel, but
-Readline's upstream install pass is serialized because its archive replacement
-rules race. The applied patch and license are checksum-bound to the selection
-stamp, and repair builds validate a sibling stage before replacing an existing
-private installation. A system Readline development package is not
-required, but the fallback still needs a linkable curses, `tinfo`, or `termcap`
-provider.
-If automatic terminal-library detection fails, install the platform's
-terminal-library development package or set `READLINE_TERMCAP_LIB` explicitly.
-`READLINE_MODE=system` or `bundled` can force either branch. Installing
-`libreadline-dev` on Debian/Ubuntu or `readline-devel` on Fedora remains an
-optional way to use the system branch. Cross builds can pass an Autoconf target
-triplet through `READLINE_HOST`; `READLINE_CPPFLAGS`, `READLINE_CFLAGS`,
-`READLINE_LDFLAGS`, and `READLINE_ARFLAGS` configure the fallback toolchain.
-Changing the prefix, platform, compiler, Readline selection, or native-build
-flags invalidates the Lua objects before rebuilding, so the installed source
-headers cannot silently drift from `liblua.a`.
+C compiler. Those interactive targets require Readline development files from
+the host: install `libreadline-dev` on Debian/Ubuntu, `readline-devel` on Fedora,
+or Readline through your macOS package manager. For Homebrew's keg-only Readline,
+pass its include/library paths through `LUA_MYCFLAGS` and `LUA_MYLDFLAGS`. Titan
+does not install Readline.
+Use `LUA_PLATFORM=linux` to omit it on Linux.
 
-`make luarocks` fetches pinned LuaRocks 3.13.0 and configures its executable and
-Lua location under `PREFIX`, with its sole system-style `ROCKS_TREE` set to the
-same directory for the supported workflow. Its forced configuration avoids a
-user or checkout-local project tree. The generated configuration also records
-Make's effective `CC`, `AR`, and `RANLIB` (using `CC` for linking), so a later
-direct `$PREFIX/bin/luarocks make` reuses the native tool identities that
-prepared the prefix instead of invalidating and rebuilding dependencies.
-Finally, that command builds and installs the Titan compiler, runtime archives
+`make lua` passes `TITAN_LIBRARY_VERSION` and `PREFIX` to the Lua fork's build
+and install targets. The fork installs its own internal sources alongside the
+matching library and public headers. The target checks only `$PREFIX/bin/lua`;
+when that program exists, it performs no build or reconfiguration. Clean Lua's
+source objects and remove or replace that program yourself when changing its
+source, platform, version, compiler, or native flags.
+
+`make luarocks` fetches pinned LuaRocks 3.13.0 and runs stock `configure`, `make`,
+and `make install` with its executable, Lua location, and configured system
+rocks tree under `PREFIX`. Its ordinary generated configuration retains the
+user tree. The target checks only `$PREFIX/bin/luarocks`, so an existing program
+is reused. Pass custom native tools explicitly to later LuaRocks commands.
+Finally, `luarocks make` builds and installs the Titan compiler, runtime archives
 and headers, and the standard library into `ROCKS_TREE`. Titan's native Make
 targets prefer the installed `$PREFIX/src/lua-5.5.1` headers when present,
 including for SDK staging, and require the matching `$PREFIX/lib/liblua.a`.
@@ -122,11 +109,6 @@ tree. Keep `$PREFIX/bin`
 first on `PATH` while developing so `lua`, `luarocks`, and `titanc` all come
 from this installation.
 
-Lua and LuaRocks record versioned, prefix-local completion stamps under
-`$PREFIX/etc/titan/`. Repeating `make luarocks` against a prepared prefix is a
-no-op, while selecting a fresh prefix performs a fresh installation; the Lua
-stamp is invalidated when its matching source build changes.
-
 Relocation here covers Lua's module search paths. LuaRocks' configuration and
 installed command wrappers can still contain absolute paths; moving a tree
 does not by itself make every installed tool relocatable. The supported
@@ -135,8 +117,8 @@ installation workflow continues to configure each destination explicitly.
 Use a fresh prefix when migrating a directory that previously used
 `luarocks init` or a user-tree LuaRocks configuration. Third-party command
 launchers such as `busted` embed the active Lua paths when their rocks are
-installed; changing LuaRocks' configuration later correctly migrates the
-Titan-owned tools, but cannot rewrite arbitrary already-installed launchers.
+installed. After changing LuaRocks configuration, reinstall affected tools to
+refresh those launchers.
 Titan's version identities are deliberately separate. `TITAN_VERSION` is the
 compiler and standard-library semantic version, currently `0.6.0`; its derived
 major/minor library version, `0.6`, owns installed library and compiler-data
@@ -154,14 +136,14 @@ The installed files used to compile Titan code include:
 | `$ROCKS_TREE/lib/libbacktrace.a` | The separate vendored native unwinder/symbolizer archive |
 | `$ROCKS_TREE/include/minicoro.h`, `titan.h` | Non-Lua top-level SDK headers |
 | `$ROCKS_TREE/include/titan/ffi.h` | Namespaced portable FFI and audited Lua-internal bridge header |
-| `$ROCKS_TREE/lib/titan/0.6/titan.so` | The dynamic standard-library provider: native `require "titan"` support plus twenty-two independent logical modules from `titan.coroutine` through `titan.json` |
-| `$ROCKS_TREE/lib/titan/0.6/titan.a` | The self-describing static form of the same twenty-two logical standard modules, plus native support and private LPegLabel/libuv/llhttp/SQLite payload, with OpenSSL payload when bundled OpenSSL is selected |
-| `$ROCKS_TREE/share/lua/5.5/titan/{coroutine,uv,async,timer,io,fs,net,ssl,url,http,websocket,os,peg,string,math,lua,iteration,gc,test,reflect,sqlite3,json}.lua` | Generated logical-module loader shims that map the canonical provider globally and invoke their exact `luaopen_titan_*` entries |
+| `$ROCKS_TREE/lib/titan/0.6/titan.so` | The dynamic standard-library provider: native `require "titan"` support plus twenty-three independent logical modules from `titan.coroutine` through `titan.json` |
+| `$ROCKS_TREE/lib/titan/0.6/titan.a` | The self-describing static form of the same twenty-three logical standard modules, plus native support and private LPegLabel/libuv/llhttp/SQLite payload, with OpenSSL payload when bundled OpenSSL is selected |
+| `$ROCKS_TREE/share/lua/5.5/titan/{coroutine,uv,async,timer,io,fs,net,ssl,url,http,websocket,os,path,peg,string,math,lua,iteration,gc,test,reflect,sqlite3,json}.lua` | Generated logical-module loader shims that map the canonical provider globally and invoke their exact `luaopen_titan_*` entries |
 | `$ROCKS_TREE/share/titan/0.6/src/titan/test.titan` | Canonical compiler-data source used for the source-private native test-runner protocol |
 
-The twenty-two-module pair, shims, and test support source are the coordinated
+The twenty-three-module pair, shims, and test support source are the coordinated
 ABI-2 standard image. `titan.io` owns the shared Interface vocabulary and
-I/O helpers; bare native support adds the twenty-second DSO opener without adding
+I/O helpers; bare native support adds the twenty-fourth DSO opener without adding
 a logical metadata key.
 
 Installs also contain `$ROCKS_TREE/include/uv.h` and
@@ -214,8 +196,8 @@ It includes a [small Unix spawn cleanup correction](vendor/libuv/README.md).
 This is the only libuv dependency policy; system libuv is not supported.
 Remove obsolete `LIBUV_MODE` overrides: the build rejects any nonempty value.
 Run `make libuv-config` to inspect the pinned source, include flags, archive,
-and platform support libraries. The Makefile records the compiler and flags
-so changes rebuild the libuv-facing objects without a manual clean.
+and platform support libraries. Clean the native build directory and affected
+Titan outputs when changing the compiler or flags.
 
 The combined `titan.so` is the sole complete dynamic libuv
 provider, while `titan.a` carries the same bundled libuv objects for static
@@ -319,7 +301,7 @@ For the Titan-owned interpreter at `$PREFIX/bin/lua`, the default
 `$PREFIX/lib/titan/0.6/?.so` before `$PREFIX/lib/lua/5.5/?.so`. The first
 template lets the generated `titan.*` loaders find the canonical provider; the
 second remains the root-discovery anchor. The default `package.path` finds all
-twenty-two loaders under `$PREFIX/share/lua/5.5/titan/`. Here `PREFIX` is
+twenty-three loaders under `$PREFIX/share/lua/5.5/titan/`. Here `PREFIX` is
 resolved from the running interpreter, so these paths follow a moved tree.
 In the currently supported layout `ROCKS_TREE == PREFIX`, so `titanc` can use
 the first entry ending in
@@ -370,21 +352,18 @@ the currently equal system-style `ROCKS_TREE` and installed `titanc`. The
 current Titan rock is likewise a **source-install** package. Its
 `build_target = "titan"` builds the runtime, a private support-only bootstrap,
 and the SDK archives/headers/Lua sources. When the canonical provider is
-absent, the build atomically stages that bootstrap at
+absent, the build copies that bootstrap to
 `$ROCKS_TREE/lib/titan/0.6/titan.so` so the just-installed compiler can load
-its native support table; a repeated install preserves an already valid full
+its native support table; a repeated install preserves an existing full
 image. After LuaRocks deploys the compiler, the source-only `post_install` hook
 calls `make install-stdlib` with that `titanc`, using the same dependency graph,
 checkout outputs, and completion stamp as a later `make stdlib`. Each logical module owns an object and its generated headers;
 unchanged objects are reused. One final incremental invocation links all
-twenty-two roots, with private LPegLabel, selected libuv, HTTP/llhttp, SQLite,
-and TLS/OpenSSL payload after `ltitanlib.o`. The publisher validates the paired
-providers, generated loaders, and exact `titan.test` compiler source, prepares
-private destination copies, and publishes them with rollback, committing
-`titan.a` before `titan.so` and using the DSO rename as the final commit point.
-Publication recognizes the bootstrap and current complete pair as recoverable
-states in the active `0.6` library namespace; twenty-two modules are the current
-installed contract. No earlier Titan installation is a migration source.
+twenty-three roots, with private LPegLabel, selected libuv, HTTP/llhttp, SQLite,
+and TLS/OpenSSL payload after `ltitanlib.o`. Installation copies the completed
+provider pair, generated loaders, exact `titan.test` compiler source, licenses,
+and optional macOS dSYM to their destinations. Explicit packaging tests own
+protocol and metadata validation. Install into a fresh tree after ABI changes.
 There is no separate Make install pass or pre-install hook. The provider,
 generated loaders, and SDK files remain
 direct artifacts outside the rock manifest, so `luarocks remove titan` does
@@ -396,15 +375,18 @@ For standard-library development after `luarocks make`, use:
 
 ```sh
 make stdlib          # rebuild changed modules and their dependents, then relink
-make install-stdlib  # build if needed, validate, and publish to the selected tree
+make install-stdlib  # build if needed, then copy to the selected tree
+make clean-stdlib    # remove stdlib outputs before changing build inputs
 ```
 
 Both commands use the installed compiler and matching SDK by default. An
 unchanged `make stdlib` immediately after `luarocks make` reuses its outputs;
-it only checks completeness and archive metadata. Compilation, linking, and
-publication print progress messages. Make tracks installed compiler/SDK updates,
-source imports, native headers, and build flags. Keep the same provider modes and
-flags between invocations to preserve reuse. To exercise checkout compiler edits,
+it checks that the expected outputs exist. Make tracks installed compiler/SDK
+updates, source imports, and native headers through ordinary prerequisites.
+Run `make clean-stdlib` before changing stdlib flags, toolchain, profile, or
+OpenSSL mode. Clean the corresponding native dependency build directories when
+changing their build inputs, or use a separate source copy and SDK prefix.
+To exercise checkout compiler edits,
 reinstall with `luarocks make`, or explicitly select the checkout compiler/runtime
 with `make stdlib STDLIB_USE_INSTALLED_RUNTIME=0`.
 
@@ -443,7 +425,8 @@ while reusing current source dependency objects. A final `--incremental`
 invocation links the usual provider pair or executable. Use `--source-first`
 consistently when available project source should take precedence over binary
 providers. Default invocations ignore existing objects. Make owns imported
-module/header, compiler, and configuration invalidation; see
+module/header and compiler prerequisites; callers clean outputs after changing
+build configuration. See
 [Incremental and separate compilation](doc/language/incremental-compilation.md)
 for the complete contract and an example.
 
@@ -565,7 +548,7 @@ pool, with cancellation-insensitive resource retirement. Its private pinned
 amalgamation enters both provider forms in either OpenSSL mode.
 GC-backed
 owners can attach table/full-userdata finalizers
-without discarding an existing metatable. Make compiles the twenty-two logical
+without discarding an existing metatable. Make compiles the twenty-three logical
 modules through separate object targets, then passes all roots to one
 incremental `titanc` link. Source contributors, imported objects/headers,
 compiler inputs, and build configuration drive recompilation. The high-level libuv
@@ -717,7 +700,7 @@ under `spec/stdlib/` and no root-level standard-library boundary specs.
 Module-owned standard-library behavior, including fresh-process and host-stdio
 cases, lives under `spec/stdlib/titan/`: compiled Titan parents launch focused
 standalone fixtures through C99 `system`, consume explicit temporary result
-files, and clean them with `defer`. The Makefile names all 27 test roots
+files, and clean them with `defer`. The Makefile names all 28 test roots
 explicitly. It compiles the explicit test/helper modules and shared `titan.test`
 support through separate `titanc -c --test --incremental` targets, then links
 one test executable with `--test --incremental`. `make titan-stdlib-test-build`
@@ -732,7 +715,7 @@ the installed provider, compiler/SDK inputs, and compile settings; a no-op
 build invokes no compiler. `make clean` removes generated outputs by ownership
 patterns without deleting author-written native fixtures.
 
-The native executable runs under a Bash process-group deadline of 300 seconds
+The Unix native executable runs under a Bash process-group deadline of 600 seconds
 by default, including fresh child-fixture compilation with the selected
 optimization flags. Override it with `TITAN_TEST_TIMEOUT`; focused CI shutdown
 checks retain their explicit 15-second limit. Its combined
@@ -759,7 +742,7 @@ enters `spec/support/run_rock_tests.sh`, which invokes `make rock-test`: the
 Busted tree runs first, followed by the same aggregate native executable.
 Busted 2.3 does not provide a shard option, and many compiler specs share fixed
 checkout-root artifact names. For an unfiltered run with no forwarded Busted
-arguments, `rock-test` therefore runs the eight retained runtime/packaging specs
+arguments, `rock-test` therefore runs the six retained runtime/packaging specs
 once, then externally partitions the compiler/language specs into four measured
 groups in private checkout copies. Every worker has private general and ccache
 temporary directories. It runs four workers by default, with nested Make and
@@ -776,7 +759,7 @@ LuaCov stats. Local shards do not collect LuaCov data.
 `BUSTED_FILTER` and `TITAN_FILTER` are independent Lua-pattern selectors;
 filtering one domain does not skip the other, so use a leaf target when only one
 is wanted. A Titan filter changes execution only—the build still compiles all
-25 source-authoritative roots.
+28 source-authoritative roots.
 
 ```sh
 $ make stdlib-test
@@ -819,7 +802,7 @@ are two to match the private runner; the manual macOS job overrides them to
 three. The ASan+UBSan job restores its separately fingerprinted native
 Lua/libbacktrace/libuv/llhttp/OpenSSL tree before LuaRocks/Titan work, saves only
 that clean dependency boundary, and reuses one aggregate native build for
-focused filters; it does not consume the regular artifact. Its 35-minute bound
+focused filters; it does not consume the regular artifact. Its 75-minute bound
 also admits the infrequent cold-cache rebuild under the two-CPU policy.
 Complete macOS validation remains a pre-merge gate. Prefer a local macOS VM
 run covering the complete runtime, packaging and compiler tests plus bundled
@@ -891,13 +874,14 @@ need the SDL2 development headers installed.
 C, compiled modules, coverage data), including nested `titan/uv/uv.c` and
 `titan/uv/uv.o`, the `titan/http`, `titan/websocket`, `titan/peg`, and `titan/string` folder-main
 outputs, and
-the twenty-two known generated standard-library loaders, while
+the twenty-three known generated standard-library loaders, while
 keeping source files and downloaded dependency trees.
-`make distclean` additionally removes the downloaded or cloned Lua, GNU
-Readline, LuaRocks, libbacktrace, libuv, OpenSSL, and llhttp source/build trees
-and their release tarballs where applicable. Neither target
-removes an installed `PREFIX`; delete a throwaway `/tmp` prefix separately
-when it is no longer needed.
+`make distclean` additionally cleans Lua's build artifacts, preserves its pinned
+submodule, and removes the checkout-local `.lua` installation. It removes the
+downloaded or cloned LuaRocks, libbacktrace, libuv, OpenSSL, llhttp, and SQLite
+source/build trees and their release tarballs where applicable. Other installed
+prefixes remain untouched; delete a throwaway `/tmp` prefix separately when it
+is no longer needed.
 
 # Compiler options
 

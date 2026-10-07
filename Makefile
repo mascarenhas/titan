@@ -1,3 +1,5 @@
+.DELETE_ON_ERROR:
+
 # Titan compiler — developer tooling.
 #
 # The compiler generates C that includes Lua 5.5's *internal* headers and links
@@ -44,81 +46,20 @@ LUA_VERSION      := 5.5.1
 LUA_ABI_VERSION  ?= 5.5
 LUA_DIR          := lua-$(LUA_VERSION)
 LUA_SOURCE_READY := $(LUA_DIR)/src/lua.h
-LUA_SOURCE_FILES := $(wildcard $(LUA_DIR)/src/*.c $(LUA_DIR)/src/*.h $(LUA_DIR)/src/lua.hpp) $(LUA_DIR)/src/Makefile
-LUA_BUILD_CONFIG := $(LUA_DIR)/src/.titan-build-config
-LUA_LIB          := $(LUA_DIR)/src/liblua.a
 LUA_BIN          := $(PREFIX)/bin/lua
 LUA_SOURCE_INSTALL_DIR := $(PREFIX)/src/$(LUA_DIR)
-LUA_INSTALL_STAMP := $(PREFIX)/etc/titan/lua-$(LUA_VERSION).installed
 # LuaRocks already runs against a prepared PREFIX. Its native build must not
 # download or reconstruct Lua merely because this checkout has no local tree.
 # An installed header set selects its matching archive even if that archive is
 # missing, so an incomplete SDK fails instead of mixing it with checkout Lua.
 LUA_INSTALLED_SDK := $(and $(wildcard $(LUA_SOURCE_INSTALL_DIR)/lua.h),$(wildcard $(LUA_SOURCE_INSTALL_DIR)/lobject.h))
 LUA_SDK_SOURCE_PATH := $(if $(LUA_INSTALLED_SDK),$(LUA_SOURCE_INSTALL_DIR),$(LUA_DIR)/src)
-LUA_SDK_PREREQ := $(if $(LUA_INSTALLED_SDK),,$(LUA_INSTALL_STAMP))
+LUA_SDK_PREREQ := $(if $(LUA_INSTALLED_SDK),,lua)
 # `titanc --lua` can explicitly select another built source tree. Only the
 # installed PREFIX layout keeps liblua.a outside that source directory.
 TITAN_RUNTIME_LUA_SOURCE_PATH ?= $(LUA_SDK_SOURCE_PATH)
 TITAN_RUNTIME_LUA_LIB = $(if $(filter $(abspath $(LUA_SOURCE_INSTALL_DIR)),$(abspath $(TITAN_RUNTIME_LUA_SOURCE_PATH))),$(PREFIX)/lib/liblua.a,$(TITAN_RUNTIME_LUA_SOURCE_PATH)/liblua.a)
 TITAN_RUNTIME_LUA_HEADERS = $(wildcard $(TITAN_RUNTIME_LUA_SOURCE_PATH)/*.h)
-
-# Lua 5.5.1's interactive Linux and macOS targets use GNU Readline. Prefer a
-# usable host installation, but do not require a development package: an
-# immutable/minimal host can build this pinned static fallback into PREFIX.
-# The archive lives in a private library directory so an unrelated readline
-# already installed in PREFIX cannot change which library Lua links.
-READLINE_MODE        ?= auto
-READLINE_VERSION     := 8.3
-READLINE_PATCHLEVEL  := 3
-READLINE_RELEASE     := $(READLINE_VERSION)-p$(READLINE_PATCHLEVEL)
-READLINE_DIR         := readline-$(READLINE_VERSION)
-READLINE_BUILD_DIR   := readline-build
-READLINE_TARBALL     := $(READLINE_DIR).tar.gz
-READLINE_URL         := https://ftp.gnu.org/gnu/readline/$(READLINE_TARBALL)
-READLINE_SHA256      := fe5383204467828cd495ee8d1d3c037a7eba1389c22bc6a041f627976f9061cc
-READLINE_PATCH_URL   := https://ftp.gnu.org/gnu/readline/readline-$(READLINE_VERSION)-patches
-READLINE_PATCH_001   := readline83-001
-READLINE_PATCH_002   := readline83-002
-READLINE_PATCH_003   := readline83-003
-READLINE_PATCHES     := $(READLINE_PATCH_001) $(READLINE_PATCH_002) $(READLINE_PATCH_003)
-READLINE_PATCH_FILE  := vendor/readline/readline-8.3-p1-p3.patch
-READLINE_COMBINED_PATCH_SHA256 := 70cbc596c0a7b3a35fabb8a05711a60e2695bd2d06a4e2f46f6f168f84403f96
-READLINE_PATCH_001_SHA256 := 21f0a03106dbe697337cd25c70eb0edbaa2bdb6d595b45f83285cdd35bac84de
-READLINE_PATCH_002_SHA256 := e27364396ba9f6debf7cbaaf1a669e2b2854241ae07f7eca74ca8a8ba0c97472
-READLINE_PATCH_003_SHA256 := 72dee13601ce38f6746eb15239999a7c56f8e1ff5eb1ec8153a1f213e4acdb29
-READLINE_EXTRACTED   := $(READLINE_DIR)/.titan-extracted-p$(READLINE_PATCHLEVEL)
-READLINE_PRIVATE_ROOT := $(READLINE_BUILD_DIR)/.titan-readline-$(READLINE_RELEASE)
-READLINE_PRIVATE_INCLUDEDIR := $(READLINE_PRIVATE_ROOT)/include
-READLINE_PRIVATE_LIBDIR := $(READLINE_PRIVATE_ROOT)/lib
-READLINE_PRIVATE_DATADIR := $(READLINE_PRIVATE_ROOT)/share
-READLINE_STATIC_LIB  := $(READLINE_PRIVATE_LIBDIR)/libreadline.a
-READLINE_HEADER      := $(READLINE_PRIVATE_INCLUDEDIR)/readline/readline.h
-READLINE_HISTORY_HEADER := $(READLINE_PRIVATE_INCLUDEDIR)/readline/history.h
-READLINE_LICENSE     := $(READLINE_PRIVATE_DATADIR)/licenses/COPYING
-READLINE_LICENSE_SOURCE := LICENSES/readline-LICENSE
-READLINE_LICENSE_SHA256 := 8ceb4b9ee5adedde47b31e975c1d90c73ad27b6b165a1dcd80c7c545eb65b903
-READLINE_INSTALL_STAMP := $(LUA_DIR)/.titan-readline-$(READLINE_RELEASE).installed
-READLINE_SELECTION_CONFIG := $(LUA_DIR)/.titan-readline-$(READLINE_RELEASE).config
-READLINE_BUILD_PROFILE := static-pic-private-staged-prefix-p3-v4
-READLINE_CFLAGS      ?= $(if $(filter validation,$(TITAN_BUILD_PROFILE)),-fPIC $(TITAN_VALIDATION_FLAGS),$(LUA_MYCFLAGS))
-READLINE_CPPFLAGS    ?=
-READLINE_LDFLAGS     ?= $(if $(filter validation,$(TITAN_BUILD_PROFILE)),$(TITAN_VALIDATION_FLAGS),$(LUA_MYLDFLAGS))
-READLINE_ARFLAGS     ?= cr
-READLINE_HOST        ?=
-READLINE_PKG_CONFIG  ?= pkg-config
-READLINE_PKG_CPPFLAGS := $(strip $(shell $(READLINE_PKG_CONFIG) --cflags-only-I readline 2>/dev/null))
-READLINE_PKG_LDFLAGS := $(strip $(shell $(READLINE_PKG_CONFIG) --libs-only-L readline 2>/dev/null))
-READLINE_PKG_LIBS    := $(filter-out -lreadline,$(strip $(shell $(READLINE_PKG_CONFIG) --libs-only-l --libs-only-other readline 2>/dev/null)))
-READLINE_SYSTEM_CPPFLAGS ?= $(READLINE_PKG_CPPFLAGS)
-READLINE_SYSTEM_LDFLAGS ?= $(READLINE_PKG_LDFLAGS)
-# Lua's interactive targets already add -lreadline. This variable carries any
-# additional system-provider libraries discovered through pkg-config (or an
-# explicit override), and the probe adds the primary archive itself.
-READLINE_SYSTEM_LIBS ?= $(READLINE_PKG_LIBS)
-# Set this to explicit terminal-capability linker flags only when auto
-# detection cannot find a usable curses, tinfo, or termcap library.
-READLINE_TERMCAP_LIB ?= auto
 
 # LuaRocks is part of the standalone Titan installation. Pin it just like Lua
 # and bundled libuv so the complete toolchain lives under the same PREFIX.
@@ -126,13 +67,7 @@ LUAROCKS_VERSION   := 3.13.0
 LUAROCKS_DIR       := luarocks-$(LUAROCKS_VERSION)
 LUAROCKS_TARBALL   := $(LUAROCKS_DIR).tar.gz
 LUAROCKS_URL       := https://luarocks.github.io/luarocks/releases/$(LUAROCKS_TARBALL)
-LUAROCKS_EXTRACTED := $(LUAROCKS_DIR)/.titan-extracted
-LUAROCKS_INSTALL_STAMP := $(PREFIX)/etc/titan/luarocks-$(LUAROCKS_VERSION).installed
-LUAROCKS_CONFIG_FILE := $(PREFIX)/etc/luarocks/config-$(LUA_ABI_VERSION).lua
-# Bump this when the generated embedded-LuaRocks policy changes.  The install
-# target compares both this content stamp and the actual config, so an existing
-# prefix is migrated instead of being left behind by an old touched stamp.
-LUAROCKS_CONFIG_POLICY := titan-system-tree-toolchain-v2
+LUAROCKS_BIN       := $(PREFIX)/bin/luarocks
 
 # The standard library is released against one audited libuv version.  The
 # bundled PIC archive is required so a clean Linux/macOS checkout does not
@@ -143,7 +78,6 @@ endif
 LIBUV_VERSION     := 1.53.0
 LIBUV_SRC_DIR     := libuv-v$(LIBUV_VERSION)
 LIBUV_BUILD_DIR   := libuv-build
-LIBUV_BUILD_CONFIG := $(LIBUV_BUILD_DIR)/.titan-libuv-build-config
 LIBUV_TARBALL     := $(LIBUV_SRC_DIR).tar.gz
 LIBUV_URL         := https://dist.libuv.org/dist/v$(LIBUV_VERSION)/$(LIBUV_TARBALL)
 LIBUV_SHA256      := cb0d6dd2128d5a95bd242c6cc982a24fe608fa93da57b6b4ec763b0018c53e64
@@ -174,8 +108,6 @@ LLHTTP_SOURCES       := $(addprefix $(LLHTTP_SRC_DIR)/src/,$(LLHTTP_SOURCE_NAMES
 LLHTTP_OBJECTS       := $(addprefix $(LLHTTP_BUILD_DIR)/,$(LLHTTP_SOURCE_NAMES:.c=.o))
 LLHTTP_HEADER        := $(LLHTTP_SRC_DIR)/include/llhttp.h
 LLHTTP_ARCHIVE       := $(LLHTTP_BUILD_DIR)/libtitan-llhttp.a
-LLHTTP_BUILD_CONFIG  := $(LLHTTP_BUILD_DIR)/.titan-llhttp-build-config
-LLHTTP_ARCHIVE_CONFIG := $(LLHTTP_BUILD_DIR)/.titan-llhttp-archive-config
 LLHTTP_CPPFLAGS      := -I$(abspath $(LLHTTP_SRC_DIR)/include)
 LLHTTP_CFLAGS        := -std=c99 -fPIC -fvisibility=hidden
 LLHTTP_BUILD_CFLAGS  ?=
@@ -196,8 +128,6 @@ SQLITE3_SOURCES       := $(SQLITE3_SRC_DIR)/sqlite3.c
 SQLITE3_OBJECTS       := $(SQLITE3_BUILD_DIR)/sqlite3.o
 SQLITE3_HEADER        := $(SQLITE3_SRC_DIR)/sqlite3.h
 SQLITE3_ARCHIVE       := $(SQLITE3_BUILD_DIR)/libtitan-sqlite3.a
-SQLITE3_BUILD_CONFIG  := $(SQLITE3_BUILD_DIR)/.titan-sqlite3-build-config
-SQLITE3_ARCHIVE_CONFIG := $(SQLITE3_BUILD_DIR)/.titan-sqlite3-archive-config
 SQLITE3_CPPFLAGS      := -I$(abspath $(SQLITE3_SRC_DIR))
 SQLITE3_CFLAGS        := -std=c99 -fPIC -fvisibility=hidden -DSQLITE_THREADSAFE=1
 SQLITE3_BUILD_CFLAGS  ?=
@@ -215,7 +145,6 @@ OPENSSL_URL           := https://github.com/openssl/openssl/releases/download/op
 OPENSSL_SHA256        := a8c0d28a529ca480f9f36cf5792e2cd21984552a3c8e4aa11a24aa31aeac98e8
 OPENSSL_EXTRACTED     := $(OPENSSL_SRC_DIR)/.titan-extracted
 OPENSSL_BUILD_DIR     := openssl-build
-OPENSSL_BUILD_CONFIG  := $(OPENSSL_BUILD_DIR)/.titan-openssl-build-config
 OPENSSL_BUILD_COMPLETE := $(OPENSSL_BUILD_DIR)/.titan-openssl-build-complete
 OPENSSL_BUNDLED_LIBSSL := $(OPENSSL_BUILD_DIR)/libssl.a
 OPENSSL_BUNDLED_LIBCRYPTO := $(OPENSSL_BUILD_DIR)/libcrypto.a
@@ -338,18 +267,11 @@ LPEGLABEL_HEADERS := $(addprefix $(LPEGLABEL_VENDOR_DIR)/,$(LPEGLABEL_HEADER_NAM
 LPEGLABEL_OBJECTS := $(addprefix $(LPEGLABEL_BUILD_DIR)/,\
 	$(LPEGLABEL_SOURCE_NAMES:.c=.o))
 LPEGLABEL_ARCHIVE := $(LPEGLABEL_BUILD_DIR)/libtitan-lpeglabel.a
-LPEGLABEL_BUILD_CONFIG := $(LPEGLABEL_BUILD_DIR)/.titan-lpeglabel-build-config
-LPEGLABEL_ARCHIVE_CONFIG := $(LPEGLABEL_BUILD_DIR)/.titan-lpeglabel-archive-config
 LPEGLABEL_CPPFLAGS := -I$(abspath $(LPEGLABEL_VENDOR_DIR))
 LPEGLABEL_CFLAGS := -std=c99 -fPIC -fvisibility=hidden
 LPEGLABEL_LUA_HEADERS = $(ROCK_LUA_HEADERS)
 # Keep parser execution optimized even when generic Titan extras select O0.
 LPEGLABEL_BUILD_CFLAGS ?= $(TITAN_PROFILE_HOST_FLAGS)
-COMPILER_DEPS_CFLAGS ?= $(TITAN_PROFILE_HOST_FLAGS) -fPIC
-COMPILER_DEPS_LDFLAGS ?= $(TITAN_PROFILE_HOST_FLAGS)
-LPEGLABEL_ROCK_CFLAGS ?= $(COMPILER_DEPS_CFLAGS)
-LPEGLABEL_ROCK_LDFLAGS ?= $(COMPILER_DEPS_LDFLAGS)
-COMPILER_DEPS_INSTALL_STAMP := $(PREFIX)/etc/titan/compiler-dependencies.installed
 
 UV_TITAN_SOURCES := \
 	titan/uv/uv.titan \
@@ -398,18 +320,18 @@ WEBSOCKET_TITAN_SOURCES := titan/websocket/websocket.titan titan/websocket/hands
 	titan/websocket/utf8.titan titan/websocket/native.titan
 JSON_TITAN_SOURCES := titan/json/json.titan titan/json/parser.titan \
 	titan/json/decoder.titan titan/json/writer.titan titan/json/numbers.titan
-STDLIB_MODULES := coroutine uv async timer io fs net ssl url http websocket os peg string \
+STDLIB_MODULES := coroutine uv async timer io fs net ssl url http websocket os path peg string \
 	math lua iteration gc test reflect sqlite3 json
 STDLIB_SOS     := $(addsuffix .so,$(STDLIB_MODULES))
 STDLIB_QUALIFIED_SOS := $(addprefix titan/,$(STDLIB_SOS))
 STDLIB_ROOTS := titan.coroutine titan.uv titan.async titan.timer \
-	titan.io titan.fs titan.net titan.ssl titan.url titan.http titan.websocket titan.os \
+	titan.io titan.fs titan.net titan.ssl titan.url titan.http titan.websocket titan.os titan.path \
 	titan.peg titan.string \
 	titan.math titan.lua titan.iteration titan.gc titan.test titan.reflect titan.sqlite3 titan.json
 STDLIB_TITAN_SOURCES := titan/coroutine.titan $(UV_TITAN_SOURCES) \
 	titan/async.titan titan/timer.titan titan/io.titan titan/fs.titan \
 	titan/net.titan titan/ssl.titan titan/url.titan \
-	$(STDLIB_HTTP_SOURCES) $(WEBSOCKET_TITAN_SOURCES) titan/os.titan \
+	$(STDLIB_HTTP_SOURCES) $(WEBSOCKET_TITAN_SOURCES) titan/os.titan titan/path.titan \
 	titan/peg/peg.titan titan/peg/combinators.titan \
 	titan/peg/native.titan \
 	titan/peg/relabel.titan titan/peg/relabel_parser.titan \
@@ -453,6 +375,7 @@ STDLIB_IMPORTS_url := peg string
 STDLIB_IMPORTS_http := async io math net ssl string timer url uv
 STDLIB_IMPORTS_websocket := async gc http io iteration net ssl string timer url uv
 STDLIB_IMPORTS_os := async uv iteration string
+STDLIB_IMPORTS_path := string
 STDLIB_IMPORTS_peg := gc
 STDLIB_IMPORTS_string := peg gc
 STDLIB_IMPORTS_math :=
@@ -465,7 +388,7 @@ STDLIB_IMPORTS_sqlite3 := async uv reflect string math
 STDLIB_IMPORTS_json := reflect string math peg iteration
 STDLIB_SHIMS := titan/coroutine.lua titan/uv.lua titan/async.lua \
 	titan/timer.lua titan/io.lua titan/fs.lua titan/net.lua titan/ssl.lua \
-	titan/url.lua titan/http.lua titan/websocket.lua titan/os.lua \
+	titan/url.lua titan/http.lua titan/websocket.lua titan/os.lua titan/path.lua \
 	titan/peg.lua titan/string.lua titan/math.lua titan/lua.lua \
 	titan/iteration.lua titan/gc.lua titan/test.lua titan/reflect.lua titan/sqlite3.lua titan/json.lua
 STDLIB_CONTAINER := titan.so
@@ -473,8 +396,6 @@ STDLIB_STATIC_ARCHIVE := titan.a
 STDLIB_PROVIDER_OUTPUTS := $(STDLIB_CONTAINER) $(STDLIB_STATIC_ARCHIVE)
 STDLIB_EXTRA_OBJECTS := $(LTITANLIB_O) $(LPEGLABEL_ARCHIVE) \
 	$(LIBUV_EXTRA_OBJECTS) $(LLHTTP_ARCHIVE) $(SQLITE3_ARCHIVE) $(OPENSSL_EXTRA_OBJECTS)
-STDLIB_NATIVE_IDENTITY_PREREQS := $(LPEGLABEL_ARCHIVE) \
-	$(LLHTTP_ARCHIVE) $(SQLITE3_ARCHIVE) $(OPENSSL_EXTRA_OBJECTS)
 STDLIB_LPEGLABEL_CPPFLAGS := $(LPEGLABEL_CPPFLAGS)
 STDLIB_HTTP_CPPFLAGS := $(LLHTTP_CPPFLAGS)
 STDLIB_SQLITE3_CPPFLAGS := $(SQLITE3_CPPFLAGS)
@@ -484,14 +405,15 @@ STDLIB_LICENSES := LICENSES/libuv-LICENSE \
 	LICENSES/lpeglabel-LICENSE LICENSES/lpeg-LICENSE \
 	LICENSES/lpeg-patterns-LICENSE \
 	LICENSES/ta-regex-LICENSE LICENSES/lua-LICENSE \
-	LICENSES/llhttp-LICENSE LICENSES/sqlite3-LICENSE LICENSES/openssl-LICENSE
-STDLIB_EMBEDDED_FORMAT_INPUTS := titan-compiler/staticmetadata.lua \
-	titan-compiler/coder.lua $(wildcard titan-compiler/coder/*.lua)
+	LICENSES/llhttp-LICENSE LICENSES/sqlite3-LICENSE LICENSES/openssl-LICENSE LICENSES/go-LICENSE LICENSES/libbacktrace-LICENSE
 TITAN_BOOTSTRAP_SO := titan-runtime/bootstrap/titan.so
 STDLIB_BOOTSTRAP_PREREQ := $(TITAN_BOOTSTRAP_SO)
 ROCK_LUA_INCDIR ?= $(PREFIX)/include
 ROCK_LUA_HEADERS = $(addprefix $(ROCK_LUA_INCDIR)/,lua.h luaconf.h lauxlib.h)
-ROCK_CFLAGS     ?= $(if $(filter validation,$(TITAN_BUILD_PROFILE)),$(TITAN_VALIDATION_FLAGS),-O2) -fPIC
+# Stock LuaRocks supplies optimized dependency flags. Apply the Titan payload
+# profile here; explicit TITAN_EXTRA_CFLAGS still follow it at compile sites.
+ROCK_CFLAGS     ?= -O2 -fPIC
+override ROCK_CFLAGS := $(strip $(ROCK_CFLAGS) $(TITAN_PROFILE_NATIVE_FLAGS))
 ROCK_LD         ?= $(CC)
 ifeq ($(HOST_OS),Darwin)
   ROCK_LIBFLAG  ?= -bundle -undefined dynamic_lookup
@@ -508,7 +430,7 @@ TITAN_LUA ?= $(or $(realpath $(ROCK_LUA)),$(ROCK_LUA))
 # Stdlib development uses the deployed compiler and its matching SDK once
 # installed. The checkout compiler remains the bootstrap path and an explicit
 # option through STDLIB_USE_INSTALLED_RUNTIME=0. Canonicalize only these build
-# inputs, so a LuaRocks /var/home root and a PATH /home alias share one stamp.
+# inputs, so a LuaRocks /var/home root and a PATH /home alias select one SDK.
 STDLIB_INSTALLED_ROOT = $(or $(realpath $(TITAN_INSTALL_TREE)),$(abspath $(TITAN_INSTALL_TREE)))
 STDLIB_ROCKS_ROOT = $(if $(strip $(TITAN_ROCKS_ROOT)),$(or $(realpath $(TITAN_ROCKS_ROOT)),$(abspath $(TITAN_ROCKS_ROOT))),$(if $(filter 1,$(STDLIB_USE_INSTALLED_RUNTIME)),$(STDLIB_INSTALLED_ROOT)))
 TITANC ?= $(if $(filter 1,$(STDLIB_USE_INSTALLED_RUNTIME)),$(call make_shell_quote,$(STDLIB_INSTALLED_ROOT)/bin/titanc),$(TITAN_LUA) -E -e 'package.path="./?.lua;./?/init.lua;" .. package.path; package.cpath="./titan-runtime/bootstrap/?.so;" .. package.cpath' ./titanc)
@@ -549,11 +471,6 @@ LIBBT_DIR := libbacktrace
 LIBBT_URL ?= https://github.com/ianlancetaylor/libbacktrace.git
 LIBBT_LIB := $(LIBBT_DIR)/.libs/libbacktrace.a
 LIBBT_CLONE_STAMP := $(LIBBT_DIR)/.titan-cloned
-LIBBT_BUILD_CONFIG := $(LIBBT_DIR)/.titan-build-config
-RUNTIME_BUILD_CONFIG := titan-runtime/.titan-runtime-build-config
-RUNTIME_ARCHIVE_CONFIG := titan-runtime/.titan-runtime-archive-build-config
-LTITANLIB_BUILD_CONFIG := titan-runtime/.titan-ltitanlib-build-config
-STDLIB_CONFIG_STAMP := titan-runtime/.titan-stdlib-build-config
 STDLIB_COMPLETION_STAMP := titan-runtime/.titan-stdlib-complete
 
 # These wrappers indirectly launch recursive Make processes. The `+` recipe
@@ -561,15 +478,14 @@ STDLIB_COMPLETION_STAMP := titan-runtime/.titan-stdlib-complete
 # turning Make's dry-run, query, or touch modes into real wrapper execution.
 RECURSIVE_WRAPPER_GUARD = flags=$${MAKEFLAGS%% *}; case "$$flags" in -*) ;; *q*) exit 1 ;; *n*|*t*) exit 0 ;; esac;
 
-.PHONY: all help lua readline readline-bundled-install \
-	check-readline-tools luarocks libbacktrace libuv libuv-config llhttp \
+.PHONY: all help lua luarocks libbacktrace libuv libuv-config llhttp \
 	check-llhttp-tools sqlite3 check-sqlite3-tools openssl openssl-config check-openssl-tools \
 	check-system-openssl invalid-openssl-mode lpeglabel \
 	check-libuv-tools runtime titan \
 	stage-titan-bootstrap install-titan-sdk stdlib stdlib-objects install-stdlib \
 	publish-stdlib \
 	rock-post-install rock-test test rock-build \
-	examples clean clean-lua clean-readline clean-luarocks clean-libbacktrace clean-libuv \
+	examples clean clean-stdlib clean-lua clean-luarocks clean-libbacktrace clean-libuv \
 	clean-llhttp clean-sqlite3 clean-openssl \
 	distclean FORCE
 
@@ -582,7 +498,7 @@ all: lua libbacktrace libuv ## Build everything needed to run the test suite (de
 
 help: ## Show this help
 	@echo "Titan developer tasks:"
-	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | \
+	@grep -h -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | \
 	  awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-20s\033[0m %s\n", $$1, $$2}'
 	@echo
 	@echo "make all and make stdlib bundle patched libuv $(LIBUV_VERSION) and llhttp"
@@ -591,12 +507,10 @@ help: ## Show this help
 	@echo "All builds require a C compiler. titanc --pretty-print additionally needs"
 	@echo "clang-format. Bundled dependencies need CMake, Perl, git, tar, curl/wget,"
 	@echo "and sha256sum/shasum (macOS: xcode-select --install; brew install cmake)."
-	@echo "A usable system Readline is preferred; otherwise make lua builds pinned"
-	@echo "GNU Readline $(READLINE_RELEASE) into PREFIX automatically; that fallback also"
-	@echo "needs a linkable curses, tinfo, or termcap provider. Optional system packages:"
-	@echo "Ubuntu/Debian libreadline-dev libssl-dev pkg-config; Fedora"
-	@echo "readline-devel openssl-devel pkgconf-pkg-config; macOS brew"
-	@echo "install openssl@3 pkgconf. Add clang-format only for --pretty-print."
+	@echo "Lua's default Linux/macOS targets require system Readline development files."
+	@echo "Ubuntu/Debian: libreadline-dev libssl-dev pkg-config; Fedora:"
+	@echo "readline-devel openssl-devel pkgconf-pkg-config; macOS: brew install"
+	@echo "readline openssl@3 pkgconf. Override LUA_PLATFORM to omit Readline."
 	@echo "llhttp and SQLite $(SQLITE3_VERSION) are always bundled."
 	@echo "For a standalone installation, choose one writable PREFIX and run:"
 	@echo "  make lua PREFIX=/path"
@@ -606,538 +520,36 @@ help: ## Show this help
 
 libuv: ## Build the pinned bundled libuv with Titan's Unix cleanup correction
 
-readline: $(READLINE_SELECTION_CONFIG) ## Select system Readline or provision the prefix-local fallback
-
-lua: $(LUA_INSTALL_STAMP) ## Build and install Titan's prefix-configured Lua
-
-# Re-run the real compile/link probe on every invocation, but preserve the
-# configuration mtime when its result and inputs are unchanged. This keeps a
-# warm `make lua` quiet while noticing a host development package appearing or
-# disappearing. The system probe deliberately omits PREFIX: a previously
-# provisioned fallback is not misclassified as a host installation.
-# The selection file lives in the Lua submodule's build tree.
-$(READLINE_SELECTION_CONFIG): $(LUA_SOURCE_READY) FORCE
-	@set -e; \
-	mkdir -p "$(@D)"; \
-	base="$@.base"; probe="$@.probe"; probe_source="$@.probe.c"; \
-	probe_log="$@.probe.log"; \
-	tmp="$@.tmp"; stamp_tmp="$(READLINE_INSTALL_STAMP).tmp"; \
-	trap 'rm -f "$$base" "$$probe" "$$probe_source" "$$probe_log" "$$tmp" "$$stamp_tmp"' \
-		EXIT HUP INT TERM; \
-	case "$(READLINE_MODE)" in \
-	  auto|system|bundled) ;; \
-	  *) echo "ERROR: READLINE_MODE must be auto, system, or bundled (got '$(READLINE_MODE)')." >&2; \
-	     exit 1 ;; \
-	esac; \
-	case "$(LUA_PLATFORM)" in \
-	  linux-readline|macosx) needs_readline=yes ;; \
-	  *) needs_readline=no ;; \
-	esac; \
-	provider=disabled; \
-	if test "$$needs_readline" = yes; then \
-	  printf '%s\n' 'int main(void) { return 0; }' > "$$probe_source"; \
-	  if ! $(LUA_CC) $(LUA_MYCFLAGS) $(LUA_MYLDFLAGS) \
-	       "$$probe_source" -o "$$probe" $(LUA_MYLIBS) \
-	       >"$$probe_log" 2>&1; then \
-	    echo "ERROR: Lua compiler/linker sanity probe failed before Readline selection." >&2; \
-	    cat "$$probe_log" >&2; \
-	    exit 1; \
-	  fi; \
-	  printf '%s\n' \
-	    '#include <stdio.h>' \
-	    '#include <readline/readline.h>' \
-	    '#include <readline/history.h>' \
-	    'int main(int argc, char **argv) {' \
-	    '  if (argc == 12345) add_history(readline(argv[0]));' \
-	    '  return rl_readline_name == NULL;' \
-	    '}' \
-	    > "$$probe_source"; \
-	  system_readline=no; \
-	  if test "$(READLINE_MODE)" != bundled && \
-	     $(LUA_CC) $(LUA_MYCFLAGS) $(READLINE_SYSTEM_CPPFLAGS) \
-	       $(LUA_MYLDFLAGS) $(READLINE_SYSTEM_LDFLAGS) "$$probe_source" \
-	       -o "$$probe" -lreadline $(LUA_MYLIBS) $(READLINE_SYSTEM_LIBS) \
-	       >"$$probe_log" 2>&1; then \
-	    system_readline=yes; \
-	  fi; \
-	  if test "$$system_readline" = yes; then \
-	    provider=system; \
-	  elif test "$(READLINE_MODE)" = system; then \
-	    echo "ERROR: READLINE_MODE=system, but the readline header/library probe failed." >&2; \
-	    cat "$$probe_log" >&2; \
-	    echo "  Use READLINE_MODE=auto (the default) to build the prefix-local fallback." >&2; \
-	    exit 1; \
-	  else \
-	    provider=bundled; \
-	  fi; \
-	fi; \
-	if test "$$provider" = bundled; then \
-	  source_inputs_ok=no; \
-	  if command -v sha256sum >/dev/null 2>&1; then \
-	    if printf '%s  %s\n' "$(READLINE_COMBINED_PATCH_SHA256)" \
-	         "$(READLINE_PATCH_FILE)" | sha256sum -c - >/dev/null 2>&1 && \
-	       printf '%s  %s\n' "$(READLINE_LICENSE_SHA256)" \
-	         "$(READLINE_LICENSE_SOURCE)" | sha256sum -c - >/dev/null 2>&1; then \
-	      source_inputs_ok=yes; \
-	    fi; \
-	  elif command -v shasum >/dev/null 2>&1; then \
-	    if printf '%s  %s\n' "$(READLINE_COMBINED_PATCH_SHA256)" \
-	         "$(READLINE_PATCH_FILE)" | shasum -a 256 -c - >/dev/null 2>&1 && \
-	       printf '%s  %s\n' "$(READLINE_LICENSE_SHA256)" \
-	         "$(READLINE_LICENSE_SOURCE)" | shasum -a 256 -c - >/dev/null 2>&1; then \
-	      source_inputs_ok=yes; \
-	    fi; \
-	  else \
-	    echo "ERROR: need sha256sum or shasum to verify $(READLINE_PATCH_FILE)." >&2; \
-	    exit 1; \
-	  fi; \
-	  if test "$$source_inputs_ok" != yes; then \
-	    echo "ERROR: checksum mismatch in vendored Readline patch or license input." >&2; \
-	    exit 1; \
-	  fi; \
-	fi; \
-	if test "$$provider" = bundled; then \
-	  printf '%s\n' 'int main(void) { return 0; }' > "$$probe_source"; \
-	  if ! $(LUA_CC) $(READLINE_CFLAGS) $(READLINE_CPPFLAGS) \
-	       $(READLINE_LDFLAGS) "$$probe_source" -o "$$probe" $(LUA_MYLIBS) \
-	       >"$$probe_log" 2>&1; then \
-	    echo "ERROR: Readline fallback compiler/linker sanity probe failed before terminal-library selection." >&2; \
-	    cat "$$probe_log" >&2; \
-	    exit 1; \
-	  fi; \
-	fi; \
-	termcap=; \
-	if test "$$provider" = bundled; then \
-	  printf '%s\n' \
-	    'extern int tgetent(char *, const char *);' \
-	    'int main(void) { return tgetent((char *)0, (const char *)0); }' \
-	    > "$$probe_source"; \
-	  termcap_found=no; \
-	  if test "$(READLINE_TERMCAP_LIB)" != auto; then \
-	    termcap=$(call make_shell_quote,$(READLINE_TERMCAP_LIB)); \
-	    if $(LUA_CC) $(READLINE_CFLAGS) $(READLINE_CPPFLAGS) \
-	       $(READLINE_LDFLAGS) "$$probe_source" -o "$$probe" \
-	       $(LUA_MYLIBS) $$termcap \
-	       >/dev/null 2>&1; then \
-	      termcap_found=yes; \
-	    fi; \
-	  else \
-	    candidates='none -ltinfo -lncursesw -lncurses -lcurses -ltermcap'; \
-	    if test "$(HOST_OS)" = Linux; then \
-	      candidates="$$candidates -Wl,-l:libtinfo.so.6 -Wl,-l:libtinfo.so.5 -Wl,-l:libncursesw.so.6 -Wl,-l:libncurses.so.6"; \
-	    fi; \
-	    for candidate in $$candidates; do \
-	      candidate_flags=$$candidate; \
-	      if test "$$candidate" = none; then candidate_flags=; fi; \
-	      if $(LUA_CC) $(READLINE_CFLAGS) $(READLINE_CPPFLAGS) \
-	         $(READLINE_LDFLAGS) "$$probe_source" -o "$$probe" \
-	         $(LUA_MYLIBS) $$candidate_flags >/dev/null 2>&1; then \
-	        termcap="$$candidate_flags"; termcap_found=yes; break; \
-	      fi; \
-	    done; \
-	  fi; \
-	  if test "$$termcap_found" != yes; then \
-	    echo "ERROR: local Readline needs a usable curses, tinfo, or termcap library." >&2; \
-	    echo "  Install the platform terminal-library development package or set READLINE_TERMCAP_LIB." >&2; \
-	    exit 1; \
-	  fi; \
-	fi; \
-	{ printf 'provider=%s\n' "$$provider"; \
-	  printf 'termcap=%s\n' "$$termcap"; \
-	  printf '%s\n' \
-	    $(call make_shell_quote,LUA_PLATFORM=$(LUA_PLATFORM)) \
-	    $(call make_shell_quote,READLINE_MODE=$(READLINE_MODE)) \
-	    $(call make_shell_quote,READLINE_VERSION=$(READLINE_VERSION)) \
-	    $(call make_shell_quote,READLINE_PATCHLEVEL=$(READLINE_PATCHLEVEL)) \
-	    $(call make_shell_quote,READLINE_SHA256=$(READLINE_SHA256)) \
-	    $(call make_shell_quote,READLINE_PATCH_001_SHA256=$(READLINE_PATCH_001_SHA256)) \
-	    $(call make_shell_quote,READLINE_PATCH_002_SHA256=$(READLINE_PATCH_002_SHA256)) \
-	    $(call make_shell_quote,READLINE_PATCH_003_SHA256=$(READLINE_PATCH_003_SHA256)) \
-	    $(call make_shell_quote,READLINE_COMBINED_PATCH_SHA256=$(READLINE_COMBINED_PATCH_SHA256)) \
-	    $(call make_shell_quote,READLINE_LICENSE_SHA256=$(READLINE_LICENSE_SHA256)) \
-	    $(call make_shell_quote,READLINE_BUILD_PROFILE=$(READLINE_BUILD_PROFILE)) \
-	    $(call make_shell_quote,READLINE_PRIVATE_ROOT=$(READLINE_PRIVATE_ROOT)) \
-	    $(call make_shell_quote,READLINE_PRIVATE_INCLUDEDIR=$(READLINE_PRIVATE_INCLUDEDIR)) \
-	    $(call make_shell_quote,READLINE_PRIVATE_LIBDIR=$(READLINE_PRIVATE_LIBDIR)) \
-	    $(call make_shell_quote,LUA_CC=$(LUA_CC)) \
-	    $(call make_shell_quote,AR=$(AR)) \
-	    $(call make_shell_quote,RANLIB=$(RANLIB)) \
-	    $(call make_shell_quote,READLINE_CFLAGS=$(READLINE_CFLAGS)) \
-	    $(call make_shell_quote,READLINE_CPPFLAGS=$(READLINE_CPPFLAGS)) \
-	    $(call make_shell_quote,READLINE_LDFLAGS=$(READLINE_LDFLAGS)) \
-	    $(call make_shell_quote,READLINE_ARFLAGS=$(READLINE_ARFLAGS)) \
-	    $(call make_shell_quote,READLINE_HOST=$(READLINE_HOST)) \
-	    $(call make_shell_quote,READLINE_SYSTEM_CPPFLAGS=$(READLINE_SYSTEM_CPPFLAGS)) \
-	    $(call make_shell_quote,READLINE_SYSTEM_LDFLAGS=$(READLINE_SYSTEM_LDFLAGS)) \
-	    $(call make_shell_quote,READLINE_SYSTEM_LIBS=$(READLINE_SYSTEM_LIBS)) \
-	    $(call make_shell_quote,READLINE_TERMCAP_LIB=$(READLINE_TERMCAP_LIB)); \
-	} > "$$base"; \
-	if test "$$provider" = bundled; then \
-	  printf '%s\n' \
-	    '#include <stdio.h>' \
-	    '#include <readline/readline.h>' \
-	    '#include <readline/history.h>' \
-	    'int main(int argc, char **argv) {' \
-	    '  if (argc == 12345) add_history(readline(argv[0]));' \
-	    '  return rl_readline_name == NULL;' \
-	    '}' \
-	    > "$$probe_source"; \
-	  fallback_current=no; \
-	  if test -f "$(READLINE_INSTALL_STAMP)" && \
-	     cmp -s "$$base" "$(READLINE_INSTALL_STAMP)" && \
-	     test -f "$(READLINE_HEADER)" && test -f "$(READLINE_HISTORY_HEADER)" && \
-	     test -f "$(READLINE_STATIC_LIB)" && \
-	     cmp -s "$(READLINE_LICENSE_SOURCE)" "$(READLINE_LICENSE)" && \
-	     $(LUA_CC) -I"$(READLINE_PRIVATE_INCLUDEDIR)" \
-	       $(READLINE_CFLAGS) $(READLINE_CPPFLAGS) $(READLINE_LDFLAGS) \
-	       "$$probe_source" -o "$$probe" "$(READLINE_STATIC_LIB)" \
-	       $(LUA_MYLIBS) $$termcap >/dev/null 2>&1; then \
-	    fallback_current=yes; \
-	  fi; \
-	  if test "$$fallback_current" != yes; then \
-	    echo "==> System Readline development files unavailable; provisioning $(READLINE_RELEASE)"; \
-	    $(MAKE) --no-print-directory readline-bundled-install \
-	      LUA_CC=$(call make_shell_quote,$(LUA_CC)) \
-	      AR=$(call make_shell_quote,$(AR)) \
-	      RANLIB=$(call make_shell_quote,$(RANLIB)) \
-	      READLINE_CFLAGS=$(call make_shell_quote,$(READLINE_CFLAGS)) \
-	      READLINE_CPPFLAGS=$(call make_shell_quote,$(READLINE_CPPFLAGS)) \
-	      READLINE_LDFLAGS=$(call make_shell_quote,$(READLINE_LDFLAGS)) \
-	      READLINE_ARFLAGS=$(call make_shell_quote,$(READLINE_ARFLAGS)) \
-	      READLINE_HOST=$(call make_shell_quote,$(READLINE_HOST)) \
-	      READLINE_SELECTED_TERMCAP_LIB="$$termcap"; \
-	    if ! test -f "$(READLINE_HEADER)" || \
-	       ! test -f "$(READLINE_HISTORY_HEADER)" || \
-	       ! test -f "$(READLINE_STATIC_LIB)" || \
-	       ! cmp -s "$(READLINE_LICENSE_SOURCE)" "$(READLINE_LICENSE)" || \
-	       ! $(LUA_CC) -I"$(READLINE_PRIVATE_INCLUDEDIR)" \
-	         $(READLINE_CFLAGS) $(READLINE_CPPFLAGS) $(READLINE_LDFLAGS) \
-	         "$$probe_source" -o "$$probe" "$(READLINE_STATIC_LIB)" \
-	         $(LUA_MYLIBS) $$termcap >/dev/null 2>&1; then \
-	      echo "ERROR: prefix-local Readline failed its exact post-install link validation." >&2; \
-	      exit 1; \
-	    fi; \
-	    cp "$$base" "$$stamp_tmp"; \
-	    mv -f "$$stamp_tmp" "$(READLINE_INSTALL_STAMP)"; \
-	  fi; \
-	fi; \
-	cp "$$base" "$$tmp"; \
-	if test -f "$@" && cmp -s "$$tmp" "$@"; then \
-	  :; \
-	else \
-	  echo "==> Lua Readline provider: $$provider"; \
-	  mv -f "$$tmp" "$@"; \
-	fi
-
-check-readline-tools:
-	@missing=0; \
-	if ! command -v "$(firstword $(LUA_CC))" >/dev/null 2>&1; then \
-	  echo "ERROR: Lua C compiler '$(firstword $(LUA_CC))' was not found." >&2; missing=1; \
-	fi; \
-	if ! command -v "$(firstword $(AR))" >/dev/null 2>&1; then \
-	  echo "ERROR: archiver '$(firstword $(AR))' was not found." >&2; missing=1; \
-	fi; \
-	if ! command -v "$(firstword $(RANLIB))" >/dev/null 2>&1; then \
-	  echo "ERROR: ranlib '$(firstword $(RANLIB))' was not found." >&2; missing=1; \
-	fi; \
-	if ! command -v curl >/dev/null 2>&1 && ! command -v wget >/dev/null 2>&1; then \
-	  echo "ERROR: need curl or wget to download $(READLINE_TARBALL)." >&2; missing=1; \
-	fi; \
-	if ! command -v sha256sum >/dev/null 2>&1 && ! command -v shasum >/dev/null 2>&1; then \
-	  echo "ERROR: need sha256sum or shasum to verify $(READLINE_TARBALL)." >&2; missing=1; \
-	fi; \
-	if ! command -v tar >/dev/null 2>&1; then \
-	  echo "ERROR: tar is required to extract $(READLINE_TARBALL)." >&2; missing=1; \
-	fi; \
-	if ! command -v git >/dev/null 2>&1; then \
-	  echo "ERROR: git is required to apply GNU Readline's vendored official fixes." >&2; missing=1; \
-	fi; \
-	test "$$missing" -eq 0
-
-$(READLINE_TARBALL):
-	@$(MAKE) --no-print-directory check-readline-tools
-	@echo "==> Downloading $(READLINE_URL)"
-	@set -e; tmp="$@.tmp"; trap 'rm -f "$$tmp"' EXIT HUP INT TERM; \
-	if command -v curl >/dev/null 2>&1; then \
-	  curl -fL -o "$$tmp" "$(READLINE_URL)"; \
-	else \
-	  wget -O "$$tmp" "$(READLINE_URL)"; \
-	fi; \
-	if command -v sha256sum >/dev/null 2>&1; then \
-	  printf '%s  %s\n' "$(READLINE_SHA256)" "$$tmp" | sha256sum -c -; \
-	else \
-	  printf '%s  %s\n' "$(READLINE_SHA256)" "$$tmp" | shasum -a 256 -c -; \
-	fi; \
-	mv -f "$$tmp" "$@"
-
-$(READLINE_EXTRACTED): $(READLINE_TARBALL) $(READLINE_PATCH_FILE)
-	@$(MAKE) --no-print-directory check-readline-tools
-	@echo "==> Verifying GNU Readline $(READLINE_VERSION) release archive and patch"
-	@set -e; check_sha256() { \
-	  expected="$$1"; path="$$2"; \
-	  if command -v sha256sum >/dev/null 2>&1; then \
-	    printf '%s  %s\n' "$$expected" "$$path" | sha256sum -c -; \
-	  else \
-	    printf '%s  %s\n' "$$expected" "$$path" | shasum -a 256 -c -; \
-	  fi; \
-	}; \
-	if ! check_sha256 "$(READLINE_SHA256)" "$(READLINE_TARBALL)"; then \
-	  echo "ERROR: checksum mismatch for $(READLINE_TARBALL); removing it." >&2; \
-	  rm -f "$(READLINE_TARBALL)"; exit 1; \
-	fi; \
-	if ! check_sha256 "$(READLINE_COMBINED_PATCH_SHA256)" \
-	     "$(READLINE_PATCH_FILE)"; then \
-	  echo "ERROR: checksum mismatch for applied Readline patch $(READLINE_PATCH_FILE)." >&2; \
-	  exit 1; \
-	fi
-	@echo "==> Extracting and patching GNU Readline $(READLINE_RELEASE)"
-	rm -rf "$(READLINE_DIR)"
-	tar zxf "$(READLINE_TARBALL)"
-	@test -x "$(READLINE_DIR)/configure" || { \
-	  echo "ERROR: $(READLINE_TARBALL) did not contain $(READLINE_DIR)." >&2; exit 1; \
-	}
-	git apply --directory="$(READLINE_DIR)" "$(READLINE_PATCH_FILE)"
-	@test "$$(sed -n '$$p' "$(READLINE_DIR)/patchlevel")" = "3"
-	@touch "$@"
-
-# The fallback is a private Lua build input, not a discoverable SDK. Upstream's
-# pkg-config files capture the temporary stage paths, so discard them before
-# atomically publishing the validated include/library tree. Its ordinary build
-# is parallel-safe, but its install targets race while replacing libhistory.a;
-# keep only that staging pass serial.
-# Keep recipe command substitutions on one physical line: Apple GNU Make 3.81
-# can corrupt the recipe tail when collapsing their escaped newlines.
-readline-bundled-install: check-readline-tools $(READLINE_EXTRACTED)
-	@set -e; \
-	echo "==> Building staged static GNU Readline $(READLINE_RELEASE) for $(PREFIX)"; \
-	mkdir -p "$(dir $(READLINE_PRIVATE_ROOT))"; \
-	stage="$$(mktemp -d "$(dir $(READLINE_PRIVATE_ROOT)).readline-$(READLINE_RELEASE).stage.XXXXXX")"; \
-	backup=; \
-	cleanup() { \
-	  if test -n "$$backup" && test -e "$$backup" && \
-	     ! test -e "$(READLINE_PRIVATE_ROOT)"; then \
-	    mv "$$backup" "$(READLINE_PRIVATE_ROOT)"; \
-	  fi; \
-	  if test -n "$$stage" && test -e "$$stage"; then rm -rf "$$stage"; fi; \
-	}; \
-	trap cleanup EXIT HUP INT TERM; \
-	rm -rf "$(READLINE_BUILD_DIR)"; \
-	mkdir -p "$(READLINE_BUILD_DIR)"; \
-	( cd "$(READLINE_BUILD_DIR)" && \
-	  "$(abspath $(READLINE_DIR))/configure" \
-	    --prefix="$(abspath $$stage)" \
-	    --includedir="$(abspath $$stage)/include" \
-	    --libdir="$(abspath $$stage)/lib" \
-	    --datarootdir="$(abspath $$stage)/share" \
-	    --disable-shared --enable-static \
-	    $(if $(strip $(READLINE_HOST)),--host=$(call make_shell_quote,$(READLINE_HOST)),) \
+# Lua and LuaRocks preparation deliberately checks only their installed programs.
+# Clean the upstream source tree yourself before changing build inputs.
+lua: ## Build and install Lua unless PREFIX/bin/lua already exists
+	@set -e; if test ! -f "$(LUA_BIN)"; then \
+	  test -f "$(LUA_SOURCE_READY)" || { \
+	    echo "ERROR: Lua source is missing; initialize the Lua submodule." >&2; \
+	    echo "Run: git submodule update --init --recursive" >&2; exit 1; \
+	  }; \
+	  $(MAKE) -C "$(LUA_DIR)" $(LUA_PLATFORM) \
+	    TITAN_LIBRARY_VERSION="$(TITAN_LIBRARY_VERSION)" PREFIX="$(PREFIX)" \
 	    CC=$(call make_shell_quote,$(LUA_CC)) \
-	    AR=$(call make_shell_quote,$(AR)) \
-	    ARFLAGS=$(call make_shell_quote,$(READLINE_ARFLAGS)) \
-	    RANLIB=$(call make_shell_quote,$(RANLIB)) \
-	    CFLAGS=$(call make_shell_quote,$(READLINE_CFLAGS)) \
-	    CPPFLAGS=$(call make_shell_quote,$(READLINE_CPPFLAGS)) \
-	    LDFLAGS=$(call make_shell_quote,$(READLINE_LDFLAGS)) \
-	    LIBS=$(call make_shell_quote,$(READLINE_SELECTED_TERMCAP_LIB)) ); \
-	$(MAKE) -C "$(READLINE_BUILD_DIR)"; \
-	$(MAKE) -j1 -C "$(READLINE_BUILD_DIR)" install; \
-	rm -rf "$$stage/lib/pkgconfig"; \
-	mkdir -p "$$stage/share/licenses"; \
-	cmp -s "$(READLINE_DIR)/COPYING" "$(READLINE_LICENSE_SOURCE)" || { \
-	  echo "ERROR: checked-in GNU Readline license does not match the pinned source." >&2; \
-	  exit 1; \
-	}; \
-	install -m 0644 "$(READLINE_LICENSE_SOURCE)" \
-	  "$$stage/share/licenses/COPYING"; \
-	test -f "$$stage/include/readline/readline.h" && \
-	test -f "$$stage/include/readline/history.h" && \
-	test -f "$$stage/lib/libreadline.a" && \
-	cmp -s "$(READLINE_LICENSE_SOURCE)" "$$stage/share/licenses/COPYING" || { \
-	  echo "ERROR: staged GNU Readline install is incomplete." >&2; exit 1; \
-	}; \
-	probe_source="$(READLINE_BUILD_DIR)/.titan-link-probe.c"; \
-	probe="$(READLINE_BUILD_DIR)/.titan-link-probe"; \
-	printf '%s\n' \
-	  '#include <stdio.h>' \
-	  '#include <readline/readline.h>' \
-	  '#include <readline/history.h>' \
-	  'int main(int argc, char **argv) {' \
-	  '  if (argc == 12345) add_history(readline(argv[0]));' \
-	  '  return rl_readline_name == NULL;' \
-	  '}' > "$$probe_source"; \
-	$(LUA_CC) -I"$$stage/include" $(READLINE_CFLAGS) $(READLINE_CPPFLAGS) \
-	  $(READLINE_LDFLAGS) "$$probe_source" -o "$$probe" \
-	  "$$stage/lib/libreadline.a" $(LUA_MYLIBS) \
-	  $(READLINE_SELECTED_TERMCAP_LIB) || { \
-	  echo "ERROR: staged GNU Readline failed its exact link validation." >&2; \
-	  exit 1; \
-	}; \
-	rm -f "$$probe" "$$probe_source"; \
-	if test -e "$(READLINE_PRIVATE_ROOT)"; then \
-	  backup="$(READLINE_PRIVATE_ROOT).backup.$$$$"; \
-	  test ! -e "$$backup"; \
-	  mv "$(READLINE_PRIVATE_ROOT)" "$$backup"; \
-	fi; \
-	mv "$$stage" "$(READLINE_PRIVATE_ROOT)"; \
-	stage=; \
-	if test -n "$$backup"; then rm -rf "$$backup"; backup=; fi; \
-	trap - EXIT HUP INT TERM
-
-$(LUA_INSTALL_STAMP): $(LUA_LIB) $(LUA_BUILD_CONFIG)
-	@echo "==> Installing Lua $(LUA_VERSION) into $(PREFIX)"
-	$(MAKE) -C "$(LUA_DIR)" install INSTALL_TOP="$(PREFIX)"
-	mkdir -p "$(LUA_SOURCE_INSTALL_DIR)"
-	install -m 0644 $(LUA_DIR)/src/*.c $(LUA_DIR)/src/*.h \
-		"$(LUA_SOURCE_INSTALL_DIR)/"
-	rm -f "$(LUA_SOURCE_INSTALL_DIR)/titan_windows_loadlib.h"
-	mkdir -p "$(@D)"
-	touch "$@"
-
-# Source checkout belongs to Git, never to a build recipe. Prepared CI copies
-# may contain the same plain sources without Git metadata.
-$(LUA_SOURCE_READY):
-	@echo "ERROR: Lua source is missing; initialize the Lua submodule."
-	@echo "Run: git submodule update --init --recursive"
-	@exit 1
-
-# Track every source/header byte as well as the effective native-build inputs.
-# This also invalidates objects after source changes with unchanged mtimes.
-# An unchanged invocation preserves the stamp mtime and keeps the build warm.
-# The fork's sources are installed unchanged; PREFIX remains a build input for
-# native dependencies and installation.
-$(LUA_BUILD_CONFIG): $(LUA_SOURCE_READY) $(READLINE_SELECTION_CONFIG) FORCE
-	@set -e; tmp="$@.tmp"; \
-	changed="$@.changed"; \
-	rm -f "$$changed"; \
-	{ printf '%s\n' \
-		$(call make_shell_quote,TITAN_BUILD_PROFILE=$(TITAN_BUILD_PROFILE)) \
-		$(call make_shell_quote,PREFIX=$(PREFIX)) \
-		$(call make_shell_quote,LUA_PLATFORM=$(LUA_PLATFORM)) \
-		$(call make_shell_quote,LUA_CC=$(LUA_CC)) \
-		$(call make_shell_quote,LUA_AR=$(LUA_AR)) \
-		$(call make_shell_quote,LUA_RANLIB=$(LUA_RANLIB)) \
-		$(call make_shell_quote,LUA_MYCFLAGS=$(LUA_MYCFLAGS)) \
-		$(call make_shell_quote,LUA_MYLDFLAGS=$(LUA_MYLDFLAGS)) \
-		$(call make_shell_quote,LUA_MYLIBS=$(LUA_MYLIBS)) \
-		$(call make_shell_quote,TITAN_LIBRARY_VERSION=$(TITAN_LIBRARY_VERSION)); } \
-		> "$$tmp"; \
-	cat "$(READLINE_SELECTION_CONFIG)" >> "$$tmp"; \
-	(cd "$(LUA_DIR)/src"; \
-	  if command -v sha256sum >/dev/null 2>&1; then \
-	    sha256sum $(notdir $(LUA_SOURCE_FILES)); \
-	  else shasum -a 256 $(notdir $(LUA_SOURCE_FILES)); fi) >> "$$tmp"; \
-	if test -r "$@" && cmp -s "$$tmp" "$@"; then \
-	  rm -f "$$tmp"; \
-	else \
-	  echo "==> Configuring Lua native build inputs"; \
-	  mv -f "$$tmp" "$$changed"; \
+	    AR=$(call make_shell_quote,$(LUA_AR)) \
+	    RANLIB=$(call make_shell_quote,$(LUA_RANLIB)) \
+	    MYCFLAGS=$(call make_shell_quote,$(LUA_MYCFLAGS)) \
+	    MYLDFLAGS=$(call make_shell_quote,$(LUA_MYLDFLAGS)) \
+	    MYLIBS=$(call make_shell_quote,$(LUA_MYLIBS)); \
+	  $(MAKE) -C "$(LUA_DIR)" install \
+	    TITAN_LIBRARY_VERSION="$(TITAN_LIBRARY_VERSION)" PREFIX="$(PREFIX)"; \
 	fi
-	@if test -r "$@.changed"; then \
-	  $(MAKE) -C "$(LUA_DIR)/src" clean; \
-	fi
-	@if test -r "$@.changed"; then mv -f "$@.changed" "$@"; fi
 
-$(LUA_LIB): $(LUA_BUILD_CONFIG)
-	@set -e; \
-	readline_provider="$$(sed -n 's/^provider=//p' "$(READLINE_SELECTION_CONFIG)")"; \
-	readline_termcap="$$(sed -n 's/^termcap=//p' "$(READLINE_SELECTION_CONFIG)")"; \
-	lua_mycflags=$(call make_shell_quote,$(LUA_MYCFLAGS)); \
-	lua_myldflags=$(call make_shell_quote,$(LUA_MYLDFLAGS)); \
-	lua_mylibs=$(call make_shell_quote,$(LUA_MYLIBS)); \
-	if test "$$readline_provider" = bundled; then \
-	  lua_mycflags="-I$(abspath $(READLINE_PRIVATE_INCLUDEDIR)) $$lua_mycflags"; \
-	  lua_myldflags="-L$(abspath $(READLINE_PRIVATE_LIBDIR)) $$lua_myldflags"; \
-	  lua_mylibs="$$lua_mylibs $$readline_termcap"; \
-	elif test "$$readline_provider" = system; then \
-	  lua_mycflags="$$lua_mycflags $(READLINE_SYSTEM_CPPFLAGS)"; \
-	  lua_myldflags="$$lua_myldflags $(READLINE_SYSTEM_LDFLAGS)"; \
-	  lua_mylibs="$$lua_mylibs $(READLINE_SYSTEM_LIBS)"; \
-	fi; \
-	echo "==> Building Lua ($(LUA_PLATFORM), Readline=$$readline_provider, MYCFLAGS=$$lua_mycflags)"; \
-	$(MAKE) -C "$(LUA_DIR)" $(LUA_PLATFORM) \
-		CC=$(call make_shell_quote,$(LUA_CC)) \
-		AR=$(call make_shell_quote,$(LUA_AR)) \
-		RANLIB=$(call make_shell_quote,$(LUA_RANLIB)) \
-		MYCFLAGS="$$lua_mycflags" \
-		MYLDFLAGS="$$lua_myldflags" \
-		MYLIBS="$$lua_mylibs"
-
-luarocks: $(LUAROCKS_INSTALL_STAMP) ## Install pinned LuaRocks into PREFIX
-ifeq ($(TITAN_BUILD_PROFILE),validation)
-luarocks: $(COMPILER_DEPS_INSTALL_STAMP)
-endif
-
-# Generic LuaRocks CFLAGS still own O0 Titan payloads. Only the compiler's
-# native Lua dependencies receive these separately scoped host flags. A
-# content receipt replaces stale same-version modules in an existing prefix.
-$(COMPILER_DEPS_INSTALL_STAMP): $(LUAROCKS_INSTALL_STAMP) FORCE
-	$(LUA_BIN) -E scripts/prepare_compiler_dependencies.lua \
-		$(call make_shell_quote,$(PREFIX)) $(call make_shell_quote,$@) \
-		$(call make_shell_quote,$(LUAROCKS_INSTALL_STAMP)) \
-		$(call make_shell_quote,$(LUA_BUILD_CONFIG)) \
-		$(call make_shell_quote,$(CC)) $(call make_shell_quote,$(AR)) \
-		$(call make_shell_quote,$(RANLIB)) \
-		$(call make_shell_quote,$(COMPILER_DEPS_CFLAGS)) \
-		$(call make_shell_quote,$(COMPILER_DEPS_LDFLAGS)) \
-		$(call make_shell_quote,$(LPEGLABEL_ROCK_CFLAGS)) \
-		$(call make_shell_quote,$(LPEGLABEL_ROCK_LDFLAGS)) \
-		$(call make_shell_quote,$(LPEGLABEL_VERSION))
-
-# This is a content/config migration target, not a one-time touched stamp.
-# LuaRocks' generated config includes a user tree even with --rocks-tree; Titan
-# owns one standalone prefix, so emit the complete force-config file ourselves
-# with Lua's %q quoting and keep only that prefix's named system tree.  FORCE
-# makes old prefixes self-migrate, while cmp preserves a completely quiet warm
-# invocation and does not perturb dependency mtimes.
-$(LUAROCKS_INSTALL_STAMP): $(LUA_INSTALL_STAMP) FORCE
-	@set -e; \
-	mkdir -p "$(@D)" "$(dir $(LUAROCKS_CONFIG_FILE))"; \
-	stamp_tmp="$@.tmp"; config_tmp="$@.config.tmp"; \
-	changed="$@.changed"; config_changed="$@.config.changed"; \
-	rm -f "$$changed" "$$config_changed"; \
-	{ printf '%s\n' \
-		$(call make_shell_quote,LUAROCKS_VERSION=$(LUAROCKS_VERSION)) \
-		$(call make_shell_quote,PREFIX=$(PREFIX)) \
-		$(call make_shell_quote,LUA_ABI_VERSION=$(LUA_ABI_VERSION)) \
-		$(call make_shell_quote,LUA_BIN=$(LUA_BIN)) \
-		$(call make_shell_quote,CC=$(CC)) \
-		$(call make_shell_quote,AR=$(AR)) \
-		$(call make_shell_quote,RANLIB=$(RANLIB)) \
-		$(call make_shell_quote,CONFIGURE=--prefix=$(PREFIX) --rocks-tree=$(PREFIX) --with-lua=$(PREFIX) --force-config) \
-		$(call make_shell_quote,CONFIG_POLICY=$(LUAROCKS_CONFIG_POLICY)) \
-		$(call make_shell_quote,TITAN_BUILD_PROFILE=$(TITAN_BUILD_PROFILE)); } \
-		> "$$stamp_tmp"; \
-	TITAN_CONFIG_PREFIX=$(call make_shell_quote,$(PREFIX)) \
-	TITAN_CONFIG_LUA_VERSION=$(call make_shell_quote,$(LUA_ABI_VERSION)) \
-	TITAN_CONFIG_CC=$(call make_shell_quote,$(CC)) \
-	TITAN_CONFIG_AR=$(call make_shell_quote,$(AR)) \
-	TITAN_CONFIG_RANLIB=$(call make_shell_quote,$(RANLIB)) \
-	TITAN_CONFIG_NATIVE_FLAGS=$(call make_shell_quote,$(TITAN_PROFILE_NATIVE_FLAGS)) \
-		"$(LUA_BIN)" -e 'local p = assert(os.getenv("TITAN_CONFIG_PREFIX")); local v = assert(os.getenv("TITAN_CONFIG_LUA_VERSION")); local cc = assert(os.getenv("TITAN_CONFIG_CC")); local ar = assert(os.getenv("TITAN_CONFIG_AR")); local ranlib = assert(os.getenv("TITAN_CONFIG_RANLIB")); local function q(s) return string.format("%q", s) end; local function join(s) return p == "/" and ("/" .. s) or (p .. "/" .. s) end; io.write("-- LuaRocks configuration for Titan (system tree and native toolchain)\n\n"); io.write("rocks_trees = {\n   { name = \"system\", root = ", q(p), " };\n}\n"); local native_flags = assert(os.getenv("TITAN_CONFIG_NATIVE_FLAGS")); io.write("variables = {\n"); if native_flags ~= "" then io.write("   CFLAGS = ", q(native_flags .. " -fPIC"), ";\n"); end; io.write("   LUA_DIR = ", q(p), ";\n   LUA_BINDIR = ", q(join("bin")), ";\n   LUA_VERSION = ", q(v), ";\n   LUA = ", q(join("bin/lua")), ";\n   CC = ", q(cc), ";\n   LD = ", q(cc), ";\n   AR = ", q(ar), ";\n   RANLIB = ", q(ranlib), ";\n}\n")' \
-		> "$$config_tmp"; \
-	if test -x "$(PREFIX)/bin/luarocks" && \
-	   test -r "$@" && cmp -s "$$stamp_tmp" "$@" && \
-	   test -r "$(LUAROCKS_CONFIG_FILE)" && \
-	   cmp -s "$$config_tmp" "$(LUAROCKS_CONFIG_FILE)"; then \
-		rm -f "$$stamp_tmp" "$$config_tmp"; \
-	else \
-		mv -f "$$stamp_tmp" "$$changed"; \
-		mv -f "$$config_tmp" "$$config_changed"; \
-	fi
-	@if test -r "$@.changed"; then \
-		$(MAKE) --no-print-directory "$(LUAROCKS_EXTRACTED)"; \
-	fi
-	@if test -r "$@.changed"; then \
-		echo "==> Configuring LuaRocks $(LUAROCKS_VERSION) for $(PREFIX)"; \
-		(cd "$(LUAROCKS_DIR)" && \
-			./configure --prefix="$(PREFIX)" --rocks-tree="$(PREFIX)" \
-				--with-lua="$(PREFIX)" --force-config); \
-	fi
-	@if test -r "$@.changed"; then $(MAKE) -C "$(LUAROCKS_DIR)"; fi
-	@if test -r "$@.changed"; then $(MAKE) -C "$(LUAROCKS_DIR)" install; fi
-	@if test -r "$@.changed"; then \
-		mv -f "$@.config.changed" "$(LUAROCKS_CONFIG_FILE)"; \
-		mv -f "$@.changed" "$@"; \
+luarocks: lua ## Install LuaRocks unless PREFIX/bin/luarocks already exists
+	@set -e; if test ! -f "$(LUAROCKS_BIN)"; then \
+	  if test ! -f "$(LUAROCKS_DIR)/configure"; then \
+	    $(MAKE) --no-print-directory -f $(call make_shell_quote,$(firstword $(MAKEFILE_LIST))) "$(LUAROCKS_TARBALL)"; \
+	    tar zxf "$(LUAROCKS_TARBALL)"; \
+	  fi; \
+	  (cd "$(LUAROCKS_DIR)" && ./configure --prefix="$(PREFIX)" \
+	    --rocks-tree="$(PREFIX)" --with-lua="$(PREFIX)" --force-config); \
+	  $(MAKE) -C "$(LUAROCKS_DIR)" LUA_DIR="$(PREFIX)"; \
+	  $(MAKE) -C "$(LUAROCKS_DIR)" install LUA_DIR="$(PREFIX)"; \
 	fi
 
 $(LUAROCKS_TARBALL):
@@ -1149,21 +561,6 @@ $(LUAROCKS_TARBALL):
 	else \
 	  echo "ERROR: need 'curl' or 'wget' to download LuaRocks" >&2; exit 1; \
 	fi
-
-$(LUAROCKS_EXTRACTED):
-	@if [ ! -d "$(LUAROCKS_DIR)" ]; then \
-	  mkdir -p "$(LUAROCKS_DIR)"; \
-	  touch "$(LUAROCKS_DIR)/.titan-needs-extract"; \
-	fi
-	@if test -r "$(LUAROCKS_DIR)/.titan-needs-extract"; then \
-	  $(MAKE) --no-print-directory "$(LUAROCKS_TARBALL)"; \
-	fi
-	@if test -r "$(LUAROCKS_DIR)/.titan-needs-extract"; then \
-	  echo "==> Extracting $(LUAROCKS_TARBALL)"; \
-	  tar zxf "$(LUAROCKS_TARBALL)"; \
-	  rm -f "$(LUAROCKS_DIR)/.titan-needs-extract"; \
-	fi
-	@touch "$@"
 
 libbacktrace: $(LIBBT_LIB) ## Clone and build the bundled libbacktrace source tree
 
@@ -1178,30 +575,7 @@ $(LIBBT_CLONE_STAMP):
 	}
 	@touch "$@"
 
-# Autoconf Makefiles do not know that a changed command-line compiler/CFLAGS
-# invalidates existing objects.  Preserve the stamp mtime on a warm build; when
-# an effective input changes (notably sanitizer flags), clean before rebuilding.
-$(LIBBT_BUILD_CONFIG): $(LIBBT_CLONE_STAMP) FORCE
-	@tmp="$@.tmp"; changed="$@.changed"; rm -f "$$changed"; \
-	{ printf '%s\n' \
-		$(call make_shell_quote,TITAN_BUILD_PROFILE=$(TITAN_BUILD_PROFILE)) \
-		$(call make_shell_quote,HOST_OS=$(HOST_OS)) \
-		$(call make_shell_quote,HOST_ARCH=$(HOST_ARCH)) \
-		$(call make_shell_quote,CC=$(CC)) \
-		$(call make_shell_quote,AR=$(AR)) \
-		$(call make_shell_quote,RANLIB=$(RANLIB)) \
-		$(call make_shell_quote,LIBBT_CFLAGS=$(LIBBT_CFLAGS)); } > "$$tmp"; \
-	if test -r "$@" && cmp -s "$$tmp" "$@"; then \
-		rm -f "$$tmp"; \
-	else \
-		mv -f "$$tmp" "$$changed"; \
-	fi
-	@if test -r "$@.changed" && test -f "$(LIBBT_DIR)/Makefile"; then \
-		$(MAKE) -C "$(LIBBT_DIR)" clean; \
-	fi
-	@if test -r "$@.changed"; then mv -f "$@.changed" "$@"; fi
-
-$(LIBBT_LIB): $(LIBBT_BUILD_CONFIG)
+$(LIBBT_LIB): $(LIBBT_CLONE_STAMP)
 	@echo "==> Building libbacktrace (configure + make, $(LIBBT_CFLAGS))"
 	cd "$(LIBBT_DIR)" && \
 		./configure CC=$(call make_shell_quote,$(CC)) \
@@ -1284,38 +658,7 @@ $(LIBUV_EXTRACTED): $(LIBUV_TARBALL) $(LIBUV_PATCH_FILE)
 	git apply --directory="$(LIBUV_SRC_DIR)" "$(LIBUV_PATCH_FILE)"
 	@touch "$@"
 
-# Make does not otherwise notice changes to command-line CMake variables, while
-# depending on the complete Makefile rebuilds libuv after unrelated edits.
-# Preserve this stamp and the configured build tree when every effective input
-# is unchanged.  On a change, recreate only libuv's generated build directory:
-# CMake caches its compiler and generator, so an in-place reconfigure could
-# silently retain an old toolchain or reject a new generator. CMake owns the
-# archive tools associated with that compiler; explicit alternatives belong in
-# LIBUV_CMAKE_FLAGS. CI uses the same profile string as its cross-run cache key.
-$(LIBUV_BUILD_CONFIG): FORCE
-	@set -e; \
-	tmp="$${TMPDIR:-/tmp}/titan-libuv-build-config.$$$$.tmp"; \
-	trap 'rm -f "$$tmp"' 0 1 2 15; \
-	{ printf '%s\n' \
-		$(call make_shell_quote,TITAN_BUILD_PROFILE=$(TITAN_BUILD_PROFILE)) \
-		$(call make_shell_quote,HOST_OS=$(HOST_OS)) \
-		$(call make_shell_quote,HOST_ARCH=$(HOST_ARCH)) \
-		$(call make_shell_quote,CC=$(CC)) \
-		$(call make_shell_quote,CMAKE_GENERATOR=$(CMAKE_GENERATOR)) \
-		$(call make_shell_quote,LIBUV_VERSION=$(LIBUV_VERSION)) \
-		$(call make_shell_quote,LIBUV_BUILD_PROFILE=$(LIBUV_BUILD_PROFILE)) \
-		$(call make_shell_quote,LIBUV_BUILD_TYPE=$(LIBUV_BUILD_TYPE)) \
-		$(call make_shell_quote,LIBUV_CMAKE_FLAGS=$(LIBUV_CMAKE_FLAGS)) \
-		$(call make_shell_quote,LIBUV_BUILD_CFLAGS=$(LIBUV_BUILD_CFLAGS)); } > "$$tmp"; \
-	if test -r "$@" && cmp -s "$$tmp" "$@"; then \
-		rm -f "$$tmp"; \
-	else \
-		rm -rf "$(LIBUV_BUILD_DIR)"; \
-		mkdir -p "$(@D)"; \
-		mv -f "$$tmp" "$@"; \
-	fi
-
-$(LIBUV_LIB): $(LIBUV_EXTRACTED) $(LIBUV_BUILD_CONFIG)
+$(LIBUV_LIB): $(LIBUV_EXTRACTED)
 	@$(MAKE) --no-print-directory check-libuv-tools
 	@echo "==> Configuring libuv $(LIBUV_VERSION) (static, PIC, $(LIBUV_BUILD_TYPE))"
 	cmake -S "$(LIBUV_SRC_DIR)" -B "$(LIBUV_BUILD_DIR)" \
@@ -1340,7 +683,7 @@ libuv-config: libuv ## Print the effective libuv compiler and linker inputs
 	@echo "LIBUV_LDFLAGS=$(LIBUV_LDFLAGS)"
 	@echo "LIBUV_PROVIDER_LDFLAGS=$(LIBUV_PROVIDER_LDFLAGS)"
 
-llhttp: $(LLHTTP_ARCHIVE) ## Build/validate private llhttp support
+llhttp: $(LLHTTP_ARCHIVE) ## Build private llhttp support
 
 check-llhttp-tools:
 	@missing=0; \
@@ -1399,101 +742,19 @@ $(LLHTTP_EXTRACTED): $(LLHTTP_TARBALL)
 $(LLHTTP_SOURCES) $(LLHTTP_HEADER): $(LLHTTP_EXTRACTED)
 	@test -f "$@" || { echo "ERROR: extracted llhttp omitted $@" >&2; exit 1; }
 
-$(LLHTTP_BUILD_CONFIG): FORCE $(LLHTTP_EXTRACTED) $(LLHTTP_SOURCES) \
+$(LLHTTP_BUILD_DIR)/%.o: $(LLHTTP_SRC_DIR)/src/%.c \
 		$(LLHTTP_HEADER)
 	@mkdir -p "$(@D)"
-	@tmp="$@.tmp"; \
-	{ printf '%s\n' \
-		$(call make_shell_quote,LLHTTP_VERSION=$(LLHTTP_VERSION)) \
-		$(call make_shell_quote,LLHTTP_SHA256=$(LLHTTP_SHA256)) \
-		$(call make_shell_quote,TITAN_BUILD_PROFILE=$(TITAN_BUILD_PROFILE)) \
-		$(call make_shell_quote,HOST_OS=$(HOST_OS)) \
-		$(call make_shell_quote,HOST_ARCH=$(HOST_ARCH)) \
-		$(call make_shell_quote,CC=$(CC)) \
-		$(call make_shell_quote,AR=$(AR)) \
-		$(call make_shell_quote,RANLIB=$(RANLIB)) \
-		$(call make_shell_quote,ROCK_CFLAGS=$(ROCK_CFLAGS)) \
-		$(call make_shell_quote,TITAN_EXTRA_CPPFLAGS=$(TITAN_EXTRA_CPPFLAGS)) \
-		$(call make_shell_quote,TITAN_EXTRA_CFLAGS=$(TITAN_EXTRA_CFLAGS)) \
-		$(call make_shell_quote,LLHTTP_CPPFLAGS=$(LLHTTP_CPPFLAGS)) \
-		$(call make_shell_quote,LLHTTP_CFLAGS=$(LLHTTP_CFLAGS)) \
-		$(call make_shell_quote,LLHTTP_BUILD_CFLAGS=$(LLHTTP_BUILD_CFLAGS)) \
-		$(call make_shell_quote,SOURCES=$(LLHTTP_SOURCES)); \
-	  for input in $(LLHTTP_SOURCES) $(LLHTTP_HEADER); do \
-	    cksum "$$input"; \
-	  done; } > "$$tmp"; \
-	if test -r "$@" && cmp -s "$$tmp" "$@"; then \
-	  rm -f "$$tmp"; \
-	else \
-	  mv -f "$$tmp" "$@"; \
-	fi
-
-$(LLHTTP_BUILD_DIR)/%.o: $(LLHTTP_SRC_DIR)/src/%.c \
-		$(LLHTTP_BUILD_CONFIG)
 	$(CC) $(TITAN_EXTRA_CPPFLAGS) $(LLHTTP_CPPFLAGS) $(ROCK_CFLAGS) \
 		$(LLHTTP_CFLAGS) $(TITAN_EXTRA_CFLAGS) $(LLHTTP_BUILD_CFLAGS) \
 		-c "$<" -o "$@"
 
-$(LLHTTP_ARCHIVE_CONFIG): FORCE $(firstword $(LLHTTP_OBJECTS))
-	@mkdir -p "$(@D)"
-	@set -e; \
-	probe="$(@D)/.titan-llhttp-tool-probe.a"; tmp="$@.tmp"; \
-	rm -f "$$probe" "$$tmp"; \
-	if $(AR) qDc "$$probe" "$(firstword $(LLHTTP_OBJECTS))" \
-			>/dev/null 2>&1 && \
-	   $(RANLIB) -D "$$probe" >/dev/null 2>&1; then \
-	  ar_mode=qDc; ranlib_mode=-D; deterministic=yes; \
-	else \
-	  rm -f "$$probe"; \
-	  $(AR) qc "$$probe" "$(firstword $(LLHTTP_OBJECTS))" \
-			>/dev/null 2>&1 || { \
-	    echo "ERROR: configured AR supports neither qDc nor qc" >&2; exit 1; \
-	  }; \
-	  $(RANLIB) "$$probe" >/dev/null 2>&1 || { \
-	    echo "ERROR: configured RANLIB is unusable" >&2; exit 1; \
-	  }; \
-	  ar_mode=qc; ranlib_mode=ordinary; deterministic=no; \
-	fi; \
-	rm -f "$$probe"; \
-	{ printf '%s\n' \
-		$(call make_shell_quote,AR=$(AR)) \
-		$(call make_shell_quote,RANLIB=$(RANLIB)) \
-		$(call make_shell_quote,MEMBERS=$(notdir $(LLHTTP_OBJECTS))) \
-		"AR_MODE=$$ar_mode" "RANLIB_MODE=$$ranlib_mode" \
-		"DETERMINISTIC=$$deterministic"; } > "$$tmp"; \
-	if test -r "$@" && cmp -s "$$tmp" "$@"; then \
-	  rm -f "$$tmp"; \
-	else \
-	  mv -f "$$tmp" "$@"; \
-	fi
+$(LLHTTP_ARCHIVE): $(LLHTTP_OBJECTS)
+	rm -f "$@"
+	$(AR) rcs "$@" $(LLHTTP_OBJECTS)
+	$(RANLIB) "$@"
 
-$(LLHTTP_ARCHIVE): FORCE $(LLHTTP_OBJECTS) $(LLHTTP_ARCHIVE_CONFIG)
-	@set -e; \
-	expected="$$(printf '%s\n' $(notdir $(LLHTTP_OBJECTS)))"; actual=""; \
-	if test -f "$@" && test ! -L "$@"; then \
-	  actual="$$( $(AR) t "$@" 2>/dev/null | awk '$$0 !~ /^__[.]SYMDEF(_64)?( SORTED)?$$/' )"; \
-	fi; \
-	newer=$(call make_shell_quote,$(filter-out FORCE,$?)); \
-	if test -n "$$newer" || test "$$actual" != "$$expected"; then \
-	  tmp="$@.tmp"; rm -f "$$tmp"; \
-	  ar_mode="$$(sed -n 's/^AR_MODE=//p' "$(LLHTTP_ARCHIVE_CONFIG)")"; \
-	  ranlib_mode="$$(sed -n 's/^RANLIB_MODE=//p' "$(LLHTTP_ARCHIVE_CONFIG)")"; \
-	  $(AR) "$$ar_mode" "$$tmp" $(LLHTTP_OBJECTS); \
-	  if test "$$ranlib_mode" = -D; then \
-	    $(RANLIB) -D "$$tmp"; \
-	  else \
-	    $(RANLIB) "$$tmp"; \
-	  fi; \
-	  actual="$$( $(AR) t "$$tmp" 2>/dev/null | awk '$$0 !~ /^__[.]SYMDEF(_64)?( SORTED)?$$/' )"; \
-	  test "$$actual" = "$$expected" || { \
-	    rm -f "$$tmp"; \
-	    echo "ERROR: private llhttp archive has wrong member order" >&2; \
-	    exit 1; \
-	  }; \
-	  mv -f "$$tmp" "$@"; \
-	fi
-
-sqlite3: $(SQLITE3_ARCHIVE) ## Build/validate private sqlite3 support
+sqlite3: $(SQLITE3_ARCHIVE) ## Build private sqlite3 support
 
 check-sqlite3-tools:
 	@missing=0; \
@@ -1552,99 +813,17 @@ $(SQLITE3_EXTRACTED): $(SQLITE3_TARBALL)
 $(SQLITE3_SOURCES) $(SQLITE3_HEADER): $(SQLITE3_EXTRACTED)
 	@test -f "$@" || { echo "ERROR: extracted sqlite3 omitted $@" >&2; exit 1; }
 
-$(SQLITE3_BUILD_CONFIG): FORCE $(SQLITE3_EXTRACTED) $(SQLITE3_SOURCES) \
+$(SQLITE3_BUILD_DIR)/%.o: $(SQLITE3_SRC_DIR)/%.c \
 		$(SQLITE3_HEADER)
 	@mkdir -p "$(@D)"
-	@tmp="$@.tmp"; \
-	{ printf '%s\n' \
-		$(call make_shell_quote,SQLITE3_VERSION=$(SQLITE3_VERSION)) \
-		$(call make_shell_quote,SQLITE3_SHA256=$(SQLITE3_SHA256)) \
-		$(call make_shell_quote,TITAN_BUILD_PROFILE=$(TITAN_BUILD_PROFILE)) \
-		$(call make_shell_quote,HOST_OS=$(HOST_OS)) \
-		$(call make_shell_quote,HOST_ARCH=$(HOST_ARCH)) \
-		$(call make_shell_quote,CC=$(CC)) \
-		$(call make_shell_quote,AR=$(AR)) \
-		$(call make_shell_quote,RANLIB=$(RANLIB)) \
-		$(call make_shell_quote,ROCK_CFLAGS=$(ROCK_CFLAGS)) \
-		$(call make_shell_quote,TITAN_EXTRA_CPPFLAGS=$(TITAN_EXTRA_CPPFLAGS)) \
-		$(call make_shell_quote,TITAN_EXTRA_CFLAGS=$(TITAN_EXTRA_CFLAGS)) \
-		$(call make_shell_quote,SQLITE3_CPPFLAGS=$(SQLITE3_CPPFLAGS)) \
-		$(call make_shell_quote,SQLITE3_CFLAGS=$(SQLITE3_CFLAGS)) \
-		$(call make_shell_quote,SQLITE3_BUILD_CFLAGS=$(SQLITE3_BUILD_CFLAGS)) \
-		$(call make_shell_quote,SOURCES=$(SQLITE3_SOURCES)); \
-	  for input in $(SQLITE3_SOURCES) $(SQLITE3_HEADER); do \
-	    cksum "$$input"; \
-	  done; } > "$$tmp"; \
-	if test -r "$@" && cmp -s "$$tmp" "$@"; then \
-	  rm -f "$$tmp"; \
-	else \
-	  mv -f "$$tmp" "$@"; \
-	fi
-
-$(SQLITE3_BUILD_DIR)/%.o: $(SQLITE3_SRC_DIR)/%.c \
-		$(SQLITE3_BUILD_CONFIG)
 	$(CC) $(TITAN_EXTRA_CPPFLAGS) $(SQLITE3_CPPFLAGS) $(ROCK_CFLAGS) \
 		$(SQLITE3_CFLAGS) $(TITAN_EXTRA_CFLAGS) $(SQLITE3_BUILD_CFLAGS) \
 		-c "$<" -o "$@"
 
-$(SQLITE3_ARCHIVE_CONFIG): FORCE $(firstword $(SQLITE3_OBJECTS))
-	@mkdir -p "$(@D)"
-	@set -e; \
-	probe="$(@D)/.titan-sqlite3-tool-probe.a"; tmp="$@.tmp"; \
-	rm -f "$$probe" "$$tmp"; \
-	if $(AR) qDc "$$probe" "$(firstword $(SQLITE3_OBJECTS))" \
-			>/dev/null 2>&1 && \
-	   $(RANLIB) -D "$$probe" >/dev/null 2>&1; then \
-	  ar_mode=qDc; ranlib_mode=-D; deterministic=yes; \
-	else \
-	  rm -f "$$probe"; \
-	  $(AR) qc "$$probe" "$(firstword $(SQLITE3_OBJECTS))" \
-			>/dev/null 2>&1 || { \
-	    echo "ERROR: configured AR supports neither qDc nor qc" >&2; exit 1; \
-	  }; \
-	  $(RANLIB) "$$probe" >/dev/null 2>&1 || { \
-	    echo "ERROR: configured RANLIB is unusable" >&2; exit 1; \
-	  }; \
-	  ar_mode=qc; ranlib_mode=ordinary; deterministic=no; \
-	fi; \
-	rm -f "$$probe"; \
-	{ printf '%s\n' \
-		$(call make_shell_quote,AR=$(AR)) \
-		$(call make_shell_quote,RANLIB=$(RANLIB)) \
-		$(call make_shell_quote,MEMBERS=$(notdir $(SQLITE3_OBJECTS))) \
-		"AR_MODE=$$ar_mode" "RANLIB_MODE=$$ranlib_mode" \
-		"DETERMINISTIC=$$deterministic"; } > "$$tmp"; \
-	if test -r "$@" && cmp -s "$$tmp" "$@"; then \
-	  rm -f "$$tmp"; \
-	else \
-	  mv -f "$$tmp" "$@"; \
-	fi
-
-$(SQLITE3_ARCHIVE): FORCE $(SQLITE3_OBJECTS) $(SQLITE3_ARCHIVE_CONFIG)
-	@set -e; \
-	expected="$$(printf '%s\n' $(notdir $(SQLITE3_OBJECTS)))"; actual=""; \
-	if test -f "$@" && test ! -L "$@"; then \
-	  actual="$$( $(AR) t "$@" 2>/dev/null | awk '$$0 !~ /^__[.]SYMDEF(_64)?( SORTED)?$$/' )"; \
-	fi; \
-	newer=$(call make_shell_quote,$(filter-out FORCE,$?)); \
-	if test -n "$$newer" || test "$$actual" != "$$expected"; then \
-	  tmp="$@.tmp"; rm -f "$$tmp"; \
-	  ar_mode="$$(sed -n 's/^AR_MODE=//p' "$(SQLITE3_ARCHIVE_CONFIG)")"; \
-	  ranlib_mode="$$(sed -n 's/^RANLIB_MODE=//p' "$(SQLITE3_ARCHIVE_CONFIG)")"; \
-	  $(AR) "$$ar_mode" "$$tmp" $(SQLITE3_OBJECTS); \
-	  if test "$$ranlib_mode" = -D; then \
-	    $(RANLIB) -D "$$tmp"; \
-	  else \
-	    $(RANLIB) "$$tmp"; \
-	  fi; \
-	  actual="$$( $(AR) t "$$tmp" 2>/dev/null | awk '$$0 !~ /^__[.]SYMDEF(_64)?( SORTED)?$$/' )"; \
-	  test "$$actual" = "$$expected" || { \
-	    rm -f "$$tmp"; \
-	    echo "ERROR: private sqlite3 archive has wrong member order" >&2; \
-	    exit 1; \
-	  }; \
-	  mv -f "$$tmp" "$@"; \
-	fi
+$(SQLITE3_ARCHIVE): $(SQLITE3_OBJECTS)
+	rm -f "$@"
+	$(AR) rcs "$@" $(SQLITE3_OBJECTS)
+	$(RANLIB) "$@"
 
 ifeq ($(OPENSSL_MODE),bundled)
 openssl: $(OPENSSL_LIBS) ## Build bundled OpenSSL
@@ -1702,35 +881,9 @@ $(OPENSSL_EXTRACTED): $(OPENSSL_TARBALL)
 	}
 	@touch "$@"
 
-$(OPENSSL_BUILD_CONFIG): FORCE $(OPENSSL_EXTRACTED)
-	@set -e; \
-	tmp="$${TMPDIR:-/tmp}/titan-openssl-build-config.$$$$.tmp"; \
-	trap 'rm -f "$$tmp"' 0 1 2 15; \
-	{ printf '%s\n' \
-		$(call make_shell_quote,OPENSSL_VERSION=$(OPENSSL_VERSION)) \
-		$(call make_shell_quote,OPENSSL_SHA256=$(OPENSSL_SHA256)) \
-		$(call make_shell_quote,TITAN_BUILD_PROFILE=$(TITAN_BUILD_PROFILE)) \
-		$(call make_shell_quote,HOST_OS=$(HOST_OS)) \
-		$(call make_shell_quote,HOST_ARCH=$(HOST_ARCH)) \
-		$(call make_shell_quote,CC=$(CC)) \
-		$(call make_shell_quote,AR=$(AR)) \
-		$(call make_shell_quote,RANLIB=$(RANLIB)) \
-		$(call make_shell_quote,OPENSSL_PERL=$(OPENSSL_PERL)) \
-		$(call make_shell_quote,OPENSSL_CONFIGURE_FLAGS=$(OPENSSL_CONFIGURE_FLAGS)) \
-		$(call make_shell_quote,OPENSSL_REQUIRED_CFLAGS=$(OPENSSL_REQUIRED_CFLAGS)) \
-		$(call make_shell_quote,OPENSSL_BUILD_CFLAGS=$(OPENSSL_BUILD_CFLAGS)) \
-		$(call make_shell_quote,TITAN_EXTRA_CPPFLAGS=$(TITAN_EXTRA_CPPFLAGS)); } \
-	  > "$$tmp"; \
-	if test -r "$@" && cmp -s "$$tmp" "$@"; then \
-	  rm -f "$$tmp"; \
-	else \
-	  rm -rf "$(OPENSSL_BUILD_DIR)"; \
-	  mkdir -p "$(@D)"; \
-	  mv -f "$$tmp" "$@"; \
-	fi
-
-$(OPENSSL_BUILD_COMPLETE): $(OPENSSL_EXTRACTED) $(OPENSSL_BUILD_CONFIG)
+$(OPENSSL_BUILD_COMPLETE): $(OPENSSL_EXTRACTED)
 	@$(MAKE) --no-print-directory check-openssl-tools
+	@mkdir -p "$(OPENSSL_BUILD_DIR)"
 	@echo "==> Configuring OpenSSL $(OPENSSL_VERSION) (static, PIC, private)"
 	cd "$(OPENSSL_BUILD_DIR)" && \
 	  CC=$(call make_shell_quote,$(CC)) \
@@ -1793,212 +946,44 @@ openssl-config: openssl ## Print effective OpenSSL compiler/linker inputs
 	@echo "OPENSSL_EXTRA_OBJECTS=$(OPENSSL_EXTRA_OBJECTS)"
 	@echo "OPENSSL_PROVIDER_LDFLAGS=$(OPENSSL_PROVIDER_LDFLAGS)"
 
-lpeglabel: $(LPEGLABEL_ARCHIVE) ## Build/validate the private LPegLabel archive
-
-# Hash every source/header and the exact public Lua configuration on every
-# invocation. The stamp's mtime changes only when content or a target-affecting
-# input changes, so warm builds remain true no-ops while same-mtime source
-# rewrites still invalidate every private object.
-$(LPEGLABEL_BUILD_CONFIG): FORCE $(LPEGLABEL_SOURCES) $(LPEGLABEL_HEADERS) \
-		$(wildcard $(LPEGLABEL_LUA_HEADERS)) $(LUA_SDK_PREREQ)
-	@mkdir -p "$(@D)"
-	@tmp="$@.tmp"; \
-	{ printf '%s\n' \
-		$(call make_shell_quote,LPEGLABEL_VERSION=$(LPEGLABEL_VERSION)) \
-		$(call make_shell_quote,LPEGLABEL_COMMIT=$(LPEGLABEL_COMMIT)) \
-		$(call make_shell_quote,TITAN_BUILD_PROFILE=$(TITAN_BUILD_PROFILE)) \
-		$(call make_shell_quote,HOST_OS=$(HOST_OS)) \
-		$(call make_shell_quote,HOST_ARCH=$(HOST_ARCH)) \
-		$(call make_shell_quote,CC=$(CC)) \
-		$(call make_shell_quote,AR=$(AR)) \
-		$(call make_shell_quote,RANLIB=$(RANLIB)) \
-		$(call make_shell_quote,ROCK_LUA_INCDIR=$(ROCK_LUA_INCDIR)) \
-		$(call make_shell_quote,ROCK_CFLAGS=$(ROCK_CFLAGS)) \
-		$(call make_shell_quote,TITAN_EXTRA_CPPFLAGS=$(TITAN_EXTRA_CPPFLAGS)) \
-		$(call make_shell_quote,TITAN_EXTRA_CFLAGS=$(TITAN_EXTRA_CFLAGS)) \
-		$(call make_shell_quote,LPEGLABEL_CPPFLAGS=$(LPEGLABEL_CPPFLAGS)) \
-		$(call make_shell_quote,LPEGLABEL_CFLAGS=$(LPEGLABEL_CFLAGS)) \
-		$(call make_shell_quote,LPEGLABEL_BUILD_CFLAGS=$(LPEGLABEL_BUILD_CFLAGS)) \
-		$(call make_shell_quote,SOURCES=$(LPEGLABEL_SOURCES)) \
-		$(call make_shell_quote,HEADERS=$(LPEGLABEL_HEADERS)) \
-		$(call make_shell_quote,LUA_HEADERS=$(LPEGLABEL_LUA_HEADERS)); \
-	  for input in $(LPEGLABEL_SOURCES) $(LPEGLABEL_HEADERS) \
-			$(LPEGLABEL_LUA_HEADERS); do \
-	    cksum "$$input"; \
-	  done; } > "$$tmp"; \
-	if test -r "$@" && cmp -s "$$tmp" "$@"; then \
-	  rm -f "$$tmp"; \
-	else \
-	  mv -f "$$tmp" "$@"; \
-	fi
+lpeglabel: $(LPEGLABEL_ARCHIVE) ## Build the private LPegLabel archive
 
 $(LPEGLABEL_BUILD_DIR)/%.o: $(LPEGLABEL_VENDOR_DIR)/%.c \
-		$(LPEGLABEL_BUILD_CONFIG)
+		$(LPEGLABEL_HEADERS) $(wildcard $(LPEGLABEL_LUA_HEADERS)) $(LUA_SDK_PREREQ)
 	@mkdir -p "$(@D)"
 	$(CC) $(TITAN_EXTRA_CPPFLAGS) $(LPEGLABEL_CPPFLAGS) \
 		-I"$(ROCK_LUA_INCDIR)" $(ROCK_CFLAGS) $(LPEGLABEL_CFLAGS) \
 		$(TITAN_EXTRA_CFLAGS) $(LPEGLABEL_BUILD_CFLAGS) -c "$<" -o "$@"
 
-# Probe the configured archive commands rather than assuming GNU flags. Use
-# deterministic qDc/-D only when both tools support that pair; otherwise verify
-# the portable q/ordinary-ranlib pair. The selected mode is a stamped input to
-# archive construction.
-$(LPEGLABEL_ARCHIVE_CONFIG): FORCE $(firstword $(LPEGLABEL_OBJECTS))
-	@mkdir -p "$(@D)"
-	@set -e; \
-	probe="$(@D)/.titan-lpeglabel-tool-probe.a"; \
-	tmp="$@.tmp"; \
-	rm -f "$$probe" "$$tmp"; \
-	if $(AR) qDc "$$probe" "$(firstword $(LPEGLABEL_OBJECTS))" \
-			>/dev/null 2>&1 && \
-	   $(RANLIB) -D "$$probe" >/dev/null 2>&1; then \
-	  ar_mode=qDc; ranlib_mode=-D; deterministic=yes; \
-	else \
-	  rm -f "$$probe"; \
-	  if ! $(AR) qc "$$probe" "$(firstword $(LPEGLABEL_OBJECTS))" \
-			>/dev/null 2>&1; then \
-	    echo "ERROR: configured AR supports neither qDc nor qc" >&2; \
-	    exit 1; \
-	  fi; \
-	  if ! $(RANLIB) "$$probe" >/dev/null 2>&1; then \
-	    echo "ERROR: configured RANLIB supports neither -D nor ordinary mode" >&2; \
-	    exit 1; \
-	  fi; \
-	  ar_mode=qc; ranlib_mode=ordinary; deterministic=no; \
-	fi; \
-	rm -f "$$probe"; \
-	{ printf '%s\n' \
-		$(call make_shell_quote,AR=$(AR)) \
-		$(call make_shell_quote,RANLIB=$(RANLIB)) \
-		$(call make_shell_quote,MEMBERS=$(notdir $(LPEGLABEL_OBJECTS))) \
-		"AR_MODE=$$ar_mode" "RANLIB_MODE=$$ranlib_mode" \
-		"DETERMINISTIC=$$deterministic"; } > "$$tmp"; \
-	if test -r "$@" && cmp -s "$$tmp" "$@"; then \
-	  rm -f "$$tmp"; \
-	else \
-	  mv -f "$$tmp" "$@"; \
-	fi
-
-# FORCE makes exact ordered membership a warm-build invariant. Rebuild only
-# when an input/configuration is newer or the regular archive's manifest is
-# missing or wrong; successful validation leaves the archive mtime untouched.
-$(LPEGLABEL_ARCHIVE): FORCE $(LPEGLABEL_OBJECTS) \
-		$(LPEGLABEL_ARCHIVE_CONFIG)
-	@set -e; \
-	expected="$$(printf '%s\n' $(notdir $(LPEGLABEL_OBJECTS)))"; \
-	actual=""; \
-	if test -f "$@" && test ! -L "$@"; then \
-	  actual="$$( $(AR) t "$@" 2>/dev/null | awk '$$0 !~ /^__[.]SYMDEF(_64)?( SORTED)?$$/' )"; \
-	fi; \
-	newer=$(call make_shell_quote,$(filter-out FORCE,$?)); \
-	if test -n "$$newer" || test "$$actual" != "$$expected"; then \
-	  tmp="$@.tmp"; \
-	  rm -f "$$tmp"; \
-	  ar_mode="$$(sed -n 's/^AR_MODE=//p' "$(LPEGLABEL_ARCHIVE_CONFIG)")"; \
-	  ranlib_mode="$$(sed -n 's/^RANLIB_MODE=//p' "$(LPEGLABEL_ARCHIVE_CONFIG)")"; \
-	  $(AR) "$$ar_mode" "$$tmp" $(LPEGLABEL_OBJECTS); \
-	  if test "$$ranlib_mode" = -D; then \
-	    $(RANLIB) -D "$$tmp"; \
-	  else \
-	    $(RANLIB) "$$tmp"; \
-	  fi; \
-	  actual="$$( $(AR) t "$$tmp" 2>/dev/null | awk '$$0 !~ /^__[.]SYMDEF(_64)?( SORTED)?$$/' )"; \
-	  if test "$$actual" != "$$expected"; then \
-	    rm -f "$$tmp"; \
-	    echo "ERROR: private LPegLabel archive has wrong member order" >&2; \
-	    exit 1; \
-	  fi; \
-	  mv -f "$$tmp" "$@"; \
-	fi
+$(LPEGLABEL_ARCHIVE): $(LPEGLABEL_OBJECTS)
+	rm -f "$@"
+	$(AR) rcs "$@" $(LPEGLABEL_OBJECTS)
+	$(RANLIB) "$@"
 
 runtime: $(TITAN_RUNTIME_LIB) ## Build the Titan C runtime archive used by every compiler mode
 
-# titan.o and minicoro.o share one compile configuration. Recompute its
-# contents without changing mtime on a warm build so switching compilers,
-# include roots, or sanitizer flags cannot reuse stale native objects or the
-# archive made from them.
-$(RUNTIME_BUILD_CONFIG): FORCE
-	@tmp="$@.tmp"; \
-	{ printf '%s\n' \
-		$(call make_shell_quote,TITAN_BUILD_PROFILE=$(TITAN_BUILD_PROFILE)) \
-		$(call make_shell_quote,HOST_OS=$(HOST_OS)) \
-		$(call make_shell_quote,HOST_ARCH=$(HOST_ARCH)) \
-		$(call make_shell_quote,PREFIX=$(PREFIX)) \
-		$(call make_shell_quote,CC=$(CC)) \
-		$(call make_shell_quote,CFLAGS=$(CFLAGS)) \
-		$(call make_shell_quote,TITAN_EXTRA_CPPFLAGS=$(TITAN_EXTRA_CPPFLAGS)) \
-		$(call make_shell_quote,TITAN_EXTRA_CFLAGS=$(TITAN_EXTRA_CFLAGS)) \
-		$(call make_shell_quote,LUA_DIR=$(LUA_DIR)) \
-		$(call make_shell_quote,TITAN_RUNTIME_LUA_SOURCE_PATH=$(TITAN_RUNTIME_LUA_SOURCE_PATH)) \
-		$(call make_shell_quote,TITAN_RUNTIME_LUA_LIB=$(TITAN_RUNTIME_LUA_LIB)) \
-		$(call make_shell_quote,LUA_PLATFORM=$(LUA_PLATFORM)) \
-		$(call make_shell_quote,LUA_MYCFLAGS=$(LUA_MYCFLAGS)) \
-		$(call make_shell_quote,LUA_MYLDFLAGS=$(LUA_MYLDFLAGS)) \
-		$(call make_shell_quote,LUA_MYLIBS=$(LUA_MYLIBS)) \
-		$(call make_shell_quote,INCLUDES=titan-runtime $(TITAN_RUNTIME_LUA_SOURCE_PATH) $(LIBBT_DIR)); } \
-		> "$$tmp"; \
-	if test -r "$@" && cmp -s "$$tmp" "$@"; then \
-		rm -f "$$tmp"; \
-	else \
-		mv -f "$$tmp" "$@"; \
-	fi
-
-# ltitanlib.o has a distinct public-Lua compile and shared-module link surface.
-# Keep link inputs in the same stamp: a changed sanitizer LDFLAG must relink
-# titan.so even when its small C source and compile flags are otherwise stable.
-$(LTITANLIB_BUILD_CONFIG): FORCE
-	@tmp="$@.tmp"; \
-	{ printf '%s\n' \
-		$(call make_shell_quote,TITAN_BUILD_PROFILE=$(TITAN_BUILD_PROFILE)) \
-		$(call make_shell_quote,HOST_OS=$(HOST_OS)) \
-		$(call make_shell_quote,HOST_ARCH=$(HOST_ARCH)) \
-		$(call make_shell_quote,PREFIX=$(PREFIX)) \
-		$(call make_shell_quote,CC=$(CC)) \
-		$(call make_shell_quote,ROCK_LUA_INCDIR=$(ROCK_LUA_INCDIR)) \
-		$(call make_shell_quote,ROCK_CFLAGS=$(ROCK_CFLAGS)) \
-		$(call make_shell_quote,TITAN_EXTRA_CFLAGS=$(TITAN_EXTRA_CFLAGS)) \
-		$(call make_shell_quote,ROCK_LD=$(ROCK_LD)) \
-		$(call make_shell_quote,ROCK_LIBFLAG=$(ROCK_LIBFLAG)) \
-		$(call make_shell_quote,TITAN_EXTRA_LDFLAGS=$(TITAN_EXTRA_LDFLAGS)); } \
-		> "$$tmp"; \
-	if test -r "$@" && cmp -s "$$tmp" "$@"; then \
-		rm -f "$$tmp"; \
-	else \
-		mv -f "$$tmp" "$@"; \
-	fi
+$(LIBBT_DIR)/backtrace.h: | $(LIBBT_CLONE_STAMP)
 
 $(RUNTIME_O): titan-runtime/titan.c titan-runtime/titan.h \
-		$(TITAN_RUNTIME_LUA_HEADERS) $(RUNTIME_BUILD_CONFIG) | $(TITAN_RUNTIME_LUA_LIB) $(LIBBT_LIB)
+		titan-runtime/titan/ffi.h $(LIBBT_DIR)/backtrace.h \
+		$(TITAN_RUNTIME_LUA_HEADERS) | $(TITAN_RUNTIME_LUA_LIB) $(LIBBT_LIB)
 	$(CC) $(TITAN_EXTRA_CPPFLAGS) $(CFLAGS) $(TITAN_EXTRA_CFLAGS) \
 		-c titan-runtime/titan.c -I titan-runtime -I $(TITAN_RUNTIME_LUA_SOURCE_PATH) \
 		-I $(LIBBT_DIR) -o $@
 
 $(MINICORO_O): titan-runtime/minicoro.c \
 		titan-runtime/minicoro.h titan-runtime/titan/ffi.h \
-		$(TITAN_RUNTIME_LUA_HEADERS) $(RUNTIME_BUILD_CONFIG) | $(TITAN_RUNTIME_LUA_LIB) $(LIBBT_LIB)
+		$(TITAN_RUNTIME_LUA_HEADERS) | $(TITAN_RUNTIME_LUA_LIB) $(LIBBT_LIB)
 	$(CC) $(TITAN_EXTRA_CPPFLAGS) $(CFLAGS) $(TITAN_EXTRA_CFLAGS) \
 		-c titan-runtime/minicoro.c -I titan-runtime -I $(TITAN_RUNTIME_LUA_SOURCE_PATH) \
 		-I $(LIBBT_DIR) -o $@
 
-$(RUNTIME_ARCHIVE_CONFIG): FORCE
-	@tmp="$@.tmp"; \
-	{ printf '%s\n' \
-		$(call make_shell_quote,AR=$(AR)) \
-		$(call make_shell_quote,RANLIB=$(RANLIB)) \
-		$(call make_shell_quote,MEMBERS=$(notdir $(TITAN_RUNTIME_OBJECTS))); } \
-		> "$$tmp"; \
-	if test -r "$@" && cmp -s "$$tmp" "$@"; then \
-		rm -f "$$tmp"; \
-	else \
-		mv -f "$$tmp" "$@"; \
-	fi
-
-$(TITAN_RUNTIME_LIB): $(TITAN_RUNTIME_OBJECTS) $(RUNTIME_ARCHIVE_CONFIG)
+$(TITAN_RUNTIME_LIB): $(TITAN_RUNTIME_OBJECTS)
 	rm -f "$@"
 	$(AR) rcs "$@" $(TITAN_RUNTIME_OBJECTS)
 	$(RANLIB) "$@"
 
-$(LTITANLIB_O): titan-runtime/ltitanlib.c $(LTITANLIB_BUILD_CONFIG) \
+$(LTITANLIB_O): titan-runtime/ltitanlib.c \
 		$(wildcard $(ROCK_LUA_HEADERS)) $(LUA_SDK_PREREQ)
 	$(CC) $(ROCK_CFLAGS) $(TITAN_EXTRA_CFLAGS) \
 		-I"$(ROCK_LUA_INCDIR)" -c "$<" -o "$@"
@@ -2013,43 +998,11 @@ $(TITAN_BOOTSTRAP_SO): $(LTITANLIB_O)
 		status=$$?; rm -f "$$tmp"; exit $$status; \
 	fi
 
-# The active library path initially needs only Titan's bare Lua support entry. A
-# valid support/full image already at that path is deliberately preserved: a
-# repeated source build must never shrink a complete stdlib back to bootstrap.
+# Seed an absent canonical provider. Preserve an installed full standard library.
 stage-titan-bootstrap: $(TITAN_BOOTSTRAP_SO)
-	@test -n "$(strip $(ROCKS_TREE))" || { \
-	  echo "ERROR: stage-titan-bootstrap requires ROCKS_TREE" >&2; exit 1; \
-	}
-	@set -e; \
-	canonical="$(TITAN_CANONICAL_SUPPORT_SO)"; \
-	validate_support() { \
-	  TITAN_SUPPORT_IMAGE="$$1" "$(TITAN_LUA)" -E -e \
-	    'local image = assert(os.getenv("TITAN_SUPPORT_IMAGE")); local open, err = package.loadlib(image, "luaopen_titan"); if not open then io.stderr:write(tostring(err), "\n"); os.exit(1) end; local values = table.pack(pcall(open)); if not values[1] or values.n ~= 2 or type(values[2]) ~= "table" or type(values[2]._loadlib) ~= "function" or type(values[2]._loadlibglobal) ~= "function" then io.stderr:write("luaopen_titan did not return the required support table\n"); os.exit(1) end'; \
-	}; \
-	mkdir -p "$$(dirname "$$canonical")"; \
-	if test -e "$$canonical" || test -L "$$canonical"; then \
-	  if ! validate_support "$$canonical"; then \
-	    echo "ERROR: existing Titan library image is not a usable support provider: $$canonical" >&2; \
-	    exit 1; \
-	  fi; \
-	else \
-	  tmp="$$canonical.tmp.$$$$"; \
-	  trap 'rm -f "$$tmp"' EXIT HUP INT TERM; \
-	  install -m 0755 "$(TITAN_BOOTSTRAP_SO)" "$$tmp"; \
-	  validate_support "$$tmp" || { \
-	    echo "ERROR: private Titan bootstrap is not a usable support provider" >&2; \
-	    exit 1; \
-	  }; \
-	  if test -e "$$canonical" || test -L "$$canonical"; then \
-	    validate_support "$$canonical" || { \
-	      echo "ERROR: concurrently staged Titan image is incompatible: $$canonical" >&2; \
-	      exit 1; \
-	    }; \
-	  else \
-	    mv -f "$$tmp" "$$canonical"; \
-	  fi; \
-	  trap - EXIT HUP INT TERM; \
-	  rm -f "$$tmp"; \
+	@mkdir -p "$(TITAN_STDLIB_VERSION_DIR)"
+	@if test ! -e "$(TITAN_CANONICAL_SUPPORT_SO)"; then \
+	  install -m 0755 "$(TITAN_BOOTSTRAP_SO)" "$(TITAN_CANONICAL_SUPPORT_SO)"; \
 	fi
 
 # LuaRocks passes ROCKS_TREE only for its source build. A direct `make titan`
@@ -2131,8 +1084,7 @@ ifeq ($(STDLIB_USE_INSTALLED_RUNTIME),1)
 else
   STDLIB_PLATFORM_PREREQS := libuv openssl
   # The provider pair may extract every runtime member. Keep the runtime archive
-  # itself order-only so its exact-membership repair runs before the compiler
-  # without turning a no-op archive validation into a relink.
+  # itself order-only because its object prerequisites already own relinking.
   STDLIB_NATIVE_PREREQS := $(TITAN_RUNTIME_OBJECTS) \
 	$(STDLIB_EXTRA_OBJECTS)
   STDLIB_RUNTIME_ARCHIVE_PREREQ := $(TITAN_RUNTIME_LIB)
@@ -2175,6 +1127,7 @@ STDLIB_C_INPUTS_uv = $(UV_TITAN_HEADERS) $(foreach dir,$(STDLIB_UV_HEADER_DIRS),
 STDLIB_C_INPUTS_async = titan/async_signal_platform.h
 STDLIB_C_INPUTS_fs = titan/fs_platform.h
 STDLIB_C_INPUTS_os = titan/os_platform.h titan/os_environment.h
+STDLIB_C_INPUTS_path = titan/path_platform.h
 STDLIB_C_INPUTS_peg = $(LPEGLABEL_HEADERS)
 STDLIB_C_INPUTS_string = $(STRING_TITAN_HEADERS)
 STDLIB_C_INPUTS_http = $(LLHTTP_HEADER)
@@ -2202,7 +1155,7 @@ stdlib-objects: $(foreach module,$(STDLIB_MODULES),$(call stdlib_outputs,$(modul
 define stdlib_object_rule
 $(call stdlib_stem,$(1)).o: FORCE $(filter titan/$(1).titan titan/$(1)/%.titan,$(STDLIB_TITAN_SOURCES)) \
 	$(foreach dependency,$(STDLIB_IMPORTS_$(1)),$(call stdlib_outputs,$(dependency))) \
-	$(STDLIB_C_INPUTS_$(1)) $(STDLIB_COMPILER_PREREQS) $(STDLIB_CONFIG_STAMP) \
+	$(STDLIB_C_INPUTS_$(1)) $(STDLIB_COMPILER_PREREQS) \
 	$(STDLIB_TOOL_PREREQS) | $(STDLIB_NATIVE_PREREQS) $(STDLIB_BOOTSTRAP_PREREQ) \
 	$(STDLIB_RUNTIME_ARCHIVE_PREREQ) $(STDLIB_PLATFORM_PREREQS)
 	@set -e; \
@@ -2235,94 +1188,11 @@ $(STDLIB_PROVIDER_OUTPUTS) $(STDLIB_SHIMS): $(STDLIB_COMPLETION_STAMP)
 	  echo "ERROR: completed stdlib provider is missing or nonregular: $@" >&2; exit 1; \
 	}
 
-# Record every effective native and compiler input that can change the
-# standard-library provider pair. Preserve mtimes when the configuration is
-# unchanged so a valid warm pair does not oscillate between bootstrap and full
-# forms. When content changes, explicitly invalidate the completion stamp so
-# rebuild correctness does not depend on filesystem timestamp granularity or
-# Make's prerequisite re-stat behavior.
-$(STDLIB_CONFIG_STAMP): FORCE $(STDLIB_NATIVE_IDENTITY_PREREQS)
-	@set -e; \
-	tmp="$@.tmp"; \
-	{ printf '%s\n' \
-		$(call make_shell_quote,TITAN_BUILD_PROFILE=$(TITAN_BUILD_PROFILE)) \
-		$(call make_shell_quote,HOST_OS=$(HOST_OS)) \
-		$(call make_shell_quote,HOST_ARCH=$(HOST_ARCH)) \
-		$(call make_shell_quote,TITAN_ABI_VERSION=$(TITAN_ABI_VERSION)) \
-		$(call make_shell_quote,TITAN_VERSION=$(TITAN_VERSION)) \
-		$(call make_shell_quote,TITAN_LIBRARY_VERSION=$(TITAN_LIBRARY_VERSION)) \
-		$(call make_shell_quote,CC=$(CC)) \
-		$(call make_shell_quote,AR=$(AR)) \
-		$(call make_shell_quote,RANLIB=$(RANLIB)) \
-		$(call make_shell_quote,TITANC=$(TITANC)) \
-		$(call make_shell_quote,TITAN_LUA=$(TITAN_LUA)) \
-		$(call make_shell_quote,TITAN_ROCKS_ROOT=$(STDLIB_ROCKS_ROOT)) \
-		$(call make_shell_quote,STDLIB_USE_INSTALLED_RUNTIME=$(STDLIB_USE_INSTALLED_RUNTIME)) \
-		$(call make_shell_quote,STDLIB_ROOTS=$(STDLIB_ROOTS)) \
-		$(call make_shell_quote,STDLIB_TITAN_SOURCES=$(STDLIB_TITAN_SOURCES)) \
-		$(call make_shell_quote,STDLIB_SHIMS=$(STDLIB_SHIMS)) \
-		$(call make_shell_quote,STDLIB_CONTAINER=$(STDLIB_CONTAINER)) \
-		$(call make_shell_quote,STDLIB_STATIC_ARCHIVE=$(STDLIB_STATIC_ARCHIVE)) \
-		$(call make_shell_quote,STDLIB_PROVIDER_OUTPUTS=$(STDLIB_PROVIDER_OUTPUTS)) \
-		$(call make_shell_quote,STDLIB_EXTRA_OBJECTS=$(STDLIB_EXTRA_OBJECTS)) \
-		$(call make_shell_quote,STDLIB_LPEGLABEL_CPPFLAGS=$(STDLIB_LPEGLABEL_CPPFLAGS)) \
-		$(call make_shell_quote,STDLIB_HTTP_CPPFLAGS=$(STDLIB_HTTP_CPPFLAGS)) \
-		$(call make_shell_quote,STDLIB_SQLITE3_CPPFLAGS=$(STDLIB_SQLITE3_CPPFLAGS)) \
-		$(call make_shell_quote,SQLITE3_TITAN_HEADERS=$(SQLITE3_TITAN_HEADERS)) \
-		$(call make_shell_quote,STRING_TITAN_HEADERS=$(STRING_TITAN_HEADERS)) \
-		$(call make_shell_quote,STDLIB_OPENSSL_CPPFLAGS=$(STDLIB_OPENSSL_CPPFLAGS)) \
-		$(call make_shell_quote,STDLIB_OPENSSL_LDFLAGS=$(STDLIB_OPENSSL_LDFLAGS)) \
-		$(call make_shell_quote,STDLIB_EMBEDDED_FORMAT_INPUTS=$(STDLIB_EMBEDDED_FORMAT_INPUTS)) \
-		$(call make_shell_quote,LPEGLABEL_VERSION=$(LPEGLABEL_VERSION)) \
-		$(call make_shell_quote,LPEGLABEL_COMMIT=$(LPEGLABEL_COMMIT)) \
-		$(call make_shell_quote,LPEGLABEL_SOURCES=$(LPEGLABEL_SOURCES)) \
-		$(call make_shell_quote,LPEGLABEL_HEADERS=$(LPEGLABEL_HEADERS)) \
-		$(call make_shell_quote,LPEGLABEL_ARCHIVE=$(LPEGLABEL_ARCHIVE)) \
-		$(call make_shell_quote,LPEGLABEL_BUILD_CONFIG=$(LPEGLABEL_BUILD_CONFIG)) \
-		$(call make_shell_quote,LPEGLABEL_ARCHIVE_CONFIG=$(LPEGLABEL_ARCHIVE_CONFIG)) \
-		$(call make_shell_quote,TITAN_EXTRA_CPPFLAGS=$(TITAN_EXTRA_CPPFLAGS)) \
-		$(call make_shell_quote,TITAN_EXTRA_CFLAGS=$(TITAN_EXTRA_CFLAGS)) \
-		$(call make_shell_quote,TITAN_EXTRA_LDFLAGS=$(TITAN_EXTRA_LDFLAGS)) \
-		$(call make_shell_quote,TITAN_NO_LINE_DIRECTIVES=$(TITAN_NO_LINE_DIRECTIVES)) \
-		$(call make_shell_quote,LIBUV_VERSION=$(LIBUV_VERSION)) \
-		$(call make_shell_quote,STDLIB_UV_CPPFLAGS=$(STDLIB_UV_CPPFLAGS)) \
-		$(call make_shell_quote,STDLIB_UV_CFLAGS=$(STDLIB_UV_CFLAGS)) \
-		$(call make_shell_quote,STDLIB_UV_LDFLAGS=$(STDLIB_UV_LDFLAGS)) \
-		$(call make_shell_quote,LLHTTP_VERSION=$(LLHTTP_VERSION)) \
-		$(call make_shell_quote,SQLITE3_VERSION=$(SQLITE3_VERSION)) \
-		$(call make_shell_quote,SQLITE3_SHA256=$(SQLITE3_SHA256)) \
-		$(call make_shell_quote,SQLITE3_CFLAGS=$(SQLITE3_CFLAGS)) \
-		$(call make_shell_quote,SQLITE3_BUILD_CFLAGS=$(SQLITE3_BUILD_CFLAGS)) \
-		$(call make_shell_quote,LLHTTP_SHA256=$(LLHTTP_SHA256)) \
-		$(call make_shell_quote,LLHTTP_SOURCE_NAMES=$(LLHTTP_SOURCE_NAMES)) \
-		$(call make_shell_quote,LLHTTP_BUILD_CFLAGS=$(LLHTTP_BUILD_CFLAGS)) \
-		$(call make_shell_quote,OPENSSL_MODE=$(OPENSSL_MODE)) \
-		$(call make_shell_quote,OPENSSL_VERSION=$(OPENSSL_VERSION)) \
-		$(call make_shell_quote,OPENSSL_SHA256=$(OPENSSL_SHA256)) \
-		$(call make_shell_quote,OPENSSL_CONFIGURE_FLAGS=$(OPENSSL_CONFIGURE_FLAGS)) \
-		$(call make_shell_quote,OPENSSL_BUILD_CFLAGS=$(OPENSSL_BUILD_CFLAGS)); \
-	  for input in $(LPEGLABEL_SOURCES) $(LPEGLABEL_HEADERS) \
-			$(LPEGLABEL_BUILD_CONFIG) \
-			$(LPEGLABEL_ARCHIVE_CONFIG) $(LPEGLABEL_ARCHIVE) \
-			$(LLHTTP_BUILD_CONFIG) $(LLHTTP_ARCHIVE_CONFIG) \
-			$(SQLITE3_BUILD_CONFIG) $(SQLITE3_ARCHIVE_CONFIG) \
-			$(LLHTTP_ARCHIVE) $(SQLITE3_ARCHIVE) $(OPENSSL_EXTRA_OBJECTS); do \
-	    cksum "$$input"; \
-	  done; } \
-		> "$$tmp"; \
-	if test -r "$@" && cmp -s "$$tmp" "$@"; then \
-		rm -f "$$tmp"; \
-	else \
-		rm -f "$(STDLIB_COMPLETION_STAMP)" $(STDLIB_MODULE_OBJECTS) && \
-		mv -f "$$tmp" "$@"; \
-	fi
-
 # FORCE runs the inexpensive completeness check on every invocation. The
 # final link runs only when an object/input changed or a public output is
-# absent. All twenty-two objects supply their metadata to this one paired
-# provider. The warm check rescans the archive without rewriting either output.
+# absent. All standard-module objects feed the same paired provider.
 $(STDLIB_COMPLETION_STAMP): FORCE $(STDLIB_MODULE_OBJECTS) \
-		$(STDLIB_COMPILER_PREREQS) $(STDLIB_CONFIG_STAMP) \
+		$(STDLIB_COMPILER_PREREQS) \
 		$(STDLIB_NATIVE_PREREQS) $(STDLIB_BOOTSTRAP_PREREQ) \
 		$(STDLIB_TOOL_PREREQS) | $(STDLIB_RUNTIME_ARCHIVE_PREREQ) \
 		$(STDLIB_PLATFORM_PREREQS)
@@ -2339,15 +1209,6 @@ $(STDLIB_COMPLETION_STAMP): FORCE $(STDLIB_MODULE_OBJECTS) \
 	else \
 	  rm -rf "$(STDLIB_CONTAINER).dSYM"; \
 	fi; \
-	validate_archive() { \
-	  env -u LUA_PATH -u LUA_CPATH -u LUA_PATH_5_5 -u LUA_CPATH_5_5 \
-	    TITAN_STDLIB_ARCHIVE=$(call make_shell_quote,$(STDLIB_STATIC_ARCHIVE)) \
-	    TITAN_STDLIB_ABI=$(call make_shell_quote,$(TITAN_ABI_VERSION)) \
-	    TITAN_STDLIB_ROOTS=$(call make_shell_quote,$(STDLIB_ROOTS)) \
-	    "$(TITAN_LUA)" -E -e \
-	      'package.path="./?.lua;./?/init.lua;" .. package.path; local metadata = require "titan-compiler.staticmetadata"; local archive = assert(os.getenv("TITAN_STDLIB_ARCHIVE")); local provider, scan_error = metadata.scan_archive(archive, { expected_abi = assert(os.getenv("TITAN_STDLIB_ABI")) }); if not provider then error(scan_error, 0) end; local expected = {}; for name in assert(os.getenv("TITAN_STDLIB_ROOTS")):gmatch("%S+") do expected[name] = true end; for name in pairs(provider.entries) do if not expected[name] then error("unexpected stdlib archive metadata key " .. name, 0) end; expected[name] = nil end; local missing = next(expected); if missing then error("missing stdlib archive metadata key " .. missing, 0) end'; \
-	}; \
-	if test "$$stale" = 0 && ! validate_archive; then stale=1; fi; \
 	if test "$$stale" = 1; then \
 	  echo "==> Linking paired Titan stdlib providers"; \
 	  rm -f "$@"; \
@@ -2362,10 +1223,6 @@ $(STDLIB_COMPLETION_STAMP): FORCE $(STDLIB_MODULE_OBJECTS) \
 	      echo "ERROR: stdlib build did not produce $$output" >&2; exit 1; \
 	    }; \
 	  done; \
-	  validate_archive || { \
-	    echo "ERROR: stdlib build produced an invalid $(STDLIB_STATIC_ARCHIVE)" >&2; \
-	    exit 1; \
-	  }; \
 	  if test "$(HOST_OS)" = Darwin; then \
 	    test -d "$(STDLIB_CONTAINER).dSYM" || { \
 	      echo "ERROR: stdlib build did not produce $(STDLIB_CONTAINER).dSYM" >&2; exit 1; \
@@ -2378,31 +1235,37 @@ $(STDLIB_COMPLETION_STAMP): FORCE $(STDLIB_MODULE_OBJECTS) \
 		$(addsuffix .dSYM,$(STDLIB_QUALIFIED_SOS))
 
 install-stdlib: stdlib ## Install the paired standard library from this source tree
-install-stdlib publish-stdlib: scripts/stdlib_installer.lua
+publish-stdlib: ## Copy an already built standard library from STDLIB_INSTALL_STAGE
+install-stdlib publish-stdlib:
 	@set -e; \
-	mkdir -p "$(TITAN_INSTALL_TREE)" "$(TITAN_SHARE_DIR)/LICENSES"; \
-	install -m 0644 THIRD_PARTY_NOTICES.md \
-	  "$(TITAN_SHARE_DIR)/THIRD_PARTY_NOTICES.md"; \
-	install -m 0644 $(STDLIB_LICENSES) \
-	  "$(TITAN_SHARE_DIR)/LICENSES/"; \
-	root=$$(CDPATH= cd "$(TITAN_INSTALL_TREE)" && pwd -P); \
 	stage=$(call make_shell_quote,$(STDLIB_INSTALL_STAGE)); \
-	( unset LUA_PATH LUA_CPATH LUA_PATH_5_5 LUA_CPATH_5_5; \
-	  if test -n $(call make_shell_quote,$(strip $(TITAN_STDLIB_DIAGNOSTIC_SNAPSHOT))); then \
-	    $(STDLIB_COMPILER_ENV) "$(TITAN_LUA)" -E \
-	      "$(CURDIR)/spec/support/ci_asan_generated_c_context.lua" snapshot \
-	      $(call make_shell_quote,$(strip $(TITAN_STDLIB_DIAGNOSTIC_SNAPSHOT))) \
-	      "$$stage/titan.so" "$(CURDIR)/titan" \
-	      "$$root/lib/titan/$(TITAN_LIBRARY_VERSION)/titan.so" "$(CURDIR)/titan"; \
-	  fi; \
-	  echo "==> Validating and publishing Titan stdlib to $$root"; \
+	mkdir -p "$(TITAN_STDLIB_VERSION_DIR)" "$(TITAN_STDLIB_LUA_DIR)" \
+	  "$(TITAN_SHARE_DIR)/$(TITAN_LIBRARY_VERSION)/src/titan" \
+	  "$(TITAN_SHARE_DIR)/LICENSES"; \
+	if test -n $(call make_shell_quote,$(strip $(TITAN_STDLIB_DIAGNOSTIC_SNAPSHOT))); then \
 	  $(STDLIB_COMPILER_ENV) "$(TITAN_LUA)" -E \
-	    "$(CURDIR)/scripts/stdlib_installer.lua" "$$stage" "$$root" )
+	    "$(CURDIR)/spec/support/ci_asan_generated_c_context.lua" snapshot \
+	    $(call make_shell_quote,$(strip $(TITAN_STDLIB_DIAGNOSTIC_SNAPSHOT))) \
+	    "$$stage/titan.so" "$(CURDIR)/titan" \
+	    "$(TITAN_CANONICAL_SUPPORT_SO)" "$(CURDIR)/titan"; \
+	fi; \
+	install -m 0755 "$$stage/titan.so" "$(TITAN_CANONICAL_SUPPORT_SO)"; \
+	install -m 0644 "$$stage/titan.a" "$(TITAN_CANONICAL_STATIC_ARCHIVE)"; \
+	for shim in $(STDLIB_SHIMS); do \
+	  install -m 0644 "$$stage/$$shim" "$(TITAN_STDLIB_LUA_DIR)/"; \
+	done; \
+	install -m 0644 "$$stage/titan/test.titan" \
+	  "$(TITAN_SHARE_DIR)/$(TITAN_LIBRARY_VERSION)/src/titan/test.titan"; \
+	if test -d "$$stage/titan.so.dSYM"; then \
+	  rm -rf "$(TITAN_CANONICAL_SUPPORT_SO).dSYM"; \
+	  cp -R "$$stage/titan.so.dSYM" "$(TITAN_CANONICAL_SUPPORT_SO).dSYM"; \
+	fi; \
+	install -m 0644 THIRD_PARTY_NOTICES.md "$(TITAN_SHARE_DIR)/THIRD_PARTY_NOTICES.md"; \
+	install -m 0644 $(STDLIB_LICENSES) "$(TITAN_SHARE_DIR)/LICENSES/"
 
 # LuaRocks invokes this after deploying the compiler and SDK. Use the same
 # object DAG, provider pair, and completion stamp as a later make stdlib.
-# The publisher validates and copies the outputs into private destination
-# siblings, preserving its rollback and final-DSO-rename publication protocol.
+# Installation copies the completed provider pair and its shims.
 rock-post-install:
 	@test -n "$(strip $(ROCKS_TREE))" || { \
 	  echo "ERROR: rock-post-install requires ROCKS_TREE" >&2; exit 1; \
@@ -2428,7 +1291,7 @@ include $(TITAN_TEST_MODULE_MANIFEST)
 TITAN_TEST_BUILD_DIR ?= .titan-tests
 TITAN_TEST_EXECUTABLE := $(TITAN_TEST_BUILD_DIR)/$(TITAN_STDLIB_TEST_PROGRAM_OUTPUT)
 # The suite deadline includes fresh child-fixture compilation at the selected
-# native profile across all 27 test roots, including fresh child compilers.
+# native profile across all 28 test roots, including fresh child compilers.
 # Focused gates may set a lower bound.
 TITAN_TEST_TIMEOUT ?= 600
 TEST_TITANC ?= $(if $(filter validation,$(TITAN_BUILD_PROFILE)),$(call make_shell_quote,$(PREFIX)/bin/titanc),titanc)
@@ -2469,8 +1332,8 @@ TITAN_TEST_COMPILER_ENV = TITAN_BUILD_PROFILE=$(call make_shell_quote,$(TITAN_BU
 STDLIB_BUSTED_TESTS := \
 	spec/asan_generated_c_context_spec.lua spec/dense_array_runtime_spec.lua \
 	spec/libuv_build_spec.lua spec/lpeglabel_build_spec.lua \
-	spec/minicoro_spec.lua spec/readline_build_spec.lua \
-	spec/rockspec_spec.lua spec/stdlib_installer_spec.lua
+	spec/minicoro_spec.lua \
+	spec/rockspec_spec.lua
 
 .PHONY: busted-test stdlib-busted-test stdlib-test \
 	titan-stdlib-test-build titan-stdlib-test-objects titan-stdlib-test-run titan-stdlib-test
@@ -2624,7 +1487,7 @@ titan-stdlib-test-run: ## Run the built native suite, optionally with TITAN_FILT
 	  $(call make_shell_quote,$(TITAN_TEST_BUILD_DIR)/stdout.log) \
 	  $(call make_shell_quote,$(TITAN_TEST_TIMEOUT)) \
 	  $(call make_shell_quote,$(TITAN_TEST_EXECUTABLE)) || status=$$?; \
-	$(TEST_LUA) -E scripts/check_stdlib_test_output.lua \
+	$(TEST_LUA) -E spec/support/check_stdlib_test_output.lua \
 	  $(call make_shell_quote,$(TITAN_TEST_BUILD_DIR)/stdout.log) \
 	  $(call make_shell_quote,$(TITAN_TEST_BUILD_DIR)/roots.txt) \
 	  $(call make_shell_quote_value,TITAN_FILTER); \
@@ -2667,17 +1530,18 @@ test: lua luarocks ## Build/install the rock and run the suite via `luarocks tes
 examples: lua ## Compile the example Titan modules (SDL examples need SDL2 headers)
 	$(MAKE) -C examples all
 
+clean-stdlib: ## Remove standard-library artifacts before changing build inputs
+	rm -f $(STDLIB_MODULE_OBJECTS) $(STDLIB_SHIMS) $(STDLIB_PROVIDER_OUTPUTS) $(STDLIB_COMPLETION_STAMP)
+	rm -f $(STDLIB_GENERATED_FOREIGN_HEADERS) $(foreach module,$(STDLIB_MODULES),$(call stdlib_stem,$(module)).c)
+	rm -rf $(STDLIB_CONTAINER).dSYM
+
 clean: ## Remove generated build/test artifacts (keeps the Lua tree)
 	bash spec/support/clean_generated_test_artifacts.sh
 	rm -f $(RUNTIME_O) titan-runtime/*.o $(TITAN_RUNTIME_LIB)
-	rm -f $(LPEGLABEL_OBJECTS) $(LPEGLABEL_ARCHIVE) \
-		$(LPEGLABEL_BUILD_CONFIG) $(LPEGLABEL_ARCHIVE_CONFIG)
+	rm -f $(LPEGLABEL_OBJECTS) $(LPEGLABEL_ARCHIVE)
 	rmdir "$(LPEGLABEL_BUILD_DIR)" 2>/dev/null || true
 	rm -rf "$(LLHTTP_BUILD_DIR)"
-	rm -f $(RUNTIME_BUILD_CONFIG) $(RUNTIME_ARCHIVE_CONFIG) \
-		$(LTITANLIB_BUILD_CONFIG) \
-		titan-runtime/.titan-titanlib-build-config \
-		$(STDLIB_CONFIG_STAMP) $(STDLIB_COMPLETION_STAMP)
+	rm -f $(STDLIB_COMPLETION_STAMP)
 	rm -f $(TITAN_BOOTSTRAP_SO)
 	rm -rf $(TITAN_BOOTSTRAP_SO).dSYM
 	rmdir titan-runtime/bootstrap 2>/dev/null || true
@@ -2704,14 +1568,8 @@ clean: ## Remove generated build/test artifacts (keeps the Lua tree)
 
 clean-lua: ## Remove Lua build artifacts and the checkout-local install; preserve the submodule
 	@if test -f "$(LUA_DIR)/Makefile"; then $(MAKE) -C "$(LUA_DIR)" clean; fi
-	rm -f "$(LUA_BUILD_CONFIG)" "$(LUA_BUILD_CONFIG).changed" \
-		"$(READLINE_SELECTION_CONFIG)" "$(READLINE_INSTALL_STAMP)"
 	rm -f lua-5.*.tar.gz
 	rm -rf .lua
-
-clean-readline: ## Remove the bundled Readline source/build trees and release archive
-	rm -rf $(READLINE_DIR) $(READLINE_BUILD_DIR)
-	rm -f $(READLINE_TARBALL) $(READLINE_PATCHES)
 
 clean-luarocks: ## Remove the downloaded LuaRocks source tree and tarball
 	rm -rf $(LUAROCKS_DIR)
@@ -2735,4 +1593,4 @@ clean-openssl: ## Remove the bundled OpenSSL source/build trees and release tarb
 	rm -rf $(OPENSSL_SRC_DIR) $(OPENSSL_BUILD_DIR)
 	rm -f $(OPENSSL_TARBALL)
 
-distclean: clean clean-lua clean-readline clean-luarocks clean-libbacktrace clean-libuv clean-llhttp clean-sqlite3 clean-openssl ## Remove all downloaded trees and artifacts
+distclean: clean clean-lua clean-luarocks clean-libbacktrace clean-libuv clean-llhttp clean-sqlite3 clean-openssl ## Remove all downloaded trees and artifacts

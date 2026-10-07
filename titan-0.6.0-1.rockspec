@@ -32,9 +32,15 @@ test_dependencies = {
 }
 test = {
    type = "command",
-   command = "bash spec/support/run_rock_tests.sh"
+   command = "bash spec/support/run_rock_tests.sh",
+   flags = { "--prefix=$(LUA_DIR)", "--make=$(MAKE)" }
 }
 hooks = {
+   platforms = {
+      windows = {
+         post_install = [["$(MAKE)" -f Makefile.win rock-post-install PREFIX="$(LUA_DIR)" ROCKS_TREE="$(SCRIPTS_DIR)/.." ROCK_TITANC="$(BINDIR)/titanc" ROCK_LUA="$(LUA)" ROCK_CFLAGS="$(CFLAGS)" CC="$(CC)" AR="$(AR)" RANLIB="$(RANLIB)"]]
+      }
+   },
    post_install = [[set -e
       unset LUA_PATH LUA_CPATH LUA_PATH_5_5 LUA_CPATH_5_5
       rocks_tree="$(SCRIPTS_DIR)/.."
@@ -53,6 +59,11 @@ hooks = {
 }
 build = {
    type = "make",
+   platforms = {
+      windows = {
+         makefile = "Makefile.win"
+      }
+   },
    -- This remains a source-only installation flow. The target builds the C
    -- runtime and, because ROCKS_TREE is set here, stages the compiler SDK
    -- before LuaRocks deploys the compiler modules. The paired stdlib provider
@@ -138,6 +149,7 @@ build = {
       ["titan-compiler.foreigntypes"] = "titan-compiler/foreigntypes.lua",
       ["titan-compiler.io"] = "titan-compiler/io.lua",
       ["titan-compiler.platform"] = "titan-compiler/platform.lua",
+      ["titan-compiler.path"] = "titan-compiler/path.lua",
             ["titan-compiler.windows_path"] = "titan-compiler/windows_path.lua",
       ["titan-compiler.windows_publication"] = "titan-compiler/windows_publication.lua",
       ["titan-compiler.test_runner"] = "titan-compiler/test_runner.lua",

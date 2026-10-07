@@ -1,5 +1,6 @@
 local test = import "test"
 local dependency = import "test_runner_dependency"
+foreign import "lua.h"
 
 local type ContextAlias = test.Context
 local cleanup_reached = false

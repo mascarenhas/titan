@@ -11,14 +11,17 @@
 -- generated .c. The merge filter classifies .titan filenames as visible, so
 -- they appear as `<file>.titan:<line>: in <symbol>`.
 local h = require 'spec.support.helpers'
+local platform = require 'titan-compiler.platform'
 
 local compile_and_run = h.compile_and_run
 local compile_and_run_app = h.compile_and_run_app
 
 local function clean()
+    if platform.windows then return end
     os.execute("rm -rf *.o *.so *.dSYM test test__entrypoint.c")
     if not h.verbose then os.execute("rm -f *.c") end
 end
+
 
 describe("libbacktrace unified stack trace", function()
     after_each(clean)
