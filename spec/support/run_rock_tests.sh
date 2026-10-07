@@ -21,7 +21,8 @@ if [[ ${TITAN_ROCK_TEST_INTERNAL:-0} == 1 ]]; then
             export PREFIX=$(cygpath -m "$PREFIX")
             local -a busted_scripts
             busted_scripts=("$PREFIX"/lib/luarocks/rocks-5.5/busted/*/bin/busted)
-            "$PREFIX/bin/lua.exe" -e 'io.stdout:setvbuf("no"); io.stderr:setvbuf("no")' \
+            # Busted must retain luv's loop while insulating test files.
+            "$PREFIX/bin/lua.exe" -l luv -e 'io.stdout:setvbuf("no"); io.stderr:setvbuf("no")' \
                 "$(cygpath -m "${busted_scripts[0]}")" "$@"
         else
             "${BUSTED:-busted}" "$@"

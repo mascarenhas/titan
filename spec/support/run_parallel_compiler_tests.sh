@@ -259,13 +259,16 @@ for _, item in ipairs({
     local actual = assert(filesystem:realpath(origin:sub(2)))
     local selected = assert(filesystem:realpath(path.join(prefix, "share", "lua", "5.5", "titan-compiler", item[3])))
     local a, b = assert(filesystem:stat(actual)), assert(filesystem:stat(selected))
-    assert(a.kind == "file" and b.kind == "file" and a.device ~= nil and a.inode ~= nil)
-    assert(a.device == b.device and a.inode == b.inode, "compiler origin differs from the selected SDK: " .. origin)
+    assert(a.kind == "file" and b.kind == "file")
+    assert(path.normalize(actual):lower() == path.normalize(selected):lower(),
+        "compiler origin differs from the selected SDK: " .. origin)
     print("compiler worker installed " .. item[1] .. "=" .. actual)
 end
 print("compiler worker profile=" .. driver.BUILD_PROFILE)
 LUA
     cat > "$worker_root/busted.lua" <<'LUA'
+-- Keep the native loop alive across Busted's per-file module isolation.
+require "luv"
 io.stdout:setvbuf("no"); io.stderr:setvbuf("no")
 local script = assert(table.remove(arg, 1))
 arg[0] = script

@@ -446,3 +446,8 @@ are supervised by native Job Objects. Windows uses MSYS2's `/tmp` as a short
 scratch base so nested fixture paths fit ordinary Win32 filename limits;
 Unix workers retain the caller's `TMPDIR`. Busted filters or appended arguments
 select the ordinary single-process route.
+
+Both Windows Busted launchers preload `luv` before test-file isolation. The
+library owns its native loop through its first module table, so that table must
+stay loaded while Busted restores `package.loaded` between files. This retains
+one loop for the complete invocation without changing ordinary compiler loading.
