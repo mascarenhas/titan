@@ -197,6 +197,21 @@ local function remove_directory(directory)
     assert(lfs.rmdir(directory))
 end
 
+local function with_default_workspace(body)
+    local strategy = compiler_io.new_sync()
+    local service = assert(cprobe.new_service({
+        io = strategy,
+        include_dirs = {},
+        profile = target_profile(),
+    }))
+    local workspace = assert(service:_ensure_workspace())
+    local completed, reason = pcall(body, service, strategy, workspace)
+    if lfs.attributes(workspace.root, "mode") then
+        remove_directory(workspace.root)
+    end
+    if not completed then error(reason, 0) end
+end
+
 describe("C probe service", function()
     it("owns a validated target profile independently of probe caching", function()
         local profile = target_profile()
@@ -285,6 +300,175 @@ describe("C probe service", function()
         assert.equal(cancellation, reason)
         assert.is_nil(lfs.symlinkattributes(reservation))
         assert.is_true(service:close())
+    end)
+
+    it("retries close after cancellation of completed directory removal",
+    function()
+        with_default_workspace(function(service, strategy, workspace)
+            local cancellation = { kind = "cancelled completed rmdir" }
+            local ordinary_rmdir = strategy.rmdir
+            local removals = 0
+            function strategy:rmdir(directory)
+                assert.equal(workspace.root, directory)
+                removals = removals + 1
+                assert.is_true(ordinary_rmdir(self, directory))
+                error(cancellation)
+            end
+
+            local completed, reason = pcall(service.close, service)
+            assert.is_false(completed)
+            assert.equal(cancellation, reason)
+            assert.equal(workspace, service.workspace)
+            assert.is_true(service.closed)
+            assert.is_nil(service.close_error)
+            assert.is_nil(lfs.attributes(workspace.root, "mode"))
+
+            strategy.rmdir = ordinary_rmdir
+            assert.is_true(service:close())
+            assert.is_nil(service.workspace)
+            assert.equal(1, removals)
+            assert.is_true(service:close())
+        end)
+    end)
+
+    it("accepts a workspace disappearing during listing without retrying rmdir",
+    function()
+        with_default_workspace(function(service, strategy, workspace)
+            local ordinary_rmdir = strategy.rmdir
+            function strategy:list(directory)
+                assert.equal(workspace.root, directory)
+                assert.is_true(ordinary_rmdir(self, directory))
+                return nil, "directory disappeared during listing"
+            end
+            function strategy:rmdir()
+                error("rmdir retried after listing confirmed absence")
+            end
+
+            assert.is_true(service:close())
+            assert.is_nil(service.workspace)
+            assert.is_nil(lfs.attributes(workspace.root, "mode"))
+        end)
+    end)
+
+    it("accepts a workspace disappearing between listing and rmdir",
+    function()
+        with_default_workspace(function(service, strategy, workspace)
+            local ordinary_list = strategy.list
+            local ordinary_rmdir = strategy.rmdir
+            local removals = 0
+            function strategy:list(directory)
+                local listed = assert(ordinary_list(self, directory))
+                assert.is_true(ordinary_rmdir(self, directory))
+                return listed
+            end
+            function strategy:rmdir(directory)
+                removals = removals + 1
+                return ordinary_rmdir(self, directory)
+            end
+
+            assert.is_true(service:close())
+            assert.is_nil(service.workspace)
+            assert.equal(1, removals)
+            assert.is_nil(lfs.attributes(workspace.root, "mode"))
+        end)
+    end)
+
+    for _, operation in ipairs({ "list", "rmdir" }) do
+        for _, inspection in ipairs({ "existing", "ambiguous" }) do
+            it("preserves " .. operation .. " failure with " .. inspection ..
+            " workspace inspection", function()
+                with_default_workspace(function(service, strategy, workspace)
+                    local ordinary_lstat = strategy.lstat
+                    if operation == "list" then
+                        function strategy:list()
+                            return nil, "injected list permission failure"
+                        end
+                    end
+                    function strategy:rmdir()
+                        return nil, "injected rmdir permission failure"
+                    end
+                    function strategy:lstat(directory)
+                        assert.equal(workspace.root, directory)
+                        if inspection == "ambiguous" then
+                            return nil, "injected inspection permission failure"
+                        end
+                        return ordinary_lstat(self, directory)
+                    end
+
+                    local closed, close_error = service:close()
+                    assert.is_nil(closed)
+                    assert.matches("injected " .. operation ..
+                        " permission failure", close_error, 1, true)
+                    assert.equal("directory",
+                        lfs.attributes(workspace.root, "mode"))
+                end)
+            end)
+        end
+
+        it("propagates cancellation confirming absence after " .. operation,
+        function()
+            with_default_workspace(function(service, strategy, workspace)
+                local cancellation = { kind = "cancelled absence confirmation" }
+                local ordinary_list = strategy.list
+                local ordinary_rmdir = strategy.rmdir
+                local ordinary_lstat = strategy.lstat
+                function strategy:list(directory)
+                    if operation == "list" then
+                        assert.is_true(ordinary_rmdir(self, directory))
+                        return nil, "directory disappeared during listing"
+                    end
+                    return ordinary_list(self, directory)
+                end
+                function strategy:rmdir(directory)
+                    assert.is_true(ordinary_rmdir(self, directory))
+                    return nil, "directory removal acknowledgement failed"
+                end
+                function strategy:lstat(directory)
+                    assert.equal(workspace.root, directory)
+                    error(cancellation)
+                end
+
+                local completed, reason = pcall(service.close, service)
+                assert.is_false(completed)
+                assert.equal(cancellation, reason)
+                assert.equal(workspace, service.workspace)
+                assert.is_nil(service.close_error)
+                assert.is_nil(lfs.attributes(workspace.root, "mode"))
+
+                strategy.lstat = ordinary_lstat
+                strategy.list = ordinary_list
+                strategy.rmdir = ordinary_rmdir
+                assert.is_true(service:close())
+                assert.is_nil(service.workspace)
+            end)
+        end)
+    end
+
+    it("preserves earlier unlink failures when the workspace later disappears",
+    function()
+        with_default_workspace(function(service, strategy, workspace)
+            assert.is_true(workspace:write("stray.o", "probe output"))
+            local ordinary_unlink = strategy.unlink
+            local ordinary_rmdir = strategy.rmdir
+            function strategy:unlink(filename)
+                assert.equal(path.to_slash(path.join(workspace.root, "stray.o")),
+                    path.to_slash(filename))
+                return nil, "injected earlier unlink failure"
+            end
+            function strategy:rmdir(directory)
+                assert.is_true(ordinary_unlink(self,
+                    path.join(directory, "stray.o")))
+                assert.is_true(ordinary_rmdir(self, directory))
+                return nil, "directory removal acknowledgement failed"
+            end
+
+            local closed, close_error = service:close()
+            assert.is_nil(closed)
+            assert.matches("injected earlier unlink failure", close_error,
+                1, true)
+            assert.is_nil(service.workspace)
+            assert.is_nil(lfs.attributes(workspace.root, "mode"))
+        end)
     end)
 
     it("exposes one authoritative cdriver process context", function()
@@ -1256,9 +1440,13 @@ exit 0
         listing.tmpname = function() return fixture_path("/fake/workspace-two") end
         listing.unlink = function() return true end
         listing.mkdir = function() return true end
-        assert(listing_service:_ensure_workspace())
+        local listing_workspace = assert(listing_service:_ensure_workspace())
         listing.list = function()
             return nil, "injected list failure"
+        end
+        function listing:lstat(directory)
+            assert.equal(listing_workspace.root, directory)
+            return { kind = "directory" }
         end
         listing.rmdir = function() return true end
         closed, close_error = listing_service:close()
@@ -1762,6 +1950,135 @@ struct titan_probe_target_s { int value; };
         -- that it still did not publish a semantic result.
         service:close()
         assert(lfs.rmdir(cache))
+    end)
+
+    local function with_checking_header_directories(body, nested)
+        local strategy = compiler_io.new_sync()
+        local owner = { io = strategy }
+        assert(ffiheaders.filename(owner,
+            nested and "nested/probe.ffi.h" or "probe.ffi.h"))
+        local directories = { table.unpack(owner.source_ffi_header_directories) }
+        local completed, reason = pcall(body, owner, strategy, directories)
+        for index = #directories, 1, -1 do
+            if lfs.attributes(directories[index], "mode") then
+                remove_directory(directories[index])
+            end
+        end
+        if not completed then error(reason, 0) end
+    end
+
+    it("closes checking-header directories disappearing after initial inspection",
+    function()
+        with_checking_header_directories(function(owner, strategy, directories)
+            local root = directories[1]
+            local ordinary_lstat = strategy.lstat
+            local ordinary_rmdir = strategy.rmdir
+            function strategy:lstat(directory)
+                local attributes, err = ordinary_lstat(self, directory)
+                if attributes then
+                    assert.equal(root, directory)
+                    assert.is_true(ordinary_rmdir(self, directory))
+                end
+                return attributes, err
+            end
+
+            assert.is_true(ffiheaders.close(owner))
+            assert.is_nil(owner.source_ffi_header_directories)
+            assert.is_nil(owner.source_ffi_header_bundle)
+            assert.is_nil(lfs.attributes(root, "mode"))
+        end)
+    end)
+
+    it("closes checking-header directories after rmdir commits but reports ENOENT",
+    function()
+        with_checking_header_directories(function(owner, strategy, directories)
+            local root = directories[1]
+            local ordinary_rmdir = strategy.rmdir
+            function strategy:rmdir(directory)
+                assert.equal(root, directory)
+                assert.is_true(ordinary_rmdir(self, directory))
+                return nil, "fs.rmdir: ENOENT: no such file or directory"
+            end
+
+            assert.is_true(ffiheaders.close(owner))
+            assert.is_nil(owner.source_ffi_header_directories)
+            assert.is_nil(owner.source_ffi_header_bundle)
+            assert.is_nil(lfs.attributes(root, "mode"))
+        end)
+    end)
+
+    for _, inspection in ipairs({ "existing", "ambiguous" }) do
+        it("retains checking-header ownership after rmdir fails with " ..
+        inspection .. " inspection", function()
+            with_checking_header_directories(function(owner, strategy, directories)
+                local root = directories[1]
+                local ordinary_lstat = strategy.lstat
+                local ordinary_rmdir = strategy.rmdir
+                local initial = true
+                function strategy:lstat(directory)
+                    assert.equal(root, directory)
+                    if not initial and inspection == "ambiguous" then
+                        return nil, "injected checking-header inspection failure"
+                    end
+                    initial = false
+                    return ordinary_lstat(self, directory)
+                end
+                function strategy:rmdir(directory)
+                    assert.equal(root, directory)
+                    return nil, "fs.rmdir: EACCES: permission denied"
+                end
+
+                local closed, close_error = ffiheaders.close(owner)
+                assert.is_nil(closed)
+                assert.equal("fs.rmdir: EACCES: permission denied", close_error)
+                assert.same(directories, owner.source_ffi_header_directories)
+                assert.equal(root, owner.source_ffi_header_bundle)
+                assert.equal("directory", lfs.attributes(root, "mode"))
+
+                strategy.lstat = ordinary_lstat
+                strategy.rmdir = ordinary_rmdir
+                assert.is_true(ffiheaders.close(owner))
+                assert.is_nil(owner.source_ffi_header_directories)
+                assert.is_nil(owner.source_ffi_header_bundle)
+            end)
+        end)
+    end
+
+    it("retains original checking-header directories when absence confirmation cancels",
+    function()
+        with_checking_header_directories(function(owner, strategy, directories)
+            local root, child = directories[1], directories[2]
+            local owned_directories = owner.source_ffi_header_directories
+            local cancellation = { kind = "cancelled checking-header confirmation" }
+            local ordinary_lstat = strategy.lstat
+            local ordinary_rmdir = strategy.rmdir
+            function strategy:lstat(directory)
+                local attributes, err = ordinary_lstat(self, directory)
+                if directory == child and not attributes then error(cancellation) end
+                return attributes, err
+            end
+            function strategy:rmdir(directory)
+                assert.equal(child, directory)
+                assert.is_true(ordinary_rmdir(self, directory))
+                return nil, "directory removal acknowledgement failed"
+            end
+
+            local completed, reason = pcall(ffiheaders.close, owner)
+            assert.is_false(completed)
+            assert.equal(cancellation, reason)
+            assert.equal(owned_directories, owner.source_ffi_header_directories)
+            assert.same(directories, owner.source_ffi_header_directories)
+            assert.equal(root, owner.source_ffi_header_bundle)
+            assert.is_nil(lfs.attributes(child, "mode"))
+            assert.equal("directory", lfs.attributes(root, "mode"))
+
+            strategy.lstat = ordinary_lstat
+            strategy.rmdir = ordinary_rmdir
+            assert.is_true(ffiheaders.close(owner))
+            assert.is_nil(owner.source_ffi_header_directories)
+            assert.is_nil(owner.source_ffi_header_bundle)
+            assert.is_nil(lfs.attributes(root, "mode"))
+        end, true)
     end)
 
     it("normalizes generated dependency diagnostics without retaining private paths",
