@@ -19,22 +19,23 @@ at `-O2 -fno-lto`: the Lua-written compiler and its tests execute through them.
 Sanitizer builds use `-O1 -fno-lto` for those host/parser components while retaining
 all ASan/UBSan instrumentation; Titan code and other native payloads remain O0.
 
-`make luarocks` reconciles the optimized compiler dependencies before Titan is
-installed. A receipt records their exact compile/link flags, selected versions,
-Lua/tool inputs and native module hashes. It rebuilds stale same-version modules
-and preserves unchanged modules. Generic LuaRocks CFLAGS remain O0 for the Titan
-rock's runtime build. `COMPILER_DEPS_CFLAGS/LDFLAGS` select host dependency flags,
-`LPEGLABEL_ROCK_CFLAGS/LDFLAGS` can specialize the compiler parser, and
-`LPEGLABEL_BUILD_CFLAGS` selects the private parser payload. Parser flags follow
-generic Titan extras so an O0 fixture setting cannot deoptimize the parser.
-Explicit domain overrides remain caller-owned, including sanitizer instrumentation.
+`make luarocks` installs stock LuaRocks and leaves native Lua dependency builds
+at its ordinary optimized defaults. Titan's runtime build receives the separate
+profile-specific `ROCK_CFLAGS`. For sanitizer installations, build LPegLabel and
+Lua filesystem explicitly through LuaRocks with the required instrumented
+`CFLAGS` and `LDFLAGS` before installing Titan. `LPEGLABEL_BUILD_CFLAGS` selects
+the private parser payload; its flags follow generic Titan extras so an O0
+fixture setting cannot deoptimize that parser. Explicit domain overrides remain
+caller-owned, including sanitizer instrumentation.
 
-Use a separate prefix for each profile. The default repository test commands
+Use a separate prefix for each profile. Lua and LuaRocks preparation only checks
+for their programs in `PREFIX/bin`; clean Lua objects and remove or replace the
+installed programs yourself when changing their build inputs. The default repository test commands
 select validation and use `.lua-validation` when no `PREFIX` was supplied;
 ordinary builds retain existing active-PATH Lua prefix discovery. A discovered
 prefix remains caller-owned: select a matching profile or pass an explicit
 separate production PREFIX when the active SDK is validation. `make test` prepares
-and reinstalls the selected toolchain before running the complete gate. A cold
+and reinstalls Titan in the selected toolchain before running the complete gate. A cold
 `make rock-test` prepares its missing validation prefix through `make test`.
 Leaf native build/run targets require that selected SDK to be prepared already.
 
@@ -43,8 +44,15 @@ with separate `.windows-sdk-validation` and `windows-build-validation` defaults.
 Ordinary Windows Lua, native dependency and runtime builds retain their existing
 `-O2` defaults; generated Titan C retains the production `-O3` policy. Explicit
 `PREFIX`, `WINDOWS_BUILD_ROOT` and native flags remain caller-owned.
+Windows also defaults to `OPENSSL_MODE=system`, so its installed binary OpenSSL
+keeps the provider's build flags. Select `OPENSSL_MODE=bundled` to build the
+pinned OpenSSL source with the selected native profile.
 
 An installed SDK records its selected profile in `etc/titan/build-profile`.
+On Unix, run `make clean-stdlib` before changing the standard provider's flags,
+tools, profile, or OpenSSL mode. On Windows, clean the selected private build
+directory and generated provider outputs. Clean the corresponding native build directory when
+changing native dependency inputs; Make does not save or reconcile those settings.
 Native outputs remain adjacent to their sources, so builds using the same
 checkout must run sequentially even when their installed prefixes differ. Use
 separate source copies for concurrent builds.
@@ -54,3 +62,9 @@ build policy without changing the language, ABI, compiler release, or metadata
 schema versions. A small compiler smoke continues to test unset production
 optimization and cross-module LTO while ordinary validation fixtures stay at
 `-O0`.
+
+Generated-C compilation concurrency is controlled by `titanc --jobs N` or
+`TITAN_JOBS=N` on Linux, macOS and Windows. The command-line option wins; the
+default is one. This bound covers independent C object compilations, while
+checking, C generation and final linking retain their normal order. Windows
+stdlib builds also honor `TITAN_JOBS`.

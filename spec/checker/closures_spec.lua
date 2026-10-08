@@ -1,3 +1,4 @@
+local temporary = require "spec.support.temporary"
 -- Checker-level coverage for anonymous functions (lambdas): capture analysis
 -- flags, parameter/return type inference, and the errors around them. These run
 -- the checker only; end-to-end closure behavior lives in the coder specs.
@@ -8,7 +9,7 @@ local assert_type_check = h.assert_type_check
 local assert_type_error = h.assert_type_error
 
 local function with_header(contents, fn)
-    local header = os.tmpname() .. ".h"
+    local header = temporary.name(".h")
     local file = assert(io.open(header, "w"))
     assert(file:write(contents))
     assert(file:close())

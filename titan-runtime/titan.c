@@ -531,11 +531,11 @@ static void titan_bt_addframe(luaL_Buffer *buf, int *wrote_any,
 }
 
 /* Native-stack capture backend. libbacktrace symbolizes PCs across every
-** dlopened .so to a #line-attributed .titan file/line (and recovers inlined
+** loaded provider to a #line-attributed .titan file/line (and recovers inlined
 ** frames); the old execinfo path is kept as a no-DWARF fallback for platforms
 ** without libbacktrace (e.g. musl/Alpine). Define TITAN_NO_LIBBACKTRACE to
 ** force the fallback. */
-#if !defined(TITAN_NO_LIBBACKTRACE) && !defined(_WIN32)
+#if !defined(TITAN_NO_LIBBACKTRACE)
 #include "backtrace.h"
 #define TITAN_HAVE_LIBBACKTRACE 1
 #elif !defined(_WIN32)
@@ -571,8 +571,9 @@ static void titan_add_raw_lua_trace(luaL_Buffer *buf, int *wrote_any,
 
 #ifdef TITAN_HAVE_LIBBACKTRACE
 /* libbacktrace snapshots the set of loaded objects ONCE, on the first
-** symbolization, and never re-scans (it caches the dl_iterate_phdr result). A
-** module dlopened after that snapshot would have no symbols, so loadlib() and
+** symbolization, and never re-scans. Windows uses a PE module snapshot with
+** loader notifications disabled; Unix caches the dl_iterate_phdr result. A
+** module loaded after that snapshot would have no symbols, so loadlib() and
 ** generated luaopen_* functions invalidate this cached state after successful
 ** loads; the next capture lazily re-creates it and re-snapshots. The state is
 ** never freed (a small, bounded leak), never recreated per-error. Keep the
@@ -614,7 +615,7 @@ static struct backtrace_state *titan_backtrace_state(lua_State *L) {
     return state;
 }
 
-/* Reset after a slow-path dlopen or a Lua require that mapped a Titan .so.
+/* Reset after a slow-path provider load or a Lua require that mapped a provider.
 ** Every titan.o copy clears the same per-state registry slot. The next capture
 ** recreates it with the now-complete process image snapshot. */
 void titan_invalidate_backtrace_state(lua_State *L) {
@@ -627,6 +628,11 @@ void titan_invalidate_backtrace_state(lua_State *L) {
 
 static const char *titan_basename(const char *path) {
     const char *slash = path ? strrchr(path, '/') : NULL;
+#if defined(_WIN32)
+    const char *backslash = path ? strrchr(path, '\\') : NULL;
+    if (backslash != NULL && (slash == NULL || backslash > slash))
+        slash = backslash;
+#endif
     return slash ? slash + 1 : path;
 }
 
@@ -696,7 +702,11 @@ static int titan_bt_collect_cb(void *data, uintptr_t pc, const char *filename,
     if (st->n >= st->cap) return 0;             /* full: stop collecting */
     if (filename == NULL) return 0;             /* unsymbolized: drop */
     base = titan_basename(filename);
-    if (strstr(filename, "titan-runtime/")) return 0;  /* runtime: drop */
+    if (strstr(filename, "titan-runtime/")
+#if defined(_WIN32)
+            || strstr(filename, "titan-runtime\\")
+#endif
+            ) return 0;  /* runtime: drop */
     if (titan_is_lua_source(base)) return 0;    /* Lua core/library: drop */
     is_entry = (function != NULL && strstr(function, TITAN_ENTRY_TAG) != NULL);
     /* A surviving frame is a Titan frame iff its source is a .titan chunk
@@ -942,32 +952,38 @@ static int push_package_cpath_root(lua_State *L) {
     lua_getglobal(L, "package");
     if(lua_istable(L, -1) && lua_getfield(L, -1, "cpath") == LUA_TSTRING) {
         size_t path_len;
-        const size_t suffix_len = sizeof(TITAN_LUA_CPATH_SUFFIX) - 1;
+        const char *suffixes[] = {
+            "/lib/titan/" TITAN_LIBRARY_VERSION "/?.so",
+            TITAN_LUA_CPATH_SUFFIX
+        };
         const char *path = lua_tolstring(L, -1, &path_len);
-        const char *entry = path;
         const char *limit = path + path_len;
-        while(entry <= limit) {
-            const char *end = memchr(entry, ';', (size_t)(limit - entry));
-            size_t entry_len;
-            size_t root_len;
-            if(end == NULL) end = limit;
-            entry_len = (size_t)(end - entry);
-            if(entry_len >= suffix_len &&
-               memcmp(entry + entry_len - suffix_len,
-                      TITAN_LUA_CPATH_SUFFIX, suffix_len) == 0) {
-                root_len = entry_len - suffix_len;
-                while(root_len > 1 && entry[root_len - 1] == '/') root_len--;
-                if(root_len == 0) {
-                    lua_pushliteral(L, "/");
-                } else {
-                    lua_pushlstring(L, entry, root_len);
+        for(size_t i = 0; i < sizeof(suffixes) / sizeof(suffixes[0]); i++) {
+            const size_t suffix_len = strlen(suffixes[i]);
+            const char *entry = path;
+            while(entry <= limit) {
+                const char *end = memchr(entry, ';', (size_t)(limit - entry));
+                size_t entry_len;
+                size_t root_len;
+                if(end == NULL) end = limit;
+                entry_len = (size_t)(end - entry);
+                if(entry_len >= suffix_len &&
+                   memcmp(entry + entry_len - suffix_len,
+                          suffixes[i], suffix_len) == 0) {
+                    root_len = entry_len - suffix_len;
+                    while(root_len > 1 && entry[root_len - 1] == '/') root_len--;
+                    if(root_len == 0) {
+                        lua_pushliteral(L, "/");
+                    } else {
+                        lua_pushlstring(L, entry, root_len);
+                    }
+                    lua_replace(L, top + 1);
+                    lua_settop(L, top + 1);
+                    return 1;
                 }
-                lua_replace(L, top + 1);
-                lua_settop(L, top + 1);
-                return 1;
+                if(end == limit) break;
+                entry = end + 1;
             }
-            if(end == limit) break;
-            entry = end + 1;
         }
     }
     lua_settop(L, top);
@@ -1569,7 +1585,7 @@ int errorhandler(lua_State *L) {
   /* Regenerate the raw traceback slot. luaL_Buffer lives on the stack from
   ** luaL_buffinit on and must stay at the top while in use, so push everything
   ** else first. */
-#if defined(_WIN32)
+#if defined(_WIN32) && !defined(TITAN_HAVE_LIBBACKTRACE)
   /* Root the Lua trace below the buffer: adding a long trace can grow its
   ** UBox, whose stack slot must remain the topmost value during appends. */
   luaL_traceback(L, L, NULL, 1);
@@ -1603,8 +1619,7 @@ int errorhandler(lua_State *L) {
     lua_pop(L, 1);
 #endif
 #if defined(_WIN32)
-    /* Experimental Windows fallback: preserve Lua frames and report native
-    ** addresses. PE/DWARF source attribution is not implemented here. */
+    /* Without libbacktrace, preserve Lua frames and report native addresses. */
     calls = CaptureStackBackTrace(0, sizeof(nbuf) / sizeof(void *), nbuf, NULL);
     for (int i = 0; i < calls; i++) {
       char frame[64];

@@ -1,29 +1,30 @@
 local assert = require "luassert"
 local cdriver = require "c-parser.cdriver"
 local checker = require "titan-compiler.checker"
+local compiler_io = require "titan-compiler.io"
 local driver = require "titan-compiler.driver"
+local filesystem = require "spec.support.filesystem"
+local installed_prefix = require "spec.support.installed_prefix"
 local lfs = require "lfs"
 local parser = require "titan-compiler.parser"
+local platform = require "titan-compiler.platform"
+local process = require "titan-compiler.process"
 local types = require "titan-compiler.types"
 
 local ROOT = lfs.currentdir()
+if platform.windows then ROOT = assert(platform.path.normalize(ROOT)) end
 local FIXTURE = ROOT .. "/spec/fixtures/parallel_compilation"
 local FIXTURE_SOURCE_ROOT = FIXTURE .. "/src"
 local WRAPPER = FIXTURE .. "/counting_cc.sh"
+local JOBS = platform.windows and 2 or 4
 local LEAVES = { "one", "two", "three", "four" }
 local REFILL_LEAVES = {
     "one", "two", "three", "four", "five", "six", "seven", "eight",
 }
 local MODULES = { "batch.one", "batch.two", "batch.three", "batch.four" }
 
-local PREFIX = os.getenv("PREFIX")
-if not PREFIX then
-    for template in package.cpath:gmatch("[^;]+") do
-        PREFIX = template:match("^(.*)/lib/lua/5[.]5/[?][.]so$")
-        if PREFIX then break end
-    end
-end
-local prefix_lua = PREFIX and (PREFIX .. "/bin/lua") or nil
+local PREFIX = installed_prefix.active()
+local prefix_lua = PREFIX .. (platform.windows and "/bin/lua.exe" or "/bin/lua")
 local function file_exists(path)
     local file = io.open(path, "rb")
     if not file then return false end
@@ -41,15 +42,16 @@ local function shell_command(argv)
 end
 
 local function run(argv, directory)
-    local command = shell_command(argv) .. " 2>&1"
-    if directory then
-        command = "cd " .. assert(cdriver.shell_quote(directory)) ..
-            " && " .. command
-    end
-    local pipe = assert(io.popen(command, "r"))
-    local output = pipe:read("*a")
-    local ok, why, code = pipe:close()
-    return ok == true, output, why, code
+    local previous = directory and assert(lfs.currentdir()) or nil
+    if directory then assert(lfs.chdir(directory)) end
+    local called, result = pcall(function()
+        return compiler_io.new_sync():run(argv)
+    end)
+    if previous then assert(lfs.chdir(previous)) end
+    assert.truthy(called, result)
+    local output = result.output or result.diagnostic or ""
+    if platform.windows then output = output:gsub("\r\n", "\n") end
+    return result.ok, output, result.why, result.status
 end
 
 local function remove_tree(path)
@@ -84,7 +86,10 @@ local workspace_directory
 local source_root
 local state_directory
 local function prepare_workspace()
-    workspace_directory = assert(os.tmpname())
+    workspace_directory = assert(compiler_io.new_sync():tmpname())
+    if platform.windows then
+        workspace_directory = assert(platform.path.normalize(workspace_directory))
+    end
     os.remove(workspace_directory)
     assert(lfs.mkdir(workspace_directory))
     source_root = workspace_directory .. "/src"
@@ -110,14 +115,15 @@ local function titanc(
         argv[#argv + 1] = "TITAN_JOBS"
     end
     for _, argument in ipairs({
-        "CC=" .. (compiler or WRAPPER),
+        "CC=" .. (compiler or (platform.windows and
+            shell_command({ "bash", WRAPPER }) or WRAPPER)),
         "TITAN_EXTRA_CPPFLAGS=",
         "TITAN_EXTRA_CFLAGS=",
         "TITAN_EXTRA_LDFLAGS=",
         "TITAN_PARALLEL_TEST_STATE=" .. state_directory,
         "TITAN_PARALLEL_TEST_DELAY=0.5",
-        "TITAN_PARALLEL_TEST_EXPECTED=" ..
-            (((cli_jobs or environment_jobs) == "4") and "4" or "1"),
+        "TITAN_PARALLEL_TEST_EXPECTED=" .. tostring(math.min(
+            tonumber(cli_jobs or environment_jobs) or 1, #MODULES)),
         "TITAN_PARALLEL_TEST_DIAGNOSTICS=" .. (diagnostics or ""),
         "TITAN_PARALLEL_TEST_FAIL=" .. (failing_module or ""),
         "TITAN_ROCKS_ROOT=" .. assert(PREFIX,
@@ -184,26 +190,32 @@ end
 
 local function configure_counting_compiler(
         diagnostics, failing_module, expected, mode)
-    driver.CC = shell_command({
+    local argv = {
         "env",
         "TITAN_PARALLEL_TEST_STATE=" .. state_directory,
         "TITAN_PARALLEL_TEST_DELAY=0.5",
-        "TITAN_PARALLEL_TEST_EXPECTED=" .. tostring(expected or 4),
+        "TITAN_PARALLEL_TEST_EXPECTED=" .. tostring(expected or JOBS),
         "TITAN_PARALLEL_TEST_DIAGNOSTICS=" .. (diagnostics or ""),
         "TITAN_PARALLEL_TEST_FAIL=" .. (failing_module or ""),
         "TITAN_PARALLEL_TEST_MODE=" .. (mode or ""),
-        WRAPPER,
-    })
+    }
+    if platform.windows then argv[#argv + 1] = "bash" end
+    argv[#argv + 1] = WRAPPER
+    driver.CC = shell_command(argv)
 end
 
-local function assert_four_overlapping_compiles(output)
-    assert.equal("4\n", read_file(state_directory .. "/maximum"), output)
+local function assert_compiler_batch(output)
+    assert.equal(tostring(JOBS) .. "\n",
+        read_file(state_directory .. "/maximum"), output)
     local commands = read_file(state_directory .. "/commands")
     local count = 0
     for _ in commands:gmatch("[^\n]+") do count = count + 1 end
     assert.equal(4, count, commands)
-    assert.is_true(file_exists(workspace_directory .. "/batch.so"))
-    assert.is_true(file_exists(workspace_directory .. "/batch.a"))
+    assert.is_true(file_exists(workspace_directory ..
+        (platform.windows and "/batch.dll" or "/batch.so")))
+    if not platform.windows then
+        assert.is_true(file_exists(workspace_directory .. "/batch.a"))
+    end
 end
 
 describe("parallel generated-C compilation", function()
@@ -214,7 +226,54 @@ describe("parallel generated-C compilation", function()
     local previous_execute
     local previous_popen
     local previous_open
+    local previous_new_sync
+    local previous_new_batch
+    local batch_overrides
     local diagnostic_stream
+
+    local function original_compile_tmpname()
+        if platform.windows then return previous_new_sync():tmpname() end
+        return previous_tmpname()
+    end
+
+    local function override_tmpname(callback)
+        if platform.windows then
+            compiler_io.new_sync = function(...)
+                local strategy = previous_new_sync(...)
+                strategy.tmpname = function() return callback() end
+                return strategy
+            end
+        else os.tmpname = callback end
+    end
+
+    local function restore_tmpname()
+        os.tmpname = previous_tmpname
+        compiler_io.new_sync = previous_new_sync
+    end
+
+    local function override_launch(callback)
+        if platform.windows then batch_overrides.spawn = callback
+        else io.popen = callback end
+    end
+
+    local function restore_launch()
+        io.popen = previous_popen
+        batch_overrides.spawn = nil
+    end
+
+    local function record_launches(launched)
+        if platform.windows then
+            override_launch(function(original, batch, argv, ...)
+                launched[#launched + 1] = shell_command(argv)
+                return original(batch, argv, ...)
+            end)
+        else
+            override_launch(function(command, mode)
+                launched[#launched + 1] = command
+                return previous_popen(command, mode)
+            end)
+        end
+    end
 
     before_each(function()
         previous_cc = driver.CC
@@ -224,16 +283,33 @@ describe("parallel generated-C compilation", function()
         previous_execute = os.execute
         previous_popen = io.popen
         previous_open = io.open
+        previous_new_sync = compiler_io.new_sync
+        previous_new_batch = process.new_batch
+        batch_overrides = {}
+        if platform.windows then
+            process.new_batch = function(...)
+                local batch, err = previous_new_batch(...)
+                if not batch then return nil, err end
+                for name, callback in pairs(batch_overrides) do
+                    local original = batch[name]
+                    batch[name] = function(self, ...)
+                        return callback(original, self, ...)
+                    end
+                end
+                return batch
+            end
+        end
         prepare_workspace()
     end)
     after_each(function()
         driver.CC = previous_cc
         io.stdout = previous_stdout
         io.stderr = previous_stderr
-        os.tmpname = previous_tmpname
+        restore_tmpname()
         os.execute = previous_execute
-        io.popen = previous_popen
+        restore_launch()
         io.open = previous_open
+        process.new_batch = previous_new_batch
         if diagnostic_stream and io.type(diagnostic_stream) == "file" then
             diagnostic_stream:close()
         end
@@ -253,7 +329,7 @@ describe("parallel generated-C compilation", function()
         diagnostic_stream = assert(io.open(diagnostic_path, "w+b"))
         io.stderr = diagnostic_stream
         local requests = checked_requests()
-        local results = driver.compile_modules(requests, 4, false)
+        local results = driver.compile_modules(requests, JOBS, false)
         assert(io.stderr:flush())
         assert(io.stderr:seek("set", 0))
         local diagnostics = assert(io.stderr:read("*a"))
@@ -273,10 +349,11 @@ describe("parallel generated-C compilation", function()
             assert.is_true(previous < position, diagnostics)
             previous = position
         end
-        assert.equal("4\n", read_file(state_directory .. "/maximum"))
+        assert.equal(tostring(JOBS) .. "\n",
+            read_file(state_directory .. "/maximum"))
 
         local commands = read_file(state_directory .. "/commands")
-        local cached = driver.compile_modules(requests, 4, false)
+        local cached = driver.compile_modules(requests, JOBS, false)
         for index, result in ipairs(cached) do
             assert.truthy(result.ok, result.err)
             assert.equal(results[index].libname, result.libname)
@@ -287,13 +364,10 @@ describe("parallel generated-C compilation", function()
     it("launches larger generated units first", function()
         configure_counting_compiler()
         local launched = {}
-        io.popen = function(command, mode)
-            launched[#launched + 1] = command
-            return previous_popen(command, mode)
-        end
+        record_launches(launched)
         local results = driver.compile_modules(
-            checked_requests(REFILL_LEAVES), 4, false)
-        io.popen = previous_popen
+            checked_requests(REFILL_LEAVES), JOBS, false)
+        restore_launch()
         for _, result in ipairs(results) do
             assert.truthy(result.ok, result.err)
         end
@@ -302,17 +376,14 @@ describe("parallel generated-C compilation", function()
     end)
 
     it("refills a slot as soon as any compiler finishes", function()
-        configure_counting_compiler(nil, nil, 4, "refill")
+        configure_counting_compiler(nil, nil, JOBS, "refill")
         local launched = {}
-        io.popen = function(command, mode)
-            launched[#launched + 1] = command
-            return previous_popen(command, mode)
-        end
+        record_launches(launched)
         local results = driver.compile_modules(
-            checked_requests(REFILL_LEAVES), 4, false)
-        io.popen = previous_popen
+            checked_requests(REFILL_LEAVES), JOBS, false)
+        restore_launch()
         local slow_was_initial = false
-        for index = 1, 4 do
+        for index = 1, JOBS do
             if launched[index]:find("/batch/one.c", 1, true) then
                 slow_was_initial = true
             end
@@ -322,7 +393,8 @@ describe("parallel generated-C compilation", function()
             assert.truthy(result.ok, result.err)
             assert.is_true(file_exists(result.libname))
         end
-        assert.equal("4\n", read_file(state_directory .. "/maximum"))
+        assert.equal(tostring(JOBS) .. "\n",
+            read_file(state_directory .. "/maximum"))
         assert.equal("0\n", read_file(state_directory .. "/active"))
         assert.is_true(file_exists(
             state_directory .. "/refilled-before-slow-finished"))
@@ -340,7 +412,7 @@ describe("parallel generated-C compilation", function()
         assert.equal("1\n", read_file(state_directory .. "/maximum"))
 
         request = checked_requests()[2]
-        results = driver.compile_modules({ request }, 4, false)
+        results = driver.compile_modules({ request }, JOBS, false)
         assert.truthy(results[1].ok, results[1].err)
         assert.equal("1\n", read_file(state_directory .. "/maximum"))
     end)
@@ -365,7 +437,7 @@ describe("parallel generated-C compilation", function()
             "invalid logical Titan module name", 1, true),
             tostring(serial[1].err))
 
-        local parallel = driver.compile_modules({ invalid }, 4, false)
+        local parallel = driver.compile_modules({ invalid }, JOBS, false)
         assert.falsy(parallel[1].ok)
         assert.truthy(tostring(parallel[1].err):find(
             "invalid logical Titan module name", 1, true),
@@ -378,7 +450,7 @@ describe("parallel generated-C compilation", function()
         local diagnostic_path = workspace_directory .. "/diagnostics"
         diagnostic_stream = assert(io.open(diagnostic_path, "w+b"))
         io.stderr = diagnostic_stream
-        local results = driver.compile_modules(checked_requests(), 4, false)
+        local results = driver.compile_modules(checked_requests(), JOBS, false)
         assert(diagnostic_stream:close())
         diagnostic_stream = nil
         io.stderr = previous_stderr
@@ -388,21 +460,22 @@ describe("parallel generated-C compilation", function()
         assert.falsy(results[3].ok)
         assert.equal("exit", results[3].err)
         assert.truthy(results[4].ok, results[4].err)
-        assert.equal("4\n", read_file(state_directory .. "/maximum"))
+        assert.equal(tostring(JOBS) .. "\n",
+            read_file(state_directory .. "/maximum"))
         assert.falsy(file_exists(source_root .. "/batch/three.o"))
     end)
 
     it("rejects duplicate modules and aliased object outputs", function()
         local requests = checked_requests()
         local ok, failure = pcall(driver.compile_modules,
-            { requests[1], requests[1] }, 4, false)
+            { requests[1], requests[1] }, JOBS, false)
         assert.falsy(ok)
         assert.truthy(tostring(failure):find(
             "duplicate compilation request", 1, true), tostring(failure))
 
         requests[2].mod.filename = requests[1].mod.filename
         ok, failure = pcall(driver.compile_modules,
-            { requests[1], requests[2] }, 4, false)
+            { requests[1], requests[2] }, JOBS, false)
         assert.falsy(ok)
         assert.truthy(tostring(failure):find(
             "share object output", 1, true), tostring(failure))
@@ -411,17 +484,30 @@ describe("parallel generated-C compilation", function()
         requests[2].mod.filename = source_root ..
             "/batch/../batch/one.titan"
         ok, failure = pcall(driver.compile_modules,
-            { requests[1], requests[2] }, 4, false)
+            { requests[1], requests[2] }, JOBS, false)
         assert.falsy(ok)
         assert.truthy(tostring(failure):find(
             "share object output", 1, true), tostring(failure))
 
+    end)
+
+    it("rejects object-output symlink aliases", function()
+        if platform.windows then
+            pending("Windows uses lexical output paths")
+            return
+        end
+        local available, message = filesystem.symlink_capability()
+        if not available then
+            pending(message)
+            return
+        end
+        local requests, ok, failure
         local alias = source_root .. "/alias"
         assert(lfs.link(source_root .. "/batch", alias, true))
         requests = checked_requests()
         requests[2].mod.filename = alias .. "/one.titan"
         ok, failure = pcall(driver.compile_modules,
-            { requests[1], requests[2] }, 4, false)
+            { requests[1], requests[2] }, JOBS, false)
         assert.falsy(ok)
         assert.truthy(tostring(failure):find(
             "share object output", 1, true), tostring(failure))
@@ -431,7 +517,7 @@ describe("parallel generated-C compilation", function()
             "/batch/new/shared.titan"
         requests[2].mod.filename = alias .. "/new/shared.titan"
         ok, failure = pcall(driver.compile_modules,
-            { requests[1], requests[2] }, 4, false)
+            { requests[1], requests[2] }, JOBS, false)
         assert.falsy(ok)
         assert.truthy(tostring(failure):find(
             "share object output", 1, true), tostring(failure))
@@ -443,93 +529,125 @@ describe("parallel generated-C compilation", function()
             "/batch/new/shared.titan"
         requests[2].mod.filename = source_root .. "/aliased-output.titan"
         ok, failure = pcall(driver.compile_modules,
-            { requests[1], requests[2] }, 4, false)
+            { requests[1], requests[2] }, JOBS, false)
         assert(os.remove(dangling_output))
-        assert(os.remove(alias))
+        if platform.windows then
+            assert(lfs.rmdir(alias))
+        else
+            assert(os.remove(alias))
+        end
         assert.falsy(ok)
         assert.truthy(tostring(failure):find(
             "share object output", 1, true), tostring(failure))
+    end)
 
-        requests = checked_requests()
-        requests[1].mod.filename = source_root .. "/Case.titan"
-        requests[2].mod.filename = source_root .. "/case.titan"
-        ok, failure = pcall(driver.compile_modules,
-            { requests[1], requests[2] }, 4, false)
-        assert.falsy(ok)
-        assert.truthy(tostring(failure):find(
-            "share object output", 1, true), tostring(failure))
-
-        requests = checked_requests()
+    it("rejects object-output hardlink aliases", function()
+        if platform.windows then
+            pending("LuaFileSystem does not provide Windows file identity")
+            return
+        end
+        local requests = checked_requests()
         copy_file(requests[1].mod.filename,
             source_root .. "/batch/one.o")
         assert(lfs.link(source_root .. "/batch/one.o",
             source_root .. "/batch/two.o"))
-        ok, failure = pcall(driver.compile_modules,
-            { requests[1], requests[2] }, 4, false)
+        local ok, failure = pcall(driver.compile_modules,
+            { requests[1], requests[2] }, JOBS, false)
         assert.falsy(ok)
         assert.truthy(tostring(failure):find(
             "share object output", 1, true), tostring(failure))
         assert.falsy(file_exists(state_directory .. "/commands"))
     end)
 
+    it("rejects object-output paths that differ only by case", function()
+        local requests = checked_requests()
+        requests[1].mod.filename = source_root .. "/Case.titan"
+        requests[2].mod.filename = source_root .. "/case.titan"
+        local ok, failure = pcall(driver.compile_modules,
+            { requests[1], requests[2] }, JOBS, false)
+        assert.falsy(ok)
+        assert.truthy(tostring(failure):find(
+            "share object output", 1, true), tostring(failure))
+    end)
+
     it("bounds a self-referential object-output symlink", function()
+        local available, message = filesystem.symlink_capability()
+        if not available then
+            pending(message)
+            return
+        end
         local request = checked_requests()[1]
         request.mod.filename = source_root .. "/loop.titan"
         assert(lfs.link("./loop.o", source_root .. "/loop.o", true))
 
-        local results = driver.compile_modules({ request }, 4, false)
+        local results = driver.compile_modules({ request }, JOBS, false)
         assert.truthy(results[1].ok, results[1].err)
         assert.truthy(file_exists(source_root .. "/loop.o"))
     end)
 
-    it("reports completion FIFO creation failures without launching", function()
+    it("reports completion channel creation failures without launching", function()
         configure_counting_compiler()
         local requests = checked_requests()
         local temporary_path
-        os.tmpname = function()
-            temporary_path = previous_tmpname()
-            return temporary_path
-        end
         local fifo_command
-        os.execute = function(command)
-            if command:find("mkfifo", 1, true) then
-                fifo_command = command
-                return nil, "exit", 91
+        if platform.windows then
+            process.new_batch = function()
+                return nil, "injected completion creation failure"
             end
-            return previous_execute(command)
+        else
+            override_tmpname(function()
+                temporary_path = original_compile_tmpname()
+                return temporary_path
+            end)
+            os.execute = function(command)
+                if command:find("mkfifo", 1, true) then
+                    fifo_command = command
+                    return nil, "exit", 91
+                end
+                return previous_execute(command)
+            end
         end
 
-        local results = driver.compile_modules(requests, 4, false)
-        os.tmpname = previous_tmpname
+        local results = driver.compile_modules(requests, JOBS, false)
+        restore_tmpname()
         os.execute = previous_execute
         for _, result in ipairs(results) do
             assert.falsy(result.ok)
-            assert.truthy(tostring(result.err):find(
+            assert.truthy(tostring(result.err):find(platform.windows and
+                "injected completion creation failure" or
                 "failed to create parallel compiler completion FIFO",
                 1, true), tostring(result.err))
         end
-        assert.truthy(fifo_command:find(
-            "'mkfifo' '-m' '600' ", 1, true), fifo_command)
-        assert.falsy(file_exists(temporary_path))
+        if not platform.windows then
+            assert.truthy(fifo_command:find(
+                "'mkfifo' '-m' '600' ", 1, true), fifo_command)
+            assert.falsy(file_exists(temporary_path))
+        end
         assert.falsy(file_exists(state_directory .. "/commands"))
     end)
 
-    it("reports completion FIFO open failures without launching", function()
+    it("reports completion channel setup failures without launching", function()
         configure_counting_compiler()
         local temporary_path
-        os.tmpname = function()
-            temporary_path = previous_tmpname()
-            return temporary_path
-        end
-        io.open = function(path, mode)
-            if mode == "r+" then
-                return nil, "injected completion open failure"
+        if platform.windows then
+            process.new_batch = function()
+                error("injected completion open failure", 0)
             end
-            return previous_open(path, mode)
+        else
+            override_tmpname(function()
+                temporary_path = original_compile_tmpname()
+                return temporary_path
+            end)
+            io.open = function(path, mode)
+                if mode == "r+" then
+                    return nil, "injected completion open failure"
+                end
+                return previous_open(path, mode)
+            end
         end
 
-        local results = driver.compile_modules(checked_requests(), 4, false)
-        os.tmpname = previous_tmpname
+        local results = driver.compile_modules(checked_requests(), JOBS, false)
+        restore_tmpname()
         io.open = previous_open
         for _, result in ipairs(results) do
             assert.falsy(result.ok)
@@ -537,34 +655,42 @@ describe("parallel generated-C compilation", function()
                 "injected completion open failure", 1, true),
                 tostring(result.err))
         end
-        assert.falsy(file_exists(temporary_path))
+        if not platform.windows then
+            assert.falsy(file_exists(temporary_path))
+        end
         assert.falsy(file_exists(state_directory .. "/commands"))
     end)
 
-    it("reaps every compiler after a completion FIFO read failure", function()
+    it("reaps every compiler after a completion channel read failure", function()
         configure_counting_compiler()
         local temporary_logs = {}
-        os.tmpname = function()
-            local path = previous_tmpname()
+        override_tmpname(function()
+            local path = original_compile_tmpname()
             temporary_logs[#temporary_logs + 1] = path
             return path
-        end
-        io.open = function(path, mode)
-            local file, open_err = previous_open(path, mode)
-            if mode ~= "r+" or not file then return file, open_err end
-            return {
-                read = function()
-                    return nil, "injected completion read failure"
-                end,
-                close = function()
-                    return file:close()
-                end,
-            }
+        end)
+        if platform.windows then
+            batch_overrides.wait = function()
+                return nil, "injected completion read failure"
+            end
+        else
+            io.open = function(path, mode)
+                local file, open_err = previous_open(path, mode)
+                if mode ~= "r+" or not file then return file, open_err end
+                return {
+                    read = function()
+                        return nil, "injected completion read failure"
+                    end,
+                    close = function()
+                        return file:close()
+                    end,
+                }
+            end
         end
 
         local results = driver.compile_modules(
-            checked_requests(REFILL_LEAVES), 4, false)
-        os.tmpname = previous_tmpname
+            checked_requests(REFILL_LEAVES), JOBS, false)
+        restore_tmpname()
         io.open = previous_open
         for _, result in ipairs(results) do
             assert.falsy(result.ok)
@@ -576,29 +702,36 @@ describe("parallel generated-C compilation", function()
         local commands = read_file(state_directory .. "/commands")
         local count = 0
         for _ in commands:gmatch("[^\n]+") do count = count + 1 end
-        assert.equal(4, count, commands)
+        assert.equal(JOBS, count, commands)
         for _, path in ipairs(temporary_logs) do
             assert.falsy(file_exists(path), path)
         end
     end)
 
-    it("reports completion FIFO cleanup failures after reaping", function()
+    it("reports completion channel cleanup failures after reaping", function()
         configure_counting_compiler()
-        io.open = function(path, mode)
-            local file, open_err = previous_open(path, mode)
-            if mode ~= "r+" or not file then return file, open_err end
-            return {
-                read = function(_, pattern)
-                    return file:read(pattern)
-                end,
-                close = function()
-                    assert(file:close())
-                    return nil, "injected completion close failure"
-                end,
-            }
+        if platform.windows then
+            batch_overrides.close = function(original, batch)
+                assert(original(batch))
+                return nil, "injected completion close failure"
+            end
+        else
+            io.open = function(path, mode)
+                local file, open_err = previous_open(path, mode)
+                if mode ~= "r+" or not file then return file, open_err end
+                return {
+                    read = function(_, pattern)
+                        return file:read(pattern)
+                    end,
+                    close = function()
+                        assert(file:close())
+                        return nil, "injected completion close failure"
+                    end,
+                }
+            end
         end
 
-        local results = driver.compile_modules(checked_requests(), 4, false)
+        local results = driver.compile_modules(checked_requests(), JOBS, false)
         io.open = previous_open
         for _, result in ipairs(results) do
             assert.falsy(result.ok)
@@ -610,21 +743,24 @@ describe("parallel generated-C compilation", function()
     end)
 
     it("reaps an active batch when creating a later log fails", function()
-        configure_counting_compiler(nil, nil, 3)
+        configure_counting_compiler(nil, nil, math.min(JOBS, 3))
         local requests = requests_with_headers()
         local temporary_logs = {}
-        -- Each object reserves its private output before FIFO/log creation.
+        -- Both platforms reserve object siblings before the logs; POSIX also
+        -- reserves the completion FIFO before its first log.
         local calls = -#requests
-        os.tmpname = function()
+        override_tmpname(function()
             calls = calls + 1
-            if calls == 4 then error("injected tmpname failure", 0) end
-            local path = previous_tmpname()
+            if calls == (platform.windows and 3 or 4) then
+                error("injected tmpname failure", 0)
+            end
+            local path = original_compile_tmpname()
             temporary_logs[#temporary_logs + 1] = path
             return path
-        end
+        end)
 
-        local results = driver.compile_modules(requests, 4, false)
-        os.tmpname = previous_tmpname
+        local results = driver.compile_modules(requests, JOBS, false)
+        restore_tmpname()
         local failed = 0
         for _, result in ipairs(results) do
             if result.ok then
@@ -637,30 +773,33 @@ describe("parallel generated-C compilation", function()
             end
         end
         assert.equal(1, failed)
-        assert.equal("3\n", read_file(state_directory .. "/maximum"))
+        assert.equal(tostring(math.min(JOBS, 3)) .. "\n",
+            read_file(state_directory .. "/maximum"))
         for _, path in ipairs(temporary_logs) do
             assert.falsy(file_exists(path), path)
         end
     end)
 
     it("cleans the first log when creating the second log fails", function()
-        configure_counting_compiler(nil, nil, 3)
+        configure_counting_compiler(nil, nil, math.min(JOBS, 3))
         local requests = requests_with_headers()
         local temporary_logs = {}
         local calls = -#requests
-        os.tmpname = function()
+        override_tmpname(function()
             calls = calls + 1
-            if calls == 3 then return nil end
-            local path = previous_tmpname()
+            if calls == (platform.windows and 2 or 3) then
+                return nil, "injected missing temporary path"
+            end
+            local path = original_compile_tmpname()
             temporary_logs[#temporary_logs + 1] = path
             return path
-        end
+        end)
 
-        local results = driver.compile_modules(requests, 4, false)
-        os.tmpname = previous_tmpname
+        local results = driver.compile_modules(requests, JOBS, false)
+        restore_tmpname()
         assert.falsy(results[1].ok)
         assert.truthy(tostring(results[1].err):find(
-            "os.tmpname returned no path", 1, true), tostring(results[1].err))
+            "injected missing temporary path", 1, true), tostring(results[1].err))
         for index = 2, 4 do
             assert.truthy(results[index].ok, results[index].err)
         end
@@ -672,16 +811,16 @@ describe("parallel generated-C compilation", function()
     it("reports command-stream and process-launch failures", function()
         configure_counting_compiler()
         local temporary_logs = {}
-        os.tmpname = function()
-            local path = previous_tmpname()
+        override_tmpname(function()
+            local path = original_compile_tmpname()
             temporary_logs[#temporary_logs + 1] = path
             return path
-        end
+        end)
         io.stdout = {
             write = function() return nil, "injected command write failure" end,
             flush = function() return true end,
         }
-        local results = driver.compile_modules(checked_requests(), 4, true)
+        local results = driver.compile_modules(checked_requests(), JOBS, true)
         io.stdout = previous_stdout
         for _, result in ipairs(results) do
             assert.falsy(result.ok)
@@ -690,18 +829,18 @@ describe("parallel generated-C compilation", function()
                 tostring(result.err))
         end
 
-        io.popen = function() error("injected popen exception", 0) end
-        results = driver.compile_modules(checked_requests(), 4, false)
+        override_launch(function() error("injected popen exception", 0) end)
+        results = driver.compile_modules(checked_requests(), JOBS, false)
         for _, result in ipairs(results) do
             assert.falsy(result.ok)
             assert.truthy(tostring(result.err):find(
                 "injected popen exception", 1, true), tostring(result.err))
         end
 
-        io.popen = function() return nil, "injected unavailable popen" end
-        results = driver.compile_modules(checked_requests(), 4, false)
-        io.popen = previous_popen
-        os.tmpname = previous_tmpname
+        override_launch(function() return nil, "injected unavailable popen" end)
+        results = driver.compile_modules(checked_requests(), JOBS, false)
+        restore_launch()
+        restore_tmpname()
         for _, result in ipairs(results) do
             assert.falsy(result.ok)
             assert.truthy(tostring(result.err):find(
@@ -719,7 +858,7 @@ describe("parallel generated-C compilation", function()
             write = function() return nil, "injected false write" end,
             flush = function() return true end,
         }
-        local results = driver.compile_modules(checked_requests(), 4, false)
+        local results = driver.compile_modules(checked_requests(), JOBS, false)
         for _, result in ipairs(results) do
             assert.falsy(result.ok)
             assert.truthy(tostring(result.err):find(
@@ -730,7 +869,7 @@ describe("parallel generated-C compilation", function()
             write = function() return true end,
             flush = function() return nil, "injected false flush" end,
         }
-        results = driver.compile_modules(checked_requests(), 4, false)
+        results = driver.compile_modules(checked_requests(), JOBS, false)
         io.stderr = previous_stderr
         for _, result in ipairs(results) do
             assert.falsy(result.ok)
@@ -740,17 +879,19 @@ describe("parallel generated-C compilation", function()
     end)
 
     it("prints only commands whose parallel launch is attempted", function()
-        configure_counting_compiler(nil, nil, 3)
+        configure_counting_compiler(nil, nil, math.min(JOBS, 3))
         local requests = requests_with_headers()
         local temporary_logs = {}
         local calls = -#requests
-        os.tmpname = function()
+        override_tmpname(function()
             calls = calls + 1
-            if calls == 2 then error("injected tmpname failure", 0) end
-            local path = previous_tmpname()
+            if calls == (platform.windows and 1 or 2) then
+                error("injected tmpname failure", 0)
+            end
+            local path = original_compile_tmpname()
             temporary_logs[#temporary_logs + 1] = path
             return path
-        end
+        end)
         local shown = {}
         io.stdout = {
             write = function(_, output)
@@ -760,8 +901,8 @@ describe("parallel generated-C compilation", function()
             flush = function() return true end,
         }
 
-        local results = driver.compile_modules(requests, 4, true)
-        os.tmpname = previous_tmpname
+        local results = driver.compile_modules(requests, JOBS, true)
+        restore_tmpname()
         io.stdout = previous_stdout
         assert.falsy(results[1].ok)
         assert.truthy(tostring(results[1].err):find(
@@ -775,7 +916,8 @@ describe("parallel generated-C compilation", function()
             assert.truthy(output:find(
                 "/batch/" .. leaf .. ".c", 1, true), output)
         end
-        assert.equal("3\n", read_file(state_directory .. "/maximum"))
+        assert.equal(tostring(math.min(JOBS, 3)) .. "\n",
+            read_file(state_directory .. "/maximum"))
         for _, path in ipairs(temporary_logs) do
             assert.falsy(file_exists(path), path)
         end
@@ -786,12 +928,12 @@ describe("parallel generated-C compilation", function()
         local requests = checked_requests()
         local temporary_logs = {}
         local log_paths = {}
-        os.tmpname = function()
-            local path = previous_tmpname()
+        override_tmpname(function()
+            local path = original_compile_tmpname()
             temporary_logs[#temporary_logs + 1] = path
             log_paths[path] = true
             return path
-        end
+        end)
         io.open = function(path, mode)
             if mode == "rb" and log_paths[path] then
                 return nil, "injected log open failure"
@@ -799,8 +941,8 @@ describe("parallel generated-C compilation", function()
             return previous_open(path, mode)
         end
 
-        local results = driver.compile_modules(requests, 4, false)
-        os.tmpname = previous_tmpname
+        local results = driver.compile_modules(requests, JOBS, false)
+        restore_tmpname()
         io.open = previous_open
         for _, result in ipairs(results) do
             assert.falsy(result.ok)
@@ -817,18 +959,18 @@ describe("parallel generated-C compilation", function()
     it("reaps the batch and removes logs after a replay exception", function()
         configure_counting_compiler("diagnostics")
         local temporary_logs = {}
-        os.tmpname = function()
-            local path = previous_tmpname()
+        override_tmpname(function()
+            local path = original_compile_tmpname()
             temporary_logs[#temporary_logs + 1] = path
             return path
-        end
+        end)
         io.stderr = {
             write = function() error("injected replay failure", 0) end,
             flush = function() return true end,
         }
 
-        local results = driver.compile_modules(checked_requests(), 4, false)
-        os.tmpname = previous_tmpname
+        local results = driver.compile_modules(checked_requests(), JOBS, false)
+        restore_tmpname()
         io.stderr = previous_stderr
         for _, result in ipairs(results) do
             assert.falsy(result.ok)
@@ -846,34 +988,41 @@ describe("parallel generated-C compilation", function()
         assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
             tostring(code) .. ")")
         assert.equal("1\n", read_file(state_directory .. "/maximum"), output)
-        assert.is_true(file_exists(workspace_directory .. "/batch.so"))
-        assert.is_true(file_exists(workspace_directory .. "/batch.a"))
+        assert.is_true(file_exists(workspace_directory ..
+            (platform.windows and "/batch.dll" or "/batch.so")))
+        if not platform.windows then
+            assert.is_true(file_exists(workspace_directory .. "/batch.a"))
+        end
     end)
 
     it("preserves completion notification for an exec compiler prefix", function()
+        if platform.windows then
+            pending("POSIX exec compiler prefix and asynchronous completion notification")
+            return
+        end
         local ok, output, why, code = titanc(
             "4", nil, nil, nil, "exec " .. WRAPPER, true)
         assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
             tostring(code) .. ")")
-        assert_four_overlapping_compiles(output)
+        assert_compiler_batch(output)
     end)
 
     it("uses TITAN_JOBS as the concurrency bound", function()
-        local ok, output, why, code = titanc("4")
+        local ok, output, why, code = titanc(tostring(JOBS))
         assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
             tostring(code) .. ")")
-        assert_four_overlapping_compiles(output)
+        assert_compiler_batch(output)
     end)
 
     it("lets --jobs override the environment", function()
-        local ok, output, why, code = titanc("1", "4")
+        local ok, output, why, code = titanc("1", tostring(JOBS))
         assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
             tostring(code) .. ")")
-        assert_four_overlapping_compiles(output)
+        assert_compiler_batch(output)
     end)
 
     it("replays diagnostics in logical-module order", function()
-        local ok, output, why, code = titanc("4", nil, nil, "reverse")
+        local ok, output, why, code = titanc(tostring(JOBS), nil, nil, "reverse")
         assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
             tostring(code) .. ")")
         local previous = 0
@@ -883,17 +1032,19 @@ describe("parallel generated-C compilation", function()
             assert.is_true(previous < position, output)
             previous = position
         end
-        assert_four_overlapping_compiles(output)
+        assert_compiler_batch(output)
     end)
 
     it("replays a failed compiler diagnostic and still reaps the batch",
        function()
-        local ok, output = titanc("4", nil, "three")
+        local ok, output = titanc(tostring(JOBS), nil, "three")
         assert.falsy(ok, output)
         assert.truthy(output:find(
             "parallel compiler sentinel: three", 1, true), output)
-        assert.equal("4\n", read_file(state_directory .. "/maximum"), output)
-        assert.falsy(file_exists(workspace_directory .. "/batch.so"))
+        assert.equal(tostring(JOBS) .. "\n",
+            read_file(state_directory .. "/maximum"), output)
+        assert.falsy(file_exists(workspace_directory ..
+            (platform.windows and "/batch.dll" or "/batch.so")))
         assert.falsy(file_exists(source_root .. "/batch/three.o"))
         assert.is_true(file_exists(source_root .. "/batch/one.o"))
         assert.is_true(file_exists(source_root .. "/batch/two.o"))

@@ -25,8 +25,7 @@ end
 
 function cpp.absolute_lookup_path(path, cwd, strategy)
     if platform.windows then
-        -- Preserve authored dot components and physical lookup spelling. Only
-        -- the native/injected filesystem determines the observed file ID.
+        -- Windows absolute paths use lexical normalization.
         return assert(platform.absolute(path, cwd, strategy or default_io))
     end
     if path:sub(1, 1) ~= SEP then path = path_join(cwd, path) end
@@ -144,6 +143,7 @@ local function physical_header(path, strategy)
     local nanoseconds = followed and followed.modified_nanoseconds
     local observation
     if followed and followed.kind == "file"
+       and followed.device ~= nil and followed.inode ~= nil
        and math.type(seconds) == "integer"
        and math.type(nanoseconds) == "integer"
        and nanoseconds >= 0 and nanoseconds < 1000000000 then
@@ -611,7 +611,7 @@ local function normalize_toolchain(options)
     end
 
     local compiler, err = normalize_argv(
-        options.compiler or os.getenv("CC") or
+        options.compiler or platform.getenv("CC") or
             (platform.windows and "clang.exe" or "cc"), "compiler", true)
     if not compiler then
         return nil, err

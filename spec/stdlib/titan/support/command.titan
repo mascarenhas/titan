@@ -166,6 +166,11 @@ local function helper_functions(): Helpers
         end,
         compile = function(directory, name, extra, static)
           local argv = {tool("titanc")}
+          if platform.windows then
+            local sdk = assert(os.getenv("TITAN_TEST_SDK_ROOT"))
+            argv = {tool("lua"), platform.join(sdk,
+              "lib/luarocks/rocks-5.5/titan/0.6.0-1/bin/titanc")}
+          end
           -- Windows production providers are DLL-only. Unix retains the
           -- archive-linked SQLite worker oracle; both execute the same child.
           if static and not platform.windows then argv[#argv + 1] = "--static" end

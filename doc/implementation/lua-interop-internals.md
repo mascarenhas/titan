@@ -909,7 +909,7 @@ eager load. A second Lua state repeats its own cache insertion and promotion
 request while the operating-system loader may reuse the mapped image.
 
 The installed standard layout has paired providers at
-`<root>/lib/titan/0.6/{titan.so,titan.a}` and twenty-two generated shims below
+`<root>/lib/titan/0.6/{titan.so,titan.a}` and twenty-three generated shims below
 `<root>/share/lua/5.5/titan/`; the shims use the DSO form. Ordinary clients use
 the compiled public `uv` API without `uv.h`. The native loader fixture in
 `spec/rockspec_spec.lua` instead links a C `provider_probe.c` which includes
@@ -1015,7 +1015,8 @@ archive is not installed in the SDK; extension DSOs leave their `uv_*` calls unr
 
 * **Preload registration, not eager loading.** The C `main` creates a
   state and runs `luaL_openlibs`. `titan_init_paths` then parses the inherited
-  `package.cpath` for the first `/lib/lua/5.5/?.so` entry, initializes the
+  `package.cpath` for the first current `/lib/titan/0.6/?.so` entry,
+  falls back to `/lib/lua/5.5/?.so` during bootstrap, and initializes the
   Titan module-path default from that root, and ensures
   `<root>/lib/titan/0.6/?.so` is present in `package.cpath`. The
   executable-relative Titan-owned Lua already places that template before its

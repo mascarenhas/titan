@@ -1,0 +1,342 @@
+# Native Windows x64 / MSYS2 CLANG64 build. Invoke from that environment with
+# make -f Makefile.win lua PREFIX=/c/path/to/titan-sdk
+# Experimental controlled Lua and native dependency DLLs with matching SDKs.
+SHELL := $(if $(filter Windows_NT,$(OS)),bash.exe,/bin/bash)
+.SHELLFLAGS := -eu -o pipefail -c
+.DELETE_ON_ERROR:
+.NOTPARALLEL:
+.DEFAULT_GOAL := help
+
+# Choose the policy before configuring any source or native object graph.
+TITAN_WINDOWS_TEST_GOALS := toolchain-check lua-source-check lua-check native-source-check native-check compiler-check runtime-check stdlib-check compiler-publication-check titan-stdlib-test-build titan-stdlib-test-run titan-stdlib-test rock-test test
+TITAN_BUILD_PROFILE ?= $(if $(filter $(TITAN_WINDOWS_TEST_GOALS),$(MAKECMDGOALS)),validation,production)
+ifneq ($(TITAN_BUILD_PROFILE),production)
+ifneq ($(TITAN_BUILD_PROFILE),validation)
+$(error TITAN_BUILD_PROFILE must be production or validation)
+endif
+endif
+export TITAN_BUILD_PROFILE
+TITAN_WINDOWS_VALIDATION_FLAGS := -O0 -fno-lto
+TITAN_WINDOWS_NATIVE_CFLAGS = $(if $(filter validation,$(TITAN_BUILD_PROFILE)),$(TITAN_WINDOWS_VALIDATION_FLAGS),-O2)
+TITAN_WINDOWS_NATIVE_LDFLAGS = $(if $(filter validation,$(TITAN_BUILD_PROFILE)),$(TITAN_WINDOWS_VALIDATION_FLAGS))
+# Compiler host components stay optimized while Titan validation stays at O0.
+TITAN_PROFILE_HOST_FLAGS = $(if $(filter validation,$(TITAN_BUILD_PROFILE)),-O2 -fno-lto)
+
+quote = '$(subst ','"'"',$(1))'
+empty :=
+space := $(empty) $(empty)
+make_path = $(subst $(space),\$(space),$(1))
+ifeq ($(origin CC),default)
+CC := clang.exe
+endif
+CC ?= clang.exe
+ifeq ($(origin RC),default)
+RC := llvm-rc
+endif
+RC ?= llvm-rc
+LUA_CFLAGS ?= $(if $(filter validation,$(TITAN_BUILD_PROFILE)),$(TITAN_PROFILE_HOST_FLAGS),-O2) -Wall -Wextra
+LUA_CPPFLAGS ?=
+LUA_LDFLAGS ?= $(TITAN_PROFILE_HOST_FLAGS)
+PREFIX ?= $(CURDIR)/$(if $(filter validation,$(TITAN_BUILD_PROFILE)),.windows-sdk-validation,.windows-sdk)
+WINDOWS_BUILD_ROOT ?= $(CURDIR)/$(if $(filter validation,$(TITAN_BUILD_PROFILE)),windows-build-validation,windows-build)
+
+# Native GNU Make requires C:/ paths; MSYS Make accepts /c paths. Apply this
+# after direct-entry defaults, and only to values that are actually present.
+ifeq ($(OS),Windows_NT)
+WINDOWS_PATH_FORMAT := $(if $(filter %mingw32,$(MAKE_HOST)),-m,-u)
+override PREFIX := $(shell cygpath $(WINDOWS_PATH_FORMAT) "$(PREFIX)")
+override WINDOWS_BUILD_ROOT := $(shell cygpath $(WINDOWS_PATH_FORMAT) "$(WINDOWS_BUILD_ROOT)")
+ifneq ($(strip $(ROCKS_TREE)),)
+override ROCKS_TREE := $(shell cygpath $(WINDOWS_PATH_FORMAT) "$(ROCKS_TREE)")
+endif
+endif
+
+LUA_VERSION := 5.5.1
+LUA_DIR := lua-$(LUA_VERSION)
+LUA_SOURCE_READY := $(LUA_DIR)/src/lua.h
+LUA_SOURCE := $(WINDOWS_BUILD_ROOT)/lua-$(LUA_VERSION)/src
+# Retain Lua's standard DLL identity for independently built binary modules.
+LUA_RESOURCE := $(LUA_SOURCE)/lua-windows.res
+LUA_MANIFEST := vendor/lua/lua-$(LUA_VERSION)-windows.manifest
+LUA_RC_SOURCE := vendor/lua/lua-$(LUA_VERSION)-windows.rc
+LUA_BIN := $(PREFIX)/bin/lua.exe
+TITAN_VERSION := 0.6.0
+TITAN_LIBRARY_VERSION := $(word 1,$(subst ., ,$(TITAN_VERSION))).$(word 2,$(subst ., ,$(TITAN_VERSION)))
+
+
+.PHONY: help lua-source lua-source-check lua-build lua lua-check toolchain-check FORCE
+help:
+	@echo 'Windows CLANG64/UCRT x64 targets:'
+	@echo '  lua-source  copy the Lua submodule sources unchanged into the Windows source stage'
+	@echo '  lua-source-check  test configured headers with Clang COFF objects (also on Linux)'
+	@echo '  lua-build   build lua55.dll, its import library, and lua.exe'
+	@echo '  lua         install those files and the complete matching Lua SDK'
+	@echo '  lua-check   check native exports/imports and exercise SDK consumers'
+	@echo '  native-source-check  check configured native headers with Clang COFF objects'
+	@echo '  native      build/install native SDK (system OpenSSL by default)'
+	@echo '  libbacktrace  build/install the pinned static Windows traceback library'
+	@echo '  native-check  inspect private PE imports and run native SDK consumers'
+	@echo '  luarocks    install standalone LuaRocks into the Lua SDK prefix'
+	@echo '  compiler    build and install the Titan source rock with LuaRocks'
+	@echo '  compiler-check  validate the installed compiler and dependencies'
+	@echo '  runtime     build/install the runtime SDK and seed an absent support DLL'
+	@echo '  runtime-check  validate runtime consumers, rebuilds and provider preservation'
+	@echo '  stdlib      use the installed compiler/SDK to build titan.dll and exact shims'
+	@echo '  stdlib-check  validate the staged DLL, metadata, shims and PE inventory'
+	@echo '  install-stdlib  build and copy the Windows DLL-only provider'
+	@echo '  publish-stdlib  copy an already built Windows provider'
+	@echo '  compiler-publication-check  validate compiler provider publication'
+	@echo '  titan-stdlib-test-build  build all shared native tests in a private NTFS SDK copy'
+	@echo '  titan-stdlib-test-run  run the built aggregate, optionally with TITAN_FILTER'
+	@echo '  titan-stdlib-test  build and run the shared native aggregate'
+
+FORCE:
+
+$(call make_path,$(LUA_SOURCE_READY)):
+	@echo 'ERROR: Lua source is missing; initialize the Lua submodule.'
+	@echo 'Run: git submodule update --init --recursive'
+	@exit 1
+
+# Keep Windows objects out of the Unix source tree. Lua owns installation.
+lua-source: $(call make_path,$(LUA_SOURCE_READY))
+	mkdir -p $(call quote,$(LUA_SOURCE)) $(call quote,$(WINDOWS_BUILD_ROOT)/lua-$(LUA_VERSION)/doc)
+	cp -p $(call quote,$(LUA_DIR)/Makefile) $(call quote,$(WINDOWS_BUILD_ROOT)/lua-$(LUA_VERSION)/)
+	cp -p $(call quote,$(LUA_DIR)/src/)*.c $(call quote,$(LUA_DIR)/src/)*.h \
+	  $(call quote,$(LUA_DIR)/src/lua.hpp) $(call quote,$(LUA_DIR)/src/Makefile) $(call quote,$(LUA_SOURCE)/)
+	cp -p $(call quote,$(LUA_DIR)/doc/)lua.1 $(call quote,$(LUA_DIR)/doc/)luac.1 \
+	  $(call quote,$(WINDOWS_BUILD_ROOT)/lua-$(LUA_VERSION)/doc/)
+
+lua-source-check: lua-source
+	perl spec/support/check_windows_lua_source.pl $(call quote,$(LUA_SOURCE)) clang llvm-readobj
+
+toolchain-check:
+	@test "$${MSYSTEM:-}" = CLANG64 || { echo 'Use the native MSYS2 CLANG64 environment (x64 UCRT)' >&2; exit 1; }
+	@test "$$($(CC) -dumpmachine)" = x86_64-w64-windows-gnu || { echo 'Expected the CLANG64 x86_64 Windows GNU target' >&2; exit 1; }
+	@printf '%s\n' '#include <_mingw.h>' \
+	  '#if !defined(__clang__) || !defined(_WIN64) || !defined(_UCRT)' \
+	  '#error Expected native Clang x64 with UCRT headers' '#endif' | $(CC) -x c -E - >/dev/null
+	@$(CC) --version | head -n 1
+
+# Lua owns its DLL and interpreter link graph, including luac.exe.
+lua-build: lua-source
+	$(RC) -FO $(call quote,$(LUA_RESOURCE)) $(call quote,$(LUA_RC_SOURCE))
+	+$(MAKE) -j1 -C $(call quote,$(LUA_SOURCE)) mingw \
+	  TITAN_LIBRARY_VERSION=$(call quote,$(TITAN_LIBRARY_VERSION)) PREFIX=$(call quote,$(PREFIX)) \
+	  CC=$(call quote,$(CC) -std=c99) \
+	  CFLAGS=$(call quote,$(LUA_CPPFLAGS) $(LUA_CFLAGS) -DTITAN_VDIR=\"$(TITAN_LIBRARY_VERSION)\" -DLUA_BUILD_AS_DLL) \
+	  MYLDFLAGS=$(call quote,$(LUA_LDFLAGS) -Xlinker --no-insert-timestamp) \
+	  MYDLLFLAGS=$(call quote,$(LUA_LDFLAGS) -Xlinker --exclude-all-symbols -Xlinker --no-insert-timestamp) \
+	  LUA_IMPLIB=liblua55.a MYLUAOBJS=lua-windows.res MINGW_STRIP=
+
+# An existing interpreter is sufficient. To change Lua sources or flags, clean
+# the private Lua outputs and remove the installed interpreter before rebuilding.
+lua: $(call make_path,$(LUA_BIN))
+
+$(call make_path,$(LUA_BIN)):
+	+$(MAKE) -f Makefile.win lua-build
+	+$(MAKE) -C $(call quote,$(WINDOWS_BUILD_ROOT)/lua-$(LUA_VERSION)) install \
+	  TITAN_LIBRARY_VERSION=$(call quote,$(TITAN_LIBRARY_VERSION)) PREFIX=$(call quote,$(PREFIX))
+
+lua-check: lua
+	CC=$(call quote,$(CC)) bash spec/support/check_windows_lua.sh $(call quote,$(PREFIX)) $(call quote,$(WINDOWS_BUILD_ROOT))
+
+# Native dependencies are built in the same CLANG64/UCRT identity as Lua.
+ifeq ($(origin CXX),default)
+CXX := clang++
+endif
+CXX ?= clang++
+ifeq ($(origin AR),default)
+AR := llvm-ar
+endif
+AR ?= llvm-ar
+RANLIB ?= llvm-ranlib
+NATIVE_CFLAGS ?= $(if $(ROCK_CFLAGS),$(ROCK_CFLAGS) )$(TITAN_WINDOWS_NATIVE_CFLAGS)
+NATIVE_CPPFLAGS ?=
+NATIVE_LDFLAGS ?= $(TITAN_WINDOWS_NATIVE_LDFLAGS)
+OPENSSL_MODE ?= system
+OPENSSL_PREFIX ?= $(if $(MINGW_PREFIX),$(MINGW_PREFIX),/clang64)
+ifneq ($(OPENSSL_MODE),system)
+ifneq ($(OPENSSL_MODE),bundled)
+$(error OPENSSL_MODE must be system or bundled)
+endif
+endif
+export OPENSSL_MODE OPENSSL_PREFIX
+
+# Keep this acquisition independent: the runtime does not need to download the
+# other native providers just to build its traceback dependency.
+LIBBT_SOURCE := $(WINDOWS_BUILD_ROOT)/native-src/libbacktrace-0b9b49cf4a2c9229fc052d6716e1528b2f23e91a
+LIBBT_BUILD_DIR := $(WINDOWS_BUILD_ROOT)/native/libbacktrace
+LIBBT_MAKE := $(MAKE)
+LIBBT_CFLAGS ?= $(NATIVE_CFLAGS) -g
+LIBBT_CPPFLAGS ?= $(NATIVE_CPPFLAGS)
+LIBBT_LDFLAGS ?= $(NATIVE_LDFLAGS)
+.PHONY: libbacktrace
+libbacktrace:
+	perl scripts/prepare_windows_native.pl $(call quote,$(WINDOWS_BUILD_ROOT)/native-src) vendor/libbacktrace/dependencies.tsv $(call quote,$(OPENSSL_MODE))
+	CC=$(call quote,$(CC)) AR=$(call quote,$(AR)) RANLIB=$(call quote,$(RANLIB)) MAKE=$(call quote,$(LIBBT_MAKE)) \
+	  LIBBT_CFLAGS=$(call quote,$(LIBBT_CFLAGS)) LIBBT_CPPFLAGS=$(call quote,$(LIBBT_CPPFLAGS)) \
+	  LIBBT_LDFLAGS=$(call quote,$(LIBBT_LDFLAGS)) \
+	  bash scripts/build_windows_libbacktrace.sh $(call quote,$(LIBBT_SOURCE)) $(call quote,$(LIBBT_BUILD_DIR)) $(call quote,$(PREFIX))
+
+.PHONY: native-source native native-source-check
+native-source:
+	perl scripts/prepare_windows_native.pl $(call quote,$(WINDOWS_BUILD_ROOT)/native-src) vendor/windows-native/dependencies.tsv $(call quote,$(OPENSSL_MODE))
+
+native: native-source
+	CC=$(call quote,$(CC)) CXX=$(call quote,$(CXX)) AR=$(call quote,$(AR)) RANLIB=$(call quote,$(RANLIB)) \
+	  NATIVE_CFLAGS=$(call quote,$(NATIVE_CFLAGS)) NATIVE_CPPFLAGS=$(call quote,$(NATIVE_CPPFLAGS)) \
+	  NATIVE_LDFLAGS=$(call quote,$(NATIVE_LDFLAGS)) \
+	  bash scripts/build_windows_native.sh $(call quote,$(WINDOWS_BUILD_ROOT)) $(call quote,$(PREFIX))
+
+native-source-check: native-source
+	perl spec/support/check_windows_native_source.pl $(call quote,$(WINDOWS_BUILD_ROOT)/native-src) clang llvm-readobj
+
+.PHONY: native-check
+native-check: native
+	CC=$(call quote,$(CC)) bash spec/support/check_windows_native.sh $(call quote,$(PREFIX)) $(call quote,$(WINDOWS_BUILD_ROOT))
+
+# Native LuaRocks installs the compiler and its declared dependencies.
+LUAROCKS ?= $(PREFIX)/bin/luarocks.exe
+LUAROCKS_CONFIG ?= $(PREFIX)/etc/luarocks/config-5.5.lua
+COMPILER_DEPS_CFLAGS ?= $(if $(filter validation,$(TITAN_BUILD_PROFILE)),$(TITAN_PROFILE_HOST_FLAGS),-O2)
+COMPILER_DEPS_LDFLAGS ?= $(TITAN_PROFILE_HOST_FLAGS)
+export WINDOWS_BUILD_ROOT
+
+.PHONY: luarocks compiler-deps compiler compiler-check
+luarocks: $(call make_path,$(PREFIX)/bin/luarocks.exe)
+
+$(call make_path,$(PREFIX)/bin/luarocks.exe): | lua
+	CC=$(call quote,$(CC)) AR=$(call quote,$(AR)) RANLIB=$(call quote,$(RANLIB)) \
+	  ROCK_MAKE=$(call quote,$(MAKE)) \
+	  COMPILER_DEPS_CFLAGS=$(call quote,$(COMPILER_DEPS_CFLAGS)) \
+	  COMPILER_DEPS_LDFLAGS=$(call quote,$(COMPILER_DEPS_LDFLAGS)) \
+	  bash scripts/install_windows_luarocks.sh $(call quote,$(WINDOWS_BUILD_ROOT)) $(call quote,$(PREFIX))
+
+compiler-deps: luarocks
+	LUAROCKS_CONFIG=$(call quote,$(shell cygpath -m "$(LUAROCKS_CONFIG)")) \
+	  $(call quote,$(LUAROCKS)) --lua-version=5.5 \
+	  --tree=$(call quote,$(shell cygpath -m "$(PREFIX)")) make --only-deps titan-0.6.0-1.rockspec \
+	  CC=$(call quote,$(CC)) LD=$(call quote,$(CC)) AR=$(call quote,$(AR)) RANLIB=$(call quote,$(RANLIB))
+
+compiler: luarocks
+	LUAROCKS_CONFIG=$(call quote,$(shell cygpath -m "$(LUAROCKS_CONFIG)")) \
+	  $(call quote,$(LUAROCKS)) --lua-version=5.5 \
+	  --tree=$(call quote,$(shell cygpath -m "$(PREFIX)")) make titan-0.6.0-1.rockspec \
+	  CC=$(call quote,$(CC)) LD=$(call quote,$(CC)) AR=$(call quote,$(AR)) RANLIB=$(call quote,$(RANLIB))
+
+compiler-check: compiler
+	bash spec/support/check_windows_compiler.sh $(call quote,$(PREFIX)) $(call quote,$(WINDOWS_BUILD_ROOT))
+
+# Runtime archive, private parser payload and support-only bootstrap.
+RUNTIME_CFLAGS ?= $(if $(ROCK_CFLAGS),$(ROCK_CFLAGS) )$(TITAN_WINDOWS_NATIVE_CFLAGS) -Wall -Wextra
+RUNTIME_CPPFLAGS ?=
+RUNTIME_LDFLAGS ?= $(TITAN_WINDOWS_NATIVE_LDFLAGS)
+LPEGLABEL_BUILD_CFLAGS ?= $(if $(ROCK_CFLAGS),$(ROCK_CFLAGS) )$(TITAN_PROFILE_HOST_FLAGS)
+TITAN_LICENSE_FILES := libuv-LICENSE libuv-LICENSE-extra libuv-tree-LICENSE libuv-inet-LICENSE \
+	lpeglabel-LICENSE lpeg-LICENSE lpeg-patterns-LICENSE ta-regex-LICENSE lua-LICENSE \
+	llhttp-LICENSE sqlite3-LICENSE openssl-LICENSE go-LICENSE libbacktrace-LICENSE llvm-LICENSE
+
+.PHONY: runtime-build runtime install-titan-sdk runtime-check
+runtime-build: lua libbacktrace
+	CC=$(call quote,$(CC)) AR=$(call quote,$(AR)) RANLIB=$(call quote,$(RANLIB)) \
+	  RUNTIME_CFLAGS=$(call quote,$(RUNTIME_CFLAGS)) \
+	  RUNTIME_CPPFLAGS=$(call quote,$(RUNTIME_CPPFLAGS)) \
+	  RUNTIME_LDFLAGS=$(call quote,$(RUNTIME_LDFLAGS)) \
+	  LPEGLABEL_BUILD_CFLAGS=$(call quote,$(LPEGLABEL_BUILD_CFLAGS)) \
+	  bash scripts/build_windows_runtime.sh $(call quote,$(WINDOWS_BUILD_ROOT)) $(call quote,$(PREFIX))
+
+runtime: install-titan-sdk
+
+install-titan-sdk: runtime-build
+	mkdir -p $(call quote,$(PREFIX)/lib/titan/$(TITAN_LIBRARY_VERSION)) \
+	  $(call quote,$(PREFIX)/include/titan) $(call quote,$(PREFIX)/etc/titan) \
+	  $(call quote,$(PREFIX)/share/titan/LICENSES)
+	cp -p $(call quote,$(WINDOWS_BUILD_ROOT)/runtime/libtitan.a) $(call quote,$(PREFIX)/lib/titan/$(TITAN_LIBRARY_VERSION)/libtitan.a)
+	cp -p titan-runtime/titan.h titan-runtime/minicoro.h $(call quote,$(PREFIX)/include/)
+	cp -p titan-runtime/titan/ffi.h $(call quote,$(PREFIX)/include/titan/ffi.h)
+	@if ! test -e $(call quote,$(PREFIX)/lib/titan/$(TITAN_LIBRARY_VERSION)/titan.dll); then \
+	  cp -p $(call quote,$(WINDOWS_BUILD_ROOT)/runtime/titan.dll) $(call quote,$(PREFIX)/lib/titan/$(TITAN_LIBRARY_VERSION)/titan.dll); fi
+	cp -p LICENSE $(call quote,$(PREFIX)/share/titan/LICENSE)
+	cp -p THIRD_PARTY_NOTICES.md $(call quote,$(PREFIX)/share/titan/THIRD_PARTY_NOTICES.md)
+	for filename in $(TITAN_LICENSE_FILES); do cp -p "LICENSES/$$filename" $(call quote,$(PREFIX)/share/titan/LICENSES/); done
+	printf '%s\n' $(call quote,$(TITAN_BUILD_PROFILE)) > $(call quote,$(PREFIX)/etc/titan/build-profile)
+
+runtime-check: runtime
+	CC=$(call quote,$(CC)) AR=$(call quote,$(AR)) RANLIB=$(call quote,$(RANLIB)) \
+	  RUNTIME_CFLAGS=$(call quote,$(RUNTIME_CFLAGS)) \
+	  RUNTIME_CPPFLAGS=$(call quote,$(RUNTIME_CPPFLAGS)) \
+	  RUNTIME_LDFLAGS=$(call quote,$(RUNTIME_LDFLAGS)) \
+	  LPEGLABEL_BUILD_CFLAGS=$(call quote,$(LPEGLABEL_BUILD_CFLAGS)) \
+	  bash spec/support/check_windows_runtime_sdk.sh $(call quote,$(WINDOWS_BUILD_ROOT)) $(call quote,$(PREFIX))
+
+STDLIB_MODULES := coroutine uv async timer io fs net ssl url http websocket os path peg string math lua iteration gc test reflect sqlite3 json
+STDLIB_ROOTS := $(addprefix titan.,$(STDLIB_MODULES))
+
+.PHONY: stdlib stdlib-check install-stdlib publish-stdlib compiler-publication-check
+# Use the installed compiler and an already prepared native/runtime SDK.
+stdlib:
+	CC=$(call quote,$(CC)) AR=$(call quote,$(AR)) RANLIB=$(call quote,$(RANLIB)) \
+	  TITAN_EXTRA_CFLAGS=$(call quote,$(if $(ROCK_CFLAGS),$(ROCK_CFLAGS) )$(TITAN_WINDOWS_NATIVE_CFLAGS) $(TITAN_EXTRA_CFLAGS)) \
+	  ROCK_TITANC=$(call quote,$(ROCK_TITANC)) ROCK_LUA=$(call quote,$(ROCK_LUA)) \
+	  bash scripts/build_windows_stdlib.sh $(call quote,$(WINDOWS_BUILD_ROOT)) $(call quote,$(PREFIX)) $(STDLIB_ROOTS)
+
+stdlib-check:
+	bash spec/support/check_windows_stdlib.sh $(call quote,$(WINDOWS_BUILD_ROOT)) $(call quote,$(PREFIX))
+
+install-stdlib: stdlib
+	+$(MAKE) -f Makefile.win publish-stdlib
+
+# Publishing an already built stage must not rebuild or replace its inputs.
+publish-stdlib:
+	mkdir -p $(call quote,$(PREFIX)/lib/titan/$(TITAN_LIBRARY_VERSION)) \
+	  $(call quote,$(PREFIX)/share/lua/5.5/titan) $(call quote,$(PREFIX)/share/titan/$(TITAN_LIBRARY_VERSION)/src/titan)
+	cp -p titan.dll $(call quote,$(PREFIX)/lib/titan/$(TITAN_LIBRARY_VERSION)/titan.dll)
+	for module in $(STDLIB_MODULES); do cp -p "titan/$$module.lua" $(call quote,$(PREFIX)/share/lua/5.5/titan/); done
+	cp -p titan/test.titan $(call quote,$(PREFIX)/share/titan/$(TITAN_LIBRARY_VERSION)/src/titan/test.titan)
+
+compiler-publication-check: runtime
+	bash spec/support/check_windows_publication.sh $(call quote,$(WINDOWS_BUILD_ROOT)) $(call quote,$(PREFIX))
+
+# The source inventory is identical to the Unix aggregate. Windows keeps its
+# native outputs and copied SDK in an explicitly owned local NTFS workspace.
+include spec/support/stdlib_test_modules.mk
+TITAN_TEST_BUILD_DIR ?= $(WINDOWS_BUILD_ROOT)/stdlib-tests
+TITAN_TEST_MAKE := $(MAKE)
+TITAN_TEST_TIMEOUT ?= 1800
+TITAN_FILTER ?=
+.PHONY: titan-stdlib-test-build titan-stdlib-test-run titan-stdlib-test
+titan-stdlib-test-build:
+	MAKE=$(call quote,$(TITAN_TEST_MAKE)) CC=$(call quote,$(CC)) TITAN_TEST_TIMEOUT=$(call quote,$(TITAN_TEST_TIMEOUT)) \
+	  bash spec/support/windows_stdlib_tests.sh build $(call quote,$(TITAN_TEST_BUILD_DIR)) $(call quote,$(PREFIX))
+
+titan-stdlib-test-run:
+	TITAN_TEST_TIMEOUT=$(call quote,$(TITAN_TEST_TIMEOUT)) TITAN_FILTER=$(call quote,$(TITAN_FILTER)) \
+	  bash spec/support/windows_stdlib_tests.sh run $(call quote,$(TITAN_TEST_BUILD_DIR))
+
+titan-stdlib-test: titan-stdlib-test-build
+	$(MAKE) -f Makefile.win titan-stdlib-test-run
+
+.PHONY: rock-test test
+rock-test: export TITAN_ROCK_TEST_STDLIB_SPECS = spec/asan_generated_c_context_spec.lua spec/dense_array_runtime_spec.lua spec/libuv_build_spec.lua spec/lpeglabel_build_spec.lua spec/minicoro_spec.lua spec/rockspec_spec.lua
+rock-test: export TITAN_ROCK_TEST_SUPERVISOR = $(TITAN_TEST_BUILD_DIR)/sdk/bin/windows-test-supervisor.exe
+rock-test: titan-stdlib-test
+	PREFIX=$(call quote,$(PREFIX)) TITAN_ROCK_TEST_INTERNAL=1 \
+	  BUSTED_FILTER=$(call quote,$(BUSTED_FILTER)) \
+	  bash spec/support/run_rock_tests.sh $(EXTRA_TEST_FLAGS)
+
+test: compiler
+	LUAROCKS_CONFIG=$(call quote,$(shell cygpath -m "$(LUAROCKS_CONFIG)")) \
+	  $(call quote,$(LUAROCKS)) --lua-version=5.5 \
+	  --tree=$(call quote,$(shell cygpath -m "$(PREFIX)")) test titan-0.6.0-1.rockspec \
+	  CC=$(call quote,$(CC)) LD=$(call quote,$(CC)) AR=$(call quote,$(AR)) RANLIB=$(call quote,$(RANLIB))
+
+# LuaRocks builds the SDK before deploying compiler modules, then invokes the
+# installed compiler for the source-only stdlib hook.
+.PHONY: titan rock-post-install check-rocks-tree
+check-rocks-tree:
+	@test $(call quote,$(PREFIX)) -ef $(call quote,$(ROCKS_TREE)) || { \
+	  echo 'The Windows source rock requires --tree to select the Lua SDK prefix.' >&2; exit 1; }
+
+titan: check-rocks-tree runtime native
+
+rock-post-install: check-rocks-tree install-stdlib

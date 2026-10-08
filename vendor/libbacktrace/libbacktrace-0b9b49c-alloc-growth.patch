@@ -1,0 +1,87 @@
+--- a/alloc.c
++++ b/alloc.c
+@@ -82,6 +82,15 @@
+ 		       void *data, struct backtrace_vector *vec)
+ {
+   void *ret;
++  size_t needed;
++
++  if (size > (size_t) -1 - vec->size)
++    {
++      if (error_callback != NULL)
++	error_callback (data, "realloc", ENOMEM);
++      return NULL;
++    }
++  needed = vec->size + size;
+ 
+   if (size > vec->alc)
+     {
+@@ -89,19 +98,18 @@
+       void *base;
+ 
+       if (vec->size == 0)
+-	alc = 32 * size;
+-      else if (vec->size >= 4096)
+-	alc = vec->size + 4096;
++	alc = size <= (size_t) -1 / 32 ? 32 * size : needed;
+       else
+-	alc = 2 * vec->size;
++	alc = vec->size <= (size_t) -1 / 2 ? 2 * vec->size : needed;
+ 
+-      if (alc < vec->size + size)
+-	alc = vec->size + size;
++      if (alc < needed)
++	alc = needed;
+ 
+       base = realloc (vec->base, alc);
+       if (base == NULL)
+ 	{
+-	  error_callback (data, "realloc", errno);
++	  if (error_callback != NULL)
++	    error_callback (data, "realloc", errno);
+ 	  return NULL;
+ 	}
+ 
+@@ -109,7 +117,9 @@
+       vec->alc = alc - vec->size;
+     }
+ 
+-  ret = (char *) vec->base + vec->size;
++  ret = vec->base;
++  if (vec->size != 0)
++    ret = (char *) ret + vec->size;
+   vec->size += size;
+   vec->alc -= size;
+   return ret;
+@@ -145,7 +155,7 @@
+ 			  backtrace_error_callback error_callback,
+ 			  void *data)
+ {
+-  vec->alc = 0;
++  void *base;
+ 
+   if (vec->size == 0)
+     {
+@@ -153,15 +163,19 @@
+ 	 free instead.  */
+       free (vec->base);
+       vec->base = NULL;
++      vec->alc = 0;
+       return 1;
+     }
+ 
+-  vec->base = realloc (vec->base, vec->size);
+-  if (vec->base == NULL)
++  base = realloc (vec->base, vec->size);
++  if (base == NULL)
+     {
+-      error_callback (data, "realloc", errno);
++      if (error_callback != NULL)
++	error_callback (data, "realloc", errno);
+       return 0;
+     }
+ 
++  vec->base = base;
++  vec->alc = 0;
+   return 1;
+ }

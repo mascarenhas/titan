@@ -2,36 +2,16 @@
 
 ## Experimental Windows builds
 
-`Makefile.windows` packages the pinned Lua, libuv, OpenSSL, llhttp, and SQLite
-providers as application-private DLLs. The corresponding attribution and
+`Makefile.win` packages the pinned Lua, libuv, llhttp, and SQLite providers
+as application-private DLLs. OpenSSL defaults to an installed binary SDK;
+`OPENSSL_MODE=bundled` builds the pinned OpenSSL 3.5.7 source instead. The
+corresponding attribution and
 license texts below also accompany those DLLs. Windows does not link GNU
 Readline. The private namespaced LPegLabel payload remains statically embedded
-in the Titan standard provider. Compiler-only LuaFileSystem, LPegLabel/relabel,
-argparse, and inspect have their upstream notices installed separately under
-`share/titan/0.6/licenses/`; the standard-provider notices and texts are under
+in the Titan standard provider. Compiler-only LuaFileSystem, luv, LPegLabel/relabel,
+argparse, and inspect are installed as ordinary LuaRocks dependencies under
+their upstream license terms. The standard-provider notices and texts are under
 `share/titan/THIRD_PARTY_NOTICES.md` and `share/titan/LICENSES/`.
-
-## GNU Readline
-
-Lua's interactive `linux-readline` and `macosx` targets link the prefix-local
-Lua interpreter through the Readline API. When the host probe succeeds, they
-use the separately installed compatible system provider, whose own license
-terms apply. Otherwise, the bundled mode downloads GNU Readline 8.3 from
-<https://ftp.gnu.org/gnu/readline/>, applies the exact vendored combination of
-official patches 001-003, and statically links the resulting private archive
-into that interpreter.
-
-GNU Readline is Copyright (C) 1987-2025 Free Software Foundation, Inc. and is
-distributed under the GNU General Public License, version 3 or later. The exact
-license text from the audited Readline 8.3 source is checked in as
-`LICENSES/readline-LICENSE`. A bundled installation also copies it to
-`readline-build/.titan-readline-8.3-p3/share/licenses/COPYING`.
-
-Anyone distributing a Lua interpreter through the bundled mode, or through a
-system mode that selected GNU Readline, must satisfy the applicable GNU
-Readline license and corresponding-source requirements. A different compatible
-system provider remains governed by that provider's terms. Neither mode
-incorporates the provider into Titan's compiler or standard-library artifacts.
 
 ## libuv
 
@@ -41,8 +21,44 @@ distributed under the MIT license; its unmodified license text is distributed
 as `LICENSES/libuv-LICENSE` (or in the installer's corresponding license
 directory).
 
-Distributions containing Titan's statically linked libuv standard library must
-include that license text and this attribution.
+Parts originating from Joyent and other Node contributors retain the MIT
+notice reproduced verbatim in `LICENSES/libuv-LICENSE-extra`. That upstream
+notice also identifies the externally maintained components: `include/uv/tree.h`,
+Copyright 2002 Niels Provos, under the BSD two-clause license reproduced in
+`LICENSES/libuv-tree-LICENSE`; and the `inet_pton`/`inet_ntop` implementations in
+`src/inet.c`, Copyright 2004 Internet Systems Consortium, Inc. and
+1996-1999 Internet Software Consortium, under the ISC license reproduced in
+`LICENSES/libuv-inet-LICENSE`.
+
+Distributions containing Titan's bundled libuv libraries must include all four
+license texts and this attribution.
+
+## luv
+
+The Windows compiler installs luv `1.52.1-0`, obtained from
+<https://github.com/luvit/luv/releases/tag/1.52.1-0>. Luv is Copyright 2014
+The Luvit Authors and is distributed under the Apache License 2.0, included in
+the dependency's `LICENSE.txt`. Its bundled libuv 1.52.1 retains the same
+libuv, Joyent, Niels Provos, and ISC license texts listed above.
+
+## libbacktrace
+
+Titan links Ian Lance Taylor's libbacktrace for native source attribution.
+The Windows build uses revision `0b9b49cf4a2c9229fc052d6716e1528b2f23e91a`
+from <https://github.com/ianlancetaylor/libbacktrace>, with a local PE/COFF
+correction for relocated symbol addresses and bounded symbol lookup. It
+disables DLL notifications and refreshes snapshots through Titan's existing
+provider-load invalidation instead. The BSD license is reproduced in
+`LICENSES/libbacktrace-LICENSE`.
+
+## LLVM libunwind
+
+Windows Titan providers and launchers statically link the CLANG64 toolchain's
+LLVM libunwind. The validated toolchain uses LLVM 22.1.8, obtained from
+<https://github.com/llvm/llvm-project/tree/llvmorg-22.1.8/libunwind>. It is
+distributed under the Apache License 2.0 with LLVM exceptions, reproduced in
+`LICENSES/llvm-LICENSE`. Distributions must include the license corresponding
+to their selected toolchain.
 
 ## OpenSSL
 
@@ -56,6 +72,8 @@ license directory).
 Distributions containing Titan's bundled OpenSSL standard library must include
 that license text and this attribution. Builds configured with
 `OPENSSL_MODE=system` dynamically use the separately installed OpenSSL instead.
+The Windows SDK stages that provider's matching DLLs, import libraries, and
+headers for deployment.
 
 ## llhttp
 
@@ -122,3 +140,11 @@ The format and pack/unpack parsers and semantics in `titan.string` are
 translated and adapted from `lstrlib.c` in Lua 5.5.1. Lua is Copyright (C)
 1994-2026 Lua.org, PUC-Rio, and is distributed under the MIT license
 reproduced in `LICENSES/lua-LICENSE`.
+
+## Go path algorithms
+
+`titan.path` and `titan-compiler.path` adapt lexical path algorithms from
+Go's `path/filepath` and `internal/filepathlite` packages, obtained from
+<https://go.dev/src/internal/filepathlite/>. Those sources are Copyright
+The Go Authors and distributed under the BSD license reproduced in
+`LICENSES/go-LICENSE`.

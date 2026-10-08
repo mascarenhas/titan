@@ -1,4 +1,8 @@
+local temporary = require "spec.support.temporary"
 local lfs = require "lfs"
+local cdriver = require "c-parser.cdriver"
+local compiler_io = require "titan-compiler.io"
+local platform = require "titan-compiler.platform"
 
 local function write_file(path, contents)
     local f = assert(io.open(path, "wb"))
@@ -6,20 +10,19 @@ local function write_file(path, contents)
     f:close()
 end
 
-local function run_command(command)
-    local f = assert(io.popen(command .. " 2>&1"))
-    local out = f:read("*a")
-    local ok = f:close()
-    return ok, out
+local function run_command(argv)
+    local result = compiler_io.new_sync():run(argv)
+    return result.ok, result.output or result.diagnostic or ""
 end
 
 local function command_available(command)
-    local ok = os.execute("command -v " .. command .. " >/dev/null 2>&1")
-    return ok == true or ok == 0
+    return run_command({ command, "--version" })
 end
 
 local function with_valgrind_stub(fn)
-    local root = os.tmpname() .. "-vg"
+    local reservation = temporary.name()
+    os.remove(reservation)
+    local root = reservation .. "-vg"
     local vgdir = root .. "/valgrind"
     assert(lfs.mkdir(root))
     assert(lfs.mkdir(vgdir))
@@ -41,18 +44,29 @@ local function with_valgrind_stub(fn)
 end
 
 local function run_c_probe(source, cflags, runner)
-    local stem = os.tmpname()
+    local stem = temporary.name()
+    os.remove(stem)
     local cfile = stem .. ".c"
-    local exe = stem
+    local exe = stem .. (platform.windows and ".exe" or "")
     write_file(cfile, source)
-    local cc = os.getenv("MINICORO_TEST_CC") or "cc"
-    local compile = string.format(
-        "%s --std=c99 -Wall -Wextra -I. %s -o %s %s",
-        cc, cflags or "", exe, cfile)
+    local cc = os.getenv("MINICORO_TEST_CC") or
+        (platform.windows and (os.getenv("CC") or "clang.exe") or "cc")
+    local compile = assert(cdriver.split_shell_words(cc))
+    for _, word in ipairs({ "--std=c99", "-Wall", "-Wextra", "-I." }) do
+        compile[#compile + 1] = word
+    end
+    for _, word in ipairs(assert(cdriver.split_shell_words(cflags or ""))) do
+        compile[#compile + 1] = word
+    end
+    compile[#compile + 1] = "-o"
+    compile[#compile + 1] = exe
+    compile[#compile + 1] = cfile
     local ok, compile_out = run_command(compile)
     os.remove(cfile)
     assert.truthy(ok, compile_out)
-    local run_ok, out = run_command((runner or "") .. exe)
+    local argv = assert(cdriver.split_shell_words(runner or ""))
+    argv[#argv + 1] = exe
+    local run_ok, out = run_command(argv)
     os.remove(exe)
     assert.truthy(run_ok, out)
     return out
@@ -395,7 +409,7 @@ local function run_suite_variant(variant)
             os.getenv("MINICORO_TEST_CFLAGS") or "",
         }, " ")
         if include_dir then
-            cflags = cflags .. " -I" .. include_dir
+            cflags = cflags .. " -I" .. assert(cdriver.shell_quote(include_dir))
         end
         return run_c_probe(minicoro_suite(variant.defines), cflags, variant.runner)
     end
@@ -492,6 +506,10 @@ describe("minicoro tagged extension", function()
 
     for _, variant in ipairs(variants) do
         it("passes tagged coroutine behavior on " .. variant.name, function()
+            if platform.windows and variant.name:find("UCONTEXT", 1, true) then
+                pending("The UCONTEXT backend requires the POSIX ucontext API")
+                return
+            end
             local out = run_suite_variant(variant)
             assert.match("ok", out)
         end)
@@ -588,6 +606,10 @@ int main(void) {
     end)
 
     it("runs tagged coroutine behavior under real Valgrind when available", function()
+        if platform.windows then
+            pending("Valgrind requires a supported Unix host")
+            return
+        end
         if not command_available("valgrind") then
             return
         end

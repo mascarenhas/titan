@@ -1,44 +1,83 @@
 local assert = require "luassert"
 local cdriver = require "c-parser.cdriver"
+local compiler_io = require "titan-compiler.io"
+local driver = require "titan-compiler.driver"
+local path = require "titan-compiler.path"
+local platform = require "titan-compiler.platform"
 local lfs = require "lfs"
 local DEPTH_PROBE = require("spec.support.helpers").DEPTH_PROBE
 
-local REPO = lfs.currentdir()
+local REPO = path.normalize(assert(lfs.currentdir()))
 local PREFIX = require("spec.support.installed_prefix").active()
-local LUA = PREFIX .. "/bin/lua"
+local SHARED_SUFFIX = platform.windows and ".dll" or ".so"
+local LUA = path.join(PREFIX, "bin", "lua" .. (platform.windows and ".exe" or ""))
+local INSTALLED_TITANC = path.join(PREFIX, platform.windows and
+    "lib/luarocks/rocks-5.5/titan/0.6.0-1/bin/titanc" or "bin/titanc")
+
+local USE_CHECKOUT_COMPILER =
+    os.getenv("TITAN_TEST_USE_CHECKOUT_COMPILER") == "1"
 
 local function exists(path)
     return lfs.attributes(path, "mode") ~= nil
 end
 
-local function quote_argv(argv)
-    local quoted = {}
-    for index, argument in ipairs(argv) do
-        quoted[index] = assert(cdriver.shell_quote(argument))
-    end
-    return table.concat(quoted, " ")
-end
-
 local function run(argv, cwd)
-    local previous = lfs.currentdir()
+    local command = { table.unpack(argv) }
+    local scripts = {}
+    if platform.windows then
+        if command[1] == "env" then command[1] = "env.exe" end
+        for index = 1, #command - 1 do
+            if command[index] == "-e" and command[index + 1]:find("[\r\n]") then
+                local script = assert(compiler_io.new_sync():tmpname())
+                local file = assert(io.open(script, "wb"))
+                assert(file:write(command[index + 1]))
+                assert(file:close())
+                scripts[#scripts + 1] = script
+                command[index] = script
+                table.remove(command, index + 1)
+                break
+            end
+        end
+    end
+    local previous = assert(lfs.currentdir())
     assert.truthy(lfs.chdir(cwd))
-    local pipe = assert(io.popen(quote_argv(argv) .. " 2>&1", "r"))
-    local output = pipe:read("*a")
-    local ok, why, code = pipe:close()
+    local called, result = pcall(function()
+        return compiler_io.new_sync():run(command)
+    end)
     assert.truthy(lfs.chdir(previous))
-    return ok == true, output, why, code
+    for _, script in ipairs(scripts) do os.remove(script) end
+    assert.truthy(called, result)
+    local output = result.output or result.diagnostic or ""
+    if platform.windows then
+        output = output:gsub("\r\n", "\n")
+        output = output:gsub('%^"(.-)%^"', function(word)
+            return assert(cdriver.shell_quote((word:gsub("%^(.)", "%1"))))
+        end)
+    end
+    return result.started and result.ok, output, result.why, result.status
 end
 
-local function make_directory(path)
-    if lfs.attributes(path, "mode") == "directory" then return end
-    local parent = path:match("^(.+)/[^/]+$")
-    if parent then make_directory(parent) end
-    assert.truthy(lfs.mkdir(path), "could not create " .. path)
+local function temporary_workspace()
+    local workspace = assert(compiler_io.new_sync():tmpname())
+    assert.truthy(os.remove(workspace))
+    assert.truthy(lfs.mkdir(workspace))
+    return path.normalize(workspace)
 end
 
-local function write_file(path, contents)
-    make_directory(assert(path:match("^(.+)/[^/]+$")))
-    local file = assert(io.open(path, "wb"))
+local function shared_path(workspace, stem)
+    return path.join(workspace, stem .. SHARED_SUFFIX)
+end
+
+local function make_directory(directory)
+    if lfs.attributes(directory, "mode") == "directory" then return end
+    local parent = path.dirname(directory)
+    if parent ~= directory then make_directory(parent) end
+    assert.truthy(lfs.mkdir(directory), "could not create " .. directory)
+end
+
+local function write_file(filename, contents)
+    make_directory(path.dirname(filename))
+    local file = assert(io.open(filename, "wb"))
     assert.truthy(file:write(contents))
     assert.truthy(file:close())
 end
@@ -50,17 +89,17 @@ local function read_file(path)
     return contents
 end
 
-local function remove_tree(path)
-    local mode = lfs.symlinkattributes(path, "mode")
+local function remove_tree(directory)
+    local mode = lfs.symlinkattributes(directory, "mode")
     if mode == "directory" then
-        for name in lfs.dir(path) do
+        for name in lfs.dir(directory) do
             if name ~= "." and name ~= ".." then
-                remove_tree(path .. "/" .. name)
+                remove_tree(path.join(directory, name))
             end
         end
-        assert.truthy(lfs.rmdir(path))
+        assert.truthy(lfs.rmdir(directory))
     elseif mode then
-        assert.truthy(os.remove(path))
+        assert.truthy(os.remove(directory))
     end
 end
 
@@ -74,24 +113,26 @@ local function compiler_argv(output_root, source_root, titan_path, ...)
         "TITAN_PATH=",
     }
     if PREFIX then
-        table.insert(argv, "PATH=" .. PREFIX .. "/bin:" ..
+        table.insert(argv, "PATH=" .. path.join(PREFIX, "bin") .. (platform.windows and ";" or ":") ..
             (os.getenv("PATH") or "/usr/bin:/bin"))
     end
 
-    local installed = PREFIX and exists(PREFIX .. "/bin/titanc")
+    local installed = not USE_CHECKOUT_COMPILER and
+        PREFIX and exists(INSTALLED_TITANC)
     if installed then
-        table.insert(argv, PREFIX .. "/bin/titanc")
+        if platform.windows then table.insert(argv, LUA) end
+        table.insert(argv, INSTALLED_TITANC)
     else
         assert.truthy(PREFIX,
             "set PREFIX or TITAN_TEST_PREFIX for native compiler tests")
         table.insert(argv, "TITAN_ROCKS_ROOT=" .. PREFIX)
-        table.insert(argv, "LUA_CPATH=" .. REPO .. "/?.so;;")
+        table.insert(argv, "LUA_CPATH=" .. path.to_slash(path.join(REPO, "?" .. SHARED_SUFFIX)) .. ";;")
         table.insert(argv, LUA)
         table.insert(argv, "-e")
         table.insert(argv, string.format(
-            "package.path=%q..package.path", REPO .. "/?.lua;" ..
-                REPO .. "/?/init.lua;"))
-        table.insert(argv, REPO .. "/titanc")
+            "package.path=%q..package.path", path.to_slash(path.join(REPO, "?.lua")) .. ";" ..
+                path.to_slash(path.join(REPO, "?/init.lua")) .. ";"))
+        table.insert(argv, path.join(REPO, "titanc"))
     end
 
     table.insert(argv, "--tree")
@@ -117,10 +158,10 @@ local function run_lua(cwd, titan_path, package_path, cpath_roots, code)
         "set PREFIX or TITAN_TEST_PREFIX for native compiler tests")
     local cpath = {}
     for _, root in ipairs(cpath_roots) do
-        table.insert(cpath, root .. "/?.so")
+        table.insert(cpath, path.to_slash(path.join(root, "?" .. SHARED_SUFFIX)))
     end
-    table.insert(cpath, PREFIX .. "/lib/titan/0.6/?.so")
-    table.insert(cpath, PREFIX .. "/lib/lua/5.5/?.so")
+    table.insert(cpath, path.to_slash(path.join(PREFIX, "lib/titan/0.6", "?" .. SHARED_SUFFIX)))
+    table.insert(cpath, path.to_slash(path.join(PREFIX, "lib/lua/5.5", "?" .. SHARED_SUFFIX)))
 
     return run({
         "env",
@@ -129,10 +170,10 @@ local function run_lua(cwd, titan_path, package_path, cpath_roots, code)
         "TITAN_PATH_0_6=" .. titan_path,
         "TITAN_PATH=",
         LUA, "-e", string.format([[
-package.path = %q
+package.path = %q .. ";" .. package.path
 package.cpath = %q
 %s
-]], package_path .. "/?.lua", table.concat(cpath, ";"), code),
+]], path.to_slash(path.join(package_path, "?.lua")), table.concat(cpath, ";"), code),
     }, cwd)
 end
 
@@ -147,16 +188,14 @@ describe("compiled-provider selection across Titan path roots", function()
     local titan_path
 
     setup(function()
-        workspace = os.tmpname()
-        assert.truthy(os.remove(workspace))
-        assert.truthy(lfs.mkdir(workspace))
+        workspace = temporary_workspace()
 
-        root_one = workspace .. "/R1"
-        root_two = workspace .. "/R2"
-        consumer_root = workspace .. "/consumer"
-        source_one = workspace .. "/source-one"
-        source_two = workspace .. "/source-two"
-        consumer_source = workspace .. "/consumer-source"
+        root_one = path.join(workspace, "R1")
+        root_two = path.join(workspace, "R2")
+        consumer_root = path.join(workspace, "consumer")
+        source_one = path.join(workspace, "source-one")
+        source_two = path.join(workspace, "source-two")
+        consumer_source = path.join(workspace, "consumer-source")
         for _, directory in ipairs({
             root_one, root_two, consumer_root,
             source_one, source_two, consumer_source,
@@ -165,7 +204,7 @@ describe("compiled-provider selection across Titan path roots", function()
         end
         titan_path = root_one .. ";;" .. root_two
 
-        write_file(source_one .. "/route/item.titan", [[
+        write_file(path.join(source_one, "route/item.titan"), [[
 function origin(): integer
     return 101
 end
@@ -174,7 +213,7 @@ function root_one_only(): integer
     return 11
 end
 ]])
-        write_file(source_two .. "/route/item.titan", [[
+        write_file(path.join(source_two, "route/item.titan"), [[
 function origin(): integer
     return 202
 end
@@ -187,7 +226,7 @@ end
         assert_compiles(root_one, source_one, root_one, "route.item")
         assert_compiles(root_two, source_two, root_two, "route.item")
 
-        write_file(consumer_source .. "/path_consumer.titan", [[
+        write_file(path.join(consumer_source, "path_consumer.titan"), [[
 local item = import "route.item"
 
 function answer(): integer
@@ -205,14 +244,14 @@ end
     it("uses the earlier exact provider for checking and Titan imports",
        function()
         assert.equal("file", lfs.attributes(
-            root_one .. "/route/item.so", "mode"))
+            shared_path(root_one, "route/item"), "mode"))
         assert.equal("file", lfs.attributes(
-            root_two .. "/route/item.so", "mode"))
+            shared_path(root_two, "route/item"), "mode"))
 
         local generated = read_file(
-            consumer_source .. "/path_consumer.c")
+            path.join(consumer_source, "path_consumer.c"))
         assert.truthy(generated:find(
-            'titan_module_provider(L, "route.item", "route/item.so")', 1, true), generated)
+            'titan_module_provider(L, "route.item", "route/item' .. SHARED_SUFFIX .. '")', 1, true), generated)
         assert.falsy(generated:find(root_one, 1, true), generated)
         assert.falsy(generated:find(root_two, 1, true), generated)
         -- root_one_only exists only in R1, so successful checking proves that
@@ -234,11 +273,19 @@ assert(consumer.answer() == 112)
         local ok, output = run_lua(
             workspace, aligned_path, root_one, { root_one, root_two },
             string.format([[
-assert(package.searchpath("route.item", package.cpath) == %q)
+local found = assert(package.searchpath("route.item", package.cpath))
+local expected = %q
+if package.config:sub(1, 1) == "\\" then
+    local filesystem = require("titan-compiler.io").new_sync()
+    assert(assert(filesystem:realpath(found)):lower() ==
+        assert(filesystem:realpath(expected)):lower())
+else
+    assert(found == expected)
+end
 local item = require "route.item"
 assert(item.origin() == 101)
 assert(item.root_one_only() == 11)
-]], root_one .. "/route/item.so"))
+]], shared_path(root_one, "route/item")))
         assert.truthy(ok, output)
 
         -- The Lua shim comes from R1 in both processes. Reversing only C-path
@@ -247,33 +294,41 @@ assert(item.root_one_only() == 11)
         ok, output = run_lua(
             workspace, aligned_path, root_one, { root_two, root_one },
             string.format([[
-assert(package.searchpath("route.item", package.cpath) == %q)
+local found = assert(package.searchpath("route.item", package.cpath))
+local expected = %q
+if package.config:sub(1, 1) == "\\" then
+    local filesystem = require("titan-compiler.io").new_sync()
+    assert(assert(filesystem:realpath(found)):lower() ==
+        assert(filesystem:realpath(expected)):lower())
+else
+    assert(found == expected)
+end
 local item = require "route.item"
 assert(item.origin() == 202)
 assert(item.root_two_only() == 22)
-]], root_two .. "/route/item.so"))
+]], shared_path(root_two, "route/item")))
         assert.truthy(ok, output)
     end)
 
     it("selects one shallower provider from a later Titan path root",
        function()
-        write_file(source_two .. "/later/branch/item.titan", [[
+        write_file(path.join(source_two, "later/branch/item.titan"), [[
 function answer(): integer
     return 303
 end
 ]])
-        write_file(source_two .. "/later/peer.titan", [[
+        write_file(path.join(source_two, "later/peer.titan"), [[
 function marker(): integer
     return 404
 end
 ]])
         assert_compiles(root_two, source_two, root_two,
             "later.branch.item", "later.peer")
-        assert.equal("file", lfs.attributes(root_two .. "/later.so", "mode"))
+        assert.equal("file", lfs.attributes(shared_path(root_two, "later"), "mode"))
         assert.is_nil(lfs.attributes(
-            root_two .. "/later/branch/item.so", "mode"))
+            shared_path(root_two, "later/branch/item"), "mode"))
 
-        write_file(consumer_source .. "/later_consumer.titan", [[
+        write_file(path.join(consumer_source, "later_consumer.titan"), [[
 local item = import "later.branch.item"
 
 function answer(): integer
@@ -284,11 +339,11 @@ end
             "later_consumer")
 
         local generated = read_file(
-            consumer_source .. "/later_consumer.c")
+            path.join(consumer_source, "later_consumer.c"))
         assert.truthy(generated:find(
-            'titan_module_provider(L, "later.branch.item", "later.so")', 1, true), generated)
+            'titan_module_provider(L, "later.branch.item", "later' .. SHARED_SUFFIX .. '")', 1, true), generated)
         assert.falsy(generated:find(
-            'titan_module_provider(L, "later.branch.item", "later/branch/item.so")', 1, true), generated)
+            'titan_module_provider(L, "later.branch.item", "later/branch/item' .. SHARED_SUFFIX .. '")', 1, true), generated)
 
         local ok, output = run_lua(
             consumer_root, titan_path, consumer_root, { consumer_root }, [[
@@ -298,8 +353,8 @@ assert(consumer.answer() == 303)
         assert.truthy(ok, output)
     end)
 
-    it("shares dense arrays through a selected static provider", function()
-        write_file(source_one .. "/staticarray/api.titan", [[
+    it("shares dense arrays through a selected provider", function()
+        write_file(path.join(source_one, "staticarray/api.titan"), [[
 function make(): {integer}
     return {10, 20, 30}
 end
@@ -313,10 +368,13 @@ function echo(xs: {value}): {value}
 end
 ]])
         assert_compiles(root_one, source_one, root_one, "staticarray.api")
-        assert.equal("file", lfs.attributes(
-            root_one .. "/staticarray/api.a", "mode"))
+        if platform.windows then
+            assert.is_nil(lfs.attributes(path.join(root_one, "staticarray/api.a"), "mode"))
+        else
+            assert.equal("file", lfs.attributes(path.join(root_one, "staticarray/api.a"), "mode"))
+        end
 
-        write_file(consumer_source .. "/static_array_consumer.titan", [[
+        write_file(path.join(consumer_source, "static_array_consumer.titan"), [[
 local api = import "staticarray.api"
 
 function roundtrip(): {value}
@@ -325,15 +383,21 @@ function roundtrip(): {value}
     return api.echo(xs)
 end
 ]])
-        assert_compiles(consumer_root, consumer_source, root_one,
-            "--static", "static_array_consumer")
+        local arguments = platform.windows and { "static_array_consumer" } or
+            { "--static", "static_array_consumer" }
+        assert_compiles(consumer_root, consumer_source, root_one, table.unpack(arguments))
 
         local generated = read_file(
-            consumer_source .. "/static_array_consumer.c")
-        assert.falsy(generated:find(
-            'titan_module_provider(L, "staticarray.api", "staticarray/api.so")', 1, true), generated)
-        assert.truthy(generated:find(
-            "extern Udata *staticarray_api_init", 1, true), generated)
+            path.join(consumer_source, "static_array_consumer.c"))
+        if platform.windows then
+            assert.truthy(generated:find(
+                'titan_module_provider(L, "staticarray.api", "staticarray/api.dll")', 1, true), generated)
+        else
+            assert.falsy(generated:find(
+                'titan_module_provider(L, "staticarray.api", "staticarray/api.so")', 1, true), generated)
+            assert.truthy(generated:find(
+                "extern Udata *staticarray_api_init", 1, true), generated)
+        end
 
         local ok, output = run_lua(
             consumer_root, root_one, consumer_root, { consumer_root }, [[
@@ -359,9 +423,9 @@ assert(#xs == 6 and xs[7] == nil)
         assert.truthy(ok, output)
     end)
 
-    it("uses native and strict entries from a selected static provider",
+    it("uses native and strict entries from a selected provider",
        function()
-        write_file(source_one .. "/staticentry/api.titan", [[
+        write_file(path.join(source_one, "staticentry/api.titan"), [[
 function probe(p: function (): integer): integer
     return p()
 end
@@ -374,10 +438,13 @@ function boundary(x: integer): value
 end
 ]])
         assert_compiles(root_one, source_one, root_one, "staticentry.api")
-        assert.equal("file", lfs.attributes(
-            root_one .. "/staticentry/api.a", "mode"))
+        if platform.windows then
+            assert.is_nil(lfs.attributes(path.join(root_one, "staticentry/api.a"), "mode"))
+        else
+            assert.equal("file", lfs.attributes(path.join(root_one, "staticentry/api.a"), "mode"))
+        end
 
-        write_file(consumer_source .. "/static_entry_consumer.titan", [[
+        write_file(path.join(consumer_source, "static_entry_consumer.titan"), [[
 local provider = import "staticentry.api"
 
 function direct_depth(p: function (): integer): integer
@@ -403,15 +470,21 @@ function boundary_function(): function (integer): value
     return provider.boundary
 end
 ]])
-        assert_compiles(consumer_root, consumer_source, root_one,
-            "--static", "static_entry_consumer")
+        local arguments = platform.windows and { "static_entry_consumer" } or
+            { "--static", "static_entry_consumer" }
+        assert_compiles(consumer_root, consumer_source, root_one, table.unpack(arguments))
 
         local generated = read_file(
-            consumer_source .. "/static_entry_consumer.c")
-        assert.falsy(generated:find(
-            'titan_module_provider(L, "staticentry.api", "staticentry/api.so")', 1, true), generated)
-        assert.truthy(generated:find(
-            "extern Udata *staticentry_api_init", 1, true), generated)
+            path.join(consumer_source, "static_entry_consumer.c"))
+        if platform.windows then
+            assert.truthy(generated:find(
+                'titan_module_provider(L, "staticentry.api", "staticentry/api.dll")', 1, true), generated)
+        else
+            assert.falsy(generated:find(
+                'titan_module_provider(L, "staticentry.api", "staticentry/api.so")', 1, true), generated)
+            assert.truthy(generated:find(
+                "extern Udata *staticentry_api_init", 1, true), generated)
+        end
 
         local ok, output = run_lua(
             consumer_root, root_one, consumer_root, { consumer_root },
@@ -449,9 +522,9 @@ assert(tostring(argument_err):find(
         assert.truthy(ok, output)
     end)
 
-    it("keeps union closure slots symmetric through a prefix archive",
+    it("keeps union closure slots symmetric through a prefix provider",
        function()
-        write_file(source_one .. "/prefix/messages.titan", [[
+        write_file(path.join(source_one, "prefix/messages.titan"), [[
 record Delta
     x: float
     y: float
@@ -478,19 +551,23 @@ function hidden_message(): Message
     return Message.hidden(77)
 end
 ]])
-        write_file(source_one .. "/prefix/peer.titan", [[
+        write_file(path.join(source_one, "prefix/peer.titan"), [[
 function marker(): integer
     return 19
 end
 ]])
         assert_compiles(root_one, source_one, root_one,
             "prefix.messages", "prefix.peer")
-        assert.equal("file", lfs.attributes(root_one .. "/prefix.a", "mode"))
-        assert.equal("file", lfs.attributes(root_one .. "/prefix.so", "mode"))
+        if platform.windows then
+            assert.is_nil(lfs.attributes(path.join(root_one, "prefix.a"), "mode"))
+        else
+            assert.equal("file", lfs.attributes(path.join(root_one, "prefix.a"), "mode"))
+        end
+        assert.equal("file", lfs.attributes(shared_path(root_one, "prefix"), "mode"))
         assert.is_nil(lfs.attributes(
-            root_one .. "/prefix/messages.a", "mode"))
+            path.join(root_one, "prefix/messages.a"), "mode"))
 
-        write_file(consumer_source .. "/prefix_union_consumer.titan", [[
+        write_file(path.join(consumer_source, "prefix_union_consumer.titan"), [[
 local m = import "prefix.messages"
 local moved = m.Message.move({ x = 1.0, y = 2.0 })
 
@@ -520,15 +597,21 @@ function hidden_else(): integer
     end
 end
 ]])
-        assert_compiles(consumer_root, consumer_source, root_one,
-            "--static", "prefix_union_consumer")
+        local arguments = platform.windows and { "prefix_union_consumer" } or
+            { "--static", "prefix_union_consumer" }
+        assert_compiles(consumer_root, consumer_source, root_one, table.unpack(arguments))
 
         local generated = read_file(
-            consumer_source .. "/prefix_union_consumer.c")
-        assert.falsy(generated:find(
-            'titan_module_provider(L, "prefix.messages", "prefix.so")', 1, true), generated)
-        assert.truthy(generated:find(
-            "extern Udata *prefix_messages_init", 1, true), generated)
+            path.join(consumer_source, "prefix_union_consumer.c"))
+        if platform.windows then
+            assert.truthy(generated:find(
+                'titan_module_provider(L, "prefix.messages", "prefix.dll")', 1, true), generated)
+        else
+            assert.falsy(generated:find(
+                'titan_module_provider(L, "prefix.messages", "prefix.so")', 1, true), generated)
+            assert.truthy(generated:find(
+                "extern Udata *prefix_messages_init", 1, true), generated)
+        end
         assert.truthy(generated:find(
             "case%s+1:%s+goto%s+_case_"), generated)
 

@@ -9,6 +9,8 @@ local checker = require 'titan-compiler.checker'
 local parser = require 'titan-compiler.parser'
 local types = require 'titan-compiler.types'
 local driver = require 'titan-compiler.driver'
+local compiler_io = require 'titan-compiler.io'
+local platform = require 'titan-compiler.platform'
 
 -- A `require`d module does not inherit busted's `assert` (luassert) global, so
 -- bring it in explicitly. luassert's `assert` is a superset of Lua's `assert`,
@@ -55,9 +57,39 @@ end
 -- working Lua from PATH.
 local configured_prefix = os.getenv("PREFIX")
 local configured_lua = configured_prefix and
-    (configured_prefix .. "/bin/lua") or nil
+    platform.join(configured_prefix, platform.windows and "bin/lua.exe" or
+        "bin/lua") or nil
 local LUA = configured_lua and file_exists(configured_lua) and configured_lua
-    or "lua"
+    or (platform.windows and "lua.exe" or "lua")
+
+local function run(argv, merge_stderr)
+    local result = compiler_io.new_sync():run(argv, {
+        stderr_to_stdout = merge_stderr,
+    })
+    local output = result.output or ""
+    -- The old Lua popen streams used text mode on Windows.
+    if platform.windows then output = output:gsub("\r\n", "\n") end
+    return result, output
+end
+
+local function executable_path(appname)
+    if not platform.windows or appname:lower():match("[.]exe$") then
+        return appname
+    end
+    local modname = appname:gsub("^%./", ""):gsub("[/\\]", ".")
+    local paths, err = driver.windows_program_paths(modname)
+    assert.truthy(paths, err)
+    return paths.executable
+end
+
+local function cleanup_app(appname)
+    if verbose() then return end
+    os.remove(appname)
+    if not platform.windows then
+        -- macOS: dsymutil leaves a directory next to the executable.
+        run({ "rm", "-rf", appname .. ".dSYM" }, true)
+    end
+end
 
 -- Reset the process-global compiler state shared through `require` so one test
 -- never leaks types or import caches into the next.
@@ -146,10 +178,64 @@ function M.compile(modname, ast)
     return driver.compile_library(modname, { libname }, nil, verbose())
 end
 
+local function compile_program(modname, objects)
+    if not platform.windows then
+        return driver.compile_program(modname, objects, nil, verbose())
+    end
+
+    -- The launcher searches the CWD before its own provider directory. Remove
+    -- this fixture's earlier library so it cannot shadow the program provider.
+    local library = modname:gsub("[.]", "/") .. ".dll"
+    if file_exists(library) then
+        local removed, err = os.remove(library)
+        if not removed then
+            return nil, "cannot remove fixture library '" .. library .. "': " ..
+                tostring(err)
+        end
+    end
+
+    -- Program validation maps its DLL. A child owns that mapping, allowing the
+    -- next application fixture to replace the same logical provider on Windows.
+    local script = assert(compiler_io.new_sync():tmpname())
+    local file = assert(io.open(script, "wb"))
+    assert(file:write(string.format("package.path=%q\npackage.cpath=%q\n",
+        package.path, package.cpath)))
+    assert(file:write("require 'spec.support.helpers'\n" ..
+        "local driver=require 'titan-compiler.driver'\n" ..
+        "local context=driver.new_resolver_context()\n"))
+    for _, field in ipairs({ "CC", "AR", "RANLIB", "CFLAGS", "INCLUDE_PATH",
+            "LUA_SOURCE_PATH", "TITAN_RUNTIME_PATH", "LIBBACKTRACE_PATH" }) do
+        assert(file:write(string.format("driver.%s=%q\n", field, driver[field])))
+    end
+    assert(file:write(string.format("driver.EMIT_LINE_DIRECTIVES=%s\n",
+        tostring(driver.EMIT_LINE_DIRECTIVES))))
+    for _, field in ipairs({ "EXTRA_CPPFLAGS", "EXTRA_CFLAGS", "EXTRA_LDFLAGS" }) do
+        assert(file:write("driver." .. field .. "={"))
+        for _, argument in ipairs(driver[field] or {}) do
+            assert(file:write(string.format("%q,", argument)))
+        end
+        assert(file:write("}\n"))
+    end
+    assert(file:write("assert(driver.configure_foreign_c(context))\n" ..
+        "assert(driver.close_resolver_context(context))\nlocal objects={"))
+    for _, object in ipairs(objects) do
+        assert(file:write(string.format("%q,", object)))
+    end
+    assert(file:write(string.format("}\nlocal ok,err=" ..
+        "driver.compile_program(%q,objects,nil,%s)\nassert(ok,err)\n",
+        modname, tostring(verbose()))))
+    assert(file:close())
+    local called, result, output = pcall(run, { LUA, "-E", script }, true)
+    assert(os.remove(script))
+    if not called then return nil, result end
+    if not result.ok then return nil, output ~= "" and output or result.diagnostic end
+    return true
+end
+
 function M.compile_app(modname, ast)
     local ok, err, libname = driver.compile(modname, ast, nil, {}, verbose())
     if not ok then return ok, err end
-    return driver.compile_program(modname, { libname }, nil, verbose())
+    return compile_program(modname, { libname })
 end
 
 -- Run `code` under the stock Lua interpreter with `modname` loaded (`-l`),
@@ -158,20 +244,17 @@ end
 -- `-e`, so quote characters in `code` (e.g. double-quoted Lua string literals)
 -- cannot collide with the shell's quoting of the command line.
 function M.call(modname, code)
-    local script = os.tmpname()
+    local script = assert(compiler_io.new_sync():tmpname())
     local sf = assert(io.open(script, "w"))
     sf:write(string.format("print(pcall(function () %s end))\n", code))
     sf:close()
-    local cmd = string.format(
-        "%s -l %s %s", LUA, modname, script)
-    local f = io.popen(cmd)
-    if not f then
-        os.remove(script); return false, "popen failed"
-    end
-    local out = f:read()
-    local ok = f:close()
+    local result, output = run({ LUA, "-l", modname, script }, false)
     os.remove(script)
-    if not ok then return false, out or "process error" end
+    local out = output ~= "" and output:match("^[^\n]*") or nil
+    if not result.ok then
+        local message = out or result.diagnostic
+        return false, message and message ~= "" and message or "process error"
+    end
     if not out then return false, "no output" end
     local data = out:match("^true%s*(.*)$")
     if data then return true, data end
@@ -179,18 +262,20 @@ function M.call(modname, code)
 end
 
 function M.call_app(appname, ...)
-    local cmd = table.concat({ appname, ... }, " ")
-    local f = io.popen(cmd)
-    if not f then return false, "popen failed", nil, "" end
-    local out = f:read() or ""
-    local ok, err, status = f:close()
-    if err == "exit" then ok = true end
-    if not verbose() then
-        os.remove(appname)
-        -- macOS: dsymutil leaves a `<exe>.dSYM` bundle (a directory) next to the
-        -- executable for libbacktrace symbolization; no-op elsewhere.
-        os.execute("rm -rf " .. appname .. ".dSYM")
+    appname = executable_path(appname)
+    local argv = { appname, ... }
+    for index = 2, #argv do
+        if type(argv[index]) == "number" then argv[index] = tostring(argv[index]) end
     end
+    local result, output = run(argv, false)
+    cleanup_app(appname)
+    if not result.started then
+        return false, result.diagnostic, nil, ""
+    end
+    local err = result.shell_status and "exit" or result.why
+    local status = result.shell_status or result.status
+    local ok = result.ok or err == "exit"
+    local out = output:match("^[^\n]*") or ""
     return ok, err, status, out
 end
 
@@ -228,14 +313,13 @@ function M.compile_and_run(titan_code, lua_test, modname)
     local ok, err = M.compile(modname, ast)
     assert.truthy(ok, err)
 
-    local script = os.tmpname()
+    local script = assert(compiler_io.new_sync():tmpname())
     local sf = assert(io.open(script, "w"))
     sf:write(lua_test)
     sf:close()
-    local f = assert(io.popen(LUA .. " -l " .. modname .. " " .. script))
-    local out = f:read("*a")
-    f:close()
+    local result, out = run({ LUA, "-l", modname, script }, false)
     os.remove(script)
+    assert.truthy(result.started, result.diagnostic)
     return out
 end
 
@@ -270,16 +354,14 @@ function M.compile_and_run_app(titan_code, modname)
     local ok, err = M.compile_app(modname, ast)
     assert.truthy(ok, err)
 
-    local execname = "./" .. modname:gsub("[.]", "/")
-    local f = assert(io.popen(execname .. " 2>&1; echo \"EXIT:$?\""))
-    local out = f:read("*a")
-    f:close()
-    local status = tonumber(out:match("EXIT:(%d+)%s*$"))
-    out = out:gsub("EXIT:%d+%s*$", "")
-    if not verbose() then
-        os.remove(execname)
-        os.execute("rm -rf " .. execname .. ".dSYM")
-    end
+    local execname = executable_path("./" .. modname:gsub("[.]", "/"))
+    local result, out = run({ execname }, true)
+    cleanup_app(execname)
+    assert.truthy(result.started, result.diagnostic)
+    -- The previous POSIX echo trailer reported 128 + signal for killed apps.
+    local status = result.shell_status or
+        (not platform.windows and result.signal and 128 + result.signal) or
+        result.status
     return status, out
 end
 
@@ -334,8 +416,7 @@ function M.generate_modules(modules, main, forapp, options)
             if not ok then return nil, e end
         end
         if forapp then
-            local ok, e =
-                driver.compile_program(main, ofiles, nil, verbose())
+            local ok, e = compile_program(main, ofiles)
             if not ok then return nil, e end
         else
             for name, _ in pairs(imported) do
@@ -386,7 +467,40 @@ end
 -- dependency order (each may import earlier ones); the last is the module under
 -- test. Returns (true) or (nil, message); asserts every dependency resolved
 -- dynamically (from its `.so`), never statically linked.
-function M.build_so_chain(mods)
+function M.build_so_chain(mods, in_process)
+    if platform.windows and not in_process then
+        -- Windows retains DLL metadata mappings for the inspecting process.
+        -- Let a fresh compiler own them, so a later fixture can replace the
+        -- same provider names and paths after this child exits.
+        local script = assert(compiler_io.new_sync():tmpname())
+        local file = assert(io.open(script, "wb"))
+        assert(file:write(string.format("package.path=%q\npackage.cpath=%q\n",
+            package.path, package.cpath)))
+        assert(file:write("local h=require 'spec.support.helpers'\n" ..
+            "local driver=require 'titan-compiler.driver'\n"))
+        for _, field in ipairs({ "CC", "AR", "RANLIB" }) do
+            assert(file:write(string.format("driver.%s=%q\n", field, driver[field])))
+        end
+        for _, field in ipairs({ "EXTRA_CPPFLAGS", "EXTRA_CFLAGS", "EXTRA_LDFLAGS" }) do
+            assert(file:write("driver." .. field .. "={"))
+            for _, argument in ipairs(driver[field] or {}) do
+                assert(file:write(string.format("%q,", argument)))
+            end
+            assert(file:write("}\n"))
+        end
+        assert(file:write("assert(driver.configure_foreign_c())\nlocal modules={\n"))
+        for _, module in ipairs(mods) do
+            assert(file:write(string.format("{name=%q,src=%q},\n", module.name, module.src)))
+        end
+        -- The second argument is private to this worker invocation.
+        assert(file:write("}\nassert(h.build_so_chain(modules,true))\n"))
+        assert(file:close())
+        local called, result, output = pcall(run, { LUA, "-E", script }, true)
+        assert(os.remove(script))
+        if not called then return nil, result end
+        if not result.ok then return nil, output ~= "" and output or result.diagnostic end
+        return true
+    end
     local names = {}
     for _, m in ipairs(mods) do names[m.name] = true end
     for _, m in ipairs(mods) do

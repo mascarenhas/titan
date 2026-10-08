@@ -1,4 +1,5 @@
 local test = import "test"
+foreign import "lua.h"
 
 function test_prefixed_location(context: test.Context)
   local file, function_name, line = test.location()

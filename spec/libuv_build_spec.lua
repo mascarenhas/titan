@@ -4,8 +4,12 @@ local async_stdlib = require "spec.support.async_stdlib"
 local cdriver = require "c-parser.cdriver"
 local coder = require "titan-compiler.coder"
 local coder_names = require "titan-compiler.coder.names"
+local compiler_io = require "titan-compiler.io"
+local installed_prefix = require "spec.support.installed_prefix"
 local lfs = require "lfs"
 local parser = require "titan-compiler.parser"
+local platform = require "titan-compiler.platform"
+local paths = require "titan-compiler.path"
 local source_inventory = require "spec.support.source_inventory"
 local staticmetadata = require "titan-compiler.staticmetadata"
 
@@ -16,20 +20,20 @@ local UV_TYPES_FIXTURE =
 "spec/fixtures/libuv/titan_uv_types.lua"
 local STDLIB_MODULES = {
     "coroutine", "uv", "async", "timer", "io", "fs", "net", "ssl",
-    "url", "http", "websocket", "os", "peg", "string", "math", "lua", "iteration", "gc",
+    "url", "http", "websocket", "os", "path", "peg", "string", "math", "lua", "iteration", "gc",
     "test", "reflect", "sqlite3", "json",
 }
 local STDLIB_ROOTS = {
     "titan.coroutine", "titan.uv", "titan.async", "titan.timer",
     "titan.io", "titan.fs", "titan.net", "titan.ssl", "titan.url",
-    "titan.http", "titan.websocket", "titan.os", "titan.peg", "titan.string", "titan.math",
+    "titan.http", "titan.websocket", "titan.os", "titan.path", "titan.peg", "titan.string", "titan.math",
     "titan.lua", "titan.iteration", "titan.gc", "titan.test", "titan.reflect",
     "titan.sqlite3", "titan.json",
 }
 local STDLIB_SHIMS = {
     "titan/coroutine.lua", "titan/uv.lua", "titan/async.lua",
     "titan/timer.lua", "titan/io.lua", "titan/fs.lua", "titan/net.lua",
-    "titan/ssl.lua", "titan/url.lua", "titan/http.lua", "titan/websocket.lua", "titan/os.lua",
+    "titan/ssl.lua", "titan/url.lua", "titan/http.lua", "titan/websocket.lua", "titan/os.lua", "titan/path.lua",
     "titan/peg.lua", "titan/string.lua", "titan/math.lua", "titan/lua.lua",
     "titan/iteration.lua", "titan/gc.lua", "titan/test.lua", "titan/reflect.lua",
     "titan/sqlite3.lua", "titan/json.lua",
@@ -87,6 +91,7 @@ local HTTP_FOREIGN_CALLBACKS = {
     },
 }
 local STDLIB_CONTAINER = "titan.so"
+local INSTALLED_STDLIB_CONTAINER = platform.windows and "titan.dll" or STDLIB_CONTAINER
 local STDLIB_STATIC_ARCHIVE = "titan.a"
 -- Reviewed loop callback ABI and native-only entry inventory. New entries require review.
 local UV_FOREIGN_CALLBACKS = {
@@ -371,22 +376,13 @@ local FFI_RETIRED_HELPERS = {
     "titan_uvshim_dup_cloexec",
 }
 
-local function prefix_from_cpath(cpath)
-    for template in (cpath .. ";"):gmatch("(.-);") do
-        local root = template:match("^(.*)/lib/lua/5%.5/%?%.so$")
-        if root then return root end
-    end
-end
-
 local function installed_stdlib_container()
-    local prefix = assert(prefix_from_cpath(package.cpath),
-        "cannot find the active Lua prefix in package.cpath")
-    return prefix .. "/lib/titan/0.6/" .. STDLIB_CONTAINER
+    local prefix = installed_prefix.active()
+    return prefix .. "/lib/titan/0.6/" .. INSTALLED_STDLIB_CONTAINER
 end
 
 local function installed_stdlib_archive()
-    local prefix = assert(prefix_from_cpath(package.cpath),
-        "cannot find the active Lua prefix in package.cpath")
+    local prefix = installed_prefix.active()
     return prefix .. "/lib/titan/0.6/" .. STDLIB_STATIC_ARCHIVE
 end
 
@@ -396,12 +392,21 @@ local function quote(word)
 end
 
 local function run_argv(argv)
-    local words = {}
-    for _, word in ipairs(argv) do table.insert(words, quote(word)) end
-    local pipe = assert(io.popen(table.concat(words, " ") .. " 2>&1"))
-    local output = pipe:read("*a")
-    local ok, why, code = pipe:close()
-    return ok == true, output, why, code
+    if platform.windows then
+        -- These queries exercise Bash recipes, including those from the Unix
+        -- Makefile. Native GNU Make otherwise selects cmd.exe on Windows.
+        for _, word in ipairs(argv) do
+            if word == "make" then
+                argv = { table.unpack(argv) }
+                argv[#argv + 1] = "SHELL=bash.exe"
+                break
+            end
+        end
+    end
+    local result = compiler_io.new_sync():run(argv)
+    local output = result.output or result.diagnostic or ""
+    if platform.windows then output = output:gsub("\r\n", "\n") end
+    return result.ok, output, result.why, result.status
 end
 
 local function compiler_argv(...)
@@ -593,13 +598,15 @@ end
 local function nm_has_symbol(output, expected)
     for line in output:gmatch("[^\r\n]+") do
         local symbol = line:match("(%S+)%s*$")
-        if symbol == expected or symbol == "_" .. expected then return true end
+        if symbol == expected or symbol == "_" .. expected or
+           platform.windows and symbol == "__imp_" .. expected then return true end
     end
     return false
 end
 
 local function make_temp_dir()
-    local path = assert(os.tmpname())
+    local path = assert(compiler_io.new_sync():tmpname())
+    if platform.windows then path = path:gsub("\\", "/") end
     os.remove(path)
     assert.truthy(lfs.mkdir(path))
     return path
@@ -619,6 +626,54 @@ local function remove_tree(path)
     end
 end
 
+-- Unix tests inspect the prepared checkout's objects. A source-only
+-- Windows rock test owns equivalent generated units in a private source tree;
+-- the installed canonical provider and SDK remain read-only.
+local windows_object_root
+local function stdlib_artifact(relative)
+    if not platform.windows then return relative end
+    if not windows_object_root then
+        local root = make_temp_dir()
+        local compiled, compile_error = xpcall(function()
+            local function copy_sources(source, destination)
+                assert(lfs.mkdir(destination))
+                for name in lfs.dir(source) do
+                    if name ~= "." and name ~= ".." then
+                        local input, output = paths.join(source, name), paths.join(destination, name)
+                        if lfs.attributes(input, "mode") == "directory" then
+                            copy_sources(input, output)
+                        elseif name:match("[.]titan$") or (name:match("[.]h$") and
+                                not name:match("[.]titan[.]h$") and not name:match("[.]ffi[.]h$")) then
+                            write_file(output, read_file(input))
+                        end
+                    end
+                end
+            end
+            copy_sources("titan", paths.join(root, "titan"))
+            local prefix = installed_prefix.active()
+            local cppflags = (os.getenv("TITAN_EXTRA_CPPFLAGS") or "") ..
+                ' -DUSING_UV_SHARED=1 -I"' .. paths.to_slash(paths.join(prefix, "include")) .. '"' ..
+                ' -I"' .. paths.to_slash(paths.join(lfs.currentdir(), "vendor", "lpeglabel")) .. '"'
+            local argv = {
+                "env.exe", "TITAN_ROCKS_ROOT=" .. prefix, "TITAN_RUNTIME_PREBUILT=1",
+                "TITAN_EXTRA_CPPFLAGS=" .. cppflags,
+                paths.join(prefix, "bin", "lua.exe"),
+                paths.join(prefix, "lib/luarocks/rocks-5.5/titan/0.6.0-1/bin/titanc"),
+                "--source-first", "-c", "--tree", root,
+                "titan.uv", "titan.async", "titan.timer", "titan.fs", "titan.net", "titan.os", "titan.sqlite3",
+            }
+            local ok, output = run_argv(argv)
+            assert.truthy(ok, output)
+        end, debug.traceback)
+        if not compiled then
+            remove_tree(root)
+            error(compile_error, 0)
+        end
+        windows_object_root = root
+    end
+    return paths.join(windows_object_root, relative)
+end
+
 -- GNU Make executes recipe lines containing $(MAKE) even under -n. Keep these
 -- command-contract tests independent of the checkout's prepared state by
 -- replacing every stdlib build prerequisite class with one isolated file.
@@ -635,6 +690,9 @@ local function run_stdlib_dry_make(argv)
     end
     if not openssl_selected then table.insert(argv, "OPENSSL_MODE=bundled") end
     table.insert(argv, "PREFIX=" .. root)
+    -- These synthetic command contracts inspect the checkout compiler and SDK
+    -- inputs, independently of any installed provider in the caller's prefix.
+    table.insert(argv, "STDLIB_USE_INSTALLED_RUNTIME=0")
     table.insert(argv, "MAKE=false")
     for _, variable in ipairs({
         "STDLIB_TOOL_PREREQS",
@@ -642,7 +700,6 @@ local function run_stdlib_dry_make(argv)
         "STDLIB_NATIVE_PREREQS",
         "STDLIB_RUNTIME_ARCHIVE_PREREQ",
         "STDLIB_BOOTSTRAP_PREREQ",
-        "STDLIB_NATIVE_IDENTITY_PREREQS",
     }) do
         table.insert(argv, variable .. "=" .. prepared)
     end
@@ -726,6 +783,9 @@ local function stdlib_command(output)
 end
 
 describe("libuv Makefile configuration", function()
+    teardown(function()
+        if windows_object_root then remove_tree(windows_object_root) end
+    end)
     it("uses O3 with Linux fat LTO for both compilers and preserves explicit flags", function()
         local root = make_temp_dir()
         local tested, test_error = xpcall(function()
@@ -780,14 +840,12 @@ describe("libuv Makefile configuration", function()
             local probe = root .. "/host-flags.mk"
             write_file(probe, "host-flags:\n\t@printf '%s\\n' " ..
                 "'$(CFLAGS)' '$(LUA_MYCFLAGS)' '$(LUA_MYLDFLAGS)' " ..
-                "'$(ROCK_CFLAGS)' '$(READLINE_CFLAGS)' " ..
-                "'$(LPEGLABEL_BUILD_CFLAGS)' '$(COMPILER_DEPS_CFLAGS)' " ..
-                "'$(COMPILER_DEPS_LDFLAGS)'\n")
+                "'$(ROCK_CFLAGS)' " ..
+                "'$(LPEGLABEL_BUILD_CFLAGS)'\n")
             local ok, output = run_argv({"env", "-u", "MAKEFLAGS", "-u", "MFLAGS",
                 "-u", "MAKEOVERRIDES", "-u", "CFLAGS", "-u", "LUA_MYCFLAGS",
-                "-u", "LUA_MYLDFLAGS", "-u", "ROCK_CFLAGS", "-u", "READLINE_CFLAGS",
-                "-u", "LPEGLABEL_BUILD_CFLAGS", "-u", "COMPILER_DEPS_CFLAGS",
-                "-u", "COMPILER_DEPS_LDFLAGS", "make", "--no-print-directory",
+                "-u", "LUA_MYLDFLAGS", "-u", "ROCK_CFLAGS",
+                "-u", "LPEGLABEL_BUILD_CFLAGS", "make", "--no-print-directory",
                 "-s", "-f", "Makefile", "-f", probe, "host-flags",
                 "TITAN_BUILD_PROFILE=validation"})
             assert.truthy(ok, output)
@@ -795,83 +853,9 @@ describe("libuv Makefile configuration", function()
             for row in output:gmatch("[^\n]+") do rows[#rows + 1] = row end
             assert.matches("-O0 -fno-lto", rows[1], 1, true)
             assert.same({"-fPIC -O2 -fno-lto", "-O2 -fno-lto",
-                "-O0 -fno-lto -fPIC", "-fPIC -O0 -fno-lto",
-                "-O2 -fno-lto", "-O2 -fno-lto -fPIC", "-O2 -fno-lto"},
+                "-O2 -fPIC -O0 -fno-lto",
+                "-O2 -fno-lto"},
                 {table.unpack(rows, 2)})
-        end, debug.traceback)
-        remove_tree(root)
-        if not tested then error(test_error, 0) end
-    end)
-
-    it("reconciles optimized compiler modules by flags and contents without rebuilding warm modules", function()
-        local root = make_temp_dir()
-        local tested, test_error = xpcall(function()
-            local prefix = root .. "/host prefix"
-            local abi = assert(_VERSION:match("Lua (.+)"))
-            local lib = prefix .. "/lib/lua/" .. abi
-            local ok, output = run_argv({"mkdir", "-p", prefix .. "/bin", lib,
-                prefix .. "/etc/titan"})
-            assert.truthy(ok, output)
-            write_file(prefix .. "/rocks.receipt", "selected rocks config\n")
-            write_file(prefix .. "/lua.receipt", "selected optimized Lua\n")
-            write_file(prefix .. "/calls", "")
-            write_file(prefix .. "/luafilesystem.version", "1.6.3-1\n")
-            write_file(lib .. "/lfs.so", "old incompatible module\n")
-            write_file(prefix .. "/bin/luarocks", ([[#!/bin/sh
-set -eu
-prefix=${0%/bin/luarocks}
-case "$1" in
-  show)
-    case "$3" in
-      lpeglabel) test -f "$prefix/lpeglabel.version"; cat "$prefix/lpeglabel.version" ;;
-      luafilesystem) test -f "$prefix/luafilesystem.version"; cat "$prefix/luafilesystem.version" ;;
-    esac ;;
-  build)
-    printf '%s\n' "$@" >> "$prefix/calls"
-    case "$2" in
-      lpeglabel) module=lpeglabel; version=1.6.2-1 ;;
-      luafilesystem) module=lfs; version=1.9.0-1 ;;
-    esac
-    printf '%s\n' "$version" > "$prefix/$2.version"
-    printf 'compiled %s\n' "$*" > "$prefix/lib/lua/ABI/$module.so" ;;
-  *) exit 91 ;;
-esac
-]]):gsub("/ABI/", "/" .. abi .. "/"))
-            ok, output = run_argv({"chmod", "+x", prefix .. "/bin/luarocks"})
-            assert.truthy(ok, output)
-            local sdk = os.getenv("PREFIX") or os.getenv("TITAN_ROCKS_ROOT")
-            local lua = sdk and (sdk .. "/bin/lua") or arg[-1]
-            assert.truthy(lua, "selected Lua executable required")
-            local receipt = prefix .. "/etc/titan/compiler-dependencies.installed"
-            local function prepare(cflags, ldflags)
-                local success, log = run_argv({lua, "-E",
-                    "scripts/prepare_compiler_dependencies.lua", prefix, receipt,
-                    prefix .. "/rocks.receipt", prefix .. "/lua.receipt",
-                    "cc", "ar", "ranlib", cflags, ldflags, cflags, ldflags,
-                    "1.6.2-1"})
-                assert.truthy(success, log)
-            end
-            prepare("-O2 -fno-lto -fPIC", "-O2 -fno-lto")
-            assert.equal(2, count_plain(read_file(prefix .. "/calls"), "build\n"))
-            assert.falsy(read_file(prefix .. "/calls"):find("luafilesystem\n1.6.3-1\n", 1, true))
-            local before = read_file(receipt)
-            assert.truthy(lfs.touch(receipt, 946684800, 946684800))
-            prepare("-O2 -fno-lto -fPIC", "-O2 -fno-lto")
-            assert.equal(before, read_file(receipt))
-            assert.equal(946684800, lfs.attributes(receipt, "modification"))
-            assert.equal(2, count_plain(read_file(prefix .. "/calls"), "build\n"))
-            local instrumented = "-O1 -fno-lto -fPIC -fsanitize=address,undefined"
-            prepare(instrumented, "-O1 -fno-lto -fsanitize=address,undefined")
-            local calls = read_file(prefix .. "/calls")
-            assert.equal(4, count_plain(calls, "build\n"))
-            assert.truthy(calls:find("CFLAGS=" .. instrumented .. "\n", 1, true))
-            assert.truthy(calls:find("LDFLAGS=-O1 -fno-lto -fsanitize=address,undefined\n", 1, true))
-            write_file(lib .. "/lfs.so", "stale restored module\n")
-            prepare(instrumented, "-O1 -fno-lto -fsanitize=address,undefined")
-            assert.equal(6, count_plain(read_file(prefix .. "/calls"), "build\n"))
-            write_file(prefix .. "/lua.receipt", "changed optimized Lua configuration\n")
-            prepare(instrumented, "-O1 -fno-lto -fsanitize=address,undefined")
-            assert.equal(8, count_plain(read_file(prefix .. "/calls"), "build\n"))
         end, debug.traceback)
         remove_tree(root)
         if not tested then error(test_error, 0) end
@@ -903,25 +887,25 @@ esac
             local print_makefile = root .. "/windows-profile.mk"
             write_file(print_makefile, table.concat({
                 "print-windows-profile:",
-                "\t@printf '%s\\n' '$(TITAN_BUILD_PROFILE)' '$(LUA_CFLAGS)' '$(LUA_LDFLAGS)' '$(NATIVE_CFLAGS)' '$(NATIVE_LDFLAGS)' '$(RUNTIME_CFLAGS)' '$(RUNTIME_LDFLAGS)' '$(COMPILER_CFLAGS)' '$(COMPILER_LDFLAGS)' '$(PREFIX)' '$(WINDOWS_BUILD_ROOT)' ",
+                "\t@printf '%s\\n' '$(TITAN_BUILD_PROFILE)' '$(LUA_CFLAGS)' '$(LUA_LDFLAGS)' '$(NATIVE_CFLAGS)' '$(NATIVE_LDFLAGS)' '$(RUNTIME_CFLAGS)' '$(RUNTIME_LDFLAGS)' '$(COMPILER_DEPS_CFLAGS)' '$(COMPILER_DEPS_LDFLAGS)' '$(PREFIX)' '$(WINDOWS_BUILD_ROOT)' ",
                 "\t@test \"$$TITAN_BUILD_PROFILE\" = '$(TITAN_BUILD_PROFILE)'", "",
             }, "\n"))
             local function query(...)
                 local argv = { "env", "-u", "TITAN_BUILD_PROFILE", "-u", "PREFIX", "-u", "WINDOWS_BUILD_ROOT",
                     "-u", "MAKEFLAGS", "-u", "MFLAGS", "-u", "GNUMAKEFLAGS", "-u", "MAKELEVEL", "-u", "MAKEOVERRIDES",
-                    "make", "--no-print-directory", "-s", "-f", "Makefile.windows", "-f", print_makefile, "print-windows-profile" }
+                    "make", "--no-print-directory", "-s", "-f", "Makefile.win", "-f", print_makefile, "print-windows-profile" }
                 for _, word in ipairs({ ... }) do argv[#argv + 1] = word end
                 return run_argv(argv)
             end
             local ok, production = query()
             assert.truthy(ok, production)
-            assert.matches("production\n-O2 -Wall -Wextra\n\n-O2\n\n-O2 -Wall -Wextra\n\n-O2 -Wall -Wextra\n\n", production, 1, true)
+            assert.matches("production\n-O2 -Wall -Wextra\n\n-O2\n\n-O2 -Wall -Wextra\n\n-O2\n\n", production, 1, true)
             assert.matches("/.windows-sdk\n", production, 1, true)
             assert.matches("/windows-build\n", production, 1, true)
-            for _, selection in ipairs({ "TITAN_BUILD_PROFILE=validation", "MAKECMDGOALS=compiler-check", "MAKECMDGOALS=titan-stdlib-test" }) do
+            for _, selection in ipairs({ "TITAN_BUILD_PROFILE=validation", "MAKECMDGOALS=compiler-check", "MAKECMDGOALS=titan-stdlib-test", "MAKECMDGOALS=rock-test" }) do
                 local valid, validation = query(selection)
                 assert.truthy(valid, validation)
-                assert.matches("validation\n-O2 -fno-lto -Wall -Wextra\n-O2 -fno-lto\n-O0 -fno-lto\n-O0 -fno-lto\n-O0 -fno-lto -Wall -Wextra\n-O0 -fno-lto\n-O0 -fno-lto -Wall -Wextra\n-O0 -fno-lto\n", validation, 1, true)
+                assert.matches("validation\n-O2 -fno-lto -Wall -Wextra\n-O2 -fno-lto\n-O0 -fno-lto\n-O0 -fno-lto\n-O0 -fno-lto -Wall -Wextra\n-O0 -fno-lto\n-O2 -fno-lto\n-O2 -fno-lto\n", validation, 1, true)
                 assert.matches("/.windows-sdk-validation\n", validation, 1, true)
                 assert.matches("/windows-build-validation\n", validation, 1, true)
             end
@@ -933,14 +917,14 @@ esac
             local valid, diagnostic = query("TITAN_BUILD_PROFILE=production validation")
             assert.is_false(valid)
             assert.matches("TITAN_BUILD_PROFILE must be production or validation", diagnostic, 1, true)
-            assert.matches("etc/titan/build-profile", read_file("Makefile.windows"), 1, true)
+            assert.matches("etc/titan/build-profile", read_file("Makefile.win"), 1, true)
         end, debug.traceback)
         remove_tree(root)
         if not tested then error(test_error, 0) end
     end)
 
     it("checks portable Windows profile argv and rejects invalid test entry profiles", function()
-        local ok, output = run_argv({ "bash", "scripts/check_windows_build_profile.sh" })
+        local ok, output = run_argv({ "bash", "spec/support/check_windows_build_profile.sh" })
         assert.truthy(ok, output)
         assert.matches("strict validation and idempotent flag propagation passed", output, 1, true)
         for _, script in ipairs({ "spec/support/run_rock_tests.sh", "spec/support/ci_test_groups.sh" }) do
@@ -996,15 +980,15 @@ esac
     end)
 
     it("builds and invalidates separate stdlib objects in parallel", function()
+            if platform.windows then
+                pending("Unix Make stdlib object DAG and shell compiler fixtures")
+                return
+            end
         local root = make_temp_dir()
         local tested, test_error = xpcall(function()
             local inputs = stdlib_source_files()
             inputs[#inputs + 1] = "titan/sqlite3/native.h"
             inputs[#inputs + 1] = "prepared"
-            for _, name in ipairs({ "llhttp.config", "llhttp-archive.config", "llhttp.a",
-                    "sqlite3.config", "sqlite3-archive.config", "sqlite3.a" }) do
-                inputs[#inputs + 1] = name
-            end
             local folders = { uv = true, http = true, websocket = true, peg = true,
                 string = true, sqlite3 = true, json = true }
             local callbacks = { coroutine = true, uv = true, fs = true,
@@ -1053,14 +1037,10 @@ esac
             local argv = { "make", "--no-print-directory", "-s", "-j4", "-C", root,
                 "MAKE=false", "PREFIX=" .. root,
                 "OPENSSL_MODE=system", "OPENSSL_PKG_CONFIG=true",
-                "TITANC=sh ./fake-titanc", "STDLIB_CONFIG_STAMP=build.config",
+                "TITANC=sh ./fake-titanc",
                 "STDLIB_COMPILER_PREREQS=prepared", "STDLIB_TOOL_PREREQS=prepared",
                 "STDLIB_NATIVE_PREREQS=prepared", "STDLIB_PLATFORM_PREREQS=prepared",
                 "STDLIB_RUNTIME_ARCHIVE_PREREQ=prepared", "STDLIB_BOOTSTRAP_PREREQ=prepared",
-                "STDLIB_NATIVE_IDENTITY_PREREQS=", "LPEGLABEL_SOURCES=", "LPEGLABEL_HEADERS=",
-                "LPEGLABEL_BUILD_CONFIG=", "LPEGLABEL_ARCHIVE_CONFIG=", "LPEGLABEL_ARCHIVE=",
-                "LLHTTP_BUILD_CONFIG=llhttp.config", "LLHTTP_ARCHIVE_CONFIG=llhttp-archive.config", "LLHTTP_ARCHIVE=llhttp.a",
-                "SQLITE3_BUILD_CONFIG=sqlite3.config", "SQLITE3_ARCHIVE_CONFIG=sqlite3-archive.config", "SQLITE3_ARCHIVE=sqlite3.a",
                 "stdlib-objects" }
             for _, module in ipairs(STDLIB_MODULES) do
                 argv[#argv + 1] = "STDLIB_C_INPUTS_" .. module .. "=" ..
@@ -1082,7 +1062,6 @@ esac
             assert.same(all, build())
             local old = os.time() - 30
             for _, source in ipairs(inputs) do assert(lfs.touch(root .. "/" .. source, old, old)) end
-            assert(lfs.touch(root .. "/build.config", old, old))
             for _, output in ipairs(outputs) do assert(lfs.touch(root .. "/" .. output, old + 1, old + 1)) end
             assert.same({}, build())
             for _, output in ipairs(outputs) do
@@ -1101,21 +1080,22 @@ esac
             -- Ensure the changed header is strictly newer at Make's precision.
             assert(lfs.touch(root .. "/" .. objects.sqlite3, old + 3, old + 3))
             assert.same({ sqlite3 = true }, build())
-            argv[#argv + 1] = "TITAN_EXTRA_CFLAGS=-DCHANGED_CONFIG=1"
-            assert.same(all, build())
-            assert.same({}, build())
         end, debug.traceback)
         remove_tree(root)
         if not tested then error(test_error, 0) end
     end)
 
     it("reuses post-install stdlib outputs with the deployed compiler and SDK", function()
+            if platform.windows then
+                pending("Unix Make post-install object/provider DAG and static Lua SDK")
+                return
+            end
         local root = make_temp_dir()
         local tested, test_error = xpcall(function()
             local prefix = root .. "/prefix"
             local inputs = {
                 "Makefile", "prepared", "THIRD_PARTY_NOTICES.md",
-                "spec/support/stdlib_test_modules.mk", "scripts/stdlib_installer.lua",
+                "spec/support/stdlib_test_modules.mk", "titan/test.titan",
                 "titan/math.titan", "prefix/bin/lua", "prefix/bin/titanc",
                 "prefix/share/lua/5.5/titan-compiler/driver.lua",
                 "prefix/include/minicoro.h", "prefix/include/titan.h",
@@ -1155,27 +1135,7 @@ case "$*" in
   *) echo "unexpected compiler arguments: $*" >&2; exit 91 ;;
 esac
 ]])
-            -- Native validation and publication are covered by the installer
-            -- suite. Here fake Lua isolates Make's retained-output contract.
-            write_file(prefix .. "/bin/lua", [[#!/bin/sh
-set -eu
-test "$1" = -E
-case "$2" in
-  -e) test "$#" = 3 ;;
-  "$PWD/scripts/stdlib_installer.lua")
-    test "$3" = "$PWD"
-    test "$4" = "$PWD/prefix"
-    test "$TITAN_RUNTIME_PREBUILT" = 1
-    printf 'publish\n' >> build.log
-    cp "$3/titan.so" "$4/lib/titan/0.6/titan.so"
-    cp "$3/titan.a" "$4/lib/titan/0.6/titan.a"
-    mkdir -p "$4/share/lua/5.5/titan" "$4/share/titan/0.6/src/titan"
-    cp "$3/titan/math.lua" "$4/share/lua/5.5/titan/math.lua"
-    printf 'test support\n' > "$4/share/titan/0.6/src/titan/test.titan"
-    ;;
-  *) echo "unexpected Lua arguments: $*" >&2; exit 92 ;;
-esac
-]])
+            write_file(prefix .. "/bin/lua", "#!/bin/sh\nexit 0\n")
             local ok, output = run_argv({
                 "chmod", "+x", prefix .. "/bin/lua", prefix .. "/bin/titanc",
             })
@@ -1196,20 +1156,10 @@ esac
                 "STDLIB_TITAN_SOURCES=titan/math.titan",
                 "STDLIB_GENERATED_FOREIGN_HEADERS=titan/math.ffi.h",
                 "STDLIB_SHIMS=titan/math.lua", "STDLIB_C_INPUTS_math=prepared",
-                "STDLIB_CONFIG_STAMP=build.config",
                 "STDLIB_COMPLETION_STAMP=build.complete", "STDLIB_LICENSES=prepared",
-                "STDLIB_EXTRA_OBJECTS=", "STDLIB_NATIVE_IDENTITY_PREREQS=",
+                "STDLIB_EXTRA_OBJECTS=",
                 "TITAN_STDLIB_DIAGNOSTIC_SNAPSHOT=",
             }
-            for _, variable in ipairs({
-                "LPEGLABEL_SOURCES", "LPEGLABEL_HEADERS", "LPEGLABEL_BUILD_CONFIG",
-                "LPEGLABEL_ARCHIVE_CONFIG", "LPEGLABEL_ARCHIVE",
-                "LLHTTP_BUILD_CONFIG", "LLHTTP_ARCHIVE_CONFIG", "LLHTTP_ARCHIVE",
-                "SQLITE3_BUILD_CONFIG", "SQLITE3_ARCHIVE_CONFIG", "SQLITE3_ARCHIVE",
-                "OPENSSL_EXTRA_OBJECTS",
-            }) do
-                arguments[#arguments + 1] = variable .. "="
-            end
             local function build(target, ...)
                 local argv = { table.unpack(arguments) }
                 argv[#argv + 1] = target
@@ -1220,9 +1170,17 @@ esac
                 write_file(root .. "/build.log", "")
                 return actions, log
             end
-            assert.equal("compile\nlink\npublish\n", build("rock-post-install",
+            assert.equal("compile\nlink\n", build("rock-post-install",
                 "ROCKS_TREE=" .. prefix, "ROCK_TITANC=" .. prefix .. "/bin/titanc",
                 "ROCK_LUA=" .. prefix .. "/bin/lua"))
+            assert.equal(read_file(root .. "/titan.so"),
+                read_file(prefix .. "/lib/titan/0.6/titan.so"))
+            assert.equal(read_file(root .. "/titan.a"),
+                read_file(prefix .. "/lib/titan/0.6/titan.a"))
+            assert.equal(read_file(root .. "/titan/math.lua"),
+                read_file(prefix .. "/share/lua/5.5/titan/math.lua"))
+            assert.equal(read_file(root .. "/titan/test.titan"),
+                read_file(prefix .. "/share/titan/0.6/src/titan/test.titan"))
             local outputs = {
                 "titan/math.o", "titan/math.c", "titan/math.ffi.h",
                 "titan.so", "titan.a", "titan/math.lua", "build.complete",
@@ -1232,7 +1190,6 @@ esac
                 for _, path in ipairs(inputs) do
                     assert(lfs.touch(root .. "/" .. path, old, old))
                 end
-                assert(lfs.touch(root .. "/build.config", old, old))
                 for _, path in ipairs(outputs) do
                     assert(lfs.touch(root .. "/" .. path, old + 1, old + 1))
                 end
@@ -1316,14 +1273,14 @@ esac
             assert.truthy(owners[module], module)
         end
         assert.same(test_owners, roots, "every test owner must be an explicit shared root")
-        assert.truthy(read_file("Makefile.windows.stdlib"):find(
+        assert.truthy(read_file("Makefile.win"):find(
             "include " .. manifest, 1, true))
         assert.falsy(lfs.attributes("spec/support/windows_stdlib_modules.tsv"))
         assert.falsy(lfs.attributes("spec/support/windows_stdlib_cases.txt"))
     end)
 
     it("validates complete native reports and narrowly classified skips", function()
-        local validate, final_counts = assert(loadfile("scripts/check_stdlib_test_output.lua"))()
+        local validate, final_counts = assert(loadfile("spec/support/check_stdlib_test_output.lua"))()
         local roots = { "first.tests", "second.tests" }
         local output = table.concat({
             "[==========] Running Titan tests.",
@@ -1368,6 +1325,10 @@ esac
     end)
 
     it("reuses separate native test objects and relinks only after a changed prerequisite", function()
+            if platform.windows then
+                pending("Unix Make native object DAG, timestamp rules and shell tool fixtures")
+                return
+            end
         local root = make_temp_dir()
         local tested, test_error = xpcall(function()
             local ok, output = run_argv({ "mkdir", "-p", root .. "/spec/support",
@@ -1505,6 +1466,10 @@ done
 
     it("keeps private runtime refreshes off shared dependency recipes",
         function()
+            if platform.windows then
+                pending("Unix private runtime Make recipes and libbacktrace archive")
+                return
+            end
             local workspace = async_stdlib.workspace("runtime-refresh")
             local tested, test_error = pcall(function()
                 local command =
@@ -1513,6 +1478,20 @@ done
                     "/libbacktrace/.libs/libbacktrace.a"
                 local libuv_archive =
                     lfs.currentdir() .. "/libuv-build/libuv.a"
+                local lua_source = workspace .. "/lua-5.5.1"
+                local prefix = installed_prefix.active()
+                for _, header in ipairs({ "lua.h", "lobject.h" }) do
+                    assert.equal(read_file(prefix .. "/src/lua-5.5.1/" .. header),
+                        read_file(lua_source .. "/" .. header), header)
+                end
+                assert.equal(read_file(prefix .. "/lib/liblua.a"),
+                    read_file(lua_source .. "/liblua.a"))
+                assert.truthy(command:find(
+                        "TITAN_RUNTIME_LUA_SOURCE_PATH=" .. quote(lua_source),
+                        1, true), command)
+                assert.truthy(command:find(
+                        "TITAN_RUNTIME_LUA_LIB=" .. quote(lua_source .. "/liblua.a"),
+                        1, true), command)
                 assert.truthy(command:find(
                         "--old-file=" .. quote(libbacktrace_archive), 1, true),
                     command)
@@ -1520,12 +1499,16 @@ done
                         "--old-file=" .. quote(libuv_archive), 1, true),
                     command)
 
+                local before = {
+                    lfs.attributes(libbacktrace_archive, "modification"),
+                    lfs.attributes(libuv_archive, "modification"),
+                }
                 local ok, _, output = async_stdlib.run(command, workspace)
                 assert.truthy(ok, output)
-                assert.falsy(output:find(
-                    "libbacktrace/.titan-build-config", 1, true), output)
-                assert.falsy(output:find(
-                    ".titan-libuv-build-config", 1, true), output)
+                assert.same(before, {
+                    lfs.attributes(libbacktrace_archive, "modification"),
+                    lfs.attributes(libuv_archive, "modification"),
+                })
             end)
             async_stdlib.cleanup(workspace)
             if not tested then error(test_error, 0) end
@@ -1720,11 +1703,6 @@ done
         local makefile = read_file("Makefile")
         for _, contract in ipairs({
             "llhttp: $(LLHTTP_ARCHIVE)",
-            "$(LLHTTP_ARCHIVE): FORCE $(LLHTTP_OBJECTS) " ..
-            "$(LLHTTP_ARCHIVE_CONFIG)",
-            "expected=\"$$(printf '%s\\n' $(notdir " ..
-            "$(LLHTTP_OBJECTS)))\"",
-            "LLHTTP_BUILD_CFLAGS=$(LLHTTP_BUILD_CFLAGS)",
             "$(LLHTTP_CFLAGS) $(TITAN_EXTRA_CFLAGS) " ..
             "$(LLHTTP_BUILD_CFLAGS)",
             "openssl: $(OPENSSL_LIBS)",
@@ -1732,7 +1710,6 @@ done
             "\"$(OPENSSL_MIN_VERSION)\" openssl",
             "CFLAGS=$(call make_shell_quote,$(OPENSSL_REQUIRED_CFLAGS) " ..
             "$(OPENSSL_BUILD_CFLAGS))",
-            "OPENSSL_CONFIGURE_FLAGS=$(OPENSSL_CONFIGURE_FLAGS)",
             "rock-post-install:",
             "clean-llhttp:", "clean-openssl:",
             "clean-libuv clean-llhttp clean-sqlite3 clean-openssl",
@@ -1748,6 +1725,10 @@ done
     end)
 
     it("builds the exact three-member private llhttp archive", function()
+            if platform.windows then
+                pending("Unix private llhttp archive; Windows consumes the native llhttp DLL SDK")
+                return
+            end
         local archive = "llhttp-build/libtitan-llhttp.a"
         assert.truthy(file_exists(archive), "run make llhttp first")
         local ok, output, why, code = run_argv(tool_argv(
@@ -1763,7 +1744,7 @@ done
         assert.truthy(nm_has_symbol(output, "llhttp_execute"), output)
     end)
 
-    it("builds the pinned serialized SQLite amalgamation as private payload", function()
+    it("pins the serialized SQLite amalgamation build inputs", function()
         assert.same({ "3.53.4" }, makefile_words("SQLITE3_VERSION"))
         assert.same({ "3530400" }, makefile_words("SQLITE3_RELEASE"))
         assert.same({
@@ -1772,6 +1753,13 @@ done
         assert.same({
             "-std=c99", "-fPIC", "-fvisibility=hidden", "-DSQLITE_THREADSAFE=1",
         }, makefile_words("SQLITE3_CFLAGS"))
+    end)
+
+    it("builds the pinned serialized SQLite amalgamation as private payload", function()
+        if platform.windows then
+            pending("Unix private SQLite archive; Windows consumes the native SQLite DLL SDK")
+            return
+        end
         local archive = "sqlite3-build/libtitan-sqlite3.a"
         local ok, output = run_argv(tool_argv("AR", "ar", "t", archive))
         assert.truthy(ok, output)
@@ -1963,7 +1951,7 @@ int main(void) {
         end)
 
     it("keeps native UV symbols and callback entrypoints in the canonical provider", function()
-            local logical_object = "titan/uv/uv.o"
+            local logical_object = stdlib_artifact("titan/uv/uv.o")
             assert.truthy(file_exists(logical_object), logical_object)
             local ok, output, why, code = run_argv(tool_argv(
                 "NM", "nm", logical_object))
@@ -1972,7 +1960,7 @@ int main(void) {
             local entries = {}
             for _, entry in ipairs(UV_FOREIGN_CALLBACKS) do entries[#entries + 1] = entry end
             for _, entry in ipairs(UV_NATIVE_ENTRIES) do entries[#entries + 1] = entry end
-            local foreign_header = read_file("titan/uv/uv.titan.h")
+            local foreign_header = read_file(stdlib_artifact("titan/uv/uv.titan.h"))
             for _, callback in ipairs(entries) do
                 local c_name = coder_names._foreign_func_name("titan.uv", callback.name)
                 if callback.inline then
@@ -2008,10 +1996,11 @@ int main(void) {
                 assert.falsy(nm_has_symbol(output, function_name),
                     logical_object .. ": " .. function_name)
             end
-            local async_ok, async_output = run_argv(tool_argv("NM", "nm", "-u", "titan/async.o"))
+            local async_ok, async_output = run_argv(tool_argv("NM", "nm", "-u", stdlib_artifact("titan/async.o")))
             assert.truthy(async_ok, async_output)
             for _, function_name in ipairs(SIGPIPE_EXTERNAL_HOST_CALLS) do
-                assert.truthy(nm_has_symbol(async_output, function_name), function_name)
+                assert.equal(not platform.windows,
+                    nm_has_symbol(async_output, function_name), function_name)
             end
             for _, retired in ipairs({
                 RETIRED_UV_WRAPPERS, RETIRED_UV_HELPERS,
@@ -2023,9 +2012,16 @@ int main(void) {
                 end
             end
 
+        end)
+
+    it("keeps native UV symbols and callbacks in the installed static provider", function()
+            if platform.windows then
+                pending("Windows has DLL providers and no Titan static-provider archive")
+                return
+            end
             local archive = installed_stdlib_archive()
             assert.truthy(file_exists(archive), archive)
-            ok, output, why, code = run_argv(tool_argv(
+            local ok, output, why, code = run_argv(tool_argv(
                 "NM", "nm", "-u", archive))
             assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
                 tostring(code) .. ")")
@@ -2063,7 +2059,8 @@ int main(void) {
                     end
                 end
             end
-            local object = module == "sqlite3" and "titan/sqlite3/sqlite3.o" or "titan/" .. module .. ".o"
+            local object = stdlib_artifact(module == "sqlite3" and
+                "titan/sqlite3/sqlite3.o" or "titan/" .. module .. ".o")
             local ok, output = run_argv(tool_argv("NM", "nm", "-u", object))
             assert.truthy(ok, output)
             for symbol in output:gmatch("[^\r\n]+") do
@@ -2127,10 +2124,6 @@ int main(void) {
                 "$(LIBUV_EXTRA_OBJECTS)", "$(LLHTTP_ARCHIVE)",
                 "$(SQLITE3_ARCHIVE)", "$(OPENSSL_EXTRA_OBJECTS)",
             }, makefile_words("STDLIB_EXTRA_OBJECTS"))
-            assert.same({
-                "$(LPEGLABEL_ARCHIVE)", "$(LLHTTP_ARCHIVE)",
-                "$(SQLITE3_ARCHIVE)", "$(OPENSSL_EXTRA_OBJECTS)",
-            }, makefile_words("STDLIB_NATIVE_IDENTITY_PREREQS"))
             assert.same({ "$(LPEGLABEL_CPPFLAGS)" },
                 makefile_words("STDLIB_LPEGLABEL_CPPFLAGS"))
             assert.same({ "$(LLHTTP_CPPFLAGS)" },
@@ -2140,12 +2133,14 @@ int main(void) {
             assert.same({ "$(OPENSSL_CPPFLAGS)" },
                 makefile_words("STDLIB_OPENSSL_CPPFLAGS"))
             assert.same({
-                "LICENSES/libuv-LICENSE",
+                "LICENSES/libuv-LICENSE", "LICENSES/libuv-LICENSE-extra",
+                "LICENSES/libuv-tree-LICENSE", "LICENSES/libuv-inet-LICENSE",
                 "LICENSES/lpeglabel-LICENSE", "LICENSES/lpeg-LICENSE",
                 "LICENSES/lpeg-patterns-LICENSE",
                 "LICENSES/ta-regex-LICENSE", "LICENSES/lua-LICENSE",
                 "LICENSES/llhttp-LICENSE", "LICENSES/sqlite3-LICENSE",
-                "LICENSES/openssl-LICENSE",
+                "LICENSES/openssl-LICENSE", "LICENSES/go-LICENSE",
+                "LICENSES/libbacktrace-LICENSE",
             }, makefile_words("STDLIB_LICENSES"))
             assert.same({ STDLIB_CONTAINER },
                 makefile_words("STDLIB_CONTAINER"))
@@ -2182,7 +2177,7 @@ int main(void) {
                 "titan/websocket/websocket.titan", "titan/websocket/handshake.titan",
                 "titan/websocket/connection.titan", "titan/websocket/frames.titan",
                 "titan/websocket/utf8.titan", "titan/websocket/native.titan",
-                "titan/os.titan",
+                "titan/os.titan", "titan/path.titan",
                 "titan/peg/peg.titan",
                 "titan/peg/combinators.titan", "titan/peg/native.titan",
                 "titan/peg/relabel.titan",
@@ -2485,11 +2480,68 @@ int main(void) {
             }, public_declarations(path))
         end)
 
-    it("pins current metadata for all twenty-two standard modules",
+    it("retains public path documentation in serialized module metadata", function()
+        local driver = require "titan-compiler.driver"
+        local types = require "titan-compiler.types"
+        local previous_imported, previous_registry = driver.imported, types.registry
+        driver.imported, types.registry = {}, {}
+        local loader
+        local completed, failure = xpcall(function()
+            local filename = assert(compiler_io.new_sync():realpath("titan/path.titan"))
+            loader = driver.defaultloader({}, {
+                analysis_only = true,
+                source_roots = { ["titan.path"] = true },
+                source_overrides = { ["titan.path"] = {
+                    kind = "generated", main = filename, files = { filename },
+                    contents = { [filename] = read_file(filename) },
+                } },
+            })
+            local loaded, module, errors = loader("titan.path")
+            assert.truthy(loaded, module)
+            assert.equal(0, #errors, table.concat(errors, "\n"))
+            local serialized = types.serialize(module)
+            local restored = assert(driver.decode_module_interface(serialized,
+                "titan.path", "path documentation metadata"))
+            assert.equal("Manipulate native filesystem path spelling without performing I/O.",
+                restored._documentation.summary)
+            assert.same(module._documentation, restored._documentation)
+            local names = { "separator", "normalize", "basename", "dirname",
+                "extension", "is_absolute", "join", "split", "to_slash",
+                "from_slash", "volume" }
+            assert.equal(#names, #restored.members)
+            for _, name in ipairs(names) do
+                local documentation = assert(restored.members[name]._documentation,
+                    "missing path documentation for " .. name)
+                assert.not_equal("", documentation.summary, name)
+                assert.not_equal("", documentation.description, name)
+                assert.same(module.members[name]._documentation, documentation, name)
+                local usage, parameters, results = 0, 0, 0
+                for _, tag in ipairs(documentation.tags) do
+                    if tag.name == "usage" then usage = usage + 1 end
+                    if tag.name == "param" then parameters = parameters + 1 end
+                    if tag.name == "return" then results = results + 1 end
+                end
+                assert.equal(2, usage, name)
+                assert.equal(name == "separator" and 0 or 1, parameters, name)
+                assert.equal(name == "separator" and 0 or name == "split" and 2 or 1,
+                    results, name)
+            end
+            local fixture = assert(loadfile(STDLIB_TYPES_FIXTURE))()
+            assert.equal(fixture.path, serialized,
+                "path's serialized public documentation fixture is stale")
+        end, debug.traceback)
+        local closed, close_error = true
+        if loader then closed, close_error = driver.close_loader(loader) end
+        driver.imported, types.registry = previous_imported, previous_registry
+        assert.truthy(completed, failure)
+        assert.truthy(closed, close_error)
+    end)
+
+    it("pins current metadata for all twenty-three standard modules",
         function()
             local expected = assert(loadfile(STDLIB_TYPES_FIXTURE))()
             local expected_uv = assert(loadfile(UV_TYPES_FIXTURE))()
-            assert.equal(22, #STDLIB_ROOTS)
+            assert.equal(23, #STDLIB_ROOTS)
             assert.equal(expected.uv, expected_uv,
                 "standalone titan.uv metadata fixture is stale")
 
@@ -2527,15 +2579,22 @@ int main(void) {
             end
         end)
 
-    it("exports twenty-three DSO openers for twenty-two standard modules",
+    it("exports twenty-four DSO openers for twenty-three standard modules",
         function()
-            assert.equal(22, #STDLIB_MODULES)
-            assert.equal(22, #STDLIB_ROOTS)
-            assert.equal(22, #STDLIB_SHIMS)
+            assert.equal(23, #STDLIB_MODULES)
+            assert.equal(23, #STDLIB_ROOTS)
+            assert.equal(23, #STDLIB_SHIMS)
 
             local container = installed_stdlib_container()
-            local ok, output, why, code = run_argv(tool_argv(
-                "NM", "nm", "-g", container))
+            local ok, output, why, code
+            if platform.windows then
+                ok, output, why, code = run_argv({
+                    "llvm-readobj", "--coff-exports", container,
+                })
+            else
+                ok, output, why, code = run_argv(tool_argv(
+                    "NM", "nm", "-g", container))
+            end
             assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
                 tostring(code) .. ")")
             local wanted = { luaopen_titan = true }
@@ -2544,7 +2603,8 @@ int main(void) {
             end
             local found = {}
             for line in output:gmatch("[^\r\n]+") do
-                local symbol = line:match("(%S+)%s*$")
+                local symbol = platform.windows and line:match("^%s*Name: (%S+)%s*$")
+                    or not platform.windows and line:match("(%S+)%s*$")
                 if symbol and symbol:sub(1, 1) == "_" then
                     symbol = symbol:sub(2)
                 end
@@ -2555,7 +2615,7 @@ int main(void) {
                     found[symbol] = true
                 end
             end
-            assert.equal(23, (function()
+            assert.equal(24, (function()
                 local count = 0
                 for _ in pairs(found) do count = count + 1 end
                 return count
@@ -2564,15 +2624,20 @@ int main(void) {
         end)
 
     it("keeps bundled SSL, HTTP, and SQLite implementation symbols private", function()
-        local host_ok, host_output, host_why, host_code =
-            run_argv({ "uname", "-s" })
-        assert.truthy(host_ok, host_output .. "\n(" ..
-            tostring(host_why) .. ", " .. tostring(host_code) .. ")")
-        local nm_flags = host_output:match("^%s*Darwin%s*$") and
-            { "-gU" } or { "-D", "-g" }
-        local argv = tool_argv("NM", "nm")
-        for _, flag in ipairs(nm_flags) do argv[#argv + 1] = flag end
-        argv[#argv + 1] = installed_stdlib_container()
+        local argv
+        if platform.windows then
+            argv = { "llvm-readobj", "--coff-exports", installed_stdlib_container() }
+        else
+            local host_ok, host_output, host_why, host_code =
+                run_argv({ "uname", "-s" })
+            assert.truthy(host_ok, host_output .. "\n(" ..
+                tostring(host_why) .. ", " .. tostring(host_code) .. ")")
+            local nm_flags = host_output:match("^%s*Darwin%s*$") and
+                { "-gU" } or { "-D", "-g" }
+            argv = tool_argv("NM", "nm")
+            for _, flag in ipairs(nm_flags) do argv[#argv + 1] = flag end
+            argv[#argv + 1] = installed_stdlib_container()
+        end
         local ok, output, why, code = run_argv(argv)
         assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
             tostring(code) .. ")")
@@ -2711,16 +2776,12 @@ int main(void) {
                 "titan/string/regex_parser.titan"))
         end)
 
-    it("keeps LuaRocks on the native toolchain that prepared its prefix",
+    it("passes native tools through the standard-library build",
         function()
             local file = assert(io.open("Makefile", "rb"))
             local makefile = file:read("*a")
             file:close()
             for _, contract in ipairs({
-                "LUAROCKS_CONFIG_POLICY := titan-system-tree-toolchain-v2",
-                "TITAN_CONFIG_CC=$(call make_shell_quote,$(CC))",
-                "TITAN_CONFIG_AR=$(call make_shell_quote,$(AR))",
-                "TITAN_CONFIG_RANLIB=$(call make_shell_quote,$(RANLIB))",
                 "unset LUA_PATH LUA_CPATH LUA_PATH_5_5 LUA_CPATH_5_5",
                 "STDLIB_COMPILER_ENV = CC=$(call make_shell_quote,$(CC))",
                 "AR=$(call make_shell_quote,$(AR)) " ..
@@ -2772,23 +2833,16 @@ int main(void) {
             file:close()
             for _, contract in ipairs({
                 "TITAN_RUNTIME_LUA_SOURCE_PATH ?= $(LUA_SDK_SOURCE_PATH)",
-                "TITAN_RUNTIME_LUA_LIB=" ..
-                "$(TITAN_RUNTIME_LUA_LIB)",
-                "TITAN_RUNTIME_LUA_SOURCE_PATH=" ..
-                "$(TITAN_RUNTIME_LUA_SOURCE_PATH)",
-                "LUA_AR=$(LUA_AR)",
-                "LUA_RANLIB=$(LUA_RANLIB)",
-                "$(TITAN_RUNTIME_LUA_HEADERS) $(RUNTIME_BUILD_CONFIG) | " ..
+                "AR=$(call make_shell_quote,$(LUA_AR))",
+                "RANLIB=$(call make_shell_quote,$(LUA_RANLIB))",
+                "$(TITAN_RUNTIME_LUA_HEADERS) | " ..
                 "$(TITAN_RUNTIME_LUA_LIB) $(LIBBT_LIB)",
                 "$(wildcard $(LPEGLABEL_LUA_HEADERS)) $(LUA_SDK_PREREQ)",
                 "$(wildcard $(ROCK_LUA_HEADERS)) $(LUA_SDK_PREREQ)",
                 "LIBUV_PROVIDER_LDFLAGS=$(LIBUV_PROVIDER_LDFLAGS)",
-                "MEMBERS=$(notdir $(TITAN_RUNTIME_OBJECTS))",
                 "STDLIB_NATIVE_PREREQS := $(TITAN_RUNTIME_OBJECTS)",
                 "$(STDLIB_EXTRA_OBJECTS)",
                 "STDLIB_RUNTIME_ARCHIVE_PREREQ := $(TITAN_RUNTIME_LIB)",
-                "STDLIB_CONFIG_STAMP := " ..
-                "titan-runtime/.titan-stdlib-build-config",
                 "STDLIB_COMPLETION_STAMP := " ..
                 "titan-runtime/.titan-stdlib-complete",
                 'rm -f "$$rocks_tree/lib/libtitan.a"',
@@ -2810,7 +2864,7 @@ int main(void) {
             local driver_source = file:read("*a")
             file:close()
             assert.truthy(driver_source:find(
-                    'os.getenv("TITAN_RUNTIME_PREBUILT") ~= "1"', 1, true),
+                    'platform.getenv("TITAN_RUNTIME_PREBUILT") ~= "1"', 1, true),
                 driver_source)
             local _, include_count = makefile:gsub(
                 "%-I %$%(TITAN_RUNTIME_LUA_SOURCE_PATH%)", "")
@@ -2825,7 +2879,7 @@ int main(void) {
             local first = assert(makefile:find(
                 "$(TITAN_BOOTSTRAP_SO): $(LTITANLIB_O)", 1, true))
             local last = assert(makefile:find(
-                "\n\n# The active library path", first, true))
+                "\n\n# Seed an absent canonical provider.", first, true))
             local rule = makefile:sub(first, last - 1)
             assert.truthy(rule:find(
                 "$(ROCK_LD) $(ROCK_LIBFLAG) -o \"$$tmp\" \"$<\"",
@@ -2841,6 +2895,10 @@ int main(void) {
 
     it("uses a loadable Lua bundle for the private macOS bootstrap",
         function()
+            if platform.windows then
+                pending("macOS bundle linker recipe and Unix Lua SDK")
+                return
+            end
             local ok, output, why, code = run_argv({
                 "make", "--no-print-directory", "-Bn",
                 "HOST_OS=Darwin", "TITAN_EXTRA_LDFLAGS=",
@@ -2858,84 +2916,13 @@ int main(void) {
                 1, true), normalized)
         end)
 
-    it("ignores the BSD ranlib index when validating archive objects",
-        function()
-            local root = make_temp_dir()
-            local archive = root .. "/libtitan.a"
-            local config = root .. "/archive-build-config"
-            local fake_ar = root .. "/ar-with-bsd-index"
-            local build_log = root .. "/archive-builds"
-            local objects = {
-                root .. "/titan.o",
-                root .. "/minicoro.o",
-            }
-            for _, object in ipairs(objects) do
-                write_file(object, "isolated fake-archive fixture\n")
-            end
-            write_file(fake_ar, string.format([[#!/bin/sh
-if test "$1" = t; then
-  printf '%%s\n' '__.SYMDEF SORTED' titan.o minicoro.o
-  exit 0
-fi
-if test "$1" = rcs; then
-  printf 'build\n' >> %s
-  : > "$2"
-  exit 0
-fi
-exit 64
-]], quote(build_log)))
-            local ok, output, why, code = run_argv({ "chmod", "+x", fake_ar })
-            assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
-                tostring(code) .. ")")
-            local make_archive = {
-                "make", "--no-print-directory", "-s",
-                "AR=" .. fake_ar,
-                "RANLIB=true",
-                "TITAN_RUNTIME_OBJECTS=" .. table.concat(objects, " "),
-                "TITAN_RUNTIME_LIB=" .. archive,
-                "RUNTIME_ARCHIVE_CONFIG=" .. config,
-                archive,
-            }
-            local ran, run_error = pcall(function()
-                ok, output, why, code = run_argv(make_archive)
-                assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
-                    tostring(code) .. ")")
-                assert.equal("build\n", read_file(build_log))
 
-                local aged = { "touch", "-t", "200001010000" }
-                for _, path in ipairs(objects) do aged[#aged + 1] = path end
-                aged[#aged + 1] = config
-                ok, output, why, code = run_argv(aged)
-                assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
-                    tostring(code) .. ")")
-                ok, output, why, code = run_argv({
-                    "touch", "-t", "200101010000", archive,
-                })
-                assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
-                    tostring(code) .. ")")
-
-                write_file(build_log, "")
-                ok, output, why, code = run_argv(make_archive)
-                assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
-                    tostring(code) .. ")")
-                assert.equal("", read_file(build_log))
-            end)
-            for _, path in ipairs({
-                archive, config, config .. ".tmp", fake_ar, build_log,
-                objects[1], objects[2],
-            }) do
-                os.remove(path)
-            end
-            assert.truthy(lfs.rmdir(root))
-            if not ran then error(run_error, 0) end
-        end)
-
-    it("keys the bundled archive on effective build inputs", function()
+    it("builds the pinned libuv source through CMake", function()
         local file = assert(io.open("Makefile", "rb"))
         local makefile = file:read("*a")
         file:close()
         assert.truthy(makefile:find(
-            "$(LIBUV_LIB): $(LIBUV_EXTRACTED) $(LIBUV_BUILD_CONFIG)",
+            "$(LIBUV_LIB): $(LIBUV_EXTRACTED)",
             1, true), makefile)
         assert.falsy(makefile:find(
                 "$(LIBUV_LIB): $(LIBUV_EXTRACTED) Makefile", 1, true),
@@ -2944,71 +2931,8 @@ exit 64
             '\n\t+$(RECURSIVE_WRAPPER_GUARD) cmake --build ' ..
             '"$(LIBUV_BUILD_DIR)" --target uv_a',
             1, true), makefile)
-        for _, input in ipairs({
-            "LIBUV_VERSION=$(LIBUV_VERSION)",
-            "LIBUV_BUILD_PROFILE=$(LIBUV_BUILD_PROFILE)",
-            "LIBUV_BUILD_TYPE=$(LIBUV_BUILD_TYPE)",
-            "LIBUV_CMAKE_FLAGS=$(LIBUV_CMAKE_FLAGS)",
-            "LIBUV_BUILD_CFLAGS=$(LIBUV_BUILD_CFLAGS)",
-        }) do
-            assert.truthy(makefile:find(input, 1, true), input)
-        end
     end)
 
-    it("recreates the CMake build tree only when its configuration changes",
-        function()
-            local build_dir = make_temp_dir()
-            local config = build_dir .. "/.titan-libuv-build-config"
-            local sentinel = build_dir .. "/configured-output"
-
-            local function configure(cc, generator)
-                return run_argv({
-                    "make", "--no-print-directory", "-s",
-                    "LIBUV_BUILD_DIR=" .. build_dir,
-                    "CC=" .. cc,
-                    "AR=review-ar",
-                    "RANLIB=review-ranlib",
-                    "CMAKE_GENERATOR=" .. generator,
-                    config,
-                })
-            end
-
-            local tested, test_error = pcall(function()
-                write_file(sentinel, "stale configured output\n")
-
-                local ok, output, why, code =
-                    configure("review-cc-a", "Review A")
-                assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
-                    tostring(code) .. ")")
-                assert.falsy(file_exists(sentinel))
-                assert.truthy(file_exists(config))
-
-                write_file(sentinel, "current configured output\n")
-                ok, output, why, code = configure("review-cc-a", "Review A")
-                assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
-                    tostring(code) .. ")")
-                assert.truthy(file_exists(sentinel),
-                    "an unchanged configuration must preserve the CMake tree")
-
-                ok, output, why, code = configure("review-cc-b", "Review A")
-                assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
-                    tostring(code) .. ")")
-                assert.falsy(file_exists(sentinel),
-                    "a compiler change must discard the cached CMake tree")
-
-                write_file(sentinel, "old generator output\n")
-                ok, output, why, code = configure("review-cc-b", "Review B")
-                assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
-                    tostring(code) .. ")")
-                assert.falsy(file_exists(sentinel),
-                    "a generator change must discard the cached CMake tree")
-            end)
-
-            os.remove(sentinel)
-            os.remove(config)
-            assert.truthy(lfs.rmdir(build_dir))
-            if not tested then error(test_error, 0) end
-        end)
 
     it("uses bundled headers, payload and Linux feature macros",
         function()
@@ -3077,6 +3001,10 @@ exit 64
 
     it("builds one provider pair with native support and one libuv policy",
         function()
+            if platform.windows then
+                pending("Unix Make paired DSO/static-provider linker recipes")
+                return
+            end
             local ok, output, why, code = run_uv_dry_run()
             assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
                 tostring(code) .. ")")
@@ -3122,6 +3050,10 @@ exit 64
         end)
 
     it("keeps system OpenSSL as ordered final-link inputs", function()
+            if platform.windows then
+                pending("Unix Make pkg-config and static-provider linker recipes")
+                return
+            end
         local root = make_temp_dir()
         local fake_pkg_config = root .. "/pkg-config"
         write_file(fake_pkg_config, [[#!/bin/sh
@@ -3170,6 +3102,10 @@ esac
 
     it("rebuilds the same provider pair when any reviewed source changes",
         function()
+            if platform.windows then
+                pending("Unix Make paired-provider source dependency graph")
+                return
+            end
             local sources = {
                 "titan/coroutine.titan", "titan/async.titan",
                 "titan/timer.titan", "titan/io.titan", "titan/fs.titan",
@@ -3177,7 +3113,7 @@ esac
                 "titan/http/http.titan", "titan/http/client.titan",
                 "titan/http/headers.titan", "titan/http/native.titan",
                 "titan/http/server.titan", "titan/http/upgrade.titan",
-                "titan/os.titan",
+                "titan/os.titan", "titan/path.titan",
                 "titan/peg/peg.titan",
                 "titan/peg/combinators.titan", "titan/peg/native.titan",
                 "titan/peg/relabel.titan",
@@ -3217,167 +3153,58 @@ esac
             end
         end)
 
-    it("keeps a valid warm pair and repairs missing or corrupt outputs",
-        function()
-            local root = make_temp_dir()
-            local source = root .. "/metadata.c"
-            local object = root .. "/metadata.o"
-            local fixture_archive = root .. "/fixture.a"
-            local fixture_provider = root .. "/fixture.so"
-            local fixture_shim = root .. "/fixture.lua"
-            local provider = root .. "/provider.so"
-            local static_archive = root .. "/provider.a"
-            local shim = root .. "/fixture-module.lua"
-            local config = root .. "/stdlib.config"
-            local completion = root .. "/stdlib.complete"
-            local prepared = root .. "/prepared"
-            local llhttp_build_config = root .. "/llhttp-build.config"
-            local llhttp_archive_config = root .. "/llhttp-archive.config"
-            local llhttp_archive = root .. "/llhttp.a"
-            local sqlite3_build_config = root .. "/sqlite3-build.config"
-            local sqlite3_archive_config = root .. "/sqlite3-archive.config"
-            local sqlite3_archive = root .. "/sqlite3.a"
-            local fake_titanc = root .. "/fake-titanc"
-            local build_log = root .. "/build.log"
-
-            local payload = assert(staticmetadata.render(
-                "fixture.module", "2", "{}"))
-            local initializer = assert(staticmetadata.c_initializer(payload))
-            write_file(source, string.format([[
-#if defined(__APPLE__)
-#define TITAN_META_SECTION \
-    __attribute__((used, aligned(1), section("__TEXT,__titanmeta")))
-#else
-#define TITAN_META_SECTION \
-    __attribute__((used, aligned(1), section(".titan.meta")))
-#endif
-TITAN_META_SECTION
-static const unsigned char fixture_metadata[] = %s;
-int fixture_native_payload(void) { return 1; }
-]], initializer))
-
-            local compile = { "env", "CCACHE_DISABLE=1" }
-            for _, word in ipairs(compiler_argv("-c", source, "-o", object)) do
-                compile[#compile + 1] = word
-            end
-            local ok, output, why, code = run_argv(compile)
-            assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
-                tostring(code) .. ")")
-            ok, output, why, code =
-                run_argv({ "ar", "rcs", fixture_archive, object })
-            assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
-                tostring(code) .. ")")
-
-            write_file(fixture_provider, "fixture provider\n")
-            write_file(fixture_shim, "fixture shim\n")
-            write_file(prepared, "prepared\n")
-            for _, input in ipairs({
-                llhttp_build_config, llhttp_archive_config, llhttp_archive,
-                sqlite3_build_config, sqlite3_archive_config, sqlite3_archive,
-            }) do
-                write_file(input, "prepared native identity\n")
-            end
-            write_file(build_log, "")
-            write_file(fake_titanc, string.format([[#!/bin/sh
+    it("preserves a warm provider pair and rebuilds missing outputs", function()
+        if platform.windows then
+            pending("Unix Make paired-provider completion")
+            return
+        end
+        local root = make_temp_dir()
+        local tested, test_error = xpcall(function()
+            write_file(root .. "/prepared", "prepared\n")
+            write_file(root .. "/fake-titanc", [[#!/bin/sh
 set -eu
-cp %s %s
-cp %s %s
-cp %s %s
-printf 'build\n' >> %s
-]], quote(fixture_provider), quote(provider),
-                quote(fixture_archive), quote(static_archive),
-                quote(fixture_shim), quote(shim), quote(build_log)))
-            ok, output, why, code = run_argv({ "chmod", "+x", fake_titanc })
-            assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
-                tostring(code) .. ")")
-
-            local prefix = assert(prefix_from_cpath(package.cpath))
-            local function run_fixture_make(ar)
-                return run_argv({
-                    "make", "--no-print-directory", "-s",
-                    "HOST_OS=Linux",
-                    "PREFIX=" .. root,
-                    "TITAN_LUA=" .. prefix .. "/bin/lua",
-                    "TITANC=" .. fake_titanc,
-                    "AR=" .. ar,
-                    "RANLIB=review-ranlib",
-                    "STDLIB_ROOTS=fixture.module",
-                    "STDLIB_MODULE_OBJECTS=",
-                    "STDLIB_TITAN_SOURCES=" .. prepared,
-                    "STDLIB_SHIMS=" .. shim,
-                    "STDLIB_CONTAINER=" .. provider,
-                    "STDLIB_STATIC_ARCHIVE=" .. static_archive,
-                    "STDLIB_CONFIG_STAMP=" .. config,
-                    "STDLIB_COMPLETION_STAMP=" .. completion,
-                    "STDLIB_EXTRA_OBJECTS=",
-                    "STDLIB_NATIVE_IDENTITY_PREREQS=",
-                    "LLHTTP_BUILD_CONFIG=" .. llhttp_build_config,
-                    "LLHTTP_ARCHIVE_CONFIG=" .. llhttp_archive_config,
-                    "LLHTTP_ARCHIVE=" .. llhttp_archive,
-                    "SQLITE3_BUILD_CONFIG=" .. sqlite3_build_config,
-                    "SQLITE3_ARCHIVE_CONFIG=" .. sqlite3_archive_config,
-                    "SQLITE3_ARCHIVE=" .. sqlite3_archive,
-                    "SQLITE3_TITAN_HEADERS=" .. prepared,
-                    "OPENSSL_EXTRA_OBJECTS=",
-                    "STDLIB_SOS=",
-                    "STDLIB_QUALIFIED_SOS=",
-                    "TITAN_COMPILER_LUA=",
-                    "STDLIB_TOOL_PREREQS=" .. prepared,
-                    "STDLIB_PLATFORM_PREREQS=" .. prepared,
-                    "STDLIB_NATIVE_PREREQS=" .. prepared,
-                    "STDLIB_RUNTIME_ARCHIVE_PREREQ=" .. prepared,
-                    "STDLIB_BOOTSTRAP_PREREQ=" .. prepared,
-                    "stdlib",
-                })
+printf 'provider\n' > provider.so
+printf 'archive\n' > provider.a
+printf 'shim\n' > fixture.lua
+printf 'build\n' >> build.log
+]])
+            local arguments = {
+                "make", "--no-print-directory", "-s", "-f", lfs.currentdir() .. "/Makefile",
+                "-C", root, "HOST_OS=Linux", "PREFIX=" .. root,
+                "TITANC=sh ./fake-titanc", "STDLIB_ROOTS=fixture.module",
+                "STDLIB_MODULE_OBJECTS=", "STDLIB_SHIMS=fixture.lua",
+                "STDLIB_CONTAINER=provider.so", "STDLIB_STATIC_ARCHIVE=provider.a",
+                "STDLIB_COMPLETION_STAMP=build.complete", "STDLIB_EXTRA_OBJECTS=",
+                "STDLIB_COMPILER_PREREQS=prepared", "STDLIB_TOOL_PREREQS=prepared",
+                "STDLIB_PLATFORM_PREREQS=prepared", "STDLIB_NATIVE_PREREQS=prepared",
+                "STDLIB_RUNTIME_ARCHIVE_PREREQ=prepared", "STDLIB_BOOTSTRAP_PREREQ=prepared",
+                "STDLIB_SOS=", "STDLIB_QUALIFIED_SOS=", "stdlib",
+            }
+            local function build()
+                local ok, output = run_argv(arguments)
+                assert.truthy(ok, output)
             end
-
-            local tested, test_error = pcall(function()
-                ok, output, why, code = run_fixture_make("review-ar-a")
-                assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
-                    tostring(code) .. ")")
-                assert.equal("build\n", read_file(build_log))
-                local provider_mtime =
-                    assert(lfs.attributes(provider, "modification"))
-                local archive_mtime =
-                    assert(lfs.attributes(static_archive, "modification"))
-
-                ok, output, why, code = run_fixture_make("review-ar-a")
-                assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
-                    tostring(code) .. ")")
-                assert.equal("build\n", read_file(build_log))
-                assert.equal(provider_mtime,
-                    lfs.attributes(provider, "modification"))
-                assert.equal(archive_mtime,
-                    lfs.attributes(static_archive, "modification"))
-
-                ok, output, why, code = run_fixture_make("review-ar-b")
-                assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
-                    tostring(code) .. ")")
-                assert.equal("build\nbuild\n", read_file(build_log))
-
-                write_file(static_archive, "corrupt archive\n")
-                ok, output, why, code = run_fixture_make("review-ar-b")
-                assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
-                    tostring(code) .. ")")
-                assert.equal("build\nbuild\nbuild\n", read_file(build_log))
-                assert.truthy(staticmetadata.scan_archive(static_archive, {
-                    expected_abi = "2",
-                }))
-
-                assert.truthy(os.remove(provider))
-                ok, output, why, code = run_fixture_make("review-ar-b")
-                assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
-                    tostring(code) .. ")")
-                assert.equal("build\nbuild\nbuild\nbuild\n",
-                    read_file(build_log))
-                assert.equal("file", lfs.symlinkattributes(provider, "mode"))
-                assert.equal("file",
-                    lfs.symlinkattributes(static_archive, "mode"))
-            end)
-
-            remove_tree(root)
-            if not tested then error(test_error, 0) end
-        end)
+            build()
+            local old = os.time() - 30
+            assert(lfs.touch(root .. "/prepared", old, old))
+            for _, name in ipairs({ "provider.so", "provider.a", "fixture.lua", "build.complete" }) do
+                assert(lfs.touch(root .. "/" .. name, old + 1, old + 1))
+            end
+            build()
+            assert.equal("build\n", read_file(root .. "/build.log"))
+            for _, name in ipairs({ "provider.so", "provider.a", "fixture.lua" }) do
+                assert.equal(old + 1, lfs.attributes(root .. "/" .. name, "modification"))
+            end
+            for _, name in ipairs({ "provider.so", "provider.a", "fixture.lua" }) do
+                assert(os.remove(root .. "/" .. name))
+                build()
+                assert.equal("file", lfs.attributes(root .. "/" .. name, "mode"))
+            end
+            assert.equal("build\nbuild\nbuild\nbuild\n", read_file(root .. "/build.log"))
+        end, debug.traceback)
+        remove_tree(root)
+        if not tested then error(test_error, 0) end
+    end)
 
     it("retries LuaRocks dependency acquisition in one warm prefix",
         function()
@@ -3442,9 +3269,13 @@ fi
 
     it("selects checkout compiler edits through the real LuaRocks Busted launcher",
         function()
+            if platform.windows then
+                pending("Unix LuaRocks shell launcher and static runtime SDK resolution")
+                return
+            end
             local root = make_temp_dir()
             local tested, test_error = xpcall(function()
-                local prefix = assert(prefix_from_cpath(package.cpath))
+                local prefix = installed_prefix.active()
                 local launcher = prefix .. "/bin/busted"
                 local installed_types =
                     prefix .. "/share/lua/5.5/titan-compiler/types.lua"
@@ -3648,10 +3479,16 @@ end)
 
     it("forwards LuaRocks command arguments to Busted byte-for-byte",
         function()
+            if platform.windows then
+                pending("Unix Make test adapter and shell Busted launcher with newline argv")
+                return
+            end
             local root = make_temp_dir()
             local tested, test_error = xpcall(function()
                 local bin = root .. "/bin"
                 local log = root .. "/argv"
+                local make_log = root .. "/selected-make"
+                local selected_make = root .. "/selected make"
                 assert(lfs.mkdir(bin))
                 local fake_busted = bin .. "/busted"
                 write_file(fake_busted, [==[#!/usr/bin/env bash
@@ -3660,8 +3497,13 @@ set -eu
 printf '%s\0' "$@" > "$TITAN_BUSTED_ARGV_LOG"
 exit 73
 ]==])
+                write_file(selected_make, [==[#!/usr/bin/env bash
+set -eu
+printf 'selected\n' > "$TITAN_SELECTED_MAKE_LOG"
+exec make "$@"
+]==])
                 local chmod_ok, chmod_output = run_argv({
-                    "chmod", "+x", fake_busted,
+                    "chmod", "+x", fake_busted, selected_make,
                 })
                 assert.truthy(chmod_ok, chmod_output)
 
@@ -3683,16 +3525,21 @@ exit 73
                     "PATH=" .. bin .. ":" .. assert(os.getenv("PATH")),
                     "BUSTED=busted",
                     "TITAN_BUSTED_ARGV_LOG=" .. log,
+                    "TITAN_SELECTED_MAKE_LOG=" .. make_log,
                     "bash",
                     "spec/support/run_rock_tests.sh",
+                    "--make=" .. selected_make,
                 }
                 for _, argument in ipairs(ordinary) do
                     argv[#argv + 1] = argument
                 end
                 argv[#argv + 1] = "--busted-filter=focus$tail"
                 argv[#argv + 1] = "--titan-filter=native$tail"
+                argv[#argv + 1] = "--prefix=" ..
+                    installed_prefix.active()
                 local ok = run_argv(argv)
                 assert.falsy(ok)
+                assert.equal("selected\n", read_file(make_log))
 
                 local encoded = read_file(log)
                 local actual = {}
@@ -3710,6 +3557,10 @@ exit 73
         end)
 
     it("shards only the exact unfiltered Busted invocation", function()
+            if platform.windows then
+                pending("Unix shell Busted routing fixture; Windows uses native supervised compiler shards")
+                return
+            end
         local root = make_temp_dir()
         local tested, test_error = xpcall(function()
             local workspace = root .. "/workspace"
@@ -3756,7 +3607,7 @@ printf 'sharded\n' > "$TITAN_ROUTING_SHARD_LOG"
             local stdlib_specs = {
                 "retained-one", "retained-two", "retained-three",
                 "retained-four", "retained-five", "retained-six",
-                "retained-seven", "retained-eight",
+                "retained-seven",
             }
             local argv_log = root .. "/argv"
             local shard_log = root .. "/shard"
@@ -3830,6 +3681,10 @@ printf 'sharded\n' > "$TITAN_ROUTING_SHARD_LOG"
 
     it("selects every uncovered compiler shard exactly once without LuaCov",
         function()
+            if platform.windows then
+                pending("Unix CI shell Busted shard launcher")
+                return
+            end
             local root = make_temp_dir()
             local tested, test_error = xpcall(function()
                 local fake_busted = root .. "/busted"
@@ -3908,6 +3763,10 @@ printf '%s\0' "$@" > "$TITAN_SELECTOR_ARGV_LOG"
 
     it("runs covered and uncovered stress compiler tests in each shard",
         function()
+            if platform.windows then
+                pending("Unix CI LuaCov and shell Busted shard launcher")
+                return
+            end
             local root = make_temp_dir()
             local tested, test_error = xpcall(function()
                 local fake_busted = root .. "/busted"
@@ -4033,6 +3892,10 @@ printf '%s\0' __TITAN_BUSTED_CALL__ "$@" >> "$TITAN_SELECTOR_ARGV_LOG"
         end)
 
     it("isolates and bounds all four local compiler workers", function()
+            if platform.windows then
+                pending("Unix compiler worker concurrency and process-group supervision")
+                return
+            end
         local root = make_temp_dir()
         local tested, test_error = xpcall(function()
             local workspace = root .. "/workspace"
@@ -4387,6 +4250,10 @@ done
 
     it("bounds TERM-ignoring descendants for every command exit path",
         function()
+            if platform.windows then
+                pending("POSIX process groups and TERM/KILL signal supervision")
+                return
+            end
             local function run_case(command, expected_ok, expected_code)
                 local started = os.time()
                 local ok, output, why, code = run_argv({
@@ -4421,23 +4288,11 @@ done
                 "$(STDLIB_STATIC_ARCHIVE)",
                 "STDLIB_EXTRA_OBJECTS := $(LTITANLIB_O) " ..
                 "$(LPEGLABEL_ARCHIVE)",
-                "STDLIB_NATIVE_IDENTITY_PREREQS := $(LPEGLABEL_ARCHIVE)",
                 "TITAN_COMPILER_LUA := " ..
                 "$(wildcard titan-compiler/*.lua \\\n\t" ..
                 "titan-compiler/checker/*.lua " ..
                 "titan-compiler/coder/*.lua c-parser/*.lua)",
-                "STDLIB_EMBEDDED_FORMAT_INPUTS := " ..
-                "titan-compiler/staticmetadata.lua \\\n\t" ..
-                "titan-compiler/coder.lua " ..
-                "$(wildcard titan-compiler/coder/*.lua)",
                 "$(STDLIB_COMPLETION_STAMP): FORCE $(STDLIB_MODULE_OBJECTS)",
-                "$(STDLIB_COMPILER_PREREQS) $(STDLIB_CONFIG_STAMP)",
-                "$(STDLIB_CONFIG_STAMP): FORCE",
-                'rm -f "$(STDLIB_COMPLETION_STAMP)"',
-                "STDLIB_STATIC_ARCHIVE=$(STDLIB_STATIC_ARCHIVE)",
-                "STDLIB_EXTRA_OBJECTS=$(STDLIB_EXTRA_OBJECTS)",
-                "STDLIB_EMBEDDED_FORMAT_INPUTS=" ..
-                "$(STDLIB_EMBEDDED_FORMAT_INPUTS)",
                 "AR=$(call make_shell_quote,$(AR))",
                 "RANLIB=$(call make_shell_quote,$(RANLIB))",
                 "CLANG_FORMAT ?= clang-format",
@@ -4448,20 +4303,14 @@ done
                 "export CLANG_FORMAT TITAN_EXTRA_CPPFLAGS " ..
                 "TITAN_EXTRA_CFLAGS \\\n\t" ..
                 "TITAN_EXTRA_LDFLAGS TITAN_NO_LINE_DIRECTIVES",
-                "TITAN_NO_LINE_DIRECTIVES=$(TITAN_NO_LINE_DIRECTIVES)",
                 "for output in $(STDLIB_PROVIDER_OUTPUTS) $(STDLIB_SHIMS)",
-                "STDLIB_UV_LDFLAGS=$(STDLIB_UV_LDFLAGS)",
-                "validate_archive()",
                 "STDLIB_INSTALL_STAGE       ?= $(CURDIR)",
                 "TITAN_STDLIB_DIAGNOSTIC_SNAPSHOT ?=",
                 "install-stdlib: stdlib",
-                "install-stdlib publish-stdlib: " ..
-                "scripts/stdlib_installer.lua",
                 "stage=$(call make_shell_quote,$(STDLIB_INSTALL_STAGE))",
                 "install -m 0644 THIRD_PARTY_NOTICES.md",
                 "install -m 0644 $(STDLIB_LICENSES)",
                 '$(STDLIB_COMPILER_ENV) "$(TITAN_LUA)" -E',
-                '"$(CURDIR)/scripts/stdlib_installer.lua" "$$stage" "$$root"',
                 "rm -f $(STDLIB_PROVIDER_OUTPUTS)",
                 "rm -f $(STDLIB_SHIMS)",
                 "rm -f titan/peg/peg.c titan/peg/peg.o",
@@ -4487,18 +4336,6 @@ done
                 "LUA_CPATH LUA_PATH_5_5 LUA_CPATH_5_5",
                 "")
             assert.equal(2, recursive_test_count, makefile)
-            local stdlib_config_start = assert(makefile:find(
-                "$(STDLIB_CONFIG_STAMP): FORCE", 1, true))
-            local stdlib_config_end = assert(makefile:find(
-                "\n$(STDLIB_COMPLETION_STAMP): FORCE",
-                stdlib_config_start, true))
-            local stdlib_config = makefile:sub(
-                stdlib_config_start, stdlib_config_end - 1)
-            assert.falsy(stdlib_config:find(
-                "CLANG_FORMAT=$(CLANG_FORMAT)", 1, true), stdlib_config)
-            assert.truthy(stdlib_config:find(
-                "TITAN_NO_LINE_DIRECTIVES=$(TITAN_NO_LINE_DIRECTIVES)",
-                1, true), stdlib_config)
             local rock_post_install_start = assert(makefile:find(
                 "rock-post-install:", 1, true))
             local rock_post_install_end = assert(makefile:find(
@@ -4520,7 +4357,7 @@ done
                 "$(call make_shell_quote,$(strip " ..
                 "$(TITAN_STDLIB_DIAGNOSTIC_SNAPSHOT)))",
                 '"$$stage/titan.so" "$(CURDIR)/titan"',
-                '"$$root/lib/titan/$(TITAN_LIBRARY_VERSION)/titan.so"',
+                '"$(TITAN_CANONICAL_SUPPORT_SO)"',
                 '"$(CURDIR)/titan"',
             }) do
                 assert.truthy(publisher:find(contract, 1, true),
@@ -4530,7 +4367,7 @@ done
                 '"$(CURDIR)/spec/support/' ..
                 'ci_asan_generated_c_context.lua"', 1, true))
             local publication = assert(publisher:find(
-                '"$(CURDIR)/scripts/stdlib_installer.lua"', diagnostic_snapshot, true))
+                'install -m 0755 "$$stage/titan.so"', diagnostic_snapshot, true))
             assert.is_true(diagnostic_snapshot < publication,
                 "diagnostic snapshot must preserve the built provider " ..
                 "before publication")
@@ -4552,7 +4389,7 @@ done
                 "\ntitan-stdlib-test:", native_run_start, true))
             local native_run = makefile:sub(native_run_start, native_run_end - 1)
             assert.truthy(native_run:find('2>&1 | tee "$$log"', 1, true), native_run)
-            assert.truthy(native_run:find("scripts/check_stdlib_test_output.lua", 1, true), native_run)
+            assert.truthy(native_run:find("spec/support/check_stdlib_test_output.lua", 1, true), native_run)
             assert.falsy(native_run:find("output=$$(", 1, true), native_run)
 
             local examples_makefile = read_file("examples/Makefile")
@@ -4571,6 +4408,7 @@ done
                 'rm -f "$static_archive"',
                 'write_manifest "$manifest" "${artifacts[@]}"',
                 'cmp -s "$manifest" "$restored_manifest"',
+                '"$shim_dir/path.lua"',
                 '"$shim_dir/peg.lua" "$shim_dir/string.lua"',
                 '"$shim_dir/math.lua" "$shim_dir/lua.lua"',
                 '"$shim_dir/iteration.lua" "$shim_dir/gc.lua" "$shim_dir/test.lua"',
@@ -4890,9 +4728,7 @@ done
                 "spec/libuv_build_spec.lua",
                 "spec/lpeglabel_build_spec.lua",
                 "spec/minicoro_spec.lua",
-                "spec/readline_build_spec.lua",
                 "spec/rockspec_spec.lua",
-                "spec/stdlib_installer_spec.lua",
             }) do
                 assert.truthy(makefile:find(retained, 1, true), retained)
             end
@@ -5179,7 +5015,7 @@ done
                 "run: make openssl",
                 "Canary source-rock installation with system OpenSSL",
                 "OPENSSL_MODE=system",
-                "brew install cmake openssl@3 pkgconf",
+                "brew install cmake readline openssl@3 pkgconf",
                 "test_ssl_http_fresh_process_sanitizer_composition$",
                 "libssl-dev", "perl",
             }) do
@@ -5202,7 +5038,7 @@ done
                 1, true), workflow)
             assert.truthy(workflow:find(
                 "for module in coroutine uv async timer io fs net ssl url " ..
-                "http websocket os peg string math lua iteration gc test reflect sqlite3 json; do",
+                "http websocket os path peg string math lua iteration gc test reflect sqlite3 json; do",
                 1, true), workflow)
             assert.truthy(workflow:find(
                 "share/titan/0.6/src/titan/test.titan", 1, true), workflow)
@@ -5217,9 +5053,7 @@ done
                 "spec/libuv_build_spec.lua",
                 "spec/lpeglabel_build_spec.lua",
                 "spec/minicoro_spec.lua",
-                "spec/readline_build_spec.lua",
                 "spec/rockspec_spec.lua",
-                "spec/stdlib_installer_spec.lua",
                 "run_isolated_compiler_coverage",
                 '"$BUSTED" -c -o gtest -v --exclude-tags=stress ' ..
                     '"$test_file"',
@@ -5340,8 +5174,8 @@ done
                     assert.is_true(tonumber(seconds) >= 0)
                 end
             end
-            assert.same({ 32, 37, 33, 44 }, shard_counts)
-            assert.equal(146, assigned_count)
+            assert.same({ 34, 37, 33, 44 }, shard_counts)
+            assert.equal(148, assigned_count)
 
             local stress_partition = read_file(
                 "spec/support/ci_compiler_stress_files.txt")
@@ -5388,7 +5222,7 @@ done
                 'LUA_MYCFLAGS: "-fPIC -O1 -fno-lto -g ' ..
                 '-fsanitize=address,undefined'), sanitizer_job)
             for _, contract in ipairs({
-                'SANITIZER_NATIVE_CACHE_SCHEMA: "v2"',
+                'SANITIZER_NATIVE_CACHE_SCHEMA: "v3"',
                 "CC: cc", "AR: ar", "RANLIB: ranlib",
                 'SANITIZER_LUA_VERSION: "5.5.1"',
                 'SANITIZER_LIBUV_VERSION: "1.53.0"',
@@ -5428,7 +5262,8 @@ done
                 "steps.sanitizer-native-cache.outputs.cache-primary-key",
                 "steps.sanitizer-native-cache.outputs.cache-hit != 'true'",
                 'test ! -e "$PREFIX/bin/luarocks"',
-                'test ! -e "$PREFIX/lib/titan"',
+                'find "$PREFIX/lib/titan" ! -type d -print -quit',
+                'test -z "$titan_entries"',
                 'test ! -e "$PREFIX/var/cache/titan-probes"',
             }) do
                 assert.truthy(sanitizer_job:find(contract, 1, true), contract)
@@ -5508,7 +5343,7 @@ done
                 "Build sanitizer-enabled native dependencies")
             assert.equal(1, count_literal(sanitizer_native_build_step,
                 "make openssl lua libuv libbacktrace llhttp sqlite3"))
-            assert.equal(1, count_literal(sanitizer_native_build_step,
+            assert.equal(0, count_literal(sanitizer_native_build_step,
                 "grep -qx 'provider=system'"))
             for _, serial_capture in ipairs({
                 "native-lua", "native-libbacktrace", "native-libuv",
@@ -5657,7 +5492,7 @@ done
                 },
                 {
                     "Install LuaRocks for the sanitizer Lua",
-                    { "make luarocks" },
+                    { "make luarocks", "build lpeglabel", "build luafilesystem" },
                 },
                 {
                     "Activate the sanitizer Titan prefix",
@@ -5863,4 +5698,31 @@ done
             remove_tree(root)
             assert.truthy(success, failure)
         end)
+end)
+
+describe("Windows libbacktrace allocator receipts", function()
+    local function run_controls(mode, expected)
+        if platform.windows then
+            pending("Unix mock-tool controls; native CLANG64 source/build and allocator harness own Windows validation")
+            return
+        end
+        local ok, output = run_argv({
+            "perl", "spec/support/check_windows_libbacktrace_allocator.pl",
+            lfs.currentdir(), mode,
+        })
+        assert.truthy(ok, output)
+        assert.truthy(output:find(expected, 1, true), output)
+    end
+
+    it("upgrades completed sources and verifies immutable preparation receipts", function()
+        run_controls("prepare", "Windows allocator source preparation controls passed.")
+    end)
+
+    it("fences cached allocator objects and publishes only successful verified builds", function()
+        run_controls("build", "Windows allocator archive-build controls passed.")
+    end)
+
+    it("forces verified alloc.c through native O0 and O2 controls without replacing the host mmap archive", function()
+        run_controls("native", "Forced alloc.c native controls passed without replacing the host mmap archive.")
+    end)
 end)

@@ -1,13 +1,17 @@
 local h = require "spec.support.helpers"
 local driver = require "titan-compiler.driver"
+local platform = require "titan-compiler.platform"
 local module = "documentation_reflection"
+local provider = "./" .. module .. (platform.windows and ".dll" or ".so")
 
 describe("documentation metadata at runtime", function()
     after_each(function()
-        for _, suffix in ipairs({".c", ".o", ".so", ".a", ".ffi.h", ".titan.h"}) do
+        for _, suffix in ipairs({".c", ".o", ".so", ".dll", ".dll.def", ".lua", ".a", ".ffi.h", ".titan.h"}) do
             os.remove(module .. suffix)
         end
-        os.execute("rm -rf " .. module .. ".so.dSYM")
+        if not platform.windows then
+            os.execute("rm -rf " .. module .. ".so.dSYM")
+        end
     end)
     it("hydrates documented records, unions, interfaces and callable signatures", function()
         local ok, err = h.build_so_chain({{name=module, src=[[
@@ -59,7 +63,7 @@ end
         assert.truthy(ok, err)
         local ran, output=h.call(module, [[assert(documentation_reflection.check()==127)]])
         assert.truthy(ran, output)
-        local metadata=assert(require("titan")._loadlib("./"..module..".so",module.."_types"))()
+        local metadata=assert(require("titan")._loadlib(provider,module.."_types"))()
         assert.truthy(metadata:find("Documented(",1,true),"language-server metadata lost documentation")
         assert.truthy(driver.decode_module_interface(metadata,module))
     end)

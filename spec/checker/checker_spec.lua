@@ -1,3 +1,4 @@
+local temporary = require "spec.support.temporary"
 local types = require 'titan-compiler.types'
 local driver = require 'titan-compiler.driver'
 local util = require 'titan-compiler.util'
@@ -11,7 +12,7 @@ local assert_ast = h.assert_ast
 local check_errs = h.check_errs
 
 local function with_header(contents, fn)
-    local header = os.tmpname() .. ".h"
+    local header = temporary.name(".h")
     local file = assert(io.open(header, "w"))
     assert(file:write(contents))
     assert(file:close())
@@ -2076,7 +2077,7 @@ describe("Titan type checker", function()
     end)
 
     it("can check typedef'd enum constants imported by the FFI", function()
-        local header = os.tmpname() .. ".h"
+        local header = temporary.name(".h")
         local fd = assert(io.open(header, "w"))
         fd:write("typedef enum { RED, GREEN, BLUE } Color;\n")
         fd:close()
@@ -2108,7 +2109,7 @@ describe("Titan type checker", function()
         -- importer skips that member while the rest of the header still
         -- imports; referencing the skipped member is a clean "not found"
         -- error, never a checker/codegen crash.
-        local header = os.tmpname() .. ".h"
+        local header = temporary.name(".h")
         local fd = assert(io.open(header, "w"))
         fd:write("float _Complex frob(float _Complex x);\nint dbl(int x);\n")
         fd:close()
@@ -2132,19 +2133,26 @@ describe("Titan type checker", function()
         -- with nil (mtime_bin >= nil) when a .so exists but no .titan does.
         local lfs = require 'lfs'
         local real = lfs.attributes
+        local suffix = require("titan-compiler.platform").windows and
+            "%.dll$" or "%.so$"
+        local compiled = { mode = "file", size = 0, modification = 12345,
+            permissions = "rw-r--r--", dev = 1, ino = 1 }
         lfs.attributes = function(f, attr)
-            if tostring(f):match("%.so$") then return 12345
-            elseif tostring(f):match("%.titan$") then return nil
+            if tostring(f):match(suffix) then
+                if attr then return compiled[attr] end
+                return compiled
+            elseif tostring(f):match("%.titan$") then
+                return nil, "No such file or directory", 2
             else return real(f, attr) end
         end
         driver.imported = {}
         local loader = driver.defaultloader()
-        local ok = pcall(driver.with_loader, loader, function(loader)
+        local ok, err = pcall(driver.with_loader, loader, function(loader)
             return loader("no_such_titan_module")
         end)
         lfs.attributes = real
         driver.imported = {}
-        assert.truthy(ok, "driver crashed comparing a number with nil")
+        assert.truthy(ok, err)
     end)
 
     it("fails on circular module references", function ()

@@ -1,3 +1,4 @@
+local temporary = require "spec.support.temporary"
 -- Typechecker tests for first-class function values: which programs the checker
 -- accepts and which it rejects, and with what error. These run the checker only
 -- -- no code is generated or executed. The end-to-end behaviour lives in
@@ -8,7 +9,7 @@ local h = require 'spec.support.helpers'
 local check_errs = h.check_errs
 
 local function with_header(contents, fn)
-    local header = os.tmpname() .. ".h"
+    local header = temporary.name(".h")
     local file = assert(io.open(header, "w"))
     assert(file:write(contents))
     assert(file:close())

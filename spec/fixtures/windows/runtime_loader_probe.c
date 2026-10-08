@@ -133,7 +133,7 @@ int main(int argc, char **argv) {
     lua_setglobal(L, "fixture_errorhandler");
     lua_pushinteger(L, LUAL_BUFFERSIZE);
     lua_setglobal(L, "fixture_buffer_size");
-    /* Force the fallback traceback buffer to grow while its Lua source string
+    /* Force the unified traceback buffer to grow while its Lua source string
     ** stays rooted. Shallow traces do not exercise the UBox stack contract. */
     run_lua(L,
         "local recurse = assert(load('local function recurse(n) if n == 0 then error(\"trace fixture\") end return 1 + recurse(n-1) end return recurse', '@' .. string.rep('long_trace_name_', 8)))()\n"
@@ -142,7 +142,8 @@ int main(int argc, char **argv) {
         "  assert(not ok and err:find('trace fixture', 1, true))\n"
         "  local trace = support.backtrace()\n"
         "  assert(type(trace) == 'string' and #trace > fixture_buffer_size)\n"
-        "  assert(trace:find('[native address ', 1, true))\n"
+        "  assert(trace:find('long_trace_name_', 1, true) and trace:find(':1: in ', 1, true))\n"
+        "  assert(trace:find('[C]: in ', 1, true))\n"
         "  collectgarbage('collect')\n"
         "end\n");
     lua_pushcfunction(L, errorhandler);
@@ -150,7 +151,8 @@ int main(int argc, char **argv) {
     assert(lua_pcall(L, 0, 0, -2) != LUA_OK);
     lua_pop(L, 2); /* original error and message handler */
     run_lua(L,
-        "assert(support.backtrace():find('[native address ', 1, true))\n");
+        "local trace = support.backtrace()\n"
+        "assert(type(trace) == 'string' and trace:find('[C]: in ', 1, true))\n");
     run_lua(L,
         "provider_dir = fixture_root .. '/lib/titan/0.6/'\n"
         "local r = debug.getregistry()\n"

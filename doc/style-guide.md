@@ -463,7 +463,7 @@ local strings = import "string"
 
 Use an alias such as `strings` when the short name is also a type keyword.
 The short-name set is `coroutine`, `uv`, `async`, `timer`, `io`, `fs`, `net`,
-`ssl`, `url`, `http`, `websocket`, `os`, `peg`, `string`, `test`, `lua`, `math`, `gc`,
+`ssl`, `url`, `http`, `websocket`, `os`, `path`, `peg`, `string`, `test`, `lua`, `math`, `gc`,
 `iteration`, `reflect`, `sqlite3`, and `json`. This rule applies
 inside
 standard-library sources too: spelling one of those imports as `"titan.fs"`,

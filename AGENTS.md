@@ -62,14 +62,26 @@ not add epicycles around what may be a misunderstood simpler design.
 
 The Unix build, provider, and test commands below describe Linux and macOS.
 Read `doc/implementation/windows-build.md` for the experimental native x64
-MSYS2 CLANG64/UCRT workflow in `Makefile.windows`. Keep its source/output tree
-separate from Unix builds. It installs a controlled Lua DLL and SDK without
-LuaRocks, compiles serially, and emits DLL providers; `--static` and Titan
+MSYS2 CLANG64/UCRT workflow in `Makefile.win`. Keep its source/output tree
+separate from Unix builds. It installs the controlled Lua DLL and SDK, then
+uses standalone LuaRocks to install dependencies and build the source rock.
+Configure the Lua prefix as the rock tree. Generated-C compilation honors
+`titanc --jobs` and `TITAN_JOBS`; native component scripts retain their ordinary
+build order. Windows uses an installed binary OpenSSL SDK by default (`OPENSSL_MODE=system`);
+`OPENSSL_PREFIX` selects it and `OPENSSL_MODE=bundled` builds the pinned source.
+Use `make -f Makefile.win` for the Windows test leaf targets.
+The compiler emits DLL providers; `--static` and Titan
 archive providers are unsupported on Windows. A program also gets a small
 `bin/<logical-module>.exe` launcher, optionally named with `--launcher-name`.
 The EXE may be renamed without changing the provider identity. Preserve Lua's
 stock Windows `!` executable-directory meaning and audit delivered PE imports
 for extra toolchain runtime dependencies.
+
+Windows native tracebacks use the separate static libbacktrace archive and
+static LLVM unwinder to recover Titan filenames, lines, and function names.
+The Windows dependency correction and snapshot invalidation contract are
+documented in `vendor/libbacktrace/README.md` and
+`doc/implementation/error-handling.md`; preserve the shared source-frame tests.
 
 Windows limitations are documented with that workflow. Shared-folder watcher
 notifications are best effort; validate filesystem, SQLite, and local watcher
@@ -97,10 +109,11 @@ O3 with fat LTO on Linux. Repository test entry points select `validation`,
 which uses O0/no LTO for Titan runtime, provider, most native dependencies,
 generated test objects and fresh child compilers. Lua, LPegLabel (both compiler
 and private payload) and Lua filesystem stay at O2/no LTO; sanitizer host/parser
-components use O1/no LTO with complete instrumentation. `make luarocks`
-reconciles those compiler dependencies through an exact content/flags receipt. Keep SDK prefixes separate; implicit Unix
+components use O1/no LTO with complete instrumentation. Stock LuaRocks installs
+compiler dependencies with its optimized defaults; sanitizer CI supplies
+instrumented host flags explicitly. Keep SDK prefixes separate; implicit Unix
 tests use `.lua-validation`, while an explicit PREFIX remains caller-owned.
-`make test` prepares/reinstalls that SDK and cold `make rock-test` re-enters the
+`make test` prepares the toolchain and reinstalls Titan in that SDK and cold `make rock-test` re-enters the
 complete preparation. Leaf test build/run targets need a prepared selected SDK.
 Inspect `etc/titan/build-profile` and effective argv for validation evidence.
 All profile-bearing configurations and native CI caches include profile identity.
@@ -119,7 +132,7 @@ or give concurrent builds separate source copies. See
   Directory aliases retain their launch spelling when physically equivalent.
   Initialize the pinned `lua-5.5.1` submodule with `git submodule update --init
   --recursive`. `make lua` compiles the Titan Lua fork directly, and
-  `Makefile.windows` copies those same sources unchanged to its separate build
+  `Makefile.win` copies those same sources unchanged to its separate build
   tree. The fork sets POSIX `LUA_ROOT` to `"!/"` and implements
   POSIX `loadlib.c` search-path expansion to
   resolve `!` from the actual executable's directory parent (`<root>/bin/lua`
@@ -127,8 +140,9 @@ or give concurrent builds separate source copies. See
   `_NSGetExecutablePath` with `realpath`. All Titan changes, including the
   Windows DLL exports and SDK annotations, live in that fork behind compilation
   guards. Build recipes never patch or rewrite its source. The source bytes do
-  not depend on `PREFIX`; configuration stamps still track prefix and native-build
-  inputs for rebuilding and installation. LuaRocks configuration and command
+  not depend on `PREFIX`; Unix preparation checks only `$PREFIX/bin/lua` and
+  `$PREFIX/bin/luarocks`. Rebuilding after source/tool/flag changes requires
+  caller-managed cleanup and program removal or replacement. LuaRocks configuration and command
   wrappers can retain absolute paths, so this is Lua module-path relocation,
   not a complete binary-distribution contract. The
   generated standard-module shims resolve physical `titan.so` through
@@ -144,13 +158,11 @@ or give concurrent builds separate source copies. See
   `ROCKS_TREE` owns the Titan rock, compiler SDK, and stdlib. The supported
   developer and CI layout currently configures `ROCKS_TREE == PREFIX`, but
   that equality is deployment policy rather than an ownership invariant. Use
-  that LuaRocks' sole system-style tree; Titan
-  library/application distribution through a separate packaging system is
-  future work. Versioned completion stamps live under `$PREFIX/etc/titan`, so
-  a warm `make luarocks` is a no-op while each new isolated prefix installs
-  independently. Its generated config records Make's effective `CC`, `AR`, and
-  `RANLIB` (`LD` follows `CC`), so invoke later rock builds through that
-  prefix's LuaRocks rather than changing native tool identity between phases.
+  that LuaRocks' configured system tree; stock configuration also retains its
+  ordinary user tree. Titan library/application distribution through a separate
+  packaging system is future work. A warm `make lua`/`make luarocks` is a no-op
+  when its installed program exists. LuaRocks uses stock configure/build/install;
+  supply custom native tools explicitly to later rock builds.
 - **CI runs Linux on every push and the complete macOS suite only on manual
   dispatch.** Complete macOS validation is a **pre-merge check**. Prefer the
   complete local macOS VM gates, including runtime/packaging/compiler tests and
@@ -184,7 +196,7 @@ or give concurrent builds separate source copies. See
   and `ltitanlib.o`
   waits for the prefix Lua installation that owns its public headers. Busted
   2.3 has no native shard option. An exact unfiltered local `rock-test` instead
-  runs the eight retained runtime/packaging specs serially, then externally
+  runs the six retained runtime/packaging specs serially, then externally
   partitions the complete compiler/language file set into four measured
   longest-first groups in private checkout copies. It defaults to four workers,
   accepts `TITAN_ROCK_TEST_JOBS=1` through `4`, gives each worker private
@@ -208,7 +220,7 @@ or give concurrent builds separate source copies. See
      ABI-2 prefix, builds and installs an isolated O0/no-LTO bundled-OpenSSL validation provider, and
      packs the complete prepared tree before tests or a system-OpenSSL reinstall.
      It then runs, without LuaCov, the retained root build/runtime/packaging
-     specs and the one 27-root native stdlib executable through `make
+     specs and the one 28-root native stdlib executable through `make
      stdlib-test`; there are no standard-library Lua boundary specs.
      The provider, runtime, native payload, generated fixtures and test objects
      use `TITAN_BUILD_PROFILE=validation` (`-O0 -fno-lto` at compile and link).
@@ -286,7 +298,7 @@ or give concurrent builds separate source copies. See
   publication gate copies
   the already validated installed pair and shims into a private stage, then uses
   `publish-stdlib` with that exact `STDLIB_INSTALL_STAGE`; it must not invoke
-  build-dependent `install-stdlib` and rebuild all twenty-two roots in the same
+  build-dependent `install-stdlib` and rebuild all twenty-three roots in the same
   configuration. Keep packaging gates before legacy compiler specs that clean
   root outputs.
 
@@ -317,7 +329,7 @@ or give concurrent builds separate source copies. See
   the Titan build and complete test run remain single-shot. Run all uncovered
   stdlib/runtime/packaging work, including the aggregate native executable,
   before `ci_test_groups.sh compiler-uncovered`. Snapshot the runtime archive,
-  canonical `titan.so`/`titan.a`, conditional dSYM, all twenty-two shims, and the
+  canonical `titan.so`/`titan.a`, conditional dSYM, all twenty-three shims, and the
   canonical test-support source before compiler tests, then restore them before
   the bundled/system OpenSSL production smokes. Keep the real x86_64/arm64 universal
   Mach-O archive lookup and repackaging proof here rather than replacing it
@@ -344,24 +356,13 @@ or give concurrent builds separate source copies. See
   headers and archive.
   `make lua` uses `MYCFLAGS=-fPIC` and selects `linux-readline`/`macosx`
   from `uname`; override with `make lua LUA_PLATFORM=...`, and use `LUA_CC`
-  for Lua's compiler. It compile-links a host Readline probe first. When the
-  development header/library is unavailable, it verifies and builds pinned
-  GNU Readline 8.3 patchlevel 3 as a static prefix-local dependency using the
-  same `PREFIX`, `LUA_CC`, `AR`, and `RANLIB`;
-  `READLINE_MODE=system|bundled` can override automatic selection. Its
-  checksum-bound repair path builds and validates a sibling stage before
-  replacing an existing private installation. Under parallel Make, Lua source
-  extraction precedes the Readline-selection file that lives in that tree;
-  fallback compilation may overlap, but upstream Readline installation into
-  the private stage is serialized because its archive replacement rules race.
-  `READLINE_HOST` supplies an optional Autoconf cross-target triplet; the
-  `READLINE_*FLAGS` inputs are
-  recorded alongside the native tools. Its configuration stamp cleans Lua
-  objects whenever `PREFIX`, `LUA_PLATFORM`, `LUA_CC`, a native-build input,
-  or the selected Readline provider changes.
+  for Lua's compiler. The caller supplies system Readline development files;
+  Titan has no Readline provisioning or selection layer. The fork's own install
+  target copies Lua's matching internal sources and headers. Clean Lua objects
+  and remove or replace the installed program before changing native inputs.
 - **Lua deps and rock installation**: `$PREFIX/bin/luarocks make
-  titan-0.6.0-1.rockspec` installs lpeglabel, inspect, argparse, luafilesystem,
-  then deploys the compiler/runtime SDK and the combined standard library. The
+  titan-0.6.0-1.rockspec` installs lpeglabel, inspect, argparse, luafilesystem
+  (plus luv for Windows compiler subprocesses), then deploys the compiler/runtime SDK and the combined standard library. The
   rockspec keeps `build_target = "titan"`, disables LuaRocks' separate Make
   install pass, derives `ROCKS_TREE` from `$(SCRIPTS_DIR)/..`, and does not own
   a manifest C module named `titan`. `make titan` builds `libtitan.a`, the
@@ -382,19 +383,17 @@ or give concurrent builds separate source copies. See
   `lplprint.o`, `lpltree.o`, and `lplvm.o`. It is standard-provider payload,
   not a runtime-SDK archive: neither it nor its private headers are installed.
 
-  SDK staging atomically places the bootstrap at
-  `$ROCKS_TREE/lib/titan/0.6/titan.so` only when the path is absent. It
-  validates and preserves an existing usable bootstrap or full image, and
-  refuses to clobber an incompatible file; a repeated build must never shrink
-  a full image back to bootstrap form. After LuaRocks deploys the compiler, the
+  SDK staging copies the bootstrap to
+  `$ROCKS_TREE/lib/titan/0.6/titan.so` only when the path is absent and preserves
+  an existing image. After LuaRocks deploys the compiler, the
   source-only `post_install` hook builds the shared per-module Make object DAG
   using the just-installed `titanc --source-first --incremental -c`, then
-  invokes `titanc --source-first --incremental` with all twenty-two roots and
+  invokes `titanc --source-first --incremental` with all twenty-three roots and
   a shared `-X` payload beginning with `ltitanlib.o` followed
   by the private namespaced LPegLabel archive. The
   standard sources are
   `titan/coroutine.titan`, the explicit eight-file `UV_TITAN_SOURCES` folder
-  ensemble, `titan/{async,timer,io,fs,net,ssl,url,os}.titan`, the explicit
+  ensemble, `titan/{async,timer,io,fs,net,ssl,url,os,path}.titan`, the explicit
   `titan/http/` and `titan/websocket/` folder ensembles, and the explicit
   `titan/peg/`, `titan/string/`, `titan/sqlite3/`, and `titan/json/` folder ensembles, plus
   `titan/{math,lua,iteration,gc,test,reflect}.titan`. Each logical
@@ -413,27 +412,14 @@ or give concurrent builds separate source copies. See
   The hook delegates to `install-stdlib`, retaining checkout objects, providers,
   shims, and completion state for a no-op subsequent `make stdlib`. Both select
   the installed compiler/SDK by default; `STDLIB_USE_INSTALLED_RUNTIME=0`
-  explicitly selects checkout compiler/runtime. The publisher validates twenty-three
-  `luaopen_*` entries and all twenty-two logical protocols, requires exactly twenty-two
-  embedded archive keys, and compares embedded ABI/types with both the staged
-  DSO and a fresh-process archive-backed validation image before checking the
-  twenty-two generated shims, exact staged `titan/test.titan` compiler source,
-  and macOS dSYM. It then runs the source-only
-  `scripts/stdlib_installer.lua` under the same effective `CC`, `AR`, `RANLIB`,
-  `TITAN_EXTRA_*`, `TITAN_ROCKS_ROOT`, and runtime-prebuilt environment for
-  recoverable publication. The script is not part of the installed compiler
-  modules. It prepares private destination copies and recognizes bootstrap-only
-  and the current complete pair as
-  bounded predecessor states; backs up the
-  exact current DSO/archive/dSYM/shims/compiler source and stale active-layout
-  copies; commits shims and compiler source, then dSYM and `titan.a`, and
-  renames `titan.so` last. Caught errors and
-  injected archive/DSO failpoints restore the exact supported predecessor. This is
-  not crash-, power-loss-, or asynchronous-signal-atomic publication. The
+  explicitly selects checkout compiler/runtime. Installation copies the completed
+  provider pair, all twenty-three shims, exact `titan/test.titan` compiler source,
+  licenses, and optional macOS dSYM. Explicit packaging and dependency-mode tests
+  own provider protocol, metadata, symbol, and layout validation. The
   canonical artifacts are `$ROCKS_TREE/lib/titan/0.6/{titan.so,titan.a}`, the DSO's
   macOS dSYM, the compiler source
   `$ROCKS_TREE/share/titan/0.6/src/titan/test.titan`, and generated
-  `$ROCKS_TREE/share/lua/5.5/titan/{coroutine,uv,async,timer,io,fs,net,ssl,url,http,websocket,os,peg,string,math,lua,iteration,gc,test,reflect,sqlite3,json}.lua`.
+  `$ROCKS_TREE/share/lua/5.5/titan/{coroutine,uv,async,timer,io,fs,net,ssl,url,http,websocket,os,path,peg,string,math,lua,iteration,gc,test,reflect,sqlite3,json}.lua`.
   No symbolic links, hard links, child DSOs, or `lib/lua` compatibility copies
   are used. Earlier Titan installations are not migration sources. These direct
   SDK/stdlib files remain outside the rock manifest and are not removed by
@@ -466,7 +452,7 @@ or give concurrent builds separate source copies. See
   predefined-macro/include-search probes, plus `AR` (default `ar`) and
   `RANLIB` (default `ranlib`) for every generated static provider. All three
   may be configured command strings, are parsed into argv, and must remain the
-  same tools recorded by the prefix's LuaRocks configuration through source
+  same tools supplied to LuaRocks and Make through source
   build, post-install validation, and later consumer builds. The archive
   builder prefers deterministic `ar qDc`/`ranlib -D`, falls back to portable
   `q`/ordinary `ranlib`, and then rescans the regular output and exact ordered
@@ -476,11 +462,10 @@ or give concurrent builds separate source copies. See
   not `uname`, because `CC`/`TITAN_EXTRA_CFLAGS` may select another target; all
   other source, selected-provider, and `-X` objects must match it. Probes use
   the platform's process transport and null device (`/dev/null` or Windows
-  `NUL`) with a deterministic locale. A system Readline development
-  package is optional: when its compile/link probe fails, `make lua` builds the
-  pinned, officially patched source fallback inside `PREFIX`. Bundled native
-  dependencies need CMake for libuv, Perl for OpenSSL, tar, a downloader
-  (`curl` or `wget`), and `sha256sum` or `shasum`.
+  `NUL`) with a deterministic locale. Lua's default Linux/macOS build requires
+  system Readline development files, or an explicit `LUA_PLATFORM` override.
+  Bundled native dependencies need CMake for libuv, Perl for OpenSSL, tar, a
+  downloader (`curl` or `wget`), and `sha256sum` or `shasum`.
 
 ## Commands
 
@@ -511,14 +496,14 @@ TITAN_JOBS=4 make -j4 test                           # supported four-way build/
 luarocks test                                       # test an already current install; PREFIX/ROCKS_TREE are not required when its bin is on PATH
 make rock-test BUSTED_FILTER='parser' TITAN_FILTER='^http[.]tests[.]'  # independent domain filters
 make stdlib                                         # incrementally build stdlib with the installed compiler/SDK
-make install-stdlib                                 # build if needed, validate, and publish stdlib
+make install-stdlib                                 # build if needed, then copy stdlib
 make stdlib-test                                    # complete retained stdlib/runtime category without coverage
 make busted-test BUSTED_FILTER='for loop'           # Busted only
 make titan-stdlib-test TITAN_FILTER='^net[.]tests[.]' # build/run the aggregate native suite
-make titan-stdlib-test-build                        # build all 27 roots once under .titan-tests
+make titan-stdlib-test-build                        # build all 28 roots once under .titan-tests
 make titan-stdlib-test-run TITAN_FILTER='^ssl[.]tests[.]' # reuse that executable
 luarocks make && bash spec/support/ci_test_groups.sh compiler  # complete covered compiler/language group
-make clean                                           # remove generated artifacts; `make distclean` also removes downloaded Lua/Readline/LuaRocks/libbacktrace/libuv/OpenSSL/llhttp trees
+make clean                                           # remove generated artifacts; `make distclean` also removes downloaded LuaRocks/libbacktrace/libuv/OpenSSL/llhttp trees
 
 TITAN_PROBE_CACHE_DISABLE=1 busted                  # full Busted tree — MUST run from repo root (all driver paths are relative)
 TITAN_ROCKS_ROOT="$PREFIX" TITAN_PROBE_CACHE_DISABLE=1 busted --run=checkout spec/parser_spec.lua  # edited compiler, installed SDK
@@ -531,8 +516,9 @@ TITAN_ROCKS_ROOT="$PREFIX" TITAN_PROBE_CACHE_DISABLE=1 busted --run=checkout spe
 ```
 
 `--incremental` loads compiler-produced source metadata from source-adjacent
-objects that are no older than their current source constituents. Make owns
-dependency, header, compiler, SDK, provider, and flag invalidation. Without
+objects that are no older than their current source constituents. Make tracks
+dependency, header, compiler, SDK, and provider timestamps. Callers clean the
+affected outputs when changing flags or native tools. Without
 that option the loader ignores objects. `-c`/`--compile-only` stops after
 object/header generation and always rebuilds every explicit root; with
 `--incremental`, its dependencies can be reused. Both modes support `--test`:
@@ -579,8 +565,7 @@ instead of covering the library integration suite.
 `foreigntypes_spec`, `lexer_spec`, `location_spec`, `parser_spec`,
 `staticmetadata_spec`, `symtab_spec`, `titanc_parallel_spec`, `types_spec`,
 `util_spec`); serial native-build and packaging
-gates also live there (`libuv_build_spec`, `rockspec_spec`,
-`stdlib_installer_spec`). Compiler and
+gates also live there (`libuv_build_spec`, `rockspec_spec`). Compiler and
 language specs are split by layer:
 checker-only specs (run the checker, never generate or execute code) live
 under `spec/checker/`, while compiler end-to-end specs (generate C, compile,
@@ -621,8 +606,7 @@ artifact, external-`--tree`, and mixed-source traceback behavior belongs in
 non-LuaCov stdlib suites.
 Prefix-container public compilation and generated-shim behavior live in
 `spec/coder/multi_module_libraries_spec.lua`; support-loader publication and
-promotion are covered by that compiler suite plus `rockspec_spec.lua` and
-`stdlib_installer_spec.lua`, without a duplicate library boundary spec. Keep the
+promotion are covered by that compiler suite plus `rockspec_spec.lua`, without a duplicate library boundary spec. Keep the
 root-major provider/metadata-claim matrix in `spec/driver_spec.lua`.
 Static-provider coverage is intentionally split: bounded ELF/Mach-O/COFF/archive
 and synthetic universal-container parsing belongs in
@@ -635,7 +619,7 @@ validation belong in `spec/coder/static_compiled_modules_spec.lua`; and paired
 publication, physical composition, rollback, and the real macOS universal
 archive gate belong in `spec/coder/multi_module_libraries_spec.lua`.
 Canonical stdlib pair ownership stays in `spec/libuv_build_spec.lua`,
-`spec/rockspec_spec.lua`, and `spec/stdlib_installer_spec.lua`; production
+and `spec/rockspec_spec.lua`; production
 bundled/system OpenSSL static smokes stay in
 `spec/support/ci_dependency_mode_smoke.sh`.
 
@@ -657,14 +641,14 @@ Helpers pull in luassert explicitly (`require 'luassert'`) because a
 `helpers.verbose = true` (was a per-file `local verbose`) to print `cc`
 command lines and keep generated `.c` files.
 
-Native standard-library behavior lives in 27 module-owned roots under
+Native standard-library behavior lives in 28 module-owned roots under
 `spec/stdlib/titan/`. `TITAN_STDLIB_TEST_ROOTS` in
 `spec/support/stdlib_test_modules.mk` names every root explicitly and is shared
 by Linux, macOS, and native Windows;
 `make titan-stdlib-test-build` builds the explicit test/support object DAG in
 `spec/support/stdlib_test_modules.mk` with `titanc -c --test --incremental`,
 then invokes `titanc --test --incremental --no-uv-bootstrap` from
-`.titan-tests/` to combine all 27 roots into the executable. Every command uses
+`.titan-tests/` to combine all 28 roots into the executable. Every command uses
 the same absolute source tree and shared test-support object. Source-first lookup
 does not expose locals through ordinary imports; the generated runner uses
 `import "titan.test.titan"` for its private protocol. The runner is
@@ -676,11 +660,11 @@ root, `test.tests`, owns the one `.titan-tests/test/tests` executable and its
 synthetic support/runner/entrypoint artifacts. Execute it from the repository root with
 `make titan-stdlib-test-run`, because fixtures rely on that CWD; `make
 titan-stdlib-test` performs both steps. `TITAN_FILTER` adds one run-time Lua
-pattern but still compiles all 27 roots. The separate build/run targets let CI
+pattern but still compiles all 28 roots. The separate build/run targets let CI
 and ASan reuse one executable for several fresh filtered processes without
 reintroducing native groups.
 
-Windows exposes the same leaf targets through `Makefile.windows` with an owned
+Windows exposes the same leaf targets through `Makefile.win` with an owned
 `TITAN_TEST_BUILD_DIR` on local NTFS and a copied validated SDK. Both platform
 runners audit named results, totals, and complete owner presence. Repository
 skips use concrete `platform: `, `capability: `, or `unsupported: ` reasons;
@@ -792,8 +776,10 @@ once under `M`. All contributors share one namespace; top-level `local` is
 module-private, never file-private. An immediate constituent cannot be imported
 as an apparent flat child once source lookup reaches its parent folder, but a
 genuine deeper folder child remains legal. It recovers the Titan
-SDK/rocks-tree root from the first `package.cpath` template ending in
-`/lib/lua/5.5/?.so`; that works because the supported install currently sets
+SDK/rocks-tree root from the first current Titan `package.cpath` template
+ending in `/lib/titan/0.6/?.so` (`?.dll` on Windows), with the ordinary
+`/lib/lua/5.5/?.so` template as a bootstrap fallback. This skips LuaRocks' preceding
+user-tree templates and works because the supported install currently sets
 `ROCKS_TREE == PREFIX`, not because the two owners are inherently identical.
 Compiled-module lookup defaults to `.;<root>/lib/titan/0.6`, with
 `TITAN_PATH_0_6`/`TITAN_PATH` overriding it and `;;` inserting that ordinary
@@ -859,17 +845,17 @@ are `titan/<module>.titan`, while `titan.uv`, `titan.http`, `titan.websocket`, `
 contributors; `titan.peg`, `titan.string`, and `titan.json` instead collect their complete
 public APIs in the canonical main and require every contributor top-level
 declaration to be module-local.
-Clean validation builds twenty-two module object targets and invokes all roots
+Clean validation builds twenty-three module object targets and invokes all roots
 in one incremental final-link process, stages
-`<root>/lib/titan/0.6/{titan.so,titan.a}`, and installs twenty-two generated shims
-below `<root>/share/lua/5.5/titan/`. The archive advertises exactly twenty-two
+`<root>/lib/titan/0.6/{titan.so,titan.a}`, and installs twenty-three generated shims
+below `<root>/share/lua/5.5/titan/`. The archive advertises exactly twenty-three
 logical metadata keys; its metadata-free payload begins with `ltitanlib.o` and
 the private five-member LPegLabel archive, followed by the pinned libuv
 payload, the private llhttp and SQLite archives, and any bundled OpenSSL
 payload used directly by `titan.ssl`. Bundled archives are flattened into
 `titan.a`;
 system OpenSSL dependencies remain final-link inputs. The DSO exposes those
-twenty-two protocols plus bare `luaopen_titan` support, for twenty-three
+twenty-three protocols plus bare `luaopen_titan` support, for twenty-four
 `luaopen_*` entries total. `titan.io`
 owns the standard Interface vocabulary and high-level I/O helpers.
 `import "async"` is parser sugar for `import "titan.async"` (likewise for the other modules under
@@ -930,16 +916,14 @@ artifacts or shims. A standalone retains `foo/bar__entrypoint.c` and emits
 standard shims. Never use `*.a`, `examples/*.a`, or another broad archive/Lua
 glob that can remove user-authored files.
 
-The stdlib configuration/completion stamps own the provider pair as one build:
-they record the archive name, effective `AR`/`RANLIB`,
-embedded-format/coder inputs, full `-X` payload, LPegLabel source/archive
-identity, OpenSSL mode, platform support, and existing
-compiler/source/flag inputs. Every warm `make stdlib` rescans `titan.a` for the
-exact twenty-two logical keys without changing pair mtimes; a missing or corrupt
-archive invalidates completion and rebuilds both forms. CI's
-`ci_stdlib_snapshot.sh` saves and restores the installed pair, runtime archive,
-dSYM, and shims with content/mode/mtime assertions around legacy compiler
-cleanup.
+The stdlib completion marker owns the pair and generated shims as one build.
+Source/import/header, compiler, SDK, and native-object prerequisites drive
+recompilation; missing companions regenerate their owning module or pair. Make
+does not hash configuration or rescan archives on warm ordinary builds. Run
+`make clean-stdlib` before changing tools, flags, profile, or OpenSSL mode, and
+clean corresponding native dependency directories after changing their inputs.
+CI's `ci_stdlib_snapshot.sh` saves and restores the installed pair, runtime
+archive, dSYM, and shims with content/mode/mtime assertions around compiler cleanup.
 Filesystem source cache entries carry `program_output` (`P` flat,
 `P__main` folder); `titanc` and filesystem child compilers must pass it to
 `driver.compile_program`. Keep the optional argument's old dotted-name default
@@ -1175,7 +1159,7 @@ ordinary Titan alias; parentheses do not change its category.
 
 Interfaces remain type-only, nonempty declarations with ordered fields and
 bodyless methods. Short standard imports (`coroutine`, `uv`, `async`, `timer`,
-`io`, `fs`, `net`, `ssl`, `url`, `http`, `websocket`, `os`, `peg`, `string`, `test`, `math`,
+`io`, `fs`, `net`, `ssl`, `url`, `http`, `websocket`, `os`, `path`, `peg`, `string`, `test`, `math`,
 `lua`, `iteration`, `gc`, `reflect`, `sqlite3`, and `json`) normalize to their
 ordinary qualified `titan.*` module names before resolution.
 
@@ -1504,8 +1488,8 @@ substitution, recursive; error on missing keys). Key facts:
   rebuild or start from a fresh installation when the ABI changes. Do not add
   cross-ABI migration, conflicting-file reconciliation, historical-layout
   cleanup, or compatibility machinery unless a task explicitly requires that
-  particular transition. This does not weaken same-ABI validation and
-  recoverable publication of the current canonical artifacts.
+  particular transition. Explicit packaging and compiler tests retain same-ABI
+  validation; ordinary standard-library installation copies its known outputs.
 - Each Titan function has **three entry roles**: a raw native-convention entry
   (`RETTYPE f(lua_State *L, Udata *_mod, CClosure *_fn, params..., input-vararg
   pair, out-params for returns 2..n, flexible-output pair)`; the input and
@@ -1567,7 +1551,7 @@ substitution, recursive; error on missing keys). Key facts:
   `_init`,
   `luaopen_*`, registry module `Udata`, initializer, record identities,
   closures, and file-local native wiring. The ABI-2 `titan.so`/`titan.a`
-  pair carries all twenty-two current logical modules, including the
+  pair carries all twenty-three current logical modules, including the
   `titan.io` Interface vocabulary and high-level I/O helpers plus `titan.test`
   `titan.reflect`, `titan.sqlite3`, and `titan.json`.
   The canonical runner-private source is published at
@@ -1657,7 +1641,7 @@ substitution, recursive; error on missing keys). Key facts:
   selected archive once and generates direct calls. Explicit `titanc` roots
   require source identities; incremental mode may supply their declarations
   and code from source-adjacent objects. The stdlib Make DAG builds individual
-  objects, then links all twenty-two roots in one incremental invocation.
+  objects, then links all twenty-three roots in one incremental invocation.
   There is no separate standard-module origin or loader. An import spelling ending in `.titan`
   strips that marker, requires source for the canonical name, and neither
   probes nor falls back to a compiled provider; source resolution without that
@@ -1698,8 +1682,8 @@ substitution, recursive; error on missing keys). Key facts:
   `pin`/`clear`, compiler-only lazy/local `_loadlib`, and shim-facing
   canonical-path lazy/global `_loadlibglobal`. Bare logical module `titan` is
   reserved in library mode, and a physical provider named `titan` must pass
-  fresh-process support-table validation through both the DSO and an
-  archive-backed image before publication.
+  the compiler's support-table validation. Explicit packaging gates exercise
+  both the DSO and an archive-backed image.
 - In `minicoro.h`, sanitizer detection must remain before the public
   `mco_runtime`/`mco_coro` declarations. Gate ASan and TSan bookkeeping fields
   with their matching feature macros so ordinary builds carry no sanitizer

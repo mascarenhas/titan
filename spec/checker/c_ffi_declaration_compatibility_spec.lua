@@ -1,3 +1,4 @@
+local temporary = require "spec.support.temporary"
 local h = require "spec.support.helpers"
 local checker = require "titan-compiler.checker"
 local cdriver = require "c-parser.cdriver"
@@ -10,7 +11,7 @@ local types = require "titan-compiler.types"
 -- the same search rules as a project. No aliases or reconstructed declarations
 -- are needed to establish one module-wide C environment.
 local function with_headers(contents, fn)
-    local directory = os.tmpname()
+    local directory = temporary.name()
     assert(os.remove(directory))
     assert(lfs.mkdir(directory))
     local headers = {}

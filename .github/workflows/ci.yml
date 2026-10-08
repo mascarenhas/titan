@@ -32,10 +32,6 @@ jobs:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
       PREFIX: ${{ github.workspace }}/.lua
       TITAN_PREFIX: ${{ github.workspace }}/.lua
-      # Exercise the immutable/minimal-host path in the regular Linux build.
-      READLINE_MODE: bundled
-      # GNU lists this mirror; the pinned source checksum remains required.
-      READLINE_URL: https://mirror.csclub.uwaterloo.ca/gnu/readline/readline-8.3.tar.gz
       LIBUV_VERSION: "1.53.0"
       # Bump when any CMake option that affects the cached archive changes.
       LIBUV_BUILD_PROFILE: "static-pic-validation-tests-off-v2"
@@ -58,8 +54,7 @@ jobs:
       # Cache only the LuaRocks-managed portion of the standalone prefix. Lua,
       # native SDK archives, and the standard container/shims are rebuilt from
       # this checkout; dependency rocks and their launchers can be reused
-      # safely. The private Readline root is deliberately omitted so this
-      # bundled-provider lane must exercise source verification and staging.
+      # safely. Lua is rebuilt from the current pinned submodule.
       - name: Cache standalone-prefix LuaRocks dependencies
         uses: ubicloud/cache@v4
         with:
@@ -74,9 +69,9 @@ jobs:
             .lua/lib/lua/5.5
             .lua/lib/luarocks
             .lua/share/lua/5.5
-          key: ubuntu-24.04-${{ runner.arch }}-${{ env.TITAN_BUILD_PROFILE }}-prefix-system-tree-host-optimized-v1-abi-${{ env.TITAN_ABI_VERSION }}-rocks-3.13.0-${{ hashFiles('titan-0.6.0-1.rockspec') }}
+          key: ubuntu-24.04-${{ runner.arch }}-${{ env.TITAN_BUILD_PROFILE }}-prefix-stock-luarocks-host-optimized-v2-abi-${{ env.TITAN_ABI_VERSION }}-rocks-3.13.0-${{ hashFiles('titan-0.6.0-1.rockspec') }}
           restore-keys: |
-            ubuntu-24.04-${{ runner.arch }}-${{ env.TITAN_BUILD_PROFILE }}-prefix-system-tree-host-optimized-v1-abi-${{ env.TITAN_ABI_VERSION }}-rocks-3.13.0-
+            ubuntu-24.04-${{ runner.arch }}-${{ env.TITAN_BUILD_PROFILE }}-prefix-stock-luarocks-host-optimized-v2-abi-${{ env.TITAN_ABI_VERSION }}-rocks-3.13.0-
 
       - name: Cache bundled libuv source and static build
         uses: ubicloud/cache@v4
@@ -123,32 +118,14 @@ jobs:
             ubuntu-24.04-${{ runner.arch }}-${{ env.TITAN_BUILD_PROFILE }}-openssl-${{ env.OPENSSL_VERSION }}-${{ env.OPENSSL_SHA256 }}-
 
       - name: Install regular build dependencies
-        run: sudo apt-get update && sudo apt-get install -y cmake curl libssl-dev libtinfo-dev perl pkg-config
+        run: sudo apt-get update && sudo apt-get install -y cmake curl libreadline-dev libssl-dev perl pkg-config
 
       - name: Prepare the standalone prefix
         run: |
-          make lua READLINE_URL="$READLINE_URL"
-          grep -qx 'provider=bundled' \
-            "lua-5.5.1/.titan-readline-8.3-p3.config"
-          test -f \
-            "readline-build/.titan-readline-8.3-p3/lib/libreadline.a"
-          cmp LICENSES/readline-LICENSE \
-            "readline-build/.titan-readline-8.3-p3/share/licenses/COPYING"
-          make luarocks
+          make lua luarocks
 
-      - name: Install bundled Readline
+      - name: Prepare the cached Titan dependency tree
         run: |
-          config="lua-5.5.1/.titan-readline-8.3-p3.config"
-          stamp="lua-5.5.1/.titan-readline-8.3-p3.installed"
-          archive="readline-build/.titan-readline-8.3-p3/lib/libreadline.a"
-          config_mtime="$(stat -c %Y "$config")"
-          stamp_mtime="$(stat -c %Y "$stamp")"
-          archive_mtime="$(stat -c %Y "$archive")"
-          make readline READLINE_URL="$READLINE_URL"
-          test "$(stat -c %Y "$config")" = "$config_mtime"
-          test "$(stat -c %Y "$stamp")" = "$stamp_mtime"
-          test "$(stat -c %Y "$archive")" = "$archive_mtime"
-
           clean_titan_environment() {
             env \
               -u LUA_PATH \
@@ -171,7 +148,7 @@ jobs:
             clean_titan_environment \
               "$PREFIX/bin/luarocks" remove titan --force
           fi
-          for module in coroutine uv async timer io fs net ssl url http websocket os peg string math lua iteration gc test reflect sqlite3 json; do
+          for module in coroutine uv async timer io fs net ssl url http websocket os path peg string math lua iteration gc test reflect sqlite3 json; do
             rm -f "$PREFIX/share/lua/5.5/titan/$module.lua"
           done
           rm -f "$PREFIX/share/titan/0.6/src/titan/test.titan"
@@ -332,6 +309,7 @@ jobs:
       # production smoke owns the complete installed runtime behavior.
       - name: Canary source-rock installation with system OpenSSL
         run: |
+          make clean-stdlib
           OPENSSL_MODE=system TITAN_EXTRA_CFLAGS='-O0 -fno-lto' \
             TITAN_EXTRA_LDFLAGS=-fno-lto \
             luarocks make --force
@@ -482,11 +460,9 @@ jobs:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
       PREFIX: ${{ github.workspace }}/.lua
       TITAN_PREFIX: ${{ github.workspace }}/.lua
-      # Retain one explicit system-provider lane alongside the bundled jobs.
-      READLINE_MODE: system
       # Native dependency caches stop at the pre-LuaRocks boundary. Bump the
       # schema when their build recipes or cached layout change.
-      SANITIZER_NATIVE_CACHE_SCHEMA: "v2"
+      SANITIZER_NATIVE_CACHE_SCHEMA: "v3"
       CC: cc
       AR: ar
       RANLIB: ranlib
@@ -507,10 +483,8 @@ jobs:
       # remain at O0 below. Keep LTO off
       # so saved translation-unit bytes still match the diagnostic shadow.
       SANITIZER_FLAGS: "-O0 -fno-lto -g -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer"
-      # Make's content stamps deliberately revisit native dependencies from
-      # later targets, so their complete configuration must remain in the
-      # environment for the whole job rather than being supplied to only the
-      # first build.
+      # Keep instrumentation in the job environment so recursive Make and
+      # LuaRocks builds receive the same sanitizer flags throughout the job.
       LUA_MYCFLAGS: "-fPIC -O1 -fno-lto -g -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer"
       LUA_MYLDFLAGS: "-O1 -fno-lto -g -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer"
       LUA_MYLIBS: "-O1 -fno-lto -g -fsanitize=address,undefined -fno-sanitize-recover=all -fno-omit-frame-pointer"
@@ -586,7 +560,6 @@ jobs:
               "llhttp=$SANITIZER_LLHTTP_VERSION:$SANITIZER_LLHTTP_SHA256" \
               "sqlite3=$SANITIZER_SQLITE3_VERSION:$SANITIZER_SQLITE3_SHA256" \
               "openssl=$SANITIZER_OPENSSL_VERSION:$SANITIZER_OPENSSL_SHA256" \
-              "readline_mode=$READLINE_MODE" \
               "lua_cflags=$LUA_MYCFLAGS" \
               "lua_ldflags=$LUA_MYLDFLAGS" \
               "lua_libs=$LUA_MYLIBS" \
@@ -650,8 +623,6 @@ jobs:
           # work on a cold cache miss.
           bash spec/support/ci_sanitizer_capture.sh native-dependencies \
             make openssl lua libuv libbacktrace llhttp sqlite3
-          grep -qx 'provider=system' \
-            "lua-5.5.1/.titan-readline-8.3-p3.config"
 
       - name: Validate sanitizer native dependency boundary
         run: |
@@ -666,7 +637,10 @@ jobs:
           test -f openssl-build/libssl.a
           test -f openssl-build/libcrypto.a
           test ! -e "$PREFIX/bin/luarocks"
-          test ! -e "$PREFIX/lib/titan"
+          # Lua creates its versioned search directory during installation.
+          # Only installed Titan artifacts belong beyond this cache boundary.
+          titan_entries="$(find "$PREFIX/lib/titan" ! -type d -print -quit)"
+          test -z "$titan_entries"
           test ! -e "$PREFIX/var/cache/titan-probes"
 
       - name: Save sanitizer native dependencies
@@ -692,7 +666,14 @@ jobs:
           key: ${{ steps.sanitizer-native-cache.outputs.cache-primary-key }}
 
       - name: Install LuaRocks for the sanitizer Lua
-        run: bash spec/support/ci_sanitizer_capture.sh luarocks make luarocks
+        run: |
+          bash spec/support/ci_sanitizer_capture.sh luarocks make luarocks
+          bash spec/support/ci_sanitizer_capture.sh lpeglabel-install \
+            "$PREFIX/bin/luarocks" build lpeglabel 1.6.2-1 \
+            CFLAGS="$COMPILER_DEPS_CFLAGS" LDFLAGS="$COMPILER_DEPS_LDFLAGS"
+          bash spec/support/ci_sanitizer_capture.sh filesystem-install \
+            "$PREFIX/bin/luarocks" build luafilesystem \
+            CFLAGS="$COMPILER_DEPS_CFLAGS" LDFLAGS="$COMPILER_DEPS_LDFLAGS"
 
       - name: Activate the sanitizer Titan prefix
         run: |
@@ -726,7 +707,7 @@ jobs:
           test -f "$TITAN_STDLIB_DIAGNOSTIC_SNAPSHOT/manifest.txt"
           test -f "$snapshot_provider" && test ! -L "$snapshot_provider"
           cmp "$snapshot_provider" "$provider"
-          for module in coroutine uv async timer io fs net ssl url http websocket os peg string math lua iteration gc test reflect sqlite3 json; do
+          for module in coroutine uv async timer io fs net ssl url http websocket os path peg string math lua iteration gc test reflect sqlite3 json; do
             test -f "$PREFIX/share/lua/5.5/titan/$module.lua"
           done
           test -f "$PREFIX/share/titan/0.6/src/titan/test.titan" &&

@@ -12,12 +12,6 @@
 # Retired Lua release archives; Lua source is a tracked submodule.
 /lua-5.*.tar.gz
 
-# GNU Readline source/build used only when host development files are absent
-/readline-*/
-/readline-build/
-/readline-*.tar.gz
-/readline83-*
-
 # local lua install
 /.lua
 /.lua-validation/
@@ -89,6 +83,7 @@
 /titan/http.lua
 /titan/websocket.lua
 /titan/os.lua
+/titan/path.lua
 /titan/peg.lua
 /titan/string.lua
 /titan/math.lua

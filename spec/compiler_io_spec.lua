@@ -1,25 +1,41 @@
+local temporary = require "spec.support.temporary"
 local compiler_io = require "titan-compiler.io"
 local platform = require "titan-compiler.platform"
+local paths = require "titan-compiler.path"
 local lfs = require "lfs"
+local filesystem = require "spec.support.filesystem"
 
 local function remove_tree(path)
-    local attributes = lfs.symlinkattributes(path)
+    local strategy = compiler_io.new_sync()
+    local attributes, err = strategy:lstat(path)
+    assert.is_nil(err, err)
     if not attributes then return end
-    if attributes.mode ~= "directory" then
-        os.remove(path)
+    if attributes.kind ~= "directory" then
+        local followed = attributes.kind == "symlink" and strategy:stat(path)
+        if platform.windows and followed and followed.kind == "directory" then
+            assert(strategy:rmdir(path))
+        else
+            assert(strategy:unlink(path))
+        end
         return
     end
-    for entry in lfs.dir(path) do
-        if entry ~= "." and entry ~= ".." then
-            remove_tree(path .. "/" .. entry)
+    -- Remove links while their targets still exist, so directory links retain
+    -- the Windows rmdir classification throughout fixture cleanup.
+    local ordinary = {}
+    for _, entry in ipairs(assert(strategy:list(path))) do
+        local child = path .. "/" .. entry
+        if assert(strategy:lstat(child)).kind == "symlink" then
+            remove_tree(child)
+        else
+            ordinary[#ordinary + 1] = child
         end
     end
-    lfs.rmdir(path)
+    for _, child in ipairs(ordinary) do remove_tree(child) end
+    assert(strategy:rmdir(path))
 end
 
 local function workspace()
-    local path = assert(os.tmpname()) .. "-compiler-io"
-    os.remove(path)
+    local path = assert(temporary.name("-compiler-io"))
     assert(lfs.mkdir(path))
     return path
 end
@@ -27,21 +43,27 @@ end
 local function with_overrides(target, replacements, body)
     local originals = {}
     for name, replacement in pairs(replacements) do
-        originals[name] = target[name]
+        originals[#originals + 1] = { name, target[name] }
         target[name] = replacement
     end
     local results = table.pack(pcall(body))
-    for name, original in pairs(originals) do
-        target[name] = original
+    for _, original in ipairs(originals) do
+        target[original[1]] = original[2]
     end
     assert.is_true(results[1], results[2])
     return table.unpack(results, 2, results.n)
 end
 
+local function posix_model_it(name, body)
+    it(name, function()
+        return with_overrides(platform, { windows = false }, body)
+    end)
+end
+
 describe("compiler I/O strategy", function()
     local root
 
-    teardown(function()
+    after_each(function()
         if root then remove_tree(root); root = nil end
     end)
 
@@ -107,23 +129,31 @@ describe("compiler I/O strategy", function()
         assert.equal("", assert(strategy:read_file(empty, 0)))
         assert.is_true(strategy:unlink(empty))
 
-        local original_rename = os.rename
-        os.rename = function()
-            return nil, "injected atomic rename failure"
+        local function reject_rename()
+            return nil, "injected rename failure"
         end
-        local called, replaced, replace_err = pcall(
-            strategy.write_file, strategy, source, "replacement")
-        os.rename = original_rename
-        assert.is_true(called, replaced)
-        assert.is_nil(replaced)
-        assert.matches("injected atomic rename failure", replace_err, 1, true)
-        assert.equal(bytes, assert(strategy:read_file(source)))
+        local function check_replacement()
+            local replaced, replace_err = strategy:write_file(source, "replacement")
+            assert.is_nil(replaced)
+            assert.matches("injected rename failure", replace_err, 1, true)
+        end
+        with_overrides(os, { rename = reject_rename }, check_replacement)
+        if platform.windows then
+            assert.is_false(strategy:readable(source))
+            assert.is_true(strategy:write_file(source, bytes))
+        else
+            assert.equal(bytes, assert(strategy:read_file(source)))
+        end
 
         local metadata = assert(strategy:stat(source))
-        assert.same({
-            "device", "inode", "kind", "mode", "modified_nanoseconds",
-            "modified_seconds", "size",
-        }, (function()
+        local expected_keys = {
+            "kind", "mode", "modified_nanoseconds", "modified_seconds", "size",
+        }
+        if not platform.windows then
+            table.insert(expected_keys, 1, "inode")
+            table.insert(expected_keys, 1, "device")
+        end
+        assert.same(expected_keys, (function()
             local keys = {}
             for key in pairs(metadata) do keys[#keys + 1] = key end
             table.sort(keys)
@@ -132,8 +162,13 @@ describe("compiler I/O strategy", function()
         assert.equal("file", metadata.kind)
         assert.equal(#bytes, metadata.size)
         assert.equal(0x8000, metadata.mode & 0xF000)
-        assert.is_number(metadata.device)
-        assert.is_number(metadata.inode)
+        if platform.windows then
+            assert.is_nil(metadata.device)
+            assert.is_nil(metadata.inode)
+        else
+            assert.is_number(metadata.device)
+            assert.is_number(metadata.inode)
+        end
         assert.is_number(metadata.modified_seconds)
         assert.is_number(metadata.modified_nanoseconds)
         assert.is_true(metadata.modified_nanoseconds >= 0)
@@ -142,8 +177,12 @@ describe("compiler I/O strategy", function()
         local hard_link = directory .. "/source-hard-link.bin"
         assert(lfs.link(source, hard_link))
         local hard_link_metadata = assert(strategy:stat(hard_link))
-        assert.equal(metadata.device, hard_link_metadata.device)
-        assert.equal(metadata.inode, hard_link_metadata.inode)
+        assert.equal(bytes, assert(strategy:read_file(hard_link)))
+        assert.equal(metadata.size, hard_link_metadata.size)
+        if not platform.windows then
+            assert.equal(metadata.device, hard_link_metadata.device)
+            assert.equal(metadata.inode, hard_link_metadata.inode)
+        end
         assert.is_true(strategy:unlink(hard_link))
 
         local entries = assert(strategy:list(directory))
@@ -171,18 +210,28 @@ describe("compiler I/O strategy", function()
     end)
 
     it("distinguishes symlinks, dangling targets, and canonical paths", function()
+        local available, message = filesystem.symlink_capability()
+        if not available then pending(message); return end
         root = workspace()
         local strategy = compiler_io.new_sync()
         local target = root .. "/target"
         assert.is_true(strategy:write_file(target, "target bytes"))
         local link = root .. "/link"
-        local linked = strategy:run({ "ln", "-s", target, link })
-        assert.is_true(linked.ok, linked.diagnostic)
+        assert(lfs.link(target, link, true))
 
         assert.equal("file", assert(strategy:stat(link)).kind)
         assert.equal("symlink", assert(strategy:lstat(link)).kind)
-        assert.equal(assert(strategy:realpath(target)),
-            assert(strategy:realpath(link)))
+        if platform.windows then
+            assert.equal(assert(strategy:absolute(target)),
+                assert(strategy:realpath(target)))
+            assert.equal(assert(strategy:absolute(link)),
+                assert(strategy:realpath(link)))
+            assert.not_equal(assert(strategy:realpath(target)),
+                assert(strategy:realpath(link)))
+        else
+            assert.equal(assert(strategy:realpath(target)),
+                assert(strategy:realpath(link)))
+        end
 
         local actual = root .. "/actual"
         local nested = actual .. "/nested"
@@ -191,21 +240,36 @@ describe("compiler I/O strategy", function()
         local sibling = actual .. "/sibling"
         assert.is_true(strategy:write_file(sibling, "sibling bytes"))
         local directory_link = root .. "/directory-link"
-        linked = strategy:run({ "ln", "-s", "actual/nested", directory_link })
-        assert.is_true(linked.ok, linked.diagnostic)
+        assert(lfs.link(nested, directory_link, true))
+        if platform.windows then
+            assert.equal(assert(strategy:absolute(directory_link)),
+                assert(strategy:realpath(directory_link)))
+            assert.not_equal(assert(strategy:realpath(nested)),
+                assert(strategy:realpath(directory_link)))
+            -- Win32 resolves dot-dot before traversing the directory link.
+            sibling = root .. "/sibling"
+            assert.is_true(strategy:write_file(sibling, "lexical sibling bytes"))
+        else
+            assert.equal(assert(strategy:realpath(nested)),
+                assert(strategy:realpath(directory_link)))
+        end
         assert.equal(assert(strategy:realpath(sibling)),
             assert(strategy:realpath(directory_link .. "/../sibling")))
 
         local dangling = root .. "/dangling"
-        linked = strategy:run({ "ln", "-s", root .. "/missing", dangling })
-        assert.is_true(linked.ok, linked.diagnostic)
+        assert(lfs.link(root .. "/missing", dangling, true))
         local followed, followed_err = strategy:stat(dangling)
         assert.is_nil(followed)
         assert.is_nil(followed_err)
         assert.equal("symlink", assert(strategy:lstat(dangling)).kind)
         local canonical, canonical_err = strategy:realpath(dangling)
         assert.is_nil(canonical)
-        assert.matches("does not exist", canonical_err, 1, true)
+        if platform.windows then
+            assert.is_string(canonical_err)
+            assert.is_true(#canonical_err > 0)
+        else
+            assert.matches("does not exist", canonical_err, 1, true)
+        end
     end)
 
     it("captures argv with deterministic locale and normalized status", function()
@@ -223,7 +287,11 @@ describe("compiler I/O strategy", function()
         assert.is_false(success.interrupted)
         assert.equal("C|C|A\0B|diagnostic", success.output)
         assert.equal(success.output, success.diagnostic)
-        assert.matches("2>&1$", success.command)
+        if platform.windows then
+            assert.is_nil(success.command:find("2>&1", 1, true))
+        else
+            assert.matches("2>&1$", success.command)
+        end
 
         local separate = strategy:run({ "sh", "-c", "printf stdout" }, {
             stderr_to_stdout = false,
@@ -247,20 +315,37 @@ describe("compiler I/O strategy", function()
         })
         assert.is_false(missing.started)
         assert.is_false(missing.ok)
-        assert.equal("exit", missing.why)
-        assert.equal(127, missing.status)
-        assert.is_false(missing.interrupted)
+        if platform.windows then
+            assert.is_nil(missing.why)
+            assert.is_nil(missing.status)
+            assert.is_nil(missing.interrupted)
+            assert.is_string(missing.diagnostic)
+        else
+            assert.equal("exit", missing.why)
+            assert.equal(127, missing.status)
+            assert.is_false(missing.interrupted)
+        end
 
-        local signalled = strategy:run({
-            "sh", "-c", "kill -TERM $$",
-        })
+        local signalled = strategy:run(platform.windows and {
+            os.getenv("PREFIX") and
+                platform.join(os.getenv("PREFIX"), "bin/lua.exe") or "lua.exe",
+            "-E", "-e", "os.exit(143)",
+        } or { "sh", "-c", "kill -TERM $$" })
         assert.is_true(signalled.started)
         assert.is_false(signalled.ok)
-        assert.equal("signal", signalled.why)
-        assert.equal(15, signalled.status)
-        assert.equal(15, signalled.signal)
-        assert.equal(143, signalled.shell_status)
-        assert.is_true(signalled.interrupted)
+        if platform.windows then
+            assert.equal("exit", signalled.why)
+            assert.equal(143, signalled.status)
+            assert.is_nil(signalled.signal)
+            assert.is_nil(signalled.shell_status)
+            assert.is_false(signalled.interrupted)
+        else
+            assert.equal("signal", signalled.why)
+            assert.equal(15, signalled.status)
+            assert.equal(15, signalled.signal)
+            assert.equal(143, signalled.shell_status)
+            assert.is_true(signalled.interrupted)
+        end
 
         local invalid = strategy:run({ [1] = "sh", extra = "argument" })
         assert.is_false(invalid.started)
@@ -287,7 +372,12 @@ describe("compiler I/O strategy", function()
         assert.is_true(strategy:mkdir(directory))
         value, err = strategy:unlink(directory)
         assert.is_nil(value)
-        assert.matches("cannot unlink directory", err, 1, true)
+        assert.is_string(err)
+        assert.is_true(#err > 0)
+        assert.equal("directory", assert(strategy:stat(directory)).kind)
+        if not platform.windows then
+            assert.matches("cannot unlink directory", err, 1, true)
+        end
 
         local cases = {
             {
@@ -332,7 +422,7 @@ describe("compiler I/O strategy", function()
         assert.matches("injected denial for cwd", validation_error, 1, true)
     end)
 
-    it("normalizes uncommon metadata and realpath failures", function()
+    posix_model_it("normalizes uncommon metadata and realpath failures", function()
         local strategy = compiler_io.new_sync()
         with_overrides(lfs, {
             attributes = function()
@@ -452,203 +542,197 @@ describe("compiler I/O strategy", function()
     end)
 
     it("normalizes command transport failures", function()
-        local strategy = compiler_io.new_sync()
+        for _, windows in ipairs({ false }) do
+            with_overrides(platform, { windows = windows }, function()
+                local strategy = compiler_io.new_sync()
 
-        with_overrides(io, {
-            popen = function() return nil, "injected spawn failure" end,
-        }, function()
-            local result = strategy:run({ "tool" })
-            assert.is_false(result.started)
-            assert.is_false(result.ok)
-            assert.matches("injected spawn failure", result.diagnostic,
-                1, true)
-        end)
+                with_overrides(io, {
+                    popen = function() return nil, "injected spawn failure" end,
+                }, function()
+                    local result = strategy:run({ "tool" })
+                    assert.is_false(result.started)
+                    assert.is_false(result.ok)
+                    assert.matches("injected spawn failure", result.diagnostic,
+                        1, true)
+                end)
 
-        local read_close_calls = 0
-        with_overrides(io, {
-            popen = function()
-                return {
-                    read = function() error("injected read failure") end,
-                    close = function()
-                        read_close_calls = read_close_calls + 1
-                        return true
+                local read_close_calls = 0
+                with_overrides(io, {
+                    popen = function()
+                        return {
+                            read = function() error("injected read failure") end,
+                            close = function()
+                                read_close_calls = read_close_calls + 1
+                                return true
+                            end,
+                        }
                     end,
-                }
-            end,
-        }, function()
-            local result = strategy:run({ "tool" })
-            assert.is_true(result.started)
-            assert.is_false(result.ok)
-            assert.matches("injected read failure", result.diagnostic,
-                1, true)
-        end)
-        assert.equal(1, read_close_calls)
+                }, function()
+                    local result = strategy:run({ "tool" })
+                    assert.is_true(result.started)
+                    assert.is_false(result.ok)
+                    assert.matches("injected read failure", result.diagnostic,
+                        1, true)
+                end)
+                assert.equal(1, read_close_calls)
 
-        with_overrides(io, {
-            popen = function()
-                return {
-                    read = function() return "partial output" end,
-                    close = function() error("injected wait failure") end,
-                }
-            end,
-        }, function()
-            local result = strategy:run({ "tool" })
-            assert.is_true(result.started)
-            assert.is_false(result.ok)
-            assert.matches("partial output", result.diagnostic, 1, true)
-            assert.matches("injected wait failure", result.diagnostic,
-                1, true)
-        end)
+                with_overrides(io, {
+                    popen = function()
+                        return {
+                            read = function() return "partial output" end,
+                            close = function() error("injected wait failure") end,
+                        }
+                    end,
+                }, function()
+                    local result = strategy:run({ "tool" })
+                    assert.is_true(result.started)
+                    assert.is_false(result.ok)
+                    assert.matches("partial output", result.diagnostic, 1, true)
+                    assert.matches("injected wait failure", result.diagnostic,
+                        1, true)
+                end)
+            end)
+        end
     end)
 end)
 
 -- These host tests exercise dispatch and result contracts. The Windows shell
 -- representation itself is gated separately by the real native argv oracle.
 describe("Windows synchronous compiler I/O", function()
-    it("preserves opaque file IDs and distinguishes missing from query errors", function()
-        local metadata = { kind = "file", mode = 0x8000, size = 4294967419,
-            device = "win32-volume:fffffffffffffffe",
-            inode = "win32-file:ffffffffffffffff0000000000000001",
-            modified_seconds = 1790816523, modified_nanoseconds = 123456700 }
+    it("renders configured worker argv without resolving or changing the executable", function()
+        local command, executable = platform.windows_process_command({
+            "clang", "", "two words", 'quote"inside', [[C:\trailing\]],
+            "%PATH% !PATH! &|<>()^", "日本語 😀",
+        })
+        assert.equal("clang", executable)
+        assert.equal([["clang" "" "two words" "quote\"inside" "C:\trailing\\" "%PATH% !PATH! &|<>()^" "日本語 😀"]], command)
+        local argument = string.rep("x", 9000)
+        assert.equal('"clang.exe" "' .. argument .. '"',
+            platform.windows_process_command({ "clang.exe", argument }))
+        for _, executable_name in ipairs({ "missing.exe", "clang.bat", "clang.cmd" }) do
+            assert.equal(executable_name,
+                select(2, platform.windows_process_command({ executable_name })))
+        end
+    end)
+
+    it("rejects malformed argument arrays before process creation", function()
+        for _, case in ipairs({
+            { false, "nonempty argument array" },
+            { {}, "nonempty argument array" },
+            { { "clang.exe", false }, "must be a string" },
+            { { "clang.exe", "bad\0argument" }, "NUL byte" },
+            { { "clang.exe", extra = "value" }, "dense argument array" },
+        }) do
+            local command, err = platform.windows_process_command(case[1])
+            assert.is_nil(command)
+            assert.matches(case[2], err, 1, true)
+        end
+    end)
+
+    it("uses LuaFileSystem metadata and lexical existing paths on Windows", function()
+        local attributes = { mode = "file", permissions = "rw-rw-rw-",
+            size = 4294967419, dev = 7, ino = 0, modification = 1790816523 }
+        local metadata = { kind = "file", mode = 0x81B6, size = 4294967419,
+            modified_seconds = 1790816523, modified_nanoseconds = 0 }
         local calls = {}
-        with_overrides(platform, { windows = true, native = function(name, path, follow)
-            calls[#calls + 1] = { name, path, follow }
+        local function query(name, path)
+            calls[#calls + 1] = { name, path }
+            if path == "symlink" and name == "lstat" then
+                return { mode = "link", permissions = "---------", size = 0,
+                    modification = attributes.modification }
+            end
             if path == "absent" then return nil, "not found", 2 end
-            if path == "absent-parent/child" then return nil, "not found", 3 end
-            if path == "denied" then return nil, "access denied", 5 end
-            if path == "junction" then return nil, "untrusted mount point", 448 end
-            if name == "_win_realpath" then return [[\\?\C:\owned\file]] end
-            return metadata
-        end }, function()
-            local strategy = compiler_io.new_sync()
-            assert.equal(metadata, strategy:stat("file"))
-            assert.equal(metadata, strategy:lstat("file"))
-            assert.same({ "_win_stat", "file", true }, calls[1])
-            assert.same({ "_win_stat", "file", false }, calls[2])
-            assert.equal([[\\?\C:\owned\file]], strategy:realpath("file"))
-            for _, path in ipairs({ "absent", "absent-parent/child" }) do
-                local attributes, err = strategy:stat(path)
-                assert.is_nil(attributes); assert.is_nil(err)
-            end
-            local attributes, err = strategy:stat("denied")
-            assert.is_nil(attributes); assert.equal("access denied", err)
-            attributes, err = strategy:stat("junction")
-            assert.is_nil(attributes); assert.equal("untrusted mount point", err)
-        end)
-    end)
-
-    it("captures binary output and preserves native exit statuses", function()
-        with_overrides(platform, { windows = true, native = function(name, path)
-            assert.equal("_win_resolve_executable", name)
-            if path == "missing-native-command.exe" then
-                return nil, "executable not found", 2
-            end
-            return "C:/tools/" .. path
-        end }, function()
-            local status = 143
-            with_overrides(io, { popen = function(command, mode)
-                assert.equal("rb", mode)
-                assert.matches('set "LANG=C"&&set "LC_ALL=C"&&', command, 1, true)
-                return {
-                    read = function() return "A\r\nB\0C\26D\255" end,
-                    close = function() return nil, "exit", status end,
-                }
-            end }, function()
+            if path == "absent-parent/child" then return nil, "not found", 2 end
+            if path == "denied" then return nil, "access denied", 13 end
+            return attributes
+        end
+        with_overrides(platform, { windows = true }, function()
+            with_overrides(lfs, {
+                attributes = function(path) return query("stat", path) end,
+                symlinkattributes = function(path, field)
+                    assert.is_string(field)
+                    if path == "absent" then return nil, "No error", 0 end
+                    if path == "denied" then return nil, "stale errno", 2 end
+                    local attributes, err, code = query("lstat", path)
+                    return attributes and attributes[field], err, code
+                end,
+                currentdir = function() return "C:/work" end,
+            }, function()
                 local strategy = compiler_io.new_sync()
-                local result = strategy:run({ "clang.exe", "-c", "file with spaces.c" })
-                assert.is_true(result.started)
-                assert.is_false(result.ok)
-                assert.equal("exit", result.why)
-                assert.equal(143, result.status)
-                assert.is_false(result.interrupted)
-                assert.is_nil(result.signal)
-                assert.is_nil(result.shell_status)
-                assert.equal("A\r\nB\0C\26D\255", result.output)
-
-                for _, code in ipairs({ 1, 126, 127, 9009 }) do
-                    status = code
-                    result = strategy:run({ "clang.exe" })
-                    assert.is_true(result.started)
-                    assert.is_false(result.ok)
-                    assert.equal(code, result.status)
-                    assert.equal("exit", result.why)
-                    assert.is_false(result.interrupted)
+                assert.same(metadata, strategy:stat("file"))
+                assert.same(metadata, strategy:lstat("file"))
+                assert.same({ "stat", "file" }, calls[1])
+                assert.same({ "lstat", "file" }, calls[2])
+                assert.equal("symlink", assert(strategy:lstat("symlink")).kind)
+                assert.equal(paths.normalize("C:/owned/file"),
+                    strategy:realpath([[C:\owned\child\..\file]]))
+                for _, path in ipairs({ "absent", "absent-parent/child" }) do
+                    local absent, err = strategy:stat(path)
+                    assert.is_nil(absent); assert.is_nil(err)
+                    absent, err = strategy:lstat(path)
+                    assert.is_nil(absent); assert.is_nil(err)
+                    local canonical, canonical_err = strategy:realpath(path)
+                    assert.is_nil(canonical)
+                    assert.matches("does not exist", canonical_err, 1, true)
                 end
-
-                status = 9009
-                result = strategy:run({ "missing-native-command.exe" })
-                assert.is_false(result.started)
-                assert.is_false(result.ok)
-                assert.is_nil(result.status)
-                assert.equal("executable not found", result.diagnostic)
+                local absent, err = strategy:stat("denied")
+                assert.is_nil(absent); assert.equal("access denied", err)
+                absent, err = strategy:lstat("denied")
+                assert.is_nil(absent); assert.equal("access denied", err)
             end)
         end)
     end)
 
-    it("rejects unsafe command representations before opening a pipe", function()
-        with_overrides(platform, { windows = true, native = function(name, path)
-            assert.equal("_win_resolve_executable", name)
-            if path == "missing-native-command.exe" then
-                return nil, "executable not found", 2
-            end
-            return "C:/tools/" .. path
-        end }, function()
-            with_overrides(io, { popen = function()
-                error("invalid command reached the shell")
+    it("passes Windows argv and options directly to the process dependency", function()
+        local process = require "titan-compiler.process"
+        local argv = { "clang", "file with spaces.c", 'quote"inside',
+            "%PATH% !PATH!", "line\nbreak", string.rep("x", 9000) }
+        local options = { stderr_to_stdout = false }
+        local expected = { started = true, ok = false, status = 256,
+            why = "exit", interrupted = false, output = "A\r\nB\0C\26D\255" }
+        with_overrides(platform, { windows = true }, function()
+            with_overrides(process, { capture = function(actual, settings)
+                assert.same(argv, actual)
+                assert.equal(options, settings)
+                return expected
             end }, function()
-                local strategy = compiler_io.new_sync()
-                for _, argv in ipairs({
-                    { "clang.exe", "line\nbreak" },
-                    { "clang.exe", "line\rbreak" },
-                    { "clang.exe", "invalid\255UTF-8" },
-                    { "wrapper.cmd", "argument" },
-                    { "wrapper.BAT", "argument" },
-                    { "wrapper.ps1", "argument" },
-                    { "", "argument" },
-                    { "clang.exe", string.rep("x", 8192) },
-                }) do
-                    local result = strategy:run(argv)
-                    assert.is_false(result.started)
-                    assert.is_false(result.ok)
-                    assert.is_string(result.diagnostic)
-                    assert.is_nil(result.command)
-                end
+                assert.equal(expected, compiler_io.new_sync():run(argv, options))
             end)
         end)
     end)
 
-    it("reserves beside the destination and preserves it on replacement failure", function()
+    it("reserves beside the destination and cleans up a failed replacement", function()
         local root = workspace()
         local path = root .. "/existing.bin"
-        local temporary = root .. "/reserved.tmp"
+        local temporary_directory = root .. "/temporary"
+        assert(lfs.mkdir(temporary_directory))
+        local temporary_path = temporary_directory .. "/reserved.tmp"
+        local sibling = paths.join(root, "reserved.tmp")
         local old = assert(io.open(path, "wb"))
         assert(old:write("old contents")); assert(old:close())
         local calls = {}
         local ok, failure = pcall(function()
-            with_overrides(platform, {
-                windows = true,
-                native = function(name, first, second)
-                    calls[#calls + 1] = { name, first, second }
-                    if name == "_win_reserve_sibling" then
-                        assert.equal(path, first)
-                        local file = assert(io.open(temporary, "wb"))
-                        assert(file:close())
-                        return temporary
-                    elseif name == "_win_replace" then
-                        assert.equal(temporary, first)
-                        assert.equal(path, second)
-                        return nil, "replacement denied"
-                    end
-                    error("unexpected native operation " .. name)
-                end,
-            }, function()
+            with_overrides(platform, { windows = true }, function()
                 local strategy = compiler_io.new_sync()
-                local written, err = strategy:write_file(path, "new contents")
-                assert.is_nil(written)
-                assert.equal("replacement denied", err)
-                assert.equal("old contents", assert(strategy:read_file(path)))
-                assert.is_nil(lfs.attributes(temporary))
-                assert.equal(2, #calls)
+                strategy.tmpname = function()
+                    local file = assert(io.open(temporary_path, "wb"))
+                    assert(file:close())
+                    return temporary_path
+                end
+                with_overrides(os, { rename = function(from, to)
+                    calls[#calls + 1] = { from, to }
+                    assert.equal(sibling, from)
+                    assert.equal(path, to)
+                    return nil, "replacement denied"
+                end }, function()
+                    local written, err = strategy:write_file(path, "new contents")
+                    assert.is_nil(written)
+                    assert.equal("replacement denied", err)
+                    assert.is_nil(lfs.attributes(path))
+                    assert.is_nil(lfs.attributes(temporary_path))
+                    assert.is_nil(lfs.attributes(sibling))
+                    assert.same({ { sibling, path } }, calls)
+                end)
             end)
         end)
         remove_tree(root)

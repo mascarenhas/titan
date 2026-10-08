@@ -240,6 +240,6 @@ Removing logical modules from an existing Windows provider does not retire old
 shims automatically; use a fresh output directory for that change.
 
 These are experimental compiler and runtime foundations, not a complete
-Windows distribution. Windows error traces currently preserve Lua frames and
-raw native addresses; native Titan source-line attribution remains unavailable.
-Unix loader behavior and source attribution are unchanged.
+Windows distribution. Windows error traces use libbacktrace to interleave Lua frames with native
+Titan filenames, lines, and function names from the generated DWARF debug
+information, using the same trace contract as Linux and macOS.

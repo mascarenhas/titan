@@ -293,18 +293,18 @@ local function run_upgrade_server(first_port: integer,
 end
 
 function test_upgrade_server_transfers_binary_excess_and_handler_lifetime(_: test.Context)
-  runtime_test.run(function () run_upgrade_server(58500) end)
+  runtime_test.run(function () run_upgrade_server(23500) end)
 end
 
 function test_upgrade_server_accepts_versioned_protocol_lists(context: test.Context)
   context:run("websocket_and_versioned_offer", function (_: test.Context)
     runtime_test.run(function ()
-      run_upgrade_server(59500, "WebSocket, IRC/6.9", "websocket")
+      run_upgrade_server(24500, "WebSocket, IRC/6.9", "websocket")
     end)
   end)
   context:run("versioned_protocol_selection", function (_: test.Context)
     runtime_test.run(function ()
-      run_upgrade_server(59600, "websocket, IRC/6.9", "irc/6.9")
+      run_upgrade_server(24600, "websocket, IRC/6.9", "irc/6.9")
     end)
   end)
 end
@@ -312,7 +312,7 @@ end
 function test_upgrade_server_rejection_does_not_drain_protocol_suffix(_: test.Context)
   runtime_test.run(function ()
     local called = 0
-    local server, port = support.http_listen(58600,
+    local server, port = support.http_listen(23600,
       function (_: http.Request, response: http.Response)
         called = called + 1
         response:set_status(403)
@@ -334,7 +334,7 @@ end
 
 function test_http_header_limit_setting_and_scheme_guard(_: test.Context)
   runtime_test.run(function ()
-    local server, _port = support.http_listen(58700,
+    local server, _port = support.http_listen(23700,
       function (_request: http.Request, _response: http.Response) end)
     defer server:close()
     test.assert(server:header_limit() == 65536)
@@ -356,7 +356,7 @@ function test_http_server_header_limit_counts_raw_leading_lines(context: test.Co
   runtime_test.run(function ()
     local called = 0
     local request_text = "GET / HTTP/1.1\r\nHost: example.test\r\nConnection: close\r\n\r\n"
-    local server, port = support.http_listen(58800,
+    local server, port = support.http_listen(23800,
       function (_request: http.Request, response: http.Response)
         called = called + 1
         response:set_header("Content-Length", "0")
@@ -385,7 +385,7 @@ end
 function test_upgrade_rejects_malformed_body_without_draining(_: test.Context)
   runtime_test.run(function ()
     local completed = false
-    local server, port = support.http_listen(58900,
+    local server, port = support.http_listen(23900,
       function (request: http.Request, response: http.Response)
         local fields = http.headers(nil)
         fields:add("X-Rejection", "checked")
@@ -414,7 +414,7 @@ function test_upgrade_requires_live_pair_and_unsent_output(_: test.Context)
   runtime_test.run(function ()
     local previous: http.Request? = nil
     local checks = 0
-    local server, port = support.http_listen(59000,
+    local server, port = support.http_listen(24000,
       function (request: http.Request, response: http.Response)
         if request.target == "/first" then
           previous = request
@@ -461,7 +461,7 @@ end
 
 function test_ordinary_http_client_rejects_101(_: test.Context)
   runtime_test.run(function ()
-    local server, port = support.raw_listen(59100)
+    local server, port = support.raw_listen(24100)
     defer server:close()
     local peer = async.run<|nil, value|>(function (): nil
       local connection = server:accept()
@@ -529,29 +529,29 @@ end
 
 function test_upgrade_rejects_complete_header_semantics_before_handler(context: test.Context)
   context:run("missing_host", function (_: test.Context)
-    reject_upgrade_semantics(59700, "HTTP/1.1", "")
+    reject_upgrade_semantics(24700, "HTTP/1.1", "")
   end)
   context:run("duplicate_host", function (_: test.Context)
-    reject_upgrade_semantics(59800, "HTTP/1.1",
+    reject_upgrade_semantics(24800, "HTTP/1.1",
       "Host: example.test\r\nHost: example.test\r\n")
   end)
   context:run("invalid_host_authority", function (_: test.Context)
-    reject_upgrade_semantics(59900, "HTTP/1.1", "Host: example.test:oops\r\n")
+    reject_upgrade_semantics(24900, "HTTP/1.1", "Host: example.test:oops\r\n")
   end)
   context:run("http_1_0", function (_: test.Context)
-    reject_upgrade_semantics(60000, "HTTP/1.0", "Host: example.test\r\n")
+    reject_upgrade_semantics(25000, "HTTP/1.0", "Host: example.test\r\n")
   end)
 end
 
 function test_upgrade_expectation_rejects_before_interim_output(context: test.Context)
   context:run("complete_offer", function (_: test.Context)
-    reject_upgrade_expectation(59200, "Connection: Upgrade\r\nUpgrade: echo\r\n")
+    reject_upgrade_expectation(24200, "Connection: Upgrade\r\nUpgrade: echo\r\n")
   end)
   context:run("missing_connection", function (_: test.Context)
-    reject_upgrade_expectation(59300, "Upgrade: echo\r\n")
+    reject_upgrade_expectation(24300, "Upgrade: echo\r\n")
   end)
   context:run("missing_upgrade", function (_: test.Context)
-    reject_upgrade_expectation(59400, "Connection: Upgrade\r\n")
+    reject_upgrade_expectation(24400, "Connection: Upgrade\r\n")
   end)
 end
 
@@ -559,7 +559,7 @@ function test_response_abort_skips_output_and_unread_body_drain(_: test.Context)
   runtime_test.run(function ()
     local finished, wait_finished, close_finished = async.channel<|boolean|>(1)
     defer close_finished()
-    local server, port = support.http_listen(59800,
+    local server, port = support.http_listen(24800,
       function (request: http.Request, response: http.Response)
         response:abort()
         response:abort()
@@ -583,7 +583,7 @@ end
 function test_response_abort_truncates_stream_and_preserves_later_exchange(_: test.Context)
   runtime_test.run(function ()
     local previous: http.Response? = nil
-    local server, port = support.http_listen(59900,
+    local server, port = support.http_listen(24900,
       function (request: http.Request, response: http.Response)
         if request.target == "/first" then
           previous = response
@@ -635,8 +635,8 @@ local function response_abort_pending_body(encrypted: boolean)
         finished(failed)
       end
     local listen = function (): (http.Server, integer)
-      if encrypted then return support.https_listen(60200, handler, 0) end
-      return support.http_listen(60000, handler)
+      if encrypted then return support.https_listen(25200, handler, 0) end
+      return support.http_listen(25000, handler)
     end
     local server, port = listen()
     defer server:close()
@@ -689,7 +689,7 @@ function test_response_pending_headers_are_immutable_and_abortable(_: test.Conte
     defer close_finished()
     local owner: async.Task? = nil
     local release: (function (nil): ())? = nil
-    local server, port = support.http_listen(60100,
+    local server, port = support.http_listen(25100,
       function (_request: http.Request, response: http.Response)
         owner = async.running()
         publish(response)

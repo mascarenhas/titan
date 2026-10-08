@@ -276,8 +276,11 @@ the public shim is unchanged; direct helper calls cover canonical reuse with a
 missing pathname. Neither helper supports passing a plain-C query through a
 `lua_CFunction` call.
 
-The experimental Windows diagnostic backend combines Lua traceback frames with
-`CaptureStackBackTrace` addresses. PE/DWARF source attribution remains unsupported. `scripts/check_windows_runtime_loader.sh` is a
+The Windows diagnostic backend combines Lua traceback frames with native
+libbacktrace frames. Generated DWARF supplies Titan filenames, line numbers,
+and functions for EXE and DLL code; provider loads invalidate the cached module
+snapshot. Builds explicitly disabling libbacktrace retain native addresses as
+a fallback. `spec/support/check_windows_runtime_loader.sh` is a
 native CLANG64/UCRT gate using real controlled Lua headers and its import
 library. It builds separate provider DLLs and checks ABI-before-initialization,
 canonical identity, callback lifetime, Unicode paths, restricted native search,
@@ -291,8 +294,10 @@ EXE. The DLL receives all selected source modules and native payload;
 the EXE links only its entrypoint, manifest resource, embedded Titan runtime,
 and the controlled Lua import library. Neither output links a Titan module
 import library. The SDK runtime archive remains `libtitan.a`; Windows uses the
-matching `lib/liblua-5.5.1.dll.a` and omits Unix `libbacktrace`, `dl`, and `m`.
-Windows links also include the system `bcrypt` import library.
+matching `lib/liblua55.a` plus the separate SDK `lib/libbacktrace.a` for
+PE/COFF source attribution, and omits Unix `dl` and `m`. Windows links select
+static unwind linkage with `-static-libgcc`, avoiding an additional toolchain
+runtime DLL.
 
 `windows_program_paths` derives `bin/<logical-module>.exe` and
 `lib/titan/0.6/<logical/module>.dll`. `--launcher-name` changes only the EXE
@@ -328,9 +333,9 @@ The Unix-rendered entrypoint is unchanged. `llvm-rc` (or the parsed `RC`
 command) embeds an `asInvoker`, UTF-8, long-path-aware manifest; no machine
 setting or global DLL search path is changed.
 
-`scripts/generate_windows_launcher_fixture.lua` emits the actual driver C,
+`spec/support/generate_windows_launcher_fixture.lua` emits the actual driver C,
 `.def`, manifest, and resource text for the native
-`scripts/check_windows_launcher.sh` gate. It verifies exact PE protocol exports,
+`spec/support/check_windows_launcher.sh` gate. It verifies exact PE protocol exports,
 allowed imports, a separate Titan dependency, Unicode arguments and resource
 paths, default/overridden/renamed launchers, bootstrap opt-out, and fresh
 incompatible-provider rejection. This generated-C gate does not establish a

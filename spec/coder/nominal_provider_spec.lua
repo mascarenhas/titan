@@ -1,24 +1,35 @@
 local assert = require "luassert"
-local cdriver = require "c-parser.cdriver"
+local compiler_io = require "titan-compiler.io"
+local driver = require "titan-compiler.driver"
 local lfs = require "lfs"
+local platform = require "titan-compiler.platform"
 local layout = require "titan-compiler.nominallayout"
 local objectmetadata = require "titan-compiler.objectmetadata"
 local staticmetadata = require "titan-compiler.staticmetadata"
 
 local PREFIX = require("spec.support.installed_prefix").active()
-local LUA = PREFIX .. "/bin/lua"
+local LUA = PREFIX .. "/bin/lua" .. (platform.windows and ".exe" or "")
 local REPOSITORY = assert(lfs.currentdir())
+if platform.windows then REPOSITORY = assert(platform.path.normalize(REPOSITORY)) end
 local workspace, source_root
 
 local function run(arguments)
-    local quoted = {}
-    for index, argument in ipairs(arguments) do
-        quoted[index] = assert(cdriver.shell_quote(argument))
-    end
-    local pipe = assert(io.popen(table.concat(quoted, " ") .. " 2>&1", "r"))
-    local output = assert(pipe:read("*a"))
-    local ok = pipe:close()
-    return ok == true, output
+    arguments = { table.unpack(arguments) }
+    if platform.windows and arguments[1] == "env" then arguments[1] = "env.exe" end
+    local result = compiler_io.new_sync():run(arguments)
+    local output = result.output or result.diagnostic or ""
+    if platform.windows then output = output:gsub("\r\n", "\n") end
+    return result.started and result.ok, output
+end
+
+local function run_program(name)
+    local executable = platform.windows and
+        assert(driver.windows_program_paths(name)).executable or "./" .. name
+    return run({ "env", "TITAN_PATH_0_6=" ..
+        (platform.windows and "./lib/titan/0.6;" or "") ..
+        ".;" .. PREFIX .. "/lib/titan/0.6",
+        "PATH=" .. PREFIX .. "/bin" .. (platform.windows and ";" or ":") ..
+            (os.getenv("PATH") or ""), executable })
 end
 
 local function write(path, contents)
@@ -55,7 +66,8 @@ local function compiled(...)
         LUA, "-E", "-e", string.format(
             "package.path = %q .. package.path; package.cpath = %q .. package.cpath",
             REPOSITORY .. "/?.lua;" .. REPOSITORY .. "/?/init.lua;",
-            REPOSITORY .. "/titan-runtime/bootstrap/?.so;"),
+            REPOSITORY .. "/titan-runtime/bootstrap/?" ..
+                (platform.windows and ".dll" or ".so") .. ";"),
         REPOSITORY .. "/titanc", "--tree", source_root,
     }
     for _, argument in ipairs({ ... }) do arguments[#arguments + 1] = argument end
@@ -110,8 +122,9 @@ end
 
 describe("nominal layout provider boundaries", function()
     before_each(function()
-        workspace = os.tmpname()
+        workspace = assert(compiler_io.new_sync():tmpname())
         assert(os.remove(workspace))
+        if platform.windows then workspace = assert(platform.path.normalize(workspace)) end
         assert(lfs.mkdir(workspace))
         source_root = workspace .. "/sources"
         assert(lfs.mkdir(source_root))
@@ -124,6 +137,10 @@ describe("nominal layout provider boundaries", function()
     end)
 
     it("reconstructs a public prefix and erased generic slots from an archive alone", function()
+        if platform.windows then
+            pending("Titan static provider archives are unsupported on Windows")
+            return
+        end
         local name = "nominal_archive_fixture"
         local stem = provider(name)
         compiled(name)
@@ -167,7 +184,7 @@ describe("nominal layout provider boundaries", function()
         local consumer = read(source_root .. "/archive_app.c")
         assert.falsy(consumer:find("nominal_private_native", 1, true))
         assert.falsy(consumer:find("private.h", 1, true))
-        local ok, output = run({ "./archive_app" })
+        local ok, output = run_program("archive_app")
         assert.is_true(ok, output)
     end)
 
@@ -204,7 +221,7 @@ describe("nominal layout provider boundaries", function()
         local consumer = read(source_root .. "/dso_app.c")
         assert.falsy(consumer:find("nominal_private_native", 1, true))
         assert.falsy(consumer:find("private.h", 1, true))
-        local ok, output = run({ "./dso_app" })
+        local ok, output = run_program("dso_app")
         assert.is_true(ok, output)
     end)
 
@@ -239,7 +256,7 @@ describe("nominal layout provider boundaries", function()
         assert.equal("file", lfs.attributes(stem .. ".titan.h", "mode"))
         compiled("--incremental", "incremental_app")
         assert.equal(bytes, read(stem .. ".o"))
-        local ok, result = run({ "./incremental_app" })
+        local ok, result = run_program("incremental_app")
         assert.is_true(ok, result)
     end)
 end)

@@ -1,3 +1,4 @@
+local temporary = require "spec.support.temporary"
 -- End-to-end tests for anonymous functions with lexical closure: generate C,
 -- compile it, and run it. Covers boxed (captured-and-mutated) capture, by-value
 -- capture, both call paths through a closure value, gc-typed captures (the box
@@ -11,7 +12,7 @@ local h = require 'spec.support.helpers'
 local run_coder = h.run_coder
 
 local function with_header(contents, fn)
-    local header = os.tmpname() .. ".h"
+    local header = temporary.name(".h")
     local file = assert(io.open(header, "w"))
     assert(file:write(contents))
     assert(file:close())
@@ -1133,7 +1134,8 @@ describe("closures over foreign-typed boxes (end-to-end)", function()
         }, "foo")
         assert.truthy(ok, err)
         local rok, out = h.call("foo", [[
-            local exists = os.tmpname()
+            local temporary = require "spec.support.temporary"
+            local exists = temporary.name()
             local fd = io.open(exists, 'w'); fd:write('x'); fd:close()
             local missing = exists .. '.nope'
             os.remove(missing)

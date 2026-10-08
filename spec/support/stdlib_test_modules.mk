@@ -8,7 +8,7 @@ TITAN_STDLIB_TEST_ROOTS := $(TITAN_STDLIB_TEST_PROGRAM_ROOT) \
 	coroutine.tests iteration.tests gc.tests lua.tests math.tests peg.tests \
 	string.core_test string.format_pack_test string.regex_test async.tests \
 	uv.task_tests uv.public_tests io.tests fs.tests timer.tests net.tests ssl.tests http.tests websocket.tests \
-	url.tests os.tests os.process_tests uv.runtime_tests reflect.tests sqlite3.tests json.tests
+	url.tests path.tests os.tests os.process_tests uv.runtime_tests reflect.tests sqlite3.tests json.tests
 
 .PHONY: print-stdlib-test-roots
 print-stdlib-test-roots:
@@ -38,6 +38,7 @@ TITAN_TEST_MODULES := async.test_support \
 	os.process_tests \
 	os.test_support \
 	os.tests \
+	path.tests \
 	peg.test_support \
 	peg.tests \
 	reflect.tests \
@@ -168,6 +169,9 @@ TITAN_TEST_SOURCES_os.tests := spec/stdlib/titan/os/tests/tests.titan \
 	spec/stdlib/titan/os/tests/helpers_test.titan \
 	spec/stdlib/titan/os/tests/time_test.titan
 TITAN_TEST_IMPORTS_os.tests := os.test_support support.command
+
+TITAN_TEST_SOURCES_path.tests := spec/stdlib/titan/path/tests.titan
+TITAN_TEST_IMPORTS_path.tests :=
 
 TITAN_TEST_SOURCES_peg.test_support := spec/stdlib/titan/peg/test_support.titan
 TITAN_TEST_IMPORTS_peg.test_support :=

@@ -1,6 +1,9 @@
 #if !defined(_XOPEN_SOURCE)
 #define _XOPEN_SOURCE 700
 #endif
+#if defined(_WIN32) && !defined(_WIN32_WINNT)
+#define _WIN32_WINNT 0x0602
+#endif
 
 #include "lua.h"
 #include "lauxlib.h"
@@ -8,9 +11,6 @@
 #if defined(_WIN32)
 #include "titan.h"
 #include "titan_winloader.h"
-#include "ltitan_winfs.h"
-#include "ltitan_winmeta.h"
-#include "ltitan_wintool.h"
 #else
 #include <dlfcn.h>
 #endif
@@ -306,13 +306,6 @@ static const luaL_Reg titanlib[] = {
   { "_loadlibglobal", lazyglobalload },
 #if defined(_WIN32)
   { "_abivalue", abivalue },
-  { "_win_tmpname", titan_winfs_tmpname },
-  { "_win_reserve_sibling", titan_winfs_reserve_sibling },
-  { "_win_replace", titan_winfs_replace },
-  { "_win_stat", titan_winfs_stat },
-  { "_win_realpath", titan_winfs_realpath },
-  { "_win_abspath", titan_winfs_abspath },
-  { "_win_resolve_executable", titan_winfs_resolve_executable },
 #endif
   { NULL, NULL }
 };

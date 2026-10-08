@@ -1,3 +1,4 @@
+local temporary = require "spec.support.temporary"
 local completion=require 'titan-compiler.completion'
 local driver=require 'titan-compiler.driver'
 local types=require 'titan-compiler.types'
@@ -240,7 +241,7 @@ describe('completion analysis',function()
         assert.truthy(found.hidden);assert.truthy(found.field);assert.truthy(found.new)
     end)
     it('uses the final C namespace and resolves aggregate pointer, owned and macro fields',function()
-        local filename=os.tmpname()..'.h'
+        local filename=temporary.name('.h')
         local file=assert(io.open(filename,'w'))
         file:write([[
             typedef struct Inner { int leaf; } Inner;

@@ -25,6 +25,26 @@ local function copy_file(source, destination)
     return input_ok and output_ok, input_error or output_error
 end
 
+local function same_file_contents(left, right)
+    local input = io.open(left, "rb")
+    if not input then return false end
+    local existing = io.open(right, "rb")
+    if not existing then input:close(); return false end
+    local same = true
+    while true do
+        local bytes, read_error = input:read(65536)
+        local previous, previous_error = existing:read(65536)
+        if read_error or previous_error or bytes ~= previous then
+            same = false
+            break
+        end
+        if not bytes then break end
+    end
+    input:close()
+    existing:close()
+    return same
+end
+
 function publication.publish(entries, fs, options)
     options = options or {}
     local prepared = {}
@@ -50,9 +70,11 @@ function publication.publish(entries, fs, options)
             destinations[key] = true
             local existing = regular(entry.destination, true)
             if entry.source then
+                need(entry.source:gsub("\\", "/"):lower() ~= key,
+                    "publication source aliases destination: " .. entry.destination)
                 local source = regular(entry.source)
-                need(not existing or source.device ~= existing.device or
-                    source.inode ~= existing.inode,
+                need(not existing or source.device == nil or source.inode == nil or
+                    source.device ~= existing.device or source.inode ~= existing.inode,
                     "publication source aliases destination: " .. entry.destination)
             end
             if options.validate_existing then
@@ -70,20 +92,23 @@ function publication.publish(entries, fs, options)
                 else
                     need(copy_file(assert(entry.source), item.stage))
                 end
+                item.unchanged = existing and
+                    same_file_contents(item.stage, item.public)
             end
         end
         -- Copy predecessors without renaming them. Windows can rename a mapped
         -- image, but rejects replacing that image; keep it at the public path
         -- until the replacement itself succeeds.
         for _, item in ipairs(prepared) do
-            if regular(item.public, true) then
+            if not item.unchanged and regular(item.public, true) then
                 item.backup = need(fs.reserve(item.public))
                 need(copy_file(item.public, item.backup))
             end
         end
         -- The caller orders the provider last, after its exact shim/source set.
         for index, item in ipairs(prepared) do
-            if item.stage then
+            if not item.unchanged and item.stage then
+                item.replacement_attempted = true
                 need(fs.replace(item.stage, item.public))
                 item.stage = nil
                 item.committed = true
@@ -91,7 +116,9 @@ function publication.publish(entries, fs, options)
                 need(fs.remove(item.public))
                 item.committed = true
             end
-            if options.after_commit then need(options.after_commit(index, item.public)) end
+            if not item.unchanged and options.after_commit then
+                need(options.after_commit(index, item.public))
+            end
         end
     end)
     local cleanup_errors = {}
@@ -102,7 +129,14 @@ function publication.publish(entries, fs, options)
     if not completed then
         for index = #prepared, 1, -1 do
             local item = prepared[index]
-            if item.committed then
+            local restore = item.committed
+            if not restore and item.backup and item.replacement_attempted then
+                -- Ordinary Windows replacement can delete the destination
+                -- before a failed rename. A mapped image remains present.
+                local existing, _, code = fs.stat(item.public)
+                restore = not existing and (code == 2 or code == 3)
+            end
+            if restore then
                 if item.backup then
                     if record(fs.replace(item.backup, item.public)) then
                         item.backup = nil

@@ -1,10 +1,13 @@
 local assert = require "luassert"
-local cdriver = require "c-parser.cdriver"
 local checker = require "titan-compiler.checker"
 local coder = require "titan-compiler.coder"
+local compiler_io = require "titan-compiler.io"
 local driver = require "titan-compiler.driver"
+local async_stdlib = require "spec.support.async_stdlib"
 local h = require "spec.support.helpers"
+local installed_prefix = require "spec.support.installed_prefix"
 local lfs = require "lfs"
+local platform = require "titan-compiler.platform"
 
 local MODULE = "line_directives"
 local FILENAME = MODULE .. ".titan"
@@ -37,21 +40,17 @@ local function file_exists(path)
     return true
 end
 
-local prefix_lua = os.getenv("PREFIX") and
-    (os.getenv("PREFIX") .. "/bin/lua") or nil
+local PREFIX = installed_prefix.active()
+local prefix_lua = PREFIX .. (platform.windows and "/bin/lua.exe" or "/bin/lua")
 local LUA = prefix_lua and file_exists(prefix_lua) and prefix_lua or "lua"
 local CHECKOUT_FIRST =
     [[package.path = "./?.lua;./?/init.lua;" .. package.path]]
 
 local function run(argv)
-    local quoted = {}
-    for index, argument in ipairs(argv) do
-        quoted[index] = assert(cdriver.shell_quote(argument))
-    end
-    local pipe = assert(io.popen(table.concat(quoted, " ") .. " 2>&1", "r"))
-    local output = pipe:read("*a")
-    local ok, why, status = pipe:close()
-    return ok == true, output, why, status
+    local result = compiler_io.new_sync():run(argv)
+    local output = result.output or result.diagnostic or ""
+    if platform.windows then output = output:gsub("\r\n", "\n") end
+    return result.ok, output, result.why, result.status
 end
 
 local function remove_tree(path)
@@ -69,6 +68,7 @@ local function remove_tree(path)
 end
 
 local function clean_cli_artifacts()
+    os.remove(MODULE .. ".dll")
     os.remove(MODULE .. ".so")
     os.remove(MODULE .. ".a")
     os.remove(MODULE .. ".lua")
@@ -90,10 +90,8 @@ describe("generated C line directives", function()
     end)
 
     it("reads the direct-driver default from TITAN_NO_LINE_DIRECTIVES", function()
-        local probe = [[
-package.path = "./?.lua;./?/init.lua;" .. package.path
-io.write(tostring(require("titan-compiler.driver").EMIT_LINE_DIRECTIVES))
-]]
+        local probe = CHECKOUT_FIRST ..
+            [[; io.write(tostring(require("titan-compiler.driver").EMIT_LINE_DIRECTIVES))]]
         local ok, output, why, status = run({
             "env", "TITAN_NO_LINE_DIRECTIVES=1", LUA, "-e", probe,
         })
@@ -119,15 +117,17 @@ io.write(tostring(require("titan-compiler.driver").EMIT_LINE_DIRECTIVES))
         assert.truthy(output:find("--no-line-directives", 1, true), output)
 
         clean_cli_artifacts()
-        local workspace = os.tmpname()
+        local workspace = assert(compiler_io.new_sync():tmpname())
+        if platform.windows then workspace = assert(platform.path.normalize(workspace)) end
         os.remove(workspace)
         assert.truthy(lfs.mkdir(workspace))
         local source = assert(io.open(workspace .. "/" .. FILENAME, "wb"))
         assert.truthy(source:write(SOURCE))
         assert.truthy(source:close())
 
+        local lua_workspace
         local tested, test_error = xpcall(function()
-            ok, output, why, status = run({
+            local argv = {
                 "env",
                 "CCACHE_DISABLE=1",
                 "TITAN_RUNTIME_PREBUILT=1",
@@ -140,8 +140,16 @@ io.write(tostring(require("titan-compiler.driver").EMIT_LINE_DIRECTIVES))
                 "./titanc",
                 "--no-line-directives",
                 "--tree", workspace,
-                MODULE,
-            })
+            }
+            if platform.windows then
+                table.insert(argv, 2, "TITAN_ROCKS_ROOT=" .. PREFIX)
+            else
+                lua_workspace = async_stdlib.workspace("line-directives")
+                argv[#argv + 1] = "--lua"
+                argv[#argv + 1] = lua_workspace .. "/lua-5.5.1"
+            end
+            argv[#argv + 1] = MODULE
+            ok, output, why, status = run(argv)
             assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
                 tostring(status) .. ")")
             local generated = assert(io.open(
@@ -152,6 +160,7 @@ io.write(tostring(require("titan-compiler.driver").EMIT_LINE_DIRECTIVES))
         end, debug.traceback)
 
         remove_tree(workspace)
+        if lua_workspace then remove_tree(lua_workspace) end
         clean_cli_artifacts()
         if not tested then error(test_error, 0) end
     end)

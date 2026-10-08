@@ -1,11 +1,19 @@
 local assert = require "luassert"
 local cdriver = require "c-parser.cdriver"
+local compiler_io = require "titan-compiler.io"
+local driver = require "titan-compiler.driver"
+local platform = require "titan-compiler.platform"
 local lfs = require "lfs"
+local async_stdlib = require "spec.support.async_stdlib"
 
 local FIXTURE = "spec/fixtures/driver_flags"
 local APPLICATION = FIXTURE .. "/application"
 local INCLUDE = FIXTURE .. "/include path"
 local MODULE = "flagprobe"
+local FORMATTER = "driver_flags_formatter.lua"
+local FORMATTER_LOG = "driver_flags_formatter_inputs.lua"
+local CC = platform.windows and (os.getenv("CC") or "clang.exe") or "cc"
+local FLAG_CC = CC .. " -DTITAN_DRIVER_CC_HONORED=1"
 
 local function file_exists(path)
     local file = io.open(path, "rb")
@@ -15,23 +23,64 @@ local function file_exists(path)
 end
 
 local prefix_lua = os.getenv("PREFIX") and
-    (os.getenv("PREFIX") .. "/bin/lua") or nil
+    (os.getenv("PREFIX") .. (platform.windows and "/bin/lua.exe" or "/bin/lua")) or nil
 local LUA = prefix_lua and file_exists(prefix_lua) and prefix_lua
-    or "lua"
+    or (platform.windows and "lua.exe" or "lua")
 
-local function shell_command(argv)
-    local quoted = {}
-    for i, arg in ipairs(argv) do
-        quoted[i] = assert(cdriver.shell_quote(arg))
+local function run(argv, options)
+    local result = compiler_io.new_sync():run(argv, options)
+    local output = result.output or result.diagnostic or ""
+    if platform.windows then
+        output = output:gsub("\r\n", "\n")
+        -- Compare the argument spelling independently of cmd's caret quoting.
+        output = output:gsub('%^"(.-)%^"', function(word)
+            return assert(cdriver.shell_quote((word:gsub("%^(.)", "%1"))))
+        end)
     end
-    return table.concat(quoted, " ")
+    return result.ok, output, result.why, result.status
 end
 
-local function run(argv)
-    local pipe = assert(io.popen(shell_command(argv) .. " 2>&1", "r"))
-    local output = pipe:read("*a")
-    local ok, why, code = pipe:close()
-    return ok == true, output, why, code
+local function formatter(status)
+    if not platform.windows then return status == 0 and "true" or "sh -c 'exit 23' --" end
+    local file = assert(io.open(FORMATTER, "w"))
+    file:write(([=[
+local path = arg[#arg]
+local input = assert(io.open(path, "rb"))
+local contents = input:read("*a")
+input:close()
+local log = assert(io.open(%q, "ab"))
+log:write(string.format("{ path = %%q, contents = %%q },\n", path, contents))
+log:close()
+os.exit(tonumber(arg[1]))
+]=]):format(FORMATTER_LOG))
+    file:close()
+    return assert(cdriver.shell_quote(LUA)) .. " " .. FORMATTER .. " " .. status
+end
+
+local function formatter_inputs()
+    local file = assert(io.open(FORMATTER_LOG, "rb"))
+    local contents = file:read("*a")
+    file:close()
+    return assert(load("return {\n" .. contents .. "}",
+        "@" .. FORMATTER_LOG, "t", {}))()
+end
+
+local function assert_formatted_header(input)
+    local include_root = lfs.currentdir():gsub("\\", "/") .. "/" .. INCLUDE .. "/"
+    assert.truthy(input.contents:find(
+        '#include "' .. include_root .. 'driver_flags_config.h"',
+        1, true), input.contents)
+    assert.truthy(input.contents:find(
+        '#include "' .. include_root .. 'titan/ffi.h"',
+        1, true), input.contents)
+    assert.falsy(input.contents:find('/' .. MODULE .. '.ffi.h"',
+        1, true), input.contents)
+end
+
+local lua_workspace
+local function fixture_lua_source()
+    lua_workspace = lua_workspace or async_stdlib.workspace("driver-flags")
+    return lua_workspace .. "/lua-5.5.1"
 end
 
 local ENVIRONMENT_KEYS = {
@@ -48,7 +97,7 @@ local ENVIRONMENT_KEYS = {
 
 local function titanc(overrides, ...)
     local environment = {
-        CC = "cc",
+        CC = CC,
         CLANG_FORMAT = "clang-format",
         CCACHE_DISABLE = "1",
         MAKE = "make",
@@ -65,24 +114,47 @@ local function titanc(overrides, ...)
 
     -- These subprocesses exercise source-checkout SDK selection even when
     -- Busted itself uses the installed SDK through its checkout profile.
-    local argv = { "env", "-u", "TITAN_ROCKS_ROOT", "-u", "TITAN_BUILD_PROFILE" }
-    if environment.TITAN_BUILD_PROFILE then
-        table.insert(argv, "TITAN_BUILD_PROFILE=" .. environment.TITAN_BUILD_PROFILE)
-    end
-    for _, name in ipairs(ENVIRONMENT_KEYS) do
-        table.insert(argv, name .. "=" .. environment[name])
+    local argv, options = {}, nil
+    -- Windows owns its SDK in a separate native build tree; the checkout does
+    -- not contain the Unix runtime archive selected by these probes on Unix.
+    if platform.windows then
+        environment.TITAN_BUILD_PROFILE = environment.TITAN_BUILD_PROFILE or false
+        environment.TITAN_ROCKS_ROOT =
+            require("spec.support.installed_prefix").active()
+        options = { env = environment }
+    else
+        argv = { "env", "-u", "TITAN_BUILD_PROFILE" }
+        argv[#argv + 1] = "-u"
+        argv[#argv + 1] = "TITAN_ROCKS_ROOT"
+        if environment.TITAN_BUILD_PROFILE then
+            table.insert(argv, "TITAN_BUILD_PROFILE=" .. environment.TITAN_BUILD_PROFILE)
+        end
+        for _, name in ipairs(ENVIRONMENT_KEYS) do
+            table.insert(argv, name .. "=" .. environment[name])
+        end
     end
     table.insert(argv, LUA)
     table.insert(argv, "-e")
     table.insert(argv,
         [[package.path = "./?.lua;./?/init.lua;" .. package.path]])
     table.insert(argv, "./titanc")
-    for _, arg in ipairs({ ... }) do table.insert(argv, arg) end
-    return run(argv)
+    local arguments = { ... }
+    if not platform.windows then
+        local selected = false
+        for _, argument in ipairs(arguments) do
+            if argument == "--lua" or argument == "-u" then selected = true end
+        end
+        if not selected then
+            table.insert(argv, "--lua")
+            table.insert(argv, fixture_lua_source())
+        end
+    end
+    for _, argument in ipairs(arguments) do table.insert(argv, argument) end
+    return run(argv, options)
 end
 
 local ARTIFACTS = {
-    MODULE .. ".so",
+    MODULE .. (platform.windows and ".dll" or ".so"),
     MODULE .. ".a",
     MODULE .. ".lua",
     APPLICATION .. "/" .. MODULE .. ".c",
@@ -107,6 +179,12 @@ end
 local function clean()
     for _, path in ipairs(ARTIFACTS) do os.remove(path) end
     remove_tree(MODULE .. ".so.dSYM")
+    os.remove(FORMATTER)
+    os.remove(FORMATTER_LOG)
+    if lua_workspace then
+        async_stdlib.cleanup(lua_workspace)
+        lua_workspace = nil
+    end
 end
 
 local function command_lines(output, required)
@@ -123,9 +201,9 @@ describe("Titan driver generic build flags", function()
     setup(function()
         clean()
         local ok, output, why, code = titanc({
-            CC = "env TITAN_DRIVER_CC_SENTINEL=present cc " ..
-                "-DTITAN_DRIVER_CC_HONORED=1",
-            CLANG_FORMAT = "sh -c 'exit 23' --",
+            CC = (platform.windows and "env.exe" or "env") ..
+                " TITAN_DRIVER_CC_SENTINEL=present " .. FLAG_CC,
+            CLANG_FORMAT = formatter(23),
             TITAN_EXTRA_CPPFLAGS = "-iquote '" .. INCLUDE .. "' " ..
                 "-DTITAN_DRIVER_CPP_BRANCH=37",
             TITAN_EXTRA_CFLAGS =
@@ -154,7 +232,12 @@ describe("Titan driver generic build flags", function()
         local cc_prefix =
             "'env' 'TITAN_DRIVER_CC_SENTINEL=present' 'cc' " ..
             "'-DTITAN_DRIVER_CC_HONORED=1'"
-        assert.truthy(verbose_output:find(cc_prefix, 1, true), verbose_output)
+        if platform.windows then
+            assert.truthy(verbose_output:find("'TITAN_DRIVER_CC_SENTINEL=present'", 1, true), verbose_output)
+            assert.truthy(verbose_output:find("'-DTITAN_DRIVER_CC_HONORED=1'", 1, true), verbose_output)
+        else
+            assert.truthy(verbose_output:find(cc_prefix, 1, true), verbose_output)
+        end
 
         local cpp_sequence = "'-iquote' '" .. INCLUDE .. "' " ..
             "'-DTITAN_DRIVER_CPP_BRANCH=37'"
@@ -170,7 +253,7 @@ describe("Titan driver generic build flags", function()
             APPLICATION .. "/" .. MODULE .. ".ffi.h", "rb"))
         local environment = header:read("*a")
         header:close()
-        local include_root = lfs.currentdir() .. "/" .. INCLUDE .. "/"
+        local include_root = lfs.currentdir():gsub("\\", "/") .. "/" .. INCLUDE .. "/"
         assert.truthy(environment:find(
             '#include "' .. include_root .. 'driver_flags_config.h"',
             1, true), environment)
@@ -185,7 +268,7 @@ describe("Titan driver generic build flags", function()
         local compile_lines = command_lines(verbose_output, "'-c'")
         local link_lines = command_lines(verbose_output, "'-shared'")
         assert.is_true(#compile_lines >= 1, verbose_output)
-        assert.equal(2, #link_lines, verbose_output)
+        assert.equal(platform.windows and 1 or 2, #link_lines, verbose_output)
 
         local marked_lines = command_lines(verbose_output, marker)
         assert.is_true(#marked_lines >= 1, verbose_output)
@@ -195,8 +278,11 @@ describe("Titan driver generic build flags", function()
         end
 
         for _, link_line in ipairs(link_lines) do
-            assert.truthy(link_line:find(
-                "'titan-runtime/libtitan.a'", 1, true), link_line)
+            local runtime_archive = platform.windows and
+                (require("spec.support.installed_prefix").active() .. "/lib/titan/" ..
+                    driver.TITAN_LIBRARY_VERSION .. "/libtitan.a") or
+                "titan-runtime/libtitan.a"
+            assert.truthy(link_line:find(assert(cdriver.shell_quote(runtime_archive)), 1, true), link_line)
             assert.falsy(link_line:find(
                 "'titan-runtime/titan.o'", 1, true), link_line)
             assert.falsy(link_line:find(marker, 1, true), link_line)
@@ -231,9 +317,12 @@ describe("Titan driver generic build flags", function()
     end)
 
     it("uses O3 everywhere and native-container LTO by default on Linux", function()
-        local ok, platform = run({ "uname", "-s" })
-        assert.truthy(ok, platform)
-        local linux = platform:match("Linux") ~= nil
+        local linux = false
+        if not platform.windows then
+            local ok, host = run({ "uname", "-s" })
+            assert.truthy(ok, host)
+            linux = host:match("Linux") ~= nil
+        end
         local checked = 0
         for _, line in ipairs(command_lines(verbose_output, "'-O3'")) do
             if line:find("'-c'", 1, true) or line:find("'-shared'", 1, true) then
@@ -242,7 +331,7 @@ describe("Titan driver generic build flags", function()
                 assert.equal(linux, line:find("'-ffat-lto-objects'", 1, true) ~= nil, line)
             end
         end
-        assert.is_true(checked >= 3, verbose_output)
+        assert.is_true(checked >= (platform.windows and 2 or 3), verbose_output)
         for _, line in ipairs(command_lines(verbose_output, "'-shared'")) do
             assert.truthy(line:find("'-O3'", 1, true), line)
         end
@@ -250,7 +339,7 @@ describe("Titan driver generic build flags", function()
 
     it("lets explicit compile and link flags disable optimization and LTO", function()
         local ok, output = titanc({
-            CC = "cc -DTITAN_DRIVER_CC_HONORED=1",
+            CC = FLAG_CC,
             TITAN_EXTRA_CPPFLAGS = "-iquote '" .. INCLUDE .. "' " ..
                 "-DTITAN_DRIVER_CPP_BRANCH=37",
             TITAN_EXTRA_CFLAGS = "-O0 -fno-lto",
@@ -271,13 +360,13 @@ describe("Titan driver generic build flags", function()
                 end
             end
         end
-        assert.is_true(checked >= 3, output)
+        assert.is_true(checked >= (platform.windows and 2 or 3), output)
     end)
 
     it("uses validation defaults for compilation and linking before explicit overrides", function()
         local ok, output = titanc({
             TITAN_BUILD_PROFILE = "validation",
-            CC = "cc -DTITAN_DRIVER_CC_HONORED=1",
+            CC = FLAG_CC,
             TITAN_EXTRA_CPPFLAGS = "-iquote '" .. INCLUDE .. "' " ..
                 "-DTITAN_DRIVER_CPP_BRANCH=37",
             TITAN_EXTRA_CFLAGS = "-O1",
@@ -298,7 +387,7 @@ describe("Titan driver generic build flags", function()
                 end
             end
         end
-        assert.is_true(checked >= 3, output)
+        assert.is_true(checked >= (platform.windows and 2 or 3), output)
         local invalid, diagnostic = titanc({ TITAN_BUILD_PROFILE = "production validation" }, MODULE)
         assert.is_false(invalid)
         assert.matches("TITAN_BUILD_PROFILE must be production or validation", diagnostic, 1, true)
@@ -306,7 +395,7 @@ describe("Titan driver generic build flags", function()
 
     it("preserves an explicitly selected compiler random seed", function()
         local ok, output = titanc({
-            CC = "cc -DTITAN_DRIVER_CC_HONORED=1",
+            CC = FLAG_CC,
             TITAN_EXTRA_CPPFLAGS = "-iquote '" .. INCLUDE .. "' " ..
                 "-DTITAN_DRIVER_CPP_BRANCH=37",
             TITAN_EXTRA_CFLAGS = "-frandom-seed=explicit-seed",
@@ -317,13 +406,16 @@ describe("Titan driver generic build flags", function()
     end)
 
     for _, explicit in ipairs({ false, true }) do
-        local selection = explicit and "selected by --lua" or "selected by default"
+        local selection = explicit and "selected by --lua" or "selected by the SDK fixture"
         it("builds the source runtime against the Lua tree " .. selection,
            function()
-            local lua_source = "lua-5.5.1/src"
+            if platform.windows then
+                pending("Windows uses the installed DLL SDK; this probe selects the Unix checkout runtime Make target")
+                return
+            end
+            local lua_source = fixture_lua_source()
             local arguments = { "-v" }
             if explicit then
-                lua_source = lfs.currentdir() .. "/" .. lua_source
                 arguments[#arguments + 1] = "--lua"
                 arguments[#arguments + 1] = lua_source
             end
@@ -357,8 +449,8 @@ describe("Titan generated-source pretty-printing", function()
 
     local function formatter_failure_args()
         return {
-            CC = "cc -DTITAN_DRIVER_CC_HONORED=1",
-            CLANG_FORMAT = "sh -c 'exit 23' --",
+            CC = FLAG_CC,
+            CLANG_FORMAT = formatter(23),
             TITAN_EXTRA_CPPFLAGS = "-iquote '" .. INCLUDE .. "' " ..
                 "-DTITAN_DRIVER_CPP_BRANCH=37",
         }
@@ -378,20 +470,31 @@ describe("Titan generated-source pretty-printing", function()
     it("uses the configured formatter when pretty-printing is requested",
        function()
         local arguments = formatter_failure_args()
-        arguments.CLANG_FORMAT = "true"
+        arguments.CLANG_FORMAT = formatter(0)
         local ok, output, why, code = titanc(arguments,
             "-v", "--pretty-print", "--tree", APPLICATION, MODULE)
         assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
             tostring(code) .. ")")
-        local format_lines = command_lines(output, "'true' '-i'")
+        local format_lines = command_lines(output, platform.windows and
+            ("'" .. FORMATTER .. "' '0' '-i'") or "'true' '-i'")
         assert.equal(2, #format_lines, output)
-        assert.truthy(format_lines[1]:find(
-            "'--style={BasedOnStyle: LLVM, IndentWidth: 4, " ..
-                "SortIncludes: false}' '--' '" .. APPLICATION .. "/" ..
+        local style = "'--style={BasedOnStyle: LLVM, IndentWidth: 4, " ..
+            "SortIncludes: false}' '--' "
+        if platform.windows then
+            local inputs = formatter_inputs()
+            assert.equal(2, #inputs)
+            assert_formatted_header(inputs[1])
+            assert.equal(APPLICATION .. "/" .. MODULE .. ".c", inputs[2].path)
+            assert.truthy(inputs[2].contents:find(
+                '/' .. MODULE .. '.ffi.h"', 1, true), inputs[2].contents)
+            assert.truthy(format_lines[1]:find(style ..
+                assert(cdriver.shell_quote(inputs[1].path)), 1, true), format_lines[1])
+        else
+            assert.truthy(format_lines[1]:find(style .. "'" .. APPLICATION .. "/" ..
                 MODULE .. ".ffi.h.format.tmp.", 1, true), format_lines[1])
+        end
         assert.truthy(format_lines[2]:find(
-            "'--style={BasedOnStyle: LLVM, IndentWidth: 4, " ..
-                "SortIncludes: false}' '--' '" .. APPLICATION .. "/" ..
+            style .. "'" .. APPLICATION .. "/" ..
                 MODULE .. ".c'", 1, true), format_lines[2])
         assert.truthy(output:find(
             "'-c' '" .. APPLICATION .. "/" .. MODULE .. ".c'", 1, true),
@@ -409,9 +512,18 @@ describe("Titan generated-source pretty-printing", function()
         assert.is_false(file_exists(cfile))
         assert.is_false(file_exists(ofile))
         assert.is_false(file_exists(header))
-        assert.truthy(output:find(
-            "failed to format generated file '" .. header .. ".format.tmp.", 1, true),
-            output)
+        if platform.windows then
+            local inputs = formatter_inputs()
+            assert.equal(1, #inputs)
+            assert_formatted_header(inputs[1])
+            assert.truthy(output:find(
+                "failed to format generated file '" .. inputs[1].path .. "'",
+                1, true), output)
+        else
+            assert.truthy(output:find(
+                "failed to format generated file '" .. header .. ".format.tmp.", 1, true),
+                output)
+        end
         assert.truthy(output:find("exit 23", 1, true), output)
         assert.falsy(output:find("'-c' '" .. cfile .. "'", 1, true),
             output)
@@ -442,7 +554,7 @@ describe("Titan driver malformed build flags", function()
     it("parses CLANG_FORMAT only when pretty-printing is requested", function()
         local malformed = {
             CLANG_FORMAT = "'unterminated",
-            CC = "cc -DTITAN_DRIVER_CC_HONORED=1",
+            CC = FLAG_CC,
             TITAN_EXTRA_CPPFLAGS = "-iquote '" .. INCLUDE .. "' " ..
                 "-DTITAN_DRIVER_CPP_BRANCH=37",
         }

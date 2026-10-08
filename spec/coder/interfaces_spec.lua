@@ -5,17 +5,15 @@ local h = require "spec.support.helpers"
 local coder_interfaces = require "titan-compiler.coder.interfaces"
 local types = require "titan-compiler.types"
 local cdriver = require "c-parser.cdriver"
+local compiler_io = require "titan-compiler.io"
+local platform = require "titan-compiler.platform"
+local driver = require "titan-compiler.driver"
 
 local function run_argv(argv)
-    local words = {}
-    for _, word in ipairs(argv) do
-        words[#words + 1] = assert(cdriver.shell_quote(word))
-    end
-    local pipe = assert(io.popen(
-        table.concat(words, " ") .. " 2>&1"))
-    local output = pipe:read("*a")
-    local ok, why, code = pipe:close()
-    return ok == true, output, why, code
+    local result = compiler_io.new_sync():run(argv)
+    local output = result.output or result.diagnostic or ""
+    if platform.windows then output = output:gsub("\r\n", "\n") end
+    return result.started and result.ok, output, result.why, result.status
 end
 
 local function interface_symbol_fragment(name)
@@ -2148,10 +2146,10 @@ describe("interfaces (end-to-end)", function()
             end
         ]])
 
-            local temporary = assert(os.tmpname())
+            local temporary = assert(compiler_io.new_sync():tmpname())
             assert.truthy(os.remove(temporary))
             local harness = temporary .. ".c"
-            local executable = temporary .. "-interfaces"
+            local executable = temporary .. "-interfaces" .. (platform.windows and ".exe" or "")
             local file = assert(io.open(harness, "wb"))
             assert.truthy(file:write([[
 #include <assert.h>
@@ -2197,21 +2195,29 @@ int main(void) {
             assert.truthy(file:close())
 
             local compiler = assert(cdriver.split_shell_words(
-                os.getenv("CC") or "cc"))
-            for _, argument in ipairs({
+                os.getenv("CC") or (platform.windows and "clang.exe" or "cc")))
+            local prefix = require("spec.support.installed_prefix").active()
+            local arguments = {
                 "--std=c99", "-O0", "-g", "-Wall", "-Wextra",
-                "-I.", "-Ititan-runtime", "-Ilua-5.5.1/src",
+                "-I.", "-Ititan-runtime", "-I" .. prefix .. "/src/lua-5.5.1",
                 harness, "test.o", "titan-runtime/libtitan.a",
                 "libbacktrace/.libs/libbacktrace.a",
-                "lua-5.5.1/src/liblua.a", "-o", executable,
+                prefix .. "/lib/liblua.a", "-o", executable,
                 "-lm", "-pthread",
-            }) do
+            }
+            if platform.windows then
+                arguments = {
+                    "--std=c99", "-O0", "-g", "-Wall", "-Wextra",
+                    "-I" .. prefix .. "/include", "-I" .. prefix .. "/src/lua-5.5.1",
+                    harness, "test.o", prefix .. "/lib/titan/0.6/libtitan.a",
+                    prefix .. "/lib/libbacktrace.a", prefix .. "/lib/liblua55.a",
+                    "-static-libgcc", "-lbcrypt", "-o", executable,
+                }
+            end
+            for _, argument in ipairs(arguments) do
                 compiler[#compiler + 1] = argument
             end
-            local uname = assert(io.popen("uname -s"))
-            local platform = assert(uname:read("*l"))
-            assert.truthy(uname:close())
-            if platform ~= "Darwin" then
+            if not platform.windows and not driver.IS_DARWIN then
                 compiler[#compiler + 1] = "-ldl"
             end
 

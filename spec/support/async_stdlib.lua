@@ -1,11 +1,13 @@
+local temporary = require "spec.support.temporary"
 local lfs = require "lfs"
 local assert = require "luassert"
+local installed_prefix = require "spec.support.installed_prefix"
 
 local M = {}
 local REPO = lfs.currentdir()
 local STANDARD_MODULES = {
     "coroutine", "uv", "async", "timer", "io", "fs", "net", "ssl",
-    "url", "http", "websocket", "os", "peg", "string", "math", "lua", "iteration", "gc",
+    "url", "http", "websocket", "os", "path", "peg", "string", "math", "lua", "iteration", "gc",
     "test", "reflect", "sqlite3", "json",
 }
 
@@ -36,7 +38,7 @@ local function host_lua()
 end
 
 local function fresh_workspace_path(label)
-    local path = os.tmpname() .. "-titan-async-stdlib-" .. label
+    local path = temporary.name("-titan-async-stdlib-" .. label)
     os.remove(path)
     return path
 end
@@ -88,7 +90,7 @@ local function find_standard_layout()
     for _, layout in ipairs(layouts) do
         if valid_production_layout(layout) then return layout end
     end
-    error("async stdlib specs require the combined titan.so and all twenty-two " ..
+    error("async stdlib specs require the combined titan.so and all twenty-three " ..
           "generated titan/*.lua shims; run make stdlib first", 0)
 
 end
@@ -205,6 +207,16 @@ function M.workspace(label)
     local ok, _, output = run("cp -Rp " .. quote(REPO .. "/titan-runtime") ..
         " " .. quote(path .. "/titan-runtime"))
     assert.truthy(ok, output)
+    -- Source-variant compilers own one matching Lua source tree and archive.
+    -- Populate it from the installed SDK rather than checkout build outputs.
+    local prefix = installed_prefix.active()
+    local lua_source = path .. "/lua-5.5.1"
+    ok, _, output = run("cp -Rp " .. quote(prefix .. "/src/lua-5.5.1") ..
+        " " .. quote(lua_source))
+    assert.truthy(ok, output)
+    ok, _, output = run("cp -p " .. quote(prefix .. "/lib/liblua.a") ..
+        " " .. quote(lua_source .. "/liblua.a"))
+    assert.truthy(ok, output)
     return path
 end
 
@@ -227,6 +239,7 @@ function M.private_runtime_make_command(workspace, dry_run)
     local libbacktrace_archive =
         REPO .. "/libbacktrace/.libs/libbacktrace.a"
     local libuv_archive = REPO .. "/libuv-build/libuv.a"
+    local prefix = installed_prefix.active()
     assert.truthy(exists(libbacktrace_archive),
         "run make libbacktrace first")
     assert.truthy(exists(libuv_archive), "run make libuv first")
@@ -236,8 +249,11 @@ function M.private_runtime_make_command(workspace, dry_run)
         dry_run and "--dry-run" or "",
         "--old-file=" .. quote(libbacktrace_archive),
         "--old-file=" .. quote(libuv_archive),
+        "PREFIX=" .. quote(prefix),
         "TITAN_RUNTIME_LUA_SOURCE_PATH=" ..
-            quote(REPO .. "/lua-5.5.1/src"),
+            quote(workspace .. "/lua-5.5.1"),
+        "TITAN_RUNTIME_LUA_LIB=" ..
+            quote(workspace .. "/lua-5.5.1/liblua.a"),
         "LIBBT_DIR=" .. quote(REPO .. "/libbacktrace"),
         "LIBUV_SRC_DIR=" .. quote(REPO .. "/libuv-v" .. version),
         "LIBUV_BUILD_DIR=" .. quote(REPO .. "/libuv-build"),
@@ -269,7 +285,7 @@ function M.compile(workspace, modname, options)
     local lua = host_lua()
     local environment = {
         "env -u LUA_PATH -u LUA_CPATH" ..
-            " -u LUA_PATH_5_5 -u LUA_CPATH_5_5 CCACHE_DISABLE=1",
+            " -u LUA_PATH_5_5 -u LUA_CPATH_5_5 -u TITAN_ROCKS_ROOT CCACHE_DISABLE=1",
         "TITAN_PATH_0_6=" .. quote(layout.library_root),
         "TITAN_PATH=",
     }
@@ -302,6 +318,7 @@ function M.compile(workspace, modname, options)
         quote(lua), quote(REPO .. "/spec/support/async_stdlib_compile.lua"),
         quote(REPO), quote(workspace .. "/src"), quote(modname),
         quote(workspace .. "/titan-runtime"),
+        quote(workspace .. "/lua-5.5.1"),
     }
     for _, object in ipairs(options.extra_objects or {}) do
         command[#command + 1] = quote(object)
@@ -325,7 +342,7 @@ function M.compile_bundle(workspace, roots, options)
 
     local environment = {
         "env -u LUA_PATH -u LUA_CPATH" ..
-            " -u LUA_PATH_5_5 -u LUA_CPATH_5_5 CCACHE_DISABLE=1",
+            " -u LUA_PATH_5_5 -u LUA_CPATH_5_5 -u TITAN_ROCKS_ROOT CCACHE_DISABLE=1",
         "TITAN_PATH_0_6=" .. quote(layout.library_root),
         "TITAN_PATH=",
     }
@@ -361,7 +378,7 @@ function M.compile_bundle(workspace, roots, options)
         quote(REPO), quote(workspace .. "/src"),
         quote(workspace .. "/titan-runtime"),
         "--tree", quote(workspace .. "/src"),
-        "--lua", quote(REPO .. "/lua-5.5.1/src"),
+        "--lua", quote(workspace .. "/lua-5.5.1"),
     }
     for _, root in ipairs(roots) do command[#command + 1] = quote(root) end
     local extra_objects = options.extra_objects or {}

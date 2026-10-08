@@ -235,9 +235,6 @@ local function callback_failure(context: test.Context, payload: value, expected:
     test.assert(#traceback > 0, "callback traceback was lost")
     local trace = traceback
     context:run("symbolic_frame", function (_child: test.Context)
-      if common.is_windows() then
-        test.skip("unsupported: native Windows tracebacks retain raw addresses without Titan symbols")
-      end
       test.assert(strings.find(trace, "callback_failure", 1, true) ~= nil,
                   "callback traceback lost its Titan frame")
     end)

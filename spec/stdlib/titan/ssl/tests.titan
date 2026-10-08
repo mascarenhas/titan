@@ -681,9 +681,6 @@ function test_ssl_supervised_failure_preserves_original_trace(
                 "TLS supervisor replaced the nominal SSL failure")
     test.assert(#original_trace > 0, "TLS supervisor lost the operation traceback")
     context:run("symbolic_frame", function (_context: test.Context)
-      if common.is_windows() then
-        test.skip("unsupported: native Windows tracebacks retain raw addresses without Titan symbols")
-      end
       test.assert(string.find(original_trace, "titan.ssl.handshake_locked", 1) ~= nil,
                   "TLS supervisor replaced the original failing operation trace")
     end)
@@ -733,9 +730,6 @@ function test_ssl_client_adoption_preserves_trust_failure_trace(context: test.Co
       local subtest = "missing_ca_frame"
       if index == 2 then subtest = "bad_ca_frame" end
       context:run(subtest, function (_context: test.Context)
-        if common.is_windows() then
-          test.skip("unsupported: native Windows tracebacks retain raw addresses without Titan symbols")
-        end
         test.assert(string.find(original_trace, expected_frame, 1) ~= nil,
                     "TLS adoption replaced the original trust failure frame")
       end)

@@ -1,3 +1,4 @@
+local temporary = require "spec.support.temporary"
 -- Tests for the hand-written C preprocessor used by the FFI (`foreign
 -- import`). These pin the macro-expansion and conditional-compilation
 -- contract so that refactors of the macro loop detection (and the rest of
@@ -11,12 +12,13 @@
 local cpp = require "c-parser.cpp"
 local c99 = require "c-parser.c99"
 local lfs = require "lfs"
+local platform = require "titan-compiler.platform"
 
 -- Run the preprocessor over `src` (a chunk of C) in isolation -- an empty
 -- define set and no system include paths, so nothing is pulled in from the
 -- host toolchain -- and return the produced output lines joined by a space.
 local function expand(src)
-    local tmp = os.tmpname()
+    local tmp = temporary.name()
     local f = assert(io.open(tmp, "wb"))
     f:write(src)
     f:close()
@@ -48,7 +50,7 @@ end
 -- This keeps the stringification differential focused: directives are
 -- suppressed with -P, and surrounding newlines are not part of the contract.
 local function host_expand(src)
-    local tmp = os.tmpname() .. ".c"
+    local tmp = temporary.name(".c")
     local f = assert(io.open(tmp, "wb"))
     f:write(src)
     f:close()
@@ -76,8 +78,25 @@ local function parse_decls(src)
 end
 
 describe("c preprocessor (cpp)", function()
-    it("removes only standalone dot components from absolute lookup paths",
+    it("uses native spelling for absolute lookup paths",
     function()
+        if platform.windows then
+            -- Windows absolute paths use lexical normalization.
+            assert.equal("C:/work/root/header.h",
+                cpp.absolute_lookup_path("./header.h", "C:/work//root"))
+            assert.equal("C:/sdk/include/api.h",
+                cpp.absolute_lookup_path(
+                    "C:/sdk/link/../include/./api.h", "C:/ignored"))
+            assert.equal("//server/share/api.h",
+                cpp.absolute_lookup_path(
+                    [[\\server\share\\.\api.h]], "C:/ignored"))
+            assert.equal("C:/server/share.h",
+                cpp.absolute_lookup_path("/server/share.h", "C:/ignored"))
+            assert.equal("C:/sdk/include/api.h",
+                cpp.absolute_lookup_path(
+                    "C:/sdk///link/../include/api.h", "C:/ignored"))
+            return
+        end
         assert.equal("/work//root/header.h",
             cpp.absolute_lookup_path("./header.h", "/work//root"))
         assert.equal("/sdk/link/../include/api.h",
@@ -98,7 +117,7 @@ describe("c preprocessor (cpp)", function()
     end)
 
     it("treats include-search observer failure as terminal", function()
-        local root = os.tmpname()
+        local root = temporary.name()
         os.remove(root)
         assert(lfs.mkdir(root))
         local fallback = root .. "/fallback"
@@ -144,10 +163,10 @@ describe("c preprocessor (cpp)", function()
         it("finds headers from " .. (ending == "\n" and "LF" or "CRLF")
             .. " compiler include output without trimming path bytes", function()
             local strategy = require("titan-compiler.io").new_sync()
-            local root = assert(strategy:tmpname())
+            local root = temporary.name()
             assert(strategy:unlink(root))
             -- Ordinary Windows directory names cannot retain a trailing space.
-            local windows = require("titan-compiler.platform").windows
+            local windows = platform.windows
             root = root .. (windows and "-cpp include path" or "-cpp include ")
             assert(lfs.mkdir(root))
             local header = root .. "/discovered.h"
@@ -277,7 +296,7 @@ describe("c preprocessor (cpp)", function()
 
         it("keys forced headers by exact operand spelling and contents",
         function()
-            local root = os.tmpname() .. "-cpp-forced-identity"
+            local root = temporary.name("-cpp-forced-identity")
             os.remove(root)
             assert(lfs.mkdir(root))
             local header = root .. "/forced.h"
@@ -311,7 +330,11 @@ describe("c preprocessor (cpp)", function()
                     equivalent.preprocessor_configuration_key)
 
                 local repeated_flags = {}
-                for _ = 1, 64 do
+                -- Duplicate operands exercise manifest identity. Keep the
+                -- Windows fixture within cmd's command-length limit even
+                -- when the private checkout has a long absolute pathname.
+                local repetitions = platform.windows and 4 or 64
+                for _ = 1, repetitions do
                     repeated_flags[#repeated_flags + 1] = "-include"
                     repeated_flags[#repeated_flags + 1] = header
                 end
@@ -344,6 +367,10 @@ describe("c preprocessor (cpp)", function()
 
         it("normalizes a shell-reported child signal as interruption",
             function()
+                if platform.windows then
+                    pending("POSIX shell signal status is unavailable through native Windows process transport")
+                    return
+                end
                 local result = cpp.capture_command({
                     "/bin/sh", "-c", "kill -TERM $$",
                 })

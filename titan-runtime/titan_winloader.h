@@ -119,6 +119,12 @@ static HMODULE titan_win_load_library(lua_State *L, const char *filename,
     lua_pushvalue(L, top + 3);
     lua_pushlightuserdata(L, library);
     lua_rawset(L, top + 4);
+    /* Clear the shared libbacktrace snapshot only when a new image is mapped.
+    ** Keep this registry operation local: the support-only bootstrap does not
+    ** link the full Titan runtime. Generated openers also invalidate it. */
+    lua_pushliteral(L, TITAN_BT_STATE_KEY);
+    lua_pushnil(L);
+    lua_rawset(L, LUA_REGISTRYINDEX);
     lua_settop(L, top);
     return library;
 failed:

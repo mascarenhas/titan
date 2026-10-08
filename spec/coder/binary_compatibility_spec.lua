@@ -4,6 +4,11 @@
 local h = require "spec.support.helpers"
 local lfs = require "lfs"
 local driver = require "titan-compiler.driver"
+local compiler_io = require "titan-compiler.io"
+local platform = require "titan-compiler.platform"
+local PREFIX = require("spec.support.installed_prefix").active()
+local LUA = PREFIX .. "/bin/lua" .. (platform.windows and ".exe" or "")
+local REPOSITORY = assert(lfs.currentdir())
 
 local generated = {}
 local serial = 0
@@ -12,7 +17,16 @@ local serial = 0
 -- process lifetime. Different cases need different logical/provider names;
 -- replacement within one case keeps exactly the same names and paths.
 local function scoped(text)
+    if platform.windows then text = text:gsub("%.so%f[%A]", ".dll") end
     return (text:gsub("bc180_", "bc180_" .. serial .. "_"))
+end
+
+local function run(arguments)
+    arguments = { table.unpack(arguments) }
+    if platform.windows and arguments[1] == "env" then arguments[1] = "env.exe" end
+    local result = compiler_io.new_sync():run(arguments)
+    assert.is_true(result.started and result.ok, result.output or result.diagnostic)
+    return (result.output or ""):gsub("\r\n", "\n")
 end
 
 local function call(code)
@@ -96,19 +110,11 @@ static lua_State *new_state(void) {
     for _, input in ipairs(driver.installed_link_inputs(paths, driver.IS_DARWIN)) do
         argv[#argv + 1] = input
     end
-    argv[#argv + 1] = "-pthread"
-    argv[#argv + 1] = driver.IS_DARWIN and "-Wl,-export_dynamic" or "-Wl,--export-dynamic"
-    argv[#argv + 1], argv[#argv + 2] = "-o", stem .. ".exe"
-    local function run(arguments)
-        local quoted = {}
-        for index, argument in ipairs(arguments) do
-            quoted[index] = assert(cdriver.shell_quote(argument))
-        end
-        local pipe = assert(io.popen(table.concat(quoted, " ") .. " 2>&1", "r"))
-        local output = assert(pipe:read("*a"))
-        local ok = pipe:close()
-        assert.is_true(ok, output)
+    if not platform.windows then
+        argv[#argv + 1] = "-pthread"
+        argv[#argv + 1] = driver.IS_DARWIN and "-Wl,-export_dynamic" or "-Wl,--export-dynamic"
     end
+    argv[#argv + 1], argv[#argv + 2] = "-o", stem .. ".exe"
     run(argv)
     run({ "./" .. stem .. ".exe" })
     return function() run({ "./" .. stem .. ".exe" }) end
@@ -121,6 +127,8 @@ local function build(modules)
         assert.is_nil(lfs.attributes(module.name .. ".titan"))
         assert.is_nil(lfs.attributes(module.name .. ".a"))
     end
+    -- The shared helper gives Windows compilation a fresh process while
+    -- retaining this caller's installed SDK paths and configured native tools.
     local ok, err = h.build_so_chain(modules)
     assert.truthy(ok, err)
     for _, module in ipairs(modules) do
@@ -166,13 +174,66 @@ describe("selective binary dependency compatibility", function()
     before_each(function() serial = serial + 1 end)
     after_each(function()
         for name in pairs(generated) do
-            for _, suffix in ipairs({ ".c", ".o", ".so", ".a",
+            for _, suffix in ipairs({ ".c", ".o", ".so", ".dll", ".dll.def", ".a",
                     ".ffi.h", ".titan.h", ".so.dSYM", ".exe", ".exe.dSYM" }) do
                 remove_tree(name .. suffix)
             end
         end
         generated = {}
     end)
+
+    if not platform.windows then
+        it("derives the runtime SDK root from Titan's C-path before LuaRocks' user tree", function()
+            run_native_harness([[
+#include <string.h>
+
+static void check_root(const char *cpath, const char *expected_root,
+                       const char *expected_template) {
+    lua_State *L = luaL_newstate();
+    assert(L != NULL);
+    luaL_openlibs(L);
+    lua_getglobal(L, "package");
+    lua_pushstring(L, cpath);
+    lua_setfield(L, -2, "cpath");
+    lua_pop(L, 1);
+
+    int top = lua_gettop(L);
+    titan_init_paths(L);
+    assert(lua_gettop(L) == top);
+    lua_getfield(L, LUA_REGISTRYINDEX, TITAN_ROOT_KEY);
+    assert(lua_type(L, -1) == LUA_TSTRING);
+    assert(strcmp(lua_tostring(L, -1), expected_root) == 0);
+    lua_pop(L, 1);
+    lua_getglobal(L, "package");
+    lua_getfield(L, -1, "cpath");
+    assert(strstr(lua_tostring(L, -1), expected_template) != NULL);
+    lua_pop(L, 2);
+    assert(lua_gettop(L) == top);
+    lua_close(L);
+}
+
+int main(void) {
+    check_root(
+        "/home/dev/.luarocks/lib/lua/5.5/?.so;"
+        "/first prefix/lib/titan/" TITAN_LIBRARY_VERSION "/?.so;"
+        "/second/lib/titan/" TITAN_LIBRARY_VERSION "/?.so;"
+        "/first prefix/lib/lua/5.5/?.so",
+        "/first prefix",
+        "/first prefix/lib/titan/" TITAN_LIBRARY_VERSION "/?.so");
+    check_root(
+        "/old/lib/titan/0.5/?.so;"
+        "/lookalike/lib/titan/" TITAN_LIBRARY_VERSION "/?.so.debug;"
+        "/bootstrap/lib/lua/5.5/?.so;/second/lib/lua/5.5/?.so",
+        "/bootstrap",
+        "/bootstrap/lib/titan/" TITAN_LIBRARY_VERSION "/?.so");
+    check_root("/lib/titan/" TITAN_LIBRARY_VERSION "/?.so;"
+               "/later/lib/lua/5.5/?.so", "/",
+               "/lib/titan/" TITAN_LIBRARY_VERSION "/?.so");
+    return 0;
+}
+]])
+        end)
+    end
 
     it("exposes a Lua-independent ABI value through the canonical provider", function()
         build({ {
@@ -186,7 +247,15 @@ describe("selective binary dependency compatibility", function()
         } })
 
         run_native_harness([[
+#ifdef _WIN32
+#include <windows.h>
+#define RTLD_LAZY 0
+#define RTLD_LOCAL 0
+#define dlopen(path, mode) ((void *)LoadLibraryA(path))
+#define dlsym(image, name) ((void *)GetProcAddress((HMODULE)(image), name))
+#else
 #include <dlfcn.h>
+#endif
 #include <string.h>
 
 typedef const char *(*abi_value_fn)(void);
@@ -645,10 +714,10 @@ int main(void) {
                 return string.format([[
                     local support = require "titan"
                     provider = assert(support._loadlibglobal(%q,
-                        "luaopen_bc180_provider"))()
+                        "luaopen_bc180_provider", "bc180_provider"))()
                     assert(provider.count == %d)
                     consumer = assert(support._loadlibglobal("./bc180_consumer.so",
-                        "luaopen_bc180_consumer"))()
+                        "luaopen_bc180_consumer", "bc180_consumer"))()
                     held = consumer.get_bound(7)
                 ]], path, count)
             end
@@ -1140,17 +1209,37 @@ int main(void) {
         rejects("Item")
     end)
 
-    local function fake_provider(body)
+    local function fake_provider(body, abi_value)
+        assert.equal("string", type(abi_value))
         local file = assert(io.open(scoped("bc180_provider.c"), "w"))
         file:write([[
             typedef struct lua_State lua_State;
             extern const char *lua_pushstring(lua_State *, const char *);
         ]], scoped(body))
+        if platform.windows then
+            -- Native Windows checks the plain-C ABI query before entering Lua
+            -- or looking for compatibility metadata. Keep wrong ABI fixtures
+            -- explicit independently of their authored Lua callbacks.
+            local core = require "titan-compiler.coder.core"
+            file:write("\nconst char *", scoped("bc180_provider_abi_value"),
+                "(void) { return ", core.c_string_literal(abi_value), "; }\n")
+        end
         file:close()
-        local shared = driver.IS_DARWIN and "-shared -undefined dynamic_lookup" or "-shared"
-        local ok = os.execute(table.concat({ driver.CC, "-fPIC", shared,
-            scoped("-o bc180_provider.so bc180_provider.c") }, " "))
-        assert.truthy(ok, "could not compile protocol fixture")
+        local cdriver = require "c-parser.cdriver"
+        local argv = assert(cdriver.split_shell_words(driver.CC))
+        argv[#argv + 1] = "-shared"
+        if platform.windows then
+            argv[#argv + 1] = "-Wl,--export-all-symbols"
+        else
+            argv[#argv + 1] = "-fPIC"
+            if driver.IS_DARWIN then
+                argv[#argv + 1], argv[#argv + 2] = "-undefined", "dynamic_lookup"
+            end
+        end
+        argv[#argv + 1], argv[#argv + 2] = "-o", scoped("bc180_provider.so")
+        argv[#argv + 1] = scoped("bc180_provider.c")
+        if platform.windows then argv[#argv + 1] = PREFIX .. "/lib/liblua55.a" end
+        run(argv)
     end
 
     it("does not consult replacement DSOs for a same-binary source dependency", function()
@@ -1173,7 +1262,7 @@ int main(void) {
             int bc180_provider_abi(lua_State *L) {
                 lua_pushstring(L, "wrong ABI"); return 1;
             }
-        ]])
+        ]], "wrong ABI")
         assert.truthy(read("bc180_consumer.so") == image)
         runs("assert(consumer.run() == 42)")
     end)
@@ -1187,11 +1276,12 @@ int main(void) {
             int bc180_provider_abi(lua_State *L) {
                 lua_pushstring(L, "wrong ABI"); return 1;
             }
-        ]])
+        ]], "wrong ABI")
         local ok, out = call([[
             local ok, err = pcall(require, "bc180_consumer")
             assert(not ok, "wrong ABI loaded")
             assert(err:find("ABI", 1, true), err)
+            assert(err:find("wrong ABI", 1, true), err)
             assert(not err:lower():find("compatib", 1, true), err)
         ]])
         assert.truthy(ok, out)
@@ -1206,7 +1296,7 @@ int main(void) {
             int bc180_provider_abi(lua_State *L) {
                 lua_pushstring(L, "2"); return 1;
             }
-        ]])
+        ]], "2")
         rejects("missing")
     end)
 
@@ -1222,7 +1312,7 @@ int main(void) {
             int bc180_provider_compatibility(lua_State *L) {
                 lua_pushstring(L, "this is not a valid Lua chunk"); return 1;
             }
-        ]])
+        ]], "2")
         rejects("compatib")
     end)
 
@@ -1230,8 +1320,9 @@ int main(void) {
         local workspace
 
         before_each(function()
-            workspace = os.tmpname()
+            workspace = assert(compiler_io.new_sync():tmpname())
             assert(os.remove(workspace))
+            if platform.windows then workspace = assert(platform.path.normalize(workspace)) end
             assert(lfs.mkdir(workspace))
         end)
 
@@ -1243,37 +1334,44 @@ int main(void) {
         it("retains dynamic slots and transitive checks through compile-only and warm final links", function()
             local cdriver = require "c-parser.cdriver"
             local repository = assert(lfs.currentdir())
-            local prefix = os.getenv("TITAN_ROCKS_ROOT")
-            if not prefix or prefix == "" then prefix = os.getenv("PREFIX") end
-            if not prefix or prefix == "" then
-                for template in package.cpath:gmatch("[^;]+") do
-                    prefix = template:match("^(.*)/lib/lua/5[.]5/[?][.]so$")
-                    if prefix then break end
-                end
-            end
-            assert(prefix, "incremental compatibility requires an installed SDK")
+            local prefix = PREFIX
             local function compile(...)
+                local primer = string.format(
+                    "package.path = %q .. package.path; package.cpath = %q .. package.cpath",
+                    repository .. "/?.lua;" .. repository .. "/?/init.lua;",
+                    repository .. "/titan-runtime/bootstrap/?" ..
+                        (platform.windows and ".dll" or ".so") .. ";")
                 local argv = {
                     "env", "TITAN_RUNTIME_PREBUILT=1", "CCACHE_DISABLE=1",
                     "TITAN_PROBE_CACHE_DISABLE=1", "TITAN_ROCKS_ROOT=" .. prefix,
                     "TITAN_EXTRA_CPPFLAGS=", "TITAN_EXTRA_CFLAGS=-O0 -fno-lto",
-                    "TITAN_EXTRA_LDFLAGS=-fno-lto", prefix .. "/bin/lua", "-E", "-e",
-                    string.format("package.path = %q .. package.path; package.cpath = %q .. package.cpath",
-                        repository .. "/?.lua;" .. repository .. "/?/init.lua;",
-                        repository .. "/titan-runtime/bootstrap/?.so;"),
-                    repository .. "/titanc", "--tree", workspace,
+                    "TITAN_EXTRA_LDFLAGS=-fno-lto", LUA, "-E",
                 }
+                if platform.windows then
+                    -- A private file preserves escaped Windows paths through
+                    -- the native command transport before entering titanc.
+                    local bootstrap = assert(platform.join(
+                        workspace, "compiler-bootstrap.lua"))
+                    local script = assert(io.open(bootstrap, "wb"))
+                    assert(script:write(primer, [[
+
+local program = table.remove(arg, 1)
+arg[0] = program
+dofile(program)
+]]))
+                    assert(script:close())
+                    argv[#argv + 1] = bootstrap
+                else
+                    argv[#argv + 1], argv[#argv + 2] = "-e", primer
+                end
+                for _, argument in ipairs({ repository .. "/titanc",
+                        "--tree", workspace }) do
+                    argv[#argv + 1] = argument
+                end
                 for _, argument in ipairs({ ... }) do
                     argv[#argv + 1] = scoped(argument)
                 end
-                local quoted = {}
-                for i, argument in ipairs(argv) do
-                    quoted[i] = assert(cdriver.shell_quote(argument))
-                end
-                local pipe = assert(io.popen(table.concat(quoted, " ") .. " 2>&1", "r"))
-                local output = assert(pipe:read("*a"))
-                local ok = pipe:close()
-                assert.is_true(ok, output)
+                run(argv)
             end
 
             build({

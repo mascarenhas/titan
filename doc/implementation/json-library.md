@@ -227,17 +227,16 @@ parse/schema/numeric errors share byte/line/column formatting.
 ## Publication and validation
 
 JSON joins the existing `titan.so`/`titan.a` pair as one ordinary logical root.
-The explicit manifests now contain 21 module protocols, archive metadata keys,
-and generated shims, with 23 DSO openers including bare `luaopen_titan`. Its
+The explicit manifests contain 23 module protocols, archive metadata keys,
+and generated shims, with 24 DSO openers including bare `luaopen_titan`. Its
 generated shim is `titan/json.lua`; there is no child DSO or independent
-LuaRocks C-module owner. The source-rock hook validates, publishes, and rolls
-back the same complete pair and exact shim inventory.
+LuaRocks C-module owner. The source-rock hook builds and copies the complete
+provider and its generated shims.
 
 Public behavior lives under `spec/stdlib/titan/json/tests/`, as the explicit
-`json.tests` root in the 27-root aggregate, without LuaCov. The existing Titan
+`json.tests` root in the 28-root aggregate, without LuaCov. The existing Titan
 parser spec tests only shorthand normalization. Packaging/native-build specs
-own exact sources, module protocols, metadata fixtures, installed shims, and
-rollback. Lua/provider and static production smokes exercise dynamic decoding,
+own exact sources, module protocols, metadata fixtures, and installed shims. Lua/provider and static production smokes exercise dynamic decoding,
 null preservation, and a reflected record/union constructor composition.
 
 The native suite covers syntax labels and positions, null/presence behavior,

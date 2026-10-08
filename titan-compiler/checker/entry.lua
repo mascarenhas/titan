@@ -1,4 +1,5 @@
 local core = require "titan-compiler.checker.core"
+local platform = require "titan-compiler.platform"
 local _ENV = core
 
 -- Entry point for the typechecker
@@ -39,7 +40,7 @@ function checker.check(modname, ast, subject, filename, loader, options)
     st.target_profile_provider = options.target_profile_provider
     st.probe_service_provider = options.probe_service_provider
     if filename then
-        st.source_dir = filename:match("^(.*)/[^/]*$")
+        st.source_dir = platform.parent(filename)
         if not st.source_dir or st.source_dir == "" then
             st.source_dir = "."
         end

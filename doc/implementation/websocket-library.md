@@ -123,11 +123,10 @@ transport loss remains abnormal. Immediate close skips protocol negotiation.
 
 ## Integration and verification
 
-The module belongs to the canonical 22-module provider, 23 exported
-openers including bare support, and 27-root native test inventory. Unix keeps
-paired providers; Windows remains DLL-only. Current-layout Windows publication
-recognizes only exact prior 21-module and exact current 22-module predecessors,
-with rollback restoring old shims/provider and removing any introduced shim.
+The module belongs to the canonical 23-module provider, 24 exported
+openers including bare support, and 28-root native test inventory. Unix keeps
+paired providers; Windows remains DLL-only. Standard-library installation
+copies the built provider and generated shims.
 No Titan, ABI, SDK or language-server version marker changes are required.
 
 Native WebSocket tests use installed public APIs and independent raw TCP/TLS

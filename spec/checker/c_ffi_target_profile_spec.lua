@@ -1,18 +1,29 @@
+local temporary = require "spec.support.temporary"
 local cdriver = require "c-parser.cdriver"
+local compiler_io = require "titan-compiler.io"
 local lfs = require "lfs"
+local platform = require "titan-compiler.platform"
 
-local function shell_command(argv)
-    local words = {}
-    for index, arg in ipairs(argv) do
-        words[index] = assert(cdriver.shell_quote(arg))
-    end
-    return table.concat(words, " ")
+local function run(argv, cwd)
+    local previous = assert(lfs.currentdir())
+    if cwd then assert(lfs.chdir(cwd)) end
+    local called, result = pcall(function() return compiler_io.new_sync():run(argv) end)
+    if cwd then assert(lfs.chdir(previous)) end
+    assert(called, result)
+    return result.started and result.ok, result.output or result.diagnostic or "",
+        result.why, result.status
+end
+
+local function temporary_header()
+    local path = temporary.name()
+    assert(os.remove(path))
+    return path .. ".h"
 end
 
 local function lua_executable()
     local prefix = os.getenv("PREFIX")
     if prefix then
-        local candidate = prefix .. "/bin/lua"
+        local candidate = prefix .. "/bin/lua" .. (platform.windows and ".exe" or "")
         if lfs.symlinkattributes(candidate, "mode") == "file" then
             return candidate
         end
@@ -21,7 +32,7 @@ local function lua_executable()
        and lfs.symlinkattributes(arg[-1], "mode") == "file" then
         return arg[-1]
     end
-    return "lua"
+    return platform.windows and "lua.exe" or "lua"
 end
 
 local function direct_checker_command(header, mode)
@@ -36,7 +47,7 @@ local function direct_checker_command(header, mode)
         argv[#argv + 1] = directory
     end
     assert(driver.close_resolver_context(context))
-    return shell_command(argv)
+    return argv
 end
 
 local function native_target_profile()
@@ -156,20 +167,16 @@ describe("direct-checker target profiles", function()
 
     it("uses explicit SDK roots outside the checkout without loading the driver",
        function()
-        local header = os.tmpname() .. ".h"
+        local header = temporary_header()
         local file = assert(io.open(header, "w"))
         assert(file:write(
             "#define TITAN_PROFILE_VALUE 0xffffffffU\n"))
         assert(file:close())
 
-        local workdir = os.tmpname()
+        local workdir = temporary.name()
         assert(os.remove(workdir))
         assert(lfs.mkdir(workdir))
-        local command = direct_checker_command(header)
-        local pipe = assert(io.popen("cd " .. assert(cdriver.shell_quote(workdir)) ..
-            " && " .. command .. " 2>&1", "r"))
-        local output = assert(pipe:read("*a"))
-        local ok, why, status = pipe:close()
+        local ok, output, why, status = run(direct_checker_command(header), workdir)
         os.remove(header)
         assert(lfs.rmdir(workdir))
 
@@ -179,7 +186,7 @@ describe("direct-checker target profiles", function()
     end)
 
     it("preserves explicit checker-only C language flags", function()
-        local header = os.tmpname() .. ".h"
+        local header = temporary_header()
         local file = assert(io.open(header, "w"))
         assert(file:write(
             "#define TITAN_PROFILE_VALUE 0xffffffffU\n"))
@@ -187,10 +194,7 @@ describe("direct-checker target profiles", function()
 
         local ok, failure = xpcall(function()
             for _, mode in ipairs({ "string", "false" }) do
-                local command = direct_checker_command(header, mode)
-                local pipe = assert(io.popen(command .. " 2>&1", "r"))
-                local output = assert(pipe:read("*a"))
-                local succeeded, why, status = pipe:close()
+                local succeeded, output, why, status = run(direct_checker_command(header, mode))
                 assert.truthy(succeeded,
                     ("%s (%s %s)"):format(
                         output, tostring(why), tostring(status)))
@@ -206,7 +210,7 @@ describe("direct-checker target profiles", function()
     end)
 
     it("preserves checker- and toolchain-owned I/O strategies", function()
-        local header = os.tmpname() .. ".h"
+        local header = temporary_header()
         local file = assert(io.open(header, "w"))
         assert(file:write(
             "#define TITAN_PROFILE_VALUE 0xffffffffU\n"))
@@ -214,10 +218,7 @@ describe("direct-checker target profiles", function()
 
         local failure
         for _, mode in ipairs({ "io", "toolchain-io" }) do
-            local command = direct_checker_command(header, mode)
-            local pipe = assert(io.popen(command .. " 2>&1", "r"))
-            local output = assert(pipe:read("*a"))
-            local ok, why, status = pipe:close()
+            local ok, output, why, status = run(direct_checker_command(header, mode))
             if not ok then
                 failure = ("%s (%s %s)"):format(
                     output, tostring(why), tostring(status))
@@ -308,7 +309,7 @@ describe("direct-checker target profiles", function()
             toolchain = global,
         })
 
-        local header = os.tmpname() .. ".h"
+        local header = temporary.name(".h")
         local file = assert(io.open(header, "w"))
         assert(file:write([[
             #if TITAN_INJECTED_PROFILE == 2

@@ -6,6 +6,7 @@
 #include <windows.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <wchar.h>
 #include <io.h>
 #include <fcntl.h>
@@ -56,6 +57,52 @@ int wmain(int argc, wchar_t **argv) {
     if (wcscmp(argv[1], L"--exit") == 0) {
         if (argc != 3) return 83;
         return (int)wcstol(argv[2], NULL, 10);
+    }
+    if (wcscmp(argv[1], L"--sleep") == 0) {
+        if (argc != 3) return 89;
+        Sleep((DWORD)wcstoul(argv[2], NULL, 10));
+        return 0;
+    }
+    if (wcscmp(argv[1], L"--wait-file") == 0) {
+        int attempt;
+        if (argc != 3) return 90;
+        for (attempt = 0; attempt < 1000; ++attempt) {
+            if (GetFileAttributesW(argv[2]) != INVALID_FILE_ATTRIBUTES) return 0;
+            Sleep(10);
+        }
+        return 91;
+    }
+    if (wcscmp(argv[1], L"--spawn") == 0) {
+        wchar_t self[32768], command[32800];
+        STARTUPINFOW startup;
+        PROCESS_INFORMATION process;
+        DWORD length = GetModuleFileNameW(NULL, self, 32768);
+        if (argc != 2 || length == 0 || length >= 32768) return 92;
+        if (swprintf(command, 32800, L"\"%ls\" --sleep 60000", self) < 0)
+            return 93;
+        memset(&startup, 0, sizeof(startup));
+        startup.cb = sizeof(startup);
+        if (!CreateProcessW(self, command, NULL, NULL, FALSE, 0, NULL,
+                            NULL, &startup, &process)) return 94;
+        CloseHandle(process.hThread);
+        CloseHandle(process.hProcess);
+        if (printf("%lu\n", (unsigned long)process.dwProcessId) < 0 ||
+            fflush(stdout) != 0) return 95;
+        return 0;
+    }
+    if (wcscmp(argv[1], L"--alive") == 0) {
+        HANDLE process;
+        DWORD status;
+        if (argc != 3) return 96;
+        process = OpenProcess(SYNCHRONIZE, FALSE,
+                              (DWORD)wcstoul(argv[2], NULL, 10));
+        if (process == NULL)
+            return GetLastError() == ERROR_INVALID_PARAMETER ? 1 : 97;
+        status = WaitForSingleObject(process, 0);
+        CloseHandle(process);
+        if (status == WAIT_TIMEOUT) return 0;
+        if (status == WAIT_OBJECT_0) return 1;
+        return 98;
     }
     if (wcscmp(argv[1], L"--bytes") == 0) {
         static const unsigned char bytes[] = { 'A', '\r', '\n', 'B', 0,

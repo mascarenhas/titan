@@ -1,9 +1,11 @@
+local temporary = require "spec.support.temporary"
 require "titan-compiler.coder.core"
 local h = require "spec.support.helpers"
 local coder = require "titan-compiler.coder"
 local coder_values = require "titan-compiler.coder.values"
 local driver = require "titan-compiler.driver"
 local types = require "titan-compiler.types"
+local platform = require "titan-compiler.platform"
 
 local function cleanup_module(name)
     name = name or "test"
@@ -561,7 +563,7 @@ describe("closure adjustment wrappers (end-to-end)", function()
 
     it("nil-fills every admitted representation and shared Interface results",
     function()
-        local header = os.tmpname() .. "_closure_adjustment_nil.h"
+        local header = temporary.name("_closure_adjustment_nil.h")
         local file = assert(io.open(header, "wb"))
         assert.truthy(file:write([[
             typedef void *closure_adjustment_pointer;

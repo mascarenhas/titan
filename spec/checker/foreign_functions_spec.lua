@@ -1,3 +1,4 @@
+local temporary = require "spec.support.temporary"
 local h = require "spec.support.helpers"
 local types = require "titan-compiler.types"
 local checker = require "titan-compiler.checker"
@@ -29,7 +30,7 @@ local declarations = [[
 ]]
 
 local function with_header(contents, fn)
-    local header = os.tmpname() .. ".h"
+    local header = temporary.name(".h")
     local file = assert(io.open(header, "w"))
     assert(file:write(contents))
     assert(file:close())
@@ -493,7 +494,7 @@ describe("foreign functions (checker)", function()
 
     it("keeps nested generated include spellings stable across resolvers",
     function()
-        local base = os.tmpname()
+        local base = temporary.name()
         os.remove(base)
         local filenames = {
             leaf = base .. "-leaf.titan",

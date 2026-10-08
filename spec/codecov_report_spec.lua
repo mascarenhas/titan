@@ -1,3 +1,4 @@
+local temporary = require "spec.support.temporary"
 local assert = require "luassert"
 
 describe("Codecov LuaCov upload report", function()
@@ -18,7 +19,7 @@ describe("Codecov LuaCov upload report", function()
     end
 
     before_each(function()
-        input, output = os.tmpname(), os.tmpname()
+        input, output = temporary.name(), temporary.name()
     end)
     after_each(function()
         os.remove(input)

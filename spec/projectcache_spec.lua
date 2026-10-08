@@ -1,3 +1,4 @@
+local temporary = require "spec.support.temporary"
 local driver = require "titan-compiler.driver"
 local types = require "titan-compiler.types"
 local parser = require "titan-compiler.parser"
@@ -5,6 +6,8 @@ local lfs = require "lfs"
 local sha256 = require "titan-compiler.sha256"
 local cpp = require "c-parser.cpp"
 local coder = require "titan-compiler.coder"
+local paths = require "titan-compiler.path"
+local platform = require "titan-compiler.platform"
 
 describe("declared project manifests", function()
     local previous_imported, previous_registry, loaders
@@ -618,7 +621,7 @@ describe("declared project manifests", function()
     it("overlays matching current header observations throughout a private graph", function()
         local entry = load_module("observations", "function answer(): integer return 42 end")
         local old = { modified_seconds = 100, modified_nanoseconds = 5, physical_identity = "physical" }
-        local input = { kind = "file", path = "/observed.h", identity = "semantic", observation = old }
+        local input = { kind = "file", path = paths.join(package.config:sub(1, 1) == "\\" and "C:/" or "/", "observed.h"), identity = "semantic", observation = old }
         entry.c_header_dependencies = { input }
         entry.ast._c_header_dependencies = { input }
         entry.ast[1]._nested_header_input = {
@@ -691,10 +694,10 @@ describe("declared project manifests", function()
         assert.equal(cancellation, err)
     end)
 
-    it("uses fresh observation baselines for later edits with retained source-import graphs", function()
+    it("validates headers for later edits with retained source-import graphs", function()
         local compiler_io = require "titan-compiler.io"
         local strategy = compiler_io.new_sync()
-        local header = os.tmpname() .. ".h"
+        local header = temporary.name(".h")
         local file = assert(io.open(header, "wb"))
         assert(file:write("typedef int retained_count;\n"))
         assert(file:close())
@@ -732,7 +735,13 @@ describe("declared project manifests", function()
             -- Prime that stable header graph before measuring later edits.
             load_module("baseline_consumer", consumer_source(0),
                 { baseline_provider = provider }, { io = strategy, cache_adapter = adapter })
-            local old_stamp = provider.c_header_dependencies[1].observation.modified_seconds
+            local old_observation = provider.c_header_dependencies[1].observation
+            local old_stamp
+            if platform.windows then
+                assert.is_nil(old_observation)
+            else
+                old_stamp = assert(old_observation).modified_seconds
+            end
             local stamp = assert(lfs.attributes(header, "modification"))
             assert(lfs.touch(header, stamp + 1, stamp + 1))
             local current, restat_error, changed = driver.restat_c_header_dependencies(
@@ -741,13 +750,22 @@ describe("declared project manifests", function()
             assert.is_false(changed)
             reads = 0
             for index = 1, 2 do
+                local previous_reads = reads
                 driver.imported, types.registry = {}, {}
                 load_module("baseline_consumer", consumer_source(index), { baseline_provider = provider }, {
                     io = strategy, header_inputs = current, cache_adapter = adapter,
                 })
-                assert.equal(0, reads)
+                if platform.windows then
+                    assert.is_true(reads > previous_reads)
+                else
+                    assert.equal(0, reads)
+                end
             end
-            assert.equal(old_stamp, provider.c_header_dependencies[1].observation.modified_seconds)
+            if platform.windows then
+                assert.is_nil(provider.c_header_dependencies[1].observation)
+            else
+                assert.equal(old_stamp, provider.c_header_dependencies[1].observation.modified_seconds)
+            end
         end)
         os.remove(header)
         assert.is_true(ok, err)
@@ -996,7 +1014,7 @@ describe("declared project manifests", function()
     end)
 
     it("checks recursive C aliases and source function pointers without native companions", function()
-        local header = os.tmpname() .. ".h"
+        local header = temporary.name(".h")
         local file = assert(io.open(header, "wb"))
         assert(file:write([[
             #ifndef TITAN_MANIFEST_C_FIXTURE

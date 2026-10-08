@@ -26,8 +26,10 @@ function ffiheaders.quote_header(name)
         return nil, "quoted C header name contains a quote, newline, or NUL byte"
     end
     -- A preprocessor header-name token does not interpret C string escapes.
-    -- Keep UTF-8 and Unix filename bytes literal; Windows separators are paths.
-    if platform.windows then name = name:gsub("\\", "/") end
+    -- Extended Windows namespaces require literal backslashes too.
+    if platform.windows and name:sub(1, 4) ~= "\\\\?\\" then
+        name = name:gsub("\\", "/")
+    end
     return '"' .. name .. '"'
 end
 

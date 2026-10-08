@@ -1,3 +1,4 @@
+local temporary = require "spec.support.temporary"
 local staticmetadata = require "titan-compiler.staticmetadata"
 local objectmetadata = require "titan-compiler.objectmetadata"
 local types = require "titan-compiler.types"
@@ -465,7 +466,7 @@ describe("trusted object source metadata", function()
             METADATANAME = "native_public_metadata",
             METADATA = assert(staticmetadata.c_initializer(public)),
         }) .. assert(objectmetadata.render(payload, "native_source_metadata"))
-        local stem = os.tmpname()
+        local stem = temporary.name()
         local source, output = stem .. ".c", stem .. ".o"
         local ok, failure = xpcall(function()
             assert(util.set_file_contents(source, code))
@@ -528,7 +529,7 @@ __attribute__((used, aligned(1), section(".titan.cprobe")))
 static const unsigned char result[] = {84,73,84,69,78,85,77,0,1,12,
     __builtin_types_compatible_p(__typeof__(&value), int *), 6};
 ]]
-        local stem = os.tmpname()
+        local stem = temporary.name()
         local source, output = stem .. ".c", stem .. ".o"
         local ok, failure = xpcall(function()
             assert(util.set_file_contents(source, code))
@@ -1287,7 +1288,7 @@ return {
         end)
 
         local function temporary_file(contents)
-            local path = os.tmpname()
+            local path = temporary.name()
             temporary_paths[#temporary_paths + 1] = path
             local file = assert(io.open(path, "wb"))
             assert(file:write(contents))

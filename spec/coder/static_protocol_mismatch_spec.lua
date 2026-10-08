@@ -1,7 +1,9 @@
+local temporary = require "spec.support.temporary"
 local assert = require "luassert"
 local cdriver = require "c-parser.cdriver"
 local driver = require "titan-compiler.driver"
 local lfs = require "lfs"
+local platform = require "titan-compiler.platform"
 local staticmetadata = require "titan-compiler.staticmetadata"
 
 local REPO = lfs.currentdir()
@@ -237,7 +239,8 @@ describe("forged static section/callable protocol mismatch", function()
     local workspace
 
     before_each(function()
-        workspace = os.tmpname()
+        if platform.windows then return end
+        workspace = temporary.name()
         assert.truthy(os.remove(workspace))
         assert.truthy(lfs.mkdir(workspace))
     end)
@@ -248,6 +251,10 @@ describe("forged static section/callable protocol mismatch", function()
 
     it("rejects the selected archive before library or executable publication",
        function()
+        if platform.windows then
+            pending("Titan archive providers require ELF or Mach-O")
+            return
+        end
         local modname = "protocol.api"
         local original = workspace .. "/original"
         local alternate = workspace .. "/alternate"
@@ -397,6 +404,10 @@ end
 
     it("rejects every missing selected-archive protocol before publication",
        function()
+        if platform.windows then
+            pending("Titan archive providers require ELF or Mach-O")
+            return
+        end
         local modname = "protocol.api"
         local provider = workspace .. "/provider"
         local provider_source = provider .. "/source"
