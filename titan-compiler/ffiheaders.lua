@@ -347,9 +347,15 @@ function ffiheaders.close(owner)
         if attributes then
             local removed, remove_err = owner.io:rmdir(directory)
             if not removed then
-                first_error = first_error or remove_err or
-                    ("could not remove checking-header directory '" .. directory .. "'")
-                table.insert(remaining_directories, 1, directory)
+                -- Another cleanup may remove the directory while the async
+                -- lstat result is being delivered. Confirm that retirement
+                -- completed before retaining a failed removal for retry.
+                local current, inspection_err = owner.io:lstat(directory)
+                if current ~= nil or inspection_err ~= nil then
+                    first_error = first_error or remove_err or
+                        ("could not remove checking-header directory '" .. directory .. "'")
+                    table.insert(remaining_directories, 1, directory)
+                end
             end
         elseif attribute_err then
             first_error = first_error or attribute_err

@@ -787,6 +787,10 @@ local function default_temp_provider(strategy)
 
     function workspace:cleanup()
         local errors = {}
+        local function root_is_absent()
+            local current, inspection_error = strategy:lstat(self.root)
+            return current == nil and inspection_error == nil
+        end
         for name in pairs(tracked) do
             local removed, err = self:remove(name)
             if not removed then errors[#errors + 1] = tostring(err) end
@@ -803,10 +807,19 @@ local function default_temp_provider(strategy)
                 end
             end
         elseif list_error then
+            -- Cancellation can arrive after an accepted rmdir removed the
+            -- directory. A later uncancelled close retries this same owner.
+            -- Confirm absence rather than classifying platform error text.
+            if root_is_absent() then
+                if #errors > 0 then return nil, table.concat(errors, "; ") end
+                return true
+            end
             errors[#errors + 1] = tostring(list_error)
         end
         local removed, err = strategy:rmdir(self.root)
-        if not removed then errors[#errors + 1] = tostring(err) end
+        if not removed and not root_is_absent() then
+            errors[#errors + 1] = tostring(err)
+        end
         if #errors > 0 then return nil, table.concat(errors, "; ") end
         return true
     end
