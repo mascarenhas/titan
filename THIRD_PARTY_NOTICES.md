@@ -8,7 +8,7 @@ as application-private DLLs. OpenSSL defaults to an installed binary SDK;
 corresponding attribution and
 license texts below also accompany those DLLs. Windows does not link GNU
 Readline. The private namespaced LPegLabel payload remains statically embedded
-in the Titan standard provider. Compiler-only LuaFileSystem, LPegLabel/relabel,
+in the Titan standard provider. Compiler-only LuaFileSystem, luv, LPegLabel/relabel,
 argparse, and inspect are installed as ordinary LuaRocks dependencies under
 their upstream license terms. The standard-provider notices and texts are under
 `share/titan/THIRD_PARTY_NOTICES.md` and `share/titan/LICENSES/`.
@@ -21,8 +21,25 @@ distributed under the MIT license; its unmodified license text is distributed
 as `LICENSES/libuv-LICENSE` (or in the installer's corresponding license
 directory).
 
-Distributions containing Titan's statically linked libuv standard library must
-include that license text and this attribution.
+Parts originating from Joyent and other Node contributors retain the MIT
+notice reproduced verbatim in `LICENSES/libuv-LICENSE-extra`. That upstream
+notice also identifies the externally maintained components: `include/uv/tree.h`,
+Copyright 2002 Niels Provos, under the BSD two-clause license reproduced in
+`LICENSES/libuv-tree-LICENSE`; and the `inet_pton`/`inet_ntop` implementations in
+`src/inet.c`, Copyright 2004 Internet Systems Consortium, Inc. and
+1996-1999 Internet Software Consortium, under the ISC license reproduced in
+`LICENSES/libuv-inet-LICENSE`.
+
+Distributions containing Titan's bundled libuv libraries must include all four
+license texts and this attribution.
+
+## luv
+
+The Windows compiler installs luv `1.52.1-0`, obtained from
+<https://github.com/luvit/luv/releases/tag/1.52.1-0>. Luv is Copyright 2014
+The Luvit Authors and is distributed under the Apache License 2.0, included in
+the dependency's `LICENSE.txt`. Its bundled libuv 1.52.1 retains the same
+libuv, Joyent, Niels Provos, and ISC license texts listed above.
 
 ## libbacktrace
 

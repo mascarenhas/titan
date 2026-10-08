@@ -5,6 +5,8 @@ use Digest::SHA;
 use File::Path qw(make_path);
 use File::Temp qw(tempdir);
 use FindBin qw($Bin);
+use lib $Bin;
+use WindowsLibbacktraceAllocator;
 
 my ($root, $manifest, $openssl_mode) = @ARGV;
 $openssl_mode //= $ENV{OPENSSL_MODE} // 'system';
@@ -45,7 +47,21 @@ for my $line (split /\n/, read_file($manifest)) {
     next if $name eq 'openssl' && $openssl_mode eq 'system';
     my $destination = "$root/$directory";
     my $stamp = "$destination/.titan-windows-source";
-    next if -f $stamp;  # completed pinned acquisition and source patches
+    if (-f $stamp) {
+        # Older completed acquisitions have only the archive stamp. Verify the
+        # existing image patch before upgrading the allocator in that tree.
+        if ($name eq 'libbacktrace') {
+            die "ordinary completed libbacktrace source required: $destination\n"
+                unless -d $destination && !-l $destination && !-l $stamp;
+            die "libbacktrace source stamp does not match pinned archive\n"
+                unless read_file($stamp) eq "$sha\n";
+            system('git', '-C', $destination, 'apply', '--no-index', '--reverse',
+                   '--check', $libbacktrace_patch) == 0
+                or die "completed libbacktrace source lacks the current Windows image patch\n";
+            WindowsLibbacktraceAllocator::prepare($destination, $sha);
+        }
+        next;  # other completed native sources keep their existing identity
+    }
     die "remove incomplete source directory: $destination\n" if -e $destination;
     if (!-f $archive) {
         my $download = tempdir('.native-download-XXXXXX', DIR => '.', CLEANUP => 1);
@@ -70,6 +86,7 @@ for my $line (split /\n/, read_file($manifest)) {
             or die "libbacktrace Windows image patch does not match pinned source\n";
         system('git', '-C', $source, 'apply', '--no-index', $libbacktrace_patch) == 0
             or die "libbacktrace Windows image patch failed\n";
+        WindowsLibbacktraceAllocator::prepare($source, $sha);
     }
     elsif ($name eq 'llhttp') {
         change("$source/include/llhttp.h", <<'BEFORE', <<'AFTER');

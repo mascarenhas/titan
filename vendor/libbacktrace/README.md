@@ -28,12 +28,48 @@ forbids calls into other modules from the notification callback. The original
 contains the affected symbol ranges, image-base selection, and notification
 registration. Toolhelp module enumeration remains unchanged.
 
+`libbacktrace-0b9b49c-alloc-growth.patch` changes the malloc-backed vector
+allocator selected by Windows. After its initial allocation, vector capacity
+grows geometrically instead of adding 4 KiB at a time. Large DWARF line tables
+therefore require an amortized linear amount of copying when realloc moves
+blocks. Checked addition and multiplication prevent capacity wraparound;
+allocation failures leave the vector's existing bytes and bookkeeping intact.
+The patch also preserves the allocation on a failed shrink, so the caller can
+free it, and retains free semantics for zero-used vectors. The Unix mmap
+allocator is unchanged.
+
+Source preparation recognizes only the exact original and patched `alloc.c`
+digests. A completed archive-only source stamp from an earlier build is
+upgraded after its pinned archive identity and existing image patch are checked.
+The separate allocator patch is applied and reverse-checked before its source
+receipt is published. Already patched sources and matching receipts keep their
+bytes and mtimes on repeated preparation. Unknown allocator bytes are rejected;
+they are not overwritten or accepted as a new baseline. Other completed native
+dependency source trees retain their existing preparation behavior.
+
 The ordinary configure/make build produces a static archive and installs its
 matching headers into the selected Lua SDK. `-static-libgcc` selects LLVM's
 static unwinder in CLANG64; consumer links use the same policy, avoiding an
 additional compiler-runtime DLL. Clean the private build directory before
-changing tools, flags, or profiles. Delete the acquired source directory before
-changing the pinned archive or patch.
+changing tools, flags, profiles, or source directories. An existing generated
+Makefile must resolve to the same physical source directory as the selected
+source; a mismatch is rejected before building or publishing a receipt rather
+than silently reconfiguring. A verified allocator source receipt owns a
+separate build digest: a missing or changed digest invalidates only allocator
+objects and the archive, even if the source mtime was restored. The build receipt
+is published after a successful archive build and a second source check; failed
+builds retain the previous receipt. Delete the acquired source directory and
+private build directory before changing the pinned archive or image patch.
+
+The retained Busted cases in `spec/libuv_build_spec.lua`, reached by ordinary
+`make test`, exercise source preparation and build receipts in temporary trees.
+They also compile the exact verified `alloc.c` with a deterministic moving
+allocator at O0 and O2, checking growth/copy bounds, contents, alignment,
+zero-size behavior, overflow, and grow/shrink/finish failure cleanup. On Unix
+this harness forces the heap backend while the ordinary installed archive
+continues to use mmap. These host controls require the canonical prepared Unix
+source/configuration; native CLANG64 runs separately prove the actual Windows
+allocator with its generated configuration.
 
 Native validation must separately prove PC-to-source and PC-to-symbol results
 for relocated executable/DLL images and a provider loaded after an earlier

@@ -1,5 +1,6 @@
 local core = require "titan-compiler.checker.core"
 local _ENV = core
+local platform = require "titan-compiler.platform"
 
 -- The compiler driver installs the exact C toolchain configuration used for
 -- generated code. Keeping this small hook in the checker makes every foreign
@@ -20,7 +21,7 @@ function new_direct_probe_service()
         local compile_flags = foreign_c_options.compile_flags or {}
         toolchain = {
             compiler = foreign_c_options.compiler or
-                os.getenv("CC") or "cc",
+                platform.getenv("CC") or "cc",
             compile_flags = compile_flags,
             language_mode = foreign_c_options.language_mode or "c99",
             language_flag = foreign_c_options.language_flag,

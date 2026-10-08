@@ -85,7 +85,7 @@ if args.compile_only then
     end
 end
 
-local jobs_text = args.jobs or os.getenv("TITAN_JOBS") or "1"
+local jobs_text = args.jobs or platform.getenv("TITAN_JOBS") or "1"
 if type(jobs_text) ~= "string" or
    not jobs_text:match("^[1-9][0-9]*$") then
     exit("--jobs and TITAN_JOBS require a positive integer")

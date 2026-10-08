@@ -2133,7 +2133,8 @@ int main(void) {
             assert.same({ "$(OPENSSL_CPPFLAGS)" },
                 makefile_words("STDLIB_OPENSSL_CPPFLAGS"))
             assert.same({
-                "LICENSES/libuv-LICENSE",
+                "LICENSES/libuv-LICENSE", "LICENSES/libuv-LICENSE-extra",
+                "LICENSES/libuv-tree-LICENSE", "LICENSES/libuv-inet-LICENSE",
                 "LICENSES/lpeglabel-LICENSE", "LICENSES/lpeg-LICENSE",
                 "LICENSES/lpeg-patterns-LICENSE",
                 "LICENSES/ta-regex-LICENSE", "LICENSES/lua-LICENSE",
@@ -2863,7 +2864,7 @@ int main(void) {
             local driver_source = file:read("*a")
             file:close()
             assert.truthy(driver_source:find(
-                    'os.getenv("TITAN_RUNTIME_PREBUILT") ~= "1"', 1, true),
+                    'platform.getenv("TITAN_RUNTIME_PREBUILT") ~= "1"', 1, true),
                 driver_source)
             local _, include_count = makefile:gsub(
                 "%-I %$%(TITAN_RUNTIME_LUA_SOURCE_PATH%)", "")
@@ -5173,8 +5174,8 @@ done
                     assert.is_true(tonumber(seconds) >= 0)
                 end
             end
-            assert.same({ 33, 37, 33, 44 }, shard_counts)
-            assert.equal(147, assigned_count)
+            assert.same({ 34, 37, 33, 44 }, shard_counts)
+            assert.equal(148, assigned_count)
 
             local stress_partition = read_file(
                 "spec/support/ci_compiler_stress_files.txt")
@@ -5697,4 +5698,31 @@ done
             remove_tree(root)
             assert.truthy(success, failure)
         end)
+end)
+
+describe("Windows libbacktrace allocator receipts", function()
+    local function run_controls(mode, expected)
+        if platform.windows then
+            pending("Unix mock-tool controls; native CLANG64 source/build and allocator harness own Windows validation")
+            return
+        end
+        local ok, output = run_argv({
+            "perl", "spec/support/check_windows_libbacktrace_allocator.pl",
+            lfs.currentdir(), mode,
+        })
+        assert.truthy(ok, output)
+        assert.truthy(output:find(expected, 1, true), output)
+    end
+
+    it("upgrades completed sources and verifies immutable preparation receipts", function()
+        run_controls("prepare", "Windows allocator source preparation controls passed.")
+    end)
+
+    it("fences cached allocator objects and publishes only successful verified builds", function()
+        run_controls("build", "Windows allocator archive-build controls passed.")
+    end)
+
+    it("forces verified alloc.c through native O0 and O2 controls without replacing the host mmap archive", function()
+        run_controls("native", "Forced alloc.c native controls passed without replacing the host mmap archive.")
+    end)
 end)

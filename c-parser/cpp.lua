@@ -611,7 +611,7 @@ local function normalize_toolchain(options)
     end
 
     local compiler, err = normalize_argv(
-        options.compiler or os.getenv("CC") or
+        options.compiler or platform.getenv("CC") or
             (platform.windows and "clang.exe" or "cc"), "compiler", true)
     if not compiler then
         return nil, err

@@ -406,11 +406,11 @@ local function source_checkout_root(strategy)
     return nil
 end
 
-local internal_root = os.getenv("TITAN_ROCKS_ROOT")
+local internal_root = platform.getenv("TITAN_ROCKS_ROOT")
 if internal_root == "" then internal_root = nil end
-local probe_prefix = os.getenv("TITAN_PREFIX")
+local probe_prefix = platform.getenv("TITAN_PREFIX")
 if probe_prefix == "" then probe_prefix = nil end
-local probe_cache_disabled = os.getenv("TITAN_PROBE_CACHE_DISABLE") == "1"
+local probe_cache_disabled = platform.getenv("TITAN_PROBE_CACHE_DISABLE") == "1"
 local configured_installation_root =
     internal_root or driver.root_from_package_cpath(package.cpath)
 driver.TITAN_ROOT = configured_installation_root and
@@ -423,8 +423,8 @@ driver.PROBE_CACHE_DIRECTORY = not probe_cache_disabled and
     preliminary_probe_root and root_join(preliminary_probe_root,
         "var/cache/titan-probes/" .. cprobe_cache.VERSION) or nil
 local configured_titan_bin_path =
-    os.getenv("TITAN_PATH" .. driver.TITAN_LIBRARY_VERSION_SUFFIX)
-    or os.getenv("TITAN_PATH")
+    platform.getenv("TITAN_PATH" .. driver.TITAN_LIBRARY_VERSION_SUFFIX)
+    or platform.getenv("TITAN_PATH")
 
 local function apply_layout(source_root)
     local previous_bin_default = driver.DEFAULT_TITAN_BIN_PATH
@@ -511,10 +511,10 @@ function driver.initialize_layout(context)
 end
 
 driver.TITAN_SOURCE_PATH = "."
-driver.EMIT_LINE_DIRECTIVES = os.getenv("TITAN_NO_LINE_DIRECTIVES") ~= "1"
+driver.EMIT_LINE_DIRECTIVES = platform.getenv("TITAN_NO_LINE_DIRECTIVES") ~= "1"
 driver.TITAN_RUNTIME_PATH = "titan-runtime/"
 driver.LIBBACKTRACE_PATH = "libbacktrace"
-driver.BUILD_PROFILE = os.getenv("TITAN_BUILD_PROFILE") or "production"
+driver.BUILD_PROFILE = platform.getenv("TITAN_BUILD_PROFILE") or "production"
 local profile_error
 if driver.BUILD_PROFILE ~= "production" and driver.BUILD_PROFILE ~= "validation" then
     profile_error = "TITAN_BUILD_PROFILE must be production or validation"
@@ -544,16 +544,16 @@ function driver.test_support_source_descriptor(context)
         program_output = "titan/test",
     }
 end
-driver.CC = os.getenv("CC") or (platform.windows and "clang.exe" or "cc")
-driver.AR = os.getenv("AR") or "ar"
-driver.RANLIB = os.getenv("RANLIB") or "ranlib"
-driver.CLANG_FORMAT = os.getenv("CLANG_FORMAT") or "clang-format"
+driver.CC = platform.getenv("CC") or (platform.windows and "clang.exe" or "cc")
+driver.AR = platform.getenv("AR") or "ar"
+driver.RANLIB = platform.getenv("RANLIB") or "ranlib"
+driver.CLANG_FORMAT = platform.getenv("CLANG_FORMAT") or "clang-format"
 
 driver.split_shell_words = cdriver.split_shell_words
 driver.shell_quote = cdriver.shell_quote
 
 local function parse_extra_flags(name)
-    local words, err = cdriver.split_shell_words(os.getenv(name) or "")
+    local words, err = cdriver.split_shell_words(platform.getenv(name) or "")
     if not words then
         return nil, "invalid " .. name .. ": " .. err
     end
@@ -5780,7 +5780,7 @@ function driver.runtime_archive_members_are_exact(output)
 end
 
 local function runtime_archive_has_expected_members(runtime_lib)
-    local ar, err = parsed_words(os.getenv("AR") or "ar", "AR")
+    local ar, err = parsed_words(platform.getenv("AR") or "ar", "AR")
     if not ar then return false, err end
     if #ar == 0 then return false, "AR command is empty" end
     append_argv(ar, { "t", runtime_lib })
@@ -5812,8 +5812,8 @@ local function check_runtime(verbose)
     runtime_checked = runtime_checked or driver.INSTALLED
     if runtime_checked then return true end
     local runtime_lib = driver.TITAN_RUNTIME_PATH .. "libtitan.a"
-    if os.getenv("TITAN_RUNTIME_PREBUILT") ~= "1" then
-        local make, err = parsed_words(os.getenv("MAKE") or "make", "MAKE")
+    if platform.getenv("TITAN_RUNTIME_PREBUILT") ~= "1" then
+        local make, err = parsed_words(platform.getenv("MAKE") or "make", "MAKE")
         if not make then return nil, err end
         if #make == 0 then return nil, "MAKE command is empty" end
         append_argv(make, {
@@ -9518,7 +9518,7 @@ local function compile_windows_program(modname, libnames, link, verbose,
         driver.windows_launcher_resource(absolute_filename(manifest)))
     if not ok then return nil, err end
     local rc
-    rc, err = parsed_words(os.getenv("RC") or "llvm-rc", "RC")
+    rc, err = parsed_words(platform.getenv("RC") or "llvm-rc", "RC")
     if not rc then return nil, err end
     if #rc == 0 then return nil, "RC command is empty" end
     append_argv(rc, { "-FO", resource, resource_source })

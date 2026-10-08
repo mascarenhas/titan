@@ -1,4 +1,5 @@
 local assert = require "luassert"
+local platform = require "titan-compiler.platform"
 
 local EXIT = {}
 local MODULE_NAMES = {
@@ -126,11 +127,11 @@ local function run_titanc(arguments, environment_jobs)
         saved_modules[name] = package.loaded[name]
         package.loaded[name] = modules[name]
     end
-    local saved_getenv = os.getenv
+    local saved_getenv = platform.getenv
     local saved_exit = os.exit
     local saved_stderr = io.stderr
     local diagnostics = {}
-    os.getenv = function(name)
+    platform.getenv = function(name)
         if name == "TITAN_JOBS" then return environment_jobs end
         return saved_getenv(name)
     end
@@ -148,7 +149,7 @@ local function run_titanc(arguments, environment_jobs)
 
     io.stderr = saved_stderr
     os.exit = saved_exit
-    os.getenv = saved_getenv
+    platform.getenv = saved_getenv
     for _, name in ipairs(MODULE_NAMES) do
         package.loaded[name] = saved_modules[name]
     end

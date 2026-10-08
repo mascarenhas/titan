@@ -13,6 +13,12 @@ local function read(path)
     local contents = assert(file:read("a")); assert(file:close())
     return contents
 end
+for _, filename in ipairs({ "libuv-LICENSE", "libuv-LICENSE-extra",
+        "libuv-tree-LICENSE", "libuv-inet-LICENSE" }) do
+    assert(read(prefix .. "/share/titan/LICENSES/" .. filename) ==
+           read(source .. "/LICENSES/" .. filename),
+           "installed libuv license differs from source: " .. filename)
+end
 local function open_support(path)
     local opener = assert(package.loadlib(path, "luaopen_titan"))
     local values = table.pack(opener())

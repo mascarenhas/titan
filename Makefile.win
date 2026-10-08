@@ -232,7 +232,9 @@ RUNTIME_CFLAGS ?= $(if $(ROCK_CFLAGS),$(ROCK_CFLAGS) )$(TITAN_WINDOWS_NATIVE_CFL
 RUNTIME_CPPFLAGS ?=
 RUNTIME_LDFLAGS ?= $(TITAN_WINDOWS_NATIVE_LDFLAGS)
 LPEGLABEL_BUILD_CFLAGS ?= $(if $(ROCK_CFLAGS),$(ROCK_CFLAGS) )$(TITAN_PROFILE_HOST_FLAGS)
-TITAN_LICENSE_NAMES := libuv lpeglabel lpeg lpeg-patterns ta-regex lua llhttp sqlite3 openssl go libbacktrace llvm
+TITAN_LICENSE_FILES := libuv-LICENSE libuv-LICENSE-extra libuv-tree-LICENSE libuv-inet-LICENSE \
+	lpeglabel-LICENSE lpeg-LICENSE lpeg-patterns-LICENSE ta-regex-LICENSE lua-LICENSE \
+	llhttp-LICENSE sqlite3-LICENSE openssl-LICENSE go-LICENSE libbacktrace-LICENSE llvm-LICENSE
 
 .PHONY: runtime-build runtime install-titan-sdk runtime-check
 runtime-build: lua libbacktrace
@@ -256,7 +258,7 @@ install-titan-sdk: runtime-build
 	  cp -p $(call quote,$(WINDOWS_BUILD_ROOT)/runtime/titan.dll) $(call quote,$(PREFIX)/lib/titan/$(TITAN_LIBRARY_VERSION)/titan.dll); fi
 	cp -p LICENSE $(call quote,$(PREFIX)/share/titan/LICENSE)
 	cp -p THIRD_PARTY_NOTICES.md $(call quote,$(PREFIX)/share/titan/THIRD_PARTY_NOTICES.md)
-	for name in $(TITAN_LICENSE_NAMES); do cp -p "LICENSES/$$name-LICENSE" $(call quote,$(PREFIX)/share/titan/LICENSES/); done
+	for filename in $(TITAN_LICENSE_FILES); do cp -p "LICENSES/$$filename" $(call quote,$(PREFIX)/share/titan/LICENSES/); done
 	printf '%s\n' $(call quote,$(TITAN_BUILD_PROFILE)) > $(call quote,$(PREFIX)/etc/titan/build-profile)
 
 runtime-check: runtime

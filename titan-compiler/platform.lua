@@ -5,6 +5,14 @@ local platform = {
     path = require "titan-compiler.windows_path",
 }
 
+-- Windows' CRT getenv snapshot does not see updates made through libuv's
+-- Win32 process environment. Keep native loading lazy so importing this
+-- lexical platform module still performs no native operations.
+function platform.getenv(name)
+    if platform.windows then return (require("luv").os_getenv(name)) end
+    return os.getenv(name)
+end
+
 function platform.is_absolute(path)
     if platform.windows then return platform.path.is_absolute(path) end
     return path:sub(1, 1) == "/"

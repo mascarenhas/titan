@@ -1301,9 +1301,9 @@ describe("compiler installation discovery", function()
        function()
         local module_name = "titan-compiler.driver"
         local loaded_driver = package.loaded[module_name]
-        local original_getenv = os.getenv
+        local original_getenv = platform.getenv
         package.loaded[module_name] = nil
-        os.getenv = function(name)
+        platform.getenv = function(name)
             if name == "TITAN_PREFIX" then return fixture_path("/explicit") end
             if name == "TITAN_PROBE_CACHE_DISABLE" then return nil end
             return original_getenv(name)
@@ -1311,7 +1311,7 @@ describe("compiler installation discovery", function()
 
         local loaded, value = pcall(require, module_name)
 
-        os.getenv = original_getenv
+        platform.getenv = original_getenv
         package.loaded[module_name] = loaded_driver
         assert.truthy(loaded, value)
 
@@ -1991,7 +1991,10 @@ describe("loader resolver ownership", function()
             ["titan-compiler.coder"] = {},
             ["titan-compiler.parser"] = {},
             ["titan-compiler.driver"] = fake_driver,
-            ["titan-compiler.platform"] = { windows = false },
+            ["titan-compiler.platform"] = {
+                windows = false,
+                getenv = function() return nil end,
+            },
             ["titan-compiler.test_runner"] = {},
             ["titan-compiler.util"] = {},
         }

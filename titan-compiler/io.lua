@@ -446,7 +446,7 @@ function Sync:tmpname()
     if platform.windows then
         -- Windows tmpnam chooses a name without creating it. Keep that name in
         -- the user's temporary directory and reserve the caller-owned file.
-        local directory = lua_os.getenv("TEMP") or lua_os.getenv("TMP")
+        local directory = platform.getenv("TEMP") or platform.getenv("TMP")
         if directory then path = paths.join(directory, paths.basename(path)) end
         local file, open_err = open_file(path, "wb")
         if not file then return nil, open_err end

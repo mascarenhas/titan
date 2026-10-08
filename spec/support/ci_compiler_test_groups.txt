@@ -121,6 +121,7 @@
 3 spec/coder/type_tests_spec.lua 5.315
 2 spec/coder/unions_spec.lua 24.131
 4 spec/coder/variadic_spec.lua 8.549
+1 spec/compiler_environment_spec.lua 0.010
 1 spec/compiler_io_spec.lua 0.024
 2 spec/compiler_module_structure_spec.lua 0.055
 1 spec/cpp_spec.lua 6.304

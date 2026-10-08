@@ -349,7 +349,8 @@ describe("standalone-prefix source installation", function()
         assert_absent(PREFIX .. "/lib/libcrypto.a")
         assert_file(PREFIX .. "/share/titan/THIRD_PARTY_NOTICES.md")
         for _, license in ipairs({
-            "libuv-LICENSE", "lpeglabel-LICENSE", "lpeg-LICENSE",
+            "libuv-LICENSE", "libuv-LICENSE-extra", "libuv-tree-LICENSE",
+            "libuv-inet-LICENSE", "lpeglabel-LICENSE", "lpeg-LICENSE",
             "lpeg-patterns-LICENSE", "ta-regex-LICENSE", "lua-LICENSE",
             "llhttp-LICENSE", "sqlite3-LICENSE", "openssl-LICENSE", "go-LICENSE",
             "libbacktrace-LICENSE",
@@ -372,6 +373,9 @@ describe("standalone-prefix source installation", function()
             "OpenSSL 3.5.7", "OPENSSL_MODE=system",
             "llhttp 9.4.3", "Copyright Fedor Indutny, 2018",
             "SQLite 3.53.4", "public domain",
+            "LICENSES/libuv-LICENSE-extra", "LICENSES/libuv-tree-LICENSE",
+            "LICENSES/libuv-inet-LICENSE", "Niels Provos", "Internet Systems Consortium",
+            "The Luvit Authors", "luv `1.52.1-0`",
         }) do
             assert.truthy(notices:find(notice, 1, true), notice)
         end
@@ -628,6 +632,12 @@ int titan_sdk_headers(void) { return LUA_VERSION_NUM + SQLITE_VERSION_NUMBER; }
             "Makefile.win",
             "scripts/install_windows_luarocks.sh",
             "scripts/prepare_windows_native.pl",
+            "scripts/WindowsLibbacktraceAllocator.pm",
+            "scripts/build_windows_libbacktrace.sh",
+            "vendor/libbacktrace/libbacktrace-0b9b49c-alloc-growth.patch",
+            "spec/fixtures/libbacktrace/allocator_vector_probe.c",
+            "spec/support/check_libbacktrace_allocator.sh",
+            "spec/support/check_windows_libbacktrace_allocator.pl",
             "vendor/libuv/libuv-1.53.0-windows-write-reentry.patch",
             "vendor/lua/UPSTREAM.md",
             "lua-5.5.1/src/Makefile",
@@ -895,6 +905,8 @@ int titan_sdk_headers(void) { return LUA_VERSION_NUM + SQLITE_VERSION_NUMBER; }
             "spec/conformance/websocket/runner_inventory.py",
             "spec/conformance/websocket/test_check_reports.py",
             "spec/conformance/websocket/test_orchestration.py",
+            "LICENSES/libuv-LICENSE", "LICENSES/libuv-LICENSE-extra",
+            "LICENSES/libuv-tree-LICENSE", "LICENSES/libuv-inet-LICENSE",
             "LICENSES/lpeglabel-LICENSE",
             "LICENSES/lpeg-LICENSE",
             "LICENSES/lpeg-patterns-LICENSE",

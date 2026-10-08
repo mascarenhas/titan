@@ -118,6 +118,7 @@ while IFS= read -r test_file; do
             # insulation and compiler modules loaded by earlier specs.
             category=unit
             ;;
+        spec/compiler_environment_spec.lua | \
         spec/cprobe_cache_spec.lua | \
         spec/cprobe_spec.lua | \
         spec/parser_spec.lua | \
