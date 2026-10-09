@@ -641,3 +641,37 @@ The artifact step now explicitly includes hidden files within that owned
 coverage directory; the existing workflow contract checks this setting.
 Compiler coverage and Codecov readback for this run are recorded separately
 when available. No local report was uploaded as a substitute.
+
+## Measured compiler partition correction
+
+CI run `37890691611` at `b32db0c88e214430f3484b186661bac94605d93b`
+passed the stdlib producer, sanitizer, native coverage and compiler pair 1–2.
+The retained native artifact independently verified 15,728 / 17,263 lines
+(91.11%), 1,272 passed cases, three classified skips and all 28 owners.
+Codecov processed that native upload and refreshed the PR report to 91.10%
+as displayed by the service.
+
+Compiler pair 3–4 reached its 45-minute limit, so the merger was skipped.
+All nine native coverage CLI cases passed, but their file took 1,578.194
+seconds rather than its stale 10-second partition weight. Its companion
+shard finished almost 20 minutes before cancellation. The interrupted
+`native_record_fields_spec.lua` case had no reported assertion failure.
+Checks saying no compiler information was found do not establish compiler
+coverage acceptance; a fresh complete upload remains required.
+
+The exhaustive 152-file manifest now uses measured covered plus stress file
+times from that run, with successful predecessor run `37887221316` supplying
+unfinished phases over unchanged compiler and timed-spec sources. The same deterministic
+longest-first, least-loaded assignment gives estimated group times of
+1,578.194, 1,360.268, 1,360.268 and 1,360.267 seconds, excluding process and
+preparation overhead. The costly CLI file occupies one group alone.
+These are scheduling estimates, not guaranteed deadlines. All files, stress
+oracles, fresh-process boundaries, two-worker concurrency, job budgets and
+coverage thresholds are preserved.
+
+The timing provenance is
+`/tmp/titan-210-b32-codecov-readback/partition-timing-final-proposal.json`
+(SHA-256 `c2da03d2a9c8cb04bce8d7b4f4c3684538b0d2eedf18772f2ef5cf905dc00217`).
+The complete cancelled-run receipt is
+`/tmp/titan-210-b32-codecov-readback/final-ci-readback-before-rebalance.json`
+(SHA-256 `3be57530f1f014f1616158f27a33c33dcfbd8009f82da4c0f4e0e00170eed22b`).
