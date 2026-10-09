@@ -6337,6 +6337,7 @@ local function prepare_compile(
     local output_ok, output_err = ensure_output_parent(filename)
     if not output_ok then return nil, output_err end
     os.remove(filename)
+    os.remove(libname)
     local ok, err = util.set_file_contents(filename, code)
     if not ok then return nil, err end
     local format_ok, format_err = driver.format_generated_file(
