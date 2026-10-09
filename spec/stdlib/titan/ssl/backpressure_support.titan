@@ -34,6 +34,33 @@ local function close_handle(handle: uv.handle_t)
   end
 end
 
+local record ResetWait
+  front: uv.tcp_t
+  done: async.Completion<|ResetWait, nil, integer|>?
+  number: integer
+end
+
+local function reset_closed(handle: uv.handle_t)
+  local waiter = uv.handle_get_data(handle) as ResetWait
+  uv.handle_set_data(handle, nil)
+  waiter.done:resolve(waiter.number, nil)
+end
+
+local function start_reset(done: async.Completion<|ResetWait, nil, integer|>,
+                           number: integer): uv.req_t?
+  local waiter = done:context(number)
+  waiter.done = done
+  waiter.number = number
+  local handle = waiter.front:as_handle_t()
+  uv.handle_set_data(handle, waiter)
+  local status = uv.tcp_close_reset(waiter.front, reset_closed)
+  if status < 0 then
+    uv.handle_set_data(handle, nil)
+    done:reject(number, status)
+  end
+  return nil
+end
+
 local record WriteWait
   request: uv.write_t
   stream: uv.stream_t
@@ -162,6 +189,19 @@ end
 function Proxy:stop_input()
   test.assert(self.front ~= nil and self.incoming ~= nil)
   test.assert(uv.read_stop(self.front:as_stream_t()) >= 0)
+end
+
+-- Close the actual frontend socket with RST and wait for native retirement.
+-- The completion context and handle data retain the owner through its close
+-- callback. No SSL engine state is inspected or rewritten.
+function Proxy:reset_front()
+  test.assert(not self.closing and self.front ~= nil and self.incoming ~= nil)
+  self.incoming:close()
+  case async.await_cleanup_with(ResetWait(self.front, nil, 0), start_reset)
+  when error(status) then raise uv.err_name(status)
+  else
+  end
+  self.front = nil
 end
 
 function Proxy:close()

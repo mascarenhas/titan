@@ -5,7 +5,8 @@ local common = import "support.common.titan"
 local type Helpers = function (string): (value)
 local type Runner = function ({string}, string?, {string: string}?, {string}?,
                              string?): (string, string, integer)
-local type Compiler = function (string, string, {string}?, boolean?):
+local type Compiler = function (string, string, {string}?, boolean?,
+                               {string: string}?):
                                (string, string, integer)
 local type LuaRunner = function (string): (string, string, integer)
 local type Program = function (string, string): (string)
@@ -157,6 +158,15 @@ local function helper_functions(): Helpers
           -- A source file also avoids command-length limits for boundary probes.
           local path = assert(compiler_io:tmpname())
           local result = table.pack(pcall(function()
+            local provider = os.getenv("TITAN_TEST_PROVIDER_DIR")
+            if provider then
+              -- -E keeps the SDK's compiler paths deterministic. Coverage
+              -- explicitly selects the same ordinary provider as Titan children.
+              source = "package.path = " .. string.format("%q",
+                  provider .. "/shims/?.lua;") .. " .. package.path\n"
+                .. "package.cpath = " .. string.format("%q",
+                  provider .. "/?.so;") .. " .. package.cpath\n" .. source
+            end
             assert(compiler_io:write_file(path, source))
             return run(true, {tool("lua"), "-E", path})
           end))
@@ -164,7 +174,7 @@ local function helper_functions(): Helpers
           if not result[1] then error(result[2], 0) end
           return table.unpack(result, 2, result.n)
         end,
-        compile = function(directory, name, extra, static)
+        compile = function(directory, name, extra, static, environment)
           local argv = {tool("titanc")}
           if platform.windows then
             local sdk = assert(os.getenv("TITAN_TEST_SDK_ROOT"))
@@ -178,7 +188,7 @@ local function helper_functions(): Helpers
           if extra then
             for index = 1, #extra do argv[#argv + 1] = extra[index] end
           end
-          local output, why, status = run(true, argv, directory)
+          local output, why, status = run(true, argv, directory, environment)
           if platform.windows and why == "exit" and status == 0 then
             copy_windows_runtime(directory)
           end
@@ -227,9 +237,10 @@ local function system(argv: {string}, directory: string?,
 end
 
 local function compile(directory: string, name: string, extra: {string}?,
-                       static: boolean?): (string, string, integer)
+                       static: boolean?, environment: {string: string}?):
+                       (string, string, integer)
   local compile_child: Compiler = helper_functions()("compile")
-  return compile_child(directory, name, extra, static)
+  return compile_child(directory, name, extra, static, environment)
 end
 
 local function program(directory: string, name: string): string

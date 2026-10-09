@@ -134,6 +134,8 @@ if [[ $mode == build ]]; then
   done > "$work/compiler.env"
   (
     set -x
+    cp "$work/cwd/spec/fixtures/stdlib/native/uv_coverage_threads.h" "$work/cwd/.titan-tests/uv_coverage_threads.h"
+    cp "$work/cwd/spec/fixtures/stdlib/native/uv_coverage_pty.h" "$work/cwd/.titan-tests/uv_coverage_pty.h"
     for fixture in async_foreign_work fs_fixture uv_stdio_probe sqlite3_worker_fixture; do
       if [[ -f $work/cwd/spec/fixtures/stdlib/native/$fixture.h ]]; then
         cp "$work/cwd/spec/fixtures/stdlib/native/$fixture.h" "$work/cwd/.titan-tests/$fixture.h"

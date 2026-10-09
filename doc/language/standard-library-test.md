@@ -5,6 +5,10 @@ turns ordinary Titan modules into a standalone test executable. Test files are
 not a distinct source kind: a test is a public top-level function discovered in
 an ordinary flat or [folder module](folder-modules.md).
 
+For opt-in coverage against original Titan production sources, see
+[native source coverage](native-coverage.md). It uses the same runner with
+isolated GCC/gcov objects and host-side collection after process exit.
+
 ```titan
 -- calc_test.titan
 local test = import "test"       -- shorthand for titan.test

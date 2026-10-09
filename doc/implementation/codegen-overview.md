@@ -32,8 +32,9 @@ this list. The coder therefore still observes the logical source order that
 defines interface members, module slots, module-variable initialization, and
 emission; it has no source-unit node or contributor context. The driver
 (`driver.compile`) writes the result next to the canonical flat source or
-folder main, performs required `#line` normalization, optionally invokes the
-configured `clang-format` when `--pretty-print` is selected, and then invokes
+folder main, optionally invokes the configured `clang-format` when
+`--pretty-print` is selected, then performs ordinary `#line` normalization or
+[coverage marker conversion](native-coverage.md), and invokes
 the system C compiler
 ([driver and toolchain](driver.md)). One consequence of the checker's
 rewriting matters constantly here: every representation-changing implicit

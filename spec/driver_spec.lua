@@ -1972,7 +1972,10 @@ describe("loader resolver ownership", function()
             end,
         }
         local argument_parser = {}
-        local chain = { args = function(self) return self end }
+        local chain = {
+            args = function(self) return self end,
+            count = function(self) return self end,
+        }
         function argument_parser:argument() return chain end
         function argument_parser:flag() return chain end
         function argument_parser:option() return chain end
@@ -1980,6 +1983,8 @@ describe("loader resolver ownership", function()
             return {
                 module = { "exceptional" },
                 extra_object = {},
+                coverage_module = {},
+                coverage_source_map = {},
             }
         end
         local fake_argparse = setmetatable({}, {
@@ -1989,6 +1994,7 @@ describe("loader resolver ownership", function()
             argparse = fake_argparse,
             ["titan-compiler.checker"] = {},
             ["titan-compiler.coder"] = {},
+            ["titan-compiler.coverage"] = {},
             ["titan-compiler.parser"] = {},
             ["titan-compiler.driver"] = fake_driver,
             ["titan-compiler.platform"] = {

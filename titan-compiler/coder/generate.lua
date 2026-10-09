@@ -103,11 +103,33 @@ function coder._assert_erased_boundary(ast)
     walk(types.registry, "active type registry", false)
 end
 
+-- Source-defined foreign helpers normally live inline in source headers.
+-- Coverage must execute their one instrumented producer body, even when a
+-- test/support consumer is excluded, and retain uncalled bodies in notes.
+-- Call this before native-header planning; generate repeats it for direct
+-- callers. No ABI, signature or normal-build inlining policy changes.
+function coder.prepare_coverage(ast, enabled)
+    for _, node in ipairs(ast) do
+        if node._tag == "Ast.TopLevelForeignFunc" then
+            local outlined = enabled == true and true or nil
+            if node._coverage_foreign_outline ~= outlined then
+                node._foreign_inline = nil
+            end
+            node._coverage_foreign_outline = outlined
+            if outlined then node._foreign_inline = false end
+        end
+    end
+end
+
 function coder.generate(modname, ast, static_deps, abi, emit_line_directives, options)
     -- Omission preserves the historical default. Reset this before any
     -- validation that may fail so a previous invocation's policy never leaks
     -- into the next generation.
     coder._emit_line_directives = emit_line_directives ~= false
+    coder._coverage_source_regions = options and options.coverage == true or false
+    assert(not coder._coverage_source_regions or coder._emit_line_directives,
+        "Titan-source coverage requires line directives")
+    coder.prepare_coverage(ast, coder._coverage_source_regions)
     assert(type(abi) == "string" and abi ~= "",
         "coder.generate requires the compiled-module ABI")
     local staticmetadata = require "titan-compiler.staticmetadata"

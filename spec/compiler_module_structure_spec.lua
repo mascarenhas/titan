@@ -29,6 +29,7 @@ describe("compiler module facades", function()
             "generate_ffi_header",
             "generate_foreign_header",
             "interface_external_symbols",
+            "prepare_coverage",
         }, sorted_keys(coder))
         for _, value in pairs(coder) do assert.is_function(value) end
     end)

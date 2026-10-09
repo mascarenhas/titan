@@ -1,0 +1,73 @@
+local command = import "support.command.titan"
+local system = import "os"
+
+local function allocator_fixture_case(context: test.Context, workspace: string,
+                                      scenario: string)
+  context:run(scenario, function (_context: test.Context)
+    local output, why, code = command.capture({
+      command.program(workspace, "ssl_allocator_app"), scenario,
+    }, workspace)
+    if why == "exit" and code == 77 then
+      test.assert(string.find(output, "capability: ", 1, true) == 1,
+                  "allocator fixture returned an undocumented capability status")
+      local reason = string.gsub(output, "[\r\n]+$", function (_: string): string
+        return ""
+      end)
+      test.skip(reason)
+    end
+    test.assert(why == "exit" and code == 0,
+                "SSL allocator fixture failed at " .. scenario .. ": " .. output)
+    test.assert(output == "SSL_ALLOCATOR_OK\n",
+                "SSL allocator fixture omitted its verified completion receipt")
+  end)
+end
+
+function test_ssl_allocator_failure_retires_transferred_native_ownership(
+    context: test.Context)
+  if common.is_windows() then
+    test.skip("platform: SSL allocator child requires Unix static archive consumers")
+  end
+  local workspace = ""
+  runtime_test.run(function ()
+    workspace = fs.tmpname()
+    fs.unlink(workspace)
+    fs.mkdir(workspace)
+    context:cleanup(function () command.remove_tree(workspace) end)
+    fs.write_file(workspace .. "/ssl_allocator_fixture.h",
+        fs.read_file("spec/fixtures/stdlib/native/ssl_allocator_fixture.h"))
+    fs.write_file(workspace .. "/ssl_allocator_app.titan",
+        fs.read_file("spec/fixtures/stdlib/titan/ssl_allocator_app.titan"))
+    fs.write_file(workspace .. "/ca.pem", fs.read_file(support.TRUST_ROOT))
+    fs.write_file(workspace .. "/server.pem", fs.read_file(support.CERTIFICATE))
+    fs.write_file(workspace .. "/server-key.pem", fs.read_file(support.PRIVATE_KEY))
+    -- The hook object belongs only to this child. Linking it into the aggregate
+    -- would replace allocators for unrelated tests and miss startup ordering.
+    local object = command.fixture_object("ssl_allocator_fixture")
+    -- System providers retain final-link dependencies. Preserve the caller's
+    -- selected SDK flags and append its available pkg-config OpenSSL flags;
+    -- self-contained bundled archives also work when pkg-config is absent.
+    local libraries, library_why, library_code =
+      command.capture({"pkg-config", "--libs", "openssl"})
+    local flags = system.getenv("TITAN_EXTRA_LDFLAGS") or ""
+    if library_why == "exit" and library_code == 0 then
+      flags = flags .. " " .. libraries
+    end
+    local output, why, code = command.compile(workspace, "ssl_allocator_app",
+        {"--no-uv-bootstrap", "-X", object}, true,
+        {["TITAN_EXTRA_LDFLAGS"] = flags})
+    test.assert(why == "exit" and code == 0,
+                "could not compile SSL allocator fixture: " .. output)
+  end)
+  allocator_fixture_case(context, workspace, "client_context")
+  allocator_fixture_case(context, workspace, "ssl_object")
+  allocator_fixture_case(context, workspace, "input_bio")
+  allocator_fixture_case(context, workspace, "output_bio")
+  allocator_fixture_case(context, workspace, "server_context")
+  allocator_fixture_case(context, workspace, "pem_bio")
+  allocator_fixture_case(context, workspace, "trust_store_insertion")
+  allocator_fixture_case(context, workspace, "verification_host_copy")
+  allocator_fixture_case(context, workspace, "accepted_engine")
+  allocator_fixture_case(context, workspace, "input_growth")
+  allocator_fixture_case(context, workspace, "write_growth")
+  allocator_fixture_case(context, workspace, "shutdown")
+end

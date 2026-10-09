@@ -1,0 +1,897 @@
+#!/usr/bin/env python3
+"""Collect native GCC coverage and report executable lines in Titan sources.
+
+This host tool does not run inside the Titan test runner. GCC's JSON v2 is the
+only counter reader; gcovr 8.4 renders a filtered line-only JSON tracefile.
+"""
+
+import argparse
+import copy
+import datetime
+import gzip
+import hashlib
+import json
+import os
+from pathlib import Path
+import platform
+import re
+import shlex
+import shutil
+import signal
+import subprocess
+import sys
+import tempfile
+import time
+import uuid
+
+
+SCHEMA = 1
+RUN_SCHEMA = 2
+GCOVR_VERSION = "8.4"
+GCOVR_FORMAT = "0.14"
+
+# Fresh templates for gcovr 8.4's supported --html-template-dir interface. The
+# context and source highlighting remain owned by gcovr; only the presented
+# metric is restricted. Keep these embedded so installed CLI copies are whole.
+HTML_TEMPLATES = {
+    "directory_page.summary.html": """<table class="coverage">
+  <caption>Titan executable lines</caption>
+  <thead><tr><th scope="col">Covered</th><th scope="col">Executable</th><th scope="col">Coverage</th></tr></thead>
+  <tbody><tr><td>{{info.lines.exec}}</td><td>{{info.lines.total}}</td>
+    <td class="{{info.lines.class}}">{{info.lines.coverage}}%</td></tr></tbody>
+</table>
+""",
+    "directory_page.content.html": """<table class="file-list">
+  <thead><tr><th scope="col">Source</th><th scope="col">Covered lines</th><th scope="col">Executable lines</th><th scope="col">Line coverage</th></tr></thead>
+  <tbody>
+  {% for row in entries %}
+    <tr><th scope="row">{% if row.link is not none %}<a href="#{{row.link}}">{{row.filename}}</a>{% else %}{{row.filename}}{% endif %}</th>
+      <td>{{row.lines.exec}}</td><td>{{row.lines.total}}</td>
+      <td class="{{row.lines.class}}">{{row.lines.coverage}}%</td></tr>
+  {% endfor %}
+  </tbody>
+</table>
+""",
+    "source_page.summary.html": """<h2>{{filename}}</h2><p>{{lines.exec}} of {{lines.total}} executable lines covered
+  <span class="{{lines.class}}">({{lines.coverage}}%)</span></p>
+""",
+    "source_page.content.html": """<div class="file-source"><table>
+  <thead><tr><th scope="col">Line</th><th scope="col">Count</th><th scope="col">Source</th></tr></thead>
+  <tbody>
+  {% for row in source_lines %}
+    <tr class="source-line"><td class="lineno"><a id="{{html_filename}}|l{{row.lineno}}" href="#{{html_filename}}|l{{row.lineno}}">{{row.lineno}}</a></td>
+      <td class="linecount {{row.covclass}}">{% if row.covclass == "uncoveredLine" %}0{% else %}{{row.linecount}}{% endif %}</td>
+      <td class="src {{row.covclass}}">{{row.source}}</td></tr>
+  {% endfor %}
+  </tbody>
+</table></div>
+""",
+    "single_page.html": """{% extends "base.html" %}
+{% block summary %}{% include "directory_page.summary.html" %}{% endblock %}
+{% block content %}
+  {% for directory in directories %}
+    {% set entries = directory.entries %}
+    {% include "directory_page.content.html" %}
+  {% endfor %}
+  {% for file in files %}
+    <section id="{{file.link}}">
+      {% set filename = file.filename %}
+      {% set lines = file.lines %}
+      {% set html_filename = file.html_filename %}
+      {% set source_lines = file.source_lines %}
+      {% include "source_page.summary.html" %}
+      {% include "source_page.content.html" %}
+    </section>
+  {% endfor %}
+{% endblock %}
+""",
+}
+
+
+class CoverageError(Exception):
+    pass
+
+
+def canonical(value):
+    return json.dumps(value, sort_keys=True, separators=(",", ":")).encode("utf-8")
+
+
+def digest(path):
+    try:
+        return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+    except OSError as error:
+        raise CoverageError("cannot read {}: {}".format(path, error)) from error
+
+
+def physical_source_lines(path):
+    """Read LF/CRLF sources without broad Unicode line splitting.
+
+    Titan source locations count LF bytes. gcovr's source reader also treats a
+    bare CR as a line break, so that source form cannot be reported faithfully.
+    Unicode separators, NEL, vertical tab and formfeed remain within their line.
+    """
+    source = Path(path).read_bytes().decode("utf-8").replace("\r\n", "\n")
+    if "\r" in source:
+        raise CoverageError("coverage sources require LF or CRLF; bare carriage return in " + str(path))
+    lines = source.split("\n")
+    if lines[-1] == "":
+        lines.pop()
+    return lines
+
+
+def save_json(path, value):
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(path.name + ".tmp-" + uuid.uuid4().hex)
+    temporary.write_text(json.dumps(value, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    temporary.replace(path)
+
+
+def read_json(path):
+    try:
+        value = json.loads(Path(path).read_text(encoding="utf-8"))
+        if not isinstance(value, dict):
+            raise CoverageError("JSON must be an object: " + str(path))
+        return value
+    except (OSError, ValueError) as error:
+        raise CoverageError("cannot read JSON {}: {}".format(path, error)) from error
+
+
+def command_argv(command):
+    if isinstance(command, list):
+        argv = command
+    else:
+        argv = shlex.split(command)
+    if not argv or not all(isinstance(item, str) and item for item in argv):
+        raise CoverageError("empty or malformed tool command")
+    return argv
+
+
+def invoke(argv, cwd=None, env=None, allowed=(0,)):
+    try:
+        result = subprocess.run(argv, cwd=cwd, env=env, stdout=subprocess.PIPE,
+                                stderr=subprocess.PIPE, text=True, encoding="utf-8", errors="replace")
+    except OSError as error:
+        raise CoverageError("cannot execute {}: {}".format(argv[0], error)) from error
+    if allowed is not None and result.returncode not in allowed:
+        raise CoverageError("{} exited {}:\n{}{}".format(shlex.join(argv), result.returncode,
+                                                        result.stdout, result.stderr))
+    return result
+
+
+def tool_identity(command):
+    argv = command_argv(command)
+    executable = shutil.which(argv[0])
+    if executable is None:
+        raise CoverageError("tool not found: " + argv[0])
+    version = invoke(argv + ["--version"]).stdout.strip()
+    if not version:
+        raise CoverageError("tool returned an empty version: " + argv[0])
+    return {"argv": argv, "executable": str(Path(executable).resolve()),
+            "sha256": digest(executable), "version_output": version}
+
+
+def identify_backend(cc, gcov, gcovr=None):
+    compiler = tool_identity(cc)
+    profiler = tool_identity(gcov)
+    if not re.search(r"\bGCC\b|\bgcc\b", compiler["version_output"]):
+        raise CoverageError("native Titan coverage requires GCC 14+; this compiler is unsupported")
+    compiler["version"] = invoke(compiler["argv"] + ["-dumpfullversion", "-dumpversion"]).stdout.strip()
+    match = re.search(r"\b(\d+\.\d+(?:\.\d+)?)\b", profiler["version_output"])
+    if not match or match.group(1) != compiler["version"]:
+        raise CoverageError("GCC and gcov versions must match exactly")
+    if int(compiler["version"].split(".")[0]) < 14:
+        raise CoverageError("native Titan coverage requires GCC 14+ and gcov JSON v2")
+    profiler["version"] = match.group(1)
+    compiler["target"] = invoke(compiler["argv"] + ["-dumpmachine"]).stdout.strip()
+    for name in ("cc1", "libgcov.a"):
+        flag = "-print-prog-name=" if name == "cc1" else "-print-file-name="
+        path = invoke(compiler["argv"] + [flag + name]).stdout.strip()
+        if not Path(path).is_file():
+            raise CoverageError("GCC does not provide its expected {} tool/runtime".format(name))
+        compiler[name] = {"path": str(Path(path).resolve()), "sha256": digest(path)}
+    result = {"cc": compiler, "gcov": profiler}
+    if gcovr is not None:
+        result["gcovr"] = identify_reporter(gcovr)
+    return result
+
+
+def identify_reporter(command):
+    reporter = tool_identity(command)
+    match = re.search(r"\bgcovr\s+(\S+)", reporter["version_output"])
+    if not match or match.group(1) != GCOVR_VERSION:
+        raise CoverageError("native Titan reports require pinned gcovr " + GCOVR_VERSION)
+    reporter["version"] = match.group(1)
+    return reporter
+
+
+def c_filename(path):
+    # JSON's escapes are the corresponding C string escapes for filesystem paths.
+    return json.dumps(str(path), ensure_ascii=True)
+
+
+def gcov_json(gcov, notes, work, data=None):
+    """Read one explicit notes/counters pair without searching a mutable tree."""
+    work = Path(work)
+    work.mkdir(parents=True, exist_ok=False)
+    local_notes = work / "object.gcno"
+    shutil.copyfile(notes, local_notes)
+    if data is not None:
+        shutil.copyfile(data, work / "object.gcda")
+    result = invoke(command_argv(gcov) + ["--json-format", "--branch-counts", str(local_notes)], cwd=work, allowed=None)
+    save_json(work / "gcov-command.json", {"argv": command_argv(gcov) + ["--json-format", "--branch-counts", str(local_notes)],
+                                           "stdout": result.stdout, "stderr": result.stderr})
+    if result.returncode:
+        raise CoverageError("gcov exited {} for {}:\n{}{}".format(result.returncode, notes, result.stdout, result.stderr))
+    # GCC reports missing counters for notes-only objects. Every other diagnostic
+    # is an error; in particular a mismatched stamp must not become zero coverage.
+    diagnostics = [line for line in result.stderr.splitlines()
+                   if not (data is None and "cannot open data file, assuming not executed" in line)]
+    if diagnostics:
+        raise CoverageError("gcov diagnostics for {}:\n{}".format(notes, "\n".join(diagnostics)))
+    files = list(work.glob("*.gcov.json.gz"))
+    if len(files) != 1:
+        raise CoverageError("gcov did not produce exactly one JSON file for " + str(notes))
+    try:
+        value = json.loads(gzip.decompress(files[0].read_bytes()))
+    except (OSError, ValueError) as error:
+        raise CoverageError("malformed gcov JSON for " + str(notes)) from error
+    if str(value.get("format_version")) != "2" or not isinstance(value.get("files"), list):
+        raise CoverageError("gcov JSON v2 is required")
+    return value
+
+
+def gcov_path(value, filename):
+    path = Path(filename)
+    if not path.is_absolute():
+        path = Path(value["current_working_directory"]) / path
+    return os.path.normcase(str(path.resolve()))
+
+
+def raw_lines(value, source):
+    key = os.path.normcase(str(Path(source).resolve()))
+    found = {}
+    for file in value["files"]:
+        if gcov_path(value, file["file"]) == key:
+            for line in file["lines"]:
+                number, count = line["line_number"], line["count"]
+                if not isinstance(number, int) or number < 1 or not isinstance(count, int) or count < 0:
+                    raise CoverageError("invalid executable line/count in gcov JSON")
+                found[number] = found.get(number, 0) + count
+    return found
+
+
+def counter_path(prefix, embedded):
+    # GCC's GCOV_PREFIX_STRIP=0 relocation drops an absolute path's root/drive.
+    path = Path(embedded)
+    parts = path.parts[1:] if path.anchor else path.parts
+    return Path(prefix).joinpath(*parts)
+
+
+def probe_backend(cc, gcov, gcovr=None, output=None):
+    tools = identify_backend(cc, gcov, gcovr)
+    output = Path(output).resolve() if output else None
+    if output is not None:
+        output.mkdir(parents=True, exist_ok=False)
+    with tempfile.TemporaryDirectory(prefix="titan-coverage-probe-") as temporary:
+        work = Path(temporary)
+        # Spaces, quotes, two filenames, a multiline expansion and a separate
+        # notes-only translation unit are all part of the capability contract.
+        source = work / ('first "quoted" file.titan' if os.name != "nt" else "first space file.titan")
+        second = work / "second file.titan"
+        untouched = work / "notes only.titan"
+        for path in (source, second, untouched):
+            path.write_text("\n".join("probe line {}".format(i) for i in range(1, 11)) + "\n", encoding="utf-8")
+        c = work / "probe.c"
+        c.write_text("int choose(int x) {{\n"
+                     "#line 3 {}\nint y=x;\n#line 3 {}\ny+=1;\n#line 3 {}\ny+=1;\n"
+                     "#line 4 {}\nif(x) {{\n#line 6 {}\nreturn 99;\n"
+                     "#line 4 {}\n}}\n#line 7 {}\nreturn y;\n#line 1 {}\n}}\n"
+                     "#line 8 {}\nint never(void) {{return 9;}}\n"
+                     "#line 1 {}\nint main(void) {{return choose(0)==2?0:1;}}\n".format(
+                         *([c_filename(source)] * 7), c_filename(c), c_filename(second), c_filename(c)), encoding="utf-8")
+        never_c = work / "never.c"
+        never_c.write_text("#line 5 {}\nint notes_only(void) {{return 4;}}\n".format(c_filename(untouched)), encoding="utf-8")
+        flags = ["-O0", "-fno-lto", "-fPIC", "--coverage", "-fprofile-update=atomic"]
+        for stem in ("probe", "never"):
+            invoke(tools["cc"]["argv"] + flags + ["-dumpbase", stem + ".c", "-dumpbase-ext", ".c",
+                                                     "-c", str(work / (stem + ".c")), "-o", str(work / (stem + ".tmp.o"))])
+            (work / (stem + ".tmp.o")).replace(work / (stem + ".o"))
+        executable = work / ("probe.exe" if os.name == "nt" else "probe")
+        invoke(tools["cc"]["argv"] + ["--coverage", str(work / "probe.o"), "-o", str(executable)])
+        prefix = work / "fresh-counters"
+        env = os.environ.copy()
+        env.update({"GCOV_PREFIX": str(prefix), "GCOV_PREFIX_STRIP": "0"})
+        invoke([str(executable)], env=env)
+        data = counter_path(prefix, work / "probe.gcda")
+        if not data.is_file() or (work / "probe.gcda").exists():
+            raise CoverageError("GCC runtime did not honor isolated GCOV_PREFIX counters")
+        value = gcov_json(tools["gcov"]["argv"], work / "probe.gcno", work / "read-probe", data)
+        actual = raw_lines(value, source)
+        if not all(actual.get(line, 0) > 0 for line in (3, 4, 7)) or actual.get(6) != 0:
+            raise CoverageError("backend failed exact Titan line attribution/untaken-line probe")
+        if raw_lines(value, second).get(8) != 0:
+            raise CoverageError("backend failed multi-file uncalled-function probe")
+        zero = gcov_json(tools["gcov"]["argv"], work / "never.gcno", work / "read-never")
+        if raw_lines(zero, untouched) != {5: 0}:
+            raise CoverageError("backend failed notes-only module probe")
+        shared = work / ("provider.dll" if os.name == "nt" else "provider.so")
+        shared_flag = "-dynamiclib" if platform.system() == "Darwin" else "-shared"
+        invoke(tools["cc"]["argv"] + ["--coverage", shared_flag, str(work / "probe.o"), "-o", str(shared)])
+        provider_prefix = work / "provider-counters"
+        provider_env = env.copy()
+        provider_env["GCOV_PREFIX"] = str(provider_prefix)
+        threaded = ("import ctypes,sys,threading; p=ctypes.CDLL(sys.argv[1]); "
+                    "threads=[threading.Thread(target=lambda:[p.choose(0) for _ in range(16)]) for _ in range(4)]; "
+                    "[t.start() for t in threads]; [t.join() for t in threads]")
+        invoke([sys.executable, "-c", threaded, str(shared)], env=provider_env)
+        provider_data = counter_path(provider_prefix, work / "probe.gcda")
+        if not provider_data.is_file():
+            raise CoverageError("shared provider did not flush isolated counters at process exit")
+        provider_value = gcov_json(tools["gcov"]["argv"], work / "probe.gcno", work / "read-provider", provider_data)
+        provider_lines = raw_lines(provider_value, source)
+        if provider_lines.get(3) != 64 or provider_lines.get(6) != 0 or provider_lines.get(7) != 64:
+            raise CoverageError("shared provider/thread-safe atomic counters failed exact-result probe")
+        children_prefix = work / "joined-child-counters"
+        children_env = env.copy()
+        children_env["GCOV_PREFIX"] = str(children_prefix)
+        joined = ("import subprocess,sys; children=[subprocess.Popen([sys.argv[1]]) for _ in range(8)]; "
+                  "sys.exit(max(child.wait() for child in children))")
+        invoke([sys.executable, "-c", joined, str(executable)], env=children_env)
+        children_value = gcov_json(tools["gcov"]["argv"], work / "probe.gcno", work / "read-children",
+                                   counter_path(children_prefix, work / "probe.gcda"))
+        children_lines = raw_lines(children_value, source)
+        if children_lines.get(3) != 8 or children_lines.get(6) != 0 or children_lines.get(7) != 8:
+            raise CoverageError("joined child processes did not preserve locked counter updates")
+        evidence = {"version": SCHEMA, "backend": "gcc-gcov", "tools": tools,
+                    "platform": {"system": platform.system(), "machine": platform.machine()},
+                    "checks": {"exact_lines": True, "multiple_files": True, "unexecuted_function": True,
+                               "notes_only": True, "atomic_temp_object": True, "counter_relocation": True,
+                               "shared_provider_exit": True, "thread_safe_counters": True, "joined_processes": True},
+                    "raw_probe": value, "raw_notes_only": zero, "raw_provider": provider_value, "raw_children": children_value}
+        if output is not None:
+            save_json(output / "probe.json", evidence)
+        return evidence
+
+
+def manifest_identity(manifest):
+    unsigned = copy.deepcopy(manifest)
+    unsigned.pop("manifest_id", None)
+    return hashlib.sha256(canonical(unsigned)).hexdigest()
+
+
+def validate_inventory(manifest, check_hashes=False):
+    if manifest.get("version") != SCHEMA or manifest.get("backend") != "gcc-gcov":
+        raise CoverageError("unsupported coverage manifest schema/backend")
+    root = Path(manifest["root"])
+    if not root.is_absolute() or not root.is_dir():
+        raise CoverageError("manifest root must be an existing absolute directory")
+    sources = manifest.get("sources", [])
+    objects = manifest.get("objects", [])
+    providers = manifest.get("providers", [])
+    if not sources or not objects or not providers:
+        raise CoverageError("coverage inventory requires sources, objects and linked providers")
+    source_ids = set()
+    path_ids = set()
+    for source in sources:
+        report = source["report_path"]
+        report_path = Path(report)
+        if report_path.is_absolute() or ".." in report_path.parts or report_path.suffix != ".titan":
+            raise CoverageError("report_path must be a root-relative Titan source path")
+        if report in source_ids:
+            raise CoverageError("duplicate source report path: " + report)
+        source_ids.add(report)
+        compiled = Path(source["path"])
+        tracked = Path(source.get("tracked_path", root / report))
+        if not compiled.is_absolute() or not tracked.is_absolute():
+            raise CoverageError("source paths must be absolute")
+        source_key = os.path.normcase(str(compiled.resolve()))
+        if source_key in path_ids:
+            raise CoverageError("compiled source has multiple report identities: " + str(compiled))
+        path_ids.add(source_key)
+        if tracked.resolve() != (root / report).resolve():
+            raise CoverageError("tracked source does not match repository report path: " + report)
+        current = digest(compiled)
+        if current != digest(tracked):
+            raise CoverageError("staged and tracked source bytes differ: " + report)
+        if (check_hashes or "sha256" in source) and current != source.get("sha256"):
+            raise CoverageError("source changed since coverage build: " + report)
+        physical_source_lines(tracked)
+    object_ids = set()
+    notes_ids = set()
+    data_ids = set()
+    measured_sources = set()
+    for obj in objects:
+        if not obj.get("sources") or not set(obj["sources"]) <= source_ids:
+            raise CoverageError("object has absent or undeclared source inventory")
+        measured_sources.update(obj["sources"])
+        for key, identities in (("path", object_ids), ("notes", notes_ids), ("data", data_ids)):
+            path = Path(obj[key])
+            if not path.is_absolute() or str(path) in identities:
+                raise CoverageError("object paths must be absolute and unique: " + str(path))
+            identities.add(str(path))
+            if key != "data":
+                current = digest(path)
+                hash_key = "sha256" if key == "path" else "notes_sha256"
+                if (check_hashes or hash_key in obj) and current != obj.get(hash_key):
+                    raise CoverageError("coverage {} changed since build: {}".format(key, path))
+        if Path(obj["notes"]).with_suffix(".gcda") != Path(obj["data"]):
+            raise CoverageError("notes/counters filenames must have the same stable stem")
+    if measured_sources != source_ids:
+        raise CoverageError("declared sources have no instrumented object: " + ", ".join(sorted(source_ids - measured_sources)))
+    provider_ids = set()
+    for provider in providers:
+        path = Path(provider["path"])
+        if not path.is_absolute() or str(path) in provider_ids:
+            raise CoverageError("provider paths must be absolute and unique")
+        provider_ids.add(str(path))
+        if not provider.get("objects") or not set(provider["objects"]) <= object_ids:
+            raise CoverageError("provider links absent or undeclared objects")
+        current = digest(path)
+        if (check_hashes or "sha256" in provider) and current != provider.get("sha256"):
+            raise CoverageError("provider changed since coverage build: " + str(path))
+    linked_paths = set()
+    for item in manifest.get("link_inventory", []):
+        path = Path(item["path"])
+        if not path.is_absolute() or str(path) in linked_paths:
+            raise CoverageError("link inventory paths must be absolute and unique")
+        linked_paths.add(str(path))
+        current = digest(path)
+        if (check_hashes or "sha256" in item) and current != item.get("sha256"):
+            raise CoverageError("linked input changed since coverage build: " + str(path))
+    if manifest.get("settings", {}).get("metric") != "titan-executable-lines":
+        raise CoverageError("manifest must declare Titan executable-line coverage")
+
+
+def seal_manifest(path, cc=None, gcov=None, gcovr=None, unmeasured_inputs=None):
+    manifest = read_json(path)
+    manifest.pop("manifest_id", None)
+    validate_inventory(manifest)
+    inventory = manifest.setdefault("link_inventory", [])
+    known = {os.path.normcase(str(Path(item["path"]).resolve())) for item in inventory}
+    for filename in unmeasured_inputs or []:
+        resolved = str(Path(filename).resolve())
+        identity = os.path.normcase(resolved)
+        if identity not in known:
+            inventory.append({"path": resolved, "role": "unmeasured-consumer-input",
+                              "sha256": digest(resolved)})
+            known.add(identity)
+    settings = manifest.get("settings", {})
+    cc = cc or settings.get("cc") or os.environ.get("CC", "gcc")
+    gcov = gcov or settings.get("gcov") or os.environ.get("GCOV", "gcov")
+    probe = probe_backend(cc, gcov, gcovr)
+    if "cc_version" in settings and settings["cc_version"] != probe["tools"]["cc"]["version"]:
+        raise CoverageError("seal compiler version differs from the coverage build")
+    if "backend_probe" in settings:
+        built_probe = json.loads(settings["backend_probe"])
+        if any(built_probe.get("tools", {}).get(key) != probe["tools"][key] for key in ("cc", "gcov")):
+            raise CoverageError("seal compiler/profiler identity differs from the compilation capability probe")
+    manifest["tools"] = probe["tools"]
+    manifest["platform"] = probe["platform"]
+    manifest["capability"] = probe["checks"]
+    for source in manifest["sources"]:
+        source["sha256"] = digest(source["path"])
+        source["tracked_path"] = str(Path(source.get("tracked_path", Path(manifest["root"]) / source["report_path"])))
+    for obj in manifest["objects"]:
+        obj["sha256"] = digest(obj["path"])
+        obj["notes_sha256"] = digest(obj["notes"])
+    for provider in manifest["providers"]:
+        provider["sha256"] = digest(provider["path"])
+    for item in manifest.get("link_inventory", []):
+        item["sha256"] = digest(item["path"])
+    manifest["manifest_id"] = manifest_identity(manifest)
+    save_json(path, manifest)
+    return manifest
+
+
+def load_manifest(path):
+    manifest = read_json(path)
+    if manifest.get("manifest_id") != manifest_identity(manifest):
+        raise CoverageError("coverage manifest is unsealed or its provenance changed; run titan-coverage seal")
+    validate_inventory(manifest, check_hashes=True)
+    tools = identify_backend(manifest["tools"]["cc"]["argv"], manifest["tools"]["gcov"]["argv"])
+    if tools != {key: manifest["tools"][key] for key in ("cc", "gcov")}:
+        raise CoverageError("compiler/profiler identity changed since coverage build")
+    if manifest["platform"] != {"system": platform.system(), "machine": platform.machine()}:
+        raise CoverageError("coverage evidence belongs to another operating system/architecture")
+    return manifest
+
+
+def utc_now():
+    return datetime.datetime.now(datetime.timezone.utc).isoformat()
+
+
+def stop_run_processes(child, interrupted=False):
+    """Bound leader cleanup and retire its whole private POSIX process group."""
+    if os.name != "nt":
+        try:
+            os.killpg(child.pid, signal.SIGINT if interrupted else signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+    elif child.poll() is None:
+        child.terminate()
+    try:
+        child.wait(timeout=2)
+    except subprocess.TimeoutExpired:
+        pass
+    # Reaping the leader says nothing about descendants which ignored the
+    # first signal and may still own output descriptors or coverage counters.
+    if os.name != "nt":
+        try:
+            os.killpg(child.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+    elif child.poll() is None:
+        child.kill()
+    try:
+        child.wait(timeout=2)
+        return True
+    except subprocess.TimeoutExpired:
+        return False
+
+
+def run_process_group_exists(group):
+    try:
+        os.killpg(group, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        # Lack of permission cannot establish that an observed group is empty.
+        return True
+    return True
+
+
+def wait_run_process_group_empty(group, timeout=2):
+    deadline = time.monotonic() + timeout
+    while run_process_group_exists(group):
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(0.01)
+    return True
+
+
+def execute_run(manifest_path, run_path, command, expected=None, timeout=None):
+    manifest = load_manifest(manifest_path)
+    if not command:
+        raise CoverageError("run requires a command after --")
+    run_path = Path(run_path).resolve()
+    try:
+        run_path.mkdir(parents=True, exist_ok=False)
+    except FileExistsError as error:
+        raise CoverageError("run directory already exists; choose a fresh run-owned directory") from error
+    prefix = run_path / "counters"
+    prefix.mkdir()
+    env = os.environ.copy()
+    env.update({"GCOV_PREFIX": str(prefix), "GCOV_PREFIX_STRIP": "0",
+                "TITAN_COVERAGE_RUN": str(run_path), "TITAN_COVERAGE_MANIFEST": str(Path(manifest_path).resolve())})
+    expected = list(expected or [obj["path"] for obj in manifest["objects"] if obj.get("expect_data", False)])
+    if not set(expected) <= {obj["path"] for obj in manifest["objects"]}:
+        raise CoverageError("expected counters refer to an undeclared object")
+    receipt = {"version": RUN_SCHEMA, "run_id": uuid.uuid4().hex, "manifest_id": manifest["manifest_id"],
+               "command": command, "cwd": str(Path.cwd()), "started": utc_now(),
+               "expected_objects": expected, "state": "running", "counter_prefix": str(prefix)}
+    if os.name != "nt":
+        receipt.update({"process_ownership": "posix-process-group-v1", "process_group_id": None,
+                        "process_group_empty_confirmed": False, "group_retirement_requested": False})
+    save_json(run_path / "run.json", receipt)
+    child = None
+    try:
+        child = subprocess.Popen(command, env=env, start_new_session=(os.name != "nt"))
+        if os.name != "nt":
+            receipt["process_group_id"] = child.pid
+        try:
+            status = child.wait(timeout=timeout)
+            receipt["state"] = "complete" if status >= 0 else "incomplete"
+        except subprocess.TimeoutExpired:
+            receipt["group_retirement_requested"] = os.name != "nt"
+            receipt["leader_reaped"] = stop_run_processes(child)
+            status = 124
+            receipt["state"] = "incomplete"
+            receipt["reason"] = "forced termination at timeout"
+    except OSError as error:
+        status = 127
+        receipt["state"] = "incomplete"
+        receipt["reason"] = str(error)
+    except KeyboardInterrupt:
+        receipt["group_retirement_requested"] = os.name != "nt"
+        receipt["leader_reaped"] = child is not None and stop_run_processes(child, interrupted=True)
+        status = 130
+        receipt["state"] = "incomplete"
+        receipt["reason"] = "interrupted"
+    if child is not None:
+        if os.name != "nt":
+            # A reaped leader may leave writers in its private group. Observe
+            # that group before collecting any counters; even a zombie-only
+            # observation is conservatively incomplete, without process scans.
+            if run_process_group_exists(child.pid) and not receipt["group_retirement_requested"]:
+                receipt["group_retirement_requested"] = True
+                receipt["leader_reaped"] = stop_run_processes(child)
+                receipt["state"] = "incomplete"
+                receipt["reason"] = "owned process group remained after leader exit"
+                status = 125
+            receipt["process_group_empty_confirmed"] = wait_run_process_group_empty(child.pid)
+            if not receipt["process_group_empty_confirmed"]:
+                receipt["state"] = "incomplete"
+                receipt["counter_collection_skipped"] = "owned process group emptiness was not confirmed"
+        receipt["leader_exit_status"] = child.returncode
+    receipt["exit_status"] = status
+    receipt["ended"] = utc_now()
+    inventory = []
+    if os.name == "nt" or receipt["process_group_empty_confirmed"]:
+        for path in sorted(prefix.rglob("*.gcda")):
+            inventory.append({"path": str(path), "sha256": digest(path)})
+    receipt["counters"] = inventory
+    expected_paths = {str(counter_path(prefix, obj["data"])) for obj in manifest["objects"] if obj["path"] in expected}
+    missing = expected_paths - {item["path"] for item in inventory}
+    if missing:
+        receipt["state"] = "incomplete"
+        receipt["missing_counters"] = sorted(missing)
+    save_json(run_path / "run.json", receipt)
+    return status if status >= 0 else 128 - status
+
+
+def load_run(path, manifest):
+    path = Path(path).resolve()
+    receipt = read_json(path / "run.json")
+    if receipt.get("version") != RUN_SCHEMA or receipt.get("manifest_id") != manifest["manifest_id"]:
+        raise CoverageError("run provenance is legacy or does not match the declared coverage build; collect a fresh run")
+    if receipt.get("state") not in ("complete", "incomplete") or "exit_status" not in receipt:
+        raise CoverageError("run has not exited/collected; cannot report its counters")
+    if os.name != "nt":
+        group = receipt.get("process_group_id")
+        if (receipt.get("process_ownership") != "posix-process-group-v1" or
+                type(group) is not int or group <= 0 or
+                type(receipt.get("leader_exit_status")) is not int or
+                type(receipt.get("group_retirement_requested")) is not bool or
+                receipt.get("process_group_empty_confirmed") is not True):
+            raise CoverageError("run owned process group was not confirmed empty; cannot report its counters")
+        if receipt["state"] == "complete" and (receipt["group_retirement_requested"] or
+                receipt["leader_exit_status"] < 0 or receipt["exit_status"] != receipt["leader_exit_status"]):
+            raise CoverageError("complete run disagrees with its owned process group lifecycle")
+    prefix = path / "counters"
+    if receipt.get("counter_prefix") != str(prefix):
+        raise CoverageError("run counter ownership changed")
+    expected_paths = {str(counter_path(prefix, obj["data"])) for obj in manifest["objects"]}
+    counters = {item["path"]: item["sha256"] for item in receipt.get("counters", [])}
+    actual = {str(item): digest(item) for item in prefix.rglob("*.gcda")}
+    if actual != counters:
+        raise CoverageError("run counters changed after collection (live child or stale accumulation)")
+    if not set(counters) <= expected_paths:
+        raise CoverageError("run contains counters outside the instrumented object inventory")
+    return receipt, counters
+
+
+def normalized_trace(manifest, raw_values):
+    """Filter explicit sources; keep genuine gcov lines and counts, no heuristics."""
+    lookup = {os.path.normcase(str(Path(source["path"]).resolve())): source for source in manifest["sources"]}
+    counts = {source["report_path"]: {} for source in manifest["sources"]}
+    text_lines = {source["report_path"]: physical_source_lines(source["tracked_path"])
+                  for source in manifest["sources"]}
+    seen = set()
+    for obj, value in raw_values:
+        allowed = set(obj["sources"])
+        for file in value["files"]:
+            source = lookup.get(gcov_path(value, file["file"]))
+            if source is None:
+                if Path(file["file"]).suffix == ".titan":
+                    raise CoverageError("gcov contains a Titan source outside the declared inventory: " + file["file"])
+                continue
+            report = source["report_path"]
+            if report not in allowed:
+                raise CoverageError("object gcov source disagrees with its contributor inventory: " + report)
+            seen.add(report)
+            line_count = len(text_lines[report])
+            for line in file["lines"]:
+                number, count = line.get("line_number"), line.get("count")
+                if not isinstance(number, int) or number < 1 or number > line_count:
+                    raise CoverageError("gcov line is outside its tracked Titan source: {}:{}".format(report, number))
+                if not isinstance(count, int) or count < 0:
+                    raise CoverageError("gcov count is malformed: " + report)
+                counts[report][number] = counts[report].get(number, 0) + count
+    missing = {source["report_path"] for source in manifest["sources"]
+               if source["report_path"] not in seen and not source.get("allow_empty", False)}
+    if missing:
+        raise CoverageError("declared sources have no gcov notes attribution: " + ", ".join(sorted(missing)))
+    return {"gcovr/format_version": GCOVR_FORMAT,
+            "files": [{"file": report, "functions": [],
+                       "lines": [{"line_number": number, "count": count, "branches": [],
+                                  "gcovr/md5": hashlib.md5(text_lines[report][number - 1].encode("utf-8"), usedforsecurity=False).hexdigest()}
+                                 for number, count in sorted(lines.items())]}
+                      for report, lines in sorted(counts.items())]}
+
+
+def compatible_manifest_identity(manifest):
+    """Merge source-equivalent builds, while retaining each image's provenance.
+
+    Test/app mode, staging roots, formatter choice and provider layout may differ.
+    The actual source identities and compiler/coverage semantics must agree.
+    """
+    settings = manifest["settings"]
+    relevant_settings = {key: settings.get(key) for key in
+                         ("metric", "line_mapping", "compile_prefix", "compiler_identity")}
+    sources = sorted((source["report_path"], source["module"], source["sha256"],
+                      os.path.normcase(str(Path(source["tracked_path"]).resolve())))
+                     for source in manifest["sources"])
+    return {"version": manifest["version"], "backend": manifest["backend"],
+            "root": os.path.normcase(str(Path(manifest["root"]).resolve())),
+            "platform": manifest["platform"], "tools": {key: manifest["tools"][key] for key in ("cc", "gcov")},
+            "sources": sources, "settings": relevant_settings}
+
+
+def merge_line_traces(traces):
+    files = {}
+    for trace in traces:
+        for source in trace["files"]:
+            lines = files.setdefault(source["file"], {})
+            for line in source["lines"]:
+                number = line["line_number"]
+                if number in lines:
+                    if lines[number]["gcovr/md5"] != line["gcovr/md5"]:
+                        raise CoverageError("coverage source line identity changed while merging")
+                    lines[number]["count"] += line["count"]
+                else:
+                    lines[number] = copy.deepcopy(line)
+    return {"gcovr/format_version": GCOVR_FORMAT,
+            "files": [{"file": path, "functions": [], "lines": [line for _, line in sorted(lines.items())]}
+                      for path, lines in sorted(files.items())]}
+
+
+def report_runs(manifest_paths, runs, output, gcovr, allow_incomplete=False):
+    if isinstance(manifest_paths, (str, Path)):
+        manifest_paths = [manifest_paths]
+    manifests = [load_manifest(path) for path in manifest_paths]
+    if not manifests:
+        raise CoverageError("report requires at least one coverage manifest")
+    manifest = manifests[0]
+    compatibility = compatible_manifest_identity(manifest)
+    if any(compatible_manifest_identity(item) != compatibility for item in manifests[1:]):
+        raise CoverageError("coverage manifests have incompatible source/tool/platform/compilation provenance")
+    by_manifest = {item["manifest_id"]: item for item in manifests}
+    if len(by_manifest) != len(manifests):
+        raise CoverageError("the same coverage manifest was supplied twice")
+    reporter = identify_reporter(gcovr)
+    receipts = []
+    inventories = []
+    run_manifests = []
+    run_ids = set()
+    for path in runs:
+        manifest_id = read_json(Path(path).resolve() / "run.json").get("manifest_id")
+        if manifest_id not in by_manifest:
+            raise CoverageError("run provenance does not match any supplied coverage manifest")
+        run_manifest = by_manifest[manifest_id]
+        receipt, inventory = load_run(path, run_manifest)
+        if receipt["run_id"] in run_ids:
+            raise CoverageError("the same coverage run was supplied twice")
+        run_ids.add(receipt["run_id"])
+        receipts.append(receipt)
+        inventories.append(inventory)
+        run_manifests.append(run_manifest)
+    if not receipts:
+        raise CoverageError("report requires at least one completed or explicitly incomplete run")
+    output = Path(output).resolve()
+    output.mkdir(parents=True, exist_ok=False)
+    traces = []
+    for index, (receipt, inventory, run_manifest) in enumerate(zip(receipts, inventories, run_manifests)):
+        raw_values = []
+        for object_index, obj in enumerate(run_manifest["objects"]):
+            data_path = str(counter_path(receipt["counter_prefix"], obj["data"]))
+            value = gcov_json(run_manifest["tools"]["gcov"]["argv"], obj["notes"],
+                              output / "raw" / ("run-{}-object-{}".format(index, object_index)),
+                              data_path if data_path in inventory else None)
+            if data_path in inventory and digest(output / "raw" / ("run-{}-object-{}".format(index, object_index)) / "object.gcda") != inventory[data_path]:
+                raise CoverageError("run counters changed during collection")
+            raw_values.append((obj, value))
+        traces.append(normalized_trace(run_manifest, raw_values))
+    trace = merge_line_traces(traces)
+    save_json(output / "lines.json", trace)
+    incomplete = [item["run_id"] for item in receipts if item["state"] != "complete"]
+    failed = [item["run_id"] for item in receipts if item["exit_status"] != 0]
+    totals = sum(len(file["lines"]) for file in trace["files"])
+    hits = sum(line["count"] > 0 for file in trace["files"] for line in file["lines"])
+    summary = {"version": SCHEMA, "metric": "titan-executable-lines", "manifest_id": manifest["manifest_id"] if len(manifests) == 1 else None,
+               "manifest_ids": [item["manifest_id"] for item in manifests],
+               "platform": manifest["platform"], "reporter": reporter, "runs": receipts,
+               "complete": not incomplete, "tests_passed": not failed,
+               "incomplete_runs": incomplete, "failed_runs": failed,
+               "lines_total": totals, "lines_covered": hits,
+               "line_percent": 100.0 * hits / totals if totals else None}
+    summary["html_templates"] = {name: hashlib.sha256(contents.encode("utf-8")).hexdigest()
+                                 for name, contents in HTML_TEMPLATES.items()}
+    save_json(output / "summary.json", summary)
+    if len(manifests) == 1:
+        save_json(output / "build.json", manifest)
+    else:
+        for index, item in enumerate(manifests):
+            save_json(output / ("build-{}.json".format(index)), item)
+    # A minimal empty config disables any ambient gcovr.cfg from a user's tree.
+    config = output / "gcovr.cfg"
+    config.write_text("", encoding="utf-8")
+    templates = output / "html-templates"
+    templates.mkdir()
+    for name, contents in HTML_TEMPLATES.items():
+        (templates / name).write_text(contents, encoding="utf-8")
+    args = reporter["argv"] + ["--config", str(config), "--root", manifest["root"],
+                              "--add-tracefile", str(output / "lines.json"),
+                              "--no-markers", "--no-exclude-noncode-lines", "--lcov", str(output / "coverage.gcovr.info"),
+                              "--cobertura", str(output / "coverage.xml"),
+                              "--html-details", str(output / "coverage.html"), "--html-single-page", "static",
+                              "--html-template-dir", str(templates),
+                              "--html-title", "Titan executable-line coverage" + (" (INCOMPLETE)" if incomplete else "")]
+    rendered = invoke(args, cwd=manifest["root"])
+    save_json(output / "report-command.json", {"argv": args, "stdout": rendered.stdout, "stderr": rendered.stderr})
+    source_paths = {os.path.normcase(str(Path(source["tracked_path"]).resolve())): source["report_path"]
+                    for source in manifest["sources"]}
+    lcov_lines = []
+    for line in (output / "coverage.gcovr.info").read_text(encoding="utf-8").splitlines():
+        if line.startswith("SF:"):
+            key = os.path.normcase(str(Path(line[3:]).resolve()))
+            if key not in source_paths:
+                raise CoverageError("reporter emitted an undeclared source: " + line[3:])
+            line = "SF:" + source_paths[key].replace("\\", "/")
+        # The public interchange report declares only the supported line metric.
+        if line.startswith(("FNF:", "FNH:", "BRF:", "BRH:")):
+            continue
+        lcov_lines.append(line)
+    (output / "coverage.info").write_text("\n".join(lcov_lines) + "\n", encoding="utf-8")
+    for item in manifests:
+        validate_inventory(item, check_hashes=True)
+    for path, item in zip(runs, run_manifests):
+        load_run(path, item)
+    print("Titan executable lines: {}/{}{}".format(hits, totals, " (incomplete)" if incomplete else ""))
+    # Partial reports remain available but are never returned as complete success.
+    if incomplete and not allow_incomplete:
+        return 2
+    if failed:
+        return 1
+    return 0
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__)
+    commands = parser.add_subparsers(dest="action", required=True)
+    probe = commands.add_parser("probe", help="verify actual GCC/gcov attribution and counter isolation")
+    seal = commands.add_parser("seal", help="verify and hash a compiler-written build inventory")
+    for item in (probe, seal):
+        item.add_argument("--cc", default=os.environ.get("CC", "gcc") if item is probe else None)
+        item.add_argument("--gcov", default=os.environ.get("GCOV", "gcov") if item is probe else None)
+        item.add_argument("--gcovr", default=None, help="also verify pinned report tool (optional while compiling)")
+    probe.add_argument("--output", help="new directory for probe JSON evidence")
+    seal.add_argument("--manifest", required=True)
+    seal.add_argument("--unmeasured-input", action="append", default=[],
+                      help="hash a separate uninstrumented consumer or test input; repeat as needed")
+    run = commands.add_parser("run", help="execute with fresh counters and an exit-status receipt")
+    run.add_argument("--manifest", required=True)
+    run.add_argument("--run", required=True, help="new run-owned directory")
+    run.add_argument("--expect-object", action="append", default=[])
+    run.add_argument("--timeout", type=float)
+    run.add_argument("command", nargs=argparse.REMAINDER)
+    report = commands.add_parser("report", help="merge matching runs and render LCOV, HTML and Cobertura")
+    report.add_argument("--manifest", action="append", required=True,
+                        help="sealed build inventory; repeat for compatible test/app images")
+    report.add_argument("--run", action="append", required=True)
+    report.add_argument("--output", required=True, help="new report directory")
+    report.add_argument("--gcovr", default=os.environ.get("GCOVR", "gcovr"))
+    report.add_argument("--allow-incomplete", action="store_true",
+                        help="accept incomplete collection explicitly; failed test statuses still fail")
+    args = parser.parse_args(argv)
+    try:
+        if args.action == "probe":
+            value = probe_backend(args.cc, args.gcov, args.gcovr, args.output)
+            print(json.dumps({"backend": value["backend"], "tools": value["tools"], "checks": value["checks"]}, sort_keys=True))
+            return 0
+        if args.action == "seal":
+            manifest = seal_manifest(args.manifest, args.cc, args.gcov, args.gcovr,
+                                     args.unmeasured_input)
+            print(manifest["manifest_id"])
+            return 0
+        if args.action == "run":
+            command = args.command[1:] if args.command[:1] == ["--"] else args.command
+            return execute_run(args.manifest, args.run, command, args.expect_object, args.timeout)
+        return report_runs(args.manifest, args.run, args.output, args.gcovr, args.allow_incomplete)
+    except (CoverageError, KeyError, TypeError, ValueError, OSError) as error:
+        print("titan-coverage: " + str(error), file=sys.stderr)
+        return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main())

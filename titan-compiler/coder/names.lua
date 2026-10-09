@@ -110,11 +110,23 @@ end
 -- driver invokes the C compiler. Nodes without a `loc` (synthesized AST) emit
 -- nothing.
 function emitline(node)
+    -- Coverage uses scoped metadata until after optional C formatting. Legacy
+    -- point stamps must not extend ownership into wrappers or housekeeping.
+    if coder._coverage_source_regions then return "" end
     if not coder._emit_line_directives then return "" end
     local loc = node and node.loc
     if not loc or not loc.line or not loc.filename then return "" end
     return "#line " .. tostring(loc.line) .. " "
         .. c_string_literal(loc.filename) .. "\n"
+end
+
+function coverage_region(node, code, ctx)
+    if not coder._coverage_source_regions or code == ""
+        or ctx and ctx._coverage_generated then return code end
+    local loc = node and node.loc
+    if not loc or not loc.line or not loc.filename then return code end
+    return require("titan-compiler.coverage_lines").region(
+        code, "source", loc.filename, loc.line)
 end
 
 function getslot(typ --[[:table]], dst --[[:string?]], src --[[:string]])

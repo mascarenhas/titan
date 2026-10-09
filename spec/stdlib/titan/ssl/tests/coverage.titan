@@ -1,0 +1,496 @@
+-- Public TLS input, ownership, and EOF contracts absent from the baseline.
+local FIXTURES = "spec/fixtures/ssl/coverage-"
+
+local function expect_ssl_failure(action: function (): (), operation: string,
+                                  name: string, message: string?)
+  local caught = false
+  do
+    action()
+  catch
+    test.assert(error is ssl.Error,
+                "expected a nominal SSL failure: " .. common.error_text(error))
+    local failure = error as ssl.Error
+    test.assert(failure.operation == operation and failure.name == name,
+                "unexpected TLS failure " .. failure.name .. " from " ..
+                  failure.operation)
+    test.assert(#failure.message > 0, "TLS failure lost its diagnostic")
+    if message ~= nil then
+      test.assert(failure.message == message,
+                  "TLS failure changed its public diagnostic: " .. failure.message)
+    end
+    caught = true
+  end
+  test.assert(caught, "invalid TLS input was accepted")
+end
+
+local function pem_file(context: test.Context, bytes: string): string
+  local path = support.temporary_path(context)
+  fs.write_file(path, bytes)
+  return path
+end
+
+function test_ssl_coverage_decodes_certificate_blocks_strictly(
+    context: test.Context)
+  context:run("invalid_trust_der", function (child: test.Context)
+    runtime_test.run(function ()
+      local invalid = pem_file(child,
+        "-----BEGIN CERTIFICATE-----\nMAA=\n-----END CERTIFICATE-----\n")
+      expect_ssl_failure(function ()
+        ssl.connect("127.0.0.1", 40000, invalid)
+      end, "ssl.client.trust", "OPENSSL")
+    end)
+  end)
+  context:run("invalid_server_der", function (child: test.Context)
+    runtime_test.run(function ()
+      local invalid = pem_file(child,
+        "-----BEGIN CERTIFICATE-----\nMAA=\n-----END CERTIFICATE-----\n")
+      expect_ssl_failure(function ()
+        ssl.listen("127.0.0.1", 40000, invalid, support.PRIVATE_KEY)
+      end, "ssl.server.certificate", "OPENSSL")
+    end)
+  end)
+  context:run("trailing_trust_der", function (_: test.Context)
+    runtime_test.run(function ()
+      expect_ssl_failure(function ()
+        ssl.connect("127.0.0.1", 40000,
+                    FIXTURES .. "certificate-trailing-der.pem")
+      end, "ssl.client.trust", "OPENSSL",
+          "certificate PEM block has trailing DER data")
+    end)
+  end)
+  context:run("trailing_server_der", function (_: test.Context)
+    runtime_test.run(function ()
+      expect_ssl_failure(function ()
+        ssl.listen("127.0.0.1", 40000,
+                   FIXTURES .. "certificate-trailing-der.pem", support.PRIVATE_KEY)
+      end, "ssl.server.certificate", "OPENSSL",
+          "certificate PEM block has trailing DER data")
+    end)
+  end)
+  context:run("unsupported_authentication_key", function (_: test.Context)
+    runtime_test.run(function ()
+      -- X25519 is a valid public-key encoding for key exchange, but cannot
+      -- authenticate a TLS server certificate. Rejection owns the decoded X509.
+      expect_ssl_failure(function ()
+        ssl.listen("127.0.0.1", 40000,
+                   FIXTURES .. "unsupported-certificate.pem", support.PRIVATE_KEY)
+      end, "ssl.server.certificate", "OPENSSL")
+    end)
+  end)
+end
+
+function test_ssl_coverage_rejects_encrypted_and_malformed_private_keys(
+    context: test.Context)
+  context:run("invalid_der", function (child: test.Context)
+    runtime_test.run(function ()
+      local invalid = pem_file(child,
+        "-----BEGIN PRIVATE KEY-----\nMAA=\n-----END PRIVATE KEY-----\n")
+      expect_ssl_failure(function ()
+        ssl.listen("127.0.0.1", 40000, support.CERTIFICATE, invalid)
+      end, "ssl.server.private-key", "OPENSSL")
+    end)
+  end)
+  context:run("trailing_der", function (_: test.Context)
+    runtime_test.run(function ()
+      expect_ssl_failure(function ()
+        ssl.listen("127.0.0.1", 40000, support.CERTIFICATE,
+                   FIXTURES .. "key-trailing-der.pem")
+      end, "ssl.server.private-key", "OPENSSL",
+          "private-key PEM block has trailing DER data")
+    end)
+  end)
+  context:run("encrypted_pkcs8_label", function (child: test.Context)
+    runtime_test.run(function ()
+      local encrypted = pem_file(child,
+        "-----BEGIN ENCRYPTED PRIVATE KEY-----\nAA==\n" ..
+        "-----END ENCRYPTED PRIVATE KEY-----\n")
+      expect_ssl_failure(function ()
+        ssl.listen("127.0.0.1", 40000, support.CERTIFICATE, encrypted)
+      end, "ssl.server.private-key", "OPENSSL",
+          "encrypted private keys are not supported")
+    end)
+  end)
+  context:run("encrypted_traditional_header", function (_: test.Context)
+    runtime_test.run(function ()
+      expect_ssl_failure(function ()
+        ssl.listen("127.0.0.1", 40000, support.CERTIFICATE,
+                   FIXTURES .. "encrypted-rsa-key.pem")
+      end, "ssl.server.private-key", "OPENSSL",
+          "encrypted private keys are not supported")
+    end)
+  end)
+  context:run("unsupported_authentication_key", function (_: test.Context)
+    runtime_test.run(function ()
+      -- A decoded X25519 private key is valid key-exchange material, but is
+      -- not a server authentication key for the SSL context.
+      expect_ssl_failure(function ()
+        ssl.listen("127.0.0.1", 40000, support.CERTIFICATE,
+                   FIXTURES .. "unsupported-key.pem")
+      end, "ssl.server.private-key", "OPENSSL")
+    end)
+  end)
+  context:run("mismatched_key", function (_: test.Context)
+    runtime_test.run(function ()
+      expect_ssl_failure(function ()
+        ssl.listen("127.0.0.1", 40000, support.CERTIFICATE,
+                   FIXTURES .. "mismatched-key.pem")
+      end, "ssl.server.private-key", "OPENSSL")
+    end)
+  end)
+end
+
+function test_ssl_coverage_trusted_chain_and_multiple_private_keys(
+    context: test.Context)
+  runtime_test.run(function ()
+    local trusted = fs.read_file(FIXTURES .. "trusted-ca.pem")
+    local chain = pem_file(context,
+      fs.read_file(support.CERTIFICATE) .. "\n" .. trusted)
+    local key = fs.read_file(support.PRIVATE_KEY)
+    local keys = pem_file(context, key .. "\n" .. key)
+    local server, port = support.listen_available(45800, chain, keys)
+    defer server:close()
+    local peer = async.run<|value, value|>(function (): value
+      local connection = server:accept()
+      defer connection:abort()
+      connection:write("trusted chain\n")
+      test.assert(connection:read_until("\n", true) == "multiple keys")
+      return nil
+    end)
+    task_support.cleanup_task(peer, "TLS trusted-chain peer")
+    local connection = ssl.connect("localhost", port,
+                                   FIXTURES .. "trusted-ca.pem")
+    defer connection:abort()
+    test.assert(connection:read_until("\n", true) == "trusted chain")
+    connection:write("multiple keys\n")
+    async.join(peer)
+    test.assert(peer:status():has_succeeded(),
+                "trusted certificate or trailing private key was not retained safely")
+  end)
+end
+
+function test_ssl_coverage_listener_validation_and_closed_accept(
+    context: test.Context)
+  runtime_test.run(function ()
+    common.assert_raises_contains(function ()
+      ssl.listen("127.0.0.1", 40000, "", support.PRIVATE_KEY)
+    end, "ssl.listen: certificate file must not be empty")
+    common.assert_raises_contains(function ()
+      ssl.listen("127.0.0.1", 40000, support.CERTIFICATE, "")
+    end, "ssl.listen: private key file must not be empty")
+    -- Invalid TCP arguments fail after the TLS context has been acquired.
+    common.assert_raises_contains(function ()
+      ssl.listen("127.0.0.1", 65536, support.CERTIFICATE, support.PRIVATE_KEY)
+    end, "listen port must be between 0 and 65535")
+    local server = support.listen_available(45900, support.CERTIFICATE,
+                                           support.PRIVATE_KEY)
+    defer server:close()
+    server:close()
+    common.assert_raises_contains(function () server:accept() end,
+                                   "ssl.accept: Server is closed")
+    server:close()
+  end)
+end
+
+function test_ssl_coverage_default_context_adoption_is_lazy(
+    context: test.Context)
+  runtime_test.run(function ()
+    local server, port = net_support.listen_available(46000)
+    defer server:close()
+    local peer = async.run<|value, value|>(function (): value
+      local accepted = server:accept()
+      defer accepted:close()
+      test.assert(accepted:read() == nil,
+                  "lazy default-trust adoption sent a ClientHello")
+      return nil
+    end)
+    task_support.cleanup_task(peer, "TLS default-context adoption peer")
+    local connection = ssl.client(net.connect("127.0.0.1", port), "localhost")
+    connection:abort()
+    connection:abort()
+    async.join(peer)
+    test.assert(peer:status():has_succeeded(),
+                "default trust context adoption failed to close its transport")
+  end)
+end
+
+function test_ssl_coverage_scoped_ip_verification_keeps_certificate_identity(
+    context: test.Context)
+  runtime_test.run(function ()
+    local server, port = support.listen_available(46100, support.CERTIFICATE,
+                                                 support.PRIVATE_KEY)
+    defer server:close()
+    local peer = async.run<|value, value|>(function (): value
+      local accepted = server:accept()
+      defer accepted:abort()
+      accepted:write("verified IPv6 identity\n")
+      test.assert(accepted:read_until("\n", true) == "scope removed only for X509")
+      return nil
+    end)
+    task_support.cleanup_task(peer, "TLS scoped-IP peer")
+    -- Adoption deliberately separates the already connected transport from
+    -- its original endpoint identity. The fixture certificate includes ::1.
+    local connection = ssl.client(net.connect("127.0.0.1", port), "::1%1",
+                                   support.TRUST_ROOT)
+    defer connection:abort()
+    connection:handshake()
+    test.assert(connection:read_until("\n", true) == "verified IPv6 identity")
+    connection:write("scope removed only for X509\n")
+    async.join(peer)
+    test.assert(peer:status():has_succeeded())
+  end)
+end
+
+function test_ssl_coverage_read_until_returns_unterminated_tail_once(
+    context: test.Context)
+  runtime_test.run(function ()
+    local server, port = support.listen_available(46200, support.CERTIFICATE,
+                                                 support.PRIVATE_KEY)
+    defer server:close()
+    local peer = async.run<|value, value|>(function (): value
+      local accepted = server:accept()
+      defer accepted:abort()
+      accepted:write("EN")
+      accepted:shutdown()
+      test.assert(accepted:read() == nil)
+      return nil
+    end)
+    task_support.cleanup_task(peer, "TLS unterminated-tail peer")
+    local connection = ssl.connect("localhost", port, support.TRUST_ROOT)
+    defer connection:abort()
+    test.assert(connection:read_until("END") == "EN",
+                "authenticated EOF discarded the delimiter prefix")
+    test.assert(connection:read_until("END") == nil,
+                "unterminated TLS tail was returned more than once")
+    async.join(peer)
+    test.assert(peer:status():has_succeeded())
+  end)
+end
+
+function test_ssl_coverage_lazy_shutdown_completes_handshake_and_is_idempotent(
+    context: test.Context)
+  runtime_test.run(function ()
+    local server, port = support.listen_available(46300, support.CERTIFICATE,
+                                                 support.PRIVATE_KEY)
+    defer server:close()
+    local peer = async.run<|value, value|>(function (): value
+      local accepted = server:accept()
+      defer accepted:abort()
+      accepted:shutdown()
+      test.assert(accepted:read() == nil)
+      accepted:shutdown()
+      accepted:close()
+      return nil
+    end)
+    task_support.cleanup_task(peer, "TLS lazy-shutdown peer")
+    local connection = ssl.connect("localhost", port, support.TRUST_ROOT)
+    defer connection:abort()
+    test.assert(connection:read() == nil and connection:read() == nil,
+                "lazy shutdown did not become stable authenticated EOF")
+    connection:shutdown()
+    connection:close()
+    connection:handshake()
+    connection:shutdown()
+    test.assert(connection:read_until("END") == nil)
+    common.assert_raises_contains(function () connection:write("closed") end,
+                                   "ssl.write: SSL Connection is closed")
+    async.join(peer)
+    test.assert(peer:status():has_succeeded())
+  end)
+end
+
+function test_ssl_coverage_aborted_connection_rejects_every_operation(
+    context: test.Context)
+  runtime_test.run(function ()
+    local server, port = net_support.listen_available(46400)
+    defer server:close()
+    local peer = async.run<|value, value|>(function (): value
+      local accepted = server:accept()
+      defer accepted:close()
+      test.assert(accepted:read() == nil)
+      return nil
+    end)
+    task_support.cleanup_task(peer, "TLS aborted-owner peer")
+    local connection = ssl.client(net.connect("127.0.0.1", port), "localhost",
+                                   support.TRUST_ROOT)
+    connection:abort()
+    expect_ssl_failure(function () connection:handshake() end,
+                        "ssl.handshake", "TLS_INTERRUPTED")
+    expect_ssl_failure(function () connection:read() end,
+                        "ssl.read", "TLS_INTERRUPTED")
+    expect_ssl_failure(function () connection:read_until("END") end,
+                        "ssl.read", "TLS_INTERRUPTED")
+    expect_ssl_failure(function () connection:write("closed") end,
+                        "ssl.write", "TLS_INTERRUPTED")
+    expect_ssl_failure(function () connection:shutdown() end,
+                        "ssl.shutdown", "TLS_INTERRUPTED")
+    connection:close()
+    connection:abort()
+    async.join(peer)
+    test.assert(peer:status():has_succeeded())
+  end)
+end
+
+function test_ssl_coverage_cancelled_handshake_retires_transport(
+    context: test.Context)
+  runtime_test.run(function ()
+    local server, port = net_support.listen_available(46500)
+    defer server:close()
+    local bytes = 0
+    local peer = async.run<|value, value|>(function (): value
+      local accepted = server:accept()
+      defer accepted:close()
+      while true do
+        local chunk? = accepted:read()
+        if chunk == nil then break end
+        bytes = bytes + #chunk
+      end
+      return nil
+    end)
+    task_support.cleanup_task(peer, "TLS cancelled-handshake peer")
+    local connection = ssl.client(net.connect("127.0.0.1", port), "localhost",
+                                   support.TRUST_ROOT)
+    defer connection:abort()
+    local handshaker = async.run<|value, value|>(function (): value
+      connection:handshake()
+      return nil
+    end)
+    task_support.cleanup_task(handshaker, "TLS cancelled handshaker")
+    while handshaker:status():as_string() ~= "waiting" or bytes == 0 do
+      timer.yield()
+    end
+    handshaker:cancel(async.CancellationReason.simple("cancel TLS handshake"))
+    async.join(handshaker)
+    async.join(peer)
+    test.assert(handshaker:status():as_string() == "cancelled" and
+                peer:status():has_succeeded() and bytes > 0,
+                "cancelled handshake did not release its accepted transport")
+    expect_ssl_failure(function () connection:read() end,
+                        "ssl.read", "TLS_INTERRUPTED")
+  end)
+end
+
+function test_ssl_coverage_tcp_reset_is_truncated_tls_eof(
+    context: test.Context)
+  runtime_test.run(function ()
+    local server, port = support.listen_available(46600, support.CERTIFICATE,
+                                                 support.PRIVATE_KEY)
+    defer server:close()
+    local peer = async.run<|value, value|>(function (): value
+      local accepted = server:accept()
+      defer accepted:abort()
+      test.assert(accepted:read_until("\n", true) == "before reset")
+      accepted:write("ready\n")
+      expect_ssl_failure(function () accepted:read() end,
+                          "ssl.read", "TLS_TRUNCATED_EOF")
+      return nil
+    end)
+    task_support.cleanup_task(peer, "TLS TCP-reset peer")
+    local proxy = backpressure.new(port)
+    defer proxy:close()
+    local connection = ssl.connect("localhost", proxy.port, support.TRUST_ROOT)
+    defer connection:abort()
+    connection:write("before reset\n")
+    test.assert(connection:read_until("\n", true) == "ready",
+                "TLS reset fixture did not finish its verified exchange")
+    proxy:reset_front()
+    expect_ssl_failure(function () connection:read() end,
+                        "ssl.read", "TLS_TRUNCATED_EOF",
+                        "TLS transport closed without close_notify")
+    expect_ssl_failure(function () connection:write("after reset") end,
+                        "ssl.write", "TLS_INTERRUPTED")
+    connection:abort()
+    connection:close()
+    proxy:close()
+    async.join(peer)
+    test.assert(peer:status():has_succeeded(),
+                "TCP-reset relay did not retire its backend TLS owner")
+  end)
+end
+
+function test_ssl_coverage_rejected_sni_retires_adopted_transport(
+    context: test.Context)
+  runtime_test.run(function ()
+    local server, port = net_support.listen_available(46700)
+    defer server:close()
+    local peer = async.run<|value, value|>(function (): value
+      local accepted = server:accept()
+      defer accepted:close()
+      test.assert(accepted:read() == nil,
+                  "rejected SNI leaked or used its adopted TCP transport")
+      return nil
+    end)
+    task_support.cleanup_task(peer, "TLS rejected-SNI peer")
+    -- OpenSSL rejects an SNI host name longer than its 255-byte limit.
+    -- Adoption has already transferred TCP ownership when configuration fails.
+    local host = string.rep("a", 256)
+    expect_ssl_failure(function ()
+      ssl.client(net.connect("127.0.0.1", port), host, support.TRUST_ROOT)
+    end, "ssl.connect.sni", "OPENSSL")
+    async.join(peer)
+    test.assert(peer:status():has_succeeded(),
+                "failed TLS configuration did not retire the adopted transport")
+  end)
+end
+
+function test_ssl_coverage_close_after_reset_preserves_transport_failure(
+    context: test.Context)
+  runtime_test.run(function ()
+    local server, port = support.listen_available(46800, support.CERTIFICATE,
+                                                 support.PRIVATE_KEY)
+    defer server:close()
+    local peer = async.run<|value, value|>(function (): value
+      local accepted = server:accept()
+      defer accepted:abort()
+      test.assert(accepted:read_until("\n", true) == "before close")
+      accepted:write("ready\n")
+      expect_ssl_failure(function () accepted:read() end,
+                          "ssl.read", "TLS_TRUNCATED_EOF")
+      return nil
+    end)
+    task_support.cleanup_task(peer, "TLS reset-during-close peer")
+    local proxy = backpressure.new(port)
+    defer proxy:close()
+    local connection = ssl.connect("localhost", proxy.port, support.TRUST_ROOT)
+    defer connection:abort()
+    connection:write("before close\n")
+    test.assert(connection:read_until("\n", true) == "ready")
+    proxy:reset_front()
+    -- Depending on socket timing, the close_notify write may be accepted or
+    -- report the reset. libuv may first mark the stream unwritable, invoking
+    -- net's exact shutdown guard. Otherwise native failures retain their cause;
+    -- close suppresses only the documented ENOTCONN half-close result.
+    local failed = false
+    do
+      connection:close()
+    catch
+      if error is string then
+        test.assert(error == "cannot write after Connection shutdown",
+                    "TLS close changed its transport writability guard: " .. (error as string))
+      else
+        test.assert(error is async.OperationError,
+                    "TLS close replaced its transport failure: " ..
+                      common.error_text(error))
+        local failure = error as async.OperationError
+        test.assert((failure.operation == "net.write" or
+                     failure.operation == "net.shutdown") and
+                    (failure.name == "ECONNRESET" or failure.name == "EPIPE" or
+                     failure.name == "ECONNABORTED"),
+                    "unexpected reset-during-close failure: " ..
+                      failure.operation .. " " .. failure.name)
+      end
+      failed = true
+    end
+    if failed then
+      expect_ssl_failure(function () connection:read() end,
+                          "ssl.read", "TLS_INTERRUPTED")
+    else
+      test.assert(connection:read() == nil,
+                  "successful TLS close did not become terminal EOF")
+    end
+    connection:close()
+    connection:abort()
+    proxy:close()
+    async.join(peer)
+    test.assert(peer:status():has_succeeded())
+  end)
+end

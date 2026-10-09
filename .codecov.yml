@@ -17,9 +17,22 @@ coverage:
     patch:
       default:
         target: 90
+        flags: [compiler]
     project:
       default:
         target: 90
+        flags: [compiler]
+
+flags:
+  compiler:
+    paths:
+      - titan-compiler/
+      - titanc
+  native-stdlib:
+    paths:
+      - titan/
+# Native coverage starts with an honest baseline. Existing compiler thresholds
+# remain scoped to the compiler; no arbitrary initial native threshold is added.
 
 ignore:
   - "spec"

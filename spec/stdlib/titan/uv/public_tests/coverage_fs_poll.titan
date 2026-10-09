@@ -1,0 +1,431 @@
+-- Public filesystem results and borrowed polling ownership. Helpers are kept
+-- distinct from the other contributors in this folder module.
+local function coverage_fs_remove(path: string, directory: boolean)
+  local request = uv.fs_t()
+  defer uv.fs_req_cleanup(request)
+  local status = 0
+  if directory then status = uv.fs_rmdir(nil, request, path)
+  else status = uv.fs_unlink(nil, request, path) end
+  if status ~= uv.ENOENT then success(status) end
+end
+
+local function coverage_fs_directory(): string
+  local request = uv.fs_t()
+  defer uv.fs_req_cleanup(request)
+  success(uv.fs_mkdtemp(nil, request, "uv-public-fs-XXXXXX"))
+  case uv.fs_get_type(request)
+  when mkdtemp() then
+  else test.assert(false, "mkdtemp lost its request kind")
+  end
+  return uv.fs_get_path(request)
+end
+
+local function coverage_fs_write(path: string, bytes: string)
+  local request = uv.fs_t()
+  defer uv.fs_req_cleanup(request)
+  local file = uv.fs_open(nil, request, path,
+    uv.FS_O_RDWR | uv.FS_O_CREAT | uv.FS_O_TRUNC, 384)
+  test.assert(file >= 0, "creating temporary file failed: " .. file)
+  defer close_file(file)
+  uv.fs_req_cleanup(request)
+  local buffer = uv.buf_t.from_string(bytes)
+  local offset = 0
+  while offset < #bytes do
+    local count = uv.fs_write(nil, request, file,
+      {buffer:slice(offset + 1, #bytes - offset)}, offset)
+    test.assert(count > 0, "temporary file write made no progress")
+    offset = offset + count
+    uv.fs_req_cleanup(request)
+  end
+end
+
+local function coverage_fs_read(path: string): string
+  local request = uv.fs_t()
+  defer uv.fs_req_cleanup(request)
+  local file = uv.fs_open(nil, request, path, uv.FS_O_RDONLY, 0)
+  test.assert(file >= 0)
+  defer close_file(file)
+  uv.fs_req_cleanup(request)
+  local bytes = ""
+  local buffer = uv.buf_t.allocate(32)
+  while true do
+    local count = uv.fs_read(nil, request, file, {buffer}, #bytes)
+    test.assert(count >= 0, "temporary file read failed")
+    uv.fs_req_cleanup(request)
+    if count == 0 then return bytes end
+    bytes = bytes .. buffer:to_string(count)
+  end
+end
+
+function test_coverage_fs_copy_links_metadata_and_descriptor_results(_context: test.Context)
+  local directory = coverage_fs_directory()
+  defer coverage_fs_remove(directory, true)
+  local source, copied = directory .. "/source", directory .. "/copied"
+  local moved, linked, sent = directory .. "/moved", directory .. "/linked", directory .. "/sent"
+  defer coverage_fs_remove(source, false)
+  defer coverage_fs_remove(copied, false)
+  defer coverage_fs_remove(moved, false)
+  defer coverage_fs_remove(linked, false)
+  defer coverage_fs_remove(sent, false)
+  local bytes = "file\0bytes\255\n"
+  coverage_fs_write(source, bytes)
+  local request = uv.fs_t()
+  defer uv.fs_req_cleanup(request)
+  success(uv.fs_copyfile(nil, request, source, copied, uv.FS_COPYFILE_EXCL))
+  case uv.fs_get_type(request)
+  when copyfile() then
+  else test.assert(false, "copyfile lost its request kind")
+  end
+  uv.fs_req_cleanup(request)
+  test.assert(uv.fs_copyfile(nil, request, source, copied, uv.FS_COPYFILE_EXCL) == uv.EEXIST)
+  test.assert(uv.fs_get_result(request) == uv.EEXIST)
+  test.assert(uv.fs_get_system_error(request) ~= 0)
+  uv.fs_req_cleanup(request)
+  success(uv.fs_rename(nil, request, copied, moved))
+  uv.fs_req_cleanup(request)
+  success(uv.fs_link(nil, request, source, linked))
+  uv.fs_req_cleanup(request)
+  test.assert(coverage_fs_read(moved) == bytes)
+  local file = uv.fs_open(nil, request, source, uv.FS_O_RDWR, 0)
+  test.assert(file >= 0)
+  defer close_file(file)
+  uv.fs_req_cleanup(request)
+  success(uv.fs_ftruncate(nil, request, file, 5))
+  uv.fs_req_cleanup(request)
+  success(uv.fs_fsync(nil, request, file))
+  uv.fs_req_cleanup(request)
+  success(uv.fs_fdatasync(nil, request, file))
+  uv.fs_req_cleanup(request)
+  success(uv.fs_fchmod(nil, request, file, 384))
+  uv.fs_req_cleanup(request)
+  success(uv.fs_futime(nil, request, file, 1234567890.0, 1234567892.0))
+  uv.fs_req_cleanup(request)
+  success(uv.fs_fstat(nil, request, file))
+  local snapshot = uv.fs_get_statbuf(request)
+  test.assert(snapshot.st_size == 5 and snapshot.st_mtim.tv_sec == 1234567892)
+  case uv.fs_get_ptr(request)
+  when stat(metadata) then test.assert(metadata.st_size == snapshot.st_size)
+  else test.assert(false, "fstat has no typed stat result")
+  end
+  uv.fs_req_cleanup(request)
+  test.assert(snapshot.st_size == 5 and snapshot.st_mtim.tv_sec == 1234567892)
+  test.assert(coverage_fs_read(linked) == "file\0", "hard link did not share the truncated file")
+  test.assert(coverage_fs_read(moved) == bytes, "copy unexpectedly shared source storage")
+  success(uv.fs_utime(nil, request, source, 1234567894.0, 1234567896.0))
+  uv.fs_req_cleanup(request)
+  success(uv.fs_chmod(nil, request, source, 384))
+  uv.fs_req_cleanup(request)
+  success(uv.fs_lstat(nil, request, linked))
+  test.assert(uv.fs_get_statbuf(request).st_size == 5)
+  test.assert(uv.fs_get_statbuf(request).st_mtim.tv_sec == 1234567896)
+  uv.fs_req_cleanup(request)
+  success(uv.fs_access(nil, request, source, uv.FS_F_OK))
+  uv.fs_req_cleanup(request)
+  test.assert(uv.fs_access(nil, request, copied, uv.FS_F_OK) == uv.ENOENT)
+  uv.fs_req_cleanup(request)
+  local output = uv.fs_open(nil, request, sent, uv.FS_O_RDWR | uv.FS_O_CREAT, 384)
+  test.assert(output >= 0)
+  defer close_file(output)
+  uv.fs_req_cleanup(request)
+  test.assert(uv.fs_sendfile(nil, request, output, file, 1, 4) == 4)
+  case uv.fs_get_type(request)
+  when sendfile() then
+  else test.assert(false, "sendfile lost its request kind")
+  end
+  uv.fs_req_cleanup(request)
+  test.assert(coverage_fs_read(sent) == "ile\0")
+end
+
+function test_coverage_fs_directory_entries_own_copies_and_cleanup(_context: test.Context)
+  local directory = coverage_fs_directory()
+  defer coverage_fs_remove(directory, true)
+  local path, nested = directory .. "/binary", directory .. "/nested"
+  defer coverage_fs_remove(path, false)
+  defer coverage_fs_remove(nested, true)
+  coverage_fs_write(path, "entry\0data")
+  local request, other = uv.fs_t(), uv.fs_t()
+  defer uv.fs_req_cleanup(request)
+  defer uv.fs_req_cleanup(other)
+  success(uv.fs_mkdir(nil, request, nested, 448))
+  uv.fs_req_cleanup(request)
+  success(uv.fs_opendir(nil, request, directory))
+  local owner = uv.fs_get_dir(request)
+  local open = true
+  defer if open then
+    uv.fs_req_cleanup(request)
+    success(uv.fs_closedir(nil, request, owner))
+  end
+  case uv.fs_get_type(request)
+  when opendir() then
+  else test.assert(false, "opendir lost its request kind")
+  end
+  case uv.fs_get_ptr(request)
+  when directory(result) then test.assert(result == owner)
+  else test.assert(false, "opendir has no typed directory result")
+  end
+  uv.fs_req_cleanup(request)
+  expect_error(function () uv.fs_get_dir(request) end, "FS result is unavailable")
+  test.assert(uv.fs_readdir(nil, request, owner, -1) == uv.EINVAL)
+  local count = uv.fs_readdir(nil, request, owner, 8)
+  test.assert(count == 2)
+  local entries = uv.fs_get_entries(request)
+  test.assert(#entries == count)
+  case uv.fs_get_ptr(request)
+  when entries(result) then test.assert(#result == count)
+  else test.assert(false, "readdir has no typed entries result")
+  end
+  test.assert(uv.fs_closedir(nil, other, owner) == uv.EBUSY)
+  test.assert(uv.fs_readdir(nil, other, owner, 8) == uv.EBUSY)
+  uv.fs_req_cleanup(request)
+  test.assert(uv.fs_readdir(nil, request, owner, 8) == 0)
+  test.assert(#uv.fs_get_entries(request) == 0)
+  uv.fs_req_cleanup(request)
+  success(uv.fs_closedir(nil, request, owner))
+  open = false
+  test.assert(uv.fs_get_ptr(request) == nil)
+  uv.fs_req_cleanup(request)
+  test.assert(uv.fs_closedir(nil, request, owner) == uv.EINVAL)
+  test.assert(uv.fs_readdir(nil, request, owner, 1) == uv.EINVAL)
+  collect()
+  local names: {string: boolean} = {}
+  for i = 1, #entries do
+    local entry = entries[i]
+    names[entry.name] = true
+    case entry.type
+    when file() then test.assert(entry.name == "binary")
+    when directory() then test.assert(entry.name == "nested")
+    when unknown() then -- Native filesystems may not supply a d_type.
+    else test.assert(false, "unexpected temporary directory entry type")
+    end
+  end
+  test.assert(names["binary"] == true and names["nested"] == true)
+  test.assert(uv.fs_scandir(nil, request, directory, 0) == 2)
+  case uv.fs_get_ptr(request)
+  when scandir(result) then test.assert(result == request)
+  else test.assert(false, "scandir has no typed iterator result")
+  end
+  local found: {string: boolean} = {}
+  for i = 1, 2 do
+    local status, entry? = uv.fs_scandir_next(request)
+    success(status)
+    found[entry.name] = true
+  end
+  local exhausted, absent? = uv.fs_scandir_next(request)
+  test.assert(exhausted == uv.EOF and absent == nil)
+  uv.fs_req_cleanup(request)
+  test.assert(found["binary"] == true and found["nested"] == true)
+  expect_error(function () uv.fs_scandir_next(request) end, "FS result is unavailable")
+  test.assert(uv.fs_opendir(nil, request, directory .. "/missing") == uv.ENOENT)
+  expect_error(function () uv.fs_get_dir(request) end, "FS request has no directory result")
+  uv.fs_req_cleanup(request)
+end
+
+function test_coverage_fs_realpath_and_statfs_results(_context: test.Context)
+  local directory = coverage_fs_directory()
+  defer coverage_fs_remove(directory, true)
+  local path = directory .. "/source"
+  defer coverage_fs_remove(path, false)
+  coverage_fs_write(path, "target")
+  local request = uv.fs_t()
+  defer uv.fs_req_cleanup(request)
+  success(uv.fs_realpath(nil, request, path))
+  local resolved = uv.fs_get_string(request)
+  case uv.fs_get_ptr(request)
+  when path(result) then test.assert(result == resolved)
+  else test.assert(false, "realpath has no typed path result")
+  end
+  uv.fs_req_cleanup(request)
+  test.assert(coverage_fs_read(resolved) == "target")
+  success(uv.fs_statfs(nil, request, path))
+  local filesystem = uv.fs_get_statfs(request)
+  test.assert(filesystem.f_bsize > 0 and filesystem.f_blocks > 0)
+  test.assert(filesystem.f_bfree >= filesystem.f_bavail and #filesystem.f_spare == 3)
+  case uv.fs_get_ptr(request)
+  when statfs(result) then test.assert(result.f_bsize == filesystem.f_bsize)
+  else test.assert(false, "statfs has no typed filesystem result")
+  end
+  uv.fs_req_cleanup(request)
+  collect()
+  test.assert(filesystem.f_bsize > 0 and #resolved > 0)
+  expect_error(function () uv.fs_get_statfs(request) end, "FS result is unavailable")
+  test.assert(uv.fs_realpath(nil, request, directory .. "/missing") == uv.ENOENT)
+  expect_error(function () uv.fs_get_string(request) end, "FS request has no string result")
+  uv.fs_req_cleanup(request)
+end
+
+function test_coverage_fs_symlink_results_and_nonfollowing_timestamps(_context: test.Context)
+  local directory = coverage_fs_directory()
+  defer coverage_fs_remove(directory, true)
+  local path, link = directory .. "/source", directory .. "/link"
+  defer coverage_fs_remove(path, false)
+  defer coverage_fs_remove(link, false)
+  coverage_fs_write(path, "target")
+  local request = uv.fs_t()
+  defer uv.fs_req_cleanup(request)
+  success(uv.fs_realpath(nil, request, path))
+  local resolved = uv.fs_get_string(request)
+  uv.fs_req_cleanup(request)
+  -- Windows may require the symlink privilege or Developer Mode. A native
+  -- permission denial still owns request cleanup, but cannot prove link I/O.
+  local status = uv.fs_symlink(nil, request, resolved, link, 0)
+  uv.fs_req_cleanup(request)
+  if common.is_windows() and (status == uv.EPERM or status == uv.EACCES) then
+    test.skip("capability: Windows symbolic-link creation is not permitted")
+  end
+  test.assert(status == 0, "symlink creation failed: " .. status)
+  test.assert(uv.fs_readlink(nil, request, link) == 0, "reading symbolic link failed")
+  local target = uv.fs_get_string(request)
+  case uv.fs_get_ptr(request)
+  when path(result) then test.assert(result == target)
+  else test.assert(false, "readlink has no typed path result")
+  end
+  uv.fs_req_cleanup(request)
+  test.assert(coverage_fs_read(target) == "target")
+  test.assert(uv.fs_lstat(nil, request, link) == 0, "statting symbolic link failed")
+  if uv.S_IFLNK ~= nil and uv.S_IFMT ~= nil then
+    test.assert((uv.fs_get_statbuf(request).st_mode & uv.S_IFMT) == uv.S_IFLNK)
+  end
+  uv.fs_req_cleanup(request)
+  test.assert(uv.fs_lutime(nil, request, link, 1234567890.0, 1234567892.0) == 0,
+    "setting symbolic link timestamps failed")
+  uv.fs_req_cleanup(request)
+  test.assert(uv.fs_lstat(nil, request, link) == 0, "statting updated symbolic link failed")
+  test.assert(uv.fs_get_statbuf(request).st_mtim.tv_sec == 1234567892)
+  uv.fs_req_cleanup(request)
+end
+
+local function coverage_fs_deadline(loop: uv.loop_t, message: string): uv.timer_t
+  local timer = uv.timer_t()
+  success(uv.timer_init(loop, timer))
+  success(uv.timer_start(timer, function (_owner: uv.timer_t) raise message end, 5000, 0))
+  return timer
+end
+
+local function coverage_fs_poll_socket(integer_descriptor: boolean)
+  local loop = new_loop()
+  defer finish_loop(loop)
+  local status, left?, right? = uv.socketpair(uv.SOCK_STREAM, 0,
+    uv.NONBLOCK_PIPE, uv.NONBLOCK_PIPE)
+  success(status)
+  local writer, reader = uv.tcp_t(), uv.tcp_t()
+  success(uv.tcp_init(loop, writer))
+  success(uv.tcp_init(loop, reader))
+  -- The TCP owners adopt both socket tokens; the poll owner only borrows one.
+  success(uv.tcp_open(writer, left))
+  success(uv.tcp_open(reader, right))
+  local poll = uv.poll_t()
+  if integer_descriptor then success(uv.poll_init(loop, poll, right:to_integer()))
+  else success(uv.poll_init_socket(loop, poll, right)) end
+  test.assert(uv.poll_init_socket(loop, poll, right) == uv.EINVAL)
+  local deadline = coverage_fs_deadline(loop, "socket polling deadline")
+  local calls, closed = 0, false
+  test.assert(uv.poll_start(poll, function (_owner: uv.poll_t, _status: integer, _events: integer)
+    test.assert(false, "rejected poll callback ran")
+  end, 0x40000000) == uv.EINVAL)
+  success(uv.poll_start(poll, function (owner: uv.poll_t, event_status: integer, events: integer)
+    success(event_status)
+    test.assert(owner == poll and (events & uv.READABLE) ~= 0)
+    calls = calls + 1
+    success(uv.poll_stop(owner))
+    success(uv.timer_stop(deadline))
+    uv.close(owner:as_handle_t(), function (view: uv.handle_t)
+      test.assert(not view:is_initialized())
+      closed = true
+    end)
+    raise "poll callback sentinel"
+  end, uv.READABLE))
+  test.assert(uv.try_write(writer:as_stream_t(), {uv.buf_t.from_string("p")}) == 1)
+  expect_error(function () uv.run(loop) end, "poll callback sentinel")
+  success(uv.run(loop))
+  test.assert(calls == 1 and closed)
+  test.assert(uv.poll_stop(poll) == uv.EINVAL)
+  -- Reading through the original owner after poll close proves the socket was
+  -- borrowed. Readiness itself did not consume the queued byte.
+  local received = ""
+  success(uv.timer_start(deadline, function (_owner: uv.timer_t)
+    raise "borrowed socket read deadline"
+  end, 5000, 0))
+  success(uv.read_start(reader:as_stream_t(),
+    function (_owner: uv.handle_t, _size: integer): uv.buf_t return uv.buf_t.allocate(8) end,
+    function (stream: uv.stream_t, count: integer, buffer: uv.buf_t?)
+      test.assert(count >= 0, "borrowed socket closed with the poll owner")
+      if count == 0 then return end
+      received = received .. buffer:to_string(count)
+      if #received == 2 then
+        success(uv.read_stop(stream))
+        success(uv.timer_stop(deadline))
+      end
+    end))
+  test.assert(uv.try_write(writer:as_stream_t(), {uv.buf_t.from_string("q")}) == 1)
+  success(uv.run(loop))
+  test.assert(received == "pq")
+end
+
+function test_coverage_fs_descriptor_poll_borrows_socket_and_propagates_callback_error(context: test.Context)
+  context:run("native_socket", function (_child: test.Context)
+    coverage_fs_poll_socket(false)
+  end)
+  context:run("integer_descriptor", function (_child: test.Context)
+    if common.is_windows() then
+      test.skip("platform: Windows poll uses native socket tokens rather than CRT descriptors")
+    end
+    coverage_fs_poll_socket(true)
+  end)
+end
+
+function test_coverage_fs_poll_missing_to_created_copies_metadata_and_path(_context: test.Context)
+  local directory = coverage_fs_directory()
+  defer coverage_fs_remove(directory, true)
+  local path = directory .. "/watched"
+  defer coverage_fs_remove(path, false)
+  local loop = new_loop()
+  defer finish_loop(loop)
+  local watcher = uv.fs_poll_t()
+  test.assert(uv.fs_poll_stop(watcher) == uv.EINVAL)
+  local invalid, absent?, capacity = uv.fs_poll_getpath(watcher, 1)
+  test.assert(invalid == uv.EINVAL and absent == nil and capacity == 1)
+  success(uv.fs_poll_init(loop, watcher))
+  test.assert(uv.fs_poll_init(loop, watcher) == uv.EINVAL)
+  local deadline = coverage_fs_deadline(loop, "filesystem polling deadline")
+  local failed, delivered, closed = 0, 0, false
+  local snapshot: uv.stat_t? = nil
+  success(uv.fs_poll_start(watcher,
+    function (owner: uv.fs_poll_t, status: integer, previous: uv.stat_t?, current: uv.stat_t?)
+      test.assert(owner == watcher)
+      if status < 0 then
+        test.assert(status == uv.ENOENT and previous == nil and current == nil)
+        failed = failed + 1
+        test.assert(failed == 1, "unchanged missing path was delivered repeatedly")
+        -- Mutation follows the observed missing baseline, never a timed guess.
+        coverage_fs_write(path, "watched\0bytes")
+      else
+        success(status)
+        test.assert(failed == 1 and previous ~= nil and current ~= nil)
+        test.assert(current.st_size == 13)
+        snapshot = current
+        delivered = delivered + 1
+        success(uv.fs_poll_stop(owner))
+        success(uv.timer_stop(deadline))
+        uv.close(owner:as_handle_t(), function (view: uv.handle_t)
+          test.assert(not view:is_initialized())
+          closed = true
+        end)
+        raise "filesystem poll callback sentinel"
+      end
+    end, path, 1))
+  local small_status, small?, needed = uv.fs_poll_getpath(watcher, 1)
+  test.assert(small_status == uv.ENOBUFS and small == nil and needed > 1)
+  local path_status, saved_path?, length = uv.fs_poll_getpath(watcher, #path + 1)
+  success(path_status)
+  test.assert(saved_path == path and length == #path)
+  expect_error(function () uv.run(loop) end, "filesystem poll callback sentinel")
+  success(uv.run(loop))
+  collect()
+  test.assert(failed == 1 and delivered == 1 and closed)
+  test.assert(snapshot.st_size == 13 and saved_path == path)
+  test.assert(uv.fs_poll_stop(watcher) == uv.EINVAL)
+  test.assert(uv.fs_poll_start(watcher,
+    function (_owner: uv.fs_poll_t, _status: integer, _previous: uv.stat_t?, _current: uv.stat_t?)
+      test.assert(false, "retired watcher callback ran")
+    end, path, 1) == uv.EINVAL)
+end

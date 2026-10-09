@@ -1,0 +1,68 @@
+local function coverage_os_echo(payload: string, delimiter: string,
+                                expected: string, remainder: string?)
+  local process = system.spawn(process_support.child_path(),
+    {"echo-count", strings.format("%d", #payload)})
+  defer cleanup_process(process)
+  local input = process_support.required_output(process.stdin, "coverage echo stdin")
+  local output = process_support.required_input(process.stdout, "coverage echo stdout")
+  local writer = async.run<|value, value|>(function (): value
+    input:write(payload)
+    input:close()
+    return nil
+  end)
+  task_support.cleanup_task(writer, "coverage echo writer cleanup")
+  test.assert(output:read_until(delimiter, true) == expected,
+              "captured read_until changed data across reads or EOF")
+  if remainder then
+    test.assert(output:read_until("long-missing-delimiter", true) == remainder,
+                "captured read_until lost its unmatched tail at EOF")
+  end
+  test.assert(output:read_until(delimiter, true) == nil,
+              "captured read_until manufactured data after EOF")
+  async.join(writer)
+  test.assert(writer:status():has_succeeded(), "coverage echo writer failed")
+  process_support.assert_normal(process:wait(), "coverage echo")
+end
+
+function test_coverage_os_read_until_across_buffers_and_eof(context: test.Context)
+  context:run("large_binary_prefix_and_retained_tail", function (_child: test.Context)
+    runtime_test.run(function ()
+      local prefix = strings.rep("a\0", 131072)
+      coverage_os_echo(prefix .. "AAABtail", "AAAB", prefix, "tail")
+    end)
+  end)
+  context:run("single_byte_missing_delimiter", function (_child: test.Context)
+    runtime_test.run(function () coverage_os_echo("abc", "z", "abc", nil) end)
+  end)
+  context:run("delimiter_larger_than_input", function (_child: test.Context)
+    runtime_test.run(function ()
+      coverage_os_echo("x", "delimiter-longer-than-the-input", "x", nil)
+    end)
+  end)
+end
+
+function test_coverage_os_consumed_spawn_options_reject_reuse(_context: test.Context)
+  runtime_test.run(function ()
+    local saved: system.SpawnConfig? = nil
+    local process = system.spawn(process_support.child_path(), {"exit", "0"},
+      function (config: system.SpawnConfig): integer
+        saved = config
+        return 0
+      end)
+    defer cleanup_process(process)
+    test.assert(saved ~= nil, "spawn did not invoke its configuration option")
+    local config: system.SpawnConfig = saved
+    test.assert(system.with_stdin(config) < 0 and
+                system.with_stdout(config) < 0 and
+                system.with_stderr(config) < 0 and
+                system.with_parent_stdin(config) < 0 and
+                system.with_parent_stdout(config) < 0 and
+                system.with_parent_stderr(config) < 0 and
+                system.with_merged_output(config) < 0,
+                "consumed SpawnConfig accepted a stream option")
+    local environment = system.with_env("TITAN_COVERAGE_CONSUMED_CONFIG", "unused")
+    test.assert(environment(config) < 0,
+                "consumed SpawnConfig accepted an environment option")
+    process_support.assert_normal(process:wait(), "consumed configuration")
+  end)
+end

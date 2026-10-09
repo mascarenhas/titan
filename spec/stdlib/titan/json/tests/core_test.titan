@@ -37,6 +37,52 @@ function test_core_scalars_containers_and_escaping(_context: test.Context)
   test.assert(json.encode(utf8_keys) == [[{"z":1,"é":2}]])
 end
 
+function test_core_map_keys_with_shared_prefixes(_context: test.Context)
+  local object: {string: value} = {}
+  object["aa"] = 1
+  object["a"] = 2
+  object["a\0"] = 3
+  object["aé"] = 4
+  object["ab"] = 5
+  local encoded = json.encode(object)
+  test.assert(encoded == [[{"a":2,"a\u0000":3,"aa":1,"ab":5,"aé":4}]])
+  local decoded: {string: value} = json.decode(encoded)
+  test.assert(decoded["a"] == 2 and decoded["a\0"] == 3 and
+              decoded["aa"] == 1 and decoded["ab"] == 5 and decoded["aé"] == 4)
+end
+
+function test_core_utf8_scalar_boundaries_and_invalid_tails(context: test.Context)
+  context:run("valid_scalars", function(_child: test.Context)
+    local subjects: {string} = {
+      string.char(194, 128), string.char(223, 191),
+      string.char(224, 160, 128), string.char(237, 159, 191),
+      string.char(238, 128, 128), string.char(239, 191, 191),
+      string.char(240, 144, 128, 128), string.char(241, 128, 128, 128),
+      string.char(244, 143, 191, 191),
+    }
+    for index = 1, #subjects do
+      local subject = subjects[index] as string
+      local encoded = json.encode(subject)
+      test.assert(encoded == '"' .. subject .. '"')
+      test.assert(json.decode(encoded) == subject)
+    end
+  end)
+  context:run("invalid_continuation_after_second_byte", function(_child: test.Context)
+    local subjects: {string} = {
+      string.char(226, 130, 65), string.char(226, 130, 192),
+      string.char(241, 128, 128, 65), string.char(241, 128, 128, 192),
+    }
+    for index = 1, #subjects do
+      local values: {value} = {subjects[index]}
+      local object: {string: value} = {["payload"] = values}
+      local failure = core_error(function() json.encode(object) end, "invalid_utf8")
+      test.assert(failure.path == '$["payload"][1]' and failure.position == nil and
+                  failure.line == nil and failure.column == nil)
+    end
+    test.assert(json.encode("recovered") == [["recovered"]])
+  end)
+end
+
 function test_core_exact_integer_conversion(_context: test.Context)
   test.assert(json.encode(math.maxinteger) == "9223372036854775807")
   test.assert(json.encode(math.mininteger) == "-9223372036854775808")

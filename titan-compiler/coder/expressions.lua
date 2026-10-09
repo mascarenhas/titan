@@ -3315,13 +3315,13 @@ function codeexp(ctx, node, iscondition, target)
         codeexp_dispatch(ctx, node, iscondition, target)
     local adjustment = node._assignment_adjustment
     if not adjustment then
-        return stats, value
+        return coverage_region(node, stats, ctx), value
     end
     local adjusted_stats, adjusted_value =
         coder._code_adjustment_value(
             ctx, adjustment, node._type,
             adjustment.target or node._type, value, node.loc)
-    return stats .. adjusted_stats, adjusted_value
+    return coverage_region(node, stats .. adjusted_stats, ctx), adjusted_value
 end
 
 function codeforeignexp(ctx, node, target)

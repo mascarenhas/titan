@@ -1,0 +1,279 @@
+local test = import "test"
+local async = import "async"
+local net = import "net"
+local ssl = import "ssl"
+local string = import "string"
+foreign import "ssl_allocator_fixture.h"
+foreign import "stdio.h"
+
+local function run_case(body: function (): ())
+  local task = async.run<|value, value|>(function (): value body(); return nil end)
+  async.loop()
+  case task:status()
+  when failed(failure) then failure:raise()
+  when succeeded(_) then
+  else raise "allocator fixture Task did not succeed"
+  end
+end
+
+local function retire_task(task: async.Task)
+  if not task:status():has_finished() then
+    task:cancel(async.CancellationReason.simple("allocator fixture cleanup"))
+  end
+  async.join(task)
+end
+
+local function expect_oom(action: function (): (), operation: string, name: string?)
+  test.assert(ffi.titan_ssl_allocator_installed() == 1,
+              "OpenSSL allocator hook was installed too late")
+  local caught = false
+  do
+    action()
+  catch
+    ffi.titan_ssl_allocator_disarm()
+    test.assert(ffi.titan_ssl_allocator_fired() == 1,
+                "expected exactly one real OpenSSL allocation failure")
+    test.assert(error is ssl.Error,
+                "allocation failure lost nominal SSL identity")
+    local failure = error as ssl.Error
+    test.assert(failure.name == (name or "OPENSSL") and failure.operation == operation and
+                #failure.message > 0,
+                "unexpected OOM operation: " .. failure.operation .. " " .. failure.message)
+    caught = true
+  end
+  ffi.titan_ssl_allocator_disarm()
+  test.assert(caught, "OpenSSL operation did not reject failed allocation")
+end
+
+local function listen_available(): (net.Server, integer)
+  for port = 46900, 46999 do
+    do
+      return net.listen("127.0.0.1", port), port
+    catch
+      if not (error is async.OperationError) or
+          (error as async.OperationError).name ~= "EADDRINUSE" then raise end
+    end
+  end
+  raise "could not find an available allocator fixture loopback port"
+end
+
+local function adoption_failure(file: string, line: integer, occurrence: integer,
+                               operation: string, trust: string?)
+  local server, port = listen_available()
+  defer server:close()
+  local peer = async.run<|value, value|>(function (): value
+    local accepted = server:accept()
+    defer accepted:close()
+    test.assert(accepted:read() == nil,
+                "OOM adoption leaked or used the transferred TCP connection")
+    return nil
+  end)
+  defer retire_task(peer)
+  local transport = net.connect("127.0.0.1", port)
+  defer transport:close()
+  test.assert(ffi.titan_ssl_allocator_installed() == 1)
+  ffi.titan_ssl_allocator_arm(file, line, occurrence)
+  defer ffi.titan_ssl_allocator_disarm()
+  local unexpected: ssl.Connection? = nil
+  defer (function () if unexpected ~= nil then unexpected:abort() end end)()
+  expect_oom(function () unexpected = ssl.client(transport, "localhost", trust) end,
+              operation)
+  async.join(peer)
+  test.assert(peer:status():has_succeeded(), "OOM adoption did not retire TCP")
+end
+
+local function client_context()
+  run_case(function ()
+    adoption_failure("", 0, 1, "ssl.client.context", "ca.pem")
+  end)
+end
+
+local function ssl_object()
+  run_case(function ()
+    adoption_failure("", 0, 1, "ssl.connection.new", nil)
+  end)
+end
+
+local function input_bio()
+  run_case(function ()
+    adoption_failure("bio_lib.c", 0, 2, "ssl.input.new", nil)
+  end)
+end
+
+local function output_bio()
+  run_case(function ()
+    adoption_failure("bio_lib.c", 0, 3, "ssl.output.new", nil)
+  end)
+end
+
+local function server_context()
+  run_case(function ()
+    ffi.titan_ssl_allocator_arm("", 0, 1)
+    defer ffi.titan_ssl_allocator_disarm()
+    expect_oom(function ()
+      ssl.listen("127.0.0.1", 40000, "server.pem",
+                 "server-key.pem")
+    end, "ssl.server.context")
+  end)
+end
+
+local function pem_bio()
+  run_case(function ()
+    local ordinal = ffi.titan_ssl_allocator_pem_bio_ordinal()
+    test.assert(ordinal > 0, "could not prepare pass-through SSL context probe")
+    adoption_failure("bio_lib.c", 0, ordinal as integer, "ssl.client.trust",
+                      "ca.pem")
+  end)
+end
+
+local function trust_store_insertion()
+  run_case(function ()
+    adoption_failure("x509_lu.c", 481, 1, "ssl.client.trust",
+                      "ca.pem")
+  end)
+end
+
+local function verification_host_copy()
+  run_case(function ()
+    adoption_failure("x509_vpm.c", 60, 1, "ssl.connect.verify-host", nil)
+  end)
+end
+
+local function accepted_engine()
+  run_case(function ()
+    local server: ssl.Server? = nil
+    local port = 47000
+    for candidate = 47000, 47099 do
+      do
+        server = ssl.listen("127.0.0.1", candidate, "server.pem",
+                            "server-key.pem")
+        port = candidate
+        break
+      catch
+        if not (error is async.OperationError) or
+            (error as async.OperationError).name ~= "EADDRINUSE" then raise end
+      end
+    end
+    test.assert(server ~= nil, "could not find an available TLS fixture port")
+    defer server:close()
+    local transport: net.Connection? = nil
+    defer (function () if transport ~= nil then transport:close() end end)()
+    local peer = async.run<|value, value|>(function (): value
+      transport = net.connect("127.0.0.1", port)
+      return nil
+    end)
+    defer retire_task(peer)
+    ffi.titan_ssl_allocator_arm("", 0, 1)
+    defer ffi.titan_ssl_allocator_disarm()
+    local unexpected: ssl.Connection? = nil
+    defer (function () if unexpected ~= nil then unexpected:abort() end end)()
+    expect_oom(function () unexpected = server:accept() end, "ssl.connection.new")
+    async.join(peer)
+    test.assert(peer:status():has_succeeded() and transport ~= nil)
+    test.assert(transport:read() == nil,
+                "failed accepted TLS engine leaked its TCP connection")
+    server:close()
+    server:close()
+  end)
+end
+
+local function established_failure(kind: string)
+  run_case(function ()
+    local server: ssl.Server? = nil
+    local port = 47400
+    for candidate = 47400, 47499 do
+      do
+        server = ssl.listen("127.0.0.1", candidate, "server.pem", "server-key.pem")
+        port = candidate
+        break
+      catch
+        if not (error is async.OperationError) or
+            (error as async.OperationError).name ~= "EADDRINUSE" then raise end
+      end
+    end
+    test.assert(server ~= nil, "could not find an available established fixture port")
+    defer server:close()
+    local accepted: ssl.Connection? = nil
+    defer (function () if accepted ~= nil then accepted:abort() end end)()
+    local send, receive = async.channel<|nil|>(1)
+    local peer = async.run<|value, value|>(function (): value
+      accepted = server:accept()
+      accepted:handshake()
+      receive()
+      if kind == "input_growth" then accepted:write(string.rep("p", 64000)) end
+      return nil
+    end)
+    defer retire_task(peer)
+    local connection = ssl.connect("localhost", port, "ca.pem")
+    defer connection:abort()
+    send(nil)
+    async.join(peer)
+    test.assert(peer:status():has_succeeded())
+    if kind == "input_growth" then
+      ffi.titan_ssl_allocator_arm("buffer.c", 132, 1)
+      defer ffi.titan_ssl_allocator_disarm()
+      expect_oom(function () connection:read() end, "ssl.input.write")
+    elseif kind == "write_growth" then
+      ffi.titan_ssl_allocator_arm("buffer.c", 132, 1)
+      defer ffi.titan_ssl_allocator_disarm()
+      expect_oom(function () connection:write(string.rep("w", 64000)) end,
+                  "ssl.write", "SSL_ERROR_SSL")
+    elseif kind == "shutdown" then
+      ffi.titan_ssl_allocator_arm("", 0, 1)
+      defer ffi.titan_ssl_allocator_disarm()
+      expect_oom(function () connection:shutdown() end, "ssl.shutdown", "SSL_ERROR_SSL")
+    end
+    local terminal = false
+    do connection:write("after failed TLS operation")
+    catch
+      test.assert(error is ssl.Error)
+      local failure = error as ssl.Error
+      test.assert(failure.name == "TLS_INTERRUPTED" and failure.operation == "ssl.write",
+                  "failed TLS engine accepted a later write")
+      terminal = true
+    end
+    test.assert(terminal, "failed TLS engine remained writable")
+    do
+      test.assert(accepted:read() == nil, "failed operation kept its transport open")
+    catch
+      test.assert(error is ssl.Error)
+      local failure = error as ssl.Error
+      test.assert(failure.operation == "ssl.read" and
+          (failure.name == "TLS_TRUNCATED_EOF" or failure.name == "SSL_ERROR_SSL"),
+          "peer lost the TLS failure/transport EOF boundary")
+    end
+    connection:close()
+    connection:close()
+  end)
+end
+
+function main(args: {string}): integer
+  test.assert(#args == 1, "SSL allocator fixture requires one scenario")
+  if ffi.titan_ssl_allocator_installed() ~= 1 then
+    ffi.puts("capability: OpenSSL allocated before the public allocator hook")
+    return 77
+  end
+  local scenario = args[1]
+  if scenario ~= "client_context" and scenario ~= "ssl_object" and
+      scenario ~= "server_context" and scenario ~= "accepted_engine" and
+      ffi.titan_ssl_allocator_layout_supported() ~= 1 then
+    ffi.puts("capability: targeted allocator callback locations require OpenSSL 3.5.7 or 3.5.9")
+    return 77
+  end
+  if scenario == "input_growth" or scenario == "write_growth" or scenario == "shutdown" then established_failure(scenario)
+  elseif scenario == "client_context" then client_context()
+  elseif scenario == "ssl_object" then ssl_object()
+  elseif scenario == "input_bio" then input_bio()
+  elseif scenario == "output_bio" then output_bio()
+  elseif scenario == "server_context" then server_context()
+  elseif scenario == "pem_bio" then pem_bio()
+  elseif scenario == "trust_store_insertion" then trust_store_insertion()
+  elseif scenario == "verification_host_copy" then verification_host_copy()
+  elseif scenario == "accepted_engine" then accepted_engine()
+  else raise "unknown SSL allocator fixture scenario"
+  end
+  test.assert(ffi.titan_ssl_allocator_fired() == 1,
+              "fixture omitted its verified one-shot allocation failure")
+  ffi.puts("SSL_ALLOCATOR_OK")
+  return 0
+end

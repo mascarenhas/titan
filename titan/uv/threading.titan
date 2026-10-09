@@ -171,7 +171,7 @@ function thread_t:equal(other: thread_t): boolean
   if not self:is_live() or not other:is_live() then
     raise "thread_equal requires live thread identifiers"
   end
-  return ffi.uv_thread_equal(self.native.thread, other.native.thread) ~= 0
+  return ffi.uv_thread_equal(self.native as foreign *uv_thread_t, other.native as foreign *uv_thread_t) ~= 0
 end
 
 --- Convenience method for [`thread_getpriority`](functions/threading.md#thread_getpriority) on this owner.

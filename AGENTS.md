@@ -173,9 +173,12 @@ or give concurrent builds separate source copies. See
   request made alongside that work does. Once requested, use
   `gh workflow run macos.yml --ref <branch>`. The separate
   `macos.yml` workflow is manual-only; `ci.yml` runs Linux jobs on pushes.
-  The regular push graph has exactly three standard `ubuntu-24.04` jobs. The
+  The regular push graph has five job definitions on standard two-CPU runners:
+  the stdlib producer, compiler pair matrix (two runner executions), compiler
+  coverage merger, native line coverage, and sanitizer. The
   stdlib producer has 45 minutes for its validation build, complete runtime suite,
-  and both production dependency smokes; the compiler consumer retains 30 minutes. The
+  and both production dependency smokes; the compiler consumer has 45 minutes
+  for its regular specs and the instrumented real CLI coverage regressions. The
   independent sanitizer has 75 minutes so a cold native-dependency cache miss
   remains a valid build under the same two-CPU bound. Linux jobs export
   `MAKEFLAGS=-j2` and `TITAN_JOBS=2`, matching the two CPUs on standard private-repository
@@ -233,7 +236,7 @@ or give concurrent builds separate source copies. See
      validation consumers. The packed canonical provider also remains
      validation; ordinary build/install defaults stay production. It uploads the already packed artifact only after both
      OpenSSL modes pass. Never repack the live system-OpenSSL tree.
-  2. `test-linux-compiler` is the sole regular-artifact consumer. It needs the
+  2. `test-linux-compiler` consumes the regular artifact. It needs the
      stdlib producer, restores that full tree on the same x86_64 Ubuntu target,
      and extracts four cache-free worker copies without their `.lua` trees. The
      measured `ci_compiler_test_groups.txt` manifest is exhaustive and assigns
@@ -242,11 +245,12 @@ or give concurrent builds separate source copies. See
      boundaries. Workers own private checkout roots and `TMPDIR`s, share only the
      prepared installed prefix read-only, stream tagged logs, and write distinct
      LuaCov stats. At most two workers run concurrently; the job sums all four
-     stats files before reporting. Disposable
+     stats files within each pair before publishing them. Disposable
      generated fixtures use
-     `TITAN_EXTRA_CFLAGS=-O0`. The job emits one filtered report and makes
-     one failing-on-error OIDC Codecov upload named `compiler`; it is the only
-     job with `id-token: write`. Its restored checkout is disposable and has no
+     `TITAN_EXTRA_CFLAGS=-O0`. `compiler-coverage` merges both pairs, emits one
+     filtered report, and makes a failing-on-error OIDC Codecov upload named
+     `compiler`. That merger and `native-coverage` have `id-token: write`.
+     The compiler consumer's restored checkout is disposable and has no
      later production-image consumer, so it does not snapshot and restore the
      canonical image around compiler tests.
   3. `sanitizer` independently owns its ASan+UBSan-instrumented Lua,
@@ -266,6 +270,13 @@ or give concurrent builds separate source copies. See
      dense-Array, PEG/string, and
      production net/OS gates, but leave the complete stdlib behavior run in the
      regular producer.
+  4. `native-coverage` consumes a separate copy of the prepared regular tree,
+     uses matching GCC/gcov 14 and pinned gcovr 8.4, and builds an isolated
+     standard provider measuring all 22 production roots. The ordinary 28-root
+     consumer and its child programs select that provider. It retains
+     isolated notes, run counters, provenance, and line-only HTML/LCOV/Cobertura
+     reports. Its separate CI Codecov upload uses the `native-stdlib` flag;
+     local runs never upload. See [native coverage](doc/language/native-coverage.md).
 
   The producer archive is deliberately a full-tree tar: partial archives lose
   source/output timestamp ordering, prepared Lua files, executable bits, and
@@ -446,8 +457,10 @@ or give concurrent builds separate source copies. See
   to `clang-format`, is parsed into argv only in that mode, and receives Titan's
   fixed explicit style with include sorting disabled for every generated `.c`,
   `.ffi.h`, and `.titan.h` stage. It never discovers a project's `.clang-format`; `-v`
-  prints the safely quoted formatter command only when it is executed. Every
-  mode still removes blank physical lines immediately after `#line` directives.
+  prints the safely quoted formatter command only when it is executed. Ordinary
+  modes remove blank physical lines immediately after `#line` directives.
+  Coverage instead preserves authored C progression and performs final lexical
+  marker-to-directive conversion after formatting; no layout pass follows it.
 - **C toolchain**: `CC` (default `cc`) for compilation and for the C FFI's
   predefined-macro/include-search probes, plus `AR` (default `ar`) and
   `RANLIB` (default `ranlib`) for every generated static provider. All three

@@ -1,0 +1,403 @@
+foreign import "uv_coverage_threads.h"
+
+local function coverage_su_deadline(loop: uv.loop_t): uv.timer_t
+  local timer = uv.timer_t()
+  success(uv.timer_init(loop, timer))
+  success(uv.timer_start(timer, function (_timer: uv.timer_t)
+    raise "UV coverage behavior exceeded its five-second deadline"
+  end, 5000, 0))
+  return timer
+end
+
+local function coverage_su_probe_rwlock(lock: uv.rwlock_t): (integer, integer)
+  local state: owned *titan_cov_su_rwlock = foreign titan_cov_su_rwlock.new()
+  state.lock = lock:borrow()
+  state.try_read = uv.rwlock_t.tryrdlock_function()
+  state.try_write = uv.rwlock_t.trywrlock_function()
+  state.read_unlock = uv.rwlock_t.rdunlock_function()
+  state.write_unlock = uv.rwlock_t.wrunlock_function()
+  local thread = uv.thread_t()
+  local accepted, joined = false, false
+  defer if accepted and not joined then success(uv.thread_join(thread)) end
+  local owners: {value} = {state, lock}
+  local status = uv.thread_create(thread, ffi.titan_cov_su_probe_lock, state, owners)
+  accepted = status == 0
+  success(status)
+  success(uv.thread_join(thread))
+  joined = true
+  return state.read_status, state.write_status
+end
+
+function test_coverage_su_recursive_mutex_allows_same_thread_reentry(_context: test.Context)
+  local mutex = uv.mutex_t()
+  success(uv.mutex_init_recursive(mutex))
+  defer uv.mutex_destroy(mutex)
+  uv.mutex_lock(mutex)
+  defer uv.mutex_unlock(mutex)
+  uv.mutex_lock(mutex)
+  defer uv.mutex_unlock(mutex)
+  success(uv.mutex_trylock(mutex))
+  uv.mutex_unlock(mutex)
+end
+
+function test_coverage_su_rwlock_distinguishes_readers_and_writers(_context: test.Context)
+  local lock = uv.rwlock_t()
+  success(uv.rwlock_init(lock))
+  defer uv.rwlock_destroy(lock)
+  uv.rwlock_rdlock(lock)
+  do
+    defer uv.rwlock_rdunlock(lock)
+    local read_status, write_status = coverage_su_probe_rwlock(lock)
+    success(read_status)
+    test.assert(write_status == uv.EBUSY, "writer entered while another thread held a read lock")
+  end
+  uv.rwlock_wrlock(lock)
+  do
+    defer uv.rwlock_wrunlock(lock)
+    local read_status, write_status = coverage_su_probe_rwlock(lock)
+    test.assert(read_status == uv.EBUSY and write_status == uv.EBUSY,
+                "exclusive writer did not exclude another thread")
+  end
+  success(uv.rwlock_tryrdlock(lock))
+  uv.rwlock_rdunlock(lock)
+  success(uv.rwlock_trywrlock(lock))
+  uv.rwlock_wrunlock(lock)
+end
+
+function test_coverage_su_condition_signal_and_broadcast_publish_permits(_context: test.Context)
+  local mutex = uv.mutex_t()
+  success(uv.mutex_init(mutex))
+  defer uv.mutex_destroy(mutex)
+  local condition = uv.cond_t()
+  success(uv.cond_init(condition))
+  defer uv.cond_destroy(condition)
+  local ready = uv.sem_t()
+  success(uv.sem_init(ready, 0))
+  defer uv.sem_destroy(ready)
+  local done = uv.sem_t()
+  success(uv.sem_init(done, 0))
+  defer uv.sem_destroy(done)
+  local state: owned *titan_cov_su_condition = foreign titan_cov_su_condition.new()
+  state.mutex = mutex:borrow()
+  state.condition = condition:borrow()
+  state.ready = ready:borrow()
+  state.done = done:borrow()
+  state.lock = uv.mutex_t.lock_function()
+  state.unlock = uv.mutex_t.unlock_function()
+  state.wait = uv.cond_t.timedwait_function()
+  state.post = uv.sem_t.post_function()
+  local owners: {value} = {state, mutex, condition, ready, done}
+  local threads: {uv.thread_t} = {}
+  local joined = false
+  defer if not joined then
+    uv.mutex_lock(mutex)
+    state.permits = 3
+    uv.cond_broadcast(condition)
+    uv.mutex_unlock(mutex)
+    for i = 1, #threads do success(uv.thread_join(threads[i])) end
+  end
+  for i = 1, 3 do
+    local thread = uv.thread_t()
+    local status = uv.thread_create(thread, ffi.titan_cov_su_wait_for_permit,
+                                   state, owners)
+    if status == 0 then threads[i] = thread end
+    success(status)
+  end
+  uv.sem_wait(ready)
+  uv.sem_wait(ready)
+  uv.sem_wait(ready)
+  uv.mutex_lock(mutex)
+  state.permits = 1
+  uv.cond_signal(condition)
+  uv.mutex_unlock(mutex)
+  uv.sem_wait(done)
+  uv.mutex_lock(mutex)
+  local first_completed: integer = state.completed
+  state.permits = 2
+  uv.cond_broadcast(condition)
+  uv.mutex_unlock(mutex)
+  uv.sem_wait(done)
+  uv.sem_wait(done)
+  for i = 1, #threads do success(uv.thread_join(threads[i])) end
+  joined = true
+  test.assert(first_completed == 1 and state.completed == 3 and state.failed == 0,
+              "condition notification did not release exactly the permitted workers")
+  uv.mutex_lock(mutex)
+  defer uv.mutex_unlock(mutex)
+  local expired = false
+  for _attempt = 1, 5 do
+    local status = uv.cond_timedwait(condition, mutex, 1000000)
+    test.assert(status == 0 or status == uv.ETIMEDOUT)
+    if status == uv.ETIMEDOUT then expired = true; break end
+  end
+  test.assert(expired, "condition without a producer never reported its timeout")
+end
+
+function test_coverage_su_tls_and_joined_thread_identity(_context: test.Context)
+  local key = uv.key_t()
+  success(uv.key_create(key))
+  defer uv.key_delete(key)
+  local parent_cell: owned int[] = foreign int.new_array(1)
+  parent_cell[0] = 17
+  test.assert(uv.key_get(key) == nil)
+  uv.key_set(key, parent_cell)
+  defer uv.key_set(key, nil)
+  local ready = uv.sem_t()
+  success(uv.sem_init(ready, 0))
+  defer uv.sem_destroy(ready)
+  local release = uv.sem_t()
+  success(uv.sem_init(release, 0))
+  defer uv.sem_destroy(release)
+  local state: owned *titan_cov_su_tls = foreign titan_cov_su_tls.new()
+  state.key = key:borrow()
+  state.ready = ready:borrow()
+  state.release = release:borrow()
+  state.get = uv.key_t.get_function()
+  state.set = uv.key_t.set_function()
+  state.post = uv.sem_t.post_function()
+  state.wait = uv.sem_t.wait_function()
+  state.set_name = uv.thread_setname_function()
+  state.get_cpu = uv.thread_getcpu_function()
+  local thread = uv.thread_t()
+  local accepted, joined = false, false
+  defer if accepted and not joined then
+    uv.sem_post(release)
+    success(uv.thread_join(thread))
+  end
+  local owners: {value} = {state, key, ready, release}
+  local status = uv.thread_create_ex(thread, uv.thread_options_t(uv.THREAD_NO_FLAGS, 0),
+                                   ffi.titan_cov_su_use_tls, state, owners)
+  accepted = status == 0
+  success(status)
+  uv.sem_wait(ready)
+  success(state.name_status)
+  test.assert(uv.key_get(key) == (parent_cell as foreign *void) and parent_cell[0] == 17,
+              "worker TLS pointer replaced its parent's value")
+  test.assert(uv.thread_equal(thread, thread) and not uv.thread_equal(thread, uv.thread_self()))
+  test.assert(uv.thread_equal(uv.thread_self(), uv.thread_self()))
+  test.assert(uv.thread_detach(thread) == uv.EBUSY, "detach discarded the retained worker graph")
+  local named, name? = uv.thread_getname(thread, 64)
+  success(named)
+  test.assert(name == "titan-cov-su")
+  local prioritized, priority? = uv.thread_getpriority(thread)
+  success(prioritized)
+  test.assert(priority ~= nil)
+  -- Linux and Windows expose CPU/affinity queries; macOS deliberately returns
+  -- ENOTSUP. Exercise that status contract without skipping the behavior case.
+  local cpu = uv.thread_getcpu()
+  local worker_cpu: integer = state.cpu
+  test.assert(cpu >= 0 or cpu == uv.ENOTSUP)
+  test.assert(worker_cpu >= 0 or worker_cpu == uv.ENOTSUP)
+  local mask_size = uv.cpumask_size()
+  if mask_size >= 0 then
+    test.assert(mask_size > 0)
+    local mask: owned char[] = foreign char.new_array(mask_size)
+    local previous: owned char[] = foreign char.new_array(mask_size)
+    success(uv.thread_getaffinity(thread, mask))
+    success(uv.thread_setaffinity(thread, mask, previous))
+    for i = 0, mask_size - 1 do
+      test.assert(mask[i] == previous[i], "same-mask update changed worker affinity")
+    end
+    success(uv.thread_setaffinity(thread, previous, nil))
+  else
+    test.assert(mask_size == uv.ENOTSUP, "unexpected native CPU-mask failure")
+  end
+  collect()
+  uv.sem_post(release)
+  success(uv.thread_join(thread))
+  joined = true
+  test.assert(state.isolated == 1 and state.cell == 42 and name == "titan-cov-su")
+  test.assert(uv.key_get(key) == (parent_cell as foreign *void))
+  local retired, absent? = uv.thread_getname(thread, 64)
+  test.assert(retired == uv.EINVAL and absent == nil)
+end
+
+function test_coverage_su_once_initialization_is_shared_across_native_threads(_context: test.Context)
+  ffi.titan_cov_su_reset_once()
+  local guard = uv.once_t()
+  local start = uv.sem_t()
+  success(uv.sem_init(start, 0))
+  defer uv.sem_destroy(start)
+  local state: owned *titan_cov_su_once = foreign titan_cov_su_once.new()
+  state.guard = guard:borrow()
+  state.start = start:borrow()
+  state.once = uv.once_function()
+  state.wait = uv.sem_t.wait_function()
+  local owners: {value} = {state, guard, start}
+  local threads: {uv.thread_t} = {}
+  local joined = false
+  defer if not joined then
+    for _i = 1, #threads do uv.sem_post(start) end
+    for i = 1, #threads do success(uv.thread_join(threads[i])) end
+  end
+  for i = 1, 3 do
+    local thread = uv.thread_t()
+    local status = uv.thread_create(thread, ffi.titan_cov_su_race_once,
+                                   state, owners)
+    if status == 0 then threads[i] = thread end
+    success(status)
+  end
+  for _i = 1, #threads do uv.sem_post(start) end
+  uv.once(guard, ffi.titan_cov_su_initialize_once)
+  for i = 1, #threads do success(uv.thread_join(threads[i])) end
+  joined = true
+  uv.once(guard, ffi.titan_cov_su_initialize_once)
+  test.assert(ffi.titan_cov_su_count_once() == 1, "one guard ran its initializer more than once")
+  uv.once(uv.once_t(), ffi.titan_cov_su_initialize_once)
+  test.assert(ffi.titan_cov_su_count_once() == 2, "distinct guards incorrectly shared native state")
+end
+
+function test_coverage_su_numeric_addresses_preserve_bytes_and_ipv6_fields(context: test.Context)
+  context:run("ipv4", function (_child: test.Context)
+    local status, address? = uv.ip4_addr("192.0.2.129", 65535)
+    success(status)
+    test.assert(address:family() == uv.AF_INET and address:port() == 65535)
+    test.assert(address:is_complete() and address:byte_length() > 4)
+    test.assert(#address:raw_bytes() == address:byte_length())
+    test.assert(address:address_bytes() == "\192\0\2\129")
+    local parsed, bytes? = uv.inet_pton(uv.AF_INET, "192.0.2.129")
+    success(parsed)
+    test.assert(bytes == address:address_bytes())
+    local formatted, text? = uv.inet_ntop(uv.AF_INET, bytes)
+    success(formatted)
+    local named, name? = uv.ip4_name(address)
+    success(named)
+    local generic, generic_name? = uv.ip_name(address)
+    success(generic)
+    test.assert(text == "192.0.2.129" and name == text and generic_name == text)
+    test.assert(address:scope_id() == 0 and address:flowinfo() == 0)
+    local length? = address:sa_len()
+    test.assert(length == nil or length == address:byte_length())
+  end)
+  context:run("ipv6", function (_child: test.Context)
+    local status, address? = uv.ip6_addr("2001:db8::1", 4321)
+    success(status)
+    address:set_flowinfo(0x12345678)
+    address:set_scope_id(7)
+    test.assert(address:family() == uv.AF_INET6 and address:port() == 4321)
+    test.assert(address:flowinfo() == 0x12345678 and address:scope_id() == 7)
+    test.assert(#address:address_bytes() == 16 and #address:raw_bytes() == address:byte_length())
+    local parsed, bytes? = uv.inet_pton(uv.AF_INET6, "2001:db8::1")
+    success(parsed)
+    test.assert(bytes == address:address_bytes())
+    local formatted, text? = uv.inet_ntop(uv.AF_INET6, bytes)
+    success(formatted)
+    local named, name? = uv.ip6_name(address)
+    success(named)
+    local generic, generic_name? = uv.ip_name(address)
+    success(generic)
+    test.assert(text == "2001:db8::1" and name == text and generic_name == text)
+  end)
+  context:run("malformed_inputs", function (_child: test.Context)
+    local bad4, absent4? = uv.ip4_addr("256.0.0.1", 80)
+    local bad6, absent6? = uv.ip6_addr("2001:::1", 80)
+    test.assert(bad4 == uv.EINVAL and absent4 == nil and bad6 == uv.EINVAL and absent6 == nil)
+    local parsed, no_bytes? = uv.inet_pton(uv.AF_INET, "127.0.0")
+    test.assert(parsed == uv.EINVAL and no_bytes == nil)
+    local short4, no4? = uv.inet_ntop(uv.AF_INET, "abc")
+    local short6, no6? = uv.inet_ntop(uv.AF_INET6, "short")
+    test.assert(short4 == uv.EINVAL and no4 == nil and short6 == uv.EINVAL and no6 == nil)
+    local unsupported, missing? = uv.inet_pton(-1, "127.0.0.1")
+    local unsupported_text, missing_text? = uv.inet_ntop(-1, "abcd")
+    test.assert(unsupported == uv.EAFNOSUPPORT and missing == nil and
+                unsupported_text == uv.EAFNOSUPPORT and missing_text == nil)
+    local valid4, address4? = uv.ip4_addr("127.0.0.1", 1)
+    local valid6, address6? = uv.ip6_addr("::1", 1)
+    success(valid4)
+    success(valid6)
+    local wrong6, absent_name6? = uv.ip6_name(address4)
+    local wrong4, absent_name4? = uv.ip4_name(address6)
+    test.assert(wrong6 == uv.EAFNOSUPPORT and absent_name6 == nil and
+                wrong4 == uv.EAFNOSUPPORT and absent_name4 == nil)
+  end)
+end
+
+function test_coverage_su_reverse_dns_callback_reuses_request_and_copies_results(_context: test.Context)
+  local loop = new_loop()
+  defer finish_loop(loop)
+  local deadline = coverage_su_deadline(loop)
+  local first_status, first? = uv.ip4_addr("127.0.0.1", 1234)
+  local second_status, second? = uv.ip6_addr("::1", 4321)
+  success(first_status)
+  success(second_status)
+  local request = uv.getnameinfo_t()
+  local flags = uv.NI_NUMERICHOST | uv.NI_NUMERICSERV
+  local calls = 0
+  local saved_host: string? = nil
+  local saved_service: string? = nil
+  success(uv.getnameinfo(loop, request, function (completed: uv.getnameinfo_t, status: integer,
+                                                host: string?, service: string?)
+    success(status)
+    calls = calls + 1
+    test.assert(completed == request and completed:get_loop() == loop)
+    test.assert(host == "127.0.0.1" and service == "1234")
+    saved_host, saved_service = host, service
+    success(uv.getnameinfo(loop, completed, function (again: uv.getnameinfo_t, result: integer,
+                                                    next_host: string?, next_service: string?)
+      success(result)
+      calls = calls + 1
+      test.assert(again == request and next_host == "::1" and next_service == "4321")
+      collect()
+      test.assert(saved_host == "127.0.0.1" and saved_service == "1234")
+      uv.close(deadline:as_handle_t())
+    end, second, flags))
+    local busy, absent_host?, absent_service? = completed:result()
+    test.assert(busy == uv.EBUSY and absent_host == nil and absent_service == nil)
+    collect()
+    test.assert(host == "127.0.0.1" and service == "1234")
+  end, first, flags))
+  test.assert(uv.getnameinfo(loop, request, nil, first, flags) == uv.EBUSY)
+  collect()
+  success(uv.run(loop))
+  test.assert(calls == 2)
+  local result, host?, service? = request:result()
+  success(result)
+  test.assert(host == "::1" and service == "4321")
+end
+
+function test_coverage_su_udp_immediate_and_batch_sends_preserve_datagrams(_context: test.Context)
+  local loop = new_loop()
+  defer finish_loop(loop)
+  local deadline = coverage_su_deadline(loop)
+  local receiver, address = bound(loop, 0)
+  local sender = uv.udp_t()
+  success(uv.udp_init(loop, sender))
+  local packets: {string: integer} = {}
+  local received = 0
+  success(uv.udp_recv_start(receiver,
+    function (_handle, _suggested) return uv.buf_t.allocate(128) end,
+    function (owner, count, buffer, peer, flags)
+      test.assert(count >= 0, "loopback UDP receive failed")
+      if peer ~= nil then
+        test.assert(flags == 0 and peer:family() == uv.AF_INET and peer:port() > 0)
+        local packet = buffer:to_string(count)
+        packets[packet] = (packets[packet] or 0) + 1
+        received = received + 1
+        if received == 4 then
+          success(uv.udp_recv_stop(owner))
+          uv.close(owner:as_handle_t())
+          uv.close(sender:as_handle_t())
+          uv.close(deadline:as_handle_t())
+        end
+      end
+    end))
+  test.assert(uv.udp_try_send(sender, {uv.buf_t.from_string("first\0packet")}, address) == 12)
+  success(uv.udp_connect(sender, address))
+  local peer_status, peer?, peer_size = uv.udp_getpeername(sender)
+  success(peer_status)
+  test.assert(peer:port() == address:port() and peer_size == peer:byte_length())
+  test.assert(uv.udp_try_send(sender, {uv.buf_t.from_string("connected\0")}, nil) == 10)
+  success(uv.udp_connect(sender, nil))
+  local disconnected, no_peer?, _size = uv.udp_getpeername(sender)
+  test.assert(disconnected == uv.ENOTCONN and no_peer == nil)
+  local vectors = {{uv.buf_t.from_string("a\0"), uv.buf_t.from_string("b")},
+                   {uv.buf_t.from_string("last")}}
+  local addresses: {uv.sockaddr_t?} = {address, address}
+  test.assert(uv.udp_try_send2(sender, vectors, addresses, 0) == 2)
+  test.assert(uv.udp_get_send_queue_count(sender) == 0 and uv.udp_get_send_queue_size(sender) == 0)
+  collect()
+  success(uv.run(loop))
+  test.assert(received == 4 and packets["first\0packet"] == 1 and packets["connected\0"] == 1 and
+              packets["a\0b"] == 1 and packets["last"] == 1,
+              "immediate/batch send merged, truncated, duplicated or lost a datagram")
+end

@@ -1,0 +1,536 @@
+local function coverage_mc_deadline(loop: uv.loop_t): uv.timer_t
+  local timer = uv.timer_t()
+  success(uv.timer_init(loop, timer))
+  success(uv.timer_start(timer, function ()
+    raise "UV miscellaneous behavior exceeded its five-second deadline"
+  end, 5000, 0))
+  return timer
+end
+
+function test_coverage_mc_interface_addresses_are_independent_snapshots(_context: test.Context)
+  local status, addresses?, count = uv.interface_addresses()
+  success(status)
+  test.assert(addresses ~= nil and #addresses == count and count >= 0)
+  local names: {string} = {}
+  for index = 1, count do
+    local address = addresses[index]
+    test.assert(#address.name > 0 and #address.phys_addr == 6)
+    local ip_status, text? = uv.ip_name(address.address, 128)
+    success(ip_status)
+    test.assert(text ~= nil and #text > 0)
+    if address.netmask ~= nil then
+      local mask_status, mask? = uv.ip_name(address.netmask, 128)
+      success(mask_status)
+      test.assert(mask ~= nil and #mask > 0)
+    end
+    names[index] = address.name
+  end
+  local next_status, next_addresses?, next_count = uv.interface_addresses()
+  success(next_status)
+  test.assert(next_addresses ~= nil and #next_addresses == next_count)
+  collect()
+  for index = 1, count do
+    test.assert(addresses[index].name == names[index], "native cleanup changed an older interface snapshot")
+  end
+end
+
+function test_coverage_mc_user_and_group_snapshots(context: test.Context)
+  context:run("effective_user", function (_child: test.Context)
+    local status, user? = uv.os_get_passwd()
+    success(status)
+    test.assert(user ~= nil and #user.username > 0 and #user.homedir > 0)
+    local name, home, uid, gid = user.username, user.homedir, user.uid, user.gid
+    local next_status, next_user? = uv.os_get_passwd()
+    success(next_status)
+    collect()
+    test.assert(next_user ~= nil and next_user.username == name)
+    test.assert(user.username == name and user.homedir == home and user.uid == uid and user.gid == gid)
+  end)
+  context:run("user_by_id", function (_child: test.Context)
+    if common.is_windows() then
+      local status, found? = uv.os_get_passwd2(0)
+      test.assert(status == uv.ENOTSUP and found == nil,
+                  "Windows user-by-id lookup must return unsupported without a snapshot")
+      return
+    end
+    local status, current? = uv.os_get_passwd()
+    success(status)
+    if current.uid < 0 then test.skip("capability: native numeric user IDs are unavailable") end
+    local found_status, found? = uv.os_get_passwd2(current.uid)
+    if found_status == uv.ENOTSUP or found_status == uv.ENOSYS then
+      test.assert(found == nil)
+      test.skip("capability: native user-by-id lookup is unavailable")
+    end
+    success(found_status)
+    test.assert(found ~= nil and found.uid == current.uid and found.username == current.username)
+    collect()
+    test.assert(found.homedir == current.homedir)
+  end)
+  context:run("effective_group", function (_child: test.Context)
+    if common.is_windows() then
+      local status, group? = uv.os_get_group(0)
+      test.assert(status == uv.ENOTSUP and group == nil,
+                  "Windows group lookup must return unsupported without a snapshot")
+      return
+    end
+    local status, current? = uv.os_get_passwd()
+    success(status)
+    if current.gid < 0 then test.skip("capability: native numeric group IDs are unavailable") end
+    local group_status, group? = uv.os_get_group(current.gid)
+    if group_status == uv.ENOTSUP or group_status == uv.ENOSYS then
+      test.assert(group == nil)
+      test.skip("capability: native group lookup is unavailable")
+    end
+    success(group_status)
+    test.assert(group ~= nil and #group.groupname > 0 and group.gid == current.gid)
+    local name = group.groupname
+    local members: {string} = {}
+    for index = 1, #group.members do members[index] = group.members[index] end
+    local next_status, next_group? = uv.os_get_group(current.gid)
+    success(next_status)
+    collect()
+    test.assert(next_group ~= nil and group.groupname == name and #group.members == #members)
+    for index = 1, #members do test.assert(group.members[index] == members[index]) end
+  end)
+end
+
+function test_coverage_mc_clocks_memory_and_system_queries(_context: test.Context)
+  test.assert(uv.available_parallelism() >= 1)
+  local available, constrained = uv.get_available_memory(), uv.get_constrained_memory()
+  -- UINT64_MAX is preserved as -1 by these exact-bit native queries.
+  test.assert(available >= 0 or available == -1)
+  test.assert(constrained >= 0 or constrained == -1)
+  local total, free = uv.get_total_memory(), uv.get_free_memory()
+  test.assert(total > 0 and free >= 0 and free <= total)
+  local start = uv.hrtime()
+  local monotonic_status, monotonic? = uv.clock_gettime(uv.CLOCK_MONOTONIC)
+  success(monotonic_status)
+  local realtime_status, realtime? = uv.clock_gettime(uv.CLOCK_REALTIME)
+  success(realtime_status)
+  test.assert(monotonic ~= nil and monotonic.tv_sec >= 0 and monotonic.tv_nsec >= 0 and monotonic.tv_nsec < 1000000000)
+  test.assert(realtime ~= nil and realtime.tv_sec > 0 and realtime.tv_nsec >= 0 and realtime.tv_nsec < 1000000000)
+  test.assert(uv.hrtime() >= start)
+  local memory_status, resident? = uv.resident_set_memory()
+  success(memory_status)
+  test.assert(resident ~= nil and resident > 0)
+  local uptime_status, uptime? = uv.uptime()
+  success(uptime_status)
+  test.assert(uptime ~= nil and uptime >= 0.0)
+  local one, five, fifteen = uv.loadavg()
+  test.assert(one >= 0.0 and five >= 0.0 and fifteen >= 0.0)
+  local name_status, name? = uv.os_uname()
+  success(name_status)
+  test.assert(name ~= nil and #name.sysname > 0 and #name.release > 0 and #name.version > 0 and #name.machine > 0)
+  local copied_system, copied_machine = name.sysname, name.machine
+  local again_status, again? = uv.os_uname()
+  success(again_status)
+  collect()
+  test.assert(again ~= nil and name.sysname == copied_system and name.machine == copied_machine)
+  test.assert(#uv.strerror_r(uv.ENOENT, 256) > 0 and uv.strerror_r(uv.ENOENT, 0) == "")
+  expect_error(function () uv.utf16_to_wtf8({65}, 1, -1) end, "WTF-8 output capacity is out of range")
+end
+
+function test_coverage_mc_thread_resource_usage(_context: test.Context)
+  local status, usage? = uv.getrusage_thread()
+  if status == uv.ENOTSUP or status == uv.ENOSYS then
+    test.assert(usage == nil)
+    test.skip("capability: native per-thread resource usage is unavailable")
+  end
+  success(status)
+  test.assert(usage ~= nil and usage.ru_utime.tv_sec >= 0 and usage.ru_stime.tv_sec >= 0)
+  test.assert(usage.ru_utime.tv_usec >= 0 and usage.ru_utime.tv_usec < 1000000)
+  test.assert(usage.ru_stime.tv_usec >= 0 and usage.ru_stime.tv_usec < 1000000)
+end
+
+function test_coverage_mc_process_title_and_priority_restore_their_inputs(_context: test.Context)
+  test.assert(uv.setup_process_args(), "native runner did not publish original process arguments")
+  local status, title? = uv.get_process_title(4096)
+  success(status)
+  local original = title as string
+  success(uv.set_process_title("Titan UV query test"))
+  defer success(uv.set_process_title(original))
+  local changed_status, changed? = uv.get_process_title(4096)
+  success(changed_status)
+  test.assert(changed == "Titan UV query test")
+  local priority_status, priority? = uv.os_getpriority(uv.os_getpid())
+  success(priority_status)
+  test.assert(priority ~= nil)
+  success(uv.os_setpriority(uv.os_getpid(), priority))
+  local same_status, same? = uv.os_getpriority(uv.os_getpid())
+  success(same_status)
+  test.assert(same == priority, "setting the current priority changed its value")
+end
+
+local function coverage_mc_handle_kind(context: test.Context, name: string, kind: uv.handle_type)
+  context:run(name, function (_child: test.Context)
+    test.assert(uv.handle_type_name(kind) == name)
+    test.assert(uv.handle_size(kind) > 0 and uv.loop_size() > 0)
+  end)
+end
+
+local function coverage_mc_request_kind(context: test.Context, name: string, kind: uv.req_type)
+  context:run(name, function (_child: test.Context)
+    test.assert(uv.req_type_name(kind) == name)
+    test.assert(uv.req_size(kind) > 0)
+  end)
+end
+
+function test_coverage_mc_native_type_queries(context: test.Context)
+  coverage_mc_handle_kind(context, "async", uv.ASYNC)
+  coverage_mc_handle_kind(context, "check", uv.CHECK)
+  coverage_mc_handle_kind(context, "fs_event", uv.FS_EVENT)
+  coverage_mc_handle_kind(context, "fs_poll", uv.FS_POLL)
+  coverage_mc_handle_kind(context, "handle", uv.HANDLE)
+  coverage_mc_handle_kind(context, "idle", uv.IDLE)
+  coverage_mc_handle_kind(context, "pipe", uv.NAMED_PIPE)
+  coverage_mc_handle_kind(context, "poll", uv.POLL)
+  coverage_mc_handle_kind(context, "prepare", uv.PREPARE)
+  coverage_mc_handle_kind(context, "process", uv.PROCESS)
+  coverage_mc_handle_kind(context, "stream", uv.STREAM)
+  coverage_mc_handle_kind(context, "tcp", uv.TCP)
+  coverage_mc_handle_kind(context, "timer", uv.TIMER)
+  coverage_mc_handle_kind(context, "tty", uv.TTY)
+  coverage_mc_handle_kind(context, "udp", uv.UDP)
+  coverage_mc_handle_kind(context, "signal", uv.SIGNAL)
+  coverage_mc_request_kind(context, "req", uv.REQ)
+  coverage_mc_request_kind(context, "connect", uv.CONNECT)
+  coverage_mc_request_kind(context, "write", uv.WRITE)
+  coverage_mc_request_kind(context, "shutdown", uv.SHUTDOWN)
+  coverage_mc_request_kind(context, "udp_send", uv.UDP_SEND)
+  coverage_mc_request_kind(context, "fs", uv.FS)
+  coverage_mc_request_kind(context, "work", uv.WORK)
+  coverage_mc_request_kind(context, "getaddrinfo", uv.GETADDRINFO)
+  coverage_mc_request_kind(context, "getnameinfo", uv.GETNAMEINFO)
+  coverage_mc_request_kind(context, "random", uv.RANDOM)
+  context:run("unknown_kinds", function (_child: test.Context)
+    test.assert(uv.handle_type_name(uv.UNKNOWN_HANDLE) == nil and uv.handle_size(uv.UNKNOWN_HANDLE) == -1)
+    test.assert(uv.req_type_name(uv.UNKNOWN_REQ) == nil and uv.req_size(uv.UNKNOWN_REQ) == -1)
+    test.assert(uv.handle_type_name(uv.FILE) == "file" and uv.handle_size(uv.FILE) == -1)
+  end)
+end
+
+local function coverage_mc_live_handle(loop: uv.loop_t, handle: uv.handle_t, name: string)
+  test.assert(uv.handle_get_loop(handle) == loop)
+  test.assert(uv.handle_type_name(uv.handle_get_type(handle)) == name)
+  uv.handle_set_data(handle, false)
+  test.assert(uv.handle_get_data(handle) == false)
+  uv.unref(handle)
+  test.assert(not uv.has_ref(handle))
+  uv.ref(handle)
+  test.assert(uv.has_ref(handle))
+end
+
+local function coverage_mc_hook_failure(context: test.Context, name: string,
+    start: function (uv.loop_t, function (): ()): uv.handle_t)
+  context:run(name, function (_child: test.Context)
+    local loop = new_loop()
+    defer finish_loop(loop)
+    local deadline = coverage_mc_deadline(loop)
+    local calls = 0
+    local failure = "coverage_mc " .. name .. " delivery"
+    local handle = start(loop, function ()
+      calls = calls + 1
+      raise failure
+    end)
+    coverage_mc_live_handle(loop, handle, name)
+    expect_error(function () uv.run(loop, uv.RUN_NOWAIT) end, failure)
+    test.assert(calls == 1 and handle:is_initialized(), "callback failure retired or repeated its owner")
+    uv.close(deadline:as_handle_t())
+    local closed = 0
+    uv.close(handle, function (view: uv.handle_t)
+      test.assert(not view:is_initialized())
+      test.assert(uv.handle_get_data(view) == false)
+      closed = closed + 1
+      raise "coverage_mc close failure"
+    end)
+    expect_error(function () uv.run(loop) end, "coverage_mc close failure")
+    test.assert(closed == 1 and not handle:is_initialized())
+    success(uv.run(loop))
+    test.assert(not uv.loop_alive(loop))
+  end)
+end
+
+function test_coverage_mc_loop_hook_failures_retire_after_close(context: test.Context)
+  coverage_mc_hook_failure(context, "idle", function (loop, fail): uv.handle_t
+    local owner = uv.idle_t()
+    success(uv.idle_init(loop, owner))
+    success(uv.idle_start(owner, function (current: uv.idle_t)
+      success(uv.idle_stop(current))
+      fail()
+    end))
+    return owner:as_handle_t()
+  end)
+  coverage_mc_hook_failure(context, "prepare", function (loop, fail): uv.handle_t
+    local owner = uv.prepare_t()
+    success(uv.prepare_init(loop, owner))
+    success(uv.prepare_start(owner, function (current: uv.prepare_t)
+      success(uv.prepare_stop(current))
+      fail()
+    end))
+    return owner:as_handle_t()
+  end)
+  coverage_mc_hook_failure(context, "check", function (loop, fail): uv.handle_t
+    local owner = uv.check_t()
+    success(uv.check_init(loop, owner))
+    success(uv.check_start(owner, function (current: uv.check_t)
+      success(uv.check_stop(current))
+      fail()
+    end))
+    return owner:as_handle_t()
+  end)
+  coverage_mc_hook_failure(context, "async", function (loop, fail): uv.handle_t
+    local owner = uv.async_t()
+    success(uv.async_init(loop, owner, function (_current: uv.async_t) fail() end))
+    success(uv.async_send(owner))
+    return owner:as_handle_t()
+  end)
+end
+
+function test_coverage_mc_walk_failure_is_synchronous_and_recoverable(_context: test.Context)
+  local loop = new_loop()
+  defer finish_loop(loop)
+  local timer = uv.timer_t()
+  success(uv.timer_init(loop, timer))
+  expect_error(function ()
+    uv.walk(loop, function (handle: uv.handle_t, argument: value)
+      test.assert(argument == false and uv.handle_get_loop(handle) == loop)
+      raise "coverage_mc walk failure"
+    end, false)
+  end, "coverage_mc walk failure")
+  -- A synchronous walk failure requests a stop of the next native run too.
+  test.assert(uv.run(loop, uv.RUN_NOWAIT) >= 0)
+  local calls = 0
+  uv.walk(loop, function () calls = calls + 1 end, nil)
+  test.assert(calls == 1, "failed walk retained its prior callback")
+end
+
+function test_coverage_mc_repeating_timer_rearms_and_stops(_context: test.Context)
+  local timer = uv.timer_t()
+  test.assert(uv.timer_again(timer) == uv.EINVAL)
+  expect_error(function () uv.timer_set_repeat(timer, 1) end, "timer is not initialized")
+  expect_error(function () uv.timer_get_repeat(timer) end, "timer is not initialized")
+  expect_error(function () uv.timer_get_due_in(timer) end, "timer is not initialized")
+  local loop = new_loop()
+  defer finish_loop(loop)
+  local deadline = coverage_mc_deadline(loop)
+  success(uv.timer_init(loop, timer))
+  test.assert(uv.timer_again(timer) == uv.EINVAL)
+  uv.timer_set_repeat(timer, 2)
+  test.assert(uv.timer_get_repeat(timer) == 2 and uv.timer_get_due_in(timer) == 0)
+  local calls = 0
+  success(uv.timer_start(timer, function (current: uv.timer_t)
+    calls = calls + 1
+    success(uv.timer_stop(current))
+    if calls == 1 then
+      uv.timer_set_repeat(current, 1)
+      success(uv.timer_again(current))
+    else
+      uv.timer_set_repeat(current, 0)
+      test.assert(uv.timer_get_repeat(current) == 0)
+      uv.close(current:as_handle_t())
+      uv.close(deadline:as_handle_t())
+    end
+  end, 0, 2))
+  test.assert(uv.backend_fd(loop) >= -1 and uv.backend_timeout(loop) >= -1)
+  success(uv.run(loop))
+  test.assert(calls == 2 and not uv.loop_alive(loop))
+  test.assert(uv.timer_again(timer) == uv.EINVAL)
+end
+
+local function coverage_mc_submit_random(loop: uv.loop_t, weak: {value: value},
+    completed: function (uv.random_t, integer, uv.buf_t, integer): ())
+  local request = uv.random_t()
+  local storage = uv.buf_t.allocate(34)
+  for index = 1, 34 do storage:set(index, 165) end
+  local slice = storage:slice(2, 32)
+  weak[1] = request
+  weak[2] = slice
+  weak[3] = storage
+  request:as_req_t():set_data("random public data")
+  success(uv.random(loop, request, slice, 32, 0, completed))
+  test.assert(uv.random(loop, request, slice, 32, 0, completed) == uv.EBUSY)
+  test.assert(uv.req_type_name(uv.req_get_type(request:as_req_t())) == "random")
+end
+
+function test_coverage_mc_async_random_retains_slices_and_survives_callback_failure(_context: test.Context)
+  local loop = new_loop()
+  defer finish_loop(loop)
+  local deadline = coverage_mc_deadline(loop)
+  local weak: {value: value} = {}
+  gc.weak(weak)
+  local calls = 0
+  coverage_mc_submit_random(loop, weak, function (request, status, buffer, length)
+    success(status)
+    test.assert(length == 32 and buffer == weak[2] and buffer:is_writable())
+    test.assert(request == weak[1] and request:as_req_t():get_data() == "random public data")
+    local storage: uv.buf_t = weak[3]
+    test.assert(storage:get(1) == 165 and storage:get(34) == 165, "random wrote outside its retained slice")
+    test.assert(#buffer:to_string(length) == length)
+    calls = calls + 1
+    success(uv.random(loop, request, buffer, 0, 0, function (next_request: uv.random_t, next_status: integer,
+                                                          next_buffer: uv.buf_t, next_length: integer)
+      success(next_status)
+      test.assert(next_request == request and next_buffer == buffer and next_length == 0)
+      calls = calls + 1
+      uv.close(deadline:as_handle_t())
+    end))
+    raise "coverage_mc random callback failure"
+  end)
+  collect()
+  assert_retained(weak, 1)
+  assert_retained(weak, 2)
+  assert_retained(weak, 3)
+  expect_error(function () uv.run(loop) end, "coverage_mc random callback failure")
+  test.assert(calls == 1)
+  collect()
+  assert_retained(weak, 1)
+  success(uv.run(loop))
+  test.assert(calls == 2)
+  collect()
+  test.assert(weak[1] == nil and weak[2] == nil and weak[3] == nil, "completed random retained native owners")
+end
+
+function test_coverage_mc_random_rejection_does_not_accept_owners(_context: test.Context)
+  local loop = new_loop()
+  defer finish_loop(loop)
+  local request = uv.random_t()
+  local buffer = uv.buf_t.allocate(4)
+  local calls = 0
+  local callback = function (_request: uv.random_t, _status: integer,
+                            _buffer: uv.buf_t, _length: integer)
+    calls = calls + 1
+  end
+  test.assert(uv.random(loop, request, buffer, -1, 0, callback) == uv.EINVAL)
+  test.assert(uv.random(loop, request, buffer, 5, 0, callback) == uv.EINVAL)
+  test.assert(uv.random(loop, request, uv.buf_t.from_string("text"), 4, 0, callback) == uv.EINVAL)
+  test.assert(uv.random(nil, request, buffer, 4, 0, callback) == uv.EINVAL)
+  test.assert(uv.random(loop, nil, buffer, 4, 0, callback) == uv.EINVAL)
+  test.assert(uv.random(loop, request, buffer, 4, 1, callback) == uv.EINVAL)
+  test.assert(calls == 0 and not uv.loop_alive(loop), "rejected random operation accepted a callback")
+  success(uv.random(loop, request, buffer, 4, 0, callback))
+  success(uv.run(loop))
+  test.assert(calls == 1, "rejected random request could not be reused")
+end
+
+function test_coverage_mc_byte_buffer_views_preserve_ownership_and_bounds(_context: test.Context)
+  local buffer = uv.buf_t.allocate(4)
+  test.assert(buffer:is_writable())
+  buffer:set(1, 0)
+  buffer:set(2, 255)
+  buffer:set(3, 65)
+  buffer:set(4, 66)
+  local slice = buffer:slice(2, 2)
+  test.assert(slice:get(1) == 255 and slice:get(2) == 65 and slice:to_string(2) == "\255A")
+  slice:set(2, 0)
+  test.assert(buffer:to_string(4) == "\0\255\0B")
+  local readonly = uv.buf_t.from_string("A\0B")
+  test.assert(not readonly:is_writable() and readonly:get(2) == 0)
+  expect_error(function () readonly:set(1, 66) end, "buffer is read-only")
+  expect_error(function () buffer:get(0) end, "buffer index is out of bounds")
+  expect_error(function () buffer:get(5) end, "buffer index is out of bounds")
+  expect_error(function () buffer:set(5, 1) end, "buffer byte/index is out of bounds")
+  expect_error(function () buffer:set(1, 256) end, "buffer byte/index is out of bounds")
+  expect_error(function () buffer:to_string(5) end, "buffer string length is out of bounds")
+  expect_error(function () buffer:slice(0, 1) end, "buffer slice is out of bounds")
+  expect_error(function () uv.buf_t.allocate(-1) end, "buffer capacity is outside native range")
+end
+
+local function coverage_mc_named_pipe(context: test.Context, name: string, sized: boolean)
+  context:run(name, function (_child: test.Context)
+    local directory_request = uv.fs_t()
+    defer uv.fs_req_cleanup(directory_request)
+    success(uv.fs_mkdtemp(nil, directory_request, "uv-mc-XXXXXX"))
+    local directory = uv.fs_get_path(directory_request)
+    defer do
+      local cleanup = uv.fs_t()
+      defer uv.fs_req_cleanup(cleanup)
+      success(uv.fs_rmdir(nil, cleanup, directory))
+    end
+    local path = directory .. "/pipe"
+    if common.is_windows() then
+      path = "\\\\.\\pipe\\titan-uv-mc-" .. uv.os_getpid() .. "-" .. uv.hrtime()
+    end
+    local loop = new_loop()
+    defer finish_loop(loop)
+    local deadline = coverage_mc_deadline(loop)
+    local server, client, peer = uv.pipe_t(), uv.pipe_t(), uv.pipe_t()
+    success(uv.pipe_init(loop, server, 0))
+    success(uv.pipe_init(loop, client, 0))
+    success(uv.pipe_init(loop, peer, 0))
+    test.assert(server:ipc() == 0 and client:ipc() == 0)
+    uv.pipe_pending_instances(server, 2)
+    if sized then
+      test.assert(uv.pipe_bind2(server, path, #path + 1, 0) == uv.EINVAL)
+      success(uv.pipe_bind2(server, path, #path, 0))
+    else
+      success(uv.pipe_bind(server, path))
+    end
+    local chmod_status = uv.pipe_chmod(server, uv.READABLE | uv.WRITABLE)
+    test.assert(chmod_status == 0 or chmod_status == uv.ENOSYS or chmod_status == uv.ENOTSUP,
+                "named pipe permissions failed unexpectedly")
+    local accepted, connected = 0, 0
+    success(uv.listen(server:as_stream_t(), 4, function (stream, status)
+      success(status)
+      success(uv.accept(stream, peer:as_handle_t()))
+      test.assert(uv.is_readable(peer:as_stream_t()) and uv.is_writable(peer:as_stream_t()))
+      accepted = accepted + 1
+      uv.close(peer:as_handle_t())
+      uv.close(server:as_handle_t())
+      raise "coverage_mc pipe connection failure"
+    end))
+    local request = uv.connect_t()
+    local callback: uv.connect_cb = function (current: uv.connect_t, status: integer)
+      success(status)
+      test.assert(current == request and current:handle() ~= nil)
+      test.assert(uv.req_type_name(uv.req_get_type(current:as_req_t())) == "connect")
+      test.assert(uv.pipe_pending_count(client) == 0)
+      test.assert(uv.handle_type_name(uv.pipe_pending_type(client)) == nil)
+      connected = connected + 1
+      uv.close(client:as_handle_t())
+      uv.close(deadline:as_handle_t())
+    end
+    if sized then
+      test.assert(uv.pipe_connect2(request, client, path, #path + 1, 0, callback) == uv.EINVAL)
+      success(uv.pipe_connect2(request, client, path, #path, 0, callback))
+    else
+      uv.pipe_connect(request, client, path, callback)
+    end
+    expect_error(function () uv.run(loop) end, "coverage_mc pipe connection failure")
+    success(uv.run(loop))
+    test.assert(accepted == 1 and connected == 1 and not uv.loop_alive(loop))
+  end)
+end
+
+function test_coverage_mc_named_pipe_connections_and_callback_failure(context: test.Context)
+  coverage_mc_named_pipe(context, "legacy_name", false)
+  coverage_mc_named_pipe(context, "explicit_length", true)
+end
+
+function test_coverage_mc_tcp_options_and_reset_retire_a_bound_socket(_context: test.Context)
+  local tcp = uv.tcp_t()
+  test.assert(uv.tcp_keepalive(tcp, 1, 10) == uv.EINVAL)
+  test.assert(uv.tcp_simultaneous_accepts(tcp, 1) == uv.EINVAL)
+  test.assert(uv.tcp_close_reset(tcp, nil) == uv.EINVAL)
+  local loop = new_loop()
+  defer finish_loop(loop)
+  success(uv.tcp_init(loop, tcp))
+  local address_status, address? = uv.ip4_addr("127.0.0.1", 0)
+  success(address_status)
+  success(uv.tcp_bind(tcp, address, 0))
+  coverage_mc_live_handle(loop, tcp:as_handle_t(), "tcp")
+  success(uv.tcp_keepalive(tcp, 1, 10))
+  success(uv.tcp_keepalive_ex(tcp, 1, 10, 3, 4))
+  test.assert(uv.tcp_keepalive_ex(tcp, 1, 0, 3, 4) == uv.EINVAL)
+  success(uv.tcp_keepalive(tcp, 0, 0))
+  success(uv.tcp_simultaneous_accepts(tcp, 1))
+  success(uv.tcp_simultaneous_accepts(tcp, 0))
+  local closed = 0
+  success(uv.tcp_close_reset(tcp, function (handle: uv.handle_t)
+    test.assert(not handle:is_initialized() and uv.handle_get_data(handle) == false)
+    closed = closed + 1
+    raise "coverage_mc reset close failure"
+  end))
+  expect_error(function () uv.run(loop) end, "coverage_mc reset close failure")
+  test.assert(closed == 1 and not tcp:as_handle_t():is_initialized())
+  success(uv.run(loop))
+end
