@@ -2,7 +2,7 @@ foreign import "uv_coverage_pty.h"
 
 local function coverage_tty_open(): owned *titan_cov_pty
   if ffi.titan_cov_pty_available() == 0 then
-    test.skip("isolated POSIX PTYs are unavailable; Windows ConPTY is a separate capability")
+    test.skip("capability: isolated POSIX PTYs are unavailable; Windows ConPTY is a separate capability")
   end
   local pty: owned *titan_cov_pty = foreign titan_cov_pty.new()
   success(ffi.titan_cov_pty_open(pty))

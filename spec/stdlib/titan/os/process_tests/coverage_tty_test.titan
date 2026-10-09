@@ -2,7 +2,7 @@ foreign import "uv_coverage_pty.h"
 
 function test_coverage_parent_terminal_streams_and_close_noop(_context: test.Context)
   if ffi.titan_cov_pty_available() == 0 then
-    test.skip("isolated POSIX PTYs are unavailable; Windows ConPTY is a separate capability")
+    test.skip("capability: isolated POSIX PTYs are unavailable; Windows ConPTY is a separate capability")
   end
   runtime_test.run(function ()
     local workspace = fs.tmpname()

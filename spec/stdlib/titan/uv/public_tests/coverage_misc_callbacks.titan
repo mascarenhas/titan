@@ -47,13 +47,19 @@ function test_coverage_mc_user_and_group_snapshots(context: test.Context)
     test.assert(user.username == name and user.homedir == home and user.uid == uid and user.gid == gid)
   end)
   context:run("user_by_id", function (_child: test.Context)
+    if common.is_windows() then
+      local status, found? = uv.os_get_passwd2(0)
+      test.assert(status == uv.ENOTSUP and found == nil,
+                  "Windows user-by-id lookup must return unsupported without a snapshot")
+      return
+    end
     local status, current? = uv.os_get_passwd()
     success(status)
-    if current.uid < 0 then test.skip("native numeric user IDs are unavailable") end
+    if current.uid < 0 then test.skip("capability: native numeric user IDs are unavailable") end
     local found_status, found? = uv.os_get_passwd2(current.uid)
     if found_status == uv.ENOTSUP or found_status == uv.ENOSYS then
       test.assert(found == nil)
-      test.skip("native user-by-id lookup is unavailable")
+      test.skip("capability: native user-by-id lookup is unavailable")
     end
     success(found_status)
     test.assert(found ~= nil and found.uid == current.uid and found.username == current.username)
@@ -61,13 +67,19 @@ function test_coverage_mc_user_and_group_snapshots(context: test.Context)
     test.assert(found.homedir == current.homedir)
   end)
   context:run("effective_group", function (_child: test.Context)
+    if common.is_windows() then
+      local status, group? = uv.os_get_group(0)
+      test.assert(status == uv.ENOTSUP and group == nil,
+                  "Windows group lookup must return unsupported without a snapshot")
+      return
+    end
     local status, current? = uv.os_get_passwd()
     success(status)
-    if current.gid < 0 then test.skip("native numeric group IDs are unavailable") end
+    if current.gid < 0 then test.skip("capability: native numeric group IDs are unavailable") end
     local group_status, group? = uv.os_get_group(current.gid)
     if group_status == uv.ENOTSUP or group_status == uv.ENOSYS then
       test.assert(group == nil)
-      test.skip("native group lookup is unavailable")
+      test.skip("capability: native group lookup is unavailable")
     end
     success(group_status)
     test.assert(group ~= nil and #group.groupname > 0 and group.gid == current.gid)
@@ -122,7 +134,7 @@ function test_coverage_mc_thread_resource_usage(_context: test.Context)
   local status, usage? = uv.getrusage_thread()
   if status == uv.ENOTSUP or status == uv.ENOSYS then
     test.assert(usage == nil)
-    test.skip("native per-thread resource usage is unavailable")
+    test.skip("capability: native per-thread resource usage is unavailable")
   end
   success(status)
   test.assert(usage ~= nil and usage.ru_utime.tv_sec >= 0 and usage.ru_stime.tv_sec >= 0)
@@ -435,9 +447,7 @@ local function coverage_mc_named_pipe(context: test.Context, name: string, sized
       success(uv.fs_rmdir(nil, cleanup, directory))
     end
     local path = directory .. "/pipe"
-    local system_status, system? = uv.os_uname()
-    success(system_status)
-    if system.sysname == "Windows_NT" then
+    if common.is_windows() then
       path = "\\\\.\\pipe\\titan-uv-mc-" .. uv.os_getpid() .. "-" .. uv.hrtime()
     end
     local loop = new_loop()
