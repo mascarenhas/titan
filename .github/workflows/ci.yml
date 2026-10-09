@@ -529,6 +529,7 @@ jobs:
         with:
           name: titan-native-line-coverage
           path: .titan-coverage
+          include-hidden-files: true
           if-no-files-found: error
           retention-days: 7
       - name: Upload native stdlib line coverage to Codecov

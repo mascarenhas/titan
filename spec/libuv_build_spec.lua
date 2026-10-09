@@ -4989,7 +4989,7 @@ done
                 "Retain local reports and collection evidence")
             for _, contract in ipairs({ "if: always()", "actions/upload-artifact@v7",
                 "name: titan-native-line-coverage", "path: .titan-coverage",
-                "if-no-files-found: error" }) do
+                "include-hidden-files: true", "if-no-files-found: error" }) do
                 assert.truthy(native_artifacts:find(contract, 1, true), contract)
             end
             local native_upload = named_step(native_coverage_job,

@@ -623,3 +623,21 @@ inventory, retains the reports and raw evidence, then separately uploads LCOV
 with the `native-stdlib` Codecov flag. The existing LuaCov `compiler` upload
 remains a separate component. Hosted CI and Codecov upload were not exercised
 by this local validation.
+
+## Second published CI native readback
+
+CI run `37887221316` at `e9d3855e3429bb526cf3924eb32c5002fa99b0d0`
+completed the native capability gates, complete production build, fresh aggregate
+capture and line report successfully. All 1,275 selected cases finished:
+1,272 passed, three classified skips, zero failures, with all 28 owners audited.
+Two skips reflect absent alternate numeric locales; the third is the POSIX
+eight-bit exit-status limit. The hosted GCC 14 report is 15,728 / 17,263 lines
+(91.11%). This is separate hosted evidence, not a union with local captures.
+
+The subsequent artifact action failed because its default hidden-file filter
+excluded the entire `.titan-coverage` directory. Consequently the CI Codecov
+upload was skipped and no native Codecov report was published for this head.
+The artifact step now explicitly includes hidden files within that owned
+coverage directory; the existing workflow contract checks this setting.
+Compiler coverage and Codecov readback for this run are recorded separately
+when available. No local report was uploaded as a substitute.
