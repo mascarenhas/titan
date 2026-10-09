@@ -1327,8 +1327,11 @@ TITAN_TEST_COMPILER_PREREQS := Makefile $(TITAN_TEST_MODULE_MANIFEST) \
 	$(TITAN_TEST_INSTALL_ROOT)/share/lua/5.5/c-parser/*.lua \
 	$(TITAN_TEST_INSTALL_ROOT)/src/$(LUA_DIR)/*.h \
 	$(TITAN_TEST_INSTALL_ROOT)/include/*.h $(TITAN_TEST_INSTALL_ROOT)/include/titan/*.h))
+# POSIX terminal fixtures need the same Linux feature declarations as libuv.
+# Keep this separate from its source header search path in installed-SDK tests.
+TITAN_TEST_FEATURE_CPPFLAGS = $(filter -D_GNU_SOURCE,$(LIBUV_CPPFLAGS))
 TITAN_TEST_COMPILER_ENV = TITAN_BUILD_PROFILE=$(call make_shell_quote,$(TITAN_BUILD_PROFILE)) \
-	TITAN_EXTRA_CPPFLAGS=$(call make_shell_quote,$(strip $(TITAN_TEST_CPPFLAGS) -I.)) \
+	TITAN_EXTRA_CPPFLAGS=$(call make_shell_quote,$(strip $(TITAN_TEST_CPPFLAGS) $(TITAN_TEST_FEATURE_CPPFLAGS) -I.)) \
 	TITAN_EXTRA_CFLAGS=$(call make_shell_quote,$(strip $(TITAN_TEST_CFLAGS))) \
 	TITAN_EXTRA_LDFLAGS=$(call make_shell_quote,$(strip $(TITAN_TEST_LDFLAGS)))
 STDLIB_BUSTED_TESTS := \
@@ -1602,7 +1605,7 @@ titan-native-coverage-run: ## Run the coverage native aggregate with fresh count
 	@printf '%s\n' $(TITAN_STDLIB_TEST_ROOTS) > $(call make_shell_quote,$(TITAN_COVERAGE_BUILD_DIR)/roots.txt)
 	@status=0; \
 	$(TITAN_TEST_COMPILER_ENV) \
-	TITAN_EXTRA_CPPFLAGS=$(call make_shell_quote,$(strip $(TITAN_TEST_CPPFLAGS) -I$(TITAN_COVERAGE_FIXTURE_DIR) -I.)) \
+	TITAN_EXTRA_CPPFLAGS=$(call make_shell_quote,$(strip $(TITAN_TEST_CPPFLAGS) $(TITAN_TEST_FEATURE_CPPFLAGS) -I$(TITAN_COVERAGE_FIXTURE_DIR) -I.)) \
 	TITAN_EXTRA_LDFLAGS=$(call make_shell_quote,$(strip $(TITAN_TEST_LDFLAGS) --coverage)) \
 	TITAN_PATH$(TITAN_LIBRARY_VERSION_SUFFIX)=$(call make_shell_quote,$(abspath $(TITAN_COVERAGE_BUILD_DIR))) \
 	TITAN_TEST_PROVIDER_DIR=$(call make_shell_quote,$(abspath $(TITAN_COVERAGE_BUILD_DIR))) \
