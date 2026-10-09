@@ -76,8 +76,9 @@ TITAN_TEST_SOURCES_async.tests := spec/stdlib/titan/async/tests/tests.titan \
 	spec/stdlib/titan/async/tests/foreign_work_test.titan \
 	spec/stdlib/titan/async/tests/subscription_test.titan \
 	spec/stdlib/titan/async/tests/task_test.titan \
-	spec/stdlib/titan/async/tests/coverage_combinator_matrix_test.titan
-TITAN_TEST_IMPORTS_async.tests := async.test_support support.async support.runtime
+	spec/stdlib/titan/async/tests/coverage_combinator_matrix_test.titan \
+	spec/stdlib/titan/async/tests/coverage_recovery_test.titan
+TITAN_TEST_IMPORTS_async.tests := async.test_support support.async support.command support.runtime
 TITAN_TEST_FOREIGN_async.tests := 1
 
 TITAN_TEST_SOURCES_coroutine.test_support := spec/stdlib/titan/coroutine/test_support.titan
@@ -162,7 +163,9 @@ TITAN_TEST_SOURCES_os.process_tests := spec/stdlib/titan/os/process_tests/proces
 	spec/stdlib/titan/os/process_tests/signal_test.titan \
 	spec/stdlib/titan/os/process_tests/stream_test.titan \
 	spec/stdlib/titan/os/process_tests/coverage_stream_test.titan \
-	spec/stdlib/titan/os/process_tests/coverage_tty_test.titan
+	spec/stdlib/titan/os/process_tests/coverage_tty_test.titan \
+	spec/stdlib/titan/os/process_tests/coverage_read_failure_test.titan \
+	spec/stdlib/titan/os/process_tests/coverage_shutdown_admission_test.titan
 TITAN_TEST_IMPORTS_os.process_tests := os.process_test_support support.async support.command support.common support.runtime
 
 TITAN_TEST_SOURCES_os.test_support := spec/stdlib/titan/os/test_support.titan
@@ -207,7 +210,10 @@ TITAN_TEST_IMPORTS_ssl.test_support := support.runtime
 
 TITAN_TEST_SOURCES_ssl.tests := spec/stdlib/titan/ssl/tests/tests.titan \
 	spec/stdlib/titan/ssl/tests/coverage.titan \
-	spec/stdlib/titan/ssl/tests/allocation_test.titan
+	spec/stdlib/titan/ssl/tests/allocation_test.titan \
+	spec/stdlib/titan/ssl/tests/error_strings_test.titan \
+	spec/stdlib/titan/ssl/tests/late_write_test.titan \
+	spec/stdlib/titan/ssl/tests/drain_failure_test.titan
 TITAN_TEST_IMPORTS_ssl.tests := support.command net.test_support ssl.backpressure_support ssl.test_support support.async support.common support.runtime
 
 TITAN_TEST_SOURCES_string.core_test := spec/stdlib/titan/string/core_test.titan

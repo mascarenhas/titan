@@ -1,0 +1,38 @@
+function test_ssl_drain_preserves_write_shutdown_failure(context: test.Context)
+  runtime_test.run(function ()
+    local server, port = net_support.listen_available(49170)
+    defer server:close()
+    local peer = async.run<|value, value|>(function (): value
+      local accepted = server:accept()
+      defer accepted:close()
+      test.assert(accepted:read() == nil,
+                  "write-half-closed transport emitted bytes during TLS adoption")
+      test.assert(accepted:read() == nil,
+                  "write-half-closed transport lost its stable TCP EOF")
+      return nil
+    end)
+    task_support.cleanup_task(peer, "TLS write-half-closed transport peer")
+
+    local transport = net.connect("127.0.0.1", port)
+    local adopted = false
+    defer if not adopted then transport:close() end
+    transport:shutdown()
+    local connection = ssl.client(transport, "localhost", support.TRUST_ROOT)
+    adopted = true
+    defer connection:abort()
+    local observed: value = nil
+    do connection:handshake()
+    catch observed = error end
+    test.assert(observed == "cannot write after Connection shutdown",
+                "TLS replaced the original transport write guard: " ..
+                  common.error_text(observed))
+    connection:abort()
+    connection:close()
+    connection:close()
+    expect_ssl_failure(function () connection:write("after failure") end,
+                        "ssl.write", "TLS_INTERRUPTED")
+    async.join(peer)
+    test.assert(peer:status():has_succeeded(),
+                "TLS write-half-closed transport peer failed")
+  end)
+end

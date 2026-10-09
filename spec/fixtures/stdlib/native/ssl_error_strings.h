@@ -1,0 +1,5 @@
+#ifndef TITAN_TEST_SSL_ERROR_STRINGS_H
+#define TITAN_TEST_SSL_ERROR_STRINGS_H
+int titan_test_ssl_no_strings_initialized(void);
+int titan_test_ssl_error_strings_suppressed(void);
+#endif

@@ -5250,8 +5250,8 @@ done
                     assert.is_true(tonumber(seconds) >= 0)
                 end
             end
-            assert.same({ 1, 49, 50, 52 }, shard_counts)
-            assert.equal(152, assigned_count)
+            assert.same({ 1, 49, 51, 52 }, shard_counts)
+            assert.equal(153, assigned_count)
 
             local stress_partition = read_file(
                 "spec/support/ci_compiler_stress_files.txt")
@@ -5431,7 +5431,7 @@ done
 
             assert.equal(1, count_literal(sanitizer_job,
                 "make titan-stdlib-test-build"), sanitizer_job)
-            assert.equal(36, count_literal(sanitizer_job,
+            assert.equal(37, count_literal(sanitizer_job,
                 "make titan-stdlib-test-run"), sanitizer_job)
             for _, filter in ipairs({
                 "TITAN_FILTER='test_lua_host_roots_coroutine_" ..
@@ -5452,6 +5452,7 @@ done
                 "TITAN_FILTER='test_ssl_http_fresh_process_sanitizer_composition$'",
                 "TITAN_FILTER='test_ssl_simultaneous_large_duplex_preserves_bytes$'",
                 "TITAN_FILTER='test_ssl_cancel_backpressured_write_aborts_before_native_drain$'",
+                "TITAN_FILTER='^ssl[.]tests[.]test_ssl_drain_preserves_write_shutdown_failure$'",
                 "TITAN_FILTER='test_upgrade_server_transfers_binary_excess_and_handler_lifetime$'",
                 "TITAN_FILTER='test_upgrade_opening_cancellation_aborts_before_output_drain$'",
                 "TITAN_FILTER='test_received_message_strings_survive_later_reads_and_forced_gc$'",
@@ -5500,7 +5501,7 @@ done
                 {
                     "Run native TLS/HTTP sanitizer gate", "TLS/HTTP",
                     {
-                        "ssl-duplex", "ssl-backpressure",
+                        "ssl-duplex", "ssl-backpressure", "ssl-drain-failure",
                         "http-upgrade-handoff", "http-upgrade-abort",
                     },
                 },

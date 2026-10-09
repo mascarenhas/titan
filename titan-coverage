@@ -1,25 +1,32 @@
 #!/usr/bin/env python3
-"""Collect native GCC coverage and report executable lines in Titan sources.
+"""Collect native coverage and report executable lines in Titan sources.
 
-This host tool does not run inside the Titan test runner. GCC's JSON v2 is the
-only counter reader; gcovr 8.4 renders a filtered line-only JSON tracefile.
+GCC JSON v2 is the default. Explicit llvm-gcov selects the pinned experimental
+Windows CLANG64 reader and build-owned JobObject runner. gcovr 8.4 renders the
+filtered line-only tracefile; neither backend uses source-based LLVM mapping.
 """
 
 import argparse
 import copy
+from contextlib import contextmanager
 import datetime
 import gzip
 import hashlib
 import json
 import os
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 import platform
+import posixpath
+from collections import Counter
 import re
 import shlex
 import shutil
 import signal
 import subprocess
 import sys
+import struct
+import threading
+import math
 import tempfile
 import time
 import uuid
@@ -29,6 +36,585 @@ SCHEMA = 1
 RUN_SCHEMA = 2
 GCOVR_VERSION = "8.4"
 GCOVR_FORMAT = "0.14"
+
+# The installed script is self-contained. Probe materializes and seals this
+# private helper; run only validates the resulting existing image.
+WINDOWS_RUNNER_SOURCE = r'''
+/* Build-owned Titan coverage process supervisor. Atomic JobObject assignment,
+ * explicit handle inheritance and bounded retirement precede counter collection.
+ * This source is embedded in the installed host; no checkout fixture is used. */
+/* Private argv and standard-handle helpers. */
+#ifndef TITAN_WINDOWS_SUPERVISOR_PROBE_HELPERS_H
+#define TITAN_WINDOWS_SUPERVISOR_PROBE_HELPERS_H
+#ifndef _WIN32_WINNT
+#define _WIN32_WINNT 0x0a00
+#endif
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#include <stdlib.h>
+#include <wchar.h>
+
+#define PROBE_COMMAND_CAPACITY 32767
+#define PROBE_FAILURE 125
+
+static int probe_append(wchar_t *command, size_t *length, wchar_t c) {
+    if (*length >= PROBE_COMMAND_CAPACITY - 1) return 0;
+    command[(*length)++] = c;
+    return 1;
+}
+
+/* Microsoft CRT argv quoting, including empty arguments and terminal slashes. */
+static int probe_quote(wchar_t *command, size_t *length, const wchar_t *arg) {
+    if (!probe_append(command, length, L'"')) return 0;
+    for (;;) {
+        size_t slashes = 0;
+        while (*arg == L'\\') { ++slashes; ++arg; }
+        size_t count = slashes;
+        if (*arg == L'"' || !*arg) count *= 2;
+        while (count--) if (!probe_append(command, length, L'\\')) return 0;
+        if (!*arg) return probe_append(command, length, L'"');
+        if (*arg == L'"' && !probe_append(command, length, L'\\')) return 0;
+        if (!probe_append(command, length, *arg++)) return 0;
+    }
+}
+
+static HANDLE probe_standard_handle(DWORD kind, DWORD access) {
+    HANDLE source = GetStdHandle(kind), result = NULL;
+    if (source && source != INVALID_HANDLE_VALUE) {
+        if (!DuplicateHandle(GetCurrentProcess(), source, GetCurrentProcess(),
+                             &result, 0, TRUE, DUPLICATE_SAME_ACCESS)) return NULL;
+    } else {
+        SECURITY_ATTRIBUTES security = {sizeof(security), NULL, TRUE};
+        result = CreateFileW(L"NUL", access, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                             &security, OPEN_EXISTING, 0, NULL);
+        if (result == INVALID_HANDLE_VALUE) return NULL;
+    }
+    return result;
+}
+#endif
+
+#ifndef TITAN_SCRATCH_SUPERVISOR_STATUS_H
+#define TITAN_SCRATCH_SUPERVISOR_STATUS_H
+/* Cancellation precedence is independent of the native leader DWORD. */
+static unsigned long probe_secondary_error_status(int timed_out, int interrupted) {
+    return timed_out ? 124UL : interrupted ? 130UL : 125UL;
+}
+static unsigned long probe_observed_control_status(int timed_out) {
+    return timed_out ? 124UL : 130UL;
+}
+#endif
+
+#include <errno.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <string.h>
+
+#define MAX_TIMEOUT_MS 0xfffffffffffffffeULL
+#define CLEANUP_TIMEOUT_MS 10000
+
+typedef struct {
+    const char *reason, *error_operation;
+    DWORD win32_error, leader_pid, leader_status, interrupt_code;
+    DWORD active_at_exit, active_before_retirement, active_final;
+    int child_created, status_known, natural_exit, active_at_exit_known;
+    int active_before_known, active_final_known, retirement_requested;
+    int retirement_succeeded, forced_leader, forced_descendants;
+    int timed_out, interrupted, empty_confirmed, complete, tests_passed;
+    DWORD result;
+    HANDLE control_read;
+    HANDLE leader_handles[3];
+    int control_present, control_inherit_cleared, control_excluded_leader;
+    int control_initial_open, control_eof, control_boundary_ready, control_closed;
+    int private_console_confirmed, console_interrupted;
+    DWORD helper_pid, console_pid_before, console_pid_after, leader_creation_flags;
+    int leader_console_inherit_requested;
+    DWORD console_process_count, console_error;
+    DWORD console_count_before, console_error_before;
+    HANDLE console_window_before, console_window_after;
+    const char *control_final_observation, *interruption_source;
+} Receipt;
+
+static HANDLE interrupt_event;
+static SRWLOCK interrupt_lock = SRWLOCK_INIT;
+static volatile LONG received_control = -1;
+
+static BOOL WINAPI control_handler(DWORD control) {
+    if (control != CTRL_C_EVENT && control != CTRL_BREAK_EVENT) return FALSE;
+    AcquireSRWLockShared(&interrupt_lock);
+    InterlockedCompareExchange(&received_control, (LONG)control, -1);
+    if (interrupt_event) SetEvent(interrupt_event);
+    ReleaseSRWLockShared(&interrupt_lock);
+    return TRUE;
+}
+
+static void error(Receipt *receipt, const char *operation) {
+    DWORD code = GetLastError();
+    if (!receipt->error_operation) {
+        receipt->error_operation = operation;
+        receipt->win32_error = code;
+    }
+    fprintf(stderr, "Titan coverage supervisor: %s failed (error %lu).\n",
+            operation, (unsigned long)code);
+    receipt->result = (DWORD)probe_secondary_error_status(receipt->timed_out, receipt->interrupted);
+}
+
+/* The explicit control-only mode has no console handler or application threads.
+ * This handle is used exclusively here: no blocking ReadFile, no payload, and
+ * no second thread doing synchronous I/O on it. Peek does not consume data. */
+static int observe_control(Receipt *receipt, int final) {
+    DWORD available = 0;
+    if (!receipt->control_present) return 1;
+    if (PeekNamedPipe(receipt->control_read, NULL, 0, NULL, &available, NULL)) {
+        if (available) {
+            if (final) receipt->control_final_observation = "unexpected_data";
+            SetLastError(ERROR_INVALID_DATA);
+            error(receipt, "unexpected control pipe payload");
+            return -1;
+        }
+        if (final) receipt->control_final_observation = "open";
+        return 1;
+    }
+    DWORD code = GetLastError();
+    if (code == ERROR_BROKEN_PIPE) {
+        receipt->control_eof = 1;
+        receipt->interrupted = 1;
+        receipt->interruption_source = "control_pipe_eof";
+        if (!receipt->timed_out) receipt->reason = "control_pipe_eof";
+        receipt->result = (DWORD)probe_secondary_error_status(receipt->timed_out, 1);
+        if (final) receipt->control_final_observation = "eof";
+        return 0;
+    }
+    if (final) receipt->control_final_observation = "error";
+    SetLastError(code);
+    error(receipt, "PeekNamedPipe control");
+    return -1;
+}
+
+static int active_processes(HANDLE job, DWORD *count, Receipt *receipt) {
+    JOBOBJECT_BASIC_ACCOUNTING_INFORMATION accounting;
+    if (!QueryInformationJobObject(job, JobObjectBasicAccountingInformation,
+                                   &accounting, sizeof(accounting), NULL)) {
+        error(receipt, "QueryInformationJobObject");
+        return 0;
+    }
+    *count = accounting.ActiveProcesses;
+    return 1;
+}
+
+static void retire_and_confirm(HANDLE job, Receipt *receipt, int force, ULONGLONG deadline) {
+    DWORD active;
+    if (active_processes(job, &active, receipt)) {
+        receipt->active_before_known = 1;
+        receipt->active_before_retirement = active;
+        /* The leader is already signalled on a natural exit. Any remaining
+         * active process is an unjoined descendant. On a forced leader stop,
+         * counts above one demonstrate descendants before retirement. */
+        if (force && (receipt->natural_exit ? active > 0 : active > 1))
+            receipt->forced_descendants = 1;
+    } else force = 1;
+    if (force) {
+        receipt->retirement_requested = 1;
+        receipt->forced_leader = receipt->child_created && !receipt->natural_exit;
+        if (TerminateJobObject(job, PROBE_FAILURE)) receipt->retirement_succeeded = 1;
+        else error(receipt, "TerminateJobObject");
+    }
+    for (;;) {
+        if (!active_processes(job, &active, receipt)) return;
+        receipt->active_final_known = 1;
+        receipt->active_final = active;
+        if (active == 0) { receipt->empty_confirmed = 1; return; }
+        if (GetTickCount64() >= deadline) {
+            SetLastError(ERROR_TIMEOUT);
+            error(receipt, "bounded empty-job confirmation");
+            return;
+        }
+        Sleep(10);
+    }
+}
+
+static const char *boolean(int value) { return value ? "true" : "false"; }
+static void optional_dword(char *output, size_t size, int known, DWORD value) {
+    if (known) snprintf(output, size, "%lu", (unsigned long)value);
+    else snprintf(output, size, "null");
+}
+
+/* Publish only a complete JSON document, and never overwrite an older receipt.
+ * Missing/partial .pending output is a failed probe, never successful evidence. */
+static int publish_receipt(const wchar_t *path, const Receipt *receipt) {
+    char status[24], hexadecimal[24], at_exit[24], before[24], final[24], control[24];
+    char operation[160], contents[8192];
+    optional_dword(status, sizeof(status), receipt->status_known, receipt->leader_status);
+    optional_dword(at_exit, sizeof(at_exit), receipt->active_at_exit_known, receipt->active_at_exit);
+    optional_dword(before, sizeof(before), receipt->active_before_known, receipt->active_before_retirement);
+    optional_dword(final, sizeof(final), receipt->active_final_known, receipt->active_final);
+    optional_dword(control, sizeof(control), receipt->console_interrupted, receipt->interrupt_code);
+    if (receipt->status_known)
+        snprintf(hexadecimal, sizeof(hexadecimal), "\"0x%08lx\"", (unsigned long)receipt->leader_status);
+    else snprintf(hexadecimal, sizeof(hexadecimal), "null");
+    if (receipt->error_operation)
+        snprintf(operation, sizeof(operation), "\"%s\"", receipt->error_operation);
+    else snprintf(operation, sizeof(operation), "null");
+    int length = snprintf(contents, sizeof(contents),
+        "{\n  \"schema\": 4,\n  \"runner_kind\": \"titan-coverage-job-v1\",\n"
+        "  \"leader_created\": %s,\n  \"leader_pid\": %lu,\n"
+        "  \"leader_status_dword\": %s,\n  \"leader_status_hex\": %s,\n"
+        "  \"leader_exited_naturally\": %s,\n"
+        "  \"active_processes_at_leader_exit\": %s,\n"
+        "  \"active_processes_before_retirement\": %s,\n"
+        "  \"active_processes_final\": %s,\n"
+        "  \"retirement_requested\": %s,\n  \"retirement_succeeded\": %s,\n"
+        "  \"forced_leader_retirement\": %s,\n  \"forced_descendant_retirement\": %s,\n"
+        "  \"timeout\": %s,\n  \"interrupted\": %s,\n  \"interrupt_code\": %s,\n"
+        "  \"empty_job_confirmed\": %s,\n  \"reason\": \"%s\",\n"
+        "  \"complete\": %s,\n  \"tests_passed\": %s,\n"
+        "  \"supervisor_exit_code\": %lu,\n"
+        "  \"supervisor_error_operation\": %s,\n  \"win32_error\": %lu,\n"
+        "  \"interruption_source\": \"%s\",\n"
+        "  \"control_read_handle\": %llu,\n  \"control_present\": %s,\n"
+        "  \"control_inherit_cleared\": %s,\n  \"control_excluded_leader\": %s,\n"
+        "  \"leader_handle_list\": [%llu, %llu, %llu],\n"
+        "  \"control_initial_open\": %s,\n  \"control_eof_observed\": %s,\n"
+        "  \"control_boundary_ready\": %s,\n"
+        "  \"control_final_observation\": \"%s\",\n  \"control_read_closed\": %s,\n"
+        "  \"private_console_confirmed\": %s,\n  \"console_process_count\": %lu,\n"
+        "  \"console_error\": %lu,\n"
+        "  \"console_count_before\": %lu,\n  \"console_error_before\": %lu,\n"
+        "  \"console_window_before\": %llu,\n  \"console_window_after\": %llu,\n"
+        "  \"console_policy\": \"%s\",\n  \"console_free_attempted\": false,\n"
+        "  \"helper_pid\": %lu,\n  \"console_pid_before\": %lu,\n  \"console_pid_after\": %lu,\n"
+        "  \"leader_console_inherit_requested\": %s,\n  \"leader_creation_flags\": %lu,\n"
+        "  \"console_query_capacity\": %u,\n  \"console_dword_size\": %u\n}\n",
+        boolean(receipt->child_created), (unsigned long)receipt->leader_pid,
+        status, hexadecimal, boolean(receipt->natural_exit), at_exit, before, final,
+        boolean(receipt->retirement_requested), boolean(receipt->retirement_succeeded),
+        boolean(receipt->forced_leader), boolean(receipt->forced_descendants),
+        boolean(receipt->timed_out), boolean(receipt->interrupted), control,
+        boolean(receipt->empty_confirmed), receipt->reason,
+        boolean(receipt->complete), boolean(receipt->tests_passed),
+        (unsigned long)receipt->result, operation, (unsigned long)receipt->win32_error,
+        receipt->interruption_source, (unsigned long long)(uintptr_t)receipt->control_read,
+        boolean(receipt->control_present), boolean(receipt->control_inherit_cleared),
+        boolean(receipt->control_excluded_leader),
+        (unsigned long long)(uintptr_t)receipt->leader_handles[0],
+        (unsigned long long)(uintptr_t)receipt->leader_handles[1],
+        (unsigned long long)(uintptr_t)receipt->leader_handles[2],
+        boolean(receipt->control_initial_open), boolean(receipt->control_eof),
+        boolean(receipt->control_boundary_ready), receipt->control_final_observation,
+        boolean(receipt->control_closed), boolean(receipt->private_console_confirmed),
+        (unsigned long)receipt->console_process_count, (unsigned long)receipt->console_error,
+        (unsigned long)receipt->console_count_before, (unsigned long)receipt->console_error_before,
+        (unsigned long long)(uintptr_t)receipt->console_window_before,
+        (unsigned long long)(uintptr_t)receipt->console_window_after,
+        receipt->control_present ? "private-headless-inherited" : "legacy-console-events",
+        (unsigned long)receipt->helper_pid, (unsigned long)receipt->console_pid_before,
+        (unsigned long)receipt->console_pid_after,
+        boolean(receipt->leader_console_inherit_requested),
+        (unsigned long)receipt->leader_creation_flags,
+        receipt->control_present ? 16U : 0U, (unsigned int)sizeof(DWORD));
+    if (length <= 0 || (size_t)length >= sizeof(contents)) return 0;
+    size_t path_length = wcslen(path);
+    wchar_t *pending = calloc(path_length + 9, sizeof(*pending));
+    if (!pending) return 0;
+    memcpy(pending, path, path_length * sizeof(*pending));
+    wcscpy(pending + path_length, L".pending");
+    HANDLE file = CreateFileW(pending, GENERIC_WRITE, 0, NULL, CREATE_NEW,
+                              FILE_ATTRIBUTE_NORMAL, NULL);
+    int ok = 0;
+    if (file != INVALID_HANDLE_VALUE) {
+        DWORD written = 0;
+        ok = WriteFile(file, contents, (DWORD)length, &written, NULL)
+            && written == (DWORD)length && FlushFileBuffers(file);
+        if (!CloseHandle(file)) ok = 0;
+        if (ok) ok = MoveFileExW(pending, path, MOVEFILE_WRITE_THROUGH);
+    }
+    free(pending);
+    return ok;
+}
+
+int wmain(int argc, wchar_t **argv) {
+    wchar_t *end = NULL;
+    errno = 0;
+    unsigned long long timeout = argc >= 3 ? wcstoull(argv[2], &end, 10) : 0;
+    int control_mode = argc >= 9 && !wcscmp(argv[5], L"--control-read-handle");
+    int program = control_mode ? 8 : 6;
+    if (argc < 7 || wcscmp(argv[1], L"--timeout-ms") || wcscmp(argv[3], L"--receipt")
+        || wcscmp(argv[program - 1], L"--") || !argv[2][0] || !end || *end || errno
+        || argv[2][0] == L'-' || timeout > MAX_TIMEOUT_MS
+        || !(((argv[4][0] >= L'A' && argv[4][0] <= L'Z')
+               || (argv[4][0] >= L'a' && argv[4][0] <= L'z'))
+              && argv[4][1] == L':' && (argv[4][2] == L'/' || argv[4][2] == L'\\'))) {
+        fputs("usage: supervisor.exe --timeout-ms 0=unbounded or positive milliseconds --receipt DRIVE:/fresh.json -- EXE [ARG...]\n", stderr);
+        return PROBE_FAILURE;
+    }
+    Receipt receipt = {0};
+    receipt.helper_pid = GetCurrentProcessId();
+    receipt.reason = "supervisor_error";
+    receipt.interruption_source = "none";
+    receipt.control_final_observation = "not_used";
+    receipt.result = PROBE_FAILURE;
+    if (control_mode) {
+        wchar_t *control_end = NULL;
+        errno = 0;
+        unsigned long long value = wcstoull(argv[6], &control_end, 10);
+        if (!argv[6][0] || argv[6][0] == L'-' || !control_end || *control_end
+            || errno || !value || value > UINTPTR_MAX || value == UINTPTR_MAX) {
+            fputs("Invalid inherited control read handle.\n", stderr);
+            return PROBE_FAILURE;
+        }
+        receipt.control_present = 1;
+        receipt.control_read = (HANDLE)(uintptr_t)value;
+        receipt.control_final_observation = "not_observed";
+    }
+    HANDLE job = NULL, handles[3] = {NULL, NULL, NULL};
+    PROCESS_INFORMATION child = {0};
+    STARTUPINFOEXW start = {0};
+    int attributes_ready = 0, handler_ready = 0, force_retirement = 0;
+    SIZE_T attribute_bytes = 0;
+    ULONGLONG cleanup_deadline = 0;
+    wchar_t *command = calloc(PROBE_COMMAND_CAPACITY, sizeof(*command));
+    if (!command) { SetLastError(ERROR_OUTOFMEMORY); error(&receipt, "command allocation"); goto done; }
+    size_t length = 0;
+    for (int i = program; i < argc; ++i) {
+        if ((i > program && !probe_append(command, &length, L' '))
+            || !probe_quote(command, &length, argv[i])) {
+            SetLastError(ERROR_BUFFER_OVERFLOW); error(&receipt, "command quoting"); goto done;
+        }
+    }
+    command[length] = 0;
+    if (control_mode) {
+        DWORD pids[16], flags;
+        SetLastError(ERROR_SUCCESS);
+        receipt.console_count_before = GetConsoleProcessList(pids, 16);
+        receipt.console_error_before = GetLastError();
+        receipt.console_window_before = GetConsoleWindow();
+        receipt.console_pid_before = receipt.console_count_before == 1 ? pids[0] : 0;
+        /* The caller creates this helper with CREATE_NO_WINDOW. Admit only a
+         * private headless console containing exactly this helper. Preserve
+         * that console so ordinary measured descendants can inherit it; never
+         * attach to a caller console or exempt an owned process from the job. */
+        if (receipt.console_count_before != 1
+            || receipt.console_pid_before != receipt.helper_pid
+            || receipt.console_window_before) {
+            SetLastError(ERROR_INVALID_DATA);
+            error(&receipt, "helper console is not private and headless"); goto done;
+        }
+        SetLastError(ERROR_SUCCESS);
+        receipt.console_process_count = GetConsoleProcessList(pids, 16);
+        receipt.console_error = GetLastError();
+        receipt.console_window_after = GetConsoleWindow();
+        receipt.console_pid_after = receipt.console_process_count == 1 ? pids[0] : 0;
+        if (receipt.console_process_count != 1
+            || receipt.console_pid_after != receipt.helper_pid
+            || receipt.console_window_after) {
+            SetLastError(ERROR_INVALID_DATA);
+            error(&receipt, "helper private console changed before leader creation"); goto done;
+        }
+        receipt.private_console_confirmed = 1;
+        if (GetFileType(receipt.control_read) != FILE_TYPE_PIPE) {
+            SetLastError(ERROR_INVALID_DATA);
+            error(&receipt, "control read handle type"); goto done;
+        }
+        if (!SetHandleInformation(receipt.control_read, HANDLE_FLAG_INHERIT, 0)
+            || !GetHandleInformation(receipt.control_read, &flags)) {
+            error(&receipt, "control read handle validation"); goto done;
+        }
+        if (flags & HANDLE_FLAG_INHERIT) {
+            SetLastError(ERROR_INVALID_DATA); error(&receipt, "control read remained inheritable"); goto done;
+        }
+        receipt.control_inherit_cleared = 1;
+        if (observe_control(&receipt, 0) != 1) goto done;
+        receipt.control_initial_open = 1;
+    } else {
+        interrupt_event = CreateEventW(NULL, TRUE, FALSE, NULL);
+        if (!interrupt_event) { error(&receipt, "interrupt event"); goto done; }
+        if (!SetConsoleCtrlHandler(control_handler, TRUE)) { error(&receipt, "SetConsoleCtrlHandler"); goto done; }
+        handler_ready = 1;
+    }
+    job = CreateJobObjectW(NULL, NULL); /* Unnamed and noninheritable. */
+    if (!job) { error(&receipt, "CreateJobObjectW"); goto done; }
+    JOBOBJECT_EXTENDED_LIMIT_INFORMATION limits = {0};
+    limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+    if (!SetInformationJobObject(job, JobObjectExtendedLimitInformation, &limits, sizeof(limits))) {
+        error(&receipt, "SetInformationJobObject"); goto done;
+    }
+    handles[0] = probe_standard_handle(STD_INPUT_HANDLE, GENERIC_READ);
+    handles[1] = probe_standard_handle(STD_OUTPUT_HANDLE, GENERIC_WRITE);
+    handles[2] = probe_standard_handle(STD_ERROR_HANDLE, GENERIC_WRITE);
+    if (!handles[0] || !handles[1] || !handles[2]) { error(&receipt, "standard handles"); goto done; }
+    for (int i = 0; i < 3; ++i) {
+        receipt.leader_handles[i] = handles[i];
+        if (control_mode && handles[i] == receipt.control_read) {
+            SetLastError(ERROR_INVALID_DATA); error(&receipt, "control handle in native stdio list"); goto done;
+        }
+    }
+    receipt.control_excluded_leader = control_mode;
+    InitializeProcThreadAttributeList(NULL, 2, 0, &attribute_bytes);
+    if (!attribute_bytes) { error(&receipt, "attribute size"); goto done; }
+    start.lpAttributeList = malloc(attribute_bytes);
+    if (!start.lpAttributeList) { SetLastError(ERROR_OUTOFMEMORY); error(&receipt, "attribute allocation"); goto done; }
+    if (!InitializeProcThreadAttributeList(start.lpAttributeList, 2, 0, &attribute_bytes)) {
+        error(&receipt, "InitializeProcThreadAttributeList"); goto done;
+    }
+    attributes_ready = 1;
+    if (!UpdateProcThreadAttribute(start.lpAttributeList, 0, PROC_THREAD_ATTRIBUTE_JOB_LIST,
+                                   &job, sizeof(job), NULL, NULL)
+        || !UpdateProcThreadAttribute(start.lpAttributeList, 0, PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
+                                      handles, sizeof(handles), NULL, NULL)) {
+        error(&receipt, "UpdateProcThreadAttribute"); goto done;
+    }
+    start.StartupInfo.cb = sizeof(start);
+    start.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
+    start.StartupInfo.hStdInput = handles[0];
+    start.StartupInfo.hStdOutput = handles[1];
+    start.StartupInfo.hStdError = handles[2];
+    if (control_mode ? observe_control(&receipt, 0) != 1
+                     : WaitForSingleObject(interrupt_event, 0) == WAIT_OBJECT_0) goto done;
+    receipt.leader_console_inherit_requested = control_mode;
+    receipt.leader_creation_flags = EXTENDED_STARTUPINFO_PRESENT | CREATE_SUSPENDED | CREATE_NEW_PROCESS_GROUP;
+    if (!CreateProcessW(argv[program], command, NULL, NULL, TRUE,
+                        receipt.leader_creation_flags,
+                        NULL, NULL, &start.StartupInfo, &child)) {
+        error(&receipt, "CreateProcessW atomic job assignment"); goto done;
+    }
+    receipt.child_created = 1;
+    receipt.leader_pid = child.dwProcessId;
+    force_retirement = 1; /* Remains set if setup/resume/wait fails. */
+    if (ResumeThread(child.hThread) == (DWORD)-1) { error(&receipt, "ResumeThread"); goto done; }
+    HANDLE waited_handles[2] = {interrupt_event, child.hProcess};
+    DWORD waited;
+    if (control_mode) {
+        ULONGLONG now_start = GetTickCount64();
+        ULONGLONG deadline = timeout && timeout < ~0ULL - now_start ? now_start + timeout : ~0ULL;
+        for (;;) {
+            if (observe_control(&receipt, 0) != 1) goto done;
+            ULONGLONG now = GetTickCount64();
+            DWORD slice = now < deadline ? (deadline - now > 20 ? 20 : (DWORD)(deadline - now)) : 0;
+            waited = WaitForSingleObject(child.hProcess, slice);
+            if (waited == WAIT_OBJECT_0) { waited = WAIT_OBJECT_0 + 1; break; }
+            if (waited == WAIT_FAILED) { error(&receipt, "control-mode leader wait"); goto done; }
+            if (waited != WAIT_TIMEOUT) {
+                SetLastError(ERROR_INVALID_DATA); error(&receipt, "unexpected control-mode wait"); goto done;
+            }
+            if (GetTickCount64() >= deadline) break;
+        }
+    } else {
+        /* The installed host always uses the control pipe. Retain the console
+         * path with bounded wait slices for independent runner diagnostics. */
+        ULONGLONG now_start = GetTickCount64();
+        ULONGLONG deadline = timeout && timeout < ~0ULL - now_start ? now_start + timeout : ~0ULL;
+        do {
+            ULONGLONG now = GetTickCount64();
+            DWORD slice = now < deadline ? (deadline - now > 1000 ? 1000 : (DWORD)(deadline - now)) : 0;
+            waited = WaitForMultipleObjects(2, waited_handles, FALSE, slice);
+        } while (waited == WAIT_TIMEOUT && GetTickCount64() < deadline);
+    }
+    if (waited == WAIT_OBJECT_0) {
+        receipt.interrupted = 1; /* Actual control code is sampled after handler quiescence. */
+        receipt.reason = "interrupt";
+        receipt.result = 130;
+    } else if (waited == WAIT_TIMEOUT) {
+        receipt.reason = "timeout";
+        receipt.timed_out = 1;
+        receipt.result = 124;
+    } else if (waited == WAIT_OBJECT_0 + 1) {
+        receipt.natural_exit = 1;
+        if (!GetExitCodeProcess(child.hProcess, &receipt.leader_status)) {
+            error(&receipt, "GetExitCodeProcess"); goto done;
+        }
+        receipt.status_known = 1;
+        if (!active_processes(job, &receipt.active_at_exit, &receipt)) goto done;
+        receipt.active_at_exit_known = 1;
+        force_retirement = receipt.active_at_exit > 0;
+        if (force_retirement) {
+            receipt.forced_descendants = 1;
+            receipt.reason = "leader_exit_with_live_descendants";
+            receipt.result = PROBE_FAILURE;
+        } else {
+            receipt.result = receipt.leader_status;
+            receipt.reason = receipt.leader_status >= 0x80000000UL ? "abnormal_exit"
+                : receipt.leader_status ? "nonzero_exit" : "normal_exit";
+        }
+    } else error(&receipt, "WaitForMultipleObjects");
+
+done:
+    /* Job accounting and the leader handle share one cleanup budget. Empty
+     * accounting alone does not supply the leader's actual native exit DWORD. */
+    cleanup_deadline = GetTickCount64() + CLEANUP_TIMEOUT_MS;
+    if (job) retire_and_confirm(job, &receipt, receipt.child_created && force_retirement,
+                               cleanup_deadline);
+    /* Preserve natural/timeout/interruption provenance independently of the
+     * eventual DWORD. Never invent the requested termination code as a result. */
+    if (receipt.child_created && !receipt.status_known) {
+        ULONGLONG now = GetTickCount64();
+        DWORD remaining = now < cleanup_deadline ? (DWORD)(cleanup_deadline - now) : 0;
+        DWORD leader_wait = WaitForSingleObject(child.hProcess, remaining);
+        if (leader_wait == WAIT_OBJECT_0) {
+            if (GetExitCodeProcess(child.hProcess, &receipt.leader_status)) receipt.status_known = 1;
+            else error(&receipt, "GetExitCodeProcess after retirement");
+        } else if (leader_wait == WAIT_TIMEOUT) {
+            SetLastError(ERROR_TIMEOUT);
+            error(&receipt, "bounded leader-status wait timeout");
+        } else if (leader_wait == WAIT_FAILED) {
+            error(&receipt, "bounded leader-status wait");
+        } else {
+            SetLastError(ERROR_INVALID_DATA);
+            error(&receipt, "unexpected leader-status wait result");
+        }
+    }
+    /* Finite cancellation admission boundary: ownership is already empty and
+     * actual leader status known. This final Peek is the last observation.
+     * A writer close after it is not atomically synchronized with us; Python
+     * retains its own KeyboardInterrupt outcome independently. */
+    if (control_mode) {
+        receipt.control_boundary_ready = receipt.empty_confirmed && receipt.status_known;
+        if (receipt.control_boundary_ready) observe_control(&receipt, 1);
+        if (CloseHandle(receipt.control_read)) receipt.control_closed = 1;
+        else error(&receipt, "close control read handle");
+    }
+    if (child.hThread) CloseHandle(child.hThread);
+    if (child.hProcess) CloseHandle(child.hProcess);
+    if (attributes_ready) DeleteProcThreadAttributeList(start.lpAttributeList);
+    free(start.lpAttributeList);
+    for (int i = 0; i < 3; ++i) if (handles[i]) CloseHandle(handles[i]);
+    if (job) CloseHandle(job); /* Kill-on-close remains the final cleanup backstop. */
+    /* Observe control events throughout retirement. Remove the callback before
+     * taking the final state snapshot; the exclusive lock waits for callbacks
+     * currently updating that state and serializes event closure with them.
+     * Failure to unregister makes this receipt incomplete. */
+    if (handler_ready && !SetConsoleCtrlHandler(control_handler, FALSE))
+        error(&receipt, "unregister console handler");
+    AcquireSRWLockExclusive(&interrupt_lock);
+    LONG control = InterlockedCompareExchange(&received_control, -1, -1);
+    if (control >= 0) {
+        receipt.interrupted = 1;
+        receipt.console_interrupted = 1;
+        receipt.interruption_source = "console";
+        receipt.interrupt_code = (DWORD)control;
+        if (!receipt.timed_out) receipt.reason = "interrupt";
+        receipt.result = (DWORD)probe_observed_control_status(receipt.timed_out);
+    }
+    if (interrupt_event) CloseHandle(interrupt_event);
+    interrupt_event = NULL;
+    receipt.complete = receipt.child_created && receipt.natural_exit && receipt.status_known
+        && receipt.empty_confirmed && !receipt.retirement_requested && !receipt.timed_out
+        && !receipt.interrupted && !receipt.error_operation && receipt.leader_status < 0x80000000UL
+        && (!control_mode || (receipt.control_boundary_ready && receipt.control_closed));
+    receipt.tests_passed = receipt.complete && receipt.leader_status == 0;
+    ReleaseSRWLockExclusive(&interrupt_lock);
+    free(command);
+    if (!publish_receipt(argv[4], &receipt)) {
+        fputs("Titan coverage supervisor: failed to publish fresh receipt.\n", stderr);
+        return PROBE_FAILURE;
+    }
+    return (int)receipt.result;
+}
+'''
+WINDOWS_RUNNER_SCHEMA = 4
+WINDOWS_CREATE_LOCK = threading.Lock()
+LLVM_VERSION = '22.1.8'
+LLVM_COUNTER_POLICY = {'format': 'llvm-gcov', 'gcov_prefix_strip': 1,
+                       'raw_version_hex': '2a313142', 'profile_update': 'atomic',
+                       'runtime': 'static-compiler-rt-profile'}
 
 # Fresh templates for gcovr 8.4's supported --html-template-dir interface. The
 # context and source highlighting remain owned by gcovr; only the presented
@@ -92,6 +678,14 @@ class CoverageError(Exception):
     pass
 
 
+class WindowsRunFailure(CoverageError):
+    def __init__(self, message, interrupted=False, timed_out=False):
+        super().__init__(message)
+        self.interrupted = interrupted
+        self.timed_out = timed_out
+        self.exit_status = 124 if timed_out else 130 if interrupted else 125
+
+
 def canonical(value):
     return json.dumps(value, sort_keys=True, separators=(",", ":")).encode("utf-8")
 
@@ -147,10 +741,12 @@ def command_argv(command):
     return argv
 
 
-def invoke(argv, cwd=None, env=None, allowed=(0,)):
+def invoke(argv, cwd=None, env=None, allowed=(0,), timeout=None):
     try:
         result = subprocess.run(argv, cwd=cwd, env=env, stdout=subprocess.PIPE,
-                                stderr=subprocess.PIPE, text=True, encoding="utf-8", errors="replace")
+                                stderr=subprocess.PIPE, text=True, encoding="utf-8", errors="replace", timeout=timeout)
+    except subprocess.TimeoutExpired as error:
+        raise CoverageError("tool timed out: " + shlex.join(argv)) from error
     except OSError as error:
         raise CoverageError("cannot execute {}: {}".format(argv[0], error)) from error
     if allowed is not None and result.returncode not in allowed:
@@ -171,7 +767,704 @@ def tool_identity(command):
             "sha256": digest(executable), "version_output": version}
 
 
-def identify_backend(cc, gcov, gcovr=None):
+
+# Explicit LLVM gcov reader: exact binary structure precedes native decoding.
+"""Strict adapter for pinned LLVM 22.1.8's little-endian B11 gcov files.
+
+Scratch integration module: tool/platform identity and tracked source physical
+line bounds belong to the caller. This module does not search for tools, sources,
+or counters. Only explicit notes/data are copied into a new reader directory.
+"""
+
+
+class llvm_reader_ReaderError(CoverageError):
+    pass
+
+
+llvm_reader_VERSION = b"*11B"
+llvm_reader_FUNCTION, llvm_reader_BLOCKS, llvm_reader_ARCS, llvm_reader_LINES = 0x01000000, 0x01410000, 0x01430000, 0x01450000
+llvm_reader_COUNTERS, llvm_reader_SUMMARY = 0x01A10000, 0xA1000000
+llvm_reader_MAX_LINE, llvm_reader_MAX_COUNT = (1 << 32) - 1, (1 << 64) - 1
+
+
+def llvm_reader_require(condition, message):
+    if not condition:
+        raise llvm_reader_ReaderError(message)
+
+
+def llvm_reader_digest(data):
+    return hashlib.sha256(data).hexdigest()
+
+
+def llvm_reader_text_value(raw, description, empty=False):
+    try:
+        value = raw.decode("utf-8", errors="strict")
+    except UnicodeDecodeError as error:
+        raise llvm_reader_ReaderError(description + " is not UTF-8") from error
+    llvm_reader_require((empty or value) and not any(ord(c) < 32 or ord(c) == 127 for c in value),
+            description + " is empty or contains a control character")
+    return value
+
+
+def llvm_reader_path_key(value):
+    # LLVM removes dot components from the recorded path; no basename fallback,
+    # physical source lookup, case folding, or relocation inference is performed.
+    return posixpath.normpath(value.replace("\\", "/"))
+
+
+class llvm_reader_Words:
+    def __init__(self, data, description):
+        self.data, self.pos, self.description = data, 0, description
+
+    def word(self):
+        llvm_reader_require(self.pos + 4 <= len(self.data), self.description + ": truncated word")
+        result = struct.unpack_from("<I", self.data, self.pos)[0]
+        self.pos += 4
+        return result
+
+    def string(self, description, empty=False):
+        length = self.word() * 4
+        llvm_reader_require(length > 0 and self.pos + length <= len(self.data),
+                self.description + ": truncated/zero-length string")
+        raw = self.data[self.pos:self.pos + length]
+        self.pos += length
+        end = raw.find(b"\0")
+        llvm_reader_require(end >= 0 and raw[end:] == b"\0" * (len(raw) - end),
+                self.description + ": missing NUL or nonzero string padding")
+        return llvm_reader_text_value(raw[:end], description, empty=empty)
+
+    def done(self):
+        llvm_reader_require(self.pos == len(self.data), self.description + ": unexpected trailing record fields")
+
+
+def llvm_reader_header(raw, magic, description):
+    llvm_reader_require(len(raw) >= 12 and len(raw) % 4 == 0, description + ": truncated/misaligned header")
+    llvm_reader_require(raw[:4] == magic, description + ": unsupported exact little-endian magic")
+    llvm_reader_require(raw[4:8] == llvm_reader_VERSION, description + ": raw version must be exact '*11B'")
+    return raw[8:12]
+
+
+def llvm_reader_records(words):
+    while True:
+        start = words.pos
+        tag = words.word()
+        if tag == 0:
+            llvm_reader_require(words.data[start:] == b"\0" * 8, words.description + ": invalid/trailing EOF marker")
+            words.pos = len(words.data)
+            return
+        length = words.word() * 4
+        llvm_reader_require(words.pos + length <= len(words.data), words.description + ": truncated record")
+        body = llvm_reader_Words(words.data[words.pos:words.pos + length], words.description + " tag " + hex(tag))
+        words.pos += length
+        yield tag, body
+
+
+def llvm_reader_parse_notes(raw):
+    stamp = llvm_reader_header(raw, b"oncg", "notes")
+    words = llvm_reader_Words(raw, "notes"); words.pos = 12
+    cwd = words.string("recorded compiler directory")
+    llvm_reader_require(words.word() in (0, 1), "notes: invalid unexecuted-block flag")
+    functions, sources = {}, {}
+    fn = None
+    for tag, body in llvm_reader_records(words):
+        if tag == llvm_reader_FUNCTION:
+            ident, line_checksum, cfg_checksum = body.word(), body.word(), body.word()
+            llvm_reader_require(ident not in functions, "notes: duplicate function ID")
+            name = body.string("function name")
+            artificial = body.word()
+            llvm_reader_require(artificial in (0, 1), "notes: invalid artificial flag")
+            filename = body.string("function source path")
+            source = llvm_reader_path_key(filename)
+            first, first_column, last, last_column = (body.word() for _ in range(4))
+            # LLVM writes the DISubprogram start and an instruction debug line
+            # independently. Titan #line remaps can move the latter into another
+            # virtual file and back to a smaller number. Neither endpoint is a
+            # bound on the per-file executable LINES records below.
+            llvm_reader_require(0 < first <= llvm_reader_MAX_LINE and 0 < last <= llvm_reader_MAX_LINE,
+                    "notes: invalid function source endpoints")
+            fn = dict(ident=ident, line_checksum=line_checksum, cfg_checksum=cfg_checksum,
+                      name=name, file=source, first=first, last=last, blocks=None,
+                      arc_sources=set(), line_blocks=set(), counters=0)
+            functions[ident] = fn
+            sources.setdefault(source, set())
+        elif tag == llvm_reader_BLOCKS:
+            llvm_reader_require(fn is not None and fn["blocks"] is None, "notes: misplaced/duplicate blocks")
+            fn["blocks"] = body.word()
+            llvm_reader_require(fn["blocks"] >= 2, "notes: function has no entry/exit blocks")
+        elif tag == llvm_reader_ARCS:
+            llvm_reader_require(fn is not None and fn["blocks"] is not None, "notes: arcs before blocks")
+            source = body.word()
+            llvm_reader_require(source < fn["blocks"] and source not in fn["arc_sources"],
+                    "notes: invalid/duplicate arc source")
+            fn["arc_sources"].add(source)
+            llvm_reader_require((len(body.data) - body.pos) % 8 == 0, "notes: malformed arc record length")
+            while body.pos < len(body.data):
+                destination, flags = body.word(), body.word()
+                llvm_reader_require(destination < fn["blocks"] and not flags & ~7, "notes: invalid arc destination/flags")
+                fn["counters"] += not (flags & 1)
+        elif tag == llvm_reader_LINES:
+            llvm_reader_require(fn is not None and fn["blocks"] is not None, "notes: lines before blocks")
+            block = body.word()
+            llvm_reader_require(block < fn["blocks"] and block not in fn["line_blocks"],
+                    "notes: invalid/duplicate line block")
+            fn["line_blocks"].add(block)
+            current = None
+            while True:
+                number = body.word()
+                if number:
+                    llvm_reader_require(current is not None, "notes: source line before source path")
+                    sources[current].add(number)
+                else:
+                    # Empty line-list terminator is encoded as a zero word,
+                    # unlike ordinary gcov strings which have padded NUL bytes.
+                    if body.pos + 4 <= len(body.data) and struct.unpack_from("<I", body.data, body.pos)[0] == 0:
+                        body.word(); break
+                    filename = body.string("line source path")
+                    current = llvm_reader_path_key(filename)
+                    sources.setdefault(current, set())
+        else:
+            raise llvm_reader_ReaderError("notes: unknown record tag " + hex(tag))
+        body.done()
+    llvm_reader_require(functions and all(f["blocks"] is not None and f["counters"] > 0 for f in functions.values()),
+            "notes: no functions or incomplete function inventory")
+    function_keys = [(f["file"], f["first"], f["name"]) for f in functions.values()]
+    llvm_reader_require(len(set(function_keys)) == len(function_keys), "notes: ambiguous duplicate function identity")
+    return dict(stamp=stamp, cwd=cwd, functions=functions, sources=sources)
+
+
+def llvm_reader_validate_data(raw, notes):
+    llvm_reader_require(llvm_reader_header(raw, b"adcg", "data") == notes["stamp"], "data: file checksum/stamp differs from notes")
+    words = llvm_reader_Words(raw, "data"); words.pos = 12
+    seen, fn, summary = set(), None, False
+    for tag, body in llvm_reader_records(words):
+        if tag == llvm_reader_FUNCTION:
+            llvm_reader_require(fn is None and not summary, "data: missing counters or function after summary")
+            ident, line_checksum, cfg_checksum = body.word(), body.word(), body.word()
+            llvm_reader_require(ident in notes["functions"] and ident not in seen, "data: unknown/duplicate function ID")
+            fn = notes["functions"][ident]
+            llvm_reader_require((line_checksum, cfg_checksum) == (fn["line_checksum"], fn["cfg_checksum"]),
+                    "data: function line/CFG checksums differ from notes")
+            seen.add(ident)
+        elif tag == llvm_reader_COUNTERS:
+            llvm_reader_require(fn is not None and len(body.data) == fn["counters"] * 8,
+                    "data: missing function or wrong counter arity")
+            # Values are uint64_t; structural validation does not invent/rebuild
+            # counts. LLVM alone solves its measured flow graph.
+            body.pos = len(body.data); fn = None
+        elif tag == llvm_reader_SUMMARY:
+            llvm_reader_require(fn is None and not summary and seen == notes["functions"].keys(),
+                    "data: missing/duplicate function inventory or summary")
+            body.word(); body.word(); summary = True
+        else:
+            raise llvm_reader_ReaderError("data: unknown record tag " + hex(tag))
+        body.done()
+    llvm_reader_require(fn is None and summary and seen == notes["functions"].keys(),
+            "data: missing counters/function/summary")
+
+
+def llvm_reader_decimal(value, maximum, description, positive=False):
+    llvm_reader_require(re.fullmatch(r"0|[1-9][0-9]*", value) is not None, description + ": malformed decimal")
+    number = int(value)
+    llvm_reader_require((number > 0 if positive else number >= 0) and number <= maximum,
+            description + ": out of range")
+    return number
+
+
+def llvm_reader_parse_intermediate(raw, notes, notes_only=False):
+    try:
+        text = raw.decode("utf-8", errors="strict")
+    except UnicodeDecodeError as error:
+        raise llvm_reader_ReaderError("LLVM intermediate output is not UTF-8") from error
+    llvm_reader_require(text and not any((ord(c) < 32 and c not in "\r\n") or ord(c) == 127 for c in text),
+            "intermediate: empty output or control character")
+    # Only physical CRLF/LF record separators; Unicode LS/VT/formfeed must
+    # never create a source-line/record boundary through str.splitlines().
+    llvm_reader_require(text.endswith("\n") and "\r" not in text.replace("\r\n", ""),
+            "intermediate: incomplete/bare-CR records")
+    rows = text.replace("\r\n", "\n").split("\n")[:-1]
+    files, functions = {}, Counter()
+    current = None
+    expected_functions = Counter((f["file"], f["first"], f["name"]) for f in notes["functions"].values())
+    for row in rows:
+        kind, separator, value = row.partition(":")
+        llvm_reader_require(separator and value, "intermediate: empty/malformed record")
+        if kind == "file":
+            source = llvm_reader_text_value(value.encode("utf-8"), "intermediate source")
+            current = llvm_reader_path_key(source)
+            llvm_reader_require(current in notes["sources"] and current not in files,
+                    "intermediate: unknown/duplicate source path")
+            files[current] = dict(file=source, lines={})
+        elif kind == "function":
+            fields = value.split(",", 2)
+            llvm_reader_require(current is not None and len(fields) == 3, "intermediate: misplaced/malformed function")
+            first = llvm_reader_decimal(fields[0], llvm_reader_MAX_LINE, "function line", positive=True)
+            count = llvm_reader_decimal(fields[1], llvm_reader_MAX_COUNT, "function count")
+            name = llvm_reader_text_value(fields[2].encode("utf-8"), "intermediate function name")
+            key = (current, first, name)
+            functions[key] += 1
+            llvm_reader_require(functions[key] <= expected_functions[key], "intermediate: unknown/duplicate function identity")
+            llvm_reader_require(not notes_only or count == 0, "intermediate: nonzero function without counters")
+        elif kind == "lcount":
+            fields = value.split(",")
+            llvm_reader_require(current is not None and len(fields) == 2, "intermediate: misplaced/malformed line count")
+            number = llvm_reader_decimal(fields[0], llvm_reader_MAX_LINE, "source line", positive=True)
+            count = llvm_reader_decimal(fields[1], llvm_reader_MAX_COUNT, "source count")
+            llvm_reader_require(number in notes["sources"][current] and number not in files[current]["lines"],
+                    "intermediate: unknown/duplicate source line")
+            llvm_reader_require(not notes_only or count == 0, "intermediate: nonzero line without counters")
+            files[current]["lines"][number] = count
+        else:
+            raise llvm_reader_ReaderError("intermediate: unexpected record kind " + kind)
+    llvm_reader_require(files.keys() == notes["sources"].keys() and functions == expected_functions,
+            "intermediate: missing source/function inventory")
+    for source, file in files.items():
+        llvm_reader_require(file["lines"].keys() == notes["sources"][source], "intermediate: missing executable source lines")
+        file["lines"] = [dict(line_number=n, count=c) for n, c in sorted(file["lines"].items())]
+    return dict(files=list(files.values()), current_working_directory=notes["cwd"])
+
+
+def llvm_gcov_raw(gcov_argv, notes, work, data=None):
+    llvm_reader_require(isinstance(gcov_argv, (list, tuple)) and len(gcov_argv) >= 2
+            and all(isinstance(a, str) and a and "\0" not in a for a in gcov_argv), "explicit LLVM gcov argv required")
+    llvm_reader_require(gcov_argv[-1] == "gcov", "explicit LLVM gcov subcommand required")
+    work = Path(work).absolute()
+    work.mkdir(parents=True, exist_ok=False)
+    notes_raw = Path(notes).read_bytes()
+    local_notes = work / "object.gcno"; local_notes.write_bytes(notes_raw)
+    data_raw = None
+    if data is not None:
+        data_raw = Path(data).read_bytes()
+        (work / "object.gcda").write_bytes(data_raw)
+    parsed = llvm_reader_parse_notes(notes_raw)
+    if data_raw is not None:
+        llvm_reader_validate_data(data_raw, parsed)
+    argv = list(gcov_argv) + ["--intermediate-format", str(local_notes)]
+    command = dict(argv=argv, input_notes_sha256=llvm_reader_digest(notes_raw),
+                   input_data_sha256=llvm_reader_digest(data_raw) if data_raw is not None else None)
+    try:
+        result = subprocess.run(argv, cwd=work, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30)
+        stdout, stderr = result.stdout, result.stderr
+        command.update(exit_status=result.returncode, timed_out=False)
+    except subprocess.TimeoutExpired as error:
+        stdout, stderr = error.stdout or b"", error.stderr or b""
+        command.update(exit_status=None, timed_out=True)
+    except OSError as error:
+        command.update(exit_status=None, timed_out=False, execution_error=str(error))
+        stdout, stderr = b"", b""
+    (work / "llvm-gcov.stdout").write_bytes(stdout)
+    (work / "llvm-gcov.stderr").write_bytes(stderr)
+    command.update(stdout_sha256=llvm_reader_digest(stdout), stderr_sha256=llvm_reader_digest(stderr))
+    (work / "gcov-command.json").write_text(json.dumps(command, indent=2) + "\n", encoding="utf-8")
+    llvm_reader_require(command.get("exit_status") == 0 and not command.get("timed_out"),
+            "LLVM reader failed: " + json.dumps(command))
+    llvm_reader_require(not stderr, "LLVM reader diagnostics despite zero exit: " + repr(stderr))
+    try:
+        stdout.decode("utf-8", errors="strict")
+    except UnicodeDecodeError as error:
+        raise llvm_reader_ReaderError("LLVM reader stdout is not UTF-8") from error
+    outputs = sorted(work.glob("*.gcov"))
+    llvm_reader_require(outputs == [work / "object.gcno.gcov"], "LLVM reader output inventory is not exactly object.gcno.gcov")
+    llvm_reader_require(local_notes.read_bytes() == notes_raw and (data_raw is None or (work / "object.gcda").read_bytes() == data_raw),
+            "LLVM reader modified its explicit notes/data")
+    return llvm_reader_parse_intermediate(outputs[0].read_bytes(), parsed, notes_only=data_raw is None)
+
+
+def pe_image_identity(path, require_runtime=True):
+    """Inspect AMD64 PE imports directly; no toolchain DLL search or fallback."""
+    raw = Path(path).read_bytes()
+    def u16(offset): return struct.unpack_from('<H', raw, offset)[0]
+    def u32(offset): return struct.unpack_from('<I', raw, offset)[0]
+    try:
+        pe = u32(0x3c)
+        if raw[:2] != b'MZ' or raw[pe:pe + 4] != b'PE\0\0' or u16(pe + 4) != 0x8664:
+            raise CoverageError('coverage runner/image requires an AMD64 PE image')
+        optional = pe + 24
+        if u16(optional) != 0x20b or u16(pe + 20) < 128:
+            raise CoverageError('coverage runner/image requires PE32+')
+        sections = []
+        for index in range(u16(pe + 6)):
+            offset = optional + u16(pe + 20) + index * 40
+            sections.append((u32(offset + 12), u32(offset + 8), u32(offset + 20), u32(offset + 16)))
+        def rva(value, size):
+            for start, virtual, physical, length in sections:
+                if start <= value and value + size <= start + min(virtual, length):
+                    offset = physical + value - start
+                    if offset + size <= len(raw): return offset
+            raise CoverageError('PE import RVA is outside a declared file-backed section')
+        address, size = u32(optional + 120), u32(optional + 124)
+        imports = []
+        if address:
+            if size < 20 or size > 1024 * 1024:
+                raise CoverageError('malformed PE import directory')
+            terminated = False
+            for index in range(size // 20):
+                offset = rva(address + index * 20, 20)
+                descriptor = struct.unpack_from('<5I', raw, offset)
+                if not any(descriptor):
+                    terminated = True; break
+                name = rva(descriptor[3], 1)
+                end = raw.find(b'\0', name, min(len(raw), name + 256))
+                if end < 0: raise CoverageError('unterminated PE import name')
+                dll = raw[name:end].decode('ascii').lower()
+                if dll in imports: raise CoverageError('duplicate PE import descriptor')
+                imports.append(dll)
+            if not terminated: raise CoverageError('unterminated PE import directory')
+        if not imports or any(not re.fullmatch(r'[a-z0-9_.+-]+\.dll', name) for name in imports):
+            raise CoverageError('PE import inventory has absent or malformed DLL names')
+        if require_runtime and any(name not in ('kernel32.dll', 'ucrtbase.dll') and
+                              not re.fullmatch(r'api-ms-win-crt-[a-z0-9-]+\.dll', name) for name in imports):
+            raise CoverageError('coverage image imports an unsupported extra runtime: ' + ', '.join(imports))
+        # A delayed dependency would evade the ordinary import inventory.
+        if u16(pe + 20) >= 224 and (u32(optional + 216) or u32(optional + 220)):
+            raise CoverageError('coverage image has unverified delayed imports')
+        return {'machine': 'AMD64', 'optional_magic': 'PE32+', 'subsystem': u16(optional + 68),
+                'imports': sorted(imports)}
+    except (IndexError, struct.error, UnicodeDecodeError) as error:
+        raise CoverageError('malformed PE image: ' + str(path)) from error
+
+
+def owned_tool_dlls(executable):
+    """Bind explicitly imported implementation DLLs beside the selected tool.
+
+    Windows system imports remain the operating-system boundary. Package DLLs
+    are resolved only beside the declared executable, never through PATH or a
+    recursive directory scan. Clang's small driver delegates to these bytes.
+    """
+    directory = Path(executable).resolve().parent
+    system = {'kernel32.dll', 'kernelbase.dll', 'ntdll.dll', 'ucrtbase.dll', 'msvcrt.dll',
+        'advapi32.dll', 'shell32.dll', 'user32.dll', 'ole32.dll', 'oleaut32.dll', 'version.dll',
+        'ws2_32.dll', 'bcrypt.dll', 'crypt32.dll', 'psapi.dll', 'dbghelp.dll', 'shlwapi.dll',
+        'rpcrt4.dll', 'gdi32.dll', 'comdlg32.dll', 'combase.dll', 'secur32.dll', 'iphlpapi.dll',
+        'winmm.dll', 'setupapi.dll', 'normaliz.dll'}
+    pending, seen, result = [Path(executable).resolve()], set(), []
+    while pending:
+        path = pending.pop()
+        image = pe_image_identity(path, require_runtime=False)
+        for name in image['imports']:
+            if name in system or name.startswith(('api-ms-win-', 'ext-ms-win-')): continue
+            dependency = directory / name
+            if not dependency.is_file():
+                raise CoverageError('declared tool implementation DLL is absent beside its executable: ' + str(dependency))
+            if name in seen: continue
+            seen.add(name)
+            result.append({'path': str(dependency), 'sha256': digest(dependency)})
+            pending.append(dependency)
+    return sorted(result, key=lambda item: item['path'])
+
+
+def native_python_identity():
+    executable = str(Path(sys.executable).resolve())
+    return {'executable': executable, 'sha256': digest(executable),
+            'implementation': sys.implementation.name, 'version': sys.version,
+            'version_info': list(sys.version_info[:3]), 'bitness': struct.calcsize('P') * 8,
+            'implementation_dlls': owned_tool_dlls(executable)}
+
+
+def interpreter_semantic_identity(identity):
+    value = copy.deepcopy(identity)
+    value.pop('executable', None)
+    value['implementation_dlls'] = sorted((PureWindowsPath(item['path']).name.lower(), item['sha256'])
+                                          for item in value.get('implementation_dlls', []))
+    return value
+
+
+def validate_interpreter(identity, current=None):
+    if (not isinstance(identity.get('executable'), str) or not Path(identity['executable']).is_absolute() or
+            digest(identity['executable']) != identity.get('sha256')):
+        raise CoverageError('sealed native Python executable identity changed')
+    for item in identity.get('implementation_dlls', []):
+        if not Path(item['path']).is_absolute() or digest(item['path']) != item['sha256']:
+            raise CoverageError('sealed native Python implementation DLL changed')
+    if interpreter_semantic_identity(identity) != interpreter_semantic_identity(current or native_python_identity()):
+        raise CoverageError('native Python implementation/version/bitness identity differs from the coverage build')
+    return identity
+
+
+def identify_llvm_backend(cc, gcov, gcovr=None, compile_args=None):
+    if os.name != 'nt' or platform.machine().lower() not in ('amd64', 'x86_64'):
+        raise CoverageError('llvm-gcov requires native Windows x64 Python and the CLANG64/UCRT SDK')
+    compiler, profiler = tool_identity(cc), tool_identity(gcov)
+    cc_version = re.search(r'clang version (\d+\.\d+\.\d+)\b', compiler['version_output'])
+    gcov_version = re.search(r'LLVM version (\d+\.\d+\.\d+)\b', profiler['version_output'])
+    if not cc_version or not gcov_version or cc_version[1] != LLVM_VERSION or gcov_version[1] != LLVM_VERSION:
+        raise CoverageError('llvm-gcov requires exact Clang/LLVM ' + LLVM_VERSION)
+    if profiler['argv'][-1] != 'gcov':
+        raise CoverageError('llvm-gcov requires an explicit llvm-cov gcov command')
+    flags = list(compile_args or [])
+    if any(not isinstance(flag, str) or not flag or '\0' in flag for flag in flags):
+        raise CoverageError('malformed effective LLVM compile argument')
+    if any(flag == '--coverage' or flag == '-ftest-coverage' or flag.startswith(('-fprofile', '-fno-profile', '-fcoverage', '-dumpdir', '-dumpbase')) for flag in flags):
+        raise CoverageError('LLVM coverage/profile paths must be owned by the explicit coverage backend')
+    prefix = compiler['argv'] + flags
+    compiler['version'] = profiler['version'] = LLVM_VERSION
+    compiler['implementation_dlls'] = owned_tool_dlls(compiler['executable'])
+    profiler['implementation_dlls'] = owned_tool_dlls(profiler['executable'])
+    compiler['target'] = invoke(prefix + ['-dumpmachine'], timeout=30).stdout.strip()
+    if compiler['target'] != 'x86_64-w64-windows-gnu':
+        raise CoverageError('llvm-gcov requires effective x86_64-w64-windows-gnu target')
+    resource = Path(invoke(prefix + ['-print-resource-dir'], timeout=30).stdout.strip()).resolve()
+    default_resource = Path(invoke(compiler['argv'] + ['-print-resource-dir'], timeout=30).stdout.strip()).resolve()
+    if resource != default_resource:
+        raise CoverageError('effective compile-only LLVM resource override differs from the final-link runtime resource')
+    runtime = resource / 'lib' / 'windows' / 'libclang_rt.profile-x86_64.a'
+    if not resource.is_dir() or not runtime.is_file():
+        raise CoverageError('LLVM does not provide the matching static x64 profile runtime')
+    compiler['resource_directory'] = str(resource)
+    compiler['profile_runtime'] = {'path': str(runtime), 'sha256': digest(runtime)}
+    compiler['effective_compile_args'] = flags
+    result = {'cc': compiler, 'gcov': profiler, 'python': native_python_identity()}
+    if gcovr is not None: result['gcovr'] = identify_reporter(gcovr)
+    return result
+
+
+def runner_source_hash():
+    return hashlib.sha256(WINDOWS_RUNNER_SOURCE.encode('utf-8')).hexdigest()
+
+
+def runner_semantic_identity(runner):
+    # Build-owned source/output paths differ legitimately between compatible
+    # builds. All compiler flags, executable/runtime bytes and helper bytes bind.
+    value = copy.deepcopy(runner)
+    for key in ('path', 'source_path', 'identity_path'): value.pop(key, None)
+    value['interpreter_identity'] = interpreter_semantic_identity(value['interpreter_identity'])
+    argv = value['compile_argv']
+    value['compile_argv'] = ['<runner-source>' if item == runner['source_path'] else
+                             '<runner-image>' if item == runner['path'] else item for item in argv]
+    return value
+
+
+def validate_runner(runner, tools):
+    if (runner.get('schema') != WINDOWS_RUNNER_SCHEMA or
+            runner.get('source_sha256') != runner_source_hash() or
+            runner.get('compiler_identity') != tools['cc']):
+        raise CoverageError('sealed Windows coverage runner source/compiler identity changed')
+    validate_interpreter(runner['interpreter_identity'], tools['python'])
+    for key in ('path', 'source_path', 'identity_path'):
+        if not isinstance(runner.get(key), str) or not Path(runner[key]).is_absolute():
+            raise CoverageError('coverage runner paths must be absolute')
+    if digest(runner['path']) != runner.get('sha256') or digest(runner['source_path']) != runner['source_sha256']:
+        raise CoverageError('sealed Windows coverage runner image/source bytes changed')
+    if runner.get('pe_image') != pe_image_identity(runner['path']):
+        raise CoverageError('sealed Windows coverage runner PE identity changed')
+    expected = tools['cc']['argv'] + tools['cc']['effective_compile_args'] + [
+        '-std=c99', '-O0', '-fno-lto', '-g0', '-Wall', '-Wextra', '-Werror', '-municode', '-static', '-Wl,--no-insert-timestamp',
+        runner['source_path'], '-o', runner['path']]
+    if runner.get('compile_argv') != expected or read_json(runner['identity_path']) != runner:
+        raise CoverageError('sealed Windows coverage runner compile/identity provenance changed')
+    return runner
+
+
+def materialize_runner(directory, tools):
+    if directory is None: raise CoverageError('llvm-gcov probe requires --runner-directory')
+    directory = Path(directory).resolve()
+    image, source, identity = directory / 'titan-coverage-runner.exe', directory / 'titan-coverage-runner.c', directory / 'runner.json'
+    if directory.exists():
+        # Compiler incremental invocations validate a durable image, never repair
+        # it, overwrite it, or select a PATH helper with another identity.
+        if not identity.is_file(): raise CoverageError('runner directory exists without a sealed helper identity; use a fresh build')
+        runner = read_json(identity)
+        if runner.get('path') != str(image) or runner.get('source_path') != str(source) or runner.get('identity_path') != str(identity):
+            raise CoverageError('runner identity does not own its declared build directory')
+        return validate_runner(runner, tools)
+    directory.mkdir(parents=True, exist_ok=False)
+    source.write_text(WINDOWS_RUNNER_SOURCE, encoding='utf-8', newline='\n')
+    # The helper has an ordinary build policy independent of measured-code
+    # debug flags. Its sealed source remains available, while -g0 prevents
+    # build-owned source paths from changing otherwise identical helper bytes.
+    argv = tools['cc']['argv'] + tools['cc']['effective_compile_args'] + [
+        '-std=c99', '-O0', '-fno-lto', '-g0', '-Wall', '-Wextra', '-Werror', '-municode', '-static', '-Wl,--no-insert-timestamp', str(source), '-o', str(image)]
+    result = invoke(argv, timeout=30)
+    runner = {'schema': WINDOWS_RUNNER_SCHEMA, 'path': str(image), 'sha256': digest(image),
+              'source_path': str(source), 'source_sha256': runner_source_hash(), 'identity_path': str(identity),
+              'compile_argv': argv, 'compiler_identity': tools['cc'], 'interpreter_identity': tools['python'],
+              'pe_image': pe_image_identity(image)}
+    if runner['pe_image']['subsystem'] != 3: raise CoverageError('runner must be a native console-subsystem executable')
+    save_json(directory / 'compile.json', {'argv': argv, 'stdout': result.stdout, 'stderr': result.stderr})
+    save_json(identity, runner)
+    return validate_runner(runner, tools)
+
+
+def validate_windows_receipt(value, helper_status):
+    def require(ok, message):
+        if not ok: raise CoverageError('Windows runner receipt: ' + message)
+    require(value.get('schema') == WINDOWS_RUNNER_SCHEMA and value.get('runner_kind') == 'titan-coverage-job-v1', 'unsupported schema/kind')
+    for key in ('leader_created', 'leader_exited_naturally', 'retirement_requested', 'retirement_succeeded',
+                'forced_leader_retirement', 'forced_descendant_retirement', 'timeout', 'interrupted',
+                'empty_job_confirmed', 'complete', 'tests_passed', 'control_present', 'control_inherit_cleared',
+                'control_excluded_leader', 'control_initial_open', 'control_eof_observed', 'control_boundary_ready',
+                'control_read_closed', 'private_console_confirmed', 'console_free_attempted',
+                'leader_console_inherit_requested'):
+        require(type(value.get(key)) is bool, 'malformed ' + key)
+    for key in ('leader_status_dword', 'supervisor_exit_code', 'active_processes_final'):
+        require(type(value.get(key)) is int and 0 <= value[key] <= 0xffffffff, 'missing/malformed ' + key)
+    require(value['supervisor_exit_code'] == helper_status, 'helper exit disagrees with receipt')
+    require(value['leader_status_hex'] == '0x{:08x}'.format(value['leader_status_dword']), 'native DWORD/hex disagreement')
+    require(value['leader_created'] and value['empty_job_confirmed'] and value['active_processes_final'] == 0,
+            'owned job emptiness/native leader status not confirmed')
+    require(value['supervisor_error_operation'] is None and value['win32_error'] == 0, 'native supervisor error')
+    handles = value.get('leader_handle_list')
+    control_handle = value.get('control_read_handle')
+    require(type(control_handle) is int and 0 < control_handle < (1 << 64) - 1 and
+            isinstance(handles, list) and len(handles) == 3 and
+            all(type(handle) is int and 0 < handle < (1 << 64) - 1 for handle in handles) and
+            len(set(handles)) == 3 and control_handle not in handles,
+            'control handle must be excluded from the exact native standard handle list')
+    require(value['control_present'] and value['control_initial_open'] and value['control_inherit_cleared'] and
+            value['control_excluded_leader'] and value['control_boundary_ready'] and value['control_read_closed'], 'control ownership not confirmed')
+    for key in ('helper_pid', 'console_pid_before', 'console_pid_after', 'console_count_before',
+                'console_process_count', 'console_error_before', 'console_error',
+                'console_query_capacity', 'console_dword_size', 'leader_creation_flags'):
+        require(type(value.get(key)) is int and 0 <= value[key] <= 0xffffffff, 'malformed ' + key)
+    for key in ('console_window_before', 'console_window_after'):
+        require(type(value.get(key)) is int and 0 <= value[key] < (1 << 64), 'malformed ' + key)
+    require(value.get('console_policy') == 'private-headless-inherited' and
+            value['private_console_confirmed'] and value['helper_pid'] > 0 and
+            value['console_pid_before'] == value['helper_pid'] == value['console_pid_after'] and
+            value['console_count_before'] == 1 and value['console_process_count'] == 1 and
+            value['console_window_before'] == 0 and value['console_window_after'] == 0 and
+            not value['console_free_attempted'] and value['leader_console_inherit_requested'] and
+            value['leader_creation_flags'] == 0x80204 and
+            value['console_query_capacity'] == 16 and value['console_dword_size'] == 4,
+            'private helper headless-console inheritance not confirmed')
+    require(value['control_final_observation'] in ('open', 'eof') and
+            value['control_eof_observed'] == (value['control_final_observation'] == 'eof'), 'invalid finite EOF boundary')
+    require(value['interruption_source'] in ('none', 'control_pipe_eof') and value['interrupt_code'] is None and
+            value['interrupted'] == value['control_eof_observed'] and
+            (value['interruption_source'] == 'control_pipe_eof') == value['interrupted'],
+            'control-pipe interruption must not invent a console event')
+    expected_complete = (value['leader_exited_naturally'] and not value['retirement_requested'] and
+        not value['timeout'] and not value['interrupted'] and value['leader_status_dword'] < 0x80000000)
+    require(value['complete'] == expected_complete and value['tests_passed'] == (expected_complete and value['leader_status_dword'] == 0),
+            'complete/tests status contradicts process lifecycle')
+    if value['timeout']: require(helper_status == 124, 'timeout lost its primary result')
+    elif value['interrupted']:
+        require(helper_status == 130 and value['interruption_source'] == 'control_pipe_eof' and value['control_eof_observed'], 'invalid interruption')
+    elif expected_complete: require(helper_status == value['leader_status_dword'], 'natural native status changed')
+    else: require(helper_status == 125 or helper_status >= 0x80000000, 'invalid incomplete status')
+    return value
+
+
+def windows_supervised_run(runner, command, receipt_path, env, timeout=None, stdin_policy="inherit", stream_capture=None):
+    """Only the helper owns the JobObject; Python owns the sole EOF writer.
+
+    Internal no-input capability calls use stdin_policy="null"; terminal
+    forwarding is limited to the one-shot CLI action whose interpreter exits
+    after collection. Reusable callers cannot leave competing terminal readers.
+    Stream directly through explicit standard handles. A KeyboardInterrupt
+    caught before collection stays incomplete even if helper admission closed
+    after its owned tree became empty. Parent death leaves run.json uncollected.
+    """
+    import msvcrt
+    if timeout is not None and (not math.isfinite(timeout) or timeout <= 0 or timeout > (1 << 53) / 1000):
+        raise CoverageError('run timeout must be positive finite seconds')
+    read_fd, writer = os.pipe()
+    read_handle = msvcrt.get_osfhandle(read_fd)
+    if os.get_handle_inheritable(msvcrt.get_osfhandle(writer)):
+        os.close(read_fd); os.close(writer)
+        raise CoverageError('control writer must not be inheritable')
+    start = subprocess.STARTUPINFO()
+    start.lpAttributeList = {'handle_list': [read_handle]}
+    argv = [runner['path'], '--timeout-ms', str(math.ceil(timeout * 1000)) if timeout else '0',
+            '--receipt', str(receipt_path), '--control-read-handle', str(read_handle), '--'] + list(command)
+    child = None; interrupted = False; backstop = False
+    parent_deadline = time.monotonic() + timeout + 12 if timeout is not None else None
+    # Pipe/file/NUL stdin retains the caller's ordinary descriptor directly.
+    # A terminal is forwarded through a pipe into the private headless console.
+    if stdin_policy not in ("inherit", "null", "terminal-one-shot"):
+        raise CoverageError("unsupported private runner stdin policy")
+    terminal_input = stdin_policy != "null" and sys.stdin is not None and sys.stdin.isatty()
+    if terminal_input and stdin_policy != "terminal-one-shot":
+        os.close(read_fd); os.close(writer)
+        raise CoverageError("terminal forwarding requires the one-shot CLI run action")
+    stdin_source = (subprocess.DEVNULL if stdin_policy == "null" else subprocess.PIPE if terminal_input
+                    else sys.stdin if sys.stdin is not None else subprocess.DEVNULL)
+    pumps, stream_errors = [], []
+    def pump_output(source, target, stream):
+        try:
+            while True:
+                data = source.read1(65536)
+                if not data: break
+                if stream_capture is not None: stream_capture(stream, data)
+                if target is not None:
+                    binary = getattr(target, "buffer", None)
+                    if binary is not None: binary.write(data); binary.flush()
+                    else: target.write(data.decode("utf-8", errors="replace")); target.flush()
+        except (OSError, ValueError) as error: stream_errors.append(str(error))
+        finally: source.close()
+    def pump_input(target):
+        try:
+            if sys.stdin is not None:
+                while True:
+                    data = os.read(sys.stdin.fileno(), 65536)
+                    if not data: break
+                    target.write(data); target.flush()
+        except (OSError, ValueError): pass  # Native EOF/closed stdin is ordinary.
+        finally:
+            try: target.close()
+            except (OSError, ValueError): pass
+    try:
+        with WINDOWS_CREATE_LOCK:
+            os.set_handle_inheritable(read_handle, True)
+            try:
+                child = subprocess.Popen(argv, env=env, close_fds=True, startupinfo=start,
+                    stdin=stdin_source, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                    creationflags=subprocess.CREATE_NO_WINDOW | subprocess.CREATE_NEW_PROCESS_GROUP)
+            finally: os.set_handle_inheritable(read_handle, False)
+        os.close(read_fd); read_fd = None
+        # Explicit pipes preserve native stdio in the private headless console.
+        # Stream bytes to the caller, including a terminal caller whose own
+        # console is never detached or joined by the helper.
+        pumps = [threading.Thread(target=pump_output, args=(source, target, stream), daemon=True)
+                 for source, target, stream in ((child.stdout, sys.stdout, 'stdout'), (child.stderr, sys.stderr, 'stderr'))]
+        for thread in pumps: thread.start()
+        if terminal_input: threading.Thread(target=pump_input, args=(child.stdin,), daemon=True).start()
+        while child.poll() is None:
+            if parent_deadline is not None and time.monotonic() >= parent_deadline:
+                raise WindowsRunFailure("Windows helper exceeded timeout plus its bounded cleanup budget", timed_out=True)
+            try: child.wait(timeout=0.05)
+            except subprocess.TimeoutExpired: pass
+    except KeyboardInterrupt:
+        interrupted = True
+    finally:
+        # EOF cancels only this private helper/tree. Never signal a console
+        # group or detach the user's Python host/caller from its own console.
+        if child is not None and child.poll() is None:
+            os.close(writer); writer = None
+            deadline = time.monotonic() + 12
+            while child.poll() is None and time.monotonic() < deadline:
+                try: child.wait(timeout=0.05)
+                except subprocess.TimeoutExpired: pass
+                except KeyboardInterrupt: interrupted = True
+            if child.poll() is None:
+                backstop = True; child.kill(); child.wait(timeout=3)
+        if read_fd is not None: os.close(read_fd)
+        if writer is not None: os.close(writer)
+    if child is None or backstop:
+        raise WindowsRunFailure('Windows coverage helper was uncollected or forced by parent backstop; counters unavailable', interrupted=interrupted)
+    for thread in pumps:
+        while thread.is_alive():
+            try: thread.join(timeout=2)
+            except KeyboardInterrupt: interrupted = True; continue
+            if thread.is_alive(): raise CoverageError("Windows helper output pipes did not drain after empty-job exit")
+    if stream_errors: raise CoverageError("Windows helper stream forwarding failed: " + "; ".join(stream_errors))
+    raw = read_json(receipt_path)
+    try:
+        native = validate_windows_receipt(raw, child.returncode)
+        if native['control_read_handle'] != read_handle:
+            raise CoverageError("Windows runner control handle differs from the parent enrollment")
+    except CoverageError as error:
+        raise WindowsRunFailure(str(error), interrupted=interrupted or raw.get('interrupted') is True,
+                                timed_out=raw.get('timeout') is True) from error
+    return {'native': native, 'parent_interrupted': interrupted, 'helper_argv': argv,
+            'exit_status': 130 if interrupted and not native['timeout'] else child.returncode,
+            'complete': native['complete'] and not interrupted}
+
+
+def identify_backend(cc, gcov, gcovr=None, backend="gcc-gcov", compile_args=None):
+    if backend == "llvm-gcov":
+        return identify_llvm_backend(cc, gcov, gcovr, compile_args)
+    if backend != "gcc-gcov":
+        raise CoverageError("unsupported explicit coverage backend: " + backend)
     compiler = tool_identity(cc)
     profiler = tool_identity(gcov)
     if not re.search(r"\bGCC\b|\bgcc\b", compiler["version_output"]):
@@ -241,9 +1534,29 @@ def gcov_json(gcov, notes, work, data=None):
     return value
 
 
-def gcov_path(value, filename):
+def gcov_path(value, filename, sealed_root=None):
     path = Path(filename)
-    if not path.is_absolute():
+    if sealed_root is not None:
+        # LLVM's authored #line names are relative to the sealed source root,
+        # even when its notes record cwd='.'. Validate before resolve can erase
+        # traversal or turn a Windows drive-relative name into an alias.
+        windows = PureWindowsPath(filename)
+        absolute = path.is_absolute()
+        if (not filename or any(ord(c) < 32 or ord(c) == 127 for c in filename) or
+                windows.drive and (not windows.is_absolute() or
+                                   not re.fullmatch(r"[A-Za-z]:", windows.drive)) or
+                windows.root and not windows.drive and
+                (os.name == "nt" or filename.startswith("\\") or not absolute)):
+            raise CoverageError("unsafe LLVM authored source path: " + filename)
+        tail = filename[len(windows.drive):].replace("\\", "/")
+        parts = tail.split("/")
+        if windows.root:
+            parts = parts[1:]
+        if not parts or any(part in ("", ".", "..") for part in parts):
+            raise CoverageError("unsafe LLVM authored source path: " + filename)
+        if not absolute and not windows.is_absolute():
+            path = Path(sealed_root).joinpath(*parts)
+    elif not path.is_absolute():
         path = Path(value["current_working_directory"]) / path
     return os.path.normcase(str(path.resolve()))
 
@@ -261,14 +1574,20 @@ def raw_lines(value, source):
     return found
 
 
-def counter_path(prefix, embedded):
+def counter_path(prefix, embedded, backend="gcc-gcov"):
     # GCC's GCOV_PREFIX_STRIP=0 relocation drops an absolute path's root/drive.
-    path = Path(embedded)
+    path = PureWindowsPath(embedded) if backend == "llvm-gcov" else Path(embedded)
+    if backend == "llvm-gcov" and (not path.is_absolute() or not re.fullmatch(r"[A-Za-z]:", path.drive)):
+        raise CoverageError("LLVM counters require an absolute local Windows drive path")
     parts = path.parts[1:] if path.anchor else path.parts
     return Path(prefix).joinpath(*parts)
 
 
-def probe_backend(cc, gcov, gcovr=None, output=None):
+def probe_backend(cc, gcov, gcovr=None, output=None, backend="gcc-gcov", runner_directory=None, compile_args=None):
+    if backend == "llvm-gcov":
+        return probe_llvm_backend(cc, gcov, gcovr, output, runner_directory, compile_args)
+    if backend != "gcc-gcov":
+        raise CoverageError("unsupported explicit coverage backend: " + backend)
     tools = identify_backend(cc, gcov, gcovr)
     output = Path(output).resolve() if output else None
     if output is not None:
@@ -354,14 +1673,239 @@ def probe_backend(cc, gcov, gcovr=None, output=None):
         return evidence
 
 
+@contextmanager
+def llvm_probe_workspace(runner_directory, diagnostics):
+    # Only this small, generated capability fixture is retained on failure.
+    # Keep it beside its build-owned helper so the printed path survives TMP
+    # cleanup; never copy the caller's environment or arbitrary source trees.
+    work = Path(tempfile.mkdtemp(prefix='probe-', dir=runner_directory)).resolve()
+    try:
+        yield work
+    except BaseException as error:
+        diagnostics.update(state='failed', error_type=type(error).__name__, error=str(error),
+                           diagnostic_directory=str(work))
+        try:
+            save_json(work / 'failure.json', diagnostics)
+        except OSError as diagnostic_error:
+            print('titan-coverage: cannot write failure receipt: ' + str(diagnostic_error), file=sys.stderr)
+        message = 'LLVM capability diagnostics retained at ' + str(work)
+        if isinstance(error, CoverageError):
+            raise CoverageError(str(error) + '\n' + message) from error
+        print('titan-coverage: ' + message, file=sys.stderr)
+        raise
+    else:
+        shutil.rmtree(work)
+
+
+def llvm_probe_command(work, name, argv):
+    command = {'argv': argv, 'exit_status': None, 'timed_out': False}
+    try:
+        result = subprocess.run(argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30)
+        stdout, stderr = result.stdout, result.stderr
+        command['exit_status'] = result.returncode
+    except subprocess.TimeoutExpired as error:
+        stdout, stderr = error.stdout or b'', error.stderr or b''
+        command['timed_out'] = True
+    except OSError as error:
+        stdout, stderr = b'', b''
+        command['execution_error'] = str(error)
+    # Compiler output is diagnostic data, never interpolated into a CLI error.
+    # Bound retained streams and record their original sizes/hashes explicitly.
+    failed = command['exit_status'] != 0 or command['timed_out']
+    failure = ('LLVM capability ' + name + ' failed (exit ' + str(command['exit_status'])
+               + ', timeout ' + str(command['timed_out']) + ')')
+    try:
+        for stream, data in (('stdout', stdout), ('stderr', stderr)):
+            retained = data[:65536]
+            (work / (name + '.' + stream)).write_bytes(retained)
+            command[stream] = {'bytes': len(data), 'sha256': hashlib.sha256(data).hexdigest(),
+                               'retained_bytes': len(retained), 'truncated': len(retained) != len(data)}
+        save_json(work / (name + '-command.json'), command)
+    except OSError as error:
+        if failed:
+            raise CoverageError(failure + '; command diagnostics could not be written: ' + str(error)) from error
+        raise
+    if failed:
+        raise CoverageError(failure + '; see ' + str(work / (name + '-command.json')))
+
+
+@contextmanager
+def llvm_probe_streams(work, name):
+    streams = {key: {'bytes': 0, 'retained_bytes': 0, 'hash': hashlib.sha256(), 'disabled': False}
+               for key in ('stdout', 'stderr')}
+    files, errors, primary = {}, [], None
+    def capture(stream, data):
+        item = streams[stream]
+        item['bytes'] += len(data)
+        item['hash'].update(data)
+        retained = data[:max(0, 65536 - item['retained_bytes'])]
+        if retained and not item['disabled']:
+            try:
+                files[stream].write(retained)
+                item['retained_bytes'] += len(retained)
+            except OSError as error:
+                # Keep draining/forwarding both native pipes and retiring the
+                # owned job even when diagnostic storage fails.
+                item['disabled'] = True
+                errors.append(stream + ': ' + str(error))
+    try:
+        for stream in streams:
+            files[stream] = (work / (name + '.native.' + stream)).open('wb')
+        yield capture
+    except BaseException as error:
+        primary = error
+        raise
+    finally:
+        for stream, file in files.items():
+            try: file.close()
+            except OSError as error: errors.append(stream + ' close: ' + str(error))
+        for stream, item in streams.items():
+            try:
+                actual = (work / (name + '.native.' + stream)).stat().st_size
+                if actual != item['retained_bytes']:
+                    errors.append(stream + ': retained file size differs from accepted writes')
+                item['retained_bytes'] = actual
+            except OSError as error:
+                item['retained_bytes'] = None
+                errors.append(stream + ' retained size: ' + str(error))
+        receipt = {stream: {'bytes': item['bytes'], 'sha256': item['hash'].hexdigest(),
+                            'retained_bytes': item['retained_bytes'],
+                            'truncated': item['bytes'] != item['retained_bytes']}
+                   for stream, item in streams.items()}
+        receipt['capture_errors'] = errors
+        try:
+            save_json(work / (name + '-native-streams.json'), receipt)
+        except OSError as error:
+            errors.append('stream receipt: ' + str(error))
+        if errors:
+            message = 'LLVM native probe stream capture failed: ' + '; '.join(errors)
+            if primary is None: raise CoverageError(message)
+            print('titan-coverage: ' + message, file=sys.stderr)
+
+
+def llvm_probe_run(runner, command, work, name, env):
+    with llvm_probe_streams(work, name) as capture:
+        outcome = windows_supervised_run(runner, command, work / (name + '-runner.json'), env, 30,
+                                         stdin_policy='null', stream_capture=capture)
+        failed = not outcome['complete'] or outcome['exit_status'] != 0
+        try:
+            save_json(work / (name + '-outcome.json'), outcome)
+        except OSError as error:
+            if not failed: raise
+            print('titan-coverage: cannot retain native outcome: ' + str(error), file=sys.stderr)
+        if failed:
+            raise CoverageError('LLVM capability child did not complete successfully under its owned runner: '
+                                + name + ' (exit ' + str(outcome['exit_status'])
+                                + ', complete ' + str(outcome['complete']) + ')')
+    return outcome
+
+
+def probe_llvm_backend(cc, gcov, gcovr=None, output=None, runner_directory=None, compile_args=None):
+    tools = identify_llvm_backend(cc, gcov, gcovr, compile_args)
+    runner = materialize_runner(runner_directory, tools)
+    if output is not None:
+        output = Path(output).resolve(); output.mkdir(parents=True, exist_ok=False)
+    diagnostics = {'schema': 1, 'backend': 'llvm-gcov', 'stage': 'prepare-fixture', 'tools': tools}
+    with llvm_probe_workspace(Path(runner['path']).parent, diagnostics) as work:
+        first, second, untouched = [work / name for name in ('first space.titan', 'second.titan', 'notes only.titan')]
+        for path in (first, second, untouched): path.write_text('probe line\n' * 10, encoding='utf-8')
+        c = work / 'probe.c'
+        c.write_text('#include <windows.h>\n__declspec(dllexport) int choose(int x) {\n'
+            '#line 3 ' + c_filename(first) + '\nint y=x;\ny+=1;\n'
+            '#line 3 ' + c_filename(first) + '\ny+=1;\n'
+            '#line 4 ' + c_filename(first) + '\nif(x) {\n'
+            '#line 6 ' + c_filename(first) + '\nreturn 99;\n}\n'
+            '#line 7 ' + c_filename(first) + '\nreturn y;\n}\n'
+            '#line 8 ' + c_filename(second) + '\nint never(void) {return 9;}\n'
+            '#line 1 ' + c_filename(c) + '\nint main(void) {return choose(0)==2?0:1;}\n', encoding='utf-8')
+        (work / 'never.c').write_text('#line 5 ' + c_filename(untouched) + '\nint notes_only(void) {return 4;}\n', encoding='utf-8')
+        prefix = tools['cc']['argv'] + tools['cc']['effective_compile_args']
+        flags = ['-O0', '-fno-lto', '--coverage', '-fprofile-update=atomic']
+        def compile_probe(name, argv):
+            diagnostics['stage'] = name
+            llvm_probe_command(work, name, argv)
+        for stem in ('probe', 'never'):
+            # Exercise the compiler's exact -dumpdir publication contract:
+            # final notes/data derive from the C basename, while -o is a unique
+            # temporary object which is atomically renamed after compilation.
+            compile_probe('compile-' + stem, prefix + flags + ['-dumpdir', str(work) + os.sep,
+                '-c', str(work / (stem + '.c')), '-o', str(work / (stem + '.tmp.o'))])
+            (work / (stem + '.tmp.o')).replace(work / (stem + '.o'))
+        executable, shared = work / 'probe.exe', work / 'provider.dll'
+        for image, kind in ((executable, []), (shared, ['-shared'])):
+            compile_probe('link-' + image.suffix[1:], tools['cc']['argv'] + ['--coverage', '-static'] + kind
+                          + [str(work / 'probe.o'), '-o', str(image)])
+            pe_image_identity(image)
+        raws = {}
+        def collect(name, command):
+            diagnostics['stage'] = 'collect-' + name
+            counter_root = work / (name + '-counters')
+            env = os.environ.copy(); env.update(GCOV_PREFIX=str(counter_root), GCOV_PREFIX_STRIP='1')
+            llvm_probe_run(runner, command, work, name, env)
+            data = counter_path(counter_root, work / 'probe.gcda', 'llvm-gcov')
+            if not data.is_file() or (work / 'probe.gcda').exists():
+                raise CoverageError('LLVM runtime did not honor drive-aware fresh counter relocation')
+            value = llvm_gcov_raw(tools['gcov']['argv'], work / 'probe.gcno', work / ('read-' + name), data)
+            raws[name] = value
+            save_json(work / (name + '-counts.json'), value)
+            return value
+        value = collect('program', [str(executable)])
+        actual = raw_lines(value, first)
+        diagnostics.update(stage='program-attribution', source=str(first),
+            expected_counts={'positive': [3, 4, 7], 'zero': [6], 'uncalled_second': {8: 0}},
+            observed_counts={'first': actual, 'second': raw_lines(value, second)})
+        if not all(actual.get(line, 0) > 0 for line in (3, 4, 7)) or actual.get(6) != 0 or raw_lines(value, second).get(8) != 0:
+            raise CoverageError('LLVM backend failed exact multi-file/uncalled Titan line attribution')
+        diagnostics['stage'] = 'notes-only'
+        zero = llvm_gcov_raw(tools['gcov']['argv'], work / 'never.gcno', work / 'read-notes-only')
+        save_json(work / 'notes-only-counts.json', zero)
+        diagnostics.update(stage='notes-only-counts', source=str(untouched),
+                           expected_counts={5: 0}, observed_counts=raw_lines(zero, untouched))
+        if raw_lines(zero, untouched) != {5: 0}:
+            raise CoverageError('LLVM backend failed complete notes-only zero inventory')
+        threaded = ('import ctypes,sys,threading; p=ctypes.CDLL(sys.argv[1]); '
+            'ts=[threading.Thread(target=lambda:[p.choose(0) for _ in range(16)]) for _ in range(4)]; '
+            '[t.start() for t in ts]; [t.join() for t in ts]')
+        provider = collect('provider', [sys.executable, '-I', '-S', '-B', '-c', threaded, str(shared)])
+        joined = ('import subprocess,sys; cs=[subprocess.Popen([sys.argv[1]]) for _ in range(8)]; '
+            'sys.exit(max(c.wait() for c in cs))')
+        children = collect('children', [sys.executable, '-I', '-S', '-B', '-c', joined, str(executable)])
+        for name, raw, count in (('provider', provider, 64), ('children', children, 8)):
+            lines = raw_lines(raw, first)
+            # The deliberate 3 -> 4 -> 3 remap records line 3 twice in one
+            # executed LLVM block. Its exact count is twice the call count;
+            # line 7 independently records each invocation once.
+            expected = {3: 2 * count, 6: 0, 7: count}
+            diagnostics.update(stage='exact-counts-' + name, source=str(first), expected_counts=expected,
+                               observed_counts=lines)
+            if any(lines.get(line) != expected_count for line, expected_count in expected.items()):
+                raise CoverageError('LLVM ' + name + ' exact counts failed: expected ' + str(expected)
+                                    + ', observed ' + str(lines))
+        checks = {key: True for key in ('exact_lines', 'multiple_files', 'unexecuted_function', 'notes_only',
+            'atomic_temp_object', 'counter_relocation', 'shared_provider_exit', 'thread_safe_counters', 'joined_processes', 'owned_runner')}
+        evidence = {'version': SCHEMA, 'backend': 'llvm-gcov', 'tools': tools,
+            'platform': {'system': platform.system(), 'machine': platform.machine()}, 'checks': checks,
+            'runner': runner, 'counter_policy': copy.deepcopy(LLVM_COUNTER_POLICY), 'raw_probe': raws, 'raw_notes_only': zero}
+        if output is not None: save_json(output / 'probe.json', evidence)
+        return evidence
+
+
 def manifest_identity(manifest):
     unsigned = copy.deepcopy(manifest)
     unsigned.pop("manifest_id", None)
     return hashlib.sha256(canonical(unsigned)).hexdigest()
 
 
+def inventory_path_identity(path, backend):
+    if backend == "llvm-gcov":
+        # Windows local-drive paths are case insensitive. Resolve physical
+        # directory aliases before folding drive/directory/filename spelling.
+        return str(Path(path).resolve()).replace("\\", "/").casefold()
+    return str(Path(path))
+
+
 def validate_inventory(manifest, check_hashes=False):
-    if manifest.get("version") != SCHEMA or manifest.get("backend") != "gcc-gcov":
+    if manifest.get("version") != SCHEMA or manifest.get("backend") not in ("gcc-gcov", "llvm-gcov"):
         raise CoverageError("unsupported coverage manifest schema/backend")
     root = Path(manifest["root"])
     if not root.is_absolute() or not root.is_dir():
@@ -385,7 +1929,8 @@ def validate_inventory(manifest, check_hashes=False):
         tracked = Path(source.get("tracked_path", root / report))
         if not compiled.is_absolute() or not tracked.is_absolute():
             raise CoverageError("source paths must be absolute")
-        source_key = os.path.normcase(str(compiled.resolve()))
+        source_key = (inventory_path_identity(compiled, manifest["backend"]) if manifest["backend"] == "llvm-gcov"
+                      else os.path.normcase(str(compiled.resolve())))
         if source_key in path_ids:
             raise CoverageError("compiled source has multiple report identities: " + str(compiled))
         path_ids.add(source_key)
@@ -407,9 +1952,10 @@ def validate_inventory(manifest, check_hashes=False):
         measured_sources.update(obj["sources"])
         for key, identities in (("path", object_ids), ("notes", notes_ids), ("data", data_ids)):
             path = Path(obj[key])
-            if not path.is_absolute() or str(path) in identities:
-                raise CoverageError("object paths must be absolute and unique: " + str(path))
-            identities.add(str(path))
+            identity = inventory_path_identity(path, manifest["backend"])
+            if not path.is_absolute() or identity in identities:
+                raise CoverageError("object paths must be absolute and physically unique: " + str(path))
+            identities.add(identity)
             if key != "data":
                 current = digest(path)
                 hash_key = "sha256" if key == "path" else "notes_sha256"
@@ -422,20 +1968,29 @@ def validate_inventory(manifest, check_hashes=False):
     provider_ids = set()
     for provider in providers:
         path = Path(provider["path"])
-        if not path.is_absolute() or str(path) in provider_ids:
-            raise CoverageError("provider paths must be absolute and unique")
-        provider_ids.add(str(path))
-        if not provider.get("objects") or not set(provider["objects"]) <= object_ids:
+        identity = inventory_path_identity(path, manifest["backend"])
+        if not path.is_absolute() or identity in provider_ids:
+            raise CoverageError("provider paths must be absolute and physically unique")
+        provider_ids.add(identity)
+        launcher = provider.get("role") == "launcher"
+        if launcher:
+            if manifest["backend"] != "llvm-gcov" or provider.get("objects") != [] or path.suffix.lower() != ".exe":
+                raise CoverageError("unmeasured launcher requires an explicit LLVM Windows EXE with no measured objects")
+        elif not provider.get("objects") or not {inventory_path_identity(item, manifest["backend"])
+                                                 for item in provider["objects"]} <= object_ids:
             raise CoverageError("provider links absent or undeclared objects")
         current = digest(path)
         if (check_hashes or "sha256" in provider) and current != provider.get("sha256"):
             raise CoverageError("provider changed since coverage build: " + str(path))
+    if not any(provider.get("objects") for provider in providers):
+        raise CoverageError("coverage build requires a measured linked provider")
     linked_paths = set()
     for item in manifest.get("link_inventory", []):
         path = Path(item["path"])
-        if not path.is_absolute() or str(path) in linked_paths:
-            raise CoverageError("link inventory paths must be absolute and unique")
-        linked_paths.add(str(path))
+        identity = inventory_path_identity(path, manifest["backend"])
+        if not path.is_absolute() or identity in linked_paths:
+            raise CoverageError("link inventory paths must be absolute and physically unique")
+        linked_paths.add(identity)
         current = digest(path)
         if (check_hashes or "sha256" in item) and current != item.get("sha256"):
             raise CoverageError("linked input changed since coverage build: " + str(path))
@@ -443,23 +1998,77 @@ def validate_inventory(manifest, check_hashes=False):
         raise CoverageError("manifest must declare Titan executable-line coverage")
 
 
-def seal_manifest(path, cc=None, gcov=None, gcovr=None, unmeasured_inputs=None):
+def unmeasured_input_list(filename):
+    if filename is None: return []
+    path = Path(filename).resolve()
+    try:
+        contents = path.read_bytes().decode("utf-8", errors="strict")
+        value = json.loads(contents)
+    except (OSError, UnicodeError, ValueError) as error:
+        raise CoverageError("cannot read UTF-8 unmeasured-input JSON list: " + str(path)) from error
+    if not isinstance(value, list) or any(not isinstance(item, str) or not item or "\0" in item for item in value):
+        raise CoverageError("unmeasured-input file must be a JSON array of nonempty path strings without NUL")
+    known, result = set(), []
+    for item in value:
+        resolved = str(Path(item).resolve())
+        identity = os.path.normcase(resolved)
+        if identity in known: raise CoverageError("duplicate physical path in unmeasured-input file: " + item)
+        if not Path(resolved).is_file(): raise CoverageError("unmeasured-input path is not a file: " + item)
+        known.add(identity); result.append(resolved)
+    return result
+
+
+def seal_manifest(path, cc=None, gcov=None, gcovr=None, unmeasured_inputs=None, unmeasured_input_file=None):
     manifest = read_json(path)
     manifest.pop("manifest_id", None)
     validate_inventory(manifest)
     inventory = manifest.setdefault("link_inventory", [])
     known = {os.path.normcase(str(Path(item["path"]).resolve())) for item in inventory}
-    for filename in unmeasured_inputs or []:
+    list_inputs = unmeasured_input_list(unmeasured_input_file)
+    for filename in list(unmeasured_inputs or []) + list_inputs:
         resolved = str(Path(filename).resolve())
         identity = os.path.normcase(resolved)
         if identity not in known:
             inventory.append({"path": resolved, "role": "unmeasured-consumer-input",
                               "sha256": digest(resolved)})
             known.add(identity)
+    if unmeasured_input_file is not None:
+        list_path = str(Path(unmeasured_input_file).resolve())
+        if os.path.normcase(list_path) not in known:
+            inventory.append({"path": list_path, "role": "unmeasured-input-list", "sha256": digest(list_path)})
     settings = manifest.get("settings", {})
     cc = cc or settings.get("cc") or os.environ.get("CC", "gcc")
     gcov = gcov or settings.get("gcov") or os.environ.get("GCOV", "gcov")
-    probe = probe_backend(cc, gcov, gcovr)
+    if manifest["backend"] == "llvm-gcov":
+        try: probe = json.loads(settings["backend_probe"])
+        except (KeyError, TypeError, ValueError) as error:
+            raise CoverageError("LLVM sealing requires the exact compilation probe JSON") from error
+        if (probe.get("backend") != "llvm-gcov" or settings.get("backend") != "llvm-gcov" or
+                probe.get("counter_policy") != LLVM_COUNTER_POLICY or
+                settings.get("counter_policy") != {"format": "llvm-gcov", "gcov_prefix_strip": 1}):
+            raise CoverageError("LLVM compilation/probe counter policy disagrees")
+        compiler_argv = command_argv(cc)
+        compile_prefix = settings.get("compile_prefix", [])
+        if not isinstance(compile_prefix, list) or compile_prefix[:len(compiler_argv)] != compiler_argv:
+            raise CoverageError("LLVM effective compiler prefix differs from selected compiler")
+        tools = identify_backend(cc, gcov, gcovr, backend="llvm-gcov", compile_args=compile_prefix[len(compiler_argv):])
+        if any(probe.get("tools", {}).get(key) != tools[key] for key in ("cc", "gcov")):
+            raise CoverageError("LLVM tool identity differs from compilation capability probe")
+        required = ("exact_lines", "multiple_files", "unexecuted_function", "notes_only", "atomic_temp_object",
+                    "counter_relocation", "shared_provider_exit", "thread_safe_counters", "joined_processes", "owned_runner")
+        if not all(probe.get("checks", {}).get(key) is True for key in required):
+            raise CoverageError("LLVM capability evidence is incomplete")
+        if probe.get("platform") != {"system": platform.system(), "machine": platform.machine()}:
+            raise CoverageError("LLVM capability evidence belongs to another host platform")
+        validate_interpreter(probe["tools"]["python"], tools["python"])
+        tools["python"] = probe["tools"]["python"]
+        manifest["runner"] = validate_runner(probe["runner"], tools)
+        manifest["counter_policy"] = copy.deepcopy(LLVM_COUNTER_POLICY)
+        probe["tools"] = tools
+        for obj in manifest["objects"]:
+            llvm_reader_parse_notes(Path(obj["notes"]).read_bytes())
+    else:
+        probe = probe_backend(cc, gcov, gcovr)
     if "cc_version" in settings and settings["cc_version"] != probe["tools"]["cc"]["version"]:
         raise CoverageError("seal compiler version differs from the coverage build")
     if "backend_probe" in settings:
@@ -489,9 +2098,16 @@ def load_manifest(path):
     if manifest.get("manifest_id") != manifest_identity(manifest):
         raise CoverageError("coverage manifest is unsealed or its provenance changed; run titan-coverage seal")
     validate_inventory(manifest, check_hashes=True)
-    tools = identify_backend(manifest["tools"]["cc"]["argv"], manifest["tools"]["gcov"]["argv"])
-    if tools != {key: manifest["tools"][key] for key in ("cc", "gcov")}:
+    tools = identify_backend(manifest["tools"]["cc"]["argv"], manifest["tools"]["gcov"]["argv"],
+                             backend=manifest["backend"],
+                             compile_args=manifest["tools"]["cc"].get("effective_compile_args"))
+    if any(tools[key] != manifest["tools"][key] for key in ("cc", "gcov")):
         raise CoverageError("compiler/profiler identity changed since coverage build")
+    if manifest["backend"] == "llvm-gcov":
+        if manifest.get("counter_policy") != LLVM_COUNTER_POLICY:
+            raise CoverageError("sealed LLVM counter policy changed")
+        validate_interpreter(manifest["tools"]["python"], tools["python"])
+        validate_runner(manifest["runner"], tools)
     if manifest["platform"] != {"system": platform.system(), "machine": platform.machine()}:
         raise CoverageError("coverage evidence belongs to another operating system/architecture")
     return manifest
@@ -550,6 +2166,40 @@ def wait_run_process_group_empty(group, timeout=2):
     return True
 
 
+def execute_windows_run(manifest, manifest_path, run_path, command, expected, timeout):
+    if manifest['backend'] != 'llvm-gcov':
+        raise CoverageError('native Windows runs require the explicit llvm-gcov owned-runner backend')
+    prefix = run_path / 'counters'
+    env = os.environ.copy()
+    env.update(GCOV_PREFIX=str(prefix), GCOV_PREFIX_STRIP='1', TITAN_COVERAGE_RUN=str(run_path),
+               TITAN_COVERAGE_MANIFEST=str(Path(manifest_path).resolve()))
+    receipt = {'version': RUN_SCHEMA, 'run_id': uuid.uuid4().hex, 'manifest_id': manifest['manifest_id'],
+        'command': command, 'cwd': str(Path.cwd()), 'started': utc_now(), 'expected_objects': expected,
+        'state': 'running', 'counter_prefix': str(prefix), 'process_ownership': 'windows-job-object-v1',
+        'job_empty_confirmed': False, 'parent_interrupted': False, 'runner_sha256': manifest['runner']['sha256']}
+    save_json(run_path / 'run.json', receipt)
+    try:
+        result = windows_supervised_run(manifest['runner'], command, run_path / 'native-runner.json', env, timeout, stdin_policy='terminal-one-shot')
+        native = result['native']
+        receipt.update(native_runner=native, native_receipt_sha256=digest(run_path / 'native-runner.json'),
+            job_empty_confirmed=True, leader_exit_status=native['leader_status_dword'],
+            parent_interrupted=result['parent_interrupted'], state='complete' if result['complete'] else 'incomplete',
+            reason='Python KeyboardInterrupt' if result['parent_interrupted'] else native['reason'],
+            exit_status=result['exit_status'], helper_argv=result['helper_argv'])
+    except (CoverageError, OSError) as error:
+        receipt.update(state='incomplete', exit_status=getattr(error, 'exit_status', 125), reason=str(error),
+                       parent_interrupted=getattr(error, 'interrupted', False),
+                       counter_collection_skipped='owned Windows job/native status was not confirmed')
+    receipt['ended'] = utc_now()
+    receipt['counters'] = ([{'path': str(path), 'sha256': digest(path)} for path in sorted(prefix.rglob('*.gcda'))]
+                            if receipt['job_empty_confirmed'] else [])
+    expected_paths = {str(counter_path(prefix, obj['data'], 'llvm-gcov')) for obj in manifest['objects'] if obj['path'] in expected}
+    missing = expected_paths - {item['path'] for item in receipt['counters']}
+    if missing: receipt.update(state='incomplete', missing_counters=sorted(missing))
+    save_json(run_path / 'run.json', receipt)
+    return receipt['exit_status']
+
+
 def execute_run(manifest_path, run_path, command, expected=None, timeout=None):
     manifest = load_manifest(manifest_path)
     if not command:
@@ -561,12 +2211,14 @@ def execute_run(manifest_path, run_path, command, expected=None, timeout=None):
         raise CoverageError("run directory already exists; choose a fresh run-owned directory") from error
     prefix = run_path / "counters"
     prefix.mkdir()
-    env = os.environ.copy()
-    env.update({"GCOV_PREFIX": str(prefix), "GCOV_PREFIX_STRIP": "0",
-                "TITAN_COVERAGE_RUN": str(run_path), "TITAN_COVERAGE_MANIFEST": str(Path(manifest_path).resolve())})
     expected = list(expected or [obj["path"] for obj in manifest["objects"] if obj.get("expect_data", False)])
     if not set(expected) <= {obj["path"] for obj in manifest["objects"]}:
         raise CoverageError("expected counters refer to an undeclared object")
+    if os.name == "nt":
+        return execute_windows_run(manifest, manifest_path, run_path, command, expected, timeout)
+    env = os.environ.copy()
+    env.update({"GCOV_PREFIX": str(prefix), "GCOV_PREFIX_STRIP": "0",
+                "TITAN_COVERAGE_RUN": str(run_path), "TITAN_COVERAGE_MANIFEST": str(Path(manifest_path).resolve())})
     receipt = {"version": RUN_SCHEMA, "run_id": uuid.uuid4().hex, "manifest_id": manifest["manifest_id"],
                "command": command, "cwd": str(Path.cwd()), "started": utc_now(),
                "expected_objects": expected, "state": "running", "counter_prefix": str(prefix)}
@@ -621,7 +2273,7 @@ def execute_run(manifest_path, run_path, command, expected=None, timeout=None):
         for path in sorted(prefix.rglob("*.gcda")):
             inventory.append({"path": str(path), "sha256": digest(path)})
     receipt["counters"] = inventory
-    expected_paths = {str(counter_path(prefix, obj["data"])) for obj in manifest["objects"] if obj["path"] in expected}
+    expected_paths = {str(counter_path(prefix, obj["data"], manifest["backend"])) for obj in manifest["objects"] if obj["path"] in expected}
     missing = expected_paths - {item["path"] for item in inventory}
     if missing:
         receipt["state"] = "incomplete"
@@ -637,7 +2289,21 @@ def load_run(path, manifest):
         raise CoverageError("run provenance is legacy or does not match the declared coverage build; collect a fresh run")
     if receipt.get("state") not in ("complete", "incomplete") or "exit_status" not in receipt:
         raise CoverageError("run has not exited/collected; cannot report its counters")
-    if os.name != "nt":
+    if manifest["backend"] == "llvm-gcov":
+        if (receipt.get("process_ownership") != "windows-job-object-v1" or
+                receipt.get("job_empty_confirmed") is not True or
+                type(receipt.get("parent_interrupted")) is not bool or
+                receipt.get("runner_sha256") != manifest["runner"]["sha256"]):
+            raise CoverageError("run owned Windows job was not confirmed empty; cannot report its counters")
+        native = read_json(path / "native-runner.json")
+        if native != receipt.get("native_runner") or digest(path / "native-runner.json") != receipt.get("native_receipt_sha256"):
+            raise CoverageError("native Windows runner receipt changed after collection")
+        validate_windows_receipt(native, native.get("supervisor_exit_code"))
+        expected_status = (130 if receipt["parent_interrupted"] and not native["timeout"] else native["supervisor_exit_code"])
+        if (receipt.get("leader_exit_status") != native["leader_status_dword"] or receipt["exit_status"] != expected_status or
+                receipt["state"] == "complete" and (not native["complete"] or receipt["parent_interrupted"])):
+            raise CoverageError("complete run disagrees with its owned Windows job lifecycle")
+    else:
         group = receipt.get("process_group_id")
         if (receipt.get("process_ownership") != "posix-process-group-v1" or
                 type(group) is not int or group <= 0 or
@@ -651,7 +2317,7 @@ def load_run(path, manifest):
     prefix = path / "counters"
     if receipt.get("counter_prefix") != str(prefix):
         raise CoverageError("run counter ownership changed")
-    expected_paths = {str(counter_path(prefix, obj["data"])) for obj in manifest["objects"]}
+    expected_paths = {str(counter_path(prefix, obj["data"], manifest["backend"])) for obj in manifest["objects"]}
     counters = {item["path"]: item["sha256"] for item in receipt.get("counters", [])}
     actual = {str(item): digest(item) for item in prefix.rglob("*.gcda")}
     if actual != counters:
@@ -671,9 +2337,10 @@ def normalized_trace(manifest, raw_values):
     for obj, value in raw_values:
         allowed = set(obj["sources"])
         for file in value["files"]:
-            source = lookup.get(gcov_path(value, file["file"]))
+            authored = (manifest["backend"] == "llvm-gcov" and file["file"].casefold().endswith(".titan"))
+            source = lookup.get(gcov_path(value, file["file"], manifest["root"] if authored else None))
             if source is None:
-                if Path(file["file"]).suffix == ".titan":
+                if authored or Path(file["file"]).suffix == ".titan":
                     raise CoverageError("gcov contains a Titan source outside the declared inventory: " + file["file"])
                 continue
             report = source["report_path"]
@@ -712,10 +2379,14 @@ def compatible_manifest_identity(manifest):
     sources = sorted((source["report_path"], source["module"], source["sha256"],
                       os.path.normcase(str(Path(source["tracked_path"]).resolve())))
                      for source in manifest["sources"])
-    return {"version": manifest["version"], "backend": manifest["backend"],
+    identity = {"version": manifest["version"], "backend": manifest["backend"],
             "root": os.path.normcase(str(Path(manifest["root"]).resolve())),
             "platform": manifest["platform"], "tools": {key: manifest["tools"][key] for key in ("cc", "gcov")},
             "sources": sources, "settings": relevant_settings}
+    if manifest["backend"] == "llvm-gcov":
+        identity["runner"] = runner_semantic_identity(manifest["runner"])
+        identity["counter_policy"] = manifest["counter_policy"]
+    return identity
 
 
 def merge_line_traces(traces):
@@ -734,6 +2405,17 @@ def merge_line_traces(traces):
     return {"gcovr/format_version": GCOVR_FORMAT,
             "files": [{"file": path, "functions": [], "lines": [line for _, line in sorted(lines.items())]}
                       for path, lines in sorted(files.items())]}
+
+
+def write_html_templates(directory):
+    directory = Path(directory)
+    directory.mkdir()
+    identities = {}
+    for name, contents in HTML_TEMPLATES.items():
+        raw = contents.encode("utf-8")
+        (directory / name).write_bytes(raw)
+        identities[name] = hashlib.sha256(raw).hexdigest()
+    return identities
 
 
 def report_runs(manifest_paths, runs, output, gcovr, allow_incomplete=False):
@@ -774,8 +2456,9 @@ def report_runs(manifest_paths, runs, output, gcovr, allow_incomplete=False):
     for index, (receipt, inventory, run_manifest) in enumerate(zip(receipts, inventories, run_manifests)):
         raw_values = []
         for object_index, obj in enumerate(run_manifest["objects"]):
-            data_path = str(counter_path(receipt["counter_prefix"], obj["data"]))
-            value = gcov_json(run_manifest["tools"]["gcov"]["argv"], obj["notes"],
+            data_path = str(counter_path(receipt["counter_prefix"], obj["data"], run_manifest["backend"]))
+            reader = llvm_gcov_raw if run_manifest["backend"] == "llvm-gcov" else gcov_json
+            value = reader(run_manifest["tools"]["gcov"]["argv"], obj["notes"],
                               output / "raw" / ("run-{}-object-{}".format(index, object_index)),
                               data_path if data_path in inventory else None)
             if data_path in inventory and digest(output / "raw" / ("run-{}-object-{}".format(index, object_index)) / "object.gcda") != inventory[data_path]:
@@ -795,8 +2478,8 @@ def report_runs(manifest_paths, runs, output, gcovr, allow_incomplete=False):
                "incomplete_runs": incomplete, "failed_runs": failed,
                "lines_total": totals, "lines_covered": hits,
                "line_percent": 100.0 * hits / totals if totals else None}
-    summary["html_templates"] = {name: hashlib.sha256(contents.encode("utf-8")).hexdigest()
-                                 for name, contents in HTML_TEMPLATES.items()}
+    templates = output / "html-templates"
+    summary["html_templates"] = write_html_templates(templates)
     save_json(output / "summary.json", summary)
     if len(manifests) == 1:
         save_json(output / "build.json", manifest)
@@ -806,10 +2489,6 @@ def report_runs(manifest_paths, runs, output, gcovr, allow_incomplete=False):
     # A minimal empty config disables any ambient gcovr.cfg from a user's tree.
     config = output / "gcovr.cfg"
     config.write_text("", encoding="utf-8")
-    templates = output / "html-templates"
-    templates.mkdir()
-    for name, contents in HTML_TEMPLATES.items():
-        (templates / name).write_text(contents, encoding="utf-8")
     args = reporter["argv"] + ["--config", str(config), "--root", manifest["root"],
                               "--add-tracefile", str(output / "lines.json"),
                               "--no-markers", "--no-exclude-noncode-lines", "--lcov", str(output / "coverage.gcovr.info"),
@@ -855,10 +2534,14 @@ def main(argv=None):
         item.add_argument("--cc", default=os.environ.get("CC", "gcc") if item is probe else None)
         item.add_argument("--gcov", default=os.environ.get("GCOV", "gcov") if item is probe else None)
         item.add_argument("--gcovr", default=None, help="also verify pinned report tool (optional while compiling)")
+    probe.add_argument("--backend", choices=("gcc-gcov", "llvm-gcov"), default="gcc-gcov")
+    probe.add_argument("--runner-directory", help="durable build-owned Windows runner directory")
+    probe.add_argument("--compile-arg", action="append", default=[], help="effective compiler-prefix token after CC; repeat")
     probe.add_argument("--output", help="new directory for probe JSON evidence")
     seal.add_argument("--manifest", required=True)
     seal.add_argument("--unmeasured-input", action="append", default=[],
                       help="hash a separate uninstrumented consumer or test input; repeat as needed")
+    seal.add_argument("--unmeasured-input-file", help="strict UTF-8 JSON array of explicit paths; list itself is sealed")
     run = commands.add_parser("run", help="execute with fresh counters and an exit-status receipt")
     run.add_argument("--manifest", required=True)
     run.add_argument("--run", required=True, help="new run-owned directory")
@@ -876,12 +2559,14 @@ def main(argv=None):
     args = parser.parse_args(argv)
     try:
         if args.action == "probe":
-            value = probe_backend(args.cc, args.gcov, args.gcovr, args.output)
-            print(json.dumps({"backend": value["backend"], "tools": value["tools"], "checks": value["checks"]}, sort_keys=True))
+            value = probe_backend(args.cc, args.gcov, args.gcovr, args.output, args.backend,
+                                  args.runner_directory, args.compile_arg)
+            print(json.dumps({key: value[key] for key in ("backend", "tools", "checks", "platform", "runner", "counter_policy")
+                              if key in value}, sort_keys=True))
             return 0
         if args.action == "seal":
             manifest = seal_manifest(args.manifest, args.cc, args.gcov, args.gcovr,
-                                     args.unmeasured_input)
+                                     args.unmeasured_input, args.unmeasured_input_file)
             print(manifest["manifest_id"])
             return 0
         if args.action == "run":

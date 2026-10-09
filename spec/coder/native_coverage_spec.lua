@@ -321,6 +321,8 @@ describe("native Titan executable-line coverage", function()
                 assert.is_nil(lfs.attributes(directory .. "/objects"))
             end
             rejected({ "--coverage-module", "lib" }, "require --coverage", nil, true)
+            rejected({ "--coverage-backend", "llvm-gcov" }, "require --coverage", nil, true)
+            rejected({ "--coverage-python", "python3" }, "require --coverage", nil, true)
             rejected({ "--no-line-directives" }, "requires source #line directives")
             rejected({ "--print-ast" }, "cannot be combined with --print-ast")
             rejected({ "--coverage-module", "../bad" }, "invalid --coverage-module name")
@@ -523,6 +525,39 @@ assert(util.set_file_contents(filename, original))
             ok, output = compile(workspace, directory, false, { "--incremental" }, nil, false)
             assert.is_false(ok)
             assert.matches("coverage build configuration changed", output)
+        end)
+    end)
+
+    it("rejects changed source with an old sealed image and rebuilds despite equal timestamps", function()
+        require_backend(false)
+        fixture(function(workspace)
+            local directory = workspace .. "/coverage"
+            local ok, output = compile(workspace, directory, false)
+            assert.truthy(ok, output)
+            report(directory, { directory .. "/bin/checks" })
+            local object = directory .. "/objects/lib.o"
+            local notes = directory .. "/objects/lib.gcno"
+            local old_object = assert(util.get_file_contents(object))
+            local old_notes = assert(util.get_file_contents(notes))
+            local old_receipt = assert(util.get_file_contents(directory .. "/objects/lib.coverage-receipt"))
+            local source = workspace .. "/lib/lib.titan"
+            write(source, (PRODUCTION:gsub("return input %+ 2", "return input + 3")))
+            local timestamp = assert(lfs.attributes(object, "modification"))
+            assert(lfs.touch(source, timestamp, timestamp))
+            local host = workspace .. "/tooling/titan-coverage"
+            ok, output = run({ "python3", host, "run", "--manifest", directory .. "/build.json",
+                "--run", directory .. "/stale-run", "--", directory .. "/bin/checks" })
+            assert.is_false(ok, output)
+            assert.matches("source changed since coverage build", output, 1, true)
+            assert.is_nil(lfs.attributes(directory .. "/stale-run"))
+            assert.equal(old_object, util.get_file_contents(object))
+            assert.equal(old_notes, util.get_file_contents(notes))
+            ok, output = compile(workspace, directory, false, { "--incremental" })
+            assert.truthy(ok, output)
+            assert.not_equal(old_object, util.get_file_contents(object))
+            assert.not_equal(old_receipt, util.get_file_contents(directory .. "/objects/lib.coverage-receipt"))
+            local files = report(directory, { directory .. "/bin/checks" }, "replacement")
+            assert.equal(0, files["lib/lib.titan"][tagged_lines(PRODUCTION).foreignnever])
         end)
     end)
 

@@ -34,3 +34,30 @@ function test_parent_stdin_keeps_buffered_bytes_after_native_close(
     _context: test.Context)
   check_parent_stdin(true)
 end
+
+function test_parent_stdin_duplicate_failure_preserves_original_descriptor(
+    _context: test.Context)
+  if common.is_windows() then
+    test.skip("platform: descriptor soft limits require POSIX RLIMIT_NOFILE")
+  end
+  runtime_test.run(function ()
+    local workspace = fs.tmpname()
+    fs.unlink(workspace)
+    fs.mkdir(workspace)
+    runtime_test.cleanup(function () command.remove_tree(workspace) end)
+    fs.write_file(workspace .. "/os_descriptor_limit.h",
+      fs.read_file("spec/fixtures/stdlib/native/os_descriptor_limit.h"))
+    fs.write_file(workspace .. "/os_descriptor_limit_app.titan",
+      fs.read_file("spec/fixtures/stdlib/titan/os_descriptor_limit_app.titan"))
+    local output, why, compiled = command.compile(workspace,
+      "os_descriptor_limit_app", {"-X", command.fixture_object("os_descriptor_limit")})
+    test.assert(why == "exit" and compiled == 0,
+                "could not compile descriptor limit child: " .. output)
+    local result_path = workspace .. "/descriptor-limit.result"
+    local status = command.system({
+      command.program(workspace, "os_descriptor_limit_app"), result_path,
+    }, workspace, nil, nil, "RLIMIT_INPUT_MARKER")
+    test.assert(status == 0 and fs.read_file(result_path) == "EMFILE_OK",
+                "descriptor failure closed input or failed to restore its soft limit")
+  end)
+end

@@ -127,6 +127,8 @@ function coder.generate(modname, ast, static_deps, abi, emit_line_directives, op
     -- into the next generation.
     coder._emit_line_directives = emit_line_directives ~= false
     coder._coverage_source_regions = options and options.coverage == true or false
+    coder._coverage_keep_native_lambdas = coder._coverage_source_regions
+        and options.coverage_backend == "llvm-gcov"
     assert(not coder._coverage_source_regions or coder._emit_line_directives,
         "Titan-source coverage requires line directives")
     coder.prepare_coverage(ast, coder._coverage_source_regions)

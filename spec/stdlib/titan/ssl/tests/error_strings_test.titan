@@ -1,0 +1,38 @@
+function test_ssl_preserves_native_code_without_loaded_error_strings(
+    context: test.Context)
+  if common.is_windows() then
+    test.skip("platform: fresh OpenSSL initialization fixture requires Unix static providers")
+  end
+  local workspace = ""
+  runtime_test.run(function ()
+    workspace = fs.tmpname()
+    fs.unlink(workspace)
+    fs.mkdir(workspace)
+    context:cleanup(function () command.remove_tree(workspace) end)
+    fs.write_file(workspace .. "/ssl_error_strings.h",
+      fs.read_file("spec/fixtures/stdlib/native/ssl_error_strings.h"))
+    fs.write_file(workspace .. "/ssl_error_strings_app.titan",
+      fs.read_file("spec/fixtures/stdlib/titan/ssl_error_strings_app.titan"))
+    fs.write_file(workspace .. "/bad.pem",
+      "-----BEGIN CERTIFICATE-----\nAQID\n-----END CERTIFICATE-----\n")
+    fs.write_file(workspace .. "/bad-key.pem", "certificate parsing must fail first")
+    local flags = system.getenv("TITAN_EXTRA_LDFLAGS") or ""
+    local libraries, library_why, library_code = command.capture({"pkg-config", "--libs", "openssl"})
+    if library_why == "exit" and library_code == 0 then flags = flags .. " " .. libraries end
+    local output, why, compiled = command.compile(workspace, "ssl_error_strings_app",
+      {"-X", command.fixture_object("ssl_error_strings")}, true,
+      {["TITAN_EXTRA_LDFLAGS"] = flags})
+    test.assert(why == "exit" and compiled == 0,
+                "could not compile no-error-strings child: " .. output)
+  end)
+  local output, why, status = command.capture({
+    command.program(workspace, "ssl_error_strings_app"),
+  }, workspace)
+  if why == "exit" and status == 77 then
+    test.assert(string.find(output, "capability: ", 1, true) == 1,
+                "no-error-strings child omitted its capability reason")
+    test.skip(string.gsub(output, "[\r\n]+$", function (_: string): string return "" end))
+  end
+  test.assert(why == "exit" and status == 0 and output == "SSL_ERROR_STRINGS_OK\n",
+              "native SSL fallback child failed: " .. output)
+end

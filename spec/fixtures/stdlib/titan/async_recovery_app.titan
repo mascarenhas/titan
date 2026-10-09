@@ -1,0 +1,96 @@
+local async = import "async"
+local test = import "test"
+foreign import "stdio.h"
+foreign import "unistd.h"
+
+local function fresh_runtime()
+  local completed = false
+  local task = async.run<|nil, nil|>(function (): nil
+    completed = true
+    return nil
+  end)
+  async.loop()
+  test.assert(completed and task:status():has_succeeded(),
+              "failure prevented a fresh Runtime from completing")
+end
+
+local function fatal_origin()
+  local marker: value = { ["fatal-origin"] = true }
+  local source_trace = "fatal origin recovery trace"
+  local first_observed, second_observed = false, false
+  local ordinary_registered, cleanup_registered = false, false
+  local task = async.run<|nil, nil|>(function (): nil
+    do
+      async.await_cleanup<|nil, nil|>(function (_resolve, _reject, fatal)
+        fatal(marker, source_trace)
+      end)
+    catch
+      first_observed = error == marker
+    end
+    do
+      async.await_with<|nil, nil, nil|>(nil, function (done, number)
+        ordinary_registered = true
+        done:resolve(number, nil)
+        return nil
+      end)
+    catch
+      second_observed = error == marker
+    end
+    local cleanup = async.await_cleanup<|nil, nil|>(function (resolve, _reject, _fatal)
+      cleanup_registered = true
+      resolve(nil)
+    end)
+    case cleanup
+    when success(_) then
+    else raise "fatal origin could not finish ownership cleanup"
+    end
+    return nil
+  end)
+  local caught = false
+  do async.loop()
+  catch
+    caught = error == marker and traceback == source_trace
+  end
+  test.assert(caught and first_observed and second_observed,
+              "fatal recovery replaced the original error or traceback")
+  test.assert(not ordinary_registered and cleanup_registered,
+              "closing Runtime admitted ordinary work or refused cleanup")
+  test.assert(task:status():has_succeeded(),
+              "fatal origin did not finish after handling rejected work")
+  fresh_runtime()
+end
+
+local function closed_stderr()
+  -- Initialize libuv's process-wide descriptors while stderr still owns fd 2.
+  fresh_runtime()
+  local saved = ffi.dup(2 as foreign int)
+  test.assert(saved >= 0, "could not preserve child stderr")
+  defer do
+    if saved >= 0 then ffi.dup2(saved, 2 as foreign int); ffi.close(saved) end
+  end
+  local marker: value = { ["closed-stderr"] = true }
+  local task = async.run<|nil, nil|>(function (): nil raise marker end)
+  test.assert(ffi.close(2 as foreign int) == 0, "could not close child stderr")
+  async.loop()
+  -- Restore the process boundary before assertions or error rendering.
+  local restored = ffi.dup2(saved, 2 as foreign int)
+  local released = ffi.close(saved)
+  saved = -1
+  -- POSIX returns the destination descriptor; the Windows CRT returns zero.
+  test.assert(restored >= 0 and released == 0, "could not restore child stderr")
+  local failed, failure? = task:status():has_failed()
+  test.assert(failed and failure ~= nil and
+              (failure as async.Error).error == marker and
+              #(failure as async.Error).traceback > 0,
+              "diagnostic write failure replaced the Task failure")
+  fresh_runtime()
+end
+
+function main(args: {string}): integer
+  test.assert(#args == 1, "async recovery child requires one mode")
+  if args[1] == "fatal-origin" then fatal_origin()
+  elseif args[1] == "closed-stderr" then closed_stderr()
+  else raise "unknown async recovery mode" end
+  test.assert(ffi.puts("ASYNC_RECOVERY_OK") >= 0, "could not publish recovery result")
+  return 0
+end

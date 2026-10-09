@@ -1,0 +1,33 @@
+local coverage_recovery_fs = import "fs"
+local coverage_recovery_command = import "support.command.titan"
+
+local function check_coverage_async_recovery(mode: string)
+  runtime_test.run(function ()
+    local workspace = coverage_recovery_fs.tmpname()
+    coverage_recovery_fs.unlink(workspace)
+    coverage_recovery_fs.mkdir(workspace)
+    runtime_test.cleanup(function () coverage_recovery_command.remove_tree(workspace) end)
+    coverage_recovery_fs.write_file(workspace .. "/async_recovery_app.titan",
+      coverage_recovery_fs.read_file("spec/fixtures/stdlib/titan/async_recovery_app.titan"))
+    local output, why, compiled = coverage_recovery_command.compile(workspace,
+      "async_recovery_app", {"--no-uv-bootstrap"})
+    test.assert(why == "exit" and compiled == 0,
+                "could not compile async recovery child: " .. output)
+    local result, exited, status = coverage_recovery_command.capture({
+      coverage_recovery_command.program(workspace, "async_recovery_app"), mode,
+    })
+    test.assert(exited == "exit" and status == 0 and
+                (result == "ASYNC_RECOVERY_OK\n" or result == "ASYNC_RECOVERY_OK\r\n"),
+                "async recovery child failed (" .. exited .. "/" .. status .. "): " .. result)
+  end)
+end
+
+function test_coverage_async_fatal_origin_rejects_ordinary_work_but_finishes_cleanup(
+    _context: test.Context)
+  check_coverage_async_recovery("fatal-origin")
+end
+
+function test_coverage_async_closed_stderr_preserves_failure_and_next_runtime(
+    _context: test.Context)
+  check_coverage_async_recovery("closed-stderr")
+end

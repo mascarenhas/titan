@@ -5,7 +5,7 @@ metric is executable **line coverage**. Generated C branches and functions are
 retained in raw gcov evidence but are absent from the public Titan metrics.
 Local runs render reports; only CI uploads to Codecov.
 
-## Final coverage expansion
+## Published core expansion snapshot
 
 The native expansion snapshot is **`c5bba2dc3767b4cfd67105ac35598ca7e01a6426c3b762f1de4c7413300834a2`** at implementation commit
 **`abbc2637066179bea74e76dfdc0e7a39aca9912a`**, with 1,156 authored files. Lua remains at
@@ -675,3 +675,206 @@ The timing provenance is
 The complete cancelled-run receipt is
 `/tmp/titan-210-b32-codecov-readback/final-ci-readback-before-rebalance.json`
 (SHA-256 `3be57530f1f014f1616158f27a33c33dcfbd8009f82da4c0f4e0e00170eed22b`).
+
+## Current published CI and processed Codecov readback
+
+[Run 37897065036](https://github.com/mascarenhas/titan/actions/runs/37897065036)
+at `8609cfb17a00e50a6b752009cf1ce9d52362f265` completed successfully on
+2026-10-09: all six jobs passed. The exhaustive compiler run observed all
+152 manifest files, 4,267 passed cases, one classified Windows-only skip and
+all 13 retained stress cases. The four shard durations were 1,460, 1,242,
+1,495 and 1,409 seconds; both pairs completed within their existing budgets.
+
+The independently audited native artifact contains 15,728 / 17,263 covered
+lines (91.11%), with 1,272 passed cases, three classified skips, all 28 owners,
+22 fresh counters, all 69 exact source identities and 419 link inputs. Its
+schema-2 receipt records natural status zero, confirmed process-group emptiness
+and no retirement. LCOV and normalized line data agree. Artifact `11602113075`
+has ZIP SHA-256 `ae0d62ffa3343a088eb1983e0d7cb33161f3937769136507db9577729934dfe6`.
+
+Codecov processed both current-head uploads. The
+[official PR report](https://github.com/mascarenhas/titan/pull/213#issuecomment-6074228412)
+shows 92.44% combined coverage. The official compiler patch check passes at
+97.24% against its unchanged 90% target; independent exact-source CI-statistics
+analysis measures 601 / 618 compiler patch lines (97.25%). The combined patch
+adds the covered UV change: 602 / 619, with 17 misses. The green project check
+explicitly reports no base coverage, so it does not establish a numeric
+compiler-project regression comparison. Earlier no-head checks were not
+accepted as compiler coverage evidence. The uncoalesced LuaCov text total
+includes installed and checkout copies of the same sources and is not the
+processed Codecov project result. The CI-statistics audit coalesces those
+aliases using the same-head prepared-SDK contract; it independently retains
+checkout source bytes, rather than extracting installed compiler sources from
+the prepared-tree archive. Local reports were never uploaded.
+
+Final readback receipt:
+`/tmp/titan-210-8609-codecov-readback/final-ci-codecov-receipt-r2.json`,
+SHA-256 `041444cf70e0f2510102a80065b1e6b97d32b2c49c3c248cdb3e0fcbb87d4963`.
+The compact evidence archive is
+`/tmp/titan-210-8609-ci-codecov-evidence-r2.tar.gz`, SHA-256
+`468e3759034946abbb7c9f9a7ec1b8aa0d6c0b66451caf23fa33fadbd9033e00`.
+
+## Windows LLVM-gcov follow-up
+
+The follow-up adds an explicit native Windows backend using matching Clang/LLVM
+22.1.8, native x64 CPython 3.14.8 and gcovr 8.4. Validation ran on the local
+Windows VM in CLANG64/UCRT, with source, SDK and output directories on NTFS.
+The measured provider contains all 22 production objects and 69 source
+contributors; the ordinary aggregate retains all 28 test owners. Reports
+measure executable lines only. Local runs do not upload to Codecov.
+
+The final reporter is `6742d826b950659e73b876005728404c54c2867a4d2c53e4e3b4353d7ec270fe`.
+Its frozen compiler/provider build used source inventory `2394256e4403d20adb0780aed90c292670aeec1fd74b9753795a8721ec5be0b0`.
+The subsequent native fixture correction is recorded separately below; the
+production stdlib, compiler, dependencies and measured objects did not change.
+
+| Gate | Result and scope |
+| --- | --- |
+| Ordinary Windows installation | Make/LuaRocks install passed in 581.143 s; all 88 installed frontend/host files matched current source. |
+| Current host regressions | Linux: 85/85 passed. Windows: six native source-path/template-byte checks passed without skips. Intel macOS: 75 applicable checks on the preceding `b130f32d` reporter, then the new template-byte check separately on `6742d826`. The explicit Bash 4 prerequisite skip excludes nine Windows shell stand-ins on Apple's Bash 3. |
+| Compiler integration | Linux and Intel macOS each passed 12 backend and ten native integration checks at compiler `f507558e` and preceding reporter `5c31a6a2`; these are separate retained gates. |
+| Windows EXE/DLL controls | Earlier installed `5c31a6a2` captures passed build, seal, capture, reports and additive merge. Ten fixture lines remained in scope, seven hit. Native controls covered selected tests, deliberate failure with retained diagnostic report, notes-only/missing-counter handling, formatting equivalence and ordinary uninstrumented output. |
+| Full Windows build | Current provider and 28-owner consumer built successfully in 1,087.877 s; independent validation accepted all 22 objects/notes, 69 contributors and 17,263 executable-line keys. |
+| Zero-selected diagnostic | Native status 0, complete collection and 22 counters; selected=0 correctly produced public audit/run/report status 1. All five raw template hashes and HTML/LCOV/Cobertura/normalized data agreed; 2,160 initialization-hit lines remained visible. |
+| First full Windows run | 1,282 selected: 1,222 passed, 27 skipped and 33 failed. Product collection completed naturally with status 1, an empty job and all 22 counters. Reformatting the retained run produced 15,620/17,263 lines (90.48%) while preserving native/audit/report status 1. This is a failed-run diagnostic, not an accepted behavior baseline. |
+| Corrected Windows reuse | 1,282 selected: 1,255 passed, 27 skipped (17 platform/ten capability), zero failed; all 28 owners audited. Product native/run/audit/report status 0, complete collection and an empty job with 22 fresh counters. HTML/LCOV/Cobertura/normalized data agree on 15,653/17,263 lines (90.67%). |
+| Corrected child | One-child compilation against retained providers: Linux 2.099 s, Intel macOS 2.959 s. Both `closed-stderr` and `fatal-origin` passed with exact output on both platforms. Windows compiled the same child alone and passed both modes, each with native status 0, an empty job and 22 fresh counters. The 5,934 Linux, 3,534 macOS and 3,741 Windows retained input files remained unchanged. |
+
+The first full-run failures identified two distinct setup defects. The private
+verification harness forced `LC_ALL=C`; its `cygpath` export corrupted and
+truncated the Unicode process-fixture pathname. Native Python, Titan and stock
+Lua observed the same nonexistent inherited path. The exact sealed Unicode
+executable existed and ran successfully when passed its correct path.
+The same export under `C.UTF-8` preserved the exact UTF-8 pathname in all three
+native readers, and both direct fixture launches passed. One previously failing
+OS process test then passed with the unchanged manifest/aggregate/provider,
+fresh counters and successful audit: one selected, one passed, no skips; native
+status 0, complete collection, an empty job and 22 counters. All 3,741 retained
+build files remained byte/mtime-identical. The UTF-8 and targeted archives are
+`4e8178df8f5d9d6defe0362ee2196b775b02c01d113c33e36707d27523e45a3b`
+and `b0520bcaa4657270b1b9485809939712852ed89ef97f40558d6aeef9a2c177aa`.
+The targeted archive's index was generated before its outer stdout capture
+closed; that one row has a stale size/hash. The complete archive pins the final
+stdout, and every other indexed file and all sealed inputs matched. No test
+rerun was used to replace the evidence.
+
+The new closed-stderr child also assumed that `dup2` returns descriptor 2 on
+success. POSIX returns that descriptor, while the Windows CRT returns zero.
+The fixture now accepts a nonnegative result and still requires successful
+closing of the saved descriptor. Its source changed from `e4fff5bb708f305b1ee77f8b18d2210f2404325115659b856ee6cfce020c67f6`
+to `af957eb6e7e90a62aa12a9d69ab9934aa791099e8946b86fc2e93063246596b4`.
+No production behavior was changed to accommodate the tests.
+
+Iteration now retains the dependency installation, provider, notes and consumer.
+Reporter-only fixes use an external updated reporter, the unchanged sealed
+manifest/run and a fresh report directory; they require no compilation or test
+rerun. Earlier reporter iterations unnecessarily rebuilt the provider and
+consumer. For the runtime fixture correction, a new small cwd copy and manifest
+record the one changed unmeasured fixture, while the original sealed build and
+failed run remain intact. Every test run gets fresh counters; no
+cross-platform or failed/successful counter union is used.
+
+The preceding Windows attempts remain failed evidence. Capability probes first
+exposed an incorrect repeated-line oracle: LLVM counts the deliberate
+`3 -> 4 -> 3` mapping twice on line 3 and once on line 7. The corrected oracle
+checks those raw counts. A later fingerprint rejection exposed Windows text
+mode truncation at Control-Z; fingerprints now read complete physical bytes,
+including authored CRLF source. Subsequent diagnostics exposed relative LLVM
+source paths being resolved against the process cwd, and HTML template hashes
+being calculated before Windows newline translation. The reporter now resolves
+authored paths against the sealed source root and writes the same UTF-8 bytes
+that it hashes. Native regressions exercise both fixes. Private stale CMake,
+archive transport, path/mode oracle and controller-count mistakes were corrected
+as verification setup issues, without relaxing product acceptance.
+
+R30's original product job and its intermediate wrapper both completed naturally
+with empty jobs. A separate enclosing scratch supervisor returned incomplete
+status 125 after retiring one unidentified live member. The cause remains
+unknown and that receipt remains failed; it does not identify a product-runner
+ownership defect. Subsequent execution uses the product's own bounded Job
+Object supervisor without that redundant nesting. All owned scratch reservations
+were released; original build/source/SDK inputs remained unchanged.
+
+The retained receipt/archive identities include: R30 failure `b4ae90e50781021c4bb83b3ed60626ecf0044dc5951f729388f381a78647f1eb`,
+qualified closure `1c2a5dfd672936678d76681f6df56d08f377d30acedeb56bc5ad80ffe176b2d2`,
+failed-run report archive `463efeda40da73dcf184e95497c15d9b50e26ccc53534df5cc62285a88792b57`,
+and independent rendered-report check `906e4fc6458d71e0402822c3fa511688f714e00e4516ff04755814c87c1a3027`.
+The corrected-child Linux receipt is `bdf87510200ac3bc95781223aefb8ba4eafa1644ae1c55eaffd455227909f22c`;
+Intel macOS receipt `9becadff724a418c61e4a8eb7a330ceca01f95caa05e97b60798a972748a60fc`.
+The Windows child archive is `273b2b5e5ce9d3f51e08e2ff643748036b323c73994cc5247b82715b1d8d2e15`.
+Final Windows archive `5da60381de02fd41689b5c721156166d6e0813b668e7237e273bac9c2eff076d`, independent raw-counter/provenance/rendered-report receipt `29b2e5704670732d6bcca6659b8cd09501d44afb421f2781ce55ca1e73ec2181`, and independent root report check `22b3872b6ef53e1bcd9a95e96f254c551a794f3fceeccf180960853cb796c0d6`. The new manifest is `608caf01f14d267200badb8b92663ccc57971263c7ce1e2fe50f18c4486dd001`; all 3,811 original linked input entries remain unchanged, with 121 fixed cwd files and their list added. Operations completed at 17:54:34.145254 UTC; completion receipt `d3b5c1c2fdc43d07a68044c22194e9fb2aca4bc5d5dde6abd0e9b4f78dfdf0aa` confirms empty product and package jobs and no further guest calls.
+
+The complete POSIX reports below predate the final collector changes and the
+predicate-only child correction. Their source and tool versions remain distinct
+from the later focused gates above. Intel macOS validation does not establish
+Apple Silicon runtime behavior. Exact feature CI and processed Codecov evidence
+is recorded on the follow-up PR after publication; base PR #213's `8609cfb1`
+checks do not certify the follow-up commit.
+
+## Follow-up high-level native validation (r14–r17)
+
+The final 19 added native cases passed in the full 28-owner aggregate on Linux x86_64 and the local Intel macOS VM. The additions cover fatal-origin recovery, closed-stderr failure isolation, parent-stdin duplication/read-start failures, unknown signal exit status, writes after child exit, OpenSSL error-string fallback, six TLS late-writer schedules, both public process-spawn shutdown-admission guards, a valid empty locale conversion, synchronous parent-stdout write rejection, and preservation of the original TCP write-shutdown error during a lazy TLS handshake. The late-writer parent plus its six subtests count as seven selected cases; the other twelve regressions each count once. The earlier r14 capture covered the first 14 cases, r15 added the two admission regressions, r16 added the two OS behaviors in existing test/fixture files, and r17 adds one public TLS transport-failure regression. The locale case requires a positive native `[%p]` control producing exactly `[]`, preserves the C-locale `AM` control, and restores the original LC_TIME. The stdout case installs a read-only pipe endpoint in an isolated child, checks nominal `stdio.write`/`EPIPE`, restores fd1 before assertions, and verifies exact successful output in a fresh Runtime. The TLS case completes public TCP write-half-close before adoption, performs no raw I/O after adoption, asserts the exact original transport writability error from the lazy handshake, checks stable plain-TCP EOF at its peer, and verifies idempotent TLS retirement plus a later nominal `TLS_INTERRUPTED` write. Its peer has immediate cleanup registration and an explicit successful join.
+
+| Platform | Ordinary consumer and audit | Fresh measured consumer and audit | Executable lines |
+| --- | --- | --- | --- |
+| Linux x86_64, GCC/gcov 16.2.1 | 1,294 selected: 1,293 passed, 1 platform skip; 28/28 owners | Same counts; complete schema-2 run | 15,780/17,263 (91.41%) |
+| Intel macOS, GCC/gcov 14.4.0 | 1,294 selected: 1,290 passed, 4 platform skips; 28/28 owners | Same counts; complete schema-2 run | 15,740/17,263 (91.18%) |
+
+Both use gcovr 8.4. “Ordinary consumer” means the unmeasured test executable exercising the retained bundled, instrumented r12 provider; it is not a newly rebuilt uncovered or system-OpenSSL provider. Separate earlier focused behavior checks passed with ordinary system OpenSSL 3.5.9. These follow-up gates do not replace the recorded compiler, packaging, or production-mode gates.
+
+| Production module | Linux hit/total | Intel macOS hit/total | Windows hit/total |
+| --- | --- | --- | --- |
+| `async` | 1968/2008 | 1968/2008 | 1968/2008 |
+| `coroutine` | 189/200 | 189/200 | 189/200 |
+| `fs` | 393/453 | 393/453 | 396/453 |
+| `gc` | 64/67 | 64/67 | 64/67 |
+| `http` | 1026/1111 | 1026/1111 | 1032/1111 |
+| `io` | 41/42 | 41/42 | 41/42 |
+| `iteration` | 16/17 | 16/17 | 16/17 |
+| `json` | 783/791 | 783/791 | 782/791 |
+| `lua` | 135/144 | 135/144 | 134/144 |
+| `math` | 236/237 | 236/237 | 236/237 |
+| `net` | 311/361 | 309/361 | 313/361 |
+| `os` | 805/870 | 778/870 | 769/870 |
+| `path` | 106/180 | 106/180 | 173/180 |
+| `peg` | 902/920 | 902/920 | 905/920 |
+| `reflect` | 389/428 | 389/428 | 389/428 |
+| `sqlite3` | 667/729 | 667/729 | 666/729 |
+| `ssl` | 821/909 | 819/909 | 777/909 |
+| `string` | 1647/1800 | 1647/1800 | 1699/1800 |
+| `timer` | 82/91 | 82/91 | 82/91 |
+| `url` | 172/173 | 172/173 | 172/173 |
+| `uv` | 4277/4937 | 4269/4937 | 4096/4937 |
+| `websocket` | 750/795 | 749/795 | 754/795 |
+
+The Windows column is the separate final LLVM-gcov capture described above, with the corrected child fixture and unchanged production source inventory. The two POSIX platforms used the same source-only r17 snapshot: archive SHA-256 `13676f69510f842811c7d89a03326bd5f5436f07c59a61a4e3f4ca54e66a5f79`, source-inventory SHA-256 `b1b3cbbb205e3ab58b9d7117101d52fbfa229c5698f4067ba6b9f792e914b580` (1,174 authored files plus two snapshot metadata files). Relative to r16, it adds only `ssl/tests/drain_failure_test.titan` as a new native test contributor and updates its explicit stdlib/source-rock inventories; the fourth authored delta is the already completed r16 validation documentation. It adds no native fixture or aggregate link input. All 69 production sources and all 82 frontend/compiler/host files are byte-identical to r16 and r15. The r16 snapshot remains retained separately with archive `c2dd788c66499dfd0b1a126b568ea19eb867d55f459d7745e89bf78215045d61`, source inventory `c6e0cecbfddc5f1770de99e930117b1eb1e14d37cba296ab9c01fa569b95d1e7`, and 1,173 authored files. Its earlier inventory increase from r15 was the published core helper `spec/support/luacov_children.lua`; its native delta was exactly the three existing OS time/read-failure test and fixture files.
+
+These full POSIX captures certify the exact host SHA-256 `4ac01a56ff4883c470af0eee3a5e403e26616fae422b02fa151cdc5e2e285121`; run receipts remain schema 2. Later Windows embedded-runner changes have a separate source and validation boundary. The fresh unmeasured consumers use the copied feature compiler/frontend, while the unchanged measured r12 providers retain their original compiler, object, notes and native-input provenance. Each platform kept its original provider/SDK/native inputs read-only, created a fresh consumer manifest and run-owned counters, and collected exactly 22 counter files. All 6,434 Linux and 4,034 macOS retained-file identities matched before/after. The production inventory remains 22 roots/69 contributors; all 17,263 source-line keys and their source MD5 values match r16, r15, r14 and r13. There was no counter union or denominator change. The earlier r15 source-rock inventory check passed 1/1. In r16 the focused calendar case and its output audit passed 1/1 on each platform, and the stdout regression passed its separate Linux ordinary/measured 1/1 checks and both full platform aggregates. The r17 source-rock inventory check passed 1/1, and its focused TLS case and output audit passed 1/1 without skips on each platform before the full ordinary and measured aggregates.
+
+All 26 targeted previously-zero lines are covered on both platforms: async 642, 645, 792–794; OS 206, 889, 1031–1032, 1045, 1075–1077, 1087, 1164–1166, 1169, 1447, 1604; SSL 203–205, 581, 584, 885. The fresh r17 Linux capture gains exactly SSL 581 and 584, each with count 1, and loses no hits relative to r16. The r17 macOS capture gains those same two targets and naturally recovers seven timing-sensitive hits from its new execution: net 642 (1), SSL 822 (1), 828 (4), 829–830 (1 each), 831 (2), and 832 (1); it loses no hits relative to r16. These seven recoveries are not attributed to new semantic test coverage. The separate r16 capture still records all seven as lost from r15. Its exact losses and original counters remain unchanged: no historical counters were combined to restore them. SSL 1682–1683, already zero in r15 and r16, remain zero in r17.
+
+Linux's single skip is the POSIX eight-bit process exit-code boundary. macOS additionally skips three Linux seccomp metadata-denial fixtures. Its 27 additional OS zeros are exclusively in the parent-stdio metadata/hint classification region, lines 1183–1264. Async hit sets are identical. In r17, macOS additionally leaves SSL 1682–1683 and net 502–503 zero. These platform distinctions and timing-sensitive misses remain in the public denominator.
+
+The requested high-level near-total coverage is **not achieved**: async is 1,968/2,008 (98.01%, 40 missed), OS is 805/870 (92.53%, 65 missed), and SSL is 821/909 (90.32%, 88 missed) on Linux. macOS records OS 778/870 (89.43%, 92 missed) and SSL 819/909 (90.10%, 90 missed). The separate final Windows capture records OS 769/870 (88.39%, 101 missed), SSL 777/909 (85.48%, 132 missed), and UV 4,096/4,937 (82.97%). The remaining gaps include:
+
+- **Async:** four `ChannelReader:read_until` EOF-before-delimiter lines (1469–1472) remain unproven. The completed separate public-close probe passed its behavioral assertions but left all four lines zero: ordinary channel closure raises from `receive`, while an already closed reader returns at an earlier guard. No ordinary deterministic public route to those tails was established. Other zeros include suspension-epoch exhaustion, Lua stack/resource failures, stale-settlement and continuation invariants, and runtime-registration cleanup catches. This review does not claim all other zeros are unreachable.
+- **OS:** 19 missed anchors are explicitly Windows-only descriptor adoption, shell construction/arguments, and process flags; another nine are authored Titan sentinel-error conversions fed by native Windows helpers. Remaining groups include metadata-probe/hint failures and rollback/escalation (1639–1654, 1685–1687). The closed-child EPIPE regression covers asynchronous completion failure at 1087, while the r16 read-only-stdout regression now covers synchronous rejection at 1075–1077. Both public shutdown-admission guards (1447, 1604) and the valid empty conversion (206) are covered. The 30-second rollback escalation is deliberately not exercised by this follow-up.
+- **SSL:** zeros include 14 anchors naming optional/disabled engine outcomes, native configuration/PEM allocation or postcondition failures, partial-write guards when partial-write mode is disabled, and saved-failure rethrow tails. The original transport-write error rethrow at 581/584 is now covered, while other transport/supervision error paths remain. Two separate public scheduling probes passed exact `TLS_INTERRUPTED`/`ssl.write`, joined Task ownership, and a fresh binary TLS/EOF companion, but left 324 and 488 zero. Ready-child cancellation and native-wait cancellation explain those tested schedules; this does not prove every possible route unreachable.
+
+Windows retains a platform skip for the no-error-strings child: the current static initializer would execute inside a DLL constructor on Windows. A safe future test adaptation can explicitly call documented OpenSSL initialization from a fresh Lua process after DLL loading, before the Titan module entry. That route could exercise SSL 203–205 without private TLS state or error-queue manipulation; it has not been implemented or verified, so the skip and zeros remain.
+
+A separate public UV peer probe reaches SSL 582 on Linux by submitting a malformed empty ServerHello and resetting TCP in the same callback. Its original measured execution and three fresh reset repeats preserve `SSL_ERROR_SSL`/code 1/`ssl.handshake`; an executed no-reset control preserves the same TLS cause and receives the TLS alert without entering the drain-error catch. The four Linux reset outcomes do not establish portable TCP data/RST delivery. The probe remains private and its counters are not included in either complete report. No post-adoption raw transport operation was used.
+
+A private real OpenSSL allocation probe reaches chain-install failure at SSL 1314–1315 with the existing unchanged one-shot allocator fixture and successful same-port recovery. Linux bundled 3.5.7 requires stack-allocation ordinal 176, while system 3.5.9 requires 173; the bundled ordinal fails its intended contract in system mode. This configuration-sensitive scenario was not integrated. Its diagnostic counters remain separate from the full reports, and no platform identity mechanism, new production hook, or fabricated error queue was added merely to raise the metric.
+
+The classification is diagnostic only. A recursive parse of the exact measured sources found no source-defined foreign-native function bodies, including nested expressions: all 111 anonymous functions use ordinary Titan `ExpFunction` bodies; foreign AST nodes here are imports/types/allocation expressions. Every remaining zero maps into an authored Titan function, method, or initializer. Guards around native APIs therefore cannot be removed from the denominator to present a stronger high-level percentage. The exact r17 Linux function grouping is retained in `/tmp/titan-210-highlevel-r17-function-gap-classification-20261009.json`; the separate r16 grouping remains unchanged.
+
+The first r14 setup failures remain preserved: incomplete macOS public-header include selection, an accidentally instrumented standalone C fixture rejected as an extra counter, and Darwin's unavailable imported `signal` member. The final gates use the matching complete public-header layout, an unmeasured standalone fixture, and the approved fresh-exec SIGALRM default-disposition fixture. The Windows descriptor-limit stubs and SIGALRM correction are included in the snapshot. The first r15 link on each platform also preserved a private-harness error: adding the child-only SQLite fixture object to aggregate `-X` caused unresolved SQLite symbols. The corrected r15 link restored the exact previously passing three-object aggregate payload using only the identical objects just compiled in the private tree. The fresh r16 and r17 builds use that three-object payload directly and require no compile/run retry. An r16 source-freeze preparation initially omitted the nested skills submodule; the diagnostic snapshot was preserved and corrected before any build or upload. These behavior regressions change no production stdlib or native-library implementation source.
+
+macOS r17 was released at 08:36:54.643064 UTC, before its 08:45 deadline. Final r17 evidence: Linux receipt SHA-256 `ec284999925f48ab984f3806d0250f2b1e5b7b36b6279aa619d68bf812305d4d`, archive `13b8316e878c5abfa45d1a1d26c846d88fe9069dca97ad8cab63dcf1084028d7`; macOS receipt `ace1c3b93b389c4e7a6a5062a8c71d934934ce8d564f39178f5b598d5507902f`, archive `2cc62f8eb6ed9d6b78f0b87135e0159c2e4fbb89b790fc868a217ce61dcdbc8f`. Exact counts, line deltas, module gaps and local paths are in `/tmp/titan-210-highlevel-r17-final-comparison-20261009.json` (SHA-256 `e0affb5fab79f2a1186b1fd26ed2950938469861909ba11a4863dbc7fb8ebc87`). Local HTML reports are `.titan-coverage/issue-210-final-highlevel-linux-r17/coverage.html` and `.titan-coverage/issue-210-final-highlevel-macos-r17/coverage.html`.
+
+Historical r16 evidence remains unchanged. macOS r16 was released at 08:03:54.274347 UTC, before its 08:10 deadline. Its earlier r15 release remains recorded at 07:04:31.765989 UTC and r14 at 06:27:18.423 UTC. Final r16 evidence: Linux receipt SHA-256 `2887aa4d7ab5c35928d2fc76e74bd34c244c5c4c1f11b67789b33b6893a68943`, archive `39ffb97d974377ae1b62ea3a3d53f67afd12911e477a65e780fa1cbaa2c25219`; macOS receipt `ed0a0736968a0dcfe00ccda4173cf93530173c2fbd63082170bddb3164c4b32e`, archive `19c87102b393ac8775ac8377d47a846eb140e63bc0ac474eecfd50b203fb7b98`. Exact counts, line deltas, module gaps and local paths are in `/tmp/titan-210-highlevel-r16-final-comparison-20261009.json` (SHA-256 `bdd5b2d2b84a95a29155d7219522992fe43c52f7faae019ae61d3f4efc1624ad`). Local HTML reports are `.titan-coverage/issue-210-final-highlevel-linux-r16/coverage.html` and `.titan-coverage/issue-210-final-highlevel-macos-r16/coverage.html`.
+
+Historical r15 evidence remains unchanged: Linux receipt `3cf51ff8a8c17810f645c0f58126f7deed7903600de38f2be360738833c9313d`, archive `d0b2325fa3c17ce4c423968a2acbbd2d4219aa7cb818d6f2c5fcf4be3023bcf9`; macOS receipt `f275119dde355354e9553ba1e256b4995f5e0a62914bc68cd4ae72e660a53d97`, archive `34728873cf9366edb77b2eb7d9b9a0092ef816b051c01476e5ddce8211efce08`. Its exact comparison is `/tmp/titan-210-highlevel-r15-final-comparison-20261009.json` (SHA-256 `d126589ebf370ea611edf82234b7b057a8600c6adcdcd196018293368fb2c410`).
+
+Historical r14 evidence remains separate and unchanged: Linux receipt `1d5e606c46ca3a0e609542ad3fdf87f6eca5d919f19c9caa3f130f7d8c0dd3d7`, archive `51a5eb60261da7a001d4cc83aea8fe49e158194809ced13fc5f2c486f98930c9`; macOS receipt `5c849bed6ff224e9b1c73892af7e81551f6a6b7d2cd5f9f77e03f9c85f31eca2`, archive `71b7ebbab4c735430e45f024cfb39586b9602fc31eed9e04393a9126e4e67090`. Its exact comparison remains `/tmp/titan-210-highlevel-native-final-comparison-20261009.json` (SHA-256 `6a8e9540ba804d176eee9beb3008a465f7a4b5c657e8bd9b6951ad31b48e6528`). The diagnostic channel/admission probes, which are outside those full captures, retain `/tmp/titan-210-public-gap-probes-20261009/final-receipt.json` (SHA-256 `95008e86d113ea799e45d2cdd8f8c9e04d12338acdf4215c5e7649e57ca1bb6b`).

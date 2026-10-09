@@ -1851,10 +1851,11 @@ function codelambdadec(tlcontext, node)
     local nativesig = cfunctiondecl(
         rettype, fname, table.concat(cparams, ", "), false)
     node._body = render([[
-    static $SIGNATURE {
+    static $RETENTION$SIGNATURE {
         $BODY
     }]], {
         SIGNATURE = nativesig,
+        RETENTION = coder._coverage_keep_native_lambdas and "__attribute__((used)) " or "",
         BODY = table.concat(stats, "\n")
     })
     node._sig = render([[

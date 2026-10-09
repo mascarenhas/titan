@@ -1,0 +1,28 @@
+local test = import "test"
+local ssl = import "ssl"
+foreign import "ssl_error_strings.h"
+foreign import "stdio.h"
+
+function main(_args: {string}): integer
+  test.assert(ffi.titan_test_ssl_no_strings_initialized() == 1, "OpenSSL no-string initialization failed")
+  if ffi.titan_test_ssl_error_strings_suppressed() ~= 1 then
+    ffi.puts("capability: OpenSSL error strings initialized before fixture constructor")
+    return 77
+  end
+  local rejected = false
+  do
+    local unexpected = ssl.listen("127.0.0.1", 0, "bad.pem", "bad-key.pem")
+    unexpected:close()
+  catch
+    test.assert(error is ssl.Error, "malformed certificate lost nominal SSL error")
+    local failure = error as ssl.Error
+    test.assert(failure.code ~= 0 and failure.name == "OPENSSL" and
+                failure.operation == "ssl.server.certificate" and
+                failure.message == "failed to decode a PEM certificate",
+                "unexpected no-string failure: " .. failure.operation .. " " .. failure.message)
+    rejected = true
+  end
+  test.assert(rejected, "malformed certificate was accepted")
+  ffi.puts("SSL_ERROR_STRINGS_OK")
+  return 0
+end

@@ -1312,7 +1312,7 @@ TITAN_TEST_MODULE_OBJECTS := $(foreach module,$(TITAN_TEST_MODULES),$(call titan
 TITAN_TEST_SUPPORT_STEM := $(TITAN_TEST_BUILD_DIR)/titan/test__test_support
 TITAN_TEST_SUPPORT_OUTPUTS := $(addprefix $(TITAN_TEST_SUPPORT_STEM),.o .c .ffi.h)
 TITAN_TEST_NATIVE_OBJECTS := $(addprefix $(TITAN_TEST_BUILD_DIR)/,async_foreign_work.o fs_fixture.o uv_stdio_probe.o sqlite3_worker_fixture.o)
-TITAN_TEST_FIXTURE_OUTPUTS := $(TITAN_TEST_NATIVE_OBJECTS) $(addprefix $(TITAN_TEST_BUILD_DIR)/,async_foreign_work.h uv_stdio_probe.h uv_coverage_threads.h uv_coverage_pty.h sqlite3_worker_fixture.h ssl_allocator_fixture.h ssl_allocator_fixture.o os_process_host_child)
+TITAN_TEST_FIXTURE_OUTPUTS := $(TITAN_TEST_NATIVE_OBJECTS) $(addprefix $(TITAN_TEST_BUILD_DIR)/,async_foreign_work.h uv_stdio_probe.h uv_coverage_threads.h uv_coverage_pty.h sqlite3_worker_fixture.h ssl_allocator_fixture.h ssl_allocator_fixture.o ssl_error_strings.h ssl_error_strings.o os_descriptor_limit.h os_descriptor_limit.o os_process_host_child)
 TITAN_TEST_CONFIG_STAMP := $(TITAN_TEST_BUILD_DIR)/build.config
 # TEST_LUA selects the installed SDK, just as it does for the compiler and the
 # native fixtures. A cold non-test Make invocation need not have one installed.
@@ -1379,7 +1379,9 @@ $(TITAN_TEST_CONFIG_STAMP): FORCE
 	if test -r "$@" && cmp -s "$$tmp" "$@"; then rm -f "$$tmp"; \
 	else \
 	  rm -f $(TITAN_TEST_MODULE_OBJECTS) $(TITAN_TEST_SUPPORT_STEM).o \
-	    $(TITAN_TEST_NATIVE_OBJECTS) $(TITAN_TEST_BUILD_DIR)/ssl_allocator_fixture.o $(TITAN_TEST_BUILD_DIR)/os_process_host_child \
+	    $(TITAN_TEST_NATIVE_OBJECTS) $(TITAN_TEST_BUILD_DIR)/ssl_allocator_fixture.o \
+	    $(TITAN_TEST_BUILD_DIR)/ssl_error_strings.o $(TITAN_TEST_BUILD_DIR)/os_descriptor_limit.o \
+	    $(TITAN_TEST_BUILD_DIR)/os_process_host_child \
 	    $(TITAN_TEST_EXECUTABLE); \
 	  mv -f "$$tmp" "$@"; \
 	fi
@@ -1442,6 +1444,20 @@ $(TITAN_TEST_BUILD_DIR)/ssl_allocator_fixture.h: spec/fixtures/stdlib/native/ssl
 $(TITAN_TEST_BUILD_DIR)/ssl_allocator_fixture.o: spec/fixtures/stdlib/native/ssl_allocator_fixture.c $(TITAN_TEST_BUILD_DIR)/ssl_allocator_fixture.h $(STDLIB_C_INPUTS_ssl) $(OPENSSL_LIBS) $(TITAN_TEST_CONFIG_STAMP)
 	$(CC) -std=c99 -Wall -Wextra -Werror -fPIC -pthread \
 	  $(TITAN_TEST_CPPFLAGS) $(TITAN_TEST_CFLAGS) $(STDLIB_OPENSSL_CPPFLAGS) \
+	  -Ispec/fixtures/stdlib/native -c "$<" -o "$@"
+
+# These objects belong only to their fresh child processes. In particular,
+# OpenSSL's sticky no-error-strings setting must never reach the aggregate.
+$(TITAN_TEST_BUILD_DIR)/ssl_error_strings.h: spec/fixtures/stdlib/native/ssl_error_strings.h $(TITAN_TEST_CONFIG_STAMP)
+	cp "$<" "$@"
+$(TITAN_TEST_BUILD_DIR)/ssl_error_strings.o: spec/fixtures/stdlib/native/ssl_error_strings.c $(TITAN_TEST_BUILD_DIR)/ssl_error_strings.h $(STDLIB_C_INPUTS_ssl) $(OPENSSL_LIBS) $(TITAN_TEST_CONFIG_STAMP)
+	$(CC) -std=c99 -Wall -Wextra -Werror -fPIC \
+	  $(TITAN_TEST_CPPFLAGS) $(TITAN_TEST_CFLAGS) $(STDLIB_OPENSSL_CPPFLAGS) \
+	  -Ispec/fixtures/stdlib/native -c "$<" -o "$@"
+$(TITAN_TEST_BUILD_DIR)/os_descriptor_limit.h: spec/fixtures/stdlib/native/os_descriptor_limit.h $(TITAN_TEST_CONFIG_STAMP)
+	cp "$<" "$@"
+$(TITAN_TEST_BUILD_DIR)/os_descriptor_limit.o: spec/fixtures/stdlib/native/os_descriptor_limit.c $(TITAN_TEST_BUILD_DIR)/os_descriptor_limit.h $(TITAN_TEST_CONFIG_STAMP)
+	$(CC) -std=c99 -Wall -Wextra -Werror -fPIC $(TITAN_TEST_CPPFLAGS) $(TITAN_TEST_CFLAGS) \
 	  -Ispec/fixtures/stdlib/native -c "$<" -o "$@"
 
 $(TITAN_TEST_BUILD_DIR)/async_foreign_work.o: spec/fixtures/stdlib/native/async_foreign_work.c $(TITAN_TEST_BUILD_DIR)/async_foreign_work.h $(TITAN_TEST_CONFIG_STAMP)
