@@ -81,6 +81,7 @@ describe("aggregate coverage dependency freshness", function()
         require_backend()
         local workspace = temporary.name("-coverage-dependency")
         assert(lfs.mkdir(workspace))
+        workspace = assert(compiler_io.new_sync():realpath(workspace))
         local tested, err = xpcall(function()
             local frontend = workspace .. "/tooling"
             assert(lfs.mkdir(frontend))
