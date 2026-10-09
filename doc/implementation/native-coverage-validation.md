@@ -5,7 +5,133 @@ metric is executable **line coverage**. Generated C branches and functions are
 retained in raw gcov evidence but are absent from the public Titan metrics.
 Local runs render reports; only CI uploads to Codecov.
 
-## Source and tool identities
+## Final coverage expansion
+
+The final source snapshot is **`c5bba2dc3767b4cfd67105ac35598ca7e01a6426c3b762f1de4c7413300834a2`** at implementation commit
+**`abbc2637066179bea74e76dfdc0e7a39aca9912a`**, with 1,156 authored files. Lua remains at
+`025bfc35df0885656de347fb7a7c377e90042a75`; the skills pin is
+`df1e7837ab0869d98c853f252d6572a0cdde0503`. ABI 2, package 0.6.0 and
+language-server API 1 remain unchanged. Commit
+`ccafc366473cefcb3364c19323c95c6921bdff5e` then updates only the host-side
+compiler-shard count expectation; the final publication commit adds this
+validation record. Neither changes the native snapshot. The records below supersede the
+historical baseline sections.
+
+The final workflow measures the normal 23-root standard provider: 22 selected
+production modules and 69 physical source contributors. An ordinary 28-root
+native test consumer uses that provider. Static child fixtures link its same
+archive; native test helpers, the runner, allocation hook and generated Lua
+shims add no measured source lines. Every shim and final consumer/fixture input
+is nevertheless sealed. Preparation counters stay separate from each fresh run.
+
+| Platform | Covered / executable lines | Line coverage | Measured native results |
+| --- | --- | --- | --- |
+| Linux x86_64, GCC/gcov 16.2.1 | 15,754 / 17,263 | 91.26% | 1,274 passed; 1 platform skip |
+| Intel macOS 15.7.7 VM, GCC/gcov 14.4.0 | 15,714 / 17,263 | 91.03% | 1,271 passed; 4 platform skips |
+| Windows 11 x64, CLANG64/UCRT 22.1.8 | Unsupported backend | No percentage | 1,241 passed; 22 classified skips ordinary |
+
+All native runs audit all 28 owners. Ordinary Linux results are 1,274 passed and one platform skip;
+ordinary macOS results are 1,263 passed and twelve classified skips. The additional eight ordinary macOS
+skips concern allocation-site layouts in system OpenSSL 3.6.5. All twelve real
+OpenSSL failure scenarios pass against the measured bundled OpenSSL 3.5.7
+provider. The same twelve pass against Linux's system OpenSSL 3.5.9.
+Windows checks include clean Lua/native/compiler SDK relocation, the fresh
+stdlib executable, compiler coverage contracts and explicit early rejection of
+`--coverage` before invoking a nonexistent C compiler or creating output.
+
+| Linux module | Covered / executable lines | Line coverage |
+| --- | --- | --- |
+| Async | 1,963 / 2,008 | 97.76% |
+| OS | 790 / 870 | 90.80% |
+| SSL | 815 / 909 | 89.66% |
+| UV | 4,277 / 4,937 | 86.63% |
+
+Compared with the retained Linux r8 report, 1,122 formerly zero-count lines are
+now covered and no previously covered lines are lost. Correcting authored
+foreign `elseif` attribution adds eleven executable SQLite worker lines; every
+one is covered. The denominator therefore changes from 17,252 to 17,263.
+Compared with the first 80.73% report, overall Linux coverage is now 91.26%.
+The final Mac report is 15,714 / 17,263 (91.03%). Two previously hit SSL
+shutdown-error lines, `titan/ssl.titan:1682–1683`, have zero counts in this
+final run despite identical production/provider bytes and passing tests.
+The retained r11 report remains separate; its hits are not merged into the
+final report. No denominator exclusions or unions of diagnostic counters
+produced these results.
+
+Linux async's remaining 45 lines concern native/allocation failure, private identity
+and recovery guards, infeasible admission limits, and conservative defensive
+arms. Linux OS retains 80 misses: 28 are explicitly Windows-only; others include
+allocation/setup errors, terminal-descriptor diagnostics, accepted-child
+rollback and the 30-second escalation path. Some remain reachable and unproven.
+
+Linux SSL has 94 remaining lines: 39 disabled native-mode/retry paths, 22 native
+construction/reference invariants, five nonreturning tails, five scheduling
+guards, seven further-chain/startup allocation candidates, four Titan
+allocation/cleanup paths, four transport-timing paths, five native error-queue
+fallbacks and three boundary lines for PEM inputs above 2 GiB. macOS SSL has
+96 misses, including the two shutdown-error lines described above. The allocation candidates, late
+write admission, narrow transport failures and error-queue fallbacks are not
+claimed unreachable. SSL remains below the requested near-total target.
+The exact classification is retained with source and report hashes in
+`/tmp/titan-210-ssl-gap/ssl-r12-full-classification.tar.gz`, SHA256
+`28bd1da9571449ea92f709ef8862bd665fb8f98139a3998e931161f914d85f6b`.
+
+Current host contracts pass 30 cases. Linux compiler coverage contracts pass
+42 cases; macOS combines 41 initial positives with the corrected focused
+temporary-directory case. That regression is additionally rerun on Linux
+after the test portability fixes. Windows compiler coverage contracts pass
+35 cases with eight GCC-only pending cases. Its build/publication contracts
+combine 60 initial positives with two corrected focused cases, leaving 38
+platform-dependent pending cases; this is not a fresh 62-case invocation.
+The exhaustive compiler manifest contains 152 files, and the source-rock
+pack/unpack check passes.
+The original complete compiler/runtime/packaging and both OpenSSL production
+mode baselines remain separate evidence below; they are not relabeled as a
+new all-current full compiler run.
+
+Five independent contract findings are resolved: stale foreign-helper callers,
+bounded whole-process-group cleanup, authored foreign `elseif`/`until`
+attribution, bare-CR rejection, and generated Lua shim provenance. The retained
+review checkpoints have SHA256
+`58c3facb0ff9cf1c0dfa42ed0290f22dd8c8abb320f325eeb4d40cf4d8366912`
+and `067ec64511b01707ab75e822696dc8a1788e3f4035a677de92f76d24fe9b06df`.
+Review was read-only against those frozen artifacts; independent reruns are
+not claimed. Native Windows testing also corrected test assumptions about
+MinGW uname text, unsupported user/group lookup IDs, and classified PTY skips.
+
+The final provider was built from a captured preflight whose production,
+compiler, runtime and native-payload bytes are identical to the final snapshot.
+Final fixtures and consumers were rebuilt and sealed after the test-only
+changes. Original provider objects, notes, images and native inputs were
+hash-checked unchanged before and after collection. This is explicit composed
+validation; it is not described as one fresh all-current Make invocation.
+
+Final local receipts and archives:
+
+- Linux receipt: `/tmp/titan-210-followup-linux/linux-final-receipt.json`,
+  SHA256 `84027257ea07115422880dd950a986c82f60a704cab48da8cf941aa8c80c7ba1`.
+  Archive: `/tmp/titan-210-followup-linux/linux-final-evidence.tar.gz`,
+  SHA256 `a22bf82b98ad695e908e8157987ff0a495a2a717875ecbc9bc148d35f60255d3`.
+- macOS receipt: `/tmp/titan-210-macos-r12-receipt.json`,
+  SHA256 `e31967210280895c578847932ba0f3fbe262f4e5e0709cbc509000443b196afa`.
+  Archive: `/tmp/titan-210-macos-r12-evidence.tar.gz`,
+  SHA256 `a6ddb2c684f46b9a06c7e86f70107a286b06a5ff1011c3082ff0dd532e6bb5c1`.
+- Windows receipt:
+  `/tmp/titan-210-platform-evidence/windows-r12-final/windows-r12-final-receipt.json`,
+  SHA256 `43f9e65bd793a0d31a9e64fad6fd0b7abf27e7a592c9ce7d63772c44cea0a27d`.
+  Archive:
+  `/tmp/titan-210-platform-evidence/windows-r12-final/windows-final-retained-evidence.tar.gz`,
+  SHA256 `3cf7164753923667bb341d343186f59e372b349b2b37409b1030c7ad5af06078`.
+
+Standalone Linux HTML is also copied to
+`.titan-coverage/issue-210-final-linux/coverage.html`; macOS HTML is copied to
+`.titan-coverage/issue-210-final-macos/coverage.html`. Both retain LCOV,
+Cobertura, normalized lines, raw gcov JSON, seals and run provenance. Public
+LCOV contains no function or branch records. Local runs never upload.
+Windows LLVM-gcov support remains a separately coordinated follow-up; its
+synthetic feasibility probe is not a native stdlib coverage report.
+
+## Historical source and tool identities
 
 Validation used `codex/issue-210-native-coverage` from
 `524ca53935c212c6268d584ef098024444b85a82`. The initial compiler, host tool, Make
