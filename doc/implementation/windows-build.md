@@ -474,6 +474,24 @@ from both `validation` and `production` build profiles when validating the
 Windows port. Windows production recipes use their ordinary `-O2` defaults;
 test objects retain validation flags when consuming a production SDK.
 
+## Native line coverage
+
+The prepared SDK also supports the explicit experimental
+`titanc --coverage-backend llvm-gcov` workflow with matching Clang/LLVM 22.1.8,
+native Windows x64 Python, and gcovr 8.4. The default GCC backend still rejects
+Windows. `make -f Makefile.win titan-native-coverage-build`, `-run`, and `-report`
+own a private local NTFS SDK copy, all 22 production roots, the ordinary 28-root
+native consumer, and fresh run counters. Local reports include HTML, LCOV and
+Cobertura; uploads remain a separate CI concern.
+
+The build-owned native coverage supervisor contains the process tree in a Job
+Object and confirms it is empty before collecting counters. It records raw
+leader status separately from timeout, interruption or unjoined-child failure.
+It does not replace the ordinary Windows behavior-test supervisor or the
+production `titan.os` process contract. See
+[native coverage](../language/native-coverage.md#experimental-windows-coverage)
+for exact tools, directory requirements and commands.
+
 ## Experimental boundaries
 
 The initial stdlib target rebuilds its explicit roots. Compiler checking and C

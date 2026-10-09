@@ -1,0 +1,106 @@
+local async = import "async"
+local system = import "os"
+local test = import "test"
+local fs = import "fs"
+local uv = import "uv"
+foreign import "unistd.h"
+foreign import "signal.h"
+
+local function coverage_write_start_failure(result_path: string): integer
+  local saved = ffi.dup(1 as foreign int)
+  test.assert(saved >= 0, "could not preserve child stdout")
+  defer do
+    if saved >= 0 then ffi.dup2(saved, 1 as foreign int); ffi.close(saved) end
+  end
+  local endpoints = foreign int.new_array(2)
+  test.assert(ffi.pipe(endpoints) == 0, "could not create child-only pipe")
+  defer ffi.close(endpoints[1])
+  test.assert(ffi.dup2(endpoints[0], 1 as foreign int) == 1,
+              "could not install read-only parent stdout")
+  test.assert(ffi.close(endpoints[0]) == 0, "could not release copied pipe descriptor")
+  local observed: async.OperationError? = nil
+  local task = async.run<|nil, nil|>(function (): nil
+    do system.stdout:write("SHOULD_NOT_WRITE")
+    catch
+      if error is async.OperationError then observed = error as async.OperationError
+      else raise end
+    end
+    system.stdout:close()
+    return nil
+  end)
+  async.loop()
+  local restored = ffi.dup2(saved, 1 as foreign int)
+  local released = ffi.close(saved)
+  saved = -1
+  test.assert(restored == 1 and released == 0, "could not restore child stdout")
+  test.assert(task:status():has_succeeded() and observed ~= nil,
+              "read-only stdout did not produce a nominal write failure")
+  local failure = observed as async.OperationError
+  test.assert(failure.code == uv.EPIPE and failure.operation == "stdio.write",
+              "write startup failure changed operation or status")
+  local companion = async.run<|nil, nil|>(function (): nil
+    system.stdout:write("WRITE_START_COMPANION_MARKER")
+    system.stdout:close()
+    fs.write_file(result_path, "WRITE_START_FAILURE_OK:" .. failure.name)
+    return nil
+  end)
+  async.loop()
+  test.assert(companion:status():has_succeeded(), "restored-output companion failed")
+  return 0
+end
+
+function main(args: {string}): integer
+  if #args == 2 and args[1] == "write-start" then
+    return coverage_write_start_failure(args[2])
+  end
+  test.assert(#args == 1, "read failure child requires one result path")
+  if args[1] == "unknown-signal" then
+    -- This fresh exec child has the default SIGALRM disposition; the test
+    -- harness does not ignore it. Termination does not generate a core file.
+    ffi.raise(ffi.SIGALRM)
+    return 99
+  end
+  local saved = ffi.dup(0 as foreign int)
+  test.assert(saved >= 0, "could not preserve child stdin")
+  defer do
+    if saved >= 0 then ffi.dup2(saved, 0 as foreign int); ffi.close(saved) end
+  end
+  local endpoints = foreign int.new_array(2)
+  test.assert(ffi.pipe(endpoints) == 0, "could not create child-only pipe")
+  defer ffi.close(endpoints[0])
+  test.assert(ffi.dup2(endpoints[1], 0 as foreign int) == 0,
+              "could not install write-only parent stdin")
+  test.assert(ffi.close(endpoints[1]) == 0, "could not release copied pipe descriptor")
+  local observed: async.OperationError? = nil
+  local task = async.run<|nil, nil|>(function (): nil
+    do system.stdin:read()
+    catch
+      if error is async.OperationError then observed = error as async.OperationError
+      else raise end
+    end
+    return nil
+  end)
+  async.loop()
+  -- Descriptor restoration precedes assertions and the successful companion.
+  local restored = ffi.dup2(saved, 0 as foreign int)
+  local released = ffi.close(saved)
+  saved = -1
+  test.assert(restored == 0 and released == 0, "could not restore child stdin")
+  test.assert(task:status():has_succeeded() and observed ~= nil,
+              "write-only stdin did not produce a nominal read failure")
+  local failure = observed as async.OperationError
+  test.assert(failure.code < 0 and failure.operation == "stdio.read.start",
+              "read startup failure changed operation or status")
+  local companion = async.run<|nil, nil|>(function (): nil
+    local input = ""
+    for chunk in system.stdin:read do input = input .. chunk end
+    test.assert(input == "READ_START_INPUT_MARKER" and system.stdin:read() == nil,
+                "failed read startup damaged the restored input or EOF")
+    system.stdin:close()
+    fs.write_file(args[1], "READ_START_FAILURE_OK:" .. failure.name)
+    return nil
+  end)
+  async.loop()
+  test.assert(companion:status():has_succeeded(), "restored-input companion failed")
+  return 0
+end

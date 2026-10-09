@@ -1,0 +1,31 @@
+local function check_coverage_shutdown_admission(mode: string)
+  runtime_test.run(function ()
+    local workspace = fs.tmpname()
+    fs.unlink(workspace)
+    fs.mkdir(workspace)
+    runtime_test.cleanup(function () command.remove_tree(workspace) end)
+    fs.write_file(workspace .. "/os_shutdown_admission_app.titan",
+      fs.read_file("spec/fixtures/stdlib/titan/os_shutdown_admission_app.titan"))
+    local output, why, compiled = command.compile(workspace,
+      "os_shutdown_admission_app", {"--no-uv-bootstrap"})
+    test.assert(why == "exit" and compiled == 0,
+                "could not compile shutdown admission child: " .. output)
+    local result, exited, status = command.capture({
+      command.program(workspace, "os_shutdown_admission_app"), mode,
+    })
+    local expected = "OS_SHUTDOWN_ADMISSION_OK:" .. mode
+    test.assert(exited == "exit" and status == 0 and
+                (result == expected .. "\n" or result == expected .. "\r\n"),
+                "shutdown admission child failed (" .. exited .. "/" .. status .. "): " .. result)
+  end)
+end
+
+function test_coverage_spawn_rejects_configuration_during_runtime_shutdown(
+    _context: test.Context)
+  check_coverage_shutdown_admission("configure")
+end
+
+function test_coverage_spawn_rechecks_runtime_shutdown_after_public_option(
+    _context: test.Context)
+  check_coverage_shutdown_admission("spawn")
+end

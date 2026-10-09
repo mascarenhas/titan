@@ -1,0 +1,33 @@
+local test = import "test"
+local async = import "async"
+local system = import "os"
+foreign import "os_descriptor_limit.h"
+local fs = import "fs"
+
+function main(args: {string}): integer
+  test.assert(#args == 1, "descriptor limit child requires one result path")
+  test.assert(ffi.titan_test_fd_limit_lower() == 0, "could not lower child descriptor soft limit")
+  local rejected = false
+  do
+    system.stdin:read()
+  catch
+    local restore_status = ffi.titan_test_fd_limit_restore()
+    test.assert(restore_status == 0, "could not restore child descriptor soft limit")
+    test.assert(error is async.OperationError, "dup failure lost nominal OperationError")
+    local failure = error as async.OperationError
+    test.assert(failure.name == "EMFILE" and failure.operation == "stdio.parent.duplicate",
+                "unexpected descriptor failure: " .. failure.operation .. " " .. failure.name)
+    rejected = true
+  end
+  local restore_status = ffi.titan_test_fd_limit_restore()
+  test.assert(restore_status == 0 and ffi.titan_test_fd_limit_restored() == 1,
+              "descriptor soft limit was not restored")
+  test.assert(rejected, "dup unexpectedly succeeded with descriptor soft limit zero")
+  local input = ""
+  for chunk in system.stdin:read do input = input .. chunk end
+  test.assert(input == "RLIMIT_INPUT_MARKER", "failed duplicate closed original input")
+  test.assert(system.stdin:read() == nil, "restored input did not stay at EOF")
+  system.stdin:close()
+  fs.write_file(args[1], "EMFILE_OK")
+  return 0
+end

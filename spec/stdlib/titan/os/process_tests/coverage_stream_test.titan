@@ -66,3 +66,31 @@ function test_coverage_os_consumed_spawn_options_reject_reuse(_context: test.Con
     process_support.assert_normal(process:wait(), "consumed configuration")
   end)
 end
+
+function test_captured_input_rejects_writes_after_child_exit(_context: test.Context)
+  runtime_test.run(function ()
+    local process = system.spawn(process_support.child_path(), {"exit", "0"})
+    defer cleanup_process(process)
+    local input = process_support.required_output(process.stdin, "closed child stdin")
+    process_support.assert_normal(process:wait(), "closed input child")
+    for _ = 1, 2 do
+      local rejected = false
+      do
+        input:write("closed pipe probe")
+      catch
+        test.assert(error is async.OperationError,
+                    "closed child write lost nominal OperationError")
+        local failure = error as async.OperationError
+        test.assert(failure.operation == "stdio.write" and failure.code < 0,
+                    "closed child write lost its native operation failure")
+        if not common.is_windows() then
+          test.assert(failure.name == "EPIPE", "closed pipe did not report EPIPE")
+        end
+        rejected = true
+      end
+      test.assert(rejected, "write to reaped child did not reject")
+    end
+    input:close()
+    input:close()
+  end)
+end

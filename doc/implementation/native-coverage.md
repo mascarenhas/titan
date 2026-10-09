@@ -81,6 +81,21 @@ runtime. Test/support/entrypoint and unrelated native dependencies are not
 instrumented. Build-generated counters are harmless because runs own fresh
 prefixes after all probes.
 
+The explicit Windows `llvm-gcov` backend instead pins Clang/LLVM 22.1.8 and
+uses `-dumpdir` with the owning object directory. LLVM keeps the source basename
+for notes and embedded data filenames even though compilation writes a unique
+sibling temporary object. Source-owned native lambdas receive `used` only in
+selected LLVM translation units so that uncalled bodies retain executable
+notes. Global `-femit-all-decls` is deliberately avoided: it also emits unrelated
+inline header bodies with dependencies the image need not supply. Ordinary and
+GCC emission retain their existing policy.
+
+Object publication preserves the prior object until the sibling compilation
+succeeds. A failed compilation invalidates that attempt's compiled entry and
+cannot link the old object as a fallback; a successful retry atomically replaces
+it. Coverage receipts still reject the prior object after source changes,
+including changes with an equal filesystem timestamp.
+
 The repository workflow builds a normal shared standard provider with 22
 measured production roots and unmeasured `titan.test`. It stages the explicit
 test ensemble and native fixtures inside the coverage build directory, then
@@ -102,14 +117,59 @@ remain intact.
 Repeated `seal --unmeasured-input` arguments bind separately built consumers and
 their original/staged test inputs to the same run through the existing hashed
 link inventory. They do not add measured sources or executable lines.
+`seal --unmeasured-input-file` provides the same explicit inputs through a strict
+UTF-8 JSON array, avoiding Windows' command-line length limit. The list itself
+is hashed. No directory search substitutes for a caller's consumer inventory.
+
+Windows final-program paths take the coverage output root while preserving
+logical provider identity and the normal executable-directory lookup. The
+manifest includes the actual measured DLL and an explicitly unmeasured EXE
+launcher, plus entrypoint/resource and native final-link inputs. Windows has no
+static provider companion. The repository Make workflow copies a prepared SDK
+into a fresh local NTFS workspace, replaces only the private copy's standard DLL
+and shims, builds the ordinary native consumer there, and seals all input files.
+The coverage host supervises the aggregate directly: nesting the ordinary test
+supervisor could hide an unjoined child by cleaning it up first.
 
 ## Host collection and reporting
 
 The installed Python `titan-coverage` command runs the backend capability probe,
 seals manifests, supervises runs, and normalizes reports. It uses GCC's gcov
-JSON v2 for counts and pinned gcovr 8.4 for standard rendering. It does not parse
-gcov binary data, invent counts, use C/C++ decision heuristics on Titan syntax,
+JSON v2 by default and pinned gcovr 8.4 for standard rendering. It does not invent
+counts, use C/C++ decision heuristics on Titan syntax,
 or place report dependencies in the synthetic runner.
+
+`load_manifest` validates the sealed inputs, tools and runner rather than hashing
+the executing Python script. A compatible updated reporter can therefore read
+retained notes and run counters from outside the sealed build and write a fresh
+report without changing that build. The embedded Windows runner source identity
+remains checked by `validate_runner`.
+
+The Windows LLVM reader first validates the exact `*11B` binary version, file
+stamp, per-function line/CFG checksums, function inventory and counter arity.
+This parses metadata rather than reconstructing counts. The matching
+`llvm-cov gcov --intermediate-format` remains the sole count reader. Its strict
+UTF-8 intermediate adapter requires the exact source/function/executable-line
+inventory from the notes, unsigned bounded counts, and complete records. Any
+stderr diagnostics, unknown records, missing inventory or malformed input fail,
+even when LLVM exits zero. Notes/data are copied into one private reader
+directory per object and checked unchanged afterwards. This precheck matters:
+LLVM can accept some altered binary version fields without a diagnostic.
+
+The LLVM probe binds compiler/profiler executable and explicitly imported
+implementation-DLL hashes, the effective x64 Windows GNU target, and the static
+profile-runtime archive. It verifies multi-file attribution, notes-only zeros,
+stable temporary-object notes, shared-provider exit, threaded atomic counters,
+and joined child processes. The native Python executable hash, implementation,
+version and bitness are also sealed and checked on readback. Windows Python
+must be a direct installation whose implementation DLLs are adjacent to its
+executable; virtual-environment redirectors are not supported by this identity
+contract. It materializes the embedded C process supervisor
+once under the build-owned `tools` directory, recording its exact source,
+compile argv, image hash and PE import inventory. Existing helpers validate or
+fail; sealing and execution never repair them or choose a PATH substitute.
+The helper uses `-g0` and a deterministic PE timestamp so build-directory debug
+paths do not change its byte identity across compatible builds.
 
 Sealing preserves and checks compiler-written hashes, verifies staged/tracked
 byte identity, records compiler/profiler/libgcov/target identities, and rejects
@@ -134,6 +194,41 @@ counter collection and cannot produce even an incomplete diagnostic report.
 This boundary does not contain descendants that deliberately change their
 session or process group.
 
+On Windows, the native helper creates the leader suspended, assigns it atomically
+to a kill-on-close Job Object, and resumes it only after assignment. Its child
+handle list contains exactly the three standard handles. Python owns the sole
+noninherited writer of a separate control pipe; only the helper inherits its
+read handle and clears inheritance before creating the leader. Pipe EOF requests
+bounded retirement. Python starts the helper with a private headless console;
+the helper verifies that its console contains only its own PID and has no
+window before creating the leader. The leader inherits that console, so console
+infrastructure stays outside the measured job while descendants retain ordinary
+console inheritance. Python keeps the caller console. Explicit output pipes
+preserve native stdio, and terminal input uses a low-level forwarding pump.
+
+LLVM capability fixtures use a unique workspace beside the sealed helper.
+Success removes that workspace; failure retains its generated sources and
+available notes/data, raw reader output and native receipts, plus a `failure.json`
+naming the stage and available expected/observed oracle. Compile/link receipts
+retain status and at most 64 KiB of each output stream, with original sizes and
+hashes. Native probe streams are teed while forwarding, with the same retention
+bound and observed byte counts/hashes. Retained sizes come from the actual files
+after closing; storage failure keeps draining and preserves a native rejection. No
+caller environment is recorded. Diagnostic-write failure preserves the primary
+tool rejection. The CLI names the retained directory explicitly.
+
+The helper requires a reaped leader and a confirmed empty job before its final
+control observation and receipt. Natural leader exit with live descendants is
+incomplete status 125; timeout 124 and interruption 130 take precedence without changing
+the raw leader DWORD. Python interruption before collection also makes the run
+incomplete, even if the helper's finite admission boundary has already closed.
+Repeated interrupts cannot turn that result into success. A parent crash leaves
+the run uncollected, and a forced-helper backstop or unconfirmed emptiness
+prevents counter collection. Readback validates the native receipt hash, exact
+control enrollment, cleanup/status relationships and sealed helper identity.
+Native helper receipt version 4 records the verified private console and leader
+creation flags; readback rejects an unverified console or incompatible helper.
+
 Run receipt version 2 records the ownership policy, group identity, retirement,
 emptiness confirmation and raw leader status. Readback rejects legacy receipts,
 missing ownership evidence, and a complete state inconsistent with retirement
@@ -156,9 +251,11 @@ GCC may include those physical header locations in a selected translation unit's
 raw notes. They have no Titan source ownership and stay outside the declared
 source-line report, like other native/header code.
 
-Linux/macOS/Windows receipts remain separate. The initial GCC backend is
-verified on Linux and Intel macOS; Windows CLANG64 rejection is deliberate and
-does not imply that a different gcov-compatible backend has been validated.
+Linux/macOS/Windows receipts remain separate. GCC and the explicitly selected
+Windows LLVM backend have different tool, runtime and counter policies;
+compatible-run merging cannot combine them. Build-owned helper paths are not
+semantic differences between otherwise compatible Windows builds, but helper
+source/image/compiler identity and counter policy remain part of compatibility.
 
 ## Verification owners
 
@@ -178,6 +275,14 @@ It is not required by ordinary Windows/Clang tests. The stdlib Make target
 reuses the existing aggregate and native fixtures with a complete production
 inventory. Ordinary full-suite and VM gates continue to validate shipping
 behavior independently of instrumentation.
+
+`spec/coverage_backend_spec.lua` owns explicit backend selection and early
+Windows rejection of the default GCC backend. Host tests also cover strict
+LLVM metadata/intermediate rejection, runner and consumer-list provenance,
+Python interruption, and receipt readback. Native Windows validation must use
+the genuinely installed compiler/host, prove EXE/DLL and provider selection,
+and render the complete stdlib report; scratch capability probes alone do not
+establish that integration.
 
 The [initial validation record](native-coverage-validation.md) contains the
 complete stdlib baseline, coverage-driven test gaps, exact tools and local VM

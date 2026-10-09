@@ -1,0 +1,90 @@
+local function late_write_shutdown_schedule(schedule: integer)
+  local server, port = support.listen_available(49100, support.CERTIFICATE,
+                                               support.PRIVATE_KEY)
+  defer server:close()
+  local payload = "late\0scheduled\255write"
+  local received = ""
+  local peer_ready = false
+  local peer_token = async.ResumeToken.new("ssl.late-write.peer")
+  local peer = async.run<|value, value|>(function (): value
+    local accepted = server:accept()
+    defer accepted:abort()
+    accepted:handshake()
+    peer_ready = true
+    async.suspend(peer_token)
+    accepted:shutdown()
+    while true do
+      local piece? = accepted:read()
+      if piece == nil then break end
+      received = received .. piece
+      test.assert(#received <= #payload,
+                  "late TLS writer delivered unexpected extra bytes")
+    end
+    test.assert(accepted:read() == nil,
+                "TLS peer authenticated EOF was not sticky")
+    return nil
+  end)
+  task_support.cleanup_task(peer, "late TLS writer peer")
+
+  local connection = ssl.connect("localhost", port, support.TRUST_ROOT)
+  defer connection:abort()
+  while not peer_ready do async.yield() end
+  local authenticated_eof = false
+  local reader = async.run<|value, value|>(function (): value
+    test.assert(connection:read() == nil,
+                "TLS shutdown peer unexpectedly sent application bytes")
+    authenticated_eof = true
+    return nil
+  end)
+  task_support.cleanup_task(reader, "late TLS writer reader")
+  while reader:status():as_string() == "ready" do async.yield() end
+
+  -- Place the writer before the peer wake, alongside it, or after one to four
+  -- cooperative turns. Each platform may resolve these public schedules at a
+  -- different admission boundary; both legal results must preserve the stream.
+  if schedule > 0 then peer:resume(peer_token) end
+  for _ = 1, schedule - 1 do async.yield() end
+  local delivered = false
+  local rejected = false
+  local writer = async.run<|value, value|>(function (): value
+    do
+      connection:write(payload)
+      delivered = true
+    catch
+      test.assert(error is string and
+                  error == "ssl.write: SSL Connection is shutting down",
+                  "late TLS writer replaced the shutdown admission error")
+      rejected = true
+    end
+    return nil
+  end)
+  task_support.cleanup_task(writer, "late TLS writer")
+  if schedule == 0 then peer:resume(peer_token) end
+
+  async.join(writer)
+  async.join(reader)
+  async.join(peer)
+  test.assert(writer:status():has_succeeded() and
+              reader:status():has_succeeded() and peer:status():has_succeeded(),
+              "late TLS write did not retire its public Task owners")
+  test.assert(delivered ~= rejected,
+              "late TLS writer did not report one terminal result")
+  if delivered then
+    test.assert(received == payload,
+                "successful late TLS write changed or lost binary bytes")
+  else
+    test.assert(received == "",
+                "rejected late TLS write delivered application bytes")
+  end
+  test.assert(authenticated_eof,
+              "late TLS write obscured authenticated EOF")
+end
+
+function test_ssl_late_writer_preserves_delivery_or_shutdown_error(
+    context: test.Context)
+  for schedule = 0, 5 do
+    context:run("schedule_" .. schedule, function (_: test.Context)
+      runtime_test.run(function () late_write_shutdown_schedule(schedule) end)
+    end)
+  end
+end

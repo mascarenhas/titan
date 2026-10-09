@@ -1,0 +1,61 @@
+local async = import "async"
+local system = import "os"
+local test = import "test"
+foreign import "stdio.h"
+
+local function fresh_runtime()
+  local completed = false
+  local task = async.run<|nil, nil|>(function (): nil completed = true; return nil end)
+  async.loop()
+  test.assert(completed and task:status():has_succeeded(), "could not finish a fresh Runtime")
+end
+
+local function fatal_wait(marker: value, source_trace: string)
+  local observed = false
+  do
+    async.await_cleanup<|nil, nil|>(function (_resolve, _reject, fatal)
+      fatal(marker, source_trace)
+    end)
+  catch
+    observed = error == marker
+  end
+  test.assert(observed and async.is_closing(), "public fatal callback did not close Runtime")
+end
+
+local function shutdown_admission(mode: string)
+  local marker: value = {["public-spawn-shutdown"] = mode}
+  local source_trace = "public spawn shutdown origin"
+  local rejected, option_ran = false, false
+  local task = async.run<|nil, nil|>(function (): nil
+    if mode == "configure" then fatal_wait(marker, source_trace) end
+    do
+      system.spawn("/titan-private-probe-must-not-spawn", {},
+        function (_config: system.SpawnConfig): integer
+          option_ran = true
+          fatal_wait(marker, source_trace)
+          return 0
+        end)
+    catch
+      local expected = "cannot configure a Process while async Runtime is shutting down"
+      if mode == "spawn" then expected = "cannot spawn a Process while async Runtime is shutting down" end
+      test.assert(error is string and error == expected, "spawn changed its shutdown admission failure")
+      rejected = true
+    end
+    test.assert(rejected and option_ran == (mode == "spawn"), "spawn crossed its shutdown admission boundary")
+    return nil
+  end)
+  local preserved = false
+  do async.loop()
+  catch preserved = error == marker and traceback == source_trace end
+  test.assert(preserved and task:status():has_succeeded(), "spawn cleanup replaced fatal origin or stranded its Task")
+  fresh_runtime()
+end
+
+function main(args: {string}): integer
+  test.assert(#args == 1 and (args[1] == "configure" or args[1] == "spawn"),
+              "shutdown admission child requires one valid mode")
+  shutdown_admission(args[1])
+  test.assert(ffi.puts("OS_SHUTDOWN_ADMISSION_OK:" .. args[1]) >= 0,
+              "could not publish shutdown admission result")
+  return 0
+end

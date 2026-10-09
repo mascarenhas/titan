@@ -8,7 +8,8 @@ SHELL := $(if $(filter Windows_NT,$(OS)),bash.exe,/bin/bash)
 .DEFAULT_GOAL := help
 
 # Choose the policy before configuring any source or native object graph.
-TITAN_WINDOWS_TEST_GOALS := toolchain-check lua-source-check lua-check native-source-check native-check compiler-check runtime-check stdlib-check compiler-publication-check titan-stdlib-test-build titan-stdlib-test-run titan-stdlib-test rock-test test
+TITAN_WINDOWS_COVERAGE_GOALS := titan-native-coverage-build titan-native-coverage-run titan-native-coverage-report titan-native-coverage
+TITAN_WINDOWS_TEST_GOALS := toolchain-check lua-source-check lua-check native-source-check native-check compiler-check runtime-check stdlib-check compiler-publication-check titan-stdlib-test-build titan-stdlib-test-run titan-stdlib-test rock-test test $(TITAN_WINDOWS_COVERAGE_GOALS)
 TITAN_BUILD_PROFILE ?= $(if $(filter $(TITAN_WINDOWS_TEST_GOALS),$(MAKECMDGOALS)),validation,production)
 ifneq ($(TITAN_BUILD_PROFILE),production)
 ifneq ($(TITAN_BUILD_PROFILE),validation)
@@ -89,6 +90,10 @@ help:
 	@echo '  titan-stdlib-test-build  build all shared native tests in a private NTFS SDK copy'
 	@echo '  titan-stdlib-test-run  run the built aggregate, optionally with TITAN_FILTER'
 	@echo '  titan-stdlib-test  build and run the shared native aggregate'
+	@echo '  titan-native-coverage-build  build and seal all 22 production roots in a private SDK copy'
+	@echo '  titan-native-coverage-run  capture the 28-root native suite with fresh LLVM counters'
+	@echo '  titan-native-coverage-report  render local line HTML, LCOV and Cobertura reports'
+	@echo '  titan-native-coverage  build, capture and report; prepared SDK and native Python required'
 
 FORCE:
 
@@ -302,7 +307,7 @@ compiler-publication-check: runtime
 include spec/support/stdlib_test_modules.mk
 TITAN_TEST_BUILD_DIR ?= $(WINDOWS_BUILD_ROOT)/stdlib-tests
 TITAN_TEST_MAKE := $(MAKE)
-TITAN_TEST_TIMEOUT ?= 1800
+TITAN_TEST_TIMEOUT ?= $(if $(filter $(TITAN_WINDOWS_COVERAGE_GOALS),$(MAKECMDGOALS)),600,1800)
 TITAN_FILTER ?=
 .PHONY: titan-stdlib-test-build titan-stdlib-test-run titan-stdlib-test
 titan-stdlib-test-build:
@@ -315,6 +320,36 @@ titan-stdlib-test-run:
 
 titan-stdlib-test: titan-stdlib-test-build
 	$(MAKE) -f Makefile.win titan-stdlib-test-run
+
+# These leaf targets consume a prepared installed SDK without reinstalling it.
+# LLVM's gcov dialect and native Python are explicit Windows-only dependencies.
+TITAN_COVERAGE_BUILD_DIR ?= $(WINDOWS_BUILD_ROOT)/native-coverage/build
+TITAN_COVERAGE_RUN_DIR ?= $(WINDOWS_BUILD_ROOT)/native-coverage/run
+TITAN_COVERAGE_REPORT_DIR ?= $(WINDOWS_BUILD_ROOT)/native-coverage/report
+TITAN_COVERAGE_PYTHON ?= python3
+TITAN_COVERAGE_GCOV ?= llvm-cov.exe gcov
+TITAN_COVERAGE_GCOVR ?= gcovr
+.PHONY: $(TITAN_WINDOWS_COVERAGE_GOALS)
+titan-native-coverage-build:
+	MAKE=$(call quote,$(TITAN_TEST_MAKE)) CC=$(call quote,$(CC)) AR=$(call quote,$(AR)) RANLIB=$(call quote,$(RANLIB)) \
+	  bash scripts/windows_native_coverage.sh build $(call quote,$(TITAN_COVERAGE_BUILD_DIR)) \
+	  $(call quote,$(PREFIX)) $(call quote,$(TITAN_COVERAGE_PYTHON)) \
+	  $(call quote,$(TITAN_COVERAGE_GCOV)) $(call quote,$(TITAN_COVERAGE_GCOVR)) $(STDLIB_ROOTS)
+
+titan-native-coverage-run:
+	TITAN_TEST_TIMEOUT=$(call quote,$(TITAN_TEST_TIMEOUT)) TITAN_FILTER=$(call quote,$(TITAN_FILTER)) \
+	  bash scripts/windows_native_coverage.sh run $(call quote,$(TITAN_COVERAGE_BUILD_DIR)) \
+	  $(call quote,$(TITAN_COVERAGE_RUN_DIR)) $(call quote,$(TITAN_COVERAGE_PYTHON))
+
+titan-native-coverage-report:
+	@bash scripts/windows_native_coverage.sh report $(call quote,$(TITAN_COVERAGE_BUILD_DIR)) \
+	  $(call quote,$(TITAN_COVERAGE_RUN_DIR)) $(call quote,$(TITAN_COVERAGE_REPORT_DIR)) \
+	  $(call quote,$(TITAN_COVERAGE_PYTHON)) $(call quote,$(TITAN_COVERAGE_GCOVR))
+
+titan-native-coverage: titan-native-coverage-build
+	+@run_status=0; $(MAKE) -f Makefile.win titan-native-coverage-run || run_status=$$?; \
+	report_status=0; $(MAKE) -f Makefile.win titan-native-coverage-report || report_status=$$?; \
+	test "$$run_status" = 0 || exit "$$run_status"; exit "$$report_status"
 
 .PHONY: rock-test test
 rock-test: export TITAN_ROCK_TEST_STDLIB_SPECS = spec/asan_generated_c_context_spec.lua spec/dense_array_runtime_spec.lua spec/libuv_build_spec.lua spec/lpeglabel_build_spec.lua spec/minicoro_spec.lua spec/rockspec_spec.lua

@@ -3,9 +3,11 @@
 set -euo pipefail
 source "$(dirname "$0")/../../scripts/windows_build_profile.sh"
 titan_windows_profile validation
-if [[ ${MSYSTEM:-} != CLANG64 || $# -lt 2 || $# -gt 3 ||
-      ( $1 != build && $1 != run ) || ( $1 == build && $# != 3 ) ]]; then
-  echo 'usage (native CLANG64): windows_stdlib_tests.sh build WORKSPACE VALIDATED_SDK_PREFIX | run WORKSPACE' >&2
+if [[ ${MSYSTEM:-} != CLANG64 || $# -lt 2 ||
+      ( $1 != build && $1 != run && $1 != coverage-run ) ||
+      ( $1 == build && $# != 3 ) || ( $1 == run && $# != 2 ) ||
+      ( $1 == coverage-run && $# != 6 ) ]]; then
+  echo 'usage (native CLANG64): windows_stdlib_tests.sh build WORKSPACE VALIDATED_SDK_PREFIX | run WORKSPACE | coverage-run WORKSPACE MANIFEST RUN_DIRECTORY PYTHON_COMMAND COVERAGE_HOST' >&2
   exit 2
 fi
 mode=$1
@@ -136,7 +138,11 @@ if [[ $mode == build ]]; then
     set -x
     cp "$work/cwd/spec/fixtures/stdlib/native/uv_coverage_threads.h" "$work/cwd/.titan-tests/uv_coverage_threads.h"
     cp "$work/cwd/spec/fixtures/stdlib/native/uv_coverage_pty.h" "$work/cwd/.titan-tests/uv_coverage_pty.h"
-    for fixture in async_foreign_work fs_fixture uv_stdio_probe sqlite3_worker_fixture; do
+    # Compile standalone child fixtures on Windows too, including cases whose
+    # POSIX/static-provider behavior is classified as unavailable. Their sticky
+    # OpenSSL startup objects must never be linked into the aggregate below.
+    for fixture in async_foreign_work fs_fixture uv_stdio_probe sqlite3_worker_fixture \
+        ssl_allocator_fixture ssl_error_strings os_descriptor_limit; do
       if [[ -f $work/cwd/spec/fixtures/stdlib/native/$fixture.h ]]; then
         cp "$work/cwd/spec/fixtures/stdlib/native/$fixture.h" "$work/cwd/.titan-tests/$fixture.h"
       fi
@@ -185,6 +191,7 @@ export TITAN_TEST_BUILD_DIR=$(cygpath -m "$work/cwd/.titan-tests")
 export TITAN_TEST_SOURCE_ROOT=$(cygpath -m "$work/cwd")
 export TITAN_TEST_SDK_ROOT="$winprefix"
 export TMP="$TITAN_TEST_ROOT" TEMP="$TITAN_TEST_ROOT"
+export TMPDIR=$(cygpath -m "$work/scratch")
 export TITAN_BEHAVIOR_SUPERVISOR=$(cygpath -w "$work/sdk/bin/windows-test-supervisor.exe")
 export TITAN_BEHAVIOR_EXE=$(cygpath -w "$work/sdk/bin/titan-stdlib-tests.exe")
 export TITAN_BEHAVIOR_CWD=$(cygpath -w "$work/cwd")
@@ -195,6 +202,51 @@ export TITAN_TEST_TIMEOUT=${TITAN_TEST_TIMEOUT:-1800} TITAN_FILTER=${TITAN_FILTE
 }
 printf 'Windows x64 CLANG64/UCRT native suite; local NTFS; roots:\n'
 cat "$work/roots.txt"
+if [[ $mode == coverage-run ]]; then
+  # Invoke the aggregate directly. The ordinary test supervisor would retire
+  # unjoined children itself and hide that failure from coverage ownership.
+  # Resolve caller-relative paths before entering the test working directory.
+  coverage_manifest=$(cygpath -au "$3")
+  coverage_run=$(cygpath -au "$4")
+  coverage_python=$5
+  coverage_host=$(cygpath -au "$6")
+  [[ ! -e $coverage_run && -f $coverage_manifest && -f $coverage_host ]] || {
+    echo 'Coverage requires a sealed manifest, installed host and fresh run directory' >&2
+    exit 1
+  }
+  perl -MText::ParseWords=shellwords -e '
+    my @a=shellwords($ARGV[0]); die "Invalid native Python command\n" unless @a;
+    print "$_\0" for @a' "$coverage_python" > "$work/coverage-python.argv"
+  mapfile -d '' -t coverage_python_argv < "$work/coverage-python.argv"
+  coverage_log=$(mktemp "$work/.coverage-output.XXXXXX")
+  coverage_test_arguments=()
+  if [[ -n $TITAN_FILTER ]]; then coverage_test_arguments+=("--filter=$TITAN_FILTER"); fi
+  trap 'rm -f "$coverage_log"' EXIT
+  set +e
+  (
+    cd "$work/cwd"
+    "${coverage_python_argv[@]}" "$(cygpath -m "$coverage_host")" run \
+      --manifest "$(cygpath -m "$coverage_manifest")" \
+      --run "$(cygpath -m "$coverage_run")" --timeout "$TITAN_TEST_TIMEOUT" \
+      -- "$(cygpath -m "$work/sdk/bin/titan-stdlib-tests.exe")" "${coverage_test_arguments[@]}"
+  ) 2>&1 | tee "$coverage_log"
+  coverage_status=$?
+  "$work/sdk/bin/lua.exe" -E "$(cygpath -m "$work/check_stdlib_test_output.lua")" \
+    "$(cygpath -m "$coverage_log")" "$(cygpath -m "$work/roots.txt")" \
+    "$TITAN_FILTER"
+  audit_status=$?
+  set -e
+  if [[ -n $(find "$work/scratch" -mindepth 1 -print -quit) ]]; then
+    echo 'Native tests left files in their owned scratch directory' >&2
+    audit_status=1
+  fi
+  if [[ -d $coverage_run ]]; then
+    cp "$coverage_log" "$coverage_run/output.log"
+    printf '%s\n' "$audit_status" > "$coverage_run/native-audit.exit"
+  fi
+  if [[ $coverage_status != 0 ]]; then exit "$coverage_status"; fi
+  exit "$audit_status"
+fi
 set +e
 # Inline PowerShell owns the supervisor handle and drains both output pipes.
 # The native supervisor atomically assigns the suite to its private Job Object;

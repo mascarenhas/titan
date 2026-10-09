@@ -8,9 +8,18 @@ local staticmetadata = require "titan-compiler.staticmetadata"
 
 local coverage = {}
 
+local function slash(filename)
+    return platform.windows and (filename:gsub("\\", "/")) or filename
+end
+
+local function identity(filename)
+    filename = slash(filename)
+    return platform.windows and filename:lower() or filename
+end
+
 local function absolute(filename)
-    return path.normalize(path.is_absolute(filename) and filename or
-        path.join(lfs.currentdir(), filename))
+    return slash(path.normalize(path.is_absolute(filename) and filename or
+        path.join(lfs.currentdir(), filename)))
 end
 
 local function mkdir(filename)
@@ -23,8 +32,18 @@ local function mkdir(filename)
     return lfs.mkdir(filename)
 end
 
+local function read_bytes(filename)
+    local file, err = io.open(filename, "rb")
+    if not file then return nil, err end
+    local contents, read_error = file:read("a")
+    local closed, close_error = file:close()
+    if not contents then return nil, read_error or "cannot read coverage input " .. filename end
+    if not closed then return nil, close_error end
+    return contents
+end
+
 local function hash_file(filename)
-    local contents, err = util.get_file_contents(filename)
+    local contents, err = read_bytes(filename)
     if not contents then return nil, err end
     return sha256.hex(contents)
 end
@@ -88,8 +107,15 @@ function coverage.prepare(driver, args, strategy)
         return nil, "Titan source coverage requires source #line directives"
     end
     if args.print_ast then return nil, "--coverage cannot be combined with --print-ast" end
-    if platform.windows then
+    local backend = args.coverage_backend or "gcc-gcov"
+    if backend ~= "gcc-gcov" and backend ~= "llvm-gcov" then
+        return nil, "unsupported native coverage backend " .. tostring(backend)
+    end
+    if platform.windows and backend == "gcc-gcov" then
         return nil, "native Titan coverage backend gcc-gcov is unsupported by the Windows CLANG64 SDK"
+    end
+    if not platform.windows and backend == "llvm-gcov" then
+        return nil, "native Titan coverage backend llvm-gcov requires the Windows x64 CLANG64/UCRT SDK"
     end
     local selected, names = {}, {}
     for _, name in ipairs(args.coverage_module or {}) do
@@ -109,10 +135,11 @@ function coverage.prepare(driver, args, strategy)
         if not from then return nil, "--coverage-source-map requires STAGED_DIRECTORY=TRACKED_DIRECTORY" end
         local resolved, resolution_error = strategy:realpath(absolute(from))
         if not resolved then return nil, resolution_error end
-        mappings[#mappings + 1] = { from = resolved, to = absolute(to) }
+        mappings[#mappings + 1] = { from = slash(resolved), to = absolute(to) }
     end
     table.sort(mappings, function(a, b) return #a.from > #b.from end)
-    local gcov = args.coverage_gcov or platform.getenv("GCOV") or "gcov"
+    local gcov = args.coverage_gcov or platform.getenv("GCOV") or
+        (backend == "llvm-gcov" and "llvm-cov gcov" or "gcov")
     local gcov_argv, parse_err = driver.split_shell_words(gcov)
     if not gcov_argv then return nil, parse_err end
     local cc_argv, cc_err = driver.split_shell_words(driver.CC)
@@ -124,25 +151,38 @@ function coverage.prepare(driver, args, strategy)
         if not result.ok then return nil, result.output or result.diagnostic end
         return result.output
     end
-    local cc_version, cc_version_err = run(cc_argv, { "-dumpfullversion" })
-    if not cc_version then return nil, "coverage requires GCC 14 or newer: " .. tostring(cc_version_err) end
-    cc_version = cc_version:match("^%s*(%d+%.%d+%.?%d*)")
-    local cc_banner = run(cc_argv, { "--version" })
-    if not cc_version or tonumber(cc_version:match("^%d+")) < 14 or
-       not cc_banner or cc_banner:lower():find("clang", 1, true) then
-        return nil, "coverage requires GCC 14 or newer; Clang is not a supported backend"
-    end
-    local gcov_version, gcov_err = run(gcov_argv, { "--version" })
-    if not gcov_version or not gcov_version:match("gcov") or
-       not gcov_version:find(cc_version, 1, true) then
-        return nil, "coverage requires gcov matching GCC " .. cc_version .. ": " .. tostring(gcov_err or gcov_version)
+    local cc_version
+    if backend == "gcc-gcov" then
+        local version, version_error = run(cc_argv, { "-dumpfullversion" })
+        if not version then return nil, "coverage requires GCC 14 or newer: " .. tostring(version_error) end
+        cc_version = version:match("^%s*(%d+%.%d+%.?%d*)")
+        local cc_banner = run(cc_argv, { "--version" })
+        if not cc_version or tonumber(cc_version:match("^%d+")) < 14 or
+           not cc_banner or cc_banner:lower():find("clang", 1, true) then
+            return nil, "coverage requires GCC 14 or newer; Clang requires the explicit llvm-gcov backend"
+        end
+        local gcov_version, gcov_err = run(gcov_argv, { "--version" })
+        if not gcov_version or not gcov_version:match("gcov") or
+           not gcov_version:find(cc_version, 1, true) then
+            return nil, "coverage requires gcov matching GCC " .. cc_version .. ": " .. tostring(gcov_err or gcov_version)
+        end
+    else
+        local banner = run(cc_argv, { "--version" })
+        cc_version = banner and banner:match("clang version (%d+%.%d+%.%d+)%f[%D]")
+        local target = run(cc_argv, { "-dumpmachine" })
+        if cc_version ~= "22.1.8" or not target or
+           target:match("^%s*(.-)%s*$") ~= "x86_64-w64-windows-gnu" then
+            return nil, "llvm-gcov coverage requires Clang 22.1.8 targeting x86_64-w64-windows-gnu (CLANG64/UCRT)"
+        end
+        -- llvm-cov's gcov subcommand shares the LLVM version banner. The host
+        -- probe additionally binds exact executable/runtime bytes and target.
+        local banner_gcov = run(gcov_argv, { "--version" })
+        if not banner_gcov or banner_gcov:match("LLVM version (%d+%.%d+%.%d+)%f[%D]") ~= cc_version then
+            return nil, "llvm-gcov coverage requires llvm-cov gcov matching LLVM " .. cc_version
+        end
     end
     local frontend = absolute(args._coverage_frontend or "titanc")
     local tool = path.join(path.dirname(frontend), "titan-coverage")
-    local probe = strategy:run({ "python3", tool, "probe", "--cc", driver.CC, "--gcov", gcov })
-    if not probe.ok then
-        return nil, "native coverage capability probe failed: " .. tostring(probe.output or probe.diagnostic)
-    end
     local directory = absolute(args.coverage)
     local source_directories = { absolute(".") }
     for tree in (args.tree or "."):gmatch("[^;]+") do
@@ -161,8 +201,8 @@ function coverage.prepare(driver, args, strategy)
             source_identity, identity_error = strategy:realpath(source_directory)
             if not source_identity then return nil, identity_error end
         end
-        if directory == source_directory or
-           output_identity and output_identity == source_identity then
+        if identity(directory) == identity(source_directory) or
+           output_identity and source_identity and identity(output_identity) == identity(source_identity) then
             return nil, "coverage output must be a separate build directory"
         end
     end
@@ -172,6 +212,8 @@ function coverage.prepare(driver, args, strategy)
     if not compile_prefix then return nil, flags_err end
     for _, flag in ipairs(compile_prefix) do
         if flag == "--coverage" or flag:match("^%-fprofile") or
+           flag:match("^%-fno%-profile") or flag:match("^%-fcoverage") or
+           flag:match("^%-dumpdir") or flag:match("^%-dumpbase") or
            flag == "-ftest-coverage" then
             return nil, "coverage flags must be owned by --coverage, not ambient compiler flags"
         end
@@ -179,14 +221,41 @@ function coverage.prepare(driver, args, strategy)
     local root = absolute(args.coverage_root or ".")
     local root_identity, root_error = strategy:realpath(root)
     if not root_identity then return nil, root_error end
+    root_identity = slash(root_identity)
+    local python = args.coverage_python or "python3"
+    local probe_argv, python_error = driver.split_shell_words(python)
+    if not probe_argv or #probe_argv == 0 then return nil, python_error or "--coverage-python command is empty" end
+    for _, argument in ipairs({ tool, "probe", "--cc", driver.CC, "--gcov", gcov }) do
+        probe_argv[#probe_argv + 1] = argument
+    end
+    if backend == "llvm-gcov" then
+        probe_argv[#probe_argv + 1] = "--backend"
+        probe_argv[#probe_argv + 1] = backend
+        probe_argv[#probe_argv + 1] = "--runner-directory"
+        probe_argv[#probe_argv + 1] = path.join(directory, "tools")
+        for index, argument in ipairs(cc_argv) do
+            if compile_prefix[index] ~= argument then
+                return nil, "coverage compiler prefix does not match the selected CC command"
+            end
+        end
+        for index = #cc_argv + 1, #compile_prefix do
+            probe_argv[#probe_argv + 1] = "--compile-arg=" .. compile_prefix[index]
+        end
+    end
+    local probe = strategy:run(probe_argv)
+    if not probe.ok or type(probe.output) ~= "string" or not probe.output:match("%S") then
+        return nil, "native coverage capability probe failed: " .. tostring(probe.output or probe.diagnostic)
+    end
     local settings = {
         metric = "titan-executable-lines", line_mapping = "titan-coverage-markers-v1",
         modules = names, compile_prefix = compile_prefix,
         link_flags = driver.EXTRA_LDFLAGS, compiler_identity = compiler_identity(frontend),
         cc = driver.CC, cc_version = cc_version, gcov = gcov,
+        backend = backend, python = python,
+        counter_policy = { format = backend, gcov_prefix_strip = backend == "llvm-gcov" and 1 or 0 },
         backend_probe = probe.output,
         pretty_print = args.pretty_print == true, test = args.test == true,
-        source_tree = args.tree or ".", working_directory = lfs.currentdir(),
+        source_tree = args.tree or ".", working_directory = absolute("."),
         source_mappings = mappings,
         root_identity = root_identity,
     }
@@ -201,7 +270,7 @@ function coverage.prepare(driver, args, strategy)
         if not ok then return nil, err end
     end
     return {
-        directory = directory, selected = selected, modules = names,
+        directory = directory, selected = selected, modules = names, backend = backend,
         root = root, root_identity = root_identity, strategy = strategy, settings = settings,
         mappings = mappings,
         sources = {}, source_entries = {}, receipts = {}, source_hashes = {},
@@ -215,7 +284,7 @@ function coverage.source(build, name, source, forced)
     local hashes = {}
     local source_hashes = {}
     for _, filename in ipairs(source.files) do
-        local bytes = source.contents and source.contents[filename] or util.get_file_contents(filename)
+        local bytes = source.contents and source.contents[filename] or read_bytes(filename)
         if not bytes then return nil, "cannot read coverage source " .. filename end
         local digest = sha256.hex(bytes)
         hashes[#hashes + 1] = absolute(filename) .. "\0" .. digest
@@ -239,6 +308,11 @@ end
 
 function coverage.compile_flags(build, name)
     if not build.selected[name] then return { "-O0", "-fno-lto" } end
+    if build.backend == "llvm-gcov" then
+        local stem = path.join(build.directory, "objects", (name:gsub("[.]", "/")))
+        return { "-O0", "-fno-lto", "--coverage", "-fprofile-update=atomic",
+            "-dumpdir", slash(path.dirname(stem)) .. "/" }
+    end
     return { "-O0", "-fno-lto", "--coverage", "-fprofile-update=atomic",
         "-fkeep-static-functions", "-dumpbase", path.basename(name:gsub("[.]", "/")) .. ".c",
         "-dumpbase-ext", ".c" }
@@ -264,16 +338,18 @@ function coverage.write_manifest(build, imported, objects, providers, extra_inpu
             local tracked = filename_absolute
             local source_identity, source_error = build.strategy:realpath(filename_absolute)
             if not source_identity then return nil, source_error end
+            source_identity = slash(source_identity)
             for _, mapping in ipairs(build.mappings) do
-                if source_identity:sub(1, #mapping.from + 1) == mapping.from .. "/" then
+                if identity(source_identity):sub(1, #mapping.from + 1) == identity(mapping.from) .. "/" then
                     tracked = mapping.to .. source_identity:sub(#mapping.from + 1)
                     break
                 end
             end
             local tracked_identity, tracked_error = build.strategy:realpath(tracked)
             if not tracked_identity then return nil, tracked_error end
+            tracked_identity = slash(tracked_identity)
             local relative = tracked_identity:sub(#build.root_identity + 2)
-            if tracked_identity:sub(1, #build.root_identity + 1) ~= build.root_identity .. "/" then
+            if identity(tracked_identity):sub(1, #build.root_identity + 1) ~= identity(build.root_identity) .. "/" then
                 return nil, "coverage source is outside --coverage-root: " .. filename_absolute
             end
             sources[#sources + 1] = { path = filename_absolute, report_path = relative, module = name,
@@ -335,7 +411,7 @@ function coverage.write_manifest(build, imported, objects, providers, extra_inpu
         end
     end
     table.sort(link_inventory, function(a, b) return a.path < b.path end)
-    local manifest = { version = 1, backend = "gcc-gcov", root = build.root,
+    local manifest = { version = 1, backend = build.backend or "gcc-gcov", root = build.root,
         sources = sources, objects = inventory, providers = providers,
         unmeasured = unmeasured, link_inventory = link_inventory, settings = build.settings }
     for _, provider in ipairs(providers) do provider.sha256 = assert(hash_file(provider.path)) end

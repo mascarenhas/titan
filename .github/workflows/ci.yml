@@ -903,13 +903,16 @@ jobs:
           bash spec/support/ci_sanitizer_capture.sh ssl-backpressure \
             make titan-stdlib-test-run \
               TITAN_FILTER='test_ssl_cancel_backpressured_write_aborts_before_native_drain$'
+          bash spec/support/ci_sanitizer_capture.sh ssl-drain-failure \
+            make titan-stdlib-test-run \
+              TITAN_FILTER='^ssl[.]tests[.]test_ssl_drain_preserves_write_shutdown_failure$'
           bash spec/support/ci_sanitizer_capture.sh http-upgrade-handoff \
             make titan-stdlib-test-run \
               TITAN_FILTER='test_upgrade_server_transfers_binary_excess_and_handler_lifetime$'
           bash spec/support/ci_sanitizer_capture.sh http-upgrade-abort \
             make titan-stdlib-test-run \
               TITAN_FILTER='test_upgrade_opening_cancellation_aborts_before_output_drain$'
-          for ownership_log in ssl-duplex ssl-backpressure \
+          for ownership_log in ssl-duplex ssl-backpressure ssl-drain-failure \
               http-upgrade-handoff http-upgrade-abort; do
             if ! grep -Eq '^\[==========\] [1-9][0-9]* tests? ran\.$' \
                 "$TITAN_SANITIZER_LOG_DIR/$ownership_log.log"; then

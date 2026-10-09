@@ -329,6 +329,19 @@ describe("Windows launcher filenames", function()
         assert.equal("app/tests.dll", suite.relative_provider)
     end)
 
+    it("relocates both Windows program artifacts under an optional output root", function()
+        local root = temporary.name("-coverage-output")
+        local original = assert(driver.windows_program_paths("app.main", "display"))
+        local covered = assert(driver.windows_program_paths("app.main", "display", nil, root))
+        assert.equal(paths.join(root, original.executable), covered.executable)
+        assert.equal(paths.join(root, original.provider), covered.provider)
+        assert.equal(original.relative_provider, covered.relative_provider)
+        local suite = assert(driver.windows_program_paths("titan.test_runner", nil, "app.tests", root))
+        assert.equal(paths.join(root, "bin/app.tests.exe"), suite.executable)
+        assert.equal(paths.join(root, "lib/titan/0.6/app/tests.dll"), suite.provider)
+        assert.equal("app/tests.dll", suite.relative_provider)
+    end)
+
     it("rejects path syntax, reserved names, controls and ambiguous endings", function()
         for _, name in ipairs({ "", ".", "..", "a/b", "a\\b", "C:app", "app:stream",
             'quote"name', "a*b", "a?b", "a|b", "<app>", "app.", "app ",
@@ -3507,6 +3520,50 @@ describe("compiler module loader", function()
                 assert.is_table(restored.ast, scenario.label)
                 assert.is_nil(restored.compiled, scenario.label)
             end
+        end)
+
+        it("retains a successful object after a failed replacement without treating it as the new result", function()
+            local name = "incremental_driver_failed_replacement"
+            local filename = source .. "/" .. name .. ".titan"
+            write_file(filename, "function answer(): integer return 42 end\n")
+            local loader, dependencies = fresh_loader()
+            local entry = load_ok(loader, name)
+            assert(driver.prepare_foreign_headers({ name }, driver.imported, false, false))
+            local ok, err, object = driver.compile_module(name, entry, dependencies, false)
+            assert.truthy(ok, err)
+            local previous_bytes = assert(util.get_file_contents(object))
+            local timestamp = os.time() - 20
+            assert(lfs.touch(object, timestamp, timestamp))
+
+            write_file(filename, "function answer(): integer return 43 end\n")
+            assert(lfs.touch(filename, timestamp + 1, timestamp + 1))
+            loader, dependencies = fresh_loader({ incremental = true })
+            entry = load_ok(loader, name)
+            assert.is_table(entry.ast)
+            assert.is_nil(entry.compiled)
+            assert(driver.prepare_foreign_headers({ name }, driver.imported, false, false))
+            local generate = coder.generate
+            coder.generate = function(...)
+                local results = table.pack(generate(...))
+                results[1] = results[1] .. "\n#error TITAN_INTENTIONAL_REPLACEMENT_FAILURE\n"
+                return table.unpack(results, 1, results.n)
+            end
+            local called, failure = xpcall(function()
+                ok, err = driver.compile_module(name, entry, dependencies, false)
+                assert.is_nil(ok)
+                assert.is_string(err)
+                assert.is_nil(entry.compiled)
+                assert.equal(previous_bytes, util.get_file_contents(object))
+                assert.equal(timestamp, lfs.attributes(object, "modification"))
+            end, debug.traceback)
+            coder.generate = generate
+            assert.truthy(called, failure)
+
+            ok, err = driver.compile_module(name, entry, dependencies, false)
+            assert.truthy(ok, err)
+            assert.equal(object, entry.compiled)
+            assert.not_equal(previous_bytes, util.get_file_contents(object))
+            assert.is_true(lfs.attributes(object, "modification") > timestamp)
         end)
 
         it("compares every folder contributor and permits equal source/object timestamps", function()

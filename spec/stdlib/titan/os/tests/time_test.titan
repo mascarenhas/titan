@@ -1,3 +1,16 @@
+foreign import "time.h"
+
+local function coverage_locale_has_empty_ampm(): boolean
+  local instant = 0 as foreign time_t
+  local calendar = ffi.gmtime(instant)
+  if not calendar then raise "gmtime could not represent the epoch" end
+  local storage = foreign char.new_array(256)
+  local written = ffi.strftime(storage as foreign *char,
+    256 as foreign size_t, "[%p]", calendar)
+  return written == 2 and storage[0] == 91 and storage[1] == 93 and
+         storage[2] == 0
+end
+
 function test_clocks_and_calendar_results(_context: test.Context)
   local original_timezone: string? = support.install_test_timezone()
   defer support.restore_test_timezone(original_timezone)
@@ -145,4 +158,35 @@ function test_locale_query_change_restore_and_validation(
   support.assert_raises_contains(function()
     system.setlocale("C", "time\0suffix")
   end, "locale category contains an embedded NUL")
+end
+
+function test_date_accepts_empty_locale_conversion(_context: test.Context)
+  local previous: string? = system.setlocale(nil, "time")
+  test.assert(previous ~= nil, "could not query LC_TIME")
+  local saved = previous as string
+  defer do
+    local restored: string? = system.setlocale(saved, "time")
+    test.assert(restored ~= nil, "could not restore LC_TIME")
+  end
+
+  test.assert(system.setlocale("C", "time") == "C")
+  test.assert(support.c_utc_format("%p") == "AM" and
+              support.as_string(system.date("!%p", 0), "C-locale AM/PM") == "AM",
+              "C-locale control did not render AM")
+  local candidates = {
+    "fr_FR.UTF-8", "fr_FR.utf8", "fr_FR", "fr-FR", "French_France.1252",
+    "en_DK.UTF-8", "en_DK.utf8", "en_DK",
+    "da_DK.UTF-8", "da_DK.utf8", "da_DK", "da-DK",
+    "de_DE.UTF-8", "de_DE.utf8", "de_DE", "de-DE",
+  }
+  for index = 1, #candidates do
+    if system.setlocale(candidates[index], "time") ~= nil and
+        coverage_locale_has_empty_ampm() then
+      test.assert(support.as_string(system.date("!%p", 0),
+                    "empty locale conversion") == "",
+                  "valid empty AM/PM conversion did not return an empty string")
+      return
+    end
+  end
+  test.skip("capability: no installed LC_TIME locale has empty AM/PM text")
 end

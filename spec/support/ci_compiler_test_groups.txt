@@ -6,9 +6,10 @@
 # Assign files longest-first by profile_seconds, breaking ties by path; choose
 # the least-loaded shard, breaking ties by shard number. Rebalance when costs
 # change materially. Recorded file times exclude process/startup overhead.
+# New coverage_backend_spec uses its 1.981s local uncovered timing until CI measures it.
 3 spec/abi_spec.lua 2.926
-2 spec/binary_compatibility_spec.lua 0.107
-4 spec/cdeclarator_spec.lua 0.058
+4 spec/binary_compatibility_spec.lua 0.107
+2 spec/cdeclarator_spec.lua 0.058
 3 spec/cdefines_spec.lua 0.054
 4 spec/cdriver_spec.lua 171.200
 4 spec/checker/binary_compatibility_spec.lua 5.583
@@ -124,37 +125,38 @@
 4 spec/coder/type_tests_spec.lua 7.539
 3 spec/coder/unions_spec.lua 36.908
 4 spec/coder/variadic_spec.lua 19.392
-3 spec/compiler_environment_spec.lua 0.062
-4 spec/compiler_io_spec.lua 0.188
-2 spec/compiler_module_structure_spec.lua 0.082
-4 spec/coverage_lines_spec.lua 0.033
+4 spec/compiler_environment_spec.lua 0.062
+3 spec/compiler_io_spec.lua 0.188
+3 spec/compiler_module_structure_spec.lua 0.082
+4 spec/coverage_backend_spec.lua 1.981
+2 spec/coverage_lines_spec.lua 0.033
 4 spec/cpp_spec.lua 10.573
-2 spec/cprobe_cache_spec.lua 0.047
+4 spec/cprobe_cache_spec.lua 0.047
 4 spec/cprobe_spec.lua 21.896
-4 spec/csemantics_spec.lua 0.627
+3 spec/csemantics_spec.lua 0.627
 3 spec/ctypes_spec.lua 2.820
 4 spec/documentation_spec.lua 0.787
 3 spec/driver_spec.lua 89.022
 3 spec/foreign_alias_headers_spec.lua 46.664
 3 spec/foreigncache_spec.lua 413.885
-3 spec/foreigntypes_spec.lua 0.181
+4 spec/foreigntypes_spec.lua 0.181
 4 spec/graphcodec_spec.lua 9.459
-4 spec/installed_prefix_spec.lua 0.095
-3 spec/lexer_spec.lua 0.322
-2 spec/location_spec.lua 0.003
+2 spec/installed_prefix_spec.lua 0.095
+4 spec/lexer_spec.lua 0.322
+3 spec/location_spec.lua 0.003
 3 spec/maybe3_spec.lua 0.003
 3 spec/native_record_fields_spec.lua 65.613
-3 spec/nominal_layout_spec.lua 0.317
+4 spec/nominal_layout_spec.lua 0.317
 2 spec/parser_spec.lua 3.838
-4 spec/path_spec.lua 0.165
+3 spec/path_spec.lua 0.165
 2 spec/projectcache_spec.lua 473.778
 4 spec/sha256_spec.lua 0.009
-4 spec/staticmetadata_spec.lua 0.606
+2 spec/staticmetadata_spec.lua 0.606
 3 spec/symtab_spec.lua 0.024
-3 spec/test_runner_spec.lua 0.112
+2 spec/test_runner_spec.lua 0.112
 4 spec/titanc_parallel_spec.lua 0.029
-2 spec/typedecl_spec.lua 0.005
+4 spec/typedecl_spec.lua 0.005
 2 spec/types_spec.lua 0.185
-4 spec/union_interface_spec.lua 0.590
+3 spec/union_interface_spec.lua 0.590
 3 spec/util_spec.lua 0.010
 2 spec/windows_publication_spec.lua 0.194

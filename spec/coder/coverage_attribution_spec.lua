@@ -81,6 +81,49 @@ describe("coverage source ownership in generated C", function()
         assert.equal(before, generate({ coverage = false }))
     end)
 
+    it("retains only selected LLVM coverage native lambda definitions", function()
+        local before = generate()
+        local llvm = generate({ coverage = true, coverage_backend = "llvm-gcov" })
+        assert.matches("static __attribute__((used))", llvm, 1, true)
+        assert.is_nil(generate({ coverage = true }):find("__attribute__((used))", 1, true))
+        assert.is_nil(generate({ coverage = false, coverage_backend = "llvm-gcov" }):find("__attribute__((used))", 1, true))
+        assert.equal(before, generate())
+        -- Entry adapters and declaration prototypes are generated machinery;
+        -- only the native body that owns Titan source regions is retained.
+        local count = 0
+        for signature in llvm:gmatch("static __attribute__%(%(used%)%)[^\n]+") do
+            assert.matches("_lambda_", signature, 1, true)
+            assert.is_nil(signature:find("_lua", 1, true))
+            assert.is_nil(signature:find("_strict", 1, true))
+            assert.is_nil(signature:find(";", 1, true))
+            count = count + 1
+        end
+        assert.equal(1, count)
+    end)
+
+    it("retains nested lambda bodies created only in constant dead arms", function()
+        local source = [[function never()
+  if false then
+    local first = function(): integer return 17 end
+  end
+  while false do
+    local second = function(): function(): integer
+      return function(): integer return 23 end
+    end
+  end
+end
+]]
+        local llvm = generate({ coverage = true, coverage_backend = "llvm-gcov" }, nil, source)
+        local retained = 0
+        for _ in llvm:gmatch("static __attribute__%(%(used%)%)") do retained = retained + 1 end
+        assert.equal(3, retained)
+        local converted, err, anchors = lines.convert(llvm, "coverage_attribution.c")
+        assert.truthy(converted, err)
+        for _, number in ipairs({ 3, 6, 7 }) do
+            assert.is_true(anchors[FILENAME][number], "missing authored lambda line " .. number)
+        end
+    end)
+
     it("rejects disabled line directives for Titan-source coverage", function()
         assert.has_error(function() generate({ coverage = true }, false) end,
             "Titan-source coverage requires line directives")

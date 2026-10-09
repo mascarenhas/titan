@@ -1,8 +1,9 @@
 # Native Titan source coverage
 
 `titanc --coverage DIRECTORY` builds an isolated **executable-line coverage**
-image for an explicit inventory of production Titan modules. It uses GCC's
-gcov instrumentation and maps the results to the original `.titan` files.
+image for an explicit inventory of production Titan modules. GCC/gcov is the
+default backend; native Windows CLANG64 has an explicit experimental LLVM/gcov
+backend. Both map the results to the original `.titan` files.
 Ordinary compilation and the native test runner keep their existing behavior.
 The Lua-written compiler's LuaCov report remains a separate component.
 
@@ -23,9 +24,11 @@ On macOS, Homebrew `gcc@14` supplies `gcc-14` and `gcov-14`. The compiler
 performs a real backend probe before emitting coverage objects: multi-file
 Titan attribution, an untaken line, an uncalled function, notes without
 counters, fresh counter directories, and shared-provider/threaded collection.
-Flag acceptance alone is insufficient. Clang coverage is not supported by
-this backend. The experimental Windows CLANG64 SDK rejects `--coverage`
-before creating coverage artifacts; normal Windows testing remains available.
+Flag acceptance alone is insufficient. Clang requires the separate
+`--coverage-backend llvm-gcov` option on native Windows; it is not substituted
+automatically for GCC. Windows rejects the default GCC backend before creating
+coverage artifacts. See [Windows coverage](#experimental-windows-coverage) for
+its tools and commands.
 
 Repeat `--coverage-module NAME` for **every production module in the desired
 denominator**, including modules the current tests never import. These names
@@ -63,7 +66,9 @@ titan-coverage report --manifest /tmp/app-coverage/build/build.json \
 ```
 
 `titan-coverage` is installed alongside `titanc`. From a checkout, invoke it as
-`python3 titan-coverage`. Compilation needs Python for its capability probe,
+`python3 titan-coverage`. `--coverage-python COMMAND` selects the native Python
+command used by compilation, defaulting to `python3`.
+Compilation needs Python for its capability probe,
 but gcovr is required only for rendering. `seal` validates the compiler's
 source/object/notes/image hashes and records exact compiler, profiler, target,
 and runtime identities. It rejects changes between compilation and sealing.
@@ -71,6 +76,11 @@ When a test consumer is built separately from a measured provider, repeat
 `seal --unmeasured-input PATH` for its executable and source/fixture inputs.
 Their hashes bind the run to that consumer without adding its code to the
 coverage denominator; edits make subsequent runs and reports fail validation.
+For a large consumer inventory, `--unmeasured-input-file FILE` accepts a UTF-8
+JSON array of explicit file paths. The list and every listed file are hashed;
+duplicate physical paths within the list, missing files and malformed input
+fail. This avoids command-line length limits without discovering inputs
+implicitly.
 
 Selected objects use `-O0 -fno-lto --coverage -fprofile-update=atomic`.
 Nonselected Titan objects use O0/no LTO without instrumentation. Coverage
@@ -99,7 +109,7 @@ still measure the body. Normal builds retain their usual inlining policy.
 ## Counters and process ownership
 
 Each `run` directory must be new. The host command sets `GCOV_PREFIX` and
-`GCOV_PREFIX_STRIP=0` only for that process tree, after build/provider probes
+`GCOV_PREFIX_STRIP=0` for GCC, or `1` for Windows LLVM, only for that process tree, after build/provider probes
 finish. Repository builds relocate any counters from compiler metadata probes
 into a separate `preparation-counters` directory. Reports never consume those
 preparation counters. Old build-time counters cannot become test hits. Joined children inherit
@@ -152,7 +162,7 @@ normally.
 
 Reports include `coverage.info` (LCOV, root-relative Titan paths),
 `coverage.xml` (Cobertura), `coverage.html`, normalized `lines.json`, summary
-and provenance, and raw gcov JSON for diagnosis. A source contributor containing
+and provenance, and raw reader evidence for diagnosis. A source contributor containing
 only declarations can have no executable lines; explicit compiler attribution
 records distinguish that from a missing source inventory. Notes-only executable
 modules and functions appear at zero. Never treat every physical Titan line as
@@ -196,6 +206,94 @@ gates. Upload `coverage.info` to Codecov in a separate CI action with a native
 stdlib flag; local coverage does not require Codecov, credentials, or network
 access. Initial baselines describe useful gaps rather than imposing an
 arbitrary percentage threshold.
+
+For reporter-only changes, invoke `report` with a separately retained updated
+`titan-coverage` script, the existing sealed manifest and run, and a fresh report
+output directory. Keep the sealed SDK and input files unchanged, and use the
+same Python and coverage tools. This needs no compilation, resealing or test
+rerun; the updated script must still accept the sealed schema and Windows runner
+identity. When bypassing the repository report wrapper, retain `native-audit.exit`
+with the report and propagate any nonzero audit status as well as report failures.
+
+## Experimental Windows coverage
+
+Windows coverage requires the native x64 CLANG64/UCRT toolchain with matching
+Clang and LLVM **22.1.8**, a native Windows x64 Python, and gcovr **8.4** in that
+Python environment. MSYS Python and source-based LLVM coverage are separate
+formats and are not supported here. Configure absolute tool paths when several
+Python or LLVM installations are available. Install the report requirements
+with the normal package installer for the chosen Python; the workflow does not
+install packages into the SDK or upload reports.
+
+Use a direct Python installation or the embeddable distribution, with its
+implementation DLLs beside `python.exe`. Windows virtual-environment redirectors
+are not supported: the identity check must bind the running interpreter and
+its implementation, rather than a launcher that locates another installation.
+
+For an application, add these options to the build example above:
+
+```sh
+--coverage-backend llvm-gcov \
+--coverage-python 'C:/coverage-tools/python.exe -I -B' \
+--coverage-gcov 'C:/msys64/clang64/bin/llvm-cov.exe gcov'
+```
+
+Invoke the installed `titan-coverage` script with the same Python command for
+`seal`, `run`, and `report`. A Windows program's build manifest records its
+actual DLL and EXE launcher. The measured DLL, generated shims, and unmeasured
+consumer must select the same provider; an EXE launcher alone contains no
+production Titan coverage.
+
+With a prepared Windows SDK, run the repository leaf targets from CLANG64:
+
+```sh
+make -f Makefile.win titan-native-coverage-build PREFIX=C:/titan-sdk \
+  TITAN_COVERAGE_PYTHON='C:/coverage-tools/python.exe -I -B' \
+  TITAN_COVERAGE_GCOV='C:/msys64/clang64/bin/llvm-cov.exe gcov' \
+  TITAN_COVERAGE_GCOVR='C:/coverage-tools/python.exe -I -B -m gcovr'
+make -f Makefile.win titan-native-coverage-run PREFIX=C:/titan-sdk \
+  TITAN_COVERAGE_PYTHON='C:/coverage-tools/python.exe -I -B'
+make -f Makefile.win titan-native-coverage-report PREFIX=C:/titan-sdk \
+  TITAN_COVERAGE_PYTHON='C:/coverage-tools/python.exe -I -B' \
+  TITAN_COVERAGE_GCOVR='C:/coverage-tools/python.exe -I -B -m gcovr'
+```
+
+The defaults place build, run and report directories under
+`WINDOWS_BUILD_ROOT/native-coverage`. Override `TITAN_COVERAGE_BUILD_DIR`,
+`TITAN_COVERAGE_RUN_DIR`, and `TITAN_COVERAGE_REPORT_DIR` to use private locations.
+The build directory must be new, on local NTFS, disjoint from the input SDK,
+and free of directory links or mount points. The workflow copies the SDK,
+measures all 22 production roots, builds the ordinary 28-root test consumer,
+and seals their explicit inputs. It leaves the prepared input SDK unchanged.
+Use a fresh run directory for each invocation. `TITAN_FILTER` supports focused
+diagnostics; an unfiltered run establishes the baseline. Relative build, run and
+report directories are resolved from the invoking directory. A failed test or
+native output audit can still produce a diagnostic report; the command remains
+nonzero and copies `native-audit.exit` into that report. A complete baseline
+requires a successful native output audit as well as successful collection.
+
+The capability probe builds a private process supervisor inside the coverage
+build directory. Runs validate and reuse that exact image; they never compile
+or repair it. A failed LLVM probe prints the retained diagnostic directory under
+the build's `tools` directory. It contains the failed stage, probe sources and
+available expected/observed counts, counters and native status receipts. Compiler
+and native output is retained up to 64 KiB per stream, with observed sizes and
+hashes. Successful probes remove their temporary fixture.
+The supervisor atomically assigns the process tree to a Windows
+Job Object and requires confirmed emptiness before collection. An unjoined
+child makes a naturally exiting run incomplete with status 125; timeout and
+Python interruption retain statuses 124 and 130. The native leader's full
+Windows exit status is recorded separately. Cancellation uses a private control
+pipe. The supervisor verifies that it owns a private headless console, then
+lets the measured leader and its children inherit that console. The calling
+Python host retains its console and standard input. Missing cleanup confirmation or a
+forced supervisor backstop prevents counter collection and reporting.
+
+LLVM's gcov-compatible notes/data use a pinned binary format. The host validates
+their headers, checksums and complete metadata inventory before asking the
+matching LLVM tool for line counts. Reader diagnostics fail even when the tool
+returns zero. Notes without counters still contribute zero-count lines. GCC
+and LLVM receipts remain separate and cannot be merged into one baseline.
 
 See [implementation](../implementation/native-coverage.md) for region ownership,
 lexical conversion, inventory receipts, and regression layers.

@@ -6303,6 +6303,7 @@ local function prepare_compile(
             driver.EMIT_LINE_DIRECTIVES, {
                 nominal_layouts = imported_layouts,
                 coverage = options and options.coverage == true,
+                coverage_backend = options and options.coverage_backend,
             })
     local imports, deps, providers = {}, {}, {}
     for _, node in ipairs(ast) do
@@ -6336,7 +6337,6 @@ local function prepare_compile(
     local output_ok, output_err = ensure_output_parent(filename)
     if not output_ok then return nil, output_err end
     os.remove(filename)
-    os.remove(libname)
     local ok, err = util.set_file_contents(filename, code)
     if not ok then return nil, err end
     local format_ok, format_err = driver.format_generated_file(
@@ -6997,16 +6997,21 @@ function driver.windows_launcher_name(modname, override)
     return name
 end
 
-function driver.windows_program_paths(modname, override, output_module)
+function driver.windows_program_paths(modname, override, output_module, output_root)
     output_module = output_module or modname
     local name, err = driver.windows_launcher_name(output_module, override)
     if not name then return nil, err end
     local relative = output_module:gsub("[.]", "/") .. ".dll"
-    return {
+    local result = {
         executable = "bin/" .. name,
         provider = "lib/titan/" .. driver.TITAN_LIBRARY_VERSION .. "/" .. relative,
         relative_provider = relative,
     }
+    if output_root then
+        result.executable = path.join(output_root, result.executable)
+        result.provider = path.join(output_root, result.provider)
+    end
+    return result
 end
 
 -- These are actual producer definitions. All post-init native/data lookup
@@ -9501,7 +9506,7 @@ end
 local function compile_windows_program(modname, libnames, link, verbose,
         extra_objects, static_archives, entrypoint_name, program_name, options)
     local paths, err = driver.windows_program_paths(
-        modname, options.launcher_name, options.output_module)
+        modname, options.launcher_name, options.output_module, options.output_root)
     if not paths then return nil, err end
     local ok
     ok, err = ensure_output_parent(paths.executable)
