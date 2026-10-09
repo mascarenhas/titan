@@ -3522,7 +3522,7 @@ describe("compiler module loader", function()
             end
         end)
 
-        it("retains a successful object after a failed replacement without treating it as the new result", function()
+        it("invalidates a stale object after a failed replacement and permits a successful retry", function()
             local name = "incremental_driver_failed_replacement"
             local filename = source .. "/" .. name .. ".titan"
             write_file(filename, "function answer(): integer return 42 end\n")
@@ -3553,8 +3553,7 @@ describe("compiler module loader", function()
                 assert.is_nil(ok)
                 assert.is_string(err)
                 assert.is_nil(entry.compiled)
-                assert.equal(previous_bytes, util.get_file_contents(object))
-                assert.equal(timestamp, lfs.attributes(object, "modification"))
+                assert.is_nil(lfs.attributes(object))
             end, debug.traceback)
             coder.generate = generate
             assert.truthy(called, failure)
