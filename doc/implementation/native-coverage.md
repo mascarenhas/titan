@@ -115,15 +115,30 @@ Sealing preserves and checks compiler-written hashes, verifies staged/tracked
 byte identity, records compiler/profiler/libgcov/target identities, and rejects
 incompatible compiler-probe evidence. A run receipt records exact build identity,
 argv, counter prefix, observed hashes, exit status, and completion limitations.
-Run directories are never reused. After the process tree has completed,
+Run directories are never reused. After the owned process group has completed,
 reporting validates receipts and copies each matching notes/counter pair to a
 private gcov work directory. Unexecuted notes are read without `.gcda`, keeping
 their executable lines at zero. Unknown inventory/source attribution, malformed
 data, missing notes, source edits, profile mismatches, and counters changed by
 late children are observable failures.
-On POSIX, timeout and interruption cleanup signal the owned process group and
-escalate to `SIGKILL` even if its leader has already exited. Waiting remains
-bounded so a descendant cannot keep writing counters after a completed receipt.
+On POSIX, `start_new_session` gives the leader a private process group. After
+reaping the leader, `killpg(pgid, 0)` must confirm that group is empty before
+counter hashing. After natural leader completion, a remaining group forces
+incomplete status 125, preserving the raw leader status, and triggers bounded
+group retirement. Timeout and
+interruption cleanup also signal that group and escalate to `SIGKILL` even if
+its leader has already exited, retaining statuses 124 and 130 respectively.
+The final emptiness wait is bounded; permission
+errors or remaining zombies cannot establish emptiness. Unconfirmed runs skip
+counter collection and cannot produce even an incomplete diagnostic report.
+This boundary does not contain descendants that deliberately change their
+session or process group.
+
+Run receipt version 2 records the ownership policy, group identity, retirement,
+emptiness confirmation and raw leader status. Readback rejects legacy receipts,
+missing ownership evidence, and a complete state inconsistent with retirement
+or the leader status. The sealed build manifest remains version 1, allowing an
+unchanged measured image to receive a fresh capture with the corrected host.
 
 Raw gcov data includes generated C locations and native arcs/functions for
 diagnosis. Normalization retains only declared Titan executable lines, verifies

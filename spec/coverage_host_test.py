@@ -307,6 +307,11 @@ class CoverageHostTest(unittest.TestCase):
         run = self.root / "child-run"
         status = coverage.execute_run(self.manifest_path, run, [sys.executable, "-c", child, str(self.program), "1"])
         self.assertEqual(status, 0)
+        if os.name != "nt":
+            receipt = coverage.read_json(run / "run.json")
+            self.assertEqual(receipt["leader_exit_status"], 0)
+            self.assertTrue(receipt["process_group_empty_confirmed"])
+            self.assertFalse(receipt["group_retirement_requested"])
         report, status = self.report_fixture([run])
         self.assertEqual(status, 0)
         lines = coverage.read_json(report / "lines.json")["files"][0]["lines"]
@@ -315,12 +320,111 @@ class CoverageHostTest(unittest.TestCase):
     def test_failure_exit_is_preserved_even_with_successful_reports(self):
         run, status = self.run_fixture("failure", "x")
         self.assertEqual(status, 7)
+        if os.name != "nt":
+            receipt = coverage.read_json(run / "run.json")
+            self.assertEqual(receipt["leader_exit_status"], 7)
+            self.assertTrue(receipt["process_group_empty_confirmed"])
+            self.assertFalse(receipt["group_retirement_requested"])
         report, status = self.report_fixture([run])
         self.assertEqual(status, 1)
         summary = coverage.read_json(report / "summary.json")
         self.assertTrue(summary["complete"])
         self.assertFalse(summary["tests_passed"])
         self.assertEqual(summary["runs"][0]["exit_status"], 7)
+
+    @unittest.skipIf(os.name == "nt", "POSIX process-group ownership")
+    def test_natural_leader_exit_retires_unjoined_child_before_counter_collection(self):
+        for leader_status in (0, 23):
+            with self.subTest(leader_status=leader_status):
+                directory = self.root / ("held-child-" + str(leader_status))
+                directory.mkdir()
+                fifo, ready = directory / "output", directory / "ready.json"
+                os.mkfifo(fifo)
+                reader = os.open(fifo, os.O_RDONLY | os.O_NONBLOCK)
+                worker = (
+                    "import json,os,signal,sys,time; from pathlib import Path; "
+                    "signal.signal(signal.SIGTERM,signal.SIG_IGN); "
+                    "output=open(sys.argv[1],'wb',buffering=0); "
+                    "Path(sys.argv[2]).write_text(json.dumps({'group':os.getpgrp()})); "
+                    "time.sleep(30)"
+                )
+                launcher = (
+                    "import subprocess,sys,time; from pathlib import Path; "
+                    "subprocess.run([sys.argv[1],'0'],check=True); "
+                    "subprocess.Popen([sys.executable,'-c',sys.argv[2],sys.argv[3],sys.argv[4]]); "
+                    "deadline=time.monotonic()+5\n"
+                    "while not Path(sys.argv[4]).exists():\n"
+                    " if time.monotonic()>=deadline: raise SystemExit(92)\n"
+                    " time.sleep(0.01)\n"
+                    "raise SystemExit(int(sys.argv[5]))"
+                )
+                try:
+                    started = time.monotonic()
+                    run = directory / "run"
+                    status = coverage.execute_run(self.manifest_path, run,
+                        [sys.executable, "-c", launcher, str(self.program), worker,
+                         str(fifo), str(ready), str(leader_status)], timeout=10)
+                    self.assertLess(time.monotonic() - started, 8)
+                    self.assertEqual(status, 125)
+                    self.assertTrue(ready.is_file(), "held descendant never became ready")
+                    receipt = coverage.read_json(run / "run.json")
+                    self.assertEqual(receipt["state"], "incomplete")
+                    self.assertEqual(receipt["leader_exit_status"], leader_status)
+                    self.assertEqual(receipt["exit_status"], 125)
+                    self.assertTrue(receipt["group_retirement_requested"])
+                    self.assertIn("owned process group remained after leader exit", receipt["reason"])
+                    # EOF proves that the held descendant has released its
+                    # descriptor. It works even if an orphan zombie remains.
+                    deadline = time.monotonic() + 1
+                    while True:
+                        try:
+                            self.assertEqual(os.read(reader, 1), b"")
+                            break
+                        except BlockingIOError:
+                            if time.monotonic() >= deadline:
+                                self.fail("unjoined descendant retained its output")
+                            time.sleep(0.01)
+                    if receipt["process_group_empty_confirmed"]:
+                        report, status = self.report_fixture([run], name="held-report-" + str(leader_status))
+                        self.assertEqual(status, 2)
+                        summary = coverage.read_json(report / "summary.json")
+                        self.assertFalse(summary["complete"])
+                        self.assertFalse(summary["tests_passed"])
+                    else:
+                        # A remaining zombie still prevents proof of group
+                        # emptiness; no counter hash or partial report is safe.
+                        self.assertEqual(receipt["counters"], [])
+                        self.assertIn("counter_collection_skipped", receipt)
+                        with self.assertRaisesRegex(coverage.CoverageError, "process group was not confirmed empty"):
+                            self.report_fixture([run], name="held-report-" + str(leader_status),
+                                                allow_incomplete=True)
+                finally:
+                    os.close(reader)
+                    if ready.is_file():
+                        try:
+                            os.killpg(json.loads(ready.read_text())["group"], signal.SIGKILL)
+                        except ProcessLookupError:
+                            pass
+
+    @unittest.skipIf(os.name == "nt", "POSIX process-group ownership")
+    def test_run_readback_rejects_legacy_or_unconfirmed_process_ownership(self):
+        run, status = self.run_fixture("owned-run", "0")
+        self.assertEqual(status, 0)
+        original = coverage.read_json(run / "run.json")
+        self.assertEqual(original["version"], 2)
+        for updates, diagnostic in (
+                ({"version": 1}, "legacy"),
+                ({"process_ownership": None}, "process group was not confirmed empty"),
+                ({"process_group_id": True}, "process group was not confirmed empty"),
+                ({"process_group_empty_confirmed": False}, "process group was not confirmed empty"),
+                ({"group_retirement_requested": True}, "disagrees with its owned process group lifecycle")):
+            with self.subTest(updates=updates):
+                receipt = dict(original, **updates)
+                coverage.save_json(run / "run.json", receipt)
+                with self.assertRaisesRegex(coverage.CoverageError, diagnostic):
+                    coverage.load_run(run, self.manifest)
+        coverage.save_json(run / "run.json", original)
+        coverage.load_run(run, self.manifest)
 
     def test_missing_expected_counters_are_incomplete(self):
         run = self.root / "missing"

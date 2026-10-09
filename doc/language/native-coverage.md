@@ -107,12 +107,24 @@ that run's prefix; the parent must wait for them to finish. Different concurrent
 shards require different run directories. Retain all run receipts and raw
 counters until reporting finishes.
 
-Collection happens after process exit. The host preserves the test's exit
-status even if a valid partial report can be generated. Crashes, timeouts,
+On POSIX, the command runs in a private process group. Collection requires
+both leader exit and confirmed group emptiness. After a natural leader exit,
+an unjoined process remaining in that group makes the run incomplete: the host
+retires the group, returns 125, and records the leader's original status
+separately. Timeout and interrupt cleanup also retire that group and retain
+statuses 124 and 130 respectively. A descendant that deliberately creates a new
+session or process group is outside this ownership boundary; measured programs
+must join their children and keep counter writers within the owned group.
+
+For normally joined runs, the host preserves the test's exit status even if a
+valid partial report can be generated. Crashes, timeouts,
 missing expected object counters, or counters changed after the receipt mark
 collection incomplete or fail validation. `--allow-incomplete` explicitly allows
 an incomplete diagnostic report, but does not convert a failing test into
-success. A process that deliberately loads only some declared providers can
+success. If group emptiness cannot be confirmed, counters are not collected
+and reporting is refused even with this option. Run receipts use version 2;
+older receipts require a fresh capture, while sealed build manifests remain
+version 1. A process that deliberately loads only some declared providers can
 select expected objects with repeated `run --expect-object /absolute/module.o`;
 other objects retain their notes-only zero denominator.
 

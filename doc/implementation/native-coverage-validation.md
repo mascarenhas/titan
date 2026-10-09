@@ -15,9 +15,10 @@ language-server API 1 remain unchanged. Commit
 `ccafc366473cefcb3364c19323c95c6921bdff5e` then updates only the host-side
 compiler-shard count expectation; the final publication commit adds this
 validation record. Neither changes the native snapshot. The subsequent CI
-collection correction changes test plumbing only and does not replace these
-native measurements. The records below supersede the historical baseline
-sections.
+collection correction changes test plumbing only. A later POSIX host ownership
+correction requires fresh captures against that unchanged native snapshot;
+the original r12 captures are retained as historical evidence. The current
+ownership verification is recorded below.
 
 The final workflow measures the normal 23-root standard provider: 22 selected
 production modules and 69 physical source contributors. An ordinary 28-root
@@ -29,7 +30,7 @@ is nevertheless sealed. Preparation counters stay separate from each fresh run.
 | Platform | Covered / executable lines | Line coverage | Measured native results |
 | --- | --- | --- | --- |
 | Linux x86_64, GCC/gcov 16.2.1 | 15,754 / 17,263 | 91.26% | 1,274 passed; 1 platform skip |
-| Intel macOS 15.7.7 VM, GCC/gcov 14.4.0 | 15,714 / 17,263 | 91.03% | 1,271 passed; 4 platform skips |
+| Intel macOS 15.7.7 VM, GCC/gcov 14.4.0 | 15,707 / 17,263 | 90.99% | 1,271 passed; 4 platform skips |
 | Windows 11 x64, CLANG64/UCRT 22.1.8 | Unsupported backend | No percentage | 1,241 passed; 22 classified skips ordinary |
 
 All native runs audit all 28 owners. Ordinary Linux results are 1,274 passed and one platform skip;
@@ -53,7 +54,7 @@ now covered and no previously covered lines are lost. Correcting authored
 foreign `elseif` attribution adds eleven executable SQLite worker lines; every
 one is covered. The denominator therefore changes from 17,252 to 17,263.
 Compared with the first 80.73% report, overall Linux coverage is now 91.26%.
-The final Mac report is 15,714 / 17,263 (91.03%). Two previously hit SSL
+The original r12 Mac report is 15,714 / 17,263 (91.03%). Two previously hit SSL
 shutdown-error lines, `titan/ssl.titan:1682–1683`, have zero counts in this
 final run despite identical production/provider bytes and passing tests.
 The retained r11 report remains separate; its hits are not merged into the
@@ -70,7 +71,7 @@ Linux SSL has 94 remaining lines: 39 disabled native-mode/retry paths, 22 native
 construction/reference invariants, five nonreturning tails, five scheduling
 guards, seven further-chain/startup allocation candidates, four Titan
 allocation/cleanup paths, four transport-timing paths, five native error-queue
-fallbacks and three boundary lines for PEM inputs above 2 GiB. macOS SSL has
+fallbacks and three boundary lines for PEM inputs above 2 GiB. The original r12 macOS SSL report has
 96 misses, including the two shutdown-error lines described above. The allocation candidates, late
 write admission, narrow transport failures and error-queue fallbacks are not
 claimed unreachable. SSL remains below the requested near-total target.
@@ -78,7 +79,8 @@ The exact classification is retained with source and report hashes in
 `/tmp/titan-210-ssl-gap/ssl-r12-full-classification.tar.gz`, SHA256
 `28bd1da9571449ea92f709ef8862bd665fb8f98139a3998e931161f914d85f6b`.
 
-Current host contracts pass 30 cases. Linux compiler coverage contracts pass
+The original host gate passed 30 cases; the corrected POSIX host gate passes
+all 32 cases. Linux compiler coverage contracts pass
 42 cases; macOS combines 41 initial positives with the corrected focused
 temporary-directory case. That regression is additionally rerun on Linux
 after the test portability fixes. Windows compiler coverage contracts pass
@@ -125,11 +127,13 @@ Final local receipts and archives:
   `/tmp/titan-210-platform-evidence/windows-r12-final/windows-final-retained-evidence.tar.gz`,
   SHA256 `3cf7164753923667bb341d343186f59e372b349b2b37409b1030c7ad5af06078`.
 
-Standalone Linux HTML is also copied to
+The original standalone Linux HTML is also copied to
 `.titan-coverage/issue-210-final-linux/coverage.html`; macOS HTML is copied to
 `.titan-coverage/issue-210-final-macos/coverage.html`. Both retain LCOV,
 Cobertura, normalized lines, raw gcov JSON, seals and run provenance. Public
-LCOV contains no function or branch records. Local runs never upload.
+LCOV contains no function or branch records. Their original run receipts
+predate the ownership correction below and must not be used as current
+completion evidence. Local runs never upload.
 Windows LLVM-gcov support remains a separately coordinated follow-up; its
 synthetic feasibility probe is not a native stdlib coverage report.
 
@@ -187,6 +191,72 @@ has three remaining misses and the lexical converter retains one defensive
 miss. This is a local projection, not a new hosted Codecov result. Initial
 statistics from a rejected stale installed compiler are diagnostic-only and
 are excluded from the composition.
+
+## POSIX leader-exit ownership correction
+
+Reviewing the failed CI capture exposed a separate host-runner defect in the
+published `149bc2454252d0d0f358f6699cbb4d78907c947a` implementation. A test
+leader could flush its counters and exit successfully while an unjoined child
+remained in the runner's private process group. Before the child's later flush,
+the old host could produce `complete=true` and `tests_passed=true`. Subsequent
+counter-hash rejection detected the late change but did not prevent that
+earlier false success. A retained real GCC reproduction demonstrated the race;
+this is not evidence that any particular original stdlib count was wrong.
+
+The correction checks owned process-group emptiness after every leader exit.
+After natural leader completion, it retires any surviving group and marks that
+run incomplete with status 125 while retaining the raw leader status. Timeout
+and interruption remain bounded and retain statuses 124 and 130. No
+counter hashing occurs without confirmed group emptiness, including when only
+an orphan zombie remains. Reporting rejects unconfirmed ownership even with
+`--allow-incomplete`. Run receipts now use version 2; older runs require fresh
+capture. Build manifests remain version 1, with no provider or ABI change.
+Deliberately escaped sessions/groups are outside the stated ownership boundary.
+
+All 32 Linux host contracts pass, including held-child leader exits 0 and 23,
+joined children, ordinary nonzero exits, resistant-child timeout, interruption,
+and rejection of legacy or inconsistent receipts. Independent source review
+found no material blocker. Against the exact retained GCC fixture, the corrected
+host returns 125, records leader status 0 and confirmed empty ownership, and
+the report returns 2 with both completion and test-success false. The sealed
+receipt is `/tmp/titan-210-posix-early-leader-probe/final-receipt.json`, SHA256
+`1e414f8aa1b1029fd4c6ff4b95ce12800f8a288006e1bfc540ab038ab585f0d7`;
+the evidence archive is `/tmp/titan-210-posix-ownership-evidence.tar.gz`, SHA256
+`c63b4a3c9bde2c07cc54435337e2b7c7a6d97a2949e99d88713944dce1fe8ee2`.
+The first hosted native job never collected or uploaded a report, so its
+cancellation did not publish a false completed native result. Compiler LuaCov
+collection is a separate path.
+
+Fresh Linux capture with the corrected external host reuses the exact sealed
+r12 provider, consumer and fixtures without rebuilding or resealing them.
+All 1,275 selected cases finish: 1,274 pass and one platform skip, with all
+28 owners audited. The version-2 receipt confirms empty ownership without
+forced retirement and all 22 expected fresh counters. Coverage remains
+15,754 / 17,263 lines (91.26%); all executable-line identities and source MD5s
+agree with r12, with no gained or lost hits. Before/after hashes match for all
+6,355 inventoried inputs, including the old build, SDK, run and report.
+The new report is `.titan-coverage/issue-210-owned-linux/coverage.html`.
+The receipt is `/tmp/titan-210-linux-host-lifecycle-r13/evidence/final-receipt.json`,
+SHA256 `9472ec07463b861899a986f8811aa09566e253dd9545fd070674ed2d8226374d`;
+archive `/tmp/titan-210-linux-host-lifecycle-r13-evidence.tar.gz`, SHA256
+`9428a916a3e3e8e83b9544f75ceb57e266a586f9b8962a389be7962d7f47cfb6`.
+
+Fresh Intel macOS capture also reuses the unchanged sealed r12 artifacts.
+The six focused lifecycle cases pass, then all 1,275 native cases finish:
+1,271 pass and four platform skips, with all 28 owners audited. The version-2
+receipt confirms empty ownership without retirement and all 22 fresh counters.
+All 3,955 retained input hashes match before and after. The fresh report is
+15,707 / 17,263 lines (90.99%), with identical executable-line identities and
+source MD5s. Seven r12 hits are now zero: `titan/net.titan:642` and
+`titan/ssl.titan:822,828–832`, covering TCP shutdown failure and TLS reciprocal
+shutdown-error handling. No previous hits are merged into this report. Current
+macOS SSL is 807 / 909 lines, leaving 102 misses. The new report is
+`.titan-coverage/issue-210-owned-macos/coverage.html`.
+The receipt is
+`/tmp/titan-210-macos-host-lifecycle-prep/retrieved/evidence/final-receipt.json`,
+SHA256 `3db0de7c009a8db898bd7b4277104303fa06273cad279aefb002538252062a62`;
+archive `/tmp/titan-210-macos-host-lifecycle-prep/evidence.tar.gz`, SHA256
+`cd45ab6cb079f3ed5211a5664e0fbaa4e633228ff0bf4829581265b88281a482`.
 
 ## Historical source and tool identities
 

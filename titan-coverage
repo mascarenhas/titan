@@ -21,10 +21,12 @@ import signal
 import subprocess
 import sys
 import tempfile
+import time
 import uuid
 
 
 SCHEMA = 1
+RUN_SCHEMA = 2
 GCOVR_VERSION = "8.4"
 GCOVR_FORMAT = "0.14"
 
@@ -528,6 +530,26 @@ def stop_run_processes(child, interrupted=False):
         return False
 
 
+def run_process_group_exists(group):
+    try:
+        os.killpg(group, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        # Lack of permission cannot establish that an observed group is empty.
+        return True
+    return True
+
+
+def wait_run_process_group_empty(group, timeout=2):
+    deadline = time.monotonic() + timeout
+    while run_process_group_exists(group):
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(0.01)
+    return True
+
+
 def execute_run(manifest_path, run_path, command, expected=None, timeout=None):
     manifest = load_manifest(manifest_path)
     if not command:
@@ -545,16 +567,23 @@ def execute_run(manifest_path, run_path, command, expected=None, timeout=None):
     expected = list(expected or [obj["path"] for obj in manifest["objects"] if obj.get("expect_data", False)])
     if not set(expected) <= {obj["path"] for obj in manifest["objects"]}:
         raise CoverageError("expected counters refer to an undeclared object")
-    receipt = {"version": SCHEMA, "run_id": uuid.uuid4().hex, "manifest_id": manifest["manifest_id"],
+    receipt = {"version": RUN_SCHEMA, "run_id": uuid.uuid4().hex, "manifest_id": manifest["manifest_id"],
                "command": command, "cwd": str(Path.cwd()), "started": utc_now(),
                "expected_objects": expected, "state": "running", "counter_prefix": str(prefix)}
+    if os.name != "nt":
+        receipt.update({"process_ownership": "posix-process-group-v1", "process_group_id": None,
+                        "process_group_empty_confirmed": False, "group_retirement_requested": False})
     save_json(run_path / "run.json", receipt)
+    child = None
     try:
         child = subprocess.Popen(command, env=env, start_new_session=(os.name != "nt"))
+        if os.name != "nt":
+            receipt["process_group_id"] = child.pid
         try:
             status = child.wait(timeout=timeout)
             receipt["state"] = "complete" if status >= 0 else "incomplete"
         except subprocess.TimeoutExpired:
+            receipt["group_retirement_requested"] = os.name != "nt"
             receipt["leader_reaped"] = stop_run_processes(child)
             status = 124
             receipt["state"] = "incomplete"
@@ -564,15 +593,33 @@ def execute_run(manifest_path, run_path, command, expected=None, timeout=None):
         receipt["state"] = "incomplete"
         receipt["reason"] = str(error)
     except KeyboardInterrupt:
-        receipt["leader_reaped"] = stop_run_processes(child, interrupted=True)
+        receipt["group_retirement_requested"] = os.name != "nt"
+        receipt["leader_reaped"] = child is not None and stop_run_processes(child, interrupted=True)
         status = 130
         receipt["state"] = "incomplete"
         receipt["reason"] = "interrupted"
+    if child is not None:
+        if os.name != "nt":
+            # A reaped leader may leave writers in its private group. Observe
+            # that group before collecting any counters; even a zombie-only
+            # observation is conservatively incomplete, without process scans.
+            if run_process_group_exists(child.pid) and not receipt["group_retirement_requested"]:
+                receipt["group_retirement_requested"] = True
+                receipt["leader_reaped"] = stop_run_processes(child)
+                receipt["state"] = "incomplete"
+                receipt["reason"] = "owned process group remained after leader exit"
+                status = 125
+            receipt["process_group_empty_confirmed"] = wait_run_process_group_empty(child.pid)
+            if not receipt["process_group_empty_confirmed"]:
+                receipt["state"] = "incomplete"
+                receipt["counter_collection_skipped"] = "owned process group emptiness was not confirmed"
+        receipt["leader_exit_status"] = child.returncode
     receipt["exit_status"] = status
     receipt["ended"] = utc_now()
     inventory = []
-    for path in sorted(prefix.rglob("*.gcda")):
-        inventory.append({"path": str(path), "sha256": digest(path)})
+    if os.name == "nt" or receipt["process_group_empty_confirmed"]:
+        for path in sorted(prefix.rglob("*.gcda")):
+            inventory.append({"path": str(path), "sha256": digest(path)})
     receipt["counters"] = inventory
     expected_paths = {str(counter_path(prefix, obj["data"])) for obj in manifest["objects"] if obj["path"] in expected}
     missing = expected_paths - {item["path"] for item in inventory}
@@ -586,10 +633,21 @@ def execute_run(manifest_path, run_path, command, expected=None, timeout=None):
 def load_run(path, manifest):
     path = Path(path).resolve()
     receipt = read_json(path / "run.json")
-    if receipt.get("version") != SCHEMA or receipt.get("manifest_id") != manifest["manifest_id"]:
-        raise CoverageError("run provenance does not match the declared coverage build")
+    if receipt.get("version") != RUN_SCHEMA or receipt.get("manifest_id") != manifest["manifest_id"]:
+        raise CoverageError("run provenance is legacy or does not match the declared coverage build; collect a fresh run")
     if receipt.get("state") not in ("complete", "incomplete") or "exit_status" not in receipt:
         raise CoverageError("run has not exited/collected; cannot report its counters")
+    if os.name != "nt":
+        group = receipt.get("process_group_id")
+        if (receipt.get("process_ownership") != "posix-process-group-v1" or
+                type(group) is not int or group <= 0 or
+                type(receipt.get("leader_exit_status")) is not int or
+                type(receipt.get("group_retirement_requested")) is not bool or
+                receipt.get("process_group_empty_confirmed") is not True):
+            raise CoverageError("run owned process group was not confirmed empty; cannot report its counters")
+        if receipt["state"] == "complete" and (receipt["group_retirement_requested"] or
+                receipt["leader_exit_status"] < 0 or receipt["exit_status"] != receipt["leader_exit_status"]):
+            raise CoverageError("complete run disagrees with its owned process group lifecycle")
     prefix = path / "counters"
     if receipt.get("counter_prefix") != str(prefix):
         raise CoverageError("run counter ownership changed")
