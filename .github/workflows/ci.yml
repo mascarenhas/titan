@@ -496,7 +496,7 @@ jobs:
           python3 spec/coverage_host_test.py
           TITAN_PROBE_CACHE_DISABLE=1 .lua/bin/busted -v \
             spec/coverage_lines_spec.lua spec/coder/coverage_attribution_spec.lua \
-            spec/coder/native_coverage_spec.lua
+            spec/coder/native_coverage_spec.lua spec/coder/coverage_dependency_spec.lua
       - name: Build complete production stdlib inventory
         run: make titan-native-coverage-build TITAN_COVERAGE_GCOV=gcov-14
       - name: Run ordinary aggregate with fresh coverage counters

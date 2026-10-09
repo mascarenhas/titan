@@ -102,13 +102,16 @@ def digest(path):
 
 
 def physical_source_lines(path):
-    """Match gcovr HTML's CR/LF source reader without splitting literal bytes.
+    """Read LF/CRLF sources without broad Unicode line splitting.
 
-    Text I/O normalizes CRLF and CR to LF. Unicode separators, NEL, vertical
-    tab and formfeed remain bytes within their physical source line; Python's
-    broader str.splitlines() would corrupt line indexes and LCOV checksums.
+    Titan source locations count LF bytes. gcovr's source reader also treats a
+    bare CR as a line break, so that source form cannot be reported faithfully.
+    Unicode separators, NEL, vertical tab and formfeed remain within their line.
     """
-    lines = Path(path).read_text(encoding="utf-8").split("\n")
+    source = Path(path).read_bytes().decode("utf-8").replace("\r\n", "\n")
+    if "\r" in source:
+        raise CoverageError("coverage sources require LF or CRLF; bare carriage return in " + str(path))
+    lines = source.split("\n")
     if lines[-1] == "":
         lines.pop()
     return lines
@@ -391,6 +394,7 @@ def validate_inventory(manifest, check_hashes=False):
             raise CoverageError("staged and tracked source bytes differ: " + report)
         if (check_hashes or "sha256" in source) and current != source.get("sha256"):
             raise CoverageError("source changed since coverage build: " + report)
+        physical_source_lines(tracked)
     object_ids = set()
     notes_ids = set()
     data_ids = set()
@@ -437,10 +441,19 @@ def validate_inventory(manifest, check_hashes=False):
         raise CoverageError("manifest must declare Titan executable-line coverage")
 
 
-def seal_manifest(path, cc=None, gcov=None, gcovr=None):
+def seal_manifest(path, cc=None, gcov=None, gcovr=None, unmeasured_inputs=None):
     manifest = read_json(path)
     manifest.pop("manifest_id", None)
     validate_inventory(manifest)
+    inventory = manifest.setdefault("link_inventory", [])
+    known = {os.path.normcase(str(Path(item["path"]).resolve())) for item in inventory}
+    for filename in unmeasured_inputs or []:
+        resolved = str(Path(filename).resolve())
+        identity = os.path.normcase(resolved)
+        if identity not in known:
+            inventory.append({"path": resolved, "role": "unmeasured-consumer-input",
+                              "sha256": digest(resolved)})
+            known.add(identity)
     settings = manifest.get("settings", {})
     cc = cc or settings.get("cc") or os.environ.get("CC", "gcc")
     gcov = gcov or settings.get("gcov") or os.environ.get("GCOV", "gcov")
@@ -486,6 +499,35 @@ def utc_now():
     return datetime.datetime.now(datetime.timezone.utc).isoformat()
 
 
+def stop_run_processes(child, interrupted=False):
+    """Bound leader cleanup and retire its whole private POSIX process group."""
+    if os.name != "nt":
+        try:
+            os.killpg(child.pid, signal.SIGINT if interrupted else signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+    elif child.poll() is None:
+        child.terminate()
+    try:
+        child.wait(timeout=2)
+    except subprocess.TimeoutExpired:
+        pass
+    # Reaping the leader says nothing about descendants which ignored the
+    # first signal and may still own output descriptors or coverage counters.
+    if os.name != "nt":
+        try:
+            os.killpg(child.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+    elif child.poll() is None:
+        child.kill()
+    try:
+        child.wait(timeout=2)
+        return True
+    except subprocess.TimeoutExpired:
+        return False
+
+
 def execute_run(manifest_path, run_path, command, expected=None, timeout=None):
     manifest = load_manifest(manifest_path)
     if not command:
@@ -513,18 +555,7 @@ def execute_run(manifest_path, run_path, command, expected=None, timeout=None):
             status = child.wait(timeout=timeout)
             receipt["state"] = "complete" if status >= 0 else "incomplete"
         except subprocess.TimeoutExpired:
-            if os.name != "nt":
-                os.killpg(child.pid, signal.SIGTERM)
-            else:
-                child.terminate()
-            try:
-                child.wait(timeout=2)
-            except subprocess.TimeoutExpired:
-                if os.name != "nt":
-                    os.killpg(child.pid, signal.SIGKILL)
-                else:
-                    child.kill()
-                child.wait()
+            receipt["leader_reaped"] = stop_run_processes(child)
             status = 124
             receipt["state"] = "incomplete"
             receipt["reason"] = "forced termination at timeout"
@@ -533,11 +564,7 @@ def execute_run(manifest_path, run_path, command, expected=None, timeout=None):
         receipt["state"] = "incomplete"
         receipt["reason"] = str(error)
     except KeyboardInterrupt:
-        if os.name != "nt":
-            os.killpg(child.pid, signal.SIGINT)
-        else:
-            child.terminate()
-        child.wait()
+        receipt["leader_reaped"] = stop_run_processes(child, interrupted=True)
         status = 130
         receipt["state"] = "incomplete"
         receipt["reason"] = "interrupted"
@@ -772,6 +799,8 @@ def main(argv=None):
         item.add_argument("--gcovr", default=None, help="also verify pinned report tool (optional while compiling)")
     probe.add_argument("--output", help="new directory for probe JSON evidence")
     seal.add_argument("--manifest", required=True)
+    seal.add_argument("--unmeasured-input", action="append", default=[],
+                      help="hash a separate uninstrumented consumer or test input; repeat as needed")
     run = commands.add_parser("run", help="execute with fresh counters and an exit-status receipt")
     run.add_argument("--manifest", required=True)
     run.add_argument("--run", required=True, help="new run-owned directory")
@@ -793,7 +822,8 @@ def main(argv=None):
             print(json.dumps({"backend": value["backend"], "tools": value["tools"], "checks": value["checks"]}, sort_keys=True))
             return 0
         if args.action == "seal":
-            manifest = seal_manifest(args.manifest, args.cc, args.gcov, args.gcovr)
+            manifest = seal_manifest(args.manifest, args.cc, args.gcov, args.gcovr,
+                                     args.unmeasured_input)
             print(manifest["manifest_id"])
             return 0
         if args.action == "run":

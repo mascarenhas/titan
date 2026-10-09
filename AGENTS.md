@@ -270,8 +270,9 @@ or give concurrent builds separate source copies. See
      production net/OS gates, but leave the complete stdlib behavior run in the
      regular producer.
   4. `native-coverage` consumes a separate copy of the prepared regular tree,
-     uses matching GCC/gcov 14 and pinned gcovr 8.4, and source-links all 22
-     production stdlib roots into the ordinary 28-root aggregate. It retains
+     uses matching GCC/gcov 14 and pinned gcovr 8.4, and builds an isolated
+     standard provider measuring all 22 production roots. The ordinary 28-root
+     consumer and its child programs select that provider. It retains
      isolated notes, run counters, provenance, and line-only HTML/LCOV/Cobertura
      reports. Its separate CI Codecov upload uses the `native-stdlib` flag;
      local runs never upload. See [native coverage](doc/language/native-coverage.md).

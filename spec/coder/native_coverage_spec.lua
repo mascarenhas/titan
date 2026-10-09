@@ -131,6 +131,48 @@ function test_runtime(_context: test.Context)
 end
 ]]
 
+local FOREIGN_DECISIONS = [[foreign function decide_raw(input: int): int
+  if input == 1 then -- @firstcondition
+    return 10 -- @firstbody
+  elseif input == 2 then -- @secondcondition
+    return 20 -- @secondbody
+  elseif input == 3 then -- @thirdcondition
+    return 30 -- @thirdbody
+  end
+  return 40 -- @fallback
+end
+foreign function cycle_raw(limit: int, skip: int): int
+  local total = 0 -- @cycleinitial
+  repeat -- @cyclerepeat
+    total = total + 1 -- @cyclebody
+    if skip ~= 0 then -- @skipcondition
+      break -- @cyclebreak
+    end
+  until total >= limit -- @cycleuntil
+  return total -- @cyclereturn
+end
+function decide(input: integer): integer
+  return decide_raw(input)
+end
+function cycle(limit: integer, skip: integer): integer
+  return cycle_raw(limit, skip)
+end
+]]
+
+local FOREIGN_CHECKS = [[local test = import "test"
+local lib = import "lib.titan"
+function test_bypassed(_context: test.Context)
+  test.assert(lib.decide(1) == 10)
+  test.assert(lib.cycle(3, 1) == 1)
+end
+function test_evaluated(_context: test.Context)
+  test.assert(lib.decide(1) == 10)
+  test.assert(lib.decide(2) == 20)
+  test.assert(lib.decide(4) == 40)
+  test.assert(lib.cycle(3, 0) == 3)
+end
+]]
+
 local function tagged_lines(source)
     local result, number = {}, 0
     for line in (source .. "\n"):gmatch("([^\n]*)\n") do
@@ -173,21 +215,23 @@ local function compile(workspace, directory, pretty, extra, mode)
     return run(argv)
 end
 
-local function report(directory, command)
+local function report(directory, command, label)
     local host = directory:match("^(.*)/[^/]+$") .. "/tooling/titan-coverage"
+    local run_directory = directory .. "/" .. (label and label .. "-run" or "run")
+    local report_directory = directory .. "/" .. (label and label .. "-report" or "report")
     local ok, output = run({ "python3", host, "seal", "--manifest",
         directory .. "/build.json", "--cc", CC, "--gcov", GCOV, "--gcovr", GCOVR })
     assert.truthy(ok, output)
     local argv = { "python3", host, "run", "--manifest", directory .. "/build.json",
-        "--run", directory .. "/run", "--" }
+        "--run", run_directory, "--" }
     for _, arg in ipairs(command) do argv[#argv + 1] = arg end
     ok, output = run(argv)
     assert.truthy(ok, output)
     ok, output = run({ "python3", host, "report", "--manifest",
-        directory .. "/build.json", "--run", directory .. "/run",
-        "--output", directory .. "/report", "--gcovr", GCOVR })
+        directory .. "/build.json", "--run", run_directory,
+        "--output", report_directory, "--gcovr", GCOVR })
     assert.truthy(ok, output)
-    return lcov(directory .. "/report/coverage.info")
+    return lcov(report_directory .. "/coverage.info")
 end
 
 local function fixture(body)
@@ -265,6 +309,48 @@ describe("native Titan executable-line coverage", function()
                 ok, output = compile(workspace, directory, not pretty)
                 assert.is_false(ok)
                 assert.matches("coverage build configuration changed", output)
+            end)
+        end)
+    end
+
+    for _, pretty in ipairs({ false, true }) do
+        it("attributes evaluated and bypassed foreign decision lines with pretty-print " .. tostring(pretty), function()
+            require_backend(pretty)
+            fixture(function(workspace)
+                write(workspace .. "/lib/lib.titan", FOREIGN_DECISIONS)
+                write(workspace .. "/checks.titan", FOREIGN_CHECKS)
+                local directory = workspace .. "/coverage"
+                local ok, output = compile(workspace, directory, pretty)
+                assert.truthy(ok, output)
+                local expected = tagged_lines(FOREIGN_DECISIONS)
+                local bypassed = report(directory,
+                    { directory .. "/bin/checks", "--filter=test_bypassed" }, "bypassed")
+                local counts = assert(bypassed["lib/lib.titan"])
+                assert.equal(1, counts[expected.firstcondition])
+                assert.equal(1, counts[expected.firstbody])
+                assert.equal(0, counts[expected.secondcondition])
+                assert.equal(0, counts[expected.thirdcondition])
+                assert.equal(0, counts[expected.secondbody])
+                assert.equal(0, counts[expected.thirdbody])
+                assert.equal(0, counts[expected.fallback])
+                assert.equal(1, counts[expected.cyclebody])
+                assert.equal(1, counts[expected.cyclebreak])
+                assert.equal(0, counts[expected.cycleuntil])
+                assert.is_nil(counts[expected.cyclerepeat], "constant C backedge must not become an authored decision")
+                local evaluated = report(directory,
+                    { directory .. "/bin/checks", "--filter=test_evaluated" }, "evaluated")
+                counts = assert(evaluated["lib/lib.titan"])
+                assert.equal(3, counts[expected.firstcondition])
+                assert.equal(1, counts[expected.firstbody])
+                assert.equal(2, counts[expected.secondcondition])
+                assert.equal(1, counts[expected.secondbody])
+                assert.equal(1, counts[expected.thirdcondition])
+                assert.equal(0, counts[expected.thirdbody])
+                assert.equal(1, counts[expected.fallback])
+                assert.equal(3, counts[expected.cyclebody])
+                assert.equal(0, counts[expected.cyclebreak])
+                assert.equal(3, counts[expected.cycleuntil])
+                assert.is_nil(counts[expected.cyclerepeat])
             end)
         end)
     end

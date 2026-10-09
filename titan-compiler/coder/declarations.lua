@@ -1017,9 +1017,13 @@ local function foreign_raw_stat_dispatch(ctx, node)
         return "break;"
     elseif tag == "Ast.StatIf" then
         local chunks = {}
-        for _, arm in ipairs(node.thens) do
+        for index, arm in ipairs(node.thens) do
             local stats, condition = coder._foreign_raw_exp(ctx, arm.condition)
-            chunks[#chunks + 1] = "{\n" .. stats .. "\nif (" .. condition .. ") "
+            local decision = stats .. "\nif (" .. condition .. ") "
+            if index > 1 then
+                decision = coverage_region(arm.condition, decision, ctx)
+            end
+            chunks[#chunks + 1] = "{\n" .. decision
                 .. coder._foreign_raw_block(ctx, arm.block)
                 .. "\nelse "
         end
@@ -1036,7 +1040,9 @@ local function foreign_raw_stat_dispatch(ctx, node)
     elseif tag == "Ast.StatRepeat" then
         local stats, condition = coder._foreign_raw_exp(ctx, node.condition)
         return "do {\n" .. coder._foreign_raw_block(ctx, node.block, false)
-            .. "\n" .. stats .. "\nif (" .. condition .. ") break;\n} while (1);"
+            .. "\n" .. coverage_region(node.condition,
+                stats .. "\nif (" .. condition .. ") break;", ctx)
+            .. "\n} while (1);"
     elseif tag == "Ast.StatFor" then
         local start_stats, start = coder._foreign_freeze(
             ctx, node.start, node.decl._type, "for_start")
@@ -1065,6 +1071,12 @@ end
 function coder._foreign_raw_stat(ctx, node)
     local code = foreign_raw_stat_dispatch(ctx, node)
     if node._tag == "Ast.StatBlock" then return code end
+    if node._tag == "Ast.StatRepeat" and coder._coverage_source_regions
+        and not ctx._coverage_generated then
+        -- The constant C backedge is scaffolding; the authored decision is
+        -- the nested until region, which may be bypassed by a body break.
+        return require("titan-compiler.coverage_lines").region(code, "generated")
+    end
     return coverage_region(node, code, ctx)
 end
 

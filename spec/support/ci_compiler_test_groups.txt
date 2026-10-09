@@ -156,3 +156,4 @@
 2 spec/coverage_lines_spec.lua 0.050
 3 spec/coder/coverage_attribution_spec.lua 1.000
 4 spec/coder/native_coverage_spec.lua 10.000
+1 spec/coder/coverage_dependency_spec.lua 15.000

@@ -19,6 +19,10 @@ generated attribution. Selected source-defined foreign functions are outlined be
 header planning in this mode; otherwise an inline body could run only in an
 excluded consumer/test object or disappear from the notes-only denominator.
 The ordinary mode restores cached inline decisions when changing policies.
+Foreign `elseif` conditions own separate decision regions, and a repeat loop's
+`until` condition owns its evaluation region. The synthesized constant C
+backedge is generated scaffolding; a body `break` does not falsely mark the
+unevaluated `until` condition as executed.
 
 `driver.format_generated_file` uses a fixed clang-format `CommentPragmas`
 reservation to preserve standalone marker comments. Coverage skips the ordinary
@@ -64,6 +68,9 @@ The settings stamp hashes the compiler, C parser, and executed `titanc` frontend
 Per-module receipts include the exact source inventory/hashes, object, notes and
 attribution metadata hashes. Missing or changed receipts force source compilation. Coverage
 objects cannot be mistaken for ordinary source-adjacent objects by timestamps.
+These receipts do not invalidate callers when an imported inline foreign helper
+changes. Callers using `--incremental` still own the complete dependency graph;
+the repository coverage recipe rebuilds rather than relying on timestamp reuse.
 
 Selected objects receive O0/no-LTO, GCC coverage, atomic profile update, and
 retention of uncalled static functions. GCC `-dumpbase stable.c
@@ -74,17 +81,27 @@ runtime. Test/support/entrypoint and unrelated native dependencies are not
 instrumented. Build-generated counters are harmless because runs own fresh
 prefixes after all probes.
 
-The complete repository aggregate source-links the stdlib rather than loading
-its installed shared provider. Its link explicitly exports the host Lua API so
-stock Lua C dependencies used by the test escape hatches keep their ordinary
-loading contract. The runner streams output through a pipe and audits all 28
-test roots using the same output validator as the ordinary native suite.
+The repository workflow builds a normal shared standard provider with 22
+measured production roots and unmeasured `titan.test`. It stages the explicit
+test ensemble and native fixtures inside the coverage build directory, then
+builds an ordinary uninstrumented 28-root consumer against that provider.
+Neither provider nor consumer enables incremental reuse without a dependency DAG.
+Runtime `TITAN_PATH_0_6` and provider-first Lua paths select the same measured
+provider in the consumer and joined children. The repository test helper also
+honors an explicit provider directory in fresh `lua -E` hosts, where ambient
+Lua paths are intentionally ignored. Static children receive a link-only
+coverage runtime flag. The runner streams output through a pipe and audits all
+28 test roots using the ordinary output validator. General CLI source-linked
+coverage remains available independently of this repository workflow.
 
 The manifest names every source constituent, mapped tracked path, source hash,
 instrumented object, notes/data path, object/notes hash, and linked image/hash.
 Uninstrumented prebuilt dependencies remain explicitly unmeasured. No binary
 metadata/ABI version needs to change; the ordinary compiler and object contracts
 remain intact.
+Repeated `seal --unmeasured-input` arguments bind separately built consumers and
+their original/staged test inputs to the same run through the existing hashed
+link inventory. They do not add measured sources or executable lines.
 
 ## Host collection and reporting
 
@@ -104,6 +121,9 @@ private gcov work directory. Unexecuted notes are read without `.gcda`, keeping
 their executable lines at zero. Unknown inventory/source attribution, malformed
 data, missing notes, source edits, profile mismatches, and counters changed by
 late children are observable failures.
+On POSIX, timeout and interruption cleanup signal the owned process group and
+escalate to `SIGKILL` even if its leader has already exited. Waiting remains
+bounded so a descendant cannot keep writing counters after a completed receipt.
 
 Raw gcov data includes generated C locations and native arcs/functions for
 diagnosis. Normalization retains only declared Titan executable lines, verifies
@@ -112,6 +132,9 @@ branch/function metrics. Public LCOV uses verified repository-relative `SF`
 paths; gcovr renders HTML and Cobertura from the normalized line trace and exact
 source-line checksums. Source inventory gaps fail unless compiler anchors
 explicitly prove that a source constituent has no executable regions.
+Sealing accepts LF and CRLF source rows but rejects bare carriage returns:
+Titan locations count LF bytes, whereas gcovr's source reader treats CR as a
+line break. Rejecting that mismatch prevents shifted HTML and LCOV checksums.
 
 Unselected source-defined foreign bodies can remain inline in generated headers.
 GCC may include those physical header locations in a selected translation unit's

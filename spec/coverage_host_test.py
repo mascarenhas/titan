@@ -13,9 +13,11 @@ import json
 import os
 from pathlib import Path
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from unittest import mock
 
@@ -198,6 +200,39 @@ class CoverageHostTest(unittest.TestCase):
         self.assertNotIn('branch="true"', (report / "coverage.xml").read_text())
         self.assertEqual(coverage.read_json(report / "summary.json")["lines_total"], 4)
 
+    def test_bare_cr_inside_long_string_rejects_seal_instead_of_shifting_lines(self):
+        first = self.sources / "first.titan"
+        # This is valid Titan, whose source locations count only LF. The CR
+        # remains inside a long string but gcovr would display an extra row.
+        first.write_bytes(b"function choose(x: boolean): integer\n"
+                          b"local text = [[one\rtwo]]\n"
+                          b"if x then return 4 else return 6 end\nend\n")
+        manifest = copy.deepcopy(self.manifest)
+        manifest.pop("manifest_id")
+        manifest["sources"][0]["sha256"] = coverage.digest(first)
+        coverage.save_json(self.manifest_path, manifest)
+        with self.assertRaisesRegex(coverage.CoverageError, "LF or CRLF; bare carriage return"):
+            coverage.seal_manifest(self.manifest_path, CC, GCOV)
+
+    def test_seal_tracks_separate_unmeasured_consumer_inputs(self):
+        helper = self.root / "consumer-fixture.txt"
+        helper.write_text("first consumer input\n")
+        manifest = coverage.seal_manifest(self.manifest_path, CC, GCOV,
+            unmeasured_inputs=[str(helper), str(helper), str(self.root / "main.o")])
+        inputs = manifest["link_inventory"]
+        self.assertEqual(len(inputs), 2)
+        retained = next(item for item in inputs if item["path"] == str(helper))
+        self.assertEqual(retained["role"], "unmeasured-consumer-input")
+        self.assertEqual(retained["sha256"], coverage.digest(helper))
+        self.assertEqual(manifest["sources"], self.manifest["sources"])
+        run, status = self.run_fixture("run-consumer-input", "1")
+        self.assertEqual(status, 0)
+        helper.write_text("changed consumer input\n")
+        with self.assertRaisesRegex(coverage.CoverageError, "linked input changed"):
+            self.report_fixture([run])
+        with self.assertRaisesRegex(coverage.CoverageError, "linked input changed"):
+            self.run_fixture("run-changed-consumer-input", "1")
+
     def test_crlf_and_literal_unicode_separators_keep_physical_line_indexes(self):
         first = self.sources / "first.titan"
         literal_line = 'local text = "raw\u2028\v\f\x85\u2029bytes"'
@@ -302,12 +337,98 @@ class CoverageHostTest(unittest.TestCase):
         self.assertEqual(status, 124)
         self.assertEqual(coverage.read_json(run / "run.json")["state"], "incomplete")
 
+    @unittest.skipIf(os.name == "nt", "POSIX process-group cleanup")
+    def test_timeout_kills_term_resistant_descendant_after_leader_exits(self):
+        fifo = self.root / "descendant-output"
+        ready = self.root / "descendant-ready.json"
+        os.mkfifo(fifo)
+        reader = os.open(fifo, os.O_RDONLY | os.O_NONBLOCK)
+        self.addCleanup(os.close, reader)
+        worker = (
+            "import json,os,signal,sys,time; from pathlib import Path; "
+            "signal.signal(signal.SIGTERM,signal.SIG_IGN); "
+            "output=open(sys.argv[1],'wb',buffering=0); "
+            "Path(sys.argv[2]).write_text(json.dumps({'group':os.getpgrp()})); "
+            "time.sleep(30)"
+        )
+        launcher = (
+            "import subprocess,sys,time; "
+            "subprocess.Popen([sys.executable,'-c',sys.argv[1],sys.argv[2],sys.argv[3]]); "
+            "time.sleep(30)"
+        )
+        try:
+            run = self.root / "descendant-timeout"
+            status = coverage.execute_run(self.manifest_path, run,
+                [sys.executable, "-c", launcher, worker, str(fifo), str(ready)], timeout=1)
+            self.assertEqual(status, 124)
+            self.assertTrue(ready.is_file(), "descendant did not become ready before timeout")
+            self.assertEqual(coverage.read_json(run / "run.json")["state"], "incomplete")
+            # EOF proves the descendant closed its output, including when its
+            # terminated leader has already been reaped. A zombie has no open
+            # descriptor and does not make this check platform-dependent.
+            deadline = time.monotonic() + 1
+            while True:
+                try:
+                    self.assertEqual(os.read(reader, 1), b"")
+                    break
+                except BlockingIOError:
+                    if time.monotonic() >= deadline:
+                        self.fail("TERM-resistant descendant retained its output after leader exit")
+                    time.sleep(0.01)
+        finally:
+            if ready.is_file():
+                group = json.loads(ready.read_text())["group"]
+                try:
+                    os.killpg(group, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+
     @unittest.skipIf(os.name == "nt", "POSIX signal result convention")
     def test_crash_records_incomplete_collection(self):
         run = self.root / "crash"
         status = coverage.execute_run(self.manifest_path, run, [sys.executable, "-c", "import os,signal; os.kill(os.getpid(),signal.SIGKILL)"])
         self.assertEqual(status, 137)
         self.assertEqual(coverage.read_json(run / "run.json")["state"], "incomplete")
+
+    @unittest.skipIf(os.name == "nt", "POSIX interrupt cleanup")
+    def test_interrupt_wait_is_bounded_when_the_process_ignores_sigint(self):
+        ready = self.root / "interrupt-ready"
+        original_popen = subprocess.Popen
+        worker = (
+            "import signal,sys,time; from pathlib import Path; "
+            "signal.signal(signal.SIGINT,signal.SIG_IGN); "
+            "Path(sys.argv[1]).write_text('ready'); time.sleep(30)"
+        )
+        def interrupt_first_wait(*args, **kwargs):
+            child = original_popen(*args, **kwargs)
+            if list(args[0])[:3] != [sys.executable, "-c", worker]:
+                return child
+            self.addCleanup(lambda: child.poll() is None and child.kill())
+            deadline = time.monotonic() + 3
+            while not ready.exists():
+                self.assertIsNone(child.poll(), "interrupt fixture exited before readiness")
+                self.assertLess(time.monotonic(), deadline, "interrupt fixture did not become ready")
+                time.sleep(0.01)
+            original_wait = child.wait
+            calls = 0
+            def wait(*wait_args, **wait_kwargs):
+                nonlocal calls
+                calls += 1
+                if calls == 1:
+                    raise KeyboardInterrupt
+                return original_wait(*wait_args, **wait_kwargs)
+            child.wait = wait
+            return child
+        run = self.root / "interrupted"
+        started = time.monotonic()
+        with mock.patch.object(coverage.subprocess, "Popen", side_effect=interrupt_first_wait):
+            status = coverage.execute_run(self.manifest_path, run,
+                [sys.executable, "-c", worker, str(ready)])
+        self.assertLess(time.monotonic() - started, 5)
+        self.assertEqual(status, 130)
+        receipt = coverage.read_json(run / "run.json")
+        self.assertEqual(receipt["state"], "incomplete")
+        self.assertTrue(receipt["leader_reaped"])
 
     def test_duplicate_runs_cannot_be_double_counted(self):
         run, _ = self.run_fixture("run", "0")

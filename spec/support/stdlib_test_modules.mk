@@ -75,7 +75,8 @@ TITAN_TEST_SOURCES_async.tests := spec/stdlib/titan/async/tests/tests.titan \
 	spec/stdlib/titan/async/tests/fatal_test.titan \
 	spec/stdlib/titan/async/tests/foreign_work_test.titan \
 	spec/stdlib/titan/async/tests/subscription_test.titan \
-	spec/stdlib/titan/async/tests/task_test.titan
+	spec/stdlib/titan/async/tests/task_test.titan \
+	spec/stdlib/titan/async/tests/coverage_combinator_matrix_test.titan
 TITAN_TEST_IMPORTS_async.tests := async.test_support support.async support.runtime
 TITAN_TEST_FOREIGN_async.tests := 1
 
@@ -159,7 +160,9 @@ TITAN_TEST_SOURCES_os.process_tests := spec/stdlib/titan/os/process_tests/proces
 	spec/stdlib/titan/os/process_tests/host_process_test.titan \
 	spec/stdlib/titan/os/process_tests/parent_stdio_test.titan \
 	spec/stdlib/titan/os/process_tests/signal_test.titan \
-	spec/stdlib/titan/os/process_tests/stream_test.titan
+	spec/stdlib/titan/os/process_tests/stream_test.titan \
+	spec/stdlib/titan/os/process_tests/coverage_stream_test.titan \
+	spec/stdlib/titan/os/process_tests/coverage_tty_test.titan
 TITAN_TEST_IMPORTS_os.process_tests := os.process_test_support support.async support.command support.common support.runtime
 
 TITAN_TEST_SOURCES_os.test_support := spec/stdlib/titan/os/test_support.titan
@@ -167,7 +170,8 @@ TITAN_TEST_IMPORTS_os.test_support := support.common
 
 TITAN_TEST_SOURCES_os.tests := spec/stdlib/titan/os/tests/tests.titan \
 	spec/stdlib/titan/os/tests/helpers_test.titan \
-	spec/stdlib/titan/os/tests/time_test.titan
+	spec/stdlib/titan/os/tests/time_test.titan \
+	spec/stdlib/titan/os/tests/coverage_calendar_test.titan
 TITAN_TEST_IMPORTS_os.tests := os.test_support support.command
 
 TITAN_TEST_SOURCES_path.tests := spec/stdlib/titan/path/tests.titan
@@ -201,8 +205,10 @@ TITAN_TEST_IMPORTS_ssl.backpressure_support := support.async
 TITAN_TEST_SOURCES_ssl.test_support := spec/stdlib/titan/ssl/test_support.titan
 TITAN_TEST_IMPORTS_ssl.test_support := support.runtime
 
-TITAN_TEST_SOURCES_ssl.tests := spec/stdlib/titan/ssl/tests.titan
-TITAN_TEST_IMPORTS_ssl.tests := net.test_support ssl.backpressure_support ssl.test_support support.async support.common support.runtime
+TITAN_TEST_SOURCES_ssl.tests := spec/stdlib/titan/ssl/tests/tests.titan \
+	spec/stdlib/titan/ssl/tests/coverage.titan \
+	spec/stdlib/titan/ssl/tests/allocation_test.titan
+TITAN_TEST_IMPORTS_ssl.tests := support.command net.test_support ssl.backpressure_support ssl.test_support support.async support.common support.runtime
 
 TITAN_TEST_SOURCES_string.core_test := spec/stdlib/titan/string/core_test.titan
 TITAN_TEST_IMPORTS_string.core_test := string.test_support
@@ -245,7 +251,9 @@ TITAN_TEST_SOURCES_uv.public_tests := spec/stdlib/titan/uv/public_tests/public_t
 	spec/stdlib/titan/uv/public_tests/workers.titan \
 	spec/stdlib/titan/uv/public_tests/outputs.titan \
 	spec/stdlib/titan/uv/public_tests/coverage_fs_poll.titan \
-	spec/stdlib/titan/uv/public_tests/coverage_sync_udp.titan
+	spec/stdlib/titan/uv/public_tests/coverage_sync_udp.titan \
+	spec/stdlib/titan/uv/public_tests/coverage_misc_callbacks.titan \
+	spec/stdlib/titan/uv/public_tests/coverage_tty.titan
 TITAN_TEST_IMPORTS_uv.public_tests := support.common
 TITAN_TEST_FOREIGN_uv.public_tests := 1
 
@@ -266,11 +274,12 @@ TITAN_TEST_C_INPUTS_fs.test_support := spec/stdlib/titan/fs/fixture_support.h
 TITAN_TEST_C_INPUTS_io.test_support := spec/stdlib/titan/io/print_capture.h
 TITAN_TEST_C_INPUTS_lua.test_support := spec/stdlib/titan/lua/source_fixture.h
 TITAN_TEST_C_INPUTS_os.test_support := spec/stdlib/titan/os/time_support.h
+TITAN_TEST_C_INPUTS_os.process_tests = $(TITAN_TEST_BUILD_DIR)/uv_coverage_pty.h
 TITAN_TEST_C_INPUTS_reflect.tests := spec/stdlib/titan/reflect/reflection_recursive.h
 TITAN_TEST_C_INPUTS_async.tests = $(TITAN_TEST_BUILD_DIR)/async_foreign_work.h \
 	spec/stdlib/titan/async/tests/async_stack_probe.h
 TITAN_TEST_C_INPUTS_uv.runtime_tests = $(TITAN_TEST_BUILD_DIR)/uv_stdio_probe.h
-TITAN_TEST_C_INPUTS_uv.public_tests = $(TITAN_TEST_BUILD_DIR)/uv_coverage_threads.h
+TITAN_TEST_C_INPUTS_uv.public_tests = $(TITAN_TEST_BUILD_DIR)/uv_coverage_threads.h $(TITAN_TEST_BUILD_DIR)/uv_coverage_pty.h
 TITAN_TEST_C_INPUTS_lua.tests = $(TITAN_TEST_BUILD_DIR)/uv_stdio_probe.h
 
 TITAN_TEST_SOURCES_websocket.tests := spec/stdlib/titan/websocket/tests/tests.titan \

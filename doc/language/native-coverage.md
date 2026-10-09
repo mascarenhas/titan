@@ -67,6 +67,10 @@ titan-coverage report --manifest /tmp/app-coverage/build/build.json \
 but gcovr is required only for rendering. `seal` validates the compiler's
 source/object/notes/image hashes and records exact compiler, profiler, target,
 and runtime identities. It rejects changes between compilation and sealing.
+When a test consumer is built separately from a measured provider, repeat
+`seal --unmeasured-input PATH` for its executable and source/fixture inputs.
+Their hashes bind the run to that consumer without adding its code to the
+coverage denominator; edits make subsequent runs and reports fail validation.
 
 Selected objects use `-O0 -fno-lto --coverage -fprofile-update=atomic`.
 Nonselected Titan objects use O0/no LTO without instrumentation. Coverage
@@ -76,6 +80,10 @@ flags, source mapping, or replaced SDK requires a fresh directory. Reinstalling
 an SDK can replace native header identities even when their bytes are unchanged.
 `--incremental` reuses
 only coverage-owned objects with matching source/object/notes/attribution receipts;
+callers must also invalidate every dependent when imported source or inline
+helpers change. These receipts do not replace a complete dependency build graph.
+The repository coverage Make target rebuilds its objects rather than opting
+into incremental compilation without such a graph.
 `-c --test` supports separate object generation, followed by the ordinary
 `--test --incremental` final link with the same coverage settings. An ordinary
 application `main` can be measured using the same options without `--test`.
@@ -92,7 +100,9 @@ still measure the body. Normal builds retain their usual inlining policy.
 
 Each `run` directory must be new. The host command sets `GCOV_PREFIX` and
 `GCOV_PREFIX_STRIP=0` only for that process tree, after build/provider probes
-finish. Old build-time counters cannot become test hits. Joined children inherit
+finish. Repository builds relocate any counters from compiler metadata probes
+into a separate `preparation-counters` directory. Reports never consume those
+preparation counters. Old build-time counters cannot become test hits. Joined children inherit
 that run's prefix; the parent must wait for them to finish. Different concurrent
 shards require different run directories. Retain all run receipts and raw
 counters until reporting finishes.
@@ -122,6 +132,12 @@ the same bytes as its tracked original. Folder contributors retain separate
 filenames. Sources outside the report root fail instead of being silently
 excluded.
 
+Selected sources must use LF or CRLF line endings. A literal bare carriage
+return, including one inside a long string, is rejected when sealing: Titan's
+source locations count LF bytes, while the HTML renderer would treat that CR
+as an extra line and show incorrect source rows. Escaped `\r` strings work
+normally.
+
 Reports include `coverage.info` (LCOV, root-relative Titan paths),
 `coverage.xml` (Cobertura), `coverage.html`, normalized `lines.json`, summary
 and provenance, and raw gcov JSON for diagnosis. A source contributor containing
@@ -139,8 +155,10 @@ HTML source highlighting uses the tracked source bytes.
 ## Titan repository baseline
 
 With a prepared validation SDK and GCC/matching gcov, the repository targets
-source-link all production stdlib modules except test support into the ordinary
-28-root native aggregate. Runtime/native dependencies remain uninstrumented:
+build an isolated standard provider containing all 23 stdlib roots, with the
+22 production roots measured and test support uninstrumented. An ordinary
+28-root native test consumer uses that provider. Runtime/native dependencies
+remain uninstrumented:
 
 ```sh
 make titan-native-coverage-build PREFIX=/tmp/titan-sdk CC=gcc-14 \
@@ -153,6 +171,13 @@ make titan-native-coverage-report PREFIX=/tmp/titan-sdk \
 ```
 
 The build/run/report split supports focused runtime filters without rebuilding.
+Coverage owns the provider, staged consumer sources/outputs, and native test
+fixtures. The run selects that provider through `TITAN_PATH_0_6` and provider-first
+Lua paths, so joined child programs contribute their existing stdlib tests to
+the same fresh counters. The repository's `lua -E` test helper explicitly selects
+the covered provider when this workflow requests it. Static child consumers
+receive the coverage runtime as a final-link input; their source stays unmeasured.
+The sealed inventory also hashes the consumer and its original/staged test inputs.
 Use an unfiltered run to establish the complete baseline; a focused run has a
 different purpose. Keep ordinary optimized and platform validation as separate
 gates. Upload `coverage.info` to Codecov in a separate CI action with a native

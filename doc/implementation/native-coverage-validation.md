@@ -331,6 +331,32 @@ The original access-violation evidence is retained separately. The complete
 compiler/runtime baseline and corrected compiler-spec rerun are described
 above; compiler and host-tool bytes did not change in the final UV correction.
 
+## Windows backend follow-up probe
+
+A bounded synthetic CLANG64/UCRT probe used Clang, llvm-cov, llvm-profdata,
+and clang-format 22.1.8 on the same Windows VM. Clang `--coverage` plus
+`llvm-cov gcov -i` preserved two Titan-style `#line` filenames, exact taken and
+untaken counts, multiline anchors, and authored C locations with formatting
+on/off in both an executable and a loaded/unloaded DLL. Notes without counters
+reported zero lines; atomic profile updates emitted actual atomic operations.
+Fresh `GCOV_PREFIX` collection required `GCOV_PREFIX_STRIP=1` to remove the
+Windows drive component and left original counters unchanged. LLVM source-based
+coverage instead reported physical C locations and omitted both virtual Titan
+files, so it cannot directly consume the current source-attribution scheme.
+
+This proves feasibility for a separate LLVM-gcov backend, not Windows support
+in the initial GCC backend. LLVM rejects `--json-format`, requiring its own
+strict intermediate reader/version contract. Joined thread/child collection,
+termination and incomplete-run accounting, locking, and production packaging
+remain acceptance work. Oobii recommends that backend as a separate follow-up;
+this delivery retains explicit Windows rejection and ordinary VM verification.
+The complete local probe receipt is
+`/tmp/titan-210-windows-coverage-probe/README.md`; asserted `result.json` SHA256
+`9c91b1a07818dab412f74a66ae69c8aeb34bf91a5c99972e193cb773cc8c03a2`,
+archive SHA256
+`ea11dd08a2ee4036c103afb3ee05acb0e8dedddb7c5fd4e068cc11cc87e35239`.
+No product sources or SDK bytes were changed by the probe.
+
 ## Reproduction
 
 Prepare a separate validation SDK, then follow the explicit dependencies and

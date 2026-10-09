@@ -1,0 +1,41 @@
+local system = import "os"
+local fs = import "fs"
+local string = import "string"
+
+local function exercise(): string
+  if not system.stdin:is_tty() or not system.stdout:is_tty() or
+     not system.stderr:is_tty() then
+    raise "parent standard streams lost their terminal kind"
+  end
+  local line? = system.stdin:read_until("\n", true)
+  if line ~= "PTY_INPUT" then raise "terminal input changed" end
+  system.stdout:write("PTY_STDOUT;")
+  system.stderr:write("PTY_STDERR;")
+  -- Stable parent stream facades have an idempotent no-op close. Later reads
+  -- and writes must keep using the Runtime-owned terminal wrappers.
+  system.stdout:close()
+  system.stdout:close()
+  system.stdout:write("PTY_AFTER_CLOSE;")
+  system.stderr:close()
+  system.stderr:write("PTY_ERROR_AFTER_CLOSE;")
+  system.stdin:close()
+  system.stdin:close()
+  if system.stdin:read_until("\n", true) ~= "PTY_SECOND" then
+    raise "closing the parent input facade changed its buffered terminal data"
+  end
+  return "OK:PTY_INPUT"
+end
+
+function main(arguments: {string}): integer
+  if #arguments ~= 1 then return 2 end
+  local result = ""
+  local status = 0
+  do
+    result = exercise()
+  catch
+    result = "ERROR:" .. string.tostring(error) .. "\n" .. traceback
+    status = 1
+  end
+  fs.write_file(arguments[1], result)
+  return status
+end

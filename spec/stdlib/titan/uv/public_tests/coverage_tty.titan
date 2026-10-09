@@ -1,0 +1,283 @@
+foreign import "uv_coverage_pty.h"
+
+local function coverage_tty_open(): owned *titan_cov_pty
+  if ffi.titan_cov_pty_available() == 0 then
+    test.skip("isolated POSIX PTYs are unavailable; Windows ConPTY is a separate capability")
+  end
+  local pty: owned *titan_cov_pty = foreign titan_cov_pty.new()
+  success(ffi.titan_cov_pty_open(pty))
+  return pty
+end
+
+local function coverage_tty_deadline(loop: uv.loop_t): uv.timer_t
+  local timer = uv.timer_t()
+  success(uv.timer_init(loop, timer))
+  success(uv.timer_start(timer, function (_timer: uv.timer_t)
+    raise "isolated TTY callback behavior exceeded its five-second deadline"
+  end, 5000, 0))
+  return timer
+end
+
+local function coverage_tty_owner(handle: uv.handle_t, owner: uv.tty_t)
+  case handle
+  when tty(current) then test.assert(current == owner, "TTY handle view changed ownership")
+  else raise "TTY callback received a different handle kind"
+  end
+end
+
+local function coverage_tty_stream_owner(stream: uv.stream_t, owner: uv.tty_t)
+  case stream
+  when tty(current) then test.assert(current == owner, "TTY stream view changed ownership")
+  else raise "TTY callback received a different stream kind"
+  end
+end
+
+function test_coverage_tty_modes_views_close_and_reinitialize(_context: test.Context)
+  local pty = coverage_tty_open()
+  defer ffi.titan_cov_pty_close(pty)
+  local loop = new_loop()
+  defer finish_loop(loop)
+  local terminal = uv.tty_t()
+  local handle = terminal:as_handle_t()
+  local stream = terminal:as_stream_t()
+  test.assert(not handle:is_initialized())
+  test.assert(uv.tty_set_mode(terminal, uv.tty_mode_t.TTY_MODE_RAW()) == uv.EINVAL)
+  local invalid, width, height = uv.tty_get_winsize(terminal)
+  test.assert(invalid == uv.EINVAL and width == 0 and height == 0)
+  test.assert(uv.tty_init(uv.loop_t(), terminal, pty.slave, 0) == uv.EINVAL)
+  success(uv.tty_init(loop, terminal, pty.slave, 0))
+  test.assert(handle:is_initialized() and uv.is_readable(stream) and uv.is_writable(stream))
+  coverage_tty_owner(stream:as_handle_t(), terminal)
+  uv.handle_set_data(handle, false)
+  test.assert(uv.handle_get_data(stream:as_handle_t()) == false)
+  local fd_status, descriptor = uv.fileno(handle)
+  success(fd_status)
+  test.assert(ffi.titan_cov_pty_is_terminal((descriptor as uv.os_fd_t):to_integer()) == 1)
+  local status, actual_width, actual_height = uv.tty_get_winsize(terminal)
+  success(status)
+  test.assert(actual_width == 97 and actual_height == 29, "TTY dimensions did not reflect its own PTY")
+  success(uv.stream_set_blocking(stream, 0))
+  success(uv.tty_set_mode(terminal, uv.tty_mode_t.TTY_MODE_RAW()))
+  test.assert(ffi.titan_cov_pty_canonical(pty) == 0 and ffi.titan_cov_pty_echo(pty) == 0)
+  success(uv.tty_set_mode(terminal, uv.tty_mode_t.TTY_MODE_IO()))
+  test.assert(ffi.titan_cov_pty_output_processing(pty) == 0)
+  success(uv.tty_set_mode(terminal, uv.tty_mode_t.TTY_MODE_NORMAL()))
+  test.assert(ffi.titan_cov_pty_canonical(pty) == 1 and ffi.titan_cov_pty_echo(pty) == 1)
+  success(uv.tty_set_mode(terminal, uv.tty_mode_t.TTY_MODE_RAW_VT()))
+  test.assert(ffi.titan_cov_pty_canonical(pty) == 0)
+  success(uv.tty_reset_mode())
+  test.assert(ffi.titan_cov_pty_canonical(pty) == 1, "global TTY reset did not restore the private terminal")
+  success(uv.tty_set_mode(terminal, uv.tty_mode_t.TTY_MODE_NORMAL()))
+  uv.tty_set_vterm_state(uv.tty_vtermstate_t.TTY_SUPPORTED())
+  local vterm_status, vterm? = uv.tty_get_vterm_state()
+  test.assert(vterm_status == uv.ENOTSUP and vterm == nil,
+              "Unix libuv unexpectedly reported Windows virtual-terminal support")
+  uv.tty_set_vterm_state(uv.tty_vtermstate_t.TTY_UNSUPPORTED())
+  local closed = 0
+  uv.close(handle, function (current: uv.handle_t)
+    coverage_tty_owner(current, terminal)
+    test.assert(not current:is_initialized(), "close callback preceded TTY retirement")
+    closed = closed + 1
+  end)
+  test.assert(handle:is_initialized() and uv.is_closing(handle))
+  test.assert(uv.tty_init(loop, terminal, pty.slave, 0) == uv.EINVAL)
+  success(uv.run(loop))
+  test.assert(closed == 1 and not handle:is_initialized())
+  success(uv.tty_init(loop, terminal, pty.slave, 0))
+  local restored, new_width, new_height = uv.tty_get_winsize(terminal)
+  success(restored)
+  test.assert(new_width == 97 and new_height == 29)
+  uv.close(handle)
+  success(uv.run(loop))
+  test.assert(not handle:is_initialized())
+end
+
+function test_coverage_tty_binary_duplex_callbacks_retain_owner(_context: test.Context)
+  local pty = coverage_tty_open()
+  defer ffi.titan_cov_pty_close(pty)
+  local loop = new_loop()
+  defer finish_loop(loop)
+  local terminal = uv.tty_t()
+  success(uv.tty_init(loop, terminal, pty.slave, 0))
+  success(uv.tty_set_mode(terminal, uv.tty_mode_t.TTY_MODE_IO()))
+  local stream = terminal:as_stream_t()
+  local deadline = coverage_tty_deadline(loop)
+  local poll = uv.poll_t()
+  success(uv.poll_init(loop, poll, pty.master))
+  local input = "\0TTY\r\n\255\003"
+  local output = "\0out\r\n\255end"
+  local received, emitted = "", ""
+  local wrote, finished = false, false
+  local retained: {uv.buf_t} = {}
+  local complete: function (): () = function ()
+    if not finished and received == input and emitted == output and wrote then
+      finished = true
+      success(uv.read_stop(stream))
+      success(uv.poll_stop(poll))
+      uv.close(poll:as_handle_t())
+      uv.close(terminal:as_handle_t())
+      uv.close(deadline:as_handle_t())
+    end
+  end
+  success(uv.poll_start(poll, function (current: uv.poll_t, status: integer, events: integer)
+    success(status)
+    test.assert(current == poll and events & uv.READABLE ~= 0)
+    local bytes: owned char[] = foreign char.new_array(128)
+    local count: integer = ffi.titan_cov_pty_read(pty, bytes, 128)
+    test.assert(count >= 0, "private PTY master read failed")
+    if count > 0 then emitted = emitted .. strings.sub(bytes as string, 1, count) end
+    test.assert(#emitted <= #output, "TTY output contained unexpected echo or translated bytes")
+    complete()
+  end, uv.READABLE))
+  success(uv.read_start(stream,
+    function (current: uv.handle_t, suggested: integer): uv.buf_t
+      coverage_tty_owner(current, terminal)
+      test.assert(suggested > 0)
+      local buffer = uv.buf_t.allocate(128)
+      retained[#retained + 1] = buffer
+      return buffer
+    end,
+    function (current: uv.stream_t, count: integer, buffer: uv.buf_t?)
+      coverage_tty_stream_owner(current, terminal)
+      test.assert(count >= 0, "private TTY input ended before its expected bytes")
+      if count > 0 then received = received .. (buffer as uv.buf_t):to_string(count) end
+      test.assert(#received <= #input)
+      if received == input then success(uv.read_stop(current)) end
+      collect()
+      complete()
+    end))
+  test.assert(ffi.titan_cov_pty_write(pty, input, #input) == #input)
+  local request = uv.write_t()
+  success(uv.write(request, stream, {uv.buf_t.from_string("\0out\r"), uv.buf_t.from_string("\n\255end")},
+    function (current: uv.write_t, status: integer)
+      success(status)
+      test.assert(current == request and not wrote)
+      coverage_tty_stream_owner(current:handle() as uv.stream_t, terminal)
+      wrote = true
+      collect()
+      complete()
+    end))
+  success(uv.run(loop))
+  test.assert(finished and received == input and emitted == output and wrote)
+  test.assert(#retained > 0 and retained[1]:is_writable(), "read callback lost its retained writable buffer")
+end
+
+function test_coverage_tty_read_callback_error_allows_restart(_context: test.Context)
+  local pty = coverage_tty_open()
+  defer ffi.titan_cov_pty_close(pty)
+  local loop = new_loop()
+  defer finish_loop(loop)
+  local terminal = uv.tty_t()
+  success(uv.tty_init(loop, terminal, pty.slave, 0))
+  success(uv.tty_set_mode(terminal, uv.tty_mode_t.TTY_MODE_IO()))
+  local stream = terminal:as_stream_t()
+  local deadline = coverage_tty_deadline(loop)
+  local received = ""
+  success(uv.read_start(stream,
+    function (_handle: uv.handle_t, _suggested: integer): uv.buf_t
+      return uv.buf_t.allocate(128)
+    end,
+    function (current: uv.stream_t, count: integer, buffer: uv.buf_t?)
+      if count > 0 then
+        received = received .. (buffer as uv.buf_t):to_string(count)
+        test.assert(#received <= 6)
+        if received == "first\0" then
+          success(uv.read_stop(current))
+          raise false
+        end
+      end
+    end))
+  test.assert(ffi.titan_cov_pty_write(pty, "first\0", 6) == 6)
+  expect_error(function () local _status = uv.run(loop) end, false)
+  test.assert(received == "first\0" and terminal:as_handle_t():is_initialized())
+  received = ""
+  success(uv.read_start(stream,
+    function (_handle: uv.handle_t, _suggested: integer): uv.buf_t
+      return uv.buf_t.allocate(128)
+    end,
+    function (current: uv.stream_t, count: integer, buffer: uv.buf_t?)
+      test.assert(count >= 0)
+      if count > 0 then received = received .. (buffer as uv.buf_t):to_string(count) end
+      if received == "again\255" then
+        success(uv.read_stop(current))
+        uv.close(current:as_handle_t())
+        uv.close(deadline:as_handle_t())
+      end
+    end))
+  test.assert(ffi.titan_cov_pty_write(pty, "again\255", 6) == 6)
+  success(uv.run(loop))
+  test.assert(received == "again\255")
+end
+
+function test_coverage_tty_read_allocation_error_preserves_pending_input(_context: test.Context)
+  local pty = coverage_tty_open()
+  defer ffi.titan_cov_pty_close(pty)
+  local loop = new_loop()
+  defer finish_loop(loop)
+  local terminal = uv.tty_t()
+  success(uv.tty_init(loop, terminal, pty.slave, 0))
+  success(uv.tty_set_mode(terminal, uv.tty_mode_t.TTY_MODE_IO()))
+  local stream = terminal:as_stream_t()
+  local deadline = coverage_tty_deadline(loop)
+  local allocations, refused = 0, 0
+  success(uv.read_start(stream,
+    function (current: uv.handle_t, _suggested: integer): uv.buf_t
+      coverage_tty_owner(current, terminal)
+      allocations = allocations + 1
+      return uv.buf_t.from_string("immutable allocation")
+    end,
+    function (current: uv.stream_t, count: integer, buffer: uv.buf_t?)
+      coverage_tty_stream_owner(current, terminal)
+      test.assert(count == uv.ENOBUFS and buffer == nil,
+                  "rejected read allocation exposed a native buffer")
+      refused = refused + 1
+      success(uv.read_stop(current))
+    end))
+  test.assert(ffi.titan_cov_pty_write(pty, "pending\0", 8) == 8)
+  expect_error(function () local _status = uv.run(loop) end,
+               "read allocation must be writable")
+  test.assert(allocations == 1 and refused == 1)
+  local received = ""
+  success(uv.read_start(stream,
+    function (_handle: uv.handle_t, _suggested: integer): uv.buf_t
+      return uv.buf_t.allocate(128)
+    end,
+    function (current: uv.stream_t, count: integer, buffer: uv.buf_t?)
+      test.assert(count >= 0)
+      if count > 0 then received = received .. (buffer as uv.buf_t):to_string(count) end
+      test.assert(#received <= 8)
+      if received == "pending\0" then
+        success(uv.read_stop(current))
+        uv.close(current:as_handle_t())
+        uv.close(deadline:as_handle_t())
+      end
+    end))
+  success(uv.run(loop))
+  test.assert(received == "pending\0", "failed allocation consumed pending terminal input")
+end
+
+function test_coverage_tty_close_callback_error_preserves_retirement(_context: test.Context)
+  local pty = coverage_tty_open()
+  defer ffi.titan_cov_pty_close(pty)
+  local loop = new_loop()
+  defer finish_loop(loop)
+  local terminal = uv.tty_t()
+  success(uv.tty_init(loop, terminal, pty.slave, 0))
+  local calls = 0
+  uv.close(terminal:as_handle_t(), function (current: uv.handle_t)
+    coverage_tty_owner(current, terminal)
+    test.assert(not current:is_initialized())
+    calls = calls + 1
+    raise false
+  end)
+  expect_error(function () local _status = uv.run(loop) end, false)
+  test.assert(calls == 1 and not terminal:as_handle_t():is_initialized())
+  success(uv.tty_init(loop, terminal, pty.slave, 0))
+  uv.close(terminal:as_handle_t(), function (current: uv.handle_t)
+    coverage_tty_owner(current, terminal)
+    calls = calls + 1
+  end)
+  success(uv.run(loop))
+  test.assert(calls == 2 and not terminal:as_handle_t():is_initialized(),
+              "close callback failure prevented owner reuse or repeated retirement")
+end

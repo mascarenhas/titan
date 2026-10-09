@@ -183,6 +183,31 @@ end
         assert.is_nil(restored:find("TITAN_COVERAGE_", 1, true))
     end)
 
+    it("anchors foreign elseif and until decisions independently of their bodies", function()
+        local source = [[foreign function decisions(input: int): int
+  if input == 1 then
+    return 10
+  elseif input == 2 then
+    return 20
+  end
+  repeat
+    input = input - 1
+  until input == 0
+  return input
+end
+]]
+        local ordinary = generate(nil, nil, source)
+        local code, err, anchors = lines.convert(generate({ coverage = true }, nil, source),
+            "coverage_attribution.c")
+        assert.truthy(code, err)
+        for _, line in ipairs({ 2, 3, 4, 5, 8, 9, 10 }) do
+            assert.is_true(anchors[FILENAME][line], "missing foreign decision/body line " .. line)
+        end
+        assert.is_nil(anchors[FILENAME][7], "constant C repeat backedge is generated scaffolding")
+        assert.equal(ordinary, generate(nil, nil, source))
+        assert.equal(ordinary, generate({ coverage = false }, nil, source))
+    end)
+
     it("keeps catch and deferred user bodies while excluding protected setup", function()
         local code, err, anchors = lines.convert(generate({ coverage = true }, nil,
             [[local count = 0

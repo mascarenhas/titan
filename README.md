@@ -798,9 +798,9 @@ the bundled/system production images, and two compiler consumers that divide
 the four isolated workers for the complete covered compiler/language set. Each
 consumer runs at most two workers concurrently with tagged output; a separate
 job merges their LuaCov evidence and uploads the `compiler` Codecov report.
-The native coverage consumer source-links the complete production stdlib into
-the existing native aggregate and uploads a separate `native-stdlib` line
-report. Local [native coverage](doc/language/native-coverage.md) renders HTML,
+The native coverage lane builds a measured standard provider used by the
+existing native aggregate and its child programs, then uploads a separate
+`native-stdlib` line report. Local [native coverage](doc/language/native-coverage.md) renders HTML,
 LCOV and Cobertura without uploading. Linux build/compiler bounds
 are two to match the private runner; the manual macOS job overrides them to
 three. The ASan+UBSan job restores its separately fingerprinted native
