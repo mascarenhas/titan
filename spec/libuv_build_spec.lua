@@ -4551,7 +4551,7 @@ done
                     or (#job + 1)
                 return job:sub(first, finish - 1)
             end
-            local function assert_codecov_job(job, upload_name)
+            local function assert_codecov_job(job, upload_name, upload_path, flag)
                 assert.equal(1, count_literal(job, "contents: read"), job)
                 assert.equal(1, count_literal(job, "id-token: write"), job)
                 assert.equal(1,
@@ -4559,7 +4559,8 @@ done
                 assert.equal(1,
                     count_literal(job, "fail_ci_if_error: true"), job)
                 assert.equal(1,
-                    count_literal(job, "files: ./luacov.codecov.out"), job)
+                    count_literal(job, "files: " .. upload_path), job)
+                assert.equal(1, count_literal(job, "flags: " .. flag), job)
                 assert.equal(1, count_literal(job,
                     "\n          name: " .. upload_name .. "\n"), job)
                 assert.equal(1, count_literal(job, "use_oidc: true"), job)
@@ -4572,7 +4573,9 @@ done
             local compiler_job = assert(linux_workflow:match(
                 "\n  test%-linux%-compiler:(.-)\n  compiler%-coverage:"))
             local coverage_job = assert(linux_workflow:match(
-                "\n  compiler%-coverage:(.-)\n  sanitizer:"))
+                "\n  compiler%-coverage:(.-)\n  native%-coverage:"))
+            local native_coverage_job = assert(linux_workflow:match(
+                "\n  native%-coverage:(.-)\n  sanitizer:"))
             local macos_job = assert(macos_workflow:match(
                 "\n  test%-macos:(.*)"))
             local sanitizer_job = assert(linux_workflow:match(
@@ -4585,17 +4588,17 @@ done
             local macos_events = assert(macos_workflow:match("\non:(.-)\nenv:"))
             assert.truthy(macos_events:match("^%s*workflow_dispatch:%s*$"),
                 macos_events)
-            assert.equal(4, count_literal(linux_workflow,
+            assert.equal(5, count_literal(linux_workflow,
                 "if: github.event_name == 'push'"), linux_workflow)
             assert.equal(1, count_literal(macos_workflow,
                 "if: github.event_name == 'workflow_dispatch'"), macos_workflow)
-            assert.equal(4, count_literal(linux_workflow, "\n    runs-on:"),
+            assert.equal(5, count_literal(linux_workflow, "\n    runs-on:"),
                 linux_workflow)
             assert.equal(1, count_literal(macos_workflow, "\n    runs-on:"),
                 macos_workflow)
             for _, job_name in ipairs({
                 "test-linux-stdlib", "test-linux-compiler", "compiler-coverage",
-                "sanitizer",
+                "native-coverage", "sanitizer",
             }) do
                 assert.equal(1, count_literal(linux_workflow,
                     "\n  " .. job_name .. ":"), job_name)
@@ -4620,9 +4623,9 @@ done
                 assert.falsy(workflow:find(removed, 1, true), removed)
             end
             assert.falsy(workflow:find("awk", 1, true), workflow)
-            assert.equal(1, count_literal(workflow,
+            assert.equal(2, count_literal(workflow,
                 "codecov/codecov-action@v7"), workflow)
-            assert.equal(1, count_literal(workflow,
+            assert.equal(2, count_literal(workflow,
                 "id-token: write"), workflow)
             assert.equal(1, count_literal(workflow,
                 'luacov "titan%-compiler/"'), workflow)
@@ -4641,6 +4644,14 @@ done
                 stdlib_job)
             assert.falsy(stdlib_job:find("codecov/codecov-action", 1, true),
                 stdlib_job)
+            assert.equal(1, count_literal(stdlib_job,
+                "\n      CC: gcc-14\n"), stdlib_job)
+            assert.equal(1, count_literal(stdlib_job,
+                "\n      LUA_CC: gcc-14\n"), stdlib_job)
+            for _, cache in ipairs({ "prefix", "libuv", "llhttp", "sqlite3", "openssl" }) do
+                assert.equal(2, count_literal(stdlib_job,
+                    "-gcc14-" .. cache .. "-"), cache)
+            end
             assert.falsy(stdlib_job:find('luacov "', 1, true),
                 stdlib_job)
             assert.falsy(stdlib_job:find(" -c -o gtest", 1, true),
@@ -4849,6 +4860,8 @@ done
             assert.equal(1, count_literal(compiler_job,
                 "timeout-minutes: 30"), compiler_job)
             assert.equal(1, count_literal(compiler_job,
+                "\n      CC: gcc-14\n"), compiler_job)
+            assert.equal(1, count_literal(compiler_job,
                 "actions/download-artifact@v8"), compiler_job)
             assert.equal(1, count_literal(compiler_job,
                 "name: titan-linux-prepared.tar.gz"), compiler_job)
@@ -4911,7 +4924,7 @@ done
                 assert.truthy(compiler_groups:find(required, 1, true),
                     required)
             end
-            assert.equal(5, count_literal(workflow,
+            assert.equal(6, count_literal(workflow,
                 "TITAN_PROBE_CACHE_DISABLE=1"), workflow)
             assert.equal(1, count_literal(coverage_job,
                 "needs: test-linux-compiler"), coverage_job)
@@ -4945,7 +4958,51 @@ done
             assert.falsy(coverage_job:find("always()", 1, true))
             assert.falsy(coverage_job:find("continue-on-error", 1, true))
             assert.falsy(coverage_job:find("ci_test_groups.sh", 1, true))
-            assert_codecov_job(coverage_job, "compiler")
+            assert_codecov_job(coverage_job, "compiler", "./luacov.codecov.out", "compiler")
+            assert.falsy(coverage_job:find("native-stdlib", 1, true), coverage_job)
+            assert.falsy(coverage_job:find(".titan-coverage/report/", 1, true), coverage_job)
+
+            for _, contract in ipairs({
+                "needs: test-linux-stdlib",
+                "runs-on: ubicloud-standard-2",
+                "timeout-minutes: 30",
+                "\n      CC: gcc-14\n",
+                "\n      GCOV: gcov-14\n",
+                "gcc-14 clang-format python3-venv",
+                "name: titan-linux-prepared.tar.gz",
+                "pip\" install -r scripts/titan-coverage-requirements.txt",
+                "python3 spec/coverage_host_test.py",
+                "spec/coverage_lines_spec.lua spec/coder/coverage_attribution_spec.lua",
+                "spec/coder/native_coverage_spec.lua",
+                "make titan-native-coverage-build TITAN_COVERAGE_GCOV=gcov-14",
+                "make titan-native-coverage-run",
+                "make titan-native-coverage-report",
+                "TITAN_COVERAGE_GCOVR=\"$RUNNER_TEMP/titan-coverage-tools/bin/gcovr\"",
+            }) do
+                assert.equal(1, count_literal(native_coverage_job, contract), contract)
+            end
+            assert.equal(1, count_literal(native_coverage_job,
+                "actions/download-artifact@v8"), native_coverage_job)
+            local native_reports = named_step(native_coverage_job, "Generate Titan line reports")
+            assert.truthy(native_reports:find("if: always()", 1, true), native_reports)
+            local native_artifacts = named_step(native_coverage_job,
+                "Retain local reports and collection evidence")
+            for _, contract in ipairs({ "if: always()", "actions/upload-artifact@v7",
+                "name: titan-native-line-coverage", "path: .titan-coverage",
+                "if-no-files-found: error" }) do
+                assert.truthy(native_artifacts:find(contract, 1, true), contract)
+            end
+            local native_upload = named_step(native_coverage_job,
+                "Upload native stdlib line coverage to Codecov")
+            assert.truthy(native_upload:find("if: success()", 1, true), native_upload)
+            assert.falsy(native_coverage_job:find("continue-on-error", 1, true), native_coverage_job)
+            assert.falsy(native_coverage_job:find("luacov.codecov.out", 1, true), native_coverage_job)
+            assert_codecov_job(native_coverage_job, "native-stdlib-lines",
+                ".titan-coverage/report/coverage.info", "native-stdlib")
+            local codecov_policy = read_file(".codecov.yml")
+            assert.equal(2, count_literal(codecov_policy, "flags: [compiler]"), codecov_policy)
+            assert.truthy(codecov_policy:find("  native-stdlib:\n    paths:\n      - titan/", 1, true),
+                codecov_policy)
 
             assert.equal(1, count_literal(macos_job,
                 "if: github.event_name == 'workflow_dispatch'"), macos_job)
@@ -5021,7 +5078,11 @@ done
             }) do
                 assert.truthy(workflow:find(contract, 1, true), contract)
             end
-            assert.equal(0, count_literal(workflow, "clang-format"), workflow)
+            assert.equal(1, count_literal(workflow, "clang-format"), workflow)
+            for _, ordinary_job in ipairs({ stdlib_job, compiler_job, coverage_job,
+                sanitizer_job, macos_job }) do
+                assert.falsy(ordinary_job:find("clang-format", 1, true), ordinary_job)
+            end
             assert.equal(1, count_literal(workflow,
                 'MAKEFLAGS: "-j2"'), workflow)
             assert.equal(1, count_literal(workflow,
@@ -5174,8 +5235,8 @@ done
                     assert.is_true(tonumber(seconds) >= 0)
                 end
             end
-            assert.same({ 34, 37, 33, 44 }, shard_counts)
-            assert.equal(148, assigned_count)
+            assert.same({ 34, 38, 34, 45 }, shard_counts)
+            assert.equal(151, assigned_count)
 
             local stress_partition = read_file(
                 "spec/support/ci_compiler_stress_files.txt")

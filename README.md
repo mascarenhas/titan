@@ -794,10 +794,14 @@ $ bash spec/support/ci_test_groups.sh compiler  # complete compiler/language set
 ```
 
 Linux CI has one uncovered stdlib producer, which also prepares and validates
-the bundled/system production images, and one standard-runner consumer for the
-complete covered compiler/language set. That consumer extracts four isolated
-workers from the prepared archive, runs at most two concurrently with tagged
-output, and emits the sole merged Codecov report. Linux build/compiler bounds
+the bundled/system production images, and two compiler consumers that divide
+the four isolated workers for the complete covered compiler/language set. Each
+consumer runs at most two workers concurrently with tagged output; a separate
+job merges their LuaCov evidence and uploads the `compiler` Codecov report.
+The native coverage consumer source-links the complete production stdlib into
+the existing native aggregate and uploads a separate `native-stdlib` line
+report. Local [native coverage](doc/language/native-coverage.md) renders HTML,
+LCOV and Cobertura without uploading. Linux build/compiler bounds
 are two to match the private runner; the manual macOS job overrides them to
 three. The ASan+UBSan job restores its separately fingerprinted native
 Lua/libbacktrace/libuv/llhttp/OpenSSL tree before LuaRocks/Titan work, saves only

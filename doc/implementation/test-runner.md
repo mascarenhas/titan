@@ -1,5 +1,10 @@
 # Native test runner implementation
 
+Opt-in [native source coverage](native-coverage.md) uses this same discovery,
+build/run split, and executable. Production object instrumentation, source
+attribution, counters, and reporting belong to the compiler and host tool;
+the generated runner does not depend on gcovr or perform collection itself.
+
 Titan's test infrastructure has three ordinary pieces:
 
 1. `titan/test.titan`, the public `titan.test` standard module and its
@@ -416,11 +421,14 @@ source rock, while author-written C fixtures remain untouched. Root-level
 compiler fixtures retain their existing exact cleanup rules.
 
 The regular Linux stdlib producer runs the retained host boundaries and this
-aggregate executable without LuaCov. The sole regular consumer runs the
-complete compiler/language group with LuaCov and publishes one report. The
+aggregate executable without LuaCov. Two compiler consumers partition the
+complete compiler/language group with LuaCov; a separate merger publishes one
+compiler report. The native coverage consumer source-links the production
+stdlib into this aggregate and publishes a separate line report. The
 sanitizer builds an independent ASan+UBSan aggregate once and selects focused
 cases with the run target; it never restores the regular artifact. The complete
-macOS gate remains manually dispatched before merge.
+macOS pre-merge gate prefers the local VM; hosted manual dispatch is an
+explicitly requested fallback.
 
 ## Packaging and compatibility
 

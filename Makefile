@@ -16,7 +16,8 @@ make_shell_quote_value = '$(subst ','"'"',$(value $(1)))'
 # Validation is an explicit native-toolchain profile, including runtime and
 # provider dependencies. Choose it before Make expands the test graph.
 TITAN_TEST_GOALS := test rock-test busted-test stdlib-test stdlib-busted-test \
-	titan-stdlib-test titan-stdlib-test-build titan-stdlib-test-objects titan-stdlib-test-run
+	titan-stdlib-test titan-stdlib-test-build titan-stdlib-test-objects titan-stdlib-test-run \
+	titan-native-coverage titan-native-coverage-build titan-native-coverage-run titan-native-coverage-report
 TITAN_BUILD_PROFILE ?= $(if $(filter $(TITAN_TEST_GOALS),$(MAKECMDGOALS)),validation,production)
 ifneq ($(TITAN_BUILD_PROFILE),production)
   ifneq ($(TITAN_BUILD_PROFILE),validation)
@@ -1311,7 +1312,7 @@ TITAN_TEST_MODULE_OBJECTS := $(foreach module,$(TITAN_TEST_MODULES),$(call titan
 TITAN_TEST_SUPPORT_STEM := $(TITAN_TEST_BUILD_DIR)/titan/test__test_support
 TITAN_TEST_SUPPORT_OUTPUTS := $(addprefix $(TITAN_TEST_SUPPORT_STEM),.o .c .ffi.h)
 TITAN_TEST_NATIVE_OBJECTS := $(addprefix $(TITAN_TEST_BUILD_DIR)/,async_foreign_work.o fs_fixture.o uv_stdio_probe.o sqlite3_worker_fixture.o)
-TITAN_TEST_FIXTURE_OUTPUTS := $(TITAN_TEST_NATIVE_OBJECTS) $(addprefix $(TITAN_TEST_BUILD_DIR)/,async_foreign_work.h uv_stdio_probe.h sqlite3_worker_fixture.h os_process_host_child)
+TITAN_TEST_FIXTURE_OUTPUTS := $(TITAN_TEST_NATIVE_OBJECTS) $(addprefix $(TITAN_TEST_BUILD_DIR)/,async_foreign_work.h uv_stdio_probe.h uv_coverage_threads.h sqlite3_worker_fixture.h os_process_host_child)
 TITAN_TEST_CONFIG_STAMP := $(TITAN_TEST_BUILD_DIR)/build.config
 # TEST_LUA selects the installed SDK, just as it does for the compiler and the
 # native fixtures. A cold non-test Make invocation need not have one installed.
@@ -1424,6 +1425,8 @@ $(TITAN_TEST_BUILD_DIR)/async_foreign_work.h: spec/fixtures/stdlib/native/async_
 	cp "$<" "$@"
 $(TITAN_TEST_BUILD_DIR)/uv_stdio_probe.h: spec/fixtures/stdlib/native/uv_stdio_probe.h $(TITAN_TEST_CONFIG_STAMP)
 	cp "$<" "$@"
+$(TITAN_TEST_BUILD_DIR)/uv_coverage_threads.h: spec/fixtures/stdlib/native/uv_coverage_threads.h $(TITAN_TEST_CONFIG_STAMP)
+	cp "$<" "$@"
 $(TITAN_TEST_BUILD_DIR)/sqlite3_worker_fixture.h: spec/fixtures/stdlib/native/sqlite3_worker_fixture.h $(TITAN_TEST_CONFIG_STAMP)
 	cp "$<" "$@"
 
@@ -1499,6 +1502,78 @@ titan-stdlib-test: titan-stdlib-test-build ## Build and run all native Titan std
 
 stdlib-test: stdlib-busted-test ## Run all stdlib/runtime tests without coverage
 	$(MAKE) titan-stdlib-test
+
+# Coverage source-links the complete production inventory into the same native
+# runner. Every object/header/image is owned by a separate coverage directory;
+# native dependencies and test/support objects remain uninstrumented.
+TITAN_COVERAGE_BUILD_DIR ?= .titan-coverage/build
+TITAN_COVERAGE_RUN_DIR ?= .titan-coverage/run
+TITAN_COVERAGE_REPORT_DIR ?= .titan-coverage/report
+TITAN_COVERAGE_PYTHON ?= python3
+TITAN_COVERAGE_GCOV ?= gcov
+TITAN_COVERAGE_GCOVR ?= gcovr
+# The source-linked aggregate hosts stock Lua C modules in its Lua escape
+# hatches. With no stdlib DSO supplying Lua API exports, its executable owns them.
+ifeq ($(HOST_OS),Darwin)
+  TITAN_COVERAGE_LUA_HOST_LDFLAGS := -Wl,-export_dynamic
+else
+  TITAN_COVERAGE_LUA_HOST_LDFLAGS := -Wl,--export-dynamic
+endif
+TITAN_COVERAGE_MODULES := $(filter-out titan.test,$(STDLIB_ROOTS))
+TITAN_COVERAGE_CPPFLAGS = $(strip $(TITAN_TEST_CPPFLAGS) $(STDLIB_LPEGLABEL_CPPFLAGS) $(STDLIB_HTTP_CPPFLAGS) $(STDLIB_SQLITE3_CPPFLAGS) $(STDLIB_OPENSSL_CPPFLAGS) $(STDLIB_UV_CPPFLAGS) -I$(abspath $(TITAN_TEST_BUILD_DIR)))
+TITAN_COVERAGE_OBJECTS := $(STDLIB_EXTRA_OBJECTS) $(filter %.o,$(TITAN_TEST_NATIVE_OBJECTS))
+.PHONY: titan-native-coverage-build titan-native-coverage-run titan-native-coverage-report titan-native-coverage
+titan-native-coverage-build: $(STDLIB_NATIVE_PREREQS) $(TITAN_TEST_FIXTURE_OUTPUTS) ## Build and seal GCC/gcov coverage for all production stdlib modules
+	@set -e; unset LUA_PATH LUA_CPATH LUA_PATH_5_5 LUA_CPATH_5_5; \
+	CC=$(call make_shell_quote,$(CC)) TITAN_BUILD_PROFILE=validation \
+	TITAN_EXTRA_CPPFLAGS=$(call make_shell_quote,$(TITAN_COVERAGE_CPPFLAGS)) \
+	TITAN_EXTRA_CFLAGS='-O0 -fno-lto' \
+	TITAN_EXTRA_LDFLAGS=$(call make_shell_quote,$(strip -O0 -fno-lto $(TITAN_COVERAGE_LUA_HOST_LDFLAGS) $(STDLIB_UV_LDFLAGS) $(STDLIB_OPENSSL_LDFLAGS))) \
+	$(TEST_TITANC) --test --incremental --no-uv-bootstrap \
+	  --coverage $(call make_shell_quote,$(abspath $(TITAN_COVERAGE_BUILD_DIR))) \
+	  --coverage-root $(call make_shell_quote,$(CURDIR)) \
+	  --coverage-gcov $(call make_shell_quote,$(TITAN_COVERAGE_GCOV)) \
+	  $(foreach module,$(TITAN_COVERAGE_MODULES),--coverage-module $(module)) \
+	  --tree $(call make_shell_quote,$(CURDIR)/spec/stdlib/titan;$(CURDIR)) \
+	  $(TITAN_STDLIB_TEST_ROOTS) -X $(TITAN_COVERAGE_OBJECTS); \
+	$(TITAN_COVERAGE_PYTHON) titan-coverage seal \
+	  --manifest $(call make_shell_quote,$(TITAN_COVERAGE_BUILD_DIR)/build.json) \
+	  --cc $(call make_shell_quote,$(CC)) --gcov $(call make_shell_quote,$(TITAN_COVERAGE_GCOV))
+
+titan-native-coverage-run: ## Run the coverage native aggregate with fresh counters and the normal deadline
+	@printf '%s\n' $(TITAN_STDLIB_TEST_ROOTS) > $(call make_shell_quote,$(TITAN_COVERAGE_BUILD_DIR)/roots.txt)
+	@status=0; \
+	$(TITAN_TEST_COMPILER_ENV) \
+	LUA_PATH_5_5="$$( $(TEST_LUA) -E -e 'io.write(package.path)' )" \
+	LUA_CPATH_5_5="$$( $(TEST_LUA) -E -e 'io.write(package.cpath)' )" \
+	TITAN_TEST_BUILD_DIR=$(call make_shell_quote,$(abspath $(TITAN_TEST_BUILD_DIR))) \
+	TITAN_TEST_SOURCE_ROOT=$(call make_shell_quote,$(CURDIR)) \
+	TITAN_TEST_SDK_ROOT=$(call make_shell_quote,$(TITAN_TEST_INSTALL_ROOT)) \
+	TITAN_PROCESS_CHILD=$(call make_shell_quote,$(abspath $(TITAN_TEST_BUILD_DIR)/os_process_host_child)) \
+	bash -o pipefail -c 'log=$$1; shift; "$$@" 2>&1 | tee "$$log"' -- \
+	$(call make_shell_quote,$(TITAN_COVERAGE_BUILD_DIR)/stdout.log) \
+	$(TITAN_COVERAGE_PYTHON) titan-coverage run \
+	  --manifest $(call make_shell_quote,$(TITAN_COVERAGE_BUILD_DIR)/build.json) \
+	  --run $(call make_shell_quote,$(TITAN_COVERAGE_RUN_DIR)) --timeout $(TITAN_TEST_TIMEOUT) -- \
+	  $(call make_shell_quote,$(abspath $(TITAN_COVERAGE_BUILD_DIR))/bin/$(TITAN_STDLIB_TEST_PROGRAM_OUTPUT)) \
+	  $(if $(strip $(TITAN_FILTER)),--filter=$(call make_shell_quote_value,TITAN_FILTER)) || status=$$?; \
+	audit_status=0; $(TEST_LUA) -E spec/support/check_stdlib_test_output.lua \
+	  $(call make_shell_quote,$(TITAN_COVERAGE_BUILD_DIR)/stdout.log) \
+	  $(call make_shell_quote,$(TITAN_COVERAGE_BUILD_DIR)/roots.txt) \
+	  $(call make_shell_quote_value,TITAN_FILTER) || audit_status=$$?; \
+	test "$$status" = 0 || exit "$$status"; exit "$$audit_status"
+
+titan-native-coverage-report: ## Render separate Titan line LCOV/HTML/Cobertura reports
+	$(TITAN_COVERAGE_PYTHON) titan-coverage report \
+	  --manifest $(call make_shell_quote,$(TITAN_COVERAGE_BUILD_DIR)/build.json) \
+	  --run $(call make_shell_quote,$(TITAN_COVERAGE_RUN_DIR)) \
+	  --output $(call make_shell_quote,$(TITAN_COVERAGE_REPORT_DIR)) \
+	  --gcovr $(call make_shell_quote,$(TITAN_COVERAGE_GCOVR))
+
+titan-native-coverage: titan-native-coverage-build ## Build, run and report native stdlib Titan line coverage
+	+@run_status=0; $(MAKE) titan-native-coverage-run || run_status=$$?; \
+	report_status=0; $(MAKE) titan-native-coverage-report || report_status=$$?; \
+	test "$$run_status" = 0 || exit "$$run_status"; exit "$$report_status"
 
 # A fresh implicit validation prefix needs a complete current installation.
 # Re-enter after preparation so installed-SDK paths are expanded in a fresh

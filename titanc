@@ -9,6 +9,7 @@ local driver = require 'titan-compiler.driver'
 local test_runner = require 'titan-compiler.test_runner'
 local util = require 'titan-compiler.util'
 local platform = require 'titan-compiler.platform'
+local coverage = require 'titan-compiler.coverage'
 
 local p = argparse('titan', 'Titan compiler')
 p:argument('module', 'Names of the modules to compile.'):args("+")
@@ -23,6 +24,11 @@ p:flag('--source-first', 'Prefer available source modules to compiled providers.
 p:flag('--incremental', 'Reuse source module objects that are no older than their sources; the build system owns other invalidation.')
 p:flag('-c --compile-only', 'Generate objects and headers only; always rebuild explicitly requested modules.')
 p:flag('--test', 'Build native Titan tests (objects only with --compile-only).')
+p:option('--coverage', 'Build isolated GCC/gcov Titan executable-line coverage artifacts in this directory.')
+p:option('--coverage-module', 'Production logical module to measure; repeat for the complete source inventory.'):count('*')
+p:option('--coverage-root', 'Original source repository root for reports (default: current directory).')
+p:option('--coverage-gcov', 'Matching GCC gcov command (default: GCOV or gcov).')
+p:option('--coverage-source-map', 'Map staged sources to tracked originals: STAGED_DIRECTORY=TRACKED_DIRECTORY.'):count('*')
 p:flag('--no-uv-bootstrap',
     'Call standalone main directly even if titan.uv installs its bootstrap hook.')
 p:flag('--no-line-directives',
@@ -73,6 +79,12 @@ end
 if args.incremental and args.print_ast then
     exit("--incremental cannot be combined with --print-ast")
 end
+if not args.coverage and (#args.coverage_module > 0 or #args.coverage_source_map > 0 or args.coverage_root or args.coverage_gcov) then
+    exit("--coverage-module, --coverage-root and --coverage-gcov require --coverage")
+end
+if args.coverage and platform.windows then
+    exit("native Titan coverage backend gcc-gcov is unsupported by the Windows CLANG64 SDK")
+end
 if platform.windows and args.static then
     exit("--static is not supported on Windows; Titan modules use DLL providers")
 end
@@ -119,12 +131,26 @@ local configured, configure_error =
     driver.configure_foreign_c(resolver_context)
 if not configured and configure_error then exit(configure_error) end
 
+local coverage_build
+if args.coverage then
+    local coverage_error
+    args._coverage_frontend = arg[0]
+    coverage_build, coverage_error = coverage.prepare(driver, args, resolver_context.io)
+    if not coverage_build then exit(coverage_error) end
+    driver.EXTRA_LDFLAGS = { table.unpack(driver.EXTRA_LDFLAGS or {}) }
+    table.insert(driver.EXTRA_LDFLAGS, "--coverage")
+    table.insert(driver.EXTRA_LDFLAGS, "-fno-lto")
+end
+
 local errors = {}
 local main_module = nil
 
 local requested_roots = {}
 local requested_modules = driver.deduplicate_module_names(args.module)
 local source_overrides = {}
+if coverage_build then
+    for _, name in ipairs(coverage_build.modules) do requested_roots[name] = true end
+end
 if args.test then
     local test_source, test_source_err =
         driver.test_support_source_descriptor(resolver_context)
@@ -149,6 +175,7 @@ local loader = driver.defaultloader({}, {
     forced_source_roots = args.compile_only and requested_roots or {},
     source_overrides = source_overrides,
     context = resolver_context,
+    coverage = coverage_build,
 })
 
 for _, modname in ipairs(requested_modules) do
@@ -173,6 +200,19 @@ for _, modname in ipairs(requested_modules) do
     end
 end
 
+if coverage_build then
+    for _, name in ipairs(coverage_build.modules) do
+        local ok, errs = checker.checkimport(name, loader)
+        if not ok then table.insert(errors, errs)
+        elseif #errs > 0 then table.insert(errors, table.concat(errs, "\n")) end
+        local mod = driver.imported[name]
+        if mod and ((mod.ast and #test_runner.function_names(mod.ast) > 0) or
+                    (mod.test_functions and #mod.test_functions > 0)) then
+            table.insert(errors, "coverage production module contains test functions: " .. name ..
+                "; split mixed test/production modules before measuring")
+        end
+    end
+end
 if #errors > 0 then exit(table.concat(errors, "\n")) end
 
 local test_modules = {}
@@ -190,7 +230,7 @@ if args.test then
         test_program_output = assert(
             driver.imported[requested_modules[1]].program_output)
         test_entrypoint_output = test_program_output .. "__test_entrypoint.c"
-        if not args.incremental then
+        if not args.incremental and not coverage_build then
             source_overrides["titan.test"].native_output =
                 test_program_output .. "__test_support.titan"
             if driver.imported["titan.test"] then
@@ -228,6 +268,9 @@ end
 
 if args.no_uv_bootstrap and not main_module then
     exit("--no-uv-bootstrap is only valid when compiling a standalone executable")
+end
+if coverage_build and main_module and not args.compile_only and not test_entrypoint_output then
+    test_entrypoint_output = driver.imported[main_module].program_output .. "__entrypoint.c"
 end
 
 local finalized, finalize_errors =
@@ -267,6 +310,11 @@ end
 table.sort(linked_names, util.bytewise_less)
 for name in pairs(output_name_set) do table.insert(output_names, name) end
 table.sort(output_names, util.bytewise_less)
+
+for _, name in ipairs(linked_names) do
+    local mod = driver.imported[name]
+    if mod.ast then coder.prepare_coverage(mod.ast, coverage_build and coverage_build.selected[name] == true) end
+end
 
 local header_plans = {}
 local header_plan_by_name = {}
@@ -407,7 +455,7 @@ if not main_module and not args.compile_only then
 
     if #errors == 0 then
         shim_plans, provider_output =
-            driver.plan_module_shims(provider, output_names)
+            driver.plan_module_shims(provider, output_names, coverage_build and coverage_build.directory)
         if not shim_plans then table.insert(errors, provider_output) end
     end
     if #errors == 0 then
@@ -479,6 +527,12 @@ if not headers_ok then exit(headers_err) end
 local compile_requests = {}
 for _, name in ipairs(linked_names) do
     local mod = driver.imported[name]
+    local extra_flags = test_modules[name] and { table.unpack(test_runner.TEST_COMPILE_FLAGS) } or {}
+    if coverage_build then
+        for _, flag in ipairs(coverage.compile_flags(coverage_build, name) or {}) do
+            extra_flags[#extra_flags + 1] = flag
+        end
+    end
     compile_requests[#compile_requests + 1] = {
         modname = name,
         mod = mod,
@@ -486,8 +540,8 @@ for _, name in ipairs(linked_names) do
         options = {
             pretty_print = args.pretty_print,
             nominal_layouts = resolver_context.nominal_layouts,
-            extra_compile_flags = test_modules[name]
-                and test_runner.TEST_COMPILE_FLAGS or nil,
+            extra_compile_flags = extra_flags,
+            coverage = coverage_build and coverage_build.selected[name] == true,
         },
     }
 end
@@ -509,6 +563,10 @@ end
 if #errors > 0 then exit(table.concat(errors, "\n")) end
 
 if args.compile_only then
+    if coverage_build then
+        local wrote, write_error = coverage.write_manifest(coverage_build, driver.imported, libnames, {})
+        if not wrote then exit(write_error) end
+    end
     finish()
     return
 end
@@ -744,5 +802,24 @@ else
 end
 
 if #errors > 0 then exit(table.concat(errors, "\n")) end
+
+if coverage_build then
+    local image = main_module and (test_program_output or driver.imported[main_module].program_output) or provider_output
+    local measured_objects = {}
+    for _, name in ipairs(coverage_build.modules) do measured_objects[#measured_objects + 1] = libnames[name] end
+    local images = { { path = image, objects = measured_objects } }
+    if not main_module and not platform.windows then
+        images[#images + 1] = { path = provider_output:gsub("[.]so$", ".a"),
+            objects = measured_objects, role = "static-companion" }
+    end
+    local link_inputs = { table.unpack(args.extra_object or {}) }
+    for _, filename in ipairs(selected_static_archives) do link_inputs[#link_inputs + 1] = filename end
+    local runtime_inputs = driver.INSTALLED and driver.installed_link_inputs(driver.INSTALL_PATHS, driver.IS_DARWIN)
+        or driver.source_link_inputs(driver.LUA_SOURCE_PATH)
+    for _, filename in ipairs(runtime_inputs) do link_inputs[#link_inputs + 1] = filename end
+    if main_module then link_inputs[#link_inputs + 1] = test_entrypoint_output:gsub("[.]c$", ".o") end
+    local wrote, write_error = coverage.write_manifest(coverage_build, driver.imported, libnames, images, link_inputs)
+    if not wrote then exit(write_error) end
+end
 
 finish()

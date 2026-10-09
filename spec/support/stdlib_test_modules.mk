@@ -243,7 +243,9 @@ TITAN_TEST_SOURCES_uv.public_tests := spec/stdlib/titan/uv/public_tests/public_t
 	spec/stdlib/titan/uv/public_tests/network.titan \
 	spec/stdlib/titan/uv/public_tests/process.titan \
 	spec/stdlib/titan/uv/public_tests/workers.titan \
-	spec/stdlib/titan/uv/public_tests/outputs.titan
+	spec/stdlib/titan/uv/public_tests/outputs.titan \
+	spec/stdlib/titan/uv/public_tests/coverage_fs_poll.titan \
+	spec/stdlib/titan/uv/public_tests/coverage_sync_udp.titan
 TITAN_TEST_IMPORTS_uv.public_tests := support.common
 TITAN_TEST_FOREIGN_uv.public_tests := 1
 
@@ -268,6 +270,7 @@ TITAN_TEST_C_INPUTS_reflect.tests := spec/stdlib/titan/reflect/reflection_recurs
 TITAN_TEST_C_INPUTS_async.tests = $(TITAN_TEST_BUILD_DIR)/async_foreign_work.h \
 	spec/stdlib/titan/async/tests/async_stack_probe.h
 TITAN_TEST_C_INPUTS_uv.runtime_tests = $(TITAN_TEST_BUILD_DIR)/uv_stdio_probe.h
+TITAN_TEST_C_INPUTS_uv.public_tests = $(TITAN_TEST_BUILD_DIR)/uv_coverage_threads.h
 TITAN_TEST_C_INPUTS_lua.tests = $(TITAN_TEST_BUILD_DIR)/uv_stdio_probe.h
 
 TITAN_TEST_SOURCES_websocket.tests := spec/stdlib/titan/websocket/tests/tests.titan \

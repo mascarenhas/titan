@@ -258,21 +258,30 @@ function coderepeat(ctx, node)
     close_loop(ctx)
     popd(ctx)
     local loopsave = loop_save_lines(frame)
+    local condition_begin, condition_end = "", ""
+    if coder._coverage_source_regions and not ctx._coverage_generated then
+        local locations = require("titan-compiler.coverage_lines")
+        condition_begin = locations.begin("source",
+            node.condition.loc.filename, node.condition.loc.line)
+        condition_end = locations.finish()
+    end
     return render([[
         $LOOPSAVE
         while(1) {
             $CBLK
             $CSTATS
-            if($CEXP) {
+            ${CONDITIONBEGIN}if($CEXP) {
                 break;
             }
-            $CHECKGC
+            $CONDITIONEND$CHECKGC
         }$AFTER
     ]], {
         LOOPSAVE = loopsave,
         CBLK = cblk,
         CSTATS = cstats,
         CEXP = toboolean(node.condition._type, cexp),
+        CONDITIONBEGIN = condition_begin,
+        CONDITIONEND = condition_end,
         CHECKGC = nallocs > 0
             and "luaC_checkGC(L); _base = restorestack(L, _base_off);" or "",
         AFTER = after_loop_label(frame),
@@ -295,7 +304,7 @@ function codeif(ctx, node, idx)
         cthn = codestat(ctx, node.thens[idx].block)
         cels = "else\n" .. codeif(ctx, node, idx + 1)
     end
-    return render([[
+    return coverage_region(node.thens[idx].condition, render([[
         {
             $CSTATS
             if($CEXP) {
@@ -307,7 +316,7 @@ function codeif(ctx, node, idx)
         CEXP = toboolean(node.thens[idx].condition._type, cexp),
         CTHN = cthn,
         CELS = cels
-    })
+    }), ctx)
 end
 
 function codefor(ctx, node)
@@ -3076,7 +3085,17 @@ end
 -- between multiply-referenced operand slots, so this cannot misattribute or
 -- break an un-hoisted operand.
 function codestat(ctx, node)
-    return emitline(node) .. codestat_dispatch(ctx, node)
+    local code = codestat_dispatch(ctx, node)
+    if coder._coverage_source_regions then
+        -- Blocks/try machinery own no executable Titan decision. Their real
+        -- body/catch/finally statements carry their own nested regions.
+        if node._tag == "Ast.StatBlock" then return code end
+        if node._tag == "Ast.StatTry" then
+            return require("titan-compiler.coverage_lines").region(code, "generated")
+        end
+        return coverage_region(node, code, ctx)
+    end
+    return emitline(node) .. code
 end
 
 return core.coder

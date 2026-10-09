@@ -1106,7 +1106,7 @@ local function run_argv(argv, verbose)
 end
 
 function driver.format_generated_file(
-        filename, verbose, pretty_print, strategy)
+        filename, verbose, pretty_print, strategy, coverage_mode)
     local label = "generated file '" .. tostring(filename) .. "'"
     if pretty_print then
         local args, err = parsed_words(driver.CLANG_FORMAT, "CLANG_FORMAT")
@@ -1117,9 +1117,12 @@ function driver.format_generated_file(
             return nil, "failed to format " .. label ..
                 ": CLANG_FORMAT command is empty"
         end
+        local style = coverage_mode and
+            "--style={BasedOnStyle: LLVM, IndentWidth: 4, SortIncludes: false, CommentPragmas: '^ TITAN_COVERAGE_'}" or
+            "--style={BasedOnStyle: LLVM, IndentWidth: 4, SortIncludes: false}"
         append_argv(args, {
             "-i",
-            "--style={BasedOnStyle: LLVM, IndentWidth: 4, SortIncludes: false}",
+            style,
             "--",
             filename,
         })
@@ -1158,15 +1161,17 @@ function driver.format_generated_file(
             (pretty_print and " after clang-format" or "") ..
             ": " .. tostring(read_err)
     end
-    -- Formatting is presentation-only. Always enforce the source-map
-    -- invariant that a `#line` directive maps the immediately following
-    -- physical statement rather than a blank line.
+    -- Ordinary source maps place statements immediately after their directive.
+    -- Coverage converts its region markers after formatting; authored C keeps
+    -- its own physical-line progression, including blank lines after #line.
     local normalized = contents
-    local removed
-    repeat
-        normalized, removed = normalized:gsub(
-            "([ \t]*#line[^\n]*\n)[ \t]*\n", "%1")
-    until removed == 0
+    if not coverage_mode then
+        local removed
+        repeat
+            normalized, removed = normalized:gsub(
+                "([ \t]*#line[^\n]*\n)[ \t]*\n", "%1")
+        until removed == 0
+    end
     if normalized ~= contents then
         local write_ok, write_err
         if strategy then
@@ -4884,6 +4889,11 @@ function driver.defaultloader(static_deps, options)
             if candidate.kind == "blocked" then
                 return false, blocked_source_error(modname, candidate)
             end
+            if options.coverage then
+                local prepared, coverage_error = require("titan-compiler.coverage").source(
+                    options.coverage, modname, candidate, forced_source_roots)
+                if not prepared then return false, coverage_error end
+            end
             context.source_modules[modname] = true
             local rebound, rebound_err =
                 rebind_overlapping_embedded_provider(modname)
@@ -6269,6 +6279,7 @@ local function prepare_compile(
     static_deps = static_deps or {}
     local filename = sourcef:gsub("[.]titan$", "") .. ".c"
     local libname = sourcef:gsub("[.]titan$", "") .. ".o"
+    coder.prepare_coverage(ast, options and options.coverage == true)
     if not ast._foreign_header_prepared or not ast._ffi_header_prepared then
         local header_plan = driver.plan_foreign_header(modname, ast, sourcef)
         local header_ok, header_err = driver.write_foreign_header_plan(
@@ -6289,7 +6300,10 @@ local function prepare_compile(
     end
     local code, native_references, _, native_bindings, encoded_layouts =
         coder.generate(modname, ast, static_deps, driver.TITAN_ABI_VERSION,
-            driver.EMIT_LINE_DIRECTIVES, { nominal_layouts = imported_layouts })
+            driver.EMIT_LINE_DIRECTIVES, {
+                nominal_layouts = imported_layouts,
+                coverage = options and options.coverage == true,
+            })
     local imports, deps, providers = {}, {}, {}
     for _, node in ipairs(ast) do
         if not node._ignore and node._tag == "Ast.TopLevelImport" then
@@ -6326,8 +6340,24 @@ local function prepare_compile(
     local ok, err = util.set_file_contents(filename, code)
     if not ok then return nil, err end
     local format_ok, format_err = driver.format_generated_file(
-        filename, verbose, options and options.pretty_print)
+        filename, verbose, options and options.pretty_print, nil,
+        options and options.coverage)
     if not format_ok then return nil, format_err end
+    if options and options.coverage then
+        local contents, read_error = util.get_file_contents(filename)
+        if not contents then return nil, read_error end
+        local converted, conversion_error, anchors =
+            require("titan-compiler.coverage_lines").convert(contents, filename)
+        if not converted then return nil, conversion_error end
+        local written, write_error = util.set_file_contents(filename, converted)
+        if not written then return nil, write_error end
+        local owned_sources = {}
+        for source in pairs(anchors) do owned_sources[#owned_sources + 1] = source end
+        table.sort(owned_sources)
+        written, write_error = util.set_file_contents(filename:gsub("[.]c$", ".coverage-anchors"),
+            table.concat(owned_sources, "\0") .. (#owned_sources > 0 and "\0" or ""))
+        if not written then return nil, write_error end
+    end
     local args, flags_err = driver.generated_compile_prefix()
     if not args then return nil, flags_err end
     append_argv(args, options and options.extra_compile_flags)
@@ -8979,11 +9009,12 @@ end
 
 -- Validate the complete shim set before code generation. Only files carrying
 -- Titan's exact generated banner are owned and replaceable.
-function driver.plan_module_shims(provider, module_names)
+function driver.plan_module_shims(provider, module_names, output_root)
     local provider_path = safe_provider_output_path(provider, platform.windows and ".dll" or ".so")
     if not provider_path then
         return nil, "invalid library provider name '" .. tostring(provider) .. "'"
     end
+    if output_root then provider_path = path.join(output_root, provider_path) end
 
     local plans = {}
     local seen = {}
@@ -8993,6 +9024,7 @@ function driver.plan_module_shims(provider, module_names)
             return nil, "module '" .. tostring(modname) ..
                 "' has no safe generated Lua shim path"
         end
+        if output_root then filename = path.join(output_root, "shims", filename) end
         if seen[filename] then
             return nil, "multiple modules would generate Lua shim '" ..
                 filename .. "'"

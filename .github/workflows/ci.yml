@@ -30,6 +30,9 @@ jobs:
       contents: read
     env:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+      # The prepared tree and coverage consumer share matching GCC/gcov.
+      CC: gcc-14
+      LUA_CC: gcc-14
       PREFIX: ${{ github.workspace }}/.lua
       TITAN_PREFIX: ${{ github.workspace }}/.lua
       LIBUV_VERSION: "1.53.0"
@@ -69,9 +72,9 @@ jobs:
             .lua/lib/lua/5.5
             .lua/lib/luarocks
             .lua/share/lua/5.5
-          key: ubuntu-24.04-${{ runner.arch }}-${{ env.TITAN_BUILD_PROFILE }}-prefix-stock-luarocks-host-optimized-v2-abi-${{ env.TITAN_ABI_VERSION }}-rocks-3.13.0-${{ hashFiles('titan-0.6.0-1.rockspec') }}
+          key: ubuntu-24.04-${{ runner.arch }}-${{ env.TITAN_BUILD_PROFILE }}-gcc14-prefix-stock-luarocks-host-optimized-v2-abi-${{ env.TITAN_ABI_VERSION }}-rocks-3.13.0-${{ hashFiles('titan-0.6.0-1.rockspec') }}
           restore-keys: |
-            ubuntu-24.04-${{ runner.arch }}-${{ env.TITAN_BUILD_PROFILE }}-prefix-stock-luarocks-host-optimized-v2-abi-${{ env.TITAN_ABI_VERSION }}-rocks-3.13.0-
+            ubuntu-24.04-${{ runner.arch }}-${{ env.TITAN_BUILD_PROFILE }}-gcc14-prefix-stock-luarocks-host-optimized-v2-abi-${{ env.TITAN_ABI_VERSION }}-rocks-3.13.0-
 
       - name: Cache bundled libuv source and static build
         uses: ubicloud/cache@v4
@@ -80,9 +83,9 @@ jobs:
             libuv-v${{ env.LIBUV_VERSION }}
             libuv-v${{ env.LIBUV_VERSION }}.tar.gz
             libuv-build
-          key: ubuntu-24.04-${{ runner.arch }}-${{ env.TITAN_BUILD_PROFILE }}-libuv-${{ env.LIBUV_VERSION }}-${{ env.LIBUV_BUILD_PROFILE }}-${{ hashFiles('vendor/libuv/*.patch') }}
+          key: ubuntu-24.04-${{ runner.arch }}-${{ env.TITAN_BUILD_PROFILE }}-gcc14-libuv-${{ env.LIBUV_VERSION }}-${{ env.LIBUV_BUILD_PROFILE }}-${{ hashFiles('vendor/libuv/*.patch') }}
           restore-keys: |
-            ubuntu-24.04-${{ runner.arch }}-${{ env.TITAN_BUILD_PROFILE }}-libuv-${{ env.LIBUV_VERSION }}-${{ env.LIBUV_BUILD_PROFILE }}-
+            ubuntu-24.04-${{ runner.arch }}-${{ env.TITAN_BUILD_PROFILE }}-gcc14-libuv-${{ env.LIBUV_VERSION }}-${{ env.LIBUV_BUILD_PROFILE }}-
 
       - name: Cache bundled llhttp source and static build
         uses: ubicloud/cache@v4
@@ -91,9 +94,9 @@ jobs:
             llhttp-release-v${{ env.LLHTTP_VERSION }}
             llhttp-release-v${{ env.LLHTTP_VERSION }}.tar.gz
             llhttp-build
-          key: ubuntu-24.04-${{ runner.arch }}-${{ env.TITAN_BUILD_PROFILE }}-llhttp-${{ env.LLHTTP_VERSION }}-${{ env.LLHTTP_SHA256 }}-${{ env.LLHTTP_BUILD_PROFILE }}
+          key: ubuntu-24.04-${{ runner.arch }}-${{ env.TITAN_BUILD_PROFILE }}-gcc14-llhttp-${{ env.LLHTTP_VERSION }}-${{ env.LLHTTP_SHA256 }}-${{ env.LLHTTP_BUILD_PROFILE }}
           restore-keys: |
-            ubuntu-24.04-${{ runner.arch }}-${{ env.TITAN_BUILD_PROFILE }}-llhttp-${{ env.LLHTTP_VERSION }}-${{ env.LLHTTP_SHA256 }}-
+            ubuntu-24.04-${{ runner.arch }}-${{ env.TITAN_BUILD_PROFILE }}-gcc14-llhttp-${{ env.LLHTTP_VERSION }}-${{ env.LLHTTP_SHA256 }}-
 
       - name: Cache bundled SQLite amalgamation and static build
         uses: ubicloud/cache@v4
@@ -102,9 +105,9 @@ jobs:
             sqlite-autoconf-${{ env.SQLITE3_RELEASE }}
             sqlite-autoconf-${{ env.SQLITE3_RELEASE }}.tar.gz
             sqlite3-build
-          key: ubuntu-24.04-${{ runner.arch }}-${{ env.TITAN_BUILD_PROFILE }}-sqlite3-${{ env.SQLITE3_VERSION }}-${{ env.SQLITE3_SHA256 }}-${{ env.SQLITE3_BUILD_PROFILE }}
+          key: ubuntu-24.04-${{ runner.arch }}-${{ env.TITAN_BUILD_PROFILE }}-gcc14-sqlite3-${{ env.SQLITE3_VERSION }}-${{ env.SQLITE3_SHA256 }}-${{ env.SQLITE3_BUILD_PROFILE }}
           restore-keys: |
-            ubuntu-24.04-${{ runner.arch }}-${{ env.TITAN_BUILD_PROFILE }}-sqlite3-${{ env.SQLITE3_VERSION }}-${{ env.SQLITE3_SHA256 }}-
+            ubuntu-24.04-${{ runner.arch }}-${{ env.TITAN_BUILD_PROFILE }}-gcc14-sqlite3-${{ env.SQLITE3_VERSION }}-${{ env.SQLITE3_SHA256 }}-
 
       - name: Cache bundled OpenSSL source and static build
         uses: ubicloud/cache@v4
@@ -113,12 +116,12 @@ jobs:
             openssl-${{ env.OPENSSL_VERSION }}
             openssl-${{ env.OPENSSL_VERSION }}.tar.gz
             openssl-build
-          key: ubuntu-24.04-${{ runner.arch }}-${{ env.TITAN_BUILD_PROFILE }}-openssl-${{ env.OPENSSL_VERSION }}-${{ env.OPENSSL_SHA256 }}-${{ env.OPENSSL_BUILD_PROFILE }}
+          key: ubuntu-24.04-${{ runner.arch }}-${{ env.TITAN_BUILD_PROFILE }}-gcc14-openssl-${{ env.OPENSSL_VERSION }}-${{ env.OPENSSL_SHA256 }}-${{ env.OPENSSL_BUILD_PROFILE }}
           restore-keys: |
-            ubuntu-24.04-${{ runner.arch }}-${{ env.TITAN_BUILD_PROFILE }}-openssl-${{ env.OPENSSL_VERSION }}-${{ env.OPENSSL_SHA256 }}-
+            ubuntu-24.04-${{ runner.arch }}-${{ env.TITAN_BUILD_PROFILE }}-gcc14-openssl-${{ env.OPENSSL_VERSION }}-${{ env.OPENSSL_SHA256 }}-
 
       - name: Install regular build dependencies
-        run: sudo apt-get update && sudo apt-get install -y cmake curl libreadline-dev libssl-dev perl pkg-config
+        run: sudo apt-get update && sudo apt-get install -y gcc-14 cmake curl libreadline-dev libssl-dev perl pkg-config
 
       - name: Prepare the standalone prefix
         run: |
@@ -346,11 +349,15 @@ jobs:
 
     env:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+      CC: gcc-14
 
     steps:
       - uses: actions/checkout@v6
         with:
           submodules: true
+
+      - name: Install the prepared tree's matching compiler
+        run: sudo apt-get update && sudo apt-get install -y gcc-14
 
       - name: Download prepared Linux tree
         uses: actions/download-artifact@v8
@@ -444,7 +451,78 @@ jobs:
           disable_search: true
           fail_ci_if_error: true
           files: ./luacov.codecov.out
+          flags: compiler
           name: compiler
+          use_oidc: true
+
+  native-coverage:
+    name: native stdlib line coverage (ubuntu-24.04, GCC 14)
+    needs: test-linux-stdlib
+    if: github.event_name == 'push'
+    runs-on: ubicloud-standard-2
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+      PREFIX: ${{ github.workspace }}/.lua
+      CC: gcc-14
+      GCOV: gcov-14
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          submodules: true
+      - name: Install coverage compiler and formatter
+        run: sudo apt-get update && sudo apt-get install -y gcc-14 clang-format python3-venv
+      - name: Download prepared Linux tree
+        uses: actions/download-artifact@v8
+        with:
+          name: titan-linux-prepared.tar.gz
+          path: ${{ runner.temp }}
+      - name: Restore prepared tree and pinned reporter
+        run: |
+          tar -xzf "$RUNNER_TEMP/titan-linux-prepared.tar.gz" -C "$GITHUB_WORKSPACE"
+          test "$(cat .ci-prepared-workspace)" = "$GITHUB_WORKSPACE"
+          echo "$PWD/.lua/bin" >> "$GITHUB_PATH"
+          python3 -m venv "$RUNNER_TEMP/titan-coverage-tools"
+          "$RUNNER_TEMP/titan-coverage-tools/bin/pip" install -r scripts/titan-coverage-requirements.txt
+      - name: Verify backend, exact Titan attribution and collection
+        env:
+          TITAN_COVERAGE_TEST_CC: gcc-14
+          TITAN_COVERAGE_TEST_GCOV: gcov-14
+        run: |
+          export TITAN_COVERAGE_TEST_GCOVR="$RUNNER_TEMP/titan-coverage-tools/bin/gcovr"
+          python3 spec/coverage_host_test.py
+          TITAN_PROBE_CACHE_DISABLE=1 .lua/bin/busted -v \
+            spec/coverage_lines_spec.lua spec/coder/coverage_attribution_spec.lua \
+            spec/coder/native_coverage_spec.lua
+      - name: Build complete production stdlib inventory
+        run: make titan-native-coverage-build TITAN_COVERAGE_GCOV=gcov-14
+      - name: Run ordinary aggregate with fresh coverage counters
+        run: make titan-native-coverage-run
+      - name: Generate Titan line reports
+        if: always()
+        run: |
+          make titan-native-coverage-report \
+            TITAN_COVERAGE_GCOVR="$RUNNER_TEMP/titan-coverage-tools/bin/gcovr"
+      - name: Retain local reports and collection evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: titan-native-line-coverage
+          path: .titan-coverage
+          if-no-files-found: error
+          retention-days: 7
+      - name: Upload native stdlib line coverage to Codecov
+        if: success()
+        uses: codecov/codecov-action@v7
+        with:
+          disable_search: true
+          fail_ci_if_error: true
+          files: .titan-coverage/report/coverage.info
+          flags: native-stdlib
+          name: native-stdlib-lines
           use_oidc: true
 
   # Keep the focused native-memory release gate on one warm standard runner.

@@ -6,6 +6,7 @@ local MODULE_NAMES = {
     "argparse",
     "titan-compiler.checker",
     "titan-compiler.coder",
+    "titan-compiler.coverage",
     "titan-compiler.parser",
     "titan-compiler.driver",
     "titan-compiler.test_runner",
@@ -17,6 +18,7 @@ local function fake_argparse(arguments)
         local parser = {}
         local declaration = {}
         function declaration:args() return self end
+        function declaration:count() return self end
         function parser:argument() return declaration end
         function parser:flag() return declaration end
         function parser:option() return declaration end
@@ -106,9 +108,11 @@ local function run_titanc(arguments, environment_jobs)
     local modules = {
         ["argparse"] = fake_argparse(arguments),
         ["titan-compiler.checker"] = checker,
+        ["titan-compiler.coverage"] = {},
         ["titan-compiler.coder"] = {
             external_symbols = function() return {} end,
             interface_external_symbols = function() return {} end,
+            prepare_coverage = function() end,
         },
         ["titan-compiler.parser"] = {
             pretty_print_ast = function() return "" end,
@@ -164,6 +168,8 @@ local function ordinary_arguments(jobs)
         module = { "pkg.three", "pkg.two", "pkg.one" },
         jobs = jobs,
         extra_object = {},
+        coverage_module = {},
+        coverage_source_map = {},
     }
 end
 

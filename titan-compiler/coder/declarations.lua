@@ -671,6 +671,7 @@ function codeboxparam(ctx, param)
 end
 
 function coder._foreign_function_is_inline(node)
+    if node._coverage_foreign_outline then return false end
     -- Private nominal layout declarations belong to the producer C unit.
     -- Its source header exports only the native callback prototype.
     if node._native_record_fields then return false end
@@ -960,7 +961,7 @@ function coder._foreign_raw_block(ctx, block, braces)
     return "{\n" .. body .. "\n}"
 end
 
-function coder._foreign_raw_stat(ctx, node)
+local function foreign_raw_stat_dispatch(ctx, node)
     local tag = node._tag
     if tag == "Ast.StatBlock" then
         return coder._foreign_raw_block(ctx, node)
@@ -1061,6 +1062,12 @@ function coder._foreign_raw_stat(ctx, node)
     error("unsupported statement in foreign function: " .. tostring(tag))
 end
 
+function coder._foreign_raw_stat(ctx, node)
+    local code = foreign_raw_stat_dispatch(ctx, node)
+    if node._tag == "Ast.StatBlock" then return code end
+    return coverage_region(node, code, ctx)
+end
+
 function coder._foreign_function_signature(node)
     local params = {}
     local fixed_index = 1
@@ -1083,6 +1090,9 @@ end
 
 function coder._code_foreign_function(tlcontext, node, inline)
     local ctx = coder._new_foreign_context(tlcontext)
+    -- Header generation also runs outside generate's policy reset. Ordinary
+    -- inline interfaces must never inherit a previous coverage invocation.
+    ctx._coverage_generated = not node._coverage_foreign_outline
     local signature = coder._foreign_function_signature(node)
     local body = coder._foreign_raw_block(ctx, node.block, false)
     local storage = inline and "static inline" or "TITAN_SOURCE_LOCAL"
@@ -1099,6 +1109,7 @@ end
 --     can collect it; returning itself cannot run the collector.
 function codefuncdec(tlcontext, node)
     local ctx = newcontext(tlcontext)
+    ctx._coverage_generated = node._record_constructor or node._union_constructor
     local stats = {}
     local rettype = node._type.rettypes[1]
     local has_function_value = node._tag ~= "Ast.TopLevelFunc"
@@ -1863,7 +1874,7 @@ function codevardec(ctx, initvars, switch_get, switch_set, gvar_map, node)
     local cstats, cexp = codeexp(ctx, node.value)
     node._slot = render("&_mod->uv[$INDEX].uv",
         { INDEX = c_integer_literal(node._upvalue) })
-    table.insert(initvars, render([[
+    table.insert(initvars, coverage_region(node, render([[
         $CSTATS
         {
             $CDECL = $CEXP;
@@ -1877,7 +1888,7 @@ function codevardec(ctx, initvars, switch_get, switch_set, gvar_map, node)
         SETSLOT = setslot(node._type, node._slot, "_var"),
         BARRIER = types.is_gc(node._type)
             and "luaC_barrierback(L, obj2gco(_mod), " .. node._slot .. ");" or ""
-    }))
+    }), ctx))
     if not node.islocal then
         table.insert(gvar_map, render([[
             lua_pushinteger(L, $INDEX);
