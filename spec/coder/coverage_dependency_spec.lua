@@ -4,6 +4,7 @@ local assert = require "luassert"
 local compiler_io = require "titan-compiler.io"
 local installed_prefix = require "spec.support.installed_prefix"
 local lfs = require "lfs"
+local luacov_children = require "spec.support.luacov_children"
 local platform = require "titan-compiler.platform"
 local temporary = require "spec.support.temporary"
 local util = require "titan-compiler.util"
@@ -59,7 +60,8 @@ local function require_backend()
     local ok, output = run({ "python3", ROOT .. "/titan-coverage", "probe",
         "--cc", CC, "--gcov", GCOV })
     if not ok then
-        if os.getenv("TITAN_COVERAGE_TEST_CC") or os.getenv("TITAN_COVERAGE_TEST_GCOV") then
+        if os.getenv("TITAN_COVERAGE_TEST_REQUIRED") == "1" or
+            os.getenv("TITAN_COVERAGE_TEST_CC") or os.getenv("TITAN_COVERAGE_TEST_GCOV") then
             assert.truthy(ok, output)
         end
         pending("native coverage tools unavailable: " .. output)
@@ -93,8 +95,11 @@ describe("aggregate coverage dependency freshness", function()
             copy(ROOT .. "/spec/support/stdlib_test_modules.mk",
                 frontend .. "/spec/support/stdlib_test_modules.mk")
             copy(ROOT .. "/titan-coverage", workspace .. "/titan-coverage")
+            local child_coverage = luacov_children.new(ROOT, frontend, workspace .. "/child-luacov")
+            local child_init = child_coverage:init_code()
             write(frontend .. "/frontend.lua", "package.path = "
                 .. string.format("%q", frontend .. "/?.lua;") .. " .. package.path\n"
+                .. child_init .. "\n"
                 .. "dofile(" .. string.format("%q", frontend .. "/titanc") .. ")\n")
             write(workspace .. "/helper.titan", "foreign function amount(): int\n  return 3\nend\n")
             write(workspace .. "/caller.titan", [[local helper = import "helper.titan"
@@ -121,6 +126,9 @@ end
                 "TEST_TITANC=" .. quote(LUA) .. " " .. quote(frontend .. "/frontend.lua") }
             local function build_and_run(name)
                 local ok, output = run(command)
+                local collected = child_coverage:collect()
+                assert.is_true(child_init == "" or collected > 0,
+                    "the Make build did not collect any child compiler LuaCov statistics")
                 assert.truthy(ok, output)
                 assert.is_nil(lfs.attributes(directory .. "/objects/caller.gcda"),
                     "compiler metadata prototypes wrote counters beside the measured object")

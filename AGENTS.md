@@ -177,7 +177,8 @@ or give concurrent builds separate source copies. See
   the stdlib producer, compiler pair matrix (two runner executions), compiler
   coverage merger, native line coverage, and sanitizer. The
   stdlib producer has 45 minutes for its validation build, complete runtime suite,
-  and both production dependency smokes; the compiler consumer retains 30 minutes. The
+  and both production dependency smokes; the compiler consumer has 45 minutes
+  for its regular specs and the instrumented real CLI coverage regressions. The
   independent sanitizer has 75 minutes so a cold native-dependency cache miss
   remains a valid build under the same two-CPU bound. Linux jobs export
   `MAKEFLAGS=-j2` and `TITAN_JOBS=2`, matching the two CPUs on standard private-repository

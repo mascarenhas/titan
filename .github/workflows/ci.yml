@@ -339,7 +339,8 @@ jobs:
     needs: test-linux-stdlib
     if: github.event_name == 'push'
     runs-on: ubicloud-standard-2
-    timeout-minutes: 30
+    # Include full LuaCov collection in the real native-coverage compiler children.
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
@@ -356,8 +357,8 @@ jobs:
         with:
           submodules: true
 
-      - name: Install the prepared tree's matching compiler
-        run: sudo apt-get update && sudo apt-get install -y gcc-14
+      - name: Install matching compiler and coverage tools
+        run: sudo apt-get update && sudo apt-get install -y gcc-14 clang-format python3-venv
 
       - name: Download prepared Linux tree
         uses: actions/download-artifact@v8
@@ -373,6 +374,15 @@ jobs:
           echo "$PWD/.lua/bin" >> "$GITHUB_PATH"
           .lua/bin/lua -v
 
+      - name: Prepare pinned native coverage reporter for compiler regressions
+        run: |
+          python3 -m venv "$RUNNER_TEMP/titan-compiler-coverage-tools"
+          "$RUNNER_TEMP/titan-compiler-coverage-tools/bin/pip" install -r scripts/titan-coverage-requirements.txt
+          gcc-14 --version
+          gcov-14 --version
+          clang-format --version
+          "$RUNNER_TEMP/titan-compiler-coverage-tools/bin/gcovr" --version
+
       # Each worker gets a private copy of the prepared checkout, so legacy
       # compiler cleanup and checkout-root fixture names cannot race. Each
       # shard first runs ordinary compiler tests with LuaCov and then its
@@ -383,6 +393,10 @@ jobs:
         env:
           TITAN_EXTRA_CFLAGS: "-O0 -fno-lto"
           TITAN_EXTRA_LDFLAGS: "-fno-lto"
+          TITAN_COVERAGE_TEST_CC: gcc-14
+          TITAN_COVERAGE_TEST_GCOV: gcov-14
+          TITAN_COVERAGE_TEST_GCOVR: ${{ runner.temp }}/titan-compiler-coverage-tools/bin/gcovr
+          TITAN_COVERAGE_TEST_REQUIRED: "1"
         run: bash spec/support/ci_parallel_compiler_tests.sh "${{ matrix.shard-pair }}"
 
       - name: Upload compiler pair coverage
@@ -460,7 +474,8 @@ jobs:
     needs: test-linux-stdlib
     if: github.event_name == 'push'
     runs-on: ubicloud-standard-2
-    timeout-minutes: 30
+    # Include the full covered provider build and the aggregate's 600-second deadline.
+    timeout-minutes: 45
     permissions:
       contents: read
       id-token: write
@@ -491,8 +506,10 @@ jobs:
         env:
           TITAN_COVERAGE_TEST_CC: gcc-14
           TITAN_COVERAGE_TEST_GCOV: gcov-14
+          TITAN_COVERAGE_TEST_REQUIRED: "1"
         run: |
           export TITAN_COVERAGE_TEST_GCOVR="$RUNNER_TEMP/titan-coverage-tools/bin/gcovr"
+          clang-format --version
           python3 spec/coverage_host_test.py
           TITAN_PROBE_CACHE_DISABLE=1 .lua/bin/busted -v \
             spec/coverage_lines_spec.lua spec/coder/coverage_attribution_spec.lua \

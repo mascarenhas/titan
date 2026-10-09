@@ -4858,7 +4858,7 @@ done
             assert.equal(1, count_literal(compiler_job,
                 "runs-on: ubicloud-standard-2"), compiler_job)
             assert.equal(1, count_literal(compiler_job,
-                "timeout-minutes: 30"), compiler_job)
+                "timeout-minutes: 45"), compiler_job)
             assert.equal(1, count_literal(compiler_job,
                 "\n      CC: gcc-14\n"), compiler_job)
             assert.equal(1, count_literal(compiler_job,
@@ -4965,7 +4965,7 @@ done
             for _, contract in ipairs({
                 "needs: test-linux-stdlib",
                 "runs-on: ubicloud-standard-2",
-                "timeout-minutes: 30",
+                "timeout-minutes: 45",
                 "\n      CC: gcc-14\n",
                 "\n      GCOV: gcov-14\n",
                 "gcc-14 clang-format python3-venv",
@@ -5078,8 +5078,23 @@ done
             }) do
                 assert.truthy(workflow:find(contract, 1, true), contract)
             end
-            assert.equal(1, count_literal(workflow, "clang-format"), workflow)
-            for _, ordinary_job in ipairs({ stdlib_job, compiler_job, coverage_job,
+            for _, contract in ipairs({
+                "gcc-14 clang-format python3-venv",
+                'python3 -m venv "$RUNNER_TEMP/titan-compiler-coverage-tools"',
+                'pip" install -r scripts/titan-coverage-requirements.txt',
+                "clang-format --version",
+                "TITAN_COVERAGE_TEST_CC: gcc-14",
+                "TITAN_COVERAGE_TEST_GCOV: gcov-14",
+                "TITAN_COVERAGE_TEST_GCOVR: ${{ runner.temp }}/titan-compiler-coverage-tools/bin/gcovr",
+                'TITAN_COVERAGE_TEST_REQUIRED: "1"',
+            }) do
+                assert.equal(1, count_literal(compiler_job, contract), contract)
+            end
+            assert.equal(1, count_literal(native_coverage_job,
+                'TITAN_COVERAGE_TEST_REQUIRED: "1"'), native_coverage_job)
+            assert.equal(1, count_literal(native_coverage_job,
+                "clang-format --version"), native_coverage_job)
+            for _, ordinary_job in ipairs({ stdlib_job, coverage_job,
                 sanitizer_job, macos_job }) do
                 assert.falsy(ordinary_job:find("clang-format", 1, true), ordinary_job)
             end

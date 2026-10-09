@@ -56,6 +56,30 @@ describe("coverage C source regions", function()
         assert.truthy(bytes:find('"caf\\303\\251.titan"', 1, true))
     end)
 
+    it("preserves numeric line controls and decodes octal authored filenames", function()
+        local result = mapped(lines.region('# 90 "caf\\303\\251.c"\nrun();\nnext();',
+            "authored", "old.c", 1))
+        assert.truthy(result:find('#line 90 "caf\\303\\251.c"\nrun();', 1, true))
+        assert.truthy(result:find('#line 91 "caf\\303\\251.c"\nnext();', 1, true))
+    end)
+
+    it("keeps invalid authored line controls from changing source ownership", function()
+        for _, control in ipairs({ '#line 90 "one" "two"', '#line 90 invalid' }) do
+            local result = mapped(lines.region(control .. "\nrun();", "authored", "old.c", 1))
+            assert.truthy(result:find(control, 1, true))
+            assert.truthy(result:find('#line 2 "old.c"\nrun();', 1, true))
+        end
+    end)
+
+    it("rejects invalid conversion inputs", function()
+        for _, input in ipairs({ { false, "generated.c" }, { "run();", false },
+            { "run();", "" }, { "run();", "bad\nname.c" } }) do
+            local result, err = lines.convert(input[1], input[2])
+            assert.is_nil(result)
+            assert.equal("invalid coverage conversion input", err)
+        end
+    end)
+
     it("does not recognize marker or directive lookalikes in literals", function()
         local result = mapped(source([[
 const char *s = "// TITAN_COVERAGE_END #line 8";

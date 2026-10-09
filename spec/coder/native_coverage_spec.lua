@@ -4,6 +4,7 @@ local assert = require "luassert"
 local compiler_io = require "titan-compiler.io"
 local installed_prefix = require "spec.support.installed_prefix"
 local lfs = require "lfs"
+local luacov_children = require "spec.support.luacov_children"
 local platform = require "titan-compiler.platform"
 local temporary = require "spec.support.temporary"
 local util = require "titan-compiler.util"
@@ -16,6 +17,8 @@ local CC = os.getenv("TITAN_COVERAGE_TEST_CC") or
 local GCOV = os.getenv("TITAN_COVERAGE_TEST_GCOV") or "gcov"
 local GCOVR = os.getenv("TITAN_COVERAGE_TEST_GCOVR") or os.getenv("GCOVR") or "gcovr"
 local HOST = ROOT .. "/titan-coverage"
+local child_coverage = {}
+local REQUIRED = os.getenv("TITAN_COVERAGE_TEST_REQUIRED") == "1"
 local function run(argv)
     local result = compiler_io.new_sync():run(argv, { stderr_to_stdout = true })
     return result.ok, result.output or result.diagnostic or ""
@@ -47,7 +50,7 @@ local function require_backend(pretty)
         local ok, output = run({ "python3", HOST, "probe", "--cc", CC,
             "--gcov", GCOV, "--gcovr", GCOVR })
         if not ok then
-            if os.getenv("TITAN_COVERAGE_TEST_CC") or os.getenv("TITAN_COVERAGE_TEST_GCOVR") then
+            if REQUIRED or os.getenv("TITAN_COVERAGE_TEST_CC") or os.getenv("TITAN_COVERAGE_TEST_GCOVR") then
                 assert.truthy(ok, output)
             end
             pending("native coverage tools unavailable: " .. output)
@@ -56,7 +59,10 @@ local function require_backend(pretty)
     end
     if pretty then
         local ok, output = run({ "clang-format", "--version" })
-        if not ok then pending("optional clang-format unavailable: " .. output) end
+        if not ok then
+            if REQUIRED then assert.truthy(ok, output) end
+            pending("optional clang-format unavailable: " .. output)
+        end
     end
 end
 
@@ -195,15 +201,33 @@ local function lcov(filename)
     return files
 end
 
-local function compile(workspace, directory, pretty, extra, mode)
+local function frontend_run(workspace, arguments, environment, collect)
     local frontend = workspace .. "/tooling"
     local checkout = 'package.path = ' .. string.format("%q", frontend .. "/?.lua;")
         .. ' .. package.path'
+    local coverage = collect ~= false and child_coverage[workspace]
+    local child_init = coverage and coverage:init_code() or ""
+    checkout = checkout .. "; " .. child_init
     local argv = { "env", "PREFIX=" .. PREFIX, "TITAN_ROCKS_ROOT=" .. PREFIX,
         "CC=" .. CC, "TITAN_BUILD_PROFILE=validation", "CCACHE_DISABLE=1",
         "TITAN_EXTRA_CPPFLAGS=", "TITAN_EXTRA_CFLAGS=-O0 -fno-lto",
-        "TITAN_EXTRA_LDFLAGS=-fno-lto", "TITAN_NO_LINE_DIRECTIVES=0",
-        LUA, "-e", checkout, frontend .. "/titanc", "--tree", workspace,
+        "TITAN_EXTRA_LDFLAGS=-fno-lto", "TITAN_NO_LINE_DIRECTIVES=0" }
+    for _, assignment in ipairs(environment or {}) do argv[#argv + 1] = assignment end
+    for _, argument in ipairs({ LUA, "-e", checkout, frontend .. "/titanc" }) do
+        argv[#argv + 1] = argument
+    end
+    for _, argument in ipairs(arguments) do argv[#argv + 1] = argument end
+    local ok, output = run(argv)
+    if coverage then
+        local collected = coverage:collect()
+        assert.is_true(child_init == "" or collected == 1,
+            "the compiler invocation did not produce its private LuaCov statistics")
+    end
+    return ok, output
+end
+
+local function compile(workspace, directory, pretty, extra, mode, collect)
+    local argv = { "--tree", workspace,
         "--coverage", directory, "--coverage-root", workspace,
         "--coverage-gcov", GCOV, "--coverage-module", "lib",
         "--coverage-module", "unused" }
@@ -212,7 +236,7 @@ local function compile(workspace, directory, pretty, extra, mode)
     for _, arg in ipairs(extra or {}) do argv[#argv + 1] = arg end
     argv[#argv + 1] = mode == "library" and "lib" or
         mode == "application" and "app" or "checks"
-    return run(argv)
+    return frontend_run(workspace, argv, nil, collect)
 end
 
 local function report(directory, command, label)
@@ -256,6 +280,8 @@ local function fixture(body)
     for _, entry in ipairs({ "titan-compiler", "c-parser", "titanc", "titan-coverage" }) do
         copy(ROOT .. "/" .. entry, workspace .. "/tooling/" .. entry)
     end
+    child_coverage[workspace] = luacov_children.new(ROOT, workspace .. "/tooling",
+        workspace .. "/child-luacov")
     write(workspace .. "/lib/lib.titan", PRODUCTION)
     write(workspace .. "/lib/extra.titan", "function extra(): integer\n  return 72\nend\n")
     write(workspace .. "/unused.titan", "function never(): integer\n  return 83\nend\n")
@@ -268,11 +294,105 @@ end
     write(workspace .. "/lib/lib.o", "ordinary object sentinel")
     write(workspace .. "/lib/lib.c", "ordinary C sentinel")
     local tested, err = xpcall(function() body(workspace) end, debug.traceback)
+    child_coverage[workspace] = nil
     remove_tree(workspace)
     if not tested then error(err, 0) end
 end
 
 describe("native Titan executable-line coverage", function()
+    it("rejects invalid coverage ownership and tool settings before compilation", function()
+        require_backend(false)
+        fixture(function(workspace)
+            local directory = workspace .. "/invalid-coverage"
+            local function rejected(extra, diagnostic, environment, without_coverage)
+                local arguments = { "--tree", workspace }
+                if not without_coverage then
+                    for _, argument in ipairs({ "--coverage", directory,
+                        "--coverage-module", "lib", "--coverage-gcov", GCOV }) do
+                        arguments[#arguments + 1] = argument
+                    end
+                end
+                for _, argument in ipairs(extra) do arguments[#arguments + 1] = argument end
+                arguments[#arguments + 1] = "checks"
+                local ok, output = frontend_run(workspace, arguments, environment)
+                assert.is_false(ok, output)
+                assert.truthy(output:find(diagnostic, 1, true), output)
+                assert.is_nil(lfs.attributes(directory .. "/build.config"))
+                assert.is_nil(lfs.attributes(directory .. "/objects"))
+            end
+            rejected({ "--coverage-module", "lib" }, "require --coverage", nil, true)
+            rejected({ "--no-line-directives" }, "requires source #line directives")
+            rejected({ "--print-ast" }, "cannot be combined with --print-ast")
+            rejected({ "--coverage-module", "../bad" }, "invalid --coverage-module name")
+            rejected({ "--coverage-module", "titan.test" }, "test support cannot be a coverage module")
+            rejected({ "--coverage-module", "titan.test.runner" }, "test support cannot be a coverage module")
+            rejected({ "--coverage-source-map", "missing-separator" },
+                "requires STAGED_DIRECTORY=TRACKED_DIRECTORY")
+            rejected({ "--coverage-source-map", workspace .. "/missing=" .. workspace },
+                workspace .. "/missing")
+            rejected({ "--coverage-gcov", "'" }, "quote")
+            rejected({}, "quote", { "CC='" })
+            rejected({}, "coverage requires GCC 14 or newer", { "CC=false" })
+            rejected({ "--coverage-gcov", "false" }, "coverage requires gcov matching GCC")
+            rejected({}, "coverage flags must be owned by --coverage", { "TITAN_EXTRA_CFLAGS=--coverage" })
+            rejected({ "--coverage-root", workspace .. "/missing-root" }, workspace .. "/missing-root")
+            local ok, output = frontend_run(workspace, { "--tree", workspace,
+                "--coverage", directory, "--coverage-gcov", GCOV, "checks" })
+            assert.is_false(ok, output)
+            assert.truthy(output:find("requires an explicit --coverage-module production inventory", 1, true), output)
+            assert.is_nil(lfs.attributes(directory .. "/build.config"))
+        end)
+    end)
+
+    it("merges isolated child LuaCov stats once and rejects changed frontend bytes", function()
+        fixture(function(workspace)
+            local frontend = workspace .. "/tooling"
+            local parent_stats = workspace .. "/collector-parent.stats"
+            local script = "package.path = " .. string.format("%q", ROOT .. "/?.lua;")
+                .. " .. package.path\nlocal root = " .. string.format("%q", ROOT)
+                .. "\nlocal frontend = " .. string.format("%q", frontend)
+                .. "\nlocal workspace = " .. string.format("%q", workspace)
+                .. "\nlocal lua = " .. string.format("%q", LUA) .. [[
+local children = require "spec.support.luacov_children"
+local runner = require "luacov.runner"
+local ordinary = children.new(root, frontend, workspace .. "/ordinary-stats")
+assert(ordinary:init_code() == "" and ordinary:collect() == 0)
+assert(not require("lfs").attributes(workspace .. "/ordinary-stats"))
+runner.init({ statsfile = workspace .. "/collector-parent.stats", runreport = false,
+    include = { "titan%-compiler/", "titanc$" } })
+local collector = children.new(root, frontend, workspace .. "/collector-stats")
+local checkout = "package.path = " .. string.format("%q", frontend .. "/?.lua;")
+    .. " .. package.path; " .. collector:init_code()
+local result = require("titan-compiler.io").new_sync():run({lua, "-e", checkout,
+    frontend .. "/titanc", "--help"})
+assert(result.ok, result.output or result.diagnostic)
+assert(collector:collect() == 1)
+local first = assert(runner.data.titanc)
+assert(first.max_hits > 0)
+local hits = {}
+for line, count in pairs(first) do hits[line] = count end
+assert(collector:collect() == 0)
+for line, count in pairs(hits) do assert(first[line] == count) end
+local util = require "titan-compiler.util"
+local filename = frontend .. "/titan-compiler/coverage.lua"
+local original = assert(util.get_file_contents(filename))
+assert(util.set_file_contents(filename, original .. "\n-- modified child\n"))
+local ok, err = pcall(function() collector:init_code() end)
+assert(not ok and err:find("copied frontend differs from tracked source", 1, true))
+assert(util.set_file_contents(filename, original))
+]]
+            local ok, output = run({ LUA, "-e", script })
+            assert.truthy(ok, output)
+            local saved = assert(require("luacov.stats").load(parent_stats))
+            assert.is_true(saved.titanc.max_hits > 0,
+                "the parent exit-time save lost its merged child statistics")
+            for filename in pairs(saved) do
+                assert.is_nil(filename:find(frontend, 1, true),
+                    "copied frontend path escaped exact source normalization")
+            end
+        end)
+    end)
+
     for _, pretty in ipairs({ false, true }) do
         it("reports exact taken and untaken source lines with pretty-print " .. tostring(pretty), function()
             require_backend(pretty)
@@ -398,7 +518,9 @@ describe("native Titan executable-line coverage", function()
             assert.equal(anchors, util.get_file_contents(anchors_path))
             local frontend = workspace .. "/tooling/titanc"
             write(frontend, assert(util.get_file_contents(frontend)) .. "\n-- provenance regression\n")
-            ok, output = compile(workspace, directory, false, { "--incremental" })
+            -- This invocation intentionally changes the compiler identity. Its
+            -- source cannot be attributed to the byte-identical tracked CLI.
+            ok, output = compile(workspace, directory, false, { "--incremental" }, nil, false)
             assert.is_false(ok)
             assert.matches("coverage build configuration changed", output)
         end)

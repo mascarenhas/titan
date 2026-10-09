@@ -7,15 +7,17 @@ Local runs render reports; only CI uploads to Codecov.
 
 ## Final coverage expansion
 
-The final source snapshot is **`c5bba2dc3767b4cfd67105ac35598ca7e01a6426c3b762f1de4c7413300834a2`** at implementation commit
+The native expansion snapshot is **`c5bba2dc3767b4cfd67105ac35598ca7e01a6426c3b762f1de4c7413300834a2`** at implementation commit
 **`abbc2637066179bea74e76dfdc0e7a39aca9912a`**, with 1,156 authored files. Lua remains at
 `025bfc35df0885656de347fb7a7c377e90042a75`; the skills pin is
 `df1e7837ab0869d98c853f252d6572a0cdde0503`. ABI 2, package 0.6.0 and
 language-server API 1 remain unchanged. Commit
 `ccafc366473cefcb3364c19323c95c6921bdff5e` then updates only the host-side
 compiler-shard count expectation; the final publication commit adds this
-validation record. Neither changes the native snapshot. The records below supersede the
-historical baseline sections.
+validation record. Neither changes the native snapshot. The subsequent CI
+collection correction changes test plumbing only and does not replace these
+native measurements. The records below supersede the historical baseline
+sections.
 
 The final workflow measures the normal 23-root standard provider: 22 selected
 production modules and 69 physical source contributors. An ordinary 28-root
@@ -130,6 +132,61 @@ Cobertura, normalized lines, raw gcov JSON, seals and run provenance. Public
 LCOV contains no function or branch records. Local runs never upload.
 Windows LLVM-gcov support remains a separately coordinated follow-up; its
 synthetic feasibility probe is not a native stdlib coverage report.
+
+## First published CI readback
+
+The first published head, `149bc2454252d0d0f358f6699cbb4d78907c947a`, ran in
+[GitHub Actions run 37880355337](https://github.com/mascarenhas/titan/actions/runs/37880355337).
+The producer, both compiler pairs, compiler coverage merger and sanitizer
+passed. The independent native coverage job reached its 30-minute job limit
+and was cancelled before collection or upload. Its attribution preflight
+passed 42 cases from 04:03:59 to 04:07:14 UTC; the covered provider and consumer
+build then took 21 minutes 35 seconds. The aggregate started at 04:28:50 and
+was still passing cases when the job was cancelled at 04:31:55. The reporter
+refused to publish counters from the unfinished run. This CI run produced no
+native Codecov report.
+
+[Codecov's compiler check](https://github.com/mascarenhas/titan/pull/213#issuecomment-6074228412)
+reported 92.27% project coverage, but patch coverage failed at 286 / 354
+executable lines (80.79%) against the existing 90% target. The 68 misses were
+41 in `titanc`, 16 in `driver.lua`, eight in `coverage_lines.lua`, and three in
+`coder/statements.lua`. The newly added `coverage.lua` was absent from the
+collected child-process statistics, so those counts did not include its
+executable denominator. The status is scoped to the `compiler` flag; a native
+upload cannot repair that compiler result.
+
+The correction supplies the compiler shards with matching GCC/gcov, the pinned
+gcovr reporter and clang-format, and makes missing coverage tools a failure in
+those configured CI lanes. Real CLI tests explicitly collect their child Lua
+processes into private statistics files and merge them into the parent runner
+only after verifying that copied, tracked and parent-resolved source bytes
+agree. An intentionally modified frontend remains outside that merge.
+Native coverage receives a 45-minute job budget for preparation, the full
+covered build, the unchanged 600-second aggregate deadline and report upload.
+Compiler pairs also receive 45 minutes for the regular specs plus real CLI
+coverage regressions, whose source hashing is slower under LuaCov.
+No tests, coverage thresholds or measured production sources are removed.
+
+Local verification passes all 36 mapper, CLI and dependency tests without
+LuaCov. A full-scope measured invocation passes 26 mapper and seven existing
+CLI cases in 877.84 seconds; the final two policy/collector cases pass in a
+separate measured invocation, and the final Make dependency case passes in
+115.21 seconds. The long invocation loaded its test wrapper before those two
+cases and the collection-count assertions were added. The frozen collector,
+compiler bytes and existing child argv are identical; the final wrapper also
+passes the complete ordinary invocation. These are composed checks, not one
+fresh measured invocation of all final test code.
+
+Combining only successful current-source measurements with the two original
+CI statistics artifacts gives a local patch projection of **601 / 618
+executable lines (97.25%)**. The newly observed `coverage.lua` contributes
+250 / 263 lines (95.06%); a repeat-condition case reveals one further active
+changed line. Thus the denominator increases from 354 to 618. All changed
+driver lines and all 17 changed statement-generator lines are hit; `titanc`
+has three remaining misses and the lexical converter retains one defensive
+miss. This is a local projection, not a new hosted Codecov result. Initial
+statistics from a rejected stale installed compiler are diagnostic-only and
+are excluded from the composition.
 
 ## Historical source and tool identities
 
