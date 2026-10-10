@@ -4423,6 +4423,16 @@ function driver.defaultloader(static_deps, options)
         if not native or not native.layouts then
             return miss("missing nominal layout metadata")
         end
+        if options.coverage then
+            local coverage = require("titan-compiler.coverage")
+            local measured = coverage.matches(options.coverage, modname,
+                native.coverage_test_functions or native.test_functions)
+            local saved = native.coverage
+            if not saved or saved.enabled ~= measured or
+                saved.backend ~= options.coverage.backend then
+                return miss("coverage selection or backend changed")
+            end
+        end
         -- A valid record is compiler-owned data. Build-system prerequisites
         -- own dependency/configuration freshness; replay only its link inputs.
         driver.imported[modname] = CIRCULAR_MARK
@@ -6227,6 +6237,7 @@ function driver.write_foreign_header_plans(plans, verbose, pretty_print)
             local temporary, reserve_err = driver.sibling_temporary_path(
                 entry.filename .. ".format")
             if not temporary then return abandon(reserve_err) end
+            temporary = temporary .. ".h" -- Preserve C language inference across random temporary suffixes.
             staged[entry] = temporary
             ok, err = util.set_file_contents(temporary, entry.contents)
             if not ok then return abandon(err) end
@@ -6279,7 +6290,8 @@ local function prepare_compile(
     static_deps = static_deps or {}
     local filename = sourcef:gsub("[.]titan$", "") .. ".c"
     local libname = sourcef:gsub("[.]titan$", "") .. ".o"
-    coder.prepare_coverage(ast, options and options.coverage == true)
+    coder.prepare_coverage(ast, options and
+        (options.coverage == true or options.coverage_backend ~= nil))
     if not ast._foreign_header_prepared or not ast._ffi_header_prepared then
         local header_plan = driver.plan_foreign_header(modname, ast, sourcef)
         local header_ok, header_err = driver.write_foreign_header_plan(
@@ -6322,18 +6334,32 @@ local function prepare_compile(
         source_files = source_entry and source_entry.source_files or { sourcef }, deps = deps,
         c_header_dependencies = ast._c_header_dependencies or {},
     }
-    local payload, metadata_error = objectmetadata.encode(entry, {
+    local coverage = require("titan-compiler.coverage")
+    local native = {
         imports = imports, bindings = native_bindings, providers = providers,
         has_main = checker.has_main(ast) and true or false,
         test_functions = require("titan-compiler.test_runner").function_names(ast),
+        coverage_test_functions = coverage.test_functions(ast),
         external_symbols = coder.external_symbols(modname, ast),
         native_references = native_references,
         foreign_header = ast._foreign_header_recipe,
         layouts = encoded_layouts,
-    })
-    if not payload then return nil, metadata_error end
-    code = code .. "\n" .. objectmetadata.render(payload,
-        "titan_object_source_" .. driver.mangle_module_name(modname))
+    }
+    if options and options.coverage_backend then
+        native.coverage = { enabled = options.coverage == true,
+            backend = options.coverage_backend }
+    end
+    local function metadata_code()
+        local payload, metadata_error = objectmetadata.encode(entry, native)
+        if not payload then return nil, metadata_error end
+        return "\n" .. objectmetadata.render(payload,
+            "titan_object_source_" .. driver.mangle_module_name(modname))
+    end
+    if not (options and options.coverage) then
+        local metadata, metadata_error = metadata_code()
+        if not metadata then return nil, metadata_error end
+        code = code .. metadata
+    end
     local output_ok, output_err = ensure_output_parent(filename)
     if not output_ok then return nil, output_err end
     os.remove(filename)
@@ -6350,15 +6376,14 @@ local function prepare_compile(
         local converted, conversion_error, anchors =
             require("titan-compiler.coverage_lines").convert(contents, filename)
         if not converted then return nil, conversion_error end
-        local written, write_error = util.set_file_contents(filename, converted)
-        if not written then return nil, write_error end
-        local owned_sources = {}
-        for source in pairs(anchors) do owned_sources[#owned_sources + 1] = source end
-        table.sort(owned_sources)
-        written, write_error = util.set_file_contents(filename:gsub("[.]c$", ".coverage-anchors"),
-            table.concat(owned_sources, "\0") .. (#owned_sources > 0 and "\0" or ""))
+        native.coverage = coverage.partial(filename, entry.source_files, anchors,
+            options.coverage_backend)
+        local metadata, metadata_error = metadata_code()
+        if not metadata then return nil, metadata_error end
+        local written, write_error = util.set_file_contents(filename, converted .. metadata)
         if not written then return nil, write_error end
     end
+    if source_entry then source_entry.coverage = native.coverage end
     local args, flags_err = driver.generated_compile_prefix()
     if not args then return nil, flags_err end
     append_argv(args, options and options.extra_compile_flags)
@@ -7263,6 +7288,8 @@ static int pmain(lua_State *L) {
 
 $ENTRYPOINT_DECLARATIONS
 
+$COVERAGE_DECLARATIONS
+
 /* main function, based on srlua */
 int main(int argc, char** argv) {
     int ret;
@@ -7277,6 +7304,7 @@ int main(int argc, char** argv) {
     }
     luaL_openlibs(L);
     titan_init_paths(L);
+    $COVERAGE_PREPARE
     lua_getglobal(L, "package");
     lua_getfield(L, -1, "preload");
     lua_pushcfunction(L, $PRELOAD_FN);
@@ -7302,6 +7330,7 @@ int main(int argc, char** argv) {
         fatal(report);
     }
     ret = lua_tointeger(L, -1);
+    $COVERAGE_FINISH
     lua_close(L);
     return ret;
 }
@@ -7315,6 +7344,7 @@ function driver.entrypoint_contents(modname, program_name, options)
         LUAOPEN_FN = "luaopen_" .. modname:gsub("[.]", "_"),
         MODNAME = modname,
         SKIP_MAIN_BOOTSTRAP = options.no_uv_bootstrap and "1" or "0",
+        COVERAGE_DECLARATIONS = "", COVERAGE_PREPARE = "", COVERAGE_FINISH = "",
     }
     if platform.windows then
         values.PROGNAME = c_string_contents(values.PROGNAME)
@@ -7331,6 +7361,58 @@ function driver.entrypoint_contents(modname, program_name, options)
         values.PLATFORM_ALERTS = util.render(unix_entrypoint_alerts, values)
         values.ENTRYPOINT_DECLARATIONS =
             "int " .. values.LUAOPEN_FN .. "(lua_State* L);"
+    end
+    if options.coverage_runtime then
+        local runtime_path = assert(package.searchpath(
+            "titan-compiler.coverage_runtime", package.path))
+        local runtime = assert(util.get_file_contents(runtime_path))
+        local config = "return " .. require("titan-compiler.coverage").serialize(
+            options.coverage_runtime)
+        values.COVERAGE_DECLARATIONS = util.render([[
+static const unsigned char titan_coverage_runtime[] = $RUNTIME;
+static const unsigned char titan_coverage_config[] = $CONFIG;
+static void titan_coverage_call(lua_State *L, const char *method) {
+    int top = lua_gettop(L);
+    lua_getfield(L, LUA_REGISTRYINDEX, "titan.coverage.runtime");
+    lua_getfield(L, -1, method);
+    lua_getfield(L, LUA_REGISTRYINDEX, "titan.coverage.config");
+    if (lua_pcall(L, 1, 0, 0) != LUA_OK) fatal(lua_tostring(L, -1));
+    lua_settop(L, top);
+}
+static void titan_coverage_prepare(lua_State *L) {
+    if (luaL_loadbuffer(L, (const char *)titan_coverage_runtime,
+        sizeof(titan_coverage_runtime), "@titan.coverage") != LUA_OK ||
+        lua_pcall(L, 0, 1, 0) != LUA_OK) fatal(lua_tostring(L, -1));
+    lua_setfield(L, LUA_REGISTRYINDEX, "titan.coverage.runtime");
+    if (luaL_loadbuffer(L, (const char *)titan_coverage_config,
+        sizeof(titan_coverage_config), "@titan.coverage.config") != LUA_OK ||
+        lua_pcall(L, 0, 1, 0) != LUA_OK) fatal(lua_tostring(L, -1));
+    lua_setfield(L, LUA_REGISTRYINDEX, "titan.coverage.config");
+    titan_coverage_call(L, "prepare");
+}
+$DUMP
+]], {
+            RUNTIME = assert(staticmetadata.c_initializer(runtime)),
+            CONFIG = assert(staticmetadata.c_initializer(config)),
+            DUMP = platform.windows and util.render([[
+static void titan_coverage_dump(lua_State *L) {
+    /* This image-owned hook is outside the logical module export descriptor. */
+    lua_CFunction dump = titan_cast_func(lua_CFunction,
+        loadsym(L, loadlib(L, "$PROVIDER"), "_titan_coverage_dump"));
+    dump(L);
+}
+]], values) or [[
+extern void __gcov_dump(void);
+static void titan_coverage_dump(lua_State *L) { (void)L; __gcov_dump(); }
+]],
+        })
+        values.COVERAGE_PREPARE = "titan_coverage_prepare(L);"
+        values.COVERAGE_FINISH = [[
+    if (ret == 0) {
+        titan_coverage_dump(L);
+        titan_coverage_call(L, "finish");
+    }
+]]
     end
     return util.render(entrypoint_template, values)
 end
@@ -9515,6 +9597,30 @@ local function compile_windows_program(modname, libnames, link, verbose,
     ok, err = ensure_output_parent(entrypoint_name)
     if not ok then return nil, err end
     local module_names = options.module_names or { modname }
+    if options.coverage_runtime then
+        -- Windows puts instrumented modules in a companion DLL, which owns
+        -- its profile runtime. The uninstrumented launcher calls this hook.
+        local dump_c = entrypoint_name:gsub("[.]c$", "__coverage_dump.c")
+        local dump_o = dump_c:gsub("[.]c$", ".o")
+        ok, err = util.set_file_contents(dump_c, [[
+#include "lua.h"
+extern void __gcov_dump(void);
+__declspec(dllexport) int _titan_coverage_dump(lua_State *L) {
+    (void)L;
+    __gcov_dump();
+    return 0;
+}
+]])
+        if not ok then return nil, err end
+        local dump_args
+        dump_args, err = driver.generated_compile_prefix()
+        if not dump_args then return nil, err end
+        append_argv(dump_args, { "-c", dump_c, "-o", dump_o })
+        local compiled, term, code = run_argv(dump_args, verbose)
+        if not compiled then return nil, term, code end
+        extra_objects = { table.unpack(extra_objects or {}) }
+        extra_objects[#extra_objects + 1] = dump_o
+    end
     local linked, term, code = driver.compile_library_output(paths.provider,
         libnames, link, verbose, extra_objects, static_archives,
         nil, nil, module_names)
@@ -9535,6 +9641,7 @@ local function compile_windows_program(modname, libnames, link, verbose,
         pretty_print = options.pretty_print,
         no_uv_bootstrap = options.no_uv_bootstrap,
         provider = paths.relative_provider,
+        coverage_runtime = options.coverage_runtime,
     }
     local entrypoint_c
     entrypoint_c, err = write_entrypoint(modname, entrypoint_name,

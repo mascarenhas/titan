@@ -111,11 +111,11 @@ describe("module foreign conversion payloads", function()
 
     it("reopens final C definitions after a body-only edit", function()
         header("cached.h", [[
-            typedef struct link link;
-            struct link { link *next; int item; };
+            typedef struct cache_link cache_link;
+            struct cache_link { cache_link *next; int item; };
             #define TITAN_TEXT "a + b"
             enum answer { ANSWER = 42 };
-            int take_link(link *input);
+            int take_link(cache_link *input);
             typedef struct { int values[4]; } shared_anonymous, same_anonymous;
         ]])
         local source = [[
@@ -131,7 +131,7 @@ describe("module foreign conversion payloads", function()
         assert.equal(1, warm.conversion.hits)
         assert.not_equal(first.ast._ffi_namespace._type, restored.ast._ffi_namespace._type)
         assert.equal("Type.CModule", restored.ast._ffi_namespace._type._tag)
-        assert.is_table(restored.ast._ffi_namespace._type.type_members.link)
+        assert.is_table(restored.ast._ffi_namespace._type.type_members.cache_link)
         local aliases = restored.ast._ffi_namespace._type.type_members
         assert.equal(types.resolve_c_typedef(aliases.shared_anonymous),
             types.resolve_c_typedef(aliases.same_anonymous))

@@ -169,7 +169,7 @@ local function ordinary_arguments(jobs)
         jobs = jobs,
         extra_object = {},
         coverage_module = {},
-        coverage_source_map = {},
+        coverage_format = {},
     }
 end
 

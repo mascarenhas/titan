@@ -17,7 +17,7 @@ make_shell_quote_value = '$(subst ','"'"',$(value $(1)))'
 # provider dependencies. Choose it before Make expands the test graph.
 TITAN_TEST_GOALS := test rock-test busted-test stdlib-test stdlib-busted-test \
 	titan-stdlib-test titan-stdlib-test-build titan-stdlib-test-objects titan-stdlib-test-run \
-	titan-native-coverage titan-native-coverage-provider-build titan-native-coverage-build titan-native-coverage-run titan-native-coverage-report
+	titan-native-coverage titan-native-coverage-build titan-native-coverage-run
 TITAN_BUILD_PROFILE ?= $(if $(filter $(TITAN_TEST_GOALS),$(MAKECMDGOALS)),validation,production)
 ifneq ($(TITAN_BUILD_PROFILE),production)
   ifneq ($(TITAN_BUILD_PROFILE),validation)
@@ -1533,128 +1533,39 @@ titan-stdlib-test: titan-stdlib-test-build ## Build and run all native Titan std
 stdlib-test: stdlib-busted-test ## Run all stdlib/runtime tests without coverage
 	$(MAKE) titan-stdlib-test
 
-# Coverage builds an ordinary shared standard provider, then an uninstrumented
-# native consumer. Children and Lua hosts select that same provider, so their
-# public standard-library behavior contributes to the same run-owned counters.
-TITAN_COVERAGE_BUILD_DIR ?= .titan-coverage/build
-TITAN_COVERAGE_RUN_DIR ?= .titan-coverage/run
-TITAN_COVERAGE_REPORT_DIR ?= .titan-coverage/report
-TITAN_COVERAGE_PYTHON ?= python3
+# Coverage is the same native suite with source dependencies selected from this
+# checkout. C and objects stay in source-adjacent .coverage directories.
+# Linux exports the executable's Lua API for the suite's ordinary Lua C helpers.
+TITAN_COVERAGE_BUILD_DIR ?= .titan-coverage
+TITAN_COVERAGE_REPORT_DIR ?= $(TITAN_COVERAGE_BUILD_DIR)/report
 TITAN_COVERAGE_GCOV ?= gcov
 TITAN_COVERAGE_GCOVR ?= gcovr
-TITAN_COVERAGE_MODULES := $(filter-out titan.test,$(STDLIB_ROOTS))
-TITAN_COVERAGE_FIXTURE_DIR = $(abspath $(TITAN_COVERAGE_BUILD_DIR))/fixtures
-TITAN_COVERAGE_FIXTURE_OUTPUTS = $(patsubst $(TITAN_TEST_BUILD_DIR)/%,$(TITAN_COVERAGE_FIXTURE_DIR)/%,$(TITAN_TEST_FIXTURE_OUTPUTS))
-# The SQLite worker fixture belongs to its archive-linked child, as in the
-# ordinary suite; the shared provider intentionally hides native SQLite symbols.
-TITAN_COVERAGE_NATIVE_OBJECTS = $(patsubst $(TITAN_TEST_BUILD_DIR)/%,$(TITAN_COVERAGE_FIXTURE_DIR)/%,$(filter-out $(TITAN_TEST_BUILD_DIR)/sqlite3_worker_fixture.o,$(filter %.o,$(TITAN_TEST_NATIVE_OBJECTS))))
-TITAN_COVERAGE_CPPFLAGS = $(strip $(TITAN_TEST_CPPFLAGS) $(STDLIB_LPEGLABEL_CPPFLAGS) $(STDLIB_HTTP_CPPFLAGS) $(STDLIB_SQLITE3_CPPFLAGS) $(STDLIB_OPENSSL_CPPFLAGS) $(STDLIB_UV_CPPFLAGS) -I$(TITAN_COVERAGE_FIXTURE_DIR))
-TITAN_COVERAGE_OBJECTS := $(STDLIB_EXTRA_OBJECTS)
-TITAN_COVERAGE_TEST_SOURCE_ROOT ?= $(CURDIR)/spec/stdlib/titan
-TITAN_COVERAGE_TEST_INPUTS = $(sort $(foreach module,$(TITAN_TEST_MODULES),$(TITAN_TEST_SOURCES_$(module)) $(filter spec/stdlib/titan/%,$(TITAN_TEST_C_INPUTS_$(module)))))
-TITAN_COVERAGE_CONSUMER_DIR = $(abspath $(TITAN_COVERAGE_BUILD_DIR))/consumer
-TITAN_COVERAGE_EXECUTABLE = $(TITAN_COVERAGE_CONSUMER_DIR)/$(TITAN_STDLIB_TEST_PROGRAM_OUTPUT)
-.PHONY: titan-native-coverage-provider-build titan-native-coverage-build titan-native-coverage-run titan-native-coverage-report titan-native-coverage
-titan-native-coverage-provider-build: $(STDLIB_NATIVE_PREREQS)
-	+$(if $(strip $(TITAN_COVERAGE_FIXTURE_OUTPUTS)),$(MAKE) $(TITAN_COVERAGE_FIXTURE_OUTPUTS) TITAN_TEST_BUILD_DIR=$(call make_shell_quote,$(TITAN_COVERAGE_FIXTURE_DIR)) TITAN_TEST_MODULES=,@:)
-	@set -e; unset LUA_PATH LUA_CPATH LUA_PATH_5_5 LUA_CPATH_5_5; \
-	rm -rf $(call make_shell_quote,$(abspath $(TITAN_COVERAGE_BUILD_DIR))/preparation-counters); \
-	GCOV_PREFIX=$(call make_shell_quote,$(abspath $(TITAN_COVERAGE_BUILD_DIR))/preparation-counters) GCOV_PREFIX_STRIP=0 \
+TITAN_COVERAGE_FORMATS ?=
+TITAN_COVERAGE_CPPFLAGS = $(strip $(TITAN_TEST_CPPFLAGS) $(STDLIB_LPEGLABEL_CPPFLAGS) $(STDLIB_HTTP_CPPFLAGS) $(STDLIB_SQLITE3_CPPFLAGS) $(STDLIB_OPENSSL_CPPFLAGS) $(STDLIB_UV_CPPFLAGS) -I$(abspath $(TITAN_TEST_BUILD_DIR)))
+TITAN_COVERAGE_EXECUTABLE = $(abspath $(TITAN_COVERAGE_BUILD_DIR))/$(TITAN_STDLIB_TEST_PROGRAM_OUTPUT)
+.PHONY: titan-native-coverage-build titan-native-coverage-run titan-native-coverage
+titan-native-coverage-build: $(STDLIB_NATIVE_PREREQS) $(TITAN_TEST_FIXTURE_OUTPUTS) ## Compile source-linked native tests with line coverage
+	@mkdir -p $(call make_shell_quote,$(TITAN_COVERAGE_BUILD_DIR))
+	@cd $(call make_shell_quote,$(TITAN_COVERAGE_BUILD_DIR)); \
 	CC=$(call make_shell_quote,$(CC)) TITAN_BUILD_PROFILE=validation \
 	TITAN_EXTRA_CPPFLAGS=$(call make_shell_quote,$(TITAN_COVERAGE_CPPFLAGS)) \
 	TITAN_EXTRA_CFLAGS='-O0 -fno-lto' \
-	TITAN_EXTRA_LDFLAGS=$(call make_shell_quote,$(strip -O0 -fno-lto $(STDLIB_UV_LDFLAGS) $(STDLIB_OPENSSL_LDFLAGS))) \
-	$(TEST_TITANC) --source-first \
-	  --coverage $(call make_shell_quote,$(abspath $(TITAN_COVERAGE_BUILD_DIR))) \
-	  --coverage-root $(call make_shell_quote,$(CURDIR)) \
+	TITAN_EXTRA_LDFLAGS=$(call make_shell_quote,$(strip -O0 -fno-lto $(if $(filter Linux,$(HOST_OS)),-rdynamic) $(STDLIB_UV_LDFLAGS) $(STDLIB_OPENSSL_LDFLAGS))) \
+	$(TEST_TITANC) --test --no-uv-bootstrap --coverage \
+	  --coverage-module 'titan.*' --coverage-root $(call make_shell_quote,$(CURDIR)) \
 	  --coverage-gcov $(call make_shell_quote,$(TITAN_COVERAGE_GCOV)) \
-	  $(foreach module,$(TITAN_COVERAGE_MODULES),--coverage-module $(module)) \
-	  --tree $(call make_shell_quote,$(CURDIR)) \
-	  $(STDLIB_ROOTS) -X $(TITAN_COVERAGE_OBJECTS)
-titan-native-coverage-build: titan-native-coverage-provider-build ## Build and seal GCC/gcov coverage for all production stdlib modules
-	@set -e; \
-	rm -rf $(call make_shell_quote,$(TITAN_COVERAGE_CONSUMER_DIR)); \
-	mkdir -p $(call make_shell_quote,$(TITAN_COVERAGE_CONSUMER_DIR)/source); \
-	for input in $(foreach input,$(TITAN_COVERAGE_TEST_INPUTS),$(call make_shell_quote,$(abspath $(input)))); do \
-	  relative=$${input#$(call make_shell_quote,$(abspath $(TITAN_COVERAGE_TEST_SOURCE_ROOT))/)}; \
-	  test "$$relative" != "$$input"; \
-	  output=$(call make_shell_quote,$(TITAN_COVERAGE_CONSUMER_DIR)/source)/$$relative; \
-	  mkdir -p "$$(dirname "$$output")"; cp "$$input" "$$output"; \
-	done; \
-	cd $(call make_shell_quote,$(TITAN_COVERAGE_CONSUMER_DIR)); \
-	unset LUA_PATH LUA_CPATH LUA_PATH_5_5 LUA_CPATH_5_5; \
-	GCOV_PREFIX=$(call make_shell_quote,$(abspath $(TITAN_COVERAGE_BUILD_DIR))/preparation-counters) GCOV_PREFIX_STRIP=0 \
-	CC=$(call make_shell_quote,$(CC)) TITAN_BUILD_PROFILE=validation \
-	TITAN_PATH$(TITAN_LIBRARY_VERSION_SUFFIX)=$(call make_shell_quote,$(abspath $(TITAN_COVERAGE_BUILD_DIR))) \
-	TITAN_EXTRA_CPPFLAGS=$(call make_shell_quote,$(TITAN_COVERAGE_CPPFLAGS)) \
-	TITAN_EXTRA_CFLAGS='-O0 -fno-lto' \
-	TITAN_EXTRA_LDFLAGS=$(call make_shell_quote,$(strip -O0 -fno-lto --coverage $(STDLIB_UV_LDFLAGS) $(STDLIB_OPENSSL_LDFLAGS))) \
-	$(TEST_TITANC) --test --no-uv-bootstrap \
-	  --tree $(call make_shell_quote,$(TITAN_COVERAGE_CONSUMER_DIR)/source) \
-	  $(TITAN_STDLIB_TEST_ROOTS) -X $(foreach object,$(TITAN_COVERAGE_NATIVE_OBJECTS),$(call make_shell_quote,$(abspath $(object))))
-	@set -e; \
-	set -- --unmeasured-input $(call make_shell_quote,$(TITAN_COVERAGE_EXECUTABLE)); \
-	for input in Makefile $(call make_shell_quote,$(TITAN_TEST_MODULE_MANIFEST)) spec/support/run_with_timeout.sh spec/support/check_stdlib_test_output.lua titan/test.titan \
-	  $(call make_shell_quote,$(TITAN_TEST_SUPPORT_SOURCE)) \
-	  $(foreach input,$(TITAN_COVERAGE_TEST_INPUTS) $(TITAN_COVERAGE_FIXTURE_OUTPUTS),$(call make_shell_quote,$(input))); do \
-	  test ! -f "$$input" || set -- "$$@" --unmeasured-input "$$input"; \
-	done; \
-	find $(call make_shell_quote,$(TITAN_COVERAGE_CONSUMER_DIR)/source) -type f \( -name '*.titan' -o -name '*.h' \) \
-	  ! -name '*.ffi.h' ! -name '*.titan.h' > $(call make_shell_quote,$(TITAN_COVERAGE_BUILD_DIR)/consumer-inputs.txt); \
-	find $(call make_shell_quote,$(abspath $(TITAN_COVERAGE_BUILD_DIR))/shims) -type f -name '*.lua' \
-	  >> $(call make_shell_quote,$(TITAN_COVERAGE_BUILD_DIR)/consumer-inputs.txt); \
-	if test -d spec/fixtures; then \
-	  find spec/fixtures -type f \( -name '*.titan' -o -name '*.lua' -o -name '*.pem' -o -name '*.h' -o -name '*.sh' -o -name '*.txt' -o -name '*.json' \) \
-	    ! -name '*.ffi.h' ! -name '*.titan.h' >> $(call make_shell_quote,$(TITAN_COVERAGE_BUILD_DIR)/consumer-inputs.txt); \
-	fi; \
-	if test -d spec/fixtures/stdlib/native; then \
-	  find spec/fixtures/stdlib/native -type f -name '*.c' >> $(call make_shell_quote,$(TITAN_COVERAGE_BUILD_DIR)/consumer-inputs.txt); \
-	fi; \
-	while IFS= read -r input; do \
-	  set -- "$$@" --unmeasured-input "$$input"; \
-	done < $(call make_shell_quote,$(TITAN_COVERAGE_BUILD_DIR)/consumer-inputs.txt); \
-	$(TITAN_COVERAGE_PYTHON) titan-coverage seal \
-	  --manifest $(call make_shell_quote,$(TITAN_COVERAGE_BUILD_DIR)/build.json) \
-	  --cc $(call make_shell_quote,$(CC)) --gcov $(call make_shell_quote,$(TITAN_COVERAGE_GCOV)) "$$@"
+	  --coverage-output $(call make_shell_quote,$(abspath $(TITAN_COVERAGE_REPORT_DIR))) \
+	  --coverage-gcovr $(call make_shell_quote,$(TITAN_COVERAGE_GCOVR)) \
+	  $(foreach format,$(TITAN_COVERAGE_FORMATS),--coverage-format $(format)) \
+	  --tree $(call make_shell_quote,$(abspath spec/stdlib/titan);$(CURDIR)) \
+	  $(TITAN_STDLIB_TEST_ROOTS) -X $(foreach object,$(STDLIB_EXTRA_OBJECTS),$(call make_shell_quote,$(abspath $(object)))) \
+	    $(foreach object,$(filter-out %/sqlite3_worker_fixture.o,$(TITAN_TEST_NATIVE_OBJECTS)),$(call make_shell_quote,$(abspath $(object))))
 
-titan-native-coverage-run: ## Run the coverage native aggregate with fresh counters and the normal deadline
-	@printf '%s\n' $(TITAN_STDLIB_TEST_ROOTS) > $(call make_shell_quote,$(TITAN_COVERAGE_BUILD_DIR)/roots.txt)
-	@status=0; \
-	$(TITAN_TEST_COMPILER_ENV) \
-	TITAN_EXTRA_CPPFLAGS=$(call make_shell_quote,$(strip $(TITAN_TEST_CPPFLAGS) $(TITAN_TEST_FEATURE_CPPFLAGS) -I$(TITAN_COVERAGE_FIXTURE_DIR) -I.)) \
-	TITAN_EXTRA_LDFLAGS=$(call make_shell_quote,$(strip $(TITAN_TEST_LDFLAGS) --coverage)) \
-	TITAN_PATH$(TITAN_LIBRARY_VERSION_SUFFIX)=$(call make_shell_quote,$(abspath $(TITAN_COVERAGE_BUILD_DIR))) \
-	TITAN_TEST_PROVIDER_DIR=$(call make_shell_quote,$(abspath $(TITAN_COVERAGE_BUILD_DIR))) \
-	LUA_PATH_5_5=$(call make_shell_quote,$(abspath $(TITAN_COVERAGE_BUILD_DIR))/shims/?.lua)";$$( $(TEST_LUA) -E -e 'io.write(package.path)' )" \
-	LUA_CPATH_5_5=$(call make_shell_quote,$(abspath $(TITAN_COVERAGE_BUILD_DIR))/?.so)";$$( $(TEST_LUA) -E -e 'io.write(package.cpath)' )" \
-	TITAN_TEST_BUILD_DIR=$(call make_shell_quote,$(TITAN_COVERAGE_FIXTURE_DIR)) \
-	TITAN_TEST_SOURCE_ROOT=$(call make_shell_quote,$(CURDIR)) \
-	TITAN_TEST_SDK_ROOT=$(call make_shell_quote,$(TITAN_TEST_INSTALL_ROOT)) \
-	TITAN_PROCESS_CHILD=$(call make_shell_quote,$(TITAN_COVERAGE_FIXTURE_DIR)/os_process_host_child) \
-	bash -o pipefail -c 'log=$$1; shift; "$$@" 2>&1 | tee "$$log"' -- \
-	$(call make_shell_quote,$(TITAN_COVERAGE_BUILD_DIR)/stdout.log) \
-	$(TITAN_COVERAGE_PYTHON) titan-coverage run \
-	  --manifest $(call make_shell_quote,$(TITAN_COVERAGE_BUILD_DIR)/build.json) \
-	  --run $(call make_shell_quote,$(TITAN_COVERAGE_RUN_DIR)) --timeout $(TITAN_TEST_TIMEOUT) -- \
-	  $(call make_shell_quote,$(TITAN_COVERAGE_EXECUTABLE)) \
-	  $(if $(strip $(TITAN_FILTER)),--filter=$(call make_shell_quote_value,TITAN_FILTER)) || status=$$?; \
-	audit_status=0; $(TEST_LUA) -E spec/support/check_stdlib_test_output.lua \
-	  $(call make_shell_quote,$(TITAN_COVERAGE_BUILD_DIR)/stdout.log) \
-	  $(call make_shell_quote,$(TITAN_COVERAGE_BUILD_DIR)/roots.txt) \
-	  $(call make_shell_quote_value,TITAN_FILTER) || audit_status=$$?; \
-	test "$$status" = 0 || exit "$$status"; exit "$$audit_status"
+titan-native-coverage-run: ## Run native coverage tests; the executable resets and reports its own counters
+	+$(MAKE) titan-stdlib-test-run TITAN_TEST_EXECUTABLE=$(call make_shell_quote,$(TITAN_COVERAGE_EXECUTABLE))
 
-titan-native-coverage-report: ## Render separate Titan line LCOV/HTML/Cobertura reports
-	$(TITAN_COVERAGE_PYTHON) titan-coverage report \
-	  --manifest $(call make_shell_quote,$(TITAN_COVERAGE_BUILD_DIR)/build.json) \
-	  --run $(call make_shell_quote,$(TITAN_COVERAGE_RUN_DIR)) \
-	  --output $(call make_shell_quote,$(TITAN_COVERAGE_REPORT_DIR)) \
-	  --gcovr $(call make_shell_quote,$(TITAN_COVERAGE_GCOVR))
-
-titan-native-coverage: titan-native-coverage-build ## Build, run and report native stdlib Titan line coverage
-	+@run_status=0; $(MAKE) titan-native-coverage-run || run_status=$$?; \
-	report_status=0; $(MAKE) titan-native-coverage-report || report_status=$$?; \
-	test "$$run_status" = 0 || exit "$$run_status"; exit "$$report_status"
+titan-native-coverage: titan-native-coverage-build ## Compile and directly run native coverage tests
+	+$(MAKE) titan-native-coverage-run
 
 # A fresh implicit validation prefix needs a complete current installation.
 # Re-enter after preparation so installed-SDK paths are expanded in a fresh

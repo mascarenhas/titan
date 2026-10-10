@@ -99,7 +99,7 @@ use the chapters below for the normative language reference.
 | [Iteration standard library](standard-library-iteration.md) | Lua-compatible Map traversal, corrected generic-for iterator tuples, and Array iteration that preserves inner nil elements. |
 | [Garbage-collection standard library](standard-library-gc.md) | Weak Maps and ephemerons, collector actions and mode switches, byte counts, and Lua 5.5 tuning parameters. |
 | [Testing Titan code](standard-library-test.md) | The `titan.test` API, native `titanc --test` discovery, subtests and cleanup, filtering, failure output, and process statuses. |
-| [Native source coverage](native-coverage.md) | Opt-in GCC/gcov executable-line coverage, isolated production inventories, fresh run counters, and LCOV/HTML/Cobertura reports against tracked Titan sources. |
+| [Native source coverage](native-coverage.md) | Compile-and-run executable-line coverage, automatic source selection, separate coverage objects, and optional LCOV/HTML/Cobertura reports. |
 | [Reflection standard library](standard-library-reflect.md) | Runtime inspection of 19 value kinds, public nominal descriptors, explicit type resolution, erased generic schemas, callable metadata, and checked dynamic field access. |
 | [JSON standard library](standard-library-json.md) | JSON encoding and typed reflection-directed decoding, record and union mappings, optional null preservation, Unicode/numbers, structured diagnostics, and resource limits. |
 | [SQLite standard library](standard-library-sqlite3.md) | Embedded SQLite with asynchronous native work, prepared statements, owned rows and cursors, reflection bindings and mapping, explicit transactions, and cancellation-safe cleanup. |

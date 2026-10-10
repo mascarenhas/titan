@@ -104,8 +104,8 @@ function coder._assert_erased_boundary(ast)
 end
 
 -- Source-defined foreign helpers normally live inline in source headers.
--- Coverage must execute their one instrumented producer body, even when a
--- test/support consumer is excluded, and retain uncalled bodies in notes.
+-- Coverage-tree modules use one producer body even when unselected, keeping
+-- incremental callers stable as the instrumentation selection changes.
 -- Call this before native-header planning; generate repeats it for direct
 -- callers. No ABI, signature or normal-build inlining policy changes.
 function coder.prepare_coverage(ast, enabled)
@@ -131,7 +131,8 @@ function coder.generate(modname, ast, static_deps, abi, emit_line_directives, op
         and options.coverage_backend == "llvm-gcov"
     assert(not coder._coverage_source_regions or coder._emit_line_directives,
         "Titan-source coverage requires line directives")
-    coder.prepare_coverage(ast, coder._coverage_source_regions)
+    coder.prepare_coverage(ast, coder._coverage_source_regions or
+        options and options.coverage_backend ~= nil)
     assert(type(abi) == "string" and abi ~= "",
         "coder.generate requires the compiled-module ABI")
     local staticmetadata = require "titan-compiler.staticmetadata"

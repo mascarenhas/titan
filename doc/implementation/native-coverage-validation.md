@@ -1,5 +1,92 @@
 # Native line coverage validation
 
+Issue #216 replaces the issue #210/PR #214 seal/run workflow with direct
+test-executable reporting. See the current
+[native coverage manual](../language/native-coverage.md) for commands.
+
+## Issue #216 simplification validation (2026-10-09)
+
+The tested implementation is based on commit
+`37cf8db98a05d289abb1aa3a4568eb52a3df73da` on
+`codex/issue-216-coverage-simplification`. The final authored-source archive has
+SHA256 `83bd620253c0cae4cf377952de2ec723e1d8d53065e154903ebf33d39824f3e4`;
+the skills submodule is `69f596353059a41c6402decc48a58402b99c434d`.
+Each platform used its own source/output tree and a prepared validation SDK.
+Final source and installed compiler updates were applied before the affected
+gates; the archive includes the Linux-only executable export flag and the final
+Windows path fixture correction. This validation record was added afterward.
+
+The ordinary native harness and its source-linked coverage variant both pass
+on all three platforms. Rich aggregate reports request HTML, LCOV and Cobertura
+with gcovr 8.4; basic reporting also passes on Windows with an explicitly
+unavailable gcovr command and no optional format flags.
+
+| Platform and coverage tools | Ordinary native gate | Source-linked coverage gate | Covered / executable lines |
+| --- | --- | --- | --- |
+| Linux x86_64, GCC/gcov 16.2.1 | 1,293 passed; 1 platform skip | 1,293 passed; 1 platform skip | 15,681 / 17,381 (90.2%) |
+| Intel macOS 15.7.7 (24G720), GCC/gcov 14.4.0 | 1,290 passed; 4 platform skips | 1,282 passed; 12 skips | 15,670 / 17,381 (90.2%) |
+| Windows 11 Pro 26H2 (26300), AMD64, CLANG64/UCRT clang/llvm-cov 22.1.8 | 1,255 passed; 27 skips | 1,255 passed; 27 skips | 15,589 / 17,381 (89.7%) |
+
+Every native gate audits all 28 owners and reports zero failures. Windows
+classifies its 27 skips as 17 platform and 10 capability skips, and verifies
+owned NTFS scratch cleanup and process-tree reaping. The covered macOS run
+classifies four platform and eight capability skips: its separate allocator
+child fixtures use the post-smoke system SDK with OpenSSL 3.6.5, whose allocation
+locations differ from the supported fixture versions. Those eight cases pass
+in the ordinary bundled-OpenSSL gate. The macOS VM is x86_64;
+these results do not claim Apple Silicon runtime validation.
+
+Repository commands use the prepared SDK selected by `PREFIX` and the
+validation profile. The coverage invocations are:
+
+```sh
+# Linux; CC and gcov select the matching installed GCC toolchain.
+make titan-native-coverage CC=gcc TITAN_COVERAGE_GCOV=gcov \
+  TITAN_COVERAGE_FORMATS='html lcov cobertura'
+# macOS, with GNU Make 4.4.1 first on PATH.
+make titan-native-coverage CC=/usr/local/bin/gcc-14 \
+  TITAN_COVERAGE_GCOV=/usr/local/bin/gcov-14 \
+  TITAN_COVERAGE_FORMATS='html lcov cobertura'
+# Native Windows MSYS2 CLANG64; the build directory is local NTFS.
+mingw32-make -f Makefile.win titan-native-coverage \
+  TITAN_COVERAGE_BUILD_DIR="$work/coverage" \
+  TITAN_COVERAGE_FORMATS='html lcov cobertura' \
+  TITAN_COVERAGE_GCOVR="$gcovr_command"
+```
+
+Linux completes the retained runtime/packaging suite (133 passes), all 153
+compiler spec files, and a 270-case rerun of the four files corrected during
+validation. Both real native coverage backends pass their 10-case regression
+suite. The full source-linked aggregate also passes an incremental relink that
+reconstructs the complete reused-object inventory. Linux's coverage executable
+exports the Lua API for helper DSOs with its ordinary Linux linker flag.
+
+macOS completes the six runtime/packaging files (129 passes), the ordinary
+aggregate, all 153 compiler files, and both bundled/system OpenSSL production
+smokes. The complete compiler run exposed five stale mocked-option fixtures;
+the final four-file rerun passes all 320 cases. Final coverage contracts pass
+58 cases. The optional default Apple `gcc` alias is correctly rejected as an
+unsupported GCC backend, leaving ten optional cases pending; explicitly
+selected GCC 14 runs those real coverage cases. System OpenSSL is 3.6.5.
+
+Windows completes the ordinary aggregate and all 58 focused coverage contracts,
+including direct EXE/companion-DLL dumping, source selection, incremental reuse,
+authored foreign decisions after pretty printing, and all rich formats. The
+staged-header formatting regression also passes separately. A one-test basic
+fixture runs directly and writes `coverage.gcov` without Python or gcovr.
+
+The Titan summaries and rich reports expose only executable-line metrics. The
+combined annotated backend output and all three optional report files are
+nonempty; LCOV has no function
+or branch records or absent-checksum placeholders, and Cobertura has no method
+elements. There are 69 source contributors with executable lines; the macOS and
+Windows traces also retain the empty `titan/uv/callbacks.titan` declaration
+contributor. Counters from different platforms or diagnostic runs are not
+combined. Local validation
+does not upload reports or dispatch hosted macOS CI.
+
+## Historical issue #210/PR #214 record
+
 This records the initial Titan-repository implementation of issue #210. The
 metric is executable **line coverage**. Generated C branches and functions are
 retained in raw gcov evidence but are absent from the public Titan metrics.

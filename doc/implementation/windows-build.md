@@ -476,21 +476,21 @@ test objects retain validation flags when consuming a production SDK.
 
 ## Native line coverage
 
-The prepared SDK also supports the explicit experimental
-`titanc --coverage-backend llvm-gcov` workflow with matching Clang/LLVM 22.1.8,
-native Windows x64 Python, and gcovr 8.4. The default GCC backend still rejects
-Windows. `make -f Makefile.win titan-native-coverage-build`, `-run`, and `-report`
-own a private local NTFS SDK copy, all 22 production roots, the ordinary 28-root
-native consumer, and fresh run counters. Local reports include HTML, LCOV and
-Cobertura; uploads remain a separate CI concern.
+The prepared SDK supports `titanc --test --coverage` with matching Clang/LLVM
+and its gcov-compatible reader. Native Windows CLANG64/UCRT selects
+`llvm-gcov` by default; the validated toolchain is LLVM 22.1.8. A direct run of
+the generated EXE resets counters, runs tests, dumps its provider DLL's counters
+and writes a basic gcov report. Python and gcovr are needed only for optional
+HTML, LCOV or Cobertura formats.
 
-The build-owned native coverage supervisor contains the process tree in a Job
-Object and confirms it is empty before collecting counters. It records raw
-leader status separately from timeout, interruption or unjoined-child failure.
-It does not replace the ordinary Windows behavior-test supervisor or the
-production `titan.os` process contract. See
-[native coverage](../language/native-coverage.md#experimental-windows-coverage)
-for exact tools, directory requirements and commands.
+`make -f Makefile.win titan-native-coverage` uses the ordinary private local
+NTFS test workspace and source-links production imports into its native test
+provider. Separate `titan-native-coverage-build` and `-run` targets allow reruns
+without recompilation; the run also reports. `TITAN_COVERAGE_FORMATS` requests
+optional richer formats. The ordinary native supervisor and test runner retain
+their existing test/child cleanup responsibilities. See
+[native coverage](../language/native-coverage.md) for source selection, tools,
+output paths and concurrency limits.
 
 ## Experimental boundaries
 

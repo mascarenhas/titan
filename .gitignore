@@ -103,6 +103,7 @@
 # Unified native standard-library test build
 /.titan-tests/
 /.titan-coverage/
+.coverage/
 # Native test C stays beside its Titan source for incremental reuse. Authored
 # C fixtures live under spec/fixtures/stdlib/native instead.
 /spec/stdlib/titan/**/*.c
