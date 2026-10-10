@@ -103,6 +103,7 @@ build = {
       ["titan-compiler.documentation"] = "titan-compiler/documentation.lua",
       ["titan-compiler.completion"] = "titan-compiler/completion.lua",
       ["titan-compiler.coverage"] = "titan-compiler/coverage.lua",
+      ["titan-compiler.coverage_runtime"] = "titan-compiler/coverage_runtime.lua",
       ["titan-compiler.coverage_lines"] = "titan-compiler/coverage_lines.lua",
       ["titan-compiler.checker.completion"] = "titan-compiler/checker/completion.lua",
       ["titan-compiler.projectcache"] = "titan-compiler/projectcache.lua",
@@ -178,8 +179,7 @@ build = {
       ["c-parser.cdefines"] = "c-parser/cdefines.lua"
       },
       bin = {
-         "titanc",
-         "titan-coverage"
+         "titanc"
       },
       conf = {
          "THIRD_PARTY_NOTICES.md"

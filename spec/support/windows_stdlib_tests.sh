@@ -4,10 +4,9 @@ set -euo pipefail
 source "$(dirname "$0")/../../scripts/windows_build_profile.sh"
 titan_windows_profile validation
 if [[ ${MSYSTEM:-} != CLANG64 || $# -lt 2 ||
-      ( $1 != build && $1 != run && $1 != coverage-run ) ||
-      ( $1 == build && $# != 3 ) || ( $1 == run && $# != 2 ) ||
-      ( $1 == coverage-run && $# != 6 ) ]]; then
-  echo 'usage (native CLANG64): windows_stdlib_tests.sh build WORKSPACE VALIDATED_SDK_PREFIX | run WORKSPACE | coverage-run WORKSPACE MANIFEST RUN_DIRECTORY PYTHON_COMMAND COVERAGE_HOST' >&2
+      ( $1 != build && $1 != run ) ||
+      ( $1 == build && $# != 3 ) || ( $1 == run && $# != 2 ) ]]; then
+  echo 'usage (native CLANG64): windows_stdlib_tests.sh build WORKSPACE VALIDATED_SDK_PREFIX | run WORKSPACE' >&2
   exit 2
 fi
 mode=$1
@@ -161,10 +160,40 @@ if [[ $mode == build ]]; then
     export TITAN_PROBE_CACHE_DISABLE=1 TITAN_PATH_0_6="$winprefix/lib/titan/0.6"
     unset LUA_PATH LUA_CPATH LUA_PATH_5_5 LUA_CPATH_5_5 LUA_INIT LUA_INIT_5_5 ROCKS_TREE
     export PATH="$work/sdk/bin:$PATH"
+    test_tree=$(cygpath -m "$work/source")
+    coverage_args=()
+    payload=("$winnative/async_foreign_work.o" "$winnative/fs_fixture.o" "$winnative/uv_stdio_probe.o")
+    if [[ ${TITAN_TEST_COVERAGE:-0} == 1 ]]; then
+      # Use the same source graph and test runner. Only production source
+      # objects below .coverage carry instrumentation; child fixture builds
+      # retain the ordinary installed provider.
+      ( unset MSYS2_ARG_CONV_EXCL
+        bash "$source_root/scripts/build_windows_runtime.sh" "$work/native-payload" "$work/sdk" )
+      winsource=$(cygpath -m "$source_root")
+      winpayload=$(cygpath -m "$work/native-payload/runtime")
+      test_tree+=";$winsource"
+      coverage_args=(--coverage --coverage-module 'titan.*'
+        --coverage-backend llvm-gcov
+        --coverage-gcov "${TITAN_COVERAGE_GCOV:-llvm-cov.exe gcov}"
+        --coverage-root "$winsource"
+        --coverage-output "$(cygpath -m "${TITAN_COVERAGE_REPORT_DIR:-$work/report}")")
+      for format in ${TITAN_COVERAGE_FORMATS:-}; do
+        coverage_args+=(--coverage-format "$format")
+      done
+      if [[ -n ${TITAN_COVERAGE_GCOVR:-} ]]; then
+        coverage_args+=(--coverage-gcovr "$TITAN_COVERAGE_GCOVR")
+      fi
+      payload+=("$winpayload/ltitanlib.o" "$winpayload/libtitan-lpeglabel.a")
+      export TITAN_EXTRA_CPPFLAGS="$TITAN_EXTRA_CPPFLAGS -I\"$winsource/vendor/lpeglabel\""
+      for library in libuv libllhttp libssl libcrypto; do
+        TITAN_EXTRA_LDFLAGS+=" \"$winprefix/lib/$library.dll.a\""
+      done
+      export TITAN_EXTRA_LDFLAGS="$TITAN_EXTRA_LDFLAGS -lws2_32"
+    fi
     cd "$work/sdk"
     "$work/sdk/bin/lua.exe" "$winprefix/lib/luarocks/rocks-5.5/titan/0.6.0-1/bin/titanc" --test --no-uv-bootstrap -j 1 \
-      --launcher-name titan-stdlib-tests --tree "$(cygpath -m "$work/source")" \
-      "${roots[@]}" -X "$winnative/async_foreign_work.o" "$winnative/fs_fixture.o" "$winnative/uv_stdio_probe.o"
+      --launcher-name titan-stdlib-tests --tree "$test_tree" "${coverage_args[@]}" \
+      "${roots[@]}" -X "${payload[@]}"
   ) 2>&1 | tee "$work/build.log"
   [[ -f $work/sdk/bin/titan-stdlib-tests.exe ]]
   printf '%s\n' "Windows x64 CLANG64/UCRT; shared native inventory; local NTFS; profile=$TITAN_BUILD_PROFILE" > "$work/build.complete"
@@ -202,51 +231,7 @@ export TITAN_TEST_TIMEOUT=${TITAN_TEST_TIMEOUT:-1800} TITAN_FILTER=${TITAN_FILTE
 }
 printf 'Windows x64 CLANG64/UCRT native suite; local NTFS; roots:\n'
 cat "$work/roots.txt"
-if [[ $mode == coverage-run ]]; then
-  # Invoke the aggregate directly. The ordinary test supervisor would retire
-  # unjoined children itself and hide that failure from coverage ownership.
-  # Resolve caller-relative paths before entering the test working directory.
-  coverage_manifest=$(cygpath -au "$3")
-  coverage_run=$(cygpath -au "$4")
-  coverage_python=$5
-  coverage_host=$(cygpath -au "$6")
-  [[ ! -e $coverage_run && -f $coverage_manifest && -f $coverage_host ]] || {
-    echo 'Coverage requires a sealed manifest, installed host and fresh run directory' >&2
-    exit 1
-  }
-  perl -MText::ParseWords=shellwords -e '
-    my @a=shellwords($ARGV[0]); die "Invalid native Python command\n" unless @a;
-    print "$_\0" for @a' "$coverage_python" > "$work/coverage-python.argv"
-  mapfile -d '' -t coverage_python_argv < "$work/coverage-python.argv"
-  coverage_log=$(mktemp "$work/.coverage-output.XXXXXX")
-  coverage_test_arguments=()
-  if [[ -n $TITAN_FILTER ]]; then coverage_test_arguments+=("--filter=$TITAN_FILTER"); fi
-  trap 'rm -f "$coverage_log"' EXIT
-  set +e
-  (
-    cd "$work/cwd"
-    "${coverage_python_argv[@]}" "$(cygpath -m "$coverage_host")" run \
-      --manifest "$(cygpath -m "$coverage_manifest")" \
-      --run "$(cygpath -m "$coverage_run")" --timeout "$TITAN_TEST_TIMEOUT" \
-      -- "$(cygpath -m "$work/sdk/bin/titan-stdlib-tests.exe")" "${coverage_test_arguments[@]}"
-  ) 2>&1 | tee "$coverage_log"
-  coverage_status=$?
-  "$work/sdk/bin/lua.exe" -E "$(cygpath -m "$work/check_stdlib_test_output.lua")" \
-    "$(cygpath -m "$coverage_log")" "$(cygpath -m "$work/roots.txt")" \
-    "$TITAN_FILTER"
-  audit_status=$?
-  set -e
-  if [[ -n $(find "$work/scratch" -mindepth 1 -print -quit) ]]; then
-    echo 'Native tests left files in their owned scratch directory' >&2
-    audit_status=1
-  fi
-  if [[ -d $coverage_run ]]; then
-    cp "$coverage_log" "$coverage_run/output.log"
-    printf '%s\n' "$audit_status" > "$coverage_run/native-audit.exit"
-  fi
-  if [[ $coverage_status != 0 ]]; then exit "$coverage_status"; fi
-  exit "$audit_status"
-fi
+
 set +e
 # Inline PowerShell owns the supervisor handle and drains both output pipes.
 # The native supervisor atomically assigns the suite to its private Job Object;

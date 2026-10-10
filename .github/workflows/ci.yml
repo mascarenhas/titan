@@ -510,19 +510,16 @@ jobs:
         run: |
           export TITAN_COVERAGE_TEST_GCOVR="$RUNNER_TEMP/titan-coverage-tools/bin/gcovr"
           clang-format --version
-          python3 spec/coverage_host_test.py
           TITAN_PROBE_CACHE_DISABLE=1 .lua/bin/busted -v \
             spec/coverage_lines_spec.lua spec/coder/coverage_attribution_spec.lua \
-            spec/coder/native_coverage_spec.lua spec/coder/coverage_dependency_spec.lua
+            spec/coder/native_coverage_spec.lua spec/coverage_runtime_spec.lua
       - name: Build complete production stdlib inventory
-        run: make titan-native-coverage-build TITAN_COVERAGE_GCOV=gcov-14
+        run: |
+          make titan-native-coverage-build TITAN_COVERAGE_GCOV=gcov-14 \
+            TITAN_COVERAGE_FORMATS='html lcov cobertura' \
+            TITAN_COVERAGE_GCOVR="$RUNNER_TEMP/titan-coverage-tools/bin/gcovr"
       - name: Run ordinary aggregate with fresh coverage counters
         run: make titan-native-coverage-run
-      - name: Generate Titan line reports
-        if: always()
-        run: |
-          make titan-native-coverage-report \
-            TITAN_COVERAGE_GCOVR="$RUNNER_TEMP/titan-coverage-tools/bin/gcovr"
       - name: Retain local reports and collection evidence
         if: always()
         uses: actions/upload-artifact@v7

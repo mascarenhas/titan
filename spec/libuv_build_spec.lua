@@ -4971,20 +4971,16 @@ done
                 "gcc-14 clang-format python3-venv",
                 "name: titan-linux-prepared.tar.gz",
                 "pip\" install -r scripts/titan-coverage-requirements.txt",
-                "python3 spec/coverage_host_test.py",
                 "spec/coverage_lines_spec.lua spec/coder/coverage_attribution_spec.lua",
                 "spec/coder/native_coverage_spec.lua",
                 "make titan-native-coverage-build TITAN_COVERAGE_GCOV=gcov-14",
                 "make titan-native-coverage-run",
-                "make titan-native-coverage-report",
                 "TITAN_COVERAGE_GCOVR=\"$RUNNER_TEMP/titan-coverage-tools/bin/gcovr\"",
             }) do
                 assert.equal(1, count_literal(native_coverage_job, contract), contract)
             end
             assert.equal(1, count_literal(native_coverage_job,
                 "actions/download-artifact@v8"), native_coverage_job)
-            local native_reports = named_step(native_coverage_job, "Generate Titan line reports")
-            assert.truthy(native_reports:find("if: always()", 1, true), native_reports)
             local native_artifacts = named_step(native_coverage_job,
                 "Retain local reports and collection evidence")
             for _, contract in ipairs({ "if: always()", "actions/upload-artifact@v7",
@@ -5250,7 +5246,7 @@ done
                     assert.is_true(tonumber(seconds) >= 0)
                 end
             end
-            assert.same({ 1, 49, 51, 52 }, shard_counts)
+            assert.same({ 39, 31, 42, 41 }, shard_counts)
             assert.equal(153, assigned_count)
 
             local stress_partition = read_file(

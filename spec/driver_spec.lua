@@ -1997,7 +1997,7 @@ describe("loader resolver ownership", function()
                 module = { "exceptional" },
                 extra_object = {},
                 coverage_module = {},
-                coverage_source_map = {},
+                coverage_format = {},
             }
         end
         local fake_argparse = setmetatable({}, {
@@ -2484,6 +2484,8 @@ describe("generated C formatting", function()
         driver.format_generated_file = function(path, verbose, pretty_print)
             assert.is_nil(verbose)
             assert.is_true(pretty_print)
+            assert.truthy(path:match("%.h$"),
+                "clang-format must recognize staged output as a C header")
             calls[#calls + 1] = path
             return nil, "injected formatter failure"
         end
