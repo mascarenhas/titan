@@ -549,9 +549,11 @@ The Lua-loader and provider columns apply in library mode; the
 entrypoint and executable columns apply in `main` program mode.
 
 In `--test` mode the first requested root's executable column applies even when
-no root declares `main`; the generated runner is the sole main. Its support,
-runner, and entrypoint C/object files use `__test_support`, `__test_runner`, and
-`__test_entrypoint` suffixes beside that executable stem. See the
+no root declares `main`; the generated runner is the sole main. Its runner and
+entrypoint C/object files use `__test_runner` and `__test_entrypoint` suffixes
+beside that executable stem. The runner ordinarily imports `titan.test` and
+calls its public `run` function; the standard module is not rebuilt specially
+for tests. See the
 [test chapter](standard-library-test.md#discovery-and-compilation).
 
 With several no-`main` roots, Titan publishes one paired provider at their longest common

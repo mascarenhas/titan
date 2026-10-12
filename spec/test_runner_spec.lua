@@ -110,7 +110,9 @@ describe("Titan test-runner source generation", function()
         assert.truthy(ast, err and parser.error_to_string(err,
             "generated__test_runner.titan") or "generated runner did not parse")
         assert.equal(1, select(2, source:gsub(
-            'local test = import "titan.test.titan"', "")))
+            'local test = import "titan.test"', "")))
+        assert.falsy(source:find('import "titan.test.titan"', 1, true), source)
+        assert.falsy(source:find("foreign import", 1, true), source)
         assert.equal(1, select(2, source:gsub(
             'local test_module_1 = import "example.alpha"', "")))
         assert.equal(1, select(2, source:gsub(
@@ -119,6 +121,8 @@ describe("Titan test-runner source generation", function()
             "  test_module_1.test_one(context)\nend", 1, true), source)
         assert.truthy(source:find(
             "function main(args: {string}): integer", 1, true), source)
+        assert.truthy(source:find("test.Case.new(", 1, true), source)
+        assert.truthy(source:find("return test.run(args, cases)", 1, true), source)
     end)
 
     it("discovers the same checked cases from source objects without ASTs", function()

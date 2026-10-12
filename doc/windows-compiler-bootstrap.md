@@ -70,7 +70,7 @@ Windows standard-library DLL and twenty-three shims, then copies those artifacts
 into the SDK.
 `mingw32-make -f Makefile.win stdlib` uses the already installed compiler and prepared
 runtime/native SDK to rebuild the provider directly. `install-stdlib` then copies
-its DLL, shims, and compiler test source. The source rock's post-install hook uses
+its DLL and shims. The source rock's post-install hook uses
 this same build-and-copy recipe with its newly deployed compiler and selected
 Lua program. `publish-stdlib` copies an existing stage without rebuilding it.
 Run `stdlib-check` separately to validate that stage.

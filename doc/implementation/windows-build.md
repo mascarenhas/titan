@@ -389,12 +389,12 @@ runtime/native SDK to compile all 23 explicit roots into one `titan.dll`.
 link retain their normal order. It does not reinstall the compiler or prepare those native inputs.
 `install-stdlib` builds that provider and then copies its artifacts. The source
 rock's post-install hook uses this same route with its just-deployed compiler
-and Lua program. `publish-stdlib` copies an existing provider, its 23 generated
-shims, and `titan/test.titan` directly without rebuilding or validating them.
+and Lua program. `publish-stdlib` copies an existing provider and its 23
+generated shims directly without rebuilding or validating them.
 
 `stdlib-check` is the separate artifact gate. It uses an isolated copy and a
 fresh Lua process to check exact PE exports, permitted imports, callable metadata
-against source objects, generated shims, and the compiler test source. Compiler
+against source objects and generated shims. Compiler
 provider publication retains its own ABI and transactional behavior;
 `compiler-publication-check` exercises that contract independently of stdlib
 installation.
@@ -404,8 +404,9 @@ UV address helper's byte-order conversion. Its PE import audit permits
 `WS2_32.dll` explicitly. Ordinary compiled Titan clients call the provider and
 do not need this import library or private UV headers themselves.
 
-The installed files are `lib/titan/0.6/titan.dll`, the 23 shims under
-`share/lua/5.5/titan`, and `share/titan/0.6/src/titan/test.titan`. No Titan `.a`
+The installed files are `lib/titan/0.6/titan.dll` and the 23 shims under
+`share/lua/5.5/titan`. Native tests use the DLL's ordinary `titan.test`
+implementation; no test-source payload is installed. No Titan `.a`
 provider or Titan import library is published. `--static` is unsupported on
 Windows. Removed logical modules do not trigger automatic stale-shim cleanup;
 build such a changed provider in a fresh output directory. A DLL mapped by

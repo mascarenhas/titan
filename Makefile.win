@@ -293,10 +293,10 @@ install-stdlib: stdlib
 # Publishing an already built stage must not rebuild or replace its inputs.
 publish-stdlib:
 	mkdir -p $(call quote,$(PREFIX)/lib/titan/$(TITAN_LIBRARY_VERSION)) \
-	  $(call quote,$(PREFIX)/share/lua/5.5/titan) $(call quote,$(PREFIX)/share/titan/$(TITAN_LIBRARY_VERSION)/src/titan)
+	  $(call quote,$(PREFIX)/share/lua/5.5/titan)
 	cp -p titan.dll $(call quote,$(PREFIX)/lib/titan/$(TITAN_LIBRARY_VERSION)/titan.dll)
 	for module in $(STDLIB_MODULES); do cp -p "titan/$$module.lua" $(call quote,$(PREFIX)/share/lua/5.5/titan/); done
-	cp -p titan/test.titan $(call quote,$(PREFIX)/share/titan/$(TITAN_LIBRARY_VERSION)/src/titan/test.titan)
+	rm -f $(call quote,$(PREFIX)/share/titan/$(TITAN_LIBRARY_VERSION)/src/titan/test.titan)
 
 compiler-publication-check: runtime
 	bash spec/support/check_windows_publication.sh $(call quote,$(WINDOWS_BUILD_ROOT)) $(call quote,$(PREFIX))

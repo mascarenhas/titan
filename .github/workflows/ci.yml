@@ -212,8 +212,7 @@ jobs:
           test -f "$static_archive" && test ! -L "$static_archive"
           test -f "$runtime_archive" && test ! -L "$runtime_archive"
           test ! -e "$PREFIX/lib/libtitan.a"
-          test -f "$PREFIX/share/titan/0.6/src/titan/test.titan" &&
-            test ! -L "$PREFIX/share/titan/0.6/src/titan/test.titan"
+          test ! -e "$PREFIX/share/titan/0.6/src/titan/test.titan"
 
       - name: Verify bare support loading through the library 0.6 path
         run: |
@@ -803,8 +802,7 @@ jobs:
           for module in coroutine uv async timer io fs net ssl url http websocket os path peg string math lua iteration gc test reflect sqlite3 json; do
             test -f "$PREFIX/share/lua/5.5/titan/$module.lua"
           done
-          test -f "$PREFIX/share/titan/0.6/src/titan/test.titan" &&
-            test ! -L "$PREFIX/share/titan/0.6/src/titan/test.titan"
+          test ! -e "$PREFIX/share/titan/0.6/src/titan/test.titan"
           readelf -Ws .lua/bin/lua | grep __asan_
           readelf -Ws .lua/bin/lua | grep __ubsan_
           for module in lpeglabel lfs; do

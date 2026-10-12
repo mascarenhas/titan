@@ -336,20 +336,19 @@ with the installed compiler and matching SDK. The shared Make object graph
 retains source-adjacent generated C, headers, and objects. One final link carries
 `ltitanlib.o`, private LPegLabel, libuv, llhttp, SQLite, and optional bundled
 OpenSSL into the paired provider. TLS uses the selected OpenSSL library directly.
-Installation then copies the pair, generated shims, exact `titan/test.titan`
-compiler source, licenses, and optional macOS dSYM. `publish-stdlib` copies an
+Installation then copies the pair, generated shims, licenses, and optional
+macOS dSYM. `publish-stdlib` copies an
 already built `STDLIB_INSTALL_STAGE` without rebuilding it. Explicit packaging
 tests own the provider protocol, symbol, metadata, and layout checks.
 
 The canonical installed files are the provider pair (plus the DSO's macOS
-dSYM), twenty-three Lua shims, and the canonical test-support source:
+dSYM) and twenty-three Lua shims:
 
 ```text
 <root>/lib/titan/0.6/titan.so
 <root>/lib/titan/0.6/titan.a
 <root>/lib/titan/0.6/titan.so.dSYM          # macOS only
 <root>/share/lua/5.5/titan/{coroutine,uv,async,timer,io,fs,net,ssl,url,http,websocket,os,path,peg,string,math,lua,iteration,gc,test,reflect,sqlite3,json}.lua
-<root>/share/titan/0.6/src/titan/test.titan
 ```
 
 These remain direct Titan artifacts outside the source-rock manifest. The
@@ -364,8 +363,8 @@ every shim must exist; warm invocations preserve their mtimes. Callers run
 clean affected native build directories or use separate source copies and SDKs.
 `make clean` removes the known generated outputs. Production
 library tests treat the combined set as read-only. CI snapshots and restores
-the checkout runtime archive plus the installed DSO/archive/dSYM/shims and
-canonical compiler source around compiler groups; its system-OpenSSL smoke replaces the whole
+the checkout runtime archive plus the installed DSO/archive/dSYM/shims
+around compiler groups; its system-OpenSSL smoke replaces the whole
 paired generation rather than one logical child, while the prepared artifact retains the
 bundled generation.
 

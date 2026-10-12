@@ -43,10 +43,11 @@ Test records also retain discovered function names. `test_runner.discover`
 combines checked ASTs and these names, preserving ordinary filtering, sorting,
 and source-closure discovery. `-c --test` discovers cases for test C flags but
 does not synthesize a runner. Incremental final test linking synthesizes the
-current runner and entrypoint while reusing support and test owner objects.
-Both separate/incremental test paths assign the stable
-`titan/test__test_support.titan` native output before loading any roots. The
-historical default `--test` path retains its first-root-specific support output.
+current runner and entrypoint while reusing eligible production and test-owner
+objects. The runner ordinarily imports `titan.test` and calls its public `run`
+function through the selected standard provider. There is no synthesized
+support object or source override. An unchanged production object can serve
+both an application and a test link when flags and dependency bindings match.
 
 The CLI reads main and external-symbol facts from cached entries when no AST
 is available. Compile-only mode skips main selection and common provider-name
@@ -154,8 +155,9 @@ explicit folder inventories. The final private publication stage reuses
 persistent source-adjacent objects, combines the ordered native payload into
 both provider forms, and performs normal pair/shim validation. The source-rock
 post-install path uses the same object targets with the deployed compiler/SDK.
-The native stdlib test suite likewise has shared support and per-module object
-targets, then a final incremental `--test` link in one build directory.
+The native stdlib test suite likewise has per-module object targets and
+installed-provider prerequisites, then a final incremental `--test` link in one
+build directory.
 
 Root driver/metadata specs cover object lookup, fallback, replay, and skipped
 compiler phases. `spec/coder/incremental_compilation_spec.lua` owns CLI and

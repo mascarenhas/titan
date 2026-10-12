@@ -29,7 +29,6 @@ SHIM_ROOT="$PREFIX/share/lua/5.5"
 PROVIDER="$LIBRARY_ROOT/titan.so"
 STATIC_ARCHIVE="$LIBRARY_ROOT/titan.a"
 RUNTIME_ARCHIVE="$LIBRARY_ROOT/libtitan.a"
-TEST_SUPPORT_SOURCE="$PREFIX/share/titan/0.6/src/titan/test.titan"
 PROCESS_CHILD_SUPPLIED=${TITAN_PROCESS_SMOKE_CHILD:+1}
 OPENSSL_PKG_CONFIG=${OPENSSL_PKG_CONFIG:-pkg-config}
 OPENSSL_MODE=${OPENSSL_MODE:-bundled}
@@ -94,9 +93,7 @@ check_canonical_container() {
     test ! -L "$RUNTIME_ARCHIVE"
     test ! -e "$PREFIX/lib/libtitan.a"
     test ! -e "$PREFIX/lib/libuv.a"
-    test -s "$TEST_SUPPORT_SOURCE"
-    test ! -L "$TEST_SUPPORT_SOURCE"
-    grep -Fq 'function testing(): boolean' "$TEST_SUPPORT_SOURCE"
+    test ! -e "$PREFIX/share/titan/0.6/src/titan/test.titan"
     test ! -e "$PROVIDER.dSYM" || [[ $platform == macos ]]
     if [[ $platform == macos ]]; then
         test -d "$PROVIDER.dSYM"

@@ -73,36 +73,40 @@ fallback under the rules in
 compilation remains binary first by default, and `--static` still only swaps `.a` and
 `.so` preference during the compiled fallback of ordinary imports.
 
-The compiler generates an ordinary source module with the reserved identity
-`titan.test.runner`. It imports every test owner ordinarily, explicitly imports
-`titan.test.titan` for the private runner protocol, and provides the sole
-`main`; a `main` in an input module is ignored in test mode. The first requested
-root owns the executable path, including the usual folder-root `__main` rule,
-so unrelated roots can form one test executable. No provider pair or Lua shim
-is emitted. Adjacent generated artifacts use the executable stem:
-`__test_support.c/.o`, `__test_runner.c/.o`, and
+The compiler generates a thin ordinary source module with the reserved identity
+`titan.test.runner`. It imports `titan.test` and every test owner through their
+public interfaces, wraps discovered callbacks in `test.Case` descriptors, and
+provides the sole `main`, which calls `test.run(args, cases)`. A `main` in an
+input module is ignored in test mode. The first requested root owns the
+executable path, including the usual folder-root `__main` rule, so unrelated
+roots can form one test executable. No provider pair or Lua shim is emitted.
+Adjacent generated artifacts use the executable stem: `__test_runner.c/.o` and
 `__test_entrypoint.c/.o`; ordinary test and dependency translation units keep
 their normal source-adjacent paths.
 
-For separate test builds, `-c --test --incremental` emits source objects and
-test compilation flags without synthesizing a runner or executable. All recipes
-use the same build directory and share `titan/test__test_support.o`; build that
-support prerequisite with `-c --test --incremental titan.test` before parallel
-owners. The final `--test --incremental` command discovers fresh and cached
-cases, generates the current runner, and links one executable. It uses the
-shared support output rather than the default first-root-specific support
-stem. See [Separate native test executables](incremental-compilation.md#separate-native-test-executables)
-for the complete sequence and Make-owned invalidation contract.
+`titan.test` follows ordinary source/provider resolution and uses the same
+standard provider as other imports. Test mode neither copies its source nor
+compiles a private support variant. A prepared SDK supplies its compiled
+implementation; no installed Titan test source is required. With `--static`,
+its selected archive remains selected unless an actual authored source import
+independently creates a provider overlap under the normal composition rules.
 
-A native test executable may still need a shared standard provider with
-`--static`. The canonical source-owned `titan.test` overlaps the keys carried
-by the combined `titan.a`; whole-provider composition then selects matching
-DSO dependencies rather than linking a duplicate `titan.test` implementation.
-Set `TITAN_PATH_0_6` to the installed `lib/titan/0.6` directory when that shared
-provider is outside the runtime search path. This test configuration does not
-imply that an ordinary application executable has the same dependency. Verify
-application delivery with its own build and a relocated execution that cannot
-find the compiler or Titan provider. See [Static compiled modules](static-compiled-modules.md).
+For separate test builds, `-c --test --incremental` emits source objects and
+test compilation flags without synthesizing a runner or executable. The final
+`--test --incremental` command discovers fresh and cached cases, generates the
+current runner, and links one executable. See
+[Separate native test executables](incremental-compilation.md#separate-native-test-executables)
+for the sequence and Make-owned invalidation contract.
+
+Production modules can share unchanged objects between application and test
+executables when compilation settings and resolved dependency providers match.
+An explicit source import in a test grants visibility to that producer's
+existing private declarations; it does not require a test-specific producer
+object. Different optimization, coverage, toolchain, or provider settings still
+require distinct objects or a rebuild. `--static` is a compiled-provider
+preference, so verify standalone delivery with a relocated executable that
+cannot find the compiler or Titan provider. See
+[Static compiled modules](static-compiled-modules.md).
 
 Only translation units that own a discovered test receive
 `-fno-optimize-sibling-calls`, preserving useful native frames for
@@ -115,6 +119,23 @@ The canonical module name is `titan.test`; `import "test"` is parser shorthand.
 It imports no other Titan standard module, so it can test the standard library
 itself.
 
+### Case registration and execution
+
+```text
+Case.new(full_name: string, owner_module: string,
+         body: function(Context): ()): Case
+run(args: {string}, cases: {Case}): integer
+```
+
+`Case.new` stores a fully qualified case name, the logical owner used for
+failure attribution, and a callback. Its fields are private. `run` executes
+cases in Array order with the standard filtering, reporting, subtest, and
+cleanup behavior described below. Arguments exclude the executable name.
+It returns 0 for a successful run or help, 1 for test failures, and 2 for
+invalid command-line options. It rejects a nested active run and restores
+inactive state when execution ends. The generated runner uses this public API;
+custom runners may use it too.
+
 ### Runner state
 
 ```text
@@ -122,7 +143,7 @@ function testing(): boolean
 function verbose(): boolean
 ```
 
-`testing()` is true while the generated `main` is executing tests and cleanup.
+`testing()` is true while `test.run` is executing tests and cleanup.
 `verbose()` is true in that interval when the executable received `-v` or
 `--verbose`. Both are false in ordinary programs, while command-line options
 are being parsed, and during imported module initializers: imported modules
@@ -136,14 +157,15 @@ function skip(reason: string?)
 ```
 
 `assert` returns when `check` is true and raises `message` or
-`"assertion failed"` otherwise. `skip` raises the runner's private nominal skip
-marker. A body skip marks that test skipped and prevents its registered
-children from running. A program may catch either raise itself; a caught value
-has been handled, so execution continues normally.
+`"assertion failed"` otherwise. While a runner is active, `skip` raises a
+`titan.test.Skip` value with public readonly `reason: string?`. This lets
+asynchronous test helpers recognize and preserve a skip without importing
+private runner code. A body skip marks that test skipped and prevents its
+registered children from running. A program may catch either raise itself; a
+caught value has been handled, so execution continues normally.
 
 Outside a runner, `assert` still raises a readable ordinary error and `skip`
-raises `"test skipped"` (with an optional `: reason` suffix), rather than
-exposing the private marker.
+raises `"test skipped"` (with an optional `: reason` suffix).
 
 ### Contexts, subtests, and cleanup
 

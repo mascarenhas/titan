@@ -1242,7 +1242,6 @@ install-stdlib publish-stdlib:
 	@set -e; \
 	stage=$(call make_shell_quote,$(STDLIB_INSTALL_STAGE)); \
 	mkdir -p "$(TITAN_STDLIB_VERSION_DIR)" "$(TITAN_STDLIB_LUA_DIR)" \
-	  "$(TITAN_SHARE_DIR)/$(TITAN_LIBRARY_VERSION)/src/titan" \
 	  "$(TITAN_SHARE_DIR)/LICENSES"; \
 	if test -n $(call make_shell_quote,$(strip $(TITAN_STDLIB_DIAGNOSTIC_SNAPSHOT))); then \
 	  $(STDLIB_COMPILER_ENV) "$(TITAN_LUA)" -E \
@@ -1256,8 +1255,7 @@ install-stdlib publish-stdlib:
 	for shim in $(STDLIB_SHIMS); do \
 	  install -m 0644 "$$stage/$$shim" "$(TITAN_STDLIB_LUA_DIR)/"; \
 	done; \
-	install -m 0644 "$$stage/titan/test.titan" \
-	  "$(TITAN_SHARE_DIR)/$(TITAN_LIBRARY_VERSION)/src/titan/test.titan"; \
+	rm -f "$(TITAN_SHARE_DIR)/$(TITAN_LIBRARY_VERSION)/src/titan/test.titan"; \
 	if test -d "$$stage/titan.so.dSYM"; then \
 	  rm -rf "$(TITAN_CANONICAL_SUPPORT_SO).dSYM"; \
 	  cp -R "$$stage/titan.so.dSYM" "$(TITAN_CANONICAL_SUPPORT_SO).dSYM"; \
@@ -1309,8 +1307,6 @@ TITAN_TEST_LDFLAGS = $(strip $(TITAN_PROFILE_NATIVE_FLAGS) $(if $(strip $(TITAN_
 titan_test_stem = $(patsubst %.titan,%,$(firstword $(TITAN_TEST_SOURCES_$(1))))
 titan_test_outputs = $(call titan_test_stem,$(1)).o $(call titan_test_stem,$(1)).c $(call titan_test_stem,$(1)).ffi.h $(if $(TITAN_TEST_FOREIGN_$(1)),$(call titan_test_stem,$(1)).titan.h)
 TITAN_TEST_MODULE_OBJECTS := $(foreach module,$(TITAN_TEST_MODULES),$(call titan_test_stem,$(module)).o)
-TITAN_TEST_SUPPORT_STEM := $(TITAN_TEST_BUILD_DIR)/titan/test__test_support
-TITAN_TEST_SUPPORT_OUTPUTS := $(addprefix $(TITAN_TEST_SUPPORT_STEM),.o .c .ffi.h)
 TITAN_TEST_NATIVE_OBJECTS := $(addprefix $(TITAN_TEST_BUILD_DIR)/,async_foreign_work.o fs_fixture.o uv_stdio_probe.o sqlite3_worker_fixture.o)
 TITAN_TEST_FIXTURE_OUTPUTS := $(TITAN_TEST_NATIVE_OBJECTS) $(addprefix $(TITAN_TEST_BUILD_DIR)/,async_foreign_work.h uv_stdio_probe.h uv_coverage_threads.h uv_coverage_pty.h sqlite3_worker_fixture.h ssl_allocator_fixture.h ssl_allocator_fixture.o ssl_error_strings.h ssl_error_strings.o os_descriptor_limit.h os_descriptor_limit.o os_process_host_child)
 TITAN_TEST_CONFIG_STAMP := $(TITAN_TEST_BUILD_DIR)/build.config
@@ -1318,7 +1314,6 @@ TITAN_TEST_CONFIG_STAMP := $(TITAN_TEST_BUILD_DIR)/build.config
 # native fixtures. A cold non-test Make invocation need not have one installed.
 TITAN_TEST_INSTALL_ROOT := $(shell $(TEST_LUA) -E -e 'io.write(assert(require("titan-compiler.driver").TITAN_ROOT))' 2>/dev/null)
 TITAN_TEST_PROVIDER_PREREQS := $(if $(TITAN_TEST_INSTALL_ROOT),$(TITAN_TEST_INSTALL_ROOT)/lib/titan/$(TITAN_LIBRARY_VERSION)/titan.so $(TITAN_TEST_INSTALL_ROOT)/lib/titan/$(TITAN_LIBRARY_VERSION)/titan.a)
-TITAN_TEST_SUPPORT_SOURCE := $(if $(TITAN_TEST_INSTALL_ROOT),$(TITAN_TEST_INSTALL_ROOT)/share/titan/$(TITAN_LIBRARY_VERSION)/src/titan/test.titan)
 TITAN_TEST_COMPILER_PREREQS := Makefile $(TITAN_TEST_MODULE_MANIFEST) \
 	$(if $(TITAN_TEST_INSTALL_ROOT),$(TITAN_TEST_INSTALL_ROOT)/bin/titanc \
 	$(wildcard $(TITAN_TEST_INSTALL_ROOT)/share/lua/5.5/titan-compiler/*.lua \
@@ -1361,7 +1356,7 @@ $(TITAN_TEST_CONFIG_STAMP): FORCE
 	@mkdir -p $(call make_shell_quote,$(TITAN_TEST_BUILD_DIR))
 	@set -e; \
 	test -n $(call make_shell_quote,$(TITAN_TEST_INSTALL_ROOT)) && \
-	  test -f $(call make_shell_quote,$(TITAN_TEST_SUPPORT_SOURCE)) || { \
+	  test -f $(call make_shell_quote,$(firstword $(TITAN_TEST_PROVIDER_PREREQS))) || { \
 	  echo "ERROR: native tests require TEST_LUA from an installed Titan SDK" >&2; exit 1; \
 	}; \
 	tmp="$@.tmp"; \
@@ -1378,7 +1373,7 @@ $(TITAN_TEST_CONFIG_STAMP): FORCE
 	  $(call make_shell_quote,ROOTS=$(TITAN_STDLIB_TEST_ROOTS)) > "$$tmp"; \
 	if test -r "$@" && cmp -s "$$tmp" "$@"; then rm -f "$$tmp"; \
 	else \
-	  rm -f $(TITAN_TEST_MODULE_OBJECTS) $(TITAN_TEST_SUPPORT_STEM).o \
+	  rm -f $(TITAN_TEST_MODULE_OBJECTS) \
 	    $(TITAN_TEST_NATIVE_OBJECTS) $(TITAN_TEST_BUILD_DIR)/ssl_allocator_fixture.o \
 	    $(TITAN_TEST_BUILD_DIR)/ssl_error_strings.o $(TITAN_TEST_BUILD_DIR)/os_descriptor_limit.o \
 	    $(TITAN_TEST_BUILD_DIR)/os_process_host_child \
@@ -1386,24 +1381,8 @@ $(TITAN_TEST_CONFIG_STAMP): FORCE
 	  mv -f "$$tmp" "$@"; \
 	fi
 
-$(TITAN_TEST_SUPPORT_STEM).o: FORCE $(TITAN_TEST_SUPPORT_SOURCE) \
-		$(TITAN_TEST_COMPILER_PREREQS) $(TITAN_TEST_PROVIDER_PREREQS) $(TITAN_TEST_CONFIG_STAMP)
-	@set -e; stale=0; \
-	newer=$(call make_shell_quote,$(filter-out FORCE,$?)); \
-	test -z "$$newer" || stale=1; \
-	for output in $(TITAN_TEST_SUPPORT_OUTPUTS); do test -f "$$output" || stale=1; done; \
-	if test "$$stale" = 1; then \
-	  rm -f "$@"; \
-	  cd $(call make_shell_quote,$(TITAN_TEST_BUILD_DIR)); \
-	  $(TITAN_TEST_COMPILER_ENV) $(TEST_TITANC) --test --incremental -j1 -c titan.test; \
-	fi
-
-$(filter-out $(TITAN_TEST_SUPPORT_STEM).o,$(TITAN_TEST_SUPPORT_OUTPUTS)): $(TITAN_TEST_SUPPORT_STEM).o
-	@test -f "$@"
-
 define titan_test_object_rule
 $(call titan_test_stem,$(1)).o: FORCE $(TITAN_TEST_SOURCES_$(1)) $(TITAN_TEST_C_INPUTS_$(1)) \
-	$(TITAN_TEST_SUPPORT_OUTPUTS) \
 	$(foreach dependency,$(TITAN_TEST_IMPORTS_$(1)),$(call titan_test_outputs,$(dependency))) \
 	$(TITAN_TEST_COMPILER_PREREQS) $(TITAN_TEST_PROVIDER_PREREQS) $(TITAN_TEST_CONFIG_STAMP)
 	@set -e; stale=0; \
@@ -1424,7 +1403,7 @@ $(filter-out $(call titan_test_stem,$(1)).o,$(call titan_test_outputs,$(1))): $(
 endef
 $(foreach module,$(TITAN_TEST_MODULES),$(eval $(call titan_test_object_rule,$(module))))
 
-titan-stdlib-test-objects: $(TITAN_TEST_MODULE_OBJECTS) $(TITAN_TEST_SUPPORT_OUTPUTS) ## Compile native test modules without linking the runner
+titan-stdlib-test-objects: $(TITAN_TEST_MODULE_OBJECTS) ## Compile native test modules without linking the runner
 
 $(TITAN_TEST_BUILD_DIR)/async_foreign_work.h: spec/fixtures/stdlib/native/async_foreign_work.h $(TITAN_TEST_CONFIG_STAMP)
 	cp "$<" "$@"
@@ -1482,7 +1461,7 @@ $(TITAN_TEST_BUILD_DIR)/os_process_host_child: spec/fixtures/stdlib/native/os_pr
 
 # A changed configuration can remove the executable after Make has cached its
 # timestamp. Recheck its existence even when fast rebuilds share that timestamp.
-$(TITAN_TEST_EXECUTABLE): FORCE $(TITAN_TEST_MODULE_OBJECTS) $(TITAN_TEST_SUPPORT_OUTPUTS) \
+$(TITAN_TEST_EXECUTABLE): FORCE $(TITAN_TEST_MODULE_OBJECTS) \
 		$(TITAN_TEST_FIXTURE_OUTPUTS) $(TITAN_TEST_COMPILER_PREREQS) \
 		$(TITAN_TEST_PROVIDER_PREREQS) $(TITAN_TEST_CONFIG_STAMP)
 	@set -e; \

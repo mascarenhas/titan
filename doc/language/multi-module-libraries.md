@@ -298,10 +298,9 @@ $ROCKS_TREE/share/lua/5.5/titan/sqlite3.lua
 $ROCKS_TREE/share/lua/5.5/titan/json.lua
 ```
 
-The compiler also installs canonical test support source at
-`$ROCKS_TREE/share/titan/0.6/src/titan/test.titan`; it is compiler data for
-the generated runner's explicit `import "titan.test.titan"` collaboration edge,
-not another logical provider.
+The same compiled provider supplies `titan.test` to applications and native
+test executables. The generated runner uses its public `Case.new` and `run`
+API; installation does not publish an extra test-support source file.
 
 The DSO is also the installation's one complete dynamic libuv provider; the
 archive carries the same private libuv object payload. Both

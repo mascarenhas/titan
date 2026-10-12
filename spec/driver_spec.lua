@@ -1068,23 +1068,6 @@ describe("compiler installation discovery", function()
         end, "invalid extra_ffi_include_dirs: compiler include dirs must be " ..
             "an ordered array")
 
-        local previous_support = driver.TEST_SUPPORT_SOURCE_PATH
-        driver.TEST_SUPPORT_SOURCE_PATH = "/virtual/titan/test.titan"
-        local descriptor
-        local completed, failure = pcall(function()
-            descriptor = assert(driver.test_support_source_descriptor({
-                io = {
-                    stat = function(_, filename)
-                        assert.equal("/virtual/titan/test.titan", filename)
-                        return { kind = "file" }
-                    end,
-                },
-            }))
-        end)
-        driver.TEST_SUPPORT_SOURCE_PATH = previous_support
-        assert.truthy(completed, failure)
-        assert.equal("/virtual/titan/test.titan", descriptor.main)
-
         local failed_platform = driver.new_resolver_context()
         function failed_platform.io:run(argv, options)
             assert.same({ "uname" }, argv)
@@ -1380,8 +1363,6 @@ describe("compiler installation discovery", function()
             liblua = "/opt/titan/lib/liblua.a",
             titan_bin = "/opt/titan/lib/titan/0.6",
             lua_cpath = "/opt/titan/lib/titan/0.6/?.so",
-            test_source =
-                "/opt/titan/share/titan/0.6/src/titan/test.titan",
         }, paths)
 
         assert.same({
@@ -1396,23 +1377,6 @@ describe("compiler installation discovery", function()
             "/opt/titan/lib/liblua.a",
             "-lm",
         }, driver.installed_link_inputs(paths, true))
-    end)
-
-    it("keeps canonical test-support outputs under the logical source path",
-       function()
-        local source = assert(driver.test_support_source_descriptor())
-        assert.equal("titan/test", source.program_output)
-    end)
-
-    it("reports a missing canonical test support source", function()
-        local previous = driver.TEST_SUPPORT_SOURCE_PATH
-        driver.TEST_SUPPORT_SOURCE_PATH = "/nonexistent/titan/test.titan"
-        local source, message = driver.test_support_source_descriptor()
-        driver.TEST_SUPPORT_SOURCE_PATH = previous
-        assert.is_nil(source)
-        assert.match("Titan test support source is missing", message,
-            1, true)
-        assert.match("/nonexistent/titan/test.titan", message, 1, true)
     end)
 
     it("identifies a checkout from driver provenance, not the working directory",
@@ -3533,7 +3497,13 @@ describe("compiler module loader", function()
             assert(driver.prepare_foreign_headers({ name }, driver.imported, false, false))
             local ok, err, object = driver.compile_module(name, entry, dependencies, false)
             assert.truthy(ok, err)
-            local previous_bytes = assert(util.get_file_contents(object))
+            local function read_object()
+                local file = assert(io.open(object, "rb"))
+                local bytes = assert(file:read("a"))
+                assert(file:close())
+                return bytes
+            end
+            local previous_bytes = read_object()
             local timestamp = os.time() - 20
             assert(lfs.touch(object, timestamp, timestamp))
 
@@ -3563,7 +3533,7 @@ describe("compiler module loader", function()
             ok, err = driver.compile_module(name, entry, dependencies, false)
             assert.truthy(ok, err)
             assert.equal(object, entry.compiled)
-            assert.not_equal(previous_bytes, util.get_file_contents(object))
+            assert.not_equal(previous_bytes, read_object())
             assert.is_true(lfs.attributes(object, "modification") > timestamp)
         end)
 

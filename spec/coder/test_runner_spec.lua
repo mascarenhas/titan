@@ -55,6 +55,18 @@ local function run(argv)
     return result.ok, output, result.why, result.status
 end
 
+local function run_program(argv)
+    local prefix = require("spec.support.installed_prefix").active()
+    -- Retain launcher-relative application DLL lookup through the defaults.
+    local command = { "env", "TITAN_PATH_0_6=" ..
+        prefix .. "/lib/titan/0.6;;" }
+    if platform.windows then
+        table.insert(command, 2, "MSYS2_ENV_CONV_EXCL=TITAN_PATH_0_6")
+    end
+    for _, argument in ipairs(argv) do command[#command + 1] = argument end
+    return run(command)
+end
+
 local function executable(modname, unix_path)
     if platform.windows then
         return assert(driver.windows_program_paths(modname)).executable
@@ -100,8 +112,6 @@ local ARTIFACTS = {
     FIXTURE .. "/titan/test/runner/user.o",
     FIXTURE .. "/" .. MUTATION .. ".c",
     FIXTURE .. "/" .. MUTATION .. ".o",
-    ROOT .. "__test_support.c",
-    ROOT .. "__test_support.o",
     ROOT .. "__test_runner.c",
     ROOT .. "__test_runner.o",
     ROOT .. "__test_entrypoint.c",
@@ -128,8 +138,6 @@ local NESTED_ARTIFACTS = {
     FIXTURE .. "/nested/tests/tests.c",
     FIXTURE .. "/nested/tests/tests.o",
     "nested/tests__main",
-    "nested/tests__main__test_support.c",
-    "nested/tests__main__test_support.o",
     "nested/tests__main__test_runner.c",
     "nested/tests__main__test_runner.o",
     "nested/tests__main__test_entrypoint.c",
@@ -148,22 +156,10 @@ local STATIC_ARTIFACTS = {
     STATIC,
     FIXTURE .. "/" .. STATIC .. ".c",
     FIXTURE .. "/" .. STATIC .. ".o",
-    STATIC .. "__test_support.c",
-    STATIC .. "__test_support.o",
     STATIC .. "__test_runner.c",
     STATIC .. "__test_runner.o",
     STATIC .. "__test_entrypoint.c",
     STATIC .. "__test_entrypoint.o",
-}
-
-local SUPPORT_ROOT_ARTIFACTS = {
-    "titan/test",
-    "titan/test__test_support.c",
-    "titan/test__test_support.o",
-    "titan/test__test_runner.c",
-    "titan/test__test_runner.o",
-    "titan/test__test_entrypoint.c",
-    "titan/test__test_entrypoint.o",
 }
 
 local function remove_artifact(path)
@@ -192,12 +188,10 @@ local function clean()
     for _, path in ipairs(COLLISION_ARTIFACTS) do remove_artifact(path) end
     for _, path in ipairs(BOOTSTRAP_ARTIFACTS) do remove_artifact(path) end
     for _, path in ipairs(STATIC_ARTIFACTS) do remove_artifact(path) end
-    for _, path in ipairs(SUPPORT_ROOT_ARTIFACTS) do remove_artifact(path) end
     clean_nested()
     remove_tree(ROOT .. ".dSYM")
     remove_tree(BOOTSTRAP .. ".dSYM")
     remove_tree(STATIC .. ".dSYM")
-    remove_tree("titan/test.dSYM")
     remove_artifact("test_runner_progname__entrypoint.c")
     os.remove("test_runner_progname__entrypoint.o")
     os.remove("test_runner_progname__main")
@@ -223,7 +217,7 @@ local function clean()
     remove_artifact("url__test_entrypoint.c")
     os.remove("url__test_entrypoint.o")
     remove_tree("url.dSYM")
-    for _, modname in ipairs({ ROOT, BOOTSTRAP, STATIC, "titan.test",
+    for _, modname in ipairs({ ROOT, BOOTSTRAP, STATIC,
             "test_runner_progname", "test_runner_hierarchy", "url" }) do
         clean_program(modname)
     end
@@ -269,9 +263,11 @@ local function compile_suite()
 end
 
 local function compile_installed(root, ...)
+    local prefix = require("spec.support.installed_prefix").active()
     local argv = {
         "env",
         "CCACHE_DISABLE=1",
+        "TITAN_PATH_0_6=" .. prefix .. "/lib/titan/0.6",
         "TITAN_EXTRA_CPPFLAGS=",
         "TITAN_EXTRA_CFLAGS=",
         "TITAN_EXTRA_LDFLAGS=",
@@ -310,7 +306,7 @@ end
 local function run_suite(...)
     local argv = { "./" .. executable(ROOT) }
     for _, argument in ipairs({ ... }) do argv[#argv + 1] = argument end
-    return run(argv)
+    return run_program(argv)
 end
 
 local function assert_order(output, ...)
@@ -323,9 +319,14 @@ local function assert_order(output, ...)
     end
 end
 
+local function has_quoted_argument(line, argument)
+    return line:find("'" .. argument .. "'", 1, true) or
+        line:find('"' .. argument .. '"', 1, true)
+end
+
 local function compile_line(output, source)
     for line in output:gmatch("[^\n]+") do
-        if line:find("'-c'", 1, true) and
+        if has_quoted_argument(line, "-c") and
            line:find(source, 1, true) then
             return line
         end
@@ -362,6 +363,8 @@ describe("native Titan test runner", function()
         for _, path in ipairs(ARTIFACTS) do
             assert.is_true(file_exists(path), path)
         end
+        assert.is_false(file_exists(ROOT .. "__test_support.c"))
+        assert.is_false(file_exists(ROOT .. "__test_support.o"))
         assert.falsy(compiler_output:find("multiple main", 1, true),
             compiler_output)
     end)
@@ -377,7 +380,7 @@ describe("native Titan test runner", function()
 
     it("applies sibling-call preservation only to discovered test modules",
        function()
-        local flag = "'-fno-optimize-sibling-calls'"
+        local flag = "-fno-optimize-sibling-calls"
         local root_line = assert(compile_line(compiler_output,
             FIXTURE .. "/" .. ROOT .. ".c"), compiler_output)
         local dependency_line = assert(compile_line(compiler_output,
@@ -389,20 +392,19 @@ describe("native Titan test runner", function()
             compiler_output)
         local prefixed_line = assert(compile_line(compiler_output,
             FIXTURE .. "/titan/test/user.c"), compiler_output)
-        local support_line = assert(compile_line(compiler_output,
-            ROOT .. "__test_support.c"), compiler_output)
         local runner_line = assert(compile_line(compiler_output,
             ROOT .. "__test_runner.c"), compiler_output)
         local entrypoint_line = assert(compile_line(compiler_output,
             ROOT .. "__test_entrypoint.c"), compiler_output)
-        assert.truthy(root_line:find(flag, 1, true), root_line)
-        assert.truthy(dependency_line:find(flag, 1, true), dependency_line)
-        assert.truthy(edge_line:find(flag, 1, true), edge_line)
-        assert.truthy(folder_line:find(flag, 1, true), folder_line)
-        assert.truthy(prefixed_line:find(flag, 1, true), prefixed_line)
-        assert.falsy(support_line:find(flag, 1, true), support_line)
-        assert.falsy(runner_line:find(flag, 1, true), runner_line)
-        assert.falsy(entrypoint_line:find(flag, 1, true), entrypoint_line)
+        assert.truthy(has_quoted_argument(root_line, flag), root_line)
+        assert.truthy(has_quoted_argument(dependency_line, flag), dependency_line)
+        assert.truthy(has_quoted_argument(edge_line, flag), edge_line)
+        assert.truthy(has_quoted_argument(folder_line, flag), folder_line)
+        assert.truthy(has_quoted_argument(prefixed_line, flag), prefixed_line)
+        assert.is_nil(compile_line(compiler_output, "titan/test.c"), compiler_output)
+        assert.is_nil(compile_line(compiler_output, "__test_support.c"), compiler_output)
+        assert.falsy(has_quoted_argument(runner_line, flag), runner_line)
+        assert.falsy(has_quoted_argument(entrypoint_line, flag), entrypoint_line)
     end)
 
     it("discovers the source closure in deterministic order and runs all phases",
@@ -509,7 +511,7 @@ describe("native Titan test runner", function()
         ok, output = run_suite("--verbose", "--filter=test_failure$")
         assert.falsy(ok, output)
         assert.truthy(output:find("in test_runner_fixture.test_failure", 1, true), output)
-        assert.truthy(output:find("in titan.test.runner.execute", 1, true), output)
+        assert.truthy(output:find("in titan.test.execute", 1, true), output)
 
         ok, output = run_suite("--filter=test_prefixed_location$")
         assert.truthy(ok, output)
@@ -633,7 +635,7 @@ describe("native Titan test runner", function()
         local compiled, output = run(direct_argv)
         assert.truthy(compiled, output)
 
-        local ok, direct_output, why, code = run({
+        local ok, direct_output, why, code = run_program({
             "./" .. executable(BOOTSTRAP), "one", "two",
         })
         assert.falsy(ok, direct_output)
@@ -649,7 +651,7 @@ describe("native Titan test runner", function()
         compiled, output = run(default_argv)
         assert.truthy(compiled, output)
 
-        ok, output, why, code = run({ "./" .. executable(BOOTSTRAP) })
+        ok, output, why, code = run_program({ "./" .. executable(BOOTSTRAP) })
         assert.falsy(ok, output)
         assert.equal("exit", why)
         assert.equal(1, code)
@@ -688,33 +690,39 @@ describe("native Titan test runner", function()
             1, true), output)
     end)
 
-    it("keeps an explicit canonical support root in logical outputs", function()
+    it("keeps explicit roots source-required without a test-support override", function()
         local ok, output, why, code = compile_installed("titan.test")
-        assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
+        assert.falsy(ok, output .. "\n(" .. tostring(why) .. ", " ..
             tostring(code) .. ")")
-        assert.is_true(file_exists(executable("titan.test")))
-        local run_ok, run_output = run({ "./" .. executable("titan.test") })
-        assert.truthy(run_ok, run_output)
-        assert.truthy(run_output:find("[==========] 0 tests ran.", 1, true),
-            run_output)
-        assert.truthy(run_output:find("[  PASSED  ] 0 tests.", 1, true),
-            run_output)
+        assert.truthy(output:find("titan.test", 1, true), output)
+        assert.is_false(file_exists("titan/test__test_support.c"))
     end)
 
-    it("falls back from an overlapping static provider to its DSO", function()
+    it("keeps the selected static standard provider for native tests", function()
         if platform.windows then
             pending("Windows supports DLL providers; Titan static archive linking is unsupported")
             return
         end
-        local ok, output, why, code = compile_installed(STATIC, "--static")
+        local prefix = require("spec.support.installed_prefix").active()
+        local archive = prefix .. "/lib/titan/0.6/titan.a"
+        local provider_modified = lfs.attributes(archive, "modification")
+        local ok, output, why, code = compile_installed(STATIC, "--static", "--verbose")
         assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
             tostring(code) .. ")")
+        assert.truthy(output:find(archive, 1, true), output)
+        local generated = read_file(FIXTURE .. "/" .. STATIC .. ".c")
+        assert.truthy(generated:find("extern Udata *titan_math_init(lua_State *L);",
+            1, true), generated)
+        assert.falsy(generated:find("TitanModuleProvider titan_math_provider;", 1, true),
+            generated)
+        assert.is_false(file_exists(STATIC .. "__test_support.c"))
+        assert.equal(provider_modified, lfs.attributes(archive, "modification"))
         local run_ok, run_output = run({
             "env", "LUA_CPATH_5_5=" .. package.cpath, "./" .. STATIC,
         })
         assert.truthy(run_ok, run_output)
         assert.truthy(run_output:find(
-            "[       OK ] test_runner_static.test_static_fallback",
+            "[       OK ] test_runner_static.test_static_provider",
             1, true), run_output)
     end)
 
@@ -726,7 +734,7 @@ function test_collision(context: test.Context)
   test.assert(true)
 end
 ]]
-        local suffix = "__test_support"
+        local suffix = "__test_runner"
         local colliding = suite .. suffix
         local colliding_source = colliding .. ".titan"
         assert(io.open(owner_source, "w")):write(owner_contents):close()
@@ -774,7 +782,7 @@ end
             assert.truthy(ok, output)
             assert.is_true(file_exists(executable(root)))
             assert.is_true(file_exists(assert(driver.windows_program_paths(root)).provider))
-            local ran, run_output = run({ "./" .. executable(root) })
+            local ran, run_output = run_program({ "./" .. executable(root) })
             assert.truthy(ran, run_output)
             assert.truthy(run_output:find("[       OK ] test_runner_hierarchy.test_root", 1, true), run_output)
         else
@@ -841,7 +849,7 @@ end
         local ok, output = run(argv)
         assert.truthy(ok, output)
         local program = executable(root, root .. "__main")
-        local run_ok, run_output = run({ "./" .. program })
+        local run_ok, run_output = run_program({ "./" .. program })
         assert.falsy(run_ok, run_output)
         assert.truthy(run_output:find(
             root .. ": folder program boom", 1, true), run_output)
@@ -860,7 +868,7 @@ end
         local ok, output, why, code = compile_installed(NESTED)
         assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
             tostring(code) .. ")")
-        local run_ok, run_output = run({ "./" .. executable(NESTED, "nested/tests__main") })
+        local run_ok, run_output = run_program({ "./" .. executable(NESTED, "nested/tests__main") })
         assert.truthy(run_ok, run_output)
         assert.truthy(run_output:find(
             "[       OK ] nested.tests.test_nested_output", 1, true),

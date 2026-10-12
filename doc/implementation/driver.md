@@ -94,9 +94,8 @@ other Titan versions and suffix lookalikes do not match. This discovery relies
 on the currently supported equal-root layout. The resulting Titan root selects the
 matching `src/lua-5.5.1`, `include`, `lib/liblua.a`,
 `lib/titan/0.6/libtitan.a`,
-`lib/libbacktrace.a`, and every compiled Titan module. Test mode additionally
-selects `share/titan/0.6/src/titan/test.titan` from that same root as canonical
-compiler-data source. Bundled libuv headers
+`lib/libbacktrace.a`, and every compiled Titan module, including `titan.test`
+for native test executables. Bundled libuv headers
 are staged under `include`, but its static archive remains a private
 source-build input rather than part of the installed SDK. Checkout mode
 deliberately retains the repository paths for compiler/runtime development.
@@ -193,11 +192,11 @@ entries and are linked statically into the replacement provider pair.
 
 A `--test` invocation is the invocation-wide source-preference case. Its
 resolver context sets `source_first`, making every dependency try the tagged source resolver
-before compiled formats and retaining binary fallback only on a clean miss. A
-narrow source override selects canonical `titan.test`, while generated
-`titan.test.runner` uses an in-memory ordinary source descriptor. This lookup
-preference does not expose locals through ordinary imports; the generated runner
-writes `import "titan.test.titan"` for its private protocol. See
+before compiled formats and retaining binary fallback only on a clean miss.
+Generated `titan.test.runner` uses an in-memory ordinary source descriptor and
+imports `titan.test` through its public `Case.new`/`run` API. The standard module
+follows ordinary provider selection and is not substituted or rebuilt specially.
+Source preference does not expose locals through ordinary imports. See
 [Native test runner](test-runner.md).
 
 The compiled branch runs complete format passes. A DSO candidate is probed
@@ -1387,9 +1386,9 @@ complete requested-root set becomes `forced_source_roots` before traversal.
 without changing ordinary-import visibility. Cached roots supply `has_main`
 and `external_symbols` facts when their AST is absent. The CLI rejects
 `--incremental` with `--print-ast`, and compile-only mode with
-`-l`, `-X`, or `--no-uv-bootstrap`. Separate/incremental test builds share
-`titan/test__test_support.o`; cached discovery records supply test function
-names, and only the final test invocation synthesizes the runner. See
+`-l`, `-X`, or `--no-uv-bootstrap`. Cached discovery records supply test
+function names, and only the final test invocation synthesizes the thin runner.
+Its `titan.test` dependency uses the ordinary standard provider. See
 [Object-backed source modules](incremental-compilation.md) for record replay,
 header restoration, and Make-owned invalidation.
 
@@ -1499,13 +1498,12 @@ publication cannot invalidate the retained build. `STDLIB_USE_INSTALLED_RUNTIME=
 selects the checkout compiler/runtime explicitly.
 
 The installation recipe copies the completed provider pair, generated shims,
-canonical test-support source, licenses, and optional macOS dSYM. Optional
+licenses, and optional macOS dSYM. Optional
 sanitizer snapshots capture the retained provider and exact generated C/object
 pairs before copying or tests can replace them. Explicit packaging tests own
 protocol, symbol, metadata, and dependency verification. The canonical installed artifacts are
 `<root>/lib/titan/0.6/{titan.so,titan.a}`, the DSO's macOS dSYM, and
-`<root>/share/lua/5.5/titan/*.lua` shims plus
-`<root>/share/titan/0.6/src/titan/test.titan`. SDK and stdlib artifacts remain
+`<root>/share/lua/5.5/titan/*.lua` shims. SDK and stdlib artifacts remain
 direct files outside the rock manifest and are not removed by
 `luarocks remove`. Earlier Titan installations are neither migration sources
 nor active-layout predecessors. Linux CI rebuilds the active `0.6` rock and

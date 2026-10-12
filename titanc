@@ -149,17 +149,6 @@ local main_module = nil
 local requested_roots = {}
 local requested_modules = driver.deduplicate_module_names(args.module)
 local source_overrides = {}
-if args.test then
-    local test_source, test_source_err =
-        driver.test_support_source_descriptor(resolver_context)
-    if not test_source then exit(test_source_err) end
-    if args.incremental or args.compile_only or coverage_build then
-        -- All separate test compilations in one build directory share the
-        -- same source-private support object, independent of root ordering.
-        test_source.native_output = "titan/test__test_support.titan"
-    end
-    source_overrides["titan.test"] = test_source
-end
 for _, modname in ipairs(requested_modules) do
     if args.test and modname == test_runner.MODULE_NAME then
         exit("logical module '" .. test_runner.MODULE_NAME ..
@@ -219,14 +208,6 @@ if args.test then
         test_program_output = assert(
             driver.imported[requested_modules[1]].program_output)
         test_entrypoint_output = test_program_output .. "__test_entrypoint.c"
-        if not args.incremental and not coverage_build then
-            source_overrides["titan.test"].native_output =
-                test_program_output .. "__test_support.titan"
-            if driver.imported["titan.test"] then
-                driver.imported["titan.test"].native_output =
-                    source_overrides["titan.test"].native_output
-            end
-        end
         local runner_source, runner_source_err = test_runner.render(cases)
         if not runner_source then exit(runner_source_err) end
         source_overrides[test_runner.MODULE_NAME] =

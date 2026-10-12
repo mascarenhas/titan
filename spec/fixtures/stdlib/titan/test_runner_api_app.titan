@@ -1,0 +1,63 @@
+local test = import "test"
+
+function main(_args: {string}): integer
+  test.assert(not test.testing() and not test.verbose(),
+              "runner was active before its first run")
+
+  local nested_rejected = false
+  local outer_cleaned = false
+  local outer_cases: {test.Case} = {
+    test.Case.new("public_runner.outer", "test_runner_api_app",
+      function (context: test.Context)
+        test.assert(test.testing() and test.verbose(),
+                    "outer run did not activate verbose state")
+        do
+          test.run({}, {})
+        catch
+          test.assert(error == "Titan test runner is already active",
+                      "nested run raised the wrong error")
+          nested_rejected = true
+        end
+        test.assert(nested_rejected, "nested run was accepted")
+        test.assert(test.testing() and test.verbose(),
+                    "nested rejection cleared the outer runner state")
+        context:cleanup(function ()
+          test.assert(test.testing() and test.verbose(),
+                      "outer state ended before cleanup")
+          outer_cleaned = true
+        end)
+      end),
+  }
+  test.assert(test.run({"--verbose"}, outer_cases) == 0,
+              "outer run failed after a caught nested rejection")
+  test.assert(outer_cleaned, "outer cleanup did not execute")
+  test.assert(not test.testing() and not test.verbose(),
+              "successful run left its state active")
+
+  local failing_cases: {test.Case} = {
+    test.Case.new("public_runner.expected_failure", "test_runner_api_app",
+      function (_context: test.Context)
+        test.assert(false, "deliberate public runner failure")
+      end),
+  }
+  test.assert(test.run({"--verbose"}, failing_cases) == 1,
+              "failing run did not return failure status")
+  test.assert(not test.testing() and not test.verbose(),
+              "failing run left its state active")
+
+  local later_called = false
+  local later_cases: {test.Case} = {
+    test.Case.new("public_runner.later", "test_runner_api_app",
+      function (_context: test.Context)
+        test.assert(test.testing() and not test.verbose(),
+                    "later run inherited verbose state")
+        later_called = true
+      end),
+  }
+  test.assert(test.run({}, later_cases) == 0,
+              "later run inherited a previous failure")
+  test.assert(later_called, "later run did not execute its case")
+  test.assert(not test.testing() and not test.verbose(),
+              "later run left its state active")
+  return 0
+end
