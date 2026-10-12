@@ -232,7 +232,20 @@ ifeq ($(TITAN_BUILD_PROFILE),production)
     TITAN_DEFAULT_OPTFLAGS += -flto=auto -ffat-lto-objects
   endif
 endif
-CFLAGS    ?= --std=c99 $(TITAN_DEFAULT_OPTFLAGS) -Wall -Wno-unused-but-set-variable -Wno-unused-function -fPIC -g
+TITAN_DEFAULT_DEBUGFLAGS := -g
+ifeq ($(TITAN_BUILD_PROFILE),production)
+  ifeq ($(origin CFLAGS),undefined)
+    # Probe the configured command, including wrappers; Clang also defines
+    # __GNUC__, so its own identity takes precedence.
+    TITAN_CC_MACROS := $(shell $(CC) -dM -E -x c /dev/null 2>/dev/null)
+    ifneq ($(filter __clang__,$(TITAN_CC_MACROS)),)
+      TITAN_DEFAULT_DEBUGFLAGS := -gline-tables-only -fdebug-info-for-profiling
+    else ifneq ($(filter __GNUC__,$(TITAN_CC_MACROS)),)
+      TITAN_DEFAULT_DEBUGFLAGS := -g1
+    endif
+  endif
+endif
+CFLAGS    ?= --std=c99 $(TITAN_DEFAULT_OPTFLAGS) -Wall -Wno-unused-but-set-variable -Wno-unused-function -fPIC $(TITAN_DEFAULT_DEBUGFLAGS)
 LUA_MYCFLAGS  ?= -fPIC $(TITAN_PROFILE_HOST_FLAGS)
 LUA_MYLDFLAGS ?= $(TITAN_PROFILE_HOST_FLAGS)
 LUA_MYLIBS    ?=

@@ -105,6 +105,13 @@ call/raise sites whose native frames should point back to Titan source.
 The source file does not need to exist at run time: the filename and line
 are carried in the object file's debug information.
 
+Production builds retain these function and line records with GCC's `-g1` or
+Clang's `-gline-tables-only -fdebug-info-for-profiling`, omitting local-variable
+debug information and its tracking work. The trace builder does not inspect
+variable locations. Clang's profiling option preserves ordinary function
+records that line tables alone can omit. Validation retains full `-g`; a later
+`-g` in extra compile/link flags restores it for debugger inspection.
+
 `titanc --no-line-directives`, or `TITAN_NO_LINE_DIRECTIVES=1` for build
 automation, suppresses those directives so native diagnostics instead report
 the generated `.c` file and physical line. This is a diagnostic mode; the

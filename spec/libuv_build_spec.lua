@@ -792,6 +792,15 @@ describe("libuv Makefile configuration", function()
             local print_makefile = root .. "/flags.mk"
             write_file(print_makefile,
                 "print-titan-flags:\n\t@printf '%s\\n' '$(CFLAGS)'\n")
+            -- The executable called gcc is Apple Clang on macOS. Supply exact
+            -- macro identities through a configured command with arguments.
+            local compiler_probe = root .. "/compiler-probe.sh"
+            write_file(compiler_probe, [[
+case "$1" in
+  gcc) printf '#define __GNUC__ 16\n' ;;
+  clang) printf '#define __GNUC__ 4\n#define __clang__ 1\n' ;;
+esac
+]])
             local function flags(host, compiler, override, profile)
                 -- This standalone query runs through a Lua pipe without the
                 -- parent Make jobserver descriptors. Isolate its settings so
@@ -799,7 +808,8 @@ describe("libuv Makefile configuration", function()
                 local argv = { "env", "-u", "TITAN_BUILD_PROFILE", "-u", "CFLAGS", "-u", "MAKEFLAGS",
                     "-u", "MFLAGS", "-u", "GNUMAKEFLAGS", "-u", "MAKELEVEL",
                     "-u", "MAKEOVERRIDES", "make", "--no-print-directory", "-s", "-f", "Makefile",
-                    "-f", print_makefile, "HOST_OS=" .. host, "CC=" .. compiler,
+                    "-f", print_makefile, "HOST_OS=" .. host,
+                    "CC=sh " .. assert(cdriver.shell_quote(compiler_probe)) .. " " .. compiler,
                     "print-titan-flags" }
                 if override then argv[#argv + 1] = "CFLAGS=" .. override end
                 if profile then argv[#argv + 1] = "TITAN_BUILD_PROFILE=" .. profile end
@@ -810,8 +820,13 @@ describe("libuv Makefile configuration", function()
             for _, compiler in ipairs({ "gcc", "clang" }) do
                 local linux = flags("Linux", compiler)
                 assert.matches("-O3 -flto=auto -ffat-lto-objects", linux, 1, true)
+                local debug_flags = compiler == "gcc" and
+                    " -g1\n" or
+                    " -gline-tables-only -fdebug-info-for-profiling\n"
+                assert.matches(debug_flags, linux, 1, true)
                 local darwin = flags("Darwin", compiler)
                 assert.matches("-O3", darwin, 1, true)
+                assert.matches(debug_flags, darwin, 1, true)
                 assert.falsy(darwin:find("-flto", 1, true), darwin)
                 assert.falsy(darwin:find("-ffat-lto-objects", 1, true), darwin)
                 assert.falsy(linux:find("-fno-lto", 1, true), linux)
@@ -821,6 +836,7 @@ describe("libuv Makefile configuration", function()
                     assert.falsy(validation:find("-O3", 1, true), validation)
                     assert.falsy(validation:find("-flto", 1, true), validation)
                     assert.falsy(validation:find("-ffat-lto-objects", 1, true), validation)
+                    assert.matches(" -g\n", validation, 1, true)
                 end
             end
             assert.equal("-O1 -DCUSTOM_DEFAULTS=1\n",
