@@ -306,6 +306,11 @@ resolved from the running interpreter, so these paths follow a moved tree.
 In the currently supported layout `ROCKS_TREE == PREFIX`, so `titanc` can use
 the first entry ending in
 `/lib/lua/5.5/?.so` to recover its Titan SDK/rocks root.
+`titanc --print-prefix` prints that discovered SDK root on Unix and Windows.
+The query does no compilation or C probing, and uses the current Lua
+`package.cpath` rather than a built-in installation path. Consumers can find
+Titan's own license at `<root>/share/titan/LICENSE`.
+
 During the source rock's post-install build, the internal `TITAN_ROCKS_ROOT`
 override identifies `ROCKS_TREE` directly. The recovered Titan root supplies
 the staged Lua sources and archives and compiled provider under

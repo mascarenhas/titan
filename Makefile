@@ -1024,7 +1024,7 @@ titan: lpeglabel libbacktrace libuv openssl llhttp sqlite3 $(TITAN_RUNTIME_LIB) 
 install-titan-sdk: $(TITAN_RUNTIME_LIB) $(TITAN_BOOTSTRAP_SO) $(TITAN_RUNTIME_LUA_LIB) \
 		$(LIBBT_LIB) $(LIBUV_LIB) $(OPENSSL_LIBS) $(LLHTTP_HEADER) \
 		$(SQLITE3_HEADER) $(TITAN_SDK_ROOT_HEADERS) \
-		$(TITAN_SDK_NAMESPACED_HEADERS) stage-titan-bootstrap
+		$(TITAN_SDK_NAMESPACED_HEADERS) LICENSE stage-titan-bootstrap
 	@test -n "$(strip $(ROCKS_TREE))" || { \
 	  echo "ERROR: install-titan-sdk requires ROCKS_TREE" >&2; exit 1; \
 	}
@@ -1036,7 +1036,8 @@ install-titan-sdk: $(TITAN_RUNTIME_LIB) $(TITAN_BOOTSTRAP_SO) $(TITAN_RUNTIME_LU
 	rm -f "$$rocks_tree/include/titan_longjmp.h"; \
 	mkdir -p "$$rocks_tree/src/$(LUA_DIR)" \
 		"$$rocks_tree/include/titan" "$$rocks_tree/lib" \
-		"$$version_dir"; \
+		"$$rocks_tree/share/titan" "$$version_dir"; \
+	install -m 0644 LICENSE "$$rocks_tree/share/titan/LICENSE"; \
 	lua_source="$(abspath $(TITAN_RUNTIME_LUA_SOURCE_PATH))"; \
 	if test "$$lua_source" != "$(LUA_SOURCE_INSTALL_DIR)" || \
 	   test "$$rocks_tree" != "$$(CDPATH= cd "$(PREFIX)" && pwd -P)"; then \

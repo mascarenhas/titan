@@ -158,6 +158,7 @@
 3 spec/symtab_spec.lua 0.024
 3 spec/test_runner_spec.lua 0.112
 1 spec/titanc_parallel_spec.lua 0.029
+1 spec/titanc_prefix_spec.lua 0.050
 4 spec/typedecl_spec.lua 0.005
 3 spec/types_spec.lua 0.185
 4 spec/union_interface_spec.lua 0.590

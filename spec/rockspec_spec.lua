@@ -343,6 +343,8 @@ describe("standalone-prefix source installation", function()
         assert_absent(TITAN_LIBDIR .. "/libtitan-sqlite3.a")
         assert_absent(PREFIX .. "/lib/libssl.a")
         assert_absent(PREFIX .. "/lib/libcrypto.a")
+        assert.equal(read_file("LICENSE"),
+            read_file(PREFIX .. "/share/titan/LICENSE"))
         assert_file(PREFIX .. "/share/titan/THIRD_PARTY_NOTICES.md")
         for _, license in ipairs({
             "libuv-LICENSE", "libuv-LICENSE-extra", "libuv-tree-LICENSE",
