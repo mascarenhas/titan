@@ -12,7 +12,8 @@ local platform = require 'titan-compiler.platform'
 local coverage = require 'titan-compiler.coverage'
 
 local p = argparse('titan', 'Titan compiler')
-p:argument('module', 'Names of the modules to compile.'):args("+")
+p:argument('module', 'Names of the modules to compile.'):args("*")
+p:flag('--print-prefix', 'Print the selected Titan installation prefix and exit.')
 p:flag('--print-ast', 'Print the AST.')
 p:flag('--pretty-print', 'Format generated C and headers with clang-format.')
 p:flag('-v --verbose', 'Be verbose about compiler invocations.')
@@ -77,6 +78,23 @@ local function finish()
     if not closed then
         exit("failed to clean C probe service: " .. tostring(close_err))
     end
+end
+
+if args.print_prefix then
+    if #args.module > 0 then
+        exit("--print-prefix cannot be combined with module names")
+    end
+    local root, root_error = driver.resolve_installation_root(
+        package.cpath, platform.getenv("TITAN_ROCKS_ROOT"))
+    if not root then
+        exit(root_error or "cannot locate the Titan installation prefix: " ..
+            "package.cpath has no matching Titan or Lua installation entry")
+    end
+    io.stdout:write(root, "\n")
+    return
+end
+if #args.module == 0 then
+    exit("at least one module name is required (or use --print-prefix)")
 end
 
 if args.incremental and args.print_ast then

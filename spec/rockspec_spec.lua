@@ -343,6 +343,8 @@ describe("standalone-prefix source installation", function()
         assert_absent(TITAN_LIBDIR .. "/libtitan-sqlite3.a")
         assert_absent(PREFIX .. "/lib/libssl.a")
         assert_absent(PREFIX .. "/lib/libcrypto.a")
+        assert.equal(read_file("LICENSE"),
+            read_file(PREFIX .. "/share/titan/LICENSE"))
         assert_file(PREFIX .. "/share/titan/THIRD_PARTY_NOTICES.md")
         for _, license in ipairs({
             "libuv-LICENSE", "libuv-LICENSE-extra", "libuv-tree-LICENSE",
@@ -1908,6 +1910,7 @@ inspect-lua-sdk:
         end
         workspace = temporary_directory("installed-lua-sdk-build")
         local repository = assert(lfs.currentdir())
+        copy_tree("LICENSE", workspace .. "/LICENSE")
         for _, source in ipairs({
             "titan.c", "titan.h", "minicoro.c", "minicoro.h",
             "ltitanlib.c", "titan/ffi.h",
@@ -1955,6 +1958,8 @@ inspect-lua-sdk:
         end
         assert.equal(read_file(PREFIX .. "/lib/liblua.a"),
             read_file(stage .. "/lib/liblua.a"))
+        assert.equal(read_file("LICENSE"),
+            read_file(stage .. "/share/titan/LICENSE"))
         ok, output = run({ LUA, "-E", "-e", string.format([[
 local open = assert(package.loadlib(%q, "luaopen_titan"))
 assert(type(open()._loadlibglobal) == "function")

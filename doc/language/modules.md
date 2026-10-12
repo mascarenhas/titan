@@ -465,6 +465,16 @@ titanc [--print-ast] [--pretty-print] [-v] [-j jobs] [--static] [--test] \
   [--tree <srcroot>] [-l lib1,lib2] [-X object...] <module>...
 ```
 
+`titanc --print-prefix` is a separate query: it prints the selected installation
+prefix followed by a newline and exits without compiling, probing C tools, or
+creating a probe cache. Do not pass module names with the query. It uses the
+compiler's ordinary `package.cpath` discovery, including Windows installations
+and relocated SDKs, with `TITAN_ROCKS_ROOT` retaining its internal installation
+override. `TITAN_PREFIX` only selects the C-probe cache and does not affect this
+query. An undiscoverable installation reports an error and exits with status 1.
+Build tools can use this query to find the matching SDK rather than infer the
+installation layout from the compiler launcher filename.
+
 * `--tree <srcroot>` sets the source tree root (default `.`); module
   `foo.bar` is looked up first at the folder main
   `<srcroot>/foo/bar/bar.titan`, then at flat source
