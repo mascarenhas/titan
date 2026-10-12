@@ -316,7 +316,15 @@ describe("Titan driver generic build flags", function()
             true), verbose_output)
     end)
 
-    it("uses O3 everywhere and native-container LTO by default on Linux", function()
+    it("uses O3 with backtrace debug info and native-container LTO on Linux", function()
+        local probe = assert(cdriver.split_shell_words(CC))
+        for _, word in ipairs({ "-dM", "-E", "-x", "c",
+                platform.windows and "NUL" or "/dev/null" }) do
+            probe[#probe + 1] = word
+        end
+        local probed, macros = run(probe)
+        assert.truthy(probed, macros)
+        local clang = macros:find("#define __clang__ ", 1, true) ~= nil
         local linux = false
         if not platform.windows then
             local ok, host = run({ "uname", "-s" })
@@ -329,12 +337,39 @@ describe("Titan driver generic build flags", function()
                 checked = checked + 1
                 assert.equal(linux, line:find("'-flto=auto'", 1, true) ~= nil, line)
                 assert.equal(linux, line:find("'-ffat-lto-objects'", 1, true) ~= nil, line)
+                if clang then
+                    assert.truthy(line:find("'-gline-tables-only'", 1, true), line)
+                    assert.truthy(line:find("'-fdebug-info-for-profiling'", 1, true), line)
+                    assert.falsy(line:find("'-g1'", 1, true), line)
+                else
+                    assert.truthy(line:find("'-g1'", 1, true), line)
+                    assert.falsy(line:find("'-gline-tables-only'", 1, true), line)
+                end
+                assert.falsy(line:find("'-g'", 1, true), line)
             end
         end
         assert.is_true(checked >= (platform.windows and 2 or 3), verbose_output)
         for _, line in ipairs(command_lines(verbose_output, "'-shared'")) do
             assert.truthy(line:find("'-O3'", 1, true), line)
         end
+    end)
+
+    it("preserves Titan function names and exact source lines with production debug info", function()
+        local ok, output = run({ LUA, "-e", [[
+            local m = require "flagprobe"
+            local titan = require "titan"
+            assert(not pcall(m.apply, function(n)
+                return m.apply(function() return m.fail_with_traceback() end, n)
+            end, 1))
+            local trace = titan.backtrace()
+            assert(trace:find("flagprobe.titan:11: in flagprobe.invalid_result", 1, true), trace)
+            assert(trace:find("flagprobe.titan:15: in flagprobe.fail_with_traceback", 1, true), trace)
+            local _, callers = trace:gsub("in flagprobe%.apply\n", "")
+            assert(callers == 2, trace)
+            print("OK")
+        ]] })
+        assert.truthy(ok, output)
+        assert.equal("OK\n", output)
     end)
 
     it("lets explicit compile and link flags disable optimization and LTO", function()
@@ -383,6 +418,9 @@ describe("Titan driver generic build flags", function()
                     assert.falsy(line:find("'-O3'", 1, true), line)
                     assert.falsy(line:find("'-flto", 1, true), line)
                     assert.falsy(line:find("'-ffat-lto-objects'", 1, true), line)
+                    assert.truthy(line:find("'-g'", 1, true), line)
+                    assert.falsy(line:find("'-g1'", 1, true), line)
+                    assert.falsy(line:find("'-gline-tables-only'", 1, true), line)
                     checked = checked + 1
                 end
             end

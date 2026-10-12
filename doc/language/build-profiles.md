@@ -4,6 +4,33 @@ Ordinary Titan compilation and installation use the `production` profile. Its
 generated C uses `-O3`, with `-flto=auto -ffat-lto-objects` on Linux. Darwin and
 Windows retain `-O3` without default LTO.
 
+Production debug information is tailored to the configured C compiler:
+
+- GCC uses `-g1`, retaining function names and source lines for backtraces while
+  omitting local variables and disabling variable and assignment tracking.
+- Clang uses `-gline-tables-only -fdebug-info-for-profiling`. Line tables omit
+  variable debug information; the profiling option preserves function records
+  that Titan's traceback symbolizer needs, including ordinary callback frames.
+- Other compilers conservatively retain `-g`.
+
+Titan identifies the compiler through its predefined macros, including when
+`CC` names a wrapper or a command with arguments. Clang takes precedence over
+its GCC compatibility macros. Titan source attribution through `#line` remains
+enabled.
+
+For an interactive debugger build, restore full debug information and select
+debug-friendly optimization in both compile and link flags:
+
+```sh
+TITAN_EXTRA_CFLAGS='-Og -g -fno-lto' \
+TITAN_EXTRA_LDFLAGS='-Og -g -fno-lto' titanc app.main
+```
+
+These extra flags follow the defaults. The later `-g` restores full debug
+information for both GCC and Clang, including ordinary variable tracking.
+Supplying matching link flags also covers Linux LTO. Rebuild existing objects
+when changing flags.
+
 Set `TITAN_BUILD_PROFILE=validation` for development and validation builds:
 
 ```sh
@@ -12,7 +39,8 @@ TITAN_BUILD_PROFILE=validation .lua-validation/bin/luarocks make --force
 TITAN_BUILD_PROFILE=validation .lua-validation/bin/luarocks test
 ```
 
-The validation profile uses `-O0 -fno-lto` for generated code, the Titan native
+The validation profile retains `-g` without disabling variable tracking and uses
+`-O0 -fno-lto` for generated code, the Titan native
 runtime and bundled standard-library payloads. Lua and its compiler dependencies
 (LPegLabel and Lua filesystem), plus the private LPegLabel payload, stay optimized
 at `-O2 -fno-lto`: the Lua-written compiler and its tests execute through them.

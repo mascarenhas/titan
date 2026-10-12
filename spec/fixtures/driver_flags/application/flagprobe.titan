@@ -5,3 +5,16 @@ function selected_branch(): integer
     return (ffi.titan_driver_selected_branch() as integer)
         + (ffi.titan_driver_collision_value() as integer)
 end
+
+local function invalid_result(): integer
+    local invalid: value = {}
+    return invalid
+end
+
+function fail_with_traceback(): integer
+    return invalid_result()
+end
+
+function apply(f: function(integer): integer, n: integer): integer
+    return f(n)
+end
