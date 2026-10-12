@@ -515,8 +515,10 @@ if driver.BUILD_PROFILE ~= "production" and driver.BUILD_PROFILE ~= "validation"
     profile_error = "TITAN_BUILD_PROFILE must be production or validation"
 end
 local profile_flags = driver.BUILD_PROFILE == "validation" and "-O0 -fno-lto" or "-O3"
-local base_cflags = "--std=c99 " .. profile_flags .. " -Wall -Wno-unused-but-set-variable -Wno-unused-function -fPIC -g"
-local default_cflags = base_cflags
+-- Keep function DWARF for backtraces. Compiler-specific debug defaults are
+-- selected lazily when a native command is needed, never during module load.
+local base_cflags = "--std=c99 " .. profile_flags .. " -Wall -Wno-unused-but-set-variable -Wno-unused-function -fPIC"
+local default_cflags = base_cflags .. " -g"
 driver.CFLAGS = default_cflags
 
 driver.CC = platform.getenv("CC") or (platform.windows and "clang.exe" or "cc")
@@ -561,8 +563,18 @@ function driver.foreign_include_dirs()
     return include_dirs
 end
 
-local function select_platform_defaults(uname, is_darwin)
-    local defaults = base_cflags
+local function select_platform_defaults(uname, is_darwin, compiler_family)
+    local debug_flags = "-g"
+    if driver.BUILD_PROFILE == "production" then
+        if compiler_family == "gcc" then
+            debug_flags = "-g1"
+        elseif compiler_family == "clang" then
+            -- Profiling records retain ordinary function names that Clang's
+            -- line tables alone omit, without local-variable debug records.
+            debug_flags = "-gline-tables-only -fdebug-info-for-profiling"
+        end
+    end
+    local defaults = base_cflags .. " " .. debug_flags
     if uname == "Linux" and driver.BUILD_PROFILE == "production" then
         -- Fat objects retain the native sections needed by the metadata and
         -- target readers, plus IR for GCC/Clang's optimizing final link.
@@ -1163,8 +1175,48 @@ function driver.format_generated_file(
     return true
 end
 
+local compiler_family_caches = setmetatable({}, { __mode = "k" })
+local compiler_family_io
+
+local function compiler_family(cc, strategy)
+    local key_parts = {}
+    for _, argument in ipairs(cc) do
+        key_parts[#key_parts + 1] = #argument .. ":" .. argument
+    end
+    local key = table.concat(key_parts)
+    local cache = compiler_family_caches[strategy]
+    if cache and cache[key] then return cache[key] end
+
+    -- This header-free bootstrap cannot use toolchain_descriptor/cprobe: their
+    -- compile prefix already needs the compiler-specific defaults chosen here.
+    local argv = { table.unpack(cc) }
+    append_argv(argv, { "-dM", "-E", "-x", "c",
+        platform.windows and "NUL" or "/dev/null" })
+    local result = strategy:run(argv, { stderr_to_stdout = true })
+    if type(result) ~= "table" or not result.started or not result.ok then
+        local detail = type(result) == "table" and
+            (result.diagnostic or result.output) or result
+        return nil, "cannot identify C compiler family: " ..
+            tostring(detail or "command failed")
+    end
+    local gcc, clang = false, false
+    for line in tostring(result.output or ""):gmatch("[^\r\n]+") do
+        local name = line:match("^%s*#%s*define%s+([%w_]+)")
+        if name == "__clang__" then clang = true
+        elseif name == "__GNUC__" then gcc = true end
+    end
+    local family = clang and "clang" or gcc and "gcc" or "unknown"
+    if not cache then
+        cache = {}
+        compiler_family_caches[strategy] = cache
+    end
+    cache[key] = family
+    return family
+end
+
 local function compiler_argv(include_extra_compile_flags, context)
     if driver.TOOLCHAIN_ERROR then return nil, driver.TOOLCHAIN_ERROR end
+    local supplied_context = context
     if context or not driver.UNAME then
         local owns_context = context == nil
         context = context or driver.new_resolver_context()
@@ -1179,6 +1231,19 @@ local function compiler_argv(include_extra_compile_flags, context)
     local cc, err = parsed_words(driver.CC, "CC")
     if not cc then return nil, err end
     if #cc == 0 then return nil, "CC command is empty" end
+    if driver.BUILD_PROFILE == "production" and driver.CFLAGS == default_cflags then
+        local strategy = supplied_context and supplied_context.io
+        if not strategy then
+            -- Object/link APIs have no resolver argument. Reuse their one lazy
+            -- synchronous strategy so every object does not repeat this probe.
+            compiler_family_io = compiler_family_io or compiler_io.new_sync()
+            strategy = compiler_family_io
+        end
+        local family
+        family, err = compiler_family(cc, strategy)
+        if not family then return nil, err end
+        select_platform_defaults(driver.UNAME, driver.IS_DARWIN, family)
+    end
     local cflags
     cflags, err = parsed_words(driver.CFLAGS, "compiler defaults")
     if not cflags then return nil, err end

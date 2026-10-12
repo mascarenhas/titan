@@ -19,6 +19,174 @@ local titan = require "titan"
 local platform = require "titan-compiler.platform"
 local paths = require "titan-compiler.path"
 
+describe("compiler-specific production debug defaults", function()
+    local function fresh_driver(profile)
+        local original_getenv = platform.getenv
+        local original_driver = package.loaded["titan-compiler.driver"]
+        platform.getenv = function(name)
+            if name == "TITAN_BUILD_PROFILE" then return profile end
+            return original_getenv(name)
+        end
+        package.loaded["titan-compiler.driver"] = nil
+        local loaded, subject = pcall(require, "titan-compiler.driver")
+        platform.getenv = original_getenv
+        package.loaded["titan-compiler.driver"] = original_driver
+        assert.truthy(loaded, subject)
+        return subject
+    end
+
+    local function probe_context(subject, response)
+        local strategy = compiler_io.new_sync()
+        local commands = {}
+        function strategy:run(argv, options)
+            commands[#commands + 1] = { argv = argv, options = options }
+            if type(response) == "function" then return response(argv) end
+            return { started = true, ok = true, output = response }
+        end
+        local context = subject.new_resolver_context({ io = strategy })
+        context._platform_initialized = true
+        context.uname = "Linux"
+        context.is_darwin = false
+        return context, commands
+    end
+
+    local function has_flag(descriptor, flag)
+        for _, argument in ipairs(descriptor.compile_flags) do
+            if argument == flag then return true end
+        end
+        return false
+    end
+
+    for _, case in ipairs({
+        { "GCC", "#define __GNUC__ 16\n", "gcc" },
+        { "Clang despite its GCC compatibility macros",
+          "#define __GNUC__ 4\r\n#define __clang__ 1\r\n", "clang" },
+        { "unknown compilers", "#define __OTHER_CC__ 1\n", "unknown" },
+    }) do
+        it("selects production debug defaults for " .. case[1], function()
+            local subject = fresh_driver("production")
+            subject.CC = "env SENTINEL=present '/tools with spaces/cc' -DCC_OPTION=1"
+            local context, commands = probe_context(subject, case[2])
+            local descriptor = assert(subject.toolchain_descriptor(context))
+            assert.same({ "env", "SENTINEL=present", "/tools with spaces/cc",
+                "-DCC_OPTION=1", "-dM", "-E", "-x", "c",
+                platform.windows and "NUL" or "/dev/null" }, commands[1].argv)
+            assert.is_true(commands[1].options.stderr_to_stdout)
+            assert.equal(case[3] == "gcc",
+                has_flag(descriptor, "-g1"))
+            assert.equal(case[3] == "clang",
+                has_flag(descriptor, "-gline-tables-only"))
+            assert.equal(case[3] == "clang",
+                has_flag(descriptor, "-fdebug-info-for-profiling"))
+            assert.equal(case[3] == "unknown", has_flag(descriptor, "-g"))
+        end)
+    end
+
+    it("caches by parsed compiler argv and I/O strategy and preserves custom flags", function()
+        local subject = fresh_driver("production")
+        local macros = "#define __GNUC__ 16\n"
+        local context, commands = probe_context(subject, function()
+            return { started = true, ok = true, output = macros }
+        end)
+        subject.CC = "'/compiler path' --target=one"
+        assert.truthy(has_flag(assert(subject.toolchain_descriptor(context)),
+            "-g1"))
+        subject.CC = "  '/compiler path'   --target=one  "
+        assert(subject.toolchain_descriptor(context))
+        assert.equal(1, #commands)
+
+        subject.CC = "'/compiler path' --target=two"
+        macros = "#define __GNUC__ 4\n#define __clang__ 1\n"
+        local changed = assert(subject.toolchain_descriptor(context))
+        assert.is_true(has_flag(changed, "-gline-tables-only"))
+        assert.is_false(has_flag(changed, "-g1"))
+        assert.equal(2, #commands)
+
+        local other, other_commands = probe_context(subject, "#define __OTHER_CC__ 1\n")
+        local neutral = assert(subject.toolchain_descriptor(other))
+        assert.is_true(has_flag(neutral, "-g"))
+        assert.is_false(has_flag(neutral, "-gline-tables-only"))
+        assert.equal(1, #other_commands)
+
+        subject.CFLAGS = "-O1 -g3 -DCUSTOM_DEFAULTS=1"
+        subject.CC = "different-compiler"
+        local custom = assert(subject.toolchain_descriptor(other))
+        assert.same({ "-O1", "-g3", "-DCUSTOM_DEFAULTS=1" }, custom.compile_flags)
+        assert.equal(1, #other_commands)
+    end)
+
+    it("reuses one lazy strategy for contextless object and link defaults", function()
+        local subject = fresh_driver("production")
+        subject.CC, subject.UNAME, subject.IS_DARWIN = "compiler-one", "Linux", false
+        local context, commands = probe_context(subject, "#define __GNUC__ 16\n")
+        local original_new_sync = compiler_io.new_sync
+        local created = 0
+        compiler_io.new_sync = function()
+            created = created + 1
+            return context.io
+        end
+        local completed, failure = xpcall(function()
+            assert(subject.generated_compile_prefix())
+            assert(subject.generated_compile_prefix())
+            assert.equal(1, created)
+            assert.equal(1, #commands)
+            subject.CC = "compiler-two"
+            assert(subject.generated_compile_prefix())
+            assert.equal(1, created)
+            assert.equal(2, #commands)
+        end, debug.traceback)
+        compiler_io.new_sync = original_new_sync
+        assert.truthy(completed, failure)
+    end)
+
+    it("keeps validation defaults independent of compiler-family probes", function()
+        local subject = fresh_driver("validation")
+        local context, commands = probe_context(subject, function()
+            error("validation attempted a compiler-family probe")
+        end)
+        local descriptor = assert(subject.toolchain_descriptor(context))
+        assert.is_true(has_flag(descriptor, "-g"))
+        assert.is_true(has_flag(descriptor, "-O0"))
+        assert.is_false(has_flag(descriptor, "-g1"))
+        assert.same({}, commands)
+    end)
+
+    it("reports family-probe failures and retries instead of caching them", function()
+        local subject = fresh_driver("production")
+        local failing = true
+        local context, commands = probe_context(subject, function()
+            if failing then
+                return { started = false, ok = false,
+                    diagnostic = "injected compiler failure" }
+            end
+            return { started = true, ok = true, output = "#define __GNUC__ 16\n" }
+        end)
+        local descriptor, err = subject.toolchain_descriptor(context)
+        assert.is_nil(descriptor)
+        assert.equal("cannot identify C compiler family: injected compiler failure", err)
+        failing = false
+        assert(subject.toolchain_descriptor(context))
+        assert.equal(2, #commands)
+    end)
+
+    it("accepts the selected production debug defaults with the configured C compiler", function()
+        local subject = fresh_driver("production")
+        local context = subject.new_resolver_context()
+        local descriptor = assert(subject.toolchain_descriptor(context))
+        local argv = { table.unpack(descriptor.compiler_argv) }
+        for _, argument in ipairs(descriptor.compile_flags) do
+            argv[#argv + 1] = argument
+        end
+        for _, argument in ipairs({ "-fsyntax-only", "-x", "c",
+                platform.windows and "NUL" or "/dev/null" }) do
+            argv[#argv + 1] = argument
+        end
+        local result = context.io:run(argv, { stderr_to_stdout = true })
+        assert.is_true(result.ok, result.output or result.diagnostic)
+        assert.is_true(subject.close_resolver_context(context))
+    end)
+end)
+
 local function fixture_path(path)
     return platform.windows and "C:" .. path or path
 end
