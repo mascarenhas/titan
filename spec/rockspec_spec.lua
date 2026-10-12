@@ -151,8 +151,6 @@ local TITAN_LIBDIR = PREFIX .. "/lib/titan/0.6"
 local TITAN_RUNTIME_ARCHIVE = TITAN_LIBDIR .. "/libtitan.a"
 local STDLIB_PROVIDER = TITAN_LIBDIR .. "/titan" .. SHARED_SUFFIX
 local STDLIB_STATIC_ARCHIVE = TITAN_LIBDIR .. "/titan.a"
-local TEST_SUPPORT_SOURCE =
-    PREFIX .. "/share/titan/0.6/src/titan/test.titan"
 local LUA_LIBDIR = PREFIX .. "/lib/lua/5.5"
 local LUA_SHAREDIR = PREFIX .. "/share/lua/5.5"
 local STDLIB_SHIMDIR = LUA_SHAREDIR .. "/titan"
@@ -314,9 +312,7 @@ describe("standalone-prefix source installation", function()
         assert_unique_regular_file(STDLIB_PROVIDER)
         if platform.windows then assert_absent(STDLIB_STATIC_ARCHIVE)
         else assert_unique_regular_file(STDLIB_STATIC_ARCHIVE) end
-        assert_unique_regular_file(TEST_SUPPORT_SOURCE)
-        assert.equal(read_file("titan/test.titan"),
-            read_file(TEST_SUPPORT_SOURCE))
+        assert_absent(PREFIX .. "/share/titan/0.6/src/titan/test.titan")
         assert_file(PREFIX ..
             "/share/lua/5.5/titan-compiler/staticmetadata.lua")
         for _, path in ipairs(COMPILER_SLICE_PATHS) do
@@ -978,7 +974,7 @@ int titan_sdk_headers(void) { return LUA_VERSION_NUM + SQLITE_VERSION_NUMBER; }
         end
     end)
 
-    it("copies a prepared provider pair, shims, and test source",
+    it("copies a prepared provider pair and shims without compiler test source",
     function()
         if platform.windows then
             pending("Unix Make publication of the paired DSO and Titan static archive")
@@ -993,6 +989,9 @@ int titan_sdk_headers(void) { return LUA_VERSION_NUM + SQLITE_VERSION_NUMBER; }
         local function seed_layout()
             make_directory(assert(canonical:match("^(.+)/[^/]+$")))
             write_file(canonical, "prior combined image\n")
+            make_directory(workspace .. "/share/titan/0.6/src/titan")
+            write_file(workspace .. "/share/titan/0.6/src/titan/test.titan",
+                "obsolete compiler-owned support source\n")
 
         end
 
@@ -1022,8 +1021,7 @@ int titan_sdk_headers(void) { return LUA_VERSION_NUM + SQLITE_VERSION_NUMBER; }
                         module .. ".lua"))
                 assert_no_obsolete_module_layout(workspace, module)
             end
-            assert.equal(read_file(stage .. "/titan/test.titan"), read_file(
-                workspace .. "/share/titan/0.6/src/titan/test.titan"))
+            assert_absent(workspace .. "/share/titan/0.6/src/titan/test.titan")
             assert_absent(workspace .. "/lib/lua/5.5/titan.so")
             assert_absent(workspace .. "/lib/lua/5.5/titan.so.dSYM")
         end
@@ -1034,10 +1032,6 @@ int titan_sdk_headers(void) { return LUA_VERSION_NUM + SQLITE_VERSION_NUMBER; }
         assert_absent(canonical_archive)
         copy_tree(STDLIB_PROVIDER, stage .. "/titan.so")
         copy_tree(STDLIB_STATIC_ARCHIVE, stage .. "/titan.a")
-        copy_tree("titan/test.titan", stage .. "/titan/test.titan")
-        write_file(stage .. "/titan/test.titan",
-            read_file(stage .. "/titan/test.titan") ..
-            "\n-- exact staged publication source\n")
         for _, module in ipairs(STDLIB_MODULES) do
             copy_tree(STDLIB_SHIMDIR .. "/" .. module .. ".lua",
                 stage .. "/titan/" .. module .. ".lua")

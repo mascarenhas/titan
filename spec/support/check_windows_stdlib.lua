@@ -95,6 +95,4 @@ for index, plan in ipairs(plans) do
     assert(read(stage .. "/" .. modules[index] .. ".lua") == plan.contents,
         "staged shim does not match its exact logical/physical provider: " .. plan.modname)
 end
-assert(read(stage .. "/test.titan") == read(source .. "/titan/test.titan"),
-    "staged compiler test support differs from source")
 print(("Validated %d Windows stdlib protocols, exact PE inventory and shims."):format(#modules))

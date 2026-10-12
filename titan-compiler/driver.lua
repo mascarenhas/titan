@@ -314,8 +314,6 @@ function driver.installed_paths(root)
             "lib/liblua55.a" or "lib/liblua.a"),
         titan_bin = titan_lib,
         lua_cpath = root_join(titan_lib, platform.windows and "?.dll" or "?.so"),
-        test_source = root_join(root, "share/titan/" ..
-            driver.TITAN_LIBRARY_VERSION .. "/src/titan/test.titan"),
     }
 end
 
@@ -433,9 +431,6 @@ local function apply_layout(source_root)
     driver.SOURCE_CHECKOUT = source_root ~= nil
     driver.INSTALLED = not driver.SOURCE_CHECKOUT
     driver.INSTALL_PATHS = driver.installed_paths(driver.TITAN_ROOT)
-    driver.TEST_SUPPORT_SOURCE_PATH = driver.SOURCE_CHECKOUT and
-        append_path(source_root, "titan/test.titan") or
-        (driver.INSTALL_PATHS and driver.INSTALL_PATHS.test_source or nil)
     driver.INSTALLATION_ERROR = driver.INSTALLED and
         not driver.INSTALL_PATHS and
         ("cannot locate the Titan installation: package.cpath has no entry " ..
@@ -524,26 +519,6 @@ local base_cflags = "--std=c99 " .. profile_flags .. " -Wall -Wno-unused-but-set
 local default_cflags = base_cflags
 driver.CFLAGS = default_cflags
 
-function driver.test_support_source_descriptor(context)
-    local filename = driver.TEST_SUPPORT_SOURCE_PATH
-    local is_file
-    if filename and context and context.io then
-        local attributes = context.io:stat(filename)
-        is_file = attributes and attributes.kind == "file"
-    else
-        is_file = filename and lfs.attributes(filename, "mode") == "file"
-    end
-    if not is_file then
-        return nil, "Titan test support source is missing" ..
-            (filename and (" at '" .. filename .. "'") or "")
-    end
-    return {
-        kind = "flat",
-        main = filename,
-        files = { filename },
-        program_output = "titan/test",
-    }
-end
 driver.CC = platform.getenv("CC") or (platform.windows and "clang.exe" or "cc")
 driver.AR = platform.getenv("AR") or "ar"
 driver.RANLIB = platform.getenv("RANLIB") or "ranlib"

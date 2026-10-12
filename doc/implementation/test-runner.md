@@ -7,8 +7,8 @@ the generated runner does not depend on gcovr or perform collection itself.
 
 Titan's test infrastructure has three ordinary pieces:
 
-1. `titan/test.titan`, the public `titan.test` standard module and its
-   source-private runner protocol;
+1. `titan/test.titan`, the ordinary standard module containing the public
+   test API and its execution, filtering, and reporting implementation;
 2. `titan-compiler/test_runner.lua`, which discovers checked test functions and
    renders a synthetic Titan module; and
 3. the `titanc --test` orchestration in `titanc` and `driver.lua`.
@@ -18,53 +18,37 @@ registry identity trick, or second compiler pipeline. The synthetic runner is
 checked, generated, compiled, linked, and initialized as an ordinary logical
 module.
 
-## Resolution and the canonical support source
+## Resolution and the ordinary standard provider
 
 A test invocation creates a resolver context with `source_first = true`.
-For every ordinary non-root dependency, `defaultloader` first asks the tagged folder/flat
-source resolver. A found source or blocked constituent is terminal; only a
-clean miss enters the existing complete `.so`/`.a` format passes, in the order
-selected by `prefer_static`. Explicit roots remain source-required. Ordinary
-resolver contexts retain their binary-first behavior byte-for-byte. This
-source-first policy changes selection only: it does not turn an ordinary import
-into permission to use locals. A written `.titan` import remains the only
-dependency edge that is both source-required and collaboration-capable.
+For every ordinary non-root dependency, `defaultloader` first asks the tagged
+folder/flat source resolver. A found source or blocked constituent is terminal;
+only a clean miss enters the existing complete `.so`/`.a` format passes, in the
+order selected by `prefer_static`. Explicit roots remain source-required.
+Ordinary resolver contexts retain their binary-first behavior. This preference
+changes selection only: a written `.titan` import remains the only dependency
+edge that is source-required and collaboration-capable.
 
-Checker-time static preference is provisional until resolver finalization. If a
-selected archive is later found to carry a source-selected identity, the loader
-rebinds every already selected key from that archive to a DSO before codegen,
-but only when each fallback is ABI-valid and has exactly the same serialized
-interface. Missing or different fallback is a composition error; source is
-never rebound, archive membership is never partially linked, and no rebinding
-occurs after finalization.
+`titan.test` follows this ordinary resolution policy. The compiler neither
+substitutes its source nor creates a separate support translation unit. An
+installed SDK provides it through the same compiled standard provider selected
+for other imports. A static test link therefore retains the standard archive
+without the artificial source overlap formerly created by a support override.
+Actual authored source overlaps retain the general whole-provider composition
+checks; test mode does not weaken those checks.
 
-`source_overrides` is a narrow descriptor map used for two trusted modules.
-The compiler overrides exactly `titan.test` with its canonical source and later
-adds generated `titan.test.runner` contents. It does not add the standard
-library checkout to the user's source path. Checkout mode locates
-`<checkout>/titan/test.titan` from `driver.lua`'s own provenance. Installed
-mode uses the transactionally published
-`<root>/share/titan/0.6/src/titan/test.titan`; a missing/nonregular file is an
-explicit test-mode diagnostic. The generated runner writes
-`import "titan.test.titan"`; that written opt-in plus this trusted source result
-grants access to private declarations. Binary metadata and ordinary source
-imports remain public-only.
+The CLI's `source_overrides` supplies only generated `titan.test.runner`
+contents. Its descriptor carries `files`, an in-memory `contents` map, and the
+usual `program_output`; parsing and checking use the ordinary source pipeline.
+The runner imports `titan.test` publicly, so it has no source-private privilege.
+No test-support source is installed with the SDK or copied into a test build.
 
-Generated descriptors carry `files`, an in-memory `contents` map, the usual
-`program_output`, and optionally a separate `native_output`. `parse_source`
-still parses every listed filename independently and calls the checker once.
-`native_output` changes only the generated C/object destination; logical
-identity, diagnostic locations, and source provenance remain untouched. The
-support translation unit is therefore emitted as
-`<program>__test_support.c/.o` rather than modifying the installed or checkout
-source tree.
-
-In separate (`-c --test`) or incremental test mode, the CLI assigns
-`titan/test__test_support.titan` as the support's `native_output` before loading
-any roots. Commands in the same build directory therefore share one support
-object regardless of requested-root order. Its canonical source filename and
-source-private provider identity remain unchanged. Default `--test` keeps the
-historical per-program output above.
+Ordinary production module code generation is independent of `--test`.
+Production objects can be shared by application and test executables when flags
+and resolved providers match. Direct private imports from tests affect consumer
+visibility, while the producer already contains its source collaboration
+surface. Make still owns dependency and configuration invalidation; coverage,
+optimization, or provider changes can require separate objects.
 
 ## Source discovery
 
@@ -85,63 +69,57 @@ even when a static provider physically carries other logical keys.
 
 ## Synthetic source and native outputs
 
-`titan-compiler/test_runner.lua` hydrates fixed source text with:
+`titan-compiler/test_runner.lua` renders a thin module with:
 
-* one deterministic ordinary import alias per distinct owner;
-* one explicit `import "titan.test.titan"` alias for the private protocol;
-* one exact `function (test.Context): ()` wrapper per case, which discards any result;
-* `TestCase` registration statements; and
-* the fixed runner implementation and `main`.
+* an ordinary public import of `titan.test`;
+* one ordinary import alias per distinct test owner;
+* one exact `function (test.Context): ()` wrapper per case, discarding results;
+* an Array of public `test.Case.new(full_name, owner_module, body)` descriptors;
+  and
+* `main(args)`, which returns `test.run(args, cases)`.
 
-The logical name `titan.test.runner` is reserved in test mode and never appears
-in the standard provider. Test owners remain subject to ordinary import and
-native-symbol naming. A bare owner rewritten by standard-library shorthand is
-rejected before runner checking because generated source has no exact import
-spelling for it; a bare name such as `math` would instead collide with Lua's
-`luaopen_math`. The documented `*_test`/`*_spec` convention avoids those
-pre-existing module constraints. The runner ordinarily imports every accepted
-test owner because discovered test functions are public, and explicitly imports
-`titan.test.titan` for its private protocol. The source descriptor is
-named `<first-program-output>__test_runner.titan`; the ordinary coder produces
-the adjacent `.c/.o`. `compile_program` receives an explicit
-`__test_entrypoint.c` path and links the same standalone objects, selected
-static providers, runtime archive, and `-X` payload order as any other main.
-The first requested root's `program_output` owns the executable, including the
-folder `__main` convention. Input application mains do not participate in main
-selection under `--test`.
+The reserved logical name `titan.test.runner` is absent from the standard
+provider. Test owners remain subject to ordinary import and native-symbol
+naming. A bare owner rewritten by standard-library shorthand is rejected
+because generated source has no exact import spelling for it; a bare name such
+as `math` would instead collide with Lua's `luaopen_math`. The documented
+`*_test`/`*_spec` convention avoids those existing module constraints.
 
-`-c --test` performs discovery so owner objects retain their test-only C flags,
-but stops before creating the synthetic runner, selecting the executable, or
-linking. An incremental final test invocation discovers all current cases and
-always generates a fresh runner and entrypoint; source/support object hits skip
-their normal compiler phases. Make owns invalidation when cases, imports,
-compiler settings, or headers change.
+The generated descriptor is named `<first-program-output>__test_runner.titan`;
+the ordinary coder produces the adjacent `.c/.o`. `compile_program` receives
+an explicit `__test_entrypoint.c` path and links the same standalone objects,
+selected standard providers, runtime archive, and `-X` payload order as any
+other main. The first requested root's `program_output` owns the executable,
+including the folder `__main` convention. Input application mains do not
+participate in main selection under `--test`.
 
+`-c --test` performs discovery so actual test-owner objects retain their C
+flags, then stops before generating the runner or linking. An incremental final
+test invocation discovers current cases from source or object metadata,
+generates a fresh runner and entrypoint, and reuses eligible source objects.
+Make owns invalidation when cases, imports, compiler settings, or headers change.
 
-For executable test builds, before emitting any C,
-`validate_program_output_paths` checks every source,
-support, runner, entrypoint, executable, and Darwin dSYM destination in both
-normalized and physical-parent form. It rejects output/output and output/input
-aliases, ancestor/descendant conflicts, symlink leaves, and an existing leaf of
-the wrong regular-file/directory kind; generated-parent creation never replaces
-an occupied path.
+Before emitting C, `validate_program_output_paths` checks every source,
+runner, entrypoint, executable, and Darwin dSYM destination in both normalized
+and physical-parent form. It rejects aliases, ancestor/descendant conflicts,
+symlink leaves, and leaves of the wrong kind. Generated-parent creation never
+replaces an occupied path.
 
 `driver.compile` accepts an invocation-local `extra_compile_flags` list.
-`titanc` passes `{ "-fno-optimize-sibling-calls" }` after ordinary configured
-C flags only for modules in the discovery owner set. Support, runner,
-entrypoint, non-test source dependencies, probes, and provider objects are not
-changed. This is deliberately object-scoped rather than global mutable driver
-policy.
+`titanc` adds `-fno-optimize-sibling-calls` only for discovery-owner modules.
+The standard provider, runner, entrypoint, production dependencies, and probes
+retain their normal flags. There is no invocation-wide test codegen mode.
 
-## `titan.test` private protocol
+## `titan.test` execution API and private state
 
-The public module serializes only `testing`, `verbose`, `location`, `skip`,
-`assert`, the nominal `Context`, and its four methods. Its fields,
-`RegisteredTest`, callback aliases, markers, state, and all `runner_*` helpers
-are local. The explicit-source runner uses:
+The public module serializes `testing`, `verbose`, `location`, `skip`, `assert`,
+`run`, the nominal `Case` and `Case.new`, the nominal `Skip` with readonly
+`reason`, and `Context` with its four methods. `Case` fields, `Context` fields,
+`RegisteredTest`, callback aliases, execution state, and all `runner_*` helpers
+remain local. The standard module's own execution code uses:
 
 * `runner_begin` / `runner_end` for module-local active and verbose state and
-  the generated runner's logger callback;
+  the standard module's reporting callback;
 * `runner_new_context` to construct the otherwise unconstructible public
   nominal record;
 * `runner_take_subtests` to seal subtest registration and detach the ordered
@@ -155,12 +133,12 @@ A Context has separate `subtests_open` and `cleanups_open` state. The former
 closes at the body-to-descendants transition; the latter closes when cleanup
 starts, so a descendant may deliberately append cleanup to a captured parent.
 Popping before invoking cleanup ensures every registered callback can be
-attempted without retaining a completed closure. `runner_begin` also installs
-the generated runner's logger callback. `Context:log` supplies that callback
-with the context's full name and the message; the runner owns the decorated,
-flushed output line. Runner activation occurs in synthetic `main`, after CLI
-validation and after module initialization; this intentionally leaves
-`testing()` false in initializers and avoids an entrypoint registry protocol.
+attempted without retaining a completed closure. `runner_begin` installs the
+standard module's reporting callback. `Context:log` supplies the context's full
+name and message for a decorated, flushed line. Public `run` parses its arguments
+before activating the state, rejects an already active run, and defers state
+reset around execution. The generated `main` calls it after module
+initialization, so `testing()` stays false in imported initializers.
 
 ## Execution state machine
 
@@ -186,13 +164,15 @@ failed cases 1, and all other runs 0. Reporting uses C99 `putchar`, not
 
 ## Trusted Lua helpers and traces
 
-`titan.test` imports only `lua.h`, `lauxlib.h`, and `titan/ffi.h`. A guarded
+`titan.test` imports `lua.h`, `lauxlib.h`, `titan/ffi.h`, `stdio.h`, and
+`string.h`, and no Titan standard modules. A guarded
 final initializer compiles one fixed Lua chunk with callable `luaL_loadstring`
 and `lua_pcallk`; the function-like `luaL_dostring` macro is intentionally not
 available through the FFI. In a normal standalone, `luaL_openlibs` has already
 run, so this snapshots the helpers before any test-owner initializer. A bare
-validation state may not have opened the standard libraries; that initializer
-catches the load failure and the first later trace or pattern operation retries.
+validation state may not have opened the standard libraries; the initializer
+first checks for the required Lua callables and defers loading when they are
+absent. The first later trace or pattern operation then loads the helpers.
 The chunk snapshots the required base/string callables into locals before it
 returns two traced closures:
 
@@ -201,8 +181,9 @@ returns two traced closures:
 
 Capturing at `titan.test` initialization keeps those helpers valid even when a
 test owner has a logical name such as `math` and replaces the corresponding Lua
-global during standalone initialization. The helper saves the Lua top, reserves stack space, converts returned closures
-to traced Titan function values, and restores the stack through `defer`.
+global during standalone initialization. The helper saves the Lua top, reserves
+stack space, converts returned closures to traced Titan function values, and
+restores the stack through `defer`.
 `runner_error_text` uses the same ledger around `luaL_tolstring` and catches a
 throwing `__tostring`, preserving a fixed fallback.
 
@@ -289,12 +270,11 @@ artifacts do not change normal installed production defaults.
 The shared `spec/support/stdlib_test_modules.mk` manifest names 28 module-owned
 roots under `spec/stdlib/titan/`, used by Linux, macOS, and native Windows.
 The same reviewed inventory names their test/helper compilation units, folder
-contributors, and direct source imports. On Unix, Make compiles shared
-`titan.test` support once with
-`-c --test --incremental titan.test`, then schedules per-module
+contributors, and direct source imports. On Unix, Make schedules per-module
 `-c --test --incremental` commands after their source dependencies. Every
-command runs from `.titan-tests/` with the same absolute source tree and flags.
-The shared support output is `titan/test__test_support.o` within that directory.
+command runs from `.titan-tests/` with the same absolute source tree and flags,
+and depends on the installed standard provider. No separate `titan.test`
+support object is compiled.
 
 One final Unix `--test --incremental --no-uv-bootstrap` invocation keeps all 28
 roots explicit and discovers the complete source/object closure. The designated
@@ -435,14 +415,16 @@ explicitly requested fallback.
 `titan.test` is an ordinary logical module in the combined
 `titan.so`/`titan.a` pair. The current provider has twenty-four `luaopen_*`
 entries including bare support and twenty-three generated logical-module shims.
-The canonical private source is a compiler-data artifact, not another run-time
-module or a LuaRocks manifest C module. Standard installation copies that exact
-source with the provider pair and shims. Explicit packaging tests check the
-installed artifacts.
+The same compiled `titan.test` implementation serves ordinary programs and
+generated test executables. Standard installation publishes the provider pair
+and shims; it does not install a private test-source payload. Packaging tests
+check those artifacts, while compiler regressions verify static-provider
+retention and production-object reuse across application and test links.
 
-The addition did not change an existing native calling convention, module
-state layout, or serialized schema. Use a fresh installation after ABI changes; earlier Titan installations are
-not migration sources.
+The public `Case`, `Skip`, and `run` declarations use the existing native
+calling conventions and metadata schema. Reinstall the compiler and standard
+provider together when changing this API. Use a fresh installation after ABI
+changes; earlier Titan installations are not migration sources.
 
 The unfiltered Windows LuaRocks backend uses the same four compiler/language
 partitions in private NTFS checkout copies after its six retained serial specs

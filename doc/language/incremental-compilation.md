@@ -192,27 +192,29 @@ inputs. Compile-only invocations do not emit an executable or entrypoint.
 
 ## Separate native test executables
 
-Keep all test build commands in the same build directory. Incremental and
-compile-only test modes share the support object at
-`titan/test__test_support.o`, independent of which test root is requested first:
+Compile each test owner after its source dependencies, then link the requested
+roots from a consistent build directory and source-selection configuration:
 
 ```sh
-titanc --test -c --incremental titan.test
 titanc --test -c --incremental project.unit_tests
 titanc --test -c --incremental project.integration_tests
 titanc --test --incremental project.unit_tests project.integration_tests
 ```
 
-`-c --test` discovers cases to apply the test compilation flags but emits no
-runner or executable. The final invocation discovers cases from both fresh
+`-c --test` discovers cases to apply the test-owner compilation flags but emits
+no runner or executable. The final invocation discovers cases from both fresh
 source and current objects, generates a new runner, and links the usual test
 executable. Application `main` functions in test roots remain ignored. Test
 additions/removals become visible after Make rebuilds the owning object.
 
-Give the shared support object its own prerequisite rule before parallel test
-recipes, and track source-private support helpers in the same Make graph.
-Compile test objects with `--test`, consistently preserving the required
-test compilation settings. `--no-uv-bootstrap`, native payloads, and link
-libraries belong on the final command. The standard-library test aggregate
-uses this object graph and one final executable; it retains the same runtime
-filters and test ownership as an ordinary `--test` build.
+`titan.test` is an ordinary dependency of the thin generated runner. An
+installed SDK supplies its compiled implementation; no separate support source
+or object is built. Production source objects may be shared with application
+builds when flags, ABI, and selected dependency providers match. A test's
+explicit `.titan` import does not change the producer's generated code.
+Track imports, foreign headers, provider changes, and configuration inputs in
+the same Make graph. Compile actual test owners with `--test` so their native
+frames retain the required test flags. `--no-uv-bootstrap`, native payloads,
+and link libraries belong on the final command. The standard-library test
+aggregate uses this object graph and one final executable; it retains the same
+runtime filters and test ownership as an ordinary `--test` build.

@@ -57,8 +57,10 @@ produced by the current checker sets the AST's `_source_import` capability.
 Ordinary resolver contexts may also select source after compiled-provider
 passes. The test runner's invocation-local `source_first` policy changes lookup
 order, not visibility: ordinary imports in either context remain public-only.
-The generated runner writes an explicit `import "titan.test.titan"` edge for its
-private protocol. See [Native test runner](test-runner.md).
+The generated runner ordinarily imports `titan.test` and calls its public
+`Case.new`/`run` API; it needs no source-private edge. Tests that inspect an
+application producer's locals still write their own explicit `.titan` import.
+See [Native test runner](test-runner.md).
 
 A checked source module retains a compiler-only overlay on its `Type.Module`:
 

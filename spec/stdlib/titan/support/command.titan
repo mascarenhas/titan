@@ -148,6 +148,13 @@ local function helper_functions(): Helpers
             assert(compiler_io:write_file(platform.join(destination, name), contents))
           end
         end
+        -- Ordinary imports keep the standard provider external on Windows.
+        -- A child launcher resolves it under its own lib/titan/0.6 layout.
+        local provider = os.getenv("TITAN_TEST_PROVIDER_DIR") or
+          platform.join(sdk, "lib/titan/0.6")
+        local contents = assert(compiler_io:read_file(platform.join(provider, "titan.dll")))
+        assert(compiler_io:write_file(
+          platform.join(directory, "lib/titan/0.6/titan.dll"), contents))
       end
 
       local functions = {

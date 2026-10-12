@@ -11,7 +11,6 @@ stage=$(mktemp -d "$build_root/.stdlib-check.XXXXXX")
 trap 'rm -rf "$stage"' EXIT
 cp titan.dll "$stage/titan.dll"
 cp "$build_root/runtime/titan.dll" "$stage/support.dll"
-cp titan/test.titan "$stage/test.titan"
 for module in coroutine uv async timer io fs net ssl url http websocket os path peg string math lua iteration gc test reflect sqlite3 json; do
   cp "titan/$module.lua" "$stage/$module.lua"
 done

@@ -2,6 +2,7 @@ local test = import "test"
 local command = import "support.command.titan"
 local runtime_test = import "support.runtime.titan"
 local common = import "support.common.titan"
+local fs = import "fs"
 
 local function assert_outside_runner_probe(source: string, label: string)
   local output, why, code = command.lua(source)
@@ -20,6 +21,10 @@ function test_outside_runner_publishes_documented_surface(
     assert(type(test.skip) == "function")
     assert(type(test.assert) == "function")
     assert(type(test.Context) == "table")
+    assert(type(test.Case) == "table")
+    assert(type(test.Case.new) == "function")
+    assert(type(test.Skip) == "table")
+    assert(type(test.run) == "function")
 
     local private_names = {
       "Cleanup", "RegisteredTest", "runner_begin", "runner_end",
@@ -43,6 +48,40 @@ function test_outside_runner_reports_inactive_state(_context: test.Context)
     assert(test.testing() == false)
     assert(test.verbose() == false)
   ]==], "outside-runner inactive-state probe")
+end
+
+function test_public_runner_rejects_nested_runs_and_resets_state(
+    _context: test.Context)
+  runtime_test.run(function ()
+    local workspace = fs.tmpname()
+    fs.unlink(workspace)
+    fs.mkdir(workspace)
+    defer command.remove_tree(workspace)
+    fs.write_file(workspace .. "/test_runner_api_app.titan",
+                  fs.read_file("spec/fixtures/stdlib/titan/test_runner_api_app.titan"))
+    local output, why, code = command.compile(workspace, "test_runner_api_app")
+    test.assert(why == "exit" and code == 0,
+                "public runner child compilation failed: " .. output)
+    output, why, code = command.capture({
+      command.program(workspace, "test_runner_api_app"),
+    })
+    test.assert(why == "exit" and code == 0,
+                "public runner lifecycle probe failed: " .. output)
+  end)
+end
+
+function test_caught_skip_exposes_structured_reason(_context: test.Context)
+  local caught = false
+  do
+    test.skip("caught skip reason")
+  catch
+    test.assert(error is test.Skip, "skip omitted its nominal error type")
+    local skip: test.Skip = error
+    test.assert(skip.reason == "caught skip reason",
+                "skip omitted its reason")
+    caught = true
+  end
+  test.assert(caught, "skip did not raise")
 end
 
 function test_outside_runner_raises_readable_errors(_context: test.Context)

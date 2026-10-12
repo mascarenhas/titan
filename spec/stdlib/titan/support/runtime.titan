@@ -2,7 +2,7 @@
 -- The executable bypasses the automatic standalone bootstrap, so a test that
 -- needs async operations starts one Task and pumps one Runtime explicitly.
 local async = import "async"
-local test = import "test.titan"
+local test = import "test"
 foreign import "lua.h"
 foreign import "titan/ffi.h"
 
@@ -30,9 +30,11 @@ end
 local function remember_failure(session: Session, failure: value,
                                 failure_traceback: string,
                                 from_cleanup: boolean)
-  local skipped, reason? = test.runner_skip_reason(failure)
+  local skipped = failure is test.Skip
   local effective = failure
   if from_cleanup and skipped then
+    local skip: test.Skip = failure
+    local reason? = skip.reason
     local message = "test.skip cannot be called from async test cleanup"
     if reason then message = message .. ": " .. (reason as string) end
     effective = message

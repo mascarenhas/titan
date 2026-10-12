@@ -340,8 +340,8 @@ or give concurrent builds separate source copies. See
   the Titan build and complete test run remain single-shot. Run all uncovered
   stdlib/runtime/packaging work, including the aggregate native executable,
   before `ci_test_groups.sh compiler-uncovered`. Snapshot the runtime archive,
-  canonical `titan.so`/`titan.a`, conditional dSYM, all twenty-three shims, and the
-  canonical test-support source before compiler tests, then restore them before
+  canonical `titan.so`/`titan.a`, conditional dSYM, and all twenty-three shims
+  before compiler tests, then restore them before
   the bundled/system OpenSSL production smokes. Keep the real x86_64/arm64 universal
   Mach-O archive lookup and repackaging proof here rather than replacing it
   with a host-only synthetic check. The complete macOS run, including both
@@ -424,12 +424,11 @@ or give concurrent builds separate source copies. See
   shims, and completion state for a no-op subsequent `make stdlib`. Both select
   the installed compiler/SDK by default; `STDLIB_USE_INSTALLED_RUNTIME=0`
   explicitly selects checkout compiler/runtime. Installation copies the completed
-  provider pair, all twenty-three shims, exact `titan/test.titan` compiler source,
-  licenses, and optional macOS dSYM. Explicit packaging and dependency-mode tests
-  own provider protocol, metadata, symbol, and layout validation. The
+  provider pair, all twenty-three shims, licenses, and optional macOS dSYM.
+  Explicit packaging and dependency-mode tests own provider protocol, metadata,
+  symbol, and layout validation. The
   canonical artifacts are `$ROCKS_TREE/lib/titan/0.6/{titan.so,titan.a}`, the DSO's
-  macOS dSYM, the compiler source
-  `$ROCKS_TREE/share/titan/0.6/src/titan/test.titan`, and generated
+  macOS dSYM, and generated
   `$ROCKS_TREE/share/lua/5.5/titan/{coroutine,uv,async,timer,io,fs,net,ssl,url,http,websocket,os,path,peg,string,math,lua,iteration,gc,test,reflect,sqlite3,json}.lua`.
   No symbolic links, hard links, child DSOs, or `lib/lua` compatibility copies
   are used. Earlier Titan installations are not migration sources. These direct
@@ -537,8 +536,13 @@ object/header generation and always rebuilds every explicit root; with
 `--incremental`, its dependencies can be reused. Both modes support `--test`:
 test object recipes use `-c --test --incremental`, while the final
 `--test --incremental` invocation discovers cached cases and emits the current
-runner/entrypoint before linking. These separate test modes share the reserved
-`titan/test__test_support` output stem in their common build directory.
+runner/entrypoint before linking. The thin runner ordinarily imports
+`titan.test` and calls `test.run(args, cases)` with public `test.Case` descriptors.
+The standard module uses the same compiled provider as ordinary applications;
+no source substitution or synthetic support object is involved. Production
+objects can be shared across application and test links when flags and resolved
+providers match. Keep incompatible coverage, toolchain, or provider settings
+separate, and let Make own dependency and configuration invalidation.
 
 `--no-uv-bootstrap` is valid only for a standalone program or `--test`. It
 changes only the generated entrypoint's hook choice: imports and `titan.uv`
@@ -662,15 +666,16 @@ by Linux, macOS, and native Windows;
 `spec/support/stdlib_test_modules.mk` with `titanc -c --test --incremental`,
 then invokes `titanc --test --incremental --no-uv-bootstrap` from
 `.titan-tests/` to combine all 28 roots into the executable. Every command uses
-the same absolute source tree and shared test-support object. Source-first lookup
-does not expose locals through ordinary imports; the generated runner uses
-`import "titan.test.titan"` for its private protocol. The runner is
-Task-independent; each async case explicitly owns `async.run`/`async.loop`
+the same absolute source tree and installed standard provider. Source-first
+lookup does not expose locals through ordinary imports; the generated runner
+uses ordinary `import "titan.test"` and the public `Case.new`/`run` API.
+The standard module owns execution, filtering, reporting, and private state.
+The runner is Task-independent; each async case explicitly owns `async.run`/`async.loop`
 through source-only `support.runtime`, and Runtime-bound cleanup runs in LIFO
 order inside that same supervisor Task before the loop returns. Ordinary later
 `Context:cleanup` is only for non-Runtime resources. The designated program
 root, `test.tests`, owns the one `.titan-tests/test/tests` executable and its
-synthetic support/runner/entrypoint artifacts. Execute it from the repository root with
+synthetic runner/entrypoint artifacts. Execute it from the repository root with
 `make titan-stdlib-test-run`, because fixtures rely on that CWD; `make
 titan-stdlib-test` performs both steps. `TITAN_FILTER` adds one run-time Lua
 pattern but still compiles all 28 roots. The separate build/run targets let CI
@@ -725,7 +730,7 @@ Make-owned state. The Linux compiler job runs on a disposable restored tree and
 has no later production consumer, so it needs no canonical-image snapshot.
 The manual macOS job does have later bundled/system smokes and must snapshot
 and restore the prepared runtime archive, combined standard-library
-DSO/archive/dSYM, all generated shims, and canonical test-support source around
+DSO/archive/dSYM and all generated shims around
 legacy compiler specs that clean root artifacts.
 
 Standard-library tests do not rewrite production source or inspect generated
@@ -1567,8 +1572,8 @@ substitution, recursive; error on missing keys). Key facts:
   pair carries all twenty-three current logical modules, including the
   `titan.io` Interface vocabulary and high-level I/O helpers plus `titan.test`
   `titan.reflect`, `titan.sqlite3`, and `titan.json`.
-  The canonical runner-private source is published at
-  `$ROCKS_TREE/share/titan/0.6/src/titan/test.titan`.
+  Native tests use the ordinary compiled `titan.test` API; no separate
+  runner-private source is installed.
   `titan.so` is the shared runtime provider and also owns bare Lua support,
   while `titan.a` is the corresponding static payload. Bundled libuv enters
   both through the one reviewed `-X` payload rather than an installed child

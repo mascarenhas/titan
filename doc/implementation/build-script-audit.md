@@ -16,8 +16,8 @@ libbacktrace. Windows runtime compilation is a direct build
 of its eight inputs, and OpenSSL uses a binary SDK by default. Versioned source
 acquisition retains checksums and the required upstream corrections.
 
-Standard-library installation copies the built provider, shims, test-support
-compiler source, licenses, and optional symbols. The initial runtime bootstrap
+Standard-library installation copies the built provider, shims, licenses, and
+optional symbols. The initial runtime bootstrap
 is copied only when the canonical provider is absent. Installation has no
 receipt, predecessor classification, metadata scan, or rollback transaction.
 Windows callers must close processes using a destination DLL before replacing it.

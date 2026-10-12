@@ -494,7 +494,6 @@ os.exit(result.ok and 0 or result.status or 1)
             assert.is_true(ran, output)
             assert.matches("[  PASSED  ] 1 test.", output, 1, true)
 
-            compiled("-c", "--test", "--incremental", "titan.test")
             compiled("-c", "--test", "--incremental", wrapper)
             compiled("-c", "--test", "--incremental", APP)
             output = compiled("--test", "--incremental", "-v", APP)
@@ -506,13 +505,12 @@ os.exit(result.ok and 0 or result.status or 1)
 
             compiled("-c", "--test", "--incremental", OTHER)
             local saved = {}
-            for _, stem in ipairs({ wrapper_stem, indirect_stem, direct_stem,
-                    workspace .. "/titan/test__test_support" }) do
+            for _, stem in ipairs({ wrapper_stem, indirect_stem, direct_stem }) do
                 saved[stem .. ".o"] = read(stem .. ".o")
             end
             for _, roots in ipairs({ {APP, OTHER}, {OTHER, APP} }) do
                 output = compiled("--test", "--incremental", "-v", table.unpack(roots))
-                for _, name in ipairs({ APP, OTHER, wrapper, "titan.test" }) do
+                for _, name in ipairs({ APP, OTHER, wrapper }) do
                     assert.matches("Titan object hit " .. name .. ":", output, 1, true)
                 end
                 for filename, bytes in pairs(saved) do assert.equal(bytes, read(filename)) end
@@ -527,11 +525,11 @@ os.exit(result.ok and 0 or result.status or 1)
         assert.is_true(ok, result)
     end)
 
-    it("links separately compiled test owners with shared support and cached discovery", function()
+    it("links separately compiled test owners with a compiled provider and cached discovery", function()
         local helper = NAMESPACE .. ".support"
         local helper_stem = source(helper, [[
-            local test = import "test.titan"
-            function active(): boolean return test.runner_active end
+            local test = import "test"
+            function active(): boolean return test.testing() end
         ]])
         local first_stem = source(APP, 'local support = import "' .. helper .. [[.titan"
             local test = import "test"
@@ -546,14 +544,10 @@ os.exit(result.ok and 0 or result.status or 1)
             function test_second(context: test.Context) test.assert(true) end
             function main(args: {string}): integer return 2 end
         ]])
-        -- The real aggregate also gives all object recipes one private build
-        -- directory. Never write the shared support fixture into the checkout.
+        -- The real aggregate also gives all object recipes one build directory.
         assert(lfs.chdir(workspace))
         local ok, result = xpcall(function()
-            compiled("-c", "--test", "--incremental", "titan.test")
-            local support = workspace .. "/titan/test__test_support"
             local future = os.time() + 60
-            assert(lfs.touch(support .. ".o", future))
             compiled("-c", "--test", "--incremental", helper)
             local first_output = compiled("-c", "--test", "--incremental", "-v", APP)
             assert.matches("-fno-optimize-sibling-calls", first_output, 1, true)
@@ -561,9 +555,9 @@ os.exit(result.ok and 0 or result.status or 1)
             assert.is_false(exists(APP))
             assert.is_false(exists(APP .. "__test_runner.c"))
             assert.is_false(exists("titan/test__test_runner.c"))
-            assert.equal(future, lfs.attributes(support .. ".o", "modification"))
+            assert.is_false(exists(workspace .. "/titan/test__test_support.o"))
             local saved = {}
-            for _, stem in ipairs({ first_stem, second_stem, helper_stem, support }) do
+            for _, stem in ipairs({ first_stem, second_stem, helper_stem }) do
                 for _, suffix in ipairs({ ".o", ".c", ".ffi.h" }) do
                     local path = stem .. suffix
                     saved[path] = read(path)
@@ -571,7 +565,7 @@ os.exit(result.ok and 0 or result.status or 1)
                 end
             end
             local output = compiled("--test", "--incremental", "--verbose", APP, OTHER)
-            for _, name in ipairs({ APP, OTHER, "titan.test" }) do
+            for _, name in ipairs({ APP, OTHER }) do
                 assert.matches("Titan object hit " .. name .. ":", output, 1, true)
             end
             for path, contents in pairs(saved) do
@@ -598,6 +592,80 @@ os.exit(result.ok and 0 or result.status or 1)
         assert(lfs.chdir(REPOSITORY))
         if not ok then error(result, 0) end
     end)
+
+    for _, provider_kind in ipairs({ "static", "dynamic" }) do
+        it("shares unchanged production objects between applications and tests with " ..
+            provider_kind .. " standard providers", function()
+            if platform.windows and provider_kind == "static" then
+                pending("Titan static-provider linking is unsupported on Windows")
+                return
+            end
+            local flags = provider_kind == "static" and { "--static" } or {}
+            local function compile_selected(...)
+                local arguments = { table.unpack(flags) }
+                for _, argument in ipairs({ ... }) do
+                    arguments[#arguments + 1] = argument
+                end
+                return compiled(table.unpack(arguments))
+            end
+            local production = NAMESPACE .. ".production"
+            local production_stem = source(production, [[
+                local math = import "math"
+                local function hidden(): integer return math.abs(-42) end
+                function answer(): integer return hidden() end
+            ]])
+            local app_stem = source(APP, 'local production = import "' .. production .. [["
+                function main(args: {string}): integer return production.answer() end
+            ]])
+            source(OTHER, 'local production = import "' .. production .. [[.titan"
+                local test = import "test"
+                function test_shared(context: test.Context)
+                    test.assert(production.hidden() == 42)
+                    test.assert(production.answer() == 42)
+                    context:cleanup(function() test.assert(test.testing()) end)
+                end
+            ]])
+            local provider = prefix .. "/lib/titan/0.6/titan" ..
+                (provider_kind == "static" and ".a" or SHARED_SUFFIX)
+            local provider_modified = lfs.attributes(provider, "modification")
+            assert.truthy(provider_modified, provider)
+            assert(lfs.chdir(workspace))
+            local ok, failure = xpcall(function()
+                compile_selected("--incremental", APP)
+                exit_code(APP, 42)
+                local future = os.time() + 60
+                local saved = {}
+                for _, stem in ipairs({ production_stem, app_stem }) do
+                    for _, suffix in ipairs({ ".c", ".o", ".ffi.h" }) do
+                        local path = stem .. suffix
+                        saved[path] = read(path)
+                        assert(lfs.touch(path, future))
+                    end
+                end
+                local output = compile_selected("--test", "--incremental", "--verbose", OTHER)
+                assert.matches("Titan object hit " .. production .. ":", output, 1, true)
+                assert.falsy(output:find("__test_support", 1, true), output)
+                assert.is_false(exists(OTHER .. "__test_support.o"))
+                assert.is_false(exists("titan/test__test_support.o"))
+                local ran, run_output = run_program(OTHER)
+                assert.is_true(ran, run_output)
+                assert.matches("[  PASSED  ] 1 test.", run_output, 1, true)
+                assert.matches(OTHER .. ".test_shared", run_output, 1, true)
+                output = compile_selected("--incremental", "--verbose", APP)
+                for _, name in ipairs({ APP, production }) do
+                    assert.matches("Titan object hit " .. name .. ":", output, 1, true)
+                end
+                exit_code(APP, 42)
+                for path, contents in pairs(saved) do
+                    assert.equal(contents, read(path), path)
+                    assert.equal(future, lfs.attributes(path, "modification"), path)
+                end
+                assert.equal(provider_modified, lfs.attributes(provider, "modification"))
+            end, debug.traceback)
+            assert(lfs.chdir(REPOSITORY))
+            assert.is_true(ok, failure)
+        end)
+    end
 
     it("builds a parallel Make DAG and propagates changed inline foreign bodies", function()
         if platform.windows then

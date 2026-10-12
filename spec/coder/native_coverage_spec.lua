@@ -51,6 +51,16 @@ local function run(argv)
     local result = io_strategy:run(argv, { stderr_to_stdout = true })
     return result.ok, result.output or result.diagnostic or ""
 end
+local function run_program(argv)
+    -- Keep the default launcher-relative path for Windows application DLLs.
+    local command = { "env", "TITAN_PATH_0_6=" ..
+        PREFIX .. "/lib/titan/0.6;;" }
+    if platform.windows then
+        table.insert(command, 2, "MSYS2_ENV_CONV_EXCL=TITAN_PATH_0_6")
+    end
+    for _, argument in ipairs(argv) do command[#command + 1] = argument end
+    return run(command)
+end
 local checked_backend, backend_error
 local function available(setup_only)
     if not checked_backend then
@@ -115,7 +125,7 @@ end
 local function execute(filter)
     local argv = { executable() }
     if filter then argv[#argv + 1] = "--filter=" .. filter end
-    return run(argv)
+    return run_program(argv)
 end
 local function annotated()
     return read(workspace .. "/report/coverage.gcov")
@@ -375,7 +385,7 @@ function main(_args: {string}): integer return calc.twice(21) - 42 end
         assert.is_not.equal(measured, read(workspace .. "/calc.o"))
         assert.equal(measured, read(workspace .. "/.coverage/calc.o"))
         local binary = workspace .. (platform.windows and "/bin/release.exe" or "/release")
-        ok, output = run({binary})
+        ok, output = run_program({binary})
         assert.truthy(ok, output)
     end)
 

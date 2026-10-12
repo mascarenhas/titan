@@ -1095,7 +1095,7 @@ describe("libuv Makefile configuration", function()
             local prefix = root .. "/prefix"
             local inputs = {
                 "Makefile", "prepared", "THIRD_PARTY_NOTICES.md",
-                "spec/support/stdlib_test_modules.mk", "titan/test.titan",
+                "spec/support/stdlib_test_modules.mk",
                 "titan/math.titan", "prefix/bin/lua", "prefix/bin/titanc",
                 "prefix/share/lua/5.5/titan-compiler/driver.lua",
                 "prefix/include/minicoro.h", "prefix/include/titan.h",
@@ -1179,8 +1179,8 @@ esac
                 read_file(prefix .. "/lib/titan/0.6/titan.a"))
             assert.equal(read_file(root .. "/titan/math.lua"),
                 read_file(prefix .. "/share/lua/5.5/titan/math.lua"))
-            assert.equal(read_file(root .. "/titan/test.titan"),
-                read_file(prefix .. "/share/titan/0.6/src/titan/test.titan"))
+            assert.is_nil(lfs.symlinkattributes(
+                prefix .. "/share/titan/0.6/src/titan/test.titan"))
             local outputs = {
                 "titan/math.o", "titan/math.c", "titan/math.ffi.h",
                 "titan.so", "titan.a", "titan/math.lua", "build.complete",
@@ -1351,7 +1351,7 @@ set -eu
 compile=false
 for arg in "$@"; do
     if test "$arg" = -c; then compile=true; fi
-    case "$arg" in support.*|test.tests|titan.test) module="$arg" ;; esac
+    case "$arg" in support.*|test.tests) module="$arg" ;; esac
 done
 if ! $compile; then
     test -f ../spec/stdlib/titan/test/tests.o
@@ -1360,18 +1360,13 @@ if ! $compile; then
     printf 'link\n' >> ../build.log
     exit 0
 fi
-if test "$module" = titan.test; then
-    stem=titan/test__test_support
-else
-    test -f titan/test__test_support.o
-    case "$module" in
-      support.command) test -f ../spec/stdlib/titan/support/common.o ;;
-      test.tests) for name in common command runtime; do
-          test -f "../spec/stdlib/titan/support/$name.o"
-        done ;;
-    esac
-    stem="../spec/stdlib/titan/$(printf '%s' "$module" | tr . /)"
-fi
+case "$module" in
+  support.command) test -f ../spec/stdlib/titan/support/common.o ;;
+  test.tests) for name in common command runtime; do
+      test -f "../spec/stdlib/titan/support/$name.o"
+    done ;;
+esac
+stem="../spec/stdlib/titan/$(printf '%s' "$module" | tr . /)"
 mkdir -p "${stem%/*}"
 for suffix in o c ffi.h; do printf 'fixture output\n' > "$stem.$suffix"; done
 printf '%s\n' "$module" >> ../build.log
@@ -1379,7 +1374,7 @@ printf '%s\n' "$module" >> ../build.log
             local argv = { "make", "--no-print-directory", "-s", "-j4", "-C", root,
                 "MAKE=false", "TEST_LUA=true", "TEST_TITANC=sh ../fake-titanc",
                 "TITAN_TEST_INSTALL_ROOT=" .. root,
-                "TITAN_TEST_SUPPORT_SOURCE=prepared", "TITAN_TEST_COMPILER_PREREQS=prepared",
+                "TITAN_TEST_COMPILER_PREREQS=prepared",
                 "TITAN_TEST_PROVIDER_PREREQS=prepared", "TITAN_TEST_FIXTURE_OUTPUTS=prepared",
                 "TITAN_TEST_C_INPUTS_support.common=prepared",
                 "TITAN_TEST_MODULES=" .. table.concat(modules, " "),
@@ -1398,7 +1393,7 @@ printf '%s\n' "$module" >> ../build.log
                 write_file(root .. "/build.log", "")
                 return result
             end
-            local all = { ["titan.test"] = true, link = true }
+            local all = { link = true }
             for _, module in ipairs(modules) do all[module] = true end
             assert.same(all, build())
             assert.same({}, build())
@@ -1411,9 +1406,8 @@ printf '%s\n' "$module" >> ../build.log
                     assert(lfs.touch(root .. "/" .. path:gsub("titan$", suffix), old + 2, old + 2))
                 end
             end
-            for _, suffix in ipairs({ "o", "c", "ffi.h" }) do
-                assert(lfs.touch(root .. "/.titan-tests/titan/test__test_support." .. suffix, old + 1, old + 1))
-            end
+            assert.is_nil(lfs.symlinkattributes(
+                root .. "/.titan-tests/titan/test__test_support.o"))
             assert(lfs.touch(root .. "/.titan-tests/test/tests", old + 3, old + 3))
             assert(lfs.touch(root .. "/spec/stdlib/titan/support/common.titan", old + 4, old + 4))
             assert.same({ ["support.common"] = true, ["support.command"] = true,
@@ -1435,8 +1429,6 @@ printf '%s\n' "$module" >> ../build.log
                 root .. "/.titan-tests/test/tests",
             }
             for _, suffix in ipairs({ "o", "c", "ffi.h" }) do
-                coarse_outputs[#coarse_outputs + 1] = root ..
-                    "/.titan-tests/titan/test__test_support." .. suffix
                 for _, path in ipairs(sources) do
                     coarse_outputs[#coarse_outputs + 1] = root .. "/" ..
                         path:gsub("titan$", suffix)
@@ -4412,9 +4404,6 @@ done
                 '"$shim_dir/peg.lua" "$shim_dir/string.lua"',
                 '"$shim_dir/math.lua" "$shim_dir/lua.lua"',
                 '"$shim_dir/iteration.lua" "$shim_dir/gc.lua" "$shim_dir/test.lua"',
-                'test_source=$prefix_rel/share/titan/0.6/src/titan/test.titan',
-                '"$test_source"',
-                'rm -f "$test_source"',
                 '"$shim_dir/io.lua"',
                 '"$shim_dir/fs.lua" "$shim_dir/net.lua" "$shim_dir/ssl.lua"',
                 '"$shim_dir/url.lua" "$shim_dir/http.lua" "$shim_dir/websocket.lua"',
@@ -5113,7 +5102,11 @@ done
                 "http websocket os path peg string math lua iteration gc test reflect sqlite3 json; do",
                 1, true), workflow)
             assert.truthy(workflow:find(
-                "share/titan/0.6/src/titan/test.titan", 1, true), workflow)
+                'test ! -e "$PREFIX/share/titan/0.6/src/titan/test.titan"',
+                1, true), workflow)
+            assert.falsy(workflow:find(
+                'test -f "$PREFIX/share/titan/0.6/src/titan/test.titan"',
+                1, true), workflow)
 
             local groups = read_file("spec/support/ci_test_groups.sh")
             for _, retained in ipairs({
