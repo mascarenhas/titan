@@ -25,6 +25,10 @@ describe("compiler-specific production debug defaults", function()
         local original_driver = package.loaded["titan-compiler.driver"]
         platform.getenv = function(name)
             if name == "TITAN_BUILD_PROFILE" then return profile end
+            -- These cases select defaults, independent of CI or caller extras.
+            if name == "TITAN_EXTRA_CPPFLAGS" or
+                    name == "TITAN_EXTRA_CFLAGS" or
+                    name == "TITAN_EXTRA_LDFLAGS" then return nil end
             return original_getenv(name)
         end
         package.loaded["titan-compiler.driver"] = nil
