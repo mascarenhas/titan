@@ -1910,6 +1910,7 @@ inspect-lua-sdk:
         end
         workspace = temporary_directory("installed-lua-sdk-build")
         local repository = assert(lfs.currentdir())
+        copy_tree("LICENSE", workspace .. "/LICENSE")
         for _, source in ipairs({
             "titan.c", "titan.h", "minicoro.c", "minicoro.h",
             "ltitanlib.c", "titan/ffi.h",
@@ -1957,6 +1958,8 @@ inspect-lua-sdk:
         end
         assert.equal(read_file(PREFIX .. "/lib/liblua.a"),
             read_file(stage .. "/lib/liblua.a"))
+        assert.equal(read_file("LICENSE"),
+            read_file(stage .. "/share/titan/LICENSE"))
         ok, output = run({ LUA, "-E", "-e", string.format([[
 local open = assert(package.loadlib(%q, "luaopen_titan"))
 assert(type(open()._loadlibglobal) == "function")

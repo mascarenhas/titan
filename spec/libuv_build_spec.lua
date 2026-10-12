@@ -5239,8 +5239,8 @@ done
                     assert.is_true(tonumber(seconds) >= 0)
                 end
             end
-            assert.same({ 39, 31, 42, 41 }, shard_counts)
-            assert.equal(153, assigned_count)
+            assert.same({ 40, 31, 42, 41 }, shard_counts)
+            assert.equal(154, assigned_count)
 
             local stress_partition = read_file(
                 "spec/support/ci_compiler_stress_files.txt")
