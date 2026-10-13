@@ -2,29 +2,29 @@ rockspec_format = "3.0"
 package = "titan"
 version = "0.6.0-1"
 source = {
-   url = "git+https://github.com/titan-lang/titan"
+   url = "git+https://github.com/mascarenhas/titan"
 }
 description = {
-   summary = "Initial prototype of the Titan compiler",
+   summary = "The Titan language compiler and standard library",
    detailed = [[
-      Initial prototype of the Titan compiler.
-      This is a proof-of-concept, implementing a subset of
-      the Titan language.
+      The Titan language compiler and standard library.
+      Titan is a statically-typed application language
+      designed to be familiar to Lua programmers and to
+      seamlessly interoperate with Lua, sharing the Lua
+      GC while compiling to binary modules and standalone
+      executables.
    ]],
    homepage = "http://github.com/titan-lang/titan",
    issues_url = "https://github.com/titan-lang/titan/issues",
-   labels = { "compiler", "lua", "language" },
+   labels = { "compiler", "lua", "language", "titan" },
    license = "MIT"
 }
 dependencies = {
    "lua ~> 5.5",
-   -- The compiler's parser still uses the separately installed Lua module.
-   -- titan.peg embeds its own private, namespaced LPegLabel engine in the
-   -- combined standard-library provider and does not load this C module.
-   "lpeglabel >= 1.5.0",
+   "lpeglabel >= 1.6.2",
    "inspect >= 3.1.0",
-   "argparse >= 0.5.0",
-   "luafilesystem >= 1.7.0",
+   "argparse >= 0.7.0",
+   "luafilesystem >= 1.9.0",
    platforms = {
       windows = { "luv >= 1.52.1" }
    }
@@ -157,7 +157,7 @@ build = {
       ["titan-compiler.platform"] = "titan-compiler/platform.lua",
       ["titan-compiler.process"] = "titan-compiler/process.lua",
       ["titan-compiler.path"] = "titan-compiler/path.lua",
-            ["titan-compiler.windows_path"] = "titan-compiler/windows_path.lua",
+      ["titan-compiler.windows_path"] = "titan-compiler/windows_path.lua",
       ["titan-compiler.windows_publication"] = "titan-compiler/windows_publication.lua",
       ["titan-compiler.test_runner"] = "titan-compiler/test_runner.lua",
       ["titan-compiler.lexer"] = "titan-compiler/lexer.lua",
