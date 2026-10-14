@@ -210,6 +210,8 @@ native-check: native
 # Native LuaRocks installs the compiler and its declared dependencies.
 LUAROCKS ?= $(PREFIX)/bin/luarocks.exe
 LUAROCKS_CONFIG ?= $(PREFIX)/etc/luarocks/config-5.5.lua
+TITAN_BINARY_ROCK_CONFIG := $(LUAROCKS_CONFIG)
+binary-rock: export LUAROCKS_CONFIG = $(shell cygpath -m "$(TITAN_BINARY_ROCK_CONFIG)")
 COMPILER_DEPS_CFLAGS ?= $(if $(filter validation,$(TITAN_BUILD_PROFILE)),$(TITAN_PROFILE_HOST_FLAGS),-O2)
 COMPILER_DEPS_LDFLAGS ?= $(TITAN_PROFILE_HOST_FLAGS)
 export WINDOWS_BUILD_ROOT

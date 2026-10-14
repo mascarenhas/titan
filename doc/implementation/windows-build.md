@@ -408,7 +408,8 @@ existing provider and its 23 generated shims directly without rebuilding or
 validating them.
 
 `mingw32-make -f Makefile.win binary-rock` packs the installed Titan and gives
-the result the native suffix from `luarocks config arch`. Plain LuaRocks 3.13
+the result the native suffix from `luarocks config arch`. It selects the SDK's
+LuaRocks configuration, including its module-based ZIP backend. Plain LuaRocks 3.13
 packing retains the native payload but misleadingly labels it `.all.rock`.
 Use the Make target rather than the one-step `--pack-binary-rock` path.
 `titan-uninstall` removes all installed Titan rock versions in its selected

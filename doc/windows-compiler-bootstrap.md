@@ -84,7 +84,8 @@ its DLL and shims. `publish-stdlib` copies an existing stage without rebuilding 
 Run `stdlib-check` separately to validate that stage.
 
 Use `mingw32-make -f Makefile.win binary-rock` to pack the installed Titan.
-The target gives the result the native platform suffix from
+The target selects the SDK's LuaRocks configuration for packing and gives
+the result the native platform suffix from
 `luarocks config arch`; plain LuaRocks 3.13 packing retains this payload but
 misleadingly labels it `.all.rock`. Avoid the one-step `--pack-binary-rock`
 path. Run `titan-uninstall` from the selected installation to remove all its
