@@ -550,8 +550,12 @@ int titan_sdk_headers(void) { return LUA_VERSION_NUM + SQLITE_VERSION_NUMBER; }
                 '["' .. module .. '"]', 1, true), manifest)
         end
         local stdlib_lua_manifest = manifest_table.lua.titan
+        local deployed_native = manifest_table.lib or {}
         for _, module in ipairs(STDLIB_MODULES) do
-            assert.falsy(manifest:find(module .. SHARED_SUFFIX, 1, true), manifest)
+            local image = module .. SHARED_SUFFIX
+            assert.falsy(retained_native[image], manifest)
+            assert.falsy(deployed_native[image], manifest)
+            assert.falsy((deployed_native.titan or {})[image], manifest)
             assert.truthy(stdlib_lua_manifest and
                 stdlib_lua_manifest[module .. ".lua"], manifest)
         end
@@ -2249,8 +2253,18 @@ describe("relocatable Lua build configuration", function()
             local ok, output = run({ "chmod", "+x", command })
             assert.truthy(ok, output)
         end
-        return tools .. (platform.windows and ";" or ":") ..
-            (os.getenv("PATH") or "/usr/bin:/bin"), marker
+        local path = os.getenv("PATH") or "/usr/bin:/bin"
+        if platform.windows then
+            -- These fixtures invoke MSYS env.exe, whose PATH lookup uses
+            -- POSIX separators even when its native Lua caller uses Windows.
+            local ok, output = run({ "cygpath.exe", "-u", tools })
+            assert.truthy(ok, output)
+            tools = assert(output:match("^%s*(.-)%s*$"))
+            ok, output = run({ "cygpath.exe", "-p", "-u", path })
+            assert.truthy(ok, output)
+            path = assert(output:match("^%s*(.-)%s*$"))
+        end
+        return tools .. ":" .. path, marker
     end
 
     it("preserves Windows Lua linker options in recursive Make arguments", function()
