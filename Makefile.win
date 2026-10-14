@@ -5,7 +5,7 @@ SHELL := $(if $(filter Windows_NT,$(OS)),bash.exe,/bin/bash)
 .SHELLFLAGS := -eu -o pipefail -c
 .DELETE_ON_ERROR:
 .NOTPARALLEL:
-.DEFAULT_GOAL := help
+.DEFAULT_GOAL := all
 
 # Choose the policy before configuring any source or native object graph.
 TITAN_WINDOWS_COVERAGE_GOALS := titan-native-coverage-build titan-native-coverage-run titan-native-coverage
@@ -39,6 +39,7 @@ LUA_CFLAGS ?= $(if $(filter validation,$(TITAN_BUILD_PROFILE)),$(TITAN_PROFILE_H
 LUA_CPPFLAGS ?=
 LUA_LDFLAGS ?= $(TITAN_PROFILE_HOST_FLAGS)
 PREFIX ?= $(CURDIR)/$(if $(filter validation,$(TITAN_BUILD_PROFILE)),.windows-sdk-validation,.windows-sdk)
+ROCKS_TREE ?= $(PREFIX)
 WINDOWS_BUILD_ROOT ?= $(CURDIR)/$(if $(filter validation,$(TITAN_BUILD_PROFILE)),windows-build-validation,windows-build)
 
 # Native GNU Make requires C:/ paths; MSYS Make accepts /c paths. Apply this
@@ -63,11 +64,18 @@ LUA_RC_SOURCE := vendor/lua/lua-$(LUA_VERSION)-windows.rc
 LUA_BIN := $(PREFIX)/bin/lua.exe
 TITAN_VERSION := 0.6.0
 TITAN_LIBRARY_VERSION := $(word 1,$(subst ., ,$(TITAN_VERSION))).$(word 2,$(subst ., ,$(TITAN_VERSION)))
+TITAN_INSTALL_TREE := $(PREFIX)
+TITAN_STDLIB_LUA_DIR ?= $(TITAN_INSTALL_TREE)/share/lua/5.5/titan
+# This is still the only loaded Makefile. GNU Make's word-based path functions
+# split checkout paths containing spaces, so let the recipe shell find its dir.
+TITAN_MAKEFILE_DIR := $(shell dirname $(call quote,$(MAKEFILE_LIST)))/
+include $(call make_path,$(TITAN_MAKEFILE_DIR)scripts/install_compiler.mk)
 
 
 .PHONY: help lua-source lua-source-check lua-build lua lua-check toolchain-check FORCE
 help:
 	@echo 'Windows CLANG64/UCRT x64 targets:'
+	@echo '  all         build the runtime, native dependencies and standard library (default)'
 	@echo '  lua-source  copy the Lua submodule sources unchanged into the Windows source stage'
 	@echo '  lua-source-check  test configured headers with Clang COFF objects (also on Linux)'
 	@echo '  lua-build   build lua55.dll, its import library, and lua.exe'
@@ -252,18 +260,20 @@ runtime-build: lua libbacktrace
 runtime: install-titan-sdk
 
 install-titan-sdk: runtime-build
-	mkdir -p $(call quote,$(PREFIX)/lib/titan/$(TITAN_LIBRARY_VERSION)) \
-	  $(call quote,$(PREFIX)/include/titan) $(call quote,$(PREFIX)/etc/titan) \
-	  $(call quote,$(PREFIX)/share/titan/LICENSES)
-	cp -p $(call quote,$(WINDOWS_BUILD_ROOT)/runtime/libtitan.a) $(call quote,$(PREFIX)/lib/titan/$(TITAN_LIBRARY_VERSION)/libtitan.a)
-	cp -p titan-runtime/titan.h titan-runtime/minicoro.h $(call quote,$(PREFIX)/include/)
-	cp -p titan-runtime/titan/ffi.h $(call quote,$(PREFIX)/include/titan/ffi.h)
-	@if ! test -e $(call quote,$(PREFIX)/lib/titan/$(TITAN_LIBRARY_VERSION)/titan.dll); then \
-	  cp -p $(call quote,$(WINDOWS_BUILD_ROOT)/runtime/titan.dll) $(call quote,$(PREFIX)/lib/titan/$(TITAN_LIBRARY_VERSION)/titan.dll); fi
-	cp -p LICENSE $(call quote,$(PREFIX)/share/titan/LICENSE)
-	cp -p THIRD_PARTY_NOTICES.md $(call quote,$(PREFIX)/share/titan/THIRD_PARTY_NOTICES.md)
-	for filename in $(TITAN_LICENSE_FILES); do cp -p "LICENSES/$$filename" $(call quote,$(PREFIX)/share/titan/LICENSES/); done
-	printf '%s\n' $(call quote,$(TITAN_BUILD_PROFILE)) > $(call quote,$(PREFIX)/etc/titan/build-profile)
+publish-titan-sdk:
+install-titan-sdk publish-titan-sdk:
+	mkdir -p $(call quote,$(TITAN_INSTALL_TREE)/lib/titan/$(TITAN_LIBRARY_VERSION)) \
+	  $(call quote,$(TITAN_INSTALL_TREE)/include/titan) $(call quote,$(TITAN_INSTALL_TREE)/etc/titan) \
+	  $(call quote,$(TITAN_INSTALL_TREE)/share/titan/LICENSES)
+	cp -p $(call quote,$(WINDOWS_BUILD_ROOT)/runtime/libtitan.a) $(call quote,$(TITAN_INSTALL_TREE)/lib/titan/$(TITAN_LIBRARY_VERSION)/libtitan.a)
+	cp -p titan-runtime/titan.h titan-runtime/minicoro.h $(call quote,$(TITAN_INSTALL_TREE)/include/)
+	cp -p titan-runtime/titan/ffi.h $(call quote,$(TITAN_INSTALL_TREE)/include/titan/ffi.h)
+	@if ! test -e $(call quote,$(TITAN_INSTALL_TREE)/lib/titan/$(TITAN_LIBRARY_VERSION)/titan.dll); then \
+	  cp -p $(call quote,$(WINDOWS_BUILD_ROOT)/runtime/titan.dll) $(call quote,$(TITAN_INSTALL_TREE)/lib/titan/$(TITAN_LIBRARY_VERSION)/titan.dll); fi
+	cp -p LICENSE $(call quote,$(TITAN_INSTALL_TREE)/share/titan/LICENSE)
+	cp -p THIRD_PARTY_NOTICES.md $(call quote,$(TITAN_INSTALL_TREE)/share/titan/THIRD_PARTY_NOTICES.md)
+	for filename in $(TITAN_LICENSE_FILES); do cp -p "LICENSES/$$filename" $(call quote,$(TITAN_INSTALL_TREE)/share/titan/LICENSES/); done
+	printf '%s\n' $(call quote,$(TITAN_BUILD_PROFILE)) > $(call quote,$(TITAN_INSTALL_TREE)/etc/titan/build-profile)
 
 runtime-check: runtime
 	CC=$(call quote,$(CC)) AR=$(call quote,$(AR)) RANLIB=$(call quote,$(RANLIB)) \
@@ -282,6 +292,7 @@ stdlib:
 	CC=$(call quote,$(CC)) AR=$(call quote,$(AR)) RANLIB=$(call quote,$(RANLIB)) \
 	  TITAN_EXTRA_CFLAGS=$(call quote,$(if $(ROCK_CFLAGS),$(ROCK_CFLAGS) )$(TITAN_WINDOWS_NATIVE_CFLAGS) $(TITAN_EXTRA_CFLAGS)) \
 	  ROCK_TITANC=$(call quote,$(ROCK_TITANC)) ROCK_LUA=$(call quote,$(ROCK_LUA)) \
+	  STDLIB_USE_INSTALLED_RUNTIME=$(call quote,$(STDLIB_USE_INSTALLED_RUNTIME)) \
 	  bash scripts/build_windows_stdlib.sh $(call quote,$(WINDOWS_BUILD_ROOT)) $(call quote,$(PREFIX)) $(STDLIB_ROOTS)
 
 stdlib-check:
@@ -292,11 +303,11 @@ install-stdlib: stdlib
 
 # Publishing an already built stage must not rebuild or replace its inputs.
 publish-stdlib:
-	mkdir -p $(call quote,$(PREFIX)/lib/titan/$(TITAN_LIBRARY_VERSION)) \
-	  $(call quote,$(PREFIX)/share/lua/5.5/titan)
-	cp -p titan.dll $(call quote,$(PREFIX)/lib/titan/$(TITAN_LIBRARY_VERSION)/titan.dll)
-	for module in $(STDLIB_MODULES); do cp -p "titan/$$module.lua" $(call quote,$(PREFIX)/share/lua/5.5/titan/); done
-	rm -f $(call quote,$(PREFIX)/share/titan/$(TITAN_LIBRARY_VERSION)/src/titan/test.titan)
+	mkdir -p $(call quote,$(TITAN_INSTALL_TREE)/lib/titan/$(TITAN_LIBRARY_VERSION)) \
+	  $(call quote,$(TITAN_STDLIB_LUA_DIR))
+	cp -p titan.dll $(call quote,$(TITAN_INSTALL_TREE)/lib/titan/$(TITAN_LIBRARY_VERSION)/titan.dll)
+	for module in $(STDLIB_MODULES); do cp -p "titan/$$module.lua" $(call quote,$(TITAN_STDLIB_LUA_DIR)/); done
+	rm -f $(call quote,$(TITAN_INSTALL_TREE)/share/titan/$(TITAN_LIBRARY_VERSION)/src/titan/test.titan)
 
 compiler-publication-check: runtime
 	bash spec/support/check_windows_publication.sh $(call quote,$(WINDOWS_BUILD_ROOT)) $(call quote,$(PREFIX))
@@ -344,7 +355,7 @@ titan-native-coverage: titan-native-coverage-build
 	+$(MAKE) -f Makefile.win titan-native-coverage-run
 
 .PHONY: rock-test test
-rock-test: export TITAN_ROCK_TEST_STDLIB_SPECS = spec/asan_generated_c_context_spec.lua spec/dense_array_runtime_spec.lua spec/libuv_build_spec.lua spec/lpeglabel_build_spec.lua spec/minicoro_spec.lua spec/rockspec_spec.lua
+rock-test: export TITAN_ROCK_TEST_STDLIB_SPECS = spec/asan_generated_c_context_spec.lua spec/dense_array_runtime_spec.lua spec/libuv_build_spec.lua spec/lpeglabel_build_spec.lua spec/minicoro_spec.lua spec/rockspec_spec.lua spec/titan_install_spec.lua
 rock-test: export TITAN_ROCK_TEST_SUPERVISOR = $(TITAN_TEST_BUILD_DIR)/sdk/bin/windows-test-supervisor.exe
 rock-test: titan-stdlib-test
 	PREFIX=$(call quote,$(PREFIX)) TITAN_ROCK_TEST_INTERNAL=1 \
@@ -357,13 +368,35 @@ test: compiler
 	  --tree=$(call quote,$(shell cygpath -m "$(PREFIX)")) test titan-0.6.0-1.rockspec \
 	  CC=$(call quote,$(CC)) LD=$(call quote,$(CC)) AR=$(call quote,$(AR)) RANLIB=$(call quote,$(RANLIB))
 
-# LuaRocks builds the SDK before deploying compiler modules, then invokes the
-# installed compiler for the source-only stdlib hook.
-.PHONY: titan rock-post-install check-rocks-tree
+# The native Windows build prepares DLL SDK dependencies in PREFIX. Build the
+# stdlib with this source rock's Lua compiler before LuaRocks deploys any files.
+.PHONY: all install publish-titan-sdk check-rocks-tree
 check-rocks-tree:
-	@test $(call quote,$(PREFIX)) -ef $(call quote,$(ROCKS_TREE)) || { \
+	@test $(call quote,$(PREFIX)) = $(call quote,$(ROCKS_TREE)) || \
+	  test $(call quote,$(PREFIX)) -ef $(call quote,$(ROCKS_TREE)) || { \
 	  echo 'The Windows source rock requires --tree to select the Lua SDK prefix.' >&2; exit 1; }
 
-titan: check-rocks-tree runtime native
+all: check-rocks-tree runtime native
+	+$(MAKE) -f Makefile.win stdlib STDLIB_USE_INSTALLED_RUNTIME=0
 
-rock-post-install: check-rocks-tree install-stdlib
+ifneq ($(strip $(INST_PREFIX)),)
+install: check-rocks-tree install-compiler install-rock-tools stage-rock-payload
+.PHONY: stage-rock-payload
+stage-rock-payload:
+	+$(MAKE) -f Makefile.win publish-titan-sdk publish-stdlib \
+	  TITAN_INSTALL_TREE=$(call quote,$(INST_PREFIX)/titan-sdk) \
+	  TITAN_STDLIB_LUA_DIR=$(call quote,$(INST_LUADIR)/titan)
+	# Retain only this controlled native SDK, never unrelated prefix contents.
+	mkdir -p $(call quote,$(INST_PREFIX)/titan-sdk/bin) \
+	  $(call quote,$(INST_PREFIX)/titan-sdk/lib) $(call quote,$(INST_PREFIX)/titan-sdk/include)
+	for filename in libuv-1.dll libllhttp-9.4.dll libsqlite3-0.dll libcrypto-3-x64.dll libssl-3-x64.dll; do \
+	  cp -p "$(PREFIX)/bin/$$filename" $(call quote,$(INST_PREFIX)/titan-sdk/bin/); done
+	for filename in libuv.dll.a libllhttp.dll.a libsqlite3.dll.a libcrypto.dll.a libssl.dll.a libbacktrace.a; do \
+	  cp -p "$(PREFIX)/lib/$$filename" $(call quote,$(INST_PREFIX)/titan-sdk/lib/); done
+	for filename in uv.h llhttp.h sqlite3.h backtrace.h backtrace-supported.h; do \
+	  cp -p "$(PREFIX)/include/$$filename" $(call quote,$(INST_PREFIX)/titan-sdk/include/); done
+	cp -pR $(call quote,$(PREFIX)/include/uv) $(call quote,$(PREFIX)/include/openssl) \
+	  $(call quote,$(INST_PREFIX)/titan-sdk/include/)
+else
+install: check-rocks-tree install-compiler publish-titan-sdk publish-stdlib
+endif

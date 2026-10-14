@@ -427,7 +427,7 @@ provider together when changing this API. Use a fresh installation after ABI
 changes; earlier Titan installations are not migration sources.
 
 The unfiltered Windows LuaRocks backend uses the same four compiler/language
-partitions in private NTFS checkout copies after its six retained serial specs
+partitions in private NTFS checkout copies after its seven retained serial specs
 and native aggregate pass. It defaults to two workers and accepts
 `TITAN_ROCK_TEST_JOBS=1` through `4`. The shard containing explicit compiler
 parallelism tests runs without other shards active. Workers inherit private

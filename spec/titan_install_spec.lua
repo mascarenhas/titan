@@ -1,0 +1,337 @@
+local assert = require "luassert"
+local lfs = require "lfs"
+local temporary = require "spec.support.temporary"
+
+local function directory(path)
+    if lfs.attributes(path, "mode") == "directory" then return end
+    local parent = path:match("^(.*)/[^/]+$")
+    if parent and parent ~= "" then directory(parent) end
+    assert(lfs.mkdir(path))
+end
+
+local function write(path, value)
+    directory(assert(path:match("^(.*)/[^/]+$")))
+    local file <close> = assert(io.open(path, "wb"))
+    assert(file:write(value))
+end
+
+local function read(path)
+    local file <close> = assert(io.open(path, "rb"))
+    return file:read("*a")
+end
+
+local function remove_tree(path)
+    local mode = lfs.symlinkattributes(path, "mode")
+    if mode == "directory" then
+        for name in lfs.dir(path) do
+            if name ~= "." and name ~= ".." then remove_tree(path .. "/" .. name) end
+        end
+        assert(lfs.rmdir(path))
+    elseif mode then
+        assert(os.remove(path))
+    end
+end
+
+describe("retained Titan SDK installation", function()
+    local workspace, installer, execute, remove
+
+    before_each(function()
+        workspace = temporary.name()
+        assert(os.remove(workspace))
+        directory(workspace)
+        local previous = assert(lfs.currentdir())
+        assert(lfs.chdir(workspace))
+        workspace = assert(lfs.currentdir()):gsub("\\", "/")
+        assert(lfs.chdir(previous))
+        installer = assert(loadfile("scripts/titan_install.lua"))()
+        execute = os.execute
+        remove = os.remove
+    end)
+
+    after_each(function()
+        os.execute = execute
+        os.remove = remove
+        remove_tree(workspace)
+    end)
+
+    it("publishes exact payload files and timestamps while preserving the matching Lua SDK", function()
+        local private = workspace .. "/rocks/titan/0.6.0-1"
+        local prefix = workspace .. "/SDK 'quoted'"
+        local payload = private .. "/titan-sdk"
+        write(payload .. "/lib/titan/0.6/titan.so", "built provider")
+        write(payload .. "/lib/titan/0.6/titan.so.dSYM/Contents/Resources/DWARF/titan.so", "debug symbols")
+        write(payload .. "/include/titan.h", "Titan header")
+        write(payload .. "/src/lua-5.5.1/lua.h", "packaged Lua")
+        write(payload .. "/lib/liblua.a", "packaged Lua archive")
+        write(payload .. "/include/lua.h", "packaged public Lua header")
+        write(payload .. "/bin/lua55.dll", "packaged Lua DLL")
+        for _, name in ipairs({ "src/lua-5.5.1/lua.h", "lib/liblua.a",
+            "include/lua.h", "bin/lua55.dll" }) do
+            write(prefix .. "/" .. name, "existing Lua owner")
+        end
+        local built_time = 1000000000 -- Representable by both POSIX and Windows CRT.
+        assert(lfs.touch(payload .. "/lib/titan/0.6/titan.so", built_time, built_time))
+
+        assert(installer.publish(private, prefix, prefix, prefix .. "/bin/luarocks"))
+
+        assert.equal("built provider", read(prefix .. "/lib/titan/0.6/titan.so"))
+        assert.equal(built_time, lfs.attributes(prefix .. "/lib/titan/0.6/titan.so", "modification"))
+        assert.equal("Titan header", read(prefix .. "/include/titan.h"))
+        for _, name in ipairs({ "src/lua-5.5.1/lua.h", "lib/liblua.a",
+            "include/lua.h", "bin/lua55.dll" }) do
+            assert.equal("existing Lua owner", read(prefix .. "/" .. name))
+        end
+        if package.config:sub(1, 1) ~= "\\" then
+            assert.equal("rwxr-xr-x", lfs.attributes(prefix .. "/lib/titan/0.6/titan.so", "permissions"))
+            assert.equal("rw-r--r--", lfs.attributes(prefix .. "/include/titan.h", "permissions"))
+            assert.equal("rw-r--r--", lfs.attributes(prefix ..
+                "/lib/titan/0.6/titan.so.dSYM/Contents/Resources/DWARF/titan.so", "permissions"))
+        end
+        local location = assert(loadfile(private .. "/installer/location.lua"))()
+        assert.equal(prefix .. "/bin/luarocks", location.luarocks)
+    end)
+
+    it("preserves external files when LuaRocks refuses dependency-breaking removal", function()
+        local private = workspace .. "/rocks/titan/0.6.0-1"
+        local prefix = workspace .. "/SDK"
+        write(private .. "/titan-sdk/lib/titan/0.6/titan.so", "provider")
+        directory(prefix)
+        assert(installer.publish(private, prefix, prefix, prefix .. "/bin/luarocks"))
+        local program = workspace .. "/external tools/luarocks"
+        os.execute = function(command)
+            assert.truthy(command:find("remove", 1, true))
+            assert.falsy(command:find("--force", 1, true))
+            assert.truthy(command:find(program, 1, true))
+            assert.truthy(command:find("--lua-version", 1, true))
+            assert.truthy(command:find("--lua-dir", 1, true))
+            return nil, "exit", 1
+        end
+
+        local removed, message = installer.uninstall(private, program)
+
+        assert.is_nil(removed)
+        assert.matches("SDK files were preserved", message, 1, true)
+        assert.equal("provider", read(prefix .. "/lib/titan/0.6/titan.so"))
+        assert.equal("directory", lfs.attributes(private, "mode"))
+    end)
+
+    it("rejects linked destination parents before publishing or removing the rock", function()
+        local private, prefix = workspace .. "/rocks/titan/0.6.0-1", workspace .. "/SDK"
+        local outside = workspace .. "/outside"
+        write(private .. "/titan-sdk/include/titan.h", "packaged header")
+        write(outside .. "/titan.h", "external owner")
+        directory(prefix)
+        local linked = lfs.link(outside, prefix .. "/include", true)
+        if not linked then
+            pending("directory symlink creation is unavailable")
+            return
+        end
+        local published, message = pcall(installer.publish,
+            private, prefix, prefix, prefix .. "/bin/luarocks")
+        assert.is_false(published)
+        assert.matches("parent is not an ordinary directory", message, 1, true)
+        assert.equal("external owner", read(outside .. "/titan.h"))
+
+        write(private .. "/installer/location.lua", string.format(
+            "return { tree = %q, luarocks = %q }", prefix, prefix .. "/bin/luarocks"))
+        os.execute = function() error("LuaRocks must not remove the rock", 0) end
+        local removed
+        removed, message = pcall(installer.uninstall, private)
+        assert.is_false(removed)
+        assert.matches("parent is not an ordinary directory", message, 1, true)
+        assert.equal("external owner", read(outside .. "/titan.h"))
+        assert.equal("directory", lfs.attributes(private, "mode"))
+    end)
+
+    it("replaces installed files without changing an already open image", function()
+        local private, prefix = workspace .. "/rocks/titan/0.6.0-1", workspace .. "/SDK"
+        write(private .. "/titan-sdk/lib/titan/0.6/titan.so", "replacement")
+        write(prefix .. "/lib/titan/0.6/titan.so", "original")
+        local image <close> = assert(io.open(prefix .. "/lib/titan/0.6/titan.so", "rb"))
+        local published, message = pcall(installer.publish,
+            private, prefix, prefix, prefix .. "/bin/luarocks")
+        if package.config:sub(1, 1) == "\\" and not published then
+            assert.equal("original", read(prefix .. "/lib/titan/0.6/titan.so"))
+        else
+            assert.truthy(published, message)
+            assert.equal("replacement", read(prefix .. "/lib/titan/0.6/titan.so"))
+        end
+        assert.equal("original", image:read("*a"))
+    end)
+
+    it("reports recovery when a native image stays locked after LuaRocks removal", function()
+        local private, prefix = workspace .. "/rocks/titan/0.6.0-1", workspace .. "/SDK"
+        local image = prefix .. "/lib/titan/0.6/titan.dll"
+        write(private .. "/titan-sdk/lib/titan/0.6/titan.dll", "provider")
+        directory(prefix)
+        assert(installer.publish(private, prefix, prefix, prefix .. "/bin/luarocks"))
+        os.execute = function()
+            remove_tree(private)
+            return true, "exit", 0
+        end
+        os.remove = function(path)
+            if path == image then return nil, "permission denied" end
+            return remove(path)
+        end
+
+        local removed, message = installer.uninstall(private)
+
+        assert.is_nil(removed)
+        assert.matches("LuaRocks removed Titan", message, 1, true)
+        assert.matches(image, message, 1, true)
+        assert.matches("reinstall the rock", message, 1, true)
+        assert.equal("provider", read(image))
+        assert.is_nil(lfs.attributes(private))
+    end)
+
+    it("returns the cleanup status from a self-removing Windows batch launcher", function()
+        if package.config:sub(1, 1) ~= "\\" then
+            pending("native CMD batch retirement")
+            return
+        end
+        local private = workspace .. "/rocks/titan/0.6.0-1"
+        local prefix = workspace .. "/SDK with spaces"
+        local launcher = prefix .. "/bin/titan-uninstall.bat"
+        local entry = prefix .. "/cleanup.lua"
+        local lua = require("spec.support.installed_prefix").active() .. "/bin/lua.exe"
+        write(private .. "/titan-sdk/include/titan.h", "header")
+        write(entry, string.format([[
+if arg[1] == "--refuse" then os.exit(1) end
+assert(os.remove(%q))
+assert(os.remove(arg[0]))
+]], launcher))
+        write(launcher, '@echo off\r\nsetlocal\r\n"' .. lua:gsub("/", "\\") ..
+            '" "' .. entry:gsub("/", "\\") .. '" %*\r\nexit /b %ERRORLEVEL%\r\n')
+        assert(installer.publish(private, prefix, prefix, "unused-luarocks.exe"))
+
+        local command = 'type NUL && "' .. launcher:gsub("/", "\\") .. '"'
+        local refused, _, status = execute(command .. " --refuse")
+        assert.falsy(refused)
+        assert.equal(1, status)
+        assert.equal("file", lfs.attributes(launcher, "mode"))
+        local caller, sentinel = workspace .. "/caller.bat", workspace .. "/caller-status"
+        write(caller, '@echo off\r\ncall "' .. launcher:gsub("/", "\\") ..
+            '" %*\r\nset "result=%ERRORLEVEL%"\r\n> "' .. sentinel:gsub("/", "\\") ..
+            '" echo %result%\r\nexit /b %result%\r\n')
+        local call = 'type NUL && "' .. caller:gsub("/", "\\") .. '"'
+        refused, _, status = execute(call .. " --refuse")
+        assert.falsy(refused)
+        assert.equal(1, status)
+        assert.equal("1", read(sentinel):match("%S+"))
+        local removed, why, code = execute(call)
+        assert.truthy(removed, tostring(why) .. " " .. tostring(code))
+        assert.equal("0", read(sentinel):match("%S+"))
+        assert.equal("file", lfs.attributes(caller, "mode"))
+        assert.is_nil(lfs.attributes(launcher))
+        assert.is_nil(lfs.attributes(entry))
+    end)
+
+    it("removes stale bundled OpenSSL and obsolete Unix SDK paths when publishing system mode", function()
+        if package.config:sub(1, 1) == "\\" then
+            pending("Windows system OpenSSL retains its copied native SDK")
+            return
+        end
+        local private, prefix = workspace .. "/rocks/titan/0.6.0-1", workspace .. "/SDK"
+        write(private .. "/titan-sdk/include/titan.h", "current header")
+        write(private .. "/installer/openssl-mode", "system\n")
+        local obsolete = { "include/openssl/ssl.h", "include/titan_longjmp.h",
+            "lib/libtitan.a", "lib/libuv.a" }
+        for _, name in ipairs(obsolete) do write(prefix .. "/" .. name, "obsolete") end
+        write(prefix .. "/include/unrelated.h", "other SDK")
+
+        assert(installer.publish(private, prefix, prefix, prefix .. "/bin/luarocks"))
+
+        for _, name in ipairs(obsolete) do assert.is_nil(lfs.symlinkattributes(prefix .. "/" .. name), name) end
+        assert.is_nil(lfs.symlinkattributes(prefix .. "/include/openssl"))
+        assert.equal("current header", read(prefix .. "/include/titan.h"))
+        assert.equal("other SDK", read(prefix .. "/include/unrelated.h"))
+    end)
+
+    it("recognizes a physical Lua prefix alias and copies the SDK only into a separate Unix tree", function()
+        if package.config:sub(1, 1) == "\\" then
+            pending("Windows installations keep the Lua SDK and rock tree together")
+            return
+        end
+        local private, lua = workspace .. "/rocks/titan/0.6.0-1", workspace .. "/Lua"
+        local alias, separate = workspace .. "/Lua alias", workspace .. "/separate tree"
+        write(private .. "/titan-sdk/lib/liblua.a", "packaged SDK")
+        write(private .. "/titan-sdk/src/lua-5.5.1/lua.h", "packaged internal header")
+        write(lua .. "/lib/liblua.a", "Lua owner")
+        write(lua .. "/src/lua-5.5.1/lua.h", "Lua owner header")
+        assert(lfs.link(lua, alias, true))
+
+        assert(installer.publish(private, alias, lua, lua .. "/bin/luarocks"))
+        assert.equal("Lua owner", read(lua .. "/lib/liblua.a"))
+        assert.equal("Lua owner header", read(lua .. "/src/lua-5.5.1/lua.h"))
+
+        assert(installer.publish(private, separate, lua, lua .. "/bin/luarocks"))
+        assert.equal("packaged SDK", read(separate .. "/lib/liblua.a"))
+        assert.equal("packaged internal header", read(separate .. "/src/lua-5.5.1/lua.h"))
+        assert.equal("Lua owner", read(lua .. "/lib/liblua.a"))
+    end)
+
+    it("rejects a separate Windows tree before copying SDK files", function()
+        local configuration = package.config
+        package.config = "\\" .. configuration:sub(2)
+        local loaded, windows_installer = pcall(function()
+            return assert(loadfile("scripts/titan_install.lua"))()
+        end)
+        package.config = configuration
+        assert.truthy(loaded, windows_installer)
+        local private, lua = workspace .. "/rocks/titan/0.6.0-1", workspace .. "/Lua"
+        local separate = workspace .. "/separate tree"
+        write(private .. "/titan-sdk/include/titan.h", "Titan header")
+        directory(lua)
+
+        local published, message = pcall(windows_installer.publish,
+            private, separate, lua, lua .. "/bin/luarocks")
+
+        assert.is_false(published)
+        assert.matches("requires the Lua SDK prefix", message, 1, true)
+        assert.is_nil(lfs.symlinkattributes(separate .. "/include/titan.h"))
+    end)
+
+    it("captures every version before removal and cleans only Titan-owned external files", function()
+        local versions = workspace .. "/rocks/titan"
+        local prefix = workspace .. "/SDK"
+        local lua = package.config:sub(1, 1) == "\\" and prefix or workspace .. "/Lua"
+        directory(prefix)
+        directory(lua)
+        local current = versions .. "/0.6.0-1"
+        local old = versions .. "/0.5.0-1"
+        local preserved = {
+            "lib/liblua.a", "src/lua-5.5.1/lua.h", "lib/libbacktrace.a",
+            "lib/libuv.dll.a", "include/uv.h", "bin/libuv-1.dll",
+            "lib/titan/0.6/application.a",
+        }
+        for _, name in ipairs(preserved) do
+            write(current .. "/titan-sdk/" .. name, name)
+            if lua == prefix and (name == "lib/liblua.a" or name:match("^src/")) then
+                write(prefix .. "/" .. name, name)
+            end
+        end
+        local owned = { "lib/titan/0.6/titan.so", "lib/titan/0.6/titan.a",
+            "lib/titan/0.6/libtitan.a", "include/titan.h", "include/minicoro.h",
+            "include/titan/ffi.h", "share/titan/LICENSE", "etc/titan/build-profile",
+            "lib/titan/0.6/titan.so.dSYM/Contents/Resources/DWARF/titan.so" }
+        for _, name in ipairs(owned) do write(current .. "/titan-sdk/" .. name, name) end
+        write(old .. "/titan-sdk/lib/titan/0.5/titan.so", "older provider")
+        assert(installer.publish(current, prefix, lua, prefix .. "/bin/luarocks"))
+        assert(installer.publish(old, prefix, lua, prefix .. "/bin/luarocks"))
+        write(prefix .. "/include/openssl/ssl.h", "third-party SSL")
+        os.execute = function(command)
+            assert.truthy(command:find("--tree", 1, true))
+            assert.truthy(command:find("remove", 1, true))
+            assert.falsy(command:find("0.6.0-1", 1, true))
+            remove_tree(versions)
+            return true, "exit", 0
+        end
+
+        assert(installer.uninstall(current))
+
+        for _, name in ipairs(owned) do assert.is_nil(lfs.symlinkattributes(prefix .. "/" .. name), name) end
+        assert.is_nil(lfs.symlinkattributes(prefix .. "/lib/titan/0.5/titan.so"))
+        for _, name in ipairs(preserved) do assert.equal(name, read(prefix .. "/" .. name)) end
+        assert.equal("third-party SSL", read(prefix .. "/include/openssl/ssl.h"))
+    end)
+end)

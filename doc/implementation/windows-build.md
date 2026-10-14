@@ -15,8 +15,8 @@ target. Both receive `TITAN_LIBRARY_VERSION` and `PREFIX`. The fork installer
 also supports native Windows GNU Make with `cmd.exe` and no Unix utilities.
 The source bytes stay unchanged. All Titan changes are already in the fork;
 Lua's platform guards select the implementation at compilation. Generated-C
-compilation honors `titanc --jobs` and `TITAN_JOBS`; its default is one. All Windows definitions live in this one Makefile: its direct default
-is help, while LuaRocks selects `titan` and `rock-post-install`. Native GNU Make
+compilation honors `titanc --jobs` and `TITAN_JOBS`; its default is one. All Windows definitions live in this one Makefile: its default build target
+is `all`, and LuaRocks uses that default and the `install` target. Native GNU Make
 (including `mingw-w64-x86_64-make`) needs drive-letter paths; MSYS Make uses MSYS
 paths. The Makefile converts `PREFIX`, `ROCKS_TREE`, and `WINDOWS_BUILD_ROOT`
 for the selected Make implementation. The native Make executable supplied by
@@ -73,7 +73,7 @@ installs compiler dependencies and the Titan source rock into the Lua prefix.
 Windows also installs `luv` for compiler subprocesses; its ordinary LuaRocks
 build uses CMake and a bundled libuv independently of Titan's stdlib libuv.
 
-Plain `luarocks test` runs the complete native stdlib suite, the six retained
+Plain `luarocks test` runs the complete native stdlib suite, the seven retained
 runtime/packaging specs, and all compiler/language specs in four private NTFS
 checkout copies. Windows defaults to two concurrent compiler-test workers;
 `TITAN_ROCK_TEST_JOBS=1` through `4` selects the bound. Each worker uses the
@@ -320,9 +320,12 @@ using this experimental SDK. Host COFF checks alone do not validate these DLLs.
 configures the Lua prefix as its rock tree, with CLANG64 tools and the matching
 `liblua55.a` import library. `compiler` runs the Titan rockspec through
 `luarocks make`; the rockspec selects `Makefile.win` on Windows. Its build pass
-stages the native dependencies and runtime SDK, LuaRocks deploys the declared
-compiler modules and launcher, and the post-install hook uses that deployed
-compiler to build and publish the standard library.
+prepares the native dependencies and runtime SDK, then builds the standard
+library with the in-tree compiler and private bootstrap. Its copying-only
+install pass stages the compiler modules, launchers, and stdlib shims for
+LuaRocks deployment and retains the built native payload under the private
+rock prefix. A copy-only `post_install` helper then publishes that payload
+to canonical SDK locations by absolute path.
 
 ```sh
 mingw32-make -f Makefile.win luarocks PREFIX=/c/Titan/sdk
@@ -387,10 +390,47 @@ The `stdlib` target uses the already installed compiler and prepared
 runtime/native SDK to compile all 23 explicit roots into one `titan.dll`.
 `TITAN_JOBS` bounds generated-C compilation; checking, generation and the final
 link retain their normal order. It does not reinstall the compiler or prepare those native inputs.
-`install-stdlib` builds that provider and then copies its artifacts. The source
-rock's post-install hook uses this same route with its just-deployed compiler
-and Lua program. `publish-stdlib` copies an existing provider and its 23
-generated shims directly without rebuilding or validating them.
+`install-stdlib` builds that provider and then copies its artifacts.
+The source rock instead builds the provider during its default `all` target using
+the compiler Lua sources in the unpacked tree, the controlled Lua program,
+and the private support bootstrap. Native SDK preparation still occurs during
+that Windows build. LuaRocks then runs the copying-only `install` target:
+compiler modules and stdlib shims go to `INST_LUADIR`, while `titanc` and
+`titan-uninstall` go to `INST_BINDIR`. The built SDK/provider payload is
+retained at `<rock-prefix>/titan-sdk`, with
+`<rock-prefix>/installer/titan_install.lua`. The `post_install` hook invokes
+that helper by absolute path to copy the payload into the canonical SDK
+locations. It needs no source directory, Makefile, or compiler. Binary rocks
+retain this same copier and payload, including the Windows native dependency
+DLLs, import libraries, and headers. LuaRocks owns compiler files and shims;
+canonical SDK/providers remain external copies. `publish-stdlib` copies an
+existing provider and its 23 generated shims directly without rebuilding or
+validating them.
+
+`mingw32-make -f Makefile.win binary-rock` packs the installed Titan and gives
+the result the native suffix from `luarocks config arch`. Plain LuaRocks 3.13
+packing retains the native payload but misleadingly labels it `.all.rock`.
+Use the Make target rather than the one-step `--pack-binary-rock` path.
+`titan-uninstall` removes all installed Titan rock versions in its selected
+tree through LuaRocks, then cleans exact external Titan files only if removal
+succeeds. Lua, LuaRocks, dependency Lua modules, and shared native dependency
+DLLs, import libraries, and headers remain. There is no per-version cleanup;
+canonical paths are shared across rock versions. Windows source and binary rock
+installations require the same physical Lua SDK and rocks prefix.
+Close programs using Titan before uninstalling. If LuaRocks removal succeeds
+but a locked image prevents cleanup, close its consumers, reinstall the rock
+to restore the cleanup command, then run `titan-uninstall` again.
+
+The publisher preserves LuaRocks' generated cleanup-launcher headers and full
+Lua invocation, but retires CMD's batch context before starting the Lua child.
+The terminal command returns naturally with that child's status without
+reopening the deleted batch file or skipping a parent batch's `CALL`
+continuation. Native tests cover refusal, self-removal, and parent-batch
+continuation from a path containing spaces. Uninstall and binary packing pass
+`--lua-version 5.5 --lua-dir <sdk>` explicitly, so standalone LuaRocks defaults
+cannot select another Lua installation. `titan-uninstall --luarocks PATH`
+selects an external frontend; otherwise cleanup tries the recorded executable,
+then `luarocks.exe` on `PATH`.
 
 `stdlib-check` is the separate artifact gate. It uses an isolated copy and a
 fresh Lua process to check exact PE exports, permitted imports, callable metadata

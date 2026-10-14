@@ -5928,10 +5928,18 @@ function driver.source_link_inputs(lua_source_path)
             "-static-libgcc",
         }
     end
+    local lua_archive = lua_source_path .. "/liblua.a"
+    if driver.INSTALL_PATHS and
+       physical_absolute_filename(lua_source_path) ==
+           physical_absolute_filename(driver.INSTALL_PATHS.lua_source) then
+        -- The matching installed Lua SDK keeps its archive outside the
+        -- internal source/header directory, including through prefix aliases.
+        lua_archive = driver.INSTALL_PATHS.liblua
+    end
     return {
         driver.TITAN_RUNTIME_PATH .. "libtitan.a",
         driver.LIBBACKTRACE_PATH .. "/.libs/libbacktrace.a",
-        lua_source_path .. "/liblua.a",
+        lua_archive,
         "-ldl",
         "-lm",
     }
@@ -8550,7 +8558,10 @@ function driver.validate_library_image_fresh(
             "[%q] = { abi = %q, types = %q, layouts = %q }",
             modname, entry.abi, entry.types, entry.layouts)
     end
-    local script_source = [[
+    -- A source-rock build can select its private native support bootstrap.
+    -- Retain that search path while loading support afresh in the child.
+    local script_source = "package.cpath = " ..
+        string.format("%q", package.cpath) .. "\n" .. [[
 local image, result = ...
 local expected = { ]] .. table.concat(expected, ",\n") .. [[ }
 

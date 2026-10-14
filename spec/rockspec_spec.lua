@@ -138,7 +138,11 @@ local function temporary_directory(label)
     assert.truthy(os.remove(reservation))
     local path = label and reservation .. "-titan-" .. label or reservation
     assert.truthy(lfs.mkdir(path))
-    return path
+    local previous = assert(lfs.currentdir())
+    assert.truthy(lfs.chdir(path))
+    local physical = assert(lfs.currentdir())
+    assert.truthy(lfs.chdir(previous))
+    return platform.windows and physical:gsub("\\", "/") or physical
 end
 
 local PREFIX = installed_prefix.active()
@@ -259,15 +263,49 @@ describe("standalone-prefix source installation", function()
         if workspace then remove_tree(workspace); workspace = nil end
     end)
 
-    it("maps every compiler Lua module into the compiler rock",
+    it("copies every compiler Lua module through the Make installer",
     function()
-        local rockspec = read_file("titan-0.6.0-1.rockspec")
-        assert.match('version%s*=%s*"0%.6%.0%-1"', rockspec)
-        for _, path in ipairs(source_inventory.lua_files("titan-compiler")) do
-            local module = path:gsub("/", "."):gsub("%.lua$", "")
-            local mapping = string.format('["%s"] = "%s"', module, path)
-            assert.truthy(rockspec:find(mapping, 1, true), mapping)
+        workspace = temporary_directory("compiler-installer")
+        local destination = workspace .. "/rock staging"
+        local ok, output = run({
+            "env", "-u", "MAKEFLAGS", "-u", "MFLAGS", "-u", "MAKEOVERRIDES",
+            "make", "--no-print-directory", "-s", "-f",
+            platform.windows and "Makefile.win" or "Makefile",
+            "PREFIX=" .. PREFIX, "install-compiler",
+            "INST_LUADIR=" .. destination .. "/lua",
+            "INST_BINDIR=" .. destination .. "/bin",
+            "INST_CONFDIR=" .. destination .. "/conf",
+        })
+        assert.truthy(ok, output)
+        local expected = {}
+        for _, owner in ipairs({ "titan-compiler", "c-parser" }) do
+            for _, path in ipairs(source_inventory.lua_files(owner)) do
+                local installed = destination .. "/lua/" .. path
+                expected[path] = true
+                assert_unique_regular_file(installed)
+                assert.equal(read_file(path), read_file(installed), path)
+                if not platform.windows then
+                    assert.equal("rw-r--r--", lfs.attributes(installed, "permissions"), path)
+                    assert.equal(lfs.attributes(path, "modification"),
+                        lfs.attributes(installed, "modification"), path)
+                end
+            end
         end
+        for _, path in ipairs(source_inventory.lua_files(destination .. "/lua")) do
+            local relative = path:sub(#destination + #"/lua/" + 1)
+            assert.truthy(expected[relative], "unexpected installed module " .. relative)
+            expected[relative] = nil
+        end
+        assert.same({}, expected)
+        assert.equal(read_file("titanc"), read_file(destination .. "/bin/titanc"))
+        if not platform.windows then
+            assert.equal("rwxr-xr-x", lfs.attributes(
+                destination .. "/bin/titanc", "permissions"))
+            assert.equal(lfs.attributes("titanc", "modification"),
+                lfs.attributes(destination .. "/bin/titanc", "modification"))
+        end
+        assert.equal(read_file("THIRD_PARTY_NOTICES.md"), read_file(
+            destination .. "/conf/THIRD_PARTY_NOTICES.md"))
     end)
 
     it("installs one matching Lua and Titan SDK before the standard images",
@@ -443,8 +481,9 @@ describe("standalone-prefix source installation", function()
         assert.same({ "minicoro.o", "titan.o" }, members)
 
         if not platform.windows then
-            assert.equal(read_file("libbacktrace/.libs/libbacktrace.a"),
-                read_file(PREFIX .. "/lib/libbacktrace.a"))
+            assert.is_true(read_file("libbacktrace/.libs/libbacktrace.a") ==
+                read_file(PREFIX .. "/lib/libbacktrace.a"),
+                "installed libbacktrace must match this prepared source tree")
         end
 
         assert.falsy(lfs.symlinkattributes(PREFIX .. "/lib/libuv.a"))
@@ -489,9 +528,13 @@ int titan_sdk_headers(void) { return LUA_VERSION_NUM + SQLITE_VERSION_NUMBER; }
             "/lib/luarocks/rocks-5.5/titan/0.6.0-1/rock_manifest"
         local manifest = read_file(manifest_path)
         local manifest_table = load_rock_manifest(manifest_path)
-        assert.falsy(manifest:find("titan" .. SHARED_SUFFIX, 1, true), manifest)
-        assert.falsy(manifest:find('["titan.a"]', 1, true), manifest)
-        assert.falsy(manifest:find("libtitan.a", 1, true), manifest)
+        local retained_native = manifest_table["titan-sdk"].lib.titan["0.6"]
+        assert.truthy(retained_native["titan" .. SHARED_SUFFIX], manifest)
+        assert.truthy(retained_native["libtitan.a"], manifest)
+        if platform.windows then assert.falsy(retained_native["titan.a"], manifest)
+        else assert.truthy(retained_native["titan.a"], manifest) end
+        assert.truthy(manifest_table.installer["titan_install.lua"], manifest)
+        assert.truthy(manifest_table.bin["titan-uninstall"], manifest)
         assert.falsy(manifest:find("vendor/lpeglabel", 1, true), manifest)
         assert.falsy(manifest:find("libtitan-lpeglabel", 1, true), manifest)
         assert.falsy(manifest:find('["pretty.lua"]', 1, true), manifest)
@@ -509,7 +552,7 @@ int titan_sdk_headers(void) { return LUA_VERSION_NUM + SQLITE_VERSION_NUMBER; }
         local stdlib_lua_manifest = manifest_table.lua.titan
         for _, module in ipairs(STDLIB_MODULES) do
             assert.falsy(manifest:find(module .. SHARED_SUFFIX, 1, true), manifest)
-            assert.falsy(stdlib_lua_manifest and
+            assert.truthy(stdlib_lua_manifest and
                 stdlib_lua_manifest[module .. ".lua"], manifest)
         end
     end)
@@ -571,8 +614,12 @@ int titan_sdk_headers(void) { return LUA_VERSION_NUM + SQLITE_VERSION_NUMBER; }
 
         local rockspec = read_file("titan-0.6.0-1.rockspec")
         local replacement_count
+        local rockspec_environment = {}
+        assert(load(rockspec, "=packed rockspec", "t", rockspec_environment))()
+        local source_url = assert(rockspec_environment.source.url)
+        local source_url_pattern = source_url:gsub("(%W)", "%%%1")
         rockspec, replacement_count = rockspec:gsub(
-            'url = "git%+https://github%.com/titan%-lang/titan"',
+            'url%s*=%s*"' .. source_url_pattern .. '"',
             function()
                 -- LuaRocks' git_file fetcher removes this protocol before
                 -- invoking Git, so keep Windows' native drive path intact.
@@ -629,6 +676,9 @@ int titan_sdk_headers(void) { return LUA_VERSION_NUM + SQLITE_VERSION_NUMBER; }
             ".agents/skills/titan-programmer/SKILL.md",
             "Makefile.win",
             "scripts/install_windows_luarocks.sh",
+            "scripts/install_compiler.mk",
+            "scripts/titan_install.lua",
+            "scripts/titan-uninstall",
             "scripts/prepare_windows_native.pl",
             "scripts/WindowsLibbacktraceAllocator.pm",
             "scripts/build_windows_libbacktrace.sh",
@@ -1089,7 +1139,7 @@ int titan_sdk_headers(void) { return LUA_VERSION_NUM + SQLITE_VERSION_NUMBER; }
             read_file(canonical))
         assert_absent(canonical_archive)
 
-        -- Simulate the state after post_install. Re-running the source rock's
+        -- Simulate the state after installation. Re-running the source rock's
         -- build target must recognize this support-capable full pair and leave
         -- all logical module entries in place.
         write_file(canonical, read_file(STDLIB_PROVIDER))
@@ -1573,6 +1623,211 @@ assert(not marker:as_handle_t():is_initialized())
     end)
 end)
 
+describe("LuaRocks native payload lifecycle", function()
+    local workspace
+
+    after_each(function()
+        if workspace then remove_tree(workspace); workspace = nil end
+    end)
+
+    it("publishes make, source and binary rocks and cleans only Titan after LuaRocks agrees", function()
+        if platform.windows then
+            pending("Unix separate-tree lifecycle; Windows uses the matching Lua SDK prefix")
+            return
+        end
+        workspace = temporary_directory("rock-payload-lifecycle")
+        local repository = assert(lfs.currentdir())
+        local source = workspace .. "/source repository"
+        local outside = workspace .. "/unrelated working directory"
+        local trees = {
+            workspace .. "/make tree", workspace .. "/source tree",
+            workspace .. "/binary tree",
+        }
+        local function environment(argv)
+            local isolated = {
+                "env", "-u", "MAKEFLAGS", "-u", "MFLAGS", "-u", "MAKEOVERRIDES",
+                "-u", "MAKELEVEL", "-u", "GNUMAKEFLAGS",
+            }
+            for _, argument in ipairs(argv) do isolated[#isolated + 1] = argument end
+            return clean_environment(isolated)
+        end
+        make_directory(source)
+        make_directory(outside)
+        local owned = {
+            "include/titan.h", "include/minicoro.h", "include/titan/ffi.h",
+            "lib/titan/0.6/libtitan.a", "lib/titan/0.6/titan" .. SHARED_SUFFIX,
+            "share/titan/NOTICE", "etc/titan/build-profile",
+        }
+        if not platform.windows then owned[#owned + 1] = "lib/titan/0.6/titan.a" end
+        local dependency_sdk = {
+            "lib/libbacktrace.a", "include/uv.h", "include/openssl/ssl.h",
+            "src/lua-5.5.1/lua.h", "lib/liblua.a",
+        }
+        for _, inventory in ipairs({ owned, dependency_sdk }) do
+            for _, path in ipairs(inventory) do
+                make_directory(assert((source .. "/titan-sdk/" .. path):match("^(.+)/[^/]+$")))
+                write_file(source .. "/titan-sdk/" .. path, "fixture payload: " .. path .. "\n")
+            end
+        end
+        copy_tree("scripts/titan_install.lua", source .. "/installer/titan_install.lua")
+        copy_tree("scripts/titan-uninstall", source .. "/titan-uninstall")
+        make_directory(source .. "/titan")
+        local shim = "return { fixture = true }\n"
+        write_file(source .. "/titan/math.lua", shim)
+        write_file(source .. "/Makefile", [[
+.PHONY: all install
+all:
+	@:
+install:
+	mkdir -p "$(INST_PREFIX)" "$(INST_BINDIR)" "$(INST_LUADIR)/titan"
+	cp -R titan-sdk installer "$(INST_PREFIX)/"
+	install -m 0755 titan-uninstall "$(INST_BINDIR)/titan-uninstall"
+	install -m 0644 titan/math.lua "$(INST_LUADIR)/titan/math.lua"
+]])
+        local specification = {}
+        assert(load(read_file("titan-0.6.0-1.rockspec"), "=production rockspec", "t", specification))()
+        local hook = assert(specification.hooks.post_install)
+        if platform.windows then hook = assert(specification.hooks.platforms.windows.post_install) end
+        local copy_directories = {}
+        for _, directory in ipairs(specification.build.copy_directories) do
+            make_directory(source .. "/" .. directory)
+            write_file(source .. "/" .. directory .. "/fixture.txt", directory .. "\n")
+            copy_directories[#copy_directories + 1] = string.format("%q", directory)
+        end
+        local rockspec = source .. "/titan-0.6.0-1.rockspec"
+        write_file(rockspec, string.format([[
+rockspec_format = "3.0"
+package = "titan"
+version = "0.6.0-1"
+source = { url = %q }
+description = { summary = "Tiny Titan installation fixture", license = "MIT" }
+dependencies = { "lua ~> 5.5" }
+hooks = { post_install = %q }
+build = {
+    type = "make",
+    install_variables = {
+        INST_PREFIX = "$(PREFIX)", INST_BINDIR = "$(BINDIR)",
+        INST_LUADIR = "$(LUADIR)"
+    },
+    copy_directories = { %s }
+}
+]], "git+file://" .. source:gsub("\\", "/"), hook, table.concat(copy_directories, ", ")))
+        for _, argv in ipairs({
+            { "git", "init", "-q", source },
+            { "git", "-C", source, "add", "-f", "." },
+            { "git", "-C", source, "-c", "user.name=Titan installation test",
+                "-c", "user.email=titan-install@example.invalid", "commit", "-qm", "fixture" },
+        }) do
+            local ok, output = run(argv)
+            assert.truthy(ok, output)
+        end
+        local function luarocks(tree, ...)
+            local argv = { LUAROCKS, "--tree", tree, ... }
+            local ok, output = run(environment(argv), outside)
+            assert.truthy(ok, output)
+            return output
+        end
+        local function private(tree)
+            return tree .. "/lib/luarocks/rocks-5.5/titan/0.6.0-1"
+        end
+        local function assert_installed(tree)
+            local retained = private(tree)
+            local manifest = load_rock_manifest(retained .. "/rock_manifest")
+            assert.truthy(manifest.lua.titan["math.lua"])
+            assert.equal(shim, read_file(tree .. "/share/lua/5.5/titan/math.lua"))
+            assert_file(retained .. "/installer/titan_install.lua")
+            assert_file(retained .. "/bin/titan-uninstall")
+            assert_file(tree .. "/bin/titan-uninstall" .. (platform.windows and ".bat" or ""))
+            local location = assert(loadfile(retained .. "/installer/location.lua", "t", {}))()
+            assert.equal(normalized_path(tree), normalized_path(location.tree))
+            assert.equal(normalized_path(PREFIX), normalized_path(location.lua_dir))
+            for _, inventory in ipairs({ owned, dependency_sdk }) do
+                for _, path in ipairs(inventory) do
+                    local contents = read_file(source .. "/titan-sdk/" .. path)
+                    assert.equal(contents, read_file(retained .. "/titan-sdk/" .. path), path)
+                    assert.equal(contents, read_file(tree .. "/" .. path), path)
+                end
+            end
+        end
+        local ok, output = run(environment({ LUAROCKS, "--tree", trees[1],
+            "make", rockspec, "--deps-mode=none" }), source)
+        assert.truthy(ok, output)
+        assert_installed(trees[1])
+        local packed, pack_output = run(environment({ LUAROCKS, "pack", rockspec }), outside)
+        assert.truthy(packed, pack_output)
+        local source_rock = outside .. "/titan-0.6.0-1.src.rock"
+        assert_file(source_rock)
+        luarocks(trees[2], "install", source_rock, "--deps-mode=none")
+        assert_installed(trees[2])
+        local arch = luarocks(trees[1], "config", "arch"):match("^%s*(.-)%s*$")
+        ok, output = run(environment({ "make", "--no-print-directory", "-s", "-f",
+            repository .. (platform.windows and "/Makefile.win" or "/Makefile"),
+            "PREFIX=" .. PREFIX, "ROCKS_TREE=" .. trees[1], "TITAN_LUAROCKS=" .. LUAROCKS,
+            "binary-rock" }), outside)
+        assert.truthy(ok, output)
+        local binary_rock = outside .. "/titan-0.6.0-1." .. arch .. ".rock"
+        assert_file(binary_rock)
+        luarocks(trees[3], "install", binary_rock, "--deps-mode=none",
+            "MAKE=" .. workspace .. "/unavailable make")
+        assert_installed(trees[3])
+
+        local function install_dependency(name, module, dependencies)
+            write_file(outside .. "/" .. module .. ".lua", "return true\n")
+            local path = outside .. "/" .. name .. "-1.0-1.rockspec"
+            write_file(path, string.format([[
+rockspec_format = "3.0"
+package = %q
+version = "1.0-1"
+source = { url = "file:///unused" }
+description = { license = "MIT" }
+dependencies = { %s }
+build = { type = "builtin", modules = { [%q] = %q } }
+]], name, dependencies, module, module .. ".lua"))
+            luarocks(trees[3], "make", path, "--deps-mode=none")
+        end
+        install_dependency("titan-install-test-keep", "fixture_dependency", '"lua ~> 5.5"')
+        install_dependency("titan-install-test-dependent", "fixture_dependent", '"titan == 0.6.0-1"')
+        local preserved = {
+            "bin/lua" .. PROGRAM_SUFFIX, "include/unrelated.h", "include/titan/keep.h",
+            "share/titan/user-note.txt",
+        }
+        for _, path in ipairs(preserved) do
+            make_directory(assert((trees[3] .. "/" .. path):match("^(.+)/[^/]+$")))
+            write_file(trees[3] .. "/" .. path, "preserved: " .. path .. "\n")
+        end
+        local function uninstall(tree)
+            local argv = platform.windows and { LUA, private(tree) .. "/bin/titan-uninstall" } or
+                { tree .. "/bin/titan-uninstall" }
+            if tree == trees[3] then
+                argv[#argv + 1] = "--luarocks"
+                argv[#argv + 1] = LUAROCKS
+            end
+            return run(environment(argv), outside)
+        end
+        ok, output = uninstall(trees[3])
+        assert.falsy(ok, output)
+        assert.truthy(output:find("Titan SDK files were preserved", 1, true), output)
+        assert_installed(trees[3])
+        luarocks(trees[3], "remove", "titan-install-test-dependent")
+        for _, tree in ipairs(trees) do
+            ok, output = uninstall(tree)
+            assert.truthy(ok, output)
+            for _, path in ipairs(owned) do assert_absent(tree .. "/" .. path) end
+            assert_absent(private(tree))
+            assert_absent(tree .. "/share/lua/5.5/titan/math.lua")
+            assert_absent(tree .. "/bin/titan-uninstall" .. (platform.windows and ".bat" or ""))
+            for _, path in ipairs(dependency_sdk) do
+                assert.equal(read_file(source .. "/titan-sdk/" .. path), read_file(tree .. "/" .. path))
+            end
+        end
+        for _, path in ipairs(preserved) do
+            assert.equal("preserved: " .. path .. "\n", read_file(trees[3] .. "/" .. path))
+        end
+        assert.equal("return true\n", read_file(trees[3] .. "/share/lua/5.5/fixture_dependency.lua"))
+        assert_file(trees[3] .. "/lib/luarocks/rocks-5.5/titan-install-test-keep/1.0-1/rock_manifest")
+    end)
+end)
+
 describe("automatic Lua prefix selection", function()
     local workspace
     local repository
@@ -2039,7 +2294,7 @@ describe("relocatable Lua build configuration", function()
         local repository = assert(lfs.currentdir())
         local prefix = workspace .. "/prepared SDK"
         local root = workspace .. "/prepared build"
-        for _, target in ipairs({ "stdlib", "install-stdlib", "rock-post-install" }) do
+        for _, target in ipairs({ "stdlib", "install-stdlib" }) do
             local ok, output = run({
                 "env", "-u", "MAKEFLAGS", "-u", "MFLAGS",
                 "-u", "MAKEOVERRIDES", "-u", "MAKELEVEL", "-u", "GNUMAKEFLAGS",
@@ -2066,6 +2321,211 @@ describe("relocatable Lua build configuration", function()
         end
         assert_absent(prefix)
         assert_absent(root)
+    end)
+
+    it("keeps both rock install passes limited to copying built files", function()
+        workspace = temporary_directory("rock-install-copies")
+        local repository = assert(lfs.currentdir())
+        local prefix = workspace .. "/prepared SDK"
+        local root = workspace .. "/prepared build"
+        for _, makefile in ipairs({ "Makefile", "Makefile.win" }) do
+            local ok, output = run({
+                "env", "-u", "MAKEFLAGS", "-u", "MFLAGS", "-u", "MAKEOVERRIDES",
+                "-u", "MAKELEVEL", "-u", "GNUMAKEFLAGS",
+                "make", "--no-print-directory", "-n", "-f", repository .. "/" .. makefile,
+                "PREFIX=" .. prefix, "ROCKS_TREE=" .. prefix,
+                "WINDOWS_BUILD_ROOT=" .. root,
+                "INST_PREFIX=" .. workspace .. "/rock",
+                "INST_LUADIR=" .. workspace .. "/rock/lua",
+                "INST_BINDIR=" .. workspace .. "/rock/bin",
+                "INST_CONFDIR=" .. workspace .. "/rock/conf",
+                "install",
+            }, repository)
+            assert.truthy(ok, output)
+            for _, forbidden in ipairs({ "build_windows_stdlib.sh", "build_windows_runtime.sh",
+                    "build_windows_native.sh", "install_windows_luarocks.sh", "--source-first" }) do
+                assert.falsy(output:find(forbidden, 1, true), output)
+            end
+            assert.truthy(output:find("/rock/bin/titanc", 1, true), output)
+            local suffix = makefile == "Makefile.win" and ".dll" or ".so"
+            assert.truthy(output:find("/lib/titan/0.6/titan" .. suffix, 1, true), output)
+        end
+        assert_absent(prefix)
+        assert_absent(root)
+        assert_absent(workspace .. "/rock")
+    end)
+
+    it("stages the Windows rock SDK without copying Lua or changing the prepared prefix", function()
+        if platform.windows then
+            pending("POSIX model of Windows Make staging without native compilation")
+            return
+        end
+        workspace = temporary_directory("windows-rock-stage")
+        local source = workspace .. "/source checkout"
+        local prefix = workspace .. "/prepared SDK"
+        local build = workspace .. "/native build"
+        local private = workspace .. "/private rock"
+        local old = os.time() - 120
+        local function fixture(root, relative, contents)
+            local path = root .. "/" .. relative
+            make_directory(assert(path:match("^(.+)/[^/]+$")))
+            write_file(path, contents or "fixture: " .. relative .. "\n")
+            assert(lfs.touch(path, old, old))
+            return path
+        end
+        for _, path in ipairs({ "Makefile.win", "scripts/install_compiler.mk",
+                "scripts/titan_install.lua", "scripts/titan-uninstall",
+                "spec/support/stdlib_test_modules.mk" }) do
+            fixture(source, path, read_file(path))
+        end
+        for _, path in ipairs({ "titanc", "titan-compiler/driver.lua", "LICENSE",
+                "THIRD_PARTY_NOTICES.md", "LICENSES/fixture-license",
+                "titan-runtime/titan.h", "titan-runtime/minicoro.h", "titan-runtime/titan/ffi.h",
+                "titan.dll", "titan/math.lua" }) do fixture(source, path) end
+        fixture(build, "runtime/libtitan.a")
+        fixture(build, "runtime/titan.dll", "support-only bootstrap\n")
+        local expected = {
+            ["lib/titan/0.6/libtitan.a"] = build .. "/runtime/libtitan.a",
+            ["lib/titan/0.6/titan.dll"] = source .. "/titan.dll",
+            ["include/titan.h"] = source .. "/titan-runtime/titan.h",
+            ["include/minicoro.h"] = source .. "/titan-runtime/minicoro.h",
+            ["include/titan/ffi.h"] = source .. "/titan-runtime/titan/ffi.h",
+            ["share/titan/LICENSE"] = source .. "/LICENSE",
+            ["share/titan/THIRD_PARTY_NOTICES.md"] = source .. "/THIRD_PARTY_NOTICES.md",
+            ["share/titan/LICENSES/fixture-license"] = source .. "/LICENSES/fixture-license",
+        }
+        for _, path in ipairs({
+            "bin/libuv-1.dll", "bin/libllhttp-9.4.dll", "bin/libsqlite3-0.dll",
+            "bin/libcrypto-3-x64.dll", "bin/libssl-3-x64.dll",
+            "lib/libuv.dll.a", "lib/libllhttp.dll.a", "lib/libsqlite3.dll.a",
+            "lib/libcrypto.dll.a", "lib/libssl.dll.a", "lib/libbacktrace.a",
+            "include/uv.h", "include/llhttp.h", "include/sqlite3.h",
+            "include/backtrace.h", "include/backtrace-supported.h",
+            "include/uv/version.h", "include/openssl/ssl.h",
+        }) do expected[path] = fixture(prefix, path) end
+        for _, path in ipairs({ "bin/lua.exe", "bin/lua55.dll", "lib/liblua55.a",
+                "include/lua.h", "src/lua-5.5.1/lua.h", "bin/unrelated.exe",
+                "lib/unrelated.a", "include/unrelated.h", "share/unrelated.txt",
+                "include/titan.h", "lib/titan/0.6/titan.dll",
+                "share/lua/5.5/titan/math.lua", "etc/titan/build-profile" }) do
+            fixture(prefix, path, "existing SDK file: " .. path .. "\n")
+        end
+        local function snapshot(root, relative, result)
+            relative, result = relative or "", result or {}
+            for name in lfs.dir(root .. (relative == "" and "" or "/" .. relative)) do
+                if name ~= "." and name ~= ".." then
+                    local child = relative == "" and name or relative .. "/" .. name
+                    local path = root .. "/" .. child
+                    if lfs.attributes(path, "mode") == "directory" then snapshot(root, child, result)
+                    else result[child] = { read_file(path), lfs.attributes(path, "modification") } end
+                end
+            end
+            return result
+        end
+        local original = snapshot(prefix)
+        local ok, output = run({
+            "env", "-u", "OS", "-u", "MAKEFLAGS", "-u", "MFLAGS",
+            "-u", "MAKEOVERRIDES", "-u", "MAKELEVEL", "-u", "GNUMAKEFLAGS",
+            "make", "--no-print-directory", "-s", "-f", "Makefile.win", "install",
+            "PREFIX=" .. prefix, "ROCKS_TREE=" .. prefix, "WINDOWS_BUILD_ROOT=" .. build,
+            "INST_PREFIX=" .. private, "INST_LUADIR=" .. private .. "/lua",
+            "INST_BINDIR=" .. private .. "/bin", "INST_CONFDIR=" .. private .. "/conf",
+            "TITAN_LICENSE_FILES=fixture-license", "STDLIB_MODULES=math",
+            "OPENSSL_MODE=system", "TITAN_BUILD_PROFILE=validation",
+        }, source)
+        assert.truthy(ok, output)
+        assert.same(original, snapshot(prefix))
+        local staged = snapshot(private .. "/titan-sdk")
+        assert.equal("validation\n", assert(staged["etc/titan/build-profile"])[1])
+        staged["etc/titan/build-profile"] = nil
+        for relative, input in pairs(expected) do
+            assert.same({ read_file(input), old }, staged[relative], relative)
+            staged[relative] = nil
+        end
+        assert.same({}, staged, "unexpected files in the retained native SDK")
+        for _, copy in ipairs({
+            { "titanc", "bin/titanc" }, { "scripts/titan-uninstall", "bin/titan-uninstall" },
+            { "scripts/titan_install.lua", "installer/titan_install.lua" },
+            { "titan-compiler/driver.lua", "lua/titan-compiler/driver.lua" },
+            { "titan/math.lua", "lua/titan/math.lua" },
+            { "THIRD_PARTY_NOTICES.md", "conf/THIRD_PARTY_NOTICES.md" },
+        }) do
+            assert.equal(read_file(source .. "/" .. copy[1]), read_file(private .. "/" .. copy[2]))
+            assert.equal(old, lfs.attributes(private .. "/" .. copy[2], "modification"))
+        end
+        assert.equal("system\n", read_file(private .. "/installer/openssl-mode"))
+    end)
+
+    it("selects the Windows source compiler without using an installed compiler path", function()
+        if platform.windows then
+            pending("POSIX shell fixture for Windows compiler selection")
+            return
+        end
+        workspace = temporary_directory("windows-source-compiler")
+        local repository = assert(lfs.currentdir())
+        local build_root = workspace .. "/build root"
+        local prefix = workspace .. "/SDK prefix"
+        local source_root = workspace .. "/source root"
+        local tools = workspace .. "/tools"
+        for _, path in ipairs({ build_root, prefix, source_root, tools }) do
+            make_directory(path)
+        end
+        write_file(tools .. "/cygpath", [[#!/bin/sh
+set -eu
+test "$1" = -m
+printf '%s\n' "$2"
+]])
+        local lua = tools .. "/fake lua.exe"
+        write_file(lua, [[#!/bin/sh
+set -eu
+printf '%s\0' "$@" > "$PROBE_ARGV"
+printf '%s\n' "$TITAN_ROCKS_ROOT" "$TITAN_RUNTIME_PREBUILT" \
+  "${TITAN_COMPILER_BOOTSTRAP-}" "$MSYS2_ARG_CONV_EXCL" > "$PROBE_ENV"
+]])
+        local ok, output = run({ "chmod", "+x", tools .. "/cygpath", lua })
+        assert.truthy(ok, output)
+        local selected_compiler = workspace .. "/unavailable compiler/titanc"
+        local argv_log = workspace .. "/argv"
+        local environment_log = workspace .. "/environment"
+        for _, installed_runtime in ipairs({ "0", "1" }) do
+            ok, output = run({
+                "env", "-u", "TITAN_COMPILER_BOOTSTRAP",
+                "MSYSTEM=CLANG64", "TITAN_JOBS=3",
+                "PATH=" .. tools .. ":" .. (os.getenv("PATH") or "/usr/bin:/bin"),
+                "ROCK_LUA=" .. lua, "ROCK_TITANC=" .. selected_compiler,
+                "STDLIB_USE_INSTALLED_RUNTIME=" .. installed_runtime,
+                "PROBE_ARGV=" .. argv_log, "PROBE_ENV=" .. environment_log,
+                "bash", repository .. "/scripts/build_windows_stdlib.sh",
+                build_root, prefix, "titan.math", "titan.json",
+            }, source_root)
+            assert.truthy(ok, output)
+            local arguments = {}
+            for argument in read_file(argv_log):gmatch("(.-)%z") do
+                arguments[#arguments + 1] = argument
+            end
+            local expected = {
+                "--source-first", "-j", "3", "--tree", source_root,
+                "titan.math", "titan.json", "-X",
+                build_root .. "/runtime/ltitanlib.o",
+                build_root .. "/runtime/libtitan-lpeglabel.a",
+            }
+            local bootstrap = ""
+            if installed_runtime == "0" then
+                assert.equal("-E", table.remove(arguments, 1))
+                assert.equal("-e", table.remove(arguments, 1))
+                local setup = table.remove(arguments, 1)
+                assert.truthy(setup:find('package.path="./?.lua;./?/init.lua;"', 1, true), setup)
+                assert.truthy(setup:find('os.getenv("TITAN_COMPILER_BOOTSTRAP")', 1, true), setup)
+                assert.truthy(setup:find('.. "/?.dll;" .. package.cpath', 1, true), setup)
+                assert.equal("./titanc", table.remove(arguments, 1))
+                bootstrap = build_root .. "/runtime"
+            else
+                assert.equal(selected_compiler, table.remove(arguments, 1))
+            end
+            assert.same(expected, arguments)
+            assert.equal(table.concat({ prefix, "1", bootstrap, "*", "" }, "\n"),
+                read_file(environment_log))
+        end
     end)
 
     it("requires initialized Lua sources before changing either build tree",

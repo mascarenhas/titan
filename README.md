@@ -27,7 +27,9 @@ distinct ownership even in the current single-directory layout:
 
 The supported developer install and CI configure LuaRocks' system tree so
 `ROCKS_TREE == PREFIX`. That equality is the current deployment policy, not an
-inherent requirement of what either name owns.
+inherent requirement of what either name owns. Unix installation can stage
+and publish to a separate `ROCKS_TREE`; Windows rock installations require the same
+physical Lua and rocks prefix.
 
 Generated C is compiled directly by default, so ordinary Linux and macOS builds
 do not require a formatter. Pass `titanc --pretty-print` to run `clang-format`
@@ -139,9 +141,8 @@ The installed files used to compile Titan code include:
 | `$ROCKS_TREE/lib/titan/0.6/titan.so` | The dynamic standard-library provider: native `require "titan"` support plus twenty-three independent logical modules from `titan.coroutine` through `titan.json` |
 | `$ROCKS_TREE/lib/titan/0.6/titan.a` | The self-describing static form of the same twenty-three logical standard modules, plus native support and private LPegLabel/libuv/llhttp/SQLite payload, with OpenSSL payload when bundled OpenSSL is selected |
 | `$ROCKS_TREE/share/lua/5.5/titan/{coroutine,uv,async,timer,io,fs,net,ssl,url,http,websocket,os,path,peg,string,math,lua,iteration,gc,test,reflect,sqlite3,json}.lua` | Generated logical-module loader shims that map the canonical provider globally and invoke their exact `luaopen_titan_*` entries |
-| `$ROCKS_TREE/share/titan/0.6/src/titan/test.titan` | Canonical compiler-data source used for the source-private native test-runner protocol |
 
-The twenty-three-module pair, shims, and test support source are the coordinated
+The twenty-three-module pair and shims are the coordinated
 ABI-2 standard image. `titan.io` owns the shared Interface vocabulary and
 I/O helpers; bare native support adds the twenty-fourth DSO opener without adding
 a logical metadata key.
@@ -303,22 +304,21 @@ template lets the generated `titan.*` loaders find the canonical provider; the
 second remains the root-discovery anchor. The default `package.path` finds all
 twenty-three loaders under `$PREFIX/share/lua/5.5/titan/`. Here `PREFIX` is
 resolved from the running interpreter, so these paths follow a moved tree.
-In the currently supported layout `ROCKS_TREE == PREFIX`, so `titanc` can use
-the first entry ending in
-`/lib/lua/5.5/?.so` to recover its Titan SDK/rocks root.
+For the ordinary equal-root layout, `titanc` recovers its SDK/rocks root from
+the first current-version `/lib/titan/0.6/?.so` template in `package.cpath`,
+falling back to an ordinary `/lib/lua/5.5/?.so` template.
 `titanc --print-prefix` prints that discovered SDK root on Unix and Windows.
 The query does no compilation or C probing, and uses the current Lua
 `package.cpath` rather than a built-in installation path. Consumers can find
 Titan's own license at `<root>/share/titan/LICENSE`.
 
-During the source rock's post-install build, the internal `TITAN_ROCKS_ROOT`
-override identifies `ROCKS_TREE` directly. The recovered Titan root supplies
+The internal `TITAN_ROCKS_ROOT` override can identify `ROCKS_TREE` directly.
+For an installed compiler, the recovered Titan root supplies
 the staged Lua sources and archives and compiled provider under
 `$ROCKS_TREE/lib/titan/0.6/`; the standard library's qualified `titan.*`
 modules consequently live as independent entries inside both `titan.so` and
-`titan.a`. This
-discovery rule implements the supported equal-root layout; it does not redefine the
-separately owned `PREFIX` and `ROCKS_TREE` as one concept.
+`titan.a`. This discovery keeps the separately owned `PREFIX` and `ROCKS_TREE`
+distinct; an explicit root override can select a separate Unix rocks tree.
 
 At startup a compiled executable uses the same executable-relative Lua
 paths: a program installed at `<root>/bin/program` discovers providers and
@@ -329,23 +329,23 @@ canonical provider remains `<root>/lib/titan/0.6/titan.so`; there are no
 child, Lua-facing, or parent-level compatibility copies.
 
 An unmodified Lua 5.5 can reproduce those search paths with versioned
-environment variables. Include the ordinary Lua C-module template because it
-is also Titan's installation-root anchor:
+environment variables. The current Titan template identifies the SDK root;
+the ordinary Lua C-module template keeps dependency modules available:
 
 ```sh
 export LUA_PATH_5_5="$ROCKS_TREE/share/lua/5.5/?.lua;$ROCKS_TREE/share/lua/5.5/?/init.lua;;"
 export LUA_CPATH_5_5="$ROCKS_TREE/lib/titan/0.6/?.so;$ROCKS_TREE/lib/lua/5.5/?.so;;"
 ```
 
-If that root-anchor template is deliberately omitted, set
-`TITAN_PATH_0_6="$ROCKS_TREE/lib/titan/0.6"` as well.
-
 `TITAN_PATH_0_6` (or the unversioned `TITAN_PATH`) overrides the Titan binary
 search path. A short standard-library import is desugared before resolution
 (`import "timer"` becomes `import "titan.timer"`), so ordinary qualified
 lookup below `$ROCKS_TREE/lib/titan/0.6` reaches the canonical provider. In a
 source checkout, `--lua` can select another complete Lua source/build tree for an
-individual compiler invocation. An installed compiler rejects `--lua` because
+individual compiler invocation. When that path physically matches the active
+installed Lua SDK's `src/lua-5.5.1/`, linking uses the matching SDK's
+`lib/liblua.a`; another source tree uses its own `liblua.a`.
+An installed compiler rejects `--lua` because
 its headers, `lib/liblua.a`, and `lib/titan/0.6/libtitan.a` are one matched
 SDK. These overrides
 are mainly useful for testing and nonstandard source builds; a normal
@@ -354,27 +354,52 @@ local-prefix install needs none of them.
 This is not yet Titan's story for packaging or distributing Titan libraries
 and applications: give a project its own standalone absolute `PREFIX` and use
 the currently equal system-style `ROCKS_TREE` and installed `titanc`. The
-current Titan rock is likewise a **source-install** package. Its
-`build_target = "titan"` builds the runtime, a private support-only bootstrap,
-and the SDK archives/headers/Lua sources. When the canonical provider is
-absent, the build copies that bootstrap to
-`$ROCKS_TREE/lib/titan/0.6/titan.so` so the just-installed compiler can load
-its native support table; a repeated install preserves an existing full
-image. After LuaRocks deploys the compiler, the source-only `post_install` hook
-calls `make install-stdlib` with that `titanc`, using the same dependency graph,
-checkout outputs, and completion stamp as a later `make stdlib`. Each logical module owns an object and its generated headers;
+Titan source rock's default Make target `all` builds the runtime, native
+dependencies, a private
+support-only bootstrap, and the complete standard library. The standard-library
+build uses the compiler Lua sources in the unpacked source tree, the private
+bootstrap, and the matching Lua SDK; a fresh tree needs no installed Titan.
+Each logical module owns an object and its generated headers;
 unchanged objects are reused. One final incremental invocation links all
 twenty-three roots, with private LPegLabel, selected libuv, HTTP/llhttp, SQLite,
-and TLS/OpenSSL payload after `ltitanlib.o`. Installation copies the completed
-provider pair, generated loaders, exact `titan.test` compiler source, licenses,
-and optional macOS dSYM to their destinations. Explicit packaging tests own
+and TLS/OpenSSL payload after `ltitanlib.o`.
+
+LuaRocks then runs the copying-only Make `install` target in that source tree.
+The target stages compiler Lua modules and standard-library shims in
+`INST_LUADIR`, and `titanc` and `titan-uninstall` in `INST_BINDIR`, for ordinary
+manifest-backed deployment. It retains a mirrored native SDK/provider payload
+at `<rock-prefix>/titan-sdk` and its copier at
+`<rock-prefix>/installer/titan_install.lua`. The `post_install` hook invokes
+that helper by absolute path to copy the prebuilt SDK, providers, licenses,
+and optional macOS dSYM to their canonical `ROCKS_TREE` destinations. It
+does no compilation and needs no source directory or Makefile. The same helper
+publishes source and binary rock installations. Explicit packaging tests own
 protocol and metadata validation. Install into a fresh tree after ABI changes.
-There is no separate Make install pass or pre-install hook. The provider,
-generated loaders, and SDK files remain
-direct artifacts outside the rock manifest, so `luarocks remove titan` does
-not remove them. Titan does not provide binary rocks yet; packaging and
-uninstall ownership for these files will be revisited with a Titan
-library/application distribution system.
+
+Use `make binary-rock` to pack the installed Titan in the selected tree. It
+retains the private payload and copier, and gives the resulting rock the
+platform name reported by `luarocks config arch`. Plain `luarocks pack titan`
+also retains the payload, but LuaRocks 3.13 labels it `.all.rock` because the
+native files live outside its ordinary `lib` deployment directory. That name
+does not make the native payload portable. The Make target corrects it.
+LuaRocks 3.13's one-step `--pack-binary-rock` path is not supported here.
+
+For complete Titan removal, run `titan-uninstall` from that installation.
+Use `titan-uninstall --luarocks PATH` to select another LuaRocks executable.
+The default tries the recorded executable, then `luarocks` (`luarocks.exe` on
+Windows) on `PATH`. Lua 5.5, the Lua SDK, and the rocks tree remain fixed to
+the selected installation.
+It asks LuaRocks to remove all installed Titan rock versions in the selected
+tree, including the compiler scripts/modules, shims, and private payloads.
+Only after that succeeds does it remove the exact external Titan headers,
+providers, runtime archive, notices, and build-profile record. Lua, LuaRocks,
+dependency Lua modules, and shared third-party native headers, libraries, and
+DLLs remain. Plain `luarocks remove titan` leaves those external Titan files
+in place. Canonical headers and shims are shared across rock versions, so
+`titan-uninstall` cleans the whole Titan installation in that tree.
+On Windows, close programs using Titan before uninstalling. If LuaRocks
+removal succeeds but an image remains locked, close its consumers, reinstall
+the rock to restore the cleanup command, and run `titan-uninstall` again.
 
 For standard-library development after `luarocks make`, use:
 
@@ -384,9 +409,8 @@ make install-stdlib  # build if needed, then copy to the selected tree
 make clean-stdlib    # remove stdlib outputs before changing build inputs
 ```
 
-Both commands use the installed compiler and matching SDK by default. An
-unchanged `make stdlib` immediately after `luarocks make` reuses its outputs;
-it checks that the expected outputs exist. Make tracks installed compiler/SDK
+Both commands use the installed compiler and matching SDK by default. The
+source-rock build retains its generated outputs. Make tracks installed compiler/SDK
 updates, source imports, and native headers through ordinary prerequisites.
 Run `make clean-stdlib` before changing stdlib flags, toolchain, profile, or
 OpenSSL mode. Clean the corresponding native dependency build directories when
@@ -747,7 +771,7 @@ enters `spec/support/run_rock_tests.sh`, which invokes `make rock-test`: the
 Busted tree runs first, followed by the same aggregate native executable.
 Busted 2.3 does not provide a shard option, and many compiler specs share fixed
 checkout-root artifact names. For an unfiltered run with no forwarded Busted
-arguments, `rock-test` therefore runs the six retained runtime/packaging specs
+arguments, `rock-test` therefore runs the seven retained runtime/packaging specs
 once, then externally partitions the compiler/language specs into four measured
 groups in private checkout copies. Every worker has private general and ccache
 temporary directories. It runs four workers by default, with nested Make and

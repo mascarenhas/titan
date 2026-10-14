@@ -771,7 +771,7 @@ local function stdlib_command(output)
     local normalized = output:gsub("\\\r\n", " "):gsub("\\\n", " ")
         :gsub("%s+", " ")
     local link = assert(normalized:find(
-        "./titanc --source-first --incremental " ..
+        " --source-first --incremental " ..
         table.concat(STDLIB_ROOTS, " "), 1, true), normalized)
     local first = 1
     for position in normalized:sub(1, link):gmatch("()CC='ccache cc'") do
@@ -1039,6 +1039,10 @@ esac
             write_file(root .. "/Makefile", read_file("Makefile"))
             local copied, copy_error = run_argv({ "mkdir", "-p", root .. "/spec/support" })
             assert.truthy(copied, copy_error)
+            copied, copy_error = run_argv({ "mkdir", "-p", root .. "/scripts" })
+            assert.truthy(copied, copy_error)
+            write_file(root .. "/scripts/install_compiler.mk",
+                read_file("scripts/install_compiler.mk"))
             write_file(root .. "/spec/support/stdlib_test_modules.mk",
                 read_file("spec/support/stdlib_test_modules.mk"))
             write_file(root .. "/build.log", "")
@@ -1101,24 +1105,31 @@ esac
         if not tested then error(test_error, 0) end
     end)
 
-    it("reuses post-install stdlib outputs with the deployed compiler and SDK", function()
+    it("installs built compiler, SDK and stdlib without compilation and reuses the deployed SDK", function()
             if platform.windows then
-                pending("Unix Make post-install object/provider DAG and static Lua SDK")
+                pending("Unix Make object/provider DAG and static Lua SDK")
                 return
             end
         local root = make_temp_dir()
         local tested, test_error = xpcall(function()
             local prefix = root .. "/prefix"
             local inputs = {
-                "Makefile", "prepared", "THIRD_PARTY_NOTICES.md",
+                "Makefile", "prepared", "LICENSE", "THIRD_PARTY_NOTICES.md",
+                "scripts/install_compiler.mk",
+                "scripts/titan_install.lua", "scripts/titan-uninstall",
                 "spec/support/stdlib_test_modules.mk",
+                "titanc", "titan-compiler/driver.lua",
                 "titan/math.titan", "prefix/bin/lua", "prefix/bin/titanc",
+                "prefix/lib/luarocks/rocks-5.5/titan/0.6.0-1/bin/titanc",
                 "prefix/share/lua/5.5/titan-compiler/driver.lua",
                 "prefix/include/minicoro.h", "prefix/include/titan.h",
                 "prefix/include/titan/ffi.h",
                 "prefix/src/lua-5.5.1/lua.h", "prefix/src/lua-5.5.1/lobject.h",
+                "prefix/src/lua-5.5.1/lua.c",
                 "prefix/lib/titan/0.6/libtitan.a",
                 "prefix/lib/libbacktrace.a", "prefix/lib/liblua.a",
+                "native/include/uv.h", "native/include/uv/version.h",
+                "native/llhttp.h", "native/sqlite3.h",
             }
             for _, path in ipairs(inputs) do
                 local parent = path:match("^(.*)/")
@@ -1129,6 +1140,8 @@ esac
                 write_file(root .. "/" .. path, "fixture input\n")
             end
             write_file(root .. "/Makefile", read_file("Makefile"))
+            write_file(root .. "/scripts/install_compiler.mk",
+                read_file("scripts/install_compiler.mk"))
             write_file(root .. "/spec/support/stdlib_test_modules.mk",
                 read_file("spec/support/stdlib_test_modules.mk"))
             write_file(prefix .. "/bin/titanc", [[#!/bin/sh
@@ -1186,9 +1199,56 @@ esac
                 write_file(root .. "/build.log", "")
                 return actions, log
             end
-            assert.equal("compile\nlink\n", build("rock-post-install",
-                "ROCKS_TREE=" .. prefix, "ROCK_TITANC=" .. prefix .. "/bin/titanc",
-                "ROCK_LUA=" .. prefix .. "/bin/lua"))
+            assert.equal("compile\nlink\n", build("stdlib"))
+            local old = os.time() - 30
+            assert(lfs.touch(root .. "/titan/math.titan", old + 20, old + 20))
+            for _, path in ipairs({ "titan.so", "titan.a", "titan/math.lua" }) do
+                assert(lfs.touch(root .. "/" .. path, old + 10, old + 10))
+            end
+            -- Publication must copy the completed image even when its sources
+            -- are newer. The install phase must never re-enter compilation.
+            assert.equal("", build("publish-stdlib"))
+            for _, path in ipairs(inputs) do
+                if path:match("^prefix/") or path:match("^native/") then
+                    assert(lfs.touch(root .. "/" .. path, old, old))
+                end
+            end
+            local installation = root .. "/installed"
+            local install_arguments = {
+                "PREFIX=" .. installation, "TITANC=false",
+                "TITAN_RUNTIME_LIB=" .. prefix .. "/lib/titan/0.6/libtitan.a",
+                "TITAN_RUNTIME_LUA_SOURCE_PATH=" .. prefix .. "/src/lua-5.5.1",
+                "TITAN_RUNTIME_LUA_LIB=" .. prefix .. "/lib/liblua.a",
+                "LIBBT_LIB=" .. prefix .. "/lib/libbacktrace.a",
+                "TITAN_SDK_ROOT_HEADERS=" .. prefix .. "/include/minicoro.h " ..
+                    prefix .. "/include/titan.h",
+                "TITAN_SDK_NAMESPACED_HEADERS=" .. prefix .. "/include/titan/ffi.h",
+                "LIBUV_SRC_DIR=native", "LLHTTP_HEADER=native/llhttp.h",
+                "SQLITE3_HEADER=native/sqlite3.h",
+            }
+            assert.equal("", build("install", table.unpack(install_arguments)))
+            for _, copy in ipairs({
+                { "titanc", "bin/titanc" },
+                { "titan-compiler/driver.lua", "share/lua/5.5/titan-compiler/driver.lua" },
+                { "prefix/lib/titan/0.6/libtitan.a", "lib/titan/0.6/libtitan.a" },
+                { "prefix/lib/libbacktrace.a", "lib/libbacktrace.a" },
+                { "prefix/lib/liblua.a", "lib/liblua.a" },
+                { "prefix/src/lua-5.5.1/lua.c", "src/lua-5.5.1/lua.c" },
+                { "native/include/uv.h", "include/uv.h" },
+                { "native/include/uv/version.h", "include/uv/version.h" },
+                { "native/llhttp.h", "include/llhttp.h" },
+                { "native/sqlite3.h", "include/sqlite3.h" },
+                { "titan.so", "lib/titan/0.6/titan.so" },
+                { "titan.a", "lib/titan/0.6/titan.a" },
+                { "titan/math.lua", "share/lua/5.5/titan/math.lua" },
+            }) do
+                assert.equal(read_file(root .. "/" .. copy[1]),
+                    read_file(installation .. "/" .. copy[2]), copy[2])
+                if copy[1]:match("^prefix/") or copy[1]:match("^native/") then
+                    assert.equal(lfs.attributes(root .. "/" .. copy[1], "modification"),
+                        lfs.attributes(installation .. "/" .. copy[2], "modification"), copy[2])
+                end
+            end
             assert.equal(read_file(root .. "/titan.so"),
                 read_file(prefix .. "/lib/titan/0.6/titan.so"))
             assert.equal(read_file(root .. "/titan.a"),
@@ -1197,11 +1257,32 @@ esac
                 read_file(prefix .. "/share/lua/5.5/titan/math.lua"))
             assert.is_nil(lfs.symlinkattributes(
                 prefix .. "/share/titan/0.6/src/titan/test.titan"))
+            local private = root .. "/private rock"
+            local staged_arguments = { table.unpack(install_arguments) }
+            for _, option in ipairs({
+                "INST_PREFIX=" .. private, "INST_BINDIR=" .. private .. "/bin",
+                "INST_LUADIR=" .. private .. "/lua", "INST_CONFDIR=" .. private .. "/conf",
+            }) do staged_arguments[#staged_arguments + 1] = option end
+            local installed_time = lfs.attributes(
+                installation .. "/lib/titan/0.6/titan.so", "modification")
+            assert.equal("", build("install", table.unpack(staged_arguments)))
+            assert.equal(read_file(root .. "/titan.so"),
+                read_file(private .. "/titan-sdk/lib/titan/0.6/titan.so"))
+            assert.equal(read_file(prefix .. "/lib/liblua.a"),
+                read_file(private .. "/titan-sdk/lib/liblua.a"))
+            assert.equal(read_file(root .. "/titan/math.lua"),
+                read_file(private .. "/lua/titan/math.lua"))
+            assert.equal(read_file(root .. "/scripts/titan_install.lua"),
+                read_file(private .. "/installer/titan_install.lua"))
+            assert.equal(read_file(root .. "/scripts/titan-uninstall"),
+                read_file(private .. "/bin/titan-uninstall"))
+            assert.is_nil(lfs.attributes(private .. "/titan-sdk/share/lua"))
+            assert.equal(installed_time, lfs.attributes(
+                installation .. "/lib/titan/0.6/titan.so", "modification"))
             local outputs = {
                 "titan/math.o", "titan/math.c", "titan/math.ffi.h",
                 "titan.so", "titan.a", "titan/math.lua", "build.complete",
             }
-            local old = os.time() - 30
             local function age_build()
                 for _, path in ipairs(inputs) do
                     assert(lfs.touch(root .. "/" .. path, old, old))
@@ -1215,7 +1296,15 @@ esac
             for _, path in ipairs(outputs) do
                 assert.equal(old + 1, lfs.attributes(root .. "/" .. path, "modification"))
             end
+            -- LuaRocks regenerates its launch wrapper during deployment. The
+            -- retained compiler script owns code invalidation once installed.
+            assert(lfs.touch(prefix .. "/bin/titanc", old + 2, old + 2))
+            assert.equal("", build("stdlib"))
+            for _, path in ipairs(outputs) do
+                assert.equal(old + 1, lfs.attributes(root .. "/" .. path, "modification"))
+            end
             for _, changed in ipairs({
+                "prefix/lib/luarocks/rocks-5.5/titan/0.6.0-1/bin/titanc",
                 "prefix/share/lua/5.5/titan-compiler/driver.lua",
                 "prefix/include/titan.h",
             }) do
@@ -1229,6 +1318,10 @@ esac
             assert.equal("link\n", build("stdlib"))
             assert.equal(old + 1, lfs.attributes(root .. "/titan/math.o", "modification"))
             assert.equal("", build("stdlib"))
+            age_build()
+            assert(os.remove(prefix .. "/lib/luarocks/rocks-5.5/titan/0.6.0-1/bin/titanc"))
+            assert(lfs.touch(prefix .. "/bin/titanc", old + 2, old + 2))
+            assert.equal("compile\nlink\n", build("stdlib"))
         end, debug.traceback)
         remove_tree(root)
         if not tested then error(test_error, 0) end
@@ -1348,9 +1441,12 @@ esac
         local root = make_temp_dir()
         local tested, test_error = xpcall(function()
             local ok, output = run_argv({ "mkdir", "-p", root .. "/spec/support",
-                root .. "/spec/stdlib/titan/support", root .. "/spec/stdlib/titan/test" })
+                root .. "/spec/stdlib/titan/support", root .. "/spec/stdlib/titan/test",
+                root .. "/scripts" })
             assert.truthy(ok, output)
             write_file(root .. "/Makefile", read_file("Makefile"))
+            write_file(root .. "/scripts/install_compiler.mk",
+                read_file("scripts/install_compiler.mk"))
             write_file(root .. "/spec/support/stdlib_test_modules.mk",
                 read_file("spec/support/stdlib_test_modules.mk"))
             write_file(root .. "/prepared", "fixture SDK/compiler input\n")
@@ -1718,7 +1814,7 @@ done
             "\"$(OPENSSL_MIN_VERSION)\" openssl",
             "CFLAGS=$(call make_shell_quote,$(OPENSSL_REQUIRED_CFLAGS) " ..
             "$(OPENSSL_BUILD_CFLAGS))",
-            "rock-post-install:",
+            "install: install-compiler publish-titan-sdk publish-stdlib",
             "clean-llhttp:", "clean-openssl:",
             "clean-libuv clean-llhttp clean-sqlite3 clean-openssl",
         }) do
@@ -2804,7 +2900,6 @@ int main(void) {
             for _, contract in ipairs({
                 'AR = "$(AR)"',
                 'RANLIB = "$(RANLIB)"',
-                "unset LUA_PATH LUA_CPATH LUA_PATH_5_5 LUA_CPATH_5_5",
             }) do
                 assert.truthy(rockspec:find(contract, 1, true), contract)
             end
@@ -2854,7 +2949,7 @@ int main(void) {
                 "STDLIB_COMPLETION_STAMP := " ..
                 "titan-runtime/.titan-stdlib-complete",
                 'rm -f "$$rocks_tree/lib/libtitan.a"',
-                'install -m 0644 "$(TITAN_RUNTIME_LIB)" ' ..
+                'install -p -m 0644 "$(TITAN_RUNTIME_LIB)" ' ..
                 '"$$version_dir/libtitan.a"',
                 "rm -f $(STDLIB_PROVIDER_OUTPUTS) $(STDLIB_QUALIFIED_SOS) " ..
                 "$(STDLIB_SOS)",
@@ -3018,7 +3113,7 @@ int main(void) {
                 tostring(code) .. ")")
             local command, normalized = stdlib_command(output)
             assert.truthy(command:find(
-                    "./titanc --source-first --incremental " .. table.concat(STDLIB_ROOTS, " "), 1, true),
+                    "./titanc --lua ", 1, true),
                 command)
             assert.equal(1, count_plain(command,
                 "-X titan-runtime/ltitanlib.o " ..
@@ -3150,7 +3245,7 @@ esac
                     tostring(why) .. ", " .. tostring(code) .. ")")
                 local command, normalized = stdlib_command(output)
                 assert.equal(1, count_plain(command,
-                    "./titanc --source-first --incremental " .. table.concat(STDLIB_ROOTS, " ")), command)
+                    "./titanc --lua "), command)
                 assert.truthy(command:find(
                     "-X titan-runtime/ltitanlib.o " ..
                     "lpeglabel-build/libtitan-lpeglabel.a " ..
@@ -4296,10 +4391,7 @@ done
                 "$(STDLIB_STATIC_ARCHIVE)",
                 "STDLIB_EXTRA_OBJECTS := $(LTITANLIB_O) " ..
                 "$(LPEGLABEL_ARCHIVE)",
-                "TITAN_COMPILER_LUA := " ..
-                "$(wildcard titan-compiler/*.lua \\\n\t" ..
-                "titan-compiler/checker/*.lua " ..
-                "titan-compiler/coder/*.lua c-parser/*.lua)",
+                "include $(TITAN_MAKEFILE_DIR)scripts/install_compiler.mk",
                 "$(STDLIB_COMPLETION_STAMP): FORCE $(STDLIB_MODULE_OBJECTS)",
                 "AR=$(call make_shell_quote,$(AR))",
                 "RANLIB=$(call make_shell_quote,$(RANLIB))",
@@ -4316,8 +4408,8 @@ done
                 "TITAN_STDLIB_DIAGNOSTIC_SNAPSHOT ?=",
                 "install-stdlib: stdlib",
                 "stage=$(call make_shell_quote,$(STDLIB_INSTALL_STAGE))",
-                "install -m 0644 THIRD_PARTY_NOTICES.md",
-                "install -m 0644 $(STDLIB_LICENSES)",
+                "install -p -m 0644 THIRD_PARTY_NOTICES.md",
+                "install -p -m 0644 $(STDLIB_LICENSES)",
                 '$(STDLIB_COMPILER_ENV) "$(TITAN_LUA)" -E',
                 "rm -f $(STDLIB_PROVIDER_OUTPUTS)",
                 "rm -f $(STDLIB_SHIMS)",
@@ -4344,18 +4436,17 @@ done
                 "LUA_CPATH LUA_PATH_5_5 LUA_CPATH_5_5",
                 "")
             assert.equal(2, recursive_test_count, makefile)
-            local rock_post_install_start = assert(makefile:find(
-                "rock-post-install:", 1, true))
-            local rock_post_install_end = assert(makefile:find(
-                "\n# Compatibility name", rock_post_install_start, true))
-            local rock_post_install = makefile:sub(
-                rock_post_install_start, rock_post_install_end - 1)
-            assert.truthy(rock_post_install:find(
-                "$(MAKE) --no-print-directory install-stdlib", 1, true))
-            assert.falsy(rock_post_install:find("--incremental", 1, true))
+            assert.falsy(makefile:find("rock-post-install:", 1, true))
+            assert.truthy(read_file("scripts/install_compiler.mk"):find(
+                "TITAN_COMPILER_LUA := " ..
+                "$(wildcard titan-compiler/*.lua \\\n\t" ..
+                "titan-compiler/checker/*.lua " ..
+                "titan-compiler/coder/*.lua c-parser/*.lua)", 1, true))
             local publisher_start = assert(makefile:find(
                 "install-stdlib publish-stdlib:", 1, true))
-            local publisher = makefile:sub(publisher_start, rock_post_install_start - 1)
+            local publisher_end = assert(makefile:find(
+                "\n# Compatibility name", publisher_start, true))
+            local publisher = makefile:sub(publisher_start, publisher_end - 1)
             for _, contract in ipairs({
                 "if test -n $(call make_shell_quote,$(strip " ..
                 "$(TITAN_STDLIB_DIAGNOSTIC_SNAPSHOT))); then",
@@ -4375,7 +4466,7 @@ done
                 '"$(CURDIR)/spec/support/' ..
                 'ci_asan_generated_c_context.lua"', 1, true))
             local publication = assert(publisher:find(
-                'install -m 0755 "$$stage/titan.so"', diagnostic_snapshot, true))
+                'install -p -m 0755 "$$stage/titan.so"', diagnostic_snapshot, true))
             assert.is_true(diagnostic_snapshot < publication,
                 "diagnostic snapshot must preserve the built provider " ..
                 "before publication")

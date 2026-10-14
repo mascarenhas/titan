@@ -325,19 +325,23 @@ likewise generated source-build intermediates: they are available before the
 standard objects compile but never become provider members, publication-stage
 artifacts, or installed headers.
 
-`make titan` builds a distinct private bootstrap at
-`titan-runtime/bootstrap/titan.so`, linked only from `ltitanlib.o`. During a
-source-rock install it is staged at `<root>/lib/titan/0.6/titan.so` only when
-that pathname is absent. An existing image is preserved, so a repeated build
-never replaces a full library with the smaller bootstrap.
-
-After LuaRocks deploys `titanc`, the post-install hook enters `install-stdlib`
-with the installed compiler and matching SDK. The shared Make object graph
+`make` (or `make all`) builds a distinct private bootstrap at
+`titan-runtime/bootstrap/titan.so`, linked only from `ltitanlib.o`. The
+source-rock build uses that image with the in-tree compiler Lua sources and
+matching Lua SDK to build the standard library before installation. It needs
+no installed Titan compiler and does not seed the canonical provider with the
+bootstrap. The shared Make object graph
 retains source-adjacent generated C, headers, and objects. One final link carries
 `ltitanlib.o`, private LPegLabel, libuv, llhttp, SQLite, and optional bundled
 OpenSSL into the paired provider. TLS uses the selected OpenSSL library directly.
-Installation then copies the pair, generated shims, licenses, and optional
-macOS dSYM. `publish-stdlib` copies an
+LuaRocks' Make install pass stages compiler Lua modules and generated shims in
+`INST_LUADIR`, plus `titanc` and `titan-uninstall` in `INST_BINDIR`. The prebuilt
+native SDK, provider pair, licenses, and optional macOS dSYM are retained in
+`<rock-prefix>/titan-sdk`, with the helper at
+`<rock-prefix>/installer/titan_install.lua`. The `post_install` hook invokes
+that copier by absolute path to publish canonical SDK/provider files. Neither
+install nor the hook compiles anything. Binary rocks retain the same payload
+and helper. `publish-stdlib` copies an
 already built `STDLIB_INSTALL_STAGE` without rebuilding it. Explicit packaging
 tests own the provider protocol, symbol, metadata, and layout checks.
 
@@ -351,9 +355,15 @@ dSYM) and twenty-three Lua shims:
 <root>/share/lua/5.5/titan/{coroutine,uv,async,timer,io,fs,net,ssl,url,http,websocket,os,path,peg,string,math,lua,iteration,gc,test,reflect,sqlite3,json}.lua
 ```
 
-These remain direct Titan artifacts outside the source-rock manifest. The
-manifest owns the compiler Lua/script files; `luarocks remove` does not claim
-to remove Titan library-package artifacts.
+Canonical SDK/providers remain outside LuaRocks' manifest; compiler scripts,
+Lua modules, and generated shims use ordinary LuaRocks ownership. The
+`titan-uninstall` command removes all installed Titan rock versions in its
+selected tree through LuaRocks first, then removes exact external Titan files
+only after success. It preserves Lua and shared dependency artifacts. Cleanup
+cannot target one rock version because these canonical paths are shared.
+`make binary-rock` packs the installed private payload and gives the output
+its native platform suffix; stock LuaRocks 3.13 would label the same payload
+`.all.rock`.
 
 The checkout Make graph has one provider-pair completion marker. The twenty-three
 flat/folder source sets, selected compiler/SDK, native headers, and imported
