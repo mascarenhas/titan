@@ -444,14 +444,8 @@ jobs:
             TITAN_COVERAGE_FORMATS='html lcov cobertura' \
             TITAN_COVERAGE_GCOVR="$RUNNER_TEMP/titan-coverage-tools/bin/gcovr"
 
-      # Each run resets its counters. Keep the complete run last so the saved
-      # report covers every test, while retaining the shutdown time boundary.
-      - name: Check native shutdown deadline and run complete covered aggregate
-        run: |
-          make titan-native-coverage-run \
-            TITAN_FILTER='test_runtime_shutdown_closes_native_handles_but_not_files$' \
-            TITAN_TEST_TIMEOUT=15
-          make titan-native-coverage-run
+      - name: Run complete covered aggregate with fresh counters
+        run: make titan-native-coverage-run
 
       - name: Build child-process smoke fixture
         run: |
@@ -803,6 +797,15 @@ jobs:
         run: |
           bash spec/support/ci_sanitizer_capture.sh native-stdlib-build \
             make titan-stdlib-test-build
+
+      # Check shutdown on the already built sanitizer aggregate. Coverage
+      # reporting must not consume the lifetime oracle's 15-second budget.
+      - name: Check native Runtime shutdown deadline
+        run: |
+          bash spec/support/ci_sanitizer_capture.sh runtime-shutdown \
+            make titan-stdlib-test-run \
+              TITAN_FILTER='test_runtime_shutdown_closes_native_handles_but_not_files$' \
+              TITAN_TEST_TIMEOUT=15
 
       - name: Run dense Array runtime sanitizer gate
         env:

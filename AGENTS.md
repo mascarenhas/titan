@@ -258,7 +258,9 @@ or give concurrent builds separate source copies. See
      owner/callback, observable coroutine-GC, TLS/HTTP, WebSocket ownership,
      dense-Array, PEG/string, and
      production net/OS gates, but leave the complete stdlib behavior run in the
-     regular stdlib/coverage lane.
+     regular stdlib/coverage lane. Its already built aggregate also runs the
+     focused Runtime-shutdown case under the retained 15-second deadline, so
+     coverage reporting does not consume that lifetime boundary.
   4. `native-coverage` also needs only `build-compiler`. It restores that
      compiler tree, builds/caches the stdlib native dependencies, and installs
      one ordinary bundled source rock for the retained host/packaging specs
@@ -266,10 +268,10 @@ or give concurrent builds separate source copies. See
      integrations (`ci_test_groups.sh stdlib-compiler`, with LuaCov). Snapshot
      and restore the canonical provider, shims, and checkout runtime around
      compiler integration fixtures. It then builds the source-linked native
-     coverage aggregate with matching GCC/gcov 14 and pinned gcovr 8.4. Run the
-     15-second shutdown filter before the complete unfiltered behavior suite:
-     each execution resets counters and replaces reports, so the complete run
-     must be last. Do not also build/run an ordinary uncovered aggregate here.
+     coverage aggregate with matching GCC/gcov 14 and pinned gcovr 8.4 and runs
+     the complete unfiltered behavior suite once. Each execution resets counters
+     and replaces reports; preserve that full report for upload. Do not also
+     build/run an ordinary uncovered aggregate here.
      Packaging still needs the ordinary installed provider; the system-OpenSSL
      reinstall remains a distinct canary. Both dependency-mode production
      smokes and the focused system SDK/promotion cases stay in this lane.

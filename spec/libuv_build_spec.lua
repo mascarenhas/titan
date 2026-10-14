@@ -5040,7 +5040,7 @@ done
                 "Run retained runtime and packaging specs",
                 "Run compiler integrations that require the installed stdlib",
                 "Build complete production stdlib inventory with coverage",
-                "Check native shutdown deadline and run complete covered aggregate",
+                "Run complete covered aggregate with fresh counters",
                 "Smoke-test bundled dependency source image",
                 "Save regular Linux C-probe results",
                 "Canary source-rock installation with system OpenSSL",
@@ -5178,16 +5178,24 @@ done
                 integration_previous = index
             end
             local covered_run = named_step(native_coverage_job,
-                "Check native shutdown deadline and run complete covered aggregate")
-            assert.equal(2, count_literal(native_coverage_job,
+                "Run complete covered aggregate with fresh counters")
+            assert.equal(1, count_literal(native_coverage_job,
                 "make titan-native-coverage-run"), native_coverage_job)
-            assert.equal(1, count_literal(covered_run, "TITAN_TEST_TIMEOUT=15"))
-            assert.truthy(covered_run:find(
+            assert.falsy(covered_run:find("TITAN_FILTER", 1, true))
+            assert.falsy(covered_run:find("TITAN_TEST_TIMEOUT=15", 1, true))
+            local shutdown_run = named_step(sanitizer_job,
+                "Check native Runtime shutdown deadline")
+            assert.truthy(shutdown_run:find(
+                "ci_sanitizer_capture.sh runtime-shutdown", 1, true))
+            assert.truthy(shutdown_run:find("make titan-stdlib-test-run", 1, true))
+            assert.truthy(shutdown_run:find(
                 "TITAN_FILTER='test_runtime_shutdown_closes_native_handles_but_not_files$'",
                 1, true))
-            assert.truthy(covered_run:find(
-                "TITAN_TEST_TIMEOUT=15\n          make titan-native-coverage-run\n",
-                1, true), covered_run)
+            assert.truthy(shutdown_run:find("TITAN_TEST_TIMEOUT=15", 1, true))
+            assert.is_true(assert(sanitizer_job:find(
+                "- name: Build unified native stdlib sanitizer executable", 1, true)) <
+                assert(sanitizer_job:find(
+                    "- name: Check native Runtime shutdown deadline", 1, true)))
             local native_artifacts = named_step(native_coverage_job,
                 "Retain local reports and collection evidence")
             for _, contract in ipairs({ "if: always()", "actions/upload-artifact@v7",
@@ -5657,7 +5665,7 @@ done
 
             assert.equal(1, count_literal(sanitizer_job,
                 "make titan-stdlib-test-build"), sanitizer_job)
-            assert.equal(37, count_literal(sanitizer_job,
+            assert.equal(38, count_literal(sanitizer_job,
                 "make titan-stdlib-test-run"), sanitizer_job)
             for _, filter in ipairs({
                 "TITAN_FILTER='test_lua_host_roots_coroutine_" ..
@@ -5808,6 +5816,10 @@ done
                 {
                     "Build unified native stdlib sanitizer executable",
                     { "make titan-stdlib-test-build" },
+                },
+                {
+                    "Check native Runtime shutdown deadline",
+                    { "make titan-stdlib-test-run" },
                 },
                 {
                     "Run dense Array runtime sanitizer gate",

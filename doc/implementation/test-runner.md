@@ -406,9 +406,10 @@ specs that consume installed standard modules run in the stdlib job with LuaCov;
 the other compiler specs remain independent of the stdlib build. The stdlib job
 runs retained host/packaging boundaries, then source-links the production stdlib
 into this aggregate for its one complete behavior run with native coverage.
-Its focused shutdown run precedes the unfiltered run, since each execution
-resets coverage counters and replaces reports. Both OpenSSL mode smokes remain
-in that job. Each LuaCov producer uploads the `compiler` flag directly and
+Each execution resets coverage counters and replaces reports, so the saved
+report comes from the complete unfiltered run. The already built sanitizer
+aggregate owns the focused 15-second shutdown check without gcov/gcovr reporting
+overhead. Both OpenSSL mode smokes remain in the stdlib job. Each LuaCov producer uploads the `compiler` flag directly and
 Codecov merges those reports; native lines use `native-stdlib` separately.
 The sanitizer builds an independent ASan+UBSan aggregate once and selects focused
 cases with the run target; it never restores the regular artifact. The complete

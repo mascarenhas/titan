@@ -837,7 +837,8 @@ sets.
 The stdlib job installs the ordinary provider for packaging and compiler
 integration checks, then source-links production imports into the native
 aggregate with coverage. It runs the complete native behavior suite once,
-retains the focused shutdown deadline, and validates both OpenSSL modes.
+and validates both OpenSSL modes. The sanitizer aggregate retains the focused
+shutdown deadline without coverage-report overhead.
 There is no additional uncovered aggregate run. Each compiler pair and the
 stdlib integrations upload their own `compiler` report; Codecov merges uploads
 under that flag. The native aggregate publishes a separate `native-stdlib`
