@@ -263,8 +263,12 @@ or give concurrent builds separate source copies. See
      coverage reporting does not consume that lifetime boundary.
   4. `native-coverage` also needs only `build-compiler`. It restores that
      compiler tree, builds/caches the stdlib native dependencies, and installs
-     one ordinary bundled source rock for the retained host/packaging specs
-     (`make stdlib-busted-test`) and the eight stdlib-dependent compiler
+     one ordinary bundled source rock for the retained host/packaging specs.
+     Immediately before that install, remove only the restored, unregistered
+     `bin/titanc`, `share/lua/5.5/titan-compiler/`, and `share/lua/5.5/c-parser/`
+     preparation copies; otherwise LuaRocks preserves them as `~` backups.
+     The source build uses its in-tree compiler. Run `make stdlib-busted-test`
+     and the eight stdlib-dependent compiler
      integrations (`ci_test_groups.sh stdlib-compiler`, with LuaCov). Snapshot
      and restore the canonical provider, shims, and checkout runtime around
      compiler integration fixtures. It then builds the source-linked native

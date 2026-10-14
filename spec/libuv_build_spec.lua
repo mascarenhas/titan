@@ -5033,6 +5033,17 @@ done
             assert.truthy(regular_save_step:find("uses: ubicloud/cache/save@v4", 1, true))
             assert.truthy(regular_save_step:find(
                 "${{ steps.regular-probe-cache.outputs.cache-primary-key }}", 1, true))
+            local rock_install = named_step(native_coverage_job,
+                "Build and install the rock")
+            local install_index = assert(rock_install:find("luarocks make --force", 1, true))
+            for _, temporary_copy in ipairs({
+                'rm -f "$PREFIX/bin/titanc"',
+                'rm -rf "$PREFIX/share/lua/5.5/titan-compiler"',
+                '"$PREFIX/share/lua/5.5/c-parser"',
+            }) do
+                assert.is_true(assert(rock_install:find(temporary_copy, 1, true)) < install_index)
+            end
+            assert.falsy(rock_install:find('rm -rf "$PREFIX/share/lua/5.5"', 1, true))
             local previous = 0
             for _, step in ipairs({
                 "Restore regular Linux C-probe results",
