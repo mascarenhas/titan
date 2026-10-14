@@ -1579,12 +1579,54 @@ describe("compiler installation discovery", function()
     end)
 
     posix_model_it("links source builds through the complete runtime archive", function()
+        driver.INSTALL_PATHS = nil
         assert.same({
             "titan-runtime/libtitan.a",
             "libbacktrace/.libs/libbacktrace.a",
             "lua-5.5.1/src/liblua.a",
             "-ldl", "-lm",
         }, driver.source_link_inputs("lua-5.5.1/src"))
+    end)
+
+    posix_output_it("links source builds with the matching installed Lua SDK archive", function()
+        driver.INSTALL_PATHS = assert(driver.installed_paths("/opt/titan"))
+        assert.same({
+            "titan-runtime/libtitan.a",
+            "libbacktrace/.libs/libbacktrace.a",
+            "/opt/titan/lib/liblua.a",
+            "-ldl", "-lm",
+        }, driver.source_link_inputs("/opt/titan/src/lua-5.5.1"))
+        -- Another explicitly selected source tree owns its local archive,
+        -- even when its pathname resembles an installed SDK's header tree.
+        assert.equal("/opt/other/src/lua-5.5.1/liblua.a",
+            driver.source_link_inputs("/opt/other/src/lua-5.5.1")[3])
+    end)
+
+    it("recognizes matching installed Lua SDK headers through a prefix alias", function()
+        if platform.windows then
+            pending("POSIX prefix aliases use native directory symlinks")
+            return
+        end
+        local available, message = require("spec.support.filesystem").symlink_capability()
+        if not available then pending(message); return end
+        local workspace = temporary.name()
+        assert(os.remove(workspace))
+        assert(lfs.mkdir(workspace))
+        local previous_paths = driver.INSTALL_PATHS
+        local completed, failure = xpcall(function()
+            local physical = workspace .. "/physical"
+            assert(lfs.mkdir(physical))
+            assert(lfs.mkdir(physical .. "/src"))
+            assert(lfs.mkdir(physical .. "/src/lua-5.5.1"))
+            local alias = workspace .. "/alias"
+            assert(lfs.link(physical, alias, true))
+            driver.INSTALL_PATHS = assert(driver.installed_paths(physical))
+            assert.equal(physical .. "/lib/liblua.a",
+                driver.source_link_inputs(alias .. "/src/lua-5.5.1")[3])
+        end, debug.traceback)
+        driver.INSTALL_PATHS = previous_paths
+        remove_tree(workspace)
+        assert.truthy(completed, failure)
     end)
 
     it("shares the exact generated-object prefix with profiles and probes",

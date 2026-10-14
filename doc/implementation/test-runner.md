@@ -400,12 +400,18 @@ same-stem `.titan` source exists. It does not consult Git, so it also works in a
 source rock, while author-written C fixtures remain untouched. Root-level
 compiler fixtures retain their existing exact cleanup rules.
 
-The regular Linux stdlib producer runs the retained host boundaries and this
-aggregate executable without LuaCov. Two compiler consumers partition the
-complete compiler/language group with LuaCov; a separate merger publishes one
-compiler report. The native coverage consumer source-links the production
-stdlib into this aggregate and publishes a separate line report. The
-sanitizer builds an independent ASan+UBSan aggregate once and selects focused
+Linux CI prepares a compiler/runtime SDK without standard modules, then starts
+two compiler shard pairs and the stdlib job in parallel. Compiler integration
+specs that consume installed standard modules run in the stdlib job with LuaCov;
+the other compiler specs remain independent of the stdlib build. The stdlib job
+runs retained host/packaging boundaries, then source-links the production stdlib
+into this aggregate for its one complete behavior run with native coverage.
+Each execution resets coverage counters and replaces reports, so the saved
+report comes from the complete unfiltered run. The already built sanitizer
+aggregate owns the focused 15-second shutdown check without gcov/gcovr reporting
+overhead. Both OpenSSL mode smokes remain in the stdlib job. Each LuaCov producer uploads the `compiler` flag directly and
+Codecov merges those reports; native lines use `native-stdlib` separately.
+The sanitizer builds an independent ASan+UBSan aggregate once and selects focused
 cases with the run target; it never restores the regular artifact. The complete
 macOS pre-merge gate prefers the local VM; hosted manual dispatch is an
 explicitly requested fallback.
@@ -427,8 +433,8 @@ provider together when changing this API. Use a fresh installation after ABI
 changes; earlier Titan installations are not migration sources.
 
 The unfiltered Windows LuaRocks backend uses the same four compiler/language
-partitions in private NTFS checkout copies after its six retained serial specs
-and native aggregate pass. It defaults to two workers and accepts
+partitions in private NTFS checkout copies after its seven retained serial specs,
+eight stdlib-dependent compiler integration specs, and native aggregate pass. It defaults to two workers and accepts
 `TITAN_ROCK_TEST_JOBS=1` through `4`. The shard containing explicit compiler
 parallelism tests runs without other shards active. Workers inherit private
 TEMP/TMP, run installed Lua and Busted against the shared read-only SDK, and

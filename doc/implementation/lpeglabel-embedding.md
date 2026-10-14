@@ -435,10 +435,13 @@ The archive and headers are not copied into `$ROCKS_TREE/lib` or
 `relabel.lua`, child DSO, or extra Titan shim. An external `lpeglabel.so`
 present as the compiler's LuaRocks dependency remains separately owned and is
 not used by `titan.peg`. The source rock contains the vendored inputs so
-post-install can build the private archive, but the installed SDK does not
-retain that build product.
+the default `all` build target can build the private archive and link it into the
+standard provider using the in-tree compiler and private bootstrap. The
+install pass stages the completed provider in the retained package payload;
+the copy-only `post_install` helper publishes it. The installed SDK
+does not retain the private archive.
 
-LuaRocks still declares `lpeglabel >= 1.5.0` for the compiler's own parser.
+LuaRocks declares `lpeglabel >= 1.6.2` for the compiler's own parser.
 That compiler-owned dependency is independent of the vendored standard
 module: a deployed `titan.peg` pattern never dynamically links to or requires
 the external module.

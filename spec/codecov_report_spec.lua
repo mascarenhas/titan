@@ -85,15 +85,21 @@ describe("Codecov LuaCov upload report", function()
         assert.equal(original, read(input))
     end)
 
-    it("rejects missing or duplicate CLI sections before replacing the upload", function()
+    it("preserves partial reports without a CLI section", function()
+        local report = "====\ntitan-compiler/driver.lua\n====\n  1 return true\n"
+        write(input, report)
+        prepare()
+        assert.equal(report, read(input))
+        assert.equal(report, read(output))
+    end)
+
+    it("rejects duplicate CLI sections before replacing the upload", function()
         local section = "====\ntitanc\n====\n  1 return true\n"
-        for _, report in ipairs({ "no CLI section\n", section .. section }) do
-            write(input, report)
-            write(output, "previous upload")
-            local ok, err = pcall(prepare)
-            assert.is_false(ok)
-            assert.matches("expected exactly one titanc section", err, 1, true)
-            assert.equal("previous upload", read(output))
-        end
+        write(input, section .. section)
+        write(output, "previous upload")
+        local ok, err = pcall(prepare)
+        assert.is_false(ok)
+        assert.matches("duplicate titanc sections", err, 1, true)
+        assert.equal("previous upload", read(output))
     end)
 end)

@@ -154,7 +154,13 @@ The stdlib object DAG keeps one object per logical module and the existing
 explicit folder inventories. The final private publication stage reuses
 persistent source-adjacent objects, combines the ordered native payload into
 both provider forms, and performs normal pair/shim validation. The source-rock
-post-install path uses the same object targets with the deployed compiler/SDK.
+default `all` build uses the same object targets with the in-tree compiler Lua
+sources, private support bootstrap, and matching Lua SDK. The install pass
+stages those built outputs; the copy-only `post_install` helper publishes the
+retained SDK/provider payload without rebuilding. Ordinary development
+`make stdlib` uses the installed compiler/SDK by default;
+`STDLIB_USE_INSTALLED_RUNTIME=0` selects the
+checkout compiler/runtime explicitly.
 The native stdlib test suite likewise has per-module object targets and
 installed-provider prerequisites, then a final incremental `--test` link in one
 build directory.

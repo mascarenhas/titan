@@ -733,7 +733,11 @@ A qualified standard name such as `titan.os` therefore runs
 physical file by validating the `titan.os` callable metadata; `--static`
 prefers the paired self-describing `titan.a`. Installation creates no child
 DSOs, parent-level or `lib/lua` copies, symbolic links, or hard links. The
-installer does not provide cross-version migration or cleanup.
+installer does not provide cross-version migration. `titan-uninstall` removes
+all Titan rock versions in its selected tree through LuaRocks, then cleans
+the exact external Titan SDK/provider files only if removal succeeds. Lua and
+shared dependencies remain. Canonical paths are shared across rock versions,
+so cleanup applies to the whole Titan installation in that tree.
 
 ## Static and dynamic linking
 

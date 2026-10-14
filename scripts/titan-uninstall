@@ -1,0 +1,23 @@
+#!/usr/bin/env lua
+
+if arg[1] == "--help" then
+    print("Usage: titan-uninstall [--luarocks PATH]\nRemove Titan from this installation tree, then clean its SDK files.")
+    return
+end
+local luarocks
+if #arg == 2 and arg[1] == "--luarocks" and arg[2] ~= "" then
+    luarocks = arg[2]
+elseif #arg > 0 then
+    error("usage: titan-uninstall [--luarocks PATH]", 0)
+end
+local script = arg[0]
+if package.config:sub(1, 1) == "\\" then script = script:gsub("\\", "/") end
+local private = assert(script:match("^(.*)/bin/[^/]+$"),
+    "cannot locate Titan's private installation directory")
+local installer = assert(loadfile(private .. "/installer/titan_install.lua"))()
+local called, removed, message = pcall(installer.uninstall, private, luarocks)
+if not called or not removed then
+    io.stderr:write(tostring(called and message or removed), "\n")
+    os.exit(1)
+end
+print("Titan was removed. Lua and shared dependencies were preserved.")
