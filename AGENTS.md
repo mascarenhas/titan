@@ -175,14 +175,12 @@ or give concurrent builds separate source copies. See
   request made alongside that work does. Once requested, use
   `gh workflow run macos.yml --ref <branch>`. The separate
   `macos.yml` workflow is manual-only; `ci.yml` runs Linux jobs on pushes.
-  The regular push graph has five job definitions on standard two-CPU runners:
-  the stdlib producer, compiler pair matrix (two runner executions), compiler
-  coverage merger, native line coverage, and sanitizer. The
-  stdlib producer has 45 minutes for its validation build, complete runtime suite,
-  and both production dependency smokes; the compiler consumer has 45 minutes
-  for its regular specs and the instrumented real CLI coverage regressions. The
-  independent sanitizer has 75 minutes so a cold native-dependency cache miss
-  remains a valid build under the same two-CPU bound. Linux jobs export
+  The regular push graph has four job definitions (five runner executions):
+  `build-compiler` and `sanitizer` start in parallel; after `build-compiler`,
+  the compiler pair matrix and `native-coverage` start in parallel. Compiler
+  preparation has 30 minutes; compiler pairs and the stdlib/coverage lane have
+  45 minutes. The independent sanitizer has 75 minutes so a cold native cache
+  miss remains valid under the same two-CPU bound. Linux jobs export
   `MAKEFLAGS=-j2` and `TITAN_JOBS=2`, matching the two CPUs on standard private-repository
   hosted runners; the macOS job
   overrides both bounds to three for its three CPUs. Make may overlap independent
@@ -201,8 +199,9 @@ or give concurrent builds separate source copies. See
   and `ltitanlib.o`
   waits for the prefix Lua installation that owns its public headers. Busted
   2.3 has no native shard option. An exact unfiltered local `rock-test` instead
-  runs the seven retained runtime/packaging specs serially, then externally
-  partitions the complete compiler/language file set into four measured
+  runs the seven retained runtime/packaging specs and eight stdlib-dependent
+  compiler integration specs serially, then externally partitions the remaining
+  compiler/language file set into four measured
   longest-first groups in private checkout copies. It defaults to four workers,
   accepts `TITAN_ROCK_TEST_JOBS=1` through `4`, gives each worker private
   general and ccache temporary directories, and caps nested Make/Titan work at
@@ -213,48 +212,36 @@ or give concurrent builds separate source copies. See
   Each group runs in a private extraction of the prepared checkout, because
   compiler specs share checkout-root artifact names; tagged Busted output
   streams to the job log. In Linux coverage CI each group owns one LuaCov stats
-  file, and the job merges all four only after every worker passes. Each Linux
-  shard excludes explicit `#stress` cases from its covered invocation, then
+  file; each pair merges its two stats files only after both workers pass. Each
+  Linux shard excludes explicit `#stress` cases from its covered invocation, then
   runs its listed stress oracles in a separate ordinary Busted invocation
   without LuaCov. Every stress oracle retains a small covered companion over
   the same compiler paths; local shards do not collect LuaCov. The installed
   prefix is shared read-only. The
   aggregate native Titan suite also remains one fast executable.
 
-  1. `test-linux-stdlib` is the prepared-tree producer. It prepares a clean
-     ABI-2 prefix, builds and installs an isolated O0/no-LTO bundled-OpenSSL validation provider, and
-     packs the complete prepared tree before tests or a system-OpenSSL reinstall.
-     It then runs, without LuaCov, the retained root build/runtime/packaging
-     specs and the one 28-root native stdlib executable through `make
-     stdlib-test`; there are no standard-library Lua boundary specs.
-     The provider, runtime, native payload, generated fixtures and test objects
-     use `TITAN_BUILD_PROFILE=validation` (`-O0 -fno-lto` at compile and link).
-     Native caches include profile identity; the tiny default/LTO compiler
-     smoke retains the optimized shipping contract. After the uncovered tests it builds the
-     child-process fixture, runs the bundled-OpenSSL production smoke, reinstalls the
-     source rock with system OpenSSL at `-O0`, reruns only the two
-     mode-dependent SDK-layout/external-DSO promotion cases from
-     `rockspec_spec.lua`, and runs the full system dependency-mode smoke with
-     validation consumers. The packed canonical provider also remains
-     validation; ordinary build/install defaults stay production. It uploads the already packed artifact only after both
-     OpenSSL modes pass. Never repack the live system-OpenSSL tree.
-  2. `test-linux-compiler` consumes the regular artifact. It needs the
-     stdlib producer, restores that full tree on the same x86_64 Ubuntu target,
-     and extracts four cache-free worker copies without their `.lua` trees. The
-     measured `ci_compiler_test_groups.txt` manifest is exhaustive and assigns
-     each compiler spec to one worker; ordinary files run once per group, while
-     the retained unit/fresh-prototype cases keep their separate Busted process
-     boundaries. Workers own private checkout roots and `TMPDIR`s, share only the
-     prepared installed prefix read-only, stream tagged logs, and write distinct
-     LuaCov stats. At most two workers run concurrently; the job sums all four
-     stats files within each pair before publishing them. Disposable
-     generated fixtures use
-     `TITAN_EXTRA_CFLAGS=-O0`. `compiler-coverage` merges both pairs, emits one
-     filtered report, and makes a failing-on-error OIDC Codecov upload named
-     `compiler`. That merger and `native-coverage` have `id-token: write`.
-     The compiler consumer's restored checkout is disposable and has no
-     later production-image consumer, so it does not snapshot and restore the
-     canonical image around compiler tests.
+  1. `build-compiler` prepares a clean ABI-2 Lua prefix, installs compiler and
+     test dependencies with `luarocks make --only-deps` and `luarocks test
+     --prepare`, then uses `make install-compiler-sdk`. This builds only the
+     runtime, libbacktrace, and bare native compiler support, plus compiler Lua
+     modules, CLI, matching Lua SDK, and Titan headers. The existing guarded
+     `stage-titan-bootstrap` supplies bare `require "titan"` support without
+     logical stdlib metadata, shims, or `titan.a`. No libuv, llhttp, SQLite,
+     OpenSSL, or private LPegLabel build belongs to this job. It immediately
+     packs and uploads the prepared compiler tree.
+  2. `test-linux-compiler` needs only `build-compiler` and runs the pairs 1–2
+     and 3–4 on two runners. Workers get private checkout roots and `TMPDIR`s,
+     share the compiler prefix read-only, and write separate LuaCov stats.
+     `ci_compiler_test_groups.txt` assigns 147 compiler-only files to four
+     workers; `ci_stdlib_compiler_test_files.txt` lists eight integration files
+     that require installed standard modules. Classification validates both
+     manifests together, rejecting missing, stale, or overlapping entries.
+     Each pair merges its two stats files, generates its report locally, and
+     uploads it directly with OIDC under the `compiler` Codecov flag. The stdlib
+     integration upload uses the same flag; Codecov merges all three. There is
+     no merger job or full-tree restore just to generate/upload a report.
+     Disposable fixtures use `TITAN_EXTRA_CFLAGS=-O0 -fno-lto`. Compiler workers
+     do not snapshot providers because no later job consumes their checkout.
   3. `sanitizer` independently owns its ASan+UBSan-instrumented Lua,
      libbacktrace, libuv, llhttp, OpenSSL, and Titan tree; it never consumes the
      regular artifact. Before any LuaRocks or Titan installation, it restores a
@@ -271,40 +258,40 @@ or give concurrent builds separate source copies. See
      owner/callback, observable coroutine-GC, TLS/HTTP, WebSocket ownership,
      dense-Array, PEG/string, and
      production net/OS gates, but leave the complete stdlib behavior run in the
-     regular producer.
-  4. `native-coverage` consumes a separate copy of the prepared regular tree,
-     uses matching GCC/gcov 14 and pinned gcovr 8.4, and source-links production
-     imports into the ordinary native aggregate. The executable resets its own
-     counters, runs tests, explicitly dumps and renders line-only reports.
-     `.coverage` directories separate generated coverage objects from ordinary
-     objects; HTML/LCOV/Cobertura are opt-in gcovr formats. Its separate CI Codecov upload uses the `native-stdlib` flag;
-     local runs never upload. See [native coverage](doc/language/native-coverage.md).
+     regular stdlib/coverage lane.
+  4. `native-coverage` also needs only `build-compiler`. It restores that
+     compiler tree, builds/caches the stdlib native dependencies, and installs
+     one ordinary bundled source rock for the retained host/packaging specs
+     (`make stdlib-busted-test`) and the eight stdlib-dependent compiler
+     integrations (`ci_test_groups.sh stdlib-compiler`, with LuaCov). Snapshot
+     and restore the canonical provider, shims, and checkout runtime around
+     compiler integration fixtures. It then builds the source-linked native
+     coverage aggregate with matching GCC/gcov 14 and pinned gcovr 8.4. Run the
+     15-second shutdown filter before the complete unfiltered behavior suite:
+     each execution resets counters and replaces reports, so the complete run
+     must be last. Do not also build/run an ordinary uncovered aggregate here.
+     Packaging still needs the ordinary installed provider; the system-OpenSSL
+     reinstall remains a distinct canary. Both dependency-mode production
+     smokes and the focused system SDK/promotion cases stay in this lane.
+     Upload LuaCov under `compiler` and native LCOV under `native-stdlib`, using
+     separate failing-on-error OIDC uploads. Keep native reports as artifacts.
+     Local runs never upload. See [native coverage](doc/language/native-coverage.md).
 
-  The producer archive is deliberately a full-tree tar: partial archives lose
-  source/output timestamp ordering, prepared Lua files, executable bits, and
-  standard-library images. Pack it before tests and before system publication,
-  but upload it only after the bundled and system gates pass. The producer and
-  consumer are the same OS, architecture, and object target; a prepared native
-  tree must never cross one of those boundaries. Keep Linux dependency builds
-  in the job that consumes their warm tree, and keep both production-mode
-  smokes in the producer instead of rebuilding them in a consumer. The
-  prefix-owned `var/cache/titan-probes/2` directory is the deliberate
-  exception to that full-tree transfer: exclude it from the tar and snapshot it
-  independently in the regular producer, sanitizer, and macOS jobs with
-  `ubicloud/cache@v4`. The regular producer uses explicit restore/save actions
-  and saves after the bundled tests and smoke but before the system-OpenSSL
-  canary can add records from another provider configuration. The other lanes
-  save at job end. Those producing lanes have distinct OS/architecture keys
-  whose immutable primary ends in the commit SHA and whose stable restore
-  prefix omits it. The prepared-tree
-  compiler consumer remains cache-free, and compiler specs explicitly disable
-  persistent records because independent fixtures reuse header pathnames;
-  production builds and native aggregate compilation still benefit. A valid
-  record is trusted acceptance or rejection evidence for its probe source, so
-  never restore cache entries from a less-trusted writer.
+  The compiler producer archive is a full-tree tar to preserve source/output
+  timestamps, prepared Lua files and executable bits, but contains no stdlib
+  provider pair/shims or stdlib native dependency build trees. Producer and
+  consumers must share OS, architecture and object target. Native dependency
+  caches belong to the stdlib lane that consumes them. Exclude the prefix-owned
+  `var/cache/titan-probes/2` from the prepared tree; restore/save it independently
+  in stdlib coverage, sanitizer, and macOS lanes. The regular cache retains the
+  `test-linux-stdlib` key namespace and saves after bundled tests/smoke but
+  before the system-OpenSSL canary. These caches include OS/architecture/profile,
+  a commit-specific immutable key, and a stable restore prefix. Compiler
+  workers remain cache-free because fixtures reuse header pathnames. Never
+  restore probe evidence from a less-trusted writer.
 
-  The regular producer's cache key includes the active ABI. After restore it
-  reruns `make lua` and `make luarocks`, replaces only known active `0.6`
+  The compiler producer's dependency cache key includes the active ABI. After
+  restore it reruns `make lua` and `make luarocks`, replaces only known active `0.6`
   Titan-owned rock/direct-shim state, and proves `package.cpath` contains
   `lib/titan/0.6/?.so`. There is no migration or compatibility path for
   installations from before the numbering reset. The `rockspec_spec.lua`
@@ -460,8 +447,8 @@ or give concurrent builds separate source copies. See
   appended arguments only to Busted, maps `BUSTED_FILTER` and `TITAN_FILTER`
   independently, and invokes `make rock-test`; the latter runs the Busted tree
   and the one aggregate native Titan suite. Its exact unfiltered path runs the
-  retained runtime/packaging specs once and the compiler/language specs in four
-  isolated local shards; filtered or otherwise customized Busted runs remain
+  retained runtime/packaging specs and stdlib-dependent compiler integrations once,
+  then the remaining compiler/language specs in four isolated local shards; filtered or otherwise customized Busted runs remain
   serial. Filtering one domain does not skip the other, so use its leaf Make
   target when only that domain is wanted.
   `luarocks test` does **not** build the rock-under-test, so `make test` runs
@@ -534,7 +521,8 @@ make busted-test BUSTED_FILTER='for loop'           # Busted only
 make titan-stdlib-test TITAN_FILTER='^net[.]tests[.]' # build/run the aggregate native suite
 make titan-stdlib-test-build                        # build all 28 roots once under .titan-tests
 make titan-stdlib-test-run TITAN_FILTER='^ssl[.]tests[.]' # reuse that executable
-luarocks make && bash spec/support/ci_test_groups.sh compiler  # complete covered compiler/language group
+luarocks make && bash spec/support/ci_test_groups.sh compiler  # covered compiler-only group
+bash spec/support/ci_test_groups.sh stdlib-compiler   # covered compiler integrations needing stdlib
 make clean                                           # remove generated artifacts; `make distclean` also removes downloaded LuaRocks/libbacktrace/libuv/OpenSSL/llhttp trees
 
 TITAN_PROBE_CACHE_DISABLE=1 busted                  # full Busted tree — MUST run from repo root (all driver paths are relative)
@@ -575,18 +563,16 @@ children that test automatic bootstrap behavior deliberately omit it.
 run library API/runtime tests under LuaCov when their purpose is to test the
 library rather than a compiler or language feature. LuaCov measures the Lua
 compiler, not Titan or C library implementations, and its debug hook can make
-repeated checks of large library sources disproportionately slow. Linux CI has
-one uncovered stdlib producer and one consumer that runs the complete
-`spec/support/ci_test_groups.sh compiler` set with coverage and emits the sole
-LuaCov/Codecov report. The producer runs retained host/build boundaries plus
-the aggregate native suite without coverage; the independent sanitizer selects
-only focused native-memory cases and does not publish coverage. This includes
-both async-I/O and coroutine behavior, which must still run in full in the
-regular uncovered job. The repository `.luacov` limits debug-hook collection to
-the same compiler and `titanc` paths emitted by the one report command; test
-source itself is not coverage. Keep those filters aligned. The merged coverage
-job preserves the original `luacov.report.out` and uploads a separate
-`luacov.codecov.out`: `spec/support/prepare_codecov_report.lua` changes only the
+repeated checks of large library sources disproportionately slow. Linux CI
+covers compiler-only shards and the small stdlib-dependent compiler integration
+set with LuaCov; it runs the complete native standard-library suite once with
+native line coverage. The independent sanitizer selects focused native-memory
+cases and publishes no coverage. The repository `.luacov` limits collection to
+compiler and `titanc` paths; test source itself is not coverage. Keep those
+filters aligned. Each producer preserves `luacov.report.out` and uploads a
+separate `luacov.codecov.out`; Codecov merges the three `compiler` uploads.
+A partial shard report may have no CLI section; the stdlib integration report
+must include it. `spec/support/prepare_codecov_report.lua` changes only the
 extensionless `titanc` section heading to `titanc.lua`, then `.codecov.yml`
 maps that report alias back to tracked `titanc`. Codecov's LuaCov parser does
 not recognize extensionless section headings; uploading the original report

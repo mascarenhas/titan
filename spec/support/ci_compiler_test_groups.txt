@@ -80,7 +80,6 @@
 2 spec/coder/coverage_attribution_spec.lua 9.242
 4 spec/coder/defer_spec.lua 6.407
 2 spec/coder/dense_arrays_spec.lua 20.570
-2 spec/coder/documentation_spec.lua 6.514
 4 spec/coder/driver_flags_spec.lua 14.360
 3 spec/coder/erased_boundary_spec.lua 5.370
 1 spec/coder/error_handling_spec.lua 14.716
@@ -93,17 +92,12 @@
 1 spec/coder/foreign_functions_spec.lua 42.897
 3 spec/coder/generics_spec.lua 31.540
 1 spec/coder/grammar_semantics_spec.lua 25.896
-4 spec/coder/immediate_functions_spec.lua 25.358
-3 spec/coder/incremental_compilation_spec.lua 70.398
 3 spec/coder/interfaces_spec.lua 41.375
 2 spec/coder/line_directives_spec.lua 6.580
 4 spec/coder/lto_spec.lua 7.261
 1 spec/coder/map_metamethods_spec.lua 4.781
-3 spec/coder/multi_module_grouping_spec.lua 3.657
-2 spec/coder/multi_module_libraries_spec.lua 47.908
 3 spec/coder/multi_module_path_runtime_spec.lua 17.301
 3 spec/coder/named_arguments_spec.lua 13.198
-4 spec/coder/native_coverage_spec.lua 63.154
 4 spec/coder/native_optional_storage_spec.lua 17.238
 1 spec/coder/native_symbol_names_spec.lua 6.111
 4 spec/coder/nominal_provider_spec.lua 6.787
@@ -122,7 +116,6 @@
 1 spec/coder/static_compiled_modules_spec.lua 4.249
 1 spec/coder/static_dynamic_facade_spec.lua 2.594
 4 spec/coder/static_protocol_mismatch_spec.lua 7.064
-2 spec/coder/test_runner_spec.lua 42.645
 2 spec/coder/type_relations_soundness_spec.lua 26.953
 1 spec/coder/type_tests_spec.lua 7.539
 4 spec/coder/unions_spec.lua 36.908

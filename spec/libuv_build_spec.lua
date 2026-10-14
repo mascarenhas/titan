@@ -3019,6 +3019,72 @@ int main(void) {
                 1, true), normalized)
         end)
 
+    it("installs the compiler SDK without building standard-library dependencies", function()
+        if platform.windows then
+            pending("Unix compiler SDK Make target; Windows uses its native builder")
+            return
+        end
+        local root = make_temp_dir()
+        local tested, test_error = xpcall(function()
+            for _, directory in ipairs({ "titan-compiler", "lua-source" }) do
+                assert(lfs.mkdir(root .. "/" .. directory))
+            end
+            local fixtures = {
+                ["titan-compiler/fixture.lua"] = "return true\n",
+                ["titanc"] = "#!/bin/sh\nexit 0\n",
+                ["THIRD_PARTY_NOTICES.md"] = "notices\n",
+                ["LICENSE"] = "license\n",
+                ["fixture.h"] = "runtime header\n",
+                ["ffi.h"] = "ffi header\n",
+                ["lua-source/lua.c"] = "Lua source\n",
+                ["lua-source/lua.h"] = "Lua header\n",
+                ["lua-source/liblua.a"] = "Lua archive\n",
+                ["libtitan.a"] = "runtime archive\n",
+                ["libbacktrace.a"] = "backtrace archive\n",
+                ["bootstrap.so"] = "bare compiler support\n",
+                ["prepared"] = "prepared SDK inputs\n",
+                ["fixture.mk"] = "all stdlib libuv lpeglabel openssl llhttp sqlite3:\n" ..
+                    "\t@echo unexpected stdlib dependency >&2; exit 91\n",
+            }
+            for name, contents in pairs(fixtures) do
+                write_file(root .. "/" .. name, contents)
+            end
+            local prefix = root .. "/sdk"
+            local ok, output = run_argv({
+                "env", "-u", "MAKEFLAGS", "-u", "MFLAGS", "-u", "MAKEOVERRIDES",
+                "make", "--no-print-directory", "-s", "-j1", "-C", root,
+                "-f", lfs.currentdir() .. "/Makefile", "-f", "fixture.mk",
+                "PREFIX=" .. prefix, "ROCKS_TREE=" .. prefix,
+                "HOST_OS=Linux", "OPENSSL_MODE=bundled", "TITAN_BUILD_PROFILE=validation",
+                "TITAN_RUNTIME_SDK_PREREQS=prepared", "TITAN_RUNTIME_LIB=libtitan.a",
+                "TITAN_BOOTSTRAP_SO=bootstrap.so", "LIBBT_LIB=libbacktrace.a",
+                "TITAN_RUNTIME_LUA_SOURCE_PATH=lua-source",
+                "TITAN_RUNTIME_LUA_LIB=lua-source/liblua.a",
+                "TITAN_SDK_ROOT_HEADERS=fixture.h", "TITAN_SDK_NAMESPACED_HEADERS=ffi.h",
+                "--old-file=bootstrap.so", "MAKE=false", "install-compiler-sdk",
+            })
+            assert.truthy(ok, output)
+            for source, destination in pairs({
+                ["titan-compiler/fixture.lua"] = "share/lua/5.5/titan-compiler/fixture.lua",
+                titanc = "bin/titanc", ["THIRD_PARTY_NOTICES.md"] = "etc/THIRD_PARTY_NOTICES.md",
+                ["libtitan.a"] = "lib/titan/0.6/libtitan.a",
+                ["libbacktrace.a"] = "lib/libbacktrace.a",
+                ["bootstrap.so"] = "lib/titan/0.6/titan.so",
+                ["fixture.h"] = "include/fixture.h", ["ffi.h"] = "include/titan/ffi.h",
+                ["lua-source/lua.c"] = "src/lua-5.5.1/lua.c",
+                ["lua-source/lua.h"] = "src/lua-5.5.1/lua.h",
+                ["lua-source/liblua.a"] = "lib/liblua.a",
+            }) do
+                assert.equal(fixtures[source], read_file(prefix .. "/" .. destination), destination)
+            end
+            assert.equal("validation\n", read_file(prefix .. "/etc/titan/build-profile"))
+            assert.falsy(lfs.attributes(prefix .. "/lib/titan/0.6/titan.a"))
+            assert.falsy(lfs.attributes(prefix .. "/share/lua/5.5/titan"))
+        end, debug.traceback)
+        remove_tree(root)
+        if not tested then error(test_error, 0) end
+    end)
+
 
     it("builds the pinned libuv source through CMake", function()
         local file = assert(io.open("Makefile", "rb"))
@@ -3675,18 +3741,26 @@ exec make "$@"
             assert.truthy(mkdir_ok, mkdir_output)
             write_file(support .. "/run_rock_tests.sh",
                 read_file("spec/support/run_rock_tests.sh"))
+            local integration_specs = {
+                "spec/coder/native_coverage_spec.lua",
+                "spec/stdlib_compiler_spec.lua",
+            }
+            write_file(support .. "/ci_stdlib_compiler_test_files.txt",
+                "# Installed-stdlib compiler fixtures\n" ..
+                table.concat(integration_specs, "\n") .. "\n")
 
             local fake_busted = bin .. "/busted"
             write_file(fake_busted, [==[#!/usr/bin/env bash
 set -eu
 : "${TITAN_ROUTING_ARGV_LOG:?}"
-printf '%s\0' "$@" > "$TITAN_ROUTING_ARGV_LOG"
+printf '%s\0' __TITAN_BUSTED_CALL__ "$@" >> "$TITAN_ROUTING_ARGV_LOG"
 ]==])
             write_file(support .. "/run_parallel_compiler_tests.sh", [==[
 #!/usr/bin/env bash
 set -eu
 : "${TITAN_ROUTING_SHARD_LOG:?}"
 printf 'sharded\n' > "$TITAN_ROUTING_SHARD_LOG"
+printf '%s\0' __TITAN_SHARDS__ >> "$TITAN_ROUTING_ARGV_LOG"
 ]==])
             local chmod_ok, chmod_output = run_argv({
                 "chmod", "+x", fake_busted,
@@ -3695,16 +3769,26 @@ printf 'sharded\n' > "$TITAN_ROUTING_SHARD_LOG"
             })
             assert.truthy(chmod_ok, chmod_output)
 
-            local function decoded_argv(path)
+            local function decoded_calls(path)
                 local encoded = read_file(path)
-                local argv = {}
+                local calls, current = {}, nil
                 local offset = 1
                 while offset <= #encoded do
                     local finish = assert(encoded:find("\0", offset, true))
-                    argv[#argv + 1] = encoded:sub(offset, finish - 1)
+                    local argument = encoded:sub(offset, finish - 1)
                     offset = finish + 1
+                    if argument == "__TITAN_BUSTED_CALL__" then
+                        current = {}
+                        calls[#calls + 1] = current
+                    elseif argument == "__TITAN_SHARDS__" then
+                        current = nil
+                        calls[#calls + 1] = "sharded"
+                    else
+                        assert.truthy(current)
+                        current[#current + 1] = argument
+                    end
                 end
-                return argv
+                return calls
             end
 
             local stdlib_specs = {
@@ -3748,23 +3832,25 @@ printf 'sharded\n' > "$TITAN_ROUTING_SHARD_LOG"
 
             local ok, output = run_case()
             assert.truthy(ok, output)
-            assert.same(stdlib_specs, decoded_argv(argv_log))
+            assert.same({ stdlib_specs, integration_specs, "sharded" },
+                decoded_calls(argv_log))
             assert.equal("sharded\n", read_file(shard_log))
 
             ok, output = run_case({ "TITAN_FILTER=native$tail" })
             assert.truthy(ok, output)
-            assert.same(stdlib_specs, decoded_argv(argv_log))
+            assert.same({ stdlib_specs, integration_specs, "sharded" },
+                decoded_calls(argv_log))
             assert.equal("sharded\n", read_file(shard_log))
 
             ok, output = run_case({ "BUSTED_FILTER=focus$tail" })
             assert.truthy(ok, output)
-            assert.same({ "--filter=focus$tail" }, decoded_argv(argv_log))
+            assert.same({ { "--filter=focus$tail" } }, decoded_calls(argv_log))
             assert.falsy(lfs.attributes(shard_log))
 
             local direct = { "--name=cost$bill", "line one\nline two", "" }
             ok, output = run_case(nil, direct)
             assert.truthy(ok, output)
-            assert.same(direct, decoded_argv(argv_log))
+            assert.same({ direct }, decoded_calls(argv_log))
             assert.falsy(lfs.attributes(shard_log))
 
             local forwarded = { "spaced sentinel", "--literal=two words" }
@@ -3775,14 +3861,14 @@ printf 'sharded\n' > "$TITAN_ROUTING_SHARD_LOG"
                 "TITAN_ROCK_TEST_ARG_1=" .. forwarded[2],
             })
             assert.truthy(ok, output)
-            assert.same(forwarded, decoded_argv(argv_log))
+            assert.same({ forwarded }, decoded_calls(argv_log))
             assert.falsy(lfs.attributes(shard_log))
         end, debug.traceback)
         remove_tree(root)
         if not tested then error(test_error, 0) end
     end)
 
-    it("selects every uncovered compiler shard exactly once without LuaCov",
+    it("selects both uncovered compiler domains exactly once without LuaCov",
         function()
             if platform.windows then
                 pending("Unix CI shell Busted shard launcher")
@@ -3801,7 +3887,7 @@ printf '%s\0' "$@" > "$TITAN_SELECTOR_ARGV_LOG"
                 })
                 assert.truthy(chmod_ok, chmod_output)
 
-                local expected = { {}, {}, {}, {} }
+                local expected = { {}, {}, {}, {}, {} }
                 for line in read_file(
                     "spec/support/ci_compiler_test_groups.txt"):
                 gmatch("[^\r\n]+") do
@@ -3811,17 +3897,25 @@ printf '%s\0' "$@" > "$TITAN_SELECTOR_ARGV_LOG"
                         paths[#paths + 1] = path
                     end
                 end
+                for line in read_file(
+                    "spec/support/ci_stdlib_compiler_test_files.txt"):
+                gmatch("[^\r\n]+") do
+                    if line:sub(1, 1) ~= "#" then
+                        expected[5][#expected[5] + 1] = line
+                    end
+                end
 
                 local seen = {}
                 local total = 0
-                for shard = 1, 4 do
+                for shard = 1, 5 do
                     local log = root .. "/shard-" .. shard
                     local ok, output = run_argv({
                         "env",
                         "BUSTED=" .. fake_busted,
                         "TITAN_SELECTOR_ARGV_LOG=" .. log,
                         "bash", "spec/support/ci_test_groups.sh",
-                        "compiler-uncovered-shard-" .. shard,
+                        shard == 5 and "stdlib-compiler-uncovered" or
+                            "compiler-uncovered-shard-" .. shard,
                     })
                     assert.truthy(ok, output)
                     assert.truthy(output:find(
@@ -3855,16 +3949,35 @@ printf '%s\0' "$@" > "$TITAN_SELECTOR_ARGV_LOG"
                     assert.same(expected[shard], actual)
                 end
                 local expected_total = 0
-                for shard = 1, 4 do
+                for shard = 1, 5 do
                     expected_total = expected_total + #expected[shard]
                 end
+                assert.equal(155, expected_total)
                 assert.equal(expected_total, total)
+
+                local complete_log = root .. "/complete"
+                local ok, output = run_argv({
+                    "env", "BUSTED=" .. fake_busted,
+                    "TITAN_SELECTOR_ARGV_LOG=" .. complete_log,
+                    "bash", "spec/support/ci_test_groups.sh",
+                    "compiler-uncovered",
+                })
+                assert.truthy(ok, output)
+                local complete = {}
+                for argument in read_file(complete_log):gmatch("([^%z]+)%z") do
+                    assert.not_equal("-c", argument)
+                    if argument:match("^spec/.+_spec[.]lua$") then
+                        assert.falsy(complete[argument], argument)
+                        complete[argument] = true
+                    end
+                end
+                assert.same(seen, complete)
             end, debug.traceback)
             remove_tree(root)
             if not tested then error(test_error, 0) end
         end)
 
-    it("runs covered and uncovered stress compiler tests in each shard",
+    it("runs covered and uncovered stress compiler tests in both domains",
         function()
             if platform.windows then
                 pending("Unix CI LuaCov and shell Busted shard launcher")
@@ -3883,7 +3996,7 @@ printf '%s\0' __TITAN_BUSTED_CALL__ "$@" >> "$TITAN_SELECTOR_ARGV_LOG"
                 })
                 assert.truthy(chmod_ok, chmod_output)
 
-                local expected = { {}, {}, {}, {} }
+                local expected = { {}, {}, {}, {}, {} }
                 for line in read_file(
                     "spec/support/ci_compiler_test_groups.txt"):
                 gmatch("[^\r\n]+") do
@@ -3891,6 +4004,13 @@ printf '%s\0' __TITAN_BUSTED_CALL__ "$@" >> "$TITAN_SELECTOR_ARGV_LOG"
                     if shard then
                         local paths = expected[tonumber(shard)]
                         paths[#paths + 1] = path
+                    end
+                end
+                for line in read_file(
+                    "spec/support/ci_stdlib_compiler_test_files.txt"):
+                gmatch("[^\r\n]+") do
+                    if line:sub(1, 1) ~= "#" then
+                        expected[5][#expected[5] + 1] = line
                     end
                 end
                 local stress = {}
@@ -3928,14 +4048,15 @@ printf '%s\0' __TITAN_BUSTED_CALL__ "$@" >> "$TITAN_SELECTOR_ARGV_LOG"
                     return calls
                 end
 
-                for shard = 1, 4 do
+                for shard = 1, 5 do
                     local log = root .. "/shard-" .. shard
                     local ok, output = run_argv({
                         "env",
                         "BUSTED=" .. fake_busted,
                         "TITAN_SELECTOR_ARGV_LOG=" .. log,
                         "bash", "spec/support/ci_test_groups.sh",
-                        "compiler-shard-" .. shard,
+                        shard == 5 and "stdlib-compiler" or
+                            "compiler-shard-" .. shard,
                     })
                     assert.truthy(ok, output)
                     assert.truthy(output:find("with LuaCov", 1, true), output)
@@ -3947,6 +4068,7 @@ printf '%s\0' __TITAN_BUSTED_CALL__ "$@" >> "$TITAN_SELECTOR_ARGV_LOG"
                     local covered_calls = 0
                     local stress_calls = 0
                     for _, argv in ipairs(decoded_calls(log)) do
+                        local invocation_files = 0
                         local with_coverage = has_argument(argv, "-c")
                         if with_coverage then
                             covered_calls = covered_calls + 1
@@ -3961,6 +4083,7 @@ printf '%s\0' __TITAN_BUSTED_CALL__ "$@" >> "$TITAN_SELECTOR_ARGV_LOG"
                         end
                         for _, argument in ipairs(argv) do
                             if argument:match("^spec/.+_spec[.]lua$") then
+                                invocation_files = invocation_files + 1
                                 if with_coverage then
                                     assert.falsy(covered[argument], argument)
                                     covered[argument] = true
@@ -3969,6 +4092,17 @@ printf '%s\0' __TITAN_BUSTED_CALL__ "$@" >> "$TITAN_SELECTOR_ARGV_LOG"
                                     assert.falsy(
                                         uncovered_stress[argument], argument)
                                     uncovered_stress[argument] = true
+                                end
+                            end
+                        end
+                        if shard == 5 and with_coverage then
+                            for _, isolated in ipairs({
+                                "spec/coder/multi_module_libraries_spec.lua",
+                                "spec/coder/native_coverage_spec.lua",
+                                "spec/stdlib_compiler_spec.lua",
+                            }) do
+                                if has_argument(argv, isolated) then
+                                    assert.equal(1, invocation_files, isolated)
                                 end
                             end
                         end
@@ -4647,9 +4781,10 @@ done
                     or (#job + 1)
                 return job:sub(first, finish - 1)
             end
-            local function assert_codecov_job(job, upload_name, upload_path, flag)
+            local function assert_codecov_upload(job, step, upload_name, upload_path, flag)
                 assert.equal(1, count_literal(job, "contents: read"), job)
                 assert.equal(1, count_literal(job, "id-token: write"), job)
+                job = named_step(job, step)
                 assert.equal(1,
                     count_literal(job, "codecov/codecov-action@v7"), job)
                 assert.equal(1,
@@ -4663,13 +4798,11 @@ done
                 assert.falsy(job:find("\n%s+token:", 1), job)
             end
 
-            local stdlib_job = assert(linux_workflow:match(
-                "\n  test%-linux%-stdlib:(.-)" ..
+            local build_job = assert(linux_workflow:match(
+                "\n  build%-compiler:(.-)" ..
                 "\n  test%-linux%-compiler:"))
             local compiler_job = assert(linux_workflow:match(
-                "\n  test%-linux%-compiler:(.-)\n  compiler%-coverage:"))
-            local coverage_job = assert(linux_workflow:match(
-                "\n  compiler%-coverage:(.-)\n  native%-coverage:"))
+                "\n  test%-linux%-compiler:(.-)\n  native%-coverage:"))
             local native_coverage_job = assert(linux_workflow:match(
                 "\n  native%-coverage:(.-)\n  sanitizer:"))
             local macos_job = assert(macos_workflow:match(
@@ -4684,17 +4817,17 @@ done
             local macos_events = assert(macos_workflow:match("\non:(.-)\nenv:"))
             assert.truthy(macos_events:match("^%s*workflow_dispatch:%s*$"),
                 macos_events)
-            assert.equal(5, count_literal(linux_workflow,
+            assert.equal(4, count_literal(linux_workflow,
                 "if: github.event_name == 'push'"), linux_workflow)
             assert.equal(1, count_literal(macos_workflow,
                 "if: github.event_name == 'workflow_dispatch'"), macos_workflow)
-            assert.equal(5, count_literal(linux_workflow, "\n    runs-on:"),
+            assert.equal(4, count_literal(linux_workflow, "\n    runs-on:"),
                 linux_workflow)
             assert.equal(1, count_literal(macos_workflow, "\n    runs-on:"),
                 macos_workflow)
             for _, job_name in ipairs({
-                "test-linux-stdlib", "test-linux-compiler", "compiler-coverage",
-                "native-coverage", "sanitizer",
+                "build-compiler", "test-linux-compiler", "native-coverage",
+                "sanitizer",
             }) do
                 assert.equal(1, count_literal(linux_workflow,
                     "\n  " .. job_name .. ":"), job_name)
@@ -4709,6 +4842,7 @@ done
             assert.equal(1, count_literal(macos_workflow,
                 'TITAN_ABI_VERSION: "2"'), macos_workflow)
             for _, removed in ipairs({
+                "\n  test-linux-stdlib:", "\n  compiler-coverage:",
                 "prepare-linux", "test-linux-library", "ubuntu-slim",
                 "compiler-core", "compiler-heavy", "library-serial",
                 "library-uv-fs", "library-net-os", "library-peg-string",
@@ -4719,48 +4853,40 @@ done
                 assert.falsy(workflow:find(removed, 1, true), removed)
             end
             assert.falsy(workflow:find("awk", 1, true), workflow)
-            assert.equal(2, count_literal(workflow,
+            assert.equal(3, count_literal(workflow,
                 "codecov/codecov-action@v7"), workflow)
             assert.equal(2, count_literal(workflow,
                 "id-token: write"), workflow)
-            assert.equal(1, count_literal(workflow,
+            assert.equal(2, count_literal(workflow,
                 'luacov "titan%-compiler/"'), workflow)
             assert.falsy(workflow:find("CODECOV_TOKEN", 1, true), workflow)
 
-            assert.equal(1, count_literal(stdlib_job,
-                    "name: stdlib (ubuntu-24.04, build+all-no-coverage)"),
-                stdlib_job)
-            assert.equal(1, count_literal(stdlib_job,
-                "runs-on: ubicloud-standard-2"), stdlib_job)
-            assert.equal(1, count_literal(stdlib_job,
-                "timeout-minutes: 45"), stdlib_job)
-            assert.equal(1, count_literal(stdlib_job,
-                "contents: read"), stdlib_job)
-            assert.falsy(stdlib_job:find("id-token: write", 1, true),
-                stdlib_job)
-            assert.falsy(stdlib_job:find("codecov/codecov-action", 1, true),
-                stdlib_job)
-            assert.equal(1, count_literal(stdlib_job,
-                "\n      CC: gcc-14\n"), stdlib_job)
-            assert.equal(1, count_literal(stdlib_job,
-                "\n      LUA_CC: gcc-14\n"), stdlib_job)
-            for _, cache in ipairs({ "prefix", "libuv", "llhttp", "sqlite3", "openssl" }) do
-                assert.equal(2, count_literal(stdlib_job,
+            for _, contract in ipairs({
+                "name: compiler dependencies (ubuntu-24.04)",
+                "runs-on: ubicloud-standard-2", "timeout-minutes: 30",
+                "contents: read", "\n      CC: gcc-14\n",
+                "\n      LUA_CC: gcc-14\n", "make lua luarocks",
+                "luarocks make --only-deps", "luarocks test --prepare",
+                "make install-compiler-sdk",
+                'test -f "$PREFIX/lib/titan/0.6/libtitan.a"',
+                'test ! -e "$PREFIX/lib/titan/0.6/titan.a"',
+                'test ! -e "$PREFIX/share/lua/5.5/titan/$module.lua"',
+            }) do
+                assert.equal(1, count_literal(build_job, contract), contract)
+            end
+            for _, forbidden in ipairs({
+                "\n    needs:", "id-token: write", "codecov/codecov-action",
+                "actions/download-artifact", "make stdlib", "make libuv",
+                "make llhttp", "make sqlite3", "make openssl",
+                "luarocks make --force", "C-probe results",
+            }) do
+                assert.falsy(build_job:find(forbidden, 1, true), forbidden)
+            end
+            assert.equal(2, count_literal(build_job, "-gcc14-prefix-"), build_job)
+            for _, cache in ipairs({ "libuv", "llhttp", "sqlite3", "openssl" }) do
+                assert.equal(2, count_literal(native_coverage_job,
                     "-gcc14-" .. cache .. "-"), cache)
             end
-            assert.falsy(stdlib_job:find('luacov "', 1, true),
-                stdlib_job)
-            assert.falsy(stdlib_job:find(" -c -o gtest", 1, true),
-                stdlib_job)
-            assert.equal(1, count_literal(stdlib_job,
-                "make stdlib-test"), stdlib_job)
-            assert.equal(1, count_literal(stdlib_job,
-                "make titan-stdlib-test-run"), stdlib_job)
-            assert.equal(1, count_literal(stdlib_job,
-                "TITAN_TEST_TIMEOUT=15"), stdlib_job)
-            assert.equal(1, count_literal(stdlib_job,
-                    "test_runtime_shutdown_closes_native_handles_but_not_files$"),
-                stdlib_job)
             assert.falsy(makefile:find(
                     "$(sort $(wildcard spec/stdlib/*_spec.lua))", 1, true),
                 makefile)
@@ -4836,41 +4962,41 @@ done
                 "spec/lpeglabel_build_spec.lua",
                 "spec/minicoro_spec.lua",
                 "spec/rockspec_spec.lua",
+                "spec/titan_install_spec.lua",
             }) do
                 assert.truthy(makefile:find(retained, 1, true), retained)
             end
-            assert.equal(1, count_literal(stdlib_job,
-                'TITAN_EXTRA_CFLAGS: "-O0 -fno-lto"'), stdlib_job)
-            assert.equal(1, count_literal(stdlib_job,
-                'TITAN_TEST_EXTRA_CFLAGS: "-O0 -fno-lto"'), stdlib_job)
-            assert.equal(1, count_literal(stdlib_job,
-                'TITAN_EXTRA_LDFLAGS: "-fno-lto"'), stdlib_job)
-            assert.equal(1, count_literal(stdlib_job,
-                'TITAN_TEST_EXTRA_LDFLAGS: "-fno-lto"'), stdlib_job)
-            assert.truthy(stdlib_job:find(
-                'static_archive="${provider%.so}.a"', 1, true), stdlib_job)
-            assert.truthy(stdlib_job:find(
-                "ci_dependency_mode_smoke.sh bundled", 1, true), stdlib_job)
-            assert.truthy(stdlib_job:find(
-                "ci_dependency_mode_smoke.sh system", 1, true), stdlib_job)
-            assert.truthy(stdlib_job:find(
-                "OPENSSL_MODE=system", 1, true), stdlib_job)
-            assert.truthy(stdlib_job:find(
-                "archive: false", 1, true), stdlib_job)
-            assert.truthy(stdlib_job:find(
-                "--exclude='./.git'", 1, true), stdlib_job)
-            assert.truthy(stdlib_job:find(
-                "--exclude='./libbacktrace/.git'", 1, true), stdlib_job)
-            assert.truthy(stdlib_job:find(
-                    "--exclude='./.lua/var/cache/titan-probes'", 1, true),
-                stdlib_job)
-            assert.truthy(stdlib_job:find(
+            local packaging_step = named_step(native_coverage_job,
+                "Run retained runtime and packaging specs")
+            for _, contract in ipairs({
+                'TITAN_EXTRA_CFLAGS: "-O0 -fno-lto"',
+                'TITAN_TEST_EXTRA_CFLAGS: "-O0 -fno-lto"',
+                'TITAN_EXTRA_LDFLAGS: "-fno-lto"',
+                'TITAN_TEST_EXTRA_LDFLAGS: "-fno-lto"',
+                'make stdlib-busted-test EXTRA_TEST_FLAGS="-o gtest -v"',
+            }) do
+                assert.equal(1, count_literal(packaging_step, contract), contract)
+            end
+            assert.falsy(native_coverage_job:find("make stdlib-test", 1, true))
+            assert.falsy(native_coverage_job:find("make titan-stdlib-test", 1, true))
+            assert.truthy(native_coverage_job:find(
+                'static_archive="${provider%.so}.a"', 1, true))
+            for _, contract in ipairs({
+                "archive: false", "--exclude='./.git'",
+                "--exclude='./libbacktrace/.git'",
+                "--exclude='./.lua/var/cache/titan-probes'",
                 "prepared tree contains the independent C-probe cache",
-                1, true), stdlib_job)
-            assert.falsy(stdlib_job:find("grep -Eq", 1, true), stdlib_job)
-            assert.truthy(stdlib_job:find(
-                "grep -E '^\\./\\.lua/var/cache/titan-probes(/|$)' " ..
-                ">/dev/null", 1, true), stdlib_job)
+                "grep -E '^\\./\\.lua/var/cache/titan-probes(/|$)' >/dev/null",
+            }) do
+                assert.truthy(build_job:find(contract, 1, true), contract)
+            end
+            local build_index = assert(build_job:find(
+                "- name: Build and install the compiler SDK without the stdlib", 1, true))
+            local pack_index = assert(build_job:find(
+                "- name: Pack prepared Linux tree", build_index, true))
+            local upload_index = assert(build_job:find(
+                "- name: Upload prepared Linux tree", pack_index, true))
+            assert.is_true(build_index < pack_index and pack_index < upload_index)
 
             assert.equal(7, count_literal(workflow,
                 "uses: ubicloud/cache@v4"), workflow)
@@ -4881,65 +5007,51 @@ done
             assert.equal(4, count_literal(workflow,
                 "path: .lua/var/cache/titan-probes/2"), workflow)
             assert.falsy(workflow:find("TITAN_PROBE_CACHE_IDENTITY", 1, true))
-            assert.equal(3, count_literal(workflow,
+            assert.equal(4, count_literal(workflow,
                 "TITAN_PREFIX: ${{ github.workspace }}/.lua"), workflow)
-            assert.truthy(stdlib_job:find("-test-linux-stdlib-", 1, true))
-            assert.falsy(compiler_job:find("-test-linux-stdlib-", 1, true))
-            assert.falsy(sanitizer_job:find("-test-linux-stdlib-", 1, true))
-            assert.truthy(sanitizer_job:find(
-                "-sanitizer-", 1, true))
+            -- Keep the existing regular cache identity when moving its owner.
+            assert.truthy(native_coverage_job:find("-test-linux-stdlib-", 1, true))
+            for _, job in ipairs({ build_job, compiler_job, sanitizer_job }) do
+                assert.falsy(job:find("-test-linux-stdlib-", 1, true))
+            end
+            assert.truthy(sanitizer_job:find("-sanitizer-", 1, true))
             assert.truthy(macos_job:find("-test-macos-", 1, true))
-            assert.equal(3, count_literal(workflow,
-                "-${{ github.sha }}"), workflow)
+            assert.equal(3, count_literal(workflow, "-${{ github.sha }}"), workflow)
             assert.equal(3, count_literal(workflow,
                 "          key: titan-probes-2-"), workflow)
 
-            local regular_cache_step = named_step(
-                stdlib_job, "Restore regular Linux C-probe results")
-            assert.falsy(regular_cache_step:find(
-                "-test-linux-compiler-", 1, true))
-            assert.truthy(regular_cache_step:find(
-                "-test-linux-stdlib-", 1, true))
-            local regular_cache_index = assert(stdlib_job:find(
-                "- name: Restore regular Linux C-probe results", 1, true))
-            assert.truthy(regular_cache_step:find(
-                "id: regular-probe-cache", 1, true))
-            assert.truthy(regular_cache_step:find(
-                "uses: ubicloud/cache/restore@v4", 1, true))
-            local regular_build_index = assert(stdlib_job:find(
-                "- name: Build and install the rock", regular_cache_index,
-                true))
-            assert.is_true(regular_cache_index < regular_build_index,
-                stdlib_job)
-
-            local pack_index = assert(stdlib_job:find(
-                "- name: Pack prepared Linux tree", 1, true))
-            local tests_index = assert(stdlib_job:find(
-                "- name: Run all stdlib/runtime tests without coverage",
-                pack_index, true))
-            local bundled_index = assert(stdlib_job:find(
-                "- name: Smoke-test bundled dependency source image",
-                tests_index, true))
-            local regular_save_index = assert(stdlib_job:find(
-                "- name: Save regular Linux C-probe results",
-                bundled_index, true))
-            local regular_save_step = named_step(
-                stdlib_job, "Save regular Linux C-probe results")
+            local regular_cache_step = named_step(native_coverage_job,
+                "Restore regular Linux C-probe results")
+            for _, contract in ipairs({
+                "id: regular-probe-cache", "uses: ubicloud/cache/restore@v4",
+                "-test-linux-stdlib-",
+            }) do
+                assert.truthy(regular_cache_step:find(contract, 1, true), contract)
+            end
+            local regular_save_step = named_step(native_coverage_job,
+                "Save regular Linux C-probe results")
+            assert.truthy(regular_save_step:find("uses: ubicloud/cache/save@v4", 1, true))
             assert.truthy(regular_save_step:find(
-                "uses: ubicloud/cache/save@v4", 1, true))
-            assert.truthy(regular_save_step:find(
-                "${{ steps.regular-probe-cache.outputs.cache-primary-key }}",
-                1, true))
-            local system_index = assert(stdlib_job:find(
-                "- name: Canary source-rock installation with system " ..
-                "OpenSSL", regular_save_index, true))
-            local upload_index = assert(stdlib_job:find(
-                "- name: Upload prepared Linux tree", system_index, true))
-            assert.is_true(pack_index < tests_index, stdlib_job)
-            assert.is_true(tests_index < bundled_index, stdlib_job)
-            assert.is_true(bundled_index < regular_save_index, stdlib_job)
-            assert.is_true(regular_save_index < system_index, stdlib_job)
-            assert.is_true(system_index < upload_index, stdlib_job)
+                "${{ steps.regular-probe-cache.outputs.cache-primary-key }}", 1, true))
+            local previous = 0
+            for _, step in ipairs({
+                "Restore regular Linux C-probe results",
+                "Build and install the rock",
+                "Run retained runtime and packaging specs",
+                "Run compiler integrations that require the installed stdlib",
+                "Build complete production stdlib inventory with coverage",
+                "Check native shutdown deadline and run complete covered aggregate",
+                "Smoke-test bundled dependency source image",
+                "Save regular Linux C-probe results",
+                "Canary source-rock installation with system OpenSSL",
+                "Upload stdlib compiler integration coverage to Codecov",
+                "Upload native stdlib line coverage to Codecov",
+            }) do
+                local index = assert(native_coverage_job:find(
+                    "- name: " .. step, 1, true), step)
+                assert.is_true(previous < index, step)
+                previous = index
+            end
 
             assert.equal(1, count_literal(compiler_job,
                     "name: compiler/language shards ${{ matrix.shard-pair }} " ..
@@ -4950,7 +5062,7 @@ done
             assert.equal(1, count_literal(compiler_job,
                 "fail-fast: false"), compiler_job)
             assert.equal(1, count_literal(compiler_job,
-                "needs: test-linux-stdlib"), compiler_job)
+                "needs: build-compiler"), compiler_job)
             assert.equal(1, count_literal(compiler_job,
                 "runs-on: ubicloud-standard-2"), compiler_job)
             assert.equal(1, count_literal(compiler_job,
@@ -4991,15 +5103,18 @@ done
             for _, required in ipairs({
                 "actions/upload-artifact@v7",
                 "name: titan-compiler-coverage-${{ matrix.shard-pair }}",
-                "path: luacov.stats.out",
+                "path: |\n            luacov.stats.out\n            luacov.codecov.out",
                 "if-no-files-found: error",
                 "overwrite: true",
             }) do
                 assert.truthy(compiler_upload:find(required, 1, true), required)
             end
             assert.falsy(compiler_job:find("continue-on-error", 1, true))
-            assert.falsy(compiler_job:find("id-token: write", 1, true))
-            assert.falsy(compiler_job:find("codecov/codecov-action", 1, true))
+            assert_codecov_upload(compiler_job,
+                "Upload compiler coverage to Codecov",
+                "compiler-${{ matrix.shard-pair }}", "./luacov.codecov.out", "compiler")
+            assert.falsy(compiler_job:find("native-stdlib", 1, true))
+            assert.falsy(linux_workflow:find("merge_luacov_stats.lua", 1, true))
             assert.falsy(compiler_job:find(
                 "C-probe results", 1, true))
             assert.truthy(read_file(
@@ -5020,63 +5135,59 @@ done
                 assert.truthy(compiler_groups:find(required, 1, true),
                     required)
             end
-            assert.equal(6, count_literal(workflow,
+            assert.equal(5, count_literal(workflow,
                 "TITAN_PROBE_CACHE_DISABLE=1"), workflow)
-            assert.equal(1, count_literal(coverage_job,
-                "needs: test-linux-compiler"), coverage_job)
-            assert.equal(1, count_literal(coverage_job,
-                "runs-on: ubicloud-standard-2"), coverage_job)
-            assert.equal(1, count_literal(coverage_job,
-                "name: titan-linux-prepared.tar.gz"), coverage_job)
-            assert.equal(2, count_literal(coverage_job,
-                "actions/download-artifact@v8"), coverage_job)
-            assert.truthy(coverage_job:find(
-                "pattern: titan-compiler-coverage-*", 1, true))
-            assert.truthy(coverage_job:find(
-                "merge_luacov_stats.lua luacov.stats.out", 1, true))
-            for _, pair in ipairs({ "1-2", "3-4" }) do
-                assert.equal(1, count_literal(coverage_job,
-                    "titan-compiler-coverage-" .. pair ..
-                    "/luacov.stats.out"), coverage_job)
+            local compiler_report = named_step(compiler_job,
+                "Generate compiler coverage report")
+            for _, contract in ipairs({
+                'luacov "titan%-compiler/" "titanc$"',
+                "lua spec/support/prepare_codecov_report.lua",
+                "luacov.report.out luacov.codecov.out",
+            }) do
+                assert.equal(1, count_literal(compiler_report, contract), contract)
             end
-            local coverage_merge_index = assert(coverage_job:find(
-                "- name: Merge all four compiler shards", 1, true))
-            local coverage_report_index = assert(coverage_job:find(
-                "- name: Generate compiler coverage report",
-                coverage_merge_index, true))
-            assert.is_true(coverage_merge_index < coverage_report_index)
-            assert.truthy(coverage_job:find(
-                "lua spec/support/prepare_codecov_report.lua", 1, true))
-            assert.truthy(coverage_job:find(
-                "luacov.report.out luacov.codecov.out", 1, true))
+            assert.falsy(compiler_report:find("grep -Fxq titanc.lua", 1, true))
             assert.truthy(read_file(".codecov.yml"):find(
                 '"^titanc[.]lua$::titanc"', 1, true))
-            assert.falsy(coverage_job:find("always()", 1, true))
-            assert.falsy(coverage_job:find("continue-on-error", 1, true))
-            assert.falsy(coverage_job:find("ci_test_groups.sh", 1, true))
-            assert_codecov_job(coverage_job, "compiler", "./luacov.codecov.out", "compiler")
-            assert.falsy(coverage_job:find("native-stdlib", 1, true), coverage_job)
-            assert.falsy(coverage_job:find(".titan-coverage/report/", 1, true), coverage_job)
 
             for _, contract in ipairs({
-                "needs: test-linux-stdlib",
-                "runs-on: ubicloud-standard-2",
-                "timeout-minutes: 45",
-                "\n      CC: gcc-14\n",
-                "\n      GCOV: gcov-14\n",
-                "gcc-14 clang-format python3-venv",
+                "name: stdlib build, tests and coverage (ubuntu-24.04, GCC 14)",
+                "needs: build-compiler", "runs-on: ubicloud-standard-2",
+                "timeout-minutes: 45", "\n      CC: gcc-14\n",
+                "\n      GCOV: gcov-14\n", "gcc-14 clang-format python3-venv",
                 "name: titan-linux-prepared.tar.gz",
-                "pip\" install -r scripts/titan-coverage-requirements.txt",
-                "spec/coverage_lines_spec.lua spec/coder/coverage_attribution_spec.lua",
-                "spec/coder/native_coverage_spec.lua",
+                'pip" install -r scripts/titan-coverage-requirements.txt',
                 "make titan-native-coverage-build TITAN_COVERAGE_GCOV=gcov-14",
-                "make titan-native-coverage-run",
-                "TITAN_COVERAGE_GCOVR=\"$RUNNER_TEMP/titan-coverage-tools/bin/gcovr\"",
+                'TITAN_COVERAGE_GCOVR="$RUNNER_TEMP/titan-coverage-tools/bin/gcovr"',
             }) do
                 assert.equal(1, count_literal(native_coverage_job, contract), contract)
             end
             assert.equal(1, count_literal(native_coverage_job,
                 "actions/download-artifact@v8"), native_coverage_job)
+            local integration_step = named_step(native_coverage_job,
+                "Run compiler integrations that require the installed stdlib")
+            local integration_previous = 0
+            for _, contract in ipairs({
+                "ci_stdlib_snapshot.sh save", "ci_test_groups.sh stdlib-compiler",
+                "ci_stdlib_snapshot.sh restore", 'luacov "titan%-compiler/"',
+                "lua spec/support/prepare_codecov_report.lua",
+                "grep -Fxq titanc.lua luacov.codecov.out",
+            }) do
+                local index = assert(integration_step:find(contract, 1, true), contract)
+                assert.is_true(integration_previous < index, contract)
+                integration_previous = index
+            end
+            local covered_run = named_step(native_coverage_job,
+                "Check native shutdown deadline and run complete covered aggregate")
+            assert.equal(2, count_literal(native_coverage_job,
+                "make titan-native-coverage-run"), native_coverage_job)
+            assert.equal(1, count_literal(covered_run, "TITAN_TEST_TIMEOUT=15"))
+            assert.truthy(covered_run:find(
+                "TITAN_FILTER='test_runtime_shutdown_closes_native_handles_but_not_files$'",
+                1, true))
+            assert.truthy(covered_run:find(
+                "TITAN_TEST_TIMEOUT=15\n          make titan-native-coverage-run\n",
+                1, true), covered_run)
             local native_artifacts = named_step(native_coverage_job,
                 "Retain local reports and collection evidence")
             for _, contract in ipairs({ "if: always()", "actions/upload-artifact@v7",
@@ -5084,13 +5195,16 @@ done
                 "include-hidden-files: true", "if-no-files-found: error" }) do
                 assert.truthy(native_artifacts:find(contract, 1, true), contract)
             end
+            assert.falsy(native_coverage_job:find("continue-on-error", 1, true))
+            assert_codecov_upload(native_coverage_job,
+                "Upload stdlib compiler integration coverage to Codecov",
+                "compiler-stdlib", "./luacov.codecov.out", "compiler")
+            assert_codecov_upload(native_coverage_job,
+                "Upload native stdlib line coverage to Codecov",
+                "native-stdlib-lines", ".titan-coverage/report/coverage.info", "native-stdlib")
             local native_upload = named_step(native_coverage_job,
                 "Upload native stdlib line coverage to Codecov")
             assert.truthy(native_upload:find("if: success()", 1, true), native_upload)
-            assert.falsy(native_coverage_job:find("continue-on-error", 1, true), native_coverage_job)
-            assert.falsy(native_coverage_job:find("luacov.codecov.out", 1, true), native_coverage_job)
-            assert_codecov_job(native_coverage_job, "native-stdlib-lines",
-                ".titan-coverage/report/coverage.info", "native-stdlib")
             local codecov_policy = read_file(".codecov.yml")
             assert.equal(2, count_literal(codecov_policy, "flags: [compiler]"), codecov_policy)
             assert.truthy(codecov_policy:find("  native-stdlib:\n    paths:\n      - titan/", 1, true),
@@ -5186,8 +5300,7 @@ done
                 'TITAN_COVERAGE_TEST_REQUIRED: "1"'), native_coverage_job)
             assert.equal(1, count_literal(native_coverage_job,
                 "clang-format --version"), native_coverage_job)
-            for _, ordinary_job in ipairs({ stdlib_job, coverage_job,
-                sanitizer_job, macos_job }) do
+            for _, ordinary_job in ipairs({ build_job, sanitizer_job, macos_job }) do
                 assert.falsy(ordinary_job:find("clang-format", 1, true), ordinary_job)
             end
             assert.equal(1, count_literal(workflow,
@@ -5226,14 +5339,18 @@ done
                 "spec/lpeglabel_build_spec.lua",
                 "spec/minicoro_spec.lua",
                 "spec/rockspec_spec.lua",
+                "spec/titan_install_spec.lua",
                 "run_isolated_compiler_coverage",
                 '"$BUSTED" -c -o gtest -v --exclude-tags=stress ' ..
                     '"$test_file"',
-                "compiler | compiler-shard-[1-4])",
-                "compiler-uncovered | compiler-uncovered-shard-[1-4])",
+                "compiler | compiler-shard-[1-4] | stdlib-compiler)",
+                "compiler-uncovered | compiler-uncovered-shard-[1-4] | stdlib-compiler-uncovered)",
                 "compiler-shard-{1..4}",
                 "compiler-uncovered-shard-{1..4}",
                 "ci_compiler_test_groups.txt",
+                "ci_stdlib_compiler_test_files.txt",
+                'requested_domain=all',
+                'requested_domain=stdlib',
             }) do
                 assert.truthy(groups:find(retained, 1, true), retained)
             end
@@ -5250,7 +5367,7 @@ done
                 assert.falsy(groups:find(removed, 1, true), removed)
             end
             local uncovered_start = assert(groups:find(
-                "compiler-uncovered | compiler-uncovered-shard-[1-4])",
+                "compiler-uncovered | compiler-uncovered-shard-[1-4] | stdlib-compiler-uncovered)",
                 1, true))
             local uncovered_finish = assert(groups:find(
                 "\n        ;;", uncovered_start, true))
@@ -5346,8 +5463,21 @@ done
                     assert.is_true(tonumber(seconds) >= 0)
                 end
             end
-            assert.same({ 40, 31, 42, 41 }, shard_counts)
-            assert.equal(154, assigned_count)
+            assert.same({ 40, 28, 40, 39 }, shard_counts)
+            assert.equal(147, assigned_count)
+            local integration_count = 0
+            for line in read_file(
+                "spec/support/ci_stdlib_compiler_test_files.txt"):gmatch("[^\n]+") do
+                if line:sub(1, 1) ~= "#" then
+                    assert.truthy(line:match("^spec/.+_spec[.]lua$"), line)
+                    assert.falsy(assigned[line], line)
+                    assert.equal("file", lfs.attributes(line, "mode"), line)
+                    assigned[line] = true
+                    integration_count = integration_count + 1
+                end
+            end
+            assert.equal(8, integration_count)
+            assert.equal(155, assigned_count + integration_count)
 
             local stress_partition = read_file(
                 "spec/support/ci_compiler_stress_files.txt")

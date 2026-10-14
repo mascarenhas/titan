@@ -772,7 +772,8 @@ Busted tree runs first, followed by the same aggregate native executable.
 Busted 2.3 does not provide a shard option, and many compiler specs share fixed
 checkout-root artifact names. For an unfiltered run with no forwarded Busted
 arguments, `rock-test` therefore runs the seven retained runtime/packaging specs
-once, then externally partitions the compiler/language specs into four measured
+once, then the eight stdlib-dependent compiler integration specs, before
+externally partitioning the remaining compiler/language specs into four measured
 groups in private checkout copies. Every worker has private general and ccache
 temporary directories. It runs four workers by default, with nested Make and
 `titanc` work capped at one slot per worker; set
@@ -819,18 +820,30 @@ Useful iterative and CI-equivalent commands are:
 $ "$PREFIX/bin/luarocks" make --force          # install the current checkout
 $ "$PREFIX/bin/luarocks" test                  # run Busted + aggregate native suite
 $ make stdlib-test                            # complete stdlib/runtime work, no LuaCov
-$ bash spec/support/ci_test_groups.sh compiler  # complete compiler/language set with LuaCov
+$ bash spec/support/ci_test_groups.sh compiler  # compiler-only set with LuaCov
+$ bash spec/support/ci_test_groups.sh stdlib-compiler  # integrations needing the installed stdlib
 ```
 
-Linux CI has one uncovered stdlib producer, which also prepares and validates
-the bundled/system production images, and two compiler consumers that divide
-the four isolated workers for the complete covered compiler/language set. Each
-consumer runs at most two workers concurrently with tagged output; a separate
-job merges their LuaCov evidence and uploads the `compiler` Codecov report.
-The native coverage lane source-links production imports into the existing
-native aggregate, whose execution produces a separate `native-stdlib` line
-report. Local [native coverage](doc/language/native-coverage.md) needs only the
-matching gcov reader; HTML, LCOV and Cobertura are optional gcovr formats.
+Linux CI starts compiler preparation and sanitizer in parallel. `build-compiler`
+installs Lua, compiler/test dependencies, and the compiler/runtime SDK through
+`make install-compiler-sdk`, without building the stdlib or its native
+dependencies. Its prepared tree feeds two compiler shard pairs and one stdlib
+build/test job in parallel. The compiler pairs cover 147 spec files; eight
+compiler integration files that require installed standard modules run with
+LuaCov in the stdlib job. The two manifests are checked for exhaustive,
+nonoverlapping selection. Local and macOS complete test commands retain both
+sets.
+
+The stdlib job installs the ordinary provider for packaging and compiler
+integration checks, then source-links production imports into the native
+aggregate with coverage. It runs the complete native behavior suite once,
+retains the focused shutdown deadline, and validates both OpenSSL modes.
+There is no additional uncovered aggregate run. Each compiler pair and the
+stdlib integrations upload their own `compiler` report; Codecov merges uploads
+under that flag. The native aggregate publishes a separate `native-stdlib`
+line report. No coverage merger runner or prepared-tree download is needed for
+uploading reports. Local [native coverage](doc/language/native-coverage.md)
+needs only the matching gcov reader; HTML, LCOV and Cobertura are optional gcovr formats.
 Uploads remain a separate CI step. Linux build/compiler bounds
 are two to match the private runner; the manual macOS job overrides them to
 three. The ASan+UBSan job restores its separately fingerprinted native

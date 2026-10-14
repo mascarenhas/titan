@@ -504,7 +504,7 @@ RECURSIVE_WRAPPER_GUARD = flags=$${MAKEFLAGS%% *}; case "$$flags" in -*) ;; *q*)
 	check-llhttp-tools sqlite3 check-sqlite3-tools openssl openssl-config check-openssl-tools \
 	check-system-openssl invalid-openssl-mode lpeglabel \
 	check-libuv-tools runtime \
-	stage-titan-bootstrap install-titan-sdk publish-titan-sdk stdlib stdlib-objects install-stdlib \
+	stage-titan-bootstrap install-compiler-sdk install-titan-sdk publish-titan-sdk stdlib stdlib-objects install-stdlib \
 	install publish-stdlib \
 	rock-test test rock-build \
 	examples clean clean-stdlib clean-lua clean-luarocks clean-libbacktrace clean-libuv \
@@ -1046,13 +1046,10 @@ endif
 
 # PREFIX owns installed Lua. Stage that SDK into a separate ROCKS_TREE, while
 # leaving Lua-owned files in place when both installation roots are the same.
-install-titan-sdk: $(TITAN_RUNTIME_LIB) $(TITAN_BOOTSTRAP_SO) $(TITAN_RUNTIME_LUA_LIB) \
-		$(LIBBT_LIB) $(LIBUV_LIB) $(OPENSSL_LIBS) $(LLHTTP_HEADER) \
-		$(SQLITE3_HEADER) $(TITAN_SDK_ROOT_HEADERS) \
-		$(TITAN_SDK_NAMESPACED_HEADERS) LICENSE stage-titan-bootstrap
-publish-titan-sdk: ## Copy the already built native compiler SDK
-install-titan-sdk publish-titan-sdk:
-	@set -e; \
+TITAN_RUNTIME_SDK_PREREQS := $(TITAN_RUNTIME_LIB) $(TITAN_BOOTSTRAP_SO) \
+	$(TITAN_RUNTIME_LUA_LIB) $(LIBBT_LIB) $(TITAN_SDK_ROOT_HEADERS) \
+	$(TITAN_SDK_NAMESPACED_HEADERS) LICENSE
+TITAN_RUNTIME_SDK_COPY = \
 	mkdir -p "$(TITAN_INSTALL_TREE)"; \
 	rocks_tree=$$(CDPATH= cd "$(TITAN_INSTALL_TREE)" && pwd -P); \
 	version_dir="$$rocks_tree/lib/titan/$(TITAN_LIBRARY_VERSION)"; \
@@ -1074,7 +1071,22 @@ install-titan-sdk publish-titan-sdk:
 	install -p -m 0644 "$(LIBBT_LIB)" "$$rocks_tree/lib/libbacktrace.a"; \
 	install -p -m 0644 $(TITAN_SDK_ROOT_HEADERS) "$$rocks_tree/include/"; \
 	install -p -m 0644 $(TITAN_SDK_NAMESPACED_HEADERS) \
-		"$$rocks_tree/include/titan/"; \
+		"$$rocks_tree/include/titan/"
+
+# The guarded bootstrap provides bare native compiler support without claiming
+# standard-module metadata, an archive provider, or generated Lua shims.
+install-compiler-sdk: install-compiler $(TITAN_RUNTIME_SDK_PREREQS) stage-titan-bootstrap ## Build and install the compiler/runtime SDK without the standard library
+	@set -e; \
+	$(TITAN_RUNTIME_SDK_COPY); \
+	mkdir -p "$$rocks_tree/etc/titan"; \
+	printf '%s\n' $(call make_shell_quote,$(TITAN_BUILD_PROFILE)) > "$$rocks_tree/etc/titan/build-profile"
+
+install-titan-sdk: $(TITAN_RUNTIME_SDK_PREREQS) $(LIBUV_LIB) $(OPENSSL_LIBS) \
+	$(LLHTTP_HEADER) $(SQLITE3_HEADER) stage-titan-bootstrap
+publish-titan-sdk: ## Copy the already built native compiler SDK
+install-titan-sdk publish-titan-sdk:
+	@set -e; \
+	$(TITAN_RUNTIME_SDK_COPY); \
 	cp -pR "$(LIBUV_SRC_DIR)/include/." "$$rocks_tree/include/"; \
 	if test "$(OPENSSL_MODE)" != system; then \
 	  mkdir -p "$$rocks_tree/include/openssl"; \

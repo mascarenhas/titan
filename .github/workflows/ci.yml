@@ -17,47 +17,27 @@ env:
   OPENSSL_MODE: bundled
 
 jobs:
-  # Build the isolated O0/no-LTO validation tree once, run every uncovered
-  # runtime/stdlib gate on that warm producer, and give compiler/LuaCov
-  # consumers pristine copies of the same bundled validation tree.
-  test-linux-stdlib:
-    name: stdlib (ubuntu-24.04, build+all-no-coverage)
+  # Prepare only Lua, compiler dependencies and native compiler support. The
+  # compiler shards can start without waiting for any standard-library build.
+  build-compiler:
+    name: compiler dependencies (ubuntu-24.04)
     if: github.event_name == 'push'
     runs-on: ubicloud-standard-2
-    # The validation producer also runs both dependency-mode smokes.
-    timeout-minutes: 45
+    timeout-minutes: 30
     permissions:
       contents: read
     env:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
-      # The prepared tree and coverage consumer share matching GCC/gcov.
       CC: gcc-14
       LUA_CC: gcc-14
       PREFIX: ${{ github.workspace }}/.lua
       TITAN_PREFIX: ${{ github.workspace }}/.lua
-      LIBUV_VERSION: "1.53.0"
-      # Bump when any CMake option that affects the cached archive changes.
-      LIBUV_BUILD_PROFILE: "static-pic-validation-tests-off-v2"
-      LLHTTP_VERSION: "9.4.3"
-      LLHTTP_SHA256: "1eb813c7437b31a87496a1cd3ed79f00746720f5e7e29c79b42c02cb69f36c39"
-      LLHTTP_BUILD_PROFILE: "static-pic-hidden-c99-v1"
-      SQLITE3_VERSION: "3.53.4"
-      SQLITE3_RELEASE: "3530400"
-      SQLITE3_SHA256: "0e9483900e92cd5de8fd48d16bf9200145a61f7fd5be542a5ac81d8a9516eb9c"
-      SQLITE3_BUILD_PROFILE: "static-pic-hidden-c99-threadsafe1-v1"
-      OPENSSL_VERSION: "3.5.7"
-      OPENSSL_SHA256: "a8c0d28a529ca480f9f36cf5792e2cd21984552a3c8e4aa11a24aa31aeac98e8"
-      OPENSSL_BUILD_PROFILE: "static-pic-hidden-minimal-v1"
 
     steps:
       - uses: actions/checkout@v6
         with:
           submodules: true
 
-      # Cache only the LuaRocks-managed portion of the standalone prefix. Lua,
-      # native SDK archives, and the standard container/shims are rebuilt from
-      # this checkout; dependency rocks and their launchers can be reused
-      # safely. Lua is rebuilt from the current pinned submodule.
       - name: Cache standalone-prefix LuaRocks dependencies
         uses: ubicloud/cache@v4
         with:
@@ -76,56 +56,11 @@ jobs:
           restore-keys: |
             ubuntu-24.04-${{ runner.arch }}-${{ env.TITAN_BUILD_PROFILE }}-gcc14-prefix-stock-luarocks-host-optimized-v2-abi-${{ env.TITAN_ABI_VERSION }}-rocks-3.13.0-
 
-      - name: Cache bundled libuv source and static build
-        uses: ubicloud/cache@v4
-        with:
-          path: |
-            libuv-v${{ env.LIBUV_VERSION }}
-            libuv-v${{ env.LIBUV_VERSION }}.tar.gz
-            libuv-build
-          key: ubuntu-24.04-${{ runner.arch }}-${{ env.TITAN_BUILD_PROFILE }}-gcc14-libuv-${{ env.LIBUV_VERSION }}-${{ env.LIBUV_BUILD_PROFILE }}-${{ hashFiles('vendor/libuv/*.patch') }}
-          restore-keys: |
-            ubuntu-24.04-${{ runner.arch }}-${{ env.TITAN_BUILD_PROFILE }}-gcc14-libuv-${{ env.LIBUV_VERSION }}-${{ env.LIBUV_BUILD_PROFILE }}-
-
-      - name: Cache bundled llhttp source and static build
-        uses: ubicloud/cache@v4
-        with:
-          path: |
-            llhttp-release-v${{ env.LLHTTP_VERSION }}
-            llhttp-release-v${{ env.LLHTTP_VERSION }}.tar.gz
-            llhttp-build
-          key: ubuntu-24.04-${{ runner.arch }}-${{ env.TITAN_BUILD_PROFILE }}-gcc14-llhttp-${{ env.LLHTTP_VERSION }}-${{ env.LLHTTP_SHA256 }}-${{ env.LLHTTP_BUILD_PROFILE }}
-          restore-keys: |
-            ubuntu-24.04-${{ runner.arch }}-${{ env.TITAN_BUILD_PROFILE }}-gcc14-llhttp-${{ env.LLHTTP_VERSION }}-${{ env.LLHTTP_SHA256 }}-
-
-      - name: Cache bundled SQLite amalgamation and static build
-        uses: ubicloud/cache@v4
-        with:
-          path: |
-            sqlite-autoconf-${{ env.SQLITE3_RELEASE }}
-            sqlite-autoconf-${{ env.SQLITE3_RELEASE }}.tar.gz
-            sqlite3-build
-          key: ubuntu-24.04-${{ runner.arch }}-${{ env.TITAN_BUILD_PROFILE }}-gcc14-sqlite3-${{ env.SQLITE3_VERSION }}-${{ env.SQLITE3_SHA256 }}-${{ env.SQLITE3_BUILD_PROFILE }}
-          restore-keys: |
-            ubuntu-24.04-${{ runner.arch }}-${{ env.TITAN_BUILD_PROFILE }}-gcc14-sqlite3-${{ env.SQLITE3_VERSION }}-${{ env.SQLITE3_SHA256 }}-
-
-      - name: Cache bundled OpenSSL source and static build
-        uses: ubicloud/cache@v4
-        with:
-          path: |
-            openssl-${{ env.OPENSSL_VERSION }}
-            openssl-${{ env.OPENSSL_VERSION }}.tar.gz
-            openssl-build
-          key: ubuntu-24.04-${{ runner.arch }}-${{ env.TITAN_BUILD_PROFILE }}-gcc14-openssl-${{ env.OPENSSL_VERSION }}-${{ env.OPENSSL_SHA256 }}-${{ env.OPENSSL_BUILD_PROFILE }}
-          restore-keys: |
-            ubuntu-24.04-${{ runner.arch }}-${{ env.TITAN_BUILD_PROFILE }}-gcc14-openssl-${{ env.OPENSSL_VERSION }}-${{ env.OPENSSL_SHA256 }}-
-
-      - name: Install regular build dependencies
-        run: sudo apt-get update && sudo apt-get install -y gcc-14 cmake curl libreadline-dev libssl-dev perl pkg-config
+      - name: Install compiler build dependencies
+        run: sudo apt-get update && sudo apt-get install -y gcc-14 curl libreadline-dev
 
       - name: Prepare the standalone prefix
-        run: |
-          make lua luarocks
+        run: make lua luarocks
 
       - name: Prepare the cached Titan dependency tree
         run: |
@@ -170,85 +105,33 @@ jobs:
             assert(cpath:find(current, 1, true), cpath)
           '
 
-      - name: Build the bundled libbacktrace
-        run: LIBBT_URL="https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/ianlancetaylor/libbacktrace.git" make libbacktrace
-
-      - name: Build the pinned bundled libuv
-        run: make libuv
-
-      - name: Build the pinned private llhttp support
-        run: make llhttp
-
-      - name: Build the pinned private SQLite support
-        run: make sqlite3
-
-      - name: Build the pinned bundled OpenSSL support
-        run: make openssl
-
       - name: Activate the standalone Titan prefix
         run: |
           echo "$PREFIX/bin" >> "$GITHUB_PATH"
           "$PREFIX/bin/lua" -v
           "$PREFIX/bin/luarocks" --version
 
-      - name: Restore regular Linux C-probe results
-        id: regular-probe-cache
-        uses: ubicloud/cache/restore@v4
-        with:
-          path: .lua/var/cache/titan-probes/2
-          key: titan-probes-2-${{ runner.os }}-${{ runner.arch }}-${{ env.TITAN_BUILD_PROFILE }}-test-linux-stdlib-${{ github.sha }}
-          restore-keys: |
-            titan-probes-2-${{ runner.os }}-${{ runner.arch }}-${{ env.TITAN_BUILD_PROFILE }}-test-linux-stdlib-
-
-      - name: Build and install the rock
-        # The dependency cache may contain the preceding commit's installed
-        # Titan rock. Force this checkout through both source-install phases.
+      - name: Install compiler and test dependencies
         run: |
-          luarocks make --force
-          provider="$PREFIX/lib/titan/0.6/titan.so"
-          static_archive="${provider%.so}.a"
-          runtime_archive="$PREFIX/lib/titan/0.6/libtitan.a"
-          test -f "$provider" && test ! -L "$provider"
-          test -f "$static_archive" && test ! -L "$static_archive"
-          test -f "$runtime_archive" && test ! -L "$runtime_archive"
-          test ! -e "$PREFIX/lib/libtitan.a"
-          test ! -e "$PREFIX/share/titan/0.6/src/titan/test.titan"
+          luarocks make --only-deps
+          luarocks test --prepare
 
-      - name: Verify bare support loading through the library 0.6 path
+      - name: Build the bundled libbacktrace
+        run: LIBBT_URL="https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/ianlancetaylor/libbacktrace.git" make libbacktrace
+
+      - name: Build and install the compiler SDK without the stdlib
         run: |
-          provider="$PREFIX/lib/titan/0.6/titan.so"
-          TITAN_EXPECTED_PROVIDER="$provider" env \
-            -u LUA_PATH \
-            -u LUA_CPATH \
-            -u LUA_PATH_5_5 \
-            -u LUA_CPATH_5_5 \
-            -u LUA_INIT \
-            -u LUA_INIT_5_5 \
-            -u TITAN_PATH \
-            -u TITAN_PATH_0_6 \
-            -u TITAN_ROCKS_ROOT \
-            "$PREFIX/bin/lua" -E -e '
-              local expected = assert(os.getenv("TITAN_EXPECTED_PROVIDER"))
-              local found = assert(package.searchpath("titan", package.cpath))
-              assert(found == expected, found .. " ~= " .. expected)
-              local titan = require "titan"
-              assert(type(titan) == "table")
-              assert(type(titan.backtrace) == "function")
-              assert(type(titan._loadlibglobal) == "function")
-            '
+          make install-compiler-sdk
+          titanc --help
+          lua -E -e 'assert(type(require("titan").backtrace) == "function")'
+          test -f "$PREFIX/lib/titan/0.6/libtitan.a"
+          test ! -e "$PREFIX/lib/titan/0.6/titan.a"
+          for module in coroutine uv async timer io fs net ssl url http websocket os path peg string math lua iteration gc test reflect sqlite3 json; do
+            test ! -e "$PREFIX/share/lua/5.5/titan/$module.lua"
+          done
 
-      - name: Verify titanc shebang environment
-        run: titanc --help
-
-      - name: Prepare test dependencies
-        run: luarocks test --prepare
-
-      # Archive the pristine bundled build before the mode smoke replaces its
-      # paired titan.so/titan.a provider. Upload remains after the smoke, so a
-      # portability failure still prevents downstream runner spend.
-      # A tar layer preserves the complete checkout's source/output mtimes,
-      # hidden .lua tree, executable bits, and standard-library images. Direct
-      # artifact upload avoids wrapping it in another archive.
+      # Preserve source/output mtimes, modes and the compiler prefix. There are
+      # no stdlib images or stdlib native dependency builds in this archive.
       - name: Pack prepared Linux tree
         run: |
           printf '%s\n' "$GITHUB_WORKSPACE" > .ci-prepared-workspace
@@ -263,66 +146,6 @@ jobs:
             exit 1
           fi
 
-      # Run retained host/runtime specs serially, then compile every native
-      # standard-library root into one executable. The final short filtered run
-      # preserves the Runtime-shutdown lifetime oracle's 15-second boundary.
-      - name: Run all stdlib/runtime tests without coverage
-        # These tests compile disposable fixtures and alternate images. The
-        # installed provider, runtime, native dependencies and child compilers
-        # use the same O0/no-LTO validation profile. The tiny LTO/default
-        # compiler smoke retains the ordinary optimized shipping contract.
-        env:
-          TITAN_EXTRA_CFLAGS: "-O0 -fno-lto"
-          TITAN_EXTRA_LDFLAGS: "-fno-lto"
-          TITAN_TEST_EXTRA_CFLAGS: "-O0 -fno-lto"
-          TITAN_TEST_EXTRA_LDFLAGS: "-fno-lto"
-        run: |
-          make stdlib-test EXTRA_TEST_FLAGS="-o gtest -v"
-          make titan-stdlib-test-run \
-            TITAN_FILTER='test_runtime_shutdown_closes_native_handles_but_not_files$' \
-            TITAN_TEST_TIMEOUT=15
-
-      - name: Build child-process smoke fixture
-        run: |
-          process_smoke_dir="$RUNNER_TEMP/titan-process-smoke"
-          mkdir -p "$process_smoke_dir"
-          TITAN_PROCESS_SMOKE_DIR="$process_smoke_dir" \
-            .lua/bin/lua -e 'require("spec.support.os_test_support").process_child(assert(os.getenv("TITAN_PROCESS_SMOKE_DIR")))'
-          echo "TITAN_PROCESS_SMOKE_CHILD=$process_smoke_dir/process_child" >> "$GITHUB_ENV"
-
-      - name: Smoke-test bundled dependency source image
-        # The following installed-rock canary owns the Linux system-mode build;
-        # do not compile the same system OpenSSL image twice on this billed
-        # runner.
-        run: bash spec/support/ci_dependency_mode_smoke.sh bundled
-
-      - name: Save regular Linux C-probe results
-        uses: ubicloud/cache/save@v4
-        with:
-          path: .lua/var/cache/titan-probes/2
-          key: ${{ steps.regular-probe-cache.outputs.cache-primary-key }}
-
-      # The prepared artifact was packed before the source-mode smoke, so this
-      # can mutate the producer's live prefix without changing the bundled tree
-      # restored by the Linux compiler consumer. Exercise only the installed
-      # system-mode boundary here; the complete library and packaging suites ran
-      # against the bundled image. The two focused rockspec cases own the
-      # mode-dependent SDK layout and external-DSO promotion boundaries; the
-      # production smoke owns the complete installed runtime behavior.
-      - name: Canary source-rock installation with system OpenSSL
-        run: |
-          make clean-stdlib
-          OPENSSL_MODE=system TITAN_EXTRA_CFLAGS='-O0 -fno-lto' \
-            TITAN_EXTRA_LDFLAGS=-fno-lto \
-            luarocks make --force
-          TITAN_EXPECT_OPENSSL_MODE=system \
-            TITAN_PROBE_CACHE_DISABLE=1 \
-            "$PREFIX/bin/busted" -o gtest -v spec/rockspec_spec.lua \
-              --name='standalone-prefix source installation installs one matching Lua and Titan SDK before the standard images' \
-              --name='standalone-prefix source installation loads direct libuv calls lazily for Titan and explicitly for Lua'
-          OPENSSL_MODE=system \
-            bash spec/support/ci_dependency_mode_smoke.sh system
-
       - name: Upload prepared Linux tree
         uses: actions/upload-artifact@v7
         with:
@@ -335,7 +158,7 @@ jobs:
 
   test-linux-compiler:
     name: compiler/language shards ${{ matrix.shard-pair }} (ubuntu-24.04, LuaCov)
-    needs: test-linux-stdlib
+    needs: build-compiler
     if: github.event_name == 'push'
     runs-on: ubicloud-standard-2
     # Include full LuaCov collection in the real native-coverage compiler children.
@@ -346,6 +169,7 @@ jobs:
         shard-pair: ["1-2", "3-4"]
     permissions:
       contents: read
+      id-token: write
 
     env:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
@@ -398,59 +222,6 @@ jobs:
           TITAN_COVERAGE_TEST_REQUIRED: "1"
         run: bash spec/support/ci_parallel_compiler_tests.sh "${{ matrix.shard-pair }}"
 
-      - name: Upload compiler pair coverage
-        uses: actions/upload-artifact@v7
-        with:
-          name: titan-compiler-coverage-${{ matrix.shard-pair }}
-          path: luacov.stats.out
-          if-no-files-found: error
-          retention-days: 1
-          overwrite: true
-
-  compiler-coverage:
-    name: compiler coverage (ubuntu-24.04, merged)
-    needs: test-linux-compiler
-    if: github.event_name == 'push'
-    runs-on: ubicloud-standard-2
-    timeout-minutes: 10
-    permissions:
-      contents: read
-      id-token: write
-
-    env:
-      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
-
-    steps:
-      - uses: actions/checkout@v6
-        with:
-          submodules: true
-
-      - name: Download prepared Linux tree
-        uses: actions/download-artifact@v8
-        with:
-          name: titan-linux-prepared.tar.gz
-          path: ${{ runner.temp }}
-
-      - name: Restore prepared Linux tree and environment
-        run: |
-          tar -xzf "$RUNNER_TEMP/titan-linux-prepared.tar.gz" \
-            -C "$GITHUB_WORKSPACE"
-          test "$(cat .ci-prepared-workspace)" = "$GITHUB_WORKSPACE"
-          echo "$PWD/.lua/bin" >> "$GITHUB_PATH"
-          .lua/bin/lua -v
-
-      - name: Download compiler pair coverage
-        uses: actions/download-artifact@v8
-        with:
-          pattern: titan-compiler-coverage-*
-          path: ${{ runner.temp }}/titan-compiler-coverage
-
-      - name: Merge all four compiler shards
-        run: |
-          lua spec/support/merge_luacov_stats.lua luacov.stats.out \
-            "$RUNNER_TEMP/titan-compiler-coverage/titan-compiler-coverage-1-2/luacov.stats.out" \
-            "$RUNNER_TEMP/titan-compiler-coverage/titan-compiler-coverage-3-4/luacov.stats.out"
-
       - name: Generate compiler coverage report
         run: |
           luacov "titan%-compiler/" "titanc$"
@@ -458,6 +229,19 @@ jobs:
           lua spec/support/prepare_codecov_report.lua \
             luacov.report.out luacov.codecov.out
 
+      - name: Upload compiler pair coverage
+        uses: actions/upload-artifact@v7
+        with:
+          name: titan-compiler-coverage-${{ matrix.shard-pair }}
+          path: |
+            luacov.stats.out
+            luacov.codecov.out
+          if-no-files-found: error
+          retention-days: 1
+          overwrite: true
+
+      # Codecov merges the two pairs and the stdlib integration report under
+      # the same flag; no merger job needs to restore the prepared tree.
       - name: Upload compiler coverage to Codecov
         uses: codecov/codecov-action@v7
         with:
@@ -465,35 +249,53 @@ jobs:
           fail_ci_if_error: true
           files: ./luacov.codecov.out
           flags: compiler
-          name: compiler
+          name: compiler-${{ matrix.shard-pair }}
           use_oidc: true
 
   native-coverage:
-    name: native stdlib line coverage (ubuntu-24.04, GCC 14)
-    needs: test-linux-stdlib
+    name: stdlib build, tests and coverage (ubuntu-24.04, GCC 14)
+    needs: build-compiler
     if: github.event_name == 'push'
     runs-on: ubicloud-standard-2
-    # Include the full covered provider build and the aggregate's 600-second deadline.
     timeout-minutes: 45
     permissions:
       contents: read
       id-token: write
     env:
       FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
-      PREFIX: ${{ github.workspace }}/.lua
       CC: gcc-14
+      LUA_CC: gcc-14
       GCOV: gcov-14
+      PREFIX: ${{ github.workspace }}/.lua
+      TITAN_PREFIX: ${{ github.workspace }}/.lua
+      LIBUV_VERSION: "1.53.0"
+      # Bump when any CMake option that affects the cached archive changes.
+      LIBUV_BUILD_PROFILE: "static-pic-validation-tests-off-v2"
+      LLHTTP_VERSION: "9.4.3"
+      LLHTTP_SHA256: "1eb813c7437b31a87496a1cd3ed79f00746720f5e7e29c79b42c02cb69f36c39"
+      LLHTTP_BUILD_PROFILE: "static-pic-hidden-c99-v1"
+      SQLITE3_VERSION: "3.53.4"
+      SQLITE3_RELEASE: "3530400"
+      SQLITE3_SHA256: "0e9483900e92cd5de8fd48d16bf9200145a61f7fd5be542a5ac81d8a9516eb9c"
+      SQLITE3_BUILD_PROFILE: "static-pic-hidden-c99-threadsafe1-v1"
+      OPENSSL_VERSION: "3.5.7"
+      OPENSSL_SHA256: "a8c0d28a529ca480f9f36cf5792e2cd21984552a3c8e4aa11a24aa31aeac98e8"
+      OPENSSL_BUILD_PROFILE: "static-pic-hidden-minimal-v1"
+
     steps:
       - uses: actions/checkout@v6
         with:
           submodules: true
-      - name: Install coverage compiler and formatter
-        run: sudo apt-get update && sudo apt-get install -y gcc-14 clang-format python3-venv
+
+      - name: Install stdlib build and coverage dependencies
+        run: sudo apt-get update && sudo apt-get install -y gcc-14 clang-format python3-venv cmake curl libreadline-dev libssl-dev perl pkg-config
+
       - name: Download prepared Linux tree
         uses: actions/download-artifact@v8
         with:
           name: titan-linux-prepared.tar.gz
           path: ${{ runner.temp }}
+
       - name: Restore prepared tree and pinned reporter
         run: |
           tar -xzf "$RUNNER_TEMP/titan-linux-prepared.tar.gz" -C "$GITHUB_WORKSPACE"
@@ -501,24 +303,193 @@ jobs:
           echo "$PWD/.lua/bin" >> "$GITHUB_PATH"
           python3 -m venv "$RUNNER_TEMP/titan-coverage-tools"
           "$RUNNER_TEMP/titan-coverage-tools/bin/pip" install -r scripts/titan-coverage-requirements.txt
-      - name: Verify backend, exact Titan attribution and collection
+          clang-format --version
+
+      - name: Cache bundled libuv source and static build
+        uses: ubicloud/cache@v4
+        with:
+          path: |
+            libuv-v${{ env.LIBUV_VERSION }}
+            libuv-v${{ env.LIBUV_VERSION }}.tar.gz
+            libuv-build
+          key: ubuntu-24.04-${{ runner.arch }}-${{ env.TITAN_BUILD_PROFILE }}-gcc14-libuv-${{ env.LIBUV_VERSION }}-${{ env.LIBUV_BUILD_PROFILE }}-${{ hashFiles('vendor/libuv/*.patch') }}
+          restore-keys: |
+            ubuntu-24.04-${{ runner.arch }}-${{ env.TITAN_BUILD_PROFILE }}-gcc14-libuv-${{ env.LIBUV_VERSION }}-${{ env.LIBUV_BUILD_PROFILE }}-
+
+      - name: Cache bundled llhttp source and static build
+        uses: ubicloud/cache@v4
+        with:
+          path: |
+            llhttp-release-v${{ env.LLHTTP_VERSION }}
+            llhttp-release-v${{ env.LLHTTP_VERSION }}.tar.gz
+            llhttp-build
+          key: ubuntu-24.04-${{ runner.arch }}-${{ env.TITAN_BUILD_PROFILE }}-gcc14-llhttp-${{ env.LLHTTP_VERSION }}-${{ env.LLHTTP_SHA256 }}-${{ env.LLHTTP_BUILD_PROFILE }}
+          restore-keys: |
+            ubuntu-24.04-${{ runner.arch }}-${{ env.TITAN_BUILD_PROFILE }}-gcc14-llhttp-${{ env.LLHTTP_VERSION }}-${{ env.LLHTTP_SHA256 }}-
+
+      - name: Cache bundled SQLite amalgamation and static build
+        uses: ubicloud/cache@v4
+        with:
+          path: |
+            sqlite-autoconf-${{ env.SQLITE3_RELEASE }}
+            sqlite-autoconf-${{ env.SQLITE3_RELEASE }}.tar.gz
+            sqlite3-build
+          key: ubuntu-24.04-${{ runner.arch }}-${{ env.TITAN_BUILD_PROFILE }}-gcc14-sqlite3-${{ env.SQLITE3_VERSION }}-${{ env.SQLITE3_SHA256 }}-${{ env.SQLITE3_BUILD_PROFILE }}
+          restore-keys: |
+            ubuntu-24.04-${{ runner.arch }}-${{ env.TITAN_BUILD_PROFILE }}-gcc14-sqlite3-${{ env.SQLITE3_VERSION }}-${{ env.SQLITE3_SHA256 }}-
+
+      - name: Cache bundled OpenSSL source and static build
+        uses: ubicloud/cache@v4
+        with:
+          path: |
+            openssl-${{ env.OPENSSL_VERSION }}
+            openssl-${{ env.OPENSSL_VERSION }}.tar.gz
+            openssl-build
+          key: ubuntu-24.04-${{ runner.arch }}-${{ env.TITAN_BUILD_PROFILE }}-gcc14-openssl-${{ env.OPENSSL_VERSION }}-${{ env.OPENSSL_SHA256 }}-${{ env.OPENSSL_BUILD_PROFILE }}
+          restore-keys: |
+            ubuntu-24.04-${{ runner.arch }}-${{ env.TITAN_BUILD_PROFILE }}-gcc14-openssl-${{ env.OPENSSL_VERSION }}-${{ env.OPENSSL_SHA256 }}-
+
+      - name: Build the pinned bundled libuv
+        run: make libuv
+
+      - name: Build the pinned private llhttp support
+        run: make llhttp
+
+      - name: Build the pinned private SQLite support
+        run: make sqlite3
+
+      - name: Build the pinned bundled OpenSSL support
+        run: make openssl
+
+      - name: Restore regular Linux C-probe results
+        id: regular-probe-cache
+        uses: ubicloud/cache/restore@v4
+        with:
+          path: .lua/var/cache/titan-probes/2
+          key: titan-probes-2-${{ runner.os }}-${{ runner.arch }}-${{ env.TITAN_BUILD_PROFILE }}-test-linux-stdlib-${{ github.sha }}
+          restore-keys: |
+            titan-probes-2-${{ runner.os }}-${{ runner.arch }}-${{ env.TITAN_BUILD_PROFILE }}-test-linux-stdlib-
+
+      - name: Build and install the rock
+        # The dependency cache may contain the preceding commit's installed
+        # Titan rock. Force this checkout through both source-install phases.
+        run: |
+          luarocks make --force
+          provider="$PREFIX/lib/titan/0.6/titan.so"
+          static_archive="${provider%.so}.a"
+          runtime_archive="$PREFIX/lib/titan/0.6/libtitan.a"
+          test -f "$provider" && test ! -L "$provider"
+          test -f "$static_archive" && test ! -L "$static_archive"
+          test -f "$runtime_archive" && test ! -L "$runtime_archive"
+          test ! -e "$PREFIX/lib/libtitan.a"
+          test ! -e "$PREFIX/share/titan/0.6/src/titan/test.titan"
+
+      - name: Verify bare support loading through the library 0.6 path
+        run: |
+          provider="$PREFIX/lib/titan/0.6/titan.so"
+          TITAN_EXPECTED_PROVIDER="$provider" env \
+            -u LUA_PATH \
+            -u LUA_CPATH \
+            -u LUA_PATH_5_5 \
+            -u LUA_CPATH_5_5 \
+            -u LUA_INIT \
+            -u LUA_INIT_5_5 \
+            -u TITAN_PATH \
+            -u TITAN_PATH_0_6 \
+            -u TITAN_ROCKS_ROOT \
+            "$PREFIX/bin/lua" -E -e '
+              local expected = assert(os.getenv("TITAN_EXPECTED_PROVIDER"))
+              local found = assert(package.searchpath("titan", package.cpath))
+              assert(found == expected, found .. " ~= " .. expected)
+              local titan = require "titan"
+              assert(type(titan) == "table")
+              assert(type(titan.backtrace) == "function")
+              assert(type(titan._loadlibglobal) == "function")
+            '
+
+      - name: Verify titanc shebang environment
+        run: titanc --help
+
+      # Packaging needs the ordinary installed provider. Run its host specs
+      # here, then run the native behavior aggregate only with coverage below.
+      - name: Run retained runtime and packaging specs
         env:
+          TITAN_EXTRA_CFLAGS: "-O0 -fno-lto"
+          TITAN_EXTRA_LDFLAGS: "-fno-lto"
+          TITAN_TEST_EXTRA_CFLAGS: "-O0 -fno-lto"
+          TITAN_TEST_EXTRA_LDFLAGS: "-fno-lto"
+        run: make stdlib-busted-test EXTRA_TEST_FLAGS="-o gtest -v"
+
+      - name: Run compiler integrations that require the installed stdlib
+        env:
+          TITAN_EXTRA_CFLAGS: "-O0 -fno-lto"
+          TITAN_EXTRA_LDFLAGS: "-fno-lto"
           TITAN_COVERAGE_TEST_CC: gcc-14
           TITAN_COVERAGE_TEST_GCOV: gcov-14
+          TITAN_COVERAGE_TEST_GCOVR: ${{ runner.temp }}/titan-coverage-tools/bin/gcovr
           TITAN_COVERAGE_TEST_REQUIRED: "1"
         run: |
-          export TITAN_COVERAGE_TEST_GCOVR="$RUNNER_TEMP/titan-coverage-tools/bin/gcovr"
-          clang-format --version
-          TITAN_PROBE_CACHE_DISABLE=1 .lua/bin/busted -v \
-            spec/coverage_lines_spec.lua spec/coder/coverage_attribution_spec.lua \
-            spec/coder/native_coverage_spec.lua spec/coverage_runtime_spec.lua
-      - name: Build complete production stdlib inventory
+          bash spec/support/ci_stdlib_snapshot.sh save "$RUNNER_TEMP/titan-stdlib.tar"
+          bash spec/support/ci_test_groups.sh stdlib-compiler
+          bash spec/support/ci_stdlib_snapshot.sh restore "$RUNNER_TEMP/titan-stdlib.tar"
+          luacov "titan%-compiler/" "titanc$"
+          grep "Summary" -B1 -A1000 luacov.report.out
+          lua spec/support/prepare_codecov_report.lua \
+            luacov.report.out luacov.codecov.out
+          grep -Fxq titanc.lua luacov.codecov.out
+
+      - name: Build complete production stdlib inventory with coverage
         run: |
           make titan-native-coverage-build TITAN_COVERAGE_GCOV=gcov-14 \
             TITAN_COVERAGE_FORMATS='html lcov cobertura' \
             TITAN_COVERAGE_GCOVR="$RUNNER_TEMP/titan-coverage-tools/bin/gcovr"
-      - name: Run ordinary aggregate with fresh coverage counters
-        run: make titan-native-coverage-run
+
+      # Each run resets its counters. Keep the complete run last so the saved
+      # report covers every test, while retaining the shutdown time boundary.
+      - name: Check native shutdown deadline and run complete covered aggregate
+        run: |
+          make titan-native-coverage-run \
+            TITAN_FILTER='test_runtime_shutdown_closes_native_handles_but_not_files$' \
+            TITAN_TEST_TIMEOUT=15
+          make titan-native-coverage-run
+
+      - name: Build child-process smoke fixture
+        run: |
+          process_smoke_dir="$RUNNER_TEMP/titan-process-smoke"
+          mkdir -p "$process_smoke_dir"
+          TITAN_PROCESS_SMOKE_DIR="$process_smoke_dir" \
+            .lua/bin/lua -e 'require("spec.support.os_test_support").process_child(assert(os.getenv("TITAN_PROCESS_SMOKE_DIR")))'
+          echo "TITAN_PROCESS_SMOKE_CHILD=$process_smoke_dir/process_child" >> "$GITHUB_ENV"
+
+      - name: Smoke-test bundled dependency source image
+        # The following installed-rock canary owns the Linux system-mode build;
+        # do not compile the same system OpenSSL image twice on this billed
+        # runner.
+        run: bash spec/support/ci_dependency_mode_smoke.sh bundled
+
+      - name: Save regular Linux C-probe results
+        uses: ubicloud/cache/save@v4
+        with:
+          path: .lua/var/cache/titan-probes/2
+          key: ${{ steps.regular-probe-cache.outputs.cache-primary-key }}
+
+      # The full behavior and packaging gates use the bundled provider. Only
+      # the mode-dependent SDK/promotion cases and production smoke need a
+      # system-OpenSSL reinstall.
+      - name: Canary source-rock installation with system OpenSSL
+        run: |
+          make clean-stdlib
+          OPENSSL_MODE=system TITAN_EXTRA_CFLAGS='-O0 -fno-lto' \
+            TITAN_EXTRA_LDFLAGS=-fno-lto \
+            luarocks make --force
+          TITAN_EXPECT_OPENSSL_MODE=system \
+            TITAN_PROBE_CACHE_DISABLE=1 \
+            "$PREFIX/bin/busted" -o gtest -v spec/rockspec_spec.lua \
+              --name='standalone-prefix source installation installs one matching Lua and Titan SDK before the standard images' \
+              --name='standalone-prefix source installation loads direct libuv calls lazily for Titan and explicitly for Lua'
+          OPENSSL_MODE=system \
+            bash spec/support/ci_dependency_mode_smoke.sh system
+
       - name: Retain local reports and collection evidence
         if: always()
         uses: actions/upload-artifact@v7
@@ -528,6 +499,17 @@ jobs:
           include-hidden-files: true
           if-no-files-found: error
           retention-days: 7
+
+      - name: Upload stdlib compiler integration coverage to Codecov
+        uses: codecov/codecov-action@v7
+        with:
+          disable_search: true
+          fail_ci_if_error: true
+          files: ./luacov.codecov.out
+          flags: compiler
+          name: compiler-stdlib
+          use_oidc: true
+
       - name: Upload native stdlib line coverage to Codecov
         if: success()
         uses: codecov/codecov-action@v7

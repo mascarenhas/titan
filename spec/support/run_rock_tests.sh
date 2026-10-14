@@ -57,6 +57,19 @@ if [[ ${TITAN_ROCK_TEST_INTERNAL:-0} == 1 ]]; then
         IFS=' ' read -r -a stdlib_specs <<< "$stdlib_spec_list"
         export TITAN_PROBE_CACHE_DISABLE=1
         run_busted "${stdlib_specs[@]}"
+        # These compiler integration fixtures consume installed logical
+        # standard modules. Run them once before the compiler-only workers,
+        # retaining the native Windows Lua/Busted adapter above.
+        stdlib_compiler_specs=()
+        while read -r test_file extra; do
+            if [[ -z ${test_file:-} || $test_file == \#* ]]; then continue; fi
+            [[ $test_file == spec/*_spec.lua && -z ${extra:-} ]] || {
+                echo "error: invalid stdlib compiler spec: $test_file ${extra:-}" >&2
+                exit 2
+            }
+            stdlib_compiler_specs+=("$test_file")
+        done < spec/support/ci_stdlib_compiler_test_files.txt
+        run_busted "${stdlib_compiler_specs[@]}"
         exec bash spec/support/run_parallel_compiler_tests.sh
     fi
     if [[ -n ${BUSTED_FILTER:-} ]]; then
