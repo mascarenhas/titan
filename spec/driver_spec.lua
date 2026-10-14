@@ -1579,6 +1579,7 @@ describe("compiler installation discovery", function()
     end)
 
     posix_model_it("links source builds through the complete runtime archive", function()
+        driver.INSTALL_PATHS = nil
         assert.same({
             "titan-runtime/libtitan.a",
             "libbacktrace/.libs/libbacktrace.a",
@@ -1587,7 +1588,7 @@ describe("compiler installation discovery", function()
         }, driver.source_link_inputs("lua-5.5.1/src"))
     end)
 
-    posix_model_it("links source builds with the matching installed Lua SDK archive", function()
+    posix_output_it("links source builds with the matching installed Lua SDK archive", function()
         driver.INSTALL_PATHS = assert(driver.installed_paths("/opt/titan"))
         assert.same({
             "titan-runtime/libtitan.a",
@@ -1601,8 +1602,8 @@ describe("compiler installation discovery", function()
             driver.source_link_inputs("/opt/other/src/lua-5.5.1")[3])
     end)
 
-    posix_model_it("recognizes matching installed Lua SDK headers through a prefix alias", function()
-        if package.config:sub(1, 1) == "\\" then
+    it("recognizes matching installed Lua SDK headers through a prefix alias", function()
+        if platform.windows then
             pending("POSIX prefix aliases use native directory symlinks")
             return
         end
@@ -1611,6 +1612,7 @@ describe("compiler installation discovery", function()
         local workspace = temporary.name()
         assert(os.remove(workspace))
         assert(lfs.mkdir(workspace))
+        local previous_paths = driver.INSTALL_PATHS
         local completed, failure = xpcall(function()
             local physical = workspace .. "/physical"
             assert(lfs.mkdir(physical))
@@ -1622,6 +1624,7 @@ describe("compiler installation discovery", function()
             assert.equal(physical .. "/lib/liblua.a",
                 driver.source_link_inputs(alias .. "/src/lua-5.5.1")[3])
         end, debug.traceback)
+        driver.INSTALL_PATHS = previous_paths
         remove_tree(workspace)
         assert.truthy(completed, failure)
     end)
