@@ -2,6 +2,8 @@
 
 `Makefile.win` builds the experimental native x64 Windows SDK, including
 controlled Lua, native dependency DLLs, the compiler and embedded runtime.
+For the installation and usage workflow, see
+[Installing and using Titan on Windows](../language/windows-build.md).
 Run it in the MSYS2 **CLANG64** environment with its
 UCRT Clang, LLVM resource tools, Bash, native GNU Make 4.3 or newer
 (`mingw32-make`), CMake, Ninja, Perl, Git, tar,
@@ -336,9 +338,22 @@ export LUAROCKS_CONFIG=C:/Titan/sdk/etc/luarocks/config-5.5.lua
 
 Users who already have compatible Lua and LuaRocks installations can run the
 last command with their own configured tree and native build tools.
+The generated configuration defaults to `clang.exe`, enables
+`fs_use_modules`, and selects CMake's Ninja generator. The executable spelling
+avoids standalone LuaRocks 3.13.0's incorrect Clang-specific MinGW export
+option; the module filesystem backend avoids its MSYS command backend's quoted
+Windows wildcard during recursive copies. The `luarocks` target checks only
+for `bin/luarocks.exe`, so callers own replacement or reconfiguration of an
+existing installation. Direct standalone commands must set `LUAROCKS_CONFIG`;
+the executable does not automatically find the SDK's `etc/luarocks` directory.
+
+LuaRocks installs `bin/titanc.bat` and retains the Lua script at
+`lib/luarocks/rocks-5.5/titan/0.6.0-1/bin/titanc`. Build and native test helpers
+invoke that script with the selected `bin/lua.exe`, avoiding batch parsing.
 `spec/support/check_windows_compiler.sh` verifies installed dependencies, their PE
-imports, the compiler modules, and CLI loading in a relocated SDK. See
-[the source compiler installation contract](../windows-compiler-bootstrap.md).
+imports, the compiler modules, and CLI loading from a different CWD in an SDK
+copy whose path contains spaces and Unicode. That gate invokes the retained
+script; LuaRocks' batch wrapper can contain installation-specific paths.
 
 `Makefile.win` builds `libtitan.a` from exactly `titan.o` and
 `minicoro.o`, plus the separate support-only `titan.dll` from `ltitanlib.o`.

@@ -52,7 +52,7 @@ Two facts shape everything downstream of the checker:
   and it ties each compiler version to one specific Lua version —
   currently **Lua 5.5.1**. Installed compilers use the matching internal
   source tree staged in the Titan SDK at `<root>/src/lua-5.5.1`; repository checkout mode uses
-  `./lua-5.5.1/src` (see the migration reports below).
+  `./lua-5.5.1/src` (see [Lua installation](driver.md#lua-installation-and-executable-relative-search-paths)).
 * **Titan data is Lua data.** Every ordinary Titan value is representable as
   a Lua value, and generated GC allocations obey Lua's (now generational)
   collector invariants: fresh objects are anchored in stack slots and writes
@@ -66,6 +66,9 @@ Two facts shape everything downstream of the checker:
 
 | Chapter | Covers |
 | --- | --- |
+| [Repository development workflow](repository-workflow.md) | Isolated prefix/submodule setup, profile and command selection, installed versus checkout compiler tests, shared-output ownership, and fixture cleanup. |
+| [Continuous integration and platform validation](continuous-integration.md) | Linux producer/consumer lanes, concurrency and sharding, packaging/coverage ordering, cache ownership, sanitizer diagnostics, and the local/manual macOS pre-merge gate. |
+| [Standard-library implementation rules](standard-library-maintenance.md) | Declaration/body ownership, meaningful adapters and cached invariants, counted FFI storage, precise callback/result APIs, narrow Lua/C boundaries, and public behavior test placement. |
 | [Documentation comments](documentation-comments.md) | LDoc-style summaries and tags retained for editor hover and completion. |
 | [AST and typedecl](ast-typedecl.md) | The `typedecl` constructor convention, `_tag` string dispatch, the full AST inventory (including written `ExpCast`/`ExpIs`), the decorations the checker adds, and what it costs to add a node or type. |
 | [Lexer and parser](lexer-parser.md) | Scannerless LPegLabel grammar with bounded terminal lookahead, committed alternatives, fold captures, iterative operator precedence, parse-time desugarings, semantic statement/spread boundaries, labeled errors, and transactional location tracking. |
@@ -133,15 +136,13 @@ Two facts shape everything downstream of the checker:
 | [Static compiled modules](static-compiled-modules.md) | Canonical object-section metadata, bounded ar/ELF/Mach-O/fat parsing, static-provider resolution and native provenance, deterministic archive flattening, three-way protocol validation, and paired publication. |
 | [Selective binary dependency verification](binary-compatibility.md) | Separate erased compatibility metadata, checker-owned per-consumer usage, ABI-first runtime verification, stable public union tags, and provider-owned variable/closure slot resolution. |
 
-## Lua-version migration reports
+## Lua-version upgrade audit
 
-The cost of building against Lua's internals is paid at Lua upgrades.
-These reports document the 5.3 → 5.5 migration and the 5.5.1 point-release
-audit. They double as a catalogue of every internal Lua API the generated code
-touches:
+Building against Lua internals requires auditing a Lua upgrade against the
+generated code, runtime, and matching headers/archive. Current representation
+and barrier rules are specified in [values and the GC](values-and-gc.md);
+the retained point-release audit records the evidence behind the pinned version:
 
-* [Lua 5.3 → 5.5: internal differences that affect Titan](../lua-5.3-to-5.5-internals.md)
-* [Titan's migration from Lua 5.3 to Lua 5.5](../lua-5.5-migration.md)
 * [Lua 5.5.0 → 5.5.1: exhaustive update audit](lua-5.5.1-update.md)
 
 ## Known limitations and quirks
@@ -183,17 +184,9 @@ cause.
 | `titan-runtime/` | `titan.h`/`titan.c` (`RTLD_LAZY` + `RTLD_GLOBAL` generated-import loader and error handler) and the reduced `minicoro.c`, whose two objects are the exact members of runtime-SDK `libtitan.a`; separate vendored `libbacktrace.a`; `ltitanlib.c`, carried as `ltitanlib.o` into the full standard `titan.so`/`titan.a` pair and linked alone into the private bootstrap, exposing `backtrace`, internal `pin`/`clear`, compiler-local `_loadlib`, and shim-facing `_loadlibglobal`; top-level `minicoro.h` and `titan.h`, plus the sole namespaced SDK header `titan/ffi.h`. Standard callbacks are source foreign functions, not runtime archive shims. |
 | `spec/` | The Busted outer harness and native Titan standard-library suites; coder specs generate, compile, and run C. |
 | `examples/`, `testfiles/` | Manual benchmark/demo material (not used by the suite). |
-| `doc/` | This documentation, the [language reference](../language/index.md), and the migration reports. |
+| `doc/` | This implementation manual, the [language reference](../language/index.md), and the [style guide](../style-guide.md). |
 
-Development workflow, prerequisites and test commands are in the
-repository's [AGENTS.md](../../AGENTS.md) and [README](../../README.md);
-the short version is: choose an absolute local `PREFIX`, put its `bin` on
-`PATH`, run `make lua`, `make luarocks`, and `make libuv`, then install the rock
-with `$PREFIX/bin/luarocks make` and run Busted from the repository root.
-Install `clang-format` only if you use `titanc --pretty-print`.
-`PREFIX` owns Lua/LuaRocks; `ROCKS_TREE` owns the Titan rock, SDK, and stdlib.
-The supported workflow currently configures them to the same path, without
-making that equality an inherent invariant.
-Busted loads the *installed* rock, so re-run that `luarocks make` after editing
-compiler sources. Use distinct `/tmp` prefixes for isolated or parallel
-verification rather than checkout-local `.lua`/`lua_modules` trees.
+Start with [repository workflow](repository-workflow.md) for prerequisites,
+isolated SDKs, profiles, and commands. [AGENTS.md](../../AGENTS.md) is the
+compact agent routing and policy guide; the implementation chapters own the
+operational and technical detail.

@@ -40,11 +40,9 @@ and old objects explicitly marked as modified — which is what *write
 barriers* are for. Two consequences drive this chapter: every fresh
 allocation must acquire its own traced root immediately (before another
 allocation or poll), and an unbarriered store of a collectable value into an
-older object is not a rare race
-but a reliably reproducible use-after-free — see the
-[Lua 5.5 migration report](../lua-5.5-migration.md) and the
-[internals catalogue](../lua-5.3-to-5.5-internals.md) for the project's
-history with exactly this.
+older object is not a rare race but a reliably reproducible use-after-free.
+The [GC discipline](#gc-discipline-the-invariants) and barrier discussion below
+specify the current rules for every generated owner.
 
 ## The C type of every Titan value
 
@@ -643,11 +641,9 @@ comment in `coder.lua`: raw stores go through `luaH_set`/`luaH_setint`
 value is the caller's responsibility; new keys are barriered internally
 by the insertion code." Under the generational collector, getting any
 of this wrong is promptly fatal: minor collections are frequent, and an
-unbarriered old→young store is a use-after-free on the next one. The
-[migration report](../lua-5.5-migration.md) ("GC write barriers") and
-the [internals catalogue](../lua-5.3-to-5.5-internals.md) record the
-barriers the 5.3-era code skipped and the `obj2gco` signature change
-that all back-barrier sites needed.
+unbarriered old→young store is a use-after-free on the next one. Back-barrier
+sites must pass `obj2gco(owner)` rather than the owner's concrete pointer type;
+the signatures and owner-specific split above are the current contract.
 
 ## Calls: C-only inputs, immediate result roots, and VM transport
 

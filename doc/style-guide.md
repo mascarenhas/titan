@@ -377,11 +377,12 @@ Task. `Task:cancel` keeps the first reason private while the status remains in
 its current live variant; terminal `cancelled(reason)` publishes it only after
 the continuation has received cancellation.
 
-Application code normally runs directly inside a libuv operation callback
-until it finishes or starts another asynchronous operation. A one-shot timer
-must close in `timer_cb` and resume its Task only from `close_cb`. Deferred close
-and repeating-ticker continuations may use such a Task-owned timer; use
-`async.yield()` when a CPU loop should explicitly cede a turn.
+One Task continuation runs until it yields, returns, or raises. Native waits
+settle their exact registration; Task startup, yield, peer settlement, and
+explicit token-bearing resumes use the Runtime's shared ready queue.
+`timer.sleep` owns a dedicated one-shot timer and waits for its native close
+through deferred cleanup before returning or finishing cancellation unwind.
+Use `async.yield()` when a CPU loop should explicitly cede a turn.
 
 Cancellation is often logical before it is physical. A callback owner and
 every GC value or native allocation it hands to libuv must remain rooted until
@@ -389,21 +390,24 @@ the terminal callback and cleanup complete, even when the waiting Task has
 been cancelled. Do not implement cancellation by dropping the last Titan
 reference or by allowing a Lua GC finalizer to race libuv. Keep one traced
 request record per one-shot callback, and keep only buffered/latest state plus
-one waiter on a multi-shot handle. The callback delivers its continuation
-directly or through its documented Task-owned one-shot timer, dispatches the
-next yielded operation, and returns; no callback or Task may re-enter `uv_run`.
+one waiter on a multi-shot handle. The callback settles its exact wait or
+publishes through the owning subscription, then returns; no callback or Task
+may re-enter `uv_run`. Follow the
+[async runtime contract](implementation/libuv-runtime.md) for continuation
+delivery and native retirement.
 
 Use Task terminal listeners for bounded Task composition. Inspect initial
 statuses first, create one fresh private `async.ResumeToken` for the composition
 invocation, then register a distinct listener that captures that record directly
 on each still-relevant named Task. Call every returned idempotent remover in
 `defer`, then call `async.suspend(token)` once. A deciding listener calls
-`Task:resume(token)`, which synchronously installs a coalesced
-target-owned zero timer and never resumes the target inline. Repeated calls with
+`Task:resume(token)`, which synchronously accepts one coalesced entry in the
+Runtime ready queue and never resumes the target inline. Repeated calls with
 the correct token coalesce; a different token raises in its caller instead of
-waking the Task. The optional token source is diagnostic only. That timer starts
-close from `timer_cb` and resumes only from `close_cb`; external cancellation of
-the suspended Task uses the stored token and the same wake. Tokens authorize
+waking the Task. The optional token source is diagnostic only. The Runtime's
+shared zero timer drains a finite FIFO batch and clears the old queue entry
+before entering the continuation; external cancellation of the suspended Task
+uses the stored token and the same wake. Tokens authorize
 only explicit `suspend`/`Task:resume(token)` coordination: native callbacks keep their
 source-private tokenless continuation path. Do not collect heterogeneously typed
 combinator operands into a Task Array or add a native polling/phase-fence
