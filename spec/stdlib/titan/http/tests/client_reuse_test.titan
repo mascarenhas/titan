@@ -298,14 +298,14 @@ end
 local function add_reuse_background_drain(context: test.Context, name: string, encrypted: boolean)
   context:run(name, function (_: test.Context)
     run_reuse_case(function ()
-      local close_returned = false
       local fixture = reuse_raw_server(26000, function (connection, identity)
         local first? = reuse_request(connection)
         if not first then return end
+        -- Send the complete small response together so close does not start
+        -- its drain budget before the peer issues a second tiny TLS write.
         connection:write("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n" ..
-                         "X-Test-Connection: " .. identity .. "\r\n\r\n1\r\na\r\n")
-        while not close_returned do timer.yield() end
-        connection:write("4\r\ntail\r\n0\r\nX-Drained: done\r\n\r\n")
+                         "X-Test-Connection: " .. identity .. "\r\n\r\n1\r\na\r\n" ..
+                         "4\r\ntail\r\n0\r\nX-Drained: done\r\n\r\n")
         for _ in reuse_request, connection do connection:write(reuse_reply(identity, "next")) end
       end, encrypted)
       local client = http.Client()
@@ -314,9 +314,13 @@ local function add_reuse_background_drain(context: test.Context, name: string, e
       if encrypted then ca = support.TRUST_ROOT end
       local first = client:get(fixture:url() .. "/first", nil, ca)
       defer first:close()
-      test.assert(first:read() == "a", "first response body prefix changed")
+      -- Header acquisition pauses before the body. Closing without a read
+      -- must defer even an already-buffered body and trailer to its worker.
+      test.assert(first.headers:get("X-Drained") == nil,
+                  "response trailer was parsed before close")
       first:close()
-      close_returned = true
+      test.assert(first.headers:get("X-Drained") == nil,
+                  "response close drained the body synchronously")
       first:close()
       test.assert(first:read() == nil, "closed response remained readable during drain")
       reuse_wait_drained(first)

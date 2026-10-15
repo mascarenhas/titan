@@ -16,7 +16,7 @@ TypeScript, Go, or C. Load every applicable peer cartridge as well:
 | --- | --- |
 | Application repository, build layout, executable delivery | [titan-application](.agents/skills/titan-application/SKILL.md) |
 | Native tests, fixtures, test-layer placement, filtering | [titan-tester](.agents/skills/titan-tester/SKILL.md) |
-| Tasks, timers, cancellation, libuv callbacks, native ownership | [titan-async](.agents/skills/titan-async/SKILL.md) |
+| Tasks, timers, cross-state Receivers, cancellation, libuv callbacks, native ownership | [titan-async](.agents/skills/titan-async/SKILL.md) |
 | URL, TCP, TLS, HTTP | [titan-networking](.agents/skills/titan-networking/SKILL.md) |
 | WS/WSS messages, upgrades, controls, lifecycle, conformance | [titan-websocket](.agents/skills/titan-websocket/SKILL.md) |
 | C imports, callbacks, Lua interop, `titan.lua` | [titan-ffi](.agents/skills/titan-ffi/SKILL.md) |
@@ -86,8 +86,9 @@ Read the [style guide](doc/style-guide.md) before application or stdlib work.
 | C-header preprocessing/type extraction, `foreign import`, `.ffi.h` pipeline | [FFI internals](doc/implementation/ffi-internals.md) |
 | C casts/operators/macros/enums, target arithmetic, compile-probe result caching | [C FFI declarations and expressions](doc/implementation/c-ffi-expressions.md) |
 | Source-defined exact C-ABI callbacks, restricted foreign bodies, `.titan.h`, sequencing | [Foreign functions](doc/implementation/foreign-functions.md) |
-| Trusted raw Lua C API: stack-effect ledger, temporary roots, longjmp, audited allowlist | [Trusted Lua C API boundary](doc/implementation/ffi-lua-api-followup.md) |
+| Trusted raw Lua C API: stack/root ledger, protected independent-state calls, native preload helpers, longjmp, audited allowlist | [Trusted Lua C API boundary](doc/implementation/ffi-lua-api-followup.md) |
 | Module lookup, C compilation/linking, CLI flags, SDK/tool paths, language-server API | [Driver and toolchain](doc/implementation/driver.md) |
+| Native loader/provider snapshots, canonical module selection, per-state bindings, ABI checks before initialization | [Module protocol](doc/implementation/codegen-overview.md#the-module-protocol), [dependency wiring](doc/implementation/codegen-overview.md#static-vs-dynamic-dependency-wiring), [runtime verification](doc/implementation/binary-compatibility.md#generated-exports-and-runtime-verification) |
 | Generated files under `-o`/`--output`, source-relative layouts, incremental/coverage paths | [Output-directory routing](doc/implementation/output-directory.md), [output user guide](doc/language/output-directory.md) |
 | Folder mains/contributors, declaration order, canonical module/output identity | [Folder modules](doc/implementation/folder-modules.md) |
 | Explicit `.titan` imports: local visibility, trusted source provenance, inherited C headers | [Source-import visibility](doc/implementation/source-import-visibility.md) |
@@ -114,16 +115,17 @@ belong in the corresponding compiler layer.
 | Area | Implementation chapters |
 | --- | --- |
 | Native libuv owners/requests, callback lifetime, adding a binding or Task adapter | [Libuv extension guide](doc/implementation/libuv-extension-guide.md); [generic wait policy](doc/implementation/libuv-runtime.md) |
-| Task scheduling, Completion waits, ResumeToken wakes, subscriptions, cancellation, shutdown, timers | [Async continuation runtime](doc/implementation/libuv-runtime.md); public [async](doc/language/async-io.md) and [timer](doc/language/standard-library-timer.md) contracts |
+| Task scheduling, Completion waits, ResumeToken wakes, subscriptions, Runtime-close listeners, cancellation, shutdown, timers | [Async continuation runtime](doc/implementation/libuv-runtime.md); public [async](doc/language/async-io.md) and [timer](doc/language/standard-library-timer.md) contracts |
+| Cross-state `TransferValue` copies/borrows, Receiver queues and opaque handles, two-phase bootstrap/cleanup | [Receiver ownership](doc/implementation/libuv-runtime.md#cross-state-receiver-ownership), [bootstrap and teardown](doc/implementation/lua-library.md#receiver-bootstrap-and-teardown); public [transfers](doc/language/async-io.md#transfer-values) and [receivers](doc/language/async-io.md#cross-state-receivers) |
 | I/O Interfaces, printing, iteration, shell streams | [I/O library](doc/implementation/io-library.md) |
 | Files, metadata, watchers, lexical paths | [Filesystem library](doc/implementation/filesystem-library.md), [path library](doc/implementation/standard-library-path.md) |
 | Child processes, stdio, signals, graceful exit | [OS library](doc/implementation/os-library.md) |
-| DNS/TCP, TLS, URLs, HTTP framing/deadlines | [DNS/TCP request and stream adapters](doc/implementation/libuv-networking.md), [TLS](doc/implementation/ssl-library.md), [URL](doc/implementation/url-library.md), [HTTP](doc/implementation/http-library.md) |
+| DNS/TCP, TLS, shared-port listener binds, URLs, HTTP pooling/framing/deadlines | [DNS/TCP request and stream adapters](doc/implementation/libuv-networking.md), [TLS](doc/implementation/ssl-library.md), [URL](doc/implementation/url-library.md), [HTTP](doc/implementation/http-library.md) |
 | WebSocket framing, controls, byte/ownership handoff, retirement | [WebSocket library](doc/implementation/websocket-library.md), [validation](doc/implementation/websocket-validation.md) |
 | PEG, relabel, private LPegLabel engine and payload | [LPegLabel embedding](doc/implementation/lpeglabel-embedding.md) |
 | Byte strings, writers, regex, format/pack | [String library](doc/implementation/string-library.md) |
 | Numeric functions, random, number parsing | [Math library](doc/implementation/math-library.md) |
-| Lua source loading and `require` cache | [Lua-loading library](doc/implementation/lua-library.md) |
+| Independent Lua states, exclusive worker execution, native preload snapshots, source loading and `require` cache | [Lua-state and loading library](doc/implementation/lua-library.md); public [Lua states and loading](doc/language/standard-library-lua.md) contract |
 | Map/Array iteration, weak Maps, finalizers, collector controls | [Iteration](doc/implementation/iteration-library.md), [GC library](doc/implementation/gc-library.md) |
 | Runtime reflection, typed JSON mapping, asynchronous SQLite | [Reflection](doc/implementation/standard-library-reflect.md), [JSON](doc/implementation/json-library.md), [SQLite](doc/implementation/sqlite3-library.md) |
 | Native case discovery, subtests, cleanup, reporting | [Test runner](doc/implementation/test-runner.md), public [test API](doc/language/standard-library-test.md) |
