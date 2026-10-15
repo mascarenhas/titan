@@ -1449,7 +1449,7 @@ After its per-module object targets complete, the standard library uses the
 same generic path to link all twenty-three qualified roots:
 
 ```sh
-titanc --source-first --incremental \
+titanc --output out --source-first --incremental \
   titan.coroutine titan.uv titan.async titan.timer titan.io titan.fs titan.net \
   titan.ssl titan.url titan.http titan.websocket titan.os titan.path \
   titan.peg titan.string \
@@ -1460,13 +1460,14 @@ titanc --source-first --incremental \
      openssl-build/libssl.a openssl-build/libcrypto.a  # OPENSSL_MODE=bundled
 ```
 
-The provider prefix is `titan`, so checkout output is `titan.so`, `titan.a`,
-and twenty-three generated `titan/*.lua` shims. Each logical module retains its own
-`luaopen_titan_*`, `_init`, `_abi`, `_types`, registry module state, and
+The provider prefix is `titan`, so checkout output is `out/titan.so`,
+`out/titan.a`, and twenty-three generated `out/titan/*.lua` shims. Each logical
+module retains its own `luaopen_titan_*`, `_init`, `_abi`, `_types`, registry module state, and
 initializer; `ltitanlib.o` supplies the twenty-fourth entry, `luaopen_titan`, and the
 support table without adding an archive metadata key. The `titan.uv` folder
-still generates only `titan/uv/uv.c`/`.o`, and no contributor shim. The
-five-member LPegLabel archive is force-carried into both providers after
+still generates one `out/titan/uv/uv.c`/`.o` pair, plus
+`out/titan/uv/uv.ffi.h` and `out/titan/uv/uv.titan.h`, and no contributor shim.
+The five-member LPegLabel archive is force-carried into both providers after
 `ltitanlib.o` but contributes no logical metadata. The build puts the private
 libuv archive after it in the shared `-X` payload, followed by the private
 llhttp and SQLite archives and then any bundled OpenSSL archives used directly by

@@ -142,12 +142,13 @@ parser/compiler helpers. `relabel_parser.titan` assembles the self-hosted
 expression grammar from operations in that shared module scope.
 
 The folder ensemble is parsed separately and then combined into one AST and
-one checker/code-generator pass. It emits only:
+one checker/code-generator pass. With `--output out`, its generated files are:
 
 ```text
-titan/peg/peg.c
-titan/peg/peg.o
-titan/peg.lua
+out/titan/peg/peg.c
+out/titan/peg/peg.o
+out/titan/peg/peg.ffi.h
+out/titan/peg.lua
 ```
 
 There is one `titan.peg` logical ABI/types protocol and no module, provider,

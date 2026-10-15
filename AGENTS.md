@@ -935,13 +935,13 @@ permits keyword spellings in the selected declaration/member/type positions
 without weakening ordinary local and parameter `NAME` bindings.
 
 The canonical main controls generated C/object placement, while logical `M`
-controls native symbols, metadata, and the generated shim. Thus folder
-`foo.bar` writes `foo/bar/bar.c` and `.o`; a single-root library invocation
-publishes exact `foo/bar.so` and `foo/bar.a`, while compatible multiple roots
-publish their one longest-common-prefix pair. Folder contributors produce no
-artifacts or shims. A standalone retains `foo/bar__entrypoint.c` and emits
-`foo/bar__main`; it does not emit a provider pair. Flat paths remain unchanged.
-`make clean` must remove nested generated `titan/uv/uv.c` and
+controls native symbols, metadata, and the generated shim. With `--output out`,
+folder `foo.bar` writes `out/foo/bar/bar.c` and `.o`; a single-root library
+invocation publishes exact `out/foo/bar.so` and `out/foo/bar.a`, while compatible
+multiple roots publish their one longest-common-prefix pair. Folder contributors
+produce no artifacts or shims. A standalone retains `out/foo/bar__entrypoint.c` and emits
+`out/foo/bar__main`; it does not emit a provider pair. `make clean` removes `out/`.
+Legacy source-adjacent cleanup must remove nested generated `titan/uv/uv.c` and
 `titan/uv/uv.o`, the exact known generated archives (`titan.a`,
 `examples/{utils,artisanal,sdl_quit}.a`, and
 `testfiles/{selection_sort,sieve}.a`), and only the explicitly known generated
