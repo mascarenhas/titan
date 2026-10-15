@@ -2346,7 +2346,10 @@ local function same_c_tag_identity(left, right, seen)
 
     local tag = left._tag
     if tag == "Type.CStruct" or tag == "Type.CUnion" then
-        return false
+        -- lua_State is a portable builtin, including inside callbacks restored
+        -- from compiled metadata. Its descriptors need not share an extractor
+        -- object; use the same identity rule as the C declaration relation.
+        return types.is_c_lua_state(left) and types.is_c_lua_state(right)
     end
 
     seen = seen or {}

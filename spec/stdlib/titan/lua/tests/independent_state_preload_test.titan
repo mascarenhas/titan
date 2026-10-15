@@ -1,0 +1,83 @@
+local independent_preload = import "lua.preload_fixture"
+
+function test_lua_independent_async_requires_executable_only_titan_module(
+    _context: test.Context)
+  runtime_test.run(function ()
+    local original = independent_preload.counter
+    defer independent_preload.counter = original
+    independent_preload.counter = 700
+    local state = tlua.new()
+    defer state:close()
+    local values: {tlua.TransferValue} = { state:run_async([[
+      package.path, package.cpath = '', ''
+      local fixture = require('lua.preload_fixture')
+      return fixture.counter, fixture.increment(1)
+    ]], "=executable-only-preload") }
+    test.assert(#values == 2 and transfer_integer(values[1]) == 41 and
+                transfer_integer(values[2]) == 42,
+                "native preload did not initialize independent module state")
+    test.assert(independent_preload.counter == 700,
+                "native preload reused the host module's mutable state")
+    local repeated: tlua.TransferValue = state:run_async([[
+      return require('lua.preload_fixture').increment(1)
+    ]])
+    test.assert(transfer_integer(repeated) == 43,
+                "repeated native require did not preserve independent state")
+    local other = tlua.new()
+    defer other:close()
+    local fresh: tlua.TransferValue = other:run_async([[
+      package.path, package.cpath = '', ''
+      return require('lua.preload_fixture').counter
+    ]])
+    test.assert(transfer_integer(fresh) == 41,
+                "new independent state reused another state's preload module")
+  end)
+end
+
+function test_lua_independent_preload_snapshot_skips_host_closures(
+    _context: test.Context)
+  local configure = common.lua_helper([=[
+    return function()
+      local preload = debug.getregistry()._PRELOAD
+      local names = {
+        'lua.tests.snapshot_lua', 'lua.tests.snapshot_c_closure',
+        'lua.tests.snapshot_nonfunction', 'lua.tests.snapshot_late',
+      }
+      local saved = {}
+      for index, name in ipairs(names) do saved[index] = preload[name] end
+      local native = assert(preload['lua.preload_fixture'])
+      preload[names[1]] = function() return 11 end
+      preload[names[2]] = string.gmatch('abc', '.')
+      preload[names[3]] = 17
+      preload[names[4]] = nil
+      local public_preload = package.preload
+      package.preload = {}
+      return function()
+        package.preload = public_preload
+        for index, name in ipairs(names) do preload[name] = saved[index] end
+      end, function() preload[names[4]] = native end
+    end
+  ]=]) as function (): (function (): (), function (): ())
+  local restore, register_late = configure()
+  defer restore()
+  local first = tlua.new()
+  defer first:close()
+  register_late()
+  local values: {tlua.TransferValue} = { first:run([[
+    return package.preload['lua.tests.snapshot_lua'] == nil,
+           package.preload['lua.tests.snapshot_c_closure'] == nil,
+           package.preload['lua.tests.snapshot_nonfunction'] == nil,
+           package.preload['lua.tests.snapshot_late'] == nil,
+           type(package.preload['lua.preload_fixture']) == 'function'
+  ]]) }
+  test.assert(#values == 5)
+  for index = 1, #values do assert_transfer_boolean(values[index], true) end
+  local second = tlua.new()
+  defer second:close()
+  local late: tlua.TransferValue = second:run([[
+    package.path, package.cpath = '', ''
+    return require('lua.tests.snapshot_late').increment(1)
+  ]])
+  test.assert(transfer_integer(late) == 42,
+              "new state did not snapshot the registry's late native loader")
+end

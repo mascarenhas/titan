@@ -143,18 +143,25 @@ change. Unobserved nonterminal transitions do not construct public snapshots.
 `async.run_foreign(f, arg)` submits the C function pointer and argument to
 libuv's process-wide worker pool and suspends the current Task until the
 after-work callback runs on the event-loop thread. It is intended for blocking
-calls into an external C library. It is not a way to run Lua code or an
-ordinary Titan function or closure on another thread. A restricted source
-`foreign function` is permitted because the compiler emits it as an exact C
-callback; its body must remain entirely within the raw-C restrictions below.
+calls into an external C library. A restricted source `foreign function` is
+permitted because the compiler emits it as an exact C callback; its body must
+remain within the raw-C restrictions below.
 
-The worker performs exactly `f(arg)`. It must not inspect or mutate Titan or
-Lua objects, call the Lua API, allocate through Titan, raise, resume a Task, or
-touch `TValue`, `Udata`, or other GC-managed state. The argument must identify
-native storage that remains alive until completion. Passing an `owned` C
-allocation keeps that owner alive in the suspended caller, but the caller is
-still responsible for synchronization and must not concurrently access bytes
-that the worker may read or write.
+The worker performs exactly `f(arg)`. It must not inspect or mutate the
+hosting Lua state's Titan/Lua objects, call the Lua API on that state, invoke
+its Titan functions or closures, allocate through its runtime, raise into its
+frames, or resume its Tasks. The argument must identify native storage that
+remains alive until completion. Passing an `owned` C allocation keeps that
+owner alive in the suspended caller, but the caller is still responsible for
+synchronization and must not concurrently access bytes that the worker may
+read or write.
+
+[`lua.Lua:run_async`](standard-library-lua.md#asynchronous-execution)
+is the explicit independent-state use of this boundary. Its worker exclusively
+owns a separate Lua state, and Lua or Titan code initialized there runs with
+that state's own globals, registry, and collector. It does not share host
+state values or attach a host Titan closure to another thread. Cross-state
+values follow the Lua library's copy and borrowed-pointer protocol.
 
 A NULL worker function is rejected before submission. A queue-submission
 failure raises immediately. After successful submission,

@@ -322,10 +322,16 @@ or rejects an OperationError labelled `async.run_foreign`, and protects unexpect
 failures with fatal plus bare rethrow. The argument's owned storage remains in
 the suspended caller through completion.
 
-Worker code must not inspect Titan/Lua owners, call the Lua API, raise, or resume
-a Task. Synchronization of shared native bytes remains the caller's job. The
-libuv worker pool is shared with other native work and async adds no new queue
-or thread policy. Ordinary cancellation never detaches the accepted job.
+Worker code must not inspect host Titan/Lua owners, call the Lua API on the
+hosting state, raise into its frames, or resume its Tasks. The
+[independent Lua-state adapter](lua-library.md#independent-state-ownership)
+exclusively owns a separate state and may execute Lua and independently
+initialized Titan modules in it. That state's collector never receives a host
+GC object; only explicitly copied strings and borrowed native addresses cross
+the boundary. Synchronization of shared native bytes remains the caller's
+job. The libuv worker pool is shared with other native work and async adds no
+new queue or thread policy. Ordinary cancellation never detaches the accepted
+job.
 
 The UV binding embeds an ordinary `uv_work_t` and a separate native callback
 data structure in one stable request owner. Before queueing, it sets

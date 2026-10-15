@@ -809,9 +809,14 @@ int titan_sdk_headers(void) { return LUA_VERSION_NUM + SQLITE_VERSION_NUMBER; }
             "spec/stdlib/titan/io/tests/process_test.titan",
             "spec/stdlib/titan/io/tests/tests.titan",
             "spec/stdlib/titan/iteration/tests.titan",
+            "spec/stdlib/titan/lua/preload_fixture.titan",
             "spec/stdlib/titan/lua/test_support.titan",
             "spec/stdlib/titan/lua/tests/core_test.titan",
             "spec/stdlib/titan/lua/tests/dofile_test.titan",
+            "spec/stdlib/titan/lua/tests/independent_state_async_test.titan",
+            "spec/stdlib/titan/lua/tests/independent_state_preload_test.titan",
+            "spec/stdlib/titan/lua/tests/independent_state_reader_test.titan",
+            "spec/stdlib/titan/lua/tests/independent_state_test.titan",
             "spec/stdlib/titan/lua/tests/require_test.titan",
             "spec/stdlib/titan/lua/tests/source_require_test.titan",
             "spec/stdlib/titan/lua/tests/tests.titan",
@@ -956,7 +961,9 @@ int titan_sdk_headers(void) { return LUA_VERSION_NUM + SQLITE_VERSION_NUMBER; }
             "doc/implementation/standard-library-path.md",
             "LICENSES/go-LICENSE",
             "titan/math.titan",
-            "titan/lua.titan",
+            "titan/lua/lua.titan",
+            "titan/lua/worker.titan",
+            "titan/lua/native.h",
             "titan/iteration.titan",
             "titan/gc.titan",
             "titan/test.titan",
@@ -1011,6 +1018,7 @@ int titan_sdk_headers(void) { return LUA_VERSION_NUM + SQLITE_VERSION_NUMBER; }
             assert.truthy(contains_suffix(expected), expected)
         end
         for _, retired in ipairs({
+            "titan/lua.titan",
             "titan/uv/file.titan",
             "titan/uv/os.titan",
             "titan/uv/runtime.titan",

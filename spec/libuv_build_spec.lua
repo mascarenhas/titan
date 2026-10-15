@@ -547,6 +547,7 @@ local function stdlib_source_files()
         ["$(WEBSOCKET_TITAN_SOURCES)"] = "WEBSOCKET_TITAN_SOURCES",
         ["$(SQLITE3_TITAN_SOURCES)"] = "SQLITE3_TITAN_SOURCES",
         ["$(JSON_TITAN_SOURCES)"] = "JSON_TITAN_SOURCES",
+        ["$(LUA_TITAN_SOURCES)"] = "LUA_TITAN_SOURCES",
     }
     for _, source in ipairs(makefile_words("STDLIB_TITAN_SOURCES")) do
         local ensemble = source_ensembles[source]
@@ -1016,11 +1017,12 @@ esac
         local tested, test_error = xpcall(function()
             local inputs = stdlib_source_files()
             inputs[#inputs + 1] = "titan/sqlite3/native.h"
+            inputs[#inputs + 1] = "titan/lua/native.h"
             inputs[#inputs + 1] = "prepared"
             local folders = { uv = true, http = true, websocket = true, peg = true,
-                string = true, sqlite3 = true, json = true }
+                string = true, sqlite3 = true, json = true, lua = true }
             local callbacks = { coroutine = true, uv = true, fs = true,
-                http = true, sqlite3 = true }
+                http = true, sqlite3 = true, lua = true }
             local outputs, objects = {}, {}
             local compiler = { "#!/bin/sh", "set -eu",
                 'test "$1 $2" = "--output out"', 'shift 2',
@@ -1078,7 +1080,8 @@ esac
                 "stdlib-objects" }
             for _, module in ipairs(STDLIB_MODULES) do
                 argv[#argv + 1] = "STDLIB_C_INPUTS_" .. module .. "=" ..
-                    (module == "sqlite3" and "titan/sqlite3/native.h" or "prepared")
+                    ((module == "sqlite3" or module == "lua") and
+                        "titan/" .. module .. "/native.h" or "prepared")
             end
             local function build()
                 local ok, output = run_argv(argv)
@@ -1114,6 +1117,10 @@ esac
             -- Ensure the changed header is strictly newer at Make's precision.
             assert(lfs.touch(root .. "/" .. objects.sqlite3, old + 3, old + 3))
             assert.same({ sqlite3 = true }, build())
+            assert(lfs.touch(root .. "/titan/lua/native.h", os.time(), os.time()))
+            assert(lfs.touch(root .. "/" .. objects.lua, old + 3, old + 3))
+            assert.same({ lua = true, reflect = true, sqlite3 = true,
+                json = true }, build())
         end, debug.traceback)
         remove_tree(root)
         if not tested then error(test_error, 0) end
@@ -2242,6 +2249,10 @@ int main(void) {
             assert.same(shims, makefile_words("STDLIB_SHIMS"))
             assert.same({ "titan/string/format_native.h" },
                 makefile_words("STRING_TITAN_HEADERS"))
+            assert.same({ "titan/lua/lua.titan", "titan/lua/worker.titan" },
+                makefile_words("LUA_TITAN_SOURCES"))
+            assert.same({ "titan/lua/native.h" },
+                makefile_words("LUA_TITAN_HEADERS"))
             assert.same({
                 "$(LTITANLIB_O)", "$(LPEGLABEL_ARCHIVE)",
                 "$(LIBUV_EXTRA_OBJECTS)", "$(LLHTTP_ARCHIVE)",
@@ -2310,7 +2321,7 @@ int main(void) {
                 "titan/string/pack.titan", "titan/string/regex_api.titan",
                 "titan/string/regex_compile.titan",
                 "titan/string/regex_parser.titan",
-                "titan/math.titan", "titan/lua.titan",
+                "titan/math.titan", "titan/lua/lua.titan", "titan/lua/worker.titan",
                 "titan/iteration.titan", "titan/gc.titan", "titan/test.titan",
                 "titan/reflect.titan",
                 "titan/sqlite3/sqlite3.titan", "titan/sqlite3/bindings.titan",
@@ -2352,7 +2363,7 @@ int main(void) {
         for _, header in ipairs({
             "titan/coroutine.titan.h",
             "titan/uv/uv.titan.h", "titan/http/http.titan.h",
-            "titan/sqlite3/sqlite3.titan.h",
+            "titan/sqlite3/sqlite3.titan.h", "titan/lua/lua.titan.h",
         }) do
             expected[#expected + 1] = "out/" .. header
         end
@@ -3311,13 +3322,13 @@ esac
                 "titan/string/pack.titan", "titan/string/regex_api.titan",
                 "titan/string/regex_compile.titan",
                 "titan/string/regex_parser.titan",
-                "titan/math.titan", "titan/lua.titan",
+                "titan/math.titan",
                 "titan/iteration.titan", "titan/gc.titan", "titan/test.titan",
             }
             for _, ensemble in ipairs({
                 "UV_TITAN_SOURCES", "SQLITE3_TITAN_SOURCES", "JSON_TITAN_SOURCES",
-                "WEBSOCKET_TITAN_SOURCES",
-                "SQLITE3_TITAN_HEADERS", "STRING_TITAN_HEADERS",
+                "WEBSOCKET_TITAN_SOURCES", "LUA_TITAN_SOURCES",
+                "SQLITE3_TITAN_HEADERS", "STRING_TITAN_HEADERS", "LUA_TITAN_HEADERS",
             }) do
                 for _, source in ipairs(makefile_words(ensemble)) do
                     sources[#sources + 1] = source
@@ -5682,7 +5693,7 @@ done
 
             assert.equal(1, count_literal(sanitizer_job,
                 "make titan-stdlib-test-build"), sanitizer_job)
-            assert.equal(38, count_literal(sanitizer_job,
+            assert.equal(39, count_literal(sanitizer_job,
                 "make titan-stdlib-test-run"), sanitizer_job)
             for _, filter in ipairs({
                 "TITAN_FILTER='test_lua_host_roots_coroutine_" ..
@@ -5699,6 +5710,7 @@ done
                 "TITAN_FILTER='test_net_received_chunks_remain_immutable'",
                 "TITAN_FILTER='test_net_overlapping_writes_'",
                 "TITAN_FILTER='test_run_foreign_'",
+                "TITAN_FILTER='test_lua_independent_'",
                 "TITAN_FILTER='test_signal_watcher_'",
                 "TITAN_FILTER='test_ssl_http_fresh_process_sanitizer_composition$'",
                 "TITAN_FILTER='test_ssl_simultaneous_large_duplex_preserves_bytes$'",

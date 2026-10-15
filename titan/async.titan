@@ -1394,7 +1394,7 @@ local function start_foreign_work(done: Completion<|ForeignWork, value, Operatio
 end
 
 --- Run one blocking C function-pointer call in the shared worker pool and wait for completion.
--- @param f C-only function; it must never enter Titan or Lua.
+-- @param f C-only entry; it must never enter the calling Lua/Titan state. Separately owned states follow the titan.lua isolation protocol.
 -- @param arg Native pointer whose owner remains live until after-work completion, including cancellation.
 -- @usage async-io.md
 function run_foreign(f: foreign function (*void): void, arg: foreign *void)

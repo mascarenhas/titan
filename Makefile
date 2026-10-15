@@ -332,6 +332,8 @@ STDLIB_HTTP_SOURCES := titan/http/http.titan titan/http/client.titan \
 SQLITE3_TITAN_SOURCES := titan/sqlite3/sqlite3.titan titan/sqlite3/bindings.titan \
 	titan/sqlite3/row.titan titan/sqlite3/worker.titan
 SQLITE3_TITAN_HEADERS := titan/sqlite3/native.h
+LUA_TITAN_SOURCES := titan/lua/lua.titan titan/lua/worker.titan
+LUA_TITAN_HEADERS := titan/lua/native.h
 STRING_TITAN_HEADERS := titan/string/format_native.h
 WEBSOCKET_TITAN_SOURCES := titan/websocket/websocket.titan titan/websocket/handshake.titan \
 	titan/websocket/connection.titan titan/websocket/frames.titan \
@@ -357,17 +359,17 @@ STDLIB_TITAN_SOURCES := titan/coroutine.titan $(UV_TITAN_SOURCES) \
 	titan/string/format.titan titan/string/pack.titan \
 	titan/string/regex_api.titan titan/string/regex_compile.titan \
 	titan/string/regex_parser.titan \
-	titan/math.titan titan/lua.titan titan/iteration.titan titan/gc.titan \
+	titan/math.titan $(LUA_TITAN_SOURCES) titan/iteration.titan titan/gc.titan \
 	titan/test.titan titan/reflect.titan $(SQLITE3_TITAN_SOURCES) \
 	$(JSON_TITAN_SOURCES)
 STDLIB_GENERATED_FFI_HEADERS := $(addprefix $(TITAN_OUTPUT_DIR)/,$(addsuffix .ffi.h, \
-	$(addprefix titan/,$(filter-out uv http websocket peg string sqlite3 json,$(STDLIB_MODULES))) \
+	$(addprefix titan/,$(filter-out uv http websocket peg string sqlite3 json lua,$(STDLIB_MODULES))) \
 	titan/uv/uv titan/http/http titan/websocket/websocket titan/peg/peg titan/string/string \
-	titan/sqlite3/sqlite3 titan/json/json))
+	titan/sqlite3/sqlite3 titan/json/json titan/lua/lua))
 STDLIB_GENERATED_FOREIGN_HEADERS := $(STDLIB_GENERATED_FFI_HEADERS) \
 	$(addprefix $(TITAN_OUTPUT_DIR)/,titan/coroutine.titan.h \
 	titan/uv/uv.titan.h titan/http/http.titan.h \
-	titan/sqlite3/sqlite3.titan.h)
+	titan/sqlite3/sqlite3.titan.h titan/lua/lua.titan.h)
 # One native compilation unit per logical module, including folder ensembles.
 # This reviewed import graph owns rebuild propagation and parallel ordering;
 # titanc's object fast path deliberately does not track dependency freshness.
@@ -378,6 +380,7 @@ STDLIB_STEM_peg := titan/peg/peg
 STDLIB_STEM_string := titan/string/string
 STDLIB_STEM_sqlite3 := titan/sqlite3/sqlite3
 STDLIB_STEM_json := titan/json/json
+STDLIB_STEM_lua := titan/lua/lua
 stdlib_stem = $(TITAN_OUTPUT_DIR)/$(if $(STDLIB_STEM_$(1)),$(STDLIB_STEM_$(1)),titan/$(1))
 stdlib_outputs = $(call stdlib_stem,$(1)).o $(call stdlib_stem,$(1)).c $(filter $(call stdlib_stem,$(1)).%,$(STDLIB_GENERATED_FOREIGN_HEADERS))
 STDLIB_MODULE_OBJECTS := $(foreach module,$(STDLIB_MODULES),$(call stdlib_stem,$(module)).o)
@@ -397,7 +400,7 @@ STDLIB_IMPORTS_path := string
 STDLIB_IMPORTS_peg := gc
 STDLIB_IMPORTS_string := peg gc
 STDLIB_IMPORTS_math :=
-STDLIB_IMPORTS_lua := async fs io string
+STDLIB_IMPORTS_lua := async fs gc io string
 STDLIB_IMPORTS_iteration :=
 STDLIB_IMPORTS_gc :=
 STDLIB_IMPORTS_test :=
@@ -1178,6 +1181,7 @@ STDLIB_C_INPUTS_http = $(LLHTTP_HEADER)
 STDLIB_C_INPUTS_ssl = $(foreach dir,$(STDLIB_OPENSSL_HEADER_DIRS),$(wildcard $(dir)/openssl/*.h))
 STDLIB_C_INPUTS_websocket = $(foreach dir,$(STDLIB_OPENSSL_HEADER_DIRS),$(wildcard $(dir)/openssl/*.h))
 STDLIB_C_INPUTS_sqlite3 = $(SQLITE3_HEADER) $(SQLITE3_TITAN_HEADERS)
+STDLIB_C_INPUTS_lua = $(LUA_TITAN_HEADERS)
 
 # The command is identical for object builds and the final link. Only the
 # latter receives native payload. Make schedules modules; each compiler gets

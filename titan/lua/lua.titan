@@ -1,4 +1,4 @@
---- Compile Lua chunks and load Lua, C, or Titan modules in the current Lua state.
+--- Load Lua and Titan code in the current state or an owned independent state.
 -- @module titan.lua
 -- @usage standard-library-lua.md
 
@@ -9,6 +9,7 @@ foreign import "titan/ffi.h"
 
 local async = import "async"
 local fs = import "fs"
+local gc = import "gc"
 local io = import "io"
 local string = import "string"
 
@@ -281,4 +282,271 @@ function dofile(filename: string, ...: value): (...: value)
   local chunk: LuaChunk =
     load_from_reader(file, "@" .. filename, nil)
   return chunk(...)
+end
+
+--- An independent Lua state with its own globals, registry, and collector.
+-- @usage standard-library-lua.md#independent-lua-states
+record Lua
+  local handle: foreign *lua_State
+  local busy: boolean
+end
+
+--- Values copied or borrowed across independent Lua states.
+-- @usage standard-library-lua.md#transferring-values
+union TransferValue
+  is_nil()
+  is_boolean(boolean)
+  is_integer(integer)
+  is_float(float)
+  is_string(string)
+  is_lua_state(foreign *lua_State)
+  is_function(foreign function (*lua_State): int)
+  is_pointer(foreign *void)
+end
+
+-- A call retains every native carrier and every source string while its worker
+-- owns the independent state. Output string addresses remain rooted by that
+-- state's stack until conversion has finished on the caller's thread.
+local record LuaCall
+  local const owner: Lua
+  local const chunk: string
+  local const name: string
+  local const arguments: {TransferValue}
+  local const inputs: owned titan_lua_value[]
+  local packet: foreign titan_lua_call
+  local stack_top: foreign int
+end
+
+local function copy_state_bytes(bytes: foreign const *char,
+                                length: foreign size_t): string
+  local top = ffi.lua_gettop(L)
+  defer ffi.lua_settop(L, top)
+  if ffi.lua_checkstack(L, 1) == 0 then
+    raise "cannot reserve Lua stack for independent-state string"
+  end
+  ffi.lua_pushlstring(L, bytes, length)
+  local result: value = ffi.lua_totvalue(L, -1)
+  return result
+end
+
+--- Close an independent state; subsequent closes are harmless.
+-- @usage standard-library-lua.md#independent-lua-states
+function Lua:close()
+  if self.busy then raise "independent Lua state is busy" end
+  local handle = self.handle
+  if not handle then return end
+  self.handle = nil
+  ffi.lua_close(handle)
+end
+
+local record LuaPreload
+  local const name: string
+  local const loader: foreign function (*lua_State): int
+end
+
+-- Snapshot only loaders that have no state-owned upvalues. Keep names in traced
+-- strings while the native initialization packet borrows their exact bytes.
+local function preload_snapshot(): {LuaPreload}
+  local top = ffi.lua_gettop(L)
+  defer ffi.lua_settop(L, top)
+  if ffi.lua_checkstack(L, 4) == 0 then
+    raise "cannot reserve Lua stack for preload snapshot"
+  end
+  ffi.lua_getfield(L, ffi.LUA_REGISTRYINDEX, ffi.LUA_PRELOAD_TABLE)
+  local entries: {LuaPreload} = {}
+  if ffi.lua_type(L, -1) ~= ffi.LUA_TTABLE then return entries end
+  ffi.lua_pushnil(L)
+  while ffi.lua_next(L, top + (1 as foreign int)) ~= 0 do
+    if ffi.lua_type(L, -2) == ffi.LUA_TSTRING then
+      local loader = ffi.lua_tocfunction(L, -1)
+      if loader then
+        if not ffi.lua_getupvalue(L, -1, 1) then
+          local name: value = ffi.lua_totvalue(L, -2)
+          entries[#entries + 1] = LuaPreload(name, loader)
+        end
+      end
+    end
+    -- Retain only the table and next key, discarding the value and any upvalue.
+    ffi.lua_settop(L, top + (2 as foreign int))
+  end
+  return entries
+end
+
+local function Lua:initialize()
+  local snapshot = preload_snapshot()
+  local entries: owned titan_lua_preload[] =
+    foreign titan_lua_preload.new_array(#snapshot)
+  for index = 1, #snapshot do
+    entries[index - 1].name = snapshot[index].name
+    entries[index - 1].length = #snapshot[index].name
+    entries[index - 1].loader = snapshot[index].loader
+  end
+  self.handle = ffi.luaL_newstate()
+  if not self.handle then raise "cannot create independent Lua state" end
+  local initialization = foreign titan_lua_open.new()
+  initialization.state = self.handle
+  initialization.preloads = entries
+  initialization.count = #snapshot
+  local status = lua_state_open(initialization)
+  if status ~= ffi.LUA_OK then
+    if ffi.lua_gettop(self.handle) > 0 then
+      local length = foreign size_t.new_array(1)
+      local bytes = ffi.lua_tolstring(self.handle, -1, length)
+      if bytes then raise copy_state_bytes(bytes, length[0]) end
+    end
+    raise "cannot initialize independent Lua standard libraries"
+  end
+catch
+  self:close()
+  raise
+end
+
+--- Create an independent state with the Lua standard libraries loaded.
+-- @return Owned state; collection closes it if it was not explicitly closed.
+-- @usage standard-library-lua.md#independent-lua-states
+function new(): Lua
+  local state = Lua(nil, false)
+  gc.finalizable(state, function (owner) owner:close() end)
+  state:initialize()
+  return state
+end
+
+local function Lua:reserve()
+  if not self.handle then raise "independent Lua state is closed" end
+  if self.busy then raise "independent Lua state is busy" end
+  self.busy = true
+end
+
+local function LuaCall:finish()
+  -- run_foreign does not unwind its caller before accepted work completes,
+  -- including on cancellation. This is the only release of the reservation.
+  ffi.free(self.packet.results)
+  self.packet.results = nil
+  ffi.lua_settop(self.owner.handle, self.stack_top)
+  self.owner.busy = false
+end
+
+local function LuaCall:prepare()
+  self.packet.state = self.owner.handle
+  self.packet.chunk = self.chunk
+  self.packet.name = self.name
+  self.packet.length = #self.chunk
+  self.packet.nargs = #self.arguments
+  self.packet.args = self.inputs
+  self.packet.results = nil
+  for index = 1, #self.arguments do
+    local input = (self.inputs as foreign *titan_lua_value) + (index - 1)
+    case self.arguments[index]
+    when is_nil() then
+      input.kind = ffi.TITAN_LUA_NIL
+    when is_boolean(item) then
+      input.kind = ffi.TITAN_LUA_BOOLEAN
+      if item then input.integer = 1 else input.integer = 0 end
+    when is_integer(item) then
+      input.kind = ffi.TITAN_LUA_INTEGER
+      input.integer = item
+    when is_float(item) then
+      input.kind = ffi.TITAN_LUA_FLOAT
+      input.number = item
+    when is_string(item) then
+      input.kind = ffi.TITAN_LUA_STRING
+      input.bytes = item
+      input.length = #item
+    when is_lua_state(item) then
+      input.kind = ffi.TITAN_LUA_STATE
+      input.state = item
+    when is_function(item) then
+      if not item then raise "cannot transfer a NULL Lua C function" end
+      input.kind = ffi.TITAN_LUA_FUNCTION
+      input.function = item
+    when is_pointer(item) then
+      input.kind = ffi.TITAN_LUA_POINTER
+      input.pointer = item
+    end
+  end
+end
+
+local function LuaCall:values(): {TransferValue}
+  if self.packet.status ~= ffi.LUA_OK then
+    raise copy_state_bytes(self.packet.message, self.packet.message_length)
+  end
+  local results: {TransferValue} = {}
+  for index = 1, self.packet.nresults as integer do
+    local item = self.packet.results + (index - 1)
+    if item.kind == ffi.TITAN_LUA_NIL then
+      results[index] = TransferValue.is_nil()
+    elseif item.kind == ffi.TITAN_LUA_BOOLEAN then
+      results[index] = TransferValue.is_boolean(item.integer ~= 0)
+    elseif item.kind == ffi.TITAN_LUA_INTEGER then
+      results[index] = TransferValue.is_integer(item.integer)
+    elseif item.kind == ffi.TITAN_LUA_FLOAT then
+      results[index] = TransferValue.is_float(item.number)
+    elseif item.kind == ffi.TITAN_LUA_STRING then
+      results[index] = TransferValue.is_string(copy_state_bytes(item.bytes, item.length))
+    elseif item.kind == ffi.TITAN_LUA_STATE then
+      results[index] = TransferValue.is_lua_state(item.state)
+    elseif item.kind == ffi.TITAN_LUA_FUNCTION then
+      results[index] = TransferValue.is_function(item.function)
+    elseif item.kind == ffi.TITAN_LUA_POINTER then
+      results[index] = TransferValue.is_pointer(item.pointer)
+    end
+  end
+  return results
+end
+
+local function Lua:prepare_call(chunk: string, name: string?,
+                                 arguments: {TransferValue}): LuaCall
+  return LuaCall {
+    owner = self,
+    chunk = chunk,
+    name = name or chunk,
+    arguments = arguments,
+    inputs = foreign titan_lua_value.new_array(#arguments),
+    packet = foreign titan_lua_call.new(),
+    stack_top = 0
+  }
+end
+
+--- Execute Lua code in this state and transfer its arguments and results.
+-- @usage standard-library-lua.md#independent-lua-states
+function Lua:run(chunk: string, name: string?, ...: TransferValue):
+    (...: TransferValue)
+  local call = self:prepare_call(chunk, name, {...})
+  self:reserve()
+  call.stack_top = ffi.lua_gettop(self.handle)
+  defer call:finish()
+  call:prepare()
+  lua_state_run(call.packet)
+  return ...call:values()
+end
+
+--- Execute Lua or required Titan code on a worker while other Tasks continue.
+-- @usage standard-library-lua.md#asynchronous-execution
+function Lua:run_async(chunk: string, name: string?, ...: TransferValue):
+    (...: TransferValue)
+  local call = self:prepare_call(chunk, name, {...})
+  self:reserve()
+  call.stack_top = ffi.lua_gettop(self.handle)
+  defer call:finish()
+  call:prepare()
+  async.run_foreign(lua_state_run, call.packet)
+  return ...call:values()
+end
+
+--- Drain a borrowed Reader, then execute its bytes in this state.
+-- @usage standard-library-lua.md#independent-lua-states
+function Lua:run_from_loader(reader: io.Reader, name: string?,
+                                   ...: TransferValue): (...: TransferValue)
+  local builder = string.writer()
+  for chunk in reader:read do builder:write(chunk) end
+  return self:run(builder:drain(), name, ...)
+end
+
+--- Drain a borrowed Reader, then execute its bytes on a worker.
+-- @usage standard-library-lua.md#asynchronous-execution
+function Lua:run_async_from_loader(reader: io.Reader, name: string?,
+                                         ...: TransferValue): (...: TransferValue)
+  local builder = string.writer()
+  for chunk in reader:read do builder:write(chunk) end
+  return self:run_async(builder:drain(), name, ...)
 end

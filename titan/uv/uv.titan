@@ -1018,7 +1018,7 @@ end
 --- Queue C-only worker(arg) on libuv's shared worker pool.
 -- @param loop Input initialized owning loop; accepted handles/requests retain it through retirement.
 -- @param req Mutable allocated nonpending request owner; accepted submission retains owner until its terminal callback returns; rejection owes no async callback.
--- @param worker Input C-only entry; no Lua/Titan execution from a native worker/once callback.
+-- @param worker Input C-only entry; no calling-state Lua/Titan execution from a native worker/once callback.
 -- @param arg Input borrowed native address for explicit C-only/TLS interop; no automatic GC ownership.
 -- @param after_work Input ordinary callable, retained until the promised callback interval ends; callback argument owners are borrowed views retained through callback return. nil skips only the public completion call; the internal terminal callback still retires the request.
 -- @param argument_owner Input traced argument-owner graph retained through internal terminal completion and any public after_work callback return.

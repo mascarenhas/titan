@@ -1,0 +1,7 @@
+-- Linked into the native test executable; no provider or Lua shim is installed.
+counter: integer = 41
+
+function increment(amount: integer): integer
+  counter = counter + amount
+  return counter
+end

@@ -29,6 +29,7 @@ TITAN_TEST_MODULES := async.test_support \
 	io.tests \
 	iteration.tests \
 	json.tests \
+	lua.preload_fixture \
 	lua.test_support \
 	lua.tests \
 	math.tests \
@@ -136,15 +137,23 @@ TITAN_TEST_SOURCES_json.tests := spec/stdlib/titan/json/tests/tests.titan \
 	spec/stdlib/titan/json/tests/parser_test.titan
 TITAN_TEST_IMPORTS_json.tests :=
 
+TITAN_TEST_SOURCES_lua.preload_fixture := spec/stdlib/titan/lua/preload_fixture.titan
+TITAN_TEST_IMPORTS_lua.preload_fixture :=
+
 TITAN_TEST_SOURCES_lua.test_support := spec/stdlib/titan/lua/test_support.titan
 TITAN_TEST_IMPORTS_lua.test_support := support.runtime
 
 TITAN_TEST_SOURCES_lua.tests := spec/stdlib/titan/lua/tests/tests.titan \
 	spec/stdlib/titan/lua/tests/core_test.titan \
 	spec/stdlib/titan/lua/tests/dofile_test.titan \
+	spec/stdlib/titan/lua/tests/independent_state_async_test.titan \
+	spec/stdlib/titan/lua/tests/independent_state_preload_test.titan \
+	spec/stdlib/titan/lua/tests/independent_state_reader_test.titan \
+	spec/stdlib/titan/lua/tests/independent_state_test.titan \
 	spec/stdlib/titan/lua/tests/require_test.titan \
 	spec/stdlib/titan/lua/tests/source_require_test.titan
-TITAN_TEST_IMPORTS_lua.tests := lua.test_support support.async support.common support.runtime
+TITAN_TEST_IMPORTS_lua.tests := lua.preload_fixture lua.test_support support.async support.common support.runtime
+TITAN_TEST_FOREIGN_lua.tests := 1
 
 TITAN_TEST_SOURCES_math.tests := spec/stdlib/titan/math/tests.titan
 TITAN_TEST_IMPORTS_math.tests :=
@@ -288,7 +297,7 @@ TITAN_TEST_C_INPUTS_async.tests = $(TITAN_TEST_BUILD_DIR)/async_foreign_work.h \
 	spec/stdlib/titan/async/tests/async_stack_probe.h
 TITAN_TEST_C_INPUTS_uv.runtime_tests = $(TITAN_TEST_BUILD_DIR)/uv_stdio_probe.h
 TITAN_TEST_C_INPUTS_uv.public_tests = $(TITAN_TEST_BUILD_DIR)/uv_coverage_threads.h $(TITAN_TEST_BUILD_DIR)/uv_coverage_pty.h
-TITAN_TEST_C_INPUTS_lua.tests = $(TITAN_TEST_BUILD_DIR)/uv_stdio_probe.h
+TITAN_TEST_C_INPUTS_lua.tests = $(TITAN_TEST_BUILD_DIR)/uv_stdio_probe.h $(TITAN_TEST_BUILD_DIR)/async_foreign_work.h
 
 TITAN_TEST_SOURCES_websocket.tests := spec/stdlib/titan/websocket/tests/tests.titan \
 	spec/stdlib/titan/websocket/tests/raw_peer.titan \

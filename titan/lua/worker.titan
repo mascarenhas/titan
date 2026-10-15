@@ -1,0 +1,178 @@
+-- Independent-state callbacks are raw C entries. Their Lua API calls address
+-- only the exclusively owned remote state, including any Titan modules that
+-- it loads. The worker never enters or inspects the caller's Lua/Titan heap.
+foreign import "lua.h"
+foreign import "lauxlib.h"
+foreign import "lualib.h"
+foreign import "stdint.h"
+foreign import "stdlib.h"
+foreign import "string.h"
+foreign import "native.h"
+
+foreign function lua_state_open_libraries(state: *lua_State): int
+  local initialization = ffi.lua_touserdata(state, 1) as foreign *titan_lua_open
+  ffi.luaL_openselectedlibs(state, ~0, 0)
+  if ffi.lua_checkstack(state, 3) == 0 then
+    return ffi.luaL_error(state, "cannot reserve independent Lua preload stack")
+  end
+  ffi.luaL_getsubtable(state, ffi.LUA_REGISTRYINDEX, ffi.LUA_PRELOAD_TABLE)
+  for index = 0, initialization.count - 1 do
+    local entry = initialization.preloads[index]
+    ffi.lua_pushlstring(state, entry.name, entry.length)
+    ffi.lua_pushcclosure(state, entry.loader, 0)
+    ffi.lua_rawset(state, -3)
+  end
+  return 0
+end
+
+-- luaL_openlibs can allocate or raise, so even initialization must have a
+-- protected entry in the new state rather than relying on the caller's jump
+-- target. A failed initialization leaves its error on the remote stack.
+foreign function lua_state_open(initialization: *titan_lua_open): int
+  local state = initialization.state
+  if ffi.lua_checkstack(state, 2) == 0 then return ffi.LUA_ERRMEM end
+  ffi.lua_pushcclosure(state, lua_state_open_libraries, 0)
+  ffi.lua_pushlightuserdata(state, initialization)
+  return ffi.lua_pcallk(state, 1, 0, 0, 0 as foreign lua_KContext, nil)
+end
+
+foreign function lua_state_error_message(state: *lua_State): int
+  ffi.luaL_tolstring(state, 1, nil)
+  return 1
+end
+
+-- This callback contains every remote allocation and error-capable operation.
+-- Returning the complete result run leaves strings rooted in the remote stack
+-- until the caller copies them into its own heap and restores that stack.
+foreign function lua_state_execute(state: *lua_State): int
+  local call = ffi.lua_touserdata(state, 1) as foreign *titan_lua_call
+  ffi.lua_settop(state, 0)
+  if ffi.lua_checkstack(state, call.nargs + 1) == 0 then
+    return ffi.luaL_error(state, "cannot reserve independent Lua argument stack")
+  end
+  local status = ffi.luaL_loadbufferx(
+    state, call.chunk, call.length, call.name, nil)
+  if status ~= ffi.LUA_OK then return ffi.lua_error(state) end
+
+  for index = 0, call.nargs - 1 do
+    local argument = call.args[index]
+    if argument.kind == ffi.TITAN_LUA_NIL then
+      ffi.lua_pushnil(state)
+    elseif argument.kind == ffi.TITAN_LUA_BOOLEAN then
+      ffi.lua_pushboolean(state, argument.integer as foreign int)
+    elseif argument.kind == ffi.TITAN_LUA_INTEGER then
+      ffi.lua_pushinteger(state, argument.integer)
+    elseif argument.kind == ffi.TITAN_LUA_FLOAT then
+      ffi.lua_pushnumber(state, argument.number)
+    elseif argument.kind == ffi.TITAN_LUA_STRING then
+      ffi.lua_pushlstring(state, argument.bytes, argument.length)
+    elseif argument.kind == ffi.TITAN_LUA_STATE then
+      ffi.lua_pushlightuserdata(state, argument.state)
+    elseif argument.kind == ffi.TITAN_LUA_FUNCTION then
+      ffi.lua_pushcclosure(state, argument.function, 0)
+    elseif argument.kind == ffi.TITAN_LUA_POINTER then
+      ffi.lua_pushlightuserdata(state, argument.pointer)
+    else
+      return ffi.luaL_error(state, "invalid independent Lua argument kind")
+    end
+  end
+
+  ffi.lua_callk(state, call.nargs, ffi.LUA_MULTRET,
+    0 as foreign lua_KContext, nil)
+  local count = ffi.lua_gettop(state)
+  if count > 0 then
+    if count as foreign size_t > ffi.SIZE_MAX / foreign titan_lua_value.sizeof then
+      return ffi.luaL_error(state, "independent Lua results are too large")
+    end
+    call.results = ffi.malloc(
+      (count as foreign size_t) * foreign titan_lua_value.sizeof)
+    if call.results == nil then
+      return ffi.luaL_error(state, "cannot allocate independent Lua results")
+    end
+  end
+  if ffi.lua_checkstack(state, 1) == 0 then
+    return ffi.luaL_error(state, "cannot reserve independent Lua result stack")
+  end
+
+  for index = 0, count - 1 do
+    local position = index + 1
+    local kind = ffi.lua_type(state, position)
+    if kind == ffi.LUA_TNIL then
+      call.results[index].kind = ffi.TITAN_LUA_NIL
+    elseif kind == ffi.LUA_TBOOLEAN then
+      call.results[index].kind = ffi.TITAN_LUA_BOOLEAN
+      call.results[index].integer = ffi.lua_toboolean(state, position)
+        as foreign lua_Integer
+    elseif kind == ffi.LUA_TNUMBER then
+      if ffi.lua_isinteger(state, position) ~= 0 then
+        call.results[index].kind = ffi.TITAN_LUA_INTEGER
+        call.results[index].integer = ffi.lua_tointegerx(state, position, nil)
+      else
+        call.results[index].kind = ffi.TITAN_LUA_FLOAT
+        call.results[index].number = ffi.lua_tonumberx(state, position, nil)
+      end
+    elseif kind == ffi.LUA_TSTRING then
+      call.results[index].kind = ffi.TITAN_LUA_STRING
+      local length = 0 as foreign size_t
+      call.results[index].bytes = ffi.lua_tolstring(state, position, length)
+      call.results[index].length = length
+    elseif kind == ffi.LUA_TTHREAD then
+      call.results[index].kind = ffi.TITAN_LUA_STATE
+      call.results[index].state = ffi.lua_tothread(state, position)
+    elseif kind == ffi.LUA_TLIGHTUSERDATA then
+      call.results[index].kind = ffi.TITAN_LUA_POINTER
+      call.results[index].pointer = ffi.lua_touserdata(state, position)
+    elseif kind == ffi.LUA_TUSERDATA then
+      call.results[index].kind = ffi.TITAN_LUA_POINTER
+      call.results[index].pointer = ffi.lua_touserdata(state, position)
+    elseif kind == ffi.LUA_TFUNCTION then
+      local callback = ffi.lua_tocfunction(state, position)
+      if callback == nil then
+        return ffi.luaL_error(state,
+          "cannot transfer a Lua function from an independent state")
+      end
+      if ffi.lua_getupvalue(state, position, 1) ~= nil then
+        return ffi.luaL_error(state,
+          "cannot transfer a C function with upvalues from an independent state")
+      end
+      call.results[index].kind = ffi.TITAN_LUA_FUNCTION
+      call.results[index].function = callback
+    else
+      return ffi.luaL_error(state,
+        "cannot transfer Lua %s from an independent state",
+        ffi.lua_typename(state, kind))
+    end
+  end
+  call.nresults = count
+  return count
+end
+
+foreign function lua_state_run(argument: *void)
+  local call = argument as foreign *titan_lua_call
+  local state = call.state
+  call.nresults = 0
+  call.message = nil
+  call.message_length = 0 as foreign size_t
+  if ffi.lua_checkstack(state, 3) == 0 then
+    call.status = ffi.LUA_ERRMEM
+    call.message = "cannot reserve independent Lua call stack"
+    call.message_length = ffi.strlen(call.message)
+    return
+  end
+
+  local top = ffi.lua_gettop(state)
+  ffi.lua_pushcclosure(state, lua_state_error_message, 0)
+  ffi.lua_pushcclosure(state, lua_state_execute, 0)
+  ffi.lua_pushlightuserdata(state, call)
+  call.status = ffi.lua_pcallk(state, 1, ffi.LUA_MULTRET, top + 1,
+    0 as foreign lua_KContext, nil)
+  if call.status ~= ffi.LUA_OK then
+    local length = 0 as foreign size_t
+    call.message = ffi.lua_tolstring(state, -1, length)
+    call.message_length = length
+    if call.message == nil then
+      call.message = "independent Lua call failed without a string error"
+      call.message_length = ffi.strlen(call.message)
+    end
+  end
+end
