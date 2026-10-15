@@ -12,8 +12,8 @@ local version = require "titan-compiler.version"
 local definitions = require "titan-compiler.cdefinitioncache"
 local csemantics = require "titan-compiler.csemantics"
 
-cdriver.HEADER_CACHE_VERSION = 6
-local HEADER_CACHE_KIND = "c-header-v6"
+cdriver.HEADER_CACHE_VERSION = 7
+local HEADER_CACHE_KIND = "c-header-v7"
 
 local SEP = package.config:sub(1, 1)
 local default_io = compiler_io.new_sync()

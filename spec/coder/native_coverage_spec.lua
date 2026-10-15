@@ -192,6 +192,28 @@ function test_mixed(_context: test.Context) test.assert(true) end
         assert.equal(0, line_count(report, workspace .. "/calc.titan", 5), report)
     end)
 
+    it("keeps coverage objects, generated test runners and default reports inside the output tree", function()
+        available()
+        local output_root = workspace .. "/build output/nested"
+        local options = { "--test", "--coverage", "--coverage-backend", BACKEND,
+            "--coverage-gcov", GCOV, "--coverage-root", workspace, "-o", output_root }
+        local ok, output = compile(options)
+        assert.truthy(ok, output)
+        assert.truthy(lfs.attributes(output_root .. "/.coverage/calc.gcno"))
+        assert.truthy(lfs.attributes(output_root .. "/.coverage/checks__test_runner.c"))
+        assert.truthy(lfs.attributes(output_root .. "/checks__test_entrypoint.c"))
+        assert.is_nil(lfs.attributes(workspace .. "/.coverage"))
+        assert.is_nil(lfs.attributes(workspace .. "/checks__test_entrypoint.c"))
+        local program = platform.windows and
+            assert(driver.windows_program_paths("checks", nil, nil, output_root)).executable or
+            output_root .. "/checks"
+        ok, output = run_program({ program })
+        assert.truthy(ok, output)
+        local report = read(output_root .. "/.coverage/report/coverage.gcov")
+        assert.is_true((line_count(report, workspace .. "/calc.titan", 2) or 0) > 0, report)
+        assert.truthy(lfs.attributes(output_root .. "/.coverage/calc.gcda"))
+    end)
+
     it("resets previous counters on every direct execution", function()
         available()
         local ok, output = compile(coverage_options("--coverage-module", "calc"))

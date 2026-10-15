@@ -69,6 +69,7 @@ done < <(find . \
     -path './.git' -prune -o \
     -path './.lua' -prune -o \
     -path './.titan-tests' -prune -o \
+    -path './out' -prune -o \
     -type f \( \
         -name '*__test_support.titan' -o \
         -name '*__test_support.c' -o -name '*__test_support.o' -o \
@@ -100,4 +101,4 @@ for fixture in ./test_runner_*; do
     if [[ -e $fixture || -L $fixture ]]; then rm -rf -- "$fixture"; fi
 done
 
-if ! $keep_output; then rm -rf -- .titan-tests; fi
+if ! $keep_output; then rm -rf -- .titan-tests out/tests; fi

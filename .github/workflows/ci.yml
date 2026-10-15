@@ -493,7 +493,7 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: titan-native-line-coverage
-          path: .titan-coverage
+          path: out/coverage
           include-hidden-files: true
           if-no-files-found: error
           retention-days: 7
@@ -514,7 +514,7 @@ jobs:
         with:
           disable_search: true
           fail_ci_if_error: true
-          files: .titan-coverage/report/coverage.info
+          files: out/coverage/report/coverage.info
           flags: native-stdlib
           name: native-stdlib-lines
           use_oidc: true

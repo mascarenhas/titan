@@ -9,7 +9,7 @@ curl, unzip, and ordinary Unix file utilities. The [Titan Lua fork](https://gith
 is a Git submodule at `lua-5.5.1/`, pinned by the Titan checkout's submodule
 commit. Initialize it after cloning or updating the checkout. The Unix build
 compiles directly in that submodule. Windows copies the source and installation Makefiles, `.c`, `.h`, `lua.hpp`,
-and manual pages into a dedicated `windows-build/` tree, then delegates
+and manual pages into a dedicated `out/windows/` tree, then delegates
 compilation to the fork's `mingw` target and installation to its `install`
 target. Both receive `TITAN_LIBRARY_VERSION` and `PREFIX`. The fork installer
 also supports native Windows GNU Make with `cmd.exe` and no Unix utilities.
@@ -33,7 +33,7 @@ Then, from ordinary Windows PowerShell, run the separate native-launch gate
 where local script execution policy permits it:
 
 ```powershell
-powershell.exe -NoProfile -File spec/support/check_windows_lua.ps1 -BuildRoot C:\path\to\checkout\windows-build-validation
+powershell.exe -NoProfile -File spec/support/check_windows_lua.ps1 -BuildRoot C:\path\to\checkout\out\windows-validation
 ```
 
 `-File` is subject to PowerShell execution policy. The gate does not change that
@@ -308,7 +308,7 @@ or that usable certificate trust roots were loaded. These checks do not establis
 Titan stdlib behavior, network interoperability, or a Windows CA-store policy.
 
 After that gate, run the exact EXE path recorded in
-`windows-build-validation/native-check/native-probe-path.txt` from ordinary PowerShell
+`out/windows-validation/native-check/native-probe-path.txt` from ordinary PowerShell
 with the argument in `native-config-path.txt`, a restricted process PATH, and
 another CWD as well. A native compile,
 import-closure audit, and successful native behavior checks are required before

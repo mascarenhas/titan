@@ -524,7 +524,19 @@ local function makefile_words(name, filename)
     end
     assert.truthy(found, "missing Makefile variable " .. name)
     assert.falsy(collecting, "unterminated Makefile variable " .. name)
-    return values
+    local result = {}
+    local prefixing = false
+    for _, word in ipairs(values) do
+        if word == "$(addprefix" then
+            prefixing = true
+        elseif prefixing then
+            word = word:gsub("^%$%(TITAN_OUTPUT_DIR%)/,", ""):gsub("%)$", "")
+            result[#result + 1] = "out/" .. word
+        else
+            result[#result + 1] = word:gsub("%$%(TITAN_OUTPUT_DIR%)", "out")
+        end
+    end
+    return result
 end
 
 local function stdlib_source_files()
@@ -631,7 +643,7 @@ end
 -- the installed canonical provider and SDK remain read-only.
 local windows_object_root
 local function stdlib_artifact(relative)
-    if not platform.windows then return relative end
+    if not platform.windows then return "out/" .. relative end
     if not windows_object_root then
         local root = make_temp_dir()
         local compiled, compile_error = xpcall(function()
@@ -659,7 +671,7 @@ local function stdlib_artifact(relative)
                 "TITAN_EXTRA_CPPFLAGS=" .. cppflags,
                 paths.join(prefix, "bin", "lua.exe"),
                 paths.join(prefix, "lib/luarocks/rocks-5.5/titan/0.6.0-1/bin/titanc"),
-                "--source-first", "-c", "--tree", root,
+                "--output", root .. "/out", "--source-first", "-c", "--tree", root,
                 "titan.uv", "titan.async", "titan.timer", "titan.fs", "titan.net", "titan.os", "titan.sqlite3",
             }
             local ok, output = run_argv(argv)
@@ -671,7 +683,7 @@ local function stdlib_artifact(relative)
         end
         windows_object_root = root
     end
-    return paths.join(windows_object_root, relative)
+    return paths.join(windows_object_root, "out", relative)
 end
 
 -- GNU Make executes recipe lines containing $(MAKE) even under -n. Keep these
@@ -917,13 +929,13 @@ esac
             assert.truthy(ok, production)
             assert.matches("production\n-O2 -Wall -Wextra\n\n-O2\n\n-O2 -Wall -Wextra\n\n-O2\n\n", production, 1, true)
             assert.matches("/.windows-sdk\n", production, 1, true)
-            assert.matches("/windows-build\n", production, 1, true)
+            assert.matches("/out/windows\n", production, 1, true)
             for _, selection in ipairs({ "TITAN_BUILD_PROFILE=validation", "MAKECMDGOALS=compiler-check", "MAKECMDGOALS=titan-stdlib-test", "MAKECMDGOALS=rock-test" }) do
                 local valid, validation = query(selection)
                 assert.truthy(valid, validation)
                 assert.matches("validation\n-O2 -fno-lto -Wall -Wextra\n-O2 -fno-lto\n-O0 -fno-lto\n-O0 -fno-lto\n-O0 -fno-lto -Wall -Wextra\n-O0 -fno-lto\n-O2 -fno-lto\n-O2 -fno-lto\n", validation, 1, true)
                 assert.matches("/.windows-sdk-validation\n", validation, 1, true)
-                assert.matches("/windows-build-validation\n", validation, 1, true)
+                assert.matches("/out/windows-validation\n", validation, 1, true)
             end
             local overridden, explicit = query("TITAN_BUILD_PROFILE=validation", "LUA_CFLAGS=-O1 -DUSER=1", "RUNTIME_LDFLAGS=-Wl,caller", "PREFIX=/caller/sdk", "WINDOWS_BUILD_ROOT=/caller/build")
             assert.truthy(overridden, explicit)
@@ -984,7 +996,7 @@ esac
                 if node._tag == "Ast.TopLevelForeignFunc" then
                     local stem = source:match("^(titan/[^/]+/)[^/]+[.]titan$")
                     stem = stem and (stem .. module) or ("titan/" .. module)
-                    expected[stem .. ".titan.h"] = true
+                    expected["out/" .. stem .. ".titan.h"] = true
                 end
             end
         end
@@ -1011,10 +1023,11 @@ esac
                 http = true, sqlite3 = true }
             local outputs, objects = {}, {}
             local compiler = { "#!/bin/sh", "set -eu",
+                'test "$1 $2" = "--output out"', 'shift 2',
                 'test "$1 $2 $3 $4" = "--source-first --incremental -j1 -c"',
                 'module="${5#titan.}"', 'case "$module" in' }
             for _, module in ipairs(STDLIB_MODULES) do
-                local stem = "titan/" .. module ..
+                local stem = "out/titan/" .. module ..
                     (folders[module] and "/" .. module or "")
                 objects[module] = stem .. ".o"
                 local files = { stem .. ".o", stem .. ".c", stem .. ".ffi.h" }
@@ -1022,12 +1035,13 @@ esac
                 for _, file in ipairs(files) do outputs[#outputs + 1] = file end
                 compiler[#compiler + 1] = module .. ")"
                 for _, dependency in ipairs(makefile_words("STDLIB_IMPORTS_" .. module)) do
-                    local depstem = "titan/" .. dependency ..
+                    local depstem = "out/titan/" .. dependency ..
                         (folders[dependency] and "/" .. dependency or "")
                     compiler[#compiler + 1] = "test -f " .. quote(depstem .. ".o")
                     compiler[#compiler + 1] = "test -f " .. quote(depstem .. ".ffi.h")
                 end
                 for _, file in ipairs(files) do
+                    compiler[#compiler + 1] = "mkdir -p " .. quote(file:match("^(.*)/"))
                     compiler[#compiler + 1] = "printf 'generated\\n' > " .. quote(file)
                 end
                 compiler[#compiler + 1] = ";;"
@@ -1092,9 +1106,9 @@ esac
                 fs = true, net = true, ssl = true, http = true, websocket = true, lua = true,
                 reflect = true, sqlite3 = true, json = true }, build())
             assert.same({}, build())
-            assert(os.remove(root .. "/titan/test.ffi.h"))
+            assert(os.remove(root .. "/out/titan/test.ffi.h"))
             assert.same({ test = true }, build())
-            assert(os.remove(root .. "/titan/test.c"))
+            assert(os.remove(root .. "/out/titan/test.c"))
             assert.same({ test = true }, build())
             assert(lfs.touch(root .. "/titan/sqlite3/native.h", os.time(), os.time()))
             -- Ensure the changed header is strictly newer at Make's precision.
@@ -1148,16 +1162,19 @@ esac
 set -eu
 test "$TITAN_RUNTIME_PREBUILT" = 1
 test "$TITAN_ROCKS_ROOT" = "$PWD/prefix"
+test "$1 $2" = "--output out"
+shift 2
+mkdir -p out/titan
 case "$*" in
   "--source-first --incremental -j1 -c titan.math")
     printf 'compile\n' >> build.log
-    for output in titan/math.o titan/math.c titan/math.ffi.h; do
+    for output in out/titan/math.o out/titan/math.c out/titan/math.ffi.h; do
       printf 'generated\n' > "$output"
     done
     ;;
   "--source-first --incremental titan.math -X")
     printf 'link\n' >> build.log
-    for output in titan.so titan.a titan/math.lua; do
+    for output in out/titan.so out/titan.a out/titan/math.lua; do
       printf 'provider\n' > "$output"
     done
     ;;
@@ -1183,8 +1200,8 @@ esac
                 "OPENSSL_PKG_CONFIG=true",
                 "STDLIB_MODULES=math", "STDLIB_ROOTS=titan.math",
                 "STDLIB_TITAN_SOURCES=titan/math.titan",
-                "STDLIB_GENERATED_FOREIGN_HEADERS=titan/math.ffi.h",
-                "STDLIB_SHIMS=titan/math.lua", "STDLIB_C_INPUTS_math=prepared",
+                "STDLIB_GENERATED_FOREIGN_HEADERS=out/titan/math.ffi.h",
+                "STDLIB_SHIMS=out/titan/math.lua", "STDLIB_C_INPUTS_math=prepared",
                 "STDLIB_COMPLETION_STAMP=build.complete", "STDLIB_LICENSES=prepared",
                 "STDLIB_EXTRA_OBJECTS=",
                 "TITAN_STDLIB_DIAGNOSTIC_SNAPSHOT=",
@@ -1202,7 +1219,7 @@ esac
             assert.equal("compile\nlink\n", build("stdlib"))
             local old = os.time() - 30
             assert(lfs.touch(root .. "/titan/math.titan", old + 20, old + 20))
-            for _, path in ipairs({ "titan.so", "titan.a", "titan/math.lua" }) do
+            for _, path in ipairs({ "out/titan.so", "out/titan.a", "out/titan/math.lua" }) do
                 assert(lfs.touch(root .. "/" .. path, old + 10, old + 10))
             end
             -- Publication must copy the completed image even when its sources
@@ -1238,9 +1255,9 @@ esac
                 { "native/include/uv/version.h", "include/uv/version.h" },
                 { "native/llhttp.h", "include/llhttp.h" },
                 { "native/sqlite3.h", "include/sqlite3.h" },
-                { "titan.so", "lib/titan/0.6/titan.so" },
-                { "titan.a", "lib/titan/0.6/titan.a" },
-                { "titan/math.lua", "share/lua/5.5/titan/math.lua" },
+                { "out/titan.so", "lib/titan/0.6/titan.so" },
+                { "out/titan.a", "lib/titan/0.6/titan.a" },
+                { "out/titan/math.lua", "share/lua/5.5/titan/math.lua" },
             }) do
                 assert.equal(read_file(root .. "/" .. copy[1]),
                     read_file(installation .. "/" .. copy[2]), copy[2])
@@ -1249,11 +1266,11 @@ esac
                         lfs.attributes(installation .. "/" .. copy[2], "modification"), copy[2])
                 end
             end
-            assert.equal(read_file(root .. "/titan.so"),
+            assert.equal(read_file(root .. "/out/titan.so"),
                 read_file(prefix .. "/lib/titan/0.6/titan.so"))
-            assert.equal(read_file(root .. "/titan.a"),
+            assert.equal(read_file(root .. "/out/titan.a"),
                 read_file(prefix .. "/lib/titan/0.6/titan.a"))
-            assert.equal(read_file(root .. "/titan/math.lua"),
+            assert.equal(read_file(root .. "/out/titan/math.lua"),
                 read_file(prefix .. "/share/lua/5.5/titan/math.lua"))
             assert.is_nil(lfs.symlinkattributes(
                 prefix .. "/share/titan/0.6/src/titan/test.titan"))
@@ -1266,11 +1283,11 @@ esac
             local installed_time = lfs.attributes(
                 installation .. "/lib/titan/0.6/titan.so", "modification")
             assert.equal("", build("install", table.unpack(staged_arguments)))
-            assert.equal(read_file(root .. "/titan.so"),
+            assert.equal(read_file(root .. "/out/titan.so"),
                 read_file(private .. "/titan-sdk/lib/titan/0.6/titan.so"))
             assert.equal(read_file(prefix .. "/lib/liblua.a"),
                 read_file(private .. "/titan-sdk/lib/liblua.a"))
-            assert.equal(read_file(root .. "/titan/math.lua"),
+            assert.equal(read_file(root .. "/out/titan/math.lua"),
                 read_file(private .. "/lua/titan/math.lua"))
             assert.equal(read_file(root .. "/scripts/titan_install.lua"),
                 read_file(private .. "/installer/titan_install.lua"))
@@ -1280,8 +1297,8 @@ esac
             assert.equal(installed_time, lfs.attributes(
                 installation .. "/lib/titan/0.6/titan.so", "modification"))
             local outputs = {
-                "titan/math.o", "titan/math.c", "titan/math.ffi.h",
-                "titan.so", "titan.a", "titan/math.lua", "build.complete",
+                "out/titan/math.o", "out/titan/math.c", "out/titan/math.ffi.h",
+                "out/titan.so", "out/titan.a", "out/titan/math.lua", "build.complete",
             }
             local function age_build()
                 for _, path in ipairs(inputs) do
@@ -1316,7 +1333,7 @@ esac
             age_build()
             assert(lfs.touch(prefix .. "/lib/titan/0.6/libtitan.a", old + 2, old + 2))
             assert.equal("link\n", build("stdlib"))
-            assert.equal(old + 1, lfs.attributes(root .. "/titan/math.o", "modification"))
+            assert.equal(old + 1, lfs.attributes(root .. "/out/titan/math.o", "modification"))
             assert.equal("", build("stdlib"))
             age_build()
             assert(os.remove(prefix .. "/lib/luarocks/rocks-5.5/titan/0.6.0-1/bin/titanc"))
@@ -1460,31 +1477,32 @@ esac
             end
             write_file(root .. "/fake-titanc", [[#!/bin/sh
 set -eu
+test "$1 $2" = "--output ."
 compile=false
 for arg in "$@"; do
     if test "$arg" = -c; then compile=true; fi
     case "$arg" in support.*|test.tests) module="$arg" ;; esac
 done
 if ! $compile; then
-    test -f ../spec/stdlib/titan/test/tests.o
+    test -f test/tests.o
     mkdir -p test
     printf 'fixture executable\n' > test/tests
-    printf 'link\n' >> ../build.log
+    printf 'link\n' >> ../../build.log
     exit 0
 fi
 case "$module" in
-  support.command) test -f ../spec/stdlib/titan/support/common.o ;;
+  support.command) test -f support/common.o ;;
   test.tests) for name in common command runtime; do
-      test -f "../spec/stdlib/titan/support/$name.o"
+      test -f "support/$name.o"
     done ;;
 esac
-stem="../spec/stdlib/titan/$(printf '%s' "$module" | tr . /)"
+stem="$(printf '%s' "$module" | tr . /)"
 mkdir -p "${stem%/*}"
 for suffix in o c ffi.h; do printf 'fixture output\n' > "$stem.$suffix"; done
-printf '%s\n' "$module" >> ../build.log
+printf '%s\n' "$module" >> ../../build.log
 ]])
             local argv = { "make", "--no-print-directory", "-s", "-j4", "-C", root,
-                "MAKE=false", "TEST_LUA=true", "TEST_TITANC=sh ../fake-titanc",
+                "MAKE=false", "TEST_LUA=true", "TEST_TITANC=sh ../../fake-titanc",
                 "TITAN_TEST_INSTALL_ROOT=" .. root,
                 "TITAN_TEST_COMPILER_PREREQS=prepared",
                 "TITAN_TEST_PROVIDER_PREREQS=prepared", "TITAN_TEST_FIXTURE_OUTPUTS=prepared",
@@ -1495,7 +1513,7 @@ printf '%s\n' "$module" >> ../build.log
                 local succeeded, message = run_argv(argv)
                 assert.truthy(succeeded, message)
                 assert.equal("file", lfs.attributes(
-                    root .. "/.titan-tests/test/tests", "mode"),
+                    root .. "/out/tests/test/tests", "mode"),
                     "successful native test build omitted its executable")
                 local result = {}
                 for name in read_file(root .. "/build.log"):gmatch("[^\n]+") do
@@ -1511,16 +1529,16 @@ printf '%s\n' "$module" >> ../build.log
             assert.same({}, build())
             local old = os.time() - 30
             assert(lfs.touch(root .. "/prepared", old, old))
-            assert(lfs.touch(root .. "/.titan-tests/build.config", old, old))
+            assert(lfs.touch(root .. "/out/tests/build.config", old, old))
             for _, path in ipairs(sources) do
                 assert(lfs.touch(root .. "/" .. path, old, old))
                 for _, suffix in ipairs({ "o", "c", "ffi.h" }) do
-                    assert(lfs.touch(root .. "/" .. path:gsub("titan$", suffix), old + 2, old + 2))
+                    assert(lfs.touch(root .. "/" .. path:gsub("^spec/stdlib/titan/", "out/tests/"):gsub("titan$", suffix), old + 2, old + 2))
                 end
             end
             assert.is_nil(lfs.symlinkattributes(
-                root .. "/.titan-tests/titan/test__test_support.o"))
-            assert(lfs.touch(root .. "/.titan-tests/test/tests", old + 3, old + 3))
+                root .. "/out/tests/titan/test__test_support.o"))
+            assert(lfs.touch(root .. "/out/tests/test/tests", old + 3, old + 3))
             assert(lfs.touch(root .. "/spec/stdlib/titan/support/common.titan", old + 4, old + 4))
             assert.same({ ["support.common"] = true, ["support.command"] = true,
                 ["test.tests"] = true, link = true }, build())
@@ -1534,16 +1552,16 @@ printf '%s\n' "$module" >> ../build.log
             -- it, so equal replacement-object mtimes must still trigger link.
             local clock = root .. "/coarse-clock"
             ok, output = run_argv({ "touch", "-r",
-                root .. "/.titan-tests/test/tests", clock })
+                root .. "/out/tests/test/tests", clock })
             assert.truthy(ok, output)
             local coarse_outputs = {
-                root .. "/.titan-tests/build.config",
-                root .. "/.titan-tests/test/tests",
+                root .. "/out/tests/build.config",
+                root .. "/out/tests/test/tests",
             }
             for _, suffix in ipairs({ "o", "c", "ffi.h" }) do
                 for _, path in ipairs(sources) do
                     coarse_outputs[#coarse_outputs + 1] = root .. "/" ..
-                        path:gsub("titan$", suffix)
+                        path:gsub("^spec/stdlib/titan/", "out/tests/"):gsub("titan$", suffix)
                 end
             end
             local quoted_outputs = {}
@@ -1637,14 +1655,13 @@ done
                 "titan/uv/callback.h",
                 "titan/uv/data_native.h",
                 "titan/uv/fd-native.h",
-                "titan/uv/fs-native-proposal.h",
                 "titan/uv/network-native.h",
                 "titan/uv/platform-constants.h",
                 "titan/uv/sync_storage.h",
                 "titan/uv/thread-native.h",
                 "titan/uv/utility_bits.h",
                 "titan/uv/version-native.h",
-                "titan/uv/work-native-proposal.h",
+                "titan/uv/work-data.h",
             }, makefile_words("UV_TITAN_HEADERS"))
         end)
 
@@ -2025,7 +2042,7 @@ int main(void) {
                     assert.falsy(body:find(forbidden, 1, true), body)
                 end
                 if entry.name == "work_worker_callback" then
-                    assert.truthy(body:find("local storage = request as foreign *titan_issue194_work_storage", 1, true))
+                    assert.truthy(body:find("local storage = request.data as foreign *titan_uv_work_data", 1, true))
                     assert.truthy(body:find("worker(storage.arg)", 1, true))
                     for _, forbidden in ipairs({"ffi.titan_record_field", "ffi.uv_req_get_data", "ffi.uv_loop_get_data"}) do
                         assert.falsy(body:find(forbidden, 1, true), body)
@@ -2220,7 +2237,9 @@ int main(void) {
         function()
             assert.same(STDLIB_MODULES, makefile_words("STDLIB_MODULES"))
             assert.same(STDLIB_ROOTS, makefile_words("STDLIB_ROOTS"))
-            assert.same(STDLIB_SHIMS, makefile_words("STDLIB_SHIMS"))
+            local shims = {}
+            for _, shim in ipairs(STDLIB_SHIMS) do shims[#shims + 1] = "out/" .. shim end
+            assert.same(shims, makefile_words("STDLIB_SHIMS"))
             assert.same({ "titan/string/format_native.h" },
                 makefile_words("STRING_TITAN_HEADERS"))
             assert.same({
@@ -2246,7 +2265,7 @@ int main(void) {
                 "LICENSES/openssl-LICENSE", "LICENSES/go-LICENSE",
                 "LICENSES/libbacktrace-LICENSE",
             }, makefile_words("STDLIB_LICENSES"))
-            assert.same({ STDLIB_CONTAINER },
+            assert.same({ "out/" .. STDLIB_CONTAINER },
                 makefile_words("STDLIB_CONTAINER"))
 
             assert.same({
@@ -2328,14 +2347,14 @@ int main(void) {
                 stem = stem .. "/" .. module
             end
             assert.truthy(file_exists(stem .. ".titan"), stem)
-            expected[#expected + 1] = stem .. ".ffi.h"
+            expected[#expected + 1] = "out/" .. stem .. ".ffi.h"
         end
         for _, header in ipairs({
             "titan/coroutine.titan.h",
             "titan/uv/uv.titan.h", "titan/http/http.titan.h",
             "titan/sqlite3/sqlite3.titan.h",
         }) do
-            expected[#expected + 1] = header
+            expected[#expected + 1] = "out/" .. header
         end
         local actual = {}
         for header in output:gmatch("[^\r\n]+") do
@@ -2911,7 +2930,7 @@ int main(void) {
             for _, contract in ipairs({
                 "LUA_SOURCE_READY := $(LUA_DIR)/src/lua.h",
                 "git submodule update --init",
-                "STDLIB_SHIMS := titan/coroutine.lua titan/uv.lua",
+                "STDLIB_SHIMS := $(addprefix $(TITAN_OUTPUT_DIR)/,titan/coroutine.lua titan/uv.lua",
                 'package.cpath="./titan-runtime/bootstrap/?.so;" .. package.cpath',
                 "rm -f $(STDLIB_SHIMS)",
             }) do
@@ -2947,7 +2966,7 @@ int main(void) {
                 "$(STDLIB_EXTRA_OBJECTS)",
                 "STDLIB_RUNTIME_ARCHIVE_PREREQ := $(TITAN_RUNTIME_LIB)",
                 "STDLIB_COMPLETION_STAMP := " ..
-                "titan-runtime/.titan-stdlib-complete",
+                "$(TITAN_OUTPUT_DIR)/.titan-stdlib-complete",
                 'rm -f "$$rocks_tree/lib/libtitan.a"',
                 'install -p -m 0644 "$(TITAN_RUNTIME_LIB)" ' ..
                 '"$$version_dir/libtitan.a"',
@@ -4520,7 +4539,7 @@ done
         function()
             local makefile = read_file("Makefile")
             for _, contract in ipairs({
-                "STDLIB_STATIC_ARCHIVE := " .. STDLIB_STATIC_ARCHIVE,
+                "STDLIB_STATIC_ARCHIVE := $(TITAN_OUTPUT_DIR)/" .. STDLIB_STATIC_ARCHIVE,
                 "STDLIB_PROVIDER_OUTPUTS := $(STDLIB_CONTAINER) " ..
                 "$(STDLIB_STATIC_ARCHIVE)",
                 "STDLIB_EXTRA_OBJECTS := $(LTITANLIB_O) " ..
@@ -4538,7 +4557,7 @@ done
                 "TITAN_EXTRA_CFLAGS \\\n\t" ..
                 "TITAN_EXTRA_LDFLAGS TITAN_NO_LINE_DIRECTIVES",
                 "for output in $(STDLIB_PROVIDER_OUTPUTS) $(STDLIB_SHIMS)",
-                "STDLIB_INSTALL_STAGE       ?= $(CURDIR)",
+                "STDLIB_INSTALL_STAGE       ?= $(abspath $(TITAN_OUTPUT_DIR))",
                 "TITAN_STDLIB_DIAGNOSTIC_SNAPSHOT ?=",
                 "install-stdlib: stdlib",
                 "stage=$(call make_shell_quote,$(STDLIB_INSTALL_STAGE))",
@@ -4589,7 +4608,7 @@ done
                 "snapshot",
                 "$(call make_shell_quote,$(strip " ..
                 "$(TITAN_STDLIB_DIAGNOSTIC_SNAPSHOT)))",
-                '"$$stage/titan.so" "$(CURDIR)/titan"',
+                '"$$stage/titan.so" "$$stage/titan"',
                 '"$(TITAN_CANONICAL_SUPPORT_SO)"',
                 '"$(CURDIR)/titan"',
             }) do
@@ -4629,7 +4648,7 @@ done
             assert.truthy(examples_makefile:find(
                 "utils.so and utils.a", 1, true), examples_makefile)
             assert.truthy(examples_makefile:find(
-                "rm -f *.c *.o *.so utils.a artisanal.a sdl_quit.a sdl_demo",
+                "rm -rf ../out/examples",
                 1, true), examples_makefile)
             assert.falsy(examples_makefile:find("*.a", 1, true),
                 examples_makefile)
@@ -5210,7 +5229,7 @@ done
             local native_artifacts = named_step(native_coverage_job,
                 "Retain local reports and collection evidence")
             for _, contract in ipairs({ "if: always()", "actions/upload-artifact@v7",
-                "name: titan-native-line-coverage", "path: .titan-coverage",
+                "name: titan-native-line-coverage", "path: out/coverage",
                 "include-hidden-files: true", "if-no-files-found: error" }) do
                 assert.truthy(native_artifacts:find(contract, 1, true), contract)
             end
@@ -5220,7 +5239,7 @@ done
                 "compiler-stdlib", "./luacov.codecov.out", "compiler")
             assert_codecov_upload(native_coverage_job,
                 "Upload native stdlib line coverage to Codecov",
-                "native-stdlib-lines", ".titan-coverage/report/coverage.info", "native-stdlib")
+                "native-stdlib-lines", "out/coverage/report/coverage.info", "native-stdlib")
             local native_upload = named_step(native_coverage_job,
                 "Upload native stdlib line coverage to Codecov")
             assert.truthy(native_upload:find("if: success()", 1, true), native_upload)

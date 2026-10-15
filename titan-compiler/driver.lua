@@ -887,6 +887,27 @@ function driver.new_resolver_context(options)
     local io_strategy = options.io
     if io_strategy == nil then io_strategy = compiler_io.new_sync() end
     compiler_io.validate(io_strategy, 2)
+    if options.output_root then
+        -- Retain the caller's I/O authority, while keeping checking headers
+        -- and transient probe payloads under the invocation's output folder.
+        -- Persistent probe-cache identities and destinations do not change.
+        local underlying = io_strategy
+        io_strategy = setmetatable({}, { __index = underlying })
+        function io_strategy:tmpname()
+            local reserved, reserve_error = underlying:tmpname()
+            if not reserved then return nil, reserve_error end
+            local relocated = path.join(options.output_root,
+                ".titan-temporary-" .. path.basename(reserved))
+            local removed, remove_error = underlying:unlink(reserved)
+            if not removed then return nil, remove_error end
+            -- The system temporary directory can be on another filesystem or
+            -- Windows drive. Create the reservation at its final destination;
+            -- write_file already stages atomically beside that destination.
+            local written, write_error = underlying:write_file(relocated, "")
+            if not written then return nil, write_error end
+            return relocated
+        end
+    end
     local source_process_trace = options.source_process_trace
     if source_process_trace ~= nil and
        type(source_process_trace) ~= "function" then
@@ -972,6 +993,7 @@ function driver.new_resolver_context(options)
         c_probe_execution_trace = c_probe_execution_trace,
         _source_profile_stack = source_profile_stack,
         extra_ffi_include_dirs = extra_ffi_include_dirs,
+        output_root = options.output_root,
     }
     local initialized, layout_error = driver.initialize_layout(context)
     if not initialized then
@@ -1854,6 +1876,32 @@ function driver.deduplicate_module_names(names)
         end
     end
     return unique
+end
+
+function driver.generated_output_path(filename, output_root)
+    if output_root then return path.join(output_root, filename) end
+    return filename
+end
+
+-- A resolved module's logical path is relative to its selected source root.
+-- Folder modules retain their canonical main's repeated final component.
+-- This also handles absolute/external source roots without '..' escapes.
+function driver.relocate_source_output(modname, source, output_root)
+    if not output_root or source._output_root == output_root then return source end
+    if source.kind ~= "generated" then
+        if not staticmetadata.valid_module_name(modname) then
+            return nil, "invalid logical Titan module name " .. string.format("%q", modname)
+        end
+        local relative = modname:gsub("[.]", "/")
+        if source.kind == "folder" then
+            relative = relative .. "/" .. modname:match("[^.]+$")
+        end
+        source.native_output = path.join(output_root, relative .. ".titan")
+        source.program_output = path.join(output_root, source.program_output or
+            modname:gsub("[.]", "/"))
+    end
+    source._output_root = output_root
+    return source
 end
 
 -- Derive the physical provider for a no-main invocation from the longest
@@ -4939,6 +4987,9 @@ function driver.defaultloader(static_deps, options)
             if candidate.kind == "blocked" then
                 return false, blocked_source_error(modname, candidate)
             end
+            local relocated, relocation_error = driver.relocate_source_output(
+                modname, candidate, options.output_root)
+            if not relocated then return false, relocation_error end
             if options.coverage then
                 local prepared, coverage_error = require("titan-compiler.coverage").source(
                     options.coverage, modname, candidate, forced_source_roots)
@@ -6544,6 +6595,14 @@ local function replay_compile_output(filename, stream)
 end
 
 local function create_compile_log()
+    if driver.OUTPUT_ROOT then
+        local filename, err = driver.sibling_temporary_path(
+            path.join(driver.OUTPUT_ROOT, ".titan-temporary"))
+        if not filename then return nil, err end
+        local wrote, write_error = util.set_file_contents(filename, "")
+        if not wrote then return nil, write_error end
+        return filename
+    end
     return compiler_io.new_sync():tmpname()
 end
 
@@ -7525,6 +7584,20 @@ ensure_output_parent = function(filename)
     local parent = filename:match("^(.*)/[^/]+$")
     if not parent or parent == "" then return true end
     return ensure_directory(parent)
+end
+
+function driver.prepare_output_root(directory)
+    if type(directory) ~= "string" or directory == "" or directory:find("[%z\r\n]") then
+        return nil, "--output requires a nonempty folder path without control characters"
+    end
+    local absolute, absolute_error = absolute_filename(directory)
+    if not absolute then return nil, absolute_error end
+    -- Resolve existing ancestors before lexical joining can collapse '..'
+    -- across a symlink. The destination follows ordinary mkdir -p semantics.
+    local output = physical_absolute_filename(absolute)
+    local ok, err = ensure_directory(output)
+    if not ok then return nil, "cannot create output folder '" .. directory .. "': " .. tostring(err) end
+    return output
 end
 
 function driver.sibling_temporary_path(filename, strategy)
@@ -9163,7 +9236,7 @@ function driver.plan_module_shims(provider, module_names, output_root)
             return nil, "module '" .. tostring(modname) ..
                 "' has no safe generated Lua shim path"
         end
-        if output_root then filename = path.join(output_root, "shims", filename) end
+        if output_root then filename = path.join(output_root, filename) end
         if seen[filename] then
             return nil, "multiple modules would generate Lua shim '" ..
                 filename .. "'"
@@ -9312,6 +9385,9 @@ function driver.publish_provider_bundle(
             for name in pairs(previous.entries or {}) do
                 if not new_entries[name] then
                     local filename = safe_module_output_path(name, ".lua")
+                    if filename and options.output_root then
+                        filename = path.join(options.output_root, filename)
+                    end
                     if filename and not new_shim_paths[filename] then
                         local attr = lfs.symlinkattributes(filename)
                         if attr then
@@ -9562,7 +9638,8 @@ function driver.run_standalone_archive_probe(
     if #module_names == 0 and not validate_titan_support then return true end
     local runtime_ok, runtime_err = check_runtime(verbose)
     if not runtime_ok then return nil, runtime_err end
-    local base = os.tmpname()
+    local base, base_error = create_compile_log()
+    if not base then return nil, base_error end
     os.remove(base)
     local source = base .. ".c"
     local object = base .. ".o"
@@ -9739,14 +9816,15 @@ function driver.compile_program(modname, libnames, link, verbose, extra_objects,
     if platform.windows then
         return compile_windows_program(modname, libnames, link, verbose,
             extra_objects, static_archives, entrypoint_output or
-                (modname:gsub("[.]", "/") .. "__entrypoint.c"),
+                driver.generated_output_path(modname:gsub("[.]", "/") .. "__entrypoint.c", options.output_root),
             program_name, options)
     end
-    local execname = program_output or modname:gsub("[.]", "/")
+    local execname = program_output or
+        driver.generated_output_path(modname:gsub("[.]", "/"), options.output_root)
     local output_ok, output_err = ensure_output_parent(execname)
     if not output_ok then return nil, output_err end
     local entrypoint_name = entrypoint_output or
-        (modname:gsub("[.]", "/") .. "__entrypoint.c")
+        driver.generated_output_path(modname:gsub("[.]", "/") .. "__entrypoint.c", options.output_root)
     output_ok, output_err = ensure_output_parent(entrypoint_name)
     if not output_ok then return nil, output_err end
     os.remove(execname)

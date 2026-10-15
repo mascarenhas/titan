@@ -250,6 +250,49 @@ describe("C declaration recovery", function()
 end)
 
 describe("C object-like macro metadata", function()
+    it("keeps floating literal ranks and leaves evaluation to C", function()
+        for _, case in ipairs({
+            { "12.", { "double" } },
+            { "- 1e3", { "double" } },
+            { "+ 1E-3F", { "float" } },
+            { "0x1.8p-2f", { "float" } },
+            { "0X1P+2L", { "long", "double" } },
+            { "( 3 * 1.5f )", { "float" } },
+            { "( 1.0f + 1.0 )", { "double" } },
+            { "( 1.0f + 1.0L )", { "long", "double" } },
+            { "( 1 ? 1.0f : 1.0L )", { "long", "double" } },
+            { "( 1.0f < 3 )", { "int" } },
+        }) do
+            local declaration = register(case[1])
+            assert.same(case[2], declaration.type, case[1])
+            assert.is_nil(declaration.macro_expression, case[1])
+            assert.is_nil(declaration.integer_literals, case[1])
+        end
+    end)
+
+    it("types the compiler floating constants used by math headers", function()
+        for _, family in ipairs({ "inf", "huge_val", "nan", "nans" }) do
+            for _, suffix in ipairs({ "", "f", "l" }) do
+                local arguments = (family == "nan" or family == "nans")
+                    and ' ( "" )' or " ( )"
+                local declaration = register("__builtin_" .. family .. suffix .. arguments)
+                assert.same(suffix == "f" and { "float" }
+                    or suffix == "l" and { "long", "double" }
+                    or { "double" }, declaration.type)
+                assert.is_nil(declaration.macro_expression)
+            end
+        end
+        for _, expression in ipairs({
+            "__builtin_unknown ( )", "__builtin_inff ( 1 )",
+            "__builtin_nanf ( )", "__builtin_nanf ( 1 )",
+            '__builtin_nanf ( "" ) . field',
+        }) do
+            local definitions = {}
+            cdefines.register_define(definitions, "INVALID", expression, {})
+            assert.is_nil(definitions.INVALID, expression)
+        end
+    end)
+
     it("registers a final macro map in deterministic byte order", function()
         local definitions = {
             zeta = { "4" },

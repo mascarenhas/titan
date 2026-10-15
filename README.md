@@ -434,10 +434,14 @@ runtime, ABI, and interoperation machinery.
 $ titanc [--print-ast] [-j jobs] [--static] [--test] [--no-uv-bootstrap] \
     [--source-first] [--incremental] [-c|--compile-only] \
     [--no-line-directives] \
-    [--lua <path>] [--tree <path>] <module> [<module>]
+    [--lua <path>] [--tree <path>] [-o|--output <directory>] <module> [<module>]
 ```
 
 The compiler takes a list of module names that you want to compile. Use
+`-o/--output out` to keep generated files under `out/`; the compiler creates
+missing directories and recreates the source hierarchy there. Use a separate
+output directory for each build configuration. See [Output directories](doc/language/output-directory.md).
+Use
 `-j/--jobs` (or `TITAN_JOBS`) to bound concurrent generated-C object
 compilations; the default is one, and values above one require the standard
 POSIX `mkfifo` utility. Pass `--static` to prefer self-describing
@@ -733,13 +737,13 @@ files, and clean them with `defer`. The Makefile names all 28 test roots
 explicitly. It compiles the explicit test/helper modules and shared `titan.test`
 support through separate `titanc -c --test --incremental` targets, then links
 one test executable with `--test --incremental`. `make titan-stdlib-test-build`
-places that executable and synthetic runner outputs below `.titan-tests/`;
+places that executable and synthetic runner outputs below `out/tests/`;
 it passes `--no-uv-bootstrap` on the final link so each
 async test explicitly owns one Runtime and completes Runtime-bound cleanup
 before that session returns. `make titan-stdlib-test-run` executes the binary
 from the repository root, and `make titan-stdlib-test` performs both.
-Source-adjacent generated C/object/header files and shared support outputs
-persist for incremental builds. Make tracks source imports, native fixtures,
+Generated C/object/header files and shared support outputs remain in
+`out/tests/` for incremental builds. The standard provider build uses `out/`. Make tracks source imports, native fixtures,
 the installed provider, compiler/SDK inputs, and compile settings; a no-op
 build invokes no compiler. `make clean` removes generated outputs by ownership
 patterns without deleting author-written native fixtures.
@@ -918,11 +922,10 @@ need the SDL2 development headers installed.
 
 # Cleaning up
 
-`make clean` removes generated build and test artifacts (object files, generated
-C, compiled modules, coverage data), including nested `titan/uv/uv.c` and
-`titan/uv/uv.o`, the `titan/http`, `titan/websocket`, `titan/peg`, and `titan/string` folder-main
-outputs, and
-the twenty-three known generated standard-library loaders, while
+`make clean` removes the `out/` tree and generated native build/test artifacts
+(object files, generated C, compiled modules, and coverage data). It also
+cleans legacy source-adjacent compiler outputs and the twenty-three known
+generated standard-library loaders, while
 keeping source files and downloaded dependency trees.
 `make distclean` additionally cleans Lua's build artifacts, preserves its pinned
 submodule, and removes the checkout-local `.lua` installation. It removes the

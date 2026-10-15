@@ -191,7 +191,7 @@ if [[ $mode == build ]]; then
       export TITAN_EXTRA_LDFLAGS="$TITAN_EXTRA_LDFLAGS -lws2_32"
     fi
     cd "$work/sdk"
-    "$work/sdk/bin/lua.exe" "$winprefix/lib/luarocks/rocks-5.5/titan/0.6.0-1/bin/titanc" --test --no-uv-bootstrap -j 1 \
+    "$work/sdk/bin/lua.exe" "$winprefix/lib/luarocks/rocks-5.5/titan/0.6.0-1/bin/titanc" --output "$winprefix" --test --no-uv-bootstrap -j 1 \
       --launcher-name titan-stdlib-tests --tree "$test_tree" "${coverage_args[@]}" \
       "${roots[@]}" -X "${payload[@]}"
   ) 2>&1 | tee "$work/build.log"

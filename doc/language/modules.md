@@ -462,7 +462,7 @@ file paths:
 titanc [--print-ast] [--pretty-print] [-v] [-j jobs] [--static] [--test] \
   [--source-first] [--incremental] [-c|--compile-only] \
   [--no-uv-bootstrap] [--no-line-directives] [--lua <luasrc>] \
-  [--tree <srcroot>] [-l lib1,lib2] [-X object...] <module>...
+  [--tree <srcroot>] [-o|--output <directory>] [-l lib1,lib2] [-X object...] <module>...
 ```
 
 `titanc --print-prefix` is a separate query: it prints the selected installation
@@ -479,6 +479,11 @@ installation layout from the compiler launcher filename.
   `foo.bar` is looked up first at the folder main
   `<srcroot>/foo/bar/bar.titan`, then at flat source
   `<srcroot>/foo/bar.titan`.
+* `-o/--output <directory>` creates the destination and missing parents, then
+  writes generated files beneath it. Generated C, objects, and headers recreate
+  the selected source root's hierarchy there; final providers, loaders,
+  executables, and coverage files also use that tree. Prefer this option to
+  keep generated files together. See [Output directories](output-directory.md).
 * `--lua <luasrc>` points a source-checkout compiler at a complete Lua
   source/build tree. Checkout developer mode otherwise uses
   `lua-5.5.1/src`. An installed compiler rejects this override and always
@@ -542,7 +547,8 @@ compilation and provider publication. Default builds do not discover or invoke
 a formatter.
 
 Compilation goes through C: each logical module becomes one C translation
-unit, written beside its canonical source, and the system C compiler (`cc`,
+unit, written under the selected output directory (beside its canonical source
+when `--output` is omitted), and the system C compiler (`cc`,
 with `--std=c99 -O3 -Wall -fPIC`) does the rest. Linux also enables
 `-flto=auto -ffat-lto-objects` so final links can optimize across object boundaries
 while objects retain native metadata sections. macOS uses ordinary native
@@ -576,7 +582,9 @@ grouping, lookup, ownership, and reserved-name rules are in
 metadata, linking, and `--static` are in [Static compiled
 modules](static-compiled-modules.md).
 
-The provider pair, generated Lua loaders, executable, and entrypoint paths are
+With `--output`, all paths in the table are below that output directory, and
+generated C and objects are relative to the selected source root. Without the
+option, the provider pair, generated Lua loaders, executable, and entrypoint paths are
 relative to the directory `titanc` runs in. Generated C and objects are beside
 the flat source or folder main, even when `--tree` points elsewhere. A folder
 contributor never produces a separate C file, object, loader, DSO, archive, or
@@ -584,7 +592,8 @@ executable. The folder program's `__main` suffix avoids colliding with its
 source directory; the logical module name and entrypoint path remain
 unchanged.
 
-Different working directories do not isolate source-adjacent C/object outputs.
+Use separate output directories to isolate configurations sharing source files.
+Without `--output`, different working directories do not isolate source-adjacent C/object outputs.
 When building the same sources with different compiler modes or flags, stage a
 separate source tree for each configuration and point `--tree` at that copy.
 For example, an application build and a `--test` build can select different

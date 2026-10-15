@@ -118,8 +118,8 @@ complete preparation. Leaf test build/run targets need a prepared selected SDK.
 Inspect `etc/titan/build-profile` and effective argv for validation evidence.
 All profile-bearing configurations and native CI caches include profile identity.
 The tiny default/LTO compiler smoke clears validation flags and exercises the
-unchanged production defaults. Serialize builds sharing source-adjacent outputs,
-or give concurrent builds separate source copies. See
+unchanged production defaults. Give concurrent configurations separate output
+directories; serialize builds that share native Make outputs. See
 [build profiles](doc/language/build-profiles.md).
 
 ## Prerequisites (important — the suite cannot run without these)
@@ -525,7 +525,7 @@ make install-stdlib                                 # build if needed, then copy
 make stdlib-test                                    # complete retained stdlib/runtime category without coverage
 make busted-test BUSTED_FILTER='for loop'           # Busted only
 make titan-stdlib-test TITAN_FILTER='^net[.]tests[.]' # build/run the aggregate native suite
-make titan-stdlib-test-build                        # build all 28 roots once under .titan-tests
+make titan-stdlib-test-build                        # build all 28 roots once under out/tests
 make titan-stdlib-test-run TITAN_FILTER='^ssl[.]tests[.]' # reuse that executable
 luarocks make && bash spec/support/ci_test_groups.sh compiler  # covered compiler-only group
 bash spec/support/ci_test_groups.sh stdlib-compiler   # covered compiler integrations needing stdlib
@@ -537,12 +537,13 @@ TITAN_ROCKS_ROOT="$PREFIX" TITAN_PROBE_CACHE_DISABLE=1 busted --run=checkout spe
 
 ./titanc [--print-ast] [--pretty-print] [--test] [--no-uv-bootstrap] \
   [-v] [-j jobs] [--static] [--source-first] [--incremental] [-c] [--no-line-directives] \
-  [--lua <luasrc>] [--tree <srcroot>] \
+  [--lua <luasrc>] [--tree <srcroot>] [-o|--output <directory>] \
   [-l lib1,lib2] [-X object...] <module>...
 ```
 
-`--incremental` loads compiler-produced source metadata from source-adjacent
-objects that are no older than their current source constituents. Make tracks
+`--incremental` loads compiler-produced source metadata from objects in the
+selected output tree (source-adjacent when `--output` is omitted) that are no
+older than their current source constituents. Make tracks
 dependency, header, compiler, SDK, and provider timestamps. Callers clean the
 affected outputs when changing flags or native tools. Without
 that option the loader ignores objects. `-c`/`--compile-only` stops after
@@ -677,7 +678,7 @@ by Linux, macOS, and native Windows;
 `make titan-stdlib-test-build` builds the explicit test/support object DAG in
 `spec/support/stdlib_test_modules.mk` with `titanc -c --test --incremental`,
 then invokes `titanc --test --incremental --no-uv-bootstrap` from
-`.titan-tests/` to combine all 28 roots into the executable. Every command uses
+`out/tests/` to combine all 28 roots into the executable. Every command uses
 the same absolute source tree and installed standard provider. Source-first
 lookup does not expose locals through ordinary imports; the generated runner
 uses ordinary `import "titan.test"` and the public `Case.new`/`run` API.
@@ -686,7 +687,7 @@ The runner is Task-independent; each async case explicitly owns `async.run`/`asy
 through source-only `support.runtime`, and Runtime-bound cleanup runs in LIFO
 order inside that same supervisor Task before the loop returns. Ordinary later
 `Context:cleanup` is only for non-Runtime resources. The designated program
-root, `test.tests`, owns the one `.titan-tests/test/tests` executable and its
+root, `test.tests`, owns the one `out/tests/test/tests` executable and its
 synthetic runner/entrypoint artifacts. Execute it from the repository root with
 `make titan-stdlib-test-run`, because fixtures rely on that CWD; `make
 titan-stdlib-test` performs both steps. `TITAN_FILTER` adds one run-time Lua
@@ -724,7 +725,7 @@ uncaught async Task diagnostics bracket the expected region with flushed
 `END` lines. Those source-owned brackets are the complete presentation
 contract for expected aggregate diagnostics.
 
-Generated test cleanup is generic but bounded. The owned `.titan-tests/`
+Generated test cleanup is generic but bounded. The owned `out/tests/`
 directory may be removed recursively. Below `spec/`, remove generated `.o`
 files and remove a `.c` only when a same-stem `.titan` source exists; this works
 without Git metadata and preserves author-written native C fixtures. Reserved
@@ -732,8 +733,8 @@ without Git metadata and preserves author-written native C fixtures. Reserved
 files, executable, and dSYM, while the root `test_runner_*` namespace belongs to
 interrupted compiler fixtures. Do not replace these ownership patterns with an
 indiscriminate `spec/**/*.c` deletion or a per-test artifact list. The build
-target retains source-adjacent outputs for incremental reuse; `make clean`
-removes them plus `.titan-tests`.
+target retains outputs in `out/tests/` for incremental reuse; `make clean`
+removes the output tree.
 
 New or modified specs that generate compiler fixtures in the repository root
 must remove only their exact module artifacts, including the paired `.a` for a
@@ -934,13 +935,13 @@ permits keyword spellings in the selected declaration/member/type positions
 without weakening ordinary local and parameter `NAME` bindings.
 
 The canonical main controls generated C/object placement, while logical `M`
-controls native symbols, metadata, and the generated shim. Thus folder
-`foo.bar` writes `foo/bar/bar.c` and `.o`; a single-root library invocation
-publishes exact `foo/bar.so` and `foo/bar.a`, while compatible multiple roots
-publish their one longest-common-prefix pair. Folder contributors produce no
-artifacts or shims. A standalone retains `foo/bar__entrypoint.c` and emits
-`foo/bar__main`; it does not emit a provider pair. Flat paths remain unchanged.
-`make clean` must remove nested generated `titan/uv/uv.c` and
+controls native symbols, metadata, and the generated shim. With `--output out`,
+folder `foo.bar` writes `out/foo/bar/bar.c` and `.o`; a single-root library
+invocation publishes exact `out/foo/bar.so` and `out/foo/bar.a`, while compatible
+multiple roots publish their one longest-common-prefix pair. Folder contributors
+produce no artifacts or shims. A standalone retains `out/foo/bar__entrypoint.c` and emits
+`out/foo/bar__main`; it does not emit a provider pair. `make clean` removes `out/`.
+Legacy source-adjacent cleanup must remove nested generated `titan/uv/uv.c` and
 `titan/uv/uv.o`, the exact known generated archives (`titan.a`,
 `examples/{utils,artisanal,sdl_quit}.a`, and
 `testfiles/{selection_sort,sieve}.a`), and only the explicitly known generated
@@ -1671,7 +1672,8 @@ substitution, recursive; error on missing keys). Key facts:
   loaded by generated `_init`, while a static dependency contributes its
   selected archive once and generates direct calls. Explicit `titanc` roots
   require source identities; incremental mode may supply their declarations
-  and code from source-adjacent objects. The stdlib Make DAG builds individual
+  and code from objects in the selected output tree. The stdlib Make DAG builds
+  individual
   objects, then links all twenty-three roots in one incremental invocation.
   There is no separate standard-module origin or loader. An import spelling ending in `.titan`
   strips that marker, requires source for the canonical name, and neither

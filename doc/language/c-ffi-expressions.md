@@ -521,6 +521,29 @@ above), leaving the host compiler to expand it under the same headers and
 flags; Titan does not paste the implementation-specific replacement into the
 generated file.
 
+Floating literals in object-like macros retain their C type: an `f`/`F`
+suffix selects `float`, an `l`/`L` suffix selects `long double`, and no suffix
+selects `double`. Decimal and hexadecimal floating literals, signed exponents,
+unary signs, and mixed arithmetic expressions are supported. Arithmetic and
+conditional expressions select the highest floating rank among their numeric
+operands; comparisons produce C `int`.
+
+Ordinary `<math.h>` constants such as `INFINITY`, `NAN`, and `HUGE_VAL` also work
+when the header expands them to GCC/Clang's `__builtin_inf*`,
+`__builtin_huge_val*`, `__builtin_nan*`, or `__builtin_nans*` constant families.
+The compiler recognizes only those builtins with their required argument
+shape. This does not expose arbitrary function-like macros. Generated C names
+the public object-like macro, so the native compiler evaluates finite values,
+infinity, and NaN with the active target's floating semantics.
+
+```titan
+foreign import "math.h"
+
+function infinity(): float
+    return ffi.INFINITY
+end
+```
+
 The existing bounded expression importer also recognizes typed dereferenced
 accessors, such as the common `errno` expansion `*accessor()`, when the imported
 accessor declaration establishes the result type. This is not general support

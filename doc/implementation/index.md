@@ -125,6 +125,7 @@ Two facts shape everything downstream of the checker:
 | [Native source coverage](native-coverage.md) | Source-region markers, separate coverage objects, per-object file inventories, and direct test-executable gcov/gcovr reporting. |
 | [Completion analysis](completion.md) | Caret-preserving dummy transforms, checker-owned lexical/member facts, detached completion descriptors and captured dependency catalogs for isolated language-server preparation. |
 | [Driver and toolchain](driver.md) | `driver.lua`, `titanc`, generated-source normalization and opt-in `clang-format`, the runtime support library (`titan-runtime/`), `util.lua`, and every default path and flag. |
+| [Output-directory routing](output-directory.md) | Source-root-relative artifact mapping, generated headers, incremental lookup, temporary files, coverage, and repository build stages. |
 | [Experimental Windows build](windows-build.md) | CLANG64/UCRT Lua and native dependency DLLs, compiler/runtime SDK, UTF-8 relocation, controlled loading, standard-provider publication and native verification boundaries. |
 | [Build and installation responsibilities](build-script-audit.md) | Plain Lua/LuaRocks bootstrap, native build ownership, the single Windows Makefile, artifact copying, and explicit verification targets. |
 | [Object-backed source modules](incremental-compilation.md) | Trusted object source metadata, AST-free source replay, compile-only CLI integration, header materialization, and Make-owned invalidation. |

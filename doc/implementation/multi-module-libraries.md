@@ -331,7 +331,7 @@ source-rock build uses that image with the in-tree compiler Lua sources and
 matching Lua SDK to build the standard library before installation. It needs
 no installed Titan compiler and does not seed the canonical provider with the
 bootstrap. The shared Make object graph
-retains source-adjacent generated C, headers, and objects. One final link carries
+retains generated C, headers, and objects below `out/` with `--output out`. One final link carries
 `ltitanlib.o`, private LPegLabel, libuv, llhttp, SQLite, and optional bundled
 OpenSSL into the paired provider. TLS uses the selected OpenSSL library directly.
 LuaRocks' Make install pass stages compiler Lua modules and generated shims in

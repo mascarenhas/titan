@@ -40,7 +40,7 @@ LUA_CPPFLAGS ?=
 LUA_LDFLAGS ?= $(TITAN_PROFILE_HOST_FLAGS)
 PREFIX ?= $(CURDIR)/$(if $(filter validation,$(TITAN_BUILD_PROFILE)),.windows-sdk-validation,.windows-sdk)
 ROCKS_TREE ?= $(PREFIX)
-WINDOWS_BUILD_ROOT ?= $(CURDIR)/$(if $(filter validation,$(TITAN_BUILD_PROFILE)),windows-build-validation,windows-build)
+WINDOWS_BUILD_ROOT ?= $(CURDIR)/$(if $(filter validation,$(TITAN_BUILD_PROFILE)),out/windows-validation,out/windows)
 
 # Native GNU Make requires C:/ paths; MSYS Make accepts /c paths. Apply this
 # after direct-entry defaults, and only to values that are actually present.
@@ -307,8 +307,8 @@ install-stdlib: stdlib
 publish-stdlib:
 	mkdir -p $(call quote,$(TITAN_INSTALL_TREE)/lib/titan/$(TITAN_LIBRARY_VERSION)) \
 	  $(call quote,$(TITAN_STDLIB_LUA_DIR))
-	cp -p titan.dll $(call quote,$(TITAN_INSTALL_TREE)/lib/titan/$(TITAN_LIBRARY_VERSION)/titan.dll)
-	for module in $(STDLIB_MODULES); do cp -p "titan/$$module.lua" $(call quote,$(TITAN_STDLIB_LUA_DIR)/); done
+	cp -p $(call quote,$(WINDOWS_BUILD_ROOT)/out/titan.dll) $(call quote,$(TITAN_INSTALL_TREE)/lib/titan/$(TITAN_LIBRARY_VERSION)/titan.dll)
+	for module in $(STDLIB_MODULES); do cp -p "$(WINDOWS_BUILD_ROOT)/out/titan/$$module.lua" $(call quote,$(TITAN_STDLIB_LUA_DIR)/); done
 	rm -f $(call quote,$(TITAN_INSTALL_TREE)/share/titan/$(TITAN_LIBRARY_VERSION)/src/titan/test.titan)
 
 compiler-publication-check: runtime

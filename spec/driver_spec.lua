@@ -483,6 +483,89 @@ local function empty_layouts(name)
     return (assert(require("titan-compiler.nominallayout").encode(name, {})))
 end
 
+describe("generated output folders", function()
+    it("maps flat and folder modules relative to their selected source tree", function()
+        local output = paths.join(lfs.currentdir(), "build output")
+        for _, source_name in ipairs({ "src/pkg/mod.titan", "/external/src/pkg/mod.titan" }) do
+            local source = { kind = "flat", main = source_name,
+                files = { source_name }, program_output = "pkg/mod" }
+            assert(driver.relocate_source_output("pkg.mod", source, output))
+            assert.equal(paths.join(output, "pkg/mod.titan"), source.native_output)
+            assert.equal(paths.join(output, "pkg/mod"), source.program_output)
+            assert.equal(source_name, source.main)
+            assert(driver.relocate_source_output("pkg.mod", source, output))
+            assert.equal(paths.join(output, "pkg/mod"), source.program_output)
+        end
+        local folder = { kind = "folder", main = "/external/src/pkg/mod/mod.titan",
+            program_output = "pkg/mod__main" }
+        assert(driver.relocate_source_output("pkg.mod", folder, output))
+        assert.equal(paths.join(output, "pkg/mod/mod.titan"), folder.native_output)
+        assert.equal(paths.join(output, "pkg/mod__main"), folder.program_output)
+    end)
+
+    it("creates a relative output folder recursively and rejects regular files", function()
+        local root = temporary.name("-output-folder")
+        local relative = paths.join(".", paths.basename(root), "nested", "output")
+        local absolute = assert(driver.prepare_output_root(relative))
+        assert.equal("directory", lfs.attributes(absolute, "mode"))
+        assert(paths.is_absolute(absolute))
+        assert(driver.remove_path(paths.join(lfs.currentdir(), paths.basename(root))))
+        local file = temporary.name()
+        local output, err = driver.prepare_output_root(file)
+        assert.is_nil(output)
+        assert.matches("not a directory", err, 1, true)
+        assert(os.remove(file))
+    end)
+
+    it("places providers and shims in the same output tree", function()
+        local root = temporary.name("-output-shims")
+        local plans, provider = driver.plan_module_shims("package", { "package.child" }, root)
+        assert.truthy(plans, provider)
+        assert.equal(paths.join(root, "package/child.lua"), plans[1].filename)
+        assert.equal(paths.join(root, "package" .. (platform.windows and ".dll" or ".so")), provider)
+    end)
+
+    it("creates output-local temporaries without renaming across filesystems", function()
+        local root = temporary.name("-output-temporaries")
+        assert(lfs.mkdir(root))
+        local strategy = compiler_io.new_sync()
+        local rename = strategy.rename
+        local cross_filesystem_attempts = 0
+        function strategy:rename(from, to)
+            if paths.dirname(from) ~= paths.dirname(to) then
+                cross_filesystem_attempts = cross_filesystem_attempts + 1
+                return nil, "cross-device link"
+            end
+            return rename(self, from, to)
+        end
+        local context = driver.new_resolver_context({ io = strategy, output_root = root })
+        local filename = assert(context.io:tmpname())
+        assert.equal(paths.normalize(root), paths.dirname(filename))
+        assert.equal("file", lfs.attributes(filename, "mode"))
+        assert.equal(0, cross_filesystem_attempts)
+        assert(context.io:unlink(filename))
+        assert(driver.close_resolver_context(context))
+        assert(lfs.rmdir(root))
+    end)
+
+    it("preserves mkdir semantics for a symlink followed by a parent component", function()
+        if platform.windows then
+            pending("POSIX symbolic-link and parent-component filesystem semantics")
+            return
+        end
+        local root = temporary.name("-output-parent")
+        assert(lfs.mkdir(root))
+        assert(lfs.mkdir(root .. "/nested"))
+        assert(lfs.mkdir(root .. "/nested/target"))
+        assert(lfs.link(root .. "/nested/target", root .. "/alias", true))
+        local output = assert(driver.prepare_output_root(root .. "/alias/../actual"))
+        assert.equal(assert(compiler_io.new_sync():realpath(root .. "/nested/actual")), output)
+        assert.equal("directory", lfs.attributes(root .. "/nested/actual", "mode"))
+        assert.is_nil(lfs.attributes(root .. "/actual"))
+        assert(driver.remove_path(root))
+    end)
+end)
+
 describe("Windows launcher filenames", function()
     it("uses the logical module and keeps overrides independent of the provider", function()
         assert.equal("app.exe", driver.windows_launcher_name("app"))

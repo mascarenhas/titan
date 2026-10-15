@@ -86,7 +86,7 @@ local function find_standard_layout()
             installed_root .. "/lib/titan/0.6", installed_shim_root)
     end
 
-    layouts[#layouts + 1] = production_layout(REPO, REPO)
+    layouts[#layouts + 1] = production_layout(REPO .. "/out", REPO .. "/out")
     for _, layout in ipairs(layouts) do
         if valid_production_layout(layout) then return layout end
     end

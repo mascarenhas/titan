@@ -305,6 +305,7 @@ describe("static compiled-module native containers", function()
         ["rolls back every caught publication boundary including stale shims"] = true,
         ["preserves an identical recursive Darwin dSYM tree"] = true,
         ["retires only exact old-provider stale shims on successful publication"] = true,
+        ["retires stale shims only inside the selected output folder"] = true,
         ["rejects nonregular provider destinations and native input aliases"] = true,
         ["rechecks planned shim ownership at publication"] = true,
     }
@@ -1170,6 +1171,37 @@ end
         assert.equal("old dso", read_file(public_dso))
         assert.equal(old_archive, read_file(public_archive))
         assert.equal(modified, read_file(stale_shim))
+    end)
+
+    it("retires stale shims only inside the selected output folder", function()
+        local root = workspace .. "/output-scope"
+        local output = root .. "/output"
+        local public_dso = output .. "/provider.so"
+        local public_archive = output .. "/provider.a"
+        assert(driver.build_static_archive(
+            public_archive, { target_object }, {}, target, false))
+        write_file(public_dso, "old dso")
+        local old_shim = assert(driver.plan_module_shims(
+            "provider", { "fixture.target" }, output))[1].contents
+        local stale_shim = output .. "/fixture/target.lua"
+        local unrelated_shim = root .. "/fixture/target.lua"
+        local unrelated_contents = "return 'unrelated source-tree loader'\n"
+        write_file(stale_shim, old_shim)
+        write_file(unrelated_shim, unrelated_contents)
+        local staged_dso = output .. "/staged.so"
+        local staged_archive = output .. "/staged.a"
+        write_file(staged_dso, "new dso")
+        write_file(staged_archive, read_file(input_archive))
+        prepare_publication_dsym(staged_dso, public_dso)
+        local published, err = in_directory(root, function()
+            return driver.publish_provider_bundle(
+                staged_dso, staged_archive, public_dso, {}, {}, {
+                    provider = "provider", output_root = output,
+                })
+        end)
+        assert.truthy(published, err)
+        assert.is_nil(lfs.symlinkattributes(stale_shim))
+        assert.equal(unrelated_contents, read_file(unrelated_shim))
     end)
 
     it("rejects nonregular provider destinations and native input aliases",

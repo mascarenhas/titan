@@ -1004,6 +1004,44 @@ describe("C FFI type checking", function()
         end)
     end)
 
+    it("imports floating constants with their C ranks including math sentinels",
+    function()
+        with_header([[
+            #include <math.h>
+            #define FFI_FLOAT_EXP (-1e3F)
+            #define FFI_DOUBLE_EXP 1E-3
+            #define FFI_LONG_DOUBLE_HEX (+0x1.8p-2L)
+            #define FFI_FLOAT_MIXED (3 * 1.5f)
+            #define FFI_FLOAT_COMPARISON (1.5f < 3)
+        ]], function(header)
+            local ok, err, ast = run_checker([[
+                foreign import "]] .. header .. [["
+                function read(): float
+                    local a = ffi.FFI_FLOAT_EXP
+                    local b = ffi.FFI_DOUBLE_EXP
+                    local c = ffi.FFI_LONG_DOUBLE_HEX
+                    local d = ffi.FFI_FLOAT_MIXED
+                    local comparison = ffi.FFI_FLOAT_COMPARISON
+                    local infinity = ffi.INFINITY
+                    local nan = ffi.NAN
+                    return a + b + c + d + comparison + infinity + nan
+                end
+            ]])
+            assert.truthy(ok, err)
+            local members = ast._ffi_namespace._type.members
+            for name, spelling in pairs({
+                FFI_FLOAT_EXP = "float", FFI_DOUBLE_EXP = "double",
+                FFI_LONG_DOUBLE_HEX = "long double", FFI_FLOAT_MIXED = "float",
+                INFINITY = "float", NAN = "float",
+            }) do
+                local typ = assert(members[name], name).type
+                assert.equal("Type.CFloat", typ._tag, name)
+                assert.equal(spelling, typ.spelling, name)
+            end
+            assert.equal("Type.CInteger", members.FFI_FLOAT_COMPARISON.type._tag)
+        end)
+    end)
+
     it("imports real POSIX signal disposition macros as function pointers",
     function()
         local ok, err, ast = run_checker([[
