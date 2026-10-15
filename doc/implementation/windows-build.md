@@ -2,6 +2,8 @@
 
 `Makefile.win` builds the experimental native x64 Windows SDK, including
 controlled Lua, native dependency DLLs, the compiler and embedded runtime.
+For the installation and usage workflow, see
+[Installing and using Titan on Windows](../language/windows-build.md).
 Run it in the MSYS2 **CLANG64** environment with its
 UCRT Clang, LLVM resource tools, Bash, native GNU Make 4.3 or newer
 (`mingw32-make`), CMake, Ninja, Perl, Git, tar,
@@ -22,6 +24,14 @@ paths. The Makefile converts `PREFIX`, `ROCKS_TREE`, and `WINDOWS_BUILD_ROOT`
 for the selected Make implementation. The native Make executable supplied by
 `mingw-w64-x86_64-make` can drive the CLANG64 compiler; selecting Make does not
 select the compiler or change its UCRT target.
+
+`WINDOWS_BUILD_ROOT` defaults to checkout-relative `out/windows` in production
+and `out/windows-validation` in validation. It owns the private Lua/native
+builds and the standard provider's generated stage at
+`<WINDOWS_BUILD_ROOT>/out`. SDK prefixes remain separate installation
+destinations. Select a distinct build root and SDK for incompatible native
+configurations; output routing does not invalidate objects after tool or flag
+changes. See [output-directory routing](output-directory.md).
 
 ```sh
 git submodule update --init --recursive
@@ -336,9 +346,22 @@ export LUAROCKS_CONFIG=C:/Titan/sdk/etc/luarocks/config-5.5.lua
 
 Users who already have compatible Lua and LuaRocks installations can run the
 last command with their own configured tree and native build tools.
+The generated configuration defaults to `clang.exe`, enables
+`fs_use_modules`, and selects CMake's Ninja generator. The executable spelling
+avoids standalone LuaRocks 3.13.0's incorrect Clang-specific MinGW export
+option; the module filesystem backend avoids its MSYS command backend's quoted
+Windows wildcard during recursive copies. The `luarocks` target checks only
+for `bin/luarocks.exe`, so callers own replacement or reconfiguration of an
+existing installation. Direct standalone commands must set `LUAROCKS_CONFIG`;
+the executable does not automatically find the SDK's `etc/luarocks` directory.
+
+LuaRocks installs `bin/titanc.bat` and retains the Lua script at
+`lib/luarocks/rocks-5.5/titan/0.6.0-1/bin/titanc`. Build and native test helpers
+invoke that script with the selected `bin/lua.exe`, avoiding batch parsing.
 `spec/support/check_windows_compiler.sh` verifies installed dependencies, their PE
-imports, the compiler modules, and CLI loading in a relocated SDK. See
-[the source compiler installation contract](../windows-compiler-bootstrap.md).
+imports, the compiler modules, and CLI loading from a different CWD in an SDK
+copy whose path contains spaces and Unicode. That gate invokes the retained
+script; LuaRocks' batch wrapper can contain installation-specific paths.
 
 `Makefile.win` builds `libtitan.a` from exactly `titan.o` and
 `minicoro.o`, plus the separate support-only `titan.dll` from `ltitanlib.o`.
@@ -388,6 +411,11 @@ mingw32-make -f Makefile.win install-stdlib PREFIX=/c/Titan/sdk
 
 The `stdlib` target uses the already installed compiler and prepared
 runtime/native SDK to compile all 23 explicit roots into one `titan.dll`.
+`scripts/build_windows_stdlib.sh` passes
+`--output <WINDOWS_BUILD_ROOT>/out`, keeping generated C, objects, headers,
+the provider DLL, and Lua shims below that stage. `publish-stdlib` copies
+`<WINDOWS_BUILD_ROOT>/out/titan.dll` and the shims under its `titan/` directory
+into the canonical SDK locations; it does not read source-adjacent outputs.
 `TITAN_JOBS` bounds generated-C compilation; checking, generation and the final
 link retain their normal order. It does not reinstall the compiler or prepare those native inputs.
 `install-stdlib` builds that provider and then copies its artifacts.
@@ -480,6 +508,9 @@ The build copies the supplied SDK and authored fixtures into its marked
 workspace, preserving the published SDK. It records the test compilation
 profile for later run commands; a run with a different selected test profile
 requires rebuilding the workspace.
+The compiler receives `--output` pointing at that private SDK copy, so generated
+test sources/objects and the `bin/titan-stdlib-tests.exe` launcher stay there
+rather than beside the copied authored sources.
 It rejects unrelated existing directories and nonlocal or non-NTFS workspaces.
 Test outputs, scratch files, native child executables, and logs stay inside that
 workspace. The runner uses the bounded Job Object supervisor and drains both output streams, including

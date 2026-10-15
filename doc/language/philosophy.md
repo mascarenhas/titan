@@ -155,9 +155,9 @@ under the API is measurably faster and allows real specialization (an
 array access compiles to an array access), at a known cost: each Titan
 release is tied to a specific minor version of Lua, and tracking a new
 Lua release means re-deriving the generated code against the new
-internals. The project has paid that cost knowingly — most recently in
-the [migration from Lua 5.3 to Lua 5.5](../lua-5.5-migration.md), which
-documents exactly how much of the generated code the internals touch.
+internals. The current [value representation and GC invariants](../implementation/values-and-gc.md)
+document that coupling, and the [Lua 5.5.1 update audit](../implementation/lua-5.5.1-update.md)
+shows how an interpreter upgrade is checked against the generated code.
 
 ## A short history
 
