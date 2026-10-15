@@ -1,0 +1,172 @@
+local independent_receiver = import "lua.receiver_fixture"
+local receiver_strings = import "string"
+local receiver_clock = import "uv"
+
+local function transfer_pointer(item: async.TransferValue): foreign *void
+  case item
+  when is_pointer(pointer) then return pointer
+  else raise "Receiver bootstrap did not return a native handle"
+  end
+end
+
+local function receiver_echo_payload(ordinal: integer): string
+  return "message-" .. ordinal .. "\0" .. receiver_strings.rep("a\0b", 1024)
+end
+
+local function stop_receiver_worker(handle: foreign *void, worker: async.Task)
+  if worker:status():has_finished() then return end
+  do
+    async.send(handle, async.TransferValue.is_string("stop"))
+  catch
+    if error ~= "receiver is closed" then raise end
+  end
+end
+
+function test_receiver_lua_two_phase_worker_and_host_gc(_context: test.Context)
+  runtime_test.run(function ()
+    test.assert(not independent_receiver.initialized(),
+                "host fixture unexpectedly owns an independent Receiver")
+    local replies = async.receiver()
+    defer replies:close()
+    local state = tlua.new()
+    defer state:close()
+    local handle = transfer_pointer(state:run_async([[
+      package.path, package.cpath = '', ''
+      return require('lua.receiver_fixture').bootstrap(...)
+    ]], "=receiver-bootstrap", async.TransferValue.is_pointer(replies:handle())))
+    local working = async.run<|integer, value|>(function (): integer
+      return transfer_integer(state:run_async([[
+        return require('lua.receiver_fixture').drive()
+      ]], "=receiver-worker-loop"))
+    end)
+    defer async.join(working)
+    defer stop_receiver_worker(handle, working)
+    test.assert(transfer_string(replies:wait()) == "ready",
+                "worker did not enter its independent Runtime")
+    for ordinal = 1, 64 do
+      async.send(handle, async.TransferValue.is_string(receiver_echo_payload(ordinal)))
+    end
+    gclib.collect()
+    gclib.collect()
+    for ordinal = 1, 64 do
+      test.assert(transfer_string(replies:wait()) == receiver_echo_payload(ordinal),
+                  "cross-state Receiver lost, reordered, or corrupted copied bytes")
+      if ordinal % 8 == 0 then gclib.collect() end
+    end
+    async.send(handle, async.TransferValue.is_string("stop"))
+    test.assert(transfer_integer(replies:wait()) == 64)
+    case async.join(working)
+    when succeeded(count) then test.assert(count == 64)
+    else raise "Receiver worker did not shut down normally" end
+    test.assert(not independent_receiver.initialized(),
+                "worker Receiver leaked into the host module instance")
+    gclib.collect()
+    common.assert_raises_contains(function ()
+      async.send(handle, async.TransferValue.is_nil())
+    end, "receiver is closed")
+    -- The worker module retains its closed Receiver until state:close. Do not
+    -- use the borrowed handle after that owner is destroyed.
+    state:close()
+  end)
+end
+
+function test_receiver_lua_cancelled_worker_waits_for_orderly_stop(_context: test.Context)
+  runtime_test.run(function ()
+    local replies = async.receiver()
+    defer replies:close()
+    local state = tlua.new()
+    defer state:close()
+    local handle = transfer_pointer(state:run_async([[
+      return require('lua.receiver_fixture').bootstrap(...)
+    ]], "=cancelled-receiver-bootstrap", async.TransferValue.is_pointer(replies:handle())))
+    local working = async.run<|nil, value|>(function (): nil
+      state:run_async("return require('lua.receiver_fixture').drive()")
+      return nil
+    end)
+    defer async.join(working)
+    defer stop_receiver_worker(handle, working)
+    test.assert(transfer_string(replies:wait()) == "ready")
+    working:cancel(async.CancellationReason.simple("Receiver worker cancelled"))
+    gclib.collect()
+    test.assert(working:status():as_string() == "waiting",
+                "cancelled run_async retired a live Receiver worker")
+    common.assert_raises_contains(function () state:close() end, "busy")
+    async.send(handle, async.TransferValue.is_string("stop"))
+    test.assert(transfer_integer(replies:wait()) == 0)
+    test.assert(async.join(working):has_cancelled(),
+                "Receiver worker lost accepted cancellation after retirement")
+    common.assert_raises_contains(function ()
+      async.send(handle, async.TransferValue.is_nil())
+    end, "receiver is closed")
+  end)
+end
+
+function test_receiver_lua_failed_bootstrap_closes_retained_endpoint(_context: test.Context)
+  runtime_test.run(function ()
+    local state = tlua.new()
+    defer state:close()
+    common.assert_raises_contains(function ()
+      state:run_async("require('lua.receiver_fixture').fail_bootstrap()")
+    end, "Receiver fixture bootstrap failed")
+    local handle = transfer_pointer(state:run(
+      "return require('lua.receiver_fixture').retained_handle()"))
+    common.assert_raises_contains(function ()
+      async.send(handle, async.TransferValue.is_nil())
+    end, "receiver is closed")
+    local drained = state:run([[
+      require('titan.async').loop()
+      collectgarbage('collect')
+      return 42
+    ]], "=failed-receiver-bootstrap-cleanup")
+    test.assert(transfer_integer(drained) == 42,
+                "failed bootstrap did not leave a drainable independent Runtime")
+    gclib.collect()
+    common.assert_raises_contains(function ()
+      async.send(handle, async.TransferValue.is_nil())
+    end, "receiver is closed")
+  end)
+end
+
+function test_receiver_lua_close_races_host_sends(_context: test.Context)
+  runtime_test.run(function ()
+    local replies = async.receiver()
+    defer replies:close()
+    local state = tlua.new()
+    defer state:close()
+    local handle = transfer_pointer(state:run_async([[
+      return require('lua.receiver_fixture').bootstrap(...)
+    ]], "=closing-receiver-bootstrap", async.TransferValue.is_pointer(replies:handle())))
+    local working = async.run<|nil, value|>(function (): nil
+      state:run_async("return require('lua.receiver_fixture').drive()")
+      return nil
+    end)
+    defer async.join(working)
+    defer stop_receiver_worker(handle, working)
+    test.assert(transfer_string(replies:wait()) == "ready")
+    async.send(handle, async.TransferValue.is_string("close"))
+    local closed = false
+    local attempts = 0
+    local deadline = receiver_clock.hrtime() + 5000000000
+    -- The independent worker closes on another OS thread while this Task
+    -- continues submitting native messages. Keep the owner alive throughout.
+    while not closed and attempts < 8192 and receiver_clock.hrtime() < deadline do
+      attempts = attempts + 1
+      do
+        async.send(handle, async.TransferValue.is_string("racing\0send"))
+      catch
+        if error ~= "receiver is closed" then raise end
+        closed = true
+      end
+      if attempts % 32 == 0 then timer.yield() end
+    end
+    test.assert(closed, "concurrent sends did not observe Receiver closure before the deadline")
+    test.assert(transfer_string(replies:wait()) == "closed",
+                "worker did not acknowledge its explicit Receiver close")
+    test.assert(async.join(working):has_succeeded(),
+                "close-versus-send race did not retire the worker")
+    gclib.collect()
+    common.assert_raises_contains(function ()
+      async.send(handle, async.TransferValue.is_string("after-close"))
+    end, "receiver is closed")
+  end)
+end

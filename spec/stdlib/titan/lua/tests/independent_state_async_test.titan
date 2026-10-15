@@ -51,8 +51,8 @@ function test_lua_independent_async_progress_busy_and_cancellation(
         local block, gate = ...
         block(gate)
         independent_completed = 42
-      ]], "=independent-worker", tlua.TransferValue.is_function(state_blocking_work),
-          tlua.TransferValue.is_pointer(gate.fixture as foreign *void))
+      ]], "=independent-worker", async.TransferValue.is_function(state_blocking_work),
+          async.TransferValue.is_pointer(gate.fixture as foreign *void))
       resumed = true
       return nil
     end)
@@ -84,7 +84,7 @@ function test_lua_independent_async_progress_busy_and_cancellation(
     end
     test.assert(ffi.titan_async_work_fixture_result(gate.fixture) == 42,
                 "event-loop continuation did not release native worker")
-    local completed: tlua.TransferValue = state:run(
+    local completed: async.TransferValue = state:run(
       "return independent_completed")
     test.assert(transfer_integer(completed) == 42,
                 "cancelled worker did not finish before state reuse")
@@ -95,9 +95,9 @@ function test_lua_independent_async_results_and_errors(_context: test.Context)
   runtime_test.run(function ()
     local state = tlua.new()
     defer state:close()
-    local values: {tlua.TransferValue} = { state:run_async(
-      "return ...", "=independent-async-values", tlua.TransferValue.is_integer(17),
-      tlua.TransferValue.is_nil(), tlua.TransferValue.is_string("a\0b")) }
+    local values: {async.TransferValue} = { state:run_async(
+      "return ...", "=independent-async-values", async.TransferValue.is_integer(17),
+      async.TransferValue.is_nil(), async.TransferValue.is_string("a\0b")) }
     test.assert(#values == 3 and transfer_integer(values[1]) == 17)
     assert_transfer_nil(values[2])
     test.assert(transfer_string(values[3]) == "a\0b")
@@ -124,8 +124,8 @@ function test_lua_independent_async_keeps_wrapper_alive_until_completion(
     local target = async.run<|nil, value|>(function (): nil
       local state = finalizable_state(counter)
       state:run_async("local block, gate = ...; block(gate)", nil,
-        tlua.TransferValue.is_function(state_blocking_work),
-        tlua.TransferValue.is_pointer(gate.fixture as foreign *void))
+        async.TransferValue.is_function(state_blocking_work),
+        async.TransferValue.is_pointer(gate.fixture as foreign *void))
       return nil
     end)
     defer async.join(target)
@@ -157,7 +157,7 @@ function test_lua_independent_async_initializes_titan_modules_per_state(
     independent_math.pi = 123.0
     local state = tlua.new()
     defer state:close()
-    local values: {tlua.TransferValue} = { state:run_async([[
+    local values: {async.TransferValue} = { state:run_async([[
       local titan_math = require('titan.math')
       local fresh = titan_math.pi > 3 and titan_math.pi < 4
       titan_math.pi = 987.0
@@ -172,12 +172,12 @@ function test_lua_independent_async_initializes_titan_modules_per_state(
                 "worker changed host Titan module variables")
     test.assert(independent_math.random(0) == expected_random,
                 "worker advanced the host Titan module's private RNG")
-    local persisted: tlua.TransferValue = state:run_async(
+    local persisted: async.TransferValue = state:run_async(
       "return require('titan.math').pi == 987.0")
     assert_transfer_boolean(persisted, true)
     local other = tlua.new()
     defer other:close()
-    local fresh: tlua.TransferValue = other:run_async([[
+    local fresh: async.TransferValue = other:run_async([[
       local titan_math = require('titan.math')
       return titan_math.pi > 3 and titan_math.pi < 4
     ]])
@@ -201,7 +201,7 @@ function test_lua_independent_async_runs_its_own_titan_runtime(
     end)
     defer async.join(releaser)
     defer gate:release()
-    local returned: tlua.TransferValue = state:run_async([[
+    local returned: async.TransferValue = state:run_async([[
       local async = require('titan.async')
       local timer = require('titan.timer')
       local block, gate = ...
@@ -215,12 +215,12 @@ function test_lua_independent_async_runs_its_own_titan_runtime(
       assert(independent_runtime_marker == 73)
       collectgarbage('collect')
       return string.rep('a\0b', 8192)
-    ]], "=independent-runtime", tlua.TransferValue.is_function(state_blocking_work),
-        tlua.TransferValue.is_pointer(gate.fixture as foreign *void))
+    ]], "=independent-runtime", async.TransferValue.is_function(state_blocking_work),
+        async.TransferValue.is_pointer(gate.fixture as foreign *void))
     test.assert(host_progress and async.join(releaser):has_succeeded(),
                 "independent Runtime blocked host Task progress")
     test.assert(ffi.titan_async_work_fixture_result(gate.fixture) == 42)
-    local repeated: tlua.TransferValue = state:run_async([[
+    local repeated: async.TransferValue = state:run_async([[
       local async = require('titan.async')
       local timer = require('titan.timer')
       local worker = async.run(function()

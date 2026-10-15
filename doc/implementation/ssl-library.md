@@ -116,8 +116,11 @@ transmitted chain. The first decoded unencrypted private key is retained by
 the context, then checked against the leaf. Encrypted keys are rejected because
 the API has no password input.
 
-The configured `SSL_CTX` is retained on `ssl.Server`. The optional backlog is
-delegated to `net.listen`, which supplies 128 when absent. Accepting a TCP
+The configured `SSL_CTX` is retained on `ssl.Server`. The optional backlog and
+`reuse_port` are delegated to `net.listen`, which supplies 128 and false when
+absent. Reuse changes only the bind flags; it adds no shared TLS context or
+listener ownership. An unsupported bind follows the existing failure path
+that releases this Server's unpublished `SSL_CTX`. Accepting a TCP
 connection creates an `SSL` in accept state but deliberately does not drive its
 handshake. `Server:accept` takes a context reference before the suspending net
 accept, so another Task may close the listener without invalidating the

@@ -1,0 +1,65 @@
+-- Executable-only module initialized independently by each Lua worker state.
+local async = import "async"
+local gc = import "gc"
+
+local receiver: async.Receiver? = nil
+local worker: async.Task<|nil, value|>? = nil
+local received = 0
+
+function initialized(): boolean
+  return receiver ~= nil
+end
+
+function retained_handle(): foreign *void
+  return receiver:handle()
+end
+
+function bootstrap(reply: value): foreign *void
+  -- Lua supplies the lightuserdata transferred from the host. Only this narrow
+  -- fixture boundary converts it back to the statically typed borrowed handle.
+  local destination = reply as foreign *void
+  receiver = async.receiver()
+  local owner = receiver as async.Receiver
+  worker = async.run<|nil, value|>(function (): nil
+    defer owner:close()
+    async.send(destination, async.TransferValue.is_string("ready"))
+    while true do
+      local item = owner:wait()
+      gc.collect()
+      gc.collect()
+      case item
+      when is_string(bytes) then
+        if bytes == "close" then
+          owner:close()
+          async.send(destination, async.TransferValue.is_string("closed"))
+          return nil
+        end
+        if bytes == "stop" then
+          async.send(destination, async.TransferValue.is_integer(received))
+          return nil
+        end
+        received = received + 1
+        async.send(destination, async.TransferValue.is_string(bytes))
+      else raise "Receiver fixture expected a string message"
+      end
+    end
+    return nil
+  end)
+  return owner:handle()
+end
+
+function drive(): integer
+  async.loop()
+  case worker:status()
+  when failed(failure) then failure:raise()
+  when succeeded() then return received
+  else raise "Receiver fixture worker did not finish normally"
+  end
+  return received
+end
+
+function fail_bootstrap()
+  receiver = async.receiver()
+  defer receiver:close()
+  raise "Receiver fixture bootstrap failed"
+end

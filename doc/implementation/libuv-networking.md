@@ -72,7 +72,11 @@ attempt. A candidate stays lexically owned until successful publication. A
 failed attempt or a cancelled native success starts close on its unpublished
 socket; the native owner remains rooted until close completion. `listen`
 selects backlog 128 when absent and validates the positive native integer range
-before submission.
+before submission. Its optional `reuse_port` defaults to false. True selects
+public `uv.TCP_REUSEPORT` as the `uv.tcp_bind` flags; nil and false select zero.
+Each candidate has the same flags, and native bind failures continue through
+the existing candidate-close and `async.OperationError` path. There is no
+fallback that disables reuse when the platform reports `UV_ENOTSUP`.
 
 Each write owns one fresh `uv.write_t` and submits its immutable Titan string
 through `uv.write_string`. The public request retains the string and contains

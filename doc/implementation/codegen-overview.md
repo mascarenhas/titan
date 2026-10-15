@@ -837,7 +837,13 @@ Dependency-check failures occur before the new module is published in the
 logical registry, so a caught failure cannot make a retry bypass verification.
 Nominal metatables, function tags, Interface arrays and witnesses, Array writers,
 canonical closures, variable initializers, Lua member access, and the module
-initializer are then prepared in their required dependency order.
+initializer are then prepared in their required dependency order. Each
+successful initialization path registers both the native Lua loader and a
+separate native provider descriptor through `titan_module_preload`. The
+registry table `TITAN_MODULE_PRELOADS_KEY` holds only the matching loader and
+`TitanModuleSymbols` resolver pointers, with no module state. Independent
+Lua states can copy this descriptor with its matching loader without sharing
+module userdata, metatables, or resolved bindings.
 
 A fresh Lua state gets a fresh userdata and fresh native caches even when the
 same generated code is shared by both states. Consequently one state's selected
@@ -960,9 +966,12 @@ image cannot safely supply the private state expected by direct native code.
 **Dynamic** dependencies first use `titan_module_provider` to look up the
 logical module in the Lua registry. An initialized module supplies its native
 export callback, even if its code is embedded in the executable or was opened
-locally through `package.loadlib`. The selected DSO filename is consulted only
-when the logical module is absent. ABI and consumer-specific compatibility
-checks run before initializing a newly opened dependency.
+locally through `package.loadlib`. If the module is absent, a copied native
+provider descriptor supplies its resolver; the selected DSO filename is
+consulted only when neither is available. Descriptor lookup does not call a Lua
+preload loader or initialize the dependency. ABI and consumer-specific
+compatibility checks run before calling the selected initializer, whether its
+code came from a copied resolver or a newly opened DSO.
 
 `titan_module_symbol` resolves the required metadata callbacks, native entries,
 bound-method trampolines, and public slot numbers through that selected provider.
@@ -974,7 +983,8 @@ the provider's resolved slot.
 
 For a **transitive dynamic owner**, initialize the explicit exposing imports
 first, then use `titan_module_provider` with the owner's logical name and a null
-filename. That owner must already be initialized. Its own ABI and selective
+filename. That owner must already be initialized; an uninitialized copied
+descriptor does not satisfy this canonical-only lookup. Its own ABI and selective
 compatibility checks precede native lookup through its export callback; global
 symbol order does not choose the owner. The corresponding module userdata and
 nominal metatables are recovered from the same Lua state's registry. See

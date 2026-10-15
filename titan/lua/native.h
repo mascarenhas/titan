@@ -3,6 +3,7 @@
 
 #include <stddef.h>
 #include "lua.h"
+#include "titan/ffi.h"
 
 /* Titan's FFI imports aggregate declarations but does not declare C layouts.
  * These carriers contain only native data. String bytes are borrowed from a
@@ -33,6 +34,7 @@ typedef struct titan_lua_preload {
   const char *name;
   size_t length;
   lua_CFunction loader;
+  TitanModuleSymbols symbols;
 } titan_lua_preload;
 
 typedef struct titan_lua_open {

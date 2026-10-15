@@ -588,3 +588,52 @@ function test_net_input_listeners_observe_without_consuming_or_reserving(context
     test.assert(terminal == 1, "explicit close duplicated an input event")
   end)
 end
+
+function test_net_reuse_port_is_opt_in(context: test.Context)
+  runtime_test.run(function ()
+    local server, port = support.listen_available(28700)
+    support.cleanup_server(context, server)
+    local observed: value = nil
+    do
+      local duplicate = net.listen("127.0.0.1", port, nil, false)
+      defer duplicate:close()
+    catch
+      observed = error
+    end
+    test.assert(observed is async.OperationError,
+                "default listener allowed another listener without reuse_port")
+    local failure = observed as async.OperationError
+    test.assert(failure.name == "EADDRINUSE" and
+                failure.operation == "net.listen",
+                "exclusive bind lost its native address-in-use error")
+  end)
+end
+
+function test_net_reuse_port_shares_address(context: test.Context)
+  runtime_test.run(function ()
+    local first: net.Server? = nil
+    local port = 0
+    do
+      first, port = support.listen_available(28800, true)
+    catch
+      test.assert(error is async.OperationError,
+                  "reuse_port did not preserve its native operation error")
+      local failure = error as async.OperationError
+      test.assert(failure.name == "ENOTSUP" and failure.code == uv.ENOTSUP and
+                  failure.operation == "net.listen",
+                  "reuse_port failed with an unexpected native error")
+      return
+    end
+    support.cleanup_server(context, first)
+    local second = net.listen("127.0.0.1", port, nil, true)
+    support.cleanup_server(context, second)
+    first:close()
+    local connection = net.connect("127.0.0.1", port)
+    support.cleanup_connection(context, connection)
+    local peer = second:accept()
+    support.cleanup_connection(context, peer)
+    connection:write("survivor\0")
+    test.assert(peer:read_until("\0", true) == "survivor",
+                "closing one reused listener stopped the other listener")
+  end)
+end

@@ -373,12 +373,16 @@ so even parser construction failure has a transport owner. Different connection
 Tasks then progress independently while each one's requests remain ordered.
 
 The high-level constructors keep required values before optional configuration:
-plain `listen` takes host and handler before optional port, backlog, and idle
-timeout, while `listen_tls` takes host, certificate, and handler before
-optional private-key path, port, backlog, and idle timeout. The plain/TLS port
-defaults are 80/443. Both pass the optional backlog to `net.listen` (directly
-or through `ssl.listen`), where it defaults to 128; TLS likewise delegates the
-omitted-key PEM-bundle behavior to `ssl.listen`. Idle timeout defaults to zero
+plain `listen` takes host and handler before optional port, backlog, idle
+timeout, and `reuse_port`, while `listen_tls` takes host, certificate, and
+handler before optional private-key path, port, backlog, idle timeout, and
+`reuse_port`. The plain/TLS port defaults are 80/443. Both pass the optional
+backlog and reuse flag to `net.listen` (directly or through `ssl.listen`), where
+they default to 128 and false. True reaches the native bind as
+`uv.TCP_REUSEPORT`; errors such as `UV_ENOTSUP` retain the ordinary net error
+path. This changes neither Server/Task ownership nor accepted connection
+scheduling. TLS likewise delegates the omitted-key PEM-bundle behavior to
+`ssl.listen`. Idle timeout defaults to zero
 and is validated before listener creation or TLS PEM reads.
 
 The Server record deliberately stores separate optional `net.Server` and

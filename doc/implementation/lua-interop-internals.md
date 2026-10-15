@@ -665,6 +665,9 @@ read, but it is not a sandbox boundary against privileged Lua/C code.
 module table**. After `_init` completes successfully, generated module code
 stores that same `luaopen_<mangled>` function under the logical module name in
 `registry[LUA_PRELOAD_TABLE]`. `package.preload` aliases this registry table.
+The same `titan_module_preload` call registers a native-only descriptor in
+`TITAN_MODULE_PRELOADS_KEY` with matching loader and symbol-resolver pointers.
+Independent states copy these code capabilities without sharing module state.
 This self-publication does not write `package.loaded`; a later Lua `require`
 calls the loader, receives the canonical registry `Udata`, and performs the
 ordinary loaded-table update. A failed initialization does not publish its
@@ -744,6 +747,7 @@ payload. The complete key inventory:
 | Registry key | Value |
 | --- | --- |
 | `"Titan module <modname>"` | canonical module `Udata`, including its native export descriptor and per-state binding caches |
+| `TITAN_MODULE_PRELOADS_KEY` (`"Titan module preload providers"`) | native preload descriptors keyed by logical module name; each holds only matching loader and symbol-resolver pointers, without module state |
 | `"Titan module <modname> metatable"` | the module `Udata`'s member metatable (only if the module exports anything) |
 | `"Titan record <fqtn> metatable"` | the record metatable (`luaL_newmetatable`) — also the record's type identity (a type check compares `uvalue(v)->metatable`) |
 | `"Titan union <fqtn> metatable"` | the union metatable and exact nominal identity; its `__index` exposes only methods and its `__newindex` rejects writes |
@@ -856,8 +860,11 @@ canonical provider's metadata, native entries, and public slot symbols even if
 it came from a linked executable, archive, or local `package.loadlib` call.
 Returning the canonical module does not initialize a second image's caches.
 
-Only when that logical module is absent does selection call `loadlib` for the
-compile-selected relative filename. `loadlib` consults `TITAN_LIBS_KEY`, then
+When the logical module is absent, selection first checks for a matching copied
+native provider descriptor. Its resolver supplies symbols without invoking a
+Lua preload loader or initializing the dependency. Only when that descriptor
+is also absent does selection call `loadlib` for the compile-selected relative
+filename. `loadlib` consults `TITAN_LIBS_KEY`, then
 walks `TITAN_PATH_0_6`, `TITAN_PATH`, or `".;<root>/lib/titan/0.6"`, with `;;`
 splicing the ordinary default. It maps `dir/file` with
 `RTLD_LAZY | RTLD_GLOBAL`, caches the handle by relative provider for the state,
@@ -865,17 +872,18 @@ invalidates native backtrace state, and never calls `dlclose`. Two logical
 modules in one image can reuse that handle and resolve different mangled entries.
 
 The ABI check precedes the consumer's required erased-signature and nominal-shape
-checks, both before newly loaded dependency initialization. Compilation still
+checks, both before copied-provider or newly loaded dependency initialization. Compilation still
 validates semantic types and physical layouts through their own protocols.
-`titan_module_symbol` uses the canonical callback or the newly opened handle;
+`titan_module_symbol` uses the canonical/copied callback or newly opened handle;
 required variable and canonical callable slots are provider-owned data symbols.
 Resolved pointers and indices stay in the importer's per-state native payload.
 Function-tag caches and Interface pair arrays also belong there, so another Lua
 state cannot overwrite these bindings.
 
 After explicit imports initialize, transitive nominal owners use the same
-logical lookup with a null filename. They must already exist and receive their
-own ABI-first compatibility checks; no global symbol lookup chooses their code.
+logical lookup with a null filename. They must already exist; an uninitialized
+copied descriptor cannot satisfy this lookup. They receive their own ABI-first
+compatibility checks; no global symbol lookup chooses their code.
 Same-binary dependencies keep direct, constant-slot access and check the exact
 linked producer's physical identity. See [Selective binary dependency
 verification](binary-compatibility.md).

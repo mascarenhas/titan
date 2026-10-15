@@ -291,19 +291,6 @@ record Lua
   local busy: boolean
 end
 
---- Values copied or borrowed across independent Lua states.
--- @usage standard-library-lua.md#transferring-values
-union TransferValue
-  is_nil()
-  is_boolean(boolean)
-  is_integer(integer)
-  is_float(float)
-  is_string(string)
-  is_lua_state(foreign *lua_State)
-  is_function(foreign function (*lua_State): int)
-  is_pointer(foreign *void)
-end
-
 -- A call retains every native carrier and every source string while its worker
 -- owns the independent state. Output string addresses remain rooted by that
 -- state's stack until conversion has finished on the caller's thread.
@@ -311,7 +298,7 @@ local record LuaCall
   local const owner: Lua
   local const chunk: string
   local const name: string
-  local const arguments: {TransferValue}
+  local const arguments: {async.TransferValue}
   local const inputs: owned titan_lua_value[]
   local packet: foreign titan_lua_call
   local stack_top: foreign int
@@ -342,10 +329,12 @@ end
 local record LuaPreload
   local const name: string
   local const loader: foreign function (*lua_State): int
+  local const symbols: foreign function (const *char): *void
 end
 
--- Snapshot only loaders that have no state-owned upvalues. Keep names in traced
--- strings while the native initialization packet borrows their exact bytes.
+-- Snapshot only loaders that have no state-owned upvalues, together with any
+-- matching native provider resolver. Names remain traced while the initialization
+-- packet borrows their bytes; no initialized module object crosses states.
 local function preload_snapshot(): {LuaPreload}
   local top = ffi.lua_gettop(L)
   defer ffi.lua_settop(L, top)
@@ -362,7 +351,10 @@ local function preload_snapshot(): {LuaPreload}
       if loader then
         if not ffi.lua_getupvalue(L, -1, 1) then
           local name: value = ffi.lua_totvalue(L, -2)
-          entries[#entries + 1] = LuaPreload(name, loader)
+          local module_name = name as string
+          local symbols = ffi.titan_module_preload_symbols(
+            L, module_name, #module_name as foreign size_t, loader)
+          entries[#entries + 1] = LuaPreload(module_name, loader, symbols)
         end
       end
     end
@@ -380,6 +372,7 @@ local function Lua:initialize()
     entries[index - 1].name = snapshot[index].name
     entries[index - 1].length = #snapshot[index].name
     entries[index - 1].loader = snapshot[index].loader
+    entries[index - 1].symbols = snapshot[index].symbols
   end
   self.handle = ffi.luaL_newstate()
   if not self.handle then raise "cannot create independent Lua state" end
@@ -466,36 +459,36 @@ local function LuaCall:prepare()
   end
 end
 
-local function LuaCall:values(): {TransferValue}
+local function LuaCall:values(): {async.TransferValue}
   if self.packet.status ~= ffi.LUA_OK then
     raise copy_state_bytes(self.packet.message, self.packet.message_length)
   end
-  local results: {TransferValue} = {}
+  local results: {async.TransferValue} = {}
   for index = 1, self.packet.nresults as integer do
     local item = self.packet.results + (index - 1)
     if item.kind == ffi.TITAN_LUA_NIL then
-      results[index] = TransferValue.is_nil()
+      results[index] = async.TransferValue.is_nil()
     elseif item.kind == ffi.TITAN_LUA_BOOLEAN then
-      results[index] = TransferValue.is_boolean(item.integer ~= 0)
+      results[index] = async.TransferValue.is_boolean(item.integer ~= 0)
     elseif item.kind == ffi.TITAN_LUA_INTEGER then
-      results[index] = TransferValue.is_integer(item.integer)
+      results[index] = async.TransferValue.is_integer(item.integer)
     elseif item.kind == ffi.TITAN_LUA_FLOAT then
-      results[index] = TransferValue.is_float(item.number)
+      results[index] = async.TransferValue.is_float(item.number)
     elseif item.kind == ffi.TITAN_LUA_STRING then
-      results[index] = TransferValue.is_string(copy_state_bytes(item.bytes, item.length))
+      results[index] = async.TransferValue.is_string(copy_state_bytes(item.bytes, item.length))
     elseif item.kind == ffi.TITAN_LUA_STATE then
-      results[index] = TransferValue.is_lua_state(item.state)
+      results[index] = async.TransferValue.is_lua_state(item.state)
     elseif item.kind == ffi.TITAN_LUA_FUNCTION then
-      results[index] = TransferValue.is_function(item.function)
+      results[index] = async.TransferValue.is_function(item.function)
     elseif item.kind == ffi.TITAN_LUA_POINTER then
-      results[index] = TransferValue.is_pointer(item.pointer)
+      results[index] = async.TransferValue.is_pointer(item.pointer)
     end
   end
   return results
 end
 
 local function Lua:prepare_call(chunk: string, name: string?,
-                                 arguments: {TransferValue}): LuaCall
+                                 arguments: {async.TransferValue}): LuaCall
   return LuaCall {
     owner = self,
     chunk = chunk,
@@ -509,8 +502,8 @@ end
 
 --- Execute Lua code in this state and transfer its arguments and results.
 -- @usage standard-library-lua.md#independent-lua-states
-function Lua:run(chunk: string, name: string?, ...: TransferValue):
-    (...: TransferValue)
+function Lua:run(chunk: string, name: string?, ...: async.TransferValue):
+    (...: async.TransferValue)
   local call = self:prepare_call(chunk, name, {...})
   self:reserve()
   call.stack_top = ffi.lua_gettop(self.handle)
@@ -522,8 +515,8 @@ end
 
 --- Execute Lua or required Titan code on a worker while other Tasks continue.
 -- @usage standard-library-lua.md#asynchronous-execution
-function Lua:run_async(chunk: string, name: string?, ...: TransferValue):
-    (...: TransferValue)
+function Lua:run_async(chunk: string, name: string?, ...: async.TransferValue):
+    (...: async.TransferValue)
   local call = self:prepare_call(chunk, name, {...})
   self:reserve()
   call.stack_top = ffi.lua_gettop(self.handle)
@@ -536,7 +529,7 @@ end
 --- Drain a borrowed Reader, then execute its bytes in this state.
 -- @usage standard-library-lua.md#independent-lua-states
 function Lua:run_from_loader(reader: io.Reader, name: string?,
-                                   ...: TransferValue): (...: TransferValue)
+                                   ...: async.TransferValue): (...: async.TransferValue)
   local builder = string.writer()
   for chunk in reader:read do builder:write(chunk) end
   return self:run(builder:drain(), name, ...)
@@ -545,7 +538,7 @@ end
 --- Drain a borrowed Reader, then execute its bytes on a worker.
 -- @usage standard-library-lua.md#asynchronous-execution
 function Lua:run_async_from_loader(reader: io.Reader, name: string?,
-                                         ...: TransferValue): (...: TransferValue)
+                                         ...: async.TransferValue): (...: async.TransferValue)
   local builder = string.writer()
   for chunk in reader:read do builder:write(chunk) end
   return self:run_async(builder:drain(), name, ...)

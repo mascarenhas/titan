@@ -12,15 +12,10 @@ foreign import "native.h"
 foreign function lua_state_open_libraries(state: *lua_State): int
   local initialization = ffi.lua_touserdata(state, 1) as foreign *titan_lua_open
   ffi.luaL_openselectedlibs(state, ~0, 0)
-  if ffi.lua_checkstack(state, 3) == 0 then
-    return ffi.luaL_error(state, "cannot reserve independent Lua preload stack")
-  end
-  ffi.luaL_getsubtable(state, ffi.LUA_REGISTRYINDEX, ffi.LUA_PRELOAD_TABLE)
   for index = 0, initialization.count - 1 do
     local entry = initialization.preloads[index]
-    ffi.lua_pushlstring(state, entry.name, entry.length)
-    ffi.lua_pushcclosure(state, entry.loader, 0)
-    ffi.lua_rawset(state, -3)
+    ffi.titan_module_preload(
+      state, entry.name, entry.length, entry.loader, entry.symbols)
   end
   return 0
 end

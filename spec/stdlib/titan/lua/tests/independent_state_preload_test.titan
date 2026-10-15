@@ -8,7 +8,7 @@ function test_lua_independent_async_requires_executable_only_titan_module(
     independent_preload.counter = 700
     local state = tlua.new()
     defer state:close()
-    local values: {tlua.TransferValue} = { state:run_async([[
+    local values: {async.TransferValue} = { state:run_async([[
       package.path, package.cpath = '', ''
       local fixture = require('lua.preload_fixture')
       return fixture.counter, fixture.increment(1)
@@ -18,19 +18,56 @@ function test_lua_independent_async_requires_executable_only_titan_module(
                 "native preload did not initialize independent module state")
     test.assert(independent_preload.counter == 700,
                 "native preload reused the host module's mutable state")
-    local repeated: tlua.TransferValue = state:run_async([[
+    local repeated: async.TransferValue = state:run_async([[
       return require('lua.preload_fixture').increment(1)
     ]])
     test.assert(transfer_integer(repeated) == 43,
                 "repeated native require did not preserve independent state")
     local other = tlua.new()
     defer other:close()
-    local fresh: tlua.TransferValue = other:run_async([[
+    local fresh: async.TransferValue = other:run_async([[
       package.path, package.cpath = '', ''
       return require('lua.preload_fixture').counter
     ]])
     test.assert(transfer_integer(fresh) == 41,
                 "new independent state reused another state's preload module")
+  end)
+end
+
+function test_lua_independent_nested_state_keeps_uninitialized_native_providers(
+    _context: test.Context)
+  runtime_test.run(function ()
+    local original = independent_preload.counter
+    defer independent_preload.counter = original
+    independent_preload.counter = 700
+    local intermediate = tlua.new()
+    defer intermediate:close()
+    local result: async.TransferValue = intermediate:run_async([=[
+      package.path, package.cpath = '', ''
+      local tlua = require('titan.lua')
+      local registry = debug.getregistry()
+      assert(registry['Titan module lua.preload_fixture'] == nil)
+      assert(registry['Titan module titan.math'] == nil)
+      local child = tlua.new()
+      local ok, failure = pcall(function()
+        child:run([[
+          package.path, package.cpath = '', ''
+          assert(debug.getregistry()['Titan module titan.math'] == nil)
+          local fixture = require('lua.preload_fixture')
+          assert(fixture.increment(1) == 42)
+          assert(fixture.pi() > 3 and fixture.pi() < 4)
+        ]], '=nested-native-provider')
+      end)
+      child:close()
+      assert(ok, failure)
+      assert(registry['Titan module lua.preload_fixture'] == nil)
+      assert(registry['Titan module titan.math'] == nil)
+      return 42
+    ]=], "=intermediate-native-provider")
+    test.assert(transfer_integer(result) == 42,
+                "nested state lost an inherited, uninitialized native provider")
+    test.assert(independent_preload.counter == 700,
+                "nested native provider reused its host module instance")
   end)
 end
 
@@ -63,7 +100,7 @@ function test_lua_independent_preload_snapshot_skips_host_closures(
   local first = tlua.new()
   defer first:close()
   register_late()
-  local values: {tlua.TransferValue} = { first:run([[
+  local values: {async.TransferValue} = { first:run([[
     return package.preload['lua.tests.snapshot_lua'] == nil,
            package.preload['lua.tests.snapshot_c_closure'] == nil,
            package.preload['lua.tests.snapshot_nonfunction'] == nil,
@@ -74,7 +111,7 @@ function test_lua_independent_preload_snapshot_skips_host_closures(
   for index = 1, #values do assert_transfer_boolean(values[index], true) end
   local second = tlua.new()
   defer second:close()
-  local late: tlua.TransferValue = second:run([[
+  local late: async.TransferValue = second:run([[
     package.path, package.cpath = '', ''
     return require('lua.tests.snapshot_late').increment(1)
   ]])

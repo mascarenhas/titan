@@ -1,0 +1,64 @@
+-- Both constructors preserve net's native reuse-port capability and errors.
+local function reused_http_listener(encrypted: boolean)
+  local handler: http.Handler = function (_: http.Request,
+                                          response: http.Response)
+    response:set_header("Content-Length", "8")
+    response:write("survivor")
+  end
+  local first: http.Server? = nil
+  local port = 0
+  do
+    if encrypted then
+      first, port = support.https_listen(25400, handler, 0, true)
+    else
+      first, port = support.http_listen(25300, handler, nil, true)
+    end
+  catch
+    test.assert(error is async.OperationError,
+                "HTTP reuse_port lost its native operation error")
+    local failure = error as async.OperationError
+    test.assert(failure.name == "ENOTSUP" and
+                failure.operation == "net.listen",
+                "HTTP reuse_port failed with an unexpected native error")
+    return
+  end
+  defer first:close()
+  local second: http.Server? = nil
+  local scheme = "http"
+  if encrypted then
+    second = http.listen_tls("127.0.0.1", support.CERTIFICATE, handler,
+                             support.PRIVATE_KEY, port, nil, nil, true)
+    scheme = "https"
+  else
+    second = http.listen("127.0.0.1", handler, port, nil, nil, true)
+  end
+  defer second:close()
+  first:close()
+  local serving = async.run<|value, value|>(function (): value
+    second:serve()
+    return nil
+  end)
+  defer task_support.cancel_and_join_task(serving, "reuse-port HTTP cleanup")
+  local client = http.Client.new()
+  defer client:close()
+  local response = client:get(scheme .. "://127.0.0.1:" ..
+                             string.tostring(port) .. "/", nil,
+                             support.TRUST_ROOT)
+  defer response:close()
+  test.assert(response.status == 200 and
+              support.read_response(response) == "survivor",
+              "closing one reused HTTP listener stopped the other listener")
+  response:close()
+  client:close()
+  second:close()
+  test.assert(async.join(serving):has_succeeded(),
+              "surviving reused HTTP listener failed to retire")
+end
+
+function test_http_reuse_port(_context: test.Context)
+  runtime_test.run(function () reused_http_listener(false) end)
+end
+
+function test_https_reuse_port(_context: test.Context)
+  runtime_test.run(function () reused_http_listener(true) end)
+end

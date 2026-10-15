@@ -834,8 +834,14 @@ name in the registry preload table, which `package.preload` aliases. Lua code
 can then use ordinary `require`, or Titan code can use `titan.lua.require`, to
 obtain the already initialized canonical module value; `require` also fills
 `package.loaded`. This includes private static archive dependencies reached by
-the initialization recursion. Any compiled-in module outside that closure and
-an unused archive sibling remain absent from the preload table.
+the initialization recursion. The generated module also registers a separate
+native provider descriptor containing code pointers only.
+[Independent Lua states](standard-library-lua.md#independent-lua-states) copy
+matching loaders and descriptors, so their compiled dynamic dependencies can
+resolve the copied code before searching for a provider file. Every module
+still initializes its own state and bindings. Any compiled-in module outside
+the entrypoint's initialization closure and an unused archive sibling remain
+absent from its preload table.
 
 After `luaL_openlibs`, the executable parses the
 inherited `package.cpath` for its current `/lib/titan/0.6/?.so` entry

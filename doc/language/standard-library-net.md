@@ -29,7 +29,7 @@ function Connection.new(): Connection
 function Connection:connect_address(address: uv.sockaddr_t)
 function connect(host: string, port: integer): Connection
 function listen(host: string, port: integer,
-                backlog: integer?): Server
+                backlog: integer?, reuse_port: boolean?): Server
 
 function Connection:read(): string?
 function Connection:has_pending_input(): boolean
@@ -81,6 +81,20 @@ wait for that close callback. It accepts ports `1..65535`.
 does not expose the selected address or port. `backlog` must be in
 `1..2147483647` and is passed directly to libuv's listener; when omitted, it
 defaults to 128.
+
+`reuse_port` defaults to false. When true, the bind uses libuv's
+`UV_TCP_REUSEPORT`, allowing independent listeners to share one local address
+and port. Every participating listener must enable it. The operating system
+distributes incoming connections; no round-robin ordering or fairness is
+promised. Each listener belongs to the Runtime that created it and closes
+independently, making the option useful for servers in separate processes or
+independent Lua states.
+
+Support follows [libuv's TCP bind contract](https://docs.libuv.org/en/v1.x/tcp.html#c.uv_tcp_bind).
+Linux supports this option; macOS and Windows currently raise
+`async.OperationError` with name `"ENOTSUP"`. Titan preserves the native error
+rather than silently binding without reuse. Omitted or false keeps the
+ordinary exclusive listener behavior.
 
 Hosts are text and cannot contain an embedded NUL. Socket payloads are binary
 and may contain any byte, including NUL.
@@ -237,6 +251,6 @@ Connection and Server API with OpenSSL memory BIOs. It does not reach through
 `net` to private libuv handles.
 
 This high-level `net` module does not expose UDP, Unix-domain/named pipes,
-socket options, or endpoint inspection. The public
+arbitrary socket options, or endpoint inspection. The public
 [`uv` binding](standard-library-uv.md) provides those native operations for
 low-level clients and adapters.

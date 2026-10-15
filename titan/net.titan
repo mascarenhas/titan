@@ -533,10 +533,11 @@ end
 -- @param host Connection hostname, numeric IP, or local bind address.
 -- @param port Numeric TCP port.
 -- @param backlog Positive listen backlog; nil defaults to 128.
+-- @param reuse_port Permit independent listeners on the same address; nil or false disables it.
 -- @return New TCP listener; the caller owns closing it.
 -- @usage standard-library-net.md#connecting-and-listening
 function listen(host: string, port: integer,
-                backlog: integer?): Server
+                backlog: integer?, reuse_port: boolean?): Server
   check_host(host)
   check_listen_port(port)
   local actual_backlog = 128
@@ -548,6 +549,8 @@ function listen(host: string, port: integer,
   async.running()
   local loop = async.current_loop()
   local addresses = resolve_addresses(host, port)
+  local flags = 0
+  if reuse_port then flags = uv.TCP_REUSEPORT end
   local last_status = uv.EADDRNOTAVAIL
   for index = 1, #addresses do
     local server = new_server(loop)
@@ -556,7 +559,7 @@ function listen(host: string, port: integer,
       local handle = server.handle_view
       if not is_closed(handle) then uv.close(handle) end
     end
-    local status = uv.tcp_bind(server.handle, addresses[index], 0)
+    local status = uv.tcp_bind(server.handle, addresses[index], flags)
     if status >= 0 then status = server.start_listen(actual_backlog) end
     if status >= 0 then transferred = true; return server end
     last_status = status

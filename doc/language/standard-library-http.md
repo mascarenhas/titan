@@ -103,10 +103,11 @@ record Server
 
 function listen(host: string, handler: Handler,
                 port: integer?, backlog: integer?,
-                idle_timeout: integer?): Server
+                idle_timeout: integer?, reuse_port: boolean?): Server
 function listen_tls(host: string, certificate_file: string, handler: Handler,
                     private_key_file: string?, port: integer?,
-                    backlog: integer?, idle_timeout: integer?): Server
+                    backlog: integer?, idle_timeout: integer?,
+                    reuse_port: boolean?): Server
 function Server:idle_timeout(timeout: integer?): integer
 function Server:header_limit(limit: integer?): integer
 function Server:serve()
@@ -117,7 +118,17 @@ function Server:close()
 and `Response` satisfies both `io.Writer` and `io.Closer` through their exact
 method shapes. The optional trailing arguments may be omitted. Plain `listen`
 defaults to port 80, `listen_tls` defaults to port 443, and both default to a
-backlog of 128. The server idle timeout defaults to 0, meaning no deadline. A
+backlog of 128. `reuse_port` defaults to false on both constructors. Setting it
+to true forwards libuv's `UV_TCP_REUSEPORT` to the underlying TCP bind, through
+`ssl.listen` for HTTPS. All listeners sharing a local address and port must
+opt in. Platform restrictions and errors are the same as
+[`net.listen`](standard-library-net.md#connecting-and-listening): unsupported
+systems, including macOS and Windows, raise `async.OperationError` named
+`"ENOTSUP"`. Closing one listener leaves the others independent. This supports
+one server per independent Lua state or process; it does not change a single
+Runtime's cooperative Task scheduling.
+
+The server idle timeout defaults to 0, meaning no deadline. A
 supplied port must be in `0..65535`, where 0 requests an ephemeral port, and a
 supplied backlog must be in `1..2147483647`. A supplied idle timeout is in
 milliseconds and must be non-negative. It is validated before opening a

@@ -368,7 +368,7 @@ STDLIB_GENERATED_FFI_HEADERS := $(addprefix $(TITAN_OUTPUT_DIR)/,$(addsuffix .ff
 	titan/sqlite3/sqlite3 titan/json/json titan/lua/lua))
 STDLIB_GENERATED_FOREIGN_HEADERS := $(STDLIB_GENERATED_FFI_HEADERS) \
 	$(addprefix $(TITAN_OUTPUT_DIR)/,titan/coroutine.titan.h \
-	titan/uv/uv.titan.h titan/http/http.titan.h \
+	titan/uv/uv.titan.h titan/async.titan.h titan/http/http.titan.h \
 	titan/sqlite3/sqlite3.titan.h titan/lua/lua.titan.h)
 # One native compilation unit per logical module, including folder ensembles.
 # This reviewed import graph owns rebuild propagation and parallel ordering;
@@ -386,7 +386,7 @@ stdlib_outputs = $(call stdlib_stem,$(1)).o $(call stdlib_stem,$(1)).c $(filter 
 STDLIB_MODULE_OBJECTS := $(foreach module,$(STDLIB_MODULES),$(call stdlib_stem,$(module)).o)
 STDLIB_IMPORTS_coroutine :=
 STDLIB_IMPORTS_uv := iteration
-STDLIB_IMPORTS_async := uv coroutine string
+STDLIB_IMPORTS_async := uv coroutine gc string
 STDLIB_IMPORTS_timer := async uv
 STDLIB_IMPORTS_io := os string
 STDLIB_IMPORTS_fs := async uv string
@@ -1171,7 +1171,7 @@ else
   STDLIB_OPENSSL_HEADER_DIRS = $(shell $(OPENSSL_PKG_CONFIG) --variable=includedir openssl 2>/dev/null)
 endif
 STDLIB_C_INPUTS_uv = $(UV_TITAN_HEADERS) $(foreach dir,$(STDLIB_UV_HEADER_DIRS),$(wildcard $(dir)/uv.h $(dir)/uv/*.h))
-STDLIB_C_INPUTS_async = titan/async_signal_platform.h
+STDLIB_C_INPUTS_async = titan/async_signal_platform.h titan/async_mailbox_native.h
 STDLIB_C_INPUTS_fs = titan/fs_platform.h
 STDLIB_C_INPUTS_os = titan/os_platform.h titan/os_environment.h
 STDLIB_C_INPUTS_path = titan/path_platform.h

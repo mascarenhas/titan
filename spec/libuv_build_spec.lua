@@ -1018,10 +1018,11 @@ esac
             local inputs = stdlib_source_files()
             inputs[#inputs + 1] = "titan/sqlite3/native.h"
             inputs[#inputs + 1] = "titan/lua/native.h"
+            inputs[#inputs + 1] = "titan/async_mailbox_native.h"
             inputs[#inputs + 1] = "prepared"
             local folders = { uv = true, http = true, websocket = true, peg = true,
                 string = true, sqlite3 = true, json = true, lua = true }
-            local callbacks = { coroutine = true, uv = true, fs = true,
+            local callbacks = { coroutine = true, uv = true, async = true, fs = true,
                 http = true, sqlite3 = true, lua = true }
             local outputs, objects = {}, {}
             local compiler = { "#!/bin/sh", "set -eu",
@@ -1706,7 +1707,7 @@ done
         local async_exports = {}
         for _, name in ipairs(public_declarations("titan/async.titan")) do async_exports[name] = true end
         for _, name in ipairs({"Error", "OperationError", "ResumeToken", "CancellationReason",
-                "TaskStatus", "Task", "Completion", "checkpoint",
+                "TaskStatus", "Task", "Completion", "TransferValue", "checkpoint",
                 "await_with", "await_cancellable_with", "await_cleanup_with",
                 "await", "await_cancellable", "await_cleanup",
                 "BufferedSubscription", "CoalescingSubscription"}) do
@@ -1729,7 +1730,7 @@ done
                 "work_t", "tcp_t", "process_t", "run", "close", "cancel", "queue_work"}) do
             assert.truthy(uv_exports[name], name)
         end
-        for _, name in ipairs({"Error", "OperationError", "Task", "Runtime", "Call"}) do
+        for _, name in ipairs({"Error", "OperationError", "Task", "Runtime", "Call", "TransferValue"}) do
             assert.falsy(uv_exports[name], name)
         end
     end)
@@ -2362,7 +2363,7 @@ int main(void) {
         end
         for _, header in ipairs({
             "titan/coroutine.titan.h",
-            "titan/uv/uv.titan.h", "titan/http/http.titan.h",
+            "titan/uv/uv.titan.h", "titan/async.titan.h", "titan/http/http.titan.h",
             "titan/sqlite3/sqlite3.titan.h", "titan/lua/lua.titan.h",
         }) do
             expected[#expected + 1] = "out/" .. header
@@ -2680,7 +2681,7 @@ int main(void) {
                 "standalone titan.uv metadata fixture is stale")
 
             for _, record_name in ipairs({
-                "ChannelReader", "ChannelWriter", "Completion",
+                "ChannelReader", "ChannelWriter", "Completion", "Receiver",
             }) do
                 local qualified = "titan.async." .. record_name
                 assert.truthy(expected.async:find(
@@ -5693,7 +5694,7 @@ done
 
             assert.equal(1, count_literal(sanitizer_job,
                 "make titan-stdlib-test-build"), sanitizer_job)
-            assert.equal(39, count_literal(sanitizer_job,
+            assert.equal(40, count_literal(sanitizer_job,
                 "make titan-stdlib-test-run"), sanitizer_job)
             for _, filter in ipairs({
                 "TITAN_FILTER='test_lua_host_roots_coroutine_" ..
@@ -5710,6 +5711,7 @@ done
                 "TITAN_FILTER='test_net_received_chunks_remain_immutable'",
                 "TITAN_FILTER='test_net_overlapping_writes_'",
                 "TITAN_FILTER='test_run_foreign_'",
+                "TITAN_FILTER='test_receiver_'",
                 "TITAN_FILTER='test_lua_independent_'",
                 "TITAN_FILTER='test_signal_watcher_'",
                 "TITAN_FILTER='test_ssl_http_fresh_process_sanitizer_composition$'",
