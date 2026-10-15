@@ -64,23 +64,35 @@ Read the [style guide](doc/style-guide.md) before application or stdlib work.
 | Consistency, coercion, guards, casts/tests, callable/assignment plans | [Type relations and boundaries](doc/implementation/type-relations-and-boundaries.md), [language types](doc/language/types.md) |
 | Generic inference, constraints, erasure, metadata | [Generics](doc/implementation/generics.md) |
 | Const locals/fields/Arrays and initialization authority | [Const values](doc/implementation/const-values.md) |
-| Records, constructor overrides, aliases, Interfaces, unions | [Record constructors](doc/implementation/record-constructors.md), [aliases](doc/implementation/type-aliases.md), [Interfaces](doc/implementation/interfaces.md), [unions](doc/implementation/unions.md) |
-| Calling conventions, function entries, closures, module initialization | [Codegen overview](doc/implementation/codegen-overview.md), [Lua interop internals](doc/implementation/lua-interop-internals.md) |
-| Representation, stack roots, barriers, capture boxes, module state | [Values and GC](doc/implementation/values-and-gc.md) |
-| Native record/union payloads, public prefixes, embedded aggregates | [Native nominal storage](doc/implementation/nominal-storage.md) |
+| Record-call desugaring, `new` overrides, literal construction authority | [Record constructors](doc/implementation/record-constructors.md) |
+| Transparent type aliases, owner namespaces, serialized `type_members` | [Type aliases](doc/implementation/type-aliases.md) |
+| Interface field snapshots, method dispatch, structural satisfaction, wrapper conversions | [Interfaces](doc/implementation/interfaces.md) |
+| Union constructors/payloads, `case` coverage, variant metadata and schema validation | [Unions](doc/implementation/unions.md) |
+| Generated function entries/calling convention, closures/capture boxes, `_fn`, module `_init` | [Codegen overview](doc/implementation/codegen-overview.md) |
+| Genuine Lua vs strict Titan calls, dynamic coercion, Lua-visible values and metatables | [Lua interop internals](doc/implementation/lua-interop-internals.md) |
+| `TValue`/`Udata` representation, stack rooting, allocation anchoring, write barriers | [Values and GC](doc/implementation/values-and-gc.md) |
+| Record/union traced UV and native payload, public prefixes, embedded C objects and tails | [Native nominal storage](doc/implementation/nominal-storage.md) |
 | Arrays, proxy identity, length, Lua writes, strict reads | [Dense Arrays](doc/implementation/dense-arrays.md) |
 | Operators, evaluation, control flow, Maps, generated constructs | [Codegen constructs](doc/implementation/codegen-constructs.md) |
-| Closure adapters and immediately invoked lambdas | [Closure adjustment wrappers](doc/implementation/closure-adjustment-wrappers.md), [immediate functions](doc/implementation/immediate-functions.md) |
-| Argument/result shapes, open sinks, spread lowering | [Named arguments](doc/implementation/named-arguments.md), [variadics](doc/implementation/variadic-parameters.md), [flexible returns](doc/implementation/flexible-returns.md), [spreads](doc/implementation/spread-expressions.md) |
+| Function-type adjustment: target-tagged wrappers, native adapters, strict relays | [Closure adjustment wrappers](doc/implementation/closure-adjustment-wrappers.md) |
+| Immediately called lambda inlining, logical frames, finite/open results, cleanup | [Immediate functions](doc/implementation/immediate-functions.md) |
+| Named calls, declaration parameter names, omissions, source-order normalization | [Named arguments](doc/implementation/named-arguments.md) |
+| Variadic input parameters, `...`, descriptor ABI, vararg scope and rooting | [Variadic parameters](doc/implementation/variadic-parameters.md) |
+| Flexible result tails, finite/open result demand, contextual calls through `value` | [Flexible returns](doc/implementation/flexible-returns.md) |
+| Array/integer-Map/vararg spread ranges, tail expansion, open-sink lowering | [Spread expressions](doc/implementation/spread-expressions.md) |
 | `raise`/`catch`, traceback attribution, longjmp, cleanup | [Error handling](doc/implementation/error-handling.md), [defer](doc/implementation/defer.md) |
 | Stackful coroutine transfer, minicoro, suspended roots | [Coroutines](doc/implementation/coroutines.md) |
-| FFI preprocessing, C parser/type extraction, declarations/probes | [FFI internals](doc/implementation/ffi-internals.md), [C FFI expressions](doc/implementation/c-ffi-expressions.md) |
-| Source-defined C callbacks, generated headers, sequencing | [Foreign functions](doc/implementation/foreign-functions.md) |
-| Lua C API use in trusted library code | [Trusted Lua C API boundary](doc/implementation/ffi-lua-api-followup.md), [Lua interop internals](doc/implementation/lua-interop-internals.md) |
-| Resolver contexts, CLI, flags, native toolchain, installed SDK paths | [Driver and toolchain](doc/implementation/driver.md) |
-| Flat/folder modules, source-private collaboration, object reuse | [Folder modules](doc/implementation/folder-modules.md), [source imports](doc/implementation/source-import-visibility.md), [incremental compilation](doc/implementation/incremental-compilation.md) |
-| Physical providers, shims, archive metadata, native composition | [Multi-module libraries](doc/implementation/multi-module-libraries.md), [static compiled modules](doc/implementation/static-compiled-modules.md) |
-| Load-time dependency compatibility and public shape requirements | [Binary compatibility](doc/implementation/binary-compatibility.md) |
+| C-header preprocessing/type extraction, `foreign import`, `.ffi.h` pipeline | [FFI internals](doc/implementation/ffi-internals.md) |
+| C casts/operators/macros/enums, target arithmetic, compile-probe result caching | [C FFI declarations and expressions](doc/implementation/c-ffi-expressions.md) |
+| Source-defined exact C-ABI callbacks, restricted foreign bodies, `.titan.h`, sequencing | [Foreign functions](doc/implementation/foreign-functions.md) |
+| Trusted raw Lua C API: stack-effect ledger, temporary roots, longjmp, audited allowlist | [Trusted Lua C API boundary](doc/implementation/ffi-lua-api-followup.md) |
+| Module lookup, C compilation/linking, CLI flags, SDK/tool paths, language-server API | [Driver and toolchain](doc/implementation/driver.md) |
+| Folder mains/contributors, declaration order, canonical module/output identity | [Folder modules](doc/implementation/folder-modules.md) |
+| Explicit `.titan` imports: local visibility, trusted source provenance, inherited C headers | [Source-import visibility](doc/implementation/source-import-visibility.md) |
+| Compile-only `-c`, incremental `.o` reuse, source-object metadata, Make-owned invalidation | [Incremental compilation](doc/implementation/incremental-compilation.md) |
+| Prefix providers, multi-root `.so`/`.a` bundles, Lua shims, staged pair publication | [Multi-module libraries](doc/implementation/multi-module-libraries.md) |
+| Archive/object metadata, ELF/Mach-O/COFF readers, target selection, static composition | [Static compiled modules](doc/implementation/static-compiled-modules.md) |
+| Replacing a DSO: consumer-used signatures/public shapes and runtime verification | [Binary compatibility](doc/implementation/binary-compatibility.md) |
 | Hover/doc comments, completion, long-lived semantic clients | [Documentation comments](doc/implementation/documentation-comments.md), [completion](doc/implementation/completion.md), [language-server API](doc/implementation/driver.md#language-server-compiler-api) |
 
 Keep `driver.LANGUAGE_SERVER_API_VERSION` at **1 until the first public
@@ -99,12 +111,12 @@ belong in the corresponding compiler layer.
 
 | Area | Implementation chapters |
 | --- | --- |
-| Public libuv owners, callbacks, native requests, extending bindings | [Libuv extension guide](doc/implementation/libuv-extension-guide.md), [async/libuv runtime](doc/implementation/libuv-runtime.md) |
-| Tasks, waits, subscriptions, cancellation, shutdown, timers | [Async/libuv runtime](doc/implementation/libuv-runtime.md); public [async](doc/language/async-io.md) and [timer](doc/language/standard-library-timer.md) contracts |
+| Native libuv owners/requests, callback lifetime, adding a binding or Task adapter | [Libuv extension guide](doc/implementation/libuv-extension-guide.md); [generic wait policy](doc/implementation/libuv-runtime.md) |
+| Task scheduling, Completion waits, ResumeToken wakes, subscriptions, cancellation, shutdown, timers | [Async continuation runtime](doc/implementation/libuv-runtime.md); public [async](doc/language/async-io.md) and [timer](doc/language/standard-library-timer.md) contracts |
 | I/O Interfaces, printing, iteration, shell streams | [I/O library](doc/implementation/io-library.md) |
 | Files, metadata, watchers, lexical paths | [Filesystem library](doc/implementation/filesystem-library.md), [path library](doc/implementation/standard-library-path.md) |
 | Child processes, stdio, signals, graceful exit | [OS library](doc/implementation/os-library.md) |
-| DNS/TCP, TLS, URLs, HTTP framing/deadlines | [Networking](doc/implementation/libuv-networking.md), [TLS](doc/implementation/ssl-library.md), [URL](doc/implementation/url-library.md), [HTTP](doc/implementation/http-library.md) |
+| DNS/TCP, TLS, URLs, HTTP framing/deadlines | [DNS/TCP request and stream adapters](doc/implementation/libuv-networking.md), [TLS](doc/implementation/ssl-library.md), [URL](doc/implementation/url-library.md), [HTTP](doc/implementation/http-library.md) |
 | WebSocket framing, controls, byte/ownership handoff, retirement | [WebSocket library](doc/implementation/websocket-library.md), [validation](doc/implementation/websocket-validation.md) |
 | PEG, relabel, private LPegLabel engine and payload | [LPegLabel embedding](doc/implementation/lpeglabel-embedding.md) |
 | Byte strings, writers, regex, format/pack | [String library](doc/implementation/string-library.md) |
@@ -127,7 +139,7 @@ Read the matching workflow before executing commands or changing build policy:
 | --- | --- |
 | Bootstrap Lua/LuaRocks, choose SDK, build/install/package/uninstall | [Repository workflow](doc/implementation/repository-workflow.md), [build responsibilities](doc/implementation/build-script-audit.md) |
 | Production vs validation inputs, prefix isolation, effective flags | [Build profiles](doc/language/build-profiles.md) |
-| Test placement, shared helpers, fixtures, native aggregate | [Test runner](doc/implementation/test-runner.md), [repository workflow](doc/implementation/repository-workflow.md) |
+| Test placement, shared helpers, fixture ownership, native aggregate | [Regression placement](doc/implementation/test-runner.md#regression-placement), [test-runner implementation](doc/implementation/test-runner.md), [repository workflow](doc/implementation/repository-workflow.md) |
 | Linux/macOS lanes, sharding, caches, sanitizer diagnostics | [Continuous integration](doc/implementation/continuous-integration.md) |
 | Native coverage, source attribution, separate coverage objects | [Native coverage implementation](doc/implementation/native-coverage.md), [coverage commands](doc/language/native-coverage.md) |
 | Windows prerequisites, SDK, DLL providers/launchers, native tests | [Windows build](doc/implementation/windows-build.md), [Windows user guide](doc/language/windows-build.md) |
