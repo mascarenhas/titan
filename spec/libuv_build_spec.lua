@@ -4569,8 +4569,6 @@ done
                 "rm -f titan/peg/peg.c titan/peg/peg.o",
                 "rm -f titan/string/string.c titan/string/string.o",
                 "rm -rf $(STDLIB_CONTAINER).dSYM",
-                "examples/utils.a examples/artisanal.a examples/sdl_quit.a",
-                "testfiles/selection_sort.a testfiles/sieve.a",
                 "include $(TITAN_TEST_MODULE_MANIFEST)",
                 "TITAN_TEST_EXECUTABLE := $(TITAN_TEST_BUILD_DIR)/" ..
                 "$(TITAN_STDLIB_TEST_PROGRAM_OUTPUT)",
@@ -4626,8 +4624,6 @@ done
             assert.falsy(makefile:find("-Wl,--whole-archive", 1, true), makefile)
             assert.falsy(makefile:find("-Wl,-force_load", 1, true), makefile)
             assert.falsy(makefile:find("rm -f *.a", 1, true), makefile)
-            assert.falsy(makefile:find("examples/*.a", 1, true), makefile)
-            assert.falsy(makefile:find("testfiles/*.a", 1, true), makefile)
             assert.falsy(makefile:find("rm -f titan/*.lua", 1, true), makefile)
             assert.falsy(makefile:find("rm -f titan/uv/*.lua", 1, true),
                 makefile)
@@ -4643,15 +4639,6 @@ done
             assert.truthy(native_run:find('2>&1 | tee "$$log"', 1, true), native_run)
             assert.truthy(native_run:find("spec/support/check_stdlib_test_output.lua", 1, true), native_run)
             assert.falsy(native_run:find("output=$$(", 1, true), native_run)
-
-            local examples_makefile = read_file("examples/Makefile")
-            assert.truthy(examples_makefile:find(
-                "utils.so and utils.a", 1, true), examples_makefile)
-            assert.truthy(examples_makefile:find(
-                "rm -rf ../out/examples",
-                1, true), examples_makefile)
-            assert.falsy(examples_makefile:find("*.a", 1, true),
-                examples_makefile)
 
             local snapshot = read_file("spec/support/ci_stdlib_snapshot.sh")
             for _, contract in ipairs({
@@ -5944,10 +5931,11 @@ done
             local root = make_temp_dir()
             local success, failure = xpcall(function()
                 for _, directory in ipairs({
-                    "spec", "future", "future/deep",
+                    "spec", "spec/nested", "spec/nested with spaces",
+                    "future", "future/deep",
                     "future/deep/suite.dSYM",
                     "test_runner_future_case", ".titan-tests",
-                    "examples", "testfiles", "authored",
+                    "authored",
                 }) do
                     assert.truthy(lfs.mkdir(root .. "/" .. directory))
                 end
@@ -5969,8 +5957,8 @@ done
                     [".titan-tests/keep"] = "owned output\n",
                     ["spec/authored.ffi.h"] = "author written header\n",
                     ["spec/empty.ffi.h"] = "",
-                    ["examples/authored.titan.h"] = "author written header\n",
-                    ["testfiles/authored.ffi.h"] = "author written header\n",
+                    ["spec/nested/authored.titan.h"] = "author written header\n",
+                    ["spec/nested with spaces/authored.ffi.h"] = "author written header\n",
                     ["authored/keep__test_support.ffi.h"] =
                     "author written header\n",
                     ["other.ffi.h"] =
@@ -5980,8 +5968,8 @@ done
                     ["spec/generated_fixture.ffi.h"] = "ffi",
                     ["spec/generated_fixture.titan.h"] = "foreign",
                     ["spec/generated with spaces.ffi.h"] = "ffi",
-                    ["examples/generated.ffi.h"] = "ffi",
-                    ["testfiles/generated.ffi.h"] = "ffi",
+                    ["spec/nested/generated.titan.h"] = "foreign",
+                    ["spec/nested with spaces/generated.ffi.h"] = "ffi",
                     ["future/deep/suite__test_support.ffi.h"] = "ffi",
                     ["future/deep/suite__test_runner.ffi.h"] = "ffi",
                     ["future/deep/suite__test_entrypoint.ffi.h"] = "ffi",
@@ -6024,7 +6012,8 @@ done
                 end
                 for _, path in ipairs({
                     "spec/authored.ffi.h", "spec/empty.ffi.h",
-                    "examples/authored.titan.h", "testfiles/authored.ffi.h",
+                    "spec/nested/authored.titan.h",
+                    "spec/nested with spaces/authored.ffi.h",
                     "authored/keep__test_support.ffi.h", "other.ffi.h",
                 }) do
                     assert.equal(files[path], read_file(root .. "/" .. path),

@@ -185,7 +185,6 @@ cause.
 | `out/` | Default repository output tree: standard-provider pair and generated logical-module shims under `out/titan/`, plus native-test and coverage subtrees. `TITAN_OUTPUT_DIR` selects another stage; authored runtime objects and native dependencies retain their own build locations. |
 | `titan-runtime/` | `titan.h`/`titan.c` (`RTLD_LAZY` + `RTLD_GLOBAL` generated-import loader and error handler) and the reduced `minicoro.c`, whose two objects are the exact members of runtime-SDK `libtitan.a`; separate vendored `libbacktrace.a`; `ltitanlib.c`, carried as `ltitanlib.o` into the full standard `titan.so`/`titan.a` pair and linked alone into the private bootstrap, exposing `backtrace`, internal `pin`/`clear`, compiler-local `_loadlib`, and shim-facing `_loadlibglobal`; top-level `minicoro.h` and `titan.h`, plus the sole namespaced SDK header `titan/ffi.h`. Standard callbacks are source foreign functions, not runtime archive shims. |
 | `spec/` | The Busted outer harness and native Titan standard-library suites; coder specs generate, compile, and run C. |
-| `examples/`, `testfiles/` | Manual benchmark/demo material (not used by the suite). |
 | `doc/` | This implementation manual, the [language reference](../language/index.md), and the [style guide](../style-guide.md). |
 
 Start with [repository workflow](repository-workflow.md) for prerequisites,

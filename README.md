@@ -906,20 +906,6 @@ repository root without setting `PREFIX` or `ROCKS_TREE`. Tests discover the
 active installation from Lua's configured paths and use the `lua` on `PATH`
 for child interpreters.
 
-# Building the examples
-
-The `examples/` directory has its own `Makefile` with a target per example
-module plus an `all` target. From the repository root, `make examples` builds
-them all:
-
-```sh
-$ make examples            # or: make -C examples all
-$ make -C examples utils   # build a single example
-```
-
-`sdl_demo` depends on `sdl_quit`, and both use the C FFI against SDL2, so they
-need the SDL2 development headers installed.
-
 # Cleaning up
 
 `make clean` removes the `out/` tree and generated native build/test artifacts

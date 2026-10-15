@@ -929,11 +929,12 @@ its element count. Scalar owners have neither a length nor array indexing.
 
 ## Linking And Platform Requirements
 
-`foreign import` gives Titan the declarations. You still link against the C
-library that implements them with `titanc -l`:
+`foreign import` gives Titan the declarations. Link the C library that
+implements them with `titanc -l`. For example, an application module `app.main`
+using a C library named `widget` links with:
 
 ```sh
-titanc examples.sdl_demo -lSDL2
+titanc -o out app.main -lwidget
 ```
 
 The compile-time FFI depends on a POSIX-like C toolchain. Titan asks the
