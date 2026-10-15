@@ -161,6 +161,111 @@ describe("incremental and separate compilation (CLI)", function()
         end
     end)
 
+    it("writes the complete source hierarchy and executable into a new output folder", function()
+        local folder = NAMESPACE .. ".folder"
+        local folder_source = source(folder, [[
+            foreign import "native.h"
+            foreign type Count = int
+            foreign function bump(item: Count): Count return item + ffi.OFFSET end
+        ]], true)
+        write(folder_source:match("^(.*)/[^/]+$") .. "/native.h", "#define OFFSET 7\n")
+        write(folder_source:match("^(.*)/[^/]+$") .. "/private.titan", [[
+            local function answer(): integer return 35 end
+        ]])
+        local app_source = source(APP, 'local folder = import "' .. folder .. [[.titan"
+            function main(args: {string}): integer
+                local callback: foreign function(Count): Count = folder.bump
+                return callback(folder.answer() as foreign Count) as integer
+            end
+        ]])
+        local output = workspace .. "/build files/nested/output"
+        compiled("--output", output, APP)
+        local folder_output = output .. "/" .. NAMESPACE .. "/folder/folder"
+        for _, stem in ipairs({ output .. "/" .. APP, folder_output }) do
+            for _, suffix in ipairs({ ".c", ".o", ".ffi.h" }) do
+                assert.is_true(exists(stem .. suffix), stem .. suffix)
+            end
+        end
+        assert.is_true(exists(folder_output .. ".titan.h"))
+        for _, stem in ipairs({ app_source, folder_source }) do
+            for _, suffix in ipairs({ ".c", ".o", ".ffi.h", ".titan.h" }) do
+                assert.is_false(exists(stem .. suffix), stem .. suffix)
+            end
+        end
+        local executable = platform.windows and
+            assert(driver.windows_program_paths(APP, nil, nil, output)).executable or output .. "/" .. APP
+        local command = { "env", "TITAN_PATH_0_6=" .. prefix .. "/lib/titan/0.6;;", executable }
+        if platform.windows then table.insert(command, 2, "MSYS2_ENV_CONV_EXCL=TITAN_PATH_0_6") end
+        local ok, text, why, code = run(command)
+        assert.equal("exit", why, text)
+        assert.equal(42, code, text)
+        assert.is_false(ok)
+        assert.is_true(exists(output .. "/" .. APP .. "__entrypoint.c"))
+        assert.is_false(exists(APP .. "__entrypoint.c"))
+    end)
+
+    it("puts library providers and Lua shims beside the redirected module hierarchy", function()
+        local flat, folder = NAMESPACE .. ".flat", NAMESPACE .. ".folder"
+        local first = source(flat, "function answer(): integer return 21 end\n")
+        local second = source(folder, "function answer(): integer return 22 end\n", true)
+        local output = workspace .. "/provider output"
+        compiled("-o", output, flat, folder)
+        assert.is_true(exists(output .. "/" .. NAMESPACE .. SHARED_SUFFIX))
+        if not platform.windows then assert.is_true(exists(output .. "/" .. NAMESPACE .. ".a")) end
+        for _, name in ipairs({ flat, folder }) do
+            assert.is_true(exists(output .. "/" .. name:gsub("[.]", "/") .. ".lua"))
+        end
+        for _, stem in ipairs({ first, second }) do
+            assert.is_false(exists(stem .. ".c"))
+            assert.is_false(exists(stem .. ".o"))
+            assert.is_false(exists(stem .. ".ffi.h"))
+        end
+        local ok, text = run({ LUA, "-E", "-e", string.format(
+            "package.path = %q .. package.path; package.cpath = %q .. package.cpath; " ..
+            "assert(require(%q).answer() == 21); assert(require(%q).answer() == 22)",
+            output .. "/?.lua;", output .. "/?" .. SHARED_SUFFIX .. ";", flat, folder) })
+        assert.is_true(ok, text)
+    end)
+
+    it("reuses only relocated objects and restores their foreign headers", function()
+        local base = NAMESPACE .. ".base"
+        local original = source(base, [[
+            foreign type Count = int
+            foreign function bump(item: Count): Count return item + 7 end
+        ]])
+        source(APP, 'local base = import "' .. base .. [[.titan"
+            function main(args: {string}): integer
+                local callback: foreign function(Count): Count = base.bump
+                return callback(35 as foreign Count) as integer
+            end
+        ]])
+        local output = workspace .. "/incremental output"
+        compiled("-o", output, "-c", base)
+        local relocated = output .. "/" .. base:gsub("[.]", "/")
+        local object = read(relocated .. ".o")
+        local future = os.time() + 120
+        assert(lfs.touch(relocated .. ".o", future))
+        assert(os.remove(relocated .. ".ffi.h"))
+        assert(os.remove(relocated .. ".titan.h"))
+        write(original .. ".o", "unrelated source-adjacent object")
+        assert(lfs.touch(original .. ".o", future + 120))
+        compiled("-o", output, "-c", "--incremental", APP)
+        assert.equal(object, read(relocated .. ".o"))
+        assert.equal(future, lfs.attributes(relocated .. ".o", "modification"))
+        assert.is_true(exists(relocated .. ".ffi.h"))
+        assert.is_true(exists(relocated .. ".titan.h"))
+        assert.equal("unrelated source-adjacent object", read(original .. ".o"))
+    end)
+
+    it("rejects an output path that is a file before checking modules", function()
+        local output = workspace .. "/reserved"
+        write(output, "user-owned\n")
+        local ok, text = compile("-o", output, APP)
+        assert.is_false(ok)
+        assert.matches("not a directory", text, 1, true)
+        assert.equal("user-owned\n", read(output))
+    end)
+
     it("compiles unrelated main roots without selecting an executable or provider", function()
         local first = source(APP, main(3))
         local second = source(OTHER, main(4))

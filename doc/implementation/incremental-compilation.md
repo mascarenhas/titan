@@ -151,9 +151,11 @@ other dependencies. No dependency hashes or configuration inventory are used
 to certify a hit.
 
 The stdlib object DAG keeps one object per logical module and the existing
-explicit folder inventories. The final private publication stage reuses
-persistent source-adjacent objects, combines the ordered native payload into
-both provider forms, and performs normal pair/shim validation. The source-rock
+explicit folder inventories. The final publication stage reuses persistent
+objects in the selected output tree (`TITAN_OUTPUT_DIR`, default `out/`),
+combines the ordered native payload into both provider forms, and performs
+normal pair/shim validation. See [output-directory routing](output-directory.md).
+The source-rock
 default `all` build uses the same object targets with the in-tree compiler Lua
 sources, private support bootstrap, and matching Lua SDK. The install pass
 stages those built outputs; the copy-only `post_install` helper publishes the

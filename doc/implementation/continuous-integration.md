@@ -7,6 +7,13 @@ in [repository workflow](repository-workflow.md); test implementation and native
 coverage are in [test runner](test-runner.md) and
 [native coverage](native-coverage.md).
 
+Repository builds stage generated Titan artifacts under `TITAN_OUTPUT_DIR`
+(default `out`), with native tests in `out/tests` and native coverage in
+`out/coverage`. Coverage reports upload from `out/coverage/report`; the ordinary
+installed provider remains a separate packaging/runtime input. Authored runtime
+objects, native dependency builds, and probe caches keep their existing owners.
+See [output-directory routing](output-directory.md) for configuration isolation.
+
 ## Linux job graph and concurrency
 
 Linux runs on pushes. Four job definitions produce five runner executions:
@@ -147,7 +154,8 @@ Keep ordinary `#line` attribution: traceback gates require exact user and
 standard-provider frames. `TITAN_NO_LINE_DIRECTIVES=1` is only for isolated
 reproduction. Before later publication replaces outputs, the shared stdlib
 publication recipe saves sanitized `titan.so`, its exact generated `.c`/`.o`
-pairs, and a NUL-delimited generated-C compile-prefix argv.
+pairs from the selected stage (`out/titan` by default), and a NUL-delimited
+generated-C compile-prefix argv.
 
 Each gate captures its original combined output. Only the failure diagnostic
 step reads those logs; never rerun the failed program/provider to obtain a

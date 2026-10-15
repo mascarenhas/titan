@@ -93,6 +93,11 @@ other main. The first requested root's `program_output` owns the executable,
 including the folder `__main` convention. Input application mains do not
 participate in main selection under `--test`.
 
+With `--output`, program stems and generated companions are mapped below the
+selected directory; source identity and test discovery remain unchanged.
+Without it, the original placement rules still apply. See
+[output-directory routing](output-directory.md).
+
 `-c --test` performs discovery so actual test-owner objects retain their C
 flags, then stops before generating the runner or linking. An incremental final
 test invocation discovers current cases from source or object metadata,
@@ -258,9 +263,11 @@ array-boundary diagnostics and `setjmp`/`longjmp` value-survival fixtures retain
 their explicit optimization levels because optimization is part of their oracle.
 Benchmark scripts keep the profiles recorded by their measurements.
 
-Production and validation prefixes are independent; source-adjacent generated
-objects still belong to one checkout. Serialize profile rebuilds or use private
-source copies. Linux and manually dispatched macOS CI prepare validation trees,
+Production and validation prefixes are independent. Distinct `--output` roots
+can separate generated Titan objects, but repository Make builds default to
+one `out/` tree and authored runtime/native dependency builds still share their
+checkout locations. Serialize builds sharing those inputs or use private source
+copies. Linux and manually dispatched macOS CI prepare validation trees,
 include the profile in native/rock/probe cache keys, and share only their
 selected read-only SDK with isolated compiler workers. These internal test
 artifacts do not change normal installed production defaults.
@@ -324,15 +331,17 @@ roots under `spec/stdlib/titan/`, used by Linux, macOS, and native Windows.
 The same reviewed inventory names their test/helper compilation units, folder
 contributors, and direct source imports. On Unix, Make schedules per-module
 `-c --test --incremental` commands after their source dependencies. Every
-command runs from `.titan-tests/` with the same absolute source tree and flags,
-and depends on the installed standard provider. No separate `titan.test`
+command runs from `TITAN_TEST_BUILD_DIR` (default `out/tests`) with `--output .`,
+uses the same absolute source tree and flags, and depends on the installed
+standard provider. No separate `titan.test`
 support object is compiled.
 
-One final Unix `--test --incremental --no-uv-bootstrap` invocation keeps all 28
-roots explicit and discovers the complete source/object closure. The designated
-first root, `test.tests`, owns `.titan-tests/test/tests`; the current synthetic
-runner, entrypoint, and Darwin dSYM are also owned there. Ordinary module
-objects/C/headers remain beside their sources. Make owns their source-import,
+One final Unix `--output . --test --incremental --no-uv-bootstrap` invocation
+keeps all 28 roots explicit and discovers the complete source/object closure. The designated
+first root, `test.tests`, owns `out/tests/test/tests`; the current synthetic
+runner, entrypoint, and Darwin dSYM are also owned there. Module C, objects,
+and headers reproduce the test source hierarchy below `out/tests`, leaving
+the source tree untouched. Make owns their source-import,
 private-header, installed-provider, compiler/SDK, and configuration prerequisites.
 Native fixture objects and the host child executable are separate targets.
 A no-op `titan-stdlib-test-build` invokes neither the compiler nor the linker.
@@ -444,13 +453,16 @@ Validation evidence records source identity, OS and architecture, SDK/compiler
 and provider settings, selected/passed/skipped/failed counts, and every skip
 reason. An Intel macOS run does not establish Apple Silicon behavior.
 
-Builds retain their reusable outputs; explicit `make clean` performs generic
-cleanup within a narrow ownership boundary. `.titan-tests/` is a
-Make-owned directory and may be removed recursively. Under `spec/`, the cleanup
-helper removes all generated `.o` files and removes a `.c` only when a
-same-stem `.titan` source exists. It does not consult Git, so it also works in a
-source rock, while author-written C fixtures remain untouched. Root-level
-compiler fixtures retain their existing exact cleanup rules.
+Builds retain their reusable outputs; explicit `make clean` removes the selected
+`TITAN_OUTPUT_DIR` (default `out/`) as a Make-owned tree. The test cleanup helper
+prunes `out/` while inspecting synthetic fixtures and, unless `--keep-output`
+is selected, removes the owned `out/tests` and legacy `.titan-tests` directories
+recursively. Under `spec/`, legacy compiler outputs still use the bounded
+cleanup rules: remove generated `.o` files and a `.c` only when a same-stem
+`.titan` source exists. Generated headers require their exact compiler banner;
+synthetic test suffixes and root `test_runner_*` identify other owned fixtures.
+This does not consult Git, so it also works in a source rock while preserving
+author-written C/header fixtures and the ordinary `out/` provider stage.
 
 Linux CI prepares a compiler/runtime SDK without standard modules, then starts
 two compiler shard pairs and the stdlib job in parallel. Compiler integration
@@ -458,6 +470,8 @@ specs that consume installed standard modules run in the stdlib job with LuaCov;
 the other compiler specs remain independent of the stdlib build. The stdlib job
 runs retained host/packaging boundaries, then source-links the production stdlib
 into this aggregate for its one complete behavior run with native coverage.
+The coverage executable and generated artifacts use `out/coverage`, with
+reports in `out/coverage/report`, separate from ordinary `out/tests` outputs.
 Each execution resets coverage counters and replaces reports, so the saved
 report comes from the complete unfiltered run. The already built sanitizer
 aggregate owns the focused 15-second shutdown check without gcov/gcovr reporting

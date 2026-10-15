@@ -1,4 +1,4 @@
--- Coverage is an ordinary source build in source-adjacent .coverage directories.
+-- Coverage is an ordinary source build in output-local .coverage directories.
 local lfs = require "lfs"
 local path = require "titan-compiler.path"
 local platform = require "titan-compiler.platform"
@@ -122,7 +122,8 @@ function coverage.prepare(driver, args, strategy)
         selected = {}, modules = {}, patterns = patterns, generated = {}, outputs = {},
         backend = backend, gcov = gcov_argv, gcovr = gcovr,
         root = absolute(args.coverage_root or "."),
-        output = absolute(args.coverage_output or ".coverage/report"),
+        output = absolute(args.coverage_output or
+            path.join(args.output or ".", ".coverage", "report")),
         formats = formats, working_directory = absolute("."),
     }
 end

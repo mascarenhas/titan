@@ -31,6 +31,10 @@ prepared by the source-rock build.
 
 The default [build profile](build-profiles.md) is `production`. Use separate
 SDK prefixes and `WINDOWS_BUILD_ROOT` directories for different profiles.
+The Windows build root defaults to `out/windows` for production and
+`out/windows-validation` for validation, beneath the checkout. The standard
+provider's generated files go into that root's `out/` subdirectory; installation
+still publishes the DLL and shims into the selected SDK.
 Lua and LuaRocks targets reuse an existing program under `PREFIX/bin`; clean
 the corresponding private build outputs and remove or replace the installed
 program when changing native inputs. Close consumers before replacing a mapped
@@ -69,6 +73,20 @@ Libraries emit one DLL provider and generated Lua shims. Programs emit a small
 `bin/<logical-module>.exe` launcher and an application DLL; `--launcher-name`
 can select another EXE name without changing provider identity. Windows Titan
 archive providers and `--static` are unsupported.
+
+Use [an output directory](output-directory.md) to separate generated files from
+sources and keep configurations independent:
+
+```sh
+titanc --output out/app app.main
+```
+
+For a standalone `app.main`, this places the launcher at
+`out/app/bin/app.main.exe` and its provider at
+`out/app/lib/titan/0.6/app/main.dll`. Without `--output`, those final paths remain
+relative to the compiler's working directory. Library consumers must select
+their output directory through the usual provider/Lua search paths;
+`--output` changes write locations without changing lookup.
 
 Deliver the matching `lua55.dll` and native dependency DLLs beside the
 executables. Lua's Windows `!` path expansion means the running executable's

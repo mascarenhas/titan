@@ -1141,6 +1141,33 @@ describe("C FFI code generation", function()
         end)
     end)
 
+    it("executes floating literal macros and native infinity and NaN constants",
+    function()
+        with_header([[
+            #include <math.h>
+            #define FFI_FLOAT_EXP (-1e3F)
+            #define FFI_DOUBLE_EXP 1E-3
+            #define FFI_LONG_DOUBLE_HEX (+0x1.8p-2L)
+            #define FFI_FLOAT_MIXED (3 * 1.5f)
+            #define FFI_FLOAT_COMPARISON (1.5f < 3)
+        ]], function(header)
+            h.run_coder([[
+                foreign import "]] .. header .. [["
+                function read(): boolean
+                    local infinity = ffi.INFINITY as float
+                    local nan = ffi.NAN as float
+                    return ffi.FFI_FLOAT_EXP == -1000.0
+                        and ffi.FFI_DOUBLE_EXP == 0.001
+                        and ffi.FFI_LONG_DOUBLE_HEX == 0.375
+                        and ffi.FFI_FLOAT_MIXED == 4.5
+                        and ffi.FFI_FLOAT_COMPARISON == 1
+                        and infinity > 1e100 and infinity == infinity * 2.0
+                        and nan ~= nan
+                end
+            ]], [[ assert(test.read()) ]])
+        end)
+    end)
+
     it("executes real POSIX signal disposition macro values", function()
         h.run_coder([[
             foreign import "signal.h"

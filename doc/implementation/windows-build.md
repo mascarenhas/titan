@@ -11,7 +11,7 @@ curl, unzip, and ordinary Unix file utilities. The [Titan Lua fork](https://gith
 is a Git submodule at `lua-5.5.1/`, pinned by the Titan checkout's submodule
 commit. Initialize it after cloning or updating the checkout. The Unix build
 compiles directly in that submodule. Windows copies the source and installation Makefiles, `.c`, `.h`, `lua.hpp`,
-and manual pages into a dedicated `windows-build/` tree, then delegates
+and manual pages into a dedicated `out/windows/` tree, then delegates
 compilation to the fork's `mingw` target and installation to its `install`
 target. Both receive `TITAN_LIBRARY_VERSION` and `PREFIX`. The fork installer
 also supports native Windows GNU Make with `cmd.exe` and no Unix utilities.
@@ -25,6 +25,14 @@ for the selected Make implementation. The native Make executable supplied by
 `mingw-w64-x86_64-make` can drive the CLANG64 compiler; selecting Make does not
 select the compiler or change its UCRT target.
 
+`WINDOWS_BUILD_ROOT` defaults to checkout-relative `out/windows` in production
+and `out/windows-validation` in validation. It owns the private Lua/native
+builds and the standard provider's generated stage at
+`<WINDOWS_BUILD_ROOT>/out`. SDK prefixes remain separate installation
+destinations. Select a distinct build root and SDK for incompatible native
+configurations; output routing does not invalidate objects after tool or flag
+changes. See [output-directory routing](output-directory.md).
+
 ```sh
 git submodule update --init --recursive
 mingw32-make -f Makefile.win lua PREFIX=/c/Titan/sdk
@@ -35,7 +43,7 @@ Then, from ordinary Windows PowerShell, run the separate native-launch gate
 where local script execution policy permits it:
 
 ```powershell
-powershell.exe -NoProfile -File spec/support/check_windows_lua.ps1 -BuildRoot C:\path\to\checkout\windows-build-validation
+powershell.exe -NoProfile -File spec/support/check_windows_lua.ps1 -BuildRoot C:\path\to\checkout\out\windows-validation
 ```
 
 `-File` is subject to PowerShell execution policy. The gate does not change that
@@ -310,7 +318,7 @@ or that usable certificate trust roots were loaded. These checks do not establis
 Titan stdlib behavior, network interoperability, or a Windows CA-store policy.
 
 After that gate, run the exact EXE path recorded in
-`windows-build-validation/native-check/native-probe-path.txt` from ordinary PowerShell
+`out/windows-validation/native-check/native-probe-path.txt` from ordinary PowerShell
 with the argument in `native-config-path.txt`, a restricted process PATH, and
 another CWD as well. A native compile,
 import-closure audit, and successful native behavior checks are required before
@@ -403,6 +411,11 @@ mingw32-make -f Makefile.win install-stdlib PREFIX=/c/Titan/sdk
 
 The `stdlib` target uses the already installed compiler and prepared
 runtime/native SDK to compile all 23 explicit roots into one `titan.dll`.
+`scripts/build_windows_stdlib.sh` passes
+`--output <WINDOWS_BUILD_ROOT>/out`, keeping generated C, objects, headers,
+the provider DLL, and Lua shims below that stage. `publish-stdlib` copies
+`<WINDOWS_BUILD_ROOT>/out/titan.dll` and the shims under its `titan/` directory
+into the canonical SDK locations; it does not read source-adjacent outputs.
 `TITAN_JOBS` bounds generated-C compilation; checking, generation and the final
 link retain their normal order. It does not reinstall the compiler or prepare those native inputs.
 `install-stdlib` builds that provider and then copies its artifacts.
@@ -495,6 +508,9 @@ The build copies the supplied SDK and authored fixtures into its marked
 workspace, preserving the published SDK. It records the test compilation
 profile for later run commands; a run with a different selected test profile
 requires rebuilding the workspace.
+The compiler receives `--output` pointing at that private SDK copy, so generated
+test sources/objects and the `bin/titan-stdlib-tests.exe` launcher stay there
+rather than beside the copied authored sources.
 It rejects unrelated existing directories and nonlocal or non-NTFS workspaces.
 Test outputs, scratch files, native child executables, and logs stay inside that
 workspace. The runner uses the bounded Job Object supervisor and drains both output streams, including

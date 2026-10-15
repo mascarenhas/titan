@@ -359,14 +359,14 @@ hexFloatingConstant <- ("0x" / "0X" ) ( hexFractionalConstant binaryExponentPart
                                       /  hexDigit+ binaryExponentPart floatingSuffix? )
 
 fractionalConstant <- digit* "." digit+
-                    / digit "."
+                    / digit+ "."
 
 exponentPart <- [eE] [-+]? digit+
 
 hexFractionalConstant <- hexDigit+? "." hexDigit+
                        / hexDigit+ "."
 
-binaryExponentPart <- [pP] digit+
+binaryExponentPart <- [pP] [-+]? digit+
 
 floatingSuffix <- [flFL]
 

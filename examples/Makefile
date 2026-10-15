@@ -3,7 +3,7 @@
 # titanc must run from the repository ROOT: it resolves titan-runtime/ and the
 # Lua source tree relative to the working directory, and the modules refer to
 # themselves as `examples.*` (e.g. `import "examples.utils"`). So each target
-# does `cd .. && ./titanc examples.<name>` — output lands back here in examples/.
+# does `cd .. && ./titanc examples.<name>` — output lands in ../out/examples/.
 #
 # Run `make -C .. examples` (or `make all` from this directory) to build them
 # all. The SDL examples need SDL2 installed. titanc has no -I/-L flags, so for an
@@ -12,7 +12,7 @@
 #   make sdl_demo CPATH=/path/to/include LIBRARY_PATH=/path/to/lib
 # and run with LD_LIBRARY_PATH=/path/to/lib so libSDL2 is found at load time.
 
-TITANC := ./titanc
+TITANC := ./titanc --output out
 
 .PHONY: all artisanal sdl_demo sdl_quit utils clean
 
@@ -38,4 +38,4 @@ sdl_demo: sdl_quit
 	cd .. && $(TITANC) examples.sdl_demo -l SDL2
 
 clean:
-	rm -f *.c *.o *.so utils.a artisanal.a sdl_quit.a sdl_demo
+	rm -rf ../out/examples

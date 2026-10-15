@@ -137,6 +137,42 @@ describe("module foreign conversion payloads", function()
             types.resolve_c_typedef(aliases.same_anonymous))
     end)
 
+    it("retains floating macro ranks through raw and converted cache payloads", function()
+        header("floating.h", [[
+            #include <math.h>
+            #define CACHED_FLOAT (3 * 1e-2F)
+            #define CACHED_LONG_DOUBLE 0x1.8p-2L
+            #define CACHED_COMPARISON (1.5f < 3)
+        ]])
+        local source = [[
+            foreign import "floating.h"
+            function number(): float
+                return ffi.CACHED_FLOAT + ffi.CACHED_LONG_DOUBLE
+                    + ffi.CACHED_COMPARISON + ffi.INFINITY
+            end
+        ]]
+        local function assert_ranks(mod)
+            local members = mod.ast._ffi_namespace._type.members
+            assert.equal("float", members.CACHED_FLOAT.type.spelling)
+            assert.equal("long double", members.CACHED_LONG_DOUBLE.type.spelling)
+            assert.equal("int", members.CACHED_COMPARISON.type.spelling)
+            assert.equal("float", members.INFINITY.type.spelling)
+        end
+        assert_ranks(check(source))
+        local count = conversions
+        local converted, warm = check(source .. "\n-- converted replay")
+        assert_ranks(converted)
+        assert.equal(count, conversions)
+        assert.equal(1, warm.conversion.hits)
+        for key in pairs(payloads) do
+            if key:find("ffi-conversion-v8\0", 1, true) == 1 then payloads[key] = nil end
+        end
+        local raw, raw_warm = check(source .. "\n-- raw replay")
+        assert_ranks(raw)
+        assert.is_true(raw_warm.headers.hits > 0)
+        assert.is_true(raw_warm.conversion.misses > 0)
+    end)
+
     it("retains inherited named scopes in raw and converted cache payloads", function()
         header("scope_leaf.h", [[
             struct inherited_raw { int member; };
@@ -180,7 +216,7 @@ describe("module foreign conversion payloads", function()
         assert_scopes(restored)
         assert.is_true(warm.conversion.hits > 0)
         for key in pairs(payloads) do
-            if key:find("ffi-conversion-v7\0", 1, true) == 1 then payloads[key] = nil end
+            if key:find("ffi-conversion-v8\0", 1, true) == 1 then payloads[key] = nil end
         end
         local raw_restored, raw_warm = check(consumer .. "\n-- raw header replay", adapter, provider)
         assert_scopes(raw_restored)
@@ -226,7 +262,7 @@ describe("module foreign conversion payloads", function()
         -- Reading the physical member during the first body check must not
         -- have inserted a checked-miss macro memo into that shared header graph.
         for key in pairs(payloads) do
-            if key:find("ffi-conversion-v7\0", 1, true) == 1 then
+            if key:find("ffi-conversion-v8\0", 1, true) == 1 then
                 payloads[key] = nil
             end
         end
@@ -323,7 +359,7 @@ describe("module foreign conversion payloads", function()
         local external = {}
         for name, value in pairs(refs) do external[value] = name end
         for key, payload in pairs(payloads) do
-            if key:find("ffi-conversion-v7\0", 1, true) == 1 then
+            if key:find("ffi-conversion-v8\0", 1, true) == 1 then
                 local snapshot = assert(cpp.decode_graph(payload, { references = refs }))
                 snapshot.converted_enums = {}
                 payloads[key] = assert(cpp.encode_graph(snapshot, { external = external }))
@@ -360,7 +396,7 @@ describe("module foreign conversion payloads", function()
         assert.equal(1, stats.conversion.hits)
         local first = restored.ast._ffi_namespace._type
         for key, payload in pairs(payloads) do
-            if key:sub(1, #"ffi-conversion-v7\0") == "ffi-conversion-v7\0" then
+            if key:sub(1, #"ffi-conversion-v8\0") == "ffi-conversion-v8\0" then
                 local snapshot = assert(cpp.decode_graph(payload, { references = graph_references(restored) }))
                 assert.equal("just", snapshot.field_macros.TEXT.tag)
                 assert.equal('"a + b"', snapshot.field_macros.TEXT.value.replacement)
@@ -378,7 +414,7 @@ describe("module foreign conversion payloads", function()
         local definitions = require "titan-compiler.cdefinitioncache"
         local snapshots = 0
         for key, payload in pairs(payloads) do
-            if key:sub(1, #"ffi-conversion-v7\0") == "ffi-conversion-v7\0" then
+            if key:sub(1, #"ffi-conversion-v8\0") == "ffi-conversion-v8\0" then
                 snapshots = snapshots + 1
                 local snapshot = assert(cpp.decode_graph(payload, { references = graph_references(mod) }))
                 local options = {
@@ -417,7 +453,7 @@ describe("module foreign conversion payloads", function()
         check(source)
         local count = conversions
         for key in pairs(payloads) do
-            if key:sub(1, #"ffi-conversion-v7\0") == "ffi-conversion-v7\0" then payloads[key] = "corrupt" end
+            if key:sub(1, #"ffi-conversion-v8\0") == "ffi-conversion-v8\0" then payloads[key] = "corrupt" end
         end
         local _, corrupt = check(source)
         assert.is_true(conversions > count)
@@ -437,7 +473,7 @@ describe("module foreign conversion payloads", function()
         check(source)
         local count, get = conversions, adapter.get
         adapter.get = function(kind, key)
-            if kind == "ffi-conversion-v7" then
+            if kind == "ffi-conversion-v8" then
                 local malformed = {}
                 setmetatable(malformed, { __index = malformed })
                 return get(kind, key), { malformed }
@@ -456,7 +492,7 @@ describe("module foreign conversion payloads", function()
         check(source)
         local get, cancellation = adapter.get, {}
         adapter.get = function(kind, key)
-            if kind == "ffi-conversion-v7" then
+            if kind == "ffi-conversion-v8" then
                 local malformed = setmetatable({}, { __index = function() error(cancellation, 0) end })
                 return get(kind, key), { malformed }
             end
@@ -502,22 +538,22 @@ describe("module foreign conversion payloads", function()
         assert.same(original, payloads)
         if platform.windows then
             -- Without physical IDs there are no saved observations to refresh.
-            assert.equal(0, refreshes["c-header-v6"] or 0)
-            assert.equal(0, refreshes["ffi-conversion-v7"] or 0)
+            assert.equal(0, refreshes["c-header-v7"] or 0)
+            assert.equal(0, refreshes["ffi-conversion-v8"] or 0)
         else
-            assert.is_true((refreshes["c-header-v6"] or 0) > 0)
-            assert.equal(1, refreshes["ffi-conversion-v7"])
+            assert.is_true((refreshes["c-header-v7"] or 0) > 0)
+            assert.equal(1, refreshes["ffi-conversion-v8"])
         end
         local _, warm = check(source)
         assert.equal(count, conversions)
         if platform.windows then
             assert.is_true(warm.headers.file_reads > 0)
             assert.is_true(warm.headers.file_hashes > 0)
-            assert.equal(0, refreshes["ffi-conversion-v7"] or 0)
+            assert.equal(0, refreshes["ffi-conversion-v8"] or 0)
         else
             assert.equal(0, warm.headers.file_reads)
             assert.equal(0, warm.headers.file_hashes)
-            assert.equal(1, refreshes["ffi-conversion-v7"])
+            assert.equal(1, refreshes["ffi-conversion-v8"])
         end
     end)
 
@@ -600,7 +636,7 @@ describe("module foreign conversion payloads", function()
         ]]
         local hashes = 0
         adapter.sha256_binary = function(bytes)
-            if bytes:find("ffi-conversion-v7", 1, true) then hashes = hashes + 1 end
+            if bytes:find("ffi-conversion-v8", 1, true) then hashes = hashes + 1 end
             return require("titan-compiler.sha256").binary(bytes)
         end
         check(source)
@@ -611,7 +647,7 @@ describe("module foreign conversion payloads", function()
         assert.equal(count, conversions)
         local cancelled = {}
         adapter.sha256_binary = function(bytes)
-            if bytes:find("ffi-conversion-v7", 1, true) then error(cancelled, 0) end
+            if bytes:find("ffi-conversion-v8", 1, true) then error(cancelled, 0) end
             return require("titan-compiler.sha256").binary(bytes)
         end
         local ok, err = pcall(check, source)

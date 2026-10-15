@@ -4,6 +4,11 @@
 #include <signal.h>
 #include <sys/stat.h>
 #include <string.h>
+#ifdef _WIN32
+#include <io.h>
+#else
+#include <unistd.h>
+#endif
 static inline int titan_uv_platform_constant(const char* name, int* out) {
 #ifdef AF_UNIX
   if (strcmp(name, "AF_UNIX") == 0) { *out = (int) AF_UNIX; return 1; }

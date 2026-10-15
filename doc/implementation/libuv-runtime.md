@@ -327,6 +327,17 @@ a Task. Synchronization of shared native bytes remains the caller's job. The
 libuv worker pool is shared with other native work and async adds no new queue
 or thread policy. Ordinary cancellation never detaches the accepted job.
 
+The UV binding embeds an ordinary `uv_work_t` and a separate native callback
+data structure in one stable request owner. Before queueing, it sets
+`uv_work_t.data` to the embedded callback data, containing the C worker,
+argument, and owner address. The worker reads only the C worker and argument;
+the terminal callback uses the owner address on the loop thread. Neither the
+data pointer nor its payload is changed while native work is pending. Terminal
+delivery clears the old worker and argument before calling user code, allowing
+that code to requeue the request without later old-state cleanup. The public
+`work_t:get_data`/`set_data` value remains a separate GC-traced slot and may be
+changed while work is pending.
+
 The named foreign-work registrar and callback use a private per-job context in
 the public work request's traced data. They detach the old association before
 settlement and retain the captured operation number through fatal reporting.

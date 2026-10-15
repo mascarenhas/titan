@@ -42,11 +42,12 @@ dependencies, unusual indirection, or accumulating special cases, inspect the
 design first and then ask the maintainer about the intended invariant before
 adding a workaround.
 
-Preserve concurrent checkout ownership. Use a separate worktree/source copy for
-parallel builds or compiler fixtures, and separate SDK prefixes for incompatible
-native inputs. Generated outputs are often source-adjacent; a different prefix
-alone does not isolate them. Inspect checkout state before cleanup and remove
-only artifacts owned by the current task.
+Preserve concurrent checkout ownership. Use separate worktrees/source copies for
+compiler fixtures and builds that share native Make outputs. Give concurrent
+generated-code configurations distinct `--output` directories and incompatible
+native inputs separate SDK prefixes. A different prefix alone does not isolate
+build artifacts. Inspect checkout state before cleanup and remove only artifacts
+owned by the current task.
 
 ## Find the implementation contract
 
@@ -87,6 +88,7 @@ Read the [style guide](doc/style-guide.md) before application or stdlib work.
 | Source-defined exact C-ABI callbacks, restricted foreign bodies, `.titan.h`, sequencing | [Foreign functions](doc/implementation/foreign-functions.md) |
 | Trusted raw Lua C API: stack-effect ledger, temporary roots, longjmp, audited allowlist | [Trusted Lua C API boundary](doc/implementation/ffi-lua-api-followup.md) |
 | Module lookup, C compilation/linking, CLI flags, SDK/tool paths, language-server API | [Driver and toolchain](doc/implementation/driver.md) |
+| Generated files under `-o`/`--output`, source-relative layouts, incremental/coverage paths | [Output-directory routing](doc/implementation/output-directory.md), [output user guide](doc/language/output-directory.md) |
 | Folder mains/contributors, declaration order, canonical module/output identity | [Folder modules](doc/implementation/folder-modules.md) |
 | Explicit `.titan` imports: local visibility, trusted source provenance, inherited C headers | [Source-import visibility](doc/implementation/source-import-visibility.md) |
 | Compile-only `-c`, incremental `.o` reuse, source-object metadata, Make-owned invalidation | [Incremental compilation](doc/implementation/incremental-compilation.md) |

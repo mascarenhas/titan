@@ -24,11 +24,13 @@ luarocks make titan-0.6.0-1.rockspec
 luarocks test --prepare
 ```
 
-Use a distinct prefix and source copy for each concurrent build. A worktree
-isolates checkout artifacts; an isolated prefix also separates installed
-compiler snapshots, native SDKs, and providers. Installed SDKs are consumer
-inputs, not scratch directories. Prefer `/tmp` prefixes for throwaway
-verification over checkout-local `.lua` or `lua_modules` trees.
+Use a distinct prefix and source copy for each concurrent repository build. A
+worktree isolates checkout artifacts, including authored runtime/native
+dependency builds; an isolated prefix also separates installed compiler
+snapshots, native SDKs, and providers. Standalone Titan compilations can share
+sources with separate `--output` directories, as described below. Installed
+SDKs are consumer inputs, not scratch directories. Prefer `/tmp` prefixes for
+throwaway verification over checkout-local `.lua` or `lua_modules` trees.
 
 This example prepares a validation SDK. Use a separate prefix and select
 `production` for ordinary release/install work rather than changing the profile
@@ -114,11 +116,29 @@ describes its resolver setup and regressions.
 
 `titanc` accepts dotted module names, not file paths. Use its
 [CLI reference](driver.md#the-titanc-command-line) for provider/standalone
-selection, `--tree`, incremental object reuse, `-c`, and test mode. Source-rock
-`all` uses the in-tree compiler and private bootstrap; ordinary `stdlib` uses
+selection, `--tree`, `--output`, incremental object reuse, `-c`, and test mode.
+Source-rock `all` uses the in-tree compiler and private bootstrap; ordinary `stdlib` uses
 the installed compiler unless `STDLIB_USE_INSTALLED_RUNTIME=0`. Packaging,
 binary-rock, and uninstall ownership are documented under
 [driver's build and installation contract](driver.md#the-titanc-command-line).
+
+## Route generated output explicitly
+
+`titanc --output DIRECTORY` keeps generated C, objects, headers, providers,
+loaders, and programs below that directory while preserving their source-root
+hierarchy. Use one output directory consistently for incremental object recipes
+and the final link. `--tree` still selects sources; `--output` changes neither
+source identity nor provider/Lua search paths. Omitting it preserves the legacy
+source-adjacent generation behavior. See
+[output-directory routing](output-directory.md) for the exact mapping.
+
+Repository Make builds default to `TITAN_OUTPUT_DIR=out`: the standard-provider
+pair and loaders stage there, native tests use `out/tests`, and native coverage
+uses `out/coverage` with reports in `out/coverage/report`. An output root can
+separate generated Titan configurations; flags and tools still require explicit
+invalidation. Authored runtime C objects, native dependency archives, and SDK
+probe caches retain their own locations and ownership, so changing only the
+output directory does not isolate all repository build inputs.
 
 ## Preserve fixture and shared-output ownership
 
@@ -130,11 +150,13 @@ they do not inherit Busted's assertion global. Helpers touching checker/coder
 state reset `types.registry` and, for imports, `driver.imported` first.
 
 Compiler fixtures remove only their exact artifacts, including the paired
-`.a` from a no-main compile. Treat `titan-runtime/libtitan.a`, the canonical
-`titan.so`/`titan.a`, generated standard shims, and native dependency archives
-as shared Make-owned state. Helpers must not invalidate them to force a rebuild.
-The bounded cleanup rules for `.titan-tests`, same-stem generated C, synthetic
-test suffixes, and interrupted root fixtures are in the
+`.a` from a no-main compile. Treat `titan-runtime/libtitan.a`, the standard
+stage's `out/titan.so`/`out/titan.a` and shims, canonical installed providers,
+and native dependency archives as shared Make-owned state. Helpers must not
+invalidate them to force a rebuild. `make clean` removes the selected
+`TITAN_OUTPUT_DIR` as an owned output tree. The bounded cleanup rules for
+`out/tests`, legacy same-stem generated C, synthetic test suffixes, and
+interrupted root fixtures are in the
 [test-runner chapter](test-runner.md#platform-portability-and-complete-execution).
 Never replace these with broad archive, Lua, or `spec/**/*.c` deletion globs.
 

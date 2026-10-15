@@ -904,15 +904,15 @@ const FS_O_CREAT: integer?
 -- @usage uv/types.md#public-constants
 const FS_O_TRUNC: integer?
 
-foreign import "work-native-proposal.h"
-foreign type WorkFunction = function (*void): void
+foreign import "work-data.h"
 foreign type WorkCallbackEntry = function (
     *lua_State, *Udata, *CClosure, *Udata, *Udata, lua_Integer): void
 
 --- Reusable native work request owner retained through accepted completion.
 -- @usage uv/types.md#work_t
 record work_t
-  local native: foreign titan_issue194_work_storage
+  local native: foreign uv_work_t
+  local work_data: foreign titan_uv_work_data
   local loop: loop_t?
   local pending: boolean
   local argument_owner: value
@@ -931,8 +931,8 @@ local function work_deliver(owner: work_t, loop: loop_t, status: integer)
   owner.argument_owner = nil
   local callback? = owner.callback
   owner.callback = nil
-  owner.native.worker = nil
-  owner.native.arg = nil
+  owner.work_data.worker = nil
+  owner.work_data.arg = nil
   -- The old argument graph stays in this handler frame through user delivery;
   -- request reuse may independently install a new graph.
   if callback ~= nil then callback(owner, status) end
@@ -948,16 +948,16 @@ catch
 end
 
 foreign function work_worker_callback(request: *uv_work_t)
-  -- request is the first member of the final embedded native storage.
-  -- Only native fields are read; no Lua/Titan/GC or req.data access occurs.
-  local storage = request as foreign *titan_issue194_work_storage
+  -- Submission publishes immutable native callback data before acceptance.
+  -- The loop thread cannot replace it until this worker has completed.
+  local storage = request.data as foreign *titan_uv_work_data
   local worker = storage.worker
   worker(storage.arg)
 end
 
 foreign function work_after_callback(request: *uv_work_t, status: int)
-  local owner = ffi.uv_req_get_data(
-      request as foreign *uv_req_t) as foreign *Udata
+  local storage = request.data as foreign *titan_uv_work_data
+  local owner = storage.owner as foreign *Udata
   local loop = ffi.uv_loop_get_data(request.loop) as foreign *Udata
   local L = ffi.titan_record_field(loop, "loop_t", "state")
   local handler = ffi.lmacro_clCvalue(
@@ -976,11 +976,12 @@ end
 -- @return Native work_t result with the documented lifetime and units.
 -- @usage uv/supplemental.md#work_tnew
 function work_t.new(): work_t
-  -- Construct final packed owner before libuv receives any address. No
+  -- Construct the final stable owner before libuv receives any address. No
   -- initialized uv_work_t is copied or moved between Titan owners.
-  local native = foreign titan_issue194_work_storage.new()
+  local native = foreign uv_work_t.new()
+  local work_data = foreign titan_uv_work_data.new()
   return {
-    native = native,
+    native = native, work_data = work_data,
     loop = nil, pending = false, callback = nil, argument_owner = nil,
     handler = work_deliver, userdata = nil,
   }
@@ -1041,10 +1042,11 @@ function queue_work(loop: loop_t, req: work_t, worker: foreign function (*void):
   req.pending = true
   req.callback = after_work
   req.argument_owner = argument_owner
-  req.native.worker = worker
-  req.native.arg = arg
+  req.work_data.worker = worker
+  req.work_data.arg = arg
+  req.work_data.owner = req as foreign *void
   local native = req.native as foreign *uv_work_t
-  ffi.uv_req_set_data(native as foreign *uv_req_t, req as foreign *void)
+  native.data = req.work_data as foreign *void
   local status = ffi.uv_queue_work(
       loop.native, native, work_worker_callback, work_after_callback) as integer
   if status ~= 0 then
@@ -1055,8 +1057,8 @@ function queue_work(loop: loop_t, req: work_t, worker: foreign function (*void):
     req.loop = previous_loop
     req.callback = nil
     req.argument_owner = nil
-    req.native.worker = nil
-    req.native.arg = nil
+    req.work_data.worker = nil
+    req.work_data.arg = nil
   end
   return status
 end
@@ -4488,7 +4490,6 @@ function fs_closedir(loop: loop_t?, request: fs_t, directory: dir_t,
   return result
 end
 
-foreign import "fs-native-proposal.h"
 --- Immutable native libuv FS_COPYFILE_EXCL flag or numeric constant.
 -- @usage uv/types.md#public-constants
 const FS_COPYFILE_EXCL: integer?
@@ -4645,8 +4646,8 @@ do
   FS_O_SEQUENTIAL = ffi.UV_FS_O_SEQUENTIAL as integer
   FS_O_SHORT_LIVED = ffi.UV_FS_O_SHORT_LIVED as integer
   FS_O_TEMPORARY = ffi.UV_FS_O_TEMPORARY as integer
-  FS_UTIME_NOW = ffi.titan_uv_fs_utime_now() as float
-  FS_UTIME_OMIT = ffi.titan_uv_fs_utime_omit() as float
+  FS_UTIME_NOW = ffi.UV_FS_UTIME_NOW as float
+  FS_UTIME_OMIT = ffi.UV_FS_UTIME_OMIT as float
   CHANGE = ffi.UV_CHANGE as integer
   CREATE_PIPE = ffi.UV_CREATE_PIPE as integer
   DISCONNECT = ffi.UV_DISCONNECT as integer

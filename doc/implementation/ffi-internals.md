@@ -672,12 +672,19 @@ ordered CType signatures, typedef targets, recursive aggregate fields and tag
 scopes, parameter-name availability, exact array/bitfield expressions, macro
 constant types, final field-macro classifications and target-profile facts.
 Integer expression leaves retain their exact token spelling; the evaluator
-reconstructs C99 literal candidates on demand. A macro cast retains its target
+reconstructs C99 literal candidates on demand. Floating literal suffixes retain
+their C rank, and numeric expressions choose their floating result rank before
+publication. The registrar recognizes the bounded GCC/Clang `inf`, `huge_val`,
+`nan`, and `nans` builtin constant families used by math headers, including
+their `f` and `l` variants and required argument shapes. Expressions containing
+floating leaves retain only their inferred C type, so mixed expressions never
+enter the exact integer evaluator. Generated C emits the public macro name
+and leaves all floating evaluation to the native compiler. A macro cast retains its target
 type and a scalar-cast marker, not the parsed operand. Parser bodies, ordinary
 source-location maps, raw macro environments, CPP spelling/spacing sidecars,
 and registrar bookkeeping do not survive this boundary.
 
-The `c-header-v6` byte payload uses this same read-only extracted graph, including
+The `c-header-v7` byte payload uses this same read-only extracted graph, including
 declaration origins for typedefs and tags. A live
 hit shares it, while a disk restore reconstructs the closed schema once after
 codec/checksum and envelope validation. Real dependencies/search observations
@@ -1064,7 +1071,8 @@ left for a later FFI iteration.
   typed inline callback bridges in `titan/ffi.h` are ordinary C functions whose
   bodies evaluate the selected Lua macros. An object-like macro is
   expression-valued through bounded recognized forms, including supported
-  integer-constant expressions and typed dereferenced accessors, or when it
+  integer-constant expressions, floating numeric expressions and the bounded
+  math-header constant builtins, and typed dereferenced accessors, or when it
   fully expands to an outer cast to a supported scalar type. A pure dotted
   identifier replacement can become a field projection. Other object-like
   forms are not generally supported.
