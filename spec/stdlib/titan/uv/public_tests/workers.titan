@@ -108,6 +108,27 @@ function test_work_reuse_retains_both_arguments_and_reports_to_original_loop(_co
   test.assert(weak[1] == nil and weak[3] == nil, "new work registration did not retire")
 end
 
+function test_work_public_data_is_independent_of_native_callback_data(_context: test.Context)
+  local loop = new_loop()
+  defer finish_loop(loop)
+  local request = uv.work_t()
+  local cell: owned int[] = foreign int.new_array(1)
+  cell[0] = 40
+  request:set_data("before submission")
+  local calls = 0
+  success(uv.queue_work(loop, request, increment_cell, cell,
+    function (current: uv.work_t, status: integer)
+      success(status)
+      test.assert(current == request and current:get_data() == "while pending")
+      test.assert(cell[0] == 41)
+      calls = calls + 1
+    end, cell))
+  request:set_data("while pending")
+  collect()
+  success(uv.run(loop))
+  test.assert(calls == 1 and request:get_data() == "while pending")
+end
+
 function test_sync_native_rejection_preserves_fresh_owner(_context: test.Context)
   local barrier = uv.barrier_t()
   test.assert(uv.barrier_init(barrier, 0) == uv.EINVAL)

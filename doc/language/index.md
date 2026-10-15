@@ -76,6 +76,7 @@ use the chapters below for the normative language reference.
 | [Static compiled modules](static-compiled-modules.md) | Self-describing `.a` providers, paired `.so`/`.a` outputs, default and `--static` resolution, native composition, and bundled/system OpenSSL final-link behavior. |
 | [Replacing shared-library dependencies](binary-compatibility.md) | Per-consumer load-time compatibility, required erased signatures and public nominal shapes, private storage changes, and union control-flow dependencies. |
 | [Incremental and separate compilation](incremental-compilation.md) | Opt-in object reuse, compile-only outputs, source-first selection, source-private metadata, and Make-owned dependency invalidation. |
+| [Output directories](output-directory.md) | `-o/--output` directory creation, source-relative generated trees, incremental builds, coverage, and platform output layouts. |
 | [Folder modules](folder-modules.md) | Splitting one logical module across a canonical main and immediate contributors: shared scope, deterministic order, lookup privacy, initialization, and artifacts. |
 | [Lua interoperability](lua-interop.md) | Using Titan from Lua and Lua values in Titan: what crosses the boundary, what each type looks like on the other side, and where the run-time checks happen. |
 | [Error handling](error-handling.md) | The run-time error model: what raises errors, error messages, `pcall`, `titan.backtrace()`, and the option-type idiom for recoverable failures. |

@@ -742,14 +742,13 @@ int titan_sdk_headers(void) { return LUA_VERSION_NUM + SQLITE_VERSION_NUMBER; }
             "titan/uv/callback.h",
             "titan/uv/data_native.h",
             "titan/uv/fd-native.h",
-            "titan/uv/fs-native-proposal.h",
             "titan/uv/network-native.h",
             "titan/uv/platform-constants.h",
             "titan/uv/sync_storage.h",
             "titan/uv/thread-native.h",
             "titan/uv/utility_bits.h",
             "titan/uv/version-native.h",
-            "titan/uv/work-native-proposal.h",
+            "titan/uv/work-data.h",
             "titan/async.titan",
             "titan/async_signal_platform.h",
             "titan/timer.titan",
@@ -2394,13 +2393,14 @@ describe("relocatable Lua build configuration", function()
         end
         for _, path in ipairs({ "titanc", "titan-compiler/driver.lua", "LICENSE",
                 "THIRD_PARTY_NOTICES.md", "LICENSES/fixture-license",
-                "titan-runtime/titan.h", "titan-runtime/minicoro.h", "titan-runtime/titan/ffi.h",
-                "titan.dll", "titan/math.lua" }) do fixture(source, path) end
+                "titan-runtime/titan.h", "titan-runtime/minicoro.h", "titan-runtime/titan/ffi.h" }) do fixture(source, path) end
+        fixture(build, "out/titan.dll")
+        fixture(build, "out/titan/math.lua")
         fixture(build, "runtime/libtitan.a")
         fixture(build, "runtime/titan.dll", "support-only bootstrap\n")
         local expected = {
             ["lib/titan/0.6/libtitan.a"] = build .. "/runtime/libtitan.a",
-            ["lib/titan/0.6/titan.dll"] = source .. "/titan.dll",
+            ["lib/titan/0.6/titan.dll"] = build .. "/out/titan.dll",
             ["include/titan.h"] = source .. "/titan-runtime/titan.h",
             ["include/minicoro.h"] = source .. "/titan-runtime/minicoro.h",
             ["include/titan/ffi.h"] = source .. "/titan-runtime/titan/ffi.h",
@@ -2461,12 +2461,14 @@ describe("relocatable Lua build configuration", function()
             { "titanc", "bin/titanc" }, { "scripts/titan-uninstall", "bin/titan-uninstall" },
             { "scripts/titan_install.lua", "installer/titan_install.lua" },
             { "titan-compiler/driver.lua", "lua/titan-compiler/driver.lua" },
-            { "titan/math.lua", "lua/titan/math.lua" },
             { "THIRD_PARTY_NOTICES.md", "conf/THIRD_PARTY_NOTICES.md" },
         }) do
             assert.equal(read_file(source .. "/" .. copy[1]), read_file(private .. "/" .. copy[2]))
             assert.equal(old, lfs.attributes(private .. "/" .. copy[2], "modification"))
         end
+        assert.equal(read_file(build .. "/out/titan/math.lua"),
+            read_file(private .. "/lua/titan/math.lua"))
+        assert.equal(old, lfs.attributes(private .. "/lua/titan/math.lua", "modification"))
         assert.equal("system\n", read_file(private .. "/installer/openssl-mode"))
     end)
 
@@ -2518,7 +2520,7 @@ printf '%s\n' "$TITAN_ROCKS_ROOT" "$TITAN_RUNTIME_PREBUILT" \
                 arguments[#arguments + 1] = argument
             end
             local expected = {
-                "--source-first", "-j", "3", "--tree", source_root,
+                "--output", build_root .. "/out", "--source-first", "-j", "3", "--tree", source_root,
                 "titan.math", "titan.json", "-X",
                 build_root .. "/runtime/ltitanlib.o",
                 build_root .. "/runtime/libtitan-lpeglabel.a",

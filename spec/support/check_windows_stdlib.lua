@@ -1,5 +1,5 @@
 -- Explicit Windows stdlib artifact validation; ordinary installation copies files.
-local stage, prefix, source, bootstrap = ...
+local stage, prefix, source, bootstrap, generated = ...
 assert(package.config:sub(1, 1) == "\\", "native Windows Lua is required")
 local modules = { "coroutine", "uv", "async", "timer", "io", "fs", "net", "ssl",
     "url", "http", "websocket", "os", "peg", "string", "path", "math", "lua", "iteration", "gc",
@@ -78,7 +78,7 @@ local function valid_imports(path)
 end
 local objects = {}
 for _, name in ipairs(modules) do
-    local stem = source .. "/titan/" .. name .. (folders[name] and ("/" .. name) or "")
+    local stem = assert(generated) .. "/titan/" .. name .. (folders[name] and ("/" .. name) or "")
     objects[#objects + 1] = { filename = stem .. ".o", modname = "titan." .. name }
 end
 local target = assert(driver.derive_target_fingerprint(objects[1].filename, names[1]))

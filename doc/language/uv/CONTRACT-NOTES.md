@@ -66,6 +66,11 @@ Only FS, getaddrinfo, getnameinfo, random, and work requests support native `can
 
 Work, native-thread, and once callbacks are C-only entries. Their `foreign function` spelling uses portable structural C types and does not require a libuv header outside this module. These entries must never call Lua/Titan or inspect a Titan owner on a foreign thread. After-work callbacks are ordinary loop-thread callables. `queue_work` retains the request and caller-owned argument graph through after-work; provide that graph through its explicit trailing `argument_owner: value` parameter (nil means an externally owned borrow). Native thread creation uses argument_owner explicitly. Detach requires nil argument_owner and externally valid code/argument storage; a retained GC graph must join.
 
+The binding passes private C callback data through native `uv_work_t.data` and
+keeps it unchanged until the worker completes. Public `work_t:get_data` and
+`work_t:set_data` access a separate traced value; changing that value while
+work is pending does not change the worker's function or argument.
+
 `work_t:get_loop()` preserves the last accepted loop through completion; a rejected submission preserves that previous association. `signal_t:get_signum()` reads the configured native signal number while initialized: stop resets it, while oneshot delivery resets it only after the callback returns.
 
 Raw synchronization/async/thread helpers are escape hatches for already-C-only carriers. Obtain their opaque pointer/entry on the Lua thread, retain the corresponding owner through every native use, and coordinate completion before destroying it. A native-safe returned entry does not make the ordinary Titan wrapper safe to call from a worker.

@@ -68,7 +68,7 @@ and reinstalls Titan in the selected toolchain before running the complete gate.
 Leaf native build/run targets require that selected SDK to be prepared already.
 
 Native Windows Make check and test targets select the same validation profile,
-with separate `.windows-sdk-validation` and `windows-build-validation` defaults.
+with separate `.windows-sdk-validation` and `out/windows-validation` defaults.
 Ordinary Windows Lua, native dependency and runtime builds retain their existing
 `-O2` defaults; generated Titan C retains the production `-O3` policy. Explicit
 `PREFIX`, `WINDOWS_BUILD_ROOT` and native flags remain caller-owned.

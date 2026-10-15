@@ -405,7 +405,7 @@ exception objects propagate unchanged through the graph boundary. Required
 header content hashing also uses this callback when available; a broken string
 result/error falls back to the ordinary Lua digest, while cancellation propagates.
 
-The `c-header-v6` payload stores extracted C declarations through a closed
+The `c-header-v7` payload stores extracted C declarations through a closed
 schema: CType shapes, canonical tags, typedef identity, qualifiers, callable
 signatures, declaration origins, field and array extents, exact integer tokens, final object-macro
 field classifications, and the finite predefined macro facts needed by target
@@ -1523,8 +1523,8 @@ that helper by absolute path and publishes the payload under `ROCKS_TREE`.
 It requires no source directory, Makefile, or compiler, so binary rocks use
 the same publication path. There is no manifest C module named `titan`.
 
-The build retains source-adjacent objects, checkout providers and shims, and
-the completion stamp. Once the prefix contains `titanc`, ordinary
+The build retains objects, providers, shims, and the completion stamp under
+`out/`, passing `--output out` in every object recipe and final link. Once the prefix contains `titanc`, ordinary
 `make stdlib` selects that installed compiler and SDK. Canonical compiler,
 Lua, and SDK paths identify the same inputs even when LuaRocks and PATH
 spell a symlinked prefix differently. Installed compiler Lua files, the retained

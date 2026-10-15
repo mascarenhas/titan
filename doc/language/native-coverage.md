@@ -4,12 +4,12 @@ Compile native tests with `--coverage`, then run the resulting test executable:
 
 ```sh
 export CC=gcc-14 GCOV=gcov-14
-titanc --test --coverage calc_tests
-./calc_tests
+titanc -o out --test --coverage calc_tests
+./out/calc_tests
 ```
 
 A successful run prints a Titan executable-line summary and writes combined
-annotated output to `.coverage/report/coverage.gcov`. Basic collection and reporting need
+annotated output to `out/.coverage/report/coverage.gcov`. Basic collection and reporting need
 neither Python nor gcovr. Coverage measures executable lines in the original
 `.titan` files; generated C branch and function percentages are not Titan
 metrics. The compiler's LuaCov report remains separate. Final coverage links require a test
@@ -33,9 +33,9 @@ Repeated `--coverage-module` options replace automatic selection with a union
 of logical-module globs:
 
 ```sh
-titanc --test --coverage \
+titanc -o out --test --coverage \
   --coverage-module 'app.*' --coverage-module 'shared.pars?r' app_tests
-./app_tests
+./out/app_tests
 ```
 
 A glob matches the complete logical name. `*` matches zero or more characters
@@ -48,12 +48,14 @@ is an error. It never makes an otherwise absent module a source root.
 ## Artifacts and repeated runs
 
 Coverage-generated C, headers and objects live in `.coverage` subdirectories
-beside their normal output locations. For example, `app/calc.titan` uses
-`app/.coverage/calc.c` and `app/.coverage/calc.o`; a folder module uses its normal
+within their normal output tree. With `-o out`, `app/calc.titan` uses
+`out/app/.coverage/calc.c` and `out/app/.coverage/calc.o`; a folder module uses its normal
 owning directory with the same extra `.coverage` component. Coverage incremental
 lookup searches those objects. Ordinary builds search their ordinary locations,
 so a later optimized build cannot reuse coverage objects and needs no cleaning
-or artifact swap.
+or artifact swap. The default report directory is `out/.coverage/report` with
+`-o out`; omitting `--output` retains source-adjacent artifacts and the original
+`.coverage/report` default. See [Output directories](output-directory.md).
 
 `--incremental` works in coverage mode. Each compiled object carries its partial
 coverage file list; linking reconstructs the complete executable inventory from
@@ -70,7 +72,7 @@ reporting runs after a successful test run.
 Join test-owned children before tests finish, as with an ordinary native test
 run. Separate executions, binaries or platforms can be combined using external
 tools. Builds sharing the same counter paths cannot run independent coverage
-sessions concurrently: use separate source/build trees. Embedded file paths are
+sessions concurrently: use separate output directories. Embedded file paths are
 absolute, so keep the build artifacts at those paths while running tests.
 
 ## Backend tools
@@ -82,9 +84,9 @@ prepared GCC SDK can use `CC=gcc-14 GCOV=gcov-14`.
 Clang uses its gcov-compatible backend with the matching `llvm-cov gcov` reader:
 
 ```sh
-CC=clang titanc --test --coverage --coverage-backend llvm-gcov \
+CC=clang titanc -o out --test --coverage --coverage-backend llvm-gcov \
   --coverage-gcov 'llvm-cov gcov' calc_tests
-./calc_tests
+./out/calc_tests
 ```
 
 This uses `.gcno`/`.gcda` files and preserves Titan `#line` attribution. It does
@@ -100,10 +102,10 @@ Only richer reports require gcovr and its Python dependency. Install gcovr 8.4
 in an environment of your choice, then request one or more formats when compiling:
 
 ```sh
-titanc --test --coverage --coverage-format html --coverage-format lcov \
+titanc -o out --test --coverage --coverage-format html --coverage-format lcov \
   --coverage-format cobertura --coverage-gcovr /path/to/gcovr \
-  --coverage-output .coverage/report calc_tests
-./calc_tests
+  --coverage-output out/.coverage/report calc_tests
+./out/calc_tests
 ```
 
 `--coverage-output` changes the report directory; `--coverage-root` sets the

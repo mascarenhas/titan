@@ -269,7 +269,7 @@ without explicit source imports or a shared source-private operation union.
 The production compiler invocation names all twenty-three logical roots:
 
 ```sh
-titanc titan.coroutine titan.uv titan.async titan.timer titan.io titan.fs titan.net \
+titanc --output out titan.coroutine titan.uv titan.async titan.timer titan.io titan.fs titan.net \
   titan.ssl titan.url titan.http titan.websocket titan.os titan.path \
   titan.peg titan.string \
   titan.math titan.lua titan.iteration titan.gc titan.test titan.reflect titan.sqlite3 titan.json \
@@ -279,13 +279,13 @@ titanc titan.coroutine titan.uv titan.async titan.timer titan.io titan.fs titan.
      openssl-build/libssl.a openssl-build/libcrypto.a  # OPENSSL_MODE=bundled
 ```
 
-Generated `titan/uv/uv.c`, `titan/uv/uv.o`, and the callback-bearing
-`titan/uv/uv.titan.h` are build artifacts and are removed by `make clean`.
+Generated `out/titan/uv/uv.c`, `out/titan/uv/uv.o`, and the callback-bearing
+`out/titan/uv/uv.titan.h` are build artifacts and are removed by `make clean`.
 The flat high-level `titan.fs` root uses public UV callbacks and does not
 emit a foreign-callback header. No contributor C/object/header, DSO, archive,
 or contributor shim is built or installed. The one logical `titan.uv` object, its one generated
-`titan/uv.lua` shim, and the remaining twenty-two logical modules (twenty-three in
-total) reside in the physical `titan.so`/`titan.a` pair. The private
+`out/titan/uv.lua` shim, and the remaining twenty-two logical modules (twenty-three in
+total) reside in the physical `out/titan.so`/`out/titan.a` pair. The private
 five-member LPegLabel archive is shared metadata-free payload for the
 `titan.peg`/`titan.string` folder modules. The private libuv archive always
 follows it, so its members enter both provider forms. The command above uses

@@ -25,7 +25,10 @@ objects. `-c` alone does not promise to write only the requested root's files.
 Unrelated roots and multiple roots defining `main` can be compiled together
 with `-c`; common provider naming and executable selection happen when linking.
 
-Objects and generated headers stay beside each flat source or folder main,
+Pass `-o out` consistently in the object and final-link invocations to keep
+objects and generated headers in the [output tree](output-directory.md).
+Incremental lookup and missing-header restoration use that same tree. Without
+`--output`, they stay beside each flat source or folder main,
 including when `--tree` points elsewhere. A folder module has one object for
 the entire module, not one object per contributor.
 

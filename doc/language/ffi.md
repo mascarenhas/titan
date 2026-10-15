@@ -111,7 +111,9 @@ The imported C environment contains value members and a separate type namespace:
   `inline`. C variadic functions such as `printf`/`snprintf` accept extra
   arguments after their fixed parameters.
 * C variables and supported object-like `#define` constants become C values.
-  Recognized forms include integer-constant expressions, typed dereferenced
+  Recognized forms include integer-constant expressions, floating literals and
+  numeric expressions, standard math constants backed by the recognized
+  GCC/Clang floating builtins, typed dereferenced
   accessors such as the common `errno` expansion, and fully expanded outer
   casts to supported C integer, floating, object-pointer, or function-pointer
   types; generated C emits the public macro spelling. Assigning to a foreign
@@ -985,7 +987,8 @@ for cache and promotion details.
   the same name, calls select that declaration and bypass the macro wrapper.
   Object-like macros are values only
   through bounded recognized expression forms, including supported
-  integer-constant expressions and typed dereferenced accessors, or when they
+  integer-constant expressions, floating numeric expressions and supported
+  math-header constant builtins, and typed dereferenced accessors, or when they
   fully expand to an outer cast to a supported scalar type. A pure dotted
   identifier replacement can stand in for a field. Other object-like forms are
   not generally supported. Supported definitions are interpreted in the final

@@ -17,9 +17,57 @@ local base_c_types = {
     CONST_CHAR = { "const", "char" },
     LONG_LONG = { "long", "long" },
     LONG = { "long" },
+    FLOAT = { "float" },
     DOUBLE = { "double" },
+    LONG_DOUBLE = { "long", "double" },
     INT = { "int" },
 }
+
+-- These GCC/Clang builtins are the constant leaves used by ordinary <math.h>
+-- definitions of INFINITY, NAN and HUGE_VAL*. They need no C declarations.
+-- This does not infer arbitrary calls or expose function-like macros.
+local floating_constant_builtins = {}
+for _, family in ipairs({ "inf", "huge_val", "nan", "nans" }) do
+    for suffix, typ in pairs({
+        f = base_c_types.FLOAT,
+        [""] = base_c_types.DOUBLE,
+        l = base_c_types.LONG_DOUBLE,
+    }) do
+        floating_constant_builtins["__builtin_" .. family .. suffix] = {
+            type = typ,
+            arguments = (family == "nan" or family == "nans") and 1 or 0,
+        }
+    end
+end
+
+local function floating_literal_type(token)
+    -- The C grammar already validated this token. Exclude integer tokens
+    -- before looking for exponent letters, which are also hexadecimal digits.
+    if token:match("^0[xX][0-9a-fA-F]+[uUlL]*$")
+       or token:match("^[0-9]+[uUlL]*$")
+       or not token:match("^[0-9.]") then return nil end
+    if token:match("[fF]$") then return base_c_types.FLOAT end
+    if token:match("[lL]$") then return base_c_types.LONG_DOUBLE end
+    return base_c_types.DOUBLE
+end
+
+local function floating_builtin_type(exp)
+    local builtin = floating_constant_builtins[exp[1]]
+    local postfix = exp.postfix
+    local arguments = postfix and postfix.args
+    if not builtin or not arguments or #arguments ~= builtin.arguments then
+        return nil
+    end
+    for key in pairs(postfix) do if key ~= "args" then return nil end end
+    if builtin.arguments == 1 then
+        local arg = arguments[1]
+        if #arg ~= 1 or type(arg[1]) ~= "string"
+           or arg[1]:sub(1, 1) ~= '"' or arg.op or arg.postfix then
+            return nil
+        end
+    end
+    return builtin.type
+end
 
 -- Target-neutral metadata for an integer constant token. The candidate list is
 -- the ordered C99 6.4.4.1 list; a later target profile chooses the first class
@@ -156,6 +204,7 @@ cdefines.integer_literal_metadata = integer_literal_metadata
 -- relying on Lua's `pairs` order.
 local function annotate_integer_literals(exp)
     local literals = {}
+    local floating = false
     local seen = {}
 
     local function visit(node)
@@ -167,6 +216,9 @@ local function annotate_integer_literals(exp)
             if metadata then
                 node.integer_literal = metadata
                 literals[#literals + 1] = metadata
+            elseif (not node.postfix and floating_literal_type(node[1]))
+                   or floating_builtin_type(node) then
+                floating = true
             end
         end
 
@@ -188,12 +240,18 @@ local function annotate_integer_literals(exp)
     end
 
     visit(exp)
-    return literals
+    return literals, floating
 end
 
 local function get_binop_type(e1, e2)
+    if e1[2] == "double" or e2[2] == "double" then
+        return base_c_types.LONG_DOUBLE
+    end
     if e1[1] == "double" or e2[1] == "double" then
         return base_c_types.DOUBLE
+    end
+    if e1[1] == "float" or e2[1] == "float" then
+        return base_c_types.FLOAT
     end
     if e1[2] == "long" or e2[2] == "long" then
         return base_c_types.LONG_LONG
@@ -256,8 +314,8 @@ get_type_of_exp = typed("Exp, TypeList -> {string}?", function(exp, lst)
                 return base_c_types.LONG
             end
             return base_c_types.INT
-        elseif val:match("%.") then
-            return base_c_types.DOUBLE
+        elseif floating_literal_type(val) then
+            return floating_literal_type(val)
         else
             return base_c_types.INT
         end
@@ -269,6 +327,8 @@ get_type_of_exp = typed("Exp, TypeList -> {string}?", function(exp, lst)
         for key in pairs(exp.postfix) do
             if key ~= "args" then return nil end
         end
+        local builtin = floating_builtin_type(exp)
+        if builtin then return builtin end
         local fn = lst[exp[1]]
         if not fn or not fn.ret then
             return nil -- unknown function, or not a function
@@ -288,7 +348,13 @@ get_type_of_exp = typed("Exp, TypeList -> {string}?", function(exp, lst)
     elseif unary == "-" then
         return get_type_of_exp(exp[1], lst)
     elseif exp.op == "?" then
-        return get_type_of_exp(exp[2], lst)
+        local e1 = get_type_of_exp(exp[2], lst)
+        local e2 = get_type_of_exp(exp[3], lst)
+        if e1 and e2 and (e1[1] == "float" or e1[#e1] == "double"
+                         or e2[1] == "float" or e2[#e2] == "double") then
+            return get_binop_type(e1, e2)
+        end
+        return e1
     elseif exp.op == "," then
         return get_type_of_exp(exp[#exp], lst)
     elseif binop_set[exp.op] then
@@ -503,10 +569,13 @@ function cdefines.register_define(lst, name, text, _)
     end
     local typ = get_type_of_exp(exp, lst)
     if typ then
+        local literals, floating = annotate_integer_literals(exp)
         add_type(lst, name, {
             type = typ,
-            macro_expression = exp,
-            integer_literals = annotate_integer_literals(exp),
+            -- Floating expressions are emitted under their public C spelling;
+            -- only integer-only expressions enter the exact target evaluator.
+            macro_expression = not floating and exp or nil,
+            integer_literals = not floating and literals or nil,
         })
     end
 end
