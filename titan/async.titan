@@ -308,6 +308,11 @@ local record TerminalRegistration<|A, B|>
   local live: boolean
 end
 
+local record CloseRegistration
+  local listener: function (): ()
+  local live: boolean
+end
+
 local record Runtime
   local loop: uv.loop_t
   local wake: uv.timer_t
@@ -323,6 +328,7 @@ local record Runtime
   local failure: Error?
   local shutdown_cancelled: boolean
   local exit_code: integer?
+  local close_registrations: {CloseRegistration}
 end
 
 --- Deferred cooperative computation with typed success and complex-cancellation payloads.
@@ -487,7 +493,7 @@ local function new_runtime(): Runtime
   local runtime = Runtime {loop = uv.loop_t.new(), wake = uv.timer_t.new(),
     ready_head = nil, ready_tail = nil, ready_count = 0, wake_armed = false,
     tasks = {}, next_task = 1,
-    current_task = nil, driving = false, closing = false, failure = nil, shutdown_cancelled = false, exit_code = nil}
+    current_task = nil, driving = false, closing = false, failure = nil, shutdown_cancelled = false, exit_code = nil, close_registrations = {}}
   check_status(uv.loop_init(runtime.loop), "runtime.loop.init")
   local status = uv.timer_init(runtime.loop, runtime.wake)
   if status < 0 then
@@ -524,6 +530,50 @@ function is_closing(): boolean
   local runtime? = active_runtime
   if runtime == nil then raise "async Runtime is not active" end
   return runtime.closing
+end
+
+--- Observe Runtime retirement after all Tasks and native handles have finished.
+-- @param listener Nonyielding cleanup outside Task execution; errors propagate from loop after all listeners run.
+-- @return Idempotent remover; registration requires an active, nonclosing Runtime.
+-- @usage async-io.md#runtime-close-listeners
+function add_close_listener(listener: function (): ()): function (): ()
+  local runtime? = active_runtime
+  if runtime == nil then raise "async Runtime is not active" end
+  if runtime.closing or runtime.exit_code ~= nil then
+    raise "cannot register a close listener while async Runtime is shutting down"
+  end
+  local registration = CloseRegistration(listener, true)
+  runtime.close_registrations[#runtime.close_registrations + 1] = registration
+  return function ()
+    if not registration.live then return end
+    registration.live = false
+    local registrations = runtime.close_registrations
+    for index = 1, #registrations do
+      if registrations[index] == registration then
+        for following = index, #registrations - 1 do
+          registrations[following] = registrations[following + 1]
+        end
+        registrations[#registrations] = nil
+        return
+      end
+    end
+  end
+end
+
+local function notify_runtime_closed(runtime: Runtime)
+  runtime.closing = true
+  local registrations = runtime.close_registrations
+  runtime.close_registrations = {}
+  for index = 1, #registrations do
+    local registration = registrations[index]
+    if registration.live then
+      registration.live = false
+      do registration.listener()
+      catch
+        if runtime.failure == nil then runtime.failure = Error(error, traceback) end
+      end
+    end
+  end
 end
 
 --- Return the current Task through the all-value view; raises outside a Task.
@@ -1288,6 +1338,7 @@ function loop()
           local status = uv.loop_close(runtime.loop)
           if status == 0 then
             uv.timer_set_data(runtime.wake, nil)
+            notify_runtime_closed(runtime)
             active_runtime = nil
             local failure? = runtime.failure
             if failure ~= nil then rethrow_failure(failure) end
@@ -3815,6 +3866,13 @@ end
 -- @usage async-io.md
 function BufferedSubscription:has_waiter(): boolean
   return self.core.waiter ~= nil
+end
+
+--- Query whether an unread item or terminal outcome is already available.
+-- @return True for queued items, ended, error, or closed; this does not consume or reserve them.
+-- @usage async-io.md
+function BufferedSubscription:has_pending(): boolean
+  return self.core.count > 0 or not self.core:is_live()
 end
 
 --- Read and transfer the complete queued batch with the shared reader reservation.

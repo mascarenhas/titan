@@ -473,6 +473,9 @@ local function start_https(first_port: integer): async.Task
     local body = ""
     local client_failure = ""
     local requesting = async.run<|value, value|>(function (): value
+      -- This fixture owns both ends; retire its default idle client before
+      -- waiting for the accepted HTTPS server Task to leave the Runtime.
+      defer http.close_idle_connections()
       support.outcome = "https-requesting"
       do
         local response = http.get(

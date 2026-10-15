@@ -32,6 +32,8 @@ function listen(host: string, port: integer,
                 backlog: integer?): Server
 
 function Connection:read(): string?
+function Connection:has_pending_input(): boolean
+function Connection:add_input_listener(listener: function (): ()): function (): ()
 function Connection:read_until(delimiter: string,
                                chop: boolean?): string?
 function Connection:write(data: string)
@@ -62,7 +64,7 @@ running resolver work can fail, so safe retirement may extend a deadline.
 For a protocol that needs to own a socket before dialing, create
 `net.Connection()`, immediately defer its `close()`, then call
 `connect_address(address)` with one complete IPv4/IPv6 address and a nonzero
-port. This does no second DNS query. Only connect and close are valid before a
+port. This does no second DNS query. Only connect, close, and the synchronous input-state query are valid before a
 successful dial. Repeat or concurrent connect attempts fail; a failed attempt
 leaves the endpoint unusable until close. A supervisor can close the known
 endpoint while its connect is pending, then drain the connecting Task. The
@@ -122,6 +124,25 @@ to wait on the same Connection is rejected; no separate facade lock or queue is
 added. Cancelling a waiting reader detaches only that waiter, wakes it on a
 later loop turn, and leaves the physical read watcher and shared Connection
 available to another Task.
+
+`has_pending_input()` synchronously reports retained delimiter bytes, queued
+native input, EOF/error/close, or an endpoint that is not connected. It does not
+consume data, start reading, reserve a reader, check cancellation, or poll the
+socket. False means no input or terminal state has been observed yet; bytes can
+still be in the operating system or arrive later. Protocol pools can use this
+conservative snapshot to reject a connection with unsolicited input.
+
+`add_input_listener(listener)` registers a nonconsuming observer from a Task on
+a connected endpoint and returns an idempotent remover. It does not start the
+lazy read watcher or report old buffered input. After each new positive receive
+or EOF/error is buffered, listeners run in registration order in the native
+callback, outside Task execution. They must not yield or perform blocking I/O;
+they may remove listeners or schedule a Task. Removing a later listener skips
+it during the same notification. An observer error does not skip remaining
+listeners, but propagates to Runtime failure. Explicit close clears listeners
+without emitting an input event. Pair registration with `has_pending_input()`
+when previously buffered data matters, and remove observers before reuse by a
+different protocol owner.
 
 ## Writing, shutdown, and close
 

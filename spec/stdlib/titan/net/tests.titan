@@ -509,3 +509,82 @@ function test_net_preowned_connect_close_and_contention(context: test.Context)
                 "closing pending connect did not report a transport error")
   end)
 end
+
+function test_net_pending_input_query_preserves_delimiter_suffix(context: test.Context)
+  runtime_test.run(function ()
+    local unconnected = net.Connection()
+    defer unconnected:close()
+    test.assert(unconnected:has_pending_input(), "unconnected endpoint appeared reusable")
+    local server, port = support.listen_available(28400)
+    support.cleanup_server(context, server)
+    local connection = net.connect("127.0.0.1", port)
+    support.cleanup_connection(context, connection)
+    local peer = server:accept()
+    support.cleanup_connection(context, peer)
+    test.assert(not connection:has_pending_input(), "fresh TCP connection had pending input")
+    peer:write("prefix\nsuffix")
+    test.assert(connection:read_until("\n", true) == "prefix", "prefix read changed bytes")
+    while not connection:has_pending_input() do timer.yield() end
+    test.assert(connection:has_pending_input(), "query consumed pending input")
+    test.assert(connection:read_until("suffix", true) == "", "query changed pending suffix")
+    test.assert(not connection:has_pending_input(), "consumed suffix stayed pending")
+    peer:shutdown()
+    test.assert(connection:read() == nil, "peer shutdown did not reach EOF")
+    test.assert(connection:has_pending_input(), "EOF connection appeared reusable")
+    connection:close()
+    test.assert(connection:has_pending_input(), "closed connection appeared reusable")
+  end)
+end
+
+function test_net_input_listeners_observe_without_consuming_or_reserving(context: test.Context)
+  runtime_test.run(function ()
+    local server, port = support.listen_available(28400)
+    support.cleanup_server(context, server)
+    local connection = net.connect("127.0.0.1", port)
+    support.cleanup_connection(context, connection)
+    local peer = server:accept()
+    support.cleanup_connection(context, peer)
+    local first = 0
+    local skipped = 0
+    local last = 0
+    local outside_task = false
+    local remove_second: function (): () = function () end
+    local remove_first = connection:add_input_listener(function ()
+      first = first + 1
+      test.assert(connection:has_pending_input(), "observer ran before buffering input")
+      do async.running() catch outside_task = true end
+      remove_second()
+    end)
+    remove_second = connection:add_input_listener(function () skipped = skipped + 1 end)
+    local remove_last = connection:add_input_listener(function () last = last + 1 end)
+    test.assert(first == 0 and last == 0, "input listener fired during registration")
+    peer:write("head\n")
+    test.assert(connection:read_until("\n", true) == "head", "observer consumed the reader's bytes")
+    test.assert(first > 0 and skipped == 0 and last == first and outside_task,
+      "input observer order, removal, or callback context changed")
+    local delivered = first
+    remove_first()
+    remove_first()
+    remove_last()
+    peer:write("old")
+    while not connection:has_pending_input() do timer.yield() end
+    local no_replay = 0
+    local remove_replay = connection:add_input_listener(function () no_replay = no_replay + 1 end)
+    test.assert(no_replay == 0, "registration replayed previously buffered input")
+    remove_replay()
+    test.assert(connection:read_until("old", false) == "old",
+      "registration consumed previously buffered input")
+    peer:write("next")
+    test.assert(connection:read_until("next", false) == "next" and
+        first == delivered and last == delivered and no_replay == 0,
+      "removed input listener ran again")
+    local terminal = 0
+    local remove_terminal = connection:add_input_listener(function () terminal = terminal + 1 end)
+    peer:shutdown()
+    test.assert(connection:read() == nil and terminal == 1,
+      "input listener missed the terminal receive event")
+    connection:close()
+    remove_terminal()
+    test.assert(terminal == 1, "explicit close duplicated an input event")
+  end)
+end

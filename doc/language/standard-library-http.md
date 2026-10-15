@@ -41,6 +41,17 @@ record ClientResponse
     headers: Headers
 end
 
+record Client
+function Client.new(): Client
+function Client:request(method: string, source_url: string,
+                        supplied_headers: Headers?, body: string?,
+                        ca_file: string?): ClientResponse
+function Client:get(source_url: string, supplied_headers: Headers?,
+                    ca_file: string?): ClientResponse
+function Client:close_idle_connections()
+function Client:close()
+function close_idle_connections()
+
 function request(method: string, source_url: string,
                  supplied_headers: Headers?, body: string?,
                  ca_file: string?): ClientResponse
@@ -172,8 +183,9 @@ Writer. When a body is present, `Content-Length` is generated unless supplied;
 an explicit length must exactly match. Request `Transfer-Encoding` is not
 supported. Request `Expect` is also rejected because this initial client sends
 the optional body in the same write as its preamble and does not expose a
-staged `100-continue` state machine. The client always sets
-`Connection: close`.
+staged `100-continue` state machine. HTTP/1.1 connections are persistent by
+default. A supplied `Connection: close` is preserved and disables reuse for
+that exchange.
 
 `get` is `request` with method `GET` and no body. It does not attach semantics
 to any other method name.
@@ -187,19 +199,102 @@ connection-close-delimited HTTP/1.1 responses are handled by the protocol
 parser. Response trailers, when present, are appended to the same ordered
 `headers` collection as parsing reaches them.
 
-Reading through body EOF closes the parser and transport. `close()` lets the
-caller discard the remaining response and is idempotent. The client has no
-connection pool and never reuses its connection.
+Reading through body EOF closes the response and makes a healthy persistent
+connection available for reuse. Always defer `response:close()` immediately:
+callers that stop reading early still own closing the response. Close is
+idempotent; later reads return nil.
+
+### Connection pools and early close
+
+Module-level `get` and `request` share a default connection pool within the
+current async Runtime. `http.Client()` creates an independent pool with the
+same request methods. Use an explicit Client when a component needs its own
+connection lifetime:
+
+```titan
+local http = import "http"
+local string = import "string"
+
+function fetch_pair(first: string, second: string): (string, string)
+  local client = http.Client()
+  defer client:close()
+  local fetch = function (source: string): string
+    local response = client:get(source)
+    defer response:close()
+    local output = string.writer()
+    while true do
+      local chunk? = response:read()
+      if chunk == nil then return output:drain() end
+      output:write(chunk)
+    end
+  end
+  return fetch(first), fetch(second)
+end
+```
+
+For repeated requests, retain that Client across the calls and close it when
+the component finishes. A Client binds to the Runtime of its first request; construction alone
+does not require a Runtime. The default helpers select a fresh pool in a later Runtime session.
+Connections are never shared across schemes, normalized URL hosts and ports,
+effective Host headers, or HTTPS CA-file selections. HTTP ignores `ca_file`.
+A CA-file selection is the supplied path spelling, not a snapshot of its
+contents; close the pool before changing trust files or default trust settings.
+
+Only idle connections are shared. A response being read or drained holds its
+connection exclusively; another request can open a new connection immediately.
+There is no pipelining or limit on active requests. Each pool retains at most
+100 idle connections in total and two for one destination/trust key. Idle
+connections expire after 90 seconds, checked when the pool is next used;
+there is no background expiry Task. Runtime shutdown closes the pools and releases their idle sockets and TLS
+engines after native retirement.
+`close_idle_connections()` retires idle connections in the default pool;
+`Client:close_idle_connections()` does the same for an explicit Client.
+`Client:close()` additionally prevents new requests and retires its background
+drains. Responses still held by callers remain caller-owned and cannot return
+their connections to a closed Client. Healthy TLS idle connections and fully
+read nonpersistent responses attempt `close_notify` with a 50 ms timeout;
+interruption or timeout falls back to abort and completes native cleanup.
+Dirty/unread connections and Runtime retirement use abort directly.
+
+Closing an unread persistent response marks it closed immediately and schedules
+background draining for at most **50 ms** and **256 KiB** of unread decoded
+body data. A new request does not wait for that drain. The connection becomes
+idle only after the complete message, including chunk trailers, has been
+validated. Already buffered transport chunks may contain more bytes than the
+drain allowance; a background drain exceeding that allowance retires the
+connection. If the whole message is already parsed and validated, close can
+discard retained body bytes and release the connection without a drain.
+Otherwise known oversized remainders, close-delimited responses, `Connection: close`,
+protocol upgrades, parse failures, and truncated messages are retired without
+pooling. Expiration or a drain error retires the connection quietly; it cannot
+change a response that the caller has already closed. Trailers discovered by a
+successful drain are appended to the response's headers.
+
+These bounds follow the approach described in
+[Go's HTTP connection-reuse article](https://go.dev/blog/http-connection-reuse).
+They apply to Titan's HTTP/1.1 client; HTTP/2 is unsupported.
 
 An ordinary `request` or `get` rejects protocol upgrades. It also explicitly
 rejects `ws` and `wss` source URLs; use the
 [`websocket` module](standard-library-websocket.md) for those schemes.
 
-The response becomes logically closed before its transport close can suspend.
-Transport close is cancellation-insensitive: if Task cancellation is pending
-or arrives while it is suspended, cleanup completes and `close()` records
-completion before terminal cancellation is published. Every later `close()`
-is an immediate no-op.
+An idle input observer removes and retires a connection when new bytes, EOF,
+or error arrive, even when no further HTTP request is made. It creates a cleanup
+Task only on that event, so there is no permanently waiting Task or unbounded
+idle receive queue. TLS control records may also cause conservative retirement.
+Already observed input is rejected before reuse as well. If a reused connection fails before any response bytes arrive,
+Titan retries at most once on a fresh connection, and only for exact `GET` or
+`HEAD` with no request body and a recognized connection-closure error. It does
+not replay other methods, a request with a body, partial or informational
+responses, parse errors, or cancellation. Data detected on an idle connection
+before any request bytes are sent causes a fresh dial without replaying output.
+
+A response permits one reader at a time. Closing while that reader is active
+retires the connection and lets the reader unwind; it does not start a competing
+drain or return that connection to the pool. Transport retirement remains
+cancellation-insensitive: when reuse is unavailable, close completes cleanup
+before terminal cancellation is published. Background draining retains its
+parser and transport until read cancellation and native cleanup finish.
 
 Redirect status codes are returned unchanged; the client never follows them.
 Content codings such as gzip are likewise returned unchanged. The caller owns

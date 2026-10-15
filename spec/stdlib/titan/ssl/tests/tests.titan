@@ -51,6 +51,8 @@ function test_ssl_combined_pem_and_binary_record_exchange(
     channel:write(string.rep("x", 40000) .. "\0ENDtail")
     test.assert(channel:read_until("\n", true) == "reply\0",
                 "TLS response delimiter changed binary bytes")
+    test.assert(connection:has_pending_input() and connection:has_pending_input(),
+                "TLS pending-input query lost the delimiter suffix")
     test.assert(channel:read() == "rest",
                 "TLS response delimiter lost excess")
     test.assert(not channel:read(), "TLS peer close_notify was not clean EOF")
@@ -58,6 +60,7 @@ function test_ssl_combined_pem_and_binary_record_exchange(
     channel:close()
     test.assert(not channel:read() and not channel:read_until("missing"),
                 "closed TLS connection did not stay at EOF")
+    test.assert(connection:has_pending_input(), "closed TLS connection appeared reusable")
 
     while task_support.active(peer) do timer.yield() end
     test.assert(peer:status():as_string() == "succeeded",

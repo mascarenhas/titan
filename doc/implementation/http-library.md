@@ -14,7 +14,8 @@ checking. Its immediate contributors share one module-private scope:
 
 ```text
 titan/http/http.titan       imports and initialization
-titan/http/client.titan     one-request client and ClientResponse
+titan/http/client.titan     request/response exchanges and ClientResponse
+titan/http/pool.titan       Client pools, idle leases, bounded background drains
 titan/http/headers.titan    ordered public Headers value
 titan/http/native.titan     private parser owner and callback event Array
 titan/http/server.titan     Request, Response, and per-connection serving
@@ -27,8 +28,8 @@ or Task operation.
 HTTP obtains every byte from the public `io.ReaderWriterCloser` view of either
 a `net.Connection` or an `ssl.Connection`, and writes through that same view.
 URL parsing calls the independent public `titan.url` module without an
-HTTP-specific C bridge. The server imports public `titan.uv` only for the
-`uv.req_t?` return type of named Completion registrars. It adds no native
+HTTP-specific C bridge. HTTP imports public `titan.uv` for the borrowed Runtime-loop identity, monotonic
+`hrtime` deadlines, and the `uv.req_t?` type of named Completion registrars. It adds no native
 network boundary and does not change UV.
 
 ## Synchronous llhttp callback bridge
@@ -109,7 +110,85 @@ Response parsing likewise pauses at headers so `request` can return a
 until a final status is reached. An exact, case-sensitive `HEAD` request
 configures llhttp's response semantics before all informational/final parsing;
 case-distinct extension methods retain ordinary body semantics. Reading body
-EOF releases the parser and the one-use transport.
+EOF releases the parser and returns an eligible transport to its owning Client pool.
+
+## Client pooling and abandoned-body draining
+
+`Client` owns idle `ClientConnection` leases and `ClientDrain` workers. A lease
+captures its public ReaderWriterCloser, concrete abort capability, conservative
+input-state query, pool key, and idle timestamp before Interface erasure. The
+key length-prefixes scheme, normalized host, port, effective Host, and HTTPS
+trust path (with default trust distinct from a file); HTTP ignores the CA path.
+There is no DNS-address coalescing, native socket access, or private net/SSL import.
+
+The first request binds a Client to `async.current_loop()` and installs one
+`async.add_close_listener`. Explicit close detaches the listener, marks the
+Client closed, detaches idle leases and drains before any suspension, then
+retires them. Runtime notification runs only after every Task and raw handle
+has retired, when idle TCP close and TLS abort are synchronous. The default
+Client reference is cleared on exact owner identity. Caller-owned active
+responses retain their existing explicit-close responsibility.
+
+Acquisition removes the newest matching lease before I/O. Pool mutation and
+selection finish before closing expired or dirty connections, because abort
+may yield. Release admits only complete, persistent, non-EOF messages with no
+parser suffix or transport input. A fresh parser is allocated per exchange.
+The caps are 100 idle leases overall, two per key, and 90 seconds idle age;
+age checks happen on pool activity without a keepalive timer Task. Active
+responses and drains are never in the idle Array. Input is checked on release,
+on acquisition, and again inside the supervised exchange before output, so
+bytes delivered while that child is queued cannot become the next response.
+While idle, a lease also registers the concrete public input observer. An
+arrival removes the observer, roots a `ClientRetirement`, schedules its abort
+Task, and removes the idle lease before that Task can run. Scheduling failure
+leaves the original idle root available to Runtime cleanup. The retirement
+registry also covers a worker cancelled before its first instruction. This
+prevents an unused socket from accumulating unbounded data. Observers are
+removed from every captured idle lease before potentially yielding close work;
+no persistent waiting Task delays Runtime shutdown.
+Once shutdown begins, native handle retirement and the Client close listener
+own final cleanup. This implements the no-unsolicited-response requirement of
+[RFC 9112 section 9.2](https://www.rfc-editor.org/rfc/rfc9112.html#section-9.2).
+
+Healthy TLS eviction and fully framed nonpersistent response retirement run
+ordinary `ssl.close` in a supervised child with a 50 ms timer. Timeout, failure,
+or cancellation aborts before draining that child. All watchers are detached
+before close may suspend; a selected lease stays lexically guarded across
+expiration cleanup, followed by a Client rebind/check before transfer. Dirty
+input and Runtime retirement take the direct abort path. Response ownership
+commits before graceful close can yield, so a repeated close cannot interrupt
+its already-owned cleanup. Supplied upgrade abort capabilities retain their
+retry-after-failure behavior.
+
+A stale reused connection gets one fresh attempt only for exact GET/HEAD with
+nil body, no received response byte (including interim responses), and selected
+EOF/reset errors. `Parser.input_received` is sticky across interim resets;
+`input_seen` remains message-local. A cancellation checkpoint precedes retry.
+Other failures propagate with their original error and traceback. Detecting
+dirty idle input before output instead discards the lease and fresh-dials any
+method because no request was sent. Ordinary request I/O uses the same
+abort-before-child-drain supervisor as protocol takeover.
+
+Response close relinquishes reader ownership immediately. A complete eligible
+message releases directly; an incomplete eligible body transfers its parser
+and lease to one supervised drain. The worker measures an absolute 50 ms
+budget from close with `uv.hrtime`, races an owned reader against the remaining
+time, and limits unread decoded bytes to 256 KiB. Known larger Content-Length
+remainders, nonpersistent messages, EOF framing, errors, and upgrades skip the
+drain. The response captures wire framing/persistence at header completion;
+mutating public headers later cannot change reuse eligibility.
+`Parser.body_consumed` includes delivered decoded chunks and subtracts retained
+`read_until` suffixes, so the allowance counts bytes still unread by the caller.
+
+A drain succeeds only after message completion and trailer validation. Before
+release, it detaches from the drain registry; otherwise a concurrent Client
+close could abort a lease already used by another request. Its fallback abort
+is armed before worker allocation/publication. On timeout, cancellation, or
+failure it aborts first, then waits for the exact reader's terminal cleanup
+before closing parser state. Closing during a foreground read instead retires
+the transport and leaves parser cleanup to that reader's defer. Background
+errors are contained because the response is already logically closed. The
+bounds follow [Go's connection-reuse design](https://go.dev/blog/http-connection-reuse).
 
 ## Bounded opening and protocol takeover
 
@@ -236,7 +315,8 @@ or reinterpret the independently parsed target. `Request.target` remains that
 received target, while `Request.url` provides the normalized routing view.
 
 The client copies supplied headers, validates Content-Length, rejects request
-Transfer-Encoding and Expect fields, and forces `Connection: close`. Rejecting
+Transfer-Encoding and Expect fields, and preserves supplied Connection fields.
+An explicit close token disables reuse; HTTP/1.1 is otherwise persistent. Rejecting
 Expect is deliberate: the initial client assembles the optional body with the
 preamble in one write and must not advertise a `100-continue` handshake that
 it does not honor. A supplied singleton Host is parsed by the URL module's
@@ -331,9 +411,12 @@ fields. Informational `100 Continue` does not reserve the final response.
 Upgrade output rechecks the live exchange after its supervised writer returns,
 before transferring ownership, because a sibling may have aborted it meanwhile.
 
-`ClientResponse:close` marks its Titan parser closed before calling the
-suspending transport close, then records transport completion after that call
-returns. `Server:close` similarly marks the high-level listener closed before
+`ClientResponse:close` marks the public response closed before transferring an
+unread reusable parser/transport to bounded background draining. A completed
+message can return its transport immediately. Non-reusable exchanges close the
+parser and retire transport cancellation-insensitively. A read failure always
+retires its connection and preserves the original error. `Server:close`
+similarly marks the high-level listener closed before
 delegating to `net.Server` or `ssl.Server`, then records listener completion
 after the delegate returns. Those underlying ownership-retiring close operations are
 cancellation-insensitive: pending cancellation neither prevents submission

@@ -46,6 +46,8 @@ function listen(host: string, port: integer,
 
 function Connection:handshake()
 function Connection:read(): string?
+function Connection:has_pending_input(): boolean
+function Connection:add_input_listener(listener: function (): ()): function (): ()
 function Connection:read_until(delimiter: string,
                                chop: boolean?): string?
 function Connection:write(data: string)
@@ -199,6 +201,22 @@ An admitted operation owns one internal I/O Task. Its public caller remains
 runnable on cancellation, closes the transport before draining that child,
 and releases the direction after cleanup. Cancellation after admission is
 terminal for the TLS connection; it is not a detachable reusable read.
+
+`has_pending_input()` is a synchronous, nonconsuming snapshot. It is true for
+retained plaintext, OpenSSL-buffered records or input-BIO bytes, pending input or
+terminal state in the TCP transport, and any TLS state other than open. Buffered
+TLS records may be partial or control records, so true does not promise a
+nonblocking plaintext read. False does not poll the socket or guarantee future
+liveness. The query never drives the handshake, consumes records, reserves an
+operation, or checks Task cancellation.
+
+`add_input_listener(listener)` delegates receive observation to the owned TCP
+transport and requires an open TLS connection in a Task. It has the same
+nonyielding callback and idempotent-removal contract as the TCP method. It does
+not perform a handshake, decrypt records, or report previously buffered TLS
+input. An event can contain a partial or control record with no application
+plaintext. HTTP pools use this conservative signal to retire idle connections
+without leaving a waiting Task alive.
 
 ## TLS shutdown and EOF
 

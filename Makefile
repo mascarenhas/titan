@@ -327,7 +327,7 @@ UV_TITAN_HEADERS := \
 	titan/uv/version-native.h \
 	titan/uv/work-data.h
 STDLIB_HTTP_SOURCES := titan/http/http.titan titan/http/client.titan \
-	titan/http/headers.titan titan/http/native.titan \
+	titan/http/headers.titan titan/http/native.titan titan/http/pool.titan \
 	titan/http/server.titan titan/http/upgrade.titan
 SQLITE3_TITAN_SOURCES := titan/sqlite3/sqlite3.titan titan/sqlite3/bindings.titan \
 	titan/sqlite3/row.titan titan/sqlite3/worker.titan

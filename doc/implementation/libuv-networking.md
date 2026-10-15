@@ -18,6 +18,20 @@ records.
 The TLS implementation composes over these public records and never obtains
 their low-level owner; see [TLS implementation](ssl-library.md).
 
+`Connection:has_pending_input()` is a pure snapshot of connection phase,
+native closed state, delimiter excess, and the public buffered subscription's
+`has_pending()`. It introduces no second receive counter, waiter, or native
+poll. False does not mean the kernel socket is empty; HTTP checks it again in
+its supervised exchange immediately before sending on an idle lease.
+
+`Connection:add_input_listener` owns a small ordered Array of private listener
+registrations. The receive callback publishes bytes or terminal state first,
+then notifies observers without consuming input. Removal marks a registration
+dead and replaces the current Array so an active notification keeps stable
+ordering. Explicit close clears registrations. Callback errors are collected
+until remaining listeners run and then retain their original traceback through
+`async.Error:raise`. Registration does not create a read watcher or Task.
+
 ## One-shot request adapters
 
 DNS, connect, write, and shutdown submit public request owners through

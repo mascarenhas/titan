@@ -12,22 +12,34 @@ record ClientResponse
   local parser: Parser
   local connection: io.ReaderWriterCloser
   local abort: function (): ()
+  local client: Client?
+  local lease: ClientConnection?
+  local request_keep_alive: boolean
+  local body_length: integer?
   local upgrade_pending: boolean
   local closed: boolean
   local connection_closed: boolean
+  local reading: boolean
 end
 
-local function client_connection(parsed_url: url.Url, ca_file: string?):
-    io.ReaderWriterCloser
+local function client_connection(parsed_url: url.Url, ca_file: string?,
+                                   key: string): ClientConnection
   if parsed_url.scheme == "https" then
-    local secure = ssl.connect(
-      parsed_url.host, parsed_url.port, ca_file)
-    local channel: io.ReaderWriterCloser = secure
-    return channel
+    local secure = ssl.connect(parsed_url.host, parsed_url.port, ca_file)
+    local adopted = false
+    defer if not adopted then secure:abort() end
+    local lease = ClientConnection(Transport(secure, secure:abort),
+      secure:has_pending_input, secure:add_input_listener, nil, true, key, 0)
+    adopted = true
+    return lease
   end
   local plain = net.connect(parsed_url.host, parsed_url.port)
-  local channel: io.ReaderWriterCloser = plain
-  return channel
+  local adopted = false
+  defer if not adopted then plain:close() end
+  local lease = ClientConnection(Transport(plain, plain:close),
+    plain:has_pending_input, plain:add_input_listener, nil, false, key, 0)
+  adopted = true
+  return lease
 end
 
 local function client_request_headers(parsed_url: url.Url,
@@ -49,7 +61,7 @@ local function client_request_headers(parsed_url: url.Url,
     raise "HTTP client requests do not support Expect"
   end
   local body_length = 0
-  if body then body_length = #(body as string) end
+  if body then body_length = #body end
   local lengths = result:values("Content-Length")
   if #lengths > 1 then
     raise "HTTP request has more than one Content-Length header"
@@ -60,20 +72,15 @@ local function client_request_headers(parsed_url: url.Url,
   elseif body then
     result:add("Content-Length", string.tostring(body_length))
   end
-  result:set("Connection", "close")
   return result
 end
 
 local function final_response_headers(parser: Parser)
   while true do
     if not ensure_parser_headers(parser) then
-      -- A client always requires a final response. This also preserves the
-      -- error when a peer closes after only informational responses.
       raise "HTTP message ended before it was complete"
     end
     if parser.status_number >= 200 then
-      -- llhttp accepts reason-phrase controls, so apply the HTTP field-value
-      -- repertoire before exposing a final response.
       validate_reason(parser.reason_text)
       return
     end
@@ -89,7 +96,122 @@ local function final_response_headers(parser: Parser)
   end
 end
 
---- Send one HTTP request and return after final response headers arrive.
+local function response_body_length(parser: Parser): integer?
+  if parser.response_to_head or parser.status_number == 204 or
+      parser.status_number == 205 or parser.status_number == 304 then
+    return 0
+  end
+  local length? = parser.parsed_headers:get("Content-Length")
+  if length == nil then return nil end
+  return decimal_header(length, "HTTP Content-Length")
+catch
+  -- llhttp admits unsigned lengths larger than Titan's signed integer range.
+  -- Such a body can stream normally, but must never receive automatic drain.
+  return math.maxinteger
+end
+
+local function stale_client_failure(failure: value): boolean
+  if failure == "HTTP message ended before it was complete" then return true end
+  if failure is async.OperationError then
+    local problem: async.OperationError = failure
+    return problem.name == "EPIPE" or problem.name == "ECONNRESET" or
+      problem.name == "ENOTCONN" or problem.name == "ECONNABORTED"
+  end
+  if failure is ssl.Error then
+    local problem: ssl.Error = failure
+    return problem.name == "TLS_TRUNCATED_EOF"
+  end
+  return false
+end
+
+--- Send an HTTP request using this client's pool and return final response headers.
+-- @param method Case-sensitive HTTP token selecting the request method.
+-- @param source_url Absolute URL text.
+-- @param supplied_headers Optional headers copied into the outgoing message.
+-- @param body Optional in-memory request-body bytes.
+-- @param ca_file Optional PEM trust bundle replacing the default trust roots.
+-- @return Response metadata and streaming body; the caller owns closing it.
+-- @usage standard-library-http.md#client-requests
+function Client:request(method: string, source_url: string,
+                         supplied_headers: Headers?, body: string?,
+                         ca_file: string?): ClientResponse
+  validate_http_token(method, "HTTP method")
+  local parsed_url = parse_url_or_raise(source_url)
+  local request_headers = client_request_headers(parsed_url, supplied_headers, body)
+  local keep_alive = not header_has_token(request_headers, "Connection", "close")
+  local builder = string.writer()
+  builder:write(method .. " " .. parsed_url.target .. " HTTP/1.1\r\n")
+  builder:write(render_headers(request_headers))
+  builder:write("\r\n")
+  if body then builder:write(body) end
+  local output = builder:drain()
+  self:bind()
+  local key = client_pool_key(parsed_url, request_headers, ca_file)
+  local lease? = self:acquire(key)
+  local reused = lease ~= nil
+  if lease == nil then lease = client_connection(parsed_url, ca_file, key) end
+  for attempt = 1, 2 do
+    local exact: Parser? = nil
+    local idle_input = false
+    do
+      exact = new_response_parser(lease.transport.connection, method == "HEAD")
+      return supervised_http_io<|ClientResponse|>(lease.transport.abort,
+        function (): ClientResponse
+          if reused and lease.has_pending_input() then
+            idle_input = true
+            raise "HTTP idle connection received input"
+          end
+          lease.transport.connection:write(output)
+          final_response_headers(exact)
+          if exact.status_number < 200 or exact.status_number > 999 then
+            raise "HTTP server returned an invalid final status code"
+          end
+          return ClientResponse {
+            status = exact.status_number,
+            reason = exact.reason_text,
+            version = "HTTP/1.1",
+            headers = exact.parsed_headers,
+            parser = exact,
+            connection = lease.transport.connection,
+            abort = lease.transport.abort,
+            client = self,
+            lease = lease,
+            request_keep_alive = keep_alive,
+            body_length = response_body_length(exact),
+            upgrade_pending = false,
+            closed = false,
+            connection_closed = false,
+            reading = false,
+          }
+        end)
+    catch
+      -- Idle input observed before the write permits a fresh dial for any
+      -- method: no request was sent. A failed sent request has stricter rules.
+      local retry = attempt == 1 and reused and (idle_input or
+        (body == nil and (method == "GET" or method == "HEAD") and
+         (exact == nil or not exact.input_received) and
+         stale_client_failure(error)))
+      if exact ~= nil then close_parser(exact) end
+      do lease.transport.abort() catch end
+      if not retry then raise end
+    end
+    -- A cancellation remains authoritative even if its transport failure
+    -- looked like a stale idle socket. Replay only these bodyless safe verbs.
+    self:bind()
+    lease = client_connection(parsed_url, ca_file, key)
+    reused = false
+  end
+  raise "HTTP request attempts exhausted"
+end
+
+--- Send a GET using this client's connection pool.
+-- @usage standard-library-http.md#client-requests
+function Client:get(source_url: string, supplied_headers: Headers?,
+                     ca_file: string?): ClientResponse
+  return self:request("GET", source_url, supplied_headers, nil, ca_file)
+end
+
+--- Send an HTTP request using the current Runtime's shared default client.
 -- @param method Case-sensitive HTTP token selecting the request method.
 -- @param source_url Absolute URL text.
 -- @param supplied_headers Optional headers copied into the outgoing message.
@@ -100,60 +222,14 @@ end
 function request(method: string, source_url: string,
                  supplied_headers: Headers?, body: string?,
                  ca_file: string?): ClientResponse
-  validate_http_token(method, "HTTP method")
-  local parsed_url = parse_url_or_raise(source_url)
-  local request_headers =
-    client_request_headers(parsed_url, supplied_headers, body)
-  local connection = client_connection(parsed_url, ca_file)
-  local parser: Parser? = nil
-  do
-    local builder = string.writer()
-    builder:write(method .. " " .. parsed_url.target ..
-                  " HTTP/1.1\r\n")
-    builder:write(render_headers(request_headers))
-    builder:write("\r\n")
-    if body then builder:write(body as string) end
-    connection:write(builder:drain())
-
-    local exact = new_response_parser(
-      connection, method == "HEAD")
-    parser = exact
-    final_response_headers(exact)
-    if exact.status_number < 200 or exact.status_number > 999 then
-      raise "HTTP server returned an invalid final status code"
-    end
-    return ClientResponse {
-      status = exact.status_number,
-      reason = exact.reason_text,
-      version = "HTTP/1.1",
-      headers = exact.parsed_headers,
-      parser = exact,
-      connection = connection,
-      abort = connection:close,
-      upgrade_pending = false,
-      closed = false,
-      connection_closed = false,
-    }
-  catch
-    local failure = error
-    if parser then close_parser(parser as Parser) end
-    do
-      connection:close()
-    catch
-    end
-    raise failure
-  end
+  return default_http_client():request(method, source_url, supplied_headers, body, ca_file)
 end
 
---- Send one GET request and return an owned streaming response.
--- @param source_url Absolute URL text.
--- @param supplied_headers Optional headers copied into the outgoing message.
--- @param ca_file Optional PEM trust bundle replacing the default trust roots.
--- @return Response metadata and streaming body; the caller owns closing it.
+--- Send a GET using the current Runtime's shared default client.
 -- @usage standard-library-http.md#client-requests
 function get(source_url: string, supplied_headers: Headers?,
              ca_file: string?): ClientResponse
-  return request("GET", source_url, supplied_headers, nil, ca_file)
+  return default_http_client():get(source_url, supplied_headers, ca_file)
 end
 
 --- Send an upgrade request over an owned supplied stream and await response headers.
@@ -187,7 +263,7 @@ function request_upgrade_on(connection: io.ReaderWriterCloser,
     parser = exact
     exact.allow_upgrade = true
     exact.header_limit = 65536
-    return supervised_upgrade_io<|ClientResponse|>(abort,
+    return supervised_http_io<|ClientResponse|>(abort,
       function (): ClientResponse
         connection:write(output)
         local interim = 0
@@ -216,9 +292,14 @@ function request_upgrade_on(connection: io.ReaderWriterCloser,
           parser = exact,
           connection = connection,
           abort = abort,
+          client = nil,
+          lease = nil,
+          request_keep_alive = false,
+          body_length = nil,
           upgrade_pending = exact.status_number == 101,
           closed = false,
           connection_closed = false,
+          reading = false,
         }
       end)
   catch
@@ -245,23 +326,47 @@ function ClientResponse:take_upgrade(): io.ReaderWriterCloser
   return view
 end
 
+local function ClientResponse:retire(graceful: boolean?)
+  self.closed = true
+  if self.connection_closed then return end
+  defer do
+    if not self.reading then close_parser(self.parser) end
+  end
+  if graceful and self.lease ~= nil then
+    -- Bounded graceful retirement owns abort fallback, even if interrupted.
+    -- Commit before suspension so another close cannot abort this operation.
+    self.connection_closed = true
+    self.lease:close_idle()
+  else
+    self.abort()
+  end
+  self.connection_closed = true
+end
+
 --- Read decoded response-body bytes, or nil at the body's end.
 -- @return Copied bytes or text, or nil at EOF or when absent.
 -- @usage standard-library-http.md#client-requests
 function ClientResponse:read(): string?
   if self.upgrade_pending then raise "HTTP upgraded response has no readable body" end
   if self.closed then return nil end
+  async.checkpoint()
+  if self.reading then raise "HTTP response already has a reader" end
+  self.reading = true
+  defer do
+    self.reading = false
+    if self.closed then close_parser(self.parser) end
+  end
   do
     local chunk? = parser_read(self.parser)
-    if chunk then return chunk as string end
+    if chunk ~= nil then return chunk end
+    self.reading = false
     self:close()
     return nil
   catch
-    local failure = error
-    do self:close() catch end
-    raise failure
+    self.reading = false
+    do self:retire() catch end
+    raise
   end
-  return nil
 end
 
 --- Read response bytes through a delimiter, retaining the unused suffix.
@@ -273,29 +378,64 @@ function ClientResponse:read_until(delimiter: string,
                                    chop: boolean?): string?
   if self.upgrade_pending then raise "HTTP upgraded response has no readable body" end
   if self.closed then return nil end
+  if #delimiter == 0 then raise "read delimiter must not be empty" end
+  async.checkpoint()
+  if self.reading then raise "HTTP response already has a reader" end
+  self.reading = true
+  defer do
+    self.reading = false
+    if self.closed then close_parser(self.parser) end
+  end
   do
     local result? = parser_read_until(self.parser, delimiter, chop)
-    if result then return result as string end
+    if result ~= nil then return result end
+    self.reading = false
     self:close()
     return nil
   catch
-    local failure = error
-    do self:close() catch end
-    raise failure
+    self.reading = false
+    do self:retire() catch end
+    raise
   end
-  return nil
 end
 
---- Discard unread body bytes and retire the one-use transport.
+--- Close the body and asynchronously drain a small unread persistent response.
 -- @usage standard-library-http.md#client-requests
 function ClientResponse:close()
-  if self.closed and self.connection_closed then return end
-  if not self.closed then
+  if self.closed then
+    if not self.connection_closed then self:retire() end
+    return
+  end
+  local started = uv.hrtime()
+  self.closed = true
+  local client? = self.client
+  local lease? = self.lease
+  if self.reading or client == nil or lease == nil or client.closed or
+      not self.request_keep_alive or not self.parser.keep_alive or
+      self.parser.transport_eof or self.upgrade_pending or async.is_closing() then
+    local graceful = not self.reading and not self.upgrade_pending and
+      self.parser.message_complete and not self.parser.transport_eof and
+      #self.parser.input_excess == 0
+    self:retire(graceful)
+    return
+  end
+  if self.parser.message_complete then
+    if not client_parser_reusable(self.parser) then
+      self:retire()
+      return
+    end
     close_parser(self.parser)
-    self.closed = true
-  end
-  if not self.connection_closed then
-    self.abort()
     self.connection_closed = true
+    client:release(lease)
+    return
   end
+  if self.body_length ~= nil and
+      self.body_length - self.parser.body_consumed > CLIENT_DRAIN_BYTES then
+    self:retire()
+    return
+  end
+  -- Ownership passes before scheduling. Retained responses can no longer
+  -- abort a later exchange after the worker returns this lease to the pool.
+  self.connection_closed = true
+  client:start_drain(lease, self.parser, started)
 end
