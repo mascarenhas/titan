@@ -1,0 +1,195 @@
+local receiver_string = import "string"
+foreign import "lauxlib.h"
+
+foreign function receiver_test_callback(state: *lua_State): int
+  return ffi.lua_gettop(state)
+end
+
+local function receiver_integer(item: async.TransferValue): integer
+  case item
+  when is_integer(number) then return number
+  else raise "receiver changed an integer's variant"
+  end
+end
+
+local function receiver_error(action: function (): (), expected: string?)
+  local caught = false
+  do
+    action()
+  catch
+    caught = error is string
+    if expected then test.assert(error == expected, "unexpected Receiver diagnostic") end
+  end
+  test.assert(caught, "invalid Receiver operation succeeded")
+end
+
+local function receiver_send_transient_string(handle: foreign *void)
+  async.send(handle, async.TransferValue.is_string(
+    receiver_string.rep("receiver\0bytes", 4096)))
+end
+
+function test_receiver_burst_fifo_preserves_every_message(_context: test.Context)
+  runtime_test.run(function ()
+    local receiver = async.receiver()
+    defer receiver:close()
+    local handle = receiver:handle()
+    for ordinal = 1, 257 do
+      async.send(handle, async.TransferValue.is_integer(ordinal))
+    end
+    support.collect_garbage()
+    for ordinal = 1, 257 do
+      test.assert(receiver_integer(receiver:wait()) == ordinal,
+                  "coalesced native wake lost or reordered a Receiver message")
+    end
+    async.send(handle, async.TransferValue.is_integer(258))
+    test.assert(receiver_integer(receiver:wait()) == 258,
+                "Receiver stopped accepting after a complete batch")
+  end)
+end
+
+function test_receiver_preserves_all_transfer_variants_and_copied_bytes(
+    _context: test.Context)
+  runtime_test.run(function ()
+    local state = ffi.luaL_newstate()
+    test.assert(state ~= nil, "could not allocate borrowed state fixture")
+    defer ffi.lua_close(state)
+    local receiver = async.receiver()
+    defer receiver:close()
+    local handle = receiver:handle()
+    local memory: owned int[] = foreign int.new_array(1)
+    memory[0] = 42
+    local expected_callback: foreign function (*lua_State): int = receiver_test_callback
+    async.send(handle, async.TransferValue.is_nil())
+    async.send(handle, async.TransferValue.is_boolean(false))
+    async.send(handle, async.TransferValue.is_boolean(true))
+    async.send(handle, async.TransferValue.is_integer(-73))
+    async.send(handle, async.TransferValue.is_float(2.5))
+    receiver_send_transient_string(handle)
+    async.send(handle, async.TransferValue.is_lua_state(state))
+    async.send(handle, async.TransferValue.is_function(receiver_test_callback))
+    async.send(handle, async.TransferValue.is_pointer(memory as foreign *void))
+    support.collect_garbage()
+    support.collect_garbage()
+    case receiver:wait()
+    when is_nil() then
+    else raise "Receiver changed nil's variant" end
+    case receiver:wait()
+    when is_boolean(flag) then test.assert(not flag, "Receiver changed false")
+    else raise "Receiver changed false's variant" end
+    case receiver:wait()
+    when is_boolean(flag) then test.assert(flag, "Receiver changed true")
+    else raise "Receiver changed true's variant" end
+    test.assert(receiver_integer(receiver:wait()) == -73)
+    case receiver:wait()
+    when is_float(number) then test.assert(number == 2.5)
+    else raise "Receiver changed a float's variant" end
+    case receiver:wait()
+    when is_string(bytes) then
+      test.assert(bytes == receiver_string.rep("receiver\0bytes", 4096),
+                  "Receiver lost copied string bytes after sender GC")
+    else raise "Receiver changed a string's variant" end
+    case receiver:wait()
+    when is_lua_state(pointer) then test.assert(pointer == state)
+    else raise "Receiver changed a borrowed state's variant" end
+    case receiver:wait()
+    when is_function(callback) then test.assert(callback == expected_callback)
+    else raise "Receiver changed a native function's variant" end
+    case receiver:wait()
+    when is_pointer(pointer) then
+      test.assert(pointer == memory as foreign *void)
+    else raise "Receiver changed a raw pointer's variant" end
+    test.assert(memory[0] == 42, "Receiver wrote through a borrowed pointer")
+  end)
+end
+
+function test_receiver_reserves_one_waiter_without_barging(_context: test.Context)
+  runtime_test.run(function ()
+    local receiver = async.receiver()
+    defer receiver:close()
+    local waiting = async.run<|async.TransferValue, value|>(receiver:wait)
+    task_support.cleanup_task(waiting, "Receiver reserved waiter cleanup")
+    support.wait_until_waiting(waiting)
+    receiver_error(function () receiver:wait() end)
+    async.send(receiver:handle(), async.TransferValue.is_integer(41))
+    receiver_error(function () receiver:wait() end)
+    case async.join(waiting)
+    when succeeded(item) then test.assert(receiver_integer(item) == 41)
+    else raise "second reader disturbed the reserved Receiver waiter" end
+    async.send(receiver:handle(), async.TransferValue.is_integer(42))
+    test.assert(receiver_integer(receiver:wait()) == 42,
+                "completed Receiver waiter retained its reservation")
+  end)
+end
+
+function test_receiver_cancellation_preserves_queued_message(_context: test.Context)
+  runtime_test.run(function ()
+    local receiver = async.receiver()
+    defer receiver:close()
+    local waiting = async.run<|async.TransferValue, value|>(receiver:wait)
+    task_support.cleanup_task(waiting, "cancelled Receiver waiter cleanup")
+    support.wait_until_waiting(waiting)
+    -- Neither send nor cancel yields: cancellation wins before delivery.
+    async.send(receiver:handle(), async.TransferValue.is_integer(73))
+    waiting:cancel(async.CancellationReason.simple("Receiver wait cancelled"))
+    test.assert(support.cancelled_with(async.join(waiting), "Receiver wait cancelled"))
+    support.collect_garbage()
+    test.assert(receiver_integer(receiver:wait()) == 73,
+                "cancelled Receiver waiter consumed its queued message")
+    async.send(receiver:handle(), async.TransferValue.is_integer(74))
+    test.assert(receiver_integer(receiver:wait()) == 74,
+                "cancelled wait closed or stalled the Receiver")
+  end)
+end
+
+function test_receiver_close_wakes_waiter_and_rejects_late_sends(_context: test.Context)
+  runtime_test.run(function ()
+    receiver_error(function ()
+      async.send(nil, async.TransferValue.is_nil())
+    end, "receiver handle must not be NULL")
+    local receiver = async.receiver()
+    defer receiver:close()
+    local handle = receiver:handle()
+    local waiting = async.run<|async.TransferValue, value|>(receiver:wait)
+    task_support.cleanup_task(waiting, "closed Receiver waiter cleanup")
+    support.wait_until_waiting(waiting)
+    receiver:close()
+    receiver:close()
+    case async.join(waiting)
+    when failed(failure) then test.assert(failure.error == "receiver is closed")
+    else raise "closing a Receiver did not fail its waiting Task" end
+    support.collect_garbage()
+    receiver_error(function ()
+      async.send(handle, async.TransferValue.is_integer(1))
+    end, "receiver is closed")
+    receiver_error(function () receiver:wait() end, "receiver is closed")
+
+    local queued = async.receiver()
+    defer queued:close()
+    receiver_send_transient_string(queued:handle())
+    queued:close()
+    support.collect_garbage()
+    receiver_error(function () queued:wait() end, "receiver is closed")
+  end)
+end
+
+function test_receiver_runtime_shutdown_retires_retained_endpoint(_context: test.Context)
+  -- Construction and send are allowed before a Task starts driving this Runtime.
+  local receiver = async.receiver()
+  defer receiver:close()
+  local handle = receiver:handle()
+  async.send(handle, async.TransferValue.is_integer(29))
+  local waiting = async.run<|async.TransferValue, value|>(receiver:wait)
+  async.loop()
+  case waiting:status()
+  when succeeded(item) then test.assert(receiver_integer(item) == 29)
+  else raise "pre-loop Receiver message did not reach its Task" end
+  support.collect_garbage()
+  support.collect_garbage()
+  receiver_error(function ()
+    async.send(handle, async.TransferValue.is_integer(30))
+  end, "receiver is closed")
+  runtime_test.run(function ()
+    receiver_error(function () receiver:wait() end, "receiver is closed")
+  end)
+  receiver:close()
+end

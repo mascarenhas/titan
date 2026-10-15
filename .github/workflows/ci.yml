@@ -873,6 +873,10 @@ jobs:
             make titan-stdlib-test-run TITAN_FILTER='test_net_overlapping_writes_'
           bash spec/support/ci_sanitizer_capture.sh foreign-work-tests \
             make titan-stdlib-test-run TITAN_FILTER='test_run_foreign_'
+          bash spec/support/ci_sanitizer_capture.sh independent-lua-state-tests \
+            make titan-stdlib-test-run TITAN_FILTER='test_lua_independent_'
+          bash spec/support/ci_sanitizer_capture.sh async-receiver-tests \
+            make titan-stdlib-test-run TITAN_FILTER='test_receiver_'
           bash spec/support/ci_sanitizer_capture.sh signal-owner-tests \
             make titan-stdlib-test-run TITAN_FILTER='test_signal_watcher_'
 

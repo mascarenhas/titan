@@ -1804,14 +1804,17 @@ separate-DSO imports use the selective compatibility protocol instead.
   every logical module; `titan.c` has no shim-specific or libuv-specific case.
 * **`titan_module_provider(L, module, file)`** — first reads the canonical
   logical module from the registry and uses the export callback in its native
-  payload. Only an absent logical module loads `file`; a null filename requires
-  an already initialized transitive owner. Executable-embedded, archive-linked,
-  and locally loaded modules publish the same callback.
+  payload. An absent module next uses a matching copied native provider
+  descriptor, then loads `file` only if no descriptor exists. A null filename
+  requires an already initialized transitive owner and does not select a
+  descriptor. Executable-embedded, archive-linked, and locally loaded modules
+  publish the same callback. Selection invokes no loader or initializer.
 * **`titan_module_symbol(L, provider, sym)`** — resolves a symbol through the
-  canonical callback or, for a newly opened provider, through `loadsym`.
+  canonical/copied native callback or, for a newly opened provider, through
+  `loadsym`.
   `loadsym(L, lib, sym)` is `dlsym` with `luaL_error(L, dlerror())` on `NULL`.
   Generated initialization verifies ABI and consumer requirements before calling
-  a newly loaded dependency's initializer, then retains resolved native pointers
+  a copied or newly loaded dependency's initializer, then retains resolved native pointers
   and slot indices in its own per-state module payload
   ([static vs dynamic wiring](codegen-overview.md)).
 * **`errorhandler(L)`** — the message handler that every generated Lua

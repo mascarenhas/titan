@@ -396,13 +396,10 @@ describe("static compiled-module native containers", function()
             "TITAN_META_SECTION TITAN_META_NO_ADDRESS_SANITIZE",
             generated, 1, true)
         assert.match(
-            "luaL_getsubtable(L, LUA_REGISTRYINDEX, LUA_PRELOAD_TABLE);",
+            'titan_module_preload(L, "fixture.target", sizeof("fixture.target") - 1,',
             generated, 1, true)
         assert.match(
-            "lua_pushcfunction(L, luaopen_fixture_target);",
-            generated, 1, true)
-        assert.match(
-            'lua_setfield(L, -2, "fixture.target");',
+            'luaopen_fixture_target, fixture_target_native_symbol);',
             generated, 1, true)
 
         local wrong, err = driver.derive_target_fingerprint(
@@ -421,6 +418,7 @@ describe("static compiled-module native containers", function()
 #include "lua.h"
 #include "lauxlib.h"
 #include "lualib.h"
+#include "titan.h"
 
 extern int luaopen_fixture_target(lua_State *L);
 
@@ -441,6 +439,23 @@ int main(void) {
     assert(lua_tocfunction(L, -1) == luaopen_fixture_target);
     lua_pop(L, 2);
     assert(lua_gettop(L) == base);
+
+    TitanModuleSymbols symbols = titan_module_preload_symbols(L,
+        "fixture.target", sizeof("fixture.target") - 1, luaopen_fixture_target);
+    assert(symbols != NULL);
+    assert(lua_gettop(L) == base);
+    lua_State *child = luaL_newstate();
+    assert(child != NULL);
+    titan_module_preload(child, "fixture.target", sizeof("fixture.target") - 1,
+        luaopen_fixture_target, symbols);
+    TitanModuleProvider inherited = titan_module_provider(child,
+        "fixture.target", "missing-provider.so");
+    assert(inherited.handle == NULL && inherited.symbols == symbols);
+    assert(lua_gettop(child) == 0);
+    lua_getfield(child, LUA_REGISTRYINDEX, "Titan module fixture.target");
+    assert(lua_isnil(child, -1));
+    lua_pop(child, 1);
+    lua_close(child);
 
     luaL_requiref(L, LUA_LOADLIBNAME, luaopen_package, 1);
     lua_pop(L, 1);

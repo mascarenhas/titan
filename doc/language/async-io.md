@@ -143,18 +143,25 @@ change. Unobserved nonterminal transitions do not construct public snapshots.
 `async.run_foreign(f, arg)` submits the C function pointer and argument to
 libuv's process-wide worker pool and suspends the current Task until the
 after-work callback runs on the event-loop thread. It is intended for blocking
-calls into an external C library. It is not a way to run Lua code or an
-ordinary Titan function or closure on another thread. A restricted source
-`foreign function` is permitted because the compiler emits it as an exact C
-callback; its body must remain entirely within the raw-C restrictions below.
+calls into an external C library. A restricted source `foreign function` is
+permitted because the compiler emits it as an exact C callback; its body must
+remain within the raw-C restrictions below.
 
-The worker performs exactly `f(arg)`. It must not inspect or mutate Titan or
-Lua objects, call the Lua API, allocate through Titan, raise, resume a Task, or
-touch `TValue`, `Udata`, or other GC-managed state. The argument must identify
-native storage that remains alive until completion. Passing an `owned` C
-allocation keeps that owner alive in the suspended caller, but the caller is
-still responsible for synchronization and must not concurrently access bytes
-that the worker may read or write.
+The worker performs exactly `f(arg)`. It must not inspect or mutate the
+hosting Lua state's Titan/Lua objects, call the Lua API on that state, invoke
+its Titan functions or closures, allocate through its runtime, raise into its
+frames, or resume its Tasks. The argument must identify native storage that
+remains alive until completion. Passing an `owned` C allocation keeps that
+owner alive in the suspended caller, but the caller is still responsible for
+synchronization and must not concurrently access bytes that the worker may
+read or write.
+
+[`lua.Lua:run_async`](standard-library-lua.md#asynchronous-execution)
+is the explicit independent-state use of this boundary. Its worker exclusively
+owns a separate Lua state, and Lua or Titan code initialized there runs with
+that state's own globals, registry, and collector. It does not share host
+state values or attach a host Titan closure to another thread. Cross-state
+values follow the Lua library's copy and borrowed-pointer protocol.
 
 A NULL worker function is rejected before submission. A queue-submission
 failure raises immediately. After successful submission,
@@ -164,7 +171,9 @@ call: libuv completion remains authoritative and retains the request/carrier;
 the suspended caller frame continues retaining any owned argument. Only after
 the callback completes does the Task receive its pending cancellation. The
 worker pool is shared with libuv filesystem and name-resolution work, so
-long-running or numerous jobs can delay unrelated operations.
+long-running or numerous jobs can delay unrelated operations. A long-lived
+independent-state loop continues occupying its worker slot; leave pool capacity
+for work that its Tasks need. See the [pool-capacity discussion](standard-library-lua.md#two-phase-receiver-bootstrap).
 
 Raw pointers and foreign function pointers have no dynamic Lua coercion. The
 serialized signature lets statically compiled Titan modules call
@@ -261,6 +270,98 @@ ready queue; later requests before delivery coalesce. Acceptance arms a needed
 shared wake before committing the request. Delivery clears the old suspension
 and queue entry before resuming the Task. This guarantees callback-deferred
 delivery but does not promise one exact libuv iteration.
+
+## Transfer values
+
+`async.TransferValue` describes copied values and borrowed addresses that can
+cross independent Lua-state boundaries. It is a public union owned by async:
+
+```text
+union TransferValue
+  is_nil()
+  is_boolean(boolean)
+  is_integer(integer)
+  is_float(float)
+  is_string(string)
+  is_lua_state(foreign *lua_State)
+  is_function(foreign function (*lua_State): int)
+  is_pointer(foreign *void)
+end
+```
+
+Nil, booleans, integers, and floats preserve their value kinds. Strings cross
+as copies of their exact bytes, including embedded zeros; no collector adopts
+another state's string object. The three pointer variants carry borrowed
+addresses. They do not retain their source object or code, validate its
+lifetime, or synchronize access to shared memory. Keep the originating state,
+any required source-state root, and native storage or code alive for the whole
+borrow.
+
+The [independent-state Lua methods](standard-library-lua.md#transferring-values)
+accept and return this union. That API specifies how Lua values map to these
+variants, including its rejection of tables, Lua closures, and C closures with
+upvalues. Import `async` to construct or annotate transfer values; `titan.lua`
+does not declare a second union or an alias.
+
+## Cross-state receivers
+
+```text
+record Receiver
+function receiver(): Receiver
+function Receiver:handle(): foreign *void
+function send(handle: foreign *void, data: TransferValue)
+function Receiver:wait(): TransferValue
+function Receiver:close()
+```
+
+`receiver()` creates a receiver in the current state's Runtime. It may be
+called outside a Task, including a `Lua:run` or `Lua:run_async` bootstrap that
+has not started Tasks in the destination state; it creates the Runtime when
+needed but does not drive its loop. Only its opaque
+native `handle()` may cross to another Lua state or thread. A `Receiver` is a
+GC-owned value that must stay in the state that created it.
+
+`send` is synchronous and may run in another state's ordinary Titan code. It
+requires no Task or source Runtime. It copies the message into a native FIFO before returning and wakes the receiver's
+loop. Scalars retain their variant and value. Strings are copied with explicit
+lengths, including embedded NUL bytes, then copied into the destination
+collector on receipt. Pointer variants copy only borrowed addresses and retain
+nothing they point to. Concurrent sends are ordered by their enqueue under the
+receiver's native lock; no ordering is promised between callers before that
+point. Coalesced native wakeups do not coalesce queued messages. The FIFO has
+no capacity limit or backpressure.
+
+`wait` requires a Task in the receiver's owning Runtime. It takes the oldest
+queued value or suspends until one arrives. At most one Task may wait on a
+receiver. Cancelling that waiter detaches it without closing the receiver or
+discarding queued messages; a later waiter can continue receiving. Calls to
+`handle`, `wait`, and `close` use the owning state. The foreign handle is only
+an argument to `async.send`, not a `uv.async_t` or a pointer that applications
+may dereference.
+
+`close` synchronously disables new sends, discards unread messages, and wakes
+a blocked waiter with an error. It is idempotent and does not require a Task.
+Native handle retirement still needs the owning `async.loop` to drain its close
+callback. Runtime shutdown also disables receivers before closing their
+handles. Sending to a closed receiver or waiting on one raises
+`"receiver is closed"`; a null send handle raises
+`"receiver handle must not be NULL"`. A null `is_function` message is rejected
+before enqueue. Native message allocation or wake failures raise `OperationError`
+with operation `"async.send"` and do not leave that message queued. A retained
+closed Receiver keeps native storage alive so late sends can safely report
+the closed error.
+
+The handle is borrowed and does not root its Receiver. Keep the Receiver
+reachable in its originating state, for example in a module field or global,
+until every sender has withdrawn the handle and all in-flight sends have
+finished. Only then may that root be released or its `Lua` state closed.
+`close` stops admission; it does not make a dangling handle safe after the owner
+has been collected. See the [two-phase independent-state example](standard-library-lua.md#two-phase-receiver-bootstrap)
+for explicit close, native drain, and state cleanup.
+
+Although the native wake primitive supports foreign threads, high-level
+`async.send` allocates and locks. It is not safe inside a raw POSIX signal
+handler. An ordinary Titan callback delivered by the event loop can use it.
 
 ## Adapting callbacks with await
 

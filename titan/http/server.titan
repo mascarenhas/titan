@@ -544,10 +544,12 @@ end
 -- @param port Numeric TCP port.
 -- @param backlog Positive listen backlog; nil defaults to 128.
 -- @param idle_timeout Header acquisition deadline in milliseconds; nil or zero disables it.
+-- @param reuse_port Permit independent listeners on the same address; nil or false disables it.
 -- @return HTTP listener ready for serve; the caller owns closing it.
 -- @usage standard-library-http.md#servers-and-handlers
 function listen(host: string, handler: Handler, port: integer?,
-                backlog: integer?, idle_timeout: integer?): Server
+                backlog: integer?, idle_timeout: integer?,
+                reuse_port: boolean?): Server
   local actual_idle_timeout = 0
   if idle_timeout then actual_idle_timeout = idle_timeout end
   if actual_idle_timeout < 0 then
@@ -556,7 +558,7 @@ function listen(host: string, handler: Handler, port: integer?,
   local actual_port = 80
   if port then actual_port = port as integer end
   return Server {
-    plain = net.listen(host, actual_port, backlog),
+    plain = net.listen(host, actual_port, backlog, reuse_port),
     secure = nil,
     encrypted = false,
     handler = handler,
@@ -575,11 +577,13 @@ end
 -- @param port Numeric TCP port.
 -- @param backlog Positive listen backlog; nil defaults to 128.
 -- @param idle_timeout Header acquisition deadline in milliseconds; nil or zero disables it.
+-- @param reuse_port Permit independent listeners on the same address; nil or false disables it.
 -- @return HTTPS listener ready for serve; the caller owns closing it.
 -- @usage standard-library-http.md#servers-and-handlers
 function listen_tls(host: string, certificate_file: string, handler: Handler,
                     private_key_file: string?, port: integer?,
-                    backlog: integer?, idle_timeout: integer?): Server
+                    backlog: integer?, idle_timeout: integer?,
+                    reuse_port: boolean?): Server
   local actual_idle_timeout = 0
   if idle_timeout then actual_idle_timeout = idle_timeout end
   if actual_idle_timeout < 0 then
@@ -589,7 +593,8 @@ function listen_tls(host: string, certificate_file: string, handler: Handler,
   if port then actual_port = port as integer end
   return Server {
     plain = nil,
-    secure = ssl.listen(host, actual_port, certificate_file, private_key_file, backlog),
+    secure = ssl.listen(host, actual_port, certificate_file, private_key_file,
+                        backlog, reuse_port),
     encrypted = true,
     handler = handler,
     idle_timeout_ms = actual_idle_timeout,

@@ -1,0 +1,95 @@
+local record StateReader
+  local chunks: {string}
+  local index: integer
+  local closed: boolean
+  local fail: boolean
+  local block: boolean
+  local waiting: boolean
+end
+
+local function StateReader.new(chunks: {string}, fail: boolean?,
+                              block: boolean?): StateReader
+  return { chunks = chunks, index = 0, closed = false,
+           fail = fail or false, block = block or false, waiting = false }
+end
+
+local function StateReader:read(): string?
+  if self.fail then raise "independent reader error" end
+  if self.block then
+    self.waiting = true
+    timer.sleep(60000)
+  end
+  timer.yield()
+  self.index = self.index + 1
+  return self.chunks[self.index]
+end
+
+local function StateReader:read_until(_delimiter: string,
+                                    _chop: boolean?): string?
+  raise "unused read_until"
+end
+
+local function StateReader:close()
+  self.closed = true
+end
+
+function test_lua_independent_readers_drain_chunks_and_remain_borrowed(
+    _context: test.Context)
+  runtime_test.run(function ()
+    local state = tlua.new()
+    defer state:close()
+    local synchronous = StateReader({ "", "return ", "", "...", "" })
+    local values: {async.TransferValue} = { state:run_from_loader(
+      synchronous, "=independent-reader", async.TransferValue.is_integer(29),
+      async.TransferValue.is_nil(), async.TransferValue.is_string("a\0b")) }
+    test.assert(not synchronous.closed and #values == 3)
+    test.assert(transfer_integer(values[1]) == 29)
+    assert_transfer_nil(values[2])
+    test.assert(transfer_string(values[3]) == "a\0b")
+    local asynchronous = StateReader({ "", "return ", "...", "" })
+    values = { state:run_async_from_loader(asynchronous,
+      "=independent-async-reader", async.TransferValue.is_string("async"),
+      async.TransferValue.is_nil()) }
+    test.assert(not asynchronous.closed and #values == 2)
+    test.assert(transfer_string(values[1]) == "async")
+    assert_transfer_nil(values[2])
+    local bad_source = StateReader({ "return )" })
+    common.assert_raises_contains(function ()
+      state:run_from_loader(bad_source, "=independent-reader-syntax")
+    end, "independent-reader-syntax")
+    test.assert(not bad_source.closed)
+    local bad_read = StateReader({}, true)
+    common.assert_raises_contains(function ()
+      state:run_async_from_loader(bad_read)
+    end, "independent reader error")
+    test.assert(not bad_read.closed)
+    assert_state_reusable(state)
+  end)
+end
+
+function test_lua_independent_reader_cancellation_precedes_state_reservation(
+    _context: test.Context)
+  runtime_test.run(function ()
+    local state = tlua.new()
+    defer state:close()
+    local reader = StateReader({ "independent_reader_ran = true" }, false, true)
+    local target = async.run<|nil, value|>(function (): nil
+      state:run_async_from_loader(reader, "=cancelled-independent-reader")
+      return nil
+    end)
+    task_support.cleanup_task(target, "independent reader cleanup")
+    while not reader.waiting and not target:status():has_finished() do
+      timer.yield()
+    end
+    test.assert(reader.waiting, "independent Reader did not suspend")
+    -- Reader draining is outside the state's busy interval.
+    assert_state_reusable(state)
+    target:cancel(async.CancellationReason.simple("independent reader cancellation"))
+    test.assert(async.join(target):has_cancelled(),
+                "blocked Reader did not report cancellation")
+    test.assert(not reader.closed, "reader cancellation closed a borrowed Reader")
+    local ran: async.TransferValue = state:run("return independent_reader_ran")
+    assert_transfer_nil(ran)
+    assert_state_reusable(state)
+  end)
+end

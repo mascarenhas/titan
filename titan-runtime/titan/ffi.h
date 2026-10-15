@@ -8,6 +8,29 @@
 #include "lgc.h"
 #include "lua.h"
 
+/* Runtime helpers are linked into each Titan provider. A shared Lua DLL may
+** export Lua internals, but does not own these helpers. Keep their existing
+** ELF/Mach-O visibility and use ordinary extern declarations elsewhere. */
+#if defined(__GNUC__) && ((__GNUC__*100 + __GNUC_MINOR__) >= 302) && \
+    (defined(__ELF__) || defined(__MACH__))
+#define TITAN_RUNTIME_FUNC __attribute__((visibility("internal"))) extern
+#else
+#define TITAN_RUNTIME_FUNC extern
+#endif
+
+/* Immutable native symbol capability; no Lua/Titan value belongs to it. */
+typedef void *(*TitanModuleSymbols)(const char *symbol);
+#define TITAN_MODULE_PRELOADS_KEY "Titan module preload providers"
+
+/* These owning-state helpers reserve their temporary stack and preserve the
+** entry top on success. They may allocate/raise. Names are length-aware so a
+** native preload with an embedded zero byte never aliases another module.
+** A NULL resolver publishes an ordinary native loader without a descriptor. */
+TITAN_RUNTIME_FUNC TitanModuleSymbols titan_module_preload_symbols(lua_State *L,
+    const char *name, size_t length, lua_CFunction loader);
+TITAN_RUNTIME_FUNC void titan_module_preload(lua_State *L, const char *name,
+    size_t length, lua_CFunction loader, TitanModuleSymbols symbols);
+
 #if defined(__unix__) || defined(__APPLE__)
 #include <sys/socket.h>
 

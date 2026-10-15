@@ -21,17 +21,6 @@
 */
 #include "titan/ffi.h"
 
-/* Runtime helpers are linked into each Titan provider. Keep their declarations
-** independent of Lua's internal API import/export policy: a shared Lua DLL may
-** export Lua internals, but does not own these helpers. Preserve their existing
-** ELF/Mach-O visibility and use ordinary extern declarations elsewhere. */
-#if defined(__GNUC__) && ((__GNUC__*100 + __GNUC_MINOR__) >= 302) && \
-    (defined(__ELF__) || defined(__MACH__))
-#define TITAN_RUNTIME_FUNC __attribute__((visibility("internal"))) extern
-#else
-#define TITAN_RUNTIME_FUNC extern
-#endif
-
 /*
 ** ===========================================================================
 ** VENDORED FROM Lua 5.5.1 src/ldo.c lines 61-109 (keep VERBATIM; re-sync on
@@ -294,7 +283,6 @@ TITAN_RUNTIME_FUNC void *loadglobalsym(lua_State *L, const char *sym);
 /* Every generated module payload begins with this header. The resolver belongs
 ** to the image which created the canonical module userdata, including a module
 ** linked directly into an executable rather than opened as a shared library. */
-typedef void *(*TitanModuleSymbols)(const char *symbol);
 typedef struct TitanModuleData {
   TitanModuleSymbols symbols;
 } TitanModuleData;
@@ -304,9 +292,10 @@ typedef struct TitanModuleProvider {
   TitanModuleSymbols symbols;
 } TitanModuleProvider;
 
-/* Prefer the initialized logical module without opening another image. A NULL
-** file permits only that canonical lookup, as used for transitive owners. All
-** successful lookups and checks preserve the Lua stack. */
+/* Prefer the initialized logical module, then a matching native preload
+** descriptor, before opening another image. A NULL file permits only the
+** canonical lookup used for initialized transitive owners. All successful
+** lookups and checks preserve the Lua stack. */
 TITAN_RUNTIME_FUNC TitanModuleProvider titan_module_provider(lua_State *L,
     const char *module, const char *file);
 TITAN_RUNTIME_FUNC void *titan_module_symbol(lua_State *L,

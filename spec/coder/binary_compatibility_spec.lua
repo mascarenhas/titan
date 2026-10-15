@@ -319,6 +319,162 @@ int main(void) {
 ]])
     end)
 
+    it("checks copied native providers before initialization and ignores stale loaders", function()
+        fixture("function answer(): integer return 42 end", [[
+            local p = import "bc180_provider"
+            function run(): integer return p.answer() end
+        ]])
+        local types = require "titan-compiler.types"
+        local compatibility = require "titan-compiler.binarycompat"
+        local core = require "titan-compiler.coder.core"
+        local changed = types.Module("bc180_provider", {
+            types.ModuleMember("bc180_provider", "answer",
+                types.Function({}, {types.String()}, false, nil, nil), {}),
+        }, {})
+        local metadata = compatibility.encode(compatibility.module(changed, {}))
+        run_native_harness([[
+#include <string.h>
+
+static int wrong_abi;
+static int abi_calls;
+static int compatibility_calls;
+static int loader_calls;
+static int initializer_calls;
+static int initializer_lookups;
+
+static int copied_loader(lua_State *L) {
+    loader_calls++;
+    return luaL_error(L, "copied loader must not run before verification");
+}
+
+static int replacement_loader(lua_State *L) {
+    return luaL_error(L, "replacement loader must not run during lookup");
+}
+
+static int copied_abi(lua_State *L) {
+    abi_calls++;
+    lua_pushstring(L, wrong_abi ? "wrong ABI" : TITAN_ABI_VERSION);
+    return 1;
+}
+
+static const char *copied_abi_value(void) {
+    abi_calls++;
+    return wrong_abi ? "wrong ABI" : TITAN_ABI_VERSION;
+}
+
+static int copied_compatibility(lua_State *L) {
+    compatibility_calls++;
+    lua_pushstring(L, ]] .. core.c_string_literal(metadata) .. [[);
+    return 1;
+}
+
+static Udata *copied_init(lua_State *L) {
+    initializer_calls++;
+    luaL_error(L, "copied initializer must not run before verification");
+    return NULL;
+}
+
+static void *copied_symbols(const char *symbol) {
+    if (strcmp(symbol, "bc180_provider_abi") == 0)
+        return titan_cast_func(void *, copied_abi);
+    if (strcmp(symbol, "bc180_provider_abi_value") == 0)
+        return titan_cast_func(void *, copied_abi_value);
+    if (strcmp(symbol, "bc180_provider_compatibility") == 0)
+        return titan_cast_func(void *, copied_compatibility);
+    if (strcmp(symbol, "bc180_provider_init") == 0) {
+        initializer_lookups++;
+        return titan_cast_func(void *, copied_init);
+    }
+    return NULL;
+}
+
+static int require_canonical(lua_State *L) {
+    (void)titan_module_provider(L, "bc180_provider", NULL);
+    return 0;
+}
+
+static void check_rejection(int abi_mismatch) {
+    lua_State *L = new_state();
+    int top = lua_gettop(L);
+    const char *name = "bc180_provider";
+    wrong_abi = abi_mismatch;
+    abi_calls = compatibility_calls = loader_calls = 0;
+    initializer_calls = initializer_lookups = 0;
+
+    titan_module_preload(L, name, strlen(name), copied_loader, copied_symbols);
+    assert(lua_gettop(L) == top);
+    assert(titan_module_preload_symbols(L, name, strlen(name), copied_loader)
+        == copied_symbols);
+    assert(lua_gettop(L) == top);
+
+    /* Even another eligible zero-upvalue C loader cannot inherit this
+     * descriptor after replacing the associated preload entry. */
+    luaL_getsubtable(L, LUA_REGISTRYINDEX, LUA_PRELOAD_TABLE);
+    lua_pushcfunction(L, replacement_loader);
+    lua_setfield(L, -2, name);
+    lua_pop(L, 1);
+    assert(titan_module_preload_symbols(L, name, strlen(name), copied_loader)
+        == NULL);
+    assert(titan_module_preload_symbols(L, name, strlen(name), replacement_loader)
+        == NULL);
+    assert(lua_gettop(L) == top);
+
+    /* Reusing the exact entry address with state-owned upvalues is likewise
+     * ineligible; pointer equality alone cannot authorize its descriptor. */
+    luaL_getsubtable(L, LUA_REGISTRYINDEX, LUA_PRELOAD_TABLE);
+    lua_pushliteral(L, "host-owned upvalue");
+    lua_pushcclosure(L, copied_loader, 1);
+    lua_setfield(L, -2, name);
+    lua_pop(L, 1);
+    assert(titan_module_preload_symbols(L, name, strlen(name), copied_loader)
+        == NULL);
+    assert(lua_gettop(L) == top);
+    titan_module_preload(L, name, strlen(name), copied_loader, copied_symbols);
+
+    TitanModuleProvider selected = titan_module_provider(L, name, "bc180_provider.so");
+    assert(selected.handle == NULL && selected.symbols == copied_symbols);
+    assert(lua_gettop(L) == top);
+    assert(abi_calls == 0 && loader_calls == 0 && initializer_calls == 0);
+
+    /* A copied capability does not satisfy a transitive canonical lookup. */
+    lua_pushcfunction(L, require_canonical);
+    assert(lua_pcall(L, 0, 0, 0) != LUA_OK);
+    assert(strstr(lua_tostring(L, -1), "unavailable") != NULL);
+    lua_settop(L, top);
+
+    if (abi_mismatch) {
+        assert(execute(L,
+            "for attempt = 1, 2 do "
+            "local ok, err = pcall(require, 'bc180_consumer'); "
+            "assert(not ok, 'copied wrong ABI was accepted'); "
+            "assert(err:find('wrong ABI', 1, true), err); "
+            "assert(not err:find('compatibility', 1, true), err) end"));
+    } else {
+        assert(execute(L,
+            "for attempt = 1, 2 do "
+            "local ok, err = pcall(require, 'bc180_consumer'); "
+            "assert(not ok, 'copied incompatible signature was accepted'); "
+            "assert(err:find('compatibility', 1, true), err); "
+            "assert(err:find('functions.answer', 1, true), err) end"));
+    }
+    assert(abi_calls == 2);
+    assert(compatibility_calls == (abi_mismatch ? 0 : 2));
+    assert(loader_calls == 0 && initializer_calls == 0 && initializer_lookups == 0);
+    lua_getfield(L, LUA_REGISTRYINDEX, "Titan module bc180_provider");
+    assert(lua_isnil(L, -1));
+    lua_pop(L, 1);
+    assert(lua_gettop(L) == top);
+    lua_close(L);
+}
+
+int main(void) {
+    check_rejection(1);
+    check_rejection(0);
+    return 0;
+}
+]])
+    end)
+
     it("accepts removal, addition and type changes of unused declarations", function()
         local image = fixture([[
             unused: integer = 7

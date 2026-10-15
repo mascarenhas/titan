@@ -42,7 +42,7 @@ function connect(host: string, port: integer,
 function listen(host: string, port: integer,
                 certificate_file: string,
                 private_key_file: string?,
-                backlog: integer?): Server
+                backlog: integer?, reuse_port: boolean?): Server
 
 function Connection:handshake()
 function Connection:read(): string?
@@ -67,7 +67,11 @@ records do not share a base class with their `net` counterparts.
 
 The optional trailing arguments may be omitted. In `listen`, an omitted
 `private_key_file` uses `certificate_file` as a combined PEM certificate/key
-bundle, while an omitted `backlog` defaults to 128. A listener port must be in
+bundle, while an omitted `backlog` defaults to 128. `reuse_port` defaults to
+false and is forwarded to [`net.listen`](standard-library-net.md#connecting-and-listening),
+including its platform support and native errors. Each TLS listener retains
+its own certificate context even when the address and port are shared.
+A listener port must be in
 `0..65535`, where 0 requests an ephemeral port, and a supplied backlog must be
 in `1..2147483647`. Strings used as hostnames, certificate paths, or trust
 paths are text and may not contain an embedded NUL. Application payloads and

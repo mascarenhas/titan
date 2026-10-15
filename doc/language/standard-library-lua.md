@@ -1,12 +1,290 @@
-# Lua loading standard library
+# Lua states and loading standard library
 
-The `titan.lua` module compiles Lua chunks, reads chunks through Titan I/O,
-executes Lua files asynchronously, and loads Lua, C, or Titan modules into the
-current Lua state. Import it by its qualified name:
+The `titan.lua` module creates independent Lua states, compiles Lua chunks,
+reads chunks through Titan I/O, executes Lua files asynchronously, and loads
+Lua, C, or Titan modules into the current Lua state. Import it by its
+qualified name:
 
 ```titan
 local lua = import "lua"
 ```
+
+## Independent Lua states
+
+```text
+record Lua
+  -- Private state ownership.
+end
+
+function new(): Lua
+function Lua:close()
+
+function Lua:run(chunk: string, name: string?, ...: async.TransferValue):
+    (...: async.TransferValue)
+function Lua:run_async(chunk: string, name: string?, ...: async.TransferValue):
+    (...: async.TransferValue)
+function Lua:run_from_loader(reader: io.Reader, name: string?,
+    ...: async.TransferValue): (...: async.TransferValue)
+function Lua:run_async_from_loader(reader: io.Reader, name: string?,
+    ...: async.TransferValue): (...: async.TransferValue)
+```
+
+`new` creates a Lua state with its own globals, registry, and garbage
+collector, and opens the Lua standard libraries. Its globals and loaded-module
+cache are independent of the Titan program's hosting Lua state and every
+other `Lua` instance. Changes persist between calls on that instance.
+`new` also snapshots native loaders from the creating state's
+registry-backed preload table. String-keyed C functions with no upvalues are
+installed under the same names in the new state's preload table. This includes
+the generated loaders of initialized Titan modules, so code in the new state
+can require modules embedded in the hosting executable without a separate
+provider file. Lua closures, C closures with upvalues, nonfunction values,
+and nonstring keys are skipped.
+
+Only loader names and native function pointers are copied. Requiring a Titan
+module initializes that module in the new state; no host module value or
+`package.loaded` cache entry is shared. The snapshot is taken at creation, so
+later changes to either state's preload table do not update the other. The
+source is the canonical registry `LUA_PRELOAD_TABLE`, even if Lua code has
+reassigned the public `package.preload` field. Custom native loaders and any
+library containing their code must remain loaded for every state using the
+copied function pointers, just as for a transferred native function.
+
+For generated Titan loaders, the snapshot also carries a matching native
+provider descriptor containing code pointers, not module state. Compiled
+dynamic imports use an already initialized destination module first, then a
+copied native provider, then the ordinary provider file search. Dependencies
+available in the snapshot therefore need no manual initialization order or
+filesystem path. ABI and consumer compatibility checks still run before a new
+dependency is initialized. Globals, metatables, module values, and resolved
+bindings are created independently in each state. A nested `lua.new()` can
+copy inherited loaders and descriptors even before their modules have been
+initialized in the intermediate state.
+
+`require` otherwise uses the new state's own `package.path`, `package.cpath`,
+and searchers, initially configured by Lua's standard-library initialization.
+Host path/searcher customizations are not copied. Installed Titan shims and
+providers remain available when that state's paths find them.
+
+`run` compiles and executes the complete text or binary chunk, passing
+its variadic arguments to Lua's `...` and returning the complete result list.
+An omitted or nil `name` uses the chunk itself, as in `load`. Input byte
+lengths are explicit; strings and chunks can contain embedded zero bytes.
+A synchronous call blocks the calling thread until Lua returns.
+
+### Transferring values
+
+The public [`async.TransferValue`](async-io.md#transfer-values) union is owned
+by `titan.async`. Import `async` to construct its variants. Only these variants
+cross the independent-state boundary:
+
+| Variant | Argument in the independent state | Result mapped to this variant |
+| --- | --- | --- |
+| `is_nil` | nil | nil |
+| `is_boolean` | boolean | boolean |
+| `is_integer` | Lua integer | Lua integer |
+| `is_float` | Lua float | Lua float, even when numerically integral |
+| `is_string` | a copied Lua byte string | a copied Titan byte string |
+| `is_lua_state` | lightuserdata containing the borrowed state address | Lua thread, as its borrowed `lua_State *` |
+| `is_function` | a C function with no upvalues | light C function or C closure with no upvalues |
+| `is_pointer` | lightuserdata containing the borrowed address | lightuserdata or a full userdata's payload address |
+
+Argument and result counts preserve nil positions. Results follow Titan's
+ordinary flexible-return demand: a finite consumer takes the requested prefix,
+while materializing an open result run has the usual 200-value limit. The
+independent-state API does not impose that limit on a larger Lua result run
+consumed through a smaller finite prefix. Every returned value is still
+validated, including an ignored tail. A table, Lua function, or C closure with
+upvalues has no transfer representation and raises if returned. An `is_lua_state` argument
+is an opaque pointer in the destination, not a coroutine attached to its
+collector. Its original variant is erased there: returning that lightuserdata
+produces `is_pointer`. Userdata metatables, uservalues, and ownership are
+never copied. A null `is_function` pointer is rejected before execution.
+
+Strings are the only copied GC values. Each side allocates its own string
+from the exact bytes; neither side installs the other state's `TString` in
+its own collector. The three pointer variants are borrowed addresses. They
+neither retain nor validate the originating object or native code. Keep a
+returned thread or full userdata reachable in its originating state for the
+complete borrow, and keep the state open. For example, a global or registry
+reference can retain an object; retaining only its `async.TransferValue` cannot.
+Native memory and C functions likewise require an independently valid
+lifetime. Concurrent access to pointed-to mutable data must be synchronized
+by the caller.
+
+Load errors, execution errors, and unsupported results raise on the Titan
+caller. The independent state's stack is restored to its entry height on
+success and failure, preserving any preexisting stack values, so a failed call
+does not prevent a later call. Effects already made
+to globals or external resources are not rolled back. Lua errors cross as
+copied diagnostics, not shared error objects.
+
+### Asynchronous execution
+
+`run_async` executes the chunk in
+[`async.run_foreign`](async-io.md)'s shared libuv worker pool. It must run in
+an async Task; while the worker runs, other Titan Tasks can continue. The
+worker has exclusive access to the independent state. The chunk can require
+and execute Titan modules initialized in that state, including running their
+own async Tasks and loop. Their module values, runtime, and GC objects belong
+to that state; they cannot access the hosting state's corresponding objects.
+C functions or modules used by the chunk must obey the same isolation and
+their own thread-safety contracts.
+
+For example, this complete Titan module requires Titan's string module in
+the independent state and calls it on a worker. The module can be found through
+a copied native preload entry or the state's configured provider paths. Call
+`uppercase` from an async Task:
+
+```titan
+local lua = import "lua"
+local async = import "async"
+
+function uppercase(text: string): string
+  local state = lua.new()
+  defer state:close()
+  local result = state:run_async([[
+    local strings = require("titan.string")
+    return strings.upper(...)
+  ]], "=independent-uppercase", async.TransferValue.is_string(text))
+  case result
+  when is_string(upper) then return upper
+  else raise "independent state returned an unexpected value"
+  end
+end
+```
+
+Only one chunk call may own a `Lua` instance at a time. A concurrent
+`run`, `run_async`, or `close` on that busy instance raises
+immediately. Different independent states may execute concurrently. A raw
+pointer does not bypass this ownership rule: foreign code must not access the
+state while its worker is active.
+
+Cancellation does not interrupt running Lua code or release the state early.
+After an async call has been accepted, the worker must finish and its native
+completion must reach the event loop before the waiting Task receives its
+pending cancellation. The state remains reserved through that completion;
+after cleanup it can be used again or closed. A Lua chunk that never returns
+therefore also prevents that Task's cancellation from completing. Long jobs
+share worker capacity with filesystem and DNS operations.
+
+### Two-phase receiver bootstrap
+
+A first `run_async` call can create a receiver before its independent state's
+loop starts. Keep its owner rooted there and return only its native handle. A
+second call runs that state's Tasks and loop. `async.send` uses the handle
+without accessing the remote state's Lua objects and may also queue a message
+before the loop starts.
+
+This complete standalone module starts the remote wait in a host Task and
+sends a copied control message while that Task executes `run_async`. The send
+may reach the native queue before the remote waiter starts; it is not lost.
+The handle stays inside one lexical scope and is never published to another
+sender. Cleanup sends a stop message if needed, drains the worker through a
+cancellation-insensitive wait, then closes/drains the remote Runtime before
+releasing its Receiver root and closing the state.
+
+```titan
+local lua = import "lua"
+local async = import "async"
+
+local function drain_worker(worker: async.Task<|nil, value|>)
+  local remove: function (): () = function () end
+  defer remove()
+  async.await_cleanup<|nil, value|>(function (resolve, _reject, _fatal)
+    if worker:status():has_finished() then
+      resolve(nil)
+    else
+      remove = worker:add_terminal_listener(function (_status) resolve(nil) end)
+    end
+  end)
+end
+
+function main(_args: {string}): integer
+  local state = lua.new()
+  defer state:close()
+  defer state:run([[
+    if control_receiver then control_receiver:close() end
+    require("titan.async").loop()
+    control_receiver = nil
+  ]], "=receiver-cleanup")
+
+  local exported = state:run_async([[
+    control_receiver = require("titan.async").receiver()
+    return control_receiver:handle()
+  ]], "=receiver-bootstrap")
+  defer exported = async.TransferValue.is_nil()
+  case exported
+  when is_pointer(handle) then
+    local worker = async.run<|nil, value|>(function (): nil
+      state:run_async([[
+        local async = require("titan.async")
+        local task = async.run(function()
+          control_receiver:wait()
+          control_receiver:close()
+        end)
+        async.loop()
+        if not task:status():has_succeeded() then
+          error("receiver Task failed")
+        end
+      ]], "=receiver-worker")
+      return nil
+    end)
+    defer do
+      -- Even cancellation before the ordinary send must stop the remote wait.
+      defer drain_worker(worker)
+      do
+        async.send(handle, async.TransferValue.is_nil())
+      catch
+        if error ~= "receiver is closed" then raise end
+      end
+    end
+    async.yield()
+    -- A send before the remote wait starts remains queued.
+    async.send(handle, async.TransferValue.is_string("stop\0"))
+    case async.join(worker)
+    when succeeded() then
+    when failed(failure) then failure:raise()
+    else raise "receiver worker did not complete"
+    end
+  else raise "receiver bootstrap returned no native handle"
+  end
+  return 0
+end
+```
+
+A long-lived service can send through the same handle while `run_async` owns
+the remote state. It must arrange cooperative shutdown with messages and then
+wait for the worker to finish; cancelling the hosting Task does not interrupt
+its Lua chunk. Withdraw handles and finish all sends before dropping the remote
+Receiver root or calling `Lua:close`.
+
+Long-lived `run_async` calls occupy libuv worker threads for their entire
+execution, even while their remote event loop is waiting. The pool is shared
+across every state and loop, including filesystem, DNS, and other
+`run_foreign` work such as SQLite. Keep capacity for work that these services
+need; occupying every worker with services that await queued pool jobs can
+prevent progress. Configure `UV_THREADPOOL_SIZE` before the first pool use;
+creating a new Lua state does not create another pool. See
+[libuv's thread-pool contract](https://docs.libuv.org/en/v1.x/threadpool.html).
+
+### Reader input and closing
+
+`run_from_loader` and `run_async_from_loader` first collect the complete
+Reader contents, then call the matching chunk method. They accept empty chunks and preserve all
+bytes, and never close the borrowed Reader. Reader methods may suspend and
+therefore require an async Task when they do. The state is reserved only
+after reading finishes: another call may use or close it while the Reader is
+being drained, and admission is checked when the chunk call starts.
+
+`close` releases the independent state and is idempotent after successful
+closure. Later chunk calls raise. Call it explicitly with `defer` when the
+state's useful lifetime is lexical. If an unclosed `Lua` wrapper becomes
+unreachable, its finalizer closes the state. Closing invokes Lua's `__gc`
+metamethods as part of `lua_close`; code owning resources inside the state can
+use those metamethods for shutdown. Accepted asynchronous work retains the
+wrapper until native completion, so GC cannot close a state that a worker is
+still using.
 
 ## Loading a string
 
@@ -117,8 +395,10 @@ dependency, visible to the preload searcher without a generated shim or
 separate provider DSO. Registration itself performs no initialization and does
 not fill `package.loaded`. A later `titan.lua.require` calls the published
 loader, receives the canonical initialized userdata, and installs it in the
-loaded table. An unused or otherwise uninitialized linked module has no preload
-entry.
+loaded table. The entrypoint does not publish unused or otherwise
+uninitialized linked modules. Independent-state snapshots can inherit these
+native loaders before their modules are initialized in the destination, as
+described above.
 
 The second searcher slot is reserved for the asynchronous source pass and is
 never called. Replacing `package.searchers[2]` therefore does not replace that

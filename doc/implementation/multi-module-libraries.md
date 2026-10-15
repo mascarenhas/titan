@@ -137,8 +137,11 @@ titan_check_module_compatibility(L, a_b_c_provider, "a_b_c_compatibility", "a/b.
 The registry entry for `"Titan module a.b.c"` takes precedence over the filename.
 If it exists, its native payload supplies an export callback, including when
 the module was initialized from an executable, archive, or `package.loadlib`.
-Only an absent logical module reaches `loadlib`, which walks the runtime Titan
-path, caches by relative provider file, maps with `RTLD_LAZY | RTLD_GLOBAL`,
+If no canonical module exists, a matching copied native provider descriptor
+supplies its resolver before `loadlib` is considered. Selection does not invoke
+a Lua loader or initialize a dependency; ABI and consumer checks still run
+first. With neither canonical state nor descriptor, `loadlib` walks the runtime
+Titan path, caches by relative provider file, maps with `RTLD_LAZY | RTLD_GLOBAL`,
 and invalidates the backtrace image cache. Two logical imports in one provider
 can reuse one handle while requesting different fully mangled symbols.
 

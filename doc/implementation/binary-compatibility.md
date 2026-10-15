@@ -196,10 +196,18 @@ titan_check_module_compatibility(L, provider, "some_module_compatibility",
 
 `titan_module_provider` first looks up `"Titan module some.module"` in the Lua
 registry. An existing canonical module supplies its payload callback, and the
-selected file is never opened. Only a missing logical module invokes `loadlib`
-for that file. ABI and compatibility checks precede initialization of a newly
-loaded provider. Native symbol and slot resolution use `titan_module_symbol`
-with the selected provider, keeping the metadata, code, and module state together.
+selected file is never opened. If the logical module is absent, a copied native
+provider descriptor supplies its symbol resolver before `loadlib` is considered
+for that file. Generated initialization uses `titan_module_preload` to register this
+descriptor separately from the Lua preload loader; it contains only matching
+loader and `TitanModuleSymbols` resolver pointers, with no module state.
+`lua.new()` copies only descriptors matching eligible native loaders, including
+inherited descriptors for modules not yet initialized in its source state.
+Descriptor lookup does not invoke a Lua loader. ABI and consumer compatibility
+checks therefore still precede initialization for both copied providers and
+newly opened DSOs. Native symbol and slot resolution use `titan_module_symbol`
+with the selected provider, keeping the metadata, code, and eventual
+destination module state together.
 
 Explicit imports are selected, checked, and initialized in sequence: an earlier
 initializer may establish a later import's canonical module. After each
@@ -222,8 +230,9 @@ This is a protocol between generated native providers, not a sandbox for
 untrusted shared libraries.
 
 Transitive nominal owners use the same logical registry lookup after explicit
-providers initialize, with a null filename. The owner must already exist; no
-second DSO is selected and no `RTLD_DEFAULT` lookup chooses its native entries.
+providers initialize, with a null filename. The owner must already exist; an
+uninitialized copied descriptor cannot satisfy this lookup. No second DSO is
+selected and no `RTLD_DEFAULT` lookup chooses its native entries.
 Their ABI and consumer-specific compatibility checks run before native use.
 Final `static_deps`/provider provenance bypasses compatibility checks for source
 or archive code residing in the same binary. Those direct edges instead require

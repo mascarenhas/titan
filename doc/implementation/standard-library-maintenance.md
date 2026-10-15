@@ -48,13 +48,14 @@ namespaced shim. Prefer the public libuv operation over platform-specific
 shortcuts when libuv provides it. See [foreign functions](foreign-functions.md)
 and [libuv extension rules](libuv-extension-guide.md).
 
-Foreign workers consume stable native callback data rather than Titan/Lua
-state. UV's private `uv_work_t.data` points to embedded C worker/argument data
+Foreign workers consume stable native callback data rather than the hosting
+state's Titan/Lua objects. UV's private `uv_work_t.data` points to embedded C worker/argument data
 that stays unchanged while work is pending; public `work_t:get_data`/`set_data`
 accesses a separate traced value. Keep those roles distinct and clear the old
 worker/argument state on terminal delivery before user code may requeue the
 request. The [foreign-worker contract](libuv-runtime.md#foreign-workers)
-specifies the stable storage, callback ordering, and C-only thread boundary.
+specifies the stable storage, callback ordering, and C-only entry boundary,
+including the exclusive independent-state execution used by `titan.lua`.
 
 ## Model actual call and result protocols
 

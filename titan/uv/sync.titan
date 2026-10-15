@@ -944,7 +944,7 @@ end
 
 --- Invoke one C-only callback exactly once for the once_t guard, with native cross-thread synchronization.
 -- @param guard Mutable initialized native synchronization owner; caller coordinates external native users and lifetime; destroy/delete only after quiescence.
--- @param callback Input C-only entry; no Lua/Titan execution from a native worker/once callback.
+-- @param callback Input C-only entry; no calling-state Lua/Titan execution from a native worker/once callback.
 -- @usage uv/functions/threading.md#once
 function once(guard: once_t, callback: foreign function(): void)
     if not callback then raise "uv.once: callback is null" end

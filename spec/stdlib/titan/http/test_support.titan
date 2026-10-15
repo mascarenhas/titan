@@ -77,15 +77,13 @@ end
 
 local function http_listen(first_port: integer,
                            handler: http.Handler,
-                           idle_timeout: integer?): (http.Server, integer)
+                           idle_timeout: integer?,
+                           reuse_port: boolean?): (http.Server, integer)
   local port = first_port
   for _ = 1, 100 do
     do
-      if idle_timeout == nil then
-        return http.listen("127.0.0.1", handler, port), port
-      end
       return http.listen("127.0.0.1", handler, port, nil,
-                         idle_timeout), port
+                         idle_timeout, reuse_port), port
     catch
       if error is async.OperationError and
          (error as async.OperationError).name == "EADDRINUSE" then
@@ -99,13 +97,14 @@ local function http_listen(first_port: integer,
 end
 
 local function https_listen(first_port: integer, handler: http.Handler,
-                            idle_timeout: integer):
+                            idle_timeout: integer, reuse_port: boolean?):
     (http.Server, integer)
   local port = first_port
   for _ = 1, 100 do
     do
       return http.listen_tls("127.0.0.1", CERTIFICATE, handler,
-                             PRIVATE_KEY, port, nil, idle_timeout), port
+                             PRIVATE_KEY, port, nil, idle_timeout,
+                             reuse_port), port
     catch
       if error is async.OperationError and
          (error as async.OperationError).name == "EADDRINUSE" then

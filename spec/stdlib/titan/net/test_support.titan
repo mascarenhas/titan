@@ -27,11 +27,12 @@ end
 
 -- Public Servers do not expose an ephemeral listener's selected port. Retry
 -- only address-use collisions from concurrent workers.
-local function listen_available(first_port: integer): (net.Server, integer)
+local function listen_available(first_port: integer, reuse_port: boolean?):
+    (net.Server, integer)
   local port = first_port
   for _ = 1, 100 do
     do
-      local server = net.listen("127.0.0.1", port)
+      local server = net.listen("127.0.0.1", port, nil, reuse_port)
       return server, port
     catch
       if error is async.OperationError then
@@ -40,8 +41,7 @@ local function listen_available(first_port: integer): (net.Server, integer)
           port = port + 1
           if port > 60999 then port = 20000 end
         else
-          raise "unexpected listen failure: " .. failure.operation ..
-                ":" .. failure.name .. ": " .. failure.message
+          raise
         end
       else
         raise error

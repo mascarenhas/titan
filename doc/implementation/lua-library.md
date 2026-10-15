@@ -1,11 +1,197 @@
-# Lua-loading library implementation
+# Lua-state and loading library implementation
 
 The user-facing contract is in the
-[Lua loading standard-library chapter](../language/standard-library-lua.md).
-`titan.lua` is a flat Titan module built against the pinned Lua 5.5 API. It
+[Lua states and loading standard-library chapter](../language/standard-library-lua.md).
+`titan.lua` is a folder module built against the pinned Lua 5.5 API. It
 uses `titan.fs` for cooperative file access, `titan.io` for the Reader
 interface, and binary-safe search/slicing helpers from `titan.string`. It
-adds no compiler intrinsic or native runtime shim.
+keeps independent-state ownership separate from current-state loading. The
+public operations require no compiler intrinsic. `titan/lua/lua.titan` owns
+the public `Lua` owner and host-thread wrappers; `titan.async` owns the
+shared `TransferValue` union. `worker.titan` supplies the raw
+foreign entries, and `native.h` declares their native packet layouts.
+
+## Independent-state ownership
+
+`Lua` owns a separately allocated `lua_State *`, not a coroutine of the
+hosting state. Creation opens the Lua standard libraries. Each state has an
+independent global environment, registry, loaded-module cache, allocator/GC
+state, and any Titan modules initialized through its Lua loaders. Shared
+provider code does not make those module values shared host objects.
+Creation snapshots eligible native loaders from the hosting state's
+canonical registry `LUA_PRELOAD_TABLE`. It includes only string keys paired
+with zero-upvalue C functions; Lua closures, C closures with upvalues, and
+other key/value kinds are skipped. The host traversal keeps the source table,
+iteration key, loader, and copied names rooted while building the snapshot.
+`preload_snapshot` returns traced `LuaPreload` entries. It uses
+`titan_module_preload_symbols` to obtain a native `TitanModuleSymbols` callback
+only when the live zero-upvalue preload function and descriptor both match the
+eligible loader. Initialization marshals names, lengths, loader pointers, and
+optional resolver pointers into `titan_lua_preload[]` and passes a `titan_lua_open` packet to the protected
+`lua_state_open` entry. Inside that protected callback,
+`titan_module_preload` installs each loader and its optional descriptor in the
+new state. Matching generated-provider descriptors travel with their
+loader entries; only native code pointers cross this boundary. Module names
+become new strings in the destination, and C loaders have no captured host
+GC state. Native loader and resolver addresses remain borrowed code pointers;
+provider libraries must stay loaded for all destination uses.
+
+Generated module initialization registers its native loader in
+`LUA_PRELOAD_TABLE` and a separate native provider descriptor under
+`TITAN_MODULE_PRELOADS_KEY` (`"Titan module preload providers"`) on each
+successful initialization path. Each descriptor is raw full userdata containing
+only a `lua_CFunction loader` and `TitanModuleSymbols symbols`; it contains no
+module userdata, globals, metatables, or resolved native bindings.
+The snapshot copies a descriptor only when it matches an eligible loader. It
+also preserves inherited descriptors whose modules have not yet initialized
+in the creating state, so nested independent states retain the same native
+dependency graph. Invoking a copied loader performs ordinary per-state module
+initialization. Neither `package.loaded` entries nor canonical host module
+userdata are copied.
+Later changes to either preload table are independent; the snapshot source
+is the registry table even if the public `package.preload` field was replaced.
+Fresh source/provider search paths and searchers still come from Lua's
+standard-library initialization, rather than host package-table copies.
+
+An explicit compiled dynamic import selects the destination's canonical
+module first, a copied native provider resolver second, and its normal DSO
+provider last. Resolving the copied descriptor does not invoke its Lua loader
+or initialize a module: generated import code still checks ABI, then the
+consumer's compatibility requirements, before calling the selected initializer.
+The initializer creates fresh state and bindings in the destination. This
+permits copied transitive dependencies to load without provider search paths
+or an application-imposed require order. A transitive-owner lookup with a
+NULL filename remains canonical-only after explicit imports initialize; a
+copied descriptor alone does not satisfy that lookup.
+
+The wrapper is the sole admission owner. A chunk call reserves it before
+preparing the independent state's stack, saves its entry height, and retains
+the reservation through result transfer and cleanup. An already reserved or closed state rejects a
+new chunk call. `close` rejects a busy state, closes an idle state once, and
+then becomes a no-op. The wrapper's GC finalizer uses the same close ownership;
+`lua_close` runs the independent state's `__gc` metamethods. Async work retains
+the wrapper until native completion, so finalization cannot race a worker.
+
+Reader methods deliberately drain their borrowed Reader before delegating to
+the chunk method. They add no second state reservation or reader-close policy.
+If reading suspends, a different Task may use or close the state in that
+interval. The actual chunk call checks admission against the state that
+exists when reading completes.
+
+### Receiver bootstrap and teardown
+
+A `Lua:run` or `Lua:run_async` bootstrap may require `titan.async`, construct a
+Receiver outside a Task, root it in that state's module/global storage, and
+return its opaque native handle. This does not drive the new Runtime. A subsequent `run_async`
+can create the remote waiting Task and drive `async.loop` under its existing
+exclusive-state reservation. Sender calls use only the native FIFO handle and
+copied transfer packet; they never enter the busy state or access its Receiver
+record. See [receiver ownership](libuv-runtime.md#cross-state-receiver-ownership).
+
+The origin must keep that Receiver reachable through the complete exported
+handle lifetime. Shutdown disables sends and retires the native handle, but a
+raw token never becomes an owner. Withdraw the handle and finish all send calls
+before releasing the remote root or closing the Lua state. After the worker
+returns, a synchronous cleanup chunk can close any remaining receiver and run
+its loop to drain native closure, then drop the root. This also covers bootstrap
+or queue-admission failure before asynchronous execution starts. The
+[complete two-phase example](../language/standard-library-lua.md#two-phase-receiver-bootstrap)
+keeps all sends local and uses this order on success and failure.
+
+A remote Runtime shares libuv's process-wide thread pool with its host and all
+other states. A worker that drives a long-lived Runtime still occupies its
+pool slot; nested filesystem/DNS/SQLite work needs separate available pool
+capacity. Receiver messaging does not add a scheduler or resize that pool.
+
+## Cross-state transfer
+
+The public `async.TransferValue` union is interpreted on the host thread. Nil,
+boolean, integer, and float keep their exact Lua value kinds. String arguments
+are copied into the independent state; string results are copied into newly
+allocated host strings. The destination collector must never receive a
+foreign `TString *` as one of its own objects. Result strings remain rooted
+on the independent stack until the host has copied their complete bytes.
+Binary strings retain their explicit lengths throughout.
+
+State pointers and ordinary pointers become lightuserdata when passed as
+arguments. Creating a thread-tagged `TValue` from a foreign state's pointer
+would install a GC reference belonging to the wrong state and is prohibited.
+Returned threads become borrowed state pointers, full userdata becomes its
+`lua_touserdata` payload address, and lightuserdata preserves its address.
+Those addresses do not retain their source object. Callers must arrange a
+source-state root for a thread or userdata before its temporary result stack
+slot is removed. A zero-upvalue C function carries only its native function
+pointer; a C closure with upvalues or a Lua closure cannot be represented.
+Tables are likewise rejected. Function and native-memory lifetime remain
+external responsibilities.
+
+The packet and conversion loops preserve every argument/result position,
+including nil. Native result count uses an `int`, and a native allocation
+holds the complete Lua result run. The host converts it to a Titan Array and
+return-spreads that Array under the ordinary flexible-return demand. A finite
+consumer can take a small prefix from a Lua run exceeding 200 results; only
+an open sink materializing more than `TITAN_VARARG_MAX` (200) values raises
+the usual flexible-result error. There is no independent-state truncation or fixed
+200-slot native result buffer. Every result is validated before publication,
+so an unsupported ignored tail still fails the whole call.
+
+### Protected execution and stack cleanup
+
+Loading, argument installation, chunk execution, and error formatting are
+protected operations on the independent state. A Lua failure must return a
+status to the host; it must not longjmp across the worker entry or into host
+Titan frames. Error objects stay in the state that created them, and the host
+raises a copied diagnostic. Error formatting must itself respect the
+protected-call boundary, because a nonstring error's conversion can call user
+code and fail. `lua_state_error_message` uses `luaL_tolstring` as the protected
+call's error handler. If that handler fails, Lua's protected-call error status
+and diagnostic are retained; a nonstring fallback uses a fixed diagnostic.
+
+The stack transaction has these ownership phases:
+
+| Phase | Independent stack and host obligation |
+| --- | --- |
+| Admission | Reserve the wrapper, then save the independent state's exact entry stack height before pushing temporary values. |
+| Protected loading and argument copy | Root the compiled chunk and copied input strings in the independent state; keep host input owners live while their bytes are borrowed. |
+| Protected chunk call | Execute only values belonging to the independent state; preserve its success results or error object. |
+| Host conversion | Read rooted result slots after native execution stops; allocate host strings and `async.TransferValue` wrappers on the host thread. |
+| Deferred cleanup | Free the native result buffer, restore the independent stack to its saved entry height, and release the reservation after success, load/runtime/conversion error, queue rejection, or cancellation. |
+
+Stack pointers cannot survive an operation that grows that stack. Result
+addresses used for copying are derived after native execution finishes and
+while the independent state is exclusively owned. Stack cleanup does not undo
+changes the Lua code already made to globals, module state, or external data.
+
+### Worker ownership and cancellation
+
+`run_async` builds a `LuaCall` owner containing its state wrapper,
+chunk/name strings, argument Array, native input array, and embedded
+`titan_lua_call` packet. The packet carries the independent state, chunk bytes
+and length, NUL-terminated diagnostic name, argument data, and result/status
+storage. The worker allocates the native result buffer for the actual result
+count; deferred host cleanup frees it after native retirement on every path.
+The host prepares transfer values before submission. The worker entry accepts
+only the packet's `void *`; it never recovers a hosting-state Titan record,
+reads host module fields, or allocates through the host runtime. The separate
+state's own Lua and independently initialized Titan code may allocate and run
+there under its exclusive ownership. Native libraries and transferred
+pointers remain responsible for synchronization of any process-shared data.
+
+The worker may retain independent-state string pointers in its result data,
+but does not create host strings. The host resumes only after
+`async.run_foreign` receives native after-work completion. It then performs
+host-side result conversion before restoring the independent stack's saved
+entry height. Both the
+packet and the complete input owner graph stay reachable in the suspended
+caller for this interval.
+
+Cancellation follows `run_foreign`'s ordinary accepted-work policy: the Task
+stays attached until after-work completion and receives cancellation only
+then. The deferred state cleanup also covers that injected cancellation,
+without publishing results or prematurely freeing data the worker still
+uses. There is no Lua instruction hook, worker termination, hidden queue, or
+per-state cancellation scheduler. A nonterminating chunk can therefore hold
+its state and worker indefinitely.
 
 ## Compiling and rooting a chunk
 
@@ -75,8 +261,10 @@ existing transitive `_init` recursion before `main`. After each generated
 module finishes `_init` successfully, it publishes its own `luaopen_*` function
 in `registry[LUA_PRELOAD_TABLE]`, which `package.preload` aliases. Searcher 1
 therefore sees every initialized import—including private static imports—by the
-time `main` runs. An unused or otherwise uninitialized linked module remains
-absent. A later asynchronous require invokes the published loader, recovers the
+time `main` runs. The entrypoint does not publish unused or otherwise
+uninitialized linked modules. An independent state can inherit the native
+loaders and provider descriptors before initializing their modules, as
+described above. A later asynchronous require invokes the published loader, recovers the
 canonical module value, and then follows the same registry cache rules shown
 above without initializing the module again.
 

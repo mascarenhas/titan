@@ -1267,6 +1267,94 @@ void *loadglobalsym (lua_State *L, const char *sym) {
 #endif
 }
 
+/* A preload descriptor contains only code pointers. It is kept separate from
+** canonical initialized module userdata and from package.loaded. Copying these
+** bytes into another state grants lookup capability, not initialized state. */
+typedef struct TitanModulePreload {
+    lua_CFunction loader;
+    TitanModuleSymbols symbols;
+} TitanModulePreload;
+
+static void titan_push_registry_table(lua_State *L, const char *key) {
+    lua_pushstring(L, key);
+    lua_rawget(L, LUA_REGISTRYINDEX);
+    if (!lua_istable(L, -1)) {
+        lua_pop(L, 1);
+        lua_newtable(L);
+        lua_pushstring(L, key);
+        lua_pushvalue(L, -2);
+        lua_rawset(L, LUA_REGISTRYINDEX);
+    }
+}
+
+/* An expected loader is supplied by a snapshot. Runtime import lookup passes
+** NULL and elects the current raw C loader itself. Both paths reject stale or
+** replaced entries before returning the descriptor's symbol capability. */
+static TitanModuleSymbols titan_find_preload_symbols(lua_State *L,
+    const char *name, size_t length, lua_CFunction expected) {
+    int top = lua_gettop(L);
+    lua_CFunction loader;
+    TitanModuleSymbols symbols = NULL;
+    luaL_checkstack(L, 4, "looking up a Titan native preload");
+    lua_pushliteral(L, LUA_PRELOAD_TABLE);
+    lua_rawget(L, LUA_REGISTRYINDEX);
+    if (!lua_istable(L, -1)) goto done;
+    lua_pushlstring(L, name, length);
+    lua_rawget(L, -2);
+    loader = lua_tocfunction(L, -1);
+    if (loader == NULL || (expected != NULL && loader != expected)) goto done;
+    if (lua_getupvalue(L, -1, 1) != NULL) goto done;
+    lua_settop(L, top);
+
+    lua_pushliteral(L, TITAN_MODULE_PRELOADS_KEY);
+    lua_rawget(L, LUA_REGISTRYINDEX);
+    if (!lua_istable(L, -1)) goto done;
+    lua_pushlstring(L, name, length);
+    lua_rawget(L, -2);
+    if (lua_type(L, -1) == LUA_TUSERDATA &&
+        lua_rawlen(L, -1) == sizeof(TitanModulePreload)) {
+        const TitanModulePreload *entry =
+            (const TitanModulePreload *)lua_touserdata(L, -1);
+        if (entry->loader == loader) symbols = entry->symbols;
+    }
+
+done:
+    lua_settop(L, top);
+    return symbols;
+}
+
+TitanModuleSymbols titan_module_preload_symbols(lua_State *L,
+    const char *name, size_t length, lua_CFunction loader) {
+    if (loader == NULL) return NULL;
+    return titan_find_preload_symbols(L, name, length, loader);
+}
+
+void titan_module_preload(lua_State *L, const char *name, size_t length,
+    lua_CFunction loader, TitanModuleSymbols symbols) {
+    int top = lua_gettop(L);
+    luaL_checkstack(L, 4, "publishing a Titan native preload");
+    if (loader == NULL) luaL_error(L, "Titan native preload loader is NULL");
+
+    /* Publish the descriptor first. If installing the loader raises, an old
+    ** different loader cannot accidentally select this new capability. */
+    titan_push_registry_table(L, TITAN_MODULE_PRELOADS_KEY);
+    lua_pushlstring(L, name, length);
+    if (symbols != NULL) {
+        TitanModulePreload *entry =
+            (TitanModulePreload *)lua_newuserdatauv(L, sizeof(*entry), 0);
+        entry->loader = loader;
+        entry->symbols = symbols;
+    } else lua_pushnil(L);
+    lua_rawset(L, -3);
+    lua_pop(L, 1);
+
+    titan_push_registry_table(L, LUA_PRELOAD_TABLE);
+    lua_pushlstring(L, name, length);
+    lua_pushcfunction(L, loader);
+    lua_rawset(L, -3);
+    lua_settop(L, top);
+}
+
 TitanModuleProvider titan_module_provider(lua_State *L, const char *module,
                                            const char *file) {
     TitanModuleProvider provider = { NULL, NULL };
@@ -1298,6 +1386,8 @@ TitanModuleProvider titan_module_provider(lua_State *L, const char *module,
     lua_pop(L, 1);
     if (file == NULL)
         luaL_error(L, "Titan canonical module '%s' is unavailable", module);
+    provider.symbols = titan_find_preload_symbols(L, module, strlen(module), NULL);
+    if (provider.symbols != NULL) return provider;
     provider.handle = loadlib(L, file);
     return provider;
 }

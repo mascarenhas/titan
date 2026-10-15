@@ -20,6 +20,14 @@ loaded from an archive, or initialized through Lua's `package.loadlib`.
 For example, a dynamically loaded plugin importing a module already supplied
 by its host executable uses the host's initialized module.
 
+An [independent Lua state](standard-library-lua.md#independent-lua-states) also
+carries matching native provider descriptors with its copied preload loaders.
+For an uninitialized dynamic dependency, it tries the copied provider before
+searching for a provider file. ABI and consumer compatibility checks still run
+before initialization, and every module's state and bindings belong to the
+destination state. This permits copied transitive dependencies to initialize
+without filesystem paths or a manual require order.
+
 ## What a consumer requires
 
 Titan first checks the provider's compiled-code ABI. If that matches, it checks

@@ -1520,10 +1520,12 @@ end
 -- @param certificate_file PEM certificate-chain path, optionally including its private key.
 -- @param private_key_file PEM private-key path; nil uses the certificate file.
 -- @param backlog Positive listen backlog; nil defaults to 128.
+-- @param reuse_port Permit independent listeners on the same address; nil or false disables it.
 -- @return New TLS listener owning its certificate context and TCP listener.
 -- @usage standard-library-ssl.md#server-connections-and-handshakes
 function listen(host: string, port: integer, certificate_file: string,
-                private_key_file: string?, backlog: integer?): Server
+                private_key_file: string?, backlog: integer?,
+                reuse_port: boolean?): Server
   checked_text(host, "ssl.listen.host")
   checked_text(certificate_file, "ssl.listen.certificate")
   if #certificate_file == 0 then
@@ -1545,7 +1547,7 @@ function listen(host: string, port: integer, certificate_file: string,
   end
   local context = server_context(certificate_data, private_key_data)
   do
-    local listener = net.listen(host, port, backlog)
+    local listener = net.listen(host, port, backlog, reuse_port)
     return Server {
       listener = listener,
       context = context,

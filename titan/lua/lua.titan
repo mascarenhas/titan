@@ -1,0 +1,545 @@
+--- Load Lua and Titan code in the current state or an owned independent state.
+-- @module titan.lua
+-- @usage standard-library-lua.md
+
+foreign import "lua.h"
+foreign import "lauxlib.h"
+foreign import "stddef.h"
+foreign import "titan/ffi.h"
+
+local async = import "async"
+local fs = import "fs"
+local gc = import "gc"
+local io = import "io"
+local string = import "string"
+
+local type LuaChunk = function (...: value): (...: value)
+local type Searcher = function (string): (value, value)
+local type Loader = function (string, value): (value)
+
+-- A cooperative require may yield while expanding, probing, or reading Lua
+-- source candidates. A second load of that same logical name is an explicit
+-- error instead of a duplicate load or a hidden scheduler wait protocol.
+local loading: {string: boolean} = {}
+
+local function global_value(name: string): value
+  local top = ffi.lua_gettop(L)
+  defer ffi.lua_settop(L, top)
+  if ffi.lua_checkstack(L, 1) == 0 then
+    raise "cannot reserve Lua stack for global lookup"
+  end
+  ffi.lua_getglobal(L, name)
+  return ffi.lua_totvalue(L, -1)
+end
+
+local function registry_map(name: string): {string: value}
+  local top = ffi.lua_gettop(L)
+  defer ffi.lua_settop(L, top)
+  if ffi.lua_checkstack(L, 1) == 0 then
+    raise "cannot reserve Lua stack for registry lookup"
+  end
+  ffi.lua_getfield(L, ffi.LUA_REGISTRYINDEX, name)
+  if ffi.lua_type(L, -1) ~= ffi.LUA_TTABLE then
+    raise "Lua registry entry '" .. name .. "' is not a table"
+  end
+  local result: value = ffi.lua_totvalue(L, -1)
+  return result as {string: value}
+end
+
+local function is_lua_function(candidate: value): boolean
+  local top = ffi.lua_gettop(L)
+  defer ffi.lua_settop(L, top)
+  if ffi.lua_checkstack(L, 1) == 0 then
+    raise "cannot reserve Lua stack for function test"
+  end
+  ffi.lua_pushtvalue(L, candidate)
+  return ffi.lua_type(L, -1) == ffi.LUA_TFUNCTION
+end
+
+--- Compile Lua text or bytecode without executing it; invalid chunks raise.
+-- @param chunk Exact chunk bytes, including any embedded NUL.
+-- @param name Diagnostic chunk name; nil uses the chunk text.
+-- @param env Replacement first upvalue, or nil to keep the default environment.
+-- @return Callable preserving all arguments and results.
+-- @usage standard-library-lua.md
+function load(chunk: string, name: string?, env: value):
+    function (...: value): (...: value)
+  local top = ffi.lua_gettop(L)
+  defer ffi.lua_settop(L, top)
+  if ffi.lua_checkstack(L, 2) == 0 then
+    raise "cannot reserve Lua stack for chunk loading"
+  end
+
+  local chunkname = chunk
+  if name then chunkname = name as string end
+  local status = ffi.luaL_loadbufferx(
+    L, chunk, #chunk as foreign size_t, chunkname, nil)
+  if status ~= ffi.LUA_OK then
+    local failure: value = ffi.lua_totvalue(L, -1)
+    raise failure
+  end
+
+  -- Nil and an omitted fixed argument are intentionally identical: leaving the
+  -- first upvalue alone preserves the ordinary global environment installed by
+  -- Lua's loader.
+  if env ~= nil then
+    ffi.lua_pushtvalue(L, env)
+    if not ffi.lua_setupvalue(L, -2, 1) then
+      -- A binary chunk may not expose a first upvalue. lua_setupvalue leaves the
+      -- supplied value on the stack in that case.
+      ffi.lua_settop(L, -2)
+    end
+  end
+
+  local callable: value = ffi.lua_totvalue(L, -1)
+  return callable as LuaChunk
+end
+
+--- Compile Lua bytes read from a borrowed Reader without closing it.
+-- @param reader Chunk source; nonnil strings contribute bytes and nil ends input.
+-- @param name Diagnostic chunk name, or nil for the default.
+-- @param env Replacement first upvalue, or nil to retain it.
+-- @return Compiled flexible callable.
+-- @usage standard-library-lua.md
+function load_from_reader(reader: io.Reader, name: string?, env: value):
+    function (...: value): (...: value)
+  local builder = string.writer()
+  for chunk in reader:read do
+    builder:write(chunk)
+  end
+  return load(builder:drain(), name, env)
+end
+
+local function replace_literal(subject: string, needle: string,
+                               replacement: string): string
+  local builder = string.writer()
+  local position = 1
+  while position <= #subject do
+    local found: integer? = string.find(subject, needle, position)
+    if not found then break end
+    local first = found as integer
+    if first > position then
+      builder:write(string.sub(subject, position, first - 1))
+    end
+    builder:write(replacement)
+    position = first + #needle
+  end
+  if position <= #subject then
+    builder:write(string.sub(subject, position))
+  end
+  return builder:drain()
+end
+
+local function open_source_candidate(filename: string): fs.File?
+  local opened: fs.File? = nil
+  do
+    opened = fs.open(filename, "r")
+  catch
+    -- Lua's source searcher treats every failure to open a candidate as a
+    -- non-match. Cancellation and non-filesystem errors still propagate.
+    if error is async.OperationError then return nil end
+    raise
+  end
+  return opened
+end
+
+local function source_search(modname: string, path: string):
+    (value, value, string)
+  local module_path = replace_literal(modname, ".", "/")
+  local messages = string.writer()
+  local position = 1
+  local finished = false
+
+  while not finished do
+    local separator: integer? = string.find(path, ";", position)
+    local template = ""
+    if separator then
+      local separator_position = separator as integer
+      template = string.sub(path, position, separator_position - 1)
+      position = separator_position + 1
+    else
+      template = string.sub(path, position)
+      finished = true
+    end
+
+    local filename = replace_literal(template, "?", module_path)
+    local maybe_file: fs.File? = open_source_candidate(filename)
+    if maybe_file then
+      local file = maybe_file as fs.File
+      defer file:close()
+      local loaded = (function (file: fs.File, modname: string,
+                                filename: string): LuaChunk
+        return load_from_reader(file, "@" .. filename, nil)
+      catch
+        raise "error loading module '" .. modname ..
+              "' from file '" .. filename .. "':\n\t" ..
+              string.tostring(error)
+      end)(file, modname, filename)
+      return loaded, filename, ""
+    end
+
+    messages:write("\n\tno file '" .. filename .. "'")
+  end
+
+  return nil, nil, messages:drain()
+end
+
+local function call_searcher(candidate: value, modname: string):
+    (value, value, string)
+  local searcher = candidate as Searcher
+  local first, data = searcher(modname)
+  if is_lua_function(first) then return first, data, "" end
+  if first is string then
+    return nil, nil, "\n\t" .. (first as string)
+  end
+  return nil, nil, ""
+end
+
+local function find_loader(modname: string,
+                           searchers: {integer: value},
+                           path: string): (value, value)
+  local messages = string.writer()
+
+  -- Slot 1 is Lua's preload searcher and remains replaceable by a custom
+  -- searcher. Slot 2 is deliberately reserved for the asynchronous source pass
+  -- below; calling Lua's stock slot would synchronously open source files.
+  local preload: value = searchers[1]
+  if preload ~= nil then
+    local loader, data, failure = call_searcher(preload, modname)
+    if loader ~= nil then return loader, data end
+    if #failure > 0 then messages:write(failure) end
+  end
+
+  local source_loader, source_data, source_failure =
+    source_search(modname, path)
+  if source_loader ~= nil then return source_loader, source_data end
+  if #source_failure > 0 then messages:write(source_failure) end
+
+  local index = 3
+  while true do
+    local candidate: value = searchers[index]
+    if candidate == nil then break end
+    local loader, data, failure = call_searcher(candidate, modname)
+    if loader ~= nil then return loader, data end
+    if #failure > 0 then messages:write(failure) end
+    index = index + 1
+  end
+
+  raise "module '" .. modname .. "' not found:" .. messages:drain()
+end
+
+--- Load a module through package searchers and the package.loaded cache.
+-- @param modname Lua module name; source loading may suspend in the current Task.
+-- @return Cached or newly loaded module value.
+-- @usage standard-library-lua.md
+function require(modname: string): value
+  local loaded = registry_map(ffi.LUA_LOADED_TABLE as string)
+  local cached: value = loaded[modname]
+  if cached then return cached end
+
+  if loading[modname] then
+    raise "module '" .. modname .. "' is already being loaded"
+  end
+  loading[modname] = true
+  defer loading[modname] = nil
+
+  local raw_package: value = global_value("package")
+  if not (raw_package is {string: value}) then
+    raise "global 'package' is not a table"
+  end
+  local package = raw_package as {string: value}
+  local raw_searchers: value = package["searchers"]
+  if not (raw_searchers is {integer: value}) then
+    raise "'package.searchers' must be a table"
+  end
+  local raw_path: value = package["path"]
+  if not (raw_path is string) then
+    raise "'package.path' must be a string"
+  end
+
+  local loader_value, loader_data = find_loader(
+    modname, raw_searchers as {integer: value}, raw_path as string)
+  local loader = loader_value as Loader
+  local result: value = loader(modname, loader_data)
+  if result ~= nil then loaded[modname] = result end
+
+  local installed: value = loaded[modname]
+  if installed == nil then
+    installed = true
+    loaded[modname] = installed
+  end
+  return installed
+end
+
+--- Read and execute a Lua file, closing its File on every exit.
+-- @param filename Path loaded within an async Task.
+-- @param ... Arguments forwarded to the chunk.
+-- @return Every result returned by the chunk, including nil slots.
+-- @usage standard-library-lua.md
+function dofile(filename: string, ...: value): (...: value)
+  local file = fs.open(filename, "r")
+  defer file:close()
+  local chunk: LuaChunk =
+    load_from_reader(file, "@" .. filename, nil)
+  return chunk(...)
+end
+
+--- An independent Lua state with its own globals, registry, and collector.
+-- @usage standard-library-lua.md#independent-lua-states
+record Lua
+  local handle: foreign *lua_State
+  local busy: boolean
+end
+
+-- A call retains every native carrier and every source string while its worker
+-- owns the independent state. Output string addresses remain rooted by that
+-- state's stack until conversion has finished on the caller's thread.
+local record LuaCall
+  local const owner: Lua
+  local const chunk: string
+  local const name: string
+  local const arguments: {async.TransferValue}
+  local const inputs: owned titan_lua_value[]
+  local packet: foreign titan_lua_call
+  local stack_top: foreign int
+end
+
+local function copy_state_bytes(bytes: foreign const *char,
+                                length: foreign size_t): string
+  local top = ffi.lua_gettop(L)
+  defer ffi.lua_settop(L, top)
+  if ffi.lua_checkstack(L, 1) == 0 then
+    raise "cannot reserve Lua stack for independent-state string"
+  end
+  ffi.lua_pushlstring(L, bytes, length)
+  local result: value = ffi.lua_totvalue(L, -1)
+  return result
+end
+
+--- Close an independent state; subsequent closes are harmless.
+-- @usage standard-library-lua.md#independent-lua-states
+function Lua:close()
+  if self.busy then raise "independent Lua state is busy" end
+  local handle = self.handle
+  if not handle then return end
+  self.handle = nil
+  ffi.lua_close(handle)
+end
+
+local record LuaPreload
+  local const name: string
+  local const loader: foreign function (*lua_State): int
+  local const symbols: foreign function (const *char): *void
+end
+
+-- Snapshot only loaders that have no state-owned upvalues, together with any
+-- matching native provider resolver. Names remain traced while the initialization
+-- packet borrows their bytes; no initialized module object crosses states.
+local function preload_snapshot(): {LuaPreload}
+  local top = ffi.lua_gettop(L)
+  defer ffi.lua_settop(L, top)
+  if ffi.lua_checkstack(L, 4) == 0 then
+    raise "cannot reserve Lua stack for preload snapshot"
+  end
+  ffi.lua_getfield(L, ffi.LUA_REGISTRYINDEX, ffi.LUA_PRELOAD_TABLE)
+  local entries: {LuaPreload} = {}
+  if ffi.lua_type(L, -1) ~= ffi.LUA_TTABLE then return entries end
+  ffi.lua_pushnil(L)
+  while ffi.lua_next(L, top + (1 as foreign int)) ~= 0 do
+    if ffi.lua_type(L, -2) == ffi.LUA_TSTRING then
+      local loader = ffi.lua_tocfunction(L, -1)
+      if loader then
+        if not ffi.lua_getupvalue(L, -1, 1) then
+          local name: value = ffi.lua_totvalue(L, -2)
+          local module_name = name as string
+          local symbols = ffi.titan_module_preload_symbols(
+            L, module_name, #module_name as foreign size_t, loader)
+          entries[#entries + 1] = LuaPreload(module_name, loader, symbols)
+        end
+      end
+    end
+    -- Retain only the table and next key, discarding the value and any upvalue.
+    ffi.lua_settop(L, top + (2 as foreign int))
+  end
+  return entries
+end
+
+local function Lua:initialize()
+  local snapshot = preload_snapshot()
+  local entries: owned titan_lua_preload[] =
+    foreign titan_lua_preload.new_array(#snapshot)
+  for index = 1, #snapshot do
+    entries[index - 1].name = snapshot[index].name
+    entries[index - 1].length = #snapshot[index].name
+    entries[index - 1].loader = snapshot[index].loader
+    entries[index - 1].symbols = snapshot[index].symbols
+  end
+  self.handle = ffi.luaL_newstate()
+  if not self.handle then raise "cannot create independent Lua state" end
+  local initialization = foreign titan_lua_open.new()
+  initialization.state = self.handle
+  initialization.preloads = entries
+  initialization.count = #snapshot
+  local status = lua_state_open(initialization)
+  if status ~= ffi.LUA_OK then
+    if ffi.lua_gettop(self.handle) > 0 then
+      local length = foreign size_t.new_array(1)
+      local bytes = ffi.lua_tolstring(self.handle, -1, length)
+      if bytes then raise copy_state_bytes(bytes, length[0]) end
+    end
+    raise "cannot initialize independent Lua standard libraries"
+  end
+catch
+  self:close()
+  raise
+end
+
+--- Create an independent state with the Lua standard libraries loaded.
+-- @return Owned state; collection closes it if it was not explicitly closed.
+-- @usage standard-library-lua.md#independent-lua-states
+function new(): Lua
+  local state = Lua(nil, false)
+  gc.finalizable(state, function (owner) owner:close() end)
+  state:initialize()
+  return state
+end
+
+local function Lua:reserve()
+  if not self.handle then raise "independent Lua state is closed" end
+  if self.busy then raise "independent Lua state is busy" end
+  self.busy = true
+end
+
+local function LuaCall:finish()
+  -- run_foreign does not unwind its caller before accepted work completes,
+  -- including on cancellation. This is the only release of the reservation.
+  ffi.free(self.packet.results)
+  self.packet.results = nil
+  ffi.lua_settop(self.owner.handle, self.stack_top)
+  self.owner.busy = false
+end
+
+local function LuaCall:prepare()
+  self.packet.state = self.owner.handle
+  self.packet.chunk = self.chunk
+  self.packet.name = self.name
+  self.packet.length = #self.chunk
+  self.packet.nargs = #self.arguments
+  self.packet.args = self.inputs
+  self.packet.results = nil
+  for index = 1, #self.arguments do
+    local input = (self.inputs as foreign *titan_lua_value) + (index - 1)
+    case self.arguments[index]
+    when is_nil() then
+      input.kind = ffi.TITAN_LUA_NIL
+    when is_boolean(item) then
+      input.kind = ffi.TITAN_LUA_BOOLEAN
+      if item then input.integer = 1 else input.integer = 0 end
+    when is_integer(item) then
+      input.kind = ffi.TITAN_LUA_INTEGER
+      input.integer = item
+    when is_float(item) then
+      input.kind = ffi.TITAN_LUA_FLOAT
+      input.number = item
+    when is_string(item) then
+      input.kind = ffi.TITAN_LUA_STRING
+      input.bytes = item
+      input.length = #item
+    when is_lua_state(item) then
+      input.kind = ffi.TITAN_LUA_STATE
+      input.state = item
+    when is_function(item) then
+      if not item then raise "cannot transfer a NULL Lua C function" end
+      input.kind = ffi.TITAN_LUA_FUNCTION
+      input.function = item
+    when is_pointer(item) then
+      input.kind = ffi.TITAN_LUA_POINTER
+      input.pointer = item
+    end
+  end
+end
+
+local function LuaCall:values(): {async.TransferValue}
+  if self.packet.status ~= ffi.LUA_OK then
+    raise copy_state_bytes(self.packet.message, self.packet.message_length)
+  end
+  local results: {async.TransferValue} = {}
+  for index = 1, self.packet.nresults as integer do
+    local item = self.packet.results + (index - 1)
+    if item.kind == ffi.TITAN_LUA_NIL then
+      results[index] = async.TransferValue.is_nil()
+    elseif item.kind == ffi.TITAN_LUA_BOOLEAN then
+      results[index] = async.TransferValue.is_boolean(item.integer ~= 0)
+    elseif item.kind == ffi.TITAN_LUA_INTEGER then
+      results[index] = async.TransferValue.is_integer(item.integer)
+    elseif item.kind == ffi.TITAN_LUA_FLOAT then
+      results[index] = async.TransferValue.is_float(item.number)
+    elseif item.kind == ffi.TITAN_LUA_STRING then
+      results[index] = async.TransferValue.is_string(copy_state_bytes(item.bytes, item.length))
+    elseif item.kind == ffi.TITAN_LUA_STATE then
+      results[index] = async.TransferValue.is_lua_state(item.state)
+    elseif item.kind == ffi.TITAN_LUA_FUNCTION then
+      results[index] = async.TransferValue.is_function(item.function)
+    elseif item.kind == ffi.TITAN_LUA_POINTER then
+      results[index] = async.TransferValue.is_pointer(item.pointer)
+    end
+  end
+  return results
+end
+
+local function Lua:prepare_call(chunk: string, name: string?,
+                                 arguments: {async.TransferValue}): LuaCall
+  return LuaCall {
+    owner = self,
+    chunk = chunk,
+    name = name or chunk,
+    arguments = arguments,
+    inputs = foreign titan_lua_value.new_array(#arguments),
+    packet = foreign titan_lua_call.new(),
+    stack_top = 0
+  }
+end
+
+--- Execute Lua code in this state and transfer its arguments and results.
+-- @usage standard-library-lua.md#independent-lua-states
+function Lua:run(chunk: string, name: string?, ...: async.TransferValue):
+    (...: async.TransferValue)
+  local call = self:prepare_call(chunk, name, {...})
+  self:reserve()
+  call.stack_top = ffi.lua_gettop(self.handle)
+  defer call:finish()
+  call:prepare()
+  lua_state_run(call.packet)
+  return ...call:values()
+end
+
+--- Execute Lua or required Titan code on a worker while other Tasks continue.
+-- @usage standard-library-lua.md#asynchronous-execution
+function Lua:run_async(chunk: string, name: string?, ...: async.TransferValue):
+    (...: async.TransferValue)
+  local call = self:prepare_call(chunk, name, {...})
+  self:reserve()
+  call.stack_top = ffi.lua_gettop(self.handle)
+  defer call:finish()
+  call:prepare()
+  async.run_foreign(lua_state_run, call.packet)
+  return ...call:values()
+end
+
+--- Drain a borrowed Reader, then execute its bytes in this state.
+-- @usage standard-library-lua.md#independent-lua-states
+function Lua:run_from_loader(reader: io.Reader, name: string?,
+                                   ...: async.TransferValue): (...: async.TransferValue)
+  local builder = string.writer()
+  for chunk in reader:read do builder:write(chunk) end
+  return self:run(builder:drain(), name, ...)
+end
+
+--- Drain a borrowed Reader, then execute its bytes on a worker.
+-- @usage standard-library-lua.md#asynchronous-execution
+function Lua:run_async_from_loader(reader: io.Reader, name: string?,
+                                         ...: async.TransferValue): (...: async.TransferValue)
+  local builder = string.writer()
+  for chunk in reader:read do builder:write(chunk) end
+  return self:run_async(builder:drain(), name, ...)
+end

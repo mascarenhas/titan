@@ -3,7 +3,7 @@
 The continuation runtime lives in `titan.async` and uses only the public
 `titan.uv` module interface. UV owns native allocations, callback roots, borrowed
 native data, and the native loop boundary. Async owns Tasks, generic waits,
-cancellation, subscriptions, and shutdown. Timer, filesystem, networking, I/O,
+cancellation, subscriptions, cross-state receiver queues, and shutdown. Timer, filesystem, networking, I/O,
 OS, and SQLite adapters own their domain records and result/resource policies.
 
 The old private UV `Call` union, per-operation dispatch methods, Task association,
@@ -20,6 +20,15 @@ and generic positions remain those of the existing async API. The defining
 module in nominal metadata changes; it is not byte-identical old metadata.
 Consumers need the rebuilt canonical provider. This work does not bump the
 existing generated-code ABI 2 or prerelease language-server API 1.
+
+Async also owns the public `TransferValue` union used by independent-state
+boundaries. Its nominal identity is `titan.async.TransferValue`; the Lua
+library consumes that ordinary compiled import rather than defining an alias
+or a second representation. Scalar variants hold ordinary Titan values, and
+the string variant retains its source string in a traced slot. State, native-function, and raw-pointer
+variants hold portable borrowed C pointer types and do not root their
+referents. The Lua adapter owns its native packets and copy/borrow conversion
+policy, described in [the Lua implementation chapter](lua-library.md#cross-state-transfer).
 
 Tasks use tagged `coroutine.Coroutine` control transfer. Coroutine itself keeps
 its existing public and native ownership contract; async uses one private tag
@@ -313,6 +322,45 @@ batch. TCP reads drain copied chunks before error/EOF; accept may need to close
 unread clients before delivering a listener failure. These policies do not
 belong in Core and do not require new generic operation kinds.
 
+## Cross-state receiver ownership
+
+`Receiver` owns the public [cross-state FIFO](../language/async-io.md#cross-state-receivers).
+Its opaque `foreign *void` handle names native receiver storage, not a Titan
+record or public `uv.async_t`. The host sending a message never follows a remote
+GC pointer or enters the destination Lua state. Scalar tags/values and copied
+string bytes live in native messages until the destination loop converts them
+into its own `TransferValue`. The one-slot string-copy transaction and
+native-packet lifetime are recorded in the [trusted Lua API ledger](ffi-lua-api-followup.md#trusted-standard-library-discipline).
+Borrowed pointer variants remain raw addresses.
+
+Receiver construction uses `ensure_runtime` without requiring a current Task
+or driving the loop, which permits synchronous independent-state bootstrap.
+Waiting belongs to a Task in the same Runtime and uses the existing async wait
+machinery. One waiter owns delivery; cancellation detaches that waiter while
+preserving queue contents. Queue insertion and native-close admission are
+serialized with the native receiver lock. FIFO order is the successful enqueue
+order, and native notification coalescing cannot lose accepted messages.
+
+Explicit close first marks the native receiver closed under that lock, then
+releases queued packets and requests native close. A blocked waiter receives
+the closed error. The operation is synchronous and idempotent; loop callbacks
+still own native handle retirement. The Runtime's handle walk applies the same
+admission shutdown to live receivers before generic close, including fatal
+shutdown. A Receiver retained after close keeps its mutex and storage alive,
+allowing a late send to reject safely without touching a retired UV handle.
+
+An exported handle does not retain that owner or the originating Lua state.
+Applications must retain the Receiver, withdraw handles, and complete sends
+before permitting collection or state destruction. Keeping storage alive until
+native close is necessary but insufficient to authorize use of an exported
+handle after the Receiver's lifetime. No registry of process-wide tokens,
+shared Titan closure, or cross-state GC object is part of this protocol.
+
+`async.send` is an ordinary Titan entry with allocation and native locking.
+Its cross-thread safety does not make it callable from a raw signal handler.
+Only the receiving loop constructs destination GC objects and settles the
+Task's wait. Error/cancellation delivery uses the existing continuation rules.
+
 ## Foreign workers
 
 `run_foreign(f,arg)` is now a public-work-request adapter over ordinary await and
@@ -322,10 +370,16 @@ or rejects an OperationError labelled `async.run_foreign`, and protects unexpect
 failures with fatal plus bare rethrow. The argument's owned storage remains in
 the suspended caller through completion.
 
-Worker code must not inspect Titan/Lua owners, call the Lua API, raise, or resume
-a Task. Synchronization of shared native bytes remains the caller's job. The
-libuv worker pool is shared with other native work and async adds no new queue
-or thread policy. Ordinary cancellation never detaches the accepted job.
+Worker code must not inspect host Titan/Lua owners, call the Lua API on the
+hosting state, raise into its frames, or resume its Tasks. The
+[independent Lua-state adapter](lua-library.md#independent-state-ownership)
+exclusively owns a separate state and may execute Lua and independently
+initialized Titan modules in it. That state's collector never receives a host
+GC object; only explicitly copied strings and borrowed native addresses cross
+the boundary. Synchronization of shared native bytes remains the caller's
+job. The libuv worker pool is shared with other native work and async adds no
+new queue or thread policy. Ordinary cancellation never detaches the accepted
+job.
 
 The UV binding embeds an ordinary `uv_work_t` and a separate native callback
 data structure in one stable request owner. Before queueing, it sets

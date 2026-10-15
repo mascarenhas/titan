@@ -117,11 +117,14 @@ return the required buffer shape and preserve any failure for their paired
 read/receive handling; they cannot throw through C.
 
 Only the owning main Lua thread drives callbacks. C-only worker, thread and
-once entries never inspect Titan owners, call Lua/Titan, or use an ordinary
-wrapper from a foreign thread. Their raw pointers and code remain externally
-valid for the whole native interval; explicit `argument_owner` retains the
-associated GC graph when permitted. Native thread detach is unavailable for a
-retained GC argument graph, because detach cannot determine its final use.
+once entries never inspect host Titan owners, enter the hosting Lua/Titan
+state, or use its ordinary wrappers from a foreign thread. The independent
+Lua-state adapter may execute code initialized in its separately owned state;
+see the [foreign-worker boundary](libuv-runtime.md#foreign-workers). Raw
+pointers and code remain externally valid for the whole native interval;
+explicit `argument_owner` retains the associated GC graph when permitted.
+Native thread detach is unavailable for a retained GC argument graph, because
+detach cannot determine its final use.
 
 ## One-shot Task adapter
 

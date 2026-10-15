@@ -208,6 +208,14 @@ Titan module can consume `foreign function(*void): void`, `foreign *void`, or
 remain unavailable to dynamic Lua coercion when they contain a raw or function
 pointer.
 
+The intrinsic opaque `lua_State` is also a supported portable pointee.
+Signatures such as `foreign *lua_State` and
+`foreign function (*lua_State): int` retain that built-in identity across
+compiled-module metadata. Otherwise matching callback pointers therefore
+support equality even when their state descriptors came from separate imports
+or metadata decoding. Other imported opaque structs remain nominal and
+nonexportable.
+
 A C function pointer has a lightuserdata `TValue` representation, using
 Titan's toolchain portability cast to preserve its address. A portable
 function-pointer type may appear in aliases, callable signatures, module
@@ -983,7 +991,8 @@ for cache and promotion details.
 * Header-dependent C types are local to the importing Titan module. Only the
   contextual primitive descriptors and pointer, foreign-function-pointer, and
   owned graphs built entirely from them can appear in exported compiled-module
-  interfaces.
+  interfaces, with the intrinsic opaque `lua_State` additionally permitted as
+  a pointer pointee.
 * Function-like macros are not imported. When a real function declaration has
   the same name, calls select that declaration and bypass the macro wrapper.
   Object-like macros are values only

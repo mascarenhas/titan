@@ -271,7 +271,7 @@ end
 
 --- Start a native thread at the C-only entry(argument), retaining argument_owner until a successful join.
 -- @param thread Mutable thread identifier owner; create requires fresh/retired owner, join retains argument graph until completion, detach requires argument_owner=nil; thread_self returns a borrowed identity.
--- @param entry Input C-only entry; no Lua/Titan execution from a native worker/once callback.
+-- @param entry Input C-only entry; no calling-state Lua/Titan execution from a native worker/once callback.
 -- @param argument Input borrowed native address for explicit C-only/TLS interop; no automatic GC ownership.
 -- @param argument_owner Input traced argument-owner graph retained through native worker completion/join.
 -- @return Native integer result with the documented lifetime and units.
@@ -284,7 +284,7 @@ end
 --- Start a native thread with thread_options_t flags/stack size and the same C-only entry and ownership contract as thread_create.
 -- @param thread Mutable thread identifier owner; create requires fresh/retired owner, join retains argument graph until completion, detach requires argument_owner=nil; thread_self returns a borrowed identity.
 -- @param options Input thread_options_t value.
--- @param entry Input C-only entry; no Lua/Titan execution from a native worker/once callback.
+-- @param entry Input C-only entry; no calling-state Lua/Titan execution from a native worker/once callback.
 -- @param argument Input borrowed native address for explicit C-only/TLS interop; no automatic GC ownership.
 -- @param argument_owner Input traced argument-owner graph retained through native worker completion/join.
 -- @return Native integer result with the documented lifetime and units.

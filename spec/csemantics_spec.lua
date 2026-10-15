@@ -995,6 +995,39 @@ describe("pure C expression semantics", function()
             assert.is_nil(invalid)
             assert.matches("matching function pointers", err)
         end)
+
+        it("preserves builtin Lua-state identity in recovered callbacks",
+           function()
+            local state = types.CStruct(
+                nil, "lua_State", nil, {}, false, false)
+            local state_pointer = types.CPointer(state, {})
+            local callback = types.CPointer(types.CFunction(
+                {state_pointer}, ctype(lp64_profile(), "int"), false, nil), {})
+            local recovered = assert(load(
+                "return " .. types.serialize(callback),
+                "recovered-callback", "t", types))()
+
+            assert.is_true(types.equals(callback, recovered))
+            assert(csemantics.pointer_equality_common_type(
+                callback, recovered))
+            local state_equality = assert(
+                csemantics.pointer_equality_common_type(
+                    state_pointer, recovered.pointee.params[1]))
+            assert.is_true(types.is_c_lua_state(
+                state_equality.common.pointee))
+
+            -- Ordinary opaque C tags remain nominal despite identical fields
+            -- and spelling; the exception is the existing builtin identity.
+            local function other_callback()
+                return types.CPointer(types.CFunction({types.CPointer(
+                    types.CStruct(nil, "OtherState", nil, {}, false, false),
+                    {})}, types.CVoid(), false, nil), {})
+            end
+            local invalid, err = csemantics.pointer_equality_common_type(
+                other_callback(), other_callback())
+            assert.is_nil(invalid)
+            assert.matches("matching function pointers", err)
+        end)
     end)
 
     describe("complete C operator decisions", function()

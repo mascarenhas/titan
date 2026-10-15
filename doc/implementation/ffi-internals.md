@@ -134,7 +134,11 @@ checking paths never become runtime keys. Anonymous aggregates retain distinct
 declaration sites. Typedef and tag origins survive conversion and cache restore,
 including named payloads reached after an owned pointer or array alias is
 unwrapped. Direct imports, source imports, and forced headers follow this same
-rule; intrinsic `lua_State` retains its built-in identity.
+rule; intrinsic `lua_State` retains its built-in identity. The recursive
+`csemantics.same_c_tag_identity` guard uses that same identity when comparing
+pointer and callback signatures, including descriptors restored from compiled
+metadata. All other C struct/union tags remain nominal; matching spelling or
+fields do not make distinct declarations compatible.
 
 This bookkeeping adds no preprocessing pass, macro-environment fingerprint,
 layout digest, or native compatibility probe. Compatible C build configuration
@@ -428,8 +432,10 @@ Serialization accepts the closed, header-independent C subset: contextual
 `CVoid`, target-profile `CInteger` and `CFloat` leaves, recursively composed
 `CPointer`, nonvariadic `CFunction`, and `COwned` descriptors. It emits only
 their structural fields and no source scope, header origin, probe, or parser
-state. Imported `CTypedef`s remain nonexportable even when their target is a
-portable primitive; structs, unions, fields, arrays, enum identities, and any
+state. The intrinsic opaque `lua_State` descriptor is additionally accepted
+as a pointer pointee, including within a callback signature. Imported
+`CTypedef`s remain nonexportable even when their target is a portable
+primitive; other structs, unions, fields, arrays, enum identities, and any
 allowed constructor containing one are rejected recursively.
 
 The compiled-interface decoder independently validates that closed schema as
