@@ -100,7 +100,7 @@ end
 -- The parent waits cancellation-sensitively while the child owns accepted
 -- output/input. It can therefore abort the transport before draining a child
 -- whose native write itself cannot detach on cancellation.
-local function supervised_upgrade_io<|A|>(abort: function (): (),
+local function supervised_http_io<|A|>(abort: function (): (),
     operation: function (): (A)): A
   async.checkpoint()
   local child = async.run<|UpgradeOutcome<|A|>, value|>(function (): UpgradeOutcome<|A|>
@@ -217,7 +217,7 @@ local function Response:write_upgrade_output(output: string)
   self.headers_sent = true
   self.closed = true
   do
-    supervised_upgrade_io<|nil|>(self.exchange.transport.abort,
+    supervised_http_io<|nil|>(self.exchange.transport.abort,
       function (): nil
         self.connection:write(output)
         return nil

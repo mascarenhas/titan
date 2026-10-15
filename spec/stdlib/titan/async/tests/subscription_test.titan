@@ -490,3 +490,30 @@ function test_subscription_waiter_query_tracks_exact_reader(context: test.Contex
   subscription_waiter_buffered(false)
   subscription_waiter_buffered(true)
 end
+
+function test_buffered_subscription_pending_query_preserves_nil_and_terminal(_: test.Context)
+  runtime_test.run(function ()
+    local publish: (function (value): (boolean))? = nil
+    local finish: (function (): (boolean))? = nil
+    local source = async.BufferedSubscription<|value, value|>(function (emit, _, ended)
+      publish = emit
+      finish = ended
+      return subscription_actions()
+    end)
+    defer source:close()
+    test.assert(not source:has_pending(), "empty live subscription reported input")
+    publish(nil)
+    publish(false)
+    test.assert(source:has_pending() and source:has_pending(), "query consumed nil input")
+    test.assert(subscription_item(source:next()) == nil, "query changed nil payload")
+    test.assert(source:has_pending(), "false item was treated as absence")
+    test.assert(subscription_item(source:next()) == false, "query changed false payload")
+    test.assert(not source:has_pending(), "drained live source retained phantom input")
+    finish()
+    test.assert(source:has_pending(), "finished source was not reported")
+    subscription_ended(source:next())
+    test.assert(source:has_pending(), "terminal state stopped being observable")
+    source:close()
+    test.assert(source:has_pending(), "closed source was not reported")
+  end)
+end

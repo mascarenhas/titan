@@ -73,7 +73,7 @@ local function reject_parsed_upgrade(parser: Parser, transport: Transport)
   defer do
     do transport.abort() catch end
   end
-  supervised_upgrade_io<|nil|>(transport.abort, function (): nil
+  supervised_http_io<|nil|>(transport.abort, function (): nil
     transport.connection:write("HTTP/1.1 400 Bad Request\r\n" ..
       "Content-Length: 0\r\nConnection: close\r\n\r\n")
     return nil

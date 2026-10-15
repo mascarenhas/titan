@@ -1,0 +1,61 @@
+function test_runtime_close_listeners_follow_native_cleanup_and_allow_removal(context: test.Context)
+  local order: {integer} = {}
+  local native_closed = false
+  local task = async.run<|nil, nil|>(function (): nil return nil end)
+  local owner = uv.timer_t.new()
+  test.assert(uv.timer_init(async.current_loop(), owner) == 0)
+  uv.timer_close(owner, function (_: uv.timer_t) native_closed = true end)
+  local remove_later: function (): () = function () end
+  local remove_first = async.add_close_listener(function ()
+    test.assert(task:status():has_finished() and native_closed,
+      "Runtime listener ran before Task/native retirement")
+    test.assert(async.is_closing(), "Runtime listener observed open Runtime")
+    order[#order + 1] = 1
+    remove_later()
+    local rejected = false
+    do async.run<|nil, nil|>(function (): nil return nil end)
+    catch rejected = true end
+    test.assert(rejected, "close listener resurrected Runtime work")
+    rejected = false
+    do async.running() catch rejected = true end
+    test.assert(rejected, "Runtime close listener ran inside a Task")
+    rejected = false
+    do async.loop() catch rejected = true end
+    test.assert(rejected, "Runtime close listener reentered the driver")
+    rejected = false
+    do async.add_close_listener(function () end) catch rejected = true end
+    test.assert(rejected, "Runtime close listener registered new cleanup")
+  end)
+  remove_later = async.add_close_listener(function () order[#order + 1] = 2 end)
+  async.add_close_listener(function () order[#order + 1] = 3 end)
+  local remove_early = async.add_close_listener(function () raise "removed listener ran" end)
+  remove_early()
+  remove_early()
+  async.loop()
+  remove_first()
+  remove_later()
+  test.assert(#order == 2 and order[1] == 1 and order[2] == 3,
+    "Runtime listeners lost order, removal, or once-only behavior")
+  runtime_test.run(function () async.yield() end)
+  test.assert(#order == 2, "Runtime listener leaked into the next session")
+end
+
+function test_runtime_close_listener_failure_preserves_error_and_runs_remaining(context: test.Context)
+  local marker: {string} = {"close failure"}
+  local remaining = false
+  async.run<|nil, nil|>(function (): nil return nil end)
+  async.add_close_listener(function () raise marker end)
+  async.add_close_listener(function () remaining = true; raise "later failure" end)
+  local caught = false
+  do async.loop()
+  catch
+    caught = true
+    test.assert(error == marker, "Runtime close replaced first failure")
+  end
+  test.assert(caught and remaining, "Runtime close stopped notifying after failure")
+  local rejected = false
+  do async.add_close_listener(function () end)
+  catch rejected = true end
+  test.assert(rejected, "listener registration silently created a Runtime")
+  runtime_test.run(function () async.yield() end)
+end

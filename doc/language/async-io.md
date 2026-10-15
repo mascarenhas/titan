@@ -13,6 +13,23 @@ ignored so a closed stream produces an `async.OperationError` instead of termina
 the process. An inherited ignored disposition or application-installed
 handler is preserved.
 
+## Runtime close listeners
+
+`add_close_listener(listener)` registers ordered, once-only cleanup on the
+active Runtime and returns an idempotent remover. It does not create a Runtime
+and rejects registration after shutdown begins. A listener runs outside any
+Task, after every Task and native handle has retired and the loop has closed,
+but before the Runtime is cleared. It must not yield, start Tasks, or use the
+retired loop. It can release non-handle resources retained by a domain owner,
+such as an idle connection's TLS engine. Ordinary active resources still need
+lexical cleanup while their Tasks can perform asynchronous retirement.
+
+Removing a later listener during notification skips it. Every remaining
+listener runs even if another raises; `loop()` preserves the first Runtime or
+listener failure and raises it after notification and Runtime clearing. A later
+`run` can create a fresh Runtime. Listeners are released at retirement, and an
+explicitly closed owner should remove its listener to release its capture early.
+
 ## Scheduling and driving Tasks
 
 The async module defines `Task`, `TaskStatus`, `CancellationReason`,
@@ -29,6 +46,7 @@ type SuspendCancelAction = function (): ()
 function run<|A, B|>(func: function (): (A)): Task<|A, B|>
 function run_foreign(f: foreign function (*void): void, arg: foreign *void)
 function loop()
+function add_close_listener(listener: function (): ()): function (): ()
 function yield()
 function running(): Task -- exactly Task<|value, value|>
 function suspend(token: ResumeToken,
@@ -960,6 +978,7 @@ function CoalescingSubscription:stop()
 function CoalescingSubscription:close()
 function BufferedSubscription:next(): SubscriptionResult<|T, E|>
 function BufferedSubscription:has_waiter(): boolean
+function BufferedSubscription:has_pending(): boolean
 function BufferedSubscription:next_batch(): SubscriptionBatchResult<|T, E|>
 function BufferedSubscription:stop()
 function BufferedSubscription:close()
@@ -1031,6 +1050,11 @@ prebuild the public connection facade before publication so extraction does
 not introduce an unowned native handle. A domain operation guard may need to
 cover the entire later classification phase, since the subscription waiter
 reservation ends when `next_batch()` returns.
+
+`BufferedSubscription:has_pending()` is a synchronous, nonconsuming snapshot:
+it is true for any queued item (including nil or false) or selected error, end,
+or closed state. It does not reserve a reader or check Task cancellation. False
+only means the live queue is currently empty; it does not predict later events.
 
 `has_waiter()` is a synchronous query on either subscription type. It reports
 the same reader reservation that cancellation detaches, including a reader whose

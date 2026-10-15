@@ -50,6 +50,18 @@ into a short GC-owned mutable byte array for that call. OpenSSL consumes the
 name during the control operation; no pointer to the temporary array is
 retained by Titan.
 
+`Connection:has_pending_input()` conservatively combines non-open state,
+retained plaintext, `SSL_has_pending`, `BIO_ctrl_pending` on the input BIO, and
+the public TCP query. The state test short-circuits before accessing a freed
+engine. `SSL_has_pending` includes unprocessed or partial TLS records and does
+not promise application data; this query only rejects dirty idle pool leases.
+It does not run the engine, read the transport, or add a native callback.
+
+The companion `add_input_listener` forwards to the owned TCP transport while
+TLS is open. It neither creates an engine operation nor peeks at decrypted data;
+partial and control ciphertext deliberately count as idle input. The listener
+is removed by its borrower or the ordinary transport-close path.
+
 ## Contexts, SSL objects, and BIO ownership
 
 The module initializer allocates one default client `SSL_CTX`, requires TLS

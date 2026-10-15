@@ -355,6 +355,11 @@ Ticker remains a persistent coalescing subscription and uses the typed close
 callback only for ownership retirement. The public timing/cancellation
 contracts remain unchanged; neither promises an exact libuv phase.
 
+`BufferedSubscription:has_pending()` reads the Core's item count and liveness
+without taking the reader reservation or consuming values. It includes terminal
+states and counts nil/false payloads correctly; adapters use it as an observed
+input snapshot, not a polling or readiness primitive.
+
 ## Shutdown and process control
 
 A first callback/driver failure sets closing, latches the original Error, and
@@ -376,10 +381,18 @@ lexical cleanup while avoiding a stale Task-only orphan snapshot.
 
 Once no Tasks remain, `uv.walk` closes remaining non-closing handles. The driver
 continues native callbacks and checks initialized inactive handles as well as
-native liveness before `uv.loop_close`. Successful close clears the active
-Runtime and only then rethrows its first fatal error with the preserved raw
-trace. A subsequent run can create a fresh Runtime. The native owner maps belong
-to UV; async does not add a parallel domain-resource registry.
+native liveness before `uv.loop_close`. Immediately after successful
+`uv.loop_close`, it detaches and invokes
+`add_close_listener` registrations in order with `closing` set. These callbacks
+run outside Tasks and cannot yield or start work; domains may release native
+objects after their underlying handles are known retired. A live bit permits
+idempotent removal, including removal of a later detached registration. Errors
+are caught individually and the first is retained unless an earlier Runtime
+failure already exists. The callback pass cannot call `uv.stop` on the closed
+loop. After notification, the driver clears the active Runtime and then
+rethrows its first failure with the preserved raw trace. A subsequent run can
+create a fresh Runtime. Native handle discovery and
+ownership remain in UV; the generic listeners are not a domain-resource registry.
 
 OS descriptors and native objects returned by workers are not automatically
 libuv handles. Their lexical/domain owners must close or dispose of them.

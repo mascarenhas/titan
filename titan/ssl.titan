@@ -1570,6 +1570,24 @@ function Connection:handshake()
   end)
 end
 
+--- Query buffered plaintext/ciphertext or a state that is not fully open.
+-- @return True for pending input or non-open state; a TLS control or partial record may still need I/O.
+-- @usage standard-library-ssl.md#reading-and-writing
+function Connection:has_pending_input(): boolean
+  if self.state ~= STATE_OPEN then return true end
+  return #self.excess > 0 or ffi.SSL_has_pending(self.handle) ~= 0 or
+    ffi.BIO_ctrl_pending(self.input) > 0 or self.transport:has_pending_input()
+end
+
+--- Observe newly buffered TCP input or terminal receive events without processing TLS.
+-- @param listener Nonyielding receive observer; encrypted data may be partial or control records.
+-- @return Idempotent remover; does not drive reads or report already buffered TLS input.
+-- @usage standard-library-ssl.md#reading-and-writing
+function Connection:add_input_listener(listener: function (): ()): function (): ()
+  if self.state ~= STATE_OPEN then raise "cannot observe input on a non-open TLS Connection" end
+  return self.transport:add_input_listener(listener)
+end
+
 --- Read decrypted bytes, returning nil only after authenticated TLS shutdown.
 -- @return Copied bytes or text, or nil at EOF or when absent.
 -- @usage standard-library-ssl.md#reading-and-writing

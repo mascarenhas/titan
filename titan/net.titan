@@ -16,6 +16,11 @@ local const CONNECTION_CONNECTING = 1
 local const CONNECTION_CONNECTED = 2
 local const CONNECTION_FAILED = 3
 
+local record InputRegistration
+  local listener: function (): ()
+  local live: boolean
+end
+
 --- An owned TCP byte stream with one waiting reader and ordered native writes.
 -- @usage standard-library-net.md#connecting-and-listening
 record Connection
@@ -29,6 +34,7 @@ record Connection
   local started: boolean
   local read_buffer: uv.buf_t?
   local phase: integer
+  local input_listeners: {InputRegistration}
 end
 
 --- An owned TCP listener with one waiting acceptor.
@@ -138,6 +144,21 @@ local function abandon(connection: Connection)
   if not is_closed(handle) then uv.close(handle) end
 end
 
+local function notify_input(connection: Connection)
+  local listeners = connection.input_listeners
+  local failure: async.Error? = nil
+  for index = 1, #listeners do
+    local registration = listeners[index]
+    if registration.live then
+      do registration.listener()
+      catch
+        if failure == nil then failure = async.Error(error, traceback) end
+      end
+    end
+  end
+  if failure ~= nil then failure:raise() end
+end
+
 local function new_connection(loop: uv.loop_t): Connection
   local tcp = uv.tcp_t.new()
   local stream = tcp:as_stream_t()
@@ -145,7 +166,7 @@ local function new_connection(loop: uv.loop_t): Connection
   local connection: Connection = {
     handle = tcp, handle_view = handle, stream = stream, loop = loop,
     excess = "", input = nil, start_read = nil, started = false,
-    read_buffer = nil, phase = CONNECTION_UNCONNECTED,
+    read_buffer = nil, phase = CONNECTION_UNCONNECTED, input_listeners = {},
   }
   connection.input = async.BufferedSubscription<|string, value|>(function (publish, fail, finish)
     local stop = function ()
@@ -180,6 +201,7 @@ local function new_connection(loop: uv.loop_t): Connection
         if count == uv.EOF then finish()
         else fail(operation_error(count, "net.read")) end
       end
+      notify_input(connection)
     end
     connection.start_read = function (): integer
       return uv.read_start(stream, allocate, receive)
@@ -542,6 +564,14 @@ function listen(host: string, port: integer,
   raise operation_error(last_status, "net.listen")
 end
 
+--- Query buffered input or a terminal/unconnected state without consuming bytes.
+-- @return True when input or an unusable read state is already visible; false does not poll the socket.
+-- @usage standard-library-net.md#reading
+function Connection:has_pending_input(): boolean
+  return self.phase ~= CONNECTION_CONNECTED or is_closed(self.handle_view) or
+    #self.excess > 0 or self.input:has_pending()
+end
+
 --- Read the next buffered byte chunk, or nil at EOF.
 -- @return Copied bytes or text, or nil at EOF or when absent.
 -- @usage standard-library-net.md#reading
@@ -643,9 +673,38 @@ function Connection:shutdown()
   end
 end
 
+--- Observe new TCP input or terminal receive events after they have been buffered.
+-- @param listener Nonyielding observer called by the native receive callback; errors fail the Runtime.
+-- @return Idempotent remover; does not start reading or report already buffered input.
+-- @usage standard-library-net.md#reading
+function Connection:add_input_listener(listener: function (): ()): function (): ()
+  validate(self.handle_view, self.loop, "observe input on")
+  if self.phase ~= CONNECTION_CONNECTED then
+    raise "cannot observe input on an unconnected TCP Connection"
+  end
+  local registration = InputRegistration(listener, true)
+  self.input_listeners[#self.input_listeners + 1] = registration
+  local connection = self
+  return function ()
+    if not registration.live then return end
+    registration.live = false
+    -- Replace the Array so an in-progress notification retains stable order.
+    local retained: {InputRegistration} = {}
+    for index = 1, #connection.input_listeners do
+      local current = connection.input_listeners[index]
+      if current ~= registration then retained[#retained + 1] = current end
+    end
+    connection.input_listeners = retained
+  end
+end
+
 --- Close both directions, discard buffered input, and release this connection.
 -- @usage standard-library-net.md#writing-shutdown-and-close
 function Connection:close()
+  for index = 1, #self.input_listeners do
+    self.input_listeners[index].live = false
+  end
+  self.input_listeners = {}
   self.excess = ""
   self.read_buffer = nil
   if is_closed(self.handle_view) then return end

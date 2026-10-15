@@ -74,6 +74,7 @@ TITAN_TEST_SOURCES_async.tests := spec/stdlib/titan/async/tests/tests.titan \
 	spec/stdlib/titan/async/tests/completion_test.titan \
 	spec/stdlib/titan/async/tests/fatal_test.titan \
 	spec/stdlib/titan/async/tests/foreign_work_test.titan \
+	spec/stdlib/titan/async/tests/runtime_close_test.titan \
 	spec/stdlib/titan/async/tests/subscription_test.titan \
 	spec/stdlib/titan/async/tests/task_test.titan \
 	spec/stdlib/titan/async/tests/coverage_combinator_matrix_test.titan \
@@ -107,6 +108,7 @@ TITAN_TEST_IMPORTS_http.test_support := support.runtime
 
 TITAN_TEST_SOURCES_http.tests := spec/stdlib/titan/http/tests/tests.titan \
 	spec/stdlib/titan/http/tests/client_behavior.titan \
+	spec/stdlib/titan/http/tests/client_reuse_test.titan \
 	spec/stdlib/titan/http/tests/eof_behavior.titan \
 	spec/stdlib/titan/http/tests/parent_cancel_test.titan \
 	spec/stdlib/titan/http/tests/sanitizer_process_test.titan \

@@ -1,0 +1,956 @@
+-- Public connection identity and raw peers exercise reuse without exposing
+-- HTTP parser, transport, pool, or Runtime implementation state.
+local type ReuseAction = function (): ()
+local type ReuseRawHandler = function (io.ReaderWriterCloser, integer): ()
+local type ReuseAccept = function (): (io.ReaderWriterCloser, function (): ())
+
+local function run_reuse_case(action: ReuseAction)
+  runtime_test.run(function ()
+    local exercise = async.run<|value, value|>(function (): value
+      action()
+      return nil
+    catch
+      return async.Error(error, traceback)
+    end)
+    defer task_support.cancel_and_join_task(exercise, "HTTP reuse exercise cleanup")
+    local watchdog = async.run<|value, value|>(function (): value
+      timer.sleep(5000)
+      return nil
+    end)
+    defer task_support.cancel_and_join_task(watchdog, "HTTP reuse watchdog cleanup")
+    case async.race_two(exercise, watchdog)
+    when second() then
+      exercise:cancel(async.CancellationReason.simple("HTTP reuse test timed out"))
+      async.join(exercise)
+      raise "HTTP reuse test timed out"
+    end
+    case async.join(exercise)
+    when succeeded(failure) then
+      if failure ~= nil then (failure as async.Error):raise() end
+    else
+      raise "HTTP reuse exercise did not complete"
+    end
+  end)
+end
+
+local record ReuseRawServer
+  listener: io.Closer
+  port: integer
+  encrypted: boolean
+  connections: {io.ReaderWriterCloser}
+  aborts: {function (): ()}
+  workers: {async.Task}
+  accepting: async.Task?
+end
+
+local function ReuseRawServer:close()
+  -- Detach observers before closing the sockets they are waiting on. Native
+  -- writes still retain their ownership until close completes their callbacks.
+  if self.accepting and not self.accepting:status():has_finished() then
+    self.accepting:cancel(async.CancellationReason.simple("HTTP reuse accept cleanup"))
+  end
+  for index = 1, #self.workers do
+    if not self.workers[index]:status():has_finished() then
+      self.workers[index]:cancel(async.CancellationReason.simple("HTTP reuse peer cleanup"))
+    end
+  end
+  self.listener:close()
+  for index = 1, #self.aborts do self.aborts[index]() end
+  if self.accepting then async.join(self.accepting) end
+  for index = 1, #self.workers do async.join(self.workers[index]) end
+end
+
+local function reuse_tls_listener(first_port: integer): (ssl.Server, integer)
+  for port = first_port, first_port + 99 do
+    do
+      return ssl.listen("127.0.0.1", port, support.CERTIFICATE, support.PRIVATE_KEY), port
+    catch
+      if not (error is async.OperationError) or
+         (error as async.OperationError).name ~= "EADDRINUSE" then raise end
+    end
+  end
+  raise "could not find an available raw HTTPS loopback port"
+end
+
+local function reuse_raw_server(first_port: integer,
+                               handler: ReuseRawHandler,
+                               encrypted: boolean?): ReuseRawServer
+  local bind = function (): (io.Closer, integer, ReuseAccept)
+    if encrypted then
+      local listener, port = reuse_tls_listener(first_port)
+      local accept: ReuseAccept = function ()
+        local connection = listener:accept()
+        return connection, connection:abort
+      end
+      return listener, port, accept
+    end
+    local listener, port = support.raw_listen(first_port)
+    local accept: ReuseAccept = function ()
+      local connection = listener:accept()
+      return connection, connection:close
+    end
+    return listener, port, accept
+  end
+  local listener, port, accept = bind()
+  local fixture = ReuseRawServer {
+    listener = listener, port = port, encrypted = encrypted or false,
+    connections = {}, aborts = {}, workers = {}, accepting = nil,
+  }
+  runtime_test.cleanup(fixture:close)
+  fixture.accepting = async.run<|value, value|>(function (): value
+    while true do
+      local connection, abort = accept()
+      local identity = #fixture.connections + 1
+      fixture.connections[identity] = connection
+      fixture.aborts[identity] = abort
+      fixture.workers[identity] = async.run<|value, value|>(function (): value
+        defer abort()
+        handler(connection, identity)
+        return nil
+      catch
+        -- Dirty, unread, and failed TLS responses retire through abort.
+        if encrypted and error is ssl.Error and
+           (error as ssl.Error).name == "TLS_TRUNCATED_EOF" then return nil end
+        raise
+      end)
+    end
+    return nil
+  end)
+  return fixture
+end
+
+local function ReuseRawServer:url(): string
+  local scheme = "http"
+  if self.encrypted then scheme = "https" end
+  return scheme .. "://127.0.0.1:" .. self.port
+end
+
+local function reuse_reply(identity: integer, contents: string): string
+  return "HTTP/1.1 200 OK\r\nX-Test-Connection: " .. identity ..
+         "\r\nContent-Length: " .. #contents .. "\r\n\r\n" .. contents
+end
+
+local function reuse_request(connection: io.ReaderWriterCloser): string?
+  return connection:read_until("\r\n\r\n", false)
+end
+
+local function reuse_assert_response(response: http.ClientResponse,
+                                    identity: integer, body: string)
+  local actual = response.headers:get("X-Test-Connection")
+  test.assert(actual == "" .. identity,
+              "HTTP client used connection " .. string.tostring(actual) ..
+              "; expected " .. identity)
+  test.assert(support.read_response(response) == body,
+              "HTTP client exposed the wrong response body")
+end
+
+local function reuse_wait_drained(response: http.ClientResponse)
+  while response.headers:get("X-Drained") == nil do timer.yield() end
+  -- Trailer visibility precedes asynchronous drain completion. Let its ready
+  -- continuation finish before the next request asks for an idle connection.
+  timer.sleep(1)
+end
+
+-- Each HTTP server connection owns one public Task. Its identity is therefore
+-- a connection-reuse oracle for both TCP and verified TLS.
+local function reuse_http_server(encrypted: boolean, first_port: integer,
+                                 handler: http.Handler): (string, {async.Task})
+  local owners: {async.Task} = {}
+  local wrapped: http.Handler = function (request: http.Request, response: http.Response)
+    local current = async.running()
+    local identity = 0
+    for index = 1, #owners do
+      if owners[index] == current then identity = index; break end
+    end
+    if identity == 0 then
+      identity = #owners + 1
+      owners[identity] = current
+    end
+    response:set_header("X-Test-Connection", "" .. identity)
+    handler(request, response)
+  end
+  local listen = function (): (http.Server, integer)
+    if encrypted then return support.https_listen(first_port, wrapped, 0) end
+    return support.http_listen(first_port, wrapped, 0)
+  end
+  local server, port = listen()
+  runtime_test.cleanup(function ()
+    server:close()
+    for index = 1, #owners do
+      task_support.cancel_and_join_task(owners[index], "HTTP reuse connection cleanup")
+    end
+  end)
+  local serving = async.run<|value, value|>(function (): value
+    server:serve()
+    return nil
+  end)
+  task_support.cleanup_task(serving, "HTTP reuse listener cleanup")
+  local scheme = "http"
+  if encrypted then scheme = "https" end
+  return scheme .. "://127.0.0.1:" .. port, owners
+end
+
+local function reuse_fixed_handler(_: http.Request, response: http.Response)
+  response:set_header("Content-Length", "2")
+  response:write("ok")
+end
+
+local function add_reuse_framing(context: test.Context, name: string,
+                                method: string, status: string, framing: string,
+                                body: string, expected: string)
+  context:run(name, function (_: test.Context)
+    run_reuse_case(function ()
+      local fixture = reuse_raw_server(25600, function (connection, identity)
+        for _ in reuse_request, connection do
+          connection:write("HTTP/1.1 " .. status .. "\r\nX-Test-Connection: " .. identity ..
+                           "\r\n" .. framing .. "\r\n" .. body)
+        end
+      end)
+      local client = http.Client()
+      defer client:close()
+      for _ = 1, 2 do
+        local response = client:request(method, fixture:url() .. "/framing")
+        defer response:close()
+        reuse_assert_response(response, 1, expected)
+        if name == "chunked_trailers" then
+          test.assert(response.headers:get("X-Trailer") == "done",
+                      "reused client lost response trailers")
+        end
+      end
+      test.assert(#fixture.connections == 1, "complete responses were not reused")
+    end)
+  end)
+end
+
+function test_client_reuse_complete_response_framing(context: test.Context)
+  add_reuse_framing(context, "fixed", "GET", "200 OK", "Content-Length: 4\r\n", "a\0bc", "a\0bc")
+  add_reuse_framing(context, "chunked_trailers", "GET", "200 OK", "Transfer-Encoding: chunked\r\n",
+                   "2\r\na\0\r\n2\r\nbc\r\n0\r\nX-Trailer: done\r\n\r\n", "a\0bc")
+  add_reuse_framing(context, "head", "HEAD", "200 OK", "Content-Length: 999\r\n", "", "")
+  add_reuse_framing(context, "empty", "GET", "200 OK", "Content-Length: 0\r\n", "", "")
+  add_reuse_framing(context, "no_content", "GET", "204 No Content", "", "", "")
+  add_reuse_framing(context, "not_modified", "GET", "304 Not Modified",
+                   "Content-Length: 999\r\n", "", "")
+end
+
+function test_client_reuse_default_get_and_request(_: test.Context)
+  run_reuse_case(function ()
+    local base, owners = reuse_http_server(false, 25700, reuse_fixed_handler)
+    defer http.close_idle_connections()
+    local first = http.get(base .. "/first")
+    defer first:close()
+    reuse_assert_response(first, 1, "ok")
+    local second = http.request("POST", base .. "/second", nil, "request")
+    defer second:close()
+    reuse_assert_response(second, 1, "ok")
+    test.assert(#owners == 1, "module GET and request used different pools")
+  end)
+end
+
+function test_client_reuse_verified_https_and_ca_isolation(_: test.Context)
+  run_reuse_case(function ()
+    local base, owners = reuse_http_server(true, 25800, reuse_fixed_handler)
+    local client = http.Client()
+    defer client:close()
+    local copied_ca = fs.tmpname()
+    defer fs.unlink(copied_ca)
+    fs.write_file(copied_ca, fs.read_file(support.TRUST_ROOT))
+    local first = client:get(base .. "/first", nil, support.TRUST_ROOT)
+    defer first:close()
+    reuse_assert_response(first, 1, "ok")
+    local second = client:get(base .. "/second", nil, support.TRUST_ROOT)
+    defer second:close()
+    reuse_assert_response(second, 1, "ok")
+    local alternate = client:get(base .. "/alternate", nil, copied_ca)
+    defer alternate:close()
+    reuse_assert_response(alternate, 2, "ok")
+    local original = client:get(base .. "/original", nil, support.TRUST_ROOT)
+    defer original:close()
+    reuse_assert_response(original, 1, "ok")
+    test.assert(#owners == 2, "HTTPS reuse crossed distinct CA selections")
+  end)
+end
+
+function test_client_reuse_isolates_clients_and_host_authority(_: test.Context)
+  run_reuse_case(function ()
+    local base, owners = reuse_http_server(false, 25900, reuse_fixed_handler)
+    local first_client = http.Client()
+    defer first_client:close()
+    local second_client = http.Client()
+    defer second_client:close()
+    local first = first_client:get(base .. "/first")
+    defer first:close()
+    reuse_assert_response(first, 1, "ok")
+    local second = second_client:get(base .. "/second")
+    defer second:close()
+    reuse_assert_response(second, 2, "ok")
+    local headers = http.headers({http.Header("Host", "example.test")})
+    local virtual = first_client:get(base .. "/virtual", headers)
+    defer virtual:close()
+    reuse_assert_response(virtual, 3, "ok")
+    local original = first_client:get(base .. "/original")
+    defer original:close()
+    reuse_assert_response(original, 1, "ok")
+    test.assert(#owners == 3, "client or effective Host identity was omitted from pooling")
+  end)
+end
+
+local function add_reuse_background_drain(context: test.Context, name: string, encrypted: boolean)
+  context:run(name, function (_: test.Context)
+    run_reuse_case(function ()
+      local close_returned = false
+      local fixture = reuse_raw_server(26000, function (connection, identity)
+        local first? = reuse_request(connection)
+        if not first then return end
+        connection:write("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n" ..
+                         "X-Test-Connection: " .. identity .. "\r\n\r\n1\r\na\r\n")
+        while not close_returned do timer.yield() end
+        connection:write("4\r\ntail\r\n0\r\nX-Drained: done\r\n\r\n")
+        for _ in reuse_request, connection do connection:write(reuse_reply(identity, "next")) end
+      end, encrypted)
+      local client = http.Client()
+      defer client:close()
+      local ca: string? = nil
+      if encrypted then ca = support.TRUST_ROOT end
+      local first = client:get(fixture:url() .. "/first", nil, ca)
+      defer first:close()
+      test.assert(first:read() == "a", "first response body prefix changed")
+      first:close()
+      close_returned = true
+      first:close()
+      test.assert(first:read() == nil, "closed response remained readable during drain")
+      reuse_wait_drained(first)
+      local next = client:get(fixture:url() .. "/next", nil, ca)
+      defer next:close()
+      reuse_assert_response(next, 1, "next")
+    end)
+  end)
+end
+
+function test_client_reuse_close_drains_in_background(context: test.Context)
+  add_reuse_background_drain(context, "http", false)
+  add_reuse_background_drain(context, "https", true)
+end
+
+function test_client_reuse_active_and_draining_responses_are_exclusive(_: test.Context)
+  run_reuse_case(function ()
+    local release_tail = false
+    local fixture = reuse_raw_server(26100, function (connection, identity)
+      if not reuse_request(connection) then return end
+      if identity == 1 then
+        connection:write("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n" ..
+                         "X-Test-Connection: 1\r\n\r\n1\r\na\r\n")
+        while not release_tail do timer.yield() end
+        connection:write("1\r\nb\r\n0\r\nX-Drained: done\r\n\r\n")
+      else
+        connection:write(reuse_reply(identity, "other"))
+      end
+      for _ in reuse_request, connection do connection:write(reuse_reply(identity, "next")) end
+    end)
+    local client = http.Client()
+    defer client:close()
+    local first = client:get(fixture:url() .. "/active")
+    defer first:close()
+    test.assert(first:read() == "a", "active response body prefix changed")
+    local active = client:get(fixture:url() .. "/while-active")
+    defer active:close()
+    test.assert(active.headers:get("X-Test-Connection") == "2",
+                "a second request borrowed an active response's connection")
+    first:close()
+    local draining = client:get(fixture:url() .. "/while-draining")
+    defer draining:close()
+    test.assert(draining.headers:get("X-Test-Connection") == "3",
+                "a second request borrowed a draining response's connection")
+    release_tail = true
+    reuse_wait_drained(first)
+    local next = client:get(fixture:url() .. "/after-drain")
+    defer next:close()
+    reuse_assert_response(next, 1, "next")
+    reuse_assert_response(active, 2, "other")
+    reuse_assert_response(draining, 3, "other")
+  end)
+end
+
+local function add_reuse_drain_timeout(context: test.Context, name: string, encrypted: boolean)
+  context:run(name, function (_: test.Context)
+    run_reuse_case(function ()
+      local saw_eof = false
+      local fixture = reuse_raw_server(26200, function (connection, identity)
+        if not reuse_request(connection) then return end
+        if identity == 1 then
+          connection:write("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\na")
+          do
+            test.assert(connection:read() == nil, "timed-out drain sent another request")
+          catch
+            if not encrypted or not (error is ssl.Error) or
+               (error as ssl.Error).name ~= "TLS_TRUNCATED_EOF" then raise end
+          end
+          saw_eof = true
+          return
+        end
+        connection:write(reuse_reply(identity, "next"))
+        for _ in reuse_request, connection do connection:write(reuse_reply(identity, "next")) end
+      end, encrypted)
+      local client = http.Client()
+      defer client:close()
+      local ca: string? = nil
+      if encrypted then ca = support.TRUST_ROOT end
+      local first = client:get(fixture:url() .. "/stalled", nil, ca)
+      defer first:close()
+      first:close()
+      while not saw_eof do timer.yield() end
+      local next = client:get(fixture:url() .. "/next", nil, ca)
+      defer next:close()
+      reuse_assert_response(next, 2, "next")
+    end)
+  end)
+end
+
+function test_client_reuse_drain_timeout_retires_transport(context: test.Context)
+  add_reuse_drain_timeout(context, "http", false)
+  add_reuse_drain_timeout(context, "https", true)
+end
+
+local function add_reuse_drain_limit(context: test.Context, name: string, size: integer,
+                                    expected_identity: integer)
+  context:run(name, function (_: test.Context)
+    run_reuse_case(function ()
+      local completed = false
+      local fixture = reuse_raw_server(26300, function (connection, identity)
+        if not reuse_request(connection) then return end
+        if identity == 1 then
+          connection:write("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n" ..
+                           "X-Test-Connection: 1\r\n\r\n" ..
+                           string.format("%x", size) .. "\r\n" .. string.rep("x", size) ..
+                           "\r\n0\r\nX-Drained: done\r\n\r\n")
+          local request? = reuse_request(connection)
+          completed = true
+          if not request then return end
+          connection:write(reuse_reply(identity, "next"))
+        else
+          connection:write(reuse_reply(identity, "next"))
+        end
+        for _ in reuse_request, connection do connection:write(reuse_reply(identity, "next")) end
+      end)
+      local client = http.Client()
+      defer client:close()
+      local first = client:get(fixture:url() .. "/large")
+      defer first:close()
+      first:close()
+      if expected_identity == 1 then
+        reuse_wait_drained(first)
+      else
+        while not completed do timer.yield() end
+      end
+      local next = client:get(fixture:url() .. "/next")
+      defer next:close()
+      reuse_assert_response(next, expected_identity, "next")
+    end)
+  end)
+end
+
+function test_client_reuse_drain_byte_limit(context: test.Context)
+  add_reuse_drain_limit(context, "at_256_kib", 262144, 1)
+  add_reuse_drain_limit(context, "over_256_kib", 262145, 2)
+end
+
+local function add_reuse_nonpersistent(context: test.Context, name: string,
+                                     request_close: boolean, response_headers: string)
+  context:run(name, function (_: test.Context)
+    run_reuse_case(function ()
+      local saw_eof = false
+      local fixture = reuse_raw_server(26400, function (connection, identity)
+        if not reuse_request(connection) then return end
+        if identity == 1 then
+          connection:write("HTTP/1.1 200 OK\r\n" .. response_headers .. "\r\n")
+          test.assert(connection:read() == nil, "nonpersistent response was reused")
+          saw_eof = true
+          return
+        end
+        connection:write(reuse_reply(identity, "next"))
+        for _ in reuse_request, connection do connection:write(reuse_reply(identity, "next")) end
+      end)
+      local client = http.Client()
+      defer client:close()
+      local headers = http.headers()
+      if request_close then headers:add("Connection", "keep-alive, CLOSE") end
+      local first = client:get(fixture:url() .. "/discard", headers)
+      defer first:close()
+      first:close()
+      while not saw_eof do timer.yield() end
+      local next = client:get(fixture:url() .. "/next")
+      defer next:close()
+      reuse_assert_response(next, 2, "next")
+    end)
+  end)
+end
+
+function test_client_reuse_skips_nonpersistent_drain(context: test.Context)
+  add_reuse_nonpersistent(context, "request_close", true, "Content-Length: 20\r\n")
+  add_reuse_nonpersistent(context, "response_close", false,
+                         "Content-Length: 20\r\nConnection: keep-alive, close\r\n")
+  add_reuse_nonpersistent(context, "close_delimited", false, "X-Framing: eof\r\n")
+end
+
+local function add_reuse_invalid_tail(context: test.Context, name: string, wire: string)
+  context:run(name, function (_: test.Context)
+    run_reuse_case(function ()
+      local retired = false
+      local fixture = reuse_raw_server(26500, function (connection, identity)
+        if not reuse_request(connection) then return end
+        if identity == 1 then
+          connection:write(wire)
+          test.assert(connection:read() == nil, "invalid response tail was reused")
+          retired = true
+          return
+        end
+        connection:write(reuse_reply(identity, "next"))
+        for _ in reuse_request, connection do connection:write(reuse_reply(identity, "next")) end
+      end)
+      local client = http.Client()
+      defer client:close()
+      local first = client:get(fixture:url() .. "/bad-tail")
+      defer first:close()
+      first:close()
+      while not retired do timer.yield() end
+      local next = client:get(fixture:url() .. "/next")
+      defer next:close()
+      reuse_assert_response(next, 2, "next")
+    end)
+  end)
+end
+
+function test_client_reuse_rejects_invalid_drained_tails(context: test.Context)
+  add_reuse_invalid_tail(context, "malformed_chunk",
+    "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\nZ\r\n")
+  add_reuse_invalid_tail(context, "unsolicited_response",
+    "HTTP/1.1 200 OK\r\nContent-Length: 1\r\n\r\nx" ..
+    "HTTP/1.1 200 OK\r\nContent-Length: 8\r\n\r\npoisoned")
+end
+
+function test_client_reuse_close_idle_connections_and_client_lifetime(_: test.Context)
+  run_reuse_case(function ()
+    local base, owners = reuse_http_server(false, 26600, reuse_fixed_handler)
+    local client = http.Client()
+    defer client:close()
+    local first = client:get(base .. "/first")
+    defer first:close()
+    reuse_assert_response(first, 1, "ok")
+    client:close_idle_connections()
+    local active = client:get(base .. "/active")
+    defer active:close()
+    test.assert(active.headers:get("X-Test-Connection") == "2",
+                "close_idle_connections left an idle connection available")
+    client:close()
+    reuse_assert_response(active, 2, "ok")
+    client:close()
+    local rejected = false
+    do
+      local unexpected = client:get(base .. "/closed")
+      defer unexpected:close()
+    catch
+      rejected = true
+    end
+    test.assert(rejected, "closed client accepted a new request")
+    while not owners[2]:status():has_finished() do timer.yield() end
+    test.assert(#owners == 2, "closed client reopened a connection")
+  end)
+end
+
+function test_client_reuse_client_close_aborts_pending_drain(_: test.Context)
+  run_reuse_case(function ()
+    local saw_eof = false
+    local fixture = reuse_raw_server(26700, function (connection, _: integer)
+      if not reuse_request(connection) then return end
+      connection:write("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\na")
+      test.assert(connection:read() == nil, "client close wrote unexpected bytes")
+      saw_eof = true
+    end)
+    local client = http.Client()
+    defer client:close()
+    local response = client:get(fixture:url() .. "/drain")
+    defer response:close()
+    response:close()
+    timer.yield()
+    client:close()
+    while not saw_eof do timer.yield() end
+    test.assert(response:read() == nil, "client close revived its drained response")
+  end)
+end
+
+function test_client_reuse_close_interrupts_concurrent_reader(_: test.Context)
+  run_reuse_case(function ()
+    local fixture = reuse_raw_server(26800, function (connection, _: integer)
+      if not reuse_request(connection) then return end
+      connection:write("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\na")
+      test.assert(connection:read() == nil, "closed reader connection received another request")
+    end)
+    local client = http.Client()
+    defer client:close()
+    local response = client:get(fixture:url() .. "/read")
+    defer response:close()
+    test.assert(response:read() == "a", "concurrent-reader prefix changed")
+    local reading = async.run<|value, value|>(function (): value
+      do response:read() catch end
+      return nil
+    end)
+    task_support.cleanup_task(reading, "HTTP reuse pending reader cleanup")
+    while reading:status():as_string() == "ready" do timer.yield() end
+    test.assert(reading:status():as_string() == "waiting", "reader was not blocked")
+    response:close()
+    test.assert(async.join(reading):has_succeeded(), "response close stranded a reader")
+    test.assert(response:read() == nil, "concurrently closed response remained readable")
+  end)
+end
+
+function test_client_reuse_retries_stale_idle_get_once(_: test.Context)
+  run_reuse_case(function ()
+    local retired = false
+    local fixture = reuse_raw_server(26900, function (connection, identity)
+      if not reuse_request(connection) then return end
+      connection:write(reuse_reply(identity, "ok"))
+      if identity == 1 then
+        -- The socket is healthy when borrowed. Fail only after the next
+        -- request was actually sent, so this exercises replay rather than a
+        -- readiness check discarding a connection before transmission.
+        test.assert(reuse_request(connection) ~= nil, "retry peer did not receive the second request")
+        connection:close()
+        retired = true
+        return
+      end
+      for _ in reuse_request, connection do connection:write(reuse_reply(identity, "ok")) end
+    end)
+    local client = http.Client()
+    defer client:close()
+    local first = client:get(fixture:url() .. "/first")
+    defer first:close()
+    reuse_assert_response(first, 1, "ok")
+    local second = client:get(fixture:url() .. "/second")
+    defer second:close()
+    reuse_assert_response(second, 2, "ok")
+    test.assert(retired and #fixture.connections == 2, "stale GET was replayed more than once")
+  end)
+end
+
+local function add_reuse_no_retry(context: test.Context, name: string,
+                                 method: string, body: string?, partial: boolean)
+  context:run(name, function (_: test.Context)
+    run_reuse_case(function ()
+      local first_request_done = false
+      local fixture = reuse_raw_server(27000, function (connection, identity)
+        if not reuse_request(connection) then return end
+        connection:write(reuse_reply(identity, "ok"))
+        first_request_done = true
+        if identity == 1 then
+          if not reuse_request(connection) then return end
+          if partial then connection:write("HTTP/1.1 200") end
+        end
+      end)
+      local client = http.Client()
+      defer client:close()
+      local first = client:get(fixture:url() .. "/prime")
+      defer first:close()
+      reuse_assert_response(first, 1, "ok")
+      while not first_request_done do timer.yield() end
+      local rejected = false
+      do
+        local response = client:request(method, fixture:url() .. "/must-not-replay", nil, body)
+        defer response:close()
+        support.read_response(response)
+      catch
+        rejected = true
+      end
+      test.assert(rejected, "unsafe or partially answered request unexpectedly replayed")
+      test.assert(#fixture.connections == 1, "request was replayed on a fresh connection")
+    end)
+  end)
+end
+
+function test_client_reuse_does_not_retry_unsafe_or_partial_requests(context: test.Context)
+  add_reuse_no_retry(context, "post", "POST", nil, false)
+  add_reuse_no_retry(context, "get_with_body", "GET", "", false)
+  add_reuse_no_retry(context, "partial_response", "GET", nil, true)
+end
+
+function test_client_reuse_default_pool_does_not_cross_runtimes(_: test.Context)
+  local previous: http.ClientResponse? = nil
+  run_reuse_case(function ()
+    local fixture = reuse_raw_server(27100, function (connection, identity)
+      if not reuse_request(connection) then return end
+      connection:write(reuse_reply(identity, "first"))
+      for _ in reuse_request, connection do connection:write(reuse_reply(identity, "stale")) end
+    end)
+    local response = http.get(fixture:url() .. "/first")
+    defer response:close()
+    previous = response
+    reuse_assert_response(response, 1, "first")
+    -- Deliberately leave the default client's idle entry for Runtime teardown.
+  end)
+  run_reuse_case(function ()
+    local fixture = reuse_raw_server(27100, function (connection, identity)
+      for _ in reuse_request, connection do connection:write(reuse_reply(identity, "fresh")) end
+    end)
+    defer http.close_idle_connections()
+    local response = http.get(fixture:url() .. "/next-runtime")
+    defer response:close()
+    reuse_assert_response(response, 1, "fresh")
+    test.assert(previous:read() == nil, "old response reopened in a later Runtime")
+  end)
+end
+
+local function add_reuse_late_input(context: test.Context, name: string, encrypted: boolean)
+  context:run(name, function (_: test.Context)
+    run_reuse_case(function ()
+      local send_poison = false
+      local poison_sent = false
+      local retired = false
+      local fixture = reuse_raw_server(27200, function (connection, identity)
+        if not reuse_request(connection) then return end
+        if identity == 1 then
+          connection:write(reuse_reply(identity, "first"))
+          while not send_poison do timer.yield() end
+          connection:write(reuse_reply(999, "poisoned"))
+          poison_sent = true
+          -- TLS retirement deliberately aborts the unauthenticated extra input.
+          do
+            test.assert(reuse_request(connection) == nil,
+                        "unsolicited input reached a subsequent request")
+          catch
+            if not encrypted or not (error is ssl.Error) or
+               (error as ssl.Error).name ~= "TLS_TRUNCATED_EOF" then raise end
+          end
+          retired = true
+          return
+        end
+        connection:write(reuse_reply(identity, "actual"))
+        do for _ in reuse_request, connection do connection:write(reuse_reply(identity, "actual")) end catch end
+      end, encrypted)
+      local client = http.Client()
+      defer client:close()
+      local ca: string? = nil
+      if encrypted then ca = support.TRUST_ROOT end
+      local first = client:get(fixture:url() .. "/first", nil, ca)
+      defer first:close()
+      reuse_assert_response(first, 1, "first")
+      send_poison = true
+      while not poison_sent do timer.yield() end
+      -- A completed TLS write need not have reached the receiver yet. Wait
+      -- for the idle observer's retirement instead of assuming delivery timing.
+      while not retired do timer.yield() end
+      local second = client:get(fixture:url() .. "/second", nil, ca)
+      defer second:close()
+      reuse_assert_response(second, 2, "actual")
+      test.assert(#fixture.connections == 2, "idle unsolicited input was accepted as a response")
+    end)
+  end)
+end
+
+function test_client_reuse_rejects_late_idle_input(context: test.Context)
+  add_reuse_late_input(context, "http", false)
+  add_reuse_late_input(context, "https", true)
+end
+
+function test_client_reuse_public_headers_cannot_enable_closed_connection(_: test.Context)
+  run_reuse_case(function ()
+    local retired = false
+    local fixture = reuse_raw_server(27300, function (connection, identity)
+      if not reuse_request(connection) then return end
+      if identity == 1 then
+        connection:write("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n" ..
+                         "Connection: close\r\n\r\na")
+        test.assert(connection:read() == nil, "mutated headers enabled a closing connection")
+        retired = true
+        return
+      end
+      connection:write(reuse_reply(identity, "next"))
+      for _ in reuse_request, connection do connection:write(reuse_reply(identity, "next")) end
+    end)
+    local client = http.Client()
+    defer client:close()
+    local first = client:get(fixture:url() .. "/closing")
+    defer first:close()
+    first.headers:remove("Connection")
+    first.headers:set("Content-Length", "0")
+    first:close()
+    while not retired do timer.yield() end
+    local next = client:get(fixture:url() .. "/next")
+    defer next:close()
+    reuse_assert_response(next, 2, "next")
+  end)
+end
+
+function test_client_reuse_mutable_headers_preserve_original_framing(_: test.Context)
+  run_reuse_case(function ()
+    local fixture = reuse_raw_server(27400, function (connection, identity)
+      for _ in reuse_request, connection do connection:write(reuse_reply(identity, "ab")) end
+    end)
+    local client = http.Client()
+    defer client:close()
+    local first = client:get(fixture:url() .. "/first")
+    defer first:close()
+    test.assert(first:read_until("ab", true) == "", "response body framing changed")
+    first.headers:set("Content-Length", "9999999999999999999999999999999999999999")
+    first.headers:set("Connection", "close")
+    first:close()
+    local second = client:get(fixture:url() .. "/second")
+    defer second:close()
+    reuse_assert_response(second, 1, "ab")
+  end)
+end
+
+function test_client_reuse_does_not_repeat_failed_get_retry(_: test.Context)
+  run_reuse_case(function ()
+    local fixture = reuse_raw_server(27500, function (connection, identity)
+      if not reuse_request(connection) then return end
+      if identity == 1 then
+        connection:write(reuse_reply(identity, "prime"))
+        test.assert(reuse_request(connection) ~= nil, "retry peer did not receive the second request")
+      end
+      -- Both the first reused attempt and its one fresh retry receive EOF.
+    end)
+    local client = http.Client()
+    defer client:close()
+    local first = client:get(fixture:url() .. "/prime")
+    defer first:close()
+    reuse_assert_response(first, 1, "prime")
+    local rejected = false
+    do
+      local second = client:get(fixture:url() .. "/retry")
+      defer second:close()
+    catch
+      rejected = true
+    end
+    test.assert(rejected and #fixture.connections == 2,
+                "client repeated a failed fresh GET retry")
+  end)
+end
+
+function test_client_reuse_origin_port_isolation(_: test.Context)
+  run_reuse_case(function ()
+    local first_peer = reuse_raw_server(27600, function (connection, identity)
+      for _ in reuse_request, connection do connection:write(reuse_reply(identity, "first-origin")) end
+    end)
+    local second_peer = reuse_raw_server(27700, function (connection, identity)
+      for _ in reuse_request, connection do connection:write(reuse_reply(identity, "second-origin")) end
+    end)
+    local client = http.Client()
+    defer client:close()
+    local first = client:get(first_peer:url() .. "/first")
+    defer first:close()
+    reuse_assert_response(first, 1, "first-origin")
+    local second = client:get(second_peer:url() .. "/second")
+    defer second:close()
+    reuse_assert_response(second, 1, "second-origin")
+    local original = client:get(first_peer:url() .. "/original")
+    defer original:close()
+    reuse_assert_response(original, 1, "first-origin")
+    test.assert(#first_peer.connections == 1 and #second_peer.connections == 1,
+                "pool reused across ports or lost an origin's idle connection")
+  end)
+end
+
+local function add_reuse_tls_retirement(context: test.Context, mode: string)
+  context:run(mode, function (_: test.Context)
+    run_reuse_case(function ()
+      local outcome = "pending"
+      local fixture = reuse_raw_server(27800, function (connection, identity)
+        if not reuse_request(connection) then return end
+        local close_header = ""
+        if mode == "response_close" then close_header = "Connection: close\r\n" end
+        connection:write("HTTP/1.1 200 OK\r\nX-Test-Connection: " .. identity ..
+                         "\r\nContent-Length: 2\r\n" .. close_header .. "\r\nok")
+        do
+          if connection:read() == nil then outcome = "clean" else outcome = "unexpected request" end
+        catch
+          if error is ssl.Error then outcome = (error as ssl.Error).name
+          else outcome = string.tostring(error) end
+        end
+      end, true)
+      local client = http.Client()
+      defer client:close()
+      local response = client:get(fixture:url() .. "/close", nil, support.TRUST_ROOT)
+      defer response:close()
+      reuse_assert_response(response, 1, "ok")
+      if mode == "client_close" then client:close()
+      elseif mode == "idle_close" then client:close_idle_connections() end
+      while outcome == "pending" do timer.yield() end
+      test.assert(outcome == "clean", "normal HTTPS retirement produced " .. outcome)
+    end)
+  end)
+end
+
+function test_client_reuse_healthy_tls_retirement_is_clean(context: test.Context)
+  add_reuse_tls_retirement(context, "client_close")
+  add_reuse_tls_retirement(context, "idle_close")
+  add_reuse_tls_retirement(context, "response_close")
+end
+
+local function add_reuse_idle_retirement(context: test.Context, name: string, encrypted: boolean)
+  context:run(name, function (_: test.Context)
+    run_reuse_case(function ()
+      local send_input = false
+      local retired = false
+      local fixture = reuse_raw_server(27900, function (connection, identity)
+        if not reuse_request(connection) then return end
+        connection:write(reuse_reply(identity, "first"))
+        while not send_input do timer.yield() end
+        connection:write(reuse_reply(999, "unsolicited"))
+        do
+          test.assert(connection:read() == nil,
+                      "idle connection received another request before retirement")
+        catch
+          if not encrypted or not (error is ssl.Error) or
+             (error as ssl.Error).name ~= "TLS_TRUNCATED_EOF" then raise end
+        end
+        retired = true
+      end, encrypted)
+      local client = http.Client()
+      defer client:close()
+      local ca: string? = nil
+      if encrypted then ca = support.TRUST_ROOT end
+      local response = client:get(fixture:url() .. "/first", nil, ca)
+      defer response:close()
+      reuse_assert_response(response, 1, "first")
+      send_input = true
+      -- No subsequent request or explicit close triggers retirement. Incoming
+      -- bytes alone must close the idle transport, preventing an unbounded queue.
+      while not retired do timer.yield() end
+      test.assert(#fixture.connections == 1, "idle retirement opened another connection")
+    end)
+  end)
+end
+
+function test_client_reuse_idle_input_retires_without_next_request(context: test.Context)
+  add_reuse_idle_retirement(context, "http", false)
+  add_reuse_idle_retirement(context, "https", true)
+end
+
+local function add_reuse_post_runtime_close(context: test.Context, name: string, encrypted: boolean)
+  context:run(name, function (_: test.Context)
+    local retained: http.ClientResponse? = nil
+    defer if retained ~= nil then retained:close() end
+    run_reuse_case(function ()
+      local fixture = reuse_raw_server(28000, function (connection, identity)
+        if not reuse_request(connection) then return end
+        connection:write(reuse_reply(identity, "ok"))
+        for _ in reuse_request, connection do connection:write(reuse_reply(identity, "next")) end
+      end, encrypted)
+      local client = http.Client()
+      local ca: string? = nil
+      if encrypted then ca = support.TRUST_ROOT end
+      local response = client:get(fixture:url() .. "/retained", nil, ca)
+      retained = response
+      test.assert(response:read_until("ok", false) == "ok", "final response chunk changed")
+      -- Keep the complete response caller-owned instead of reading EOF. The
+      -- Runtime retires its handles and Client before the caller closes it.
+    end)
+    retained:close()
+    retained:close()
+    test.assert(retained:read() == nil, "response reopened after its Runtime retired")
+  end)
+end
+
+function test_client_reuse_response_close_after_runtime_retirement(context: test.Context)
+  add_reuse_post_runtime_close(context, "http", false)
+  add_reuse_post_runtime_close(context, "https", true)
+end

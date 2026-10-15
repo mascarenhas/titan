@@ -53,6 +53,7 @@ local record Parser
   local body_excess: string
   local body_chunks: {string}
   local body_index: integer
+  local body_consumed: integer
   local parsed_headers: Headers
   local target_text: string
   local reason_text: string
@@ -67,6 +68,7 @@ local record Parser
   local message_complete: boolean
   local transport_eof: boolean
   local input_seen: boolean
+  local input_received: boolean
   local paused: boolean
   local closed: boolean
 end
@@ -357,6 +359,7 @@ local function new_parser(connection: io.ReaderWriterCloser,
     body_excess = "",
     body_chunks = {},
     body_index = 1,
+    body_consumed = 0,
     parsed_headers = headers(nil),
     target_text = "",
     reason_text = "",
@@ -371,6 +374,7 @@ local function new_parser(connection: io.ReaderWriterCloser,
     message_complete = false,
     transport_eof = false,
     input_seen = false,
+    input_received = false,
     paused = false,
     closed = false,
   }
@@ -467,7 +471,10 @@ local function execute_input(parser: Parser, input: string)
   -- Empty calls advance llhttp epsilon transitions and are not transport
   -- input. Every nonempty input means EOF while still awaiting headers is not
   -- idle, even when llhttp ignored it as a leading empty request line.
-  if #input > 0 then parser.input_seen = true end
+  if #input > 0 then
+    parser.input_seen = true
+    parser.input_received = true
+  end
   parser.callback_state = L
   parser.callback_failed = false
   parser.callback_error = nil
@@ -607,6 +614,7 @@ local function parser_read(parser: Parser): string?
   if #parser.body_excess > 0 then
     local result = parser.body_excess
     parser.body_excess = ""
+    parser.body_consumed = parser.body_consumed + #result
     return result
   end
   while parser.body_index > #parser.body_chunks do
@@ -614,6 +622,7 @@ local function parser_read(parser: Parser): string?
     advance_parser(parser)
   end
   local result = parser.body_chunks[parser.body_index]
+  parser.body_consumed = parser.body_consumed + #result
   parser.body_index = parser.body_index + 1
   if parser.body_index > #parser.body_chunks then
     parser.body_chunks = {}
@@ -646,6 +655,7 @@ local function parser_read_until(parser: Parser, delimiter: string,
         builder:write(string.sub(boundary, 1, result_end))
       end
       parser.body_excess = string.sub(boundary, match_end + 1)
+      parser.body_consumed = parser.body_consumed - #parser.body_excess
       return builder:drain()
     end
     local keep = #delimiter - 1
@@ -671,6 +681,7 @@ local function parser_reset_message(parser: Parser)
   parser.body_excess = ""
   parser.body_chunks = {}
   parser.body_index = 1
+  parser.body_consumed = 0
   parser.parsed_headers = headers(nil)
   parser.target_text = ""
   parser.reason_text = ""

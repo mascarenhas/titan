@@ -1,0 +1,451 @@
+-- Idle HTTP connections belong to one Client and one async Runtime. Leases
+-- leave the idle Array before any I/O, so no two exchanges share a stream.
+local const CLIENT_MAX_IDLE = 100
+local const CLIENT_MAX_IDLE_PER_KEY = 2
+local const CLIENT_IDLE_NS = 90000000000
+local const CLIENT_DRAIN_NS = 50000000
+local const CLIENT_DRAIN_BYTES = 262144
+local const CLIENT_CLOSE_MS = 50
+
+local record ClientConnection
+  transport: Transport
+  has_pending_input: function (): (boolean)
+  add_input_listener: function (function (): ()): (function (): ())
+  remove_input_listener: (function (): ())?
+  secure: boolean
+  key: string
+  idle_since: integer
+end
+
+local record ClientRetirement
+  client: Client
+  lease: ClientConnection
+  task: async.Task<|nil, value|>?
+end
+
+local record ClientDrain
+  client: Client
+  lease: ClientConnection
+  parser: Parser
+  started: integer
+  task: async.Task<|nil, value|>?
+end
+
+--- An HTTP/1.1 client owning a bounded pool of idle TCP and TLS connections.
+-- @usage standard-library-http.md#client-requests
+record Client
+  local loop: uv.loop_t?
+  local idle: {ClientConnection}
+  local drains: {ClientDrain}
+  local retirements: {ClientRetirement}
+  local remove_close_listener: (function (): ())?
+  local closed: boolean
+end
+
+local default_client: Client? = nil
+
+--- Create a client; its first request binds it to the current async Runtime.
+-- @return A client whose close method retires its pooled and draining connections.
+-- @usage standard-library-http.md#client-requests
+function Client.new(): Client
+  return { loop = nil, idle = {}, drains = {}, retirements = {}, remove_close_listener = nil,
+    closed = false }
+end
+
+local function Client:bind()
+  async.checkpoint()
+  if self.closed then raise "HTTP Client is closed" end
+  local loop = async.current_loop()
+  if self.loop == nil then
+    self.remove_close_listener = async.add_close_listener(function ()
+      -- Native handles and every worker are already retired. Idle TCP close
+      -- and TLS abort now release only synchronous retained owner state.
+      defer if default_client == self then default_client = nil end
+      self:close()
+    end)
+    self.loop = loop
+  elseif self.loop ~= loop then
+    raise "HTTP Client belongs to a different async Runtime"
+  end
+end
+
+-- Length prefixes preserve exact Host/CA spellings without ambiguous keys.
+local function client_key_part(text: string): string
+  return #text .. ":" .. text
+end
+
+local function client_pool_key(parsed: url.Url, headers: Headers,
+                                ca_file: string?): string
+  local result = client_key_part(parsed.scheme) ..
+    client_key_part(parsed.host) .. client_key_part("" .. parsed.port) ..
+    client_key_part(headers:get("Host"))
+  if parsed.scheme == "https" then
+    if ca_file ~= nil then return result .. "file:" .. client_key_part(ca_file) end
+    return result .. "default"
+  end
+  return result
+end
+
+local function ClientConnection:stop_watching()
+  local remove? = self.remove_input_listener
+  self.remove_input_listener = nil
+  if remove ~= nil then remove() end
+end
+
+local function Client:forget_idle(lease: ClientConnection)
+  lease:stop_watching()
+  local retained: {ClientConnection} = {}
+  for index = 1, #self.idle do
+    local current = self.idle[index]
+    if current ~= lease then retained[#retained + 1] = current end
+  end
+  self.idle = retained
+end
+
+local function Client:forget_retirement(retirement: ClientRetirement)
+  local retained: {ClientRetirement} = {}
+  for index = 1, #self.retirements do
+    local current = self.retirements[index]
+    if current ~= retirement then retained[#retained + 1] = current end
+  end
+  self.retirements = retained
+end
+
+local function ClientRetirement:run(): nil
+  defer self.client:forget_retirement(self)
+  self.lease.transport.abort()
+  return nil
+catch
+  return nil
+end
+
+local function Client:watch_idle(lease: ClientConnection)
+  local adopted = false
+  defer if not adopted then
+    self:forget_idle(lease)
+    do lease.transport.abort() catch end
+  end
+  lease.remove_input_listener = lease.add_input_listener(function ()
+    -- No Task waits on idle input. One receive notification removes this
+    -- lease before scheduling can allow another request to acquire it.
+    lease:stop_watching()
+    if async.is_closing() then return end
+    -- Both roots survive until scheduling succeeds. Tracking also lets
+    -- Client.close retire a worker cancelled before its first instruction.
+    local retirement = ClientRetirement(self, lease, nil)
+    self.retirements[#self.retirements + 1] = retirement
+    do
+      retirement.task = async.run<|nil, value|>(function (): nil
+        return retirement:run()
+      end)
+    catch
+      self:forget_retirement(retirement)
+      raise
+    end
+    self:forget_idle(lease)
+  end)
+  adopted = true
+end
+
+-- Healthy TLS retirement preserves close_notify without letting a stalled
+-- peer hold pool cleanup open. Interrupted or dirty streams use abort directly.
+local function ClientConnection:close_idle()
+  self:stop_watching()
+  if not self.secure or self.has_pending_input() or async.is_closing() then
+    self.transport.abort()
+    return
+  end
+  local closer: async.Task<|nil, value|>? = nil
+  local completed = false
+  defer if not completed then
+    do self.transport.abort() catch end
+    if closer ~= nil then
+      closer:cancel(async.CancellationReason.simple("HTTP TLS close stopped"))
+      await_terminal_cleanup(closer)
+    end
+  end
+  closer = async.run<|nil, value|>(function (): nil
+    self.transport.connection:close()
+    return nil
+  end)
+  local deadline = async.run<|nil, value|>(function (): nil
+    timer.sleep(CLIENT_CLOSE_MS)
+    return nil
+  end)
+  defer do
+    deadline:cancel(async.CancellationReason.simple("HTTP TLS close finished"))
+    await_terminal_cleanup(deadline)
+  end
+  case async.race_two(closer, deadline)
+  when first(status) then
+    case status
+    when succeeded(_) then completed = true
+    when failed(failure) then failure:raise()
+    when cancelled(reason) then raise reason
+    end
+  end
+end
+
+local function Client:acquire(key: string): ClientConnection?
+  local now = uv.hrtime()
+  local retained: {ClientConnection} = {}
+  local expired: {ClientConnection} = {}
+  local selected: ClientConnection? = nil
+  local handed_off = false
+  defer if selected ~= nil and not handed_off then
+    do selected.transport.abort() catch end
+  end
+  -- Prefer the newest idle connection. All pool mutation precedes closes,
+  -- which may suspend and allow another request to use this Client.
+  for index = #self.idle, 1, -1 do
+    local lease = self.idle[index]
+    if now - lease.idle_since >= CLIENT_IDLE_NS or lease.has_pending_input() then
+      lease:stop_watching()
+      expired[#expired + 1] = lease
+    elseif selected == nil and lease.key == key then
+      lease:stop_watching()
+      selected = lease
+    else
+      retained[#retained + 1] = lease
+    end
+  end
+  -- Preserve oldest-to-newest order for the next LIFO acquisition.
+  self.idle = {}
+  for index = #retained, 1, -1 do
+    self.idle[#self.idle + 1] = retained[index]
+  end
+  for index = 1, #expired do
+    do expired[index]:close_idle() catch end
+  end
+  -- Closing expired TLS streams can suspend; cancellation or Client.close
+  -- must not strand a lease already removed from the idle Array.
+  self:bind()
+  handed_off = true
+  return selected
+end
+
+local function Client:release(lease: ClientConnection)
+  if self.loop ~= async.current_loop() or async.is_closing() or
+      lease.has_pending_input() then
+    lease.transport.abort()
+    return
+  end
+  if self.closed then
+    lease:close_idle()
+    return
+  end
+  local now = uv.hrtime()
+  local retained: {ClientConnection} = {}
+  local expired: {ClientConnection} = {}
+  local same_key = 0
+  for index = 1, #self.idle do
+    local current = self.idle[index]
+    if now - current.idle_since >= CLIENT_IDLE_NS then
+      current:stop_watching()
+      expired[#expired + 1] = current
+    else
+      retained[#retained + 1] = current
+      if current.key == lease.key then same_key = same_key + 1 end
+    end
+  end
+  local pooled = #retained < CLIENT_MAX_IDLE and same_key < CLIENT_MAX_IDLE_PER_KEY
+  if pooled then
+    lease.idle_since = now
+    retained[#retained + 1] = lease
+  else
+    expired[#expired + 1] = lease
+  end
+  self.idle = retained
+  defer do
+    for index = 1, #expired do
+      do expired[index]:close_idle() catch end
+    end
+  end
+  if pooled then self:watch_idle(lease) end
+end
+
+local function Client:forget_drain(drain: ClientDrain)
+  local retained: {ClientDrain} = {}
+  for index = 1, #self.drains do
+    local current = self.drains[index]
+    if current ~= drain then retained[#retained + 1] = current end
+  end
+  self.drains = retained
+end
+
+local function client_parser_reusable(parser: Parser): boolean
+  -- With no pipelining, bytes following this response are unsolicited input.
+  -- Never let them become the response to a later request.
+  return parser.message_complete and parser.keep_alive and
+    not parser.transport_eof and #parser.input_excess == 0
+end
+
+local function ClientDrain:read_body(): boolean
+  local initial = self.parser.body_consumed
+  while true do
+    if uv.hrtime() - self.started >= CLIENT_DRAIN_NS then return false end
+    if #self.parser.body_excess > 0 or
+        self.parser.body_index <= #self.parser.body_chunks then
+      -- Buffered payload makes parser_read nonblocking. Check each chunk so
+      -- an over-budget result is discarded even when it arrived in one read.
+      parser_read(self.parser)
+      if self.parser.body_consumed - initial > CLIENT_DRAIN_BYTES then return false end
+    elseif self.parser.message_complete then
+      return client_parser_reusable(self.parser)
+    else
+      -- parser_read can loop over arbitrarily many framing-only inputs.
+      -- Advance one input at a time so chunk extensions and trailers cannot
+      -- bypass the absolute budget merely because the transport is buffered.
+      advance_parser(self.parser)
+    end
+  end
+catch
+  -- An abandoned body has no reader to receive a network/framing failure.
+  -- Its only valid outcome is transport retirement, never a pooled socket.
+  return false
+end
+
+local function ClientDrain:run(): nil
+  local released = false
+  defer do
+    self.client:forget_drain(self)
+    if not released then do self.lease.transport.abort() catch end end
+    close_parser(self.parser)
+  end
+  if self.client.closed or uv.hrtime() - self.started >= CLIENT_DRAIN_NS then return nil end
+  local reader = async.run<|boolean, value|>(function (): boolean
+    return self:read_body()
+  end)
+  defer do
+    if not reader:status():has_finished() then
+      -- Abort first: accepted TLS/native I/O must retire before its child can
+      -- unwind. The reader still owns parser state until terminal cleanup.
+      defer await_terminal_cleanup(reader)
+      do self.lease.transport.abort() catch end
+      reader:cancel(async.CancellationReason.simple("HTTP response drain stopped"))
+    end
+  end
+  local remaining = CLIENT_DRAIN_NS - (uv.hrtime() - self.started)
+  if remaining <= 0 then return nil end
+  local deadline = async.run<|nil, value|>(function (): nil
+    timer.sleep((remaining + 999999) // 1000000)
+    return nil
+  end)
+  defer deadline:cancel(async.CancellationReason.simple("HTTP response drain finished"))
+  case async.race_two(reader, deadline)
+  when first(status) then
+    case status
+    when succeeded(reusable) then
+      if reusable and not self.client.closed and
+          uv.hrtime() - self.started < CLIENT_DRAIN_NS then
+        close_parser(self.parser)
+        -- The lease leaves worker ownership before pool release can yield.
+        self.client:forget_drain(self)
+        released = true
+        self.client:release(self.lease)
+      end
+    end
+  end
+  return nil
+catch
+  -- Drain workers are supervised cleanup, not uncaught application failures.
+  return nil
+end
+
+local function Client:start_drain(lease: ClientConnection, parser: Parser,
+                                  started: integer)
+  local adopted = false
+  defer if not adopted then
+    close_parser(parser)
+    do lease.transport.abort() catch end
+  end
+  local drain = ClientDrain(self, lease, parser, started, nil)
+  self.drains[#self.drains + 1] = drain
+  do
+    drain.task = async.run<|nil, value|>(function (): nil return drain:run() end)
+    adopted = true
+  catch
+    self:forget_drain(drain)
+    raise
+  end
+end
+
+--- Retire connections currently idle; active responses and drains remain owned.
+-- @usage standard-library-http.md#client-requests
+function Client:close_idle_connections()
+  local idle = self.idle
+  self.idle = {}
+  for index = 1, #idle do idle[index]:stop_watching() end
+  local failure: async.Error? = nil
+  for index = 1, #idle do
+    do idle[index]:close_idle()
+    catch
+      if failure == nil then failure = async.Error(error, traceback) end
+    end
+  end
+  if failure ~= nil then failure:raise() end
+end
+
+--- Close the pool and its drain workers; active responses may finish without reuse.
+-- @usage standard-library-http.md#client-requests
+function Client:close()
+  if self.closed then return end
+  self.closed = true
+  local remove? = self.remove_close_listener
+  self.remove_close_listener = nil
+  if remove ~= nil then remove() end
+  local drains = self.drains
+  self.drains = {}
+  local retirements = self.retirements
+  self.retirements = {}
+  local failure: async.Error? = nil
+  do self:close_idle_connections()
+  catch failure = async.Error(error, traceback) end
+  for index = 1, #retirements do
+    local retirement = retirements[index]
+    do retirement.lease.transport.abort()
+    catch
+      if failure == nil then failure = async.Error(error, traceback) end
+    end
+    local task? = retirement.task
+    if task ~= nil then
+      task:cancel(async.CancellationReason.simple("HTTP Client closed"))
+      await_terminal_cleanup(task)
+    end
+  end
+  for index = 1, #drains do
+    local drain = drains[index]
+    do drain.lease.transport.abort()
+    catch
+      if failure == nil then failure = async.Error(error, traceback) end
+    end
+    local task? = drain.task
+    if task ~= nil then
+      task:cancel(async.CancellationReason.simple("HTTP Client closed"))
+      await_terminal_cleanup(task)
+    end
+    -- A worker cancelled before its first instruction never armed its defer.
+    close_parser(drain.parser)
+  end
+  if failure ~= nil then failure:raise() end
+end
+
+local function default_http_client(): Client
+  async.checkpoint()
+  local current? = default_client
+  local loop = async.current_loop()
+  if current ~= nil and current.loop == loop and not current.closed then return current end
+  local created = Client()
+  created:bind()
+  default_client = created
+  -- Normally Runtime close already cleared the default. An explicitly
+  -- closed default is likewise replaced before another request starts.
+  if current ~= nil then current:close() end
+  return created
+end
+
+--- Close the current Runtime's default client's currently idle connections.
+-- @usage standard-library-http.md#client-requests
+function close_idle_connections()
+  default_http_client():close_idle_connections()
+end

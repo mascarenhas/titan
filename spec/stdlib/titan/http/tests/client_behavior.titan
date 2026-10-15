@@ -16,8 +16,8 @@ local function start_client(first_port: integer): async.Task
       test.assert(support.contains(request_text, "Host: 127.0.0.1:" ..
                      string.tostring(port) .. "\r\n"),
             "HTTP client sent the wrong Host header")
-      test.assert(support.contains(request_text, "Connection: close\r\n"),
-            "HTTP client did not request connection close")
+      test.assert(not support.contains(request_text, "Connection: close\r\n"),
+            "HTTP client unnecessarily disabled persistent connections")
       test.assert(support.read_exact(connection, 12) == "request\0body",
             "HTTP client changed the request body")
       support.outcome = "peer-writing-response"
