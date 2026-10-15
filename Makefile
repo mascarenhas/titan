@@ -510,7 +510,7 @@ RECURSIVE_WRAPPER_GUARD = flags=$${MAKEFLAGS%% *}; case "$$flags" in -*) ;; *q*)
 	stage-titan-bootstrap install-compiler-sdk install-titan-sdk publish-titan-sdk stdlib stdlib-objects install-stdlib \
 	install publish-stdlib \
 	rock-test test rock-build \
-	examples clean clean-stdlib clean-lua clean-luarocks clean-libbacktrace clean-libuv \
+	clean clean-stdlib clean-lua clean-luarocks clean-libbacktrace clean-libuv \
 	clean-llhttp clean-sqlite3 clean-openssl \
 	distclean FORCE
 
@@ -1597,9 +1597,6 @@ test: lua luarocks ## Build/install the rock and run the suite via `luarocks tes
 		TITAN_TEST_TIMEOUT=$(call make_shell_quote,$(TITAN_TEST_TIMEOUT)) \
 		"$(PREFIX)/bin/luarocks" test
 
-examples: lua ## Compile the example Titan modules (SDL examples need SDL2 headers)
-	$(MAKE) -C examples all
-
 clean-stdlib: ## Remove standard-library artifacts before changing build inputs
 	rm -f $(STDLIB_MODULE_OBJECTS) $(STDLIB_SHIMS) $(STDLIB_PROVIDER_OUTPUTS) $(STDLIB_COMPLETION_STAMP)
 	rm -f $(STDLIB_GENERATED_FOREIGN_HEADERS) $(foreach module,$(STDLIB_MODULES),$(call stdlib_stem,$(module)).c)
@@ -1629,11 +1626,6 @@ clean: ## Remove generated build/test artifacts (keeps the Lua tree)
 	rm -rf $(STDLIB_CONTAINER).dSYM
 	rm -rf $(addsuffix .dSYM,$(STDLIB_SOS)) \
 		$(addsuffix .dSYM,$(STDLIB_QUALIFIED_SOS))
-	rm -f examples/*.c examples/*.o examples/*.so \
-		examples/utils.a examples/artisanal.a examples/sdl_quit.a \
-		examples/sdl_demo
-	rm -f testfiles/*.c testfiles/*.o testfiles/*.so \
-		testfiles/selection_sort.a testfiles/sieve.a
 	rm -f *.c *.o *.so test
 	rm -f luacov.stats.out luacov.report.out
 
