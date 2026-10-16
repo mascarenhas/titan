@@ -1,7 +1,5 @@
 local function transfer_session(source: websocket.Connection): websocket.Connection
-  local status, system? = uv.os_uname()
-  test.assert(status == 0)
-  if system.sysname == "Windows_NT" then
+  if common.is_windows() then
     local failure = expect_error(function () source:to_transfer_payload() end)
     test.assert(failure is async.OperationError and
       (failure as async.OperationError).name == "EBUSY",
@@ -67,9 +65,7 @@ function test_transfer_server_preserves_ws_and_wss_buffered_bytes(context: test.
 end
 
 function test_transfer_open_session_survives_source_state_close(context: test.Context)
-  local status, system? = uv.os_uname()
-  test.assert(status == 0)
-  if system.sysname == "Windows_NT" then
+  if common.is_windows() then
     test.skip("platform: Windows native pending reads are rejected by the transfer contract")
     return
   end

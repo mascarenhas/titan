@@ -64,10 +64,8 @@ function test_ssl_transfer_preserves_established_plaintext(context: test.Context
     local source = ssl.connect("localhost", port, support.TRUST_ROOT)
     defer source:abort()
     test.assert(source:read_until("\n", true) == "prefix")
-    local status, system? = uv.os_uname()
-    test.assert(status == 0)
     local connection = source
-    if system.sysname == "Windows_NT" then
+    if common.is_windows() then
       local refused = false
       do source:to_transfer_payload()
       catch

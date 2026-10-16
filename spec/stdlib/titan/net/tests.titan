@@ -646,9 +646,7 @@ function test_net_transfer_preserves_input_and_rejects_native_pending_reads(
     test.assert(connection:read_until("\n", true) == "prefix")
     peer:write("queued\0")
     timer.sleep(20)
-    local status, system? = uv.os_uname()
-    test.assert(status == 0)
-    if system.sysname == "Windows_NT" then
+    if common.is_windows() then
       local refused = false
       do connection:to_transfer_payload()
       catch

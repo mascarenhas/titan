@@ -1,12 +1,9 @@
 local transfer_lua = import "lua"
 local transfer_gc = import "gc"
-local transfer_uv = import "uv"
 local transfer_common = import "support.common.titan"
 
 local function require_http_native_handoff()
-  local status, system? = transfer_uv.os_uname()
-  test.assert(status == 0)
-  if system.sysname == "Windows_NT" then
+  if transfer_common.is_windows() then
     test.skip("platform: Windows native pending reads are rejected by the transfer contract")
   end
 end
