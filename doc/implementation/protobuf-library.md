@@ -8,10 +8,6 @@ shared scalar/type helpers, `encoder.titan` owns graph traversal,
 proto3 declarations. It depends on `reflect` and `string`; it does not depend
 on the asynchronous runtime or independent-state wrapper.
 
-The [performance study](protobuf-performance-results.md) records a reproducible
-production-build baseline, exclusive sampled attribution, and the limits of
-using those samples to estimate compiler-specialization gains.
-
 ## Reflection boundary
 
 The codec uses `RecordType` and `UnionType` descriptors, including nominal
@@ -78,9 +74,11 @@ field to the previous occurrence of that number. Later scalar lookups use the
 Map; message merging follows only matching links and restores their original
 encounter order. A single occurrence returns its bytes directly. The Map grows
 with encountered field numbers, never the largest numeric tag. Ordered-only
-Array and union readers allocate no index. This removes the previous full scan
-for every schema field while preserving validation of every merged occurrence's
-wire kind and encounter order for Array slots and oneof replacement.
+Array and union readers allocate no index. Building the index takes time linear
+in the parsed field count; subsequent scalar lookups take expected constant
+time, and message merging visits only matching occurrences. Every merged
+occurrence's wire kind is validated, and encounter order governs Array slots
+and oneof replacement.
 
 Schema-directed decoding requires each non-optional field, validates the wire
 kind, and constructs children before calling reflected construction for the
@@ -110,15 +108,16 @@ strings use protobuf bytes so arbitrary byte sequences round-trip.
 
 ## Integration and verification
 
-Custom record transfer hooks live in `async`, before its structural protobuf
-fallback. They do not change `serialize` or this codec's public-field policy.
-Their native packet graph preserves nested `TransferValue` policies separately
-from protobuf bytes.
+Custom record transfer hooks are dispatched by `titan.transfer` before its
+structural protobuf fallback. The codec's `serialize` entry point retains its
+public-field policy. Native transfer packet graphs preserve nested
+`TransferValue` policies separately from protobuf bytes.
 
 The Unix and Windows standard providers include `titan.protobuf`, its Lua shim,
-and its native tests in the shared inventory. Both `titan.lua` and `titan.async`
-import the codec so its loader is available in independent-state preload
-snapshots and Receiver-only applications. Explicit nominal carriers retain
+and its native tests in the shared inventory. `titan.lua` imports the codec
+directly, and `titan.async` depends on it through `titan.transfer`, so its loader
+is available in independent-state preload snapshots and Receiver-only
+applications. Explicit nominal carriers retain
 their serialized names and bytes. Closure graph reconstruction uses the codec
 to decode nominal captures against the receiving state's initialized types;
 no operation reads another state's reflection descriptors.
