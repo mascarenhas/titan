@@ -9,6 +9,7 @@ local timer = import "timer"
 local support = import "fs.test_support.titan"
 local common = import "support.common.titan"
 local task_support = import "support.async.titan"
+local transfer_lua = import "lua"
 
 local function contains_entry(entries: {string}, wanted: string): boolean
   for index = 1, #entries do
@@ -214,6 +215,12 @@ function test_fs_concurrent_reads_preserve_buffers_through_gc_and_cancellation(
                   cancelled:status():as_string() == "waiting" and
                   survivor:status():as_string() == "waiting",
                   "filesystem reads did not suspend after submission")
+      expect_failure(function () first:to_transfer_payload() end,
+                     "File transfer accepted an in-flight read")
+      expect_failure(function () second:to_transfer_payload() end,
+                     "File transfer detached an active survivor")
+      test.assert(not first:is_closed() and not second:is_closed(),
+                  "rejected File transfer detached a descriptor")
       cancelled:cancel(async.CancellationReason.simple("cancel pending read"))
       gc.collect()
       gc.collect()
@@ -1081,5 +1088,119 @@ function test_fs_close_completes_with_pending_cancellation(context: test.Context
     local cancelled, actual? = closer:status():has_cancelled()
     test.assert(cancelled and actual == reason and close_completed and file:is_closed(),
                 "pending cancellation prevented File ownership cleanup")
+  end)
+end
+
+function test_fs_file_transfer_preserves_buffer_position_and_source_invalidation(
+    context: test.Context)
+  runtime_test.run(function ()
+    local root = support.new_workspace(context)
+    local path = root .. "/transfer.dat"
+    support.cleanup_path(context, path)
+    fs.write_file(path, "head\0tail\255")
+    local source = fs.open(path, "r+")
+    defer source:close()
+    test.assert(source:read_until("\0", true) == "head")
+    local packet = async.TransferValue.from_value(source)
+    test.assert(source:is_closed() and source:read() == nil)
+    expect_failure(function () source:write("invalid") end,
+                   "transferred File remained writable")
+    source:close()
+    local target: fs.File = packet:to_value()
+    defer target:close()
+    test.assert(target:read(2) == "ta" and target:read() == "il\255",
+                "File transfer lost retained delimiter bytes")
+    test.assert(target:read() == nil)
+    test.assert(target:write("\0end") == 4)
+    target:flush()
+    target:close()
+    test.assert(fs.read_file(path) == "head\0tail\255\0end",
+                "File transfer changed the descriptor position")
+  end)
+end
+
+function test_fs_file_transfer_rejects_closed_and_malformed_payloads(
+    context: test.Context)
+  expect_failure(function () fs.File.from_transfer_payload("") end,
+                 "File accepted a missing transfer payload")
+  expect_failure(function ()
+    fs.File.from_transfer_payload(strings.char(10, 0, 18, 0))
+  end, "File accepted an invalid descriptor wire kind")
+  expect_failure(function ()
+    fs.File.from_transfer_payload(strings.char(8, 1, 18, 0))
+  end, "File accepted a closed descriptor")
+  expect_failure(function ()
+    fs.File.from_transfer_payload(strings.char(8, 128, 128, 128, 128, 16, 18, 0))
+  end, "File accepted an out-of-range descriptor")
+  expect_failure(function ()
+    fs.File.from_transfer_payload(strings.char(8, 0))
+  end, "File accepted a missing retained buffer")
+  runtime_test.run(function ()
+    local root = support.new_workspace(context)
+    local path = root .. "/closed-transfer.dat"
+    support.cleanup_path(context, path)
+    local file = fs.open(path, "w")
+    file:close()
+    expect_failure(function () file:to_transfer_payload() end,
+                   "closed File transferred a descriptor")
+  end)
+end
+
+function test_fs_file_transfer_hooks_are_synchronous(context: test.Context)
+  local source: fs.File?
+  local target: fs.File?
+  defer runtime_test.run(function ()
+    if target then target:close() end
+    if source then source:close() end
+  end)
+  runtime_test.run(function ()
+    local root = support.new_workspace(context)
+    local path = root .. "/synchronous-transfer.dat"
+    support.cleanup_path(context, path)
+    fs.write_file(path, "data")
+    source = fs.open(path, "r")
+  end)
+  target = fs.File.from_transfer_payload(source:to_transfer_payload())
+  runtime_test.run(function () test.assert(target:read() == "data") end)
+end
+
+function test_fs_file_transfer_crosses_states_and_survives_source_shutdown(
+    context: test.Context)
+  runtime_test.run(function ()
+    local root = support.new_workspace(context)
+    local path = root .. "/cross-state-transfer.dat"
+    support.cleanup_path(context, path)
+    fs.write_file(path, "head|worker|host\0\255")
+    local source = fs.open(path, "r")
+    defer source:close()
+    test.assert(source:read_until("|", true) == "head")
+    local state = transfer_lua.new()
+    defer state:close()
+    local operation = function (): async.TransferValue
+      defer source:close()
+      test.assert(source:read_until("|", true) == "worker")
+      return async.TransferValue.from_value(source)
+    end
+    local packet: async.TransferValue = state:run_async([[
+      local operation = ...
+      local async = require('titan.async')
+      local task = async.run(operation)
+      async.loop()
+      local success, result = task:status():has_succeeded()
+      if not success then
+        local failed, failure = task:status():has_failed()
+        if failed then failure:raise() end
+        error('File transfer worker did not succeed')
+      end
+      return result
+    ]], "=file-transfer", async.TransferValue.from_value(operation))
+    test.assert(source:is_closed())
+    state:close()
+    gc.collect()
+    gc.collect()
+    local target: fs.File = packet:to_value()
+    defer target:close()
+    test.assert(target:read() == "host\0\255" and target:read() == nil,
+                "cross-state File transfer lost its native owner or bytes")
   end)
 end

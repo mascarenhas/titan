@@ -67,6 +67,8 @@ local function admitted_read_cancel_case(secure: boolean)
     end)
     cleanup_operation(connection, reader, "admitted reader cleanup")
     while not ready do timer.yield() end
+    common.assert_raises_contains(function () connection:to_transfer_payload() end,
+      "pending operation")
     gc.collect()
     reader:cancel(reason)
     async.join(reader)

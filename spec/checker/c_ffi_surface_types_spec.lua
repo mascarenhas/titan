@@ -231,15 +231,13 @@ describe("surface C99 types", function()
         assert.is_table(word._c_numeric_carriers)
     end)
 
-    it("keeps header-defined typedef identity module-local", function()
+    it("exports named header-defined typedef aliases", function()
         with_header("typedef int local_word;\n", function(header)
             local ok, err = run_checker(
                 "foreign import \"" .. header .. '"\n' ..
                 "foreign type Word = local_word\n" ..
                 "function expose(item: foreign Word): foreign Word return item end")
-            assert.falsy(ok)
-            assert.match("cannot export C FFI type 'foreign Word'", err)
-            assert.match("non%-portable header%-defined type", err)
+            assert.truthy(ok, err)
         end)
     end)
 

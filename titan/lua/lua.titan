@@ -11,6 +11,8 @@ local async = import "async"
 local fs = import "fs"
 local gc = import "gc"
 local io = import "io"
+-- The static dependency makes its native loader available to new states.
+local transfer = import "titan.transfer"
 local string = import "string"
 
 local type LuaChunk = function (...: value): (...: value)
@@ -424,9 +426,10 @@ local function LuaCall:prepare()
   self.packet.chunk = self.chunk
   self.packet.name = self.name
   self.packet.length = #self.chunk
-  self.packet.nargs = #self.arguments
+  self.packet.nargs = 0
   self.packet.args = self.inputs
   self.packet.results = nil
+  self.packet.nargs = #self.arguments
   for index = 1, #self.arguments do
     local input = (self.inputs as foreign *titan_lua_value) + (index - 1)
     case self.arguments[index]
@@ -455,6 +458,37 @@ local function LuaCall:prepare()
     when is_pointer(item) then
       input.kind = ffi.TITAN_LUA_POINTER
       input.pointer = item
+    when is_record(module, name, data) then
+      input.kind = ffi.TITAN_LUA_RECORD
+      input.module = module
+      input.module_length = #module
+      input.name = name
+      input.name_length = #name
+      input.bytes = data
+      input.length = #data
+    when is_union(module, name, data) then
+      input.kind = ffi.TITAN_LUA_UNION
+      input.module = module
+      input.module_length = #module
+      input.name = name
+      input.name_length = #name
+      input.bytes = data
+      input.length = #data
+    when is_closure(module, entry, data) then
+      input.kind = ffi.TITAN_LUA_CLOSURE
+      input.module = module
+      input.module_length = #module
+      input.entry = entry
+      input.bytes = data
+      input.length = #data
+    when is_record_payload(module, name, payload) then
+      input.kind = ffi.TITAN_LUA_RECORD_PAYLOAD
+      input.module = module
+      input.module_length = #module
+      input.name = name
+      input.name_length = #name
+      input.bytes = payload
+      input.length = #payload
     end
   end
 end
@@ -482,6 +516,27 @@ local function LuaCall:values(): {async.TransferValue}
       results[index] = async.TransferValue.is_function(item.function)
     elseif item.kind == ffi.TITAN_LUA_POINTER then
       results[index] = async.TransferValue.is_pointer(item.pointer)
+    elseif item.kind == ffi.TITAN_LUA_RECORD then
+      results[index] = async.TransferValue.is_record(
+        copy_state_bytes(item.module, item.module_length),
+        copy_state_bytes(item.name, item.name_length),
+        copy_state_bytes(item.bytes, item.length))
+    elseif item.kind == ffi.TITAN_LUA_UNION then
+      results[index] = async.TransferValue.is_union(
+        copy_state_bytes(item.module, item.module_length),
+        copy_state_bytes(item.name, item.name_length),
+        copy_state_bytes(item.bytes, item.length))
+    elseif item.kind == ffi.TITAN_LUA_CLOSURE then
+      results[index] = async.TransferValue.is_closure(
+        copy_state_bytes(item.module, item.module_length), item.entry,
+        copy_state_bytes(item.bytes, item.length))
+    elseif item.kind == ffi.TITAN_LUA_RECORD_PAYLOAD then
+      results[index] = async.TransferValue.is_record_payload(
+        copy_state_bytes(item.module, item.module_length),
+        copy_state_bytes(item.name, item.name_length),
+        copy_state_bytes(item.bytes, item.length))
+    else
+      raise "invalid independent Lua result kind"
     end
   end
   return results

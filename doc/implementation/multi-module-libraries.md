@@ -307,7 +307,7 @@ Lua process and requires exactly one support table exposing `_loadlib` and
 proof.
 
 The production standard library is the canonical example. One compiler
-invocation names all twenty-three logical roots and publishes root `titan.so` and
+invocation names all twenty-five logical roots and publishes root `titan.so` and
 `titan.a`. Internal standard imports are direct. `ltitanlib.o` is shared `-X`
 payload and supplies bare `luaopen_titan` without adding a logical metadata
 key. The private namespaced five-member LPegLabel archive follows it as
@@ -316,9 +316,9 @@ llhttp and SQLite archives, and finally any bundled OpenSSL payload used directl
 `titan.ssl`. The eight HTTP callback definitions already live in the generated
 `titan.http` object; there is no adapter object. Bundled archives are
 force-carried into the DSO and flattened into the archive; system OpenSSL settings remain final-link inputs
-and are never copied into `titan.a`. The DSO exports twenty-four Lua entries
-(`luaopen_titan` plus the twenty-three logical entries); both forms define the
-twenty-three logical protocols, and the archive advertises exactly twenty-three
+and are never copied into `titan.a`. The DSO exports twenty-six Lua entries
+(`luaopen_titan` plus the twenty-five logical entries); both forms define the
+twenty-five logical protocols, and the archive advertises exactly twenty-five
 metadata keys.
 The private LPegLabel archive and its headers remain source-build inputs; they
 are not installed in the compiler/runtime SDK. The callback-bearing
@@ -349,13 +349,13 @@ already built `STDLIB_INSTALL_STAGE` without rebuilding it. Explicit packaging
 tests own the provider protocol, symbol, metadata, and layout checks.
 
 The canonical installed files are the provider pair (plus the DSO's macOS
-dSYM) and twenty-three Lua shims:
+dSYM) and twenty-five Lua shims:
 
 ```text
 <root>/lib/titan/0.6/titan.so
 <root>/lib/titan/0.6/titan.a
 <root>/lib/titan/0.6/titan.so.dSYM          # macOS only
-<root>/share/lua/5.5/titan/{coroutine,uv,async,timer,io,fs,net,ssl,url,http,websocket,os,path,peg,string,math,lua,iteration,gc,test,reflect,sqlite3,json}.lua
+<root>/share/lua/5.5/titan/{coroutine,uv,async,timer,io,fs,net,ssl,url,http,websocket,os,path,peg,string,math,lua,iteration,gc,test,reflect,sqlite3,json,protobuf,transfer}.lua
 ```
 
 Canonical SDK/providers remain outside LuaRocks' manifest; compiler scripts,
@@ -368,7 +368,7 @@ cannot target one rock version because these canonical paths are shared.
 its native platform suffix; stock LuaRocks 3.13 would label the same payload
 `.all.rock`.
 
-The checkout Make graph has one provider-pair completion marker. The twenty-three
+The checkout Make graph has one provider-pair completion marker. The twenty-five
 flat/folder source sets, selected compiler/SDK, native headers, and imported
 generated outputs are prerequisites. The DSO, archive, conditional dSYM, and
 every shim must exist; warm invocations preserve their mtimes. Callers run

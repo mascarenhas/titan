@@ -1,0 +1,36 @@
+local handle_transfer = import "lua.handle_transfer_fixture"
+
+function test_lua_record_payload_native_handle_survives_detached_origin_gc(
+    _context: test.Context)
+  runtime_test.run(function ()
+    local resource = handle_transfer.resource_new()
+    test.assert(resource ~= nil, "cannot create native pipe fixture")
+    defer handle_transfer.resource_destroy(resource)
+    local inbox = async.receiver()
+    defer inbox:close()
+    local source = tlua.new()
+    defer source:close()
+    source:run_async([[
+      require('lua.handle_transfer_fixture').send_detached(...)
+    ]], nil, async.TransferValue.is_pointer(inbox:handle()),
+      async.TransferValue.is_pointer(resource))
+    source:close()
+    test.assert(handle_transfer.finalizers(resource) == 1,
+      "source wrapper was not collected before destination reconstruction")
+    test.assert(handle_transfer.close_calls(resource) == 0,
+      "detached source finalizer closed the transferred descriptor")
+    local packet = inbox:wait()
+    case packet
+    when is_record_payload(module, name, payload) then
+      test.assert(module == "lua.handle_transfer_fixture" and
+        name == "lua.handle_transfer_fixture.Pipe" and #payload > 0)
+    else raise "native wrapper did not use its record payload hooks" end
+    local restored: handle_transfer.Pipe = packet:to_value()
+    defer restored:close()
+    test.assert(restored:read_byte() == 107,
+      "destination wrapper could not use the live transferred descriptor")
+    restored:close()
+    test.assert(handle_transfer.close_calls(resource) == 1,
+      "native resource was not closed exactly once by the destination")
+  end)
+end

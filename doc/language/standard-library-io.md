@@ -166,6 +166,8 @@ function InputOutputStream:read_until(delimiter: string,
 function InputOutputStream:write(data: string)
 function InputOutputStream:close()
 function InputOutputStream:wait(): os.ExitStatus
+function InputOutputStream:to_transfer_payload(): string
+function InputOutputStream.from_transfer_payload(payload: string): InputOutputStream
 
 function popen(command: string): InputOutputStream
 ```
@@ -210,6 +212,46 @@ neither operating-system pipe can fill while the other direction is waiting.
 Read merged output through EOF before an ordinary `wait` when the child may
 produce more than one pipe buffer. Errors and cancellation follow the same
 Task and native-owner cleanup rules as direct process streams.
+
+## Transferring shell streams
+
+`InputOutputStream:to_transfer_payload()` transfers the idle writable stdin and
+merged readable stdout/stderr pipes. Pending wrapper operations and underlying
+pipe reads or writes are rejected before either pipe is detached. Native pipe
+handoff follows the platform restrictions of
+[`os.InputStream` and `os.OutputStream`](standard-library-os.md#transferring-process-streams).
+`InputOutputStream.from_transfer_payload(payload)` adopts both pipes on the
+current destination Runtime, including buffered output.
+
+Captured shell output starts reading as soon as `popen` creates the process.
+On Windows this normally leaves an overlapped read pending even before the
+first `read()` call. Such live shell pipes reject transfer with `EBUSY`;
+yielding alone does not make them idle. Rejection preserves the original
+wrapper's writes, reads, and child `wait()`.
+
+Child-process ownership remains at the origin. Keep the original Runtime
+running to receive and reap the child's exit. The original wrapper's `wait()`
+still returns the child status, and its `close()` still terminates a running
+child when needed. Its transferred read side returns EOF and its writes
+raise. The destination owns communication only: `wait()` raises
+`transferred InputOutputStream has no child process owner`, while `close()`
+closes its pipes without signalling or waiting for the child. Closing the
+origin wrapper can therefore terminate a child still communicating through the
+destination.
+
+If native handoff of the second pipe fails after the first succeeded, the
+source retains the first pipe's payload. A later transfer retries with that
+payload; `write()` re-adopts it locally, while `close()` directly retires its
+descriptor even after Runtime shutdown has closed transfer admission. Once both
+pipes detach, the hook serializes their byte payloads with its private protobuf
+schema. If this final serialization fails, it closes both detached pipes and
+leaves the source communication facades closed; the original child remains
+available through `wait()` and `close()`.
+
+The payload follows the same trusted manual contract as other resource hooks:
+deliver and adopt it exactly once within this process, recover failed delivery,
+and explicitly close the destination. Copying or dropping a payload does not
+duplicate or close the owned pipes.
 
 ## Standard implementations
 

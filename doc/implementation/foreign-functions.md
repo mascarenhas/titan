@@ -20,7 +20,7 @@ callable representation:
 | Source/compiler form | Checked representation | Generated representation |
 | --- | --- | --- |
 | `foreign function(P...): R` | `Type.CPointer(Type.CFunction(P, R, false, false))` | an exact C function-pointer declarator |
-| `foreign function f(P...): R ... end` | `Type.CFunction(P, R, false, false)` on `Ast.TopLevelForeignFunc` | one plain C function, inline in the generated header or hidden out of line |
+| `[local] foreign function f(P...): R ... end` | `Type.CFunction(P, R, false, false)` on `Ast.TopLevelForeignFunc` | one plain C function; public entries are exported out of line, local entries may be inline or hidden |
 | a direct reference to `f` | a declaration designator, not a value | the bare generated C name |
 | an exactly typed pointer context | C declaration-to-pointer decay | the same bare generated C name |
 
@@ -38,11 +38,11 @@ alternatives factor any shared syntactic prefix. A foreign function uses
 foreign-only parameter and return types:
 
 ```text
-foreign function AnyName '(' [foreignparlist] ')' [':' foreigntype] block end
+[local] foreign function AnyName '(' [foreignparlist] ')' [':' foreigntype] block end
 ```
 
 It produces `Ast.TopLevelForeignFunc(loc, name, params, rettypes, flexrettype,
-block)`. Missing results become C void. `Ast.TypeForeignFunction` represents
+block)` with an `islocal` flag. Missing results become C void. `Ast.TypeForeignFunction` represents
 `function(foreign_types): foreign_result` inside foreign type syntax and lowers
 to a C function pointer. Bare C variadic tails remain represented for a precise
 unsupported-source-variadic diagnostic. Titan function types use their distinct
@@ -104,7 +104,8 @@ called with `{ foreign = true }` and increments
 * requires numeric-for controls, limits, and steps to share a C integer or
   floating type; and
 * permits only parameters/locals, current-module foreign declarations, C
-  namespaces, and foreign members reached through an explicit source import.
+  namespaces, public foreign members through regular imports, and local foreign
+  members through an explicit source import.
 
 `checkvar` rejects an ordinary top-level Titan declaration in this mode, and a
 qualified Titan-module lookup is accepted only when
@@ -134,19 +135,57 @@ foreign entry has no Titan `setjmp`, root frame, catch, or cleanup protocol.
 
 ## Source collaboration and binary isolation
 
-`makemoduletype` places every foreign declaration only in the producer's
-compiler-private `source_members` overlay. The member is marked
-`_foreign_source` and local regardless of its surface lack of a `local`
-modifier. It is absent from `Type.Module.members`, `type_members`, serialized
-`foreign *_types`, and `.titan.meta`.
+`makemoduletype` publishes ordinary foreign declarations as
+`Type.ModuleMember(Type.CFunction)` with exact parameter names. Their signature
+must satisfy the existing exportable C type graph contract. The closed binary
+validator permits `CFunction` as a module declaration or pointer pointee, never
+as a module variable; it validates fixed arity, return/parameter types and
+parameter names. Foreign declarations consume no module uservalue or closure
+slot and have no Lua or strict entry. Selective binary compatibility records
+used foreign signatures in the existing function category.
 
-This declaration boundary is independent of C type exportability. A public
-ordinary Titan signature may serialize a foreign function-pointer type built
-only from contextual C primitives and pointers, but that structural type does
-not publish any source `foreign function` declaration or generated-header
-dependency.
+`local foreign function` lives only in the compiler-private `source_members`
+overlay, marked `_foreign_source` and local. It is absent from serialized
+interfaces. Binary metadata cannot acquire source authority by carrying that
+marker.
 
-A loader result grants access only when the import AST carries the written
+Regular imports expose public C declarations to ordinary Titan bodies and
+restricted foreign bodies. Each imported public raw entry has an exact typed
+function-pointer slot qualified by its importing source module. The generated
+image owns the hidden slot; it is absent from public metadata, module userdata,
+and Windows exports. Own and local raw entries still use direct C designators.
+
+After ordinary dependency ABI/compatibility checks, initialization, and final
+canonical selection, `init_data_from_other_modules` resolves dynamic candidates
+with the existing `titan_module_symbol` and obtains static candidates from the
+exact linked entry. The existing runtime resolver therefore selects initialized
+modules, copied native preloads, and runtime-path DSOs as usual. There is no
+direct shared-library link input, generated import library, or build-time path
+dependency. Only static candidates enter the native-reference extraction set.
+Windows `.def` publication includes public raw entries alongside the existing
+protocol exports.
+
+Bindings publish in sorted native-symbol order with GCC/Clang's C99-compatible
+`__atomic_compare_exchange_n` (`ACQ_REL` success, `ACQUIRE` failure). A null slot
+accepts its first candidate; an equal existing address is valid, while a
+different one raises before publishing the consumer module. Raw calls and
+callback conversions acquire-load the exact pointer, with no hidden `L` or
+`_mod` argument and no forwarding wrapper. Independent states may initialize
+the same image concurrently without a data race or callback redirection.
+Published slots persist even if a later initialization step fails. This is a
+stable native-image binding, not a rollback transaction; ordinary Titan native
+bindings remain per-state. Runtime-loaded Titan DSOs already remain mapped for
+the process lifetime.
+
+Checking-time source headers precede final static/dynamic provenance, so both
+kinds of imported public entry use the same slot expression. A copied local
+inline callback declares its owner's hidden slot as `extern` in `.titan.h` and
+reads that owner slot, never a separate translation-unit-local copy. The
+binary-usage prescan retains references used only in prepared inline bodies.
+Header-dependent C types still require compatible original headers in the
+consumer.
+
+A loader result grants local access only when the import AST carries the written
 `source_required` marker and provenance proves both `kind == "source"` and a
 source module type. `TopLevelImport._source_import` then lets
 `types.module_member` select the overlay for that one written edge. A binary
@@ -184,9 +223,10 @@ the ordinary native/Lua/strict entry generator.
 `_foreign_function_signature` renders every parameter with `cdeclarator`,
 including C parameter adjustment, and renders a real `void` parameter list when
 there are no parameters. The body uses only ordinary C locals and the written
-parameters. Inline definitions use `static inline`; out-of-line definitions use
-`TITAN_SOURCE_LOCAL`, which selects hidden visibility on the supported
-GCC/Clang toolchains.
+parameters. Local inline definitions use `static inline`; local out-of-line
+definitions use `TITAN_SOURCE_LOCAL`, which selects hidden visibility on the
+supported GCC/Clang toolchains. Public definitions always remain out of line
+with external visibility and appear in the native provider export inventory.
 
 C does not specify the evaluation order of operands or call arguments, whereas
 Titan does. `_foreign_freeze` is the sequencing primitive: it emits an exact
@@ -271,14 +311,14 @@ A generated module C file includes its own `.ffi.h` first and then its own
 `.titan.h` when present, plus needed explicit-source Titan declaration headers.
 It does not reconstruct a supplemental origin list from individual C types.
 
-`_foreign_function_is_inline` skips an optional prefix of initialized local
+`_foreign_function_is_inline` first excludes public declarations, then skips an optional prefix of initialized local
 declarations and then recognizes exactly three root shapes: one return; one
 `if` whose sole then and else statements return; or one returning `if` without
 else followed by one return. The decision is cached as `_foreign_inline` and is
-shared by header and translation-unit generation. Every other declaration gets
-a hidden prototype in the header and one hidden definition in the owning C
-file. A static-inline address is translation-unit-local; the compiler does not
-manufacture a canonical out-of-line identity.
+shared by header and translation-unit generation. Every other local declaration
+gets a hidden prototype in the header and one hidden definition in the owning C
+file. A static-inline address is translation-unit-local. Public entries always
+have an extern prototype and one exported out-of-line definition.
 
 ### Temporary headers during checking
 
@@ -466,8 +506,8 @@ cannot establish a Titan recovery boundary.
 
 ## Standard-library callback migrations
 
-The standard library dogfoods foreign declarations at the three former hand-written
-callback boundaries:
+The standard library uses foreign declarations at its native callback
+boundaries:
 
 * `titan.coroutine` defines `coro_entry_trampoline` in
   `titan/coroutine.titan` and assigns it directly to `mco_desc.func`.
@@ -510,9 +550,11 @@ registration and subscription APIs. See the
 [extension guide](libuv-extension-guide.md) for the exact native pin, request,
 and terminal-callback ownership rules.
 
-The runtime SDK archive consequently has exactly `titan.o` and `minicoro.o`.
+The runtime SDK archive has exactly `titan.o` and `minicoro.o`.
+Transfer helpers and standard-library callbacks are source foreign functions
+compiled into their owning module objects.
 Its installed namespaced header set is only `titan/ffi.h`, alongside top-level
-`minicoro.h` and `titan.h` (and the separately governed
+`minicoro.h`, `titan.h`, and `transfer.h` (and the separately governed
 bundled libuv headers). The standard provider payload is `ltitanlib.o`, private
 LPegLabel, the bundled libuv payload, private llhttp/SQLite, and the selected OpenSSL
 payload; it has no `titan_uv.o`, `titan/coro.h`, `titan/uv.h`, or
@@ -549,7 +591,7 @@ foo_bar_\u2133_baz_titanentry_lua
 foo_bar_\u2133_baz_titanentry_strict
 ```
 
-A foreign declaration uses only the first native spelling. Hidden linkage and
+A foreign declaration uses only the first native spelling. Public or local linkage and
 source/Lua visibility are properties of the declaration, not alternate name
 encodings. Library preflight calls `coder.external_symbols`, so hidden
 cross-object foreign and local entries still participate in collision checks
@@ -560,8 +602,6 @@ objects define callbacks absent from the runtime/HTTP support objects, and
 callable entry families use the separated module/nominal/member hierarchy.
 Current prerelease ABI 2 retains that contract together with generic and public
 standard-library metadata and [native nominal storage](nominal-storage.md).
-The earlier callable/owned type-spelling revision changed registry keys without
-an independent ABI-number increment during prerelease development.
 ABI-marker mismatches are rejected even when serialized public types match.
 Native compilation also rejects missing or malformed physical-layout metadata.
 Same-marker prerelease layout changes require a clean rebuild of the compiler,
@@ -571,7 +611,7 @@ runtime, and providers together.
 `TITAN_PATH_0_6`, `lib/titan/0.6`, `share/titan/0.6`, and `stdlib_0_6`.
 Earlier Titan installations are not migration or compatibility inputs.
 
-Foreign declarations, allocation plans, and generated headers remain
-compiler-local. They add no public type descriptor or module-state slot, so the
-combined standard provider still has twenty-three logical metadata keys and
-twenty-four DSO openers including bare `luaopen_titan`.
+Public foreign declarations reuse the existing `ModuleMember(CFunction)` type
+graph and function compatibility category. Local foreign declarations,
+allocation plans, and generated headers remain compiler-local. Neither kind of
+foreign function adds a module-state slot or Lua opener.

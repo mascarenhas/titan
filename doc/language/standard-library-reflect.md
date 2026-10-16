@@ -83,6 +83,7 @@ const type: RecordType
 
 function RecordValue:get(i: integer): value
 function RecordValue:set(i: integer, v: value)
+function RecordValue:project(i: integer): value
 ```
 
 `value` retains the original record. `n_fields` is the number of **public**
@@ -118,6 +119,7 @@ record UnionValue
 end
 
 function UnionValue:get(i: integer): value
+function UnionValue:project(i: integer): value
 ```
 
 `tag` is the active variant's 0-based runtime tag. `n_parts` is its payload
@@ -136,6 +138,47 @@ the public tags. Compare an entry's `tag` with `UnionValue.tag` when finding its
 schema, and account for a tag outside the public range. A private active variant
 has no public variant descriptor, although inspection still exposes its
 runtime tag, part count, and readable payload parts.
+
+### Native storage projections and default construction
+
+```text
+function RecordType:construct(fields: const {value}): value
+function UnionType:construct(tag: integer, parts: const {value}): value
+```
+
+`project(i)` uses the same 1-based field or payload ordinal as `get(i)`, with a
+lossless representation for supported native C storage. Ordinary Titan values
+are returned unchanged. A C integer becomes a Titan integer carrying all its
+bits; an unsigned 64-bit value above `INT64_MAX` therefore has a negative
+projection. C `float` and `double` become Titan floats. C `long double` becomes
+the C library's exact hexadecimal floating text (`%La`), using the process
+locale; reconstruction uses the same locale's `strtold`. Pointer projections
+are raw pointers, including NULL as lightuserdata; no pointed-to storage is
+traversed or retained.
+
+A by-value C struct becomes a `const {value}` containing its fields in
+declaration order, recursively projected. A fixed C array becomes a const
+Array of its elements. The projection copies semantic fields and never reads
+padding bytes. C unions, flexible-array storage, and integer widths above 64
+bits raise when encountered. Native scalar Options preserve nil and otherwise
+use the same projected representation.
+Named C bitfields, including const bitfields, participate in field order;
+reconstruction rejects values outside the bitfield's range.
+
+`construct` initializes a fresh nominal value from those projections using the
+compiler's default storage construction. It can initialize const fields and
+does not call a user-defined `new`. A record with private fields cannot be
+constructed this way. Union construction accepts only a public variant tag.
+Argument positions follow the descriptor's field or part order; trailing nil
+positions may be absent from the Array's length. Excess positions, missing
+required values, incompatible types, out-of-range native scalars, and invalid
+long-double text raise. Failure never exposes a partially initialized result.
+
+`RecordType.is_public` and `UnionType.is_public` report declaration visibility.
+Their `all_public` fields report whether every field or variant is public.
+These are separate properties: a local record can have only public fields.
+Projections and construction are general reflection operations; a serializer
+can use both properties to impose its own public-data boundary.
 
 ### Interfaces
 
@@ -326,6 +369,8 @@ one `return_descriptor`, which may be `is_foreign_void`.
 ```text
 record RecordType
   const name: string
+  const is_public: boolean
+  const all_public: boolean
   const fields: const {FieldType}
   const statics: const {StaticFunctionType}
   const methods: const {MethodType}
@@ -333,6 +378,8 @@ end
 
 record UnionType
   const name: string
+  const is_public: boolean
+  const all_public: boolean
   const variants: const {VariantType}
   const statics: const {StaticFunctionType}
   const methods: const {MethodType}

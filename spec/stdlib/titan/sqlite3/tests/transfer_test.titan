@@ -1,0 +1,154 @@
+local transfer_lua = import "lua"
+local transfer_gc = import "gc"
+
+function test_connection_transfer_preserves_transactions_and_detaches_source(
+    _: test.Context)
+  runtime_test.run(function ()
+    local source = sqlite3.connect(":memory:")
+    defer source:close()
+    execute_sql(source, "CREATE TABLE item (value INTEGER)")
+    execute_sql(source, "INSERT INTO item VALUES (1)")
+    source:set_autocommit(false)
+    execute_sql(source, "INSERT INTO item VALUES (2)")
+    execute_sql(source, "SAVEPOINT handoff")
+    execute_sql(source, "INSERT INTO item VALUES (3)")
+
+    local packet = async.TransferValue.from_value(source)
+    local target: sqlite3.Connection = packet:to_value()
+    defer target:close()
+    source:close()
+    local failure = expect_wrapper_error(function () source:get_autocommit() end)
+    test.assert(failure.message == "connection is closed")
+    expect_wrapper_error(function () source:to_transfer_payload() end)
+    test.assert(not target:get_autocommit() and
+                scalar_integer(target, "SELECT count(*) FROM item") == 3)
+    execute_sql(target, "ROLLBACK TO handoff")
+    execute_sql(target, "RELEASE handoff")
+    test.assert(scalar_integer(target, "SELECT count(*) FROM item") == 2)
+    target:rollback()
+    test.assert(target:get_autocommit() and
+                scalar_integer(target, "SELECT value FROM item") == 1)
+  end)
+end
+
+function test_connection_transfer_rejects_statements_and_cursors_before_detach(
+    _: test.Context)
+  runtime_test.run(function ()
+    local source = sqlite3.connect(":memory:")
+    defer source:close()
+    local statement = source:prepare("SELECT 7 UNION ALL SELECT 9")
+    defer statement:close()
+    local idle = expect_wrapper_error(function () source:to_transfer_payload() end)
+    test.assert(idle.message == "connection owns open statements" and
+                idle.operation == "to_transfer_payload")
+    local cursor = statement:query()
+    defer cursor:close()
+    local active = expect_wrapper_error(function () source:to_transfer_payload() end)
+    test.assert(active.message == "connection has an active cursor")
+    test.assert(required_row(cursor):get(1) as integer == 7,
+                "rejected transfer damaged the active cursor")
+    cursor:close()
+    statement:close()
+    local target = sqlite3.Connection.from_transfer_payload(source:to_transfer_payload())
+    defer target:close()
+    test.assert(scalar_integer(target, "SELECT 11") == 11)
+  end)
+end
+
+function test_connection_transfer_rejects_invalid_payloads(_: test.Context)
+  expect_wrapper_error(function () sqlite3.Connection.from_transfer_payload("") end)
+  expect_wrapper_error(function ()
+    sqlite3.Connection.from_transfer_payload(string.char(8, 0))
+  end)
+  expect_wrapper_error(function ()
+    sqlite3.Connection.from_transfer_payload(string.char(9) .. string.rep("\0", 8))
+  end)
+  expect_wrapper_error(function ()
+    sqlite3.Connection.from_transfer_payload(string.char(9) .. string.rep("\0", 7))
+  end)
+end
+
+function test_connection_transfer_hooks_do_not_need_a_running_task(_: test.Context)
+  local source: sqlite3.Connection?
+  local target: sqlite3.Connection?
+  defer runtime_test.run(function ()
+    if target then target:close() end
+    if source then source:close() end
+  end)
+  runtime_test.run(function () source = sqlite3.connect(":memory:") end)
+  target = sqlite3.Connection.from_transfer_payload(source:to_transfer_payload())
+  runtime_test.run(function ()
+    test.assert(scalar_integer(target, "SELECT 13") == 13)
+  end)
+end
+
+function test_connection_transfer_rejected_delivery_can_be_recovered(_: test.Context)
+  runtime_test.run(function ()
+    local source = sqlite3.connect(":memory:")
+    defer source:close()
+    execute_sql(source, "CREATE TABLE item (value INTEGER)")
+    execute_sql(source, "INSERT INTO item VALUES (17)")
+    local packet = async.TransferValue.from_value(source)
+    local inbox = async.receiver()
+    defer inbox:close()
+    inbox:close()
+    local rejected = false
+    do
+      async.send(inbox:handle(), packet)
+    catch
+      test.assert(error == "receiver is closed")
+      rejected = true
+    end
+    local recovered: sqlite3.Connection = packet:to_value()
+    defer recovered:close()
+    test.assert(rejected and scalar_integer(recovered, "SELECT value FROM item") == 17,
+                "failed delivery lost the caller-owned native connection")
+  end)
+end
+
+function test_connection_transfer_crosses_states_and_survives_source_shutdown(
+    _: test.Context)
+  runtime_test.run(function ()
+    local source = sqlite3.connect(":memory:")
+    defer source:close()
+    execute_sql(source, "CREATE TABLE item (value INTEGER)")
+    execute_sql(source, "INSERT INTO item VALUES (19)")
+    source:set_autocommit(false)
+    execute_sql(source, "SAVEPOINT handoff")
+    local state = transfer_lua.new()
+    defer state:close()
+    local operation = function (): async.TransferValue
+      defer source:close()
+      test.assert(not source:get_autocommit())
+      test.assert(scalar_integer(source, "SELECT value FROM item") == 19)
+      execute_sql(source, "INSERT INTO item VALUES (23)")
+      return async.TransferValue.from_value(source)
+    end
+    local packet: async.TransferValue = state:run_async([[
+      local operation = ...
+      local async = require('titan.async')
+      local task = async.run(operation)
+      async.loop()
+      local success, result = task:status():has_succeeded()
+      if not success then
+        local failed, failure = task:status():has_failed()
+        if failed then failure:raise() end
+        error('SQLite transfer worker did not succeed')
+      end
+      return result
+    ]], "=sqlite-connection-transfer", async.TransferValue.from_value(operation))
+    source:close()
+    state:close()
+    transfer_gc.collect()
+    transfer_gc.collect()
+    local target: sqlite3.Connection = packet:to_value()
+    defer target:close()
+    test.assert(not target:get_autocommit() and
+                scalar_integer(target, "SELECT count(*) FROM item") == 2)
+    execute_sql(target, "ROLLBACK TO handoff")
+    execute_sql(target, "RELEASE handoff")
+    target:commit()
+    test.assert(target:get_autocommit() and
+                scalar_integer(target, "SELECT value FROM item") == 19)
+  end)
+end

@@ -161,7 +161,7 @@ catch
   ffi.uv_stop(loop.native)
 end
 
-foreign function udp_alloc_callback(base: *uv_handle_t, suggested: size_t, output: *uv_buf_t)
+local foreign function udp_alloc_callback(base: *uv_handle_t, suggested: size_t, output: *uv_buf_t)
   local owner = ffi.uv_handle_get_data(base) as foreign *Udata
   local loop = ffi.uv_loop_get_data(ffi.uv_handle_get_loop(base)) as foreign *Udata
   local L = ffi.titan_record_field(loop, "loop_t", "state")
@@ -174,7 +174,7 @@ foreign function udp_alloc_callback(base: *uv_handle_t, suggested: size_t, outpu
   ffi.lua_settop(L, top)
 end
 
-foreign function udp_recv_callback(native: *uv_udp_t, nread: ssize_t, buffer: const *uv_buf_t, address: const *sockaddr, flags: unsigned int)
+local foreign function udp_recv_callback(native: *uv_udp_t, nread: ssize_t, buffer: const *uv_buf_t, address: const *sockaddr, flags: unsigned int)
   local owner = ffi.uv_handle_get_data(native as foreign *uv_handle_t) as foreign *Udata
   local loop = ffi.uv_loop_get_data(ffi.uv_handle_get_loop(native as foreign *uv_handle_t)) as foreign *Udata
   local L = ffi.titan_record_field(loop, "loop_t", "state")
@@ -188,7 +188,7 @@ foreign function udp_recv_callback(native: *uv_udp_t, nread: ssize_t, buffer: co
   ffi.lua_settop(L, top)
 end
 
-foreign function udp_close_callback(base: *uv_handle_t)
+local foreign function udp_close_callback(base: *uv_handle_t)
   local owner = ffi.uv_handle_get_data(base) as foreign *Udata
   local loop = ffi.uv_loop_get_data(ffi.uv_handle_get_loop(base)) as foreign *Udata
   local L = ffi.titan_record_field(loop, "loop_t", "state")
@@ -201,7 +201,7 @@ foreign function udp_close_callback(base: *uv_handle_t)
   ffi.lua_settop(L, top)
 end
 
-foreign function udp_send_callback(native: *uv_udp_send_t, status: int)
+local foreign function udp_send_callback(native: *uv_udp_send_t, status: int)
   local owner = ffi.uv_req_get_data(native as foreign *uv_req_t) as foreign *Udata
   local loop = ffi.uv_loop_get_data(ffi.uv_handle_get_loop(native.handle as foreign *uv_handle_t)) as foreign *Udata
   local L = ffi.titan_record_field(loop, "loop_t", "state")

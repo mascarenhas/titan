@@ -706,11 +706,13 @@ entire installed toolchain relocatable.
 
 The standard-library names `coroutine`, `uv`, `async`, `timer`, `io`, `fs`,
 `net`, `ssl`, `url`, `http`, `websocket`, `os`, `path`, `peg`, `string`, `test`, `lua`, `math`, `gc`,
-`iteration`, `reflect`, `sqlite3`, and `json` are parser sugar for the qualified module names
+`iteration`, `reflect`, `sqlite3`, `json`, `protobuf`, and `transfer` are parser
+sugar for the qualified module names
 `titan.coroutine`, `titan.uv`, `titan.async`, `titan.timer`, `titan.io`,
 `titan.fs`, `titan.net`, `titan.ssl`, `titan.url`, `titan.http`, `titan.websocket`, `titan.os`, `titan.path`,
 `titan.peg`, `titan.string`, `titan.test`, `titan.lua`, `titan.math`, `titan.gc`,
-`titan.iteration`, `titan.reflect`, `titan.sqlite3`, and `titan.json`.
+`titan.iteration`, `titan.reflect`, `titan.sqlite3`, `titan.json`,
+`titan.protobuf`, and `titan.transfer`.
 
 The qualified names then follow ordinary
 module lookup rules. Thus

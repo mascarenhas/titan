@@ -18,7 +18,7 @@ record Request
   version: string
   headers: Headers
   local parser: Parser
-  local exchange: Exchange
+  local exchange: ExchangeState
   local ended: boolean
 end
 
@@ -26,7 +26,7 @@ end
 -- @usage standard-library-http.md#servers-and-handlers
 record Response
   local connection: io.ReaderWriterCloser
-  local exchange: Exchange
+  local exchange: ExchangeState
   local request_method: string
   local request_keep_alive: boolean
   local response_headers: Headers
@@ -120,7 +120,7 @@ local function read_request(parser: Parser,
     version = "HTTP/1.1",
     headers = parser.parsed_headers,
     parser = parser,
-    exchange = Exchange(transport, parser, true, false, false, false),
+    exchange = ExchangeState(transport, parser, true, false, false, false, 0, false),
     ended = false,
   }
 end
@@ -129,6 +129,8 @@ end
 -- @return Copied bytes or text, or nil at EOF or when absent.
 -- @usage standard-library-http.md#servers-and-handlers
 function Request:read(): string?
+  self.exchange.pending = self.exchange.pending + 1
+  defer self.exchange.pending = self.exchange.pending - 1
   if not self.exchange.active then raise "HTTP request exchange has ended" end
   if self.parser.upgrade then raise "HTTP upgrade request has no readable body" end
   if self.ended then return nil end
@@ -144,6 +146,8 @@ end
 -- @usage standard-library-http.md#servers-and-handlers
 function Request:read_until(delimiter: string,
                             chop: boolean?): string?
+  self.exchange.pending = self.exchange.pending + 1
+  defer self.exchange.pending = self.exchange.pending - 1
   if not self.exchange.active then raise "HTTP request exchange has ended" end
   if self.parser.upgrade then raise "HTTP upgrade request has no readable body" end
   if self.ended then return nil end
@@ -327,6 +331,8 @@ end
 --- Validate response framing and send the status line and headers.
 -- @usage standard-library-http.md#servers-and-handlers
 function Response:send_headers()
+  self.exchange.pending = self.exchange.pending + 1
+  defer self.exchange.pending = self.exchange.pending - 1
   if self.exchange.transferred then raise "HTTP response was upgraded" end
   if self.headers_sent then return end
   if self.closed then raise "HTTP response is closed" end
@@ -345,6 +351,8 @@ end
 -- @param data Immutable binary bytes to write or decode.
 -- @usage standard-library-http.md#servers-and-handlers
 function Response:write(data: string)
+  self.exchange.pending = self.exchange.pending + 1
+  defer self.exchange.pending = self.exchange.pending - 1
   if not self.exchange.active then raise "HTTP response exchange has ended" end
   if self.closed then raise "HTTP response is closed" end
   if not self.headers_sent then self:send_headers() end
@@ -369,6 +377,8 @@ end
 --- Finish response framing and enforce an exact declared content length.
 -- @usage standard-library-http.md#servers-and-handlers
 function Response:close()
+  self.exchange.pending = self.exchange.pending + 1
+  defer self.exchange.pending = self.exchange.pending - 1
   if self.closed then return end
   if not self.headers_sent then self:send_headers() end
   if self.content_length and self.body_allowed and
@@ -494,7 +504,7 @@ end
 local function serve_connection(transport: Transport,
                                 server: Server, started: function (): ())
   local connection = transport.connection
-  local exchange: Exchange? = nil
+  local exchange: ExchangeState? = nil
   defer do
     if exchange == nil or not exchange.transferred then connection:close() end
   end
@@ -509,6 +519,7 @@ local function serve_connection(transport: Transport,
     if not request then return end
     local request_value = request as Request
     exchange = request_value.exchange
+    exchange.serving = true
     local response = new_response(connection, request_value)
     if not accept_request_expectation(
         connection, request_value, response) then

@@ -19,8 +19,8 @@ See [output-directory routing](output-directory.md) for configuration isolation.
 Linux runs on pushes. Four job definitions produce five runner executions:
 `build-compiler` and `sanitizer` start independently; after `build-compiler`,
 two `test-linux-compiler` shard pairs and `native-coverage` start in parallel.
-Preparation has a 30-minute timeout, compiler pairs and native coverage 45
-minutes, and the independent cold sanitizer build 75 minutes.
+Preparation has a 30-minute timeout, compiler pairs 45 minutes, native coverage
+60 minutes, and the independent cold sanitizer build 75 minutes.
 
 Linux sets `MAKEFLAGS=-j2` and `TITAN_JOBS=2` for its two-CPU runners. Native
 Make prerequisites may overlap; each compiler process overlaps only generated-C
@@ -69,7 +69,7 @@ pass, generates its own report, and uploads directly with the `compiler`
 Codecov flag. The stdlib integration upload uses that same flag, so there is
 no full-tree merger job.
 
-Local exact, unfiltered `rock-test` runs the seven retained runtime/packaging
+Local exact, unfiltered `rock-test` runs the eight retained runtime/packaging
 specs and eight stdlib-dependent compiler integrations serially, then partitions
 the other compiler/language specs into four measured longest-first groups in
 private checkout copies. `TITAN_ROCK_TEST_JOBS=1` through `4` selects workers,
@@ -133,6 +133,12 @@ profile-bearing native/configuration cache includes profile identity.
 
 ## Sanitizer ownership and failure diagnostics
 
+The disposable Linux sanitizer runner removes its unused preinstalled Android
+SDK at `/usr/local/lib/android/sdk` before building, and reports disk space
+before and after. Instrumented providers and static child fixtures need room
+for their link outputs. Make-owned runtime/provider archives, generated code,
+and diagnostic snapshots remain available throughout the gates.
+
 The sanitizer owns an independent ASan+UBSan Lua, libbacktrace, libuv, llhttp,
 OpenSSL, and Titan tree; it never consumes the ordinary compiler artifact.
 Before LuaRocks/Titan installation, restore native dependencies keyed by pinned
@@ -190,7 +196,7 @@ dependency acquisition within the same prefix; build and complete test execution
 remain single-shot. Run all uncovered stdlib/runtime/packaging work and the
 aggregate before `ci_test_groups.sh compiler-uncovered`. Before compiler
 fixtures, use `ci_stdlib_snapshot.sh` to preserve the runtime archive,
-canonical pair, conditional dSYM, and all twenty-three shims, then restore them
+canonical pair, conditional dSYM, and all twenty-five shims, then restore them
 before bundled/system production smokes. Retain the real x86_64/arm64 universal
 Mach-O archive lookup/repackaging proof; a host-only synthetic check is not a
 replacement. Compiler/language specs must not delete shared runtime state to

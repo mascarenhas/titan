@@ -18,14 +18,18 @@ native submission and receives a typed Completion with its exact operation numbe
 from private UV owners. Public field names, result tags, constructor namespaces,
 and generic positions remain those of the existing async API. The defining
 module in nominal metadata changes; it is not byte-identical old metadata.
-Consumers need the rebuilt canonical provider. This work does not bump the
-existing generated-code ABI 2 or prerelease language-server API 1.
+Consumers need the rebuilt canonical provider. The current generated-code ABI
+is 2; the prerelease language-server API remains 1.
 
 Async also owns the public `TransferValue` union used by independent-state
 boundaries. Its nominal identity is `titan.async.TransferValue`; the Lua
 library consumes that ordinary compiled import rather than defining an alias
 or a second representation. Scalar variants hold ordinary Titan values, and
-the string variant retains its source string in a traced slot. State, native-function, and raw-pointer
+the string variant retains its source string in a traced slot. Record/union
+variants retain a nominal name and protobuf wire bytes in two traced slots;
+async transports these packets as opaque data. Its protobuf dependency supplies
+the native loader used to encode and reconstruct nominal closure captures.
+State, native-function, and raw-pointer
 variants hold portable borrowed C pointer types and do not root their
 referents. The Lua adapter owns its native packets and copy/borrow conversion
 policy, described in [the Lua implementation chapter](lua-library.md#cross-state-transfer).
@@ -307,8 +311,12 @@ producer close action. That action may await cleanup and use its supplied drain
 to dispose of unread resources. Subsequent close calls initiate nothing and do
 not wait for the first call's in-progress cleanup.
 
-Buffered controls stay synchronous. `drain_if` must receive a nonyielding,
-nonmutating predicate and detaches the entire FIFO on any match; it is not a
+Buffered controls stay synchronous. `snapshot_pending` copies the complete unread FIFO and
+returns its terminal outcome, or nil while live, without consuming entries or
+reserving a reader. The copy retains values after the source drains or closes;
+payloads themselves retain their ordinary reference semantics. Resource hooks
+use it to allocate snapshots before detaching native ownership. `drain_if` uses a
+nonyielding, nonmutating predicate and detaches the entire FIFO on any match; it is not a
 filter. `drain_pending` detaches regardless of terminal state. A domain that
 removes the outcome reserved for a notified reader must complete its terminal
 or control transition before yielding back to that reader. `wake_batch` affects
@@ -329,9 +337,41 @@ Its opaque `foreign *void` handle names native receiver storage, not a Titan
 record or public `uv.async_t`. The host sending a message never follows a remote
 GC pointer or enters the destination Lua state. Scalar tags/values and copied
 string bytes live in native messages until the destination loop converts them
-into its own `TransferValue`. The one-slot string-copy transaction and
+into its own `TransferValue`. Nominal packets copy the defining module, nominal
+name, and wire bytes into one native allocation with independently checked lengths; no string
+borrows the sending collector after `send` returns. The receiving loop copies
+them into its own collector and preserves the record/union variant without
+decoding. The one-slot string-copy transaction and
 native-packet lifetime are recorded in the [trusted Lua API ledger](ffi-lua-api-followup.md#trusted-standard-library-discipline).
 Borrowed pointer variants remain raw addresses.
+
+Closure and custom record packets use the same flat string-copy boundary.
+`from_value` snapshots closure captures and runs custom encoding hooks before
+queue admission. A closure packet copies its module name and snapshot bytes,
+and carries an immutable entry address. No origin closure, capture box, or
+other origin GC pointer enters the queue. Accepted messages own only their
+copied strings and native FIFO allocation; delivery or discard frees that
+storage without traversing payloads or closing resources named inside them.
+
+The receiving loop reconstructs `TransferValue.is_closure(module, entry, data)`
+or `TransferValue.is_record_payload(module, name, data)` without decoding.
+The consumer explicitly calls `:to_value()` to create a destination closure or
+invoke the static reconstruction hook. Closure reconstruction resolves the
+entry against the destination module's manifest before decoding its captures.
+Every restored mutable capture receives a fresh cell. A captured
+`TransferValue` retains its union wrapper. Active closure and custom-record
+conversion cycles are rejected; repeated acyclic values retain copy semantics.
+See the [transfer implementation](transfer-library.md) for the anonymous
+protobuf snapshot and canonical preload lookup.
+
+`TransferValue.from_value` validates the pair of public hook signatures through
+ordinary reflection and permits private record fields when that pair is valid.
+Its active-record guard prevents a hook recursively packing the same record;
+deferred cleanup releases the guard after success or error. Hooks must run
+synchronously. They may transfer native tokens under application policy, but
+queue cleanup never closes or duplicates those tokens and cannot undo hook
+side effects. The programmer must detach or clear an origin owner when needed
+to prevent its finalizer from closing a handed-off resource.
 
 Receiver construction uses `ensure_runtime` without requiring a current Task
 or driving the loop, which permits synchronous independent-state bootstrap.
@@ -375,7 +415,7 @@ hosting state, raise into its frames, or resume its Tasks. The
 [independent Lua-state adapter](lua-library.md#independent-state-ownership)
 exclusively owns a separate state and may execute Lua and independently
 initialized Titan modules in it. That state's collector never receives a host
-GC object; only explicitly copied strings and borrowed native addresses cross
+GC object; copied values, opaque snapshot bytes, and borrowed addresses cross
 the boundary. Synchronization of shared native bytes remains the caller's
 job. The libuv worker pool is shared with other native work and async adds no
 new queue or thread policy. Ordinary cancellation never detaches the accepted
@@ -453,7 +493,10 @@ libuv handles. Their lexical/domain owners must close or dispose of them.
 Closing a process watcher does not kill or reap the process.
 
 `request_exit(code)` obtains the current Task, records only the first code,
+unbinds the Runtime's UV transfer loop before cancellation can enter cleanup,
 cancels every unfinished Task, and raises the caller's retained cancellation.
+The separate closing flag remains unchanged; accepted cleanup awaits and
+native callbacks still retire through the ordinary driver.
 The standalone bootstrap returns that code after ordinary cleanup. `run` refuses
 to create new Tasks once exit is requested. A manual Lua/Titan host retains
 control after its loop call; this operation does not call process-wide C exit.

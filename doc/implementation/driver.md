@@ -120,19 +120,19 @@ Both Unix and Windows SDK installation also publish Titan's own `LICENSE` at
 `<root>/share/titan/LICENSE`, so SDK consumers can redistribute the license
 without access to the compiler source checkout.
 
-The standard library consists of twenty-three ordinary qualified logical modules:
+The standard library consists of twenty-five ordinary qualified logical modules:
 `titan.coroutine`, `titan.uv`, `titan.async`, `titan.timer`, `titan.io`,
 `titan.fs`, `titan.net`, `titan.ssl`, `titan.url`, `titan.http`, `titan.websocket`, `titan.os`, `titan.path`,
 `titan.peg`, `titan.string`, `titan.math`, `titan.lua`, `titan.iteration`,
-`titan.gc`, `titan.test`, `titan.reflect`, `titan.sqlite3`, and `titan.json`. Most
+`titan.gc`, `titan.test`, `titan.reflect`, `titan.sqlite3`, `titan.json`, `titan.protobuf`, and `titan.transfer`. Most
 checkout sources are `titan/<name>.titan`; `titan.uv`, `titan.http`, `titan.websocket`,
-`titan.peg`, `titan.string`, `titan.sqlite3`, and `titan.json` are folder
+`titan.peg`, `titan.string`, `titan.sqlite3`, `titan.json`, and `titan.protobuf` are folder
 ensembles. One `titanc` invocation links their independent objects and
 `ltitanlib.o` into the physical checkout provider pair `titan.so`/`titan.a`.
 The private namespaced LPegLabel archive follows `ltitanlib.o` as metadata-free
 payload; selected libuv, private llhttp/SQLite, and selected OpenSSL payloads follow
 it. Installation publishes both forms below `<root>/lib/titan/0.6/`
-and twenty-three generated logical-module shims below
+and twenty-five generated logical-module shims below
 `<root>/share/lua/5.5/titan/`. Titan imports discover each module through the
 preferred compiled-format pass; Lua requires use a generated shim and the DSO
 form.
@@ -141,18 +141,18 @@ form.
 `titan.async` owns the Runtime and its public Task, result, error, and
 subscription types. Async, timer, fs, net, os, and sqlite3 import the ordinary
 compiled `titan.uv` interface; none requires a source-private UV scheduler.
-All twenty-three modules share the canonical physical provider pair while
+All twenty-five modules share the canonical physical provider pair while
 retaining their separate logical and nominal identities. See the
 [public binding reference](../language/standard-library-uv.md) and
 [async implementation](libuv-runtime.md).
 
 For source convenience, the parser first removes one terminal explicit-source
-marker, `.titan`, and then desugars the twenty-three short standard-library imports
+marker, `.titan`, and then desugars the twenty-five short standard-library imports
 before module resolution: `import "async"`, for example, places
 `titan.async` in the import AST exactly as `import "titan.async"` would. The same
 mapping applies to `coroutine`, `uv`, `timer`, `io`, `fs`, `net`, `ssl`, `url`, `http`, `websocket`,
 `os`, `path`, `peg`, `string`, `test`, `math`, `lua`, `iteration`, `gc`, `reflect`,
-`sqlite3`, and `json`; every other name is left unchanged. The driver, checker, code
+`sqlite3`, `json`, `protobuf`, and `transfer`; every other name is left unchanged. The driver, checker, code
 generator, and runtime thus
 see only the qualified module name. Each qualified name naturally produces its
 matching native symbols and Lua entry point (`titan_async_*` and
@@ -201,7 +201,7 @@ as `options.source_roots`; each such module tries source first, even if a
 binary for it was cached by an earlier import in the same compiler process.
 If its source is absent, compilation fails rather than treating an existing
 binary as an empty build root. Imports reached from that root remain binary
-first. This is why one standard-library invocation can force all twenty-three roots
+first. This is why one standard-library invocation can force all twenty-five roots
 through source even when a bootstrap or prior combined provider pair is
 visible. Their internal imports resolve to the already selected source cache
 entries and are linked statically into the replacement provider pair.
@@ -1446,14 +1446,14 @@ loading; [Static compiled modules](static-compiled-modules.md) documents the
 archive resolver, binding constraints, composition, and paired publication.
 
 After its per-module object targets complete, the standard library uses the
-same generic path to link all twenty-three qualified roots:
+same generic path to link all twenty-five qualified roots:
 
 ```sh
 titanc --output out --source-first --incremental \
   titan.coroutine titan.uv titan.async titan.timer titan.io titan.fs titan.net \
   titan.ssl titan.url titan.http titan.websocket titan.os titan.path \
   titan.peg titan.string \
-  titan.math titan.lua titan.iteration titan.gc titan.test titan.reflect titan.sqlite3 titan.json \
+  titan.math titan.lua titan.iteration titan.gc titan.test titan.reflect titan.sqlite3 titan.json titan.protobuf titan.transfer \
   -X titan-runtime/ltitanlib.o lpeglabel-build/libtitan-lpeglabel.a \
      libuv-build/libuv.a llhttp-build/libtitan-llhttp.a \
      sqlite3-build/libtitan-sqlite3.a \
@@ -1461,9 +1461,9 @@ titanc --output out --source-first --incremental \
 ```
 
 The provider prefix is `titan`, so checkout output is `out/titan.so`,
-`out/titan.a`, and twenty-three generated `out/titan/*.lua` shims. Each logical
+`out/titan.a`, and twenty-five generated `out/titan/*.lua` shims. Each logical
 module retains its own `luaopen_titan_*`, `_init`, `_abi`, `_types`, registry module state, and
-initializer; `ltitanlib.o` supplies the twenty-fourth entry, `luaopen_titan`, and the
+initializer; `ltitanlib.o` supplies the twenty-fifth entry, `luaopen_titan`, and the
 support table without adding an archive metadata key. The `titan.uv` folder
 still generates one `out/titan/uv/uv.c`/`.o` pair, plus
 `out/titan/uv/uv.ffi.h` and `out/titan/uv/uv.titan.h`, and no contributor shim.
@@ -1689,7 +1689,7 @@ minicoro implementation/tag support `minicoro.o`. Source foreign callbacks
 live in generated standard-module objects instead. Static-archive selection
 pulls in only referenced objects. Vendored `libbacktrace.a` is a separate link
 input. `ltitanlib.o` is also separate: it is the only input to the private
-support bootstrap and is passed once as shared native payload when the twenty-three
+support bootstrap and is passed once as shared native payload when the twenty-five
 standard logical modules are published in the full `titan.so`/`titan.a` pair.
 The private five-member LPegLabel archive follows it only in the standard
 provider payload and is not part of the runtime SDK.

@@ -123,7 +123,8 @@ may change for consumers that do not construct the record.
 The prerelease ABI marker remains 2 and the compiler version remains 0.6.0.
 Rebuild code, providers and cached objects with the matching compiler and SDK;
 no adapter reads the old all-UV layout. Native imports require the new separate
-layout protocol even though the version marker is unchanged.
+layout protocol. ABI 2 also publishes generated reflected projection and
+default-construction callbacks; old providers must be rebuilt.
 
 ## Native owners and callback access
 

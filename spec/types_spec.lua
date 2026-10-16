@@ -2847,6 +2847,7 @@ describe("Titan types", function()
         it("finds the first non-exportable C descriptor", function()
             local portable = types.CPointer(cint(), {"const"})
             assert.is_nil(types.first_non_exportable_type(portable))
+            assert.is_nil(types.first_non_exportable_type(types.CArray(cint(), 2)))
 
             local alias = types.CTypedef("ffi_int", cint())
             assert.equal(alias, types.first_non_exportable_type(alias))
@@ -2861,7 +2862,7 @@ describe("Titan types", function()
 
             for _, malformed in ipairs({
                 types.CPointer(cint(), {"volatile"}),
-                types.CArray(cint(), 2),
+                types.CArray(cint(), nil),
                 types.CFunction({types.CVoid()}, types.CVoid(), false, nil),
                 types.CFunction({types.COwned(cint(), false)},
                     types.CVoid(), false, nil),

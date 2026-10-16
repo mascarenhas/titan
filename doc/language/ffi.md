@@ -61,8 +61,8 @@ The compiler prepares `A.ffi.h` from those includes and any `foreign type`
 typedef declarations before checking Titan signatures. A module defining foreign functions also gets `A.titan.h` for their
 checked declarations and eligible inline bodies. Generated `A.c` includes its own `.ffi.h` before
 any `.titan.h`, so the consumer's complete C environment is established first.
-See [foreign functions](foreign-functions.md) for those source-private entry
-points.
+See [foreign functions](foreign-functions.md) for public C entry exports and
+local source-only callbacks.
 
 The configured C compiler remains authoritative for C declaration legality and
 implicit conversions. Titan no longer compares independently extracted copies
@@ -213,8 +213,9 @@ Signatures such as `foreign *lua_State` and
 `foreign function (*lua_State): int` retain that built-in identity across
 compiled-module metadata. Otherwise matching callback pointers therefore
 support equality even when their state descriptors came from separate imports
-or metadata decoding. Other imported opaque structs remain nominal and
-nonexportable.
+or metadata decoding. Other imported opaque structs retain their declaring
+header identity and may appear behind pointers when consumers include that
+declaration.
 
 A C function pointer has a lightuserdata `TValue` representation, using
 Titan's toolchain portability cast to preserve its address. A portable
@@ -224,12 +225,19 @@ entry can box a native function-pointer result. Boxing does not record its C
 signature: recovering a function pointer from an arbitrary `value` requires
 an explicit unsafe `as` cast, just as recovering an object pointer does.
 
-Header-dependent types remain local to the module that imports the header. An
-imported typedef is nonexportable even when it resolves to one of the portable
-primitives. Imported structs, unions, fields, arrays, enum identities, and any
-pointer/function/owner graph containing one are likewise nonexportable. This
-keeps compiled metadata independent of another module's C declarations and
-macro environment.
+Public C type graphs may also contain named header typedefs, structs, unions,
+and fixed arrays when every component is exportable. An embedded aggregate
+must be complete, have no flexible array member, and contain no GC-bearing
+storage. Enum identities, unnamed aggregates without a typedef name, and
+unsupported C forms remain nonexportable.
+
+Every importing translation unit must make the original named C declarations
+visible, normally with its own `foreign import` of their declaring header. A
+same-spelled declaration from a different header is not the same identity.
+Ordinary Titan imports and compiled libraries carry compact type and layout
+metadata, without inheriting C headers or synthesizing C definitions. Explicit
+`.titan` source imports retain their existing header inheritance. Target C
+numeric traits and aggregate shapes must agree with the exported metadata.
 
 A module variable still requires a C type with a `TValue` representation:
 a boxable scalar, object or function pointer, exact `TValue`/`Udata *`, or owned
@@ -239,8 +247,8 @@ remain ineligible as stored values. See [Native storage in records and
 unions](nominal-storage.md) for initialization and borrowed projection rules.
 Source-written owned types may be used in aliases, variables, eligible record
 fields/union parts, callable parameters and results, Options, Arrays, and Maps;
-public use is accepted only when the complete owner graph is built from the
-portable primitives above.
+public use is accepted only when the complete owner graph is exportable and
+its required C declarations are visible to the consumer.
 
 C integers, C floats, object and function pointers, exact `TValue`, and owned C
 storage are supported Option bases. By-value C aggregates and arrays and direct
@@ -988,11 +996,10 @@ for cache and promotion details.
   compatible C function-pointer types. Restricted source foreign functions are
   the supported way to write a callback; ordinary Titan closures are not
   adapted to C callback ABIs.
-* Header-dependent C types are local to the importing Titan module. Only the
-  contextual primitive descriptors and pointer, foreign-function-pointer, and
-  owned graphs built entirely from them can appear in exported compiled-module
-  interfaces, with the intrinsic opaque `lua_State` additionally permitted as
-  a pointer pointee.
+* Public header-dependent C types require the original declarations in every
+  consumer's C environment. Binary imports do not inherit those headers.
+  Flexible array members, anonymous aggregates without a typedef name, and
+  enum identities are not supported in public C graphs.
 * Function-like macros are not imported. When a real function declaration has
   the same name, calls select that declaration and bypass the macro wrapper.
   Object-like macros are values only

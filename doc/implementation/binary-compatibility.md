@@ -26,6 +26,16 @@ from a generic call's specialized signature. Parameter names remain separate
 ordered signature data. Variadic inputs, flexible results, and const type
 qualifiers survive through their ordinary erased type representation.
 
+Public foreign declarations use the same function category with their exact
+`Type.CFunction` signature and parameter names. Calls and contextual callback
+conversions record usage; declarations imported from a C header are outside the
+Titan module compatibility graph. Raw imported addresses resolve through the
+checked canonical provider, then publish atomically in hidden typed slots
+owned by the consumer image. Later initialization must select the same address.
+These stable bindings have no module-state slot or public metadata entry; see
+[foreign-function binding](foreign-functions.md#source-collaboration-and-binary-isolation).
+Only statically included candidates enter the direct native-reference set.
+
 The projection intentionally excludes module slot numbers, private record
 fields, and producer-private physical layout. Records publish ordered public
 fields and maps of public methods/statics. Unions publish ordered public
@@ -321,7 +331,9 @@ and non-Windows invocations. Program output preflight includes the provider,
 PE links disable automatic exports. `windows_provider_exports` writes a
 producer-owned `.def` from every logical module physically carried into the
 DLL: `_abi_value`, `_abi`, `_types`, `_layouts`, `_compatibility`, `_init`, and
-`luaopen_*`. Existing canonical descriptor callbacks resolve subsequent native
+`luaopen_*`, plus public raw foreign entries recovered from module interfaces.
+Hidden raw-address binding slots are never exported. Existing canonical
+descriptor callbacks resolve subsequent native
 function and slot addresses; collision inventories are not export inventories.
 The support-only `luaopen_titan` keeps its explicit Lua-module export annotation.
 Missing module inventories fail before an existing output is removed. Private

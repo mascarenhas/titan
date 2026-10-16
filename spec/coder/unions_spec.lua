@@ -22,16 +22,19 @@ local function clean_generated_modules()
 end
 
 local function without_reflection_payload_reader(source, owner)
-    local marker = "static void test_\\u2133_" .. owner
-        .. "_\\u2131_payload_reader("
-    local start = assert(source:find(marker, 1, true))
-    local body_start = assert(source:find("{", start, true))
-    local body = assert(source:match("^%b{}", body_start))
-    -- The reflection boundary boxes an Array for Lua. Exclude precisely that
-    -- reader while retaining every constructor, case load, and other function
-    -- in the no-proxy assertion for compiler-internal payload storage.
-    return source:sub(1, start - 1)
-        .. source:sub(body_start + #body)
+    for _, suffix in ipairs({ "payload_reader", "projection" }) do
+        local marker = "static void test_\\u2133_" .. owner
+            .. "_\\u2131_" .. suffix .. "("
+        local start = assert(source:find(marker, 1, true))
+        local body_start = assert(source:find("{", start, true))
+        local body = assert(source:match("^%b{}", body_start))
+        -- Reflection boxes an Array for Lua. Exclude these readers while
+        -- retaining every constructor, case load, and other function in the
+        -- no-proxy assertion for compiler-internal payload storage.
+        source = source:sub(1, start - 1)
+            .. source:sub(body_start + #body)
+    end
+    return source
 end
 
 describe("unions (end-to-end)", function()

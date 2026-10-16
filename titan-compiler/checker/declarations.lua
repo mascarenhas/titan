@@ -62,6 +62,14 @@ function annotate_lua_function_boundary(node)
     end
 end
 
+function annotate_closure_transfer_captures(node)
+    node._capture_dynamic_plans = {}
+    for index, decl in ipairs(node._captures or {}) do
+        node._capture_dynamic_plans[index] =
+            maybe3.from_optional(types.dynamic_coercion(decl._type))
+    end
+end
+
 function checkfuncbody(node, st, errors, opts)
     opts = opts or {}
     st:add_symbol("$function", node) -- for return type
@@ -1131,6 +1139,8 @@ toplevel_visitor = util.make_visitor({
                             part.type, typefromnode(part.type, st, errors))
                         local tpart = types.Field(
                             fqtn, part.name, ptype, part_index, false)
+                        tpart.dynamic_plan =
+                            maybe3.from_optional(types.dynamic_coercion(ptype))
                         part._type, part._decl = ptype, tpart
                         part._nominal_storage =
                             checker._nominal_storage_plan(ptype, array_view)
@@ -1602,6 +1612,65 @@ function visit_toplevel(node, st, errors, loader)
     st.current_toplevel_order = nil
 end
 
+-- Binary interfaces carry C declaration identity and checked field shapes,
+-- never header inheritance. The importing translation unit must have the same
+-- real declaration before generated public payloads can name or embed it.
+function check_imported_c_declarations(module_ast, st, errors)
+    local reported = {}
+    for _, node in ipairs(module_ast) do
+        if not node._ignore and node._tag == "Ast.TopLevelImport"
+           and node._type and node._type._tag == "Type.Module" then
+            local seen = {}
+            local function visit(typ)
+                if type(typ) ~= "table" or seen[typ] or typ.islocal then return end
+                seen[typ] = true
+                local tag = typ._tag
+                if tag == "Type.Nominal" then
+                    visit(types.registry[typ.fqtn])
+                elseif tag == "Type.CTypedef" or tag == "Type.CStruct"
+                       or tag == "Type.CUnion" then
+                    if types.is_c_lua_state(typ) then return end
+                    local visible
+                    if tag == "Type.CTypedef" then
+                        visible = st.ffi_namespace._type.type_members[typ.name]
+                    elseif typ.tagname then
+                        local declaration = st:find_c_file_tag(typ.tagname,
+                            tag == "Type.CStruct" and "struct" or "union")
+                        visible = declaration and declaration.canonical
+                    elseif typ.typedef then
+                        visible = types.resolve_c_typedef(
+                            st.ffi_namespace._type.type_members[typ.typedef])
+                    end
+                    local matches = visible and types.equals(typ, visible)
+                    if matches and tag == "Type.CTypedef" then
+                        matches = types.equals(typ.target, visible.target)
+                    end
+                    if not matches then
+                        local key = types.c_reference_key(typ) or tostring(typ)
+                        if not reported[key] then
+                            reported[key] = true
+                            checker.typeerror(errors, node.loc,
+                                "imported C declaration '%s' from module '%s' is not visible " ..
+                                "with its original identity and layout; foreign import its " ..
+                                "declaring header or use an explicit .titan source import",
+                                types.tostring(typ), node.modname)
+                        end
+                        return
+                    end
+                end
+                for key, child in pairs(typ) do
+                    if type(key) ~= "string" or (key:sub(1, 1) ~= "_"
+                       and key ~= "owner" and key ~= "source_members"
+                       and key ~= "source_type_members" and key ~= "dynamic_plan") then
+                        visit(child)
+                    end
+                end
+            end
+            visit(node._type)
+        end
+    end
+end
+
 -- Collect top-level declarations in dependency order while retaining the AST's
 -- logical source order for interfaces and code generation. Imports establish
 -- the type environment; records and their constructors come next; other
@@ -1648,6 +1717,7 @@ function checktoplevel(ast, st, errors, loader)
             end
         end
     end
+    check_imported_c_declarations(ast, st, errors)
     -- Structural constraints cannot be decided until every nominal method
     -- signature has populated its canonical owner descriptor. Keep every
     -- signature-time application deferrable across aliases, owners, top-level

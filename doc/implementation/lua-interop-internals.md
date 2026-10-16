@@ -917,7 +917,7 @@ eager load. A second Lua state repeats its own cache insertion and promotion
 request while the operating-system loader may reuse the mapped image.
 
 The installed standard layout has paired providers at
-`<root>/lib/titan/0.6/{titan.so,titan.a}` and twenty-three generated shims below
+`<root>/lib/titan/0.6/{titan.so,titan.a}` and twenty-five generated shims below
 `<root>/share/lua/5.5/titan/`; the shims use the DSO form. Ordinary clients use
 the compiled public `uv` API without `uv.h`. The native loader fixture in
 `spec/rockspec_spec.lua` instead links a C `provider_probe.c` which includes

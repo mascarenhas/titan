@@ -274,6 +274,51 @@ function init_data_from_other_modules(tlcontext, includes, loadmods,
             function_sig(func.mangled, func.type, dynamic),
             function_sig("", func.type, true))
     end
+    -- Raw C functions have no implicit state argument. Bind their imported
+    -- addresses once per physical consumer image, using the same checked
+    -- canonical providers as ordinary Titan imports. Publication is atomic:
+    -- independent states may initialize shared code concurrently, but none
+    -- may redirect an address already visible to a raw callback.
+    for _, func in ipairs(coder._sorted_foreign_imports(tlcontext)) do
+        local pointer = types.CPointer(func.type, {})
+        table.insert(includes, "TITAN_SOURCE_LOCAL "
+            .. cdeclarator.render_declaration(pointer, func.binding)
+            .. " = NULL;")
+        local candidate
+        if static_deps[func.module] == true then
+            table.insert(includes, "extern "
+                .. cdeclarator.render_declaration(func.type, func.mangled)
+                .. ";")
+            candidate = func.mangled
+        else
+            local provider = (mprefixes[func.module]
+                or mangle_qn(func.module) .. "_") .. "provider"
+            candidate = "titan_cast_func("
+                .. cdeclarator.render_declaration(pointer, "")
+                .. ", titan_module_symbol(L, " .. provider .. ", "
+                .. c_string_literal(coder._linkage_symbol_name(func.mangled))
+                .. "))"
+        end
+        table.insert(loadglobals, render([[
+            {
+                $CANDIDATE_DECL = $CANDIDATE;
+                $EXPECTED_DECL = NULL;
+                if (!__atomic_compare_exchange_n(&$BINDING, &_expected,
+                        _candidate, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)
+                    && _expected != _candidate) {
+                    luaL_error(L, $ERROR);
+                }
+            }
+        ]], {
+            CANDIDATE_DECL = cdeclarator.render_declaration(pointer, "_candidate"),
+            EXPECTED_DECL = cdeclarator.render_declaration(pointer, "_expected"),
+            CANDIDATE = candidate,
+            BINDING = func.binding,
+            ERROR = c_string_literal("foreign function '" .. func.module
+                .. "." .. func.name
+                .. "' has a different native binding in this consumer image"),
+        }))
+    end
     for name, info in pairs(tlcontext.bound_luas) do
         local declaration = static_deps[info.module] == true
             and ("int " .. name .. "(lua_State *L)")
@@ -314,6 +359,7 @@ function init_data_from_other_modules(tlcontext, includes, loadmods,
 end
 
 function coderecorddec(ctx, code, initrecs, node)
+    local projector, constructor = coder._reflection_metadata(ctx, code, node)
     -- (the type tag is forward-declared up front in generate(), so that
     -- forward/mutually-recursive record field types resolve)
     local plan = coder._nominal_plan(ctx, node._type)
@@ -476,6 +522,12 @@ function coderecorddec(ctx, code, initrecs, node)
         lua_rawset(L, -3);
         lua_pushliteral(L, $TAG);
         lua_rawsetp(L, -2, TITAN_MT_TYPE);
+        lua_pushboolean(L, $PUBLIC);
+        lua_rawsetp(L, -2, TITAN_MT_PUBLIC);
+        lua_pushlightuserdata(L, titan_cast_func(void *, $PROJECTOR));
+        lua_rawsetp(L, -2, TITAN_MT_PROJECT);
+        lua_pushlightuserdata(L, titan_cast_func(void *, $CONSTRUCTOR));
+        lua_rawsetp(L, -2, TITAN_MT_CONSTRUCT);
         titan_pushmodule(L, _mod);
         lua_rawsetp(L, -2, TITAN_MT_MOD);
         lua_newtable(L);
@@ -514,6 +566,9 @@ function coderecorddec(ctx, code, initrecs, node)
             node._type.name, "newindex"),
         TYPE = node._type.name,
         TAG = c_string_literal(types.serialize_semantic(node._declared_type or node._type)),
+        PUBLIC = node.islocal and "0" or "1",
+        PROJECTOR = projector,
+        CONSTRUCTOR = constructor,
         FIELDMAP = table.concat(fieldmap, "\n")
     }))
 end
@@ -521,6 +576,7 @@ end
 -- Generate the Lua-facing metatable for a union. Variants, tags, and payloads
 -- are opaque; only public methods participate in lookup, and all writes fail.
 function coder._codeuniondec(ctx, code, initnominals, node)
+    local projector, constructor = coder._reflection_metadata(ctx, code, node)
     local payload_reader = coder._nominal_function_prefix(
         node._type.name, "payload_reader")
     local payload_cases = {}
@@ -649,6 +705,14 @@ function coder._codeuniondec(ctx, code, initnominals, node)
             lua_rawset(L, -3);
             lua_pushliteral(L, $TAG);
             lua_rawsetp(L, -2, TITAN_MT_TYPE);
+            lua_pushboolean(L, $PUBLIC);
+            lua_rawsetp(L, -2, TITAN_MT_PUBLIC);
+            lua_pushlightuserdata(L, titan_cast_func(void *, $PROJECTOR));
+            lua_rawsetp(L, -2, TITAN_MT_PROJECT);
+            lua_pushlightuserdata(L, titan_cast_func(void *, $CONSTRUCTOR));
+            lua_rawsetp(L, -2, TITAN_MT_CONSTRUCT);
+            titan_pushmodule(L, _mod);
+            lua_rawsetp(L, -2, TITAN_MT_MOD);
             lua_pushlightuserdata(L, titan_cast_func(void *, $PAYLOAD_READER));
             lua_rawsetp(L, -2, TITAN_MT_PAYLOAD);
             lua_newtable(L);
@@ -685,6 +749,9 @@ function coder._codeuniondec(ctx, code, initnominals, node)
         TYPE = node._type.name,
         TAG = c_string_literal(types.serialize_semantic(node._declared_type or node._type)),
         PAYLOAD_READER = payload_reader,
+        PUBLIC = node.islocal and "0" or "1",
+        PROJECTOR = projector,
+        CONSTRUCTOR = constructor,
         METHODMAP = table.concat(methodmap, "\n"),
     }))
 end
@@ -848,6 +915,12 @@ function coder._code_interface_method_artifacts(
     }))
 
     function_type_tag(tlcontext, ftype)
+    coder._transfer_register_source(tlcontext, ftype,
+        nativename, bound_luaname, strictname, {{
+            type = types.Nominal(interface.name), boxed = false,
+            dynamic_plan = method_node._lua_dynamic_plans[1],
+            loc = method_node.loc,
+        }}, method_node.loc)
 end
 
 -- Interface declarations are type-only, but their owner module publishes one
@@ -1130,6 +1203,7 @@ function coder.generate_ffi_header(modname, ast, source_header)
 end
 
 function coder.generate_foreign_header(modname, ast, tlcontext, header_paths)
+    tlcontext = tlcontext or { module = modname }
     local has_foreign = false
     for _, node in ipairs(ast) do
         if not node._ignore and node._tag == "Ast.TopLevelForeignFunc" then
@@ -1180,9 +1254,19 @@ function coder.generate_foreign_header(modname, ast, tlcontext, header_paths)
                     coder._code_foreign_function(tlcontext, node, true)
             else
                 declarations[#declarations + 1] =
-                    "TITAN_SOURCE_LOCAL " .. signature .. ";"
+                    (node.islocal and "TITAN_SOURCE_LOCAL " or "extern ")
+                    .. signature .. ";"
             end
         end
+    end
+
+    -- A copied inline callback uses its declaring module's initialized slot,
+    -- never an uninitialized translation-unit-local copy. These hidden names
+    -- are source-private implementation details, absent from public metadata.
+    for _, func in ipairs(coder._sorted_foreign_imports(tlcontext)) do
+        declarations[#declarations + 1] = "extern TITAN_SOURCE_LOCAL "
+            .. cdeclarator.render_declaration(
+                types.CPointer(func.type, {}), func.binding) .. ";"
     end
 
     local prefix = table.concat({

@@ -2,7 +2,7 @@ local independent_math = import "math"
 foreign import "async_foreign_work.h"
 foreign import "lua.h"
 
-foreign function state_blocking_work(state: *lua_State): int
+local foreign function state_blocking_work(state: *lua_State): int
   ffi.titan_async_work_fixture_block(ffi.lua_touserdata(state, 1))
   return 0
 end

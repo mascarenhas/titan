@@ -1,6 +1,30 @@
 # Supplemental public API reference
 
-These 205 declarations complement the 305 canonical native wrappers. Constructors and owner methods are also grouped with their type in [types](types.md). Every entry uses the public signature; private native fields are omitted. See [ownership contracts](CONTRACT-NOTES.md) for the owner, buffer, callback, and native worker rules.
+These 214 declarations complement the 305 canonical native wrappers. Constructors and owner methods are also grouped with their type in [types](types.md). Every entry uses the public signature; private native fields are omitted. See [ownership contracts](CONTRACT-NOTES.md) for the owner, buffer, callback, and native worker rules.
+
+## Native resource handoff
+
+The following nine declarations implement the [native handoff contract](../standard-library-uv.md#native-resource-handoff):
+
+```titan
+function bind_transfer_loop(loop: loop_t)
+function unbind_transfer_loop(loop: loop_t)
+function stream_transfer_status(stream: stream_t, allow_reading: boolean?): integer
+function tcp_t:to_transfer_payload(): string
+function tcp_t.from_transfer_payload(payload: string): tcp_t
+function pipe_t:to_transfer_payload(): string
+function pipe_t.from_transfer_payload(payload: string): pipe_t
+function tcp_t.discard_transfer_payload(payload: string): integer
+function pipe_t.discard_transfer_payload(payload: string): integer
+```
+
+The state-local binding selects the destination loop. The read-only status
+query rejects unsupported or pending operations. Encoding detaches one idle
+endpoint; reconstruction adopts it once with fresh native storage. The caller
+owns payload delivery, adoption, and recovery. Ordinary async programs use the
+binding installed by their active Runtime. The explicit discard methods consume
+a known unadopted byte payload without a loop and return native close status.
+A close attempt consumes ownership even when it reports an error.
 
 ## addrinfo_result_t:entries
 

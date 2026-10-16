@@ -141,6 +141,45 @@ its authoritative reservation check and preserves the existing duplicate-wait
 diagnostic. Closing a server also drains and closes every unread accepted
 connection; a generic queue cannot infer that these values own sockets.
 
+## Connection transfer ownership
+
+`net.Connection` implements the synchronous custom record transfer hooks. Its
+encoder checks active, nonclosing Runtime ownership, connected state, subscription waiter,
+tracked output count and input observers before asking the public UV layer to
+validate native request ownership. It has no Task or cancellation checkpoint;
+idle handoff also works from synchronous transfer callbacks. `stream_transfer_status(stream, true)`
+permits a stoppable persistent read watcher but never an outstanding native
+read request. This preserves prefetch and HTTP observation semantics: Windows
+overlapped reads remain a reason to reject, rather than changing all net reads
+to demand-driven production.
+
+Windows libuv decrements a connect request's native pending count after invoking
+its callback. Completion delivery can resume the waiting Titan Task inside that
+callback, so returning from `connect` alone does not prove native retirement.
+The transfer gate retains its rejection until the callback returns; callers
+moving a fresh connection yield once before handoff. No scheduler exception or
+pending-count exemption is needed.
+
+`BufferedSubscription:snapshot_pending()` copies unread queue references and
+terminal status without consuming the source queue. The encoder snapshots
+binary excess/queue bytes, typed failure and reader state before stopping the
+watcher and invoking the TCP handle hook. A rejected native handoff restarts a
+previously active watcher. After native detachment succeeds, it clears the
+source subscription, callback and scratch references. The source handle's
+ordinary asynchronous close retains its native callback ownership through
+retirement. A private protobuf schema combines those copied fields and the
+known TCP child bytes. A lexical guard discards the detached TCP payload if
+outer serialization raises. Public `Connection.discard_transfer_payload`
+decodes this same schema and delegates directly to UV without Runtime adoption.
+
+Reconstruction decodes the same schema before adopting the endpoint, creates a
+fresh `Connection` and subscription on the destination Runtime, restores
+unread bytes, and resumes a previously active live reader. No source-state
+callback, Task or subscription is copied. The low-level endpoint gate rejects
+half-closed streams because opening the duplicate does not reproduce libuv's
+directional flags. Policy ownership is manual and exactly once; neither
+encoding nor transport delivery installs a recovery registry or drop finalizer.
+
 ## Close and Runtime ownership
 
 A native owner is closed when it is no longer initialized or libuv reports it

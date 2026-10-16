@@ -2147,6 +2147,21 @@ local portable_c_descriptor_fields = {
         fields = true,
         complete = true,
         has_fam = true,
+        origin = true,
+    },
+    ["Type.CUnion"] = {
+        _tag = true, cname = true, tagname = true, typedef = true,
+        fields = true, complete = true, origin = true,
+    },
+    ["Type.CArray"] = {
+        _tag = true, elem = true, len = true, quals = true,
+    },
+    ["Type.CTypedef"] = {
+        _tag = true, name = true, target = true, quals = true, origin = true,
+    },
+    ["Type.CField"] = {
+        _tag = true, owner = true, name = true, type = true,
+        bitfield = true, flexible_array = true,
     },
 }
 
@@ -2557,7 +2572,8 @@ local function validate_record_interface(record, context, seen)
         local ok, err = validate_interface_type(
             field.type, value_context(owner_context), seen)
         if not ok then return nil, err end
-        if not types.has_tvalue_representation(field.type) then
+        if not types.has_tvalue_representation(field.type)
+           and not require("titan-compiler.nominallayout").classify(field.type) then
             return nil, "record field '" .. field.name ..
                 "' has no TValue representation"
         end
@@ -3012,6 +3028,10 @@ validate_interface_type = function(typ, context, seen)
                and pointee_tag ~= "Type.CFloat"
                and pointee_tag ~= "Type.CPointer"
                and pointee_tag ~= "Type.CFunction"
+               and pointee_tag ~= "Type.CArray"
+               and pointee_tag ~= "Type.CTypedef"
+               and pointee_tag ~= "Type.CStruct"
+               and pointee_tag ~= "Type.CUnion"
                and not types.is_c_lua_state(typ.pointee)) then
             return nil, "portable C pointer has a noncanonical shape"
         end
@@ -3020,13 +3040,14 @@ validate_interface_type = function(typ, context, seen)
         local valid, validation_error =
             validate_interface_type(typ.pointee, nested, seen)
         if not valid then return nil, validation_error end
-        if not types.is_portable_c_type_graph(typ) then
+        if not types.is_exportable_c_type_graph(typ) then
             return nil,
                 "portable C pointer graph is cyclic or noncanonical"
         end
         return true
     elseif tag == "Type.CFunction" then
-        if not context or context.kind ~= "c-pointee"
+        if not context or (context.kind ~= "c-pointee"
+                           and context.kind ~= "module-member")
            or dense_plain_list_length(typ.params) == nil
            or type(typ.ret) ~= "table"
            or typ.vararg ~= false or typ.abi ~= nil then
@@ -3038,7 +3059,10 @@ validate_interface_type = function(typ, context, seen)
             if type(param) ~= "table"
                or (param._tag ~= "Type.CInteger"
                    and param._tag ~= "Type.CFloat"
-                   and param._tag ~= "Type.CPointer") then
+                   and param._tag ~= "Type.CPointer"
+                   and param._tag ~= "Type.CTypedef"
+                   and param._tag ~= "Type.CStruct"
+                   and param._tag ~= "Type.CUnion") then
                 return nil, "portable C function parameter has an invalid shape"
             end
             local ok, err = validate_interface_type(param, nested, seen)
@@ -3048,7 +3072,10 @@ validate_interface_type = function(typ, context, seen)
         if typ.ret._tag ~= "Type.CVoid"
            and typ.ret._tag ~= "Type.CInteger"
            and typ.ret._tag ~= "Type.CFloat"
-           and typ.ret._tag ~= "Type.CPointer" then
+           and typ.ret._tag ~= "Type.CPointer"
+           and typ.ret._tag ~= "Type.CTypedef"
+           and typ.ret._tag ~= "Type.CStruct"
+           and typ.ret._tag ~= "Type.CUnion" then
             return nil, "portable C function return has an invalid shape"
         end
         return validate_interface_type(typ.ret, nested, seen)
@@ -3058,16 +3085,71 @@ validate_interface_type = function(typ, context, seen)
         if type(typ.count) ~= "boolean"
            or (pointee_tag ~= "Type.CInteger"
                and pointee_tag ~= "Type.CFloat"
-               and pointee_tag ~= "Type.CPointer") then
+               and pointee_tag ~= "Type.CPointer"
+               and pointee_tag ~= "Type.CTypedef"
+               and pointee_tag ~= "Type.CStruct"
+               and pointee_tag ~= "Type.CUnion"
+               and pointee_tag ~= "Type.CArray") then
             return nil, "portable owned C type has a noncanonical shape"
         end
         local nested = value_context(context)
         nested.kind = "c-owned-payload"
         return validate_interface_type(typ.pointee, nested, seen)
-    elseif tag == "Type.CStruct" then
-        if not types.is_c_lua_state(typ) or not context
-           or context.kind ~= "c-pointee" then
-            return nil, "C struct is not valid as a value-facing type"
+    elseif tag == "Type.CTypedef" then
+        local graph = context and context.kind == "c-pointee"
+            and types.CPointer(typ, {}) or typ
+        if not valid_source_identifier(typ.name) or type(typ.origin) ~= "string"
+           or typ.origin == "" or not types.is_exportable_c_type_graph(graph) then
+            return nil, "C typedef has an invalid declaration identity or target"
+        end
+        return validate_interface_type(typ.target, context, seen)
+    elseif tag == "Type.CArray" then
+        if not types.valid_c_extent(typ.len)
+           or not types.is_exportable_c_type_graph(typ) then
+            return nil, "C array has an invalid fixed extent or element type"
+        end
+        local nested = value_context(context)
+        nested.kind = "c-field"
+        return validate_interface_type(typ.elem, nested, seen)
+    elseif tag == "Type.CStruct" or tag == "Type.CUnion" then
+        if types.is_c_lua_state(typ) then
+            if not context or context.kind ~= "c-pointee" then
+                return nil, "C struct is not valid as a value-facing type"
+            end
+            return true
+        end
+        local graph = context and context.kind == "c-pointee"
+            and types.CPointer(typ, {}) or typ
+        if not types.is_exportable_c_type_graph(graph)
+           or type(typ.origin) ~= "string" or typ.origin == ""
+           or (typ.cname ~= nil and typ.cname ~= typ.tagname
+               and typ.cname ~= typ.typedef
+               and typ.cname ~= (tag == "Type.CStruct" and "struct " or "union ") ..
+                   tostring(typ.tagname)) then
+            return nil, "C aggregate has an invalid declaration identity or field graph"
+        end
+        local count = dense_array_length(typ.fields)
+        if not count or not typ.complete and count ~= 0 then
+            return nil, "C aggregate field list is invalid"
+        end
+        local names = {}
+        local nested = value_context(context)
+        nested.kind = "c-field"
+        for _, field in ipairs(typ.fields) do
+            local fields_ok, fields_err = validate_portable_c_descriptor_fields(field)
+            if not fields_ok then return nil, fields_err end
+            if not valid_source_identifier(field.name) or names[field.name]
+               or field.owner ~= nil and field.owner ~= typ then
+                return nil, "C aggregate field has an invalid owner or name"
+            end
+            names[field.name] = field
+            local field_ok, field_err = validate_interface_type(field.type, nested, seen)
+            if not field_ok then return nil, field_err end
+        end
+        for name, field in pairs(typ.fields) do
+            if type(name) ~= "number" and names[name] ~= field then
+                return nil, "C aggregate has an invalid named field projection"
+            end
         end
         return true
     elseif tag == "Type.Nominal" then
@@ -3189,7 +3271,8 @@ validate_interface_type = function(typ, context, seen)
             local ok, err = validate_interface_type(
                 part.type, value_context(context), seen)
             if not ok then return nil, err end
-            if not types.has_tvalue_representation(part.type) then
+            if not types.has_tvalue_representation(part.type)
+               and not require("titan-compiler.nominallayout").classify(part.type) then
                 return nil, "union variant '" .. typ.name ..
                     "' payload has no TValue representation"
             end
@@ -3287,6 +3370,7 @@ function driver.validate_module_interface(modtype, modname)
             member._tag ~= "Type.ModuleVariable") or
            member.modname ~= modname or
            not valid_source_identifier(member.name) or member.islocal
+           or member._foreign_source ~= nil
            or type(member.type) ~= "table" or
            type(member.type._tag) ~= "string" then
             return nil, "module member " .. index .. " has an invalid schema"
@@ -3305,7 +3389,8 @@ function driver.validate_module_interface(modtype, modname)
             if signature._tag == "Type.FunctionScheme" then
                 signature = signature.signature
             end
-            if signature._tag == "Type.Function" then
+            if signature._tag == "Type.Function"
+                    or signature._tag == "Type.CFunction" then
                 if not validate_name_list(
                         member.paramnames, #signature.params) then
                     return nil, "module function '" .. member.name ..
@@ -3341,6 +3426,7 @@ function driver.validate_module_interface(modtype, modname)
         if member._tag == "Type.ModuleMember"
            and member.type._tag ~= "Type.Function"
            and member.type._tag ~= "Type.FunctionScheme"
+           and member.type._tag ~= "Type.CFunction"
            and member.type._tag ~= "Type.Record"
            and member.type._tag ~= "Type.Union" then
             return nil, "module member '" .. member.name ..
@@ -3414,6 +3500,8 @@ function driver.decode_module_interface(serialized, modname, origin)
     if decoded.n ~= 2 then
         return nil, "serialized module interface must return exactly one value"
     end
+    local references_ok, references_error = types.resolve_compiled_c_references(decoded[2])
+    if not references_ok then return nil, references_error end
     local valid, validation_err =
         driver.validate_module_interface(decoded[2], modname)
     if not valid then return nil, validation_err end
@@ -5787,6 +5875,8 @@ function driver.tableloader(modtable, imported, deps, options)
         if not modtf then return false, load_err end
         local ok, modt_or_err = pcall(modtf)
         if not ok then return false, modt_or_err end
+        local references_ok, references_error = types.resolve_compiled_c_references(modt_or_err)
+        if not references_ok then return false, references_error end
         imported[modname] = {
             kind = "source", ast = ast, type = modt_or_err, completion = ast._completion,
             source_type = source_type, filename = modf,
@@ -5859,6 +5949,7 @@ local RUNTIME_ARCHIVE_INPUTS = {
     "titan.h",
     "minicoro.c",
     "minicoro.h",
+    "transfer.h",
     "titan/ffi.h",
 }
 local RUNTIME_ARCHIVE_MEMBERS = {
@@ -7150,7 +7241,7 @@ end
 -- These are actual producer definitions. All post-init native/data lookup
 -- uses the already generated canonical callback; collision inventories also
 -- contain hidden and source-only names and are not PE export inventories.
-function driver.windows_provider_exports(module_names)
+function driver.windows_provider_exports(module_names, interfaces, library_name)
     local names, seen = {}, {}
     for _, modname in ipairs(module_names) do
         local mangled = driver.mangle_module_name(modname)
@@ -7161,9 +7252,17 @@ function driver.windows_provider_exports(module_names)
             seen[name], names[#names + 1] = true, name
         end
         names[#names + 1] = "luaopen_" .. mangled
+        local interface = interfaces and interfaces[modname]
+        for _, symbol in ipairs(interface and
+                coder.foreign_external_symbols(modname, interface) or {}) do
+            assert(not seen[symbol], "duplicate Windows module export " .. symbol)
+            seen[symbol], names[#names + 1] = true, symbol
+        end
     end
     table.sort(names, util.bytewise_less)
-    return "EXPORTS\n    " .. table.concat(names, "\n    ") .. "\n", names
+    local library = library_name and
+        ("LIBRARY " .. string.format("%q", path.basename(library_name)) .. "\n") or ""
+    return library .. "EXPORTS\n    " .. table.concat(names, "\n    ") .. "\n", names
 end
 
 function driver.windows_launcher_manifest()
@@ -8333,6 +8432,28 @@ function driver.compile_archive_validation_image(
         module_names)
 end
 
+-- PE exports need the public raw declarations even when a fresh publication
+-- process has only compile-only objects and their existing source metadata.
+local function windows_link_interfaces(libnames, extra_objects, ordered_payload)
+    local objects = { table.unpack(libnames or {}) }
+    if ordered_payload then
+        for _, input in ipairs(ordered_payload) do
+            if input.object then
+                objects[#objects + 1] = assert(input.link_path or input.path)
+            end
+        end
+    else
+        append_argv(objects, extra_objects or {})
+    end
+    local interfaces = {}
+    for _, object in ipairs(objects) do
+        local bytes = util.get_file_contents(object)
+        local entry = bytes and objectmetadata.read(bytes, object)
+        if entry then interfaces[entry.type.name] = entry.type end
+    end
+    return interfaces
+end
+
 function driver.compile_library_output(soname, libnames, link, verbose,
                                        extra_objects, static_archives,
                                        ordered_payload, install_name,
@@ -8372,7 +8493,10 @@ function driver.compile_library_output(soname, libnames, link, verbose,
     append_argv(args, { "-o", soname })
     local export_file
     if platform.windows then
-        local exports = driver.windows_provider_exports(module_names)
+        local interfaces = windows_link_interfaces(
+            libnames, extra_objects, ordered_payload)
+        local exports = driver.windows_provider_exports(
+            module_names, interfaces, install_name or soname)
         export_file = soname .. ".def"
         local wrote, write_error = util.set_file_contents(export_file, exports)
         if not wrote then return nil, write_error end

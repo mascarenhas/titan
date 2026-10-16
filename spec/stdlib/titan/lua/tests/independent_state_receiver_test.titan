@@ -1,5 +1,4 @@
 local independent_receiver = import "lua.receiver_fixture"
-local receiver_strings = import "string"
 local receiver_clock = import "uv"
 
 local function transfer_pointer(item: async.TransferValue): foreign *void
@@ -10,7 +9,7 @@ local function transfer_pointer(item: async.TransferValue): foreign *void
 end
 
 local function receiver_echo_payload(ordinal: integer): string
-  return "message-" .. ordinal .. "\0" .. receiver_strings.rep("a\0b", 1024)
+  return "message-" .. ordinal .. "\0" .. strings.rep("a\0b", 1024)
 end
 
 local function stop_receiver_worker(handle: foreign *void, worker: async.Task)
@@ -149,7 +148,9 @@ function test_receiver_lua_close_races_host_sends(_context: test.Context)
     local deadline = receiver_clock.hrtime() + 5000000000
     -- The independent worker closes on another OS thread while this Task
     -- continues submitting native messages. Keep the owner alive throughout.
-    while not closed and attempts < 8192 and receiver_clock.hrtime() < deadline do
+    -- Bound elapsed time, not the number of host scheduling turns: a fast
+    -- sender can exhaust thousands of attempts before the worker gets CPU.
+    while not closed and receiver_clock.hrtime() < deadline do
       attempts = attempts + 1
       do
         async.send(handle, async.TransferValue.is_string("racing\0send"))
@@ -157,7 +158,9 @@ function test_receiver_lua_close_races_host_sends(_context: test.Context)
         if error ~= "receiver is closed" then raise end
         closed = true
       end
-      if attempts % 32 == 0 then timer.yield() end
+      -- Pace batches so a delayed worker does not accumulate an unbounded
+      -- queue while the host waits for the actual close admission boundary.
+      if not closed and attempts % 32 == 0 then timer.sleep(1) end
     end
     test.assert(closed, "concurrent sends did not observe Receiver closure before the deadline")
     test.assert(transfer_string(replies:wait()) == "closed",

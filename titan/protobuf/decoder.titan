@@ -1,0 +1,312 @@
+--- Bounded wire parsing and fresh nominal reconstruction.
+-- @module titan.protobuf
+
+local record WireField
+  const number: integer
+  const wire: integer
+  const bits: integer
+  const bytes: string
+  previous: integer
+end
+
+local record WireReader
+  const source: string
+  position: integer
+end
+
+local record Message
+  const fields: {WireField}
+  last_by_number: {integer: integer}?
+end
+
+local function WireReader:varint(): integer
+  local bits = 0
+  for index = 0, 9 do
+    if self.position > #self.source then raise "protobuf: truncated varint" end
+    local byte: integer = string.byte(self.source, self.position)
+    self.position = self.position + 1
+    if index == 9 and byte > 1 then raise "protobuf: varint overflow" end
+    bits = bits | ((byte & 127) << (index * 7))
+    if byte < 128 then return bits end
+  end
+  raise "protobuf: varint overflow"
+end
+
+local function WireReader:take(count: integer): string
+  if count < 0 or count > #self.source - self.position + 1 then
+    raise "protobuf: truncated field"
+  end
+  local bytes = string.sub(self.source, self.position, self.position + count - 1)
+  self.position = self.position + count
+  return bytes
+end
+
+local function WireReader:key(): (integer, integer)
+  local key = self:varint()
+  if key < 0 or key > 4294967295 then raise "protobuf: invalid field key" end
+  local number = key >> 3
+  local wire = key & 7
+  if number == 0 then raise "protobuf: field number zero" end
+  return number, wire
+end
+
+local function WireReader:field(number: integer, wire: integer, depth: integer): WireField
+  if wire == 0 then return WireField(number, wire, self:varint(), "", 0) end
+  if wire == 1 then return WireField(number, wire, 0, self:take(8), 0) end
+  if wire == 2 then
+    local count = self:varint()
+    if count < 0 or count > 2147483647 then raise "protobuf: invalid byte length" end
+    return WireField(number, wire, 0, self:take(count), 0)
+  end
+  if wire == 5 then return WireField(number, wire, 0, self:take(4), 0) end
+  if wire == 3 then
+    require_depth(depth)
+    while self.position <= #self.source do
+      local nested_number, nested_wire = self:key()
+      if nested_wire == 4 then
+        if nested_number ~= number then raise "protobuf: mismatched end group" end
+        return WireField(number, wire, 0, "", 0)
+      end
+      self:field(nested_number, nested_wire, depth + 1)
+    end
+    raise "protobuf: unterminated group"
+  end
+  raise "protobuf: invalid wire type"
+end
+
+local function read_message(bytes: string): Message
+  local reader = WireReader(bytes, 1)
+  local fields: {WireField} = {}
+  while reader.position <= #bytes do
+    local number, wire = reader:key()
+    fields[#fields + 1] = reader:field(number, wire, 1)
+  end
+  return Message(fields, nil)
+end
+
+local function Message:last_index(number: integer): integer
+  local count = #self.fields
+  if count == 0 then return 0 end
+  if count == 1 then
+    if self.fields[1].number == number then return 1 end
+    return 0
+  end
+  local last_by_number? = self.last_by_number
+  if last_by_number == nil then
+    -- Ordered-only readers need no index; grow with encountered numeric tags.
+    local built: {integer: integer} = {}
+    for index = 1, count do
+      local field = self.fields[index]
+      field.previous = built[field.number] or 0
+      built[field.number] = index
+    end
+    self.last_by_number = built
+    last_by_number = built
+  end
+  return last_by_number[number] or 0
+end
+
+local function Message:last(number: integer): WireField?
+  local index = self:last_index(number)
+  if index == 0 then return nil end
+  return self.fields[index]
+end
+
+local function require_wire(field: WireField, expected: integer)
+  if field.wire ~= expected then raise "protobuf: unexpected wire type" end
+end
+
+-- Singular embedded messages merge across repeated occurrences. Scalars use
+-- the final occurrence, as required by the Protocol Buffers wire contract.
+local function Message:merged(number: integer): string
+  local index = self:last_index(number)
+  if index == 0 then return "" end
+  local field = self.fields[index]
+  require_wire(field, 2)
+  if field.previous == 0 then return field.bytes end
+  -- Walk only this field's occurrences, then restore wire encounter order.
+  local chunks: {string} = {}
+  while index ~= 0 do
+    field = self.fields[index]
+    require_wire(field, 2)
+    chunks[#chunks + 1] = field.bytes
+    index = field.previous
+  end
+  local output = string.writer()
+  for part = #chunks, 1, -1 do
+    output:write(chunks[part])
+  end
+  return output:drain()
+end
+
+local function decode_record(bytes: string, descriptor: reflect.RecordType,
+                              depth: integer): value
+  require_depth(depth)
+  require_record(descriptor)
+  local message = read_message(bytes)
+  local fields: {value} = {}
+  for index = 1, #descriptor.fields do
+    fields[index] = decode_field(message, field_number(index),
+                                 descriptor.fields[index].type, depth + 1)
+  end
+  return descriptor:construct(fields as const {value})
+end
+
+local function decode_union(bytes: string, descriptor: reflect.UnionType,
+                             depth: integer): value
+  require_depth(depth)
+  require_union(descriptor)
+  local message = read_message(bytes)
+  local selected = 0
+  local payload = string.writer()
+  for index = 1, #message.fields do
+    local field = message.fields[index]
+    local ordinal = field_ordinal(field.number)
+    if ordinal >= 1 and ordinal <= #descriptor.variants then
+      require_wire(field, 2)
+      if selected ~= ordinal then
+        payload = string.writer()
+        selected = ordinal
+      end
+      payload:write(field.bytes)
+    end
+  end
+  if selected == 0 then raise "protobuf: union has no recognized variant" end
+  local variant = descriptor.variants[selected]
+  local parts_message = read_message(payload:drain())
+  local parts: {value} = {}
+  for index = 1, #variant.parts do
+    parts[index] = decode_field(parts_message, field_number(index),
+                                variant.parts[index].type, depth + 1)
+  end
+  return descriptor:construct(variant.tag, parts as const {value})
+end
+
+local function decode_array(bytes: string, constness: reflect.ArrayTypeConstness,
+                             element: reflect.Type, depth: integer): value
+  require_depth(depth)
+  local message = read_message(bytes)
+  local entries: {value} = {}
+  local count = 0
+  local is_const = false
+  for index = 1, #message.fields do
+    local field = message.fields[index]
+    if field.number == 1 then
+      require_wire(field, 2)
+      count = count + 1
+      local slot = read_message(field.bytes)
+      if slot:last(1) ~= nil then
+        entries[count] = decode_field(slot, 1, element, depth + 1)
+      end
+    elseif field.number == 2 then
+      require_wire(field, 0)
+      if field.bits ~= 0 and field.bits ~= 1 then raise "protobuf: invalid boolean" end
+      is_const = field.bits == 1
+    end
+  end
+  case constness
+  when is_const() then return entries as const {value}
+  when is_maybe_const() then
+    if is_const then return entries as const {value} end
+  end
+  return entries
+end
+
+local function decode_foreign_array(bytes: string, element: reflect.Type,
+                                     depth: integer): value
+  require_depth(depth)
+  local message = read_message(bytes)
+  local entries: {value} = {}
+  local count = 0
+  for index = 1, #message.fields do
+    local field = message.fields[index]
+    if field.number == 1 then
+      require_wire(field, 2)
+      count = count + 1
+      entries[count] = decode_field(read_message(field.bytes), 1, element, depth + 1)
+    end
+  end
+  return entries as const {value}
+end
+
+local function decode_foreign_struct(bytes: string,
+                                      descriptor: reflect.ForeignStructType,
+                                      depth: integer): value
+  require_depth(depth)
+  require_struct(descriptor)
+  local message = read_message(bytes)
+  local fields: {value} = {}
+  for index = 1, #descriptor.fields do
+    fields[index] = decode_field(message, field_number(index),
+                                 descriptor.fields[index].type, depth + 1)
+  end
+  return fields as const {value}
+end
+
+local function decode_field(message: Message, number: integer,
+                              descriptor: reflect.Type, depth: integer): value
+  require_depth(depth)
+  local resolved = resolve_type(descriptor)
+  local field? = message:last(number)
+  case resolved
+  when is_option(base) then
+    if field == nil then return nil end
+    return decode_field(message, number, base, depth)
+  when is_nil() then
+    if field ~= nil then read_message(message:merged(number)) end
+    return nil
+  end
+  if field == nil then raise "protobuf: missing required field " .. number end
+  case resolved
+  when is_boolean() then
+    require_wire(field, 0)
+    if field.bits ~= 0 and field.bits ~= 1 then raise "protobuf: invalid boolean" end
+    return field.bits == 1
+  when is_integer() then
+    require_wire(field, 0)
+    return unzigzag(field.bits)
+  when is_float() then
+    require_wire(field, 1)
+    return (string.unpack("<d", field.bytes))
+  when is_string() then
+    require_wire(field, 2)
+    return field.bytes
+  when is_array{is_const, elem_descriptor} then
+    return decode_array(message:merged(number), is_const, elem_descriptor, depth)
+  when is_record(record_type) then
+    return decode_record(message:merged(number), record_type, depth)
+  when is_union(union_type) then
+    return decode_union(message:merged(number), union_type, depth)
+  when is_foreign_integer{spelling, is_signed, bits} then
+    require_wire(field, 0)
+    local result = field.bits
+    if is_signed then result = unzigzag(result) end
+    check_integer(result, spelling, is_signed, bits)
+    return result
+  when is_foreign_float(spelling) then
+    if spelling == "long double" then
+      require_wire(field, 2)
+      return field.bytes
+    elseif spelling == "float" then
+      require_wire(field, 5)
+      return (string.unpack("<f", field.bytes))
+    elseif spelling == "double" then
+      require_wire(field, 1)
+      return (string.unpack("<d", field.bytes))
+    end
+    raise "protobuf: unsupported foreign floating type " .. spelling
+  when is_foreign_pointer() then
+    require_wire(field, 1)
+    local bits: integer = string.unpack("<i8", field.bytes)
+    local address = ffi.titan_protobuf_bits_pointer(bits)
+    local recovered: integer = ffi.titan_protobuf_pointer_bits(address)
+    if recovered ~= bits then raise "protobuf: pointer address out of range" end
+    return address
+  when is_foreign_struct(structure) then
+    return decode_foreign_struct(message:merged(number), structure, depth)
+  when is_foreign_array{elem_descriptor, len} then
+    require_foreign_array(len)
+    return decode_foreign_array(message:merged(number), elem_descriptor, depth)
+  else raise "protobuf: unsupported field type"
+  end
+end

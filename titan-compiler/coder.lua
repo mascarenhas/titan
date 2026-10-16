@@ -13,6 +13,8 @@ require "titan-compiler.coder.immediate"
 require "titan-compiler.coder.expressions"
 require "titan-compiler.coder.declarations"
 require "titan-compiler.coder.native_record_fields"
+require "titan-compiler.coder.reflection"
+require "titan-compiler.coder.closure_transfer"
 require "titan-compiler.coder.module"
 require "titan-compiler.coder.binary"
 require "titan-compiler.coder.generate"
@@ -27,4 +29,5 @@ return {
     generate_foreign_header = implementation.generate_foreign_header,
     external_symbols = implementation.external_symbols,
     interface_external_symbols = implementation.interface_external_symbols,
+    foreign_external_symbols = implementation.foreign_external_symbols,
 }

@@ -103,8 +103,24 @@ function types.CArray(elem, len, quals)
 end
 
 local raw_CTypedef = types.CTypedef
-function types.CTypedef(name, target, quals)
-    return raw_CTypedef(name, target, quals or {})
+function types.CTypedef(name, target, quals, origin)
+    local result = raw_CTypedef(name, target, quals or {})
+    result.origin = origin
+    return result
+end
+
+local raw_CStruct = types.CStruct
+function types.CStruct(cname, tagname, typedef, fields, complete, has_fam, origin)
+    local result = raw_CStruct(cname, tagname, typedef, fields, complete, has_fam)
+    result.origin = origin
+    return result
+end
+
+local raw_CUnion = types.CUnion
+function types.CUnion(cname, tagname, typedef, fields, complete, origin)
+    local result = raw_CUnion(cname, tagname, typedef, fields, complete)
+    result.origin = origin
+    return result
 end
 
 -- Keep the pre-generics constructors source-compatible while making the
@@ -496,6 +512,257 @@ function types.is_portable_c_type_graph(root)
     return visit(root, "root")
 end
 
+-- Header-dependent public C declarations retain identity, never header text or
+-- an alternative C definition. Consumers must make the original declaration
+-- visible through their own foreign imports (or an explicit source import).
+function types.c_declaration_origin(typ)
+    return typ.origin or typ._ffi_scope
+end
+
+local function c_identifier(name)
+    return type(name) == "string" and name:match("^[A-Za-z_][A-Za-z0-9_]*$") ~= nil
+end
+
+function types.c_reference_key(typ)
+    local tag = typ._tag
+    local kind = tag == "Type.CTypedef" and "typedef"
+        or tag == "Type.CStruct" and "struct"
+        or tag == "Type.CUnion" and "union"
+    if not kind then return nil end
+    local name = tag == "Type.CTypedef" and typ.name
+        or typ.tagname or typ.typedef or typ.cname
+    if type(name) ~= "string" then return nil end
+    local origin = types.c_declaration_origin(typ)
+    return kind .. "@" .. (origin and origin .. "@" or "") .. name
+end
+
+-- CNamed is only a wire backreference. Resolve it once in a freshly decoded
+-- interface, before publication, and restore the ordinary named field views.
+function types.resolve_compiled_c_references(root)
+    local declarations, duplicates, seen = {}, {}, {}
+    local function collect(value)
+        if type(value) ~= "table" or seen[value] then return true end
+        seen[value] = true
+        local key = types.c_reference_key(value)
+        if key then
+            if declarations[key] and declarations[key] ~= value then
+                duplicates[#duplicates + 1] = {key, declarations[key], value}
+            else
+                declarations[key] = value
+            end
+        end
+        for _, child in pairs(value) do
+            local ok, err = collect(child)
+            if not ok then return nil, err end
+        end
+        return true
+    end
+    local ok, err = collect(root)
+    if not ok then return nil, err end
+    seen = {}
+    local function resolve(value)
+        if type(value) ~= "table" or seen[value] then return true end
+        seen[value] = true
+        for key, child in pairs(value) do
+            if type(child) == "table" and child._tag == "Type.CNamed" then
+                for name in pairs(child) do
+                    if name ~= "_tag" and name ~= "tagname" then
+                        return nil, "C declaration reference contains unexpected fields"
+                    end
+                end
+                local declaration = declarations[child.tagname]
+                if not declaration then
+                    return nil, "unknown C declaration reference " .. tostring(child.tagname)
+                end
+                value[key] = declaration
+            else
+                local resolved, resolution_error = resolve(child)
+                if not resolved then return nil, resolution_error end
+            end
+        end
+        if value._tag == "Type.CStruct" or value._tag == "Type.CUnion" then
+            if type(value.fields) ~= "table" then
+                return nil, "C aggregate has no field list"
+            end
+            local names = {}
+            for _, field in ipairs(value.fields) do
+                if type(field) ~= "table" or field._tag ~= "Type.CField"
+                   or type(field.name) ~= "string" or names[field.name]
+                   or field.owner ~= nil and field.owner ~= value
+                   or value.fields[field.name] ~= nil and value.fields[field.name] ~= field then
+                    return nil, "C aggregate has an invalid field projection"
+                end
+                names[field.name] = true
+                field.owner = value
+                value.fields[field.name] = field
+            end
+        end
+        return true
+    end
+    local resolved, resolution_error = resolve(root)
+    if not resolved then return nil, resolution_error end
+    -- A repeated typedef may spell its target as CNamed in one occurrence and
+    -- as a full declaration in another. Compare only after all references and
+    -- field owner views have been restored. Typedef equality alone is nominal;
+    -- wire consistency additionally requires identical target graphs.
+    for _, duplicate in ipairs(duplicates) do
+        local key, first, other = table.unpack(duplicate)
+        local compared, equal = pcall(types.equals, first, other)
+        if compared and equal and first._tag == "Type.CTypedef" then
+            compared, equal = pcall(types.equals, first.target, other.target)
+        end
+        if not compared or not equal then
+            return nil, "duplicate C declaration identity " .. key
+        end
+    end
+    return true
+end
+
+-- Preserve target expressions rather than evaluating C arithmetic in Lua.
+-- Every atom is a token, and the declarator renderer checks the expression
+-- structure. Metadata cannot smuggle declarations/directives through an extent.
+function types.valid_c_extent(extent)
+    local operators = {
+        ["+"]=true, ["-"]=true, ["*"]=true, ["/"]=true, ["%"]=true,
+        ["<<"]=true, [">>"]=true, ["&"]=true, ["|"]=true, ["^"]=true,
+        ["~"]=true, ["!"]=true, ["=="]=true, ["!="]=true, ["<"]=true,
+        [">"]=true, ["<="]=true, [">="]=true, ["&&"]=true, ["||"]=true,
+        ["?"]=true, [","]=true, sizeof=true,
+    }
+    local keys = {
+        postfix=true, idx=true, args=true, dot=true, arrow=true, type=true,
+        id=true, declarator=true, params=true, param=true, paramstyle=true,
+        name=true, array_static=true, array_qualifiers=true,
+    }
+    local active = {}
+    local function valid(value, depth)
+        if depth > 64 then return false end
+        if type(value) == "number" then return math.type(value) == "integer" end
+        if type(value) == "boolean" then return true end
+        if type(value) == "string" then
+            return c_identifier(value) or value == "*"
+                or value:match("^%d+[uUlL]*$") ~= nil
+                or value:match("^0[xX]%x+[uUlL]*$") ~= nil
+        end
+        if type(value) ~= "table" or getmetatable(value) ~= nil or active[value] then
+            return false
+        end
+        active[value] = true
+        local count, maximum = 0, 0
+        for key, child in pairs(value) do
+            if type(key) == "number" and math.type(key) == "integer" and key > 0 then
+                count, maximum = count + 1, math.max(maximum, key)
+                if not valid(child, depth + 1) then active[value] = nil; return false end
+            elseif key == "op" or key == "unop" then
+                if not operators[child] then active[value] = nil; return false end
+            elseif not keys[key] or not valid(child, depth + 1) then
+                active[value] = nil
+                return false
+            end
+        end
+        active[value] = nil
+        return count == maximum
+    end
+    if extent == nil or extent == "" or not valid(extent, 1) then return false end
+    if type(extent) == "number" and extent <= 0 then return false end
+    return pcall(require("titan-compiler.cdeclarator").render_array_extent, extent)
+end
+
+function types.is_exportable_c_type_graph(root)
+    local active = {}
+    local function visit(typ, position)
+        if type(typ) ~= "table" then return false end
+        local tag = typ._tag
+        if active[typ] then
+            if tag == "Type.CPointer" then
+                local pointee = types.resolve_c_typedef(typ.pointee)
+                return pointee and active[pointee]
+                    and (pointee._tag == "Type.CStruct" or pointee._tag == "Type.CUnion")
+            end
+            local resolved = types.resolve_c_typedef(typ)
+            return position == "pointee" and resolved
+                and (resolved._tag == "Type.CStruct" or resolved._tag == "Type.CUnion")
+        end
+        active[typ] = true
+        local ok = false
+        if tag == "Type.CVoid" then
+            ok = position == "root" or position == "pointee" or position == "return"
+        elseif tag == "Type.CInteger" or tag == "Type.CFloat" then
+            ok = types.is_portable_c_type_graph(typ)
+        elseif tag == "Type.CTypedef" then
+            local origin = types.c_declaration_origin(typ)
+            ok = c_identifier(typ.name) and type(origin) == "string" and origin ~= ""
+                and dense_const_qualifiers(typ.quals)
+                and visit(typ.target, position)
+        elseif tag == "Type.CPointer" then
+            ok = dense_const_qualifiers(typ.quals)
+                and visit(typ.pointee, "pointee")
+                and typ.pointee._tag ~= "Type.COwned"
+        elseif tag == "Type.CArray" then
+            ok = types.valid_c_extent(typ.len)
+                and dense_const_qualifiers(typ.quals)
+                and visit(typ.elem, "field")
+                and typ.elem._tag ~= "Type.CFunction"
+                and typ.elem._tag ~= "Type.COwned"
+        elseif tag == "Type.CStruct" or tag == "Type.CUnion" then
+            if types.is_c_lua_state(typ) then
+                ok = position == "pointee"
+            else
+                local origin = types.c_declaration_origin(typ)
+                ok = type(origin) == "string" and origin ~= ""
+                    and (c_identifier(typ.tagname) or c_identifier(typ.typedef))
+                    and (typ.tagname == nil or c_identifier(typ.tagname))
+                    and (typ.typedef == nil or c_identifier(typ.typedef))
+                    and (typ.cname == nil or typ.cname == typ.tagname
+                        or typ.cname == typ.typedef
+                        or typ.cname == (tag == "Type.CStruct" and "struct " or "union ") ..
+                            tostring(typ.tagname))
+                    and type(typ.complete) == "boolean"
+                    and (typ.complete or position == "pointee")
+                    and not typ.has_fam and type(typ.fields) == "table"
+                if ok then
+                    for _, field in ipairs(typ.fields) do
+                        if field._tag ~= "Type.CField" or not c_identifier(field.name)
+                           or field.flexible_array ~= false
+                           or field.bitfield ~= nil and not types.valid_c_extent(field.bitfield)
+                           or not visit(field.type, "field")
+                           or field.type._tag == "Type.CFunction"
+                           or field.type._tag == "Type.COwned" then
+                            ok = false
+                            break
+                        end
+                    end
+                end
+            end
+        elseif tag == "Type.CFunction" then
+            ok = (position == "pointee" or position == "root")
+                and (typ._paramstyle == nil or typ._paramstyle == "prototype")
+                and dense_plain_list_length(typ.params) ~= nil
+                and typ.vararg == false and typ.abi == nil
+            if ok then
+                for _, param in ipairs(typ.params) do
+                    if not visit(param, "parameter") or param._tag == "Type.COwned"
+                       or param._tag == "Type.CFunction" or param._tag == "Type.CArray" then
+                        ok = false
+                        break
+                    end
+                end
+            end
+            if ok then
+                ok = visit(typ.ret, "return") and typ.ret._tag ~= "Type.COwned"
+                    and typ.ret._tag ~= "Type.CFunction" and typ.ret._tag ~= "Type.CArray"
+            end
+        elseif tag == "Type.COwned" then
+            ok = position == "root" and type(typ.count) == "boolean"
+                and visit(typ.pointee, "field")
+                and typ.pointee._tag ~= "Type.CFunction" and typ.pointee._tag ~= "Type.COwned"
+        end
+        active[typ] = nil
+        return ok
+    end
+    return visit(root, "root")
+end
+
 function types.resolve_c_typedef(t)
     local seen = {}
     while t and t._tag == "Type.CTypedef" do
@@ -575,7 +842,7 @@ local function find_c_type(
             return typ
         elseif is_c_tag(tag) then
             if not skip_portable
-               or not types.is_portable_c_type_graph(typ) then
+               or not types.is_exportable_c_type_graph(typ) then
                 return typ
             end
             return nil
@@ -1772,6 +2039,8 @@ c_declaration_type_equals = function(
                 ltype.elem, rtype.elem, seen, true)
     elseif tag == "Type.CFunction" then
         return c_function_type_equals(ltype, rtype, seen)
+    elseif tag == "Type.CNamed" then
+        return ltype.tagname == rtype.tagname
     elseif tag == "Type.CStruct" or tag == "Type.CUnion" then
         -- Source-imported declarations retain their producer descriptor, but
         -- generated C places inherited and direct headers in one file-scope
@@ -1779,10 +2048,9 @@ c_declaration_type_equals = function(
         -- C type even when independent extraction allocated two objects.
         return ltype == rtype
             or (types.is_c_lua_state(ltype) and types.is_c_lua_state(rtype))
-            or (ltype._c_tag_scope == "file"
-                and rtype._c_tag_scope == "file"
-                and ltype.tagname ~= nil
-                and ltype.tagname == rtype.tagname)
+            or (types.c_declaration_origin(ltype) ~= nil
+                and types.c_declaration_origin(ltype) == types.c_declaration_origin(rtype)
+                and type_equals(ltype, rtype, seen))
     end
     return false
 end
@@ -2006,6 +2274,8 @@ type_equals = function(t1, t2, seen)
     elseif tag1 == "Type.Map" then
         return type_equals(t1.keys, t2.keys, seen) and
                type_equals(t1.values, t2.values, seen)
+    elseif tag1 == "Type.CNamed" then
+        return t1.tagname == t2.tagname
     elseif tag1 == "Type.CInteger" then
         if t1._c_enum_identity or t2._c_enum_identity then
             return t1._c_enum_identity ~= nil
@@ -2029,31 +2299,33 @@ type_equals = function(t1, t2, seen)
         if types.is_c_lua_state(t1) and types.is_c_lua_state(t2) then
             return true
         end
-        return t1.cname == t2.cname and
+        return types.c_declaration_origin(t1) == types.c_declaration_origin(t2) and
+               t1.cname == t2.cname and
                t1.tagname == t2.tagname and
                t1.typedef == t2.typedef and
                t1.complete == t2.complete and
                t1.has_fam == t2.has_fam and
                same_value(t1.fields, t2.fields, seen)
     elseif tag1 == "Type.CUnion" then
-        return t1.cname == t2.cname and
+        return types.c_declaration_origin(t1) == types.c_declaration_origin(t2) and
+               t1.cname == t2.cname and
                t1.tagname == t2.tagname and
                t1.typedef == t2.typedef and
                t1.complete == t2.complete and
                same_value(t1.fields, t2.fields, seen)
     elseif tag1 == "Type.CField" then
         return t1.name == t2.name and
-               t1.bitfield == t2.bitfield and
+               same_value(t1.bitfield, t2.bitfield, seen) and
                t1.flexible_array == t2.flexible_array and
                type_equals(t1.owner, t2.owner, seen) and
                type_equals(t1.type, t2.type, seen)
     elseif tag1 == "Type.CTypedef" then
         -- C typedef names are nominal in Titan's foreign-type namespace. Their
         -- targets still drive representation through resolve_c_typedef(), but
-        -- duplicate declarations imported from different headers can build
-        -- distinct target graphs for the same typedef name (for example through
-        -- system-header typedef chains). Those are the same C name for equality.
-        return t1.name == t2.name
+        -- separately converted declarations can build distinct target graphs
+        -- for the same original typedef. Retain its declaring-header identity.
+        return types.c_declaration_origin(t1) == types.c_declaration_origin(t2)
+            and t1.name == t2.name
             and same_value(t1.quals or {}, t2.quals or {}, seen)
     elseif tag1 == "Type.COwned" then
         return t1.count == t2.count and type_equals(t1.pointee, t2.pointee, seen)
@@ -5241,9 +5513,8 @@ function types.serialize(t, seen_ctypes)
             tostring(t.vararg or false) .. "," ..
             (t.abi and string.format("%q", t.abi) or "nil") .. ")"
     elseif tag == "Type.CStruct" then
-        local name = t.cname or t.tagname
+        local name = types.c_reference_key(t)
         if name then
-            local name = "struct@" .. name
             if seen_ctypes[name] then
                 return "CNamed(" .. string.format("%q", name) .. ")"
             end
@@ -5258,11 +5529,12 @@ function types.serialize(t, seen_ctypes)
             serialize_literal(t.typedef) .. ",{" ..
             table.concat(fields, ",") .. "}," ..
             tostring(t.complete or false) .. "," ..
-            tostring(t.has_fam or false) .. ")"
+            tostring(t.has_fam or false) ..
+            (types.c_declaration_origin(t) and "," ..
+                serialize_literal(types.c_declaration_origin(t)) or "") .. ")"
     elseif tag == "Type.CUnion" then
-        local name = t.cname or t.tagname
+        local name = types.c_reference_key(t)
         if name then
-            local name = "union@" .. name
             if seen_ctypes[name] then
                 return "CNamed(" .. string.format("%q", name) .. ")"
             end
@@ -5276,7 +5548,9 @@ function types.serialize(t, seen_ctypes)
             serialize_literal(t.tagname) .. "," ..
             serialize_literal(t.typedef) .. ",{" ..
             table.concat(fields, ",") .. "}," ..
-            tostring(t.complete or false) .. ")"
+            tostring(t.complete or false) ..
+            (types.c_declaration_origin(t) and "," ..
+                serialize_literal(types.c_declaration_origin(t)) or "") .. ")"
     elseif tag == "Type.CField" then
         return "CField(nil," ..
             string.format("%q", t.name) .. "," ..
@@ -5284,14 +5558,16 @@ function types.serialize(t, seen_ctypes)
             util.tostring(t.bitfield) .. "," ..
             tostring(t.flexible_array or false) .. ")"
     elseif tag == "Type.CTypedef" then
-        local name = "typedef@" .. t.name
+        local name = types.c_reference_key(t)
         if seen_ctypes[name] then
             return "CNamed(" .. string.format("%q", name) .. ")"
         end
         seen_ctypes[name] = true
         return "CTypedef(" .. string.format("%q", t.name) .. "," ..
             types.serialize(t.target, seen_ctypes) .. "," ..
-            serialize_names(t.quals) .. ")"
+            serialize_names(t.quals) ..
+            (types.c_declaration_origin(t) and "," ..
+                serialize_literal(types.c_declaration_origin(t)) or "") .. ")"
     elseif tag == "Type.COwned" then
         return "COwned(" .. types.serialize(t.pointee, seen_ctypes) .. "," ..
             tostring(t.count) .. ")"

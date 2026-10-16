@@ -155,6 +155,7 @@ function coder.generate(modname, ast, static_deps, abi, emit_line_directives, op
         metatables = {},
         owned_c_metatables = {},
         functions = {},
+        foreign_functions = {},
         modules = {},
         -- ABI-family-prefixed diagnostic spelling -> { id, key, registry_key }.
         -- The prefix distinguishes C-bearing from C-free callable shapes whose
@@ -182,6 +183,19 @@ function coder.generate(modname, ast, static_deps, abi, emit_line_directives, op
         imported_nominal_layouts = options and options.nominal_layouts or {},
         upvalue = 0
     }
+
+    -- An inline local foreign body may already live in the prepared source
+    -- header. Its checked public C references still belong to this object.
+    for module, usage in pairs(tlcontext.binary_usage) do
+        local interface = tlcontext.binary_modules[module]
+        for name in pairs(usage.functions or {}) do
+            local member = interface and interface.members[name]
+            if member and member.type._tag == "Type.CFunction" then
+                coder._foreign_reference_name({ source = true, public = true,
+                    module = module, name = name, type = member.type }, tlcontext)
+            end
+        end
+    end
 
     local funcs = {}
     local initvars = {}
@@ -349,7 +363,8 @@ function coder.generate(modname, ast, static_deps, abi, emit_line_directives, op
                         table.insert(sigs,
                             coder._code_foreign_function(tlcontext, node, true))
                     else
-                        table.insert(sigs, "TITAN_SOURCE_LOCAL "
+                        table.insert(sigs,
+                            (node.islocal and "TITAN_SOURCE_LOCAL " or "extern ")
                             .. coder._foreign_function_signature(node) .. ";")
                     end
                 end
@@ -514,6 +529,10 @@ function coder.generate(modname, ast, static_deps, abi, emit_line_directives, op
         end
     end
 
+    -- Capture reconstruction can introduce ordinary type identities and
+    -- conversion helpers, so emit it before the dependency/writer fixpoints.
+    coder._transfer_emit_sources(tlcontext, code)
+
     -- Array constructors encountered while emitting functions/lambdas have
     -- now frozen the complete module-local writer inventory.
     local array_writer_inits = {}
@@ -654,9 +673,15 @@ function coder.generate(modname, ast, static_deps, abi, emit_line_directives, op
                 coder._emit_callable_adapter(tlcontext, site)
             table.insert(sigs, adapter_sig)
             table.insert(code, adapter_body)
+            local transfer_entry = coder._transfer_register_adapter(tlcontext, site)
+            if transfer_entry then
+                coder._transfer_emit_entry(tlcontext, code, transfer_entry)
+            end
             i = i + 1
         end
     end
+
+    coder._transfer_emit_manifest(tlcontext, sigs, code)
 
     if #switch_get > 0 then
         table.insert(code, render([[
@@ -995,7 +1020,6 @@ function coder.generate(modname, ast, static_deps, abi, emit_line_directives, op
                 "#include " .. c_header_name(header)
         end
     end
-
     local preamble_substs = {
         FIXEDPREFIX =
             require("titan-compiler.cpreamble").fixed_prefix,
@@ -1038,6 +1062,12 @@ function coder.generate(modname, ast, static_deps, abi, emit_line_directives, op
         end
     end
     for _, func in pairs(tlcontext.functions) do
+        remember_binding(func.module)
+        if static_deps[func.module] == true then
+            direct_native_modules[func.module] = true
+        end
+    end
+    for _, func in pairs(tlcontext.foreign_functions) do
         remember_binding(func.module)
         if static_deps[func.module] == true then
             direct_native_modules[func.module] = true

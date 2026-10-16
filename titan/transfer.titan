@@ -1,0 +1,486 @@
+--- Copy and borrow policies for values crossing independent Lua states.
+-- @module titan.transfer
+-- @usage standard-library-transfer.md
+
+foreign import "lua.h"
+foreign import "lauxlib.h"
+foreign import "titan/ffi.h"
+foreign import "transfer.h"
+local reflect = import "reflect"
+local protobuf = import "protobuf"
+
+-- These private C-ABI functions run only inside the owning state's protected
+-- entry. They retain no state and leave all surviving values rooted on its
+-- stack. The generated callbacks know the exact capture storage types.
+local foreign function transfer_module_value(state: *lua_State, index: int): *Udata
+  if ffi.lua_type(state, index) ~= ffi.LUA_TUSERDATA then
+    ffi.luaL_error(state, "closure transfer requires a Titan module")
+    return nil
+  end
+  local candidate = ffi.lua_totvalue(state, index)
+  local module = ffi.lmacro_uvalue(candidate)
+  if module.len < foreign TitanModuleData.sizeof then
+    ffi.luaL_error(state, "closure transfer module has no native descriptor")
+    return nil
+  end
+  return module
+end
+
+local foreign function transfer_manifest(state: *lua_State,
+                                   owner: *Udata): const *TitanTransferModule
+  if owner.len < foreign TitanModuleData.sizeof then
+    ffi.luaL_error(state, "transfer owner has no native module descriptor")
+    return nil
+  end
+  local data = ffi.lmacro_getudatamem(owner) as foreign const *TitanModuleData
+  if data.symbols == nil then
+    ffi.luaL_error(state, "transfer owner has no native module descriptor")
+    return nil
+  end
+  local module = data.symbols(ffi.TITAN_TRANSFER_MANIFEST_SYMBOL)
+    as foreign const *TitanTransferModule
+  if module == nil then
+    ffi.luaL_error(state, "transfer owner has no module manifest")
+    return nil
+  end
+  if module.name == nil then
+    ffi.luaL_error(state, "transfer owner has no module name")
+    return nil
+  end
+  if module.entry_count ~= 0 then
+    if module.entries == nil then
+      ffi.luaL_error(state, "transfer owner has no closure entries")
+      return nil
+    end
+  end
+  return module
+end
+
+-- Push the real owner name alongside the returned immutable source entry.
+local foreign function transfer_closure_entry(state: *lua_State,
+                                        index: int): const *TitanTransferEntry
+  local candidate = ffi.lua_totvalue(state, index)
+  if ffi.lmacro_ttisCclosure(candidate) == 0 then
+    ffi.luaL_error(state, "cannot transfer a value that is not a Titan closure")
+    return nil
+  end
+  local closure = ffi.lmacro_clCvalue(candidate)
+  if closure.nupvalues < 5 then
+    ffi.luaL_error(state, "invalid Titan closure header")
+    return nil
+  end
+  if ffi.lmacro_ttisfulluserdata(closure.upvalue[0]) == 0 then
+    ffi.luaL_error(state, "invalid Titan closure module")
+    return nil
+  end
+  if ffi.lmacro_ttislightuserdata(closure.upvalue[2]) == 0 then
+    ffi.luaL_error(state, "invalid Titan closure native entry")
+    return nil
+  end
+  if ffi.lmacro_ttislightuserdata(closure.upvalue[3]) == 0 then
+    ffi.luaL_error(state, "invalid Titan closure brand")
+    return nil
+  end
+  if ffi.lmacro_pvalue(closure.upvalue[3]) ~= ffi.TITAN_BRAND then
+    ffi.luaL_error(state, "invalid Titan closure brand")
+    return nil
+  end
+  if ffi.lmacro_ttislcf(closure.upvalue[closure.nupvalues - 1]) == 0 then
+    ffi.luaL_error(state, "invalid Titan closure strict entry")
+    return nil
+  end
+  local module = transfer_manifest(state, ffi.lmacro_uvalue(closure.upvalue[0]))
+  local ordinal = 0 as foreign unsigned int
+  while ordinal < module.entry_count do
+    local entry = module.entries + ordinal
+    if entry.native == ffi.lmacro_pvalue(closure.upvalue[2]) then
+      if entry.strict == ffi.lmacro_fvalue(closure.upvalue[closure.nupvalues - 1]) then
+        ffi.luaL_checkstack(state, 1, "copying a closure module name")
+        ffi.lua_pushstring(state, module.name)
+        return entry
+      end
+    end
+    ordinal = ordinal + 1
+  end
+  ffi.luaL_error(state, "Titan closure entry is absent from its module manifest")
+  return nil
+end
+
+local foreign function transfer_capture_count(entry: const *TitanTransferEntry): unsigned int
+  return entry.capture_count
+end
+
+local foreign function transfer_project(state: *lua_State, index: int,
+                                  entry: const *TitanTransferEntry)
+  ffi.luaL_checkstack(state, (entry.capture_count as foreign int) + 2,
+    "projecting immediate closure captures")
+  local candidate = ffi.lua_totvalue(state, index)
+  entry.project(state, ffi.lmacro_clCvalue(candidate))
+end
+
+-- Generated native loaders already memoize their module; keep only the result.
+foreign function transfer_load_module(state: *lua_State,
+                                      name: const *char, length: size_t)
+  local top = ffi.lua_gettop(state)
+  ffi.luaL_checkstack(state, 3, "loading a transfer module")
+  ffi.lua_pushstring(state, ffi.LUA_PRELOAD_TABLE)
+  ffi.lua_rawget(state, ffi.LUA_REGISTRYINDEX)
+  if ffi.lua_type(state, -1) ~= ffi.LUA_TTABLE then
+    ffi.luaL_error(state, "transfer module has no native preload table")
+    return
+  end
+  ffi.lua_pushlstring(state, name, length)
+  ffi.lua_rawget(state, -2)
+  if ffi.lua_type(state, -1) ~= ffi.LUA_TFUNCTION then
+    ffi.luaL_error(state, "transfer module has no preload loader")
+    return
+  end
+  ffi.lua_copy(state, -1, top + 1)
+  ffi.lua_settop(state, top + 1)
+  ffi.lua_callk(state, 0, 1, 0 as foreign lua_KContext, nil)
+  -- The generated initializer publishes this exact module before returning.
+  -- A preload wrapper may not substitute unrelated native userdata.
+  ffi.lua_pushstring(state, "Titan module ")
+  ffi.lua_pushlstring(state, name, length)
+  ffi.lua_concat(state, 2)
+  ffi.lua_rawget(state, ffi.LUA_REGISTRYINDEX)
+  if ffi.lua_type(state, -1) ~= ffi.LUA_TUSERDATA then
+    ffi.luaL_error(state, "transfer loader did not initialize its Titan module")
+    return
+  end
+  if ffi.lua_rawequal(state, top + 1, -1) == 0 then
+    ffi.luaL_error(state, "transfer loader returned a different Titan module")
+    return
+  end
+  ffi.lua_settop(state, top + 1)
+end
+
+local foreign function transfer_resolve(state: *lua_State, index: int,
+                                  token: const *void): const *TitanTransferEntry
+  local module = transfer_manifest(state, transfer_module_value(state, index))
+  local ordinal = 0 as foreign unsigned int
+  while ordinal < module.entry_count do
+    local entry = module.entries + ordinal
+    -- Compare addresses before reading any part of the incoming token.
+    if (entry as foreign const *void) == token then return entry end
+    ordinal = ordinal + 1
+  end
+  ffi.luaL_error(state, "closure transfer entry belongs to a different provider or is invalid")
+  return nil
+end
+
+local foreign function transfer_restore(state: *lua_State,
+                                  entry: const *TitanTransferEntry,
+                                  module_index: int, capture_base: int)
+  local top = ffi.lua_gettop(state)
+  local module = transfer_module_value(state, module_index)
+  capture_base = ffi.lua_absindex(state, capture_base)
+  if entry.capture_count ~= 0 then
+    if capture_base < 1 then
+      ffi.luaL_error(state, "closure transfer is missing captures")
+      return
+    end
+    if capture_base > top then
+      ffi.luaL_error(state, "closure transfer is missing captures")
+      return
+    end
+    if entry.capture_count > ((top - capture_base + 1) as foreign unsigned int) then
+      ffi.luaL_error(state, "closure transfer is missing captures")
+      return
+    end
+  end
+  ffi.luaL_checkstack(state, (entry.capture_count as foreign int) + 2,
+    "restoring immediate closure captures")
+  entry.restore(state, module, capture_base)
+end
+
+local foreign function transfer_nominal_module(state: *lua_State, index: int)
+  local top = ffi.lua_gettop(state)
+  index = ffi.lua_absindex(state, index)
+  ffi.luaL_checkstack(state, 2, "resolving a nominal's declaring module")
+  if ffi.lua_getmetatable(state, index) == 0 then
+    ffi.luaL_error(state, "transfer nominal has no metatable")
+    return
+  end
+  ffi.lua_rawgetp(state, -1, ffi.TITAN_MT_MOD)
+  local module = transfer_manifest(state, transfer_module_value(state, -1))
+  ffi.lua_settop(state, top)
+  ffi.lua_pushstring(state, module.name)
+end
+
+--- Values copied or borrowed across independent Lua states.
+-- @usage async-io.md#transfer-values
+union TransferValue
+  is_nil()
+  is_boolean(boolean)
+  is_integer(integer)
+  is_float(float)
+  is_string(string)
+  is_lua_state(foreign *lua_State)
+  is_function(foreign function (*lua_State): int)
+  is_pointer(foreign *void)
+  is_record(module: string, name: string, data: string)
+  is_union(module: string, name: string, data: string)
+  is_closure(module: string, entry: foreign const *void, data: string)
+  is_record_payload(module: string, name: string, data: string)
+end
+
+local record RecordTransferHooks
+  const encode: reflect.MethodType
+  const decode: reflect.StaticFunctionType
+end
+
+local transfer_active_records: {value: boolean} = {}
+local transfer_active_closures: {value: boolean} = {}
+local closure_fields: const {reflect.Type} = {}
+
+local function transfer_string_type(descriptor: reflect.Type?): boolean
+  if descriptor == nil then return false end
+  case descriptor
+  when is_string() then return true
+  else return false
+  end
+end
+
+local function transfer_named_type(descriptor: reflect.Type?, name: string): boolean
+  if descriptor == nil then return false end
+  case descriptor
+  when is_named(named) then return named.name == name
+  when is_record(record_type) then return record_type.name == name
+  when is_union(union_type) then return union_type.name == name
+  else return false
+  end
+end
+
+local function record_transfer_hooks(descriptor: reflect.RecordType): RecordTransferHooks?
+  local encode: reflect.MethodType? = nil
+  local decode: reflect.StaticFunctionType? = nil
+  for index = 1, #descriptor.methods do
+    local method = descriptor.methods[index]
+    if method.name == "to_transfer_payload" then
+      encode = method
+    elseif method.name == "from_transfer_payload" then
+      raise "transfer: from_transfer_payload must be a static function on " .. descriptor.name
+    end
+  end
+  for index = 1, #descriptor.statics do
+    local static = descriptor.statics[index]
+    if static.name == "from_transfer_payload" then
+      decode = static
+    elseif static.name == "to_transfer_payload" then
+      raise "transfer: to_transfer_payload must be an instance method on " .. descriptor.name
+    end
+  end
+  if encode == nil and decode == nil then return nil end
+  if encode == nil or decode == nil then
+    raise "transfer: record requires both transfer payload hooks: " .. descriptor.name
+  end
+  if not descriptor.is_public then
+    raise "transfer: record payload hooks require a public record: " .. descriptor.name
+  end
+  if #encode.param_descriptors ~= 0 or encode.vararg_descriptor ~= nil
+      or #encode.return_descriptors ~= 1 or encode.flexret_descriptor ~= nil
+      or not transfer_string_type(encode.return_descriptors[1]) then
+    raise "transfer: invalid to_transfer_payload signature on " .. descriptor.name
+  end
+  if #decode.param_descriptors ~= 1 or decode.vararg_descriptor ~= nil
+      or not transfer_string_type(decode.param_descriptors[1])
+      or #decode.return_descriptors ~= 1 or decode.flexret_descriptor ~= nil
+      or not transfer_named_type(decode.return_descriptors[1], descriptor.name) then
+    raise "transfer: invalid from_transfer_payload signature on " .. descriptor.name
+  end
+  return RecordTransferHooks(encode, decode)
+end
+
+local function nominal_module(candidate: value): string
+  local top = ffi.lua_gettop(L)
+  defer ffi.lua_settop(L, top)
+  if ffi.lua_checkstack(L, 2) == 0 then raise "cannot reserve nominal transfer stack" end
+  ffi.lua_pushtvalue(L, candidate)
+  transfer_nominal_module(L, -1)
+  return ffi.lua_totvalue(L, -1) as value
+end
+
+local function snapshot_closure(candidate: value): TransferValue
+  if transfer_active_closures[candidate] then raise "cannot transfer cyclic closure captures" end
+  transfer_active_closures[candidate] = true
+  defer transfer_active_closures[candidate] = nil
+  local top = ffi.lua_gettop(L)
+  defer ffi.lua_settop(L, top)
+  if ffi.lua_checkstack(L, 2) == 0 then raise "cannot reserve transfer closure stack" end
+  ffi.lua_pushtvalue(L, candidate)
+  local closure_index = ffi.lua_gettop(L)
+  local entry = transfer_closure_entry(L, closure_index)
+  local module: string = ffi.lua_totvalue(L, -1) as value
+  local count = transfer_capture_count(entry) as integer
+  local capture_base = ffi.lua_gettop(L) + 1
+  -- Project the complete immediate frontier before any custom hook can change
+  -- a captured cell. The Lua stack keeps every projected value rooted.
+  transfer_project(L, closure_index, entry)
+  local policies: {TransferValue} = {}
+  local was_policy: {boolean} = {}
+  for index = 0, count - 1 do
+    local capture: value = ffi.lua_totvalue(L, (capture_base + index) as foreign int)
+    was_policy[index + 1] = capture is TransferValue
+    policies[index + 1] = TransferValue.from_value(capture)
+  end
+  return TransferValue.is_closure(module, entry as foreign const *void,
+    protobuf.serialize_fields(closure_fields, policies, was_policy))
+end
+
+local function initialize_nominal(module: string, name: string)
+  if reflect.find_nominal(name) ~= nil then return end
+  local top = ffi.lua_gettop(L)
+  defer ffi.lua_settop(L, top)
+  transfer_load_module(L, module, #module as foreign size_t)
+end
+
+--- Select the copy or borrow policy for a value, preserving an explicit TransferValue.
+-- Public records may provide synchronous to_transfer_payload/from_transfer_payload hooks.
+-- The hooks take precedence over structural protobuf encoding and may encapsulate private fields.
+-- @param candidate Scalar, public nominal, Titan closure, or explicit transfer policy.
+-- @return Flat transfer policy; closure captures and custom hooks are snapshotted now.
+-- @usage async-io.md#custom-record-transfer
+function TransferValue.from_value(candidate: value): TransferValue
+  if candidate is TransferValue then return candidate end
+  case reflect.inspect(candidate)
+  when is_nil() then return TransferValue.is_nil()
+  when is_boolean(item) then return TransferValue.is_boolean(item)
+  when is_integer(item) then return TransferValue.is_integer(item)
+  when is_float(item) then return TransferValue.is_float(item)
+  when is_string(item) then return TransferValue.is_string(item)
+  when is_raw_pointer(item) then return TransferValue.is_pointer(item)
+  when is_lua_thread{thread} then return TransferValue.is_lua_state(thread)
+  when is_lua_userdata() then
+    local raw: foreign TValue = candidate
+    return TransferValue.is_pointer(ffi.lmacro_getudatamem(ffi.lmacro_uvalue(raw)))
+  when is_titan_function() then return snapshot_closure(candidate)
+  when is_lua_c_function{entry} then
+    local raw: foreign TValue = candidate
+    if ffi.lmacro_ttisCclosure(raw) ~= 0 then
+      local closure = ffi.lmacro_clCvalue(raw)
+      if closure.nupvalues ~= 0 then
+        raise "transfer: cannot transfer a Lua C closure with upvalues"
+      end
+    end
+    return TransferValue.is_function(entry)
+  when is_record(record_value) then
+    local hooks? = record_transfer_hooks(record_value.type)
+    local module = nominal_module(candidate)
+    if hooks ~= nil then
+      if transfer_active_records[candidate] then
+        raise "transfer: cyclic record payload for " .. record_value.type.name
+      end
+      transfer_active_records[candidate] = true
+      defer transfer_active_records[candidate] = nil
+      local payload: string = hooks.encode.callable(record_value.value)
+      return TransferValue.is_record_payload(module, record_value.type.name, payload)
+    end
+    return TransferValue.is_record(module, record_value.type.name, protobuf.serialize(candidate))
+  when is_union(union_value) then
+    return TransferValue.is_union(nominal_module(candidate), union_value.type.name, protobuf.serialize(candidate))
+  else raise "transfer: unsupported value"
+  end
+end
+
+local function transfer_pointer_value(pointer: foreign *void): value
+  local top = ffi.lua_gettop(L)
+  defer ffi.lua_settop(L, top)
+  if ffi.lua_checkstack(L, 1) == 0 then raise "cannot reserve transfer pointer stack" end
+  ffi.lua_pushlightuserdata(L, pointer)
+  return ffi.lua_totvalue(L, -1) as value
+end
+
+--- Wrap copied closure packet fields at a trusted Lua/lightuserdata boundary.
+-- The entry is validated against the destination manifest only by to_value.
+function TransferValue.from_closure_payload(module: string, entry: value,
+    data: string): TransferValue
+  return TransferValue.is_closure(module, entry as foreign const *void, data)
+end
+
+--- Recover a semantic value from a transfer policy in the current Lua state.
+-- Custom record reconstruction invokes its synchronous from_transfer_payload hook.
+-- Raw pointer policies remain borrowed; custom resource hooks may adopt ownership.
+-- @return Scalar, borrowed address, callable, or reconstructed nominal value.
+-- @usage async-io.md#custom-record-transfer
+function TransferValue:to_value(): value
+  case self
+  when is_nil() then return nil
+  when is_boolean(item) then return item
+  when is_integer(item) then return item
+  when is_float(item) then return item
+  when is_string(item) then return item
+  when is_lua_state(item) then return transfer_pointer_value(item)
+  when is_pointer(item) then return transfer_pointer_value(item)
+  when is_function(item) then
+    if not item then raise "cannot transfer a NULL Lua C function" end
+    local top = ffi.lua_gettop(L)
+    defer ffi.lua_settop(L, top)
+    if ffi.lua_checkstack(L, 1) == 0 then raise "cannot reserve transfer function stack" end
+    ffi.lua_pushcclosure(L, item, 0)
+    return ffi.lua_totvalue(L, -1) as value
+  when is_record(module, name, data) then
+    initialize_nominal(module, name)
+    return protobuf.deserialize_nominal(data, name, false)
+  when is_union(module, name, data) then
+    initialize_nominal(module, name)
+    return protobuf.deserialize_nominal(data, name, true)
+  when is_closure(module, token, data) then
+    local top = ffi.lua_gettop(L)
+    defer ffi.lua_settop(L, top)
+    transfer_load_module(L, module, #module as foreign size_t)
+    local module_index = ffi.lua_gettop(L)
+    -- Resolve the token by equality against the destination module's manifest
+    -- before dereferencing it or reconstructing resource-bearing captures.
+    local entry = transfer_resolve(L, module_index, token)
+    local count = transfer_capture_count(entry) as integer
+    local policies: {TransferValue}, was_policy: {value} =
+      protobuf.deserialize_fields(data, closure_fields)
+    if #policies ~= count or #was_policy ~= count then
+      raise "invalid closure capture count"
+    end
+    -- Arrays can contain holes independently of their element descriptor.
+    -- Check the complete frontier before a custom decoder can adopt anything.
+    for index = 1, count do
+      local policy: TransferValue = policies[index]
+      -- An implicit projection checks the boolean tag; written `is boolean`
+      -- accepts every value through Lua truthiness.
+      local flag: boolean = was_policy[index]
+    end
+    if ffi.lua_checkstack(L, (count + 1) as foreign int) == 0 then
+      raise "cannot reserve transfer closure stack"
+    end
+    for index = 1, count do
+      local policy = policies[index]
+      if was_policy[index] then ffi.lua_pushtvalue(L, policy)
+      else ffi.lua_pushtvalue(L, policy:to_value()) end
+    end
+    transfer_restore(L, entry, module_index, (module_index + 1) as foreign int)
+    return ffi.lua_totvalue(L, -1) as value
+  when is_record_payload(module, name, payload) then
+    initialize_nominal(module, name)
+    local nominal? = reflect.find_nominal(name)
+    if nominal == nil then raise "transfer: unknown record type " .. name end
+    case nominal
+    when is_record(descriptor) then
+      local hooks? = record_transfer_hooks(descriptor)
+      if hooks == nil then raise "transfer: record has no payload hooks: " .. name end
+      local result: value = hooks.decode.callable(payload)
+      case reflect.inspect(result)
+      when is_record(record_value) then
+        if record_value.type.name == name then return result end
+      end
+      raise "transfer: from_transfer_payload returned a different record: " .. name
+    else raise "transfer: nominal type is not a record: " .. name
+    end
+  end
+end
+
+do
+  closure_fields = {
+    reflect.Type.is_array(reflect.ArrayTypeConstness.is_mutable(),
+      reflect.Type.is_named(reflect.NamedType("titan.transfer.TransferValue"))),
+    reflect.Type.is_array(reflect.ArrayTypeConstness.is_mutable(),
+      reflect.Type.is_boolean()),
+  }
+end

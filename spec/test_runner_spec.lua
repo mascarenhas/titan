@@ -114,9 +114,17 @@ describe("Titan test-runner source generation", function()
         assert.falsy(source:find('import "titan.test.titan"', 1, true), source)
         assert.falsy(source:find("foreign import", 1, true), source)
         assert.equal(1, select(2, source:gsub(
-            'local test_module_1 = import "example.alpha"', "")))
+            'local test_module_1 = import "example.alpha.titan"', "")))
         assert.equal(1, select(2, source:gsub(
-            'local test_module_2 = import "example.beta"', "")))
+            'local test_module_2 = import "example.beta.titan"', "")))
+        local owner_imports = 0
+        for _, node in ipairs(ast) do
+            if node._tag == "Ast.TopLevelImport" and node.modname ~= "titan.test" then
+                assert.is_true(node.source_required)
+                owner_imports = owner_imports + 1
+            end
+        end
+        assert.equal(2, owner_imports)
         assert.truthy(source:find(
             "  test_module_1.test_one(context)\nend", 1, true), source)
         assert.truthy(source:find(

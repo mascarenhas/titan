@@ -47,6 +47,7 @@ record Connection
   local terminal: boolean
   local failure: async.Error?
   local works: {Work}
+  local pending_operations: integer
   local retirement: (async.Task<|nil, value|>)?
 end
 
@@ -59,7 +60,8 @@ local function new_connection(stream: io.ReaderWriterCloser?, client: boolean,
     reader = nil, writer = nil, frame = nil, pong = nil, ping_work = nil,
     shutdown_work = nil, ping_token = nil, ping_received = false,
     close_sent = false, close_received = false, peer_code = nil, peer_reason = nil,
-    closing = false, terminal = false, failure = nil, works = {}, retirement = nil,
+    closing = false, terminal = false, failure = nil, works = {},
+    pending_operations = 0, retirement = nil,
   }
 end
 
@@ -279,6 +281,9 @@ end
 --- Abort and retire this session idempotently, even during pending cancellation.
 -- @usage standard-library-websocket.md#reader-duty-closing-and-cancellation
 function Connection:close()
+  self.pending_operations = self.pending_operations + 1
+  defer self.pending_operations = self.pending_operations - 1
+  if self.terminal and self.stream == nil then return end
   self:retire(nil)
 end
 
@@ -320,6 +325,8 @@ end
 -- @param data Immutable binary bytes to write or decode.
 -- @usage standard-library-websocket.md#public-interface
 function Connection:write(kind: MessageType, data: string)
+  self.pending_operations = self.pending_operations + 1
+  defer self.pending_operations = self.pending_operations - 1
   async.checkpoint()
   self:check_open("websocket.write")
   if self.closing then raise state_error("websocket.write", "WebSocket is closing") end
@@ -348,6 +355,8 @@ end
 -- @return Complete message bytes, or nil after a valid peer Close.
 -- @usage standard-library-websocket.md#public-interface
 function Connection:read(): (MessageType?, string?)
+  self.pending_operations = self.pending_operations + 1
+  defer self.pending_operations = self.pending_operations - 1
   async.checkpoint()
   if self.failure then self.failure:raise() end
   if self.close_received and self.close_sent then return nil, nil end
@@ -368,6 +377,8 @@ end
 -- @param timeout_ms Positive control deadline in milliseconds; nil defaults to 5000.
 -- @usage standard-library-websocket.md#reader-duty-closing-and-cancellation
 function Connection:ping(timeout_ms: integer?)
+  self.pending_operations = self.pending_operations + 1
+  defer self.pending_operations = self.pending_operations - 1
   local timeout = positive(timeout_ms, CONTROL_TIMEOUT, "WebSocket Ping timeout")
   async.checkpoint(); self:check_open("websocket.ping")
   if self.closing then raise state_error("websocket.ping", "WebSocket is closing") end
@@ -405,6 +416,8 @@ end
 -- @param timeout_ms Positive control deadline in milliseconds; nil defaults to 5000.
 -- @usage standard-library-websocket.md#reader-duty-closing-and-cancellation
 function Connection:shutdown(code: integer?, reason: string?, timeout_ms: integer?)
+  self.pending_operations = self.pending_operations + 1
+  defer self.pending_operations = self.pending_operations - 1
   local timeout = positive(timeout_ms, CONTROL_TIMEOUT, "WebSocket shutdown timeout")
   local payload = close_payload(code or 1000, reason or "", self.client)
   async.checkpoint()
@@ -441,4 +454,53 @@ local function Connection:failure_close(code: integer)
   work:execute(function ()
     self:send_frame(work, 8, true, close_payload(code, "", self.client))
   end, CONTROL_TIMEOUT)
+end
+
+
+--- Detach an idle open session and its unread transport bytes for manual handoff.
+-- @return Same-process payload that must be adopted exactly once.
+-- @usage standard-library-websocket.md#transferring-connections
+function Connection:to_transfer_payload(): string
+  if self.terminal or self.closing or self.stream == nil then
+    raise "cannot transfer a closed or closing WebSocket Connection"
+  end
+  -- Child slots retire before the public caller completes its cleanup.
+  if self.pending_operations ~= 0 or self.reader ~= nil or self.writer ~= nil or self.frame ~= nil or
+      self.pong ~= nil or self.ping_work ~= nil or self.shutdown_work ~= nil or
+      self.retirement ~= nil or #self.works ~= 0 or self.message_kind ~= nil then
+    raise "cannot transfer a WebSocket Connection with a pending operation"
+  end
+  local stream: http.UpgradedStream? = nil
+  case reflect.inspect(self.stream)
+  when is_interface(wrapper) then
+    if wrapper.wrapped is http.UpgradedStream then stream = wrapper.wrapped end
+  end
+  if stream == nil then raise "invalid WebSocket upgraded stream owner" end
+  local input = string.sub(self.input, self.cursor)
+  local stream_payload = stream:to_transfer_payload()
+  self.stream = nil
+  self.input = ""
+  self.cursor = 1
+  self.terminal = true
+  self.closing = true
+  local exported = false
+  defer if not exported then http.UpgradedStream.discard_transfer_payload(stream_payload) end
+  local payload = protobuf.serialize_fields(connection_transfer_fields,
+    stream_payload, self.client, self.protocol, self.limit, input)
+  exported = true
+  return payload
+end
+
+--- Adopt a detached WebSocket session on the destination's active Runtime.
+-- @param payload Exact bytes returned by to_transfer_payload; ownership is manual.
+-- @return Fresh session retaining role, subprotocol, read limit and unread bytes.
+-- @usage standard-library-websocket.md#transferring-connections
+function Connection.from_transfer_payload(payload: string): Connection
+  local stream_payload: string, client: boolean, protocol: string?, limit: integer, input: string =
+    protobuf.deserialize_fields(payload, connection_transfer_fields)
+  if limit <= 0 then raise "invalid WebSocket limit transfer payload" end
+  local connection = new_connection(nil, client, protocol, limit)
+  connection.input = input
+  connection.stream = http.UpgradedStream.from_transfer_payload(stream_payload)
+  return connection
 end

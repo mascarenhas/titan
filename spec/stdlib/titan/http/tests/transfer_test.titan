@@ -1,0 +1,183 @@
+local transfer_lua = import "lua"
+local transfer_gc = import "gc"
+local transfer_common = import "support.common.titan"
+
+local function require_http_native_handoff()
+  if transfer_common.is_windows() then
+    test.skip("platform: Windows native pending reads are rejected by the transfer contract")
+  end
+end
+
+local function http_exchange_cross_state(secure: boolean)
+  runtime_test.run(function ()
+    local ready = async.receiver()
+    defer ready:close()
+    local ready_handle = ready:handle()
+    local operation = function (): async.TransferValue
+      local packet: async.TransferValue? = nil
+      local listener: http.Server? = nil
+      local handler: http.Handler = function (request: http.Request, response: http.Response)
+        test.assert(request:read_until("\n", true) == "left")
+        response:set_status(201)
+        response:set_header("Content-Length", "6")
+        response:add_header("X-Reply", "first")
+        response:add_header("X-Reply", "second")
+        response:write("one")
+        packet = async.TransferValue.from_value(http.Exchange(request, response))
+        transfer_common.assert_raises_contains(function () request:read() end, "exchange has ended")
+        transfer_common.assert_raises_contains(function () response:write("bad") end, "exchange has ended")
+        listener:close()
+      end
+      local port = 0
+      if secure then
+        listener, port = support.https_listen(46600, handler, 0)
+      else
+        listener, port = support.http_listen(46700, handler)
+      end
+      defer listener:close()
+      async.send(ready_handle, async.TransferValue.is_integer(port))
+      listener:serve()
+      if packet == nil then raise "HTTP worker did not transfer its exchange" end
+      return packet
+    end
+    local client = async.run<|nil, value|>(function (): nil
+      local port: integer = ready:wait():to_value()
+      local connection: io.ReaderWriterCloser = (function (): io.ReaderWriterCloser
+        if secure then return ssl.connect("localhost", port, support.TRUST_ROOT) end
+        return net.connect("127.0.0.1", port)
+      end)()
+      defer connection:close()
+      connection:write("POST /move HTTP/1.1\r\nHost: localhost\r\n" ..
+        "Transfer-Encoding: chunked\r\nConnection: close\r\n\r\n" ..
+        "9\r\nleft\nrest\r\n0\r\nX-Trailer: yes\r\n\r\n")
+      local opening? = connection:read_until("\r\n\r\n", true)
+      test.assert(opening ~= nil and support.contains(opening, "201 Created"))
+      test.assert(support.contains(opening, "X-Reply: first\r\nX-Reply: second"))
+      local output = string.writer()
+      for chunk in connection:read do output:write(chunk) end
+      test.assert(output:drain() == "onetwo", "transferred response lost its written byte count")
+      return nil
+    end)
+    task_support.cleanup_task(client, "HTTP transfer client")
+    local state = transfer_lua.new()
+    defer state:close()
+    local packet: async.TransferValue = state:run_async([[
+      local operation = ...
+      local async = require('titan.async')
+      local task = async.run(operation)
+      async.loop()
+      local success, result = task:status():has_succeeded()
+      if not success then
+        local failed, failure = task:status():has_failed()
+        if failed then failure:raise() end
+        error('HTTP transfer worker did not succeed')
+      end
+      return result
+    ]], "=http-exchange-transfer", async.TransferValue.from_value(operation))
+    state:close()
+    transfer_gc.collect()
+    transfer_gc.collect()
+    local exchange: http.Exchange = packet:to_value()
+    defer exchange:close()
+    test.assert(exchange.request:read() == "rest", "HTTP body suffix did not survive source close")
+    test.assert(exchange.request:read() == nil)
+    test.assert(exchange.request.headers:get("X-Trailer") == "yes", "trailer lost request header alias")
+    exchange.response:write("two")
+    exchange:close()
+    async.join(client)
+    test.assert(client:status():has_succeeded(), "HTTP transfer client failed")
+  end)
+end
+
+function test_transfer_exchange_survives_source_state_close(context: test.Context)
+  require_http_native_handoff()
+  context:run("http", function (_child: test.Context) http_exchange_cross_state(false) end)
+  context:run("https", function (_child: test.Context) http_exchange_cross_state(true) end)
+end
+
+function test_transfer_exchange_preserves_pipelined_keep_alive(_context: test.Context)
+  require_http_native_handoff()
+  runtime_test.run(function ()
+    local handled = 0
+    local listener: http.Server? = nil
+    local handler: http.Handler = function (request: http.Request, response: http.Response)
+      local packet = async.TransferValue.from_value(http.Exchange(request, response))
+      local moved: http.Exchange = packet:to_value()
+      moved:serve(function (next_request: http.Request, next_response: http.Response)
+        handled = handled + 1
+        if handled == 1 then
+          transfer_common.assert_raises_contains(function ()
+            moved:serve(function (_request: http.Request, _response: http.Response) end)
+          end, "already being served")
+        end
+        test.assert(next_request:read() == nil, "bodyless parser epsilon transition was lost")
+        next_response:set_header("Content-Length", "4")
+        next_response:write(next_request.url.path)
+        if handled == 2 then listener:close() end
+      end)
+    end
+    local port = 0
+    listener, port = support.http_listen(46800, handler)
+    defer listener:close()
+    local serving = async.run<|nil, value|>(function (): nil listener:serve(); return nil end)
+    task_support.cleanup_task(serving, "HTTP transferred keep-alive listener")
+    local client = net.connect("127.0.0.1", port)
+    defer client:close()
+    client:write("GET /one HTTP/1.1\r\nHost: localhost\r\n\r\n" ..
+      "GET /two HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+    local output = string.writer()
+    for chunk in client:read do output:write(chunk) end
+    local bytes = output:drain()
+    test.assert(handled == 2 and support.contains(bytes, "\r\n\r\n/oneHTTP/1.1 200 OK") and
+      support.contains(bytes, "\r\n\r\n/two"), "HTTP handoff lost the next pipelined exchange")
+    async.join(serving)
+    test.assert(serving:status():has_succeeded(), "transferred HTTP listener failed")
+  end)
+end
+
+function test_transfer_exchange_rejects_pending_reader_before_detach(_context: test.Context)
+  runtime_test.run(function ()
+    local checked = false
+    local handler: http.Handler = function (request: http.Request, response: http.Response)
+      local exchange = http.Exchange(request, response)
+      transfer_common.assert_raises_contains(function ()
+        exchange:serve(function (_request: http.Request, _response: http.Response) end)
+      end, "already being served")
+      local reader = async.run<|nil, value|>(function (): nil request:read(); return nil end)
+      task_support.cleanup_task(reader, "HTTP pending transfer reader")
+      while reader:status():as_string() == "ready" do timer.yield() end
+      test.assert(reader:status():as_string() == "waiting")
+      transfer_common.assert_raises_contains(function () exchange:to_transfer_payload() end,
+        "pending operation")
+      reader:cancel(async.CancellationReason.simple("HTTP transfer pending-reader check"))
+      async.join(reader)
+      checked = true
+      test.assert(request:read() == "body", "rejected transfer damaged the origin request")
+      response:set_header("Content-Length", "2")
+      response:write("ok")
+    end
+    local listener, port = support.http_listen(46900, handler)
+    defer listener:close()
+    local serving = async.run<|nil, value|>(function (): nil listener:serve(); return nil end)
+    task_support.cleanup_task(serving, "HTTP pending transfer listener")
+    local client = net.connect("127.0.0.1", port)
+    defer client:close()
+    client:write("POST /pending HTTP/1.1\r\nHost: localhost\r\n" ..
+      "Content-Length: 4\r\nConnection: close\r\n\r\n")
+    while not checked do timer.yield() end
+    client:write("body")
+    local output = string.writer()
+    for chunk in client:read do output:write(chunk) end
+    test.assert(support.contains(output:drain(), "\r\n\r\nok"))
+    listener:close()
+    async.join(serving)
+    test.assert(serving:status():has_succeeded(), "pending-transfer HTTP listener failed")
+  end)
+end
+
+function test_transfer_exchange_rejects_malformed_payload(_context: test.Context)
+  transfer_common.assert_raises(function () http.Exchange.from_transfer_payload("") end)
+  transfer_common.assert_raises(function ()
+    http.UpgradedStream.from_transfer_payload("\255")
+  end)
+end

@@ -1,0 +1,141 @@
+local function transfer_rejected(action: function (): ())
+  local rejected = false
+  do action() catch rejected = true end
+  test.assert(rejected, "unsafe native handoff was accepted")
+end
+
+local function transfer_read_all(loop: uv.loop_t, reader: uv.stream_t): string
+  local bytes = ""
+  success(uv.read_start(reader,
+    function (_: uv.handle_t, _size: integer): uv.buf_t return uv.buf_t.allocate(4096) end,
+    function (stream: uv.stream_t, count: integer, buffer: uv.buf_t?)
+      if count > 0 then bytes = bytes .. buffer:to_string(count)
+      elseif count < 0 then
+        test.assert(count == uv.EOF)
+        success(uv.read_stop(stream))
+        uv.close(stream:as_handle_t())
+      end
+    end))
+  success(uv.run(loop))
+  return bytes
+end
+
+function test_tcp_transfer_attaches_destination_loop_and_retires_source(_context: test.Context)
+  local source, destination = new_loop(), new_loop()
+  defer finish_loop(source)
+  defer finish_loop(destination)
+  local status, left?, right? = uv.socketpair(uv.SOCK_STREAM, 0,
+    uv.NONBLOCK_PIPE, uv.NONBLOCK_PIPE)
+  success(status)
+  local writer, reader = uv.tcp_t(), uv.tcp_t()
+  success(uv.tcp_init(source, writer))
+  success(uv.tcp_init(source, reader))
+  success(uv.tcp_open(writer, left))
+  success(uv.tcp_open(reader, right))
+  local packet = writer:to_transfer_payload()
+  test.assert(uv.is_closing(writer:as_handle_t()), "source still accepts operations")
+  uv.bind_transfer_loop(destination)
+  defer uv.unbind_transfer_loop(destination)
+  local restored = uv.tcp_t.from_transfer_payload(packet)
+  test.assert(uv.handle_get_loop(restored:as_handle_t()) == destination)
+  test.assert(uv.handle_get_data(restored:as_handle_t()) == nil)
+  collect()
+  success(uv.write_string(uv.write_t(), restored:as_stream_t(), "tcp\0handoff\255",
+    function (_: uv.write_t, code: integer)
+      success(code)
+      uv.close(restored:as_handle_t())
+    end))
+  success(uv.run(destination))
+  test.assert(transfer_read_all(source, reader:as_stream_t()) == "tcp\0handoff\255")
+end
+
+function test_pipe_transfer_requires_destination_binding_before_adoption(_context: test.Context)
+  local source, destination = new_loop(), new_loop()
+  defer finish_loop(source)
+  defer finish_loop(destination)
+  local reader, writer = open_pipe_pair(source)
+  local packet = writer:to_transfer_payload()
+  test.assert(uv.is_closing(writer:as_handle_t()))
+  transfer_rejected(function () uv.pipe_t.from_transfer_payload(packet) end)
+  uv.bind_transfer_loop(destination)
+  defer uv.unbind_transfer_loop(destination)
+  uv.bind_transfer_loop(destination)
+  transfer_rejected(function () uv.bind_transfer_loop(source) end)
+  uv.unbind_transfer_loop(source)
+  local restored = uv.pipe_t.from_transfer_payload(packet)
+  test.assert(uv.handle_get_loop(restored:as_handle_t()) == destination)
+  success(uv.write_string(uv.write_t(), restored:as_stream_t(), "pipe\0handoff\255",
+    function (_: uv.write_t, code: integer)
+      success(code)
+      uv.close(restored:as_handle_t())
+    end))
+  success(uv.run(destination))
+  test.assert(transfer_read_all(source, reader:as_stream_t()) == "pipe\0handoff\255")
+end
+
+function test_native_transfer_refuses_userdata_pending_write_and_active_read(_context: test.Context)
+  local loop = new_loop()
+  defer finish_loop(loop)
+  local reader, writer = open_pipe_pair(loop)
+  local writer_handle = writer:as_handle_t()
+  uv.handle_set_data(writer_handle, "source metadata")
+  transfer_rejected(function () writer:to_transfer_payload() end)
+  test.assert(not uv.is_closing(writer_handle))
+  test.assert(uv.handle_get_data(writer_handle) == "source metadata")
+  uv.handle_set_data(writer_handle, nil)
+  local writes = 0
+  success(uv.write_string(uv.write_t(), writer:as_stream_t(), "",
+    function (_: uv.write_t, status: integer) success(status); writes = writes + 1 end))
+  test.assert(uv.stream_transfer_status(writer:as_stream_t()) == uv.EBUSY)
+  transfer_rejected(function () writer:to_transfer_payload() end)
+  test.assert(not uv.is_closing(writer_handle))
+  success(uv.run(loop))
+  test.assert(writes == 1)
+  success(uv.read_start(reader:as_stream_t(),
+    function (_: uv.handle_t, _size: integer): uv.buf_t return uv.buf_t.allocate(32) end,
+    function (_: uv.stream_t, _count: integer, _buffer: uv.buf_t?) end))
+  transfer_rejected(function () reader:to_transfer_payload() end)
+  test.assert(not uv.is_closing(reader:as_handle_t()))
+  success(uv.read_stop(reader:as_stream_t()))
+end
+
+function test_pipe_transfer_rejects_invalid_descriptor_before_owner_init(_context: test.Context)
+  local loop = new_loop()
+  defer finish_loop(loop)
+  uv.bind_transfer_loop(loop)
+  defer uv.unbind_transfer_loop(loop)
+  expect_error(function ()
+    uv.pipe_t.from_transfer_payload(strings.char(8, 1))
+  end, "invalid pipe transfer descriptor")
+  transfer_rejected(function ()
+    uv.pipe_t.from_transfer_payload(strings.char(8, 128, 128, 128, 128, 32))
+  end)
+  local owners = 0
+  uv.walk(loop, function (_: uv.handle_t, _data: value) owners = owners + 1 end)
+  test.assert(owners == 0, "invalid pipe descriptor initialized an adoptive owner")
+end
+
+function test_native_transfer_discard_retires_unadopted_payload_without_loop_binding(
+    _context: test.Context)
+  local loop = new_loop()
+  defer finish_loop(loop)
+  local pipe_reader, pipe_writer = open_pipe_pair(loop)
+  local pipe_packet = pipe_writer:to_transfer_payload()
+  success(uv.pipe_t.discard_transfer_payload(pipe_packet))
+  test.assert(transfer_read_all(loop, pipe_reader:as_stream_t()) == "")
+
+  local status, left?, right? = uv.socketpair(uv.SOCK_STREAM, 0,
+    uv.NONBLOCK_PIPE, uv.NONBLOCK_PIPE)
+  success(status)
+  local writer, reader = uv.tcp_t(), uv.tcp_t()
+  success(uv.tcp_init(loop, writer))
+  success(uv.tcp_init(loop, reader))
+  success(uv.tcp_open(writer, left))
+  success(uv.tcp_open(reader, right))
+  local tcp_packet = writer:to_transfer_payload()
+  success(uv.tcp_t.discard_transfer_payload(tcp_packet))
+  test.assert(transfer_read_all(loop, reader:as_stream_t()) == "")
+
+  transfer_rejected(function () uv.pipe_t.discard_transfer_payload("") end)
+  transfer_rejected(function () uv.tcp_t.discard_transfer_payload("") end)
+end

@@ -28,8 +28,11 @@ The relevant metatable entries use private lightuserdata keys:
 | `TITAN_MT_TYPE` | Compiler-generated `types.serialize(...)` expression for the schema |
 | `TITAN_MT_MEMBERMAP` | Public field accessor addresses and public method closures, keyed by name |
 | `TITAN_MT_STATICS` | Constructor and static-function closures, keyed by their member names |
-| `TITAN_MT_MOD` | Declaring module userdata for record and Interface accessors |
+| `TITAN_MT_MOD` | Declaring module userdata for accessors and nominal construction |
 | `TITAN_MT_PAYLOAD` | Generated typed payload reader for a union |
+| `TITAN_MT_PROJECT` | Generated typed field/part storage projector |
+| `TITAN_MT_CONSTRUCT` | Generated default storage construction callback |
+| `TITAN_MT_PUBLIC` | Whether the nominal declaration is public |
 
 Record and Interface field entries in the member map are lightuserdata
 addresses of generated native accessors. Method entries remain Lua-callable C
@@ -63,8 +66,13 @@ retain `value` because their payloads can be numbers, strings, or expression
 tables.
 
 `hydrate_type` evaluates the compiler-produced descriptor expression through
-`titan.lua.load` with an explicit constructor environment. This is an internal
-decoder for trusted compiler metadata, not a public source-evaluation API.
+an audited `luaL_loadbufferx` transaction with an explicit constructor
+environment and text-only mode. The saved stack top is restored on every
+path, and the loaded callable is copied into traced Titan storage before
+invocation. Reflection depends only on `iteration`, allowing `titan.lua` and
+other state-transfer clients to use reflection without an import cycle.
+This is an internal decoder for trusted compiler metadata, not a public
+source-evaluation API.
 Its constructors match serializer spellings such as `Record`, `Field`,
 `Function`, `Nominal`, and `COwned`.
 
@@ -84,6 +92,11 @@ The hydration context is saved and restored around each operation, including
 failure, so nested work cannot replace its caller's active owner tables.
 Completed descriptors are cached by metatable. Successful nominal lookups are
 also cached by qualified name.
+
+Record and union hydration retain the generated projector, constructor, and
+declaring module owner. Existing serialized total field/variant counts are
+compared with the visible descriptor count to compute `all_public`;
+`TITAN_MT_PUBLIC` independently supplies `is_public`.
 
 ### Generic erasure and named boundaries
 
@@ -152,6 +165,52 @@ Conversion may allocate, particularly when constructing an Interface wrapper.
 Keep source and destination roots valid across those conversions, publish
 boxed output promptly, and do not retain a movable Lua stack pointer across
 an allocating call. A failed conversion must leave the old field intact.
+
+## Native projections and default construction
+
+`coder/reflection.lua` generates storage projectors and constructors using the
+same `_nominal_plan`, `_nominal_member`, and `_nominal_store` operations as
+ordinary nominal construction. Their metatable protocol is part of ABI 2;
+compiler, runtime, and providers must be rebuilt together. The language-server
+API remains version 1.
+
+Each projector receives the rooted nominal owner and a public field ordinal
+or active part ordinal. Ordinary fields use normal boxing. Direct C integers
+copy their complete uint64 bit pattern into a Lua integer; C float/double use
+Lua numbers. Long doubles use bounded `%La` text and full-consumption `strtold`
+on construction, rejecting overflow and underflow to zero. Runtime helpers
+select MinGW's wide formatter and parser explicitly on Windows, since the
+x86_64 UCRT printf family treats long double as double. Structs recurse
+through typed C member expressions, including bitfields, and arrays through
+their actual C extent. The compiler never emits a dump of aggregate padding.
+Unsupported unions, flexible storage, or widths raise only when projected or
+constructed, preserving the ability to reflect an otherwise unrelated field.
+
+Aggregate projections allocate const Titan Arrays. Every intermediate Array
+stays rooted on the Lua stack until installed in its parent; parents apply the
+ordinary GC barrier. The native callbacks carry stack offsets across
+allocation rather than movable stack addresses. The public Titan methods
+save and defer restoration of the exact entry top, including failure.
+
+Construction takes the rooted projection Array and allocates the final
+userdata once, rooting it before any field conversion. It uses the existing
+native nominal layout and store operations, including traced-slot barriers.
+Owned foreign values occupy traced slots and follow ordinary boxing and
+conversion, including optional absence; direct C provenance alone does not
+select native payload access. The protobuf codec separately rejects owned
+resources when encountered.
+Ordinary fields retain their checker-owned dynamic conversion plans; native
+projections use typed C writes with tag, range, and structure checks. Const
+fields are initialized as part of creating the fresh value. No public `new`
+call or mutation of an existing record is involved. A failed conversion leaves
+only a rooted partial object that is discarded during stack restoration.
+The input Array remains owned by the caller throughout the native callback.
+For C structs, all bitfields are initialized together in a typed designated
+initializer and checked for narrowing before the object is copied to fresh
+storage. Non-bitfield members are then filled recursively. This supports
+const and adjacent bitfields without taking their addresses or overwriting
+an already initialized sibling. Pointer temporaries discard only a typedef's
+top-level qualifiers; pointee qualifiers remain intact.
 
 ## Value classification
 

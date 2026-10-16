@@ -268,7 +268,7 @@ install-titan-sdk publish-titan-sdk:
 	  $(call quote,$(TITAN_INSTALL_TREE)/include/titan) $(call quote,$(TITAN_INSTALL_TREE)/etc/titan) \
 	  $(call quote,$(TITAN_INSTALL_TREE)/share/titan/LICENSES)
 	cp -p $(call quote,$(WINDOWS_BUILD_ROOT)/runtime/libtitan.a) $(call quote,$(TITAN_INSTALL_TREE)/lib/titan/$(TITAN_LIBRARY_VERSION)/libtitan.a)
-	cp -p titan-runtime/titan.h titan-runtime/minicoro.h $(call quote,$(TITAN_INSTALL_TREE)/include/)
+	cp -p titan-runtime/titan.h titan-runtime/minicoro.h titan-runtime/transfer.h $(call quote,$(TITAN_INSTALL_TREE)/include/)
 	cp -p titan-runtime/titan/ffi.h $(call quote,$(TITAN_INSTALL_TREE)/include/titan/ffi.h)
 	@if ! test -e $(call quote,$(TITAN_INSTALL_TREE)/lib/titan/$(TITAN_LIBRARY_VERSION)/titan.dll); then \
 	  cp -p $(call quote,$(WINDOWS_BUILD_ROOT)/runtime/titan.dll) $(call quote,$(TITAN_INSTALL_TREE)/lib/titan/$(TITAN_LIBRARY_VERSION)/titan.dll); fi
@@ -285,7 +285,7 @@ runtime-check: runtime
 	  LPEGLABEL_BUILD_CFLAGS=$(call quote,$(LPEGLABEL_BUILD_CFLAGS)) \
 	  bash spec/support/check_windows_runtime_sdk.sh $(call quote,$(WINDOWS_BUILD_ROOT)) $(call quote,$(PREFIX))
 
-STDLIB_MODULES := coroutine uv async timer io fs net ssl url http websocket os path peg string math lua iteration gc test reflect sqlite3 json
+STDLIB_MODULES := coroutine uv async timer io fs net ssl url http websocket os path peg string math lua iteration gc test reflect sqlite3 json protobuf transfer
 STDLIB_ROOTS := $(addprefix titan.,$(STDLIB_MODULES))
 
 .PHONY: stdlib stdlib-check install-stdlib publish-stdlib compiler-publication-check

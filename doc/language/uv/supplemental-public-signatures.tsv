@@ -1,4 +1,13 @@
 public_name	signature	source	parameter_roles
+bind_transfer_loop	function bind_transfer_loop(loop: loop_t)	titan/uv/transfer.titan:8	loop: INPUT initialized destination loop; one state-local binding until explicit unbind.
+unbind_transfer_loop	function unbind_transfer_loop(loop: loop_t)	titan/uv/transfer.titan:18	loop: INPUT exact loop to unbind; an unrelated loop leaves the binding unchanged.
+stream_transfer_status	function stream_transfer_status(stream: stream_t, allow_reading: boolean?): integer	titan/uv/transfer.titan:40	stream: INPUT live TCP or pipe; allow_reading: INPUT permits an adapter watcher but never pending native requests; no ownership mutation.
+tcp_t:to_transfer_payload	function tcp_t:to_transfer_payload(): string	titan/uv/transfer.titan:86	self: INPUT/OUTPUT idle connected owner; successful encoding detaches it into one caller-owned native payload.
+tcp_t.from_transfer_payload	function tcp_t.from_transfer_payload(payload: string): tcp_t	titan/uv/transfer.titan:104	payload: INPUT exactly-once socket handoff; adopts onto the destination bound loop.
+pipe_t:to_transfer_payload	function pipe_t:to_transfer_payload(): string	titan/uv/transfer.titan:120	self: INPUT/OUTPUT idle non-IPC pipe owner; successful encoding detaches it into one caller-owned native payload.
+pipe_t.from_transfer_payload	function pipe_t.from_transfer_payload(payload: string): pipe_t	titan/uv/transfer.titan:137	payload: INPUT exactly-once pipe descriptor handoff; adopts onto the destination bound loop.
+pipe_t.discard_transfer_payload	function pipe_t.discard_transfer_payload(payload: string): integer	titan/uv/transfer.titan:165	payload: INPUT known unadopted native bytes; native close attempt consumes ownership even on error; no Runtime required.
+tcp_t.discard_transfer_payload	function tcp_t.discard_transfer_payload(payload: string): integer	titan/uv/transfer.titan:157	payload: INPUT known unadopted native bytes; native close attempt consumes ownership even on error; no Runtime required.
 addrinfo_result_t:entries	function addrinfo_result_t:entries(): {addrinfo_t}	titan/uv/dns.titan:56	
 async_send_function	function async_send_function(): foreign function (*void): int	titan/uv/uv.titan:1839	
 async_t.new	function async_t.new(): async_t	titan/uv/uv.titan:1800	

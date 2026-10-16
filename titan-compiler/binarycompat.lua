@@ -119,7 +119,8 @@ function binarycompat.module(modtype, registry)
                     type = value_type(member.type), const = member.isconst,
                 }
             elseif member.type._tag == "Type.Function"
-                or member.type._tag == "Type.FunctionScheme" then
+                or member.type._tag == "Type.FunctionScheme"
+                or member.type._tag == "Type.CFunction" then
                 result.functions[member.name] = signature(member.type, member.paramnames)
             else
                 add_nominal(member.name, member.type)

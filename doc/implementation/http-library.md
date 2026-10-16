@@ -8,7 +8,7 @@ callback bridge, streaming parser ownership, and high-level server composition.
 ## Folder-module structure and layering
 
 The canonical `titan/http/http.titan` main uses the short `net`, `ssl`, `url`,
-`io`, `async`, `math`, and `string` imports. The parser
+`io`, `async`, `math`, `reflect`, and `string` imports. The parser
 resolves every short spelling to its ordinary `titan.*` logical identity before
 checking. Its immediate contributors share one module-private scope:
 
@@ -19,6 +19,7 @@ titan/http/pool.titan       Client pools, idle leases, bounded background drains
 titan/http/headers.titan    ordered public Headers value
 titan/http/native.titan     private parser owner and callback event Array
 titan/http/server.titan     Request, Response, and per-connection serving
+titan/http/transfer.titan   paired Exchange handoff and parser snapshots
 titan/http/upgrade.titan    owned upgrade stream, opening supervisor, handoff
 ```
 
@@ -494,6 +495,51 @@ its completion. Transport and scheduling use high-level `async`, `timer`, and pu
 connection operations. The UV import supplies the registrar return type;
 there is no connection-local watchdog or generation protocol.
 
+## Cross-state exchange ownership
+
+`ExchangeState` remains the shared private owner of the parser, captured transport,
+and admission flags. Public `Exchange` bundles its matching `Request` and
+`Response`; its custom hook detaches that shared owner once. Request reads,
+response output/close, and supervised upgrade output hold `pending` across their
+entire operation, including queued native completion. The serving-owner flag
+rejects nested or competing `Exchange:serve` loops while permitting an idle
+handler to transfer the pair. Destination reconstruction starts without a serving
+owner and registers one when `serve` starts.
+
+The encoder validates state, snapshots metadata and buffers, then delegates the
+transport move to the concrete public TCP/TLS hook. Only after successful
+detachment does it mark the source exchange transferred/inactive and close its
+old parser. A private anonymous-root protobuf schema contains copied scalar,
+header-array, URL and parser fields plus the known transport kind and child
+bytes. If that final encoding raises, a lexical guard discards the detached
+transport; the source stays inactive. The original server's defer therefore
+cannot close an adopted transport. `Exchange:serve` follows the same serial request/framing loop with a
+destination-supplied handler; subsequent transfers/upgrades retain the same
+ownership guard. A single-exchange consumer uses `Exchange:close` to finish its
+response and retire the transport.
+
+The pinned llhttp state is copied as process-local bytes. Its `_current` is an
+integer state selector represented as a pointer; `_span_cb0` names immutable
+native parser code. Source `data`, settings, input span, error position, and reason
+pointers are cleared. The decoder constructs fresh Parser settings, callbacks,
+and Lua-state ownership, then installs its local data/settings pointers. A live
+span is restored with a local nonnil marker: llhttp restarts every live span at
+the next input before reading it. Copied semantic fields preserve partial body
+and trailer state, delimiter excess, and buffered next-request input. The usual
+Request.headers/Parser.parsed_headers alias is restored so later trailers remain
+visible through the request.
+
+`UpgradedStream` is public with private fields so it can participate in the custom
+record protocol. It transfers the native transport plus its unread prefix and
+rejects active reads/writes. Ordinary upgrade retirement continues to use the
+captured abort capability. Handoff explicitly unwraps only supported TCP/TLS
+owners and rebuilds that capability in the destination; arbitrary supplied
+Interface implementations are rejected before ownership changes. Its private
+protobuf schema carries prefix, transport kind and child bytes. Its public
+`discard_transfer_payload` decodes those bytes and directly retires the known
+TCP/TLS child without a Runtime; WebSocket uses this method for failed outer
+serialization. A native close attempt consumes the packet even on an error.
+
 ## Native build and provider composition
 
 The build pins llhttp 9.4.3 and verifies its source tarball. The three generated
@@ -505,10 +551,9 @@ system-llhttp mode, and neither the private archive nor headers are installed
 as runtime-SDK files.
 
 The HTTP root adds one logical protocol, archive key, generated shim, and
-`luaopen_titan_http`. The coordinated current image, including `titan.test`, `titan.reflect`,
-`titan.sqlite3`, and `titan.json`, has twenty-three logical
-modules and shims with twenty-four DSO openers including bare `luaopen_titan`
-support. The complete image
+`luaopen_titan_http`. The current provider has twenty-five logical modules
+and shims, with twenty-six DSO openers including bare `luaopen_titan` support.
+The complete image
 lives in the `0.6` library namespace; earlier installations are not publication
 predecessors.
 

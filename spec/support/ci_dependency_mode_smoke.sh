@@ -100,7 +100,7 @@ check_canonical_container() {
         test -f "$PROVIDER.dSYM/Contents/Resources/DWARF/titan.so"
     fi
 
-    for module in coroutine uv async timer io fs net ssl url http websocket os path peg string math lua iteration gc test reflect sqlite3 json; do
+    for module in coroutine uv async timer io fs net ssl url http websocket os path peg string math lua iteration gc test reflect sqlite3 json protobuf transfer; do
         local shim="$SHIM_ROOT/titan/$module.lua"
 
         test -f "$shim"
@@ -152,6 +152,8 @@ local expected = {
     ["titan.reflect"] = true,
     ["titan.sqlite3"] = true,
     ["titan.json"] = true,
+    ["titan.protobuf"] = true,
+    ["titan.transfer"] = true,
 }
 
 local scanned, scan_error = metadata.scan_archive(archive, {

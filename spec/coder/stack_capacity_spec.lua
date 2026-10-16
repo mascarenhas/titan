@@ -111,7 +111,11 @@ describe("generated Lua-stack capacity", function()
             1, true))
         assert.truthy(csrc:find(
             "titan_ensure_stack(L, 10);", 1, true))
-        local _, direct_closures = csrc:gsub(
+        -- Count the ordinary allocation sites, excluding cold transfer restore
+        -- helpers that also reconstruct six-slot closures.
+        local exercise = assert(csrc:match(
+            "[^\n]*test_\\u2133_exercise_titan%b()%s*(%b{})"))
+        local _, direct_closures = exercise:gsub(
             "luaF_newCclosure%(L, 6%);", "")
         assert.is_true(direct_closures >= 2,
             "lambda and bound-method construction must both be direct")

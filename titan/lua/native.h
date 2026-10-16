@@ -16,7 +16,11 @@ typedef enum titan_lua_kind {
   TITAN_LUA_STRING,
   TITAN_LUA_STATE,
   TITAN_LUA_FUNCTION,
-  TITAN_LUA_POINTER
+  TITAN_LUA_POINTER,
+  TITAN_LUA_RECORD,
+  TITAN_LUA_UNION,
+  TITAN_LUA_CLOSURE,
+  TITAN_LUA_RECORD_PAYLOAD
 } titan_lua_kind;
 
 typedef struct titan_lua_value {
@@ -25,9 +29,14 @@ typedef struct titan_lua_value {
   lua_Number number;
   const char *bytes;
   size_t length;
+  const char *name;
+  size_t name_length;
+  const char *module;
+  size_t module_length;
   lua_State *state;
   lua_CFunction function;
   void *pointer;
+  const void *entry;
 } titan_lua_value;
 
 typedef struct titan_lua_preload {

@@ -144,6 +144,7 @@ local function cancelled_prepare()
   defer cleanup_target(target)
   cancel_while_blocked(target, "cancel accepted SQLite prepare")
   assert_overlap_rejected(function () connection:get_autocommit() end)
+  assert_overlap_rejected(function () connection:to_transfer_payload() end)
   ffi.titan_sqlite_fixture_release()
   join_cancelled(target, "cancel accepted SQLite prepare")
   test.assert(not published and
@@ -230,6 +231,7 @@ local function cancelled_close()
   end)
   defer cleanup_target(target)
   cancel_while_blocked(target, "cancel accepted SQLite close")
+  assert_overlap_rejected(function () connection:to_transfer_payload() end)
   local closes = ffi.titan_sqlite_fixture_closed_connections() as integer
   test.assert(ffi.titan_sqlite_fixture_live_connections() == 1,
               "cancelled close abandoned its native handle before completion")

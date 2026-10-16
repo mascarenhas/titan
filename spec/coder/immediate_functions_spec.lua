@@ -15,6 +15,13 @@ local function generate(source)
     return coder.generate("test", ast, {}, driver.TITAN_ABI_VERSION)
 end
 
+local function native_body(csrc, name)
+    -- Transfer reconstruction has its own cold allocation path. These checks
+    -- concern the ordinary source call, including an inlined immediate body.
+    return assert(csrc:match(
+        "[^\n]*test_\\u2133_" .. name .. "_titan%b()%s*(%b{})"), name)
+end
+
 local effects = [[
     log: integer = 0
     function mark(n: integer): integer
@@ -49,7 +56,7 @@ describe("immediately invoked anonymous functions", function()
                 return result + 1
             end
         ]])
-        assert.not_match("luaF_newCclosure", csrc)
+        assert.not_match("luaF_newCclosure", native_body(csrc, "choose"))
         assert.not_match("lambda_%d+", csrc)
         assert.not_match("luaD_callnoyield", csrc)
     end)
@@ -65,7 +72,7 @@ describe("immediately invoked anonymous functions", function()
                 return head, next
             end
         ]])
-        assert.not_match("luaF_newCclosure", csrc)
+        assert.not_match("luaF_newCclosure", native_body(csrc, "finite"))
         assert.not_match("lambda_%d+", csrc)
         assert.not_match("%[TITAN_VARARG_MAX%]", csrc)
         assert.not_match("_flexdesc_", csrc)
@@ -84,7 +91,7 @@ describe("immediately invoked anonymous functions", function()
                 end)()
             end
         ]])
-        local _, allocations = csrc:gsub("luaF_newCclosure", "")
+        local _, allocations = native_body(csrc, "make"):gsub("luaF_newCclosure", "")
         assert.equal(1, allocations)
         assert.match("lambda_%d+", csrc)
         h.run_coder([[

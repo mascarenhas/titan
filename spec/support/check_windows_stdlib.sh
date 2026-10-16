@@ -11,7 +11,7 @@ stage=$(mktemp -d "$build_root/.stdlib-check.XXXXXX")
 trap 'rm -rf "$stage"' EXIT
 cp "$build_root/out/titan.dll" "$stage/titan.dll"
 cp "$build_root/runtime/titan.dll" "$stage/support.dll"
-for module in coroutine uv async timer io fs net ssl url http websocket os path peg string math lua iteration gc test reflect sqlite3 json; do
+for module in coroutine uv async timer io fs net ssl url http websocket os path peg string math lua iteration gc test reflect sqlite3 json protobuf transfer; do
   cp "$build_root/out/titan/$module.lua" "$stage/$module.lua"
 done
 llvm-readobj --coff-exports "$stage/titan.dll" > "$stage/provider.exports"

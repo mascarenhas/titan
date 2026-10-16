@@ -5,6 +5,14 @@
 local uv = import "uv"
 local async = import "async"
 local string = import "string"
+local protobuf = import "protobuf"
+local reflect = import "reflect"
+
+local const connection_transfer_fields: const {reflect.Type} = {
+  reflect.Type.is_string(), reflect.Type.is_string(), reflect.Type.is_integer(),
+  reflect.Type.is_option(reflect.Type.is_named(reflect.NamedType("titan.async.OperationError"))),
+  reflect.Type.is_boolean(),
+}
 
 -- Stream payloads are binary strings, so delimiter handling uses the string
 -- library's length-aware literal search and slicing operations.
@@ -35,6 +43,7 @@ record Connection
   local read_buffer: uv.buf_t?
   local phase: integer
   local input_listeners: {InputRegistration}
+  local pending_outputs: integer
 end
 
 --- An owned TCP listener with one waiting acceptor.
@@ -159,14 +168,15 @@ local function notify_input(connection: Connection)
   if failure ~= nil then failure:raise() end
 end
 
-local function new_connection(loop: uv.loop_t): Connection
-  local tcp = uv.tcp_t.new()
+local function wrap_connection(loop: uv.loop_t, tcp: uv.tcp_t,
+                                terminal: integer, failure: value): Connection
   local stream = tcp:as_stream_t()
   local handle = tcp:as_handle_t()
   local connection: Connection = {
     handle = tcp, handle_view = handle, stream = stream, loop = loop,
     excess = "", input = nil, start_read = nil, started = false,
     read_buffer = nil, phase = CONNECTION_UNCONNECTED, input_listeners = {},
+    pending_outputs = 0,
   }
   connection.input = async.BufferedSubscription<|string, value|>(function (publish, fail, finish)
     local stop = function ()
@@ -206,8 +216,16 @@ local function new_connection(loop: uv.loop_t): Connection
     connection.start_read = function (): integer
       return uv.read_start(stream, allocate, receive)
     end
+    if terminal == 1 then finish()
+    elseif terminal == 2 then fail(failure) end
     return actions
   end)
+  return connection
+end
+
+local function new_connection(loop: uv.loop_t): Connection
+  local tcp = uv.tcp_t.new()
+  local connection = wrap_connection(loop, tcp, 0, nil)
   check_status(uv.tcp_init(loop, tcp), "net.tcp.init")
   return connection
 end
@@ -652,6 +670,8 @@ function Connection:write(data: string)
   if #data == 0 then return end
   local request = uv.write_t.new()
   uv.buf_check_length(data, #data)
+  self.pending_outputs = self.pending_outputs + 1
+  defer self.pending_outputs = self.pending_outputs - 1
   case async.await_with<|WriteOperation, nil, integer|>(
     WriteOperation(request, stream, data, nil, 0), start_write)
   when success() then
@@ -669,11 +689,115 @@ function Connection:shutdown()
   local stream = self.stream
   if not uv.is_writable(stream) then return end
   local request = uv.shutdown_t.new()
+  self.pending_outputs = self.pending_outputs + 1
+  defer self.pending_outputs = self.pending_outputs - 1
   case async.await_with<|ShutdownOperation, nil, integer|>(
     ShutdownOperation(request, stream, nil, 0), start_shutdown)
   when success() then
   when error(code) then raise operation_error(code, "net.shutdown")
   end
+end
+
+--- Detach an idle TCP connection into a manually owned transfer payload.
+-- Pending operations and input observers are rejected before ownership changes.
+-- @return Native endpoint, copied unread bytes, and receive state; adopt exactly once.
+-- @usage standard-library-net.md#transferring-connections
+function Connection:to_transfer_payload(): string
+  -- Encoding is synchronous and may run in a transfer callback without a Task.
+  if self.loop ~= async.current_loop() then
+    raise "TCP resource belongs to a different async Runtime"
+  end
+  if async.is_closing() then raise "cannot transfer from a closing async Runtime" end
+  if is_closed(self.handle_view) then raise "cannot transfer a closed TCP resource" end
+  if self.phase ~= CONNECTION_CONNECTED then
+    raise "cannot transfer an unconnected TCP Connection"
+  end
+  if self.input:has_waiter() or self.pending_outputs ~= 0 then
+    raise "cannot transfer a TCP Connection with a pending operation"
+  end
+  if #self.input_listeners ~= 0 then
+    raise "cannot transfer a TCP Connection with input observers"
+  end
+  -- A Windows overlapped read remains native-owned even after read_stop.
+  -- Check it before touching the persistent producer or its queued bytes.
+  check_status(uv.stream_transfer_status(self.stream, true), "net.transfer")
+  local pending, terminal? = self.input:snapshot_pending()
+  local bytes = string.writer()
+  bytes:write(self.excess)
+  for index = 1, pending.count do bytes:write(pending:get(index)) end
+  local terminal_kind = 0
+  local failure: async.OperationError? = nil
+  if terminal ~= nil then
+    case terminal
+    when ended() then terminal_kind = 1
+    when error(reason) then
+      terminal_kind = 2
+      failure = reason
+    when closed() then raise "cannot transfer a closed TCP Connection"
+    when item() then raise "invalid TCP subscription snapshot"
+    end
+  end
+  local input_bytes = bytes:drain()
+  local started = self.started
+  local reading = uv.is_active(self.handle_view)
+  if reading then check_status(uv.read_stop(self.stream), "net.transfer.stop") end
+  local native_payload = ""
+  do
+    native_payload = self.handle:to_transfer_payload()
+  catch
+    if reading and not is_closed(self.handle_view) then
+      check_status(self.start_read(), "net.transfer.restart")
+    end
+    raise
+  end
+  self.excess = ""
+  self.input = nil
+  self.start_read = nil
+  self.started = false
+  self.read_buffer = nil
+  local exported = false
+  defer if not exported then uv.tcp_t.discard_transfer_payload(native_payload) end
+  local payload = protobuf.serialize_fields(connection_transfer_fields,
+    native_payload, input_bytes, terminal_kind, failure, started)
+  exported = true
+  return payload
+end
+
+--- Adopt one detached TCP connection on the destination's active Runtime.
+-- @param payload Exact bytes returned by to_transfer_payload; ownership is manual.
+-- @return Fresh connection with destination-owned callbacks and copied unread input.
+-- @usage standard-library-net.md#transferring-connections
+function Connection.from_transfer_payload(payload: string): Connection
+  local native_payload: string, bytes: string, terminal: integer,
+    failure: async.OperationError?, started: boolean =
+    protobuf.deserialize_fields(payload, connection_transfer_fields)
+  if terminal < 0 or terminal > 2 then raise "invalid TCP Connection receive state" end
+  if (terminal == 2) ~= (failure ~= nil) then
+    raise "invalid TCP Connection receive error"
+  end
+  local loop = async.current_loop()
+  if async.is_closing() then raise "cannot transfer into a closing async Runtime" end
+  local tcp = uv.tcp_t.from_transfer_payload(native_payload)
+  local handle = tcp:as_handle_t()
+  local adopted = false
+  defer if not adopted then uv.close(handle) end
+  local connection = wrap_connection(loop, tcp, terminal, failure)
+  connection.phase = CONNECTION_CONNECTED
+  connection.excess = bytes
+  if started and terminal == 0 then
+    check_status(connection.start_read(), "net.transfer.read.start")
+    connection.started = true
+  end
+  adopted = true
+  return connection
+end
+
+--- Dispose of an undelivered connection payload exactly once without a Runtime.
+-- @return Native socket close status; adoption or disposal consumes the payload.
+-- @usage standard-library-net.md#transferring-connections
+function Connection.discard_transfer_payload(payload: string): integer
+  local native_payload: string = protobuf.deserialize_fields(payload, connection_transfer_fields)
+  return uv.tcp_t.discard_transfer_payload(native_payload)
 end
 
 --- Observe new TCP input or terminal receive events after they have been buffered.

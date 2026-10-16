@@ -23,6 +23,7 @@
 3 spec/checker/c_ffi_spec.lua 117.030
 4 spec/checker/c_ffi_stack_objects_spec.lua 20.858
 1 spec/checker/c_ffi_surface_types_spec.lua 18.740
+1 spec/checker/public_c_exports_spec.lua 0.000
 2 spec/checker/c_ffi_tag_names_spec.lua 24.451
 2 spec/checker/c_ffi_target_profile_spec.lua 12.921
 3 spec/checker/checker_spec.lua 58.252
@@ -74,6 +75,7 @@
 3 spec/coder/c_ffi_tag_names_spec.lua 9.229
 1 spec/coder/closure_adjustment_wrappers_spec.lua 15.454
 2 spec/coder/closures_spec.lua 18.381
+2 spec/coder/closure_transfer_spec.lua 0.000
 4 spec/coder/coder_spec.lua 94.307
 4 spec/coder/const_values_spec.lua 6.224
 3 spec/coder/contextual_value_calls_spec.lua 7.007
@@ -107,6 +109,7 @@
 1 spec/coder/optional_parameters_spec.lua 6.406
 3 spec/coder/parallel_compilation_spec.lua 24.313
 1 spec/coder/record_constructors_spec.lua 7.992
+4 spec/coder/reflection_projection_spec.lua 0.000
 3 spec/coder/so_import_spec.lua 16.910
 3 spec/coder/so_trace_names_spec.lua 6.051
 4 spec/coder/source_import_local_visibility_spec.lua 76.086

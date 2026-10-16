@@ -77,7 +77,7 @@ end
 -- The Parser owner remains traced throughout each synchronous Titan entry call;
 -- each callback restores the pre-callback Lua stack before returning its exact
 -- C result.
-foreign function llhttp_url_cb(
+local foreign function llhttp_url_cb(
     parser: *llhttp_t, data: const *char,
     length: size_t): int
   local owner = parser.data as foreign *Udata
@@ -93,7 +93,7 @@ foreign function llhttp_url_cb(
   return result
 end
 
-foreign function llhttp_status_cb(
+local foreign function llhttp_status_cb(
     parser: *llhttp_t, data: const *char,
     length: size_t): int
   local owner = parser.data as foreign *Udata
@@ -109,7 +109,7 @@ foreign function llhttp_status_cb(
   return result
 end
 
-foreign function llhttp_header_field_cb(
+local foreign function llhttp_header_field_cb(
     parser: *llhttp_t, data: const *char,
     length: size_t): int
   local owner = parser.data as foreign *Udata
@@ -125,7 +125,7 @@ foreign function llhttp_header_field_cb(
   return result
 end
 
-foreign function llhttp_header_value_cb(
+local foreign function llhttp_header_value_cb(
     parser: *llhttp_t, data: const *char,
     length: size_t): int
   local owner = parser.data as foreign *Udata
@@ -141,7 +141,7 @@ foreign function llhttp_header_value_cb(
   return result
 end
 
-foreign function llhttp_header_value_complete_cb(
+local foreign function llhttp_header_value_complete_cb(
     parser: *llhttp_t): int
   local owner = parser.data as foreign *Udata
   local callback = ffi.lmacro_clCvalue(
@@ -156,7 +156,7 @@ foreign function llhttp_header_value_complete_cb(
   return result
 end
 
-foreign function llhttp_headers_complete_cb(
+local foreign function llhttp_headers_complete_cb(
     parser: *llhttp_t): int
   local owner = parser.data as foreign *Udata
   local callback = ffi.lmacro_clCvalue(
@@ -171,7 +171,7 @@ foreign function llhttp_headers_complete_cb(
   return result
 end
 
-foreign function llhttp_body_cb(
+local foreign function llhttp_body_cb(
     parser: *llhttp_t, data: const *char,
     length: size_t): int
   local owner = parser.data as foreign *Udata
@@ -187,7 +187,7 @@ foreign function llhttp_body_cb(
   return result
 end
 
-foreign function llhttp_message_complete_cb(
+local foreign function llhttp_message_complete_cb(
     parser: *llhttp_t): int
   local owner = parser.data as foreign *Udata
   local callback = ffi.lmacro_clCvalue(

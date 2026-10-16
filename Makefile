@@ -266,7 +266,7 @@ MINICORO_O := titan-runtime/minicoro.o
 LTITANLIB_O := titan-runtime/ltitanlib.o
 TITAN_RUNTIME_OBJECTS := $(RUNTIME_O) $(MINICORO_O)
 TITAN_RUNTIME_LIB := titan-runtime/libtitan.a
-TITAN_SDK_ROOT_HEADERS := titan-runtime/minicoro.h titan-runtime/titan.h
+TITAN_SDK_ROOT_HEADERS := titan-runtime/minicoro.h titan-runtime/titan.h titan-runtime/transfer.h
 TITAN_SDK_NAMESPACED_HEADERS := titan-runtime/titan/ffi.h
 
 # Titan's public PEG module embeds one audited LPegLabel engine instead of
@@ -312,6 +312,7 @@ UV_TITAN_SOURCES := \
 	titan/uv/sync.titan \
 	titan/uv/tcp.titan \
 	titan/uv/threading.titan \
+	titan/uv/transfer.titan \
 	titan/uv/udp.titan \
 	titan/uv/utilities.titan
 UV_TITAN_HEADERS := \
@@ -323,12 +324,13 @@ UV_TITAN_HEADERS := \
 	titan/uv/platform-constants.h \
 	titan/uv/sync_storage.h \
 	titan/uv/thread-native.h \
+	titan/uv/transfer-native.h \
 	titan/uv/utility_bits.h \
 	titan/uv/version-native.h \
 	titan/uv/work-data.h
 STDLIB_HTTP_SOURCES := titan/http/http.titan titan/http/client.titan \
 	titan/http/headers.titan titan/http/native.titan titan/http/pool.titan \
-	titan/http/server.titan titan/http/upgrade.titan
+	titan/http/server.titan titan/http/transfer.titan titan/http/upgrade.titan
 SQLITE3_TITAN_SOURCES := titan/sqlite3/sqlite3.titan titan/sqlite3/bindings.titan \
 	titan/sqlite3/row.titan titan/sqlite3/worker.titan
 SQLITE3_TITAN_HEADERS := titan/sqlite3/native.h
@@ -340,14 +342,16 @@ WEBSOCKET_TITAN_SOURCES := titan/websocket/websocket.titan titan/websocket/hands
 	titan/websocket/utf8.titan titan/websocket/native.titan
 JSON_TITAN_SOURCES := titan/json/json.titan titan/json/parser.titan \
 	titan/json/decoder.titan titan/json/writer.titan titan/json/numbers.titan
+PROTOBUF_TITAN_SOURCES := titan/protobuf/protobuf.titan titan/protobuf/encoder.titan \
+	titan/protobuf/decoder.titan titan/protobuf/schema.titan
 STDLIB_MODULES := coroutine uv async timer io fs net ssl url http websocket os path peg string \
-	math lua iteration gc test reflect sqlite3 json
+	math lua iteration gc test reflect sqlite3 json protobuf transfer
 STDLIB_SOS     := $(addsuffix .so,$(STDLIB_MODULES))
 STDLIB_QUALIFIED_SOS := $(addprefix titan/,$(STDLIB_SOS))
 STDLIB_ROOTS := titan.coroutine titan.uv titan.async titan.timer \
 	titan.io titan.fs titan.net titan.ssl titan.url titan.http titan.websocket titan.os titan.path \
 	titan.peg titan.string \
-	titan.math titan.lua titan.iteration titan.gc titan.test titan.reflect titan.sqlite3 titan.json
+	titan.math titan.lua titan.iteration titan.gc titan.test titan.reflect titan.sqlite3 titan.json titan.protobuf titan.transfer
 STDLIB_TITAN_SOURCES := titan/coroutine.titan $(UV_TITAN_SOURCES) \
 	titan/async.titan titan/timer.titan titan/io.titan titan/fs.titan \
 	titan/net.titan titan/ssl.titan titan/url.titan \
@@ -361,15 +365,15 @@ STDLIB_TITAN_SOURCES := titan/coroutine.titan $(UV_TITAN_SOURCES) \
 	titan/string/regex_parser.titan \
 	titan/math.titan $(LUA_TITAN_SOURCES) titan/iteration.titan titan/gc.titan \
 	titan/test.titan titan/reflect.titan $(SQLITE3_TITAN_SOURCES) \
-	$(JSON_TITAN_SOURCES)
+	$(JSON_TITAN_SOURCES) $(PROTOBUF_TITAN_SOURCES) titan/transfer.titan
 STDLIB_GENERATED_FFI_HEADERS := $(addprefix $(TITAN_OUTPUT_DIR)/,$(addsuffix .ffi.h, \
-	$(addprefix titan/,$(filter-out uv http websocket peg string sqlite3 json lua,$(STDLIB_MODULES))) \
+	$(addprefix titan/,$(filter-out uv http websocket peg string sqlite3 json lua protobuf,$(STDLIB_MODULES))) \
 	titan/uv/uv titan/http/http titan/websocket/websocket titan/peg/peg titan/string/string \
-	titan/sqlite3/sqlite3 titan/json/json titan/lua/lua))
+	titan/sqlite3/sqlite3 titan/json/json titan/lua/lua titan/protobuf/protobuf))
 STDLIB_GENERATED_FOREIGN_HEADERS := $(STDLIB_GENERATED_FFI_HEADERS) \
 	$(addprefix $(TITAN_OUTPUT_DIR)/,titan/coroutine.titan.h \
 	titan/uv/uv.titan.h titan/async.titan.h titan/http/http.titan.h \
-	titan/sqlite3/sqlite3.titan.h titan/lua/lua.titan.h)
+	titan/sqlite3/sqlite3.titan.h titan/lua/lua.titan.h titan/transfer.titan.h)
 # One native compilation unit per logical module, including folder ensembles.
 # This reviewed import graph owns rebuild propagation and parallel ordering;
 # titanc's object fast path deliberately does not track dependency freshness.
@@ -380,38 +384,41 @@ STDLIB_STEM_peg := titan/peg/peg
 STDLIB_STEM_string := titan/string/string
 STDLIB_STEM_sqlite3 := titan/sqlite3/sqlite3
 STDLIB_STEM_json := titan/json/json
+STDLIB_STEM_protobuf := titan/protobuf/protobuf
 STDLIB_STEM_lua := titan/lua/lua
 stdlib_stem = $(TITAN_OUTPUT_DIR)/$(if $(STDLIB_STEM_$(1)),$(STDLIB_STEM_$(1)),titan/$(1))
 stdlib_outputs = $(call stdlib_stem,$(1)).o $(call stdlib_stem,$(1)).c $(filter $(call stdlib_stem,$(1)).%,$(STDLIB_GENERATED_FOREIGN_HEADERS))
 STDLIB_MODULE_OBJECTS := $(foreach module,$(STDLIB_MODULES),$(call stdlib_stem,$(module)).o)
 STDLIB_IMPORTS_coroutine :=
-STDLIB_IMPORTS_uv := iteration
-STDLIB_IMPORTS_async := uv coroutine gc string
+STDLIB_IMPORTS_uv := iteration protobuf reflect
+STDLIB_IMPORTS_async := uv coroutine gc string transfer
 STDLIB_IMPORTS_timer := async uv
-STDLIB_IMPORTS_io := os string
-STDLIB_IMPORTS_fs := async uv string
-STDLIB_IMPORTS_net := async uv string
-STDLIB_IMPORTS_ssl := async fs net string gc uv
+STDLIB_IMPORTS_io := os string async protobuf reflect
+STDLIB_IMPORTS_fs := async uv string protobuf reflect
+STDLIB_IMPORTS_net := async uv string protobuf reflect
+STDLIB_IMPORTS_ssl := async fs net string gc uv protobuf reflect
 STDLIB_IMPORTS_url := peg string
-STDLIB_IMPORTS_http := async io math net ssl string timer url uv
-STDLIB_IMPORTS_websocket := async gc http io iteration net ssl string timer url uv
-STDLIB_IMPORTS_os := async uv iteration string
+STDLIB_IMPORTS_http := async io math net protobuf reflect ssl string timer url uv
+STDLIB_IMPORTS_websocket := async gc http io iteration net protobuf reflect ssl string timer url uv
+STDLIB_IMPORTS_os := async uv iteration string protobuf reflect
 STDLIB_IMPORTS_path := string
 STDLIB_IMPORTS_peg := gc
 STDLIB_IMPORTS_string := peg gc
 STDLIB_IMPORTS_math :=
-STDLIB_IMPORTS_lua := async fs gc io string
+STDLIB_IMPORTS_lua := async fs gc io string transfer
 STDLIB_IMPORTS_iteration :=
 STDLIB_IMPORTS_gc :=
 STDLIB_IMPORTS_test :=
-STDLIB_IMPORTS_reflect := iteration lua string
-STDLIB_IMPORTS_sqlite3 := async uv reflect string math
+STDLIB_IMPORTS_reflect := iteration
+STDLIB_IMPORTS_sqlite3 := async uv reflect string math protobuf
 STDLIB_IMPORTS_json := reflect string math peg iteration
+STDLIB_IMPORTS_protobuf := reflect string
+STDLIB_IMPORTS_transfer := reflect protobuf
 STDLIB_SHIMS := $(addprefix $(TITAN_OUTPUT_DIR)/,titan/coroutine.lua titan/uv.lua titan/async.lua \
 	titan/timer.lua titan/io.lua titan/fs.lua titan/net.lua titan/ssl.lua \
 	titan/url.lua titan/http.lua titan/websocket.lua titan/os.lua titan/path.lua \
 	titan/peg.lua titan/string.lua titan/math.lua titan/lua.lua \
-	titan/iteration.lua titan/gc.lua titan/test.lua titan/reflect.lua titan/sqlite3.lua titan/json.lua)
+	titan/iteration.lua titan/gc.lua titan/test.lua titan/reflect.lua titan/sqlite3.lua titan/json.lua titan/protobuf.lua titan/transfer.lua)
 STDLIB_CONTAINER := $(TITAN_OUTPUT_DIR)/titan.so
 STDLIB_STATIC_ARCHIVE := $(TITAN_OUTPUT_DIR)/titan.a
 STDLIB_PROVIDER_OUTPUTS := $(STDLIB_CONTAINER) $(STDLIB_STATIC_ARCHIVE)
@@ -989,7 +996,7 @@ runtime: $(TITAN_RUNTIME_LIB) ## Build the Titan C runtime archive used by every
 
 $(LIBBT_DIR)/backtrace.h: | $(LIBBT_CLONE_STAMP)
 
-$(RUNTIME_O): titan-runtime/titan.c titan-runtime/titan.h \
+$(RUNTIME_O): titan-runtime/titan.c titan-runtime/titan.h titan-runtime/transfer.h \
 		titan-runtime/titan/ffi.h $(LIBBT_DIR)/backtrace.h \
 		$(TITAN_RUNTIME_LUA_HEADERS) | $(TITAN_RUNTIME_LUA_LIB) $(LIBBT_LIB)
 	$(CC) $(TITAN_EXTRA_CPPFLAGS) $(CFLAGS) $(TITAN_EXTRA_CFLAGS) \
@@ -1157,6 +1164,7 @@ ifeq ($(STDLIB_USE_INSTALLED_RUNTIME),1)
 	$(STDLIB_ROCKS_ROOT)/share/lua/$(LUA_ABI_VERSION)/titan-compiler/coder/*.lua \
 	$(STDLIB_ROCKS_ROOT)/share/lua/$(LUA_ABI_VERSION)/c-parser/*.lua) \
 	$(STDLIB_ROCKS_ROOT)/include/minicoro.h $(STDLIB_ROCKS_ROOT)/include/titan.h \
+	$(STDLIB_ROCKS_ROOT)/include/transfer.h \
 	$(STDLIB_ROCKS_ROOT)/include/titan/ffi.h \
 	$(wildcard $(STDLIB_ROCKS_ROOT)/src/$(LUA_DIR)/*.h)
 else
@@ -1182,6 +1190,7 @@ STDLIB_C_INPUTS_ssl = $(foreach dir,$(STDLIB_OPENSSL_HEADER_DIRS),$(wildcard $(d
 STDLIB_C_INPUTS_websocket = $(foreach dir,$(STDLIB_OPENSSL_HEADER_DIRS),$(wildcard $(dir)/openssl/*.h))
 STDLIB_C_INPUTS_sqlite3 = $(SQLITE3_HEADER) $(SQLITE3_TITAN_HEADERS)
 STDLIB_C_INPUTS_lua = $(LUA_TITAN_HEADERS)
+STDLIB_C_INPUTS_protobuf = titan/protobuf/native.h
 
 # The command is identical for object builds and the final link. Only the
 # latter receives native payload. Make schedules modules; each compiler gets
@@ -1318,7 +1327,7 @@ include $(TITAN_TEST_MODULE_MANIFEST)
 TITAN_TEST_BUILD_DIR ?= $(TITAN_OUTPUT_DIR)/tests
 TITAN_TEST_EXECUTABLE := $(TITAN_TEST_BUILD_DIR)/$(TITAN_STDLIB_TEST_PROGRAM_OUTPUT)
 # The suite deadline includes fresh child-fixture compilation at the selected
-# native profile across all 28 test roots, including fresh child compilers.
+# native profile across all 29 test roots, including fresh child compilers.
 # Focused gates may set a lower bound.
 TITAN_TEST_TIMEOUT ?= 600
 TEST_TITANC ?= $(if $(filter validation,$(TITAN_BUILD_PROFILE)),$(call make_shell_quote,$(PREFIX)/bin/titanc),titanc)

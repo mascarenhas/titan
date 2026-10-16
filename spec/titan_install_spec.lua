@@ -311,7 +311,7 @@ assert(os.remove(arg[0]))
             end
         end
         local owned = { "lib/titan/0.6/titan.so", "lib/titan/0.6/titan.a",
-            "lib/titan/0.6/libtitan.a", "include/titan.h", "include/minicoro.h",
+            "lib/titan/0.6/libtitan.a", "include/titan.h", "include/minicoro.h", "include/transfer.h",
             "include/titan/ffi.h", "share/titan/LICENSE", "etc/titan/build-profile",
             "lib/titan/0.6/titan.so.dSYM/Contents/Resources/DWARF/titan.so" }
         for _, name in ipairs(owned) do write(current .. "/titan-sdk/" .. name, name) end

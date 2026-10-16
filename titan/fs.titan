@@ -5,6 +5,8 @@
 local async = import "titan.async"
 local uv = import "titan.uv"
 local string = import "titan.string"
+local protobuf = import "titan.protobuf"
+local reflect = import "titan.reflect"
 foreign import "fs_platform.h"
 
 local READ_CHUNK_BYTES = 64 * 1024
@@ -14,7 +16,12 @@ local READ_CHUNK_BYTES = 64 * 1024
 record File
   local handle: integer
   local excess: string
+  local pending_operations: integer
 end
+
+local const file_transfer_fields: const {reflect.Type} = {
+  reflect.Type.is_integer(), reflect.Type.is_string(),
+}
 
 --- Filesystem metadata with an opaque device/inode identity pair.
 -- @field size File size in bytes.
@@ -222,7 +229,7 @@ end
 function open(path: string, mode: string): File
   checked_path(path, "fs.open")
   local flags = open_flags(mode)
-  local file = File(-1, "")
+  local file = File(-1, "", 0)
   do
     return acquire<|File|>(file, "fs.open", function (loop: uv.loop_t,
         request: uv.fs_t, callback: function (uv.fs_t): ()): integer
@@ -241,6 +248,8 @@ end
 -- @return Read bytes or nil at EOF.
 -- @usage standard-library-fs.md
 function File:read(max_bytes: integer?): string?
+  self.pending_operations = self.pending_operations + 1
+  defer self.pending_operations = self.pending_operations - 1
   local requested = READ_CHUNK_BYTES
   if max_bytes then requested = max_bytes end
   if requested <= 0 then
@@ -274,6 +283,8 @@ end
 -- @usage standard-library-fs.md
 function File:read_until(delimiter: string,
                          chop: boolean?): string?
+  self.pending_operations = self.pending_operations + 1
+  defer self.pending_operations = self.pending_operations - 1
   if self.handle < 0 then
     self.excess = ""
     return nil
@@ -322,6 +333,8 @@ end
 -- @return Number of bytes written.
 -- @usage standard-library-fs.md
 function File:write(data: string): integer
+  self.pending_operations = self.pending_operations + 1
+  defer self.pending_operations = self.pending_operations - 1
   self:require_open()
   local length = #data
   if length == 0 then return 0 end
@@ -341,6 +354,8 @@ end
 --- Flush file data to stable storage before returning.
 -- @usage standard-library-fs.md
 function File:flush()
+  self.pending_operations = self.pending_operations + 1
+  defer self.pending_operations = self.pending_operations - 1
   self:require_open()
   perform<|integer|>("fs.flush", function (loop: uv.loop_t,
       request: uv.fs_t, callback: function (uv.fs_t): ()): integer
@@ -391,6 +406,8 @@ local function start_file_close(done: async.Completion<|FileClose, integer, inte
 end
 
 local function File:close_with(operation: string)
+  self.pending_operations = self.pending_operations + 1
+  defer self.pending_operations = self.pending_operations - 1
   self.excess = ""
   if self.handle < 0 then return end
   local close = FileClose(uv.fs_t.new(), self.handle, false, nil, 0)
@@ -418,6 +435,33 @@ end
 -- @usage standard-library-fs.md
 function File:is_closed(): boolean
   return self.handle < 0
+end
+
+--- Detach an idle descriptor and retained bytes into a manually owned payload.
+-- @return Same-process descriptor and bytes, to be adopted exactly once.
+-- @usage standard-library-fs.md#transferring-files
+function File:to_transfer_payload(): string
+  self:require_open()
+  if self.pending_operations ~= 0 then
+    raise "cannot transfer a File with a pending operation"
+  end
+  local payload = protobuf.serialize_fields(file_transfer_fields, self.handle, self.excess)
+  self.handle = -1
+  self.excess = ""
+  return payload
+end
+
+--- Adopt a manually transferred descriptor and its retained read bytes.
+-- @param payload Exact opaque byte payload returned by to_transfer_payload.
+-- @return File owning the descriptor; the caller must close it.
+-- @usage standard-library-fs.md#transferring-files
+function File.from_transfer_payload(payload: string): File
+  local descriptor: integer, excess: string =
+    protobuf.deserialize_fields(payload, file_transfer_fields)
+  if descriptor < 0 or descriptor > 2147483647 then
+    raise "invalid File transfer descriptor"
+  end
+  return File(descriptor, excess, 0)
 end
 
 --- Read a complete binary file and close the temporary File on every exit.
@@ -516,7 +560,7 @@ end
 -- @usage standard-library-fs.md
 function tmpname(): string
   local template = sized_path("fs.tmpname", uv.os_tmpdir) .. "/titan-fs-XXXXXX"
-  local file = File(-1, "")
+  local file = File(-1, "", 0)
   defer file:close_with("fs.tmpname.close")
   return acquire<|string|>(file, "fs.tmpname", function (loop: uv.loop_t,
       request: uv.fs_t, callback: function (uv.fs_t): ()): integer

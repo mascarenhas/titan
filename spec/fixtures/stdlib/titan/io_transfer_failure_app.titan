@@ -1,0 +1,73 @@
+-- Run only through spec/support/check_io_transfer_failure.sh, which provides
+-- the controlled native dup wrapper in this separate child process.
+local io = import "io"
+local os = import "os"
+local async = import "async"
+local test = import "test"
+local string = import "string"
+local uv = import "uv"
+foreign import "stdio.h"
+
+local function arm(generation: string, source: io.InputOutputStream)
+  os.setenv("TITAN_IO_DUP_FAILURE", generation)
+  defer os.unsetenv("TITAN_IO_DUP_FAILURE")
+  local rejected = false
+  do source:to_transfer_payload()
+  catch
+    test.assert(string.find(string.tostring(error), "too many open files", 1, true) ~= nil,
+                "expected the armed second-dup failure")
+    rejected = true
+  end
+  test.assert(rejected, "second native pipe duplication was not rejected")
+end
+
+function main(_args: {string}): integer
+  if os.getenv("TITAN_IO_EXIT_PROBE") == "1" then
+    local exiting = io.popen("exit 0")
+    defer do
+      local rejected = false
+      do uv.pipe_t.from_transfer_payload(string.char(8, 1))
+      catch
+        rejected = error == "native transfer requires an active destination async Runtime"
+      end
+      test.assert(rejected, "exit cleanup reopened native adoption")
+      exiting:close()
+      test.assert(exiting:read() == nil, "exit cleanup did not retire the composite")
+      test.assert(exiting:wait().code == 0, "exit cleanup lost the cached child status")
+      ffi.puts("PASS: exit cleanup discarded retained pipe with adoption still closed")
+    end
+    arm("4", exiting)
+    -- Reap before sticky exit cancellation; Process.wait deliberately checks
+    -- cancellation, and this case isolates staged-descriptor retirement.
+    test.assert(exiting:wait().code == 0)
+    async.request_exit(0)
+  end
+
+  local source = io.popen("read line; printf '%s' \"$line\"")
+  defer source:close()
+  arm("1", source)
+  source:write("write-recovered\n")
+  test.assert(source:read_until("missing") == "write-recovered")
+  test.assert(source:wait().code == 0)
+  source:close()
+
+  local retry = io.popen("read line; printf '%s' \"$line\"")
+  defer retry:close()
+  arm("2", retry)
+  local packet = async.TransferValue.from_value(retry)
+  local target: io.InputOutputStream = packet:to_value()
+  defer target:close()
+  target:write("retry-recovered\n")
+  test.assert(target:read_until("missing") == "retry-recovered")
+  test.assert(retry:wait().code == 0)
+  target:close()
+  retry:close()
+
+  local close = io.popen("read line")
+  defer close:close()
+  arm("3", close)
+  close:close()
+  test.assert(close:read() == nil)
+  ffi.puts("PASS: second-pipe failure retained write/retry/close ownership")
+  return 0
+end

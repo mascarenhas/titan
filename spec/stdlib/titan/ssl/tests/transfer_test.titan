@@ -1,0 +1,122 @@
+function test_ssl_transfer_moves_lazy_engine_across_states(context: test.Context)
+  runtime_test.run(function ()
+    local server, port = support.listen_available(45900, support.CERTIFICATE,
+                                                 support.PRIVATE_KEY)
+    support.cleanup_server(context, server)
+    local peer = async.run<|nil, value|>(function (): nil
+      local connection = server:accept()
+      defer connection:abort()
+      test.assert(connection:read_until("\0", true) == "transferred")
+      connection:write("verified-reply\0")
+      return nil
+    end)
+    task_support.cleanup_task(peer, "TLS transferred peer")
+    local state = transfer_lua.new()
+    defer state:close()
+    local operation = function (): async.TransferValue
+      local transport = net.connect("127.0.0.1", port)
+      local connection = ssl.client(transport, "localhost", support.TRUST_ROOT)
+      defer connection:abort()
+      local packet = async.TransferValue.from_value(connection)
+      test.assert(connection:read() == nil, "detached TLS source retained its engine")
+      return packet
+    end
+    local packet: async.TransferValue = state:run_async([[
+      local operation = ...
+      local async = require('titan.async')
+      local task = async.run(operation)
+      async.loop()
+      local success, result = task:status():has_succeeded()
+      if not success then
+        local failed, failure = task:status():has_failed()
+        if failed then failure:raise() end
+        error('TLS transfer worker did not succeed')
+      end
+      return result
+    ]], "=ssl-connection-transfer", async.TransferValue.from_value(operation))
+    state:close()
+    gc.collect()
+    gc.collect()
+    local connection: ssl.Connection = packet:to_value()
+    defer connection:abort()
+    connection:handshake()
+    connection:write("transferred\0")
+    test.assert(connection:read_until("\0", true) == "verified-reply")
+    async.join(peer)
+    test.assert(peer:status():has_succeeded(), "TLS transfer peer failed")
+  end)
+end
+
+function test_ssl_transfer_preserves_established_plaintext(context: test.Context)
+  runtime_test.run(function ()
+    local server, port = support.listen_available(46000, support.CERTIFICATE,
+                                                 support.PRIVATE_KEY)
+    support.cleanup_server(context, server)
+    local peer = async.run<|nil, value|>(function (): nil
+      local connection = server:accept()
+      defer connection:abort()
+      connection:write("prefix\nsuffix\0")
+      test.assert(connection:read_until("\0", true) == "continued")
+      connection:write("reply\0")
+      return nil
+    end)
+    task_support.cleanup_task(peer, "TLS established transfer peer")
+    local source = ssl.connect("localhost", port, support.TRUST_ROOT)
+    defer source:abort()
+    test.assert(source:read_until("\n", true) == "prefix")
+    local connection = source
+    if common.is_windows() then
+      local refused = false
+      do source:to_transfer_payload()
+      catch
+        test.assert(error is async.OperationError)
+        test.assert((error as async.OperationError).name == "EBUSY")
+        refused = true
+      end
+      test.assert(refused, "pending Windows TLS transport read was detached")
+    else
+      local packet = async.TransferValue.from_value(source)
+      connection = packet:to_value()
+      test.assert(source:read() == nil)
+    end
+    defer connection:abort()
+    gc.collect()
+    test.assert(connection:read_until("\0", true) == "suffix")
+    connection:write("continued\0")
+    test.assert(connection:read_until("\0", true) == "reply")
+    async.join(peer)
+    test.assert(peer:status():has_succeeded(), "TLS transfer peer failed")
+  end)
+end
+
+function test_ssl_transfer_rejects_pending_handshake(context: test.Context)
+  runtime_test.run(function ()
+    local server, port = net_support.listen_available(46100)
+    net_support.cleanup_server(context, server)
+    local transport = net.connect("127.0.0.1", port)
+    local peer = server:accept()
+    net_support.cleanup_connection(context, peer)
+    local connection = ssl.client(transport, "localhost", support.TRUST_ROOT)
+    defer connection:abort()
+    local interrupted = false
+    local handshaker = async.run<|nil, value|>(function (): nil
+      do connection:handshake() catch interrupted = true end
+      return nil
+    end)
+    task_support.cleanup_task(handshaker, "TLS pending transfer handshake")
+    while handshaker:status():as_string() == "ready" do timer.yield() end
+    test.assert(handshaker:status():as_string() == "waiting")
+    common.assert_raises_contains(function () connection:to_transfer_payload() end,
+      "pending operation")
+    connection:abort()
+    async.join(handshaker)
+    test.assert(handshaker:status():has_succeeded() and interrupted)
+  end)
+end
+
+function test_ssl_transfer_rejects_malformed_payloads(_context: test.Context)
+  common.assert_raises(function () ssl.Connection.from_transfer_payload("") end)
+  common.assert_raises(function ()
+    ssl.Connection.from_transfer_payload("\255")
+  end)
+end

@@ -109,8 +109,11 @@ function test_runner.render(cases)
             local alias = "test_module_" .. tostring(#module_order + 1)
             module_aliases[case.modname] = alias
             module_order[#module_order + 1] = case.modname
+            -- Discovery admits only checked source owners. Preserve that
+            -- provenance so their authored C environment accompanies any
+            -- exported native fields reconstructed by the runner.
             imports[#imports + 1] = "local " .. alias .. " = import " ..
-                quoted(case.modname) .. "\n"
+                quoted(case.modname .. ".titan") .. "\n"
         end
     end
 

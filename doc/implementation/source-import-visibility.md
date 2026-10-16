@@ -58,14 +58,16 @@ Ordinary resolver contexts may also select source after compiled-provider
 passes. The test runner's invocation-local `source_first` policy changes lookup
 order, not visibility: ordinary imports in either context remain public-only.
 The generated runner ordinarily imports `titan.test` and calls its public
-`Case.new`/`run` API; it needs no source-private edge. Tests that inspect an
+`Case.new`/`run` API. Its discovered source-backed owners are imported explicitly
+with `.titan`, so their public native fields retain the authored C header
+environment through the ordinary trusted source mechanism. Tests that inspect an
 application producer's locals still write their own explicit `.titan` import.
 See [Native test runner](test-runner.md).
 
 A checked source module retains a compiler-only overlay on its `Type.Module`:
 
 * `source_members` and `source_type_members` hold its own local value and type
-  declarations; a source `foreign function` also lives only in this overlay and
+  declarations; a `local foreign function` also lives only in this overlay and
   is marked as a declaration designator rather than a module-state value;
 * `_source` and source-complete nominal decorations distinguish trusted
   producer descriptors from public facades.
@@ -168,7 +170,7 @@ followed by a deterministic source-private region:
 2. local top-level function closures in source order;
 3. local constructors and nominal-function closures in nominal/source order.
 
-A source foreign declaration has no closure or value slot and does not enter
+A foreign declaration has no closure or value slot and does not enter
 this layout. Every co-generated importer reconstructs those slots from the same layout.
 Before reading a private slot, it compares the canonical state token with the
 hidden identity entry linked from its exact producer translation unit. A
@@ -177,8 +179,9 @@ writes otherwise target the producer `_mod`; GC-bearing writes use the userdata
 back barrier. Function and nominal-value reads load the producer's canonical
 closure slot, preserving identity across importers and Lua GC cycles.
 
-Native entries needed across source translation units have hidden visibility.
-Ordinary local/public top-level functions and source foreign declarations all
+Local native entries needed across source translation units have hidden visibility.
+Public foreign entries have ordinary C external linkage and are callable through
+regular imports. Ordinary top-level functions and foreign declarations all
 use the current ABI's injective module/member UCN separator. Local nominal statics and
 methods use the same module/owner/member hierarchy as public ones; visibility,
 not an alternate spelling, keeps private entries out of the DSO's dynamic API. They

@@ -113,13 +113,46 @@ describe("foreign functions (checker)", function()
                 types.resolve_c_typedef(noop._type.ret)._tag)
             assert.equal("Type.CFunction", ast[6]._type._tag)
 
-            assert.is_nil(modtype.members.noop)
-            assert.is_nil(modtype.members.invoke)
-            assert.is_true(modtype.source_members.noop._foreign_source)
-            assert.is_true(modtype.source_members.invoke._foreign_source)
+            assert.equal("Type.CFunction", modtype.members.noop.type._tag)
+            assert.equal("Type.CFunction", modtype.members.invoke.type._tag)
+            assert.is_nil(modtype.source_members.noop)
+            assert.is_nil(modtype.source_members.invoke)
             assert.same({ "callback", "item", "input" },
-                modtype.source_members.invoke.paramnames)
+                modtype.members.invoke.paramnames)
         end)
+    end)
+
+    it("imports public C declarations in ordinary and foreign bodies", function()
+        local modules = {
+            provider = [[
+                foreign function add(left: int, right: int): int
+                    return left + right
+                end
+                local foreign function hidden(): int return 0 end
+            ]],
+            consumer = [[
+                local provider = import "provider"
+                foreign function raw(input: int): int
+                    local callback: foreign function(int, int): int = provider.add
+                    return callback(input, provider.add { right = 2, left = 3 })
+                end
+                function ordinary(): integer
+                    local callback: foreign function(int, int): int = provider.add
+                    return callback(20, 22)
+                end
+            ]],
+        }
+        local ok, err, imported = h.run_checker_modules(
+            modules, "consumer", { interface = "compiled" })
+        assert.truthy(ok, err)
+        local provider = imported.provider.type
+        assert.equal("Type.CFunction", provider.members.add.type._tag)
+        assert.same({ "left", "right" }, provider.members.add.paramnames)
+        assert.is_nil(provider.members.hidden)
+        assert.same({}, types.public_module_prefix_layout(provider))
+        local rebuilt = assert(load("return " .. types.serialize(provider),
+            "public foreign interface", "t", types))()
+        assert.is_true(driver.validate_module_interface(rebuilt, "provider"))
     end)
 
     it("supports forward calls, named calls, and contextual address decay",
@@ -157,6 +190,52 @@ describe("foreign functions (checker)", function()
             local address = ast[5].block.stats[1].exps[1]
             assert.same({ source = true, module = "test", name = "second" },
                 address._foreign_function_reference)
+        end)
+    end)
+
+    it("requires original headers for public foreign signatures", function()
+        with_header(declarations, function(header)
+            local modules = {
+                provider = 'foreign import "' .. header .. [["
+                    foreign function read(item: *ffi_item): int
+                        return item.value
+                    end
+                ]],
+                consumer = [[
+                    local provider = import "provider"
+                    function unused(): integer return 0 end
+                ]],
+            }
+            local ok, err = h.run_checker_modules(
+                modules, "consumer", { interface = "compiled" })
+            assert.falsy(ok)
+            assert.match("not visible with its original identity and layout", err, 1, true)
+            modules.consumer = 'foreign import "' .. header .. [["
+                local provider = import "provider"
+                foreign function read(item: *ffi_item): int
+                    return provider.read(item)
+                end
+            ]]
+            ok, err = h.run_checker_modules(
+                modules, "consumer", { interface = "compiled" })
+            assert.truthy(ok, err)
+        end)
+    end)
+
+    it("keeps nonexportable C signature graphs local", function()
+        with_header([[
+            typedef struct ffi_flexible { int count; char bytes[]; } ffi_flexible;
+        ]], function(header)
+            local body = [[
+                foreign function count(item: *ffi_flexible): int
+                    return item.count
+                end
+            ]]
+            local ok, err = check_with_header(header, body)
+            assert.falsy(ok)
+            assert.match("cannot export C FFI type", err, 1, true)
+            ok, err = check_with_header(header, "local " .. body)
+            assert.truthy(ok, err)
         end)
     end)
 
@@ -588,13 +667,13 @@ describe("foreign functions (checker)", function()
         compare(first.header, second.header)
     end)
 
-    it("keeps source foreign members direct-only and out of compiled interfaces",
+    it("keeps local foreign members direct-only and out of compiled interfaces",
     function()
         with_header("typedef int ffi_int;\n", function(header)
             local quoted = string.format("%q", header)
             local modules = {
                 provider = "foreign import " .. quoted .. [[
-                    foreign function increment(
+                    local foreign function increment(
                         input: ffi_int
                     ): ffi_int
                         return input + 1

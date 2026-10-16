@@ -149,7 +149,8 @@ function coder._nominal_store(ctx, plan, slot, typ, object, value)
     local member = coder._nominal_member(plan, slot, object)
     if slot.kind == "array" then
         return "memcpy((void *)" .. member .. ", " .. value .. ", sizeof(" .. member .. "));"
-    elseif slot.kind == "aggregate" then
+    elseif slot.kind == "aggregate"
+        or (types.is_direct_c(typ) and #types.c_type_qualifiers(typ) > 0) then
         -- The destination is freshly allocated storage or a checker-approved
         -- whole-object replacement. C assignment cannot initialize an object
         -- whose declaration (or a nested member) is const-qualified.

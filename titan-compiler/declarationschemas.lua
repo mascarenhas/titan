@@ -108,17 +108,19 @@ local schemas = {
     },
     ["Type.CStruct"] = {
         cname = "c_name?", tagname = "c_name?", typedef = "c_name?",
+        origin = "string?",
         fields = "members", complete = "boolean", has_fam = "boolean",
         _c_tag_scope = "string?", _definition_order = "integer?",
     },
     ["Type.CUnion"] = {
         cname = "c_name?", tagname = "c_name?", typedef = "c_name?",
+        origin = "string?",
         fields = "members", complete = "boolean", _c_tag_scope = "string?", _definition_order = "integer?",
     },
     ["Type.CField"] = {
         owner = "type?", name = "string", type = "type", bitfield = "extent?", flexible_array = "boolean",
     },
-    ["Type.CTypedef"] = { name = "c_name", target = "type", quals = "names" },
+    ["Type.CTypedef"] = { name = "c_name", target = "type", quals = "names", origin = "string?" },
     ["Type.COwned"] = { pointee = "type", count = "boolean" },
     header = {
         modname = "string", logical_name = "string", identity = "string",

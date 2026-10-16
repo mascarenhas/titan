@@ -5,8 +5,13 @@
 local async = import "async"
 local uv = import "uv"
 local reflect = import "reflect"
+local protobuf = import "protobuf"
 local string = import "string"
 local math = import "math"
+
+local const connection_transfer_fields: const {reflect.Type} = {
+  reflect.Type.is_foreign_pointer(reflect.Type.is_foreign_void(), {}),
+}
 
 --- A SQLite validation or native-operation failure with optional SQLite result codes.
 -- @field message Human-readable failure description.
@@ -246,6 +251,54 @@ function Connection:close()
   end
   run_foreign_cleanup(sqlite_close_worker, packet)
   check_result(packet, "close")
+end
+
+--- Detach an idle connection into a manually owned native transfer payload.
+-- @return Opaque native pointer bytes; adopt exactly once or recover ownership.
+-- @usage standard-library-sqlite3.md#transferring-connections
+function Connection:to_transfer_payload(): string
+  self:reserve("to_transfer_payload", false)
+  defer self.busy = false
+  if self.statements ~= 0 then
+    raise Error {
+      message = "connection owns open statements",
+      code = nil,
+      extended_code = nil,
+      operation = "to_transfer_payload"
+    }
+  end
+  -- Allocate the bytes before relinquishing the source's close authority.
+  local payload = protobuf.serialize_fields(connection_transfer_fields, self.handle)
+  self.handle = nil
+  return payload
+end
+
+--- Adopt one detached SQLite connection without changing its transaction state.
+-- @param payload Exact opaque byte payload returned by to_transfer_payload.
+-- @return Fresh connection owner; the supplied pointer must not be adopted again.
+-- @usage standard-library-sqlite3.md#transferring-connections
+function Connection.from_transfer_payload(payload: string): Connection
+  local raw_handle: value = (function (): value
+    return protobuf.deserialize_fields(payload, connection_transfer_fields)
+  catch
+    raise Error {
+      message = "invalid connection transfer payload",
+      code = nil, extended_code = nil, operation = "from_transfer_payload"
+    }
+  end)()
+  local handle = raw_handle as foreign *void
+  if not handle then
+    raise Error {
+      message = "invalid connection transfer pointer",
+      code = nil, extended_code = nil, operation = "from_transfer_payload"
+    }
+  end
+  return Connection {
+    handle = handle as foreign *sqlite3,
+    statements = 0,
+    busy = false,
+    active_statement = nil
+  }
 end
 
 --- Finalize this statement after its active cursor is released.

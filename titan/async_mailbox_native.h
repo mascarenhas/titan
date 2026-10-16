@@ -3,6 +3,7 @@
 
 #include <stddef.h>
 #include "lua.h"
+#include "titan/ffi.h"
 
 /* Only native bytes cross a state/thread boundary. The public UV binding owns
  * the actual async handle and mutex; these are its borrowed C-only capabilities.
@@ -15,7 +16,11 @@ typedef enum titan_async_message_kind {
   TITAN_ASYNC_MESSAGE_STRING,
   TITAN_ASYNC_MESSAGE_STATE,
   TITAN_ASYNC_MESSAGE_FUNCTION,
-  TITAN_ASYNC_MESSAGE_POINTER
+  TITAN_ASYNC_MESSAGE_POINTER,
+  TITAN_ASYNC_MESSAGE_RECORD,
+  TITAN_ASYNC_MESSAGE_UNION,
+  TITAN_ASYNC_MESSAGE_CLOSURE,
+  TITAN_ASYNC_MESSAGE_RECORD_PAYLOAD
 } titan_async_message_kind;
 
 typedef struct titan_async_message {
@@ -25,9 +30,14 @@ typedef struct titan_async_message {
   lua_Number number;
   const char *bytes;
   size_t length;
+  const char *name;
+  size_t name_length;
+  const char *module;
+  size_t module_length;
   lua_State *state;
   lua_CFunction function;
   void *pointer;
+  const void *entry;
 } titan_async_message;
 
 typedef struct titan_async_mailbox {

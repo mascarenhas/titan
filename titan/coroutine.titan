@@ -11,7 +11,7 @@ foreign type VoidPointer = *void
 
 foreign type coro_entry_func = function (*lua_State, *Udata, *CClosure, TValue, *mco_coro): void
 
-foreign function coro_entry_trampoline(co: *mco_coro)
+local foreign function coro_entry_trampoline(co: *mco_coro)
   -- Foreign bodies cannot read Titan module constants. These are the C-array
   -- indices corresponding to the first four owner uservalues below.
   const THREAD_UV_INDEX = 0

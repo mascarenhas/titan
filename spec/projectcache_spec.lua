@@ -1035,7 +1035,7 @@ describe("declared project manifests", function()
                 foreign import %q
                 foreign type ManifestChain = Chain
                 foreign type ManifestCallback = function (*ManifestChain): DeclInt
-                foreign function read(node: *ManifestChain): DeclInt return node.value end
+                local foreign function read(node: *ManifestChain): DeclInt return node.value end
             ]], header))
             local payload = assert(driver.encode_project_entry(provider))
             assert.is_nil(payload:find("CPP_BODY_ONLY_MANIFEST_SENTINEL", 1, true))
@@ -1058,7 +1058,7 @@ describe("declared project manifests", function()
             end
             local consumer = load_module("c_consumer", [[
                 local provider = import "c_provider.titan"
-                foreign function inspect(node: *ManifestChain): DeclInt
+                local foreign function inspect(node: *ManifestChain): DeclInt
                     local callback: foreign ManifestCallback = provider.read
                     return callback(node) + node.row[1] + node.value
                 end

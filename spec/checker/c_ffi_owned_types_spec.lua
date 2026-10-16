@@ -637,12 +637,11 @@ describe("source-written owned C types", function()
         "function expose(item: owned *ffi_item): integer return 0 end",
         "record Public item: owned *ffi_item end",
     }) do
-        it("rejects an exported owner composed as " .. public_shape,
+        it("exports a named C owner composed as " .. public_shape,
         function()
             with_header(declarations, function(header)
                 local ok, err = check_with_header(header, public_shape)
-                assert.falsy(ok)
-                assert.match("cannot export C FFI type", err)
+                assert.truthy(ok, err)
             end)
         end)
     end

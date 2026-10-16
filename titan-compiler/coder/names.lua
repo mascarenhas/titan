@@ -57,12 +57,13 @@ function c_header_name(name)
     return assert(require("titan-compiler.ffiheaders").quote_header(name))
 end
 
--- Numeric expressions copy C values, so their mutable native carriers must
+-- Scalar expressions copy C values, so their mutable native carriers must
 -- not inherit a typedef's top-level const/volatile qualification. Keep the
--- checked declaration identity and every pointer/aggregate qualifier intact.
+-- checked declaration identity, pointer pointee qualifiers, and aggregates.
 function coder._c_value_type(typ)
     local resolved = types.resolve_c_typedef(typ)
-    if (resolved._tag == "Type.CInteger" or resolved._tag == "Type.CFloat")
+    if (resolved._tag == "Type.CInteger" or resolved._tag == "Type.CFloat"
+        or resolved._tag == "Type.CPointer")
        and #types.c_type_qualifiers(typ) > 0 then
         return resolved
     end
@@ -330,15 +331,44 @@ function coder._foreign_func_name(modname, name)
     return func_name(modname, name, false)
 end
 
-function coder._foreign_reference_name(reference)
+function coder._foreign_reference_name(reference, ctx)
     if reference.source then
-        return coder._foreign_func_name(reference.module, reference.name)
+        local name = coder._foreign_func_name(reference.module, reference.name)
+        if ctx and reference.public then
+            local tlcontext = ctx.tlcontext or ctx
+            if reference.module ~= tlcontext.module then
+                tlcontext.foreign_functions = tlcontext.foreign_functions or {}
+                local binding = coder._function_prefix(tlcontext.module,
+                    "foreign_binding") .. "_" .. name
+                tlcontext.foreign_functions[name] = {
+                    module = reference.module, name = reference.name,
+                    mangled = name, type = reference.type, binding = binding,
+                }
+                -- A raw function has no Lua state or module userdata. Its
+                -- imported address belongs to this native image instead.
+                return "(__atomic_load_n(&" .. binding
+                    .. ", __ATOMIC_ACQUIRE))"
+            end
+        end
+        return name
     end
     -- The checker selected a real C declaration, not a function-like macro
     -- with the same spelling. Parenthesizing its designator keeps that exact
     -- prototype in ordinary calls, restricted foreign bodies, and callbacks.
     -- Object-like aliases still expand normally inside the parentheses.
     return "(" .. reference.name .. ")"
+end
+
+function coder._sorted_foreign_imports(tlcontext)
+    local names, imports = {}, {}
+    for name in pairs(tlcontext.foreign_functions or {}) do
+        names[#names + 1] = name
+    end
+    table.sort(names)
+    for _, name in ipairs(names) do
+        imports[#imports + 1] = tlcontext.foreign_functions[name]
+    end
+    return imports
 end
 
 function func_luaname(modname, name, _)
@@ -449,6 +479,20 @@ function coder.external_symbols(modname, ast)
     return symbols
 end
 
+-- Native export files need linkage spelling, not the C source UCN spelling.
+-- Raw public declarations are the only extra C exports implied by this view.
+function coder.foreign_external_symbols(modname, modtype)
+    local symbols = {}
+    for _, member in ipairs(modtype.members or {}) do
+        if member._tag == "Type.ModuleMember" and not member.islocal
+                and member.type and member.type._tag == "Type.CFunction" then
+            symbols[#symbols + 1] = coder._linkage_symbol_name(
+                coder._foreign_func_name(modname, member.name))
+        end
+    end
+    return symbols
+end
+
 -- Return the known public symbol families represented by a recovered module
 -- interface. Static-provider preflight has no AST, but it can still reject the
 -- same protocol/function/record-member collisions before invoking the linker.
@@ -474,7 +518,8 @@ function coder.interface_external_symbols(modname, modtype)
     for _, member in ipairs(modtype.members or {}) do
         local typ = member.type
         if member._tag == "Type.ModuleMember" and typ then
-            if typ._tag == "Type.Function" or typ._tag == "Type.FunctionScheme" then
+            if typ._tag == "Type.Function" or typ._tag == "Type.FunctionScheme"
+                    or typ._tag == "Type.CFunction" then
                 add(func_name(modname, member.name),
                     "function '" .. modname .. "." .. member.name .. "'")
             elseif typ._tag == "Type.Record" or typ._tag == "Type.Union" then

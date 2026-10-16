@@ -30,6 +30,44 @@ lambda keeps a reference to that call's `n`, increments it on every call,
 and the value persists between calls because the lambda holds the variable
 alive after `make_counter` has returned.
 
+## Transferring a closure between Lua states
+
+[`TransferValue.from_value(callback)`](async-io.md#transfer-values) snapshots a
+Titan function immediately for an independent Lua state or cross-state Receiver.
+All immediate captures are projected before any capture's custom hook runs.
+Sending the resulting packet later does not observe subsequent origin changes.
+The destination loads the recorded owning module through its preload
+entry, validates the entry token, and creates a fresh closure over copied
+capture values. Module globals belong to the destination module instance.
+
+Mutable captures become fresh cells. An outer closure and nested captured
+closures receive independent cells even if they shared a source cell.
+Separate conversions and repeated `to_value` calls also form independent
+snapshots. Bound concrete methods copy their receiver under the same custom-hook
+or protobuf rules as other nominal captures. Callable adjustment preserves its
+source callable and target signature.
+
+Every capture must satisfy its selected policy. Cycles, including a closure
+that captures itself through a mutable variable, raise during `from_value`.
+Direct Arrays, Maps, Interfaces, owned C storage, and local nominal types are
+not transferable captures. A public record with private fields may supply
+[custom transfer hooks](async-io.md#custom-record-transfer); other records and
+unions follow public protobuf rules. A captured `TransferValue` remains its
+policy wrapper, including opaque custom-record or closure packet bytes. It is
+not implicitly unwrapped into its semantic value.
+
+The Interface restriction applies to bound Interface methods because their
+captured receiver is an Interface. Native pointers remain borrowed addresses
+with caller-managed lifetime. A pointer to Lua-managed `Udata` is rejected,
+including a present optional pointer; an absent optional transfers as `nil`.
+The packet retains no source-state closure, mutable box, string, or nominal
+heap object. See [transfer values](async-io.md#transfer-values).
+
+Nominal packets carry their actual defining module. Reconstruction queries the
+destination registry first, calls the preload loader on a miss, then
+retries. This applies to structural protobuf nominals and custom-record
+payloads; qualified nominal names are never split to infer their module.
+
 ## Syntax
 
 A function expression is a top-level function declaration minus the name

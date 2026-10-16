@@ -159,11 +159,14 @@ function coder._binary_resolver(tlcontext, ast)
     end
     return render([[
         static void *$NAME(const char *symbol) {
+            if (strcmp(symbol, TITAN_TRANSFER_MANIFEST_SYMBOL) == 0)
+                return (void *)&$TRANSFER_MANIFEST;
             $ENTRIES
             return NULL;
         }
     ]], {
         NAME = tlcontext.prefix .. "native_symbol",
+        TRANSFER_MANIFEST = assert(tlcontext.transfer_manifest),
         ENTRIES = table.concat(entries, "\n"),
     })
 end

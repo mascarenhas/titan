@@ -2,6 +2,8 @@
 local test = import "test"
 local runtime_test = import "support.runtime.titan"
 local task_support = import "support.async.titan"
+local common = import "support.common.titan"
+local transfer_lua = import "lua"
 local async = import "async"
 local gc = import "gc"
 local http = import "http"

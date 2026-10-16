@@ -15,23 +15,16 @@ local uv = import "titan.uv"
 local coroutine = import "titan.coroutine"
 local gc = import "titan.gc"
 local string = import "titan.string"
+local transfer = import "titan.transfer"
 
 --- Nonyielding cancellation callback that detaches one exact explicit-suspension waiter.
 -- @usage async-io.md
 type SuspendCancelAction = function (): ()
 
---- Values copied or borrowed across independent Lua states.
+--- Copy and borrow policies shared with low-level resource owners.
+-- Transparent alias of transfer.TransferValue; constructors and methods are identical.
 -- @usage async-io.md#transfer-values
-union TransferValue
-  is_nil()
-  is_boolean(boolean)
-  is_integer(integer)
-  is_float(float)
-  is_string(string)
-  is_lua_state(foreign *lua_State)
-  is_function(foreign function (*lua_State): int)
-  is_pointer(foreign *void)
-end
+type TransferValue = transfer.TransferValue
 
 --- A FIFO receiver whose opaque native handle can be sent across Lua states.
 -- @usage async-io.md#cross-state-receivers
@@ -48,7 +41,7 @@ end
 -- These functions never recover a Lua/Titan owner. A sender owns its copied
 -- node until insertion succeeds; a receiver detaches nodes before entering its
 -- collector or subscription. Native wakeups may coalesce without losing data.
-foreign function receiver_free_messages(message: *titan_async_message)
+local foreign function receiver_free_messages(message: *titan_async_message)
   while message ~= nil do
     local next = message.next
     ffi.free(message)
@@ -56,20 +49,46 @@ foreign function receiver_free_messages(message: *titan_async_message)
   end
 end
 
-foreign function receiver_copy_message(input: *titan_async_message): *titan_async_message
+local foreign function receiver_copy_message(input: *titan_async_message): *titan_async_message
   local length = 0 as foreign size_t
+  local name_length = 0 as foreign size_t
+  local module_length = 0 as foreign size_t
   if input.kind == ffi.TITAN_ASYNC_MESSAGE_STRING then length = input.length end
+  local nominal = 0 as foreign int
+  if input.kind == ffi.TITAN_ASYNC_MESSAGE_RECORD then nominal = 1 end
+  if input.kind == ffi.TITAN_ASYNC_MESSAGE_UNION then nominal = 1 end
+  if input.kind == ffi.TITAN_ASYNC_MESSAGE_CLOSURE then nominal = 1 end
+  if input.kind == ffi.TITAN_ASYNC_MESSAGE_RECORD_PAYLOAD then nominal = 1 end
+  if nominal ~= 0 then
+    length = input.length
+    name_length = input.name_length
+    module_length = input.module_length
+  end
   if length > ffi.SIZE_MAX - foreign titan_async_message.sizeof then return nil end
-  local message = ffi.malloc(foreign titan_async_message.sizeof + length)
+  if name_length > ffi.SIZE_MAX - foreign titan_async_message.sizeof - length then
+    return nil
+  end
+  if module_length > ffi.SIZE_MAX - foreign titan_async_message.sizeof - length - name_length then
+    return nil
+  end
+  local message = ffi.malloc(foreign titan_async_message.sizeof + length + name_length + module_length)
     as foreign *titan_async_message
   if message == nil then return nil end
   message[0] = input[0]
   message.next = nil
-  if input.kind == ffi.TITAN_ASYNC_MESSAGE_STRING then
+  do
     local bytes = (message + 1) as foreign *char
     message.bytes = bytes
     if length > 0 then
       ffi.memcpy(bytes, input.bytes, length)
+    end
+    message.name = bytes + length
+    if name_length > 0 then
+      ffi.memcpy(bytes + length, input.name, name_length)
+    end
+    message.module = bytes + length + name_length
+    if module_length > 0 then
+      ffi.memcpy(bytes + length + name_length, input.module, module_length)
     end
   end
   return message
@@ -77,7 +96,7 @@ end
 
 -- Positive statuses are local admission failures (1 allocation, 2 closed);
 -- negative statuses are returned unchanged by the public native UV send entry.
-foreign function receiver_send_native(mailbox: *titan_async_mailbox,
+local foreign function receiver_send_native(mailbox: *titan_async_mailbox,
                                      input: *titan_async_message): int
   local message = receiver_copy_message(input)
   if message == nil then return 1 end
@@ -102,7 +121,7 @@ foreign function receiver_send_native(mailbox: *titan_async_mailbox,
   return status
 end
 
-foreign function receiver_take_messages(mailbox: *titan_async_mailbox): *titan_async_message
+local foreign function receiver_take_messages(mailbox: *titan_async_mailbox): *titan_async_message
   mailbox.lock(mailbox.mutex)
   local messages = mailbox.first
   mailbox.first = nil
@@ -111,7 +130,7 @@ foreign function receiver_take_messages(mailbox: *titan_async_mailbox): *titan_a
   return messages
 end
 
-foreign function receiver_disable_native(mailbox: *titan_async_mailbox)
+local foreign function receiver_disable_native(mailbox: *titan_async_mailbox)
   mailbox.lock(mailbox.mutex)
   mailbox.closed = 1
   local messages = mailbox.first
@@ -121,7 +140,7 @@ foreign function receiver_disable_native(mailbox: *titan_async_mailbox)
   receiver_free_messages(messages)
 end
 
-foreign function receiver_is_closed_native(mailbox: *titan_async_mailbox): int
+local foreign function receiver_is_closed_native(mailbox: *titan_async_mailbox): int
   mailbox.lock(mailbox.mutex)
   local closed = mailbox.closed
   mailbox.unlock(mailbox.mutex)
@@ -608,8 +627,11 @@ local function new_runtime(): Runtime
     tasks = {}, next_task = 1,
     current_task = nil, driving = false, closing = false, failure = nil, shutdown_cancelled = false, exit_code = nil, close_registrations = {}}
   check_status(uv.loop_init(runtime.loop), "runtime.loop.init")
+  do uv.bind_transfer_loop(runtime.loop)
+  catch uv.loop_close(runtime.loop); raise end
   local status = uv.timer_init(runtime.loop, runtime.wake)
   if status < 0 then
+    uv.unbind_transfer_loop(runtime.loop)
     uv.loop_close(runtime.loop)
     raise operation_error(status, "runtime.timer.init")
   end
@@ -674,6 +696,7 @@ function add_close_listener(listener: function (): ()): function (): ()
 end
 
 local function notify_runtime_closed(runtime: Runtime)
+  uv.unbind_transfer_loop(runtime.loop)
   runtime.closing = true
   local registrations = runtime.close_registrations
   runtime.close_registrations = {}
@@ -755,6 +778,7 @@ local function finish_task(task: Task, state: TaskStatus)
   end
   task.runtime.tasks[task.root_index] = nil
   if not has_tasks(task.runtime) then
+    uv.unbind_transfer_loop(task.runtime.loop)
     task.runtime.closing = true
     uv.stop(task.runtime.loop)
   end
@@ -1359,6 +1383,7 @@ end
 
 local function fail_runtime(runtime: Runtime, error: value, trace: string)
   if runtime.failure == nil then runtime.failure = Error(error, trace) end
+  uv.unbind_transfer_loop(runtime.loop)
   runtime.closing = true
   -- The failing callback may have stopped or closed the borrowed loop's wake
   -- handle. Revalidate it before the driver can block on unrelated handles.
@@ -1432,6 +1457,7 @@ function loop()
     -- Task-owned cleanup may have accepted a handle-based wait. Leave its
     -- completion and scheduler wakes intact until every Task has unwound.
     if not has_tasks(runtime) and runtime.ready_head == nil then
+      uv.unbind_transfer_loop(runtime.loop)
       runtime.closing = true
       do close_handles(runtime) catch fail_runtime(runtime, error, traceback) end
     end
@@ -3590,6 +3616,7 @@ function request_exit(code: integer)
   local task = running()
   local runtime = task.runtime
   if runtime.exit_code == nil then runtime.exit_code = code end
+  uv.unbind_transfer_loop(runtime.loop)
   local index = 1
   while index < runtime.next_task do
     local other? = runtime.tasks[index]
@@ -4012,6 +4039,24 @@ function BufferedSubscription:close()
 end
 
 -- Producer/domain control operations are synchronous and never suspend.
+--- Copy the unread queue and inspect its terminal outcome without consuming it.
+-- @return Independent batch plus nil while live, or the ended/error/closed outcome.
+-- @usage async-io.md
+function BufferedSubscription:snapshot_pending(): (SubscriptionBatch<|T|>, SubscriptionResult<|T, E|>?)
+  local core = self.core
+  local copied: {Item<|T|>} = {}
+  for index = 1, core.count do
+    copied[index] = Item<|T|>(core.items[core.first + index - 1].value)
+  end
+  local batch = SubscriptionBatch<|T|>(core.count, 1, copied)
+  case core.terminal
+  when live() then return batch, nil
+  when ended() then return batch, SubscriptionResult<|T, E|>.ended()
+  when error(failure) then return batch, SubscriptionResult<|T, E|>.error(failure)
+  when closed() then return batch, SubscriptionResult<|T, E|>.closed()
+  end
+end
+
 --- Synchronously transfer the complete unread batch to its domain owner.
 -- @return Batch with explicit count, possibly empty.
 -- @usage async-io.md
@@ -4097,6 +4142,21 @@ local function receiver_value(message: foreign *titan_async_message): TransferVa
     return TransferValue.is_function(message.function)
   elseif message.kind == ffi.TITAN_ASYNC_MESSAGE_POINTER then
     return TransferValue.is_pointer(message.pointer)
+  elseif message.kind == ffi.TITAN_ASYNC_MESSAGE_RECORD then
+    return TransferValue.is_record(receiver_copy_bytes(message.module, message.module_length),
+      receiver_copy_bytes(message.name, message.name_length),
+      receiver_copy_bytes(message.bytes, message.length))
+  elseif message.kind == ffi.TITAN_ASYNC_MESSAGE_UNION then
+    return TransferValue.is_union(receiver_copy_bytes(message.module, message.module_length),
+      receiver_copy_bytes(message.name, message.name_length),
+      receiver_copy_bytes(message.bytes, message.length))
+  elseif message.kind == ffi.TITAN_ASYNC_MESSAGE_CLOSURE then
+    return TransferValue.is_closure(receiver_copy_bytes(message.module, message.module_length),
+      message.entry, receiver_copy_bytes(message.bytes, message.length))
+  elseif message.kind == ffi.TITAN_ASYNC_MESSAGE_RECORD_PAYLOAD then
+    return TransferValue.is_record_payload(receiver_copy_bytes(message.module, message.module_length),
+      receiver_copy_bytes(message.name, message.name_length),
+      receiver_copy_bytes(message.bytes, message.length))
   end
   raise "invalid receiver message kind"
 end
@@ -4172,7 +4232,7 @@ end
 
 --- Copy one transfer value into a receiver's FIFO and notify its owning loop.
 -- @param handle Borrowed sender address whose Receiver remains retained.
--- @param data Copied scalars/string bytes or explicitly borrowed native address.
+-- @param data Flat copied packet or borrowed native address.
 -- @usage async-io.md#cross-state-receivers
 function send(handle: foreign *void, data: TransferValue)
   if not handle then raise "receiver handle must not be NULL" end
@@ -4203,6 +4263,37 @@ function send(handle: foreign *void, data: TransferValue)
   when is_pointer(item) then
     message.kind = ffi.TITAN_ASYNC_MESSAGE_POINTER
     message.pointer = item
+  when is_record(module, name, data) then
+    message.kind = ffi.TITAN_ASYNC_MESSAGE_RECORD
+    message.module = module
+    message.module_length = #module
+    message.name = name
+    message.name_length = #name
+    message.bytes = data
+    message.length = #data
+  when is_union(module, name, data) then
+    message.kind = ffi.TITAN_ASYNC_MESSAGE_UNION
+    message.module = module
+    message.module_length = #module
+    message.name = name
+    message.name_length = #name
+    message.bytes = data
+    message.length = #data
+  when is_closure(module, entry, data) then
+    message.kind = ffi.TITAN_ASYNC_MESSAGE_CLOSURE
+    message.module = module
+    message.module_length = #module
+    message.entry = entry
+    message.bytes = data
+    message.length = #data
+  when is_record_payload(module, name, payload) then
+    message.kind = ffi.TITAN_ASYNC_MESSAGE_RECORD_PAYLOAD
+    message.module = module
+    message.module_length = #module
+    message.name = name
+    message.name_length = #name
+    message.bytes = payload
+    message.length = #payload
   end
   local status = receiver_send_native(handle as foreign *titan_async_mailbox, message)
   if status == 1 then raise operation_error(uv.ENOMEM, "async.send") end

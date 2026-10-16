@@ -22,6 +22,12 @@
 typedef void *(*TitanModuleSymbols)(const char *symbol);
 #define TITAN_MODULE_PRELOADS_KEY "Titan module preload providers"
 
+/* The immutable resolver belongs to the image that created this module state.
+** Every generated module's native payload starts with this exact header. */
+typedef struct TitanModuleData {
+  TitanModuleSymbols symbols;
+} TitanModuleData;
+
 /* These owning-state helpers reserve their temporary stack and preserve the
 ** entry top on success. They may allocate/raise. Names are length-aware so a
 ** native preload with an embedded zero byte never aliases another module.
@@ -70,6 +76,9 @@ static inline int titan_posix_getsockname(int descriptor,
 #define TITAN_MT_MEMBERMAP ((void *)(uintptr_t)UINT64_C(0x310D781561E92F6D))
 #define TITAN_MT_MOD ((void *)(uintptr_t)UINT64_C(0x54C6087BF019D23A))
 #define TITAN_MT_PAYLOAD ((void *)(uintptr_t)UINT64_C(0xB7D24E619053AC8F))
+#define TITAN_MT_PROJECT ((void *)(uintptr_t)UINT64_C(0x730AB98A6741201C))
+#define TITAN_MT_CONSTRUCT ((void *)(uintptr_t)UINT64_C(0x730AB98A6741201D))
+#define TITAN_MT_PUBLIC ((void *)(uintptr_t)UINT64_C(0x730AB98A6741201E))
 
 /*
 ** Titan types that have a metatable
@@ -129,6 +138,11 @@ static inline void lua_pushtvalue(lua_State *L, TValue value) {
   L->top.p++;
 }
 
+/* Lightuserdata preserves address bits and exposes no pointed-to storage. */
+static inline void lua_pushconstlightuserdata(lua_State *L, const void *value) {
+  lua_pushlightuserdata(L, (void *)value);
+}
+
 static inline void *lua_togco(lua_State *L, int idx) {
   TValue value = lua_totvalue(L, idx);
   return gcvalue(&value);
@@ -165,6 +179,10 @@ static inline int lmacro_ttisLclosure(const TValue *o) {
 
 static inline int lmacro_ttisCclosure(const TValue *o) {
   return ttisCclosure(o);
+}
+
+static inline int lmacro_ttisfulluserdata(const TValue *o) {
+  return ttisfulluserdata(o);
 }
 
 static inline int lmacro_ttislcf(const TValue *o) { return ttislcf(o); }

@@ -94,7 +94,7 @@ catch
   ffi.uv_stop(loop.native)
 end
 
-foreign function process_callback(native: *uv_process_t, exit_status: int64_t, term_signal: int)
+local foreign function process_callback(native: *uv_process_t, exit_status: int64_t, term_signal: int)
   local base = native as foreign *uv_handle_t
   local owner = ffi.uv_handle_get_data(base) as foreign *Udata
   local loop = ffi.uv_loop_get_data(ffi.uv_handle_get_loop(base)) as foreign *Udata
@@ -108,7 +108,7 @@ foreign function process_callback(native: *uv_process_t, exit_status: int64_t, t
   ffi.lua_settop(L, top)
 end
 
-foreign function process_close_callback(base: *uv_handle_t)
+local foreign function process_close_callback(base: *uv_handle_t)
   local owner = ffi.uv_handle_get_data(base) as foreign *Udata
   local loop = ffi.uv_loop_get_data(ffi.uv_handle_get_loop(base)) as foreign *Udata
   local L = ffi.titan_record_field(loop, "loop_t", "state")
@@ -146,7 +146,7 @@ end
 
 -- The final handoff cannot execute Titan loop-backedge GC checks. These
 -- owners are already rooted, and every selected entry was validated above.
-foreign function consume_spawn_pipes(options: *uv_process_options_t)
+local foreign function consume_spawn_pipes(options: *uv_process_options_t)
   for index = 0, options.stdio_count - 1 do
     local entry = options.stdio[index]
     if (entry.flags & ffi.UV_CREATE_PIPE) ~= 0 then

@@ -756,13 +756,19 @@ end
             end
             foreign type Nested = function(function(int): int): void
             foreign type Variadic = function(int, ...): int
+            local foreign function private_callback(input: int): int
+                return input
+            end
         ]])
         assert.equal("void", program[1].rettypes[1].name)
+        assert.is_false(program[1].islocal)
         assert.equal("Ast.TypeCPointer",program[2].params[1].type._tag)
         assert.equal("Ast.TypeForeignFunction",program[2].params[2].type._tag)
         assert.equal("Ast.TopLevelForeignTypeAlias",program[3]._tag)
         assert.equal("Ast.TypeForeignFunction",program[3].type.argtypes[1]._tag)
         assert.is_true(program[4].type.varargtype)
+        assert.equal("Ast.TopLevelForeignFunc", program[5]._tag)
+        assert.is_true(program[5].islocal)
         assert_program_syntax_error("local foreign type X = int","TopLevelDecl")
     end)
 
@@ -2666,7 +2672,7 @@ end]])
        function()
         local names = {
             "coroutine", "uv", "async", "timer", "io", "fs", "net", "ssl",
-            "url", "http", "websocket", "os", "path", "peg", "string", "test", "sqlite3", "json",
+            "url", "http", "websocket", "os", "path", "peg", "string", "test", "sqlite3", "json", "protobuf", "transfer",
         }
         for _, name in ipairs(names) do
             assert_program_ast(

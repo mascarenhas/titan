@@ -13,6 +13,8 @@ local support = import "ssl.test_support.titan"
 local net_support = import "net.test_support.titan"
 local backpressure = import "ssl.backpressure_support.titan"
 local task_support = import "support.async.titan"
+local transfer_lua = import "lua"
+local uv = import "uv"
 
 function test_ssl_combined_pem_and_binary_record_exchange(
     context: test.Context)
@@ -365,6 +367,8 @@ function test_ssl_pending_read_allows_write_and_rejects_duplicate_direction(
     local duplicate_failed = false
     do connection:read() catch duplicate_failed = true end
     test.assert(duplicate_failed, "duplicate TLS reader was admitted")
+    common.assert_raises_contains(function () connection:to_transfer_payload() end,
+      "pending operation")
     local shutdown_failed = false
     do connection:shutdown() catch shutdown_failed = true end
     test.assert(shutdown_failed, "TLS shutdown ignored live reader")
@@ -581,6 +585,8 @@ function test_ssl_cancel_backpressured_write_aborts_before_native_drain(
     gc.collect()
     test.assert(not write_returned and writer:status():as_string() == "waiting",
                 "TLS peer did not establish write backpressure")
+    common.assert_raises_contains(function () connection:to_transfer_payload() end,
+      "pending operation")
     local duplicate_failed = false
     do connection:write("duplicate writer") catch duplicate_failed = true end
     test.assert(duplicate_failed and not write_returned,

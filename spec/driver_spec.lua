@@ -701,6 +701,23 @@ describe("Windows launcher filenames", function()
 end)
 
 describe("Windows provider export inventory", function()
+    it("exports raw public foreign entries under the final DLL name", function()
+        local signature = types.CFunction({}, types.CVoid(), false, nil)
+        local interface = types.Module("pkg.alpha", {
+            types.ModuleMember("pkg.alpha", "raw", signature, {}),
+        })
+        interface.source_members = {
+            types.ModuleMember("pkg.alpha", "private_raw", signature, {}),
+        }
+        local definition, names = driver.windows_provider_exports(
+            { "pkg.alpha" }, { ["pkg.alpha"] = interface }, "public/provider.dll")
+        assert.matches('LIBRARY "provider.dll"\nEXPORTS\n', definition, 1, true)
+        local symbol = coder.foreign_external_symbols("pkg.alpha", interface)[1]
+        assert.matches(symbol, definition, 1, true)
+        assert.not_matches("private_raw", definition, 1, true)
+        assert.equal(8, #names)
+    end)
+
     it("exports only the module protocol in stable linker order", function()
         local expected = {
             "luaopen_pkg_alpha", "luaopen_pkg_zeta",
@@ -2043,6 +2060,26 @@ describe("portable C99 compiled-interface validation", function()
         end
     end)
 
+    it("round-trips public C declarations without admitting source authority", function()
+        local cint = types.CInteger("int", true, 3, 32)
+        local raw = types.CFunction({ cint }, cint, false, nil)
+        local member = types.ModuleMember(modname, "increment", raw, { "input" })
+        local module = types.Module(modname, { member })
+        assert.is_true(driver.validate_module_interface(module, modname))
+        local rebuilt = assert(load("return " .. types.serialize(module),
+            "public C declaration metadata", "t", types))()
+        assert.is_true(driver.validate_module_interface(rebuilt, modname))
+        assert.is_true(types.equals(module, rebuilt))
+        assert.same({}, types.public_module_prefix_layout(rebuilt))
+
+        member._foreign_source = true
+        reject(module, "module member 1 has an invalid schema")
+        member._foreign_source = nil
+        member.paramnames = {}
+        reject(module, "has invalid parameter-name metadata")
+        reject(variable_module(raw), "portable C function has a noncanonical shape")
+    end)
+
     it("rejects direct value-facing void descriptors", function()
         reject(variable_module(types.CVoid()),
             "C void is not valid as a value-facing type")
@@ -2084,7 +2121,7 @@ describe("portable C99 compiled-interface validation", function()
         reject(variable_module(types.CPointer(cint, { "volatile" })),
             "portable C pointer has a noncanonical shape")
         reject(variable_module(types.CTypedef("local_int", cint, {})),
-            "Type.CTypedef is not valid in a value-facing type graph")
+            "C typedef has an invalid declaration identity or target")
 
         local private = types.CInteger("int", true, 3, 32)
         private._c_numeric = {}
@@ -3857,7 +3894,7 @@ describe("compiler module loader", function()
             local name = "incremental_driver_headers"
             local filename = source .. "/" .. name .. ".titan"
             write_file(filename, [[
-                foreign function increment(value: int): int
+                local foreign function increment(value: int): int
                     return value + 1
                 end
             ]])
