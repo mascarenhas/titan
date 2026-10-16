@@ -341,16 +341,35 @@ decoding. The one-slot string-copy transaction and
 native-packet lifetime are recorded in the [trusted Lua API ledger](ffi-lua-api-followup.md#trusted-standard-library-discipline).
 Borrowed pointer variants remain raw addresses.
 
-Closure packets own a `TitanTransferGraph` encoded entirely in the sending
-state. Sender cleanup retains graph ownership until native queue admission
+Closure and custom record payload packets own a `TitanTransferGraph` encoded
+entirely in the sending state. Sender cleanup retains graph ownership until native queue admission
 succeeds; allocation failure, closed admission, and native wake failure leave
 it with the sender. The queue owns accepted graphs and frees them after
 destination reconstruction, or when close/failure discards pending nodes.
-The receiving loop decodes using its own module instances and collector, then
-publishes `TransferValue.is_closure` containing that reconstructed callable.
+The receiving loop decodes using its own module instances and collector.
+Closure packets publish `TransferValue.is_closure` containing the reconstructed
+callable.
 The native graph carries copied captures, immutable code capabilities, and
 box ordinals. No origin closure, capture box, or other origin GC pointer is
 published to the queue.
+
+Custom record packets use the policy encoder/decoder and arrive as
+`TransferValue.is_record_payload(name, payload)`, preserving each nested policy
+and initializing its defining module through the existing native capability.
+The consumer explicitly calls `:to_value()` to invoke the static reconstruction
+hook. A closure capturing a custom record instead reconstructs that record as
+part of its semantic capture graph. A captured `TransferValue` retains its
+union wrapper. Active custom-record and payload-Array cycles are rejected,
+while acyclic repeated values retain copy semantics.
+
+`TransferValue.from_value` validates the pair of public hook signatures through
+ordinary reflection and permits private record fields when that pair is valid.
+Its active-record guard prevents a hook recursively packing the same record;
+deferred cleanup releases the guard after success or error. Hooks must run
+synchronously. They may transfer native tokens under application policy, but
+queue cleanup never closes or duplicates those tokens and cannot undo hook
+side effects. The programmer must detach or clear an origin owner when needed
+to prevent its finalizer from closing a handed-off resource.
 
 Receiver construction uses `ensure_runtime` without requiring a current Task
 or driving the loop, which permits synchronous independent-state bootstrap.

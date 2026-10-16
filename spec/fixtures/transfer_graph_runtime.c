@@ -36,10 +36,28 @@ static void graph_free(void *pointer) {
 #undef calloc
 #undef free
 
+/* Policy graphs use the real dense Array implementation. Native traceback
+ * symbolization is unrelated to these ownership checks. */
+#define TITAN_NO_LIBBACKTRACE
+#undef lua_assert
+#define lua_assert(condition) assert(condition)
+#if defined(_WIN32) && defined(__clang__)
+/* Embedding the Array implementation also brings in private Windows loader
+ * helpers which this standalone fixture does not use. Keep the fixture's own
+ * strict warnings, and the ordinary runtime build flags, unchanged. */
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wunused-function"
+#endif
+#include "titan-runtime/titan.c"
+#if defined(_WIN32) && defined(__clang__)
+#pragma clang diagnostic pop
+#endif
+
 static char outer_native, inner_native, leaf_native, detaching_native, function_tag;
 static unsigned module_initializations;
 static int reconstruction_budget = -1;
 static void *fixture_symbols(const char *name);
+static void register_custom_record(lua_State *L, Udata *module);
 
 static int fixture_entry(lua_State *L) {
     (void)L;
@@ -60,6 +78,7 @@ static Udata *fixture_init(lua_State *L) {
         ->symbols = fixture_symbols;
     module = uvalue(s2v(L->top.p - 1));
     lua_setfield(L, LUA_REGISTRYINDEX, "Titan module transfer.runtime.fixture");
+    register_custom_record(L, module);
     lua_gc(L, LUA_GCCOLLECT);
     return module;
 }
@@ -222,6 +241,194 @@ static void *fixture_symbols(const char *name) {
 static void *different_symbols(const char *name) {
     (void)name;
     return NULL;
+}
+
+/* This small native async facade exercises the graph independently of an
+ * installed standard library. Its nominal layout and payload-reader protocol
+ * match generated unions; the actual dense Arrays come from titan.c above. */
+#define POLICY_MT "Titan union titan.async.TransferValue metatable"
+#define CUSTOM_MT "transfer fixture custom record"
+#define CUSTOM_NAME "transfer.runtime.fixture.Custom"
+static unsigned custom_reconstructions;
+
+static void policy_reader(lua_State *L, Udata *owner, lua_Integer index,
+                           TValue *result) {
+    (void)L;
+    if (index == 0) {
+        setivalue(result, *(int *)getudatamem(owner));
+    } else {
+        assert(index >= 1 && index <= 2);
+        *result = owner->uv[index - 1].uv;
+    }
+}
+
+static void push_policy(lua_State *L, int tag, int first, int second) {
+    int top = lua_gettop(L);
+    if (first != 0) first = lua_absindex(L, first);
+    if (second != 0) second = lua_absindex(L, second);
+    *(int *)lua_newuserdatauv(L, sizeof(int), 2) = tag;
+    luaL_setmetatable(L, POLICY_MT);
+    if (first != 0) {
+        lua_pushvalue(L, first);
+        lua_setiuservalue(L, top + 1, 1);
+    }
+    if (second != 0) {
+        lua_pushvalue(L, second);
+        lua_setiuservalue(L, top + 1, 2);
+    }
+    lua_gc(L, LUA_GCCOLLECT);
+}
+
+static int policy_constructor(lua_State *L) {
+    int tag = (int)lua_tointeger(L, lua_upvalueindex(1));
+    if (tag >= 5 && tag <= 7)
+        return luaL_error(L, "implicit dynamic coercion to foreign pointer is unavailable");
+    push_policy(L, tag, tag == 0 ? 0 : 1, tag >= 8 && tag != 10 ? 2 : 0);
+    return 1;
+}
+
+static void policy_native_constructor(lua_State *L, Udata *module,
+    lua_Integer tag, TValue *input, TValue *output) {
+    int top = lua_gettop(L);
+    Table *parts = titan_reflect_projection_input(L, input, 1);
+    TValue pointer;
+    (void)module;
+    assert(tag >= 5 && tag <= 7);
+    titan_array_get(parts, 1, &pointer);
+    assert(ttislightuserdata(&pointer));
+    lua_pushtvalue(L, pointer);
+    push_policy(L, (int)tag, -1, 0);
+    *output = lua_totvalue(L, -1);
+    lua_settop(L, top);
+}
+
+static void push_custom_record(lua_State *L, int payload) {
+    payload = lua_absindex(L, payload);
+    lua_newuserdatauv(L, 0, 1);
+    luaL_setmetatable(L, CUSTOM_MT);
+    lua_pushvalue(L, payload);
+    lua_setiuservalue(L, -2, 1);
+    lua_gc(L, LUA_GCCOLLECT);
+}
+
+static int policy_from_value(lua_State *L) {
+    if (transfer_is_policy(L, 1)) {
+        lua_settop(L, 1);
+        return 1;
+    }
+    luaL_checkudata(L, 1, CUSTOM_MT);
+    lua_pushliteral(L, CUSTOM_NAME);
+    lua_getiuservalue(L, 1, 1);
+    push_policy(L, 11, -2, -1);
+    return 1;
+}
+
+static int policy_to_value(lua_State *L) {
+    int *tag = (int *)luaL_checkudata(L, 1, POLICY_MT);
+    if (*tag == 11) {
+        fail_reconstruction(L);
+        ++custom_reconstructions;
+        lua_getiuservalue(L, 1, 2);
+        push_custom_record(L, -1);
+    } else if (*tag == 0) lua_pushnil(L);
+    else lua_getiuservalue(L, 1, 1);
+    return 1;
+}
+
+static int async_loader(lua_State *L) {
+    static const char *names[] = {
+        "is_nil", "is_boolean", "is_integer", "is_float", "is_string",
+        "is_lua_state", "is_function", "is_pointer", "is_record",
+        "is_union", "is_closure", "is_record_payload"
+    };
+    unsigned i;
+    luaL_newmetatable(L, POLICY_MT);
+    lua_pushlightuserdata(L, titan_cast_func(void *, policy_reader));
+    lua_rawsetp(L, -2, TITAN_MT_PAYLOAD);
+    lua_pushinteger(L, TITAN_UNION);
+    lua_rawsetp(L, -2, TITAN_BRAND);
+    lua_pushlightuserdata(L, titan_cast_func(void *, policy_native_constructor));
+    lua_rawsetp(L, -2, TITAN_MT_CONSTRUCT);
+    ((TitanModuleData *)lua_newuserdatauv(L, sizeof(TitanModuleData), 0))->symbols = NULL;
+    lua_rawsetp(L, -2, TITAN_MT_MOD);
+    lua_newtable(L);
+    lua_pushcfunction(L, policy_to_value);
+    lua_setfield(L, -2, "to_value");
+    lua_setfield(L, -2, "__index");
+    lua_pop(L, 1);
+    lua_newtable(L);
+    lua_newtable(L);
+    for (i = 0; i < sizeof(names) / sizeof(names[0]); ++i) {
+        lua_pushinteger(L, i);
+        lua_pushcclosure(L, policy_constructor, 1);
+        lua_setfield(L, -2, names[i]);
+    }
+    lua_pushcfunction(L, policy_from_value);
+    lua_setfield(L, -2, "from_value");
+    lua_setfield(L, -2, "TransferValue");
+    return 1;
+}
+
+static void register_custom_record(lua_State *L, Udata *module) {
+    int top = lua_gettop(L);
+    luaL_newmetatable(L, CUSTOM_MT);
+    lua_pushinteger(L, TITAN_RECORD);
+    lua_rawsetp(L, -2, TITAN_BRAND);
+    lua_pushboolean(L, 1);
+    lua_rawsetp(L, -2, TITAN_MT_PUBLIC);
+    titan_pushmodule(L, module);
+    lua_rawsetp(L, -2, TITAN_MT_MOD);
+    luaL_getsubtable(L, LUA_REGISTRYINDEX, TITAN_METATABLES_KEY);
+    lua_pushvalue(L, -2);
+    lua_setfield(L, -2, CUSTOM_NAME);
+    lua_settop(L, top);
+}
+
+static lua_State *policy_state(int initialize_record) {
+    lua_State *L = luaL_newstate();
+    assert(L != NULL);
+    luaL_getsubtable(L, LUA_REGISTRYINDEX, LUA_PRELOAD_TABLE);
+    lua_pushcfunction(L, async_loader);
+    lua_setfield(L, -2, "titan.async");
+    lua_pop(L, 1);
+    transfer_library(L, "titan.async");
+    lua_pop(L, 1);
+    if (initialize_record) fixture_init(L);
+    return L;
+}
+
+static int encode_policy_call(lua_State *L) {
+    int top = lua_gettop(L);
+    titan_transfer_encode_policy(L, (TitanTransferGraph *)lua_touserdata(L, 2), -2);
+    assert(lua_gettop(L) == top);
+    return 0;
+}
+static int decode_policy_call(lua_State *L) {
+    titan_transfer_decode_policy(L, (const TitanTransferGraph *)lua_touserdata(L, 1));
+    return 1;
+}
+static int encode_policy(lua_State *L, TitanTransferGraph *graph) {
+    lua_pushcfunction(L, encode_policy_call);
+    lua_pushvalue(L, 1);
+    lua_pushlightuserdata(L, graph);
+    return lua_pcall(L, 2, 0, 0);
+}
+static int decode_policy(lua_State *L, const TitanTransferGraph *graph) {
+    lua_pushcfunction(L, decode_policy_call);
+    lua_pushlightuserdata(L, (void *)graph);
+    return lua_pcall(L, 1, 1, 0);
+}
+
+static void wrap_leaf(lua_State *L, int value) {
+    int top = lua_gettop(L);
+    Udata *module = fixture_init(L);
+    value = lua_absindex(L, value);
+    lua_newtable(L);
+    lua_pushvalue(L, value);
+    lua_rawseti(L, -2, 1);
+    restore_leaf(L, module, lua_gettop(L));
+    lua_copy(L, -1, top + 1);
+    lua_settop(L, top + 1);
 }
 
 static int encode_call(lua_State *L) {
@@ -452,7 +659,253 @@ static void test_reentrant_box_identity_roots(void) {
     lua_close(L);
 }
 
+static lua_State *make_policy_packet(void) {
+    lua_State *L = policy_state(1);
+    Table *array = transfer_policy_array(L, 12);
+    int tag;
+    for (tag = 0; tag < 12; ++tag) {
+        int top = lua_gettop(L);
+        switch (tag) {
+        case 0: break;
+        case 1: lua_pushboolean(L, 0); break;
+        case 2: lua_pushinteger(L, 42); break;
+        case 3: lua_pushnumber(L, 1.25); break;
+        case 4: lua_pushlstring(L, "a\0b", 3); break;
+        case 5: lua_pushlightuserdata(L, NULL); break;
+        case 6:
+            lua_pushlightuserdata(L, titan_cast_func(void *, fixture_entry));
+            break;
+        case 7: lua_pushlightuserdata(L, &function_tag); break;
+        case 8:
+        case 9:
+            lua_pushliteral(L, "packet nominal");
+            lua_pushlstring(L, "\0wire", 5);
+            break;
+        case 10:
+            lua_pushinteger(L, 77);
+            wrap_leaf(L, -1);
+            lua_remove(L, top + 1);
+            break;
+        case 11:
+            lua_pushliteral(L, CUSTOM_NAME);
+            transfer_policy_array(L, 0);
+            break;
+        }
+        push_policy(L, tag, tag == 0 ? 0 : top + 1,
+                    tag >= 8 && tag != 10 ? top + 2 : 0);
+        titan_array_set_stack(L, array, tag + 1, -1);
+        lua_settop(L, top);
+    }
+    lua_pushliteral(L, CUSTOM_NAME);
+    push_policy(L, 11, -1, 1);
+    lua_copy(L, -1, 1);
+    lua_settop(L, 1);
+    return L;
+}
+
+static int invalid_policy_array_write(lua_State *L) {
+    lua_getiuservalue(L, 1, 2);
+    lua_pushinteger(L, 42);
+    lua_seti(L, -2, 1);
+    return 0;
+}
+
+static void test_policy_variants_and_source_retirement(void) {
+    lua_State *origin = make_policy_packet();
+    lua_State *destination;
+    TitanTransferGraph *graph = titan_transfer_new();
+    unsigned before;
+    Table *mutable_mt, *const_mt, *array;
+    TValue value;
+    int i, status;
+    custom_reconstructions = 0;
+    status = encode_policy(origin, graph);
+    if (status != LUA_OK) fprintf(stderr, "%s\n", lua_tostring(origin, -1));
+    assert(status == LUA_OK);
+    assert(graph->scratch == NULL);
+    lua_close(origin);
+    destination = policy_state(0);
+    before = module_initializations;
+    assert(decode(destination, graph) != LUA_OK);
+    assert(strstr(lua_tostring(destination, -1), "different root policy") != NULL);
+    lua_settop(destination, 0);
+    assert(decode_policy(destination, graph) == LUA_OK);
+    assert(module_initializations == before + 1);
+    assert(custom_reconstructions == 0);
+    assert(*(int *)luaL_checkudata(destination, 1, POLICY_MT) == 11);
+    lua_getiuservalue(destination, 1, 2);
+    value = lua_totvalue(destination, -1);
+    titan_array_cached_metatables(destination, &mutable_mt, &const_mt);
+    array = titan_array_try_backing(&value, mutable_mt);
+    assert(array != NULL && titan_array_length(array) == 12);
+    for (i = 0; i < 12; ++i) {
+        Udata *policy;
+        titan_array_get(array, i + 1, &value);
+        assert(ttisfulluserdata(&value));
+        policy = uvalue(&value);
+        assert(*(int *)getudatamem(policy) == i);
+        if (i == 1) assert(ttisfalse(&policy->uv[0].uv));
+        if (i == 2) assert(ivalue(&policy->uv[0].uv) == 42);
+        if (i == 4) {
+            TString *bytes = tsvalue(&policy->uv[0].uv);
+            assert(tsslen(bytes) == 3 && memcmp(getstr(bytes), "a\0b", 3) == 0);
+        }
+        if (i == 5) assert(pvalue(&policy->uv[0].uv) == NULL);
+        if (i == 6) assert(pvalue(&policy->uv[0].uv)
+                          == titan_cast_func(void *, fixture_entry));
+        if (i == 7) assert(pvalue(&policy->uv[0].uv) == &function_tag);
+        if (i == 10) {
+            CClosure *closure = clCvalue(&policy->uv[0].uv);
+            assert(ivalue(&closure->upvalue[4]) == 77);
+        }
+    }
+    lua_settop(destination, 1);
+    lua_pushcfunction(destination, invalid_policy_array_write);
+    lua_pushvalue(destination, 1);
+    assert(lua_pcall(destination, 1, 0, 0) != LUA_OK);
+    assert(strstr(lua_tostring(destination, -1), "requires TransferValue") != NULL);
+    lua_settop(destination, 1);
+    transfer_policy_to_value(destination, 1);
+    assert(luaL_testudata(destination, -1, CUSTOM_MT) != NULL);
+    assert(custom_reconstructions == 1);
+    titan_transfer_free(graph);
+    assert(allocations == 0);
+    lua_close(destination);
+}
+
+static void test_policy_allocation_failures(void) {
+    lua_State *L = make_policy_packet();
+    int budget;
+    for (budget = 0; budget < 150; ++budget) {
+        TitanTransferGraph *graph;
+        int status;
+        allocation_budget = budget;
+        graph = titan_transfer_new();
+        if (graph == NULL) {
+            assert(allocations == 0);
+            continue;
+        }
+        status = encode_policy(L, graph);
+        allocation_budget = -1;
+        if (status != LUA_OK) {
+            assert(strstr(lua_tostring(L, -1), "cannot allocate") != NULL);
+            lua_settop(L, 1);
+        }
+        titan_transfer_free(graph);
+        assert(allocations == 0);
+        if (status == LUA_OK) break;
+    }
+    assert(budget > 20 && budget < 150);
+    lua_close(L);
+}
+
+static void test_custom_capture_and_policy_wrapper(void) {
+    int wrapper;
+    for (wrapper = 0; wrapper <= 1; ++wrapper) {
+        lua_State *origin = make_policy_packet();
+        lua_State *destination;
+        TitanTransferGraph *graph = titan_transfer_new();
+        if (!wrapper) {
+            transfer_policy_to_value(origin, 1);
+            lua_replace(origin, 1);
+        }
+        wrap_leaf(origin, 1);
+        lua_replace(origin, 1);
+        assert(encode(origin, graph) == LUA_OK);
+        lua_close(origin);
+        destination = policy_state(0);
+        if (!wrapper) {
+            reconstruction_budget = 0;
+            assert(decode(destination, graph) != LUA_OK);
+            assert(strstr(lua_tostring(destination, -1), "injected") != NULL);
+            lua_settop(destination, 0);
+            lua_gc(destination, LUA_GCCOLLECT);
+            reconstruction_budget = -1;
+        }
+        assert(decode(destination, graph) == LUA_OK);
+        assert(lua_getupvalue(destination, 1, 5) != NULL);
+        assert(luaL_testudata(destination, -1, wrapper ? POLICY_MT : CUSTOM_MT));
+        titan_transfer_free(graph);
+        assert(allocations == 0);
+        lua_close(destination);
+    }
+}
+
+static void test_custom_payload_cycles(void) {
+    int record_cycle;
+    for (record_cycle = 0; record_cycle <= 1; ++record_cycle) {
+        lua_State *L = policy_state(1);
+        Table *array = transfer_policy_array(L, 1);
+        TitanTransferGraph *graph = titan_transfer_new();
+        lua_pushliteral(L, CUSTOM_NAME);
+        push_policy(L, 11, 2, 1);
+        if (record_cycle) {
+            push_custom_record(L, 1);
+            wrap_leaf(L, -1);
+            push_policy(L, 10, -1, 0);
+            titan_array_set_stack(L, array, 1, -1);
+            lua_settop(L, 4);
+            wrap_leaf(L, 4);
+        } else {
+            titan_array_set_stack(L, array, 1, 3);
+            lua_pushvalue(L, 3);
+        }
+        lua_replace(L, 1);
+        lua_settop(L, 1);
+        assert((record_cycle ? encode(L, graph) : encode_policy(L, graph)) != LUA_OK);
+        assert(strstr(lua_tostring(L, -1), "cyclic") != NULL);
+        titan_transfer_free(graph);
+        assert(allocations == 0);
+        lua_close(L);
+    }
+}
+
+static void test_invalid_policy_packets(void) {
+    static const char *diagnostics[] = {
+        "not initialized", "mutable Titan Array", "TransferValue entries",
+        "NULL Lua C function"
+    };
+    int kind;
+    for (kind = 0; kind < 4; ++kind) {
+        lua_State *L = make_policy_packet();
+        TitanTransferGraph *graph = titan_transfer_new();
+        if (kind == 0) {
+            lua_pushliteral(L, "unknown.Record");
+            lua_setiuservalue(L, 1, 1);
+        } else if (kind == 1) {
+            lua_newtable(L);
+            lua_setiuservalue(L, 1, 2);
+        } else {
+            Table *mutable_mt, *const_mt, *array;
+            TValue value;
+            lua_getiuservalue(L, 1, 2);
+            value = lua_totvalue(L, -1);
+            titan_array_cached_metatables(L, &mutable_mt, &const_mt);
+            array = titan_array_try_backing(&value, mutable_mt);
+            if (kind == 2) lua_pushinteger(L, 1);
+            else {
+                lua_pushlightuserdata(L, NULL);
+                push_policy(L, 6, -1, 0);
+            }
+            /* Deliberately bypass the public Array writer to verify that the
+             * native transport rejects malformed trusted-boundary input. */
+            titan_array_set_stack(L, array, 1, -1);
+            lua_settop(L, 1);
+        }
+        assert(encode_policy(L, graph) != LUA_OK);
+        assert(strstr(lua_tostring(L, -1), diagnostics[kind]) != NULL);
+        titan_transfer_free(graph);
+        assert(allocations == 0);
+        lua_close(L);
+    }
+}
+
 int main(void) {
+    test_policy_variants_and_source_retirement();
+    test_policy_allocation_failures();
+    test_custom_capture_and_policy_wrapper();
+    test_custom_payload_cycles();
+    test_invalid_policy_packets();
     test_reentrant_box_identity_roots();
     test_native_allocation_failures();
     test_source_retirement_and_aliases();

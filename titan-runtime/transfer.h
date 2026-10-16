@@ -35,7 +35,11 @@ typedef struct TitanTransferModule {
 /* The caller must publish the empty graph into its cleanup owner before encode
  * can raise. A graph is encoded once and is immutable afterwards. It retains
  * only copied native data, immutable code capabilities, and box ordinals.
- * Decode pushes one semantic value and uses only destination-state GC roots.
+ * Encode preserves the entry stack. Closure-root decode pushes one semantic
+ * closure; policy-root decode pushes one exact TransferValue, including nested
+ * custom record payloads. Both use only destination-state GC roots. A custom
+ * payload retains its record owner's immutable module capability so decode can
+ * initialize that owner without guessing a module name from the nominal name.
  * Both operations require an enclosing owning-state protected error boundary. */
 /* The opaque graph API is declared in titan/ffi.h for trusted Titan callers. */
 

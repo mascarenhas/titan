@@ -36,32 +36,49 @@ foreign function lua_state_error_message(state: *lua_State): int
   return 1
 end
 
--- Load the copied native provider through the owning state's registry. This
+-- Load a copied native provider through the owning state's registry. This
 -- does not depend on a chunk preserving the global require function. Stack:
--- entry -> one callable; all allocation/errors stay under lua_state_execute.
-foreign function lua_state_protobuf_function(state: *lua_State,
-                                             name: const *char): int
+-- entry -> one module; all allocation/errors stay under lua_state_execute.
+foreign function lua_state_native_module(state: *lua_State,
+                                         name: const *char): int
   local top = ffi.lua_gettop(state)
   if ffi.lua_checkstack(state, 3) == 0 then
-    return ffi.luaL_error(state, "cannot reserve independent Lua protobuf stack")
+    return ffi.luaL_error(state, "cannot reserve independent Lua module stack")
   end
   ffi.lua_pushstring(state, ffi.LUA_PRELOAD_TABLE)
   ffi.lua_rawget(state, ffi.LUA_REGISTRYINDEX)
   if ffi.lua_type(state, -1) ~= ffi.LUA_TTABLE then
-    return ffi.luaL_error(state, "independent state has no native protobuf loader")
+    return ffi.luaL_error(state, "independent state has no native loader for %s", name)
   end
-  ffi.lua_pushstring(state, "titan.protobuf")
+  ffi.lua_pushstring(state, name)
   ffi.lua_rawget(state, -2)
   local loader = ffi.lua_tocfunction(state, -1)
   if loader == nil then
-    return ffi.luaL_error(state, "independent state has no native protobuf loader")
+    return ffi.luaL_error(state, "independent state has no native loader for %s", name)
   end
   if ffi.lua_getupvalue(state, -1, 1) ~= nil then
-    return ffi.luaL_error(state, "independent state has no native protobuf loader")
+    return ffi.luaL_error(state, "independent state has no native loader for %s", name)
   end
   ffi.lua_settop(state, top)
-  ffi.luaL_requiref(state, "titan.protobuf", loader, 0)
+  ffi.luaL_requiref(state, name, loader, 0)
+  return 0
+end
+
+foreign function lua_state_protobuf_function(state: *lua_State,
+                                             name: const *char): int
+  local top = ffi.lua_gettop(state)
+  lua_state_native_module(state, "titan.protobuf")
   ffi.lua_getfield(state, -1, name)
+  ffi.lua_copy(state, -1, top + 1)
+  ffi.lua_settop(state, top + 1)
+  return 0
+end
+
+foreign function lua_state_transfer_from_value(state: *lua_State): int
+  local top = ffi.lua_gettop(state)
+  lua_state_native_module(state, "titan.async")
+  ffi.lua_getfield(state, -1, "TransferValue")
+  ffi.lua_getfield(state, -1, "from_value")
   ffi.lua_copy(state, -1, top + 1)
   ffi.lua_settop(state, top + 1)
   return 0
@@ -75,11 +92,11 @@ foreign function lua_state_closure_value(state: *lua_State, position: int,
     return ffi.luaL_error(state, "cannot transfer a value that is not a Titan closure")
   end
   result.kind = ffi.TITAN_LUA_CLOSURE
-  result.closure = ffi.titan_transfer_new()
-  if result.closure == nil then
+  result.graph = ffi.titan_transfer_new()
+  if result.graph == nil then
     return ffi.luaL_error(state, "cannot allocate independent-state closure transfer")
   end
-  ffi.titan_transfer_encode(state, result.closure, position)
+  ffi.titan_transfer_encode(state, result.graph, position)
   return 1
 end
 
@@ -143,6 +160,13 @@ foreign function lua_state_transfer_value(state: *lua_State, position: int,
     result.pointer = ffi.lua_touserdata(state, -1)
   elseif tag == 10 then
     lua_state_closure_value(state, -1, result)
+  elseif tag == 11 then
+    result.kind = ffi.TITAN_LUA_RECORD_PAYLOAD
+    result.graph = ffi.titan_transfer_new()
+    if result.graph == nil then
+      return ffi.luaL_error(state, "cannot allocate independent-state record payload transfer")
+    end
+    ffi.titan_transfer_encode_policy(state, result.graph, position)
   elseif tag >= 8 then
     if tag > 9 then return ffi.luaL_error(state, "invalid independent Lua TransferValue variant") end
     if tag == 8 then result.kind = ffi.TITAN_LUA_RECORD
@@ -162,9 +186,9 @@ foreign function lua_state_transfer_value(state: *lua_State, position: int,
   return 1
 end
 
--- Serialize only in the origin state. Replace its result slot with a private
--- two-string root so the protected call still returns exactly the original
--- result count, while names and wire bytes survive until host-side copying.
+-- Convert only in the origin state. The transfer carrier replaces the result
+-- slot, retaining all source strings until host copying finishes. Custom hooks
+-- may encapsulate private fields; ordinary nominals retain protobuf's rules.
 foreign function lua_state_nominal_value(state: *lua_State, position: int,
                                         result: *titan_lua_value): int
   local top = ffi.lua_gettop(state)
@@ -172,38 +196,20 @@ foreign function lua_state_nominal_value(state: *lua_State, position: int,
     return ffi.luaL_error(state, "cannot reserve independent Lua nominal stack")
   end
   if ffi.lua_getmetatable(state, position) == 0 then return 0 end
-  local metatable = ffi.lua_topointer(state, -1)
   ffi.lua_rawgetp(state, -1, ffi.TITAN_BRAND)
   local brand = ffi.lua_tointegerx(state, -1, nil)
   ffi.lua_settop(state, top)
   if brand ~= ffi.TITAN_RECORD then
     if brand ~= ffi.TITAN_UNION then return 0 end
   end
-  ffi.lua_rawgetp(state, ffi.LUA_REGISTRYINDEX, metatable)
-  if ffi.lua_type(state, -1) ~= ffi.LUA_TSTRING then
-    return ffi.luaL_error(state, "independent Lua nominal has no registered name")
-  end
-  lua_state_protobuf_function(state, "serialize")
+  lua_state_transfer_from_value(state)
   ffi.lua_pushvalue(state, position)
   ffi.lua_callk(state, 1, 1, 0 as foreign lua_KContext, nil)
-  if ffi.lua_type(state, -1) ~= ffi.LUA_TSTRING then
-    return ffi.luaL_error(state, "protobuf serialization did not return bytes")
-  end
-  local name_length = 0 as foreign size_t
-  result.name = ffi.lua_tolstring(state, top + 1, name_length)
-  result.name_length = name_length
-  local length = 0 as foreign size_t
-  result.bytes = ffi.lua_tolstring(state, top + 2, length)
-  result.length = length
-  if brand == ffi.TITAN_RECORD then result.kind = ffi.TITAN_LUA_RECORD
-  else result.kind = ffi.TITAN_LUA_UNION end
-  ffi.lua_createtable(state, 2, 0)
-  ffi.lua_pushvalue(state, top + 1)
-  ffi.lua_rawseti(state, -2, 1 as foreign lua_Integer)
-  ffi.lua_pushvalue(state, top + 2)
-  ffi.lua_rawseti(state, -2, 2 as foreign lua_Integer)
   ffi.lua_copy(state, -1, position)
   ffi.lua_settop(state, top)
+  if lua_state_transfer_value(state, position, result) == 0 then
+    return ffi.luaL_error(state, "nominal conversion did not return a TransferValue")
+  end
   return 1
 end
 
@@ -239,7 +245,14 @@ foreign function lua_state_execute(state: *lua_State): int
     elseif argument.kind == ffi.TITAN_LUA_POINTER then
       ffi.lua_pushlightuserdata(state, argument.pointer)
     elseif argument.kind == ffi.TITAN_LUA_CLOSURE then
-      ffi.titan_transfer_decode(state, argument.closure)
+      ffi.titan_transfer_decode(state, argument.graph)
+    elseif argument.kind == ffi.TITAN_LUA_RECORD_PAYLOAD then
+      ffi.titan_transfer_decode_policy(state, argument.graph)
+      ffi.lua_getfield(state, -1, "to_value")
+      ffi.lua_pushvalue(state, -2)
+      ffi.lua_callk(state, 1, 1, 0 as foreign lua_KContext, nil)
+      ffi.lua_copy(state, -1, -2)
+      ffi.lua_settop(state, -2)
     elseif argument.kind >= ffi.TITAN_LUA_RECORD then
       if argument.kind > ffi.TITAN_LUA_UNION then
         return ffi.luaL_error(state, "invalid independent Lua argument kind")

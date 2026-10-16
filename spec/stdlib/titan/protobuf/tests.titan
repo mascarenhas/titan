@@ -409,3 +409,121 @@ function test_schema_is_stable_and_contains_matching_wire_types(_context: test.C
   test.assert(string.find(union_schema, "oneof variant") ~= nil)
   test.assert(string.find(union_schema, "v_empty = 1;") ~= nil)
 end
+
+record WideFields
+  f1: integer
+  f2: integer
+  f3: integer
+  f4: integer
+  f5: integer
+  f6: integer
+  f7: integer
+  f8: integer
+  f9: integer
+  f10: integer
+  f11: integer
+  f12: integer
+  f13: integer
+  f14: integer
+  f15: integer
+  f16: integer
+  f17: integer
+  f18: integer
+  f19: integer
+  f20: integer
+  f21: integer
+  f22: integer
+  f23: integer
+  f24: integer
+  f25: integer
+  f26: integer
+  f27: integer
+  f28: integer
+  f29: integer
+  f30: integer
+  f31: integer
+  f32: integer
+end
+
+local function append_test_varint(output: string.StringWriter, bits: integer)
+  while bits >= 128 do
+    output:write(string.char((bits & 127) | 128))
+    bits = bits >> 7
+  end
+  output:write(string.char(bits))
+end
+
+function test_sparse_field_index_handles_wide_records_and_high_unknown_tags(
+    _context: test.Context)
+  local absent: NilValue = protobuf.deserialize(string.char(16, 1),
+    descriptor(NilValue(nil)))
+  test.assert(absent.nothing == nil)
+  expect_error(function()
+    protobuf.deserialize(string.char(16, 1), descriptor(IntegerValue(0)))
+  end, "missing required field")
+  expect_error(function()
+    protobuf.deserialize(string.char(8, 0), descriptor(NilValue(nil)))
+  end, "unexpected wire type")
+  local initial = WideFields(1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16,
+    17, 18, 19, 20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32)
+  local expected = WideFields(-1, -2, -3, -4, -5, -6, -7, -8, -9, -10, -11, -12,
+    -13, -14, -15, -16, -17, -18, -19, -20, -21, -22, -23, -24, -25, -26, -27,
+    -28, -29, -30, -31, -32)
+  local output = string.writer()
+  output:write(protobuf.serialize(initial))
+  for index = 1, 4096 do
+    append_test_varint(output, (index + 1000) << 3)
+    append_test_varint(output, index)
+  end
+  -- Maximum legal tag and a reserved unknown tag must not size a dense Array.
+  output:write(string.char(248, 255, 255, 255, 15, 0))
+  append_test_varint(output, 19000 << 3)
+  output:write(string.char(0))
+  output:write(protobuf.serialize(expected))
+  local decoded: WideFields = protobuf.deserialize(output:drain(), descriptor(initial))
+  test.assert(protobuf.serialize(decoded) == protobuf.serialize(expected))
+end
+
+function test_indexed_message_merge_preserves_interleaving_and_rejects_earlier_bad_wire(
+    _context: test.Context)
+  local output = string.writer()
+  for index = 1, 128 do
+    local fragment = Shared(Node("left-" .. index, nil), Node("right-" .. index, nil))
+    output:write(protobuf.serialize(fragment))
+    -- Interleaved unrelated fields are not part of either message's merge run.
+    output:write(string.char(248, 255, 255, 255, 15, 0))
+  end
+  local target = descriptor(Shared(Node("", nil), Node("", nil)))
+  local decoded: Shared = protobuf.deserialize(output:drain(), target)
+  test.assert(decoded.left.name == "left-128" and decoded.right.name == "right-128")
+  local valid = protobuf.serialize(Shared(Node("left", nil), Node("right", nil)))
+  expect_error(function()
+    protobuf.deserialize(string.char(8, 0) .. valid, target)
+  end, "unexpected wire type")
+  expect_error(function()
+    protobuf.deserialize(valid .. string.char(8, 0), target)
+  end, "unexpected wire type")
+  -- Scalar fields still inspect only the last occurrence, even if an earlier
+  -- occurrence used another wire kind; embedded message merging checks them all.
+  local scalar: IntegerValue = protobuf.deserialize(string.char(10, 0, 8, 6),
+    descriptor(IntegerValue(0)))
+  test.assert(scalar.number == 3)
+end
+
+function test_indexed_union_merge_keeps_last_variant_reset_and_payload_order(
+    _context: test.Context)
+  local target = descriptor(Choice.empty())
+  local unknown = string.char(248, 255, 255, 255, 15, 0)
+  local repeated = protobuf.serialize(Choice.pair(3, "retained")) .. unknown ..
+    string.char(18, 2, 8, 8)
+  local merged: Choice = protobuf.deserialize(repeated, target)
+  case merged
+  when pair(number, note) then test.assert(number == 4 and note == "retained")
+  else raise "same-variant message merge changed variant" end
+  local reset: Choice = protobuf.deserialize(repeated ..
+    protobuf.serialize(Choice.empty()) .. unknown ..
+    protobuf.serialize(Choice.pair(5, nil)), target)
+  case reset
+  when pair(number, note) then test.assert(number == 5 and note == nil)
+  else raise "oneof replacement failed to reset earlier payloads" end
+end

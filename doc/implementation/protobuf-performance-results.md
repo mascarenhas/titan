@@ -13,7 +13,8 @@ The results describe the protobuf implementation at `88e54cd8`, measured on
 [harness](../../spec/bench/protobuf/README.md) and compact
 [machine-readable results](../../spec/bench/protobuf/results-issue242.json)
 retain both timing windows, repetitions, sample counts, categories, and hashes.
-No codec optimization was applied for this study.
+No codec optimization was applied for this initial study. The field-index
+follow-up below measures the later decoder change separately.
 
 ## Production build and timing boundary
 
@@ -133,9 +134,10 @@ which compiler specialization would still need. Conversely, reflection-induced
 allocation and GC appear in shared buckets. Adding the direct percentages and
 applying Amdahl’s law would therefore give an unsupported speedup estimate.
 
-## What to investigate next
+## Baseline priorities
 
-The first promising experiments are narrower than a full compiler extension:
+The baseline identified three experiments narrower than a full compiler
+extension. The first was subsequently implemented and measured below:
 
 1. **Avoid repeated decoder scans.** `decode_record` asks `decode_field` for each
    declared field; `Message:last` scans all parsed fields each time, and embedded
@@ -158,3 +160,86 @@ The first promising experiments are narrower than a full compiler extension:
 The current evidence supports investigating intermediate allocation and field
 lookup first. It neither rules out a useful compiler-specialized codec nor shows
 that replacing direct reflected field access alone would deliver a large gain.
+
+## Field-index follow-up (2026-10-16 UTC)
+
+The final decoder builds a sparse field-number index only when a multi-field
+message first needs lookup. Empty and single-field messages answer directly;
+Array and union readers that only traverse encounter order allocate no index.
+The index links repeated occurrences, so merging visits only matching fragments,
+checks every wire kind, and restores their original order. A single embedded
+occurrence returns its bytes directly. Index storage grows with encountered tags,
+never the largest field number. This replaces repeated full scans with one
+linear index build and expected constant-time scalar lookups; merging remains
+proportional to the matching occurrences.
+
+An initial eager index improved the 64-field decoder by 17.8%, but regressed the
+256-integer Array by 8.1% and the small string/integer record by 9.9% in its paired
+run. That exploratory candidate was replaced by the lazy design above. Its
+measurements remain under `eager_experiment` in the
+[retained comparison data](../../spec/bench/protobuf/results-field-index.json).
+The final design removes the large-Array regression and retains the wide-record
+gain, with an explicit cost for small records: the two-field string record and
+four-integer record are 14.1% and 11.5% slower in the final comparison. No
+arbitrary small-size threshold was added.
+
+The comparison uses the original immutable production executable and a new
+consumer built from exactly the same benchmark sources and wire fixtures. Only
+the decoder implementation changed in the provider source; later record-transfer
+hooks are outside these measured builds. Compiler/native inputs, production
+flags, affinity, power settings, and timing boundaries stayed fixed. Eager and
+lazy candidates each have their own alternating original/candidate run; results
+are not pooled across windows. Decoder, executable, provider, and consumer-source
+hashes and every individual pair are retained.
+
+All task-created Linux, Windows, and macOS builds/tests were quiet for the final
+run; the pre-existing Mac service and normal desktop activity remained. Five
+fresh-process unsampled pairs used equal operation counts and alternated which
+executable ran first. Counts targeted roughly 500 ms of baseline CPU using the
+earlier matrix; candidate durations vary with performance. The table shows CPU
+microseconds per decode, median and minimum–maximum. Negative change means lower
+latency.
+
+| Workload | Wire bytes | Original µs | Final lazy µs | Change |
+| --- | ---: | ---: | ---: | ---: |
+| 4 integer fields | 8 | 2.23 (2.22–2.28) | 2.48 (2.43–2.53) | +11.5% |
+| 16 integer fields | 38 | 8.37 (8.31–9.28) | 8.43 (8.27–8.45) | +0.7% |
+| 64 integer fields | 230 | 50.77 (50.53–51.49) | 41.70 (41.28–42.35) | -17.9% |
+| 16-byte string + integer | 20 | 1.45 (1.44–1.47) | 1.66 (1.65–1.68) | +14.1% |
+| 4,096-byte string + integer | 4,101 | 2.68 (2.66–3.71) | 2.82 (2.77–2.92) | +5.3% |
+| Two nested 4-field records + string | 28 | 7.92 (7.89–8.15) | 7.88 (7.75–7.93) | -0.5% |
+| Active union with integer + record | 14 | 5.87 (5.69–6.16) | 5.97 (5.83–5.99) | +1.8% |
+| Array of 8 integers | 36 | 11.00 (10.78–11.13) | 10.66 (10.58–10.79) | -3.1% |
+| Array of 256 integers | 1,274 | 312.88 (307.39–316.54) | 313.54 (304.58–402.00) | +0.2% |
+| Array of 8 four-field records | 100 | 36.36 (35.80–36.97) | 34.83 (34.60–35.87) | -4.2% |
+| Array of 128 four-field records | 1,803 | 611.20 (604.50–637.13) | 594.97 (593.71–619.90) | -2.7% |
+
+This is a complexity improvement with workload-dependent constant costs, not a
+universal speedup. In particular, the 256-integer final run has a high outlier;
+the overlapping distributions support describing its median as approximately
+unchanged. Serialization controls changed by −7.5% to +3.0% across the eleven
+shapes, showing residual variability even in the quieter window. Their medians,
+ranges, and raw pairs are retained too. The final timing/profile window was
+02:16:03–02:18:15 UTC on 2026-10-16.
+
+Separate final-decoder control/sampled pairs collected 12,825 exclusive samples
+with no drops. Sampled/control CPU ratios ranged from 0.986 to 1.141, and
+unresolved samples from 0.36% to 0.62%. The same classification is used below;
+Map or collector work can land outside the named lookup function. Baseline
+profiles came from an earlier, busier window, so differences in sampled shares
+are diagnostic rather than precise attribution of the paired latency change.
+
+| Decoder | Direct reflection | Descriptors | Field lookup | Shared allocator/GC | Samples |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| `flat4` | 0.9% | 0.9% | 3.8% | 60.9% | 3,370 |
+| `flat16` | 0.5% | 1.2% | 3.1% | 60.9% | 3,059 |
+| `flat64` | 0.0% | 0.9% | 2.3% | 65.7% | 3,370 |
+| `records128` | 1.0% | 0.8% | 3.1% | 64.4% | 3,026 |
+
+The final implementation passed all 22 native protobuf cases, including sparse
+high tags, wide records, duplicate-message order, wrong-wire fragments, and the
+zero/single-field paths. All 44 cold/warm independent-wire benchmark checks
+passed. An additional generated schema was accepted by protoc; Python decoded
+and reproduced its 97 bytes exactly, and the final Titan decoder consumed the
+Python encoding. These checks validate the measured decoder; platform and
+full-suite integration gates are recorded separately.

@@ -1,0 +1,401 @@
+local transfer_reflect = import "reflect"
+local transfer_protobuf = import "protobuf"
+
+local transfer_payload_new_calls = 0
+local transfer_payload_encode_calls = 0
+local transfer_payload_decode_calls = 0
+
+record TransferPayloadRecord
+  local secret: integer
+end
+
+function TransferPayloadRecord.new(secret: integer): TransferPayloadRecord
+  transfer_payload_new_calls = transfer_payload_new_calls + 1
+  return { secret = secret }
+end
+
+function TransferPayloadRecord:to_transfer_payload(): (...: async.TransferValue)
+  transfer_payload_encode_calls = transfer_payload_encode_calls + 1
+  support.collect_garbage()
+  return async.TransferValue.is_nil(), async.TransferValue.is_integer(self.secret),
+    async.TransferValue.is_string("payload\0bytes"), async.TransferValue.is_boolean(false)
+end
+
+function TransferPayloadRecord.from_transfer_payload(...: async.TransferValue): TransferPayloadRecord
+  transfer_payload_decode_calls = transfer_payload_decode_calls + 1
+  test.assert(#... == 4, "custom transfer changed flexible payload arity")
+  local empty = ...[1]
+  local number = ...[2]
+  local bytes = ...[3]
+  local flag = ...[4]
+  test.assert(empty:to_value() == nil)
+  test.assert(bytes:to_value() == "payload\0bytes")
+  test.assert(flag:to_value() == false)
+  support.collect_garbage()
+  return { secret = number:to_value() }
+end
+
+record TransferPayloadEmpty
+  local marker: integer
+end
+
+function TransferPayloadEmpty:to_transfer_payload(): (...: async.TransferValue)
+  return
+end
+
+function TransferPayloadEmpty.from_transfer_payload(...: async.TransferValue): TransferPayloadEmpty
+  test.assert(#... == 0, "empty transfer payload gained an argument")
+  return { marker = 42 }
+end
+
+record TransferPayloadGeneric<|T|>
+  local item: T
+end
+
+function TransferPayloadGeneric:to_transfer_payload(): (...: async.TransferValue)
+  return async.TransferValue.from_value(self.item)
+end
+
+function TransferPayloadGeneric.from_transfer_payload(...: async.TransferValue): TransferPayloadGeneric<|T|>
+  test.assert(#... == 1)
+  local item = ...[1]
+  return { item = item:to_value() }
+end
+
+record TransferPayloadNative
+  local policies: {async.TransferValue}
+end
+
+function TransferPayloadNative:to_transfer_payload(): (...: async.TransferValue)
+  return ...self.policies
+end
+
+function TransferPayloadNative.from_transfer_payload(...: async.TransferValue): TransferPayloadNative
+  return { policies = {...} }
+end
+
+record TransferPayloadRetry
+  local fail: boolean
+end
+
+function TransferPayloadRetry:to_transfer_payload(): (...: async.TransferValue)
+  if self.fail then raise "transfer-hook-failure" end
+  return async.TransferValue.is_boolean(false)
+end
+
+function TransferPayloadRetry.from_transfer_payload(...: async.TransferValue): TransferPayloadRetry
+  test.assert(#... == 1)
+  return { fail = false }
+end
+
+record TransferPayloadCycle
+  local marker: integer
+end
+
+function TransferPayloadCycle:to_transfer_payload(): (...: async.TransferValue)
+  return async.TransferValue.from_value(self)
+end
+
+function TransferPayloadCycle.from_transfer_payload(...: async.TransferValue): TransferPayloadCycle
+  return { marker = #... }
+end
+
+record TransferPayloadClosureCycle
+  local marker: integer
+end
+
+function TransferPayloadClosureCycle:to_transfer_payload(): (...: async.TransferValue)
+  return async.TransferValue.is_closure(function (): value return self end)
+end
+
+function TransferPayloadClosureCycle.from_transfer_payload(...: async.TransferValue): TransferPayloadClosureCycle
+  return { marker = #... }
+end
+
+record TransferPayloadToOnly
+  marker: integer
+end
+
+function TransferPayloadToOnly:to_transfer_payload(): (...: async.TransferValue)
+  return async.TransferValue.is_integer(self.marker)
+end
+
+record TransferPayloadFromOnly
+  marker: integer
+end
+
+function TransferPayloadFromOnly.from_transfer_payload(...: async.TransferValue): TransferPayloadFromOnly
+  return { marker = #... }
+end
+
+record TransferPayloadWrongKinds
+  marker: integer
+end
+
+function TransferPayloadWrongKinds.to_transfer_payload(): (...: async.TransferValue)
+  return
+end
+
+function TransferPayloadWrongKinds:from_transfer_payload(...: async.TransferValue): TransferPayloadWrongKinds
+  return self
+end
+
+record TransferPayloadFixedOutput
+  marker: integer
+end
+
+function TransferPayloadFixedOutput:to_transfer_payload(): async.TransferValue
+  return async.TransferValue.is_integer(self.marker)
+end
+
+function TransferPayloadFixedOutput.from_transfer_payload(...: async.TransferValue): TransferPayloadFixedOutput
+  return { marker = #... }
+end
+
+record TransferPayloadWrongTail
+  marker: integer
+end
+
+function TransferPayloadWrongTail:to_transfer_payload(): (...: value)
+  return self.marker
+end
+
+function TransferPayloadWrongTail.from_transfer_payload(...: async.TransferValue): TransferPayloadWrongTail
+  return { marker = #... }
+end
+
+record TransferPayloadFixedInput
+  marker: integer
+end
+
+function TransferPayloadFixedInput:to_transfer_payload(): (...: async.TransferValue)
+  return async.TransferValue.is_integer(self.marker)
+end
+
+function TransferPayloadFixedInput.from_transfer_payload(item: async.TransferValue): TransferPayloadFixedInput
+  return { marker = item:to_value() }
+end
+
+record TransferPayloadWrongReturn
+  marker: integer
+end
+
+function TransferPayloadWrongReturn:to_transfer_payload(): (...: async.TransferValue)
+  return async.TransferValue.is_integer(self.marker)
+end
+
+function TransferPayloadWrongReturn.from_transfer_payload(...: async.TransferValue): integer
+  return #...
+end
+
+record TransferPayloadPlain
+  marker: integer
+end
+
+union TransferPayloadPlainUnion
+  item(integer)
+end
+
+local function transfer_payload_error(action: function (): (), fragment: string)
+  local caught = false
+  do
+    action()
+  catch
+    caught = error is string and support.contains(error, fragment)
+  end
+  test.assert(caught, "missing transfer error containing: " .. fragment)
+end
+
+function test_transfer_payload_private_fields_empty_and_generic(_context: test.Context)
+  transfer_payload_new_calls = 0
+  transfer_payload_encode_calls = 0
+  transfer_payload_decode_calls = 0
+  local source: TransferPayloadRecord = { secret = 73 }
+  local packet = async.TransferValue.from_value(source)
+  test.assert(transfer_payload_encode_calls == 1 and transfer_payload_decode_calls == 0)
+  case packet
+  when is_record_payload(name, payload) then
+    test.assert(name == "async.tests.TransferPayloadRecord" and #payload == 4)
+  else raise "private record did not select custom payload hooks"
+  end
+  support.collect_garbage()
+  local restored: TransferPayloadRecord = packet:to_value()
+  test.assert(restored ~= source and restored.secret == 73)
+  test.assert(transfer_payload_decode_calls == 1 and transfer_payload_new_calls == 0,
+              "custom transfer invoked a constructor or repeated reconstruction")
+  local empty: TransferPayloadEmpty = { marker = -1 }
+  local empty_copy: TransferPayloadEmpty = async.TransferValue.from_value(empty):to_value()
+  test.assert(empty_copy.marker == 42)
+  local generic: TransferPayloadGeneric<|string|> = { item = "erased\0payload" }
+  local generic_copy: TransferPayloadGeneric<|string|> =
+    async.TransferValue.from_value(generic):to_value()
+  test.assert(generic_copy.item == generic.item)
+end
+
+function test_transfer_payload_rejects_malformed_hook_pairs(_context: test.Context)
+  local cases: {value} = {
+    TransferPayloadToOnly(1), TransferPayloadFromOnly(1), TransferPayloadWrongKinds(1),
+    TransferPayloadFixedOutput(1), TransferPayloadWrongTail(1),
+    TransferPayloadFixedInput(1), TransferPayloadWrongReturn(1)
+  }
+  for index = 1, #cases do
+    transfer_payload_error(function () async.TransferValue.from_value(cases[index]) end,
+                           "transfer:")
+  end
+  transfer_payload_error(function ()
+    async.TransferValue.is_record_payload("async.tests.TransferPayloadPlain", {}):to_value()
+  end, "record has no payload hooks")
+  transfer_payload_error(function ()
+    async.TransferValue.is_record_payload("missing.TransferPayloadRecord", {}):to_value()
+  end, "unknown record type")
+  transfer_payload_error(function ()
+    async.TransferValue.is_record_payload("async.tests.TransferPayloadPlainUnion", {}):to_value()
+  end, "nominal type is not a record")
+end
+
+function test_transfer_payload_reentrant_error_releases_pack_guard(_context: test.Context)
+  local source: TransferPayloadRetry = { fail = true }
+  transfer_payload_error(function () async.TransferValue.from_value(source) end,
+                         "transfer-hook-failure")
+  source.fail = false
+  local restored: TransferPayloadRetry = async.TransferValue.from_value(source):to_value()
+  test.assert(not restored.fail, "failed transfer retained its active-record guard")
+  local cyclic: TransferPayloadCycle = { marker = 1 }
+  transfer_payload_error(function () async.TransferValue.from_value(cyclic) end,
+                         "cyclic record payload")
+  transfer_payload_error(function () async.TransferValue.from_value(cyclic) end,
+                         "cyclic record payload")
+end
+
+function test_transfer_payload_explicit_policies_and_structural_fallback(_context: test.Context)
+  local chosen = async.TransferValue.is_string("chosen\0policy")
+  test.assert(async.TransferValue.from_value(chosen) == chosen,
+              "explicit TransferValue policy was reinterpreted")
+  test.assert(chosen:to_value() == "chosen\0policy")
+  test.assert(async.TransferValue.from_value(nil):to_value() == nil)
+  test.assert(async.TransferValue.from_value(false):to_value() == false)
+  case async.TransferValue.from_value(42.0)
+  when is_float(number) then test.assert(number == 42.0)
+  else raise "from_value changed an integral float into an integer"
+  end
+  local plain = TransferPayloadPlain(42)
+  local plain_packet = async.TransferValue.from_value(plain)
+  case plain_packet
+  when is_record(name, bytes) then
+    test.assert(name == "async.tests.TransferPayloadPlain")
+    test.assert(bytes == transfer_protobuf.serialize(plain))
+  else raise "record without hooks skipped structural protobuf"
+  end
+  local plain_copy: TransferPayloadPlain = plain_packet:to_value()
+  test.assert(plain_copy ~= plain and plain_copy.marker == 42)
+  local message = TransferPayloadPlainUnion.item(73)
+  local union_copy: TransferPayloadPlainUnion = async.TransferValue.from_value(message):to_value()
+  case union_copy
+  when item(number) then test.assert(number == 73)
+  end
+  local closure = function (): integer return 91 end
+  local closure_packet = async.TransferValue.from_value(closure)
+  test.assert(closure_packet:to_value() == closure, "local closure policy changed callable identity")
+  local storage: owned int[] = foreign int.new_array(1)
+  storage[0] = 117
+  local pointer_packet = async.TransferValue.is_pointer(storage as foreign *void)
+  case transfer_reflect.inspect(pointer_packet:to_value())
+  when is_raw_pointer(pointer) then test.assert(pointer == storage as foreign *void)
+  else raise "borrowed pointer policy did not recover a raw pointer"
+  end
+  local native: function (...: value): (...: value) =
+    async.TransferValue.is_function(receiver_test_callback):to_value()
+  test.assert(native(23) == 23)
+  transfer_payload_error(function () async.TransferValue.is_closure(42):to_value() end,
+                         "not a Titan closure")
+  transfer_payload_error(function () async.TransferValue.from_value({1, 2, 3}) end,
+                         "unsupported value")
+end
+
+function test_receiver_copies_custom_record_payload_and_retains_policy(_context: test.Context)
+  runtime_test.run(function ()
+    local receiver = async.receiver()
+    defer receiver:close()
+    local source: TransferPayloadRecord = { secret = 211 }
+    local packet = async.TransferValue.from_value(source)
+    async.send(receiver:handle(), packet)
+    source.secret = -1
+    case packet
+    when is_record_payload(_, payload) then
+      payload[2] = async.TransferValue.is_integer(-2)
+    end
+    support.collect_garbage()
+    local delivered = receiver:wait()
+    case delivered
+    when is_record_payload(name, payload) then
+      test.assert(name == "async.tests.TransferPayloadRecord" and #payload == 4)
+    else raise "Receiver unwrapped the custom record policy"
+    end
+    local restored: TransferPayloadRecord = delivered:to_value()
+    test.assert(restored.secret == 211, "Receiver retained source payload storage")
+  end)
+end
+
+function test_receiver_rejects_custom_record_closure_cycle(_context: test.Context)
+  runtime_test.run(function ()
+    local receiver = async.receiver()
+    defer receiver:close()
+    local source: TransferPayloadClosureCycle = { marker = 1 }
+    local packet = async.TransferValue.from_value(source)
+    transfer_payload_error(function () async.send(receiver:handle(), packet) end,
+                           "cyclic")
+    async.send(receiver:handle(), async.TransferValue.is_integer(42))
+    test.assert(receiver:wait():to_value() == 42,
+                "rejected payload poisoned a reusable Receiver")
+  end)
+end
+
+function test_receiver_preserves_nested_native_payload_policies(_context: test.Context)
+  runtime_test.run(function ()
+    local state = ffi.luaL_newstate()
+    test.assert(state ~= nil, "could not allocate borrowed payload state")
+    defer ffi.lua_close(state)
+    local memory: owned int[] = foreign int.new_array(1)
+    memory[0] = 137
+    local null_pointer: foreign *void = nil
+    local null_state: foreign *lua_State = nil
+    local callback: foreign function (*lua_State): int = receiver_test_callback
+    local inner: TransferPayloadNative = { policies = {
+      async.TransferValue.is_pointer(null_pointer),
+      async.TransferValue.is_pointer(memory as foreign *void),
+      async.TransferValue.is_lua_state(null_state),
+      async.TransferValue.is_lua_state(state),
+      async.TransferValue.is_function(callback)
+    } }
+    local outer: TransferPayloadNative = {
+      policies = { async.TransferValue.from_value(inner) }
+    }
+    local receiver = async.receiver()
+    defer receiver:close()
+    async.send(receiver:handle(), async.TransferValue.from_value(outer))
+    support.collect_garbage()
+    local outer_copy: TransferPayloadNative = receiver:wait():to_value()
+    test.assert(#outer_copy.policies == 1)
+    local inner_copy: TransferPayloadNative = outer_copy.policies[1]:to_value()
+    local policies = inner_copy.policies
+    test.assert(#policies == 5)
+    case policies[1]
+    when is_pointer(pointer) then test.assert(pointer == nil)
+    else raise "nested NULL pointer policy changed variant" end
+    case policies[2]
+    when is_pointer(pointer) then test.assert(pointer == memory as foreign *void)
+    else raise "nested pointer policy changed variant" end
+    case policies[3]
+    when is_lua_state(pointer) then test.assert(pointer == nil)
+    else raise "nested NULL state policy changed variant" end
+    case policies[4]
+    when is_lua_state(pointer) then test.assert(pointer == state)
+    else raise "nested state policy changed variant" end
+    case policies[5]
+    when is_function(entry) then test.assert(entry == callback)
+    else raise "nested native function policy changed variant" end
+    local native: function (...: value): (...: value) = policies[5]:to_value()
+    test.assert(native(139) == 139, "nested native function lost callability")
+    test.assert(memory[0] == 137, "nested pointer policy changed borrowed storage")
+  end)
+end

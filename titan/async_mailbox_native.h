@@ -19,7 +19,8 @@ typedef enum titan_async_message_kind {
   TITAN_ASYNC_MESSAGE_POINTER,
   TITAN_ASYNC_MESSAGE_RECORD,
   TITAN_ASYNC_MESSAGE_UNION,
-  TITAN_ASYNC_MESSAGE_CLOSURE
+  TITAN_ASYNC_MESSAGE_CLOSURE,
+  TITAN_ASYNC_MESSAGE_RECORD_PAYLOAD
 } titan_async_message_kind;
 
 typedef struct titan_async_message {
@@ -34,7 +35,7 @@ typedef struct titan_async_message {
   lua_State *state;
   lua_CFunction function;
   void *pointer;
-  TitanTransferGraph *closure;
+  TitanTransferGraph *graph;
 } titan_async_message;
 
 typedef struct titan_async_mailbox {

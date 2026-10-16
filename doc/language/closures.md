@@ -43,18 +43,27 @@ Mutable captures become new cells. When several nested closures share a cell
 inside one transferred closure graph, they continue sharing the corresponding
 destination cell. The source cell remains independent, and separate transfer
 values form independent snapshots. Bound concrete methods copy their receiver
-under the ordinary nominal transfer rules. A callable adjustment retains its
-source callable and target signature.
+under the same custom-hook or protobuf rules as other nominal captures. A
+callable adjustment retains its source callable and target signature.
 
 Every visited capture must be transferable. Cycles, including a recursive
 closure that captures itself through a mutable variable, raise during transfer.
-Arrays, Maps, Interfaces, owned C storage, and non-public nominal data are not
-transferable captures. This restriction applies to bound Interface methods
+Arrays, Maps, Interfaces, owned C storage, and local nominal types are not
+transferable captures. A public record with private fields may supply the
+[custom record transfer hooks](async-io.md#custom-record-transfer); other
+records and unions follow the public protobuf rules. A captured `TransferValue`
+remains a union value with copied policies, including any nested custom record
+packets or closure graphs. It is not implicitly unwrapped into its semantic
+value. The Interface restriction applies to bound Interface methods
 because their captured receiver is an Interface. Captured native pointers
 remain borrowed addresses with caller-managed lifetime. A captured pointer to
 Lua-managed `Udata` is rejected, including a present optional pointer; an absent
 optional remains transferable as `nil`. See
 [Transfer values](async-io.md#transfer-values) for the complete value policy.
+
+Custom record payloads initialize their defining module in the destination.
+Ordinary protobuf nominals require that module to be initialized by imports or
+explicit bootstrap before decoding.
 
 ## Syntax
 

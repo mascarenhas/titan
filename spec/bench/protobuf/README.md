@@ -23,6 +23,11 @@ python3 spec/bench/protobuf/analyze.py /absolute/new-results
 python3 spec/bench/protobuf/measure.py recheck \
   --output /absolute/new-results --cpu 2 \
   --quiet-note /absolute/recheck-state.txt
+# Build a second consumer with exactly the same benchmark source, then compare.
+python3 spec/bench/protobuf/compare.py \
+  --before /absolute/new-results --after /absolute/candidate-results \
+  --output /absolute/new-comparison --cpu 2 \
+  --quiet-note /absolute/comparison-state.txt
 ```
 
 Choose an allowed CPU appropriate for the host. `build` requires a fresh output
@@ -33,6 +38,13 @@ records hardware, CPU affinity, process names/load, raw repetitions, and the
 quiet-state note. It refuses to overwrite a previous measurement matrix.
 `recheck` preserves the same executable and fixtures, records five fresh-process
 500 ms batches by default, and saves a separate `recheck.json`.
+`compare` requires the baseline's `summary.json` and two completed consumer
+builds. It verifies executable and consumer-source hashes plus independent
+fixture bytes, then runs five alternating fresh-process pairs with equal
+operation counts. The baseline timings select counts targeting 500 ms of CPU;
+candidate durations vary with its performance. It also samples four decoder
+shapes in separate control/sampled pairs. Its fresh output directory retains
+every pair, medians, ranges, ratios, and resolved profiles.
 
 The eleven shapes cover 4/16/64 integer fields, 16/4,096-byte strings, nested
 records, an active union payload, 8/256 integers, and 8/128 four-field records
@@ -62,7 +74,7 @@ updates `sig_atomic_t` counters. Symbol/line resolution happens after timing.
 counts, and exclusive categories. Every sampled address, inline chain, and
 classification is retained in the `*.resolved.json` files. The categories keep
 direct reflected APIs/generated projection and construction separate from
-descriptor resolution, generic codec dispatch/traversal, repeated wire-field
+descriptor resolution, generic codec dispatch/traversal, wire-field
 lookup, wire parsing/writing, buffers, and shared runtime/allocator/GC work.
 
 Exclusive samples are **not** an inclusive attribution of all costs caused by
@@ -70,9 +82,10 @@ reflection. An allocator or collector interrupted inside a reflected call still
 lands in the shared bucket; generated construction includes necessary target
 object work. Likewise, generic traversal contains validation and loop work
 which specialization would not eliminate completely. A percentage therefore
-does not directly predict a specialization speedup. The width sweep also
-exposes the decoder's repeated linear `Message:last`/`merged` scans, which are
-independent of reflected-field access.
+does not directly predict a specialization speedup. The baseline width sweep
+exposed repeated linear `Message:last`/`merged` scans, independently of
+reflected-field access. The paired follow-up compares that implementation with
+a sparse field index built only when a multi-field message needs lookup.
 
 The [issue 242 report](../../../doc/implementation/protobuf-performance-results.md)
 records measured results and interpretation.

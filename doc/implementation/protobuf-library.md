@@ -71,6 +71,17 @@ selection resets the accumulated payload when a different recognized variant
 appears; repeated occurrences of the current variant merge. Unknown fields do
 not change the selected variant.
 
+Each parsed message keeps its ordered field Array. Empty and single-field
+messages answer lookups directly. The first lookup in a multi-field message
+builds a sparse Map from field number to the last Array index, linking each
+field to the previous occurrence of that number. Later scalar lookups use the
+Map; message merging follows only matching links and restores their original
+encounter order. A single occurrence returns its bytes directly. The Map grows
+with encountered field numbers, never the largest numeric tag. Ordered-only
+Array and union readers allocate no index. This removes the previous full scan
+for every schema field while preserving validation of every merged occurrence's
+wire kind and encounter order for Array slots and oneof replacement.
+
 Schema-directed decoding requires each non-optional field, validates the wire
 kind, and constructs children before calling reflected construction for the
 parent. No partially constructed value is published after a failure. Type
@@ -98,6 +109,11 @@ fields, because nil positions and nested Arrays need explicit slots. Titan
 strings use protobuf bytes so arbitrary byte sequences round-trip.
 
 ## Integration and verification
+
+Custom record transfer hooks live in `async`, before its structural protobuf
+fallback. They do not change `serialize` or this codec's public-field policy.
+Their native packet graph preserves nested `TransferValue` policies separately
+from protobuf bytes.
 
 The Unix and Windows standard providers include `titan.protobuf`, its Lua shim,
 and its native tests in the shared inventory. Both `titan.lua` and `titan.async`

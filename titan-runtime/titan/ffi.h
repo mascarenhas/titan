@@ -31,14 +31,18 @@ TITAN_RUNTIME_FUNC TitanModuleSymbols titan_module_preload_symbols(lua_State *L,
 TITAN_RUNTIME_FUNC void titan_module_preload(lua_State *L, const char *name,
     size_t length, lua_CFunction loader, TitanModuleSymbols symbols);
 
-/* Native-owned closure transfer graphs. The caller owns cleanup before encode
-** can raise. Encode preserves the successful entry top; decode pushes one
+/* Native-owned closure and transfer-policy graphs. The caller owns cleanup
+** before encode can raise. Encode preserves the successful entry top; decode pushes one
 ** rooted destination value. Both require an owning-state protected boundary. */
 typedef struct TitanTransferGraph TitanTransferGraph;
 TITAN_RUNTIME_FUNC TitanTransferGraph *titan_transfer_new(void);
 TITAN_RUNTIME_FUNC void titan_transfer_encode(lua_State *L,
     TitanTransferGraph *graph, int index);
 TITAN_RUNTIME_FUNC void titan_transfer_decode(lua_State *L,
+    const TitanTransferGraph *graph);
+TITAN_RUNTIME_FUNC void titan_transfer_encode_policy(lua_State *L,
+    TitanTransferGraph *graph, int index);
+TITAN_RUNTIME_FUNC void titan_transfer_decode_policy(lua_State *L,
     const TitanTransferGraph *graph);
 TITAN_RUNTIME_FUNC void titan_transfer_free(TitanTransferGraph *graph);
 TITAN_RUNTIME_FUNC int titan_transfer_is_closure(lua_State *L, int index);

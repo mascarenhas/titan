@@ -416,11 +416,11 @@ local function LuaCall:finish()
   -- run_foreign does not unwind its caller before accepted work completes,
   -- including on cancellation. This is the only release of the reservation.
   for index = 0, self.packet.nargs as integer - 1 do
-    ffi.titan_transfer_free(self.inputs[index].closure)
-    self.inputs[index].closure = nil
+    ffi.titan_transfer_free(self.inputs[index].graph)
+    self.inputs[index].graph = nil
   end
   for index = 0, self.packet.allocated_results as integer - 1 do
-    ffi.titan_transfer_free(self.packet.results[index].closure)
+    ffi.titan_transfer_free(self.packet.results[index].graph)
   end
   ffi.free(self.packet.results)
   self.packet.results = nil
@@ -439,7 +439,7 @@ local function LuaCall:prepare()
   self.packet.results = nil
   self.packet.allocated_results = 0
   for index = 0, #self.arguments - 1 do
-    self.inputs[index].closure = nil
+    self.inputs[index].graph = nil
   end
   self.packet.nargs = #self.arguments
   for index = 1, #self.arguments do
@@ -493,9 +493,20 @@ local function LuaCall:prepare()
         raise "cannot transfer a value that is not a Titan closure"
       end
       input.kind = ffi.TITAN_LUA_CLOSURE
-      input.closure = ffi.titan_transfer_new()
-      if not input.closure then raise "cannot allocate independent-state closure transfer" end
-      ffi.titan_transfer_encode(L, input.closure, -1)
+      input.graph = ffi.titan_transfer_new()
+      if not input.graph then raise "cannot allocate independent-state closure transfer" end
+      ffi.titan_transfer_encode(L, input.graph, -1)
+    when is_record_payload(_name, _payload) then
+      local top = ffi.lua_gettop(L)
+      defer ffi.lua_settop(L, top)
+      if ffi.lua_checkstack(L, 1) == 0 then
+        raise "cannot reserve Lua stack for independent-state record payload"
+      end
+      ffi.lua_pushtvalue(L, self.arguments[index])
+      input.kind = ffi.TITAN_LUA_RECORD_PAYLOAD
+      input.graph = ffi.titan_transfer_new()
+      if not input.graph then raise "cannot allocate independent-state record payload transfer" end
+      ffi.titan_transfer_encode_policy(L, input.graph, -1)
     end
   end
 end
@@ -534,9 +545,17 @@ local function LuaCall:values(): {async.TransferValue}
     elseif item.kind == ffi.TITAN_LUA_CLOSURE then
       local top = ffi.lua_gettop(L)
       defer ffi.lua_settop(L, top)
-      ffi.titan_transfer_decode(L, item.closure)
+      ffi.titan_transfer_decode(L, item.graph)
       local closure: value = ffi.lua_totvalue(L, -1)
       results[index] = async.TransferValue.is_closure(closure)
+    elseif item.kind == ffi.TITAN_LUA_RECORD_PAYLOAD then
+      local top = ffi.lua_gettop(L)
+      defer ffi.lua_settop(L, top)
+      ffi.titan_transfer_decode_policy(L, item.graph)
+      local carrier: value = ffi.lua_totvalue(L, -1)
+      results[index] = carrier as async.TransferValue
+    else
+      raise "invalid independent Lua result kind"
     end
   end
   return results

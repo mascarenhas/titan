@@ -132,16 +132,35 @@ adjustment-wrapper structure. Unsupported captures and active graph cycles
 raise during encoding. Nominal capture reconstruction retains the ordinary
 initialized-type requirement after the closure owner's module initialization.
 
-Other Titan records and unions are encoded by the origin state's
-`titan.protobuf.serialize` under the existing protected call. The static Lua
-module dependency makes protobuf's zero-upvalue native loader part of the
-new-state preload snapshot. The worker loads that provider with `luaL_requiref`
-through the registry's preload entry; user replacement of global `require`
-does not change the transfer operation. Each encoded result slot is replaced
-with a private two-string table rooting the name and bytes. Returning the
-original result count keeps these temporary roots private while retaining
-them through host copying. Serialization failure rejects the complete result
-run, including an unsupported nominal in an ignored tail.
+Other Titan records and unions pass through the origin state's
+`async.TransferValue.from_value` under the existing protected call. Exact public
+record hooks take precedence over structural protobuf encoding; their private
+fields need not be serializable. Hook signatures and calls use ordinary public
+reflection descriptors, with no reserved compiler names or new generated
+record manifest. The static imports make the async/protobuf native loaders
+available to new states. The worker loads them with `luaL_requiref` through the
+registry's preload entries, independently of global `require`. The resulting
+transfer carrier replaces its original result slot and roots all name/data
+strings until host copying finishes. Returning the original result count keeps
+these temporary roots private. Conversion failure rejects the complete result
+run, including an unsupported nominal or failed hook in an ignored tail.
+
+Custom `is_record_payload` carriers use `titan_transfer_encode_policy` and
+`titan_transfer_decode_policy`. The native graph retains the ordered payload
+as policies: a pointer, state pointer, closure, or nested record packet remains
+its corresponding `TransferValue` variant when supplied to the reconstruction
+hook. An explicit captured `TransferValue` has a semantic wrapper node so a
+closure capture keeps the union value instead of unwrapping it. Custom records
+captured directly are reconstructed through `TransferValue:to_value()`.
+
+For a custom packet, encoding obtains the registered nominal's declaring module
+from `TITAN_MT_MOD` and retains its existing immutable `TitanTransferModule`
+capability. Decoding initializes and verifies that exact provider before
+creating the destination carrier. It never guesses a module boundary from a
+dotted record name. Incoming custom arguments then call `to_value()` before the
+chunk runs; returned values remain carriers for explicit host reconstruction.
+Native graph cleanup owns all partial allocations, but application hooks remain
+responsible for safe handle detachment/adoption and any side-effect rollback.
 
 Record/union arguments carry borrowed host name/data bytes in the native
 packet. The worker copies both strings and invokes
@@ -149,7 +168,9 @@ packet. The worker copies both strings and invokes
 an already initialized destination nominal of the matching kind. Fresh values
 belong only to the destination collector. No source GC object, descriptor, or
 module instance crosses the boundary; native pointers inside an otherwise
-supported graph keep their borrowed-address semantics.
+supported graph keep their borrowed-address semantics. The custom-record policy
+above deliberately adds native module initialization to its own path; ordinary
+protobuf packets retain their explicit initialized-type requirement.
 
 State pointers and ordinary pointers become lightuserdata when passed as
 arguments. Creating a thread-tagged `TValue` from a foreign state's pointer
@@ -193,7 +214,7 @@ The stack transaction has these ownership phases:
 | Protected loading and argument copy | Root the compiled chunk, copied input strings, and decoded nominal arguments in the independent state; keep host input owners live while their bytes are borrowed. |
 | Protected chunk call and result encoding | Execute and serialize only values belonging to the independent state; preserve its result roots or error object. |
 | Host conversion | Read rooted result slots after native execution stops; allocate host strings and `async.TransferValue` wrappers on the host thread. |
-| Deferred cleanup | Free every input/output closure graph and the native result buffer, restore the independent stack to its saved entry height, and release the reservation after success, load/runtime/conversion error, queue rejection, or cancellation. |
+| Deferred cleanup | Free every input/output transfer graph and the native result buffer, restore the independent stack to its saved entry height, and release the reservation after success, load/runtime/conversion error, queue rejection, or cancellation. |
 
 Stack pointers cannot survive an operation that grows that stack. Result
 addresses used for copying are derived after native execution finishes and

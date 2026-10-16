@@ -289,6 +289,7 @@ union TransferValue
   is_record(name: string, data: string)
   is_union(name: string, data: string)
   is_closure(value: value)
+  is_record_payload(name: string, payload: {TransferValue})
 end
 ```
 
@@ -318,16 +319,19 @@ Mutable captured variables become fresh destination cells, preserving aliases
 between captures inside one closure graph. Separate transfer values are
 independent snapshots. Source and destination cells never share GC storage.
 Module globals use the destination module's state and are not copied.
-A captured `TransferValue` remains that union value; its variant is not
-unwrapped as a top-level transfer policy. Its selected payload must therefore
-satisfy the ordinary nominal serialization rules.
+A captured `TransferValue` remains that union value. Its selected policy is
+preserved while its payload is copied or borrowed recursively, including custom
+record payloads and closures.
 
 Capture cycles, direct captures of unsupported managed values such as Maps,
-Arrays, Interfaces, and owned C storage, and records/unions that fail the public
-protobuf rules raise while preparing the transfer. Arrays inside a supported
-nominal graph follow the protobuf rules and can be copied. Captured nominal types must be initialized
-by the closure owner's imports or an earlier explicit bootstrap. Native pointer
-captures keep their borrowed-address lifetime rules. The `value` parameter
+Arrays, Interfaces, and owned C storage, and records/unions that fail their
+transfer policy raise while preparing the transfer. A record's custom payload
+hooks take precedence over structural protobuf encoding, including when the
+record is captured by a closure. Arrays inside a supported nominal graph follow
+the protobuf rules and can be copied. Ordinary protobuf nominal captures require
+their types to be initialized by the closure owner's imports or an earlier
+explicit bootstrap; custom record payloads initialize their own defining module.
+Native pointer captures keep their borrowed-address lifetime rules. The `value` parameter
 preserves the original closure without a function-type adjustment; passing a
 non-Titan closure or any non-function value raises at the transfer boundary.
 
@@ -336,6 +340,68 @@ accept and return this union. That API specifies how Lua values map to these
 variants, including its rejection of tables, Lua closures, and ordinary C closures
 with upvalues. Import `async` to construct or annotate transfer values; `titan.lua`
 does not declare a second union or an alias.
+
+### Custom record transfer
+
+```text
+function TransferValue.from_value(candidate: value): TransferValue
+function TransferValue:to_value(): value
+```
+
+`from_value` preserves an existing `TransferValue` unchanged. Otherwise it
+selects the scalar, string, borrowed pointer/state/native-function, Titan
+closure, or public nominal policy for the supplied value. Integer and float
+tags remain distinct. Lua C closures with upvalues, Lua closures, containers,
+Interfaces, and owned foreign storage are not accepted by this helper. Ordinary
+Lua userdata uses a borrowed payload address, and a Lua thread uses a borrowed
+state address; retain their source owners for the whole borrow.
+
+A public record can opt into a custom protocol with these exact public member
+signatures:
+
+```text
+function Record:to_transfer_payload(): (...: async.TransferValue)
+function Record.from_transfer_payload(...: async.TransferValue): Record
+```
+
+The instance method has no arguments beyond its receiver and returns only a
+flexible `TransferValue` tail. The static function accepts only a variadic
+`TransferValue` tail and returns exactly the same record type. The signatures
+are checked against public reflection metadata at transfer time, using its
+ordinary erased generic types. Missing counterparts, wrong member kinds, or
+different parameter/result shapes raise instead of falling back to protobuf.
+Private methods do not opt into the protocol. The record may have private
+fields because its hooks choose how to represent and reconstruct them.
+
+`from_value` calls `to_transfer_payload` once and stores the qualified record
+name and ordered payload in `is_record_payload`. Zero results and explicit
+`is_nil()` entries are preserved. Each entry remains an explicit transfer
+policy, so a hook can borrow a pointer, copy a string or nominal, or transfer a
+closure without losing that choice. A native transfer boundary copies the
+complete payload graph and initializes its record's owning module in the
+destination state. A receiver returns the carrier; `to_value` invokes
+`from_transfer_payload` with its ordered variants and verifies the returned
+record's identity. Calling `to_value` repeatedly invokes reconstruction each
+time. A carrier constructed manually must name a registered public record
+with valid hooks.
+
+Records without hooks and unions keep the structural protobuf policy.
+`to_value` decodes those packets using the current state's initialized nominal
+descriptors. For scalars, borrowed addresses, and closures it exposes the
+selected local value. It does not snapshot a closure until that policy crosses
+a transfer boundary.
+
+Both hooks must run synchronously and must not yield. A recursive attempt to
+pack the same active record raises; cyclic native payload/capture graphs are
+also rejected. Errors propagate through the owning transfer operation and
+release temporary transport storage. Hook side effects are not rolled back.
+
+The programmer owns safe handoff of native resources. For an OS handle or
+socket wrapper, detach or clear the origin wrapper before it can be collected
+and close the transferred handle accidentally, then establish the receiving
+wrapper's ownership explicitly. The transport copies or borrows the chosen
+payload; it does not move handles automatically, prevent double-close, or undo
+ownership changes when a later hook or transfer fails.
 
 ## Cross-state receivers
 

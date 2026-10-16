@@ -6,6 +6,7 @@ local record WireField
   const wire: integer
   const bits: integer
   const bytes: string
+  previous: integer
 end
 
 local record WireReader
@@ -15,6 +16,7 @@ end
 
 local record Message
   const fields: {WireField}
+  last_by_number: {integer: integer}?
 end
 
 local function WireReader:varint(): integer
@@ -49,21 +51,21 @@ local function WireReader:key(): (integer, integer)
 end
 
 local function WireReader:field(number: integer, wire: integer, depth: integer): WireField
-  if wire == 0 then return WireField(number, wire, self:varint(), "") end
-  if wire == 1 then return WireField(number, wire, 0, self:take(8)) end
+  if wire == 0 then return WireField(number, wire, self:varint(), "", 0) end
+  if wire == 1 then return WireField(number, wire, 0, self:take(8), 0) end
   if wire == 2 then
     local count = self:varint()
     if count < 0 or count > 2147483647 then raise "protobuf: invalid byte length" end
-    return WireField(number, wire, 0, self:take(count))
+    return WireField(number, wire, 0, self:take(count), 0)
   end
-  if wire == 5 then return WireField(number, wire, 0, self:take(4)) end
+  if wire == 5 then return WireField(number, wire, 0, self:take(4), 0) end
   if wire == 3 then
     require_depth(depth)
     while self.position <= #self.source do
       local nested_number, nested_wire = self:key()
       if nested_wire == 4 then
         if nested_number ~= number then raise "protobuf: mismatched end group" end
-        return WireField(number, wire, 0, "")
+        return WireField(number, wire, 0, "", 0)
       end
       self:field(nested_number, nested_wire, depth + 1)
     end
@@ -79,16 +81,35 @@ local function read_message(bytes: string): Message
     local number, wire = reader:key()
     fields[#fields + 1] = reader:field(number, wire, 1)
   end
-  return Message(fields)
+  return Message(fields, nil)
+end
+
+local function Message:last_index(number: integer): integer
+  local count = #self.fields
+  if count == 0 then return 0 end
+  if count == 1 then
+    if self.fields[1].number == number then return 1 end
+    return 0
+  end
+  local last_by_number? = self.last_by_number
+  if last_by_number == nil then
+    -- Ordered-only readers need no index; grow with encountered numeric tags.
+    local built: {integer: integer} = {}
+    for index = 1, count do
+      local field = self.fields[index]
+      field.previous = built[field.number] or 0
+      built[field.number] = index
+    end
+    self.last_by_number = built
+    last_by_number = built
+  end
+  return last_by_number[number] or 0
 end
 
 local function Message:last(number: integer): WireField?
-  local result: WireField?
-  for index = 1, #self.fields do
-    local field = self.fields[index]
-    if field.number == number then result = field end
-  end
-  return result
+  local index = self:last_index(number)
+  if index == 0 then return nil end
+  return self.fields[index]
 end
 
 local function require_wire(field: WireField, expected: integer)
@@ -98,13 +119,22 @@ end
 -- Singular embedded messages merge across repeated occurrences. Scalars use
 -- the final occurrence, as required by the Protocol Buffers wire contract.
 local function Message:merged(number: integer): string
+  local index = self:last_index(number)
+  if index == 0 then return "" end
+  local field = self.fields[index]
+  require_wire(field, 2)
+  if field.previous == 0 then return field.bytes end
+  -- Walk only this field's occurrences, then restore wire encounter order.
+  local chunks: {string} = {}
+  while index ~= 0 do
+    field = self.fields[index]
+    require_wire(field, 2)
+    chunks[#chunks + 1] = field.bytes
+    index = field.previous
+  end
   local output = string.writer()
-  for index = 1, #self.fields do
-    local field = self.fields[index]
-    if field.number == number then
-      require_wire(field, 2)
-      output:write(field.bytes)
-    end
+  for part = #chunks, 1, -1 do
+    output:write(chunks[part])
   end
   return output:drain()
 end

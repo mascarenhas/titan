@@ -353,8 +353,8 @@ adapter has an entry containing its native/strict/coercive entries, capture
 policies, and generated projection/reconstruction callbacks. The manifest also
 contains the module name, normal initializer, and physical provider's symbol
 resolver identity. A referenced local function has the same transfer capability
-as an exported function; visibility of the code declaration does not make its
-captured private nominal data serializable.
+as an exported function. Captured nominals still follow the public protobuf or
+custom-record transfer policy; local nominal types remain ineligible.
 
 Projection visits actual capture values, never module userdata or a mutable
 cell's bytes as if they were a Lua value. The checker records capture conversion
@@ -395,6 +395,16 @@ prefix, shared boxes, source coercive entry, and penultimate source link without
 serializing private wrapper layout twice. The graph rejects capture cycles and
 uses one owned native allocation arena; see [Lua-state transfers](lua-library.md)
 and [Receiver ownership](libuv-runtime.md#cross-state-receiver-ownership).
+
+The same arena supports custom record payloads and explicit transfer policies.
+Custom records carry their qualified name, ordered policy children, and the
+defining module capability recovered from `TITAN_MT_MOD`. A captured record is
+reconstructed through its hooks; a captured `TransferValue` uses a wrapper node
+to retain the union and its selected policy. Native pointer, Lua-state, and
+C-function policy variants use the existing `TITAN_MT_CONSTRUCT` projection
+callback with a rooted const Array and destination module. This preserves the
+ordinary rule that Lua-facing constructors cannot implicitly coerce a dynamic
+value to a foreign pointer.
 
 Titan's normal native loader and generated Lua shims retain provider images for
 the process lifetime, so a transferred closure remains valid after its source

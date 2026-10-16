@@ -19,7 +19,8 @@ typedef enum titan_lua_kind {
   TITAN_LUA_POINTER,
   TITAN_LUA_RECORD,
   TITAN_LUA_UNION,
-  TITAN_LUA_CLOSURE
+  TITAN_LUA_CLOSURE,
+  TITAN_LUA_RECORD_PAYLOAD
 } titan_lua_kind;
 
 typedef struct titan_lua_value {
@@ -33,7 +34,7 @@ typedef struct titan_lua_value {
   lua_State *state;
   lua_CFunction function;
   void *pointer;
-  TitanTransferGraph *closure;
+  TitanTransferGraph *graph;
 } titan_lua_value;
 
 typedef struct titan_lua_preload {

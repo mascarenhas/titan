@@ -140,6 +140,11 @@ serialize eligible returned records and unions; an explicitly returned
 `TransferValue` takes precedence over this classification. Receiver messages
 copy both strings into their native FIFO node.
 
+Records with the [custom transfer-hook pair](async-io.md#custom-record-transfer)
+use an `is_record_payload` carrier instead during automatic transfer. Those
+hooks are an async transfer protocol; calling `protobuf.serialize` directly
+continues to apply the structural public-data rules in this chapter.
+
 Before passing a serialized nominal as a `Lua:run` or `run_async` argument,
 initialize its defining module in that state. Argument decoding happens before
 the submitted chunk runs, so requiring the module inside that same chunk is

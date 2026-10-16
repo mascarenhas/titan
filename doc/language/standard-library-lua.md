@@ -91,12 +91,32 @@ cross the independent-state boundary:
 | `is_record(name, data)` | a fresh record decoded from protobuf bytes | a public record serialized with its fully qualified name |
 | `is_union(name, data)` | a fresh union decoded from protobuf bytes | a public union serialized with its fully qualified name |
 | `is_closure(value)` | a reconstructed Titan closure with copied captures | a Titan closure, including an adjusted closure or bound method |
+| `is_record_payload(name, payload)` | a record reconstructed by its static transfer hook | a public record with the custom transfer-hook pair |
 
 A result that is already an origin-state `async.TransferValue` uses that
 variant's policy. For example, returning `TransferValue.is_string(bytes)`
 copies those bytes, and returning `TransferValue.is_record(name, data)` carries
 that existing serialized payload without serializing the wrapper. Pointer and
-state variants preserve their explicitly selected kind.
+state variants preserve their explicitly selected kind. Custom record payloads
+likewise retain their supplied name and ordered `TransferValue` entries.
+
+Public records with the exact synchronous
+[`to_transfer_payload` / `from_transfer_payload` pair](async-io.md#custom-record-transfer)
+use that protocol before structural protobuf encoding. Their fields may be
+private. The returned `is_record_payload` is an inspectable packet;
+`packet:to_value()` invokes the current state's reconstruction hook. Incoming
+custom-record arguments reconstruct before the chunk runs. Their native packet
+carries the source type's existing module capability, so transfer initializes
+and verifies that exact provider in the destination even without a preload
+entry or global `require`. It does not infer a module name from the record's
+dotted name. Nested payload entries remain `TransferValue` variants for the
+hook to interpret.
+
+The programmer owns native resource handoff inside these hooks. For example,
+clear or detach an origin wrapper's close authority before its collection could
+close the socket or file descriptor being passed. Transport copies payloads and
+borrows explicit native tokens; it neither moves native ownership automatically
+nor rolls back hook side effects if conversion or message admission later fails.
 
 Titan closures transfer automatically when returned directly. Their owning
 modules are initialized in the receiving state before reconstruction, even
@@ -109,12 +129,13 @@ cycles raise in the origin. The returned `is_closure` contains a callable
 owned by the caller's collector; it remains valid after the independent state
 closes, subject to the lifetime of any borrowed native pointers it captures.
 
-Ordinary public records and unions are serialized automatically through
+Public records without custom transfer hooks, and public unions, are serialized through
 [`protobuf.serialize`](standard-library-protobuf.md). All record fields and
 union variants must be public, and the encountered value graph must contain
 only supported data and no cycles. Unsupported nominal values raise; they do
 not silently become borrowed addresses. The caller receives the nominal name
-and wire bytes and may decode them with `protobuf.deserialize_nominal`.
+and wire bytes and may decode them with `TransferValue:to_value()` or
+`protobuf.deserialize_nominal`.
 Incoming record/union arguments are decoded automatically before the chunk
 runs. Their types must already be initialized in that independent state;
 bootstrap with a preceding call that loads the defining module. Type lookup

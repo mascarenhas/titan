@@ -15,6 +15,7 @@ local uv = import "titan.uv"
 local coroutine = import "titan.coroutine"
 local gc = import "titan.gc"
 local string = import "titan.string"
+local reflect = import "titan.reflect"
 -- Closure capture graphs can contain public nominals even in async-only apps.
 local protobuf = import "titan.protobuf"
 
@@ -36,6 +37,169 @@ union TransferValue
   is_record(name: string, data: string)
   is_union(name: string, data: string)
   is_closure(value: value)
+  is_record_payload(name: string, payload: {TransferValue})
+end
+
+local record RecordTransferHooks
+  const encode: reflect.MethodType
+  const decode: reflect.StaticFunctionType
+end
+
+local transfer_active_records: {value: boolean} = {}
+
+local function transfer_named_type(descriptor: reflect.Type?, name: string): boolean
+  if descriptor == nil then return false end
+  case descriptor
+  when is_named(named) then return named.name == name
+  when is_record(record_type) then return record_type.name == name
+  when is_union(union_type) then return union_type.name == name
+  else return false
+  end
+end
+
+local function record_transfer_hooks(descriptor: reflect.RecordType): RecordTransferHooks?
+  local encode: reflect.MethodType? = nil
+  local decode: reflect.StaticFunctionType? = nil
+  for index = 1, #descriptor.methods do
+    local method = descriptor.methods[index]
+    if method.name == "to_transfer_payload" then
+      encode = method
+    elseif method.name == "from_transfer_payload" then
+      raise "transfer: from_transfer_payload must be a static function on " .. descriptor.name
+    end
+  end
+  for index = 1, #descriptor.statics do
+    local static = descriptor.statics[index]
+    if static.name == "from_transfer_payload" then
+      decode = static
+    elseif static.name == "to_transfer_payload" then
+      raise "transfer: to_transfer_payload must be an instance method on " .. descriptor.name
+    end
+  end
+  if encode == nil and decode == nil then return nil end
+  if encode == nil or decode == nil then
+    raise "transfer: record requires both transfer payload hooks: " .. descriptor.name
+  end
+  if not descriptor.is_public then
+    raise "transfer: record payload hooks require a public record: " .. descriptor.name
+  end
+  if #encode.param_descriptors ~= 0 or encode.vararg_descriptor ~= nil
+      or #encode.return_descriptors ~= 0
+      or not transfer_named_type(encode.flexret_descriptor, "titan.async.TransferValue") then
+    raise "transfer: invalid to_transfer_payload signature on " .. descriptor.name
+  end
+  if #decode.param_descriptors ~= 0
+      or not transfer_named_type(decode.vararg_descriptor, "titan.async.TransferValue")
+      or #decode.return_descriptors ~= 1 or decode.flexret_descriptor ~= nil
+      or not transfer_named_type(decode.return_descriptors[1], descriptor.name) then
+    raise "transfer: invalid from_transfer_payload signature on " .. descriptor.name
+  end
+  return RecordTransferHooks(encode, decode)
+end
+
+--- Select the copy or borrow policy for a value, preserving an explicit TransferValue.
+-- Public records may provide synchronous to_transfer_payload/from_transfer_payload hooks.
+-- The hooks take precedence over structural protobuf encoding and may encapsulate private fields.
+-- @param candidate Scalar, public nominal, Titan closure, or explicit transfer policy.
+-- @return Transfer policy retaining its local payload until a transfer boundary copies it.
+-- @usage async-io.md#custom-record-transfer
+function TransferValue.from_value(candidate: value): TransferValue
+  if candidate is TransferValue then return candidate end
+  case reflect.inspect(candidate)
+  when is_nil() then return TransferValue.is_nil()
+  when is_boolean(item) then return TransferValue.is_boolean(item)
+  when is_integer(item) then return TransferValue.is_integer(item)
+  when is_float(item) then return TransferValue.is_float(item)
+  when is_string(item) then return TransferValue.is_string(item)
+  when is_raw_pointer(item) then return TransferValue.is_pointer(item)
+  when is_lua_thread{thread} then return TransferValue.is_lua_state(thread)
+  when is_lua_userdata() then
+    local raw: foreign TValue = candidate
+    return TransferValue.is_pointer(ffi.lmacro_getudatamem(ffi.lmacro_uvalue(raw)))
+  when is_titan_function() then return TransferValue.is_closure(candidate)
+  when is_lua_c_function{entry} then
+    local raw: foreign TValue = candidate
+    if ffi.lmacro_ttisCclosure(raw) ~= 0 then
+      local closure = ffi.lmacro_clCvalue(raw)
+      if closure.nupvalues ~= 0 then
+        raise "transfer: cannot transfer a Lua C closure with upvalues"
+      end
+    end
+    return TransferValue.is_function(entry)
+  when is_record(record_value) then
+    local hooks? = record_transfer_hooks(record_value.type)
+    if hooks ~= nil then
+      if transfer_active_records[candidate] then
+        raise "transfer: cyclic record payload for " .. record_value.type.name
+      end
+      transfer_active_records[candidate] = true
+      defer transfer_active_records[candidate] = nil
+      local payload: {TransferValue} = { hooks.encode.callable(record_value.value) }
+      return TransferValue.is_record_payload(record_value.type.name, payload)
+    end
+    return TransferValue.is_record(record_value.type.name, protobuf.serialize(candidate))
+  when is_union(union_value) then
+    return TransferValue.is_union(union_value.type.name, protobuf.serialize(candidate))
+  else raise "transfer: unsupported value"
+  end
+end
+
+local function transfer_pointer_value(pointer: foreign *void): value
+  local top = ffi.lua_gettop(L)
+  defer ffi.lua_settop(L, top)
+  if ffi.lua_checkstack(L, 1) == 0 then raise "cannot reserve transfer pointer stack" end
+  ffi.lua_pushlightuserdata(L, pointer)
+  return ffi.lua_totvalue(L, -1) as value
+end
+
+--- Recover a semantic value from a transfer policy in the current Lua state.
+-- Custom record reconstruction invokes its synchronous from_transfer_payload hook.
+-- Borrowed addresses remain borrowed; this operation does not move native ownership.
+-- @return Scalar, borrowed address, callable, or reconstructed nominal value.
+-- @usage async-io.md#custom-record-transfer
+function TransferValue:to_value(): value
+  case self
+  when is_nil() then return nil
+  when is_boolean(item) then return item
+  when is_integer(item) then return item
+  when is_float(item) then return item
+  when is_string(item) then return item
+  when is_lua_state(item) then return transfer_pointer_value(item)
+  when is_pointer(item) then return transfer_pointer_value(item)
+  when is_function(item) then
+    if not item then raise "cannot transfer a NULL Lua C function" end
+    local top = ffi.lua_gettop(L)
+    defer ffi.lua_settop(L, top)
+    if ffi.lua_checkstack(L, 1) == 0 then raise "cannot reserve transfer function stack" end
+    ffi.lua_pushcclosure(L, item, 0)
+    return ffi.lua_totvalue(L, -1) as value
+  when is_record(name, data) then return protobuf.deserialize_nominal(data, name, false)
+  when is_union(name, data) then return protobuf.deserialize_nominal(data, name, true)
+  when is_closure(item) then
+    local top = ffi.lua_gettop(L)
+    defer ffi.lua_settop(L, top)
+    if ffi.lua_checkstack(L, 1) == 0 then raise "cannot reserve transfer closure stack" end
+    ffi.lua_pushtvalue(L, item)
+    if ffi.titan_transfer_is_closure(L, -1) == 0 then
+      raise "cannot transfer a value that is not a Titan closure"
+    end
+    return item
+  when is_record_payload(name, payload) then
+    local nominal? = reflect.find_nominal(name)
+    if nominal == nil then raise "transfer: unknown record type " .. name end
+    case nominal
+    when is_record(descriptor) then
+      local hooks? = record_transfer_hooks(descriptor)
+      if hooks == nil then raise "transfer: record has no payload hooks: " .. name end
+      local result: value = hooks.decode.callable(...payload)
+      case reflect.inspect(result)
+      when is_record(record_value) then
+        if record_value.type.name == name then return result end
+      end
+      raise "transfer: from_transfer_payload returned a different record: " .. name
+    else raise "transfer: nominal type is not a record: " .. name
+    end
+  end
 end
 
 --- A FIFO receiver whose opaque native handle can be sent across Lua states.
@@ -56,7 +220,7 @@ end
 foreign function receiver_free_messages(message: *titan_async_message)
   while message ~= nil do
     local next = message.next
-    ffi.titan_transfer_free(message.closure)
+    ffi.titan_transfer_free(message.graph)
     ffi.free(message)
     message = next
   end
@@ -4127,9 +4291,15 @@ local function receiver_value(message: foreign *titan_async_message): TransferVa
   elseif message.kind == ffi.TITAN_ASYNC_MESSAGE_CLOSURE then
     local top = ffi.lua_gettop(L)
     defer ffi.lua_settop(L, top)
-    ffi.titan_transfer_decode(L, message.closure)
+    ffi.titan_transfer_decode(L, message.graph)
     local item: value = ffi.lua_totvalue(L, -1)
     return TransferValue.is_closure(item)
+  elseif message.kind == ffi.TITAN_ASYNC_MESSAGE_RECORD_PAYLOAD then
+    local top = ffi.lua_gettop(L)
+    defer ffi.lua_settop(L, top)
+    ffi.titan_transfer_decode_policy(L, message.graph)
+    local item: value = ffi.lua_totvalue(L, -1)
+    return item
   end
   raise "invalid receiver message kind"
 end
@@ -4142,7 +4312,7 @@ local function Receiver:deliver()
     local item = receiver_value(message)
     if not self.publish(item) then return end
     messages = message.next
-    ffi.titan_transfer_free(message.closure)
+    ffi.titan_transfer_free(message.graph)
     ffi.free(message)
   end
 end
@@ -4206,13 +4376,13 @@ end
 
 --- Copy one transfer value into a receiver's FIFO and notify its owning loop.
 -- @param handle Borrowed sender address whose Receiver remains retained.
--- @param data Copied scalar, string, nominal packet, or closure graph, or borrowed native address.
+-- @param data Copied scalar, string, nominal packet, closure graph, or custom record payload, or borrowed native address.
 -- @usage async-io.md#cross-state-receivers
 function send(handle: foreign *void, data: TransferValue)
   if not handle then raise "receiver handle must not be NULL" end
   local message = foreign titan_async_message.new()
-  message.closure = nil
-  defer ffi.titan_transfer_free(message.closure)
+  message.graph = nil
+  defer ffi.titan_transfer_free(message.graph)
   case data
   when is_nil() then
     message.kind = ffi.TITAN_ASYNC_MESSAGE_NIL
@@ -4262,12 +4432,23 @@ function send(handle: foreign *void, data: TransferValue)
       raise "cannot transfer a value that is not a Titan closure"
     end
     message.kind = ffi.TITAN_ASYNC_MESSAGE_CLOSURE
-    message.closure = ffi.titan_transfer_new()
-    if not message.closure then raise "cannot allocate receiver closure transfer" end
-    ffi.titan_transfer_encode(L, message.closure, -1)
+    message.graph = ffi.titan_transfer_new()
+    if not message.graph then raise "cannot allocate receiver closure transfer" end
+    ffi.titan_transfer_encode(L, message.graph, -1)
+  when is_record_payload() then
+    local top = ffi.lua_gettop(L)
+    defer ffi.lua_settop(L, top)
+    if ffi.lua_checkstack(L, 1) == 0 then
+      raise "cannot reserve Lua stack for receiver record payload"
+    end
+    ffi.lua_pushtvalue(L, data)
+    message.kind = ffi.TITAN_ASYNC_MESSAGE_RECORD_PAYLOAD
+    message.graph = ffi.titan_transfer_new()
+    if not message.graph then raise "cannot allocate receiver record payload transfer" end
+    ffi.titan_transfer_encode_policy(L, message.graph, -1)
   end
   local status = receiver_send_native(handle as foreign *titan_async_mailbox, message)
-  if status == 0 then message.closure = nil end
+  if status == 0 then message.graph = nil end
   if status == 1 then raise operation_error(uv.ENOMEM, "async.send") end
   if status == 2 then raise "receiver is closed" end
   check_status(status, "async.send")

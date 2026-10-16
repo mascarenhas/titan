@@ -1,0 +1,85 @@
+-- Executable-only fixture for programmer-owned native handle transfer.
+local async = import "async"
+local gc = import "gc"
+foreign import "handle_transfer_fixture.h"
+
+record Pipe
+  local resource: foreign *void
+  local finalizer_probe: foreign *void
+end
+
+function Pipe:close()
+  local resource = self.resource
+  self.resource = nil
+  self.finalizer_probe = nil
+  if resource then ffi.titan_test_record_handle_close(resource) end
+end
+
+local function finalize_pipe(pipe: Pipe)
+  if pipe.finalizer_probe then
+    ffi.titan_test_record_handle_finalized(pipe.finalizer_probe)
+  end
+  pipe:close()
+end
+
+function Pipe.new(resource: foreign *void): Pipe
+  if not resource then raise "native handle fixture requires a resource" end
+  local pipe: Pipe = { resource = resource, finalizer_probe = resource }
+  gc.finalizable(pipe, finalize_pipe)
+  return pipe
+end
+
+function Pipe:to_transfer_payload(): (...: async.TransferValue)
+  local resource = self.resource
+  if not resource then raise "native handle fixture is detached" end
+  -- The programmer explicitly relinquishes the source wrapper's close
+  -- authority. TransferValue does not move ownership or undo this on failure.
+  -- The enclosing test retains the token allocation through the whole handoff.
+  self.resource = nil
+  return async.TransferValue.is_pointer(resource)
+end
+
+function Pipe.from_transfer_payload(...: async.TransferValue): Pipe
+  local payload: {async.TransferValue} = {...}
+  if #payload ~= 1 then raise "native handle fixture payload arity" end
+  case payload[1]
+  when is_pointer(resource) then return Pipe(resource)
+  else raise "native handle fixture expected borrowed pointer policy"
+  end
+end
+
+function Pipe:read_byte(): integer
+  if not self.resource then raise "native handle fixture is closed" end
+  return ffi.titan_test_record_handle_read(self.resource)
+end
+
+local function detached_payload(resource: foreign *void): async.TransferValue
+  local pipe = Pipe(resource)
+  return async.TransferValue.from_value(pipe)
+end
+
+function send_detached(destination: value, resource: value)
+  -- Only this Lua/lightuserdata boundary performs raw-pointer assertions.
+  local packet = detached_payload(resource as foreign *void)
+  -- The source wrapper's frame is gone before collection. Its finalizer must
+  -- run while the token is retained and must observe the explicit detachment.
+  gc.collect()
+  gc.collect()
+  async.send(destination as foreign *void, packet)
+end
+
+function resource_new(): foreign *void
+  return ffi.titan_test_record_handle_new()
+end
+
+function resource_destroy(resource: foreign *void)
+  ffi.titan_test_record_handle_destroy(resource)
+end
+
+function close_calls(resource: foreign *void): integer
+  return ffi.titan_test_record_handle_close_calls(resource)
+end
+
+function finalizers(resource: foreign *void): integer
+  return ffi.titan_test_record_handle_finalizers(resource)
+end
