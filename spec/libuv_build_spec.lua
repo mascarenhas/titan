@@ -1023,7 +1023,7 @@ esac
             inputs[#inputs + 1] = "prepared"
             local folders = { uv = true, http = true, websocket = true, peg = true,
                 string = true, sqlite3 = true, json = true, lua = true, protobuf = true }
-            local callbacks = { coroutine = true, uv = true, async = true, fs = true,
+            local callbacks = { coroutine = true, uv = true, transfer = true, async = true, fs = true,
                 http = true, sqlite3 = true, lua = true }
             local outputs, objects = {}, {}
             local compiler = { "#!/bin/sh", "set -eu",
@@ -2078,7 +2078,7 @@ int main(void) {
             }) do
                 assert.falsy(makefile:find(retired, 1, true), retired)
             end
-            assert.same({ "$(RUNTIME_O)", "$(MINICORO_O)", "$(TRANSFER_O)" },
+            assert.same({ "$(RUNTIME_O)", "$(MINICORO_O)" },
                 makefile_words("TITAN_RUNTIME_OBJECTS"))
 
         end)
@@ -2370,7 +2370,7 @@ int main(void) {
             expected[#expected + 1] = "out/" .. stem .. ".ffi.h"
         end
         for _, header in ipairs({
-            "titan/coroutine.titan.h",
+            "titan/coroutine.titan.h", "titan/transfer.titan.h",
             "titan/uv/uv.titan.h", "titan/async.titan.h", "titan/http/http.titan.h",
             "titan/sqlite3/sqlite3.titan.h", "titan/lua/lua.titan.h",
         }) do
@@ -3014,7 +3014,7 @@ int main(void) {
                 driver_source)
             local _, include_count = makefile:gsub(
                 "%-I %$%(TITAN_RUNTIME_LUA_SOURCE_PATH%)", "")
-            assert.equal(3, include_count, makefile)
+            assert.equal(2, include_count, makefile)
         end)
 
     it("keeps the private Lua bootstrap separate from the runtime archive",
@@ -5706,7 +5706,7 @@ done
 
             assert.equal(1, count_literal(sanitizer_job,
                 "make titan-stdlib-test-build"), sanitizer_job)
-            assert.equal(40, count_literal(sanitizer_job,
+            assert.equal(41, count_literal(sanitizer_job,
                 "make titan-stdlib-test-run"), sanitizer_job)
             for _, filter in ipairs({
                 "TITAN_FILTER='test_lua_host_roots_coroutine_" ..
