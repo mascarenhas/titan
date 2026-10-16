@@ -322,19 +322,31 @@ function test_io_stream_transfer_keeps_process_ownership_at_origin(
     local source = stream.popen(popen_quote(process_support.child_path()) ..
                                " echo-count 4 " .. popen_quote("|done"))
     defer source:close()
-    local target: stream.InputOutputStream?
-    -- Registration runs with an active Runtime but outside Task execution.
-    async.await<|nil, nil|>(function (resolve, _reject, _fatal)
-      local packet = async.TransferValue.from_value(source)
-      target = packet:to_value()
-      resolve(nil)
-    end)
-    test.assert(source:read() == nil and source:read_until("|") == nil)
-    common.assert_raises(function () source:write("late") end)
-    common.assert_raises(function () source:to_transfer_payload() end)
+    local target = source
+    if common.is_windows() then
+      local refused = false
+      do source:to_transfer_payload()
+      catch
+        test.assert(error is async.OperationError)
+        local failure = error as async.OperationError
+        test.assert(failure.name == "EBUSY" and failure.operation == "stdio.transfer")
+        refused = true
+      end
+      test.assert(refused, "pending Windows shell-pipe read was detached")
+    else
+      -- Registration runs with an active Runtime but outside Task execution.
+      async.await<|nil, nil|>(function (resolve, _reject, _fatal)
+        local packet = async.TransferValue.from_value(source)
+        target = packet:to_value()
+        resolve(nil)
+      end)
+      test.assert(source:read() == nil and source:read_until("|") == nil)
+      common.assert_raises(function () source:write("late") end)
+      common.assert_raises(function () source:to_transfer_payload() end)
+      common.assert_raises_contains(function () target:wait() end,
+                                   "no child process owner")
+    end
     defer target:close()
-    common.assert_raises_contains(function () target:wait() end,
-                                 "no child process owner")
     target:write("A\0B\255")
     test.assert(target:read_until("|", true) == "A\0B\255")
     test.assert(target:read() == "done" and target:read() == nil)
@@ -371,6 +383,10 @@ end
 
 function test_io_stream_transfer_crosses_states_with_origin_reaping(
     _context: test.Context)
+  if common.is_windows() then
+    test.skip("platform: Windows shell pipes start an eager pending native read")
+    return
+  end
   runtime_test.run(function ()
     local source = stream.popen(popen_quote(process_support.child_path()) ..
                                " echo-count 4 " .. popen_quote("|done"))

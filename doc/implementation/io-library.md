@@ -146,6 +146,11 @@ All five potentially waiting wrapper operations increment a count until their
 continuations exit. Transfer rejects a nonzero count, then preflights both
 private Stdio owners through io's existing explicit `os.titan` source import.
 This prevents a pending operation on the second pipe from detaching the first.
+Process creation starts captured output reads before publishing the facade.
+Windows therefore commonly retains a pending overlapped read on a fresh shell
+pipe, and preflight rejects it with `stdio.transfer`/`EBUSY` even after a yield.
+Tests verify rejection without detachment and continued source traffic/reaping;
+live cross-state shell-pipe handoff has a classified Windows skip.
 The first detached writable-pipe packet remains on the source until the second
 handoff succeeds. A failure therefore retains ownership locally; transfer can
 retry, and write can reconstruct that owner. Successful reconstruction

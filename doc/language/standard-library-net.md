@@ -122,6 +122,11 @@ pending even while no Task is reading, so that state raises `EBUSY` without
 detaching. A fresh connection whose lazy read watcher has not started can move.
 Rejected admission leaves the source connection usable.
 
+On Windows, the Task that called `connect` can resume before its native connect
+callback has returned. An immediate transfer can therefore report `EBUSY`
+even before reading starts. Call `async.yield()` after connecting to let that
+callback retire before attempting an otherwise idle handoff.
+
 Successful encoding detaches the source before delivery. It preserves unread
 delimiter excess and buffered binary input; the destination resumes the same
 TCP byte stream. Source aliases behave as closed, and their `close()` cannot

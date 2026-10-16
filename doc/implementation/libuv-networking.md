@@ -153,6 +153,13 @@ read request. This preserves prefetch and HTTP observation semantics: Windows
 overlapped reads remain a reason to reject, rather than changing all net reads
 to demand-driven production.
 
+Windows libuv decrements a connect request's native pending count after invoking
+its callback. Completion delivery can resume the waiting Titan Task inside that
+callback, so returning from `connect` alone does not prove native retirement.
+The transfer gate retains its rejection until the callback returns; callers
+moving a fresh connection yield once before handoff. No scheduler exception or
+pending-count exemption is needed.
+
 `BufferedSubscription:snapshot_pending()` copies unread queue references and
 terminal status without consuming the source queue. The encoder builds its
 binary excess/queue snapshot and complete policy Array before stopping the

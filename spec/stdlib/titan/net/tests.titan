@@ -602,6 +602,8 @@ function test_net_transfer_moves_fresh_connection_across_states(context: test.Co
     local operation = function (): async.TransferValue
       local connection = net.connect("127.0.0.1", port)
       defer connection:close()
+      -- The native connect callback must retire before moving its endpoint.
+      async.yield()
       local packet = async.TransferValue.from_value(connection)
       test.assert(connection:read() == nil, "detached source retained its endpoint")
       return packet
@@ -708,6 +710,7 @@ function test_net_transfer_rejected_delivery_can_be_recovered(context: test.Cont
     support.cleanup_server(context, server)
     local connection = net.connect("127.0.0.1", port)
     support.cleanup_connection(context, connection)
+    async.yield()
     local peer = server:accept()
     support.cleanup_connection(context, peer)
     local packet = async.TransferValue.from_value(connection)
@@ -785,6 +788,7 @@ function test_net_transfer_hooks_run_without_a_current_task(context: test.Contex
     support.cleanup_server(context, server)
     local source = net.connect("127.0.0.1", port)
     support.cleanup_connection(context, source)
+    async.yield()
     local peer = server:accept()
     support.cleanup_connection(context, peer)
     local target: net.Connection? = nil
