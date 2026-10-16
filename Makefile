@@ -1179,7 +1179,7 @@ else
   STDLIB_OPENSSL_HEADER_DIRS = $(shell $(OPENSSL_PKG_CONFIG) --variable=includedir openssl 2>/dev/null)
 endif
 STDLIB_C_INPUTS_uv = $(UV_TITAN_HEADERS) $(foreach dir,$(STDLIB_UV_HEADER_DIRS),$(wildcard $(dir)/uv.h $(dir)/uv/*.h))
-STDLIB_C_INPUTS_async = titan/async_signal_platform.h titan/async_mailbox_native.h
+STDLIB_C_INPUTS_async = titan/async_signal_platform.h titan/async_receiver_native.h
 STDLIB_C_INPUTS_fs = titan/fs_platform.h
 STDLIB_C_INPUTS_os = titan/os_platform.h titan/os_environment.h
 STDLIB_C_INPUTS_path = titan/path_platform.h

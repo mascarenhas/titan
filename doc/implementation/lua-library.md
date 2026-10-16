@@ -84,17 +84,19 @@ A `Lua:run` or `Lua:run_async` bootstrap may require `titan.async`, construct a
 Receiver outside a Task, root it in that state's module/global storage, and
 return its opaque native handle. This does not drive the new Runtime. A subsequent `run_async`
 can create the remote waiting Task and drive `async.loop` under its existing
-exclusive-state reservation. Sender calls use only the native FIFO handle and
-copied transfer packet; they never enter the busy state or access its Receiver
-record. See [receiver ownership](libuv-runtime.md#cross-state-receiver-ownership).
+exclusive-state reservation. Sender calls use only the native notification
+handle and copied transfer packet; they never enter the busy state or access its Receiver
+record. Sends coalesce and the receiving callback overwrites any unread value;
+there is no per-message delivery guarantee. See [receiver ownership](libuv-runtime.md#cross-state-receiver-ownership).
 
 The origin must keep that Receiver reachable through the complete exported
-handle lifetime. Shutdown disables sends and retires the native handle, but a
-raw token never becomes an owner. Withdraw the handle and finish all send calls
-before releasing the remote root or closing the Lua state. After the worker
-returns, a synchronous cleanup chunk can close any remaining receiver and run
+handle lifetime. A raw token never becomes an owner. Withdraw the handle and
+finish all send calls before receiver close, Runtime shutdown, release of the
+remote root, or Lua-state destruction. Send and close are not concurrent-safe;
+receiving a stop message alone does not establish that its sender has returned.
+After the worker returns, a synchronous cleanup chunk can close any remaining receiver and run
 its loop to drain native closure, then drop the root. This also covers bootstrap
-or queue-admission failure before asynchronous execution starts. The
+or worker-admission failure before asynchronous execution starts. The
 [complete two-phase example](../language/standard-library-lua.md#two-phase-receiver-bootstrap)
 keeps all sends local and uses this order on success and failure.
 

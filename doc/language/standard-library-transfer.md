@@ -18,7 +18,7 @@ function Record.from_transfer_payload(payload: string): Record
 ```
 
 A hook chooses its own synchronous byte format. The generic policy stores the
-actual defining module, nominal name, and bytes; native queues copy and free
+actual defining module, nominal name, and bytes; native transports copy and free
 those strings. There is no generic recursive payload graph or implicit native
 resource lifetime management.
 
@@ -39,6 +39,15 @@ adopts that payload into fresh local wrappers. A failed send does not undo
 detachment: the caller must recover the returned payload or explicitly dispose
 of its resources. Copying or dropping a byte string does not duplicate or
 close the resources named by it.
+
+A Receiver is a [lossy, coalescing notification](async-io.md#cross-state-receivers):
+a successful send may be overwritten before receipt. Replacing or discarding
+that packet releases its bytes but does not dispose of native resources inside
+it, including resources in captured closure payloads. Keep ownership outside
+the lossy message or use a separate handoff protocol that guarantees exactly-once
+adoption or disposal. Successful `send` alone is not proof of either. Repeating
+the same payload may also cause double adoption; lack of an acknowledgement
+alone does not authorize disposing of a resource the destination may own.
 
 Preflight rejection and failed native duplication preserve that endpoint's
 source ownership. If io's second pipe duplication fails, its source retains

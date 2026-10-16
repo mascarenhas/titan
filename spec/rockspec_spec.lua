@@ -751,7 +751,7 @@ int titan_sdk_headers(void) { return LUA_VERSION_NUM + SQLITE_VERSION_NUMBER; }
             "titan/uv/work-data.h",
             "titan/async.titan",
             "titan/async_signal_platform.h",
-            "titan/async_mailbox_native.h",
+            "titan/async_receiver_native.h",
             "titan/timer.titan",
             "titan/io.titan",
             "titan/fs.titan",

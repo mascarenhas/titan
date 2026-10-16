@@ -229,32 +229,20 @@ share worker capacity with filesystem and DNS operations.
 A first `run_async` call can create a receiver before its independent state's
 loop starts. Keep its owner rooted there and return only its native handle. A
 second call runs that state's Tasks and loop. `async.send` uses the handle
-without accessing the remote state's Lua objects and may also queue a message
-before the loop starts.
+without accessing the remote state's Lua objects and can publish a message
+before the loop starts. The Receiver retains only the latest pending packet;
+its [coalescing contract](async-io.md#cross-state-receivers) does not guarantee
+one receipt per send.
 
-This complete standalone module starts the remote wait in a host Task and
-sends a copied control message while that Task executes `run_async`. The send
-may reach the native queue before the remote waiter starts; it is not lost.
-The handle stays inside one lexical scope and is never published to another
-sender. Cleanup sends a stop message if needed, drains the worker through a
-cancellation-insensitive wait, then closes/drains the remote Runtime before
-releasing its Receiver root and closing the state.
+This complete standalone module sends one copied control message before
+starting the remote loop. The send has returned before the remote waiter can
+close the Receiver or end its Runtime. The handle stays inside one lexical
+scope and is never published to another sender. Cleanup closes and drains the
+remote Runtime before releasing its Receiver root and closing the state.
 
 ```titan
 local lua = import "lua"
 local async = import "async"
-
-local function drain_worker(worker: async.Task<|nil, value|>)
-  local remove: function (): () = function () end
-  defer remove()
-  async.await_cleanup<|nil, value|>(function (resolve, _reject, _fatal)
-    if worker:status():has_finished() then
-      resolve(nil)
-    else
-      remove = worker:add_terminal_listener(function (_status) resolve(nil) end)
-    end
-  end)
-end
 
 function main(_args: {string}): integer
   local state = lua.new()
@@ -272,37 +260,19 @@ function main(_args: {string}): integer
   defer exported = async.TransferValue.is_nil()
   case exported
   when is_pointer(handle) then
-    local worker = async.run<|nil, value|>(function (): nil
-      state:run_async([[
-        local async = require("titan.async")
-        local task = async.run(function()
-          control_receiver:wait()
-          control_receiver:close()
-        end)
-        async.loop()
-        if not task:status():has_succeeded() then
-          error("receiver Task failed")
-        end
-      ]], "=receiver-worker")
-      return nil
-    end)
-    defer do
-      -- Even cancellation before the ordinary send must stop the remote wait.
-      defer drain_worker(worker)
-      do
-        async.send(handle, async.TransferValue.is_nil())
-      catch
-        if error ~= "receiver is closed" then raise end
-      end
-    end
-    async.yield()
-    -- A send before the remote wait starts remains queued.
+    -- Finish sending before the remote loop can begin teardown.
     async.send(handle, async.TransferValue.is_string("stop\0"))
-    case async.join(worker)
-    when succeeded() then
-    when failed(failure) then failure:raise()
-    else raise "receiver worker did not complete"
-    end
+    state:run_async([[
+      local async = require("titan.async")
+      local task = async.run(function()
+        control_receiver:wait()
+        control_receiver:close()
+      end)
+      async.loop()
+      if not task:status():has_succeeded() then
+        error("receiver Task failed")
+      end
+    ]], "=receiver-worker")
   else raise "receiver bootstrap returned no native handle"
   end
   return 0
@@ -310,10 +280,12 @@ end
 ```
 
 A long-lived service can send through the same handle while `run_async` owns
-the remote state. It must arrange cooperative shutdown with messages and then
-wait for the worker to finish; cancelling the hosting Task does not interrupt
-its Lua chunk. Withdraw handles and finish all sends before dropping the remote
-Receiver root or calling `Lua:close`.
+the remote state. Its shutdown protocol must stop senders and establish that
+every send has returned before the remote Receiver closes or its Runtime
+shuts down. A stop message can arrive before its sender returns, so receipt
+alone does not establish that ordering. Then wait for the worker to finish
+before dropping the remote Receiver root or calling `Lua:close`. Cancelling
+the hosting Task does not interrupt its Lua chunk or synchronize senders.
 
 Long-lived `run_async` calls occupy libuv worker threads for their entire
 execution, even while their remote event loop is waiting. The pool is shared
