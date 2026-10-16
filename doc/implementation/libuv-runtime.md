@@ -3,8 +3,9 @@
 The continuation runtime lives in `titan.async` and uses only the public
 `titan.uv` module interface. UV owns native allocations, callback roots, borrowed
 native data, and the native loop boundary. Async owns Tasks, generic waits,
-cancellation, subscriptions, cross-state receiver queues, and shutdown. Timer, filesystem, networking, I/O,
-OS, and SQLite adapters own their domain records and result/resource policies.
+cancellation, subscriptions, coalescing cross-state receivers, and shutdown.
+Timer, filesystem, networking, I/O, OS, and SQLite adapters own their domain
+records and result/resource policies.
 
 The old private UV `Call` union, per-operation dispatch methods, Task association,
 and domain-operation router are removed from this architecture. Adding an async
@@ -332,7 +333,18 @@ belong in Core and do not require new generic operation kinds.
 
 ## Cross-state receiver ownership
 
-`Receiver` owns the public [cross-state FIFO](../language/async-io.md#cross-state-receivers).
+`Receiver` owns the public [lossy cross-state notification](../language/async-io.md#cross-state-receivers)
+boundary. One Receiver-owned native slot holds the copied packet between
+`send` and the destination callback. A send replaces any packet still in that
+slot and calls `uv_async_send`, which carries no payload. Sequential sends
+completed before the callback leave only the latest packet pending. Native
+wakeups coalesce, and each callback replaces the Receiver's one unread value
+in the destination state through `CoalescingSubscription`. Successful sends
+carry no receipt or adoption guarantee. An atomic pointer exchange transfers
+the pending packet: a sender frees the packet it replaced, and the callback
+takes and clears the slot before copying into destination GC storage. There is
+no native FIFO or mutex.
+
 Its opaque `foreign *void` handle names native receiver storage, not a Titan
 record or public `uv.async_t`. The host sending a message never follows a remote
 GC pointer or enters the destination Lua state. Scalar tags/values and copied
@@ -347,11 +359,12 @@ Borrowed pointer variants remain raw addresses.
 
 Closure and custom record packets use the same flat string-copy boundary.
 `from_value` snapshots closure captures and runs custom encoding hooks before
-queue admission. A closure packet copies its module name and snapshot bytes,
+native publication. A closure packet copies its module name and snapshot bytes,
 and carries an immutable entry address. No origin closure, capture box, or
-other origin GC pointer enters the queue. Accepted messages own only their
-copied strings and native FIFO allocation; delivery or discard frees that
-storage without traversing payloads or closing resources named inside them.
+other origin GC pointer enters native storage. Accepted messages own only their
+copied strings and native packet allocation; delivery, replacement, or discard
+frees that storage without traversing payloads or closing resources named
+inside them.
 
 The receiving loop reconstructs `TransferValue.is_closure(module, entry, data)`
 or `TransferValue.is_record_payload(module, name, data)` without decoding.
@@ -369,34 +382,48 @@ ordinary reflection and permits private record fields when that pair is valid.
 Its active-record guard prevents a hook recursively packing the same record;
 deferred cleanup releases the guard after success or error. Hooks must run
 synchronously. They may transfer native tokens under application policy, but
-queue cleanup never closes or duplicates those tokens and cannot undo hook
+packet cleanup never closes or duplicates those tokens and cannot undo hook
 side effects. The programmer must detach or clear an origin owner when needed
-to prevent its finalizer from closing a handed-off resource.
+to prevent its finalizer from closing a handed-off resource. A detached
+resource can be lost even after `send` succeeds, including when it is nested
+inside a closure snapshot. Resource ownership must therefore remain outside
+the lossy message or use an application handoff protocol that accounts for
+replacement, adoption, and disposal.
 
 Receiver construction uses `ensure_runtime` without requiring a current Task
 or driving the loop, which permits synchronous independent-state bootstrap.
 Waiting belongs to a Task in the same Runtime and uses the existing async wait
 machinery. One waiter owns delivery; cancellation detaches that waiter while
-preserving queue contents. Queue insertion and native-close admission are
-serialized with the native receiver lock. FIFO order is the successful enqueue
-order, and native notification coalescing cannot lose accepted messages.
+preserving the current unread value. Later callbacks may replace that value
+before another waiter consumes it. The Receiver has no message FIFO or
+per-send wake accounting.
 
-Explicit close first marks the native receiver closed under that lock, then
-releases queued packets and requests native close. A blocked waiter receives
-the closed error. The operation is synchronous and idempotent; loop callbacks
-still own native handle retirement. The Runtime's handle walk applies the same
-admission shutdown to live receivers before generic close, including fatal
-shutdown. A Receiver retained after close keeps its mutex and storage alive,
-allowing a late send to reject safely without touching a retired UV handle.
+Explicit close marks the native receiver closed, takes and frees its pending
+packet, closes the coalescing subscription, and requests native close. A blocked
+waiter receives the closed error. The operation is synchronous and idempotent;
+loop callbacks still own native handle retirement. The Runtime's handle walk
+applies the same close to live receivers before generic close, including fatal
+shutdown. A finalizer also releases the native packet during Lua-state destruction;
+it does not drive the loop or replace explicit native-handle retirement. The closed flag is ordinary native state: the application must stop
+senders and complete all in-flight calls before close or Runtime shutdown.
+The atomic packet slot supports concurrent sends and callback consumption; it
+does not establish a concurrent send/close contract.
+
+A Receiver retained after close keeps its endpoint storage alive. After
+external synchronization, a sequenced late send checks the closed flag and
+rejects without touching a retired UV handle. Native packet allocation failure
+raises `OperationError` for `async.send`. The pinned libuv `uv_async_send`
+returns zero for a valid handle lifetime.
 
 An exported handle does not retain that owner or the originating Lua state.
 Applications must retain the Receiver, withdraw handles, and complete sends
-before permitting collection or state destruction. Keeping storage alive until
-native close is necessary but insufficient to authorize use of an exported
+before close, Runtime shutdown, collection, or state destruction. Receiving a
+stop packet does not itself prove the sender has returned from `send`.
+Keeping storage alive until native close is necessary but insufficient to authorize use of an exported
 handle after the Receiver's lifetime. No registry of process-wide tokens,
 shared Titan closure, or cross-state GC object is part of this protocol.
 
-`async.send` is an ordinary Titan entry with allocation and native locking.
+`async.send` is an ordinary Titan entry with native packet allocation and copying.
 Its cross-thread safety does not make it callable from a raw signal handler.
 Only the receiving loop constructs destination GC objects and settles the
 Task's wait. Error/cancellation delivery uses the existing continuation rules.

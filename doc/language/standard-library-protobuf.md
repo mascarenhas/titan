@@ -180,7 +180,9 @@ the ordinary C FFI precondition.
 wire payload. Independent-state calls automatically
 serialize eligible returned records and unions; an explicitly returned
 `TransferValue` takes precedence over this classification. Receiver messages
-copy both strings into their native FIFO node.
+copy the module, nominal name, and wire bytes into native packets. Their
+[lossy, coalescing delivery](async-io.md#cross-state-receivers) can replace an
+unread packet; protobuf encoding adds no delivery guarantee.
 
 Records with the [custom transfer-hook pair](async-io.md#custom-record-transfer)
 use an `is_record_payload(module, name, bytes)` carrier instead during automatic

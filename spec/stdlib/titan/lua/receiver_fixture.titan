@@ -1,6 +1,7 @@
 -- Executable-only module initialized independently by each Lua worker state.
 local async = import "async"
 local gc = import "gc"
+local uv = import "uv"
 
 local receiver: async.Receiver? = nil
 local worker: async.Task<|nil, value|>? = nil
@@ -14,14 +15,24 @@ function retained_handle(): foreign *void
   return receiver:handle()
 end
 
-function bootstrap(reply: value): foreign *void
+function bootstrap(reply: value, quiescence: value): foreign *void
   -- Lua supplies the lightuserdata transferred from the host. Only this narrow
   -- fixture boundary converts it back to the statically typed borrowed handle.
   local destination = reply as foreign *void
+  local gate = quiescence as foreign *void
+  local wait = uv.sem_t.wait_function()
   receiver = async.receiver()
   local owner = receiver as async.Receiver
   worker = async.run<|nil, value|>(function (): nil
-    defer owner:close()
+    local response: async.TransferValue? = nil
+    defer do
+      -- Receipt can precede the sender's return from async.send. The host
+      -- posts only after its last send has returned and keeps the gate alive
+      -- until this worker is joined.
+      wait(gate)
+      owner:close()
+      if response ~= nil then async.send(destination, response) end
+    end
     async.send(destination, async.TransferValue.is_string("ready"))
     while true do
       local item = owner:wait()
@@ -30,12 +41,11 @@ function bootstrap(reply: value): foreign *void
       case item
       when is_string(bytes) then
         if bytes == "close" then
-          owner:close()
-          async.send(destination, async.TransferValue.is_string("closed"))
+          response = async.TransferValue.is_string("closed")
           return nil
         end
         if bytes == "stop" then
-          async.send(destination, async.TransferValue.is_integer(received))
+          response = async.TransferValue.is_integer(received)
           return nil
         end
         received = received + 1

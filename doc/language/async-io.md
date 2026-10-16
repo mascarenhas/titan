@@ -396,8 +396,12 @@ can therefore change ownership during `from_value`, before any send.
 The programmer owns safe, exactly-once delivery and adoption of native
 payloads. A failed send leaves the returned packet with the caller, who must
 recover or explicitly dispose of its resources. Copying or dropping bytes
-does not duplicate or close a native handle. For resource captures that need
-recovery after a later capture fails, construct and retain their explicit
+does not duplicate or close a native handle. A successful Receiver send can
+still be coalesced or overwritten before receipt; it is not an acknowledgement
+of delivery or adoption. Keep native resource ownership outside the lossy
+message or arrange a separate handoff protocol that guarantees adoption or
+disposal. For resource captures that need recovery after a later capture fails,
+construct and retain their explicit
 policies first, then capture those policies. See
 [native resource handoff](standard-library-transfer.md#native-resource-handoff)
 for the built-in hooks' failure and cleanup rules.
@@ -423,56 +427,72 @@ native `handle()` may cross to another Lua state or thread. A `Receiver` is a
 GC-owned value that must stay in the state that created it.
 
 `send` is synchronous and may run in another state's ordinary Titan code. It
-requires no Task or source Runtime. It copies the message into a native FIFO before returning and wakes the receiver's
-loop. Scalars retain their variant and value. Strings are copied with explicit
+requires no Task or source Runtime. It copies the message into the Receiver's
+one native pending slot before returning, replacing any packet still in that
+slot, and requests a wake of the receiver's loop. The synchronous
+`uv_async_send` notification carries no payload; the Receiver owns those bytes
+until the later callback consumes them.
+
+Delivery is **lossy and coalescing**: several sends may produce one native
+callback, and each callback replaces any unread value in the Receiver.
+Sequential sends completed before the callback leave only the latest packet
+pending. A successful send does not promise that a waiter will receive that
+message. There is no FIFO, message count, or backpressure.
+
+Scalars retain their variant and value. Strings are copied with explicit
 lengths, including embedded NUL bytes, then copied into the destination
 collector on receipt. Record and union variants copy their module, nominal name, and wire
 bytes and arrive as the same `TransferValue` variant; the receiver does not
 implicitly decode or validate the protobuf payload. Closure and custom-record
 variants likewise copy their already converted packets; `to_value` performs
 destination reconstruction after receipt.
-Pointer variants copy only borrowed addresses and retain
-nothing they point to. Concurrent sends are ordered by their enqueue under the
-receiver's native lock; no ordering is promised between callers before that
-point. Coalesced native wakeups do not coalesce queued messages. The FIFO has
-no capacity limit or backpressure.
+Pointer variants copy only borrowed addresses and retain nothing they point
+to. Concurrent senders must not depend on an ordering between their messages.
+Coalescing or overwriting a packet frees its copied bytes without disposing of
+resources named inside it. See [native resource handoff](standard-library-transfer.md#native-resource-handoff)
+before sending resource payloads or closures that capture them.
 
 Closure and custom-record reconstruction run when the receiving code calls
 `to_value`; initialization or reconstruction failures raise to that caller.
 Independent `Lua:run` and `Lua:run_async` decode incoming arguments before the
 chunk runs and report reconstruction failures to their calling Titan code.
 
-`wait` requires a Task in the receiver's owning Runtime. It takes the oldest
-queued value or suspends until one arrives. At most one Task may wait on a
-receiver. Cancelling that waiter detaches it without closing the receiver or
-discarding queued messages; a later waiter can continue receiving. Calls to
-`handle`, `wait`, and `close` use the owning state. The foreign handle is only
+`wait` requires a Task in the receiver's owning Runtime. It consumes the current
+unread value or suspends until a callback supplies one. At most one Task may
+wait on a receiver. Cancelling that waiter detaches it without closing the receiver or
+discarding its unread value; later callbacks may still replace that value
+before another waiter consumes it. Calls to `handle`, `wait`, and `close` use
+the owning state. The foreign handle is only
 an argument to `async.send`, not a `uv.async_t` or a pointer that applications
 may dereference.
 
-`close` synchronously disables new sends, discards unread messages, and wakes
-a blocked waiter with an error. It is idempotent and does not require a Task.
+`close` marks the Receiver closed, discards its pending packet and unread value,
+and wakes a blocked waiter with an error. It is idempotent and does not require
+a Task. **Stop senders and finish every in-flight send before calling `close`
+or allowing the owning Runtime to shut down.** Concurrent send and close are
+unsupported. Receiving a stop message alone does not prove its sender has
+returned; arrange sender completion separately before remote teardown.
+
 Native handle retirement still needs the owning `async.loop` to drain its close
-callback. Runtime shutdown also disables receivers before closing their
-handles. Sending to a closed receiver or waiting on one raises
-`"receiver is closed"`; a null send handle raises
-`"receiver handle must not be NULL"`. A null `is_function` message is rejected
-before enqueue. Native message allocation or wake failures raise `OperationError`
-with operation `"async.send"` and do not leave that message queued. A retained
-closed Receiver keeps native storage alive so late sends can safely report
-the closed error.
+callback. Runtime shutdown also closes receivers. After senders and close have
+been synchronized, a later send to a retained closed Receiver raises
+`"receiver is closed"`; waiting on a closed Receiver raises the same error.
+A null send handle raises `"receiver handle must not be NULL"`. A null
+`is_function` message is rejected before publication. Native message allocation
+errors raise `OperationError` with operation `"async.send"`.
 
 The handle is borrowed and does not root its Receiver. Keep the Receiver
 reachable in its originating state, for example in a module field or global,
 until every sender has withdrawn the handle and all in-flight sends have
-finished. Only then may that root be released or its `Lua` state closed.
-`close` stops admission; it does not make a dangling handle safe after the owner
-has been collected. See the [two-phase independent-state example](standard-library-lua.md#two-phase-receiver-bootstrap)
+finished. Retaining the Receiver keeps its endpoint storage alive after close,
+but does not synchronize close against a send. Only after sender quiescence may
+that root be released or its `Lua` state closed. A handle is invalid after its
+owner has been collected. See the [two-phase independent-state example](standard-library-lua.md#two-phase-receiver-bootstrap)
 for explicit close, native drain, and state cleanup.
 
 Although the native wake primitive supports foreign threads, high-level
-`async.send` allocates and locks. It is not safe inside a raw POSIX signal
-handler. An ordinary Titan callback delivered by the event loop can use it.
+`async.send` allocates and copies message storage. It is not safe inside a raw
+POSIX signal handler. An ordinary Titan callback delivered by the event loop can use it.
 
 ## Adapting callbacks with await
 

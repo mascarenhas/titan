@@ -1,13 +1,13 @@
-#ifndef TITAN_ASYNC_MAILBOX_NATIVE_H
-#define TITAN_ASYNC_MAILBOX_NATIVE_H
+#ifndef TITAN_ASYNC_RECEIVER_NATIVE_H
+#define TITAN_ASYNC_RECEIVER_NATIVE_H
 
 #include <stddef.h>
 #include "lua.h"
 #include "titan/ffi.h"
 
 /* Only native bytes cross a state/thread boundary. The public UV binding owns
- * the actual async handle and mutex; these are its borrowed C-only capabilities.
- * The Receiver retains those owners through every send and native close. */
+ * the async handle; its borrowed C-only send capability never enters Lua.
+ * Callers finish sends before close and retain the Receiver through all uses. */
 typedef enum titan_async_message_kind {
   TITAN_ASYNC_MESSAGE_NIL,
   TITAN_ASYNC_MESSAGE_BOOLEAN,
@@ -24,7 +24,6 @@ typedef enum titan_async_message_kind {
 } titan_async_message_kind;
 
 typedef struct titan_async_message {
-  struct titan_async_message *next;
   titan_async_message_kind kind;
   lua_Integer integer;
   lua_Number number;
@@ -40,15 +39,20 @@ typedef struct titan_async_message {
   const void *entry;
 } titan_async_message;
 
-typedef struct titan_async_mailbox {
+typedef struct titan_async_receiver {
   void *handle;
-  void *mutex;
   int (*send)(void *);
-  void (*lock)(void *);
-  void (*unlock)(void *);
-  titan_async_message *first;
-  titan_async_message *last;
+  titan_async_message *message;
   int closed;
-} titan_async_mailbox;
+} titan_async_receiver;
+
+/* Titan's FFI cannot spell the compiler's generic atomic builtin. The supported
+ * GCC/Clang toolchains provide this exchange on a naturally aligned pointer.
+ * Publication transfers ownership: only the thread taking the old pointer may
+ * read/free it. Close is externally serialized with send, like handle lifetime. */
+static inline titan_async_message *titan_async_receiver_exchange(
+    titan_async_receiver *receiver, titan_async_message *message) {
+  return __atomic_exchange_n(&receiver->message, message, __ATOMIC_ACQ_REL);
+}
 
 #endif

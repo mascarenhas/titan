@@ -10,7 +10,7 @@ foreign import "errno.h"
 foreign import "stdint.h"
 foreign import "stdlib.h"
 foreign import "string.h"
-foreign import "async_mailbox_native.h"
+foreign import "async_receiver_native.h"
 local uv = import "titan.uv"
 local coroutine = import "titan.coroutine"
 local gc = import "titan.gc"
@@ -26,29 +26,19 @@ type SuspendCancelAction = function (): ()
 -- @usage async-io.md#transfer-values
 type TransferValue = transfer.TransferValue
 
---- A FIFO receiver whose opaque native handle can be sent across Lua states.
+--- A coalescing receiver whose opaque native handle can be sent across Lua states.
 -- @usage async-io.md#cross-state-receivers
 record Receiver
-  local native: foreign titan_async_mailbox
+  local native: foreign titan_async_receiver
   local native_handle: uv.async_t
   local handle_view: uv.handle_t
-  local mutex: uv.mutex_t
-  local mutex_live: boolean
-  local subscription: BufferedSubscription<|TransferValue, value|>?
+  local subscription: CoalescingSubscription<|TransferValue, value|>?
   local publish: (function (TransferValue): boolean)?
 end
 
--- These functions never recover a Lua/Titan owner. A sender owns its copied
--- node until insertion succeeds; a receiver detaches nodes before entering its
--- collector or subscription. Native wakeups may coalesce without losing data.
-local foreign function receiver_free_messages(message: *titan_async_message)
-  while message ~= nil do
-    local next = message.next
-    ffi.free(message)
-    message = next
-  end
-end
-
+-- Senders touch only native storage shared with the destination callback.
+-- The atomic slot owns one copied value; replacing or taking it transfers
+-- ownership of that allocation. No send-side queue or GC object is shared.
 local foreign function receiver_copy_message(input: *titan_async_message): *titan_async_message
   local length = 0 as foreign size_t
   local name_length = 0 as foreign size_t
@@ -75,7 +65,6 @@ local foreign function receiver_copy_message(input: *titan_async_message): *tita
     as foreign *titan_async_message
   if message == nil then return nil end
   message[0] = input[0]
-  message.next = nil
   do
     local bytes = (message + 1) as foreign *char
     message.bytes = bytes
@@ -94,57 +83,21 @@ local foreign function receiver_copy_message(input: *titan_async_message): *tita
   return message
 end
 
--- Positive statuses are local admission failures (1 allocation, 2 closed);
--- negative statuses are returned unchanged by the public native UV send entry.
-local foreign function receiver_send_native(mailbox: *titan_async_mailbox,
-                                     input: *titan_async_message): int
+-- Positive statuses are local failures (1 allocation, 2 closed). Callers must
+-- finish sends before close; the atomic exchange only synchronizes shared data.
+local foreign function receiver_send_native(receiver: *titan_async_receiver,
+                                            input: *titan_async_message): int
+  if receiver.closed ~= 0 then return 2 end
   local message = receiver_copy_message(input)
   if message == nil then return 1 end
-  mailbox.lock(mailbox.mutex)
-  if mailbox.closed ~= 0 then
-    mailbox.unlock(mailbox.mutex)
-    ffi.free(message)
-    return 2
-  end
-  local previous = mailbox.last
-  if previous ~= nil then previous.next = message
-  else mailbox.first = message end
-  mailbox.last = message
-  local status = mailbox.send(mailbox.handle)
-  if status < 0 then
-    mailbox.last = previous
-    if previous ~= nil then previous.next = nil
-    else mailbox.first = nil end
-  end
-  mailbox.unlock(mailbox.mutex)
-  if status < 0 then ffi.free(message) end
-  return status
+  local previous = ffi.titan_async_receiver_exchange(receiver, message)
+  ffi.free(previous)
+  return receiver.send(receiver.handle)
 end
 
-local foreign function receiver_take_messages(mailbox: *titan_async_mailbox): *titan_async_message
-  mailbox.lock(mailbox.mutex)
-  local messages = mailbox.first
-  mailbox.first = nil
-  mailbox.last = nil
-  mailbox.unlock(mailbox.mutex)
-  return messages
-end
-
-local foreign function receiver_disable_native(mailbox: *titan_async_mailbox)
-  mailbox.lock(mailbox.mutex)
-  mailbox.closed = 1
-  local messages = mailbox.first
-  mailbox.first = nil
-  mailbox.last = nil
-  mailbox.unlock(mailbox.mutex)
-  receiver_free_messages(messages)
-end
-
-local foreign function receiver_is_closed_native(mailbox: *titan_async_mailbox): int
-  mailbox.lock(mailbox.mutex)
-  local closed = mailbox.closed
-  mailbox.unlock(mailbox.mutex)
-  return closed
+local foreign function receiver_disable_native(receiver: *titan_async_receiver)
+  receiver.closed = 1
+  ffi.free(ffi.titan_async_receiver_exchange(receiver, nil))
 end
 
 local ASYNC_TAG: value = {}
@@ -4092,24 +4045,18 @@ end
 -- Runtime shutdown uses this same admission boundary before its generic UV
 -- close. The native handle's reserved .data remains owned by the UV binding.
 local function Receiver:disable()
-  if self.mutex_live and self.native.mutex ~= nil then
-    receiver_disable_native(self.native)
-  end
+  receiver_disable_native(self.native)
   local subscription? = self.subscription
   if subscription ~= nil then
-    defer subscription:drain_pending()
+    defer subscription.core:discard()
     subscription:stop()
   end
 end
 
--- The borrowed sender address cannot root this owner. Clients must retain it
--- until all senders are quiescent. Keeping the mutex through this finalizer
--- lets a retained, explicitly closed receiver reject a late send safely.
+-- lua_close runs finalizers even for rooted owners. Reclaim the copied packet
+-- there too; callers must already have stopped senders before state teardown.
 local function receiver_finalize(owner: Receiver)
-  if not owner.mutex_live then return end
-  if owner.native.mutex ~= nil then receiver_disable_native(owner.native) end
-  owner.mutex_live = false
-  owner.mutex:destroy()
+  receiver_disable_native(owner.native)
 end
 
 local function receiver_copy_bytes(bytes: foreign const *char,
@@ -4162,18 +4109,13 @@ local function receiver_value(message: foreign *titan_async_message): TransferVa
 end
 
 local function Receiver:deliver()
-  local messages = receiver_take_messages(self.native)
-  defer receiver_free_messages(messages)
-  while messages ~= nil do
-    local message = messages
-    local item = receiver_value(message)
-    if not self.publish(item) then return end
-    messages = message.next
-    ffi.free(message)
-  end
+  local message = ffi.titan_async_receiver_exchange(self.native, nil)
+  if message == nil then return end
+  defer ffi.free(message)
+  self.publish(receiver_value(message))
 end
 
---- Create a FIFO receiver without driving its Runtime or requiring a Task.
+--- Create a coalescing receiver without driving its Runtime or requiring a Task.
 -- @return Receiver retained by its native handle until close completes.
 -- @usage async-io.md#cross-state-receivers
 function receiver(): Receiver
@@ -4183,18 +4125,16 @@ function receiver(): Receiver
   end
   local handle = uv.async_t.new()
   local owner = Receiver {
-    native = foreign titan_async_mailbox.new(),
+    native = foreign titan_async_receiver.new(),
     native_handle = handle,
     handle_view = handle:as_handle_t(),
-    mutex = uv.mutex_t.new(),
-    mutex_live = false,
     subscription = nil,
     publish = nil
   }
   owner.native.closed = 1
   gc.finalizable(owner, receiver_finalize)
   do
-    owner.subscription = BufferedSubscription<|TransferValue, value|>.new(
+    owner.subscription = CoalescingSubscription<|TransferValue, value|>.new(
       function (publish, _fail, _finish)
         owner.publish = publish
         local actions = SubscriptionActions<|TransferValue|>(
@@ -4202,12 +4142,7 @@ function receiver(): Receiver
           function (_drain) owner:close() end)
         local callback = function (_: uv.async_t) owner:deliver() end
         uv.handle_set_data(owner.handle_view, owner)
-        owner.native.lock = uv.mutex_t.lock_function()
-        owner.native.unlock = uv.mutex_t.unlock_function()
         owner.native.send = uv.async_send_function()
-        check_status(owner.mutex:init(), "async.receiver.mutex")
-        owner.mutex_live = true
-        owner.native.mutex = owner.mutex:borrow()
         check_status(uv.async_init(runtime.loop, handle, callback), "async.receiver")
         owner.native.handle = handle:borrow()
         owner.native.closed = 0
@@ -4215,9 +4150,6 @@ function receiver(): Receiver
       end)
   catch
     owner:close()
-    -- Rejected native initialization has no close callback. Its unexported
-    -- mutex can retire immediately; accepted handles retain it until GC.
-    if not owner.handle_view:is_initialized() then receiver_finalize(owner) end
     raise
   end
   return owner
@@ -4230,7 +4162,7 @@ function Receiver:handle(): foreign *void
   return self.native
 end
 
---- Copy one transfer value into a receiver's FIFO and notify its owning loop.
+--- Replace the handle's shared value and notify its owning loop; sends may coalesce.
 -- @param handle Borrowed sender address whose Receiver remains retained.
 -- @param data Flat copied packet or borrowed native address.
 -- @usage async-io.md#cross-state-receivers
@@ -4295,18 +4227,18 @@ function send(handle: foreign *void, data: TransferValue)
     message.bytes = payload
     message.length = #payload
   end
-  local status = receiver_send_native(handle as foreign *titan_async_mailbox, message)
+  local status = receiver_send_native(handle as foreign *titan_async_receiver, message)
   if status == 1 then raise operation_error(uv.ENOMEM, "async.send") end
   if status == 2 then raise "receiver is closed" end
   check_status(status, "async.send")
 end
 
---- Wait for the next FIFO message; cancellation leaves the receiver reusable.
+--- Take the latest delivered value, or wait; newer callbacks replace unread values.
 -- @return One transfer value, including explicit nil and false variants.
 -- @usage async-io.md#cross-state-receivers
 function Receiver:wait(): TransferValue
   checkpoint()
-  if receiver_is_closed_native(self.native) ~= 0 then raise "receiver is closed" end
+  if self.native.closed ~= 0 then raise "receiver is closed" end
   local result = self.subscription:next()
   case result
   when item(message) then return message

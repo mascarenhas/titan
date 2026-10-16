@@ -71,6 +71,13 @@ Only UV owns libuv duplication/adoption and pending-request checks; domain
 adapters own semantic state and fresh destination callbacks. The transport
 copies bytes without following native pointers.
 
+Receiver delivery is lossy: native notifications coalesce and callbacks replace unread
+values. Packet replacement frees only transport storage, without invoking
+resource disposal hooks. A successful send therefore does not establish
+exactly-once delivery or adoption. This applies equally to native tokens hidden
+inside closure snapshots; the application must retain an ownership protocol
+outside the lossy packet.
+
 Preflight and duplication failures retain endpoint ownership. io preserves its
 first detached pipe when a second duplication fails. Other post-detach encoding
 failures can terminalize the composite after explicit disposal. This is not a

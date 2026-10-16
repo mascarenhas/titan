@@ -120,8 +120,8 @@ transaction: save `lua_gettop(L)`, defer exact restoration, reserve one slot,
 push the complete native byte range with `lua_pushlstring`, then copy that
 slot into traced Titan `value` before returning it as a string. The input is
 owned native message storage, not a borrowed string from another collector.
-The delivery callback retains its detached message list through the copy and
-frees it on success or failure, including failure during allocation or
+The delivery callback atomically takes the Receiver's pending packet, retains
+that packet through the copy, and frees it on success or failure, including failure during allocation or
 publication. No foreign sender accesses `L`, and the new helper has no registry
 or arbitrary Lua-call authority. Async's existing private runtime registry and
 error-frame operations retain their separate continuation-runtime contract.

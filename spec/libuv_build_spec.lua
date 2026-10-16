@@ -1019,7 +1019,7 @@ esac
             local inputs = stdlib_source_files()
             inputs[#inputs + 1] = "titan/sqlite3/native.h"
             inputs[#inputs + 1] = "titan/lua/native.h"
-            inputs[#inputs + 1] = "titan/async_mailbox_native.h"
+            inputs[#inputs + 1] = "titan/async_receiver_native.h"
             inputs[#inputs + 1] = "prepared"
             local folders = { uv = true, http = true, websocket = true, peg = true,
                 string = true, sqlite3 = true, json = true, lua = true, protobuf = true }
