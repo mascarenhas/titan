@@ -19,8 +19,8 @@ See [output-directory routing](output-directory.md) for configuration isolation.
 Linux runs on pushes. Four job definitions produce five runner executions:
 `build-compiler` and `sanitizer` start independently; after `build-compiler`,
 two `test-linux-compiler` shard pairs and `native-coverage` start in parallel.
-Preparation has a 30-minute timeout, compiler pairs and native coverage 45
-minutes, and the independent cold sanitizer build 75 minutes.
+Preparation has a 30-minute timeout, compiler pairs 45 minutes, native coverage
+60 minutes, and the independent cold sanitizer build 75 minutes.
 
 Linux sets `MAKEFLAGS=-j2` and `TITAN_JOBS=2` for its two-CPU runners. Native
 Make prerequisites may overlap; each compiler process overlaps only generated-C
@@ -132,6 +132,12 @@ Save after bundled tests/smoke and before the system-OpenSSL canary. Every
 profile-bearing native/configuration cache includes profile identity.
 
 ## Sanitizer ownership and failure diagnostics
+
+The disposable Linux sanitizer runner removes its unused preinstalled Android
+SDK at `/usr/local/lib/android/sdk` before building, and reports disk space
+before and after. Instrumented providers and static child fixtures need room
+for their link outputs. Make-owned runtime/provider archives, generated code,
+and diagnostic snapshots remain available throughout the gates.
 
 The sanitizer owns an independent ASan+UBSan Lua, libbacktrace, libuv, llhttp,
 OpenSSL, and Titan tree; it never consumes the ordinary compiler artifact.

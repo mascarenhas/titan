@@ -5219,7 +5219,7 @@ done
             for _, contract in ipairs({
                 "name: stdlib build, tests and coverage (ubuntu-24.04, GCC 14)",
                 "needs: build-compiler", "runs-on: ubicloud-standard-2",
-                "timeout-minutes: 45", "\n      CC: gcc-14\n",
+                "timeout-minutes: 60", "\n      CC: gcc-14\n",
                 "\n      GCOV: gcov-14\n", "gcc-14 clang-format python3-venv",
                 "name: titan-linux-prepared.tar.gz",
                 'pip" install -r scripts/titan-coverage-requirements.txt',
