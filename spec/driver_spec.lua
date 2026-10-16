@@ -1646,19 +1646,19 @@ describe("compiler installation discovery", function()
             checkout))
     end)
 
-    it("requires exactly the two runtime archive members", function()
+    it("requires exactly the three runtime archive members", function()
         assert.is_true(driver.runtime_archive_members_are_exact(
-            "titan.o\nminicoro.o\n"))
+            "titan.o\nminicoro.o\ntransfer.o\n"))
         assert.is_true(driver.runtime_archive_members_are_exact(
-            "__.SYMDEF SORTED\ntitan.o\nminicoro.o\n"))
+            "__.SYMDEF SORTED\ntitan.o\nminicoro.o\ntransfer.o\n"))
         assert.is_true(driver.runtime_archive_members_are_exact(
-            "__.SYMDEF_64\ntitan.o\nminicoro.o\n"))
+            "__.SYMDEF_64\ntitan.o\nminicoro.o\ntransfer.o\n"))
         assert.is_false(driver.runtime_archive_members_are_exact(
-            "titan.o\nminicoro.o\ntitan_uv.o\n"))
+            "titan.o\nminicoro.o\ntransfer.o\ntitan_uv.o\n"))
         assert.is_false(driver.runtime_archive_members_are_exact(
-            "__.SYMDEF\ntitan.o\nminicoro.o\nstale.o\n"))
+            "__.SYMDEF\ntitan.o\nminicoro.o\ntransfer.o\nstale.o\n"))
         assert.is_false(driver.runtime_archive_members_are_exact(
-            "minicoro.o\ntitan.o\n"))
+            "minicoro.o\ntitan.o\ntransfer.o\n"))
     end)
 
     posix_model_it("links source builds through the complete runtime archive", function()
@@ -2084,7 +2084,7 @@ describe("portable C99 compiled-interface validation", function()
         reject(variable_module(types.CPointer(cint, { "volatile" })),
             "portable C pointer has a noncanonical shape")
         reject(variable_module(types.CTypedef("local_int", cint, {})),
-            "Type.CTypedef is not valid in a value-facing type graph")
+            "C typedef has an invalid declaration identity or target")
 
         local private = types.CInteger("int", true, 3, 32)
         private._c_numeric = {}

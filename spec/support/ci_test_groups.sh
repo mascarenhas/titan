@@ -136,6 +136,7 @@ while IFS= read -r test_file; do
     case "$test_file" in
         spec/asan_generated_c_context_spec.lua | \
         spec/dense_array_runtime_spec.lua | \
+        spec/transfer_runtime_spec.lua | \
         spec/libuv_build_spec.lua | \
         spec/lpeglabel_build_spec.lua | \
         spec/minicoro_spec.lua | \

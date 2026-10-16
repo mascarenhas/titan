@@ -252,34 +252,64 @@ end
 -- closed schema, this keeps graph traversal independent of Lua hash seeds.
 -- GC slots intentionally carry no type graph: their checked type already
 -- belongs to the unchanged semantic interface.
-local function type_recipe(typ)
+local function type_recipe(typ, seen)
+    if not seen and typ._tag:match("^Type%.C")
+       and not types.is_exportable_c_type_graph(typ) then
+        fail("public native member has no portable or exportable C declaration")
+    end
+    seen = seen or {}
+    if seen[typ] then return seen[typ] end
     local tag = typ._tag
     if tag == "Type.Nil" or tag == "Type.Boolean" or tag == "Type.Integer"
        or tag == "Type.Float" then return { tag }
-    elseif tag == "Type.Option" then return { tag, type_recipe(typ.base) } end
-    if not types.is_portable_c_type_graph(typ) then
-        fail("public native member has no portable C declaration")
-    end
-    if tag == "Type.CVoid" then return { tag }
+    elseif tag == "Type.Option" then return { tag, type_recipe(typ.base, seen) } end
+    local recipe = { tag }
+    seen[typ] = recipe
+    if tag == "Type.CVoid" then return recipe
     elseif tag == "Type.CInteger" then
-        return { tag, typ.spelling, typ.signed, typ.rank, typ.bits }
-    elseif tag == "Type.CFloat" then return { tag, typ.spelling }
+        recipe[2], recipe[3], recipe[4], recipe[5] =
+            typ.spelling, typ.signed, typ.rank, typ.bits
+        return recipe
+    elseif tag == "Type.CFloat" then
+        recipe[2] = typ.spelling
+        return recipe
     elseif tag == "Type.CPointer" then
         local quals = {}
         for i, qualifier in ipairs(typ.quals) do quals[i] = qualifier end
         local pointee = types.is_c_lua_state(typ.pointee)
-            and { "lua_State" } or type_recipe(typ.pointee)
-        return { tag, pointee, quals }
+            and { "lua_State" } or type_recipe(typ.pointee, seen)
+        recipe[2], recipe[3] = pointee, quals
+        return recipe
     elseif tag == "Type.CFunction" then
         local params = {}
-        for i, param in ipairs(typ.params) do params[i] = type_recipe(param) end
+        for i, param in ipairs(typ.params) do params[i] = type_recipe(param, seen) end
         -- Portable C functions have no optional ABI annotation.
-        return { tag, params, type_recipe(typ.ret), false }
+        recipe[2], recipe[3], recipe[4] = params, type_recipe(typ.ret, seen), false
+        return recipe
+    elseif tag == "Type.CArray" then
+        recipe[2], recipe[3], recipe[4] = type_recipe(typ.elem, seen), typ.len, typ.quals
+        return recipe
+    elseif tag == "Type.CTypedef" then
+        recipe[2], recipe[3], recipe[4], recipe[5] = typ.name,
+            type_recipe(typ.target, seen), typ.quals, types.c_declaration_origin(typ)
+        return recipe
+    elseif tag == "Type.CStruct" or tag == "Type.CUnion" then
+        recipe[2], recipe[3], recipe[4] = typ.cname or false,
+            typ.tagname or false, typ.typedef or false
+        recipe[5], recipe[6], recipe[7], recipe[8] = {}, typ.complete,
+            typ.has_fam or false, types.c_declaration_origin(typ)
+        for index, field in ipairs(typ.fields) do
+            recipe[5][index] = {field.name, type_recipe(field.type, seen),
+                field.bitfield or false, field.flexible_array}
+        end
+        return recipe
     end
     fail("unsupported public native declaration " .. tostring(tag))
 end
 
-local function recipe_type(recipe, depth)
+local function recipe_type(recipe, depth, seen)
+    seen = seen or {}
+    if seen[recipe] then return seen[recipe] end
     depth = (depth or 0) + 1
     if depth > 64 then fail("native declaration is too deep") end
     array(recipe, nil, "native declaration")
@@ -291,7 +321,7 @@ local function recipe_type(recipe, depth)
         typ = types[tag:sub(6)]()
     elseif tag == "Type.Option" then
         array(recipe, 2, "optional declaration")
-        typ = types.Option(recipe_type(recipe[2], depth))
+        typ = types.Option(recipe_type(recipe[2], depth, seen))
     elseif tag == "Type.CInteger" then
         array(recipe, 5, "C integer declaration")
         typ = types.CInteger(recipe[2], recipe[3], recipe[4], recipe[5])
@@ -305,17 +335,45 @@ local function recipe_type(recipe, depth)
         if type(recipe[2]) == "table" and recipe[2][1] == "lua_State" then
             array(recipe[2], 1, "Lua state declaration")
             pointee = types.CStruct(nil, "lua_State", nil, {}, false, false)
-        else pointee = recipe_type(recipe[2], depth) end
+        else pointee = recipe_type(recipe[2], depth, seen) end
         typ = types.CPointer(pointee, recipe[3])
     elseif tag == "Type.CFunction" then
         array(recipe, 4, "C function declaration")
         array(recipe[2], nil, "C function parameters")
         local params = {}
-        for i, param in ipairs(recipe[2]) do params[i] = recipe_type(param, depth) end
-        typ = types.CFunction(params, recipe_type(recipe[3], depth), recipe[4], nil)
+        for i, param in ipairs(recipe[2]) do params[i] = recipe_type(param, depth, seen) end
+        typ = types.CFunction(params, recipe_type(recipe[3], depth, seen), recipe[4], nil)
+    elseif tag == "Type.CArray" then
+        array(recipe, 4, "C array declaration")
+        typ = types.CArray(recipe_type(recipe[2], depth, seen), recipe[3], recipe[4])
+    elseif tag == "Type.CTypedef" then
+        array(recipe, 5, "C typedef declaration")
+        typ = types.CTypedef(recipe[2], nil, recipe[4], recipe[5])
+        seen[recipe] = typ
+        typ.target = recipe_type(recipe[3], depth, seen)
+    elseif tag == "Type.CStruct" or tag == "Type.CUnion" then
+        array(recipe, 8, "C aggregate declaration")
+        array(recipe[5], nil, "C aggregate fields")
+        if tag == "Type.CStruct" then
+            typ = types.CStruct(recipe[2] or nil, recipe[3] or nil,
+                recipe[4] or nil, {}, recipe[6], recipe[7], recipe[8])
+        else
+            if recipe[7] ~= false then fail("C union has a flexible-array flag") end
+            typ = types.CUnion(recipe[2] or nil, recipe[3] or nil,
+                recipe[4] or nil, {}, recipe[6], recipe[8])
+        end
+        seen[recipe] = typ
+        for index, field in ipairs(recipe[5]) do
+            array(field, 4, "C aggregate field")
+            local declared = types.CField(typ, field[1],
+                recipe_type(field[2], depth, seen), field[3] or nil, field[4])
+            if typ.fields[declared.name] then fail("duplicate C aggregate field") end
+            typ.fields[index], typ.fields[declared.name] = declared, declared
+        end
     else fail("unknown native declaration " .. tostring(tag)) end
-    if tag:match("^Type%.C") and not types.is_portable_c_type_graph(typ) then
-        fail("invalid portable C declaration")
+    if depth == 1 and tag:match("^Type%.C")
+       and not types.is_exportable_c_type_graph(typ) then
+        fail("invalid exportable C declaration")
     end
     return typ
 end

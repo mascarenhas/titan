@@ -1,0 +1,176 @@
+--- Schema-directed Protocol Buffers encoding of public Titan record and union graphs.
+-- @module titan.protobuf
+-- @usage standard-library-protobuf.md
+
+local reflect = import "reflect"
+local string = import "string"
+foreign import "native.h"
+
+local function field_number(ordinal: integer): integer
+  if ordinal >= 19000 then return ordinal + 1000 end
+  return ordinal
+end
+
+local function field_ordinal(number: integer): integer
+  if number >= 20000 then return number - 1000 end
+  if number >= 19000 then return 0 end
+  return number
+end
+
+local function require_depth(depth: integer)
+  if depth > 128 then raise "protobuf: nesting exceeds 128 levels" end
+end
+
+local function resolve_type(descriptor: reflect.Type): reflect.Type
+  local current = descriptor
+  for index = 1, 128 do
+    case current
+    when is_named(named) then
+      local found? = reflect.find_nominal(named.name)
+      if found == nil then raise "protobuf: unknown nominal type " .. named.name end
+      current = named:resolve()
+    when is_foreign_named(named) then current = named:resolve()
+    when is_foreign_typedef{target_descriptor} then current = target_descriptor
+    else return current
+    end
+  end
+  raise "protobuf: cyclic type alias"
+end
+
+local function require_record(descriptor: reflect.RecordType)
+  if not descriptor.is_public or not descriptor.all_public then
+    raise "protobuf: record must be public with only public fields: " .. descriptor.name
+  end
+end
+
+local function require_union(descriptor: reflect.UnionType)
+  if not descriptor.is_public or not descriptor.all_public then
+    raise "protobuf: union must be public with only public variants: " .. descriptor.name
+  end
+end
+
+local function require_struct(descriptor: reflect.ForeignStructType)
+  if not descriptor.is_complete or descriptor.has_fam then
+    raise "protobuf: foreign struct must be complete without a flexible array"
+  end
+end
+
+local function require_foreign_array(length: value)
+  if length == nil or length == "" then
+    raise "protobuf: foreign array requires a fixed extent"
+  end
+end
+
+local function check_integer(number: integer, spelling: string,
+                              signed: boolean, bits: integer)
+  if bits < 1 or bits > 64 then raise "protobuf: unsupported foreign integer width" end
+  if spelling == "_Bool" or spelling == "bool" then
+    if number ~= 0 and number ~= 1 then raise "protobuf: foreign boolean out of range" end
+  end
+  if bits < 64 then
+    if signed then
+      local maximum = (1 << (bits - 1)) - 1
+      if number < -maximum - 1 or number > maximum then
+        raise "protobuf: signed integer out of range"
+      end
+    elseif number < 0 or number > (1 << bits) - 1 then
+      raise "protobuf: unsigned integer out of range"
+    end
+  end
+end
+
+local function write_varint(output: string.StringWriter, bits: integer)
+  local remaining = bits
+  while remaining < 0 or remaining >= 128 do
+    output:write(string.char((remaining & 127) | 128))
+    remaining = remaining >> 7
+  end
+  output:write(string.char(remaining))
+end
+
+local function write_key(output: string.StringWriter, number: integer, wire: integer)
+  if number < 1 or number > 536870911 then raise "protobuf: too many fields" end
+  write_varint(output, (number << 3) | wire)
+end
+
+local function write_bytes(output: string.StringWriter, number: integer, bytes: string)
+  if #bytes > 2147483647 then raise "protobuf: message exceeds 2 GiB" end
+  write_key(output, number, 2)
+  write_varint(output, #bytes)
+  output:write(bytes)
+end
+
+local function zigzag(number: integer): integer
+  if number < 0 then return ~(number << 1) end
+  return number << 1
+end
+
+local function unzigzag(number: integer): integer
+  return (number >> 1) ~ -(number & 1)
+end
+
+--- Serialize a public record or union instance, rejecting cycles and unsupported encountered values.
+-- @param candidate Public record or union instance to traverse.
+-- @return Protocol Buffers wire bytes for the root message.
+-- @usage standard-library-protobuf.md#api
+function serialize(candidate: value): string
+  local encoder = Encoder({})
+  local bytes = ""
+  case reflect.inspect(candidate)
+  when is_record(record_value) then bytes = encoder:record_value(record_value, 1)
+  when is_union(union_value) then bytes = encoder:union_value(union_value, 1)
+  else raise "protobuf: root must be a public record or union"
+  end
+  if #bytes > 2147483647 then raise "protobuf: message exceeds 2 GiB" end
+  return bytes
+end
+
+--- Decode a record or union using its initialized nominal descriptor and raw construction.
+-- @param bytes Protocol Buffers wire bytes for the root message.
+-- @param descriptor Registered public record or union descriptor.
+-- @return Fresh nominal value and recursively copied fields.
+-- @usage standard-library-protobuf.md#api
+function deserialize(bytes: string, descriptor: reflect.Type): value
+  if #bytes > 2147483647 then raise "protobuf: message exceeds 2 GiB" end
+  local resolved = resolve_type(descriptor)
+  case resolved
+  when is_record(record_type) then return decode_record(bytes, record_type, 1)
+  when is_union(union_type) then return decode_union(bytes, union_type, 1)
+  else raise "protobuf: root descriptor must be a public record or union"
+  end
+end
+
+--- Resolve an initialized nominal type by name for cross-state transfer decoding.
+-- @param bytes Protocol Buffers wire bytes for the root message.
+-- @param name Fully qualified nominal name already registered in this state.
+-- @param is_union True for a union, false for a record.
+-- @return Fresh nominal value of the requested kind.
+-- @usage standard-library-protobuf.md#api
+function deserialize_nominal(bytes: string, name: string, is_union: boolean): value
+  local found? = reflect.find_nominal(name)
+  if found == nil then raise "protobuf: unknown nominal type " .. name end
+  case found
+  when is_record(descriptor) then
+    if not is_union then return deserialize(bytes, reflect.Type.is_record(descriptor)) end
+  when is_union(descriptor) then
+    if is_union then return deserialize(bytes, reflect.Type.is_union(descriptor)) end
+  end
+  raise "protobuf: nominal kind mismatch for " .. name
+end
+
+--- Render a complete proto3 schema describing the public record or union wire format.
+-- @param descriptor Public root record or union descriptor.
+-- @return A complete, pretty-printed proto3 schema with deterministic identifiers.
+-- @usage standard-library-protobuf.md#wire-mapping
+function schema(descriptor: reflect.Type): string
+  local builder = Schema({}, string.writer())
+  local resolved = resolve_type(descriptor)
+  case resolved
+  when is_record() then
+  when is_union() then
+  else raise "protobuf: root descriptor must be a public record or union"
+  end
+  builder.output:write("syntax = \"proto3\";\n\n")
+  builder:type_name(resolved, "Root", 1)
+  return builder.output:drain()
+end

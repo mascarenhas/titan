@@ -2,10 +2,13 @@
 #define TITAN_H
 
 #include <float.h>
+#include <errno.h>
 #include <math.h>
 #include <setjmp.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
 
 #include "llimits.h"
 #include "lobject.h"
@@ -20,6 +23,7 @@
 ** runtime
 */
 #include "titan/ffi.h"
+#include "transfer.h"
 
 /*
 ** ===========================================================================
@@ -445,6 +449,64 @@ TITAN_RUNTIME_FUNC lu_byte titan_array_get(Table *backing, lua_Integer index,
                                   TValue *result);
 TITAN_RUNTIME_FUNC void titan_array_set_stack(lua_State *L, Table *backing,
                                      lua_Integer index, int value_index);
+
+/* UCRT's printf family narrows long double to double on x86_64. Select the
+** MinGW implementations explicitly without changing unrelated stdio policy. */
+static l_inline int titan_reflect_format_long_double(char *buffer,
+    size_t capacity, long double value) {
+#ifdef __MINGW32__
+  return __mingw_snprintf(buffer, capacity, "%La", value);
+#else
+  return snprintf(buffer, capacity, "%La", value);
+#endif
+}
+
+static l_inline long double titan_reflect_parse_long_double(const char *text,
+    char **end) {
+#ifdef __MINGW32__
+  /* MinGW's ordinary strtold is already an alias to this wide parser. */
+  return __mingw_strtold(text, end);
+#else
+  return strtold(text, end);
+#endif
+}
+
+/* Reflected native projections own ordinary const Arrays. The generated caller
+** keeps every aggregate on the Lua stack until it is installed in its parent. */
+static l_inline Table *titan_reflect_projection_array(lua_State *L,
+                                                     lua_Unsigned count) {
+  if (count > TITAN_ARRAY_MAX_CAPACITY)
+    luaL_error(L, "native projection exceeds Titan Array capacity");
+  Table *mt = titan_const_array_metatable(L);
+  luaL_checkstack(L, 2, "reflection projection stack overflow");
+  StkId result = L->top.p++;
+  setnilvalue(s2v(result));
+  Table *array = titan_const_array_new(L, mt, count, result);
+  titan_array_set_length(array, count);
+  setuvalue(L, s2v(L->top.p - 1), titan_array_require_proxy(array));
+  return array;
+}
+
+static l_inline void titan_reflect_projection_put(lua_State *L, Table *array,
+                                                  lua_Integer index) {
+  TValue value = lua_totvalue(L, -1);
+  obj2arr(array, cast_uint(index), &value);
+  luaC_barrierback(L, obj2gco(array), &value);
+  lua_pop(L, 1);
+}
+
+static l_inline Table *titan_reflect_projection_input(lua_State *L,
+    const TValue *value, lua_Unsigned arity) {
+  Table *mutable_mt, *const_mt;
+  titan_array_cached_metatables(L, &mutable_mt, &const_mt);
+  Table *array = titan_array_try_backing_either(value, mutable_mt, const_mt);
+  if (array == NULL)
+    luaL_error(L, "reflected construction requires an Array projection");
+  /* Trailing nil positions have no Array length, but still have schema arity. */
+  if (titan_array_length(array) > arity)
+    luaL_error(L, "reflected construction has too many values");
+  return array;
+}
 
 static l_inline Table *titan_ensure_metatables_table(lua_State *L) {
   luaL_checkstack(L, 1, "stack overflow creating metatables table");

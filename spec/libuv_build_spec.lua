@@ -21,14 +21,14 @@ local UV_TYPES_FIXTURE =
 local STDLIB_MODULES = {
     "coroutine", "uv", "async", "timer", "io", "fs", "net", "ssl",
     "url", "http", "websocket", "os", "path", "peg", "string", "math", "lua", "iteration", "gc",
-    "test", "reflect", "sqlite3", "json",
+    "test", "reflect", "sqlite3", "json", "protobuf",
 }
 local STDLIB_ROOTS = {
     "titan.coroutine", "titan.uv", "titan.async", "titan.timer",
     "titan.io", "titan.fs", "titan.net", "titan.ssl", "titan.url",
     "titan.http", "titan.websocket", "titan.os", "titan.path", "titan.peg", "titan.string", "titan.math",
     "titan.lua", "titan.iteration", "titan.gc", "titan.test", "titan.reflect",
-    "titan.sqlite3", "titan.json",
+    "titan.sqlite3", "titan.json", "titan.protobuf",
 }
 local STDLIB_SHIMS = {
     "titan/coroutine.lua", "titan/uv.lua", "titan/async.lua",
@@ -36,7 +36,7 @@ local STDLIB_SHIMS = {
     "titan/ssl.lua", "titan/url.lua", "titan/http.lua", "titan/websocket.lua", "titan/os.lua", "titan/path.lua",
     "titan/peg.lua", "titan/string.lua", "titan/math.lua", "titan/lua.lua",
     "titan/iteration.lua", "titan/gc.lua", "titan/test.lua", "titan/reflect.lua",
-    "titan/sqlite3.lua", "titan/json.lua",
+    "titan/sqlite3.lua", "titan/json.lua", "titan/protobuf.lua",
 }
 local LPEGLABEL_INCLUDE =
     "-I" .. lfs.currentdir() .. "/vendor/lpeglabel"
@@ -547,6 +547,7 @@ local function stdlib_source_files()
         ["$(WEBSOCKET_TITAN_SOURCES)"] = "WEBSOCKET_TITAN_SOURCES",
         ["$(SQLITE3_TITAN_SOURCES)"] = "SQLITE3_TITAN_SOURCES",
         ["$(JSON_TITAN_SOURCES)"] = "JSON_TITAN_SOURCES",
+        ["$(PROTOBUF_TITAN_SOURCES)"] = "PROTOBUF_TITAN_SOURCES",
         ["$(LUA_TITAN_SOURCES)"] = "LUA_TITAN_SOURCES",
     }
     for _, source in ipairs(makefile_words("STDLIB_TITAN_SOURCES")) do
@@ -1021,7 +1022,7 @@ esac
             inputs[#inputs + 1] = "titan/async_mailbox_native.h"
             inputs[#inputs + 1] = "prepared"
             local folders = { uv = true, http = true, websocket = true, peg = true,
-                string = true, sqlite3 = true, json = true, lua = true }
+                string = true, sqlite3 = true, json = true, lua = true, protobuf = true }
             local callbacks = { coroutine = true, uv = true, async = true, fs = true,
                 http = true, sqlite3 = true, lua = true }
             local outputs, objects = {}, {}
@@ -1108,7 +1109,7 @@ esac
             assert(lfs.touch(root .. "/titan/uv/tcp.titan", old + 2, old + 2))
             assert.same({ uv = true, async = true, timer = true, os = true, io = true,
                 fs = true, net = true, ssl = true, http = true, websocket = true, lua = true,
-                reflect = true, sqlite3 = true, json = true }, build())
+                sqlite3 = true }, build())
             assert.same({}, build())
             assert(os.remove(root .. "/out/titan/test.ffi.h"))
             assert.same({ test = true }, build())
@@ -1120,8 +1121,7 @@ esac
             assert.same({ sqlite3 = true }, build())
             assert(lfs.touch(root .. "/titan/lua/native.h", os.time(), os.time()))
             assert(lfs.touch(root .. "/" .. objects.lua, old + 3, old + 3))
-            assert.same({ lua = true, reflect = true, sqlite3 = true,
-                json = true }, build())
+            assert.same({ lua = true }, build())
         end, debug.traceback)
         remove_tree(root)
         if not tested then error(test_error, 0) end
@@ -1145,6 +1145,7 @@ esac
                 "prefix/lib/luarocks/rocks-5.5/titan/0.6.0-1/bin/titanc",
                 "prefix/share/lua/5.5/titan-compiler/driver.lua",
                 "prefix/include/minicoro.h", "prefix/include/titan.h",
+                "prefix/include/transfer.h",
                 "prefix/include/titan/ffi.h",
                 "prefix/src/lua-5.5.1/lua.h", "prefix/src/lua-5.5.1/lobject.h",
                 "prefix/src/lua-5.5.1/lua.c",
@@ -1246,7 +1247,7 @@ esac
                 "TITAN_RUNTIME_LUA_LIB=" .. prefix .. "/lib/liblua.a",
                 "LIBBT_LIB=" .. prefix .. "/lib/libbacktrace.a",
                 "TITAN_SDK_ROOT_HEADERS=" .. prefix .. "/include/minicoro.h " ..
-                    prefix .. "/include/titan.h",
+                    prefix .. "/include/titan.h " .. prefix .. "/include/transfer.h",
                 "TITAN_SDK_NAMESPACED_HEADERS=" .. prefix .. "/include/titan/ffi.h",
                 "LIBUV_SRC_DIR=native", "LLHTTP_HEADER=native/llhttp.h",
                 "SQLITE3_HEADER=native/sqlite3.h",
@@ -1258,6 +1259,7 @@ esac
                 { "prefix/lib/titan/0.6/libtitan.a", "lib/titan/0.6/libtitan.a" },
                 { "prefix/lib/libbacktrace.a", "lib/libbacktrace.a" },
                 { "prefix/lib/liblua.a", "lib/liblua.a" },
+                { "prefix/include/transfer.h", "include/transfer.h" },
                 { "prefix/src/lua-5.5.1/lua.c", "src/lua-5.5.1/lua.c" },
                 { "native/include/uv.h", "include/uv.h" },
                 { "native/include/uv/version.h", "include/uv/version.h" },
@@ -1332,6 +1334,7 @@ esac
                 "prefix/lib/luarocks/rocks-5.5/titan/0.6.0-1/bin/titanc",
                 "prefix/share/lua/5.5/titan-compiler/driver.lua",
                 "prefix/include/titan.h",
+                "prefix/include/transfer.h",
             }) do
                 age_build()
                 assert(lfs.touch(root .. "/" .. changed, old + 2, old + 2))
@@ -2074,7 +2077,7 @@ int main(void) {
             }) do
                 assert.falsy(makefile:find(retired, 1, true), retired)
             end
-            assert.same({ "$(RUNTIME_O)", "$(MINICORO_O)" },
+            assert.same({ "$(RUNTIME_O)", "$(MINICORO_O)", "$(TRANSFER_O)" },
                 makefile_words("TITAN_RUNTIME_OBJECTS"))
 
         end)
@@ -2330,6 +2333,8 @@ int main(void) {
                 "titan/json/json.titan", "titan/json/parser.titan",
                 "titan/json/decoder.titan", "titan/json/writer.titan",
                 "titan/json/numbers.titan",
+                "titan/protobuf/protobuf.titan", "titan/protobuf/encoder.titan",
+                "titan/protobuf/decoder.titan", "titan/protobuf/schema.titan",
             }, stdlib_source_files())
         end)
 
@@ -2672,11 +2677,11 @@ int main(void) {
         assert.truthy(closed, close_error)
     end)
 
-    it("pins current metadata for all twenty-three standard modules",
+    it("pins current metadata for all twenty-four standard modules",
         function()
             local expected = assert(loadfile(STDLIB_TYPES_FIXTURE))()
             local expected_uv = assert(loadfile(UV_TYPES_FIXTURE))()
-            assert.equal(23, #STDLIB_ROOTS)
+            assert.equal(24, #STDLIB_ROOTS)
             assert.equal(expected.uv, expected_uv,
                 "standalone titan.uv metadata fixture is stale")
 
@@ -2714,11 +2719,11 @@ int main(void) {
             end
         end)
 
-    it("exports twenty-four DSO openers for twenty-three standard modules",
+    it("exports twenty-five DSO openers for twenty-four standard modules",
         function()
-            assert.equal(23, #STDLIB_MODULES)
-            assert.equal(23, #STDLIB_ROOTS)
-            assert.equal(23, #STDLIB_SHIMS)
+            assert.equal(24, #STDLIB_MODULES)
+            assert.equal(24, #STDLIB_ROOTS)
+            assert.equal(24, #STDLIB_SHIMS)
 
             local container = installed_stdlib_container()
             local ok, output, why, code
@@ -2750,7 +2755,7 @@ int main(void) {
                     found[symbol] = true
                 end
             end
-            assert.equal(24, (function()
+            assert.equal(25, (function()
                 local count = 0
                 for _ in pairs(found) do count = count + 1 end
                 return count
@@ -3002,7 +3007,7 @@ int main(void) {
                 driver_source)
             local _, include_count = makefile:gsub(
                 "%-I %$%(TITAN_RUNTIME_LUA_SOURCE_PATH%)", "")
-            assert.equal(2, include_count, makefile)
+            assert.equal(3, include_count, makefile)
         end)
 
     it("keeps the private Lua bootstrap separate from the runtime archive",
@@ -3020,7 +3025,7 @@ int main(void) {
                 1, true), rule)
             for _, forbidden in ipairs({
                 "$(TITAN_RUNTIME_LIB)", "$(LIBBT_LIB)", "$(RUNTIME_O)",
-                "$(MINICORO_O)", "$(UV_O)", "$(LPEGLABEL_ARCHIVE)",
+                "$(MINICORO_O)", "$(TRANSFER_O)", "$(UV_O)", "$(LPEGLABEL_ARCHIVE)",
             }) do
                 assert.falsy(rule:find(forbidden, 1, true),
                     forbidden .. " in:\n" .. rule)
@@ -3327,7 +3332,7 @@ esac
                 "titan/iteration.titan", "titan/gc.titan", "titan/test.titan",
             }
             for _, ensemble in ipairs({
-                "UV_TITAN_SOURCES", "SQLITE3_TITAN_SOURCES", "JSON_TITAN_SOURCES",
+                "UV_TITAN_SOURCES", "SQLITE3_TITAN_SOURCES", "JSON_TITAN_SOURCES", "PROTOBUF_TITAN_SOURCES",
                 "WEBSOCKET_TITAN_SOURCES", "LUA_TITAN_SOURCES",
                 "SQLITE3_TITAN_HEADERS", "STRING_TITAN_HEADERS", "LUA_TITAN_HEADERS",
             }) do
@@ -3983,7 +3988,7 @@ printf '%s\0' "$@" > "$TITAN_SELECTOR_ARGV_LOG"
                 for shard = 1, 5 do
                     expected_total = expected_total + #expected[shard]
                 end
-                assert.equal(155, expected_total)
+                assert.equal(158, expected_total)
                 assert.equal(expected_total, total)
 
                 local complete_log = root .. "/complete"
@@ -4976,6 +4981,7 @@ done
             for _, retained in ipairs({
                 "spec/asan_generated_c_context_spec.lua",
                 "spec/dense_array_runtime_spec.lua",
+                "spec/transfer_runtime_spec.lua",
                 "spec/libuv_build_spec.lua",
                 "spec/lpeglabel_build_spec.lua",
                 "spec/minicoro_spec.lua",
@@ -5356,7 +5362,7 @@ done
                 1, true), workflow)
             assert.truthy(workflow:find(
                 "for module in coroutine uv async timer io fs net ssl url " ..
-                "http websocket os path peg string math lua iteration gc test reflect sqlite3 json; do",
+                "http websocket os path peg string math lua iteration gc test reflect sqlite3 json protobuf; do",
                 1, true), workflow)
             assert.truthy(workflow:find(
                 'test ! -e "$PREFIX/share/titan/0.6/src/titan/test.titan"',
@@ -5372,6 +5378,7 @@ done
                 "compiler_isolated_coverage_tests=()",
                 "spec/asan_generated_c_context_spec.lua",
                 "spec/dense_array_runtime_spec.lua",
+                "spec/transfer_runtime_spec.lua",
                 "spec/libuv_build_spec.lua",
                 "spec/lpeglabel_build_spec.lua",
                 "spec/minicoro_spec.lua",
@@ -5500,8 +5507,8 @@ done
                     assert.is_true(tonumber(seconds) >= 0)
                 end
             end
-            assert.same({ 40, 28, 40, 39 }, shard_counts)
-            assert.equal(147, assigned_count)
+            assert.same({ 41, 29, 40, 40 }, shard_counts)
+            assert.equal(150, assigned_count)
             local integration_count = 0
             for line in read_file(
                 "spec/support/ci_stdlib_compiler_test_files.txt"):gmatch("[^\n]+") do
@@ -5514,7 +5521,7 @@ done
                 end
             end
             assert.equal(8, integration_count)
-            assert.equal(155, assigned_count + integration_count)
+            assert.equal(158, assigned_count + integration_count)
 
             local stress_partition = read_file(
                 "spec/support/ci_compiler_stress_files.txt")
@@ -5853,7 +5860,7 @@ done
                     { "make titan-stdlib-test-run" },
                 },
                 {
-                    "Run dense Array runtime sanitizer gate",
+                    "Run dense Array and closure transfer runtime sanitizer gate",
                     { ".lua/bin/busted" },
                 },
                 {

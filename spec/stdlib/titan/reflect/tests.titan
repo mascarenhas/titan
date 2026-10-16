@@ -5,6 +5,7 @@ local gc = import "gc"
 local lua = import "lua"
 local string = import "string"
 foreign import "limits.h"
+foreign import "float.h"
 foreign import "stdlib.h"
 foreign import "lua.h"
 foreign import "titan/ffi.h"
@@ -1503,4 +1504,183 @@ function test_named_union_parts_descriptors_access_and_construction(_context: te
   test.assert(hidden:get(1) == "hidden")
   test.assert((hidden:get(2) as {integer})[2] == 23)
   test.assert((inspected:get(3) as {integer})[1] == 17)
+end
+
+record ProjectedRecord
+  const number: integer
+  const text: string
+  const child: SimpleRecord
+  const items: const {integer}
+  const last: string?
+end
+
+local projected_new_calls = 0
+
+function ProjectedRecord.new(number: integer): ProjectedRecord
+  projected_new_calls = projected_new_calls + 1
+  return {number = number + 1000, text = "custom", child = SimpleRecord(0, 0), items = {}, last = nil}
+end
+
+local record LocalProjectedRecord
+  number: integer
+end
+
+local function constructed_projected_record(index: integer): ProjectedRecord
+  local child = SimpleRecord(index, index + 1)
+  local items: const {integer} = {index, index + 2}
+  local fields: const {value} = {index, "fresh projection " .. index, child, items, nil}
+  return required_record("reflect.tests.ProjectedRecord"):construct(fields)
+end
+
+function test_default_reflected_construction_bypasses_new_and_retains_values(_context: test.Context)
+  local was_generational = gc.generational()
+  defer do if not was_generational then gc.incremental() end end
+  local before = projected_new_calls
+  local result = constructed_projected_record(1)
+  for i = 2, 32 do
+    result = constructed_projected_record(i)
+    gc.step(1)
+  end
+  gc.collect()
+  test.assert(projected_new_calls == before)
+  test.assert(result.number == 32 and result.text == "fresh projection 32")
+  test.assert(result.child.x == 32 and result.child.y == 33)
+  test.assert(result.items[1] == 32 and result.items[2] == 34 and result.last == nil)
+  local viewed = record_value(result)
+  test.assert(viewed.type.is_public and viewed.type.all_public)
+  test.assert(viewed:project(1) == 32 and viewed:project(5) == nil)
+  expect_failure(function() viewed:set(1, 7) end)
+  expect_failure(function() viewed:project(0) end)
+  expect_failure(function() viewed.type:construct({"wrong", "text", result.child, result.items}) end)
+  expect_failure(function() viewed.type:construct({32, "text", result.child, result.items, nil, 7}) end)
+  local local_value = record_value(LocalProjectedRecord(9))
+  test.assert(not local_value.type.is_public and local_value.type.all_public)
+  test.assert(not record_value(PrivateOnly.new(1)).type.all_public)
+end
+
+record ProjectedNumbers
+  const unsigned: foreign unsigned long long
+  const optional: (foreign unsigned long long)?
+  const wide: foreign long double
+  const pointer: foreign *void
+end
+
+function test_native_projection_preserves_unsigned_long_double_and_null(_context: test.Context)
+  local original = ProjectedNumbers(ffi.ULLONG_MAX, ffi.ULLONG_MAX, ffi.LDBL_MAX, nil)
+  local inspected = record_value(original)
+  local unsigned: integer = inspected:project(1)
+  test.assert(unsigned == -1 and inspected:project(2) == -1)
+  test.assert(inspected:project(3) is string)
+  case reflect.inspect(inspected:project(4))
+  when is_raw_pointer(pointer) then test.assert(pointer == nil)
+  else raise "NULL projection must remain raw pointer data"
+  end
+  local fields: const {value} = {
+    inspected:project(1), inspected:project(2), inspected:project(3), inspected:project(4)
+  }
+  local restored: ProjectedNumbers = inspected.type:construct(fields)
+  gc.collect()
+  test.assert(restored.unsigned == ffi.ULLONG_MAX)
+  test.assert((restored.optional as foreign unsigned long long) == ffi.ULLONG_MAX)
+  test.assert(restored.wide == ffi.LDBL_MAX and restored.pointer == nil)
+  expect_failure(function() inspected.type:construct({-1, nil, "invalid", inspected:project(4)}) end)
+end
+
+function test_native_long_double_projection_preserves_extra_precision(_context: test.Context)
+  local precise = ffi.titan_reflect_precise_long_double()
+  local inspected = record_value(ProjectedNumbers(0, nil, precise, nil))
+  local restored: ProjectedNumbers = inspected.type:construct({
+    inspected:project(1), nil, inspected:project(3), inspected:project(4)
+  })
+  test.assert(restored.wide == precise)
+end
+
+record ProjectedAggregate
+  const pair: foreign titan_reflect_pair
+  const row: foreign titan_reflect_row
+end
+
+record ProjectedOwners
+  const owner: owned int[]
+  const optional: (owned int[])?
+end
+
+function test_reflected_construction_retains_owned_values_and_optional_absence(_context: test.Context)
+  local owner: owned int[] = foreign int.new_array(1)
+  owner[0] = 47
+  local inspected = record_value(ProjectedOwners(owner, owner))
+  local restored: ProjectedOwners = inspected.type:construct({
+    inspected:project(1), inspected:project(2)
+  })
+  local absent: ProjectedOwners = inspected.type:construct({inspected:project(1), nil})
+  gc.collect()
+  test.assert(restored.owner == owner and restored.owner[0] == 47)
+  test.assert(restored.optional == owner and absent.optional == nil)
+  test.assert(record_value(absent):project(2) == nil)
+end
+
+function test_native_aggregate_projection_copies_fields_without_padding(_context: test.Context)
+  local pair = foreign titan_reflect_pair.new()
+  pair.quot, pair.rem = 17, -3
+  local row = foreign int.new_array(3)
+  row[0], row[1], row[2] = 5, 7, 11
+  local original = ProjectedAggregate(pair, row)
+  local inspected = record_value(original)
+  local pair_projection: const {value} = inspected:project(1)
+  local row_projection: const {value} = inspected:project(2)
+  test.assert(pair_projection[1] == 17 and pair_projection[2] == -3)
+  test.assert(#row_projection == 3 and row_projection[3] == 11)
+  local restored: ProjectedAggregate = inspected.type:construct({pair_projection, row_projection})
+  gc.collect()
+  test.assert(restored.pair.quot == 17 and restored.pair.rem == -3)
+  test.assert(restored.row[0] == 5 and restored.row[2] == 11)
+  expect_failure(function() inspected.type:construct({{17}, row_projection}) end)
+  expect_failure(function() inspected.type:construct({pair_projection, {1, 2, 3, 4}}) end)
+end
+
+union ProjectedUnion
+  empty()
+  parts(number: foreign unsigned long long, label: string, last: integer?)
+end
+
+function test_default_union_construction_accepts_nil_tail_and_native_bits(_context: test.Context)
+  local original = ProjectedUnion.parts(ffi.ULLONG_MAX, "parts", nil)
+  local inspected = union_value(original)
+  test.assert(inspected.type.is_public and inspected.type.all_public)
+  local restored: ProjectedUnion = inspected.type:construct(inspected.tag,
+    {inspected:project(1), inspected:project(2), inspected:project(3)})
+  gc.collect()
+  case restored
+  when parts{number, label, last} then
+    test.assert(number == ffi.ULLONG_MAX and label == "parts" and last == nil)
+  else raise "expected reconstructed parts"
+  end
+  local empty: ProjectedUnion = inspected.type:construct(0, {})
+  test.assert(union_value(empty).n_parts == 0)
+  expect_failure(function() inspected.type:construct(8, {}) end)
+end
+
+record ProjectedQualified
+  const pointer: foreign titan_reflect_const_pointer
+  const data: foreign titan_reflect_qualified
+end
+
+function test_qualified_native_projection_preserves_adjacent_bitfields_and_siblings(_context: test.Context)
+  local original = ProjectedQualified(nil, ffi.titan_reflect_make_qualified())
+  local inspected = record_value(original)
+  local projected: const {value} = inspected:project(2)
+  test.assert(projected[1] == 23 and projected[2] == 5 and projected[3] == -3)
+  test.assert(projected[4] == 19 and projected[5] == 29)
+  local restored: ProjectedQualified = inspected.type:construct({inspected:project(1), projected})
+  gc.collect()
+  test.assert(restored.pointer == nil and restored.data.pointer == nil)
+  test.assert(restored.data.before == 23 and restored.data.after == 29)
+  test.assert(restored.data.first as integer == 5 and restored.data.second as integer == -3 and restored.data.third as integer == 19)
+  test.assert(restored.data.row[0] == 31 and restored.data.row[1] == 37)
+  expect_failure(function()
+    inspected.type:construct({inspected:project(1), {23, 8, -3, 19, 29, projected[6], projected[7]}})
+  end)
+  expect_failure(function()
+    inspected.type:construct({inspected:project(1), {23, 5, 8, 19, 29, projected[6], projected[7]}})
+  end)
 end

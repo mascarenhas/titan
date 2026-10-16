@@ -1330,6 +1330,7 @@ checkexp = util.make_visitor({
         -- Save the ordered list of enclosing decls this lambda captures, for
         -- codegen (closure-creation pushes + lambda-body upvalue indexing).
         node._captures = frame.captures
+        annotate_closure_transfer_captures(node)
         -- Lua closures allow at most 255 upvalues. Titan reserves the first
         -- four for module/tag/native/brand and the final one for the strict
         -- stack entry, leaving 250 source-level captures.

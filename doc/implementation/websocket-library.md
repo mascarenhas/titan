@@ -124,7 +124,7 @@ transport loss remains abnormal. Immediate close skips protocol negotiation.
 ## Integration and verification
 
 The module belongs to the canonical 23-module provider, 24 exported
-openers including bare support, and 28-root native test inventory. Unix keeps
+openers including bare support, and 29-root native test inventory. Unix keeps
 paired providers; Windows remains DLL-only. Standard-library installation
 copies the built provider and generated shims.
 No Titan, ABI, SDK or language-server version marker changes are required.

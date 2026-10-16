@@ -2350,6 +2350,9 @@ local function same_c_tag_identity(left, right, seen)
         -- from compiled metadata. Its descriptors need not share an extractor
         -- object; use the same identity rule as the C declaration relation.
         return types.is_c_lua_state(left) and types.is_c_lua_state(right)
+            or types.c_declaration_origin(left) ~= nil
+                and types.c_declaration_origin(left) == types.c_declaration_origin(right)
+                and types.equals(left, right)
     end
 
     seen = seen or {}

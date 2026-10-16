@@ -30,6 +30,32 @@ lambda keeps a reference to that call's `n`, increments it on every call,
 and the value persists between calls because the lambda holds the variable
 alive after `make_counter` has returned.
 
+## Transferring a closure between Lua states
+
+[`async.TransferValue.is_closure`](async-io.md#transfer-values) snapshots a
+Titan function value for an independent Lua state or cross-state Receiver.
+The receiver initializes the function's owning module and creates a fresh
+closure over copied capture values. Module globals belong to the receiving
+module instance; transferring a function does not copy its source module's
+global state.
+
+Mutable captures become new cells. When several nested closures share a cell
+inside one transferred closure graph, they continue sharing the corresponding
+destination cell. The source cell remains independent, and separate transfer
+values form independent snapshots. Bound concrete methods copy their receiver
+under the ordinary nominal transfer rules. A callable adjustment retains its
+source callable and target signature.
+
+Every visited capture must be transferable. Cycles, including a recursive
+closure that captures itself through a mutable variable, raise during transfer.
+Arrays, Maps, Interfaces, owned C storage, and non-public nominal data are not
+transferable captures. This restriction applies to bound Interface methods
+because their captured receiver is an Interface. Captured native pointers
+remain borrowed addresses with caller-managed lifetime. A captured pointer to
+Lua-managed `Udata` is rejected, including a present optional pointer; an absent
+optional remains transferable as `nil`. See
+[Transfer values](async-io.md#transfer-values) for the complete value policy.
+
 ## Syntax
 
 A function expression is a top-level function declaration minus the name

@@ -186,13 +186,13 @@ local SCHEMAS = {
     },
     ["Type.CStruct"] = {
         { "cname", "name" }, { "tagname", "name" },
-        { "typedef", "name" },
+        { "typedef", "name" }, { "origin", "atom" },
         { "_c_tag_scope", "atom" }, { "_ffi_scope", "atom" },
         { "_c_origin_header", "header" },
     },
     ["Type.CUnion"] = {
         { "cname", "name" }, { "tagname", "name" },
-        { "typedef", "name" }, { "_c_tag_scope", "atom" },
+        { "typedef", "name" }, { "origin", "atom" }, { "_c_tag_scope", "atom" },
         { "_ffi_scope", "atom" }, { "_c_origin_header", "header" },
     },
     ["Type.CField"] = {
@@ -201,7 +201,7 @@ local SCHEMAS = {
         { "_ffi_scope", "atom" }, { "_c_origin_header", "header" },
     },
     ["Type.CTypedef"] = {
-        { "name", "name" }, { "target", "type" },
+        { "name", "name" }, { "target", "type" }, { "origin", "atom" },
         { "quals", "string_list_default" }, { "_ffi_scope", "atom" },
         { "_c_origin_header", "header" },
     },

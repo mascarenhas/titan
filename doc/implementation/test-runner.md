@@ -40,7 +40,10 @@ checks; test mode does not weaken those checks.
 The CLI's `source_overrides` supplies only generated `titan.test.runner`
 contents. Its descriptor carries `files`, an in-memory `contents` map, and the
 usual `program_output`; parsing and checking use the ordinary source pipeline.
-The runner imports `titan.test` publicly, so it has no source-private privilege.
+The runner imports `titan.test` publicly. Its discovered test owners use
+explicit `.titan` imports, preserving the already-checked source provenance and
+inheriting the real C headers needed to reconstruct their exported native
+fields. Discovery never supplies binary owners to this source-only path.
 No test-support source is installed with the SDK or copied into a test build.
 
 Ordinary production module code generation is independent of `--test`.
@@ -72,7 +75,7 @@ even when a static provider physically carries other logical keys.
 `titan-compiler/test_runner.lua` renders a thin module with:
 
 * an ordinary public import of `titan.test`;
-* one ordinary import alias per distinct test owner;
+* one explicit `.titan` import alias per distinct source-backed test owner;
 * one exact `function (test.Context): ()` wrapper per case, discarding results;
 * an Array of public `test.Case.new(full_name, owner_module, body)` descriptors;
   and
@@ -326,7 +329,7 @@ teardown when the deadline wins, and timer-only cancellation when the reader win
 
 ## Repository dogfooding
 
-The shared `spec/support/stdlib_test_modules.mk` manifest names 28 module-owned
+The shared `spec/support/stdlib_test_modules.mk` manifest names 29 module-owned
 roots under `spec/stdlib/titan/`, used by Linux, macOS, and native Windows.
 The same reviewed inventory names their test/helper compilation units, folder
 contributors, and direct source imports. On Unix, Make schedules per-module
@@ -337,7 +340,7 @@ standard provider. No separate `titan.test`
 support object is compiled.
 
 One final Unix `--output . --test --incremental --no-uv-bootstrap` invocation
-keeps all 28 roots explicit and discovers the complete source/object closure. The designated
+keeps all 29 roots explicit and discovers the complete source/object closure. The designated
 first root, `test.tests`, owns `out/tests/test/tests`; the current synthetic
 runner, entrypoint, and Darwin dSYM are also owned there. Module C, objects,
 and headers reproduce the test source hierarchy below `out/tests`, leaving
@@ -348,7 +351,7 @@ A no-op `titan-stdlib-test-build` invokes neither the compiler nor the linker.
 
 `make titan-stdlib-test-run` returns to the repository root before executing,
 because several fixtures use repository-relative paths. `TITAN_FILTER` supplies
-one Lua pattern to this already built executable; it never changes the 28-root
+one Lua pattern to this already built executable; it never changes the 29-root
 compile. `make titan-stdlib-test` composes build and run, while the split leaf
 targets let sanitizer and focused development runs reuse one build in multiple
 fresh processes. `BUSTED_FILTER` is independent and belongs to
@@ -391,7 +394,7 @@ because it reinstalls the current compiler and provider before testing;
 
 `run_with_timeout.sh` uses Bash monitor mode to give the executable its own
 process group and polls it at a coarse interval. Make's default
-`TITAN_TEST_TIMEOUT=600` covers all 28 test roots, including repeated fresh
+`TITAN_TEST_TIMEOUT=600` covers all 29 test roots, including repeated fresh
 child-fixture compilation under the selected profile. Explicit overrides, including the
 15-second CI shutdown check, remain independent of that default. At the deadline it sends
 `TERM`, then `KILL` after a short grace period, maps the timeout to status 124,
@@ -485,8 +488,8 @@ explicitly requested fallback.
 ## Packaging and compatibility
 
 `titan.test` is an ordinary logical module in the combined
-`titan.so`/`titan.a` pair. The current provider has twenty-four `luaopen_*`
-entries including bare support and twenty-three generated logical-module shims.
+`titan.so`/`titan.a` pair. The current provider has twenty-five `luaopen_*`
+entries including bare support and twenty-four generated logical-module shims.
 The same compiled `titan.test` implementation serves ordinary programs and
 generated test executables. Standard installation publishes the provider pair
 and shims; it does not install a private test-source payload. Packaging tests
@@ -499,7 +502,7 @@ provider together when changing this API. Use a fresh installation after ABI
 changes; earlier Titan installations are not migration sources.
 
 The unfiltered Windows LuaRocks backend uses the same four compiler/language
-partitions in private NTFS checkout copies after its seven retained serial specs,
+partitions in private NTFS checkout copies after its eight retained serial specs,
 eight stdlib-dependent compiler integration specs, and native aggregate pass. It defaults to two workers and accepts
 `TITAN_ROCK_TEST_JOBS=1` through `4`. The shard containing explicit compiler
 parallelism tests runs without other shards active. Workers inherit private

@@ -514,6 +514,10 @@ function coder.generate(modname, ast, static_deps, abi, emit_line_directives, op
         end
     end
 
+    -- Capture reconstruction can introduce ordinary type identities and
+    -- conversion helpers, so emit it before the dependency/writer fixpoints.
+    coder._transfer_emit_sources(tlcontext, code)
+
     -- Array constructors encountered while emitting functions/lambdas have
     -- now frozen the complete module-local writer inventory.
     local array_writer_inits = {}
@@ -654,9 +658,15 @@ function coder.generate(modname, ast, static_deps, abi, emit_line_directives, op
                 coder._emit_callable_adapter(tlcontext, site)
             table.insert(sigs, adapter_sig)
             table.insert(code, adapter_body)
+            local transfer_entry = coder._transfer_register_adapter(tlcontext, site)
+            if transfer_entry then
+                coder._transfer_emit_entry(tlcontext, code, transfer_entry)
+            end
             i = i + 1
         end
     end
+
+    coder._transfer_emit_manifest(tlcontext, sigs, code)
 
     if #switch_get > 0 then
         table.insert(code, render([[

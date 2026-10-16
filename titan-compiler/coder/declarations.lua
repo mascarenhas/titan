@@ -1311,6 +1311,10 @@ function codefuncdec(tlcontext, node)
             })
         node._sig = node._sig .. "\n    static int " .. strictname
             .. "(lua_State *L);"
+        coder._transfer_register_source(tlcontext,
+            types.Function(node._type.params, node._type.rettypes, false,
+                node._type.varargtype, node._type.flexrettype),
+            fname, luaname, strictname, {}, node.loc)
     end
 end
 
@@ -1500,6 +1504,11 @@ function codemethodtrampoline(tlcontext, node)
     -- from the registry this module populates, so its bound value's fast path can
     -- recognise the trampoline. (publish-or-recover dedupes a double publish.)
     function_type_tag(tlcontext, ftype)
+    coder._transfer_register_source(tlcontext, ftype,
+        nativename, luaname, strictname, {{
+            type = types.Nominal(mtype.fqtn), boxed = false,
+            dynamic_plan = node._lua_dynamic_plans[1], loc = node.loc,
+        }}, node.loc)
 end
 
 -- Names + registration for a lambda node, assigned on first sight at its use
@@ -1881,6 +1890,16 @@ function codelambdadec(tlcontext, node)
             strict_plans = node._strict_guard_plans,
             strict_vararg_plan = node._strict_vararg_guard_plan,
         })
+    local captures = {}
+    for index, decl in ipairs(node._captures) do
+        captures[index] = {
+            type = decl._type, boxed = decl._boxed and true or false,
+            dynamic_plan = assert(node._capture_dynamic_plans[index]),
+            loc = decl.loc or node.loc,
+        }
+    end
+    coder._transfer_register_source(tlcontext, node._type,
+        fname, luaname, node._lambda_strict, captures, node.loc)
 end
 
 function codevardec(ctx, initvars, switch_get, switch_set, gvar_map, node)

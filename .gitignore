@@ -70,6 +70,7 @@
 /titan/sqlite3/sqlite3.c
 /titan/sqlite3/sqlite3.titan.h
 /titan/json/json.c
+/titan/protobuf/protobuf.c
 /titan/json/json.titan.h
 
 # Generated logical-module shims for the combined standard-library image
@@ -96,6 +97,7 @@
 /titan/reflect.lua
 /titan/sqlite3.lua
 /titan/json.lua
+/titan/protobuf.lua
 
 # Native runtime command-line configuration stamps
 /titan-runtime/.titan-*-build-config

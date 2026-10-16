@@ -87,23 +87,56 @@ cross the independent-state boundary:
 | `is_string` | a copied Lua byte string | a copied Titan byte string |
 | `is_lua_state` | lightuserdata containing the borrowed state address | Lua thread, as its borrowed `lua_State *` |
 | `is_function` | a C function with no upvalues | light C function or C closure with no upvalues |
-| `is_pointer` | lightuserdata containing the borrowed address | lightuserdata or a full userdata's payload address |
+| `is_pointer` | lightuserdata containing the borrowed address | lightuserdata or other full userdata's payload address |
+| `is_record(name, data)` | a fresh record decoded from protobuf bytes | a public record serialized with its fully qualified name |
+| `is_union(name, data)` | a fresh union decoded from protobuf bytes | a public union serialized with its fully qualified name |
+| `is_closure(value)` | a reconstructed Titan closure with copied captures | a Titan closure, including an adjusted closure or bound method |
+
+A result that is already an origin-state `async.TransferValue` uses that
+variant's policy. For example, returning `TransferValue.is_string(bytes)`
+copies those bytes, and returning `TransferValue.is_record(name, data)` carries
+that existing serialized payload without serializing the wrapper. Pointer and
+state variants preserve their explicitly selected kind.
+
+Titan closures transfer automatically when returned directly. Their owning
+modules are initialized in the receiving state before reconstruction, even
+when that state's preload snapshot did not contain the module. This uses the
+native module initialization protocol and does not depend on global `require`.
+Captured values follow the [closure transfer rules](async-io.md#transfer-values):
+mutable cells are copied with aliases preserved inside one closure graph,
+module globals belong to the destination module, and unsupported captures or
+cycles raise in the origin. The returned `is_closure` contains a callable
+owned by the caller's collector; it remains valid after the independent state
+closes, subject to the lifetime of any borrowed native pointers it captures.
+
+Ordinary public records and unions are serialized automatically through
+[`protobuf.serialize`](standard-library-protobuf.md). All record fields and
+union variants must be public, and the encountered value graph must contain
+only supported data and no cycles. Unsupported nominal values raise; they do
+not silently become borrowed addresses. The caller receives the nominal name
+and wire bytes and may decode them with `protobuf.deserialize_nominal`.
+Incoming record/union arguments are decoded automatically before the chunk
+runs. Their types must already be initialized in that independent state;
+bootstrap with a preceding call that loads the defining module. Type lookup
+does not implicitly import a module.
 
 Argument and result counts preserve nil positions. Results follow Titan's
 ordinary flexible-return demand: a finite consumer takes the requested prefix,
 while materializing an open result run has the usual 200-value limit. The
 independent-state API does not impose that limit on a larger Lua result run
 consumed through a smaller finite prefix. Every returned value is still
-validated, including an ignored tail. A table, Lua function, or C closure with
-upvalues has no transfer representation and raises if returned. An `is_lua_state` argument
+validated, including an ignored tail. A table, Lua function, or ordinary C closure
+with upvalues has no transfer representation and raises if returned. An `is_lua_state` argument
 is an opaque pointer in the destination, not a coroutine attached to its
 collector. Its original variant is erased there: returning that lightuserdata
-produces `is_pointer`. Userdata metatables, uservalues, and ownership are
-never copied. A null `is_function` pointer is rejected before execution.
+produces `is_pointer` unless Lua explicitly returns an `is_lua_state` wrapper.
+Foreign userdata metatables, uservalues, and ownership are never copied.
+A null `is_function` pointer is rejected before execution or when encountered
+in an origin-state transfer wrapper.
 
-Strings are the only copied GC values. Each side allocates its own string
-from the exact bytes; neither side installs the other state's `TString` in
-its own collector. The three pointer variants are borrowed addresses. They
+Each side allocates its own strings from the exact bytes; neither side installs
+the other state's `TString` in its own collector. Serialized nominal graphs
+also allocate fresh destination values. The three pointer variants are borrowed addresses. They
 neither retain nor validate the originating object or native code. Keep a
 returned thread or full userdata reachable in its originating state for the
 complete borrow, and keep the state open. For example, a global or registry

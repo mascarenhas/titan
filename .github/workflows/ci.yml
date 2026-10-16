@@ -86,7 +86,7 @@ jobs:
             clean_titan_environment \
               "$PREFIX/bin/luarocks" remove titan --force
           fi
-          for module in coroutine uv async timer io fs net ssl url http websocket os path peg string math lua iteration gc test reflect sqlite3 json; do
+          for module in coroutine uv async timer io fs net ssl url http websocket os path peg string math lua iteration gc test reflect sqlite3 json protobuf; do
             rm -f "$PREFIX/share/lua/5.5/titan/$module.lua"
           done
           rm -f "$PREFIX/share/titan/0.6/src/titan/test.titan"
@@ -126,7 +126,7 @@ jobs:
           lua -E -e 'assert(type(require("titan").backtrace) == "function")'
           test -f "$PREFIX/lib/titan/0.6/libtitan.a"
           test ! -e "$PREFIX/lib/titan/0.6/titan.a"
-          for module in coroutine uv async timer io fs net ssl url http websocket os path peg string math lua iteration gc test reflect sqlite3 json; do
+          for module in coroutine uv async timer io fs net ssl url http websocket os path peg string math lua iteration gc test reflect sqlite3 json protobuf; do
             test ! -e "$PREFIX/share/lua/5.5/titan/$module.lua"
           done
 
@@ -779,7 +779,7 @@ jobs:
           test -f "$TITAN_STDLIB_DIAGNOSTIC_SNAPSHOT/manifest.txt"
           test -f "$snapshot_provider" && test ! -L "$snapshot_provider"
           cmp "$snapshot_provider" "$provider"
-          for module in coroutine uv async timer io fs net ssl url http websocket os path peg string math lua iteration gc test reflect sqlite3 json; do
+          for module in coroutine uv async timer io fs net ssl url http websocket os path peg string math lua iteration gc test reflect sqlite3 json protobuf; do
             test -f "$PREFIX/share/lua/5.5/titan/$module.lua"
           done
           test ! -e "$PREFIX/share/titan/0.6/src/titan/test.titan"
@@ -811,13 +811,14 @@ jobs:
               TITAN_FILTER='test_runtime_shutdown_closes_native_handles_but_not_files$' \
               TITAN_TEST_TIMEOUT=15
 
-      - name: Run dense Array runtime sanitizer gate
+      - name: Run dense Array and closure transfer runtime sanitizer gate
         env:
           TITAN_TEST_EXTRA_CFLAGS: ${{ env.SANITIZER_FLAGS }}
           TITAN_TEST_EXTRA_LDFLAGS: ${{ env.SANITIZER_FLAGS }}
         run: |
           bash spec/support/ci_sanitizer_capture.sh dense-array \
-            env TITAN_PROBE_CACHE_DISABLE=1 .lua/bin/busted -o gtest -v spec/dense_array_runtime_spec.lua
+            env TITAN_PROBE_CACHE_DISABLE=1 .lua/bin/busted -o gtest -v \
+              spec/dense_array_runtime_spec.lua spec/transfer_runtime_spec.lua
 
       - name: Run immediate function compiler sanitizer gate
         run: |

@@ -1,0 +1,366 @@
+local transfer_fixture = import "lua.transfer_fixture"
+local transfer_protobuf = import "titan.protobuf"
+
+foreign function transfer_state_pointer(state: *lua_State): int
+  ffi.lua_pushlightuserdata(state, state)
+  return 1
+end
+
+local function check_transfer_policies(values: {async.TransferValue},
+                                      pointer: foreign *void)
+  test.assert(#values == 9, "TransferValue temporary roots changed result arity")
+  assert_transfer_nil(values[1])
+  assert_transfer_boolean(values[2], false)
+  test.assert(transfer_integer(values[3]) == -73)
+  case values[4]
+  when is_float(number) then test.assert(number == 2.5)
+  else raise "origin TransferValue float policy was lost" end
+  test.assert(transfer_string(values[5]) == strings.rep("policy\0bytes", 4096))
+  case values[6]
+  when is_pointer(actual) then test.assert(actual == pointer)
+  else raise "origin TransferValue pointer policy was lost" end
+  case values[7]
+  when is_function(callback) then test.assert(callback ~= nil)
+  else raise "origin TransferValue function policy was lost" end
+  case values[8]
+  when is_record(name, data) then
+    test.assert(name == "explicit.Record" and data == "record\0wire")
+  else raise "explicit record transfer was serialized again" end
+  case values[9]
+  when is_union(name, data) then
+    test.assert(name == "explicit.Union" and data == "union\0wire")
+  else raise "explicit union transfer was serialized again" end
+end
+
+function test_lua_independent_honors_origin_transfer_policies(_context: test.Context)
+  runtime_test.run(function ()
+    local state = tlua.new()
+    defer state:close()
+    local memory: owned int[] = foreign int.new_array(1)
+    local pointer = memory as foreign *void
+    local chunk = [[return require('lua.transfer_fixture').policies(...)]]
+    local synchronous: {async.TransferValue} = {state:run(chunk, nil,
+      async.TransferValue.is_pointer(pointer))}
+    local asynchronous: {async.TransferValue} = {state:run_async(chunk, nil,
+      async.TransferValue.is_pointer(pointer))}
+    gclib.collect()
+    gclib.collect()
+    check_transfer_policies(synchronous, pointer)
+    check_transfer_policies(asynchronous, pointer)
+    local echoed: async.TransferValue = state:run(
+      "local callback = ...; return callback(41)", nil, synchronous[7])
+    test.assert(transfer_integer(echoed) == 41)
+    local returned: async.TransferValue = state:run([[
+      local state_pointer = ...
+      return require('lua.transfer_fixture').state_policy(state_pointer())
+    ]], nil, async.TransferValue.is_function(transfer_state_pointer))
+    case returned
+    when is_lua_state(pointer) then test.assert(pointer ~= nil)
+    else raise "origin TransferValue state policy became an ordinary pointer" end
+  end)
+end
+
+local function check_transferred_record(candidate: async.TransferValue,
+                                         expected: integer)
+  case candidate
+  when is_record(name, data) then
+    test.assert(name == "lua.transfer_fixture.TransferRecord")
+    local restored: transfer_fixture.TransferRecord =
+      transfer_protobuf.deserialize_nominal(data, name, false)
+    test.assert(restored.number == expected)
+    test.assert(restored.text == strings.rep("nominal\0bytes", 4096))
+    test.assert(#restored.entries == 3 and restored.entries[3] == 3)
+  else raise "public record did not transfer as protobuf" end
+end
+
+function test_lua_independent_transfers_nominals_and_decodes_arguments(
+    _context: test.Context)
+  runtime_test.run(function ()
+    local state = tlua.new()
+    defer state:close()
+    local values: {async.TransferValue} = {state:run_async([[
+      local fixture = require('lua.transfer_fixture')
+      require = nil
+      return fixture.record_value(17), nil, fixture.union_value(29)
+    ]])}
+    test.assert(#values == 3, "nominal temporary roots changed result arity")
+    gclib.collect()
+    check_transferred_record(values[1], 17)
+    assert_transfer_nil(values[2])
+    case values[3]
+    when is_union(name, data) then
+      test.assert(name == "lua.transfer_fixture.TransferUnion")
+      local restored: transfer_fixture.TransferUnion =
+        transfer_protobuf.deserialize_nominal(data, name, true)
+      case restored
+      when present(item, label) then
+        test.assert(item.number == 29 and label == "union\0label")
+      else raise "union tag changed during transfer" end
+    else raise "public union did not transfer as protobuf" end
+    local echoed: {async.TransferValue} = {state:run("return ...", nil,
+      values[1], values[2], values[3])}
+    test.assert(#echoed == 3)
+    check_transferred_record(echoed[1], 17)
+    assert_transfer_nil(echoed[2])
+    local scalar: async.TransferValue = state:run(
+      "local record = ...; return record.number", nil, values[1])
+    test.assert(transfer_integer(scalar) == 17)
+  end)
+end
+
+function test_lua_independent_nominal_failure_releases_state(_context: test.Context)
+  local state = tlua.new()
+  defer state:close()
+  common.assert_raises_contains(function ()
+    state:run("return require('lua.transfer_fixture').private_value()")
+  end, "public")
+  assert_state_reusable(state)
+  local partial = [[
+    local fixture = require('lua.transfer_fixture')
+    return fixture.record_value(11), fixture.private_value()
+  ]]
+  common.assert_raises_contains(function () state:run(partial) end, "public")
+  assert_state_reusable(state)
+  runtime_test.run(function ()
+    common.assert_raises_contains(function () state:run_async(partial) end, "public")
+    assert_state_reusable(state)
+  end)
+  common.assert_raises_contains(function ()
+    state:run("return ...", nil,
+      async.TransferValue.is_record("missing.Record", ""))
+  end, "unknown")
+  assert_state_reusable(state)
+end
+
+function test_lua_independent_reconstructs_defaults_const_and_empty_variants(
+    _context: test.Context)
+  local state = tlua.new()
+  defer state:close()
+  local values: {async.TransferValue} = {state:run([[
+    local fixture = require('lua.transfer_fixture')
+    return fixture.DefaultRecord.new(301), fixture.CustomRecord.new(),
+      fixture.TransferUnion.empty(), fixture.construction_count()
+  ]])}
+  test.assert(#values == 4)
+  test.assert(transfer_integer(values[4]) == 1)
+  case values[1]
+  when is_record(name, data) then
+    local restored: transfer_fixture.DefaultRecord =
+      transfer_protobuf.deserialize_nominal(data, name, false)
+    test.assert(restored.number == 301)
+  else raise "default record did not transfer" end
+  case values[2]
+  when is_record(name, data) then
+    local restored: transfer_fixture.CustomRecord =
+      transfer_protobuf.deserialize_nominal(data, name, false)
+    test.assert(restored.number == 407)
+  else raise "custom record did not transfer" end
+  case values[3]
+  when is_union(name, data) then
+    local restored: transfer_fixture.TransferUnion =
+      transfer_protobuf.deserialize_nominal(data, name, true)
+    case restored
+    when empty() then
+    else raise "empty variant changed during transfer" end
+  else raise "empty union did not transfer" end
+  test.assert(transfer_fixture.construction_count() == 0,
+    "deserializing invoked the destination's custom constructor")
+  local returned: async.TransferValue = state:run([[
+    local item = ...
+    assert(item.number == 407)
+    return require('lua.transfer_fixture').construction_count()
+  ]], nil, values[2])
+  test.assert(transfer_integer(returned) == 1,
+    "decoding a transfer argument invoked the origin's custom constructor")
+end
+
+local function transfer_closure(item: async.TransferValue): value
+  case item
+  when is_closure(callback) then return callback
+  else raise "Titan closure did not preserve its transfer variant" end
+end
+
+function test_lua_independent_closure_snapshots_survive_origin_close(
+    _context: test.Context)
+  runtime_test.run(function ()
+    local state = tlua.new()
+    defer state:close()
+    local values: {async.TransferValue} = {state:run_async([[
+      local fixture = require('lua.transfer_fixture')
+      return fixture.closure_constant, fixture.closure_text(),
+        fixture.closure_counter(), fixture.closure_mutable_text(),
+        fixture.closure_shared_boxes(), fixture.closure_nominal(),
+        fixture.closure_policy(), fixture.closure_bound_method(),
+        fixture.closure_captured_policy()
+    ]])}
+    test.assert(#values == 9)
+    state:close()
+    gclib.collect()
+    gclib.collect()
+    local constant: function (): integer = transfer_closure(values[1])
+    local text: function (): string = transfer_closure(values[2])
+    local count: function (): integer = transfer_closure(values[3])
+    local growing: function (): string = transfer_closure(values[4])
+    local shared: function (): integer = transfer_closure(values[5])
+    local nominal: function (): integer = transfer_closure(values[6])
+    local policy: function (): integer = transfer_closure(values[7])
+    local bound: function (): integer = transfer_closure(values[8])
+    local captured_policy: function (): integer = transfer_closure(values[9])
+    test.assert(constant() == 37)
+    test.assert(text() == strings.rep("closure\0text", 1024))
+    test.assert(count() == 6 and count() == 7)
+    test.assert(growing() == "ab" and growing() == "abb")
+    test.assert(shared() == 116 and shared() == 227,
+      "reconstructed captures did not preserve one shared mutable cell")
+    test.assert(nominal() == 56 and policy() == 6 and bound() == 61)
+    test.assert(captured_policy() == 67)
+  end)
+end
+
+function test_lua_independent_closure_arguments_initialize_owner_and_copy_boxes(
+    _context: test.Context)
+  runtime_test.run(function ()
+    local state = tlua.new()
+    defer state:close()
+    -- The closure's native owner capability must initialize this state even
+    -- without a preload entry or accessible Lua require function.
+    state:run([[
+      package.preload['lua.transfer_fixture'] = nil
+      require = nil
+    ]])
+    local source = transfer_fixture.closure_shared_boxes()
+    local carrier = async.TransferValue.is_closure(source)
+    local returned: async.TransferValue = state:run_async([[
+      local callback = ...
+      assert(callback() == 116)
+      collectgarbage('collect')
+      return callback
+    ]], nil, carrier)
+    test.assert(source() == 116, "destination mutated the origin's captured box")
+    local copied: function (): integer = transfer_closure(returned)
+    test.assert(copied() == 227)
+    test.assert(source() == 227, "returned closure retained origin box identity")
+    local adjusted = transfer_fixture.closure_adjusted()
+    local adjusted_result: async.TransferValue = state:run([[
+      local callback = ...
+      assert(callback(4, 'unused') == 7)
+      return callback
+    ]], nil, async.TransferValue.is_closure(adjusted))
+    local restored: function (integer, value): value = transfer_closure(adjusted_result)
+    test.assert(restored(5, nil) as integer == 12)
+    test.assert(adjusted(1, nil) as integer == 4,
+      "adjusted closure copied the origin's mutable cell")
+  end)
+end
+
+function test_lua_independent_rejects_closure_capture_failures_and_reuses_state(
+    _context: test.Context)
+  local state = tlua.new()
+  defer state:close()
+  common.assert_raises_contains(function ()
+    state:run("return ...", nil, async.TransferValue.is_closure(42))
+  end, "Titan closure")
+  assert_state_reusable(state)
+  common.assert_raises_contains(function ()
+    state:run("return require('lua.transfer_fixture').closure_array()")
+  end, "transfer")
+  assert_state_reusable(state)
+  common.assert_raises_contains(function ()
+    state:run("return require('lua.transfer_fixture').closure_private_nominal()")
+  end, "public")
+  assert_state_reusable(state)
+  common.assert_raises_contains(function ()
+    state:run("return require('lua.transfer_fixture').closure_cycle()")
+  end, "cycl")
+  assert_state_reusable(state)
+  local partial = [[
+    local fixture = require('lua.transfer_fixture')
+    return fixture.closure_counter(), fixture.closure_array()
+  ]]
+  common.assert_raises_contains(function () state:run(partial) end, "transfer")
+  assert_state_reusable(state)
+  runtime_test.run(function ()
+    common.assert_raises_contains(function () state:run_async(partial) end, "transfer")
+    assert_state_reusable(state)
+  end)
+  common.assert_raises_contains(function ()
+    state:run("return ...", nil,
+      async.TransferValue.is_closure(transfer_fixture.closure_counter()),
+      async.TransferValue.is_closure(transfer_fixture.closure_array()))
+  end, "transfer")
+  assert_state_reusable(state)
+end
+
+function test_lua_independent_receiver_copies_closure_before_origin_close(
+    _context: test.Context)
+  runtime_test.run(function ()
+    local receiver = async.receiver()
+    defer receiver:close()
+    local state = tlua.new()
+    defer state:close()
+    state:run_async([[
+      local handle = ...
+      local fixture = require('lua.transfer_fixture')
+      fixture.send_closure(handle)
+      collectgarbage('collect')
+    ]], nil, async.TransferValue.is_pointer(receiver:handle()))
+    state:close()
+    gclib.collect()
+    local callback: function (): integer = transfer_closure(receiver:wait())
+    test.assert(callback() == 116 and callback() == 227)
+  end)
+end
+
+function test_lua_independent_closure_copies_native_numbers_exactly(
+    _context: test.Context)
+  local state = tlua.new()
+  defer state:close()
+  local result: async.TransferValue = state:run(
+    "return require('lua.transfer_fixture').closure_native_numbers()")
+  state:close()
+  gclib.collect()
+  local restored: function (): boolean = transfer_closure(result)
+  test.assert(restored(), "closure capture narrowed a native number")
+  test.assert(not restored(), "native captures were not restored as mutable cells")
+end
+
+function test_lua_independent_closure_uses_destination_module_globals(
+    _context: test.Context)
+  transfer_fixture.closure_global_reset(700)
+  defer transfer_fixture.closure_global_reset(100)
+  local state = tlua.new()
+  defer state:close()
+  local result: async.TransferValue = state:run([[
+    local fixture = require('lua.transfer_fixture')
+    assert(fixture.closure_global() == 101)
+    assert(fixture.closure_global() == 102)
+    return fixture.closure_global
+  ]])
+  local restored: function (): integer = transfer_closure(result)
+  test.assert(restored() == 701, "closure retained the origin module instance")
+  local origin: async.TransferValue = state:run(
+    "return require('lua.transfer_fixture').closure_global()")
+  test.assert(transfer_integer(origin) == 103,
+    "destination closure mutated origin module globals")
+  test.assert(restored() == 702)
+end
+
+function test_lua_independent_closure_rejects_managed_native_pointer_captures(
+    _context: test.Context)
+  local state = tlua.new()
+  defer state:close()
+  common.assert_raises_contains(function ()
+    state:run("return require('lua.transfer_fixture').closure_managed_pointer()")
+  end, "transfer")
+  assert_state_reusable(state)
+  common.assert_raises_contains(function ()
+    state:run("return require('lua.transfer_fixture').closure_optional_managed_pointer(true)")
+  end, "transfer")
+  assert_state_reusable(state)
+  local result: async.TransferValue = state:run(
+    "return require('lua.transfer_fixture').closure_optional_managed_pointer(false)")
+  state:close()
+  gclib.collect()
+  local callback: function (): boolean = transfer_closure(result)
+  test.assert(callback(), "absent optional managed pointer did not remain nil")
+end

@@ -314,6 +314,7 @@ function init_data_from_other_modules(tlcontext, includes, loadmods,
 end
 
 function coderecorddec(ctx, code, initrecs, node)
+    local projector, constructor = coder._reflection_metadata(ctx, code, node)
     -- (the type tag is forward-declared up front in generate(), so that
     -- forward/mutually-recursive record field types resolve)
     local plan = coder._nominal_plan(ctx, node._type)
@@ -476,6 +477,12 @@ function coderecorddec(ctx, code, initrecs, node)
         lua_rawset(L, -3);
         lua_pushliteral(L, $TAG);
         lua_rawsetp(L, -2, TITAN_MT_TYPE);
+        lua_pushboolean(L, $PUBLIC);
+        lua_rawsetp(L, -2, TITAN_MT_PUBLIC);
+        lua_pushlightuserdata(L, titan_cast_func(void *, $PROJECTOR));
+        lua_rawsetp(L, -2, TITAN_MT_PROJECT);
+        lua_pushlightuserdata(L, titan_cast_func(void *, $CONSTRUCTOR));
+        lua_rawsetp(L, -2, TITAN_MT_CONSTRUCT);
         titan_pushmodule(L, _mod);
         lua_rawsetp(L, -2, TITAN_MT_MOD);
         lua_newtable(L);
@@ -514,6 +521,9 @@ function coderecorddec(ctx, code, initrecs, node)
             node._type.name, "newindex"),
         TYPE = node._type.name,
         TAG = c_string_literal(types.serialize_semantic(node._declared_type or node._type)),
+        PUBLIC = node.islocal and "0" or "1",
+        PROJECTOR = projector,
+        CONSTRUCTOR = constructor,
         FIELDMAP = table.concat(fieldmap, "\n")
     }))
 end
@@ -521,6 +531,7 @@ end
 -- Generate the Lua-facing metatable for a union. Variants, tags, and payloads
 -- are opaque; only public methods participate in lookup, and all writes fail.
 function coder._codeuniondec(ctx, code, initnominals, node)
+    local projector, constructor = coder._reflection_metadata(ctx, code, node)
     local payload_reader = coder._nominal_function_prefix(
         node._type.name, "payload_reader")
     local payload_cases = {}
@@ -649,6 +660,14 @@ function coder._codeuniondec(ctx, code, initnominals, node)
             lua_rawset(L, -3);
             lua_pushliteral(L, $TAG);
             lua_rawsetp(L, -2, TITAN_MT_TYPE);
+            lua_pushboolean(L, $PUBLIC);
+            lua_rawsetp(L, -2, TITAN_MT_PUBLIC);
+            lua_pushlightuserdata(L, titan_cast_func(void *, $PROJECTOR));
+            lua_rawsetp(L, -2, TITAN_MT_PROJECT);
+            lua_pushlightuserdata(L, titan_cast_func(void *, $CONSTRUCTOR));
+            lua_rawsetp(L, -2, TITAN_MT_CONSTRUCT);
+            titan_pushmodule(L, _mod);
+            lua_rawsetp(L, -2, TITAN_MT_MOD);
             lua_pushlightuserdata(L, titan_cast_func(void *, $PAYLOAD_READER));
             lua_rawsetp(L, -2, TITAN_MT_PAYLOAD);
             lua_newtable(L);
@@ -685,6 +704,9 @@ function coder._codeuniondec(ctx, code, initnominals, node)
         TYPE = node._type.name,
         TAG = c_string_literal(types.serialize_semantic(node._declared_type or node._type)),
         PAYLOAD_READER = payload_reader,
+        PUBLIC = node.islocal and "0" or "1",
+        PROJECTOR = projector,
+        CONSTRUCTOR = constructor,
         METHODMAP = table.concat(methodmap, "\n"),
     }))
 end
@@ -848,6 +870,12 @@ function coder._code_interface_method_artifacts(
     }))
 
     function_type_tag(tlcontext, ftype)
+    coder._transfer_register_source(tlcontext, ftype,
+        nativename, bound_luaname, strictname, {{
+            type = types.Nominal(interface.name), boxed = false,
+            dynamic_plan = method_node._lua_dynamic_plans[1],
+            loc = method_node.loc,
+        }}, method_node.loc)
 end
 
 -- Interface declarations are type-only, but their owner module publishes one

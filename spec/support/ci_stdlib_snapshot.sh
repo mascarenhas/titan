@@ -47,7 +47,7 @@ artifacts=(
     "$shim_dir/path.lua" "$shim_dir/peg.lua" "$shim_dir/string.lua"
     "$shim_dir/math.lua" "$shim_dir/lua.lua"
     "$shim_dir/iteration.lua" "$shim_dir/gc.lua" "$shim_dir/test.lua"
-    "$shim_dir/reflect.lua" "$shim_dir/sqlite3.lua" "$shim_dir/json.lua"
+    "$shim_dir/reflect.lua" "$shim_dir/sqlite3.lua" "$shim_dir/json.lua" "$shim_dir/protobuf.lua"
 )
 
 if [[ $(uname -s) == Darwin ]]; then artifacts+=("$provider.dSYM"); fi
@@ -118,7 +118,7 @@ remove_installed_artifacts() {
         "$shim_dir/path.lua" "$shim_dir/peg.lua" "$shim_dir/string.lua" \
         "$shim_dir/math.lua" "$shim_dir/lua.lua" \
         "$shim_dir/iteration.lua" "$shim_dir/gc.lua" "$shim_dir/test.lua" \
-        "$shim_dir/reflect.lua" "$shim_dir/sqlite3.lua" "$shim_dir/json.lua"
+        "$shim_dir/reflect.lua" "$shim_dir/sqlite3.lua" "$shim_dir/json.lua" "$shim_dir/protobuf.lua"
 }
 
 case "$mode" in

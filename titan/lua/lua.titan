@@ -11,6 +11,8 @@ local async = import "async"
 local fs = import "fs"
 local gc = import "gc"
 local io = import "io"
+-- The static dependency makes its native loader available to new states.
+local protobuf = import "titan.protobuf"
 local string = import "string"
 
 local type LuaChunk = function (...: value): (...: value)
@@ -413,8 +415,16 @@ end
 local function LuaCall:finish()
   -- run_foreign does not unwind its caller before accepted work completes,
   -- including on cancellation. This is the only release of the reservation.
+  for index = 0, self.packet.nargs as integer - 1 do
+    ffi.titan_transfer_free(self.inputs[index].closure)
+    self.inputs[index].closure = nil
+  end
+  for index = 0, self.packet.allocated_results as integer - 1 do
+    ffi.titan_transfer_free(self.packet.results[index].closure)
+  end
   ffi.free(self.packet.results)
   self.packet.results = nil
+  self.packet.allocated_results = 0
   ffi.lua_settop(self.owner.handle, self.stack_top)
   self.owner.busy = false
 end
@@ -424,9 +434,14 @@ local function LuaCall:prepare()
   self.packet.chunk = self.chunk
   self.packet.name = self.name
   self.packet.length = #self.chunk
-  self.packet.nargs = #self.arguments
+  self.packet.nargs = 0
   self.packet.args = self.inputs
   self.packet.results = nil
+  self.packet.allocated_results = 0
+  for index = 0, #self.arguments - 1 do
+    self.inputs[index].closure = nil
+  end
+  self.packet.nargs = #self.arguments
   for index = 1, #self.arguments do
     local input = (self.inputs as foreign *titan_lua_value) + (index - 1)
     case self.arguments[index]
@@ -455,6 +470,32 @@ local function LuaCall:prepare()
     when is_pointer(item) then
       input.kind = ffi.TITAN_LUA_POINTER
       input.pointer = item
+    when is_record(name, data) then
+      input.kind = ffi.TITAN_LUA_RECORD
+      input.name = name
+      input.name_length = #name
+      input.bytes = data
+      input.length = #data
+    when is_union(name, data) then
+      input.kind = ffi.TITAN_LUA_UNION
+      input.name = name
+      input.name_length = #name
+      input.bytes = data
+      input.length = #data
+    when is_closure(item) then
+      local top = ffi.lua_gettop(L)
+      defer ffi.lua_settop(L, top)
+      if ffi.lua_checkstack(L, 1) == 0 then
+        raise "cannot reserve Lua stack for independent-state closure"
+      end
+      ffi.lua_pushtvalue(L, item)
+      if ffi.titan_transfer_is_closure(L, -1) == 0 then
+        raise "cannot transfer a value that is not a Titan closure"
+      end
+      input.kind = ffi.TITAN_LUA_CLOSURE
+      input.closure = ffi.titan_transfer_new()
+      if not input.closure then raise "cannot allocate independent-state closure transfer" end
+      ffi.titan_transfer_encode(L, input.closure, -1)
     end
   end
 end
@@ -482,6 +523,20 @@ local function LuaCall:values(): {async.TransferValue}
       results[index] = async.TransferValue.is_function(item.function)
     elseif item.kind == ffi.TITAN_LUA_POINTER then
       results[index] = async.TransferValue.is_pointer(item.pointer)
+    elseif item.kind == ffi.TITAN_LUA_RECORD then
+      results[index] = async.TransferValue.is_record(
+        copy_state_bytes(item.name, item.name_length),
+        copy_state_bytes(item.bytes, item.length))
+    elseif item.kind == ffi.TITAN_LUA_UNION then
+      results[index] = async.TransferValue.is_union(
+        copy_state_bytes(item.name, item.name_length),
+        copy_state_bytes(item.bytes, item.length))
+    elseif item.kind == ffi.TITAN_LUA_CLOSURE then
+      local top = ffi.lua_gettop(L)
+      defer ffi.lua_settop(L, top)
+      ffi.titan_transfer_decode(L, item.closure)
+      local closure: value = ffi.lua_totvalue(L, -1)
+      results[index] = async.TransferValue.is_closure(closure)
     end
   end
   return results

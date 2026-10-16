@@ -1,0 +1,139 @@
+--- Deterministic, collision-free proto3 schema names and declarations.
+-- @module titan.protobuf
+
+local record Schema
+  const seen: {string: string}
+  const output: string.StringWriter
+end
+
+-- Escape underscores as well as punctuation so distinct qualified names can
+-- never collapse to the same protobuf identifier.
+local function identifier(name: string): string
+  local output = string.writer()
+  for index = 1, #name do
+    local byte: integer = string.byte(name, index)
+    local plain = false
+    if byte >= 48 and byte <= 57 then plain = true
+    elseif byte >= 65 and byte <= 90 then plain = true
+    elseif byte >= 97 and byte <= 122 then plain = true
+    end
+    if plain then
+      output:write(string.char(byte))
+    else output:write(string.format("_%02x", byte))
+    end
+  end
+  return output:drain()
+end
+
+local function Schema:field(output: string.StringWriter, name: string,
+                             number: integer, descriptor: reflect.Type,
+                             hint: string, depth: integer)
+  local type_name, scalar = self:type_name(descriptor, hint, depth)
+  output:write("  ")
+  if scalar then output:write("optional ") end
+  output:write(type_name .. " f_" .. identifier(name) .. " = " .. number .. ";\n")
+end
+
+local function Schema:array(element: reflect.Type, name: string,
+                             titan_array: boolean, depth: integer): string
+  local slot = name .. "_Slot"
+  local body = string.writer()
+  body:write("message " .. slot .. " {\n")
+  self:field(body, "value", 1, element, slot .. "_Value", depth + 1)
+  body:write("}\n\nmessage " .. name .. " {\n  repeated " .. slot .. " items = 1;\n")
+  if titan_array then body:write("  optional bool is_const = 2;\n") end
+  body:write("}\n\n")
+  self.output:write(body:drain())
+  return name
+end
+
+local function Schema:type_name(descriptor: reflect.Type, hint: string,
+                                  depth: integer): (string, boolean)
+  require_depth(depth)
+  local resolved = resolve_type(descriptor)
+  case resolved
+  when is_option(base) then return self:type_name(base, hint, depth)
+  when is_boolean() then return "bool", true
+  when is_integer() then return "sint64", true
+  when is_float() then return "double", true
+  when is_string() then return "bytes", true
+  when is_nil() then
+    local name = hint .. "_Nil"
+    self.output:write("message " .. name .. " {}\n\n")
+    return name, false
+  when is_array{elem_descriptor} then
+    return self:array(elem_descriptor, hint .. "_Array", true, depth), false
+  when is_record(record_type) then
+    require_record(record_type)
+    local key = "record:" .. record_type.name
+    local previous? = self.seen[key]
+    if previous ~= nil then return previous, false end
+    local name = "T_" .. identifier(record_type.name)
+    self.seen[key] = name
+    local body = string.writer()
+    body:write("message " .. name .. " {\n")
+    for index = 1, #record_type.fields do
+      local field = record_type.fields[index]
+      self:field(body, field.name, field_number(index), field.type,
+                  name .. "_Field" .. index, depth + 1)
+    end
+    body:write("}\n\n")
+    self.output:write(body:drain())
+    return name, false
+  when is_union(union_type) then
+    require_union(union_type)
+    local key = "union:" .. union_type.name
+    local previous? = self.seen[key]
+    if previous ~= nil then return previous, false end
+    local name = "T_" .. identifier(union_type.name)
+    self.seen[key] = name
+    local body = string.writer()
+    body:write("message " .. name .. " {\n  oneof variant {\n")
+    for index = 1, #union_type.variants do
+      local variant = union_type.variants[index]
+      local payload_name = name .. "_Variant" .. index
+      local payload = string.writer()
+      payload:write("message " .. payload_name .. " {\n")
+      for part = 1, #variant.parts do
+        local field = variant.parts[part]
+        self:field(payload, field.name, field_number(part), field.type,
+                    payload_name .. "_Part" .. part, depth + 1)
+      end
+      payload:write("}\n\n")
+      self.output:write(payload:drain())
+      body:write("    " .. payload_name .. " v_" .. identifier(variant.name) ..
+                   " = " .. field_number(index) .. ";\n")
+    end
+    body:write("  }\n}\n\n")
+    self.output:write(body:drain())
+    return name, false
+  when is_foreign_integer{is_signed, bits} then
+    if bits < 1 or bits > 64 then raise "protobuf: unsupported foreign integer width" end
+    if is_signed then return "sint64", true end
+    return "uint64", true
+  when is_foreign_float(spelling) then
+    if spelling == "long double" then return "bytes", true end
+    if spelling == "float" then return "float", true end
+    if spelling == "double" then return "double", true end
+    raise "protobuf: unsupported foreign floating type " .. spelling
+  when is_foreign_pointer() then return "fixed64", true
+  when is_foreign_array{elem_descriptor, len} then
+    require_foreign_array(len)
+    return self:array(elem_descriptor, hint .. "_CArray", false, depth), false
+  when is_foreign_struct(structure) then
+    require_struct(structure)
+    local name = hint .. "_Struct"
+    local body = string.writer()
+    body:write("message " .. name .. " {\n")
+    for index = 1, #structure.fields do
+      local field = structure.fields[index]
+      if field.is_flexible_array then raise "protobuf: flexible foreign array" end
+      self:field(body, field.name, field_number(index), field.type,
+                  name .. "_Field" .. index, depth + 1)
+    end
+    body:write("}\n\n")
+    self.output:write(body:drain())
+    return name, false
+  else raise "protobuf: unsupported field type"
+  end
+end

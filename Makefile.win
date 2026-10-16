@@ -268,7 +268,7 @@ install-titan-sdk publish-titan-sdk:
 	  $(call quote,$(TITAN_INSTALL_TREE)/include/titan) $(call quote,$(TITAN_INSTALL_TREE)/etc/titan) \
 	  $(call quote,$(TITAN_INSTALL_TREE)/share/titan/LICENSES)
 	cp -p $(call quote,$(WINDOWS_BUILD_ROOT)/runtime/libtitan.a) $(call quote,$(TITAN_INSTALL_TREE)/lib/titan/$(TITAN_LIBRARY_VERSION)/libtitan.a)
-	cp -p titan-runtime/titan.h titan-runtime/minicoro.h $(call quote,$(TITAN_INSTALL_TREE)/include/)
+	cp -p titan-runtime/titan.h titan-runtime/minicoro.h titan-runtime/transfer.h $(call quote,$(TITAN_INSTALL_TREE)/include/)
 	cp -p titan-runtime/titan/ffi.h $(call quote,$(TITAN_INSTALL_TREE)/include/titan/ffi.h)
 	@if ! test -e $(call quote,$(TITAN_INSTALL_TREE)/lib/titan/$(TITAN_LIBRARY_VERSION)/titan.dll); then \
 	  cp -p $(call quote,$(WINDOWS_BUILD_ROOT)/runtime/titan.dll) $(call quote,$(TITAN_INSTALL_TREE)/lib/titan/$(TITAN_LIBRARY_VERSION)/titan.dll); fi
@@ -285,7 +285,7 @@ runtime-check: runtime
 	  LPEGLABEL_BUILD_CFLAGS=$(call quote,$(LPEGLABEL_BUILD_CFLAGS)) \
 	  bash spec/support/check_windows_runtime_sdk.sh $(call quote,$(WINDOWS_BUILD_ROOT)) $(call quote,$(PREFIX))
 
-STDLIB_MODULES := coroutine uv async timer io fs net ssl url http websocket os path peg string math lua iteration gc test reflect sqlite3 json
+STDLIB_MODULES := coroutine uv async timer io fs net ssl url http websocket os path peg string math lua iteration gc test reflect sqlite3 json protobuf
 STDLIB_ROOTS := $(addprefix titan.,$(STDLIB_MODULES))
 
 .PHONY: stdlib stdlib-check install-stdlib publish-stdlib compiler-publication-check
@@ -357,7 +357,7 @@ titan-native-coverage: titan-native-coverage-build
 	+$(MAKE) -f Makefile.win titan-native-coverage-run
 
 .PHONY: rock-test test
-rock-test: export TITAN_ROCK_TEST_STDLIB_SPECS = spec/asan_generated_c_context_spec.lua spec/dense_array_runtime_spec.lua spec/libuv_build_spec.lua spec/lpeglabel_build_spec.lua spec/minicoro_spec.lua spec/rockspec_spec.lua spec/titan_install_spec.lua
+rock-test: export TITAN_ROCK_TEST_STDLIB_SPECS = spec/asan_generated_c_context_spec.lua spec/dense_array_runtime_spec.lua spec/transfer_runtime_spec.lua spec/libuv_build_spec.lua spec/lpeglabel_build_spec.lua spec/minicoro_spec.lua spec/rockspec_spec.lua spec/titan_install_spec.lua
 rock-test: export TITAN_ROCK_TEST_SUPERVISOR = $(TITAN_TEST_BUILD_DIR)/sdk/bin/windows-test-supervisor.exe
 rock-test: titan-stdlib-test
 	PREFIX=$(call quote,$(PREFIX)) TITAN_ROCK_TEST_INTERNAL=1 \

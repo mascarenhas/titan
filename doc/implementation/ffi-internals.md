@@ -287,10 +287,10 @@ CFloat       = {"spelling"}
 CPointer     = {"pointee", "quals"}
 CArray       = {"elem", "len", "quals"}
 CFunction    = {"params", "ret", "vararg", "abi"}
-CStruct      = {"cname", "tagname", "typedef", "fields", "complete", "has_fam"}
-CUnion       = {"cname", "tagname", "typedef", "fields", "complete"}
+CStruct      = {"cname", "tagname", "typedef", "fields", "complete", "has_fam", "origin?"}
+CUnion       = {"cname", "tagname", "typedef", "fields", "complete", "origin?"}
 CField       = {"owner", "name", "type", "bitfield", "flexible_array"}
-CTypedef     = {"name", "target", "quals"}
+CTypedef     = {"name", "target", "quals", "origin?"}
 COwned       = {"pointee", "count"}
 CModule      = {"name", "members", "type_members"}
 ```
@@ -312,7 +312,8 @@ three different questions separate:
   boxed callable signatures and therefore governs C-bearing function-tag
   identity;
 * `types.first_non_exportable_type` performs the recursive public-interface
-  scan and returns only header-dependent or otherwise nonportable descriptors;
+  scan, accepting portable primitives and named, recursively exportable C
+  declaration graphs with stable origin identity;
 * `types.is_direct_c` asks whether the value itself has a C representation,
   while `types.has_tvalue_representation` asks whether that representation can
   round-trip through a Lua `TValue`.
@@ -433,10 +434,24 @@ Serialization accepts the closed, header-independent C subset: contextual
 `CPointer`, nonvariadic `CFunction`, and `COwned` descriptors. It emits only
 their structural fields and no source scope, header origin, probe, or parser
 state. The intrinsic opaque `lua_State` descriptor is additionally accepted
-as a pointer pointee, including within a callback signature. Imported
-`CTypedef`s remain nonexportable even when their target is a portable
-primitive; other structs, unions, fields, arrays, enum identities, and any
-allowed constructor containing one are rejected recursively.
+as a pointer pointee, including within a callback signature.
+
+Named `CTypedef`, `CStruct`, and `CUnion` declarations additionally carry a
+compact `origin` identity copied from their defining header provenance.
+Their recursively exportable fields, fixed `CArray` extents, qualifiers, and
+completeness enter the public metadata. Cycles through aggregate pointers use
+qualified `CNamed` backreferences; decoding resolves them before publication
+and restores field owner/name views. By-value cycles, FAM aggregates,
+unspellable anonymous aggregates, enum identities, and noncanonical array
+expressions are rejected. Native layout recipes retain the same checked graph.
+Neither metadata format transports header contents or emits replacement C
+definitions.
+
+After final C-environment extraction, the checker compares imported public C
+declarations with the consumer's visible declarations by origin and shape.
+An ordinary or binary Titan import therefore needs explicit consumer foreign
+headers. Explicit `.titan` imports continue to inherit their generated header
+environment. This check never mutates the provider's descriptors.
 
 The compiled-interface decoder independently validates that closed schema as
 hostile input before code generation. Primitive spellings and structural
@@ -460,13 +475,12 @@ leaves and lowering traits; no caller-supplied annotations survive. Native C
 probes independently acquire the live target and reject disagreement with the
 semantic host's declared target.
 
-The decoder also reapplies `types.has_tvalue_representation` to every decoded
-module variable, public record field, public union part, and Interface field.
-The public serialization contract remains restricted to portable types;
-private embedded foreign aggregates do not enter this graph. Function pointers
-have a lightuserdata representation and pass this check. Nominal physical
-storage is selected separately: passing this semantic-interface check does not
-imply that a record field or union part occupies a UV slot.
+The decoder reapplies `types.has_tvalue_representation` to decoded module
+variables and Interface fields. Public record fields and union parts may
+instead use valid native nominal storage, including complete non-GC-bearing
+C aggregates and fixed arrays. Private fields remain absent from the public
+graph. Function pointers have a lightuserdata representation. Nominal physical
+storage is selected separately from semantic-interface eligibility.
 
 ## Converting C Declarations
 
@@ -638,10 +652,10 @@ The checker has FFI-specific handling in a few narrow places:
   Titan import and variable frontier remains in force.
 
 Export checks use `types.first_non_exportable_type`: a public function
-signature, variable, alias, or nominal member may contain only contextual C
-primitives and recursively portable pointer, foreign-function-pointer, and
-owned graphs. Header-derived typedefs and aggregate/array/enum identities are
-still rejected. Local fields/variants, methods, and nominal functions are
+signature, variable, alias, or nominal member may contain contextual C
+primitives and recursively exportable pointer, foreign-function-pointer,
+owned, named aggregate, typedef, and fixed-array graphs. Required header
+declarations must be visible in each consumer. Local fields/variants, methods, and nominal functions are
 skipped before this check, so a private C-typed record slot or union variant
 can remain module-internal. `CModule` itself is
 rejected as a first-class value in the same `ExpVar` path as ordinary Titan

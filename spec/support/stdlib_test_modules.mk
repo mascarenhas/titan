@@ -8,7 +8,7 @@ TITAN_STDLIB_TEST_ROOTS := $(TITAN_STDLIB_TEST_PROGRAM_ROOT) \
 	coroutine.tests iteration.tests gc.tests lua.tests math.tests peg.tests \
 	string.core_test string.format_pack_test string.regex_test async.tests \
 	uv.task_tests uv.public_tests io.tests fs.tests timer.tests net.tests ssl.tests http.tests websocket.tests \
-	url.tests path.tests os.tests os.process_tests uv.runtime_tests reflect.tests sqlite3.tests json.tests
+	url.tests path.tests os.tests os.process_tests uv.runtime_tests reflect.tests sqlite3.tests json.tests protobuf.tests
 
 .PHONY: print-stdlib-test-roots
 print-stdlib-test-roots:
@@ -32,6 +32,7 @@ TITAN_TEST_MODULES := async.test_support \
 	lua.preload_fixture \
 	lua.receiver_fixture \
 	lua.test_support \
+	lua.transfer_fixture \
 	lua.tests \
 	math.tests \
 	net.test_support \
@@ -43,6 +44,7 @@ TITAN_TEST_MODULES := async.test_support \
 	path.tests \
 	peg.test_support \
 	peg.tests \
+	protobuf.tests \
 	reflect.tests \
 	sqlite3.tests \
 	ssl.backpressure_support \
@@ -140,6 +142,9 @@ TITAN_TEST_SOURCES_json.tests := spec/stdlib/titan/json/tests/tests.titan \
 	spec/stdlib/titan/json/tests/parser_test.titan
 TITAN_TEST_IMPORTS_json.tests :=
 
+TITAN_TEST_SOURCES_protobuf.tests := spec/stdlib/titan/protobuf/tests.titan
+TITAN_TEST_IMPORTS_protobuf.tests :=
+
 TITAN_TEST_SOURCES_lua.preload_fixture := spec/stdlib/titan/lua/preload_fixture.titan
 TITAN_TEST_IMPORTS_lua.preload_fixture :=
 
@@ -157,9 +162,13 @@ TITAN_TEST_SOURCES_lua.tests := spec/stdlib/titan/lua/tests/tests.titan \
 	spec/stdlib/titan/lua/tests/independent_state_reader_test.titan \
 	spec/stdlib/titan/lua/tests/independent_state_receiver_test.titan \
 	spec/stdlib/titan/lua/tests/independent_state_test.titan \
+	spec/stdlib/titan/lua/tests/independent_state_transfer_test.titan \
 	spec/stdlib/titan/lua/tests/require_test.titan \
 	spec/stdlib/titan/lua/tests/source_require_test.titan
-TITAN_TEST_IMPORTS_lua.tests := lua.preload_fixture lua.receiver_fixture lua.test_support support.async support.common support.runtime
+TITAN_TEST_IMPORTS_lua.tests := lua.preload_fixture lua.receiver_fixture lua.test_support lua.transfer_fixture support.async support.common support.runtime
+TITAN_TEST_SOURCES_lua.transfer_fixture := spec/stdlib/titan/lua/transfer_fixture.titan
+TITAN_TEST_IMPORTS_lua.transfer_fixture :=
+TITAN_TEST_FOREIGN_lua.transfer_fixture := 1
 TITAN_TEST_FOREIGN_lua.tests := 1
 
 TITAN_TEST_SOURCES_math.tests := spec/stdlib/titan/math/tests.titan
@@ -300,6 +309,7 @@ TITAN_TEST_C_INPUTS_lua.test_support := spec/stdlib/titan/lua/source_fixture.h
 TITAN_TEST_C_INPUTS_os.test_support := spec/stdlib/titan/os/time_support.h
 TITAN_TEST_C_INPUTS_os.process_tests = $(TITAN_TEST_BUILD_DIR)/uv_coverage_pty.h
 TITAN_TEST_C_INPUTS_reflect.tests := spec/stdlib/titan/reflect/reflection_recursive.h
+TITAN_TEST_C_INPUTS_protobuf.tests := spec/stdlib/titan/protobuf/protobuf_fixture.h
 TITAN_TEST_C_INPUTS_async.tests = $(TITAN_TEST_BUILD_DIR)/async_foreign_work.h \
 	spec/stdlib/titan/async/tests/async_stack_probe.h
 TITAN_TEST_C_INPUTS_uv.runtime_tests = $(TITAN_TEST_BUILD_DIR)/uv_stdio_probe.h

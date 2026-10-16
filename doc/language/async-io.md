@@ -286,6 +286,9 @@ union TransferValue
   is_lua_state(foreign *lua_State)
   is_function(foreign function (*lua_State): int)
   is_pointer(foreign *void)
+  is_record(name: string, data: string)
+  is_union(name: string, data: string)
+  is_closure(value: value)
 end
 ```
 
@@ -297,10 +300,41 @@ lifetime, or synchronize access to shared memory. Keep the originating state,
 any required source-state root, and native storage or code alive for the whole
 borrow.
 
+`is_record` and `is_union` carry a fully qualified nominal name and
+[protobuf wire bytes](standard-library-protobuf.md). Both strings are copied
+across the boundary. These variants describe a serialized graph; they do not
+retain the original record or union. Use `protobuf.serialize` to create the
+bytes and `protobuf.deserialize_nominal` to reconstruct the value against an
+initialized destination type. The graph must satisfy protobuf's public-data,
+supported-type, and acyclic-value rules.
+
+At a transfer boundary, `is_closure` snapshots a Titan closure, its owning module
+and entry points, and its transferable captures. Constructing the variant itself
+only retains the closure; the snapshot happens when the transfer is prepared.
+The receiving state initializes the owning module
+and reconstructs a callable using that state's module instance. Strings and
+nominal captures are copied; captured closures are reconstructed recursively.
+Mutable captured variables become fresh destination cells, preserving aliases
+between captures inside one closure graph. Separate transfer values are
+independent snapshots. Source and destination cells never share GC storage.
+Module globals use the destination module's state and are not copied.
+A captured `TransferValue` remains that union value; its variant is not
+unwrapped as a top-level transfer policy. Its selected payload must therefore
+satisfy the ordinary nominal serialization rules.
+
+Capture cycles, direct captures of unsupported managed values such as Maps,
+Arrays, Interfaces, and owned C storage, and records/unions that fail the public
+protobuf rules raise while preparing the transfer. Arrays inside a supported
+nominal graph follow the protobuf rules and can be copied. Captured nominal types must be initialized
+by the closure owner's imports or an earlier explicit bootstrap. Native pointer
+captures keep their borrowed-address lifetime rules. The `value` parameter
+preserves the original closure without a function-type adjustment; passing a
+non-Titan closure or any non-function value raises at the transfer boundary.
+
 The [independent-state Lua methods](standard-library-lua.md#transferring-values)
 accept and return this union. That API specifies how Lua values map to these
-variants, including its rejection of tables, Lua closures, and C closures with
-upvalues. Import `async` to construct or annotate transfer values; `titan.lua`
+variants, including its rejection of tables, Lua closures, and ordinary C closures
+with upvalues. Import `async` to construct or annotate transfer values; `titan.lua`
 does not declare a second union or an alias.
 
 ## Cross-state receivers
@@ -325,11 +359,21 @@ GC-owned value that must stay in the state that created it.
 requires no Task or source Runtime. It copies the message into a native FIFO before returning and wakes the receiver's
 loop. Scalars retain their variant and value. Strings are copied with explicit
 lengths, including embedded NUL bytes, then copied into the destination
-collector on receipt. Pointer variants copy only borrowed addresses and retain
+collector on receipt. Record and union variants copy both their name and wire
+bytes and arrive as the same `TransferValue` variant; the receiver does not
+implicitly decode or validate the protobuf payload. Closure variants snapshot
+captures before enqueue and arrive with a reconstructed destination callable.
+Pointer variants copy only borrowed addresses and retain
 nothing they point to. Concurrent sends are ordered by their enqueue under the
 receiver's native lock; no ordering is promised between callers before that
 point. Coalesced native wakeups do not coalesce queued messages. The FIFO has
 no capacity limit or backpressure.
+
+Closure reconstruction runs in the receiving Runtime's delivery callback.
+An initialization or reconstruction failure follows the Runtime's callback
+failure path; queued native graphs are released during cleanup. Independent
+`Lua:run` and `Lua:run_async` reconstruction failures instead raise to their
+calling Titan code.
 
 `wait` requires a Task in the receiver's owning Runtime. It takes the oldest
 queued value or suspends until one arrives. At most one Task may wait on a

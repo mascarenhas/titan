@@ -13,7 +13,7 @@ local PROGRAM_SUFFIX = platform.windows and ".exe" or ""
 local STDLIB_MODULES = {
     "coroutine", "uv", "async", "timer", "io", "fs", "net", "ssl",
     "url", "http", "websocket", "os", "path", "peg", "string", "math", "lua", "iteration", "gc",
-    "test", "reflect", "sqlite3", "json",
+    "test", "reflect", "sqlite3", "json", "protobuf",
 }
 local COMPILER_SLICE_PATHS = {}
 for _, owner in ipairs({ "checker", "coder" }) do
@@ -478,7 +478,7 @@ describe("standalone-prefix source installation", function()
         assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
             tostring(code) .. ")")
         local members = archive_object_members(output)
-        assert.same({ "minicoro.o", "titan.o" }, members)
+        assert.same({ "minicoro.o", "titan.o", "transfer.o" }, members)
 
         if not platform.windows then
             assert.is_true(read_file("libbacktrace/.libs/libbacktrace.a") ==
@@ -988,7 +988,19 @@ int titan_sdk_headers(void) { return LUA_VERSION_NUM + SQLITE_VERSION_NUMBER; }
             "spec/stdlib/titan/json/tests/core_test.titan",
             "doc/language/standard-library-json.md",
             "doc/implementation/json-library.md",
+            "titan/protobuf/protobuf.titan",
+            "titan/protobuf/encoder.titan",
+            "titan/protobuf/decoder.titan",
+            "titan/protobuf/schema.titan",
+            "titan/protobuf/native.h",
+            "spec/stdlib/titan/protobuf/tests.titan",
+            "spec/stdlib/titan/protobuf/protobuf_fixture.h",
+            "doc/language/standard-library-protobuf.md",
+            "doc/implementation/protobuf-library.md",
             "titan-compiler/test_runner.lua",
+            "titan-compiler/coder/closure_transfer.lua",
+            "titan-runtime/transfer.c",
+            "titan-runtime/transfer.h",
             "titan-compiler/ffiheaders.lua",
             "titan-compiler/objectmetadata.lua",
             "spec/support/stdlib_test_modules.mk",
@@ -1284,6 +1296,7 @@ assert(support._loadlib(%q, "titan_async_abi"))
             local gc = require "titan.gc"
             local testing = require "titan.test"
             local json = require "titan.json"
+            local protobuf = require "titan.protobuf"
             local builtin_string = require "string"
             -- Requiring async initializes its public uv dependency globally.
             -- The returned async-owned Task resolves its methods through the
@@ -1332,6 +1345,7 @@ assert(support._loadlib(%q, "titan_async_abi"))
             assert(type(gc) == "userdata")
             assert(type(testing) == "userdata")
             assert(type(json) == "userdata")
+            assert(type(protobuf) == "userdata")
             local json_source = '{"answer":42,"values":[1,null,3]}'
             assert(json.encode(json.decode(json_source)) == json_source)
             assert(not testing.testing())
@@ -1365,6 +1379,7 @@ assert(support._loadlib(%q, "titan_async_abi"))
                 gc = gc,
                 test = testing,
                 json = json,
+                protobuf = protobuf,
             }) do
                 local symbol = "luaopen_titan_" .. name
                 assert(normalize(package.searchpath("titan." .. name, package.path)) ==
@@ -1673,7 +1688,7 @@ describe("LuaRocks native payload lifecycle", function()
         make_directory(source)
         make_directory(outside)
         local owned = {
-            "include/titan.h", "include/minicoro.h", "include/titan/ffi.h",
+            "include/titan.h", "include/minicoro.h", "include/transfer.h", "include/titan/ffi.h",
             "lib/titan/0.6/libtitan.a", "lib/titan/0.6/titan" .. SHARED_SUFFIX,
             "share/titan/NOTICE", "etc/titan/build-profile",
         }
@@ -2160,7 +2175,7 @@ inspect-lua-sdk:
         local incomplete = workspace .. "/prefix"
         copy_tree(PREFIX .. "/src/lua-5.5.1",
             incomplete .. "/src/lua-5.5.1")
-        for _, source in ipairs({ "titan.c", "titan.h", "titan/ffi.h" }) do
+        for _, source in ipairs({ "titan.c", "titan.h", "transfer.h", "titan/ffi.h" }) do
             copy_tree("titan-runtime/" .. source,
                 workspace .. "/titan-runtime/" .. source)
         end
@@ -2186,7 +2201,7 @@ inspect-lua-sdk:
         local repository = assert(lfs.currentdir())
         copy_tree("LICENSE", workspace .. "/LICENSE")
         for _, source in ipairs({
-            "titan.c", "titan.h", "minicoro.c", "minicoro.h",
+            "titan.c", "titan.h", "minicoro.c", "minicoro.h", "transfer.c", "transfer.h",
             "ltitanlib.c", "titan/ffi.h",
         }) do
             copy_tree("titan-runtime/" .. source,
@@ -2409,7 +2424,7 @@ describe("relocatable Lua build configuration", function()
         end
         for _, path in ipairs({ "titanc", "titan-compiler/driver.lua", "LICENSE",
                 "THIRD_PARTY_NOTICES.md", "LICENSES/fixture-license",
-                "titan-runtime/titan.h", "titan-runtime/minicoro.h", "titan-runtime/titan/ffi.h" }) do fixture(source, path) end
+                "titan-runtime/titan.h", "titan-runtime/minicoro.h", "titan-runtime/transfer.h", "titan-runtime/titan/ffi.h" }) do fixture(source, path) end
         fixture(build, "out/titan.dll")
         fixture(build, "out/titan/math.lua")
         fixture(build, "runtime/libtitan.a")
@@ -2419,6 +2434,7 @@ describe("relocatable Lua build configuration", function()
             ["lib/titan/0.6/titan.dll"] = build .. "/out/titan.dll",
             ["include/titan.h"] = source .. "/titan-runtime/titan.h",
             ["include/minicoro.h"] = source .. "/titan-runtime/minicoro.h",
+            ["include/transfer.h"] = source .. "/titan-runtime/transfer.h",
             ["include/titan/ffi.h"] = source .. "/titan-runtime/titan/ffi.h",
             ["share/titan/LICENSE"] = source .. "/LICENSE",
             ["share/titan/THIRD_PARTY_NOTICES.md"] = source .. "/THIRD_PARTY_NOTICES.md",

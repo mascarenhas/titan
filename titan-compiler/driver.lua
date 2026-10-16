@@ -2147,6 +2147,21 @@ local portable_c_descriptor_fields = {
         fields = true,
         complete = true,
         has_fam = true,
+        origin = true,
+    },
+    ["Type.CUnion"] = {
+        _tag = true, cname = true, tagname = true, typedef = true,
+        fields = true, complete = true, origin = true,
+    },
+    ["Type.CArray"] = {
+        _tag = true, elem = true, len = true, quals = true,
+    },
+    ["Type.CTypedef"] = {
+        _tag = true, name = true, target = true, quals = true, origin = true,
+    },
+    ["Type.CField"] = {
+        _tag = true, owner = true, name = true, type = true,
+        bitfield = true, flexible_array = true,
     },
 }
 
@@ -2557,7 +2572,8 @@ local function validate_record_interface(record, context, seen)
         local ok, err = validate_interface_type(
             field.type, value_context(owner_context), seen)
         if not ok then return nil, err end
-        if not types.has_tvalue_representation(field.type) then
+        if not types.has_tvalue_representation(field.type)
+           and not require("titan-compiler.nominallayout").classify(field.type) then
             return nil, "record field '" .. field.name ..
                 "' has no TValue representation"
         end
@@ -3012,6 +3028,10 @@ validate_interface_type = function(typ, context, seen)
                and pointee_tag ~= "Type.CFloat"
                and pointee_tag ~= "Type.CPointer"
                and pointee_tag ~= "Type.CFunction"
+               and pointee_tag ~= "Type.CArray"
+               and pointee_tag ~= "Type.CTypedef"
+               and pointee_tag ~= "Type.CStruct"
+               and pointee_tag ~= "Type.CUnion"
                and not types.is_c_lua_state(typ.pointee)) then
             return nil, "portable C pointer has a noncanonical shape"
         end
@@ -3020,7 +3040,7 @@ validate_interface_type = function(typ, context, seen)
         local valid, validation_error =
             validate_interface_type(typ.pointee, nested, seen)
         if not valid then return nil, validation_error end
-        if not types.is_portable_c_type_graph(typ) then
+        if not types.is_exportable_c_type_graph(typ) then
             return nil,
                 "portable C pointer graph is cyclic or noncanonical"
         end
@@ -3038,7 +3058,10 @@ validate_interface_type = function(typ, context, seen)
             if type(param) ~= "table"
                or (param._tag ~= "Type.CInteger"
                    and param._tag ~= "Type.CFloat"
-                   and param._tag ~= "Type.CPointer") then
+                   and param._tag ~= "Type.CPointer"
+                   and param._tag ~= "Type.CTypedef"
+                   and param._tag ~= "Type.CStruct"
+                   and param._tag ~= "Type.CUnion") then
                 return nil, "portable C function parameter has an invalid shape"
             end
             local ok, err = validate_interface_type(param, nested, seen)
@@ -3048,7 +3071,10 @@ validate_interface_type = function(typ, context, seen)
         if typ.ret._tag ~= "Type.CVoid"
            and typ.ret._tag ~= "Type.CInteger"
            and typ.ret._tag ~= "Type.CFloat"
-           and typ.ret._tag ~= "Type.CPointer" then
+           and typ.ret._tag ~= "Type.CPointer"
+           and typ.ret._tag ~= "Type.CTypedef"
+           and typ.ret._tag ~= "Type.CStruct"
+           and typ.ret._tag ~= "Type.CUnion" then
             return nil, "portable C function return has an invalid shape"
         end
         return validate_interface_type(typ.ret, nested, seen)
@@ -3058,16 +3084,71 @@ validate_interface_type = function(typ, context, seen)
         if type(typ.count) ~= "boolean"
            or (pointee_tag ~= "Type.CInteger"
                and pointee_tag ~= "Type.CFloat"
-               and pointee_tag ~= "Type.CPointer") then
+               and pointee_tag ~= "Type.CPointer"
+               and pointee_tag ~= "Type.CTypedef"
+               and pointee_tag ~= "Type.CStruct"
+               and pointee_tag ~= "Type.CUnion"
+               and pointee_tag ~= "Type.CArray") then
             return nil, "portable owned C type has a noncanonical shape"
         end
         local nested = value_context(context)
         nested.kind = "c-owned-payload"
         return validate_interface_type(typ.pointee, nested, seen)
-    elseif tag == "Type.CStruct" then
-        if not types.is_c_lua_state(typ) or not context
-           or context.kind ~= "c-pointee" then
-            return nil, "C struct is not valid as a value-facing type"
+    elseif tag == "Type.CTypedef" then
+        local graph = context and context.kind == "c-pointee"
+            and types.CPointer(typ, {}) or typ
+        if not valid_source_identifier(typ.name) or type(typ.origin) ~= "string"
+           or typ.origin == "" or not types.is_exportable_c_type_graph(graph) then
+            return nil, "C typedef has an invalid declaration identity or target"
+        end
+        return validate_interface_type(typ.target, context, seen)
+    elseif tag == "Type.CArray" then
+        if not types.valid_c_extent(typ.len)
+           or not types.is_exportable_c_type_graph(typ) then
+            return nil, "C array has an invalid fixed extent or element type"
+        end
+        local nested = value_context(context)
+        nested.kind = "c-field"
+        return validate_interface_type(typ.elem, nested, seen)
+    elseif tag == "Type.CStruct" or tag == "Type.CUnion" then
+        if types.is_c_lua_state(typ) then
+            if not context or context.kind ~= "c-pointee" then
+                return nil, "C struct is not valid as a value-facing type"
+            end
+            return true
+        end
+        local graph = context and context.kind == "c-pointee"
+            and types.CPointer(typ, {}) or typ
+        if not types.is_exportable_c_type_graph(graph)
+           or type(typ.origin) ~= "string" or typ.origin == ""
+           or (typ.cname ~= nil and typ.cname ~= typ.tagname
+               and typ.cname ~= typ.typedef
+               and typ.cname ~= (tag == "Type.CStruct" and "struct " or "union ") ..
+                   tostring(typ.tagname)) then
+            return nil, "C aggregate has an invalid declaration identity or field graph"
+        end
+        local count = dense_array_length(typ.fields)
+        if not count or not typ.complete and count ~= 0 then
+            return nil, "C aggregate field list is invalid"
+        end
+        local names = {}
+        local nested = value_context(context)
+        nested.kind = "c-field"
+        for _, field in ipairs(typ.fields) do
+            local fields_ok, fields_err = validate_portable_c_descriptor_fields(field)
+            if not fields_ok then return nil, fields_err end
+            if not valid_source_identifier(field.name) or names[field.name]
+               or field.owner ~= nil and field.owner ~= typ then
+                return nil, "C aggregate field has an invalid owner or name"
+            end
+            names[field.name] = field
+            local field_ok, field_err = validate_interface_type(field.type, nested, seen)
+            if not field_ok then return nil, field_err end
+        end
+        for name, field in pairs(typ.fields) do
+            if type(name) ~= "number" and names[name] ~= field then
+                return nil, "C aggregate has an invalid named field projection"
+            end
         end
         return true
     elseif tag == "Type.Nominal" then
@@ -3189,7 +3270,8 @@ validate_interface_type = function(typ, context, seen)
             local ok, err = validate_interface_type(
                 part.type, value_context(context), seen)
             if not ok then return nil, err end
-            if not types.has_tvalue_representation(part.type) then
+            if not types.has_tvalue_representation(part.type)
+               and not require("titan-compiler.nominallayout").classify(part.type) then
                 return nil, "union variant '" .. typ.name ..
                     "' payload has no TValue representation"
             end
@@ -3414,6 +3496,8 @@ function driver.decode_module_interface(serialized, modname, origin)
     if decoded.n ~= 2 then
         return nil, "serialized module interface must return exactly one value"
     end
+    local references_ok, references_error = types.resolve_compiled_c_references(decoded[2])
+    if not references_ok then return nil, references_error end
     local valid, validation_err =
         driver.validate_module_interface(decoded[2], modname)
     if not valid then return nil, validation_err end
@@ -5787,6 +5871,8 @@ function driver.tableloader(modtable, imported, deps, options)
         if not modtf then return false, load_err end
         local ok, modt_or_err = pcall(modtf)
         if not ok then return false, modt_or_err end
+        local references_ok, references_error = types.resolve_compiled_c_references(modt_or_err)
+        if not references_ok then return false, references_error end
         imported[modname] = {
             kind = "source", ast = ast, type = modt_or_err, completion = ast._completion,
             source_type = source_type, filename = modf,
@@ -5859,11 +5945,14 @@ local RUNTIME_ARCHIVE_INPUTS = {
     "titan.h",
     "minicoro.c",
     "minicoro.h",
+    "transfer.c",
+    "transfer.h",
     "titan/ffi.h",
 }
 local RUNTIME_ARCHIVE_MEMBERS = {
     "titan.o",
     "minicoro.o",
+    "transfer.o",
 }
 
 local function is_archive_symbol_index(member)

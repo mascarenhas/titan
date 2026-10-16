@@ -8,7 +8,7 @@ local REPO = lfs.currentdir()
 local STANDARD_MODULES = {
     "coroutine", "uv", "async", "timer", "io", "fs", "net", "ssl",
     "url", "http", "websocket", "os", "path", "peg", "string", "math", "lua", "iteration", "gc",
-    "test", "reflect", "sqlite3", "json",
+    "test", "reflect", "sqlite3", "json", "protobuf",
 }
 
 
@@ -90,7 +90,7 @@ local function find_standard_layout()
     for _, layout in ipairs(layouts) do
         if valid_production_layout(layout) then return layout end
     end
-    error("async stdlib specs require the combined titan.so and all twenty-three " ..
+    error("async stdlib specs require the combined titan.so and all twenty-four " ..
           "generated titan/*.lua shims; run make stdlib first", 0)
 
 end

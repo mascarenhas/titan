@@ -69,7 +69,7 @@ pass, generates its own report, and uploads directly with the `compiler`
 Codecov flag. The stdlib integration upload uses that same flag, so there is
 no full-tree merger job.
 
-Local exact, unfiltered `rock-test` runs the seven retained runtime/packaging
+Local exact, unfiltered `rock-test` runs the eight retained runtime/packaging
 specs and eight stdlib-dependent compiler integrations serially, then partitions
 the other compiler/language specs into four measured longest-first groups in
 private checkout copies. `TITAN_ROCK_TEST_JOBS=1` through `4` selects workers,
@@ -190,7 +190,7 @@ dependency acquisition within the same prefix; build and complete test execution
 remain single-shot. Run all uncovered stdlib/runtime/packaging work and the
 aggregate before `ci_test_groups.sh compiler-uncovered`. Before compiler
 fixtures, use `ci_stdlib_snapshot.sh` to preserve the runtime archive,
-canonical pair, conditional dSYM, and all twenty-three shims, then restore them
+canonical pair, conditional dSYM, and all twenty-four shims, then restore them
 before bundled/system production smokes. Retain the real x86_64/arm64 universal
 Mach-O archive lookup/repackaging proof; a host-only synthetic check is not a
 replacement. Compiler/language specs must not delete shared runtime state to

@@ -3,9 +3,9 @@ local stage, prefix, source, bootstrap, generated = ...
 assert(package.config:sub(1, 1) == "\\", "native Windows Lua is required")
 local modules = { "coroutine", "uv", "async", "timer", "io", "fs", "net", "ssl",
     "url", "http", "websocket", "os", "peg", "string", "path", "math", "lua", "iteration", "gc",
-    "test", "reflect", "sqlite3", "json" }
+    "test", "reflect", "sqlite3", "json", "protobuf" }
 local folders = { uv = true, http = true, websocket = true, peg = true, string = true,
-    sqlite3 = true, json = true }
+    sqlite3 = true, json = true, lua = true, protobuf = true }
 local names = {}
 for _, name in ipairs(modules) do names[#names + 1] = "titan." .. name end
 local function read(path)

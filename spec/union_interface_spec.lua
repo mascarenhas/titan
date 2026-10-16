@@ -1054,27 +1054,27 @@ describe("union module interfaces", function()
                 {
                     label = "error-recovery marker",
                     make = types.Invalid,
-                    pattern = "Type%.Invalid",
+                    pattern = "Type%.Invalid is not valid in a value%-facing type graph",
                 },
                 {
                     label = "no-value marker",
                     make = types.Void,
-                    pattern = "Type%.Void",
+                    pattern = "Type%.Void is not valid in a value%-facing type graph",
                 },
                 {
                     label = "nested module",
                     make = function()
                         return types.Module("evil", {})
                     end,
-                    pattern = "Type%.Module",
+                    pattern = "Type%.Module is not valid in a value%-facing type graph",
                 },
                 {
-                    label = "header-dependent C FFI descriptor",
+                    label = "C typedef without a declaring origin",
                     make = function()
                         return types.CTypedef("platform_int",
                             types.CInteger("int", true, 3, 32), {})
                     end,
-                    pattern = "Type%.CTypedef",
+                    pattern = "C typedef has an invalid declaration identity or target",
                 },
             }
             local placements = {
@@ -1100,8 +1100,7 @@ describe("union module interfaces", function()
                     local ok, err =
                         driver.validate_module_interface(module, "sample")
                     assert.falsy(ok, case.label)
-                    assert.match(case.pattern ..
-                        " is not valid in a value%-facing type graph", err)
+                    assert.match(case.pattern, err)
                 end
             end
         end)

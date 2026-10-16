@@ -18,14 +18,18 @@ native submission and receives a typed Completion with its exact operation numbe
 from private UV owners. Public field names, result tags, constructor namespaces,
 and generic positions remain those of the existing async API. The defining
 module in nominal metadata changes; it is not byte-identical old metadata.
-Consumers need the rebuilt canonical provider. This work does not bump the
-existing generated-code ABI 2 or prerelease language-server API 1.
+Consumers need the rebuilt canonical provider. The current generated-code ABI
+is 2; the prerelease language-server API remains 1.
 
 Async also owns the public `TransferValue` union used by independent-state
 boundaries. Its nominal identity is `titan.async.TransferValue`; the Lua
 library consumes that ordinary compiled import rather than defining an alias
 or a second representation. Scalar variants hold ordinary Titan values, and
-the string variant retains its source string in a traced slot. State, native-function, and raw-pointer
+the string variant retains its source string in a traced slot. Record/union
+variants retain a nominal name and protobuf wire bytes in two traced slots;
+async transports these packets as opaque data. Its protobuf dependency supplies
+the native loader used to encode and reconstruct nominal closure captures.
+State, native-function, and raw-pointer
 variants hold portable borrowed C pointer types and do not root their
 referents. The Lua adapter owns its native packets and copy/borrow conversion
 policy, described in [the Lua implementation chapter](lua-library.md#cross-state-transfer).
@@ -329,9 +333,24 @@ Its opaque `foreign *void` handle names native receiver storage, not a Titan
 record or public `uv.async_t`. The host sending a message never follows a remote
 GC pointer or enters the destination Lua state. Scalar tags/values and copied
 string bytes live in native messages until the destination loop converts them
-into its own `TransferValue`. The one-slot string-copy transaction and
+into its own `TransferValue`. Nominal packets copy both the name and wire bytes
+into one native allocation with independently checked lengths; neither string
+borrows the sending collector after `send` returns. The receiving loop copies
+them into its own collector and preserves the record/union variant without
+decoding. The one-slot string-copy transaction and
 native-packet lifetime are recorded in the [trusted Lua API ledger](ffi-lua-api-followup.md#trusted-standard-library-discipline).
 Borrowed pointer variants remain raw addresses.
+
+Closure packets own a `TitanTransferGraph` encoded entirely in the sending
+state. Sender cleanup retains graph ownership until native queue admission
+succeeds; allocation failure, closed admission, and native wake failure leave
+it with the sender. The queue owns accepted graphs and frees them after
+destination reconstruction, or when close/failure discards pending nodes.
+The receiving loop decodes using its own module instances and collector, then
+publishes `TransferValue.is_closure` containing that reconstructed callable.
+The native graph carries copied captures, immutable code capabilities, and
+box ordinals. No origin closure, capture box, or other origin GC pointer is
+published to the queue.
 
 Receiver construction uses `ensure_runtime` without requiring a current Task
 or driving the loop, which permits synchronous independent-state bootstrap.
@@ -375,7 +394,7 @@ hosting state, raise into its frames, or resume its Tasks. The
 [independent Lua-state adapter](lua-library.md#independent-state-ownership)
 exclusively owns a separate state and may execute Lua and independently
 initialized Titan modules in it. That state's collector never receives a host
-GC object; only explicitly copied strings and borrowed native addresses cross
+GC object; copied values, native closure graphs, and borrowed addresses cross
 the boundary. Synchronization of shared native bytes remains the caller's
 job. The libuv worker pool is shared with other native work and async adds no
 new queue or thread policy. Ordinary cancellation never detaches the accepted

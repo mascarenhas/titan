@@ -510,7 +510,9 @@ registration and subscription APIs. See the
 [extension guide](libuv-extension-guide.md) for the exact native pin, request,
 and terminal-callback ownership rules.
 
-The runtime SDK archive consequently has exactly `titan.o` and `minicoro.o`.
+The runtime SDK archive has exactly `titan.o`, `minicoro.o`, and `transfer.o`.
+The transfer object owns native closure-copy graphs and their cleanup; ordinary
+standard-library callbacks remain source foreign functions.
 Its installed namespaced header set is only `titan/ffi.h`, alongside top-level
 `minicoro.h` and `titan.h` (and the separately governed
 bundled libuv headers). The standard provider payload is `ltitanlib.o`, private

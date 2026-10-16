@@ -1,0 +1,224 @@
+local async = import "async"
+local strings = import "string"
+foreign import "lua.h"
+foreign import "limits.h"
+foreign import "float.h"
+foreign import "titan/ffi.h"
+
+record TransferRecord
+  const number: integer
+  text: string
+  entries: {integer}
+end
+
+record DefaultRecord
+  const number: integer
+end
+
+local constructions = 0
+
+record CustomRecord
+  const number: integer
+end
+
+function CustomRecord.new(): CustomRecord
+  constructions = constructions + 1
+  return { number = 407 }
+end
+
+function construction_count(): integer
+  return constructions
+end
+
+union TransferUnion
+  empty()
+  present(record: TransferRecord, label: string)
+end
+
+record PrivateField
+  public_field: integer
+  local private_field: integer
+end
+
+foreign function transfer_echo(state: *lua_State): int
+  return ffi.lua_gettop(state)
+end
+
+function policies(pointer: value): (...: async.TransferValue)
+  return async.TransferValue.is_nil(), async.TransferValue.is_boolean(false),
+    async.TransferValue.is_integer(-73), async.TransferValue.is_float(2.5),
+    async.TransferValue.is_string(strings.rep("policy\0bytes", 4096)),
+    async.TransferValue.is_pointer(pointer as foreign *void),
+    async.TransferValue.is_function(transfer_echo),
+    async.TransferValue.is_record("explicit.Record", "record\0wire"),
+    async.TransferValue.is_union("explicit.Union", "union\0wire")
+end
+
+function state_policy(pointer: value): async.TransferValue
+  return async.TransferValue.is_lua_state(pointer as foreign *lua_State)
+end
+
+function record_value(number: integer): TransferRecord
+  return TransferRecord(number, strings.rep("nominal\0bytes", 4096), {1, 2, 3})
+end
+
+function union_value(number: integer): TransferUnion
+  return TransferUnion.present(record_value(number), "union\0label")
+end
+
+function private_value(): PrivateField
+  return PrivateField(1, 2)
+end
+
+function closure_constant(): integer
+  return 37
+end
+
+function closure_text(): function (): string
+  local const text = strings.rep("closure\0text", 1024)
+  return function (): string return text end
+end
+
+function closure_counter(): function (): integer
+  local count = 5
+  return function (): integer
+    count = count + 1
+    return count
+  end
+end
+
+function closure_mutable_text(): function (): string
+  local text = "a"
+  return function (): string
+    text = text .. "b"
+    return text
+  end
+end
+
+function closure_shared_boxes(): function (): integer
+  local count = 5
+  local first = function (): integer
+    count = count + 1
+    return count
+  end
+  local second = function (): integer
+    count = count + 10
+    return count
+  end
+  return function (): integer
+    count = count + 100
+    first()
+    second()
+    return count
+  end
+end
+
+function send_closure(handle: value)
+  async.send(handle as foreign *void,
+    async.TransferValue.is_closure(closure_shared_boxes()))
+end
+
+function closure_nominal(): function (): integer
+  local const item = record_value(53)
+  return function (): integer return item.number + item.entries[3] end
+end
+
+function closure_captured_policy(): function (): integer
+  local const policy = async.TransferValue.is_integer(67)
+  return function (): integer
+    case policy
+    when is_integer(number) then return number
+    else raise "captured TransferValue was unwrapped during closure transfer" end
+  end
+end
+
+function closure_adjusted(): function (integer, value): value
+  local count = 3
+  local source = function (amount: integer): integer
+    count = count + amount
+    return count
+  end
+  local adjusted: function (integer, value): value = source
+  return adjusted
+end
+
+function DefaultRecord:read_number(): integer
+  return self.number
+end
+
+function closure_bound_method(): function (): integer
+  local item = DefaultRecord(61)
+  return item:read_number
+end
+
+function closure_policy(): async.TransferValue
+  return async.TransferValue.is_closure(closure_counter())
+end
+
+function closure_array(): function (): integer
+  local values = {1, 2, 3}
+  return function (): integer return values[1] end
+end
+
+function closure_private_nominal(): function (): integer
+  local item = private_value()
+  return function (): integer return item.public_field end
+end
+
+function closure_cycle(): function (): integer
+  local recurse: (function (): integer)? = nil
+  recurse = function (): integer return recurse() end
+  return recurse
+end
+
+function closure_native_numbers(): function (): boolean
+  local wide: foreign unsigned long long = ffi.ULLONG_MAX
+  local optional: (foreign unsigned long long)? = ffi.ULLONG_MAX
+  local precise: foreign long double = (1 as foreign long double) + ffi.LDBL_EPSILON
+  local maximum: foreign long double = ffi.LDBL_MAX
+  return function (): boolean
+    local exact = wide == ffi.ULLONG_MAX and optional ~= nil
+      and (optional as foreign unsigned long long) == ffi.ULLONG_MAX
+      and precise == (1 as foreign long double) + ffi.LDBL_EPSILON
+      and maximum == ffi.LDBL_MAX
+    wide = 0
+    optional = nil
+    precise = 0
+    maximum = 0
+    return exact
+  end
+end
+
+local closure_global_count = 100
+
+function closure_global_reset(number: integer)
+  closure_global_count = number
+end
+
+function closure_global(): integer
+  closure_global_count = closure_global_count + 1
+  return closure_global_count
+end
+
+function closure_managed_pointer(): function (): boolean
+  local top = ffi.lua_gettop(L)
+  defer ffi.lua_settop(L, top)
+  local item: value = DefaultRecord(83)
+  if ffi.lua_checkstack(L, 1) == 0 then raise "managed capture fixture stack" end
+  ffi.lua_pushtvalue(L, item)
+  local pointer = ffi.lua_togco(L, -1) as foreign *Udata
+  return function (): boolean return pointer ~= nil end
+end
+
+function closure_optional_managed_pointer(present: boolean): function (): boolean
+  local pointer: (foreign *Udata)? = nil
+  if present then
+    local top = ffi.lua_gettop(L)
+    defer ffi.lua_settop(L, top)
+    local item: value = DefaultRecord(89)
+    if ffi.lua_checkstack(L, 1) == 0 then raise "managed capture fixture stack" end
+    ffi.lua_pushtvalue(L, item)
+    pointer = ffi.lua_togco(L, -1) as foreign *Udata
+  end
+  return function (): boolean return pointer == nil end
+end

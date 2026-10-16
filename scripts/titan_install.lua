@@ -241,6 +241,7 @@ local function titan_owned(relative)
         library == "titan.so" or library == "titan.dll" or
         (library and library:match("^titan[.]so[.]dSYM/")) or
         relative == "include/titan.h" or relative == "include/minicoro.h" or
+        relative == "include/transfer.h" or
         relative == "include/titan/ffi.h" or
         relative:match("^share/titan/") or relative == "etc/titan/build-profile"
 end

@@ -31,6 +31,18 @@ TITAN_RUNTIME_FUNC TitanModuleSymbols titan_module_preload_symbols(lua_State *L,
 TITAN_RUNTIME_FUNC void titan_module_preload(lua_State *L, const char *name,
     size_t length, lua_CFunction loader, TitanModuleSymbols symbols);
 
+/* Native-owned closure transfer graphs. The caller owns cleanup before encode
+** can raise. Encode preserves the successful entry top; decode pushes one
+** rooted destination value. Both require an owning-state protected boundary. */
+typedef struct TitanTransferGraph TitanTransferGraph;
+TITAN_RUNTIME_FUNC TitanTransferGraph *titan_transfer_new(void);
+TITAN_RUNTIME_FUNC void titan_transfer_encode(lua_State *L,
+    TitanTransferGraph *graph, int index);
+TITAN_RUNTIME_FUNC void titan_transfer_decode(lua_State *L,
+    const TitanTransferGraph *graph);
+TITAN_RUNTIME_FUNC void titan_transfer_free(TitanTransferGraph *graph);
+TITAN_RUNTIME_FUNC int titan_transfer_is_closure(lua_State *L, int index);
+
 #if defined(__unix__) || defined(__APPLE__)
 #include <sys/socket.h>
 
@@ -70,6 +82,9 @@ static inline int titan_posix_getsockname(int descriptor,
 #define TITAN_MT_MEMBERMAP ((void *)(uintptr_t)UINT64_C(0x310D781561E92F6D))
 #define TITAN_MT_MOD ((void *)(uintptr_t)UINT64_C(0x54C6087BF019D23A))
 #define TITAN_MT_PAYLOAD ((void *)(uintptr_t)UINT64_C(0xB7D24E619053AC8F))
+#define TITAN_MT_PROJECT ((void *)(uintptr_t)UINT64_C(0x730AB98A6741201C))
+#define TITAN_MT_CONSTRUCT ((void *)(uintptr_t)UINT64_C(0x730AB98A6741201D))
+#define TITAN_MT_PUBLIC ((void *)(uintptr_t)UINT64_C(0x730AB98A6741201E))
 
 /*
 ** Titan types that have a metatable

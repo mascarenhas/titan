@@ -625,6 +625,52 @@ describe("native Titan test runner", function()
         setup(clean)
         teardown(clean)
 
+    it("inherits source-owner headers for exported native fields", function()
+        local workspace = assert(compiler_io.new_sync():tmpname())
+        assert(os.remove(workspace))
+        assert(lfs.mkdir(workspace))
+        local header = workspace .. "/native.h"
+        assert(io.open(header, "w")):write([[
+#ifndef TITAN_TEST_RUNNER_NATIVE_H
+#define TITAN_TEST_RUNNER_NATIVE_H
+typedef struct titan_test_runner_native { int count; } titan_test_runner_native;
+static inline titan_test_runner_native titan_test_runner_make(void) {
+    titan_test_runner_native value = { 27 };
+    return value;
+}
+#endif
+]]):close()
+        assert(io.open(workspace .. "/native_owner.titan", "w")):write(
+            "foreign import " .. string.format("%q", header) .. [[
+
+local test = import "test"
+record NativeBox
+    item: foreign titan_test_runner_native
+end
+function test_native_owner(context: test.Context)
+    local box = NativeBox.new(ffi.titan_test_runner_make())
+    test.assert(box.item.count == 27)
+end
+]]):close()
+        local output_root = workspace .. "/output"
+        local argv = working_titanc_arguments()
+        for _, argument in ipairs({ "--test", "--tree", workspace,
+                "--output", output_root, "native_owner" }) do
+            argv[#argv + 1] = argument
+        end
+        local ok, output = run(argv)
+        local program = platform.windows and
+            assert(driver.windows_program_paths("native_owner", nil, nil,
+                output_root)).executable or output_root .. "/native_owner"
+        local ran, run_output
+        if ok then ran, run_output = run_program({ program }) end
+        remove_tree(workspace)
+        assert.truthy(ok, output)
+        assert.truthy(ran, run_output)
+        assert.truthy(run_output:find(
+            "[       OK ] native_owner.test_native_owner", 1, true), run_output)
+    end)
+
     it("ignores an installed bootstrap only when explicitly disabled",
        function()
         local direct_argv = working_titanc_arguments()

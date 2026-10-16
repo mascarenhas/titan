@@ -68,6 +68,7 @@ local standard_imports = {
     reflect = "titan.reflect",
     sqlite3 = "titan.sqlite3",
     json = "titan.json",
+    protobuf = "titan.protobuf",
 }
 
 

@@ -2206,7 +2206,7 @@ describe("C FFI type checking", function()
         end)
     end)
 
-    it("rejects exported functions that mention C FFI types", function()
+    it("exports functions with named header C typedefs", function()
         with_header("typedef int ffi_count;\n", function(header)
             local ok, err = run_checker([[
                 foreign import "]] .. header .. [["
@@ -2215,12 +2215,11 @@ describe("C FFI type checking", function()
                     return 1
                 end
             ]])
-            assert.falsy(ok)
-            assert.match("cannot export C FFI type '.-ffi_count'", err)
+            assert.truthy(ok, err)
         end)
     end)
 
-    it("reports exported C FFI types cleanly through source imports", function()
+    it("requires C declarations at ordinary importing sites", function()
         with_header("typedef int ffi_count;\n", function(header)
             local ok, err = run_checker_modules({
                 a = [[
@@ -2235,11 +2234,11 @@ describe("C FFI type checking", function()
                 ]]
             }, "b")
             assert.falsy(ok)
-            assert.match("cannot export C FFI type '.-ffi_count'", err)
+            assert.match("imported C declaration '.-ffi_count'.-is not visible", err)
         end)
     end)
 
-    it("rejects record fields that mention C FFI types", function()
+    it("exports record fields with named header C typedefs", function()
         with_header("typedef int ffi_count;\n", function(header)
             local ok, err = run_checker([[
                 foreign import "]] .. header .. [["
@@ -2248,8 +2247,7 @@ describe("C FFI type checking", function()
                     x: foreign ffi_count
                 end
             ]])
-            assert.falsy(ok)
-            assert.match("cannot export C FFI type '.-ffi_count'", err)
+            assert.truthy(ok, err)
         end)
     end)
 
@@ -2347,7 +2345,7 @@ describe("C FFI type checking", function()
         end)
     end)
 
-    it("rejects C FFI types exposed by public union variants", function()
+    it("exports named C typedefs in public union variants", function()
         with_header("typedef int ffi_count;\n", function(header)
             local ok, err = run_checker([[
                 foreign import "]] .. header .. [["
@@ -2356,12 +2354,11 @@ describe("C FFI type checking", function()
                     count(foreign ffi_count)
                 end
             ]])
-            assert.falsy(ok)
-            assert.match("cannot export C FFI type '.-ffi_count'", err)
+            assert.truthy(ok, err)
         end)
     end)
 
-    it("rejects exported legacy C struct types without crashing", function()
+    it("exports named complete C aggregate signatures", function()
         with_header("typedef struct ffi_point { int x; } ffi_point;\n", function(header)
             local ok, err = run_checker([[
                 foreign import "]] .. header .. [["
@@ -2370,8 +2367,7 @@ describe("C FFI type checking", function()
                     return 1
                 end
             ]])
-            assert.falsy(ok)
-            assert.match("cannot export C FFI type '.-ffi_point'", err)
+            assert.truthy(ok, err)
         end)
     end)
 end)

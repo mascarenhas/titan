@@ -16,7 +16,10 @@ typedef enum titan_lua_kind {
   TITAN_LUA_STRING,
   TITAN_LUA_STATE,
   TITAN_LUA_FUNCTION,
-  TITAN_LUA_POINTER
+  TITAN_LUA_POINTER,
+  TITAN_LUA_RECORD,
+  TITAN_LUA_UNION,
+  TITAN_LUA_CLOSURE
 } titan_lua_kind;
 
 typedef struct titan_lua_value {
@@ -25,9 +28,12 @@ typedef struct titan_lua_value {
   lua_Number number;
   const char *bytes;
   size_t length;
+  const char *name;
+  size_t name_length;
   lua_State *state;
   lua_CFunction function;
   void *pointer;
+  TitanTransferGraph *closure;
 } titan_lua_value;
 
 typedef struct titan_lua_preload {
@@ -51,6 +57,8 @@ typedef struct titan_lua_call {
   int nargs;
   int status;
   int nresults;
+  /* Count of zero-initialized result slots, including a partial conversion. */
+  int allocated_results;
   titan_lua_value *args;
   /* Allocated by the worker; freed by the caller only after completion. */
   titan_lua_value *results;

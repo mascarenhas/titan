@@ -1,0 +1,411 @@
+-- Public behavior of schema-directed protobuf serialization.
+local test = import "test"
+local protobuf = import "protobuf"
+local reflect = import "reflect"
+local string = import "string"
+local gc = import "gc"
+foreign import "limits.h"
+foreign import "protobuf_fixture.h"
+
+local function descriptor(candidate: value): reflect.Type
+  case reflect.inspect(candidate)
+  when is_record(record_value) then return reflect.Type.is_record(record_value.type)
+  when is_union(union_value) then return reflect.Type.is_union(union_value.type)
+  else raise "expected nominal test value"
+  end
+end
+
+local function roundtrip(candidate: value): value
+  return protobuf.deserialize(protobuf.serialize(candidate), descriptor(candidate))
+end
+
+local function expect_error(action: function (): (), expected: string)
+  local failed = false
+  do
+    action()
+  catch
+    failed = true
+    test.assert(error is string)
+    local message: string = error
+    test.assert(string.find(message, expected) ~= nil, message)
+  end
+  test.assert(failed, "expected operation to reject " .. expected)
+end
+
+record IntegerValue
+  number: integer
+end
+
+record Narrow
+  number: foreign unsigned char
+end
+
+record BooleanValue
+  flag: boolean
+  optional: boolean?
+end
+
+record NilValue
+  nothing: nil
+end
+
+record LongDouble
+  number: foreign long double
+end
+
+record FunctionPointer
+  callback: foreign function(int): int
+end
+
+record Scalars
+  minimum: integer
+  maximum: integer
+  flag: boolean
+  ratio: float
+  bytes: string
+  absent: string?
+end
+
+record Node
+  name: string
+  next: Node?
+end
+
+record Shared
+  left: Node
+  right: Node
+end
+
+record Arrays
+  mutable: {integer}
+  frozen: const {integer}
+  maybe: const? {integer}
+  absent: ({integer})?
+  empty: {integer}
+end
+
+union Choice
+  empty()
+  pair(number: integer, note: string?)
+  node(Node)
+end
+
+union Optimistic
+  empty()
+  unavailable(function (): ())
+end
+
+record OptionalUnsupported
+  callback: (function (): ())?
+  empty: {function (): ()}
+end
+
+record AnyValue
+  item: value
+end
+
+local record LocalRecord
+  number: integer
+end
+
+local union LocalUnion
+  item(integer)
+end
+
+record PrivateFields
+  number: integer
+  local hidden: integer
+end
+
+union PrivateVariants
+  visible()
+  local hidden()
+end
+
+local constructions = 0
+
+record CustomConstructor
+  const number: integer
+end
+
+function CustomConstructor.new(number: integer): CustomConstructor
+  constructions = constructions + 1
+  return { number = number }
+end
+
+record ForeignScalars
+  signed: foreign long long
+  unsigned: foreign unsigned long long
+  narrow: foreign unsigned char
+  ratio: foreign float
+  precise: foreign double
+  pointer: foreign *void
+end
+
+record Embedded
+  packet: foreign titan_protobuf_packet
+  row: foreign titan_protobuf_row
+end
+
+union NativeChoice
+  empty()
+  packet(foreign titan_protobuf_packet)
+end
+
+function test_signed_wire_golden(_context: test.Context)
+  test.assert(protobuf.serialize(IntegerValue(75)) == string.char(8, 150, 1))
+  test.assert(protobuf.serialize(IntegerValue(-1)) == string.char(8, 1))
+  test.assert(protobuf.serialize(IntegerValue(0)) == string.char(8, 0))
+  local decoded: IntegerValue = protobuf.deserialize(string.char(8, 150, 1),
+                                                     descriptor(IntegerValue(0)))
+  test.assert(decoded.number == 75)
+end
+
+function test_scalars_preserve_tags_extremes_and_binary_strings(_context: test.Context)
+  local original = Scalars(-9223372036854775807 - 1, 9223372036854775807,
+                            false, -0.0, "\0\255raw\0bytes", nil)
+  local decoded: Scalars = roundtrip(original)
+  test.assert(decoded.minimum == original.minimum and decoded.maximum == original.maximum)
+  test.assert(not decoded.flag and decoded.absent == nil)
+  test.assert(decoded.bytes == original.bytes)
+  test.assert(string.pack("<d", decoded.ratio) == string.pack("<d", original.ratio))
+end
+
+function test_nested_records_copy_shared_subgraphs(_context: test.Context)
+  local node = Node("leaf", nil)
+  local original = Shared(node, node)
+  local decoded: Shared = roundtrip(original)
+  test.assert(decoded.left.name == "leaf" and decoded.right.name == "leaf")
+  test.assert(decoded.left ~= node and decoded.left ~= decoded.right)
+  decoded.left.name = "changed"
+  test.assert(node.name == "leaf" and decoded.right.name == "leaf")
+end
+
+function test_arrays_preserve_holes_empty_absent_and_constness(_context: test.Context)
+  local holes: {integer} = {7}
+  holes[3] = 9
+  local frozen = holes as const {integer}
+  local original = Arrays(holes, frozen, frozen, nil, {})
+  local decoded: Arrays = roundtrip(original)
+  test.assert(#decoded.mutable == 3 and decoded.mutable[1] == 7)
+  test.assert(decoded.mutable[2] == nil and decoded.mutable[3] == 9)
+  test.assert(#decoded.empty == 0 and decoded.absent == nil)
+  case reflect.inspect(decoded.frozen)
+  when is_const_array() then
+  else raise "const Array lost its constness"
+  end
+  case reflect.inspect(decoded.maybe)
+  when is_const_array() then
+  else raise "maybe-const Array lost its actual constness"
+  end
+  local mutable_maybe: Arrays = roundtrip(Arrays({}, frozen, holes, {}, {}))
+  test.assert(mutable_maybe.absent ~= nil and #mutable_maybe.absent == 0)
+  case reflect.inspect(mutable_maybe.maybe)
+  when is_array() then
+  else raise "mutable maybe-const Array became const"
+  end
+end
+
+function test_union_empty_and_nullable_payloads(_context: test.Context)
+  test.assert(protobuf.serialize(Choice.empty()) == string.char(10, 0))
+  local empty: Choice = roundtrip(Choice.empty())
+  case empty
+  when empty() then
+  else raise "empty variant changed"
+  end
+  local pair: Choice = roundtrip(Choice.pair(-3, nil))
+  case pair
+  when pair(number, note) then test.assert(number == -3 and note == nil)
+  else raise "pair variant changed"
+  end
+  local nested: Choice = roundtrip(Choice.node(Node("nested", nil)))
+  case nested
+  when node(node) then test.assert(node.name == "nested")
+  else raise "nested variant changed"
+  end
+end
+
+function test_custom_constructor_is_not_invoked_by_decode(_context: test.Context)
+  constructions = 0
+  local original = CustomConstructor(17)
+  local decoded: CustomConstructor = roundtrip(original)
+  test.assert(decoded.number == 17 and constructions == 1)
+end
+
+function test_optimistic_encoding_does_not_preflight_unvisited_types(_context: test.Context)
+  local decoded: Optimistic = roundtrip(Optimistic.empty())
+  case decoded
+  when empty() then
+  else raise "unexpected variant"
+  end
+  local optional: OptionalUnsupported = roundtrip(OptionalUnsupported(nil, {}))
+  test.assert(optional.callback == nil and #optional.empty == 0)
+  expect_error(function() protobuf.schema(descriptor(Optimistic.empty())) end,
+                 "unsupported field type")
+  expect_error(function() protobuf.serialize(Optimistic.unavailable(function() end)) end,
+                 "unsupported field type")
+  expect_error(function() protobuf.serialize(AnyValue(17)) end, "unsupported field type")
+end
+
+function test_cycles_and_nonpublic_nominals_are_rejected(_context: test.Context)
+  local cyclic = Node("cycle", nil)
+  cyclic.next = cyclic
+  expect_error(function() protobuf.serialize(cyclic) end, "cyclic object graph")
+  expect_error(function() protobuf.serialize(LocalRecord(1)) end, "record must be public")
+  expect_error(function() protobuf.serialize(LocalUnion.item(1)) end, "union must be public")
+  expect_error(function() protobuf.serialize(PrivateFields(1, 2)) end,
+                 "record must be public")
+  expect_error(function() protobuf.serialize(PrivateVariants.visible()) end,
+                 "union must be public")
+end
+
+function test_excessive_graph_and_unknown_group_nesting_is_rejected(_context: test.Context)
+  local chain = Node("leaf", nil)
+  for index = 1, 129 do chain = Node("branch", chain) end
+  expect_error(function() protobuf.serialize(chain) end, "nesting exceeds 128")
+  local groups = string.rep(string.char(51), 129) .. string.rep(string.char(52), 129)
+  expect_error(function()
+    protobuf.deserialize(string.char(8, 0) .. groups, descriptor(IntegerValue(0)))
+  end, "nesting exceeds 128")
+end
+
+function test_foreign_scalars_preserve_full_unsigned_bits_and_pointer_addresses(_context: test.Context)
+  local owner: owned *int = foreign int.new()
+  local original = ForeignScalars(ffi.LLONG_MIN, ffi.ULLONG_MAX, 255,
+                                   1.25, -2.5, owner)
+  local decoded: ForeignScalars = roundtrip(original)
+  test.assert(decoded.signed == ffi.LLONG_MIN and decoded.unsigned == ffi.ULLONG_MAX)
+  test.assert(decoded.narrow as integer == 255 and decoded.ratio as float == 1.25)
+  test.assert(decoded.precise as float == -2.5)
+  test.assert(decoded.pointer == original.pointer)
+  local null_pointer: ForeignScalars = roundtrip(ForeignScalars(0, 0, 0, 0, 0, nil))
+  test.assert(not null_pointer.pointer)
+end
+
+function test_long_double_uses_exact_text_without_double_narrowing(_context: test.Context)
+  local original = LongDouble(ffi.titan_protobuf_long_double())
+  local decoded: LongDouble = roundtrip(original)
+  test.assert(decoded.number == original.number)
+  test.assert(string.find(protobuf.schema(descriptor(original)), "optional bytes f_number = 1;") ~= nil)
+end
+
+function test_foreign_function_pointer_keeps_its_borrowed_address(_context: test.Context)
+  local original = FunctionPointer(ffi.titan_protobuf_increment)
+  local decoded: FunctionPointer = roundtrip(original)
+  test.assert(decoded.callback(26) as integer == 27)
+end
+
+function test_boolean_presence_and_foreign_integer_bounds(_context: test.Context)
+  local absent: BooleanValue = roundtrip(BooleanValue(false, nil))
+  local present: BooleanValue = roundtrip(BooleanValue(true, false))
+  test.assert(not absent.flag and absent.optional == nil)
+  test.assert(present.flag and present.optional == false)
+  expect_error(function()
+    protobuf.deserialize(string.char(8, 2), descriptor(BooleanValue(false, nil)))
+  end, "invalid boolean")
+  expect_error(function()
+    protobuf.deserialize(string.char(8, 128, 2), descriptor(Narrow(0)))
+  end, "unsigned integer out of range")
+end
+
+function test_embedded_foreign_structs_arrays_and_bitfields(_context: test.Context)
+  local packet = foreign titan_protobuf_packet.new()
+  packet.pair.x = -37
+  packet.pair.serial = ffi.ULLONG_MAX
+  packet.pair.ratio = 1.5
+  packet.row[0] = 10
+  packet.row[1] = 20
+  packet.row[2] = 30
+  packet.pointer = nil
+  packet.mode = 5
+  packet.offset = -7
+  local row = foreign int.new_array(3)
+  row[0] = 2
+  row[1] = 4
+  row[2] = 8
+  local original = Embedded(packet, row)
+  local decoded: Embedded = roundtrip(original)
+  gc.collect()
+  test.assert(decoded.packet.pair.x as integer == -37)
+  test.assert(decoded.packet.pair.serial == ffi.ULLONG_MAX)
+  test.assert(decoded.packet.pair.ratio as float == 1.5)
+  test.assert(decoded.packet.row[0] as integer == 10)
+  test.assert(decoded.packet.row[2] as integer == 30)
+  test.assert(decoded.packet.mode as integer == 5 and decoded.packet.offset as integer == -7)
+  test.assert(decoded.row[1] as integer == 4)
+  packet.pair.x = 99
+  row[1] = 99
+  test.assert(decoded.packet.pair.x as integer == -37 and decoded.row[1] as integer == 4)
+  local variant: NativeChoice = roundtrip(NativeChoice.packet(packet))
+  case variant
+  when packet(actual) then test.assert(actual.pair.x as integer == 99)
+  else raise "foreign union payload changed"
+  end
+end
+
+function test_unknown_fields_scalar_last_wins_and_message_merge(_context: test.Context)
+  local target = descriptor(IntegerValue(0))
+  local decoded: IntegerValue = protobuf.deserialize(
+    string.char(8, 2, 42, 3) .. "abc" .. string.char(8, 18, 51, 8, 1, 52), target)
+  test.assert(decoded.number == 9)
+  local shared = Shared(Node("", nil), Node("", nil))
+  -- Field 1 occurs twice; the second embedded message is empty and must merge.
+  local wire = string.char(10, 3, 10, 1) .. "a" .. string.char(10, 0, 18, 3, 10, 1) .. "b"
+  local merged: Shared = protobuf.deserialize(wire, descriptor(shared))
+  test.assert(merged.left.name == "a" and merged.right.name == "b")
+end
+
+function test_union_oneof_uses_last_recognized_variant(_context: test.Context)
+  local wire = protobuf.serialize(Choice.pair(3, "old")) .. protobuf.serialize(Choice.empty())
+  local decoded: Choice = protobuf.deserialize(wire, descriptor(Choice.empty()))
+  case decoded
+  when empty() then
+  else raise "oneof did not select last variant"
+  end
+end
+
+function test_malformed_wire_is_rejected(_context: test.Context)
+  local target = descriptor(IntegerValue(0))
+  expect_error(function() protobuf.deserialize("", target) end, "missing required field")
+  expect_error(function() protobuf.deserialize(string.char(0), target) end, "field number zero")
+  expect_error(function() protobuf.deserialize(string.char(8, 128), target) end, "truncated varint")
+  expect_error(function()
+    protobuf.deserialize(string.char(8) .. string.rep(string.char(255), 9) .. string.char(2), target)
+  end, "varint overflow")
+  expect_error(function() protobuf.deserialize(string.char(10, 2, 1), target) end, "truncated field")
+  expect_error(function() protobuf.deserialize(string.char(13, 0, 0, 0, 0), target) end,
+                 "unexpected wire type")
+  expect_error(function() protobuf.deserialize(string.char(51, 60), target) end,
+                 "mismatched end group")
+  expect_error(function()
+    protobuf.deserialize(string.char(10, 1, 128), descriptor(NilValue(nil)))
+  end, "truncated varint")
+end
+
+function test_nominal_lookup_requires_registered_matching_kind(_context: test.Context)
+  local original = IntegerValue(27)
+  local decoded: IntegerValue = protobuf.deserialize_nominal(
+    protobuf.serialize(original), "protobuf.tests.IntegerValue", false)
+  test.assert(decoded.number == 27)
+  expect_error(function()
+    protobuf.deserialize_nominal("", "protobuf.tests.Missing", false)
+  end, "unknown nominal type")
+  expect_error(function()
+    protobuf.deserialize_nominal("", "protobuf.tests.IntegerValue", true)
+  end, "nominal kind mismatch")
+end
+
+function test_schema_is_stable_and_contains_matching_wire_types(_context: test.Context)
+  local target = descriptor(Scalars(0, 0, false, 0.0, "", nil))
+  local output = protobuf.schema(target)
+  test.assert(output == protobuf.schema(target))
+  test.assert(string.find(output, "syntax = \"proto3\";") ~= nil)
+  test.assert(string.find(output, "message T_protobuf_2etests_2eScalars") ~= nil)
+  test.assert(string.find(output, "optional sint64 f_minimum = 1;") ~= nil)
+  test.assert(string.find(output, "optional bytes f_bytes = 5;") ~= nil)
+  local recursive = protobuf.schema(descriptor(Node("", nil)))
+  test.assert(string.find(recursive, "T_protobuf_2etests_2eNode f_next = 2;") ~= nil)
+  local union_schema = protobuf.schema(descriptor(Choice.empty()))
+  test.assert(string.find(union_schema, "oneof variant") ~= nil)
+  test.assert(string.find(union_schema, "v_empty = 1;") ~= nil)
+end

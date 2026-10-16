@@ -62,6 +62,10 @@ function generic_prepare_erased_registry(surface_registry)
             for index, variant in ipairs(lowered.variants) do
                 local source = owner.variants[index]
                 variant.islocal = source and source.islocal or nil
+                for _, part in ipairs(variant.parts) do
+                    part.dynamic_plan =
+                        maybe3.from_optional(types.dynamic_coercion(part.type))
+                end
             end
         end
         erased[fqtn] = lowered
@@ -1350,6 +1354,9 @@ function generic_refresh_erased_annotations(node)
            or tag == "Ast.TopLevelMethod" or tag == "Ast.ExpFunction"
            or tag == "Ast.InterfaceMethod" then
             annotate_lua_function_boundary(value)
+            if tag == "Ast.ExpFunction" then
+                annotate_closure_transfer_captures(value)
+            end
         elseif tag == "Ast.TopLevelVar" then
             value._lua_write_dynamic_plan =
                 maybe3.from_optional(types.dynamic_coercion(value._type))

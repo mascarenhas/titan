@@ -57,12 +57,13 @@ function c_header_name(name)
     return assert(require("titan-compiler.ffiheaders").quote_header(name))
 end
 
--- Numeric expressions copy C values, so their mutable native carriers must
+-- Scalar expressions copy C values, so their mutable native carriers must
 -- not inherit a typedef's top-level const/volatile qualification. Keep the
--- checked declaration identity and every pointer/aggregate qualifier intact.
+-- checked declaration identity, pointer pointee qualifiers, and aggregates.
 function coder._c_value_type(typ)
     local resolved = types.resolve_c_typedef(typ)
-    if (resolved._tag == "Type.CInteger" or resolved._tag == "Type.CFloat")
+    if (resolved._tag == "Type.CInteger" or resolved._tag == "Type.CFloat"
+        or resolved._tag == "Type.CPointer")
        and #types.c_type_qualifiers(typ) > 0 then
         return resolved
     end

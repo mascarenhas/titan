@@ -83,7 +83,7 @@ installs compiler dependencies and the Titan source rock into the Lua prefix.
 Windows also installs `luv` for compiler subprocesses; its ordinary LuaRocks
 build uses CMake and a bundled libuv independently of Titan's stdlib libuv.
 
-Plain `luarocks test` runs the complete native stdlib suite, the seven retained
+Plain `luarocks test` runs the complete native stdlib suite, the eight retained
 runtime/packaging specs, and all compiler/language specs in four private NTFS
 checkout copies. Windows defaults to two concurrent compiler-test workers;
 `TITAN_ROCK_TEST_JOBS=1` through `4` selects the bound. Each worker uses the
@@ -501,7 +501,7 @@ mingw32-make -f Makefile.win titan-stdlib-test-run \
 pattern without narrowing compilation; omit it for complete validation. The
 compatibility entrypoint `spec/support/check_windows_stdlib_behavior.sh WORKSPACE SDK`
 also builds and runs the full shared suite. There is no separate Windows case
-allowlist: `spec/support/stdlib_test_modules.mk` supplies the same 28 explicit
+allowlist: `spec/support/stdlib_test_modules.mk` supplies the same 29 explicit
 roots to all three platforms, including filesystem, SQLite, and local watchers.
 
 The build copies the supplied SDK and authored fixtures into its marked

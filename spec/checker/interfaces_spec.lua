@@ -1232,7 +1232,7 @@ describe("interfaces (typechecker)", function()
         assert.match("cannot export local record type 'test%.Hidden'", err)
     end)
 
-    it("rejects C FFI types anywhere in a public Interface signature",
+    it("exports named C typedefs in a public Interface signature",
     function()
         with_header("typedef int ffi_int;\n", function(header)
             local session = h.new_checker_probe_session()
@@ -1248,8 +1248,7 @@ describe("interfaces (typechecker)", function()
             end)
             h.close_checker_probe_session(session)
             assert.is_true(ran, failure)
-            assert.falsy(ok)
-            assert.match("cannot export C FFI type '.-ffi_int'", err)
+            assert.truthy(ok, err)
         end)
     end)
 
