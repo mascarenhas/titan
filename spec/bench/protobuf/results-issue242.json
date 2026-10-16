@@ -1,0 +1,1352 @@
+{
+  "format_version": 1,
+  "source_commit": "88e54cd8",
+  "scope": "protobuf implementation before record transfer hooks; production Linux x86-64",
+  "hardware": {
+    "cpu": "AMD Ryzen AI 9 HX 370",
+    "physical_cores": 12,
+    "logical_cpus": 24,
+    "pinned_logical_cpu": 9,
+    "smt_sibling": 21,
+    "governor": "powersave",
+    "energy_performance_preference": "balance_performance",
+    "scaling_max_freq_khz": 3289474
+  },
+  "build": {
+    "platform": "Linux-7.2.8-ogc5.1.fc44.x86_64-x86_64-with-glibc2.43",
+    "compiler": "gcc (GCC) 16.2.1 20260819 (Red Hat 16.2.1-2)",
+    "profile": "production",
+    "generated_c_flags": [
+      "-O3",
+      "-g1",
+      "-flto=auto",
+      "-ffat-lto-objects"
+    ],
+    "consumer_options": [
+      "--static",
+      "--no-uv-bootstrap"
+    ],
+    "source_sha256": {
+      "bench.titan": "9e8ab5128a80530d22729787c96b968947b246c62e2d6327ebf290f65c1a3180",
+      "probe.c": "3ded75c8be17fd40dc252910d2960a9d0763e071176ef7c4347a6545798a1843",
+      "probe.h": "d1e043240cd42f2a2448da7ad2d1ded8d963f4b35d501031ecdcae89daa7e1b8"
+    },
+    "executable_sha256": "1c06c2aa642ee8238aafd36524f8228d1a6a55f0e59c8aa74d9da9eef5f070e8",
+    "provider_sha256": {
+      "bin/lua": "4ff90fc0bccfffb89db1198b3807b2731b1f95686967a42d13f9b78f6f5561ee",
+      "lib/liblua.a": "4e7c2c04717085bb89744d1c3cbafe5f0be48bbd72237791f58b1f674dd49ece",
+      "lib/titan/0.6/libtitan.a": "067923821ece65fbcc172001c3d9fb6c4c5abee9ba3eb8503e3889aa69b523fe",
+      "lib/titan/0.6/titan.a": "6250e076cdf93806448215a842c0baa265ecfa81cab90c7c0c133159d60325ef"
+    },
+    "provider_source_manifest_sha256": "d934dd8ecbe0b940f1ea63fc9f67e5c2f610d359e7d07d4e2c39c2795d296f5b",
+    "implementation_source_sha256": {
+      "titan-compiler/coder/reflection.lua": "3a3cec785c8a470bf2e00bef680a31d07cf0fefd40d237e98fd526044113087c",
+      "titan-runtime/transfer.c": "3f4f8d06f8457846902a007900091987d0377dd8c0ea21c661e78f7736709fd5",
+      "titan/protobuf/decoder.titan": "7c1afc04a18a7ac63c66d5824497e569ad1631456d6a8bbc1bd4c4e57c71e106",
+      "titan/protobuf/encoder.titan": "b6f3b87766d8780de88d2924a4d809f8b6e9072821b9c139a6ac537e1427f52e",
+      "titan/protobuf/native.h": "24cfd07576997dc545efefcfc5b9b272e819126f01030c3f5a2b6d8fac7c49d6",
+      "titan/protobuf/protobuf.titan": "9ca990d03a0dcb99362743f386d180fe9dff77a7b7cdd6f4f7e63138d25a553c",
+      "titan/protobuf/schema.titan": "c031a65d61038bdded1e8f085ad8fffc98e093b74f93fecf0264f2bd8966d44e",
+      "titan/reflect.titan": "a611557c47f100f7b3f44badbd47dda0bf11b4d7869df7aa7c0d73214ba2fef9",
+      "titan/string/string.titan": "e1015dcb814d4c2173e8f14dbe506e3a9d5b96e814a58e818306960e0d2b72ea"
+    },
+    "retained_source_sha256": {
+      "bench.titan": "8252a86b46ee51caa633f0affb20bcfdfae007b234ece45af9a3def38df9750a",
+      "probe.c": "3ded75c8be17fd40dc252910d2960a9d0763e071176ef7c4347a6545798a1843",
+      "probe.h": "d1e043240cd42f2a2448da7ad2d1ded8d963f4b35d501031ecdcae89daa7e1b8"
+    },
+    "retained_source_normalization": "bench.titan omits one final blank line present in the measured source; executable statements are unchanged."
+  },
+  "measurement": {
+    "initial_started": "2026-10-16T01:04:36Z",
+    "initial_finished": "2026-10-16T01:08:56Z",
+    "initial_repeats": 5,
+    "initial_batch_seconds": 0.25,
+    "profile_target_seconds": 5.0,
+    "profile_requested_interval_us": 1000,
+    "initial_background": "Windows and macOS task-created validation active; benchmark-only affinity pin.",
+    "initial_load_start": [
+      5.20849609375,
+      8.22412109375,
+      9.71240234375
+    ],
+    "initial_load_end": [
+      7.65869140625,
+      8.1669921875,
+      9.3388671875
+    ],
+    "recheck_started": "2026-10-16T01:14:55Z",
+    "recheck_finished": "2026-10-16T01:15:49Z",
+    "recheck_repeats": 5,
+    "recheck_batch_seconds": 0.5,
+    "recheck_background": "Task-created VM validation completed, no task-created native builds; live desktop and pre-existing one-CPU guest service remained.",
+    "recheck_load_start": [
+      4.27197265625,
+      6.728515625,
+      8.396484375
+    ],
+    "recheck_load_end": [
+      3.62353515625,
+      6.14111328125,
+      8.09912109375
+    ],
+    "timing_boundary": "Input setup and module initialization excluded; 64 warmup operations and cached resolved root descriptor for warm batches; initial descriptor hydration included in first call; in-batch GC included; result validation and teardown excluded.",
+    "attribution": "Exclusive interrupted instruction only; allocator and GC costs are not attributed inclusively to their callers. Categories do not imply a specialization speedup."
+  },
+  "rows": [
+    {
+      "workload": "flat4",
+      "operation": "serialize",
+      "wire_bytes": 8,
+      "initial_batch_count": 157570,
+      "initial_warm_cpu_us": {
+        "median": 1.7192582153963318,
+        "min": 1.500238217934886,
+        "max": 2.0107094180364284
+      },
+      "initial_warm_wall_us": {
+        "median": 1.7332800215777115,
+        "min": 1.5083655073935394,
+        "max": 2.0315121977533797
+      },
+      "first_call_cpu_us": [
+        58.951,
+        60.403999999999996,
+        60.594,
+        59.682,
+        65.464
+      ],
+      "recheck_batch_count": 290823,
+      "recheck_warm_cpu_us": {
+        "median": 1.559181650007049,
+        "min": 1.5439568569198447,
+        "max": 2.226960133827104
+      },
+      "recheck_warm_wall_us": {
+        "median": 1.5706235029554059,
+        "min": 1.5548536257448689,
+        "max": 2.245443149269487
+      },
+      "recheck_cpu_us_repetitions": [
+        1.7865918170158481,
+        2.226960133827104,
+        1.559181650007049,
+        1.5485564896861665,
+        1.5439568569198447
+      ],
+      "recheck_initial_median_ratio": 0.9068920747588918,
+      "profile_sample_count": 4598,
+      "profile_samples_dropped": 0,
+      "sampled_control_cpu_ratio": 1.030055063442349,
+      "category_samples": {
+        "reflection_api_and_lookup": 339,
+        "generated_projection_construction": 125,
+        "descriptor_resolution": 40,
+        "codec_dispatch_and_traversal": 204,
+        "wire_field_lookup": 0,
+        "wire_parse_write": 94,
+        "allocator_and_gc_shared": 2360,
+        "strings_buffers_and_copy": 635,
+        "other_runtime_and_harness": 781,
+        "unresolved": 20
+      }
+    },
+    {
+      "workload": "flat4",
+      "operation": "deserialize",
+      "wire_bytes": 8,
+      "initial_batch_count": 109050,
+      "initial_warm_cpu_us": {
+        "median": 2.285416561210454,
+        "min": 2.183625190279688,
+        "max": 2.362997267308574
+      },
+      "initial_warm_wall_us": {
+        "median": 2.2993196515359924,
+        "min": 2.1939911049977074,
+        "max": 2.3825091609353506
+      },
+      "first_call_cpu_us": [
+        66.065,
+        58.791,
+        56.937,
+        62.438,
+        61.657
+      ],
+      "recheck_batch_count": 218778,
+      "recheck_warm_cpu_us": {
+        "median": 2.2885266800135295,
+        "min": 2.285394792895081,
+        "max": 3.6656250628490983
+      },
+      "recheck_warm_wall_us": {
+        "median": 2.3067805126658074,
+        "min": 2.302359373428773,
+        "max": 3.688862824415618
+      },
+      "recheck_cpu_us_repetitions": [
+        3.6656250628490983,
+        2.2865576474782654,
+        2.2885266800135295,
+        2.285394792895081,
+        2.3151776138368576
+      ],
+      "recheck_initial_median_ratio": 1.0013608542336931,
+      "profile_sample_count": 5107,
+      "profile_samples_dropped": 0,
+      "sampled_control_cpu_ratio": 0.9864294378695493,
+      "category_samples": {
+        "reflection_api_and_lookup": 32,
+        "generated_projection_construction": 10,
+        "descriptor_resolution": 61,
+        "codec_dispatch_and_traversal": 178,
+        "wire_field_lookup": 118,
+        "wire_parse_write": 340,
+        "allocator_and_gc_shared": 3281,
+        "strings_buffers_and_copy": 287,
+        "other_runtime_and_harness": 769,
+        "unresolved": 31
+      }
+    },
+    {
+      "workload": "flat16",
+      "operation": "serialize",
+      "wire_bytes": 38,
+      "initial_batch_count": 60226,
+      "initial_warm_cpu_us": {
+        "median": 4.3470559226911965,
+        "min": 4.227473715670972,
+        "max": 4.668138777272275
+      },
+      "initial_warm_wall_us": {
+        "median": 4.37815211038422,
+        "min": 4.2589398266529415,
+        "max": 4.70635830040182
+      },
+      "first_call_cpu_us": [
+        84.068,
+        81.864,
+        91.153,
+        119.756,
+        86.223
+      ],
+      "recheck_batch_count": 115020,
+      "recheck_warm_cpu_us": {
+        "median": 4.2004789775691185,
+        "min": 4.172059050599896,
+        "max": 4.304312606503217
+      },
+      "recheck_warm_wall_us": {
+        "median": 4.22836213701965,
+        "min": 4.201787949921753,
+        "max": 4.336915232133542
+      },
+      "recheck_cpu_us_repetitions": [
+        4.202966736219788,
+        4.304312606503217,
+        4.172059050599896,
+        4.2004789775691185,
+        4.173197835159103
+      ],
+      "recheck_initial_median_ratio": 0.9662813297714987,
+      "profile_sample_count": 5295,
+      "profile_samples_dropped": 0,
+      "sampled_control_cpu_ratio": 1.0728821355946752,
+      "category_samples": {
+        "reflection_api_and_lookup": 344,
+        "generated_projection_construction": 233,
+        "descriptor_resolution": 79,
+        "codec_dispatch_and_traversal": 217,
+        "wire_field_lookup": 0,
+        "wire_parse_write": 148,
+        "allocator_and_gc_shared": 2393,
+        "strings_buffers_and_copy": 1051,
+        "other_runtime_and_harness": 813,
+        "unresolved": 17
+      }
+    },
+    {
+      "workload": "flat16",
+      "operation": "deserialize",
+      "wire_bytes": 38,
+      "initial_batch_count": 29269,
+      "initial_warm_cpu_us": {
+        "median": 8.515095288530526,
+        "min": 8.37314845057911,
+        "max": 9.754552769141412
+      },
+      "initial_warm_wall_us": {
+        "median": 8.573648330998667,
+        "min": 8.423530732173973,
+        "max": 9.86594933205781
+      },
+      "first_call_cpu_us": [
+        80.522,
+        83.087,
+        112.642,
+        80.101,
+        84.85000000000001
+      ],
+      "recheck_batch_count": 58719,
+      "recheck_warm_cpu_us": {
+        "median": 8.543287062109368,
+        "min": 8.426164171733168,
+        "max": 8.5715249578501
+      },
+      "recheck_warm_wall_us": {
+        "median": 8.60744861118207,
+        "min": 8.471236311926294,
+        "max": 8.614791311159932
+      },
+      "recheck_cpu_us_repetitions": [
+        8.543287062109368,
+        8.500894412370783,
+        8.549264786525656,
+        8.426164171733168,
+        8.5715249578501
+      ],
+      "recheck_initial_median_ratio": 1.003310799541705,
+      "profile_sample_count": 5052,
+      "profile_samples_dropped": 0,
+      "sampled_control_cpu_ratio": 0.9869559734266545,
+      "category_samples": {
+        "reflection_api_and_lookup": 13,
+        "generated_projection_construction": 4,
+        "descriptor_resolution": 53,
+        "codec_dispatch_and_traversal": 173,
+        "wire_field_lookup": 443,
+        "wire_parse_write": 394,
+        "allocator_and_gc_shared": 3000,
+        "strings_buffers_and_copy": 333,
+        "other_runtime_and_harness": 621,
+        "unresolved": 18
+      }
+    },
+    {
+      "workload": "flat64",
+      "operation": "serialize",
+      "wire_bytes": 230,
+      "initial_batch_count": 11412,
+      "initial_warm_cpu_us": {
+        "median": 19.828876796354713,
+        "min": 18.81052418506835,
+        "max": 22.94767464072906
+      },
+      "initial_warm_wall_us": {
+        "median": 19.915578426218016,
+        "min": 18.89775148966001,
+        "max": 23.129866105853488
+      },
+      "first_call_cpu_us": [
+        211.008,
+        162.157,
+        155.404,
+        161.425,
+        211.60999999999999
+      ],
+      "recheck_batch_count": 25216,
+      "recheck_warm_cpu_us": {
+        "median": 18.792118694479697,
+        "min": 18.68088987151015,
+        "max": 19.504098270939085
+      },
+      "recheck_warm_wall_us": {
+        "median": 18.879770820114214,
+        "min": 18.771415529822335,
+        "max": 19.632404108502538
+      },
+      "recheck_cpu_us_repetitions": [
+        18.792118694479697,
+        19.013532360406092,
+        18.741571898794415,
+        18.68088987151015,
+        19.504098270939085
+      ],
+      "recheck_initial_median_ratio": 0.9477147337934133,
+      "profile_sample_count": 5755,
+      "profile_samples_dropped": 0,
+      "sampled_control_cpu_ratio": 1.1928153023308385,
+      "category_samples": {
+        "reflection_api_and_lookup": 263,
+        "generated_projection_construction": 267,
+        "descriptor_resolution": 71,
+        "codec_dispatch_and_traversal": 194,
+        "wire_field_lookup": 0,
+        "wire_parse_write": 150,
+        "allocator_and_gc_shared": 2855,
+        "strings_buffers_and_copy": 1260,
+        "other_runtime_and_harness": 680,
+        "unresolved": 15
+      }
+    },
+    {
+      "workload": "flat64",
+      "operation": "deserialize",
+      "wire_bytes": 230,
+      "initial_batch_count": 3923,
+      "initial_warm_cpu_us": {
+        "median": 53.510257710935505,
+        "min": 52.8479602345144,
+        "max": 56.35256410910018
+      },
+      "initial_warm_wall_us": {
+        "median": 53.93200203925567,
+        "min": 53.249849859801174,
+        "max": 56.81465205200102
+      },
+      "first_call_cpu_us": [
+        160.753,
+        226.558,
+        248.98,
+        158.519,
+        166.50300000000001
+      ],
+      "recheck_batch_count": 9344,
+      "recheck_warm_cpu_us": {
+        "median": 51.53249111729452,
+        "min": 50.669725813356166,
+        "max": 51.99016010273972
+      },
+      "recheck_warm_wall_us": {
+        "median": 51.89022998715753,
+        "min": 50.92168707191781,
+        "max": 52.376547731164386
+      },
+      "recheck_cpu_us_repetitions": [
+        51.99016010273972,
+        51.53249111729452,
+        50.669725813356166,
+        51.65635766267123,
+        50.987906892123284
+      ],
+      "recheck_initial_median_ratio": 0.9630394866658097,
+      "profile_sample_count": 4917,
+      "profile_samples_dropped": 0,
+      "sampled_control_cpu_ratio": 0.9798382088493395,
+      "category_samples": {
+        "reflection_api_and_lookup": 3,
+        "generated_projection_construction": 0,
+        "descriptor_resolution": 31,
+        "codec_dispatch_and_traversal": 154,
+        "wire_field_lookup": 1040,
+        "wire_parse_write": 304,
+        "allocator_and_gc_shared": 2623,
+        "strings_buffers_and_copy": 293,
+        "other_runtime_and_harness": 455,
+        "unresolved": 14
+      }
+    },
+    {
+      "workload": "bytes16",
+      "operation": "serialize",
+      "wire_bytes": 20,
+      "initial_batch_count": 211188,
+      "initial_warm_cpu_us": {
+        "median": 1.2884762344451388,
+        "min": 1.2236171988938767,
+        "max": 1.769158867928102
+      },
+      "initial_warm_wall_us": {
+        "median": 1.2977573204916946,
+        "min": 1.2331170236945281,
+        "max": 1.7865215968710342
+      },
+      "first_call_cpu_us": [
+        65.183,
+        72.567,
+        62.939,
+        56.617,
+        59.843
+      ],
+      "recheck_batch_count": 388055,
+      "recheck_warm_cpu_us": {
+        "median": 1.1849821829379856,
+        "min": 1.1654846761412685,
+        "max": 1.4994910025640693
+      },
+      "recheck_warm_wall_us": {
+        "median": 1.1917465385061394,
+        "min": 1.1727069461803095,
+        "max": 1.5095254332504413
+      },
+      "recheck_cpu_us_repetitions": [
+        1.1654846761412685,
+        1.1667886974784503,
+        1.1849821829379856,
+        1.1899558696576515,
+        1.4994910025640693
+      ],
+      "recheck_initial_median_ratio": 0.9196771746808965,
+      "profile_sample_count": 4542,
+      "profile_samples_dropped": 0,
+      "sampled_control_cpu_ratio": 0.9981812571731786,
+      "category_samples": {
+        "reflection_api_and_lookup": 324,
+        "generated_projection_construction": 39,
+        "descriptor_resolution": 33,
+        "codec_dispatch_and_traversal": 202,
+        "wire_field_lookup": 0,
+        "wire_parse_write": 68,
+        "allocator_and_gc_shared": 2568,
+        "strings_buffers_and_copy": 439,
+        "other_runtime_and_harness": 846,
+        "unresolved": 23
+      }
+    },
+    {
+      "workload": "bytes16",
+      "operation": "deserialize",
+      "wire_bytes": 20,
+      "initial_batch_count": 169887,
+      "initial_warm_cpu_us": {
+        "median": 1.4554007428467157,
+        "min": 1.443218192092391,
+        "max": 1.5194804487688878
+      },
+      "initial_warm_wall_us": {
+        "median": 1.4619410902541101,
+        "min": 1.4500582916880045,
+        "max": 1.5283169577424993
+      },
+      "first_call_cpu_us": [
+        69.35199999999999,
+        72.587,
+        70.72399999999999,
+        62.10699999999999,
+        64.312
+      ],
+      "recheck_batch_count": 343548,
+      "recheck_warm_cpu_us": {
+        "median": 1.4496626876011505,
+        "min": 1.4372969424942075,
+        "max": 1.5204436032228392
+      },
+      "recheck_warm_wall_us": {
+        "median": 1.4581522203593094,
+        "min": 1.4437393755748833,
+        "max": 1.530111387637244
+      },
+      "recheck_cpu_us_repetitions": [
+        1.44158884930199,
+        1.4640020055421659,
+        1.4496626876011505,
+        1.5204436032228392,
+        1.4372969424942075
+      ],
+      "recheck_initial_median_ratio": 0.9960574053065675,
+      "profile_sample_count": 5352,
+      "profile_samples_dropped": 0,
+      "sampled_control_cpu_ratio": 0.9486682927135784,
+      "category_samples": {
+        "reflection_api_and_lookup": 64,
+        "generated_projection_construction": 8,
+        "descriptor_resolution": 59,
+        "codec_dispatch_and_traversal": 221,
+        "wire_field_lookup": 79,
+        "wire_parse_write": 345,
+        "allocator_and_gc_shared": 3392,
+        "strings_buffers_and_copy": 293,
+        "other_runtime_and_harness": 868,
+        "unresolved": 23
+      }
+    },
+    {
+      "workload": "bytes4096",
+      "operation": "serialize",
+      "wire_bytes": 4101,
+      "initial_batch_count": 82737,
+      "initial_warm_cpu_us": {
+        "median": 2.431168570288988,
+        "min": 2.11047898763552,
+        "max": 3.836063623288251
+      },
+      "initial_warm_wall_us": {
+        "median": 2.4518675441459084,
+        "min": 2.1257964393197724,
+        "max": 3.892507934781295
+      },
+      "first_call_cpu_us": [
+        81.334,
+        77.57600000000001,
+        84.269,
+        76.033,
+        85.502
+      ],
+      "recheck_batch_count": 205662,
+      "recheck_warm_cpu_us": {
+        "median": 2.1849886999056705,
+        "min": 2.1559878684443405,
+        "max": 2.2412776886347503
+      },
+      "recheck_warm_wall_us": {
+        "median": 2.197782414835993,
+        "min": 2.1682648277270475,
+        "max": 2.2557686300823683
+      },
+      "recheck_cpu_us_repetitions": [
+        2.1849886999056705,
+        2.2412776886347503,
+        2.2111869864146025,
+        2.17552155964641,
+        2.1559878684443405
+      ],
+      "recheck_initial_median_ratio": 0.8987401065512892,
+      "profile_sample_count": 5193,
+      "profile_samples_dropped": 0,
+      "sampled_control_cpu_ratio": 1.0605510298234802,
+      "category_samples": {
+        "reflection_api_and_lookup": 207,
+        "generated_projection_construction": 21,
+        "descriptor_resolution": 21,
+        "codec_dispatch_and_traversal": 154,
+        "wire_field_lookup": 0,
+        "wire_parse_write": 55,
+        "allocator_and_gc_shared": 3418,
+        "strings_buffers_and_copy": 717,
+        "other_runtime_and_harness": 585,
+        "unresolved": 15
+      }
+    },
+    {
+      "workload": "bytes4096",
+      "operation": "deserialize",
+      "wire_bytes": 4101,
+      "initial_batch_count": 84415,
+      "initial_warm_cpu_us": {
+        "median": 3.0153228810045603,
+        "min": 2.7239125155481845,
+        "max": 3.2397605994195344
+      },
+      "initial_warm_wall_us": {
+        "median": 3.065296819285672,
+        "min": 2.7542154593377957,
+        "max": 3.282016643961381
+      },
+      "first_call_cpu_us": [
+        89.59899999999999,
+        113.76400000000001,
+        82.70700000000001,
+        91.08200000000001,
+        71.375
+      ],
+      "recheck_batch_count": 165820,
+      "recheck_warm_cpu_us": {
+        "median": 2.644959425883488,
+        "min": 2.637086792907972,
+        "max": 2.7165846942467735
+      },
+      "recheck_warm_wall_us": {
+        "median": 2.661274056205524,
+        "min": 2.6525998974791944,
+        "max": 2.729980207453866
+      },
+      "recheck_cpu_us_repetitions": [
+        2.6405199915571105,
+        2.7165846942467735,
+        2.680875600048245,
+        2.637086792907972,
+        2.644959425883488
+      ],
+      "recheck_initial_median_ratio": 0.8771728701247128,
+      "profile_sample_count": 4507,
+      "profile_samples_dropped": 0,
+      "sampled_control_cpu_ratio": 0.9012322293558604,
+      "category_samples": {
+        "reflection_api_and_lookup": 24,
+        "generated_projection_construction": 7,
+        "descriptor_resolution": 22,
+        "codec_dispatch_and_traversal": 112,
+        "wire_field_lookup": 41,
+        "wire_parse_write": 198,
+        "allocator_and_gc_shared": 3209,
+        "strings_buffers_and_copy": 413,
+        "other_runtime_and_harness": 471,
+        "unresolved": 10
+      }
+    },
+    {
+      "workload": "nested",
+      "operation": "serialize",
+      "wire_bytes": 28,
+      "initial_batch_count": 50357,
+      "initial_warm_cpu_us": {
+        "median": 5.018796155450086,
+        "min": 4.665487717695653,
+        "max": 5.887236531167464
+      },
+      "initial_warm_wall_us": {
+        "median": 5.051443930337391,
+        "min": 4.686046011478047,
+        "max": 5.933781380940088
+      },
+      "first_call_cpu_us": [
+        87.776,
+        80.88300000000001,
+        80.833,
+        83.12700000000001,
+        81.063
+      ],
+      "recheck_batch_count": 99625,
+      "recheck_warm_cpu_us": {
+        "median": 4.582705274780427,
+        "min": 4.530334112923463,
+        "max": 5.570055759096611
+      },
+      "recheck_warm_wall_us": {
+        "median": 4.603010649937264,
+        "min": 4.551241726474278,
+        "max": 5.6117485671267255
+      },
+      "recheck_cpu_us_repetitions": [
+        5.570055759096611,
+        4.530334112923463,
+        4.598021169385194,
+        4.567179734002509,
+        4.582705274780427
+      ],
+      "recheck_initial_median_ratio": 0.9131084692100728,
+      "profile_sample_count": 5689,
+      "profile_samples_dropped": 0,
+      "sampled_control_cpu_ratio": 0.8335990056408498,
+      "category_samples": {
+        "reflection_api_and_lookup": 456,
+        "generated_projection_construction": 95,
+        "descriptor_resolution": 79,
+        "codec_dispatch_and_traversal": 239,
+        "wire_field_lookup": 0,
+        "wire_parse_write": 93,
+        "allocator_and_gc_shared": 3082,
+        "strings_buffers_and_copy": 664,
+        "other_runtime_and_harness": 966,
+        "unresolved": 15
+      }
+    },
+    {
+      "workload": "nested",
+      "operation": "deserialize",
+      "wire_bytes": 28,
+      "initial_batch_count": 30603,
+      "initial_warm_cpu_us": {
+        "median": 8.174202463810738,
+        "min": 8.148997647289482,
+        "max": 8.28048926575826
+      },
+      "initial_warm_wall_us": {
+        "median": 8.237680750253244,
+        "min": 8.210808286769272,
+        "max": 8.3486170963631
+      },
+      "first_call_cpu_us": [
+        95.11999999999999,
+        140.105,
+        93.07600000000001,
+        103.595,
+        100.199
+      ],
+      "recheck_batch_count": 61168,
+      "recheck_warm_cpu_us": {
+        "median": 8.028429685456448,
+        "min": 7.862357327360711,
+        "max": 8.278099349332983
+      },
+      "recheck_warm_wall_us": {
+        "median": 8.066432301203244,
+        "min": 7.8984864635103325,
+        "max": 8.332503613000261
+      },
+      "recheck_cpu_us_repetitions": [
+        8.028429685456448,
+        7.892514206774784,
+        8.278099349332983,
+        8.219673047998954,
+        7.862357327360711
+      ],
+      "recheck_initial_median_ratio": 0.9821667277022238,
+      "profile_sample_count": 6676,
+      "profile_samples_dropped": 0,
+      "sampled_control_cpu_ratio": 0.975514889082104,
+      "category_samples": {
+        "reflection_api_and_lookup": 95,
+        "generated_projection_construction": 8,
+        "descriptor_resolution": 61,
+        "codec_dispatch_and_traversal": 247,
+        "wire_field_lookup": 156,
+        "wire_parse_write": 365,
+        "allocator_and_gc_shared": 4464,
+        "strings_buffers_and_copy": 386,
+        "other_runtime_and_harness": 852,
+        "unresolved": 42
+      }
+    },
+    {
+      "workload": "union",
+      "operation": "serialize",
+      "wire_bytes": 14,
+      "initial_batch_count": 42903,
+      "initial_warm_cpu_us": {
+        "median": 5.822297601566324,
+        "min": 4.40785760902501,
+        "max": 5.924212013145933
+      },
+      "initial_warm_wall_us": {
+        "median": 5.89882840360814,
+        "min": 4.455573759410764,
+        "max": 6.025426357131202
+      },
+      "first_call_cpu_us": [
+        211.37900000000002,
+        170.582,
+        175.701,
+        177.38500000000002,
+        154.201
+      ],
+      "recheck_batch_count": 85877,
+      "recheck_warm_cpu_us": {
+        "median": 3.330128043597238,
+        "min": 3.2993495115106493,
+        "max": 3.3727453450865776
+      },
+      "recheck_warm_wall_us": {
+        "median": 3.3457170837360413,
+        "min": 3.314297343875543,
+        "max": 3.3882141667734085
+      },
+      "recheck_cpu_us_repetitions": [
+        3.330128043597238,
+        3.311292033955541,
+        3.3408047672834407,
+        3.2993495115106493,
+        3.3727453450865776
+      ],
+      "recheck_initial_median_ratio": 0.5719611520203574,
+      "profile_sample_count": 3651,
+      "profile_samples_dropped": 0,
+      "sampled_control_cpu_ratio": 0.8894843639879425,
+      "category_samples": {
+        "reflection_api_and_lookup": 229,
+        "generated_projection_construction": 51,
+        "descriptor_resolution": 34,
+        "codec_dispatch_and_traversal": 182,
+        "wire_field_lookup": 0,
+        "wire_parse_write": 66,
+        "allocator_and_gc_shared": 2092,
+        "strings_buffers_and_copy": 382,
+        "other_runtime_and_harness": 598,
+        "unresolved": 17
+      }
+    },
+    {
+      "workload": "union",
+      "operation": "deserialize",
+      "wire_bytes": 14,
+      "initial_batch_count": 28146,
+      "initial_warm_cpu_us": {
+        "median": 6.893628508491437,
+        "min": 5.821078767853336,
+        "max": 8.528458963973566
+      },
+      "initial_warm_wall_us": {
+        "median": 6.95527851204434,
+        "min": 5.857785582320757,
+        "max": 8.6155845946138
+      },
+      "first_call_cpu_us": [
+        165.101,
+        159.752,
+        113.785,
+        112.723,
+        122.832
+      ],
+      "recheck_batch_count": 72531,
+      "recheck_warm_cpu_us": {
+        "median": 5.666154168562407,
+        "min": 5.6270753884545925,
+        "max": 5.955727550978202
+      },
+      "recheck_warm_wall_us": {
+        "median": 5.694423694696061,
+        "min": 5.650385545490893,
+        "max": 5.986257986240366
+      },
+      "recheck_cpu_us_repetitions": [
+        5.666154168562407,
+        5.6270753884545925,
+        5.727148956997698,
+        5.955727550978202,
+        5.663423267292607
+      ],
+      "recheck_initial_median_ratio": 0.8219407473992759,
+      "profile_sample_count": 4387,
+      "profile_samples_dropped": 0,
+      "sampled_control_cpu_ratio": 0.930960832469459,
+      "category_samples": {
+        "reflection_api_and_lookup": 58,
+        "generated_projection_construction": 9,
+        "descriptor_resolution": 39,
+        "codec_dispatch_and_traversal": 122,
+        "wire_field_lookup": 73,
+        "wire_parse_write": 246,
+        "allocator_and_gc_shared": 2951,
+        "strings_buffers_and_copy": 276,
+        "other_runtime_and_harness": 592,
+        "unresolved": 21
+      }
+    },
+    {
+      "workload": "ints8",
+      "operation": "serialize",
+      "wire_bytes": 36,
+      "initial_batch_count": 29239,
+      "initial_warm_cpu_us": {
+        "median": 8.56457245459831,
+        "min": 7.501259892609187,
+        "max": 10.487380861178563
+      },
+      "initial_warm_wall_us": {
+        "median": 8.643945586374363,
+        "min": 7.541393686514587,
+        "max": 10.584028899757172
+      },
+      "first_call_cpu_us": [
+        82.35499999999999,
+        71.30499999999999,
+        72.166,
+        70.152,
+        67.768
+      ],
+      "recheck_batch_count": 58380,
+      "recheck_warm_cpu_us": {
+        "median": 7.476117163412127,
+        "min": 7.354361459403905,
+        "max": 7.570392034943473
+      },
+      "recheck_warm_wall_us": {
+        "median": 7.512447019527236,
+        "min": 7.387657776635835,
+        "max": 7.612647156560466
+      },
+      "recheck_cpu_us_repetitions": [
+        7.481218054128126,
+        7.476117163412127,
+        7.42928605686879,
+        7.354361459403905,
+        7.570392034943473
+      ],
+      "recheck_initial_median_ratio": 0.8729118940897287,
+      "profile_sample_count": 4993,
+      "profile_samples_dropped": 0,
+      "sampled_control_cpu_ratio": 1.1093877648708497,
+      "category_samples": {
+        "reflection_api_and_lookup": 92,
+        "generated_projection_construction": 5,
+        "descriptor_resolution": 30,
+        "codec_dispatch_and_traversal": 176,
+        "wire_field_lookup": 0,
+        "wire_parse_write": 117,
+        "allocator_and_gc_shared": 3083,
+        "strings_buffers_and_copy": 752,
+        "other_runtime_and_harness": 720,
+        "unresolved": 18
+      }
+    },
+    {
+      "workload": "ints8",
+      "operation": "deserialize",
+      "wire_bytes": 36,
+      "initial_batch_count": 19201,
+      "initial_warm_cpu_us": {
+        "median": 11.265233581584292,
+        "min": 11.01261184313317,
+        "max": 12.130459246914224
+      },
+      "initial_warm_wall_us": {
+        "median": 11.394984011249413,
+        "min": 11.068411957710534,
+        "max": 12.222753762824851
+      },
+      "first_call_cpu_us": [
+        78.108,
+        78.087,
+        76.85499999999999,
+        79.41,
+        84.369
+      ],
+      "recheck_batch_count": 44384,
+      "recheck_warm_cpu_us": {
+        "median": 12.006934548485939,
+        "min": 10.929992970439798,
+        "max": 14.153237405371305
+      },
+      "recheck_warm_wall_us": {
+        "median": 12.093433241708723,
+        "min": 10.9786581425739,
+        "max": 14.26763376441961
+      },
+      "recheck_cpu_us_repetitions": [
+        12.006934548485939,
+        14.153237405371305,
+        13.749863892393655,
+        10.9421578722062,
+        10.929992970439798
+      ],
+      "recheck_initial_median_ratio": 1.0658398213876483,
+      "profile_sample_count": 4986,
+      "profile_samples_dropped": 0,
+      "sampled_control_cpu_ratio": 0.9410929213241876,
+      "category_samples": {
+        "reflection_api_and_lookup": 8,
+        "generated_projection_construction": 1,
+        "descriptor_resolution": 31,
+        "codec_dispatch_and_traversal": 123,
+        "wire_field_lookup": 57,
+        "wire_parse_write": 390,
+        "allocator_and_gc_shared": 3362,
+        "strings_buffers_and_copy": 332,
+        "other_runtime_and_harness": 655,
+        "unresolved": 27
+      }
+    },
+    {
+      "workload": "ints256",
+      "operation": "serialize",
+      "wire_bytes": 1274,
+      "initial_batch_count": 1223,
+      "initial_warm_cpu_us": {
+        "median": 195.2992199509403,
+        "min": 192.12235404742435,
+        "max": 199.80637530662307
+      },
+      "initial_warm_wall_us": {
+        "median": 196.48959525756337,
+        "min": 193.0593164349959,
+        "max": 201.048345053148
+      },
+      "first_call_cpu_us": [
+        251.414,
+        251.715,
+        245.85500000000002,
+        249.631,
+        240.022
+      ],
+      "recheck_batch_count": 2560,
+      "recheck_warm_cpu_us": {
+        "median": 199.461217578125,
+        "min": 192.123802734375,
+        "max": 202.22325976562502
+      },
+      "recheck_warm_wall_us": {
+        "median": 200.73625585937504,
+        "min": 193.07349609375,
+        "max": 203.67310078125
+      },
+      "recheck_cpu_us_repetitions": [
+        192.123802734375,
+        193.484583984375,
+        199.461217578125,
+        202.22325976562502,
+        201.766128515625
+      ],
+      "recheck_initial_median_ratio": 1.0213108768597754,
+      "profile_sample_count": 5230,
+      "profile_samples_dropped": 0,
+      "sampled_control_cpu_ratio": 1.0212844315547815,
+      "category_samples": {
+        "reflection_api_and_lookup": 2,
+        "generated_projection_construction": 1,
+        "descriptor_resolution": 28,
+        "codec_dispatch_and_traversal": 178,
+        "wire_field_lookup": 0,
+        "wire_parse_write": 111,
+        "allocator_and_gc_shared": 3195,
+        "strings_buffers_and_copy": 954,
+        "other_runtime_and_harness": 732,
+        "unresolved": 29
+      }
+    },
+    {
+      "workload": "ints256",
+      "operation": "deserialize",
+      "wire_bytes": 1274,
+      "initial_batch_count": 726,
+      "initial_warm_cpu_us": {
+        "median": 311.7952630853995,
+        "min": 306.2394600550964,
+        "max": 347.45503856749315
+      },
+      "initial_warm_wall_us": {
+        "median": 313.4449476584022,
+        "min": 308.30215426997245,
+        "max": 349.49558126721763
+      },
+      "first_call_cpu_us": [
+        272.114,
+        252.978,
+        255.80299999999997,
+        255.983,
+        260.98199999999997
+      ],
+      "recheck_batch_count": 1604,
+      "recheck_warm_cpu_us": {
+        "median": 304.7146745635911,
+        "min": 304.52020448877806,
+        "max": 316.8236122194514
+      },
+      "recheck_warm_wall_us": {
+        "median": 306.6228235660848,
+        "min": 306.0151483790524,
+        "max": 319.68169576059853
+      },
+      "recheck_cpu_us_repetitions": [
+        311.35639339152124,
+        316.8236122194514,
+        304.7146745635911,
+        304.69039650872816,
+        304.52020448877806
+      ],
+      "recheck_initial_median_ratio": 0.977290904128107,
+      "profile_sample_count": 5190,
+      "profile_samples_dropped": 0,
+      "sampled_control_cpu_ratio": 1.0385814377669724,
+      "category_samples": {
+        "reflection_api_and_lookup": 2,
+        "generated_projection_construction": 0,
+        "descriptor_resolution": 25,
+        "codec_dispatch_and_traversal": 127,
+        "wire_field_lookup": 79,
+        "wire_parse_write": 369,
+        "allocator_and_gc_shared": 3595,
+        "strings_buffers_and_copy": 341,
+        "other_runtime_and_harness": 626,
+        "unresolved": 26
+      }
+    },
+    {
+      "workload": "records8",
+      "operation": "serialize",
+      "wire_bytes": 100,
+      "initial_batch_count": 11783,
+      "initial_warm_cpu_us": {
+        "median": 21.050663413392176,
+        "min": 20.729352711533565,
+        "max": 23.609796486463544
+      },
+      "initial_warm_wall_us": {
+        "median": 21.148933548332344,
+        "min": 20.839711703301365,
+        "max": 23.745357379275223
+      },
+      "first_call_cpu_us": [
+        100.77,
+        105.26899999999999,
+        104.357,
+        103.616,
+        99.658
+      ],
+      "recheck_batch_count": 23752,
+      "recheck_warm_cpu_us": {
+        "median": 20.522018482654094,
+        "min": 20.41562702088245,
+        "max": 20.958146808689794
+      },
+      "recheck_warm_wall_us": {
+        "median": 20.61647141293365,
+        "min": 20.50972760188616,
+        "max": 21.119252231391037
+      },
+      "recheck_cpu_us_repetitions": [
+        20.958146808689794,
+        20.505892261704275,
+        20.41562702088245,
+        20.54475147356012,
+        20.522018482654094
+      ],
+      "recheck_initial_median_ratio": 0.9748870180309014,
+      "profile_sample_count": 4992,
+      "profile_samples_dropped": 0,
+      "sampled_control_cpu_ratio": 0.9276934610696096,
+      "category_samples": {
+        "reflection_api_and_lookup": 346,
+        "generated_projection_construction": 67,
+        "descriptor_resolution": 53,
+        "codec_dispatch_and_traversal": 197,
+        "wire_field_lookup": 0,
+        "wire_parse_write": 101,
+        "allocator_and_gc_shared": 2516,
+        "strings_buffers_and_copy": 757,
+        "other_runtime_and_harness": 940,
+        "unresolved": 15
+      }
+    },
+    {
+      "workload": "records8",
+      "operation": "deserialize",
+      "wire_bytes": 100,
+      "initial_batch_count": 6394,
+      "initial_warm_cpu_us": {
+        "median": 38.75430919612136,
+        "min": 36.74962558648733,
+        "max": 40.45031169846732
+      },
+      "initial_warm_wall_us": {
+        "median": 39.06196731310604,
+        "min": 37.00106631216766,
+        "max": 40.7749483891148
+      },
+      "first_call_cpu_us": [
+        124.465,
+        120.157,
+        123.57300000000001,
+        115.52799999999999,
+        119.496
+      ],
+      "recheck_batch_count": 12902,
+      "recheck_warm_cpu_us": {
+        "median": 36.03047783289412,
+        "min": 35.73436180437142,
+        "max": 36.38570229421795
+      },
+      "recheck_warm_wall_us": {
+        "median": 36.223159975197646,
+        "min": 35.92093489381491,
+        "max": 36.61153038288637
+      },
+      "recheck_cpu_us_repetitions": [
+        36.03047783289412,
+        35.86505937064021,
+        36.38570229421795,
+        36.09840652611998,
+        35.73436180437142
+      ],
+      "recheck_initial_median_ratio": 0.9297153937271098,
+      "profile_sample_count": 4825,
+      "profile_samples_dropped": 0,
+      "sampled_control_cpu_ratio": 0.9821356051118041,
+      "category_samples": {
+        "reflection_api_and_lookup": 63,
+        "generated_projection_construction": 6,
+        "descriptor_resolution": 53,
+        "codec_dispatch_and_traversal": 141,
+        "wire_field_lookup": 115,
+        "wire_parse_write": 286,
+        "allocator_and_gc_shared": 3191,
+        "strings_buffers_and_copy": 304,
+        "other_runtime_and_harness": 640,
+        "unresolved": 26
+      }
+    },
+    {
+      "workload": "records128",
+      "operation": "serialize",
+      "wire_bytes": 1803,
+      "initial_batch_count": 396,
+      "initial_warm_cpu_us": {
+        "median": 338.8172550505051,
+        "min": 335.31821717171715,
+        "max": 472.45548484848484
+      },
+      "initial_warm_wall_us": {
+        "median": 341.2160202020203,
+        "min": 337.1855075757576,
+        "max": 475.85014141414143
+      },
+      "first_call_cpu_us": [
+        649.7669999999999,
+        648.4839999999999,
+        848.943,
+        944.9639999999999,
+        882.065
+      ],
+      "recheck_batch_count": 1476,
+      "recheck_warm_cpu_us": {
+        "median": 330.53851219512194,
+        "min": 328.99124322493225,
+        "max": 333.7942005420054
+      },
+      "recheck_warm_wall_us": {
+        "median": 332.5050169376694,
+        "min": 330.4178570460704,
+        "max": 335.6959132791328
+      },
+      "recheck_cpu_us_repetitions": [
+        330.37464972899727,
+        328.99124322493225,
+        330.53851219512194,
+        333.7942005420054,
+        333.7001592140922
+      ],
+      "recheck_initial_median_ratio": 0.9755657578474004,
+      "profile_sample_count": 5534,
+      "profile_samples_dropped": 0,
+      "sampled_control_cpu_ratio": 1.0705354489301633,
+      "category_samples": {
+        "reflection_api_and_lookup": 282,
+        "generated_projection_construction": 75,
+        "descriptor_resolution": 52,
+        "codec_dispatch_and_traversal": 208,
+        "wire_field_lookup": 0,
+        "wire_parse_write": 105,
+        "allocator_and_gc_shared": 3098,
+        "strings_buffers_and_copy": 758,
+        "other_runtime_and_harness": 926,
+        "unresolved": 30
+      }
+    },
+    {
+      "workload": "records128",
+      "operation": "deserialize",
+      "wire_bytes": 1803,
+      "initial_batch_count": 358,
+      "initial_warm_cpu_us": {
+        "median": 675.0451117318436,
+        "min": 635.644717877095,
+        "max": 757.1882458100561
+      },
+      "initial_warm_wall_us": {
+        "median": 680.3269553072626,
+        "min": 640.3884804469274,
+        "max": 763.0143296089385
+      },
+      "first_call_cpu_us": [
+        555.699,
+        536.3720000000001,
+        513.8109999999999,
+        519.511,
+        497.44899999999996
+      ],
+      "recheck_batch_count": 741,
+      "recheck_warm_cpu_us": {
+        "median": 638.2877314439946,
+        "min": 624.8135020242914,
+        "max": 702.4818987854251
+      },
+      "recheck_warm_wall_us": {
+        "median": 642.5434925775978,
+        "min": 628.0656221322537,
+        "max": 706.7530337381917
+      },
+      "recheck_cpu_us_repetitions": [
+        624.8135020242914,
+        630.8583603238866,
+        702.4818987854251,
+        639.7575816464238,
+        638.2877314439946
+      ],
+      "recheck_initial_median_ratio": 0.945548260925041,
+      "profile_sample_count": 6246,
+      "profile_samples_dropped": 0,
+      "sampled_control_cpu_ratio": 1.2728266050677264,
+      "category_samples": {
+        "reflection_api_and_lookup": 65,
+        "generated_projection_construction": 6,
+        "descriptor_resolution": 50,
+        "codec_dispatch_and_traversal": 197,
+        "wire_field_lookup": 128,
+        "wire_parse_write": 364,
+        "allocator_and_gc_shared": 4125,
+        "strings_buffers_and_copy": 400,
+        "other_runtime_and_harness": 869,
+        "unresolved": 42
+      }
+    }
+  ]
+}

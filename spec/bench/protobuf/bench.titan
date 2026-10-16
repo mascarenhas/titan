@@ -1,0 +1,205 @@
+-- Isolated protobuf measurement consumer. No workers or asynchronous operations.
+local protobuf = import "protobuf"
+local reflect = import "reflect"
+local string = import "string"
+local gc = import "gc"
+foreign import "probe.h"
+
+record Flat4
+  f1: integer
+  f2: integer
+  f3: integer
+  f4: integer
+end
+
+record Flat16
+  f1: integer
+  f2: integer
+  f3: integer
+  f4: integer
+  f5: integer
+  f6: integer
+  f7: integer
+  f8: integer
+  f9: integer
+  f10: integer
+  f11: integer
+  f12: integer
+  f13: integer
+  f14: integer
+  f15: integer
+  f16: integer
+end
+
+record Flat64
+  f1: integer
+  f2: integer
+  f3: integer
+  f4: integer
+  f5: integer
+  f6: integer
+  f7: integer
+  f8: integer
+  f9: integer
+  f10: integer
+  f11: integer
+  f12: integer
+  f13: integer
+  f14: integer
+  f15: integer
+  f16: integer
+  f17: integer
+  f18: integer
+  f19: integer
+  f20: integer
+  f21: integer
+  f22: integer
+  f23: integer
+  f24: integer
+  f25: integer
+  f26: integer
+  f27: integer
+  f28: integer
+  f29: integer
+  f30: integer
+  f31: integer
+  f32: integer
+  f33: integer
+  f34: integer
+  f35: integer
+  f36: integer
+  f37: integer
+  f38: integer
+  f39: integer
+  f40: integer
+  f41: integer
+  f42: integer
+  f43: integer
+  f44: integer
+  f45: integer
+  f46: integer
+  f47: integer
+  f48: integer
+  f49: integer
+  f50: integer
+  f51: integer
+  f52: integer
+  f53: integer
+  f54: integer
+  f55: integer
+  f56: integer
+  f57: integer
+  f58: integer
+  f59: integer
+  f60: integer
+  f61: integer
+  f62: integer
+  f63: integer
+  f64: integer
+end
+
+record Payload
+  id: integer
+  bytes: string
+end
+record Nested
+  left: Flat4
+  right: Flat4
+  label: string
+end
+union Choice
+  empty()
+  payload(number: integer, item: Flat4)
+  text(string)
+end
+record Integers
+  entries: {integer}
+end
+record Records
+  entries: {Flat4}
+end
+
+local function fixture(name: string): (value, string)
+  if name == "flat4" then
+    return Flat4(-13, -6, 1, 8), "bench.Flat4"
+  elseif name == "flat16" then
+    return Flat16(-13, -6, 1, 8, 15, 22, 29, 36, 43, 50, 57, 64, 71, 78, 85, 92), "bench.Flat16"
+  elseif name == "flat64" then
+    return Flat64(-13, -6, 1, 8, 15, 22, 29, 36, 43, 50, 57, 64, 71, 78, 85, 92, 99, 106, 113, 120, 127, 134, 141, 148, 155, 162, 169, 176, 183, 190, 197, 204, 211, 218, 225, 232, 239, 246, 253, 260, 267, 274, 281, 288, 295, 302, 309, 316, 323, 330, 337, 344, 351, 358, 365, 372, 379, 386, 393, 400, 407, 414, 421, 428), "bench.Flat64"
+  elseif name == "bytes16" then return Payload(42, string.rep("x", 16)), "bench.Payload"
+  elseif name == "bytes4096" then return Payload(42, string.rep("x", 4096)), "bench.Payload"
+  elseif name == "nested" then
+    return Nested(Flat4(-13, -6, 1, 8), Flat4(10, 20, 30, 40), "nested"), "bench.Nested"
+  elseif name == "union" then
+    return Choice.payload(42, Flat4(-13, -6, 1, 8)), "bench.Choice"
+  elseif name == "ints8" or name == "ints256" then
+    local size = 8
+    if name == "ints256" then size = 256 end
+    local entries: {integer} = {}
+    for index = 1, size do entries[index] = index * 7 - 20 end
+    return Integers(entries), "bench.Integers"
+  elseif name == "records8" or name == "records128" then
+    local size = 8
+    if name == "records128" then size = 128 end
+    local entries: {Flat4} = {}
+    for index = 1, size do entries[index] = Flat4(index, -index, index + 1, index + 2) end
+    return Records(entries), "bench.Records"
+  end
+  raise "unknown benchmark workload"
+end
+
+function main(args: {string}): integer
+  if #args ~= 6 then raise "expected workload operation count warmup fixture sample-output" end
+  local name = args[1]
+  local operation = args[2]
+  local count: integer = ffi.titan_bench_count(args[3])
+  local warmup: integer = ffi.titan_bench_count(args[4])
+  if count < 1 then raise "benchmark count must be positive" end
+  local candidate, nominal_name = fixture(name)
+  -- A named descriptor leaves hydration to the first measured decode call.
+  local descriptor = reflect.Type.is_named(reflect.NamedType(nominal_name))
+  local wire_length: integer = ffi.titan_bench_load_wire(args[5])
+  local writer = string.writer()
+  for index = 0, wire_length - 1 do
+    writer:write(string.char(ffi.titan_bench_wire_byte(index)))
+  end
+  local expected = writer:drain()
+  local encoded = ""
+  local decoded: value = nil
+  if operation == "serialize" then
+    for index = 1, warmup do encoded = protobuf.serialize(candidate) end
+  elseif operation == "deserialize" then
+    for index = 1, warmup do decoded = protobuf.deserialize(expected, descriptor) end
+  else raise "unknown benchmark operation"
+  end
+  -- Steady-state callers can resolve the root descriptor once. The cold lane
+  -- deliberately includes its first hydration; nested descriptors still follow
+  -- the codec's ordinary resolution path in both lanes.
+  if warmup > 0 then descriptor = reflect.NamedType(nominal_name):resolve() end
+  gc.collect()
+  local sampled = args[6] ~= "-"
+  if sampled then ffi.titan_bench_sampler_start() end
+  local wall_start: float = ffi.titan_bench_wall()
+  local cpu_start: float = ffi.titan_bench_cpu()
+  local checksum = 0
+  if operation == "serialize" then
+    for index = 1, count do
+      encoded = protobuf.serialize(candidate)
+      checksum = checksum + #encoded
+    end
+  else
+    for index = 1, count do decoded = protobuf.deserialize(expected, descriptor) end
+    checksum = count * #expected
+  end
+  local cpu_elapsed: float = ffi.titan_bench_cpu() - cpu_start
+  local wall_elapsed: float = ffi.titan_bench_wall() - wall_start
+  if sampled then ffi.titan_bench_sampler_stop() end
+  if operation == "serialize" then
+    if encoded ~= expected then raise "serialized wire differs from independent fixture" end
+  else
+    if protobuf.serialize(decoded) ~= expected then raise "decoded value failed roundtrip" end
+  end
+  if sampled then ffi.titan_bench_sampler_dump(args[6]) end
+  ffi.titan_bench_report(name, operation, count, #expected, checksum, wall_elapsed, cpu_elapsed)
+  return 0
+end

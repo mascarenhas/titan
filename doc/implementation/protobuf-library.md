@@ -8,6 +8,10 @@ shared scalar/type helpers, `encoder.titan` owns graph traversal,
 proto3 declarations. It depends on `reflect` and `string`; it does not depend
 on the asynchronous runtime or independent-state wrapper.
 
+The [performance study](protobuf-performance-results.md) records a reproducible
+production-build baseline, exclusive sampled attribution, and the limits of
+using those samples to estimate compiler-specialization gains.
+
 ## Reflection boundary
 
 The codec uses `RecordType` and `UnionType` descriptors, including nominal
