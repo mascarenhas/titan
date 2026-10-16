@@ -104,7 +104,7 @@ describe("Titan link-time optimization", function()
         local facade = source_root .. "/lto_fixture/facade"
         write(source_root .. "/oracle.h", "void " .. SENTINEL .. "(void);\n")
         write(base .. ".titan", [[
-            foreign function answer(): int
+            local foreign function answer(): int
                 local total = 0
                 while total < 42 do total = total + 1 end
                 return total

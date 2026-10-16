@@ -380,6 +380,13 @@ describe("static compiled-module native containers", function()
 
     it("calls public foreign entries from an archive without source or a DSO", function()
         types.registry, driver.imported = {}, {}
+        local foreign_context = driver.new_resolver_context()
+        local configured, configuration_error = xpcall(function()
+            assert(driver.configure_foreign_c(foreign_context))
+        end, debug.traceback)
+        local closed, close_error = driver.close_resolver_context(foreign_context)
+        assert(configured, configuration_error)
+        assert(closed, close_error)
         local producer_source = [[
             foreign function increment(input: int): int return input + 1 end
         ]]

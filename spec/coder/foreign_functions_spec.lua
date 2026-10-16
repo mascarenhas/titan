@@ -119,7 +119,10 @@ describe("source-defined foreign functions", function()
         assert(lfs.mkdir(relocated))
         local suffix = platform.windows and ".dll" or ".so"
         for _, name in ipairs({ "foreign_export_provider", "foreign_export_consumer" }) do
-            assert(os.rename(name .. suffix, relocated .. "/" .. name .. suffix))
+            -- The temporary directory may be on another filesystem.
+            assert(compiler_io.new_sync():write_file(
+                relocated .. "/" .. name .. suffix, read_file(name .. suffix)))
+            assert(os.remove(name .. suffix))
             assert(os.remove(name .. ".titan.h"))
             assert(os.remove(name .. ".ffi.h"))
         end

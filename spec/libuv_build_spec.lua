@@ -2689,6 +2689,31 @@ int main(void) {
             assert.equal(expected.uv, expected_uv,
                 "standalone titan.uv metadata fixture is stale")
 
+            -- The public raw loader retains the target's real size_t carrier
+            -- and header declaration identity. Pin every other part of the
+            -- portable golden, including the rest of this exact signature.
+            local driver = require "titan-compiler.driver"
+            local types = require "titan-compiler.types"
+            local loader = driver.tableloader({ target_size_t_probe = [[
+foreign import "lua.h"
+foreign function target_size_t(length: size_t): void
+end
+]] }, {}, nil, { analysis_only = true })
+            local loaded, target, errors = driver.with_loader(loader,
+                function(current) return current("target_size_t_probe") end)
+            assert.truthy(loaded, target)
+            assert.equal(0, #errors, table.concat(errors, "\n"))
+            local transfer = assert(driver.decode_module_interface(
+                expected.transfer, "titan.transfer", STDLIB_TYPES_FIXTURE))
+            assert.equal(expected.transfer, types.serialize(transfer))
+            local native_loader = transfer.members.transfer_load_module.type
+            assert.equal("Type.CFunction", native_loader._tag)
+            assert.equal(3, #native_loader.params)
+            assert.equal("Type.CTypedef", native_loader.params[3]._tag)
+            assert.equal("size_t", native_loader.params[3].name)
+            native_loader.params[3] = target.members.target_size_t.type.params[1]
+            expected.transfer = types.serialize(transfer)
+
             for _, record_name in ipairs({
                 "ChannelReader", "ChannelWriter", "Completion", "Receiver",
             }) do

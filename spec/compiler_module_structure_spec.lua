@@ -25,6 +25,7 @@ describe("compiler module facades", function()
     it("exports only the production coder API", function()
         assert.same({
             "external_symbols",
+            "foreign_external_symbols",
             "generate",
             "generate_ffi_header",
             "generate_foreign_header",

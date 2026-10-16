@@ -255,7 +255,8 @@ function test_receiver_copies_closure_snapshots_and_retires_packet_bytes(_contex
     else raise "Receiver changed a closure's transfer variant" end
     local invalid = async.TransferValue.is_closure("async.tests", nil, "invalid protobuf")
     async.send(handle, invalid)
-    receiver_error(function () receiver:wait():to_value() end, "entry")
+    receiver_error(function () receiver:wait():to_value() end,
+      "closure transfer entry belongs to a different provider or is invalid")
     receiver_send_transient_closure(handle)
     receiver:close()
     receiver_error(function () receiver_send_transient_closure(handle) end, "receiver is closed")

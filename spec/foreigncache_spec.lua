@@ -292,7 +292,7 @@ describe("module foreign conversion payloads", function()
         ]])
         local source = [[
             foreign import "extracted.h"
-            foreign function projected(input: *item): word return input.PROJECT end
+            local foreign function projected(input: *item): word return input.PROJECT end
             function answer(): integer
                 local result = ffi.named { count = 1, label = "value" }
                 return ffi.HIGH + ffi.SMALL
@@ -335,7 +335,7 @@ describe("module foreign conversion payloads", function()
         ]])
         local source = [[
             foreign import "fields.h"
-            foreign function observed(item: *item): word return item.removed + item.function_like end
+            local foreign function observed(item: *item): word return item.removed + item.function_like end
         ]]
         check(source)
         local count = conversions

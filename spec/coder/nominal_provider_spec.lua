@@ -101,7 +101,7 @@ local function provider(name)
             local hidden(integer)
             ready(count: integer, label: string)
         end
-        foreign function native_secret(pointer: *nominal_private_native): int
+        local foreign function native_secret(pointer: *nominal_private_native): int
             return pointer.secret
         end
         function make(): State

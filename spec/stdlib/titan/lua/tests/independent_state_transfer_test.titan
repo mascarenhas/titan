@@ -271,12 +271,16 @@ function test_lua_independent_closure_calls_preload_and_memoizes_module(_context
     local original = package.preload['lua.transfer_fixture']
     assert(type(original) == 'function')
     local calls, owner = 0, nil
-    package.preload['lua.transfer_fixture'] = function(...)
+    local function counted_loader(...)
       calls = calls + 1
       local current = original(...)
+      -- First initialization republishes its native preload; keep observing
+      -- the later calls that return the memoized module.
+      package.preload['lua.transfer_fixture'] = counted_loader
       if owner then assert(current == owner) else owner = current end
       return current
     end
+    package.preload['lua.transfer_fixture'] = counted_loader
     function transfer_loader_calls() return calls end
     require = nil
   ]])

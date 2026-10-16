@@ -358,7 +358,7 @@ or `TransferValue.is_record_payload(module, name, data)` without decoding.
 The consumer explicitly calls `:to_value()` to create a destination closure or
 invoke the static reconstruction hook. Closure reconstruction resolves the
 entry against the destination module's manifest before decoding its captures.
-Every restored capture receives a fresh mutable cell. A captured
+Every restored mutable capture receives a fresh cell. A captured
 `TransferValue` retains its union wrapper. Active closure and custom-record
 conversion cycles are rejected; repeated acyclic values retain copy semantics.
 See the [transfer implementation](transfer-library.md) for the anonymous
