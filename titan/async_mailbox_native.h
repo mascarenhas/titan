@@ -32,10 +32,12 @@ typedef struct titan_async_message {
   size_t length;
   const char *name;
   size_t name_length;
+  const char *module;
+  size_t module_length;
   lua_State *state;
   lua_CFunction function;
   void *pointer;
-  TitanTransferGraph *graph;
+  const void *entry;
 } titan_async_message;
 
 typedef struct titan_async_mailbox {

@@ -257,8 +257,8 @@ Task nor injects pending Task cancellation. See [runtime shutdown](libuv-runtime
 ## Native socket and pipe handoff
 
 `uv/transfer.titan` owns the direct custom hooks for TCP and non-IPC pipe
-endpoints. The lower `titan.transfer` module supplies their payload type without
-introducing a UV-to-async import cycle. Async binds its active state-local loop
+endpoints. They use ordinary protobuf byte payloads with private field schemas,
+so no UV-to-async import cycle is introduced. Async binds its active state-local loop
 through `bind_transfer_loop` and clears that exact binding at shutdown
 admission. Destination hooks require this binding before allocating or adopting
 an owner; they never inspect private Runtime state.
@@ -272,8 +272,12 @@ roots, catching accepted write/connect/shutdown work whose terminal callback
 has not yet retired it. Public userdata must be nil; callbacks are rebuilt by
 the destination domain.
 
-All payload allocations precede source close, and a lexical cleanup closes a
-duplicate if payload preparation fails. Source `uv.close` retains the old
+Protobuf encoding precedes source close, and a lexical cleanup closes a
+duplicate if serialization fails. TCP identifiers use a fixed64 raw-pointer
+field and pipe descriptors use an integer field. The public static
+`discard_transfer_payload` methods decode these known schemas and close the
+unadopted native token directly, without a loop or Runtime. A close attempt
+consumes ownership even when its returned status is an error. Source `uv.close` retains the old
 owner through its ordinary callback. Reconstruction allocates fresh native
 storage, initializes it on the bound loop, and adopts the duplicated identifier.
 Failed adoption closes that new native lifetime while leaving the unadopted

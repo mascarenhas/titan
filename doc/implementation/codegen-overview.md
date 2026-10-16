@@ -349,10 +349,9 @@ per generated module. The existing native-symbol resolver returns it for
 `TITAN_TRANSFER_MANIFEST_SYMBOL`; ordinary closure allocation and invocation
 perform no additional lookup and keep their existing upvalue layout. Each
 first-class source function, lambda, bound method, and realized callable
-adapter has an entry containing its native/strict/coercive entries, capture
-policies, and generated projection/reconstruction callbacks. The manifest also
-contains the module name, normal initializer, and physical provider's symbol
-resolver identity. A referenced local function has the same transfer capability
+adapter has an entry containing its native/strict lookup key, immediate capture
+count, and generated projection/restoration functions. The manifest contains
+only the actual module name and entry array. A referenced local function has the same transfer capability
 as an exported function. Captured nominals still follow the public protobuf or
 custom-record transfer policy; local nominal types remain ineligible.
 
@@ -362,49 +361,52 @@ plans and refreshes them after generic erasure. Generated callbacks use the
 existing `box_read`/`newbox`/`box_write` policies: scalar cells contain an inline
 native payload, while GC-bearing cells contain a traced uservalue. Native
 integer bits and long-double text use the same exact projection representation
-as reflected native fields. The encoder retains every source box used for
-identity deduplication in a temporary Lua root table. Reentrant finalizers can
-mutate source captures and detach an already visited nested closure without
-making its box address available for reuse during the traversal. Encoding
-assigns native ordinals, then discards the root table and every scratch source
-GC pointer before crossing the boundary. Capture callbacks reject Lua-managed `Udata *`
+as reflected native fields. One generated function projects **all** immediate
+semantic captures onto the source stack before custom hooks run. The source
+closure and projected values remain rooted while ordinary Titan code converts
+and serializes them. Owning-state foreign functions in `titan.transfer` discover
+entries, project captures, and invoke generated restoration; `transfer.h` only
+declares the immutable manifest layout. There is no native recursive serializer,
+allocation arena, or source identity map. Generated code rejects Lua-managed `Udata *`
 before native-pointer projection, including typedef spellings and present
 optional pointers; an absent optional projects and reconstructs as nil. This
 guard prevents the trusted GC-bearing pointer representation from becoming a
 borrowed lightuserdata address. Unsupported reconstruction conversions also
-fail during projection, before the capture graph crosses the boundary.
+fail during projection, before the packet crosses the boundary.
 
-Destination reconstruction initializes the owner through its normal native
-initializer, then verifies that the canonical module has the manifest's physical
-symbol resolver. An already initialized different provider is rejected before
-using a copied native entry against its private module layout. Function tags
-come from that destination module's canonical per-state tags. Three callbacks
-each push exactly one rooted result: projection produces a semantic capture,
-capture reconstruction produces the actual internal upvalue slot, and final
-reconstruction produces the closure. A new mutable box is cached immediately
-after its value is decoded, before decoding a later nested closure that can
-reference the same box. Fresh closures are rooted with initialized headers and
-nil captures before completed slots are copied; the allocation debt check runs
-after publication.
+Destination reconstruction calls the named loader directly from
+`LUA_PRELOAD_TABLE` and roots its returned module. The ordinary generated
+initializer already memoizes that module. The foreign helper obtains the returned
+module's manifest through its own `TitanModuleData.symbols` and matches the
+incoming token by pointer equality against entry addresses **before
+dereferencing it**. Invalid tokens and different physical providers are
+rejected before decoding captures or invoking reconstruction hooks. No
+initializer pointer travels with the packet.
+
+One generated restore function consumes a contiguous semantic capture run. It
+converts and roots every internal slot, allocating a fresh box for each mutable
+capture with `newbox`/`box_write`, before allocating the final closure. The
+fresh-white closure receives its complete header, slots, and strict trailer
+without intervening allocation, then becomes rooted before the allocation debt
+check. Function tags come from the destination module's canonical per-state
+caches. There is no per-capture callback, scratch slot table, boxedness bitmap,
+or shared-cell reconstruction.
 
 An adjustment entry projects only its immediate source closure. Once that
 source has been reconstructed, the generated adapter callback repeats the
 ordinary prefix-copy construction, replacing module/tag/native/strict entries
 with the destination adapter's values. This preserves the copied source capture
-prefix, shared boxes, source coercive entry, and penultimate source link without
-serializing private wrapper layout twice. The graph rejects capture cycles and
-uses one owned native allocation arena; see [Lua-state transfers](lua-library.md)
+prefix, source coercive entry, and penultimate source link without
+serializing private wrapper layout twice. Ordinary Titan transfer code owns
+active closure-cycle detection and snapshot conversion; nested packets already
+contain opaque bytes. See [Lua-state transfers](lua-library.md)
 and [Receiver ownership](libuv-runtime.md#cross-state-receiver-ownership).
 
-The same arena supports custom record payloads and explicit transfer policies.
-Custom records carry their qualified name, ordered policy children, and the
-defining module capability recovered from `TITAN_MT_MOD`. A captured record is
-reconstructed through its hooks; a captured `TransferValue` uses a wrapper node
-to retain the union and its selected policy. Native pointer, Lua-state, and
-C-function policy variants use the existing `TITAN_MT_CONSTRUCT` projection
-callback with a rooted const Array and destination module. This preserves the
-ordinary rule that Lua-facing constructors cannot implicitly coerce a dynamic
-value to a foreign pointer.
+Custom and ordinary nominal packets carry both their qualified nominal name
+and actual declaring-module name recovered through `TITAN_MT_MOD`; nested types
+and folder modules do not require name splitting. A captured record is
+reconstructed through its hook or protobuf policy. A captured `TransferValue`
+is flagged so reconstruction retains the union instead of unwrapping it.
 
 Titan's normal native loader and generated Lua shims retain provider images for
 the process lifetime, so a transferred closure remains valid after its source
@@ -884,6 +886,11 @@ State-dependent native bindings never live in mutable file-global C variables.
 An immutable symbol resolver can belong to a shared object, a linked archive,
 or an executable; it identifies the code that created this module state without
 recovering a filename or loader handle.
+
+Public raw [foreign imports](foreign-functions.md#source-collaboration-and-binary-isolation)
+have no state argument. Their exact C addresses resolve through the same checked
+providers and publish atomically into stable consumer-image slots. A later
+state must select the same address; it cannot overwrite a raw binding.
 
 Generated Titan declarations and definitions have protected visibility on ELF,
 so a resolver's native addresses bind to its own image despite duplicate

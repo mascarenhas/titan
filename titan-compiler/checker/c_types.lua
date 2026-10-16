@@ -672,12 +672,13 @@ function checker._foreign_function_reference(var)
            and var._tag == "Ast.VarDot" and var.exp and var.exp._type then
         if var.exp._type._tag == "Type.CModule" then
             return { name = var.name }
-        elseif var.exp._type._tag == "Type.Module"
-               and decl._foreign_source then
+        elseif var.exp._type._tag == "Type.Module" then
             return {
                 source = true,
                 module = decl.modname,
                 name = decl.name,
+                public = not decl.islocal,
+                type = decl.type,
             }
         end
     end

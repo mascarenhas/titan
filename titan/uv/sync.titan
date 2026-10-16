@@ -73,7 +73,7 @@ function mutex_t:lock()
     ffi.uv_mutex_lock(self.storage as foreign *uv_mutex_t)
 end
 
-foreign function native_mutex_lock(native: *void): void
+local foreign function native_mutex_lock(native: *void): void
     ffi.uv_mutex_lock(native as foreign *uv_mutex_t)
 end
 
@@ -92,7 +92,7 @@ function mutex_t:trylock(): integer
     return ffi.uv_mutex_trylock(self.storage as foreign *uv_mutex_t)
 end
 
-foreign function native_mutex_trylock(native: *void): int
+local foreign function native_mutex_trylock(native: *void): int
     return ffi.uv_mutex_trylock(native as foreign *uv_mutex_t)
 end
 
@@ -110,7 +110,7 @@ function mutex_t:unlock()
     ffi.uv_mutex_unlock(self.storage as foreign *uv_mutex_t)
 end
 
-foreign function native_mutex_unlock(native: *void): void
+local foreign function native_mutex_unlock(native: *void): void
     ffi.uv_mutex_unlock(native as foreign *uv_mutex_t)
 end
 
@@ -177,7 +177,7 @@ function rwlock_t:rdlock()
     ffi.uv_rwlock_rdlock(self.storage as foreign *uv_rwlock_t)
 end
 
-foreign function native_rwlock_rdlock(native: *void): void
+local foreign function native_rwlock_rdlock(native: *void): void
     ffi.uv_rwlock_rdlock(native as foreign *uv_rwlock_t)
 end
 
@@ -196,7 +196,7 @@ function rwlock_t:tryrdlock(): integer
     return ffi.uv_rwlock_tryrdlock(self.storage as foreign *uv_rwlock_t)
 end
 
-foreign function native_rwlock_tryrdlock(native: *void): int
+local foreign function native_rwlock_tryrdlock(native: *void): int
     return ffi.uv_rwlock_tryrdlock(native as foreign *uv_rwlock_t)
 end
 
@@ -214,7 +214,7 @@ function rwlock_t:rdunlock()
     ffi.uv_rwlock_rdunlock(self.storage as foreign *uv_rwlock_t)
 end
 
-foreign function native_rwlock_rdunlock(native: *void): void
+local foreign function native_rwlock_rdunlock(native: *void): void
     ffi.uv_rwlock_rdunlock(native as foreign *uv_rwlock_t)
 end
 
@@ -232,7 +232,7 @@ function rwlock_t:wrlock()
     ffi.uv_rwlock_wrlock(self.storage as foreign *uv_rwlock_t)
 end
 
-foreign function native_rwlock_wrlock(native: *void): void
+local foreign function native_rwlock_wrlock(native: *void): void
     ffi.uv_rwlock_wrlock(native as foreign *uv_rwlock_t)
 end
 
@@ -251,7 +251,7 @@ function rwlock_t:trywrlock(): integer
     return ffi.uv_rwlock_trywrlock(self.storage as foreign *uv_rwlock_t)
 end
 
-foreign function native_rwlock_trywrlock(native: *void): int
+local foreign function native_rwlock_trywrlock(native: *void): int
     return ffi.uv_rwlock_trywrlock(native as foreign *uv_rwlock_t)
 end
 
@@ -269,7 +269,7 @@ function rwlock_t:wrunlock()
     ffi.uv_rwlock_wrunlock(self.storage as foreign *uv_rwlock_t)
 end
 
-foreign function native_rwlock_wrunlock(native: *void): void
+local foreign function native_rwlock_wrunlock(native: *void): void
     ffi.uv_rwlock_wrunlock(native as foreign *uv_rwlock_t)
 end
 
@@ -337,7 +337,7 @@ function sem_t:post()
     ffi.uv_sem_post(self.storage as foreign *uv_sem_t)
 end
 
-foreign function native_sem_post(native: *void): void
+local foreign function native_sem_post(native: *void): void
     ffi.uv_sem_post(native as foreign *uv_sem_t)
 end
 
@@ -355,7 +355,7 @@ function sem_t:wait()
     ffi.uv_sem_wait(self.storage as foreign *uv_sem_t)
 end
 
-foreign function native_sem_wait(native: *void): void
+local foreign function native_sem_wait(native: *void): void
     ffi.uv_sem_wait(native as foreign *uv_sem_t)
 end
 
@@ -374,7 +374,7 @@ function sem_t:trywait(): integer
     return ffi.uv_sem_trywait(self.storage as foreign *uv_sem_t)
 end
 
-foreign function native_sem_trywait(native: *void): int
+local foreign function native_sem_trywait(native: *void): int
     return ffi.uv_sem_trywait(native as foreign *uv_sem_t)
 end
 
@@ -441,7 +441,7 @@ function cond_t:signal()
     ffi.uv_cond_signal(self.storage as foreign *uv_cond_t)
 end
 
-foreign function native_cond_signal(native: *void): void
+local foreign function native_cond_signal(native: *void): void
     ffi.uv_cond_signal(native as foreign *uv_cond_t)
 end
 
@@ -459,7 +459,7 @@ function cond_t:broadcast()
     ffi.uv_cond_broadcast(self.storage as foreign *uv_cond_t)
 end
 
-foreign function native_cond_broadcast(native: *void): void
+local foreign function native_cond_broadcast(native: *void): void
     ffi.uv_cond_broadcast(native as foreign *uv_cond_t)
 end
 
@@ -528,7 +528,7 @@ function barrier_t:wait(): integer
     return ffi.uv_barrier_wait(self.storage as foreign *uv_barrier_t)
 end
 
-foreign function native_barrier_wait(native: *void): int
+local foreign function native_barrier_wait(native: *void): int
     return ffi.uv_barrier_wait(native as foreign *uv_barrier_t)
 end
 
@@ -610,11 +610,11 @@ function cond_t:timedwait(mutex: mutex_t, timeout_ns: foreign unsigned long long
     return ffi.uv_cond_timedwait(self.storage as foreign *uv_cond_t, mutex.storage as foreign *uv_mutex_t, timeout_ns as foreign uint64_t)
 end
 
-foreign function native_cond_wait(cond: *void, mutex: *void): void
+local foreign function native_cond_wait(cond: *void, mutex: *void): void
     ffi.uv_cond_wait(cond as foreign *uv_cond_t, mutex as foreign *uv_mutex_t)
 end
 
-foreign function native_cond_timedwait(cond: *void, mutex: *void, timeout_ns: unsigned long long): int
+local foreign function native_cond_timedwait(cond: *void, mutex: *void, timeout_ns: unsigned long long): int
     return ffi.uv_cond_timedwait(cond as foreign *uv_cond_t, mutex as foreign *uv_mutex_t, timeout_ns as foreign uint64_t)
 end
 
@@ -650,11 +650,11 @@ function key_t:set(value: foreign *void)
     ffi.uv_key_set(self.storage as foreign *uv_key_t, value)
 end
 
-foreign function native_key_get(key: *void): *void
+local foreign function native_key_get(key: *void): *void
     return ffi.uv_key_get(key as foreign *uv_key_t)
 end
 
-foreign function native_key_set(key: *void, value: *void): void
+local foreign function native_key_set(key: *void, value: *void): void
     ffi.uv_key_set(key as foreign *uv_key_t, value)
 end
 
@@ -951,7 +951,7 @@ function once(guard: once_t, callback: foreign function(): void)
     ffi.uv_once(guard.storage as foreign *uv_once_t, callback)
 end
 
-foreign function native_once(guard: *void, callback: function(): void): void
+local foreign function native_once(guard: *void, callback: function(): void): void
     ffi.uv_once(guard as foreign *uv_once_t, callback)
 end
 

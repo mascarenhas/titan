@@ -161,15 +161,18 @@ moving a fresh connection yield once before handoff. No scheduler exception or
 pending-count exemption is needed.
 
 `BufferedSubscription:snapshot_pending()` copies unread queue references and
-terminal status without consuming the source queue. The encoder builds its
-binary excess/queue snapshot and complete policy Array before stopping the
+terminal status without consuming the source queue. The encoder snapshots
+binary excess/queue bytes, typed failure and reader state before stopping the
 watcher and invoking the TCP handle hook. A rejected native handoff restarts a
 previously active watcher. After native detachment succeeds, it clears the
 source subscription, callback and scratch references. The source handle's
 ordinary asynchronous close retains its native callback ownership through
-retirement.
+retirement. A private protobuf schema combines those copied fields and the
+known TCP child bytes. A lexical guard discards the detached TCP payload if
+outer serialization raises. Public `Connection.discard_transfer_payload`
+decodes this same schema and delegates directly to UV without Runtime adoption.
 
-Reconstruction validates the policy before adopting the endpoint, creates a
+Reconstruction decodes the same schema before adopting the endpoint, creates a
 fresh `Connection` and subscription on the destination Runtime, restores
 unread bytes, and resumes a previously active live reader. No source-state
 callback, Task or subscription is copied. The low-level endpoint gate rejects

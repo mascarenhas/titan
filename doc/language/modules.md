@@ -602,8 +602,7 @@ source objects. The build system owns those source copies and invalidation.
 
 An installed compiler links `<root>/lib/titan/0.6/libtitan.a`; compiler development
 directly from the repository lazily rebuilds and links
-`titan-runtime/libtitan.a`. Both archives contain exactly `titan.o`, `minicoro.o`,
-and `transfer.o`; source-defined
+`titan-runtime/libtitan.a`. Both archives contain exactly `titan.o` and `minicoro.o`; source-defined
 foreign callbacks live in their generated module objects, and neither driver
 mode links `titan.o` directly. Vendored `libbacktrace.a` and the matching `liblua.a` remain separate
 link inputs. The native Lua support entry is compiled from `ltitanlib.c`: a

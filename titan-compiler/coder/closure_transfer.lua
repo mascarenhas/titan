@@ -111,8 +111,8 @@ local function emit_source_entry(tlcontext, entry)
         else
             expression = getslot(cap.type, nil, source)
         end
-        project[#project + 1] = "case " .. index .. ": {\n"
-            .. prefix .. project_value(ctx, cap, expression) .. "\nreturn; }"
+        project[#project + 1] = "{\n"
+            .. prefix .. project_value(ctx, cap, expression) .. "\n}"
 
         local convert = cvardecl(ctx, cap.type, "_converted")
             .. " = " .. initval(cap.type) .. ";\n"
@@ -127,59 +127,48 @@ local function emit_source_entry(tlcontext, entry)
                 .. setslot(cap.type, "&_slot", "_converted")
                 .. "\nlua_pushtvalue(L, _slot);"
         end
-        restore[#restore + 1] = "case " .. index .. ": {\n" .. body .. "\nreturn; }"
+        restore[#restore + 1] = "{\nTValue _value = lua_totvalue(L, _capture_base + "
+            .. index .. ");\n(void)_value;\n" .. body .. "\n}"
     end
-    local init_captures, copy_captures = "", ""
+    local copy_captures = ""
     if #entry.captures > 0 then
-        init_captures = render([[
-            for (unsigned _i = 0; _i < $COUNT; ++_i)
-                setnilvalue(&_closure->upvalue[4 + _i]);
-        ]], { COUNT = #entry.captures })
         copy_captures = render([[
             for (unsigned _i = 0; _i < $COUNT; ++_i) {
-                lua_rawgeti(L, _slots, (lua_Integer)_i + 1);
-                setobj2n(L, &_closure->upvalue[4 + _i], s2v(L->top.p - 1));
-                lua_pop(L, 1);
+                TValue _slot = lua_totvalue(L, _top + 1 + (int)_i);
+                setobj2n(L, &_closure->upvalue[4 + _i], &_slot);
             }
         ]], { COUNT = #entry.captures })
     end
     return render([[
-        static void ${ID}_project(lua_State *L, CClosure *_fn,
-                                 unsigned _index) {
+        static void ${ID}_project(lua_State *L, CClosure *_fn) {
+            if (_fn->nupvalues != $NUP || _fn->f != $COERCIVE)
+                luaL_error(L, "closure does not match its transfer entry");
             Udata *_mod = uvalue(&_fn->upvalue[0]);
             (void)_mod;
-            titan_ensure_stack(L, 2);
-            switch (_index) {
-                $PROJECT
-                default: luaL_error(L, "invalid closure capture index");
-            }
+            $PROJECT
         }
-        static void ${ID}_capture(lua_State *L, Udata *_mod,
-                                 unsigned _index, int _value_index) {
+        static void ${ID}_restore(lua_State *L, Udata *_mod, int _capture_base) {
             (void)_mod;
-            TValue _value = lua_totvalue(L, _value_index);
-            (void)_value;
-            titan_ensure_stack(L, 2);
-            switch (_index) {
-                $CAPTURE
-                default: luaL_error(L, "invalid closure capture index");
-            }
-        }
-        static void ${ID}_restore(lua_State *L, Udata *_mod, int _slots) {
-            _slots = lua_absindex(L, _slots);
-            titan_ensure_stack(L, 2);
+            _capture_base = lua_absindex(L, _capture_base);
+            (void)_capture_base;
+            int _top = lua_gettop(L);
+            /* Convert and root every slot/fresh cell before creating the final
+             * closure. Its initialization can then retain the white-object
+             * invariant without construction barriers. */
+            $CAPTURE
             CClosure *_closure = luaF_newCclosure(L, $NUP);
             _closure->f = $COERCIVE;
             setuvalue(L, &_closure->upvalue[0], _mod);
             setpvalue(&_closure->upvalue[1], (void *)$TAG);
             setpvalue(&_closure->upvalue[2], titan_cast_func(void *, $NATIVE));
             setpvalue(&_closure->upvalue[3], TITAN_BRAND);
-            $INITCAPTURES
+            $COPYCAPTURES
             setfvalue(&_closure->upvalue[$STRICT_INDEX], $STRICT);
             setclCvalue(L, s2v(L->top.p), _closure); L->top.p++;
-            $COPYCAPTURES
             lua_assert(iswhite(_closure));
             luaC_checkGC(L);
+            lua_copy(L, -1, _top + 1);
+            lua_settop(L, _top + 1);
         }
     ]], {
         ID = entry.id,
@@ -187,7 +176,6 @@ local function emit_source_entry(tlcontext, entry)
         CAPTURE = table.concat(restore, "\n"),
         NUP = #entry.captures + 5,
         COUNT = #entry.captures,
-        INITCAPTURES = init_captures,
         COPYCAPTURES = copy_captures,
         STRICT_INDEX = #entry.captures + 4,
         COERCIVE = entry.coercive,
@@ -199,25 +187,14 @@ end
 
 local function emit_adapter_entry(tlcontext, entry)
     return render([[
-        static void ${ID}_project(lua_State *L, CClosure *_fn,
-                                 unsigned _index) {
-            if (_index != 0 || _fn->nupvalues < 6)
+        static void ${ID}_project(lua_State *L, CClosure *_fn) {
+            if (_fn->nupvalues < 6)
                 luaL_error(L, "invalid adjusted closure capture");
-            titan_ensure_stack(L, 1);
             lua_pushtvalue(L, _fn->upvalue[_fn->nupvalues - 2]);
         }
-        static void ${ID}_capture(lua_State *L, Udata *_mod,
-                                 unsigned _index, int _value_index) {
-            (void)_mod;
-            if (_index != 0)
-                luaL_error(L, "invalid adjusted closure capture index");
-            lua_pushvalue(L, _value_index);
-        }
-        static void ${ID}_restore(lua_State *L, Udata *_mod, int _slots) {
-            _slots = lua_absindex(L, _slots);
-            titan_ensure_stack(L, 2);
-            lua_rawgeti(L, _slots, 1);
-            TValue _source_value = lua_totvalue(L, -1);
+        static void ${ID}_restore(lua_State *L, Udata *_mod, int _capture_base) {
+            _capture_base = lua_absindex(L, _capture_base);
+            TValue _source_value = lua_totvalue(L, _capture_base);
             CClosure *_source = ttisCclosure(&_source_value)
                 ? clCvalue(&_source_value) : NULL;
             if (_source == NULL || _source->nupvalues < 5
@@ -238,7 +215,7 @@ local function emit_adapter_entry(tlcontext, entry)
             setclCvalue(L, &_closure->upvalue[_count - 1], _source);
             setfvalue(&_closure->upvalue[_count], $STRICT);
             lua_assert(iswhite(_closure));
-            setclCvalue(L, s2v(L->top.p - 1), _closure);
+            setclCvalue(L, s2v(L->top.p), _closure); L->top.p++;
             luaC_checkGC(L);
         }
     ]], {
@@ -269,25 +246,13 @@ function coder._transfer_emit_manifest(tlcontext, sigs, code)
     local initializers = {}
     for _, entry in ipairs(entries) do
         assert(entry.emitted, "closure transfer entry was not emitted")
-        local boxed = {}
-        for _, capture in ipairs(entry.captures) do
-            boxed[#boxed + 1] = capture.boxed and "1" or "0"
-        end
-        local boxed_name = "NULL"
-        if #boxed > 0 then
-            boxed_name = entry.id .. "_boxed"
-            code[#code + 1] = "static const unsigned char " .. boxed_name
-                .. "[] = { " .. table.concat(boxed, ", ") .. " };"
-        end
         initializers[#initializers + 1] = render([[
-            { titan_cast_func(void *, $NATIVE), $COERCIVE, $STRICT,
-              $COUNT, $BOXED, ${ID}_project, ${ID}_capture, ${ID}_restore, $KIND }
+            { titan_cast_func(void *, $NATIVE), $STRICT,
+              $COUNT, ${ID}_project, ${ID}_restore }
         ]], {
-            NATIVE = entry.native, COERCIVE = entry.coercive,
+            NATIVE = entry.native,
             STRICT = entry.strict, COUNT = #entry.captures,
-            BOXED = boxed_name, ID = entry.id,
-            KIND = entry.kind == "adapter"
-                and "TITAN_TRANSFER_ADAPTER" or "TITAN_TRANSFER_SOURCE",
+            ID = entry.id,
         })
     end
     local array = "NULL"
@@ -297,16 +262,13 @@ function coder._transfer_emit_manifest(tlcontext, sigs, code)
             .. "[] = {\n" .. table.concat(initializers, ",\n") .. "\n};"
     end
     tlcontext.transfer_manifest = tlcontext.prefix .. "transfer_manifest"
-    sigs[#sigs + 1] = "Udata *" .. tlcontext.prefix .. "init(lua_State *L);"
     code[#code + 1] = render([[
         static const TitanTransferModule $MANIFEST = {
-            $NAME, $INIT, $SYMBOLS, $COUNT, $ENTRIES
+            $NAME, $COUNT, $ENTRIES
         };
     ]], {
         MANIFEST = tlcontext.transfer_manifest,
         NAME = c_string_literal(tlcontext.module),
-        INIT = tlcontext.prefix .. "init",
-        SYMBOLS = tlcontext.prefix .. "native_symbol",
         COUNT = #entries, ENTRIES = array,
     })
 end

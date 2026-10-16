@@ -61,8 +61,8 @@ The compiler prepares `A.ffi.h` from those includes and any `foreign type`
 typedef declarations before checking Titan signatures. A module defining foreign functions also gets `A.titan.h` for their
 checked declarations and eligible inline bodies. Generated `A.c` includes its own `.ffi.h` before
 any `.titan.h`, so the consumer's complete C environment is established first.
-See [foreign functions](foreign-functions.md) for those source-private entry
-points.
+See [foreign functions](foreign-functions.md) for public C entry exports and
+local source-only callbacks.
 
 The configured C compiler remains authoritative for C declaration legality and
 implicit conversions. Titan no longer compares independently extracted copies

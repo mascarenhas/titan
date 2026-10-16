@@ -55,14 +55,14 @@ archive_objects() {
   pending_output=
 }
 common=(-std=c99 -Wall -Wextra "${cppflags[@]}" -I titan-runtime -I "$prefix/src/lua-5.5.1" -I "$prefix/include")
-for name in titan minicoro transfer ltitanlib; do
+for name in titan minicoro ltitanlib; do
   if needs_build "$work/$name.o" "titan-runtime/$name.c" "${headers[@]}"; then
     write_output "$work/$name.o" "${compiler[@]}" "${common[@]}" "${runtime_cflags[@]}" \
       -c "titan-runtime/$name.c" -o "$work/$name.o"
   fi
 done
-if needs_build "$work/libtitan.a" "$work/titan.o" "$work/minicoro.o" "$work/transfer.o"; then
-  archive_objects "$work/libtitan.a" "$work/titan.o" "$work/minicoro.o" "$work/transfer.o"
+if needs_build "$work/libtitan.a" "$work/titan.o" "$work/minicoro.o"; then
+  archive_objects "$work/libtitan.a" "$work/titan.o" "$work/minicoro.o"
 fi
 peg_objects=()
 for name in lplcap lplcode lplprint lpltree lplvm; do

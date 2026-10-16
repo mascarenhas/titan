@@ -140,6 +140,40 @@ function deserialize(bytes: string, descriptor: reflect.Type): value
   end
 end
 
+--- Encode an anonymous root message using an explicit ordered field schema.
+-- The descriptor stays with the caller; only the encoded values enter the packet.
+-- Nested nominal values retain the ordinary public-field requirements.
+-- @param fields One declared type per field, in wire field-number order.
+-- @param ... Exactly one value per field, including explicit nil values.
+-- @return Protocol Buffers wire bytes for the anonymous message.
+-- @usage standard-library-protobuf.md#anonymous-messages
+function serialize_fields(fields: const {reflect.Type}, ...: value): string
+  if #... ~= #fields then raise "protobuf: anonymous field count mismatch" end
+  local encoder = Encoder({})
+  local output = string.writer()
+  for index = 1, #fields do
+    encoder:field(output, field_number(index), ...[index], fields[index], 2)
+  end
+  local bytes = output:drain()
+  if #bytes > 2147483647 then raise "protobuf: message exceeds 2 GiB" end
+  return bytes
+end
+
+--- Decode an anonymous message using the same ordered schema as its encoder.
+-- @param bytes Protocol Buffers wire bytes for the anonymous message.
+-- @param fields The caller's ordered field types; no nominal lookup is needed for the root.
+-- @return Exactly one result per declared field, preserving nil positions.
+-- @usage standard-library-protobuf.md#anonymous-messages
+function deserialize_fields(bytes: string, fields: const {reflect.Type}): (...: value)
+  if #bytes > 2147483647 then raise "protobuf: message exceeds 2 GiB" end
+  local message = read_message(bytes)
+  local values: {value} = {}
+  for index = 1, #fields do
+    values[index] = decode_field(message, field_number(index), fields[index], 2)
+  end
+  return ...values[1, #fields]
+end
+
 --- Resolve an initialized nominal type by name for cross-state transfer decoding.
 -- @param bytes Protocol Buffers wire bytes for the root message.
 -- @param name Fully qualified nominal name already registered in this state.

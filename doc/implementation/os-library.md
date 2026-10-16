@@ -85,15 +85,18 @@ left the native write queue. Read callbacks are retained on the domain owner so
 a failed handoff can restart a stopped watcher without replacing its queue.
 
 Input hooks use `BufferedSubscription:snapshot_pending` to copy queued strings
-and the terminal result before detachment. The payload carries those strings,
-the facade excess, a terminal marker or encoded `OperationError`, and an
-optional custom `uv.pipe_t` packet. A closed native pipe needs no descriptor.
+and the terminal result before detachment. Private ordered `reflect.Type` Arrays
+define the anonymous-root protobuf schemas. The input payload carries those
+strings, facade excess, a terminal marker, an optional `OperationError`, and an
+optional known `uv.pipe_t` byte payload. A closed native pipe needs no descriptor.
 Successful encoding clears the original facade's handle and excess; its old
 subscription and native owner retire through their existing ownership paths.
 Reconstruction creates a fresh subscription with destination closures and
 replays the copied strings before resuming production or publishing terminal
 state. Output hooks only carry the pipe packet. Stable parent facades instead
 copy descriptor identity, with active input state or pending writes rejected.
+A lexical guard discards detached child bytes if outer serialization fails; it
+uses the public UV cleanup method without adopting another native owner.
 
 The Process exit watcher, process owner, and reap obligation never move.
 Transferring a public endpoint leaves the original Process's stream field as an
@@ -101,10 +104,9 @@ inert facade, so existing process cleanup cannot close the adopted descriptor.
 No resource registry or replay protection is introduced: the caller owns the
 manual exactly-once handoff and failure recovery contract.
 
-The private writable-packet discard helper supports `io`'s partial-handoff
-cleanup. It validates the exact OutputStream and pipe payloads, then uses the
-existing owned-descriptor close primitive without a Runtime or native-handle
-adoption. The caller clears its retained packet after the native call, before
+Private input/output packet discard helpers support `io`'s handoff cleanup.
+They decode their known protobuf schemas and delegate to the public pipe
+discard method without a Runtime or native-handle adoption. The caller clears its retained packet after the native call, before
 reporting a close error, because a close attempt is terminal even on EINTR.
 
 ## Stable parent streams and platform facts

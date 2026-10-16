@@ -647,7 +647,7 @@ end
 function codeforeigncall(ctx, node)
     local cfuncname = coder._foreign_reference_name(
         assert(node._direct_foreign_reference,
-            "direct foreign call lacks its checker reference"))
+            "direct foreign call lacks its checker reference"), ctx)
     local ftype = node.exp._type
     assert(ftype._tag == "Type.CFunction",
         "direct foreign call lost its C function declaration")

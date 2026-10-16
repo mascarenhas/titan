@@ -111,9 +111,10 @@ worker whose continuation has not retired is still ineligible. Even an idle
 Statement owns a `sqlite3_stmt *` and retains the original Connection; it
 cannot follow a detached connection implicitly.
 
-The hook allocates its single pointer policy before clearing `handle`. The
-source then has no close authority, and the reservation is released by its
-ordinary defer. Decoding validates arity, policy kind and nonnull address,
+The hook serializes its raw pointer as a protobuf fixed64 field before clearing
+`handle`. Its private field schema is reused for decoding. The source then has
+no close authority, and the reservation is released by its ordinary defer.
+Decoding validates the wire message and nonnull address,
 then allocates a fresh Connection with zero Statements and no active operation.
 Neither hook calls SQLite, queues work, captures a source Runtime, or yields.
 The existing FULLMUTEX database already supports successive worker threads;
@@ -122,7 +123,7 @@ Transaction/savepoint state stays on the native handle.
 
 The carrier is not a reference-counted ticket. Repeated adoption, abandoned
 payloads, arbitrary pointer injection and failure after detachment retain the
-public programmer-owned lifetime rules; the transfer graph neither closes nor
+public programmer-owned lifetime rules; the transfer carrier neither closes nor
 rolls back native ownership. A retained packet can be adopted locally after a
 rejected send. No GC callback performs database I/O.
 

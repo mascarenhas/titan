@@ -5,6 +5,14 @@
 local uv = import "uv"
 local async = import "async"
 local string = import "string"
+local protobuf = import "protobuf"
+local reflect = import "reflect"
+
+local const connection_transfer_fields: const {reflect.Type} = {
+  reflect.Type.is_string(), reflect.Type.is_string(), reflect.Type.is_integer(),
+  reflect.Type.is_option(reflect.Type.is_named(reflect.NamedType("titan.async.OperationError"))),
+  reflect.Type.is_boolean(),
+}
 
 -- Stream payloads are binary strings, so delimiter handling uses the string
 -- library's length-aware literal search and slicing operations.
@@ -694,7 +702,7 @@ end
 -- Pending operations and input observers are rejected before ownership changes.
 -- @return Native endpoint, copied unread bytes, and receive state; adopt exactly once.
 -- @usage standard-library-net.md#transferring-connections
-function Connection:to_transfer_payload(): (...: async.TransferValue)
+function Connection:to_transfer_payload(): string
   -- Encoding is synchronous and may run in a transfer callback without a Task.
   if self.loop ~= async.current_loop() then
     raise "TCP resource belongs to a different async Runtime"
@@ -718,28 +726,28 @@ function Connection:to_transfer_payload(): (...: async.TransferValue)
   bytes:write(self.excess)
   for index = 1, pending.count do bytes:write(pending:get(index)) end
   local terminal_kind = 0
-  local failure = async.TransferValue.is_nil()
+  local failure: async.OperationError? = nil
   if terminal ~= nil then
     case terminal
     when ended() then terminal_kind = 1
     when error(reason) then
       terminal_kind = 2
-      failure = async.TransferValue.from_value(reason)
+      failure = reason
     when closed() then raise "cannot transfer a closed TCP Connection"
     when item() then raise "invalid TCP subscription snapshot"
     end
   end
-  local payload: {async.TransferValue} = {
-    async.TransferValue.is_nil(), async.TransferValue.is_string(bytes:drain()),
-    async.TransferValue.is_integer(terminal_kind), failure,
-    async.TransferValue.is_boolean(self.started),
-  }
+  local input_bytes = bytes:drain()
+  local started = self.started
   local reading = uv.is_active(self.handle_view)
   if reading then check_status(uv.read_stop(self.stream), "net.transfer.stop") end
+  local native_payload = ""
   do
-    payload[1] = async.TransferValue.from_value(self.handle)
+    native_payload = self.handle:to_transfer_payload()
   catch
-    if reading then check_status(self.start_read(), "net.transfer.restart") end
+    if reading and not is_closed(self.handle_view) then
+      check_status(self.start_read(), "net.transfer.restart")
+    end
     raise
   end
   self.excess = ""
@@ -747,46 +755,29 @@ function Connection:to_transfer_payload(): (...: async.TransferValue)
   self.start_read = nil
   self.started = false
   self.read_buffer = nil
-  return ...payload
+  local exported = false
+  defer if not exported then uv.tcp_t.discard_transfer_payload(native_payload) end
+  local payload = protobuf.serialize_fields(connection_transfer_fields,
+    native_payload, input_bytes, terminal_kind, failure, started)
+  exported = true
+  return payload
 end
 
 --- Adopt one detached TCP connection on the destination's active Runtime.
--- @param ... Exact payload returned by to_transfer_payload; ownership is manual.
+-- @param payload Exact bytes returned by to_transfer_payload; ownership is manual.
 -- @return Fresh connection with destination-owned callbacks and copied unread input.
 -- @usage standard-library-net.md#transferring-connections
-function Connection.from_transfer_payload(...: async.TransferValue): Connection
-  if #... ~= 5 then raise "invalid TCP Connection transfer payload" end
-  local bytes = ""
-  local terminal = 0
-  local started = false
-  case ...[2]
-  when is_string(item) then bytes = item
-  else raise "invalid TCP Connection input payload" end
-  case ...[3]
-  when is_integer(item) then terminal = item
-  else raise "invalid TCP Connection receive state" end
+function Connection.from_transfer_payload(payload: string): Connection
+  local native_payload: string, bytes: string, terminal: integer,
+    failure: async.OperationError?, started: boolean =
+    protobuf.deserialize_fields(payload, connection_transfer_fields)
   if terminal < 0 or terminal > 2 then raise "invalid TCP Connection receive state" end
-  case ...[5]
-  when is_boolean(item) then started = item
-  else raise "invalid TCP Connection read state" end
-  local failure: value = nil
-  if terminal == 2 then
-    failure = ...[4]:to_value()
-    if not (failure is async.OperationError) then
-      raise "invalid TCP Connection receive error"
-    end
-  else
-    case ...[4]
-    when is_nil() then
-    else raise "invalid TCP Connection receive error" end
+  if (terminal == 2) ~= (failure ~= nil) then
+    raise "invalid TCP Connection receive error"
   end
-  case ...[1]
-  when is_record_payload(name, _payload) then
-    if name ~= "titan.uv.tcp_t" then raise "invalid TCP Connection endpoint payload" end
-  else raise "invalid TCP Connection endpoint payload" end
   local loop = async.current_loop()
   if async.is_closing() then raise "cannot transfer into a closing async Runtime" end
-  local tcp: uv.tcp_t = ...[1]:to_value()
+  local tcp = uv.tcp_t.from_transfer_payload(native_payload)
   local handle = tcp:as_handle_t()
   local adopted = false
   defer if not adopted then uv.close(handle) end
@@ -799,6 +790,14 @@ function Connection.from_transfer_payload(...: async.TransferValue): Connection
   end
   adopted = true
   return connection
+end
+
+--- Dispose of an undelivered connection payload exactly once without a Runtime.
+-- @return Native socket close status; adoption or disposal consumes the payload.
+-- @usage standard-library-net.md#transferring-connections
+function Connection.discard_transfer_payload(payload: string): integer
+  local native_payload: string = protobuf.deserialize_fields(payload, connection_transfer_fields)
+  return uv.tcp_t.discard_transfer_payload(native_payload)
 end
 
 --- Observe new TCP input or terminal receive events after they have been buffered.

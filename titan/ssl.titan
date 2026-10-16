@@ -7,6 +7,8 @@ local uv = import "uv"
 local fs = import "fs"
 local net = import "net"
 local string = import "string"
+local protobuf = import "protobuf"
+local reflect = import "reflect"
 local gc = import "gc"
 foreign import "openssl/err.h"
 foreign import "openssl/x509v3.h"
@@ -14,6 +16,13 @@ foreign import "openssl/pem.h"
 foreign import "openssl/ssl.h"
 foreign import "stddef.h"
 foreign import "string.h"
+
+local const connection_transfer_fields: const {reflect.Type} = {
+  reflect.Type.is_string(),
+  reflect.Type.is_foreign_pointer(reflect.Type.is_foreign_void(), {}),
+  reflect.Type.is_boolean(), reflect.Type.is_string(), reflect.Type.is_boolean(),
+  reflect.Type.is_boolean(), reflect.Type.is_string(),
+}
 
 foreign type VoidPointer = *void
 
@@ -1594,7 +1603,7 @@ end
 -- Native SSL/BIO storage moves intact; no handshake or TLS reserialization occurs.
 -- @return Same-process engine and transport state, to be adopted exactly once.
 -- @usage standard-library-ssl.md#transferring-connections
-function Connection:to_transfer_payload(): (...: async.TransferValue)
+function Connection:to_transfer_payload(): string
   if not self.handle or self.state == STATE_TERMINATING then
     raise "cannot transfer a closed or terminating TLS Connection"
   end
@@ -1603,16 +1612,14 @@ function Connection:to_transfer_payload(): (...: async.TransferValue)
       #self.cleanup_waiters ~= 0 or #self.scope_waiters ~= 0 then
     raise "cannot transfer a TLS Connection with a pending operation"
   end
-  local payload: {async.TransferValue} = {
-    async.TransferValue.is_nil(), async.TransferValue.is_pointer(self.handle),
-    async.TransferValue.is_boolean(self.client), async.TransferValue.is_string(self.state),
-    async.TransferValue.is_boolean(self.transport_eof),
-    async.TransferValue.is_boolean(self.transport_shutdown),
-    async.TransferValue.is_string(self.excess),
-  }
-  -- Transport validation and native duplication must succeed before the engine
-  -- loses its source owner. SSL owns both BIOs and its own SSL_CTX reference.
-  payload[1] = async.TransferValue.from_value(self.transport)
+  local handle = self.handle
+  local client = self.client
+  local state = self.state
+  local transport_eof = self.transport_eof
+  local transport_shutdown = self.transport_shutdown
+  local excess = self.excess
+  -- The engine remains source-owned until the child handoff succeeds.
+  local transport_payload = self.transport:to_transfer_payload()
   self.handle = nil
   self.input = nil
   self.output = nil
@@ -1620,49 +1627,32 @@ function Connection:to_transfer_payload(): (...: async.TransferValue)
   self.transport = nil
   self.transport_closed = true
   self.state = STATE_CLOSED
-  return ...payload
+  local exported = false
+  defer if not exported then
+    defer ffi.SSL_free(handle)
+    net.Connection.discard_transfer_payload(transport_payload)
+  end
+  local payload = protobuf.serialize_fields(connection_transfer_fields,
+    transport_payload, handle, client, state, transport_eof, transport_shutdown, excess)
+  exported = true
+  return payload
 end
 
 --- Adopt a detached TLS engine on the destination's active Runtime.
--- @param ... Exact manually owned payload returned by to_transfer_payload.
+-- @param payload Exact manually owned bytes returned by to_transfer_payload.
 -- @return Fresh TLS wrapper retaining the original native engine and buffered state.
 -- @usage standard-library-ssl.md#transferring-connections
-function Connection.from_transfer_payload(...: async.TransferValue): Connection
-  if #... ~= 7 then raise "invalid TLS Connection transfer payload" end
-  local handle: foreign *SSL = nil
-  local client = false
-  local state = ""
-  local transport_eof = false
-  local transport_shutdown = false
-  local excess = ""
-  case ...[2]
-  when is_pointer(pointer) then handle = pointer as foreign *SSL
-  else raise "invalid TLS Connection engine payload" end
+function Connection.from_transfer_payload(payload: string): Connection
+  local transport_payload: string, raw_handle: value, client: boolean,
+    state: string, transport_eof: boolean, transport_shutdown: boolean, excess: string =
+    protobuf.deserialize_fields(payload, connection_transfer_fields)
+  local handle = raw_handle as foreign *SSL
   if not handle then raise "invalid TLS Connection engine payload" end
-  case ...[3]
-  when is_boolean(item) then client = item
-  else raise "invalid TLS Connection client state" end
-  case ...[4]
-  when is_string(item) then state = item
-  else raise "invalid TLS Connection state" end
   if state ~= STATE_HANDSHAKING and state ~= STATE_OPEN and
       state ~= STATE_WRITE_SHUTDOWN and state ~= STATE_PEER_CLOSED and
       state ~= STATE_SHUTDOWN then
     raise "invalid TLS Connection state"
   end
-  case ...[5]
-  when is_boolean(item) then transport_eof = item
-  else raise "invalid TLS Connection transport EOF state" end
-  case ...[6]
-  when is_boolean(item) then transport_shutdown = item
-  else raise "invalid TLS Connection transport shutdown state" end
-  case ...[7]
-  when is_string(item) then excess = item
-  else raise "invalid TLS Connection input payload" end
-  case ...[1]
-  when is_record_payload(name, _payload) then
-    if name ~= "titan.net.Connection" then raise "invalid TLS Connection transport payload" end
-  else raise "invalid TLS Connection transport payload" end
   -- Allocate the complete destination GC owner before adopting either native
   -- resource. No source-state strings, callbacks, or Operation owners survive.
   local connection: Connection = {
@@ -1674,11 +1664,23 @@ function Connection.from_transfer_payload(...: async.TransferValue): Connection
     transport_eof = transport_eof, transport_shutdown = transport_shutdown,
     transport_closed = false, excess = excess,
   }
-  connection.transport = ...[1]:to_value()
+  connection.transport = net.Connection.from_transfer_payload(transport_payload)
   connection.handle = handle
   connection.input = ffi.SSL_get_rbio(handle)
   connection.output = ffi.SSL_get_wbio(handle)
   return connection
+end
+
+--- Dispose of an undelivered TLS payload exactly once without a Runtime.
+-- @return Native transport close status; the SSL engine is also released.
+-- @usage standard-library-ssl.md#transferring-connections
+function Connection.discard_transfer_payload(payload: string): integer
+  local transport_payload: string, raw_handle: value =
+    protobuf.deserialize_fields(payload, connection_transfer_fields)
+  local handle = raw_handle as foreign *SSL
+  if not handle then raise "invalid TLS Connection engine payload" end
+  defer ffi.SSL_free(handle)
+  return net.Connection.discard_transfer_payload(transport_payload)
 end
 
 --- Read decrypted bytes, returning nil only after authenticated TLS shutdown.

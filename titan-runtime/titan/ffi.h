@@ -22,6 +22,12 @@
 typedef void *(*TitanModuleSymbols)(const char *symbol);
 #define TITAN_MODULE_PRELOADS_KEY "Titan module preload providers"
 
+/* The immutable resolver belongs to the image that created this module state.
+** Every generated module's native payload starts with this exact header. */
+typedef struct TitanModuleData {
+  TitanModuleSymbols symbols;
+} TitanModuleData;
+
 /* These owning-state helpers reserve their temporary stack and preserve the
 ** entry top on success. They may allocate/raise. Names are length-aware so a
 ** native preload with an embedded zero byte never aliases another module.
@@ -30,22 +36,6 @@ TITAN_RUNTIME_FUNC TitanModuleSymbols titan_module_preload_symbols(lua_State *L,
     const char *name, size_t length, lua_CFunction loader);
 TITAN_RUNTIME_FUNC void titan_module_preload(lua_State *L, const char *name,
     size_t length, lua_CFunction loader, TitanModuleSymbols symbols);
-
-/* Native-owned closure and transfer-policy graphs. The caller owns cleanup
-** before encode can raise. Encode preserves the successful entry top; decode pushes one
-** rooted destination value. Both require an owning-state protected boundary. */
-typedef struct TitanTransferGraph TitanTransferGraph;
-TITAN_RUNTIME_FUNC TitanTransferGraph *titan_transfer_new(void);
-TITAN_RUNTIME_FUNC void titan_transfer_encode(lua_State *L,
-    TitanTransferGraph *graph, int index);
-TITAN_RUNTIME_FUNC void titan_transfer_decode(lua_State *L,
-    const TitanTransferGraph *graph);
-TITAN_RUNTIME_FUNC void titan_transfer_encode_policy(lua_State *L,
-    TitanTransferGraph *graph, int index);
-TITAN_RUNTIME_FUNC void titan_transfer_decode_policy(lua_State *L,
-    const TitanTransferGraph *graph);
-TITAN_RUNTIME_FUNC void titan_transfer_free(TitanTransferGraph *graph);
-TITAN_RUNTIME_FUNC int titan_transfer_is_closure(lua_State *L, int index);
 
 #if defined(__unix__) || defined(__APPLE__)
 #include <sys/socket.h>
@@ -148,6 +138,11 @@ static inline void lua_pushtvalue(lua_State *L, TValue value) {
   L->top.p++;
 }
 
+/* Lightuserdata preserves address bits and exposes no pointed-to storage. */
+static inline void lua_pushconstlightuserdata(lua_State *L, const void *value) {
+  lua_pushlightuserdata(L, (void *)value);
+}
+
 static inline void *lua_togco(lua_State *L, int idx) {
   TValue value = lua_totvalue(L, idx);
   return gcvalue(&value);
@@ -184,6 +179,10 @@ static inline int lmacro_ttisLclosure(const TValue *o) {
 
 static inline int lmacro_ttisCclosure(const TValue *o) {
   return ttisCclosure(o);
+}
+
+static inline int lmacro_ttisfulluserdata(const TValue *o) {
+  return ttisfulluserdata(o);
 }
 
 static inline int lmacro_ttislcf(const TValue *o) { return ttislcf(o); }

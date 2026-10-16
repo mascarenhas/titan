@@ -300,6 +300,8 @@ describe("static compiled-module native containers", function()
             "Windows Titan archive-provider consumers are not implemented",
         ["builds consumer-local callable views over an archive-selected source"] =
             "Windows Titan archive-provider consumers are not implemented",
+        ["calls public foreign entries from an archive without source or a DSO"] =
+            "Windows Titan archive-provider consumers are not implemented",
     }
     local publication_cases = {
         ["rolls back every caught publication boundary including stale shims"] = true,
@@ -374,6 +376,67 @@ describe("static compiled-module native containers", function()
         driver.AR = original_ar
         driver.RANLIB = original_ranlib
         driver.TITAN_BIN_PATH = original_titan_bin_path
+    end)
+
+    it("calls public foreign entries from an archive without source or a DSO", function()
+        types.registry, driver.imported = {}, {}
+        local producer_source = [[
+            foreign function increment(input: int): int return input + 1 end
+        ]]
+        local producer_path = workspace .. "/raw_foreign.titan"
+        local producer = assert(parser.parse(producer_path, producer_source))
+        local _, errors = checker.check(
+            "foreign.only", producer, producer_source, producer_path)
+        assert.equal(0, #errors, table.concat(errors, "\n"))
+        local ok, err, object = driver.compile(
+            "foreign.only", producer, producer_path, {}, false)
+        assert.truthy(ok, err)
+        local archive = workspace .. "/foreign.a"
+        make_archive(archive, { object })
+        assert(os.remove(object))
+        assert.is_nil(lfs.attributes(producer_path))
+        assert.is_nil(lfs.attributes(workspace .. "/foreign.so"))
+
+        types.registry, driver.imported = {}, {}
+        driver.TITAN_BIN_PATH = workspace
+        local source = [[
+            local provider = import "foreign.only"
+            local foreign function invoke(input: int): int
+                return provider.increment(input)
+            end
+            function main(args: {string}): integer
+                local callback: foreign function(int): int = provider.increment
+                if invoke(40) ~= 41 or callback(41) ~= 42 then return 1 end
+                return 0
+            end
+        ]]
+        local filename = workspace .. "/raw_consumer.titan"
+        local ast = assert(parser.parse(filename, source))
+        local static_deps = {}
+        local context = driver.new_resolver_context({ prefer_static = true })
+        local loader = driver.defaultloader(static_deps, { context = context })
+        local completed, failure = pcall(function()
+            driver.with_loader(loader, function(active_loader)
+                local _, diagnostics = checker.check(
+                    "foreign.consumer", ast, source, filename, active_loader)
+                assert.equal(0, #diagnostics, table.concat(diagnostics, "\n"))
+                assert.equal("static", driver.imported["foreign.only"].kind)
+                local compiled, compile_error, consumer, references = driver.compile(
+                    "foreign.consumer", ast, filename, static_deps, false)
+                assert.truthy(compiled, compile_error)
+                assert.is_true(references["foreign.only"])
+                local executable = workspace .. "/raw_foreign_app"
+                local linked, link_error = driver.compile_program(
+                    "foreign.consumer", { consumer }, nil, false, nil,
+                    executable, { archive }, workspace .. "/raw_entrypoint.c", nil,
+                    { no_uv_bootstrap = true })
+                assert.truthy(linked, link_error)
+                local ran, output = run({ executable })
+                assert.truthy(ran, output)
+            end)
+        end)
+        assert(driver.close_resolver_context(context))
+        assert.truthy(completed, failure)
     end)
 
     it("derives the authoritative target from one generated module object",

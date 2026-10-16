@@ -197,7 +197,7 @@ catch
   ffi.uv_stop(loop.native)
 end
 
-foreign function getaddrinfo_callback(native: *uv_getaddrinfo_t,
+local foreign function getaddrinfo_callback(native: *uv_getaddrinfo_t,
                                        status: int, result: *addrinfo)
   local owner = ffi.uv_req_get_data(native as foreign *uv_req_t) as foreign *Udata
   local loop = ffi.uv_loop_get_data(native.loop) as foreign *Udata
@@ -357,7 +357,7 @@ catch
   ffi.uv_stop(loop.native)
 end
 
-foreign function getnameinfo_callback(native: *uv_getnameinfo_t, status: int,
+local foreign function getnameinfo_callback(native: *uv_getnameinfo_t, status: int,
     hostname: const *char, service: const *char)
   local owner = ffi.uv_req_get_data(native as foreign *uv_req_t) as foreign *Udata
   local loop = ffi.uv_loop_get_data(native.loop) as foreign *Udata

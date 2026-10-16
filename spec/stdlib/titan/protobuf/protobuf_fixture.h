@@ -1,6 +1,9 @@
 #ifndef TITAN_SPEC_PROTOBUF_FIXTURE_H
 #define TITAN_SPEC_PROTOBUF_FIXTURE_H
 
+#include <stdint.h>
+#include <string.h>
+
 typedef int titan_protobuf_row[1 + 2];
 
 typedef struct titan_protobuf_pair {
@@ -23,6 +26,13 @@ static inline long double titan_protobuf_long_double(void) {
 
 static inline int titan_protobuf_increment(int value) {
   return value + 1;
+}
+
+/* Synthetic addresses are compared and serialized, never dereferenced. */
+static inline void *titan_protobuf_pointer_pattern(int64_t value) {
+  uint64_t bits;
+  memcpy(&bits, &value, sizeof(bits));
+  return (void *)(uintptr_t)bits;
 }
 
 #endif

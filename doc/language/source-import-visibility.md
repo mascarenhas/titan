@@ -52,7 +52,7 @@ local engine = import "example.engine.titan"
 
 * module variables, for both typed reads and writes;
 * ordinary functions;
-* source-defined `foreign function` declarations as exact C designators;
+* `local foreign function` declarations as exact C designators;
 * records and unions;
 * type aliases;
 * record fields and union variants;
@@ -120,7 +120,8 @@ The consumer's builtin `ffi` value namespace and separate foreign type namespace
 `.ffi.h`. Private Titan names still require a direct written `.titan` import:
 `alias.member` remains governed by the explicit-source capability even when a
 C declaration arrives through a transitive header. Ordinary and binary imports
-grant no C-environment inheritance or private Titan permission. Each source
+expose public foreign functions as qualified C designators, but grant no
+C-environment inheritance or private Titan permission. Each source
 module still compiles as an ordinary separate C translation unit. If a
 consumer's additional headers make an imported declaration incompatible, final
 C compilation may report the conflict.
@@ -132,7 +133,8 @@ collaboration overlay, local variable slots, local aliases, or local nominal
 members. Co-residence in one physical provider, static linking, registry state,
 or a matching source file elsewhere does not create source permission.
 
-Lua sees the same public-only module and nominal member maps. Source-local
+Lua sees the public Titan value members and nominal member maps; raw foreign
+functions have no Lua-callable value even when public. Source-local
 members cannot be read or written through `require`, even when they exist in the
 same physical provider.
 

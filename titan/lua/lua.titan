@@ -12,7 +12,7 @@ local fs = import "fs"
 local gc = import "gc"
 local io = import "io"
 -- The static dependency makes its native loader available to new states.
-local protobuf = import "titan.protobuf"
+local transfer = import "titan.transfer"
 local string = import "string"
 
 local type LuaChunk = function (...: value): (...: value)
@@ -415,16 +415,8 @@ end
 local function LuaCall:finish()
   -- run_foreign does not unwind its caller before accepted work completes,
   -- including on cancellation. This is the only release of the reservation.
-  for index = 0, self.packet.nargs as integer - 1 do
-    ffi.titan_transfer_free(self.inputs[index].graph)
-    self.inputs[index].graph = nil
-  end
-  for index = 0, self.packet.allocated_results as integer - 1 do
-    ffi.titan_transfer_free(self.packet.results[index].graph)
-  end
   ffi.free(self.packet.results)
   self.packet.results = nil
-  self.packet.allocated_results = 0
   ffi.lua_settop(self.owner.handle, self.stack_top)
   self.owner.busy = false
 end
@@ -437,10 +429,6 @@ local function LuaCall:prepare()
   self.packet.nargs = 0
   self.packet.args = self.inputs
   self.packet.results = nil
-  self.packet.allocated_results = 0
-  for index = 0, #self.arguments - 1 do
-    self.inputs[index].graph = nil
-  end
   self.packet.nargs = #self.arguments
   for index = 1, #self.arguments do
     local input = (self.inputs as foreign *titan_lua_value) + (index - 1)
@@ -470,43 +458,37 @@ local function LuaCall:prepare()
     when is_pointer(item) then
       input.kind = ffi.TITAN_LUA_POINTER
       input.pointer = item
-    when is_record(name, data) then
+    when is_record(module, name, data) then
       input.kind = ffi.TITAN_LUA_RECORD
+      input.module = module
+      input.module_length = #module
       input.name = name
       input.name_length = #name
       input.bytes = data
       input.length = #data
-    when is_union(name, data) then
+    when is_union(module, name, data) then
       input.kind = ffi.TITAN_LUA_UNION
+      input.module = module
+      input.module_length = #module
       input.name = name
       input.name_length = #name
       input.bytes = data
       input.length = #data
-    when is_closure(item) then
-      local top = ffi.lua_gettop(L)
-      defer ffi.lua_settop(L, top)
-      if ffi.lua_checkstack(L, 1) == 0 then
-        raise "cannot reserve Lua stack for independent-state closure"
-      end
-      ffi.lua_pushtvalue(L, item)
-      if ffi.titan_transfer_is_closure(L, -1) == 0 then
-        raise "cannot transfer a value that is not a Titan closure"
-      end
+    when is_closure(module, entry, data) then
       input.kind = ffi.TITAN_LUA_CLOSURE
-      input.graph = ffi.titan_transfer_new()
-      if not input.graph then raise "cannot allocate independent-state closure transfer" end
-      ffi.titan_transfer_encode(L, input.graph, -1)
-    when is_record_payload(_name, _payload) then
-      local top = ffi.lua_gettop(L)
-      defer ffi.lua_settop(L, top)
-      if ffi.lua_checkstack(L, 1) == 0 then
-        raise "cannot reserve Lua stack for independent-state record payload"
-      end
-      ffi.lua_pushtvalue(L, self.arguments[index])
+      input.module = module
+      input.module_length = #module
+      input.entry = entry
+      input.bytes = data
+      input.length = #data
+    when is_record_payload(module, name, payload) then
       input.kind = ffi.TITAN_LUA_RECORD_PAYLOAD
-      input.graph = ffi.titan_transfer_new()
-      if not input.graph then raise "cannot allocate independent-state record payload transfer" end
-      ffi.titan_transfer_encode_policy(L, input.graph, -1)
+      input.module = module
+      input.module_length = #module
+      input.name = name
+      input.name_length = #name
+      input.bytes = payload
+      input.length = #payload
     end
   end
 end
@@ -536,24 +518,23 @@ local function LuaCall:values(): {async.TransferValue}
       results[index] = async.TransferValue.is_pointer(item.pointer)
     elseif item.kind == ffi.TITAN_LUA_RECORD then
       results[index] = async.TransferValue.is_record(
+        copy_state_bytes(item.module, item.module_length),
         copy_state_bytes(item.name, item.name_length),
         copy_state_bytes(item.bytes, item.length))
     elseif item.kind == ffi.TITAN_LUA_UNION then
       results[index] = async.TransferValue.is_union(
+        copy_state_bytes(item.module, item.module_length),
         copy_state_bytes(item.name, item.name_length),
         copy_state_bytes(item.bytes, item.length))
     elseif item.kind == ffi.TITAN_LUA_CLOSURE then
-      local top = ffi.lua_gettop(L)
-      defer ffi.lua_settop(L, top)
-      ffi.titan_transfer_decode(L, item.graph)
-      local closure: value = ffi.lua_totvalue(L, -1)
-      results[index] = async.TransferValue.is_closure(closure)
+      results[index] = async.TransferValue.is_closure(
+        copy_state_bytes(item.module, item.module_length), item.entry,
+        copy_state_bytes(item.bytes, item.length))
     elseif item.kind == ffi.TITAN_LUA_RECORD_PAYLOAD then
-      local top = ffi.lua_gettop(L)
-      defer ffi.lua_settop(L, top)
-      ffi.titan_transfer_decode_policy(L, item.graph)
-      local carrier: value = ffi.lua_totvalue(L, -1)
-      results[index] = carrier as async.TransferValue
+      results[index] = async.TransferValue.is_record_payload(
+        copy_state_bytes(item.module, item.module_length),
+        copy_state_bytes(item.name, item.name_length),
+        copy_state_bytes(item.bytes, item.length))
     else
       raise "invalid independent Lua result kind"
     end

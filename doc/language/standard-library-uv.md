@@ -168,17 +168,20 @@ cover owner methods and Titan-specific helpers, including
 [`TransferValue`](async-io.md#transfer-values):
 
 ```text
-function tcp_t:to_transfer_payload(): (...: transfer.TransferValue)
-function tcp_t.from_transfer_payload(...: transfer.TransferValue): tcp_t
-function pipe_t:to_transfer_payload(): (...: transfer.TransferValue)
-function pipe_t.from_transfer_payload(...: transfer.TransferValue): pipe_t
+function tcp_t:to_transfer_payload(): string
+function tcp_t.from_transfer_payload(payload: string): tcp_t
+function pipe_t:to_transfer_payload(): string
+function pipe_t.from_transfer_payload(payload: string): pipe_t
+function tcp_t.discard_transfer_payload(payload: string): integer
+function pipe_t.discard_transfer_payload(payload: string): integer
 function stream_transfer_status(stream: stream_t, allow_reading: boolean?): integer
 function bind_transfer_loop(loop: loop_t)
 function unbind_transfer_loop(loop: loop_t)
 ```
 
-Encoding duplicates the platform socket or descriptor and immediately starts
-closing the source owner. Its old native storage remains rooted until the close
+Encoding duplicates the platform socket or descriptor, serializes that identifier
+with a private protobuf field schema, and then starts closing the source owner.
+A serialization failure closes the duplicate and preserves the source owner. Its old native storage remains rooted until the close
 callback. Reconstruction creates a fresh owner on the destination Runtime's
 loop and adopts the duplicate. It does not copy native `uv_*_t` storage,
 callbacks, or Lua-state references. The async Runtime manages the state-local
@@ -210,6 +213,12 @@ Native payloads follow the manual handoff contract: the caller delivers and
 adopts them exactly once and recovers the resource if delivery or adoption
 fails. Copying a payload does not duplicate its descriptor, and discarding one
 does not close it. The source is already detached when encoding returns.
+
+The two explicit `discard_transfer_payload` methods close a known unadopted
+native payload without a bound loop or Runtime and return the native close
+status. The close attempt consumes ownership even if it returns an error; do
+not adopt or discard that payload again. These are ordinary cleanup methods,
+not additional hooks recognized by `TransferValue`.
 
 ## Coverage and deliberate omissions
 

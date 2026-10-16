@@ -53,9 +53,10 @@ admission guard; it does not change existing concurrent operation or close
 ordering. Deferred decrements preserve the guard through accepted native
 callbacks, result publication, cancellation, and error unwinding.
 
-`to_transfer_payload` checks open ownership and a zero count, allocates the
-descriptor/string payload, then clears `handle` and `excess` as its final
-mutation. Adoption validates both slots and the signed native descriptor range
+`to_transfer_payload` checks open ownership and a zero count, serializes the
+descriptor and buffered string with a private ordered protobuf field schema,
+then clears `handle` and `excess` as its final mutation. Adoption decodes that
+same schema and validates the signed native descriptor range
 before constructing `File(descriptor, excess, 0)`. A descriptor is process-owned
 rather than bound to a UV loop, so neither hook needs a Task or native I/O.
 The descriptor and current file position move intact across independent Lua

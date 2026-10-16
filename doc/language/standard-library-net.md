@@ -39,8 +39,8 @@ function Connection:read_until(delimiter: string,
 function Connection:write(data: string)
 function Connection:shutdown()
 function Connection:close()
-function Connection:to_transfer_payload(): (...: async.TransferValue)
-function Connection.from_transfer_payload(...: async.TransferValue): Connection
+function Connection:to_transfer_payload(): string
+function Connection.from_transfer_payload(payload: string): Connection
 
 function Server:accept(): Connection
 function Server:close()
@@ -104,8 +104,8 @@ and may contain any byte, including NUL.
 ## Transferring connections
 
 An idle connected `Connection` provides
-`to_transfer_payload(): (...: async.TransferValue)` and
-`Connection.from_transfer_payload(...: async.TransferValue): Connection` for
+`to_transfer_payload(): string` and
+`Connection.from_transfer_payload(payload: string): Connection` for
 same-process handoff between independent Lua states. Use
 `async.TransferValue.from_value(connection)` to obtain the custom record policy,
 then reconstruct it with `packet:to_value()` in a state with an active async
@@ -130,12 +130,20 @@ callback retire before attempting an otherwise idle handoff.
 Successful encoding detaches the source before delivery. It preserves unread
 delimiter excess and buffered binary input; the destination resumes the same
 TCP byte stream. Source aliases behave as closed, and their `close()` cannot
-close the adopted endpoint. A transfer policy is a manually owned capability:
+close the adopted endpoint. The opaque protobuf bytes contain the known UV
+child payload and copied stream state. If outer serialization fails after UV
+detachment, the hook closes that detached endpoint and leaves the source closed.
+A transfer payload is a manually owned capability:
 adopt it exactly once, or recover it locally if delivery fails. Sending or
 decoding it twice can cause double close or use after free; discarding it
 without adoption leaks the detached resource. The carrier has no automatic
 rollback, replay protection or drop finalizer. This is not a persistence or
 cross-process serialization format.
+
+`Connection.discard_transfer_payload(payload: string): integer` consumes a known
+unadopted payload by closing its endpoint without an active Runtime. It returns
+the native close status. The close attempt consumes ownership even when the
+status reports an error; never adopt or discard that payload afterward.
 
 ## Reading
 

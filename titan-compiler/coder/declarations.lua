@@ -671,6 +671,9 @@ function codeboxparam(ctx, param)
 end
 
 function coder._foreign_function_is_inline(node)
+    -- Public callbacks need one provider-owned address, including when their
+    -- implementation could otherwise fit in an explicit source-import header.
+    if not node.islocal then return false end
     if node._coverage_foreign_outline then return false end
     -- Private nominal layout declarations belong to the producer C unit.
     -- Its source header exports only the native callback prototype.
@@ -735,8 +738,12 @@ function coder._foreign_source_member_reference(var)
     if not decl then return nil end
     if decl._tag == "Ast.TopLevelForeignFunc" then
         return { source = true, module = decl._foreign_module, name = decl.name }
-    elseif decl._tag == "Type.ModuleMember" and decl._foreign_source then
-        return { source = true, module = decl.modname, name = decl.name }
+    elseif decl._tag == "Type.ModuleMember"
+            and decl.type._tag == "Type.CFunction" then
+        return {
+            source = true, module = decl.modname, name = decl.name,
+            public = not decl.islocal, type = decl.type,
+        }
     end
 end
 
@@ -747,7 +754,7 @@ function coder._foreign_raw_var(ctx, node)
         end
         local reference = coder._foreign_source_member_reference(node)
         if reference then
-            return "", coder._foreign_reference_name(reference)
+            return "", coder._foreign_reference_name(reference, ctx)
         end
         error("foreign variable lacks a C name: " .. tostring(node.name))
     elseif node._tag == "Ast.VarDot" then
@@ -757,7 +764,7 @@ function coder._foreign_raw_var(ctx, node)
         end
         local reference = coder._foreign_source_member_reference(node)
         if reference then
-            return "", coder._foreign_reference_name(reference)
+            return "", coder._foreign_reference_name(reference, ctx)
         end
         if node._decl and node._decl._tag == "Type.CPseudoSize" then
             local op = node._decl.name == "sizeof" and "sizeof" or "_Alignof"
@@ -789,7 +796,7 @@ function coder._foreign_raw_call(ctx, node)
     local callee
     if node._direct_foreign_reference then
         signature = node.exp._type
-        callee = coder._foreign_reference_name(node._direct_foreign_reference)
+        callee = coder._foreign_reference_name(node._direct_foreign_reference, ctx)
     elseif node._c_pointer_call then
         signature = node._c_pointer_call
         callee_stats, callee = coder._foreign_freeze(
@@ -856,7 +863,7 @@ function coder._foreign_raw_exp(ctx, node)
     elseif tag == "Ast.ExpVar" then
         if node._foreign_function_reference then
             return "", coder._foreign_reference_name(
-                node._foreign_function_reference)
+                node._foreign_function_reference, ctx)
         end
         return coder._foreign_raw_var(ctx, node.var)
     elseif tag == "Ast.VarName" or tag == "Ast.VarDot"
@@ -1107,7 +1114,8 @@ function coder._code_foreign_function(tlcontext, node, inline)
     ctx._coverage_generated = not node._coverage_foreign_outline
     local signature = coder._foreign_function_signature(node)
     local body = coder._foreign_raw_block(ctx, node.block, false)
-    local storage = inline and "static inline" or "TITAN_SOURCE_LOCAL"
+    local storage = inline and "static inline"
+        or node.islocal and "TITAN_SOURCE_LOCAL" or ""
     return storage .. " " .. signature .. " {\n" .. body .. "\n}"
 end
 

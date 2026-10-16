@@ -274,6 +274,51 @@ function init_data_from_other_modules(tlcontext, includes, loadmods,
             function_sig(func.mangled, func.type, dynamic),
             function_sig("", func.type, true))
     end
+    -- Raw C functions have no implicit state argument. Bind their imported
+    -- addresses once per physical consumer image, using the same checked
+    -- canonical providers as ordinary Titan imports. Publication is atomic:
+    -- independent states may initialize shared code concurrently, but none
+    -- may redirect an address already visible to a raw callback.
+    for _, func in ipairs(coder._sorted_foreign_imports(tlcontext)) do
+        local pointer = types.CPointer(func.type, {})
+        table.insert(includes, "TITAN_SOURCE_LOCAL "
+            .. cdeclarator.render_declaration(pointer, func.binding)
+            .. " = NULL;")
+        local candidate
+        if static_deps[func.module] == true then
+            table.insert(includes, "extern "
+                .. cdeclarator.render_declaration(func.type, func.mangled)
+                .. ";")
+            candidate = func.mangled
+        else
+            local provider = (mprefixes[func.module]
+                or mangle_qn(func.module) .. "_") .. "provider"
+            candidate = "titan_cast_func("
+                .. cdeclarator.render_declaration(pointer, "")
+                .. ", titan_module_symbol(L, " .. provider .. ", "
+                .. c_string_literal(coder._linkage_symbol_name(func.mangled))
+                .. "))"
+        end
+        table.insert(loadglobals, render([[
+            {
+                $CANDIDATE_DECL = $CANDIDATE;
+                $EXPECTED_DECL = NULL;
+                if (!__atomic_compare_exchange_n(&$BINDING, &_expected,
+                        _candidate, 0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)
+                    && _expected != _candidate) {
+                    luaL_error(L, $ERROR);
+                }
+            }
+        ]], {
+            CANDIDATE_DECL = cdeclarator.render_declaration(pointer, "_candidate"),
+            EXPECTED_DECL = cdeclarator.render_declaration(pointer, "_expected"),
+            CANDIDATE = candidate,
+            BINDING = func.binding,
+            ERROR = c_string_literal("foreign function '" .. func.module
+                .. "." .. func.name
+                .. "' has a different native binding in this consumer image"),
+        }))
+    end
     for name, info in pairs(tlcontext.bound_luas) do
         local declaration = static_deps[info.module] == true
             and ("int " .. name .. "(lua_State *L)")
@@ -1158,6 +1203,7 @@ function coder.generate_ffi_header(modname, ast, source_header)
 end
 
 function coder.generate_foreign_header(modname, ast, tlcontext, header_paths)
+    tlcontext = tlcontext or { module = modname }
     local has_foreign = false
     for _, node in ipairs(ast) do
         if not node._ignore and node._tag == "Ast.TopLevelForeignFunc" then
@@ -1208,9 +1254,19 @@ function coder.generate_foreign_header(modname, ast, tlcontext, header_paths)
                     coder._code_foreign_function(tlcontext, node, true)
             else
                 declarations[#declarations + 1] =
-                    "TITAN_SOURCE_LOCAL " .. signature .. ";"
+                    (node.islocal and "TITAN_SOURCE_LOCAL " or "extern ")
+                    .. signature .. ";"
             end
         end
+    end
+
+    -- A copied inline callback uses its declaring module's initialized slot,
+    -- never an uninitialized translation-unit-local copy. These hidden names
+    -- are source-private implementation details, absent from public metadata.
+    for _, func in ipairs(coder._sorted_foreign_imports(tlcontext)) do
+        declarations[#declarations + 1] = "extern TITAN_SOURCE_LOCAL "
+            .. cdeclarator.render_declaration(
+                types.CPointer(func.type, {}), func.binding) .. ";"
     end
 
     local prefix = table.concat({

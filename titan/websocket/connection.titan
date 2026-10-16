@@ -460,7 +460,7 @@ end
 --- Detach an idle open session and its unread transport bytes for manual handoff.
 -- @return Same-process payload that must be adopted exactly once.
 -- @usage standard-library-websocket.md#transferring-connections
-function Connection:to_transfer_payload(): (...: async.TransferValue)
+function Connection:to_transfer_payload(): string
   if self.terminal or self.closing or self.stream == nil then
     raise "cannot transfer a closed or closing WebSocket Connection"
   end
@@ -476,54 +476,31 @@ function Connection:to_transfer_payload(): (...: async.TransferValue)
     if wrapper.wrapped is http.UpgradedStream then stream = wrapper.wrapped end
   end
   if stream == nil then raise "invalid WebSocket upgraded stream owner" end
-  local payload: {async.TransferValue} = {
-    async.TransferValue.is_nil(), async.TransferValue.is_boolean(self.client),
-    async.TransferValue.from_value(self.protocol),
-    async.TransferValue.is_integer(self.limit),
-    async.TransferValue.is_string(string.sub(self.input, self.cursor)),
-  }
-  payload[1] = async.TransferValue.from_value(stream)
+  local input = string.sub(self.input, self.cursor)
+  local stream_payload = stream:to_transfer_payload()
   self.stream = nil
   self.input = ""
   self.cursor = 1
   self.terminal = true
   self.closing = true
-  return ...payload
+  local exported = false
+  defer if not exported then http.UpgradedStream.discard_transfer_payload(stream_payload) end
+  local payload = protobuf.serialize_fields(connection_transfer_fields,
+    stream_payload, self.client, self.protocol, self.limit, input)
+  exported = true
+  return payload
 end
 
 --- Adopt a detached WebSocket session on the destination's active Runtime.
--- @param ... Exact payload returned by to_transfer_payload; ownership is manual.
+-- @param payload Exact bytes returned by to_transfer_payload; ownership is manual.
 -- @return Fresh session retaining role, subprotocol, read limit and unread bytes.
 -- @usage standard-library-websocket.md#transferring-connections
-function Connection.from_transfer_payload(...: async.TransferValue): Connection
-  if #... ~= 5 then raise "invalid WebSocket Connection transfer payload" end
-  case ...[1]
-  when is_record_payload(name, _payload) then
-    if name ~= "titan.http.UpgradedStream" then
-      raise "invalid WebSocket transport transfer payload"
-    end
-  else raise "invalid WebSocket transport transfer payload" end
-  local client = false
-  case ...[2]
-  when is_boolean(item) then client = item
-  else raise "invalid WebSocket role transfer payload" end
-  local protocol: string? = nil
-  case ...[3]
-  when is_nil() then
-  when is_string(item) then protocol = item
-  else raise "invalid WebSocket subprotocol transfer payload" end
-  local limit = 0
-  case ...[4]
-  when is_integer(item) then limit = item
-  else raise "invalid WebSocket limit transfer payload" end
+function Connection.from_transfer_payload(payload: string): Connection
+  local stream_payload: string, client: boolean, protocol: string?, limit: integer, input: string =
+    protobuf.deserialize_fields(payload, connection_transfer_fields)
   if limit <= 0 then raise "invalid WebSocket limit transfer payload" end
-  local input = ""
-  case ...[5]
-  when is_string(item) then input = item
-  else raise "invalid WebSocket input transfer payload" end
   local connection = new_connection(nil, client, protocol, limit)
   connection.input = input
-  local stream: http.UpgradedStream = ...[1]:to_value()
-  connection.stream = stream
+  connection.stream = http.UpgradedStream.from_transfer_payload(stream_payload)
   return connection
 end

@@ -41,31 +41,37 @@ end
 -- These functions never recover a Lua/Titan owner. A sender owns its copied
 -- node until insertion succeeds; a receiver detaches nodes before entering its
 -- collector or subscription. Native wakeups may coalesce without losing data.
-foreign function receiver_free_messages(message: *titan_async_message)
+local foreign function receiver_free_messages(message: *titan_async_message)
   while message ~= nil do
     local next = message.next
-    ffi.titan_transfer_free(message.graph)
     ffi.free(message)
     message = next
   end
 end
 
-foreign function receiver_copy_message(input: *titan_async_message): *titan_async_message
+local foreign function receiver_copy_message(input: *titan_async_message): *titan_async_message
   local length = 0 as foreign size_t
   local name_length = 0 as foreign size_t
+  local module_length = 0 as foreign size_t
   if input.kind == ffi.TITAN_ASYNC_MESSAGE_STRING then length = input.length end
   local nominal = 0 as foreign int
   if input.kind == ffi.TITAN_ASYNC_MESSAGE_RECORD then nominal = 1 end
   if input.kind == ffi.TITAN_ASYNC_MESSAGE_UNION then nominal = 1 end
+  if input.kind == ffi.TITAN_ASYNC_MESSAGE_CLOSURE then nominal = 1 end
+  if input.kind == ffi.TITAN_ASYNC_MESSAGE_RECORD_PAYLOAD then nominal = 1 end
   if nominal ~= 0 then
     length = input.length
     name_length = input.name_length
+    module_length = input.module_length
   end
   if length > ffi.SIZE_MAX - foreign titan_async_message.sizeof then return nil end
   if name_length > ffi.SIZE_MAX - foreign titan_async_message.sizeof - length then
     return nil
   end
-  local message = ffi.malloc(foreign titan_async_message.sizeof + length + name_length)
+  if module_length > ffi.SIZE_MAX - foreign titan_async_message.sizeof - length - name_length then
+    return nil
+  end
+  local message = ffi.malloc(foreign titan_async_message.sizeof + length + name_length + module_length)
     as foreign *titan_async_message
   if message == nil then return nil end
   message[0] = input[0]
@@ -80,13 +86,17 @@ foreign function receiver_copy_message(input: *titan_async_message): *titan_asyn
     if name_length > 0 then
       ffi.memcpy(bytes + length, input.name, name_length)
     end
+    message.module = bytes + length + name_length
+    if module_length > 0 then
+      ffi.memcpy(bytes + length + name_length, input.module, module_length)
+    end
   end
   return message
 end
 
 -- Positive statuses are local admission failures (1 allocation, 2 closed);
 -- negative statuses are returned unchanged by the public native UV send entry.
-foreign function receiver_send_native(mailbox: *titan_async_mailbox,
+local foreign function receiver_send_native(mailbox: *titan_async_mailbox,
                                      input: *titan_async_message): int
   local message = receiver_copy_message(input)
   if message == nil then return 1 end
@@ -111,7 +121,7 @@ foreign function receiver_send_native(mailbox: *titan_async_mailbox,
   return status
 end
 
-foreign function receiver_take_messages(mailbox: *titan_async_mailbox): *titan_async_message
+local foreign function receiver_take_messages(mailbox: *titan_async_mailbox): *titan_async_message
   mailbox.lock(mailbox.mutex)
   local messages = mailbox.first
   mailbox.first = nil
@@ -120,7 +130,7 @@ foreign function receiver_take_messages(mailbox: *titan_async_mailbox): *titan_a
   return messages
 end
 
-foreign function receiver_disable_native(mailbox: *titan_async_mailbox)
+local foreign function receiver_disable_native(mailbox: *titan_async_mailbox)
   mailbox.lock(mailbox.mutex)
   mailbox.closed = 1
   local messages = mailbox.first
@@ -130,7 +140,7 @@ foreign function receiver_disable_native(mailbox: *titan_async_mailbox)
   receiver_free_messages(messages)
 end
 
-foreign function receiver_is_closed_native(mailbox: *titan_async_mailbox): int
+local foreign function receiver_is_closed_native(mailbox: *titan_async_mailbox): int
   mailbox.lock(mailbox.mutex)
   local closed = mailbox.closed
   mailbox.unlock(mailbox.mutex)
@@ -4133,23 +4143,20 @@ local function receiver_value(message: foreign *titan_async_message): TransferVa
   elseif message.kind == ffi.TITAN_ASYNC_MESSAGE_POINTER then
     return TransferValue.is_pointer(message.pointer)
   elseif message.kind == ffi.TITAN_ASYNC_MESSAGE_RECORD then
-    return TransferValue.is_record(receiver_copy_bytes(message.name, message.name_length),
+    return TransferValue.is_record(receiver_copy_bytes(message.module, message.module_length),
+      receiver_copy_bytes(message.name, message.name_length),
       receiver_copy_bytes(message.bytes, message.length))
   elseif message.kind == ffi.TITAN_ASYNC_MESSAGE_UNION then
-    return TransferValue.is_union(receiver_copy_bytes(message.name, message.name_length),
+    return TransferValue.is_union(receiver_copy_bytes(message.module, message.module_length),
+      receiver_copy_bytes(message.name, message.name_length),
       receiver_copy_bytes(message.bytes, message.length))
   elseif message.kind == ffi.TITAN_ASYNC_MESSAGE_CLOSURE then
-    local top = ffi.lua_gettop(L)
-    defer ffi.lua_settop(L, top)
-    ffi.titan_transfer_decode(L, message.graph)
-    local item: value = ffi.lua_totvalue(L, -1)
-    return TransferValue.is_closure(item)
+    return TransferValue.is_closure(receiver_copy_bytes(message.module, message.module_length),
+      message.entry, receiver_copy_bytes(message.bytes, message.length))
   elseif message.kind == ffi.TITAN_ASYNC_MESSAGE_RECORD_PAYLOAD then
-    local top = ffi.lua_gettop(L)
-    defer ffi.lua_settop(L, top)
-    ffi.titan_transfer_decode_policy(L, message.graph)
-    local item: value = ffi.lua_totvalue(L, -1)
-    return item
+    return TransferValue.is_record_payload(receiver_copy_bytes(message.module, message.module_length),
+      receiver_copy_bytes(message.name, message.name_length),
+      receiver_copy_bytes(message.bytes, message.length))
   end
   raise "invalid receiver message kind"
 end
@@ -4162,7 +4169,6 @@ local function Receiver:deliver()
     local item = receiver_value(message)
     if not self.publish(item) then return end
     messages = message.next
-    ffi.titan_transfer_free(message.graph)
     ffi.free(message)
   end
 end
@@ -4226,13 +4232,11 @@ end
 
 --- Copy one transfer value into a receiver's FIFO and notify its owning loop.
 -- @param handle Borrowed sender address whose Receiver remains retained.
--- @param data Copied scalar, string, nominal packet, closure graph, or custom record payload, or borrowed native address.
+-- @param data Flat copied packet or borrowed native address.
 -- @usage async-io.md#cross-state-receivers
 function send(handle: foreign *void, data: TransferValue)
   if not handle then raise "receiver handle must not be NULL" end
   local message = foreign titan_async_message.new()
-  message.graph = nil
-  defer ffi.titan_transfer_free(message.graph)
   case data
   when is_nil() then
     message.kind = ffi.TITAN_ASYNC_MESSAGE_NIL
@@ -4259,46 +4263,39 @@ function send(handle: foreign *void, data: TransferValue)
   when is_pointer(item) then
     message.kind = ffi.TITAN_ASYNC_MESSAGE_POINTER
     message.pointer = item
-  when is_record(name, data) then
+  when is_record(module, name, data) then
     message.kind = ffi.TITAN_ASYNC_MESSAGE_RECORD
+    message.module = module
+    message.module_length = #module
     message.name = name
     message.name_length = #name
     message.bytes = data
     message.length = #data
-  when is_union(name, data) then
+  when is_union(module, name, data) then
     message.kind = ffi.TITAN_ASYNC_MESSAGE_UNION
+    message.module = module
+    message.module_length = #module
     message.name = name
     message.name_length = #name
     message.bytes = data
     message.length = #data
-  when is_closure(item) then
-    local top = ffi.lua_gettop(L)
-    defer ffi.lua_settop(L, top)
-    if ffi.lua_checkstack(L, 1) == 0 then
-      raise "cannot reserve Lua stack for receiver closure"
-    end
-    ffi.lua_pushtvalue(L, item)
-    if ffi.titan_transfer_is_closure(L, -1) == 0 then
-      raise "cannot transfer a value that is not a Titan closure"
-    end
+  when is_closure(module, entry, data) then
     message.kind = ffi.TITAN_ASYNC_MESSAGE_CLOSURE
-    message.graph = ffi.titan_transfer_new()
-    if not message.graph then raise "cannot allocate receiver closure transfer" end
-    ffi.titan_transfer_encode(L, message.graph, -1)
-  when is_record_payload() then
-    local top = ffi.lua_gettop(L)
-    defer ffi.lua_settop(L, top)
-    if ffi.lua_checkstack(L, 1) == 0 then
-      raise "cannot reserve Lua stack for receiver record payload"
-    end
-    ffi.lua_pushtvalue(L, data)
+    message.module = module
+    message.module_length = #module
+    message.entry = entry
+    message.bytes = data
+    message.length = #data
+  when is_record_payload(module, name, payload) then
     message.kind = ffi.TITAN_ASYNC_MESSAGE_RECORD_PAYLOAD
-    message.graph = ffi.titan_transfer_new()
-    if not message.graph then raise "cannot allocate receiver record payload transfer" end
-    ffi.titan_transfer_encode_policy(L, message.graph, -1)
+    message.module = module
+    message.module_length = #module
+    message.name = name
+    message.name_length = #name
+    message.bytes = payload
+    message.length = #payload
   end
   local status = receiver_send_native(handle as foreign *titan_async_mailbox, message)
-  if status == 0 then message.graph = nil end
   if status == 1 then raise operation_error(uv.ENOMEM, "async.send") end
   if status == 2 then raise "receiver is closed" end
   check_status(status, "async.send")

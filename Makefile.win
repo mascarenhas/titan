@@ -357,7 +357,7 @@ titan-native-coverage: titan-native-coverage-build
 	+$(MAKE) -f Makefile.win titan-native-coverage-run
 
 .PHONY: rock-test test
-rock-test: export TITAN_ROCK_TEST_STDLIB_SPECS = spec/asan_generated_c_context_spec.lua spec/dense_array_runtime_spec.lua spec/transfer_runtime_spec.lua spec/libuv_build_spec.lua spec/lpeglabel_build_spec.lua spec/minicoro_spec.lua spec/rockspec_spec.lua spec/titan_install_spec.lua
+rock-test: export TITAN_ROCK_TEST_STDLIB_SPECS = spec/asan_generated_c_context_spec.lua spec/dense_array_runtime_spec.lua spec/libuv_build_spec.lua spec/lpeglabel_build_spec.lua spec/minicoro_spec.lua spec/rockspec_spec.lua spec/titan_install_spec.lua
 rock-test: export TITAN_ROCK_TEST_SUPERVISOR = $(TITAN_TEST_BUILD_DIR)/sdk/bin/windows-test-supervisor.exe
 rock-test: titan-stdlib-test
 	PREFIX=$(call quote,$(PREFIX)) TITAN_ROCK_TEST_INTERNAL=1 \

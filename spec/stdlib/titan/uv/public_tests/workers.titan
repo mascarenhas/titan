@@ -1,6 +1,6 @@
 -- These callbacks are deliberately C-only. The public work/thread APIs accept
 -- portable C pointers; no libuv header, layout, or Titan/Lua worker entry is used.
-foreign function increment_cell(argument: *void)
+local foreign function increment_cell(argument: *void)
   local cell = argument as foreign *int
   cell[0] = cell[0] + 1
 end

@@ -337,34 +337,32 @@ Its opaque `foreign *void` handle names native receiver storage, not a Titan
 record or public `uv.async_t`. The host sending a message never follows a remote
 GC pointer or enters the destination Lua state. Scalar tags/values and copied
 string bytes live in native messages until the destination loop converts them
-into its own `TransferValue`. Nominal packets copy both the name and wire bytes
-into one native allocation with independently checked lengths; neither string
+into its own `TransferValue`. Nominal packets copy the defining module, nominal
+name, and wire bytes into one native allocation with independently checked lengths; no string
 borrows the sending collector after `send` returns. The receiving loop copies
 them into its own collector and preserves the record/union variant without
 decoding. The one-slot string-copy transaction and
 native-packet lifetime are recorded in the [trusted Lua API ledger](ffi-lua-api-followup.md#trusted-standard-library-discipline).
 Borrowed pointer variants remain raw addresses.
 
-Closure and custom record payload packets own a `TitanTransferGraph` encoded
-entirely in the sending state. Sender cleanup retains graph ownership until native queue admission
-succeeds; allocation failure, closed admission, and native wake failure leave
-it with the sender. The queue owns accepted graphs and frees them after
-destination reconstruction, or when close/failure discards pending nodes.
-The receiving loop decodes using its own module instances and collector.
-Closure packets publish `TransferValue.is_closure` containing the reconstructed
-callable.
-The native graph carries copied captures, immutable code capabilities, and
-box ordinals. No origin closure, capture box, or other origin GC pointer is
-published to the queue.
+Closure and custom record packets use the same flat string-copy boundary.
+`from_value` snapshots closure captures and runs custom encoding hooks before
+queue admission. A closure packet copies its module name and snapshot bytes,
+and carries an immutable entry address. No origin closure, capture box, or
+other origin GC pointer enters the queue. Accepted messages own only their
+copied strings and native FIFO allocation; delivery or discard frees that
+storage without traversing payloads or closing resources named inside them.
 
-Custom record packets use the policy encoder/decoder and arrive as
-`TransferValue.is_record_payload(name, payload)`, preserving each nested policy
-and initializing its defining module through the existing native capability.
-The consumer explicitly calls `:to_value()` to invoke the static reconstruction
-hook. A closure capturing a custom record instead reconstructs that record as
-part of its semantic capture graph. A captured `TransferValue` retains its
-union wrapper. Active custom-record and payload-Array cycles are rejected,
-while acyclic repeated values retain copy semantics.
+The receiving loop reconstructs `TransferValue.is_closure(module, entry, data)`
+or `TransferValue.is_record_payload(module, name, data)` without decoding.
+The consumer explicitly calls `:to_value()` to create a destination closure or
+invoke the static reconstruction hook. Closure reconstruction resolves the
+entry against the destination module's manifest before decoding its captures.
+Every restored capture receives a fresh mutable cell. A captured
+`TransferValue` retains its union wrapper. Active closure and custom-record
+conversion cycles are rejected; repeated acyclic values retain copy semantics.
+See the [transfer implementation](transfer-library.md) for the anonymous
+protobuf snapshot and canonical preload lookup.
 
 `TransferValue.from_value` validates the pair of public hook signatures through
 ordinary reflection and permits private record fields when that pair is valid.
@@ -417,7 +415,7 @@ hosting state, raise into its frames, or resume its Tasks. The
 [independent Lua-state adapter](lua-library.md#independent-state-ownership)
 exclusively owns a separate state and may execute Lua and independently
 initialized Titan modules in it. That state's collector never receives a host
-GC object; copied values, native closure graphs, and borrowed addresses cross
+GC object; copied values, opaque snapshot bytes, and borrowed addresses cross
 the boundary. Synchronization of shared native bytes remains the caller's
 job. The libuv worker pool is shared with other native work and async adds no
 new queue or thread policy. Ordinary cancellation never detaches the accepted

@@ -56,16 +56,15 @@ function test_connection_transfer_rejects_statements_and_cursors_before_detach(
 end
 
 function test_connection_transfer_rejects_invalid_payloads(_: test.Context)
-  expect_wrapper_error(function () sqlite3.Connection.from_transfer_payload() end)
+  expect_wrapper_error(function () sqlite3.Connection.from_transfer_payload("") end)
   expect_wrapper_error(function ()
-    sqlite3.Connection.from_transfer_payload(async.TransferValue.is_nil())
+    sqlite3.Connection.from_transfer_payload(string.char(8, 0))
   end)
   expect_wrapper_error(function ()
-    sqlite3.Connection.from_transfer_payload(async.TransferValue.is_pointer(nil))
+    sqlite3.Connection.from_transfer_payload(string.char(9) .. string.rep("\0", 8))
   end)
   expect_wrapper_error(function ()
-    sqlite3.Connection.from_transfer_payload(async.TransferValue.is_pointer(nil),
-                                             async.TransferValue.is_nil())
+    sqlite3.Connection.from_transfer_payload(string.char(9) .. string.rep("\0", 7))
   end)
 end
 
@@ -137,7 +136,7 @@ function test_connection_transfer_crosses_states_and_survives_source_shutdown(
         error('SQLite transfer worker did not succeed')
       end
       return result
-    ]], "=sqlite-connection-transfer", async.TransferValue.is_closure(operation))
+    ]], "=sqlite-connection-transfer", async.TransferValue.from_value(operation))
     source:close()
     state:close()
     transfer_gc.collect()

@@ -5,6 +5,8 @@
 local async = import "titan.async"
 local uv = import "titan.uv"
 local string = import "titan.string"
+local protobuf = import "titan.protobuf"
+local reflect = import "titan.reflect"
 foreign import "fs_platform.h"
 
 local READ_CHUNK_BYTES = 64 * 1024
@@ -16,6 +18,10 @@ record File
   local excess: string
   local pending_operations: integer
 end
+
+local const file_transfer_fields: const {reflect.Type} = {
+  reflect.Type.is_integer(), reflect.Type.is_string(),
+}
 
 --- Filesystem metadata with an opaque device/inode identity pair.
 -- @field size File size in bytes.
@@ -434,38 +440,26 @@ end
 --- Detach an idle descriptor and retained bytes into a manually owned payload.
 -- @return Same-process descriptor and bytes, to be adopted exactly once.
 -- @usage standard-library-fs.md#transferring-files
-function File:to_transfer_payload(): (...: async.TransferValue)
+function File:to_transfer_payload(): string
   self:require_open()
   if self.pending_operations ~= 0 then
     raise "cannot transfer a File with a pending operation"
   end
-  local payload: {async.TransferValue} = {
-    async.TransferValue.is_integer(self.handle),
-    async.TransferValue.is_string(self.excess),
-  }
+  local payload = protobuf.serialize_fields(file_transfer_fields, self.handle, self.excess)
   self.handle = -1
   self.excess = ""
-  return ...payload
+  return payload
 end
 
 --- Adopt a manually transferred descriptor and its retained read bytes.
--- @param ... Exactly one descriptor integer and one byte string.
+-- @param payload Exact opaque byte payload returned by to_transfer_payload.
 -- @return File owning the descriptor; the caller must close it.
 -- @usage standard-library-fs.md#transferring-files
-function File.from_transfer_payload(...: async.TransferValue): File
-  if #... ~= 2 then raise "invalid File transfer payload" end
-  local descriptor = -1
-  case ...[1]
-  when is_integer(number) then descriptor = number
-  else raise "invalid File transfer descriptor"
-  end
+function File.from_transfer_payload(payload: string): File
+  local descriptor: integer, excess: string =
+    protobuf.deserialize_fields(payload, file_transfer_fields)
   if descriptor < 0 or descriptor > 2147483647 then
     raise "invalid File transfer descriptor"
-  end
-  local excess = ""
-  case ...[2]
-  when is_string(bytes) then excess = bytes
-  else raise "invalid File transfer buffer"
   end
   return File(descriptor, excess, 0)
 end

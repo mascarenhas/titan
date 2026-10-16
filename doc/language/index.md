@@ -104,11 +104,11 @@ use the chapters below for the normative language reference.
 | [Native source coverage](native-coverage.md) | Compile-and-run executable-line coverage, automatic source selection, separate coverage objects, and optional LCOV/HTML/Cobertura reports. |
 | [Reflection standard library](standard-library-reflect.md) | Runtime inspection of 19 value kinds, public nominal descriptors, explicit type resolution, erased generic schemas, callable metadata, checked field access, lossless native projections, and default construction. |
 | [JSON standard library](standard-library-json.md) | JSON encoding and typed reflection-directed decoding, record and union mappings, optional null preservation, Unicode/numbers, structured diagnostics, and resource limits. |
-| [Protocol Buffers standard library](standard-library-protobuf.md) | Public record/union graph serialization, reflection-directed reconstruction, native C fields, proto3 schemas, and independent-state transfer payloads. |
+| [Protocol Buffers standard library](standard-library-protobuf.md) | Public record/union serialization, anonymous messages with explicit field descriptors, native C fields, proto3 schemas, and independent-state transfer payloads. |
 | [Transfer policies](standard-library-transfer.md) | State-independent copy/borrow policies, custom resource handoff, and destination Runtime ownership. |
 | [SQLite standard library](standard-library-sqlite3.md) | Embedded SQLite with asynchronous native work, prepared statements, owned rows and cursors, reflection bindings and mapping, explicit transactions, and cancellation-safe cleanup. |
 | [The C FFI](ffi.md) | `foreign import`: binding C headers, supported types, calling C functions, ownership, allocation, and limitations. |
-| [Foreign functions](foreign-functions.md) | Source-defined exact C-ABI entry points, the restricted raw-C body, pointer types, explicit source collaboration, generated companions, sequencing, and callback use. |
+| [Foreign functions](foreign-functions.md) | Public exact C-ABI exports through regular imports, runtime provider selection and stable image bindings, local source callbacks, restricted raw-C bodies, pointer identity, generated companions, and sequencing. |
 | [C FFI declarations and expressions](c-ffi-expressions.md) | Named C tags, compiled-probe caching and manual clearing, host-validated pointer conversions, target-directed automatic/owned allocation (including flexible tails), typed object-macro values, macro-projected fields, and target-correct C operators. |
 | [Grammar](grammar.md) | The complete lexical and syntactic grammar. |
 

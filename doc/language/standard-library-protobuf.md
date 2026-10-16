@@ -31,6 +31,8 @@ serialize(candidate: value): string
 deserialize(bytes: string, descriptor: reflect.Type): value
 schema(descriptor: reflect.Type): string
 deserialize_nominal(bytes: string, name: string, is_union: boolean): value
+serialize_fields(fields: const {reflect.Type}, ...: value): string
+deserialize_fields(bytes: string, fields: const {reflect.Type}): (...: value)
 ```
 
 The root must be a public Titan record or union. `deserialize` and `schema`
@@ -42,6 +44,45 @@ argument conversion entry. Unknown names raise; lookup does not load modules.
 The serialized result is a binary string. Names, filenames, and schemas are
 ordinary strings too, but wire bytes need not be text and may contain NULs.
 Errors are strings identifying the rejected type, value, or wire condition.
+
+## Anonymous messages
+
+`serialize_fields` and `deserialize_fields` use an explicit ordered Array of
+field types instead of a nominal root. Keep the same descriptor beside both
+operations; the packet carries values, not the descriptor. This is useful for
+custom transfer hooks whose byte payload is an implementation detail:
+
+```titan
+local protobuf = import "protobuf"
+local reflect = import "reflect"
+
+local const payload_fields: const {reflect.Type} = {
+  reflect.Type.is_integer(),
+  reflect.Type.is_string(),
+}
+
+function encode_payload(handle: integer, buffered: string): string
+  return protobuf.serialize_fields(payload_fields, handle, buffered)
+end
+
+function decode_payload(bytes: string): (integer, string)
+  return protobuf.deserialize_fields(bytes, payload_fields)
+end
+```
+
+Encoding requires exactly one argument per declared field, including explicit
+nil arguments. Decoding returns exactly that many values, preserving interior
+and trailing nil positions. An empty descriptor encodes an empty message and
+decodes to no values. Field numbers follow descriptor order and use the same
+reserved-number skip, presence, merge, wire-validation, nesting, and size rules
+as nominal messages. The same fields in a record produce the same wire bytes.
+
+The caller selects field values explicitly; this path does not inspect or
+construct a record. Nested records and unions still require public declarations
+and public members. Pointer fields use
+`reflect.Type.is_foreign_pointer(reflect.Type.is_foreign_void(), {})` and retain
+the same borrowed-address semantics as nominal pointer fields. No extra public
+record type is needed to define an anonymous root.
 
 ## Eligible values
 
@@ -134,19 +175,21 @@ the ordinary C FFI precondition.
 
 ## Independent states
 
-`async.TransferValue.is_record(name, bytes)` and `is_union(name, bytes)` carry
-the root type name and wire payload. Independent-state calls automatically
+`async.TransferValue.is_record(module, name, bytes)` and
+`is_union(module, name, bytes)` carry the defining module, root type name, and
+wire payload. Independent-state calls automatically
 serialize eligible returned records and unions; an explicitly returned
 `TransferValue` takes precedence over this classification. Receiver messages
 copy both strings into their native FIFO node.
 
 Records with the [custom transfer-hook pair](async-io.md#custom-record-transfer)
-use an `is_record_payload` carrier instead during automatic transfer. Those
-hooks are an async transfer protocol; calling `protobuf.serialize` directly
+use an `is_record_payload(module, name, bytes)` carrier instead during automatic
+transfer. Hooks may use an anonymous-message descriptor to encode native
+tokens and copied state. Calling `protobuf.serialize` directly
 continues to apply the structural public-data rules in this chapter.
 
-Before passing a serialized nominal as a `Lua:run` or `run_async` argument,
-initialize its defining module in that state. Argument decoding happens before
-the submitted chunk runs, so requiring the module inside that same chunk is
-too late. See [independent Lua states](standard-library-lua.md) and
-[transfer values](async-io.md#transfer-values) for ownership and bootstrap rules.
+`TransferValue:to_value()` first checks the destination nominal registry. On a
+miss it calls the recorded module's native preload loader and retries lookup.
+The standalone `protobuf.deserialize_nominal` helper only looks up an already
+initialized type. See [independent Lua states](standard-library-lua.md) and
+[transfer values](async-io.md#transfer-values) for ownership and preload rules.

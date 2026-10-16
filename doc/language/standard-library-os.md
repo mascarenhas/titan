@@ -509,15 +509,18 @@ described above.
 
 ### Transferring process streams
 
-`InputStream` and `OutputStream` implement `to_transfer_payload` and
-`from_transfer_payload` for the custom
+`InputStream` and `OutputStream` implement `to_transfer_payload(): string` and
+`from_transfer_payload(payload: string)` for the custom
 [`TransferValue`](async-io.md#transfer-values) protocol. An idle captured pipe
 can move to another state's active async Runtime. Encoding detaches the source
 stream immediately; the receiving wrapper owns a fresh UV handle on its own
 loop. Subsequent source input reads return nil, source output writes fail as
 closed, and closing the source wrapper cannot close the destination pipe.
 Handoff hooks are synchronous and require an active, nonclosing Runtime;
-they can run between Tasks or from callbacks without a current Task.
+they can run between Tasks or from callbacks without a current Task. Each
+record uses its private protobuf field schema to encode copied state and its
+known UV child payload. If outer serialization fails after native detachment,
+the hook closes the detached endpoint and leaves the source facade detached.
 
 Input handoff preserves the facade's excess bytes, queued binary chunks, and
 EOF or error outcome. A stream whose native pipe has already ended can still

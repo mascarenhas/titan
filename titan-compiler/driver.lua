@@ -3046,7 +3046,8 @@ validate_interface_type = function(typ, context, seen)
         end
         return true
     elseif tag == "Type.CFunction" then
-        if not context or context.kind ~= "c-pointee"
+        if not context or (context.kind ~= "c-pointee"
+                           and context.kind ~= "module-member")
            or dense_plain_list_length(typ.params) == nil
            or type(typ.ret) ~= "table"
            or typ.vararg ~= false or typ.abi ~= nil then
@@ -3369,6 +3370,7 @@ function driver.validate_module_interface(modtype, modname)
             member._tag ~= "Type.ModuleVariable") or
            member.modname ~= modname or
            not valid_source_identifier(member.name) or member.islocal
+           or member._foreign_source ~= nil
            or type(member.type) ~= "table" or
            type(member.type._tag) ~= "string" then
             return nil, "module member " .. index .. " has an invalid schema"
@@ -3387,7 +3389,8 @@ function driver.validate_module_interface(modtype, modname)
             if signature._tag == "Type.FunctionScheme" then
                 signature = signature.signature
             end
-            if signature._tag == "Type.Function" then
+            if signature._tag == "Type.Function"
+                    or signature._tag == "Type.CFunction" then
                 if not validate_name_list(
                         member.paramnames, #signature.params) then
                     return nil, "module function '" .. member.name ..
@@ -3423,6 +3426,7 @@ function driver.validate_module_interface(modtype, modname)
         if member._tag == "Type.ModuleMember"
            and member.type._tag ~= "Type.Function"
            and member.type._tag ~= "Type.FunctionScheme"
+           and member.type._tag ~= "Type.CFunction"
            and member.type._tag ~= "Type.Record"
            and member.type._tag ~= "Type.Union" then
             return nil, "module member '" .. member.name ..
@@ -5945,14 +5949,12 @@ local RUNTIME_ARCHIVE_INPUTS = {
     "titan.h",
     "minicoro.c",
     "minicoro.h",
-    "transfer.c",
     "transfer.h",
     "titan/ffi.h",
 }
 local RUNTIME_ARCHIVE_MEMBERS = {
     "titan.o",
     "minicoro.o",
-    "transfer.o",
 }
 
 local function is_archive_symbol_index(member)
@@ -7239,7 +7241,7 @@ end
 -- These are actual producer definitions. All post-init native/data lookup
 -- uses the already generated canonical callback; collision inventories also
 -- contain hidden and source-only names and are not PE export inventories.
-function driver.windows_provider_exports(module_names)
+function driver.windows_provider_exports(module_names, interfaces, library_name)
     local names, seen = {}, {}
     for _, modname in ipairs(module_names) do
         local mangled = driver.mangle_module_name(modname)
@@ -7250,9 +7252,17 @@ function driver.windows_provider_exports(module_names)
             seen[name], names[#names + 1] = true, name
         end
         names[#names + 1] = "luaopen_" .. mangled
+        local interface = interfaces and interfaces[modname]
+        for _, symbol in ipairs(interface and
+                coder.foreign_external_symbols(modname, interface) or {}) do
+            assert(not seen[symbol], "duplicate Windows module export " .. symbol)
+            seen[symbol], names[#names + 1] = true, symbol
+        end
     end
     table.sort(names, util.bytewise_less)
-    return "EXPORTS\n    " .. table.concat(names, "\n    ") .. "\n", names
+    local library = library_name and
+        ("LIBRARY " .. string.format("%q", path.basename(library_name)) .. "\n") or ""
+    return library .. "EXPORTS\n    " .. table.concat(names, "\n    ") .. "\n", names
 end
 
 function driver.windows_launcher_manifest()
@@ -8422,6 +8432,28 @@ function driver.compile_archive_validation_image(
         module_names)
 end
 
+-- PE exports need the public raw declarations even when a fresh publication
+-- process has only compile-only objects and their existing source metadata.
+local function windows_link_interfaces(libnames, extra_objects, ordered_payload)
+    local objects = { table.unpack(libnames or {}) }
+    if ordered_payload then
+        for _, input in ipairs(ordered_payload) do
+            if input.object then
+                objects[#objects + 1] = assert(input.link_path or input.path)
+            end
+        end
+    else
+        append_argv(objects, extra_objects or {})
+    end
+    local interfaces = {}
+    for _, object in ipairs(objects) do
+        local bytes = util.get_file_contents(object)
+        local entry = bytes and objectmetadata.read(bytes, object)
+        if entry then interfaces[entry.type.name] = entry.type end
+    end
+    return interfaces
+end
+
 function driver.compile_library_output(soname, libnames, link, verbose,
                                        extra_objects, static_archives,
                                        ordered_payload, install_name,
@@ -8461,7 +8493,10 @@ function driver.compile_library_output(soname, libnames, link, verbose,
     append_argv(args, { "-o", soname })
     local export_file
     if platform.windows then
-        local exports = driver.windows_provider_exports(module_names)
+        local interfaces = windows_link_interfaces(
+            libnames, extra_objects, ordered_payload)
+        local exports = driver.windows_provider_exports(
+            module_names, interfaces, install_name or soname)
         export_file = soname .. ".def"
         local wrote, write_error = util.set_file_contents(export_file, exports)
         if not wrote then return nil, write_error end

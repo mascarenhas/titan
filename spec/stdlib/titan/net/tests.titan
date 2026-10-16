@@ -620,7 +620,7 @@ function test_net_transfer_moves_fresh_connection_across_states(context: test.Co
         error('TCP transfer worker did not succeed')
       end
       return result
-    ]], "=net-connection-transfer", async.TransferValue.is_closure(operation))
+    ]], "=net-connection-transfer", async.TransferValue.from_value(operation))
     state:close()
     gc.collect()
     gc.collect()
@@ -727,9 +727,9 @@ function test_net_transfer_rejected_delivery_can_be_recovered(context: test.Cont
 end
 
 function test_net_transfer_rejects_malformed_payloads(_context: test.Context)
-  common.assert_raises(function () net.Connection.from_transfer_payload() end)
+  common.assert_raises(function () net.Connection.from_transfer_payload("") end)
   common.assert_raises(function ()
-    net.Connection.from_transfer_payload(async.TransferValue.is_nil())
+    net.Connection.from_transfer_payload("\255")
   end)
 end
 

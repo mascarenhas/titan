@@ -29,8 +29,8 @@ function File:write(data: string): integer
 function File:flush()
 function File:close()
 function File:is_closed(): boolean
-function File:to_transfer_payload(): (...: async.TransferValue)
-function File.from_transfer_payload(...: async.TransferValue): File
+function File:to_transfer_payload(): string
+function File.from_transfer_payload(payload: string): File
 
 function stat(path: string): Stat?
 function lstat(path: string): Stat?
@@ -181,10 +181,11 @@ the operating system may already have reused that descriptor number.
 ## Transferring files
 
 `File:to_transfer_payload()` moves an open, idle File into a same-process
-transfer payload containing its descriptor and copied delimiter-read remainder.
+opaque protobuf byte string containing its descriptor and copied delimiter-read
+remainder. Serialization finishes before the source relinquishes ownership.
 It rejects a pending `read`, `read_until`, `write`, `flush`, or `close` before
 detaching anything. Successful detachment makes the source behave like a closed
-File. `File.from_transfer_payload(...)` adopts that descriptor without reopening
+File. `File.from_transfer_payload(payload)` adopts that descriptor without reopening
 the path, preserving its position and mode. The two hooks themselves do not
 wait or require a running Task; subsequent file I/O retains its usual Task
 requirement.

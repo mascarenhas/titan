@@ -72,12 +72,10 @@ function test_exit_rejects_native_adoption_during_cleanup_and_preserves_payload(
   test.assert(status == 0)
   defer if read_file >= 0 then close_exit_transfer_file(read_file) end
   defer if write_file >= 0 then close_exit_transfer_file(write_file) end
-  local packet: async.TransferValue? = nil
+  local packet: string? = nil
   defer if packet ~= nil then
-    case packet
-    when is_integer(file) then close_exit_transfer_file(file)
-    else raise "exit transfer fixture lost its pipe descriptor"
-    end
+    test.assert(uv.pipe_t.discard_transfer_payload(packet) == 0,
+                "exit transfer fixture could not dispose its descriptor")
   end
   local rejected, cleanup_completed, closing_flag_preserved = false, false, false
   local task = async.run<|nil, value|>(function (): nil

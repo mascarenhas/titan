@@ -74,26 +74,63 @@ local record ExchangeSnapshot
   rejected: boolean
 end
 
-local function append_handoff(items: {async.TransferValue}, item: value)
-  items[#items + 1] = async.TransferValue.from_value(item)
-end
-
-local function append_handoff_headers(items: {async.TransferValue}, source: Headers)
-  local entries = source:all()
-  append_handoff(items, #entries)
-  for index = 1, #entries do
-    append_handoff(items, entries[index].name)
-    append_handoff(items, entries[index].contents)
-  end
-end
-
-local function append_handoff_strings(items: {async.TransferValue}, source: {string})
-  append_handoff(items, #source)
-  for index = 1, #source do append_handoff(items, source[index]) end
-end
+local const exchange_transfer_fields: const {reflect.Type} = {
+  reflect.Type.is_string(), -- native_bytes
+  reflect.Type.is_boolean(), -- span_active
+  reflect.Type.is_boolean(), -- parser_response_to_head
+  reflect.Type.is_boolean(), -- parser_allow_upgrade
+  reflect.Type.is_boolean(), -- parser_upgrade
+  reflect.Type.is_integer(), -- parser_header_limit
+  reflect.Type.is_integer(), -- parser_header_bytes
+  reflect.Type.is_integer(), -- parser_last_error
+  reflect.Type.is_string(), -- parser_input_excess
+  reflect.Type.is_string(), -- parser_body_excess
+  reflect.Type.is_array(reflect.ArrayTypeConstness.is_mutable(), reflect.Type.is_string()), -- parser_body_chunks
+  reflect.Type.is_integer(), -- parser_body_index
+  reflect.Type.is_integer(), -- parser_body_consumed
+  reflect.Type.is_array(reflect.ArrayTypeConstness.is_mutable(), reflect.Type.is_named(reflect.NamedType("titan.http.Header"))), -- parser_parsed_headers
+  reflect.Type.is_string(), -- parser_target_text
+  reflect.Type.is_string(), -- parser_reason_text
+  reflect.Type.is_string(), -- parser_header_name_text
+  reflect.Type.is_string(), -- parser_header_contents_text
+  reflect.Type.is_string(), -- parser_method_text
+  reflect.Type.is_integer(), -- parser_status_number
+  reflect.Type.is_integer(), -- parser_major
+  reflect.Type.is_integer(), -- parser_minor
+  reflect.Type.is_boolean(), -- parser_keep_alive
+  reflect.Type.is_boolean(), -- parser_headers_complete
+  reflect.Type.is_boolean(), -- parser_message_complete
+  reflect.Type.is_boolean(), -- parser_transport_eof
+  reflect.Type.is_boolean(), -- parser_input_seen
+  reflect.Type.is_boolean(), -- parser_input_received
+  reflect.Type.is_boolean(), -- parser_paused
+  reflect.Type.is_string(), -- request_method
+  reflect.Type.is_string(), -- request_target
+  reflect.Type.is_named(reflect.NamedType("titan.url.Url")), -- request_url
+  reflect.Type.is_string(), -- request_version
+  reflect.Type.is_array(reflect.ArrayTypeConstness.is_mutable(), reflect.Type.is_named(reflect.NamedType("titan.http.Header"))), -- request_headers
+  reflect.Type.is_boolean(), -- request_headers_shared
+  reflect.Type.is_boolean(), -- request_ended
+  reflect.Type.is_string(), -- response_request_method
+  reflect.Type.is_boolean(), -- response_request_keep_alive
+  reflect.Type.is_array(reflect.ArrayTypeConstness.is_mutable(), reflect.Type.is_named(reflect.NamedType("titan.http.Header"))), -- response_response_headers
+  reflect.Type.is_integer(), -- response_status_number
+  reflect.Type.is_string(), -- response_reason_text
+  reflect.Type.is_boolean(), -- response_headers_sent
+  reflect.Type.is_boolean(), -- response_chunked
+  reflect.Type.is_boolean(), -- response_body_allowed
+  reflect.Type.is_option(reflect.Type.is_integer()), -- response_content_length
+  reflect.Type.is_integer(), -- response_written
+  reflect.Type.is_boolean(), -- response_keep_alive
+  reflect.Type.is_boolean(), -- response_closed
+  reflect.Type.is_boolean(), -- output_started
+  reflect.Type.is_boolean(), -- rejected
+  reflect.Type.is_integer(), -- transport kind
+  reflect.Type.is_string(), -- complete child transport payload
+}
 
 local record HandoffReader
-  items: {async.TransferValue}
+  items: {value}
   position: integer
 end
 
@@ -101,44 +138,18 @@ local function HandoffReader:next(): value
   if self.position > #self.items then raise "invalid HTTP Exchange transfer payload" end
   local item = self.items[self.position]
   self.position = self.position + 1
-  -- Metadata never adopts a resource. Only the final transport entry may own
-  -- native state, and it is interpreted after all metadata has been validated.
-  case item
-  when is_nil() then
-  when is_boolean() then
-  when is_integer() then
-  when is_string() then
-  when is_record(name) then
-    if name ~= "titan.url.Url" then raise "invalid HTTP Exchange metadata" end
-  else raise "invalid HTTP Exchange metadata"
-  end
-  return item:to_value()
-end
-
-local function HandoffReader:count(): integer
-  local count: integer = self:next()
-  if count < 0 or count > #self.items - self.position + 1 then
-    raise "invalid HTTP Exchange transfer count"
-  end
-  return count
+  return item
 end
 
 local function HandoffReader:headers(): Headers
+  local entries: {Header} = self:next()
   local result = headers(nil)
-  local count = self:count()
-  for index = 1, count do
-    local name: string = self:next()
-    local contents: string = self:next()
-    result:add(name, contents)
-  end
+  for index = 1, #entries do result:add(entries[index].name, entries[index].contents) end
   return result
 end
 
 local function HandoffReader:strings(): {string}
-  local result: {string} = {}
-  local count = self:count()
-  for index = 1, count do result[index] = self:next() end
-  return result
+  return self:next()
 end
 
 local function parser_handoff_bytes(parser: Parser): string
@@ -156,7 +167,7 @@ end
 
 --- Detach an idle request/response pair, preserving parser and framing progress.
 -- @usage standard-library-http.md#resource-handoff
-function Exchange:to_transfer_payload(): (...: async.TransferValue)
+function Exchange:to_transfer_payload(): string
   local request_value = self.request
   local response = self.response
   local state = response.exchange
@@ -170,73 +181,78 @@ function Exchange:to_transfer_payload(): (...: async.TransferValue)
     raise "HTTP Exchange parser is not transferable"
   end
   local native_bytes = parser_handoff_bytes(parser)
-  local items: {async.TransferValue} = {}
-  append_handoff(items, native_bytes)
-  append_handoff(items, parser.native._span_pos0 ~= nil)
-  append_handoff(items, parser.response_to_head)
-  append_handoff(items, parser.allow_upgrade)
-  append_handoff(items, parser.upgrade)
-  append_handoff(items, parser.header_limit)
-  append_handoff(items, parser.header_bytes)
-  append_handoff(items, parser.last_error)
-  append_handoff(items, parser.input_excess)
-  append_handoff(items, parser.body_excess)
-  append_handoff_strings(items, parser.body_chunks)
-  append_handoff(items, parser.body_index)
-  append_handoff(items, parser.body_consumed)
-  append_handoff_headers(items, parser.parsed_headers)
-  append_handoff(items, parser.target_text)
-  append_handoff(items, parser.reason_text)
-  append_handoff(items, parser.header_name_text)
-  append_handoff(items, parser.header_contents_text)
-  append_handoff(items, parser.method_text)
-  append_handoff(items, parser.status_number)
-  append_handoff(items, parser.major)
-  append_handoff(items, parser.minor)
-  append_handoff(items, parser.keep_alive)
-  append_handoff(items, parser.headers_complete)
-  append_handoff(items, parser.message_complete)
-  append_handoff(items, parser.transport_eof)
-  append_handoff(items, parser.input_seen)
-  append_handoff(items, parser.input_received)
-  append_handoff(items, parser.paused)
-  append_handoff(items, request_value.method)
-  append_handoff(items, request_value.target)
-  append_handoff(items, request_value.url)
-  append_handoff(items, request_value.version)
-  append_handoff_headers(items, request_value.headers)
-  append_handoff(items, request_value.headers == parser.parsed_headers)
-  append_handoff(items, request_value.ended)
-  append_handoff(items, response.request_method)
-  append_handoff(items, response.request_keep_alive)
-  append_handoff_headers(items, response.response_headers)
-  append_handoff(items, response.status_number)
-  append_handoff(items, response.reason_text)
-  append_handoff(items, response.headers_sent)
-  append_handoff(items, response.chunked)
-  append_handoff(items, response.body_allowed)
-  append_handoff(items, response.content_length)
-  append_handoff(items, response.written)
-  append_handoff(items, response.keep_alive)
-  append_handoff(items, response.closed)
-  append_handoff(items, state.output_started)
-  append_handoff(items, state.rejected)
-  -- Reserve the final slot before the native ownership boundary.
-  items[#items + 1] = async.TransferValue.is_nil()
-  local transport = transfer_transport(state.transport)
-  items[#items] = transport
+  local items: {value} = {
+    native_bytes,
+    parser.native._span_pos0 ~= nil,
+    parser.response_to_head,
+    parser.allow_upgrade,
+    parser.upgrade,
+    parser.header_limit,
+    parser.header_bytes,
+    parser.last_error,
+    parser.input_excess,
+    parser.body_excess,
+    parser.body_chunks,
+    parser.body_index,
+    parser.body_consumed,
+    parser.parsed_headers:all(),
+    parser.target_text,
+    parser.reason_text,
+    parser.header_name_text,
+    parser.header_contents_text,
+    parser.method_text,
+    parser.status_number,
+    parser.major,
+    parser.minor,
+    parser.keep_alive,
+    parser.headers_complete,
+    parser.message_complete,
+    parser.transport_eof,
+    parser.input_seen,
+    parser.input_received,
+    parser.paused,
+    request_value.method,
+    request_value.target,
+    request_value.url,
+    request_value.version,
+    request_value.headers:all(),
+    request_value.headers == parser.parsed_headers,
+    request_value.ended,
+    response.request_method,
+    response.request_keep_alive,
+    response.response_headers:all(),
+    response.status_number,
+    response.reason_text,
+    response.headers_sent,
+    response.chunked,
+    response.body_allowed,
+    response.content_length,
+    response.written,
+    response.keep_alive,
+    response.closed,
+    state.output_started,
+    state.rejected,
+    0, "",
+  }
+  local kind, transport_payload = transfer_transport(state.transport)
+  items[#items - 1] = kind
+  items[#items] = transport_payload
   state.transferred = true
   state.active = false
   request_value.ended = true
   response.closed = true
   close_parser(parser)
-  return ...items
+  local exported = false
+  defer if not exported then discard_transfer_transport(kind, transport_payload) end
+  local payload = protobuf.serialize_fields(exchange_transfer_fields, ...items)
+  exported = true
+  return payload
 end
 
 --- Adopt both endpoints on the destination Runtime with fresh parser callbacks.
 -- @usage standard-library-http.md#resource-handoff
-function Exchange.from_transfer_payload(...: async.TransferValue): Exchange
-  local reader = HandoffReader({...}, 1)
+function Exchange.from_transfer_payload(payload: string): Exchange
+  local reader = HandoffReader({protobuf.deserialize_fields(payload, exchange_transfer_fields)}, 1)
   local snapshot = ExchangeSnapshot {
     native_bytes = reader:next(),
     span_active = reader:next(),
@@ -289,7 +305,9 @@ function Exchange.from_transfer_payload(...: async.TransferValue): Exchange
     output_started = reader:next(),
     rejected = reader:next(),
   }
-  if reader.position ~= #reader.items or
+  local transport_kind: integer = reader:next()
+  local transport_payload: string = reader:next()
+  if reader.position ~= #reader.items + 1 or
       #snapshot.native_bytes ~= foreign llhttp_t.sizeof or
       snapshot.parser_body_index < 1 or
       snapshot.parser_body_index > #snapshot.parser_body_chunks + 1 or
@@ -299,7 +317,9 @@ function Exchange.from_transfer_payload(...: async.TransferValue): Exchange
        snapshot.parser_last_error ~= ffi.HPE_PAUSED) then
     raise "invalid HTTP Exchange transfer payload"
   end
-  local transport = restore_transfer_transport(reader.items[reader.position])
+  local transport = restore_transfer_transport(transport_kind, transport_payload)
+  local adopted = false
+  defer if not adopted then transport.abort() end
   local parser = new_request_parser(transport.connection)
   ffi.memcpy(parser.native, snapshot.native_bytes as foreign const *char,
     foreign llhttp_t.sizeof)
@@ -362,7 +382,9 @@ function Exchange.from_transfer_payload(...: async.TransferValue): Exchange
     closed = snapshot.response_closed,
   }
   if snapshot.request_headers_shared then request_value.headers = parser.parsed_headers end
-  return Exchange(request_value, response)
+  local result = Exchange(request_value, response)
+  adopted = true
+  return result
 end
 
 --- Finish the current response and retire this exchange's transport.

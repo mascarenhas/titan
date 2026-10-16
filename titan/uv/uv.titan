@@ -3,11 +3,20 @@
 -- @usage standard-library-uv.md
 
 local iteration = import "iteration"
+local protobuf = import "protobuf"
+local reflect = import "reflect"
 foreign import "uv.h"
 foreign import "lua.h"
 foreign import "titan/ffi.h"
 foreign import "callback.h"
 foreign type CallbackEntry = function (*lua_State, *Udata, *CClosure, *Udata, *Udata): void
+
+local const tcp_transfer_fields: const {reflect.Type} = {
+  reflect.Type.is_foreign_pointer(reflect.Type.is_foreign_void(), {}),
+}
+local const pipe_transfer_fields: const {reflect.Type} = {
+  reflect.Type.is_integer(),
+}
 
 local main_thread: foreign *lua_State = nil
 local driving: loop_t? = nil
@@ -238,7 +247,7 @@ catch
   ffi.uv_stop(loop.native)
 end
 
-foreign function timer_callback(native: *uv_timer_t)
+local foreign function timer_callback(native: *uv_timer_t)
   local base = native as foreign *uv_handle_t
   local owner = ffi.uv_handle_get_data(base) as foreign *Udata
   local loop = ffi.uv_loop_get_data(ffi.uv_handle_get_loop(base)) as foreign *Udata
@@ -253,7 +262,7 @@ foreign function timer_callback(native: *uv_timer_t)
   ffi.lua_settop(L, top)
 end
 
-foreign function timer_close_callback(base: *uv_handle_t)
+local foreign function timer_close_callback(base: *uv_handle_t)
   local owner = ffi.uv_handle_get_data(base) as foreign *Udata
   local loop = ffi.uv_loop_get_data(ffi.uv_handle_get_loop(base)) as foreign *Udata
   local L = ffi.titan_record_field(loop, "loop_t", "state")
@@ -619,7 +628,7 @@ catch
   ffi.uv_stop(loop.native)
 end
 
-foreign function fs_callback(native: *uv_fs_t)
+local foreign function fs_callback(native: *uv_fs_t)
   local owner = ffi.uv_req_get_data(native as foreign *uv_req_t) as foreign *Udata
   local loop = ffi.uv_loop_get_data(native.loop) as foreign *Udata
   local L = ffi.titan_record_field(loop, "loop_t", "state")
@@ -947,7 +956,7 @@ catch
   ffi.uv_stop(loop.native)
 end
 
-foreign function work_worker_callback(request: *uv_work_t)
+local foreign function work_worker_callback(request: *uv_work_t)
   -- Submission publishes immutable native callback data before acceptance.
   -- The loop thread cannot replace it until this worker has completed.
   local storage = request.data as foreign *titan_uv_work_data
@@ -955,7 +964,7 @@ foreign function work_worker_callback(request: *uv_work_t)
   worker(storage.arg)
 end
 
-foreign function work_after_callback(request: *uv_work_t, status: int)
+local foreign function work_after_callback(request: *uv_work_t, status: int)
   local storage = request.data as foreign *titan_uv_work_data
   local owner = storage.owner as foreign *Udata
   local loop = ffi.uv_loop_get_data(request.loop) as foreign *Udata
@@ -1787,7 +1796,7 @@ catch
 end
 
 foreign type WalkEntry = function (*lua_State, *Udata, *CClosure, *Udata, *uv_handle_t): void
-foreign function walk_callback(native: *uv_handle_t, arg: *void)
+local foreign function walk_callback(native: *uv_handle_t, arg: *void)
   local loop = arg as foreign *Udata
   local owner = ffi.uv_handle_get_data(native) as foreign *Udata
   local L = ffi.titan_record_field(loop, "loop_t", "state")
@@ -1875,7 +1884,7 @@ catch
   ffi.uv_stop(loop.native)
 end
 
-foreign function idle_callback(native: *uv_idle_t)
+local foreign function idle_callback(native: *uv_idle_t)
   local base = native as foreign *uv_handle_t
   local owner = ffi.uv_handle_get_data(base) as foreign *Udata
   local loop = ffi.uv_loop_get_data(ffi.uv_handle_get_loop(base)) as foreign *Udata
@@ -1889,7 +1898,7 @@ foreign function idle_callback(native: *uv_idle_t)
   ffi.lua_settop(L, top)
 end
 
-foreign function idle_close_callback(base: *uv_handle_t)
+local foreign function idle_close_callback(base: *uv_handle_t)
   local owner = ffi.uv_handle_get_data(base) as foreign *Udata
   local loop = ffi.uv_loop_get_data(ffi.uv_handle_get_loop(base)) as foreign *Udata
   local L = ffi.titan_record_field(loop, "loop_t", "state")
@@ -2003,7 +2012,7 @@ catch
   ffi.uv_stop(loop.native)
 end
 
-foreign function prepare_callback(native: *uv_prepare_t)
+local foreign function prepare_callback(native: *uv_prepare_t)
   local base = native as foreign *uv_handle_t
   local owner = ffi.uv_handle_get_data(base) as foreign *Udata
   local loop = ffi.uv_loop_get_data(ffi.uv_handle_get_loop(base)) as foreign *Udata
@@ -2017,7 +2026,7 @@ foreign function prepare_callback(native: *uv_prepare_t)
   ffi.lua_settop(L, top)
 end
 
-foreign function prepare_close_callback(base: *uv_handle_t)
+local foreign function prepare_close_callback(base: *uv_handle_t)
   local owner = ffi.uv_handle_get_data(base) as foreign *Udata
   local loop = ffi.uv_loop_get_data(ffi.uv_handle_get_loop(base)) as foreign *Udata
   local L = ffi.titan_record_field(loop, "loop_t", "state")
@@ -2131,7 +2140,7 @@ catch
   ffi.uv_stop(loop.native)
 end
 
-foreign function check_callback(native: *uv_check_t)
+local foreign function check_callback(native: *uv_check_t)
   local base = native as foreign *uv_handle_t
   local owner = ffi.uv_handle_get_data(base) as foreign *Udata
   local loop = ffi.uv_loop_get_data(ffi.uv_handle_get_loop(base)) as foreign *Udata
@@ -2145,7 +2154,7 @@ foreign function check_callback(native: *uv_check_t)
   ffi.lua_settop(L, top)
 end
 
-foreign function check_close_callback(base: *uv_handle_t)
+local foreign function check_close_callback(base: *uv_handle_t)
   local owner = ffi.uv_handle_get_data(base) as foreign *Udata
   local loop = ffi.uv_loop_get_data(ffi.uv_handle_get_loop(base)) as foreign *Udata
   local L = ffi.titan_record_field(loop, "loop_t", "state")
@@ -2259,7 +2268,7 @@ catch
   ffi.uv_stop(loop.native)
 end
 
-foreign function async_callback(native: *uv_async_t)
+local foreign function async_callback(native: *uv_async_t)
   local base = native as foreign *uv_handle_t
   local owner = ffi.uv_handle_get_data(base) as foreign *Udata
   local loop = ffi.uv_loop_get_data(ffi.uv_handle_get_loop(base)) as foreign *Udata
@@ -2273,7 +2282,7 @@ foreign function async_callback(native: *uv_async_t)
   ffi.lua_settop(L, top)
 end
 
-foreign function async_close_callback(base: *uv_handle_t)
+local foreign function async_close_callback(base: *uv_handle_t)
   local owner = ffi.uv_handle_get_data(base) as foreign *Udata
   local loop = ffi.uv_loop_get_data(ffi.uv_handle_get_loop(base)) as foreign *Udata
   local L = ffi.titan_record_field(loop, "loop_t", "state")
@@ -2340,7 +2349,7 @@ function async_t:borrow(): foreign *void
   return self.native as foreign *void
 end
 
-foreign function async_send_native(handle: *void): int
+local foreign function async_send_native(handle: *void): int
   return ffi.uv_async_send(handle as foreign *uv_async_t)
 end
 
@@ -2394,7 +2403,7 @@ end
 
 foreign type SignalEntry = function (*lua_State, *Udata, *CClosure, *Udata, *Udata, lua_Integer): void
 
-foreign function signal_callback(native: *uv_signal_t, signum: int)
+local foreign function signal_callback(native: *uv_signal_t, signum: int)
   local base = native as foreign *uv_handle_t
   local owner = ffi.uv_handle_get_data(base) as foreign *Udata
   local loop = ffi.uv_loop_get_data(ffi.uv_handle_get_loop(base)) as foreign *Udata
@@ -2408,7 +2417,7 @@ foreign function signal_callback(native: *uv_signal_t, signum: int)
   ffi.lua_settop(L, top)
 end
 
-foreign function signal_close_callback(base: *uv_handle_t)
+local foreign function signal_close_callback(base: *uv_handle_t)
   local owner = ffi.uv_handle_get_data(base) as foreign *Udata
   local loop = ffi.uv_loop_get_data(ffi.uv_handle_get_loop(base)) as foreign *Udata
   local L = ffi.titan_record_field(loop, "loop_t", "state")
@@ -2552,7 +2561,7 @@ end
 
 foreign type PollEntry = function (*lua_State, *Udata, *CClosure, *Udata, *Udata, lua_Integer, lua_Integer): void
 
-foreign function poll_callback(native: *uv_poll_t, status: int, events: int)
+local foreign function poll_callback(native: *uv_poll_t, status: int, events: int)
   local base = native as foreign *uv_handle_t
   local owner = ffi.uv_handle_get_data(base) as foreign *Udata
   local loop = ffi.uv_loop_get_data(ffi.uv_handle_get_loop(base)) as foreign *Udata
@@ -2566,7 +2575,7 @@ foreign function poll_callback(native: *uv_poll_t, status: int, events: int)
   ffi.lua_settop(L, top)
 end
 
-foreign function poll_close_callback(base: *uv_handle_t)
+local foreign function poll_close_callback(base: *uv_handle_t)
   local owner = ffi.uv_handle_get_data(base) as foreign *Udata
   local loop = ffi.uv_loop_get_data(ffi.uv_handle_get_loop(base)) as foreign *Udata
   local L = ffi.titan_record_field(loop, "loop_t", "state")
@@ -2987,7 +2996,7 @@ catch
 end
 
 foreign type RandomEntry = function (*lua_State, *Udata, *CClosure, *Udata, *Udata, lua_Integer, lua_Integer): void
-foreign function random_callback(native: *uv_random_t, status: int, buf: *void, buflen: size_t)
+local foreign function random_callback(native: *uv_random_t, status: int, buf: *void, buflen: size_t)
   local owner = ffi.uv_req_get_data(native as foreign *uv_req_t) as foreign *Udata
   local loop = ffi.uv_loop_get_data(native.loop) as foreign *Udata
   local L = ffi.titan_record_field(loop, "loop_t", "state")
@@ -3121,7 +3130,7 @@ end
 
 foreign type FsEventEntry = function (*lua_State, *Udata, *CClosure, *Udata, *Udata, const *char, lua_Integer, lua_Integer): void
 
-foreign function fs_event_callback(native: *uv_fs_event_t, filename: const *char, events: int, status: int)
+local foreign function fs_event_callback(native: *uv_fs_event_t, filename: const *char, events: int, status: int)
   local base = native as foreign *uv_handle_t
   local owner = ffi.uv_handle_get_data(base) as foreign *Udata
   local loop = ffi.uv_loop_get_data(ffi.uv_handle_get_loop(base)) as foreign *Udata
@@ -3135,7 +3144,7 @@ foreign function fs_event_callback(native: *uv_fs_event_t, filename: const *char
   ffi.lua_settop(L, top)
 end
 
-foreign function fs_event_close_callback(base: *uv_handle_t)
+local foreign function fs_event_close_callback(base: *uv_handle_t)
   local owner = ffi.uv_handle_get_data(base) as foreign *Udata
   local loop = ffi.uv_loop_get_data(ffi.uv_handle_get_loop(base)) as foreign *Udata
   local L = ffi.titan_record_field(loop, "loop_t", "state")
@@ -3276,7 +3285,7 @@ end
 
 foreign type FsPollEntry = function (*lua_State, *Udata, *CClosure, *Udata, *Udata, lua_Integer, const *uv_stat_t, const *uv_stat_t): void
 
-foreign function fs_poll_callback(native: *uv_fs_poll_t, status: int, prev: const *uv_stat_t, curr: const *uv_stat_t)
+local foreign function fs_poll_callback(native: *uv_fs_poll_t, status: int, prev: const *uv_stat_t, curr: const *uv_stat_t)
   local base = native as foreign *uv_handle_t
   local owner = ffi.uv_handle_get_data(base) as foreign *Udata
   local loop = ffi.uv_loop_get_data(ffi.uv_handle_get_loop(base)) as foreign *Udata
@@ -3290,7 +3299,7 @@ foreign function fs_poll_callback(native: *uv_fs_poll_t, status: int, prev: cons
   ffi.lua_settop(L, top)
 end
 
-foreign function fs_poll_close_callback(base: *uv_handle_t)
+local foreign function fs_poll_close_callback(base: *uv_handle_t)
   local owner = ffi.uv_handle_get_data(base) as foreign *Udata
   local loop = ffi.uv_loop_get_data(ffi.uv_handle_get_loop(base)) as foreign *Udata
   local L = ffi.titan_record_field(loop, "loop_t", "state")

@@ -26,7 +26,7 @@ function main(_args: {string}): integer
     local exiting = io.popen("exit 0")
     defer do
       local rejected = false
-      do uv.pipe_t.from_transfer_payload(async.TransferValue.is_integer(-1))
+      do uv.pipe_t.from_transfer_payload(string.char(8, 1))
       catch
         rejected = error == "native transfer requires an active destination async Runtime"
       end

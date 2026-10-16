@@ -83,8 +83,8 @@ Connection:write(kind: MessageType, data: string)
 Connection:ping(timeout_ms: integer?)
 Connection:shutdown(code: integer?, reason: string?, timeout_ms: integer?)
 Connection:close()
-Connection:to_transfer_payload(): (...: async.TransferValue)
-Connection.from_transfer_payload(...: async.TransferValue): Connection
+Connection:to_transfer_payload(): string
+Connection.from_transfer_payload(payload: string): Connection
 Connection:subprotocol(): string?
 Connection:close_status(): (integer?, string?)
 ```
@@ -113,12 +113,15 @@ bytes, including NUL. Received UTF-8 is validated across chunks and fragments.
 ## Transferring connections
 
 An idle open `Connection` implements
-`to_transfer_payload(): (...: async.TransferValue)` and
-`Connection.from_transfer_payload(...: async.TransferValue): Connection`.
+`to_transfer_payload(): string` and
+`Connection.from_transfer_payload(payload: string): Connection`.
 Use `async.TransferValue.from_value(connection)` and decode its custom record
 policy with `packet:to_value()` in a state with an active async Runtime. The
 same-process handoff preserves the client/server role, selected subprotocol,
-read limit and unread WebSocket, HTTP upgrade and TCP/TLS bytes.
+read limit and unread WebSocket, HTTP upgrade and TCP/TLS bytes. Its private
+protobuf schema contains copied WebSocket state and the known HTTP child bytes.
+If outer serialization fails after the child detaches, the hook closes the
+detached transport and leaves the source terminal.
 
 Transfer rejects pending reader, writer, Ping, Pong, Close, shutdown or
 retirement work, and rejects a closing or terminal session. An operation remains

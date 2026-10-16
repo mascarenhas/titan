@@ -1,4 +1,3 @@
-local transfer = import "transfer"
 foreign import "transfer-native.h"
 
 local transfer_loop: loop_t? = nil
@@ -84,7 +83,7 @@ end
 -- The source enters closing immediately. The caller owns delivery/recovery;
 -- copying or discarding this payload does not duplicate or close its socket.
 -- @usage standard-library-uv.md#native-resource-handoff
-function tcp_t:to_transfer_payload(): (...: transfer.TransferValue)
+function tcp_t:to_transfer_payload(): string
   local stream = self:as_stream_t()
   local handle = self:as_handle_t()
   transfer_status_check(stream_transfer_status(stream))
@@ -93,7 +92,7 @@ function tcp_t:to_transfer_payload(): (...: transfer.TransferValue)
   local socket = output[0]
   local committed = false
   defer if not committed then ffi.titan_uv_transfer_close_socket(socket) end
-  local payload = transfer.TransferValue.is_pointer(
+  local payload = protobuf.serialize_fields(tcp_transfer_fields,
     ffi.titan_uv_transfer_socket_pointer(socket))
   close(handle, nil)
   committed = true
@@ -102,14 +101,10 @@ end
 
 --- Adopt one TCP handoff payload on the destination Runtime's bound loop.
 -- @usage standard-library-uv.md#native-resource-handoff
-function tcp_t.from_transfer_payload(...: transfer.TransferValue): tcp_t
+function tcp_t.from_transfer_payload(payload: string): tcp_t
   local loop = require_transfer_loop()
-  if #... ~= 1 then raise "invalid TCP transfer payload" end
-  local socket: foreign uv_os_sock_t = 0
-  case ...[1]
-  when is_pointer(pointer) then socket = ffi.titan_uv_transfer_socket_value(pointer)
-  else raise "invalid TCP transfer payload"
-  end
+  local pointer = (protobuf.deserialize_fields(payload, tcp_transfer_fields)) as foreign *void
+  local socket = ffi.titan_uv_transfer_socket_value(pointer)
   local owner = tcp_t.new()
   local handle = owner:as_handle_t()
   transfer_status_check(tcp_init(loop, owner))
@@ -122,7 +117,7 @@ end
 
 --- Detach an idle non-IPC pipe endpoint into an exactly-once descriptor payload.
 -- @usage standard-library-uv.md#native-resource-handoff
-function pipe_t:to_transfer_payload(): (...: transfer.TransferValue)
+function pipe_t:to_transfer_payload(): string
   local stream = self:as_stream_t()
   local handle = self:as_handle_t()
   transfer_status_check(stream_transfer_status(stream))
@@ -131,7 +126,7 @@ function pipe_t:to_transfer_payload(): (...: transfer.TransferValue)
   local file = output[0]
   local committed = false
   defer if not committed then ffi.titan_uv_transfer_close_file(file) end
-  local payload = transfer.TransferValue.is_integer(file as integer)
+  local payload = protobuf.serialize_fields(pipe_transfer_fields, file as integer)
   close(handle, nil)
   committed = true
   return payload
@@ -139,17 +134,12 @@ end
 
 --- Adopt one non-IPC pipe handoff payload on the destination Runtime's loop.
 -- @usage standard-library-uv.md#native-resource-handoff
-function pipe_t.from_transfer_payload(...: transfer.TransferValue): pipe_t
+function pipe_t.from_transfer_payload(payload: string): pipe_t
   local loop = require_transfer_loop()
-  if #... ~= 1 then raise "invalid pipe transfer payload" end
-  local file: foreign uv_file = -1
-  case ...[1]
-  when is_integer(descriptor) then
-    file = descriptor as foreign uv_file
-    if descriptor < 0 or file as integer ~= descriptor then
-      raise "invalid pipe transfer descriptor"
-    end
-  else raise "invalid pipe transfer payload"
+  local descriptor: integer = protobuf.deserialize_fields(payload, pipe_transfer_fields)
+  local file = descriptor as foreign uv_file
+  if descriptor < 0 or file as integer ~= descriptor then
+    raise "invalid pipe transfer descriptor"
   end
   local owner = pipe_t.new()
   local handle = owner:as_handle_t()
@@ -159,4 +149,24 @@ function pipe_t.from_transfer_payload(...: transfer.TransferValue): pipe_t
   transfer_status_check(ffi.titan_uv_transfer_open_pipe(owner.native, file))
   adopted = true
   return owner
+end
+
+--- Close an undelivered TCP payload exactly once without adopting it on a loop.
+-- @return Native close status; the payload is consumed once close is attempted.
+-- @usage standard-library-uv.md#native-resource-handoff
+function tcp_t.discard_transfer_payload(payload: string): integer
+  local pointer = (protobuf.deserialize_fields(payload, tcp_transfer_fields)) as foreign *void
+  return ffi.titan_uv_transfer_close_socket(ffi.titan_uv_transfer_socket_value(pointer))
+end
+
+--- Close an undelivered pipe payload exactly once without requiring a Runtime.
+-- @return Native close status; the payload is consumed once close is attempted.
+-- @usage standard-library-uv.md#native-resource-handoff
+function pipe_t.discard_transfer_payload(payload: string): integer
+  local descriptor: integer = protobuf.deserialize_fields(payload, pipe_transfer_fields)
+  local file = descriptor as foreign uv_file
+  if descriptor < 0 or file as integer ~= descriptor then
+    raise "invalid pipe transfer descriptor"
+  end
+  return ffi.titan_uv_transfer_close_file(file)
 end

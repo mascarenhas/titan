@@ -4988,7 +4988,6 @@ done
             for _, retained in ipairs({
                 "spec/asan_generated_c_context_spec.lua",
                 "spec/dense_array_runtime_spec.lua",
-                "spec/transfer_runtime_spec.lua",
                 "spec/libuv_build_spec.lua",
                 "spec/lpeglabel_build_spec.lua",
                 "spec/minicoro_spec.lua",
@@ -5385,7 +5384,6 @@ done
                 "compiler_isolated_coverage_tests=()",
                 "spec/asan_generated_c_context_spec.lua",
                 "spec/dense_array_runtime_spec.lua",
-                "spec/transfer_runtime_spec.lua",
                 "spec/libuv_build_spec.lua",
                 "spec/lpeglabel_build_spec.lua",
                 "spec/minicoro_spec.lua",
@@ -5867,8 +5865,8 @@ done
                     { "make titan-stdlib-test-run" },
                 },
                 {
-                    "Run dense Array and closure transfer runtime sanitizer gate",
-                    { ".lua/bin/busted" },
+                    "Run dense Array and value transfer sanitizer gate",
+                    { ".lua/bin/busted", "make titan-stdlib-test-run" },
                 },
                 {
                     "Run immediate function compiler sanitizer gate",

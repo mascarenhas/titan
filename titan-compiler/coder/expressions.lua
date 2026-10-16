@@ -2713,7 +2713,7 @@ function codeexp_dispatch(ctx, node, iscondition, target)
     elseif tag == "Ast.ExpVar" then
         if node._foreign_function_reference then
             return "", foreigncast(
-                coder._foreign_reference_name(node._foreign_function_reference),
+                coder._foreign_reference_name(node._foreign_function_reference, ctx),
                 node._type)
         end
         return codeexp(ctx, node.var, iscondition)

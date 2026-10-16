@@ -92,6 +92,23 @@ final C range, qualifier, fixed-array extent, and construction checks. A decoded
 pointer remains a borrowed address. No GC object from the source state enters
 the destination heap.
 
+## Anonymous root messages
+
+`serialize_fields` accepts an ordered `const {reflect.Type}` descriptor and an
+exact-arity variadic value run. It calls the same `Encoder:field` operation used
+by reflected records, with the same declaration-order field numbers and root
+depth. `deserialize_fields` parses one ordinary message and calls `decode_field`
+for each declared type. Its explicit result range preserves the descriptor's
+field count even when the final results are nil. Neither entry constructs a
+nominal descriptor or changes the visibility checks on nested nominal values.
+
+The descriptor remains in the hook's module; only bytes cross the state
+boundary. Resource hooks describe pointer tokens, scalar state, and child
+payload strings this way. Closure snapshots describe Arrays of converted
+`TransferValue` policies and explicit-policy flags. Nested closures and custom
+payloads are already byte strings, so this use does not introduce a recursive
+native transfer representation or a separate field codec.
+
 ## Schema generation
 
 The schema builder walks declared descriptors, separately from optimistic value
@@ -110,16 +127,16 @@ strings use protobuf bytes so arbitrary byte sequences round-trip.
 
 Custom record transfer hooks are dispatched by `titan.transfer` before its
 structural protobuf fallback. The codec's `serialize` entry point retains its
-public-field policy. Native transfer packet graphs preserve nested
-`TransferValue` policies separately from protobuf bytes.
+public-field policy. Custom payloads and closure snapshots are immutable byte
+strings before they enter the native transfer boundary.
 
 The Unix and Windows standard providers include `titan.protobuf`, its Lua shim,
-and its native tests in the shared inventory. `titan.lua` imports the codec
-directly, and `titan.async` depends on it through `titan.transfer`, so its loader
+and its native tests in the shared inventory. `titan.lua` and `titan.async`
+depend on the codec through `titan.transfer`, so its loader
 is available in independent-state preload snapshots and Receiver-only
 applications. Explicit nominal carriers retain
-their serialized names and bytes. Closure graph reconstruction uses the codec
-to decode nominal captures against the receiving state's initialized types;
+their defining modules, nominal names, and bytes. Closure reconstruction uses
+the codec to decode its snapshot against the receiving state's initialized types;
 no operation reads another state's reflection descriptors.
 
 Tests belong in `spec/stdlib/titan/protobuf/`, with transfer lifecycle cases in

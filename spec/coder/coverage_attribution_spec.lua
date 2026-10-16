@@ -202,7 +202,7 @@ end
     end)
 
     it("outlines source foreign bodies for coverage and restores normal inlining", function()
-        local ast = checked([[foreign function plus(input: int): int
+        local ast = checked([[local foreign function plus(input: int): int
   return input + 1
 end
 function use(input: integer): integer

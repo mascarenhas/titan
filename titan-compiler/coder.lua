@@ -29,4 +29,5 @@ return {
     generate_foreign_header = implementation.generate_foreign_header,
     external_symbols = implementation.external_symbols,
     interface_external_symbols = implementation.interface_external_symbols,
+    foreign_external_symbols = implementation.foreign_external_symbols,
 }

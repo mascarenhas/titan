@@ -1,6 +1,8 @@
 -- Executable-only fixture for programmer-owned native handle transfer.
 local async = import "async"
 local gc = import "gc"
+local protobuf = import "protobuf"
+local reflect = import "reflect"
 foreign import "handle_transfer_fixture.h"
 
 record Pipe
@@ -29,23 +31,22 @@ function Pipe.new(resource: foreign *void): Pipe
   return pipe
 end
 
-function Pipe:to_transfer_payload(): (...: async.TransferValue)
-  local resource = self.resource
-  if not resource then raise "native handle fixture is detached" end
-  -- The programmer explicitly relinquishes the source wrapper's close
-  -- authority. TransferValue does not move ownership or undo this on failure.
-  -- The enclosing test retains the token allocation through the whole handoff.
-  self.resource = nil
-  return async.TransferValue.is_pointer(resource)
+local function pipe_fields(): const {reflect.Type}
+  return {reflect.Type.is_foreign_pointer(reflect.Type.is_foreign_void(), {})}
 end
 
-function Pipe.from_transfer_payload(...: async.TransferValue): Pipe
-  local payload: {async.TransferValue} = {...}
-  if #payload ~= 1 then raise "native handle fixture payload arity" end
-  case payload[1]
-  when is_pointer(resource) then return Pipe(resource)
-  else raise "native handle fixture expected borrowed pointer policy"
-  end
+function Pipe:to_transfer_payload(): string
+  local resource = self.resource
+  if not resource then raise "native handle fixture is detached" end
+  local payload = protobuf.serialize_fields(pipe_fields(), resource)
+  -- Only the wrapper moves close authority; the byte transport never owns it.
+  self.resource = nil
+  return payload
+end
+
+function Pipe.from_transfer_payload(payload: string): Pipe
+  local resource = (protobuf.deserialize_fields(payload, pipe_fields())) as foreign *void
+  return Pipe(resource)
 end
 
 function Pipe:read_byte(): integer

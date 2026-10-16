@@ -61,7 +61,7 @@ checkvar = util.make_visitor({
                 local allowed = tag == "Ast.Decl"
                     or tag == "Ast.TopLevelForeignFunc"
                     or tag == "Checker.ForeignNamespace"
-                    or (tag == "Ast.TopLevelImport" and decl._source_import)
+                    or tag == "Ast.TopLevelImport"
                 if not allowed then
                     node._type = invalid(errors, node.loc,
                         "ordinary Titan declaration '%s' is not visible inside a foreign function",
@@ -398,11 +398,13 @@ checkvar = util.make_visitor({
                 end
             end
         end
-        if checker._foreign_function_depth > 0 and ltype._tag == "Type.Module"
-           and not checker._foreign_function_reference(node) then
-            node._type = invalid(errors, node.loc,
-                "ordinary Titan member '%s.%s' is not visible inside a foreign function",
-                ltype.name, node.name)
+        if checker._foreign_function_depth > 0 and ltype._tag == "Type.Module" then
+            local reference = checker._foreign_function_reference(node)
+            if not reference then
+                node._type = invalid(errors, node.loc,
+                    "ordinary Titan member '%s.%s' is not visible inside a foreign function",
+                    ltype.name, node.name)
+            end
         end
         if node._type and node._type._tag ~= "Type.Invalid" then
             local spelling_only = context

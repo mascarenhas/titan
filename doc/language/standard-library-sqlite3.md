@@ -48,8 +48,8 @@ Connection:get_autocommit(): boolean
 Connection:set_autocommit(autocommit: boolean)
 Connection:commit()
 Connection:rollback()
-Connection:to_transfer_payload(): (...: async.TransferValue)
-Connection.from_transfer_payload(...: async.TransferValue): Connection
+Connection:to_transfer_payload(): string
+Connection.from_transfer_payload(payload: string): Connection
 
 Statement:execute(...: value): integer
 Statement:query(...: value): Cursor
@@ -126,9 +126,10 @@ alias of the source Connection behave as closed; its `close()` becomes a no-op.
 The same native database moves, including a private `:memory:` database, open
 transaction, and savepoints. Transfer does not commit or roll back anything.
 
-The payload is exactly one nonnull `TransferValue.is_pointer` containing the
-detached handle. `Connection.from_transfer_payload` rejects another arity,
-variant, or a null pointer. It trusts that a nonnull pointer came from this
+The opaque protobuf byte payload has one fixed64 field containing the nonnull
+native handle. Encoding finishes before the source handle is cleared.
+`Connection.from_transfer_payload` rejects malformed bytes, a mismatched field
+kind, or a null pointer. It trusts that a nonnull pointer came from this
 protocol; it cannot validate an arbitrary address or detect prior adoption.
 
 This is a manual ownership handoff. Adopt the payload exactly once, retain it

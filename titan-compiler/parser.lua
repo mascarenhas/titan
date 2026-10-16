@@ -468,12 +468,14 @@ function defs.toplevelfuncdecl(pos, islocal, name_loc, name, typeparams,
             flexrettype, block, typeparams), name_loc), end_loc)
 end
 
-function defs.foreignfuncdecl(pos, name_loc, name, params, rettypes,
+function defs.foreignfuncdecl(pos, islocal, name_loc, name, params, rettypes,
                               flexrettype, block, end_loc)
-    return with_end_loc(with_name_loc(
+    local node = with_end_loc(with_name_loc(
             ast.TopLevelForeignFunc(
                 pos, name, params, rettypes, flexrettype, block), name_loc),
         end_loc)
+    node.islocal = islocal
+    return node
 end
 
 function defs.typealiasdecl(pos, islocal, name_loc, name, type)
@@ -1025,7 +1027,7 @@ local grammar_source = [[
             / &(LOCAL NAME ASSIGN IMPORT) import^ImportImport
             / &variablehead topvar^AssignVar
             / &(LOCAL? FUNCTION) functiondecl^NameFunc
-            / &(FOREIGN FUNCTION) foreignfunc^NameFunc
+            / &(LOCAL? FOREIGN FUNCTION) foreignfunc^NameFunc
             / &(FOREIGN TYPE) foreigntypealias^NameTypeAlias
             / &(FOREIGN IMPORT) foreignimport
             / &(LOCAL? TYPE) typealias^NameTypeAlias
@@ -1056,7 +1058,7 @@ local grammar_source = [[
                     rettypeopt^TypeFunc block^Statement P END^EndFunc) -> functiondecl
     functionselector <- ((COLON -> ':') P ANYNAME^NameMethod
                         / (DOT -> '.') P ANYNAME^NameStatic) -> function_selector
-    foreignfunc <- (P FOREIGN FUNCTION P ANYNAME^NameFunc
+    foreignfunc <- (P localopt FOREIGN FUNCTION P ANYNAME^NameFunc
                     (TYPEOPEN %{GenericForeignFunc})?
                     LPAREN^LParPList foreignparamlist^DeclParList RPAREN^RParPList
                     foreignretopt^TypeFunc block^Statement P END^EndFunc) -> foreignfuncdecl

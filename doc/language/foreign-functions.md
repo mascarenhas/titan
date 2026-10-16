@@ -26,17 +26,16 @@ C types, calls, ownership, and allocation.
 
 Portable C primitives such as `int`, `unsigned long`, `float`, and
 `double` belong to the foreign type category and need no header import. Public
-Titan signatures may also expose foreign function-pointer types built only
-from those primitives and their pointers. That exports the structural C type,
-not a source `foreign function` declaration; the declaration itself retains
-the source-only visibility described below.
+Titan signatures and public foreign declarations may expose exportable C type
+graphs. Header-dependent types require the original compatible declarations in
+the consumer's C environment; a regular import does not inherit C headers.
 
 ## Declaration syntax
 
 A foreign function is a top-level declaration:
 
 ```text
-foreign function name(p1: C1, p2: C2): CResult
+[local] foreign function name(p1: C1, p2: C2): CResult
   body
 end
 ```
@@ -49,10 +48,9 @@ foreign function notify(item: *Item)
 end
 ```
 
-There is no `local` form, foreign method, foreign record function, or nested
-foreign declaration. A foreign function is source-private by definition; its
-availability to another Titan module is described under
-[Source visibility](#source-visibility).
+An ordinary foreign declaration is public. `local foreign function` keeps the
+entry private to its source module and direct explicit source importers. There
+is no foreign method, foreign record function, or nested foreign declaration.
 
 Every parameter and the optional result must be a direct C FFI type. A complete
 C struct or union can be passed or returned by value. Pointers to incomplete
@@ -98,11 +96,44 @@ Lua, be boxed in `value`, or receive Titan callable adjustment. Conversely, an
 ordinary Titan function or closure is not automatically adapted to a C callback
 ABI. Write a foreign function that implements the required C boundary.
 
-## Source visibility
+## Public exports and source visibility
 
 The defining module can call or take the address of its foreign functions by
-name. Another module can use them only through a written explicit source-import
-alias:
+name. Regular imports expose public foreign functions through the module alias,
+including inside other foreign functions:
+
+```titan
+local bridge = import "native.bridge"
+
+foreign function forward(input: int): int
+  return bridge.transform(input)
+end
+```
+
+The exported signature must be an exportable C type graph. Compiled `.so` and
+`.a` interfaces carry the exact C signature and parameter names. Module
+initialization finds a shared provider through normal Titan runtime resolution:
+an initialized canonical module, a matching native preload, or the runtime
+search path. It checks compatibility before obtaining the raw address. A
+statically included provider supplies its exact linked entry instead. Moving a
+shared provider and selecting its new location at runtime requires no relink.
+
+The imported address is stable for that physical consumer image. Calls and
+callback conversions use the same actual C function pointer, without an
+implicit Lua state or module argument. Independent Lua states may initialize
+the image concurrently when they select the same address. A later state that
+selects a different address fails initialization before the consumer can be
+used; it cannot redirect callbacks already handed to C. A published binding
+also remains stable if a later part of initialization fails. Ordinary Titan
+function bindings retain their separate per-state behavior.
+
+Public entries have one outlined definition. They are not Titan closures and
+Lua cannot access them through `require`. Imported raw dependencies must be
+initialized before a foreign entry using them is called; normal Titan imports
+perform that initialization before exposing the entry.
+
+A `local foreign function` is available to another module only through a
+written explicit source-import alias:
 
 ```titan
 local bridge = import "internal.bridge.titan"
@@ -112,12 +143,12 @@ local function install()
 end
 ```
 
-This permission is direct and source-only. Source resolution without the
+This local permission is direct and source-only. Source resolution without the
 `.titan` marker does not grant it, and it does not propagate through an
 intermediate module. A consumer of a `.so` or `.a` sees only the producer's
-public Titan interface; compiled metadata contains no foreign function.
+public interface; compiled metadata contains no local foreign function.
 Physical co-residence in one provider and static linking do not change that
-rule, and Lua cannot see foreign functions through `require`.
+rule.
 
 The source dependency's generated `.ffi.h` joins the consumer's C environment,
 and its `.titan.h` supplies foreign-function declarations. C header inheritance
@@ -131,7 +162,8 @@ A foreign body can use:
 
 * its parameters and initialized C-typed locals;
 * foreign functions in the current module;
-* foreign functions reached through an explicit source import;
+* public foreign functions reached through a regular import, and local foreign
+  functions reached through an explicit source import;
 * imported C namespaces and their functions, values, fields, types,
   `sizeof`, and `alignof`;
 * C calls, field and pointer/array indexing, C casts and C-mode operators;
@@ -237,12 +269,13 @@ Do not use either reserved path for an author-written header.
 
 These headers are source-build artifacts, not binary interfaces. They are not
 placed in `.titan.meta`, provider archives, installed SDKs, Lua shims, or
-standard-library publication transactions. A binary consumer cannot recover or
-name the foreign functions they declare.
+standard-library publication transactions. Binary consumers recover public
+foreign declarations from module metadata and emit exact typed native bindings;
+they do not need either generated header.
 
 ### Inline subset and function identity
 
-A foreign function is emitted as `static inline` in the generated header only
+A local foreign function is emitted as `static inline` in the generated header only
 when its root body consists of optional direct local declarations followed by
 exactly one of:
 
@@ -252,8 +285,9 @@ exactly one of:
 3. one `if` without `else` whose sole `then` returns, followed by one expression
    return.
 
-Every other foreign function has a hidden external definition in the module's
-generated C file. The inline form is an optimization/header-availability rule,
+Every other local foreign function has a hidden external definition in the
+module's generated C file. Public foreign functions always have an exported
+external definition. The inline form is an optimization/header-availability rule,
 not a C constant-expression promise. Taking one inline function's address in
 two translation units may yield different addresses.
 
@@ -280,8 +314,7 @@ the UCN spellings; object and tool names contain UTF-8 `ℳ` and `ℱ`.
 The callable hierarchy, source-defined standard-library callbacks, generic
 interface metadata, and affected public standard-library signatures are all
 part of the current prerelease ABI 2. Function and owned type registry
-identities use the revised type spellings. The earlier grammar change did not
-require an independent ABI or language-version change.
+identities use the current type spellings.
 [Native record and union storage](nominal-storage.md) requires rebuilding
 compiler, runtime, and providers together without a prerelease version bump.
 

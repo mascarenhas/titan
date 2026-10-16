@@ -5,6 +5,12 @@
 local os = import "os.titan"
 local string = import "string"
 local async = import "async"
+local protobuf = import "protobuf"
+local reflect = import "reflect"
+
+local const stream_transfer_fields: const {reflect.Type} = {
+  reflect.Type.is_string(), reflect.Type.is_string(),
+}
 
 --- Readable binary stream with chunk and delimiter reads.
 -- @usage standard-library-io.md
@@ -119,7 +125,7 @@ record InputOutputStream
   local process: os.Process?
   local input: os.OutputStream?
   local output: os.InputStream?
-  local input_packet: async.TransferValue?
+  local input_packet: string?
   local status: os.ExitStatus?
   local closed: boolean
   local pending_operations: integer
@@ -190,7 +196,7 @@ end
 local function InputOutputStream:restore_input()
   local packet? = self.input_packet
   if packet ~= nil then
-    local input: os.OutputStream = packet:to_value()
+    local input = os.OutputStream.from_transfer_payload(packet)
     self.input = input
     if self.process ~= nil then self.process.stdin = input end
     self.input_packet = nil
@@ -249,63 +255,54 @@ function InputOutputStream:close()
 end
 
 --- Detach idle communication pipes while retaining child ownership at origin.
--- @return Two manually owned process-stream payloads, to adopt exactly once.
+-- @return Opaque bytes owning both process streams, to adopt exactly once.
 -- @usage standard-library-io.md#transferring-shell-streams
-function InputOutputStream:to_transfer_payload(): (...: async.TransferValue)
+function InputOutputStream:to_transfer_payload(): string
   if self.closed or self.output == nil then
     raise "cannot transfer closed or detached InputOutputStream pipes"
   end
   if self.pending_operations ~= 0 then
     raise "cannot transfer an InputOutputStream with a pending operation"
   end
-  -- Check both owners before detaching either, including native read/write work.
+  -- Preflight both owners before detaching either. An ordinary failure in
+  -- the second dup retains the first packet for write, retry, or close.
   if self.input ~= nil and self.input.handle ~= nil then
     os.stream_transfer_preflight(self.input.handle, false)
   end
-  if self.output.handle ~= nil then
-    os.stream_transfer_preflight(self.output.handle, true)
-  end
-  local payload: {async.TransferValue} = {
-    async.TransferValue.is_nil(), async.TransferValue.is_nil(),
-  }
+  if self.output.handle ~= nil then os.stream_transfer_preflight(self.output.handle, true) end
   if self.input_packet == nil then
-    self.input_packet = async.TransferValue.from_value(self.input)
+    if self.input == nil then raise "InputOutputStream pipes were transferred" end
+    self.input_packet = self.input:to_transfer_payload()
     self.input = nil
   end
-  payload[1] = self.input_packet
-  payload[2] = async.TransferValue.from_value(self.output)
+  local output_packet = self.output:to_transfer_payload()
+  local input_packet: string = self.input_packet
   self.output = nil
   self.input_packet = nil
-  return ...payload
+  local exported = false
+  defer if not exported then
+    defer os.discard_input_transfer_payload(output_packet)
+    os.discard_output_transfer_payload(input_packet)
+  end
+  local payload = protobuf.serialize_fields(stream_transfer_fields, input_packet, output_packet)
+  exported = true
+  return payload
 end
 
 --- Adopt communication pipes without acquiring the originating child Process.
--- @param ... Writable-input and merged-readable-output record payloads.
+-- @param payload Opaque protobuf bytes containing both process-stream payloads.
 -- @return Pipe owner; wait is available only on the original facade.
 -- @usage standard-library-io.md#transferring-shell-streams
-function InputOutputStream.from_transfer_payload(...: async.TransferValue): InputOutputStream
-  if #... ~= 2 then raise "invalid InputOutputStream transfer payload" end
-  case ...[1]
-  when is_record_payload(name) then
-    if name ~= "titan.os.OutputStream" then
-      raise "invalid InputOutputStream writable payload"
-    end
-  else raise "invalid InputOutputStream writable payload"
-  end
-  case ...[2]
-  when is_record_payload(name) then
-    if name ~= "titan.os.InputStream" then
-      raise "invalid InputOutputStream readable payload"
-    end
-  else raise "invalid InputOutputStream readable payload"
-  end
+function InputOutputStream.from_transfer_payload(payload: string): InputOutputStream
+  local input_packet: string, output_packet: string =
+    protobuf.deserialize_fields(payload, stream_transfer_fields)
   local result = InputOutputStream(nil, nil, nil, nil, nil, false, 0)
   local adopted = false
   defer if not adopted and result.input ~= nil then
     os.discard_unpublished_stdio(result.input.handle)
   end
-  result.input = ...[1]:to_value()
-  result.output = ...[2]:to_value()
+  result.input = os.OutputStream.from_transfer_payload(input_packet)
+  result.output = os.InputStream.from_transfer_payload(output_packet)
   adopted = true
   return result
 end

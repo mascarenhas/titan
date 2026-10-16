@@ -127,8 +127,8 @@ Only open idle WebSocket sessions can produce a transfer policy. The gate
 checks every operation/frame/control reservation, the work list, partial
 message owner and retirement Task before touching HTTP ownership. An idle
 session has no in-flight fragmented-message builder or UTF-8 continuation.
-The policy carries role, subprotocol, limit and the unread suffix of the input
-chunk, plus the HTTP `UpgradedStream` policy. Reflection unwraps the known I/O
+A private anonymous-root protobuf schema carries role, subprotocol, limit and
+the unread suffix of the input chunk, plus the known HTTP `UpgradedStream` bytes. Reflection unwraps the known I/O
 Interface to that public concrete owner; it never copies an Interface wrapper
 or captured abort closure between states.
 
@@ -140,7 +140,8 @@ The transfer hook checks both the public count and the internal reservations.
 
 The HTTP wrapper in turn owns its unread prefix and concrete net/SSL transport.
 After it detaches successfully, the source WebSocket facade drops the stream,
-clears input and becomes terminal without protocol output. Destination
+clears input and becomes terminal without protocol output. A lexical guard
+discards the detached HTTP bytes if outer protobuf encoding fails. Destination
 construction allocates its StringWriter, UTF-8 state and empty work list before
 adopting the HTTP wrapper. No operation Tasks, timers or source closures are
 transferred. The transport's strict native-pending restrictions still apply,

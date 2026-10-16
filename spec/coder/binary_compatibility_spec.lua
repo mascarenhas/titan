@@ -182,6 +182,21 @@ describe("selective binary dependency compatibility", function()
         generated = {}
     end)
 
+    it("rejects changed used public foreign signatures before module initialization", function()
+        local consumer_image = fixture([[
+            foreign function increment(input: int): int return input + 1 end
+        ]], [[
+            local provider = import "bc180_provider"
+            foreign function raw(): int return provider.increment(41) end
+            function answer(): integer return raw() end
+        ]])
+        runs("assert(consumer.answer() == 42)")
+        replace([[
+            foreign function increment(input: long): int return input as foreign int end
+        ]], consumer_image)
+        rejects("increment")
+    end)
+
     if not platform.windows then
         it("derives the runtime SDK root from Titan's C-path before LuaRocks' user tree", function()
             run_native_harness([[
@@ -857,6 +872,149 @@ int main(void) {
             assert(os.remove(scoped("bc180_provider.so")))
             rerun()
             assert.truthy(read("bc180_consumer.so") == image)
+        end)
+
+        it("keeps raw foreign bindings stable across conflicting state providers", function()
+            local image = fixture([[
+                foreign function increment(input: int): int return input + 1 end
+                function own(): integer return increment(40) end
+            ]], [[
+                local provider = import "bc180_provider"
+                local foreign function invoke(input: int): int
+                    return provider.increment(input)
+                end
+                function exercise(): integer
+                    local callback: foreign function(int): int = provider.increment
+                    return invoke(41) + callback(40)
+                end
+            ]])
+            save_artifact("bc180_provider", "bc180_raw_first", ".so")
+            replace([[
+                foreign function increment(input: int): int return input + 2 end
+                function own(): integer return increment(40) end
+            ]], image)
+            save_artifact("bc180_provider", "bc180_raw_second", ".so")
+            assert(os.remove(scoped("bc180_provider.so")))
+            local core = require "titan-compiler.coder.core"
+            local first = [[
+                local support = require "titan"
+                provider = assert(support._loadlibglobal("./bc180_raw_first.so",
+                    "luaopen_bc180_provider", "bc180_provider"))()
+                consumer = assert(support._loadlibglobal("./bc180_consumer.so",
+                    "luaopen_bc180_consumer", "bc180_consumer"))()
+                assert(provider.own() == 41 and consumer.exercise() == 83)
+            ]]
+            local second = [[
+                local support = require "titan"
+                provider = assert(support._loadlibglobal("./bc180_raw_second.so",
+                    "luaopen_bc180_provider", "bc180_provider"))()
+                assert(provider.own() == 42)
+                local opener = assert(support._loadlibglobal("./bc180_consumer.so",
+                    "luaopen_bc180_consumer", "bc180_consumer"))
+                for attempt = 1, 2 do
+                    local ok, err = pcall(opener)
+                    assert(not ok, "conflicting raw provider changed the binding")
+                    assert(tostring(err):find("different native binding", 1, true), err)
+                end
+            ]]
+            run_native_harness([[
+int main(void) {
+    lua_State *first = new_state();
+    lua_State *second = new_state();
+    int ok = execute(first, ]] .. core.c_string_literal(first) .. [[)
+        && execute(second, ]] .. core.c_string_literal(second) .. [[);
+    lua_close(second);
+    if (ok) ok = execute(first, "assert(consumer.exercise() == 83)");
+    lua_close(first);
+    return ok ? 0 : 1;
+}
+]])
+            assert.equal(image, read("bc180_consumer.so"))
+        end)
+
+        it("publishes raw foreign bindings during concurrent independent initialization", function()
+            fixture([[
+                foreign function increment(input: int): int return input + 1 end
+            ]], [[
+                local provider = import "bc180_provider"
+                local foreign function invoke(input: int): int
+                    return provider.increment(input)
+                end
+                function exercise(): integer
+                    local callback: foreign function(int): int = provider.increment
+                    return invoke(41) + callback(40)
+                end
+            ]])
+            local core = require "titan-compiler.coder.core"
+            local prepare = [[
+                require "bc180_provider"
+                local support = require "titan"
+                open_consumer = assert(support._loadlibglobal("./bc180_consumer.so",
+                    "luaopen_bc180_consumer", "bc180_consumer"))
+            ]]
+            local exercise = [[
+                local consumer = open_consumer()
+                for count = 1, 2000 do assert(consumer.exercise() == 83) end
+            ]]
+            run_native_harness([[
+#if defined(_WIN32)
+#include <windows.h>
+#else
+#include <pthread.h>
+#endif
+
+enum { THREADS = 8 };
+typedef struct { lua_State *state; int ok; } Worker;
+static int ready, start;
+
+#if defined(_WIN32)
+static DWORD WINAPI initialize(LPVOID argument) {
+#else
+static void *initialize(void *argument) {
+#endif
+    Worker *worker = (Worker *)argument;
+    __atomic_add_fetch(&ready, 1, __ATOMIC_RELEASE);
+    while (!__atomic_load_n(&start, __ATOMIC_ACQUIRE)) {}
+    worker->ok = execute(worker->state, ]] .. core.c_string_literal(exercise) .. [[);
+    return 0;
+}
+
+int main(void) {
+    Worker workers[THREADS];
+#if defined(_WIN32)
+    HANDLE threads[THREADS];
+#else
+    pthread_t threads[THREADS];
+#endif
+    for (int i = 0; i < THREADS; i++) {
+        workers[i].state = new_state();
+        workers[i].ok = 0;
+        if (!execute(workers[i].state, ]] .. core.c_string_literal(prepare) .. [[)) return 1;
+    }
+    for (int i = 0; i < THREADS; i++) {
+#if defined(_WIN32)
+        threads[i] = CreateThread(NULL, 0, initialize, &workers[i], 0, NULL);
+        if (threads[i] == NULL) return 2;
+#else
+        if (pthread_create(&threads[i], NULL, initialize, &workers[i]) != 0) return 2;
+#endif
+    }
+    while (__atomic_load_n(&ready, __ATOMIC_ACQUIRE) != THREADS) {}
+    __atomic_store_n(&start, 1, __ATOMIC_RELEASE);
+    int ok = 1;
+    for (int i = 0; i < THREADS; i++) {
+#if defined(_WIN32)
+        if (WaitForSingleObject(threads[i], INFINITE) != WAIT_OBJECT_0) return 3;
+        CloseHandle(threads[i]);
+#else
+        if (pthread_join(threads[i], NULL) != 0) return 3;
+#endif
+        ok = ok && workers[i].ok;
+        lua_close(workers[i].state);
+    }
+    return ok ? 0 : 1;
+}
+]])
         end)
 
         it("keeps one consumer DSO's bindings independent in two live Lua states", function()

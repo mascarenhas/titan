@@ -263,9 +263,8 @@ TITAN_OUTPUT_DIR ?= out
 
 RUNTIME_O := titan-runtime/titan.o
 MINICORO_O := titan-runtime/minicoro.o
-TRANSFER_O := titan-runtime/transfer.o
 LTITANLIB_O := titan-runtime/ltitanlib.o
-TITAN_RUNTIME_OBJECTS := $(RUNTIME_O) $(MINICORO_O) $(TRANSFER_O)
+TITAN_RUNTIME_OBJECTS := $(RUNTIME_O) $(MINICORO_O)
 TITAN_RUNTIME_LIB := titan-runtime/libtitan.a
 TITAN_SDK_ROOT_HEADERS := titan-runtime/minicoro.h titan-runtime/titan.h titan-runtime/transfer.h
 TITAN_SDK_NAMESPACED_HEADERS := titan-runtime/titan/ffi.h
@@ -374,7 +373,7 @@ STDLIB_GENERATED_FFI_HEADERS := $(addprefix $(TITAN_OUTPUT_DIR)/,$(addsuffix .ff
 STDLIB_GENERATED_FOREIGN_HEADERS := $(STDLIB_GENERATED_FFI_HEADERS) \
 	$(addprefix $(TITAN_OUTPUT_DIR)/,titan/coroutine.titan.h \
 	titan/uv/uv.titan.h titan/async.titan.h titan/http/http.titan.h \
-	titan/sqlite3/sqlite3.titan.h titan/lua/lua.titan.h)
+	titan/sqlite3/sqlite3.titan.h titan/lua/lua.titan.h titan/transfer.titan.h)
 # One native compilation unit per logical module, including folder ensembles.
 # This reviewed import graph owns rebuild propagation and parallel ordering;
 # titanc's object fast path deliberately does not track dependency freshness.
@@ -391,27 +390,27 @@ stdlib_stem = $(TITAN_OUTPUT_DIR)/$(if $(STDLIB_STEM_$(1)),$(STDLIB_STEM_$(1)),t
 stdlib_outputs = $(call stdlib_stem,$(1)).o $(call stdlib_stem,$(1)).c $(filter $(call stdlib_stem,$(1)).%,$(STDLIB_GENERATED_FOREIGN_HEADERS))
 STDLIB_MODULE_OBJECTS := $(foreach module,$(STDLIB_MODULES),$(call stdlib_stem,$(module)).o)
 STDLIB_IMPORTS_coroutine :=
-STDLIB_IMPORTS_uv := iteration transfer
+STDLIB_IMPORTS_uv := iteration protobuf reflect
 STDLIB_IMPORTS_async := uv coroutine gc string transfer
 STDLIB_IMPORTS_timer := async uv
-STDLIB_IMPORTS_io := os string async
-STDLIB_IMPORTS_fs := async uv string
-STDLIB_IMPORTS_net := async uv string
-STDLIB_IMPORTS_ssl := async fs net string gc uv
+STDLIB_IMPORTS_io := os string async protobuf reflect
+STDLIB_IMPORTS_fs := async uv string protobuf reflect
+STDLIB_IMPORTS_net := async uv string protobuf reflect
+STDLIB_IMPORTS_ssl := async fs net string gc uv protobuf reflect
 STDLIB_IMPORTS_url := peg string
-STDLIB_IMPORTS_http := async io math net reflect ssl string timer url uv
-STDLIB_IMPORTS_websocket := async gc http io iteration net reflect ssl string timer url uv
-STDLIB_IMPORTS_os := async uv iteration string
+STDLIB_IMPORTS_http := async io math net protobuf reflect ssl string timer url uv
+STDLIB_IMPORTS_websocket := async gc http io iteration net protobuf reflect ssl string timer url uv
+STDLIB_IMPORTS_os := async uv iteration string protobuf reflect
 STDLIB_IMPORTS_path := string
 STDLIB_IMPORTS_peg := gc
 STDLIB_IMPORTS_string := peg gc
 STDLIB_IMPORTS_math :=
-STDLIB_IMPORTS_lua := async fs gc io string protobuf
+STDLIB_IMPORTS_lua := async fs gc io string transfer
 STDLIB_IMPORTS_iteration :=
 STDLIB_IMPORTS_gc :=
 STDLIB_IMPORTS_test :=
 STDLIB_IMPORTS_reflect := iteration
-STDLIB_IMPORTS_sqlite3 := async uv reflect string math
+STDLIB_IMPORTS_sqlite3 := async uv reflect string math protobuf
 STDLIB_IMPORTS_json := reflect string math peg iteration
 STDLIB_IMPORTS_protobuf := reflect string
 STDLIB_IMPORTS_transfer := reflect protobuf
@@ -1011,13 +1010,6 @@ $(MINICORO_O): titan-runtime/minicoro.c \
 		-c titan-runtime/minicoro.c -I titan-runtime -I $(TITAN_RUNTIME_LUA_SOURCE_PATH) \
 		-I $(LIBBT_DIR) -o $@
 
-$(TRANSFER_O): titan-runtime/transfer.c titan-runtime/transfer.h titan-runtime/titan.h \
-		titan-runtime/titan/ffi.h $(TITAN_RUNTIME_LUA_HEADERS) \
-		| $(TITAN_RUNTIME_LUA_LIB) $(LIBBT_LIB)
-	$(CC) $(TITAN_EXTRA_CPPFLAGS) $(CFLAGS) $(TITAN_EXTRA_CFLAGS) \
-		-c titan-runtime/transfer.c -I titan-runtime -I $(TITAN_RUNTIME_LUA_SOURCE_PATH) \
-		-I $(LIBBT_DIR) -o $@
-
 $(TITAN_RUNTIME_LIB): $(TITAN_RUNTIME_OBJECTS)
 	rm -f "$@"
 	$(AR) rcs "$@" $(TITAN_RUNTIME_OBJECTS)
@@ -1375,7 +1367,6 @@ TITAN_TEST_COMPILER_ENV = TITAN_BUILD_PROFILE=$(call make_shell_quote,$(TITAN_BU
 	TITAN_EXTRA_LDFLAGS=$(call make_shell_quote,$(strip $(TITAN_TEST_LDFLAGS)))
 STDLIB_BUSTED_TESTS := \
 	spec/asan_generated_c_context_spec.lua spec/dense_array_runtime_spec.lua \
-	spec/transfer_runtime_spec.lua \
 	spec/libuv_build_spec.lua spec/lpeglabel_build_spec.lua \
 	spec/minicoro_spec.lua \
 	spec/rockspec_spec.lua spec/titan_install_spec.lua

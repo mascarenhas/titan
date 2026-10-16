@@ -1,6 +1,8 @@
 local async = import "async"
 local gc = import "gc"
 local strings = import "string"
+local protobuf = import "protobuf"
+local reflect = import "reflect"
 foreign import "lua.h"
 foreign import "limits.h"
 foreign import "float.h"
@@ -41,7 +43,7 @@ record PrivateField
   local private_field: integer
 end
 
-foreign function transfer_echo(state: *lua_State): int
+local foreign function transfer_echo(state: *lua_State): int
   return ffi.lua_gettop(state)
 end
 
@@ -51,8 +53,8 @@ function policies(pointer: value): (...: async.TransferValue)
     async.TransferValue.is_string(strings.rep("policy\0bytes", 4096)),
     async.TransferValue.is_pointer(pointer as foreign *void),
     async.TransferValue.is_function(transfer_echo),
-    async.TransferValue.is_record("explicit.Record", "record\0wire"),
-    async.TransferValue.is_union("explicit.Union", "union\0wire")
+    async.TransferValue.is_record("explicit", "explicit.Record", "record\0wire"),
+    async.TransferValue.is_union("explicit", "explicit.Union", "union\0wire")
 end
 
 function state_policy(pointer: value): async.TransferValue
@@ -116,7 +118,7 @@ end
 
 function send_closure(handle: value)
   async.send(handle as foreign *void,
-    async.TransferValue.is_closure(closure_shared_boxes()))
+    async.TransferValue.from_value(closure_shared_boxes()))
 end
 
 function closure_nominal(): function (): integer
@@ -153,7 +155,7 @@ function closure_bound_method(): function (): integer
 end
 
 function closure_policy(): async.TransferValue
-  return async.TransferValue.is_closure(closure_counter())
+  return async.TransferValue.from_value(closure_counter())
 end
 
 function closure_array(): function (): integer
@@ -229,22 +231,22 @@ record PayloadRecord
   local text: string
 end
 
-function PayloadRecord:to_transfer_payload(): (...: async.TransferValue)
-  gc.collect()
-  return async.TransferValue.is_integer(self.number),
-    async.TransferValue.is_string(self.text),
-    async.TransferValue.is_boolean(false), async.TransferValue.is_nil()
+local function payload_fields(): const {reflect.Type}
+  return {reflect.Type.is_integer(), reflect.Type.is_string(),
+    reflect.Type.is_boolean(), reflect.Type.is_nil()}
 end
 
-function PayloadRecord.from_transfer_payload(...: async.TransferValue): PayloadRecord
-  local payload: {async.TransferValue} = {...}
+function PayloadRecord:to_transfer_payload(): string
   gc.collect()
-  if #payload ~= 4 then raise "record payload count changed" end
-  if payload[3]:to_value() ~= false or payload[4]:to_value() ~= nil then
-    raise "record payload policy order changed"
-  end
-  return PayloadRecord(payload[1]:to_value() as integer,
-    payload[2]:to_value() as string)
+  return protobuf.serialize_fields(payload_fields(), self.number, self.text, false, nil)
+end
+
+function PayloadRecord.from_transfer_payload(payload: string): PayloadRecord
+  local number: integer, text: string, flag: boolean, empty: value =
+    protobuf.deserialize_fields(payload, payload_fields())
+  gc.collect()
+  if flag or empty ~= nil then raise "record payload metadata changed" end
+  return PayloadRecord(number, text)
 end
 
 function PayloadRecord:number_value(): integer
@@ -263,19 +265,14 @@ record NestedPayload
   local item: PayloadRecord
 end
 
-function NestedPayload:to_transfer_payload(): (...: async.TransferValue)
+function NestedPayload:to_transfer_payload(): string
   gc.collect()
-  return async.TransferValue.from_value(self.item)
+  return self.item:to_transfer_payload()
 end
 
-function NestedPayload.from_transfer_payload(...: async.TransferValue): NestedPayload
-  local payload: {async.TransferValue} = {...}
+function NestedPayload.from_transfer_payload(payload: string): NestedPayload
   gc.collect()
-  if #payload ~= 1 then raise "nested record payload count changed" end
-  case payload[1]
-  when is_record_payload(_name, _data) then
-  else raise "nested record payload policy was unwrapped" end
-  return NestedPayload(payload[1]:to_value() as PayloadRecord)
+  return NestedPayload(PayloadRecord.from_transfer_payload(payload))
 end
 
 function NestedPayload:number_value(): integer
@@ -290,17 +287,14 @@ record FailingPayload
   local phase: string
 end
 
-function FailingPayload:to_transfer_payload(): (...: async.TransferValue)
+function FailingPayload:to_transfer_payload(): string
   if self.phase == "encode" then raise "record hook encode failure" end
-  return async.TransferValue.is_string(self.phase)
+  return self.phase
 end
 
-function FailingPayload.from_transfer_payload(...: async.TransferValue): FailingPayload
-  local payload: {async.TransferValue} = {...}
-  if #payload ~= 1 then raise "failure payload count changed" end
-  local phase = payload[1]:to_value() as string
-  if phase == "decode" then raise "record hook decode failure" end
-  return FailingPayload(phase)
+function FailingPayload.from_transfer_payload(payload: string): FailingPayload
+  if payload == "decode" then raise "record hook decode failure" end
+  return FailingPayload(payload)
 end
 
 function failing_payload_value(phase: string): FailingPayload
@@ -311,13 +305,14 @@ record CyclicPayload
   local number: integer
 end
 
-function CyclicPayload:to_transfer_payload(): (...: async.TransferValue)
-  return async.TransferValue.is_closure(function (): integer
+function CyclicPayload:to_transfer_payload(): string
+  local packet = async.TransferValue.from_value(function (): integer
     return self.number
   end)
+  return ""
 end
 
-function CyclicPayload.from_transfer_payload(...: async.TransferValue): CyclicPayload
+function CyclicPayload.from_transfer_payload(payload: string): CyclicPayload
   raise "cyclic payload should not reach reconstruction"
 end
 
@@ -334,7 +329,7 @@ function closure_custom_policy(): function (): integer
   local item = async.TransferValue.from_value(payload_record_value(89))
   return function (): integer
     case item
-    when is_record_payload(_name, _data) then
+    when is_record_payload(_module, _name, _data) then
       local restored: PayloadRecord = item:to_value()
       return restored:number_value()
     else raise "captured custom TransferValue policy was unwrapped" end

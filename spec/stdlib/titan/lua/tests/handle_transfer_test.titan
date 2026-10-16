@@ -21,12 +21,9 @@ function test_lua_record_payload_native_handle_survives_detached_origin_gc(
       "detached source finalizer closed the transferred descriptor")
     local packet = inbox:wait()
     case packet
-    when is_record_payload(name, payload) then
-      test.assert(name == "lua.handle_transfer_fixture.Pipe")
-      test.assert(#payload == 1)
-      case payload[1]
-      when is_pointer(pointer) then test.assert(pointer == resource)
-      else raise "native resource pointer policy changed in transit" end
+    when is_record_payload(module, name, payload) then
+      test.assert(module == "lua.handle_transfer_fixture" and
+        name == "lua.handle_transfer_fixture.Pipe" and #payload > 0)
     else raise "native wrapper did not use its record payload hooks" end
     local restored: handle_transfer.Pipe = packet:to_value()
     defer restored:close()

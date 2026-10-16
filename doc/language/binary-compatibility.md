@@ -20,11 +20,18 @@ loaded from an archive, or initialized through Lua's `package.loadlib`.
 For example, a dynamically loaded plugin importing a module already supplied
 by its host executable uses the host's initialized module.
 
+Public [foreign functions](foreign-functions.md) use the same runtime provider
+selection and compatibility checks. Their raw addresses bind once per physical
+consumer image, because raw C bodies have no implicit state argument. A later
+state selecting another address fails initialization instead of redirecting
+existing callbacks. Statically included raw entries retain their exact linked
+addresses; dynamic raw imports remain relocatable through the runtime path.
+
 An [independent Lua state](standard-library-lua.md#independent-lua-states) also
 carries matching native provider descriptors with its copied preload loaders.
 For an uninitialized dynamic dependency, it tries the copied provider before
 searching for a provider file. ABI and consumer compatibility checks still run
-before initialization, and every module's state and bindings belong to the
+before initialization, and every module's state and ordinary Titan bindings belong to the
 destination state. This permits copied transitive dependencies to initialize
 without filesystem paths or a manual require order.
 
@@ -38,6 +45,7 @@ affected consumer function would not have been called in that execution.
 | Referenced declaration | What must remain the same |
 | --- | --- |
 | Function | Erased parameter and result types, parameter names, variadic input, and flexible-result shape. |
+| Public foreign function | Exact C parameter/result types and parameter names. It has no closure or module-state slot. |
 | Module variable | Erased type and mutable/const status. Declaration order may change. |
 | Record | Nominal identity and the complete ordered list of public field names, erased types, and constness. |
 | Union | Nominal identity and the complete ordered list of public variant names and named payload signatures. |

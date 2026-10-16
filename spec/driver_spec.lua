@@ -701,6 +701,23 @@ describe("Windows launcher filenames", function()
 end)
 
 describe("Windows provider export inventory", function()
+    it("exports raw public foreign entries under the final DLL name", function()
+        local signature = types.CFunction({}, types.CVoid(), false, nil)
+        local interface = types.Module("pkg.alpha", {
+            types.ModuleMember("pkg.alpha", "raw", signature, {}),
+        })
+        interface.source_members = {
+            types.ModuleMember("pkg.alpha", "private_raw", signature, {}),
+        }
+        local definition, names = driver.windows_provider_exports(
+            { "pkg.alpha" }, { ["pkg.alpha"] = interface }, "public/provider.dll")
+        assert.matches('LIBRARY "provider.dll"\nEXPORTS\n', definition, 1, true)
+        local symbol = coder.foreign_external_symbols("pkg.alpha", interface)[1]
+        assert.matches(symbol, definition, 1, true)
+        assert.not_matches("private_raw", definition, 1, true)
+        assert.equal(8, #names)
+    end)
+
     it("exports only the module protocol in stable linker order", function()
         local expected = {
             "luaopen_pkg_alpha", "luaopen_pkg_zeta",
@@ -1646,19 +1663,19 @@ describe("compiler installation discovery", function()
             checkout))
     end)
 
-    it("requires exactly the three runtime archive members", function()
+    it("requires exactly the two runtime archive members", function()
         assert.is_true(driver.runtime_archive_members_are_exact(
-            "titan.o\nminicoro.o\ntransfer.o\n"))
+            "titan.o\nminicoro.o\n"))
         assert.is_true(driver.runtime_archive_members_are_exact(
-            "__.SYMDEF SORTED\ntitan.o\nminicoro.o\ntransfer.o\n"))
+            "__.SYMDEF SORTED\ntitan.o\nminicoro.o\n"))
         assert.is_true(driver.runtime_archive_members_are_exact(
-            "__.SYMDEF_64\ntitan.o\nminicoro.o\ntransfer.o\n"))
+            "__.SYMDEF_64\ntitan.o\nminicoro.o\n"))
         assert.is_false(driver.runtime_archive_members_are_exact(
-            "titan.o\nminicoro.o\ntransfer.o\ntitan_uv.o\n"))
+            "titan.o\nminicoro.o\ntitan_uv.o\n"))
         assert.is_false(driver.runtime_archive_members_are_exact(
-            "__.SYMDEF\ntitan.o\nminicoro.o\ntransfer.o\nstale.o\n"))
+            "__.SYMDEF\ntitan.o\nminicoro.o\nstale.o\n"))
         assert.is_false(driver.runtime_archive_members_are_exact(
-            "minicoro.o\ntitan.o\ntransfer.o\n"))
+            "minicoro.o\ntitan.o\n"))
     end)
 
     posix_model_it("links source builds through the complete runtime archive", function()
@@ -2041,6 +2058,26 @@ describe("portable C99 compiled-interface validation", function()
             assert.is_true(driver.validate_module_interface(rebuilt, modname))
             assert.is_true(types.equals(modtype, rebuilt))
         end
+    end)
+
+    it("round-trips public C declarations without admitting source authority", function()
+        local cint = types.CInteger("int", true, 3, 32)
+        local raw = types.CFunction({ cint }, cint, false, nil)
+        local member = types.ModuleMember(modname, "increment", raw, { "input" })
+        local module = types.Module(modname, { member })
+        assert.is_true(driver.validate_module_interface(module, modname))
+        local rebuilt = assert(load("return " .. types.serialize(module),
+            "public C declaration metadata", "t", types))()
+        assert.is_true(driver.validate_module_interface(rebuilt, modname))
+        assert.is_true(types.equals(module, rebuilt))
+        assert.same({}, types.public_module_prefix_layout(rebuilt))
+
+        member._foreign_source = true
+        reject(module, "module member 1 has an invalid schema")
+        member._foreign_source = nil
+        member.paramnames = {}
+        reject(module, "has invalid parameter-name metadata")
+        reject(variable_module(raw), "portable C function has a noncanonical shape")
     end)
 
     it("rejects direct value-facing void descriptors", function()
@@ -3857,7 +3894,7 @@ describe("compiler module loader", function()
             local name = "incremental_driver_headers"
             local filename = source .. "/" .. name .. ".titan"
             write_file(filename, [[
-                foreign function increment(value: int): int
+                local foreign function increment(value: int): int
                     return value + 1
                 end
             ]])

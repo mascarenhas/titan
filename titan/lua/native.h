@@ -31,10 +31,12 @@ typedef struct titan_lua_value {
   size_t length;
   const char *name;
   size_t name_length;
+  const char *module;
+  size_t module_length;
   lua_State *state;
   lua_CFunction function;
   void *pointer;
-  TitanTransferGraph *graph;
+  const void *entry;
 } titan_lua_value;
 
 typedef struct titan_lua_preload {
@@ -58,8 +60,6 @@ typedef struct titan_lua_call {
   int nargs;
   int status;
   int nresults;
-  /* Count of zero-initialized result slots, including a partial conversion. */
-  int allocated_results;
   titan_lua_value *args;
   /* Allocated by the worker; freed by the caller only after completion. */
   titan_lua_value *results;

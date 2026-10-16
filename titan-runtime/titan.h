@@ -284,13 +284,6 @@ inline static TString *_float2str(lua_State *L, lua_Number f) {
 TITAN_RUNTIME_FUNC void *loadlib(lua_State *L, const char *file);
 TITAN_RUNTIME_FUNC void *loadsym(lua_State *L, void *lib, const char *sym);
 TITAN_RUNTIME_FUNC void *loadglobalsym(lua_State *L, const char *sym);
-/* Every generated module payload begins with this header. The resolver belongs
-** to the image which created the canonical module userdata, including a module
-** linked directly into an executable rather than opened as a shared library. */
-typedef struct TitanModuleData {
-  TitanModuleSymbols symbols;
-} TitanModuleData;
-
 typedef struct TitanModuleProvider {
   void *handle;
   TitanModuleSymbols symbols;

@@ -9,11 +9,18 @@ local io = import "io"
 local iteration = import "iteration"
 local net = import "net"
 local reflect = import "reflect"
+local protobuf = import "protobuf"
 local ssl = import "ssl"
 local string = import "string"
 local timer = import "timer"
 local url = import "url"
 local uv = import "uv"
+
+local const connection_transfer_fields: const {reflect.Type} = {
+  reflect.Type.is_string(), reflect.Type.is_boolean(),
+  reflect.Type.is_option(reflect.Type.is_string()),
+  reflect.Type.is_integer(), reflect.Type.is_string(),
+}
 
 local const DEFAULT_LIMIT = 1024 * 1024
 local const OPEN_TIMEOUT = 10000

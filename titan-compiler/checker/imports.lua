@@ -738,7 +738,6 @@ function makemoduletype(modname, modast, st)
     local type_members = {}
     local source_members = {}
     local source_type_members = {}
-    local has_source_foreign = false
 
     local function add_source_member(member)
         member.islocal = true
@@ -776,9 +775,12 @@ function makemoduletype(modname, modast, st)
                 local member = types.ModuleMember(modname, tlnode.name,
                     tlnode._type, tlnode._paramnames)
                 member._documentation = tlnode._documentation
-                member._foreign_source = true
-                has_source_foreign = true
-                add_source_member(member)
+                if tlnode.islocal then
+                    member._foreign_source = true
+                    add_source_member(member)
+                else
+                    members[#members + 1] = member
+                end
             elseif tag == "Ast.TopLevelRecord"
                    or tag == "Ast.TopLevelUnion" then
                 local member = types.ModuleMember(
@@ -833,7 +835,8 @@ function reject_exported_c_ffi_types(modname, modast, errors)
             local tag = node._tag
             if tag == "Ast.TopLevelVar" and not node.islocal then
                 reject_exported_c_ffi_type(modname, errors, node.loc, node._type)
-            elseif tag == "Ast.TopLevelFunc" and not node.islocal then
+            elseif (tag == "Ast.TopLevelFunc"
+                    or tag == "Ast.TopLevelForeignFunc") and not node.islocal then
                 reject_exported_c_ffi_type(modname, errors, node.loc, node._type)
             elseif tag == "Ast.TopLevelTypeAlias" and not node.islocal then
                 reject_exported_c_ffi_type(modname, errors,

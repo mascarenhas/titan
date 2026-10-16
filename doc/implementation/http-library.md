@@ -509,8 +509,11 @@ owner and registers one when `serve` starts.
 The encoder validates state, snapshots metadata and buffers, then delegates the
 transport move to the concrete public TCP/TLS hook. Only after successful
 detachment does it mark the source exchange transferred/inactive and close its
-old parser. The original server's defer therefore cannot close the adopted
-transport. `Exchange:serve` follows the same serial request/framing loop with a
+old parser. A private anonymous-root protobuf schema contains copied scalar,
+header-array, URL and parser fields plus the known transport kind and child
+bytes. If that final encoding raises, a lexical guard discards the detached
+transport; the source stays inactive. The original server's defer therefore
+cannot close an adopted transport. `Exchange:serve` follows the same serial request/framing loop with a
 destination-supplied handler; subsequent transfers/upgrades retain the same
 ownership guard. A single-exchange consumer uses `Exchange:close` to finish its
 response and retire the transport.
@@ -531,7 +534,11 @@ record protocol. It transfers the native transport plus its unread prefix and
 rejects active reads/writes. Ordinary upgrade retirement continues to use the
 captured abort capability. Handoff explicitly unwraps only supported TCP/TLS
 owners and rebuilds that capability in the destination; arbitrary supplied
-Interface implementations are rejected before ownership changes.
+Interface implementations are rejected before ownership changes. Its private
+protobuf schema carries prefix, transport kind and child bytes. Its public
+`discard_transfer_payload` decodes those bytes and directly retires the known
+TCP/TLS child without a Runtime; WebSocket uses this method for failed outer
+serialization. A native close attempt consumes the packet even on an error.
 
 ## Native build and provider composition
 

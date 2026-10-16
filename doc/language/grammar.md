@@ -145,7 +145,7 @@ tlstaticfunc ::= [local] function AnyName '.' AnyName [typeparams]
                  '(' [parlist] ')' [':' rettype] block end
 tlfunc ::= [local] function AnyName [typeparams]
            '(' [parlist] ')' [':' rettype] block end
-tlforeignfunc ::= foreign function AnyName
+tlforeignfunc ::= [local] foreign function AnyName
                   '(' [foreignparlist] ')' [':' foreigntype] block end
 tlvar ::= [local] [const] AnyName
           (':' type ['=' exp] | '=' exp)

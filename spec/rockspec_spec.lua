@@ -478,7 +478,7 @@ describe("standalone-prefix source installation", function()
         assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
             tostring(code) .. ")")
         local members = archive_object_members(output)
-        assert.same({ "minicoro.o", "titan.o", "transfer.o" }, members)
+        assert.same({ "minicoro.o", "titan.o" }, members)
 
         if not platform.windows then
             assert.is_true(read_file("libbacktrace/.libs/libbacktrace.a") ==
@@ -1003,7 +1003,6 @@ int titan_sdk_headers(void) { return LUA_VERSION_NUM + SQLITE_VERSION_NUMBER; }
             "doc/implementation/protobuf-library.md",
             "titan-compiler/test_runner.lua",
             "titan-compiler/coder/closure_transfer.lua",
-            "titan-runtime/transfer.c",
             "titan-runtime/transfer.h",
             "titan-compiler/ffiheaders.lua",
             "titan-compiler/objectmetadata.lua",
@@ -2208,7 +2207,7 @@ inspect-lua-sdk:
         local repository = assert(lfs.currentdir())
         copy_tree("LICENSE", workspace .. "/LICENSE")
         for _, source in ipairs({
-            "titan.c", "titan.h", "minicoro.c", "minicoro.h", "transfer.c", "transfer.h",
+            "titan.c", "titan.h", "minicoro.c", "minicoro.h", "transfer.h",
             "ltitanlib.c", "titan/ffi.h",
         }) do
             copy_tree("titan-runtime/" .. source,

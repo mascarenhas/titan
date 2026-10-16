@@ -5,6 +5,8 @@
 local uv = import "uv"
 local async = import "async"
 local iteration = import "iteration"
+local protobuf = import "protobuf"
+local reflect = import "reflect"
 foreign import "os_platform.h"
 foreign import "os_environment.h"
 foreign type ParentStdioProbe = titan_parent_stdio_probe
@@ -12,6 +14,16 @@ local string = import "string"
 foreign import "time.h"
 foreign import "locale.h"
 foreign import "string.h"
+
+local const output_transfer_fields: const {reflect.Type} = {
+  reflect.Type.is_integer(), reflect.Type.is_option(reflect.Type.is_string()),
+}
+local const input_transfer_fields: const {reflect.Type} = {
+  reflect.Type.is_integer(), reflect.Type.is_string(), reflect.Type.is_integer(),
+  reflect.Type.is_option(reflect.Type.is_named(reflect.NamedType("titan.async.OperationError"))),
+  reflect.Type.is_option(reflect.Type.is_string()),
+  reflect.Type.is_array(reflect.ArrayTypeConstness.is_mutable(), reflect.Type.is_string()),
+}
 
 -- Time/date behavior is translated and adapted from src/loslib.c in the
 -- immutable Lua 5.5.1 release:
@@ -1772,50 +1784,31 @@ local function checked_text(text: string, operation: string)
   if contains_nul(text) then raise make_error(uv.EINVAL, operation) end
 end
 
-local function stream_payload_integer(payload: async.TransferValue): integer
-  case payload
-  when is_integer(number) then return number
-  else raise "invalid process stream transfer payload"
+-- Validation precedes the native close. Once close is attempted, callers
+-- clear their packet before reporting its status; retry must not close twice.
+local function discard_output_transfer_payload(payload: string): integer
+  local descriptor: integer, native: string? =
+    protobuf.deserialize_fields(payload, output_transfer_fields)
+  if descriptor == 1 or descriptor == 2 then
+    if native ~= nil then raise "invalid standard output transfer payload" end
+    return 0
   end
+  if descriptor ~= -1 then raise "invalid retained output stream descriptor" end
+  if native == nil then return 0 end
+  return uv.pipe_t.discard_transfer_payload(native)
 end
 
-local function stream_payload_string(payload: async.TransferValue): string
-  case payload
-  when is_string(bytes) then return bytes
-  else raise "invalid process stream transfer payload"
+local function discard_input_transfer_payload(payload: string): integer
+  local descriptor: integer, _excess: string, _terminal: integer,
+    _failure: async.OperationError?, native: string?, _initial: {string} =
+    protobuf.deserialize_fields(payload, input_transfer_fields)
+  if descriptor == 0 then
+    if native ~= nil then raise "invalid standard input transfer payload" end
+    return 0
   end
-end
-
--- Retire io's retained writable packet without reopening transfer admission.
--- Validation may raise before ownership changes; after calling native close,
--- return its status so the caller clears the packet before reporting errors.
-local function discard_output_transfer_payload(packet: async.TransferValue): integer
-  local output: {async.TransferValue} = {}
-  case packet
-  when is_record_payload(name, payload) then
-    if name ~= "titan.os.OutputStream" or #payload ~= 2 then
-      raise "invalid retained output stream transfer payload"
-    end
-    output = payload
-  else raise "invalid retained output stream transfer payload"
-  end
-  if stream_payload_integer(output[1]) ~= -1 then
-    raise "invalid retained output stream transfer descriptor"
-  end
-  local descriptor = -1
-  case output[2]
-  when is_nil() then return 0
-  when is_record_payload(name, payload) then
-    if name ~= "titan.uv.pipe_t" or #payload ~= 1 then
-      raise "invalid retained pipe transfer payload"
-    end
-    descriptor = stream_payload_integer(payload[1])
-  else raise "invalid retained pipe transfer payload"
-  end
-  if descriptor < 0 or descriptor > 2147483647 then
-    raise "invalid retained pipe transfer descriptor"
-  end
-  return platform_status(ffi.titan_close_parent_duplicate(descriptor))
+  if descriptor ~= -1 then raise "invalid retained input stream descriptor" end
+  if native == nil then return 0 end
+  return uv.pipe_t.discard_transfer_payload(native)
 end
 
 local function stream_transfer_preflight(stream: Stdio, reading: boolean)
@@ -1836,25 +1829,20 @@ local function stream_transfer_preflight(stream: Stdio, reading: boolean)
   end
 end
 
-local function stdio_native_payload(stream: Stdio): async.TransferValue
+local function stdio_native_payload(stream: Stdio): string
   case stream.native
-  when pipe(native) then return async.TransferValue.from_value(native)
+  when pipe(native) then return native:to_transfer_payload()
   else raise "only pipe streams support native handoff"
   end
 end
 
-local function restored_stdio(packet: async.TransferValue): Stdio
+local function restored_stdio(packet: string?): Stdio
   local loop = async.current_loop()
   if async.is_closing() then raise "cannot transfer a stream while async Runtime is shutting down" end
   local native = uv.pipe_t.new()
   local stream = Stdio(native:as_stream_t(), native:as_handle_t(), loop, nil, nil, nil, 0)
-  case packet
-  when is_nil() then return stream
-  when is_record_payload(name) then
-    if name ~= "titan.uv.pipe_t" then raise "invalid process pipe transfer payload" end
-  else raise "invalid process pipe transfer payload"
-  end
-  native = packet:to_value() as uv.pipe_t
+  if packet == nil then return stream end
+  native = uv.pipe_t.from_transfer_payload(packet)
   local adopted = false
   defer if not adopted then uv.close(native:as_handle_t()) end
   stream.native = native:as_stream_t()
@@ -1867,43 +1855,41 @@ end
 -- The caller owns exactly-once payload delivery and recovery after detachment.
 -- The child Process and its exit watcher remain in the originating Runtime.
 -- @usage standard-library-os.md#transferring-process-streams
-function OutputStream:to_transfer_payload(): (...: async.TransferValue)
+function OutputStream:to_transfer_payload(): string
   local stream? = self.handle
-  local native_packet = async.TransferValue.is_nil()
-  local payload: {async.TransferValue} = {
-    async.TransferValue.is_integer(self.parent_descriptor), native_packet}
   if self.parent_descriptor >= 0 then
     if stream ~= nil and stream.pending_writes ~= 0 then
       raise "stream has a pending write"
     end
-    return ...payload
+    return protobuf.serialize_fields(output_transfer_fields, self.parent_descriptor, nil)
   end
-  if stream == nil then return ...payload end
-  stream_transfer_preflight(stream, false)
-  if not stream_is_closed(stream.handle) then
-    payload[2] = stdio_native_payload(stream)
+  local native_packet: string? = nil
+  if stream ~= nil then
+    stream_transfer_preflight(stream, false)
+    if not stream_is_closed(stream.handle) then native_packet = stdio_native_payload(stream) end
   end
   self.handle = nil
-  return ...payload
+  local exported = false
+  defer if not exported and native_packet ~= nil then
+    uv.pipe_t.discard_transfer_payload(native_packet)
+  end
+  local payload = protobuf.serialize_fields(output_transfer_fields, -1, native_packet)
+  exported = true
+  return payload
 end
 
 --- Reconstruct an output facade or adopt its captured pipe on this Runtime.
 -- @usage standard-library-os.md#transferring-process-streams
-function OutputStream.from_transfer_payload(...: async.TransferValue): OutputStream
-  if #... ~= 2 then raise "invalid output stream transfer payload" end
-  local descriptor = stream_payload_integer(...[1])
+function OutputStream.from_transfer_payload(payload: string): OutputStream
+  local descriptor: integer, native: string? =
+    protobuf.deserialize_fields(payload, output_transfer_fields)
   if descriptor == 1 or descriptor == 2 then
-    case ...[2]
-    when is_nil() then return OutputStream(nil, descriptor)
-    else raise "invalid standard output transfer payload"
-    end
+    if native ~= nil then raise "invalid standard output transfer payload" end
+    return OutputStream(nil, descriptor)
   end
   if descriptor ~= -1 then raise "invalid output stream descriptor" end
   local result = OutputStream(nil, -1)
-  case ...[2]
-  when is_nil() then return result
-  else result.handle = restored_stdio(...[2])
-  end
+  if native ~= nil then result.handle = restored_stdio(native) end
   return result
 end
 
@@ -1911,85 +1897,86 @@ end
 -- Unused standard-input facades copy descriptor identity. A pending native
 -- read, reader reservation, or write is rejected before changing the source.
 -- @usage standard-library-os.md#transferring-process-streams
-function InputStream:to_transfer_payload(): (...: async.TransferValue)
+function InputStream:to_transfer_payload(): string
   local stream? = self.handle
-  local terminal_packet = async.TransferValue.is_boolean(true)
-  local payload: {async.TransferValue} = {
-    async.TransferValue.is_integer(self.parent_descriptor),
-    async.TransferValue.is_string(self.excess), terminal_packet,
-    async.TransferValue.is_nil()}
+  local terminal_kind = 3
+  local failure: async.OperationError? = nil
+  local initial: {string} = {}
   if self.parent_descriptor >= 0 then
     if #self.excess ~= 0 or (stream ~= nil and stream.reads ~= nil) then
       raise "standard input has active or buffered read state"
     end
-    return ...payload
+    return protobuf.serialize_fields(input_transfer_fields,
+      self.parent_descriptor, self.excess, terminal_kind, nil, nil, initial)
   end
-  if stream == nil then return ...payload end
-  stream_transfer_preflight(stream, true)
-  local reads? = stream.reads
-  if reads ~= nil then
-    local batch, terminal? = reads:snapshot_pending()
-    if terminal == nil then
-      payload[3] = async.TransferValue.is_nil()
-    else
-      case terminal
-      when error(failure) then payload[3] = async.TransferValue.from_value(failure)
-      when ended() then payload[3] = async.TransferValue.is_boolean(false)
-      when closed() then
-      when item() then raise "invalid input stream terminal outcome"
+  local native_packet: string? = nil
+  if stream ~= nil then
+    stream_transfer_preflight(stream, true)
+    local reads? = stream.reads
+    if reads ~= nil then
+      local batch, terminal? = reads:snapshot_pending()
+      if terminal == nil then terminal_kind = 0
+      else
+        case terminal
+        when error(reason) then
+          terminal_kind = 2
+          failure = reason
+        when ended() then terminal_kind = 1
+        when closed() then
+        when item() then raise "invalid input stream terminal outcome"
+        end
+      end
+      for index = 1, batch.count do initial[index] = batch:get(index) end
+    elseif not stream_is_closed(stream.handle) then terminal_kind = 0 end
+    if not stream_is_closed(stream.handle) then
+      if reads ~= nil then check_status(uv.read_stop(stream.native), "stdio.transfer.read_stop") end
+      do
+        native_packet = stdio_native_payload(stream)
+      catch
+        if reads ~= nil and not stream_is_closed(stream.handle) then
+          resume_stream_read(stream, "stdio.transfer.read_resume")
+        end
+        raise
       end
     end
-    for index = 1, batch.count do
-      payload[index + 4] = async.TransferValue.is_string(batch:get(index))
-    end
-  elseif not stream_is_closed(stream.handle) then
-    payload[3] = async.TransferValue.is_nil()
   end
-  if not stream_is_closed(stream.handle) then
-    if reads ~= nil then check_status(uv.read_stop(stream.native), "stdio.transfer.read_stop") end
-    do
-      payload[4] = stdio_native_payload(stream)
-    catch
-      if reads ~= nil and not stream_is_closed(stream.handle) then
-        resume_stream_read(stream, "stdio.transfer.read_resume")
-      end
-      raise
-    end
-  end
+  local excess = self.excess
   self.handle = nil
   self.excess = ""
-  return ...payload
+  local exported = false
+  defer if not exported and native_packet ~= nil then
+    uv.pipe_t.discard_transfer_payload(native_packet)
+  end
+  local payload = protobuf.serialize_fields(input_transfer_fields,
+    -1, excess, terminal_kind, failure, native_packet, initial)
+  exported = true
+  return payload
 end
 
 --- Reconstruct buffered input and adopt its optional pipe on this Runtime.
 -- @usage standard-library-os.md#transferring-process-streams
-function InputStream.from_transfer_payload(...: async.TransferValue): InputStream
-  if #... < 4 then raise "invalid input stream transfer payload" end
-  local descriptor = stream_payload_integer(...[1])
-  local excess = stream_payload_string(...[2])
+function InputStream.from_transfer_payload(payload: string): InputStream
+  local descriptor: integer, excess: string, terminal_kind: integer,
+    failure: async.OperationError?, native: string?, initial: {string} =
+    protobuf.deserialize_fields(payload, input_transfer_fields)
+  if terminal_kind < 0 or terminal_kind > 3 or
+      (terminal_kind == 2) ~= (failure ~= nil) then
+    raise "invalid input stream terminal payload"
+  end
   if descriptor == 0 then
-    if #... ~= 4 or #excess ~= 0 then raise "invalid standard input transfer payload" end
-    case ...[4]
-    when is_nil() then return InputStream(nil, 0, "")
-    else raise "invalid standard input transfer payload"
+    if #excess ~= 0 or native ~= nil or #initial ~= 0 or terminal_kind ~= 3 then
+      raise "invalid standard input transfer payload"
     end
+    return InputStream(nil, 0, "")
   end
   if descriptor ~= -1 then raise "invalid input stream descriptor" end
-  local initial: {string} = {}
-  for index = 5, #... do initial[index - 4] = stream_payload_string(...[index]) end
   local terminal: async.SubscriptionResult<|string, async.OperationError|>? = nil
-  case ...[3]
-  when is_nil() then
-  when is_boolean(closed) then
-    if closed then terminal = async.SubscriptionResult<|string, async.OperationError|>.closed()
-    else terminal = async.SubscriptionResult<|string, async.OperationError|>.ended() end
-  when is_record() then
-    local failure = ...[3]:to_value() as async.OperationError
-    terminal = async.SubscriptionResult<|string, async.OperationError|>.error(failure)
-  else raise "invalid input stream terminal payload"
+  if terminal_kind == 1 then terminal = async.SubscriptionResult<|string, async.OperationError|>.ended()
+  elseif terminal_kind == 2 then terminal = async.SubscriptionResult<|string, async.OperationError|>.error(failure)
+  elseif terminal_kind == 3 then terminal = async.SubscriptionResult<|string, async.OperationError|>.closed()
   end
   local result = InputStream(nil, -1, excess)
-  local stream = restored_stdio(...[4])
+  local stream = restored_stdio(native)
   local published = false
   defer if not published then discard_unpublished_stdio(stream) end
   if terminal == nil and stream_is_closed(stream.handle) then

@@ -73,7 +73,7 @@ local function http_exchange_cross_state(secure: boolean)
         error('HTTP transfer worker did not succeed')
       end
       return result
-    ]], "=http-exchange-transfer", async.TransferValue.is_closure(operation))
+    ]], "=http-exchange-transfer", async.TransferValue.from_value(operation))
     state:close()
     transfer_gc.collect()
     transfer_gc.collect()
@@ -176,9 +176,8 @@ function test_transfer_exchange_rejects_pending_reader_before_detach(_context: t
 end
 
 function test_transfer_exchange_rejects_malformed_payload(_context: test.Context)
-  transfer_common.assert_raises(function () http.Exchange.from_transfer_payload() end)
+  transfer_common.assert_raises(function () http.Exchange.from_transfer_payload("") end)
   transfer_common.assert_raises(function ()
-    http.UpgradedStream.from_transfer_payload(async.TransferValue.is_integer(1),
-      async.TransferValue.is_nil())
+    http.UpgradedStream.from_transfer_payload("\255")
   end)
 end

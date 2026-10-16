@@ -1121,24 +1121,20 @@ end
 
 function test_fs_file_transfer_rejects_closed_and_malformed_payloads(
     context: test.Context)
-  expect_failure(function () fs.File.from_transfer_payload() end,
+  expect_failure(function () fs.File.from_transfer_payload("") end,
                  "File accepted a missing transfer payload")
   expect_failure(function ()
-    fs.File.from_transfer_payload(async.TransferValue.is_nil(),
-                                 async.TransferValue.is_string(""))
-  end, "File accepted an invalid descriptor kind")
+    fs.File.from_transfer_payload(strings.char(10, 0, 18, 0))
+  end, "File accepted an invalid descriptor wire kind")
   expect_failure(function ()
-    fs.File.from_transfer_payload(async.TransferValue.is_integer(-1),
-                                 async.TransferValue.is_string(""))
+    fs.File.from_transfer_payload(strings.char(8, 1, 18, 0))
   end, "File accepted a closed descriptor")
   expect_failure(function ()
-    fs.File.from_transfer_payload(async.TransferValue.is_integer(2147483648),
-                                 async.TransferValue.is_string(""))
+    fs.File.from_transfer_payload(strings.char(8, 128, 128, 128, 128, 16, 18, 0))
   end, "File accepted an out-of-range descriptor")
   expect_failure(function ()
-    fs.File.from_transfer_payload(async.TransferValue.is_integer(0),
-                                 async.TransferValue.is_nil())
-  end, "File accepted an invalid retained buffer")
+    fs.File.from_transfer_payload(strings.char(8, 0))
+  end, "File accepted a missing retained buffer")
   runtime_test.run(function ()
     local root = support.new_workspace(context)
     local path = root .. "/closed-transfer.dat"
@@ -1197,7 +1193,7 @@ function test_fs_file_transfer_crosses_states_and_survives_source_shutdown(
         error('File transfer worker did not succeed')
       end
       return result
-    ]], "=file-transfer", async.TransferValue.is_closure(operation))
+    ]], "=file-transfer", async.TransferValue.from_value(operation))
     test.assert(source:is_closed())
     state:close()
     gc.collect()

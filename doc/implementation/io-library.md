@@ -152,7 +152,7 @@ pipe, and preflight rejects it with `stdio.transfer`/`EBUSY` even after a yield.
 Tests verify rejection without detachment and continued source traffic/reaping;
 live cross-state shell-pipe handoff has a classified Windows skip.
 The first detached writable-pipe packet remains on the source until the second
-handoff succeeds. A failure therefore retains ownership locally; transfer can
+handoff succeeds. A failure of that second handoff retains ownership locally; transfer can
 retry, and write can reconstruct that owner. Successful reconstruction
 also updates `Process.stdin` to preserve the original facade alias and clears
 the staged field only after adoption succeeds. Close validates and directly
@@ -172,8 +172,11 @@ it reaps the child before requesting exit to keep cancellation of `Process.wait`
 separate from this ownership test. Other platforms report a classified skip.
 
 After successful transfer the source drops both communication facades but
-retains child wait/termination ownership. The receiver validates both nominal
-payload kinds before adoption and allocates its composite shell first. If
+retains child wait/termination ownership. The private protobuf schema contains
+the two known OS child byte payloads. A lexical guard directly discards both
+unadopted packets if final serialization raises after both pipes detach; the
+source Process remains available for wait/termination cleanup. The receiver
+decodes both strings before adoption and allocates its composite shell first. If
 readable-pipe adoption fails, it schedules native close of the unpublished
 writable owner without waiting, preserving the hooks' nonyielding contract.
 The underlying hooks own platform-specific descriptor duplication and

@@ -100,7 +100,9 @@ function binary_collect_usage(tree, st, registry)
             if used then used.variables[decl.name] = true end
         elseif tag == "Type.ModuleMember" then
             local typ = decl.type
-            if typ._tag == "Type.Function" or typ._tag == "Type.FunctionScheme" then
+            if typ._tag == "Type.Function" or typ._tag == "Type.FunctionScheme"
+                    or (typ._tag == "Type.CFunction" and not decl.islocal
+                        and st.binary_modules[decl.modname]) then
                 local used = module_usage(decl.modname)
                 if used then used.functions[decl.name] = true end
             end

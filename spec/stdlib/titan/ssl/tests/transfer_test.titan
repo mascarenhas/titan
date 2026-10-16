@@ -33,7 +33,7 @@ function test_ssl_transfer_moves_lazy_engine_across_states(context: test.Context
         error('TLS transfer worker did not succeed')
       end
       return result
-    ]], "=ssl-connection-transfer", async.TransferValue.is_closure(operation))
+    ]], "=ssl-connection-transfer", async.TransferValue.from_value(operation))
     state:close()
     gc.collect()
     gc.collect()
@@ -115,8 +115,8 @@ function test_ssl_transfer_rejects_pending_handshake(context: test.Context)
 end
 
 function test_ssl_transfer_rejects_malformed_payloads(_context: test.Context)
-  common.assert_raises(function () ssl.Connection.from_transfer_payload() end)
+  common.assert_raises(function () ssl.Connection.from_transfer_payload("") end)
   common.assert_raises(function ()
-    ssl.Connection.from_transfer_payload(async.TransferValue.is_nil())
+    ssl.Connection.from_transfer_payload("\255")
   end)
 end

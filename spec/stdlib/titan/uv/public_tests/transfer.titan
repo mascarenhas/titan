@@ -1,5 +1,3 @@
-local native_transfer = import "transfer"
-
 local function transfer_rejected(action: function (): ())
   local rejected = false
   do action() catch rejected = true end
@@ -107,12 +105,37 @@ function test_pipe_transfer_rejects_invalid_descriptor_before_owner_init(_contex
   uv.bind_transfer_loop(loop)
   defer uv.unbind_transfer_loop(loop)
   expect_error(function ()
-    uv.pipe_t.from_transfer_payload(native_transfer.TransferValue.is_integer(-1))
+    uv.pipe_t.from_transfer_payload(strings.char(8, 1))
   end, "invalid pipe transfer descriptor")
   transfer_rejected(function ()
-    uv.pipe_t.from_transfer_payload(native_transfer.TransferValue.is_integer(4294967296))
+    uv.pipe_t.from_transfer_payload(strings.char(8, 128, 128, 128, 128, 32))
   end)
   local owners = 0
   uv.walk(loop, function (_: uv.handle_t, _data: value) owners = owners + 1 end)
   test.assert(owners == 0, "invalid pipe descriptor initialized an adoptive owner")
+end
+
+function test_native_transfer_discard_retires_unadopted_payload_without_loop_binding(
+    _context: test.Context)
+  local loop = new_loop()
+  defer finish_loop(loop)
+  local pipe_reader, pipe_writer = open_pipe_pair(loop)
+  local pipe_packet = pipe_writer:to_transfer_payload()
+  success(uv.pipe_t.discard_transfer_payload(pipe_packet))
+  test.assert(transfer_read_all(loop, pipe_reader:as_stream_t()) == "")
+
+  local status, left?, right? = uv.socketpair(uv.SOCK_STREAM, 0,
+    uv.NONBLOCK_PIPE, uv.NONBLOCK_PIPE)
+  success(status)
+  local writer, reader = uv.tcp_t(), uv.tcp_t()
+  success(uv.tcp_init(loop, writer))
+  success(uv.tcp_init(loop, reader))
+  success(uv.tcp_open(writer, left))
+  success(uv.tcp_open(reader, right))
+  local tcp_packet = writer:to_transfer_payload()
+  success(uv.tcp_t.discard_transfer_payload(tcp_packet))
+  test.assert(transfer_read_all(loop, reader:as_stream_t()) == "")
+
+  transfer_rejected(function () uv.pipe_t.discard_transfer_payload("") end)
+  transfer_rejected(function () uv.tcp_t.discard_transfer_payload("") end)
 end

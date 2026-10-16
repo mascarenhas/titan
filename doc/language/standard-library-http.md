@@ -560,14 +560,22 @@ own the exchange. The destination supplies its own handler and owns any request
 deadline policy. `close` completes the current response and closes the transport.
 
 `Exchange` and `UpgradedStream` implement the synchronous
-`to_transfer_payload(): (...: async.TransferValue)` and
-`from_transfer_payload(...: async.TransferValue)` hooks. The latter returns the
+`to_transfer_payload(): string` and
+`from_transfer_payload(payload: string)` hooks. The latter returns the
 same concrete record type. `UpgradedStream` is a public record with private
 fields; upgrade APIs retain their `io.ReaderWriterCloser` return type. Its hook
 preserves the already received protocol prefix. WebSocket transfer unwraps that
 HTTP-owned stream and uses this hook automatically. Custom stream implementations
 passed to `request_upgrade_on` do not gain native handoff support: these HTTP
-hooks require a concrete `net.Connection` or `ssl.Connection` transport.
+hooks require a concrete `net.Connection` or `ssl.Connection` transport. Each
+owner encodes a private protobuf schema containing its metadata and the known
+transport's byte payload. Failure to serialize after transport detachment closes
+the detached transport and leaves the source inactive.
+
+`UpgradedStream.discard_transfer_payload(payload: string): integer` consumes a
+known unadopted payload without a Runtime and returns its native close status.
+A close attempt consumes the payload even on an error; do not adopt or discard
+the bytes afterward.
 
 This is the [manual resource handoff contract](standard-library-transfer.md#native-resource-handoff):
 the source detaches before delivery, payloads must be adopted exactly once, and

@@ -1,6 +1,10 @@
 -- Ordinary retirement uses the capability captured before Interface erasure.
 -- Cross-state handoff explicitly supports the native net/SSL owners and rebuilds
 -- that capability from their fresh destination wrappers.
+local const upgraded_transfer_fields: const {reflect.Type} = {
+  reflect.Type.is_string(), reflect.Type.is_integer(), reflect.Type.is_string(),
+}
+
 local record Transport
   connection: io.ReaderWriterCloser
   abort: function (): ()
@@ -96,32 +100,33 @@ local function new_upgraded_stream(transport: Transport,
   return UpgradedStream(transport, parser.input_excess, false, false, 0)
 end
 
-local function transfer_transport(transport: Transport): async.TransferValue
+local function transfer_transport(transport: Transport): (integer, string)
   local concrete: value = transport.connection
   case reflect.inspect(concrete)
   when is_interface(wrapper) then concrete = wrapper.wrapped
   else
   end
-  if not (concrete is net.Connection) and not (concrete is ssl.Connection) then
-    raise "HTTP transfer requires a native TCP or TLS transport"
+  if concrete is net.Connection then
+    return 1, (concrete as net.Connection):to_transfer_payload()
+  elseif concrete is ssl.Connection then
+    return 2, (concrete as ssl.Connection):to_transfer_payload()
   end
-  return async.TransferValue.from_value(concrete)
+  raise "HTTP transfer requires a native TCP or TLS transport"
 end
 
-local function restore_transfer_transport(payload: async.TransferValue): Transport
-  case payload
-  when is_record_payload(name) then
-    if name ~= "titan.net.Connection" and name ~= "titan.ssl.Connection" then
-      raise "invalid HTTP transport transfer payload"
-    end
-  else raise "invalid HTTP transport transfer payload"
+local function discard_transfer_transport(kind: integer, payload: string): integer
+  if kind == 1 then return net.Connection.discard_transfer_payload(payload)
+  elseif kind == 2 then return ssl.Connection.discard_transfer_payload(payload)
   end
-  local concrete = payload:to_value()
-  if concrete is net.Connection then
-    local connection = concrete as net.Connection
+  raise "invalid HTTP transport transfer payload"
+end
+
+local function restore_transfer_transport(kind: integer, payload: string): Transport
+  if kind == 1 then
+    local connection = net.Connection.from_transfer_payload(payload)
     return Transport(connection, connection:close)
-  elseif concrete is ssl.Connection then
-    local connection = concrete as ssl.Connection
+  elseif kind == 2 then
+    local connection = ssl.Connection.from_transfer_payload(payload)
     return Transport(connection, connection:abort)
   end
   raise "invalid HTTP transport transfer payload"
@@ -129,29 +134,38 @@ end
 
 --- Move an idle upgraded stream, preserving unread protocol bytes.
 -- @usage standard-library-http.md#resource-handoff
-function UpgradedStream:to_transfer_payload(): (...: async.TransferValue)
+function UpgradedStream:to_transfer_payload(): string
   if self.closed then raise "HTTP upgraded stream is closed" end
   if self.reading or self.writing ~= 0 then
     raise "HTTP upgraded stream has a pending operation"
   end
-  local prefix = async.TransferValue.is_string(self.prefix)
-  local transport = transfer_transport(self.transport)
+  local prefix = self.prefix
+  local kind, transport_payload = transfer_transport(self.transport)
   self.closed = true
   self.prefix = ""
-  return prefix, transport
+  local exported = false
+  defer if not exported then discard_transfer_transport(kind, transport_payload) end
+  local payload = protobuf.serialize_fields(upgraded_transfer_fields, prefix, kind, transport_payload)
+  exported = true
+  return payload
 end
 
 --- Adopt an upgraded stream on the active destination Runtime.
 -- @usage standard-library-http.md#resource-handoff
-function UpgradedStream.from_transfer_payload(...: async.TransferValue): UpgradedStream
-  if #... ~= 2 then raise "invalid HTTP upgraded stream transfer payload" end
-  local prefix = ""
-  case ...[1]
-  when is_string(bytes) then prefix = bytes
-  else raise "invalid HTTP upgraded stream transfer payload"
-  end
-  local transport = restore_transfer_transport(...[2])
+function UpgradedStream.from_transfer_payload(payload: string): UpgradedStream
+  local prefix: string, kind: integer, transport_payload: string =
+    protobuf.deserialize_fields(payload, upgraded_transfer_fields)
+  local transport = restore_transfer_transport(kind, transport_payload)
   return UpgradedStream(transport, prefix, false, false, 0)
+end
+
+--- Dispose of an undelivered upgraded stream exactly once without a Runtime.
+-- @return Native transport close status; the payload must not be adopted later.
+-- @usage standard-library-http.md#resource-handoff
+function UpgradedStream.discard_transfer_payload(payload: string): integer
+  local _prefix: string, kind: integer, transport_payload: string =
+    protobuf.deserialize_fields(payload, upgraded_transfer_fields)
+  return discard_transfer_transport(kind, transport_payload)
 end
 
 local record UpgradeOutcome<|A|>

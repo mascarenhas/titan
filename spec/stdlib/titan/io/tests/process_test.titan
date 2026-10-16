@@ -418,7 +418,7 @@ function test_io_stream_transfer_crosses_states_with_origin_reaping(
         error('shell stream transfer worker did not succeed')
       end
       return result
-    ]], "=shell-stream-transfer", async.TransferValue.is_closure(operation))
+    ]], "=shell-stream-transfer", async.TransferValue.from_value(operation))
     state:close()
     test.assert(result:to_value() as string == "x\0y\255|done")
     test.assert(source:wait().code == 0,
@@ -427,9 +427,8 @@ function test_io_stream_transfer_crosses_states_with_origin_reaping(
 end
 
 function test_io_stream_transfer_rejects_malformed_payloads(_context: test.Context)
-  common.assert_raises(function () stream.InputOutputStream.from_transfer_payload() end)
+  common.assert_raises(function () stream.InputOutputStream.from_transfer_payload("") end)
   common.assert_raises(function ()
-    stream.InputOutputStream.from_transfer_payload(async.TransferValue.is_nil(),
-                                                  async.TransferValue.is_nil())
+    stream.InputOutputStream.from_transfer_payload("\255")
   end)
 end

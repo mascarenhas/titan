@@ -262,7 +262,7 @@ observable.
 ## Connection transfer ownership
 
 TLS handoff moves the `SSL *` and its owned memory BIOs intact, together with
-the custom TCP connection policy and copied scalar/plaintext state. OpenSSL's
+the known TCP connection byte payload and copied scalar/plaintext state. OpenSSL's
 `SSL_new` retains its context; the engine owns both BIOs. The implementation
 installs no Lua-state callbacks or Lua-bearing native ex-data on these objects.
 Consequently, closing the source Lua state after detachment does not invalidate
@@ -270,9 +270,13 @@ the engine or its context. Encrypted input has already been copied into a BIO;
 retry pointers and borrowed output batches are excluded by the idle gate.
 
 The encoder rejects every reader/writer/control/handshake/feeder/retry owner and
-cleanup or scope waiter. It allocates policy storage before transferring TCP,
+cleanup or scope waiter. It snapshots scalar state before transferring TCP,
 then clears the source engine/BIO/transport references and marks it closed.
-It does not call `SSL_free`. The destination validates the entire policy and
+A private protobuf schema encodes the child bytes, fixed64 engine pointer and
+copied state. Successful encoding preserves the engine; if serialization raises
+after detachment, a lexical guard calls `SSL_free` and discards the TCP packet.
+Public `Connection.discard_transfer_payload` performs the same terminal cleanup
+for a known unadopted packet without a Runtime. The destination decodes the schema and
 allocates an empty wrapper before adopting TCP, attaches the native engine,
 and obtains its BIO pointers with `SSL_get_rbio`/`SSL_get_wbio`. All operation
 slots and waiter Arrays are fresh destination-owned objects. TLS transfer

@@ -122,6 +122,84 @@ union PrivateVariants
   local hidden()
 end
 
+local function anonymous_equal(actual: value, expected: value)
+  test.assert(actual == expected)
+end
+
+local function anonymous_result_count(...: value): integer
+  return #...
+end
+
+local function check_anonymous_nil_slots(...: value)
+  anonymous_equal(#..., 4)
+  anonymous_equal(...[1], nil)
+  anonymous_equal(...[2], 37)
+  anonymous_equal(...[3], false)
+  anonymous_equal(...[4], nil)
+end
+
+function test_anonymous_fields_match_nominal_wire(_context: test.Context)
+  local fields: const {reflect.Type} = {reflect.Type.is_integer()}
+  local bytes = protobuf.serialize_fields(fields, -37)
+  anonymous_equal(bytes, protobuf.serialize(IntegerValue(-37)))
+  local number: integer = protobuf.deserialize_fields(bytes, fields)
+  anonymous_equal(number, -37)
+end
+
+function test_anonymous_fields_preserve_nil_positions_and_result_count(_context: test.Context)
+  local fields: const {reflect.Type} = {
+    reflect.Type.is_nil(), reflect.Type.is_integer(),
+    reflect.Type.is_boolean(), reflect.Type.is_option(reflect.Type.is_string())
+  }
+  local bytes = protobuf.serialize_fields(fields, nil, 37, false, nil)
+  check_anonymous_nil_slots(protobuf.deserialize_fields(bytes, fields))
+  local empty: const {reflect.Type} = {}
+  anonymous_equal(protobuf.serialize_fields(empty), "")
+  anonymous_equal(anonymous_result_count(protobuf.deserialize_fields("", empty)), 0)
+end
+
+function test_anonymous_fields_require_exact_arity(_context: test.Context)
+  local fields: const {reflect.Type} = {reflect.Type.is_option(reflect.Type.is_integer())}
+  expect_error(function () protobuf.serialize_fields(fields) end, "field count mismatch")
+  expect_error(function () protobuf.serialize_fields(fields, nil, nil) end, "field count mismatch")
+  anonymous_equal(protobuf.serialize_fields(fields, nil), "")
+end
+
+function test_anonymous_fields_use_existing_wire_validation(_context: test.Context)
+  local fields: const {reflect.Type} = {reflect.Type.is_integer()}
+  expect_error(function () protobuf.deserialize_fields("", fields) end, "missing required field")
+  expect_error(function () protobuf.deserialize_fields(string.char(10, 0), fields) end, "wire")
+  local merged = protobuf.serialize_fields(fields, 7) .. protobuf.serialize_fields(fields, 19)
+  local number: integer = protobuf.deserialize_fields(merged .. string.char(16, 6), fields)
+  anonymous_equal(number, 19)
+end
+
+function test_anonymous_fields_copy_arrays_and_nominals(_context: test.Context)
+  local fields: const {reflect.Type} = {
+    reflect.Type.is_array(reflect.ArrayTypeConstness.is_mutable(), reflect.Type.is_string()),
+    descriptor(IntegerValue(0))
+  }
+  local original = {"a\0b", "tail"}
+  local bytes = protobuf.serialize_fields(fields, original, IntegerValue(41))
+  local copied: {string}, nominal: IntegerValue = protobuf.deserialize_fields(bytes, fields)
+  original[1] = "changed"
+  anonymous_equal(copied[1], "a\0b")
+  anonymous_equal(copied[2], "tail")
+  anonymous_equal(nominal.number, 41)
+end
+
+local record AnonymousLocal
+  number: integer
+end
+
+function test_anonymous_fields_preserve_nominal_visibility_rules(_context: test.Context)
+  local candidate = AnonymousLocal(7)
+  local fields: const {reflect.Type} = {descriptor(candidate)}
+  expect_error(function () protobuf.serialize_fields(fields, candidate) end, "record must be public")
+  expect_error(function () protobuf.deserialize_fields(string.char(10, 2, 8, 14), fields) end,
+               "record must be public")
+end
+
 local constructions = 0
 
 record CustomConstructor
@@ -293,6 +371,29 @@ function test_foreign_function_pointer_keeps_its_borrowed_address(_context: test
   local original = FunctionPointer(ffi.titan_protobuf_increment)
   local decoded: FunctionPointer = roundtrip(original)
   test.assert(decoded.callback(26) as integer == 27)
+end
+
+function test_anonymous_pointer_fields_preserve_null_and_all_address_bits(_context: test.Context)
+  if foreign uintptr_t.sizeof ~= 8 then
+    test.skip("platform: full 64-bit pointer patterns require 64-bit pointers")
+  end
+  local fields: const {reflect.Type} = {
+    reflect.Type.is_foreign_pointer(reflect.Type.is_foreign_void(), {}),
+  }
+  local patterns: {integer} = {0, 0x8000000000000000, 0xffffffffffffffff, 0x0123456789abcdef}
+  for index = 1, #patterns do
+    local pattern = patterns[index]
+    local address = ffi.titan_protobuf_pointer_pattern(pattern)
+    local encoded = protobuf.serialize_fields(fields, address)
+    test.assert(encoded == string.char(9) .. string.pack("<i8", pattern),
+                "pointer did not use exact fixed64 address bits")
+    local restored = (protobuf.deserialize_fields(encoded, fields)) as foreign *void
+    test.assert(restored == address, "pointer address bits changed during decoding")
+  end
+  local original_callback: foreign function(int): int = ffi.titan_protobuf_increment
+  local callback_bytes = protobuf.serialize_fields(fields, original_callback)
+  local callback = (protobuf.deserialize_fields(callback_bytes, fields)) as foreign function(int): int
+  test.assert(callback(26) as integer == 27, "anonymous foreign function pointer changed")
 end
 
 function test_boolean_presence_and_foreign_integer_bounds(_context: test.Context)

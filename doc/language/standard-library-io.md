@@ -166,8 +166,8 @@ function InputOutputStream:read_until(delimiter: string,
 function InputOutputStream:write(data: string)
 function InputOutputStream:close()
 function InputOutputStream:wait(): os.ExitStatus
-function InputOutputStream:to_transfer_payload(): (...: async.TransferValue)
-function InputOutputStream.from_transfer_payload(...: async.TransferValue): InputOutputStream
+function InputOutputStream:to_transfer_payload(): string
+function InputOutputStream.from_transfer_payload(payload: string): InputOutputStream
 
 function popen(command: string): InputOutputStream
 ```
@@ -220,7 +220,7 @@ merged readable stdout/stderr pipes. Pending wrapper operations and underlying
 pipe reads or writes are rejected before either pipe is detached. Native pipe
 handoff follows the platform restrictions of
 [`os.InputStream` and `os.OutputStream`](standard-library-os.md#transferring-process-streams).
-`InputOutputStream.from_transfer_payload(...)` adopts both pipes on the
+`InputOutputStream.from_transfer_payload(payload)` adopts both pipes on the
 current destination Runtime, including buffered output.
 
 Captured shell output starts reading as soon as `popen` creates the process.
@@ -242,8 +242,11 @@ destination.
 If native handoff of the second pipe fails after the first succeeded, the
 source retains the first pipe's payload. A later transfer retries with that
 payload; `write()` re-adopts it locally, while `close()` directly retires its
-descriptor even after Runtime shutdown has closed transfer admission. No
-payload is discarded merely because this composite hook raises.
+descriptor even after Runtime shutdown has closed transfer admission. Once both
+pipes detach, the hook serializes their byte payloads with its private protobuf
+schema. If this final serialization fails, it closes both detached pipes and
+leaves the source communication facades closed; the original child remains
+available through `wait()` and `close()`.
 
 The payload follows the same trusted manual contract as other resource hooks:
 deliver and adopt it exactly once within this process, recover failed delivery,

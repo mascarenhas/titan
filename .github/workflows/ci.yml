@@ -811,14 +811,16 @@ jobs:
               TITAN_FILTER='test_runtime_shutdown_closes_native_handles_but_not_files$' \
               TITAN_TEST_TIMEOUT=15
 
-      - name: Run dense Array and closure transfer runtime sanitizer gate
+      - name: Run dense Array and value transfer sanitizer gate
         env:
           TITAN_TEST_EXTRA_CFLAGS: ${{ env.SANITIZER_FLAGS }}
           TITAN_TEST_EXTRA_LDFLAGS: ${{ env.SANITIZER_FLAGS }}
         run: |
           bash spec/support/ci_sanitizer_capture.sh dense-array \
             env TITAN_PROBE_CACHE_DISABLE=1 .lua/bin/busted -o gtest -v \
-              spec/dense_array_runtime_spec.lua spec/transfer_runtime_spec.lua
+              spec/dense_array_runtime_spec.lua
+          bash spec/support/ci_sanitizer_capture.sh value-transfer \
+            make titan-stdlib-test-run TITAN_FILTER=transfer
 
       - name: Run immediate function compiler sanitizer gate
         run: |

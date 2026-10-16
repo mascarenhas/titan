@@ -53,8 +53,8 @@ function Connection:read_until(delimiter: string,
 function Connection:write(data: string)
 function Connection:shutdown()
 function Connection:close()
-function Connection:to_transfer_payload(): (...: async.TransferValue)
-function Connection.from_transfer_payload(...: async.TransferValue): Connection
+function Connection:to_transfer_payload(): string
+function Connection.from_transfer_payload(payload: string): Connection
 function Connection:abort()
 
 function Server:accept(): Connection
@@ -179,8 +179,8 @@ back into them.
 ## Transferring connections
 
 An idle TLS `Connection` implements
-`to_transfer_payload(): (...: async.TransferValue)` and
-`Connection.from_transfer_payload(...: async.TransferValue): Connection`.
+`to_transfer_payload(): string` and
+`Connection.from_transfer_payload(payload: string): Connection`.
 `async.TransferValue.from_value(connection)` detaches the live TLS engine and
 its TCP transport into a same-process custom record policy. Decode with
 `packet:to_value()` in a state with an active async Runtime. The destination
@@ -193,13 +193,21 @@ retirement ownership. It also follows every
 [TCP transfer restriction](standard-library-net.md#transferring-connections),
 including registered input observers and native overlapped reads on Windows.
 An admission failure leaves the original connection usable. The source becomes
-closed as soon as encoding succeeds, before any receiver accepts the payload.
+closed after the transport detaches, before any receiver accepts the payload.
+The private protobuf schema stores the TCP child bytes, a fixed64 engine pointer,
+and copied TLS state. If outer serialization fails after transport detachment,
+the hook frees the engine and closes the detached transport.
 
 Ownership is manual: reconstruct exactly once, including local recovery when
 delivery fails, and then close or abort the reconstructed connection normally.
 Replay can double close or use freed native memory; dropping the payload leaks
 the detached engine and endpoint. There is no automatic delivery rollback or
 payload finalizer. The native engine pointer is valid only in the same process.
+
+`Connection.discard_transfer_payload(payload: string): integer` consumes a known
+unadopted payload without an active Runtime: it frees the engine and closes the
+endpoint, returning the native close status. The close attempt consumes ownership
+even on an error; the bytes must never be adopted or discarded again.
 
 ## Reading and writing
 

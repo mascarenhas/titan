@@ -110,7 +110,7 @@ function test_transfer_open_session_survives_source_state_close(context: test.Co
         error('WebSocket transfer worker did not succeed')
       end
       return result
-    ]], "=websocket-session-transfer", async.TransferValue.is_closure(operation))
+    ]], "=websocket-session-transfer", async.TransferValue.from_value(operation))
     state:close()
     gc.collect(); gc.collect()
     local connection: websocket.Connection = packet:to_value()
@@ -124,9 +124,9 @@ function test_transfer_open_session_survives_source_state_close(context: test.Co
 end
 
 function test_transfer_websocket_rejects_malformed_payloads(_context: test.Context)
-  common.assert_raises(function () websocket.Connection.from_transfer_payload() end)
+  common.assert_raises(function () websocket.Connection.from_transfer_payload("") end)
   common.assert_raises(function ()
-    websocket.Connection.from_transfer_payload(async.TransferValue.is_nil())
+    websocket.Connection.from_transfer_payload("\255")
   end)
 end
 
