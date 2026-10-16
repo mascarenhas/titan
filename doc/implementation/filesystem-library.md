@@ -44,6 +44,31 @@ buffer views and resubmit the unconsumed suffix after a short write, preserving
 1-based slice indices and exact borrowed lifetime. File mode mapping and native
 creation permissions remain in this module.
 
+## File transfer
+
+`File` counts entry to exit of each public read/write/flush operation and the
+internal close operation, including the complete `read_until` composition.
+Nested reads contribute to the same count. The count is solely a transfer
+admission guard; it does not change existing concurrent operation or close
+ordering. Deferred decrements preserve the guard through accepted native
+callbacks, result publication, cancellation, and error unwinding.
+
+`to_transfer_payload` checks open ownership and a zero count, allocates the
+descriptor/string payload, then clears `handle` and `excess` as its final
+mutation. Adoption validates both slots and the signed native descriptor range
+before constructing `File(descriptor, excess, 0)`. A descriptor is process-owned
+rather than bound to a UV loop, so neither hook needs a Task or native I/O.
+The descriptor and current file position move intact across independent Lua
+states. The payload uses the existing trusted, exactly-once manual handoff
+contract; it does not add a descriptor registry, destructor, or replay guard.
+
+Native `fs.tests` cover retained binary delimiter bytes, shared file position,
+source invalidation, malformed and closed payloads, hooks outside a Task, and
+cross-state use after source-state shutdown. The existing deterministic
+concurrent-read gate also rejects transfer of both accepted pending reads
+before their completion callbacks can run, and verifies both source owners
+remain open.
+
 ## Metadata and canonical paths
 
 `stat` and `lstat` copy public UV `stat_t` results into the existing `Stat`

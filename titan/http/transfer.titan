@@ -1,0 +1,421 @@
+-- HTTP request and response ownership crosses states as one exchange.
+-- The llhttp snapshot is process-local, tied to this provider's pinned llhttp.
+-- Its state selector and span callback are native code identities; all pointers
+-- to source Lua storage, settings, input bytes, and error text are removed.
+
+--- One request and response sharing a transferable HTTP transport and parser.
+-- @field request Request reader and metadata.
+-- @field response Response writer and framing state.
+-- @usage standard-library-http.md#resource-handoff
+record Exchange
+  const request: Request
+  const response: Response
+end
+
+--- Bundle the matching live endpoints passed to an HTTP handler.
+-- @usage standard-library-http.md#resource-handoff
+function Exchange.new(request_value: Request, response: Response): Exchange
+  if request_value.exchange ~= response.exchange or not response.exchange.active then
+    raise "HTTP Exchange requires a matching live request and response"
+  end
+  return {request = request_value, response = response}
+end
+
+local record ExchangeSnapshot
+  native_bytes: string
+  span_active: boolean
+  parser_response_to_head: boolean
+  parser_allow_upgrade: boolean
+  parser_upgrade: boolean
+  parser_header_limit: integer
+  parser_header_bytes: integer
+  parser_last_error: integer
+  parser_input_excess: string
+  parser_body_excess: string
+  parser_body_chunks: {string}
+  parser_body_index: integer
+  parser_body_consumed: integer
+  parser_parsed_headers: Headers
+  parser_target_text: string
+  parser_reason_text: string
+  parser_header_name_text: string
+  parser_header_contents_text: string
+  parser_method_text: string
+  parser_status_number: integer
+  parser_major: integer
+  parser_minor: integer
+  parser_keep_alive: boolean
+  parser_headers_complete: boolean
+  parser_message_complete: boolean
+  parser_transport_eof: boolean
+  parser_input_seen: boolean
+  parser_input_received: boolean
+  parser_paused: boolean
+  request_method: string
+  request_target: string
+  request_url: url.Url
+  request_version: string
+  request_headers: Headers
+  request_headers_shared: boolean
+  request_ended: boolean
+  response_request_method: string
+  response_request_keep_alive: boolean
+  response_response_headers: Headers
+  response_status_number: integer
+  response_reason_text: string
+  response_headers_sent: boolean
+  response_chunked: boolean
+  response_body_allowed: boolean
+  response_content_length: integer?
+  response_written: integer
+  response_keep_alive: boolean
+  response_closed: boolean
+  output_started: boolean
+  rejected: boolean
+end
+
+local function append_handoff(items: {async.TransferValue}, item: value)
+  items[#items + 1] = async.TransferValue.from_value(item)
+end
+
+local function append_handoff_headers(items: {async.TransferValue}, source: Headers)
+  local entries = source:all()
+  append_handoff(items, #entries)
+  for index = 1, #entries do
+    append_handoff(items, entries[index].name)
+    append_handoff(items, entries[index].contents)
+  end
+end
+
+local function append_handoff_strings(items: {async.TransferValue}, source: {string})
+  append_handoff(items, #source)
+  for index = 1, #source do append_handoff(items, source[index]) end
+end
+
+local record HandoffReader
+  items: {async.TransferValue}
+  position: integer
+end
+
+local function HandoffReader:next(): value
+  if self.position > #self.items then raise "invalid HTTP Exchange transfer payload" end
+  local item = self.items[self.position]
+  self.position = self.position + 1
+  -- Metadata never adopts a resource. Only the final transport entry may own
+  -- native state, and it is interpreted after all metadata has been validated.
+  case item
+  when is_nil() then
+  when is_boolean() then
+  when is_integer() then
+  when is_string() then
+  when is_record(name) then
+    if name ~= "titan.url.Url" then raise "invalid HTTP Exchange metadata" end
+  else raise "invalid HTTP Exchange metadata"
+  end
+  return item:to_value()
+end
+
+local function HandoffReader:count(): integer
+  local count: integer = self:next()
+  if count < 0 or count > #self.items - self.position + 1 then
+    raise "invalid HTTP Exchange transfer count"
+  end
+  return count
+end
+
+local function HandoffReader:headers(): Headers
+  local result = headers(nil)
+  local count = self:count()
+  for index = 1, count do
+    local name: string = self:next()
+    local contents: string = self:next()
+    result:add(name, contents)
+  end
+  return result
+end
+
+local function HandoffReader:strings(): {string}
+  local result: {string} = {}
+  local count = self:count()
+  for index = 1, count do result[index] = self:next() end
+  return result
+end
+
+local function parser_handoff_bytes(parser: Parser): string
+  local copied = foreign llhttp_t.new()
+  ffi.memcpy(copied, parser.native, foreign llhttp_t.sizeof)
+  copied.data = nil
+  copied.settings = nil
+  copied._span_pos0 = nil
+  copied.error_pos = nil
+  copied.reason = nil
+  local storage = foreign char.new_array(foreign llhttp_t.sizeof)
+  ffi.memcpy(storage, copied, foreign llhttp_t.sizeof)
+  return storage as string
+end
+
+--- Detach an idle request/response pair, preserving parser and framing progress.
+-- @usage standard-library-http.md#resource-handoff
+function Exchange:to_transfer_payload(): (...: async.TransferValue)
+  local request_value = self.request
+  local response = self.response
+  local state = response.exchange
+  local parser = state.parser
+  if request_value.exchange ~= state or not state.active or state.transferred or parser.closed then
+    raise "HTTP Exchange has ended or already transferred"
+  end
+  if state.pending ~= 0 then raise "HTTP Exchange has a pending operation" end
+  if parser.callback_failed or #parser.events ~= 0 or
+      (parser.last_error ~= ffi.HPE_OK and parser.last_error ~= ffi.HPE_PAUSED) then
+    raise "HTTP Exchange parser is not transferable"
+  end
+  local native_bytes = parser_handoff_bytes(parser)
+  local items: {async.TransferValue} = {}
+  append_handoff(items, native_bytes)
+  append_handoff(items, parser.native._span_pos0 ~= nil)
+  append_handoff(items, parser.response_to_head)
+  append_handoff(items, parser.allow_upgrade)
+  append_handoff(items, parser.upgrade)
+  append_handoff(items, parser.header_limit)
+  append_handoff(items, parser.header_bytes)
+  append_handoff(items, parser.last_error)
+  append_handoff(items, parser.input_excess)
+  append_handoff(items, parser.body_excess)
+  append_handoff_strings(items, parser.body_chunks)
+  append_handoff(items, parser.body_index)
+  append_handoff(items, parser.body_consumed)
+  append_handoff_headers(items, parser.parsed_headers)
+  append_handoff(items, parser.target_text)
+  append_handoff(items, parser.reason_text)
+  append_handoff(items, parser.header_name_text)
+  append_handoff(items, parser.header_contents_text)
+  append_handoff(items, parser.method_text)
+  append_handoff(items, parser.status_number)
+  append_handoff(items, parser.major)
+  append_handoff(items, parser.minor)
+  append_handoff(items, parser.keep_alive)
+  append_handoff(items, parser.headers_complete)
+  append_handoff(items, parser.message_complete)
+  append_handoff(items, parser.transport_eof)
+  append_handoff(items, parser.input_seen)
+  append_handoff(items, parser.input_received)
+  append_handoff(items, parser.paused)
+  append_handoff(items, request_value.method)
+  append_handoff(items, request_value.target)
+  append_handoff(items, request_value.url)
+  append_handoff(items, request_value.version)
+  append_handoff_headers(items, request_value.headers)
+  append_handoff(items, request_value.headers == parser.parsed_headers)
+  append_handoff(items, request_value.ended)
+  append_handoff(items, response.request_method)
+  append_handoff(items, response.request_keep_alive)
+  append_handoff_headers(items, response.response_headers)
+  append_handoff(items, response.status_number)
+  append_handoff(items, response.reason_text)
+  append_handoff(items, response.headers_sent)
+  append_handoff(items, response.chunked)
+  append_handoff(items, response.body_allowed)
+  append_handoff(items, response.content_length)
+  append_handoff(items, response.written)
+  append_handoff(items, response.keep_alive)
+  append_handoff(items, response.closed)
+  append_handoff(items, state.output_started)
+  append_handoff(items, state.rejected)
+  -- Reserve the final slot before the native ownership boundary.
+  items[#items + 1] = async.TransferValue.is_nil()
+  local transport = transfer_transport(state.transport)
+  items[#items] = transport
+  state.transferred = true
+  state.active = false
+  request_value.ended = true
+  response.closed = true
+  close_parser(parser)
+  return ...items
+end
+
+--- Adopt both endpoints on the destination Runtime with fresh parser callbacks.
+-- @usage standard-library-http.md#resource-handoff
+function Exchange.from_transfer_payload(...: async.TransferValue): Exchange
+  local reader = HandoffReader({...}, 1)
+  local snapshot = ExchangeSnapshot {
+    native_bytes = reader:next(),
+    span_active = reader:next(),
+    parser_response_to_head = reader:next(),
+    parser_allow_upgrade = reader:next(),
+    parser_upgrade = reader:next(),
+    parser_header_limit = reader:next(),
+    parser_header_bytes = reader:next(),
+    parser_last_error = reader:next(),
+    parser_input_excess = reader:next(),
+    parser_body_excess = reader:next(),
+    parser_body_chunks = reader:strings(),
+    parser_body_index = reader:next(),
+    parser_body_consumed = reader:next(),
+    parser_parsed_headers = reader:headers(),
+    parser_target_text = reader:next(),
+    parser_reason_text = reader:next(),
+    parser_header_name_text = reader:next(),
+    parser_header_contents_text = reader:next(),
+    parser_method_text = reader:next(),
+    parser_status_number = reader:next(),
+    parser_major = reader:next(),
+    parser_minor = reader:next(),
+    parser_keep_alive = reader:next(),
+    parser_headers_complete = reader:next(),
+    parser_message_complete = reader:next(),
+    parser_transport_eof = reader:next(),
+    parser_input_seen = reader:next(),
+    parser_input_received = reader:next(),
+    parser_paused = reader:next(),
+    request_method = reader:next(),
+    request_target = reader:next(),
+    request_url = reader:next(),
+    request_version = reader:next(),
+    request_headers = reader:headers(),
+    request_headers_shared = reader:next(),
+    request_ended = reader:next(),
+    response_request_method = reader:next(),
+    response_request_keep_alive = reader:next(),
+    response_response_headers = reader:headers(),
+    response_status_number = reader:next(),
+    response_reason_text = reader:next(),
+    response_headers_sent = reader:next(),
+    response_chunked = reader:next(),
+    response_body_allowed = reader:next(),
+    response_content_length = reader:next(),
+    response_written = reader:next(),
+    response_keep_alive = reader:next(),
+    response_closed = reader:next(),
+    output_started = reader:next(),
+    rejected = reader:next(),
+  }
+  if reader.position ~= #reader.items or
+      #snapshot.native_bytes ~= foreign llhttp_t.sizeof or
+      snapshot.parser_body_index < 1 or
+      snapshot.parser_body_index > #snapshot.parser_body_chunks + 1 or
+      snapshot.parser_body_consumed < 0 or
+      not snapshot.parser_headers_complete or
+      (snapshot.parser_last_error ~= ffi.HPE_OK and
+       snapshot.parser_last_error ~= ffi.HPE_PAUSED) then
+    raise "invalid HTTP Exchange transfer payload"
+  end
+  local transport = restore_transfer_transport(reader.items[reader.position])
+  local parser = new_request_parser(transport.connection)
+  ffi.memcpy(parser.native, snapshot.native_bytes as foreign const *char,
+    foreign llhttp_t.sizeof)
+  parser.native.data = parser as foreign *void
+  parser.native.settings = parser.settings
+  -- llhttp resets a live span to the next input's address on execute. A local
+  -- nonnil marker retains that state without keeping an origin input pointer.
+  if snapshot.span_active then parser.native._span_pos0 = parser as foreign *void end
+  parser.response_to_head = snapshot.parser_response_to_head
+  parser.allow_upgrade = snapshot.parser_allow_upgrade
+  parser.upgrade = snapshot.parser_upgrade
+  parser.header_limit = snapshot.parser_header_limit
+  parser.header_bytes = snapshot.parser_header_bytes
+  parser.last_error = snapshot.parser_last_error
+  parser.input_excess = snapshot.parser_input_excess
+  parser.body_excess = snapshot.parser_body_excess
+  parser.body_chunks = snapshot.parser_body_chunks
+  parser.body_index = snapshot.parser_body_index
+  parser.body_consumed = snapshot.parser_body_consumed
+  parser.parsed_headers = snapshot.parser_parsed_headers
+  parser.target_text = snapshot.parser_target_text
+  parser.reason_text = snapshot.parser_reason_text
+  parser.header_name_text = snapshot.parser_header_name_text
+  parser.header_contents_text = snapshot.parser_header_contents_text
+  parser.method_text = snapshot.parser_method_text
+  parser.status_number = snapshot.parser_status_number
+  parser.major = snapshot.parser_major
+  parser.minor = snapshot.parser_minor
+  parser.keep_alive = snapshot.parser_keep_alive
+  parser.headers_complete = snapshot.parser_headers_complete
+  parser.message_complete = snapshot.parser_message_complete
+  parser.transport_eof = snapshot.parser_transport_eof
+  parser.input_seen = snapshot.parser_input_seen
+  parser.input_received = snapshot.parser_input_received
+  parser.paused = snapshot.parser_paused
+  local state = ExchangeState(transport, parser, true, false,
+    snapshot.output_started, snapshot.rejected, 0, false)
+  local request_value = Request {
+    method = snapshot.request_method,
+    target = snapshot.request_target,
+    url = snapshot.request_url,
+    version = snapshot.request_version,
+    headers = snapshot.request_headers,
+    ended = snapshot.request_ended,
+    parser = parser, exchange = state,
+  }
+  local response = Response {
+    connection = transport.connection, exchange = state,
+    request_method = snapshot.response_request_method,
+    request_keep_alive = snapshot.response_request_keep_alive,
+    response_headers = snapshot.response_response_headers,
+    status_number = snapshot.response_status_number,
+    reason_text = snapshot.response_reason_text,
+    headers_sent = snapshot.response_headers_sent,
+    chunked = snapshot.response_chunked,
+    body_allowed = snapshot.response_body_allowed,
+    content_length = snapshot.response_content_length,
+    written = snapshot.response_written,
+    keep_alive = snapshot.response_keep_alive,
+    closed = snapshot.response_closed,
+  }
+  if snapshot.request_headers_shared then request_value.headers = parser.parsed_headers end
+  return Exchange(request_value, response)
+end
+
+--- Finish the current response and retire this exchange's transport.
+-- @usage standard-library-http.md#resource-handoff
+function Exchange:close()
+  local state = self.response.exchange
+  if not state.active then return end
+  if state.pending ~= 0 then raise "HTTP Exchange has a pending operation" end
+  defer do
+    state.active = false
+    close_parser(state.parser)
+    state.transport.abort()
+  end
+  self.response:close()
+  state.transport.connection:close()
+end
+
+--- Handle this exchange and subsequent keep-alive requests on the adopted connection.
+-- The supplied handler owns application policy in the destination state.
+-- @usage standard-library-http.md#resource-handoff
+function Exchange:serve(handler: Handler)
+  local request_value = self.request
+  local response = self.response
+  local state = response.exchange
+  if not state.active then raise "HTTP Exchange has ended" end
+  if state.serving then raise "HTTP Exchange is already being served" end
+  if state.pending ~= 0 then raise "HTTP Exchange has a pending operation" end
+  state.serving = true
+  local parser = state.parser
+  local transport = state.transport
+  local encrypted = request_value.url.scheme == "https"
+  defer do
+    if not state.transferred then
+      state.active = false
+      close_parser(parser)
+      transport.abort()
+    end
+  end
+  while true do
+    handler(request_value, response)
+    if not state.active then return end
+    response:close()
+    if parser.upgrade then state.active = false; return end
+    drain_request(request_value)
+    state.active = false
+    if not parser.keep_alive or not response.keep_alive then return end
+    parser_reset_message(parser)
+    local next_request? = read_request(parser, encrypted, transport)
+    if next_request == nil then return end
+    request_value = next_request
+    response = new_response(transport.connection, request_value)
+    state = request_value.exchange
+    state.serving = true
+    if not accept_request_expectation(transport.connection, request_value, response) then return end
+  end
+end

@@ -76,7 +76,7 @@ end
 
 foreign function lua_state_transfer_from_value(state: *lua_State): int
   local top = ffi.lua_gettop(state)
-  lua_state_native_module(state, "titan.async")
+  lua_state_native_module(state, "titan.transfer")
   ffi.lua_getfield(state, -1, "TransferValue")
   ffi.lua_getfield(state, -1, "from_value")
   ffi.lua_copy(state, -1, top + 1)
@@ -111,7 +111,7 @@ foreign function lua_state_transfer_value(state: *lua_State, position: int,
     return ffi.luaL_error(state, "cannot reserve independent Lua transfer stack")
   end
   if ffi.luaL_testudata(state, position,
-      "Titan union titan.async.TransferValue metatable") == nil then
+      "Titan union titan.transfer.TransferValue metatable") == nil then
     return 0
   end
   ffi.lua_getmetatable(state, position)

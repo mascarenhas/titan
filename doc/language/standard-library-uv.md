@@ -162,6 +162,55 @@ cover owner methods and Titan-specific helpers, including
 | [Errors](uv/functions/errors.md), [version](uv/functions/version.md) | Error-domain conversion, text, and bundled native version. |
 | [Legacy allocation helpers](uv/functions/undocumented.md) | Why native heap loop allocation/deletion is not exported. |
 
+## Native resource handoff
+
+`tcp_t` and `pipe_t` provide the custom record hooks used by
+[`TransferValue`](async-io.md#transfer-values):
+
+```text
+function tcp_t:to_transfer_payload(): (...: transfer.TransferValue)
+function tcp_t.from_transfer_payload(...: transfer.TransferValue): tcp_t
+function pipe_t:to_transfer_payload(): (...: transfer.TransferValue)
+function pipe_t.from_transfer_payload(...: transfer.TransferValue): pipe_t
+function stream_transfer_status(stream: stream_t, allow_reading: boolean?): integer
+function bind_transfer_loop(loop: loop_t)
+function unbind_transfer_loop(loop: loop_t)
+```
+
+Encoding duplicates the platform socket or descriptor and immediately starts
+closing the source owner. Its old native storage remains rooted until the close
+callback. Reconstruction creates a fresh owner on the destination Runtime's
+loop and adopts the duplicate. It does not copy native `uv_*_t` storage,
+callbacks, or Lua-state references. The async Runtime manages the state-local
+loop binding; callback-only programs may bind an initialized loop explicitly
+and must unbind it before shutdown. A different live binding is rejected, and
+unbinding an unrelated loop leaves the current binding intact.
+
+Independent `lua.Lua` calls decode transfer arguments before executing their
+chunk. Establish that state's Runtime before passing a native payload, for
+example with `state:run("local a = require('titan.async'); a.run(function () end)")`.
+The receiving chunk can schedule its work and drive `async.loop`. After that
+loop retires, establish another Runtime before a later native handoff.
+
+Handoff requires an idle, connected, fully readable and writable TCP endpoint,
+or an idle non-IPC pipe endpoint. Active listeners, bound pipe servers,
+half-closed TCP sockets, IPC framing state, queued writes, pending connect or
+shutdown requests, and native reads awaiting completion are rejected before
+detachment. Windows may retain a native read after `read_stop`; stopping the
+watcher alone does not make that handle transferable. Public handle userdata
+must be nil. Destination code registers its own callbacks and userdata.
+
+`stream_transfer_status` is a read-only preflight returning zero or a negative
+native status. With `allow_reading = true`, it permits a stoppable read watcher
+owned by a higher-level adapter, while still rejecting pending native reads and
+all other unsupported state. The adapter must stop that watcher before calling
+the actual hook.
+
+Native payloads follow the manual handoff contract: the caller delivers and
+adopts them exactly once and recovers the resource if delivery or adoption
+fails. Copying a payload does not duplicate its descriptor, and discarding one
+does not close it. The source is already detached when encoding returns.
+
 ## Coverage and deliberate omissions
 
 The [coverage map](uv/coverage.md) accounts for all **319** native functions in

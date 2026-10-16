@@ -248,6 +248,66 @@ function Connection:close()
   check_result(packet, "close")
 end
 
+--- Detach an idle connection into a manually owned native transfer payload.
+-- @return One native pointer policy; adopt it exactly once or recover ownership.
+-- @usage standard-library-sqlite3.md#transferring-connections
+function Connection:to_transfer_payload(): (...: async.TransferValue)
+  self:reserve("to_transfer_payload", false)
+  defer self.busy = false
+  if self.statements ~= 0 then
+    raise Error {
+      message = "connection owns open statements",
+      code = nil,
+      extended_code = nil,
+      operation = "to_transfer_payload"
+    }
+  end
+  -- Allocate the policy before relinquishing the source's close authority.
+  local payload = async.TransferValue.is_pointer(self.handle)
+  self.handle = nil
+  return payload
+end
+
+--- Adopt one detached SQLite connection without changing its transaction state.
+-- @param ... The single pointer policy returned by to_transfer_payload.
+-- @return Fresh connection owner; the supplied pointer must not be adopted again.
+-- @usage standard-library-sqlite3.md#transferring-connections
+function Connection.from_transfer_payload(...: async.TransferValue): Connection
+  if #... ~= 1 then
+    raise Error {
+      message = "connection transfer requires one pointer payload",
+      code = nil,
+      extended_code = nil,
+      operation = "from_transfer_payload"
+    }
+  end
+  local handle: foreign *void = nil
+  case ...[1]
+  when is_pointer(pointer) then handle = pointer
+  else
+    raise Error {
+      message = "connection transfer requires a pointer payload",
+      code = nil,
+      extended_code = nil,
+      operation = "from_transfer_payload"
+    }
+  end
+  if not handle then
+    raise Error {
+      message = "connection transfer pointer is null",
+      code = nil,
+      extended_code = nil,
+      operation = "from_transfer_payload"
+    }
+  end
+  return Connection {
+    handle = handle as foreign *sqlite3,
+    statements = 0,
+    busy = false,
+    active_statement = nil
+  }
+end
+
 --- Finalize this statement after its active cursor is released.
 -- @usage standard-library-sqlite3.md#connections-and-statement-lifetime
 function Statement:close()

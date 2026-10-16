@@ -87,10 +87,9 @@ target. HTTP operations raise the returned `url.Error` when they cannot
 proceed; both standalone URL entry points remain nonthrowing.
 
 The URL root adds one logical protocol, archive metadata key, generated shim,
-and `luaopen_titan_url` entry to the coordinated provider. The later additions
-of the independent `titan.test` and `titan.reflect` modules make the current
-image twenty-three logical modules and shims with twenty-four DSO openers including
-bare `luaopen_titan`.
+and `luaopen_titan_url` entry to the coordinated provider. The current image
+contains twenty-five logical modules and shims, with twenty-six DSO openers
+including bare `luaopen_titan`.
 The complete image is published in the `0.6` library namespace; earlier Titan
 installations are not migrated or cleaned up.
 

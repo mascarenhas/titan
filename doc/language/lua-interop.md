@@ -119,9 +119,10 @@ assert(require "os" == lua_os)
 
 The same qualified Lua identity applies to every standard module, including
 `titan.coroutine`, `titan.async`, `titan.timer`, `titan.io`, `titan.fs`,
-`titan.net`, `titan.ssl`, `titan.url`, `titan.http`, `titan.websocket`, `titan.os`, `titan.peg`,
-`titan.string`, `titan.math`, `titan.lua`, `titan.iteration`, `titan.gc`, and
-`titan.test`, `titan.reflect`, `titan.sqlite3`, and `titan.json`. The public
+`titan.net`, `titan.ssl`, `titan.url`, `titan.http`, `titan.websocket`, `titan.os`,
+`titan.path`, `titan.peg`, `titan.string`, `titan.math`, `titan.lua`,
+`titan.iteration`, `titan.gc`, `titan.test`, `titan.reflect`, `titan.sqlite3`,
+`titan.json`, `titan.protobuf`, and `titan.transfer`. The public
 low-level `titan.uv` binding uses the same canonical identity. All standard modules support
 the documented short Titan imports alongside their qualified names. Requiring
 `titan.string` does not mutate Lua's `string` table or string metatable. In an

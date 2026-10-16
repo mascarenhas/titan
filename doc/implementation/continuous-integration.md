@@ -190,7 +190,7 @@ dependency acquisition within the same prefix; build and complete test execution
 remain single-shot. Run all uncovered stdlib/runtime/packaging work and the
 aggregate before `ci_test_groups.sh compiler-uncovered`. Before compiler
 fixtures, use `ci_stdlib_snapshot.sh` to preserve the runtime archive,
-canonical pair, conditional dSYM, and all twenty-four shims, then restore them
+canonical pair, conditional dSYM, and all twenty-five shims, then restore them
 before bundled/system production smokes. Retain the real x86_64/arm64 universal
 Mach-O archive lookup/repackaging proof; a host-only synthetic check is not a
 replacement. Compiler/language specs must not delete shared runtime state to

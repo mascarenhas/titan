@@ -9,6 +9,8 @@ local strings = import "string"
 local timer = import "timer"
 local support = import "net.test_support.titan"
 local task_support = import "support.async.titan"
+local common = import "support.common.titan"
+local transfer_lua = import "lua"
 
 local function expect_cancelled_net_operation(action: function (): (),
                                               label: string)
@@ -321,6 +323,8 @@ function test_net_overlapping_writes_preserve_bytes_through_gc_and_cancellation(
                   first:status():as_string() == "waiting" and
                   second:status():as_string() == "waiting",
                   "overlapping TCP writes did not both await their callbacks")
+      common.assert_raises_contains(function () connection:to_transfer_payload() end,
+        "pending operation")
       first:cancel(reason)
       gc.collect()
       gc.collect()
@@ -589,6 +593,145 @@ function test_net_input_listeners_observe_without_consuming_or_reserving(context
   end)
 end
 
+function test_net_transfer_moves_fresh_connection_across_states(context: test.Context)
+  runtime_test.run(function ()
+    local server, port = support.listen_available(28500)
+    support.cleanup_server(context, server)
+    local state = transfer_lua.new()
+    defer state:close()
+    local operation = function (): async.TransferValue
+      local connection = net.connect("127.0.0.1", port)
+      defer connection:close()
+      local packet = async.TransferValue.from_value(connection)
+      test.assert(connection:read() == nil, "detached source retained its endpoint")
+      return packet
+    end
+    local packet: async.TransferValue = state:run_async([[
+      local operation = ...
+      local async = require('titan.async')
+      local task = async.run(operation)
+      async.loop()
+      local success, result = task:status():has_succeeded()
+      if not success then
+        local failed, failure = task:status():has_failed()
+        if failed then failure:raise() end
+        error('TCP transfer worker did not succeed')
+      end
+      return result
+    ]], "=net-connection-transfer", async.TransferValue.is_closure(operation))
+    state:close()
+    gc.collect()
+    gc.collect()
+    local peer = server:accept()
+    support.cleanup_connection(context, peer)
+    local connection: net.Connection = packet:to_value()
+    support.cleanup_connection(context, connection)
+    connection:write("new-state\0")
+    test.assert(peer:read_until("\0", true) == "new-state")
+    peer:write("reply\0")
+    test.assert(connection:read_until("\0", true) == "reply")
+  end)
+end
+
+function test_net_transfer_preserves_input_and_rejects_native_pending_reads(
+    context: test.Context)
+  runtime_test.run(function ()
+    local server, port = support.listen_available(28600)
+    support.cleanup_server(context, server)
+    local connection = net.connect("127.0.0.1", port)
+    support.cleanup_connection(context, connection)
+    local peer = server:accept()
+    support.cleanup_connection(context, peer)
+    peer:write("prefix\nsuffix\0")
+    test.assert(connection:read_until("\n", true) == "prefix")
+    peer:write("queued\0")
+    timer.sleep(20)
+    local status, system? = uv.os_uname()
+    test.assert(status == 0)
+    if system.sysname == "Windows_NT" then
+      local refused = false
+      do connection:to_transfer_payload()
+      catch
+        test.assert(error is async.OperationError)
+        local failure = error as async.OperationError
+        test.assert(failure.name == "EBUSY" and failure.operation == "net.transfer")
+        refused = true
+      end
+      test.assert(refused, "pending Windows read was detached")
+      test.assert(connection:read_until("\0", true) == "suffix")
+      test.assert(connection:read_until("\0", true) == "queued")
+      peer:write("still-live\0")
+      test.assert(connection:read_until("\0", true) == "still-live")
+    else
+      local packet = async.TransferValue.from_value(connection)
+      local target: net.Connection = packet:to_value()
+      support.cleanup_connection(context, target)
+      connection:close()
+      test.assert(target:has_pending_input())
+      test.assert(target:read_until("\0", true) == "suffix")
+      test.assert(target:read_until("\0", true) == "queued")
+      peer:write("after-transfer\0")
+      test.assert(target:read_until("\0", true) == "after-transfer")
+    end
+  end)
+end
+
+function test_net_transfer_rejects_waiters_and_observers_before_detach(context: test.Context)
+  runtime_test.run(function ()
+    local server, port = support.listen_available(28700)
+    support.cleanup_server(context, server)
+    local connection = net.connect("127.0.0.1", port)
+    support.cleanup_connection(context, connection)
+    local peer = server:accept()
+    support.cleanup_connection(context, peer)
+    local remove = connection:add_input_listener(function () end)
+    common.assert_raises_contains(function () connection:to_transfer_payload() end,
+      "input observers")
+    remove()
+    local received = ""
+    local reader = async.run<|nil, value|>(function (): nil
+      received = connection:read_until("\0", true)
+      return nil
+    end)
+    task_support.cleanup_task(reader, "TCP transfer reader")
+    while reader:status():as_string() == "ready" do timer.yield() end
+    test.assert(reader:status():as_string() == "waiting")
+    common.assert_raises_contains(function () connection:to_transfer_payload() end,
+      "pending operation")
+    peer:write("original-reader\0")
+    async.join(reader)
+    test.assert(reader:status():has_succeeded() and received == "original-reader")
+  end)
+end
+
+function test_net_transfer_rejected_delivery_can_be_recovered(context: test.Context)
+  runtime_test.run(function ()
+    local server, port = support.listen_available(28800)
+    support.cleanup_server(context, server)
+    local connection = net.connect("127.0.0.1", port)
+    support.cleanup_connection(context, connection)
+    local peer = server:accept()
+    support.cleanup_connection(context, peer)
+    local packet = async.TransferValue.from_value(connection)
+    local inbox = async.receiver()
+    defer inbox:close()
+    inbox:close()
+    common.assert_raises_contains(function () async.send(inbox:handle(), packet) end,
+      "receiver is closed")
+    local recovered: net.Connection = packet:to_value()
+    support.cleanup_connection(context, recovered)
+    recovered:write("recovered\0")
+    test.assert(peer:read_until("\0", true) == "recovered")
+  end)
+end
+
+function test_net_transfer_rejects_malformed_payloads(_context: test.Context)
+  common.assert_raises(function () net.Connection.from_transfer_payload() end)
+  common.assert_raises(function ()
+    net.Connection.from_transfer_payload(async.TransferValue.is_nil())
+  end)
+end
+
 function test_net_reuse_port_is_opt_in(context: test.Context)
   runtime_test.run(function ()
     local server, port = support.listen_available(28700)
@@ -635,5 +778,29 @@ function test_net_reuse_port_shares_address(context: test.Context)
     connection:write("survivor\0")
     test.assert(peer:read_until("\0", true) == "survivor",
                 "closing one reused listener stopped the other listener")
+  end)
+end
+
+function test_net_transfer_hooks_run_without_a_current_task(context: test.Context)
+  runtime_test.run(function ()
+    local server, port = support.listen_available(28900)
+    support.cleanup_server(context, server)
+    local source = net.connect("127.0.0.1", port)
+    support.cleanup_connection(context, source)
+    local peer = server:accept()
+    support.cleanup_connection(context, peer)
+    local target: net.Connection? = nil
+    async.await<|nil, nil|>(function (resolve, _reject, _fatal)
+      local outside_task = false
+      do async.running() catch outside_task = true end
+      test.assert(outside_task, "transfer fixture still ran in a Task")
+      local packet = async.TransferValue.from_value(source)
+      target = packet:to_value()
+      resolve(nil)
+    end)
+    support.cleanup_connection(context, target)
+    source:close()
+    target:write("callback-handoff\0")
+    test.assert(peer:read_until("\0", true) == "callback-handoff")
   end)
 end

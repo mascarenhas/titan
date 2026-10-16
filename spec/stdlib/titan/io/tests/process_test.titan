@@ -1,3 +1,5 @@
+local command = import "support.command.titan"
+
 -- Quote the controlled native fixture arguments in the shell under test. Only
 -- the syntax differs; the byte/stream/status assertions below are shared.
 local function popen_quote(argument: string): string
@@ -56,6 +58,36 @@ local function read_process_output(pipe: stream.InputOutputStream): string
   local result = ""
   for chunk in pipe:read do result = result .. chunk end
   return result
+end
+
+function test_io_process_transfer_recovers_second_dup_failure(context: test.Context)
+  if common.is_windows() then
+    test.skip("platform: controlled dup wrapping requires Linux syscall support")
+    return
+  end
+  local host, host_why, host_status = command.capture({"uname", "-s"})
+  test.assert(host_why == "exit" and host_status == 0, host)
+  if host ~= "Linux\n" then
+    test.skip("platform: controlled dup wrapping requires Linux syscall support")
+    return
+  end
+  runtime_test.run(function ()
+    local workspace = fs.tmpname()
+    fs.unlink(workspace)
+    context:cleanup(function () command.remove_tree(workspace) end)
+    local sdk? = system.getenv("TITAN_TEST_SDK_ROOT")
+    test.assert(sdk ~= nil, "I/O transfer fixture requires the selected test SDK")
+    local output, why, status = command.capture({
+      "bash", "spec/support/check_io_transfer_failure.sh", sdk, workspace,
+    })
+    test.assert(why == "exit" and status == 0,
+                "I/O transfer fault fixture failed: " .. output)
+    test.assert(common.contains(output,
+      "PASS: second-pipe failure retained write/retry/close ownership"))
+    test.assert(common.contains(output,
+      "PASS: exit cleanup discarded retained pipe with adoption still closed"))
+    test.assert(common.contains(output, "PASS: staged descriptor retired"))
+  end)
 end
 
 function test_io_process_interactive_merged_output_and_status(
@@ -281,5 +313,107 @@ function test_io_process_fixed_system_shell(_context: test.Context)
     test.assert(read_process_output(pipe) == "SYSTEM_SHELL" .. shell_newline(),
                 "popen did not select its fixed system shell")
     process_support.assert_normal(pipe:wait(), "fixed system shell")
+  end)
+end
+
+function test_io_stream_transfer_keeps_process_ownership_at_origin(
+    _context: test.Context)
+  runtime_test.run(function ()
+    local source = stream.popen(popen_quote(process_support.child_path()) ..
+                               " echo-count 4 " .. popen_quote("|done"))
+    defer source:close()
+    local target: stream.InputOutputStream?
+    -- Registration runs with an active Runtime but outside Task execution.
+    async.await<|nil, nil|>(function (resolve, _reject, _fatal)
+      local packet = async.TransferValue.from_value(source)
+      target = packet:to_value()
+      resolve(nil)
+    end)
+    test.assert(source:read() == nil and source:read_until("|") == nil)
+    common.assert_raises(function () source:write("late") end)
+    common.assert_raises(function () source:to_transfer_payload() end)
+    defer target:close()
+    common.assert_raises_contains(function () target:wait() end,
+                                 "no child process owner")
+    target:write("A\0B\255")
+    test.assert(target:read_until("|", true) == "A\0B\255")
+    test.assert(target:read() == "done" and target:read() == nil)
+    target:close()
+    test.assert(source:wait().code == 0,
+                "moving shell pipes lost the originating child status")
+    source:close()
+  end)
+end
+
+function test_io_stream_transfer_rejects_pending_reader_before_detachment(
+    _context: test.Context)
+  runtime_test.run(function ()
+    local source = stream.popen(popen_quote(process_support.child_path()) ..
+                               " popen-interactive")
+    defer source:close()
+    local received = ""
+    local reader = async.run<|nil, value|>(function (): nil
+      received = read_process_output(source)
+      return nil
+    end)
+    task_support.cleanup_task(reader, "shell transfer waiting reader")
+    while reader:status():as_string() == "ready" do timer.yield() end
+    test.assert(reader:status():as_string() == "waiting")
+    common.assert_raises_contains(function () source:to_transfer_payload() end,
+                                 "pending operation")
+    source:write("still-owned\n")
+    async.join(reader)
+    test.assert(reader:status():has_succeeded() and received == "OUT:still-owned:ERR",
+                "rejected shell transfer damaged a communication pipe")
+    test.assert(source:wait().code == 7)
+  end)
+end
+
+function test_io_stream_transfer_crosses_states_with_origin_reaping(
+    _context: test.Context)
+  runtime_test.run(function ()
+    local source = stream.popen(popen_quote(process_support.child_path()) ..
+                               " echo-count 4 " .. popen_quote("|done"))
+    defer source:close()
+    local state = transfer_lua.new()
+    defer state:close()
+    -- Arguments are decoded before the Lua chunk starts. Establish the
+    -- destination Runtime before adopting the closure's captured pipes.
+    state:run([[
+      local async = require('titan.async')
+      async.run(function () end)
+    ]], "=shell-stream-transfer-runtime")
+    local operation = function (): string
+      defer source:close()
+      common.assert_raises_contains(function () source:wait() end,
+                                   "no child process owner")
+      source:write("x\0y\255")
+      return read_process_output(source)
+    end
+    local result: async.TransferValue = state:run_async([[
+      local operation = ...
+      local async = require('titan.async')
+      local task = async.run(operation)
+      async.loop()
+      local success, result = task:status():has_succeeded()
+      if not success then
+        local failed, failure = task:status():has_failed()
+        if failed then failure:raise() end
+        error('shell stream transfer worker did not succeed')
+      end
+      return result
+    ]], "=shell-stream-transfer", async.TransferValue.is_closure(operation))
+    state:close()
+    test.assert(result:to_value() as string == "x\0y\255|done")
+    test.assert(source:wait().code == 0,
+                "source Runtime did not reap the child after worker pipe use")
+  end)
+end
+
+function test_io_stream_transfer_rejects_malformed_payloads(_context: test.Context)
+  common.assert_raises(function () stream.InputOutputStream.from_transfer_payload() end)
+  common.assert_raises(function ()
+    stream.InputOutputStream.from_transfer_payload(async.TransferValue.is_nil(),
+                                                  async.TransferValue.is_nil())
   end)
 end

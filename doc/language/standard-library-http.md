@@ -535,6 +535,46 @@ acquisition; protocol opening and session deadlines are separate policies.
 Upgrade I/O failures preserve the original error value and traceback through
 the supervising Task's transport cleanup.
 
+## Resource handoff
+
+A handler's `Request` and `Response` share one parser and transport. Bundle them
+with `http.Exchange(request, response)` and transfer that public record:
+
+```titan
+local packet = async.TransferValue.from_value(http.Exchange(request, response))
+async.send(worker_handle, packet)
+```
+
+The origin hook rejects pending reads, writes, upgrades, or native transport
+operations before detachment. Success invalidates the original endpoints and
+lets the original handler return. The hook preserves request metadata, unread
+body bytes, parser progress, trailers, response headers, framing, and already
+written byte counts. The pair cannot be transferred independently.
+
+In the destination's active Runtime, `packet:to_value()` returns an `Exchange`
+with public const `request` and `response` fields. Either finish the current
+exchange and call `exchange:close()`, or call `exchange:serve(handler)` to handle
+it and subsequent requests on that connection. `serve` preserves serial
+keep-alive processing and unread next-request bytes; only one serving loop may
+own the exchange. The destination supplies its own handler and owns any request
+deadline policy. `close` completes the current response and closes the transport.
+
+`Exchange` and `UpgradedStream` implement the synchronous
+`to_transfer_payload(): (...: async.TransferValue)` and
+`from_transfer_payload(...: async.TransferValue)` hooks. The latter returns the
+same concrete record type. `UpgradedStream` is a public record with private
+fields; upgrade APIs retain their `io.ReaderWriterCloser` return type. Its hook
+preserves the already received protocol prefix. WebSocket transfer unwraps that
+HTTP-owned stream and uses this hook automatically. Custom stream implementations
+passed to `request_upgrade_on` do not gain native handoff support: these HTTP
+hooks require a concrete `net.Connection` or `ssl.Connection` transport.
+
+This is the [manual resource handoff contract](standard-library-transfer.md#native-resource-handoff):
+the source detaches before delivery, payloads must be adopted exactly once, and
+the caller owns recovery after failed delivery. Raw parser state is process-local
+and belongs to the same native provider. Windows pending overlapped reads reject
+handoff even when no application Task is waiting.
+
 ## Example
 
 ```titan

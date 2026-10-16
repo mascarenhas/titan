@@ -803,6 +803,9 @@ local record Stdio
   handle: uv.handle_t
   loop: uv.loop_t
   reads: async.BufferedSubscription<|string, async.OperationError|>?
+  alloc_read: uv.alloc_cb?
+  deliver_read: uv.read_cb?
+  pending_writes: integer
 end
 
 local record CloseOperation
@@ -1002,13 +1005,18 @@ end
 
 local function new_pipe_stdio(loop: uv.loop_t): (integer, Stdio?)
   local pipe = uv.pipe_t.new()
-  local stream = Stdio(pipe:as_stream_t(), pipe:as_handle_t(), loop, nil)
+  local stream = Stdio(pipe:as_stream_t(), pipe:as_handle_t(), loop, nil, nil, nil, 0)
   local status = uv.pipe_init(loop, pipe, 0)
   if status < 0 then return status, nil end
   return 0, stream
 end
 
-local function start_stream_read(stream: Stdio, operation: string)
+local function resume_stream_read(stream: Stdio, operation: string)
+  check_status(uv.read_start(stream.native, stream.alloc_read, stream.deliver_read), operation)
+end
+
+local function start_stream_read(stream: Stdio, operation: string,
+    initial: {string}?, terminal: async.SubscriptionResult<|string, async.OperationError|>?)
   if stream.reads ~= nil then return end
   stream.reads = async.BufferedSubscription<|string, async.OperationError|>.new(function (publish, fail, finish)
     local actions = async.SubscriptionActions<|string|>(function ()
@@ -1017,16 +1025,28 @@ local function start_stream_read(stream: Stdio, operation: string)
       drain()
       close_native(stream.handle)
     end)
+    if initial ~= nil then
+      for index = 1, #initial do publish(initial[index]) end
+    end
+    if terminal ~= nil then
+      case terminal
+      when error(failure) then fail(failure)
+      else finish()
+      end
+      return actions
+    end
     if stream_is_closed(stream.handle) then finish(); return actions end
-    local status = uv.read_start(stream.native,
-      function (_, size): uv.buf_t return uv.buf_t.allocate(size) end,
-      function (_, count, buffer)
+    stream.alloc_read = function (_: uv.handle_t, size: integer): uv.buf_t
+      return uv.buf_t.allocate(size)
+    end
+    stream.deliver_read = function (_: uv.stream_t, count: integer, buffer: uv.buf_t?)
         if count == 0 then return end
         if count > 0 then publish(buffer:to_string(count)); return end
         uv.read_stop(stream.native)
         discard_unpublished_stdio(stream)
         if count == uv.EOF then finish() else fail(make_error(count, "stdio.read")) end
-      end)
+      end
+    local status = uv.read_start(stream.native, stream.alloc_read, stream.deliver_read)
     if status < 0 then
       discard_unpublished_stdio(stream)
       fail(make_error(status, operation))
@@ -1050,6 +1070,7 @@ end
 
 local function stdio_written(request: uv.write_t, status: integer)
   local context = request:get_data() as WriteOperation
+  context.stream.pending_writes = context.stream.pending_writes - 1
   local completion = context.completion as async.Completion<|WriteOperation, nil, async.OperationError|>
   local number = context.number
   request:set_data(nil)
@@ -1075,6 +1096,8 @@ local function start_stdio_write(
     request:set_data(nil)
     context.completion = nil
     completion:reject(number, make_error(status, "stdio.write"))
+  else
+    context.stream.pending_writes = context.stream.pending_writes + 1
   end
   return nil
 end
@@ -1283,7 +1306,7 @@ local function initialize_parent_stdio(loop: uv.loop_t, descriptor: integer): St
   end
   if tty then
     local native = uv.tty_t.new()
-    local owner = Stdio(native:as_stream_t(), native:as_handle_t(), loop, nil)
+    local owner = Stdio(native:as_stream_t(), native:as_handle_t(), loop, nil, nil, nil, 0)
     check_status(uv.tty_init(loop, native, duplicate as integer, 0), "stdio.parent.init")
     stream = owner
     local status, actual? = uv.fileno(owner.handle)
@@ -1747,4 +1770,233 @@ end
 
 local function checked_text(text: string, operation: string)
   if contains_nul(text) then raise make_error(uv.EINVAL, operation) end
+end
+
+local function stream_payload_integer(payload: async.TransferValue): integer
+  case payload
+  when is_integer(number) then return number
+  else raise "invalid process stream transfer payload"
+  end
+end
+
+local function stream_payload_string(payload: async.TransferValue): string
+  case payload
+  when is_string(bytes) then return bytes
+  else raise "invalid process stream transfer payload"
+  end
+end
+
+-- Retire io's retained writable packet without reopening transfer admission.
+-- Validation may raise before ownership changes; after calling native close,
+-- return its status so the caller clears the packet before reporting errors.
+local function discard_output_transfer_payload(packet: async.TransferValue): integer
+  local output: {async.TransferValue} = {}
+  case packet
+  when is_record_payload(name, payload) then
+    if name ~= "titan.os.OutputStream" or #payload ~= 2 then
+      raise "invalid retained output stream transfer payload"
+    end
+    output = payload
+  else raise "invalid retained output stream transfer payload"
+  end
+  if stream_payload_integer(output[1]) ~= -1 then
+    raise "invalid retained output stream transfer descriptor"
+  end
+  local descriptor = -1
+  case output[2]
+  when is_nil() then return 0
+  when is_record_payload(name, payload) then
+    if name ~= "titan.uv.pipe_t" or #payload ~= 1 then
+      raise "invalid retained pipe transfer payload"
+    end
+    descriptor = stream_payload_integer(payload[1])
+  else raise "invalid retained pipe transfer payload"
+  end
+  if descriptor < 0 or descriptor > 2147483647 then
+    raise "invalid retained pipe transfer descriptor"
+  end
+  return platform_status(ffi.titan_close_parent_duplicate(descriptor))
+end
+
+local function stream_transfer_preflight(stream: Stdio, reading: boolean)
+  if stream.loop ~= async.current_loop() then
+    raise "stdio stream belongs to a different async Runtime"
+  end
+  if async.is_closing() then raise "cannot transfer a stream while async Runtime is shutting down" end
+  if stream.pending_writes ~= 0 then raise "stream has a pending write" end
+  if stream.reads ~= nil and stream.reads:has_waiter() then
+    raise "stream has a pending read"
+  end
+  if not stream_is_closed(stream.handle) then
+    case stream.native
+    when pipe() then
+    else raise "only pipe streams support native handoff"
+    end
+    check_status(uv.stream_transfer_status(stream.native, reading), "stdio.transfer")
+  end
+end
+
+local function stdio_native_payload(stream: Stdio): async.TransferValue
+  case stream.native
+  when pipe(native) then return async.TransferValue.from_value(native)
+  else raise "only pipe streams support native handoff"
+  end
+end
+
+local function restored_stdio(packet: async.TransferValue): Stdio
+  local loop = async.current_loop()
+  if async.is_closing() then raise "cannot transfer a stream while async Runtime is shutting down" end
+  local native = uv.pipe_t.new()
+  local stream = Stdio(native:as_stream_t(), native:as_handle_t(), loop, nil, nil, nil, 0)
+  case packet
+  when is_nil() then return stream
+  when is_record_payload(name) then
+    if name ~= "titan.uv.pipe_t" then raise "invalid process pipe transfer payload" end
+  else raise "invalid process pipe transfer payload"
+  end
+  native = packet:to_value() as uv.pipe_t
+  local adopted = false
+  defer if not adopted then uv.close(native:as_handle_t()) end
+  stream.native = native:as_stream_t()
+  stream.handle = native:as_handle_t()
+  adopted = true
+  return stream
+end
+
+--- Move an idle captured output pipe, or copy a stable stdout/stderr facade.
+-- The caller owns exactly-once payload delivery and recovery after detachment.
+-- The child Process and its exit watcher remain in the originating Runtime.
+-- @usage standard-library-os.md#transferring-process-streams
+function OutputStream:to_transfer_payload(): (...: async.TransferValue)
+  local stream? = self.handle
+  local native_packet = async.TransferValue.is_nil()
+  local payload: {async.TransferValue} = {
+    async.TransferValue.is_integer(self.parent_descriptor), native_packet}
+  if self.parent_descriptor >= 0 then
+    if stream ~= nil and stream.pending_writes ~= 0 then
+      raise "stream has a pending write"
+    end
+    return ...payload
+  end
+  if stream == nil then return ...payload end
+  stream_transfer_preflight(stream, false)
+  if not stream_is_closed(stream.handle) then
+    payload[2] = stdio_native_payload(stream)
+  end
+  self.handle = nil
+  return ...payload
+end
+
+--- Reconstruct an output facade or adopt its captured pipe on this Runtime.
+-- @usage standard-library-os.md#transferring-process-streams
+function OutputStream.from_transfer_payload(...: async.TransferValue): OutputStream
+  if #... ~= 2 then raise "invalid output stream transfer payload" end
+  local descriptor = stream_payload_integer(...[1])
+  if descriptor == 1 or descriptor == 2 then
+    case ...[2]
+    when is_nil() then return OutputStream(nil, descriptor)
+    else raise "invalid standard output transfer payload"
+    end
+  end
+  if descriptor ~= -1 then raise "invalid output stream descriptor" end
+  local result = OutputStream(nil, -1)
+  case ...[2]
+  when is_nil() then return result
+  else result.handle = restored_stdio(...[2])
+  end
+  return result
+end
+
+--- Move an idle captured input pipe together with buffered bytes and outcome.
+-- Unused standard-input facades copy descriptor identity. A pending native
+-- read, reader reservation, or write is rejected before changing the source.
+-- @usage standard-library-os.md#transferring-process-streams
+function InputStream:to_transfer_payload(): (...: async.TransferValue)
+  local stream? = self.handle
+  local terminal_packet = async.TransferValue.is_boolean(true)
+  local payload: {async.TransferValue} = {
+    async.TransferValue.is_integer(self.parent_descriptor),
+    async.TransferValue.is_string(self.excess), terminal_packet,
+    async.TransferValue.is_nil()}
+  if self.parent_descriptor >= 0 then
+    if #self.excess ~= 0 or (stream ~= nil and stream.reads ~= nil) then
+      raise "standard input has active or buffered read state"
+    end
+    return ...payload
+  end
+  if stream == nil then return ...payload end
+  stream_transfer_preflight(stream, true)
+  local reads? = stream.reads
+  if reads ~= nil then
+    local batch, terminal? = reads:snapshot_pending()
+    if terminal == nil then
+      payload[3] = async.TransferValue.is_nil()
+    else
+      case terminal
+      when error(failure) then payload[3] = async.TransferValue.from_value(failure)
+      when ended() then payload[3] = async.TransferValue.is_boolean(false)
+      when closed() then
+      when item() then raise "invalid input stream terminal outcome"
+      end
+    end
+    for index = 1, batch.count do
+      payload[index + 4] = async.TransferValue.is_string(batch:get(index))
+    end
+  elseif not stream_is_closed(stream.handle) then
+    payload[3] = async.TransferValue.is_nil()
+  end
+  if not stream_is_closed(stream.handle) then
+    if reads ~= nil then check_status(uv.read_stop(stream.native), "stdio.transfer.read_stop") end
+    do
+      payload[4] = stdio_native_payload(stream)
+    catch
+      if reads ~= nil and not stream_is_closed(stream.handle) then
+        resume_stream_read(stream, "stdio.transfer.read_resume")
+      end
+      raise
+    end
+  end
+  self.handle = nil
+  self.excess = ""
+  return ...payload
+end
+
+--- Reconstruct buffered input and adopt its optional pipe on this Runtime.
+-- @usage standard-library-os.md#transferring-process-streams
+function InputStream.from_transfer_payload(...: async.TransferValue): InputStream
+  if #... < 4 then raise "invalid input stream transfer payload" end
+  local descriptor = stream_payload_integer(...[1])
+  local excess = stream_payload_string(...[2])
+  if descriptor == 0 then
+    if #... ~= 4 or #excess ~= 0 then raise "invalid standard input transfer payload" end
+    case ...[4]
+    when is_nil() then return InputStream(nil, 0, "")
+    else raise "invalid standard input transfer payload"
+    end
+  end
+  if descriptor ~= -1 then raise "invalid input stream descriptor" end
+  local initial: {string} = {}
+  for index = 5, #... do initial[index - 4] = stream_payload_string(...[index]) end
+  local terminal: async.SubscriptionResult<|string, async.OperationError|>? = nil
+  case ...[3]
+  when is_nil() then
+  when is_boolean(closed) then
+    if closed then terminal = async.SubscriptionResult<|string, async.OperationError|>.closed()
+    else terminal = async.SubscriptionResult<|string, async.OperationError|>.ended() end
+  when is_record() then
+    local failure = ...[3]:to_value() as async.OperationError
+    terminal = async.SubscriptionResult<|string, async.OperationError|>.error(failure)
+  else raise "invalid input stream terminal payload"
+  end
+  local result = InputStream(nil, -1, excess)
+  local stream = restored_stdio(...[4])
+  local published = false
+  defer if not published then discard_unpublished_stdio(stream) end
+  if terminal == nil and stream_is_closed(stream.handle) then
+    raise "live input stream transfer has no pipe"
+  end
+  start_stream_read(stream, "stdio.transfer.read_start", initial, terminal)
+  result.handle = stream
+  published = true
+  return result
 end

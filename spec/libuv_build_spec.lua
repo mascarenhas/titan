@@ -21,14 +21,14 @@ local UV_TYPES_FIXTURE =
 local STDLIB_MODULES = {
     "coroutine", "uv", "async", "timer", "io", "fs", "net", "ssl",
     "url", "http", "websocket", "os", "path", "peg", "string", "math", "lua", "iteration", "gc",
-    "test", "reflect", "sqlite3", "json", "protobuf",
+    "test", "reflect", "sqlite3", "json", "protobuf", "transfer",
 }
 local STDLIB_ROOTS = {
     "titan.coroutine", "titan.uv", "titan.async", "titan.timer",
     "titan.io", "titan.fs", "titan.net", "titan.ssl", "titan.url",
     "titan.http", "titan.websocket", "titan.os", "titan.path", "titan.peg", "titan.string", "titan.math",
     "titan.lua", "titan.iteration", "titan.gc", "titan.test", "titan.reflect",
-    "titan.sqlite3", "titan.json", "titan.protobuf",
+    "titan.sqlite3", "titan.json", "titan.protobuf", "titan.transfer",
 }
 local STDLIB_SHIMS = {
     "titan/coroutine.lua", "titan/uv.lua", "titan/async.lua",
@@ -36,7 +36,7 @@ local STDLIB_SHIMS = {
     "titan/ssl.lua", "titan/url.lua", "titan/http.lua", "titan/websocket.lua", "titan/os.lua", "titan/path.lua",
     "titan/peg.lua", "titan/string.lua", "titan/math.lua", "titan/lua.lua",
     "titan/iteration.lua", "titan/gc.lua", "titan/test.lua", "titan/reflect.lua",
-    "titan/sqlite3.lua", "titan/json.lua", "titan/protobuf.lua",
+    "titan/sqlite3.lua", "titan/json.lua", "titan/protobuf.lua", "titan/transfer.lua",
 }
 local LPEGLABEL_INCLUDE =
     "-I" .. lfs.currentdir() .. "/vendor/lpeglabel"
@@ -1670,6 +1670,7 @@ done
                 "titan/uv/platform-constants.h",
                 "titan/uv/sync_storage.h",
                 "titan/uv/thread-native.h",
+                "titan/uv/transfer-native.h",
                 "titan/uv/utility_bits.h",
                 "titan/uv/version-native.h",
                 "titan/uv/work-data.h",
@@ -2304,6 +2305,7 @@ int main(void) {
                 "titan/uv/sync.titan",
                 "titan/uv/tcp.titan",
                 "titan/uv/threading.titan",
+                "titan/uv/transfer.titan",
                 "titan/uv/udp.titan",
                 "titan/uv/utilities.titan",
                 "titan/async.titan",
@@ -2311,7 +2313,7 @@ int main(void) {
                 "titan/net.titan", "titan/ssl.titan", "titan/url.titan",
                 "titan/http/http.titan", "titan/http/client.titan",
                 "titan/http/headers.titan", "titan/http/native.titan",
-                "titan/http/pool.titan", "titan/http/server.titan", "titan/http/upgrade.titan",
+                "titan/http/pool.titan", "titan/http/server.titan", "titan/http/transfer.titan", "titan/http/upgrade.titan",
                 "titan/websocket/websocket.titan", "titan/websocket/handshake.titan",
                 "titan/websocket/connection.titan", "titan/websocket/frames.titan",
                 "titan/websocket/utf8.titan", "titan/websocket/native.titan",
@@ -2335,6 +2337,7 @@ int main(void) {
                 "titan/json/numbers.titan",
                 "titan/protobuf/protobuf.titan", "titan/protobuf/encoder.titan",
                 "titan/protobuf/decoder.titan", "titan/protobuf/schema.titan",
+                "titan/transfer.titan",
             }, stdlib_source_files())
         end)
 
@@ -2616,7 +2619,8 @@ int main(void) {
                 "InputOutputStream", "print", "lines",
                 "InputOutputStream:read", "InputOutputStream:read_until",
                 "InputOutputStream:write", "InputOutputStream:wait",
-                "InputOutputStream:close", "popen",
+                "InputOutputStream:close", "InputOutputStream:to_transfer_payload",
+                "InputOutputStream.from_transfer_payload", "popen",
             }, public_declarations(path))
         end)
 
@@ -2677,11 +2681,11 @@ int main(void) {
         assert.truthy(closed, close_error)
     end)
 
-    it("pins current metadata for all twenty-four standard modules",
+    it("pins current metadata for all twenty-five standard modules",
         function()
             local expected = assert(loadfile(STDLIB_TYPES_FIXTURE))()
             local expected_uv = assert(loadfile(UV_TYPES_FIXTURE))()
-            assert.equal(24, #STDLIB_ROOTS)
+            assert.equal(25, #STDLIB_ROOTS)
             assert.equal(expected.uv, expected_uv,
                 "standalone titan.uv metadata fixture is stale")
 
@@ -2719,11 +2723,11 @@ int main(void) {
             end
         end)
 
-    it("exports twenty-five DSO openers for twenty-four standard modules",
+    it("exports twenty-six DSO openers for twenty-five standard modules",
         function()
-            assert.equal(24, #STDLIB_MODULES)
-            assert.equal(24, #STDLIB_ROOTS)
-            assert.equal(24, #STDLIB_SHIMS)
+            assert.equal(25, #STDLIB_MODULES)
+            assert.equal(25, #STDLIB_ROOTS)
+            assert.equal(25, #STDLIB_SHIMS)
 
             local container = installed_stdlib_container()
             local ok, output, why, code
@@ -2755,7 +2759,7 @@ int main(void) {
                     found[symbol] = true
                 end
             end
-            assert.equal(25, (function()
+            assert.equal(26, (function()
                 local count = 0
                 for _ in pairs(found) do count = count + 1 end
                 return count
@@ -2797,7 +2801,8 @@ int main(void) {
             assert.same({
                 "File", "Stat", "Stat.new", "open", "File:read",
                 "File:read_until", "File:write", "File:flush",
-                "File:close", "File:is_closed", "read_file",
+                "File:close", "File:is_closed", "File:to_transfer_payload",
+                "File.from_transfer_payload", "read_file",
                 "write_file", "stat", "lstat", "tmpname", "tmpdir",
                 "homedir", "pwd", "chdir", "mkdir", "unlink", "rmdir",
                 "rename", "list", "realpath", "Watcher", "WatcherEvent",
@@ -2843,6 +2848,8 @@ int main(void) {
             "InputStream:read_until", "InputStream:close",
             "InputStream:is_tty", "exit",
             "wait_signal",
+            "OutputStream:to_transfer_payload", "OutputStream.from_transfer_payload",
+            "InputStream:to_transfer_payload", "InputStream.from_transfer_payload",
         }, public_declarations("titan/os.titan"))
 
         assert.falsy(read_file("titan/os.titan"):find(
@@ -3317,7 +3324,7 @@ esac
                 "titan/net.titan", "titan/ssl.titan", "titan/url.titan",
                 "titan/http/http.titan", "titan/http/client.titan",
                 "titan/http/headers.titan", "titan/http/native.titan",
-                "titan/http/pool.titan", "titan/http/server.titan", "titan/http/upgrade.titan",
+                "titan/http/pool.titan", "titan/http/server.titan", "titan/http/transfer.titan", "titan/http/upgrade.titan",
                 "titan/os.titan", "titan/path.titan",
                 "titan/peg/peg.titan",
                 "titan/peg/combinators.titan", "titan/peg/native.titan",
@@ -5362,7 +5369,7 @@ done
                 1, true), workflow)
             assert.truthy(workflow:find(
                 "for module in coroutine uv async timer io fs net ssl url " ..
-                "http websocket os path peg string math lua iteration gc test reflect sqlite3 json protobuf; do",
+                "http websocket os path peg string math lua iteration gc test reflect sqlite3 json protobuf transfer; do",
                 1, true), workflow)
             assert.truthy(workflow:find(
                 'test ! -e "$PREFIX/share/titan/0.6/src/titan/test.titan"',

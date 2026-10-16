@@ -121,11 +121,36 @@ Only after children retire are partial-message/input buffers cleared. A valid
 peer Close plus reciprocal output becomes normal message EOF; earlier
 transport loss remains abnormal. Immediate close skips protocol negotiation.
 
+## Connection transfer ownership
+
+Only open idle WebSocket sessions can produce a transfer policy. The gate
+checks every operation/frame/control reservation, the work list, partial
+message owner and retirement Task before touching HTTP ownership. An idle
+session has no in-flight fragmented-message builder or UTF-8 continuation.
+The policy carries role, subprotocol, limit and the unread suffix of the input
+chunk, plus the HTTP `UpgradedStream` policy. Reflection unwraps the known I/O
+Interface to that public concrete owner; it never copies an Interface wrapper
+or captured abort closure between states.
+
+A private pending-operation count spans each public read, write, Ping,
+shutdown and close call through its final cleanup. Internal Work slots may be
+released earlier to preserve frame fairness and receive takeover; their release
+does not permit transfer while the public caller is still resuming or unwinding.
+The transfer hook checks both the public count and the internal reservations.
+
+The HTTP wrapper in turn owns its unread prefix and concrete net/SSL transport.
+After it detaches successfully, the source WebSocket facade drops the stream,
+clears input and becomes terminal without protocol output. Destination
+construction allocates its StringWriter, UTF-8 state and empty work list before
+adopting the HTTP wrapper. No operation Tasks, timers or source closures are
+transferred. The transport's strict native-pending restrictions still apply,
+including Windows overlapped reads. Payloads remain manually owned and must be
+adopted once; there are no replay guards or delivery rollback owners.
+
 ## Integration and verification
 
-The module belongs to the canonical 23-module provider, 24 exported
-openers including bare support, and 29-root native test inventory. Unix keeps
-paired providers; Windows remains DLL-only. Standard-library installation
+The module belongs to the canonical provider and native test inventory.
+Unix keeps paired providers; Windows remains DLL-only. Standard-library installation
 copies the built provider and generated shims.
 No Titan, ABI, SDK or language-server version marker changes are required.
 

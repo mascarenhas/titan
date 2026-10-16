@@ -517,3 +517,42 @@ function test_buffered_subscription_pending_query_preserves_nil_and_terminal(_: 
     test.assert(source:has_pending(), "closed source was not reported")
   end)
 end
+
+function test_buffered_subscription_snapshot_preserves_queue_and_terminal(_: test.Context)
+  runtime_test.run(function ()
+    local publish: (function (value): (boolean))? = nil
+    local fail: (function (value): (boolean))? = nil
+    local source = async.BufferedSubscription<|value, value|>(function (emit, reject, _)
+      publish, fail = emit, reject
+      return subscription_actions()
+    end)
+    defer source:close()
+    publish(nil)
+    publish(false)
+    local first, live? = source:snapshot_pending()
+    test.assert(live == nil and first.count == 2, "live snapshot lost queued values")
+    test.assert(first:get(1) == nil and first:get(2) == false, "snapshot lost nil or false")
+    test.assert(subscription_item(source:next()) == nil, "snapshot consumed the queue")
+    publish(3)
+    fail(false)
+    local second, terminal? = source:snapshot_pending()
+    test.assert(second.count == 2 and second:get(1) == false and second:get(2) == 3,
+      "snapshot did not preserve the consumed prefix")
+    subscription_terminal_error(terminal, false)
+    source:close()
+    test.assert(first.count == 2 and first:get(1) == nil and first:get(2) == false,
+      "source mutation changed its earlier snapshot")
+    test.assert(second:get(2) == 3, "closing discarded the snapshot")
+    local empty, closed? = source:snapshot_pending()
+    test.assert(empty.count == 0, "closed snapshot retained discarded entries")
+    subscription_closed(closed)
+    local ended = async.BufferedSubscription<|value, value|>(function (_emit, _reject, finish)
+      finish()
+      return subscription_actions()
+    end)
+    defer ended:close()
+    local no_items, outcome? = ended:snapshot_pending()
+    test.assert(no_items.count == 0, "empty terminal snapshot contained entries")
+    subscription_ended(outcome)
+  end)
+end

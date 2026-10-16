@@ -105,6 +105,7 @@ use the chapters below for the normative language reference.
 | [Reflection standard library](standard-library-reflect.md) | Runtime inspection of 19 value kinds, public nominal descriptors, explicit type resolution, erased generic schemas, callable metadata, checked field access, lossless native projections, and default construction. |
 | [JSON standard library](standard-library-json.md) | JSON encoding and typed reflection-directed decoding, record and union mappings, optional null preservation, Unicode/numbers, structured diagnostics, and resource limits. |
 | [Protocol Buffers standard library](standard-library-protobuf.md) | Public record/union graph serialization, reflection-directed reconstruction, native C fields, proto3 schemas, and independent-state transfer payloads. |
+| [Transfer policies](standard-library-transfer.md) | State-independent copy/borrow policies, custom resource handoff, and destination Runtime ownership. |
 | [SQLite standard library](standard-library-sqlite3.md) | Embedded SQLite with asynchronous native work, prepared statements, owned rows and cursors, reflection bindings and mapping, explicit transactions, and cancellation-safe cleanup. |
 | [The C FFI](ffi.md) | `foreign import`: binding C headers, supported types, calling C functions, ownership, allocation, and limitations. |
 | [Foreign functions](foreign-functions.md) | Source-defined exact C-ABI entry points, the restricted raw-C body, pointer types, explicit source collaboration, generated companions, sequencing, and callback use. |

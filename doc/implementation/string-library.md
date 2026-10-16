@@ -51,10 +51,10 @@ writer and byte-preserving normalization helpers. Neither dependency exposes
 private engine or storage state to URL.
 The adapter state and close rules are documented with their owner in
 [Async channel-backed string streams](../language/async-io.md#channel-backed-string-streams).
-Production places all twenty-three logical modules and LPegLabel in one static
+Production places all twenty-five logical modules and LPegLabel in one static
 bundle.
 
-The installed standard build requests twenty-three roots in stable order:
+The installed standard build requests twenty-five roots in stable order:
 
 ```text
 titan.coroutine
@@ -69,6 +69,7 @@ titan.url
 titan.http
 titan.websocket
 titan.os
+titan.path
 titan.peg
 titan.string
 titan.math
@@ -79,6 +80,8 @@ titan.test
 titan.reflect
 titan.sqlite3
 titan.json
+titan.protobuf
+titan.transfer
 ```
 
 The request order keeps `titan.io` before its concrete stream users, places
@@ -88,8 +91,8 @@ non-topological. Recursive import loading resolves both the
 `titan.async`/`titan.net`/`titan.os` to `titan.string` to `titan.peg` chains
 and the `titan.url` PEG/string dependencies while those facades are processed.
 
-The paired `titan.so`/`titan.a` therefore contains twenty-three logical protocols
-and twenty-three archive metadata keys. The DSO exposes twenty-four Lua openers: bare
+The paired `titan.so`/`titan.a` therefore contains twenty-five logical protocols
+and twenty-five archive metadata keys. The DSO exposes twenty-six Lua openers: bare
 `luaopen_titan` support plus one entry per logical module. The provider's
 metadata-free payload begins with `ltitanlib.o`, then the private
 `libtitan-lpeglabel.a`, then the selected libuv payload, private llhttp

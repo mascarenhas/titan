@@ -488,8 +488,8 @@ explicitly requested fallback.
 ## Packaging and compatibility
 
 `titan.test` is an ordinary logical module in the combined
-`titan.so`/`titan.a` pair. The current provider has twenty-five `luaopen_*`
-entries including bare support and twenty-four generated logical-module shims.
+`titan.so`/`titan.a` pair. The current provider has twenty-six `luaopen_*`
+entries including bare support and twenty-five generated logical-module shims.
 The same compiled `titan.test` implementation serves ordinary programs and
 generated test executables. Standard installation publishes the provider pair
 and shims; it does not install a private test-source payload. Packaging tests

@@ -53,6 +53,8 @@ function Connection:read_until(delimiter: string,
 function Connection:write(data: string)
 function Connection:shutdown()
 function Connection:close()
+function Connection:to_transfer_payload(): (...: async.TransferValue)
+function Connection.from_transfer_payload(...: async.TransferValue): Connection
 function Connection:abort()
 
 function Server:accept(): Connection
@@ -173,6 +175,31 @@ explicit point before their first application read or write.
 context reference. It is idempotent. Connections already returned by
 `accept()` retain their own TLS state and remain usable; a close does not reach
 back into them.
+
+## Transferring connections
+
+An idle TLS `Connection` implements
+`to_transfer_payload(): (...: async.TransferValue)` and
+`Connection.from_transfer_payload(...: async.TransferValue): Connection`.
+`async.TransferValue.from_value(connection)` detaches the live TLS engine and
+its TCP transport into a same-process custom record policy. Decode with
+`packet:to_value()` in a state with an active async Runtime. The destination
+retains the verified peer identity, negotiated engine state, unread plaintext
+and encrypted BIO buffers. No second handshake or TLS serialization occurs.
+A lazy client or accepted connection may move before its first handshake.
+
+Transfer rejects pending read, write, handshake, shutdown, retry, cleanup or
+retirement ownership. It also follows every
+[TCP transfer restriction](standard-library-net.md#transferring-connections),
+including registered input observers and native overlapped reads on Windows.
+An admission failure leaves the original connection usable. The source becomes
+closed as soon as encoding succeeds, before any receiver accepts the payload.
+
+Ownership is manual: reconstruct exactly once, including local recovery when
+delivery fails, and then close or abort the reconstructed connection normally.
+Replay can double close or use freed native memory; dropping the payload leaks
+the detached engine and endpoint. There is no automatic delivery rollback or
+payload finalizer. The native engine pointer is valid only in the same process.
 
 ## Reading and writing
 

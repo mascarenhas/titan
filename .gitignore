@@ -98,6 +98,7 @@
 /titan/sqlite3.lua
 /titan/json.lua
 /titan/protobuf.lua
+/titan/transfer.lua
 
 # Native runtime command-line configuration stamps
 /titan-runtime/.titan-*-build-config

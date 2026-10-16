@@ -1,0 +1,162 @@
+local transfer = import "transfer"
+foreign import "transfer-native.h"
+
+local transfer_loop: loop_t? = nil
+
+--- Bind the state-local loop used to reconstruct transferred native owners.
+-- The async Runtime binds its initialized loop and unbinds before shutdown.
+-- @usage standard-library-uv.md#native-resource-handoff
+function bind_transfer_loop(loop: loop_t)
+  if not loop.initialized then raise "transfer loop is not initialized" end
+  if transfer_loop ~= nil and transfer_loop ~= loop then
+    raise "a different transfer loop is already bound"
+  end
+  transfer_loop = loop
+end
+
+--- Remove this exact loop's transfer binding before closing admission.
+-- @usage standard-library-uv.md#native-resource-handoff
+function unbind_transfer_loop(loop: loop_t)
+  if transfer_loop == loop then transfer_loop = nil end
+end
+
+local function require_transfer_loop(): loop_t
+  local loop? = transfer_loop
+  if loop == nil or not loop.initialized then
+    raise "native transfer requires an active destination async Runtime"
+  end
+  return loop
+end
+
+local function transfer_status_check(status: integer)
+  if status < 0 then raise "native transfer: " .. strerror(status) end
+end
+
+--- Check whether an open TCP or non-IPC pipe endpoint can be handed off.
+-- Active reads/listeners, native requests, and public userdata are rejected.
+-- This check does not change the owner or its descriptor.
+-- `allow_reading` permits an adapter's stoppable read watcher, but never a
+-- pending native read request; the adapter must stop the watcher before handoff.
+-- @usage standard-library-uv.md#native-resource-handoff
+function stream_transfer_status(stream: stream_t, allow_reading: boolean?): integer
+  local native = stream:pointer()
+  local loop? = stream:owner_loop()
+  if native == nil or loop == nil then return ffi.UV_EINVAL end
+  case stream
+  when tcp(owner) then
+    if owner.userdata ~= nil then return ffi.UV_EINVAL end
+    if owner.connection_callback ~= nil then return ffi.UV_EBUSY end
+  when pipe(owner) then
+    if owner.userdata ~= nil then return ffi.UV_EINVAL end
+    if owner.connection_callback ~= nil then return ffi.UV_EBUSY end
+  when tty() then return ffi.UV_ENOTSUP
+  end
+  local native_allow = 0
+  if allow_reading then native_allow = 1 end
+  local status = ffi.titan_uv_transfer_stream_status(native, native_allow) as integer
+  if status < 0 then return status end
+  for candidate in iteration.pairs(loop.requests) do
+    if candidate is connect_t then
+      local request = candidate as connect_t
+      if request.stream ~= nil and request.stream:pointer() == native then
+        return ffi.UV_EBUSY
+      end
+    elseif candidate is write_t then
+      local request = candidate as write_t
+      if request.stream ~= nil and request.stream:pointer() == native then
+        return ffi.UV_EBUSY
+      end
+      if request.send_stream ~= nil and
+          request.send_stream:pointer() == native as foreign *uv_handle_t then
+        return ffi.UV_EBUSY
+      end
+    elseif candidate is shutdown_t then
+      local request = candidate as shutdown_t
+      if request.stream ~= nil and request.stream:pointer() == native then
+        return ffi.UV_EBUSY
+      end
+    end
+  end
+  return 0
+end
+
+--- Detach an idle connected TCP endpoint into an exactly-once native payload.
+-- The source enters closing immediately. The caller owns delivery/recovery;
+-- copying or discarding this payload does not duplicate or close its socket.
+-- @usage standard-library-uv.md#native-resource-handoff
+function tcp_t:to_transfer_payload(): (...: transfer.TransferValue)
+  local stream = self:as_stream_t()
+  local handle = self:as_handle_t()
+  transfer_status_check(stream_transfer_status(stream))
+  local output = foreign uv_os_sock_t.new_array(1)
+  transfer_status_check(ffi.titan_uv_transfer_dup_socket(self.native, output))
+  local socket = output[0]
+  local committed = false
+  defer if not committed then ffi.titan_uv_transfer_close_socket(socket) end
+  local payload = transfer.TransferValue.is_pointer(
+    ffi.titan_uv_transfer_socket_pointer(socket))
+  close(handle, nil)
+  committed = true
+  return payload
+end
+
+--- Adopt one TCP handoff payload on the destination Runtime's bound loop.
+-- @usage standard-library-uv.md#native-resource-handoff
+function tcp_t.from_transfer_payload(...: transfer.TransferValue): tcp_t
+  local loop = require_transfer_loop()
+  if #... ~= 1 then raise "invalid TCP transfer payload" end
+  local socket: foreign uv_os_sock_t = 0
+  case ...[1]
+  when is_pointer(pointer) then socket = ffi.titan_uv_transfer_socket_value(pointer)
+  else raise "invalid TCP transfer payload"
+  end
+  local owner = tcp_t.new()
+  local handle = owner:as_handle_t()
+  transfer_status_check(tcp_init(loop, owner))
+  local adopted = false
+  defer if not adopted then close(handle, nil) end
+  transfer_status_check(ffi.uv_tcp_open(owner.native, socket))
+  adopted = true
+  return owner
+end
+
+--- Detach an idle non-IPC pipe endpoint into an exactly-once descriptor payload.
+-- @usage standard-library-uv.md#native-resource-handoff
+function pipe_t:to_transfer_payload(): (...: transfer.TransferValue)
+  local stream = self:as_stream_t()
+  local handle = self:as_handle_t()
+  transfer_status_check(stream_transfer_status(stream))
+  local output = foreign uv_file.new_array(1)
+  transfer_status_check(ffi.titan_uv_transfer_dup_pipe(self.native, output))
+  local file = output[0]
+  local committed = false
+  defer if not committed then ffi.titan_uv_transfer_close_file(file) end
+  local payload = transfer.TransferValue.is_integer(file as integer)
+  close(handle, nil)
+  committed = true
+  return payload
+end
+
+--- Adopt one non-IPC pipe handoff payload on the destination Runtime's loop.
+-- @usage standard-library-uv.md#native-resource-handoff
+function pipe_t.from_transfer_payload(...: transfer.TransferValue): pipe_t
+  local loop = require_transfer_loop()
+  if #... ~= 1 then raise "invalid pipe transfer payload" end
+  local file: foreign uv_file = -1
+  case ...[1]
+  when is_integer(descriptor) then
+    file = descriptor as foreign uv_file
+    if descriptor < 0 or file as integer ~= descriptor then
+      raise "invalid pipe transfer descriptor"
+    end
+  else raise "invalid pipe transfer payload"
+  end
+  local owner = pipe_t.new()
+  local handle = owner:as_handle_t()
+  transfer_status_check(pipe_init(loop, owner, 0))
+  local adopted = false
+  defer if not adopted then close(handle, nil) end
+  transfer_status_check(ffi.titan_uv_transfer_open_pipe(owner.native, file))
+  adopted = true
+  return owner
+end

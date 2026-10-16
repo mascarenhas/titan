@@ -166,6 +166,8 @@ function InputOutputStream:read_until(delimiter: string,
 function InputOutputStream:write(data: string)
 function InputOutputStream:close()
 function InputOutputStream:wait(): os.ExitStatus
+function InputOutputStream:to_transfer_payload(): (...: async.TransferValue)
+function InputOutputStream.from_transfer_payload(...: async.TransferValue): InputOutputStream
 
 function popen(command: string): InputOutputStream
 ```
@@ -210,6 +212,37 @@ neither operating-system pipe can fill while the other direction is waiting.
 Read merged output through EOF before an ordinary `wait` when the child may
 produce more than one pipe buffer. Errors and cancellation follow the same
 Task and native-owner cleanup rules as direct process streams.
+
+## Transferring shell streams
+
+`InputOutputStream:to_transfer_payload()` transfers the idle writable stdin and
+merged readable stdout/stderr pipes. Pending wrapper operations and underlying
+pipe reads or writes are rejected before either pipe is detached. Native pipe
+handoff follows the platform restrictions of
+[`os.InputStream` and `os.OutputStream`](standard-library-os.md#transferring-process-streams).
+`InputOutputStream.from_transfer_payload(...)` adopts both pipes on the
+current destination Runtime, including buffered output.
+
+Child-process ownership remains at the origin. Keep the original Runtime
+running to receive and reap the child's exit. The original wrapper's `wait()`
+still returns the child status, and its `close()` still terminates a running
+child when needed. Its transferred read side returns EOF and its writes
+raise. The destination owns communication only: `wait()` raises
+`transferred InputOutputStream has no child process owner`, while `close()`
+closes its pipes without signalling or waiting for the child. Closing the
+origin wrapper can therefore terminate a child still communicating through the
+destination.
+
+If native handoff of the second pipe fails after the first succeeded, the
+source retains the first pipe's payload. A later transfer retries with that
+payload; `write()` re-adopts it locally, while `close()` directly retires its
+descriptor even after Runtime shutdown has closed transfer admission. No
+payload is discarded merely because this composite hook raises.
+
+The payload follows the same trusted manual contract as other resource hooks:
+deliver and adopt it exactly once within this process, recover failed delivery,
+and explicitly close the destination. Copying or dropping a payload does not
+duplicate or close the owned pipes.
 
 ## Standard implementations
 

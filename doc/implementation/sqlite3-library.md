@@ -23,8 +23,8 @@ The matching public `sqlite3.h` is staged in the compiler SDK. Private symbol
 visibility follows the existing bundled native payload policy.
 
 SQLite is one logical standard module in the combined provider, which has
-twenty-three module protocols,
-twenty-three archive metadata keys/shims, and twenty-four Lua openers including bare
+twenty-five module protocols,
+twenty-five archive metadata keys/shims, and twenty-six Lua openers including bare
 support `luaopen_titan`. Source, provider validation, ordinary installation,
 snapshot, native aggregate, production smoke, and CI cache manifests include
 it explicitly. Native dependency cache identities include the version,
@@ -99,6 +99,32 @@ keeps its handle. Public explicit cleanup updates the visible owner after
 native retirement, so a rejected submission leaves it available for cleanup
 again. The module never uses sqlite3_close_v2 zombie ownership or SQLite
 process-global shutdown.
+
+## Connection transfer
+
+Connection's custom record hooks move the existing `sqlite3 *` under the
+[manual handoff contract](../language/standard-library-sqlite3.md#transferring-connections).
+The encoding hook reserves the Connection with the same closed/busy/active
+Cursor checks as close, then rejects any remaining Statement. The reservation
+also covers result publication and cancellation cleanup, so a completed
+worker whose continuation has not retired is still ineligible. Even an idle
+Statement owns a `sqlite3_stmt *` and retains the original Connection; it
+cannot follow a detached connection implicitly.
+
+The hook allocates its single pointer policy before clearing `handle`. The
+source then has no close authority, and the reservation is released by its
+ordinary defer. Decoding validates arity, policy kind and nonnull address,
+then allocates a fresh Connection with zero Statements and no active operation.
+Neither hook calls SQLite, queues work, captures a source Runtime, or yields.
+The existing FULLMUTEX database already supports successive worker threads;
+the receiving state's ordinary worker submission can use it directly.
+Transaction/savepoint state stays on the native handle.
+
+The carrier is not a reference-counted ticket. Repeated adoption, abandoned
+payloads, arbitrary pointer injection and failure after detachment retain the
+public programmer-owned lifetime rules; the transfer graph neither closes nor
+rolls back native ownership. A retained packet can be adopted locally after a
+rejected send. No GC callback performs database I/O.
 
 ## Cancellation
 
@@ -189,6 +215,11 @@ leave earlier fields changed.
 Public behavior lives under `spec/stdlib/titan/sqlite3/` in the native aggregate,
 outside LuaCov. The tests exercise bindings, reusable statements, owned rows,
 reflection, transactions, cancellation, and independent-loop progress.
+Transfer cases cover source invalidation, synchronous hooks, transaction and
+savepoint preservation, invalid payloads, rejected-send recovery, and round
+trips through an independent state followed by source-state collection. The
+existing worker gates also reject transfer during prepare and close, including
+when no Statement has been published yet.
 Deterministic worker gates use SQLite's supported native extension hooks in a
 normal installed static-consumer child, with no rewritten provider or callback
 interposition. Focused ASan/UBSan runs use the instrumented bundled SQLite.

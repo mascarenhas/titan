@@ -123,8 +123,9 @@ TITAN_TEST_SOURCES_http.tests := spec/stdlib/titan/http/tests/tests.titan \
 	spec/stdlib/titan/http/tests/server_behavior.titan \
 	spec/stdlib/titan/http/tests/test_cases.titan \
 	spec/stdlib/titan/http/tests/timeout_tls_behavior.titan \
-	spec/stdlib/titan/http/tests/upgrade_behavior.titan
-TITAN_TEST_IMPORTS_http.tests := http.test_support support.async support.command support.runtime
+	spec/stdlib/titan/http/tests/upgrade_behavior.titan \
+	spec/stdlib/titan/http/tests/transfer_test.titan
+TITAN_TEST_IMPORTS_http.tests := http.test_support support.async support.command support.common support.runtime
 
 TITAN_TEST_SOURCES_io.test_support := spec/stdlib/titan/io/test_support.titan
 TITAN_TEST_IMPORTS_io.test_support :=
@@ -132,7 +133,7 @@ TITAN_TEST_IMPORTS_io.test_support :=
 TITAN_TEST_SOURCES_io.tests := spec/stdlib/titan/io/tests/tests.titan \
 	spec/stdlib/titan/io/tests/core_test.titan \
 	spec/stdlib/titan/io/tests/process_test.titan
-TITAN_TEST_IMPORTS_io.tests := io.test_support os.process_test_support support.async support.common support.runtime
+TITAN_TEST_IMPORTS_io.tests := io.test_support os.process_test_support support.async support.command support.common support.runtime
 
 TITAN_TEST_SOURCES_iteration.tests := spec/stdlib/titan/iteration/tests.titan
 TITAN_TEST_IMPORTS_iteration.tests := support.common
@@ -185,7 +186,7 @@ TITAN_TEST_SOURCES_net.test_support := spec/stdlib/titan/net/test_support.titan
 TITAN_TEST_IMPORTS_net.test_support := support.runtime
 
 TITAN_TEST_SOURCES_net.tests := spec/stdlib/titan/net/tests.titan
-TITAN_TEST_IMPORTS_net.tests := net.test_support support.async support.runtime
+TITAN_TEST_IMPORTS_net.tests := net.test_support support.async support.common support.runtime
 
 TITAN_TEST_SOURCES_os.process_test_support := spec/stdlib/titan/os/process_test_support.titan
 TITAN_TEST_IMPORTS_os.process_test_support := support.async support.common
@@ -199,7 +200,8 @@ TITAN_TEST_SOURCES_os.process_tests := spec/stdlib/titan/os/process_tests/proces
 	spec/stdlib/titan/os/process_tests/coverage_stream_test.titan \
 	spec/stdlib/titan/os/process_tests/coverage_tty_test.titan \
 	spec/stdlib/titan/os/process_tests/coverage_read_failure_test.titan \
-	spec/stdlib/titan/os/process_tests/coverage_shutdown_admission_test.titan
+	spec/stdlib/titan/os/process_tests/coverage_shutdown_admission_test.titan \
+	spec/stdlib/titan/os/process_tests/transfer_test.titan
 TITAN_TEST_IMPORTS_os.process_tests := os.process_test_support support.async support.command support.common support.runtime
 
 TITAN_TEST_SOURCES_os.test_support := spec/stdlib/titan/os/test_support.titan
@@ -227,6 +229,7 @@ TITAN_TEST_SOURCES_reflect.tests := spec/stdlib/titan/reflect/tests.titan
 TITAN_TEST_IMPORTS_reflect.tests :=
 
 TITAN_TEST_SOURCES_sqlite3.tests := spec/stdlib/titan/sqlite3/tests/tests.titan \
+	spec/stdlib/titan/sqlite3/tests/transfer_test.titan \
 	spec/stdlib/titan/sqlite3/tests/binding_test.titan \
 	spec/stdlib/titan/sqlite3/tests/cancellation_test.titan \
 	spec/stdlib/titan/sqlite3/tests/connection_test.titan \
@@ -247,7 +250,8 @@ TITAN_TEST_SOURCES_ssl.tests := spec/stdlib/titan/ssl/tests/tests.titan \
 	spec/stdlib/titan/ssl/tests/allocation_test.titan \
 	spec/stdlib/titan/ssl/tests/error_strings_test.titan \
 	spec/stdlib/titan/ssl/tests/late_write_test.titan \
-	spec/stdlib/titan/ssl/tests/drain_failure_test.titan
+	spec/stdlib/titan/ssl/tests/drain_failure_test.titan \
+	spec/stdlib/titan/ssl/tests/transfer_test.titan
 TITAN_TEST_IMPORTS_ssl.tests := support.command net.test_support ssl.backpressure_support ssl.test_support support.async support.common support.runtime
 
 TITAN_TEST_SOURCES_string.core_test := spec/stdlib/titan/string/core_test.titan
@@ -293,7 +297,8 @@ TITAN_TEST_SOURCES_uv.public_tests := spec/stdlib/titan/uv/public_tests/public_t
 	spec/stdlib/titan/uv/public_tests/coverage_fs_poll.titan \
 	spec/stdlib/titan/uv/public_tests/coverage_sync_udp.titan \
 	spec/stdlib/titan/uv/public_tests/coverage_misc_callbacks.titan \
-	spec/stdlib/titan/uv/public_tests/coverage_tty.titan
+	spec/stdlib/titan/uv/public_tests/coverage_tty.titan \
+	spec/stdlib/titan/uv/public_tests/transfer.titan
 TITAN_TEST_IMPORTS_uv.public_tests := support.common
 TITAN_TEST_FOREIGN_uv.public_tests := 1
 
@@ -333,6 +338,7 @@ TITAN_TEST_SOURCES_websocket.tests := spec/stdlib/titan/websocket/tests/tests.ti
 	spec/stdlib/titan/websocket/tests/lifecycle_test.titan \
 	spec/stdlib/titan/websocket/tests/ownership_test.titan \
 	spec/stdlib/titan/websocket/tests/backpressure.titan \
-	spec/stdlib/titan/websocket/tests/backpressure_test.titan
-TITAN_TEST_IMPORTS_websocket.tests := support.async support.runtime
+	spec/stdlib/titan/websocket/tests/backpressure_test.titan \
+	spec/stdlib/titan/websocket/tests/transfer_test.titan
+TITAN_TEST_IMPORTS_websocket.tests := support.async support.common support.runtime
 TITAN_TEST_C_INPUTS_websocket.tests := spec/stdlib/titan/websocket/tests/pressure-native.h

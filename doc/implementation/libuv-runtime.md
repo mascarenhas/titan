@@ -311,8 +311,12 @@ producer close action. That action may await cleanup and use its supplied drain
 to dispose of unread resources. Subsequent close calls initiate nothing and do
 not wait for the first call's in-progress cleanup.
 
-Buffered controls stay synchronous. `drain_if` must receive a nonyielding,
-nonmutating predicate and detaches the entire FIFO on any match; it is not a
+Buffered controls stay synchronous. `snapshot_pending` copies the complete unread FIFO and
+returns its terminal outcome, or nil while live, without consuming entries or
+reserving a reader. The copy retains values after the source drains or closes;
+payloads themselves retain their ordinary reference semantics. Resource hooks
+use it to allocate snapshots before detaching native ownership. `drain_if` uses a
+nonyielding, nonmutating predicate and detaches the entire FIFO on any match; it is not a
 filter. `drain_pending` detaches regardless of terminal state. A domain that
 removes the outcome reserved for a notified reader must complete its terminal
 or control transition before yielding back to that reader. `wake_batch` affects
@@ -491,7 +495,10 @@ libuv handles. Their lexical/domain owners must close or dispose of them.
 Closing a process watcher does not kill or reap the process.
 
 `request_exit(code)` obtains the current Task, records only the first code,
+unbinds the Runtime's UV transfer loop before cancellation can enter cleanup,
 cancels every unfinished Task, and raises the caller's retained cancellation.
+The separate closing flag remains unchanged; accepted cleanup awaits and
+native callbacks still retire through the ordinary driver.
 The standalone bootstrap returns that code after ordinary cleanup. `run` refuses
 to create new Tasks once exit is requested. A manual Lua/Titan host retains
 control after its loop call; this operation does not call process-wide C exit.

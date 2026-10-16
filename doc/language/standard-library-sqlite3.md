@@ -48,6 +48,8 @@ Connection:get_autocommit(): boolean
 Connection:set_autocommit(autocommit: boolean)
 Connection:commit()
 Connection:rollback()
+Connection:to_transfer_payload(): (...: async.TransferValue)
+Connection.from_transfer_payload(...: async.TransferValue): Connection
 
 Statement:execute(...: value): integer
 Statement:query(...: value): Cursor
@@ -108,6 +110,36 @@ SQLite reports a delayed execution error. Early Cursor close resets and
 clears its Statement; it does not roll back a transaction. Cleanup may raise.
 Forgetting explicit close is outside the prompt resource-release guarantee;
 GC does not perform asynchronous database I/O.
+
+## Transferring connections
+
+Connection implements the [custom record transfer protocol](async-io.md#custom-record-transfer).
+`async.TransferValue.from_value(connection)` detaches its native SQLite handle;
+the resulting carrier's `to_value()` adopts it into a fresh Connection. Both
+hooks are synchronous and need no running Task. Ordinary operations and close
+on the receiving Connection still use the receiving state's worker queue.
+
+Transfer rejects a closed Connection, an outstanding operation, an active
+Cursor, or any open Statement before detaching. Close every Cursor and
+Statement first, including idle Statements. Successful detachment makes every
+alias of the source Connection behave as closed; its `close()` becomes a no-op.
+The same native database moves, including a private `:memory:` database, open
+transaction, and savepoints. Transfer does not commit or roll back anything.
+
+The payload is exactly one nonnull `TransferValue.is_pointer` containing the
+detached handle. `Connection.from_transfer_payload` rejects another arity,
+variant, or a null pointer. It trusts that a nonnull pointer came from this
+protocol; it cannot validate an arbitrary address or detect prior adoption.
+
+This is a manual ownership handoff. Adopt the payload exactly once, retain it
+while delivery is pending, and recover it yourself after failed delivery. For
+example, a carrier rejected by `async.send` can be adopted locally with
+`:to_value()` and then closed. Replaying a carrier can create two owners and
+cause use-after-free or double-close; abandoning one leaks the database.
+Transfer does not roll back detachment when later packing or delivery fails,
+and queue disposal does not close a pointer payload. These are the shared
+custom-hook ownership rules, including when a Connection is captured by a
+transferred closure.
 
 ## Binding values
 

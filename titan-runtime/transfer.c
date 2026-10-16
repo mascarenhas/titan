@@ -184,7 +184,7 @@ static void transfer_protobuf_function(lua_State *L, const char *name) {
 
 static void transfer_policy_function(lua_State *L, const char *name) {
     int top = lua_gettop(L);
-    transfer_library(L, "titan.async");
+    transfer_library(L, "titan.transfer");
     lua_getfield(L, -1, "TransferValue");
     lua_getfield(L, -1, name);
     if (!lua_isfunction(L, -1))
@@ -195,7 +195,7 @@ static void transfer_policy_function(lua_State *L, const char *name) {
 
 static int transfer_is_policy(lua_State *L, int index) {
     return luaL_testudata(L, index,
-        "Titan union titan.async.TransferValue metatable") != NULL;
+        "Titan union titan.transfer.TransferValue metatable") != NULL;
 }
 
 static void transfer_policy_to_value(lua_State *L, int index) {
@@ -779,7 +779,7 @@ static Table *transfer_policy_array(lua_State *L, unsigned count) {
     TValue writer;
     int top = lua_gettop(L);
     luaL_checkstack(L, 2, "rebuilding a Titan transfer payload Array");
-    luaL_getmetatable(L, "Titan union titan.async.TransferValue metatable");
+    luaL_getmetatable(L, "Titan union titan.transfer.TransferValue metatable");
     if (!lua_istable(L, -1))
         luaL_error(L, "destination has no TransferValue metatable");
     lua_pushcclosure(L, transfer_policy_array_writer, 1);
@@ -805,9 +805,9 @@ static void transfer_native_policy(lua_State *L, lua_Integer tag, void *pointer)
     Table *parts;
     TValue input, output;
     luaL_checkstack(L, 5, "rebuilding a native Titan transfer policy");
-    transfer_library(L, "titan.async");
+    transfer_library(L, "titan.transfer");
     lua_pop(L, 1);
-    luaL_getmetatable(L, "Titan union titan.async.TransferValue metatable");
+    luaL_getmetatable(L, "Titan union titan.transfer.TransferValue metatable");
     if (!lua_istable(L, -1))
         luaL_error(L, "destination has no TransferValue metatable");
     lua_rawgetp(L, -1, TITAN_MT_CONSTRUCT);

@@ -246,7 +246,7 @@ static void *different_symbols(const char *name) {
 /* This small native async facade exercises the graph independently of an
  * installed standard library. Its nominal layout and payload-reader protocol
  * match generated unions; the actual dense Arrays come from titan.c above. */
-#define POLICY_MT "Titan union titan.async.TransferValue metatable"
+#define POLICY_MT "Titan union titan.transfer.TransferValue metatable"
 #define CUSTOM_MT "transfer fixture custom record"
 #define CUSTOM_NAME "transfer.runtime.fixture.Custom"
 static unsigned custom_reconstructions;
@@ -389,9 +389,9 @@ static lua_State *policy_state(int initialize_record) {
     assert(L != NULL);
     luaL_getsubtable(L, LUA_REGISTRYINDEX, LUA_PRELOAD_TABLE);
     lua_pushcfunction(L, async_loader);
-    lua_setfield(L, -2, "titan.async");
+    lua_setfield(L, -2, "titan.transfer");
     lua_pop(L, 1);
-    transfer_library(L, "titan.async");
+    transfer_library(L, "titan.transfer");
     lua_pop(L, 1);
     if (initialize_record) fixture_init(L);
     return L;

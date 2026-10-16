@@ -259,6 +259,31 @@ is benign once the alert output has already been drained: it means the peer
 won the close race. Explicit `shutdown` and every other failure remain
 observable.
 
+## Connection transfer ownership
+
+TLS handoff moves the `SSL *` and its owned memory BIOs intact, together with
+the custom TCP connection policy and copied scalar/plaintext state. OpenSSL's
+`SSL_new` retains its context; the engine owns both BIOs. The implementation
+installs no Lua-state callbacks or Lua-bearing native ex-data on these objects.
+Consequently, closing the source Lua state after detachment does not invalidate
+the engine or its context. Encrypted input has already been copied into a BIO;
+retry pointers and borrowed output batches are excluded by the idle gate.
+
+The encoder rejects every reader/writer/control/handshake/feeder/retry owner and
+cleanup or scope waiter. It allocates policy storage before transferring TCP,
+then clears the source engine/BIO/transport references and marks it closed.
+It does not call `SSL_free`. The destination validates the entire policy and
+allocates an empty wrapper before adopting TCP, attaches the native engine,
+and obtains its BIO pointers with `SSL_get_rbio`/`SSL_get_wbio`. All operation
+slots and waiter Arrays are fresh destination-owned objects. TLS transfer
+inherits native-pending and half-close rejection from the TCP layer.
+
+This is a same-process, manual exactly-once capability, not a serialized TLS
+session. Replay, dropped payloads and failed delivery recovery belong to the
+caller. Tests cover a lazy engine moved out of an independent Lua state,
+source-state shutdown before decoding, established plaintext preservation,
+and rejection during handshake, read and backpressured output.
+
 ## Trust-path boundary
 
 The module initializer calls `SSL_CTX_set_default_verify_paths` on the one

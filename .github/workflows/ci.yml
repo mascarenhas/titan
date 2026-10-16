@@ -86,7 +86,7 @@ jobs:
             clean_titan_environment \
               "$PREFIX/bin/luarocks" remove titan --force
           fi
-          for module in coroutine uv async timer io fs net ssl url http websocket os path peg string math lua iteration gc test reflect sqlite3 json protobuf; do
+          for module in coroutine uv async timer io fs net ssl url http websocket os path peg string math lua iteration gc test reflect sqlite3 json protobuf transfer; do
             rm -f "$PREFIX/share/lua/5.5/titan/$module.lua"
           done
           rm -f "$PREFIX/share/titan/0.6/src/titan/test.titan"
@@ -126,7 +126,7 @@ jobs:
           lua -E -e 'assert(type(require("titan").backtrace) == "function")'
           test -f "$PREFIX/lib/titan/0.6/libtitan.a"
           test ! -e "$PREFIX/lib/titan/0.6/titan.a"
-          for module in coroutine uv async timer io fs net ssl url http websocket os path peg string math lua iteration gc test reflect sqlite3 json protobuf; do
+          for module in coroutine uv async timer io fs net ssl url http websocket os path peg string math lua iteration gc test reflect sqlite3 json protobuf transfer; do
             test ! -e "$PREFIX/share/lua/5.5/titan/$module.lua"
           done
 
@@ -779,7 +779,7 @@ jobs:
           test -f "$TITAN_STDLIB_DIAGNOSTIC_SNAPSHOT/manifest.txt"
           test -f "$snapshot_provider" && test ! -L "$snapshot_provider"
           cmp "$snapshot_provider" "$provider"
-          for module in coroutine uv async timer io fs net ssl url http websocket os path peg string math lua iteration gc test reflect sqlite3 json protobuf; do
+          for module in coroutine uv async timer io fs net ssl url http websocket os path peg string math lua iteration gc test reflect sqlite3 json protobuf transfer; do
             test -f "$PREFIX/share/lua/5.5/titan/$module.lua"
           done
           test ! -e "$PREFIX/share/titan/0.6/src/titan/test.titan"

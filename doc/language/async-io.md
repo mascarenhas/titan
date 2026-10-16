@@ -273,8 +273,12 @@ delivery but does not promise one exact libuv iteration.
 
 ## Transfer values
 
+`TransferValue` is defined in `titan.transfer`; `async.TransferValue` is a
+transparent alias. Native resource hooks and their manual handoff contract are
+described in [transfer policies](standard-library-transfer.md).
+
 `async.TransferValue` describes copied values and borrowed addresses that can
-cross independent Lua-state boundaries. It is a public union owned by async:
+cross independent Lua-state boundaries. It aliases this public transfer union:
 
 ```text
 union TransferValue
@@ -826,7 +830,9 @@ import is required by this adapter.
 `request_exit(code)` requires a running Task. It records the first requested
 status, requests cancellation of all unfinished Tasks including the caller,
 and raises the caller's retained cancellation reason. New `run` calls are
-rejected after the request. Lexical defers and cleanup awaits still run, and
+rejected after the request, and the Runtime immediately stops admitting native
+resource handoffs. This does not change the separate `is_closing()` flag.
+Lexical defers and cleanup awaits still run, and
 the standalone bootstrap returns the requested status after draining the
 Runtime. Catching the raised reason does not withdraw the exit request or
 clear cancellation. In a host that explicitly calls `loop`, draining the
@@ -1194,6 +1200,7 @@ function BufferedSubscription:next_batch(): SubscriptionBatchResult<|T, E|>
 function BufferedSubscription:stop()
 function BufferedSubscription:close()
 function BufferedSubscription:drain_pending(): SubscriptionBatch<|T|>
+function BufferedSubscription:snapshot_pending(): (SubscriptionBatch<|T|>, SubscriptionResult<|T, E|>?)
 function BufferedSubscription:drain_if(predicate: function (T): (boolean)):
     SubscriptionBatch<|T|>?
 function BufferedSubscription:wake_batch()
@@ -1310,6 +1317,7 @@ These producer-side controls are synchronous and do not suspend:
 | Operation | Behavior |
 | --- | --- |
 | `drain_pending()` | Detach the entire current queue, including an empty one, without changing terminal state. |
+| `snapshot_pending()` | Copy the unread queue without consuming it; return the batch and nil while live, or its ended/error/closed outcome. Later queue changes do not change the snapshot. Values keep their usual reference semantics. |
 | `drain_if(predicate)` | Inspect in FIFO order; if any item matches, detach the entire queue in its original order. Return nil without detaching when none match. |
 | `wake_batch()` | Notify only an existing `next_batch` waiter. It stores no future wake credit and does not end the subscription. |
 

@@ -1,25 +1,28 @@
--- The HTTP owner captures transport retirement before Interface erasure.
--- Upgraded streams own only that public capability and unread binary input;
--- they never rediscover the concrete TCP/TLS type.
+-- Ordinary retirement uses the capability captured before Interface erasure.
+-- Cross-state handoff explicitly supports the native net/SSL owners and rebuilds
+-- that capability from their fresh destination wrappers.
 local record Transport
   connection: io.ReaderWriterCloser
   abort: function (): ()
 end
 
-local record Exchange
+local record ExchangeState
   transport: Transport
   parser: Parser
   active: boolean
   transferred: boolean
   output_started: boolean
   rejected: boolean
+  pending: integer
+  serving: boolean
 end
 
-local record UpgradedStream
-  transport: Transport
-  prefix: string
-  closed: boolean
-  reading: boolean
+record UpgradedStream
+  local transport: Transport
+  local prefix: string
+  local closed: boolean
+  local reading: boolean
+  local writing: integer
 end
 
 local function UpgradedStream:read_chunk(): string?
@@ -76,6 +79,8 @@ end
 
 function UpgradedStream:write(data: string)
   if self.closed then raise "HTTP upgraded stream is closed" end
+  self.writing = self.writing + 1
+  defer self.writing = self.writing - 1
   self.transport.connection:write(data)
 end
 
@@ -88,7 +93,65 @@ end
 
 local function new_upgraded_stream(transport: Transport,
                                    parser: Parser): UpgradedStream
-  return UpgradedStream(transport, parser.input_excess, false, false)
+  return UpgradedStream(transport, parser.input_excess, false, false, 0)
+end
+
+local function transfer_transport(transport: Transport): async.TransferValue
+  local concrete: value = transport.connection
+  case reflect.inspect(concrete)
+  when is_interface(wrapper) then concrete = wrapper.wrapped
+  else
+  end
+  if not (concrete is net.Connection) and not (concrete is ssl.Connection) then
+    raise "HTTP transfer requires a native TCP or TLS transport"
+  end
+  return async.TransferValue.from_value(concrete)
+end
+
+local function restore_transfer_transport(payload: async.TransferValue): Transport
+  case payload
+  when is_record_payload(name) then
+    if name ~= "titan.net.Connection" and name ~= "titan.ssl.Connection" then
+      raise "invalid HTTP transport transfer payload"
+    end
+  else raise "invalid HTTP transport transfer payload"
+  end
+  local concrete = payload:to_value()
+  if concrete is net.Connection then
+    local connection = concrete as net.Connection
+    return Transport(connection, connection:close)
+  elseif concrete is ssl.Connection then
+    local connection = concrete as ssl.Connection
+    return Transport(connection, connection:abort)
+  end
+  raise "invalid HTTP transport transfer payload"
+end
+
+--- Move an idle upgraded stream, preserving unread protocol bytes.
+-- @usage standard-library-http.md#resource-handoff
+function UpgradedStream:to_transfer_payload(): (...: async.TransferValue)
+  if self.closed then raise "HTTP upgraded stream is closed" end
+  if self.reading or self.writing ~= 0 then
+    raise "HTTP upgraded stream has a pending operation"
+  end
+  local prefix = async.TransferValue.is_string(self.prefix)
+  local transport = transfer_transport(self.transport)
+  self.closed = true
+  self.prefix = ""
+  return prefix, transport
+end
+
+--- Adopt an upgraded stream on the active destination Runtime.
+-- @usage standard-library-http.md#resource-handoff
+function UpgradedStream.from_transfer_payload(...: async.TransferValue): UpgradedStream
+  if #... ~= 2 then raise "invalid HTTP upgraded stream transfer payload" end
+  local prefix = ""
+  case ...[1]
+  when is_string(bytes) then prefix = bytes
+  else raise "invalid HTTP upgraded stream transfer payload"
+  end
+  local transport = restore_transfer_transport(...[2])
+  return UpgradedStream(transport, prefix, false, false, 0)
 end
 
 local record UpgradeOutcome<|A|>
@@ -210,6 +273,8 @@ local function Response:validate_upgrade_exchange(request_value: Request)
 end
 
 local function Response:write_upgrade_output(output: string)
+  self.exchange.pending = self.exchange.pending + 1
+  defer self.exchange.pending = self.exchange.pending - 1
   if #output > 65536 then raise "HTTP upgrade output headers exceed 64 KiB" end
   -- Reserve the response's output phase before scheduling its writer. No
   -- second upgrade or ordinary response output may overlap the pending block.

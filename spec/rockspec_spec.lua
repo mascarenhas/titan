@@ -13,7 +13,7 @@ local PROGRAM_SUFFIX = platform.windows and ".exe" or ""
 local STDLIB_MODULES = {
     "coroutine", "uv", "async", "timer", "io", "fs", "net", "ssl",
     "url", "http", "websocket", "os", "path", "peg", "string", "math", "lua", "iteration", "gc",
-    "test", "reflect", "sqlite3", "json", "protobuf",
+    "test", "reflect", "sqlite3", "json", "protobuf", "transfer",
 }
 local COMPILER_SLICE_PATHS = {}
 for _, owner in ipairs({ "checker", "coder" }) do
@@ -765,7 +765,7 @@ int titan_sdk_headers(void) { return LUA_VERSION_NUM + SQLITE_VERSION_NUMBER; }
             "titan/http/native.titan",
             "titan/http/pool.titan",
             "titan/http/server.titan",
-            "titan/http/upgrade.titan",
+            "titan/http/transfer.titan", "titan/http/upgrade.titan",
             "titan/websocket/websocket.titan",
             "titan/websocket/handshake.titan",
             "titan/websocket/connection.titan",
@@ -993,6 +993,10 @@ int titan_sdk_headers(void) { return LUA_VERSION_NUM + SQLITE_VERSION_NUMBER; }
             "titan/protobuf/decoder.titan",
             "titan/protobuf/schema.titan",
             "titan/protobuf/native.h",
+            "titan/transfer.titan",
+            "titan/uv/transfer-native.h",
+            "doc/language/standard-library-transfer.md",
+            "doc/implementation/transfer-library.md",
             "spec/stdlib/titan/protobuf/tests.titan",
             "spec/stdlib/titan/protobuf/protobuf_fixture.h",
             "doc/language/standard-library-protobuf.md",
@@ -1297,6 +1301,7 @@ assert(support._loadlib(%q, "titan_async_abi"))
             local testing = require "titan.test"
             local json = require "titan.json"
             local protobuf = require "titan.protobuf"
+            local transfer = require "titan.transfer"
             local builtin_string = require "string"
             -- Requiring async initializes its public uv dependency globally.
             -- The returned async-owned Task resolves its methods through the
@@ -1346,6 +1351,7 @@ assert(support._loadlib(%q, "titan_async_abi"))
             assert(type(testing) == "userdata")
             assert(type(json) == "userdata")
             assert(type(protobuf) == "userdata")
+            assert(type(transfer) == "userdata")
             local json_source = '{"answer":42,"values":[1,null,3]}'
             assert(json.encode(json.decode(json_source)) == json_source)
             assert(not testing.testing())
@@ -1380,6 +1386,7 @@ assert(support._loadlib(%q, "titan_async_abi"))
                 test = testing,
                 json = json,
                 protobuf = protobuf,
+                transfer = transfer,
             }) do
                 local symbol = "luaopen_titan_" .. name
                 assert(normalize(package.searchpath("titan." .. name, package.path)) ==

@@ -89,9 +89,9 @@ Both shell branches use the existing asynchronous process owner and captured
 libuv pipes, with writable stdin and one shared stdout/stderr pipe. There are
 no CRT mode flags or text-mode byte conversions. `popen` narrows the optional
 process stream fields explicitly, then constructs one
-public `InputOutputStream` whose five fields remain private: the Process, the
-writable input facade, the one merged readable facade, an optional cached
-`ExitStatus`, and the completed-close bit. It never constructs a second
+public `InputOutputStream` with private fields for the optional originating
+Process, writable and merged-readable facades, an optional staged writable-pipe
+payload, cached `ExitStatus`, completed-close bit, and pending-operation count. It never constructs a second
 facade for stderr; `os.spawn` has already stored the exact same InputStream in
 both Process output fields.
 
@@ -133,3 +133,48 @@ Exact parent-stdin process plumbing also runs natively: a compiled Titan parent
 launches a focused standalone child through C99 `system`, reads its temporary
 result file, and removes that file with `defer`. Closed-facade behavior in a
 later Runtime runs under two explicit `support.runtime` sessions.
+
+## Shell-stream transfer
+
+The composite hooks move only the captured pipes. The originating `Process`
+and its UV exit callback remain in the original Runtime; that callback retains
+`ProcessOwner` until exit even if the original `InputOutputStream` becomes
+unreachable. The destination facade has no Process. Its `wait` reports that
+explicitly, while its `close` only disposes its two stream owners.
+
+All five potentially waiting wrapper operations increment a count until their
+continuations exit. Transfer rejects a nonzero count, then preflights both
+private Stdio owners through io's existing explicit `os.titan` source import.
+This prevents a pending operation on the second pipe from detaching the first.
+The first detached writable-pipe packet remains on the source until the second
+handoff succeeds. A failure therefore retains ownership locally; transfer can
+retry, and write can reconstruct that owner. Successful reconstruction
+also updates `Process.stdin` to preserve the original facade alias and clears
+the staged field only after adoption succeeds. Close validates and directly
+retires a retained packet's descriptor without adoption, so cleanup remains
+available after transfer admission closes. It clears that packet after the
+native close attempt, before reporting its status; a terminal close error must
+not cause a retry against a potentially reused descriptor. No registry or
+native multi-pipe transaction is introduced.
+
+The isolated Linux regression `spec/support/check_io_transfer_failure.sh`
+takes an absolute installed SDK prefix and a new absolute output directory.
+It builds a child-only `dup` interposer and the native
+`io_transfer_failure_app` fixture, then verifies write, retry, close, and exit
+cleanup after the second pipe duplication fails. The exit case verifies both
+closed native-adoption admission and retirement of the exact staged descriptor;
+it reaps the child before requesting exit to keep cancellation of `Process.wait`
+separate from this ownership test. Other platforms report a classified skip.
+
+After successful transfer the source drops both communication facades but
+retains child wait/termination ownership. The receiver validates both nominal
+payload kinds before adoption and allocates its composite shell first. If
+readable-pipe adoption fails, it schedules native close of the unpublished
+writable owner without waiting, preserving the hooks' nonyielding contract.
+The underlying hooks own platform-specific descriptor duplication and
+read-buffer reconstruction.
+
+Native `io.tests` cover pipe transfer with binary traffic and source reaping,
+explicit destination wait rejection, pending-reader rejection without source
+detachment, malformed payloads, and use from an independent Lua state while
+the origin Runtime retains child ownership.

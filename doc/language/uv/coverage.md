@@ -12,9 +12,9 @@ column describes the underlying C ABI for binding maintainers. The
 actually supplies or receives; native pointer borrowing does not shorten the
 lifetime of an independently copied public value.
 
-The public API also has 205 [supplemental declarations](supplemental-public-signatures.tsv):
+The public API also has 212 [supplemental declarations](supplemental-public-signatures.tsv):
 constructors, owner views, result/data accessors, C-only bridge entries,
-`has_api`, and `setup_process_args`. These are documented in
+`has_api`, `setup_process_args`, and native transfer hooks and loop binding. These are documented in
 [types](types.md) and [supplemental APIs](supplemental.md); they are not counted
 as additional native C functions.
 

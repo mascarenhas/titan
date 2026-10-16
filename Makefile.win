@@ -285,7 +285,7 @@ runtime-check: runtime
 	  LPEGLABEL_BUILD_CFLAGS=$(call quote,$(LPEGLABEL_BUILD_CFLAGS)) \
 	  bash spec/support/check_windows_runtime_sdk.sh $(call quote,$(WINDOWS_BUILD_ROOT)) $(call quote,$(PREFIX))
 
-STDLIB_MODULES := coroutine uv async timer io fs net ssl url http websocket os path peg string math lua iteration gc test reflect sqlite3 json protobuf
+STDLIB_MODULES := coroutine uv async timer io fs net ssl url http websocket os path peg string math lua iteration gc test reflect sqlite3 json protobuf transfer
 STDLIB_ROOTS := $(addprefix titan.,$(STDLIB_MODULES))
 
 .PHONY: stdlib stdlib-check install-stdlib publish-stdlib compiler-publication-check

@@ -59,3 +59,73 @@ function test_runtime_close_listener_failure_preserves_error_and_runs_remaining(
   test.assert(rejected, "listener registration silently created a Runtime")
   runtime_test.run(function () async.yield() end)
 end
+
+local function close_exit_transfer_file(file: integer)
+  local request = uv.fs_t.new()
+  local status = uv.fs_close(nil, request, file)
+  uv.fs_req_cleanup(request)
+  test.assert(status == 0, "exit transfer fixture could not close its descriptor")
+end
+
+function test_exit_rejects_native_adoption_during_cleanup_and_preserves_payload(_: test.Context)
+  local status, read_file, write_file = uv.pipe(uv.NONBLOCK_PIPE, uv.NONBLOCK_PIPE)
+  test.assert(status == 0)
+  defer if read_file >= 0 then close_exit_transfer_file(read_file) end
+  defer if write_file >= 0 then close_exit_transfer_file(write_file) end
+  local packet: async.TransferValue? = nil
+  defer if packet ~= nil then
+    case packet
+    when is_integer(file) then close_exit_transfer_file(file)
+    else raise "exit transfer fixture lost its pipe descriptor"
+    end
+  end
+  local rejected, cleanup_completed, closing_flag_preserved = false, false, false
+  local task = async.run<|nil, value|>(function (): nil
+    local writer = uv.pipe_t.new()
+    test.assert(uv.pipe_init(async.current_loop(), writer, 0) == 0)
+    test.assert(uv.pipe_open(writer, write_file) == 0)
+    write_file = -1
+    packet = writer:to_transfer_payload()
+    defer do
+      -- Exit cancellation is distinct from fatal Runtime closing, but native
+      -- handoff admission must already be closed before cleanup registrars run.
+      closing_flag_preserved = not async.is_closing()
+      async.await_cleanup<|nil, nil|>(function (resolve, _reject, _fatal)
+        local adopted: uv.pipe_t? = nil
+        do adopted = uv.pipe_t.from_transfer_payload(packet)
+        catch
+          rejected = error == "native transfer requires an active destination async Runtime"
+        end
+        if adopted ~= nil then
+          packet = nil
+          uv.close(adopted:as_handle_t())
+        end
+        local cleanup_timer = uv.timer_t.new()
+        test.assert(uv.timer_init(async.current_loop(), cleanup_timer) == 0)
+        test.assert(uv.timer_start(cleanup_timer, function (owner: uv.timer_t)
+          uv.timer_close(owner, function (_: uv.timer_t)
+            cleanup_completed = true
+            resolve(nil)
+          end)
+        end, 0, 0) == 0)
+      end)
+    end
+    async.request_exit(23)
+    return nil
+  end)
+  async.loop()
+  test.assert(task:status():has_cancelled(), "exit request lost sticky cancellation")
+  test.assert(rejected, "exit cleanup adopted a new native owner")
+  test.assert(closing_flag_preserved, "exit changed the public fatal-closing query")
+  test.assert(cleanup_completed, "exit prevented accepted cleanup callbacks from retiring")
+  local retired = false
+  runtime_test.run(function ()
+    local adopted = uv.pipe_t.from_transfer_payload(packet)
+    packet = nil
+    test.assert(uv.handle_get_loop(adopted:as_handle_t()) == async.current_loop())
+    test.assert(uv.is_writable(adopted:as_stream_t()),
+      "rejected adoption consumed the pipe descriptor")
+    uv.close(adopted:as_handle_t(), function (_: uv.handle_t) retired = true end)
+  end)
+  test.assert(retired, "fresh Runtime did not retire the recovered owner")
+end

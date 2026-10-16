@@ -254,6 +254,33 @@ other worker-acquired resources. An adapter must own those resources itself.
 `async.is_closing()` is a synchronous admission query; it neither requires a
 Task nor injects pending Task cancellation. See [runtime shutdown](libuv-runtime.md#shutdown-and-process-control).
 
+## Native socket and pipe handoff
+
+`uv/transfer.titan` owns the direct custom hooks for TCP and non-IPC pipe
+endpoints. The lower `titan.transfer` module supplies their payload type without
+introducing a UV-to-async import cycle. Async binds its active state-local loop
+through `bind_transfer_loop` and clears that exact binding at shutdown
+admission. Destination hooks require this binding before allocating or adopting
+an owner; they never inspect private Runtime state.
+
+`transfer-native.h` duplicates platform resources, checks native pending
+requests, and handles Windows socket/CRT descriptor distinctions. Unix bound
+pipe owners are excluded because native close unlinks their pathname; IPC
+framing and half-closed TCP direction flags are not reconstructible by ordinary
+descriptor adoption. The Titan preflight also scans the owning loop's request
+roots, catching accepted write/connect/shutdown work whose terminal callback
+has not yet retired it. Public userdata must be nil; callbacks are rebuilt by
+the destination domain.
+
+All payload allocations precede source close, and a lexical cleanup closes a
+duplicate if payload preparation fails. Source `uv.close` retains the old
+owner through its ordinary callback. Reconstruction allocates fresh native
+storage, initializes it on the bound loop, and adopts the duplicated identifier.
+Failed adoption closes that new native lifetime while leaving the unadopted
+identifier under the caller's manual recovery contract. Windows pending reads
+remain ineligible even after `read_stop`; no cancellation-based move guarantee
+is inferred from an idle Titan Task.
+
 ## Validation and integration
 
 Behavior belongs in public native Titan tests. Exercise the canonical compiled

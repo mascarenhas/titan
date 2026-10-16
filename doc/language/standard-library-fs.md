@@ -29,6 +29,8 @@ function File:write(data: string): integer
 function File:flush()
 function File:close()
 function File:is_closed(): boolean
+function File:to_transfer_payload(): (...: async.TransferValue)
+function File.from_transfer_payload(...: async.TransferValue): File
 
 function stat(path: string): Stat?
 function lstat(path: string): Stat?
@@ -83,7 +85,8 @@ Files created by `open` request permissions `0666`, subject to the process
 umask.
 
 The returned `File` is an opaque wrapper around an operating-system descriptor;
-callers cannot construct, forge, or extract that descriptor.
+ordinary file operations do not expose that descriptor. The trusted
+same-process transfer hooks below carry it in a manually owned payload.
 
 `read(max_bytes)` uses 64 KiB when `max_bytes` is omitted or `nil`. An
 explicit size must be positive. It returns at most that many bytes, possibly
@@ -150,8 +153,9 @@ return `nil` as ordinary Reader EOF, while `write` and `flush` reject the
 closed File. Repeated close is idempotent, `is_closed()` reports that terminal
 state, and close discards facade-retained delimiter excess. If another
 filesystem request is already using the descriptor, its result follows the
-host/libuv ordering; Titan does not add an active-operation counter or close
-queue. Coordinate close with other File operations when that distinction
+host/libuv ordering; Titan does not serialize or queue closes behind those
+operations. Its operation counter only rejects transfer while a File operation
+is pending. Coordinate close with other File operations when that distinction
 matters.
 
 Task cancellation does not abandon or suppress accepted native work. The
@@ -173,6 +177,24 @@ it or operating-system process teardown reclaims it. Once libuv accepts a
 close submission, the File wrapper is terminal even if the callback reports an
 error. The runtime reports that error once and never retries the close, because
 the operating system may already have reused that descriptor number.
+
+## Transferring files
+
+`File:to_transfer_payload()` moves an open, idle File into a same-process
+transfer payload containing its descriptor and copied delimiter-read remainder.
+It rejects a pending `read`, `read_until`, `write`, `flush`, or `close` before
+detaching anything. Successful detachment makes the source behave like a closed
+File. `File.from_transfer_payload(...)` adopts that descriptor without reopening
+the path, preserving its position and mode. The two hooks themselves do not
+wait or require a running Task; subsequent file I/O retains its usual Task
+requirement.
+
+These hooks implement the manual resource-handoff contract of
+[`async.TransferValue`](async-io.md#transfer-values). Deliver and adopt the
+payload exactly once in this process, and close the adopted File explicitly.
+The caller owns recovery after failed delivery. Copying the payload does not
+duplicate its descriptor, and discarding it does not close the descriptor.
+Replaying or forging a payload can close or use an unrelated descriptor.
 
 ## Whole-file helpers
 

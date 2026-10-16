@@ -1,6 +1,26 @@
 # Supplemental public API reference
 
-These 205 declarations complement the 305 canonical native wrappers. Constructors and owner methods are also grouped with their type in [types](types.md). Every entry uses the public signature; private native fields are omitted. See [ownership contracts](CONTRACT-NOTES.md) for the owner, buffer, callback, and native worker rules.
+These 212 declarations complement the 305 canonical native wrappers. Constructors and owner methods are also grouped with their type in [types](types.md). Every entry uses the public signature; private native fields are omitted. See [ownership contracts](CONTRACT-NOTES.md) for the owner, buffer, callback, and native worker rules.
+
+## Native resource handoff
+
+The following seven declarations implement the [native handoff contract](../standard-library-uv.md#native-resource-handoff):
+
+```titan
+function bind_transfer_loop(loop: loop_t)
+function unbind_transfer_loop(loop: loop_t)
+function stream_transfer_status(stream: stream_t, allow_reading: boolean?): integer
+function tcp_t:to_transfer_payload(): (...: transfer.TransferValue)
+function tcp_t.from_transfer_payload(...: transfer.TransferValue): tcp_t
+function pipe_t:to_transfer_payload(): (...: transfer.TransferValue)
+function pipe_t.from_transfer_payload(...: transfer.TransferValue): pipe_t
+```
+
+The state-local binding selects the destination loop. The read-only status
+query rejects unsupported or pending operations. Encoding detaches one idle
+endpoint; reconstruction adopts it once with fresh native storage. The caller
+owns payload delivery, adoption, and recovery. Ordinary async programs use the
+binding installed by their active Runtime.
 
 ## addrinfo_result_t:entries
 

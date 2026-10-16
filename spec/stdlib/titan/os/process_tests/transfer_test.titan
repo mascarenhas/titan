@@ -1,0 +1,116 @@
+local transfer_lua = import "lua"
+
+local function process_transfer_state(): transfer_lua.Lua
+  local state = transfer_lua.new()
+  -- Argument policies are decoded before the chunk runs. Establish the
+  -- destination's state-local Runtime before handing it any native owners.
+  state:run("local a = require('titan.async'); a.run(function () end)")
+  return state
+end
+
+function test_process_stream_handoff_keeps_process_reaping_in_origin(
+    _context: test.Context)
+  runtime_test.run(function ()
+    local state = process_transfer_state()
+    defer state:close()
+    local process = system.spawn(process_support.child_path(), {"echo"})
+    defer cleanup_process(process)
+    local input = process_support.required_output(process.stdin, "transfer stdin")
+    local output = process_support.required_input(process.stdout, "transfer stdout")
+    local payload = "header\npipe\0handoff\255\r\n"
+    local input_packet: async.TransferValue? = nil
+    async.await<|nil, nil|>(function (resolve, _reject, _fatal)
+      -- Registration runs without a current Task. Serialization only needs
+      -- the active Runtime; it neither waits nor checks cancellation.
+      common.assert_raises(function () async.running() end)
+      input_packet = async.TransferValue.from_value(input)
+      resolve(nil)
+    end)
+    test.assert(process:is_running(), "pipe handoff retired the child watcher")
+    common.assert_raises(function () input:write("detached") end)
+    input:close()
+    local written: async.TransferValue = state:run_async([[
+      local output, bytes = ...
+      local a = require('titan.async')
+      local work = a.run(function ()
+        output:write(bytes)
+        output:close()
+      end)
+      a.loop()
+      assert(work:status():has_succeeded(), 'transferred stdin write failed')
+      return #bytes
+    ]], "=process-input-handoff", input_packet,
+      async.TransferValue.is_string(payload))
+    case written
+    when is_integer(count) then test.assert(count == #payload)
+    else raise "worker did not confirm the transferred write"
+    end
+    test.assert(output:read_until("\n", true) == "header")
+    process_support.assert_normal(process:wait(), "origin-owned transferred child")
+    test.assert(not process:is_running(), "origin did not reap transferred child")
+
+    -- A Windows read can remain native-pending after the child exits. Retry
+    -- only while the source is intact; callbacks must retire before detach.
+    local output_packet: async.TransferValue? = nil
+    for _ = 1, 100 do
+      async.await<|nil, nil|>(function (resolve, _reject, _fatal)
+        do output_packet = async.TransferValue.from_value(output) catch end
+        resolve(nil)
+      end)
+      if output_packet ~= nil then break end
+      async.yield()
+    end
+    test.assert(output_packet ~= nil, "terminal stdout never became transferable")
+    test.assert(output:read() == nil, "detached stdout remained readable")
+    gc.collect()
+    state:run("local a = require('titan.async'); a.run(function () end)")
+    local received: async.TransferValue = state:run_async([[
+      local input = ...
+      local a = require('titan.async')
+      local bytes = ''
+      local work = a.run(function ()
+        while true do
+          local chunk = input:read()
+          if chunk == nil then break end
+          bytes = bytes .. chunk
+        end
+        input:close()
+      end)
+      a.loop()
+      assert(work:status():has_succeeded(), 'transferred stdout read failed')
+      return bytes
+    ]], "=process-output-handoff", output_packet)
+    case received
+    when is_string(bytes) then test.assert(bytes == "pipe\0handoff\255\r\n")
+    else raise "worker did not return the transferred input bytes"
+    end
+    process_support.assert_normal(process:wait(), "repeated origin child wait")
+  end)
+end
+
+function test_process_stream_handoff_rejects_pending_reader_without_detach(
+    _context: test.Context)
+  runtime_test.run(function ()
+    local process = system.spawn(process_support.child_path(), {"echo-count", "1"})
+    defer cleanup_process(process)
+    local input = process_support.required_output(process.stdin, "pending stdin")
+    local output = process_support.required_input(process.stdout, "pending stdout")
+    local received: string? = nil
+    local reader = async.run<|nil, value|>(function (): nil
+      received = output:read()
+      return nil
+    end)
+    task_support.cleanup_task(reader, "pending handoff reader cleanup")
+    process_support.wait_until_waiting(reader, "pending handoff reader")
+    common.assert_raises_contains(function ()
+      async.TransferValue.from_value(output)
+    end, "pending read")
+    input:write("R")
+    input:close()
+    async.join(reader)
+    test.assert(reader:status():has_succeeded() and received == "R",
+      "rejected handoff disturbed the original reader")
+    test.assert(not output:read())
+    process_support.assert_normal(process:wait(), "pending handoff child")
+  end)
+end

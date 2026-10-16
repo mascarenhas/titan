@@ -15,192 +15,16 @@ local uv = import "titan.uv"
 local coroutine = import "titan.coroutine"
 local gc = import "titan.gc"
 local string = import "titan.string"
-local reflect = import "titan.reflect"
--- Closure capture graphs can contain public nominals even in async-only apps.
-local protobuf = import "titan.protobuf"
+local transfer = import "titan.transfer"
 
 --- Nonyielding cancellation callback that detaches one exact explicit-suspension waiter.
 -- @usage async-io.md
 type SuspendCancelAction = function (): ()
 
---- Values copied or borrowed across independent Lua states.
+--- Copy and borrow policies shared with low-level resource owners.
+-- Transparent alias of transfer.TransferValue; constructors and methods are identical.
 -- @usage async-io.md#transfer-values
-union TransferValue
-  is_nil()
-  is_boolean(boolean)
-  is_integer(integer)
-  is_float(float)
-  is_string(string)
-  is_lua_state(foreign *lua_State)
-  is_function(foreign function (*lua_State): int)
-  is_pointer(foreign *void)
-  is_record(name: string, data: string)
-  is_union(name: string, data: string)
-  is_closure(value: value)
-  is_record_payload(name: string, payload: {TransferValue})
-end
-
-local record RecordTransferHooks
-  const encode: reflect.MethodType
-  const decode: reflect.StaticFunctionType
-end
-
-local transfer_active_records: {value: boolean} = {}
-
-local function transfer_named_type(descriptor: reflect.Type?, name: string): boolean
-  if descriptor == nil then return false end
-  case descriptor
-  when is_named(named) then return named.name == name
-  when is_record(record_type) then return record_type.name == name
-  when is_union(union_type) then return union_type.name == name
-  else return false
-  end
-end
-
-local function record_transfer_hooks(descriptor: reflect.RecordType): RecordTransferHooks?
-  local encode: reflect.MethodType? = nil
-  local decode: reflect.StaticFunctionType? = nil
-  for index = 1, #descriptor.methods do
-    local method = descriptor.methods[index]
-    if method.name == "to_transfer_payload" then
-      encode = method
-    elseif method.name == "from_transfer_payload" then
-      raise "transfer: from_transfer_payload must be a static function on " .. descriptor.name
-    end
-  end
-  for index = 1, #descriptor.statics do
-    local static = descriptor.statics[index]
-    if static.name == "from_transfer_payload" then
-      decode = static
-    elseif static.name == "to_transfer_payload" then
-      raise "transfer: to_transfer_payload must be an instance method on " .. descriptor.name
-    end
-  end
-  if encode == nil and decode == nil then return nil end
-  if encode == nil or decode == nil then
-    raise "transfer: record requires both transfer payload hooks: " .. descriptor.name
-  end
-  if not descriptor.is_public then
-    raise "transfer: record payload hooks require a public record: " .. descriptor.name
-  end
-  if #encode.param_descriptors ~= 0 or encode.vararg_descriptor ~= nil
-      or #encode.return_descriptors ~= 0
-      or not transfer_named_type(encode.flexret_descriptor, "titan.async.TransferValue") then
-    raise "transfer: invalid to_transfer_payload signature on " .. descriptor.name
-  end
-  if #decode.param_descriptors ~= 0
-      or not transfer_named_type(decode.vararg_descriptor, "titan.async.TransferValue")
-      or #decode.return_descriptors ~= 1 or decode.flexret_descriptor ~= nil
-      or not transfer_named_type(decode.return_descriptors[1], descriptor.name) then
-    raise "transfer: invalid from_transfer_payload signature on " .. descriptor.name
-  end
-  return RecordTransferHooks(encode, decode)
-end
-
---- Select the copy or borrow policy for a value, preserving an explicit TransferValue.
--- Public records may provide synchronous to_transfer_payload/from_transfer_payload hooks.
--- The hooks take precedence over structural protobuf encoding and may encapsulate private fields.
--- @param candidate Scalar, public nominal, Titan closure, or explicit transfer policy.
--- @return Transfer policy retaining its local payload until a transfer boundary copies it.
--- @usage async-io.md#custom-record-transfer
-function TransferValue.from_value(candidate: value): TransferValue
-  if candidate is TransferValue then return candidate end
-  case reflect.inspect(candidate)
-  when is_nil() then return TransferValue.is_nil()
-  when is_boolean(item) then return TransferValue.is_boolean(item)
-  when is_integer(item) then return TransferValue.is_integer(item)
-  when is_float(item) then return TransferValue.is_float(item)
-  when is_string(item) then return TransferValue.is_string(item)
-  when is_raw_pointer(item) then return TransferValue.is_pointer(item)
-  when is_lua_thread{thread} then return TransferValue.is_lua_state(thread)
-  when is_lua_userdata() then
-    local raw: foreign TValue = candidate
-    return TransferValue.is_pointer(ffi.lmacro_getudatamem(ffi.lmacro_uvalue(raw)))
-  when is_titan_function() then return TransferValue.is_closure(candidate)
-  when is_lua_c_function{entry} then
-    local raw: foreign TValue = candidate
-    if ffi.lmacro_ttisCclosure(raw) ~= 0 then
-      local closure = ffi.lmacro_clCvalue(raw)
-      if closure.nupvalues ~= 0 then
-        raise "transfer: cannot transfer a Lua C closure with upvalues"
-      end
-    end
-    return TransferValue.is_function(entry)
-  when is_record(record_value) then
-    local hooks? = record_transfer_hooks(record_value.type)
-    if hooks ~= nil then
-      if transfer_active_records[candidate] then
-        raise "transfer: cyclic record payload for " .. record_value.type.name
-      end
-      transfer_active_records[candidate] = true
-      defer transfer_active_records[candidate] = nil
-      local payload: {TransferValue} = { hooks.encode.callable(record_value.value) }
-      return TransferValue.is_record_payload(record_value.type.name, payload)
-    end
-    return TransferValue.is_record(record_value.type.name, protobuf.serialize(candidate))
-  when is_union(union_value) then
-    return TransferValue.is_union(union_value.type.name, protobuf.serialize(candidate))
-  else raise "transfer: unsupported value"
-  end
-end
-
-local function transfer_pointer_value(pointer: foreign *void): value
-  local top = ffi.lua_gettop(L)
-  defer ffi.lua_settop(L, top)
-  if ffi.lua_checkstack(L, 1) == 0 then raise "cannot reserve transfer pointer stack" end
-  ffi.lua_pushlightuserdata(L, pointer)
-  return ffi.lua_totvalue(L, -1) as value
-end
-
---- Recover a semantic value from a transfer policy in the current Lua state.
--- Custom record reconstruction invokes its synchronous from_transfer_payload hook.
--- Borrowed addresses remain borrowed; this operation does not move native ownership.
--- @return Scalar, borrowed address, callable, or reconstructed nominal value.
--- @usage async-io.md#custom-record-transfer
-function TransferValue:to_value(): value
-  case self
-  when is_nil() then return nil
-  when is_boolean(item) then return item
-  when is_integer(item) then return item
-  when is_float(item) then return item
-  when is_string(item) then return item
-  when is_lua_state(item) then return transfer_pointer_value(item)
-  when is_pointer(item) then return transfer_pointer_value(item)
-  when is_function(item) then
-    if not item then raise "cannot transfer a NULL Lua C function" end
-    local top = ffi.lua_gettop(L)
-    defer ffi.lua_settop(L, top)
-    if ffi.lua_checkstack(L, 1) == 0 then raise "cannot reserve transfer function stack" end
-    ffi.lua_pushcclosure(L, item, 0)
-    return ffi.lua_totvalue(L, -1) as value
-  when is_record(name, data) then return protobuf.deserialize_nominal(data, name, false)
-  when is_union(name, data) then return protobuf.deserialize_nominal(data, name, true)
-  when is_closure(item) then
-    local top = ffi.lua_gettop(L)
-    defer ffi.lua_settop(L, top)
-    if ffi.lua_checkstack(L, 1) == 0 then raise "cannot reserve transfer closure stack" end
-    ffi.lua_pushtvalue(L, item)
-    if ffi.titan_transfer_is_closure(L, -1) == 0 then
-      raise "cannot transfer a value that is not a Titan closure"
-    end
-    return item
-  when is_record_payload(name, payload) then
-    local nominal? = reflect.find_nominal(name)
-    if nominal == nil then raise "transfer: unknown record type " .. name end
-    case nominal
-    when is_record(descriptor) then
-      local hooks? = record_transfer_hooks(descriptor)
-      if hooks == nil then raise "transfer: record has no payload hooks: " .. name end
-      local result: value = hooks.decode.callable(...payload)
-      case reflect.inspect(result)
-      when is_record(record_value) then
-        if record_value.type.name == name then return result end
-      end
-      raise "transfer: from_transfer_payload returned a different record: " .. name
-    else raise "transfer: nominal type is not a record: " .. name
-    end
-  end
-end
+type TransferValue = transfer.TransferValue
 
 --- A FIFO receiver whose opaque native handle can be sent across Lua states.
 -- @usage async-io.md#cross-state-receivers
@@ -793,8 +617,11 @@ local function new_runtime(): Runtime
     tasks = {}, next_task = 1,
     current_task = nil, driving = false, closing = false, failure = nil, shutdown_cancelled = false, exit_code = nil, close_registrations = {}}
   check_status(uv.loop_init(runtime.loop), "runtime.loop.init")
+  do uv.bind_transfer_loop(runtime.loop)
+  catch uv.loop_close(runtime.loop); raise end
   local status = uv.timer_init(runtime.loop, runtime.wake)
   if status < 0 then
+    uv.unbind_transfer_loop(runtime.loop)
     uv.loop_close(runtime.loop)
     raise operation_error(status, "runtime.timer.init")
   end
@@ -859,6 +686,7 @@ function add_close_listener(listener: function (): ()): function (): ()
 end
 
 local function notify_runtime_closed(runtime: Runtime)
+  uv.unbind_transfer_loop(runtime.loop)
   runtime.closing = true
   local registrations = runtime.close_registrations
   runtime.close_registrations = {}
@@ -940,6 +768,7 @@ local function finish_task(task: Task, state: TaskStatus)
   end
   task.runtime.tasks[task.root_index] = nil
   if not has_tasks(task.runtime) then
+    uv.unbind_transfer_loop(task.runtime.loop)
     task.runtime.closing = true
     uv.stop(task.runtime.loop)
   end
@@ -1544,6 +1373,7 @@ end
 
 local function fail_runtime(runtime: Runtime, error: value, trace: string)
   if runtime.failure == nil then runtime.failure = Error(error, trace) end
+  uv.unbind_transfer_loop(runtime.loop)
   runtime.closing = true
   -- The failing callback may have stopped or closed the borrowed loop's wake
   -- handle. Revalidate it before the driver can block on unrelated handles.
@@ -1617,6 +1447,7 @@ function loop()
     -- Task-owned cleanup may have accepted a handle-based wait. Leave its
     -- completion and scheduler wakes intact until every Task has unwound.
     if not has_tasks(runtime) and runtime.ready_head == nil then
+      uv.unbind_transfer_loop(runtime.loop)
       runtime.closing = true
       do close_handles(runtime) catch fail_runtime(runtime, error, traceback) end
     end
@@ -3775,6 +3606,7 @@ function request_exit(code: integer)
   local task = running()
   local runtime = task.runtime
   if runtime.exit_code == nil then runtime.exit_code = code end
+  uv.unbind_transfer_loop(runtime.loop)
   local index = 1
   while index < runtime.next_task do
     local other? = runtime.tasks[index]
@@ -4197,6 +4029,24 @@ function BufferedSubscription:close()
 end
 
 -- Producer/domain control operations are synchronous and never suspend.
+--- Copy the unread queue and inspect its terminal outcome without consuming it.
+-- @return Independent batch plus nil while live, or the ended/error/closed outcome.
+-- @usage async-io.md
+function BufferedSubscription:snapshot_pending(): (SubscriptionBatch<|T|>, SubscriptionResult<|T, E|>?)
+  local core = self.core
+  local copied: {Item<|T|>} = {}
+  for index = 1, core.count do
+    copied[index] = Item<|T|>(core.items[core.first + index - 1].value)
+  end
+  local batch = SubscriptionBatch<|T|>(core.count, 1, copied)
+  case core.terminal
+  when live() then return batch, nil
+  when ended() then return batch, SubscriptionResult<|T, E|>.ended()
+  when error(failure) then return batch, SubscriptionResult<|T, E|>.error(failure)
+  when closed() then return batch, SubscriptionResult<|T, E|>.closed()
+  end
+end
+
 --- Synchronously transfer the complete unread batch to its domain owner.
 -- @return Batch with explicit count, possibly empty.
 -- @usage async-io.md

@@ -105,7 +105,7 @@ end
 --- An owned TLS byte stream permitting one reader and one writer concurrently.
 -- @usage standard-library-ssl.md#server-connections-and-handshakes
 record Connection
-  local transport: net.Connection
+  local transport: net.Connection?
   local handle: foreign *SSL
   local input: foreign *BIO
   local output: foreign *BIO
@@ -1588,6 +1588,97 @@ end
 function Connection:add_input_listener(listener: function (): ()): function (): ()
   if self.state ~= STATE_OPEN then raise "cannot observe input on a non-open TLS Connection" end
   return self.transport:add_input_listener(listener)
+end
+
+--- Detach an idle TLS engine and TCP transport into a manually owned payload.
+-- Native SSL/BIO storage moves intact; no handshake or TLS reserialization occurs.
+-- @return Same-process engine and transport state, to be adopted exactly once.
+-- @usage standard-library-ssl.md#transferring-connections
+function Connection:to_transfer_payload(): (...: async.TransferValue)
+  if not self.handle or self.state == STATE_TERMINATING then
+    raise "cannot transfer a closed or terminating TLS Connection"
+  end
+  if self.reader ~= nil or self.writer ~= nil or self.control ~= nil or
+      self.handshaker ~= nil or self.feeder ~= nil or self.retry ~= nil or
+      #self.cleanup_waiters ~= 0 or #self.scope_waiters ~= 0 then
+    raise "cannot transfer a TLS Connection with a pending operation"
+  end
+  local payload: {async.TransferValue} = {
+    async.TransferValue.is_nil(), async.TransferValue.is_pointer(self.handle),
+    async.TransferValue.is_boolean(self.client), async.TransferValue.is_string(self.state),
+    async.TransferValue.is_boolean(self.transport_eof),
+    async.TransferValue.is_boolean(self.transport_shutdown),
+    async.TransferValue.is_string(self.excess),
+  }
+  -- Transport validation and native duplication must succeed before the engine
+  -- loses its source owner. SSL owns both BIOs and its own SSL_CTX reference.
+  payload[1] = async.TransferValue.from_value(self.transport)
+  self.handle = nil
+  self.input = nil
+  self.output = nil
+  self.excess = ""
+  self.transport = nil
+  self.transport_closed = true
+  self.state = STATE_CLOSED
+  return ...payload
+end
+
+--- Adopt a detached TLS engine on the destination's active Runtime.
+-- @param ... Exact manually owned payload returned by to_transfer_payload.
+-- @return Fresh TLS wrapper retaining the original native engine and buffered state.
+-- @usage standard-library-ssl.md#transferring-connections
+function Connection.from_transfer_payload(...: async.TransferValue): Connection
+  if #... ~= 7 then raise "invalid TLS Connection transfer payload" end
+  local handle: foreign *SSL = nil
+  local client = false
+  local state = ""
+  local transport_eof = false
+  local transport_shutdown = false
+  local excess = ""
+  case ...[2]
+  when is_pointer(pointer) then handle = pointer as foreign *SSL
+  else raise "invalid TLS Connection engine payload" end
+  if not handle then raise "invalid TLS Connection engine payload" end
+  case ...[3]
+  when is_boolean(item) then client = item
+  else raise "invalid TLS Connection client state" end
+  case ...[4]
+  when is_string(item) then state = item
+  else raise "invalid TLS Connection state" end
+  if state ~= STATE_HANDSHAKING and state ~= STATE_OPEN and
+      state ~= STATE_WRITE_SHUTDOWN and state ~= STATE_PEER_CLOSED and
+      state ~= STATE_SHUTDOWN then
+    raise "invalid TLS Connection state"
+  end
+  case ...[5]
+  when is_boolean(item) then transport_eof = item
+  else raise "invalid TLS Connection transport EOF state" end
+  case ...[6]
+  when is_boolean(item) then transport_shutdown = item
+  else raise "invalid TLS Connection transport shutdown state" end
+  case ...[7]
+  when is_string(item) then excess = item
+  else raise "invalid TLS Connection input payload" end
+  case ...[1]
+  when is_record_payload(name, _payload) then
+    if name ~= "titan.net.Connection" then raise "invalid TLS Connection transport payload" end
+  else raise "invalid TLS Connection transport payload" end
+  -- Allocate the complete destination GC owner before adopting either native
+  -- resource. No source-state strings, callbacks, or Operation owners survive.
+  local connection: Connection = {
+    transport = nil, handle = nil, input = nil, output = nil,
+    client = client, state = state,
+    reader = nil, writer = nil, control = nil,
+    handshaker = nil, feeder = nil, retry = nil,
+    cleanup_waiters = {}, scope_waiters = {},
+    transport_eof = transport_eof, transport_shutdown = transport_shutdown,
+    transport_closed = false, excess = excess,
+  }
+  connection.transport = ...[1]:to_value()
+  connection.handle = handle
+  connection.input = ffi.SSL_get_rbio(handle)
+  connection.output = ffi.SSL_get_wbio(handle)
+  return connection
 end
 
 --- Read decrypted bytes, returning nil only after authenticated TLS shutdown.

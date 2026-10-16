@@ -2666,7 +2666,7 @@ end]])
        function()
         local names = {
             "coroutine", "uv", "async", "timer", "io", "fs", "net", "ssl",
-            "url", "http", "websocket", "os", "path", "peg", "string", "test", "sqlite3", "json", "protobuf",
+            "url", "http", "websocket", "os", "path", "peg", "string", "test", "sqlite3", "json", "protobuf", "transfer",
         }
         for _, name in ipairs(names) do
             assert_program_ast(

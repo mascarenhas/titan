@@ -83,6 +83,8 @@ Connection:write(kind: MessageType, data: string)
 Connection:ping(timeout_ms: integer?)
 Connection:shutdown(code: integer?, reason: string?, timeout_ms: integer?)
 Connection:close()
+Connection:to_transfer_payload(): (...: async.TransferValue)
+Connection.from_transfer_payload(...: async.TransferValue): Connection
 Connection:subprotocol(): string?
 Connection:close_status(): (integer?, string?)
 ```
@@ -107,6 +109,33 @@ shutdown operations fail clearly. Outgoing messages use data fragments of at
 most 16 KiB. Controls can be sent between frames; two data messages never
 interleave. Text is validated before emission; binary strings preserve all
 bytes, including NUL. Received UTF-8 is validated across chunks and fragments.
+
+## Transferring connections
+
+An idle open `Connection` implements
+`to_transfer_payload(): (...: async.TransferValue)` and
+`Connection.from_transfer_payload(...: async.TransferValue): Connection`.
+Use `async.TransferValue.from_value(connection)` and decode its custom record
+policy with `packet:to_value()` in a state with an active async Runtime. The
+same-process handoff preserves the client/server role, selected subprotocol,
+read limit and unread WebSocket, HTTP upgrade and TCP/TLS bytes.
+
+Transfer rejects pending reader, writer, Ping, Pong, Close, shutdown or
+retirement work, and rejects a closing or terminal session. An operation remains
+pending until its public call finishes, including cancellation and deadline
+cleanup after internal work completes. Its transport must
+also satisfy the [TCP](standard-library-net.md#transferring-connections) and,
+for `wss`, [TLS](standard-library-ssl.md#transferring-connections) idle rules.
+The persistent Windows overlapped read normally makes an established session
+ineligible even between application operations; rejection leaves it usable.
+
+Successful encoding closes the source facade before delivery without sending
+a WebSocket Close frame. The destination continues the existing protocol
+session. Adopt the payload exactly once, or recover it locally after rejected
+delivery. Replaying it can double close or access freed resources; dropping it
+leaks the detached transport. No automatic replay protection, finalizer or
+delivery rollback is provided. The representation is not suitable for storage
+or another process.
 
 ## Reader duty, closing and cancellation
 

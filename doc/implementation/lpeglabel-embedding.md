@@ -417,17 +417,18 @@ libtitan-sqlite3.a
 [bundled OpenSSL libssl.a + libcrypto.a]
 ```
 
-The source build invokes one compiler process for the twenty-three logical roots:
+The source build invokes one compiler process for the twenty-five logical roots:
 
 ```text
 titan.coroutine titan.uv titan.async titan.timer titan.io titan.fs
 titan.net titan.ssl titan.url titan.http titan.websocket titan.os titan.path titan.peg titan.string
 titan.math titan.lua titan.iteration titan.gc titan.test titan.reflect titan.sqlite3 titan.json
+titan.protobuf titan.transfer
 ```
 
-The paired `titan.so`/`titan.a` has twenty-three logical ABI/types protocols,
-twenty-three archive metadata keys, and twenty-three generated Lua shims. Bare native
-support adds a twenty-fourth DSO opener. LPegLabel contributes no logical key:
+The paired `titan.so`/`titan.a` has twenty-five logical ABI/types protocols,
+twenty-five archive metadata keys, and twenty-five generated Lua shims. Bare native
+support adds a twenty-sixth DSO opener. LPegLabel contributes no logical key:
 its five members are
 force-carried into both provider forms solely as private native payload.
 
@@ -447,8 +448,8 @@ That compiler-owned dependency is independent of the vendored standard
 module: a deployed `titan.peg` pattern never dynamically links to or requires
 the external module.
 
-The generated providers are validated for exact symbols, twenty-three metadata
-keys, all twenty-four Lua openers, and absence of an LPegLabel dynamic
+The generated providers are validated for exact symbols, twenty-five metadata
+keys, all twenty-six Lua openers, and absence of an LPegLabel dynamic
 dependency. Isolation
 tests load private and external engines in both orders, use both pattern
 families, vary their max-stack settings independently, and reject cross-engine

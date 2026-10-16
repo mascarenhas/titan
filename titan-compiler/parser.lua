@@ -69,6 +69,7 @@ local standard_imports = {
     sqlite3 = "titan.sqlite3",
     json = "titan.json",
     protobuf = "titan.protobuf",
+    transfer = "titan.transfer",
 }
 
 
