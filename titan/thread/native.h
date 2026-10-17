@@ -8,6 +8,13 @@
 #include "titan/ffi.h"
 #include "../async_receiver_native.h"
 
+/* The CRT write count is unsigned int on Windows and size_t on POSIX. */
+#ifdef _WIN32
+typedef unsigned int titan_thread_write_count;
+#else
+typedef size_t titan_thread_write_count;
+#endif
+
 /* Native layouts for cross-state channels and OS-thread lifecycles.
  * All structures live on the process heap and are synchronized by borrowed
  * native uv_mutex_t capabilities without exposing one state's GC objects. */

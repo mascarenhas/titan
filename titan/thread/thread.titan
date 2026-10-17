@@ -402,10 +402,14 @@ local foreign function write_stderr_bytes(bytes: const *char, length: size_t)
   if length == (0 as foreign size_t) then return end
   local offset = 0 as foreign size_t
   while offset < length do
+    local chunk = length - offset
+    if chunk > (65536 as foreign size_t) then
+      chunk = 65536 as foreign size_t
+    end
     local written = ffi.write(
       2 as foreign int,
       bytes + offset,
-      length - offset)
+      chunk as foreign titan_thread_write_count)
     if written < 0 then
       if ffi.errno == ffi.EINTR then
         -- Retry interrupted write.

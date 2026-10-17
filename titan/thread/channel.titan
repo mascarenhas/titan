@@ -380,16 +380,16 @@ function Receiver:try_receive(): (boolean, T?)
   return false, nil
 end
 
---- Return a generic-for iterator triple that yields messages until the channel is closed and drained.
+--- Return a generic-for iterator triple that yields a true continuation and each message until closed and drained.
 -- @return Iterator function, this Receiver state, and nil control variable.
 -- @usage standard-library-thread.md
-function Receiver:incoming(): (function (Receiver<|T|>, T?): (T?, nil), Receiver<|T|>, nil)
-  return function (rx: Receiver<|T|>, _: T?): (T?, nil)
+function Receiver:incoming(): (function (Receiver<|T|>, boolean?): (boolean?, T?), Receiver<|T|>, nil)
+  return function (rx: Receiver<|T|>, _: boolean?): (boolean?, T?)
     local ok, msg = rx:dequeue_or_wait()
     if not ok then
       return nil, nil
     end
-    return thread_message_to_value(msg) as T, nil
+    return true, thread_message_to_value(msg) as T
   end, self, nil
 end
 

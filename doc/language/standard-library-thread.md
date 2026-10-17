@@ -64,7 +64,7 @@ function Receiver:receive(): T
 function Receiver:receive_result(): ReceiveResult<|T|>
 function Receiver:try_receive(): (boolean, T?)
 function Receiver:incoming():
-    (function (Receiver<|T|>, T?): (T?, nil), Receiver<|T|>, nil)
+    (function (Receiver<|T|>, boolean?): (boolean?, T?), Receiver<|T|>, nil)
 function Receiver:close()
 function Receiver:is_closed(): boolean
 function Receiver:clone(): Receiver<|T|>
@@ -145,13 +145,20 @@ and returns its initial `(Sender<|T|>, Receiver<|T|>)` endpoint pair.
   buffered item was available immediately, or `(false, nil)` if the buffer is
   empty (whether open or closed).
 - `Receiver:incoming()` returns a generic-`for` iterator triple that yields
-  messages in FIFO order until the channel is closed and drained:
+  `(true, message)` in FIFO order, then `(nil, nil)` once the channel is closed
+  and drained. The first result controls iteration independently of the
+  message, so nil and false remain ordinary payloads. Discard that continuation
+  with `_` and mark the payload binding `?` to preserve a delivered nil:
 
 ```text
-for msg in rx:incoming() do
+for _, msg? in rx:incoming() do
   process(msg)
 end
 ```
+
+For a nonnullable message type, an ordinary payload binding such as
+`for _, job in rx:incoming() do` forces the optional iterator result to that
+required message type.
 
 ### Closing, cloning, and transferring endpoints
 

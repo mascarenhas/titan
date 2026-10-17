@@ -98,6 +98,14 @@ supports nested custom transfer hooks (`depth > 1`) via shared
 
 ## Channel state machine and endpoint transfer
 
+`Receiver:incoming()` uses a boolean continuation independently of its payload:
+each delivered packet returns `(true, decoded_message)`, and a closed, drained
+channel returns `(nil, nil)`. Generic `for` tests the first result for nil, so
+using the message itself as that result would terminate on a delivered nil and
+leave later packets buffered. The independent scalar continuation preserves
+nullable and `value` messages without allocating a per-message wrapper. Callers
+use `for _, message? in receiver:incoming() do` when nil must remain visible.
+
 `titan_thread_channel` owns:
 
 - `mutex`: heap-allocated `uv_mutex_t` protecting all fields.
@@ -156,6 +164,11 @@ packets via `channel_drain_and_discard`, `Thread:cancel` loses a race, or a
 references without allocating new finalizable handles.
 
 ## Detached OS thread lifecycle and cancellation
+
+Worker diagnostics use direct native writes, including after a Lua state has
+closed. Each write is bounded to 64 KiB and uses a private count typedef matching
+the Windows CRT's `unsigned int` or POSIX `size_t`; offsets remain `size_t` so
+partial writes and interruptions preserve the complete report.
 
 `spawn_raw<|R|>(entry: function (): (R), initially_observed: boolean)`
 serializes the zero-argument `entry` closure into `ctrl.entry_msg`, detaches a
