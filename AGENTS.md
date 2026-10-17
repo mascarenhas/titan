@@ -17,6 +17,7 @@ TypeScript, Go, or C. Load every applicable peer cartridge as well:
 | Application repository, build layout, executable delivery | [titan-application](.agents/skills/titan-application/SKILL.md) |
 | Native tests, fixtures, test-layer placement, filtering | [titan-tester](.agents/skills/titan-tester/SKILL.md) |
 | Tasks, timers, cross-state Receivers, cancellation, libuv callbacks, native ownership | [titan-async](.agents/skills/titan-async/SKILL.md) |
+| Cross-thread channels, thread handles, thread groups | [titan-thread](.agents/skills/titan-thread/SKILL.md) |
 | URL, TCP, TLS, HTTP | [titan-networking](.agents/skills/titan-networking/SKILL.md) |
 | WS/WSS messages, upgrades, controls, lifecycle, conformance | [titan-websocket](.agents/skills/titan-websocket/SKILL.md) |
 | C imports, callbacks, Lua interop, `titan.lua` | [titan-ffi](.agents/skills/titan-ffi/SKILL.md) |
@@ -119,6 +120,7 @@ belong in the corresponding compiler layer.
 | Task scheduling, Completion waits, ResumeToken wakes, subscriptions, Runtime-close listeners, cancellation, shutdown, timers | [Async continuation runtime](doc/implementation/libuv-runtime.md); public [async](doc/language/async-io.md) and [timer](doc/language/standard-library-timer.md) contracts |
 | Cross-state `TransferValue` policies, flat packets, closure snapshots, custom hooks, manual native resource handoff | [Transfer policy](doc/implementation/transfer-library.md); public [transfer policies](doc/language/standard-library-transfer.md) and [conversions](doc/language/async-io.md#transfer-values) |
 | Lossy coalescing Receiver ownership, copied packets, borrowed send handles, two-phase bootstrap/cleanup | [Receiver ownership](doc/implementation/libuv-runtime.md#cross-state-receiver-ownership), [bootstrap and teardown](doc/implementation/lua-library.md#receiver-bootstrap-and-teardown); public [receivers](doc/language/async-io.md#cross-state-receivers) |
+| Cross-thread channels, standalone Thread handles, bounded Group execution | [Thread library](doc/implementation/thread-library.md); public [thread](doc/language/standard-library-thread.md) contract |
 | I/O Interfaces, printing, iteration, shell streams | [I/O library](doc/implementation/io-library.md) |
 | Files, metadata, watchers, lexical paths | [Filesystem library](doc/implementation/filesystem-library.md), [path library](doc/implementation/standard-library-path.md) |
 | Child processes, stdio, signals, graceful exit | [OS library](doc/implementation/os-library.md) |

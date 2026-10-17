@@ -340,3 +340,26 @@ function send_custom_record(handle: value)
   async.send(handle as foreign *void,
     async.TransferValue.from_value(payload_record_value(97)))
 end
+
+record EnvelopeWithPayload
+  tag: string
+  item: PayloadRecord
+  items: {PayloadRecord}
+end
+
+union ChoiceWithPayload
+  empty()
+  wrapped(item: PayloadRecord, count: integer)
+end
+
+function envelope_payload_value(number: integer): EnvelopeWithPayload
+  return EnvelopeWithPayload("env", payload_record_value(number), {
+    payload_record_value(number + 1),
+    payload_record_value(number + 2),
+  })
+end
+
+function choice_payload_value(number: integer): ChoiceWithPayload
+  return ChoiceWithPayload.wrapped(payload_record_value(number), number * 2)
+end
+

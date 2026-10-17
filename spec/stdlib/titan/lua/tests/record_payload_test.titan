@@ -113,3 +113,31 @@ function test_lua_record_payload_receiver_reconstructs_after_sender_close(
     check_record_payload(inbox:wait(), 97)
   end)
 end
+
+function test_lua_nested_custom_record_payload_in_ordinary_record_and_union(
+    _context: test.Context)
+  runtime_test.run(function ()
+    local state = tlua.new()
+    defer state:close()
+    local env_packet, choice_packet = state:run_async([[
+      local fixture = require('lua.transfer_fixture')
+      return fixture.envelope_payload_value(101), fixture.choice_payload_value(107)
+    ]])
+    state:close()
+    gclib.collect()
+    local env: transfer_fixture.EnvelopeWithPayload = env_packet:to_value()
+    test.assert(env.tag == "env")
+    test.assert(env.item:number_value() == 101)
+    test.assert(#env.items == 2)
+    test.assert(env.items[1]:number_value() == 102)
+    test.assert(env.items[2]:number_value() == 103)
+
+    local choice: transfer_fixture.ChoiceWithPayload = choice_packet:to_value()
+    case choice
+    when wrapped(item, count) then
+      test.assert(item:number_value() == 107 and count == 214)
+    else raise "expected wrapped ChoiceWithPayload"
+    end
+  end)
+end
+

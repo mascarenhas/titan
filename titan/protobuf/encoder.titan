@@ -10,20 +10,24 @@ local function Encoder:enter(candidate: value)
   self.active[candidate] = true
 end
 
-local function Encoder:record_value(candidate: reflect.RecordValue, depth: integer): string
+local function Encoder:record_value(
+    buf: foreign *titan_protobuf_buffer,
+    candidate: reflect.RecordValue,
+    depth: integer)
   require_depth(depth)
   require_record(candidate.type)
   self:enter(candidate.value)
   defer self.active[candidate.value] = nil
-  local output = string.writer()
   for index = 1, #candidate.type.fields do
-    self:field(output, field_number(index), candidate:project(index),
+    self:field(buf, field_number(index), candidate:project(index),
                candidate.type.fields[index].type, depth + 1)
   end
-  return output:drain()
 end
 
-local function Encoder:union_value(candidate: reflect.UnionValue, depth: integer): string
+local function Encoder:union_value(
+    buf: foreign *titan_protobuf_buffer,
+    candidate: reflect.UnionValue,
+    depth: integer)
   require_depth(depth)
   require_union(candidate.type)
   self:enter(candidate.value)
@@ -31,149 +35,166 @@ local function Encoder:union_value(candidate: reflect.UnionValue, depth: integer
   for index = 1, #candidate.type.variants do
     local variant = candidate.type.variants[index]
     if variant.tag == candidate.tag then
-      local payload = string.writer()
+      local mark = begin_nested(buf, field_number(index))
       for part = 1, #variant.parts do
-        self:field(payload, field_number(part), candidate:project(part),
+        self:field(buf, field_number(part), candidate:project(part),
                    variant.parts[part].type, depth + 1)
       end
-      local output = string.writer()
-      write_bytes(output, field_number(index), payload:drain())
-      return output:drain()
+      end_nested(buf, mark)
+      return
     end
   end
   raise "protobuf: private union variant"
 end
 
-local function Encoder:array(candidate: value, element: reflect.Type,
-                              depth: integer): string
+local function Encoder:array(
+    buf: foreign *titan_protobuf_buffer,
+    candidate: value,
+    element: reflect.Type,
+    depth: integer)
   require_depth(depth)
   self:enter(candidate)
   defer self.active[candidate] = nil
-  local entries: const? {value} = (function (candidate: value): const? {value}
-    case reflect.inspect(candidate)
-    when is_array(entries) then return entries
-    when is_const_array(entries) then return entries
-    else raise "protobuf: expected a Titan Array"
-    end
-  end)(candidate)
-  local output = string.writer()
+  local entries: const? {value}, is_const_arr: boolean =
+    (function (candidate: value): (const? {value}, boolean)
+      case reflect.inspect(candidate)
+      when is_array(entries) then return entries, false
+      when is_const_array(entries) then return entries, true
+      else raise "protobuf: expected a Titan Array"
+      end
+    end)(candidate)
   for index = 1, #entries do
     local item: value = entries[index]
-    local slot = string.writer()
+    local slot_mark = begin_nested(buf, 1)
     -- A missing Array slot is legal independently of its element descriptor.
-    if item ~= nil then self:field(slot, 1, item, element, depth + 1) end
-    write_bytes(output, 1, slot:drain())
+    if item ~= nil then self:field(buf, 1, item, element, depth + 1) end
+    end_nested(buf, slot_mark)
   end
-  write_key(output, 2, 0)
-  case reflect.inspect(candidate)
-  when is_const_array() then write_varint(output, 1)
-  else write_varint(output, 0)
-  end
-  return output:drain()
+  write_key(buf, 2, 0)
+  if is_const_arr then write_varint(buf, 1) else write_varint(buf, 0) end
 end
 
-local function Encoder:foreign_array(candidate: value, element: reflect.Type,
-                                      depth: integer): string
+local function Encoder:foreign_array(
+    buf: foreign *titan_protobuf_buffer,
+    candidate: value,
+    element: reflect.Type,
+    depth: integer)
   require_depth(depth)
   local entries: const {value} = candidate
-  local output = string.writer()
   for index = 1, #entries do
-    local slot = string.writer()
-    self:field(slot, 1, entries[index], element, depth + 1)
-    write_bytes(output, 1, slot:drain())
+    local slot_mark = begin_nested(buf, 1)
+    self:field(buf, 1, entries[index], element, depth + 1)
+    end_nested(buf, slot_mark)
   end
-  return output:drain()
 end
 
-local function Encoder:foreign_struct(candidate: value,
-                                       descriptor: reflect.ForeignStructType,
-                                       depth: integer): string
+local function Encoder:foreign_struct(
+    buf: foreign *titan_protobuf_buffer,
+    candidate: value,
+    descriptor: reflect.ForeignStructType,
+    depth: integer)
   require_depth(depth)
   require_struct(descriptor)
   local fields: const {value} = candidate
-  local output = string.writer()
   for index = 1, #descriptor.fields do
     local field = descriptor.fields[index]
     if field.is_flexible_array then raise "protobuf: flexible foreign array" end
-    self:field(output, field_number(index), fields[index], field.type, depth + 1)
+    self:field(buf, field_number(index), fields[index], field.type, depth + 1)
   end
-  return output:drain()
 end
 
-local function Encoder:field(output: string.StringWriter, number: integer,
-                              candidate: value, descriptor: reflect.Type,
-                              depth: integer)
+local function Encoder:field(
+    buf: foreign *titan_protobuf_buffer,
+    number: integer,
+    candidate: value,
+    descriptor: reflect.Type,
+    depth: integer)
   require_depth(depth)
   local resolved = resolve_type(descriptor)
   case resolved
   when is_option(base) then
-    if candidate ~= nil then self:field(output, number, candidate, base, depth) end
+    if candidate ~= nil then self:field(buf, number, candidate, base, depth) end
   when is_nil() then
     if candidate ~= nil then raise "protobuf: expected nil" end
   when is_boolean() then
     local flag: boolean = candidate
-    write_key(output, number, 0)
-    if flag then write_varint(output, 1) else write_varint(output, 0) end
+    write_key(buf, number, 0)
+    if flag then write_varint(buf, 1) else write_varint(buf, 0) end
   when is_integer() then
     local integer_value: integer = candidate
-    write_key(output, number, 0)
-    write_varint(output, zigzag(integer_value))
+    write_key(buf, number, 0)
+    write_varint(buf, zigzag(integer_value))
   when is_float() then
     local number_value: float = candidate
-    write_key(output, number, 1)
-    output:write(string.pack("<d", number_value))
+    write_double(buf, number, number_value)
   when is_string() then
     local bytes: string = candidate
-    write_bytes(output, number, bytes)
+    write_bytes(buf, number, bytes)
   when is_array{elem_descriptor} then
-    write_bytes(output, number, self:array(candidate, elem_descriptor, depth))
+    local mark = begin_nested(buf, number)
+    self:array(buf, candidate, elem_descriptor, depth)
+    end_nested(buf, mark)
   when is_record(expected) then
     case reflect.inspect(candidate)
     when is_record(actual) then
       if actual.type.name ~= expected.name then raise "protobuf: record type mismatch" end
-      write_bytes(output, number, self:record_value(actual, depth))
+      local encode? = find_transfer_hooks(expected, "protobuf")
+      if encode ~= nil then
+        self:enter(actual.value)
+        defer self.active[actual.value] = nil
+        local payload = encode_transfer_payload(
+            actual.value, encode, "protobuf: cyclic object graph")
+        write_bytes(buf, number, payload)
+      else
+        local mark = begin_nested(buf, number)
+        self:record_value(buf, actual, depth)
+        end_nested(buf, mark)
+      end
     else raise "protobuf: expected a record"
     end
   when is_union(expected) then
     case reflect.inspect(candidate)
     when is_union(actual) then
       if actual.type.name ~= expected.name then raise "protobuf: union type mismatch" end
-      write_bytes(output, number, self:union_value(actual, depth))
+      local mark = begin_nested(buf, number)
+      self:union_value(buf, actual, depth)
+      end_nested(buf, mark)
     else raise "protobuf: expected a union"
     end
   when is_foreign_integer{spelling, is_signed, bits} then
     local integer_value: integer = candidate
     check_integer(integer_value, spelling, is_signed, bits)
-    write_key(output, number, 0)
-    if is_signed then write_varint(output, zigzag(integer_value))
-    else write_varint(output, integer_value)
+    write_key(buf, number, 0)
+    if is_signed then write_varint(buf, zigzag(integer_value))
+    else write_varint(buf, integer_value)
     end
   when is_foreign_float(spelling) then
     if spelling == "long double" then
       local exact: string = candidate
-      write_bytes(output, number, exact)
+      write_bytes(buf, number, exact)
       return
     end
     local number_value: float = candidate
     if spelling == "float" then
-      write_key(output, number, 5)
-      output:write(string.pack("<f", number_value))
+      write_float32(buf, number, number_value)
     elseif spelling == "double" then
-      write_key(output, number, 1)
-      output:write(string.pack("<d", number_value))
+      write_double(buf, number, number_value)
     else raise "protobuf: unsupported foreign floating type " .. spelling
     end
   when is_foreign_pointer() then
     local address = candidate as foreign *void
     local bits: integer = ffi.titan_protobuf_pointer_bits(address)
-    write_key(output, number, 1)
-    output:write(string.pack("<i8", bits))
+    write_fixed64(buf, number, bits)
   when is_foreign_struct(structure) then
-    write_bytes(output, number, self:foreign_struct(candidate, structure, depth))
+    local mark = begin_nested(buf, number)
+    self:foreign_struct(buf, candidate, structure, depth)
+    end_nested(buf, mark)
   when is_foreign_array{elem_descriptor, len} then
     require_foreign_array(len)
-    write_bytes(output, number,
-                self:foreign_array(candidate, elem_descriptor, depth))
+    local mark = begin_nested(buf, number)
+    self:foreign_array(buf, candidate, elem_descriptor, depth)
+    end_nested(buf, mark)
   else raise "protobuf: unsupported field type"
   end
 end
+

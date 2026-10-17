@@ -344,14 +344,17 @@ JSON_TITAN_SOURCES := titan/json/json.titan titan/json/parser.titan \
 	titan/json/decoder.titan titan/json/writer.titan titan/json/numbers.titan
 PROTOBUF_TITAN_SOURCES := titan/protobuf/protobuf.titan titan/protobuf/encoder.titan \
 	titan/protobuf/decoder.titan titan/protobuf/schema.titan
+THREAD_TITAN_SOURCES := titan/thread/thread.titan titan/thread/channel.titan \
+	titan/thread/group.titan titan/thread/spawn.titan
+THREAD_TITAN_HEADERS := titan/thread/native.h
 STDLIB_MODULES := coroutine uv async timer io fs net ssl url http websocket os path peg string \
-	math lua iteration gc test reflect sqlite3 json protobuf transfer
+	math lua iteration gc test reflect sqlite3 json protobuf transfer thread
 STDLIB_SOS     := $(addsuffix .so,$(STDLIB_MODULES))
 STDLIB_QUALIFIED_SOS := $(addprefix titan/,$(STDLIB_SOS))
 STDLIB_ROOTS := titan.coroutine titan.uv titan.async titan.timer \
 	titan.io titan.fs titan.net titan.ssl titan.url titan.http titan.websocket titan.os titan.path \
 	titan.peg titan.string \
-	titan.math titan.lua titan.iteration titan.gc titan.test titan.reflect titan.sqlite3 titan.json titan.protobuf titan.transfer
+	titan.math titan.lua titan.iteration titan.gc titan.test titan.reflect titan.sqlite3 titan.json titan.protobuf titan.transfer titan.thread
 STDLIB_TITAN_SOURCES := titan/coroutine.titan $(UV_TITAN_SOURCES) \
 	titan/async.titan titan/timer.titan titan/io.titan titan/fs.titan \
 	titan/net.titan titan/ssl.titan titan/url.titan \
@@ -365,15 +368,15 @@ STDLIB_TITAN_SOURCES := titan/coroutine.titan $(UV_TITAN_SOURCES) \
 	titan/string/regex_parser.titan \
 	titan/math.titan $(LUA_TITAN_SOURCES) titan/iteration.titan titan/gc.titan \
 	titan/test.titan titan/reflect.titan $(SQLITE3_TITAN_SOURCES) \
-	$(JSON_TITAN_SOURCES) $(PROTOBUF_TITAN_SOURCES) titan/transfer.titan
+	$(JSON_TITAN_SOURCES) $(PROTOBUF_TITAN_SOURCES) titan/transfer.titan $(THREAD_TITAN_SOURCES)
 STDLIB_GENERATED_FFI_HEADERS := $(addprefix $(TITAN_OUTPUT_DIR)/,$(addsuffix .ffi.h, \
-	$(addprefix titan/,$(filter-out uv http websocket peg string sqlite3 json lua protobuf,$(STDLIB_MODULES))) \
+	$(addprefix titan/,$(filter-out uv http websocket peg string sqlite3 json lua protobuf thread,$(STDLIB_MODULES))) \
 	titan/uv/uv titan/http/http titan/websocket/websocket titan/peg/peg titan/string/string \
-	titan/sqlite3/sqlite3 titan/json/json titan/lua/lua titan/protobuf/protobuf))
+	titan/sqlite3/sqlite3 titan/json/json titan/lua/lua titan/protobuf/protobuf titan/thread/thread))
 STDLIB_GENERATED_FOREIGN_HEADERS := $(STDLIB_GENERATED_FFI_HEADERS) \
 	$(addprefix $(TITAN_OUTPUT_DIR)/,titan/coroutine.titan.h \
 	titan/uv/uv.titan.h titan/async.titan.h titan/http/http.titan.h \
-	titan/sqlite3/sqlite3.titan.h titan/lua/lua.titan.h titan/transfer.titan.h)
+	titan/sqlite3/sqlite3.titan.h titan/lua/lua.titan.h titan/transfer.titan.h titan/thread/thread.titan.h)
 # One native compilation unit per logical module, including folder ensembles.
 # This reviewed import graph owns rebuild propagation and parallel ordering;
 # titanc's object fast path deliberately does not track dependency freshness.
@@ -386,6 +389,7 @@ STDLIB_STEM_sqlite3 := titan/sqlite3/sqlite3
 STDLIB_STEM_json := titan/json/json
 STDLIB_STEM_protobuf := titan/protobuf/protobuf
 STDLIB_STEM_lua := titan/lua/lua
+STDLIB_STEM_thread := titan/thread/thread
 stdlib_stem = $(TITAN_OUTPUT_DIR)/$(if $(STDLIB_STEM_$(1)),$(STDLIB_STEM_$(1)),titan/$(1))
 stdlib_outputs = $(call stdlib_stem,$(1)).o $(call stdlib_stem,$(1)).c $(filter $(call stdlib_stem,$(1)).%,$(STDLIB_GENERATED_FOREIGN_HEADERS))
 STDLIB_MODULE_OBJECTS := $(foreach module,$(STDLIB_MODULES),$(call stdlib_stem,$(module)).o)
@@ -414,11 +418,12 @@ STDLIB_IMPORTS_sqlite3 := async uv reflect string math protobuf
 STDLIB_IMPORTS_json := reflect string math peg iteration
 STDLIB_IMPORTS_protobuf := reflect string
 STDLIB_IMPORTS_transfer := reflect protobuf
+STDLIB_IMPORTS_thread := async gc lua string transfer uv
 STDLIB_SHIMS := $(addprefix $(TITAN_OUTPUT_DIR)/,titan/coroutine.lua titan/uv.lua titan/async.lua \
 	titan/timer.lua titan/io.lua titan/fs.lua titan/net.lua titan/ssl.lua \
 	titan/url.lua titan/http.lua titan/websocket.lua titan/os.lua titan/path.lua \
 	titan/peg.lua titan/string.lua titan/math.lua titan/lua.lua \
-	titan/iteration.lua titan/gc.lua titan/test.lua titan/reflect.lua titan/sqlite3.lua titan/json.lua titan/protobuf.lua titan/transfer.lua)
+	titan/iteration.lua titan/gc.lua titan/test.lua titan/reflect.lua titan/sqlite3.lua titan/json.lua titan/protobuf.lua titan/transfer.lua titan/thread.lua)
 STDLIB_CONTAINER := $(TITAN_OUTPUT_DIR)/titan.so
 STDLIB_STATIC_ARCHIVE := $(TITAN_OUTPUT_DIR)/titan.a
 STDLIB_PROVIDER_OUTPUTS := $(STDLIB_CONTAINER) $(STDLIB_STATIC_ARCHIVE)
@@ -1191,6 +1196,8 @@ STDLIB_C_INPUTS_websocket = $(foreach dir,$(STDLIB_OPENSSL_HEADER_DIRS),$(wildca
 STDLIB_C_INPUTS_sqlite3 = $(SQLITE3_HEADER) $(SQLITE3_TITAN_HEADERS)
 STDLIB_C_INPUTS_lua = $(LUA_TITAN_HEADERS)
 STDLIB_C_INPUTS_protobuf = titan/protobuf/native.h
+STDLIB_C_INPUTS_transfer = titan/async_receiver_native.h titan/protobuf/native.h
+STDLIB_C_INPUTS_thread = $(THREAD_TITAN_HEADERS) titan/async_receiver_native.h
 
 # The command is identical for object builds and the final link. Only the
 # latter receives native payload. Make schedules modules; each compiler gets

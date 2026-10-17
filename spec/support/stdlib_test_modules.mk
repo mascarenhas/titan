@@ -8,7 +8,7 @@ TITAN_STDLIB_TEST_ROOTS := $(TITAN_STDLIB_TEST_PROGRAM_ROOT) \
 	coroutine.tests iteration.tests gc.tests lua.tests math.tests peg.tests \
 	string.core_test string.format_pack_test string.regex_test async.tests \
 	uv.task_tests uv.public_tests io.tests fs.tests timer.tests net.tests ssl.tests http.tests websocket.tests \
-	url.tests path.tests os.tests os.process_tests uv.runtime_tests reflect.tests sqlite3.tests json.tests protobuf.tests
+	url.tests path.tests os.tests os.process_tests uv.runtime_tests reflect.tests sqlite3.tests json.tests protobuf.tests thread.tests
 
 .PHONY: print-stdlib-test-roots
 print-stdlib-test-roots:
@@ -60,6 +60,7 @@ TITAN_TEST_MODULES := async.test_support \
 	support.common \
 	support.runtime \
 	test.tests \
+	thread.tests \
 	timer.tests \
 	url.tests \
 	uv.public_tests \
@@ -280,6 +281,9 @@ TITAN_TEST_IMPORTS_support.runtime :=
 
 TITAN_TEST_SOURCES_test.tests := spec/stdlib/titan/test/tests.titan
 TITAN_TEST_IMPORTS_test.tests := support.command support.common support.runtime
+
+TITAN_TEST_SOURCES_thread.tests := spec/stdlib/titan/thread/tests.titan
+TITAN_TEST_IMPORTS_thread.tests := support.async support.runtime
 
 TITAN_TEST_SOURCES_timer.tests := spec/stdlib/titan/timer/tests.titan
 TITAN_TEST_IMPORTS_timer.tests := support.async support.runtime

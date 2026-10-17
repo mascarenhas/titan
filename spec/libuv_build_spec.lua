@@ -21,14 +21,14 @@ local UV_TYPES_FIXTURE =
 local STDLIB_MODULES = {
     "coroutine", "uv", "async", "timer", "io", "fs", "net", "ssl",
     "url", "http", "websocket", "os", "path", "peg", "string", "math", "lua", "iteration", "gc",
-    "test", "reflect", "sqlite3", "json", "protobuf", "transfer",
+    "test", "reflect", "sqlite3", "json", "protobuf", "transfer", "thread",
 }
 local STDLIB_ROOTS = {
     "titan.coroutine", "titan.uv", "titan.async", "titan.timer",
     "titan.io", "titan.fs", "titan.net", "titan.ssl", "titan.url",
     "titan.http", "titan.websocket", "titan.os", "titan.path", "titan.peg", "titan.string", "titan.math",
     "titan.lua", "titan.iteration", "titan.gc", "titan.test", "titan.reflect",
-    "titan.sqlite3", "titan.json", "titan.protobuf", "titan.transfer",
+    "titan.sqlite3", "titan.json", "titan.protobuf", "titan.transfer", "titan.thread",
 }
 local STDLIB_SHIMS = {
     "titan/coroutine.lua", "titan/uv.lua", "titan/async.lua",
@@ -36,7 +36,7 @@ local STDLIB_SHIMS = {
     "titan/ssl.lua", "titan/url.lua", "titan/http.lua", "titan/websocket.lua", "titan/os.lua", "titan/path.lua",
     "titan/peg.lua", "titan/string.lua", "titan/math.lua", "titan/lua.lua",
     "titan/iteration.lua", "titan/gc.lua", "titan/test.lua", "titan/reflect.lua",
-    "titan/sqlite3.lua", "titan/json.lua", "titan/protobuf.lua", "titan/transfer.lua",
+    "titan/sqlite3.lua", "titan/json.lua", "titan/protobuf.lua", "titan/transfer.lua", "titan/thread.lua",
 }
 local LPEGLABEL_INCLUDE =
     "-I" .. lfs.currentdir() .. "/vendor/lpeglabel"
@@ -238,6 +238,7 @@ local UV_NATIVE_ENTRIES = {
     { name = "native_mutex_lock", source = "titan/uv/sync.titan" },
     { name = "native_mutex_trylock", inline = true, source = "titan/uv/sync.titan" },
     { name = "native_mutex_unlock", source = "titan/uv/sync.titan" },
+    { name = "native_mutex_destroy", source = "titan/uv/sync.titan" },
     { name = "native_rwlock_rdlock", source = "titan/uv/sync.titan" },
     { name = "native_rwlock_tryrdlock", inline = true, source = "titan/uv/sync.titan" },
     { name = "native_rwlock_rdunlock", source = "titan/uv/sync.titan" },
@@ -256,7 +257,7 @@ local UV_NATIVE_ENTRIES = {
     { name = "native_key_set", source = "titan/uv/sync.titan" },
     { name = "native_once", source = "titan/uv/sync.titan" },
     { name = "work_worker_callback", source = "titan/uv/uv.titan" },
-    { name = "async_send_native", inline = true, source = "titan/uv/uv.titan" },
+    { name = "async_send_native", source = "titan/uv/uv.titan" },
 }
 local LEGACY_UV_CALLBACKS = {
     "titan_uvshim_signal_cb",
@@ -549,6 +550,7 @@ local function stdlib_source_files()
         ["$(JSON_TITAN_SOURCES)"] = "JSON_TITAN_SOURCES",
         ["$(PROTOBUF_TITAN_SOURCES)"] = "PROTOBUF_TITAN_SOURCES",
         ["$(LUA_TITAN_SOURCES)"] = "LUA_TITAN_SOURCES",
+        ["$(THREAD_TITAN_SOURCES)"] = "THREAD_TITAN_SOURCES",
     }
     for _, source in ipairs(makefile_words("STDLIB_TITAN_SOURCES")) do
         local ensemble = source_ensembles[source]
@@ -1019,12 +1021,13 @@ esac
             local inputs = stdlib_source_files()
             inputs[#inputs + 1] = "titan/sqlite3/native.h"
             inputs[#inputs + 1] = "titan/lua/native.h"
+            inputs[#inputs + 1] = "titan/thread/native.h"
             inputs[#inputs + 1] = "titan/async_receiver_native.h"
             inputs[#inputs + 1] = "prepared"
             local folders = { uv = true, http = true, websocket = true, peg = true,
-                string = true, sqlite3 = true, json = true, lua = true, protobuf = true }
+                string = true, sqlite3 = true, json = true, lua = true, protobuf = true, thread = true }
             local callbacks = { coroutine = true, uv = true, transfer = true, async = true, fs = true,
-                http = true, sqlite3 = true, lua = true }
+                http = true, sqlite3 = true, lua = true, thread = true }
             local outputs, objects = {}, {}
             local compiler = { "#!/bin/sh", "set -eu",
                 'test "$1 $2" = "--output out"', 'shift 2',
@@ -1109,7 +1112,7 @@ esac
             assert(lfs.touch(root .. "/titan/uv/tcp.titan", old + 2, old + 2))
             assert.same({ uv = true, async = true, timer = true, os = true, io = true,
                 fs = true, net = true, ssl = true, http = true, websocket = true, lua = true,
-                sqlite3 = true }, build())
+                sqlite3 = true, thread = true }, build())
             assert.same({}, build())
             assert(os.remove(root .. "/out/titan/test.ffi.h"))
             assert.same({ test = true }, build())
@@ -1121,7 +1124,7 @@ esac
             assert.same({ sqlite3 = true }, build())
             assert(lfs.touch(root .. "/titan/lua/native.h", os.time(), os.time()))
             assert(lfs.touch(root .. "/" .. objects.lua, old + 3, old + 3))
-            assert.same({ lua = true }, build())
+            assert.same({ lua = true, thread = true }, build())
         end, debug.traceback)
         remove_tree(root)
         if not tested then error(test_error, 0) end
@@ -2259,6 +2262,12 @@ int main(void) {
             assert.same({ "titan/lua/native.h" },
                 makefile_words("LUA_TITAN_HEADERS"))
             assert.same({
+                "titan/thread/thread.titan", "titan/thread/channel.titan",
+                "titan/thread/group.titan", "titan/thread/spawn.titan",
+            }, makefile_words("THREAD_TITAN_SOURCES"))
+            assert.same({ "titan/thread/native.h" },
+                makefile_words("THREAD_TITAN_HEADERS"))
+            assert.same({
                 "$(LTITANLIB_O)", "$(LPEGLABEL_ARCHIVE)",
                 "$(LIBUV_EXTRA_OBJECTS)", "$(LLHTTP_ARCHIVE)",
                 "$(SQLITE3_ARCHIVE)", "$(OPENSSL_EXTRA_OBJECTS)",
@@ -2338,6 +2347,8 @@ int main(void) {
                 "titan/protobuf/protobuf.titan", "titan/protobuf/encoder.titan",
                 "titan/protobuf/decoder.titan", "titan/protobuf/schema.titan",
                 "titan/transfer.titan",
+                "titan/thread/thread.titan", "titan/thread/channel.titan",
+                "titan/thread/group.titan", "titan/thread/spawn.titan",
             }, stdlib_source_files())
         end)
 
@@ -2372,7 +2383,7 @@ int main(void) {
         for _, header in ipairs({
             "titan/coroutine.titan.h", "titan/transfer.titan.h",
             "titan/uv/uv.titan.h", "titan/async.titan.h", "titan/http/http.titan.h",
-            "titan/sqlite3/sqlite3.titan.h", "titan/lua/lua.titan.h",
+            "titan/sqlite3/sqlite3.titan.h", "titan/lua/lua.titan.h", "titan/thread/thread.titan.h",
         }) do
             expected[#expected + 1] = "out/" .. header
         end
@@ -2681,11 +2692,11 @@ int main(void) {
         assert.truthy(closed, close_error)
     end)
 
-    it("pins current metadata for all twenty-five standard modules",
+    it("pins current metadata for all twenty-six standard modules",
         function()
             local expected = assert(loadfile(STDLIB_TYPES_FIXTURE))()
             local expected_uv = assert(loadfile(UV_TYPES_FIXTURE))()
-            assert.equal(25, #STDLIB_ROOTS)
+            assert.equal(26, #STDLIB_ROOTS)
             assert.equal(expected.uv, expected_uv,
                 "standalone titan.uv metadata fixture is stale")
 
@@ -2748,11 +2759,11 @@ end
             end
         end)
 
-    it("exports twenty-six DSO openers for twenty-five standard modules",
+    it("exports twenty-seven DSO openers for twenty-six standard modules",
         function()
-            assert.equal(25, #STDLIB_MODULES)
-            assert.equal(25, #STDLIB_ROOTS)
-            assert.equal(25, #STDLIB_SHIMS)
+            assert.equal(26, #STDLIB_MODULES)
+            assert.equal(26, #STDLIB_ROOTS)
+            assert.equal(26, #STDLIB_SHIMS)
 
             local container = installed_stdlib_container()
             local ok, output, why, code
@@ -2784,7 +2795,7 @@ end
                     found[symbol] = true
                 end
             end
-            assert.equal(26, (function()
+            assert.equal(27, (function()
                 local count = 0
                 for _ in pairs(found) do count = count + 1 end
                 return count
@@ -3365,8 +3376,8 @@ esac
             }
             for _, ensemble in ipairs({
                 "UV_TITAN_SOURCES", "SQLITE3_TITAN_SOURCES", "JSON_TITAN_SOURCES", "PROTOBUF_TITAN_SOURCES",
-                "WEBSOCKET_TITAN_SOURCES", "LUA_TITAN_SOURCES",
-                "SQLITE3_TITAN_HEADERS", "STRING_TITAN_HEADERS", "LUA_TITAN_HEADERS",
+                "WEBSOCKET_TITAN_SOURCES", "LUA_TITAN_SOURCES", "THREAD_TITAN_SOURCES",
+                "SQLITE3_TITAN_HEADERS", "STRING_TITAN_HEADERS", "LUA_TITAN_HEADERS", "THREAD_TITAN_HEADERS",
             }) do
                 for _, source in ipairs(makefile_words(ensemble)) do
                     sources[#sources + 1] = source
@@ -5393,7 +5404,7 @@ done
                 1, true), workflow)
             assert.truthy(workflow:find(
                 "for module in coroutine uv async timer io fs net ssl url " ..
-                "http websocket os path peg string math lua iteration gc test reflect sqlite3 json protobuf transfer; do",
+                "http websocket os path peg string math lua iteration gc test reflect sqlite3 json protobuf transfer thread; do",
                 1, true), workflow)
             assert.truthy(workflow:find(
                 'test ! -e "$PREFIX/share/titan/0.6/src/titan/test.titan"',

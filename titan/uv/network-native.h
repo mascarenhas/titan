@@ -1,5 +1,5 @@
-#ifndef TITAN_ISSUE194_NETWORK_NATIVE_H
-#define TITAN_ISSUE194_NETWORK_NATIVE_H
+#ifndef TITAN_UV_NETWORK_NATIVE_H
+#define TITAN_UV_NETWORK_NATIVE_H
 #include <uv.h>
 /* Embedded private state lets the C-only spawn handoff update this one flag
  * through the compiler's nominal-field projection, without a Titan GC loop. */

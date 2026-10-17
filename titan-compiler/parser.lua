@@ -70,6 +70,7 @@ local standard_imports = {
     json = "titan.json",
     protobuf = "titan.protobuf",
     transfer = "titan.transfer",
+    thread = "titan.thread",
 }
 
 

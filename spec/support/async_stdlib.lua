@@ -8,7 +8,7 @@ local REPO = lfs.currentdir()
 local STANDARD_MODULES = {
     "coroutine", "uv", "async", "timer", "io", "fs", "net", "ssl",
     "url", "http", "websocket", "os", "path", "peg", "string", "math", "lua", "iteration", "gc",
-    "test", "reflect", "sqlite3", "json", "protobuf", "transfer",
+    "test", "reflect", "sqlite3", "json", "protobuf", "transfer", "thread",
 }
 
 

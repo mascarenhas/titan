@@ -1,5 +1,5 @@
-#ifndef TITAN_ISSUE194_ADDRESS_NATIVE_H
-#define TITAN_ISSUE194_ADDRESS_NATIVE_H
+#ifndef TITAN_UV_ADDRESS_NATIVE_H
+#define TITAN_UV_ADDRESS_NATIVE_H
 #include <stddef.h>
 #include <uv.h>
 /* Darwin exposes ntohs as a function-like macro, which Titan cannot import as

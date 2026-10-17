@@ -1,0 +1,830 @@
+--- Spawning standalone OS threads and Thread lifecycle handles.
+-- @module titan.thread
+
+--- Host-state handle to a spawned OS thread running an isolated Lua/Titan state.
+-- @usage standard-library-thread.md
+record Thread<|R|>
+  local native: foreign *titan_thread_control
+  local monitor_task: async.Task<|R, value|>?
+  local cached_status: ThreadStatus<|R|>?
+end
+
+local function thread_control_new_native(
+    mutex: foreign *void): foreign *titan_thread_control
+  if mutex == nil then
+    return nil
+  end
+  local ctrl = ffi.calloc(1 as foreign size_t, foreign titan_thread_control.sizeof)
+    as foreign *titan_thread_control
+  if ctrl == nil then
+    uv.native_mutex_destroy(mutex)
+    return nil
+  end
+  ctrl.mutex = mutex
+  ctrl.refcount = 1 as foreign size_t
+  ctrl.status_kind = ffi.TITAN_THREAD_STATE_RUNNING
+  return ctrl
+end
+
+local foreign function thread_control_destroy_unreferenced(
+    ctrl: *titan_thread_control)
+  if ctrl.entry_msg ~= nil then
+    thread_message_free(ctrl.entry_msg)
+    ctrl.entry_msg = nil
+  end
+  if ctrl.cancel_reason_msg ~= nil then
+    thread_message_free(ctrl.cancel_reason_msg)
+    ctrl.cancel_reason_msg = nil
+  end
+  if ctrl.result_msg ~= nil then
+    thread_message_free(ctrl.result_msg)
+    ctrl.result_msg = nil
+  end
+  if ctrl.status_kind == ffi.TITAN_THREAD_STATE_FAILED then
+    if ctrl.observed == 0 then
+      if ctrl.stderr_report ~= nil then
+        if ctrl.stderr_report_len > (0 as foreign size_t) then
+          write_stderr_bytes(ctrl.stderr_report, ctrl.stderr_report_len)
+        end
+      end
+    end
+  end
+  if ctrl.error_traceback ~= nil then
+    ffi.free(ctrl.error_traceback)
+    ctrl.error_traceback = nil
+  end
+  if ctrl.stderr_report ~= nil then
+    ffi.free(ctrl.stderr_report)
+    ctrl.stderr_report = nil
+  end
+  if ctrl.mutex ~= nil then
+    uv.native_mutex_destroy(ctrl.mutex)
+    ctrl.mutex = nil
+  end
+  ffi.free(ctrl)
+end
+
+local foreign function thread_control_release_native(ctrl: *titan_thread_control)
+  if ctrl == nil then return end
+  uv.native_mutex_lock(ctrl.mutex)
+  ctrl.refcount = ctrl.refcount - (1 as foreign size_t)
+  local destroy = 0 as foreign int
+  if ctrl.refcount == (0 as foreign size_t) then
+    destroy = 1
+  end
+  uv.native_mutex_unlock(ctrl.mutex)
+  if destroy ~= 0 then
+    thread_control_destroy_unreferenced(ctrl)
+  end
+end
+
+local foreign function thread_control_complete_native(ctrl: *titan_thread_control)
+  if ctrl == nil then return end
+  uv.native_mutex_lock(ctrl.mutex)
+  ctrl.finished = 1
+  waiter_wake_all(ffi.titan_thread_join_queue(ctrl))
+  uv.native_mutex_unlock(ctrl.mutex)
+end
+
+local foreign function thread_control_copy_cstr(
+    src: const *char, len: size_t): *char
+  if len == ffi.SIZE_MAX then return nil end
+  local buf = ffi.malloc(len + (1 as foreign size_t)) as foreign *char
+  if buf == nil then return nil end
+  if len > (0 as foreign size_t) then
+    if src ~= nil then
+      ffi.memcpy(buf, src, len)
+    end
+  end
+  local term = buf + len
+  term[0] = 0 as foreign char
+  return buf
+end
+
+local function thread_control_is_observed_native(
+    ctrl: foreign *titan_thread_control): integer
+  uv.native_mutex_lock(ctrl.mutex)
+  local obs = ctrl.observed as integer
+  uv.native_mutex_unlock(ctrl.mutex)
+  return obs
+end
+
+local function thread_control_record_succeeded_native(
+    ctrl: foreign *titan_thread_control, msg: foreign *titan_thread_message)
+  uv.native_mutex_lock(ctrl.mutex)
+  if ctrl.status_kind == ffi.TITAN_THREAD_STATE_RUNNING then
+    ctrl.status_kind = ffi.TITAN_THREAD_STATE_SUCCEEDED
+    ctrl.result_msg = msg
+    msg = nil
+  end
+  uv.native_mutex_unlock(ctrl.mutex)
+  if msg ~= nil then
+    thread_message_free(msg)
+  end
+end
+
+local function thread_control_record_cancelled_native(
+    ctrl: foreign *titan_thread_control, reason_msg: foreign *titan_thread_message)
+  uv.native_mutex_lock(ctrl.mutex)
+  if ctrl.status_kind == ffi.TITAN_THREAD_STATE_RUNNING then
+    ctrl.status_kind = ffi.TITAN_THREAD_STATE_CANCELLED
+    ctrl.result_msg = reason_msg
+    reason_msg = nil
+  end
+  uv.native_mutex_unlock(ctrl.mutex)
+  if reason_msg ~= nil then
+    thread_message_free(reason_msg)
+  end
+end
+
+local foreign function thread_control_record_failed_native(
+    ctrl: *titan_thread_control,
+    err_msg: *titan_thread_message,
+    trace: const *char,
+    trace_len: size_t,
+    report: const *char,
+    report_len: size_t)
+  local trace_copy = thread_control_copy_cstr(trace, trace_len)
+  local report_copy: foreign *char = nil
+  if report_len > (0 as foreign size_t) then
+    report_copy = thread_control_copy_cstr(report, report_len)
+  end
+  uv.native_mutex_lock(ctrl.mutex)
+  if ctrl.status_kind == ffi.TITAN_THREAD_STATE_RUNNING then
+    ctrl.status_kind = ffi.TITAN_THREAD_STATE_FAILED
+    ctrl.result_msg = err_msg
+    err_msg = nil
+    ctrl.error_traceback = trace_copy
+    ctrl.error_traceback_len = trace_len
+    trace_copy = nil
+    if ctrl.observed == 0 then
+      ctrl.stderr_report = report_copy
+      ctrl.stderr_report_len = report_len
+      report_copy = nil
+    end
+  end
+  uv.native_mutex_unlock(ctrl.mutex)
+  if err_msg ~= nil then thread_message_free(err_msg) end
+  if trace_copy ~= nil then ffi.free(trace_copy) end
+  if report_copy ~= nil then ffi.free(report_copy) end
+end
+
+local function thread_control_bind_child_cancel_native(
+    ctrl: foreign *titan_thread_control,
+    handle: foreign *void): integer
+  uv.native_mutex_lock(ctrl.mutex)
+  ctrl.child_cancel_handle = handle
+  local already_cancelled = ctrl.cancel_requested as integer
+  uv.native_mutex_unlock(ctrl.mutex)
+  return already_cancelled
+end
+
+local function thread_control_clear_child_cancel_native(
+    ctrl: foreign *titan_thread_control)
+  uv.native_mutex_lock(ctrl.mutex)
+  ctrl.child_cancel_handle = nil
+  uv.native_mutex_unlock(ctrl.mutex)
+end
+
+local function thread_control_take_cancel_reason_native(
+    ctrl: foreign *titan_thread_control): foreign *titan_thread_message
+  uv.native_mutex_lock(ctrl.mutex)
+  local msg = ctrl.cancel_reason_msg
+  ctrl.cancel_reason_msg = nil
+  uv.native_mutex_unlock(ctrl.mutex)
+  return msg
+end
+
+local function thread_control_request_cancel_native(
+    ctrl: foreign *titan_thread_control,
+    reason_msg: foreign *titan_thread_message): integer
+  uv.native_mutex_lock(ctrl.mutex)
+  if ctrl.finished ~= 0 or ctrl.cancel_requested ~= 0 then
+    uv.native_mutex_unlock(ctrl.mutex)
+    return 0
+  end
+  ctrl.cancel_requested = 1
+  ctrl.cancel_reason_msg = reason_msg
+  if ctrl.child_cancel_handle ~= nil then
+    uv.async_send_native(ctrl.child_cancel_handle)
+  end
+  uv.native_mutex_unlock(ctrl.mutex)
+  return 1
+end
+
+local function thread_control_register_join_waiter(
+    ctrl: foreign *titan_thread_control,
+    waiter: foreign *titan_thread_waiter,
+    async_handle: foreign *void): integer
+  uv.native_mutex_lock(ctrl.mutex)
+  ctrl.observed = 1
+  if ctrl.finished ~= 0 then
+    uv.native_mutex_unlock(ctrl.mutex)
+    return 0
+  end
+  waiter_enqueue(ffi.titan_thread_join_queue(ctrl), waiter, async_handle)
+  uv.native_mutex_unlock(ctrl.mutex)
+  return 1
+end
+
+local function thread_control_unregister_join_waiter(
+    ctrl: foreign *titan_thread_control, waiter: foreign *titan_thread_waiter)
+  if ctrl == nil or waiter == nil then return end
+  uv.native_mutex_lock(ctrl.mutex)
+  waiter_unlink(ffi.titan_thread_join_queue(ctrl), waiter)
+  waiter.async_handle = nil
+  uv.native_mutex_unlock(ctrl.mutex)
+end
+
+local function safe_value_to_thread_message(item: value): foreign *titan_thread_message
+  local msg: foreign *titan_thread_message = nil
+  do
+    msg = value_to_thread_message(item)
+  catch
+    msg = value_to_thread_message(render_error_text(item))
+  end
+  return msg
+end
+
+local function take_bootstrap_control(): foreign *titan_thread_control
+  local top = ffi.lua_gettop(L)
+  defer ffi.lua_settop(L, top)
+  if ffi.lua_checkstack(L, 2) == 0 then
+    raise "cannot reserve stack for thread bootstrap"
+  end
+  ffi.lua_getfield(L, ffi.LUA_REGISTRYINDEX, "_TITAN_THREAD_CTRL")
+  local ctrl = ffi.lua_touserdata(L, -1) as foreign *titan_thread_control
+  ffi.lua_pushnil(L)
+  ffi.lua_setfield(L, ffi.LUA_REGISTRYINDEX, "_TITAN_THREAD_CTRL")
+  return ctrl
+end
+
+local function child_thread_bootstrap()
+  local ctrl = take_bootstrap_control()
+  local entry_msg = ctrl.entry_msg
+  ctrl.entry_msg = nil
+
+  local was_cancelled = false
+  local observed_cancel_reason: async.CancellationReason<|value|>? = nil
+  local cancel_handle = uv.async_t.new()
+  local cancel_view = cancel_handle:as_handle_t()
+  local cancel_initialized = false
+
+  local root_task = async.run<|value, value|>(function (): value
+    local close_cancel_handle = function ()
+      thread_control_clear_child_cancel_native(ctrl)
+      if cancel_initialized and not uv.is_closing(cancel_view) then
+        uv.close(cancel_view)
+      end
+    end
+    defer close_cancel_handle()
+    do
+      async.checkpoint()
+      local m = entry_msg
+      entry_msg = nil
+      local entry_val = thread_message_to_value(m)
+      local result: value = (entry_val as function (): (value))()
+      async.checkpoint()
+      local res_msg = value_to_thread_message(result)
+      thread_control_record_succeeded_native(ctrl, res_msg)
+    catch
+      local caught_err = error
+      local caught_trace = traceback
+      if entry_msg ~= nil then thread_message_discard(entry_msg); entry_msg = nil end
+
+      local is_cancelled = was_cancelled
+      local final_reason? = observed_cancel_reason
+      if not is_cancelled then
+        do
+          async.checkpoint()
+        catch
+          is_cancelled = true
+          if error is async.CancellationReason<|value|> then
+            final_reason = error as async.CancellationReason<|value|>
+          end
+        end
+      end
+      if is_cancelled then
+        local reason_val = final_reason or async.CancellationReason.simple("cancelled")
+        local reason_msg = safe_value_to_thread_message(reason_val as value)
+        thread_control_record_cancelled_native(ctrl, reason_msg)
+      else
+        local report = ""
+        if thread_control_is_observed_native(ctrl) == 0 then
+          report = format_thread_stderr(caught_err, caught_trace)
+        end
+        local err_msg = safe_value_to_thread_message(caught_err)
+        thread_control_record_failed_native(
+          ctrl,
+          err_msg,
+          caught_trace as foreign const *char,
+          #caught_trace as foreign size_t,
+          report as foreign const *char,
+          #report as foreign size_t)
+      end
+      do
+        async.request_exit(0)
+      catch
+      end
+    end
+    return nil
+  end)
+
+  local deliver_cancel = function ()
+    if was_cancelled then return end
+    was_cancelled = true
+    local reason_msg = thread_control_take_cancel_reason_native(ctrl)
+    local reason: async.CancellationReason<|value|> =
+      async.CancellationReason.simple("cancelled")
+    if reason_msg ~= nil then
+      do
+        local decoded = thread_message_to_value(reason_msg)
+        if decoded is async.CancellationReason<|value|> then
+          reason = decoded as async.CancellationReason<|value|>
+        end
+      catch
+      end
+    end
+    observed_cancel_reason = reason
+    root_task:cancel(reason)
+  end
+
+  local loop = async.current_loop()
+  local rc = uv.async_init(loop, cancel_handle, function (_: uv.async_t)
+    deliver_cancel()
+  end)
+  if rc >= 0 then
+    cancel_initialized = true
+    uv.unref(cancel_view)
+    local already = thread_control_bind_child_cancel_native(
+      ctrl, cancel_handle:borrow())
+    if already ~= 0 then
+      deliver_cancel()
+    end
+  end
+
+  do
+    async.loop()
+  catch
+    local loop_err = error
+    local loop_trace = traceback
+    local report = ""
+    if thread_control_is_observed_native(ctrl) == 0 then
+      report = format_thread_stderr(loop_err, loop_trace)
+    end
+    local err_msg = safe_value_to_thread_message(loop_err)
+    thread_control_record_failed_native(
+      ctrl,
+      err_msg,
+      loop_trace as foreign const *char,
+      #loop_trace as foreign size_t,
+      report as foreign const *char,
+      #report as foreign size_t)
+  end
+end
+
+local function register_thread_bootstrap()
+  local top = ffi.lua_gettop(L)
+  defer ffi.lua_settop(L, top)
+  if ffi.lua_checkstack(L, 2) == 0 then
+    raise "cannot reserve stack for thread bootstrap registration"
+  end
+  ffi.lua_pushtvalue(L, child_thread_bootstrap)
+  ffi.lua_setfield(L, ffi.LUA_REGISTRYINDEX, "_TITAN_THREAD_BOOTSTRAP")
+end
+
+local foreign function thread_worker_protected(state: *lua_State): int
+  local ctrl = ffi.lua_touserdata(state, 1)
+  transfer.transfer_load_module(state, "titan.thread", 12 as foreign size_t)
+  ffi.lua_settop(state, 0)
+  ffi.lua_pushlightuserdata(state, ctrl)
+  ffi.lua_setfield(state, ffi.LUA_REGISTRYINDEX, "_TITAN_THREAD_CTRL")
+  ffi.lua_getfield(state, ffi.LUA_REGISTRYINDEX, "_TITAN_THREAD_BOOTSTRAP")
+  ffi.lua_callk(state, 0, 0, 0 as foreign lua_KContext, nil)
+  return 0
+end
+
+local foreign function record_bootstrap_failure_native(
+    ctrl: *titan_thread_control, msg_bytes: const *char, len: size_t)
+  local err_msg: foreign *titan_thread_message = nil
+  if len <= ffi.SIZE_MAX - foreign titan_thread_message.sizeof then
+    err_msg = ffi.calloc(1 as foreign size_t, foreign titan_thread_message.sizeof + len)
+      as foreign *titan_thread_message
+    if err_msg ~= nil then
+      err_msg.kind = ffi.TITAN_ASYNC_MESSAGE_STRING
+      err_msg.length = len
+      local bytes = (err_msg + 1) as foreign *char
+      err_msg.bytes = bytes
+      if len > (0 as foreign size_t) then
+        if msg_bytes ~= nil then
+          ffi.memcpy(bytes, msg_bytes, len)
+        end
+      end
+    end
+  end
+  thread_control_record_failed_native(
+    ctrl, err_msg, "", 0 as foreign size_t, msg_bytes, len)
+end
+
+local foreign function thread_worker_main(arg: *void)
+  local ctrl = arg as foreign *titan_thread_control
+  local state = ctrl.child_state
+  if state ~= nil then
+    if ffi.lua_checkstack(state, 3) ~= 0 then
+      ffi.lua_pushcclosure(state, thread_worker_protected, 0)
+      ffi.lua_pushlightuserdata(state, ctrl as foreign *void)
+      local status = ffi.lua_pcallk(
+        state, 1, 0, 0, 0 as foreign lua_KContext, nil)
+      if status ~= ffi.LUA_OK then
+        local len = 0 as foreign size_t
+        local msg_bytes = ffi.lua_tolstring(state, -1, len)
+        if msg_bytes == nil then
+          msg_bytes = "child thread bootstrap failed"
+          len = 29 as foreign size_t
+        end
+        record_bootstrap_failure_native(ctrl, msg_bytes, len)
+      end
+    end
+    ffi.lua_close(state)
+    ctrl.child_state = nil
+  end
+  if ctrl.status_kind == ffi.TITAN_THREAD_STATE_RUNNING then
+    record_bootstrap_failure_native(
+      ctrl, "child thread exited without recording a status", 46 as foreign size_t)
+  end
+  thread_control_complete_native(ctrl)
+  thread_control_release_native(ctrl)
+end
+
+local function thread_finalize(self: Thread<|value|>)
+  local ctrl = self.native
+  self.native = nil
+  if ctrl ~= nil then
+    thread_control_release_native(ctrl)
+  end
+end
+
+local function Thread:reconstruct_terminal_status(): ThreadStatus<|R|>
+  local cached? = self.cached_status
+  if cached ~= nil then
+    return cached
+  end
+  local ctrl = self.native
+  uv.native_mutex_lock(ctrl.mutex)
+  ctrl.observed = 1
+  local kind = ctrl.status_kind
+  local msg = ctrl.result_msg
+  ctrl.result_msg = nil
+  local trace_ptr = ctrl.error_traceback
+  local trace_len = ctrl.error_traceback_len
+  ctrl.error_traceback = nil
+  ctrl.error_traceback_len = 0 as foreign size_t
+  uv.native_mutex_unlock(ctrl.mutex)
+
+  local trace_str = ""
+  if trace_ptr ~= nil then
+    defer ffi.free(trace_ptr)
+    if trace_len > (0 as foreign size_t) then
+      trace_str = copy_native_bytes(trace_ptr, trace_len)
+    end
+  end
+
+  local resolved: ThreadStatus<|R|> = ThreadStatus<|R|>.running()
+  if kind == ffi.TITAN_THREAD_STATE_SUCCEEDED then
+    local val: value = nil
+    local decode_ok = true
+    if msg ~= nil then
+      do
+        val = thread_message_to_value(msg)
+      catch
+        decode_ok = false
+        resolved = ThreadStatus<|R|>.failed(Error(error, traceback))
+      end
+    end
+    if decode_ok then
+      resolved = ThreadStatus<|R|>.succeeded(val as R)
+    end
+  elseif kind == ffi.TITAN_THREAD_STATE_CANCELLED then
+    local reason: async.CancellationReason<|value|> =
+      async.CancellationReason.simple("cancelled")
+    if msg ~= nil then
+      do
+        local decoded = thread_message_to_value(msg)
+        if decoded is async.CancellationReason<|value|> then
+          reason = decoded as async.CancellationReason<|value|>
+        end
+      catch
+      end
+    end
+    resolved = ThreadStatus<|R|>.cancelled(reason)
+  else
+    local err_val: value = "thread failed"
+    if msg ~= nil then
+      do
+        err_val = thread_message_to_value(msg)
+      catch
+      end
+    end
+    resolved = ThreadStatus<|R|>.failed(Error(err_val, trace_str))
+  end
+  self.cached_status = resolved
+  return resolved
+end
+
+--- Return a snapshot of the thread's current lifecycle status without blocking.
+-- @return Current ThreadStatus (running, succeeded, failed, or cancelled).
+-- @usage standard-library-thread.md
+function Thread:status(): ThreadStatus<|R|>
+  local cached? = self.cached_status
+  if cached ~= nil then
+    return cached
+  end
+  local ctrl = self.native
+  uv.native_mutex_lock(ctrl.mutex)
+  local done = ctrl.finished ~= 0
+  uv.native_mutex_unlock(ctrl.mutex)
+  if not done then
+    return ThreadStatus<|R|>.running()
+  end
+  return self:reconstruct_terminal_status()
+end
+
+local function Thread:wait_until_finished_cleanup()
+  local ctrl = self.native
+  uv.native_mutex_lock(ctrl.mutex)
+  local done = ctrl.finished ~= 0
+  if done then ctrl.observed = 1 end
+  uv.native_mutex_unlock(ctrl.mutex)
+  if done then return end
+  local waiter_storage = foreign titan_thread_waiter.new()
+  local waiter: foreign *titan_thread_waiter = waiter_storage
+  local loop = async.current_loop()
+  local handle = uv.async_t.new()
+  local handle_view = handle:as_handle_t()
+  local finished_wait = false
+  local finish_handle = function ()
+    if finished_wait then return end
+    finished_wait = true
+    thread_control_unregister_join_waiter(ctrl, waiter)
+    if not uv.is_closing(handle_view) then
+      uv.close(handle_view)
+    end
+  end
+  defer finish_handle()
+  async.await_cleanup<|nil, value|>(function (
+      resolve: function (nil): (),
+      _reject: function (value): (),
+      _fatal: function (value, string): ())
+    local settled = false
+    local rc = uv.async_init(loop, handle, function (_: uv.async_t)
+      if not settled then
+        settled = true
+        resolve(nil)
+      end
+    end)
+    if rc < 0 then
+      settled = true
+      resolve(nil)
+      return
+    end
+    local need_wait = thread_control_register_join_waiter(
+      ctrl, waiter, handle:borrow())
+    if need_wait == 0 and not settled then
+      settled = true
+      resolve(nil)
+    end
+  end)
+end
+
+--- Suspend the current Task until the thread finishes and return its terminal ThreadStatus.
+-- @return Terminal ThreadStatus without raising the thread's failure or cancellation outcome.
+-- @usage standard-library-thread.md
+function Thread:join(): ThreadStatus<|R|>
+  async.running()
+  local cached? = self.cached_status
+  if cached ~= nil then
+    async.checkpoint()
+    return cached
+  end
+  local ctrl = self.native
+  uv.native_mutex_lock(ctrl.mutex)
+  local done = ctrl.finished ~= 0
+  if done then ctrl.observed = 1 end
+  uv.native_mutex_unlock(ctrl.mutex)
+  if done then
+    async.checkpoint()
+    return self:reconstruct_terminal_status()
+  end
+  local waiter_storage = foreign titan_thread_waiter.new()
+  local waiter: foreign *titan_thread_waiter = waiter_storage
+  wait_on_native_waiter(
+    function (async_handle: foreign *void): boolean
+      return thread_control_register_join_waiter(ctrl, waiter, async_handle) ~= 0
+    end,
+    function ()
+      thread_control_unregister_join_waiter(ctrl, waiter)
+    end)
+  return self:reconstruct_terminal_status()
+end
+
+--- Request cooperative cancellation of the thread's event loop and Tasks.
+-- @param reason Optional CancellationReason; first cancellation reason wins.
+-- @usage standard-library-thread.md
+function Thread:cancel(reason: async.CancellationReason<|value|>?)
+  local actual = reason or async.CancellationReason.simple("cancelled")
+  local ctrl = self.native
+  uv.native_mutex_lock(ctrl.mutex)
+  local ignore = ctrl.finished ~= 0 or ctrl.cancel_requested ~= 0
+  uv.native_mutex_unlock(ctrl.mutex)
+  if ignore then return end
+  local msg = safe_value_to_thread_message(actual as value)
+  local accepted = thread_control_request_cancel_native(ctrl, msg)
+  if accepted == 0 then
+    thread_message_discard(msg)
+  end
+end
+
+--- Return an async.Task proxy for composing this thread with async combinators.
+-- @return Host-state Task that resolves, fails, or cancels with this thread.
+-- @usage standard-library-thread.md
+function Thread:task(): async.Task<|R, value|>
+  local existing? = self.monitor_task
+  if existing ~= nil then
+    return existing
+  end
+  local ctrl = self.native
+  uv.native_mutex_lock(ctrl.mutex)
+  ctrl.observed = 1
+  uv.native_mutex_unlock(ctrl.mutex)
+  local task = async.run<|R, value|>(function (): R
+    local status: ThreadStatus<|R|> = ThreadStatus<|R|>.running()
+    do
+      status = self:join()
+    catch
+      local reason: async.CancellationReason<|value|>? = nil
+      if error is async.CancellationReason<|value|> then
+        reason = error as async.CancellationReason<|value|>
+      end
+      self:cancel(reason)
+      self:wait_until_finished_cleanup()
+      raise
+    end
+    case status
+    when succeeded(val) then
+      return val
+    when failed(err) then
+      err:raise()
+      -- Required for return-path analysis; err:raise() above always raises.
+      raise err.error
+    when cancelled(reason) then
+      local current = async.running()
+      current:cancel(reason)
+      async.checkpoint()
+      -- Required for return-path analysis; checkpoint() above always raises.
+      raise reason
+    when running() then
+      raise "unreachable running status after Thread:join"
+    end
+  end)
+  task:add_terminal_listener(function (st: async.TaskStatus<|R, value|>)
+    case st
+    when cancelled(reason) then
+      self:cancel(reason)
+    else
+    end
+  end)
+  self.monitor_task = task
+  return task
+end
+
+local function spawn_raw<|R|>(
+    entry: function (): (R),
+    initially_observed: boolean): Thread<|R|>
+  local mutex = uv.mutex_t.create_native()
+  local ctrl = thread_control_new_native(mutex)
+  if ctrl == nil then
+    raise "thread: out of memory allocating control block"
+  end
+  if initially_observed then
+    ctrl.observed = 1
+  end
+  do
+    ctrl.entry_msg = value_to_thread_message(entry)
+    local state = lua.new()
+    ctrl.child_state = state:detach()
+  catch
+    if ctrl.entry_msg ~= nil then
+      local m = ctrl.entry_msg
+      ctrl.entry_msg = nil
+      thread_message_discard(m)
+    end
+    thread_control_release_native(ctrl)
+    raise
+  end
+
+  ctrl.refcount = 2 as foreign size_t
+  local os_thread = uv.thread_t.new()
+  local rc = os_thread:create(thread_worker_main, ctrl as foreign *void, nil)
+  if rc < 0 then
+    ctrl.refcount = 1 as foreign size_t
+    if ctrl.entry_msg ~= nil then
+      local m = ctrl.entry_msg
+      ctrl.entry_msg = nil
+      thread_message_discard(m)
+    end
+    if ctrl.child_state ~= nil then
+      ffi.lua_close(ctrl.child_state)
+      ctrl.child_state = nil
+    end
+    thread_control_release_native(ctrl)
+    raise async.OperationError(rc, uv.err_name(rc), uv.strerror(rc), "thread.spawn")
+  end
+  os_thread:detach()
+
+  local handle = Thread<|R|> {
+    native = ctrl,
+    monitor_task = nil,
+    cached_status = nil
+  }
+  gc.finalizable(handle, thread_finalize)
+  return handle
+end
+
+--- Spawn a dedicated OS thread with an isolated Lua/Titan state and async Runtime.
+-- @param entry Zero-argument closure to execute as the child thread's root Task.
+-- @return Thread handle for observing, joining, or cancelling the spawned thread.
+-- @usage standard-library-thread.md
+function spawn<|R|>(entry: function (): (R)): Thread<|R|>
+  return spawn_raw<|R|>(entry, false)
+end
+
+--- Spawn a dedicated OS thread passing 1 transferred argument to its entry closure.
+-- @param entry One-argument closure to execute in the child thread.
+-- @param first First argument transferred by value or custom hook.
+-- @return Thread handle for observing, joining, or cancelling the spawned thread.
+-- @usage standard-library-thread.md
+function spawn_one<|A, R|>(entry: function (A): (R), first: A): Thread<|R|>
+  return spawn<|R|>(function (): R
+    return entry(first)
+  end)
+end
+
+--- Spawn a dedicated OS thread passing 2 transferred arguments to its entry closure.
+-- @param entry Two-argument closure to execute in the child thread.
+-- @param first First argument transferred to the child thread.
+-- @param second Second argument transferred to the child thread.
+-- @return Thread handle for observing, joining, or cancelling the spawned thread.
+-- @usage standard-library-thread.md
+function spawn_two<|A, B, R|>(
+    entry: function (A, B): (R), first: A, second: B): Thread<|R|>
+  return spawn<|R|>(function (): R
+    return entry(first, second)
+  end)
+end
+
+--- Spawn a dedicated OS thread passing 3 transferred arguments to its entry closure.
+-- @param entry Three-argument closure to execute in the child thread.
+-- @param first First argument transferred to the child thread.
+-- @param second Second argument transferred to the child thread.
+-- @param third Third argument transferred to the child thread.
+-- @return Thread handle for observing, joining, or cancelling the spawned thread.
+-- @usage standard-library-thread.md
+function spawn_three<|A, B, C, R|>(
+    entry: function (A, B, C): (R), first: A, second: B, third: C): Thread<|R|>
+  return spawn<|R|>(function (): R
+    return entry(first, second, third)
+  end)
+end
+
+--- Spawn a dedicated OS thread passing 4 transferred arguments to its entry closure.
+-- @param entry Four-argument closure to execute in the child thread.
+-- @param first First argument transferred to the child thread.
+-- @param second Second argument transferred to the child thread.
+-- @param third Third argument transferred to the child thread.
+-- @param fourth Fourth argument transferred to the child thread.
+-- @return Thread handle for observing, joining, or cancelling the spawned thread.
+-- @usage standard-library-thread.md
+function spawn_four<|A, B, C, D, R|>(
+    entry: function (A, B, C, D): (R),
+    first: A, second: B, third: C, fourth: D): Thread<|R|>
+  return spawn<|R|>(function (): R
+    return entry(first, second, third, fourth)
+  end)
+end
+
+--- Spawn a dedicated OS thread passing 5 transferred arguments to its entry closure.
+-- @param entry Five-argument closure to execute in the child thread.
+-- @param first First argument transferred to the child thread.
+-- @param second Second argument transferred to the child thread.
+-- @param third Third argument transferred to the child thread.
+-- @param fourth Fourth argument transferred to the child thread.
+-- @param fifth Fifth argument transferred to the child thread.
+-- @return Thread handle for observing, joining, or cancelling the spawned thread.
+-- @usage standard-library-thread.md
+function spawn_five<|A, B, C, D, E, R|>(
+    entry: function (A, B, C, D, E): (R),
+    first: A, second: B, third: C, fourth: D, fifth: E): Thread<|R|>
+  return spawn<|R|>(function (): R
+    return entry(first, second, third, fourth, fifth)
+  end)
+end

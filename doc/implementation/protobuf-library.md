@@ -40,13 +40,39 @@ checks descriptors as their values are visited. Union traversal visits the
 active payload only; the all-public type flag still rejects private variants
 anywhere on that nominal declaration.
 
-All accumulation uses `string.StringWriter`. Varints use logical shifts on the
-64-bit integer carrier, including unsigned bit patterns represented by negative
-Titan integers. ZigZag preserves the complete signed range. Fixed floating
-and pointer payloads use explicitly little-endian `string.pack` formats.
-Foreign signedness and width checks run before publication. Structs use member
-order; nested fixed arrays use their projected values and target construction
-validates the actual C extent without evaluating C expressions in Titan.
+All wire accumulation writes into a pluggable, expandable native buffer
+(`titan_protobuf_buffer` in `titan/protobuf/native.h`) that grows by amortized
+doubling (`titan_protobuf_buf_reserve`) via a pluggable `grow` callback and
+`context` pointer. Because serialization calls may raise Lua errors (`longjmp`)
+after buffer growth, callers allocate the buffer descriptor with
+`owned *titan_protobuf_buffer = foreign titan_protobuf_buffer.new()` so its
+`data`, `length`, and `capacity` fields live in GC-owned userdata storage rather
+than a stack-spilled automatic C aggregate across `setjmp`/`longjmp`, and pair
+`titan_protobuf_buf_init_heap` with `defer ffi.titan_protobuf_buf_free_heap(buf)`
+to free `buf->data` on normal exit or unwind. Ordinary string-returning entry
+points initialize a heap-backed buffer outside the Lua GC with
+`titan_protobuf_buf_init_heap` and materialize the final Lua string once at the
+root; `titan.transfer.encode_message` reserves `sizeof(titan_async_message)` at
+the start of the buffer so the serialized wire payload and trailing name/module
+bytes are written directly into the outgoing message packet without an extra
+allocation or intermediate Lua string. Nested length-delimited messages reserve
+a one-byte length slot at `begin_nested` and patch or shift in place at
+`end_nested`, avoiding intermediate per-message writers or string allocations.
+Varints use logical shifts on the 64-bit integer carrier, including unsigned bit
+patterns represented by negative Titan integers. ZigZag preserves the complete
+signed range. Fixed floating and pointer payloads write little-endian bytes
+directly into the buffer. Foreign signedness and width checks run before
+publication. Structs use member order; nested fixed arrays use their projected
+values and target construction validates the actual C extent without evaluating
+C expressions in Titan.
+
+`find_transfer_hooks` memoizes the validated `(to_hook, from_hook)` pair (or a
+negative sentinel) per nominal record name (`descriptor.name`) in a module-local
+Map, and `encode_transfer_payload` shares the module-local
+`active_record_payloads` Map so nested (`depth > 1`) and root custom-record hook
+invocations enforce a single reentrancy guard. Nested records (`depth > 1`) that
+provide both `to_transfer_payload` and `from_transfer_payload` encode as
+`optional bytes` via their hooks rather than requiring public fields.
 
 Array wrappers retain slot positions and distinguish absence from an empty
 container. Nil slots produce empty element messages. The constness field
@@ -55,17 +81,20 @@ scalar defaults match the presence markers in generated proto3 schemas.
 
 ## Decoding
 
-`WireReader` validates each key and length before reading. A varint has at most
-ten bytes and its tenth byte contains at most one payload bit. Length-delimited
-fields must fit both the remaining source and the protobuf size limit. Unknown
-groups are skipped with a bounded, matching start/end field-number walk.
+`WireReader` operates directly on a `const uint8_t *` byte buffer with explicit
+`(offset, limit)` bounds, validating each key and length before reading. A
+varint has at most ten bytes and its tenth byte contains at most one payload
+bit. Length-delimited fields must fit both the remaining source and the protobuf
+size limit. Unknown groups are skipped with a bounded, matching start/end
+field-number walk.
 
-Parsed `WireField` values retain integer bits or exact byte strings. Singular
-scalars select their final occurrence. Singular messages concatenate payloads
-before parsing their child fields, implementing protobuf merge behavior. Union
-selection resets the accumulated payload when a different recognized variant
-appears; repeated occurrences of the current variant merge. Unknown fields do
-not change the selected variant.
+Parsed `WireField` entries record integer bits or `(offset, length)` slices into
+the underlying byte buffer without allocating intermediate Lua strings. Singular
+scalars select their final occurrence. Single-occurrence embedded messages and
+union variants parse their child fields in place from the parent buffer slice;
+repeated occurrences of a singular embedded message or union variant concatenate
+their slices before parsing child fields, implementing protobuf merge behavior.
+Unknown fields do not change the selected union variant.
 
 Each parsed message keeps its ordered field Array. Empty and single-field
 messages answer lookups directly. The first lookup in a multi-field message
@@ -126,9 +155,12 @@ strings use protobuf bytes so arbitrary byte sequences round-trip.
 ## Integration and verification
 
 Custom record transfer hooks are dispatched by `titan.transfer` before its
-structural protobuf fallback. The codec's `serialize` entry point retains its
-public-field policy. Custom payloads and closure snapshots are immutable byte
-strings before they enter the native transfer boundary.
+structural protobuf fallback at the root, while `titan.protobuf` dispatches
+`to_transfer_payload` and `from_transfer_payload` for nested record fields
+(`depth > 1`) inside public records, unions, and Arrays, emitting them as
+`optional bytes` on the wire. The codec's `serialize` entry point retains its
+public-field policy at `depth == 1`. Custom payloads and closure snapshots are
+immutable byte strings before they enter the native transfer boundary.
 
 The Unix and Windows standard providers include `titan.protobuf`, its Lua shim,
 and its native tests in the shared inventory. `titan.lua` and `titan.async`

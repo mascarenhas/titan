@@ -5,7 +5,11 @@
 foreign import "lua.h"
 foreign import "lauxlib.h"
 foreign import "titan/ffi.h"
+foreign import "stdlib.h"
+foreign import "string.h"
 foreign import "transfer.h"
+foreign import "async_receiver_native.h"
+foreign import "protobuf/native.h"
 local reflect = import "reflect"
 local protobuf = import "protobuf"
 
@@ -118,7 +122,11 @@ local foreign function transfer_project(state: *lua_State, index: int,
   entry.project(state, ffi.lmacro_clCvalue(candidate))
 end
 
--- Generated native loaders already memoize their module; keep only the result.
+--- Load and verify a native Titan module from package.preload in the given Lua state, pushing its module userdata.
+-- @param state Target Lua state with an initialized native preload table.
+-- @param name Canonical module name bytes.
+-- @param length Byte length of the module name.
+-- @usage standard-library-transfer.md
 foreign function transfer_load_module(state: *lua_State,
                                       name: const *char, length: size_t)
   local top = ffi.lua_gettop(state)
@@ -225,72 +233,8 @@ union TransferValue
   is_record_payload(module: string, name: string, data: string)
 end
 
-local record RecordTransferHooks
-  const encode: reflect.MethodType
-  const decode: reflect.StaticFunctionType
-end
-
-local transfer_active_records: {value: boolean} = {}
 local transfer_active_closures: {value: boolean} = {}
 local closure_fields: const {reflect.Type} = {}
-
-local function transfer_string_type(descriptor: reflect.Type?): boolean
-  if descriptor == nil then return false end
-  case descriptor
-  when is_string() then return true
-  else return false
-  end
-end
-
-local function transfer_named_type(descriptor: reflect.Type?, name: string): boolean
-  if descriptor == nil then return false end
-  case descriptor
-  when is_named(named) then return named.name == name
-  when is_record(record_type) then return record_type.name == name
-  when is_union(union_type) then return union_type.name == name
-  else return false
-  end
-end
-
-local function record_transfer_hooks(descriptor: reflect.RecordType): RecordTransferHooks?
-  local encode: reflect.MethodType? = nil
-  local decode: reflect.StaticFunctionType? = nil
-  for index = 1, #descriptor.methods do
-    local method = descriptor.methods[index]
-    if method.name == "to_transfer_payload" then
-      encode = method
-    elseif method.name == "from_transfer_payload" then
-      raise "transfer: from_transfer_payload must be a static function on " .. descriptor.name
-    end
-  end
-  for index = 1, #descriptor.statics do
-    local static = descriptor.statics[index]
-    if static.name == "from_transfer_payload" then
-      decode = static
-    elseif static.name == "to_transfer_payload" then
-      raise "transfer: to_transfer_payload must be an instance method on " .. descriptor.name
-    end
-  end
-  if encode == nil and decode == nil then return nil end
-  if encode == nil or decode == nil then
-    raise "transfer: record requires both transfer payload hooks: " .. descriptor.name
-  end
-  if not descriptor.is_public then
-    raise "transfer: record payload hooks require a public record: " .. descriptor.name
-  end
-  if #encode.param_descriptors ~= 0 or encode.vararg_descriptor ~= nil
-      or #encode.return_descriptors ~= 1 or encode.flexret_descriptor ~= nil
-      or not transfer_string_type(encode.return_descriptors[1]) then
-    raise "transfer: invalid to_transfer_payload signature on " .. descriptor.name
-  end
-  if #decode.param_descriptors ~= 1 or decode.vararg_descriptor ~= nil
-      or not transfer_string_type(decode.param_descriptors[1])
-      or #decode.return_descriptors ~= 1 or decode.flexret_descriptor ~= nil
-      or not transfer_named_type(decode.return_descriptors[1], descriptor.name) then
-    raise "transfer: invalid from_transfer_payload signature on " .. descriptor.name
-  end
-  return RecordTransferHooks(encode, decode)
-end
 
 local function nominal_module(candidate: value): string
   local top = ffi.lua_gettop(L)
@@ -301,7 +245,8 @@ local function nominal_module(candidate: value): string
   return ffi.lua_totvalue(L, -1) as value
 end
 
-local function snapshot_closure(candidate: value): TransferValue
+local function project_closure_captures(
+    candidate: value): (string, foreign const *void, {TransferValue}, {boolean})
   if transfer_active_closures[candidate] then raise "cannot transfer cyclic closure captures" end
   transfer_active_closures[candidate] = true
   defer transfer_active_closures[candidate] = nil
@@ -324,15 +269,45 @@ local function snapshot_closure(candidate: value): TransferValue
     was_policy[index + 1] = capture is TransferValue
     policies[index + 1] = TransferValue.from_value(capture)
   end
-  return TransferValue.is_closure(module, entry as foreign const *void,
+  return module, entry as foreign const *void, policies, was_policy
+end
+
+local function snapshot_closure(candidate: value): TransferValue
+  local module, entry, policies, was_policy = project_closure_captures(candidate)
+  return TransferValue.is_closure(module, entry,
     protobuf.serialize_fields(closure_fields, policies, was_policy))
 end
 
-local function initialize_nominal(module: string, name: string)
+local function snapshot_closure_to_buffer(
+    buf: foreign *titan_protobuf_buffer,
+    candidate: value): (string, foreign const *void)
+  local module, entry, policies, was_policy = project_closure_captures(candidate)
+  protobuf.serialize_fields_to_buffer(
+      buf as foreign *void, closure_fields, policies, was_policy)
+  return module, entry
+end
+
+local function encode_record_payload(
+    record_value: reflect.RecordValue,
+    encode: reflect.MethodType): string
+  return protobuf.encode_transfer_payload(
+      record_value.value,
+      encode,
+      "transfer: cyclic record payload for " .. record_value.type.name)
+end
+
+local function initialize_nominal_raw(
+    module: foreign const *char,
+    module_len: foreign size_t,
+    name: string)
   if reflect.find_nominal(name) ~= nil then return end
   local top = ffi.lua_gettop(L)
   defer ffi.lua_settop(L, top)
-  transfer_load_module(L, module, #module as foreign size_t)
+  transfer_load_module(L, module, module_len)
+end
+
+local function initialize_nominal(module: string, name: string)
+  initialize_nominal_raw(module, #module as foreign size_t, name)
 end
 
 --- Select the copy or borrow policy for a value, preserving an explicit TransferValue.
@@ -365,30 +340,38 @@ function TransferValue.from_value(candidate: value): TransferValue
     end
     return TransferValue.is_function(entry)
   when is_record(record_value) then
-    local hooks? = record_transfer_hooks(record_value.type)
+    local encode? = protobuf.find_transfer_hooks(record_value.type, "transfer")
     local module = nominal_module(candidate)
-    if hooks ~= nil then
-      if transfer_active_records[candidate] then
-        raise "transfer: cyclic record payload for " .. record_value.type.name
-      end
-      transfer_active_records[candidate] = true
-      defer transfer_active_records[candidate] = nil
-      local payload: string = hooks.encode.callable(record_value.value)
+    if encode ~= nil then
+      local payload = encode_record_payload(record_value, encode)
       return TransferValue.is_record_payload(module, record_value.type.name, payload)
     end
-    return TransferValue.is_record(module, record_value.type.name, protobuf.serialize(candidate))
+    return TransferValue.is_record(
+        module, record_value.type.name, protobuf.serialize(candidate))
   when is_union(union_value) then
-    return TransferValue.is_union(nominal_module(candidate), union_value.type.name, protobuf.serialize(candidate))
+    return TransferValue.is_union(
+        nominal_module(candidate), union_value.type.name, protobuf.serialize(candidate))
   else raise "transfer: unsupported value"
   end
 end
 
-local function transfer_pointer_value(pointer: foreign *void): value
+local function pointer_to_value(pointer: foreign *void): value
   local top = ffi.lua_gettop(L)
-  defer ffi.lua_settop(L, top)
   if ffi.lua_checkstack(L, 1) == 0 then raise "cannot reserve transfer pointer stack" end
   ffi.lua_pushlightuserdata(L, pointer)
-  return ffi.lua_totvalue(L, -1) as value
+  local result: value = ffi.lua_totvalue(L, -1)
+  ffi.lua_settop(L, top)
+  return result
+end
+
+local function cfunction_to_value(item: foreign function (*lua_State): int): value
+  if not item then raise "cannot transfer a NULL Lua C function" end
+  local top = ffi.lua_gettop(L)
+  if ffi.lua_checkstack(L, 1) == 0 then raise "cannot reserve transfer function stack" end
+  ffi.lua_pushcclosure(L, item, 0)
+  local result: value = ffi.lua_totvalue(L, -1)
+  ffi.lua_settop(L, top)
+  return result
 end
 
 --- Wrap copied closure packet fields at a trusted Lua/lightuserdata boundary.
@@ -396,6 +379,67 @@ end
 function TransferValue.from_closure_payload(module: string, entry: value,
     data: string): TransferValue
   return TransferValue.is_closure(module, entry as foreign const *void, data)
+end
+
+local function restore_closure_from_buffer(
+    module: foreign const *char,
+    module_len: foreign size_t,
+    token: foreign const *void,
+    data: foreign const *void,
+    data_len: integer): value
+  local top = ffi.lua_gettop(L)
+  defer ffi.lua_settop(L, top)
+  transfer_load_module(L, module, module_len)
+  local module_index = ffi.lua_gettop(L)
+  -- Resolve the token by equality against the destination module's manifest
+  -- before dereferencing it or reconstructing resource-bearing captures.
+  local entry = transfer_resolve(L, module_index, token)
+  local count = transfer_capture_count(entry) as integer
+  local policies: {TransferValue}, was_policy: {value} =
+    protobuf.deserialize_fields_buffer(data, data_len, closure_fields)
+  if #policies ~= count or #was_policy ~= count then
+    raise "invalid closure capture count"
+  end
+  -- Arrays can contain holes independently of their element descriptor.
+  -- Check the complete frontier before a custom decoder can adopt anything.
+  for index = 1, count do
+    local policy: TransferValue = policies[index]
+    -- An implicit projection checks the boolean tag; written `is boolean`
+    -- accepts every value through Lua truthiness.
+    local flag: boolean = was_policy[index]
+  end
+  if ffi.lua_checkstack(L, (count + 1) as foreign int) == 0 then
+    raise "cannot reserve transfer closure stack"
+  end
+  for index = 1, count do
+    local policy = policies[index]
+    if was_policy[index] then ffi.lua_pushtvalue(L, policy)
+    else ffi.lua_pushtvalue(L, policy:to_value()) end
+  end
+  transfer_restore(L, entry, module_index, (module_index + 1) as foreign int)
+  return ffi.lua_totvalue(L, -1) as value
+end
+
+local function decode_record_payload(
+    module: foreign const *char,
+    module_len: foreign size_t,
+    name: string,
+    payload: string): value
+  initialize_nominal_raw(module, module_len, name)
+  local nominal? = reflect.find_nominal(name)
+  if nominal == nil then raise "transfer: unknown record type " .. name end
+  case nominal
+  when is_record(descriptor) then
+    local _?, decode? = protobuf.find_transfer_hooks(descriptor, "transfer")
+    if decode == nil then raise "transfer: record has no payload hooks: " .. name end
+    local result: value = decode.callable(payload)
+    case reflect.inspect(result)
+    when is_record(record_value) then
+      if record_value.type.name == name then return result end
+    end
+    raise "transfer: from_transfer_payload returned a different record: " .. name
+  else raise "transfer: nominal type is not a record: " .. name
+  end
 end
 
 --- Recover a semantic value from a transfer policy in the current Lua state.
@@ -410,15 +454,9 @@ function TransferValue:to_value(): value
   when is_integer(item) then return item
   when is_float(item) then return item
   when is_string(item) then return item
-  when is_lua_state(item) then return transfer_pointer_value(item)
-  when is_pointer(item) then return transfer_pointer_value(item)
-  when is_function(item) then
-    if not item then raise "cannot transfer a NULL Lua C function" end
-    local top = ffi.lua_gettop(L)
-    defer ffi.lua_settop(L, top)
-    if ffi.lua_checkstack(L, 1) == 0 then raise "cannot reserve transfer function stack" end
-    ffi.lua_pushcclosure(L, item, 0)
-    return ffi.lua_totvalue(L, -1) as value
+  when is_lua_state(item) then return pointer_to_value(item)
+  when is_pointer(item) then return pointer_to_value(item)
+  when is_function(item) then return cfunction_to_value(item)
   when is_record(module, name, data) then
     initialize_nominal(module, name)
     return protobuf.deserialize_nominal(data, name, false)
@@ -426,54 +464,306 @@ function TransferValue:to_value(): value
     initialize_nominal(module, name)
     return protobuf.deserialize_nominal(data, name, true)
   when is_closure(module, token, data) then
-    local top = ffi.lua_gettop(L)
-    defer ffi.lua_settop(L, top)
-    transfer_load_module(L, module, #module as foreign size_t)
-    local module_index = ffi.lua_gettop(L)
-    -- Resolve the token by equality against the destination module's manifest
-    -- before dereferencing it or reconstructing resource-bearing captures.
-    local entry = transfer_resolve(L, module_index, token)
-    local count = transfer_capture_count(entry) as integer
-    local policies: {TransferValue}, was_policy: {value} =
-      protobuf.deserialize_fields(data, closure_fields)
-    if #policies ~= count or #was_policy ~= count then
-      raise "invalid closure capture count"
-    end
-    -- Arrays can contain holes independently of their element descriptor.
-    -- Check the complete frontier before a custom decoder can adopt anything.
-    for index = 1, count do
-      local policy: TransferValue = policies[index]
-      -- An implicit projection checks the boolean tag; written `is boolean`
-      -- accepts every value through Lua truthiness.
-      local flag: boolean = was_policy[index]
-    end
-    if ffi.lua_checkstack(L, (count + 1) as foreign int) == 0 then
-      raise "cannot reserve transfer closure stack"
-    end
-    for index = 1, count do
-      local policy = policies[index]
-      if was_policy[index] then ffi.lua_pushtvalue(L, policy)
-      else ffi.lua_pushtvalue(L, policy:to_value()) end
-    end
-    transfer_restore(L, entry, module_index, (module_index + 1) as foreign int)
-    return ffi.lua_totvalue(L, -1) as value
+    -- data remains rooted in self throughout restore_closure_from_buffer.
+    return restore_closure_from_buffer(
+        module,
+        #module as foreign size_t,
+        token,
+        ffi.titan_protobuf_bytes_ptr(data) as foreign const *void,
+        #data)
   when is_record_payload(module, name, payload) then
-    initialize_nominal(module, name)
-    local nominal? = reflect.find_nominal(name)
-    if nominal == nil then raise "transfer: unknown record type " .. name end
-    case nominal
-    when is_record(descriptor) then
-      local hooks? = record_transfer_hooks(descriptor)
-      if hooks == nil then raise "transfer: record has no payload hooks: " .. name end
-      local result: value = hooks.decode.callable(payload)
-      case reflect.inspect(result)
-      when is_record(record_value) then
-        if record_value.type.name == name then return result end
-      end
-      raise "transfer: from_transfer_payload returned a different record: " .. name
-    else raise "transfer: nominal type is not a record: " .. name
-    end
+    return decode_record_payload(module, #module as foreign size_t, name, payload)
   end
+end
+
+local function alloc_scalar_message(
+    kind: foreign titan_async_message_kind): foreign *titan_async_message
+  local msg = ffi.calloc(1 as foreign size_t, foreign titan_async_message.sizeof)
+    as foreign *titan_async_message
+  if msg == nil then
+    raise "transfer: out of memory copying message"
+  end
+  msg.kind = kind
+  return msg
+end
+
+local function copy_async_message(
+    input: foreign *titan_async_message): foreign *titan_async_message
+  local copied = ffi.titan_async_copy_message(input)
+  if copied == nil then
+    raise "transfer: out of memory copying message"
+  end
+  return copied
+end
+
+local function finalize_buf_message(
+    buf: foreign *titan_protobuf_buffer,
+    kind: foreign titan_async_message_kind,
+    name: string,
+    module: string,
+    entry: foreign const *void): foreign *titan_async_message
+  local header_size = foreign titan_async_message.sizeof
+  local wire_len = (buf.length - header_size) as foreign size_t
+  local name_len = #name as foreign size_t
+  local module_len = #module as foreign size_t
+  if ffi.titan_protobuf_buf_write_raw(buf, name, name_len) == 0 then
+    raise "transfer: out of memory copying message"
+  end
+  if ffi.titan_protobuf_buf_write_raw(buf, module, module_len) == 0 then
+    raise "transfer: out of memory copying message"
+  end
+  local msg = ffi.titan_protobuf_buf_take_data(buf) as foreign *titan_async_message
+  local base = (msg + 1) as foreign *char
+  ffi.memset(msg, 0, header_size)
+  msg.kind = kind
+  msg.bytes = base
+  msg.length = wire_len
+  msg.name = base + wire_len
+  msg.name_length = name_len
+  msg.module = base + wire_len + name_len
+  msg.module_length = module_len
+  msg.entry = entry
+  return msg
+end
+
+local function transfer_policy_to_message(
+    data: TransferValue): foreign *titan_async_message
+  local message = foreign titan_async_message.new()
+  case data
+  when is_nil() then
+    message.kind = ffi.TITAN_ASYNC_MESSAGE_NIL
+  when is_boolean(item) then
+    message.kind = ffi.TITAN_ASYNC_MESSAGE_BOOLEAN
+    if item then message.integer = 1 else message.integer = 0 end
+  when is_integer(item) then
+    message.kind = ffi.TITAN_ASYNC_MESSAGE_INTEGER
+    message.integer = item
+  when is_float(item) then
+    message.kind = ffi.TITAN_ASYNC_MESSAGE_FLOAT
+    message.number = item
+  when is_string(item) then
+    message.kind = ffi.TITAN_ASYNC_MESSAGE_STRING
+    message.bytes = item
+    message.length = #item
+  when is_lua_state(item) then
+    message.kind = ffi.TITAN_ASYNC_MESSAGE_STATE
+    message.state = item
+  when is_function(item) then
+    if not item then
+      raise "cannot send a NULL Lua C function"
+    end
+    message.kind = ffi.TITAN_ASYNC_MESSAGE_FUNCTION
+    message.function = item
+  when is_pointer(item) then
+    message.kind = ffi.TITAN_ASYNC_MESSAGE_POINTER
+    message.pointer = item
+  when is_record(module, name, bytes) then
+    message.kind = ffi.TITAN_ASYNC_MESSAGE_RECORD
+    message.module = module
+    message.module_length = #module
+    message.name = name
+    message.name_length = #name
+    message.bytes = bytes
+    message.length = #bytes
+  when is_union(module, name, bytes) then
+    message.kind = ffi.TITAN_ASYNC_MESSAGE_UNION
+    message.module = module
+    message.module_length = #module
+    message.name = name
+    message.name_length = #name
+    message.bytes = bytes
+    message.length = #bytes
+  when is_closure(module, entry, bytes) then
+    message.kind = ffi.TITAN_ASYNC_MESSAGE_CLOSURE
+    message.module = module
+    message.module_length = #module
+    message.entry = entry
+    message.bytes = bytes
+    message.length = #bytes
+  when is_record_payload(module, name, payload) then
+    message.kind = ffi.TITAN_ASYNC_MESSAGE_RECORD_PAYLOAD
+    message.module = module
+    message.module_length = #module
+    message.name = name
+    message.name_length = #name
+    message.bytes = payload
+    message.length = #payload
+  end
+  return copy_async_message(message)
+end
+
+--- Serialize a transferable value or TransferValue directly into a heap-allocated native message packet.
+-- Records, unions, and closures serialize directly into the packet's expandable C buffer without an intermediate Lua string.
+-- @param candidate Scalar, public nominal, Titan closure, or explicit TransferValue.
+-- @return Opaque pointer to a heap-allocated titan_async_message owned by the caller.
+-- @usage standard-library-transfer.md
+function encode_message(candidate: value): foreign *void
+  if candidate is TransferValue then
+    return transfer_policy_to_message(candidate as TransferValue) as foreign *void
+  end
+  case reflect.inspect(candidate)
+  when is_nil() then
+    return alloc_scalar_message(ffi.TITAN_ASYNC_MESSAGE_NIL) as foreign *void
+  when is_boolean(flag) then
+    local msg = alloc_scalar_message(ffi.TITAN_ASYNC_MESSAGE_BOOLEAN)
+    if flag then msg.integer = 1 else msg.integer = 0 end
+    return msg as foreign *void
+  when is_integer(num) then
+    local msg = alloc_scalar_message(ffi.TITAN_ASYNC_MESSAGE_INTEGER)
+    msg.integer = num
+    return msg as foreign *void
+  when is_float(num) then
+    local msg = alloc_scalar_message(ffi.TITAN_ASYNC_MESSAGE_FLOAT)
+    msg.number = num
+    return msg as foreign *void
+  when is_string(str) then
+    local message = foreign titan_async_message.new()
+    message.kind = ffi.TITAN_ASYNC_MESSAGE_STRING
+    message.bytes = str
+    message.length = #str
+    return copy_async_message(message) as foreign *void
+  when is_raw_pointer(ptr) then
+    local msg = alloc_scalar_message(ffi.TITAN_ASYNC_MESSAGE_POINTER)
+    msg.pointer = ptr
+    return msg as foreign *void
+  when is_lua_thread{thread} then
+    local msg = alloc_scalar_message(ffi.TITAN_ASYNC_MESSAGE_STATE)
+    msg.state = thread
+    return msg as foreign *void
+  when is_lua_userdata() then
+    local raw: foreign TValue = candidate
+    local msg = alloc_scalar_message(ffi.TITAN_ASYNC_MESSAGE_POINTER)
+    msg.pointer = ffi.lmacro_getudatamem(ffi.lmacro_uvalue(raw))
+    return msg as foreign *void
+  when is_lua_c_function{entry} then
+    local raw: foreign TValue = candidate
+    if ffi.lmacro_ttisCclosure(raw) ~= 0 then
+      local closure = ffi.lmacro_clCvalue(raw)
+      if closure.nupvalues ~= 0 then
+        raise "transfer: cannot transfer a Lua C closure with upvalues"
+      end
+    end
+    if not entry then
+      raise "cannot send a NULL Lua C function"
+    end
+    local msg = alloc_scalar_message(ffi.TITAN_ASYNC_MESSAGE_FUNCTION)
+    msg.function = entry
+    return msg as foreign *void
+  when is_titan_function() then
+    local buf: owned *titan_protobuf_buffer = foreign titan_protobuf_buffer.new()
+    if ffi.titan_protobuf_buf_init_heap(buf, foreign titan_async_message.sizeof) == 0 then
+      raise "transfer: out of memory copying message"
+    end
+    defer ffi.titan_protobuf_buf_free_heap(buf)
+    local module, entry = snapshot_closure_to_buffer(buf, candidate)
+    return finalize_buf_message(
+        buf, ffi.TITAN_ASYNC_MESSAGE_CLOSURE, "", module, entry) as foreign *void
+  when is_record(record_value) then
+    local encode? = protobuf.find_transfer_hooks(record_value.type, "transfer")
+    local module = nominal_module(candidate)
+    local name = record_value.type.name
+    if encode ~= nil then
+      local payload = encode_record_payload(record_value, encode)
+      local message = foreign titan_async_message.new()
+      message.kind = ffi.TITAN_ASYNC_MESSAGE_RECORD_PAYLOAD
+      message.module = module
+      message.module_length = #module
+      message.name = name
+      message.name_length = #name
+      message.bytes = payload
+      message.length = #payload
+      return copy_async_message(message) as foreign *void
+    end
+    local buf: owned *titan_protobuf_buffer = foreign titan_protobuf_buffer.new()
+    if ffi.titan_protobuf_buf_init_heap(buf, foreign titan_async_message.sizeof) == 0 then
+      raise "transfer: out of memory copying message"
+    end
+    defer ffi.titan_protobuf_buf_free_heap(buf)
+    protobuf.serialize_to_buffer(buf as foreign *void, candidate)
+    return finalize_buf_message(
+        buf, ffi.TITAN_ASYNC_MESSAGE_RECORD, name, module, nil) as foreign *void
+  when is_union(union_value) then
+    local module = nominal_module(candidate)
+    local name = union_value.type.name
+    local buf: owned *titan_protobuf_buffer = foreign titan_protobuf_buffer.new()
+    if ffi.titan_protobuf_buf_init_heap(buf, foreign titan_async_message.sizeof) == 0 then
+      raise "transfer: out of memory copying message"
+    end
+    defer ffi.titan_protobuf_buf_free_heap(buf)
+    protobuf.serialize_to_buffer(buf as foreign *void, candidate)
+    return finalize_buf_message(
+        buf, ffi.TITAN_ASYNC_MESSAGE_UNION, name, module, nil) as foreign *void
+  else
+    raise "transfer: unsupported value"
+  end
+end
+
+local function copy_native_bytes(bytes: foreign const *char, length: foreign size_t): string
+  if length == 0 then return "" end
+  local top = ffi.lua_gettop(L)
+  if ffi.lua_checkstack(L, 1) == 0 then
+    raise "cannot reserve Lua stack for transfer message bytes"
+  end
+  ffi.lua_pushlstring(L, bytes, length)
+  local result: value = ffi.lua_totvalue(L, -1)
+  ffi.lua_settop(L, top)
+  return result as string
+end
+
+--- Reconstruct a semantic value in the current Lua state from a heap-allocated native message packet and free the packet.
+-- @param raw_message Opaque pointer to a heap-allocated titan_async_message produced by encode_message.
+-- @return Reconstructed value in the current Lua state.
+-- @usage standard-library-transfer.md
+function decode_message(raw_message: foreign *void): value
+  local message = raw_message as foreign *titan_async_message
+  defer ffi.free(message)
+  local kind = message.kind
+  if kind == ffi.TITAN_ASYNC_MESSAGE_NIL then
+    return nil
+  elseif kind == ffi.TITAN_ASYNC_MESSAGE_BOOLEAN then
+    return message.integer ~= 0
+  elseif kind == ffi.TITAN_ASYNC_MESSAGE_INTEGER then
+    return message.integer
+  elseif kind == ffi.TITAN_ASYNC_MESSAGE_FLOAT then
+    return message.number
+  elseif kind == ffi.TITAN_ASYNC_MESSAGE_STRING then
+    return copy_native_bytes(message.bytes, message.length)
+  elseif kind == ffi.TITAN_ASYNC_MESSAGE_STATE then
+    return pointer_to_value(message.state as foreign *void)
+  elseif kind == ffi.TITAN_ASYNC_MESSAGE_FUNCTION then
+    return cfunction_to_value(message.function)
+  elseif kind == ffi.TITAN_ASYNC_MESSAGE_POINTER then
+    return pointer_to_value(message.pointer)
+  elseif kind == ffi.TITAN_ASYNC_MESSAGE_RECORD then
+    local name = copy_native_bytes(message.name, message.name_length)
+    initialize_nominal_raw(message.module, message.module_length, name)
+    return protobuf.deserialize_nominal_buffer(
+        message.bytes as foreign const *void,
+        message.length as integer,
+        name,
+        false)
+  elseif kind == ffi.TITAN_ASYNC_MESSAGE_UNION then
+    local name = copy_native_bytes(message.name, message.name_length)
+    initialize_nominal_raw(message.module, message.module_length, name)
+    return protobuf.deserialize_nominal_buffer(
+        message.bytes as foreign const *void,
+        message.length as integer,
+        name,
+        true)
+  elseif kind == ffi.TITAN_ASYNC_MESSAGE_CLOSURE then
+    return restore_closure_from_buffer(
+        message.module,
+        message.module_length,
+        message.entry,
+        message.bytes as foreign const *void,
+        message.length as integer)
+  elseif kind == ffi.TITAN_ASYNC_MESSAGE_RECORD_PAYLOAD then
+    local name = copy_native_bytes(message.name, message.name_length)
+    local payload = copy_native_bytes(message.bytes, message.length)
+    return decode_record_payload(
+        message.module, message.module_length, name, payload)
+  end
+  raise "invalid transfer message kind"
 end
 
 do

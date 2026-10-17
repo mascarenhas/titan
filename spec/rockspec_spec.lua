@@ -13,7 +13,7 @@ local PROGRAM_SUFFIX = platform.windows and ".exe" or ""
 local STDLIB_MODULES = {
     "coroutine", "uv", "async", "timer", "io", "fs", "net", "ssl",
     "url", "http", "websocket", "os", "path", "peg", "string", "math", "lua", "iteration", "gc",
-    "test", "reflect", "sqlite3", "json", "protobuf", "transfer",
+    "test", "reflect", "sqlite3", "json", "protobuf", "transfer", "thread",
 }
 local COMPILER_SLICE_PATHS = {}
 for _, owner in ipairs({ "checker", "coder" }) do
@@ -997,6 +997,14 @@ int titan_sdk_headers(void) { return LUA_VERSION_NUM + SQLITE_VERSION_NUMBER; }
             "titan/uv/transfer-native.h",
             "doc/language/standard-library-transfer.md",
             "doc/implementation/transfer-library.md",
+            "titan/thread/thread.titan",
+            "titan/thread/channel.titan",
+            "titan/thread/spawn.titan",
+            "titan/thread/group.titan",
+            "titan/thread/native.h",
+            "spec/stdlib/titan/thread/tests.titan",
+            "doc/language/standard-library-thread.md",
+            "doc/implementation/thread-library.md",
             "spec/stdlib/titan/protobuf/tests.titan",
             "spec/stdlib/titan/protobuf/protobuf_fixture.h",
             "doc/language/standard-library-protobuf.md",
@@ -1301,6 +1309,7 @@ assert(support._loadlib(%q, "titan_async_abi"))
             local json = require "titan.json"
             local protobuf = require "titan.protobuf"
             local transfer = require "titan.transfer"
+            local titan_thread = require "titan.thread"
             local builtin_string = require "string"
             -- Requiring async initializes its public uv dependency globally.
             -- The returned async-owned Task resolves its methods through the
@@ -1351,6 +1360,7 @@ assert(support._loadlib(%q, "titan_async_abi"))
             assert(type(json) == "userdata")
             assert(type(protobuf) == "userdata")
             assert(type(transfer) == "userdata")
+            assert(type(titan_thread) == "userdata")
             local json_source = '{"answer":42,"values":[1,null,3]}'
             assert(json.encode(json.decode(json_source)) == json_source)
             assert(not testing.testing())
@@ -1386,6 +1396,7 @@ assert(support._loadlib(%q, "titan_async_abi"))
                 json = json,
                 protobuf = protobuf,
                 transfer = transfer,
+                thread = titan_thread,
             }) do
                 local symbol = "luaopen_titan_" .. name
                 assert(normalize(package.searchpath("titan." .. name, package.path)) ==

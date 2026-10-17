@@ -18,6 +18,7 @@ end
 
 function new(): Lua
 function Lua:close()
+function Lua:detach(): foreign *lua_State
 
 function Lua:run(chunk: string, name: string?, ...: async.TransferValue):
     (...: async.TransferValue)
@@ -71,6 +72,12 @@ its variadic arguments to Lua's `...` and returning the complete result list.
 An omitted or nil `name` uses the chunk itself, as in `load`. Input byte
 lengths are explicit; strings and chunks can contain embedded zero bytes.
 A synchronous call blocks the calling thread until Lua returns.
+
+`detach` transfers ownership of an idle open `lua_State *` out of the `Lua`
+wrapper and marks the wrapper closed so neither `close` nor GC finalization
+closes the underlying state. Calling `detach` on a busy or already closed
+`Lua` instance raises. The caller becomes responsible for eventually calling
+`lua_close` on the returned pointer.
 
 ### Transferring values
 
