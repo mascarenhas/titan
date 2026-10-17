@@ -114,12 +114,14 @@ local function thread_control_record_succeeded_native(
   uv.native_mutex_lock(ctrl.mutex)
   if ctrl.status_kind == ffi.TITAN_THREAD_STATE_RUNNING then
     ctrl.status_kind = ffi.TITAN_THREAD_STATE_SUCCEEDED
-    ctrl.result_msg = msg
-    msg = nil
+    if ctrl.abandoned == 0 then
+      ctrl.result_msg = msg
+      msg = nil
+    end
   end
   uv.native_mutex_unlock(ctrl.mutex)
   if msg ~= nil then
-    thread_message_free(msg)
+    thread_message_discard(msg)
   end
 end
 
@@ -128,12 +130,14 @@ local function thread_control_record_cancelled_native(
   uv.native_mutex_lock(ctrl.mutex)
   if ctrl.status_kind == ffi.TITAN_THREAD_STATE_RUNNING then
     ctrl.status_kind = ffi.TITAN_THREAD_STATE_CANCELLED
-    ctrl.result_msg = reason_msg
-    reason_msg = nil
+    if ctrl.abandoned == 0 then
+      ctrl.result_msg = reason_msg
+      reason_msg = nil
+    end
   end
   uv.native_mutex_unlock(ctrl.mutex)
   if reason_msg ~= nil then
-    thread_message_free(reason_msg)
+    thread_message_discard(reason_msg)
   end
 end
 
@@ -143,7 +147,7 @@ local foreign function thread_control_record_failed_native(
     trace: const *char,
     trace_len: size_t,
     report: const *char,
-    report_len: size_t)
+    report_len: size_t): *titan_thread_message
   local trace_copy = thread_control_copy_cstr(trace, trace_len)
   local report_copy: foreign *char = nil
   if report_len > (0 as foreign size_t) then
@@ -152,11 +156,13 @@ local foreign function thread_control_record_failed_native(
   uv.native_mutex_lock(ctrl.mutex)
   if ctrl.status_kind == ffi.TITAN_THREAD_STATE_RUNNING then
     ctrl.status_kind = ffi.TITAN_THREAD_STATE_FAILED
-    ctrl.result_msg = err_msg
-    err_msg = nil
-    ctrl.error_traceback = trace_copy
-    ctrl.error_traceback_len = trace_len
-    trace_copy = nil
+    if ctrl.abandoned == 0 then
+      ctrl.result_msg = err_msg
+      err_msg = nil
+      ctrl.error_traceback = trace_copy
+      ctrl.error_traceback_len = trace_len
+      trace_copy = nil
+    end
     if ctrl.observed == 0 then
       ctrl.stderr_report = report_copy
       ctrl.stderr_report_len = report_len
@@ -164,9 +170,26 @@ local foreign function thread_control_record_failed_native(
     end
   end
   uv.native_mutex_unlock(ctrl.mutex)
-  if err_msg ~= nil then thread_message_free(err_msg) end
   if trace_copy ~= nil then ffi.free(trace_copy) end
   if report_copy ~= nil then ffi.free(report_copy) end
+  return err_msg
+end
+
+local function thread_control_record_failed(
+    ctrl: foreign *titan_thread_control,
+    err_msg: foreign *titan_thread_message,
+    trace: string,
+    report: string)
+  local leftover = thread_control_record_failed_native(
+    ctrl,
+    err_msg,
+    trace as foreign const *char,
+    #trace as foreign size_t,
+    report as foreign const *char,
+    #report as foreign size_t)
+  if leftover ~= nil then
+    thread_message_discard(leftover)
+  end
 end
 
 local function thread_control_bind_child_cancel_native(
@@ -184,6 +207,15 @@ local function thread_control_clear_child_cancel_native(
   uv.native_mutex_lock(ctrl.mutex)
   ctrl.child_cancel_handle = nil
   uv.native_mutex_unlock(ctrl.mutex)
+end
+
+local function thread_control_take_entry_native(
+    ctrl: foreign *titan_thread_control): foreign *titan_thread_message
+  uv.native_mutex_lock(ctrl.mutex)
+  local msg = ctrl.entry_msg
+  ctrl.entry_msg = nil
+  uv.native_mutex_unlock(ctrl.mutex)
+  return msg
 end
 
 local function thread_control_take_cancel_reason_native(
@@ -261,8 +293,17 @@ end
 
 local function child_thread_bootstrap()
   local ctrl = take_bootstrap_control()
-  local entry_msg = ctrl.entry_msg
-  ctrl.entry_msg = nil
+  local entry_msg = thread_control_take_entry_native(ctrl)
+  defer do
+    if entry_msg ~= nil then
+      thread_message_discard(entry_msg)
+      entry_msg = nil
+    end
+    local leftover_cancel = thread_control_take_cancel_reason_native(ctrl)
+    if leftover_cancel ~= nil then
+      thread_message_discard(leftover_cancel)
+    end
+  end
 
   local was_cancelled = false
   local observed_cancel_reason: async.CancellationReason<|value|>? = nil
@@ -314,13 +355,7 @@ local function child_thread_bootstrap()
           report = format_thread_stderr(caught_err, caught_trace)
         end
         local err_msg = safe_value_to_thread_message(caught_err)
-        thread_control_record_failed_native(
-          ctrl,
-          err_msg,
-          caught_trace as foreign const *char,
-          #caught_trace as foreign size_t,
-          report as foreign const *char,
-          #report as foreign size_t)
+        thread_control_record_failed(ctrl, err_msg, caught_trace, report)
       end
       do
         async.request_exit(0)
@@ -373,13 +408,7 @@ local function child_thread_bootstrap()
       report = format_thread_stderr(loop_err, loop_trace)
     end
     local err_msg = safe_value_to_thread_message(loop_err)
-    thread_control_record_failed_native(
-      ctrl,
-      err_msg,
-      loop_trace as foreign const *char,
-      #loop_trace as foreign size_t,
-      report as foreign const *char,
-      #report as foreign size_t)
+    thread_control_record_failed(ctrl, err_msg, loop_trace, report)
   end
 end
 
@@ -422,8 +451,11 @@ local foreign function record_bootstrap_failure_native(
       end
     end
   end
-  thread_control_record_failed_native(
+  local leftover = thread_control_record_failed_native(
     ctrl, err_msg, "", 0 as foreign size_t, msg_bytes, len)
+  if leftover ~= nil then
+    thread_message_free(leftover)
+  end
 end
 
 local foreign function thread_worker_main(arg: *void)
@@ -456,11 +488,39 @@ local foreign function thread_worker_main(arg: *void)
   thread_control_release_native(ctrl)
 end
 
+local function thread_control_abandon_and_release(ctrl: foreign *titan_thread_control)
+  if ctrl == nil then return end
+  uv.native_mutex_lock(ctrl.mutex)
+  ctrl.abandoned = 1
+  local finished = ctrl.finished ~= 0
+  local entry_msg: foreign *titan_thread_message = nil
+  local cancel_msg: foreign *titan_thread_message = nil
+  if finished then
+    entry_msg = ctrl.entry_msg
+    ctrl.entry_msg = nil
+    cancel_msg = ctrl.cancel_reason_msg
+    ctrl.cancel_reason_msg = nil
+  end
+  local result_msg = ctrl.result_msg
+  ctrl.result_msg = nil
+  uv.native_mutex_unlock(ctrl.mutex)
+  if entry_msg ~= nil then
+    thread_message_discard(entry_msg)
+  end
+  if cancel_msg ~= nil then
+    thread_message_discard(cancel_msg)
+  end
+  if result_msg ~= nil then
+    thread_message_discard(result_msg)
+  end
+  thread_control_release_native(ctrl)
+end
+
 local function thread_finalize(self: Thread<|value|>)
   local ctrl = self.native
   self.native = nil
   if ctrl ~= nil then
-    thread_control_release_native(ctrl)
+    thread_control_abandon_and_release(ctrl)
   end
 end
 

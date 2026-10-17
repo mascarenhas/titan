@@ -719,6 +719,40 @@ local function start_cancelled_endpoint_send(
   return task, rx
 end
 
+local function spawn_abandoned_thread_returning_sender_after_finish(): thread.Receiver<|integer|>
+  local tx, rx = thread.channel<|integer|>(1)
+  local done_tx, done_rx = thread.channel<|boolean|>(1)
+  defer done_tx:close()
+  defer done_rx:close()
+  local _worker = thread.spawn_two(function (
+    inner_tx: thread.Sender<|integer|>,
+    notify_tx: thread.Sender<|boolean|>
+  ): PipeEnvelope
+    notify_tx:send(true)
+    return PipeEnvelope.sender_end(inner_tx, "abandoned-result-after-finish")
+  end, tx, done_tx)
+  test.assert(done_rx:receive())
+  timer.sleep(20)
+  return rx
+end
+
+local function spawn_abandoned_thread_returning_sender_while_running(
+  gate_rx: thread.Receiver<|boolean|>,
+  ready_tx: thread.Sender<|boolean|>
+): thread.Receiver<|integer|>
+  local tx, rx = thread.channel<|integer|>(1)
+  local _worker = thread.spawn_three(function (
+    inner_tx: thread.Sender<|integer|>,
+    g_rx: thread.Receiver<|boolean|>,
+    r_tx: thread.Sender<|boolean|>
+  ): PipeEnvelope
+    r_tx:send(true)
+    g_rx:receive()
+    return PipeEnvelope.sender_end(inner_tx, "abandoned-result-while-running")
+  end, tx, gate_rx, ready_tx)
+  return rx
+end
+
 function test_endpoint_transfer_gating_discard_and_rollback(_context: test.Context)
   runtime_test.run(function ()
     local s_tx, s_rx = thread.channel<|string|>(1)
@@ -774,6 +808,45 @@ function test_endpoint_transfer_gating_discard_and_rollback(_context: test.Conte
     test.assert(rx2:is_closed(), "mid-encode record failure leaked Sender reference")
     test.assert(rx3:is_closed(), "mid-encode closure failure leaked Sender reference")
     test.assert(rx4:is_closed(), "cancelled Sender:send leaked Sender reference")
+
+    -- Verify abandoned Thread returning a Sender releases its result retain
+    -- both when finalized after worker completion and when finalized while running.
+    local rx5 = spawn_abandoned_thread_returning_sender_after_finish()
+    defer rx5:close()
+    gc.collect()
+    gc.collect()
+    test.assert(rx5:is_closed(), "abandoned completed Thread leaked returned Sender reference")
+
+    local ab_gate_tx, ab_gate_rx = thread.channel<|boolean|>(1)
+    local ab_ready_tx, ab_ready_rx = thread.channel<|boolean|>(1)
+    defer ab_gate_tx:close()
+    defer ab_gate_rx:close()
+    defer ab_ready_tx:close()
+    defer ab_ready_rx:close()
+    local rx6 = spawn_abandoned_thread_returning_sender_while_running(ab_gate_rx, ab_ready_tx)
+    defer rx6:close()
+    test.assert(ab_ready_rx:receive())
+    gc.collect()
+    gc.collect()
+    test.assert(not rx6:is_closed())
+    ab_gate_tx:send(true)
+    case rx6:receive_result()
+    when closed() then
+    else raise "abandoned running Thread leaked returned Sender reference"
+    end
+    test.assert(rx6:is_closed())
+
+    -- Verify Receiver:close() flushes unread messages and releases nested Sender retains.
+    local close_flush_tx, close_flush_rx = thread.channel<|PipeEnvelope|>(2)
+    defer close_flush_tx:close()
+    defer close_flush_rx:close()
+    local rx7 = enqueue_ephemeral_sender(close_flush_tx)
+    defer rx7:close()
+    gc.collect()
+    gc.collect()
+    test.assert(not rx7:is_closed())
+    close_flush_rx:close()
+    test.assert(rx7:is_closed(), "Receiver:close() leaked buffered Sender reference")
   end)
 end
 

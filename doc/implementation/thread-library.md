@@ -145,11 +145,15 @@ and record `self.native` in `pending_retained_senders` or
 `pending_retained_receivers`. If `transfer.encode_message` raises partway
 through a composite record, union, or closure, `value_to_thread_message` rolls
 back all sender and receiver retains from that failed encode before re-raising.
-If an already-encoded packet is discarded in a Titan state before delivery (for
-example when `Sender:try_send` finds a full or closed channel, `Sender:send` is
-cancelled while parked, or `Thread:cancel` loses a race),
-`thread_message_discard` decodes composite packets under `catch` so any retained
-endpoint references are adopted into GC-finalizable handles and released.
+If an already-encoded packet is discarded before delivery (for example when
+`Sender:try_send` finds a full or closed channel, `Sender:send` is cancelled
+while parked, `Receiver:close()` or finalizer cleanup drains unread ring-buffer
+packets via `channel_drain_and_discard`, `Thread:cancel` loses a race, or a
+`Thread` handle is finalized without observing its result),
+`thread_message_discard` decodes composite packets with
+`endpoint_transfer_discarding = true` so `Sender.from_transfer_payload` and
+`Receiver.from_transfer_payload` synchronously release their retained endpoint
+references without allocating new finalizable handles.
 
 ## Detached OS thread lifecycle and cancellation
 
@@ -177,7 +181,12 @@ Inside `thread_worker_main`:
 3. When the root `Task` finishes, its `defer` clears `ctrl.child_cancel_handle`
    and closes the cancellation handle. On uncaught error or cancellation, it
    records the terminal status in `ctrl` and calls `async.request_exit(0)` so
-   any remaining child handles close cleanly.
+   any remaining child handles close cleanly. If `ctrl.abandoned` is already set
+   because the parent finalized its `Thread` handle while the worker was still
+   running, `thread_control_record_succeeded_native`,
+   `thread_control_record_cancelled_native`, and `thread_control_record_failed`
+   discard `result_msg` immediately via `thread_message_discard` instead of
+   storing it on `ctrl`.
 4. After `lua_pcallk` returns, `thread_worker_main` closes the child `lua_State`
    with `lua_close`, records a fallback `TITAN_THREAD_STATE_FAILED` status if
    `ctrl.status_kind` is still `TITAN_THREAD_STATE_RUNNING`, marks
@@ -187,7 +196,11 @@ Inside `thread_worker_main`:
    `result_msg` and `error_traceback` (or `Thread:cancel`'s `cancel_reason_msg`
    in the child) under `ctrl.mutex` and performs all Lua decoding, string
    allocation, and `ffi.free` outside the mutex, caching the reconstructed
-   `ThreadStatus<|R|>` on `self.cached_status`.
+   `ThreadStatus<|R|>` on `self.cached_status`. If the parent instead drops and
+   finalizes `Thread<|R|>` without reconstructing its status,
+   `thread_control_abandon_and_release` sets `ctrl.abandoned = 1`, detaches any
+   already-recorded `result_msg`, and discards it via `thread_message_discard`
+   before releasing the parent's `ctrl` reference.
 6. When `ctrl.refcount` reaches `0`, `thread_control_destroy_unreferenced`
    writes `ctrl.stderr_report` to `stderr` if `ctrl.status_kind ==
    TITAN_THREAD_STATE_FAILED` and `ctrl.observed == 0`.

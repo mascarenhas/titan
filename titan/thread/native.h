@@ -65,6 +65,7 @@ typedef struct titan_thread_control {
   char *stderr_report;
   size_t stderr_report_len;
   int observed;
+  int abandoned;
   titan_thread_waiter_queue join_waiters;
 } titan_thread_control;
 

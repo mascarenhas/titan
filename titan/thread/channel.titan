@@ -108,6 +108,10 @@ local function channel_try_dequeue_native(
     return 2, nil
   end
   uv.native_mutex_lock(ch.mutex)
+  if ch.closed == 2 then
+    uv.native_mutex_unlock(ch.mutex)
+    return 2, nil
+  end
   if ch.count > (0 as foreign size_t) then
     local slot = ch.ring + ch.head
     local msg = slot[0]
@@ -298,6 +302,10 @@ function Sender.from_transfer_payload(payload: string): Sender<|T|>
   if ch == nil then
     raise "thread: invalid Sender transfer payload"
   end
+  if endpoint_transfer_discarding then
+    channel_release_sender_native(ch)
+    return Sender<|T|> { native = nil }
+  end
   return new_sender<|T|>(ch)
 end
 
@@ -434,6 +442,10 @@ function Receiver.from_transfer_payload(payload: string): Receiver<|T|>
   local ch = ffi.titan_thread_bits_pointer(bits) as foreign *titan_thread_channel
   if ch == nil then
     raise "thread: invalid Receiver transfer payload"
+  end
+  if endpoint_transfer_discarding then
+    channel_release_receiver_native(ch)
+    return Receiver<|T|> { native = nil }
   end
   return new_receiver<|T|>(ch)
 end

@@ -173,7 +173,7 @@ end
   only when **all** active `Receiver` handles have been garbage-collected does
   the channel automatically close from the receiver side and flush unread
   buffered messages. Unread messages flushed by `Receiver:close()` or finalizer
-  cleanup release their packet memory without decoding nested endpoints.
+  cleanup release any retained nested `Sender` or `Receiver` endpoints.
 - Both `Sender` and `Receiver` implement `to_transfer_payload` and
   `from_transfer_payload` for internal use by `titan.thread`'s message transfer
   machinery using **clone-on-transfer** semantics: transferring an endpoint
@@ -182,8 +182,10 @@ end
   invalidating the caller's handle, and adopts that reference into a fresh
   handle in the destination state. An in-flight transferred endpoint keeps the
   channel open even if the sender drops its local handle before the receiver
-  decodes the message, and failed or cancelled sends automatically roll back or
-  release the retained reference. `Sender` and `Receiver` endpoints can only be
+  decodes the message, and failed or cancelled sends, unread messages flushed by
+  `Receiver:close()` or receiver finalization, and unconsumed results of
+  abandoned `Thread` handles automatically roll back or release the retained
+  reference. `Sender` and `Receiver` endpoints can only be
   transferred through thread channels and `spawn*` arguments; calling
   `protobuf.serialize`, `transfer.TransferValue.from_value`, or
   `to_transfer_payload` / `from_transfer_payload` directly outside thread

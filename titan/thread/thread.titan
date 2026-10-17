@@ -195,6 +195,62 @@ local foreign function channel_destroy_unreferenced(ch: *titan_thread_channel)
   ffi.free(ch)
 end
 
+local endpoint_transfer_depth: integer = 0
+local endpoint_transfer_discarding: boolean = false
+local pending_retained_senders: {integer} = {}
+local pending_retained_receivers: {integer} = {}
+
+local function thread_message_to_value(message: foreign *titan_thread_message): value
+  endpoint_transfer_depth = endpoint_transfer_depth + 1
+  defer endpoint_transfer_depth = endpoint_transfer_depth - 1
+  return transfer.decode_message(message as foreign *void)
+end
+
+local function thread_message_discard(message: foreign *titan_thread_message)
+  if message == nil then return end
+  local kind = message.kind
+  if kind == ffi.TITAN_ASYNC_MESSAGE_RECORD_PAYLOAD or
+     kind == ffi.TITAN_ASYNC_MESSAGE_RECORD or
+     kind == ffi.TITAN_ASYNC_MESSAGE_UNION or
+     kind == ffi.TITAN_ASYNC_MESSAGE_CLOSURE then
+    local prev_discarding = endpoint_transfer_discarding
+    endpoint_transfer_discarding = true
+    defer endpoint_transfer_discarding = prev_discarding
+    endpoint_transfer_depth = endpoint_transfer_depth + 1
+    defer endpoint_transfer_depth = endpoint_transfer_depth - 1
+    do
+      transfer.decode_message(message as foreign *void)
+    catch
+    end
+  else
+    ffi.free(message)
+  end
+end
+
+local function channel_drain_and_discard(ch: foreign *titan_thread_channel)
+  if ch == nil then return end
+  while true do
+    uv.native_mutex_lock(ch.mutex)
+    local msg: foreign *titan_thread_message = nil
+    if ch.ring ~= nil and ch.count > (0 as foreign size_t) then
+      local slot = ch.ring + ch.head
+      msg = slot[0]
+      slot[0] = nil
+      ch.head = (ch.head + (1 as foreign size_t)) % ch.capacity
+      ch.count = ch.count - (1 as foreign size_t)
+    else
+      ch.head = 0 as foreign size_t
+      ch.tail = 0 as foreign size_t
+      uv.native_mutex_unlock(ch.mutex)
+      return
+    end
+    uv.native_mutex_unlock(ch.mutex)
+    if msg ~= nil then
+      thread_message_discard(msg)
+    end
+  end
+end
+
 local function channel_retain_sender_native(ch: foreign *titan_thread_channel)
   if ch == nil then return end
   uv.native_mutex_lock(ch.mutex)
@@ -209,7 +265,7 @@ local function channel_retain_receiver_native(ch: foreign *titan_thread_channel)
   uv.native_mutex_unlock(ch.mutex)
 end
 
-local foreign function channel_release_sender_native(ch: *titan_thread_channel)
+local function channel_release_sender_native(ch: foreign *titan_thread_channel)
   if ch == nil then return end
   uv.native_mutex_lock(ch.mutex)
   if ch.active_senders > (0 as foreign size_t) then
@@ -234,18 +290,25 @@ local foreign function channel_release_sender_native(ch: *titan_thread_channel)
   end
 end
 
-local foreign function channel_release_receiver_native(ch: *titan_thread_channel)
+local function channel_release_receiver_native(ch: foreign *titan_thread_channel)
   if ch == nil then return end
   uv.native_mutex_lock(ch.mutex)
-  if ch.active_receivers > (0 as foreign size_t) then
-    ch.active_receivers = ch.active_receivers - (1 as foreign size_t)
-    if ch.active_receivers == (0 as foreign size_t) then
-      ch.closed = 1
-      clear_ring_messages(ch)
-      waiter_wake_all(ffi.titan_thread_overflow_queue(ch))
-      waiter_wake_all(ffi.titan_thread_underflow_queue(ch))
-    end
+  if ch.active_receivers == (0 as foreign size_t) then
+    uv.native_mutex_unlock(ch.mutex)
+    return
   end
+  if ch.active_receivers > (1 as foreign size_t) then
+    ch.active_receivers = ch.active_receivers - (1 as foreign size_t)
+    uv.native_mutex_unlock(ch.mutex)
+    return
+  end
+  ch.closed = 2
+  waiter_wake_all(ffi.titan_thread_overflow_queue(ch))
+  waiter_wake_all(ffi.titan_thread_underflow_queue(ch))
+  uv.native_mutex_unlock(ch.mutex)
+  channel_drain_and_discard(ch)
+  uv.native_mutex_lock(ch.mutex)
+  ch.active_receivers = ch.active_receivers - (1 as foreign size_t)
   local destroy = 0 as foreign int
   if ch.active_senders == (0 as foreign size_t) then
     if ch.active_receivers == (0 as foreign size_t) then
@@ -272,11 +335,11 @@ end
 local function channel_close_receiver_native(ch: foreign *titan_thread_channel)
   if ch == nil then return end
   uv.native_mutex_lock(ch.mutex)
-  ch.closed = 1
-  clear_ring_messages(ch)
+  ch.closed = 2
   waiter_wake_all(ffi.titan_thread_overflow_queue(ch))
   waiter_wake_all(ffi.titan_thread_underflow_queue(ch))
   uv.native_mutex_unlock(ch.mutex)
+  channel_drain_and_discard(ch)
 end
 
 local function channel_is_closed_native(ch: foreign *titan_thread_channel): integer
@@ -289,10 +352,6 @@ local function channel_is_closed_native(ch: foreign *titan_thread_channel): inte
   uv.native_mutex_unlock(ch.mutex)
   return closed
 end
-
-local endpoint_transfer_depth: integer = 0
-local pending_retained_senders: {integer} = {}
-local pending_retained_receivers: {integer} = {}
 
 local function value_to_thread_message(item: value): foreign *titan_thread_message
   local saved_tx = #pending_retained_senders
@@ -324,30 +383,6 @@ local function value_to_thread_message(item: value): foreign *titan_thread_messa
     pending_retained_receivers[i] = nil
   end
   return raw as foreign *titan_thread_message
-end
-
-local function thread_message_to_value(message: foreign *titan_thread_message): value
-  endpoint_transfer_depth = endpoint_transfer_depth + 1
-  defer endpoint_transfer_depth = endpoint_transfer_depth - 1
-  return transfer.decode_message(message as foreign *void)
-end
-
-local function thread_message_discard(message: foreign *titan_thread_message)
-  if message == nil then return end
-  local kind = message.kind
-  if kind == ffi.TITAN_ASYNC_MESSAGE_RECORD_PAYLOAD or
-     kind == ffi.TITAN_ASYNC_MESSAGE_RECORD or
-     kind == ffi.TITAN_ASYNC_MESSAGE_UNION or
-     kind == ffi.TITAN_ASYNC_MESSAGE_CLOSURE then
-    endpoint_transfer_depth = endpoint_transfer_depth + 1
-    defer endpoint_transfer_depth = endpoint_transfer_depth - 1
-    do
-      transfer.decode_message(message as foreign *void)
-    catch
-    end
-  else
-    ffi.free(message)
-  end
 end
 
 local function copy_native_bytes(bytes: foreign const *char, length: foreign size_t): string
