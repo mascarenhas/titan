@@ -1,0 +1,169 @@
+-- The HTTP serving guard aborts the transport after a Connection: close
+-- response; a raw TLS reader may report its existing truncated-EOF contract.
+local function transferred_exchange_peer_closed(
+    client: io.ReaderWriterCloser, secure: boolean): boolean
+  return client:read() == nil
+catch
+  if secure and error is ssl.Error then
+    test.assert((error as ssl.Error).name == "TLS_TRUNCATED_EOF",
+      "HTTPS retirement raised an unexpected TLS failure")
+    return true
+  end
+  raise error
+end
+
+-- Adopted Exchange serving owns its next-request header deadline policy.
+local function transferred_exchange_header_deadline(
+    secure: boolean, timeout: integer?, slow_response: boolean,
+    reject_negative: boolean)
+  runtime_test.run(function ()
+    local handled = 0
+    local adopted = false
+    local listener: http.Server? = nil
+    local handler: http.Handler = function (request: http.Request, response: http.Response)
+      async.yield()
+      local packet = async.TransferValue.from_value(http.Exchange(request, response))
+      local moved: http.Exchange = packet:to_value()
+      defer moved:close()
+      adopted = true
+      if reject_negative then
+        local called = false
+        transfer_common.assert_raises_contains(function ()
+          moved:serve(function (_request: http.Request, _response: http.Response)
+            called = true
+          end, -1)
+        end, "non-negative")
+        test.assert(not called, "negative Exchange timeout dispatched its handler")
+      end
+      local destination: http.Handler = function (next_request: http.Request,
+                                                  next_response: http.Response)
+        handled = handled + 1
+        if slow_response and handled == 1 then
+          -- Both handler work and an already-started response may outlive the
+          -- next-header deadline. The deadline begins only after this returns.
+          timer.sleep(90)
+          next_response:set_header("Content-Length", "2")
+          next_response:write("a")
+          timer.sleep(90)
+          next_response:write("b")
+        else
+          next_response:set_header("Content-Length", "0")
+        end
+        test.assert(next_request:read() == nil)
+        if handled == 2 then listener:close() end
+      end
+      if timeout == nil then moved:serve(destination)
+      else moved:serve(destination, timeout) end
+    end
+    local port = 0
+    if secure then listener, port = support.https_listen(47000, handler, 0)
+    else listener, port = support.http_listen(47100, handler, 0) end
+    defer listener:close()
+    listener:read_ahead(false)
+    local serving = async.run<|nil, value|>(function (): nil
+      listener:serve()
+      return nil
+    end)
+    task_support.cleanup_task(serving, "transferred Exchange timeout listener")
+    local client: io.ReaderWriterCloser, abort: function (): () =
+      (function (): (io.ReaderWriterCloser, function (): ())
+        if secure then
+          local connection = ssl.connect("localhost", port, support.TRUST_ROOT)
+          return connection, connection:abort
+        end
+        local connection = net.connect("127.0.0.1", port)
+        return connection, connection:close
+      end)()
+    defer abort()
+    local watchdog_fired = false
+    local watchdog = async.run<|nil, value|>(function (): nil
+      timer.sleep(2000)
+      watchdog_fired = true
+      do abort() catch end
+      return nil
+    end)
+    task_support.cleanup_task(watchdog, "transferred Exchange timeout watchdog")
+    client:write("GET /first HTTP/1.1\r\nHost: localhost\r\n\r\n")
+    local first_headers? = client:read_until("\r\n\r\n", false)
+    test.assert(first_headers ~= nil and support.contains(first_headers, "200 OK"),
+      "transferred Exchange lost its current response")
+    if slow_response then
+      local body = string.writer()
+      local received = 0
+      while received < 2 do
+        local chunk? = client:read()
+        test.assert(chunk ~= nil, "header deadline truncated the current response")
+        body:write(chunk)
+        received = received + #chunk
+      end
+      test.assert(body:drain() == "ab", "header deadline covered handler or response work")
+    end
+    if timeout ~= nil and timeout > 0 and not slow_response then
+      -- These incomplete next headers must never reach the destination handler.
+      client:write("GET /partial HTTP/1.1\r\nHost: local")
+      test.assert(transferred_exchange_peer_closed(client, secure),
+        "transferred Exchange ignored its next-header deadline")
+      test.assert(handled == 1, "partial next request reached an Exchange handler")
+      listener:close()
+    else
+      -- Omitted and explicit-zero policies both retain the indefinite wait.
+      if not slow_response then timer.sleep(90) end
+      client:write("GET /second HTTP/1.1\r\nHost: localhost\r\n" ..
+        "Connection: close\r\n\r\n")
+      local second_headers? = client:read_until("\r\n\r\n", false)
+      test.assert(second_headers ~= nil and support.contains(second_headers, "200 OK"),
+        "transferred Exchange lost a later request outside its header deadline")
+      test.assert(transferred_exchange_peer_closed(client, secure),
+        "transferred Exchange did not close after the final request")
+      test.assert(handled == 2, "transferred Exchange lost its next request")
+    end
+    watchdog:cancel(async.CancellationReason.simple("transferred Exchange timeout completed"))
+    async.join(watchdog)
+    test.assert(not watchdog_fired, "transferred Exchange timeout required its watchdog")
+    test.assert(adopted, "Exchange timeout fixture did not adopt the transport")
+    async.join(serving)
+    test.assert(serving:status():has_succeeded(), "transferred Exchange timeout listener failed")
+  end)
+end
+
+function test_transfer_exchange_serve_defaults_to_no_header_timeout(context: test.Context)
+  context:run("http-default", function (_child: test.Context)
+    transferred_exchange_header_deadline(false, nil, false, false)
+  end)
+  context:run("http-zero", function (_child: test.Context)
+    transferred_exchange_header_deadline(false, 0, false, false)
+  end)
+  context:run("https-default", function (_child: test.Context)
+    transferred_exchange_header_deadline(true, nil, false, false)
+  end)
+  context:run("https-zero", function (_child: test.Context)
+    transferred_exchange_header_deadline(true, 0, false, false)
+  end)
+end
+
+function test_transfer_exchange_serve_times_out_partial_next_headers(context: test.Context)
+  context:run("http", function (_child: test.Context)
+    transferred_exchange_header_deadline(false, 30, false, false)
+  end)
+  context:run("https", function (_child: test.Context)
+    transferred_exchange_header_deadline(true, 30, false, false)
+  end)
+end
+
+function test_transfer_exchange_serve_deadline_excludes_current_handler_and_response(context: test.Context)
+  context:run("http", function (_child: test.Context)
+    transferred_exchange_header_deadline(false, 30, true, false)
+  end)
+  context:run("https", function (_child: test.Context)
+    transferred_exchange_header_deadline(true, 30, true, false)
+  end)
+end
+
+function test_transfer_exchange_serve_rejects_negative_timeout_before_ownership(context: test.Context)
+  context:run("http", function (_child: test.Context)
+    transferred_exchange_header_deadline(false, 0, false, true)
+  end)
+  context:run("https", function (_child: test.Context)
+    transferred_exchange_header_deadline(true, 0, false, true)
+  end)
+end

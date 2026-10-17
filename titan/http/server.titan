@@ -50,6 +50,7 @@ record Server
   local handler: Handler
   local idle_timeout_ms: integer
   local header_limit_bytes: integer
+  local read_ahead_enabled: boolean
   local closed: boolean
   local listener_closed: boolean
 end
@@ -458,9 +459,8 @@ local function await_terminal_cleanup<|A, B|>(task: async.Task<|A, B|>)
 end
 
 local function read_request_with_idle_timeout(
-    parser: Parser, server: Server, transport: Transport): Request?
-  local encrypted = server.encrypted
-  local timeout = server.idle_timeout_ms
+    parser: Parser, encrypted: boolean, transport: Transport,
+    timeout: integer): Request?
   if timeout == 0 then return read_request(parser, encrypted, transport) end
 
   local cleanup_reason = async.CancellationReason<|value|>.simple(
@@ -515,7 +515,8 @@ local function serve_connection(transport: Transport,
     -- Snapshot the current setting for this request-header acquisition.
     -- Setter calls affect the next loop iteration, never an in-flight read.
     parser.header_limit = server.header_limit_bytes
-    local request? = read_request_with_idle_timeout(parser, server, transport)
+    local request? = read_request_with_idle_timeout(
+      parser, server.encrypted, transport, server.idle_timeout_ms)
     if not request then return end
     local request_value = request as Request
     exchange = request_value.exchange
@@ -541,10 +542,12 @@ end
 local function accept_connection(server: Server): Transport
   if server.encrypted then
     local connection = (server.secure as ssl.Server):accept()
+    connection:read_ahead(server.read_ahead_enabled)
     local channel: io.ReaderWriterCloser = connection
     return Transport(channel, connection:abort)
   end
   local connection = (server.plain as net.Server):accept()
+  connection:read_ahead(server.read_ahead_enabled)
   local channel: io.ReaderWriterCloser = connection
   return Transport(channel, connection:close)
 end
@@ -575,6 +578,7 @@ function listen(host: string, handler: Handler, port: integer?,
     handler = handler,
     idle_timeout_ms = actual_idle_timeout,
     header_limit_bytes = 65536,
+    read_ahead_enabled = true,
     closed = false,
     listener_closed = false,
   }
@@ -610,9 +614,23 @@ function listen_tls(host: string, certificate_file: string, handler: Handler,
     handler = handler,
     idle_timeout_ms = actual_idle_timeout,
     header_limit_bytes = 65536,
+    read_ahead_enabled = true,
     closed = false,
     listener_closed = false,
   }
+end
+
+--- Read or configure native read-ahead for subsequently accepted connections.
+-- @param enabled New TCP input policy; nil only queries it.
+-- @return Previous policy; true enables persistent read-ahead by default.
+-- @usage standard-library-http.md#servers-and-handlers
+function Server:read_ahead(enabled: boolean?): boolean
+  local previous = self.read_ahead_enabled
+  if enabled ~= nil then
+    if self.closed then raise "HTTP Server is closed" end
+    self.read_ahead_enabled = enabled
+  end
+  return previous
 end
 
 --- Read or update the next request-header deadline, returning its previous value.

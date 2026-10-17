@@ -11,6 +11,7 @@ local support = import "net.test_support.titan"
 local task_support = import "support.async.titan"
 local common = import "support.common.titan"
 local transfer_lua = import "lua"
+local thread = import "thread"
 
 local function expect_cancelled_net_operation(action: function (): (),
                                               label: string)
@@ -804,5 +805,84 @@ function test_net_transfer_hooks_run_without_a_current_task(context: test.Contex
     source:close()
     target:write("callback-handoff\0")
     test.assert(peer:read_until("\0", true) == "callback-handoff")
+  end)
+end
+
+function test_net_demand_read_policy_survives_handoff(context: test.Context)
+  runtime_test.run(function ()
+    local server, port = support.listen_available(28900)
+    support.cleanup_server(context, server)
+    local source = net.connect("127.0.0.1", port)
+    support.cleanup_connection(context, source)
+    local peer = server:accept()
+    support.cleanup_connection(context, peer)
+    test.assert(source:read_ahead(), "TCP read-ahead did not default to enabled")
+    test.assert(source:read_ahead(false), "TCP read-ahead setter lost the previous policy")
+    test.assert(not source:read_ahead() and not source:read_ahead(false))
+    peer:write("prefix\nsuffix\0")
+    test.assert(source:read_until("\n", true) == "prefix")
+    common.assert_raises_contains(function () source:read_ahead(true) end,
+      "reading has started")
+    -- Move only after the read callback's native request has retired.
+    async.yield()
+    local payload = source:to_transfer_payload()
+    local target = net.Connection.from_transfer_payload(payload)
+    support.cleanup_connection(context, target)
+    test.assert(not target:read_ahead(), "TCP handoff lost demand-read policy")
+    common.assert_raises_contains(function () target:read_ahead(true) end,
+      "reading has started")
+    test.assert(target:read_until("\0", true) == "suffix", "handoff lost delimiter excess")
+    -- Consuming transferred excess must not restart an idle native reader.
+    async.yield()
+    local worker_payload = target:to_transfer_payload()
+    local worker = thread.spawn_one(function (bytes: string): string
+      local connection = net.Connection.from_transfer_payload(bytes)
+      defer connection:close()
+      test.assert(not connection:read_ahead(), "thread handoff enabled read-ahead")
+      test.assert(connection:read_until("\0", true) == "worker")
+      connection:write("reply\0")
+      return "finished"
+    end, worker_payload)
+    runtime_test.cleanup(function () worker:cancel(); worker:join() end)
+    peer:write("worker\0")
+    test.assert(peer:read_until("\0", true) == "reply", "thread handoff lost its live socket")
+    case worker:join()
+    when succeeded(result) then test.assert(result == "finished")
+    when failed(failure) then failure:raise()
+    else raise "demand-read TCP worker did not succeed"
+    end
+  end)
+end
+
+function test_net_demand_reader_cancellation_allows_replacement(context: test.Context)
+  runtime_test.run(function ()
+    local server, port = support.listen_available(29000)
+    support.cleanup_server(context, server)
+    local connection = net.connect("127.0.0.1", port)
+    support.cleanup_connection(context, connection)
+    local peer = server:accept()
+    support.cleanup_connection(context, peer)
+    connection:read_ahead(false)
+    local reader = async.run<|nil, value|>(function (): nil
+      connection:read()
+      return nil
+    end)
+    task_support.cleanup_task(reader, "demand TCP cancelled reader")
+    while reader:status():as_string() == "ready" do timer.yield() end
+    test.assert(reader:status():as_string() == "waiting")
+    reader:cancel()
+    local writer = async.run<|nil, value|>(function (): nil
+      async.join(reader)
+      peer:write("replacement\0tail")
+      peer:shutdown()
+      return nil
+    end)
+    task_support.cleanup_task(writer, "demand TCP replacement writer")
+    test.assert(connection:read_until("\0", true) == "replacement")
+    test.assert(connection:read() == "tail")
+    test.assert(connection:read() == nil, "demand TCP reader did not observe EOF")
+    test.assert(connection:read() == nil, "demand TCP reader restarted after EOF")
+    async.join(writer)
+    test.assert(reader:status():has_cancelled() and writer:status():has_succeeded())
   end)
 end

@@ -1,0 +1,60 @@
+function test_transfer_exchange_discard_closes_transport(_context: test.Context)
+  runtime_test.run(function ()
+    local send, receive, close = async.channel<|string|>()
+    defer close()
+    local listener: http.Server? = nil
+    local handler: http.Handler = function (request: http.Request, response: http.Response)
+      async.yield()
+      send(http.Exchange(request, response):to_transfer_payload())
+      listener:close()
+    end
+    local port = 0
+    listener, port = support.http_listen(46900, handler)
+    defer listener:close()
+    listener:read_ahead(false)
+    local serving = async.run<|nil, value|>(function (): nil listener:serve(); return nil end)
+    task_support.cleanup_task(serving, "discarded HTTP exchange listener")
+    local peer = net.connect("127.0.0.1", port)
+    defer peer:close()
+    peer:write("GET /discard HTTP/1.1\r\nHost: localhost\r\n\r\n")
+    local payload = receive()
+    test.assert(http.Exchange.discard_transfer_payload(payload) == 0,
+      "discard did not close the detached transport")
+    test.assert(peer:read() == nil, "discarded HTTP transport remained open")
+    async.join(serving)
+    test.assert(serving:status():has_succeeded(), "listener did not finish successfully")
+  end)
+end
+
+function test_transfer_exchange_discard_rejects_malformed_payload(_context: test.Context)
+  transfer_common.assert_raises(function () http.Exchange.discard_transfer_payload("") end)
+  transfer_common.assert_raises(function () http.Exchange.discard_transfer_payload("\255") end)
+end
+
+function test_transfer_exchange_discard_without_runtime(_context: test.Context)
+  local payload: string? = nil
+  runtime_test.run(function ()
+    local send, receive, close = async.channel<|string|>()
+    defer close()
+    local listener: http.Server? = nil
+    local handler: http.Handler = function (request: http.Request, response: http.Response)
+      async.yield()
+      send(http.Exchange(request, response):to_transfer_payload())
+      listener:close()
+    end
+    local port = 0
+    listener, port = support.http_listen(47000, handler)
+    defer listener:close()
+    listener:read_ahead(false)
+    local serving = async.run<|nil, value|>(function (): nil listener:serve(); return nil end)
+    task_support.cleanup_task(serving, "HTTP discard without Runtime listener")
+    local peer = net.connect("127.0.0.1", port)
+    defer peer:close()
+    peer:write("GET /discard HTTP/1.1\r\nHost: localhost\r\n\r\n")
+    payload = receive()
+    async.join(serving)
+    test.assert(serving:status():has_succeeded(), "listener did not finish successfully")
+  end)
+  test.assert(http.Exchange.discard_transfer_payload(payload) == 0,
+    "discard required a live Runtime")
+end

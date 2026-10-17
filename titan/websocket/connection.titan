@@ -504,3 +504,11 @@ function Connection.from_transfer_payload(payload: string): Connection
   connection.stream = http.UpgradedStream.from_transfer_payload(stream_payload)
   return connection
 end
+
+--- Dispose of an undelivered session without adopting its upgraded stream.
+-- @return Native close status; adoption or disposal consumes the payload.
+-- @usage standard-library-websocket.md#transferring-connections
+function Connection.discard_transfer_payload(payload: string): integer
+  local stream_payload: string = protobuf.deserialize_fields(payload, connection_transfer_fields)
+  return http.UpgradedStream.discard_transfer_payload(stream_payload)
+end

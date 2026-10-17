@@ -141,6 +141,23 @@ its authoritative reservation check and preserves the existing duplicate-wait
 diagnostic. Closing a server also drains and closes every unread accepted
 connection; a generic queue cannot infer that these values own sockets.
 
+## Demand-driven reads
+
+`Connection:read_ahead(enabled?)` selects the read policy before the first
+native arm. The default remains persistent prefetch. A separate first-read
+marker freezes the policy even though demand mode clears the active-watcher
+marker after each result. For nonzero callbacks, demand mode stops public UV
+reading and clears that marker before publishing bytes or terminal state. An
+empty callback keeps the existing read pending. The next public read drains
+excess and subscription results before arming another native read.
+
+Stopping before publication prevents the Windows callback from requeueing its
+read. Its existing native request count is retired after that callback returns;
+`async.yield()` places handoff beyond this callback boundary. This does not
+weaken `uv.stream_transfer_status` or cancel an already-posted persistent read.
+The transfer schema preserves both the configured policy and first-read marker.
+Reconstruction starts a saved active reader only in read-ahead mode.
+
 ## Connection transfer ownership
 
 `net.Connection` implements the synchronous custom record transfer hooks. Its

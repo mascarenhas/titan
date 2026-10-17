@@ -111,6 +111,7 @@ function listen_tls(host: string, certificate_file: string, handler: Handler,
 function Server:idle_timeout(timeout: integer?): integer
 function Server:header_limit(limit: integer?): integer
 function Server:serve()
+function Server:read_ahead(enabled: boolean?): boolean
 function Server:close()
 ```
 
@@ -537,6 +538,16 @@ the supervising Task's transport cleanup.
 
 ## Resource handoff
 
+For portable handoff after HTTP classification, call
+`listener:read_ahead(false)` before serving connections. This setting defaults
+to true; the method returns the previous value and an omitted argument only
+queries it. Changes affect newly accepted TCP/TLS connections, before their
+first header read or TLS handshake, and leave existing connections unchanged.
+Demand-driven reads avoid posting another Windows overlapped read between
+operations. Yield with `async.yield()` after the last read/write and before
+synchronous encoding so its native callback can retire. Pending application
+operations and native requests still reject handoff.
+
 A handler's `Request` and `Response` share one parser and transport. Bundle them
 with `http.Exchange(request, response)` and transfer that public record:
 
@@ -553,11 +564,17 @@ written byte counts. The pair cannot be transferred independently.
 
 In the destination's active Runtime, `packet:to_value()` returns an `Exchange`
 with public const `request` and `response` fields. Either finish the current
-exchange and call `exchange:close()`, or call `exchange:serve(handler)` to handle
-it and subsequent requests on that connection. `serve` preserves serial
-keep-alive processing and unread next-request bytes; only one serving loop may
-own the exchange. The destination supplies its own handler and owns any request
-deadline policy. `close` completes the current response and closes the transport.
+exchange and call `exchange:close()`, or call
+`exchange:serve(handler, idle_timeout: integer?)` to handle it and subsequent
+requests on that connection. `serve` preserves serial keep-alive processing and
+unread next-request bytes; only one serving loop may own the exchange. The
+optional timeout is a non-negative number of milliseconds, defaulting to zero
+for an indefinite wait. A positive timeout bounds each subsequent request-line
+and header acquisition with one absolute deadline, including partial headers.
+It does not cover the already-parsed current exchange, handlers, request bodies,
+automatic body draining, or response writes. A negative timeout is rejected
+before serving ownership changes. The originating listener's timeout is not
+inherited. `close` completes the current response and closes the transport.
 
 `Exchange` and `UpgradedStream` implement the synchronous
 `to_transfer_payload(): string` and
@@ -572,8 +589,9 @@ owner encodes a private protobuf schema containing its metadata and the known
 transport's byte payload. Failure to serialize after transport detachment closes
 the detached transport and leaves the source inactive.
 
-`UpgradedStream.discard_transfer_payload(payload: string): integer` consumes a
-known unadopted payload without a Runtime and returns its native close status.
+`Exchange.discard_transfer_payload(payload: string): integer` and
+`UpgradedStream.discard_transfer_payload(payload: string): integer` consume a
+known unadopted payload without a Runtime and return its native close status.
 A close attempt consumes the payload even on an error; do not adopt or discard
 the bytes afterward.
 

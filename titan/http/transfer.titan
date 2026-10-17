@@ -402,10 +402,24 @@ function Exchange:close()
   state.transport.connection:close()
 end
 
+--- Dispose of an undelivered exchange without adopting its parser or transport.
+-- @return Native close status; adoption or disposal consumes the payload.
+-- @usage standard-library-http.md#resource-handoff
+function Exchange.discard_transfer_payload(payload: string): integer
+  local items: {value} = {protobuf.deserialize_fields(payload, exchange_transfer_fields)}
+  local kind: integer = items[#exchange_transfer_fields - 1]
+  local transport_payload: string = items[#exchange_transfer_fields]
+  return discard_transfer_transport(kind, transport_payload)
+end
+
 --- Handle this exchange and subsequent keep-alive requests on the adopted connection.
 -- The supplied handler owns application policy in the destination state.
+-- The optional non-negative idle timeout bounds later request-header waits in
+-- milliseconds; zero (the default) waits indefinitely.
 -- @usage standard-library-http.md#resource-handoff
-function Exchange:serve(handler: Handler)
+function Exchange:serve(handler: Handler, idle_timeout: integer?)
+  local timeout = idle_timeout or 0
+  if timeout < 0 then raise "HTTP idle timeout must be non-negative" end
   local request_value = self.request
   local response = self.response
   local state = response.exchange
@@ -432,7 +446,8 @@ function Exchange:serve(handler: Handler)
     state.active = false
     if not parser.keep_alive or not response.keep_alive then return end
     parser_reset_message(parser)
-    local next_request? = read_request(parser, encrypted, transport)
+    local next_request? = read_request_with_idle_timeout(
+      parser, encrypted, transport, timeout)
     if next_request == nil then return end
     request_value = next_request
     response = new_response(transport.connection, request_value)

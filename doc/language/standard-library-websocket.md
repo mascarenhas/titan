@@ -85,6 +85,7 @@ Connection:shutdown(code: integer?, reason: string?, timeout_ms: integer?)
 Connection:close()
 Connection:to_transfer_payload(): string
 Connection.from_transfer_payload(payload: string): Connection
+Connection.discard_transfer_payload(payload: string): integer
 Connection:subprotocol(): string?
 Connection:close_status(): (integer?, string?)
 ```
@@ -131,6 +132,9 @@ also satisfy the [TCP](standard-library-net.md#transferring-connections) and,
 for `wss`, [TLS](standard-library-ssl.md#transferring-connections) idle rules.
 The persistent Windows overlapped read normally makes an established session
 ineligible even between application operations; rejection leaves it usable.
+A server session inherits demand-driven reading when its HTTP listener selected
+`read_ahead(false)` before accepting it. Yield after its last completed I/O
+before encoding; all WebSocket and native operation guards still apply.
 
 Successful encoding closes the source facade before delivery without sending
 a WebSocket Close frame. The destination continues the existing protocol
@@ -139,6 +143,11 @@ delivery. Replaying it can double close or access freed resources; dropping it
 leaks the detached transport. No automatic replay protection, finalizer or
 delivery rollback is provided. The representation is not suitable for storage
 or another process.
+
+`Connection.discard_transfer_payload(payload: string): integer` consumes an
+unadopted session payload without a Runtime by discarding its HTTP child
+transport. It returns the native close status. A close attempt consumes the
+payload even on an error; never adopt or discard the bytes again.
 
 ## Reader duty, closing and cancellation
 

@@ -32,6 +32,7 @@ function listen(host: string, port: integer,
                 backlog: integer?, reuse_port: boolean?): Server
 
 function Connection:read(): string?
+function Connection:read_ahead(enabled: boolean?): boolean
 function Connection:has_pending_input(): boolean
 function Connection:add_input_listener(listener: function (): ()): function (): ()
 function Connection:read_until(delimiter: string,
@@ -120,6 +121,11 @@ stopped for handoff only when it has no pending native read request. In
 particular, an established Windows connection commonly has an overlapped read
 pending even while no Task is reading, so that state raises `EBUSY` without
 detaching. A fresh connection whose lazy read watcher has not started can move.
+For later handoff, call `connection:read_ahead(false)` before the first native
+read. This demand-driven mode stops the watcher before delivering each chunk,
+so Windows does not post another overlapped read while the consumer is idle.
+Call `async.yield()` after the last read or write before synchronous encoding
+to let its native callback retire. The pending-operation gate still applies.
 Rejected admission leaves the source connection usable.
 
 On Windows, the Task that called `connect` can resume before its native connect
@@ -152,6 +158,17 @@ A Connection starts its libuv read watcher lazily on the first `read` or
 when no Task is waiting. The retained application buffer has no size limit, so
 a peer that produces data faster than the program drains it can make memory
 use grow.
+
+`read_ahead(enabled?)` returns the previous setting, which defaults to true.
+Omitting the argument queries it. Changing the setting is allowed only before
+the first native read starts; later setter calls raise. With
+false, one positive or terminal callback stops the watcher before publishing
+its result, and a later read rearms it only after buffered input is exhausted.
+An empty callback keeps waiting. Delimiter excess, EOF and cancellation retain
+the ordinary read contract. Transfer preserves this setting, and demand-driven
+connections remain stopped in the destination until another read needs input.
+This mode changes prefetch policy; it does not limit the kernel socket buffer
+or impose message boundaries.
 
 `read()` returns the facade's retained delimiter excess first. Otherwise it
 returns the oldest native chunk already buffered, or waits for the next
