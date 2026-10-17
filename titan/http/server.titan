@@ -459,9 +459,8 @@ local function await_terminal_cleanup<|A, B|>(task: async.Task<|A, B|>)
 end
 
 local function read_request_with_idle_timeout(
-    parser: Parser, server: Server, transport: Transport): Request?
-  local encrypted = server.encrypted
-  local timeout = server.idle_timeout_ms
+    parser: Parser, encrypted: boolean, transport: Transport,
+    timeout: integer): Request?
   if timeout == 0 then return read_request(parser, encrypted, transport) end
 
   local cleanup_reason = async.CancellationReason<|value|>.simple(
@@ -516,7 +515,8 @@ local function serve_connection(transport: Transport,
     -- Snapshot the current setting for this request-header acquisition.
     -- Setter calls affect the next loop iteration, never an in-flight read.
     parser.header_limit = server.header_limit_bytes
-    local request? = read_request_with_idle_timeout(parser, server, transport)
+    local request? = read_request_with_idle_timeout(
+      parser, server.encrypted, transport, server.idle_timeout_ms)
     if not request then return end
     local request_value = request as Request
     exchange = request_value.exchange

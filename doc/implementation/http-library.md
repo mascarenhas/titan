@@ -454,8 +454,11 @@ connection-Task return; a client awaiting its first or final response maps the
 same outcome back to an incomplete-message error.
 
 At the start of each serial request iteration, the connection Task snapshots
-the Server's `idle_timeout_ms`. Zero reads directly. A positive value starts a
-header-reader Task and timer Task and uses `async.race_two`. Reader success
+the Server's `idle_timeout_ms`. The shared header-acquisition helper takes the
+encryption mode and timeout as explicit values, preserving this per-request
+snapshot when called by either serving loop. Zero reads directly. A positive
+value starts a header-reader Task and timer Task and uses `async.race_two`.
+Reader success
 requests cancellation of the timer-only deadline. Its unconditional cancellation
 defer remains installed for every exit; cancellation is idempotent. The timer's
 native close can finish in the background because it owns no parser or
@@ -523,8 +526,14 @@ bytes. If that final encoding raises, a lexical guard discards the detached
 transport; the source stays inactive. The original server's defer therefore
 cannot close an adopted transport. `Exchange:serve` follows the same serial request/framing loop with a
 destination-supplied handler; subsequent transfers/upgrades retain the same
-ownership guard. A single-exchange consumer uses `Exchange:close` to finish its
-response and retire the transport.
+ownership guard. Its optional non-negative `idle_timeout` defaults to zero and
+uses the shared header-acquisition helper only after the current handler,
+response closing, body draining, and keep-alive reset. The current exchange was
+already parsed before adoption; its handler and response are never covered by
+this deadline. Each later header wait gets the supplied absolute deadline,
+independent of the originating Server. Negative values are rejected before any
+serving ownership changes. A single-exchange consumer uses `Exchange:close`
+to finish its response and retire the transport.
 
 The pinned llhttp state is copied as process-local bytes. Its `_current` is an
 integer state selector represented as a pointer; `_span_cb0` names immutable

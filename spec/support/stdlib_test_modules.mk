@@ -126,6 +126,7 @@ TITAN_TEST_SOURCES_http.tests := spec/stdlib/titan/http/tests/tests.titan \
 	spec/stdlib/titan/http/tests/timeout_tls_behavior.titan \
 	spec/stdlib/titan/http/tests/upgrade_behavior.titan \
 	spec/stdlib/titan/http/tests/transfer_test.titan \
+	spec/stdlib/titan/http/tests/transfer_timeout_test.titan \
 	spec/stdlib/titan/http/tests/discard_transfer_test.titan
 TITAN_TEST_IMPORTS_http.tests := http.test_support support.async support.command support.common support.runtime
 
