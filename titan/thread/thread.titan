@@ -1,0 +1,503 @@
+--- OS threads with isolated Lua/Titan states, bounded MPMC channels, and thread groups.
+-- @module titan.thread
+-- @usage standard-library-thread.md
+
+foreign import "lua.h"
+foreign import "lauxlib.h"
+foreign import "titan/ffi.h"
+foreign import "unistd.h"
+foreign import "errno.h"
+foreign import "stdint.h"
+foreign import "stdlib.h"
+foreign import "string.h"
+foreign import "native.h"
+local async = import "async"
+local gc = import "gc"
+local lua = import "lua"
+local string = import "string"
+local transfer = import "transfer"
+local uv = import "uv"
+
+--- Caught error value and stack traceback captured from a failed thread.
+-- @field error Reconstructed error value (or its rendered string when the original value is not transferable).
+-- @field traceback Formatted stack traceback from the child thread.
+-- @usage standard-library-thread.md
+record Error
+  const error: value
+  const traceback: string
+end
+
+--- Rethrow the thread's original error value with its preserved traceback.
+-- @usage standard-library-thread.md
+function Error:raise()
+  local top = ffi.lua_gettop(L)
+  defer ffi.lua_settop(L, top)
+  if ffi.lua_checkstack(L, 2) == 0 then raise "cannot reserve error handoff" end
+  ffi.lua_pushtvalue(L, self.traceback)
+  ffi.lua_setfield(L, ffi.LUA_REGISTRYINDEX, ffi.TITAN_BACKTRACE_KEY)
+  ffi.lua_pushboolean(L, 1)
+  ffi.lua_setfield(L, ffi.LUA_REGISTRYINDEX, ffi.TITAN_TRACE_PINNED)
+  raise self.error
+end
+
+--- Lifecycle state of a spawned thread.
+-- @usage standard-library-thread.md
+union ThreadStatus<|R|>
+  running()
+  succeeded(R)
+  failed(Error)
+  cancelled(async.CancellationReason<|value|>)
+end
+
+--- Return the lowercase name of this thread status variant.
+-- @return Variant tag name ("running", "succeeded", "failed", or "cancelled").
+-- @usage standard-library-thread.md
+function ThreadStatus:as_string(): string
+  case self
+  when running() then return "running"
+  when succeeded(_) then return "succeeded"
+  when failed(_) then return "failed"
+  when cancelled(_) then return "cancelled"
+  end
+end
+
+--- Report whether the thread has reached a terminal state.
+-- @return True for succeeded, failed, or cancelled; false while running.
+-- @usage standard-library-thread.md
+function ThreadStatus:has_finished(): boolean
+  case self
+  when running() then return false
+  else return true
+  end
+end
+
+--- Report whether the thread completed normally and project its return value.
+-- @return True and the return value when succeeded; false and nil otherwise.
+-- @usage standard-library-thread.md
+function ThreadStatus:has_succeeded(): (boolean, R?)
+  case self
+  when succeeded(result) then return true, result
+  else return false, nil
+  end
+end
+
+--- Report whether the thread failed with an uncaught error and project its Error.
+-- @return True and the Error when failed; false and nil otherwise.
+-- @usage standard-library-thread.md
+function ThreadStatus:has_failed(): (boolean, Error?)
+  case self
+  when failed(err) then return true, err
+  else return false, nil
+  end
+end
+
+--- Report whether the thread terminated due to cancellation and project its reason.
+-- @return True and the CancellationReason when cancelled; false and nil otherwise.
+-- @usage standard-library-thread.md
+function ThreadStatus:has_cancelled(): (boolean, async.CancellationReason<|value|>?)
+  case self
+  when cancelled(reason) then return true, reason
+  else return false, nil
+  end
+end
+
+local foreign function waiter_wake_one(q: *titan_thread_waiter_queue)
+  local waiter = q.head
+  if waiter == nil then return end
+  q.head = waiter.next
+  if q.head ~= nil then
+    q.head.prev = nil
+  else
+    q.tail = nil
+  end
+  waiter.next = nil
+  waiter.prev = nil
+  waiter.active = 0
+  waiter.signaled = 1
+  if waiter.async_handle ~= nil then
+    uv.async_send_native(waiter.async_handle)
+  end
+end
+
+local foreign function waiter_wake_all(q: *titan_thread_waiter_queue)
+  while q.head ~= nil do
+    waiter_wake_one(q)
+  end
+end
+
+local function waiter_enqueue(
+    q: foreign *titan_thread_waiter_queue,
+    waiter: foreign *titan_thread_waiter,
+    async_handle: foreign *void)
+  waiter.async_handle = async_handle
+  waiter.next = nil
+  waiter.prev = q.tail
+  if q.tail ~= nil then
+    q.tail.next = waiter
+  else
+    q.head = waiter
+  end
+  q.tail = waiter
+  waiter.active = 1
+  waiter.signaled = 0
+end
+
+local function waiter_unlink(
+    q: foreign *titan_thread_waiter_queue,
+    waiter: foreign *titan_thread_waiter)
+  if waiter.active == 0 then return end
+  if waiter.prev ~= nil then
+    waiter.prev.next = waiter.next
+  else
+    q.head = waiter.next
+  end
+  if waiter.next ~= nil then
+    waiter.next.prev = waiter.prev
+  else
+    q.tail = waiter.prev
+  end
+  waiter.next = nil
+  waiter.prev = nil
+  waiter.active = 0
+end
+
+local foreign function thread_message_free(message: *titan_thread_message)
+  if message == nil then return end
+  ffi.free(message)
+end
+
+local foreign function clear_ring_messages(ch: *titan_thread_channel)
+  if ch.ring == nil then return end
+  while ch.count > (0 as foreign size_t) do
+    local slot = ch.ring + ch.head
+    local msg = slot[0]
+    slot[0] = nil
+    ch.head = (ch.head + (1 as foreign size_t)) % ch.capacity
+    ch.count = ch.count - (1 as foreign size_t)
+    if msg ~= nil then
+      ffi.free(msg)
+    end
+  end
+  ch.head = 0 as foreign size_t
+  ch.tail = 0 as foreign size_t
+end
+
+local foreign function channel_destroy_unreferenced(ch: *titan_thread_channel)
+  clear_ring_messages(ch)
+  if ch.ring ~= nil then
+    ffi.free(ch.ring)
+    ch.ring = nil
+  end
+  if ch.mutex ~= nil then
+    uv.native_mutex_destroy(ch.mutex)
+    ch.mutex = nil
+  end
+  ffi.free(ch)
+end
+
+local endpoint_transfer_depth: integer = 0
+local endpoint_transfer_discarding: boolean = false
+local pending_retained_senders: {integer} = {}
+local pending_retained_receivers: {integer} = {}
+
+local function thread_message_to_value(message: foreign *titan_thread_message): value
+  endpoint_transfer_depth = endpoint_transfer_depth + 1
+  defer endpoint_transfer_depth = endpoint_transfer_depth - 1
+  return transfer.decode_message(message as foreign *void)
+end
+
+local function thread_message_discard(message: foreign *titan_thread_message)
+  if message == nil then return end
+  local kind = message.kind
+  if kind == ffi.TITAN_ASYNC_MESSAGE_RECORD_PAYLOAD or
+     kind == ffi.TITAN_ASYNC_MESSAGE_RECORD or
+     kind == ffi.TITAN_ASYNC_MESSAGE_UNION or
+     kind == ffi.TITAN_ASYNC_MESSAGE_CLOSURE then
+    local prev_discarding = endpoint_transfer_discarding
+    endpoint_transfer_discarding = true
+    defer endpoint_transfer_discarding = prev_discarding
+    endpoint_transfer_depth = endpoint_transfer_depth + 1
+    defer endpoint_transfer_depth = endpoint_transfer_depth - 1
+    do
+      transfer.decode_message(message as foreign *void)
+    catch
+    end
+  else
+    ffi.free(message)
+  end
+end
+
+local function channel_drain_and_discard(ch: foreign *titan_thread_channel)
+  if ch == nil then return end
+  while true do
+    uv.native_mutex_lock(ch.mutex)
+    local msg: foreign *titan_thread_message = nil
+    if ch.ring ~= nil and ch.count > (0 as foreign size_t) then
+      local slot = ch.ring + ch.head
+      msg = slot[0]
+      slot[0] = nil
+      ch.head = (ch.head + (1 as foreign size_t)) % ch.capacity
+      ch.count = ch.count - (1 as foreign size_t)
+    else
+      ch.head = 0 as foreign size_t
+      ch.tail = 0 as foreign size_t
+      uv.native_mutex_unlock(ch.mutex)
+      return
+    end
+    uv.native_mutex_unlock(ch.mutex)
+    if msg ~= nil then
+      thread_message_discard(msg)
+    end
+  end
+end
+
+local function channel_retain_sender_native(ch: foreign *titan_thread_channel)
+  if ch == nil then return end
+  uv.native_mutex_lock(ch.mutex)
+  ch.active_senders = ch.active_senders + (1 as foreign size_t)
+  uv.native_mutex_unlock(ch.mutex)
+end
+
+local function channel_retain_receiver_native(ch: foreign *titan_thread_channel)
+  if ch == nil then return end
+  uv.native_mutex_lock(ch.mutex)
+  ch.active_receivers = ch.active_receivers + (1 as foreign size_t)
+  uv.native_mutex_unlock(ch.mutex)
+end
+
+local function channel_release_sender_native(ch: foreign *titan_thread_channel)
+  if ch == nil then return end
+  uv.native_mutex_lock(ch.mutex)
+  if ch.active_senders > (0 as foreign size_t) then
+    ch.active_senders = ch.active_senders - (1 as foreign size_t)
+    if ch.active_senders == (0 as foreign size_t) then
+      if ch.closed == 0 then
+        ch.closed = 1
+        waiter_wake_all(ffi.titan_thread_overflow_queue(ch))
+        waiter_wake_all(ffi.titan_thread_underflow_queue(ch))
+      end
+    end
+  end
+  local destroy = 0 as foreign int
+  if ch.active_senders == (0 as foreign size_t) then
+    if ch.active_receivers == (0 as foreign size_t) then
+      destroy = 1
+    end
+  end
+  uv.native_mutex_unlock(ch.mutex)
+  if destroy ~= 0 then
+    channel_destroy_unreferenced(ch)
+  end
+end
+
+local function channel_release_receiver_native(ch: foreign *titan_thread_channel)
+  if ch == nil then return end
+  uv.native_mutex_lock(ch.mutex)
+  if ch.active_receivers == (0 as foreign size_t) then
+    uv.native_mutex_unlock(ch.mutex)
+    return
+  end
+  if ch.active_receivers > (1 as foreign size_t) then
+    ch.active_receivers = ch.active_receivers - (1 as foreign size_t)
+    uv.native_mutex_unlock(ch.mutex)
+    return
+  end
+  ch.closed = 2
+  waiter_wake_all(ffi.titan_thread_overflow_queue(ch))
+  waiter_wake_all(ffi.titan_thread_underflow_queue(ch))
+  uv.native_mutex_unlock(ch.mutex)
+  channel_drain_and_discard(ch)
+  uv.native_mutex_lock(ch.mutex)
+  ch.active_receivers = ch.active_receivers - (1 as foreign size_t)
+  local destroy = 0 as foreign int
+  if ch.active_senders == (0 as foreign size_t) then
+    if ch.active_receivers == (0 as foreign size_t) then
+      destroy = 1
+    end
+  end
+  uv.native_mutex_unlock(ch.mutex)
+  if destroy ~= 0 then
+    channel_destroy_unreferenced(ch)
+  end
+end
+
+local function channel_close_sender_native(ch: foreign *titan_thread_channel)
+  if ch == nil then return end
+  uv.native_mutex_lock(ch.mutex)
+  if ch.closed == 0 then
+    ch.closed = 1
+    waiter_wake_all(ffi.titan_thread_overflow_queue(ch))
+    waiter_wake_all(ffi.titan_thread_underflow_queue(ch))
+  end
+  uv.native_mutex_unlock(ch.mutex)
+end
+
+local function channel_close_receiver_native(ch: foreign *titan_thread_channel)
+  if ch == nil then return end
+  uv.native_mutex_lock(ch.mutex)
+  ch.closed = 2
+  waiter_wake_all(ffi.titan_thread_overflow_queue(ch))
+  waiter_wake_all(ffi.titan_thread_underflow_queue(ch))
+  uv.native_mutex_unlock(ch.mutex)
+  channel_drain_and_discard(ch)
+end
+
+local function channel_is_closed_native(ch: foreign *titan_thread_channel): integer
+  if ch == nil then return 1 end
+  uv.native_mutex_lock(ch.mutex)
+  local closed = 0
+  if ch.closed ~= 0 then
+    closed = 1
+  end
+  uv.native_mutex_unlock(ch.mutex)
+  return closed
+end
+
+local function value_to_thread_message(item: value): foreign *titan_thread_message
+  local saved_tx = #pending_retained_senders
+  local saved_rx = #pending_retained_receivers
+  endpoint_transfer_depth = endpoint_transfer_depth + 1
+  defer endpoint_transfer_depth = endpoint_transfer_depth - 1
+  local raw: foreign *void = nil
+  do
+    raw = transfer.encode_message(item)
+  catch
+    for i = #pending_retained_senders, saved_tx + 1, -1 do
+      local ch = ffi.titan_thread_bits_pointer(pending_retained_senders[i])
+        as foreign *titan_thread_channel
+      pending_retained_senders[i] = nil
+      channel_release_sender_native(ch)
+    end
+    for i = #pending_retained_receivers, saved_rx + 1, -1 do
+      local ch = ffi.titan_thread_bits_pointer(pending_retained_receivers[i])
+        as foreign *titan_thread_channel
+      pending_retained_receivers[i] = nil
+      channel_release_receiver_native(ch)
+    end
+    raise
+  end
+  for i = #pending_retained_senders, saved_tx + 1, -1 do
+    pending_retained_senders[i] = nil
+  end
+  for i = #pending_retained_receivers, saved_rx + 1, -1 do
+    pending_retained_receivers[i] = nil
+  end
+  return raw as foreign *titan_thread_message
+end
+
+local function copy_native_bytes(bytes: foreign const *char, length: foreign size_t): string
+  if length == 0 then return "" end
+  local top = ffi.lua_gettop(L)
+  if ffi.lua_checkstack(L, 1) == 0 then
+    raise "cannot reserve Lua stack for thread message bytes"
+  end
+  ffi.lua_pushlstring(L, bytes, length)
+  local result: value = ffi.lua_totvalue(L, -1)
+  ffi.lua_settop(L, top)
+  return result as string
+end
+
+local foreign function write_stderr_bytes(bytes: const *char, length: size_t)
+  if bytes == nil then return end
+  if length == (0 as foreign size_t) then return end
+  local offset = 0 as foreign size_t
+  while offset < length do
+    local chunk = length - offset
+    if chunk > (65536 as foreign size_t) then
+      chunk = 65536 as foreign size_t
+    end
+    local written = ffi.write(
+      2 as foreign int,
+      bytes + offset,
+      chunk as foreign titan_thread_write_count)
+    if written < 0 then
+      if ffi.errno == ffi.EINTR then
+        -- Retry interrupted write.
+      else
+        return
+      end
+    elseif written == 0 then
+      return
+    else
+      offset = offset + (written as foreign size_t)
+    end
+  end
+end
+
+local function render_error_text(err: value): string
+  local text = "<error while rendering thread failure>"
+  do
+    local top = ffi.lua_gettop(L)
+    defer ffi.lua_settop(L, top)
+    if err is async.OperationError then
+      local failure = err as async.OperationError
+      text = failure.operation .. ": " .. failure.name ..
+             " (" .. failure.code .. "): " .. failure.message
+    else
+      if ffi.lua_checkstack(L, 2) == 0 then
+        raise "cannot reserve Lua stack for thread error rendering"
+      end
+      ffi.lua_pushtvalue(L, err)
+      local rendered = ffi.luaL_tolstring(L, -1, nil)
+      if rendered then
+        text = rendered as string
+      else
+        text = "<unprintable error>"
+      end
+    end
+  catch
+  end
+  return text
+end
+
+local function format_thread_stderr(err: value, trace: string): string
+  local text = "uncaught error in thread: " .. render_error_text(err) .. "\n"
+  if #trace > 0 then
+    text = text .. "stack traceback:\n" .. trace .. "\n"
+  end
+  return text
+end
+
+local function wait_on_native_waiter(
+    register_fn: function (foreign *void): boolean,
+    unregister_fn: function (): ())
+  local task = async.running()
+  async.checkpoint()
+  local loop = async.current_loop()
+  local handle = uv.async_t.new()
+  local handle_view = handle:as_handle_t()
+  local token = async.ResumeToken("thread.wait")
+  local finished = false
+  local registered = false
+  local resumed_normally = false
+  local callback = function (_: uv.async_t)
+    if not finished then
+      task:resume(token)
+    end
+  end
+  local status = uv.async_init(loop, handle, callback)
+  if status < 0 then
+    raise async.OperationError(status, uv.err_name(status), uv.strerror(status), "thread.wait")
+  end
+  local finish_wait = function ()
+    if finished then return end
+    finished = true
+    if registered and not resumed_normally then
+      unregister_fn()
+    end
+    if not uv.is_closing(handle_view) then
+      uv.close(handle_view)
+    end
+  end
+  defer finish_wait()
+  registered = register_fn(handle:borrow())
+  if not registered then
+    return
+  end
+  async.suspend(token, finish_wait)
+  resumed_normally = true
+end
+
+do
+  register_thread_bootstrap()
+end

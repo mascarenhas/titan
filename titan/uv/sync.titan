@@ -1,6 +1,7 @@
 -- Candidate only: ordinary calls belong to the owning Lua thread.
 -- Borrowed C helpers operate solely on native storage; retain each owner
 -- through all worker uses and join before destroy/delete. No finalizers.
+foreign import "stdlib.h"
 foreign import "sync_storage.h"
 
 local const SYNC_FRESH = 0
@@ -10,7 +11,7 @@ local const SYNC_RETIRED = 2
 --- Owned native mutex storage with explicit initialization and destruction.
 -- @usage uv/types.md#mutex_t
 record mutex_t
-    local const storage: foreign titan_issue194_mutex_storage
+    local const storage: foreign titan_uv_mutex_storage
     local state: integer
 end
 
@@ -18,7 +19,7 @@ end
 -- @return Native mutex_t result with the documented lifetime and units.
 -- @usage uv/supplemental.md#mutex_tnew
 function mutex_t.new(): mutex_t
-    local storage = foreign titan_issue194_mutex_storage.new()
+    local storage = foreign titan_uv_mutex_storage.new()
     return { storage = storage, state = SYNC_FRESH }
 end
 
@@ -73,7 +74,10 @@ function mutex_t:lock()
     ffi.uv_mutex_lock(self.storage as foreign *uv_mutex_t)
 end
 
-local foreign function native_mutex_lock(native: *void): void
+--- Lock a borrowed or process-heap native mutex pointer directly from C or Titan.
+-- @param native Borrowed or process-heap `uv_mutex_t *` pointer.
+-- @usage uv/supplemental.md#native_mutex_lock
+foreign function native_mutex_lock(native: *void): void
     ffi.uv_mutex_lock(native as foreign *uv_mutex_t)
 end
 
@@ -110,7 +114,10 @@ function mutex_t:unlock()
     ffi.uv_mutex_unlock(self.storage as foreign *uv_mutex_t)
 end
 
-local foreign function native_mutex_unlock(native: *void): void
+--- Unlock a borrowed or process-heap native mutex pointer directly from C or Titan.
+-- @param native Borrowed or process-heap `uv_mutex_t *` pointer.
+-- @usage uv/supplemental.md#native_mutex_unlock
+foreign function native_mutex_unlock(native: *void): void
     ffi.uv_mutex_unlock(native as foreign *uv_mutex_t)
 end
 
@@ -121,10 +128,33 @@ function mutex_t.unlock_function(): foreign function(*void): void
     return native_mutex_unlock
 end
 
+--- Allocate and initialize a process-heap mutex not owned by any state's GC.
+-- @return Native foreign *void result with the documented lifetime and units.
+-- @usage uv/supplemental.md#mutex_tcreate_native
+function mutex_t.create_native(): foreign *void
+    local mutex = ffi.malloc(foreign titan_uv_mutex_storage.sizeof)
+    if mutex == nil then return nil end
+    if ffi.uv_mutex_init(mutex as foreign *uv_mutex_t) ~= 0 then
+        ffi.free(mutex)
+        return nil
+    end
+    return mutex
+end
+
+--- Destroy and free a process-heap mutex created with `mutex_t.create_native`.
+-- @param native Process-heap mutex pointer, or NULL.
+-- @usage uv/supplemental.md#native_mutex_destroy
+foreign function native_mutex_destroy(native: *void): void
+    if native ~= nil then
+        ffi.uv_mutex_destroy(native as foreign *uv_mutex_t)
+        ffi.free(native)
+    end
+end
+
 --- Owned native rwlock storage with explicit initialization and destruction.
 -- @usage uv/types.md#rwlock_t
 record rwlock_t
-    local const storage: foreign titan_issue194_rwlock_storage
+    local const storage: foreign titan_uv_rwlock_storage
     local state: integer
 end
 
@@ -132,7 +162,7 @@ end
 -- @return Native rwlock_t result with the documented lifetime and units.
 -- @usage uv/supplemental.md#rwlock_tnew
 function rwlock_t.new(): rwlock_t
-    local storage = foreign titan_issue194_rwlock_storage.new()
+    local storage = foreign titan_uv_rwlock_storage.new()
     return { storage = storage, state = SYNC_FRESH }
 end
 
@@ -283,7 +313,7 @@ end
 --- Owned native sem storage with explicit initialization and destruction.
 -- @usage uv/types.md#sem_t
 record sem_t
-    local const storage: foreign titan_issue194_sem_storage
+    local const storage: foreign titan_uv_sem_storage
     local state: integer
 end
 
@@ -291,7 +321,7 @@ end
 -- @return Native sem_t result with the documented lifetime and units.
 -- @usage uv/supplemental.md#sem_tnew
 function sem_t.new(): sem_t
-    local storage = foreign titan_issue194_sem_storage.new()
+    local storage = foreign titan_uv_sem_storage.new()
     return { storage = storage, state = SYNC_FRESH }
 end
 
@@ -388,7 +418,7 @@ end
 --- Owned native cond storage with explicit initialization and destruction.
 -- @usage uv/types.md#cond_t
 record cond_t
-    local const storage: foreign titan_issue194_cond_storage
+    local const storage: foreign titan_uv_cond_storage
     local state: integer
 end
 
@@ -396,7 +426,7 @@ end
 -- @return Native cond_t result with the documented lifetime and units.
 -- @usage uv/supplemental.md#cond_tnew
 function cond_t.new(): cond_t
-    local storage = foreign titan_issue194_cond_storage.new()
+    local storage = foreign titan_uv_cond_storage.new()
     return { storage = storage, state = SYNC_FRESH }
 end
 
@@ -473,7 +503,7 @@ end
 --- Owned native barrier storage with explicit initialization and destruction.
 -- @usage uv/types.md#barrier_t
 record barrier_t
-    local const storage: foreign titan_issue194_barrier_storage
+    local const storage: foreign titan_uv_barrier_storage
     local state: integer
 end
 
@@ -481,7 +511,7 @@ end
 -- @return Native barrier_t result with the documented lifetime and units.
 -- @usage uv/supplemental.md#barrier_tnew
 function barrier_t.new(): barrier_t
-    local storage = foreign titan_issue194_barrier_storage.new()
+    local storage = foreign titan_uv_barrier_storage.new()
     return { storage = storage, state = SYNC_FRESH }
 end
 
@@ -542,7 +572,7 @@ end
 --- Owned native key storage with explicit initialization and destruction.
 -- @usage uv/types.md#key_t
 record key_t
-    local const storage: foreign titan_issue194_key_storage
+    local const storage: foreign titan_uv_key_storage
     local state: integer
 end
 
@@ -550,7 +580,7 @@ end
 -- @return Native key_t result with the documented lifetime and units.
 -- @usage uv/supplemental.md#key_tnew
 function key_t.new(): key_t
-    local storage = foreign titan_issue194_key_storage.new()
+    local storage = foreign titan_uv_key_storage.new()
     return { storage = storage, state = SYNC_FRESH }
 end
 
@@ -922,16 +952,16 @@ end
 --- Native once-initialization storage retaining its explicit guard owner.
 -- @usage uv/types.md#once_t
 record once_t
-    local const storage: foreign titan_issue194_once_storage
+    local const storage: foreign titan_uv_once_storage
 end
 
 --- Allocate stable native once storage with its initial once state.
 -- @return Native once_t result with the documented lifetime and units.
 -- @usage uv/supplemental.md#once_tnew
 function once_t.new(): once_t
-    local storage = foreign titan_issue194_once_storage.new()
+    local storage = foreign titan_uv_once_storage.new()
     local owner: once_t = { storage = storage }
-    ffi.titan_issue194_once_init(owner.storage)
+    ffi.titan_uv_once_init(owner.storage)
     return owner
 end
 

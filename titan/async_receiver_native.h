@@ -2,6 +2,9 @@
 #define TITAN_ASYNC_RECEIVER_NATIVE_H
 
 #include <stddef.h>
+#include <stdint.h>
+#include <stdlib.h>
+#include <string.h>
 #include "lua.h"
 #include "titan/ffi.h"
 
@@ -45,6 +48,46 @@ typedef struct titan_async_receiver {
   titan_async_message *message;
   int closed;
 } titan_async_receiver;
+
+static inline titan_async_message *titan_async_copy_message(
+    const titan_async_message *input) {
+  size_t length = 0;
+  size_t name_length = 0;
+  size_t module_length = 0;
+  if (input->kind == TITAN_ASYNC_MESSAGE_STRING) {
+    length = input->length;
+  } else if (input->kind == TITAN_ASYNC_MESSAGE_RECORD ||
+             input->kind == TITAN_ASYNC_MESSAGE_UNION ||
+             input->kind == TITAN_ASYNC_MESSAGE_CLOSURE ||
+             input->kind == TITAN_ASYNC_MESSAGE_RECORD_PAYLOAD) {
+    length = input->length;
+    name_length = input->name_length;
+    module_length = input->module_length;
+  }
+  if (length > SIZE_MAX - sizeof(titan_async_message)) return NULL;
+  if (name_length > SIZE_MAX - sizeof(titan_async_message) - length) return NULL;
+  if (module_length > SIZE_MAX - sizeof(titan_async_message) - length - name_length) {
+    return NULL;
+  }
+  titan_async_message *message = (titan_async_message *)malloc(
+      sizeof(titan_async_message) + length + name_length + module_length);
+  if (message == NULL) return NULL;
+  *message = *input;
+  char *bytes = (char *)(message + 1);
+  message->bytes = bytes;
+  if (length > 0) {
+    memcpy(bytes, input->bytes, length);
+  }
+  message->name = bytes + length;
+  if (name_length > 0) {
+    memcpy(bytes + length, input->name, name_length);
+  }
+  message->module = bytes + length + name_length;
+  if (module_length > 0) {
+    memcpy(bytes + length + name_length, input->module, module_length);
+  }
+  return message;
+}
 
 /* Titan's FFI cannot spell the compiler's generic atomic builtin. The supported
  * GCC/Clang toolchains provide this exchange on a naturally aligned pointer.

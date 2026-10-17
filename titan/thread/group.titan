@@ -1,0 +1,273 @@
+--- Structured thread groups with optional concurrency limits and error propagation.
+-- @module titan.thread
+
+local record GroupWaiter
+  const task: async.Task<|value, value|>
+  const token: async.ResumeToken
+  active: boolean
+  granted: boolean
+end
+
+--- Coordinates a dynamic collection of spawned threads with optional concurrency limit and error propagation.
+-- @usage standard-library-thread.md
+record Group
+  local const limit: integer?
+  local const propagate_errors: boolean
+  local running_count: integer
+  local const active_threads: {Thread<|nil|>}
+  local const errors: {Error}
+  local const admission_waiters: {GroupWaiter}
+  local admission_head: integer
+  local const completion_waiters: {GroupWaiter}
+  local abort_reason: async.CancellationReason<|value|>?
+end
+
+--- Create a structured thread group.
+-- @param limit Optional maximum number of concurrently running threads in the group.
+-- @param propagate_errors When true, the first uncaught thread error cancels remaining threads and prevents new spawns.
+-- @return New Group instance.
+-- @usage standard-library-thread.md
+function group(limit: integer?, propagate_errors: boolean?): Group
+  if limit ~= nil and (limit as integer) < 1 then
+    raise "group limit must be positive"
+  end
+  return Group {
+    limit = limit,
+    propagate_errors = propagate_errors == true,
+    running_count = 0,
+    active_threads = {},
+    errors = {},
+    admission_waiters = {},
+    admission_head = 1,
+    completion_waiters = {},
+    abort_reason = nil
+  }
+end
+
+local function Group:wake_completion_waiters()
+  if self.running_count > 0 then
+    return
+  end
+  local waiters = self.completion_waiters
+  for index = 1, #waiters do
+    local w = waiters[index]
+    if w.active then
+      w.active = false
+      w.task:resume(w.token)
+    end
+  end
+  for index = #waiters, 1, -1 do
+    waiters[index] = nil
+  end
+end
+
+local function Group:clear_admissions()
+  local admissions = self.admission_waiters
+  for index = #admissions, 1, -1 do
+    admissions[index] = nil
+  end
+  self.admission_head = 1
+end
+
+local function Group:release_slot()
+  local admissions = self.admission_waiters
+  if self.abort_reason == nil then
+    while self.admission_head <= #admissions do
+      local index = self.admission_head
+      self.admission_head = index + 1
+      local w = admissions[index]
+      if w.active then
+        w.active = false
+        w.granted = true
+        if self.admission_head > #admissions then
+          self:clear_admissions()
+        end
+        w.task:resume(w.token)
+        return
+      end
+    end
+  end
+  self:clear_admissions()
+  self.running_count = self.running_count - 1
+  self:wake_completion_waiters()
+end
+
+local function Group:trigger_abort(reason: async.CancellationReason<|value|>)
+  if self.abort_reason == nil then
+    self.abort_reason = reason
+  end
+  local admissions = self.admission_waiters
+  for index = self.admission_head, #admissions do
+    local w = admissions[index]
+    if w.active then
+      w.active = false
+      w.task:resume(w.token)
+    end
+  end
+  self:clear_admissions()
+  for index = 1, #self.active_threads do
+    self.active_threads[index]:cancel(self.abort_reason)
+  end
+end
+
+local function Group:acquire_slot(): boolean
+  if self.abort_reason ~= nil then
+    return false
+  end
+  local lim? = self.limit
+  if lim == nil or self.running_count < lim then
+    self.running_count = self.running_count + 1
+    return true
+  end
+  local task = async.running()
+  async.checkpoint()
+  local token = async.ResumeToken("thread.Group.spawn")
+  local waiter = GroupWaiter {
+    task = task,
+    token = token,
+    active = true,
+    granted = false
+  }
+  self.admission_waiters[#self.admission_waiters + 1] = waiter
+  local cancel_action = function ()
+    if waiter.active then
+      waiter.active = false
+    elseif waiter.granted then
+      waiter.granted = false
+      self:release_slot()
+    end
+  end
+  async.suspend(token, cancel_action)
+  if waiter.granted then
+    if self.abort_reason ~= nil then
+      waiter.granted = false
+      self:release_slot()
+      return false
+    end
+    return true
+  end
+  return false
+end
+
+local function Group:spawn_raw_entry(entry: function (): (nil))
+  async.running()
+  async.checkpoint()
+  if not self:acquire_slot() then
+    return
+  end
+  local th: Thread<|nil|>? = nil
+  do
+    th = spawn_raw<|nil|>(entry, true)
+  catch
+    self:release_slot()
+    raise
+  end
+  local spawned = th as Thread<|nil|>
+  self.active_threads[#self.active_threads + 1] = spawned
+  if self.abort_reason ~= nil then
+    spawned:cancel(self.abort_reason)
+  end
+  async.run<|nil, value|>(function (): nil
+    local status = spawned:join()
+    local active = self.active_threads
+    for index = 1, #active do
+      if active[index] == spawned then
+        active[index] = active[#active]
+        active[#active] = nil
+        break
+      end
+    end
+    case status
+    when failed(err) then
+      self.errors[#self.errors + 1] = err
+      if self.propagate_errors and self.abort_reason == nil then
+        self:trigger_abort(async.CancellationReason.simple("group thread failed"))
+      end
+    else
+    end
+    self:release_slot()
+    return nil
+  end)
+end
+
+--- Spawn a zero-argument thread managed by this group.
+-- @param entry Closure to execute in the spawned thread.
+-- @usage standard-library-thread.md
+function Group:spawn(entry: function (): ())
+  self:spawn_raw_entry(function (): nil
+    entry()
+    return nil
+  end)
+end
+
+--- Spawn a one-argument thread managed by this group.
+-- @param entry One-argument closure to execute in the spawned thread.
+-- @param first First argument transferred to the thread.
+-- @usage standard-library-thread.md
+function Group:spawn_one<|A|>(entry: function (A): (), first: A)
+  self:spawn_raw_entry(function (): nil
+    entry(first)
+    return nil
+  end)
+end
+
+--- Spawn a two-argument thread managed by this group.
+-- @param entry Two-argument closure to execute in the spawned thread.
+-- @param first First argument transferred to the thread.
+-- @param second Second argument transferred to the thread.
+-- @usage standard-library-thread.md
+function Group:spawn_two<|A, B|>(entry: function (A, B): (), first: A, second: B)
+  self:spawn_raw_entry(function (): nil
+    entry(first, second)
+    return nil
+  end)
+end
+
+--- Spawn a three-argument thread managed by this group.
+-- @param entry Three-argument closure to execute in the spawned thread.
+-- @param first First argument transferred to the thread.
+-- @param second Second argument transferred to the thread.
+-- @param third Third argument transferred to the thread.
+-- @usage standard-library-thread.md
+function Group:spawn_three<|A, B, C|>(
+    entry: function (A, B, C): (), first: A, second: B, third: C)
+  self:spawn_raw_entry(function (): nil
+    entry(first, second, third)
+    return nil
+  end)
+end
+
+--- Cancel all currently running threads in the group and prevent further spawns.
+-- @param reason Optional CancellationReason forwarded to running threads.
+-- @usage standard-library-thread.md
+function Group:cancel(reason: async.CancellationReason<|value|>?)
+  local actual = reason or async.CancellationReason.simple("cancelled")
+  self:trigger_abort(actual)
+end
+
+--- Suspend the current Task until all threads and queued spawns in the group complete.
+-- @return Array of uncaught Error values collected in completion order.
+-- @usage standard-library-thread.md
+function Group:wait(): {Error}
+  local task = async.running()
+  async.checkpoint()
+  while self.running_count > 0 do
+    local token = async.ResumeToken("thread.Group.wait")
+    local waiter = GroupWaiter {
+      task = task,
+      token = token,
+      active = true,
+      granted = false
+    }
+    self.completion_waiters[#self.completion_waiters + 1] = waiter
+    local cancel_action = function ()
+      waiter.active = false
+    end
+    async.suspend(token, cancel_action)
+  end
+  local result: {Error} = {}
+  for index = 1, #self.errors do
+    result[index] = self.errors[index]
+  end
+  return result
+end

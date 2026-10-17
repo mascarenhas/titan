@@ -656,6 +656,7 @@ end
 ```
 
 ```titan
+function mutex_t.create_native(): foreign *void
 function mutex_t.lock_function(): foreign function(*void): void
 function mutex_t.new(): mutex_t
 function mutex_t.trylock_function(): foreign function(*void): int

@@ -9,7 +9,8 @@ pipe_t.from_transfer_payload	function pipe_t.from_transfer_payload(payload: stri
 pipe_t.discard_transfer_payload	function pipe_t.discard_transfer_payload(payload: string): integer	titan/uv/transfer.titan:165	payload: INPUT known unadopted native bytes; native close attempt consumes ownership even on error; no Runtime required.
 tcp_t.discard_transfer_payload	function tcp_t.discard_transfer_payload(payload: string): integer	titan/uv/transfer.titan:157	payload: INPUT known unadopted native bytes; native close attempt consumes ownership even on error; no Runtime required.
 addrinfo_result_t:entries	function addrinfo_result_t:entries(): {addrinfo_t}	titan/uv/dns.titan:56	
-async_send_function	function async_send_function(): foreign function (*void): int	titan/uv/uv.titan:1839	
+async_send_function	function async_send_function(): foreign function (*void): int	titan/uv/uv.titan:2363	
+async_send_native	foreign function async_send_native(handle: *void): int	titan/uv/uv.titan:2356	handle: INPUT borrowed initialized native uv_async_t pointer; caller retains the associated owner across all native uses.
 async_t.new	function async_t.new(): async_t	titan/uv/uv.titan:1800	
 async_t:as_handle_t	function async_t:as_handle_t(): handle_t	titan/uv/uv.titan:1807	
 async_t:borrow	function async_t:borrow(): foreign *void	titan/uv/uv.titan:1829	
@@ -90,17 +91,21 @@ lib_t:dlopen	function lib_t:dlopen(filename: string): integer	titan/uv/dll.titan
 lib_t:dlsym	function lib_t:dlsym(name: string): (integer, symbol_t?)	titan/uv/dll.titan:44	name: INPUT immutable text/byte owner; native C-string conventions apply where the operation takes text. FS path strings remain retained until request cleanup; other synchronous borrows end when the call returns.
 loop_t.new	function loop_t.new(): loop_t	titan/uv/uv.titan:73	
 loop_t:secondary_error_count	function loop_t:secondary_error_count(): integer	titan/uv/uv.titan:154	
-mutex_t.lock_function	function mutex_t.lock_function(): foreign function(*void): void	titan/uv/sync.titan:62	
-mutex_t.new	function mutex_t.new(): mutex_t	titan/uv/sync.titan:15	
-mutex_t.trylock_function	function mutex_t.trylock_function(): foreign function(*void): int	titan/uv/sync.titan:75	
-mutex_t.unlock_function	function mutex_t.unlock_function(): foreign function(*void): void	titan/uv/sync.titan:88	
-mutex_t:borrow	function mutex_t:borrow(): foreign *void	titan/uv/sync.titan:28	
-mutex_t:destroy	function mutex_t:destroy()	titan/uv/sync.titan:47	
-mutex_t:init	function mutex_t:init(): integer	titan/uv/sync.titan:33	
-mutex_t:init_recursive	function mutex_t:init_recursive(): integer	titan/uv/sync.titan:40	
-mutex_t:lock	function mutex_t:lock()	titan/uv/sync.titan:53	
-mutex_t:trylock	function mutex_t:trylock(): integer	titan/uv/sync.titan:66	
-mutex_t:unlock	function mutex_t:unlock()	titan/uv/sync.titan:79	
+mutex_t.create_native	function mutex_t.create_native(): foreign *void	titan/uv/sync.titan:138	
+mutex_t.lock_function	function mutex_t.lock_function(): foreign function(*void): void	titan/uv/sync.titan:87	
+mutex_t.new	function mutex_t.new(): mutex_t	titan/uv/sync.titan:21	
+mutex_t.trylock_function	function mutex_t.trylock_function(): foreign function(*void): int	titan/uv/sync.titan:110	
+mutex_t.unlock_function	function mutex_t.unlock_function(): foreign function(*void): void	titan/uv/sync.titan:131	
+mutex_t:borrow	function mutex_t:borrow(): foreign *void	titan/uv/sync.titan:37	
+mutex_t:destroy	function mutex_t:destroy()	titan/uv/sync.titan:64	
+mutex_t:init	function mutex_t:init(): integer	titan/uv/sync.titan:45	
+mutex_t:init_recursive	function mutex_t:init_recursive(): integer	titan/uv/sync.titan:55	
+mutex_t:lock	function mutex_t:lock()	titan/uv/sync.titan:72	
+mutex_t:trylock	function mutex_t:trylock(): integer	titan/uv/sync.titan:94	
+mutex_t:unlock	function mutex_t:unlock()	titan/uv/sync.titan:116	
+native_mutex_destroy	foreign function native_mutex_destroy(native: *void): void	titan/uv/sync.titan:151	native: INPUT/OUTPUT process-heap mutex pointer from mutex_t.create_native, or NULL; destroys and frees after quiescence.
+native_mutex_lock	foreign function native_mutex_lock(native: *void): void	titan/uv/sync.titan:80	native: INPUT/OUTPUT borrowed or process-heap initialized uv_mutex_t pointer.
+native_mutex_unlock	foreign function native_mutex_unlock(native: *void): void	titan/uv/sync.titan:120	native: INPUT/OUTPUT borrowed or process-heap initialized uv_mutex_t pointer.
 once_function	function once_function(): foreign function(*void, function(): void): void	titan/uv/sync.titan:641	
 once_t.new	function once_t.new(): once_t	titan/uv/sync.titan:621	
 once_t:borrow	function once_t:borrow(): foreign *void	titan/uv/sync.titan:628	

@@ -64,6 +64,10 @@ local function Schema:type_name(descriptor: reflect.Type, hint: string,
   when is_array{elem_descriptor} then
     return self:array(elem_descriptor, hint .. "_Array", true, depth), false
   when is_record(record_type) then
+    local encode? = find_transfer_hooks(record_type, "protobuf")
+    if depth > 1 and encode ~= nil then
+      return "bytes", true
+    end
     require_record(record_type)
     local key = "record:" .. record_type.name
     local previous? = self.seen[key]

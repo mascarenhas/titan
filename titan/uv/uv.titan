@@ -2349,7 +2349,11 @@ function async_t:borrow(): foreign *void
   return self.native as foreign *void
 end
 
-local foreign function async_send_native(handle: *void): int
+--- Notify an initialized borrowed `uv_async_t *` handle directly from C or Titan.
+-- @param handle Borrowed initialized `uv_async_t *` handle pointer.
+-- @return Native int result with the documented lifetime and units.
+-- @usage uv/supplemental.md#async_send_native
+foreign function async_send_native(handle: *void): int
   return ffi.uv_async_send(handle as foreign *uv_async_t)
 end
 

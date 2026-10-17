@@ -1,0 +1,451 @@
+--- Bounded cross-thread MPMC channels.
+-- @module titan.thread
+
+--- Sending endpoint of a bounded cross-thread channel.
+-- @usage standard-library-thread.md
+record Sender<|T|>
+  local native: foreign *titan_thread_channel
+end
+
+--- Receiving endpoint of a bounded cross-thread channel.
+-- @usage standard-library-thread.md
+record Receiver<|T|>
+  local native: foreign *titan_thread_channel
+end
+
+--- Result of receiving from a channel that may close cleanly after draining.
+-- @usage standard-library-thread.md
+union ReceiveResult<|T|>
+  message(T)
+  closed()
+end
+
+local function channel_new_native(
+    capacity: foreign size_t,
+    mutex: foreign *void): foreign *titan_thread_channel
+  if mutex == nil or capacity == (0 as foreign size_t) then
+    if mutex ~= nil then
+      uv.native_mutex_destroy(mutex)
+    end
+    return nil
+  end
+  if capacity > ffi.SIZE_MAX / foreign titan_thread_message_ptr.sizeof then
+    uv.native_mutex_destroy(mutex)
+    return nil
+  end
+  local ch = ffi.calloc(1 as foreign size_t, foreign titan_thread_channel.sizeof)
+    as foreign *titan_thread_channel
+  if ch == nil then
+    uv.native_mutex_destroy(mutex)
+    return nil
+  end
+  local ring = ffi.calloc(capacity, foreign titan_thread_message_ptr.sizeof)
+    as foreign *titan_thread_message_ptr
+  if ring == nil then
+    ffi.free(ch)
+    uv.native_mutex_destroy(mutex)
+    return nil
+  end
+  ch.mutex = mutex
+  ch.active_senders = 1 as foreign size_t
+  ch.active_receivers = 1 as foreign size_t
+  ch.capacity = capacity
+  ch.head = 0 as foreign size_t
+  ch.tail = 0 as foreign size_t
+  ch.count = 0 as foreign size_t
+  ch.ring = ring
+  ch.closed = 0
+  return ch
+end
+
+local function channel_try_enqueue_native(
+    ch: foreign *titan_thread_channel,
+    msg: foreign *titan_thread_message,
+    waiter: foreign *titan_thread_waiter,
+    async_handle: foreign *void): integer
+  if ch == nil then return 2 end
+  uv.native_mutex_lock(ch.mutex)
+  if ch.closed ~= 0 then
+    uv.native_mutex_unlock(ch.mutex)
+    return 2
+  end
+  if ch.count < ch.capacity then
+    local slot = ch.ring + ch.tail
+    slot[0] = msg
+    ch.tail = (ch.tail + (1 as foreign size_t)) % ch.capacity
+    ch.count = ch.count + (1 as foreign size_t)
+    waiter_wake_one(ffi.titan_thread_underflow_queue(ch))
+    uv.native_mutex_unlock(ch.mutex)
+    return 0
+  end
+  if waiter ~= nil then
+    waiter_enqueue(ffi.titan_thread_overflow_queue(ch), waiter, async_handle)
+  end
+  uv.native_mutex_unlock(ch.mutex)
+  return 1
+end
+
+local function channel_unregister_overflow_waiter(
+    ch: foreign *titan_thread_channel, waiter: foreign *titan_thread_waiter)
+  if ch == nil or waiter == nil then return end
+  uv.native_mutex_lock(ch.mutex)
+  if waiter.active ~= 0 then
+    waiter_unlink(ffi.titan_thread_overflow_queue(ch), waiter)
+  elseif waiter.signaled ~= 0 then
+    if ch.count < ch.capacity or ch.closed ~= 0 then
+      waiter_wake_one(ffi.titan_thread_overflow_queue(ch))
+    end
+  end
+  waiter.async_handle = nil
+  uv.native_mutex_unlock(ch.mutex)
+end
+
+local function channel_try_dequeue_native(
+    ch: foreign *titan_thread_channel,
+    waiter: foreign *titan_thread_waiter,
+    async_handle: foreign *void): (integer, foreign *titan_thread_message)
+  if ch == nil then
+    return 2, nil
+  end
+  uv.native_mutex_lock(ch.mutex)
+  if ch.closed == 2 then
+    uv.native_mutex_unlock(ch.mutex)
+    return 2, nil
+  end
+  if ch.count > (0 as foreign size_t) then
+    local slot = ch.ring + ch.head
+    local msg = slot[0]
+    slot[0] = nil
+    ch.head = (ch.head + (1 as foreign size_t)) % ch.capacity
+    ch.count = ch.count - (1 as foreign size_t)
+    waiter_wake_one(ffi.titan_thread_overflow_queue(ch))
+    uv.native_mutex_unlock(ch.mutex)
+    return 0, msg
+  end
+  if ch.closed ~= 0 then
+    uv.native_mutex_unlock(ch.mutex)
+    return 2, nil
+  end
+  if waiter ~= nil then
+    waiter_enqueue(ffi.titan_thread_underflow_queue(ch), waiter, async_handle)
+  end
+  uv.native_mutex_unlock(ch.mutex)
+  return 1, nil
+end
+
+local function channel_unregister_underflow_waiter(
+    ch: foreign *titan_thread_channel, waiter: foreign *titan_thread_waiter)
+  if ch == nil or waiter == nil then return end
+  uv.native_mutex_lock(ch.mutex)
+  if waiter.active ~= 0 then
+    waiter_unlink(ffi.titan_thread_underflow_queue(ch), waiter)
+  elseif waiter.signaled ~= 0 then
+    if ch.count > (0 as foreign size_t) or ch.closed ~= 0 then
+      waiter_wake_one(ffi.titan_thread_underflow_queue(ch))
+    end
+  end
+  waiter.async_handle = nil
+  uv.native_mutex_unlock(ch.mutex)
+end
+
+local function sender_finalize(self: Sender<|value|>)
+  local ch = self.native
+  self.native = nil
+  if ch ~= nil then
+    channel_release_sender_native(ch)
+  end
+end
+
+local function receiver_finalize(self: Receiver<|value|>)
+  local ch = self.native
+  self.native = nil
+  if ch ~= nil then
+    channel_release_receiver_native(ch)
+  end
+end
+
+local function new_sender<|T|>(ch: foreign *titan_thread_channel): Sender<|T|>
+  local tx = Sender<|T|> { native = ch }
+  gc.finalizable(tx, sender_finalize)
+  return tx
+end
+
+local function new_receiver<|T|>(ch: foreign *titan_thread_channel): Receiver<|T|>
+  local rx = Receiver<|T|> { native = ch }
+  gc.finalizable(rx, receiver_finalize)
+  return rx
+end
+
+--- Create a bounded cross-thread channel pair.
+-- @param capacity Maximum buffered messages before send suspends; defaults to 1.
+-- @return Paired Sender and Receiver endpoints sharing the channel.
+-- @usage standard-library-thread.md
+function channel<|T|>(capacity: integer?): (Sender<|T|>, Receiver<|T|>)
+  local cap = capacity or 1
+  if cap < 1 then
+    raise "channel capacity must be positive"
+  end
+  local mutex = uv.mutex_t.create_native()
+  local ch = channel_new_native(cap as foreign size_t, mutex)
+  if ch == nil then
+    raise "thread: out of memory allocating channel"
+  end
+  return new_sender<|T|>(ch), new_receiver<|T|>(ch)
+end
+
+--- Send a message through the channel, suspending the current Task only when the buffer is full.
+-- @param message Value to transfer into the channel buffer.
+-- @usage standard-library-thread.md
+function Sender:send(message: T)
+  local msg: foreign *titan_thread_message = value_to_thread_message(message as value)
+  defer if msg ~= nil then thread_message_discard(msg) end
+  while true do
+    local fast = channel_try_enqueue_native(self.native, msg, nil, nil)
+    if fast == 0 then
+      msg = nil
+      return
+    elseif fast == 2 then
+      raise "channel is closed"
+    end
+    local waiter_storage = foreign titan_thread_waiter.new()
+    local waiter: foreign *titan_thread_waiter = waiter_storage
+    local closed_err = false
+    wait_on_native_waiter(
+      function (async_handle: foreign *void): boolean
+        local rc = channel_try_enqueue_native(
+          self.native, msg, waiter, async_handle)
+        if rc == 0 then
+          msg = nil
+          return false
+        elseif rc == 2 then
+          closed_err = true
+          return false
+        end
+        return true
+      end,
+      function ()
+        channel_unregister_overflow_waiter(self.native, waiter)
+      end)
+    if msg == nil then
+      return
+    elseif closed_err then
+      raise "channel is closed"
+    end
+  end
+end
+
+--- Attempt to send a message without blocking.
+-- @param message Value to transfer if buffer space is immediately available.
+-- @return True if enqueued; false if the channel buffer is currently full.
+-- @usage standard-library-thread.md
+function Sender:try_send(message: T): boolean
+  local msg = value_to_thread_message(message as value)
+  local rc = channel_try_enqueue_native(self.native, msg, nil, nil)
+  if rc == 0 then
+    return true
+  elseif rc == 2 then
+    thread_message_discard(msg)
+    raise "channel is closed"
+  else
+    thread_message_discard(msg)
+    return false
+  end
+end
+
+--- Close the channel for sending while preserving already-buffered messages for receivers.
+-- @usage standard-library-thread.md
+function Sender:close()
+  channel_close_sender_native(self.native)
+end
+
+--- Report whether the channel has been closed.
+-- @return True once closed by a sender or receiver or when all peers have been dropped.
+-- @usage standard-library-thread.md
+function Sender:is_closed(): boolean
+  return channel_is_closed_native(self.native) ~= 0
+end
+
+--- Create a new local Sender handle sharing the same underlying channel.
+-- @return Cloned Sender endpoint.
+-- @usage standard-library-thread.md
+function Sender:clone(): Sender<|T|>
+  channel_retain_sender_native(self.native)
+  return new_sender<|T|>(self.native)
+end
+
+--- Retain a sender reference and serialize the channel pointer for cross-state transfer.
+-- @return Serialized transfer payload bytes.
+-- @usage standard-library-thread.md
+function Sender:to_transfer_payload(): string
+  if endpoint_transfer_depth <= 0 then
+    raise "thread endpoints can only be transferred through thread channels or spawn arguments"
+  end
+  channel_retain_sender_native(self.native)
+  local bits: integer = ffi.titan_thread_pointer_bits(self.native as foreign *void)
+  pending_retained_senders[#pending_retained_senders + 1] = bits
+  return string.pack("<i8", bits)
+end
+
+--- Reconstruct a Sender endpoint adopting the sender reference retained by to_transfer_payload.
+-- @param payload Serialized transfer payload bytes.
+-- @return Reconstructed Sender endpoint.
+-- @usage standard-library-thread.md
+function Sender.from_transfer_payload(payload: string): Sender<|T|>
+  if endpoint_transfer_depth <= 0 then
+    raise "thread endpoints can only be transferred through thread channels or spawn arguments"
+  end
+  if #payload ~= 8 then
+    raise "thread: invalid Sender transfer payload"
+  end
+  local bits: integer = string.unpack("<i8", payload)
+  local ch = ffi.titan_thread_bits_pointer(bits) as foreign *titan_thread_channel
+  if ch == nil then
+    raise "thread: invalid Sender transfer payload"
+  end
+  if endpoint_transfer_discarding then
+    channel_release_sender_native(ch)
+    return Sender<|T|> { native = nil }
+  end
+  return new_sender<|T|>(ch)
+end
+
+local function Receiver:dequeue_or_wait(): (boolean, foreign *titan_thread_message)
+  while true do
+    local fast_status, fast_msg = channel_try_dequeue_native(self.native, nil, nil)
+    if fast_status == 0 then
+      return true, fast_msg
+    elseif fast_status == 2 then
+      return false, nil
+    end
+    local waiter_storage = foreign titan_thread_waiter.new()
+    local waiter: foreign *titan_thread_waiter = waiter_storage
+    local received = false
+    local closed_empty = false
+    local slow_msg: foreign *titan_thread_message = nil
+    wait_on_native_waiter(
+      function (async_handle: foreign *void): boolean
+        local status, msg = channel_try_dequeue_native(
+          self.native, waiter, async_handle)
+        if status == 0 then
+          slow_msg = msg
+          received = true
+          return false
+        elseif status == 2 then
+          closed_empty = true
+          return false
+        end
+        return true
+      end,
+      function ()
+        channel_unregister_underflow_waiter(self.native, waiter)
+      end)
+    if received then
+      return true, slow_msg
+    elseif closed_empty then
+      return false, nil
+    end
+  end
+end
+
+--- Receive the next message from the channel, suspending when empty and raising if closed and drained.
+-- @return Next message from the channel.
+-- @usage standard-library-thread.md
+function Receiver:receive(): T
+  local ok, msg = self:dequeue_or_wait()
+  if not ok then
+    raise "channel is closed"
+  end
+  return thread_message_to_value(msg) as T
+end
+
+--- Receive the next message or a closed status without raising on clean stream completion.
+-- @return ReceiveResult.message(value) or ReceiveResult.closed().
+-- @usage standard-library-thread.md
+function Receiver:receive_result(): ReceiveResult<|T|>
+  local ok, msg = self:dequeue_or_wait()
+  if not ok then
+    return ReceiveResult<|T|>.closed()
+  end
+  return ReceiveResult<|T|>.message(thread_message_to_value(msg) as T)
+end
+
+--- Attempt to receive a buffered message without blocking.
+-- @return True and the message when available; false and nil when currently empty.
+-- @usage standard-library-thread.md
+function Receiver:try_receive(): (boolean, T?)
+  local status, msg = channel_try_dequeue_native(self.native, nil, nil)
+  if status == 0 then
+    return true, thread_message_to_value(msg) as T
+  end
+  return false, nil
+end
+
+--- Return a generic-for iterator triple that yields a true continuation and each message until closed and drained.
+-- @return Iterator function, this Receiver state, and nil control variable.
+-- @usage standard-library-thread.md
+function Receiver:incoming(): (function (Receiver<|T|>, boolean?): (boolean?, T?), Receiver<|T|>, nil)
+  return function (rx: Receiver<|T|>, _: boolean?): (boolean?, T?)
+    local ok, msg = rx:dequeue_or_wait()
+    if not ok then
+      return nil, nil
+    end
+    return true, thread_message_to_value(msg) as T
+  end, self, nil
+end
+
+--- Close the channel from the consumer side and discard any unread buffered messages.
+-- @usage standard-library-thread.md
+function Receiver:close()
+  channel_close_receiver_native(self.native)
+end
+
+--- Report whether the channel has been closed.
+-- @return True once closed by a sender or receiver or when all peers have been dropped.
+-- @usage standard-library-thread.md
+function Receiver:is_closed(): boolean
+  return channel_is_closed_native(self.native) ~= 0
+end
+
+--- Create a new local Receiver handle sharing the same underlying channel.
+-- @return Cloned Receiver endpoint.
+-- @usage standard-library-thread.md
+function Receiver:clone(): Receiver<|T|>
+  channel_retain_receiver_native(self.native)
+  return new_receiver<|T|>(self.native)
+end
+
+--- Retain a receiver reference and serialize the channel pointer for cross-state transfer.
+-- @return Serialized transfer payload bytes.
+-- @usage standard-library-thread.md
+function Receiver:to_transfer_payload(): string
+  if endpoint_transfer_depth <= 0 then
+    raise "thread endpoints can only be transferred through thread channels or spawn arguments"
+  end
+  channel_retain_receiver_native(self.native)
+  local bits: integer = ffi.titan_thread_pointer_bits(self.native as foreign *void)
+  pending_retained_receivers[#pending_retained_receivers + 1] = bits
+  return string.pack("<i8", bits)
+end
+
+--- Reconstruct a Receiver endpoint adopting the receiver reference retained by to_transfer_payload.
+-- @param payload Serialized transfer payload bytes.
+-- @return Reconstructed Receiver endpoint.
+-- @usage standard-library-thread.md
+function Receiver.from_transfer_payload(payload: string): Receiver<|T|>
+  if endpoint_transfer_depth <= 0 then
+    raise "thread endpoints can only be transferred through thread channels or spawn arguments"
+  end
+  if #payload ~= 8 then
+    raise "thread: invalid Receiver transfer payload"
+  end
+  local bits: integer = string.unpack("<i8", payload)
+  local ch = ffi.titan_thread_bits_pointer(bits) as foreign *titan_thread_channel
+  if ch == nil then
+    raise "thread: invalid Receiver transfer payload"
+  end
+  if endpoint_transfer_discarding then
+    channel_release_receiver_native(ch)
+    return Receiver<|T|> { native = nil }
+  end
+  return new_receiver<|T|>(ch)
+end

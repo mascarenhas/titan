@@ -628,3 +628,152 @@ function test_indexed_union_merge_keeps_last_variant_reset_and_payload_order(
   when pair(number, note) then test.assert(number == 5 and note == nil)
   else raise "oneof replacement failed to reset earlier payloads" end
 end
+
+record HookedToken
+  local secret: integer
+  local label: string
+end
+
+local const hooked_token_fields: const {reflect.Type} = {
+  reflect.Type.is_integer(),
+  reflect.Type.is_string(),
+}
+
+function HookedToken:to_transfer_payload(): string
+  if self.secret < 0 then raise "hooked token encode rejected negative secret" end
+  return protobuf.serialize_fields(hooked_token_fields, self.secret, self.label)
+end
+
+function HookedToken.from_transfer_payload(payload: string): HookedToken
+  if payload == "bad-hook" then raise "hooked token decode failure" end
+  local secret: integer, label: string =
+    protobuf.deserialize_fields(payload, hooked_token_fields)
+  return HookedToken(secret, label)
+end
+
+function HookedToken:read_secret(): integer
+  return self.secret
+end
+
+function HookedToken:read_label(): string
+  return self.label
+end
+
+record HookedEnvelope
+  id: integer
+  token: HookedToken
+  optional_token: HookedToken?
+  list: {HookedToken}
+end
+
+union HookedChoice
+  none()
+  single(HookedToken)
+end
+
+record CyclicHooked
+  local id: integer
+end
+
+function CyclicHooked:to_transfer_payload(): string
+  return protobuf.serialize_fields({descriptor(self)}, self)
+end
+
+function CyclicHooked.from_transfer_payload(_payload: string): CyclicHooked
+  return CyclicHooked(0)
+end
+
+function test_nested_custom_transfer_hooks_in_records_unions_fields_and_schema(
+    _context: test.Context)
+  local first = HookedToken(42, "alpha\0beta")
+  local second = HookedToken(99, "gamma")
+  local envelope = HookedEnvelope(7, first, nil, {first, second})
+  local decoded: HookedEnvelope = roundtrip(envelope)
+  test.assert(decoded.id == 7)
+  test.assert(decoded.token:read_secret() == 42)
+  test.assert(decoded.token:read_label() == "alpha\0beta")
+  test.assert(decoded.optional_token == nil)
+  test.assert(#decoded.list == 2)
+  test.assert(decoded.list[1]:read_secret() == 42)
+  test.assert(decoded.list[2]:read_secret() == 99)
+
+  local choice: HookedChoice = roundtrip(HookedChoice.single(first))
+  case choice
+  when single(tok) then
+    test.assert(tok:read_secret() == 42 and tok:read_label() == "alpha\0beta")
+  else raise "expected single HookedChoice"
+  end
+
+  local field_types: const {reflect.Type} = {descriptor(first), reflect.Type.is_integer()}
+  local wire = protobuf.serialize_fields(field_types, second, 123)
+  local out_token: HookedToken, out_num: integer =
+    protobuf.deserialize_fields(wire, field_types)
+  test.assert(out_token:read_secret() == 99 and out_num == 123)
+
+  local env_schema = protobuf.schema(descriptor(envelope))
+  test.assert(string.find(env_schema, "optional bytes f_token = 2;") ~= nil, env_schema)
+  test.assert(string.find(env_schema, "optional bytes f_value = 1;") ~= nil, env_schema)
+
+  -- Top-level serialize on HookedToken still checks root record public fields (and rejects private fields).
+  expect_error(function()
+    protobuf.serialize(first)
+  end, "record must be public with only public fields")
+
+  -- Hook encode failure propagates cleanly.
+  expect_error(function()
+    protobuf.serialize(HookedChoice.single(HookedToken(-1, "neg")))
+  end, "hooked token encode rejected negative secret")
+
+  -- Hook decode failure propagates cleanly.
+  expect_error(function()
+    protobuf.deserialize_fields(
+      protobuf.serialize_fields({reflect.Type.is_string()}, "bad-hook"),
+      {descriptor(first)})
+  end, "hooked token decode failure")
+
+  -- Cyclic custom transfer hook is rejected.
+  local cyc = CyclicHooked(1)
+  expect_error(function()
+    protobuf.serialize_fields({descriptor(cyc)}, cyc)
+  end, "cyclic object graph")
+end
+
+record NestedPayload
+  body: string
+end
+
+record NestedOuter
+  prefix: string
+  inner: NestedPayload
+  suffix: integer
+end
+
+function test_nested_message_varint_length_boundaries_and_realloc_error_cleanup(
+    _context: test.Context)
+  -- NestedPayload has 1 field: tag (1 byte) + length varint + body bytes.
+  -- body of 125 bytes -> nested message is 1 + 1 + 125 = 127 bytes (max 1-byte varint).
+  -- body of 126 bytes -> nested message is 1 + 1 + 126 = 128 bytes (min 2-byte varint, 1-byte memmove).
+  -- body of 16381 bytes -> nested message is 1 + 2 + 16381 = 16384 bytes (min 3-byte varint, 2-byte memmove).
+  local lengths: {integer} = {125, 126, 127, 16380, 16381, 16382}
+  for idx = 1, #lengths do
+    local body_len = lengths[idx]
+    local payload = string.rep("x", body_len)
+    local outer = NestedOuter("head", NestedPayload(payload), body_len)
+    local decoded: NestedOuter = roundtrip(outer)
+    test.assert(decoded.prefix == "head")
+    test.assert(#decoded.inner.body == body_len)
+    test.assert(decoded.inner.body == payload)
+    test.assert(decoded.suffix == body_len)
+  end
+
+  -- Trigger multiple buffer reallocations (>64 bytes initial capacity) followed by
+  -- a mid-serialization failure to exercise owned *titan_protobuf_buffer unwind cleanup.
+  local large_prefix = string.rep("p", 4096)
+  local good_tok = HookedToken(1, large_prefix)
+  local bad_tok = HookedToken(-1, "fail-after-realloc")
+  local failing_env = HookedEnvelope(99, good_tok, bad_tok, {good_tok})
+  expect_error(function()
+    protobuf.serialize(failing_env)
+  end, "hooked token encode rejected negative secret")
+end
+

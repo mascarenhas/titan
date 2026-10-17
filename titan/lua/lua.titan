@@ -12,7 +12,7 @@ local fs = import "fs"
 local gc = import "gc"
 local io = import "io"
 -- The static dependency makes its native loader available to new states.
-local transfer = import "titan.transfer"
+local transfer = import "transfer"
 local string = import "string"
 
 local type LuaChunk = function (...: value): (...: value)
@@ -326,6 +326,17 @@ function Lua:close()
   if not handle then return end
   self.handle = nil
   ffi.lua_close(handle)
+end
+
+--- Detach and return the underlying Lua state pointer; caller assumes ownership.
+-- @return Raw lua_State pointer owned by the caller.
+-- @usage standard-library-lua.md#independent-lua-states
+function Lua:detach(): foreign *lua_State
+  if self.busy then raise "independent Lua state is busy" end
+  local handle = self.handle
+  if not handle then raise "independent Lua state is closed" end
+  self.handle = nil
+  return handle
 end
 
 local record LuaPreload

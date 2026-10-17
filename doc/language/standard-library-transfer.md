@@ -75,6 +75,29 @@ waiting, and reaping. HTTP request and response endpoints move together as one
 
 Resource chapters document their supported states, buffers, and guards.
 
+## Native message packets
+
+The public functions below serialize and reconstruct heap-allocated native
+transfer packets (`titan_async_message`) for cross-thread channels and other
+native queues:
+
+```text
+function encode_message(candidate: value): foreign *void
+function decode_message(raw_message: foreign *void): value
+```
+
+`encode_message` accepts any transferable Titan value or an explicit
+`TransferValue`. Scalars, strings, pointers, C functions, and pre-built
+`TransferValue` wrappers copy into a single heap allocation; records and unions
+serialize their wire bytes directly into an expandable native buffer prefixed
+with the message header, and closures serialize their projected capture array
+into that buffer, without creating an intermediate `TransferValue` or Lua string
+for the root message. `decode_message` only accepts a non-nil pointer returned
+by `encode_message`, reconstructs the value in the current Lua state, and
+**takes ownership of and always frees `raw_message`** (both on normal return and
+if decoding raises an error). If a packet returned by `encode_message` is never
+passed to `decode_message`, the caller must free it with `ffi.free`.
+
 ## Raw module loader
 
 The public foreign function below supports trusted integrations with the Lua C

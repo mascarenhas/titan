@@ -68,7 +68,11 @@ The wrapper is the sole admission owner. A chunk call reserves it before
 preparing the independent state's stack, saves its entry height, and retains
 the reservation through result transfer and cleanup. An already reserved or closed state rejects a
 new chunk call. `close` rejects a busy state, closes an idle state once, and
-then becomes a no-op. The wrapper's GC finalizer uses the same close ownership;
+then becomes a no-op. `detach` rejects a busy or already closed state, clears
+`self.handle`, and returns the raw `lua_State *` so an external owner (such as
+`titan.thread` worker bootstrap) can adopt and close the state on its own OS
+thread without triggering `lua_close` from the creating state's GC finalizer.
+The wrapper's GC finalizer uses the same close ownership;
 `lua_close` runs the independent state's `__gc` metamethods. Async work retains
 the wrapper until native completion, so finalization cannot race a worker.
 

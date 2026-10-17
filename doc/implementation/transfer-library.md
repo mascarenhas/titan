@@ -24,6 +24,17 @@ recorded module's preload loader, using an ordinary protected Lua call,
 then retries nominal lookup. Module initialization remains memoized. No raw
 initializer capability or source module userdata crosses states.
 
+`encode_message` and `decode_message` provide direct native packet
+(`titan_async_message`) serialization for `titan.thread` without requiring
+source imports across modules. For records, unions, and closures,
+`encode_message` initializes an `owned *titan_protobuf_buffer` on the C heap,
+reserves `sizeof(titan_async_message)` at the front, serializes the wire payload
+in place via `protobuf.serialize_to_buffer` or `protobuf.serialize_fields_to_buffer`,
+appends the nominal/module name bytes, and detaches the single allocation with
+`titan_protobuf_buf_take_data`. `decode_message` reads directly from the packet's
+byte slices using `protobuf.deserialize_nominal_buffer` and
+`protobuf.deserialize_fields_buffer` and frees the packet via `defer ffi.free`.
+
 `transfer_load_module` is a public source-defined foreign function shared with
 `titan.lua` through an ordinary compiled import. Its exact raw signature is
 `(state: *lua_State, name: const *char, length: size_t)` with no C return value.

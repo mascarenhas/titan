@@ -42,7 +42,7 @@ end
 --- An owned native thread token for a C-only entry and explicit join or detach.
 -- @usage uv/types.md#thread_t
 record thread_t
-  local native: foreign titan_issue194_thread_storage
+  local native: foreign titan_uv_thread_storage
   local phase: integer
   local argument_owner: value
 end
@@ -51,7 +51,7 @@ end
 -- @return Native thread_t result with the documented lifetime and units.
 -- @usage uv/supplemental.md#thread_tnew
 function thread_t.new(): thread_t
-  local native = foreign titan_issue194_thread_storage.new()
+  local native = foreign titan_uv_thread_storage.new()
   return { native = native, phase = THREAD_FRESH, argument_owner = nil }
 end
 

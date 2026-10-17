@@ -28,11 +28,22 @@ end
 
 ```text
 serialize(candidate: value): string
+serialize_to_buffer(buf: foreign *void, candidate: value)
 deserialize(bytes: string, descriptor: reflect.Type): value
 schema(descriptor: reflect.Type): string
 deserialize_nominal(bytes: string, name: string, is_union: boolean): value
+deserialize_nominal_buffer(data: foreign const *void, length: integer,
+                           name: string, is_union: boolean): value
 serialize_fields(fields: const {reflect.Type}, ...: value): string
+serialize_fields_to_buffer(buf: foreign *void,
+                           fields: const {reflect.Type}, ...: value)
 deserialize_fields(bytes: string, fields: const {reflect.Type}): (...: value)
+deserialize_fields_buffer(data: foreign const *void, length: integer,
+                          fields: const {reflect.Type}): (...: value)
+find_transfer_hooks(descriptor: reflect.RecordType, context_prefix: string):
+    (reflect.Function?, reflect.Function?)
+encode_transfer_payload(candidate: value, to_hook: reflect.Function,
+                        context_prefix: string): string
 ```
 
 The root must be a public Titan record or union. `deserialize` and `schema`
@@ -41,9 +52,19 @@ accept its record/union descriptor or a named descriptor that resolves to it.
 and checks the requested nominal kind. It is also the independent-state
 argument conversion entry. Unknown names raise; lookup does not load modules.
 
-The serialized result is a binary string. Names, filenames, and schemas are
-ordinary strings too, but wire bytes need not be text and may contain NULs.
-Errors are strings identifying the rejected type, value, or wire condition.
+`serialize_to_buffer` and `serialize_fields_to_buffer` append encoded wire bytes
+into a caller-initialized `titan_protobuf_buffer` (`buf`) without allocating an
+intermediate Lua string. `deserialize_nominal_buffer` and
+`deserialize_fields_buffer` decode directly from a borrowed `const void *` byte
+slice of length `length`. `find_transfer_hooks` returns a record's validated
+`(to_transfer_payload, from_transfer_payload)` pair (memoized per nominal record
+name `descriptor.name`), and `encode_transfer_payload` invokes `to_hook` under
+the shared active-record cycle guard.
+
+The serialized result of `serialize` and `serialize_fields` is a binary string.
+Names, filenames, and schemas are ordinary strings too, but wire bytes need not
+be text and may contain NULs. Errors are strings identifying the rejected type,
+value, or wire condition.
 
 ## Anonymous messages
 
@@ -186,9 +207,15 @@ unread packet; protobuf encoding adds no delivery guarantee.
 
 Records with the [custom transfer-hook pair](async-io.md#custom-record-transfer)
 use an `is_record_payload(module, name, bytes)` carrier instead during automatic
-transfer. Hooks may use an anonymous-message descriptor to encode native
-tokens and copied state. Calling `protobuf.serialize` directly
-continues to apply the structural public-data rules in this chapter.
+transfer at the root. When such a record appears as a nested field inside an
+outer public record or union (or inside an Array field), `protobuf.serialize`,
+`protobuf.deserialize`, and `protobuf.schema` automatically delegate that
+nested field to its `to_transfer_payload(): string` and
+`from_transfer_payload(payload: string): Record` hooks and represent it on the
+wire as `optional bytes` without requiring public fields on the hooked record.
+Hooks may use an anonymous-message descriptor to encode native tokens and
+copied state. Calling `protobuf.serialize` directly on a root record continues
+to apply the structural public-data rules in this chapter.
 
 `TransferValue:to_value()` first checks the destination nominal registry. On a
 miss it calls the recorded module's native preload loader and retries lookup.

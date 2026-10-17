@@ -1,6 +1,6 @@
 # Supplemental public API reference
 
-These 214 declarations complement the 305 canonical native wrappers. Constructors and owner methods are also grouped with their type in [types](types.md). Every entry uses the public signature; private native fields are omitted. See [ownership contracts](CONTRACT-NOTES.md) for the owner, buffer, callback, and native worker rules.
+These 220 declarations complement the 305 canonical native wrappers. Constructors and owner methods are also grouped with their type in [types](types.md). Every entry uses the public signature; private native fields are omitted. See [ownership contracts](CONTRACT-NOTES.md) for the owner, buffer, callback, and native worker rules.
 
 ## Native resource handoff
 
@@ -44,6 +44,17 @@ function async_send_function(): foreign function (*void): int
 ```
 
 Returns the native-safe opaque async-send entry for an already-C-only carrier. Obtain and retain its associated owner before native use; ordinary async_send remains a Lua-thread call.
+
+
+## async_send_native
+
+Notify a borrowed initialized `uv_async_t` handle directly from C or Titan without entering Lua. Retain the associated `async_t` owner across all native callers and stop sending before closing the handle.
+
+```titan
+foreign function async_send_native(handle: *void): int
+```
+
+**Roles:** handle: INPUT borrowed initialized native uv_async_t pointer; caller retains the associated owner across all native uses.
 
 
 ## async_t.new
@@ -753,6 +764,15 @@ function loop_t:secondary_error_count(): integer
 ```
 
 
+## mutex_t.create_native
+
+Allocate and initialize a process-heap `uv_mutex_t` not owned by any Lua state's GC. Destroy and free it with `native_mutex_destroy` only after all native users have stopped.
+
+```titan
+function mutex_t.create_native(): foreign *void
+```
+
+
 ## mutex_t.lock_function
 
 Return the exact C-only native entry for this operation. Obtain this pointer and retain borrowed owners before starting native work. Foreign calls obey native synchronization/lifetime rules and cannot enter Titan or Lua.
@@ -850,6 +870,39 @@ Convenience method for [`mutex_unlock`](functions/threading.md#mutex_unlock) on 
 ```titan
 function mutex_t:unlock()
 ```
+
+
+## native_mutex_destroy
+
+Destroy and free a process-heap mutex created with `mutex_t.create_native` after all native callers are quiescent. Passing NULL is a no-op.
+
+```titan
+foreign function native_mutex_destroy(native: *void): void
+```
+
+**Roles:** native: INPUT/OUTPUT process-heap mutex pointer from mutex_t.create_native, or NULL; destroys and frees after quiescence.
+
+
+## native_mutex_lock
+
+Lock a borrowed or process-heap initialized `uv_mutex_t` pointer directly from C or Titan.
+
+```titan
+foreign function native_mutex_lock(native: *void): void
+```
+
+**Roles:** native: INPUT/OUTPUT borrowed or process-heap initialized uv_mutex_t pointer.
+
+
+## native_mutex_unlock
+
+Unlock a borrowed or process-heap initialized `uv_mutex_t` pointer directly from C or Titan.
+
+```titan
+foreign function native_mutex_unlock(native: *void): void
+```
+
+**Roles:** native: INPUT/OUTPUT borrowed or process-heap initialized uv_mutex_t pointer.
 
 
 ## once_function
