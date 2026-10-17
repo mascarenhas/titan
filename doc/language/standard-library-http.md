@@ -111,6 +111,7 @@ function listen_tls(host: string, certificate_file: string, handler: Handler,
 function Server:idle_timeout(timeout: integer?): integer
 function Server:header_limit(limit: integer?): integer
 function Server:serve()
+function Server:read_ahead(enabled: boolean?): boolean
 function Server:close()
 ```
 
@@ -537,6 +538,16 @@ the supervising Task's transport cleanup.
 
 ## Resource handoff
 
+For portable handoff after HTTP classification, call
+`listener:read_ahead(false)` before serving connections. This setting defaults
+to true; the method returns the previous value and an omitted argument only
+queries it. Changes affect newly accepted TCP/TLS connections, before their
+first header read or TLS handshake, and leave existing connections unchanged.
+Demand-driven reads avoid posting another Windows overlapped read between
+operations. Yield with `async.yield()` after the last read/write and before
+synchronous encoding so its native callback can retire. Pending application
+operations and native requests still reject handoff.
+
 A handler's `Request` and `Response` share one parser and transport. Bundle them
 with `http.Exchange(request, response)` and transfer that public record:
 
@@ -572,7 +583,8 @@ owner encodes a private protobuf schema containing its metadata and the known
 transport's byte payload. Failure to serialize after transport detachment closes
 the detached transport and leaves the source inactive.
 
-`UpgradedStream.discard_transfer_payload(payload: string): integer` consumes a
+`Exchange.discard_transfer_payload(payload: string): integer` and
+`UpgradedStream.discard_transfer_payload(payload: string): integer` consume a
 known unadopted payload without a Runtime and returns its native close status.
 A close attempt consumes the payload even on an error; do not adopt or discard
 the bytes afterward.

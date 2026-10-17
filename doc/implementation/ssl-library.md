@@ -116,6 +116,11 @@ transmitted chain. The first decoded unencrypted private key is retained by
 the context, then checked against the leaf. Encrypted keys are rejected because
 the API has no password input.
 
+`Connection:read_ahead(enabled?)` delegates directly to its public TCP
+transport. A lazy accepted TLS connection can select demand-driven reading
+before any handshake input. TLS engine serialization and operation admission
+are unchanged; the TCP transfer packet carries this policy across states.
+
 The configured `SSL_CTX` is retained on `ssl.Server`. The optional backlog and
 `reuse_port` are delegated to `net.listen`, which supplies 128 and false when
 absent. Reuse changes only the bind flags; it adds no shared TLS context or

@@ -1581,6 +1581,15 @@ function Connection:handshake()
   end)
 end
 
+--- Read or configure TCP read-ahead before the first TLS transport read.
+-- @param enabled New native input policy; nil only queries it.
+-- @return Previous transport policy; true enables persistent read-ahead by default.
+-- @usage standard-library-ssl.md#reading-and-writing
+function Connection:read_ahead(enabled: boolean?): boolean
+  if self.transport == nil then raise "cannot configure read-ahead on a transferred TLS Connection" end
+  return self.transport:read_ahead(enabled)
+end
+
 --- Query buffered plaintext/ciphertext or a state that is not fully open.
 -- @return True for pending input or non-open state; a TLS control or partial record may still need I/O.
 -- @usage standard-library-ssl.md#reading-and-writing

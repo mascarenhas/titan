@@ -11,7 +11,7 @@ local reflect = import "reflect"
 local const connection_transfer_fields: const {reflect.Type} = {
   reflect.Type.is_string(), reflect.Type.is_string(), reflect.Type.is_integer(),
   reflect.Type.is_option(reflect.Type.is_named(reflect.NamedType("titan.async.OperationError"))),
-  reflect.Type.is_boolean(),
+  reflect.Type.is_boolean(), reflect.Type.is_boolean(), reflect.Type.is_boolean(),
 }
 
 -- Stream payloads are binary strings, so delimiter handling uses the string
@@ -40,6 +40,8 @@ record Connection
   local input: async.BufferedSubscription<|string, value|>?
   local start_read: (function (): integer)?
   local started: boolean
+  local read_ahead_enabled: boolean
+  local read_started: boolean
   local read_buffer: uv.buf_t?
   local phase: integer
   local input_listeners: {InputRegistration}
@@ -175,12 +177,14 @@ local function wrap_connection(loop: uv.loop_t, tcp: uv.tcp_t,
   local connection: Connection = {
     handle = tcp, handle_view = handle, stream = stream, loop = loop,
     excess = "", input = nil, start_read = nil, started = false,
+    read_ahead_enabled = true, read_started = false,
     read_buffer = nil, phase = CONNECTION_UNCONNECTED, input_listeners = {},
     pending_outputs = 0,
   }
   connection.input = async.BufferedSubscription<|string, value|>(function (publish, fail, finish)
     local stop = function ()
       if connection.started then uv.read_stop(stream) end
+      connection.started = false
       -- Public UV independently retains any outstanding allocation/read pair.
       connection.read_buffer = nil
     end
@@ -204,9 +208,14 @@ local function wrap_connection(loop: uv.loop_t, tcp: uv.tcp_t,
     local receive = function (_: uv.stream_t, count: integer, buffer: uv.buf_t?)
       if count == 0 then return end
       if count > 0 then
+        if not connection.read_ahead_enabled then
+          check_status(uv.read_stop(stream), "net.read.stop")
+          connection.started = false
+        end
         publish(buffer:to_string(count))
       else
         uv.read_stop(stream)
+        connection.started = false
         connection.read_buffer = nil
         if count == uv.EOF then finish()
         else fail(operation_error(count, "net.read")) end
@@ -455,9 +464,10 @@ local function read(connection: Connection): string?
   -- Admit cancellation before reader contention or the first persistent read.
   async.checkpoint()
   if connection.input:has_waiter() then raise "Connection already has a waiting reader" end
-  if not connection.started then
+  if not connection.started and not connection.input:has_pending() then
     check_status(connection.start_read(), "net.read.start")
     connection.started = true
+    connection.read_started = true
   end
   case connection.input:next()
   when item(bytes) then return bytes
@@ -583,6 +593,20 @@ function listen(host: string, port: integer,
     last_status = status
   end
   raise operation_error(last_status, "net.listen")
+end
+
+--- Read or configure whether native input continues between application reads.
+-- @param enabled New policy before the first native read; nil only queries it.
+-- @return Previous policy; true is the default persistent read-ahead mode.
+-- @usage standard-library-net.md#reading
+function Connection:read_ahead(enabled: boolean?): boolean
+  local previous = self.read_ahead_enabled
+  if enabled ~= nil then
+    validate(self.handle_view, self.loop, "configure read-ahead on")
+    if self.read_started then raise "cannot configure TCP read-ahead after reading has started" end
+    self.read_ahead_enabled = enabled
+  end
+  return previous
 end
 
 --- Query buffered input or a terminal/unconnected state without consuming bytes.
@@ -758,7 +782,8 @@ function Connection:to_transfer_payload(): string
   local exported = false
   defer if not exported then uv.tcp_t.discard_transfer_payload(native_payload) end
   local payload = protobuf.serialize_fields(connection_transfer_fields,
-    native_payload, input_bytes, terminal_kind, failure, started)
+    native_payload, input_bytes, terminal_kind, failure, started,
+    self.read_ahead_enabled, self.read_started)
   exported = true
   return payload
 end
@@ -769,7 +794,7 @@ end
 -- @usage standard-library-net.md#transferring-connections
 function Connection.from_transfer_payload(payload: string): Connection
   local native_payload: string, bytes: string, terminal: integer,
-    failure: async.OperationError?, started: boolean =
+    failure: async.OperationError?, started: boolean, read_ahead: boolean, read_started: boolean =
     protobuf.deserialize_fields(payload, connection_transfer_fields)
   if terminal < 0 or terminal > 2 then raise "invalid TCP Connection receive state" end
   if (terminal == 2) ~= (failure ~= nil) then
@@ -784,7 +809,9 @@ function Connection.from_transfer_payload(payload: string): Connection
   local connection = wrap_connection(loop, tcp, terminal, failure)
   connection.phase = CONNECTION_CONNECTED
   connection.excess = bytes
-  if started and terminal == 0 then
+  connection.read_ahead_enabled = read_ahead
+  connection.read_started = read_started
+  if read_ahead and started and terminal == 0 then
     check_status(connection.start_read(), "net.transfer.read.start")
     connection.started = true
   end

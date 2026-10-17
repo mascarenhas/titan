@@ -1,0 +1,64 @@
+function test_transfer_discard_closes_unadopted_session(_context: test.Context)
+  runtime_test.run(function ()
+    local send, receive, close = async.channel<|string|>()
+    defer close()
+    local listener: http.Server? = nil
+    local handler: http.Handler = function (request: http.Request, response: http.Response)
+      local source = websocket.accept(request, response)
+      defer source:close()
+      async.yield()
+      send(source:to_transfer_payload())
+      listener:close()
+    end
+    local port = 0
+    listener, port = listen_http(handler, false)
+    defer listener:close()
+    listener:read_ahead(false)
+    local serving = async.run<|nil, value|>(function (): nil listener:serve(); return nil end)
+    task_support.cleanup_task(serving, "discarded WebSocket listener")
+    local peer = websocket.connect("ws://127.0.0.1:" .. port .. "/discard")
+    defer peer:close()
+    local payload = receive()
+    test.assert(websocket.Connection.discard_transfer_payload(payload) == 0,
+      "discard did not close the detached WebSocket transport")
+    local failure = expect_error(function () peer:read() end)
+    test.assert(failure is websocket.Error or failure is async.OperationError,
+      "discarded WebSocket transport did not terminate the peer")
+    async.join(serving)
+    test.assert(serving:status():has_succeeded(), "listener did not finish successfully")
+  end)
+end
+
+function test_transfer_discard_rejects_malformed_payload(_context: test.Context)
+  expect_error(function () websocket.Connection.discard_transfer_payload("") end)
+  expect_error(function () websocket.Connection.discard_transfer_payload("\255") end)
+end
+
+function test_transfer_discard_without_runtime(_context: test.Context)
+  local payload: string? = nil
+  runtime_test.run(function ()
+    local send, receive, close = async.channel<|string|>()
+    defer close()
+    local listener: http.Server? = nil
+    local handler: http.Handler = function (request: http.Request, response: http.Response)
+      local source = websocket.accept(request, response)
+      defer source:close()
+      async.yield()
+      send(source:to_transfer_payload())
+      listener:close()
+    end
+    local port = 0
+    listener, port = listen_http(handler, false)
+    defer listener:close()
+    listener:read_ahead(false)
+    local serving = async.run<|nil, value|>(function (): nil listener:serve(); return nil end)
+    task_support.cleanup_task(serving, "WebSocket discard without Runtime listener")
+    local peer = websocket.connect("ws://127.0.0.1:" .. port .. "/discard")
+    defer peer:close()
+    payload = receive()
+    async.join(serving)
+    test.assert(serving:status():has_succeeded(), "listener did not finish successfully")
+  end)
+  test.assert(websocket.Connection.discard_transfer_payload(payload) == 0,
+    "discard required a live Runtime")
+end

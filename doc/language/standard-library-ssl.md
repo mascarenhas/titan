@@ -45,6 +45,7 @@ function listen(host: string, port: integer,
                 backlog: integer?, reuse_port: boolean?): Server
 
 function Connection:handshake()
+function Connection:read_ahead(enabled: boolean?): boolean
 function Connection:read(): string?
 function Connection:has_pending_input(): boolean
 function Connection:add_input_listener(listener: function (): ()): function (): ()
@@ -192,6 +193,10 @@ Transfer rejects pending read, write, handshake, shutdown, retry, cleanup or
 retirement ownership. It also follows every
 [TCP transfer restriction](standard-library-net.md#transferring-connections),
 including registered input observers and native overlapped reads on Windows.
+`Connection:read_ahead(enabled?)` forwards the TCP read-ahead policy and returns
+its previous setting. Configure false before the first TLS handshake or I/O to
+permit demand-driven native reads, then yield after completed I/O before handoff.
+The setting is inherited by transferred TLS connections.
 An admission failure leaves the original connection usable. The source becomes
 closed after the transport detaches, before any receiver accepts the payload.
 The private protobuf schema stores the TCP child bytes, a fixed64 engine pointer,

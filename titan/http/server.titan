@@ -50,6 +50,7 @@ record Server
   local handler: Handler
   local idle_timeout_ms: integer
   local header_limit_bytes: integer
+  local read_ahead_enabled: boolean
   local closed: boolean
   local listener_closed: boolean
 end
@@ -541,10 +542,12 @@ end
 local function accept_connection(server: Server): Transport
   if server.encrypted then
     local connection = (server.secure as ssl.Server):accept()
+    connection:read_ahead(server.read_ahead_enabled)
     local channel: io.ReaderWriterCloser = connection
     return Transport(channel, connection:abort)
   end
   local connection = (server.plain as net.Server):accept()
+  connection:read_ahead(server.read_ahead_enabled)
   local channel: io.ReaderWriterCloser = connection
   return Transport(channel, connection:close)
 end
@@ -575,6 +578,7 @@ function listen(host: string, handler: Handler, port: integer?,
     handler = handler,
     idle_timeout_ms = actual_idle_timeout,
     header_limit_bytes = 65536,
+    read_ahead_enabled = true,
     closed = false,
     listener_closed = false,
   }
@@ -610,9 +614,23 @@ function listen_tls(host: string, certificate_file: string, handler: Handler,
     handler = handler,
     idle_timeout_ms = actual_idle_timeout,
     header_limit_bytes = 65536,
+    read_ahead_enabled = true,
     closed = false,
     listener_closed = false,
   }
+end
+
+--- Read or configure native read-ahead for subsequently accepted connections.
+-- @param enabled New TCP input policy; nil only queries it.
+-- @return Previous policy; true enables persistent read-ahead by default.
+-- @usage standard-library-http.md#servers-and-handlers
+function Server:read_ahead(enabled: boolean?): boolean
+  local previous = self.read_ahead_enabled
+  if enabled ~= nil then
+    if self.closed then raise "HTTP Server is closed" end
+    self.read_ahead_enabled = enabled
+  end
+  return previous
 end
 
 --- Read or update the next request-header deadline, returning its previous value.

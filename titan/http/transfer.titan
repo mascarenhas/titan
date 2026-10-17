@@ -402,6 +402,16 @@ function Exchange:close()
   state.transport.connection:close()
 end
 
+--- Dispose of an undelivered exchange without adopting its parser or transport.
+-- @return Native close status; adoption or disposal consumes the payload.
+-- @usage standard-library-http.md#resource-handoff
+function Exchange.discard_transfer_payload(payload: string): integer
+  local items: {value} = {protobuf.deserialize_fields(payload, exchange_transfer_fields)}
+  local kind: integer = items[#exchange_transfer_fields - 1]
+  local transport_payload: string = items[#exchange_transfer_fields]
+  return discard_transfer_transport(kind, transport_payload)
+end
+
 --- Handle this exchange and subsequent keep-alive requests on the adopted connection.
 -- The supplied handler owns application policy in the destination state.
 -- @usage standard-library-http.md#resource-handoff

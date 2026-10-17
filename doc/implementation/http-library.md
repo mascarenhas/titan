@@ -497,6 +497,14 @@ there is no connection-local watchdog or generation protocol.
 
 ## Cross-state exchange ownership
 
+`Server:read_ahead(enabled?)` stores a listener policy, defaulting to true.
+`accept_connection` applies it through the public TCP/TLS Connection method
+before parser or lazy TLS handshake input. It affects future accepted sockets
+only. Demand mode stops each native read before publication, allowing Windows
+header classification followed by an explicit callback-retirement yield and
+ordinary Exchange handoff. The existing native pending-request gate remains
+authoritative.
+
 `ExchangeState` remains the shared private owner of the parser, captured transport,
 and admission flags. Public `Exchange` bundles its matching `Request` and
 `Response`; its custom hook detaches that shared owner once. Request reads,
@@ -539,6 +547,11 @@ protobuf schema carries prefix, transport kind and child bytes. Its public
 `discard_transfer_payload` decodes those bytes and directly retires the known
 TCP/TLS child without a Runtime; WebSocket uses this method for failed outer
 serialization. A native close attempt consumes the packet even on an error.
+
+`Exchange.discard_transfer_payload` validates the same anonymous schema,
+selects its final transport kind/bytes, and delegates directly to the concrete
+TCP/TLS discard operation. It never reconstructs a parser or adopts a handle,
+so failed delivery can retire a known packet without a live Runtime.
 
 ## Native build and provider composition
 

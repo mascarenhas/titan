@@ -125,7 +125,8 @@ TITAN_TEST_SOURCES_http.tests := spec/stdlib/titan/http/tests/tests.titan \
 	spec/stdlib/titan/http/tests/test_cases.titan \
 	spec/stdlib/titan/http/tests/timeout_tls_behavior.titan \
 	spec/stdlib/titan/http/tests/upgrade_behavior.titan \
-	spec/stdlib/titan/http/tests/transfer_test.titan
+	spec/stdlib/titan/http/tests/transfer_test.titan \
+	spec/stdlib/titan/http/tests/discard_transfer_test.titan
 TITAN_TEST_IMPORTS_http.tests := http.test_support support.async support.command support.common support.runtime
 
 TITAN_TEST_SOURCES_io.test_support := spec/stdlib/titan/io/test_support.titan
@@ -343,6 +344,7 @@ TITAN_TEST_SOURCES_websocket.tests := spec/stdlib/titan/websocket/tests/tests.ti
 	spec/stdlib/titan/websocket/tests/ownership_test.titan \
 	spec/stdlib/titan/websocket/tests/backpressure.titan \
 	spec/stdlib/titan/websocket/tests/backpressure_test.titan \
-	spec/stdlib/titan/websocket/tests/transfer_test.titan
+	spec/stdlib/titan/websocket/tests/transfer_test.titan \
+	spec/stdlib/titan/websocket/tests/discard_transfer_test.titan
 TITAN_TEST_IMPORTS_websocket.tests := support.async support.common support.runtime
 TITAN_TEST_C_INPUTS_websocket.tests := spec/stdlib/titan/websocket/tests/pressure-native.h

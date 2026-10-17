@@ -2,12 +2,6 @@ local transfer_lua = import "lua"
 local transfer_gc = import "gc"
 local transfer_common = import "support.common.titan"
 
-local function require_http_native_handoff()
-  if transfer_common.is_windows() then
-    test.skip("platform: Windows native pending reads are rejected by the transfer contract")
-  end
-end
-
 local function http_exchange_cross_state(secure: boolean)
   runtime_test.run(function ()
     local ready = async.receiver()
@@ -23,6 +17,7 @@ local function http_exchange_cross_state(secure: boolean)
         response:add_header("X-Reply", "first")
         response:add_header("X-Reply", "second")
         response:write("one")
+        async.yield()
         packet = async.TransferValue.from_value(http.Exchange(request, response))
         transfer_common.assert_raises_contains(function () request:read() end, "exchange has ended")
         transfer_common.assert_raises_contains(function () response:write("bad") end, "exchange has ended")
@@ -35,6 +30,9 @@ local function http_exchange_cross_state(secure: boolean)
         listener, port = support.http_listen(46700, handler)
       end
       defer listener:close()
+      test.assert(listener:read_ahead(), "HTTP read-ahead did not default to enabled")
+      test.assert(listener:read_ahead(false), "HTTP read-ahead setter lost the previous policy")
+      test.assert(not listener:read_ahead())
       async.send(ready_handle, async.TransferValue.is_integer(port))
       listener:serve()
       if packet == nil then raise "HTTP worker did not transfer its exchange" end
@@ -90,17 +88,16 @@ local function http_exchange_cross_state(secure: boolean)
 end
 
 function test_transfer_exchange_survives_source_state_close(context: test.Context)
-  require_http_native_handoff()
   context:run("http", function (_child: test.Context) http_exchange_cross_state(false) end)
   context:run("https", function (_child: test.Context) http_exchange_cross_state(true) end)
 end
 
 function test_transfer_exchange_preserves_pipelined_keep_alive(_context: test.Context)
-  require_http_native_handoff()
   runtime_test.run(function ()
     local handled = 0
     local listener: http.Server? = nil
     local handler: http.Handler = function (request: http.Request, response: http.Response)
+      async.yield()
       local packet = async.TransferValue.from_value(http.Exchange(request, response))
       local moved: http.Exchange = packet:to_value()
       moved:serve(function (next_request: http.Request, next_response: http.Response)
@@ -119,6 +116,7 @@ function test_transfer_exchange_preserves_pipelined_keep_alive(_context: test.Co
     local port = 0
     listener, port = support.http_listen(46800, handler)
     defer listener:close()
+    listener:read_ahead(false)
     local serving = async.run<|nil, value|>(function (): nil listener:serve(); return nil end)
     task_support.cleanup_task(serving, "HTTP transferred keep-alive listener")
     local client = net.connect("127.0.0.1", port)

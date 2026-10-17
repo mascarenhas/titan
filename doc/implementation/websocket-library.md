@@ -185,3 +185,12 @@ Protocol references: [RFC 6455](https://www.rfc-editor.org/rfc/rfc6455.html),
 [case-sensitive subprotocols](https://www.rfc-editor.org/rfc/rfc7936.html),
 [close registry](https://www.iana.org/assignments/websocket/websocket.xhtml),
 and [OpenSSL EVP](https://docs.openssl.org/3.5/man3/EVP_DigestInit/).
+
+## Discarding undelivered handoffs
+
+`Connection.discard_transfer_payload` decodes the existing schema's first
+stream-payload field and delegates to `http.UpgradedStream`'s public discard
+operation. It does not reconstruct WebSocket state or require a Runtime.
+The close attempt consumes the payload even when its returned native status
+reports an error; delivery supervisors must choose exactly one adoption or
+discard path.
