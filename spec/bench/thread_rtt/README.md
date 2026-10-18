@@ -10,6 +10,11 @@ are failure receipts, not timings. A successful build or smoke does not establis
 baseline repeatability, lifecycle correctness, or a speedup. Publish actual
 results only after measurement, using [the report contract](REPORT_TEMPLATE.md).
 
+The measured [original/resource-ownership baseline report](reports/resource-v4-report.md)
+includes the full53-case tables and a self-contained raw/source/provenance archive.
+It describes the pre-wake checkpoint and its known lifecycle/fairness limits,
+not final corrected wake/join performance or platform acceptance.
+
 ## Checkpoints and Acceptance Order
 
 1. Commit the baseline harness before switching the actual thread wait/spawn

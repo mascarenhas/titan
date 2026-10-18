@@ -1,0 +1,15 @@
+{
+  "archive": "resource-v4-evidence.tar.gz",
+  "bytes": 24146556,
+  "compiled_private_artifacts_included": false,
+  "harness_commit": "f14260b4",
+  "member_files": 8219,
+  "original_sdk_included": false,
+  "recorded_path_index": "RECORDED-PATHS.json: 8217 original absolute paths mapped to archive/extracted-relative members with SHA-256 and size; EVIDENCE-FILES.json inventories the same original bytes",
+  "dependency_inputs": "Four exact original dependency .rock packages (97333 bytes total): argparse, inspect, lpeglabel and luafilesystem. Two contain third-party .so payloads; these tiny original build inputs and their MIT licenses are included, not an SDK/provider/executable output tree.",
+  "quiescence_note_sha256": "b9c72ffcc73c966ea50d5828a35f96cd2c2f227b9a6161c6d3157097f718b483",
+  "raw_evidence_sha256": "86000028e47677296de784e522d2faaa05f6c8f4d7d920aae8a87e5a913148d8",
+  "scope": "Original versus resource-ownership/pre-wake; not final wake/join acceptance",
+  "sha256": "4650fc5c4095117c1b4a73a71bc39a9e1998aeb08bc173d4359baadb916715b2",
+  "source_reconstruction": "Original66d/Lua025b/skills9d git archives and exact resource-r3 overlay included; canonical full26-root providers/consumers rebuild from archived scripts, frozen harness, flags, source/SDK receipts and Native payload identities. Installed SDK binaries and generated C/object/provider binaries remain parent-owned local artifacts, not this raw/source archive."
+}
