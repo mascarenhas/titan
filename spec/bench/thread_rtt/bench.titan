@@ -1,0 +1,2215 @@
+-- Private benchmark consumer of the installed public Titan provider.
+-- Never source-import stdlib modules; all imports must resolve from the provider.
+
+foreign import "lua.h"
+foreign import "titan/ffi.h"
+foreign import "rtt_probe.h"
+
+local async = import "async"
+local gc = import "gc"
+local protobuf = import "protobuf"
+local reflect = import "reflect"
+local string = import "string"
+local thread = import "thread"
+local transfer = import "transfer"
+
+local const token_value = 19088743
+local const token_bytes = "gE#\001\000\000\000\000"
+
+record BytesToken
+  const bytes: string
+end
+
+function BytesToken:to_transfer_payload(): string
+  return self.bytes
+end
+
+function BytesToken.from_transfer_payload(payload: string): BytesToken
+  return BytesToken(payload)
+end
+
+record PackedToken
+  const bits: integer
+end
+
+function PackedToken:to_transfer_payload(): string
+  return string.pack("<i8", self.bits)
+end
+
+function PackedToken.from_transfer_payload(payload: string): PackedToken
+  local bits: integer = string.unpack("<i8", payload)
+  return PackedToken(bits)
+end
+
+record ReplyMsg
+  const id: integer
+  const value: integer
+  const tag: string
+end
+
+record PlainJob
+  const id: integer
+  const body: string
+  const reply: string
+end
+
+record BytesJob
+  const id: integer
+  const body: string
+  const reply: BytesToken
+end
+
+record PackedJob
+  const id: integer
+  const body: string
+  const reply: PackedToken
+end
+
+record SenderJob
+  const id: integer
+  const body: string
+  const reply: thread.Sender<|integer|>
+end
+
+record ReceiverJob
+  const id: integer
+  const body: string
+  const reply: thread.Receiver<|integer|>
+end
+
+record RpcSenderJob
+  const id: integer
+  const body: string
+  const reply: thread.Sender<|ReplyMsg|>
+end
+
+record LargeJob
+  const id: integer
+  const body: string
+  const reply: string
+end
+
+record LargeSenderJob
+  const id: integer
+  const body: string
+  const reply: thread.Sender<|ReplyMsg|>
+end
+
+record ReplySenderPool
+  const senders: {thread.Sender<|ReplyMsg|>}
+end
+
+record MpmcProducer<|T|>
+  const request: thread.Sender<|T|>
+  const replies: {thread.Receiver<|ReplyMsg|>}
+  const reply_senders: {thread.Sender<|ReplyMsg|>}
+  const permits: {thread.Receiver<|integer|>}
+  const release_permits: {thread.Sender<|integer|>}
+  const ready: thread.Sender<|integer|>
+  const start: thread.Receiver<|integer|>
+  const done: thread.Sender<|integer|>
+  const retire: thread.Receiver<|integer|>
+  const index: integer
+  const producers: integer
+  const in_flight: integer
+  const count: integer
+  const warmup: integer
+end
+
+record Small
+  id: integer
+  body: string
+end
+
+record Wide
+  f1: integer
+  f2: integer
+  f3: integer
+  f4: integer
+  f5: integer
+  f6: integer
+  f7: integer
+  f8: integer
+  f9: integer
+  f10: integer
+  f11: integer
+  f12: integer
+  f13: integer
+  f14: integer
+  f15: integer
+  f16: integer
+end
+
+record Blob
+  bytes: string
+end
+
+local record CaseMeta
+  const name: string
+  const category: string
+  const protocol: string
+  const default_count: integer
+  const default_warmup: integer
+  const in_flight: integer
+  const producers: integer
+  const consumers: integer
+  const capacity: integer
+end
+
+local function parse_int(text: string): integer
+  if #text == 0 then raise "empty integer argument" end
+  local pos = 1
+  local neg = false
+  local first: integer? = string.byte(text, 1)
+  if first == 45 then
+    neg = true
+    pos = 2
+  end
+  if pos > #text then raise "invalid integer argument: " .. text end
+  local acc = 0
+  for i = pos, #text do
+    local b: integer? = string.byte(text, i)
+    if b == nil or b < 48 or b > 57 then
+      raise "invalid integer argument: " .. text
+    end
+    acc = acc * 10 + (b - 48)
+  end
+  if neg then return -acc end
+  return acc
+end
+
+local function abs_int(v: integer): integer
+  if v < 0 then return -v end
+  return v
+end
+
+local function record_descriptor(candidate: value): reflect.Type
+  case reflect.inspect(candidate)
+  when is_record(record_value) then
+    return reflect.Type.is_record(record_value.type)
+  else
+    raise "benchmark expected a record"
+  end
+end
+
+local function run_in_runtime(body: function (): integer): integer
+  local out = 0
+  local task = async.run<|integer, value|>(body)
+  async.loop()
+  case task:status()
+  when succeeded(v) then
+    out = v
+  when failed(err) then
+    err:raise()
+  when cancelled(reason) then
+    raise reason
+  else
+    raise "benchmark runtime task did not finish"
+  end
+  return out
+end
+
+local function await_task<|T|>(task: async.Task<|T, value|>): T
+  case async.join(task)
+  when succeeded(val) then
+    return val
+  when failed(err) then
+    err:raise()
+    raise err.error
+  when cancelled(reason) then
+    raise reason
+  else
+    raise "task did not finish"
+  end
+end
+
+local function join_worker(th: thread.Thread<|integer|>): integer
+  case th:join()
+  when succeeded(v) then
+    return v
+  when failed(err) then
+    err:raise()
+    raise err.error
+  when cancelled(reason) then
+    raise reason
+  else
+    raise "worker did not finish"
+  end
+end
+
+local function raw_roundtrip(candidate: value): value
+  local top = ffi.lua_gettop(L)
+  defer ffi.lua_settop(L, top)
+  local raw: foreign *void = transfer.encode_message(candidate)
+  defer transfer.discard_message(raw)
+  local status = transfer.decode_message(L, raw)
+  if status ~= 0 then
+    local failure: value = nil
+    if status > 0 then failure = ffi.lua_totvalue(L, -1) as value end
+    transfer.raise_message_error(status, failure)
+  end
+  return ffi.lua_totvalue(L, -1) as value
+end
+
+local function wait_until_waiting<|T|>(task: async.Task<|T, value|>)
+  while task:status():as_string() ~= "waiting" do
+    if task:status():has_finished() then
+      raise "task terminated before reaching its controlled wait"
+    end
+    async.yield()
+  end
+end
+
+local function warm_channel<|T|>(item: T): T
+  local tx, rx = thread.channel<|T|>(1)
+  local reader = async.run<|T, value|>(function (): T
+    return rx:receive()
+  end)
+  wait_until_waiting(reader)
+  tx:send(item)
+  local restored = await_task(reader)
+  tx:close(); rx:close()
+  return restored
+end
+
+local function traced_send<|T|>(tx: thread.Sender<|T|>, item: T, endpoint_retains: integer)
+  local slot = ffi.rtt_probe_op_begin(ffi.RTT_OP_SEND as foreign int, endpoint_retains as foreign int)
+  do
+    tx:send(item)
+  catch
+    if error is async.CancellationReason<|value|> then
+      ffi.rtt_probe_op_end(slot, ffi.RTT_OUTCOME_CANCELLED as foreign int)
+    else
+      ffi.rtt_probe_op_end(slot, ffi.RTT_OUTCOME_CLOSED as foreign int)
+    end
+    raise
+  end
+  ffi.rtt_probe_op_end(slot, ffi.RTT_OUTCOME_OK as foreign int)
+end
+
+local function traced_receive<|T|>(rx: thread.Receiver<|T|>): T
+  local slot = ffi.rtt_probe_op_begin(ffi.RTT_OP_RECV as foreign int, 0)
+  do
+    local val = rx:receive()
+    ffi.rtt_probe_op_end(slot, ffi.RTT_OUTCOME_OK as foreign int)
+    return val
+  catch
+    if error is async.CancellationReason<|value|> then
+      ffi.rtt_probe_op_end(slot, ffi.RTT_OUTCOME_CANCELLED as foreign int)
+    else
+      ffi.rtt_probe_op_end(slot, ffi.RTT_OUTCOME_CLOSED as foreign int)
+    end
+    raise
+  end
+end
+
+local function traced_receive_result<|T|>(rx: thread.Receiver<|T|>): thread.ReceiveResult<|T|>
+  local slot = ffi.rtt_probe_op_begin(ffi.RTT_OP_RECV as foreign int, 0)
+  local res: thread.ReceiveResult<|T|> = thread.ReceiveResult<|T|>.closed()
+  do
+    res = rx:receive_result()
+  catch
+    if error is async.CancellationReason<|value|> then
+      ffi.rtt_probe_op_end(slot, ffi.RTT_OUTCOME_CANCELLED as foreign int)
+    else
+      ffi.rtt_probe_op_end(slot, ffi.RTT_OUTCOME_CLOSED as foreign int)
+    end
+    raise
+  end
+  case res
+  when message(_) then
+    ffi.rtt_probe_op_end(slot, ffi.RTT_OUTCOME_OK as foreign int)
+  when closed() then
+    ffi.rtt_probe_op_end(slot, ffi.RTT_OUTCOME_CLOSED as foreign int)
+  end
+  return res
+end
+
+-- ============================================================================
+-- Group 1: Same-state codec & overhead controls
+-- ============================================================================
+
+local function run_codec_case(
+    case_name: string,
+    count: integer,
+    warmup: integer): (integer, integer)
+  local small = Small(7, "request")
+  local wide = Wide(1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16)
+  local blob = Blob(string.rep("x", 65536))
+  local small_type = record_descriptor(small)
+  local wide_type = record_descriptor(wide)
+  local blob_type = record_descriptor(blob)
+  local small_bytes = protobuf.serialize(small)
+  local wide_bytes = protobuf.serialize(wide)
+  local blob_bytes = protobuf.serialize(blob)
+
+  local c1 = 1
+  local c2 = 2; local c3 = 3; local c4 = 4; local c5 = 5; local c6 = 6; local c7 = 7; local c8 = 8
+  local c9 = 9; local c10 = 10; local c11 = 11; local c12 = 12; local c13 = 13; local c14 = 14; local c15 = 15; local c16 = 16
+  local c17 = 17; local c18 = 18; local c19 = 19; local c20 = 20; local c21 = 21; local c22 = 22; local c23 = 23; local c24 = 24
+  local c25 = 25; local c26 = 26; local c27 = 27; local c28 = 28; local c29 = 29; local c30 = 30; local c31 = 31; local c32 = 32
+  local c33 = 33; local c34 = 34; local c35 = 35; local c36 = 36; local c37 = 37; local c38 = 38; local c39 = 39; local c40 = 40
+  local c41 = 41; local c42 = 42; local c43 = 43; local c44 = 44; local c45 = 45; local c46 = 46; local c47 = 47; local c48 = 48
+  local c49 = 49; local c50 = 50; local c51 = 51; local c52 = 52; local c53 = 53; local c54 = 54; local c55 = 55; local c56 = 56
+  local c57 = 57; local c58 = 58; local c59 = 59; local c60 = 60; local c61 = 61; local c62 = 62; local c63 = 63; local c64 = 64
+
+  local fn_cap0 = function (x: integer): integer return x + 7 end
+  local fn_cap1 = function (x: integer): integer return x + c1 end
+  local fn_cap8 = function (x: integer): integer
+    return x + c1 + c2 + c3 + c4 + c5 + c6 + c7 + c8
+  end
+  local fn_cap64 = function (x: integer): integer
+    return x +
+      c1 + c2 + c3 + c4 + c5 + c6 + c7 + c8 +
+      c9 + c10 + c11 + c12 + c13 + c14 + c15 + c16 +
+      c17 + c18 + c19 + c20 + c21 + c22 + c23 + c24 +
+      c25 + c26 + c27 + c28 + c29 + c30 + c31 + c32 +
+      c33 + c34 + c35 + c36 + c37 + c38 + c39 + c40 +
+      c41 + c42 + c43 + c44 + c45 + c46 + c47 + c48 +
+      c49 + c50 + c51 + c52 + c53 + c54 + c55 + c56 +
+      c57 + c58 + c59 + c60 + c61 + c62 + c63 + c64
+  end
+  local fn_complex = function (
+      a: Small, b: Wide, c: string, d: integer, e: float, f: boolean): integer
+    if f and #c > 0 and e >= 0.0 then
+      return a.id + b.f1 + b.f16 + d + c1
+    end
+    return 0
+  end
+
+  local wire_bytes = 0
+  if case_name == "codec_scalar_roundtrip" then
+    wire_bytes = 8
+  elseif case_name == "codec_small_encode" or case_name == "codec_small_decode" or
+         case_name == "codec_small_transfer_roundtrip" then
+    wire_bytes = #small_bytes
+  elseif case_name == "codec_wide16_encode" or case_name == "codec_wide16_decode" or
+         case_name == "codec_wide16_transfer_roundtrip" then
+    wire_bytes = #wide_bytes
+  elseif case_name == "codec_large64k_encode" or case_name == "codec_large64k_decode" or
+         case_name == "codec_large64k_transfer_roundtrip" then
+    wire_bytes = #blob_bytes
+  end
+
+  local step = function (idx: integer, record_sample: boolean): integer
+    local t0: foreign int64_t = 0
+    if record_sample then
+      t0 = ffi.rtt_probe_now_ns()
+    end
+    local val = 0
+    if case_name == "call_control" then
+      val = (idx > 0) and 1 or 0
+    elseif case_name == "overhead_control" then
+      local slot = ffi.rtt_probe_op_begin(ffi.RTT_OP_NONE as foreign int, 0)
+      val = 1
+      ffi.rtt_probe_op_end(slot, ffi.RTT_OUTCOME_OK as foreign int)
+    elseif case_name == "inspect_record" then
+      case reflect.inspect(small)
+      when is_record(rv) then val = #rv.type.fields
+      else raise "expected record inspection"
+      end
+    elseif case_name == "inspect_function" then
+      case reflect.inspect(fn_cap1)
+      when is_titan_function() then val = 1
+      else raise "expected Titan function inspection"
+      end
+    elseif case_name == "codec_scalar_roundtrip" then
+      local decoded: integer = raw_roundtrip(idx)
+      if decoded ~= idx then raise "scalar roundtrip mismatch" end
+      val = 1
+    elseif case_name == "codec_small_encode" then
+      local encoded = protobuf.serialize(small)
+      val = #encoded
+    elseif case_name == "codec_small_decode" then
+      local decoded: Small = protobuf.deserialize(small_bytes, small_type)
+      val = decoded.id
+    elseif case_name == "codec_small_transfer_roundtrip" then
+      local decoded: Small = raw_roundtrip(small)
+      val = decoded.id
+    elseif case_name == "codec_wide16_encode" then
+      local encoded = protobuf.serialize(wide)
+      val = #encoded
+    elseif case_name == "codec_wide16_decode" then
+      local decoded: Wide = protobuf.deserialize(wide_bytes, wide_type)
+      val = decoded.f1 + decoded.f16
+    elseif case_name == "codec_wide16_transfer_roundtrip" then
+      local decoded: Wide = raw_roundtrip(wide)
+      val = decoded.f1 + decoded.f16
+    elseif case_name == "codec_large64k_encode" then
+      local encoded = protobuf.serialize(blob)
+      val = #encoded
+    elseif case_name == "codec_large64k_decode" then
+      local decoded: Blob = protobuf.deserialize(blob_bytes, blob_type)
+      val = #decoded.bytes
+    elseif case_name == "codec_large64k_transfer_roundtrip" then
+      local decoded: Blob = raw_roundtrip(blob)
+      val = #decoded.bytes
+    elseif case_name == "closure_roundtrip_cap0" then
+      local restored: function (integer): integer =
+        raw_roundtrip(fn_cap0)
+      val = restored(3)
+    elseif case_name == "closure_roundtrip_cap1" then
+      local restored: function (integer): integer =
+        raw_roundtrip(fn_cap1)
+      val = restored(3)
+    elseif case_name == "closure_roundtrip_cap8" then
+      local restored: function (integer): integer =
+        raw_roundtrip(fn_cap8)
+      val = restored(3)
+    elseif case_name == "closure_roundtrip_cap64" then
+      local restored: function (integer): integer =
+        raw_roundtrip(fn_cap64)
+      val = restored(3)
+    elseif case_name == "closure_roundtrip_complex_sig" then
+      local restored: function (Small, Wide, string, integer, float, boolean): integer =
+        raw_roundtrip(fn_complex)
+      val = restored(small, wide, "ok", 5, 1.0, true)
+    else
+      raise "unknown codec case: " .. case_name
+    end
+    if record_sample then
+      local t1 = ffi.rtt_probe_now_ns()
+      ffi.rtt_probe_record_sample(t1 - t0)
+    end
+    return val
+  end
+
+  local w_start = ffi.rtt_probe_now_ns()
+  local w_sum = 0
+  for i = 1, warmup do
+    w_sum = w_sum + step(i, false)
+  end
+  ffi.rtt_probe_mark_warmup_done(ffi.rtt_probe_now_ns() - w_start, warmup as foreign int64_t)
+  gc.collect()
+  gc.collect()
+
+  ffi.rtt_probe_mark_setup_start(gc.count() as foreign int64_t)
+  ffi.rtt_probe_start_body(gc.count() as foreign int64_t)
+  local checksum = 0
+  for i = 1, count do
+    checksum = checksum + step(i, true)
+  end
+  ffi.rtt_probe_stop_body(gc.count() as foreign int64_t)
+  ffi.rtt_probe_mark_workers_retired(gc.count() as foreign int64_t)
+
+  return checksum + (w_sum * 0), wire_bytes
+end
+
+-- ============================================================================
+-- Group 2: Same-state immediate nonblocking queue controls
+-- ============================================================================
+
+local function run_same_state_queue_case(
+    case_name: string,
+    count: integer,
+    warmup: integer): (integer, integer)
+  local wire_bytes = #protobuf.serialize(PlainJob(1, "request", token_bytes))
+  local checksum = run_in_runtime(function (): integer
+    local plain_tx, plain_rx = thread.channel<|PlainJob|>(1)
+    local bytes_tx, bytes_rx = thread.channel<|BytesJob|>(1)
+    local packed_tx, packed_rx = thread.channel<|PackedJob|>(1)
+    local sender_tx, sender_rx = thread.channel<|SenderJob|>(1)
+    local receiver_tx, receiver_rx = thread.channel<|ReceiverJob|>(1)
+    local aux_tx, aux_rx = thread.channel<|integer|>(1)
+    local b_tok = BytesToken(token_bytes)
+    local p_tok = PackedToken(token_value)
+    local last_tx: thread.Sender<|integer|>? = nil
+    local last_rx: thread.Receiver<|integer|>? = nil
+    local last_value: value = nil
+
+    local run_batch = function (iters: integer, timed: boolean): integer
+      local sum = 0
+      for i = 1, iters do
+        local t0: foreign int64_t = 0
+        if timed then t0 = ffi.rtt_probe_now_ns() end
+        if case_name == "queue_plain_bytes8" then
+          traced_send(plain_tx, PlainJob(i, "request", token_bytes), 0)
+          local job = traced_receive(plain_rx)
+          last_value = job
+          if job.id ~= i or job.body ~= "request" then
+            raise "plain queue token mismatch"
+          end
+          sum = sum + job.id
+        elseif case_name == "queue_opaque_hook8" then
+          traced_send(bytes_tx, BytesJob(i, "request", b_tok), 0)
+          local job = traced_receive(bytes_rx)
+          last_value = job
+          if job.id ~= i or job.body ~= "request" then
+            raise "opaque queue token mismatch"
+          end
+          sum = sum + job.id
+        elseif case_name == "queue_packed_hook8" then
+          traced_send(packed_tx, PackedJob(i, "request", p_tok), 0)
+          local job = traced_receive(packed_rx)
+          last_value = job
+          if job.id ~= i or job.body ~= "request" then
+            raise "packed queue token mismatch"
+          end
+          sum = sum + job.id
+        elseif case_name == "queue_real_sender" then
+          traced_send(sender_tx, SenderJob(i, "request", aux_tx), 1)
+          local job = traced_receive(sender_rx)
+          last_value = job
+          if job.id ~= i or job.body ~= "request" then
+            raise "sender queue mismatch"
+          end
+          last_tx = job.reply
+          sum = sum + job.id
+        elseif case_name == "queue_real_receiver" then
+          traced_send(receiver_tx, ReceiverJob(i, "request", aux_rx), 1)
+          local job = traced_receive(receiver_rx)
+          last_value = job
+          if job.id ~= i or job.body ~= "request" then
+            raise "receiver queue mismatch"
+          end
+          last_rx = job.reply
+          sum = sum + job.id
+        elseif case_name == "sender_clone" then
+          local cloned = aux_tx:clone()
+          if cloned == aux_tx then raise "clone identity error" end
+          last_tx = cloned
+          sum = sum + i
+        else
+          raise "unknown queue case: " .. case_name
+        end
+        if timed then
+          local t1 = ffi.rtt_probe_now_ns()
+          ffi.rtt_probe_record_sample(t1 - t0)
+        end
+      end
+      return sum
+    end
+    local validate_last = function (iters: integer)
+      if case_name == "queue_plain_bytes8" then
+        local job: PlainJob = last_value
+        if job.reply ~= token_bytes then raise "plain payload mismatch" end
+      elseif case_name == "queue_opaque_hook8" then
+        local job: BytesJob = last_value
+        if job.reply.bytes ~= token_bytes then raise "opaque payload mismatch" end
+      elseif case_name == "queue_packed_hook8" then
+        local job: PackedJob = last_value
+        if job.reply.bits ~= token_value then raise "packed payload mismatch" end
+      end
+      if last_tx ~= nil then
+        last_tx:send(iters)
+        if aux_rx:receive() ~= iters then raise "transferred Sender check failed" end
+      end
+      if last_rx ~= nil then
+        aux_tx:send(iters)
+        if last_rx:receive() ~= iters then raise "transferred Receiver check failed" end
+      end
+      last_tx = nil; last_rx = nil; last_value = nil
+    end
+
+    local w_start = ffi.rtt_probe_now_ns()
+    run_batch(warmup, false)
+    validate_last(warmup)
+    ffi.rtt_probe_mark_warmup_done(ffi.rtt_probe_now_ns() - w_start, warmup as foreign int64_t)
+    gc.collect()
+    gc.collect()
+
+    ffi.rtt_probe_mark_setup_start(gc.count() as foreign int64_t)
+    ffi.rtt_probe_start_body(gc.count() as foreign int64_t)
+    local total = run_batch(count, true)
+    ffi.rtt_probe_stop_body(gc.count() as foreign int64_t)
+    validate_last(count)
+
+    plain_tx:close(); plain_rx:close()
+    bytes_tx:close(); bytes_rx:close()
+    packed_tx:close(); packed_rx:close()
+    sender_tx:close(); sender_rx:close()
+    receiver_tx:close(); receiver_rx:close()
+    aux_tx:close(); aux_rx:close()
+    return total
+  end)
+  ffi.rtt_probe_mark_workers_retired(gc.count() as foreign int64_t)
+  return checksum, wire_bytes
+end
+
+-- ============================================================================
+-- Group 3: Cross-thread SPSC Request/Reply
+-- ============================================================================
+
+local function run_spsc_case(
+    case_name: string,
+    count: integer,
+    warmup: integer): (integer, integer)
+  local req_wire = #protobuf.serialize(PlainJob(1, "request", token_bytes))
+  local rep_wire = #protobuf.serialize(ReplyMsg(1, 3, "ok"))
+  local wire_bytes = req_wire + rep_wire
+  if case_name == "spsc_scalar_persistent" then
+    wire_bytes = 16
+  elseif case_name == "spsc_large64k_persistent" or case_name == "spsc_large64k_endpoint_pool4" then
+    wire_bytes = 65536 + req_wire + rep_wire
+  end
+
+  local checksum = run_in_runtime(function (): integer
+    ffi.rtt_probe_mark_setup_start(gc.count() as foreign int64_t)
+    local ready_tx, ready_rx = thread.channel<|integer|>(1)
+
+    if case_name == "spsc_scalar_persistent" then
+      local req_tx, req_rx = thread.channel<|integer|>(1)
+      local rep_tx, rep_rx = thread.channel<|integer|>(1)
+      local worker = thread.spawn_three<|
+          thread.Receiver<|integer|>,
+          thread.Sender<|integer|>,
+          thread.Sender<|integer|>,
+          integer|>(function (
+            rx: thread.Receiver<|integer|>,
+            tx: thread.Sender<|integer|>,
+            rdy: thread.Sender<|integer|>): integer
+        rdy:send(1)
+        local processed = 0
+        for _, msg? in rx:incoming() do
+          local id = msg or 0
+          if id < 0 then
+            local a = -id
+            gc.collect(); gc.collect()
+            tx:send(a * 2 + 1)
+          else
+            ffi.rtt_probe_trace_worker_recv(id as foreign int64_t)
+            local out = id * 2 + 1
+            ffi.rtt_probe_trace_worker_reply_start(id as foreign int64_t)
+            traced_send(tx, out, 0)
+            ffi.rtt_probe_trace_worker_reply_done(id as foreign int64_t)
+            processed = processed + 1
+          end
+        end
+        return processed
+      end, req_rx, rep_tx, ready_tx)
+
+      ready_rx:receive()
+      local w_start = ffi.rtt_probe_now_ns()
+      for i = 1, warmup do
+        req_tx:send(-i)
+        if rep_rx:receive() ~= i * 2 + 1 then raise "warmup scalar mismatch" end
+      end
+      ffi.rtt_probe_mark_warmup_done(ffi.rtt_probe_now_ns() - w_start, warmup as foreign int64_t)
+      gc.collect()
+
+      ffi.rtt_probe_start_body(gc.count() as foreign int64_t)
+      local sum = 0
+      for i = 1, count do
+        local t0 = ffi.rtt_probe_now_ns()
+        ffi.rtt_probe_trace_client_send_start(i as foreign int64_t, t0)
+        traced_send(req_tx, i, 0)
+        ffi.rtt_probe_trace_client_send_done(i as foreign int64_t, ffi.rtt_probe_now_ns())
+        local reply = traced_receive(rep_rx)
+        local t5 = ffi.rtt_probe_now_ns()
+        ffi.rtt_probe_trace_client_reply_done(i as foreign int64_t, t5)
+        ffi.rtt_probe_record_sample(t5 - t0)
+        if reply ~= i * 2 + 1 then raise "scalar reply mismatch" end
+        sum = sum + reply
+      end
+      ffi.rtt_probe_stop_body(gc.count() as foreign int64_t)
+
+      req_tx:close()
+      if join_worker(worker) ~= count then raise "worker count mismatch" end
+      rep_tx:close(); rep_rx:close(); req_rx:close(); ready_tx:close(); ready_rx:close()
+      return sum
+
+    elseif case_name == "spsc_record_persistent" then
+      local req_tx, req_rx = thread.channel<|PlainJob|>(1)
+      local rep_tx, rep_rx = thread.channel<|ReplyMsg|>(1)
+      local worker = thread.spawn_three<|
+          thread.Receiver<|PlainJob|>,
+          thread.Sender<|ReplyMsg|>,
+          thread.Sender<|integer|>,
+          integer|>(function (
+            rx: thread.Receiver<|PlainJob|>,
+            tx: thread.Sender<|ReplyMsg|>,
+            rdy: thread.Sender<|integer|>): integer
+        rdy:send(1)
+        local processed = 0
+        for _, job? in rx:incoming() do
+          if job == nil then raise "nil job" end
+          local id = job.id
+          if job.body ~= "request" then raise "invalid plain job" end
+          if id < 0 then
+            local a = -id
+            gc.collect(); gc.collect()
+            tx:send(ReplyMsg(a, a * 2 + 1, "ok"))
+          else
+            ffi.rtt_probe_trace_worker_recv(id as foreign int64_t)
+            local rep = ReplyMsg(id, id * 2 + 1, "ok")
+            ffi.rtt_probe_trace_worker_reply_start(id as foreign int64_t)
+            traced_send(tx, rep, 0)
+            ffi.rtt_probe_trace_worker_reply_done(id as foreign int64_t)
+            processed = processed + 1
+          end
+        end
+        return processed
+      end, req_rx, rep_tx, ready_tx)
+
+      ready_rx:receive()
+      local w_start = ffi.rtt_probe_now_ns()
+      for i = 1, warmup do
+        req_tx:send(PlainJob(-i, "request", token_bytes))
+        local r = rep_rx:receive()
+        if r.id ~= i or r.value ~= i * 2 + 1 then raise "warmup record mismatch" end
+      end
+      ffi.rtt_probe_mark_warmup_done(ffi.rtt_probe_now_ns() - w_start, warmup as foreign int64_t)
+      gc.collect()
+
+      ffi.rtt_probe_start_body(gc.count() as foreign int64_t)
+      local sum = 0
+      for i = 1, count do
+        local t0 = ffi.rtt_probe_now_ns()
+        ffi.rtt_probe_trace_client_send_start(i as foreign int64_t, t0)
+        traced_send(req_tx, PlainJob(i, "request", token_bytes), 0)
+        ffi.rtt_probe_trace_client_send_done(i as foreign int64_t, ffi.rtt_probe_now_ns())
+        local rep = traced_receive(rep_rx)
+        local t5 = ffi.rtt_probe_now_ns()
+        ffi.rtt_probe_trace_client_reply_done(i as foreign int64_t, t5)
+        ffi.rtt_probe_record_sample(t5 - t0)
+        if rep.id ~= i or rep.value ~= i * 2 + 1 or rep.tag ~= "ok" then
+          raise "record reply mismatch"
+        end
+        sum = sum + rep.value
+      end
+      ffi.rtt_probe_stop_body(gc.count() as foreign int64_t)
+
+      req_tx:close()
+      if join_worker(worker) ~= count then raise "worker count mismatch" end
+      rep_tx:close(); rep_rx:close(); req_rx:close(); ready_tx:close(); ready_rx:close()
+      return sum
+
+    elseif case_name == "spsc_opaque_persistent" then
+      local req_tx, req_rx = thread.channel<|BytesJob|>(1)
+      local rep_tx, rep_rx = thread.channel<|ReplyMsg|>(1)
+      local b_tok = BytesToken(token_bytes)
+      local worker = thread.spawn_three<|
+          thread.Receiver<|BytesJob|>,
+          thread.Sender<|ReplyMsg|>,
+          thread.Sender<|integer|>,
+          integer|>(function (
+            rx: thread.Receiver<|BytesJob|>,
+            tx: thread.Sender<|ReplyMsg|>,
+            rdy: thread.Sender<|integer|>): integer
+        rdy:send(1)
+        local processed = 0
+        for _, job? in rx:incoming() do
+          if job == nil then raise "nil job" end
+          local id = job.id
+          if job.body ~= "request" then raise "invalid opaque job" end
+          if id < 0 then
+            local a = -id
+            gc.collect(); gc.collect()
+            tx:send(ReplyMsg(a, a * 2 + 1, "ok"))
+          else
+            ffi.rtt_probe_trace_worker_recv(id as foreign int64_t)
+            local rep = ReplyMsg(id, id * 2 + 1, "ok")
+            ffi.rtt_probe_trace_worker_reply_start(id as foreign int64_t)
+            traced_send(tx, rep, 0)
+            ffi.rtt_probe_trace_worker_reply_done(id as foreign int64_t)
+            processed = processed + 1
+          end
+        end
+        return processed
+      end, req_rx, rep_tx, ready_tx)
+
+      ready_rx:receive()
+      local w_start = ffi.rtt_probe_now_ns()
+      for i = 1, warmup do
+        req_tx:send(BytesJob(-i, "request", b_tok))
+        local r = rep_rx:receive()
+        if r.id ~= i or r.value ~= i * 2 + 1 then raise "warmup opaque mismatch" end
+      end
+      ffi.rtt_probe_mark_warmup_done(ffi.rtt_probe_now_ns() - w_start, warmup as foreign int64_t)
+      gc.collect()
+
+      ffi.rtt_probe_start_body(gc.count() as foreign int64_t)
+      local sum = 0
+      for i = 1, count do
+        local t0 = ffi.rtt_probe_now_ns()
+        ffi.rtt_probe_trace_client_send_start(i as foreign int64_t, t0)
+        traced_send(req_tx, BytesJob(i, "request", b_tok), 0)
+        ffi.rtt_probe_trace_client_send_done(i as foreign int64_t, ffi.rtt_probe_now_ns())
+        local rep = traced_receive(rep_rx)
+        local t5 = ffi.rtt_probe_now_ns()
+        ffi.rtt_probe_trace_client_reply_done(i as foreign int64_t, t5)
+        ffi.rtt_probe_record_sample(t5 - t0)
+        if rep.id ~= i or rep.value ~= i * 2 + 1 or rep.tag ~= "ok" then
+          raise "opaque reply mismatch"
+        end
+        sum = sum + rep.value
+      end
+      ffi.rtt_probe_stop_body(gc.count() as foreign int64_t)
+
+      req_tx:close()
+      if join_worker(worker) ~= count then raise "worker count mismatch" end
+      rep_tx:close(); rep_rx:close(); req_rx:close(); ready_tx:close(); ready_rx:close()
+      return sum
+
+    elseif case_name == "spsc_endpoint_carried_persistent" then
+      local req_tx, req_rx = thread.channel<|RpcSenderJob|>(1)
+      local rep_tx, rep_rx = thread.channel<|ReplyMsg|>(1)
+      local worker = thread.spawn_three<|
+          thread.Receiver<|RpcSenderJob|>,
+          thread.Sender<|ReplyMsg|>,
+          thread.Sender<|integer|>,
+          integer|>(function (
+            rx: thread.Receiver<|RpcSenderJob|>,
+            tx: thread.Sender<|ReplyMsg|>,
+            rdy: thread.Sender<|integer|>): integer
+        rdy:send(1)
+        local processed = 0
+        for _, job? in rx:incoming() do
+          if job == nil then raise "nil job" end
+          local id = job.id
+          if job.body ~= "request" then raise "invalid endpoint job" end
+          if id < 0 then
+            local a = -id
+            gc.collect(); gc.collect()
+            job.reply:send(ReplyMsg(a, a * 2 + 1, "ok"))
+          else
+            ffi.rtt_probe_trace_worker_recv(id as foreign int64_t)
+            local rep = ReplyMsg(id, id * 2 + 1, "ok")
+            ffi.rtt_probe_trace_worker_reply_start(id as foreign int64_t)
+            traced_send(job.reply, rep, 0)
+            ffi.rtt_probe_trace_worker_reply_done(id as foreign int64_t)
+            processed = processed + 1
+          end
+        end
+        -- Preserve the control's bootstrap endpoint footprint outside timing.
+        if tx:is_closed() then raise "persistent reply endpoint closed before retirement" end
+        return processed
+      end, req_rx, rep_tx, ready_tx)
+
+      ready_rx:receive()
+      local w_start = ffi.rtt_probe_now_ns()
+      for i = 1, warmup do
+        req_tx:send(RpcSenderJob(-i, "request", rep_tx))
+        local r = rep_rx:receive()
+        if r.id ~= i or r.value ~= i * 2 + 1 then raise "warmup endpoint mismatch" end
+      end
+      ffi.rtt_probe_mark_warmup_done(ffi.rtt_probe_now_ns() - w_start, warmup as foreign int64_t)
+      gc.collect()
+
+      ffi.rtt_probe_start_body(gc.count() as foreign int64_t)
+      local sum = 0
+      for i = 1, count do
+        local t0 = ffi.rtt_probe_now_ns()
+        ffi.rtt_probe_trace_client_send_start(i as foreign int64_t, t0)
+        traced_send(req_tx, RpcSenderJob(i, "request", rep_tx), 1)
+        ffi.rtt_probe_trace_client_send_done(i as foreign int64_t, ffi.rtt_probe_now_ns())
+        local rep = traced_receive(rep_rx)
+        local t5 = ffi.rtt_probe_now_ns()
+        ffi.rtt_probe_trace_client_reply_done(i as foreign int64_t, t5)
+        ffi.rtt_probe_record_sample(t5 - t0)
+        if rep.id ~= i or rep.value ~= i * 2 + 1 or rep.tag ~= "ok" then
+          raise "endpoint reply mismatch"
+        end
+        sum = sum + rep.value
+      end
+      ffi.rtt_probe_stop_body(gc.count() as foreign int64_t)
+
+      req_tx:close()
+      if join_worker(worker) ~= count then raise "worker count mismatch" end
+      rep_tx:close(); rep_rx:close(); req_rx:close(); ready_tx:close(); ready_rx:close()
+      return sum
+
+    elseif case_name == "spsc_record_pool4_control" then
+      local req_tx, req_rx = thread.channel<|PlainJob|>(1)
+      local pool_tx: {thread.Sender<|ReplyMsg|>} = {}
+      local pool_rx: {thread.Receiver<|ReplyMsg|>} = {}
+      for s = 1, 4 do
+        local ptx, prx = thread.channel<|ReplyMsg|>(1)
+        pool_tx[s] = ptx
+        pool_rx[s] = prx
+      end
+      local pool_arg = ReplySenderPool(pool_tx)
+      local worker = thread.spawn_three<|
+          thread.Receiver<|PlainJob|>,
+          ReplySenderPool,
+          thread.Sender<|integer|>,
+          integer|>(function (
+            rx: thread.Receiver<|PlainJob|>,
+            pool: ReplySenderPool,
+            rdy: thread.Sender<|integer|>): integer
+        rdy:send(1)
+        local processed = 0
+        for _, job? in rx:incoming() do
+          if job == nil then raise "nil job" end
+          local id = job.id
+          if job.body ~= "request" then raise "invalid pool4 control job" end
+          local a = abs_int(id)
+          local slot = (a - 1) % 4 + 1
+          local tx = pool.senders[slot]
+          if id < 0 then
+            gc.collect(); gc.collect()
+            tx:send(ReplyMsg(a, a * 2 + 1, "ok"))
+          else
+            ffi.rtt_probe_trace_worker_recv(id as foreign int64_t)
+            local rep = ReplyMsg(id, id * 2 + 1, "ok")
+            ffi.rtt_probe_trace_worker_reply_start(id as foreign int64_t)
+            traced_send(tx, rep, 0)
+            ffi.rtt_probe_trace_worker_reply_done(id as foreign int64_t)
+            processed = processed + 1
+          end
+        end
+        return processed
+      end, req_rx, pool_arg, ready_tx)
+
+      ready_rx:receive()
+      local w_start = ffi.rtt_probe_now_ns()
+      for i = 1, warmup do
+        local slot = (i - 1) % 4 + 1
+        req_tx:send(PlainJob(-i, "request", token_bytes))
+        local r = pool_rx[slot]:receive()
+        if r.id ~= i or r.value ~= i * 2 + 1 then raise "warmup pool4 control mismatch" end
+      end
+      ffi.rtt_probe_mark_warmup_done(ffi.rtt_probe_now_ns() - w_start, warmup as foreign int64_t)
+      gc.collect()
+
+      ffi.rtt_probe_start_body(gc.count() as foreign int64_t)
+      local sum = 0
+      for i = 1, count do
+        local slot = (i - 1) % 4 + 1
+        local t0 = ffi.rtt_probe_now_ns()
+        ffi.rtt_probe_trace_client_send_start(i as foreign int64_t, t0)
+        traced_send(req_tx, PlainJob(i, "request", token_bytes), 0)
+        ffi.rtt_probe_trace_client_send_done(i as foreign int64_t, ffi.rtt_probe_now_ns())
+        local rep = traced_receive(pool_rx[slot])
+        local t5 = ffi.rtt_probe_now_ns()
+        ffi.rtt_probe_trace_client_reply_done(i as foreign int64_t, t5)
+        ffi.rtt_probe_record_sample(t5 - t0)
+        if rep.id ~= i or rep.value ~= i * 2 + 1 or rep.tag ~= "ok" then
+          raise "pool4 control reply mismatch"
+        end
+        sum = sum + rep.value
+      end
+      ffi.rtt_probe_stop_body(gc.count() as foreign int64_t)
+
+      req_tx:close()
+      if join_worker(worker) ~= count then raise "worker count mismatch" end
+      for s = 1, 4 do pool_tx[s]:close(); pool_rx[s]:close() end
+      req_rx:close(); ready_tx:close(); ready_rx:close()
+      return sum
+
+    elseif case_name == "spsc_endpoint_pool4_reply" then
+      local req_tx, req_rx = thread.channel<|RpcSenderJob|>(1)
+      local pool_tx: {thread.Sender<|ReplyMsg|>} = {}
+      local pool_rx: {thread.Receiver<|ReplyMsg|>} = {}
+      for s = 1, 4 do
+        local ptx, prx = thread.channel<|ReplyMsg|>(1)
+        pool_tx[s] = ptx
+        pool_rx[s] = prx
+      end
+      local worker = thread.spawn_two<|
+          thread.Receiver<|RpcSenderJob|>,
+          thread.Sender<|integer|>,
+          integer|>(function (
+            rx: thread.Receiver<|RpcSenderJob|>,
+            rdy: thread.Sender<|integer|>): integer
+        rdy:send(1)
+        local processed = 0
+        for _, job? in rx:incoming() do
+          if job == nil then raise "nil job" end
+          local id = job.id
+          if job.body ~= "request" then raise "invalid pool4 endpoint job" end
+          if id < 0 then
+            local a = -id
+            gc.collect(); gc.collect()
+            job.reply:send(ReplyMsg(a, a * 2 + 1, "ok"))
+          else
+            ffi.rtt_probe_trace_worker_recv(id as foreign int64_t)
+            local rep = ReplyMsg(id, id * 2 + 1, "ok")
+            ffi.rtt_probe_trace_worker_reply_start(id as foreign int64_t)
+            traced_send(job.reply, rep, 0)
+            ffi.rtt_probe_trace_worker_reply_done(id as foreign int64_t)
+            processed = processed + 1
+          end
+        end
+        return processed
+      end, req_rx, ready_tx)
+
+      ready_rx:receive()
+      local w_start = ffi.rtt_probe_now_ns()
+      for i = 1, warmup do
+        local slot = (i - 1) % 4 + 1
+        req_tx:send(RpcSenderJob(-i, "request", pool_tx[slot]))
+        local r = pool_rx[slot]:receive()
+        if r.id ~= i or r.value ~= i * 2 + 1 then raise "warmup pool4 endpoint mismatch" end
+      end
+      ffi.rtt_probe_mark_warmup_done(ffi.rtt_probe_now_ns() - w_start, warmup as foreign int64_t)
+      gc.collect()
+
+      ffi.rtt_probe_start_body(gc.count() as foreign int64_t)
+      local sum = 0
+      for i = 1, count do
+        local slot = (i - 1) % 4 + 1
+        local t0 = ffi.rtt_probe_now_ns()
+        ffi.rtt_probe_trace_client_send_start(i as foreign int64_t, t0)
+        traced_send(req_tx, RpcSenderJob(i, "request", pool_tx[slot]), 1)
+        ffi.rtt_probe_trace_client_send_done(i as foreign int64_t, ffi.rtt_probe_now_ns())
+        local rep = traced_receive(pool_rx[slot])
+        local t5 = ffi.rtt_probe_now_ns()
+        ffi.rtt_probe_trace_client_reply_done(i as foreign int64_t, t5)
+        ffi.rtt_probe_record_sample(t5 - t0)
+        if rep.id ~= i or rep.value ~= i * 2 + 1 or rep.tag ~= "ok" then
+          raise "pool4 endpoint reply mismatch"
+        end
+        sum = sum + rep.value
+      end
+      ffi.rtt_probe_stop_body(gc.count() as foreign int64_t)
+
+      req_tx:close()
+      if join_worker(worker) ~= count then raise "worker count mismatch" end
+      for s = 1, 4 do pool_tx[s]:close(); pool_rx[s]:close() end
+      req_rx:close(); ready_tx:close(); ready_rx:close()
+      return sum
+
+    elseif case_name == "spsc_endpoint_fresh_reply" then
+      local req_tx, req_rx = thread.channel<|RpcSenderJob|>(1)
+      local worker = thread.spawn_two<|
+          thread.Receiver<|RpcSenderJob|>,
+          thread.Sender<|integer|>,
+          integer|>(function (
+            rx: thread.Receiver<|RpcSenderJob|>,
+            rdy: thread.Sender<|integer|>): integer
+        rdy:send(1)
+        local processed = 0
+        for _, job? in rx:incoming() do
+          if job == nil then raise "nil job" end
+          local id = job.id
+          if job.body ~= "request" then raise "invalid fresh endpoint job" end
+          if id < 0 then
+            local a = -id
+            gc.collect(); gc.collect()
+            job.reply:send(ReplyMsg(a, a * 2 + 1, "ok"))
+          else
+            ffi.rtt_probe_trace_worker_recv(id as foreign int64_t)
+            local rep = ReplyMsg(id, id * 2 + 1, "ok")
+            ffi.rtt_probe_trace_worker_reply_start(id as foreign int64_t)
+            traced_send(job.reply, rep, 0)
+            ffi.rtt_probe_trace_worker_reply_done(id as foreign int64_t)
+            processed = processed + 1
+          end
+        end
+        return processed
+      end, req_rx, ready_tx)
+
+      ready_rx:receive()
+      local w_start = ffi.rtt_probe_now_ns()
+      for i = 1, warmup do
+        local f_tx, f_rx = thread.channel<|ReplyMsg|>(1)
+        req_tx:send(RpcSenderJob(-i, "request", f_tx))
+        local r = f_rx:receive()
+        f_tx:close(); f_rx:close()
+        if r.id ~= i or r.value ~= i * 2 + 1 then raise "warmup fresh endpoint mismatch" end
+      end
+      ffi.rtt_probe_mark_warmup_done(ffi.rtt_probe_now_ns() - w_start, warmup as foreign int64_t)
+      gc.collect()
+
+      ffi.rtt_probe_start_body(gc.count() as foreign int64_t)
+      local sum = 0
+      for i = 1, count do
+        local t0 = ffi.rtt_probe_now_ns()
+        ffi.rtt_probe_trace_client_send_start(i as foreign int64_t, t0)
+        local f_tx, f_rx = thread.channel<|ReplyMsg|>(1)
+        traced_send(req_tx, RpcSenderJob(i, "request", f_tx), 1)
+        ffi.rtt_probe_trace_client_send_done(i as foreign int64_t, ffi.rtt_probe_now_ns())
+        local rep = traced_receive(f_rx)
+        f_tx:close(); f_rx:close()
+        local t5 = ffi.rtt_probe_now_ns()
+        ffi.rtt_probe_trace_client_reply_done(i as foreign int64_t, t5)
+        ffi.rtt_probe_record_sample(t5 - t0)
+        if rep.id ~= i or rep.value ~= i * 2 + 1 or rep.tag ~= "ok" then
+          raise "fresh endpoint reply mismatch"
+        end
+        sum = sum + rep.value
+      end
+      ffi.rtt_probe_stop_body(gc.count() as foreign int64_t)
+
+      req_tx:close()
+      if join_worker(worker) ~= count then raise "worker count mismatch" end
+      req_rx:close(); ready_tx:close(); ready_rx:close()
+      return sum
+
+    elseif case_name == "spsc_large64k_persistent" then
+      local payload_64k = string.rep("x", 65536)
+      local req_tx, req_rx = thread.channel<|LargeJob|>(1)
+      local rep_tx, rep_rx = thread.channel<|ReplyMsg|>(1)
+      local worker = thread.spawn_three<|
+          thread.Receiver<|LargeJob|>,
+          thread.Sender<|ReplyMsg|>,
+          thread.Sender<|integer|>,
+          integer|>(function (
+            rx: thread.Receiver<|LargeJob|>,
+            tx: thread.Sender<|ReplyMsg|>,
+            rdy: thread.Sender<|integer|>): integer
+        rdy:send(1)
+        local processed = 0
+        for _, job? in rx:incoming() do
+          if job == nil then raise "nil large job" end
+          local id = job.id
+          if #job.body ~= 65536 then raise "invalid large64k job" end
+          if id < 0 then
+            local a = -id
+            gc.collect(); gc.collect()
+            tx:send(ReplyMsg(a, a * 2 + 1, "ok"))
+          else
+            ffi.rtt_probe_trace_worker_recv(id as foreign int64_t)
+            local rep = ReplyMsg(id, id * 2 + 1, "ok")
+            ffi.rtt_probe_trace_worker_reply_start(id as foreign int64_t)
+            traced_send(tx, rep, 0)
+            ffi.rtt_probe_trace_worker_reply_done(id as foreign int64_t)
+            processed = processed + 1
+          end
+        end
+        return processed
+      end, req_rx, rep_tx, ready_tx)
+
+      ready_rx:receive()
+      local w_start = ffi.rtt_probe_now_ns()
+      for i = 1, warmup do
+        req_tx:send(LargeJob(-i, payload_64k, token_bytes))
+        local r = rep_rx:receive()
+        if r.id ~= i or r.value ~= i * 2 + 1 then raise "warmup large64k mismatch" end
+      end
+      ffi.rtt_probe_mark_warmup_done(ffi.rtt_probe_now_ns() - w_start, warmup as foreign int64_t)
+      gc.collect()
+
+      ffi.rtt_probe_start_body(gc.count() as foreign int64_t)
+      local sum = 0
+      for i = 1, count do
+        local t0 = ffi.rtt_probe_now_ns()
+        ffi.rtt_probe_trace_client_send_start(i as foreign int64_t, t0)
+        traced_send(req_tx, LargeJob(i, payload_64k, token_bytes), 0)
+        ffi.rtt_probe_trace_client_send_done(i as foreign int64_t, ffi.rtt_probe_now_ns())
+        local rep = traced_receive(rep_rx)
+        local t5 = ffi.rtt_probe_now_ns()
+        ffi.rtt_probe_trace_client_reply_done(i as foreign int64_t, t5)
+        ffi.rtt_probe_record_sample(t5 - t0)
+        if rep.id ~= i or rep.value ~= i * 2 + 1 or rep.tag ~= "ok" then
+          raise "large64k reply mismatch"
+        end
+        sum = sum + rep.value
+      end
+      ffi.rtt_probe_stop_body(gc.count() as foreign int64_t)
+
+      req_tx:close()
+      if join_worker(worker) ~= count then raise "worker count mismatch" end
+      rep_tx:close(); rep_rx:close(); req_rx:close(); ready_tx:close(); ready_rx:close()
+      return sum
+
+    elseif case_name == "spsc_large64k_endpoint_pool4" then
+      local payload_64k = string.rep("x", 65536)
+      local req_tx, req_rx = thread.channel<|LargeSenderJob|>(1)
+      local pool_tx: {thread.Sender<|ReplyMsg|>} = {}
+      local pool_rx: {thread.Receiver<|ReplyMsg|>} = {}
+      for s = 1, 4 do
+        local ptx, prx = thread.channel<|ReplyMsg|>(1)
+        pool_tx[s] = ptx
+        pool_rx[s] = prx
+      end
+      local worker = thread.spawn_two<|
+          thread.Receiver<|LargeSenderJob|>,
+          thread.Sender<|integer|>,
+          integer|>(function (
+            rx: thread.Receiver<|LargeSenderJob|>,
+            rdy: thread.Sender<|integer|>): integer
+        rdy:send(1)
+        local processed = 0
+        for _, job? in rx:incoming() do
+          if job == nil then raise "nil large sender job" end
+          local id = job.id
+          if #job.body ~= 65536 then raise "invalid large64k sender job" end
+          if id < 0 then
+            local a = -id
+            gc.collect(); gc.collect()
+            job.reply:send(ReplyMsg(a, a * 2 + 1, "ok"))
+          else
+            ffi.rtt_probe_trace_worker_recv(id as foreign int64_t)
+            local rep = ReplyMsg(id, id * 2 + 1, "ok")
+            ffi.rtt_probe_trace_worker_reply_start(id as foreign int64_t)
+            traced_send(job.reply, rep, 0)
+            ffi.rtt_probe_trace_worker_reply_done(id as foreign int64_t)
+            processed = processed + 1
+          end
+        end
+        return processed
+      end, req_rx, ready_tx)
+
+      ready_rx:receive()
+      local w_start = ffi.rtt_probe_now_ns()
+      for i = 1, warmup do
+        local slot = (i - 1) % 4 + 1
+        req_tx:send(LargeSenderJob(-i, payload_64k, pool_tx[slot]))
+        local r = pool_rx[slot]:receive()
+        if r.id ~= i or r.value ~= i * 2 + 1 then raise "warmup large64k endpoint mismatch" end
+      end
+      ffi.rtt_probe_mark_warmup_done(ffi.rtt_probe_now_ns() - w_start, warmup as foreign int64_t)
+      gc.collect()
+
+      ffi.rtt_probe_start_body(gc.count() as foreign int64_t)
+      local sum = 0
+      for i = 1, count do
+        local slot = (i - 1) % 4 + 1
+        local t0 = ffi.rtt_probe_now_ns()
+        ffi.rtt_probe_trace_client_send_start(i as foreign int64_t, t0)
+        traced_send(req_tx, LargeSenderJob(i, payload_64k, pool_tx[slot]), 1)
+        ffi.rtt_probe_trace_client_send_done(i as foreign int64_t, ffi.rtt_probe_now_ns())
+        local rep = traced_receive(pool_rx[slot])
+        local t5 = ffi.rtt_probe_now_ns()
+        ffi.rtt_probe_trace_client_reply_done(i as foreign int64_t, t5)
+        ffi.rtt_probe_record_sample(t5 - t0)
+        if rep.id ~= i or rep.value ~= i * 2 + 1 or rep.tag ~= "ok" then
+          raise "large64k endpoint reply mismatch"
+        end
+        sum = sum + rep.value
+      end
+      ffi.rtt_probe_stop_body(gc.count() as foreign int64_t)
+
+      req_tx:close()
+      if join_worker(worker) ~= count then raise "worker count mismatch" end
+      for s = 1, 4 do pool_tx[s]:close(); pool_rx[s]:close() end
+      req_rx:close(); ready_tx:close(); ready_rx:close()
+      return sum
+    end
+
+    raise "unknown SPSC case: " .. case_name
+  end)
+  ffi.rtt_probe_mark_workers_retired(gc.count() as foreign int64_t)
+  return checksum, wire_bytes
+end
+
+-- ============================================================================
+-- Group 4: Bounded MPMC & Explicit Full/Empty Wait Cases
+-- ============================================================================
+
+local function mpmc_produce<|T|>(
+    config: MpmcProducer<|T|>,
+    make_job: function (integer, integer): T): integer
+  local tasks: {async.Task<|integer, value|>} = {}
+  for lane = 1, config.in_flight do
+    local lane_index = lane
+    tasks[lane] = async.run<|integer, value|>(function (): integer
+      local exchange = function (id: integer, measured: boolean): integer
+        local slot = (abs_int(id) - 1) % config.in_flight + 1
+        local permit = config.permits[slot]:receive()
+        local t0 = ffi.rtt_probe_now_ns()
+        if measured then ffi.rtt_probe_trace_client_send_start(id as foreign int64_t, t0) end
+        traced_send(config.request, make_job(id, slot), 0)
+        if measured then
+          ffi.rtt_probe_trace_client_send_done(id as foreign int64_t, ffi.rtt_probe_now_ns())
+        end
+        local reply = traced_receive(config.replies[slot])
+        local t5 = ffi.rtt_probe_now_ns()
+        config.release_permits[slot]:send(permit)
+        local expected_id = abs_int(id)
+        if reply.id ~= expected_id or reply.value ~= expected_id * 2 + 1 or reply.tag ~= "ok" then
+          raise "MPMC reply validation failed"
+        end
+        if measured then
+          ffi.rtt_probe_trace_client_reply_done(id as foreign int64_t, t5)
+          ffi.rtt_probe_record_sample(t5 - t0)
+        end
+        return reply.value
+      end
+      -- Every producer state exercises the real protocol before the barrier.
+      for i = 1, config.warmup do
+        exchange(-(config.index + (lane_index - 1 + i * config.in_flight) * config.producers), false)
+      end
+      gc.collect(); gc.collect()
+      config.ready:send(1)
+      config.start:receive()
+      local sum = 0
+      local id = config.index + (lane_index - 1) * config.producers
+      while id <= config.count do
+        sum = sum + exchange(id, true)
+        id = id + config.in_flight * config.producers
+      end
+      return sum
+    end)
+  end
+  local sum = 0
+  for lane = 1, config.in_flight do sum = sum + await_task(tasks[lane]) end
+  config.done:send(sum)
+  config.retire:receive()
+  return sum
+end
+
+local function run_mpmc_pool_case(
+    use_endpoint: boolean,
+    in_flight: integer,
+    producers: integer,
+    consumers: integer,
+    capacity: integer,
+    count: integer,
+    warmup: integer): (integer, integer)
+  local checksum = run_in_runtime(function (): integer
+    ffi.rtt_probe_mark_setup_start(gc.count() as foreign int64_t)
+    local ready_tx, ready_rx = thread.channel<|integer|>(producers * in_flight + consumers)
+    local start_tx, start_rx = thread.channel<|integer|>(producers * in_flight)
+    local done_tx, done_rx = thread.channel<|integer|>(producers)
+    local retire_tx, retire_rx = thread.channel<|integer|>(producers)
+    local pool_size = in_flight
+    if pool_size < 4 then pool_size = 4 end
+    local pool_tx: {thread.Sender<|ReplyMsg|>} = {}
+    local pool_rx: {thread.Receiver<|ReplyMsg|>} = {}
+    local permits_tx: {thread.Sender<|integer|>} = {}
+    local permits_rx: {thread.Receiver<|integer|>} = {}
+    for slot = 1, pool_size do
+      local tx, rx = thread.channel<|ReplyMsg|>(1)
+      local ptx, prx = thread.channel<|integer|>(1)
+      pool_tx[slot] = tx; pool_rx[slot] = rx
+      permits_tx[slot] = ptx; permits_rx[slot] = prx
+      ptx:send(slot)
+    end
+    local workers: {thread.Thread<|integer|>} = {}
+    local senders: {thread.Thread<|integer|>} = {}
+    local plain_tx, plain_rx = thread.channel<|PlainJob|>(capacity)
+    local ep_tx, ep_rx = thread.channel<|RpcSenderJob|>(capacity)
+    local reply_pool = ReplySenderPool(pool_tx)
+    for c = 1, consumers do
+      if use_endpoint then
+        workers[c] = thread.spawn_three<|
+            thread.Receiver<|RpcSenderJob|>, thread.Sender<|integer|>,
+            thread.Sender<|ReplyMsg|>, integer|>(function (
+              rx: thread.Receiver<|RpcSenderJob|>, ready: thread.Sender<|integer|>,
+              sample_reply: thread.Sender<|ReplyMsg|>): integer
+          local warmed = warm_channel(RpcSenderJob(-1, "request", sample_reply))
+          if warmed.id ~= -1 then raise "MPMC endpoint warmup failed" end
+          local warm_reply = warm_channel(ReplyMsg(1, 3, "ok"))
+          if warm_reply.value ~= 3 then raise "MPMC reply warmup failed" end
+          gc.collect(); gc.collect()
+          ready:send(1)
+          local processed = 0
+          for _, job? in rx:incoming() do
+            if job == nil then raise "nil MPMC request" end
+            if job.body ~= "request" then raise "invalid MPMC body" end
+            local id = abs_int(job.id)
+            if job.id > 0 then
+              ffi.rtt_probe_trace_worker_recv(id as foreign int64_t)
+              ffi.rtt_probe_trace_worker_reply_start(id as foreign int64_t)
+            end
+            traced_send(job.reply, ReplyMsg(id, id * 2 + 1, "ok"), 0)
+            if job.id > 0 then
+              ffi.rtt_probe_trace_worker_reply_done(id as foreign int64_t)
+              processed = processed + 1
+            end
+          end
+          return processed
+        end, ep_rx, ready_tx, pool_tx[1])
+      else
+        workers[c] = thread.spawn_four<|
+            thread.Receiver<|PlainJob|>, thread.Sender<|integer|>,
+            ReplySenderPool, integer, integer|>(function (
+              rx: thread.Receiver<|PlainJob|>, ready: thread.Sender<|integer|>,
+              pool: ReplySenderPool, lanes: integer): integer
+          local warmed = warm_channel(PlainJob(-1, "request", token_bytes))
+          if warmed.id ~= -1 then raise "MPMC plain warmup failed" end
+          local warm_reply = warm_channel(ReplyMsg(1, 3, "ok"))
+          if warm_reply.value ~= 3 then raise "MPMC reply warmup failed" end
+          gc.collect(); gc.collect()
+          ready:send(1)
+          local processed = 0
+          for _, job? in rx:incoming() do
+            if job == nil then raise "nil MPMC request" end
+            if job.body ~= "request" then raise "invalid MPMC body" end
+            local id = abs_int(job.id)
+            local slot = (id - 1) % lanes + 1
+            if job.id > 0 then
+              ffi.rtt_probe_trace_worker_recv(id as foreign int64_t)
+              ffi.rtt_probe_trace_worker_reply_start(id as foreign int64_t)
+            end
+            traced_send(pool.senders[slot], ReplyMsg(id, id * 2 + 1, "ok"), 0)
+            if job.id > 0 then
+              ffi.rtt_probe_trace_worker_reply_done(id as foreign int64_t)
+              processed = processed + 1
+            end
+          end
+          return processed
+        end, plain_rx, ready_tx, reply_pool, in_flight)
+      end
+    end
+    local warm_start = ffi.rtt_probe_now_ns()
+    for p = 1, producers do
+      if use_endpoint then
+        local config = MpmcProducer<|RpcSenderJob|>(
+          ep_tx, pool_rx, pool_tx, permits_rx, permits_tx, ready_tx, start_rx,
+          done_tx, retire_rx, p, producers, in_flight, count, warmup)
+        senders[p] = thread.spawn_one<|MpmcProducer<|RpcSenderJob|>, integer|>(
+          function (cfg: MpmcProducer<|RpcSenderJob|>): integer
+            return mpmc_produce(cfg, function (id: integer, slot: integer): RpcSenderJob
+              return RpcSenderJob(id, "request", cfg.reply_senders[slot])
+            end)
+          end, config)
+      else
+        local config = MpmcProducer<|PlainJob|>(
+          plain_tx, pool_rx, pool_tx, permits_rx, permits_tx, ready_tx, start_rx,
+          done_tx, retire_rx, p, producers, in_flight, count, warmup)
+        senders[p] = thread.spawn_one<|MpmcProducer<|PlainJob|>, integer|>(
+          function (cfg: MpmcProducer<|PlainJob|>): integer
+            return mpmc_produce(cfg, function (id: integer, _slot: integer): PlainJob
+              return PlainJob(id, "request", token_bytes)
+            end)
+          end, config)
+      end
+    end
+    for _ = 1, producers * in_flight + consumers do ready_rx:receive() end
+    ffi.rtt_probe_mark_warmup_done(
+      ffi.rtt_probe_now_ns() - warm_start, (warmup * producers * in_flight) as foreign int64_t)
+    gc.collect(); gc.collect()
+    ffi.rtt_probe_start_body(gc.count() as foreign int64_t)
+    for _ = 1, producers * in_flight do start_tx:send(1) end
+    local sum = 0
+    for _ = 1, producers do sum = sum + done_rx:receive() end
+    ffi.rtt_probe_stop_body(gc.count() as foreign int64_t)
+    for _ = 1, producers do retire_tx:send(1) end
+    local producer_sum = 0
+    for p = 1, producers do producer_sum = producer_sum + join_worker(senders[p]) end
+    if producer_sum ~= sum then raise "MPMC producer checksum mismatch" end
+    plain_tx:close(); ep_tx:close()
+    local processed = 0
+    for c = 1, consumers do processed = processed + join_worker(workers[c]) end
+    if processed ~= count or sum ~= count * (count + 2) then raise "MPMC lifecycle mismatch" end
+    for slot = 1, pool_size do
+      pool_tx[slot]:close(); pool_rx[slot]:close()
+      permits_tx[slot]:close(); permits_rx[slot]:close()
+    end
+    plain_rx:close(); ep_rx:close()
+    ready_tx:close(); ready_rx:close(); start_tx:close(); start_rx:close()
+    done_tx:close(); done_rx:close(); retire_tx:close(); retire_rx:close()
+    return sum
+  end)
+  ffi.rtt_probe_mark_workers_retired(gc.count() as foreign int64_t)
+  return checksum, 0
+end
+
+local function run_wait_directed_case(
+    case_name: string,
+    count: integer,
+    warmup: integer): (integer, integer)
+  local req_wire = #protobuf.serialize(PlainJob(1, "request", token_bytes))
+  local rep_wire = #protobuf.serialize(ReplyMsg(1, 3, "ok"))
+  local wire_bytes = req_wire + rep_wire
+
+  local checksum = run_in_runtime(function (): integer
+    ffi.rtt_probe_mark_setup_start(gc.count() as foreign int64_t)
+    local ready_tx, ready_rx = thread.channel<|integer|>(1)
+    local step_tx, step_rx = thread.channel<|integer|>(1)
+
+    if case_name == "wait_full_sender_record" then
+      local req_tx, req_rx = thread.channel<|PlainJob|>(1)
+      local rep_tx, rep_rx = thread.channel<|ReplyMsg|>(2)
+      local worker = thread.spawn_four<|
+          thread.Receiver<|PlainJob|>,
+          thread.Receiver<|integer|>,
+          thread.Sender<|ReplyMsg|>,
+          thread.Sender<|integer|>,
+          integer|>(function (
+            rx: thread.Receiver<|PlainJob|>,
+            st_rx: thread.Receiver<|integer|>,
+            tx: thread.Sender<|ReplyMsg|>,
+            rdy: thread.Sender<|integer|>): integer
+        rdy:send(1)
+        local processed = 0
+        local previous_id = 0
+        for _, step_id? in st_rx:incoming() do
+          local sid = step_id or 0
+          local job = rx:receive()
+          if job.id ~= previous_id then raise "full sender admission lost FIFO identity" end
+          previous_id = sid
+          if #job.body == 0 then raise "invalid job" end
+          if sid > 0 then
+            tx:send(ReplyMsg(sid, sid * 2 + 1, "ok"))
+            processed = processed + 1
+          elseif sid < 0 then
+            local a = -sid
+            gc.collect(); gc.collect()
+            tx:send(ReplyMsg(a, a * 2 + 1, "ok"))
+          end
+        end
+        return processed
+      end, req_rx, step_rx, rep_tx, ready_tx)
+
+      ready_rx:receive()
+      -- Pre-fill the capacity-1 channel so every subsequent send finds count == 1 (full!)
+      req_tx:send(PlainJob(0, "prefill", token_bytes))
+
+      local run_one = function (id: integer, timed: boolean): integer
+        local t0: foreign int64_t = 0
+        if timed then
+          t0 = ffi.rtt_probe_now_ns()
+          ffi.rtt_probe_trace_client_send_start(id as foreign int64_t, t0)
+        end
+        local sender_task = async.run<|nil, value|>(function (): nil
+          if timed then
+            traced_send(req_tx, PlainJob(id, "request", token_bytes), 0)
+          else
+            req_tx:send(PlainJob(id, "request", token_bytes))
+          end
+          return nil
+        end)
+        wait_until_waiting(sender_task)
+        step_tx:send(id)
+        await_task(sender_task)
+        if timed then
+          ffi.rtt_probe_trace_client_send_done(id as foreign int64_t, ffi.rtt_probe_now_ns())
+        end
+        local rep = timed and traced_receive(rep_rx) or rep_rx:receive()
+        if timed then
+          local t5 = ffi.rtt_probe_now_ns()
+          ffi.rtt_probe_trace_client_reply_done(id as foreign int64_t, t5)
+          ffi.rtt_probe_record_sample(t5 - t0)
+        end
+        return rep.value
+      end
+
+      local w_start = ffi.rtt_probe_now_ns()
+      for i = 1, warmup do
+        if run_one(-i, false) ~= i * 2 + 1 then raise "warmup full sender mismatch" end
+      end
+      ffi.rtt_probe_mark_warmup_done(ffi.rtt_probe_now_ns() - w_start, warmup as foreign int64_t)
+      gc.collect()
+
+      ffi.rtt_probe_start_body(gc.count() as foreign int64_t)
+      local sum = 0
+      for i = 1, count do
+        local v = run_one(i, true)
+        if v ~= i * 2 + 1 then raise "full sender reply mismatch" end
+        sum = sum + v
+      end
+      ffi.rtt_probe_stop_body(gc.count() as foreign int64_t)
+
+      -- Drain the 1 remaining item in req_rx
+      step_tx:send(0)
+      step_tx:close()
+      if join_worker(worker) ~= count then raise "full sender worker count mismatch" end
+      req_tx:close(); req_rx:close(); rep_tx:close(); rep_rx:close()
+      ready_tx:close(); ready_rx:close(); step_rx:close()
+      return sum
+
+    elseif case_name == "wait_full_sender_endpoint" then
+      local req_tx, req_rx = thread.channel<|RpcSenderJob|>(1)
+      local rep_tx, rep_rx = thread.channel<|ReplyMsg|>(2)
+      local worker = thread.spawn_three<|
+          thread.Receiver<|RpcSenderJob|>,
+          thread.Receiver<|integer|>,
+          thread.Sender<|integer|>,
+          integer|>(function (
+            rx: thread.Receiver<|RpcSenderJob|>,
+            st_rx: thread.Receiver<|integer|>,
+            rdy: thread.Sender<|integer|>): integer
+        rdy:send(1)
+        local processed = 0
+        local previous_id = 0
+        for _, step_id? in st_rx:incoming() do
+          local sid = step_id or 0
+          local job = rx:receive()
+          if job.id ~= previous_id then raise "full sender admission lost FIFO identity" end
+          previous_id = sid
+          if #job.body == 0 then raise "invalid endpoint job" end
+          if sid > 0 then
+            job.reply:send(ReplyMsg(sid, sid * 2 + 1, "ok"))
+            processed = processed + 1
+          elseif sid < 0 then
+            local a = -sid
+            gc.collect(); gc.collect()
+            job.reply:send(ReplyMsg(a, a * 2 + 1, "ok"))
+          end
+        end
+        return processed
+      end, req_rx, step_rx, ready_tx)
+
+      ready_rx:receive()
+      req_tx:send(RpcSenderJob(0, "prefill", rep_tx))
+
+      local run_one = function (id: integer, timed: boolean): integer
+        local t0: foreign int64_t = 0
+        if timed then
+          t0 = ffi.rtt_probe_now_ns()
+          ffi.rtt_probe_trace_client_send_start(id as foreign int64_t, t0)
+        end
+        local sender_task = async.run<|nil, value|>(function (): nil
+          if timed then
+            traced_send(req_tx, RpcSenderJob(id, "request", rep_tx), 1)
+          else
+            req_tx:send(RpcSenderJob(id, "request", rep_tx))
+          end
+          return nil
+        end)
+        wait_until_waiting(sender_task)
+        step_tx:send(id)
+        await_task(sender_task)
+        if timed then
+          ffi.rtt_probe_trace_client_send_done(id as foreign int64_t, ffi.rtt_probe_now_ns())
+        end
+        local rep = timed and traced_receive(rep_rx) or rep_rx:receive()
+        if timed then
+          local t5 = ffi.rtt_probe_now_ns()
+          ffi.rtt_probe_trace_client_reply_done(id as foreign int64_t, t5)
+          ffi.rtt_probe_record_sample(t5 - t0)
+        end
+        return rep.value
+      end
+
+      local w_start = ffi.rtt_probe_now_ns()
+      for i = 1, warmup do
+        if run_one(-i, false) ~= i * 2 + 1 then raise "warmup full sender endpoint mismatch" end
+      end
+      ffi.rtt_probe_mark_warmup_done(ffi.rtt_probe_now_ns() - w_start, warmup as foreign int64_t)
+      gc.collect()
+
+      ffi.rtt_probe_start_body(gc.count() as foreign int64_t)
+      local sum = 0
+      for i = 1, count do
+        local v = run_one(i, true)
+        if v ~= i * 2 + 1 then raise "full sender endpoint reply mismatch" end
+        sum = sum + v
+      end
+      ffi.rtt_probe_stop_body(gc.count() as foreign int64_t)
+
+      step_tx:send(0)
+      step_tx:close()
+      if join_worker(worker) ~= count then raise "full sender endpoint worker count mismatch" end
+      req_tx:close(); req_rx:close(); rep_tx:close(); rep_rx:close()
+      ready_tx:close(); ready_rx:close(); step_rx:close()
+      return sum
+
+    elseif case_name == "wait_empty_receiver_record" then
+      local msg_tx, msg_rx = thread.channel<|PlainJob|>(1)
+      local worker = thread.spawn_three<|
+          thread.Sender<|PlainJob|>,
+          thread.Receiver<|integer|>,
+          thread.Sender<|integer|>,
+          integer|>(function (
+            tx: thread.Sender<|PlainJob|>,
+            st_rx: thread.Receiver<|integer|>,
+            rdy: thread.Sender<|integer|>): integer
+        rdy:send(1)
+        local processed = 0
+        for _, step_id? in st_rx:incoming() do
+          local sid = step_id or 0
+          local a = abs_int(sid)
+          if sid < 0 then gc.collect(); gc.collect() end
+          tx:send(PlainJob(a, "request", token_bytes))
+          if sid > 0 then processed = processed + 1 end
+        end
+        return processed
+      end, msg_tx, step_rx, ready_tx)
+
+      ready_rx:receive()
+      local run_one = function (id: integer, timed: boolean): integer
+        local t0: foreign int64_t = 0
+        if timed then t0 = ffi.rtt_probe_now_ns() end
+        local recv_task = async.run<|PlainJob, value|>(function (): PlainJob
+          if timed then
+            return traced_receive(msg_rx)
+          else
+            return msg_rx:receive()
+          end
+        end)
+        wait_until_waiting(recv_task)
+        step_tx:send(id)
+        local job = await_task(recv_task)
+        if timed then
+          local t1 = ffi.rtt_probe_now_ns()
+          ffi.rtt_probe_record_sample(t1 - t0)
+        end
+        if #job.body ~= 7 then raise "empty receiver record mismatch" end
+        return job.id
+      end
+
+      local w_start = ffi.rtt_probe_now_ns()
+      for i = 1, warmup do
+        if run_one(-i, false) ~= i then raise "warmup empty receiver mismatch" end
+      end
+      ffi.rtt_probe_mark_warmup_done(ffi.rtt_probe_now_ns() - w_start, warmup as foreign int64_t)
+      gc.collect()
+
+      ffi.rtt_probe_start_body(gc.count() as foreign int64_t)
+      local sum = 0
+      for i = 1, count do
+        local v = run_one(i, true)
+        if v ~= i then raise "empty receiver id mismatch" end
+        sum = sum + v
+      end
+      ffi.rtt_probe_stop_body(gc.count() as foreign int64_t)
+
+      step_tx:close()
+      if join_worker(worker) ~= count then raise "empty receiver worker count mismatch" end
+      msg_tx:close(); msg_rx:close(); ready_tx:close(); ready_rx:close(); step_rx:close()
+      return sum
+
+    elseif case_name == "wait_empty_receiver_endpoint" then
+      local msg_tx, msg_rx = thread.channel<|RpcSenderJob|>(1)
+      local rep_tx, rep_rx = thread.channel<|ReplyMsg|>(1)
+      local worker = thread.spawn_four<|
+          thread.Sender<|RpcSenderJob|>,
+          thread.Sender<|ReplyMsg|>,
+          thread.Receiver<|integer|>,
+          thread.Sender<|integer|>,
+          integer|>(function (
+            tx: thread.Sender<|RpcSenderJob|>,
+            carried: thread.Sender<|ReplyMsg|>,
+            st_rx: thread.Receiver<|integer|>,
+            rdy: thread.Sender<|integer|>): integer
+        rdy:send(1)
+        local processed = 0
+        for _, step_id? in st_rx:incoming() do
+          local sid = step_id or 0
+          local a = abs_int(sid)
+          if sid < 0 then gc.collect(); gc.collect() end
+          tx:send(RpcSenderJob(a, "request", carried))
+          if sid > 0 then processed = processed + 1 end
+        end
+        return processed
+      end, msg_tx, rep_tx, step_rx, ready_tx)
+
+      ready_rx:receive()
+      local run_one = function (id: integer, timed: boolean): integer
+        local t0: foreign int64_t = 0
+        if timed then t0 = ffi.rtt_probe_now_ns() end
+        local recv_task = async.run<|RpcSenderJob, value|>(function (): RpcSenderJob
+          if timed then
+            return traced_receive(msg_rx)
+          else
+            return msg_rx:receive()
+          end
+        end)
+        wait_until_waiting(recv_task)
+        step_tx:send(id)
+        local job = await_task(recv_task)
+        if timed then
+          local t1 = ffi.rtt_probe_now_ns()
+          ffi.rtt_probe_record_sample(t1 - t0)
+        end
+        if #job.body ~= 7 then raise "empty receiver endpoint mismatch" end
+        return job.id
+      end
+
+      local w_start = ffi.rtt_probe_now_ns()
+      for i = 1, warmup do
+        if run_one(-i, false) ~= i then raise "warmup empty receiver endpoint mismatch" end
+      end
+      ffi.rtt_probe_mark_warmup_done(ffi.rtt_probe_now_ns() - w_start, warmup as foreign int64_t)
+      gc.collect()
+
+      ffi.rtt_probe_start_body(gc.count() as foreign int64_t)
+      local sum = 0
+      for i = 1, count do
+        local v = run_one(i, true)
+        if v ~= i then raise "empty receiver endpoint id mismatch" end
+        sum = sum + v
+      end
+      ffi.rtt_probe_stop_body(gc.count() as foreign int64_t)
+
+      step_tx:close()
+      if join_worker(worker) ~= count then raise "empty receiver endpoint worker count mismatch" end
+      msg_tx:close(); msg_rx:close(); rep_tx:close(); rep_rx:close()
+      ready_tx:close(); ready_rx:close(); step_rx:close()
+      return sum
+    end
+
+    raise "unknown directed wait case: " .. case_name
+  end)
+  ffi.rtt_probe_mark_workers_retired(gc.count() as foreign int64_t)
+  return checksum, wire_bytes
+end
+
+-- ============================================================================
+-- Group 5: Close/Cancel Churn & Join Paths (Ordinary vs Cleanup Join)
+-- ============================================================================
+
+local function run_churn_or_join_case(
+    case_name: string,
+    count: integer,
+    warmup: integer): (integer, integer)
+  local checksum = run_in_runtime(function (): integer
+    local run_one = function (idx: integer, timed: boolean): integer
+      local t0: foreign int64_t = 0
+      if timed then t0 = ffi.rtt_probe_now_ns() end
+      local result_val = 0
+
+      if case_name == "churn_close_parked_senders" then
+        local tx, rx = thread.channel<|integer|>(1)
+        tx:send(0) -- fill capacity 1
+        local s1 = async.run<|integer, value|>(function (): integer
+          local caught = false
+          do
+            if timed then traced_send(tx, idx, 0) else tx:send(idx) end
+          catch
+            caught = true
+          end
+          if not caught then raise "expected closed error on parked sender 1" end
+          return 1
+        end)
+        local s2 = async.run<|integer, value|>(function (): integer
+          local caught = false
+          do
+            if timed then traced_send(tx, idx + 1, 0) else tx:send(idx + 1) end
+          catch
+            caught = true
+          end
+          if not caught then raise "expected closed error on parked sender 2" end
+          return 1
+        end)
+        wait_until_waiting(s1)
+        wait_until_waiting(s2)
+        rx:close()
+        result_val = await_task(s1) + await_task(s2)
+        tx:close()
+
+      elseif case_name == "churn_close_parked_receivers" then
+        local tx, rx = thread.channel<|integer|>(1)
+        local r1 = async.run<|integer, value|>(function (): integer
+          local res = timed and traced_receive_result(rx) or rx:receive_result()
+          case res
+          when closed() then return 1
+          else raise "expected closed result on parked receiver 1"
+          end
+        end)
+        local r2 = async.run<|integer, value|>(function (): integer
+          local res = timed and traced_receive_result(rx) or rx:receive_result()
+          case res
+          when closed() then return 1
+          else raise "expected closed result on parked receiver 2"
+          end
+        end)
+        wait_until_waiting(r1)
+        wait_until_waiting(r2)
+        tx:close()
+        result_val = await_task(r1) + await_task(r2)
+        rx:close()
+
+      elseif case_name == "churn_cancel_parked_waiters" then
+        local tx, rx = thread.channel<|integer|>(1)
+        tx:send(0) -- fill tx so s_task parks on overflow
+        local empty_tx, empty_rx = thread.channel<|integer|>(1)
+        local s_task = async.run<|integer, value|>(function (): integer
+          if timed then traced_send(tx, idx, 0) else tx:send(idx) end
+          return 0
+        end)
+        local r_task = async.run<|integer, value|>(function (): integer
+          if timed then return traced_receive(empty_rx) else return empty_rx:receive() end
+        end)
+        wait_until_waiting(s_task)
+        wait_until_waiting(r_task)
+        s_task:cancel()
+        r_task:cancel()
+        case async.join(s_task)
+        when cancelled() then result_val = result_val + 1
+        else raise "expected s_task cancelled"
+        end
+        case async.join(r_task)
+        when cancelled() then result_val = result_val + 1
+        else raise "expected r_task cancelled"
+        end
+        tx:close(); rx:close(); empty_tx:close(); empty_rx:close()
+
+      elseif case_name == "join_ordinary" then
+        local rdy_tx, rdy_rx = thread.channel<|integer|>(1)
+        local rel_tx, rel_rx = thread.channel<|integer|>(1)
+        local worker = thread.spawn_two<|
+            thread.Sender<|integer|>,
+            thread.Receiver<|integer|>,
+            integer|>(function (
+              rdy: thread.Sender<|integer|>,
+              rel: thread.Receiver<|integer|>): integer
+          rdy:send(1)
+          local v = rel:receive()
+          return v + 1
+        end, rdy_tx, rel_rx)
+        rdy_rx:receive()
+        local joiner = async.run<|integer, value|>(function (): integer
+          local slot = -1 as foreign int
+          if timed then
+            slot = ffi.rtt_probe_op_begin(ffi.RTT_OP_JOIN as foreign int, 0)
+          end
+          local st = worker:join()
+          if timed then
+            ffi.rtt_probe_op_end(slot, ffi.RTT_OUTCOME_OK as foreign int)
+          end
+          case st
+          when succeeded(v) then return v
+          else raise "ordinary join failed"
+          end
+        end)
+        wait_until_waiting(joiner)
+        rel_tx:send(idx)
+        result_val = await_task(joiner)
+        rdy_tx:close(); rdy_rx:close(); rel_tx:close(); rel_rx:close()
+
+      elseif case_name == "join_cleanup_cancelled_task" then
+        local rdy_tx, rdy_rx = thread.channel<|integer|>(1)
+        local blk_tx, blk_rx = thread.channel<|integer|>(1)
+        local release_tx, release_rx = thread.channel<|integer|>(1)
+        local worker = thread.spawn_three<|
+            thread.Sender<|integer|>, thread.Receiver<|integer|>,
+            thread.Receiver<|integer|>, integer|>(function (
+              rdy: thread.Sender<|integer|>, blk: thread.Receiver<|integer|>,
+              release: thread.Receiver<|integer|>): integer
+          local gate = async.run<|integer, value|>(function (): integer
+            return release:receive()
+          end)
+          defer do
+            rdy:send(2)
+            async.await_cleanup<|nil, value|>(function (
+                resolve: function (nil): (),
+                _reject: function (value): (),
+                _fatal: function (value, string): ())
+              if gate:status():has_finished() then
+                resolve(nil)
+              else
+                gate:add_terminal_listener(function (_: async.TaskStatus<|integer, value|>)
+                  resolve(nil)
+                end)
+              end
+            end)
+            case gate:status()
+            when succeeded(v) then
+              if v ~= 1 then raise "cleanup release mismatch" end
+            else raise "cleanup release task did not succeed"
+            end
+          end
+          rdy:send(1)
+          return blk:receive()
+        end, rdy_tx, blk_rx, release_rx)
+        if rdy_rx:receive() ~= 1 then raise "cleanup worker not ready" end
+        local mon = worker:task()
+        wait_until_waiting(mon)
+        mon:cancel()
+        if rdy_rx:receive() ~= 2 then raise "child cleanup barrier not entered" end
+        local released = false
+        -- Cancellation has queued the proxy before this releaser. The Runtime
+        -- FIFO runs its cleanup registrar before the newly queued Task.
+        local releaser = async.run<|nil, value|>(function (): nil
+          if mon:status():has_finished() then raise "proxy retired before child cleanup" end
+          released = true
+          release_tx:send(1)
+          return nil
+        end)
+        case async.join(mon)
+        when cancelled() then result_val = 1
+        else raise "expected monitor task cancelled"
+        end
+        await_task(releaser)
+        if not released then raise "proxy cleanup release was skipped" end
+        rdy_tx:close(); rdy_rx:close(); blk_tx:close(); blk_rx:close()
+        release_tx:close(); release_rx:close()
+
+      else
+        raise "unknown churn/join case: " .. case_name
+      end
+
+      if timed then
+        local t1 = ffi.rtt_probe_now_ns()
+        ffi.rtt_probe_record_sample(t1 - t0)
+      end
+      return result_val
+    end
+
+    local w_start = ffi.rtt_probe_now_ns()
+    for i = 1, warmup do
+      run_one(i, false)
+    end
+    ffi.rtt_probe_mark_warmup_done(ffi.rtt_probe_now_ns() - w_start, warmup as foreign int64_t)
+    gc.collect()
+
+    ffi.rtt_probe_mark_setup_start(gc.count() as foreign int64_t)
+    ffi.rtt_probe_start_body(gc.count() as foreign int64_t)
+    local sum = 0
+    for i = 1, count do
+      sum = sum + run_one(i, true)
+    end
+    ffi.rtt_probe_stop_body(gc.count() as foreign int64_t)
+    return sum
+  end)
+  ffi.rtt_probe_mark_workers_retired(gc.count() as foreign int64_t)
+  return checksum, 0
+end
+
+-- ============================================================================
+-- Case catalog and main driver
+-- ============================================================================
+
+local function all_cases(): {CaseMeta}
+  return {
+    -- Group 1: Same-state codec & overhead controls
+    CaseMeta("call_control", "same_state_codec", "same_state", 10000, 200, 1, 1, 1, 1),
+    CaseMeta("overhead_control", "same_state_codec", "same_state", 10000, 200, 1, 1, 1, 1),
+    CaseMeta("inspect_record", "same_state_codec", "same_state", 5000, 200, 1, 1, 1, 1),
+    CaseMeta("inspect_function", "same_state_codec", "same_state", 1000, 100, 1, 1, 1, 1),
+    CaseMeta("codec_scalar_roundtrip", "same_state_codec", "same_state", 5000, 200, 1, 1, 1, 1),
+    CaseMeta("codec_small_encode", "same_state_codec", "same_state", 5000, 200, 1, 1, 1, 1),
+    CaseMeta("codec_small_decode", "same_state_codec", "same_state", 5000, 200, 1, 1, 1, 1),
+    CaseMeta("codec_small_transfer_roundtrip", "same_state_codec", "same_state", 5000, 200, 1, 1, 1, 1),
+    CaseMeta("codec_wide16_encode", "same_state_codec", "same_state", 5000, 200, 1, 1, 1, 1),
+    CaseMeta("codec_wide16_decode", "same_state_codec", "same_state", 5000, 200, 1, 1, 1, 1),
+    CaseMeta("codec_wide16_transfer_roundtrip", "same_state_codec", "same_state", 5000, 200, 1, 1, 1, 1),
+    CaseMeta("codec_large64k_encode", "same_state_codec", "same_state", 256, 32, 1, 1, 1, 1),
+    CaseMeta("codec_large64k_decode", "same_state_codec", "same_state", 256, 32, 1, 1, 1, 1),
+    CaseMeta("codec_large64k_transfer_roundtrip", "same_state_codec", "same_state", 256, 32, 1, 1, 1, 1),
+    CaseMeta("closure_roundtrip_cap0", "same_state_codec", "same_state", 1000, 100, 1, 1, 1, 1),
+    CaseMeta("closure_roundtrip_cap1", "same_state_codec", "same_state", 1000, 100, 1, 1, 1, 1),
+    CaseMeta("closure_roundtrip_cap8", "same_state_codec", "same_state", 1000, 100, 1, 1, 1, 1),
+    CaseMeta("closure_roundtrip_cap64", "same_state_codec", "same_state", 1000, 100, 1, 1, 1, 1),
+    CaseMeta("closure_roundtrip_complex_sig", "same_state_codec", "same_state", 1000, 100, 1, 1, 1, 1),
+
+    -- Group 2: Same-state immediate nonblocking queue controls
+    CaseMeta("queue_plain_bytes8", "same_state_queue", "same_state_queue", 5000, 200, 1, 1, 1, 1),
+    CaseMeta("queue_opaque_hook8", "same_state_queue", "same_state_queue", 5000, 200, 1, 1, 1, 1),
+    CaseMeta("queue_packed_hook8", "same_state_queue", "same_state_queue", 5000, 200, 1, 1, 1, 1),
+    CaseMeta("queue_real_sender", "same_state_queue", "same_state_queue", 5000, 200, 1, 1, 1, 1),
+    CaseMeta("queue_real_receiver", "same_state_queue", "same_state_queue", 5000, 200, 1, 1, 1, 1),
+    CaseMeta("sender_clone", "same_state_queue", "same_state_queue", 5000, 200, 1, 1, 1, 1),
+
+    -- Group 3: Cross-thread SPSC request/reply
+    CaseMeta("spsc_scalar_persistent", "spsc_rtt", "persistent_reply", 1000, 64, 1, 1, 1, 1),
+    CaseMeta("spsc_record_persistent", "spsc_rtt", "persistent_reply", 1000, 64, 1, 1, 1, 1),
+    CaseMeta("spsc_opaque_persistent", "spsc_rtt", "persistent_reply", 1000, 64, 1, 1, 1, 1),
+    CaseMeta("spsc_endpoint_carried_persistent", "spsc_rtt", "persistent_reply", 1000, 64, 1, 1, 1, 1),
+    CaseMeta("spsc_record_pool4_control", "spsc_rtt", "pool_four_reply", 1000, 64, 1, 1, 1, 1),
+    CaseMeta("spsc_endpoint_pool4_reply", "spsc_rtt", "pool_four_reply", 1000, 64, 1, 1, 1, 1),
+    CaseMeta("spsc_endpoint_fresh_reply", "spsc_rtt", "fresh_reply", 500, 32, 1, 1, 1, 1),
+    CaseMeta("spsc_large64k_persistent", "spsc_rtt", "persistent_reply", 256, 16, 1, 1, 1, 1),
+    CaseMeta("spsc_large64k_endpoint_pool4", "spsc_rtt", "pool_four_reply", 256, 16, 1, 1, 1, 1),
+
+    -- Group 4: Cross-thread Bounded MPMC & Directed Full/Empty Waits
+    CaseMeta("mpmc_record_inflight1_cap1_2p2c", "mpmc_rtt", "pool_four_reply", 1000, 64, 1, 2, 2, 1),
+    CaseMeta("mpmc_endpoint_inflight1_cap1_2p2c", "mpmc_rtt", "pool_four_reply", 1000, 64, 1, 2, 2, 1),
+    CaseMeta("mpmc_record_inflight4_cap1_2p2c", "mpmc_rtt", "pool_four_reply", 1000, 64, 4, 2, 2, 1),
+    CaseMeta("mpmc_endpoint_inflight4_cap1_2p2c", "mpmc_rtt", "pool_four_reply", 1000, 64, 4, 2, 2, 1),
+    CaseMeta("mpmc_record_inflight4_cap4_2p2c", "mpmc_rtt", "pool_four_reply", 1000, 64, 4, 2, 2, 4),
+    CaseMeta("mpmc_endpoint_inflight4_cap4_2p2c", "mpmc_rtt", "pool_four_reply", 1000, 64, 4, 2, 2, 4),
+    CaseMeta("mpmc_record_inflight16_cap2_4p4c", "mpmc_rtt", "pool_16_reply", 1000, 64, 16, 4, 4, 2),
+    CaseMeta("mpmc_endpoint_inflight16_cap2_4p4c", "mpmc_rtt", "pool_16_reply", 1000, 64, 16, 4, 4, 2),
+    CaseMeta("mpmc_record_inflight16_cap16_4p4c", "mpmc_rtt", "pool_16_reply", 1000, 64, 16, 4, 4, 16),
+    CaseMeta("mpmc_endpoint_inflight16_cap16_4p4c", "mpmc_rtt", "pool_16_reply", 1000, 64, 16, 4, 4, 16),
+    CaseMeta("wait_full_sender_record", "mpmc_rtt", "directed_full_wait", 500, 32, 1, 1, 1, 1),
+    CaseMeta("wait_full_sender_endpoint", "mpmc_rtt", "directed_full_wait", 500, 32, 1, 1, 1, 1),
+    CaseMeta("wait_empty_receiver_record", "mpmc_rtt", "directed_empty_wait", 500, 32, 1, 1, 1, 1),
+    CaseMeta("wait_empty_receiver_endpoint", "mpmc_rtt", "directed_empty_wait", 500, 32, 1, 1, 1, 1),
+
+    -- Group 5: Close/Cancel Churn & Join Paths
+    CaseMeta("churn_close_parked_senders", "churn_and_join", "close_churn", 500, 32, 2, 2, 1, 1),
+    CaseMeta("churn_close_parked_receivers", "churn_and_join", "close_churn", 500, 32, 2, 1, 2, 1),
+    CaseMeta("churn_cancel_parked_waiters", "churn_and_join", "cancel_churn", 500, 32, 2, 1, 1, 1),
+    CaseMeta("join_ordinary", "churn_and_join", "ordinary_join", 100, 8, 1, 1, 1, 1),
+    CaseMeta("join_cleanup_cancelled_task", "churn_and_join", "cleanup_join", 100, 8, 1, 1, 1, 1)
+  }
+end
+
+local function find_case(name: string): CaseMeta
+  local catalog = all_cases()
+  for i = 1, #catalog do
+    if catalog[i].name == name then
+      return catalog[i]
+    end
+  end
+  raise "unknown benchmark case: " .. name
+end
+
+local function measure_cold_first_use(): integer
+  local t0 = ffi.rtt_probe_now_ns()
+  local v = run_in_runtime(function (): integer
+    local tx, rx = thread.channel<|PlainJob|>(1)
+    local rep_tx, rep_rx = thread.channel<|ReplyMsg|>(1)
+    local w = thread.spawn_two<|
+        thread.Receiver<|PlainJob|>,
+        thread.Sender<|ReplyMsg|>,
+        integer|>(function (
+          r: thread.Receiver<|PlainJob|>,
+          p: thread.Sender<|ReplyMsg|>): integer
+      local j = r:receive()
+      p:send(ReplyMsg(j.id, j.id + 1, "cold"))
+      return 1
+    end, rx, rep_tx)
+    tx:send(PlainJob(1, "request", token_bytes))
+    local rep = rep_rx:receive()
+    tx:close(); rx:close(); rep_tx:close(); rep_rx:close()
+    return join_worker(w) + rep.value
+  end)
+  local elapsed = ffi.rtt_probe_now_ns() - t0
+  if v ~= 3 then raise "cold first-use checksum mismatch" end
+  gc.collect()
+  gc.collect()
+  return elapsed as integer
+end
+
+function main(args: {string}): integer
+  if #args < 1 then
+    raise "usage: bench <case_name> [count] [warmup] [instrumented:0|1] [raw_samples_path]"
+  end
+  local meta = find_case(args[1])
+  local count = (#args >= 2) and parse_int(args[2]) or meta.default_count
+  local warmup = (#args >= 3) and parse_int(args[3]) or meta.default_warmup
+  local instrumented = (#args >= 4) and parse_int(args[4]) or 0
+  local raw_samples_path = (#args >= 5) and args[5] or ""
+  if count < 1 or count > 1000000 or warmup < 1 or
+     (instrumented ~= 0 and instrumented ~= 1) then
+    raise "invalid benchmark counts or instrumentation mode"
+  end
+
+  local cold_ns = measure_cold_first_use()
+
+  local sample_cap = count + 64
+  if sample_cap < 1024 then sample_cap = 1024 end
+  if ffi.rtt_probe_init(
+      sample_cap as foreign int64_t,
+      (count + 16) as foreign int64_t,
+      instrumented as foreign int) == 0 then
+    raise "rtt_probe_init failed (sample allocation or accounting calibration failure)"
+  end
+  defer ffi.rtt_probe_cleanup()
+
+  ffi.rtt_probe_mark_cold_done(cold_ns as foreign int64_t)
+  ffi.rtt_probe_mark_setup_start(gc.count() as foreign int64_t)
+
+  local checksum = 0
+  local wire_bytes = 0
+  if meta.category == "same_state_codec" then
+    checksum, wire_bytes = run_codec_case(meta.name, count, warmup)
+  elseif meta.category == "same_state_queue" then
+    checksum, wire_bytes = run_same_state_queue_case(meta.name, count, warmup)
+  elseif meta.category == "spsc_rtt" then
+    checksum, wire_bytes = run_spsc_case(meta.name, count, warmup)
+  elseif meta.category == "mpmc_rtt" then
+    if meta.protocol == "directed_full_wait" or meta.protocol == "directed_empty_wait" then
+      checksum, wire_bytes = run_wait_directed_case(meta.name, count, warmup)
+    else
+      local use_ep = string.find(meta.name, "endpoint", 1) ~= nil
+      checksum, wire_bytes = run_mpmc_pool_case(
+        use_ep, meta.in_flight, meta.producers, meta.consumers,
+        meta.capacity, count, warmup)
+    end
+  elseif meta.category == "churn_and_join" then
+    checksum, wire_bytes = run_churn_or_join_case(meta.name, count, warmup)
+  else
+    raise "unsupported category: " .. meta.category
+  end
+  if ffi.rtt_probe_quiesce() == 0 then raise "native workers did not retire" end
+  ffi.rtt_probe_set_wire_bytes(wire_bytes as foreign int64_t)
+
+  -- Two explicit post-retirement GC passes to measure residual reclamation
+  -- and two-phase finalizer completion outside the main timing window.
+  local gc1_t0 = ffi.rtt_probe_now_ns()
+  gc.collect()
+  local gc1_ns = ffi.rtt_probe_now_ns() - gc1_t0
+  ffi.rtt_probe_mark_post_gc1(gc1_ns, gc.count() as foreign int64_t)
+
+  local gc2_t0 = ffi.rtt_probe_now_ns()
+  gc.collect()
+  local gc2_ns = ffi.rtt_probe_now_ns() - gc2_t0
+  if ffi.rtt_probe_quiesce() == 0 then raise "native worker epilogue did not retire" end
+  ffi.rtt_probe_mark_post_gc2(gc2_ns, gc.count() as foreign int64_t)
+
+  if ffi.rtt_probe_finish_json(
+      meta.name,
+      meta.category,
+      meta.protocol,
+      count as foreign int64_t,
+      meta.in_flight as foreign int64_t,
+      meta.producers as foreign int64_t,
+      meta.consumers as foreign int64_t,
+      meta.capacity as foreign int64_t,
+      checksum as foreign int64_t,
+      raw_samples_path) == 0 then
+    raise "rtt_probe_finish_json failed"
+  end
+  return 0
+end
