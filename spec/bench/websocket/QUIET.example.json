@@ -1,7 +1,0 @@
-{
-  "owner_thread_id": "01a1054f-c6d4-7253-9868-ee6198900e08",
-  "measurements_allowed": false,
-  "starts_unix": 0,
-  "expires_unix": 0,
-  "note": "Owner records the agreed window, date, machine, VM state, and absence of overlapping local/native/VM builds and other performance measurements."
-}

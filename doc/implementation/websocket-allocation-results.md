@@ -12,7 +12,7 @@ Lua requested-byte traffic counts successful allocations/resizes, rather than re
 
 ## Actual operation slopes
 
-Each cell is **userdata / functions / requested Lua bytes per operation**, from `(100−0)/100` or `(1000−100)/900`. Binary payloads, no incoming fragmentation; numbers are rounded here and preserved at full precision in the selected [measurement summary](../../spec/bench/websocket/allocation-summary-final5.json). Different read chunking, string interning and task progress can alter the intervals. Raw controls are topology comparisons, not an isolated codec decomposition.
+Each cell is **userdata / functions / requested Lua bytes per operation**, from `(100−0)/100` or `(1000−100)/900`. Binary payloads, no incoming fragmentation; numbers are rounded here and preserved at full precision in the selected [measurement summary](https://github.com/mascarenhas/titan/releases/download/issue-193-benchmark-archive/websocket-benchmark-issue193.zip) (`spec/bench/websocket/allocation-summary-final5.json` in [archived issue benchmarks](benchmark-archives.md)). Different read chunking, string interning and task progress can alter the intervals. Raw controls are topology comparisons, not an isolated codec decomposition.
 
 | 32-byte workload | 0→100 | 100→1000 |
 | --- | ---: | ---: |

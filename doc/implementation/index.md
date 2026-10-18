@@ -139,6 +139,7 @@ Two facts shape everything downstream of the checker:
 | [Multi-module libraries](multi-module-libraries.md) | Grouping logical modules into one physical provider pair; common-prefix selection, DSO discovery/claims, generated Lua shims, canonical runtime imports, lazy/global promotion, and validated publication. |
 | [Static compiled modules](static-compiled-modules.md) | Loading/linking archive providers and constructing flattened archives; object-section interfaces, bounded ar/ELF/COFF/Mach-O readers, target/provenance validation, whole-provider composition, and paired publication. |
 | [Selective binary dependency verification](binary-compatibility.md) | Checking whether an existing consumer can load a changed provider; used signatures/public shapes, ABI-first runtime verification, copied native provider selection, stable union tags, variable/closure slots, and Windows DLL launchers. |
+| [Archived issue benchmarks](benchmark-archives.md) | Index of issue benchmark harnesses, C probes, raw result JSONs, and relocatable evidence archives published as GitHub pre-release ZIPs (#193, #196, #242, #252). |
 
 ## Lua-version upgrade audit
 

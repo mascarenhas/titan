@@ -335,9 +335,11 @@ These observations cover the uniform yielding workload and its one timer. They d
 
 ## Reproduction and evidence
 
-The [portable measurement harness](../../spec/bench/async_allocations/README.md)
+The [portable measurement harness](https://github.com/mascarenhas/titan/releases/tag/issue-196-benchmark-archive)
+(`spec/bench/async_allocations/README.md` in [archived issue benchmarks](benchmark-archives.md))
 records build identities and runs allocation and uninstrumented comparisons.
-[Machine-readable results](../../spec/bench/async_allocations/results-issue196.json)
+[Machine-readable results](https://github.com/mascarenhas/titan/releases/download/issue-196-benchmark-archive/async-allocations-benchmark-issue196.zip)
+(`spec/bench/async_allocations/results-issue196.json` in the archive)
 retain the comparison quantities and raw evidence hashes. The measurements
 describe the frozen provider above; subsequent documentation, harness and
 regression-only changes do not alter its production inputs.
