@@ -56,10 +56,14 @@ permits `Event.move(...)` to select the original public constructor.
 Export validation walks resolved alias targets recursively. Public aliases
 containing local nominal types or nonexportable C descriptors are rejected by
 the same rules as function signatures, variables, and public nominal members.
-Portable owned graphs and Titan constructors containing portable foreign
+Portable owned graphs and Titan constructors containing exportable foreign
 components remain eligible public targets; a direct raw foreign alias uses the
-separate declaration below. A header-defined `CTypedef` remains nonexportable
-regardless of its resolved target.
+separate declaration below. `types.is_exportable_c_type_graph` accepts a named
+header `CTypedef` with valid declaration provenance when its complete target
+graph is exportable. Such consumers must provide the original compatible C
+declarations; ordinary Titan imports do not inherit the declaring headers.
+The alias adds no boxing, lifetime, or serialization policy. See
+[the C export boundary](../language/ffi.md).
 
 ## Foreign aliases are a separate C declaration
 

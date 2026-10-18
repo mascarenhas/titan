@@ -718,9 +718,12 @@ closing the use. This is intentionally stronger than
 `types.has_tvalue_representation`: lightuserdata alone cannot recover pointee
 type, bounds, or lifetime. No generic path broadens `value -> CPointer` or
 another FFI relation. Foreign functions remain non-generic. Exportability is a
-separate recursive check: contextual primitives and their portable
-pointer/function/owned closure are accepted, while imported typedefs and other
-header-dependent C descriptors remain forbidden.
+separate recursive check (`types.is_exportable_c_type_graph`): besides portable
+graphs it accepts eligible named header typedefs, structs/unions, and fixed
+arrays when every component is exportable and consumers provide the original
+compatible C declarations. Ordinary imports do not inherit those headers.
+This does not admit otherwise-forbidden C shapes as generic type arguments or
+create new boxing/ownership conversions; see [the C FFI](../language/ffi.md).
 
 Raw C `TValue` needs no special API whitelist. Once a parameter erases to
 `value`, the focused ordinary pass selects the existing whole-slot

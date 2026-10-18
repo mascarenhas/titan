@@ -42,6 +42,11 @@ void rtt_probe_cancelled_wait(void);
 void rtt_probe_fast_success(void);
 void rtt_probe_join_check(int done);
 void rtt_probe_waiter_bind(void *waiter);
+void rtt_probe_external_prepare(void *waiter);
+void rtt_probe_retirement_bind(void *context, void *target);
+void rtt_probe_retirement_notify(void *context, void *target);
+void rtt_probe_retirement_check(void *context, int status);
+void rtt_probe_retirement_registered(void *context, int pending);
 void rtt_probe_waiter_notify(void *waiter);
 void rtt_probe_cleanup_prepare(void *waiter);
 void rtt_probe_waiter_complete(void *waiter, int normal);
@@ -58,12 +63,18 @@ void rtt_probe_trace_worker_reply_start(int64_t req_id);
 void rtt_probe_trace_worker_reply_done(int64_t req_id);
 void rtt_probe_trace_client_reply_done(int64_t req_id, int64_t t_ns);
 
+/* Finite MPMC fairness traces are preallocated before any worker/timer starts. */
+int rtt_probe_mpmc_setup(int64_t operations, int producers, int lanes, int consumers);
+void rtt_probe_trace_permit_start(int64_t req_id, int producer, int lane, int64_t t_ns);
+int rtt_probe_mpmc_consumer_done(int consumer, int64_t operations);
+
 
 int rtt_probe_finish_json(const char *case_name, const char *category,
                           const char *protocol, int64_t operations,
                           int64_t in_flight, int64_t producers,
                           int64_t consumers, int64_t capacity,
-                          int64_t checksum, const char *raw_samples_path);
+                          int64_t checksum, const char *raw_samples_path,
+                          const char *request_trace_path);
 void rtt_probe_cleanup(void);
 
 #endif

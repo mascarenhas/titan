@@ -20,6 +20,10 @@ the measured harness revision.
 - Final corrected wake/join lane, if measured: `<source revision and SDK identity, or not measured>`.
 - Actual command, selected catalog, and case count: `<plan output and hashes>`.
 - Changes between each pair: `<ownership / codec / wake changes actually present>`.
+- Final common compiler patch set and real combined candidate delta, including
+  shared-wake/join/native-retirement/cancellation-transport changes: `<evidence>`.
+- Historical harness/source/report publication and separately rebuilt final
+  resource lane (not an old output relabeled for new helpers): `<evidence>`.
 
 The historical pre-resource baseline and resource-ownership checkpoint both use
 **generated-code ABI 2**. Other existing version numbers remain unchanged,
@@ -144,6 +148,12 @@ generated consumer bytes.
 - Matched pair keys `(case, batch, repeat, mode)` and order-sensitive per-pair
   differences/ratios; separate within-batch variation from between-batch
   repeatability: `<evidence>`.
+- Current MPMC request sidecars, exact request/producer/lane partition and count,
+  timestamp/body-window checks, path/SHA-256 and after-join consumer counts:
+  `<evidence; unavailable for frozen-v4, never retrofitted>`.
+- Relocatable raw/source archive member index and original byte hashes; exact
+  checkpoint reconstruction inputs/dependency licenses and command replay:
+  `<evidence; no dependence on an unarchived old SDK/prefix>`.
 
 Keep raw paired observations even when generated tables display marginal lane
 medians. Identify whether a reported percentile is from pooled samples, a
@@ -219,6 +229,24 @@ claim.
 Do not label these as matched endpoint-only component differences. A large
 non-endpoint pool-four control would be required for that component claim.
 
+### Finite MPMC credit wait and progress
+
+Keep original post-permit RTT distinct from the required current request trace
+that starts before permit acquisition. Report each actual producer/lane's
+assigned/completed count, permit-wait and including-permit end-to-end
+distributions, first/last progress and intercompletion-gap samples; preserve the
+identity TSV and actual per-consumer positive-request counts after join.
+
+| Case / mode | Per-lane counts / empty availability | Worst lane permit / including-permit p99 | Maximum intercompletion gap | Startup / finish skew | Consumer counts | Actual paired ranges / batch differences |
+|---|---|---|---|---|---|---|
+| `<case/mode>` | `<evidence>` | `<evidence>` | `<evidence>` | `<evidence>` | `<evidence>` | `<evidence>` |
+
+These are finite fixture observations, not strict FIFO completion or starvation
+bounds. An empty lane/one-completion gap is unavailable, not zero. Account for
+the extra common clock/trace overhead in both fresh matched lanes. Frozen-v4
+did not measure this interval: aggregate historical p99 cannot prove fairness.
+
+
 ## 6. Semantic Wait Counters and Handle Lifecycle
 
 Use the private source probes, not a mutex-lock ordinal/retain-skip heuristic.
@@ -247,6 +275,13 @@ allocation traffic and the zero-unretired-handle requirement unchanged.
 Show that directed waits and cleanup-join barriers exercised their intended
 slow paths. A checksum or observer Task suspension alone does not prove that
 the native operation parked.
+
+Record `thread_wait_contract` and actual source probe recipe. Legacy ordinary
+registration precedes suspension; shared external registration runs after yield
+and must count its own accepted pending native registration, not a later Task's
+yield. Proxy prearm is not cleanup suspension; prove the actual non-inline
+native-cleanup registrar/continuation separately. Inline or unawaited retirement
+notifications are unavailable for wake attribution, never zero-latency samples.
 
 ## 7. Allocation, Copy Coverage, and Overlapping Stages
 
@@ -282,6 +317,10 @@ it is not isolated libuv delivery time. Require exact waiter identity and a
 causative notification, not a process-global last signal or an in-flight-one
 assumption. Missing/ambiguous attribution, unsupported instrumentation, and
 zero samples must be distinguished from an observed zero-duration interval.
+Current matched wake intervals end at the exact successful native-await return,
+including helper cleanup in both lanes. Disclose that common final-harness
+boundary versus frozen-v4 raw coroutine-return sampling; do not silently pool
+stage observations across those harness/compiler phases.
 
 ## 8. Instrumentation Overhead and Lifecycle Evidence
 

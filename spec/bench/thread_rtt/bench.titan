@@ -1288,6 +1288,11 @@ local function mpmc_produce<|T|>(
     tasks[lane] = async.run<|integer, value|>(function (): integer
       local exchange = function (id: integer, measured: boolean): integer
         local slot = (abs_int(id) - 1) % config.in_flight + 1
+        if measured then
+          ffi.rtt_probe_trace_permit_start(
+            id as foreign int64_t, config.index as foreign int,
+            lane_index as foreign int, ffi.rtt_probe_now_ns())
+        end
         local permit = config.permits[slot]:receive()
         local t0 = ffi.rtt_probe_now_ns()
         if measured then ffi.rtt_probe_trace_client_send_start(id as foreign int64_t, t0) end
@@ -1341,6 +1346,11 @@ local function run_mpmc_pool_case(
     warmup: integer): (integer, integer)
   local checksum = run_in_runtime(function (): integer
     ffi.rtt_probe_mark_setup_start(gc.count() as foreign int64_t)
+    if ffi.rtt_probe_mpmc_setup(
+        count as foreign int64_t, producers as foreign int,
+        in_flight as foreign int, consumers as foreign int) == 0 then
+      raise "MPMC fairness trace allocation or topology failed"
+    end
     local ready_tx, ready_rx = thread.channel<|integer|>(producers * in_flight + consumers)
     local start_tx, start_rx = thread.channel<|integer|>(producers * in_flight)
     local done_tx, done_rx = thread.channel<|integer|>(producers)
@@ -1464,7 +1474,13 @@ local function run_mpmc_pool_case(
     if producer_sum ~= sum then raise "MPMC producer checksum mismatch" end
     plain_tx:close(); ep_tx:close()
     local processed = 0
-    for c = 1, consumers do processed = processed + join_worker(workers[c]) end
+    for c = 1, consumers do
+      local worker_count = join_worker(workers[c])
+      if ffi.rtt_probe_mpmc_consumer_done(c as foreign int, worker_count as foreign int64_t) == 0 then
+        raise "MPMC consumer accounting failed"
+      end
+      processed = processed + worker_count
+    end
     if processed ~= count or sum ~= count * (count + 2) then raise "MPMC lifecycle mismatch" end
     for slot = 1, pool_size do
       pool_tx[slot]:close(); pool_rx[slot]:close()
@@ -2140,6 +2156,10 @@ function main(args: {string}): integer
   local warmup = (#args >= 3) and parse_int(args[3]) or meta.default_warmup
   local instrumented = (#args >= 4) and parse_int(args[4]) or 0
   local raw_samples_path = (#args >= 5) and args[5] or ""
+  local request_trace_path = ""
+  if meta.category == "mpmc_rtt" and meta.producers > 1 and raw_samples_path ~= "" then
+    request_trace_path = raw_samples_path .. ".requests.tsv"
+  end
   if count < 1 or count > 1000000 or warmup < 1 or
      (instrumented ~= 0 and instrumented ~= 1) then
     raise "invalid benchmark counts or instrumentation mode"
@@ -2208,7 +2228,7 @@ function main(args: {string}): integer
       meta.consumers as foreign int64_t,
       meta.capacity as foreign int64_t,
       checksum as foreign int64_t,
-      raw_samples_path) == 0 then
+      raw_samples_path, request_trace_path) == 0 then
     raise "rtt_probe_finish_json failed"
   end
   return 0

@@ -795,10 +795,9 @@ function spill_decl_init(ctx, decl)
         })
     end
     return render([[
-        $CT volatile $SPILL = $CVAR;
+        $DECL = $CVAR;
     ]], {
-        CT = ctype(decl._type),
-        SPILL = spill_cvar(decl),
+        DECL = cvardecl(ctx, decl._type, spill_cvar(decl), { "volatile" }),
         CVAR = decl._cvar,
     })
 end
@@ -819,10 +818,9 @@ function spill_decl_zero(ctx, decl)
         })
     end
     return render([[
-        $CT volatile $SPILL = $INIT;
+        $DECL = $INIT;
     ]], {
-        CT = ctype(decl._type),
-        SPILL = spill_cvar(decl),
+        DECL = cvardecl(ctx, decl._type, spill_cvar(decl), { "volatile" }),
         INIT = initval(decl._type),
     })
 end

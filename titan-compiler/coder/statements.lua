@@ -2702,14 +2702,10 @@ function coder._codeautomaticallocationdecl(ctx, decl)
         local backing = "_foreign_backing_" .. logical
         decl._cvar = decl._cvar or ("_local_" .. logical)
         local array_type = types.CArray(plan.payload_type, count)
-        decl._c_backing_storage = {
-            address = backing,
-            bytes = "sizeof(" .. backing .. ")",
-        }
-        decl._spill_cvar = "_spill_foreign_backing_" .. logical
+        -- The view is a pointer scalar: spill its value, not backing bytes
+        -- that may have changed through the borrowed pointer.
         return render([[
             $BACKING = {0};
-            $POINTER;
             $POINTER = $BACKING_NAME;
             $CSPILLDECL
         ]], {

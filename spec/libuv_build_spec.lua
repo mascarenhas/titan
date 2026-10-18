@@ -235,27 +235,43 @@ local UV_FOREIGN_CALLBACKS = {
 -- static inline definitions. Their linkage names need not appear in nm output.
 local UV_NATIVE_ENTRIES = {
     { name = "consume_spawn_pipes", source = "titan/uv/process.titan" },
+    { name = "external_wake_drop_target_locked", source = "titan/uv/external_wake.titan" },
+    { name = "external_wake_free_core", source = "titan/uv/external_wake.titan" },
+    { name = "external_wake_unlink_pending", source = "titan/uv/external_wake.titan" },
+    { name = "external_wake_detach", source = "titan/uv/external_wake.titan" },
+    { name = "native_external_wake_retain", source = "titan/uv/external_wake.titan" },
+    { name = "native_external_wake_release", source = "titan/uv/external_wake.titan" },
+    { name = "native_external_wake_notify", source = "titan/uv/external_wake.titan" },
+    { name = "native_external_wake_unregister", source = "titan/uv/external_wake.titan" },
+    { name = "native_external_wake_is_notified", source = "titan/uv/external_wake.titan" },
+    { name = "external_wake_reserve_native", source = "titan/uv/external_wake.titan" },
+    { name = "external_wake_activate_native", source = "titan/uv/external_wake.titan" },
+    { name = "external_wake_unregister_native", source = "titan/uv/external_wake.titan" },
+    { name = "external_wake_drain_native", source = "titan/uv/external_wake.titan" },
+    { name = "external_wake_begin_close", source = "titan/uv/external_wake.titan" },
     { name = "native_mutex_lock", source = "titan/uv/sync.titan" },
-    { name = "native_mutex_trylock", inline = true, source = "titan/uv/sync.titan" },
+    { name = "native_mutex_trylock", source = "titan/uv/sync.titan" },
     { name = "native_mutex_unlock", source = "titan/uv/sync.titan" },
     { name = "native_mutex_destroy", source = "titan/uv/sync.titan" },
     { name = "native_rwlock_rdlock", source = "titan/uv/sync.titan" },
-    { name = "native_rwlock_tryrdlock", inline = true, source = "titan/uv/sync.titan" },
+    { name = "native_rwlock_tryrdlock", source = "titan/uv/sync.titan" },
     { name = "native_rwlock_rdunlock", source = "titan/uv/sync.titan" },
     { name = "native_rwlock_wrlock", source = "titan/uv/sync.titan" },
-    { name = "native_rwlock_trywrlock", inline = true, source = "titan/uv/sync.titan" },
+    { name = "native_rwlock_trywrlock", source = "titan/uv/sync.titan" },
     { name = "native_rwlock_wrunlock", source = "titan/uv/sync.titan" },
     { name = "native_sem_post", source = "titan/uv/sync.titan" },
     { name = "native_sem_wait", source = "titan/uv/sync.titan" },
-    { name = "native_sem_trywait", inline = true, source = "titan/uv/sync.titan" },
+    { name = "native_sem_trywait", source = "titan/uv/sync.titan" },
     { name = "native_cond_signal", source = "titan/uv/sync.titan" },
     { name = "native_cond_broadcast", source = "titan/uv/sync.titan" },
-    { name = "native_barrier_wait", inline = true, source = "titan/uv/sync.titan" },
+    { name = "native_barrier_wait", source = "titan/uv/sync.titan" },
     { name = "native_cond_wait", source = "titan/uv/sync.titan" },
-    { name = "native_cond_timedwait", inline = true, source = "titan/uv/sync.titan" },
-    { name = "native_key_get", inline = true, source = "titan/uv/sync.titan" },
+    { name = "native_cond_timedwait", source = "titan/uv/sync.titan" },
+    { name = "native_key_get", source = "titan/uv/sync.titan" },
     { name = "native_key_set", source = "titan/uv/sync.titan" },
     { name = "native_once", source = "titan/uv/sync.titan" },
+    { name = "native_thread_join", source = "titan/uv/threading.titan" },
+    { name = "native_thread_detach", source = "titan/uv/threading.titan" },
     { name = "work_worker_callback", source = "titan/uv/uv.titan" },
     { name = "async_send_native", source = "titan/uv/uv.titan" },
 }
@@ -1022,6 +1038,7 @@ esac
             inputs[#inputs + 1] = "titan/sqlite3/native.h"
             inputs[#inputs + 1] = "titan/lua/native.h"
             inputs[#inputs + 1] = "titan/thread/native.h"
+            inputs[#inputs + 1] = "titan/transfer_native.h"
             inputs[#inputs + 1] = "titan/async_receiver_native.h"
             inputs[#inputs + 1] = "prepared"
             local folders = { uv = true, http = true, websocket = true, peg = true,
@@ -1668,6 +1685,7 @@ done
                 "titan/uv/address-native.h",
                 "titan/uv/callback.h",
                 "titan/uv/data_native.h",
+                "titan/uv/external-wake-native.h",
                 "titan/uv/fd-native.h",
                 "titan/uv/network-native.h",
                 "titan/uv/platform-constants.h",
@@ -2303,6 +2321,7 @@ int main(void) {
                 "titan/uv/data.titan",
                 "titan/uv/dll.titan",
                 "titan/uv/dns.titan",
+                "titan/uv/external_wake.titan",
                 "titan/uv/fd.titan",
                 "titan/uv/identifiers.titan",
                 "titan/uv/pipe_tty.titan",
@@ -2700,30 +2719,11 @@ int main(void) {
             assert.equal(expected.uv, expected_uv,
                 "standalone titan.uv metadata fixture is stale")
 
-            -- The public raw loader retains the target's real size_t carrier
-            -- and header declaration identity. Pin every other part of the
-            -- portable golden, including the rest of this exact signature.
             local driver = require "titan-compiler.driver"
             local types = require "titan-compiler.types"
-            local loader = driver.tableloader({ target_size_t_probe = [[
-foreign import "lua.h"
-foreign function target_size_t(length: size_t): void
-end
-]] }, {}, nil, { analysis_only = true })
-            local loaded, target, errors = driver.with_loader(loader,
-                function(current) return current("target_size_t_probe") end)
-            assert.truthy(loaded, target)
-            assert.equal(0, #errors, table.concat(errors, "\n"))
             local transfer = assert(driver.decode_module_interface(
                 expected.transfer, "titan.transfer", STDLIB_TYPES_FIXTURE))
             assert.equal(expected.transfer, types.serialize(transfer))
-            local native_loader = transfer.members.transfer_load_module.type
-            assert.equal("Type.CFunction", native_loader._tag)
-            assert.equal(3, #native_loader.params)
-            assert.equal("Type.CTypedef", native_loader.params[3]._tag)
-            assert.equal("size_t", native_loader.params[3].name)
-            native_loader.params[3] = target.members.target_size_t.type.params[1]
-            expected.transfer = types.serialize(transfer)
 
             for _, record_name in ipairs({
                 "ChannelReader", "ChannelWriter", "Completion", "Receiver",

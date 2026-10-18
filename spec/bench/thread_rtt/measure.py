@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Reproducible cross-thread RTT & component benchmark harness (Issue #252 Workstream 2)."""
 import argparse
+import csv
 import hashlib
 import json
 import os
@@ -237,16 +238,22 @@ def expected_checksum(case_name, count, result):
 
 
 def instrument_thread(root, probe_header):
-    """Fail-closed, source-scoped instrumentation of the two audited ABIs.
-
-    Only harness-owned source bytes are changed. Each replacement is scoped to
-    its named top-level function; changes in control flow fail the build rather
-    than silently falling back to lock-order inference.
-    """
+    """Instrument exact legacy/shared source contracts, both generated-code ABI 2."""
     edits = []
+    thread_source = (root / "titan/thread/thread.titan").read_text()
+    if ("local function wait_on_native_waiter(" in thread_source and
+            "uv.async_send_native(waiter.async_handle)" in thread_source):
+        contract = "legacy_register_before_yield"
+    elif ("local function wait_on_native_waiter(" not in thread_source and
+          "local target = waiter.wake_target" in thread_source and
+          "uv.native_external_wake_notify(target)" in thread_source):
+        contract = "shared_register_after_yield_prearmed_retirement"
+    else:
+        raise ValueError("unrecognized audited thread wait contract")
+    shared = contract.startswith("shared_")
 
-    def transform(filename, name, change):
-        path = root / "titan/thread" / filename
+    def transform(filename, name, change, subtree="thread"):
+        path = root / "titan" / subtree / filename
         text = path.read_text()
         pattern = rf"(?m)^(?:local )?(?:foreign )?function {re.escape(name)}(?:[(<:])"
         match = re.search(pattern, text)
@@ -261,7 +268,8 @@ def instrument_thread(root, probe_header):
         if before == after:
             raise ValueError(f"probe did not change {filename}:{name}")
         path.write_text(text[:match.start()] + after + text[end:])
-        edits.append({"file": filename, "owner": name,
+        edits.append({"file": str(path.relative_to(root)), "owner": name,
+                      "wait_contract": contract,
                       "before_sha256": hashlib.sha256(before.encode()).hexdigest(),
                       "after_sha256": hashlib.sha256(after.encode()).hexdigest()})
 
@@ -274,18 +282,14 @@ def instrument_thread(root, probe_header):
         text = once(text, f"  uv.native_mutex_lock({mutex})",
                     f"  local rtt_attempt = ffi.rtt_probe_attempt_begin({kind})\n"
                     f"  uv.native_mutex_lock({mutex})")
-        # Hook immediately BEFORE the exact branch's unlock. A successful
-        # dequeue in the native-ABI version assigns result[0] after unlocking.
         pattern = (rf"(?m)^(\s*)uv.native_mutex_unlock\({re.escape(mutex)}\)"
                    rf"\n(\s*(?:result\[0\] = msg\n\s*)?return ([012])(?:[^\n]*))")
         hits = 0
         def branch(match):
             nonlocal hits
             hits += 1
-            result = int(match[3])
-            # Channel:0 ready/1 blocked/2 closed; join:0 done/1 blocked.
             return (f"{match[1]}ffi.rtt_probe_attempt_end({kind}, waiter as foreign *void, "
-                    f"{result}, rtt_attempt)\n{match[0]}")
+                    f"{int(match[3])}, rtt_attempt)\n{match[0]}")
         text = re.sub(pattern, branch, text)
         if hits != expected_returns:
             raise ValueError(f"expected {expected_returns} exact queue branches, found {hits}")
@@ -300,19 +304,26 @@ def instrument_thread(root, probe_header):
     transform("thread.titan", "waiter_enqueue", lambda text: once(
         text, "  waiter.signaled = 0",
         "  waiter.signaled = 0\n  ffi.rtt_probe_waiter_bind(waiter as foreign *void)"))
+
     def notify_probe(text):
         text = once(text, "  waiter.signaled = 1",
                     "  waiter.signaled = 1\n  ffi.rtt_probe_waiter_notify(waiter as foreign *void)")
-        return once(text, "    uv.async_send_native(waiter.async_handle)",
-                    "    local rtt_signal = uv.async_send_native(waiter.async_handle)\n"
+        call = ("uv.native_external_wake_notify(target)" if shared
+                else "uv.async_send_native(waiter.async_handle)")
+        return once(text, f"    {call}",
+                    f"    local rtt_signal = {call}\n"
                     "    ffi.rtt_probe_waiter_signal_result(waiter as foreign *void, rtt_signal as foreign int)")
     transform("thread.titan", "waiter_wake_one", notify_probe)
+
     for filename, name in (
         ("channel.titan", "Sender:send"),
         ("channel.titan", "Receiver:dequeue_or_wait"),
-        ("spawn.titan", "Thread:join"),
+        ("spawn.titan", "Thread:wait_until_finished" if shared else "Thread:join"),
     ):
         def complete_wait(text):
+            if shared:
+                return once(text, "async.wait_external(",
+                            "rtt_wait_external(waiter as foreign *void, ")
             pattern = r"(?m)^([ \t]*)end\)\n"
             text, count = re.subn(
                 pattern, lambda match: match[0] +
@@ -331,6 +342,7 @@ def instrument_thread(root, probe_header):
                         "    rtt_first = false\n"
                         "    local waiter_storage = foreign titan_thread_waiter.new()")
         transform("channel.titan", name, initial_fast)
+
     def cancellation_probe(text):
         if re.search(r"(?m)^catch$", text):
             raise ValueError("native wait catch policy changed")
@@ -340,17 +352,20 @@ def instrument_thread(root, probe_header):
             "    ffi.rtt_probe_cancelled_wait()\n"
             "  end\n"
             "  raise\nend")
-    transform("thread.titan", "wait_on_native_waiter", cancellation_probe)
+    if not shared:
+        transform("thread.titan", "wait_on_native_waiter", cancellation_probe)
     for filename, name in (
         ("channel.titan", "channel_unregister_overflow_waiter"),
         ("channel.titan", "channel_unregister_underflow_waiter"),
         ("spawn.titan", "thread_control_unregister_join_waiter"),
     ):
-        transform(filename, name, lambda text: once(
-            text, "  waiter.async_handle = nil",
-            "  ffi.rtt_probe_waiter_complete(waiter as foreign *void, 0)\n"
-            "  waiter.async_handle = nil"))
-    for name in ("Thread:join", "Thread:wait_until_finished_cleanup"):
+        anchor = "  waiter.signaled = 0" if shared else "  waiter.async_handle = nil"
+        transform(filename, name, lambda text, a=anchor: once(
+            text, a, f"  ffi.rtt_probe_waiter_complete(waiter as foreign *void, 0)\n{a}"))
+
+    join_owners = ("Thread:wait_until_finished",) if shared else (
+        "Thread:join", "Thread:wait_until_finished_cleanup")
+    for name in join_owners:
         def join_probe(text, cleanup=name.endswith("_cleanup")):
             text = once(text, "  local done = ctrl.finished ~= 0",
                         "  local done = ctrl.finished ~= 0\n"
@@ -368,6 +383,53 @@ def instrument_thread(root, probe_header):
                             "    ffi.rtt_probe_join_check(1)\n    return cached")
             return text
         transform("spawn.titan", name, join_probe)
+
+    if shared:
+        def retirement_register(text):
+            text = once(text,
+                "    uv.native_mutex_unlock(ctrl.mutex)\n    return 0 as foreign int",
+                "    ffi.rtt_probe_retirement_bind(context, target)\n"
+                "    uv.native_mutex_unlock(ctrl.mutex)\n    return 0 as foreign int")
+            return once(text, "  ctrl.proxy_wake_target = target",
+                "  ctrl.proxy_wake_target = target\n"
+                "  ffi.rtt_probe_retirement_bind(context, target)")
+        transform("spawn.titan", "thread_control_register_retirement_native", retirement_register)
+        transform("spawn.titan", "thread_control_unregister_retirement_native", lambda text: once(
+            text, "  uv.native_external_wake_release(target)",
+            "  uv.native_external_wake_release(target)\n"
+            "  ffi.rtt_probe_waiter_complete(context, 0)"))
+        transform("spawn.titan", "thread_control_complete_native", lambda text: once(
+            text, "    uv.native_external_wake_notify(proxy_target)",
+            "    ffi.rtt_probe_retirement_notify(ctrl as foreign *void, proxy_target)\n"
+            "    local rtt_signal = uv.native_external_wake_notify(proxy_target)\n"
+            "    ffi.rtt_probe_waiter_signal_result(ctrl as foreign *void, rtt_signal as foreign int)"))
+        transform("async.titan", "start_native_retirement_wait", lambda text: once(
+            text, "  if owner.native.ready ~= 0 then done:resolve(number, nil) end",
+            "  if owner.native.ready ~= 0 then\n"
+            "    ffi.rtt_probe_retirement_registered(owner.native.context, 0)\n"
+            "    done:resolve(number, nil)\n"
+            "  else\n"
+            "    ffi.rtt_probe_retirement_registered(owner.native.context, 1)\n"
+            "  end"), subtree="")
+        def native_await(text):
+            text = once(text, "    local status = retirement_poll_native(self.native)",
+                "    local status = retirement_poll_native(self.native)\n"
+                "    ffi.rtt_probe_retirement_check(self.native.context, status as foreign int)")
+            text = once(text, "      return\n    end\n    if status < 0 then",
+                "      ffi.rtt_probe_waiter_complete(self.native.context, 1)\n"
+                "      return\n    end\n    if status < 0 then")
+            return once(text, "    end\n    return\n  end\n  if self.used then",
+                "    end\n    ffi.rtt_probe_waiter_complete(self.native.context, 1)\n"
+                "    return\n  end\n  if self.used then")
+        transform("async.titan", "ExternalWait:await", native_await, subtree="")
+        transform("async.titan", "ExternalWait:retire", lambda text: once(
+            text, "  self.retired = true",
+            "  if self.native.retire ~= nil then\n"
+            "    ffi.rtt_probe_waiter_complete(self.native.context, 0)\n"
+            "  end\n  self.retired = true"), subtree="")
+        async_source = root / "titan/async.titan"
+        async_source.write_text(f'foreign import "{probe_header}"\n' + async_source.read_text())
+
     for filename, name, anchor, kind, delta in (
         ("channel.titan", "channel_new_native", "  return ch", 1, 1),
         ("thread.titan", "channel_destroy_unreferenced", "  ffi.free(ch)", 1, -1),
@@ -384,7 +446,20 @@ def instrument_thread(root, probe_header):
                     "  thread_control_release_native(ctrl)\n  ffi.rtt_probe_resource(3, -1)")
     transform("spawn.titan", "thread_worker_main", worker_probe)
     main = root / "titan/thread/thread.titan"
-    main.write_text(f'foreign import "{probe_header}"\n' + main.read_text())
+    text = main.read_text()
+    if shared:
+        helper = (
+            "local function rtt_wait_external(\n"
+            "    waiter: foreign *void,\n"
+            "    register_fn: function (foreign *void): boolean,\n"
+            "    unregister_fn: function (): ())\n"
+            "  ffi.rtt_probe_external_prepare(waiter)\n"
+            "  defer ffi.rtt_probe_waiter_complete(waiter, 0)\n"
+            "  async.wait_external(register_fn, unregister_fn)\n"
+            "  ffi.rtt_probe_waiter_complete(waiter, 1)\nend")
+        text = once(text, "\ndo\n  register_thread_bootstrap()",
+                    "\n" + cancellation_probe(helper) + "\n\ndo\n  register_thread_bootstrap()")
+    main.write_text(f'foreign import "{probe_header}"\n' + text)
     return edits
 
 
@@ -494,6 +569,111 @@ def scaled_count(default_value, scale, minimum=4):
     if scale == 1.0:
         return default_value
     return max(minimum, int(round(default_value * scale)))
+
+
+FAIRNESS_METRICS = (
+    "worst_lane_permit_wait_p99_ns", "worst_lane_end_to_end_p99_ns",
+    "max_intercompletion_gap_ns", "first_start_spread_ns", "last_completion_skew_ns",
+)
+
+
+def distribution_ns(values):
+    ordered = sorted(values)
+    if not ordered:
+        return {"samples": 0, **{name: None for name in (
+            "min_ns", "p50_ns", "p95_ns", "p99_ns", "max_ns")}}
+    return {
+        "samples": len(ordered), "min_ns": ordered[0], "max_ns": ordered[-1],
+        **{f"p{p}_ns": ordered[(len(ordered) - 1) * p // 100] for p in (50, 95, 99)},
+    }
+
+
+def read_mpmc_fairness(path, meta, result):
+    descriptor = result.get("fairness")
+    count = result["operations"]
+    producers, lanes = meta["producers"], meta["in_flight"]
+    consumers = descriptor.get("consumer_operations") if isinstance(descriptor, dict) else None
+    if (descriptor is None or descriptor.get("request_samples") != count or
+            not isinstance(consumers, list) or len(consumers) != meta["consumers"] or
+            any(type(n) is not int or n < 0 for n in consumers) or sum(consumers) != count):
+        raise RuntimeError("missing or inconsistent native MPMC fairness descriptor")
+    if not path.is_file():
+        raise RuntimeError(f"missing required MPMC request trace: {path}")
+    by_lane = {(p, lane): [] for p in range(1, producers + 1) for lane in range(1, lanes + 1)}
+    columns = (
+        "request_id", "producer", "lane", "permit_start_ns", "send_start_ns", "reply_received_ns")
+    seen = 0
+    with path.open(newline="") as stream:
+        reader = csv.DictReader(stream, delimiter="\t")
+        if reader.fieldnames != list(columns):
+            raise RuntimeError("unexpected MPMC request trace columns")
+        for row in reader:
+            if set(row) != set(columns):
+                raise RuntimeError("malformed MPMC request trace row")
+            values = {name: int(row[name]) for name in columns}
+            seen += 1
+            p, lane = values["producer"], values["lane"]
+            if (values["request_id"] != seen or seen > count or
+                    p != (seen - 1) % producers + 1 or
+                    lane != ((seen - 1) // producers) % lanes + 1):
+                raise RuntimeError("MPMC request trace identity/partition mismatch")
+            permit, send, reply = (values[name] for name in columns[3:])
+            if not (0 <= permit <= send <= reply <= result["clocks"]["body_wall_ns"]):
+                raise RuntimeError("MPMC trace timestamp outside its measured body")
+            history = by_lane[(p, lane)]
+            if history and permit < history[-1][2]:
+                raise RuntimeError("MPMC producer lane overlapped its preceding request")
+            history.append((permit, send, reply))
+    if seen != count:
+        raise RuntimeError(f"wrong MPMC request trace count: {seen} != {count}")
+    lane_rows = []
+    for (p, lane), history in by_lane.items():
+        first_id = p + (lane - 1) * producers
+        expected = max(0, (count - first_id) // (producers * lanes) + 1)
+        if len(history) != expected:
+            raise RuntimeError("missing producer-lane progress evidence")
+        lane_rows.append({
+            "producer": p, "lane": lane, "operations": len(history),
+            "expected_operations": expected,
+            "first_permit_start_ns": history[0][0] if history else None,
+            "last_reply_received_ns": history[-1][2] if history else None,
+            "permit_wait": distribution_ns([send - permit for permit, send, _ in history]),
+            "end_to_end_including_permit": distribution_ns([reply - permit for permit, _, reply in history]),
+            "intercompletion_gap": distribution_ns([
+                history[i][2] - history[i - 1][2] for i in range(1, len(history))]),
+        })
+    def maximum(stage, field):
+        return max((row[stage][field] for row in lane_rows if row[stage][field] is not None), default=None)
+    starts = [row["first_permit_start_ns"] for row in lane_rows if row["operations"]]
+    stops = [row["last_reply_received_ns"] for row in lane_rows if row["operations"]]
+    return {
+        **descriptor,
+        "scope": "finite MPMC credit wait and lane progress; not a FIFO completion or starvation bound",
+        "raw_request_trace_sha256": digest(path),
+        "producer_lanes": lane_rows,
+        "worst_lane_permit_wait_p99_ns": maximum("permit_wait", "p99_ns"),
+        "worst_lane_end_to_end_p99_ns": maximum("end_to_end_including_permit", "p99_ns"),
+        "max_intercompletion_gap_ns": maximum("intercompletion_gap", "max_ns"),
+        "first_start_spread_ns": max(starts) - min(starts) if starts else None,
+        "last_completion_skew_ns": max(stops) - min(stops) if stops else None,
+    }
+
+
+def summarize_fairness(rows):
+    rounds = [row["fairness"] for row in rows if row.get("fairness") is not None]
+    if not rounds:
+        return None
+    if len(rounds) != len(rows):
+        raise RuntimeError("incomplete per-round MPMC fairness evidence")
+    metrics = {}
+    for name in FAIRNESS_METRICS:
+        values = [row[name] for row in rounds if row[name] is not None]
+        metrics[name] = {
+            "rounds_with_samples": len(values),
+            "median_ns": statistics.median(values) if values else None,
+            "range_ns": [min(values), max(values)] if values else None,
+        }
+    return {"rounds": len(rounds), "metrics": metrics, "per_round": rounds}
 
 
 class Runner:
@@ -828,6 +1008,7 @@ class Runner:
             },
             native_compile_argv=compile_commands,
             source_probe_sha256=digest(self.output / "SOURCE-PROBES.json"),
+            thread_wait_contract=probe_edits[0]["wait_contract"],
             sdk_content_sha256=hashlib.sha256(
                 json.dumps(sdk_hashes, sort_keys=True).encode()).hexdigest(),
             native_payload_archive_sha256=digest(native_archive),
@@ -943,6 +1124,11 @@ class Runner:
         with sample_file.open() as stream:
             if sum(1 for _ in stream) != actual_count + 1:
                 raise RuntimeError(f"wrong raw RTT sample count in {case_name}")
+        request_trace = Path(str(sample_file) + ".requests.tsv")
+        if case_name.startswith("mpmc_"):
+            result["fairness"] = read_mpmc_fairness(request_trace, meta, result)
+        elif result.get("fairness") is not None:
+            raise RuntimeError("unexpected MPMC fairness descriptor in another protocol")
         if instrumented and self.config.get("wrappers_supported"):
             cal = result.get("calibration", {})
             if not ( result.get("wrapper_hooks_compiled") is True and
@@ -984,6 +1170,9 @@ class Runner:
             "receipt": receipt,
             "raw_samples_tsv": str(sample_file),
             "raw_samples_sha256": digest(sample_file),
+            "raw_request_trace_tsv": str(request_trace) if case_name.startswith("mpmc_") else None,
+            "raw_request_trace_sha256": (
+                result["fairness"]["raw_request_trace_sha256"] if case_name.startswith("mpmc_") else None),
         }
 
 
@@ -1005,6 +1194,10 @@ def summarize_campaign(manifest, rows):
             if r["case"] == case_name and r["instrumented"]
         ]
         entry = {"meta": CASE_BY_NAME.get(case_name, {})}
+        entry["fairness"] = {
+            "uninstrumented": summarize_fairness(uninst_rows),
+            "instrumented": summarize_fairness(inst_rows),
+        }
         if uninst_rows:
             us_list = [r["clocks"]["us_per_op"] for r in uninst_rows]
             tp_list = [r["clocks"]["throughput_ops_per_sec"] for r in uninst_rows]

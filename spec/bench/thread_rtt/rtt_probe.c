@@ -124,6 +124,9 @@ typedef struct {
 } rtt_counters_snapshot_t;
 
 typedef struct {
+  _Atomic int64_t permit_start;
+  _Atomic int producer;
+  _Atomic int lane;
   _Atomic int64_t t0_send_start;
   _Atomic int64_t t1_send_done;
   _Atomic int64_t t2_worker_recv;
@@ -149,6 +152,7 @@ typedef struct {
 } rtt_active_op_t;
 
 #define MAX_ACTIVE_OPS 512
+#define MAX_MPMC_CONSUMERS 64
 static rtt_active_op_t g_active_ops[MAX_ACTIVE_OPS];
 static _Thread_local int tls_current_op_slot = -1;
 static _Atomic int64_t g_resources[3];
@@ -197,7 +201,10 @@ typedef struct {
   _Atomic int64_t notified_ns;
   _Atomic unsigned notifications;
   int cleanup;
-  int64_t returned_ns;
+  int post_yield;
+  int suspended;
+  int op_slot;
+  void *target;
 } rtt_waiter_entry_t;
 
 static rtt_lua_state_slot_t g_lua_slots[MAX_LUA_STATES];
@@ -331,6 +338,12 @@ static struct {
 
   rtt_op_trace_t *op_traces;
   size_t trace_capacity;
+  int64_t mpmc_operations;
+  int mpmc_producers;
+  int mpmc_lanes;
+  int mpmc_consumers;
+  _Atomic int mpmc_trace_failures;
+  int64_t consumer_operations[MAX_MPMC_CONSUMERS];
 } g_probe;
 
 static int64_t clock_ns(clockid_t clk) {
@@ -523,6 +536,8 @@ int rtt_probe_init(int64_t sample_capacity, int64_t trace_capacity,
   rtt_probe_cleanup();
   if (!rtt_probe_quiesce()) return 0;
   g_setup_started = 0;
+  g_probe.mpmc_operations = 0;
+  atomic_store_explicit(&g_probe.mpmc_trace_failures, 0, memory_order_relaxed);
   size_t scap = sample_capacity > 0 ? (size_t)sample_capacity : 0;
   size_t tcap = trace_capacity > 0 ? (size_t)trace_capacity : 0;
 
@@ -570,6 +585,47 @@ int rtt_probe_init(int64_t sample_capacity, int64_t trace_capacity,
 #endif
 
   atomic_store_explicit(&g_probe.initialized, 1, memory_order_release);
+  return 1;
+}
+
+int rtt_probe_mpmc_setup(int64_t operations, int producers, int lanes, int consumers) {
+  if (operations < 1 || operations > 1000000 || producers < 1 || lanes < 1 ||
+      consumers < 1 || consumers > MAX_MPMC_CONSUMERS ||
+      producers > MAX_ACTIVE_OPS / lanes || g_probe.mpmc_operations != 0) return 0;
+  if (g_probe.op_traces == NULL) {
+    g_probe.op_traces = raw_calloc((size_t)operations + 1, sizeof(rtt_op_trace_t));
+    if (g_probe.op_traces == NULL) return 0;
+    g_probe.trace_capacity = (size_t)operations;
+  }
+  if (g_probe.trace_capacity < (size_t)operations) return 0;
+  g_probe.mpmc_operations = operations;
+  g_probe.mpmc_producers = producers;
+  g_probe.mpmc_lanes = lanes;
+  g_probe.mpmc_consumers = consumers;
+  for (int i = 0; i < consumers; i++) g_probe.consumer_operations[i] = -1;
+  return 1;
+}
+
+void rtt_probe_trace_permit_start(int64_t req_id, int producer, int lane, int64_t t_ns) {
+  if (req_id < 1 || req_id > g_probe.mpmc_operations ||
+      producer < 1 || producer > g_probe.mpmc_producers ||
+      lane < 1 || lane > g_probe.mpmc_lanes ||
+      !atomic_load_explicit(&g_probe.active_body, memory_order_acquire)) {
+    atomic_fetch_add_explicit(&g_probe.mpmc_trace_failures, 1, memory_order_relaxed);
+    return;
+  }
+  rtt_op_trace_t *trace = &g_probe.op_traces[req_id];
+  if (atomic_exchange_explicit(&trace->permit_start, t_ns, memory_order_relaxed) != 0)
+    atomic_fetch_add_explicit(&g_probe.mpmc_trace_failures, 1, memory_order_relaxed);
+  atomic_store_explicit(&trace->producer, producer, memory_order_relaxed);
+  atomic_store_explicit(&trace->lane, lane, memory_order_relaxed);
+}
+
+int rtt_probe_mpmc_consumer_done(int consumer, int64_t operations) {
+  if (consumer < 1 || consumer > g_probe.mpmc_consumers ||
+      operations < 0 || operations > g_probe.mpmc_operations ||
+      g_probe.consumer_operations[consumer - 1] != -1) return 0;
+  g_probe.consumer_operations[consumer - 1] = operations;
   return 1;
 }
 
@@ -711,14 +767,19 @@ int64_t rtt_probe_attempt_begin(int kind) {
 void rtt_probe_attempt_end(int kind, void *waiter, int result, int64_t started) {
 #if RTT_PROBE_WRAPPERS
   rtt_waiter_entry_t *entry = waiter != NULL ? find_waiter(waiter) : NULL;
-  int cleanup = entry != NULL && entry->cleanup;
-  tls_pending_waiter = result == 1 && !cleanup ? waiter : NULL;
+  int post_yield = entry != NULL && (entry->cleanup || entry->post_yield);
+  /* External registrars execute after yielding: never leave their identity in
+   * TLS for a sibling Task's next yield. Legacy ordinary registration is earlier. */
+  tls_pending_waiter = result == 1 && !post_yield ? waiter : NULL;
   tls_pending_kind = kind;
-  if (cleanup && result == 1 &&
-      atomic_load_explicit(&g_probe.active_body, memory_order_relaxed)) {
-    /* await_cleanup already yielded before its registrar executes. */
-    atomic_fetch_add_explicit(&g_probe.actual_suspensions, 1, memory_order_relaxed);
-    atomic_fetch_add_explicit(&g_join_suspensions[1], 1, memory_order_relaxed);
+  if (post_yield && result == 1) {
+    entry->suspended = 1;
+    if (atomic_load_explicit(&g_probe.active_body, memory_order_relaxed)) {
+      atomic_fetch_add_explicit(&g_probe.actual_suspensions, 1, memory_order_relaxed);
+      if (entry->cleanup || kind == RTT_OP_JOIN)
+        atomic_fetch_add_explicit(&g_join_suspensions[entry->cleanup ? 1 : 0],
+                                  1, memory_order_relaxed);
+    }
   }
 #endif
   if (started == 0 || !atomic_load_explicit(&g_probe.active_body, memory_order_acquire)) return;
@@ -730,6 +791,9 @@ void rtt_probe_attempt_end(int kind, void *waiter, int result, int64_t started) 
   if (waiter != NULL && result == 0)
     atomic_fetch_add_explicit(&g_probe.registration_recheck_successes, 1, memory_order_relaxed);
   int id = tls_current_op_slot;
+#if RTT_PROBE_WRAPPERS
+  if (entry != NULL && entry->post_yield) id = entry->op_slot;
+#endif
   if (id >= 0 && id < MAX_ACTIVE_OPS && g_active_ops[id].op_kind == kind) {
     rtt_active_op_t *slot = &g_active_ops[id];
     if (waiter != NULL && slot->slow_check_done_ns > 0)
@@ -757,6 +821,7 @@ void rtt_probe_cancelled_wait(void) {
 
 #if RTT_PROBE_WRAPPERS
 static rtt_waiter_entry_t *find_waiter(void *waiter) {
+  if (waiter == NULL) return NULL;
   for (int i = 0; i < MAX_ACTIVE_OPS; i++)
     if (atomic_load_explicit(&g_waiters[i].waiter, memory_order_acquire) == waiter)
       return &g_waiters[i];
@@ -774,13 +839,82 @@ void rtt_probe_waiter_bind(void *waiter) {
       atomic_store_explicit(&g_waiters[i].notified_ns, 0, memory_order_relaxed);
       atomic_store_explicit(&g_waiters[i].notifications, 0, memory_order_relaxed);
       g_waiters[i].cleanup = 0;
-      g_waiters[i].returned_ns = 0;
+      g_waiters[i].post_yield = 0;
+      g_waiters[i].suspended = 0;
+      g_waiters[i].op_slot = tls_current_op_slot;
+      g_waiters[i].target = NULL;
       return;
     }
   }
   atomic_fetch_add_explicit(&g_probe.slot_exhaustion_failures, 1, memory_order_relaxed);
 #else
   (void)waiter;
+#endif
+}
+
+void rtt_probe_external_prepare(void *waiter) {
+  rtt_probe_waiter_bind(waiter);
+#if RTT_PROBE_WRAPPERS
+  rtt_waiter_entry_t *entry = find_waiter(waiter);
+  if (entry != NULL) {
+    entry->post_yield = 1;
+    entry->op_slot = tls_current_op_slot;
+  }
+#endif
+}
+
+void rtt_probe_retirement_bind(void *context, void *target) {
+  rtt_probe_waiter_bind(context);
+#if RTT_PROBE_WRAPPERS
+  rtt_waiter_entry_t *entry = find_waiter(context);
+  if (entry != NULL) {
+    entry->cleanup = 1;
+    entry->post_yield = 1;
+    entry->op_slot = -1;
+    entry->target = target;
+  }
+#else
+  (void)target;
+#endif
+}
+
+void rtt_probe_retirement_notify(void *context, void *target) {
+#if RTT_PROBE_WRAPPERS
+  rtt_waiter_entry_t *entry = find_waiter(context);
+  if (entry == NULL || entry->target != target) {
+    atomic_fetch_add_explicit(&g_probe.slot_exhaustion_failures, 1, memory_order_relaxed);
+    return;
+  }
+  rtt_probe_waiter_notify(context);
+#else
+  (void)context; (void)target;
+#endif
+}
+
+void rtt_probe_retirement_check(void *context, int status) {
+#if RTT_PROBE_WRAPPERS
+  if (find_waiter(context) != NULL) rtt_probe_join_check(status == 0);
+#else
+  (void)context; (void)status;
+#endif
+}
+
+void rtt_probe_retirement_registered(void *context, int pending) {
+#if RTT_PROBE_WRAPPERS
+  rtt_waiter_entry_t *entry = find_waiter(context);
+  if (entry == NULL || entry->suspended) return;
+  if (pending) entry->suspended = 1;
+  if (atomic_load_explicit(&g_probe.active_body, memory_order_relaxed)) {
+    if (pending) {
+      atomic_fetch_add_explicit(&g_probe.actual_suspensions, 1, memory_order_relaxed);
+      atomic_fetch_add_explicit(&g_join_suspensions[1], 1, memory_order_relaxed);
+    } else {
+      atomic_fetch_add_explicit(&g_probe.registration_recheck_successes, 1,
+                                memory_order_relaxed);
+    }
+  }
+#else
+  (void)context; (void)pending;
 #endif
 }
 
@@ -794,13 +928,15 @@ void rtt_probe_cleanup_prepare(void *waiter) {
 
 void rtt_probe_waiter_complete(void *waiter, int normal) {
 #if RTT_PROBE_WRAPPERS
+  if (tls_pending_waiter == waiter) tls_pending_waiter = NULL;
   rtt_waiter_entry_t *entry = find_waiter(waiter);
   if (entry == NULL) return;
   if (atomic_load_explicit(&g_probe.active_body, memory_order_relaxed)) {
     unsigned signals = atomic_load_explicit(&entry->notifications, memory_order_acquire);
     int64_t notified = atomic_load_explicit(&entry->notified_ns, memory_order_relaxed);
-    int64_t returned = entry->cleanup ? clock_ns(CLOCK_MONOTONIC) : entry->returned_ns;
-    if (normal && signals == 1 && notified > 0 && returned >= notified) {
+    int64_t returned = normal && entry->suspended && signals == 1 && notified > 0
+                           ? clock_ns(CLOCK_MONOTONIC) : 0;
+    if (normal && entry->suspended && signals == 1 && notified > 0 && returned >= notified) {
       push_sample(&g_probe.native_wake_samples, returned - notified);
       atomic_fetch_add_explicit(&g_probe.attributed_wakes, 1, memory_order_relaxed);
     } else if (signals != 0 || !normal) {
@@ -852,23 +988,27 @@ void rtt_probe_trace_client_send_start(int64_t req_id, int64_t t_ns) {
 }
 
 void rtt_probe_trace_client_send_done(int64_t req_id, int64_t t_ns) {
+  if (!atomic_load_explicit(&g_probe.instrumented, memory_order_relaxed)) return;
   if (req_id <= 0 || (size_t)req_id > g_probe.trace_capacity || g_probe.op_traces == NULL) return;
   atomic_store_explicit(&g_probe.op_traces[req_id].t1_send_done, t_ns, memory_order_relaxed);
 }
 
 void rtt_probe_trace_worker_recv(int64_t req_id) {
+  if (!atomic_load_explicit(&g_probe.instrumented, memory_order_relaxed)) return;
   if (req_id <= 0 || (size_t)req_id > g_probe.trace_capacity || g_probe.op_traces == NULL) return;
   int64_t now = clock_ns(CLOCK_MONOTONIC);
   atomic_store_explicit(&g_probe.op_traces[req_id].t2_worker_recv, now, memory_order_relaxed);
 }
 
 void rtt_probe_trace_worker_reply_start(int64_t req_id) {
+  if (!atomic_load_explicit(&g_probe.instrumented, memory_order_relaxed)) return;
   if (req_id <= 0 || (size_t)req_id > g_probe.trace_capacity || g_probe.op_traces == NULL) return;
   int64_t now = clock_ns(CLOCK_MONOTONIC);
   atomic_store_explicit(&g_probe.op_traces[req_id].t3_reply_start, now, memory_order_relaxed);
 }
 
 void rtt_probe_trace_worker_reply_done(int64_t req_id) {
+  if (!atomic_load_explicit(&g_probe.instrumented, memory_order_relaxed)) return;
   if (req_id <= 0 || (size_t)req_id > g_probe.trace_capacity || g_probe.op_traces == NULL) return;
   int64_t now = clock_ns(CLOCK_MONOTONIC);
   atomic_store_explicit(&g_probe.op_traces[req_id].t4_reply_done, now, memory_order_release);
@@ -878,6 +1018,7 @@ void rtt_probe_trace_client_reply_done(int64_t req_id, int64_t t_ns) {
   if (req_id <= 0 || (size_t)req_id > g_probe.trace_capacity || g_probe.op_traces == NULL) return;
   rtt_op_trace_t *tr = &g_probe.op_traces[req_id];
   atomic_store_explicit(&tr->t5_reply_recv, t_ns, memory_order_relaxed);
+  if (!atomic_load_explicit(&g_probe.instrumented, memory_order_relaxed)) return;
   int64_t t0 = atomic_load_explicit(&tr->t0_send_start, memory_order_relaxed);
   int64_t t2 = atomic_load_explicit(&tr->t2_worker_recv, memory_order_acquire);
   int64_t t3 = atomic_load_explicit(&tr->t3_reply_start, memory_order_relaxed);
@@ -1171,6 +1312,8 @@ mco_result __wrap_mco_yield(mco_coro *co, void *tag) {
   int kind = tls_pending_kind;
   tls_current_op_slot = -1;
   tls_pending_waiter = NULL;
+  rtt_waiter_entry_t *entry = waiter != NULL ? find_waiter(waiter) : NULL;
+  if (entry != NULL) entry->suspended = 1;
   if (waiter != NULL && atomic_load_explicit(&g_probe.active_body, memory_order_relaxed)) {
     atomic_fetch_add_explicit(&g_probe.actual_suspensions, 1, memory_order_relaxed);
     if (kind == RTT_OP_JOIN)
@@ -1178,8 +1321,6 @@ mco_result __wrap_mco_yield(mco_coro *co, void *tag) {
   }
   mco_result result = __real_mco_yield(co, tag);
   tls_current_op_slot = saved_slot;
-  rtt_waiter_entry_t *entry = waiter != NULL ? find_waiter(waiter) : NULL;
-  if (entry != NULL) entry->returned_ns = clock_ns(CLOCK_MONOTONIC);
   return result;
 }
 #endif
@@ -1218,11 +1359,54 @@ static void write_dist_json(FILE *out, const char *name, rtt_sample_buf_t *buf, 
           trailing_comma ? "," : "");
 }
 
+static int write_mpmc_trace(const char *path, int64_t operations,
+                            int64_t producers, int64_t lanes, int64_t consumers) {
+  if (operations != g_probe.mpmc_operations || producers != g_probe.mpmc_producers ||
+      lanes != g_probe.mpmc_lanes || consumers != g_probe.mpmc_consumers ||
+      atomic_load_explicit(&g_probe.mpmc_trace_failures, memory_order_relaxed) != 0 ||
+      path == NULL || path[0] == '\0') return 0;
+  int64_t completed = 0;
+  for (int i = 0; i < g_probe.mpmc_consumers; i++) {
+    if (g_probe.consumer_operations[i] < 0) return 0;
+    completed += g_probe.consumer_operations[i];
+  }
+  if (completed != operations) return 0;
+  FILE *out = fopen(path, "w");
+  if (out == NULL) return 0;
+  fprintf(out, "request_id\tproducer\tlane\tpermit_start_ns\tsend_start_ns\treply_received_ns\n");
+  int invalid = 0;
+  for (int64_t id = 1; id <= operations; id++) {
+    rtt_op_trace_t *trace = &g_probe.op_traces[id];
+    int producer = atomic_load_explicit(&trace->producer, memory_order_relaxed);
+    int lane = atomic_load_explicit(&trace->lane, memory_order_relaxed);
+    int64_t permit = atomic_load_explicit(&trace->permit_start, memory_order_relaxed);
+    int64_t send = atomic_load_explicit(&trace->t0_send_start, memory_order_relaxed);
+    int64_t reply = atomic_load_explicit(&trace->t5_reply_recv, memory_order_relaxed);
+    if (producer != (id - 1) % producers + 1 ||
+        lane != ((id - 1) / producers) % lanes + 1 ||
+        permit < g_probe.body_start_wall_ns || send < permit || reply < send ||
+        reply > g_probe.body_stop_wall_ns) {
+      invalid = 1;
+      break;
+    }
+    fprintf(out, "%lld\t%d\t%d\t%lld\t%lld\t%lld\n", (long long)id, producer, lane,
+            (long long)(permit - g_probe.body_start_wall_ns),
+            (long long)(send - g_probe.body_start_wall_ns),
+            (long long)(reply - g_probe.body_start_wall_ns));
+  }
+  int failed = ferror(out);
+  if (fclose(out) != 0 || failed || invalid) return 0;
+  return 1;
+}
+
 int rtt_probe_finish_json(const char *case_name, const char *category,
                           const char *protocol, int64_t operations,
                           int64_t in_flight, int64_t producers,
                           int64_t consumers, int64_t capacity,
-                          int64_t checksum, const char *raw_samples_path) {
+                          int64_t checksum, const char *raw_samples_path,
+                          const char *request_trace_path) {
+  if (g_probe.mpmc_operations != 0 &&
+      !write_mpmc_trace(request_trace_path, operations, producers, in_flight, consumers)) return 0;
   if (raw_samples_path != NULL && raw_samples_path[0] != '\0') {
     FILE *f = fopen(raw_samples_path, "w");
     if (f == NULL) return 0;
@@ -1275,7 +1459,7 @@ int rtt_probe_finish_json(const char *case_name, const char *category,
     } else if (attr_wakes > 0 && unattr_wakes > 0) {
       wake_mode = "partial_exact_only";
     } else if (unattr_wakes > 0) {
-      wake_mode = "unavailable_cancelled_or_nonunique_notification";
+      wake_mode = "unavailable_unawaited_cancelled_failed_or_nonunique_notification";
     } else {
       wake_mode = "no_suspensions";
     }
@@ -1295,6 +1479,15 @@ int rtt_probe_finish_json(const char *case_name, const char *category,
   fprintf(stdout, "  \"wrapper_hooks_compiled\": %s,\n", RTT_PROBE_WRAPPERS ? "true" : "false");
   fprintf(stdout, "  \"native_wake_attribution_mode\": \"%s\",\n", wake_mode);
   fprintf(stdout, "  \"measurement_scope\": \"native branch events occurring inside body; stage intervals overlap\",\n");
+  if (g_probe.mpmc_operations != 0) {
+    fprintf(stdout, "  \"fairness\": {\"request_samples\": %lld, \"consumer_operations\": [",
+            (long long)g_probe.mpmc_operations);
+    for (int i = 0; i < g_probe.mpmc_consumers; i++)
+      fprintf(stdout, "%s%lld", i == 0 ? "" : ",", (long long)g_probe.consumer_operations[i]);
+    fprintf(stdout, "]},\n");
+  } else {
+    fprintf(stdout, "  \"fairness\": null,\n");
+  }
   int64_t states, handles, waiters;
   live_probe_owners(&states, &handles, &waiters);
   fprintf(stdout, "  \"lifecycle\": {\"channels_delta\": %lld, \"controls_delta\": %lld, "

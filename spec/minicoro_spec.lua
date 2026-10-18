@@ -575,6 +575,94 @@ int main(void) {
         assert.match("ok", out)
     end)
 
+    it("refreshes ASan main-stack bounds when a runtime moves between caller stacks", function()
+        local out = run_c_probe([[
+#include <assert.h>
+#include <stddef.h>
+#include <stdio.h>
+#define __SANITIZE_ADDRESS__ 1
+#define MINICORO_IMPL
+#include "titan-runtime/minicoro.h"
+
+static mco_runtime shared_runtime;
+static int main_tag_value = 1;
+static int nested_tag_value = 2;
+static void *main_tag = &main_tag_value;
+static void *nested_tag = &nested_tag_value;
+static const void *next_caller_bottom;
+static size_t next_caller_size;
+static const void *last_switch_bottom;
+static size_t last_switch_size;
+static mco_coro *inner_co;
+
+void __sanitizer_start_switch_fiber(void **fake_stack_save,
+                                    const void *bottom,
+                                    size_t size) {
+  if (fake_stack_save) *fake_stack_save = (void *)0x1111;
+  last_switch_bottom = bottom;
+  last_switch_size = size;
+}
+
+void __sanitizer_finish_switch_fiber(void *fake_stack_save,
+                                     const void **bottom_old,
+                                     size_t *size_old) {
+  (void)fake_stack_save;
+  if (bottom_old) *bottom_old = next_caller_bottom;
+  if (size_old) *size_old = next_caller_size;
+}
+
+static int tagcmp(void *a, void *b) {
+  return a == b;
+}
+
+static void inner_entry(mco_coro *co) {
+  assert(mco_yield(co, nested_tag) == MCO_SUCCESS);
+}
+
+static void outer_entry(mco_coro *co) {
+  mco_desc desc = mco_desc_init(inner_entry, 65536);
+  desc.runtime = &shared_runtime;
+  assert(mco_create(&inner_co, &desc) == MCO_SUCCESS);
+  next_caller_bottom = co->stack_base;
+  next_caller_size = co->stack_size;
+  assert(mco_resume(inner_co, nested_tag) == MCO_SUCCESS);
+  assert(mco_yield(co, main_tag) == MCO_SUCCESS);
+  next_caller_bottom = co->stack_base;
+  next_caller_size = co->stack_size;
+  assert(mco_resume(inner_co, nested_tag) == MCO_SUCCESS);
+  assert(mco_destroy(inner_co) == MCO_SUCCESS);
+}
+
+int main(void) {
+  mco_coro *co = NULL;
+  mco_desc desc = mco_desc_init(outer_entry, 65536);
+  mco_set_tag_comparator(tagcmp);
+  desc.runtime = &shared_runtime;
+  assert(mco_create(&co, &desc) == MCO_SUCCESS);
+
+  next_caller_bottom = (const void *)0x100000;
+  next_caller_size = 0x20000;
+  assert(mco_resume(co, main_tag) == MCO_SUCCESS);
+  assert(shared_runtime.asan_main_stack_bottom == (const void *)0x100000);
+  assert(shared_runtime.asan_main_stack_size == 0x20000);
+  assert(last_switch_bottom == (const void *)0x100000);
+  assert(last_switch_size == 0x20000);
+
+  next_caller_bottom = (const void *)0x400000;
+  next_caller_size = 0x80000;
+  assert(mco_resume(co, main_tag) == MCO_SUCCESS);
+  assert(shared_runtime.asan_main_stack_bottom == (const void *)0x400000);
+  assert(shared_runtime.asan_main_stack_size == 0x80000);
+  assert(last_switch_bottom == (const void *)0x400000);
+  assert(last_switch_size == 0x80000);
+  assert(mco_destroy(co) == MCO_SUCCESS);
+  puts("ok");
+  return 0;
+}
+        ]])
+        assert.match("ok", out)
+    end)
+
     it("includes only TSan bookkeeping in TSan public layouts", function()
         local out = run_c_probe([[
 #include <assert.h>

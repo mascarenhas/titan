@@ -15,6 +15,15 @@ includes the full53-case tables and a self-contained raw/source/provenance archi
 It describes the pre-wake checkpoint and its known lifecycle/fairness limits,
 not final corrected wake/join performance or platform acceptance.
 
+The [matched resource/wake report](reports/wake-v1-report.md) publishes the final
+53-case campaign, [tables](reports/wake-v1-tables.md),
+[manifest](reports/wake-v1-publication.json), and
+[relocatable raw/source archive](reports/wake-v1-evidence.tar.gz).
+It preserves the measured common-CPP2 and delivered-v3 source boundaries and
+qualifies ordinary versus cleanup wake endpoints. Fewer per-wait UV handles do
+not establish a blanket latency or fairness improvement; regressions and batch
+disagreement remain visible.
+
 ## Checkpoints and Acceptance Order
 
 1. Commit the baseline harness before switching the actual thread wait/spawn
@@ -120,6 +129,22 @@ The complete root set is `async`, `coroutine`, `fs`, `gc`, `http`, `io`,
 fingerprints before and after private edits, probe-owner edit hashes, original
 Native archive identity, all provider-build receipts, and final link evidence.
 An unrecognized source anchor must fail, not fall back to a mutex-order guess.
+
+`BUILD.json.thread_wait_contract` names the audited registration model, not a
+different ABI. The current recipe supports legacy register-before-yield waits
+and the corrected shared register-after-yield/native-retirement path. External
+registrars execute only after the Task has yielded, so accepted native pending
+registrations are counted there, never left in TLS for a sibling's next yield.
+The private waiter entry carries its originating operation slot across that
+yield so registration attribution does not depend on scheduler TLS.
+
+The proxy's native retirement registration is prearmed before Task exposure;
+it is not a cleanup suspension. A private-copy `async` probe counts only the
+actual native-cleanup registrar after its yield, distinguishes inline return,
+and retires residual probe entries when the real capability retires. The
+distinct control/target notification is correlated separately from ordinary
+join-queue waiters. Negative retirement never becomes successful native release.
+These changes touch only harness-owned provider copies, not production sources.
 
 The authored harness uses one private `raw_roundtrip` helper for raw codec
 measurements. `measure.py` selects its calling form from the exact measured
@@ -239,12 +264,49 @@ last-signal fallback; one request in flight does not prove a single live waiter.
 Cancelled, failed, duplicate, or otherwise ambiguous notifications cannot
 become attributed samples. This interval includes scheduler/ready-queue delay,
 not isolated libuv delivery time.
+For the current matched harness, the continuation endpoint is the exact native
+wait call's successful return, including its helper cleanup; legacy and shared
+lanes use that same endpoint. This differs from frozen-v4 ordinary-wait sampling
+at the raw coroutine-return boundary. Prearmed capabilities that retire without
+a cleanup suspension cannot yield a wake-latency sample; their notifications
+remain explicitly unattributed. Keep these harness-phase boundaries visible.
 
 Stages overlap and execute on different OS threads. Never add their medians
 into a synthetic RTT or infer wake/endpoint cost by subtracting separately
 measured workload medians. Missing instrumentation, ambiguous attribution, and
 zero samples mean unavailable coverage, not an observed zero-duration stage.
 Preserve partial attribution labels rather than silently filling gaps.
+
+### Finite MPMC credit-wait and progress evidence
+
+The original 53 cases and their post-permit RTT boundary remain unchanged.
+Current MPMC cases additionally preallocate request traces in **both** modes
+before workers/warmup/timing. Each measured producer lane records its actual
+producer/lane identity and a clock immediately before permit acquisition, plus
+the existing send-start and reply-received clocks. This adds clock/storage
+overhead to the finite fixture; it is not a probe-free scheduler benchmark.
+
+The required sidecar is `$RTT_SAMPLE_PATH.requests.tsv`, with columns
+`request_id`, `producer`, `lane`, `permit_start_ns`, `send_start_ns` and
+`reply_received_ns`; timestamps are relative to body start. It is written
+outside timing, contains exactly one row per measured request, and is bound by
+`raw_request_trace_tsv` / `raw_request_trace_sha256` in every MPMC raw row.
+Missing, duplicate, malformed, out-of-body, mispartitioned or incomplete traces
+reject a run. Consumer counts are the actual positive-request totals collected
+from each joined worker outside timing, not an assumed equal division.
+
+Derived per-producer/lane distributions report permit wait, end-to-end including
+credit acquisition, intercompletion gaps and first/last progress timestamps.
+Summary/paired tables retain worst-lane statistics, all-round ranges, actual
+within-pair deltas and independent batch differences. An unassigned lane or a
+one-completion gap series has unavailable percentiles, not invented zeroes.
+Preserve the full per-lane raw identity/count evidence alongside these summaries.
+Finite imbalance, startup/finish skew and progress gaps are not strict FIFO
+completion, starvation bounds or general fairness guarantees.
+
+Frozen-v4 historical evidence has no pre-permit/progress/consumer-share series.
+Reproduce its report with its archived frozen helpers; do not mutate or relabel
+those BUILD/SDK/source/sample bytes to retrofit current fairness diagnostics.
 
 
 ## Case Catalog (53 Original Cases Across 5 Groups)
@@ -508,13 +570,26 @@ observations and within/between-batch variation. Instrumented repeats are a
 separate diagnostic series, not additional primary RTT rounds.
 `--quiescence-note` is required and must name a nonempty operator-evidence file.
 
-After the original/resource-ownership baseline measurements and harness commit
-gate pass, build the final corrected wake/join candidate with the same `build`
-command and policy, using its own `WAKE_PREFIX`, `WAKE_SOURCE`, `WAKE_RECEIPT`,
-and `WAKE_COMMIT`:
+After the original/resource baseline gate, freeze this current harness and build
+**both fresh final lanes**. `FINAL_BASE_*` selects the resource/pre-wake source
+rebuilt with the exact common required compiler patch set; `WAKE_*` selects the
+corrected candidate under that same compiler/Lua/native policy. Do not reuse an
+old frozen-v4 built lane with changed helper/payload hashes. `FINAL_HARNESS`
+names one immutable copy used for both builds and their entire campaign:
 
 ```sh
-python3 spec/bench/thread_rtt/measure.py \
+python3 "$FINAL_HARNESS/measure.py" \
+  --prefix "$FINAL_BASE_PREFIX" \
+  --provider-source "$FINAL_BASE_SOURCE" \
+  --provider-receipt "$FINAL_BASE_RECEIPT" \
+  --source-commit "$FINAL_BASE_COMMIT" \
+  --output "$RTT_ROOT/final-resource" \
+  --cc "$BENCH_CC" --ar "$BENCH_AR" --ranlib "$BENCH_RANLIB" \
+  --titan-cflags="$PROVIDER_TITAN_CFLAGS" \
+  --link-libraries "$LINK_LIBRARIES" \
+  build
+
+python3 "$FINAL_HARNESS/measure.py" \
   --prefix "$WAKE_PREFIX" \
   --provider-source "$WAKE_SOURCE" \
   --provider-receipt "$WAKE_RECEIPT" \
@@ -525,10 +600,11 @@ python3 spec/bench/thread_rtt/measure.py \
   --link-libraries "$LINK_LIBRARIES" \
   build
 
-python3 spec/bench/thread_rtt/measure.py --output "$RTT_ROOT/wake" smoke
+python3 "$FINAL_HARNESS/measure.py" --output "$RTT_ROOT/final-resource" smoke
+python3 "$FINAL_HARNESS/measure.py" --output "$RTT_ROOT/wake" smoke
 
-python3 spec/bench/thread_rtt/compare.py \
-  --baseline "$RTT_ROOT/accepted" \
+python3 "$FINAL_HARNESS/compare.py" \
+  --baseline "$RTT_ROOT/final-resource" \
   --candidate "$RTT_ROOT/wake" \
   --output "$RTT_ROOT/paired-wake" \
   --quiescence-note "$QUIESCENCE_NOTE" \
@@ -546,6 +622,12 @@ an accepted child cancellation reason. Run the full final Linux, Windows NTFS,
 and local macOS correctness/platform gates; benchmark worker-tail zero is not
 that proof. None of these final-candidate requirements is claimed for, or made
 a prerequisite to measuring, the legacy pre-wake checkpoint.
+
+The final comparison measures the **combined corrected candidate**, including
+shared wakes, joinable token/OS-join retirement, generic async retirement and
+any actual cancellation-transport correction. Enumerate the real source delta;
+do not call it a pure wake-only effect or infer full historical Thread support
+from the earlier resource benchmark. All version numbers remain unchanged.
 
 ### 5. Generate tables, audit, and complete the report
 

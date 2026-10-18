@@ -983,6 +983,47 @@ assert(require("pkg.left") == left)
         assert.truthy(ok, output)
     end)
 
+    it("binds every folder contributor alias to one compiled module state",
+       function()
+        -- This source tree contains only the client. pkg.shared must resolve
+        -- through the separately compiled provider in workspace, not source.
+        local client_root = workspace .. "/alias-client-source"
+        write_file(client_root .. "/alias_client/alias_client.titan", [[
+local first = import "pkg.shared"
+local second = import "pkg.shared"
+
+function run(): integer
+    local a = first.touch()
+    local b = second.touch()
+    local c = third_touch()
+    local d = fourth_touch()
+    return a * 1000 + b * 100 + c * 10 + d
+end
+]])
+        write_file(client_root .. "/alias_client/aliases.titan", [[
+local third = import "pkg.shared"
+local fourth = import "pkg.shared"
+
+local function third_touch(): integer
+    return third.touch()
+end
+
+local function fourth_touch(): integer
+    return fourth.touch()
+end
+]])
+        local ok, output, why, code =
+            compile(workspace, client_root, "alias_client")
+        assert.truthy(ok, output .. "\n(" .. tostring(why) .. ", " ..
+            tostring(code) .. ")")
+        ok, output = run_lua(workspace, [[
+local client = require "alias_client"
+assert(client.run() == 1234)
+assert(client.run() == 5678)
+]])
+        assert.truthy(ok, output)
+    end)
+
     it("supports a binary-only external consumer through the selected provider",
        function()
         write_file(source_root .. "/consumer.titan", [[

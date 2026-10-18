@@ -6,16 +6,29 @@
  * joins all workers before destroying the synchronization owners. */
 typedef struct titan_cov_su_rwlock {
   void *lock;
+  void (*read_lock)(void *);
   int (*try_read)(void *);
-  int (*try_write)(void *);
   void (*read_unlock)(void *);
+  void (*write_lock)(void *);
+  int (*try_write)(void *);
   void (*write_unlock)(void *);
+  int mode;
   int read_status;
   int write_status;
+  int blocking_value;
 } titan_cov_su_rwlock;
 
 static void titan_cov_su_probe_lock(void *argument) {
   titan_cov_su_rwlock *state = (titan_cov_su_rwlock *)argument;
+  if (state->mode == 1) {
+    state->read_lock(state->lock);
+    state->blocking_value += 10;
+    state->read_unlock(state->lock);
+    state->write_lock(state->lock);
+    state->blocking_value += 32;
+    state->write_unlock(state->lock);
+    return;
+  }
   state->read_status = state->try_read(state->lock);
   if (state->read_status == 0)
     state->read_unlock(state->lock);
@@ -106,4 +119,110 @@ static void titan_cov_su_race_once(void *argument) {
   state->once(state->guard, titan_cov_su_initialize_once);
 }
 
+
+typedef struct titan_cov_su_sync_matrix {
+  void *mutex;
+  void *cond;
+  void *sem;
+  void *barrier;
+  void *start;
+  void (*mutex_lock)(void *);
+  int (*mutex_trylock)(void *);
+  void (*mutex_unlock)(void *);
+  void (*cond_signal)(void *);
+  void (*cond_broadcast)(void *);
+  void (*cond_wait)(void *, void *);
+  void (*sem_post)(void *);
+  void (*sem_wait)(void *);
+  int (*sem_trywait)(void *);
+  int (*barrier_wait)(void *);
+  int arrived;
+  int serial_count;
+  int zero_count;
+  int error_count;
+  int all_arrived_before_release;
+  int abort_barrier;
+  int predicate_phase;
+  int cond_wait_released_mutex;
+  int spurious_recheck_held;
+  int cond_waiters_ready;
+  int cond_waiters_done;
+  int phase_one_rechecks;
+  int trylock_busy_status;
+  int trylock_free_status;
+  int trywait_empty_status;
+  int trywait_ready_status;
+  int trywait_after_status;
+} titan_cov_su_sync_matrix;
+
+static void titan_cov_su_barrier_participant(void *argument) {
+  titan_cov_su_sync_matrix *state = (titan_cov_su_sync_matrix *)argument;
+  int rc;
+  state->sem_wait(state->start);
+  if (state->abort_barrier)
+    return;
+  state->mutex_lock(state->mutex);
+  state->arrived++;
+  state->mutex_unlock(state->mutex);
+  rc = state->barrier_wait(state->barrier);
+  state->mutex_lock(state->mutex);
+  if (state->arrived != 3)
+    state->all_arrived_before_release = 0;
+  if (rc > 0)
+    state->serial_count++;
+  else if (rc == 0)
+    state->zero_count++;
+  else
+    state->error_count++;
+  state->mutex_unlock(state->mutex);
+}
+
+static void titan_cov_su_cond_wait_worker(void *argument) {
+  titan_cov_su_sync_matrix *state = (titan_cov_su_sync_matrix *)argument;
+  state->mutex_lock(state->mutex);
+  state->cond_waiters_ready++;
+  state->sem_post(state->sem);
+  while (state->predicate_phase < 2) {
+    state->cond_wait(state->cond, state->mutex);
+    if (state->predicate_phase == 1 && state->phase_one_rechecks == 0) {
+      state->phase_one_rechecks++;
+      state->cond_broadcast(state->cond);
+    }
+  }
+  state->cond_waiters_done++;
+  state->mutex_unlock(state->mutex);
+  state->sem_post(state->sem);
+}
+
+static void titan_cov_su_cond_producer_worker(void *argument) {
+  titan_cov_su_sync_matrix *state = (titan_cov_su_sync_matrix *)argument;
+  state->sem_wait(state->sem);
+  state->sem_wait(state->sem);
+  state->trywait_empty_status = state->sem_trywait(state->sem);
+  state->sem_post(state->sem);
+  state->trywait_ready_status = state->sem_trywait(state->sem);
+  state->trywait_after_status = state->sem_trywait(state->sem);
+  state->mutex_lock(state->mutex);
+  state->cond_wait_released_mutex =
+      (state->cond_waiters_ready == 2 && state->cond_waiters_done == 0);
+  state->predicate_phase = 1;
+  state->cond_signal(state->cond);
+  state->mutex_unlock(state->mutex);
+  state->mutex_lock(state->mutex);
+  while (state->phase_one_rechecks == 0)
+    state->cond_wait(state->cond, state->mutex);
+  state->spurious_recheck_held =
+      (state->phase_one_rechecks > 0 && state->cond_waiters_done == 0);
+  state->predicate_phase = 2;
+  state->cond_signal(state->cond);
+  state->cond_broadcast(state->cond);
+  state->mutex_unlock(state->mutex);
+}
+
+static void titan_cov_su_try_busy_mutex(void *argument) {
+  titan_cov_su_sync_matrix *state = (titan_cov_su_sync_matrix *)argument;
+  state->trylock_busy_status = state->mutex_trylock(state->mutex);
+  if (state->trylock_busy_status == 0)
+    state->mutex_unlock(state->mutex);
+}
 #endif

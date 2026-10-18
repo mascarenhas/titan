@@ -81,13 +81,6 @@ foreign function native_mutex_lock(native: *void): void
     ffi.uv_mutex_lock(native as foreign *uv_mutex_t)
 end
 
---- Return the exact C-only native entry for this operation.
--- @return Native foreign function(*void): void result with the documented lifetime and units.
--- @usage uv/supplemental.md#mutex_tlock_function
-function mutex_t.lock_function(): foreign function(*void): void
-    return native_mutex_lock
-end
-
 --- Convenience method for [`mutex_trylock`](functions/threading.md#mutex_trylock) on this owner.
 -- @return Native integer result with the documented lifetime and units.
 -- @usage uv/supplemental.md#mutex_ttrylock
@@ -96,15 +89,12 @@ function mutex_t:trylock(): integer
     return ffi.uv_mutex_trylock(self.storage as foreign *uv_mutex_t)
 end
 
-local foreign function native_mutex_trylock(native: *void): int
+--- Attempt immediate acquisition of a borrowed or process-heap native mutex pointer directly from C or Titan.
+-- @param native Borrowed or process-heap `uv_mutex_t *` pointer.
+-- @return Native status result: zero when acquired, or a negative libuv status such as `EBUSY`.
+-- @usage uv/supplemental.md#native_mutex_trylock
+foreign function native_mutex_trylock(native: *void): int
     return ffi.uv_mutex_trylock(native as foreign *uv_mutex_t)
-end
-
---- Return the exact C-only native entry for this operation.
--- @return Native foreign function(*void): int result with the documented lifetime and units.
--- @usage uv/supplemental.md#mutex_ttrylock_function
-function mutex_t.trylock_function(): foreign function(*void): int
-    return native_mutex_trylock
 end
 
 --- Convenience method for [`mutex_unlock`](functions/threading.md#mutex_unlock) on this owner.
@@ -119,13 +109,6 @@ end
 -- @usage uv/supplemental.md#native_mutex_unlock
 foreign function native_mutex_unlock(native: *void): void
     ffi.uv_mutex_unlock(native as foreign *uv_mutex_t)
-end
-
---- Return the exact C-only native entry for this operation.
--- @return Native foreign function(*void): void result with the documented lifetime and units.
--- @usage uv/supplemental.md#mutex_tunlock_function
-function mutex_t.unlock_function(): foreign function(*void): void
-    return native_mutex_unlock
 end
 
 --- Allocate and initialize a process-heap mutex not owned by any state's GC.
@@ -207,15 +190,11 @@ function rwlock_t:rdlock()
     ffi.uv_rwlock_rdlock(self.storage as foreign *uv_rwlock_t)
 end
 
-local foreign function native_rwlock_rdlock(native: *void): void
+--- Acquire a read lock on a borrowed native rwlock pointer directly from C or Titan.
+-- @param native Borrowed initialized `uv_rwlock_t *` pointer.
+-- @usage uv/supplemental.md#native_rwlock_rdlock
+foreign function native_rwlock_rdlock(native: *void): void
     ffi.uv_rwlock_rdlock(native as foreign *uv_rwlock_t)
-end
-
---- Return the exact C-only native entry for this operation.
--- @return Native foreign function(*void): void result with the documented lifetime and units.
--- @usage uv/supplemental.md#rwlock_trdlock_function
-function rwlock_t.rdlock_function(): foreign function(*void): void
-    return native_rwlock_rdlock
 end
 
 --- Convenience method for [`rwlock_tryrdlock`](functions/threading.md#rwlock_tryrdlock) on this owner.
@@ -226,15 +205,12 @@ function rwlock_t:tryrdlock(): integer
     return ffi.uv_rwlock_tryrdlock(self.storage as foreign *uv_rwlock_t)
 end
 
-local foreign function native_rwlock_tryrdlock(native: *void): int
+--- Attempt immediate read-lock acquisition on a borrowed native rwlock pointer directly from C or Titan.
+-- @param native Borrowed initialized `uv_rwlock_t *` pointer.
+-- @return Native status result: zero when acquired, or a negative libuv status such as `EBUSY`.
+-- @usage uv/supplemental.md#native_rwlock_tryrdlock
+foreign function native_rwlock_tryrdlock(native: *void): int
     return ffi.uv_rwlock_tryrdlock(native as foreign *uv_rwlock_t)
-end
-
---- Return the exact C-only native entry for this operation.
--- @return Native foreign function(*void): int result with the documented lifetime and units.
--- @usage uv/supplemental.md#rwlock_ttryrdlock_function
-function rwlock_t.tryrdlock_function(): foreign function(*void): int
-    return native_rwlock_tryrdlock
 end
 
 --- Convenience method for [`rwlock_rdunlock`](functions/threading.md#rwlock_rdunlock) on this owner.
@@ -244,15 +220,11 @@ function rwlock_t:rdunlock()
     ffi.uv_rwlock_rdunlock(self.storage as foreign *uv_rwlock_t)
 end
 
-local foreign function native_rwlock_rdunlock(native: *void): void
+--- Release a read lock on a borrowed native rwlock pointer directly from C or Titan.
+-- @param native Borrowed initialized `uv_rwlock_t *` pointer.
+-- @usage uv/supplemental.md#native_rwlock_rdunlock
+foreign function native_rwlock_rdunlock(native: *void): void
     ffi.uv_rwlock_rdunlock(native as foreign *uv_rwlock_t)
-end
-
---- Return the exact C-only native entry for this operation.
--- @return Native foreign function(*void): void result with the documented lifetime and units.
--- @usage uv/supplemental.md#rwlock_trdunlock_function
-function rwlock_t.rdunlock_function(): foreign function(*void): void
-    return native_rwlock_rdunlock
 end
 
 --- Convenience method for [`rwlock_wrlock`](functions/threading.md#rwlock_wrlock) on this owner.
@@ -262,15 +234,11 @@ function rwlock_t:wrlock()
     ffi.uv_rwlock_wrlock(self.storage as foreign *uv_rwlock_t)
 end
 
-local foreign function native_rwlock_wrlock(native: *void): void
+--- Acquire an exclusive write lock on a borrowed native rwlock pointer directly from C or Titan.
+-- @param native Borrowed initialized `uv_rwlock_t *` pointer.
+-- @usage uv/supplemental.md#native_rwlock_wrlock
+foreign function native_rwlock_wrlock(native: *void): void
     ffi.uv_rwlock_wrlock(native as foreign *uv_rwlock_t)
-end
-
---- Return the exact C-only native entry for this operation.
--- @return Native foreign function(*void): void result with the documented lifetime and units.
--- @usage uv/supplemental.md#rwlock_twrlock_function
-function rwlock_t.wrlock_function(): foreign function(*void): void
-    return native_rwlock_wrlock
 end
 
 --- Convenience method for [`rwlock_trywrlock`](functions/threading.md#rwlock_trywrlock) on this owner.
@@ -281,15 +249,12 @@ function rwlock_t:trywrlock(): integer
     return ffi.uv_rwlock_trywrlock(self.storage as foreign *uv_rwlock_t)
 end
 
-local foreign function native_rwlock_trywrlock(native: *void): int
+--- Attempt immediate exclusive write-lock acquisition on a borrowed native rwlock pointer directly from C or Titan.
+-- @param native Borrowed initialized `uv_rwlock_t *` pointer.
+-- @return Native status result: zero when acquired, or a negative libuv status such as `EBUSY`.
+-- @usage uv/supplemental.md#native_rwlock_trywrlock
+foreign function native_rwlock_trywrlock(native: *void): int
     return ffi.uv_rwlock_trywrlock(native as foreign *uv_rwlock_t)
-end
-
---- Return the exact C-only native entry for this operation.
--- @return Native foreign function(*void): int result with the documented lifetime and units.
--- @usage uv/supplemental.md#rwlock_ttrywrlock_function
-function rwlock_t.trywrlock_function(): foreign function(*void): int
-    return native_rwlock_trywrlock
 end
 
 --- Convenience method for [`rwlock_wrunlock`](functions/threading.md#rwlock_wrunlock) on this owner.
@@ -299,15 +264,11 @@ function rwlock_t:wrunlock()
     ffi.uv_rwlock_wrunlock(self.storage as foreign *uv_rwlock_t)
 end
 
-local foreign function native_rwlock_wrunlock(native: *void): void
+--- Release an exclusive write lock on a borrowed native rwlock pointer directly from C or Titan.
+-- @param native Borrowed initialized `uv_rwlock_t *` pointer.
+-- @usage uv/supplemental.md#native_rwlock_wrunlock
+foreign function native_rwlock_wrunlock(native: *void): void
     ffi.uv_rwlock_wrunlock(native as foreign *uv_rwlock_t)
-end
-
---- Return the exact C-only native entry for this operation.
--- @return Native foreign function(*void): void result with the documented lifetime and units.
--- @usage uv/supplemental.md#rwlock_twrunlock_function
-function rwlock_t.wrunlock_function(): foreign function(*void): void
-    return native_rwlock_wrunlock
 end
 
 --- Owned native sem storage with explicit initialization and destruction.
@@ -367,15 +328,11 @@ function sem_t:post()
     ffi.uv_sem_post(self.storage as foreign *uv_sem_t)
 end
 
-local foreign function native_sem_post(native: *void): void
+--- Increment a borrowed native semaphore pointer directly from C or Titan.
+-- @param native Borrowed initialized `uv_sem_t *` pointer.
+-- @usage uv/supplemental.md#native_sem_post
+foreign function native_sem_post(native: *void): void
     ffi.uv_sem_post(native as foreign *uv_sem_t)
-end
-
---- Return the exact C-only native entry for this operation.
--- @return Native foreign function(*void): void result with the documented lifetime and units.
--- @usage uv/supplemental.md#sem_tpost_function
-function sem_t.post_function(): foreign function(*void): void
-    return native_sem_post
 end
 
 --- Convenience method for [`sem_wait`](functions/threading.md#sem_wait) on this owner.
@@ -385,15 +342,11 @@ function sem_t:wait()
     ffi.uv_sem_wait(self.storage as foreign *uv_sem_t)
 end
 
-local foreign function native_sem_wait(native: *void): void
+--- Wait on and decrement a borrowed native semaphore pointer directly from C or Titan.
+-- @param native Borrowed initialized `uv_sem_t *` pointer.
+-- @usage uv/supplemental.md#native_sem_wait
+foreign function native_sem_wait(native: *void): void
     ffi.uv_sem_wait(native as foreign *uv_sem_t)
-end
-
---- Return the exact C-only native entry for this operation.
--- @return Native foreign function(*void): void result with the documented lifetime and units.
--- @usage uv/supplemental.md#sem_twait_function
-function sem_t.wait_function(): foreign function(*void): void
-    return native_sem_wait
 end
 
 --- Convenience method for [`sem_trywait`](functions/threading.md#sem_trywait) on this owner.
@@ -404,15 +357,12 @@ function sem_t:trywait(): integer
     return ffi.uv_sem_trywait(self.storage as foreign *uv_sem_t)
 end
 
-local foreign function native_sem_trywait(native: *void): int
+--- Attempt immediate decrement of a borrowed native semaphore pointer directly from C or Titan.
+-- @param native Borrowed initialized `uv_sem_t *` pointer.
+-- @return Native status result: zero when decremented, or a negative libuv status such as `EAGAIN`.
+-- @usage uv/supplemental.md#native_sem_trywait
+foreign function native_sem_trywait(native: *void): int
     return ffi.uv_sem_trywait(native as foreign *uv_sem_t)
-end
-
---- Return the exact C-only native entry for this operation.
--- @return Native foreign function(*void): int result with the documented lifetime and units.
--- @usage uv/supplemental.md#sem_ttrywait_function
-function sem_t.trywait_function(): foreign function(*void): int
-    return native_sem_trywait
 end
 
 --- Owned native cond storage with explicit initialization and destruction.
@@ -471,15 +421,11 @@ function cond_t:signal()
     ffi.uv_cond_signal(self.storage as foreign *uv_cond_t)
 end
 
-local foreign function native_cond_signal(native: *void): void
+--- Wake one waiter on a borrowed native condition-variable pointer directly from C or Titan.
+-- @param native Borrowed initialized `uv_cond_t *` pointer.
+-- @usage uv/supplemental.md#native_cond_signal
+foreign function native_cond_signal(native: *void): void
     ffi.uv_cond_signal(native as foreign *uv_cond_t)
-end
-
---- Return the exact C-only native entry for this operation.
--- @return Native foreign function(*void): void result with the documented lifetime and units.
--- @usage uv/supplemental.md#cond_tsignal_function
-function cond_t.signal_function(): foreign function(*void): void
-    return native_cond_signal
 end
 
 --- Convenience method for [`cond_broadcast`](functions/threading.md#cond_broadcast) on this owner.
@@ -489,15 +435,11 @@ function cond_t:broadcast()
     ffi.uv_cond_broadcast(self.storage as foreign *uv_cond_t)
 end
 
-local foreign function native_cond_broadcast(native: *void): void
+--- Wake all waiters on a borrowed native condition-variable pointer directly from C or Titan.
+-- @param native Borrowed initialized `uv_cond_t *` pointer.
+-- @usage uv/supplemental.md#native_cond_broadcast
+foreign function native_cond_broadcast(native: *void): void
     ffi.uv_cond_broadcast(native as foreign *uv_cond_t)
-end
-
---- Return the exact C-only native entry for this operation.
--- @return Native foreign function(*void): void result with the documented lifetime and units.
--- @usage uv/supplemental.md#cond_tbroadcast_function
-function cond_t.broadcast_function(): foreign function(*void): void
-    return native_cond_broadcast
 end
 
 --- Owned native barrier storage with explicit initialization and destruction.
@@ -558,15 +500,12 @@ function barrier_t:wait(): integer
     return ffi.uv_barrier_wait(self.storage as foreign *uv_barrier_t)
 end
 
-local foreign function native_barrier_wait(native: *void): int
+--- Block at a borrowed native barrier pointer directly from C or Titan until all participants arrive.
+-- @param native Borrowed initialized `uv_barrier_t *` pointer.
+-- @return Positive serial-thread indicator for one participant and zero for all others.
+-- @usage uv/supplemental.md#native_barrier_wait
+foreign function native_barrier_wait(native: *void): int
     return ffi.uv_barrier_wait(native as foreign *uv_barrier_t)
-end
-
---- Return the exact C-only native entry for this operation.
--- @return Native foreign function(*void): int result with the documented lifetime and units.
--- @usage uv/supplemental.md#barrier_twait_function
-function barrier_t.wait_function(): foreign function(*void): int
-    return native_barrier_wait
 end
 
 --- Owned native key storage with explicit initialization and destruction.
@@ -640,26 +579,22 @@ function cond_t:timedwait(mutex: mutex_t, timeout_ns: foreign unsigned long long
     return ffi.uv_cond_timedwait(self.storage as foreign *uv_cond_t, mutex.storage as foreign *uv_mutex_t, timeout_ns as foreign uint64_t)
 end
 
-local foreign function native_cond_wait(cond: *void, mutex: *void): void
+--- Atomically release a locked native mutex and wait on a borrowed condition variable directly from C or Titan.
+-- @param cond Borrowed initialized `uv_cond_t *` pointer.
+-- @param mutex Locked borrowed or process-heap `uv_mutex_t *` pointer.
+-- @usage uv/supplemental.md#native_cond_wait
+foreign function native_cond_wait(cond: *void, mutex: *void): void
     ffi.uv_cond_wait(cond as foreign *uv_cond_t, mutex as foreign *uv_mutex_t)
 end
 
-local foreign function native_cond_timedwait(cond: *void, mutex: *void, timeout_ns: unsigned long long): int
+--- Wait on a borrowed condition variable with a relative nanosecond timeout directly from C or Titan.
+-- @param cond Borrowed initialized `uv_cond_t *` pointer.
+-- @param mutex Locked borrowed or process-heap `uv_mutex_t *` pointer.
+-- @param timeout_ns Relative timeout in nanoseconds.
+-- @return Zero when signaled or a negative libuv status such as `ETIMEDOUT`.
+-- @usage uv/supplemental.md#native_cond_timedwait
+foreign function native_cond_timedwait(cond: *void, mutex: *void, timeout_ns: unsigned long long): int
     return ffi.uv_cond_timedwait(cond as foreign *uv_cond_t, mutex as foreign *uv_mutex_t, timeout_ns as foreign uint64_t)
-end
-
---- Return the exact C-only native entry for this operation.
--- @return Native foreign function(*void, *void): void result with the documented lifetime and units.
--- @usage uv/supplemental.md#cond_twait_function
-function cond_t.wait_function(): foreign function(*void, *void): void
-    return native_cond_wait
-end
-
---- Return the exact C-only native entry for this operation.
--- @return Native foreign function(*void, *void, unsigned long long): int result with the documented lifetime and units.
--- @usage uv/supplemental.md#cond_ttimedwait_function
-function cond_t.timedwait_function(): foreign function(*void, *void, unsigned long long): int
-    return native_cond_timedwait
 end
 
 -- TLS stores a raw pointer per native thread. The caller separately retains
@@ -680,26 +615,20 @@ function key_t:set(value: foreign *void)
     ffi.uv_key_set(self.storage as foreign *uv_key_t, value)
 end
 
-local foreign function native_key_get(key: *void): *void
+--- Read the calling OS thread's value for a borrowed TLS key pointer directly from C or Titan.
+-- @param key Borrowed initialized `uv_key_t *` pointer.
+-- @return Calling thread's stored pointer value, or NULL.
+-- @usage uv/supplemental.md#native_key_get
+foreign function native_key_get(key: *void): *void
     return ffi.uv_key_get(key as foreign *uv_key_t)
 end
 
-local foreign function native_key_set(key: *void, value: *void): void
+--- Set the calling OS thread's value for a borrowed TLS key pointer directly from C or Titan.
+-- @param key Borrowed initialized `uv_key_t *` pointer.
+-- @param value Borrowed pointer stored for the calling OS thread, or NULL.
+-- @usage uv/supplemental.md#native_key_set
+foreign function native_key_set(key: *void, value: *void): void
     ffi.uv_key_set(key as foreign *uv_key_t, value)
-end
-
---- Return the exact C-only native entry for this operation.
--- @return Native foreign function(*void): *void result with the documented lifetime and units.
--- @usage uv/supplemental.md#key_tget_function
-function key_t.get_function(): foreign function(*void): *void
-    return native_key_get
-end
-
---- Return the exact C-only native entry for this operation.
--- @return Native foreign function(*void, *void): void result with the documented lifetime and units.
--- @usage uv/supplemental.md#key_tset_function
-function key_t.set_function(): foreign function(*void, *void): void
-    return native_key_set
 end
 
 -- Canonical native-prefix-drop module functions.
@@ -981,13 +910,10 @@ function once(guard: once_t, callback: foreign function(): void)
     ffi.uv_once(guard.storage as foreign *uv_once_t, callback)
 end
 
-local foreign function native_once(guard: *void, callback: function(): void): void
+--- Run a C-only no-argument initializer at most once for a borrowed `once_t` guard pointer directly from C or Titan.
+-- @param guard Borrowed initialized `uv_once_t *` pointer.
+-- @param callback Non-null C-only callback with no arguments or return value.
+-- @usage uv/supplemental.md#native_once
+foreign function native_once(guard: *void, callback: function(): void): void
     ffi.uv_once(guard as foreign *uv_once_t, callback)
-end
-
---- Return the C-only native once entry.
--- @return Native foreign function(*void, function(): void): void result with the documented lifetime and units.
--- @usage uv/supplemental.md#once_function
-function once_function(): foreign function(*void, function(): void): void
-    return native_once
 end

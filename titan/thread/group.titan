@@ -14,7 +14,7 @@ record Group
   local const limit: integer?
   local const propagate_errors: boolean
   local running_count: integer
-  local const active_threads: {Thread<|nil|>}
+  local const active_threads: {Thread<|nil|>: boolean}
   local const errors: {Error}
   local const admission_waiters: {GroupWaiter}
   local admission_head: integer
@@ -105,8 +105,8 @@ local function Group:trigger_abort(reason: async.CancellationReason<|value|>)
     end
   end
   self:clear_admissions()
-  for index = 1, #self.active_threads do
-    self.active_threads[index]:cancel(self.abort_reason)
+  for worker, _ in iteration.pairs(self.active_threads) do
+    worker:cancel(self.abort_reason)
   end
 end
 
@@ -149,6 +149,58 @@ local function Group:acquire_slot(): boolean
   return false
 end
 
+-- Listener registration can fail after it has already installed its callback.
+-- Membership, not the observed flag, therefore owns the one terminal release.
+local function Group:finish_thread(spawned: Thread<|nil|>,
+    monitor_status: async.TaskStatus<|nil, value|>)
+  if self.active_threads[spawned] == nil then return end
+  -- This observer runs only after the proxy's successful native gate. Retire
+  -- membership before fallible projection: listener errors are isolated by
+  -- async and must not strand Group admission/completion accounting.
+  self.active_threads[spawned] = nil
+  defer self:release_slot()
+  local status = spawned:status()
+  local failure: Error? = nil
+  case status
+  when failed(err) then
+    failure = err
+  else
+    case monitor_status
+    when failed(err) then
+      failure = Error(err.error, err.traceback)
+    else
+    end
+  end
+  if failure ~= nil then
+    self.errors[#self.errors + 1] = failure as Error
+    if self.propagate_errors and self.abort_reason == nil then
+      self:trigger_abort(async.CancellationReason.simple("group thread failed"))
+    end
+  end
+end
+
+-- false retains an admitted child whose proxy/listener setup must be retried;
+-- true means a listener returned successfully. Only terminal native retirement
+-- removes either state. A public wait makes one explicit retry pass.
+local function Group:observe_thread(spawned: Thread<|nil|>)
+  local observed? = self.active_threads[spawned]
+  if observed == nil then return end
+  local monitor = spawned:task()
+  local status = monitor:status()
+  if status:has_finished() then
+    self:finish_thread(spawned, status)
+    return
+  end
+  if observed then return end
+  if self.abort_reason ~= nil then
+    spawned:cancel(self.abort_reason)
+  end
+  monitor:add_terminal_listener(function (terminal: async.TaskStatus<|nil, value|>)
+    self:finish_thread(spawned, terminal)
+  end)
+  self.active_threads[spawned] = true
+end
+
 local function Group:spawn_raw_entry(entry: function (): (nil))
   async.running()
   async.checkpoint()
@@ -157,37 +209,13 @@ local function Group:spawn_raw_entry(entry: function (): (nil))
   end
   local th: Thread<|nil|>? = nil
   do
-    th = spawn_raw<|nil|>(entry, true)
+    th = spawn_raw<|nil|>(entry, true, self.active_threads)
   catch
     self:release_slot()
     raise
   end
   local spawned = th as Thread<|nil|>
-  self.active_threads[#self.active_threads + 1] = spawned
-  if self.abort_reason ~= nil then
-    spawned:cancel(self.abort_reason)
-  end
-  async.run<|nil, value|>(function (): nil
-    local status = spawned:join()
-    local active = self.active_threads
-    for index = 1, #active do
-      if active[index] == spawned then
-        active[index] = active[#active]
-        active[#active] = nil
-        break
-      end
-    end
-    case status
-    when failed(err) then
-      self.errors[#self.errors + 1] = err
-      if self.propagate_errors and self.abort_reason == nil then
-        self:trigger_abort(async.CancellationReason.simple("group thread failed"))
-      end
-    else
-    end
-    self:release_slot()
-    return nil
-  end)
+  self:observe_thread(spawned)
 end
 
 --- Spawn a zero-argument thread managed by this group.
@@ -251,6 +279,9 @@ end
 function Group:wait(): {Error}
   local task = async.running()
   async.checkpoint()
+  for spawned, _ in iteration.pairs(self.active_threads) do
+    self:observe_thread(spawned)
+  end
   while self.running_count > 0 do
     local token = async.ResumeToken("thread.Group.wait")
     local waiter = GroupWaiter {

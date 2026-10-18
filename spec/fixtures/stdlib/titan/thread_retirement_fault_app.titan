@@ -1,0 +1,1057 @@
+-- Fresh Linux child; only test wrappers are added to unchanged SDK archives.
+local async = import "async"
+local gc = import "gc"
+local test = import "test"
+local thread = import "thread"
+local uv = import "uv"
+local transfer = import "transfer"
+foreign import "stdio.h"
+foreign import "thread_retirement_fault_api.h"
+
+local function count(counter: foreign int): integer
+  return ffi.titan_thread_fault_counter(counter)
+end
+
+local function cancelled_text(reason: async.CancellationReason<|value|>): string
+  case reason
+  when simple(text) then return text
+  when complex(_) then return "<complex>"
+  end
+end
+
+-- This is an ordinary deliberately wide GC-frame workload, not a private
+-- compiler slot-count assertion. Every distinct value remains live together
+-- at the Array constructor. The first body marker distinguishes entry failure
+-- from a failure after this callback's body has started.
+local function wide_cleanup(reason: async.CancellationReason<|value|>?)
+  ffi.titan_thread_fault_wide_body()
+  local v01: value = "one"
+  local v02: value = "two"
+  local v03: value = "three"
+  local v04: value = "four"
+  local v05: value = "five"
+  local v06: value = "six"
+  local v07: value = "seven"
+  local v08: value = "eight"
+  local v09: value = "nine"
+  local v10: value = "ten"
+  local v11: value = "eleven"
+  local v12: value = "twelve"
+  local v13: value = "thirteen"
+  local v14: value = "fourteen"
+  local v15: value = "fifteen"
+  local v16: value = "sixteen"
+  local v17: value = "seventeen"
+  local v18: value = "eighteen"
+  local v19: value = "nineteen"
+  local v20: value = "twenty"
+  local v21: value = "twenty-one"
+  local v22: value = "twenty-two"
+  local v23: value = "twenty-three"
+  local v24: value = "twenty-four"
+  local v25: value = "twenty-five"
+  local v26: value = "twenty-six"
+  local v27: value = "twenty-seven"
+  local v28: value = "twenty-eight"
+  local v29: value = "twenty-nine"
+  local v30: value = "thirty"
+  local v31: value = "thirty-one"
+  local v32: value = "thirty-two"
+  local v33: value = "thirty-three"
+  local v34: value = "thirty-four"
+  local v35: value = "thirty-five"
+  local v36: value = "thirty-six"
+  local v37: value = "thirty-seven"
+  local v38: value = "thirty-eight"
+  local v39: value = "thirty-nine"
+  local v40: value = "forty"
+  local v41: value = "forty-one"
+  local v42: value = "forty-two"
+  local v43: value = "forty-three"
+  local v44: value = "forty-four"
+  local v45: value = "forty-five"
+  local v46: value = "forty-six"
+  local v47: value = "forty-seven"
+  local v48: value = "forty-eight"
+  local v49: value = "forty-nine"
+  local v50: value = "fifty"
+  local v51: value = "fifty-one"
+  local v52: value = "fifty-two"
+  local v53: value = "fifty-three"
+  local v54: value = "fifty-four"
+  local v55: value = "fifty-five"
+  local v56: value = "fifty-six"
+  local v57: value = "fifty-seven"
+  local v58: value = "fifty-eight"
+  local v59: value = "fifty-nine"
+  local v60: value = "sixty"
+  local v61: value = "sixty-one"
+  local v62: value = "sixty-two"
+  local v63: value = "sixty-three"
+  local v64: value = reason
+  local retained: {value} = {
+    v01, v02, v03, v04, v05, v06, v07, v08,
+    v09, v10, v11, v12, v13, v14, v15, v16,
+    v17, v18, v19, v20, v21, v22, v23, v24,
+    v25, v26, v27, v28, v29, v30, v31, v32,
+    v33, v34, v35, v36, v37, v38, v39, v40,
+    v41, v42, v43, v44, v45, v46, v47, v48,
+    v49, v50, v51, v52, v53, v54, v55, v56,
+    v57, v58, v59, v60, v61, v62, v63, v64,
+  }
+  test.assert(retained[1] == "one" and retained[63] == "sixty-three")
+end
+
+record ForwardingAllocationFault
+  label: string
+end
+
+function ForwardingAllocationFault:to_transfer_payload(): string
+  ffi.titan_thread_fault_forward_hook()
+  ffi.titan_thread_fault_arm_stack_oom(L)
+  wide_cleanup(nil)
+  return self.label
+end
+
+function ForwardingAllocationFault.from_transfer_payload(payload: string): ForwardingAllocationFault
+  return ForwardingAllocationFault(payload)
+end
+
+record NativeFallbackAllocationFault
+  label: string
+end
+
+function NativeFallbackAllocationFault:to_transfer_payload(): string
+  ffi.titan_thread_fault_forward_hook()
+  ffi.titan_thread_fault_arm_packet_copy_oom()
+  raise "owned ordinary forwarding fault"
+end
+
+function NativeFallbackAllocationFault.from_transfer_payload(
+    payload: string): NativeFallbackAllocationFault
+  return NativeFallbackAllocationFault(payload)
+end
+
+local function prepare_packet_copy_fault()
+  defer ffi.titan_thread_fault_disarm()
+  ffi.titan_thread_fault_begin_packet_probe()
+  local raw: foreign *void = transfer.encode_message("native packet allocation probe")
+  defer transfer.discard_message(raw)
+  test.assert(ffi.titan_thread_fault_finish_packet_probe(raw) == 1,
+    "public packet probe did not observe its actual native allocator")
+end
+
+local function assert_real_retirement()
+  test.assert(count(ffi.TITAN_THREAD_FAULT_CREATED as foreign int) == 1 and
+    count(ffi.TITAN_THREAD_FAULT_ENTRY_RETURNED as foreign int) == 1 and
+    count(ffi.TITAN_THREAD_FAULT_TAIL_RELEASED as foreign int) == 1,
+    "real native worker did not cross its controlled exit tail")
+  test.assert(count(ffi.TITAN_THREAD_FAULT_REAL_JOINS as foreign int) == 1 and
+    count(ffi.TITAN_THREAD_FAULT_TERMINALS as foreign int) == 1 and
+    count(ffi.TITAN_THREAD_FAULT_EARLY_TERMINALS as foreign int) == 0,
+    "Task published terminal without exactly one successful real OS join")
+  test.assert(count(ffi.TITAN_THREAD_FAULT_CHANGED_TOKEN as foreign int) == 0,
+    "join retry replaced its live native token")
+end
+
+local function exercise_thread(scenario: string)
+  local hold_tx, hold_rx = thread.channel<|integer|>(1)
+  defer hold_tx:close()
+  defer hold_rx:close()
+  ffi.titan_thread_fault_arm_worker()
+  local worker = thread.spawn_one(function (hold: thread.Receiver<|integer|>): integer
+    defer ffi.titan_thread_fault_child_cleanup()
+    ffi.titan_thread_fault_child_started()
+    local result = hold:receive()
+    if scenario == "proxy-failure" then raise "child failure original" end
+    return result
+  end, hold_rx)
+  local proxy: async.Task<|integer, value|>? = nil
+  defer do
+    ffi.titan_thread_fault_disarm()
+    ffi.titan_thread_fault_release_cleanup()
+    hold_tx:close()
+    if proxy ~= nil and not proxy:status():has_finished() then proxy:cancel() end
+    async.loop()
+  end
+  ffi.titan_thread_fault_wait_started()
+  if scenario == "native-fallback-copy-oom" then prepare_packet_copy_fault() end
+  local memory_error = ffi.titan_thread_fault_memory_error(L) as string
+  if scenario == "prepare-userdata-oom" then
+    local failed = false
+    local original: value = nil
+    ffi.titan_thread_fault_arm_userdata_oom()
+    do proxy = worker:task()
+    catch failed = true; original = error end
+    ffi.titan_thread_fault_disarm()
+    test.assert(failed and proxy == nil and original == memory_error,
+      "proxy construction allocation failure exposed a Task or changed its error")
+    test.assert(count(ffi.TITAN_THREAD_FAULT_USERDATA_ENTRY as foreign int) == 1 and
+      count(ffi.TITAN_THREAD_FAULT_ALLOCATOR_HITS as foreign int) > 0 and
+      count(ffi.TITAN_THREAD_FAULT_ALLOCATION_BYTES as foreign int) > 0,
+      "proxy preparation did not hit the actual userdata allocator")
+    test.assert(not worker:status():has_finished(),
+      "construction failure falsely retired the still-running child")
+  end
+  if scenario == "accepted-child-reason" then
+    worker:cancel(async.CancellationReason.simple("accepted child first"))
+    ffi.titan_thread_fault_wait_cleanup()
+  end
+  proxy = worker:task()
+  test.assert(proxy == worker:task(), "Thread:task did not retain one memoized monitor")
+  local remove_terminal = proxy:add_terminal_listener(function (_status)
+    ffi.titan_thread_fault_terminal()
+  end)
+  defer remove_terminal()
+  local reason: async.CancellationReason<|value|> = async.CancellationReason.simple("exact host first")
+  if scenario == "forwarding-stack-oom" or scenario == "accepted-child-reason" then
+    reason = async.CancellationReason.complex(ForwardingAllocationFault("host payload") as value)
+  elseif scenario == "native-fallback-copy-oom" then
+    reason = async.CancellationReason.complex(NativeFallbackAllocationFault("host payload") as value)
+  end
+  local normal_outcome = scenario == "proxy-success" or scenario == "proxy-failure"
+  if scenario == "join-retry" then ffi.titan_thread_fault_fail_join_once() end
+  if scenario ~= "waiting" and not normal_outcome then
+    proxy:cancel(reason)
+    proxy:cancel(async.CancellationReason.simple("late host reason"))
+  end
+  local controller = async.run<|nil, value|>(function (): nil
+    defer ffi.titan_thread_fault_release_cleanup()
+    if scenario == "waiting" or normal_outcome then
+      while proxy:status():as_string() == "ready" do async.yield() end
+      test.assert(proxy:status():as_string() == "waiting",
+        "proxy never established its live wait")
+      if normal_outcome then
+        test.assert(hold_tx:try_send(42))
+      else
+        proxy:cancel(reason)
+        proxy:cancel(async.CancellationReason.simple("late host reason"))
+      end
+    end
+    while count(ffi.TITAN_THREAD_FAULT_CHILD_CLEANUP as foreign int) == 0 and
+        not proxy:status():has_finished() do
+      async.yield()
+    end
+    -- Only this separately runnable controller releases cleanup. A blocking
+    -- join on the owning loop before child cleanup retires cannot pass here.
+    test.assert(count(ffi.TITAN_THREAD_FAULT_CHILD_CLEANUP as foreign int) == 1 and
+      count(ffi.TITAN_THREAD_FAULT_REAL_JOINS as foreign int) == 0 and
+      count(ffi.TITAN_THREAD_FAULT_TERMINALS as foreign int) == 0 and
+      not proxy:status():has_finished(),
+      "owning loop did not make progress while child cleanup was gated")
+    return nil
+  end)
+  if scenario == "join-retry" then
+    local failed = false
+    local observed: value = nil
+    do async.loop()
+    catch failed = true; observed = error end
+    test.assert(failed and observed is async.OperationError,
+      "native join failure did not escape the driver as OperationError")
+    local operation: async.OperationError = observed
+    test.assert(operation.code == (ffi.titan_thread_fault_join_error() as integer) and
+      operation.operation == "async.native_retirement.retire",
+      "driver replaced the native join status or operation")
+    test.assert(count(ffi.TITAN_THREAD_FAULT_JOIN_FAILURES as foreign int) == 1 and
+      count(ffi.TITAN_THREAD_FAULT_JOIN_ATTEMPTS as foreign int) == 1 and
+      count(ffi.TITAN_THREAD_FAULT_REAL_JOINS as foreign int) == 0 and
+      count(ffi.TITAN_THREAD_FAULT_TERMINALS as foreign int) == 0 and
+      not proxy:status():has_finished(),
+      "failed join consumed ownership, automatically retried, or published terminal")
+    async.loop()
+    test.assert(count(ffi.TITAN_THREAD_FAULT_JOIN_ATTEMPTS as foreign int) == 2,
+      "explicit driver retry did not retry the same native join")
+  else
+    async.loop()
+  end
+  ffi.titan_thread_fault_disarm()
+  case controller:status()
+  when failed(failure) then failure:raise()
+  when succeeded(_) then
+  else raise "cleanup-gate controller did not succeed"
+  end
+  test.assert(count(ffi.TITAN_THREAD_FAULT_CHILD_CLEANUP as foreign int) == 1,
+    "child did not unwind exactly once")
+  if scenario == "proxy-success" then
+    local succeeded, result? = proxy:status():has_succeeded()
+    test.assert(succeeded and result == 42, "proxy lost the child's success value")
+  elseif scenario == "proxy-failure" then
+    local failed, failure? = proxy:status():has_failed()
+    test.assert(failed and failure.error == "child failure original",
+      "proxy replaced the child's original error")
+  else
+    local cancelled, actual? = proxy:status():has_cancelled()
+    test.assert(cancelled and actual == reason,
+      "proxy changed its exact first host cancellation reason")
+    local child_cancelled, child_reason? = worker:status():has_cancelled()
+    test.assert(child_cancelled and child_reason ~= nil)
+    if scenario == "accepted-child-reason" then
+      test.assert(cancelled_text(child_reason) == "accepted child first" and
+        count(ffi.TITAN_THREAD_FAULT_FORWARD_HOOK as foreign int) == 0,
+        "retirement overwrote an accepted child reason or encoded a losing host reason")
+    elseif scenario == "forwarding-stack-oom" then
+      test.assert(count(ffi.TITAN_THREAD_FAULT_FORWARD_HOOK as foreign int) == 1 and
+        count(ffi.TITAN_THREAD_FAULT_STACK_GROWTH as foreign int) == 1 and
+        count(ffi.TITAN_THREAD_FAULT_ALLOCATOR_HITS as foreign int) == 1 and
+        count(ffi.TITAN_THREAD_FAULT_WIDE_BODY as foreign int) == 0,
+        "forwarding fault did not hit actual stack allocation before helper entry")
+      -- Ordinary cancellation may admit safe_value_to_thread_message's
+      -- rendered fallback; this does not claim the native fallback admitted it.
+      test.assert(cancelled_text(child_reason) == "cancelled")
+    elseif scenario == "native-fallback-copy-oom" then
+      test.assert(count(ffi.TITAN_THREAD_FAULT_FORWARD_HOOK as foreign int) == 1 and
+        count(ffi.TITAN_THREAD_FAULT_PACKET_COPY_FAILURES as foreign int) == 1 and
+        count(ffi.TITAN_THREAD_FAULT_ALLOCATION_BYTES as foreign int) > 0,
+        "ordinary forwarding fallback did not hit its observed native packet allocation")
+      test.assert(cancelled_text(child_reason) == "cancelled",
+        "failed ordinary admission did not use the selected native reasonless cancellation")
+    else
+      test.assert(cancelled_text(child_reason) == "exact host first",
+        "retirement replaced the child's admitted cancellation reason")
+    end
+  end
+  assert_real_retirement()
+  local after_proxy = async.run<|nil, value|>(function (): nil
+    local joined = worker:join()
+    test.assert(joined:has_finished() and
+      count(ffi.TITAN_THREAD_FAULT_REAL_JOINS as foreign int) == 1,
+      "normal join after proxy retirement tried to consume the token again")
+    return nil
+  end)
+  async.loop()
+  test.assert((after_proxy:status():has_succeeded()))
+end
+
+local function exercise_child_prestart_cancel(scenario: string)
+  local native_fallback = scenario == "child-prestart-native-fallback"
+  if native_fallback then prepare_packet_copy_fault() end
+  ffi.titan_thread_fault_arm_worker()
+  ffi.titan_thread_fault_arm_worker_entry_gate()
+  local worker = thread.spawn(function (): integer
+    ffi.titan_thread_fault_child_started()
+    return 42
+  end)
+  local proxy: async.Task<|integer, value|>? = nil
+  defer do
+    ffi.titan_thread_fault_disarm()
+    ffi.titan_thread_fault_release_worker_entry()
+    if proxy ~= nil and not proxy:status():has_finished() then proxy:cancel() end
+    async.loop()
+  end
+  ffi.titan_thread_fault_wait_started()
+  if not native_fallback then
+    worker:cancel(async.CancellationReason.simple("accepted before child entry"))
+  end
+  proxy = worker:task()
+  local reason: async.CancellationReason<|value|> =
+    async.CancellationReason.simple("exact host before child entry")
+  if native_fallback then
+    reason = async.CancellationReason.complex(NativeFallbackAllocationFault("prestart host") as value)
+  end
+  local remove_terminal = proxy:add_terminal_listener(function (_status)
+    ffi.titan_thread_fault_terminal()
+  end)
+  defer remove_terminal()
+  proxy:cancel(reason)
+  proxy:cancel(async.CancellationReason.simple("late prestart host reason"))
+  local controller = async.run<|nil, value|>(function (): nil
+    defer ffi.titan_thread_fault_release_worker_entry()
+    test.assert(proxy:status():as_string() == "waiting" and
+      count(ffi.TITAN_THREAD_FAULT_JOIN_ATTEMPTS as foreign int) == 0 and
+      count(ffi.TITAN_THREAD_FAULT_TERMINALS as foreign int) == 0 and
+      count(ffi.TITAN_THREAD_FAULT_CHILD_STARTED as foreign int) == 0,
+      "proxy did not remain pending while the real child entry was held")
+    if native_fallback then
+      test.assert(count(ffi.TITAN_THREAD_FAULT_FORWARD_HOOK as foreign int) == 1 and
+        count(ffi.TITAN_THREAD_FAULT_PACKET_COPY_FAILURES as foreign int) == 1,
+        "prestart fallback did not follow the failed ordinary forwarding attempt")
+    end
+    return nil
+  end)
+  async.loop()
+  ffi.titan_thread_fault_disarm()
+  case controller:status()
+  when failed(failure) then failure:raise()
+  when succeeded(_) then
+  else raise "prestart native-entry controller did not succeed"
+  end
+  local cancelled, actual? = proxy:status():has_cancelled()
+  test.assert(cancelled and actual == reason, "prestart retirement replaced the exact host reason")
+  local child_cancelled, child_reason? = worker:status():has_cancelled()
+  local expected_child_reason = native_fallback and "cancelled" or "accepted before child entry"
+  test.assert(child_cancelled and child_reason ~= nil and
+    cancelled_text(child_reason) == expected_child_reason,
+    "child cancellation before its first Task entry lost the admitted reason")
+  test.assert(count(ffi.TITAN_THREAD_FAULT_CHILD_STARTED as foreign int) == 0 and
+    count(ffi.TITAN_THREAD_FAULT_CHILD_CLEANUP as foreign int) == 0,
+    "prestart child cancellation executed its entry body")
+  assert_real_retirement()
+end
+
+local function exercise_normal_join(scenario: string)
+  local hold_tx, hold_rx = thread.channel<|integer|>(1)
+  defer hold_tx:close()
+  defer hold_rx:close()
+  ffi.titan_thread_fault_arm_worker()
+  local worker = thread.spawn_one(function (hold: thread.Receiver<|integer|>): integer
+    defer ffi.titan_thread_fault_child_cleanup()
+    ffi.titan_thread_fault_child_started()
+    local result = hold:receive()
+    if scenario == "cached-failure-join" then raise "cached original failure" end
+    return result
+  end, hold_rx)
+  defer do
+    ffi.titan_thread_fault_release_cleanup()
+    hold_tx:close()
+    async.loop()
+  end
+  ffi.titan_thread_fault_wait_started()
+  local supervisor: async.Task<|nil, value|>? = nil
+  supervisor = async.run<|nil, value|>(function (): nil
+    if scenario ~= "slow-normal-join" then
+      if scenario == "cached-cancel-join" then
+        worker:cancel(async.CancellationReason.simple("cached exact cancel"))
+      else
+        test.assert(hold_tx:try_send(42))
+      end
+      while count(ffi.TITAN_THREAD_FAULT_CHILD_CLEANUP as foreign int) == 0 do async.yield() end
+      test.assert(count(ffi.TITAN_THREAD_FAULT_REAL_JOINS as foreign int) == 0 and
+        count(ffi.TITAN_THREAD_FAULT_TERMINALS as foreign int) == 0)
+      ffi.titan_thread_fault_release_cleanup()
+      while not worker:status():has_finished() do async.yield() end
+      -- status() has cached a logical terminal while the actual OS exit tail
+      -- is still held. It must be nonblocking and must not consume the token.
+      test.assert(worker:status():has_finished() and
+        count(ffi.TITAN_THREAD_FAULT_TAIL_RELEASED as foreign int) == 0 and
+        count(ffi.TITAN_THREAD_FAULT_REAL_JOINS as foreign int) == 0,
+        "status blocked on or falsely claimed OS retirement")
+    end
+    local joined = worker:join()
+    test.assert(count(ffi.TITAN_THREAD_FAULT_REAL_JOINS as foreign int) == 1,
+      "normal join returned before a real OS join")
+    if scenario == "cached-failure-join" then
+      local failed, failure? = joined:has_failed()
+      test.assert(failed and failure.error == "cached original failure")
+    elseif scenario == "cached-cancel-join" then
+      local cancelled, reason? = joined:has_cancelled()
+      test.assert(cancelled and reason ~= nil and cancelled_text(reason) == "cached exact cancel")
+    else
+      local succeeded, result? = joined:has_succeeded()
+      test.assert(succeeded and result == 42)
+    end
+    worker:join()
+    test.assert(count(ffi.TITAN_THREAD_FAULT_JOIN_ATTEMPTS as foreign int) == 1,
+      "repeated normal join reused its retired token")
+    local proxy = worker:task()
+    local proxy_status = async.join(proxy)
+    test.assert(proxy_status:as_string() == joined:as_string() and
+      count(ffi.TITAN_THREAD_FAULT_JOIN_ATTEMPTS as foreign int) == 1,
+      "proxy after normal join retired the token again")
+    return nil
+  end)
+  local remove_terminal = supervisor:add_terminal_listener(function (_status)
+    ffi.titan_thread_fault_terminal()
+  end)
+  defer remove_terminal()
+  local controller: async.Task<|nil, value|>? = nil
+  if scenario == "slow-normal-join" then
+    controller = async.run<|nil, value|>(function (): nil
+      defer ffi.titan_thread_fault_release_cleanup()
+      while supervisor:status():as_string() == "ready" do async.yield() end
+      test.assert(supervisor:status():as_string() == "waiting")
+      test.assert(hold_tx:try_send(42))
+      while count(ffi.TITAN_THREAD_FAULT_CHILD_CLEANUP as foreign int) == 0 and
+          not supervisor:status():has_finished() do async.yield() end
+      test.assert(count(ffi.TITAN_THREAD_FAULT_CHILD_CLEANUP as foreign int) == 1 and
+        not supervisor:status():has_finished() and
+        count(ffi.TITAN_THREAD_FAULT_REAL_JOINS as foreign int) == 0,
+        "normal join blocked the loop before child cleanup retired")
+      return nil
+    end)
+  end
+  async.loop()
+  case supervisor:status()
+  when failed(failure) then failure:raise()
+  when succeeded(_) then
+  else raise "normal join supervisor did not succeed"
+  end
+  if controller ~= nil then test.assert((controller:status():has_succeeded())) end
+  assert_real_retirement()
+end
+
+local function prepare_map_admission_fault(): thread.Thread<|nil|>
+  local exemplar = thread.spawn(function (): nil return nil end)
+  local members: {thread.Thread<|nil|>: boolean} = {}
+  ffi.titan_thread_fault_begin_map_probe()
+  members[exemplar] = false
+  test.assert(ffi.titan_thread_fault_finish_map_probe() == 1,
+    "ordinary public Thread-keyed Map insertion did not expose its key metatable")
+  local joined = async.run<|nil, value|>(function (): nil
+    test.assert((exemplar:join():has_succeeded()))
+    return nil
+  end)
+  async.loop()
+  case joined:status()
+  when failed(failure) then failure:raise()
+  when succeeded(_) then
+  else raise "Map allocation probe Thread did not retire"
+  end
+  return exemplar
+end
+
+local function rejected_group_admission_probe(group: thread.Group): (
+    boolean, value, thread.Sender<|integer|>, function (): ())
+  local peer, receiver = thread.channel<|integer|>(2)
+  local held_clone: thread.Receiver<|integer|>? = receiver:clone()
+  local release_held = function () held_clone = nil end
+  local failed = false
+  local original: value = nil
+  do
+    group:spawn_one(function (hold: thread.Receiver<|integer|>)
+      ffi.titan_thread_fault_child_started()
+      hold:receive()
+    end, receiver)
+  catch
+    ffi.titan_thread_fault_disarm()
+    failed = true
+    original = error
+  end
+  return failed, original, peer, release_held
+end
+
+local function assert_rollback_receiver_released_once(peer: thread.Sender<|integer|>,
+    release_held: function (): (), label: string)
+  gc.collect()
+  gc.collect()
+  test.assert(not peer:is_closed(), label .. ": Receiver retain was released more than once")
+  release_held()
+  gc.collect()
+  gc.collect()
+  test.assert(peer:is_closed(), label .. ": Receiver retain was leaked")
+end
+
+local function exercise_group_map_admission_fault()
+  -- Keep this public exemplar alive through the last assertion: the native
+  -- probe borrows its exact shared Thread<nil> metatable, not a private layout.
+  local exemplar = prepare_map_admission_fault()
+  local group = thread.group(1, false)
+  local first_tx, first_rx = thread.channel<|integer|>(1)
+  local second_tx, second_rx = thread.channel<|integer|>(1)
+  local third_tx, third_rx = thread.channel<|integer|>(1)
+  defer first_tx:close()
+  defer first_rx:close()
+  defer second_tx:close()
+  defer second_rx:close()
+  defer third_tx:close()
+  defer third_rx:close()
+  defer do
+    ffi.titan_thread_fault_disarm()
+    first_tx:close()
+    second_tx:close()
+    third_tx:close()
+    group:cancel()
+    async.loop()
+  end
+  local prepared = false
+  local second_returned = false
+  local third_returned = false
+  local group_completed = false
+  local supervisor = async.run<|nil, value|>(function (): nil
+    ffi.titan_thread_fault_arm_worker()
+    ffi.titan_thread_fault_arm_map_admission_oom()
+    local failed, original, map_peer, release_map = rejected_group_admission_probe(group)
+    defer map_peer:close()
+    test.assert(failed and original == (ffi.titan_thread_fault_memory_error(L) as string) and
+      count(ffi.TITAN_THREAD_FAULT_MAP_ADMISSION_FAILURES as foreign int) == 1 and
+      count(ffi.TITAN_THREAD_FAULT_ALLOCATOR_HITS as foreign int) == 2 and
+      count(ffi.TITAN_THREAD_FAULT_ALLOCATION_BYTES as foreign int) > 0,
+      "Group admission did not preserve its observed real hash-allocation failure")
+    test.assert(count(ffi.TITAN_THREAD_FAULT_CREATED as foreign int) == 0 and
+      count(ffi.TITAN_THREAD_FAULT_CHILD_STARTED as foreign int) == 0,
+      "Group admission OOM started an OS child before publishing its owner")
+    assert_rollback_receiver_released_once(map_peer, release_map, "pre-start admission OOM")
+    local admission_errors = group:wait()
+    test.assert(#admission_errors == 0, "pre-start admission failure occupied a Group slot")
+
+    -- A later native-create failure happens after membership was committed.
+    -- Its ctrl-owned guard must remove that member and discard the new packet.
+    ffi.titan_thread_fault_fail_create_once()
+    local create_failed, create_error, create_peer, release_create =
+      rejected_group_admission_probe(group)
+    defer create_peer:close()
+    test.assert(create_failed and create_error is async.OperationError,
+      "native-create failure did not preserve its original operation error")
+    local operation: async.OperationError = create_error
+    test.assert(operation.code == (ffi.titan_thread_fault_create_error() as integer) and
+      operation.operation == "thread.spawn" and
+      count(ffi.TITAN_THREAD_FAULT_CREATE_FAILURES as foreign int) == 1 and
+      count(ffi.TITAN_THREAD_FAULT_CREATED as foreign int) == 0 and
+      count(ffi.TITAN_THREAD_FAULT_CHILD_STARTED as foreign int) == 0,
+      "failed native create started a child or changed the native status")
+    assert_rollback_receiver_released_once(create_peer, release_create, "native-create rollback")
+    local create_errors = group:wait()
+    test.assert(#create_errors == 0, "native-create rollback retained its admitted member")
+    group:spawn_one(function (hold: thread.Receiver<|integer|>) hold:receive() end, first_rx)
+    prepared = true
+    local errors = group:wait()
+    test.assert(#errors == 0, "reused Group admission reported a worker error")
+    group_completed = true
+    return nil
+  end)
+  local second = async.run<|nil, value|>(function (): nil
+    while not prepared and not supervisor:status():has_finished() do async.yield() end
+    test.assert(prepared, "Group admission owner failed before reusing its slot")
+    group:spawn_one(function (hold: thread.Receiver<|integer|>) hold:receive() end, second_rx)
+    second_returned = true
+    return nil
+  end)
+  local third = async.run<|nil, value|>(function (): nil
+    while second:status():as_string() == "ready" do async.yield() end
+    test.assert(second:status():as_string() == "waiting",
+      "first queued admission did not establish its actual FIFO wait")
+    group:spawn_one(function (hold: thread.Receiver<|integer|>) hold:receive() end, third_rx)
+    third_returned = true
+    return nil
+  end)
+  local controller = async.run<|nil, value|>(function (): nil
+    defer do
+      first_tx:close()
+      second_tx:close()
+      third_tx:close()
+    end
+    while not prepared and not supervisor:status():has_finished() do async.yield() end
+    while second:status():as_string() == "ready" do async.yield() end
+    while third:status():as_string() == "ready" do async.yield() end
+    test.assert(prepared and second:status():as_string() == "waiting" and
+      third:status():as_string() == "waiting" and not second_returned and
+      not third_returned and not group_completed,
+      "failed admission did not leave a usable bounded Group slot")
+    test.assert(first_tx:try_send(11))
+    while not second_returned and not second:status():has_finished() do async.yield() end
+    test.assert(second_returned and third:status():as_string() == "waiting" and
+      not third_returned and not group_completed,
+      "reused admission lost FIFO order or released the held second child")
+    test.assert(second_tx:try_send(22))
+    while not third_returned and not third:status():has_finished() do async.yield() end
+    test.assert(third_returned and not group_completed,
+      "Group completed before its final queued child retired")
+    test.assert(third_tx:try_send(33))
+    return nil
+  end)
+  async.loop()
+  case supervisor:status()
+  when failed(failure) then failure:raise()
+  when succeeded(_) then
+  else raise "Map admission owner did not succeed"
+  end
+  case second:status()
+  when failed(failure) then failure:raise()
+  when succeeded(_) then
+  else raise "first reused Group admission did not succeed"
+  end
+  case third:status()
+  when failed(failure) then failure:raise()
+  when succeeded(_) then
+  else raise "second reused Group admission did not succeed"
+  end
+  case controller:status()
+  when failed(failure) then failure:raise()
+  when succeeded(_) then
+  else raise "Map admission FIFO controller did not succeed"
+  end
+  test.assert(group_completed and second_returned and third_returned and
+    count(ffi.TITAN_THREAD_FAULT_CREATED as foreign int) == 0 and
+    count(ffi.TITAN_THREAD_FAULT_CHILD_STARTED as foreign int) == 0 and
+    count(ffi.TITAN_THREAD_FAULT_REAL_JOINS as foreign int) == 0,
+    "rejected admission started a selected worker or lost a later Group member")
+  test.assert(exemplar:status():has_finished())
+end
+
+local function prepare_listener_allocation_fault()
+  local calls = 0
+  local probe = async.run<|nil, value|>(function (): nil return nil end)
+  ffi.titan_thread_fault_begin_listener_probe()
+  local remove = probe:add_terminal_listener(function (_status: async.TaskStatus<|nil, value|>)
+    calls = calls + 1
+  end)
+  test.assert(ffi.titan_thread_fault_finish_listener_probe() == 1,
+    "ordinary public listener call did not expose its actual allocation callsites")
+  defer remove()
+  async.loop()
+  test.assert((probe:status():has_succeeded()) and calls == 1,
+    "listener allocation discovery changed ordinary public listener behavior")
+end
+
+local function exercise_group_retirement(scenario: string)
+  local ready_constructor = scenario == "group-finished-constructor-join-retry"
+  local listener_return_fault = scenario == "group-listener-return-oom"
+  local listener_registration_fault = scenario == "group-listener-registration-oom"
+  local listener_fault = listener_return_fault or listener_registration_fault
+  if listener_fault then prepare_listener_allocation_fault() end
+  local group = thread.group(2, false)
+  local target_tx, target_rx = thread.channel<|integer|>(1)
+  local other_tx, other_rx = thread.channel<|integer|>(1)
+  local third_tx, third_rx = thread.channel<|integer|>(1)
+  local fourth_tx, fourth_rx = thread.channel<|integer|>(1)
+  local started_tx, started_rx = thread.channel<|boolean|>(1)
+  local retry_tx, retry_rx = thread.channel<|boolean|>(1)
+  defer target_tx:close()
+  defer target_rx:close()
+  defer other_tx:close()
+  defer other_rx:close()
+  defer third_tx:close()
+  defer third_rx:close()
+  defer fourth_tx:close()
+  defer fourth_rx:close()
+  defer started_tx:close()
+  defer started_rx:close()
+  defer retry_tx:close()
+  defer retry_rx:close()
+  defer do
+    ffi.titan_thread_fault_disarm()
+    ffi.titan_thread_fault_release_cleanup()
+    target_tx:close()
+    other_tx:close()
+    third_tx:close()
+    fourth_tx:close()
+    retry_tx:close()
+    group:cancel()
+    async.loop()
+  end
+  local target_admitted = false
+  local constructor_failed = false
+  local constructor_failure: value = nil
+  local third_returned = false
+  local fourth_returned = false
+  local retry_started = false
+  local group_completed = false
+  local supervisor = async.run<|nil, value|>(function (): nil
+    group:spawn_two(function (hold: thread.Receiver<|integer|>, started: thread.Sender<|boolean|>)
+      test.assert(started:try_send(true))
+      hold:receive()
+    end, other_rx, started_tx)
+    test.assert(started_rx:receive() == true)
+    ffi.titan_thread_fault_arm_worker()
+    if ready_constructor then
+      test.assert(target_tx:try_send(42))
+      ffi.titan_thread_fault_release_cleanup()
+      -- This native-only gate holds uv_thread_create until the unchanged
+      -- callback has really returned, not until an estimated sleep expires.
+      ffi.titan_thread_fault_arm_finished_before_create_return()
+    end
+    if listener_return_fault then
+      ffi.titan_thread_fault_arm_listener_return_oom()
+    elseif listener_registration_fault then
+      ffi.titan_thread_fault_arm_listener_registration_oom()
+    else
+      ffi.titan_thread_fault_fail_join_once()
+    end
+    do
+      group:spawn_one(function (hold: thread.Receiver<|integer|>)
+        defer ffi.titan_thread_fault_child_cleanup()
+        ffi.titan_thread_fault_child_started()
+        hold:receive()
+      end, target_rx)
+    catch
+      ffi.titan_thread_fault_disarm()
+      constructor_failed = true
+      constructor_failure = error
+    end
+    target_admitted = true
+    if ready_constructor or listener_fault then
+      -- Constructor/observer admission errors retain the same child and slot;
+      -- only a later explicit wait retries setup, including a finished proxy.
+      retry_rx:receive()
+      retry_started = true
+    end
+    local errors = group:wait()
+    test.assert(#errors == 0 and
+      count(ffi.TITAN_THREAD_FAULT_REAL_JOINS as foreign int) == 1,
+      "Group wait returned errors or preceded its child's actual native join")
+    group_completed = true
+    return nil
+  end)
+  local remove_terminal = supervisor:add_terminal_listener(function (_status)
+    ffi.titan_thread_fault_terminal()
+  end)
+  defer remove_terminal()
+  local admission = async.run<|nil, value|>(function (): nil
+    while not target_admitted and not supervisor:status():has_finished() do async.yield() end
+    test.assert(target_admitted, "Group owner failed before its second admission")
+    group:spawn_one(function (hold: thread.Receiver<|integer|>)
+      hold:receive()
+    end, third_rx)
+    test.assert(count(ffi.TITAN_THREAD_FAULT_REAL_JOINS as foreign int) == 1,
+      "Group released an occupied admission slot before actual native retirement")
+    third_returned = true
+    return nil
+  end)
+  local fourth_admission = async.run<|nil, value|>(function (): nil
+    while not target_admitted and not supervisor:status():has_finished() do async.yield() end
+    while admission:status():as_string() == "ready" do async.yield() end
+    test.assert(admission:status():as_string() == "waiting",
+      "first FIFO admission did not establish its actual Group wait")
+    test.assert(target_admitted, "Group owner failed before its second admission")
+    group:spawn_one(function (hold: thread.Receiver<|integer|>)
+      hold:receive()
+    end, fourth_rx)
+    fourth_returned = true
+    return nil
+  end)
+  local controller = async.run<|nil, value|>(function (): nil
+    defer do
+      ffi.titan_thread_fault_release_cleanup()
+      target_tx:close()
+      other_tx:close()
+      third_tx:close()
+      fourth_tx:close()
+      retry_tx:try_send(true)
+    end
+    while not target_admitted and not supervisor:status():has_finished() do async.yield() end
+    while admission:status():as_string() == "ready" do async.yield() end
+    while fourth_admission:status():as_string() == "ready" do async.yield() end
+    test.assert(target_admitted and admission:status():as_string() == "waiting" and
+      fourth_admission:status():as_string() == "waiting" and
+      supervisor:status():as_string() == "waiting" and not third_returned and
+      not fourth_returned and not group_completed,
+      "Group did not retain both original admissions and its FIFO queued spawns")
+    ffi.titan_thread_fault_wait_started()
+    if ready_constructor then
+      test.assert(constructor_failed and constructor_failure is async.OperationError,
+        "already-finished Group child did not return its native constructor error")
+      local operation: async.OperationError = constructor_failure
+      test.assert(operation.code == (ffi.titan_thread_fault_join_error() as integer) and
+        operation.operation == "async.native_retirement.retire",
+        "Group constructor changed the native status or operation")
+      test.assert(count(ffi.TITAN_THREAD_FAULT_ENTRY_RETURNED as foreign int) == 1 and
+        count(ffi.TITAN_THREAD_FAULT_JOIN_FAILURES as foreign int) == 1 and
+        count(ffi.TITAN_THREAD_FAULT_JOIN_ATTEMPTS as foreign int) == 1 and
+        count(ffi.TITAN_THREAD_FAULT_REAL_JOINS as foreign int) == 0 and
+        count(ffi.TITAN_THREAD_FAULT_TAIL_RELEASED as foreign int) == 0 and
+        count(ffi.TITAN_THREAD_FAULT_TERMINALS as foreign int) == 0,
+        "failed constructor consumed its token, retried, or released its Group admission")
+      test.assert(retry_tx:try_send(true))
+    elseif listener_fault then
+      test.assert(constructor_failed and
+        constructor_failure == (ffi.titan_thread_fault_memory_error(L) as string) and
+        count(ffi.TITAN_THREAD_FAULT_ALLOCATOR_HITS as foreign int) == 2 and
+        count(ffi.TITAN_THREAD_FAULT_ALLOCATION_BYTES as foreign int) > 0 and
+        count(ffi.TITAN_THREAD_FAULT_REAL_JOINS as foreign int) == 0,
+        "Group listener did not fail at its observed real allocator with its original error")
+      local expected_return = listener_return_fault and 1 or 0
+      local expected_registration = listener_registration_fault and 1 or 0
+      test.assert(
+        count(ffi.TITAN_THREAD_FAULT_LISTENER_RETURN_FAILURES as foreign int) == expected_return and
+        count(ffi.TITAN_THREAD_FAULT_LISTENER_REGISTRATION_FAILURES as foreign int) ==
+          expected_registration,
+        "listener fault hit the wrong allocation boundary")
+      if listener_return_fault then
+        -- The first callback was installed before allocating its remover.
+        -- Retry while this same proxy is live, so two admitted callbacks must
+        -- still consume only one member and wake only the first queued spawn.
+        test.assert(retry_tx:try_send(true))
+        while not retry_started and not supervisor:status():has_finished() do async.yield() end
+        test.assert(retry_started and supervisor:status():as_string() == "waiting")
+      end
+      test.assert(target_tx:try_send(42))
+      while count(ffi.TITAN_THREAD_FAULT_CHILD_CLEANUP as foreign int) == 0 do async.yield() end
+      ffi.titan_thread_fault_release_cleanup()
+    else
+      test.assert(not constructor_failed and
+        count(ffi.TITAN_THREAD_FAULT_JOIN_ATTEMPTS as foreign int) == 0,
+        "linked Group child tried native retirement during construction")
+      test.assert(target_tx:try_send(42))
+      while count(ffi.TITAN_THREAD_FAULT_CHILD_CLEANUP as foreign int) == 0 do async.yield() end
+      test.assert(count(ffi.TITAN_THREAD_FAULT_REAL_JOINS as foreign int) == 0 and
+        count(ffi.TITAN_THREAD_FAULT_TERMINALS as foreign int) == 0 and not group_completed,
+        "Group completed while its child's real cleanup was still held")
+      ffi.titan_thread_fault_release_cleanup()
+    end
+    while count(ffi.TITAN_THREAD_FAULT_REAL_JOINS as foreign int) == 0 do async.yield() end
+    if listener_registration_fault then
+      -- No callback was installed. The driver has now completed this linked
+      -- proxy's native gate and terminal publication without releasing its
+      -- false/admitted Group member. The explicit wait must inspect that
+      -- existing terminal Task inline, not attach a no-op late listener.
+      test.assert(admission:status():as_string() == "waiting" and
+        fourth_admission:status():as_string() == "waiting" and not group_completed and
+        not third_returned and not fourth_returned,
+        "failed listener registration lost the unobserved terminal member")
+      test.assert(retry_tx:try_send(true))
+    end
+    while not third_returned and not admission:status():has_finished() do async.yield() end
+    test.assert(third_returned and not fourth_returned and
+      fourth_admission:status():as_string() == "waiting" and not group_completed,
+      "Group double-released one member or violated FIFO while two children were still held")
+    test.assert(other_tx:try_send(7))
+    test.assert(third_tx:try_send(9))
+    while not fourth_returned and not fourth_admission:status():has_finished() do async.yield() end
+    test.assert(fourth_returned and not group_completed,
+      "Group did not retain its final still-live child after granting the next slot")
+    test.assert(fourth_tx:try_send(11))
+    return nil
+  end)
+  if ready_constructor or listener_fault then
+    async.loop()
+  else
+    local failed = false
+    local observed: value = nil
+    do async.loop()
+    catch failed = true; observed = error end
+    test.assert(failed and observed is async.OperationError,
+      "linked Group native join failure did not escape through the driver")
+    local operation: async.OperationError = observed
+    test.assert(operation.code == (ffi.titan_thread_fault_join_error() as integer) and
+      operation.operation == "async.native_retirement.retire",
+      "Group driver changed the native status or operation")
+    test.assert(count(ffi.TITAN_THREAD_FAULT_JOIN_FAILURES as foreign int) == 1 and
+      count(ffi.TITAN_THREAD_FAULT_JOIN_ATTEMPTS as foreign int) == 1 and
+      count(ffi.TITAN_THREAD_FAULT_REAL_JOINS as foreign int) == 0 and
+      count(ffi.TITAN_THREAD_FAULT_TERMINALS as foreign int) == 0 and
+      not supervisor:status():has_finished() and not controller:status():has_finished() and
+      admission:status():as_string() == "waiting" and
+      fourth_admission:status():as_string() == "waiting" and
+      not third_returned and not fourth_returned and not group_completed,
+      "failed Group join dropped ownership, released a slot, or automatically retried")
+    async.loop()
+  end
+  case supervisor:status()
+  when failed(failure) then failure:raise()
+  when succeeded(_) then
+  else raise "Group owner did not succeed"
+  end
+  case admission:status()
+  when failed(failure) then failure:raise()
+  when succeeded(_) then
+  else raise "queued Group admission did not succeed"
+  end
+  case fourth_admission:status()
+  when failed(failure) then failure:raise()
+  when succeeded(_) then
+  else raise "second queued Group admission did not succeed"
+  end
+  case controller:status()
+  when failed(failure) then failure:raise()
+  when succeeded(_) then
+  else raise "Group native retry controller did not succeed"
+  end
+  local expected_attempts = listener_fault and 1 or 2
+  local expected_failures = listener_fault and 0 or 1
+  test.assert(group_completed and third_returned and fourth_returned and
+    count(ffi.TITAN_THREAD_FAULT_JOIN_ATTEMPTS as foreign int) == expected_attempts and
+    count(ffi.TITAN_THREAD_FAULT_JOIN_FAILURES as foreign int) == expected_failures,
+    "explicit Group retry did not retire the original child token exactly once")
+  assert_real_retirement()
+end
+
+local function exercise_wide_entry(scenario: string)
+  ffi.titan_thread_fault_set_wake_functions(uv.native_external_wake_retain,
+    uv.native_external_wake_notify, uv.native_external_wake_release)
+  test.assert(ffi.titan_thread_fault_start_native() == 0, "native capability worker start failed")
+  defer ffi.titan_thread_fault_release_native()
+  ffi.titan_thread_fault_wait_started()
+  local memory_error = ffi.titan_thread_fault_memory_error(L) as string
+  local owner = async.prepare_native_retirement(nil, ffi.titan_thread_fault_context(),
+    ffi.titan_thread_fault_register, ffi.titan_thread_fault_unregister,
+    ffi.titan_thread_fault_retire)
+  defer owner:close()
+  local body_started = false
+  local reason = async.CancellationReason<|value|>.simple("wide prestart exact reason")
+  local cleanup_ran = false
+  local cleanup: function (async.CancellationReason<|value|>?): () = wide_cleanup
+  if scenario == "wide-body-entry-oom" then
+    cleanup = function (_reason: async.CancellationReason<|value|>?)
+      cleanup_ran = true
+    end
+  end
+  if scenario == "wide-prestart-cleanup-helper-oom" then
+    cleanup = function (cleanup_reason: async.CancellationReason<|value|>?)
+      ffi.titan_thread_fault_arm_stack_oom(L)
+      wide_cleanup(cleanup_reason)
+    end
+  end
+  local target = async.run_with_cleanup<|integer, value|>(function (): integer
+    body_started = true
+    ffi.titan_thread_fault_arm_stack_oom(L)
+    if scenario == "wide-body-entry-oom" then wide_cleanup(nil) end
+    return 17
+  end, cleanup, owner)
+  local remove_terminal = target:add_terminal_listener(function (_status)
+    ffi.titan_thread_fault_terminal()
+  end)
+  defer remove_terminal()
+  if scenario == "wide-prestart-cleanup-helper-oom" then target:cancel(reason) end
+  local controller = async.run<|nil, value|>(function (): nil
+    defer ffi.titan_thread_fault_release_native()
+    test.assert(count(ffi.TITAN_THREAD_FAULT_STACK_GROWTH as foreign int) == 1 and
+      count(ffi.TITAN_THREAD_FAULT_ALLOCATOR_HITS as foreign int) == 1 and
+      count(ffi.TITAN_THREAD_FAULT_ALLOCATION_BYTES as foreign int) > 0 and
+      count(ffi.TITAN_THREAD_FAULT_WIDE_BODY as foreign int) == 0,
+      "legal wide-frame workload did not hit its actual entry stack allocation")
+    test.assert(not target:status():has_finished() and
+      count(ffi.TITAN_THREAD_FAULT_TERMINALS as foreign int) == 0,
+      "entry OOM bypassed the prearmed native retirement barrier")
+    return nil
+  end)
+  async.loop()
+  ffi.titan_thread_fault_disarm()
+  case controller:status()
+  when failed(failure) then failure:raise()
+  when succeeded(_) then
+  else raise "wide-entry controller did not succeed"
+  end
+  if scenario == "wide-body-entry-oom" then
+    test.assert(cleanup_ran, "body entry failure skipped its ordinary cleanup")
+  end
+  if scenario == "wide-prestart-cleanup-helper-oom" then
+    local cancelled, actual? = target:status():has_cancelled()
+    test.assert(cancelled and actual == reason and not body_started,
+      "prestart entry OOM replaced the exact cancellation reason or ran the body")
+  else
+    local failed, failure? = target:status():has_failed()
+    test.assert(failed and failure.error == memory_error and body_started,
+      "entry OOM replaced the original Lua memory error")
+  end
+  assert_real_retirement()
+end
+
+function main(args: {string}): integer
+  test.assert(#args == 1, "retirement fixture requires one scenario")
+  test.assert(ffi.titan_thread_fault_init(L) == 1, "native fixture setup failed")
+  defer ffi.titan_thread_fault_shutdown()
+  defer ffi.titan_thread_fault_report()
+  gc.pause()
+  defer gc.resume()
+  local scenario = args[1]
+  if scenario == "prestart" or scenario == "waiting" or
+     scenario == "proxy-success" or scenario == "proxy-failure" or
+     scenario == "accepted-child-reason" or scenario == "join-retry" or
+     scenario == "prepare-userdata-oom" or scenario == "forwarding-stack-oom" or
+     scenario == "native-fallback-copy-oom" then
+    exercise_thread(scenario)
+  elseif scenario == "child-prestart-cancel" or scenario == "child-prestart-native-fallback" then
+    exercise_child_prestart_cancel(scenario)
+  elseif scenario == "cached-success-join" or scenario == "cached-failure-join" or
+         scenario == "cached-cancel-join" or scenario == "slow-normal-join" then
+    exercise_normal_join(scenario)
+  elseif scenario == "group-map-admission-oom" then
+    exercise_group_map_admission_fault()
+  elseif scenario == "group-linked-join-retry" or
+         scenario == "group-finished-constructor-join-retry" or
+         scenario == "group-listener-return-oom" or
+         scenario == "group-listener-registration-oom" then
+    exercise_group_retirement(scenario)
+  elseif scenario == "wide-cleanup-entry-oom" or scenario == "wide-body-entry-oom" or
+         scenario == "wide-prestart-cleanup-helper-oom" then
+    exercise_wide_entry(scenario)
+  else
+    raise "unknown retirement fixture scenario"
+  end
+  ffi.puts("THREAD_RETIREMENT_OK")
+  return 0
+catch
+  ffi.puts("THREAD_RETIREMENT_FAILED")
+  if error is string then ffi.puts(error as string) end
+  ffi.puts(traceback)
+  return 1
+end

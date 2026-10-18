@@ -2,11 +2,9 @@
 #define TITAN_THREAD_NATIVE_H
 
 #include <stddef.h>
-#include <stdint.h>
-#include <string.h>
 #include "lua.h"
 #include "titan/ffi.h"
-#include "../async_receiver_native.h"
+#include "../transfer_native.h"
 
 /* The CRT write count is unsigned int on Windows and size_t on POSIX. */
 #ifdef _WIN32
@@ -25,7 +23,7 @@ typedef titan_thread_message *titan_thread_message_ptr;
 typedef struct titan_thread_waiter {
   struct titan_thread_waiter *next;
   struct titan_thread_waiter *prev;
-  void *async_handle;
+  void *wake_target;
   int signaled;
   int active;
 } titan_thread_waiter;
@@ -56,17 +54,29 @@ typedef enum titan_thread_state_kind {
   TITAN_THREAD_STATE_CANCELLED
 } titan_thread_state_kind;
 
+typedef enum titan_thread_cancellation_kind {
+  TITAN_THREAD_CANCELLATION_DEFAULT,
+  TITAN_THREAD_CANCELLATION_SIMPLE,
+  TITAN_THREAD_CANCELLATION_COMPLEX
+} titan_thread_cancellation_kind;
+
 typedef struct titan_thread_control {
   void *mutex;
   size_t refcount;
+  void *os_thread;
+  int os_joined;
+  /* One cached Thread:task monitor owns this native, non-GC waiter slot. */
+  void *proxy_wake_target;
   lua_State *child_state;
   titan_thread_message *entry_msg;
   int cancel_requested;
   titan_thread_message *cancel_reason_msg;
+  int cancel_reason_kind;
   void *child_cancel_handle;
   int finished;
   titan_thread_state_kind status_kind;
   titan_thread_message *result_msg;
+  int result_reason_kind;
   char *error_traceback;
   size_t error_traceback_len;
   char *stderr_report;
@@ -89,19 +99,6 @@ static inline titan_thread_waiter_queue *titan_thread_underflow_queue(
 static inline titan_thread_waiter_queue *titan_thread_join_queue(
     titan_thread_control *ctrl) {
   return &ctrl->join_waiters;
-}
-
-static inline int64_t titan_thread_pointer_bits(void *address) {
-  uint64_t bits = (uint64_t)(uintptr_t)address;
-  int64_t result;
-  memcpy(&result, &bits, sizeof(result));
-  return result;
-}
-
-static inline void *titan_thread_bits_pointer(int64_t value) {
-  uint64_t bits;
-  memcpy(&bits, &value, sizeof(bits));
-  return (void *)(uintptr_t)bits;
 }
 
 #endif

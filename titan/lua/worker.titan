@@ -41,7 +41,7 @@ end
 -- entry -> one module; all allocation/errors stay under lua_state_execute.
 local foreign function lua_state_native_module(state: *lua_State,
                                          name: const *char): int
-  transfer.transfer_load_module(state, name, ffi.strlen(name))
+  transfer.transfer_load_module(state, name, ffi.strlen(name) as foreign unsigned long long)
   return 0
 end
 

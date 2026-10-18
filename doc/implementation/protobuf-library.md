@@ -30,6 +30,40 @@ native assignments and extents, and roots the incomplete destination while
 allocating conversions run. Existing ordinary reflection get/set rules remain
 unchanged. See [reflection implementation](standard-library-reflect.md).
 
+### Inspected structural-root collaboration
+
+The ordinary compiled API includes two narrowly typed collaboration entries:
+
+```text
+serialize_inspected_record_to_buffer(buf: foreign *void,
+                                     candidate: reflect.RecordValue)
+serialize_inspected_union_to_buffer(buf: foreign *void,
+                                    candidate: reflect.UnionValue)
+```
+
+`buf` must point to a live, initialized `titan_protobuf_buffer`. Each helper
+records its starting length, creates one ordinary `Encoder`, appends the
+already-inspected root at depth 1, and checks the appended message size.
+The caller retains buffer ownership and must provide its normal native-buffer
+cleanup; these entries neither initialize nor finalize that storage.
+
+`serialize_to_buffer` performs one `reflect.inspect` and dispatches to these
+helpers. Transfer already has a `reflect.RecordValue` or `reflect.UnionValue`
+from its root classification, so it passes that same descriptor instead of
+inspecting the root again. These functions are exported through ordinary
+compiled imports because transfer and protobuf are separate modules; no private
+source import, descriptor cache, or second hook/prewalk pass is introduced.
+
+`Encoder:record_value` / `union_value` still enforce public nominal and complete
+member visibility, active-path cycle detection, the 128-level depth limit, and
+the normal field/variant traversal with nested custom-hook dispatch. The helper
+checks the existing 2 GiB message limit after encoding. No policy is broadened:
+root custom-hook selection remains transfer's responsibility, and ordinary
+`protobuf.serialize` retains its structural public-data rules. See the
+[owning API inventory](../language/standard-library-protobuf.md#api) and
+[transfer classification](transfer-library.md#flat-packets-and-direct-classification).
+
+
 ## Encoding
 
 The encoder keeps an active-path Map keyed by the original nominal or Array
@@ -69,8 +103,10 @@ C expressions in Titan.
 `find_transfer_hooks` memoizes the validated `(to_hook, from_hook)` pair (or a
 negative sentinel) per nominal record name (`descriptor.name`) in a module-local
 Map, and `encode_transfer_payload` shares the module-local
-`active_record_payloads` Map so nested (`depth > 1`) and root custom-record hook
-invocations enforce a single reentrancy guard. Nested records (`depth > 1`) that
+`active_record_payloads` ephemeron Map so nested (`depth > 1`) and root hook
+invocations enforce one reentrancy guard without permanently rooting abandoned
+encoding graphs. Lexical removals still restore that guard on normal/error exit.
+Nested records (`depth > 1`) that
 provide both `to_transfer_payload` and `from_transfer_payload` encode as
 `optional bytes` via their hooks rather than requiring public fields.
 

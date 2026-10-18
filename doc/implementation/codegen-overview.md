@@ -980,11 +980,12 @@ interfaces have reproducible text; ordered Interface methods, module members,
 record fields, and union variants retain their established logical source order.
 Physical UV/member indices are independent and never enter that semantic schema.
 Contextual `CVoid`/`CInteger`/`CFloat` descriptors and recursively portable
-`CPointer`, nonvariadic `CFunction`, and `COwned` graphs are also serialized
-structurally. Their encoding omits all source scope and header provenance, and
-the driver validates the closed portable-C schema before code generation.
-Imported typedefs and other header-dependent C descriptors never enter this
-literal.
+`CPointer`, nonvariadic `CFunction`, and `COwned` graphs are serialized
+structurally without source scope or header provenance, while named header
+`CTypedef`, `CStruct`, and `CUnion` descriptors serialize with their
+`c_declaration_origin` provenance so consumers can verify original compatible
+declarations. Enum identities, unnamed aggregates without a typedef name, and
+flexible-array aggregates never enter this literal.
 Callable declaration descriptors also serialize formal
 `paramnames`, while structural `Type.Function` values do not. Callable shapes
 also carry their optional `flexrettype`; accepting that new constructor shape

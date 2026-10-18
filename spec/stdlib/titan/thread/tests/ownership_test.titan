@@ -1,0 +1,1891 @@
+-- Thread endpoint ownership, packet attachment/claim, rollback, and native discard tests.
+
+local ownership_reject_decode = false
+local ownership_reject_encode = false
+local ownership_encode_calls = 0
+local ownership_decode_calls = 0
+
+local function reset_ownership_hook_state(reject_decode: boolean, reject_encode: boolean)
+  ownership_reject_decode = reject_decode
+  ownership_reject_encode = reject_encode
+  ownership_encode_calls = 0
+  ownership_decode_calls = 0
+end
+
+record OwnershipHook
+  const bytes: string
+end
+
+function OwnershipHook:to_transfer_payload(): string
+  ownership_encode_calls = ownership_encode_calls + 1
+  if ownership_reject_encode then
+    raise "expected hook encode failure"
+  end
+  return self.bytes
+end
+
+function OwnershipHook.from_transfer_payload(payload: string): OwnershipHook
+  ownership_decode_calls = ownership_decode_calls + 1
+  if ownership_reject_decode then
+    raise "expected earlier decoder failure"
+  end
+  return OwnershipHook(payload)
+end
+
+record EarlierSenderHook
+  const hook: OwnershipHook
+  const endpoint: thread.Sender<|integer|>
+end
+
+record LaterSenderHook
+  const endpoint: thread.Sender<|integer|>
+  const hook: OwnershipHook
+end
+
+record EarlierReceiverHook
+  const hook: OwnershipHook
+  const endpoint: thread.Receiver<|integer|>
+end
+
+record LaterReceiverHook
+  const endpoint: thread.Receiver<|integer|>
+  const hook: OwnershipHook
+end
+
+local stashed_adopted_tx: thread.Sender<|integer|>? = nil
+local stashed_adopted_rx: thread.Receiver<|integer|>? = nil
+
+record StashingEndpointHook
+  const tx: thread.Sender<|integer|>
+  const rx: thread.Receiver<|integer|>
+end
+
+function StashingEndpointHook:to_transfer_payload(): string
+  return self.tx:to_transfer_payload() .. self.rx:to_transfer_payload()
+end
+
+function StashingEndpointHook.from_transfer_payload(payload: string): StashingEndpointHook
+  if #payload ~= 8 then
+    raise "invalid StashingEndpointHook payload"
+  end
+  local tx = thread.Sender<|integer|>.from_transfer_payload(strings.sub(payload, 1, 4))
+  local rx = thread.Receiver<|integer|>.from_transfer_payload(strings.sub(payload, 5, 8))
+  stashed_adopted_tx = tx
+  stashed_adopted_rx = rx
+  return StashingEndpointHook(tx, rx)
+end
+
+record PartialDecodeSandwich
+  const earlier_tx: thread.Sender<|integer|>
+  const earlier_rx: thread.Receiver<|integer|>
+  const stashed: StashingEndpointHook
+  const failing: OwnershipHook
+  const later_tx: thread.Sender<|integer|>
+  const later_rx: thread.Receiver<|integer|>
+end
+
+record EndpointPair
+  const tx: thread.Sender<|integer|>
+  const rx: thread.Receiver<|integer|>
+end
+
+record RetiringEndpointPair
+  const tx: thread.Sender<|integer|>
+  const rx: thread.Receiver<|integer|>
+  const retired: thread.Sender<|boolean|>
+end
+
+record NativeEndpointCycle
+  const receiver: thread.Receiver<|value|>
+  const retired: thread.Sender<|boolean|>
+end
+
+record ChildBootstrapFailureHook
+  const label: string
+end
+
+function ChildBootstrapFailureHook:to_transfer_payload(): string
+  return self.label
+end
+
+function ChildBootstrapFailureHook.from_transfer_payload(_payload: string): ChildBootstrapFailureHook
+  raise "expected child entry decode failure"
+end
+
+record EndpointArrayCarrier
+  const label: string
+  const senders: {thread.Sender<|integer|>}
+  const receivers: {thread.Receiver<|integer|>}
+  const pairs: {EndpointPair}
+end
+
+union EndpointUnionCarrier
+  empty()
+  single_tx(tx: thread.Sender<|integer|>)
+  single_rx(rx: thread.Receiver<|integer|>)
+  nested_bundle(
+    bundle: EndpointArrayCarrier,
+    extra_tx: thread.Sender<|integer|>,
+    extra_rx: thread.Receiver<|integer|>)
+end
+
+record OpaqueEndpointHook
+  const tag: string
+  const tx: thread.Sender<|integer|>
+  const rx: thread.Receiver<|integer|>
+end
+
+function OpaqueEndpointHook:to_transfer_payload(): string
+  ownership_encode_calls = ownership_encode_calls + 1
+  local tx_bytes = self.tx:to_transfer_payload()
+  local rx_bytes = self.rx:to_transfer_payload()
+  return tx_bytes .. rx_bytes .. self.tag
+end
+
+function OpaqueEndpointHook.from_transfer_payload(payload: string): OpaqueEndpointHook
+  ownership_decode_calls = ownership_decode_calls + 1
+  if #payload < 8 then
+    raise "invalid OpaqueEndpointHook payload"
+  end
+  local tx_bytes = strings.sub(payload, 1, 4)
+  local rx_bytes = strings.sub(payload, 5, 8)
+  local tag = strings.sub(payload, 9)
+  local tx = thread.Sender<|integer|>.from_transfer_payload(tx_bytes)
+  local rx = thread.Receiver<|integer|>.from_transfer_payload(rx_bytes)
+  return OpaqueEndpointHook(tag, tx, rx)
+end
+
+record DuplicateEndpointCarrier
+  const tx1: thread.Sender<|integer|>
+  const tx2: thread.Sender<|integer|>
+  const rx1: thread.Receiver<|integer|>
+  const rx2: thread.Receiver<|integer|>
+  const tx_list: {thread.Sender<|integer|>}
+  const rx_list: {thread.Receiver<|integer|>}
+end
+
+record DuplicatePartialDecodeCarrier
+  const first_tx: thread.Sender<|integer|>
+  const first_rx: thread.Receiver<|integer|>
+  const failing: OwnershipHook
+  const second_tx: thread.Sender<|integer|>
+  const second_rx: thread.Receiver<|integer|>
+end
+
+local cancel_race_action: (function (): ())? = nil
+
+record CancelRaceHook
+  const label: string
+end
+
+function CancelRaceHook:to_transfer_payload(): string
+  local act? = cancel_race_action
+  if act ~= nil then
+    cancel_race_action = nil
+    act()
+  end
+  return self.label
+end
+
+function CancelRaceHook.from_transfer_payload(payload: string): CancelRaceHook
+  ownership_decode_calls = ownership_decode_calls + 1
+  return CancelRaceHook(payload)
+end
+
+record CancelReasonBundle
+  const tx: thread.Sender<|integer|>
+  const rx: thread.Receiver<|integer|>
+  const hook: CancelRaceHook
+end
+
+record RecursiveLeafPacket
+  const hook: OwnershipHook
+  const tx: thread.Sender<|integer|>
+  const rx: thread.Receiver<|integer|>
+end
+
+record RecursiveLevel2Packet
+  const hook: OwnershipHook
+  const inner_rx: thread.Receiver<|RecursiveLeafPacket|>
+  const extra_tx: thread.Sender<|integer|>
+end
+
+record RecursiveLevel1Packet
+  const hook: OwnershipHook
+  const mid_rx: thread.Receiver<|RecursiveLevel2Packet|>
+  const extra_rx: thread.Receiver<|integer|>
+end
+
+local function install_preload_probe(name: string, mode: string): function (): integer
+  local setup = lua.load([=[
+    local target_name, target_mode = ...
+    local registry = debug.getregistry()
+    local preload = registry._PRELOAD
+    local saved_preload = preload[target_name]
+    local calls = 0
+    if target_mode == "missing" then
+      preload[target_name] = nil
+    elseif target_mode == "spy_fail" then
+      preload[target_name] = function()
+        calls = calls + 1
+        error("unexpected preload loader invocation for " .. target_name)
+      end
+    end
+    return function()
+      preload[target_name] = saved_preload
+      return calls
+    end
+  ]=]) as function (string, string): (function (): integer)
+  return setup(name, mode)
+end
+
+-- Create a channel pair where one external reference is kept in a closure box
+-- so a test can prove an operation released its retain at most once (channel
+-- stays open while the box is held) and at least once (channel auto-closes
+-- as soon as the box is released and collected).
+local function make_sender_release_once_probe(): (
+  thread.Sender<|integer|>?,
+  thread.Receiver<|integer|>,
+  function (): ()
+)
+  local tx, rx = thread.channel<|integer|>(2)
+  local held_clone: thread.Sender<|integer|>? = tx:clone()
+  local release_held = function ()
+    held_clone = nil
+  end
+  return tx, rx, release_held
+end
+
+local function make_receiver_release_once_probe(): (
+  thread.Sender<|integer|>,
+  thread.Receiver<|integer|>?,
+  function (): ()
+)
+  local tx, rx = thread.channel<|integer|>(2)
+  local held_clone: thread.Receiver<|integer|>? = rx:clone()
+  local release_held = function ()
+    held_clone = nil
+  end
+  return tx, rx, release_held
+end
+
+local function assert_sender_released_exactly_once(
+  peer_rx: thread.Receiver<|integer|>,
+  release_held_tx: function (): (),
+  context_label: string
+)
+  gc.collect()
+  gc.collect()
+  test.assert(
+    not peer_rx:is_closed(),
+    context_label .. ": Sender retain was released more than once")
+  release_held_tx()
+  gc.collect()
+  gc.collect()
+  test.assert(
+    peer_rx:is_closed(),
+    context_label .. ": Sender retain was leaked")
+end
+
+local function assert_receiver_released_exactly_once(
+  peer_tx: thread.Sender<|integer|>,
+  release_held_rx: function (): (),
+  context_label: string
+)
+  gc.collect()
+  gc.collect()
+  test.assert(
+    not peer_tx:is_closed(),
+    context_label .. ": Receiver retain was released more than once")
+  release_held_rx()
+  gc.collect()
+  gc.collect()
+  test.assert(
+    peer_tx:is_closed(),
+    context_label .. ": Receiver retain was leaked")
+end
+
+local function enqueue_earlier_sender_hook(
+  tx: thread.Sender<|EarlierSenderHook|>
+): (thread.Receiver<|integer|>, function (): ())
+  local inner_tx, inner_rx, release_held = make_sender_release_once_probe()
+  tx:send(EarlierSenderHook(OwnershipHook("opaque-sender-earlier"), inner_tx))
+  return inner_rx, release_held
+end
+
+local function enqueue_later_sender_hook(
+  tx: thread.Sender<|LaterSenderHook|>
+): (thread.Receiver<|integer|>, function (): ())
+  local inner_tx, inner_rx, release_held = make_sender_release_once_probe()
+  tx:send(LaterSenderHook(inner_tx, OwnershipHook("opaque-sender-later")))
+  return inner_rx, release_held
+end
+
+local function enqueue_earlier_receiver_hook(
+  tx: thread.Sender<|EarlierReceiverHook|>
+): (thread.Sender<|integer|>, function (): ())
+  local inner_tx, inner_rx, release_held = make_receiver_release_once_probe()
+  tx:send(EarlierReceiverHook(OwnershipHook("opaque-receiver-earlier"), inner_rx))
+  return inner_tx, release_held
+end
+
+local function enqueue_later_receiver_hook(
+  tx: thread.Sender<|LaterReceiverHook|>
+): (thread.Sender<|integer|>, function (): ())
+  local inner_tx, inner_rx, release_held = make_receiver_release_once_probe()
+  tx:send(LaterReceiverHook(inner_rx, OwnershipHook("opaque-receiver-later")))
+  return inner_tx, release_held
+end
+
+local function enqueue_sole_earlier_sender(
+  tx: thread.Sender<|EarlierSenderHook|>
+): thread.Receiver<|integer|>
+  local inner_tx, inner_rx = thread.channel<|integer|>(1)
+  tx:send(EarlierSenderHook(OwnershipHook("sole-earlier-tx"), inner_tx))
+  return inner_rx
+end
+
+local function enqueue_sole_later_sender(
+  tx: thread.Sender<|LaterSenderHook|>
+): thread.Receiver<|integer|>
+  local inner_tx, inner_rx = thread.channel<|integer|>(1)
+  tx:send(LaterSenderHook(inner_tx, OwnershipHook("sole-later-tx")))
+  return inner_rx
+end
+
+local function enqueue_sole_earlier_receiver(
+  tx: thread.Sender<|EarlierReceiverHook|>
+): thread.Sender<|integer|>
+  local inner_tx, inner_rx = thread.channel<|integer|>(1)
+  tx:send(EarlierReceiverHook(OwnershipHook("sole-earlier-rx"), inner_rx))
+  return inner_tx
+end
+
+local function enqueue_sole_later_receiver(
+  tx: thread.Sender<|LaterReceiverHook|>
+): thread.Sender<|integer|>
+  local inner_tx, inner_rx = thread.channel<|integer|>(1)
+  tx:send(LaterReceiverHook(inner_rx, OwnershipHook("sole-later-rx")))
+  return inner_tx
+end
+
+local function enqueue_partial_decode_sandwich(
+  outer_tx: thread.Sender<|PartialDecodeSandwich|>
+): (
+  thread.Receiver<|integer|>,
+  thread.Sender<|integer|>,
+  thread.Receiver<|integer|>,
+  thread.Sender<|integer|>,
+  thread.Receiver<|integer|>,
+  thread.Sender<|integer|>
+)
+  local e_tx, e_peer_rx = thread.channel<|integer|>(1)
+  local e_peer_tx, e_rx = thread.channel<|integer|>(1)
+  local s_tx, s_peer_rx = thread.channel<|integer|>(1)
+  local s_peer_tx, s_rx = thread.channel<|integer|>(1)
+  local l_tx, l_peer_rx = thread.channel<|integer|>(1)
+  local l_peer_tx, l_rx = thread.channel<|integer|>(1)
+  outer_tx:send(PartialDecodeSandwich(
+    e_tx,
+    e_rx,
+    StashingEndpointHook(s_tx, s_rx),
+    OwnershipHook("sandwich-fail"),
+    l_tx,
+    l_rx))
+  return e_peer_rx, e_peer_tx, s_peer_rx, s_peer_tx, l_peer_rx, l_peer_tx
+end
+
+local function enqueue_native_endpoint_cycle(mutual: boolean): (
+  thread.Receiver<|value|>, thread.Receiver<|boolean|>
+)
+  local tx, rx = thread.channel<|value|>(1)
+  local retired_tx, retired_rx = thread.channel<|boolean|>(1)
+  if mutual then
+    local reverse_tx, reverse_rx = thread.channel<|value|>(1)
+    test.assert(reverse_tx:try_send(NativeEndpointCycle(rx, retired_tx) as value))
+    reverse_tx:close()
+    test.assert(tx:try_send(reverse_rx as value))
+  else
+    test.assert(tx:try_send(NativeEndpointCycle(rx, retired_tx) as value))
+  end
+  tx:close()
+  return rx, retired_rx
+end
+
+local function exercise_native_endpoint_cycle_close(mutual: boolean)
+  runtime_test.run(function ()
+    local receiver, retired = enqueue_native_endpoint_cycle(mutual)
+    defer receiver:close()
+    defer retired:close()
+    gc.collect()
+    gc.collect()
+    test.assert(not retired:is_closed(), "queued native cycle lost its packet owner")
+    receiver:close()
+    receiver:close()
+    case retired:receive_result()
+    when closed() then
+    else raise "explicit Receiver:close did not drain the native endpoint cycle"
+    end
+  end)
+end
+
+function test_native_endpoint_cycles_retire_through_explicit_receiver_close(context: test.Context)
+  context:run("receiver_of_its_own_channel", function (_child: test.Context)
+    exercise_native_endpoint_cycle_close(false)
+  end)
+  context:run("mutually_queued_receivers", function (_child: test.Context)
+    exercise_native_endpoint_cycle_close(true)
+  end)
+end
+
+local function exercise_and_drop_stashed_endpoints(
+  sender_peer: thread.Receiver<|integer|>,
+  receiver_peer: thread.Sender<|integer|>
+)
+  test.assert(stashed_adopted_tx:try_send(314))
+  test.assert(sender_peer:receive() == 314)
+  test.assert(receiver_peer:try_send(271))
+  test.assert(stashed_adopted_rx:receive() == 271)
+  stashed_adopted_tx = nil
+  stashed_adopted_rx = nil
+end
+
+function test_discard_reproducer_inverted_sender_and_receiver(context: test.Context)
+  context:run("sender_hook_orders_on_discard", function (_child: test.Context)
+    runtime_test.run(function ()
+      -- 1. Successful custom decoder before Sender.
+      reset_ownership_hook_state(false, false)
+      local tx1, rx1 = thread.channel<|EarlierSenderHook|>(1)
+      defer tx1:close()
+      defer rx1:close()
+      local peer_rx1, release1 = enqueue_earlier_sender_hook(tx1)
+      defer peer_rx1:close()
+      test.assert(ownership_encode_calls == 1)
+      rx1:close()
+      test.assert(ownership_decode_calls == 0, "discard invoked user decoder")
+      assert_sender_released_exactly_once(peer_rx1, release1, "earlier valid hook discard")
+
+      -- 2. Throwing custom decoder before Sender (inverted #250 Appendix C leak case).
+      reset_ownership_hook_state(true, false)
+      local tx2, rx2 = thread.channel<|EarlierSenderHook|>(1)
+      defer tx2:close()
+      defer rx2:close()
+      local sole_rx2 = enqueue_sole_earlier_sender(tx2)
+      defer sole_rx2:close()
+      gc.collect()
+      gc.collect()
+      test.assert(not sole_rx2:is_closed(), "queued endpoint did not retain its Sender")
+      rx2:close()
+      test.assert(ownership_decode_calls == 0, "discard invoked throwing user decoder")
+      test.assert(
+        sole_rx2:is_closed(),
+        "Receiver:close() leaked Sender after earlier throwing hook")
+
+      local tx2b, rx2b = thread.channel<|EarlierSenderHook|>(1)
+      defer tx2b:close()
+      defer rx2b:close()
+      local peer_rx2b, release2b = enqueue_earlier_sender_hook(tx2b)
+      defer peer_rx2b:close()
+      rx2b:close()
+      test.assert(ownership_decode_calls == 0)
+      assert_sender_released_exactly_once(peer_rx2b, release2b, "earlier throwing hook discard")
+
+      -- 3. Throwing custom decoder after Sender.
+      reset_ownership_hook_state(true, false)
+      local tx3, rx3 = thread.channel<|LaterSenderHook|>(1)
+      defer tx3:close()
+      defer rx3:close()
+      local peer_rx3, release3 = enqueue_later_sender_hook(tx3)
+      defer peer_rx3:close()
+      rx3:close()
+      test.assert(ownership_decode_calls == 0, "discard invoked later user decoder")
+      assert_sender_released_exactly_once(peer_rx3, release3, "later throwing hook discard")
+    end)
+  end)
+
+  context:run("receiver_hook_orders_on_discard", function (_child: test.Context)
+    runtime_test.run(function ()
+      -- 1. Successful custom decoder before Receiver.
+      reset_ownership_hook_state(false, false)
+      local tx1, rx1 = thread.channel<|EarlierReceiverHook|>(1)
+      defer tx1:close()
+      defer rx1:close()
+      local peer_tx1, release1 = enqueue_earlier_receiver_hook(tx1)
+      defer peer_tx1:close()
+      rx1:close()
+      test.assert(ownership_decode_calls == 0, "discard invoked user decoder before Receiver")
+      assert_receiver_released_exactly_once(peer_tx1, release1, "earlier valid Receiver discard")
+
+      -- 2. Throwing custom decoder before Receiver.
+      reset_ownership_hook_state(true, false)
+      local tx2, rx2 = thread.channel<|EarlierReceiverHook|>(1)
+      defer tx2:close()
+      defer rx2:close()
+      local sole_tx2 = enqueue_sole_earlier_receiver(tx2)
+      defer sole_tx2:close()
+      gc.collect()
+      gc.collect()
+      test.assert(not sole_tx2:is_closed(), "queued endpoint did not retain its Receiver")
+      rx2:close()
+      test.assert(ownership_decode_calls == 0, "discard invoked throwing user decoder")
+      test.assert(
+        sole_tx2:is_closed(),
+        "Receiver:close() leaked Receiver after earlier throwing hook")
+
+      local tx2b, rx2b = thread.channel<|EarlierReceiverHook|>(1)
+      defer tx2b:close()
+      defer rx2b:close()
+      local peer_tx2b, release2b = enqueue_earlier_receiver_hook(tx2b)
+      defer peer_tx2b:close()
+      rx2b:close()
+      assert_receiver_released_exactly_once(peer_tx2b, release2b, "earlier throwing Receiver discard")
+
+      -- 3. Throwing custom decoder after Receiver.
+      reset_ownership_hook_state(true, false)
+      local tx3, rx3 = thread.channel<|LaterReceiverHook|>(1)
+      defer tx3:close()
+      defer rx3:close()
+      local peer_tx3, release3 = enqueue_later_receiver_hook(tx3)
+      defer peer_tx3:close()
+      rx3:close()
+      test.assert(ownership_decode_calls == 0, "discard invoked later user decoder")
+      assert_receiver_released_exactly_once(peer_tx3, release3, "later throwing Receiver discard")
+    end)
+  end)
+
+  context:run("partial_decode_failure_adopted_vs_unclaimed", function (_child: test.Context)
+    runtime_test.run(function ()
+      -- Earlier hook throws during receive(): unclaimed Sender/Receiver released synchronously
+      -- by decode_message unwind before any GC cycle.
+      reset_ownership_hook_state(true, false)
+      local e_tx, e_rx = thread.channel<|EarlierSenderHook|>(2)
+      defer e_tx:close()
+      defer e_rx:close()
+      local sole_peer_rx = enqueue_sole_earlier_sender(e_tx)
+      defer sole_peer_rx:close()
+      local probe_peer_rx, release_probe_tx = enqueue_earlier_sender_hook(e_tx)
+      defer probe_peer_rx:close()
+      gc.collect()
+      gc.collect()
+      test.assert(not sole_peer_rx:is_closed())
+      gc.pause()
+      do
+        defer gc.resume()
+        expect_error(function ()
+          e_rx:receive()
+        end, "expected earlier decoder failure")
+        test.assert(
+          sole_peer_rx:is_closed(),
+          "unclaimed Sender was not released synchronously on decode unwind")
+        expect_error(function ()
+          e_rx:try_receive()
+        end, "expected earlier decoder failure")
+      end
+      assert_sender_released_exactly_once(
+        probe_peer_rx, release_probe_tx, "unclaimed Sender on receive error")
+
+      local er_tx, er_rx = thread.channel<|EarlierReceiverHook|>(2)
+      defer er_tx:close()
+      defer er_rx:close()
+      local sole_peer_tx = enqueue_sole_earlier_receiver(er_tx)
+      defer sole_peer_tx:close()
+      local probe_peer_tx, release_probe_rx = enqueue_earlier_receiver_hook(er_tx)
+      defer probe_peer_tx:close()
+      gc.collect()
+      gc.collect()
+      test.assert(not sole_peer_tx:is_closed())
+      gc.pause()
+      do
+        defer gc.resume()
+        expect_error(function ()
+          er_rx:receive()
+        end, "expected earlier decoder failure")
+        test.assert(
+          sole_peer_tx:is_closed(),
+          "unclaimed Receiver was not released synchronously on decode unwind")
+        expect_error(function ()
+          er_rx:try_receive()
+        end, "expected earlier decoder failure")
+      end
+      assert_receiver_released_exactly_once(
+        probe_peer_tx, release_probe_rx, "unclaimed Receiver on receive error")
+
+      -- Later hook throws after Sender/Receiver was already claimed:
+      -- adopted wrapper stays alive before GC and releases once when collected.
+      reset_ownership_hook_state(true, false)
+      local l_tx, l_rx = thread.channel<|LaterSenderHook|>(2)
+      defer l_tx:close()
+      defer l_rx:close()
+      local adopted_peer_rx = enqueue_sole_later_sender(l_tx)
+      defer adopted_peer_rx:close()
+      local adopted_probe_rx, release_adopted_tx = enqueue_later_sender_hook(l_tx)
+      defer adopted_probe_rx:close()
+      gc.collect()
+      gc.collect()
+      gc.pause()
+      do
+        defer gc.resume()
+        expect_error(function ()
+          l_rx:receive()
+        end, "expected earlier decoder failure")
+        test.assert(
+          not adopted_peer_rx:is_closed(),
+          "decode unwind prematurely released an already-adopted Sender")
+        expect_error(function ()
+          l_rx:try_receive()
+        end, "expected earlier decoder failure")
+      end
+      gc.collect()
+      gc.collect()
+      test.assert(
+        adopted_peer_rx:is_closed(),
+        "adopted Sender wrapper was not finalized after partial decode failure")
+      assert_sender_released_exactly_once(
+        adopted_probe_rx, release_adopted_tx, "adopted Sender on partial decode failure")
+
+      local lr_tx, lr_rx = thread.channel<|LaterReceiverHook|>(2)
+      defer lr_tx:close()
+      defer lr_rx:close()
+      local adopted_peer_tx = enqueue_sole_later_receiver(lr_tx)
+      defer adopted_peer_tx:close()
+      local adopted_probe_tx, release_adopted_rx = enqueue_later_receiver_hook(lr_tx)
+      defer adopted_probe_tx:close()
+      gc.collect()
+      gc.collect()
+      gc.pause()
+      do
+        defer gc.resume()
+        expect_error(function ()
+          lr_rx:receive()
+        end, "expected earlier decoder failure")
+        test.assert(
+          not adopted_peer_tx:is_closed(),
+          "decode unwind prematurely released an already-adopted Receiver")
+        expect_error(function ()
+          lr_rx:try_receive()
+        end, "expected earlier decoder failure")
+      end
+      gc.collect()
+      gc.collect()
+      test.assert(
+        adopted_peer_tx:is_closed(),
+        "adopted Receiver wrapper was not finalized after partial decode failure")
+      assert_receiver_released_exactly_once(
+        adopted_probe_tx, release_adopted_rx, "adopted Receiver on partial decode failure")
+
+      -- Composite sandwich with earlier adopted endpoints, stashed adopted endpoints,
+      -- failing hook, and later unclaimed endpoints in the same packet.
+      stashed_adopted_tx = nil
+      stashed_adopted_rx = nil
+      defer do
+        stashed_adopted_tx = nil
+        stashed_adopted_rx = nil
+      end
+      reset_ownership_hook_state(true, false)
+      local sw_tx, sw_rx = thread.channel<|PartialDecodeSandwich|>(1)
+      defer sw_tx:close()
+      defer sw_rx:close()
+      local e_peer_rx, e_peer_tx, s_peer_rx, s_peer_tx, l_peer_rx, l_peer_tx =
+        enqueue_partial_decode_sandwich(sw_tx)
+      defer e_peer_rx:close()
+      defer e_peer_tx:close()
+      defer s_peer_rx:close()
+      defer s_peer_tx:close()
+      defer l_peer_rx:close()
+      defer l_peer_tx:close()
+      gc.collect()
+      gc.collect()
+      test.assert(
+        not e_peer_rx:is_closed() and not e_peer_tx:is_closed() and
+        not s_peer_rx:is_closed() and not s_peer_tx:is_closed() and
+        not l_peer_rx:is_closed() and not l_peer_tx:is_closed())
+      gc.pause()
+      do
+        defer gc.resume()
+        expect_error(function ()
+          sw_rx:receive()
+        end, "expected earlier decoder failure")
+        -- Unclaimed entries after the throwing hook are already released before GC.
+        test.assert(l_peer_rx:is_closed() and l_peer_tx:is_closed(),
+          "unclaimed trailing endpoints were not released on decode error")
+        -- Claimed entries before the throwing hook remain alive until their wrappers are collected.
+        test.assert(not e_peer_rx:is_closed() and not e_peer_tx:is_closed(),
+          "claimed leading endpoints were released by packet disposal")
+        test.assert(not s_peer_rx:is_closed() and not s_peer_tx:is_closed(),
+          "stashed adopted endpoints were released by packet disposal")
+      end
+      gc.collect()
+      gc.collect()
+      -- Unreferenced earlier wrappers are now finalized, while stashed wrappers remain live and usable.
+      test.assert(e_peer_rx:is_closed() and e_peer_tx:is_closed(),
+        "unreferenced adopted endpoints did not finalize on GC")
+      test.assert(not s_peer_rx:is_closed() and not s_peer_tx:is_closed(),
+        "reachable adopted endpoints closed while still referenced")
+      exercise_and_drop_stashed_endpoints(s_peer_rx, s_peer_tx)
+      gc.collect()
+      gc.collect()
+      test.assert(s_peer_rx:is_closed() and s_peer_tx:is_closed(),
+        "stashed adopted endpoints did not close after final reference dropped")
+    end)
+  end)
+end
+
+local function enqueue_duplicate_carrier(
+  out_tx: thread.Sender<|DuplicateEndpointCarrier|>
+): (
+  thread.Receiver<|integer|>,
+  function (): (),
+  thread.Sender<|integer|>,
+  function (): ()
+)
+  local tx, peer_rx, release_tx = make_sender_release_once_probe()
+  local peer_tx, rx, release_rx = make_receiver_release_once_probe()
+  out_tx:send(DuplicateEndpointCarrier(
+    tx,
+    tx,
+    rx,
+    rx,
+    {tx, tx},
+    {rx, rx}))
+  return peer_rx, release_tx, peer_tx, release_rx
+end
+
+local function enqueue_duplicate_partial_decode(
+  out_tx: thread.Sender<|DuplicatePartialDecodeCarrier|>
+): (thread.Receiver<|integer|>, thread.Sender<|integer|>)
+  local tx, peer_rx = thread.channel<|integer|>(2)
+  local peer_tx, rx = thread.channel<|integer|>(2)
+  out_tx:send(DuplicatePartialDecodeCarrier(
+    tx,
+    rx,
+    OwnershipHook("dup-partial-fail"),
+    tx,
+    rx))
+  return peer_rx, peer_tx
+end
+
+local record DuplicateEndpointKeepalive
+  sender: thread.Sender<|integer|>?
+  receiver: thread.Receiver<|integer|>?
+end
+
+local function decode_duplicate_keepalive(
+  incoming: thread.Receiver<|DuplicateEndpointCarrier|>
+): DuplicateEndpointKeepalive
+  local decoded = incoming:receive()
+  test.assert(
+    decoded.tx1 ~= decoded.tx2 and
+    decoded.tx1 ~= decoded.tx_list[1] and
+    decoded.tx_list[1] ~= decoded.tx_list[2])
+  test.assert(
+    decoded.rx1 ~= decoded.rx2 and
+    decoded.rx1 ~= decoded.rx_list[1] and
+    decoded.rx_list[1] ~= decoded.rx_list[2])
+  return DuplicateEndpointKeepalive(decoded.tx_list[2], decoded.rx_list[2])
+end
+
+local function exercise_and_drop_duplicate_keepalive(
+  keep: DuplicateEndpointKeepalive,
+  sender_peer: thread.Receiver<|integer|>,
+  receiver_peer: thread.Sender<|integer|>
+)
+  test.assert(keep.sender:try_send(77))
+  test.assert(sender_peer:receive() == 77)
+  test.assert(receiver_peer:try_send(88))
+  test.assert(keep.receiver:receive() == 88)
+  keep.sender = nil
+  keep.receiver = nil
+end
+
+local function enqueue_root_endpoint_probes(
+  senders: thread.Sender<|thread.Sender<|integer|>|>,
+  receivers: thread.Sender<|thread.Receiver<|integer|>|>
+): (
+  thread.Receiver<|integer|>, function (): (),
+  thread.Sender<|integer|>, function (): ()
+)
+  local tx, sender_peer, release_sender = make_sender_release_once_probe()
+  local receiver_peer, rx, release_receiver = make_receiver_release_once_probe()
+  senders:send(tx)
+  receivers:send(rx)
+  return sender_peer, release_sender, receiver_peer, release_receiver
+end
+
+local function reject_top_level_endpoint_arrays(): (
+  thread.Receiver<|integer|>, function (): (),
+  thread.Sender<|integer|>, function (): ()
+)
+  local any_tx, any_rx = thread.channel<|value|>(2)
+  defer any_tx:close()
+  defer any_rx:close()
+  local tx, sender_peer, release_sender = make_sender_release_once_probe()
+  local receiver_peer, rx, release_receiver = make_receiver_release_once_probe()
+  local sender_array: {thread.Sender<|integer|>} = {tx}
+  local receiver_array: {thread.Receiver<|integer|>} = {rx}
+  expect_error(function ()
+    any_tx:send(sender_array)
+  end, "transfer: unsupported value")
+  expect_error(function ()
+    any_tx:try_send(receiver_array)
+  end, "transfer: unsupported value")
+  expect_error(function ()
+    thread.spawn_one(function (_arr: {thread.Sender<|integer|>}): integer
+      return 1
+    end, sender_array)
+  end, "transfer: unsupported value")
+  return sender_peer, release_sender, receiver_peer, release_receiver
+end
+
+function test_endpoint_carriers_duplicates_and_top_level_array_rejection(context: test.Context)
+  context:run("root_sender_and_receiver_transfer_and_discard", function (_child: test.Context)
+    runtime_test.run(function ()
+      local tx_ch_tx, tx_ch_rx = thread.channel<|thread.Sender<|integer|>|>(2)
+      local rx_ch_tx, rx_ch_rx = thread.channel<|thread.Receiver<|integer|>|>(2)
+      defer tx_ch_tx:close()
+      defer tx_ch_rx:close()
+      defer rx_ch_tx:close()
+      defer rx_ch_rx:close()
+
+      local data_tx, data_rx = thread.channel<|integer|>(2)
+      defer data_tx:close()
+      defer data_rx:close()
+
+      tx_ch_tx:send(data_tx)
+      rx_ch_tx:send(data_rx)
+
+      local worker = thread.spawn_two(function (
+        in_tx_rx: thread.Receiver<|thread.Sender<|integer|>|>,
+        in_rx_rx: thread.Receiver<|thread.Receiver<|integer|>|>
+      ): integer
+        local adopted_tx = in_tx_rx:receive()
+        local adopted_rx = in_rx_rx:receive()
+        adopted_tx:send(515)
+        return adopted_rx:receive()
+      end, tx_ch_rx, rx_ch_rx)
+
+      local st = worker:join()
+      local ok, val? = st:has_succeeded()
+      test.assert(ok and val == 515)
+
+      -- Discarding unread root Sender and Receiver endpoints releases them exactly once.
+      local d_peer_rx, release_d_tx, d_peer_tx, release_d_rx =
+        enqueue_root_endpoint_probes(tx_ch_tx, rx_ch_tx)
+      defer d_peer_rx:close()
+      defer d_peer_tx:close()
+      tx_ch_rx:close()
+      rx_ch_rx:close()
+      assert_sender_released_exactly_once(d_peer_rx, release_d_tx, "discarded root Sender")
+      assert_receiver_released_exactly_once(d_peer_tx, release_d_rx, "discarded root Receiver")
+    end)
+  end)
+
+  context:run("nested_records_unions_arrays_opaque_hooks_and_closures", function (_child: test.Context)
+    runtime_test.run(function ()
+      reset_ownership_hook_state(false, false)
+      local union_tx, union_rx = thread.channel<|EndpointUnionCarrier|>(2)
+      local opaque_tx, opaque_rx = thread.channel<|OpaqueEndpointHook|>(2)
+      local fn_tx, fn_rx = thread.channel<|function (): integer|>(2)
+      defer union_tx:close()
+      defer union_rx:close()
+      defer opaque_tx:close()
+      defer opaque_rx:close()
+      defer fn_tx:close()
+      defer fn_rx:close()
+
+      local a_tx, a_rx = thread.channel<|integer|>(2)
+      local b_tx, b_rx = thread.channel<|integer|>(2)
+      local c_tx, c_rx = thread.channel<|integer|>(2)
+      local d_tx, d_rx = thread.channel<|integer|>(2)
+      local o_tx, o_rx = thread.channel<|integer|>(2)
+      defer a_tx:close()
+      defer a_rx:close()
+      defer b_tx:close()
+      defer b_rx:close()
+      defer c_tx:close()
+      defer c_rx:close()
+      defer d_tx:close()
+      defer d_rx:close()
+      defer o_tx:close()
+      defer o_rx:close()
+
+      local carrier = EndpointArrayCarrier(
+        "array-in-root",
+        {a_tx, b_tx},
+        {a_rx, b_rx},
+        {EndpointPair(c_tx, c_rx)})
+      union_tx:send(EndpointUnionCarrier.nested_bundle(carrier, d_tx, d_rx))
+      opaque_tx:send(OpaqueEndpointHook("custom-opaque", o_tx, o_rx))
+
+      local cap_opaque = OpaqueEndpointHook("captured-opaque", o_tx, o_rx)
+      fn_tx:send(function (): integer
+        cap_opaque.tx:send(91)
+        return cap_opaque.rx:receive()
+      end)
+
+      local worker = thread.spawn_three(function (
+        u_rx: thread.Receiver<|EndpointUnionCarrier|>,
+        op_rx: thread.Receiver<|OpaqueEndpointHook|>,
+        f_rx: thread.Receiver<|function (): integer|>
+      ): integer
+        local u = u_rx:receive()
+        local total = 0
+        case u
+        when nested_bundle(b, ex_tx, ex_rx) then
+          test.assert(b.label == "array-in-root")
+          b.senders[1]:send(10)
+          b.senders[2]:send(20)
+          b.pairs[1].tx:send(30)
+          ex_tx:send(40)
+          total = total + b.receivers[1]:receive() + b.receivers[2]:receive()
+          total = total + b.pairs[1].rx:receive() + ex_rx:receive()
+        else
+          raise "expected nested_bundle"
+        end
+        local op = op_rx:receive()
+        test.assert(op.tag == "custom-opaque")
+        op.tx:send(50)
+        total = total + op.rx:receive()
+        local fn = f_rx:receive()
+        total = total + fn()
+        test.assert(ownership_decode_calls == 2,
+          "child did not decode both the direct and closure-captured opaque hooks")
+        return total
+      end, union_rx, opaque_rx, fn_rx)
+
+      local st = worker:join()
+      local ok, sum? = st:has_succeeded()
+      test.assert(ok and sum == 10 + 20 + 30 + 40 + 50 + 91)
+      test.assert(ownership_encode_calls == 2, "parent did not encode both opaque hook paths")
+    end)
+  end)
+
+  context:run("duplicate_endpoint_occurrences_retain_and_claim_independently", function (_child: test.Context)
+    runtime_test.run(function ()
+      local out_tx, out_rx = thread.channel<|DuplicateEndpointCarrier|>(2)
+      defer out_tx:close()
+      defer out_rx:close()
+
+      -- 1. Four occurrences of the same Sender and same Receiver in one packet:
+      -- each occurrence retains independently and decodes to a distinct wrapper.
+      local peer_rx, release_tx, peer_tx, release_rx = enqueue_duplicate_carrier(out_tx)
+      defer peer_rx:close()
+      defer peer_tx:close()
+      release_tx()
+      release_rx()
+      gc.collect()
+      gc.collect()
+      test.assert(not peer_rx:is_closed() and not peer_tx:is_closed())
+
+      local keep = decode_duplicate_keepalive(out_rx)
+      gc.collect()
+      gc.collect()
+      -- Three of the four decoded wrappers were collected; the 4th keeps the channel open.
+      test.assert(not peer_rx:is_closed() and not peer_tx:is_closed())
+      exercise_and_drop_duplicate_keepalive(keep, peer_rx, peer_tx)
+      gc.collect()
+      gc.collect()
+      test.assert(peer_rx:is_closed() and peer_tx:is_closed(),
+        "final duplicate endpoint wrapper did not close peer after collection")
+
+      -- 2. Partial decode failure between two occurrences of the same endpoint:
+      -- first occurrence is adopted, second occurrence is released on decode unwind.
+      reset_ownership_hook_state(true, false)
+      local p_tx, p_rx = thread.channel<|DuplicatePartialDecodeCarrier|>(1)
+      defer p_tx:close()
+      defer p_rx:close()
+      local dup_peer_rx, dup_peer_tx = enqueue_duplicate_partial_decode(p_tx)
+      defer dup_peer_rx:close()
+      defer dup_peer_tx:close()
+      gc.collect()
+      gc.collect()
+      gc.pause()
+      do
+        defer gc.resume()
+        expect_error(function ()
+          p_rx:receive()
+        end, "expected earlier decoder failure")
+        -- Second occurrence was released on unwind, but first occurrence is still owned by its wrapper!
+        test.assert(
+          not dup_peer_rx:is_closed() and not dup_peer_tx:is_closed(),
+          "unclaimed duplicate occurrence released the already-adopted first occurrence")
+      end
+      gc.collect()
+      gc.collect()
+      test.assert(
+        dup_peer_rx:is_closed() and dup_peer_tx:is_closed(),
+        "adopted first duplicate occurrence leaked after GC")
+
+      -- 3. Discarding a packet with 4 duplicate occurrences releases all 4 packet retains
+      -- while preserving an external held reference.
+      local disc_peer_rx, disc_release_tx, disc_peer_tx, disc_release_rx =
+        enqueue_duplicate_carrier(out_tx)
+      defer disc_peer_rx:close()
+      defer disc_peer_tx:close()
+      out_rx:close()
+      assert_sender_released_exactly_once(
+        disc_peer_rx, disc_release_tx, "discarded 4x duplicate Sender")
+      assert_receiver_released_exactly_once(
+        disc_peer_tx, disc_release_rx, "discarded 4x duplicate Receiver")
+    end)
+  end)
+
+  context:run("top_level_arrays_rejected_even_with_endpoints", function (_child: test.Context)
+    runtime_test.run(function ()
+      local peer_rx, release_tx, peer_tx, release_rx = reject_top_level_endpoint_arrays()
+      defer peer_rx:close()
+      defer peer_tx:close()
+      assert_sender_released_exactly_once(peer_rx, release_tx, "rejected top-level Sender array")
+      assert_receiver_released_exactly_once(peer_tx, release_rx, "rejected top-level Receiver array")
+    end)
+  end)
+end
+
+local function enqueue_pair_on_channel(
+  target_tx: thread.Sender<|EndpointPair|>,
+  use_try_send: boolean
+): (
+  boolean,
+  thread.Receiver<|integer|>,
+  function (): (),
+  thread.Sender<|integer|>,
+  function (): ()
+)
+  local tx, peer_rx, release_tx = make_sender_release_once_probe()
+  local peer_tx, rx, release_rx = make_receiver_release_once_probe()
+  local ok = false
+  if use_try_send then
+    ok = target_tx:try_send(EndpointPair(tx, rx))
+  else
+    target_tx:send(EndpointPair(tx, rx))
+    ok = true
+  end
+  return ok, peer_rx, release_tx, peer_tx, release_rx
+end
+
+local function start_parked_pair_send(
+  full_tx: thread.Sender<|EndpointPair|>
+): (
+  async.Task<|boolean, value|>,
+  thread.Receiver<|integer|>,
+  function (): (),
+  thread.Sender<|integer|>,
+  function (): ()
+)
+  local tx, peer_rx, release_tx = make_sender_release_once_probe()
+  local peer_tx, rx, release_rx = make_receiver_release_once_probe()
+  local pair: EndpointPair? = EndpointPair(tx, rx)
+  local task = spawn_task(function (): boolean
+    defer pair = nil
+    full_tx:send(pair as EndpointPair)
+    return true
+  end, "parked_pair_send")
+  return task, peer_rx, release_tx, peer_tx, release_rx
+end
+
+local function build_last_receiver_probe(): (
+  thread.Sender<|EndpointPair|>,
+  {thread.Receiver<|EndpointPair|>},
+  thread.Receiver<|integer|>,
+  function (): (),
+  thread.Sender<|integer|>,
+  function (): ()
+)
+  local tx, rx = thread.channel<|EndpointPair|>(2)
+  local clone = rx:clone()
+  local _, sender_peer, release_sender, receiver_peer, release_receiver =
+    enqueue_pair_on_channel(tx, false)
+  return tx, {clone}, sender_peer, release_sender, receiver_peer, release_receiver
+end
+
+local function reject_thread_capture_probe(): (
+  thread.Receiver<|integer|>, function (): (),
+  thread.Sender<|integer|>, function (): ()
+)
+  local tx, sender_peer, release_sender = make_sender_release_once_probe()
+  local receiver_peer, rx, release_receiver = make_receiver_release_once_probe()
+  local non_transferable = PrivateNonTransferable(11)
+  expect_error(function ()
+    thread.spawn(function (): integer
+      tx:try_send(1)
+      rx:try_receive()
+      return non_transferable.secret
+    end)
+  end, "record must be public with only public fields")
+  return sender_peer, release_sender, receiver_peer, release_receiver
+end
+
+local function spawn_missing_bootstrap_probe(): (
+  thread.Thread<|integer|>,
+  thread.Receiver<|integer|>, function (): (),
+  thread.Sender<|integer|>, function (): ()
+)
+  local tx, sender_peer, release_sender = make_sender_release_once_probe()
+  local receiver_peer, rx, release_receiver = make_receiver_release_once_probe()
+  local restore_thread_preload = install_preload_probe("titan.thread", "missing")
+  defer restore_thread_preload()
+  local worker = thread.spawn_two(function (
+    sender: thread.Sender<|integer|>, receiver: thread.Receiver<|integer|>
+  ): integer
+    sender:send(1)
+    return receiver:receive()
+  end, tx, rx)
+  return worker, sender_peer, release_sender, receiver_peer, release_receiver
+end
+
+local function spawn_decode_failure_probe(): (
+  thread.Thread<|integer|>,
+  thread.Receiver<|integer|>, function (): (),
+  thread.Sender<|integer|>, function (): (),
+  thread.Receiver<|integer|>, function (): (),
+  thread.Sender<|integer|>, function (): ()
+)
+  local a_tx, a_sender_peer, release_a_sender = make_sender_release_once_probe()
+  local a_receiver_peer, a_rx, release_a_receiver = make_receiver_release_once_probe()
+  local u_tx, u_sender_peer, release_u_sender = make_sender_release_once_probe()
+  local u_receiver_peer, u_rx, release_u_receiver = make_receiver_release_once_probe()
+  local fail_hook = ChildBootstrapFailureHook("child-entry-decode-fail")
+  local worker = thread.spawn(function (): integer
+    a_tx:send(1)
+    a_rx:try_receive()
+    if #fail_hook.label == 0 then return 0 end
+    u_tx:send(2)
+    u_rx:try_receive()
+    return 1
+  end)
+  return worker, a_sender_peer, release_a_sender, a_receiver_peer, release_a_receiver,
+    u_sender_peer, release_u_sender, u_receiver_peer, release_u_receiver
+end
+
+local record AbandonedThreadProbe
+  const sender_peer: thread.Receiver<|integer|>
+  const release_sender: function (): ()
+  const receiver_peer: thread.Sender<|integer|>
+  const release_receiver: function (): ()
+  const retired: thread.Receiver<|boolean|>
+  const release_worker: function (): ()
+end
+
+local function build_abandoned_thread_probe(mode: string): AbandonedThreadProbe
+  local started_tx, started_rx = thread.channel<|boolean|>(1)
+  defer started_tx:close()
+  defer started_rx:close()
+  local gate_tx, gate_rx = thread.channel<|boolean|>(1)
+  local retired_tx, retired_rx = thread.channel<|boolean|>(1)
+  local tx, sender_peer, release_sender = make_sender_release_once_probe()
+  local receiver_peer, rx, release_receiver = make_receiver_release_once_probe()
+  local worker: thread.Thread<|RetiringEndpointPair|>? = nil
+  local prepared = false
+  defer if not prepared then
+    gate_tx:close()
+    if worker ~= nil then worker:cancel(); worker:join() end
+    retired_rx:close()
+    sender_peer:close()
+    receiver_peer:close()
+    release_sender()
+    release_receiver()
+  end
+
+  if mode == "cancelled" then
+    worker = thread.spawn_three(function (
+      started: thread.Sender<|boolean|>,
+      gate: thread.Receiver<|boolean|>,
+      retired: thread.Sender<|boolean|>
+    ): RetiringEndpointPair
+      started:send(true)
+      if retired:is_closed() then raise "unreachable retired cancellation owner" end
+      gate:receive()
+      raise "unreachable cancelled worker return"
+    end, started_tx, gate_rx, retired_tx)
+  else
+    worker = thread.spawn_five(function (
+      sender: thread.Sender<|integer|>,
+      receiver: thread.Receiver<|integer|>,
+      started: thread.Sender<|boolean|>,
+      gate: thread.Receiver<|boolean|>,
+      retired: thread.Sender<|boolean|>
+    ): RetiringEndpointPair
+      started:send(true)
+      if mode == "running" then gate:receive_result() end
+      if retired:is_closed() then raise "unreachable retired result owner" end
+      local result = RetiringEndpointPair(sender, receiver, retired)
+      if mode == "failed" then raise result end
+      return result
+    end, tx, rx, started_tx, gate_rx, retired_tx)
+  end
+  test.assert(started_rx:receive())
+  if mode == "finished" then
+    while not worker:status():has_finished() do async.yield() end
+  elseif mode == "cancelled" then
+    worker:cancel(async.CancellationReason.complex(
+      RetiringEndpointPair(tx, rx, retired_tx) as value))
+  end
+  local probe = AbandonedThreadProbe(sender_peer, release_sender,
+    receiver_peer, release_receiver, retired_rx, function () gate_tx:close() end)
+  prepared = true
+  -- Return no Thread, source endpoint, decoded outcome, or cancellation value.
+  -- Their generated expression roots must leave a real function frame before
+  -- the caller can use collection as an abandonment/release oracle.
+  return probe
+end
+
+local function AbandonedThreadProbe:assert_released(label: string)
+  defer do
+    self.release_worker()
+    gc.collect()
+    gc.collect()
+    self.retired:receive_result()
+    self.retired:close()
+    self.sender_peer:close()
+    self.receiver_peer:close()
+  end
+  gc.collect()
+  gc.collect()
+  self.release_worker()
+  case self.retired:receive_result()
+  when closed() then
+  else raise "expected abandoned Thread retirement: " .. label
+  end
+  assert_sender_released_exactly_once(self.sender_peer, self.release_sender,
+    label .. " Sender")
+  assert_receiver_released_exactly_once(self.receiver_peer, self.release_receiver,
+    label .. " Receiver")
+end
+
+local function reject_closed_pair_probe(
+  target: thread.Sender<|EndpointPair|>, also_send: boolean
+): (
+  thread.Receiver<|integer|>, function (): (),
+  thread.Sender<|integer|>, function (): ()
+)
+  local tx, sender_peer, release_sender = make_sender_release_once_probe()
+  local receiver_peer, rx, release_receiver = make_receiver_release_once_probe()
+  expect_error(function ()
+    target:try_send(EndpointPair(tx, rx))
+  end, "channel is closed")
+  if also_send then
+    expect_error(function ()
+      target:send(EndpointPair(tx, rx))
+    end, "channel is closed")
+  end
+  return sender_peer, release_sender, receiver_peer, release_receiver
+end
+
+local function cancel_with_endpoint_race_probe(
+  worker: thread.Thread<|integer|>, action: function (): (), label: string
+): (
+  thread.Receiver<|integer|>, function (): (),
+  thread.Sender<|integer|>, function (): ()
+)
+  local tx, sender_peer, release_sender = make_sender_release_once_probe()
+  local receiver_peer, rx, release_receiver = make_receiver_release_once_probe()
+  cancel_race_action = action
+  defer cancel_race_action = nil
+  worker:cancel(async.CancellationReason.complex(
+    CancelReasonBundle(tx, rx, CancelRaceHook(label)) as value))
+  return sender_peer, release_sender, receiver_peer, release_receiver
+end
+
+function test_channel_and_thread_endpoint_lifecycle_matrix(context: test.Context)
+  context:run("try_send_full_and_closed_release_once", function (_child: test.Context)
+    runtime_test.run(function ()
+      local full_tx, full_rx = thread.channel<|EndpointPair|>(1)
+      defer full_tx:close()
+      defer full_rx:close()
+      local dummy_tx, dummy_rx = thread.channel<|integer|>(1)
+      defer dummy_tx:close()
+      defer dummy_rx:close()
+      test.assert(full_tx:try_send(EndpointPair(dummy_tx, dummy_rx)))
+
+      -- 1. Full try_send discards packet and releases both Sender and Receiver retains once.
+      local sent, peer_rx1, rel_tx1, peer_tx1, rel_rx1 =
+        enqueue_pair_on_channel(full_tx, true)
+      defer peer_rx1:close()
+      defer peer_tx1:close()
+      test.assert(not sent)
+      assert_sender_released_exactly_once(peer_rx1, rel_tx1, "full try_send Sender")
+      assert_receiver_released_exactly_once(peer_tx1, rel_rx1, "full try_send Receiver")
+
+      -- 2. Sender-closed try_send and send fast-path release both retains once.
+      local sclosed_tx, sclosed_rx = thread.channel<|EndpointPair|>(1)
+      defer sclosed_rx:close()
+      sclosed_tx:close()
+      local peer_rx2, rel_tx2, peer_tx2, rel_rx2 = reject_closed_pair_probe(sclosed_tx, true)
+      defer peer_rx2:close()
+      defer peer_tx2:close()
+      assert_sender_released_exactly_once(peer_rx2, rel_tx2, "sender-closed try_send/send Sender")
+      assert_receiver_released_exactly_once(peer_tx2, rel_rx2, "sender-closed try_send/send Receiver")
+
+      -- 3. Receiver-closed try_send releases both retains once.
+      local rclosed_tx, rclosed_rx = thread.channel<|EndpointPair|>(1)
+      defer rclosed_tx:close()
+      rclosed_rx:close()
+      local peer_rx3, rel_tx3, peer_tx3, rel_rx3 = reject_closed_pair_probe(rclosed_tx, false)
+      defer peer_rx3:close()
+      defer peer_tx3:close()
+      assert_sender_released_exactly_once(peer_rx3, rel_tx3, "receiver-closed try_send Sender")
+      assert_receiver_released_exactly_once(peer_tx3, rel_rx3, "receiver-closed try_send Receiver")
+    end)
+  end)
+
+  context:run("parked_send_cancelled_and_closed_release_once", function (child: test.Context)
+    child:log("BEGIN expected channel-closed async Task diagnostics")
+    runtime_test.run(function ()
+      local dummy_tx, dummy_rx = thread.channel<|integer|>(1)
+      defer dummy_tx:close()
+      defer dummy_rx:close()
+
+      -- 1. Cancelled parked send.
+      local ch1_tx, ch1_rx = thread.channel<|EndpointPair|>(1)
+      defer ch1_tx:close()
+      defer ch1_rx:close()
+      test.assert(ch1_tx:try_send(EndpointPair(dummy_tx, dummy_rx)))
+      local task1, peer_rx1, rel_tx1, peer_tx1, rel_rx1 = start_parked_pair_send(ch1_tx)
+      defer peer_rx1:close()
+      defer peer_tx1:close()
+      wait_until_waiting(task1)
+      task1:cancel(async.CancellationReason.simple("cancel parked send"))
+      expect_error(function ()
+        await_task(task1)
+      end, "cancel parked send")
+      assert_sender_released_exactly_once(peer_rx1, rel_tx1, "cancelled parked send Sender")
+      assert_receiver_released_exactly_once(peer_tx1, rel_rx1, "cancelled parked send Receiver")
+
+      -- 2. Parked send woken by Sender:close().
+      local ch2_tx, ch2_rx = thread.channel<|EndpointPair|>(1)
+      defer ch2_rx:close()
+      test.assert(ch2_tx:try_send(EndpointPair(dummy_tx, dummy_rx)))
+      local task2, peer_rx2, rel_tx2, peer_tx2, rel_rx2 = start_parked_pair_send(ch2_tx)
+      defer peer_rx2:close()
+      defer peer_tx2:close()
+      wait_until_waiting(task2)
+      ch2_tx:close()
+      expect_error(function ()
+        await_task(task2)
+      end, "channel is closed")
+      assert_sender_released_exactly_once(peer_rx2, rel_tx2, "Sender:close parked send Sender")
+      assert_receiver_released_exactly_once(peer_tx2, rel_rx2, "Sender:close parked send Receiver")
+
+      -- 3. Parked send woken by Receiver:close().
+      local ch3_tx, ch3_rx = thread.channel<|EndpointPair|>(1)
+      defer ch3_tx:close()
+      test.assert(ch3_tx:try_send(EndpointPair(dummy_tx, dummy_rx)))
+      local task3, peer_rx3, rel_tx3, peer_tx3, rel_rx3 = start_parked_pair_send(ch3_tx)
+      defer peer_rx3:close()
+      defer peer_tx3:close()
+      wait_until_waiting(task3)
+      ch3_rx:close()
+      expect_error(function ()
+        await_task(task3)
+      end, "channel is closed")
+      assert_sender_released_exactly_once(peer_rx3, rel_tx3, "Receiver:close parked send Sender")
+      assert_receiver_released_exactly_once(peer_tx3, rel_rx3, "Receiver:close parked send Receiver")
+    end)
+    child:log("END expected channel-closed async Task diagnostics")
+  end)
+
+  context:run("unread_queue_close_and_last_receiver_gc_release_once", function (_child: test.Context)
+    runtime_test.run(function ()
+      -- 1. Unread queue close.
+      local q1_tx, q1_rx = thread.channel<|EndpointPair|>(2)
+      defer q1_tx:close()
+      local _, peer_rx1, rel_tx1, peer_tx1, rel_rx1 = enqueue_pair_on_channel(q1_tx, false)
+      local _, peer_rx2, rel_tx2, peer_tx2, rel_rx2 = enqueue_pair_on_channel(q1_tx, false)
+      defer peer_rx1:close()
+      defer peer_tx1:close()
+      defer peer_rx2:close()
+      defer peer_tx2:close()
+      q1_rx:close()
+      assert_sender_released_exactly_once(peer_rx1, rel_tx1, "unread queue close msg1 Sender")
+      assert_receiver_released_exactly_once(peer_tx1, rel_rx1, "unread queue close msg1 Receiver")
+      assert_sender_released_exactly_once(peer_rx2, rel_tx2, "unread queue close msg2 Sender")
+      assert_receiver_released_exactly_once(peer_tx2, rel_rx2, "unread queue close msg2 Receiver")
+
+      -- 2. Last Receiver GC (after dropping both Receiver and its clone).
+      local q2_tx, q2_receivers, peer_rx3, rel_tx3, peer_tx3, rel_rx3 =
+        build_last_receiver_probe()
+      defer q2_tx:close()
+      defer peer_rx3:close()
+      defer peer_tx3:close()
+      -- Dropping only the first Receiver keeps the queue alive through the clone.
+      gc.collect()
+      gc.collect()
+      test.assert(not q2_tx:is_closed())
+      -- Dropping the last Receiver clone triggers receiver_finalize -> channel_drain_and_discard.
+      q2_receivers[1] = nil
+      gc.collect()
+      gc.collect()
+      test.assert(q2_tx:is_closed(), "last Receiver GC did not auto-close channel")
+      assert_sender_released_exactly_once(peer_rx3, rel_tx3, "last Receiver GC Sender")
+      assert_receiver_released_exactly_once(peer_tx3, rel_rx3, "last Receiver GC Receiver")
+    end)
+  end)
+
+  context:run("spawn_encode_and_bootstrap_failures_release_once", function (_child: test.Context)
+    runtime_test.run(function ()
+      -- 1. Synchronous spawn encode failure after attaching Sender and Receiver.
+      local peer_rx1, rel_tx1, peer_tx1, rel_rx1 = reject_thread_capture_probe()
+      defer peer_rx1:close()
+      defer peer_tx1:close()
+      assert_sender_released_exactly_once(peer_rx1, rel_tx1, "spawn encode failure Sender")
+      assert_receiver_released_exactly_once(peer_tx1, rel_rx1, "spawn encode failure Receiver")
+
+      -- 2. Child bootstrap failure when titan.thread preload is absent in child snapshot:
+      -- thread_worker_protected fails before child_thread_bootstrap runs;
+      -- thread_control_complete_native discards entry_msg even while Thread handle is retained.
+      local boot_fail_worker, peer_rx2, rel_tx2, peer_tx2, rel_rx2 =
+        spawn_missing_bootstrap_probe()
+      defer peer_rx2:close()
+      defer peer_tx2:close()
+      local st_boot = boot_fail_worker:join()
+      test.assert(st_boot:has_failed(), "expected child thread bootstrap failure")
+      -- Note: boot_fail_worker is still held alive here, proving entry_msg was discarded on completion.
+      assert_sender_released_exactly_once(
+        peer_rx2, rel_tx2, "bootstrap failure (missing titan.thread) Sender")
+      assert_receiver_released_exactly_once(
+        peer_tx2, rel_rx2, "bootstrap failure (missing titan.thread) Receiver")
+
+      -- 3. Child bootstrap failure during entry closure decode (adopted captures + unclaimed captures
+      -- + child lua_close cleanup).
+      reset_ownership_hook_state(true, false)
+      local decode_fail_worker, a_peer_rx, rel_a_tx, a_peer_tx, rel_a_rx,
+        u_peer_rx, rel_u_tx, u_peer_tx, rel_u_rx = spawn_decode_failure_probe()
+      defer a_peer_rx:close()
+      defer a_peer_tx:close()
+      defer u_peer_rx:close()
+      defer u_peer_tx:close()
+      local st_dec = decode_fail_worker:join()
+      test.assert(st_dec:has_failed(), "expected child entry capture decode failure")
+      assert_sender_released_exactly_once(
+        a_peer_rx, rel_a_tx, "child entry decode adopted Sender (reclaimed by child lua_close)")
+      assert_receiver_released_exactly_once(
+        a_peer_tx, rel_a_rx, "child entry decode adopted Receiver (reclaimed by child lua_close)")
+      assert_sender_released_exactly_once(
+        u_peer_rx, rel_u_tx, "child entry decode unclaimed Sender")
+      assert_receiver_released_exactly_once(
+        u_peer_tx, rel_u_rx, "child entry decode unclaimed Receiver")
+    end)
+  end)
+
+  context:run("rejected_cancel_reason_races_and_unconsumed_cancel_release_once", function (_child: test.Context)
+    runtime_test.run(function ()
+      -- 1. Cancel reason race against a winning concurrent cancel during Thread:cancel encode.
+      local ready1_tx, ready1_rx = thread.channel<|boolean|>(1)
+      local hold1_tx, hold1_rx = thread.channel<|integer|>(1)
+      defer ready1_tx:close()
+      defer ready1_rx:close()
+      defer hold1_tx:close()
+      defer hold1_rx:close()
+      local worker1 = thread.spawn(function (): integer
+        ready1_tx:send(true)
+        return hold1_rx:receive()
+      end)
+      defer do worker1:cancel(); worker1:join() end
+      test.assert(ready1_rx:receive())
+
+      reset_ownership_hook_state(false, false)
+      local c_peer_rx1, rel_c_tx1, c_peer_tx1, rel_c_rx1 =
+        cancel_with_endpoint_race_probe(worker1, function ()
+          worker1:cancel(async.CancellationReason.simple("winning inner cancel"))
+        end, "losing outer cancel")
+      defer c_peer_rx1:close()
+      defer c_peer_tx1:close()
+
+      local st1 = worker1:join()
+      local is_c1, reason1? = st1:has_cancelled()
+      test.assert(is_c1 and reason1 ~= nil)
+      test.assert(
+        strings.find(reason_text(reason1 as async.CancellationReason<|value|>), "winning inner cancel") ~= nil)
+      test.assert(ownership_decode_calls == 0, "rejected cancel reason invoked decoder")
+      assert_sender_released_exactly_once(
+        c_peer_rx1, rel_c_tx1, "rejected cancel race (concurrent cancel) Sender")
+      assert_receiver_released_exactly_once(
+        c_peer_tx1, rel_c_rx1, "rejected cancel race (concurrent cancel) Receiver")
+
+      -- 2. Cancel reason race against worker completion during Thread:cancel encode.
+      local ready2_tx, ready2_rx = thread.channel<|boolean|>(1)
+      local gate2_tx, gate2_rx = thread.channel<|integer|>(1)
+      local worker2: thread.Thread<|integer|>? = nil
+      defer ready2_tx:close()
+      defer ready2_rx:close()
+      defer gate2_tx:close()
+      defer gate2_rx:close()
+      worker2 = thread.spawn_two(function (
+        ready: thread.Sender<|boolean|>,
+        gate: thread.Receiver<|integer|>
+      ): integer
+        ready:send(true)
+        return gate:receive()
+      end, ready2_tx, gate2_rx)
+      defer do worker2:cancel(); worker2:join() end
+      test.assert(ready2_rx:receive())
+
+      local c_peer_rx2, rel_c_tx2, c_peer_tx2, rel_c_rx2 =
+        cancel_with_endpoint_race_probe(worker2, function ()
+          test.assert(gate2_tx:try_send(42))
+          -- Hooks are synchronous: poll the independent worker's actual finish.
+          while not worker2:status():has_finished() do end
+        end, "losing post-finish cancel")
+      defer c_peer_rx2:close()
+      defer c_peer_tx2:close()
+
+      local st2 = worker2:join()
+      local ok2, val2? = st2:has_succeeded()
+      test.assert(ok2 and val2 == 42)
+      test.assert(ownership_decode_calls == 0)
+      assert_sender_released_exactly_once(
+        c_peer_rx2, rel_c_tx2, "rejected cancel race (worker finished) Sender")
+      assert_receiver_released_exactly_once(
+        c_peer_tx2, rel_c_rx2, "rejected cancel race (worker finished) Receiver")
+    end)
+  end)
+
+  context:run("abandoned_thread_results_and_child_lua_close_release_once", function (child: test.Context)
+    runtime_test.run(function ()
+      local completed = build_abandoned_thread_probe("finished")
+      completed:assert_released("abandoned finished Thread result")
+
+      local running = build_abandoned_thread_probe("running")
+      running:assert_released("abandoned running Thread result")
+
+      local cancelled = build_abandoned_thread_probe("cancelled")
+      cancelled:assert_released("abandoned cancelled Thread reason")
+
+      child:log("BEGIN expected uncaught thread error diagnostics")
+      local failed = build_abandoned_thread_probe("failed")
+      failed:assert_released("abandoned failed Thread error payload")
+      child:log("END expected uncaught thread error diagnostics")
+    end)
+  end)
+end
+
+local function build_recursive_receiver_tree(): (
+  thread.Receiver<|RecursiveLevel1Packet|>?,
+  thread.Receiver<|integer|>,
+  function (): (),
+  thread.Sender<|integer|>,
+  function (): (),
+  thread.Receiver<|integer|>,
+  function (): (),
+  thread.Sender<|integer|>,
+  function (): ()
+)
+  local ch1_tx, ch1_rx = thread.channel<|RecursiveLevel1Packet|>(1)
+  local ch2_tx, ch2_rx = thread.channel<|RecursiveLevel2Packet|>(1)
+  local ch3_tx, ch3_rx = thread.channel<|RecursiveLeafPacket|>(1)
+
+  local leaf_tx, leaf_peer_rx, rel_leaf_tx = make_sender_release_once_probe()
+  local leaf_peer_tx, leaf_rx, rel_leaf_rx = make_receiver_release_once_probe()
+  local extra_tx, extra_peer_rx, rel_extra_tx = make_sender_release_once_probe()
+  local extra_peer_tx, extra_rx, rel_extra_rx = make_receiver_release_once_probe()
+
+  test.assert(ch3_tx:try_send(RecursiveLeafPacket(OwnershipHook("leaf"), leaf_tx, leaf_rx)))
+  ch3_tx:close()
+  test.assert(ch2_tx:try_send(RecursiveLevel2Packet(OwnershipHook("level2"), ch3_rx, extra_tx)))
+  ch2_tx:close()
+  test.assert(ch1_tx:try_send(RecursiveLevel1Packet(OwnershipHook("level1"), ch2_rx, extra_rx)))
+  ch1_tx:close()
+
+  return ch1_rx,
+    leaf_peer_rx, rel_leaf_tx,
+    leaf_peer_tx, rel_leaf_rx,
+    extra_peer_rx, rel_extra_tx,
+    extra_peer_tx, rel_extra_rx
+end
+
+local function build_recursive_receiver_gc_probe(): (
+  {thread.Receiver<|RecursiveLevel1Packet|>},
+  thread.Receiver<|integer|>, function (): (),
+  thread.Sender<|integer|>, function (): (),
+  thread.Receiver<|integer|>, function (): (),
+  thread.Sender<|integer|>, function (): ()
+)
+  local receiver,
+    leaf_rx, release_leaf_tx, leaf_tx, release_leaf_rx,
+    extra_rx, release_extra_tx, extra_tx, release_extra_rx = build_recursive_receiver_tree()
+  return {receiver}, leaf_rx, release_leaf_tx, leaf_tx, release_leaf_rx,
+    extra_rx, release_extra_tx, extra_tx, release_extra_rx
+end
+
+local function spawn_recursive_close_probe(): (
+  thread.Thread<|integer|>, thread.Receiver<|boolean|>,
+  thread.Receiver<|integer|>, function (): (),
+  thread.Sender<|integer|>, function (): (),
+  thread.Receiver<|integer|>, function (): (),
+  thread.Sender<|integer|>, function (): ()
+)
+  local tree,
+    leaf_rx, release_leaf_tx, leaf_tx, release_leaf_rx,
+    extra_rx, release_extra_tx, extra_tx, release_extra_rx = build_recursive_receiver_tree()
+  local alert_tx, alert_rx = thread.channel<|boolean|>(1)
+  local worker = thread.spawn_two(function (
+    adopted_tree_rx: thread.Receiver<|RecursiveLevel1Packet|>,
+    alert_tx: thread.Sender<|boolean|>
+  ): integer
+    local arm_child_close = lua.load([=[
+      local rx_to_keep, tx_alert = ...
+      local registry = debug.getregistry()
+      local preload = registry._PRELOAD
+      registry["Titan module thread.tests"] = nil
+      preload["thread.tests"] = function()
+        tx_alert:try_send(true)
+        error("preload loader invoked during child lua_close")
+      end
+      preload["unavailable.missing_module"] = function()
+        tx_alert:try_send(true)
+        error("missing module preload invoked during child lua_close")
+      end
+      _G.child_close_tree_rx = rx_to_keep
+      _G.child_close_alert_tx = tx_alert
+    ]=]) as function (value, value): ()
+    arm_child_close(adopted_tree_rx, alert_tx)
+    return 7
+  end, tree, alert_tx)
+  return worker, alert_rx, leaf_rx, release_leaf_tx, leaf_tx, release_leaf_rx,
+    extra_rx, release_extra_tx, extra_tx, release_extra_rx
+end
+
+function test_recursive_receiver_drain_and_discard_without_runtime_and_after_shutdown(
+  context: test.Context
+)
+  -- Phase 1: Before any Runtime is created in this test (no active Runtime).
+  reset_ownership_hook_state(true, false)
+  local preload_restore_pre = install_preload_probe("thread.tests", "spy_fail")
+  local rx_pre_close,
+    l_peer_rx1, rel_l_tx1,
+    l_peer_tx1, rel_l_rx1,
+    e_peer_rx1, rel_e_tx1,
+    e_peer_tx1, rel_e_rx1 = build_recursive_receiver_tree()
+  defer l_peer_rx1:close()
+  defer l_peer_tx1:close()
+  defer e_peer_rx1:close()
+  defer e_peer_tx1:close()
+  -- Collect intermediate ch2_rx, ch3_rx, and leaf wrappers so rx_pre_close is sole root.
+  gc.collect()
+  gc.collect()
+  rx_pre_close:close()
+  local preload_calls_pre1 = preload_restore_pre()
+  test.assert(preload_calls_pre1 == 0, "discard without Runtime invoked module preload")
+  test.assert(ownership_decode_calls == 0, "discard without Runtime invoked user decoder")
+  assert_sender_released_exactly_once(l_peer_rx1, rel_l_tx1, "no-Runtime close leaf Sender")
+  assert_receiver_released_exactly_once(l_peer_tx1, rel_l_rx1, "no-Runtime close leaf Receiver")
+  assert_sender_released_exactly_once(e_peer_rx1, rel_e_tx1, "no-Runtime close level2 Sender")
+  assert_receiver_released_exactly_once(e_peer_tx1, rel_e_rx1, "no-Runtime close level1 Receiver")
+
+  -- Last-Receiver GC finalizer before any Runtime is created.
+  reset_ownership_hook_state(true, false)
+  local preload_restore_pre_gc = install_preload_probe("thread.tests", "spy_fail")
+  local pre_gc_receivers,
+    l_peer_rx2, rel_l_tx2,
+    l_peer_tx2, rel_l_rx2,
+    e_peer_rx2, rel_e_tx2,
+    e_peer_tx2, rel_e_rx2 = build_recursive_receiver_gc_probe()
+  defer l_peer_rx2:close()
+  defer l_peer_tx2:close()
+  defer e_peer_rx2:close()
+  defer e_peer_tx2:close()
+  pre_gc_receivers[1] = nil
+  gc.collect()
+  gc.collect()
+  local preload_calls_pre2 = preload_restore_pre_gc()
+  test.assert(preload_calls_pre2 == 0, "GC discard without Runtime invoked module preload")
+  test.assert(ownership_decode_calls == 0, "GC discard without Runtime invoked user decoder")
+  assert_sender_released_exactly_once(l_peer_rx2, rel_l_tx2, "no-Runtime GC leaf Sender")
+  assert_receiver_released_exactly_once(l_peer_tx2, rel_l_rx2, "no-Runtime GC leaf Receiver")
+  assert_sender_released_exactly_once(e_peer_rx2, rel_e_tx2, "no-Runtime GC level2 Sender")
+  assert_receiver_released_exactly_once(e_peer_tx2, rel_e_rx2, "no-Runtime GC level1 Receiver")
+
+  -- Phase 2: Build recursive trees inside an active Runtime, then shut down the Runtime
+  -- and discard both by explicit close and by last-Receiver GC after Runtime shutdown.
+  local rx_post_close: thread.Receiver<|RecursiveLevel1Packet|>? = nil
+  local l_peer_rx3: thread.Receiver<|integer|>? = nil
+  local rel_l_tx3: (function (): ())? = nil
+  local l_peer_tx3: thread.Sender<|integer|>? = nil
+  local rel_l_rx3: (function (): ())? = nil
+  local e_peer_rx3: thread.Receiver<|integer|>? = nil
+  local rel_e_tx3: (function (): ())? = nil
+  local e_peer_tx3: thread.Sender<|integer|>? = nil
+  local rel_e_rx3: (function (): ())? = nil
+
+  local rx_post_gc: thread.Receiver<|RecursiveLevel1Packet|>? = nil
+  local l_peer_rx4: thread.Receiver<|integer|>? = nil
+  local rel_l_tx4: (function (): ())? = nil
+  local l_peer_tx4: thread.Sender<|integer|>? = nil
+  local rel_l_rx4: (function (): ())? = nil
+  local e_peer_rx4: thread.Receiver<|integer|>? = nil
+  local rel_e_tx4: (function (): ())? = nil
+  local e_peer_tx4: thread.Sender<|integer|>? = nil
+  local rel_e_rx4: (function (): ())? = nil
+
+  runtime_test.run(function ()
+    rx_post_close,
+      l_peer_rx3, rel_l_tx3,
+      l_peer_tx3, rel_l_rx3,
+      e_peer_rx3, rel_e_tx3,
+      e_peer_tx3, rel_e_rx3 = build_recursive_receiver_tree()
+    rx_post_gc,
+      l_peer_rx4, rel_l_tx4,
+      l_peer_tx4, rel_l_rx4,
+      e_peer_rx4, rel_e_tx4,
+      e_peer_tx4, rel_e_rx4 = build_recursive_receiver_tree()
+  end)
+
+  defer do
+    if l_peer_rx3 ~= nil then (l_peer_rx3 as thread.Receiver<|integer|>):close() end
+    if l_peer_tx3 ~= nil then (l_peer_tx3 as thread.Sender<|integer|>):close() end
+    if e_peer_rx3 ~= nil then (e_peer_rx3 as thread.Receiver<|integer|>):close() end
+    if e_peer_tx3 ~= nil then (e_peer_tx3 as thread.Sender<|integer|>):close() end
+    if l_peer_rx4 ~= nil then (l_peer_rx4 as thread.Receiver<|integer|>):close() end
+    if l_peer_tx4 ~= nil then (l_peer_tx4 as thread.Sender<|integer|>):close() end
+    if e_peer_rx4 ~= nil then (e_peer_rx4 as thread.Receiver<|integer|>):close() end
+    if e_peer_tx4 ~= nil then (e_peer_tx4 as thread.Sender<|integer|>):close() end
+  end
+
+  -- Runtime has now shut down.
+  reset_ownership_hook_state(true, false)
+  local preload_restore_post = install_preload_probe("thread.tests", "spy_fail")
+  gc.collect()
+  gc.collect()
+  rx_post_close:close()
+  rx_post_close = nil
+  rx_post_gc = nil
+  gc.collect()
+  gc.collect()
+  local preload_calls_post = preload_restore_post()
+  test.assert(preload_calls_post == 0, "post-Runtime discard invoked module preload")
+  test.assert(ownership_decode_calls == 0, "post-Runtime discard invoked user decoder")
+
+  assert_sender_released_exactly_once(
+    l_peer_rx3 as thread.Receiver<|integer|>,
+    rel_l_tx3 as function (): (),
+    "post-shutdown close leaf Sender")
+  assert_receiver_released_exactly_once(
+    l_peer_tx3 as thread.Sender<|integer|>,
+    rel_l_rx3 as function (): (),
+    "post-shutdown close leaf Receiver")
+  assert_sender_released_exactly_once(
+    e_peer_rx3 as thread.Receiver<|integer|>,
+    rel_e_tx3 as function (): (),
+    "post-shutdown close level2 Sender")
+  assert_receiver_released_exactly_once(
+    e_peer_tx3 as thread.Sender<|integer|>,
+    rel_e_rx3 as function (): (),
+    "post-shutdown close level1 Receiver")
+
+  assert_sender_released_exactly_once(
+    l_peer_rx4 as thread.Receiver<|integer|>,
+    rel_l_tx4 as function (): (),
+    "post-shutdown GC leaf Sender")
+  assert_receiver_released_exactly_once(
+    l_peer_tx4 as thread.Sender<|integer|>,
+    rel_l_rx4 as function (): (),
+    "post-shutdown GC leaf Receiver")
+  assert_sender_released_exactly_once(
+    e_peer_rx4 as thread.Receiver<|integer|>,
+    rel_e_tx4 as function (): (),
+    "post-shutdown GC level2 Sender")
+  assert_receiver_released_exactly_once(
+    e_peer_tx4 as thread.Sender<|integer|>,
+    rel_e_rx4 as function (): (),
+    "post-shutdown GC level1 Receiver")
+
+  context:run("discard_during_lua_close_and_with_uninitialized_nominal_module", function (_child: test.Context)
+    -- 1. Independent lua.new() state where "thread.tests" is NEVER initialized and its
+    -- _PRELOAD entry is a spy that errors if called, plus an unavailable nominal module.
+    local indep = lua.new()
+    defer indep:close()
+    local res: {async.TransferValue} = { indep:run([=[
+      local registry = debug.getregistry()
+      assert(registry["Titan module thread.tests"] == nil,
+        "thread.tests was unexpectedly pre-initialized in fresh state")
+      local preload = registry._PRELOAD
+      local loader_calls = 0
+      preload["thread.tests"] = function()
+        loader_calls = loader_calls + 1
+        error("thread.tests preload must not run on discard")
+      end
+      preload["unavailable.missing_module"] = nil
+
+      local thread = require("titan.thread")
+      local transfer = require("titan.transfer")
+
+      local leaf_tx1, leaf_rx1 = thread.channel(1)
+      local leaf_tx2, leaf_rx2 = thread.channel(1)
+      local inner_tx, inner_rx = thread.channel(3)
+      local outer_tx, outer_rx = thread.channel(2)
+
+      assert(inner_tx:try_send(leaf_tx1))
+      assert(inner_tx:try_send(
+        transfer.TransferValue.is_record(
+          "thread.tests", "thread.tests.RecursiveLeafPacket", "\008\001")))
+      assert(inner_tx:try_send(
+        transfer.TransferValue.is_record_payload(
+          "unavailable.missing_module", "unavailable.missing_module.MissingHook", "bytes")))
+      inner_tx:close()
+      leaf_tx1 = nil
+
+      assert(outer_tx:try_send(inner_rx))
+      outer_tx:close()
+      inner_rx = nil
+      collectgarbage("collect")
+      collectgarbage("collect")
+      assert(not leaf_rx1:is_closed(), "recursive inner_rx did not retain leaf_tx1")
+
+      -- Explicit close in a state where thread.tests was never initialized and is unavailable.
+      outer_rx:close()
+      assert(leaf_rx1:is_closed(), "recursive Receiver:close did not release leaf_tx1")
+      assert(loader_calls == 0, "discard invoked preload loader")
+      assert(registry["Titan module thread.tests"] == nil,
+        "discard initialized thread.tests")
+
+      -- Retain a second recursive chain in _G so indep:close() (lua_close) finalizes it.
+      local close_inner_tx, close_inner_rx = thread.channel(2)
+      local close_outer_tx, close_outer_rx = thread.channel(2)
+      assert(close_inner_tx:try_send(leaf_tx2))
+      assert(close_inner_tx:try_send(
+        transfer.TransferValue.is_record(
+          "unavailable.missing_module", "unavailable.missing_module.MissingRecord", "\008\001")))
+      close_inner_tx:close()
+      assert(close_outer_tx:try_send(close_inner_rx))
+      close_outer_tx:close()
+      _G.retained_close_rx = close_outer_rx
+      _G.retained_leaf_rx2 = leaf_rx2
+      return loader_calls
+    ]=], "=uninitialized-module-discard") }
+    case res[1]
+    when is_integer(calls) then test.assert(calls == 0)
+    else raise "expected integer loader_calls from independent state"
+    end
+    -- Closing `indep` runs lua_close on the state holding _G.retained_close_rx without error.
+    indep:close()
+
+    -- 2. Worker thread whose child lua_close discards a 3-level recursive Receiver tree
+    -- containing composite RecursiveLevel1Packet/Level2Packet/LeafPacket messages from parent,
+    -- while child's _PRELOAD["thread.tests"] is poisoned before lua_close.
+    runtime_test.run(function ()
+      reset_ownership_hook_state(true, false)
+      local worker, loader_alert_rx,
+        w_l_peer_rx, w_rel_l_tx, w_l_peer_tx, w_rel_l_rx,
+        w_e_peer_rx, w_rel_e_tx, w_e_peer_tx, w_rel_e_rx = spawn_recursive_close_probe()
+      defer w_l_peer_rx:close()
+      defer w_l_peer_tx:close()
+      defer w_e_peer_rx:close()
+      defer w_e_peer_tx:close()
+      defer loader_alert_rx:close()
+      local st = worker:join()
+      local ok, code? = st:has_succeeded()
+      test.assert(ok and code == 7, "worker did not exit cleanly before child lua_close")
+
+      local alert_ok, _? = loader_alert_rx:try_receive()
+      test.assert(not alert_ok, "child lua_close invoked module preload loader during discard")
+
+      assert_sender_released_exactly_once(
+        w_l_peer_rx, w_rel_l_tx, "child lua_close recursive leaf Sender")
+      assert_receiver_released_exactly_once(
+        w_l_peer_tx, w_rel_l_rx, "child lua_close recursive leaf Receiver")
+      assert_sender_released_exactly_once(
+        w_e_peer_rx, w_rel_e_tx, "child lua_close recursive level2 Sender")
+      assert_receiver_released_exactly_once(
+        w_e_peer_tx, w_rel_e_rx, "child lua_close recursive level1 Receiver")
+    end)
+  end)
+end

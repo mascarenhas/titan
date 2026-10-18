@@ -1056,11 +1056,13 @@ Two real loaders exist in `driver.lua`:
   strings of nested constructor calls produced by `types.serialize` and are
   evaluated with
   `load("return " .. s, modname, "t", types)`, the `types` module itself
-  serving as the environment. `types.serialize` admits only contextual C
-  primitives and recursively portable pointer, nonvariadic C-function, and
-  owned graphs. The closed metadata validator reconstructs and validates those
-  descriptors without source state; imported typedefs and header-dependent C
-  graphs cannot cross a compiled-interface boundary. Local nominal declarations
+  serving as the environment. `types.serialize` admits contextual C
+  primitives, recursively portable pointer, nonvariadic C-function, and
+  owned graphs, and named header typedef, struct, union, and fixed-array
+  graphs that carry a valid declaration origin. The closed metadata validator
+  reconstructs and validates those descriptors without source state; enum
+  identities, unnamed aggregates without a typedef name, and flexible-array
+  aggregates cannot cross a compiled-interface boundary. Local nominal declarations
   and members are omitted from the serialized interface; exported records
   still serialize their total `nfields` count and each public
   `Field.index`, so public fields keep their real `Udata` slot even when local
@@ -1120,9 +1122,10 @@ per-file checker invocation.
 
 After the module interface is built, export validation rejects any public type
 tree, including an exported alias target, that mentions a local nominal type or
-a nonexportable C descriptor. Contextual primitives and portable
-pointer/function/owned closure are accepted; imported typedefs and
-header-dependent graphs are not. For records and unions, the walkers skip
+a nonexportable C descriptor. Contextual primitives, portable
+pointer/function/owned closure, and named header-dependent C graphs with a valid
+declaration origin are accepted; enum identities, unnamed aggregates, and
+flexible-array aggregates are not. For records and unions, the walkers skip
 private fields/variants, methods, and functions before applying the check, so
 an exported owner may keep a private C-typed member that never enters its
 interface.

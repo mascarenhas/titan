@@ -4,8 +4,8 @@
 # and system OpenSSL policies. Libuv, llhttp and SQLite are always bundled.
 # Besides the ordinary Lua/API smokes, this proves titan.a matches titan.so and
 # can load io and run
-# async/timer/fs/net/ssl/url/http/websocket/os plus PEG/string behavior in a compiled Titan
-# application while the dynamic provider and generated shims are out of search
+# async/timer/fs/net/ssl/url/http/websocket/os/transfer/thread plus PEG/string behavior in compiled Titan
+# applications while the dynamic provider and generated shims are out of search
 # reach. System mode exercises the host's ordinary OpenSSL pkg-config settings.
 
 set -euo pipefail
@@ -377,9 +377,12 @@ build_and_run_static_titan() {
     local mode=$1
     local mode_dir="$SMOKE_TMP/static-$mode"
     local executable="$mode_dir/static_uv_smoke"
+    local transfer_executable="$mode_dir/transfer_ownership_smoke_app"
     local marker="$mode_dir/static-marker"
     local cppflags ldflags
     mkdir -p "$mode_dir"
+    cp spec/fixtures/stdlib/titan/transfer_ownership_smoke_app.titan \
+        "$mode_dir/transfer_ownership_smoke_app.titan"
     cat >"$mode_dir/static_uv_smoke.titan" <<'TITAN'
 local async = import "async"
 local timer = import "timer"
@@ -690,8 +693,17 @@ TITAN
             TITAN_EXTRA_CFLAGS="-fno-strict-aliasing" \
             TITAN_EXTRA_LDFLAGS="$ldflags" \
             "$TITANC" --static static_uv_smoke
+        env -u LUA_PATH -u LUA_CPATH -u LUA_PATH_5_5 -u LUA_CPATH_5_5 \
+            TITAN_ROCKS_ROOT="$PREFIX" \
+            TITAN_PATH_0_6="$LIBRARY_ROOT" TITAN_PATH= \
+            TITAN_RUNTIME_PREBUILT=1 \
+            TITAN_EXTRA_CPPFLAGS="$cppflags" \
+            TITAN_EXTRA_CFLAGS="-fno-strict-aliasing" \
+            TITAN_EXTRA_LDFLAGS="$ldflags" \
+            "$TITANC" --static transfer_ownership_smoke_app
     )
     test -x "$executable"
+    test -x "$transfer_executable"
 
     mv "$PROVIDER" "$PROVIDER_HIDDEN"
     mv "$SHIM_ROOT/titan" "$SHIMS_HIDDEN"
@@ -701,6 +713,12 @@ TITAN
         LUA_PATH_5_5="$mode_dir/no-lua/?.lua" \
         LUA_CPATH_5_5="$mode_dir/no-lua/?.so" \
         "$executable" "$marker" "$TITAN_PROCESS_SMOKE_CHILD"
+    printf '' | env \
+        LUA_PATH="$mode_dir/no-lua/?.lua" \
+        LUA_CPATH="$mode_dir/no-lua/?.so" \
+        LUA_PATH_5_5="$mode_dir/no-lua/?.lua" \
+        LUA_CPATH_5_5="$mode_dir/no-lua/?.so" \
+        "$transfer_executable"
     restore_hidden_provider
     test ! -e "$marker"
 
@@ -722,6 +740,22 @@ TITAN
     fi
     if ! defines_uv_version "$executable"; then
         echo "static Titan executable did not absorb reachable libuv objects" >&2
+        exit 1
+    fi
+    require_no_titan_dependency "$transfer_executable"
+    require_no_lpeglabel_dependency "$transfer_executable"
+    require_no_sqlite3_dependency "$transfer_executable"
+    if [[ $OPENSSL_MODE == bundled ]] &&
+            has_openssl_dependency "$transfer_executable"; then
+        echo "bundled static Titan transfer smoke executable depends on an OpenSSL DSO" >&2
+        exit 1
+    fi
+    if has_libuv_dependency "$transfer_executable"; then
+        echo "static Titan transfer smoke executable depends on a libuv DSO" >&2
+        exit 1
+    fi
+    if ! defines_uv_version "$transfer_executable"; then
+        echo "static Titan transfer smoke executable did not absorb reachable libuv objects" >&2
         exit 1
     fi
 }

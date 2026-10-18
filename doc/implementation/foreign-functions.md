@@ -125,7 +125,7 @@ This second pass is important: parser desugarings and checker-synthesized nodes
 cannot bypass the raw-C surface merely because their original spelling looked
 innocent.
 
-The allowed body is intentionally unsafe C. Pointer dereference, indexing,
+The allowed body is intentionally unsafe C (see [The C FFI](../language/ffi.md#the-c-ffi)). Pointer dereference, indexing,
 function-pointer calls, arithmetic, and casts do not gain the NULL, bounds,
 range, ownership, or Lua-error checks used by ordinary Titan-to-C lowering. A
 literal zero step is rejected, but a dynamic zero step is the trusted
@@ -442,6 +442,13 @@ for a FAM. This keeps address-taking, C out-parameter mutation, block lifetime,
 defer-tail predeclaration, and try-spill analysis attached to the actual
 `Ast.Decl`.
 
+For `automatic_array_borrow`, that emitter owns both the backing declaration
+and the single pointer-view declaration initialized from it; generic local
+lowering must not redeclare the view. Defer-tail predeclaration likewise places
+the backing and initialized view together in the enclosing cleanup scope,
+then suppresses both declarations at the original statement. This lifetime
+handling does not turn the pointer view into an aggregate spill.
+
 ### Flexible-array-member provenance
 
 For a complete `struct T` whose marked final field is `E field[]`,
@@ -491,18 +498,28 @@ lifted structural conversions.
 Ordinary Titan `catch`/`finally` still uses C `setjmp`/`longjmp`. The existing
 write/read analysis marks a declaration when a protected region can mutate it
 and recovery can observe it. Constructor-created storage participates because
-it is declaration-owned. `_c_backing_storage` generalizes a spill to an address
-and byte expression: ordinary aggregates use `&local`/`sizeof local`, borrowed
-fixed arrays use their hidden backing, and automatic FAMs use their complete
-extended byte area.
+it is declaration-owned. Ordinary aggregates and fixed arrays spill their
+complete object representation using `&local`/`sizeof local`.
+`_c_backing_storage` supplies the address and byte extent for an automatic FAM's
+complete extended backing.
 
-The coder maintains a volatile byte spill with explicit byte loops after
-initialization, assignments, and normally returning mutable C calls, then
-reloads it on recovery. It intentionally does not cast away volatility through
-`memcpy`. A C call that mutates and then longjmps does not commit its partial
-post-call state; an untracked alias remains outside the supported contract.
-Foreign functions themselves have no such spill protocol because their bodies
-cannot establish a Titan recovery boundary.
+For those aggregates, the coder maintains a volatile byte spill with explicit
+byte loops after initialization, assignments, and normally returning mutable C
+calls, then reloads it on recovery. It intentionally does not cast away
+volatility through `memcpy`.
+
+An `automatic_array_borrow` declaration instead uses the ordinary volatile
+pointer-scalar spill. Reassigning the view or passing its mutable address to a
+normally returning C out-parameter call commits the pointer value; recovery
+reloads that pointer, never snapshots or restores its backing bytes. Writes
+through the borrowed pointer therefore remain in the live backing, including
+raw-slot mutations observed by deferred cleanup after a caught error. Capturing
+the pointer does not extend the backing's lifetime.
+
+A C call that mutates a declaration and then longjmps does not commit that
+declaration's partial post-call state to its spill; untracked aliases do not
+participate in spill updates. Foreign functions themselves have no such spill
+protocol because their bodies cannot establish a Titan recovery boundary.
 
 ## Standard-library callback migrations
 

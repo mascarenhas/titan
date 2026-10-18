@@ -126,6 +126,148 @@ explicit `argument_owner` retains the associated GC graph when permitted.
 Native thread detach is unavailable for a retained GC argument graph, because
 detach cannot determine its final use.
 
+
+`titan/uv/sync.titan` publishes the [20 direct synchronization entries and their
+exact C signatures](../language/uv/supplemental.md#direct-synchronization-entry-map)
+in place of 20 removed getters. Eighteen are newly public; mutex lock/unlock
+were already public. The separate heap-only `native_mutex_destroy` remains
+public. Ordinary compiled clients call or store these entries without a runtime
+getter or `uv.h` import; only UV owns libuv FFI.
+
+The [central synchronization ownership rules](../language/uv/types.md#synchronization-and-native-carrier-ownership)
+distinguish three lifetimes. GC-backed mutex/rwlock/semaphore/condition/barrier/TLS
+owners use checked `Fresh -> Live -> Retired` state, explicit initialization and
+explicit destruction/deletion after every native user is quiescent. A failed
+initialization leaves fresh storage; retirement is terminal. Their borrowed
+pointers do not root them, and no GC finalizer destroys their primitives.
+`mutex_t.create_native()` instead allocates and initializes independent
+process-heap storage; only its result may be passed to `native_mutex_destroy`,
+which destroys and frees it after quiescence (NULL is a no-op). Never pass
+`:borrow()` storage to that function. `once_t.new()` already initializes its
+guard in final stable storage (`UV_ONCE_INIT`), with no additional init, reset,
+or destroy; root it through every participating native call. `key_t` stores a
+per-OS-thread borrowed pointer, not Task-local state, pointee ownership, or a GC
+root. Raw entries bypass checked owner guards and cannot diagnose dangling or
+wrong-kind pointers safely.
+
+Lock and wait operations block the OS thread. Do not suspend a Task while
+holding a blocking `uv` lock, or wait on the loop thread for a sibling Task to
+release one. Cooperative coordination uses [same-state channels](../language/async-io.md#bounded-channels)
+or [cross-thread channels](../language/standard-library-thread.md#cross-thread-channels);
+there is no `thread.Mutex`.
+
+The separate three-entry [heap-thread-token API](../language/uv/supplemental.md#create_native_thread)
+is implemented in `titan/uv/threading.titan`, not in the synchronization getter
+map. Ordinary `create_native_thread(entry, argument)` allocates token storage
+and returns `(0, token)` after native acceptance. NULL entry/allocation/native
+creation failures return `(status, nil)` and free any unpublished token.
+The worker may begin before the constructor returns. This route never retains
+a GC `argument_owner` graph: code and the complete native argument graph stay
+manually owned through worker completion. C-only `native_thread_join(token)`
+and `native_thread_detach(token)` free the token only on `0`; any nonzero result
+preserves it, and NULL returns `UV_EINVAL`. Join blocks the calling OS thread,
+so hold no worker-needed mutex and require no progress on that blocked loop.
+Detach does not join, free arguments, or prove quiescence; only worker entry
+and argument copies are independent of freed token storage. Serialize token
+retirement, never raw-free or reuse it after success, and never mix this token
+with checked `thread_t` storage. Checked owner APIs are unchanged; publication
+of these capabilities does not itself prove any `titan.thread` caller migration.
+
+
+`titan/uv/external_wake.titan` and `titan/uv/external-wake-native.h` implement
+the destination-loop wake bridge used by generic `async.ExternalWait`.
+`external_wake_t.new()` constructs its owner and installs the nonyielding
+fallback before native acquisition. `external_wake_init` initializes an
+internal `async_t` in the unreferenced state and allocates a reference-counted
+heap core whose first member is its mutex. A reserved target pins that core;
+neither target nor core contains a Lua/Titan GC value. Keep the bridge and
+destination semantic state on traced loop-thread owners.
+
+`external_wake_t:reserve(identity)` preallocates a `PREPARED` target without
+keeping the loop alive. The returned pointer is borrowed from the destination's
+registration reference until exact unregister/detach. Before publishing it in
+a native domain waiter, take a separate producer reference with
+`native_external_wake_retain`; every such reference eventually pairs with
+`native_external_wake_release`. References pin native storage, not the bridge,
+Lua state, handle, or code image. C-only calls after state close require the
+[provider image to remain mapped](foreign-functions.md); runtime-loaded Titan
+DSOs remain mapped for process lifetime.
+
+Activate only when the actual wait is admitted. `:activate(target)` changes
+`PREPARED -> ARMED` without allocation, references the shared handle on the
+first active wait, and precedes publication of the retained native waiter.
+Generic async registration then rechecks domain readiness and publishes under
+the domain mutex; an immediate-ready result or registration failure retires
+the target. All native algorithms use domain-mutex -> wake-core-mutex order,
+never the reverse; release core locks before consulting destination GC state
+or calling a domain unregister callback. No ordinary Titan/Lua call, allocation,
+error construction, or Task suspension belongs under a native domain lock.
+
+`native_external_wake_notify` queues an `ARMED` target once (`PENDING`) and calls
+`uv_async_send` while holding the core mutex, serializing the borrowed handle
+against close/detach. Further `PENDING` notifications repeat the send without
+allocating or enqueueing another node; `DELIVERED` returns zero without sending.
+The pending queue, not callback count, records work. A send failure does not
+retract publication. NULL, `PREPARED`, `RETIRED`, or detached targets return
+`UV_EINVAL`; non-NULL arguments still require a live reference.
+
+`native_external_wake_is_notified(target)` reads only the phase under the core
+mutex and returns native `int` `1` for `PENDING` or `DELIVERED`, `0` otherwise
+(including NULL). Drain preserves this durable notification latch until exact
+unregister/detach. The C-only query may run on a foreign thread, but it requires
+a valid registration borrow or producer reference through its whole call;
+it acquires no reference and does not make later dereference atomic with
+retirement.
+
+
+On the destination loop, `:drain(output, capacity)` copies bounded batches of
+identities to caller-owned native storage, marks them `DELIVERED`, and re-arms
+notification if entries remain. Process the returned count even if re-arming
+fails. Generic async uses batches of 64, validates each live wait/epoch in its
+traced map, and schedules through the existing ready queue, not reentrant Task
+execution. At most one pending node exists per target. Draining does not end
+the active wait or release loop liveness: retain the handle reference until
+settlement/cancellation retires the registration.
+
+Clear the destination identity map and target borrow before `:unregister`;
+it unlinks pending state in $O(1)$ time, consumes the registration reference
+(possibly freeing the target), and unreferences the handle when the last
+activated wait retires. Separately retained producer targets may outlive this
+retirement and receive `UV_EINVAL` on later notification. Never reuse a freed
+borrow or treat the status checks as dangling-pointer protection.
+
+`native_external_wake_unregister(target)` exposes the same consuming
+registration retirement using only the target's core. Despite its C ABI it is
+**destination-loop-thread-only**, because it can call `uv_unref`. Clear the
+destination map/borrow first; `0` consumes the registration and may free the
+target, while NULL or a still-live retired target returns `UV_EINVAL`.
+It does not release an independent producer reference. Call exactly one
+unregister form for a registration and never inspect a freed borrow afterward,
+including through the notification query.
+
+
+Normal `:close()` requires zero registrations, including `PREPARED` targets
+(`UV_EBUSY` otherwise). It clears `core.handle` under the core mutex before
+initiating `uv.close`; close completion detaches the owner core reference.
+Drive and drain that close before releasing loop ownership. The nonyielding
+GC fallback (`external_wake_detach`) is different: it clears the handle borrow,
+retires all remaining registrations/pending references, and drops the core
+owner reference without calling Lua or driving/closing the loop. Retained
+producer targets survive either path until their final native release; the
+fallback neither completes native handle close nor licenses abandoning normal
+loop cleanup.
+
+The independent-state external-wake fixture tests that fallback during
+`lua_close` without abandoning its initialized loop. It registers a test-owned
+loop-cleanup finalizer **before** constructing the wake, so Lua's reverse
+finalization order detaches the wake first, without any loop drive. Cleanup
+then observes `reserve` returning `EINVAL` **before** closing/draining the
+underlying handle and calling `loop_close`; otherwise the handle's close
+handler could mask a missing GC detach. Host-owned status/callback-count
+storage survives state close and proves detachment, zero notification
+callbacks, and successful loop retirement. Finalizer errors are Lua warnings,
+so those results must be asserted by the host rather than only in a finalizer.
+
 ## One-shot Task adapter
 
 An adapter allocates its request owner and rollback state, then calls one of:
@@ -274,16 +416,19 @@ the destination domain.
 
 Protobuf encoding precedes source close, and a lexical cleanup closes a
 duplicate if serialization fails. TCP identifiers use a fixed64 raw-pointer
-field and pipe descriptors use an integer field. The public static
+field and pipe descriptors use an integer field. Packet-attached automatic
+resource disposal in `transfer` covers `thread.Sender` and `thread.Receiver`
+endpoints; `tcp_t` and `pipe_t` remain manual byte-payload hooks and are not
+decoded or closed by `transfer.discard_message`. The public static
 `discard_transfer_payload` methods decode these known schemas and close the
 unadopted native token directly, without a loop or Runtime. A close attempt
 consumes ownership even when its returned status is an error. Source `uv.close` retains the old
 owner through its ordinary callback. Reconstruction allocates fresh native
 storage, initializes it on the bound loop, and adopts the duplicated identifier.
 Failed adoption closes that new native lifetime while leaving the unadopted
-identifier under the caller's manual recovery contract. Windows pending reads
-remain ineligible even after `read_stop`; no cancellation-based move guarantee
-is inferred from an idle Titan Task.
+identifier under the caller's manual recovery contract.
+Windows pending reads remain ineligible even after `read_stop`; no
+cancellation-based move guarantee is inferred from an idle Titan Task.
 
 ## Validation and integration
 
@@ -305,7 +450,11 @@ Extract exact provider metadata from its exported protocol to update fixtures;
 do not synthesize serialized schemas from source text. The defining owners of
 Task/error/status types are async; rebuild stale consumers rather than adding
 an identity alias to old UV metadata. Keep the prerelease language-server API
-at 1 and the generated-code ABI at 2 unless their separate rules require change.
+at **1**, generated-code ABI at **2**, and all other existing version numbers
+unchanged for this cutover. Rebuild the compiler/runtime/providers and consumers
+as a coherent set; do not add a compatibility shim, migration, or historical
+registry. Distinguish baseline and accepted ownership builds by source revision
+and provider/SDK hashes, not an ABI-number delta.
 
 Run focused gates before the complete native/compiler suites and production
 packaging checks. Libuv, llhttp and SQLite stay bundled in both supported Unix

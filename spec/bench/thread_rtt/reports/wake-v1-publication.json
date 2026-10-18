@@ -1,0 +1,249 @@
+{
+  "abi_version": "2",
+  "archive": "wake-v1-evidence.tar.gz",
+  "bytes": 45549260,
+  "campaign": {
+    "batch_sign_disagreements": 26,
+    "batches": 2,
+    "cases": 53,
+    "elapsed_seconds": 158.19136238098145,
+    "faster_paired_median_cases": 17,
+    "finished": 1792362605.2572114,
+    "host_affinity": [
+      0,
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      11,
+      12,
+      13,
+      14,
+      15,
+      16,
+      17,
+      18,
+      19,
+      20,
+      21,
+      22,
+      23
+    ],
+    "host_limits": "Operator build/test quiet interval, not exclusive host isolation; final frequency/governor/memory/model policy not recaptured",
+    "instrumented_repeats_per_lane": 2,
+    "instrumented_rows": 212,
+    "lifecycle_absolute_maxima": {
+      "active_async_handles": 0,
+      "active_workers": 0,
+      "channels_delta": 0,
+      "controls_delta": 0,
+      "lua_states_delta": 0,
+      "pending_waiter_probes": 0
+    },
+    "load_average_after": [
+      6.24755859375,
+      10.01806640625,
+      8.50146484375
+    ],
+    "load_average_before": [
+      13.42041015625,
+      13.05517578125,
+      9.046875
+    ],
+    "mpmc_request_sidecars_required_in_both_modes": true,
+    "mpmc_requests": 160000,
+    "mpmc_rows": 160,
+    "passed_calibrations": 212,
+    "published_measurement_receipt_exit_counts": {
+      "0": 1060
+    },
+    "repeats_per_batch": 3,
+    "rows": 848,
+    "rtt_samples": 1879680,
+    "scale": 1.0,
+    "seed": 252,
+    "slot_exhaustion_failures": 0,
+    "slower_paired_median_cases": 36,
+    "smoke_rows": 212,
+    "smoke_rtt_samples": 23500,
+    "standalone_baseline_files": "Both BASELINE-* pairs retain scale.05 smoke aliases, not independent full-count campaigns",
+    "started": 1792362447.065849,
+    "truncated_samples": 0,
+    "uninstrumented_rows": 636
+  },
+  "compiled_private_artifacts_included": false,
+  "correctness_evidence": "INTEGRATOR-REPORTED-GATES.json retains Main-source82/82 Thread/all23 faults and1794pass/1POSIXskip/0fail native owners30/30. Quiescence records finished local/VM validations; detailed final-v3 platform/sanitizer inventories remain integration-owned, not inferred from RTT.",
+  "cpp2_v3_equivalence": {
+    "member": "source-inputs/titan-issue252-cpp2-vs-v3-codegen-equivalence.json",
+    "qualification": "Parent-generated normalized source-level comparison, not an independently rerun v3 performance campaign or whole-binary/platform/sanitizer equivalence claim",
+    "receipt": {
+      "bench_c_identical": true,
+      "bench_c_normalized_lines": 121249,
+      "cpp2_receipt": "/tmp/titan-issue252-wake-final-cpp2-v1/PROVIDER-RECEIPT.json",
+      "cpp2_receipt_sha256": "24a6a6e77dff36d9570f76c82ad2a2b6d825eabb8c8456f924a0bea52552203d",
+      "cpp2_sdk": "/tmp/titan-issue252-wake-final-cpp2-v1/sdk",
+      "os_c_single_line_diff": {
+        "cpp2": "int volatile _spill_local_duplicate_1 = 0;",
+        "line": 47739,
+        "v3": "volatile int _spill_local_duplicate_1 = 0;"
+      },
+      "stdlib_26_roots_identical_except_os_c_volatile_order": true,
+      "summary": "Post-CPP2 v3 compiler borrowed-pointer spill fix (flow.lua, names.lua, statements.lua, values.lua) and minicoro.h ASan stack-bounds guard produce 100% identical generated C across bench.titan (121,249 lines) and all 26 stdlib modules except cosmetic 'int volatile' -> 'volatile int' on one local in os.c.",
+      "v3_manifest": "/tmp/titan-issue252-final-corrective-abi2-v3.source.sha256",
+      "v3_manifest_sha256": "f0f8219f95c8115118c54c94fa593f2e494c4205d47dd7e6d87e636b514ac5f6"
+    },
+    "sha256": "9f7ed1032a78513b7663d450acba236b5031ae97c7412d1ef44cd62bf5f5090a"
+  },
+  "delivered_v3_overlay": {
+    "bytes": 617650,
+    "changed_or_new_files": 51,
+    "full_source_manifest_member": "source-inputs/titan-issue252-final-corrective-abi2-v3.source.sha256",
+    "full_source_manifest_sha256": "f0f8219f95c8115118c54c94fa593f2e494c4205d47dd7e6d87e636b514ac5f6",
+    "member": "source-inputs/titan-issue252-final-corrective-abi2-v3-delta.tar.gz",
+    "sha256": "06fd5e8fe39b44156094738ff724b43007f79179c0fe46481e13ccd68d0f7690"
+  },
+  "dependency_inputs": {
+    "licenses": "source-inputs/common/third-party-licenses/",
+    "package_bytes": 97333,
+    "packages": {
+      "titan-issue252-baseline-attested/dependency-rocks/argparse-0.7.2-1.all.rock": {
+        "bytes": 18120,
+        "sha256": "40eb4f03902365a285d4da4f72b3d1299db206b325773757c9c32ca78e8a210c"
+      },
+      "titan-issue252-baseline-attested/dependency-rocks/inspect-3.1.3-0.all.rock": {
+        "bytes": 8506,
+        "sha256": "f3f14a251a39e938d527762a3ce1d0926b5840f408ab47a5831a96d3ff6ce0f0"
+      },
+      "titan-issue252-baseline-attested/dependency-rocks/lpeglabel-1.6.2-1.linux-x86_64.rock": {
+        "bytes": 39159,
+        "sha256": "7151b98621c9eaf56e4579e7e7e888a696cc6b747c3254714aacb9d574f30c23"
+      },
+      "titan-issue252-baseline-attested/dependency-rocks/luafilesystem-1.9.0-1.linux-x86_64.rock": {
+        "bytes": 31548,
+        "sha256": "7490345e0a4b75319cdf52bcefb70522b9542c3e1534cb40cec8dba79595fc84"
+      }
+    },
+    "qualification": "Four exact approved original dependency inputs; two contain third-party .so payloads, not Titan provider outputs"
+  },
+  "existing_versions": "Unchanged: SDK0.6/package0.6.0/language-server API1; v1/v3 are snapshot/publication labels",
+  "harness": {
+    "freeze": "782E",
+    "git_commit": "No final-harness commit invented; parent owns commits",
+    "record": "authored/issue252-final-benchmark-harness-freeze.json",
+    "sha256": {
+      "README.md": "3965abbd73e0f5569f9ef2e1132a5a55233dc4218797ad74db17d17daee51ac4",
+      "REPORT_TEMPLATE.md": "06644223d46a4e443469f190b8923e871bdf050e7fe34b74b2c7d08907904bb2",
+      "bench.titan": "5a9e13bbed374169451611b064461c6312e69724328fa8f968140beacbe2a00b",
+      "compare.py": "ebdcdc10b42962835f2b417a50e12bddaea6f57f965a480d7fed63b5c7a01958",
+      "compile_guard.lua": "d8baf0c0dcaa3641e907e0ee6a533f3bf9a240c4323f4ef5ebb63aacbb25278b",
+      "measure.py": "6d84aad9be7a036fad2e7530b27213395dbee84bfef6146a23d6eda23a54f335",
+      "rtt_probe.c": "76f000d72ac276f86737cebb181e6ac54c5d97829049128408f79a45d1db023e",
+      "rtt_probe.h": "a1836505b16121e47a4c65f2f218050772a158e58f53ad740608c9250b32e7fe",
+      "summarize.py": "218ddb05355b446578bb62d71046808a378d4f34ae55d2dd158496bc05d4a011"
+    },
+    "source_directory": "/tmp/titan-issue252-rtt-harness-final-v1"
+  },
+  "lanes": {
+    "final-resource": {
+      "codec_contract": "native_consuming_slot",
+      "executable_sha256": {
+        "instrumented": "1c0d85b48ac53ab341115ce30226bc99e73eb71fa1835517fe2ec0abbfaac67a",
+        "uninstrumented": "165707faa63a973eaf175c0417dc007e65456312d9c7b42e999f727166d5a7d1"
+      },
+      "extracted_native_payload_archive_sha256": "72e5da2181c176c64eb38d6573416bb2657b3f7eebda6420fb8c45e64c12c628",
+      "generated_consumer_sha256": "5a9e13bbed374169451611b064461c6312e69724328fa8f968140beacbe2a00b",
+      "prefix": "/tmp/titan-issue252-prewake-cpp2/sdk",
+      "private_provider_files": {
+        "/tmp/titan-issue252-rtt-final-cpp2-v1/final-resource/work/provider/titan.a": "be10652a64eb0e5a4529e31004da2a832573747d68acb8864c3f3247e5631504",
+        "/tmp/titan-issue252-rtt-final-cpp2-v1/final-resource/work/provider/titan.so": "b61480d621fa894c53acaa17613d7281d006a12d01875afccca9fda6181ad473"
+      },
+      "provider_files": {
+        "/tmp/titan-issue252-prewake-cpp2/sdk/bin/lua": "4ff90fc0bccfffb89db1198b3807b2731b1f95686967a42d13f9b78f6f5561ee",
+        "/tmp/titan-issue252-prewake-cpp2/sdk/lib/luarocks/rocks-5.5/titan/0.6.0-1/bin/titanc": "567bdf8984e6631a199b3feae238483a632af62aa9239a5864a93fb074ce03b4",
+        "/tmp/titan-issue252-prewake-cpp2/sdk/lib/titan/0.6/libtitan.a": "f8123ef431b4a854bc1473d1f35296a39a3159d85a25303e60c6dbb7d5f8152f",
+        "/tmp/titan-issue252-prewake-cpp2/sdk/lib/titan/0.6/titan.a": "ccb6892101bae22fa954c240b6cd060ad7900cebbba826904e02d4bbb8e83106",
+        "/tmp/titan-issue252-prewake-cpp2/sdk/lib/titan/0.6/titan.so": "0031fe44035b0a58a4db918c4b68ff6a3d27f599290043ee8e1089c4a317e211"
+      },
+      "receipt_sha256": "a40babf3ad2b33cf5a614b47df3426e6fd9296516298137426f45276d0d5dbd1",
+      "sdk_content_sha256": "49c792e165dc84545ba1a865e60c7dfc9dafbaaaff1b60223b159490ae4e21c0",
+      "source": "/tmp/titan-issue252-prewake-cpp2/source",
+      "source_label": "resource-prewake-cpp2-a40babf3ad2b33cf (content-attested snapshot label, NOT a Git commit)",
+      "source_probe_sha256": "b30c3955aacd540c889e4d8abd8c90a43120fad4a96097937e479a91715ff9ca",
+      "thread_wait_contract": "legacy_register_before_yield"
+    },
+    "wake": {
+      "codec_contract": "native_consuming_slot",
+      "executable_sha256": {
+        "instrumented": "d2e720f74b2cb858bc52775b93aa438c1717426eb6fa758b184d99e64f34bb52",
+        "uninstrumented": "5b947f9427c169680c4e70d66409035a4ce7310be920a09584aa0dbd058e9b41"
+      },
+      "extracted_native_payload_archive_sha256": "822b7ebdb3890aaf700faf72e3cc8efa957f426a8fee481138c8fc6df1644f5c",
+      "generated_consumer_sha256": "5a9e13bbed374169451611b064461c6312e69724328fa8f968140beacbe2a00b",
+      "prefix": "/tmp/titan-issue252-wake-final-cpp2-v1/sdk",
+      "private_provider_files": {
+        "/tmp/titan-issue252-rtt-final-cpp2-v1/wake/work/provider/titan.a": "4134252b74bc63c27ddba1e5ec69f61dc23e7d40a0b046faaa4d85d7adc497f6",
+        "/tmp/titan-issue252-rtt-final-cpp2-v1/wake/work/provider/titan.so": "93e12795cfb6beee79d35e62ad42b684ec57b813d96bc57c8bb3077019ee7eb7"
+      },
+      "provider_files": {
+        "/tmp/titan-issue252-wake-final-cpp2-v1/sdk/bin/lua": "4ff90fc0bccfffb89db1198b3807b2731b1f95686967a42d13f9b78f6f5561ee",
+        "/tmp/titan-issue252-wake-final-cpp2-v1/sdk/lib/luarocks/rocks-5.5/titan/0.6.0-1/bin/titanc": "567bdf8984e6631a199b3feae238483a632af62aa9239a5864a93fb074ce03b4",
+        "/tmp/titan-issue252-wake-final-cpp2-v1/sdk/lib/titan/0.6/libtitan.a": "f8123ef431b4a854bc1473d1f35296a39a3159d85a25303e60c6dbb7d5f8152f",
+        "/tmp/titan-issue252-wake-final-cpp2-v1/sdk/lib/titan/0.6/titan.a": "3e67b718e3b5a8b90aad99a7afa9986f3c0ab7fdb789c372bba67f2f4ac53894",
+        "/tmp/titan-issue252-wake-final-cpp2-v1/sdk/lib/titan/0.6/titan.so": "c476b2fba29936e052f45f1bfd3b291ac2c173245fcca9d8e4f35085313935b1"
+      },
+      "receipt_sha256": "24a6a6e77dff36d9570f76c82ad2a2b6d825eabb8c8456f924a0bea52552203d",
+      "sdk_content_sha256": "e8b0bbe9d73e20d0272d2e0138bfe675e2215a9037b10ffaf89caf55f0a61eb7",
+      "source": "/tmp/titan-issue252-wake-final-cpp2-v1/source",
+      "source_label": "wake-final-cpp2-24a6a6e77dff36d9",
+      "source_probe_sha256": "480423cce1d313714b23d59422b5eb6178529df61ae09b4ec57a3f2d5c557b5d",
+      "thread_wait_contract": "shared_register_after_yield_prearmed_retirement"
+    }
+  },
+  "measured_v1_overlay": {
+    "added_or_replaced_files": 90,
+    "bytes": 24366123,
+    "deleted": [
+      "spec/stdlib/titan/thread/tests.titan"
+    ],
+    "full_authored_source_files": 1157,
+    "full_source_manifest_sha256": "d655863f3fcac8678cfd833b4e7c25c8e632c67f3df003630e73fe460130b46a",
+    "member": "source-inputs/titan-issue252-final-measured-cpp2-v1-overlay.tar.gz",
+    "sha256": "10fd531513b33ecadc1f2226950eb906f2e69fd8d8b8d2ad46774b1313145c0d"
+  },
+  "member_files": 5031,
+  "native_policy": "Full recorded native_policy objects equal; common SDK libtitan/Lua/libbacktrace base archives retained; per-provider extracted Native archive hashes differ and are both preserved",
+  "native_wake_qualification": "Ordinary endpoint after helper return including helper defers; cleanup-join endpoint at normal body end before its own defers. Frozen broader wording is qualified in the authored report.",
+  "original_sdk_included": false,
+  "paired_summary_sha256": "348bd3e1e80df430bbab33181742d42d433f3deb53eba4fa4068563695b3191e",
+  "payload_files": 5029,
+  "publication_author_work": "Supplied-data analysis, authored documentation, byte-preserving tables and source/raw packaging only; no builds/tests/lint/formatters/smokes/audits/performance reruns/commits/branch changes or archive replay verification executed",
+  "quiescence_note_sha256": "acd0cda2e94ef8ca5578b2b5c6a76e9fb14f2da6c84a3419b7c0665930aa7114",
+  "raw_bytes_rewritten": false,
+  "raw_evidence_sha256": "d1a65e07d077901a67c49c60e832de144b5d54f1cd2ee88a3724a95728c3ad40",
+  "readme": {
+    "change": "Publication cross-reference only; measured immutable README retained in harness/",
+    "file": "../README.md",
+    "sha256": "238fcfb49c90269c89fa3d8895b589f9e3fc97d487fd4053f9e5f3b72510f32e"
+  },
+  "recorded_path_index": "RECORDED-PATHS.json: 5020 recorded paths/URIs to extraction-relative members with SHA-256/bytes; EVIDENCE-FILES.json inventories 5029 payloads; the two indexes do not recursively hash themselves",
+  "report": {
+    "bytes": 34433,
+    "file": "wake-v1-report.md",
+    "sha256": "ce8c0d5151a0de3471297690ad6b8f53f24a4b41f75eb604d732061b24f5e886"
+  },
+  "scope": "Completed full53-case matched resource/prewake CPP2 versus combined final Thread wake/join/native-retirement/cancellation/Group pre-start admission; not wake-only, no blanket latency/fairness improvement claimed",
+  "sha256": "8fe59cac8ad99657789b10631b8a66a4cc72809230a3b4896b88729aea5f5ca8",
+  "source_reconstruction": "SOURCE-RECONSTRUCTION.md: original66d/Lua025b/skills9d archives +resource-r3 +exact common CPP2 overlay; measured90-file v1 overlay and explicit obsolete-test deletion; final51-file v3 delta on separate candidate copy. No old SDK required; matching native pins/toolchain/system OpenSSL and new receipts required.",
+  "tables": {
+    "bytes": 263847,
+    "file": "wake-v1-tables.md",
+    "origin": "Exact parent-produced TABLES.md bytes, no publication-side renderer execution",
+    "sha256": "ba8fab18bcef6fee3770862c153a57d9cb07fd2d736de31a16c94f077d6f4c2a"
+  }
+}

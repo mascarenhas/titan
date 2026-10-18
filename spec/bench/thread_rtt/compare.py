@@ -99,6 +99,7 @@ def main():
                 "provider_files": r.manifest["provider_files"],
                 "source_sha256": r.manifest["source_sha256"],
                 "source_probe_sha256": r.manifest["source_probe_sha256"],
+                "thread_wait_contract": r.manifest["thread_wait_contract"],
                 "provider_receipt_sha256": r.manifest["provider_receipt_sha256"],
                 "sdk_content_sha256": r.manifest["sdk_content_sha256"],
                 "native_policy": r.manifest["native_policy"],
@@ -223,6 +224,14 @@ def main():
                     raise RuntimeError(f"mismatched paired observations: {case_name}")
                 before = baseline["clocks"]["us_per_op"]
                 after = candidate["clocks"]["us_per_op"]
+                before_fairness = baseline.get("fairness")
+                after_fairness = candidate.get("fairness")
+                fairness_deltas = {}
+                if before_fairness is not None and after_fairness is not None:
+                    for metric in measure.FAIRNESS_METRICS:
+                        b_value, c_value = before_fairness[metric], after_fairness[metric]
+                        fairness_deltas[metric] = (
+                            c_value - b_value if b_value is not None and c_value is not None else None)
                 paired_rows.append({
                     "batch": batch, "repeat": repeat, "operations": baseline["operations"],
                     "baseline_us_per_op": before, "candidate_us_per_op": after,
@@ -230,6 +239,7 @@ def main():
                     "ratio": after / before if before > 0 else None,
                     "p99_delta_us": (candidate["distributions"]["rtt"]["p99_ns"] -
                                      baseline["distributions"]["rtt"]["p99_ns"]) / 1000,
+                    "fairness_delta_ns": fairness_deltas,
                 })
             deltas = [row["delta_us_per_op"] for row in paired_rows]
             ratios = [row["ratio"] for row in paired_rows if row["ratio"] is not None]
@@ -245,6 +255,24 @@ def main():
                     for batch in range(args.batches)
                 },
             }
+            if case_name.startswith("mpmc_"):
+                fairness_stats = {}
+                for metric in measure.FAIRNESS_METRICS:
+                    def values(batch=None):
+                        return [
+                            row["fairness_delta_ns"][metric] for row in paired_rows
+                            if (batch is None or row["batch"] == batch) and
+                            row["fairness_delta_ns"].get(metric) is not None]
+                    observed = values()
+                    fairness_stats[metric] = {
+                        "pair_samples": len(observed),
+                        "median_delta_ns": statistics.median(observed) if observed else None,
+                        "range_delta_ns": [min(observed), max(observed)] if observed else None,
+                        "batch_median_deltas_ns": {
+                            str(batch): statistics.median(values(batch)) if values(batch) else None
+                            for batch in range(args.batches)},
+                    }
+                comp["paired"]["fairness"] = fairness_stats
         if "instrumented" in b_case and "instrumented" in c_case:
             bi = b_case["instrumented"]
             ci = c_case["instrumented"]

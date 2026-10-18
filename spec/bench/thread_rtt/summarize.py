@@ -35,6 +35,11 @@ def provenance(manifest, lane):
         "Full SDK content manifest SHA-256": manifest.get("sdk_content_sha256"),
         "Source hash-map SHA-256": map_hash(manifest.get("source_sha256", {})),
         "Source probe recipe SHA-256": manifest.get("source_probe_sha256"),
+        "Audited native wait contract": manifest.get("thread_wait_contract", "not recorded by historical harness"),
+        "Native-wake successful continuation endpoint": (
+            "native-await return including helper cleanup"
+            if manifest.get("thread_wait_contract")
+            else "not recorded by historical harness; inspect its archived source probes"),
         "Original builder receipt SHA-256": manifest.get("provider_receipt_sha256"),
         "Preserved native payload archive SHA-256": manifest.get("native_payload_archive_sha256"),
         "Generated consumer SHA-256": manifest.get("generated_consumer_sha256"),
@@ -53,6 +58,11 @@ def provenance(manifest, lane):
 
 def lane_tables(summary, title):
     cases = summary.get("cases", {})
+    wake_boundary = (
+        "Both current matched lanes end the native-wake interval at the exact successful native-await "
+        "return, including helper cleanup. Do not pool this with frozen-v4 raw coroutine-return samples. "
+        if summary.get("provenance", {}).get("thread_wait_contract")
+        else "The historical native-wake continuation boundary must be read from its archived source probes. ")
     lines = [f"## {title}", "", f"Catalog: {summary.get('catalog_case_count', 'unavailable')} cases; "
              f"this report contains {len(cases)} measured cases.", "",
              "Uninstrumented timing uses the original immutable SDK. Instrumented timing uses a private "
@@ -191,7 +201,9 @@ def lane_tables(summary, title):
               "Encode/decode subintervals cover selected benchmark call brackets, not every worker's codec. "
               "Queue intervals include lock acquisition and readiness/closed branches, ending before unlock. "
               "Native wake correlates the exact selected waiter with its notification and successful continuation; "
-              "cancelled/failed/nonunique notifications are unavailable, never attributed to a global last signal. "
+              "cancelled/failed/nonunique or unawaited prearmed notifications are unavailable, never "
+              "attributed to a global last signal. "
+              f"{wake_boundary}"
               "It is not isolated kernel wake latency. Stages overlap across OS threads: do not add medians or "
               "subtract independently measured RTTs to manufacture a component time.", "",
               "### Instrumentation overhead", "",
@@ -201,6 +213,42 @@ def lane_tables(summary, title):
         lines.append(f"| `{name}` | {row['uninstrumented_median_us_per_op']:.3f} | "
                      f"{row['instrumented_median_us_per_op']:.3f} | {row['overhead_us_per_op']:+.3f} | "
                      f"{fmt(row['overhead_ratio'])} |")
+    lines += ["", "### Finite MPMC credit wait and progress", "",
+              "These existing MPMC cases retain their original post-permit RTT boundary. Separate bounded "
+              "request traces start before credit acquisition and retain actual producer/lane identity. "
+              "Values below are medians [ranges] of per-round worst-lane statistics, in microseconds; "
+              "availability is shown as contributing/total rounds. Per-lane sample counts/distributions and "
+              "raw trace hashes remain in JSON. An empty lane or one-completion gap series is unavailable, not zero.",
+              "",
+              "| Case | Mode | Rounds | Worst lane permit p99 | Worst lane including-permit p99 | Max intercompletion gap | First-start / last-completion skew | Consumer request counts by round |",
+              "|---|---|---:|---:|---:|---:|---|---|"]
+    for name, entry in cases.items():
+        for mode in ("uninstrumented", "instrumented"):
+            row = entry.get("fairness", {}).get(mode)
+            if row is None:
+                continue
+            def metric_cell(metric):
+                item = row["metrics"][metric]
+                if item["median_ns"] is None:
+                    return f"unavailable (0/{row['rounds']})"
+                low, high = item["range_ns"]
+                return (f"{item['median_ns'] / 1000:.3f} "
+                        f"[{low / 1000:.3f}..{high / 1000:.3f}] "
+                        f"({item['rounds_with_samples']}/{row['rounds']})")
+            counts = "; ".join(",".join(str(n) for n in r["consumer_operations"])
+                               for r in row["per_round"])
+            lines.append(
+                f"| `{name}` | {mode} | {row['rounds']} | "
+                f"{metric_cell('worst_lane_permit_wait_p99_ns')} | "
+                f"{metric_cell('worst_lane_end_to_end_p99_ns')} | "
+                f"{metric_cell('max_intercompletion_gap_ns')} | "
+                f"{metric_cell('first_start_spread_ns')} / "
+                f"{metric_cell('last_completion_skew_ns')} | {counts} |")
+    lines += ["", "Consumer counts are each actual worker's positive-request count, collected after join "
+              "outside timing; they are not a uniform-share promise. Progress gaps include the finite fixture's "
+              "credit contention/scheduling. Different lane operation counts and finite startup/finish affect "
+              "skews. This is not strict FIFO completion, a starvation bound or a generic scheduler fairness proof. "
+              "Instrumented fairness is diagnostic and can be perturbed by the private probe overhead.", ""]
     for group, heading in (
         ("endpoint_contrasts", "Matched protocol/shape endpoint component contrasts"),
         ("policy_contrasts", "Payload-policy controls (not isolated endpoint costs)"),
@@ -247,6 +295,24 @@ def render_paired(summary):
               "Ranges and batch differences expose observed variation; this renderer does not assert "
               "statistical significance or attribute a resource-ownership checkpoint change to a later final "
               "corrected wake/join cutover.", ""]
+    lines += ["## Actual within-pair finite MPMC fairness differences", "",
+              "Candidate minus baseline microseconds; these compare each paired run's worst-lane statistic, "
+              "not a difference of pooled request percentiles. Zero contributing samples means unavailable.",
+              "",
+              "| Case | Metric | Pairs | Median delta [range] us | Independent batch median deltas us |",
+              "|---|---|---:|---:|---|"]
+    for name, entry in summary["comparisons"].items():
+        for metric, row in entry.get("paired", {}).get("fairness", {}).items():
+            values = row["range_delta_ns"]
+            cell = ("unavailable" if values is None else
+                    f"{row['median_delta_ns'] / 1000:+.3f} "
+                    f"[{values[0] / 1000:+.3f}..{values[1] / 1000:+.3f}]")
+            batches = ", ".join(
+                f"{batch}: {fmt(value / 1000 if value is not None else None)}"
+                for batch, value in row["batch_median_deltas_ns"].items())
+            lines.append(f"| `{name}` | `{metric}` | {row['pair_samples']} | {cell} | {batches} |")
+    lines += ["", "Retain actual per-pair deltas/order, per-lane progress distributions and consumer counts "
+              "in raw evidence; no no-regression or statistical-significance claim is generated here.", ""]
     for lane in ("baseline", "candidate"):
         lane_summary = summary["lanes"][lane]
         lines += provenance(lane_summary["provenance"], lane)
