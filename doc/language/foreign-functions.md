@@ -243,17 +243,20 @@ cannot run a Titan `defer` while it unwinds.
 
 ## Generated headers
 
-Every source module owns a compiler-generated, source-adjacent `.ffi.h` with
-its ordered C environment. A module defining foreign functions also owns a
-`.titan.h` with their declarations and eligible inline bodies:
+Every source module owns a compiler-generated `.ffi.h` with its ordered C
+environment. A module defining foreign functions also owns a `.titan.h` with
+their declarations and eligible inline bodies. Both go to the selected
+[output directory](output-directory.md) with the same hierarchy as the generated
+C file, or beside the source when no output directory is selected:
 
 | Module source | C environment | Foreign-function declarations |
 | --- | --- | --- |
 | flat `foo/bar.titan` | `foo/bar.ffi.h` | `foo/bar.titan.h` |
 | folder main `foo/bar/bar.titan` | `foo/bar/bar.ffi.h` | `foo/bar/bar.titan.h` |
 
-A folder contributor produces no separate headers. With `--tree`, the headers
-are beside the selected external canonical source, like generated C and objects.
+A folder contributor produces no separate headers. With `--tree` and no output
+directory, the headers are beside the selected external canonical source, like
+generated C and objects.
 
 The compiler prepares all needed headers before compiling any source object.
 `.ffi.h` includes explicit source dependencies' `.ffi.h` files first, then

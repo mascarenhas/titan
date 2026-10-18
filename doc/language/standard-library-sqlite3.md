@@ -126,21 +126,22 @@ alias of the source Connection behave as closed; its `close()` becomes a no-op.
 The same native database moves, including a private `:memory:` database, open
 transaction, and savepoints. Transfer does not commit or roll back anything.
 
-The opaque protobuf byte payload has one fixed64 field containing the nonnull
-native handle. Encoding finishes before the source handle is cleared.
-`Connection.from_transfer_payload` rejects malformed bytes, a mismatched field
-kind, or a null pointer. It trusts that a nonnull pointer came from this
-protocol; it cannot validate an arbitrary address or detect prior adoption.
+Encoding finishes before the source handle is cleared.
+`Connection.from_transfer_payload` rejects malformed bytes (including a
+mismatched field kind) and a null native handle. It trusts that a nonnull handle
+came from this protocol; it cannot validate an arbitrary address or detect prior
+adoption.
 
-This is a manual ownership handoff. Adopt the payload exactly once, retain it
-while delivery is pending, and recover it yourself after failed delivery. For
-example, a carrier rejected by `async.send` can be adopted locally with
-`:to_value()` and then closed. Replaying a carrier can create two owners and
-cause use-after-free or double-close; abandoning one leaks the database.
-Transfer does not roll back detachment when later packing or delivery fails,
-and queue disposal does not close a pointer payload. These are the shared
-custom-hook ownership rules, including when a Connection is captured by a
-transferred closure.
+This is a manual ownership handoff under the
+[shared manual-handoff rules](standard-library-transfer.md#shared-manual-handoff-rules).
+Connection has no public `discard_transfer_payload`. Adopt the payload exactly
+once, retain it while delivery is pending, and recover it yourself after failed
+delivery. For example, a carrier rejected by `async.send` can be adopted locally
+with `:to_value()` and then closed. Replaying a carrier can create two owners
+and cause use-after-free or double-close; abandoning one leaks the database.
+Transfer does not roll back detachment when later packing or delivery fails, and
+queue disposal does not close a pointer payload. These rules also apply when a
+Connection is captured by a transferred closure.
 
 ## Binding values
 

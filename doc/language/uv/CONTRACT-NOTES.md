@@ -1,6 +1,6 @@
 # Ownership and value contracts
 
-Use ordinary `import "titan.uv"` to access these public types. The provider uses pinned, patched libuv 1.53.0. `has_api("tcp_connect")` queries the canonical exported wrapper set, without the `uv_` prefix; it does not promise OS/kernel support. Platform constants can be nil when the native platform omits them. The [coverage map](coverage.md) explains the unavailable wrappers and internal copied-result cleanup.
+Use ordinary `import "uv"` or `import "titan.uv"` to access these public types. The provider uses pinned, patched libuv 1.53.0. `has_api("tcp_connect")` queries the canonical exported wrapper set, without the `uv_` prefix; it does not promise OS/kernel support. Platform constants can be nil when the native platform omits them. The [coverage map](coverage.md) explains the unavailable wrappers and internal copied-result cleanup.
 
 ## Objects and native storage
 
@@ -15,7 +15,11 @@ Use ordinary `import "titan.uv"` to access these public types. The provider uses
 | `addrinfo_result_t` | Produced by successful getaddrinfo | Explicit `freeaddrinfo` | Copied entries/strings/address values remain valid |
 | CPU/interface/env/passwd/group snapshots | Binding copies native results | Matching native free runs before wrapper return | Caller owns ordinary GC-managed values; no public free operation |
 | `thread_t` | Construct, then create/create_ex | Join succeeds, or permitted detach succeeds | Joined/detached identifiers may be reused; thread_self is a borrowed identity |
-| Synchronization owner | Construct, then init/create | Explicit destroy/delete after all native users stop | Single native lifetime; constructor again for another lifetime |
+| Heap thread token | `create_native_thread` returns one caller-owned heap token on native creation success | `native_thread_join` or `native_thread_detach` returns `0` and frees token storage | Failure preserves token; detach does not join or release argument resources; no GC argument-owner retention |
+| Checked synchronization owner (`mutex_t`, `rwlock_t`, `sem_t`, `cond_t`, `barrier_t`, `key_t`) | Construct fresh final storage, then successful init/create | Explicit destroy/delete after every native user is quiescent | Terminal retirement; failed init leaves fresh storage; no automatic GC destruction; borrows do not root owners |
+| `once_t` | `once_t.new()` initializes the guard in final stable storage | All participating native calls return | No separate init/reset/destroy; root the guard through all calls |
+| Process-heap mutex | `mutex_t.create_native()` allocates and initializes outside GC, or returns nil | `native_mutex_destroy` after quiescence | Destroy also frees; never pass `mutex_t:borrow()` storage |
+| `external_wake_t` | Construct fresh owner, then `external_wake_init`; reserve targets without loop liveness | Normal close after all registrations retire, then native close completion | Retained producer targets pin only native target/core storage; GC detach retires leftover registrations but is not native close |
 | `lib_t` | Construct, then one dlopen attempt | Explicit dlclose, including failed native open | Terminal close; old symbols cannot become valid for a new image |
 | `os_fd_t`, `os_sock_t`, integer descriptor | Borrowed identifier or result of an acquiring operation | Explicit corresponding resource close/adoption | Collecting a token never closes a native resource |
 
@@ -64,7 +68,7 @@ Known IPv4/IPv6 addresses preserve all native fields, including IPv6 flow/scope.
 
 Only FS, getaddrinfo, getnameinfo, random, and work requests support native `cancel`. Connect/write/shutdown/UDP-send do not become cancellable merely because they expose req_t. Successful cancellation still requires terminal completion, normally with ECANCELED. EBUSY means native work has already progressed too far; keep all owners until ordinary completion. Cancellation never closes a resource automatically.
 
-Work, native-thread, and once callbacks are C-only entries. Their `foreign function` spelling uses portable structural C types and does not require a libuv header outside this module. These entries must never call Lua/Titan or inspect a Titan owner on a foreign thread. After-work callbacks are ordinary loop-thread callables. `queue_work` retains the request and caller-owned argument graph through after-work; provide that graph through its explicit trailing `argument_owner: value` parameter (nil means an externally owned borrow). Native thread creation uses argument_owner explicitly. Detach requires nil argument_owner and externally valid code/argument storage; a retained GC graph must join.
+Work, native-thread, and once callbacks are C-only entries. Their `foreign function` spelling uses portable structural C types and does not require a libuv header outside this module. These entries must never call Lua/Titan or inspect a Titan owner on a foreign thread. After-work callbacks are ordinary loop-thread callables. `queue_work` retains the request and caller-owned argument graph through after-work; provide that graph through its explicit trailing `argument_owner: value` parameter (nil means an externally owned borrow). The checked `thread_t` creation route uses `argument_owner` explicitly; detach requires nil and externally valid code/argument storage, while a retained GC graph must join. The separate [`create_native_thread`](supplemental.md#create_native_thread) route retains no GC graph: its caller owns native argument lifetime manually and retires its heap token with exactly one successful native join or detach.
 
 The binding passes private C callback data through native `uv_work_t.data` and
 keeps it unchanged until the worker completes. Public `work_t:get_data` and
@@ -73,7 +77,41 @@ work is pending does not change the worker's function or argument.
 
 `work_t:get_loop()` preserves the last accepted loop through completion; a rejected submission preserves that previous association. `signal_t:get_signum()` reads the configured native signal number while initialized: stop resets it, while oneshot delivery resets it only after the callback returns.
 
-Raw synchronization/async/thread helpers are escape hatches for already-C-only carriers. Obtain their opaque pointer/entry on the Lua thread, retain the corresponding owner through every native use, and coordinate completion before destroying it. A native-safe returned entry does not make the ordinary Titan wrapper safe to call from a worker.
+Direct synchronization entries use the [complete 20-operation getter-to-C-signature map](supplemental.md#direct-synchronization-entry-map); 18 entries are newly public and mutex lock/unlock were already public. The getters are removed rather than retained as aliases. Unrelated `async_send_function()`, `async_send_native`, `thread_getcpu_function()`, and `thread_setname_function()` keep their existing contracts. These C-only escape hatches do not make ordinary Titan wrappers worker-safe. Obtain a checked owner's `:borrow()` on its Lua thread and root that owner through all native users; destroy/delete only after quiescence. Do not suspend a Task while holding a blocking lock. A `mutex_t.create_native()` pointer is instead caller-owned heap storage and pairs only with `native_mutex_destroy`, including NULL-safe cleanup. TLS keys are OS-thread-local pointer slots, not Task-local state or pointee owners. See [synchronization and native-carrier ownership](types.md#synchronization-and-native-carrier-ownership).
+
+The external wake bridge has a separate borrow/reference protocol. `reserve`
+returns a target borrowed from its destination registration; it neither roots a
+Titan owner nor keeps the loop alive. Take a producer reference before native
+publication. Activate only when admitting a wait, before waiter publication;
+keep the shared async handle referenced until every activated wait is retired,
+including already-drained targets. Native notification queues at most one
+pending node per target and never reads Lua/Titan GC values. The destination
+drains bounded identity batches and validates/schedules its own live waits.
+Clear destination map entries and borrows before `unregister`, which may free
+the target. Retained producers may survive unregister or close and receive
+`EINVAL` on late notification; release each retained reference exactly once.
+
+[`native_external_wake_is_notified`](supplemental.md#native_external_wake_is_notified)
+returns `1` for `PENDING` or `DELIVERED`, and `0` otherwise, under the core mutex;
+drain does not clear that latch. The caller still needs a valid borrow/retain
+through the query, and the snapshot does not protect a later dereference from
+retirement. [`native_external_wake_unregister`](supplemental.md#native_external_wake_unregister)
+is C-only but **destination-loop-thread-only**: it can unreference the handle.
+It consumes the registration on `0`, not a producer reference, and may free a
+borrowed target immediately. Never use both unregister forms for one
+registration or dereference a consumed borrow.
+
+
+Normal bridge close returns `EBUSY` for any registration, even a prepared
+unused one, and must be followed by native close completion on the loop. The
+nonyielding GC fallback instead detaches native state and retires remaining
+registrations without calling Lua or driving/closing the loop. It is not a
+replacement for normal loop cleanup. Native producer references pin no Lua
+state, handle, GC owner, or provider image; C-only release after state teardown
+still requires the [provider to remain mapped](../../implementation/foreign-functions.md).
+Raw pointer validity is a prerequisite: native status checks do not protect
+against freed borrows or wrong-kind storage.
+
 
 ## Units, ranges, nullable values, and defaults
 

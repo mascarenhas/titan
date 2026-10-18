@@ -1,6 +1,6 @@
 # Public types, fields, callbacks, and constants
 
-This reference describes header-free public types. Packed native fields are private. Empty record blocks below mean opaque owners, not empty storage. Constructors/methods remain listed explicitly. Ordinary callback aliases use normal callable dispatch; C-only callbacks are documented separately. Each listed constructor or method has its operation and lifetime rules in the [supplemental reference](supplemental.md); native callback rules are in the [callback reference](callbacks.md).
+This reference describes header-free public types. Packed native fields are private. Empty record blocks below mean opaque owners, not empty storage. Constructors/methods remain listed explicitly. Ordinary callback aliases use normal callable dispatch; C-only callbacks are documented separately. Each listed constructor or method has its operation and lifetime rules in the [supplemental reference](supplemental.md); native callback rules are in the [callback reference](callbacks.md); blocking synchronization, native-carrier, and external wake rules are centralized in [synchronization and native-carrier ownership](#synchronization-and-native-carrier-ownership).
 
 Source-level optional constant annotations support module initialization. Pinned initialized constants are immutable values; `?` alone is not a capability probe. Constants from platform_constants.titan are explicitly nil when the native platform lacks their definition; test these before use.
 
@@ -90,12 +90,13 @@ end
 
 ```titan
 function barrier_t.new(): barrier_t
-function barrier_t.wait_function(): foreign function(*void): int
 function barrier_t:borrow(): foreign *void
 function barrier_t:destroy()
 function barrier_t:init(count: integer): integer
 function barrier_t:wait(): integer
 ```
+
+Native workers and C-only carriers use [`native_barrier_wait`](supplemental.md#native_barrier_wait) on `barrier:borrow()` while keeping `barrier` rooted until all participants finish; see [synchronization and native-carrier ownership](#synchronization-and-native-carrier-ownership).
 
 
 ## buf_t
@@ -164,11 +165,7 @@ end
 ```
 
 ```titan
-function cond_t.broadcast_function(): foreign function(*void): void
 function cond_t.new(): cond_t
-function cond_t.signal_function(): foreign function(*void): void
-function cond_t.timedwait_function(): foreign function(*void, *void, unsigned long long): int
-function cond_t.wait_function(): foreign function(*void, *void): void
 function cond_t:borrow(): foreign *void
 function cond_t:broadcast()
 function cond_t:destroy()
@@ -177,6 +174,8 @@ function cond_t:signal()
 function cond_t:timedwait(mutex: mutex_t, timeout_ns: foreign unsigned long long): integer
 function cond_t:wait(mutex: mutex_t)
 ```
+
+Native workers and C-only carriers use [`native_cond_signal`](supplemental.md#native_cond_signal), [`native_cond_broadcast`](supplemental.md#native_cond_broadcast), [`native_cond_wait`](supplemental.md#native_cond_wait), and [`native_cond_timedwait`](supplemental.md#native_cond_timedwait); see [synchronization and native-carrier ownership](#synchronization-and-native-carrier-ownership).
 
 
 ## connect_cb
@@ -288,6 +287,25 @@ end
 ```titan
 type exit_cb = function (process_t, integer, integer): ()
 ```
+
+
+## external_wake_t
+
+```titan
+record external_wake_t
+end
+```
+
+```titan
+function external_wake_t.new(): external_wake_t
+function external_wake_t:activate(target: foreign *void): integer
+function external_wake_t:close(): integer
+function external_wake_t:drain(output: foreign *unsigned long long, capacity: foreign unsigned int): (integer, foreign unsigned int)
+function external_wake_t:reserve(identity: foreign unsigned long long): (integer, foreign *void)
+function external_wake_t:unregister(target: foreign *void): integer
+```
+
+Owned destination-loop cross-thread wake bridge initialized with [`external_wake_init`](supplemental.md#external_wake_init). C-only producer entries [`native_external_wake_retain`](supplemental.md#native_external_wake_retain), [`native_external_wake_release`](supplemental.md#native_external_wake_release), [`native_external_wake_notify`](supplemental.md#native_external_wake_notify), and [`native_external_wake_is_notified`](supplemental.md#native_external_wake_is_notified) operate on valid native target references; the query reports the durable pending/delivered phase without consuming it. The separate C-only [`native_external_wake_unregister`](supplemental.md#native_external_wake_unregister) consumes a registration on success and is **destination-loop-thread-only**, because retirement may unreference the async handle. See [synchronization and native-carrier ownership](#synchronization-and-native-carrier-ownership) for exact borrow/reference lifetimes, reservation/activation liveness, bounded batch draining, and normal close versus GC detach.
 
 
 ## fs_cb
@@ -572,15 +590,15 @@ end
 ```
 
 ```titan
-function key_t.get_function(): foreign function(*void): *void
 function key_t.new(): key_t
-function key_t.set_function(): foreign function(*void, *void): void
 function key_t:borrow(): foreign *void
 function key_t:create(): integer
 function key_t:delete()
 function key_t:get(): foreign *void
 function key_t:set(value: foreign *void)
 ```
+
+OS-thread-local raw pointer slot (`uv_key_t`), not `async.Task`-local state and not a pointee owner or GC root. Native workers use [`native_key_get`](supplemental.md#native_key_get) and [`native_key_set`](supplemental.md#native_key_set); see [synchronization and native-carrier ownership](#synchronization-and-native-carrier-ownership).
 
 
 ## lib_t
@@ -657,10 +675,7 @@ end
 
 ```titan
 function mutex_t.create_native(): foreign *void
-function mutex_t.lock_function(): foreign function(*void): void
 function mutex_t.new(): mutex_t
-function mutex_t.trylock_function(): foreign function(*void): int
-function mutex_t.unlock_function(): foreign function(*void): void
 function mutex_t:borrow(): foreign *void
 function mutex_t:destroy()
 function mutex_t:init(): integer
@@ -669,6 +684,8 @@ function mutex_t:lock()
 function mutex_t:trylock(): integer
 function mutex_t:unlock()
 ```
+
+Native workers and C-only carriers use [`native_mutex_lock`](supplemental.md#native_mutex_lock), [`native_mutex_trylock`](supplemental.md#native_mutex_trylock), and [`native_mutex_unlock`](supplemental.md#native_mutex_unlock) on either `mutex:borrow()` or a process-heap pointer from [`mutex_t.create_native`](supplemental.md#mutex_tcreate_native). [`native_mutex_destroy`](supplemental.md#native_mutex_destroy) destroys and frees only `mutex_t.create_native()` pointers after quiescence and must never receive `mutex:borrow()`; see [synchronization and native-carrier ownership](#synchronization-and-native-carrier-ownership).
 
 
 ## once_t
@@ -682,6 +699,8 @@ end
 function once_t.new(): once_t
 function once_t:borrow(): foreign *void
 ```
+
+`once_t.new()` initializes its guard in final stable storage (`UV_ONCE_INIT`); it has no destroy or reset operation and is used with [`once`](functions/threading.md#once) or [`native_once`](supplemental.md#native_once) and a C-only `foreign function(): void` callback.
 
 
 ## os_fd_t
@@ -932,12 +951,6 @@ end
 
 ```titan
 function rwlock_t.new(): rwlock_t
-function rwlock_t.rdlock_function(): foreign function(*void): void
-function rwlock_t.rdunlock_function(): foreign function(*void): void
-function rwlock_t.tryrdlock_function(): foreign function(*void): int
-function rwlock_t.trywrlock_function(): foreign function(*void): int
-function rwlock_t.wrlock_function(): foreign function(*void): void
-function rwlock_t.wrunlock_function(): foreign function(*void): void
 function rwlock_t:borrow(): foreign *void
 function rwlock_t:destroy()
 function rwlock_t:init(): integer
@@ -949,6 +962,8 @@ function rwlock_t:wrlock()
 function rwlock_t:wrunlock()
 ```
 
+Native workers and C-only carriers use [`native_rwlock_rdlock`](supplemental.md#native_rwlock_rdlock), [`native_rwlock_tryrdlock`](supplemental.md#native_rwlock_tryrdlock), [`native_rwlock_rdunlock`](supplemental.md#native_rwlock_rdunlock), [`native_rwlock_wrlock`](supplemental.md#native_rwlock_wrlock), [`native_rwlock_trywrlock`](supplemental.md#native_rwlock_trywrlock), and [`native_rwlock_wrunlock`](supplemental.md#native_rwlock_wrunlock); see [synchronization and native-carrier ownership](#synchronization-and-native-carrier-ownership).
+
 
 ## sem_t
 
@@ -959,9 +974,6 @@ end
 
 ```titan
 function sem_t.new(): sem_t
-function sem_t.post_function(): foreign function(*void): void
-function sem_t.trywait_function(): foreign function(*void): int
-function sem_t.wait_function(): foreign function(*void): void
 function sem_t:borrow(): foreign *void
 function sem_t:destroy()
 function sem_t:init(value: integer): integer
@@ -969,6 +981,8 @@ function sem_t:post()
 function sem_t:trywait(): integer
 function sem_t:wait()
 ```
+
+Native workers and C-only carriers use [`native_sem_post`](supplemental.md#native_sem_post), [`native_sem_wait`](supplemental.md#native_sem_wait), and [`native_sem_trywait`](supplemental.md#native_sem_trywait); see [synchronization and native-carrier ownership](#synchronization-and-native-carrier-ownership).
 
 
 ## shutdown_cb
@@ -1179,6 +1193,13 @@ function thread_t:setaffinity(mask: owned char[], oldmask: (owned char[])?): int
 function thread_t:setpriority(priority: integer): integer
 ```
 
+The separate [`create_native_thread`](supplemental.md#create_native_thread),
+[`native_thread_join`](supplemental.md#native_thread_join), and
+[`native_thread_detach`](supplemental.md#native_thread_detach) helpers use
+caller-owned process-heap tokens instead of this GC-backed owner. They never
+retain an `argument_owner` graph and do not change `thread_t`'s checked API.
+
+
 
 ## timer_cb
 
@@ -1379,6 +1400,61 @@ function write_t:send_handle(): handle_t?
 function write_t:set_data(data: value)
 ```
 
+
+## Synchronization and native-carrier ownership
+
+The low-level synchronization and cross-thread wake types in `titan.uv` follow explicit OS-thread and native-lifetime rules.
+
+### Blocking primitives and Tasks
+
+The lock and wait operations on `mutex_t`, `rwlock_t`, `sem_t`, `cond_t`, and `barrier_t` block the calling OS thread, not just the current `async.Task`. Calling a blocking operation on a loop thread stalls that event loop and every Task in its state. Do not suspend a Task while holding a blocking `uv` mutex or lock: a sibling Task cannot safely acquire that lock or run to release it while the OS thread is blocked. For cooperative coordination use same-state [`async.channel`](../async-io.md#bounded-channels) or cross-thread [`thread.channel`](../standard-library-thread.md#cross-thread-channels) (`Sender<|T|>` and `Receiver<|T|>`); there is no `thread.Mutex` API. Queries, try operations, notifications, and TLS access do not all block.
+
+### Checked owners and `:borrow()`
+
+`mutex_t`, `rwlock_t`, `sem_t`, `cond_t`, `barrier_t`, and `key_t` allocate final packed storage in Titan GC memory and move through `Fresh -> Live -> Retired`.
+
+- Construction does not initialize the primitive. A successful `init`, `init_recursive`, or `create` makes the owner live; a negative initialization result leaves it fresh for another attempt.
+- Checked operations reject fresh or retired owners. Explicit `destroy` or `delete` is terminal and is permitted only after all native users are quiescent; create a new owner for another lifetime.
+- Garbage collection never destroys or deletes the primitive automatically, and these GC-backed owners are not transferable across states or threads.
+- `:borrow()` returns an unrooted `foreign *void` to live packed storage for a C-only carrier (`uv.thread_t`, `uv.queue_work`, `async.run_foreign`, or a foreign callback). Keep the complete owner rooted, for example through `argument_owner`, until every worker has joined or completed, then retire it explicitly. A raw native call does not perform the checked owner's lifecycle validation.
+
+### Process-heap mutexes
+
+[`mutex_t.create_native()`](supplemental.md#mutex_tcreate_native) allocates and initializes an independent `uv_mutex_t` on the process heap outside any Lua state's GC, returning `nil` on allocation or initialization failure. [`native_mutex_lock`](supplemental.md#native_mutex_lock), [`native_mutex_trylock`](supplemental.md#native_mutex_trylock), and [`native_mutex_unlock`](supplemental.md#native_mutex_unlock) accept either a `mutex_t.create_native()` pointer or a live `mutex_t:borrow()` pointer.
+
+[`native_mutex_destroy`](supplemental.md#native_mutex_destroy) both destroys the native mutex and `free`s its heap block, and is a no-op on `nil`. Call it **only** on pointers returned by `mutex_t.create_native()`, after all native users are quiescent, and **never** on `mutex_t:borrow()` storage, which retires through `mutex:destroy()` or `uv.mutex_destroy(mutex)`. A raw heap mutex pointer is a low-level native carrier capability (used, for example, inside reference-counted native structures), not a standalone transferable Titan owner.
+
+### Caller-owned heap thread tokens
+
+[`create_native_thread(entry, argument)`](supplemental.md#create_native_thread) returns `(0, token)` for a C-only native worker or `(status, nil)` on failure, freeing any unpublished token. The returned heap token is a unique native owner, not a GC root or a checked `thread_t` value. The caller manually retains worker code and the complete native argument graph until worker completion.
+
+[`native_thread_join`](supplemental.md#native_thread_join) blocks the OS thread and [`native_thread_detach`](supplemental.md#native_thread_detach) does not wait. Each consumes and frees the token only on `0`, preserves it on failure, and returns `uv.EINVAL` for NULL. Serialize retirement, never raw-free a token, and do not reuse aliases after success. Detach frees no argument resources and supplies no completion or quiescence guarantee.
+
+### `once_t` and `key_t`
+
+- `once_t`: `once_t.new()` already initializes its `uv_once_t` guard directly in final stable owner storage (`UV_ONCE_INIT`); there is no separate initialization, destroy, or reset operation. Keep the owner rooted through every participating native call, including contending calls, and allocate a new owner for a separate guard. Both [`once`](functions/threading.md#once) and [`native_once`](supplemental.md#native_once) take a non-null C-only `foreign function(): void` callback, which may execute on whichever native caller thread wins the race and must never enter Lua/Titan.
+- `key_t`: `key_create` and `key_delete` manage an OS-thread-local storage slot (`uv_key_t`), not `async.Task`-local state and not an ownership or GC-rooting mechanism. `key_get` / `key_set` and [`native_key_get`](supplemental.md#native_key_get) / [`native_key_set`](supplemental.md#native_key_set) read and write a borrowed `foreign *void` for the calling OS thread without blocking. The caller owns pointee lifetime across overwrite, thread exit, and `key_delete`; `key_delete` destroys only the key slot and does not free per-thread pointees.
+
+### Direct `native_*` entries and return conventions
+
+The [complete getter-to-entry map and exact C signatures](supplemental.md#direct-synchronization-entry-map) list the 20 synchronization operations available directly through ordinary compiled imports. The earlier runtime getters are removed and have no compatibility aliases; the map shows each replacement. Call or store these exact C function pointers without a runtime getter or `uv.h` import. Native code must keep its provider image mapped for the complete call interval. `native_mutex_destroy` stays heap-only, and the unrelated helpers `async_send_function`, `async_send_native`, `thread_getcpu_function`, and `thread_setname_function` are separate. Raw pointers must refer to valid storage of the correct primitive; dangling-pointer or wrong-kind misuse is undefined behavior, not a checked lifecycle error.
+
+- `cond_timedwait` / `cond_t:timedwait` / `native_cond_timedwait` take a relative timeout in nanoseconds as `foreign unsigned long long` and return `0` when signaled or a negative libuv status such as `uv.ETIMEDOUT`. Always test the caller's predicate in a loop under the locked mutex, because spurious wakeups are permitted.
+- `mutex_trylock`, `rwlock_tryrdlock`, `rwlock_trywrlock`, and `sem_trywait` (and their `native_*` counterparts) return `0` on immediate acquisition or decrement, or a negative libuv status (`uv.EBUSY` or `uv.EAGAIN`).
+- `barrier_wait` / `barrier_t:wait` / `native_barrier_wait` return a positive serial-thread indicator (`> 0`) for one participating thread and `0` for all other participants. This is not a negative-error status channel.
+
+### Cross-thread external wake bridge
+
+[`external_wake_t.new()`](supplemental.md#external_wake_tnew) constructs a fresh owner. [`external_wake_init(loop, owner, callback)`](supplemental.md#external_wake_init) initializes its internal `async_t` handle on `loop` in the **unreferenced** (`uv_unref`) state and allocates a reference-counted, mutex-protected native core. Ordinary methods and the callback run on the destination loop thread. Native retain, release, notify, and `native_external_wake_is_notified` may run on foreign threads; the C-only `native_external_wake_unregister` belongs exclusively to the destination loop thread.
+
+- [`owner:reserve(identity)`](supplemental.md#external_wake_treserve) preallocates a `PREPARED` target for an opaque `foreign unsigned long long` identity without referencing the loop handle, returning `(0, target)` or `(status, nil)`. The returned pointer is **borrowed** from the destination's registration reference, not an independent owner or GC root. It remains valid only until exact [`owner:unregister(target)`](supplemental.md#external_wake_tunregister) or bridge detachment. Before publishing it across threads, take a separate producer reference with NULL-safe [`native_external_wake_retain(target)`](supplemental.md#native_external_wake_retain); release that reference with [`native_external_wake_release(target)`](supplemental.md#native_external_wake_release) after the last producer use.
+- [`owner:activate(target)`](supplemental.md#external_wake_tactivate) transitions `PREPARED -> ARMED` without allocating. Activate only when admitting the actual wait, before publishing its native waiter; do not activate merely to prepare a possible future wait. The first active wait references the shared handle (`uv_ref`), and it stays referenced until all activated targets are unregistered, including targets already drained as `DELIVERED`. An immediate readiness recheck or failed registration must also retire its target.
+- [`native_external_wake_notify(target)`](supplemental.md#native_external_wake_notify) requires a producer reference for its entire call. It queues an `ARMED` target once (`PENDING`) and calls `uv_async_send` under the core mutex; another notification while `PENDING` sends again but does not enqueue another node. `DELIVERED` returns `0` without another send. NULL, `PREPARED`, `RETIRED`, or detached targets return `uv.EINVAL`, provided any non-NULL pointer still has a live reference. A send error does not retract an already published pending identity.
+- [`owner:drain(output, capacity)`](supplemental.md#external_wake_tdrain) copies up to `capacity` identities into caller-owned `foreign *unsigned long long` storage and marks those targets `DELIVERED`; it re-arms the async notification if pending entries remain. Process the returned `count` even when re-arming reports an error. Notifications coalesce, so callback count is not waiter count. The queue contains at most one pending node per reserved target, not an allocation per notification; native targets hold no Lua/Titan GC values. The adapter keeps its identity-to-wait map traced on the destination, validates the exact live wait, and schedules it rather than resuming a Task reentrantly.
+- [`owner:unregister(target)`](supplemental.md#external_wake_tunregister) retires a prepared, armed, pending, or delivered target in $O(1)$ time, unlinks any pending node, drops the registration reference, and unreferences the handle when the last activated wait retires. Clear the destination map entry and borrowed pointer before this call: success may free the target. Only separately retained producer pointers may survive it; their later notifications return `uv.EINVAL`.
+- [`native_external_wake_is_notified(target)`](supplemental.md#native_external_wake_is_notified) reads the phase under the core mutex and returns native `int` `1` for `PENDING` or `DELIVERED`, `0` otherwise (including NULL). The notification stays latched after drain until unregister or detach. Querying does not acquire a reference, consume a notification, or establish atomicity with a later retirement; a non-NULL target needs a valid registration borrow or producer reference throughout the call.
+- [`native_external_wake_unregister(target)`](supplemental.md#native_external_wake_unregister) provides C-only registration retirement through the target's core but is **destination-loop-thread-only**, because it may `uv_unref` the handle. It consumes the registration reference on `0`, not a producer reference; clear the destination map and borrow first, and never call both unregister forms for one registration. A successful unregister may free a merely borrowed target immediately. Status checks or the query do not make later use of that freed borrow safe.
+- Normal [`owner:close()`](supplemental.md#external_wake_tclose) requires **zero registrations**, prepared as well as activated (`uv.EBUSY` otherwise). It clears the borrowed native handle under the core mutex before initiating `uv.close`; drive the destination loop through close completion. Retained producer references may outlive this close and pin only native target/core storage, not the bridge, handle, Lua state, or provider image. The nonyielding GC fallback instead detaches the core and retires any remaining registrations without calling Lua or driving/closing the loop; it is not normal close or permission to abandon native handle cleanup. Producer release remains C-only after state teardown under the [provider-lifetime contract](../../implementation/foreign-functions.md). See the [extension guide](../../implementation/libuv-extension-guide.md#foreign-callback-boundary) for adapter and lock-order mechanics.
 
 ## Numeric levels and flags
 

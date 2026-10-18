@@ -199,9 +199,15 @@ expressions such as `ffi.fclose(handle)`, not to type spellings.
 `foreign import` supplies header declarations. `foreign type Name = T` adds a
 module-local C typedef and makes it available through explicit source-import
 headers. These typedefs are distinct from transparent Titan `type` aliases.
-Portable primitives, pointers, and function pointers can appear in public
-compiled interfaces; a header-dependent typedef remains nonexportable even when
-its target is a portable primitive.
+Public compiled interfaces may contain recursively exportable C type graphs,
+including eligible named header typedefs, structs/unions, and fixed arrays—not
+only header-free primitives and pointer graphs. Every component must satisfy
+the C exportability rules, and consumers must make the original compatible
+named declarations visible; an ordinary Titan import does not inherit C headers.
+An ordinary `foreign function` declaration is public independently of its
+signature, but that signature must still be exportable; unsupported graphs
+are rejected rather than silently made local. See [the C FFI](ffi.md) and
+[foreign-function exports](foreign-functions.md#public-exports-and-source-visibility).
 
 Ownership is a Titan type constructor: write `owned *T`, `owned T[]`, or
 `owned Alias` when a foreign alias resolves to a pointer or array. Do not prefix

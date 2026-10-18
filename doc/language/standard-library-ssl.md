@@ -198,21 +198,21 @@ its previous setting. Configure false before the first TLS handshake or I/O to
 permit demand-driven native reads, then yield after completed I/O before handoff.
 The setting is inherited by transferred TLS connections.
 An admission failure leaves the original connection usable. The source becomes
-closed after the transport detaches, before any receiver accepts the payload.
-The private protobuf schema stores the TCP child bytes, a fixed64 engine pointer,
-and copied TLS state. If outer serialization fails after transport detachment,
-the hook frees the engine and closes the detached transport.
+closed after the transport detaches, before any receiver accepts the payload. If
+serializing the enclosing value fails after the transport detached, the hook
+frees the engine and closes the detached transport.
 
-Ownership is manual: reconstruct exactly once, including local recovery when
-delivery fails, and then close or abort the reconstructed connection normally.
-Replay can double close or use freed native memory; dropping the payload leaks
-the detached engine and endpoint. There is no automatic delivery rollback or
-payload finalizer. The native engine pointer is valid only in the same process.
+The payload is a manually owned, same-process capability: follow the
+[shared manual-handoff rules](standard-library-transfer.md#shared-manual-handoff-rules),
+reconstructing it exactly once, including local recovery when delivery fails,
+and then close or abort the reconstructed connection normally. The native TLS
+engine it carries is valid only in the same process, and dropping the payload
+leaks the detached engine and endpoint.
 
 `Connection.discard_transfer_payload(payload: string): integer` consumes a known
 unadopted payload without an active Runtime: it frees the engine and closes the
 endpoint, returning the native close status. The close attempt consumes ownership
-even on an error; the bytes must never be adopted or discarded again.
+even on an error; never adopt or discard the bytes again.
 
 ## Reading and writing
 

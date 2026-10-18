@@ -1,6 +1,6 @@
 # Supplemental public API reference
 
-These 220 declarations complement the 305 canonical native wrappers. Constructors and owner methods are also grouped with their type in [types](types.md). Every entry uses the public signature; private native fields are omitted. See [ownership contracts](CONTRACT-NOTES.md) for the owner, buffer, callback, and native worker rules.
+These 232 [supplemental declarations](supplemental-public-signatures.tsv) complement the 305 canonical native wrappers. Constructors and owner methods are also grouped with their type in [types](types.md). Every entry uses the public signature; private native fields are omitted. See [ownership contracts](CONTRACT-NOTES.md) for the owner, buffer, callback, and native worker rules, and [synchronization and native-carrier ownership](types.md#synchronization-and-native-carrier-ownership) for blocking synchronization, raw heap mutex/thread-token ownership, `once_t`/`key_t`, and cross-thread wake rules.
 
 ## Native resource handoff
 
@@ -25,6 +25,68 @@ owns payload delivery, adoption, and recovery. Ordinary async programs use the
 binding installed by their active Runtime. The explicit discard methods consume
 a known unadopted byte payload without a loop and return native close status.
 A close attempt consumes ownership even when it reports an error.
+
+
+## Synchronization, native carriers, and external wake bridge
+
+Native synchronization and cross-thread wake helpers follow the central rules in [types](types.md#synchronization-and-native-carrier-ownership) and the [threading reference](functions/threading.md):
+
+- **Blocking OS primitives vs cooperative Tasks:** Lock/wait operations on `mutex_t`, `rwlock_t`, `sem_t`, `cond_t`, and `barrier_t` block the calling OS thread, not just an `async.Task`. Do not suspend a Task while holding a blocking `uv` mutex or lock. Use same-state [`async.channel`](../async-io.md#bounded-channels) or cross-thread [`thread.channel`](../standard-library-thread.md#cross-thread-channels) for cooperative coordination; there is no `thread.Mutex` API. Try operations, notifications, queries, and TLS access are not all blocking waits.
+- **Checked GC-backed owners vs borrowed pointers:** `mutex_t`, `rwlock_t`, `sem_t`, `cond_t`, `barrier_t`, and `key_t` have explicit `Fresh -> Live -> Retired` lifetimes. Successful `init`/`create` makes an owner live; a negative result leaves it fresh. `destroy`/`delete` is terminal and must follow quiescence of every native user; GC supplies no automatic destruction. `:borrow()` requires a live owner and returns an unrooted `foreign *void`; keep the complete owner rooted until every worker or thread finishes, then retire it explicitly. The raw `native_*` calls bypass these checked lifecycle guards.
+- **Process-heap mutexes:** [`mutex_t.create_native`](#mutex_tcreate_native) allocates and initializes an independent `uv_mutex_t` on the process heap outside GC. [`native_mutex_lock`](#native_mutex_lock), [`native_mutex_trylock`](#native_mutex_trylock), and [`native_mutex_unlock`](#native_mutex_unlock) accept either a `create_native` pointer or `mutex_t:borrow()`. [`native_mutex_destroy`](#native_mutex_destroy) both destroys and `free`s **only** `mutex_t.create_native()` pointers after quiescence (and is a no-op on `nil`); never pass `mutex_t:borrow()` to `native_mutex_destroy`.
+- **`once_t` and `key_t`:** [`once_t.new`](#once_tnew) already initializes its guard in final stable storage (`UV_ONCE_INIT`); there is no separate initialization, destroy, or reset operation. Root it through every participating native call. [`once`](functions/threading.md#once) and [`native_once`](#native_once) take a non-null C-only `foreign function(): void` callback. `key_t` manages an OS-thread-local `foreign *void` slot, not `async.Task`-local state, pointee ownership, or a GC root; the caller retains and disposes pointees independently of key deletion.
+- **Direct C-only `native_*` entries:** The [entry map below](#direct-synchronization-entry-map) accounts for all 20 removed synchronization getters and their exact direct C signatures: 18 newly public entries plus the already-public mutex lock/unlock entries. The separate heap-only `native_mutex_destroy` is unchanged. Unrelated [`async_send_function`](#async_send_function), [`async_send_native`](#async_send_native), [`thread_getcpu_function`](#thread_getcpu_function), and [`thread_setname_function`](#thread_setname_function) remain available.
+- **Cross-thread external wake bridge:** [`external_wake_t.new`](#external_wake_tnew) constructs the owner; [`external_wake_init`](#external_wake_init) creates an unreferenced async handle and native queue. [`reserve`](#external_wake_treserve) only prepares storage and returns a borrowed target. [`activate`](#external_wake_tactivate) begins an actual wait and references the handle until that wait is unregistered, not merely until its notification is drained. C-only producers hold separate [`retain`](#native_external_wake_retain)/[`release`](#native_external_wake_release) references while calling [`notify`](#native_external_wake_notify). The destination drains bounded identity batches and retires targets with [`unregister`](#external_wake_tunregister) before normal [`close`](#external_wake_tclose), which returns `uv.EBUSY` even for an unused prepared registration. A nonyielding GC detach retires leftover registrations but is not a replacement for native close completion. See the [central wake lifetime rules](types.md#synchronization-and-native-carrier-ownership) and [extension guide](../../implementation/libuv-extension-guide.md#foreign-callback-boundary).
+- **Caller-owned heap thread tokens:** [`create_native_thread`](#create_native_thread) starts a C-only worker and returns a process-heap token, without retaining any GC argument graph. [`native_thread_join`](#native_thread_join) and [`native_thread_detach`](#native_thread_detach) consume and free that token only on native success; a nonzero status preserves the same owner. Detach retires only the token and does not wait for worker completion. These helpers are distinct from the unchanged checked `thread_t`/`argument_owner` API.
+
+### Direct synchronization entry map
+
+The left column names removed getters, not callable aliases. Use the right-hand
+entry directly through ordinary `import "uv"` and assign it to an exactly
+compatible `foreign function` pointer when a native carrier needs a callback.
+These are C signatures: `int` results are native C statuses/results, not Titan
+`integer` result slots. The existing checked owner methods and canonical
+functions remain available on the owning Lua thread.
+
+| Removed getter | Direct public declaration |
+| --- | --- |
+| `mutex_t.lock_function` | `foreign function native_mutex_lock(native: *void): void` |
+| `mutex_t.trylock_function` | `foreign function native_mutex_trylock(native: *void): int` |
+| `mutex_t.unlock_function` | `foreign function native_mutex_unlock(native: *void): void` |
+| `rwlock_t.rdlock_function` | `foreign function native_rwlock_rdlock(native: *void): void` |
+| `rwlock_t.tryrdlock_function` | `foreign function native_rwlock_tryrdlock(native: *void): int` |
+| `rwlock_t.rdunlock_function` | `foreign function native_rwlock_rdunlock(native: *void): void` |
+| `rwlock_t.wrlock_function` | `foreign function native_rwlock_wrlock(native: *void): void` |
+| `rwlock_t.trywrlock_function` | `foreign function native_rwlock_trywrlock(native: *void): int` |
+| `rwlock_t.wrunlock_function` | `foreign function native_rwlock_wrunlock(native: *void): void` |
+| `sem_t.post_function` | `foreign function native_sem_post(native: *void): void` |
+| `sem_t.wait_function` | `foreign function native_sem_wait(native: *void): void` |
+| `sem_t.trywait_function` | `foreign function native_sem_trywait(native: *void): int` |
+| `cond_t.signal_function` | `foreign function native_cond_signal(native: *void): void` |
+| `cond_t.broadcast_function` | `foreign function native_cond_broadcast(native: *void): void` |
+| `cond_t.wait_function` | `foreign function native_cond_wait(cond: *void, mutex: *void): void` |
+| `cond_t.timedwait_function` | `foreign function native_cond_timedwait(cond: *void, mutex: *void, timeout_ns: unsigned long long): int` |
+| `barrier_t.wait_function` | `foreign function native_barrier_wait(native: *void): int` |
+| `key_t.get_function` | `foreign function native_key_get(key: *void): *void` |
+| `key_t.set_function` | `foreign function native_key_set(key: *void, value: *void): void` |
+| `once_function` | `foreign function native_once(guard: *void, callback: function(): void): void` |
+
+The timeout is a relative unsigned nanosecond interval. Condition waits require
+the caller to hold the mutex, release it atomically while waiting, and reacquire
+it before return; always recheck the protected predicate in a loop. Try
+operations return `0` on acquisition/decrement or a negative native status.
+Barrier wait returns a positive serial-thread result for one participant and
+`0` for the others. The once callback has no arguments or return value and
+must execute only C/native work.
+
+[`native_mutex_destroy(native: *void): void`](#native_mutex_destroy) is not a
+getter replacement: it destroys and frees only `mutex_t.create_native()` output
+after quiescence and accepts NULL as a no-op. Borrowed storage instead retires
+through its checked owner. Raw entries do not validate pointer kind or liveness;
+using a stale or wrong-kind pointer is undefined behavior. C-only calls after
+state close still require a mapped provider; runtime-loaded Titan DSOs follow
+the [process-lifetime mapping rule](../../implementation/foreign-functions.md).
+
 
 ## addrinfo_result_t:entries
 
@@ -90,15 +152,6 @@ Allocate stable native storage without initializing it. Call the matching init/c
 
 ```titan
 function barrier_t.new(): barrier_t
-```
-
-
-## barrier_t.wait_function
-
-Return the exact C-only native entry for this operation. Obtain this pointer and retain borrowed owners before starting native work. Foreign calls obey native synchronization/lifetime rules and cannot enter Titan or Lua.
-
-```titan
-function barrier_t.wait_function(): foreign function(*void): int
 ```
 
 
@@ -242,48 +295,12 @@ function check_t:as_handle_t(): handle_t
 ```
 
 
-## cond_t.broadcast_function
-
-Return the exact C-only native entry for this operation. Obtain this pointer and retain borrowed owners before starting native work. Foreign calls obey native synchronization/lifetime rules and cannot enter Titan or Lua.
-
-```titan
-function cond_t.broadcast_function(): foreign function(*void): void
-```
-
-
 ## cond_t.new
 
 Allocate stable native storage without initializing it. Call the matching init/create operation before use and explicitly destroy/delete only after every native user has stopped.
 
 ```titan
 function cond_t.new(): cond_t
-```
-
-
-## cond_t.signal_function
-
-Return the exact C-only native entry for this operation. Obtain this pointer and retain borrowed owners before starting native work. Foreign calls obey native synchronization/lifetime rules and cannot enter Titan or Lua.
-
-```titan
-function cond_t.signal_function(): foreign function(*void): void
-```
-
-
-## cond_t.timedwait_function
-
-Return the exact C-only native entry for this operation. Obtain this pointer and retain borrowed owners before starting native work. Foreign calls obey native synchronization/lifetime rules and cannot enter Titan or Lua.
-
-```titan
-function cond_t.timedwait_function(): foreign function(*void, *void, unsigned long long): int
-```
-
-
-## cond_t.wait_function
-
-Return the exact C-only native entry for this operation. Obtain this pointer and retain borrowed owners before starting native work. Foreign calls obey native synchronization/lifetime rules and cannot enter Titan or Lua.
-
-```titan
-function cond_t.wait_function(): foreign function(*void, *void): void
 ```
 
 
@@ -381,6 +398,34 @@ function connect_t:handle(): stream_t?
 ```
 
 
+## create_native_thread
+
+Start a C-only native thread and return `(0, token)` with a uniquely caller-owned
+process-heap token. A NULL `entry` returns `(uv.EINVAL, nil)`, allocation failure
+returns `(uv.ENOMEM, nil)`, and native creation failure frees the unpublished
+token and returns `(status, nil)`. The worker may start before this call returns;
+prepare its complete native argument graph before submission.
+
+```text
+function create_native_thread(entry: foreign function(*void): void,
+                              argument: foreign *void): (integer, foreign *void)
+```
+
+**Roles:** entry: INPUT non-null C-only worker entry; argument: INPUT borrowed
+native pointer, possibly NULL, with manually managed complete backing storage;
+token: OUTPUT uniquely caller-owned heap capability, not checked `thread_t` storage.
+
+This ordinary Titan constructor runs on its calling Lua thread. The worker
+executes only `entry(argument)` and must not enter that hosting Lua/Titan state
+or inspect its GC owners. This route never retains `argument_owner`: the caller
+keeps code, argument storage, and all reachable native resources valid until
+worker completion. Retire the token exactly once with
+[`native_thread_join`](#native_thread_join) or
+[`native_thread_detach`](#native_thread_detach). Detach does not establish
+completion or retire argument resources. Never raw-free the token or mix it
+with the checked `thread_t` API.
+
+
 ## dir_t.new
 
 Allocate an empty directory owner. A successful `fs_opendir` establishes the native directory lifetime, which must end with `fs_closedir`.
@@ -388,6 +433,79 @@ Allocate an empty directory owner. A successful `fs_opendir` establishes the nat
 ```titan
 function dir_t.new(): dir_t
 ```
+
+
+## external_wake_init
+
+Initialize an [`external_wake_t`](types.md#external_wake_t) bridge on `loop` with an unreferenced (`uv_unref`) internal `async_t` handle and a reference-counted, mutex-protected native waiter queue. `callback` runs on the owning loop thread with `owner` when notifications arrive. Returns `0` on success or a negative libuv status (`uv.EINVAL`, `uv.ENOMEM`).
+
+```titan
+function external_wake_init(loop: loop_t, owner: external_wake_t, callback: function (external_wake_t): ()): integer
+```
+
+**Roles:** loop: INPUT initialized destination loop owner; owner: INPUT/OUTPUT fresh external_wake_t owner; callback: INPUT loop-thread notification callback.
+
+
+## external_wake_t.new
+
+Allocate a fresh `external_wake_t` owner without initializing its native loop handle or queue. Registering its GC finalizer provides only a non-yielding state-teardown (`lua_close`) fallback that detaches the native core without driving a loop; normal callers initialize with [`external_wake_init`](#external_wake_init), unregister all targets, and call [`external_wake_t:close`](#external_wake_tclose).
+
+```titan
+function external_wake_t.new(): external_wake_t
+```
+
+
+## external_wake_t:activate
+
+Transition a reserved `PREPARED` target from [`external_wake_t:reserve`](#external_wake_treserve) to `ARMED` without allocating, increment the bridge's active-wait count, and reference (`uv_ref`) the underlying `async_t` handle when active waits transition from zero to one. Activate only when admitting the wait, before native waiter publication. The reference lasts through `PENDING` and `DELIVERED` until exact unregister, not just until notification or drain. Return `0` on success or `uv.EINVAL` if the bridge is uninitialized/closed or a live `target` is nil, belongs to another bridge, or is not `PREPARED`. Failed native registration or an immediate readiness recheck must retire the activated target.
+
+```titan
+function external_wake_t:activate(target: foreign *void): integer
+```
+
+**Roles:** target: INPUT/OUTPUT borrowed prepared target pointer returned by reserve; transitions to armed and references the handle while active waits remain.
+
+
+## external_wake_t:close
+
+Begin closing an initialized bridge once **every** target, including unused `PREPARED` targets, has been retired with [`external_wake_t:unregister`](#external_wake_tunregister). Return `uv.EBUSY` while any registration remains, or `0` after clearing the borrowed handle pointer under the core mutex and scheduling native close. Drive the destination loop through close completion. Retained producer targets remain valid native allocations but notifications return `uv.EINVAL` without touching the closing handle. Fresh or finalized owners return `0`; the nonyielding GC detach is a separate teardown fallback that retires registrations and does not drive or close the loop.
+
+```titan
+function external_wake_t:close(): integer
+```
+
+
+## external_wake_t:drain
+
+Drain up to `capacity` pending identities from the FIFO into caller-owned `output` storage (`foreign *unsigned long long` with at least `capacity` slots), mark each target `DELIVERED`, and re-arm `uv_async_send` if entries remain. Return `(status, count)`; process `count` identities even if re-arming fails. Uninitialized/closed bridges, nil `output`, or zero `capacity` return `(uv.EINVAL, 0)`. One pending node per target bounds native queue storage independently of notification count; no Lua/Titan values cross this queue. Draining does not unregister a target or release its active-wait loop reference. The destination adapter validates live identity/epoch state and schedules continuations; it must not assume one callback per notification or resume Tasks reentrantly.
+
+```titan
+function external_wake_t:drain(output: foreign *unsigned long long, capacity: foreign unsigned int): (integer, foreign unsigned int)
+```
+
+**Roles:** output: OUTPUT caller-owned array of unsigned long long slots; capacity: INPUT maximum identities to copy in this batch.
+
+
+## external_wake_t:reserve
+
+Preallocate a `PREPARED` target for an opaque `foreign unsigned long long` identity without referencing the internal async handle. Return `(0, target)` or `(status, nil)` (`uv.EINVAL` or `uv.ENOMEM`). `target` is borrowed from the destination bridge's registration reference until exact unregister or detach; the pointer is not a GC root or an independent owner. Before cross-thread publication, take a separate [`native_external_wake_retain`](#native_external_wake_retain) producer reference. Preparation alone does not admit a wait or keep the loop alive.
+
+```titan
+function external_wake_t:reserve(identity: foreign unsigned long long): (integer, foreign *void)
+```
+
+**Roles:** identity: INPUT opaque waiter identity delivered on drain; returned target: OUTPUT borrowed registration pointer; the loop handle remains unreferenced until activate.
+
+
+## external_wake_t:unregister
+
+Retire a `PREPARED`, `ARMED`, `PENDING`, or `DELIVERED` target from this bridge in $O(1)$ time. Unlink any pending entry, decrement active waits if activated (`uv_unref` at zero), and consume the registration reference. Clear the destination identity-map entry and borrowed pointer first: success may free the target. A separately retained producer reference may outlive unregister and must eventually be released. Return `0`, or `uv.EINVAL` for nil, a live foreign-core target, or a live retired target. These checks do not make a dangling pointer or a second call using a freed borrow safe.
+
+```titan
+function external_wake_t:unregister(target: foreign *void): integer
+```
+
+**Roles:** target: INPUT/OUTPUT borrowed target pointer returned by reserve; consumes registration reference and unreferences when active waits reach zero.
 
 
 ## fs_event_t.new
@@ -623,30 +741,12 @@ function idle_t:as_handle_t(): handle_t
 ```
 
 
-## key_t.get_function
-
-Return the exact C-only native entry for this operation. Obtain this pointer and retain borrowed owners before starting native work. Foreign calls obey native synchronization/lifetime rules and cannot enter Titan or Lua.
-
-```titan
-function key_t.get_function(): foreign function(*void): *void
-```
-
-
 ## key_t.new
 
 Allocate stable native storage without initializing it. Call the matching init/create operation before use and explicitly destroy/delete only after every native user has stopped.
 
 ```titan
 function key_t.new(): key_t
-```
-
-
-## key_t.set_function
-
-Return the exact C-only native entry for this operation. Obtain this pointer and retain borrowed owners before starting native work. Foreign calls obey native synchronization/lifetime rules and cannot enter Titan or Lua.
-
-```titan
-function key_t.set_function(): foreign function(*void, *void): void
 ```
 
 
@@ -766,19 +866,10 @@ function loop_t:secondary_error_count(): integer
 
 ## mutex_t.create_native
 
-Allocate and initialize a process-heap `uv_mutex_t` not owned by any Lua state's GC. Destroy and free it with `native_mutex_destroy` only after all native users have stopped.
+Allocate and initialize a process-heap `uv_mutex_t` not owned by any Lua state's GC (returning `nil` if allocation or `uv_mutex_init` fails). Use [`native_mutex_lock`](#native_mutex_lock), [`native_mutex_trylock`](#native_mutex_trylock), and [`native_mutex_unlock`](#native_mutex_unlock) to operate on the returned pointer, and destroy and free it with [`native_mutex_destroy`](#native_mutex_destroy) only after all native users are quiescent.
 
 ```titan
 function mutex_t.create_native(): foreign *void
-```
-
-
-## mutex_t.lock_function
-
-Return the exact C-only native entry for this operation. Obtain this pointer and retain borrowed owners before starting native work. Foreign calls obey native synchronization/lifetime rules and cannot enter Titan or Lua.
-
-```titan
-function mutex_t.lock_function(): foreign function(*void): void
 ```
 
 
@@ -788,24 +879,6 @@ Allocate stable native storage without initializing it. Call the matching init/c
 
 ```titan
 function mutex_t.new(): mutex_t
-```
-
-
-## mutex_t.trylock_function
-
-Return the exact C-only native entry for this operation. Obtain this pointer and retain borrowed owners before starting native work. Foreign calls obey native synchronization/lifetime rules and cannot enter Titan or Lua.
-
-```titan
-function mutex_t.trylock_function(): foreign function(*void): int
-```
-
-
-## mutex_t.unlock_function
-
-Return the exact C-only native entry for this operation. Obtain this pointer and retain borrowed owners before starting native work. Foreign calls obey native synchronization/lifetime rules and cannot enter Titan or Lua.
-
-```titan
-function mutex_t.unlock_function(): foreign function(*void): void
 ```
 
 
@@ -872,9 +945,164 @@ function mutex_t:unlock()
 ```
 
 
+## native_barrier_wait
+
+Block the calling OS thread at a borrowed initialized `uv_barrier_t` pointer directly from C or Titan until all configured participants arrive. Returns a positive serial-thread indicator (`> 0`) for one participant and `0` for all others (not a negative error status). Retain the associated `barrier_t` owner across all native callers.
+
+```titan
+foreign function native_barrier_wait(native: *void): int
+```
+
+**Roles:** native: INPUT/OUTPUT borrowed initialized uv_barrier_t pointer; caller retains the associated owner across all native uses.
+
+
+## native_cond_broadcast
+
+Wake all OS threads waiting on a borrowed initialized `uv_cond_t` pointer directly from C or Titan. Retain the associated `cond_t` owner across all native callers.
+
+```titan
+foreign function native_cond_broadcast(native: *void): void
+```
+
+**Roles:** native: INPUT/OUTPUT borrowed initialized uv_cond_t pointer; caller retains the associated owner across all native uses.
+
+
+## native_cond_signal
+
+Wake one OS thread waiting on a borrowed initialized `uv_cond_t` pointer directly from C or Titan. Retain the associated `cond_t` owner across all native callers.
+
+```titan
+foreign function native_cond_signal(native: *void): void
+```
+
+**Roles:** native: INPUT/OUTPUT borrowed initialized uv_cond_t pointer; caller retains the associated owner across all native uses.
+
+
+## native_cond_timedwait
+
+Atomically release a locked `mutex` (`mutex_t:borrow()` or `mutex_t.create_native()`) and wait on a borrowed initialized `cond` (`cond_t:borrow()`) with a relative `unsigned long long` nanosecond timeout directly from C or Titan, reacquiring `mutex` before returning. Returns `0` when signaled or a negative libuv status such as `uv.ETIMEDOUT`; recheck the caller's predicate in a loop because spurious wakeups are permitted.
+
+```titan
+foreign function native_cond_timedwait(cond: *void, mutex: *void, timeout_ns: unsigned long long): int
+```
+
+**Roles:** cond: INPUT/OUTPUT borrowed initialized uv_cond_t pointer; mutex: INPUT/OUTPUT locked borrowed or process-heap initialized uv_mutex_t pointer; timeout_ns: INPUT relative unsigned nanosecond timeout.
+
+
+## native_cond_wait
+
+Atomically release a locked `mutex` (`mutex_t:borrow()` or `mutex_t.create_native()`) and block the calling OS thread on a borrowed initialized `cond` (`cond_t:borrow()`) directly from C or Titan, reacquiring `mutex` before returning. Check the caller's predicate in a loop because spurious wakeups are permitted.
+
+```titan
+foreign function native_cond_wait(cond: *void, mutex: *void): void
+```
+
+**Roles:** cond: INPUT/OUTPUT borrowed initialized uv_cond_t pointer; mutex: INPUT/OUTPUT locked borrowed or process-heap initialized uv_mutex_t pointer.
+
+
+## native_external_wake_is_notified
+
+Return native `int` **1** when a valid target is `PENDING` or `DELIVERED`,
+otherwise **0**, including NULL. The core mutex protects the phase snapshot.
+Notification remains latched after drain until exact unregister or GC detach;
+the query neither drains nor consumes the target, rearms it, or releases loop
+liveness. This is a boolean result, not a negative-status channel.
+
+```text
+foreign function native_external_wake_is_notified(target: *void): int
+```
+
+**Roles:** target: INPUT target protected for the complete call by its valid
+destination registration borrow or an independent native producer reference.
+
+This C-only query may run on a foreign thread; it reads no Lua/Titan GC value.
+A query does not acquire a reference or make a following access atomic with
+retirement. Never query a freed borrow after unregister/detach; a surviving
+retained reference may query the retired target and receives `0`.
+
+
+## native_external_wake_notify
+
+Notify an activated target directly from C or Titan while holding a producer reference for the entire call. An `ARMED` target is queued once and becomes `PENDING`; another `PENDING` notification repeats `uv_async_send` without adding a node. `DELIVERED` returns `0` without sending. Other accepted calls return the native send status. Queue publication precedes notification under the core mutex, so a negative send status does not retract the pending identity. NULL, `PREPARED`, `RETIRED`, or detached targets return `uv.EINVAL`; every non-NULL pointer must still have a valid reference. This entry accesses only native storage and never calls Lua.
+
+```titan
+foreign function native_external_wake_notify(target: *void): int
+```
+
+**Roles:** target: INPUT/OUTPUT retained activated external wake target pointer.
+
+
+## native_external_wake_release
+
+Release one native producer reference directly from C or Titan; NULL is a no-op. The last target reference frees that target, and the core is freed only after its owner reference and all target pins are gone. Producer references may survive unregister, native close completion, or destination state teardown, but neither retain Lua/Titan owners nor pin the provider image. Calls remain C-only and require the [provider to stay mapped](../../implementation/foreign-functions.md); a released pointer must not be reused.
+
+```titan
+foreign function native_external_wake_release(target: *void): void
+```
+
+**Roles:** target: INPUT/OUTPUT retained external wake target pointer, or NULL.
+
+
+## native_external_wake_retain
+
+Retain an additional native producer reference before publishing a reserved target to another OS thread; NULL is a no-op. Call only while an existing registration or producer reference still guarantees pointer validity. This pins the target and native core, not the destination bridge, handle, Lua state, or provider image. Pair each retain with exactly one release after all uses of that producer reference.
+
+```titan
+foreign function native_external_wake_retain(target: *void): void
+```
+
+**Roles:** target: INPUT/OUTPUT reserved external wake target pointer, or NULL.
+
+
+## native_external_wake_unregister
+
+Retire the target's destination registration directly through its native core,
+with the same unlink/ref-count semantics as
+[`external_wake_t:unregister`](#external_wake_tunregister). This C-ABI entry is
+**destination-loop-thread-only**, not a producer-thread escape hatch: retirement
+may call `uv_unref` on that loop's async handle.
+
+```text
+foreign function native_external_wake_unregister(target: *void): int
+```
+
+**Roles:** target: INPUT/OUTPUT valid registration borrow from `reserve`, or a
+separately retained live target; success consumes the registration reference.
+
+Clear destination identity-map entries and the registration borrow before
+calling. Return `0` on retirement, or `uv.EINVAL` for NULL or an already-retired
+target whose storage is still valid. A nonzero result does not consume a
+registration. Success may free a merely borrowed target immediately; never
+dereference it afterward. An independent producer reference survives and still
+requires its matching release. Do not call both unregister forms for one
+registration or mistake this operation for releasing a producer reference.
+
+
+## native_key_get
+
+Read the calling OS thread's stored `foreign *void` value for a borrowed initialized `uv_key_t` pointer (`key_t:borrow()`) directly from C or Titan, returning NULL (`nil`) when unset. This is OS-thread-local pointer storage, not `async.Task`-local state or pointee ownership.
+
+```titan
+foreign function native_key_get(key: *void): *void
+```
+
+**Roles:** key: INPUT borrowed initialized uv_key_t pointer; caller retains the associated owner across all native uses.
+
+
+## native_key_set
+
+Set the calling OS thread's stored `foreign *void` value (or NULL) for a borrowed initialized `uv_key_t` pointer (`key_t:borrow()`) directly from C or Titan. The caller owns the pointee's lifetime across overwrite, thread exit, and `key_delete`.
+
+```titan
+foreign function native_key_set(key: *void, value: *void): void
+```
+
+**Roles:** key: INPUT borrowed initialized uv_key_t pointer; value: INPUT borrowed native address stored for the calling OS thread, or NULL.
+
+
 ## native_mutex_destroy
 
-Destroy and free a process-heap mutex created with `mutex_t.create_native` after all native callers are quiescent. Passing NULL is a no-op.
+Destroy and free a process-heap mutex created with [`mutex_t.create_native`](#mutex_tcreate_native) after all native callers are quiescent. Passing NULL is a no-op. Never pass a borrowed [`mutex_t:borrow`](#mutex_tborrow) pointer to this function; GC-backed `mutex_t` owners use [`mutex_t:destroy`](#mutex_tdestroy) / [`mutex_destroy`](functions/threading.md#mutex_destroy).
 
 ```titan
 foreign function native_mutex_destroy(native: *void): void
@@ -885,7 +1113,7 @@ foreign function native_mutex_destroy(native: *void): void
 
 ## native_mutex_lock
 
-Lock a borrowed or process-heap initialized `uv_mutex_t` pointer directly from C or Titan.
+Block the calling OS thread until it acquires a borrowed (`mutex_t:borrow()`) or process-heap (`mutex_t.create_native()`) initialized `uv_mutex_t` pointer directly from C or Titan.
 
 ```titan
 foreign function native_mutex_lock(native: *void): void
@@ -894,9 +1122,20 @@ foreign function native_mutex_lock(native: *void): void
 **Roles:** native: INPUT/OUTPUT borrowed or process-heap initialized uv_mutex_t pointer.
 
 
+## native_mutex_trylock
+
+Attempt immediate acquisition of a borrowed (`mutex_t:borrow()`) or process-heap (`mutex_t.create_native()`) initialized `uv_mutex_t` pointer directly from C or Titan. Returns `0` when acquired or a negative libuv status such as `uv.EBUSY`.
+
+```titan
+foreign function native_mutex_trylock(native: *void): int
+```
+
+**Roles:** native: INPUT/OUTPUT borrowed or process-heap initialized uv_mutex_t pointer.
+
+
 ## native_mutex_unlock
 
-Unlock a borrowed or process-heap initialized `uv_mutex_t` pointer directly from C or Titan.
+Unlock a borrowed (`mutex_t:borrow()`) or process-heap (`mutex_t.create_native()`) initialized `uv_mutex_t` pointer directly from C or Titan.
 
 ```titan
 foreign function native_mutex_unlock(native: *void): void
@@ -905,20 +1144,158 @@ foreign function native_mutex_unlock(native: *void): void
 **Roles:** native: INPUT/OUTPUT borrowed or process-heap initialized uv_mutex_t pointer.
 
 
-## once_function
+## native_once
 
-Return the C-only native once entry. The once owner and callback arguments must outlive every participating native call; the callback cannot access Titan or Lua.
+Run a non-null C-only no-argument initializer `callback` at most once for a borrowed `once_t` guard pointer (`once_t:borrow()`) directly from C or Titan. `once_t.new()` initializes its guard in final stable storage (`UV_ONCE_INIT`) with no destroy or reset operation; `callback` may run on whichever OS thread wins the race and must never enter Lua or Titan.
 
 ```titan
-function once_function(): foreign function(*void, function(): void): void
+foreign function native_once(guard: *void, callback: function(): void): void
 ```
 
-Returns a native-safe structural entry taking an opaque once guard and a no-argument C callback. Initialize once_t with the native initializer, retain it through all callers, and never invoke Lua/Titan from that callback.
+**Roles:** guard: INPUT/OUTPUT borrowed initialized uv_once_t pointer; callback: INPUT non-null C-only initializer with no arguments or return value.
+
+
+## native_rwlock_rdlock
+
+Acquire a shared read lock on a borrowed initialized `uv_rwlock_t` pointer (`rwlock_t:borrow()`) directly from C or Titan, blocking the calling OS thread if an exclusive writer holds the lock. Retain the `rwlock_t` owner across all native callers.
+
+```titan
+foreign function native_rwlock_rdlock(native: *void): void
+```
+
+**Roles:** native: INPUT/OUTPUT borrowed initialized uv_rwlock_t pointer; caller retains the associated owner across all native uses.
+
+
+## native_rwlock_rdunlock
+
+Release a shared read lock on a borrowed initialized `uv_rwlock_t` pointer (`rwlock_t:borrow()`) directly from C or Titan.
+
+```titan
+foreign function native_rwlock_rdunlock(native: *void): void
+```
+
+**Roles:** native: INPUT/OUTPUT borrowed initialized uv_rwlock_t pointer; caller retains the associated owner across all native uses.
+
+
+## native_rwlock_tryrdlock
+
+Attempt immediate shared read-lock acquisition on a borrowed initialized `uv_rwlock_t` pointer (`rwlock_t:borrow()`) directly from C or Titan. Returns `0` when acquired or a negative libuv status such as `uv.EBUSY`.
+
+```titan
+foreign function native_rwlock_tryrdlock(native: *void): int
+```
+
+**Roles:** native: INPUT/OUTPUT borrowed initialized uv_rwlock_t pointer; caller retains the associated owner across all native uses.
+
+
+## native_rwlock_trywrlock
+
+Attempt immediate exclusive write-lock acquisition on a borrowed initialized `uv_rwlock_t` pointer (`rwlock_t:borrow()`) directly from C or Titan. Returns `0` when acquired or a negative libuv status such as `uv.EBUSY`.
+
+```titan
+foreign function native_rwlock_trywrlock(native: *void): int
+```
+
+**Roles:** native: INPUT/OUTPUT borrowed initialized uv_rwlock_t pointer; caller retains the associated owner across all native uses.
+
+
+## native_rwlock_wrlock
+
+Acquire an exclusive write lock on a borrowed initialized `uv_rwlock_t` pointer (`rwlock_t:borrow()`) directly from C or Titan, blocking the calling OS thread until readers and writers release it. Retain the `rwlock_t` owner across all native callers.
+
+```titan
+foreign function native_rwlock_wrlock(native: *void): void
+```
+
+**Roles:** native: INPUT/OUTPUT borrowed initialized uv_rwlock_t pointer; caller retains the associated owner across all native uses.
+
+
+## native_rwlock_wrunlock
+
+Release an exclusive write lock on a borrowed initialized `uv_rwlock_t` pointer (`rwlock_t:borrow()`) directly from C or Titan.
+
+```titan
+foreign function native_rwlock_wrunlock(native: *void): void
+```
+
+**Roles:** native: INPUT/OUTPUT borrowed initialized uv_rwlock_t pointer; caller retains the associated owner across all native uses.
+
+
+## native_sem_post
+
+Increment a borrowed initialized `uv_sem_t` pointer (`sem_t:borrow()`) directly from C or Titan, waking one waiting OS thread when applicable. Retain the `sem_t` owner across all native callers.
+
+```titan
+foreign function native_sem_post(native: *void): void
+```
+
+**Roles:** native: INPUT/OUTPUT borrowed initialized uv_sem_t pointer; caller retains the associated owner across all native uses.
+
+
+## native_sem_trywait
+
+Attempt immediate decrement of a borrowed initialized `uv_sem_t` pointer (`sem_t:borrow()`) directly from C or Titan. Returns `0` when decremented or a negative libuv status such as `uv.EAGAIN`.
+
+```titan
+foreign function native_sem_trywait(native: *void): int
+```
+
+**Roles:** native: INPUT/OUTPUT borrowed initialized uv_sem_t pointer; caller retains the associated owner across all native uses.
+
+
+## native_sem_wait
+
+Block the calling OS thread until a borrowed initialized `uv_sem_t` pointer (`sem_t:borrow()`) can be decremented directly from C or Titan. Retain the `sem_t` owner across all native callers.
+
+```titan
+foreign function native_sem_wait(native: *void): void
+```
+
+**Roles:** native: INPUT/OUTPUT borrowed initialized uv_sem_t pointer; caller retains the associated owner across all native uses.
+
+
+## native_thread_detach
+
+Detach a live heap token returned by [`create_native_thread`](#create_native_thread).
+Native success (`0`) consumes and frees the token; any nonzero status preserves
+it for the same caller owner. NULL returns `uv.EINVAL`. Serialize token
+retirement: no alias may join/detach a successfully consumed token.
+
+```text
+foreign function native_thread_detach(token: *void): int
+```
+
+Detach does **not** join the worker, free its argument, or establish that its
+native resources are quiescent. Code and argument storage must remain valid
+until independently established worker completion. The worker's native entry
+and argument copies do not borrow token storage, so successful detach can free
+the token while the worker is still running, including from the worker itself.
+The entry is C-only and may run without Lua state, provided its provider remains
+mapped. Never pass a checked `thread_t` owner or arbitrary thread identifier.
+
+
+## native_thread_join
+
+Join a live heap token returned by [`create_native_thread`](#create_native_thread),
+blocking the calling OS thread until native worker completion. Success (`0`)
+consumes and frees the token; a nonzero status preserves it for the same caller
+owner. NULL returns `uv.EINVAL`. Serialize join/detach and never reuse an alias
+after successful consumption.
+
+```text
+foreign function native_thread_join(token: *void): int
+```
+
+Do not hold a mutex needed by the worker across join or block a loop thread
+whose progress the worker needs. The C-only call does not enter Lua or retire
+argument resources itself; after successful join, their owner may dispose them
+knowing the worker is finished. A failure is not completion evidence. Never
+pass checked `thread_t` storage, a borrowed identity, or a raw-freed token.
 
 
 ## once_t.new
 
-Allocate stable native once storage with its initial once state. Retain it across all participating native callers; construction does not invoke the callback.
+Allocate the guard already initialized with `UV_ONCE_INIT` in its final stable owner storage. Retain it through every participating native call; construction does not invoke the callback. There is no separate init, reset, or destroy operation.
 
 ```titan
 function once_t.new(): once_t
@@ -927,7 +1304,7 @@ function once_t.new(): once_t
 
 ## once_t:borrow
 
-Borrow an opaque pointer to stable native storage for a C-only carrier. Retain the Titan owner until all native uses end; the pointer alone does not root it. Initialize the native lifetime before use and never let it outlive destroy/close.
+Borrow the guard already initialized by `once_t.new()` in final stable owner storage. The pointer does not root that owner; keep it rooted through all participating native calls, including contenders waiting for the initializer to finish. No additional init, reset, destroy, or close operation exists for `once_t`.
 
 ```titan
 function once_t:borrow(): foreign *void
@@ -1122,60 +1499,6 @@ function rwlock_t.new(): rwlock_t
 ```
 
 
-## rwlock_t.rdlock_function
-
-Return the exact C-only native entry for this operation. Obtain this pointer and retain borrowed owners before starting native work. Foreign calls obey native synchronization/lifetime rules and cannot enter Titan or Lua.
-
-```titan
-function rwlock_t.rdlock_function(): foreign function(*void): void
-```
-
-
-## rwlock_t.rdunlock_function
-
-Return the exact C-only native entry for this operation. Obtain this pointer and retain borrowed owners before starting native work. Foreign calls obey native synchronization/lifetime rules and cannot enter Titan or Lua.
-
-```titan
-function rwlock_t.rdunlock_function(): foreign function(*void): void
-```
-
-
-## rwlock_t.tryrdlock_function
-
-Return the exact C-only native entry for this operation. Obtain this pointer and retain borrowed owners before starting native work. Foreign calls obey native synchronization/lifetime rules and cannot enter Titan or Lua.
-
-```titan
-function rwlock_t.tryrdlock_function(): foreign function(*void): int
-```
-
-
-## rwlock_t.trywrlock_function
-
-Return the exact C-only native entry for this operation. Obtain this pointer and retain borrowed owners before starting native work. Foreign calls obey native synchronization/lifetime rules and cannot enter Titan or Lua.
-
-```titan
-function rwlock_t.trywrlock_function(): foreign function(*void): int
-```
-
-
-## rwlock_t.wrlock_function
-
-Return the exact C-only native entry for this operation. Obtain this pointer and retain borrowed owners before starting native work. Foreign calls obey native synchronization/lifetime rules and cannot enter Titan or Lua.
-
-```titan
-function rwlock_t.wrlock_function(): foreign function(*void): void
-```
-
-
-## rwlock_t.wrunlock_function
-
-Return the exact C-only native entry for this operation. Obtain this pointer and retain borrowed owners before starting native work. Foreign calls obey native synchronization/lifetime rules and cannot enter Titan or Lua.
-
-```titan
-function rwlock_t.wrunlock_function(): foreign function(*void): void
-```
-
-
 ## rwlock_t:borrow
 
 Borrow an opaque pointer to stable native storage for a C-only carrier. Retain the Titan owner until all native uses end; the pointer alone does not root it. Initialize the native lifetime before use and never let it outlive destroy/close.
@@ -1263,33 +1586,6 @@ Allocate stable native storage without initializing it. Call the matching init/c
 
 ```titan
 function sem_t.new(): sem_t
-```
-
-
-## sem_t.post_function
-
-Return the exact C-only native entry for this operation. Obtain this pointer and retain borrowed owners before starting native work. Foreign calls obey native synchronization/lifetime rules and cannot enter Titan or Lua.
-
-```titan
-function sem_t.post_function(): foreign function(*void): void
-```
-
-
-## sem_t.trywait_function
-
-Return the exact C-only native entry for this operation. Obtain this pointer and retain borrowed owners before starting native work. Foreign calls obey native synchronization/lifetime rules and cannot enter Titan or Lua.
-
-```titan
-function sem_t.trywait_function(): foreign function(*void): int
-```
-
-
-## sem_t.wait_function
-
-Return the exact C-only native entry for this operation. Obtain this pointer and retain borrowed owners before starting native work. Foreign calls obey native synchronization/lifetime rules and cannot enter Titan or Lua.
-
-```titan
-function sem_t.wait_function(): foreign function(*void): void
 ```
 
 

@@ -1,4 +1,4 @@
-local uv = import "titan.uv"
+local uv = import "uv"
 
 foreign function fill(argument: *void): void
   local item = argument as foreign *int
@@ -14,7 +14,7 @@ local function check(status: integer)
 end
 
 function main(args: {string}): integer
-  -- These are blocking native primitives. Use the returned C-only entries
+  -- These are blocking native primitives. Use the direct uv.native_* entries
   -- inside a native carrier; ordinary Titan wrappers run on the Lua thread.
   local mutex = uv.mutex_t()
   check(uv.mutex_init(mutex))
@@ -27,6 +27,14 @@ function main(args: {string}): integer
   uv.mutex_unlock(mutex)
   -- A timed wait can wake spuriously. Application code must check a predicate.
   if waited ~= 0 and waited ~= uv.ETIMEDOUT then check(waited) end
+
+  local heap_mutex = uv.mutex_t.create_native()
+  if heap_mutex == nil then return 1 end
+  defer uv.native_mutex_destroy(heap_mutex)
+  uv.native_mutex_lock(heap_mutex)
+  uv.native_mutex_unlock(heap_mutex)
+  if uv.native_mutex_trylock(heap_mutex) ~= 0 then return 1 end
+  uv.native_mutex_unlock(heap_mutex)
 
   local rwlock = uv.rwlock_t()
   check(uv.rwlock_init(rwlock))
@@ -48,7 +56,7 @@ function main(args: {string}): integer
 
   local once = uv.once_t()
   uv.once(once, initialize_once)
-  uv.once(once, initialize_once) -- The native initializer runs at most once.
+  uv.native_once(once:borrow(), initialize_once) -- The native initializer runs at most once.
 
   local packet: owned int[] = foreign int.new_array(1)
   local key = uv.key_t()

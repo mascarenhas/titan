@@ -365,8 +365,9 @@ until libuv reports terminal completion. Keep raw metatable manipulation in
 
 Application code should import the public `async` facade and the high-level
 `timer`, `fs`, `net`, `ssl`, `http`, and `os` modules. The synchronous `url`
-module is likewise application-level. The low-level `uv` module is runtime
-plumbing, not the general application API.
+module is also application-level. The `uv` module is the low-level libuv
+binding, meant for library adapters and programs that drive their own loop;
+prefer the high-level modules in application code.
 
 `async.run` schedules a Task and returns before its function runs. Observe
 spawned Tasks through their structured `status`, the bounded `any`/`race`/
@@ -396,22 +397,24 @@ may re-enter `uv_run`. Follow the
 [async runtime contract](implementation/libuv-runtime.md) for continuation
 delivery and native retirement.
 
-Use Task terminal listeners for bounded Task composition. Inspect initial
-statuses first, create one fresh private `async.ResumeToken` for the composition
-invocation, then register a distinct listener that captures that record directly
-on each still-relevant named Task. Call every returned idempotent remover in
-`defer`, then call `async.suspend(token)` once. A deciding listener calls
-`Task:resume(token)`, which synchronously accepts one coalesced entry in the
-Runtime ready queue and never resumes the target inline. Repeated calls with
-the correct token coalesce; a different token raises in its caller instead of
-waking the Task. The optional token source is diagnostic only. The Runtime's
-shared zero timer drains a finite FIFO batch and clears the old queue entry
-before entering the continuation; external cancellation of the suspended Task
-uses the stored token and the same wake. Tokens authorize
-only explicit `suspend`/`Task:resume(token)` coordination: native callbacks keep their
-source-private tokenless continuation path. Do not collect heterogeneously typed
-combinator operands into a Task Array or add a native polling/phase-fence
-protocol or scheduler join protocol.
+Use terminal listeners to compose a bounded group of Tasks:
+
+1. Check each Task's current status first.
+2. Create one fresh private `async.ResumeToken` for this invocation.
+3. Register a distinct listener on each still-relevant Task. Each listener
+   captures the token directly.
+4. Call every returned remover in `defer`. The removers are idempotent.
+5. Call `async.suspend(token)` once.
+
+The listener that decides the outcome calls `Task:resume(token)`. That call
+accepts one coalesced entry in the Runtime's ready queue and never resumes the
+target inline. Repeated calls with the correct token coalesce, and a different
+token raises in the caller and wakes nothing. The token's `source` text is for
+diagnostics only. Cancelling the suspended Task uses the stored token and the
+same wake. Tokens authorize only explicit `suspend` and `Task:resume(token)`
+coordination; native callbacks resume their Task through their own private
+path. Do not collect Tasks of different types in one Array, and do not add a
+polling loop, a phase fence, or a separate join protocol.
 
 Low-level contributors must classify a new libuv binding as synchronous,
 one-shot, or persistent multi-shot before adding state. Follow
@@ -431,6 +434,36 @@ concurrently. Use `os.spawn` instead when the program needs direct executable
 and argv control, separate stdout and stderr, or explicit capture/inheritance
 options. A full operating-system pipe is a normal backpressure condition, not
 a reason to make process I/O blocking.
+
+## Pick the right cross-thread tool
+
+Each thread started with `thread.spawn*` has its own Lua state and event loop.
+Nothing is shared, so every value is copied or moved. Choose the tool by what
+must survive:
+
+- Use `thread.channel<|T|>` for a stream of messages. It is a bounded FIFO with
+  backpressure and drops nothing.
+- Use `async.channel<|T|>` between Tasks in the same state. It copies nothing.
+- Use `async.Receiver` or `async.PacketReceiver` to wake another state with the
+  latest value. Both coalesce: a newer value replaces an unread one.
+  `Receiver` copies plain values and cannot carry channel endpoints.
+  `PacketReceiver` moves a `transfer.Packet`, which can carry them.
+
+Observe a thread with `Thread:join()`, or compose `Thread:task()` with the
+`async` combinators. Cancelling the proxy Task only requests cancellation of the
+thread. Release anything the thread still uses only after the proxy is terminal
+or `join()` returns.
+
+Native resources that move by manual handoff, such as `net.Connection`,
+`ssl.Connection`, `http.Exchange`, `websocket.Connection`, and `fs.File`, are
+not released when a packet is discarded. Adopt each payload exactly once, or
+recover it with the type's `discard_transfer_payload` where one exists. The
+[shared manual-handoff rules](language/standard-library-transfer.md#shared-manual-handoff-rules)
+give the details. Release a `transfer.encode_message` packet with
+`transfer.discard_message` or `Packet:close()`, never with `ffi.free`.
+
+The `uv` locks block the OS thread. Do not hold one across a Task suspension;
+use channels to coordinate instead.
 
 ## Design one logical module before choosing its files
 
@@ -467,12 +500,11 @@ local strings = import "string"
 
 Use an alias such as `strings` when the short name is also a type keyword.
 The short-name set is `coroutine`, `uv`, `async`, `timer`, `io`, `fs`, `net`,
-`ssl`, `url`, `http`, `websocket`, `os`, `path`, `peg`, `string`, `test`, `lua`, `math`, `gc`,
-`iteration`, `reflect`, `sqlite3`, and `json`. This rule applies
-inside
-standard-library sources too: spelling one of those imports as `"titan.fs"`,
-`"titan.ssl"`, or a
-similar qualified name is a style violation, not extra precision.
+`ssl`, `url`, `http`, `websocket`, `os`, `path`, `peg`, `string`, `test`, `lua`,
+`math`, `gc`, `iteration`, `reflect`, `sqlite3`, `json`, `protobuf`, `transfer`,
+and `thread`. The rule applies inside standard-library sources too: spelling one
+of those imports as `"titan.fs"`, `"titan.ssl"`, or another qualified name is a
+style violation, not extra precision.
 Lua loads the same logical modules with qualified names:
 
 ```lua
@@ -523,6 +555,15 @@ runner is not a build system or an external supervisor.
 
 ## Keep Lua and C machinery behind narrow audited boundaries
 
+Treat `foreign` calls, source `foreign function` bodies, and raw-pointer handoff
+as an explicit unsafe boundary, comparable to Rust's `unsafe`. Titan code that
+uses none of them should be well-behaved. The foreign code and its callers
+uphold the pointer, lifetime, ownership, ABI, and threading contracts of the
+APIs they use. Titan does not contain arbitrary native behavior and does not
+check that a raw pointer is usable, so do not add speculative guards against
+native misuse. Keep the boundary small, and make the public Titan API behave
+correctly for ordinary callers.
+
 Public standard-library APIs should expose ordinary Titan types. Keep Lua API
 state, borrowed stack values, raw C pointers, local FFI records, and libuv
 controls inside the low-level module that owns their lifetime. Convert to a
@@ -569,6 +610,13 @@ Examples should compile as written and use the same module identities that
 real programs use. Distinguish binary payloads from text paths, byte indices
 from Unicode concepts, direct executable spawning from shell execution, and a
 concrete resource's guarantees from an Interface's method shape.
+
+Write the language manual in terms of what a caller can observe. Put mechanism
+(private field names, internal state names, the order of private callbacks) in
+the implementation chapters. Do not record test status, release gates, issue
+numbers, or change history in a manual; state the current behavior. Build
+examples with an output directory (`titanc -o out ...`) so generated files stay
+out of the source tree.
 
 When a user-visible language feature changes, update both the language and
 implementation manuals. When a standard-library API changes, update its

@@ -18,6 +18,15 @@ it binds: Titan cannot stop a C function from writing past a buffer, storing a
 pointer into a Titan string, freeing memory it does not own, or crashing the
 process.
 
+Treat the FFI as an explicit unsafe boundary, comparable to Rust's `unsafe`.
+Calls into C, source [`foreign function`](foreign-functions.md) bodies, and
+raw-pointer handoff are inside that boundary. Titan code that uses none of them
+is expected to be well-behaved. The foreign code and every native caller of an
+API uphold that API's pointer, lifetime, ownership, ABI, and threading
+contracts. Titan does not contain arbitrary native behavior and does not
+validate that a raw pointer is usable; the compiler checks the C types, calls,
+and conversions it can establish statically and lowers valid Titan correctly.
+
 Named tag-only aggregates, automatic C storage, contextual object-pointer
 casts, and C-mode operators are covered in
 [C FFI declarations and expressions](c-ffi-expressions.md). Implementation
@@ -1013,8 +1022,9 @@ for cache and promotion details.
 * Owned allocation does not support `void`, incomplete aggregate types, or C
   array typedef payloads. A flexible-array-member structure uses only
   `foreign T.new(count)`; `T.new_array` remains unavailable for it.
-* C adopted pointers/lifetimes are parked for a later design; v1 has borrowed C
-  pointers and Titan-owned userdata only.
+* Adopting externally allocated C pointers and their lifetimes into Titan
+  ownership is not supported. Titan code can use only borrowed C pointers and
+  Titan-owned userdata.
 * All headers in one module share the C ordinary-identifier and tag namespaces.
   Titan does not rename C declarations. The combined C parser builds `ffi`,
   while the configured native compiler checks the real declarations and

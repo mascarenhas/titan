@@ -4,8 +4,8 @@ The `fs` standard module provides asynchronous file and path operations with a
 synchronous-looking Titan interface. Titan imports the canonical module with
 `import "fs"`; Lua loads the same module identity with `require "titan.fs"`.
 The current supported hosts are Linux and macOS. The
-[libuv setup instructions](../../README.md#libuv-setup) cover the default
-pinned build and optional system-package mode on both platforms.
+[installation chapter](installation.md#libuv) explains how Titan builds its
+pinned libuv on both platforms. System libuv is not supported.
 
 ```text
 record File
@@ -191,11 +191,14 @@ wait or require a running Task; subsequent file I/O retains its usual Task
 requirement.
 
 These hooks implement the manual resource-handoff contract of
-[`async.TransferValue`](async-io.md#transfer-values). Deliver and adopt the
-payload exactly once in this process, and close the adopted File explicitly.
-The caller owns recovery after failed delivery. Copying the payload does not
-duplicate its descriptor, and discarding it does not close the descriptor.
-Replaying or forging a payload can close or use an unrelated descriptor.
+[`async.TransferValue`](async-io.md#transfer-values) under the
+[shared manual-handoff rules](standard-library-transfer.md#shared-manual-handoff-rules).
+Deliver and adopt the payload exactly once in this process, and close the
+adopted File explicitly. File has no public `discard_transfer_payload`: after a
+failed delivery, adopt the payload locally with `File.from_transfer_payload` and
+close the File. Copying the payload does not duplicate its descriptor, and
+discarding it does not close the descriptor. Replaying or forging a payload can
+close or use an unrelated descriptor.
 
 ## Whole-file helpers
 

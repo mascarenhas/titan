@@ -81,9 +81,10 @@ closes the underlying state. Calling `detach` on a busy or already closed
 
 ### Transferring values
 
-The public [`async.TransferValue`](async-io.md#transfer-values) union is owned
-by `titan.async`. Import `async` to construct its variants. Only these variants
-cross the independent-state boundary:
+The canonical [`transfer.TransferValue`](standard-library-transfer.md) union is
+defined by `titan.transfer`; `async.TransferValue` in the signatures above is a
+transparent alias of that same type. Import `transfer` or `async` to construct
+its variants. Only these variants cross the independent-state boundary:
 
 | Variant | Argument in the independent state | Result mapped to this variant |
 | --- | --- | --- |
@@ -100,14 +101,14 @@ cross the independent-state boundary:
 | `is_closure(module, entry, data)` | a reconstructed Titan closure with copied captures | a Titan closure, including an adjusted closure or bound method |
 | `is_record_payload(module, name, data)` | a record reconstructed by its static transfer hook | a public record with the custom transfer-hook pair |
 
-A result that is already an origin-state `async.TransferValue` uses that
+**Existing policies.** A result that is already an origin-state `async.TransferValue` uses that
 variant's policy. For example, returning `TransferValue.is_string(bytes)`
 copies those bytes, and returning `TransferValue.is_record(module, name, data)` carries
 that existing serialized payload without serializing the wrapper. Pointer and
 state variants preserve their explicitly selected kind. Custom record payloads
 likewise retain their supplied module, name, and opaque bytes.
 
-Public records with the exact synchronous
+**Custom records.** Public records with the exact synchronous
 [`to_transfer_payload` / `from_transfer_payload` pair](async-io.md#custom-record-transfer)
 use that protocol before structural protobuf encoding. Their fields may be
 private. The returned `is_record_payload` is an inspectable packet;
@@ -119,13 +120,28 @@ native preload loader and retries lookup. It does not infer a module name from
 the record's dotted name. The reconstruction hook interprets the bytes, using
 the same descriptor as its encoder when it uses an anonymous protobuf message.
 
-The programmer owns native resource handoff inside these hooks. For example,
-clear or detach an origin wrapper's close authority before its collection could
-close the socket or file descriptor being passed. Transport copies payloads and
-borrows explicit native tokens; it neither moves native ownership automatically
-nor rolls back hook side effects if conversion or message admission later fails.
+**No packet attachments.** These calls use Lua's separate native `titan_lua_value` carrier, not an owned
+`transfer.Packet`. `Lua:run`, `run_async`, and both Reader-loading companions
+open no packet attachment/claim scope and cannot transport packet-attached
+resources such as `thread.Sender` or `thread.Receiver`, including endpoints
+nested in records, opaque hook bytes, or closure captures. Endpoint policy
+conversion without a matching enclosing packet scope raises. Conversion inside
+such a scope may reuse its packet, but its index bytes own nothing and do not
+upgrade this separate Lua carrier into an attachment transport. Use a
+[`thread` packet route](standard-library-thread.md#closing-cloning-and-transferring-endpoints)
+or an [`async.PacketReceiver`](async-io.md#owned-packet-receivers) when endpoint
+ownership must cross states.
 
-Titan closures transfer automatically when returned directly. Their owning
+**Manual handoff.** The programmer owns safe native resource handoff inside supported custom hooks.
+Transport copies opaque payloads and borrows explicit native tokens; it neither
+moves native ownership automatically nor rolls back hook side effects if
+conversion or later execution fails. Only the specific types listed in the
+[manual-handoff inventory](standard-library-transfer.md#manual-handoff-api-inventory)
+provide those hooks; other filesystem, process, stream, and SQLite objects do
+not acquire a handoff API by using this carrier. Deliver each detached payload
+to exactly one adopter or use its documented recovery/disposal path.
+
+**Closures.** Titan closures transfer automatically when returned directly. Their owning
 modules are initialized through the receiving state's native preload table
 before reconstruction. A missing preload is an error. The loader returns its
 memoized module and does not depend on global `require`.
@@ -138,7 +154,7 @@ an immutable native entry token, and capture bytes. Calling `to_value()` builds
 a callable owned by the caller's collector. The packet survives the independent
 state closing, subject to the lifetime of any borrowed native pointers it contains.
 
-Public records without custom transfer hooks, and public unions, are serialized through
+**Records and unions.** Public records without custom transfer hooks, and public unions, are serialized through
 [`protobuf.serialize`](standard-library-protobuf.md). All record fields and
 union variants must be public, and the encountered value graph must contain
 only supported data and no cycles. Unsupported nominal values raise; they do
@@ -150,7 +166,7 @@ runs. `TransferValue:to_value()` uses the defining module's preload loader on a
 registry miss; direct `protobuf.deserialize_nominal` still requires the type
 to be initialized already.
 
-Argument and result counts preserve nil positions. Results follow Titan's
+**Counts and results.** Argument and result counts preserve nil positions. Results follow Titan's
 ordinary flexible-return demand: a finite consumer takes the requested prefix,
 while materializing an open result run has the usual 200-value limit. The
 independent-state API does not impose that limit on a larger Lua result run
@@ -164,7 +180,7 @@ Foreign userdata metatables, uservalues, and ownership are never copied.
 A null `is_function` pointer is rejected before execution or when encountered
 in an origin-state transfer wrapper.
 
-Each side allocates its own strings from the exact bytes; neither side installs
+**Strings and borrowed pointers.** Each side allocates its own strings from the exact bytes; neither side installs
 the other state's `TString` in its own collector. Serialized nominal graphs
 also allocate fresh destination values. The three pointer variants are borrowed addresses. They
 neither retain nor validate the originating object or native code. Keep a
@@ -175,7 +191,7 @@ Native memory and C functions likewise require an independently valid
 lifetime. Concurrent access to pointed-to mutable data must be synchronized
 by the caller.
 
-Load errors, execution errors, and unsupported results raise on the Titan
+**Errors.** Load errors, execution errors, and unsupported results raise on the Titan
 caller. The independent state's stack is restored to its entry height on
 success and failure, preserving any preexisting stack values, so a failed call
 does not prevent a later call. Effects already made

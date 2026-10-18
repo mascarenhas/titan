@@ -1,16 +1,20 @@
 # Titan quick tour
 
-Titan is a statically typed, ahead-of-time compiled sister language to Lua.
-Its syntax is intentionally familiar to Lua programmers, but its modules,
-records, containers, calls, and Lua boundaries all have statically checked
-types.
+Titan is a statically typed language that compiles ahead of time to native code
+and runs inside the Lua runtime. The syntax is close to Lua's, but modules,
+records, containers, calls, and the boundary with Lua all have static types.
 
-This tour uses only APIs implemented by the ABI-2 compiler and standard
-library. It assumes that Titan has been installed as described in the
-[README](../README.md#install), and that the installation's `bin` directory is
-first on `PATH`. Run every `titanc` command from the directory that contains
-the example source tree: the compiler accepts dotted module names, not source
-paths.
+This tour walks through short programs that use the compiler and standard
+library as they exist today. It assumes Titan is
+[installed](language/installation.md) and that the installation's `bin`
+directory is first on `PATH`.
+
+Two conventions apply to every command below:
+
+- `titanc` takes dotted module names, not file paths. Run it from the directory
+  that holds the source: `titanc hello` compiles `hello.titan`.
+- `-o out` puts all generated files under `out/`, so your source directory stays
+  clean. The executable for module `hello` is `out/hello`.
 
 ## A first executable
 
@@ -41,34 +45,34 @@ end
 Compile and run it:
 
 ```sh
-titanc hello
-./hello Titan
+titanc -o out hello
+./out/hello Titan
 test "$(cat greeting.txt)" = 'Hello, Titan!!!'
 ```
 
-This small program already shows several Titan rules:
+What this program shows:
 
-- an import is a local module alias;
-- every parameter and record field has a type;
-- top-level functions are exported unless they are `local`;
-- a record is nominal and has a synthesized positional `new` function;
-- `args` is an Array, so its first user argument is at index 1 and an absent
-  element produces an option value;
-- `or` handles that absent value without an explicit unwrap; and
-- importing `fs` installs the standalone async bootstrap, so asynchronous
-  filesystem operations retain their direct, synchronous-looking spelling in
-  `main`.
+- `import` binds a module to a local name.
+- Every parameter and record field has a type.
+- Top-level functions are exported unless they are `local`.
+- A record is a distinct named type. It gets a `new` function that takes the
+  fields in order.
+- `args` is an Array of the command-line arguments. `args[1]` is the first one,
+  and reading a missing element gives an option value. `or` supplies the default
+  without an explicit unwrap.
+- A module that defines `function main(args: {string}): integer` builds into an
+  executable. Importing `fs` makes `main` run as an async task, so file
+  operations in `main` look like ordinary blocking calls.
 
-`strings.rep` has a third `separator: string?` parameter. The two-argument call
-is legal because an omitted fixed argument is filled with `nil`, which that
-option type accepts. This is Titan's general fixed-call rule, not a special
-default-argument syntax.
+`strings.rep` has a third parameter, `separator: string?`. You can omit it
+because a missing fixed argument is filled with `nil`, which an option type
+accepts. This is Titan's general call rule, not a default-argument feature.
 
 ## Values, containers, and options
 
-An Array `{T}` uses positive integer positions and may contain holes. A Map
-`{K: V}` is a key/value dictionary. They are distinct types and have distinct
-run-time representations.
+An Array `{T}` is indexed by positive integers and may contain holes. A Map
+`{K: V}` is a key/value dictionary. They are different types with different
+runtime representations.
 
 ```titan
 function frequencies(words: {string}): {string: integer}
@@ -87,14 +91,14 @@ function titan_count(words: {string}): integer
 end
 ```
 
-An indexed read has an option type because the position or key may be absent.
-An unmarked local such as `word` immediately unwraps the option and raises if
-the Array has a hole there. The marked local `count?` preserves absence so the
-next line can handle it. Use that distinction deliberately: do not let an
-unintended nil travel deeper into the program.
+An indexed read has an option type, because the position or key may be absent.
+A plain local such as `word` unwraps the option at once and raises an error if
+the Array has a hole there. The marked local `count?` keeps the absence so that
+the next line can handle it. Choose between them on purpose, so that an
+unexpected `nil` does not travel further into the program.
 
-A method receiver is another automatic unwrap site. After a nil guard, call
-the method directly on the option; no cast is needed:
+A method receiver also unwraps automatically. After a `nil` check, call the
+method on the option directly:
 
 ```titan
 local strings = import "string"
@@ -107,12 +111,12 @@ function whole_match(expression: strings.Regex,
 end
 ```
 
-If the receiver were nil, the call itself would raise. Here the preceding
-guard makes that automatic unwrap known-safe.
+If `found` were still `nil`, the call itself would raise. Here the `nil` check
+above it makes the unwrap safe, so no cast is needed.
 
-For an Array, `#values` is the greatest present positive index, not the number
-of present elements. Deleting an interior position does not reduce the length
-while a later position remains present:
+For an Array, `#values` is the highest present positive index, not the number of
+present elements. Setting an interior position to `nil` does not shorten the
+Array while a later position is still present:
 
 ```titan
 function length_with_a_hole(): integer
@@ -122,7 +126,7 @@ function length_with_a_hole(): integer
 end
 ```
 
-Records model fixed nominal data. Unions model a closed set of tagged cases:
+A record holds fixed named fields. A union is a closed set of tagged cases:
 
 ```titan
 union Lookup
@@ -142,14 +146,14 @@ function describe(result: Lookup): string
 end
 ```
 
-Construct these values with `Lookup.found("Titan")` and `Lookup.missing()`.
-Union constructors are positional, and each `when` arm is a full block with
-ordinary `defer` and `catch` behavior.
+Build these values with `Lookup.found("Titan")` and `Lookup.missing()`. Union
+constructors take their arguments by position. Each `when` arm is a full block,
+so `defer` and `catch` work inside it as anywhere else.
 
 ## Functions and result lists
 
-A function's return annotation describes its complete result list. Omitting
-the annotation means zero results, not one nil result:
+A return annotation describes the whole result list. Leaving it out means zero
+results, not one `nil`:
 
 ```titan
 function divmod(numerator: integer,
@@ -163,9 +167,8 @@ function quotient(): integer
 end
 ```
 
-Some APIs return a run whose length is chosen at run time. The string module's
-`byte` operation is one example, and an Array constructor is an open result
-sink:
+Some functions return a run of values whose length is known only at run time.
+`string.byte` is one, and an Array constructor accepts such a run:
 
 ```titan
 local strings = import "string"
@@ -175,12 +178,12 @@ function bytes(text: string): {integer}
 end
 ```
 
-The final call expands into every byte that actually exists. A finite
-consumer instead sees each requested flexible position as optional. Only the
-last expression of an expression list expands; parentheses force a call to
-one result. See [Functions](language/functions.md), [variadic
-parameters](language/variadic-parameters.md), and [flexible
-returns](language/flexible-returns.md) for the complete adjustment rules.
+The final call expands into every byte that exists. A fixed-size consumer sees
+each requested position as optional instead. Only the last expression in a list
+expands, and parentheses reduce a call to one result. See
+[Functions](language/functions.md),
+[variadic parameters](language/variadic-parameters.md), and
+[flexible returns](language/flexible-returns.md) for the full rules.
 
 ## Modules and Lua
 
@@ -196,35 +199,33 @@ local function private_suffix(): string
 end
 ```
 
-With no `main`, the module builds as a library:
+It has no `main`, so it builds as a library. Lua loads it through the generated
+loader in `out/`:
 
 ```sh
-titanc greeting
-lua -e 'print(require("greeting").make("Lua"))'
+titanc -o out greeting
+LUA_PATH='out/?.lua;;' LUA_CPATH='out/?.so;;' \
+  lua -e 'print(require("greeting").make("Lua"))'
 ```
 
 Another Titan module uses `local greeting = import "greeting"`. Lua uses
-`require "greeting"` for this application module. Standard-library names are
-different: Titan uses established short imports such as `import "fs"`,
-`import "url"`, and `import "http"`, while Lua uses the qualified identities
-`require "titan.fs"`, `require "titan.url"`, and `require "titan.http"`.
+`require "greeting"`. Standard-library modules are named differently in the two
+languages: Titan uses short names (`import "fs"`, `import "url"`), and Lua uses
+qualified names (`require "titan.fs"`, `require "titan.url"`).
 
-A dotted module name maps to directories: `import "app.model"` resolves the
-logical module `app.model`. One logical module may be a flat source
-`app/model.titan` or a folder whose main source is
-`app/model/model.titan`. Folder contributors share the same module namespace;
-they are not independently importable submodules. The
-[folder-module chapter](language/folder-modules.md) gives the exact layout and
-ordering rules.
+A dotted module name maps to directories. `import "app.model"` finds either
+`app/model.titan` or a folder whose main file is `app/model/model.titan`. The
+other `.titan` files in that folder belong to the same module. They share its
+namespace and cannot be imported on their own. See
+[Folder modules](language/folder-modules.md).
 
-## Errors and deterministic cleanup
+## Errors and cleanup
 
-Run-time errors are ordinary Lua error values. Raise one explicitly with
-`raise`, attach `catch` directly to an existing block, and schedule deterministic
-cleanup with `defer`. There is no `try` keyword or user-written `finally` block.
+Errors are ordinary Lua error values. Use `raise` to raise one, `catch` to handle
+errors from a block, and `defer` to schedule cleanup. There is no `try` and no
+user-written `finally`.
 
-The most common cleanup pattern is to defer a close immediately after a
-resource has been acquired:
+The usual pattern is to defer the close right after acquiring a resource:
 
 ```titan
 local fs = import "fs"
@@ -245,22 +246,21 @@ function checked_first_line(path: string): string?
   return first_line(path)
 catch
   -- `error: value` and `traceback: string` are available here.
-  raise -- preserve the original value and traceback
+  raise -- keep the original error value and traceback
 end
 ```
 
-`defer` runs on fallthrough, return, break, and error. Several defers in one
-block run last-in-first-out. A cleanup error replaces the pending return or
-error. Every structural `io.Closer`
-accepts repeated `close()` calls safely; consult the concrete resource for
-its post-close read/write and cancellation behavior.
+`defer` runs when the block ends normally, returns, breaks, or raises. Several
+defers in one block run last-in, first-out. An error in a deferred statement
+replaces the pending return or error. Every `io.Closer` accepts repeated
+`close()` calls. Check the concrete resource for what reads, writes, and
+cancellation do after close.
 
 ## Tasks and asynchronous work
 
-The public asynchronous facade is `async`; `timer`, `fs`, `net`, `ssl`,
-`http`, and `os` build on the same Runtime. The synchronous `url` parser is
-also reusable without opening a connection. In a standalone program the event
-loop is driven automatically:
+`async` is the public API for tasks. `timer`, `fs`, `net`, `ssl`, `http`, and
+`os` run on the same event loop, and the `url` parser is plain synchronous code.
+In an executable, the program drives the event loop for you:
 
 ```titan
 local async = import "async"
@@ -276,31 +276,32 @@ function main(args: {string}): integer
     async.yield()
     results["right"] = "ready"
   end)
-  -- The standalone Runtime stays alive until both Tasks finish, even though
-  -- main itself returns first.
+  -- The program keeps running until both tasks finish, even though
+  -- main returns first.
   return 0
 end
 ```
 
 ```sh
-titanc concurrent
-./concurrent
+titanc -o out concurrent
+./out/concurrent
 ```
 
-`async.run` schedules a Task but does not run it inline. A Task executes in a
-libuv callback until it finishes, raises, or starts another asynchronous
-operation and yields. `async.yield()` is an explicit fairness turn; CPU-heavy
-code that never yields blocks the loop. An uncaught Task error is logged with
-its traceback and ends only that Task; `Task:status()` retains that exact
-failure and traceback. Fixed-arity `any`, `race`, `all`, and `join`
-combinators coordinate bounded Task groups without cancelling unfinished
-inputs. The other Tasks continue. Close resources explicitly. Runtime
-shutdown drains and closes its libuv handles,
-but closing a process watcher does not terminate or reap its child, and raw
-File descriptors remain caller-owned.
+`async.run` schedules a task and returns without running it. A task runs inside
+a libuv callback until it finishes, raises an error, or starts an asynchronous
+operation and waits. Tasks never run at the same time, and nothing preempts a
+task: code that loops without waiting blocks everything, so call `async.yield()`
+in long CPU-bound loops.
 
-A Lua host drives the same Runtime explicitly and uses qualified module
-names:
+- An uncaught error in a task is logged with its traceback and ends only that
+  task. `Task:status()` keeps the error and traceback.
+- The fixed-arity combinators `any_*`, `race_*`, `all_*`, and `join*` wait on a
+  bounded group of tasks. They do not cancel the tasks that are still running.
+- Close resources yourself. Shutting down the event loop closes its libuv
+  handles, but closing a process watcher does not kill or reap its child, and
+  you must close raw file descriptors yourself.
+
+A Lua program runs the event loop explicitly and uses qualified module names:
 
 ```lua
 local async = require "titan.async"
@@ -316,10 +317,82 @@ assert(task:status():as_string() == "succeeded")
 assert(result == "done")
 ```
 
+## Threads
+
+`thread` runs a function on its own operating-system thread. Each thread has a
+separate Lua state, so values are copied between threads and never shared.
+Threads talk through bounded channels:
+
+```titan
+local thread = import "thread"
+
+function main(args: {string}): integer
+  local tx, rx = thread.channel<|integer|>(4)
+  local producer = thread.spawn_one(function (out: thread.Sender<|integer|>): nil
+    for i = 1, 5 do out:send(i * i) end
+    out:close()
+    return nil
+  end, tx)
+
+  local total = 0
+  for _, square in rx:incoming() do
+    total = total + square
+  end
+  producer:join()
+  if total == 55 then return 0 else return 1 end
+end
+```
+
+`spawn_one` copies the function and its argument when it is called, and raises
+an error in the caller if either cannot be copied. `send` waits when the channel
+is full. `incoming()` ends once the channel is closed and empty. `join()` waits
+until the thread has finished and been joined, and returns its outcome without
+raising. See the [thread chapter](language/standard-library-thread.md) for
+thread groups, cancellation, and sending channel endpoints between threads.
+
+## Native tests
+
+A test is a public function that takes one `test.Context` and whose name starts
+with `test_`. `titanc --test` finds these functions and links them into an
+executable. You do not write a `main`. Save a module as `calc.titan`:
+
+```titan
+function twice(x: integer): integer
+  return x * 2
+end
+```
+
+And its tests as `calc_test.titan`:
+
+```titan
+local test = import "test"
+local calc = import "calc"
+
+function test_twice(context: test.Context)
+  test.assert(calc.twice(21) == 42, "twice(21) should be 42")
+end
+
+function test_twice_of_negative(context: test.Context)
+  test.assert(calc.twice(-4) == -8)
+end
+```
+
+```sh
+titanc -o out --test calc_test
+./out/calc_test
+./out/calc_test --filter='test_twice$' --verbose
+```
+
+`test.assert` raises an error when its condition is false. The runner reports
+each failure with its source location and exits with status 1 if any test
+failed. A run that finds no tests also exits 0, so check that the summary lists
+the tests you expect. See [Testing Titan code](language/standard-library-test.md)
+for subtests, cleanup, skipping, and async tests.
+
 ## Files, strings, PEGs, and generic iteration
 
-This executable combines the shipped filesystem, byte-string, regex, and PEG
-APIs. Save it as `parse_name.titan`:
+This executable uses the file, string, regex, and PEG libraries together.
+Save it as `parse_name.titan`:
 
 ```titan
 local fs = import "fs"
@@ -355,32 +428,29 @@ end
 
 ```sh
 printf 'Titan language\n' > name.txt
-titanc parse_name
-./parse_name name.txt
+titanc -o out parse_name
+./out/parse_name name.txt
 test "$(cat name.out)" = TITAN
 ```
 
-Strings are binary byte sequences. Regex and PEG character classes are not
-implicitly Unicode. `Pattern:match` is anchored at its initial position,
-whereas `Regex:match` performs a leftmost search unless its expression is
-anchored. `Regex:gmatch` supplies the iterator to Titan's generic `for`; its
-missing state, initial-control, and close tuple slots are filled with nil.
+Strings are byte sequences, not Unicode text, and regex and PEG character classes
+work on bytes. `Pattern:match` matches only at the start of the subject.
+`Regex:match` searches for the leftmost match unless the expression is anchored.
+`Regex:gmatch` returns the iterator for Titan's generic `for`, and fills the
+loop's missing state, initial-control, and close slots with `nil`.
 
-For ready-made HTTP URL parsing, `local url = import "url"` exposes
-`url.parse(source): (url.Url?, url.Error?)`. Success returns a normalized
-component record and nil; malformed input returns nil plus a structured
-one-based byte diagnostic instead of raising. The module compiles its labeled
-PEGs once and is usable independently of the HTTP client. Code that receives
-an HTTP scheme, Host authority, and origin-form target separately can call
-`url.parse_request(scheme, authority, target)` with the same result tuple;
-scheme, authority, and target boundaries are then validated before
-normalization.
+For HTTP URLs, `url.parse(source)` returns `(url.Url?, url.Error?)`. On success
+you get a normalized record and `nil`. On malformed input you get `nil` and an
+error with a one-based byte position. It does not raise. If you already have the
+scheme, authority, and request target separately, call
+`url.parse_request(scheme, authority, target)`, which returns the same pair. The
+parser works without the HTTP client.
 
 ## Child processes
 
-Use `io.popen` when a program intentionally wants shell syntax and one stream
-containing the child's merged stdout and stderr. Drain that stream before
-waiting. This example uses POSIX shell syntax:
+Use `io.popen` when you want shell syntax and a single stream that carries the
+child's stdout and stderr together. Read that stream to the end before calling
+`wait`. This example uses POSIX shell syntax. Save it as `child.titan`:
 
 ```titan
 local fs = import "fs"
@@ -411,25 +481,29 @@ function main(args: {string}): integer
 end
 ```
 
-`io.popen` invokes `/bin/sh -c` on Linux and macOS, or the system `cmd.exe`
-with `/d /s /c` on Windows. Command strings follow that shell's syntax. It
-captures stdin and presents exactly one facade over the merged byte stream.
-Its `wait` method preserves the complete `os.ExitStatus`, including signal
-termination.
+```sh
+titanc -o out child
+./out/child
+cat child.output
+```
 
-Use `os.spawn` when a shell is not wanted. It starts the named executable
-directly with the supplied argv and keeps stdout and stderr separate unless a
-spawn option explicitly merges them. Capture and inheritance options also
-decide which of the optional `Process.stdin`, `stdout`, and `stderr` endpoints
-exist in the parent. Drain captured output concurrently with input and `wait`,
-or a full operating-system pipe can deadlock the child and parent.
+`io.popen` runs `/bin/sh -c` on Linux and macOS, and `cmd.exe /d /s /c` on
+Windows, so the command string follows that shell's syntax. It captures stdin and
+gives you one stream for the merged output. `wait` returns the full
+`os.ExitStatus`, including the signal if a signal ended the child.
 
-## Math, collection iteration, GC, and dynamic Lua
+Use `os.spawn` when you do not want a shell. It runs the named executable
+directly with the argument list you give it, and keeps stdout and stderr separate
+unless you ask to merge them. Its capture and inherit options decide which of
+`Process.stdin`, `stdout`, and `stderr` exist in the parent. Read captured output
+while you write input and wait, or a full pipe can block both the child and the
+parent.
 
-`math` exposes a deliberately typed numerical surface. Operations that
-produce floating-point values take and return `float`; integer-only operations
-say so explicitly. Its random generator follows Lua 5.5's xoshiro256** stream,
-including deterministic two-word seeds:
+## Math, iteration, GC, and dynamic Lua
+
+`math` has typed signatures. Operations that produce floating-point values take
+and return `float`, and integer-only operations are named as such. Its random
+generator reproduces Lua 5.5's xoshiro256** sequence, including two-word seeds:
 
 ```titan
 local math = import "math"
@@ -444,12 +518,12 @@ function numerical_example(): boolean
 end
 ```
 
-`tonumber` returns `value?` because a successful numeral may be an integer or
-a float. `math` deliberately has no `type` operation: use Titan's static
-types or the ordinary `is`/`as` gradual checks at a `value` boundary.
+`tonumber` returns `value?`, because a numeral can be an integer or a float.
+`math` has no `type` function. Use Titan's static types, or `is` and `as` where a
+`value` enters your code.
 
-`iteration` supplies the familiar collection iterators without adding methods
-to Array or Map types:
+`iteration` provides the usual collection iterators without adding methods to
+Array or Map:
 
 ```titan
 local iteration = import "iteration"
@@ -471,14 +545,13 @@ function visit_holes(values: {value}): integer
 end
 ```
 
-Unlike Lua's `ipairs`, this Array iterator visits every position through
-`#values`, including an interior nil element. Its first result is the nonnil
-integer index, so the nil item does not end generic iteration.
+Unlike Lua's `ipairs`, this Array iterator visits every position up to `#values`,
+including an interior `nil`. Its first result is the integer index, which is never
+`nil`, so a `nil` element does not end the loop.
 
-`gc` exposes explicit collector actions, observation, tuning, weak Map
-configuration, and reachability-owned finalizers for tables and full
-userdata. The stop action and status query are intentionally different
-functions:
+`gc` controls the collector, sets weak Maps, and registers finalizers for tables
+and full userdata. `pause()` stops the collector and `paused()` only reports
+whether it is stopped:
 
 ```titan
 local gc = import "gc"
@@ -500,18 +573,15 @@ function configure_cache(cache: {value: value})
 end
 ```
 
-`pause_percent` is the incremental collector's tuning accessor; `pause()` has
-side effects, while `paused()` only reports whether the collector is stopped.
-Weak and ephemeron configuration preserves an existing Map metatable and
-changes only its raw `__mode` field. Generic `finalizable<|T|>` likewise
-preserves that exact metatable while replacing raw `__gc`; its callback
-receives the finalized value at the same exact `T` selected by the caller.
-Cleanup should clear owned state before releasing it so the callback remains
-safe if cleanup is retried or partially completed.
+`pause_percent` reads or sets the incremental collector's pause parameter.
+`gc.weak` and `gc.finalizable` keep the Map's existing metatable and change only
+its `__mode` or `__gc` field. The finalizer receives the value as the exact type
+you chose for `T`. Make cleanup clear the state it owns before releasing it, so
+that running it again or after a partial run is safe.
 
-Finally, `lua` is the audited dynamic boundary for compiling Lua chunks,
-executing Lua files, and loading modules. Flexible arguments and results,
-including inner nil values, pass through unchanged:
+Finally, `lua` is the dynamic boundary: it compiles Lua chunks, runs Lua files,
+and loads modules. Arguments and results pass through unchanged, including inner
+`nil` values:
 
 ```titan
 local lua = import "lua"
@@ -522,18 +592,20 @@ function dynamic_results(): (...: value)
 end
 ```
 
-`load` uses the complete byte length, accepts text and binary chunks, and
-raises a load error instead of returning `(nil, message)`. `load_from_reader`
-does not close its Reader. `dofile` owns and closes its File, and
-`lua.require` replaces the blocking source-file search with asynchronous
-filesystem operations while retaining preload, C-module, Titan-shim, and
-`package.loaded` behavior. See the four standard-library chapters in the
-[language reference](language/index.md) for the complete contracts.
+`load` uses the full byte length and accepts text and binary chunks. On a load
+error it raises instead of returning `(nil, message)`. `load_from_reader` does not
+close its Reader, and `dofile` closes the file it opens. `lua.require` searches
+for source files with asynchronous filesystem calls, and otherwise follows Lua's
+rules for preload, C modules, Titan loaders, and `package.loaded`. Use `lua`
+sparingly: it can bypass static checks as thoroughly as the C interface can. See
+the [Lua states and loading chapter](language/standard-library-lua.md) for the
+full contracts.
 
 ## Where to go next
 
-- Read the [language reference](language/index.md) for normative semantics.
-- Read the [style guide](style-guide.md) before adding application or standard
-  library code.
-- Read the [implementation documentation](implementation/index.md) when the
-  compiler, generated C, ABI, or Lua boundary is relevant.
+- The [language reference](language/index.md) describes the language and every
+  standard-library module.
+- The [style guide](style-guide.md) covers conventions for application and
+  standard-library code.
+- The [implementation documentation](implementation/index.md) explains the
+  compiler, generated C, ABI, and the Lua boundary.

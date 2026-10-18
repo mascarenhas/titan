@@ -517,10 +517,9 @@ stream immediately; the receiving wrapper owns a fresh UV handle on its own
 loop. Subsequent source input reads return nil, source output writes fail as
 closed, and closing the source wrapper cannot close the destination pipe.
 Handoff hooks are synchronous and require an active, nonclosing Runtime;
-they can run between Tasks or from callbacks without a current Task. Each
-record uses its private protobuf field schema to encode copied state and its
-known UV child payload. If outer serialization fails after native detachment,
-the hook closes the detached endpoint and leaves the source facade detached.
+they can run between Tasks or from callbacks without a current Task. If
+serializing the enclosing value fails after native detachment, the hook closes
+the detached endpoint and leaves the source facade detached.
 
 Input handoff preserves the facade's excess bytes, queued binary chunks, and
 EOF or error outcome. A stream whose native pipe has already ended can still
@@ -541,9 +540,12 @@ there while the destination reads or writes the transferred communication
 pipes. Merged stdout/stderr fields already share one `InputStream`; transferring
 that wrapper detaches both source aliases.
 
-As with other native resource hooks, the caller owns exactly-once delivery and
-adoption, and recovery when delivery or adoption fails. Native payload copies
-do not create additional owners, and discarded payloads do not close resources.
+The payload follows the
+[shared manual-handoff rules](standard-library-transfer.md#shared-manual-handoff-rules).
+These types have no public `discard_transfer_payload`: recover a payload that
+was not delivered by adopting it locally and closing the stream. Native payload
+copies do not create additional owners, and discarded payloads do not close
+resources.
 
 ### Process lifecycle
 

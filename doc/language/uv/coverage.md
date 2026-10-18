@@ -12,11 +12,31 @@ column describes the underlying C ABI for binding maintainers. The
 actually supplies or receives; native pointer borrowing does not shorten the
 lifetime of an independently copied public value.
 
-The public API also has 219 [supplemental declarations](supplemental-public-signatures.tsv):
-constructors, owner views, result/data accessors, C-only bridge entries,
-`has_api`, `setup_process_args`, and native transfer hooks and loop binding. These are documented in
-[types](types.md) and [supplemental APIs](supplemental.md); they are not counted
-as additional native C functions.
+The public API also has **232** [supplemental declarations](supplemental-public-signatures.tsv):
+constructors, owner views, result/data accessors, direct C-only synchronization,
+heap-thread-token and external-wake entries, `has_api`, `setup_process_args`, and native transfer
+hooks and loop binding. These are documented in [types](types.md) and
+[supplemental APIs](supplemental.md); they are not additional distinct libuv C
+functions and do not change the 319-function/305-wrapper native inventory.
+
+The [direct synchronization entry map](supplemental.md#direct-synchronization-entry-map)
+accounts for **20 removed getters** and their exact replacement C signatures.
+Eighteen entries are newly public; mutex lock/unlock were already public, as
+was the separate heap-only `native_mutex_destroy`. The **12 external-wake
+declarations** are `external_wake_t.new`, `external_wake_init`,
+`external_wake_t:reserve`, `:activate`, `:drain`, `:unregister`, `:close`,
+`native_external_wake_retain`, `native_external_wake_release`,
+`native_external_wake_notify`, `native_external_wake_is_notified`, and
+`native_external_wake_unregister`. The owner type is listed separately in the
+type reference. The three heap-thread-token declarations are
+`create_native_thread`, `native_thread_join`, and `native_thread_detach`; they
+are separate from the 20 getter replacements and the checked `thread_t` API.
+All these helpers are supplemental, not new canonical native wrappers or
+`has_api` capability names.
+
+The TSV records public signatures and source locations. Regenerate it from the
+coherent compiled provider using the [metadata workflow](../../implementation/libuv-extension-guide.md#validation-and-integration);
+do not hand-normalize foreign types or source-line numbers.
 
 ## Unavailable direct wrappers
 
@@ -71,6 +91,12 @@ that every platform/backend combination has been executed. See
 [ownership](CONTRACT-NOTES.md), [process policy](PROCESS-POLICY.md), and the
 [implementation guide](../../implementation/libuv-extension-guide.md) for the
 lifecycle rules that accompany the declarations.
+
+The synchronization map and the external-wake and heap-thread-token entries are
+API inventories, not claims that every operation has been executed on every
+platform. Using a C-only entry with a dangling or wrong-kind pointer is
+undefined behavior, not a checked error. The generated-code ABI is version
+**2**, including for all of these entries.
 
 ## Runnable family examples
 

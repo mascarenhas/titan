@@ -134,22 +134,18 @@ even before reading starts. Call `async.yield()` after connecting to let that
 callback retire before attempting an otherwise idle handoff.
 
 Successful encoding detaches the source before delivery. It preserves unread
-delimiter excess and buffered binary input; the destination resumes the same
+delimiter excess and buffered binary input, and the destination resumes the same
 TCP byte stream. Source aliases behave as closed, and their `close()` cannot
-close the adopted endpoint. The opaque protobuf bytes contain the known UV
-child payload and copied stream state. If outer serialization fails after UV
-detachment, the hook closes that detached endpoint and leaves the source closed.
-A transfer payload is a manually owned capability:
-adopt it exactly once, or recover it locally if delivery fails. Sending or
-decoding it twice can cause double close or use after free; discarding it
-without adoption leaks the detached resource. The carrier has no automatic
-rollback, replay protection or drop finalizer. This is not a persistence or
-cross-process serialization format.
+close the adopted endpoint. If serializing the enclosing value fails after the
+endpoint detached, the hook closes the detached endpoint and leaves the source
+closed. The payload is a manually owned, same-process capability: follow the
+[shared manual-handoff rules](standard-library-transfer.md#shared-manual-handoff-rules),
+adopting it exactly once or recovering it locally if delivery fails.
 
 `Connection.discard_transfer_payload(payload: string): integer` consumes a known
-unadopted payload by closing its endpoint without an active Runtime. It returns
-the native close status. The close attempt consumes ownership even when the
-status reports an error; never adopt or discard that payload afterward.
+unadopted payload by closing its endpoint, without needing an active Runtime. It
+returns the native close status. The close attempt consumes ownership even when
+the status reports an error; never adopt or discard that payload afterward.
 
 ## Reading
 
