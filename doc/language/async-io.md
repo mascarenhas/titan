@@ -35,15 +35,17 @@ explicitly closed owner should remove its listener to release its capture early.
 The async module defines `Task`, `TaskStatus`, `CancellationReason`,
 `ResumeToken`, `Error`, and `OperationError`. They are ordinary public nominal
 types owned by async, with the constructors, fields, tags, methods, and generic
-positions shown below. Their move from the old private UV implementation does
-not change these public programming contracts. Rebuild consumers against the
-canonical provider; the defining-module metadata changes even though the
-generated-code ABI remains at version 2.
+positions shown below. Rebuild consumers against the matching `titan.async`
+provider; the generated-code ABI is version 2.
 
 ```text
 type SuspendCancelAction = function (): ()
 
 function run<|A, B|>(func: function (): (A)): Task<|A, B|>
+function run_with_cleanup<|A, B|>(
+    body: function (): (A),
+    cleanup: function (CancellationReason<|B|>?): (),
+    final_wait: ExternalWait?): Task<|A, B|>
 function run_foreign(f: foreign function (*void): void, arg: foreign *void)
 function loop()
 function add_close_listener(listener: function (): ()): function (): ()
@@ -135,6 +137,47 @@ activity. Calling `run` from another Task is valid and still does not run the
 new Task inline. Scheduling no longer creates and closes a timer per wake;
 ordering relative to unrelated native close callbacks can therefore differ.
 
+`async.run_with_cleanup<|A, B|>(body, cleanup, final_wait?)` starts a Task
+through a wrapper instead of ordinary `run`'s shortcut for a Task cancelled
+before it starts. On entry the wrapper **installs** a `defer` that calls
+`cleanup(reason)`, and only then performs `checkpoint()` and `body()`. Cleanup
+therefore runs when the body exits or unwinds, not before it. It receives the
+first sticky `CancellationReason<|B|>?`, or nil when the Task was not
+cancelled. Cleanup may perform cancellation-insensitive retirement work, but
+entering an ordinary callback is not by itself a guarantee that native
+ownership has retired. That is the job of the optional third argument.
+
+The optional `final_wait` argument designates one prepared native-retirement
+`ExternalWait`, created by `prepare_native_retirement`, as the Task's exclusive
+ownership-retirement gate. An ordinary `prepare_external_wait` result is not
+eligible. The capability must be live, unused, unbound, and prepared by the
+same Runtime. A wrong-kind, other-Runtime, consumed, closed, or already-bound
+capability is rejected before the Task is exposed. The constructor allocates
+the Task's reusable Completion up front and revalidates the capability
+afterwards. If admission fails, the constructor rolls back its native
+registration and binding without treating the original domain resource as
+retired: the caller still owns that resource.
+
+The constructor arms the gate before returning the Task. The Task's terminal
+status and terminal listeners stay blocked until native retirement completes,
+even if an ordinary root or cleanup entry fails or no cleanup ever waits.
+Ordinary callbacks can still allocate and fail; allocating the Completion up
+front does not make them allocation-free.
+
+An explicit `final_wait:wait_cleanup()` is optional. Only the bound Task's
+cleanup may attach it to the already-armed gate. That exact capability, used
+from that cleanup with its own registrar, may use the Task's last suspension
+number (`LUA_MAXINTEGER`). Every other suspension of the designated Task is
+limited to `LUA_MAXINTEGER - 1`: generic cleanup awaits, an aliased capability
+with another registrar, body code, and peer Tasks cannot take the privilege.
+Without a third argument the ordinary finite limit applies. Exhaustion raises
+`"async Task suspension epoch exhausted"` without reset or wrapping. Native
+retirement itself does not depend on an available suspension number. See
+[native retirement capabilities](#native-retirement-capabilities). The thread
+standard library supplies the concrete Thread callbacks and binds them to its
+`Thread:task()` proxy
+([thread retirement wiring](../implementation/thread-library.md#join-proxy-retirement-and-the-native-terminal-barrier)).
+
 `Task:status()` returns a snapshot. Repeated observations during one state
 transition return the same snapshot; a later transition gets a fresh snapshot,
 even if its tag is again `running` or `waiting`. Retained snapshots never
@@ -192,6 +235,11 @@ checking a status tag, or calling `as_string()` needs no payload check. A
 `Error`. `as_string()` returns `"ready"`, `"running"`, `"waiting"`,
 `"succeeded"`, `"failed"`, or `"cancelled"`. The predicate methods inspect
 terminal states and payloads without spelling a `case`.
+
+A Task held nonterminal by native retirement is still unfinished even after its
+body and ordinary cleanup have returned. A first explicit `cancel` during that
+interval keeps the normal cancellation precedence over pending success or
+failure; it does not bypass the retirement barrier.
 
 A Lua host drives scheduled work explicitly:
 
@@ -262,8 +310,8 @@ call it. Omitting the second argument is equivalent to passing nil.
 `ResumeToken`, `SuspendCancelAction`, the required token parameters, and the
 nil-accepting cancellation-action parameter are part of the public compiled-
 module contract. Both serialized `titan.async` metadata and the exact native
-signatures include them. A mismatched ABI-2 provider is rejected rather than
-migrated or adapted.
+signatures include them. Use matching providers and consumers under
+generated-code ABI 2, and rebuild consumers when the provider changes.
 
 The first correct-token wake request appends the target Task to the Runtime's
 ready queue; later requests before delivery coalesce. Acceptance arms a needed
@@ -307,11 +355,18 @@ lifetime, or synchronize access to shared memory. Keep native storage, code,
 and any required originating state and source-state root alive for the borrow.
 
 `from_value` preserves an existing `TransferValue` unchanged. Otherwise it
-selects the scalar, string, borrowed pointer/state/native-function, Titan
-closure, or public nominal policy. Integer and float tags remain distinct.
-Lua closures, Lua C closures with upvalues, direct containers, Interfaces,
-and owned foreign storage are rejected. Ordinary Lua userdata uses a borrowed
-payload address; a Lua thread uses a borrowed state address.
+classifies scalar Lua tags (`nil`, `boolean`, `integer` versus `float`
+preserving `-0.0` and integral floats, binary `string`, lightuserdata pointers,
+Lua threads as borrowed `*lua_State`, unbranded Lua userdata as borrowed payload
+addresses, and bare Lua C functions or zero-upvalue C closures with
+NULL-function rejection) directly without constructing a `reflect.Value`
+wrapper. Branded Titan closures are validated directly against their module
+manifest without hydrating reflection function signatures (while explicit
+`reflect.inspect` calls preserve eager full `FunctionType` signature hydration).
+Public records without custom transfer hooks and public unions are inspected
+once at the root and serialized through `protobuf`'s typed internal buffer
+entries. Lua closures, Lua C closures with upvalues, direct containers,
+Interfaces, and owned foreign storage are rejected.
 
 `is_record` and `is_union` carry the actual defining module, fully qualified
 nominal name, and [protobuf bytes](standard-library-protobuf.md). The graph
@@ -324,12 +379,16 @@ initialization is memoized; an already initialized nominal needs no loader.
 ### Closure snapshots
 
 Use `TransferValue.from_value(callback)` to snapshot a Titan closure.
-Conversion projects and roots **all immediate semantic captures before running
-any capture's custom hook**, then converts each capture to its transfer policy.
-Nested closures and custom payloads become opaque bytes during this conversion.
-The returned `is_closure` packet contains its defining module, immutable
-native entry token, and protobuf snapshot bytes. Sending that packet later
-does not observe subsequent changes to the origin's captures.
+Conversion validates the Titan closure header, brand, module userdata, and
+manifest entry, then projects and roots **the complete immediate capture
+frontier onto the Lua stack before running any capture's custom hook**, and
+finally converts each snapshotted capture once in declaration order. Freezing
+the immediate capture frontier before hooks prevents an earlier capture's custom
+hook from mutating a shared cell before a later capture is read. Nested closures
+and custom payloads become opaque bytes during this conversion. The returned
+`is_closure` packet contains its defining module, immutable native entry token,
+and protobuf snapshot bytes. Sending that packet later does not observe
+subsequent changes to the origin's captures.
 
 `from_closure_payload` wraps fields already copied by a trusted Lua/native
 transport. Its `value` entry parameter explicitly checks the raw pointer at
@@ -393,18 +452,38 @@ same active record or closure raises; active guards unwind when conversion
 fails. Hook side effects are not rolled back. A hook that detaches a resource
 can therefore change ownership during `from_value`, before any send.
 
-The programmer owns safe, exactly-once delivery and adoption of native
-payloads. A failed send leaves the returned packet with the caller, who must
-recover or explicitly dispose of its resources. Copying or dropping bytes
-does not duplicate or close a native handle. A successful Receiver send can
-still be coalesced or overwritten before receipt; it is not an acknowledgement
-of delivery or adoption. Keep native resource ownership outside the lossy
-message or arrange a separate handoff protocol that guarantees adoption or
-disposal. For resource captures that need recovery after a later capture fails,
-construct and retain their explicit
-policies first, then capture those policies. See
+Resources fall into two ownership categories. See
 [native resource handoff](standard-library-transfer.md#native-resource-handoff)
 for the built-in hooks' failure and cleanup rules.
+
+- **Manual-handoff resources.** The programmer owns safe, exactly-once delivery
+  and adoption of these payloads under the
+  [shared manual-handoff rules](standard-library-transfer.md#shared-manual-handoff-rules).
+  The [supported API inventory](standard-library-transfer.md#manual-handoff-api-inventory)
+  names the TCP/TLS/HTTP/WebSocket, file, process-stream, shell-stream, and
+  SQLite Connection hooks; it does not make every type in those modules
+  transferable. User hooks that do not register packet resources have the same
+  responsibility. A failed pre-admission packet send leaves the packet with the
+  caller, who must recover or explicitly dispose of its resources. Copying or
+  dropping bytes, or discarding a native packet with `transfer.discard_message`
+  or `Packet:close()`, does not decode payloads, invoke
+  `from_transfer_payload`, or close these resources. When a capture needs
+  recovery after a later capture fails, construct and retain its explicit
+  policy first, then capture that policy.
+- **Packet-scoped resources.** Resources registered with
+  `transfer.attach_resource` and `transfer.claim_resource` (initially
+  [`thread.Sender` and `thread.Receiver`](standard-library-thread.md#closing-cloning-and-transferring-endpoints))
+  require a matching active native packet scope, opened by
+  `transfer.encode_message` or `transfer.Packet.from_value`. Policy and protobuf
+  conversion create no scope, so endpoint hooks raise without one. Nested opaque
+  or capture work may reuse the enclosing packet, but its index bytes retain no
+  ownership independently of that packet. `async.send` / `Receiver` and
+  `lua.Lua:run` / `run_async` copy policy data, not the packet's resource table,
+  so they are not standalone endpoint ownership routes.
+
+A successful `Receiver` or `PacketReceiver` send can still be coalesced or
+overwritten before receipt. It is not an acknowledgement of delivery or
+adoption.
 
 Records without hooks and unions retain structural protobuf transfer.
 
@@ -419,80 +498,172 @@ function Receiver:wait(): TransferValue
 function Receiver:close()
 ```
 
-`receiver()` creates a receiver in the current state's Runtime. It may be
-called outside a Task, including a `Lua:run` or `Lua:run_async` bootstrap that
-has not started Tasks in the destination state; it creates the Runtime when
-needed but does not drive its loop. Only its opaque
+**Creating a receiver.** `receiver()` creates a receiver in the current state's
+Runtime. It may be called outside a Task, including from a `Lua:run` or
+`Lua:run_async` bootstrap that has not started Tasks in the destination state.
+It creates the Runtime when needed but does not drive its loop. Only the opaque
 native `handle()` may cross to another Lua state or thread. A `Receiver` is a
-GC-owned value that must stay in the state that created it.
+GC-owned value that must stay in the state that created it, and `handle`,
+`wait`, and `close` all run in that owning state. The foreign handle is only an
+argument to `async.send`. It is not a `uv.async_t` or a pointer that
+applications may dereference.
 
-`send` is synchronous and may run in another state's ordinary Titan code. It
-requires no Task or source Runtime. It copies the message into the Receiver's
-one native pending slot before returning, replacing any packet still in that
-slot, and requests a wake of the receiver's loop. The synchronous
-`uv_async_send` notification carries no payload; the Receiver owns those bytes
-until the later callback consumes them.
+**Sending.** `send` is synchronous and may run in another state's ordinary Titan
+code. It requires no Task or source Runtime. It copies the message into the
+Receiver's one native pending slot before returning, replacing any packet still
+in that slot, and requests a wake of the receiver's loop. The wake notification
+carries no payload; the Receiver owns the bytes until the later callback
+consumes them. High-level `async.send` allocates and copies message storage, so
+it is not safe inside a raw POSIX signal handler. An ordinary Titan callback
+delivered by the event loop can use it.
 
-Delivery is **lossy and coalescing**: several sends may produce one native
+**Delivery is lossy and coalescing.** Several sends may produce one native
 callback, and each callback replaces any unread value in the Receiver.
 Sequential sends completed before the callback leave only the latest packet
 pending. A successful send does not promise that a waiter will receive that
-message. There is no FIFO, message count, or backpressure.
+message. There is no FIFO, message count, or backpressure. Concurrent senders
+must not depend on an ordering between their messages.
 
-Scalars retain their variant and value. Strings are copied with explicit
-lengths, including embedded NUL bytes, then copied into the destination
-collector on receipt. Record and union variants copy their module, nominal name, and wire
-bytes and arrive as the same `TransferValue` variant; the receiver does not
-implicitly decode or validate the protobuf payload. Closure and custom-record
-variants likewise copy their already converted packets; `to_value` performs
-destination reconstruction after receipt.
-Pointer variants copy only borrowed addresses and retain nothing they point
-to. Concurrent senders must not depend on an ordering between their messages.
-Coalescing or overwriting a packet frees its copied bytes without disposing of
-resources named inside it. See [native resource handoff](standard-library-transfer.md#native-resource-handoff)
-before sending resource payloads or closures that capture them.
+**What a message carries.**
 
-Closure and custom-record reconstruction run when the receiving code calls
-`to_value`; initialization or reconstruction failures raise to that caller.
-Independent `Lua:run` and `Lua:run_async` decode incoming arguments before the
-chunk runs and report reconstruction failures to their calling Titan code.
+- Scalars retain their variant and value. Strings are copied with explicit
+  lengths, including embedded NUL bytes, and copied again into the destination
+  collector on receipt.
+- Record and union variants copy their module, nominal name, and wire bytes and
+  arrive as the same `TransferValue` variant. The receiver does not implicitly
+  decode or validate the protobuf payload.
+- Closure and custom-record variants copy their already converted packets.
+  `to_value` performs destination reconstruction after receipt, so
+  initialization and reconstruction failures raise to the code that calls
+  `to_value`. Independent `Lua:run` and `Lua:run_async` decode incoming
+  arguments before the chunk runs and report reconstruction failures to their
+  calling Titan code.
+- Pointer variants copy only borrowed addresses and retain nothing they point
+  to.
+- Coalescing or overwriting a packet frees its copied bytes without disposing of
+  resources named inside it. See
+  [native resource handoff](standard-library-transfer.md#native-resource-handoff)
+  before sending resource payloads or closures that capture them.
 
-`wait` requires a Task in the receiver's owning Runtime. It consumes the current
-unread value or suspends until a callback supplies one. At most one Task may
-wait on a receiver. Cancelling that waiter detaches it without closing the receiver or
-discarding its unread value; later callbacks may still replace that value
-before another waiter consumes it. Calls to `handle`, `wait`, and `close` use
-the owning state. The foreign handle is only
-an argument to `async.send`, not a `uv.async_t` or a pointer that applications
-may dereference.
+**Waiting.** `wait` requires a Task in the receiver's owning Runtime. It
+consumes the current unread value or suspends until a callback supplies one. At
+most one Task may wait on a receiver. Cancelling that waiter detaches it without
+closing the receiver or discarding its unread value; later callbacks may still
+replace that value before another waiter consumes it.
 
-`close` marks the Receiver closed, discards its pending packet and unread value,
-and wakes a blocked waiter with an error. It is idempotent and does not require
-a Task. **Stop senders and finish every in-flight send before calling `close`
-or allowing the owning Runtime to shut down.** Concurrent send and close are
-unsupported. Receiving a stop message alone does not prove its sender has
-returned; arrange sender completion separately before remote teardown.
+**Closing.** `close` marks the Receiver closed, discards its pending packet and
+unread value, and wakes a blocked waiter with an error. It is idempotent and does
+not require a Task. **Stop senders and finish every in-flight send before
+calling `close` or allowing the owning Runtime to shut down.** Concurrent send
+and close are unsupported. Receiving a stop message alone does not prove its
+sender has returned; arrange sender completion separately before remote
+teardown. Native handle retirement still needs the owning `async.loop` to drain
+its close callback, and Runtime shutdown also closes receivers.
 
-Native handle retirement still needs the owning `async.loop` to drain its close
-callback. Runtime shutdown also closes receivers. After senders and close have
-been synchronized, a later send to a retained closed Receiver raises
-`"receiver is closed"`; waiting on a closed Receiver raises the same error.
-A null send handle raises `"receiver handle must not be NULL"`. A null
-`is_function` message is rejected before publication. Native message allocation
-errors raise `OperationError` with operation `"async.send"`.
+**Errors.** After senders and close have been synchronized, a later send to a
+retained closed Receiver raises `"receiver is closed"`; waiting on a closed
+Receiver raises the same error. A null send handle raises
+`"receiver handle must not be NULL"`. Passing a `PacketReceiver` handle to
+`async.send` raises `"receiver handle mode mismatch"`. A null `is_function`
+message is rejected before publication. Native message allocation errors raise
+`OperationError` with operation `"async.send"`.
 
-The handle is borrowed and does not root its Receiver. Keep the Receiver
-reachable in its originating state, for example in a module field or global,
-until every sender has withdrawn the handle and all in-flight sends have
-finished. Retaining the Receiver keeps its endpoint storage alive after close,
-but does not synchronize close against a send. Only after sender quiescence may
-that root be released or its `Lua` state closed. A handle is invalid after its
-owner has been collected. See the [two-phase independent-state example](standard-library-lua.md#two-phase-receiver-bootstrap)
+**Handle lifetime.** The handle is borrowed and does not root its Receiver. Keep
+the Receiver reachable in its originating state, for example in a module field
+or global, until every sender has withdrawn the handle and all in-flight sends
+have finished. Retaining the Receiver keeps its endpoint storage alive after
+close, but does not synchronize close against a send. Only after sender
+quiescence may that root be released or its `Lua` state closed. A handle is
+invalid after its owner has been collected. See the
+[two-phase independent-state example](standard-library-lua.md#two-phase-receiver-bootstrap)
 for explicit close, native drain, and state cleanup.
 
-Although the native wake primitive supports foreign threads, high-level
-`async.send` allocates and copies message storage. It is not safe inside a raw
-POSIX signal handler. An ordinary Titan callback delivered by the event loop can use it.
+### Owned packet receivers
+
+`PacketReceiver` provides a separate latest-packet coalescing route that moves
+single-owner [`transfer.Packet`](standard-library-transfer.md#native-message-packets)
+values—including packets carrying attached `thread.Sender` or `thread.Receiver`
+endpoints—without changing `Receiver` or `TransferValue` into move-only types:
+
+```text
+record PacketReceiver
+function packet_receiver(): PacketReceiver
+function PacketReceiver:handle(): foreign *void
+function send_packet(handle: foreign *void, packet: transfer.Packet)
+function PacketReceiver:wait_packet(): transfer.Packet
+function PacketReceiver:close()
+```
+
+- `packet_receiver()` creates an owned-packet receiver in the current state's
+  Runtime. Like `receiver()`, it may be called outside a Task and creates the
+  Runtime when needed without driving its loop (raising
+  `"cannot create a receiver while async Runtime is shutting down"` once
+  shutdown or `request_exit` has begun).
+- `PacketReceiver:handle()` returns the borrowed opaque native receiver address.
+  Passing a `PacketReceiver` handle to `async.send`, or a legacy `Receiver`
+  handle to `async.send_packet`, raises `"receiver handle mode mismatch"`.
+- `send_packet(handle, packet)` synchronously publishes `packet` into the
+  destination's latest-packet slot and notifies its loop:
+  - Validation precedes publication: a `nil` handle raises
+    `"receiver handle must not be NULL"`, an already decoded, taken, or closed
+    `packet` raises `"transfer: packet is consumed or closed"`, a legacy
+    `Receiver` handle raises `"receiver handle mode mismatch"`, and a closed
+    `PacketReceiver` raises `"receiver is closed"`. Any rejection before
+    admission leaves `packet` unconsumed with the caller.
+  - **Publication commit point**: The native helper atomically exchanges the
+    packet into the receiver's slot and clears the source Packet's prepared
+    native owner cell in the same C-only interval, before disposing the replaced
+    packet or notifying the loop. No ordinary `take_message()` entry runs after
+    publication. Even if the subsequent notification status raises
+    `OperationError` for `"async.send_packet"`, every source alias is already
+    consumed; the caller cannot retry or dispose the published allocation.
+    Validation and ordinary checked setup happen before this native commit.
+- `PacketReceiver:wait_packet(): transfer.Packet` requires a running Task in the
+  owning Runtime and takes the latest packet into a fresh destination
+  `transfer.Packet` owner:
+  - **Single-reader reservation and no barging**: At most one Task may wait on a
+    `PacketReceiver`. `wait_packet` reserves the reader slot before inspecting
+    the native packet slot; a second caller raises
+    `"packet receiver already has a waiting reader"` even when a packet is
+    already in the slot or the first reader's wake is queued in the Runtime's
+    ready FIFO.
+  - **Wake-only callback and direct slot retention**: The libuv `async_t`
+    callback only schedules a deferred `ResumeToken` wake for the reserved
+    reader; it never takes, copies, or decodes the packet. Before inspecting the
+    slot, `wait_packet` constructs/finalizes an inert `Packet` and obtains its
+    native owner cell. The eventual native exchange writes directly into that
+    rooted destination owner, with no ordinary adopting entry after the take.
+    Preparation failure leaves the native slot unread.
+  - **Coalescing, stale wakes, and cancellation**: A newer `send_packet` before
+    the reader takes the slot—whether before or after the libuv callback has
+    run—atomically replaces the slot and disposes the overwritten packet via
+    `transfer.discard_message`, releasing any attached thread endpoints in C
+    without entering Lua or requiring a Runtime. If a stale or coalesced wake
+    finds the slot empty, `wait_packet` clears its notification flag and
+    suspends again under the same reader reservation; a `send_packet` between
+    the empty-slot check and suspension leaves a pending libuv notification or
+    wake. Cancelling the waiting Task detaches its reader reservation without
+    taking or discarding an unread packet in the slot.
+  - **Decoding and disposal**: Calling `pkt:decode()` on the returned
+    `transfer.Packet` reconstructs the value in a packet decode scope and claims
+    attached endpoints; calling `pkt:close()` or collecting `pkt` disposes any
+    unclaimed attachments via `transfer.discard_message`. Because native discard
+    never runs user decoders, manual-handoff resources (`http.Exchange`,
+    `ssl.Connection`, `net.Connection`, `websocket.Connection`, etc.) are not
+    auto-disposed if a `PacketReceiver` overwrites or closes an unread packet.
+- `PacketReceiver:close()` is idempotent and does not require a Task. It marks
+  the receiver closed, atomically takes and disposes any unread packet in the
+  native slot via `transfer.discard_message`, wakes any reserved reader (which
+  raises `"receiver is closed"`), and initiates `uv.close` on its native handle.
+  Runtime shutdown and `PacketReceiver` GC finalization also disable the slot
+  and dispose any unread packet.
+- **Borrowed-handle lifetime**: Like `Receiver:handle()`,
+  `PacketReceiver:handle()` is borrowed and does not retain the `PacketReceiver`
+  or its Lua state. Atomic slot exchange synchronizes packet replacement and
+  reader extraction, not concurrent `send_packet`-versus-`close` races or stale
+  handle lifetimes. Keep `PacketReceiver` rooted, withdraw handles, and finish
+  all in-flight `send_packet` calls before calling `close()`, shutting down the
+  Runtime, collecting `PacketReceiver`, or closing the destination state.
 
 ## Adapting callbacks with await
 
@@ -542,6 +713,25 @@ function current_loop(): uv.loop_t
 function is_closing(): boolean
 function checkpoint()
 function request_exit(code: integer)
+
+record ExternalWait -- opaque; prepared by either factory below
+function prepare_external_wait(
+    register_fn: function (foreign *void): boolean,
+    unregister_fn: function (): ()): ExternalWait
+function prepare_native_retirement(
+    owner: value, context: foreign *void,
+    register_fn: foreign function (*void, *void): int,
+    unregister_fn: foreign function (*void): void,
+    retire_fn: foreign function (*void): int): ExternalWait
+function ExternalWait:wait()
+function ExternalWait:wait_cleanup()
+function ExternalWait:close()
+function wait_external(
+    register_fn: function (foreign *void): boolean,
+    unregister_fn: function (): ())
+function wait_external_cleanup(
+    register_fn: function (foreign *void): boolean,
+    unregister_fn: function (): ())
 ```
 
 The `_with` forms pass one typed Completion and an operation number to `start`.
@@ -841,6 +1031,215 @@ operation. For a read, copy the valid buffer prefix before cleanup and
 settlement. The awaiting frame and accepted request retain their public owner
 records through the terminal callback. No private UV header or native FFI
 import is required by this adapter.
+
+### External waits
+
+Cross-thread subsystems can use the Runtime's shared external wake bridge to
+suspend a Task without creating and closing a fresh `uv.async_t` for each wait.
+This is a generic adapter API. The thread standard library builds its channel
+send, channel receive, and `Thread:join()` waits on the public
+`async.wait_external`, so those paths share one bridge
+([thread waiter suspension](../implementation/thread-library.md#shared-external-wake-suspension)).
+
+The rules in this section apply to `prepare_external_wait`. Native retirement
+capabilities have a separate contract, described below, and are not
+interchangeable with ordinary waits.
+
+**Preparing a wait.** `prepare_external_wait(register_fn, unregister_fn)` may be
+called outside a Task, for example to preallocate state before `async.loop()`
+starts. Like `run`, `run_with_cleanup`, `receiver`, and `packet_receiver`, it
+creates the current state's Runtime when needed without driving its loop. It
+rejects preparation once shutdown or `request_exit` has begun
+(`"cannot prepare an external wait while async Runtime is shutting down"`).
+Preparation lazily initializes the Runtime's shared
+[`uv.external_wake_t`](uv/types.md#external_wake_t) bridge, assigns the wait an
+immutable positive identity, and calls
+[`external_wake_t:reserve(identity)`](uv/supplemental.md#external_wake_treserve)
+to preallocate an **unreferenced** native wake target. Identities increase
+monotonically from `1` to `LUA_MAXINTEGER` and are never reused; exhausting them
+raises `"async external wait identity exhausted"`. A reserved target does not
+reference the underlying `uv_async_t` handle, so an unused `ExternalWait` never
+keeps an otherwise idle event loop alive.
+
+**The `ExternalWait` owner.** An `ExternalWait` is a one-shot owner bound to the
+Runtime that prepared it:
+
+- `wait()` requires a running Task and performs an ordinary,
+  cancellation-sensitive wait.
+- `wait_cleanup()` requires a running Task and performs a
+  cancellation-insensitive cleanup wait, which is admitted even when Task
+  cancellation is pending or the Runtime is shutting down.
+- Calling either from a Task on another Runtime raises
+  `"external wait belongs to another async Runtime"`. Calling either on a used
+  or closed `ExternalWait` raises `"external wait is consumed or closed"`.
+- `close()` idempotently retires an unused `ExternalWait` and unregisters its
+  reserved target. Calling it while the wait is actively pending raises
+  `"cannot close an active external wait"`.
+
+**Registration.** When a wait starts, the bridge first activates the reserved
+target with the allocation-free
+[`external_wake_t:activate(target)`](uv/supplemental.md#external_wake_tactivate).
+Active waits reference the shared `uv_async_t` handle, so a Task waiting only on
+another OS thread keeps the loop alive instead of triggering an idle-loop
+failure. The bridge then calls `register_fn(target)` with the borrowed native
+target pointer:
+
+- Inside `register_fn`, the domain checks readiness under its native mutex. If
+  the condition is already satisfied, `register_fn` returns `false`. The bridge
+  then retires and unreferences the target and resolves inline without
+  suspending.
+- If the caller must wait, `register_fn` retains a producer reference with
+  [`uv.native_external_wake_retain(target)`](uv/supplemental.md#native_external_wake_retain),
+  links its native waiter under the domain mutex, and returns `true`.
+- If `register_fn` raises, the bridge calls `unregister_fn()` and retires the
+  target before rethrowing. Rollback must retire any partial native link.
+- When `unregister_fn` unlinks a still-linked waiter, it must release the
+  producer reference that `register_fn` retained. If a producer already
+  unlinked, notified, or released it, do not release that reference a second
+  time.
+
+**Notification.** Native producers on any OS thread notify a retained target with
+[`uv.native_external_wake_notify(target)`](uv/supplemental.md#native_external_wake_notify)
+and release their reference with
+[`uv.native_external_wake_release(target)`](uv/supplemental.md#native_external_wake_release);
+neither accesses Lua or GC state. On the destination loop thread, the bridge
+drains pending identities in bounded batches of 64 with
+[`external_wake_t:drain`](uv/supplemental.md#external_wake_tdrain), rearming the
+handle when more remain, and schedules each matching live wait through the
+Runtime's deferred ready queue. It never re-enters a Task directly from the
+native callback.
+
+**Cancellation.** Cancelling or unwinding an active wait synchronously calls
+`unregister_fn()` and
+[`external_wake_t:unregister(target)`](uv/supplemental.md#external_wake_tunregister).
+That unlinks any pending notification and unreferences the shared handle when
+active waits reach zero. The bridge checks both the unique `ExternalWait`
+identity and the Task's suspension epoch, so stale or duplicate native
+notifications are ignored and can never wake a replacement wait on the same
+Task.
+
+**Convenience wrappers.** `wait_external(register_fn, unregister_fn)` and
+`wait_external_cleanup(register_fn, unregister_fn)` require a running Task. They
+call `prepare_external_wait`, `defer owner:close()`, and run `owner:wait()` or
+`owner:wait_cleanup()`.
+
+#### Native retirement capabilities
+
+`prepare_native_retirement(owner, context, register_fn, unregister_fn, retire_fn)`
+prepares the native capability accepted by `run_with_cleanup`'s third argument.
+Ordinary `prepare_external_wait` results are not eligible. Preparation may
+create the Runtime outside a Task; the unused reservation is unreferenced.
+Null callbacks raise `"native retirement callbacks must not be NULL"` before
+native reservation.
+
+**Native ownership and callbacks.** `owner` is a traced keepalive for the
+context through native callback return and committed readiness, including the
+OS join when retiring a Thread. The caller remains responsible for the validity
+of `context` and every callback dependency; a raw pointer alone retains nothing.
+Native producers must independently own queued native context/nodes and retain
+their wake target through notification/unlink, including state close. A traced
+GC owner is not a cross-state-close native lifetime pin.
+
+The three callbacks are nonraising, nonyielding C-only entries: they receive no
+Lua state, access no module/GC objects, run no user hooks, and perform no Lua
+allocation:
+
+- `register_fn(context, target): int` checks readiness under the domain's mutex.
+  `0` means monotonic already-finished readiness with no linked waiter or
+  producer reference; `1` means the waiter is linked after retaining `target`;
+  a negative status rejects with no native link/reference left behind.
+- `unregister_fn(context)` is exact unlink/release for **constructor rollback**.
+  Normal successful retirement does not call it: the producer unlinks and
+  releases its own reference when notifying.
+- `retire_fn(context): int` returns `0` only after actual native retirement
+  (finished plus successful OS join for a Thread), `1` while pending, or a
+  negative native error while preserving its token/resource. It runs on the
+  loop thread with no driver-held core or domain mutex; it may take its own
+  domain mutex briefly but must release it before blocking. It may block only
+  for native final completion after readiness — never for unfinished domain
+  work — and no bound is promised on that native tail. Success is idempotent.
+
+The producer must notify only when the next `retire_fn` call can return **zero
+or a negative error**, not pending. A drained target remains DELIVERED; another
+notify on it does not schedule another wake. Merely notifying an operation whose
+retirement will still return `1` can therefore strand a referenced wait.
+`retire_fn` can also be polled repeatedly while pending, including at an explicit
+cleanup attachment, terminal publication or recovery; positive-path side effects
+must be idempotent. A notification may retire the native resource before the
+host Task body has finished.
+
+**Binding and rollback.** A capability must be live, unused, same-Runtime and
+exclusively unbound. Validation repeats after Task/Completion allocations.
+The constructor activates/registers the barrier before exposing the Task.
+Register result `0` must also retire successfully before exposure; result `1`
+leaves the accepted waiter referenced. A still-pending retire after register
+result `0` raises `"native retirement is not complete"`.
+
+Failure before binding leaves the caller's reservation intact unless caller
+finalizers changed it. Once bind/arm admission begins, later failure performs
+native unlink if needed, removes the map/target borrow, consumes the UV
+registration and closes the capability. No body/cleanup is called and no Task
+is exposed; the original domain owner still owns a running resource. Do not
+reuse the closed capability. Activation/register errors use `OperationError`
+operations `"async.native_retirement.activate"` /
+`"async.native_retirement.register"`.
+Immediate constructor retirement errors use
+`"async.native_retirement.retire"` synchronously and perform the same admission
+rollback; no pending Task is exposed for driver retry in that case.
+An unused unbound capability may be closed idempotently without a Task to
+release its reservation; closing that preparation does not retire the original
+domain resource.
+
+**Optional attachment and logical close.** Wait methods require a Task in the
+capability's owning Runtime. An unbound native wait then raises
+`"native retirement is not bound to a cleanup Task"`. A bound ordinary `:wait()`,
+body use or peer-Task use raises
+`"external wait is reserved for its Task cleanup"`. Only the bound Task's
+cleanup may call `:wait_cleanup()`. It attaches once to the prearmed barrier,
+without another registration; earlier retirement completes inline, otherwise
+it is cancellation-shielded. Completion remains durable independently of the
+current Completion or Task epoch.
+
+Owner-cleanup `:close()` with retirement pending closes the user-facing wait
+view, not the native barrier. The Task retains that accepted barrier until
+retirement; later waits raise `"external wait is consumed or closed"`.
+Closing an active await raises `"cannot close an active external wait"`;
+retired close is idempotent from any context. Neither a failed ordinary wait
+entry nor deferred close may invalidate native ownership.
+
+**Terminal publication and retry.** A Task's body result or error, and any
+pending terminal outcome, stay held until both the Task's root and native
+retirement have finished. Every terminal path and every terminal listener waits
+for that, including when ordinary startup or cleanup entry fails. A body error
+is not replaced merely because the cleanup entry later fails, and the first
+sticky cancellation keeps its normal precedence.
+
+For an admitted gate, a negative retire result is an error from `async.loop()`,
+**not a Task outcome**. It raises `OperationError` with the native code
+unchanged and operation `"async.native_retirement.retire"`. The Task, its
+native context, wake registration, Completion, suspension number, and Runtime
+all stay in place. The driver neither spins, detaches, blocks on unfinished
+work, nor fabricates completion.
+
+Calling `async.loop()` again explicitly clears the negative-result state and
+retries that same retirement once at the start of the new invocation, before
+blocking, even if the wake already arrived and no further wake will. It does
+not register again, recreate the owner or the Task, or reset suspension
+numbers. Another negative result raises another driver error with ownership
+intact; zero lets ordinary continuation and terminal publication proceed.
+
+A retirement adapter may request a reasonless cancellation of the native
+resource's owner when ordinary reason forwarding was missed or failed and no
+cancellation has already been accepted. It may do so only at the exact cleanup
+attachment or while terminal publication is pending because ordinary cleanup
+failed. It never does so for an unfinished normal body or because registration
+returned `1`. The fallback preserves the host's original error or first reason,
+never overwrites an accepted cancellation reason of the owner, and still
+requires the actual native retirement. The thread library supplies this policy
+for `Thread:task()`: its cleanup forwards the first reason and then waits on the
+gate, and it requests a reasonless child cancellation only while the child has
+no recorded outcome and no accepted cancellation request
+([thread retirement wiring](../implementation/thread-library.md#join-proxy-retirement-and-the-native-terminal-barrier)).
 
 ### Program exit control
 

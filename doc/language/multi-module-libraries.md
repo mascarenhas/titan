@@ -169,9 +169,11 @@ Every physical logical module published in a library DSO gets one generated
 `.lua` loader at its logical path. This includes requested roots, source
 dependencies, and logical modules carried from a selected static provider. A
 [folder module](folder-modules.md) is already one logical module, so it gets
-one loader for the module, never one per contributor. With an external
-`--tree`, generated C stays beside the source while the provider and logical
-loader paths are created below the compiler's working directory.
+one loader for the module, never one per contributor. With an external `--tree`
+and no `--output`, generated C stays beside the source while the provider and
+logical loader paths are created below the compiler's working directory. With
+`--output`, all of them are created below the output directory (see
+[Output directories](output-directory.md)).
 
 Generated loaders begin with:
 

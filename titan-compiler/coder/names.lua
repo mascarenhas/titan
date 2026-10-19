@@ -74,8 +74,8 @@ function coder._render_c_type_name(typ)
     return cdeclarator.render_type_name(typ)
 end
 
-function coder._render_c_declaration(typ, name)
-    return cdeclarator.render_declaration(typ, name)
+function coder._render_c_declaration(typ, name, quals)
+    return cdeclarator.render_declaration(typ, name, quals)
 end
 
 function c_integer_literal(n)

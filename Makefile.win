@@ -290,7 +290,7 @@ STDLIB_ROOTS := $(addprefix titan.,$(STDLIB_MODULES))
 
 .PHONY: stdlib stdlib-check install-stdlib publish-stdlib compiler-publication-check
 # Use the installed compiler and an already prepared native/runtime SDK.
-stdlib:
+stdlib: titan/transfer_native.h titan/async_receiver_native.h titan/uv/external-wake-native.h
 	CC=$(call quote,$(CC)) AR=$(call quote,$(AR)) RANLIB=$(call quote,$(RANLIB)) \
 	  TITAN_EXTRA_CFLAGS=$(call quote,$(if $(ROCK_CFLAGS),$(ROCK_CFLAGS) )$(TITAN_WINDOWS_NATIVE_CFLAGS) $(TITAN_EXTRA_CFLAGS)) \
 	  ROCK_TITANC=$(call quote,$(ROCK_TITANC)) ROCK_LUA=$(call quote,$(ROCK_LUA)) \

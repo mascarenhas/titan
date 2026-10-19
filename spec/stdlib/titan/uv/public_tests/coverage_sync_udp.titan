@@ -1,3 +1,9 @@
+local su_fault_fs = import "fs"
+local su_fault_os = import "os"
+local su_fault_command = import "support.command.titan"
+local su_fault_common = import "support.common.titan"
+local su_fault_runtime = import "support.runtime.titan"
+
 foreign import "uv_coverage_threads.h"
 
 local function coverage_su_deadline(loop: uv.loop_t): uv.timer_t
@@ -9,13 +15,17 @@ local function coverage_su_deadline(loop: uv.loop_t): uv.timer_t
   return timer
 end
 
-local function coverage_su_probe_rwlock(lock: uv.rwlock_t): (integer, integer)
+local function coverage_su_probe_rwlock(lock: uv.rwlock_t,
+                                        mode: integer?): (integer, integer, integer)
   local state: owned *titan_cov_su_rwlock = foreign titan_cov_su_rwlock.new()
   state.lock = lock:borrow()
-  state.try_read = uv.rwlock_t.tryrdlock_function()
-  state.try_write = uv.rwlock_t.trywrlock_function()
-  state.read_unlock = uv.rwlock_t.rdunlock_function()
-  state.write_unlock = uv.rwlock_t.wrunlock_function()
+  state.read_lock = uv.native_rwlock_rdlock
+  state.try_read = uv.native_rwlock_tryrdlock
+  state.read_unlock = uv.native_rwlock_rdunlock
+  state.write_lock = uv.native_rwlock_wrlock
+  state.try_write = uv.native_rwlock_trywrlock
+  state.write_unlock = uv.native_rwlock_wrunlock
+  state.mode = mode or 0
   local thread = uv.thread_t()
   local accepted, joined = false, false
   defer if accepted and not joined then success(uv.thread_join(thread)) end
@@ -25,7 +35,7 @@ local function coverage_su_probe_rwlock(lock: uv.rwlock_t): (integer, integer)
   success(status)
   success(uv.thread_join(thread))
   joined = true
-  return state.read_status, state.write_status
+  return state.read_status, state.write_status, state.blocking_value
 end
 
 function test_coverage_su_recursive_mutex_allows_same_thread_reentry(_context: test.Context)
@@ -62,6 +72,9 @@ function test_coverage_su_rwlock_distinguishes_readers_and_writers(_context: tes
   uv.rwlock_rdunlock(lock)
   success(uv.rwlock_trywrlock(lock))
   uv.rwlock_wrunlock(lock)
+  local _, _, blocking_value = coverage_su_probe_rwlock(lock, 1)
+  test.assert(blocking_value == 42,
+              "native rwlock worker rdlock/wrlock did not publish writes")
 end
 
 function test_coverage_su_condition_signal_and_broadcast_publish_permits(_context: test.Context)
@@ -82,10 +95,10 @@ function test_coverage_su_condition_signal_and_broadcast_publish_permits(_contex
   state.condition = condition:borrow()
   state.ready = ready:borrow()
   state.done = done:borrow()
-  state.lock = uv.mutex_t.lock_function()
-  state.unlock = uv.mutex_t.unlock_function()
-  state.wait = uv.cond_t.timedwait_function()
-  state.post = uv.sem_t.post_function()
+  state.lock = uv.native_mutex_lock
+  state.unlock = uv.native_mutex_unlock
+  state.wait = uv.native_cond_timedwait
+  state.post = uv.native_sem_post
   local owners: {value} = {state, mutex, condition, ready, done}
   local threads: {uv.thread_t} = {}
   local joined = false
@@ -152,10 +165,10 @@ function test_coverage_su_tls_and_joined_thread_identity(_context: test.Context)
   state.key = key:borrow()
   state.ready = ready:borrow()
   state.release = release:borrow()
-  state.get = uv.key_t.get_function()
-  state.set = uv.key_t.set_function()
-  state.post = uv.sem_t.post_function()
-  state.wait = uv.sem_t.wait_function()
+  state.get = uv.native_key_get
+  state.set = uv.native_key_set
+  state.post = uv.native_sem_post
+  state.wait = uv.native_sem_wait
   state.set_name = uv.thread_setname_function()
   state.get_cpu = uv.thread_getcpu_function()
   local thread = uv.thread_t()
@@ -221,8 +234,8 @@ function test_coverage_su_once_initialization_is_shared_across_native_threads(_c
   local state: owned *titan_cov_su_once = foreign titan_cov_su_once.new()
   state.guard = guard:borrow()
   state.start = start:borrow()
-  state.once = uv.once_function()
-  state.wait = uv.sem_t.wait_function()
+  state.once = uv.native_once
+  state.wait = uv.native_sem_wait
   local owners: {value} = {state, guard, start}
   local threads: {uv.thread_t} = {}
   local joined = false
@@ -245,6 +258,291 @@ function test_coverage_su_once_initialization_is_shared_across_native_threads(_c
   test.assert(ffi.titan_cov_su_count_once() == 1, "one guard ran its initializer more than once")
   uv.once(uv.once_t(), ffi.titan_cov_su_initialize_once)
   test.assert(ffi.titan_cov_su_count_once() == 2, "distinct guards incorrectly shared native state")
+end
+
+function test_coverage_su_direct_foreign_sync_entries_and_worker_matrix(
+    context: test.Context)
+  context:run("exact_pointer_assignment_and_direct_calls", function (_child: test.Context)
+    local mutex_lock: foreign function(*void): void = uv.native_mutex_lock
+    local mutex_trylock: foreign function(*void): int = uv.native_mutex_trylock
+    local mutex_unlock: foreign function(*void): void = uv.native_mutex_unlock
+    local mutex_destroy: foreign function(*void): void = uv.native_mutex_destroy
+    local rwlock_rdlock: foreign function(*void): void = uv.native_rwlock_rdlock
+    local rwlock_tryrdlock: foreign function(*void): int = uv.native_rwlock_tryrdlock
+    local rwlock_rdunlock: foreign function(*void): void = uv.native_rwlock_rdunlock
+    local rwlock_wrlock: foreign function(*void): void = uv.native_rwlock_wrlock
+    local rwlock_trywrlock: foreign function(*void): int = uv.native_rwlock_trywrlock
+    local rwlock_wrunlock: foreign function(*void): void = uv.native_rwlock_wrunlock
+    local sem_post: foreign function(*void): void = uv.native_sem_post
+    local sem_wait: foreign function(*void): void = uv.native_sem_wait
+    local sem_trywait: foreign function(*void): int = uv.native_sem_trywait
+    local cond_signal: foreign function(*void): void = uv.native_cond_signal
+    local cond_broadcast: foreign function(*void): void = uv.native_cond_broadcast
+    local cond_wait: foreign function(*void, *void): void = uv.native_cond_wait
+    local cond_timedwait: foreign function(*void, *void, unsigned long long): int =
+      uv.native_cond_timedwait
+    local barrier_wait: foreign function(*void): int = uv.native_barrier_wait
+    local key_get: foreign function(*void): *void = uv.native_key_get
+    local key_set: foreign function(*void, *void): void = uv.native_key_set
+    local once_call: foreign function(*void, function(): void): void = uv.native_once
+    test.assert(cond_wait ~= nil and mutex_destroy ~= nil)
+
+    local mutex = uv.mutex_t()
+    success(uv.mutex_init(mutex))
+    defer uv.mutex_destroy(mutex)
+    local raw_mutex = mutex:borrow()
+    mutex_lock(raw_mutex)
+    mutex_unlock(raw_mutex)
+    test.assert(mutex_trylock(raw_mutex) == 0)
+    mutex_unlock(raw_mutex)
+
+    local rwlock = uv.rwlock_t()
+    success(uv.rwlock_init(rwlock))
+    defer uv.rwlock_destroy(rwlock)
+    local raw_rwlock = rwlock:borrow()
+    rwlock_rdlock(raw_rwlock)
+    test.assert(rwlock_tryrdlock(raw_rwlock) == 0)
+    rwlock_rdunlock(raw_rwlock)
+    rwlock_rdunlock(raw_rwlock)
+    rwlock_wrlock(raw_rwlock)
+    rwlock_wrunlock(raw_rwlock)
+    test.assert(rwlock_trywrlock(raw_rwlock) == 0)
+    rwlock_wrunlock(raw_rwlock)
+
+    local sem = uv.sem_t()
+    success(uv.sem_init(sem, 0))
+    defer uv.sem_destroy(sem)
+    local raw_sem = sem:borrow()
+    test.assert((sem_trywait(raw_sem) as integer) == uv.EAGAIN)
+    sem_post(raw_sem)
+    test.assert(sem_trywait(raw_sem) == 0)
+    sem_post(raw_sem)
+    sem_wait(raw_sem)
+    test.assert((sem_trywait(raw_sem) as integer) == uv.EAGAIN)
+
+    local cond = uv.cond_t()
+    success(uv.cond_init(cond))
+    defer uv.cond_destroy(cond)
+    local raw_cond = cond:borrow()
+    cond_signal(raw_cond)
+    cond_broadcast(raw_cond)
+    mutex_lock(raw_mutex)
+    local mutex_locked = true
+    defer if mutex_locked then mutex_unlock(raw_mutex) end
+    local timed_out = false
+    for _attempt = 1, 5 do
+      local rc: integer = cond_timedwait(raw_cond, raw_mutex, 1000000)
+      test.assert(rc == 0 or rc == uv.ETIMEDOUT)
+      if rc == uv.ETIMEDOUT then timed_out = true; break end
+    end
+    mutex_unlock(raw_mutex)
+    mutex_locked = false
+    test.assert(timed_out, "direct foreign cond_timedwait did not report timeout")
+
+    local barrier = uv.barrier_t()
+    success(uv.barrier_init(barrier, 1))
+    defer uv.barrier_destroy(barrier)
+    test.assert(barrier_wait(barrier:borrow()) > 0)
+
+    local key = uv.key_t()
+    success(uv.key_create(key))
+    defer uv.key_delete(key)
+    local raw_key = key:borrow()
+    local cell: owned int[] = foreign int.new_array(1)
+    cell[0] = 99
+    test.assert(key_get(raw_key) == nil)
+    key_set(raw_key, cell)
+    test.assert(key_get(raw_key) == (cell as foreign *void))
+    key_set(raw_key, nil)
+    test.assert(key_get(raw_key) == nil)
+
+    ffi.titan_cov_su_reset_once()
+    local guard = uv.once_t()
+    once_call(guard:borrow(), ffi.titan_cov_su_initialize_once)
+    once_call(guard:borrow(), ffi.titan_cov_su_initialize_once)
+    test.assert(ffi.titan_cov_su_count_once() == 1)
+  end)
+
+  context:run("barrier_participation_and_serial_winner", function (_child: test.Context)
+    local mutex = uv.mutex_t()
+    success(uv.mutex_init(mutex))
+    defer uv.mutex_destroy(mutex)
+    local barrier = uv.barrier_t()
+    success(uv.barrier_init(barrier, 3))
+    defer uv.barrier_destroy(barrier)
+    local start = uv.sem_t()
+    success(uv.sem_init(start, 0))
+    defer uv.sem_destroy(start)
+    local state: owned *titan_cov_su_sync_matrix =
+      foreign titan_cov_su_sync_matrix.new()
+    state.mutex = mutex:borrow()
+    state.barrier = barrier:borrow()
+    state.start = start:borrow()
+    state.sem_wait = uv.native_sem_wait
+    state.mutex_lock = uv.native_mutex_lock
+    state.mutex_unlock = uv.native_mutex_unlock
+    state.barrier_wait = uv.native_barrier_wait
+    state.all_arrived_before_release = 1
+    local owners: {value} = {state, mutex, barrier, start}
+    local threads: {uv.thread_t} = {}
+    local started = 0
+    local released = false
+    local joined = false
+    defer if not joined then
+      if not released then
+        state.abort_barrier = 1
+        for _i = 1, started do uv.sem_post(start) end
+      end
+      for i = 1, started do success(uv.thread_join(threads[i])) end
+    end
+    for i = 1, 3 do
+      local thread = uv.thread_t()
+      threads[i] = thread
+      local status = uv.thread_create(
+        thread, ffi.titan_cov_su_barrier_participant, state, owners)
+      if status == 0 then started = started + 1 end
+      success(status)
+    end
+    released = true
+    for _i = 1, started do uv.sem_post(start) end
+    for i = 1, #threads do success(uv.thread_join(threads[i])) end
+    joined = true
+    test.assert(state.arrived == 3 and state.all_arrived_before_release == 1,
+                "barrier released a participant before all threads arrived")
+    test.assert(state.serial_count == 1 and state.zero_count == 2 and state.error_count == 0,
+                "barrier did not elect exactly one serial thread")
+  end)
+
+  context:run("condition_wait_predicate_loop_and_try_statuses", function (_child: test.Context)
+    local mutex = uv.mutex_t()
+    success(uv.mutex_init(mutex))
+    defer uv.mutex_destroy(mutex)
+    local cond = uv.cond_t()
+    success(uv.cond_init(cond))
+    defer uv.cond_destroy(cond)
+    local sem = uv.sem_t()
+    success(uv.sem_init(sem, 0))
+    defer uv.sem_destroy(sem)
+    local state: owned *titan_cov_su_sync_matrix =
+      foreign titan_cov_su_sync_matrix.new()
+    state.mutex = mutex:borrow()
+    state.cond = cond:borrow()
+    state.sem = sem:borrow()
+    state.mutex_lock = uv.native_mutex_lock
+    state.mutex_trylock = uv.native_mutex_trylock
+    state.mutex_unlock = uv.native_mutex_unlock
+    state.cond_signal = uv.native_cond_signal
+    state.cond_broadcast = uv.native_cond_broadcast
+    state.cond_wait = uv.native_cond_wait
+    state.sem_post = uv.native_sem_post
+    state.sem_wait = uv.native_sem_wait
+    state.sem_trywait = uv.native_sem_trywait
+    local owners: {value} = {state, mutex, cond, sem}
+
+    uv.native_mutex_lock(state.mutex)
+    do
+      defer uv.native_mutex_unlock(state.mutex)
+      local probe_thread = uv.thread_t()
+      success(uv.thread_create(
+        probe_thread, ffi.titan_cov_su_try_busy_mutex, state, owners))
+      success(uv.thread_join(probe_thread))
+      test.assert((state.trylock_busy_status as integer) == uv.EBUSY,
+                  "native_mutex_trylock did not report EBUSY across OS threads")
+    end
+
+    local waiters: {uv.thread_t} = {}
+    local producer = uv.thread_t()
+    local producer_started = false
+    local joined = false
+    defer if not joined then
+      uv.native_mutex_lock(state.mutex)
+      state.predicate_phase = 2
+      uv.native_cond_broadcast(state.cond)
+      uv.native_mutex_unlock(state.mutex)
+      if producer_started then success(uv.thread_join(producer)) end
+      for i = 1, #waiters do success(uv.thread_join(waiters[i])) end
+    end
+    for i = 1, 2 do
+      local thread = uv.thread_t()
+      local status = uv.thread_create(
+        thread, ffi.titan_cov_su_cond_wait_worker, state, owners)
+      if status == 0 then waiters[i] = thread end
+      success(status)
+    end
+    local pstatus = uv.thread_create(
+      producer, ffi.titan_cov_su_cond_producer_worker, state, owners)
+    producer_started = pstatus == 0
+    success(pstatus)
+    success(uv.thread_join(producer))
+    producer_started = false
+    uv.native_sem_wait(state.sem)
+    uv.native_sem_wait(state.sem)
+    for i = 1, #waiters do success(uv.thread_join(waiters[i])) end
+    joined = true
+    state.trylock_free_status = uv.native_mutex_trylock(state.mutex)
+    if state.trylock_free_status == 0 then uv.native_mutex_unlock(state.mutex) end
+    test.assert((state.trywait_empty_status as integer) == uv.EAGAIN and
+                state.trywait_ready_status == 0 and
+                (state.trywait_after_status as integer) == uv.EAGAIN,
+                "native_sem_trywait returned unexpected status values")
+    test.assert(state.trylock_free_status == 0 and
+                state.cond_wait_released_mutex == 1,
+                "native_cond_wait did not release its mutex while waiting")
+    test.assert(state.spurious_recheck_held == 1 and
+                state.cond_waiters_done == 2,
+                "condition predicate loop did not survive intermediate wake and finish")
+  end)
+
+  context:run("heap_mutex_lifecycle_and_null_destroy", function (_child: test.Context)
+    uv.native_mutex_destroy(nil)
+    local raw_mutex = uv.mutex_t.create_native()
+    test.assert(raw_mutex ~= nil, "mutex_t.create_native returned NULL")
+    local destroyed = false
+    local locked = false
+    defer if not destroyed then uv.native_mutex_destroy(raw_mutex) end
+    defer if locked then uv.native_mutex_unlock(raw_mutex) end
+
+    local try_status = uv.native_mutex_trylock(raw_mutex)
+    locked = try_status == 0
+    test.assert(locked)
+    local state: owned *titan_cov_su_sync_matrix =
+      foreign titan_cov_su_sync_matrix.new()
+    state.mutex = raw_mutex
+    state.mutex_trylock = uv.native_mutex_trylock
+    state.mutex_unlock = uv.native_mutex_unlock
+    local probe = uv.thread_t()
+    success(uv.thread_create(probe, ffi.titan_cov_su_try_busy_mutex, state, state))
+    success(uv.thread_join(probe))
+    test.assert((state.trylock_busy_status as integer) == uv.EBUSY,
+                "heap mutex trylock did not report EBUSY on another OS thread")
+    uv.native_mutex_unlock(raw_mutex)
+    locked = false
+
+    local cond = uv.cond_t()
+    success(uv.cond_init(cond))
+    defer uv.cond_destroy(cond)
+    uv.native_mutex_lock(raw_mutex)
+    locked = true
+    local timed_out = false
+    for _attempt = 1, 5 do
+      local rc: integer = uv.native_cond_timedwait(cond:borrow(), raw_mutex, 1000000)
+      test.assert(rc == 0 or rc == uv.ETIMEDOUT)
+      if rc == uv.ETIMEDOUT then timed_out = true; break end
+    end
+    state.trylock_busy_status = 0
+    local reacquired_probe = uv.thread_t()
+    success(uv.thread_create(
+      reacquired_probe, ffi.titan_cov_su_try_busy_mutex, state, state))
+    success(uv.thread_join(reacquired_probe))
+    uv.native_mutex_unlock(raw_mutex)
+    locked = false
+    test.assert(timed_out and (state.trylock_busy_status as integer) == uv.EBUSY,
+                "cond_timedwait did not reacquire heap mutex before returning")
+
+    uv.native_mutex_destroy(raw_mutex)
+    destroyed = true
+    uv.native_mutex_destroy(nil)
+  end)
 end
 
 function test_coverage_su_numeric_addresses_preserve_bytes_and_ipv6_fields(context: test.Context)
@@ -400,4 +698,56 @@ function test_coverage_su_udp_immediate_and_batch_sends_preserve_datagrams(_cont
   test.assert(received == 4 and packets["first\0packet"] == 1 and packets["connected\0"] == 1 and
               packets["a\0b"] == 1 and packets["last"] == 1,
               "immediate/batch send merged, truncated, duplicated or lost a datagram")
+end
+
+local function su_native_ownership_case(context: test.Context, workspace: string,
+                                        scenario: string)
+  context:run(scenario, function (_child: test.Context)
+    local output, why, status = su_fault_command.capture({
+      su_fault_command.program(workspace, "uv_sync_alloc_fault_app"), scenario,
+    }, workspace)
+    test.assert(why == "exit" and status == 0,
+                "native UV ownership scenario failed at " .. scenario .. ": " .. output)
+    test.assert(output == "UV_NATIVE_OWNERSHIP_OK\n",
+                "native ownership child omitted its receipt")
+  end)
+end
+
+local function su_native_fault_workspace(context: test.Context): string
+  if su_fault_common.is_windows() then
+    test.skip("platform: native allocation wrapping requires Linux static archive linkage")
+  end
+  local host, why, status = su_fault_command.capture({"uname", "-s"})
+  test.assert(why == "exit" and status == 0, host)
+  if host ~= "Linux\n" then
+    test.skip("platform: native allocation wrapping requires Linux static archive linkage")
+  end
+  local workspace = ""
+  su_fault_runtime.run(function ()
+    workspace = su_fault_fs.tmpname()
+    su_fault_fs.unlink(workspace)
+    su_fault_fs.mkdir(workspace)
+    context:cleanup(function () su_fault_command.remove_tree(workspace) end)
+    su_fault_fs.write_file(workspace .. "/uv_sync_alloc_fault_api.h",
+      su_fault_fs.read_file("spec/fixtures/stdlib/native/uv_sync_alloc_fault_api.h"))
+    su_fault_fs.write_file(workspace .. "/uv_sync_alloc_fault_app.titan",
+      su_fault_fs.read_file("spec/fixtures/stdlib/titan/uv_sync_alloc_fault_app.titan"))
+    local flags = su_fault_os.getenv("TITAN_EXTRA_LDFLAGS") or ""
+    flags = flags .. " -Wl,--wrap=malloc,--wrap=free,--wrap=uv_mutex_init" ..
+      ",--wrap=uv_thread_join,--wrap=uv_thread_detach,--wrap=uv_thread_create"
+    local output, compile_why, code = su_fault_command.compile(workspace,
+      "uv_sync_alloc_fault_app",
+      {"--no-uv-bootstrap", "-X", su_fault_command.fixture_object("uv_sync_alloc_fault")},
+      true, {["TITAN_EXTRA_LDFLAGS"] = flags})
+    test.assert(compile_why == "exit" and code == 0,
+                "could not compile unchanged-provider UV allocation child: " .. output)
+  end)
+  return workspace
+end
+
+function test_native_heap_mutex_allocation_failure_and_cleanup(context: test.Context)
+  local workspace = su_native_fault_workspace(context)
+  su_native_ownership_case(context, workspace, "malloc-failure")
+  su_native_ownership_case(context, workspace, "init-failure")
+  su_native_ownership_case(context, workspace, "success-and-destroy")
 end

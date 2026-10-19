@@ -114,7 +114,9 @@ A producer defining foreign functions also generates `A.titan.h` for its C
 prototypes and eligible inline bodies. Generated C includes its own `.ffi.h`
 first, then its `.titan.h` when present and the needed explicit-source Titan
 headers. Resolver-owned checking trees contain the actual generated headers;
-final compilation uses their source-adjacent counterparts.
+final compilation uses their counterparts in the normal generated-file location
+(the [output directory](output-directory.md) when one is selected, otherwise
+beside the source).
 
 The consumer's builtin `ffi` value namespace and separate foreign type namespace comes from parsing its combined
 `.ffi.h`. Private Titan names still require a direct written `.titan` import:

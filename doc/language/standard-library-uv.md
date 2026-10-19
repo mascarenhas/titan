@@ -79,8 +79,44 @@ async Task, a native callback, or a nested `walk` callback.
 `uv.walk` also requires that thread; it invokes callbacks synchronously.
 Ordinary wrappers execute Titan/Lua code and are not callable from foreign
 threads, even when the underlying C operation is thread-safe. The explicit
-C-only worker/thread entries and raw synchronization helpers have their own
-[contracts](uv/CONTRACT-NOTES.md#cancellation-and-worker-boundaries).
+C-only worker/thread entries, direct `native_*` synchronization functions, and
+cross-thread `external_wake_t` bridge have their own
+[contracts](uv/CONTRACT-NOTES.md#cancellation-and-worker-boundaries) and
+[synchronization ownership rules](uv/types.md#synchronization-and-native-carrier-ownership).
+
+The [synchronization entry map](uv/supplemental.md#direct-synchronization-entry-map)
+lists all 20 removed getters and exact direct C signatures (18 newly public
+entries, plus the already-public mutex lock/unlock). Native carriers use those
+entries without a source import. A borrowed checked synchronization owner must
+stay rooted until every native user is quiescent, then be explicitly retired.
+`mutex_t.create_native()` instead returns caller-owned heap storage, destroyed
+and freed only by `native_mutex_destroy`; never pass `mutex_t:borrow()` there.
+`once_t.new()` already initializes its stable guard with no separate
+init/reset/destroy, and TLS keys neither identify Tasks nor own their pointees.
+Do not suspend a Task while holding a blocking `uv` lock; use
+[same-state channels](async-io.md#bounded-channels) or
+[cross-thread channels](standard-library-thread.md#cross-thread-channels) for
+cooperative coordination.
+
+The separate [heap-thread-token helpers](uv/supplemental.md#create_native_thread)
+provide manual native ownership: creation returns a unique process-heap token,
+and native join/detach consume it only on success. They retain no GC argument
+graph and do not change checked `thread_t` semantics. Detach is not join or
+proof that worker arguments may be released.
+
+`external_wake_t` is a low-level identity wake bridge, not a message queue or
+permission for a worker to touch destination GC objects. Preparation borrows a
+target without keeping the loop alive; an admitted wait activates it, and the
+shared handle remains referenced through registration retirement, not merely
+through notification delivery. Native producers take separate references, and
+the destination drains bounded batches into its own traced wait map. Follow
+the [complete borrow, close, and teardown contract](uv/types.md#synchronization-and-native-carrier-ownership);
+normal close rejects any remaining registration with `EBUSY`, whereas GC
+detach is only a nonyielding fallback and does not complete native loop cleanup.
+The native `is_notified` query preserves notification observability after
+drain while a valid target borrow/reference remains. Native unregister is a
+consuming **destination-loop-thread-only** entry, not a foreign producer call;
+it may unreference the loop handle and immediately free the registration borrow.
 
 ## Read status and lifetime together
 
@@ -132,8 +168,9 @@ The [type reference](uv/types.md) lists public records, tagged owner views,
 callback aliases, enums, constants, constructors, and methods. The
 [callback reference](uv/callbacks.md) specifies timing, argument ownership,
 thread affinity, and exception handling. [Supplemental APIs](uv/supplemental.md)
-cover owner methods and Titan-specific helpers, including
-`setup_process_args()`.
+cover owner methods, direct `native_*` synchronization foreign entries,
+`mutex_t.create_native()`, the `external_wake_t` cross-thread wake bridge, and
+Titan-specific helpers such as `setup_process_args()`.
 
 | Family | Operations |
 | --- | --- |
@@ -142,7 +179,7 @@ cover owner methods and Titan-specific helpers, including
 | [Requests](uv/functions/request.md) | Cancellation, public data, kind/size queries, and request views. |
 | [Timers](uv/functions/timer.md) | One-shot and repeating callback timers, stop/rearm, repeat/due-time queries. |
 | [Prepare](uv/functions/prepare.md), [check](uv/functions/check.md), [idle](uv/functions/idle.md) | Callbacks around the loop's polling phase. |
-| [Async notifications](uv/functions/async.md) | Coalesced native-to-loop notifications and the C-only send entry. |
+| [Async notifications](uv/functions/async.md) | Coalesced native-to-loop notifications, C-only send entries, and the supplemental `external_wake_t` waiter bridge. |
 | [Signals](uv/functions/signal.md) | Repeated and one-shot signal delivery. |
 | [Descriptor polling](uv/functions/poll.md) | Readiness notifications for borrowed descriptors or sockets. |
 | [Streams](uv/functions/stream.md) | Listen/accept, read allocation, writes, shutdown, and immediate writes. |
@@ -155,7 +192,7 @@ cover owner methods and Titan-specific helpers, including
 | [Filesystem events](uv/functions/fs_event.md), [filesystem polling](uv/functions/fs_poll.md) | Native notifications or periodic metadata comparison. |
 | [Processes](uv/functions/process.md) | Spawn, stdio setup, PID, signal delivery, and process-handle ownership. |
 | [Worker pool](uv/functions/threadpool.md) | C-only blocking work with loop-thread completion. |
-| [Threads and synchronization](uv/functions/threading.md) | Native threads, join/detach, affinity, locks, conditions, semaphores, and once. |
+| [Threads and synchronization](uv/functions/threading.md) | Native threads, join/detach, affinity, locks, conditions, semaphores, once, TLS keys, and direct `native_*` C-only entries. |
 | [Dynamic libraries](uv/functions/dll.md) | Open, symbol lookup, error text, and explicit close. |
 | [System utilities](uv/functions/misc.md) | Environment, paths, identity, memory, clocks, randomness, addresses, and encoding. |
 | [Metrics](uv/functions/metrics.md) | Loop activity and idle-time measurements. |
@@ -209,10 +246,15 @@ owned by a higher-level adapter, while still rejecting pending native reads and
 all other unsupported state. The adapter must stop that watcher before calling
 the actual hook.
 
-Native payloads follow the manual handoff contract: the caller delivers and
-adopts them exactly once and recovers the resource if delivery or adoption
-fails. Copying a payload does not duplicate its descriptor, and discarding one
-does not close it. The source is already detached when encoding returns.
+Native payloads follow the
+[shared manual-handoff rules](standard-library-transfer.md#shared-manual-handoff-rules):
+the caller delivers and adopts them exactly once and recovers the resource if
+delivery or adoption fails. The source is already detached when encoding
+returns. Copying a payload does not duplicate its descriptor, and discarding
+one does not close it or invoke `from_transfer_payload`. That includes
+`transfer.discard_message` and channel or receiver teardown, which
+automatically release only packet-attached `thread.Sender` and `thread.Receiver`
+endpoints.
 
 The two explicit `discard_transfer_payload` methods close a known unadopted
 native payload without a bound loop or Runtime and return the native close
@@ -232,3 +274,10 @@ entrypoint's original argument storage; it is not an arbitrary `uv_setup_args`
 wrapper. Type, field, callback, macro, and platform-constant mappings accompany
 the function inventory. Coverage does not remove platform-specific native
 limitations or make every operation appropriate inside a cooperative Task.
+
+The **232** [supplemental declarations](uv/supplemental.md) include the direct
+synchronization map, **12** external-wake helpers, and three heap-thread-token
+helpers. None of them adds a distinct libuv C operation. Counts describe the
+exported API inventory, not a claim that every operation has been executed on
+every platform. The generated-code ABI is version **2** and the language-server
+API is version **1**.

@@ -147,6 +147,7 @@ function import_module(loadmods, initmods, sigs, mprefixes,
     local mprefix = mangle_qn(modname) .. "_"
     local public_layout = coder._public_prefix_layout(node._type)
     local source_check = ""
+    local first_import = mprefixes[modname] == nil
     mprefixes[modname] = mprefix
     if not dynamic then
         local identity = coder._source_module_identity_name(modname)
@@ -174,8 +175,11 @@ function import_module(loadmods, initmods, sigs, mprefixes,
         local file = node._type.file
         tlcontext.binary_modules[modname] = tlcontext.binary_modules[modname]
             or rawget(node, "_declared_type") or node._type
-        table.insert(loadmods,
-            "TitanModuleProvider " .. mprefix .. "provider;")
+        -- Aliases keep separate module slots but share one canonical handle.
+        if first_import then
+            table.insert(loadmods,
+                "TitanModuleProvider " .. mprefix .. "provider;")
+        end
         local compatibility = coder._binary_check(tlcontext, modname,
             mprefix .. "provider", file)
         table.insert(initmods, render([[

@@ -29,6 +29,10 @@ end
 ```text
 serialize(candidate: value): string
 serialize_to_buffer(buf: foreign *void, candidate: value)
+serialize_inspected_record_to_buffer(buf: foreign *void,
+                                     candidate: reflect.RecordValue)
+serialize_inspected_union_to_buffer(buf: foreign *void,
+                                    candidate: reflect.UnionValue)
 deserialize(bytes: string, descriptor: reflect.Type): value
 schema(descriptor: reflect.Type): string
 deserialize_nominal(bytes: string, name: string, is_union: boolean): value
@@ -60,6 +64,17 @@ slice of length `length`. `find_transfer_hooks` returns a record's validated
 `(to_transfer_payload, from_transfer_payload)` pair (memoized per nominal record
 name `descriptor.name`), and `encode_transfer_payload` invokes `to_hook` under
 the shared active-record cycle guard.
+
+`serialize_inspected_record_to_buffer` and
+`serialize_inspected_union_to_buffer` are ordinary compiled collaboration
+entries used by `titan.transfer` after it has already inspected the root.
+`buf` must point to a live, initialized `titan_protobuf_buffer`, just as for
+`serialize_to_buffer`; these functions append to it and do not own or finalize
+the buffer. The typed `reflect.RecordValue` or `reflect.UnionValue` avoids a
+second root inspection, not the normal public-nominal/member visibility,
+active-record cycle, nesting-depth (128), custom-hook dispatch, or 2 GiB
+message-size checks. These internal-purpose entries do not introduce a new
+serialization policy or make unsupported roots transferable.
 
 The serialized result of `serialize` and `serialize_fields` is a binary string.
 Names, filenames, and schemas are ordinary strings too, but wire bytes need not
@@ -196,8 +211,9 @@ the ordinary C FFI precondition.
 
 ## Independent states
 
-`async.TransferValue.is_record(module, name, bytes)` and
-`is_union(module, name, bytes)` carry the defining module, root type name, and
+`transfer.TransferValue.is_record(module, name, bytes)` and
+`is_union(module, name, bytes)` (`async.TransferValue` is a transparent alias)
+carry the defining module, root type name, and
 wire payload. Independent-state calls automatically
 serialize eligible returned records and unions; an explicitly returned
 `TransferValue` takes precedence over this classification. Receiver messages
@@ -216,6 +232,14 @@ wire as `optional bytes` without requiring public fields on the hooked record.
 Hooks may use an anonymous-message descriptor to encode native tokens and
 copied state. Calling `protobuf.serialize` directly on a root record continues
 to apply the structural public-data rules in this chapter.
+
+Standalone protobuf operations open no packet resource scope. In particular,
+calling these hooks from `protobuf.serialize` does not by itself authorize
+`thread.Sender` or `thread.Receiver` attachment. Endpoints are supported only
+when the protobuf/hook work belongs to the exact current packet scope opened
+by a [packet transfer operation](standard-library-transfer.md#scoped-resource-attachments-and-packet-local-indexes).
+Hooks remain synchronous and nonyielding; nested hook dispatch does not change
+their ownership or execution contract.
 
 `TransferValue:to_value()` first checks the destination nominal registry. On a
 miss it calls the recorded module's native preload loader and retries lookup.

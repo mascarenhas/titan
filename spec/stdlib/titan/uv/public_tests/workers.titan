@@ -1,3 +1,7 @@
+local native_thread_common = import "support.common.titan"
+
+foreign type NativeThreadPtr = *void
+
 -- These callbacks are deliberately C-only. The public work/thread APIs accept
 -- portable C pointers; no libuv header, layout, or Titan/Lua worker entry is used.
 local foreign function increment_cell(argument: *void)
@@ -129,23 +133,327 @@ function test_work_public_data_is_independent_of_native_callback_data(_context: 
   test.assert(calls == 1 and request:get_data() == "while pending")
 end
 
-function test_sync_native_rejection_preserves_fresh_owner(_context: test.Context)
-  local barrier = uv.barrier_t()
-  test.assert(uv.barrier_init(barrier, 0) == uv.EINVAL)
-  success(uv.barrier_init(barrier, 1))
-  test.assert(uv.barrier_wait(barrier) == 1)
-  uv.barrier_destroy(barrier)
-  expect_error(function () uv.barrier_wait(barrier) end,
-               "uv.barrier: not initialized or already destroyed")
+local function start_rooted_sync_worker(weak: {value: value})
   local mutex = uv.mutex_t()
   success(uv.mutex_init(mutex))
-  defer uv.mutex_destroy(mutex)
+  local rwlock = uv.rwlock_t()
+  success(uv.rwlock_init(rwlock))
+  local sem = uv.sem_t()
+  success(uv.sem_init(sem, 0))
+  local cond = uv.cond_t()
+  success(uv.cond_init(cond))
+  local barrier = uv.barrier_t()
+  success(uv.barrier_init(barrier, 1))
+  local key = uv.key_t()
+  success(uv.key_create(key))
+  local once = uv.once_t()
+  local cell: owned int[] = foreign int.new_array(1)
+  cell[0] = 10
+  test.assert(mutex:borrow() ~= nil and rwlock:borrow() ~= nil and
+              sem:borrow() ~= nil and cond:borrow() ~= nil and
+              barrier:borrow() ~= nil and key:borrow() ~= nil and
+              once:borrow() ~= nil)
+  local thread = uv.thread_t()
+  local owners: {value} = {cell, mutex, rwlock, sem, cond, barrier, key, once}
+  weak[1] = thread
+  weak[2] = mutex
+  weak[3] = rwlock
+  weak[4] = sem
+  weak[5] = cond
+  weak[6] = barrier
+  weak[7] = key
+  weak[8] = once
+  success(uv.thread_create(thread, increment_cell, cell, owners))
+end
+
+local function finish_rooted_sync_worker(weak: {value: value})
+  local thread: uv.thread_t = weak[1]
+  local mutex: uv.mutex_t = weak[2]
+  local rwlock: uv.rwlock_t = weak[3]
+  local sem: uv.sem_t = weak[4]
+  local cond: uv.cond_t = weak[5]
+  local barrier: uv.barrier_t = weak[6]
+  local key: uv.key_t = weak[7]
+  success(uv.thread_join(thread))
+  uv.mutex_destroy(mutex)
+  uv.rwlock_destroy(rwlock)
+  uv.sem_destroy(sem)
+  uv.cond_destroy(cond)
+  uv.barrier_destroy(barrier)
+  uv.key_delete(key)
+end
+
+function test_sync_borrowed_owners_remain_rooted_across_gc_until_join_and_destroy(
+    _context: test.Context)
+  local weak: {value: value} = {}
+  gc.weak(weak)
+  start_rooted_sync_worker(weak)
+  collect()
+  for i = 1, 8 do assert_retained(weak, i) end
+  finish_rooted_sync_worker(weak)
+  collect()
+  for i = 1, 8 do
+    test.assert(weak[i] == nil, "retired synchronization owner survived GC")
+  end
+end
+
+function test_sync_native_rejection_preserves_fresh_owner(_context: test.Context)
+  local barrier = uv.barrier_t()
+  expect_error(function () barrier:borrow() end,
+               "uv.barrier: not initialized or already destroyed")
+  test.assert(uv.barrier_init(barrier, 0) == uv.EINVAL)
+  success(uv.barrier_init(barrier, 1))
+  expect_error(function () uv.barrier_init(barrier, 1) end,
+               "uv.barrier: initialization requires fresh owner")
+  test.assert(uv.barrier_wait(barrier) == 1)
+  uv.barrier_destroy(barrier)
+  expect_error(function () barrier:borrow() end,
+               "uv.barrier: not initialized or already destroyed")
+  expect_error(function () uv.barrier_wait(barrier) end,
+               "uv.barrier: not initialized or already destroyed")
+
+  local mutex = uv.mutex_t()
+  expect_error(function () mutex:borrow() end,
+               "uv.mutex: not initialized or already destroyed")
+  expect_error(function () uv.mutex_lock(mutex) end,
+               "uv.mutex: not initialized or already destroyed")
+  success(uv.mutex_init(mutex))
+  expect_error(function () uv.mutex_init(mutex) end,
+               "uv.mutex: initialization requires fresh owner")
   success(uv.mutex_trylock(mutex))
   uv.mutex_unlock(mutex)
+  uv.mutex_destroy(mutex)
+  expect_error(function () mutex:borrow() end,
+               "uv.mutex: not initialized or already destroyed")
+  expect_error(function () uv.mutex_destroy(mutex) end,
+               "uv.mutex: not initialized or already destroyed")
+
+  local rwlock = uv.rwlock_t()
+  expect_error(function () rwlock:borrow() end,
+               "uv.rwlock: not initialized or already destroyed")
+  success(uv.rwlock_init(rwlock))
+  expect_error(function () uv.rwlock_init(rwlock) end,
+               "uv.rwlock: initialization requires fresh owner")
+  uv.rwlock_destroy(rwlock)
+  expect_error(function () rwlock:borrow() end,
+               "uv.rwlock: not initialized or already destroyed")
+
   local semaphore = uv.sem_t()
+  expect_error(function () semaphore:borrow() end,
+               "uv.sem: not initialized or already destroyed")
   success(uv.sem_init(semaphore, 0))
-  defer uv.sem_destroy(semaphore)
+  expect_error(function () uv.sem_init(semaphore, 0) end,
+               "uv.sem: initialization requires fresh owner")
   test.assert(uv.sem_trywait(semaphore) == uv.EAGAIN)
   uv.sem_post(semaphore)
   success(uv.sem_trywait(semaphore))
+  uv.sem_destroy(semaphore)
+  expect_error(function () semaphore:borrow() end,
+               "uv.sem: not initialized or already destroyed")
+
+  local cond = uv.cond_t()
+  expect_error(function () cond:borrow() end,
+               "uv.cond: not initialized or already destroyed")
+  success(uv.cond_init(cond))
+  expect_error(function () uv.cond_init(cond) end,
+               "uv.cond: initialization requires fresh owner")
+  uv.cond_destroy(cond)
+  expect_error(function () cond:borrow() end,
+               "uv.cond: not initialized or already destroyed")
+
+  local key = uv.key_t()
+  expect_error(function () key:borrow() end,
+               "uv.key: not initialized or already destroyed")
+  success(uv.key_create(key))
+  expect_error(function () uv.key_create(key) end,
+               "uv.key: initialization requires fresh owner")
+  uv.key_delete(key)
+  expect_error(function () key:borrow() end,
+               "uv.key: not initialized or already destroyed")
+end
+
+local foreign function native_token_increment_worker(argument: *void)
+  local slots = argument as foreign *NativeThreadPtr
+  local go = slots[0]
+  local cell = slots[1] as foreign *int
+  uv.native_sem_wait(go)
+  cell[0] = cell[0] + 1
+end
+
+local foreign function native_token_detached_worker(argument: *void)
+  local slots = argument as foreign *NativeThreadPtr
+  local go = slots[0]
+  local done = slots[1]
+  local mutex = slots[2]
+  local cell = slots[3] as foreign *int
+  uv.native_sem_wait(go)
+  uv.native_mutex_lock(mutex)
+  cell[0] = cell[0] + 2
+  uv.native_sem_post(done)
+  -- Final access to caller-owned storage. The caller acquires this mutex after
+  -- done before destroying synchronization storage or dropping the argument.
+  uv.native_mutex_unlock(mutex)
+end
+
+local foreign function native_token_self_join_worker(argument: *void)
+  local slots = argument as foreign *NativeThreadPtr
+  local go = slots[0]
+  local done = slots[1]
+  local status = slots[3] as foreign *int
+  uv.native_sem_wait(go)
+  local token = slots[2]
+  local result = uv.native_thread_join(token)
+  if result == 0 then slots[2] = nil end
+  status[0] = result
+  uv.native_sem_post(done)
+end
+
+function test_native_thread_tokens_reject_null_without_creating_ownership(_context: test.Context)
+  local join: foreign function(*void): int = uv.native_thread_join
+  local detach: foreign function(*void): int = uv.native_thread_detach
+  local status, token = uv.create_native_thread(nil, nil)
+  test.assert(status == uv.EINVAL and token == nil,
+              "NULL native entry created a thread token")
+  test.assert((join(nil) as integer) == uv.EINVAL,
+              "NULL native join did not reject absent ownership")
+  test.assert((detach(nil) as integer) == uv.EINVAL,
+              "NULL native detach did not reject absent ownership")
+end
+
+function test_native_thread_join_retires_caller_owned_token_and_argument(_context: test.Context)
+  local go = uv.sem_t()
+  success(uv.sem_init(go, 0))
+  defer uv.sem_destroy(go)
+  local cell: owned int[] = foreign int.new_array(1)
+  cell[0] = 40
+  local slots: owned NativeThreadPtr[] = foreign NativeThreadPtr.new_array(2)
+  slots[0] = go:borrow()
+  slots[1] = cell
+  local token: foreign *void = nil
+  defer if token ~= nil then
+    uv.sem_post(go)
+    local result = uv.native_thread_join(token)
+    if result == 0 then token = nil end
+    success(result)
+  end
+  local status, created = uv.create_native_thread(native_token_increment_worker, slots)
+  token = created
+  success(status)
+  test.assert(token ~= nil)
+  -- Raw creation roots nothing: these explicit local owners remain reachable
+  -- while the worker is blocked and collection runs.
+  collect()
+  test.assert(cell[0] == 40)
+  uv.sem_post(go)
+  local join: foreign function(*void): int = uv.native_thread_join
+  local result = join(token)
+  if result == 0 then token = nil end
+  success(result)
+  test.assert(slots[1] == (cell as foreign *void),
+              "caller-owned carrier did not survive native join")
+  test.assert(token == nil and cell[0] == 41,
+              "native join did not publish writes before token consumption")
+end
+
+function test_native_thread_detach_consumes_only_token_not_argument_lifetime(_context: test.Context)
+  local go = uv.sem_t()
+  success(uv.sem_init(go, 0))
+  defer uv.sem_destroy(go)
+  local done = uv.sem_t()
+  success(uv.sem_init(done, 0))
+  defer uv.sem_destroy(done)
+  local mutex = uv.mutex_t()
+  success(uv.mutex_init(mutex))
+  defer uv.mutex_destroy(mutex)
+  local cell: owned int[] = foreign int.new_array(1)
+  cell[0] = 40
+  local slots: owned NativeThreadPtr[] = foreign NativeThreadPtr.new_array(4)
+  slots[0] = go:borrow()
+  slots[1] = done:borrow()
+  slots[2] = mutex:borrow()
+  slots[3] = cell
+  local token: foreign *void = nil
+  local accepted, retired = false, false
+  defer if accepted and not retired then
+    uv.sem_post(go)
+    if token ~= nil then
+      local result = uv.native_thread_join(token)
+      if result == 0 then token = nil end
+      success(result)
+    else
+      uv.sem_wait(done)
+      uv.mutex_lock(mutex)
+      uv.mutex_unlock(mutex)
+    end
+  end
+  local status, created = uv.create_native_thread(native_token_detached_worker, slots)
+  token = created
+  accepted = status == 0
+  success(status)
+  local detach: foreign function(*void): int = uv.native_thread_detach
+  local result = detach(token)
+  if result == 0 then token = nil end
+  success(result)
+  test.assert(token == nil, "successful native detach did not consume its token")
+  collect()
+  test.assert(cell[0] == 40)
+  uv.sem_post(go)
+  uv.sem_wait(done)
+  uv.mutex_lock(mutex)
+  uv.mutex_unlock(mutex)
+  retired = true
+  test.assert(slots[3] == (cell as foreign *void),
+              "caller-owned carrier did not survive detached worker quiescence")
+  test.assert(cell[0] == 42,
+              "detached worker lost its caller-owned argument before final access")
+end
+
+function test_native_thread_failed_self_join_preserves_valid_token(_context: test.Context)
+  if native_thread_common.is_windows() then
+    test.skip("platform: Windows native self-join blocks instead of returning a deadlock error")
+  end
+  local go = uv.sem_t()
+  success(uv.sem_init(go, 0))
+  defer uv.sem_destroy(go)
+  local done = uv.sem_t()
+  success(uv.sem_init(done, 0))
+  defer uv.sem_destroy(done)
+  local result: owned int[] = foreign int.new_array(1)
+  local slots: owned NativeThreadPtr[] = foreign NativeThreadPtr.new_array(4)
+  slots[0] = go:borrow()
+  slots[1] = done:borrow()
+  slots[3] = result
+  local token: foreign *void = nil
+  defer if token ~= nil then
+    uv.sem_post(go)
+    local status = uv.native_thread_join(token)
+    if status == 0 then token = nil end
+    success(status)
+  end
+  local status, created = uv.create_native_thread(native_token_self_join_worker, slots)
+  token = created
+  success(status)
+  slots[2] = token
+  uv.sem_post(go)
+  uv.sem_wait(done)
+  token = slots[2]
+  test.assert((result[0] as integer) < 0 and token ~= nil,
+              "native self-join did not return failure with valid ownership preserved")
+  local joined = uv.native_thread_join(token)
+  if joined == 0 then token = nil end
+  success(joined)
+  test.assert(token == nil,
+              "successful retirement after failed self-join did not consume its token")
+end
+
+function test_native_thread_retirement_errors_preserve_valid_tokens(context: test.Context)
+  local workspace = su_native_fault_workspace(context)
+  su_native_ownership_case(context, workspace, "thread-join-failure")
+  su_native_ownership_case(context, workspace, "thread-detach-failure")
+end
+
+function test_native_thread_constructor_failure_returns_no_token(context: test.Context)
+  local workspace = su_native_fault_workspace(context)
+  su_native_ownership_case(context, workspace, "thread-token-allocation-failure")
+  su_native_ownership_case(context, workspace, "thread-native-create-failure")
 end

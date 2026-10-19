@@ -140,7 +140,10 @@ is preserved through static providers and chains of aliases.
 
 A `local type` alias is visible only inside its defining module and is omitted
 from the compiled interface. A public alias must have an exportable target: it
-cannot expose a local nominal type or a header-dependent foreign type.
+cannot expose a local nominal type or a nonexportable C type graph. Eligible
+header-dependent components are allowed when consumers supply the original
+compatible declarations; ordinary Titan imports do not inherit C headers.
+See [the C FFI export rules](ffi.md).
 
 Ordinary `type` aliases name Titan types, including owned C storage and Titan
 containers, Options, or callable types containing foreign components. They

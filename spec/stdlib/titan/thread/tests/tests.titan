@@ -1,13 +1,19 @@
 local test = import "test"
 local async = import "async"
 local gc = import "gc"
+local lua = import "lua"
 local protobuf = import "protobuf"
 local strings = import "string"
 local thread = import "thread"
 local timer = import "timer"
 local transfer = import "transfer"
+local uv = import "uv"
 local runtime_test = import "support.runtime.titan"
 local task_support = import "support.async.titan"
+local thread_fault_fs = import "fs"
+local thread_fault_os = import "os"
+local thread_fault_command = import "support.command.titan"
+local thread_fault_common = import "support.common.titan"
 
 local function spawn_task<|T|>(entry: function (): (T), label: string): async.Task<|T, value|>
   local t = async.run(entry)
@@ -41,10 +47,8 @@ local function await_task<|T|>(task: async.Task<|T, value|>): T
 end
 
 local function wait_until_waiting<|T|>(task: async.Task<|T, value|>)
-  for _ = 1, 8 do
-    if task:status():as_string() == "waiting" then
-      return
-    end
+  while task:status():as_string() ~= "waiting" and
+        not task:status():has_finished() do
     async.yield()
   end
   test.assert(task:status():as_string() == "waiting", "expected task to reach waiting status")
@@ -75,6 +79,16 @@ local function expect_error(action: function (): (), expected: string)
     end
   end
   test.assert(failed, "expected error containing: " .. expected)
+end
+
+local function expect_raises(action: function (): ())
+  local failed = false
+  do
+    action()
+  catch
+    failed = true
+  end
+  test.assert(failed, "expected operation to raise an error")
 end
 
 record JobPacket
@@ -333,7 +347,8 @@ function test_incoming_nil_payloads_cross_threads_with_backpressure(_context: te
   end)
 end
 
-function test_receiver_close_flushes_buffer_and_wakes_senders(_context: test.Context)
+function test_receiver_close_flushes_buffer_and_wakes_senders(context: test.Context)
+  context:log("BEGIN expected channel-closed async Task diagnostics")
   runtime_test.run(function ()
     local tx, rx = thread.channel<|integer|>(1)
     tx:send(1)
@@ -392,6 +407,7 @@ function test_receiver_close_flushes_buffer_and_wakes_senders(_context: test.Con
     end, "channel is closed")
     test.assert(rx4:receive() == 10)
   end)
+  context:log("END expected channel-closed async Task diagnostics")
 end
 
 function test_waiter_cancellation_preserves_subsequent_messages(_context: test.Context)
@@ -656,7 +672,7 @@ function test_thread_cancellation_propagates_to_worker(_context: test.Context)
   end)
 end
 
-function test_thread_group_limit_and_error_propagation(_context: test.Context)
+function test_thread_group_limit_and_error_propagation(context: test.Context)
   expect_error(function ()
     thread.group(0)
   end, "group limit must be positive")
@@ -664,6 +680,7 @@ function test_thread_group_limit_and_error_propagation(_context: test.Context)
     thread.group(-1)
   end, "group limit must be positive")
 
+  context:log("BEGIN expected Group child proxy failure diagnostics")
   runtime_test.run(function ()
     -- Empty group wait returns empty array immediately.
     local empty_group = thread.group(2, true)
@@ -717,6 +734,7 @@ function test_thread_group_limit_and_error_propagation(_context: test.Context)
       errs2[1].error is string and
       strings.find(errs2[1].error as string, "immediate group failure") ~= nil)
   end)
+  context:log("END expected Group child proxy failure diagnostics")
 end
 
 local function spawn_abandoned_sender(): (thread.Receiver<|integer|>, thread.Thread<|integer|>)
@@ -853,11 +871,11 @@ local function start_cancelled_endpoint_send(
 ): (async.Task<|boolean, value|>, thread.Receiver<|integer|>)
   local tx, rx = thread.channel<|integer|>(1)
   local env: PipeEnvelope? = PipeEnvelope.sender_end(tx, "cancelled-send")
-  local task = async.run(function (): boolean
+  local task = spawn_task(function (): boolean
     defer env = nil
     full_tx:send(env as PipeEnvelope)
     return true
-  end)
+  end, "cancelled endpoint send cleanup")
   return task, rx
 end
 
@@ -874,7 +892,7 @@ local function spawn_abandoned_thread_returning_sender_after_finish(): thread.Re
     return PipeEnvelope.sender_end(inner_tx, "abandoned-result-after-finish")
   end, tx, done_tx)
   test.assert(done_rx:receive())
-  timer.sleep(20)
+  while not _worker:status():has_finished() do async.yield() end
   return rx
 end
 
@@ -901,25 +919,28 @@ function test_endpoint_transfer_gating_discard_and_rollback(_context: test.Conte
     defer s_tx:close()
     defer s_rx:close()
 
-    -- Direct transfer/protobuf calls outside titan.thread message transfer are rejected.
-    expect_error(function ()
+    -- Direct transfer/protobuf calls outside an active packet scope are rejected.
+    expect_raises(function ()
       s_tx:to_transfer_payload()
-    end, "thread endpoints can only be transferred through thread channels or spawn arguments")
-    expect_error(function ()
+    end)
+    expect_raises(function ()
       s_rx:to_transfer_payload()
-    end, "thread endpoints can only be transferred through thread channels or spawn arguments")
-    expect_error(function ()
+    end)
+    expect_raises(function ()
       thread.Sender<|string|>.from_transfer_payload("12345678")
-    end, "thread endpoints can only be transferred through thread channels or spawn arguments")
-    expect_error(function ()
+    end)
+    expect_raises(function ()
       thread.Receiver<|string|>.from_transfer_payload("12345678")
-    end, "thread endpoints can only be transferred through thread channels or spawn arguments")
-    expect_error(function ()
+    end)
+    expect_raises(function ()
       protobuf.serialize(JobPacket(1, s_tx))
-    end, "thread endpoints can only be transferred through thread channels or spawn arguments")
-    expect_error(function ()
+    end)
+    expect_raises(function ()
       transfer.TransferValue.from_value(s_tx)
-    end, "thread endpoints can only be transferred through thread channels or spawn arguments")
+    end)
+    expect_raises(function ()
+      transfer.TransferValue.from_value(s_rx)
+    end)
 
     -- Verify discarded try_send and mid-encode failures do not leak retained endpoint refs.
     local full_tx, full_rx = thread.channel<|PipeEnvelope|>(1)
@@ -1091,8 +1112,8 @@ function test_thread_task_failure_and_cancel_forwarding(_context: test.Context)
     local st = worker:join()
     test.assert(st:has_finished() and st:as_string() == "cancelled")
 
-    -- Pre-start cancellation: cancelling worker2:task() before its READY_START
-    -- turn executes still forwards cancellation to worker2 via its terminal listener.
+    -- Pre-start cancellation still forwards to worker2 and retires the worker
+    -- before publishing the proxy's terminal cancellation.
     local worker2 = thread.spawn(function (): integer
       ready_tx:send(true)
       return hold_rx:receive()
@@ -1108,7 +1129,8 @@ function test_thread_task_failure_and_cancel_forwarding(_context: test.Context)
   end)
 end
 
-function test_group_admission_suspension_and_active_sibling_cancellation(_context: test.Context)
+function test_group_admission_suspension_and_active_sibling_cancellation(context: test.Context)
+  context:log("BEGIN expected Group child proxy failure diagnostics")
   runtime_test.run(function ()
     -- Verify that a 3rd Group:spawn call suspends when limit = 2 and resumes on slot release.
     local g = thread.group(2, false)
@@ -1205,23 +1227,26 @@ function test_group_admission_suspension_and_active_sibling_cancellation(_contex
     end, ready_tx, block_rx, cancelled_tx)
     test.assert(ready_rx:receive())
 
-    local ran_queued = false
+    local unexpected_tx, unexpected_rx = thread.channel<|string|>(2)
+    defer unexpected_tx:close()
+    defer unexpected_rx:close()
     local queued_spawner = spawn_task(function (): boolean
-      g_cancel:spawn(function ()
-        ran_queued = true
-      end)
+      g_cancel:spawn_one(function (tx: thread.Sender<|string|>)
+        tx:send("queued")
+      end, unexpected_tx)
       return true
     end, "queued_spawner")
     wait_until_waiting(queued_spawner)
 
     g_cancel:cancel(async.CancellationReason.simple("explicit group cancel"))
     test.assert(await_task(queued_spawner))
-    local ran_after_cancel = false
-    g_cancel:spawn(function ()
-      ran_after_cancel = true
-    end)
+    g_cancel:spawn_one(function (tx: thread.Sender<|string|>)
+      tx:send("after_cancel")
+    end, unexpected_tx)
     local cancel_errs = g_cancel:wait()
     test.assert(cancelled_rx:receive())
-    test.assert(#cancel_errs == 0 and not ran_queued and not ran_after_cancel)
+    local has_unexpected, unexpected? = unexpected_rx:try_receive()
+    test.assert(#cancel_errs == 0 and not has_unexpected and unexpected == nil)
   end)
+  context:log("END expected Group child proxy failure diagnostics")
 end

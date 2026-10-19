@@ -1,6 +1,48 @@
 local transfer_reflect = import "reflect"
 local transfer_protobuf = import "protobuf"
+local transfer_mod = import "transfer"
+local transfer_thread = import "thread"
+local transfer_lua = import "lua"
+local transfer_math = import "math"
+local transfer_coroutine = import "coroutine"
+local transfer_gc = import "gc"
+local transfer_fs = import "fs"
+local transfer_os = import "os"
+local transfer_command = import "support.command.titan"
+local transfer_common = import "support.common.titan"
+foreign import "stdlib.h"
 foreign import "transfer.h"
+foreign type TransferMessageSlot = *void
+
+-- Called only AFTER a consuming foreign entry has returned and committed the
+-- caller slot. The caller must copy the native result/error with lua_totvalue
+-- in its own frame BEFORE entering this ordinary helper: the helper preamble
+-- reserves fresh nil root slots above the caller's value, so top -1 here is
+-- this function's own slot, never the caller's result.
+local function transfer_message_result(status: foreign int, result: value): value
+  if status ~= 0 then
+    transfer_mod.raise_message_error(status, result)
+  end
+  return result
+end
+
+-- These stateful C entries receive the *caller's slot*, not an unguarded raw
+-- value. They are passed as ordinary Lua C functions to independent states.
+local foreign function transfer_adopt_slot_lua(state: *lua_State): int
+  local slot = ffi.lua_touserdata(state, 1) as foreign *(*void)
+  local owner = ffi.lua_touserdata(state, 2)
+  local status = transfer_mod.adopt_into(owner, slot)
+  if status ~= 0 then return ffi.luaL_error(state, "transfer raw adoption rejected") end
+  return 0
+end
+
+local foreign function transfer_decode_slot_lua(state: *lua_State): int
+  local slot = ffi.lua_touserdata(state, 1) as foreign *(*void)
+  local status = transfer_mod.decode_message(state, slot)
+  if status > 0 then return ffi.lua_error(state) end
+  if status < 0 then return ffi.luaL_error(state, "transfer raw decode setup failed") end
+  return 1
+end
 
 local transfer_payload_new_calls = 0
 local transfer_payload_encode_calls = 0
@@ -314,13 +356,10 @@ function test_transfer_closure_validates_entry_before_decoding_payload(context: 
     }
     local address_one = (transfer_protobuf.deserialize_fields(
       "\9\1\0\0\0\0\0\0\0", pointer_fields)) as foreign *void
-    local copied: owned *TitanTransferEntry = foreign TitanTransferEntry.new()
-    ffi.memcpy(copied, entry, foreign TitanTransferEntry.sizeof)
     local tokens: {async.TransferValue} = {
       async.TransferValue.is_pointer(nil), async.TransferValue.is_pointer(address_one),
-      async.TransferValue.is_pointer(copied as foreign *void),
     }
-    local names = {"null", "address-one", "unregistered-identical-entry"}
+    local names = {"null", "address-one"}
     for index = 1, #tokens do
       local token = tokens[index]
       context:run(names[index], function (_context: test.Context)
@@ -332,6 +371,14 @@ function test_transfer_closure_validates_entry_before_decoding_payload(context: 
         else raise "invalid entry fixture policy" end
       end)
     end
+    context:run("unregistered-identical-entry", function (_context: test.Context)
+      local copied: owned *TitanTransferEntry = foreign TitanTransferEntry.new()
+      ffi.memcpy(copied, entry, foreign TitanTransferEntry.sizeof)
+      transfer_payload_error(function ()
+        async.TransferValue.is_closure(module, copied as foreign *void,
+          "invalid protobuf"):to_value()
+      end, "entry")
+    end)
   else raise "closure snapshot did not preserve its carrier" end
 end
 
@@ -548,4 +595,2785 @@ function test_receiver_copies_opaque_payload_with_preconverted_native_policies(_
     test.assert(native(139) == 139, "nested native function lost callability")
     test.assert(memory[0] == 137, "nested pointer policy changed borrowed storage")
   end)
+end
+
+-- Issue #252: packet-scoped resource table, native discard, Packet lifecycle,
+-- and demand-driven codec/reflection behavior.
+
+local transfer_hook_log: {string} = {}
+local transfer_hook_saved_sender: (transfer_thread.Sender<|integer|>)? = nil
+local transfer_hook_saved_receiver: (transfer_thread.Receiver<|integer|>)? = nil
+local transfer_forbidden_decode_calls = 0
+
+local function reset_transfer_hook_state()
+  transfer_hook_log = {}
+  transfer_hook_saved_sender = nil
+  transfer_hook_saved_receiver = nil
+  transfer_forbidden_decode_calls = 0
+end
+
+-- Use and drop one hook-adopted endpoint in a frame that returns before the
+-- caller collects garbage. Titan compiled code keeps expression values in
+-- reserved GC-root slots for the lifetime of a function; reading the saved
+-- wrapper in the observing frame would therefore retain it and hide its
+-- finalizer. The ownership contract still requires the native claim to be
+-- released once the wrapper itself becomes unreachable.
+local function transfer_drain_saved_sender(
+    peer: transfer_thread.Receiver<|integer|>,
+    payload: integer,
+    label: string): (boolean, integer?)
+  local adopted: (transfer_thread.Sender<|integer|>)? = transfer_hook_saved_sender
+  test.assert(adopted ~= nil and not peer:is_closed(), label)
+  if adopted == nil then return false, nil end
+  test.assert(adopted:try_send(payload))
+  local got, item? = peer:try_receive()
+  transfer_hook_saved_sender = nil
+  return got, item
+end
+
+local function transfer_drain_saved_receiver(
+    peer: transfer_thread.Sender<|integer|>,
+    payload: integer,
+    label: string): (boolean, integer?)
+  local adopted: (transfer_thread.Receiver<|integer|>)? = transfer_hook_saved_receiver
+  test.assert(adopted ~= nil and not peer:is_closed(), label)
+  if adopted == nil then return false, nil end
+  test.assert(peer:try_send(payload))
+  local got, item? = adopted:try_receive()
+  transfer_hook_saved_receiver = nil
+  return got, item
+end
+
+local function transfer_payload_raises(action: function (): (), message: string)
+  local caught = false
+  do
+    action()
+  catch
+    caught = true
+  end
+  test.assert(caught, message)
+end
+local foreign function test_resource_retain(raw: *void)
+  local count = raw as foreign *int
+  count[0] = count[0] + 1
+end
+
+local foreign function test_resource_release(raw: *void)
+  local count = raw as foreign *int
+  count[0] = count[0] - 1
+end
+
+local foreign function test_resource_other_release(raw: *void)
+  local count = raw as foreign *int
+  count[0] = count[0] - 100
+end
+
+local foreign function transfer_limited_lua_alloc(
+    ud: *void, ptr: *void, osize: size_t, nsize: size_t): *void
+  if nsize == (0 as foreign size_t) then
+    ffi.free(ptr)
+    return nil
+  end
+  local ctrl = ud as foreign *size_t
+  if ctrl ~= nil then
+    local mode = ctrl[0]
+    if mode == (1 as foreign size_t) then
+      if ptr == nil then
+        if ctrl[1] > (0 as foreign size_t) then
+          ctrl[1] = ctrl[1] - (1 as foreign size_t)
+        end
+        if ctrl[1] == (0 as foreign size_t) then
+          ctrl[2] = ctrl[2] + (1 as foreign size_t)
+          if ctrl[2] >= (2 as foreign size_t) then
+            ctrl[0] = 0 as foreign size_t
+          end
+          return nil
+        end
+      end
+    elseif mode == (2 as foreign size_t) then
+      if nsize >= ctrl[1] then
+        if nsize > osize then
+          ctrl[2] = ctrl[2] + (1 as foreign size_t)
+          if ctrl[2] >= (2 as foreign size_t) then
+            ctrl[0] = 0 as foreign size_t
+          end
+          return nil
+        end
+      end
+    end
+  end
+  return ffi.realloc(ptr, nsize)
+end
+
+record TransferPayloadHookStep
+  local label: string
+  local fail_encode: boolean
+  local fail_decode: boolean
+end
+
+local function transfer_hook_step_fields(): const {transfer_reflect.Type}
+  return {transfer_reflect.Type.is_string(), transfer_reflect.Type.is_boolean()}
+end
+
+function TransferPayloadHookStep:to_transfer_payload(): string
+  transfer_hook_log[#transfer_hook_log + 1] = "enc:" .. self.label
+  if self.fail_encode then
+    raise "hook-encode-boom:" .. self.label
+  end
+  return transfer_protobuf.serialize_fields(
+    transfer_hook_step_fields(), self.label, self.fail_decode)
+end
+
+function TransferPayloadHookStep.from_transfer_payload(
+    payload: string): TransferPayloadHookStep
+  local label: string, fail_decode: boolean =
+    transfer_protobuf.deserialize_fields(payload, transfer_hook_step_fields())
+  transfer_hook_log[#transfer_hook_log + 1] = "dec:" .. label
+  if fail_decode then
+    raise "hook-decode-boom:" .. label
+  end
+  return { label = label, fail_encode = false, fail_decode = false }
+end
+
+record TransferPayloadStashingSender
+  local tx: (transfer_thread.Sender<|integer|>)?
+  local index_bytes: string
+end
+
+function TransferPayloadStashingSender:to_transfer_payload(): string
+  local sender = self.tx as transfer_thread.Sender<|integer|>
+  local bytes = sender:to_transfer_payload()
+  self.index_bytes = bytes
+  return bytes
+end
+
+function TransferPayloadStashingSender.from_transfer_payload(
+    payload: string): TransferPayloadStashingSender
+  local adopted = transfer_thread.Sender<|integer|>.from_transfer_payload(payload)
+  transfer_hook_saved_sender = adopted
+  return { tx = adopted, index_bytes = payload }
+end
+
+record TransferPayloadStashingReceiver
+  local rx: (transfer_thread.Receiver<|integer|>)?
+  local index_bytes: string
+end
+
+function TransferPayloadStashingReceiver:to_transfer_payload(): string
+  local receiver = self.rx as transfer_thread.Receiver<|integer|>
+  local bytes = receiver:to_transfer_payload()
+  self.index_bytes = bytes
+  return bytes
+end
+
+function TransferPayloadStashingReceiver.from_transfer_payload(
+    payload: string): TransferPayloadStashingReceiver
+  local adopted = transfer_thread.Receiver<|integer|>.from_transfer_payload(payload)
+  transfer_hook_saved_receiver = adopted
+  return { rx = adopted, index_bytes = payload }
+end
+
+record TransferPayloadSenderComposite
+  before: TransferPayloadHookStep
+  first: transfer_thread.Sender<|integer|>
+  middle: TransferPayloadHookStep
+  second: transfer_thread.Sender<|integer|>
+  after: TransferPayloadHookStep
+end
+
+record TransferPayloadReceiverComposite
+  before: TransferPayloadHookStep
+  first: transfer_thread.Receiver<|integer|>
+  middle: TransferPayloadHookStep
+  second: transfer_thread.Receiver<|integer|>
+  after: TransferPayloadHookStep
+end
+
+record TransferPayloadPartialAdoptedSender
+  adopted_first: TransferPayloadStashingSender
+  failing_middle: TransferPayloadHookStep
+  unclaimed_second: transfer_thread.Sender<|integer|>
+end
+
+record TransferPayloadPartialAdoptedReceiver
+  adopted_first: TransferPayloadStashingReceiver
+  failing_middle: TransferPayloadHookStep
+  unclaimed_second: transfer_thread.Receiver<|integer|>
+end
+
+union TransferPayloadEndpointUnion
+  empty()
+  sender_only(transfer_thread.Sender<|integer|>)
+  receiver_only(transfer_thread.Receiver<|integer|>)
+  both(tx: transfer_thread.Sender<|integer|>, rx: transfer_thread.Receiver<|integer|>)
+end
+
+record TransferPayloadEndpointGraph
+  direct_tx: transfer_thread.Sender<|integer|>
+  direct_rx: transfer_thread.Receiver<|integer|>
+  choice: TransferPayloadEndpointUnion
+  tx_list: {transfer_thread.Sender<|integer|>}
+  const_tx_list: const {transfer_thread.Sender<|integer|>}
+  rx_list: {transfer_thread.Receiver<|integer|>}
+  hooked: TransferPayloadStashingSender
+end
+
+record TransferPayloadDuplicateEndpoints
+  left_tx: TransferPayloadStashingSender
+  right_tx: TransferPayloadStashingSender
+  tx_pair: {transfer_thread.Sender<|integer|>}
+  left_rx: TransferPayloadStashingReceiver
+  right_rx: TransferPayloadStashingReceiver
+end
+
+-- Claimed wrappers move here so the frame that read them can return before
+-- the release observations collect garbage.
+local record TransferPayloadDuplicateHolders
+  local tx1: transfer_thread.Sender<|integer|>?
+  local tx2: transfer_thread.Sender<|integer|>?
+  local tx3: transfer_thread.Sender<|integer|>?
+  local rx1: transfer_thread.Receiver<|integer|>?
+  local rx2: transfer_thread.Receiver<|integer|>?
+end
+
+record TransferPayloadManySenders
+  senders: {transfer_thread.Sender<|integer|>}
+  tail: TransferPayloadHookStep
+end
+
+record TransferPayloadLargeAndSender
+  first: transfer_thread.Sender<|integer|>
+  text: string
+  second: transfer_thread.Sender<|integer|>
+end
+
+record TransferPayloadForbiddenDecode
+  local tx: (transfer_thread.Sender<|integer|>)?
+  local rx: (transfer_thread.Receiver<|transfer_thread.Sender<|integer|>|>)?
+end
+
+function TransferPayloadForbiddenDecode:to_transfer_payload(): string
+  local sender = self.tx as transfer_thread.Sender<|integer|>
+  local tx_bytes = sender:to_transfer_payload()
+  local rx_bytes = ""
+  if self.rx ~= nil then
+    local receiver = self.rx as transfer_thread.Receiver<|transfer_thread.Sender<|integer|>|>
+    rx_bytes = receiver:to_transfer_payload()
+  end
+  return tx_bytes .. rx_bytes
+end
+
+function TransferPayloadForbiddenDecode.from_transfer_payload(
+    _payload: string): TransferPayloadForbiddenDecode
+  transfer_forbidden_decode_calls = transfer_forbidden_decode_calls + 1
+  raise "discard must never invoke from_transfer_payload"
+end
+
+record TransferPayloadForbiddenEnvelope
+  inner: TransferPayloadForbiddenDecode
+end
+
+union TransferPayloadForbiddenUnion
+  item(TransferPayloadForbiddenDecode)
+end
+
+local function encode_sender_composite_packet(
+    fail_before: boolean,
+    fail_middle: boolean,
+    fail_after: boolean): (transfer_mod.Packet, transfer_thread.Receiver<|integer|>, transfer_thread.Receiver<|integer|>)
+  local tx1, rx1 = transfer_thread.channel<|integer|>(1)
+  local tx2, rx2 = transfer_thread.channel<|integer|>(1)
+  local item = TransferPayloadSenderComposite(
+    TransferPayloadHookStep("b", false, fail_before),
+    tx1,
+    TransferPayloadHookStep("m", false, fail_middle),
+    tx2,
+    TransferPayloadHookStep("a", false, fail_after))
+  return transfer_mod.Packet.from_value(item), rx1, rx2
+end
+
+local function encode_receiver_composite_packet(
+    fail_before: boolean,
+    fail_middle: boolean,
+    fail_after: boolean): (transfer_mod.Packet, transfer_thread.Sender<|integer|>, transfer_thread.Sender<|integer|>, transfer_thread.Receiver<|integer|>)
+  local tx1, rx1 = transfer_thread.channel<|integer|>(1)
+  local tx2, rx2 = transfer_thread.channel<|integer|>(1)
+  local nested_tx, nested_rx = transfer_thread.channel<|integer|>(1)
+  local msg_tx, msg_rx = transfer_thread.channel<|transfer_thread.Sender<|integer|>|>(1)
+  test.assert(msg_tx:try_send(nested_tx))
+  msg_tx:close()
+  -- Wait: keep rx1 and rx2 typed as Receiver<|integer|>, and also verify
+  -- buffered message drain on rx1 by pre-sending an integer and checking tx1:is_closed().
+  test.assert(tx1:try_send(51))
+  test.assert(tx2:try_send(52))
+  msg_rx:close()
+  local item = TransferPayloadReceiverComposite(
+    TransferPayloadHookStep("b", false, fail_before),
+    rx1,
+    TransferPayloadHookStep("m", false, fail_middle),
+    rx2,
+    TransferPayloadHookStep("a", false, fail_after))
+  return transfer_mod.Packet.from_value(item), tx1, tx2, nested_rx
+end
+
+local function encode_partial_adopted_sender_packet(): (
+    transfer_mod.Packet, transfer_thread.Receiver<|integer|>, transfer_thread.Receiver<|integer|>)
+  local tx1, rx1 = transfer_thread.channel<|integer|>(1)
+  local tx2, rx2 = transfer_thread.channel<|integer|>(1)
+  local item = TransferPayloadPartialAdoptedSender(
+    TransferPayloadStashingSender(tx1, ""),
+    TransferPayloadHookStep("m", false, true),
+    tx2)
+  return transfer_mod.Packet.from_value(item), rx1, rx2
+end
+
+local function encode_partial_adopted_receiver_packet(): (
+    transfer_mod.Packet, transfer_thread.Sender<|integer|>, transfer_thread.Sender<|integer|>)
+  local tx1, rx1 = transfer_thread.channel<|integer|>(1)
+  local tx2, rx2 = transfer_thread.channel<|integer|>(1)
+  test.assert(tx1:try_send(81))
+  local item = TransferPayloadPartialAdoptedReceiver(
+    TransferPayloadStashingReceiver(rx1, ""),
+    TransferPayloadHookStep("m", false, true),
+    rx2)
+  return transfer_mod.Packet.from_value(item), tx1, tx2
+end
+
+function test_transfer_resource_decoder_order_and_partial_adoption(context: test.Context)
+  context:run("sender-success", function (_context: test.Context)
+    reset_transfer_hook_state()
+    local pkt, rx1, rx2 = encode_sender_composite_packet(false, false, false)
+    defer rx1:close()
+    defer rx2:close()
+    support.collect_garbage()
+    support.collect_garbage()
+    test.assert(not rx1:is_closed() and not rx2:is_closed(),
+                "Packet did not retain encoded Senders after source GC")
+    local decoded: TransferPayloadSenderComposite = pkt:decode()
+    test.assert(#transfer_hook_log == 6 and
+                transfer_hook_log[1] == "enc:b" and transfer_hook_log[2] == "enc:m" and
+                transfer_hook_log[3] == "enc:a" and transfer_hook_log[4] == "dec:b" and
+                transfer_hook_log[5] == "dec:m" and transfer_hook_log[6] == "dec:a",
+                "unexpected custom hook encounter order")
+    test.assert(decoded.first:try_send(101) and decoded.second:try_send(202))
+    local ok1, v1? = rx1:try_receive()
+    local ok2, v2? = rx2:try_receive()
+    test.assert(ok1 and v1 == 101 and ok2 and v2 == 202)
+  end)
+
+  context:run("sender-fail-before", function (_context: test.Context)
+    reset_transfer_hook_state()
+    local pkt, rx1, rx2 = encode_sender_composite_packet(true, false, false)
+    defer rx1:close()
+    defer rx2:close()
+    support.collect_garbage()
+    support.collect_garbage()
+    test.assert(not rx1:is_closed() and not rx2:is_closed())
+    transfer_payload_error(function () pkt:decode() end, "hook-decode-boom:b")
+    -- Inverted #250 Appendix C: throwing decoder before later Senders releases
+    -- all unclaimed table entries immediately upon decode_message unwind.
+    test.assert(rx1:is_closed() and rx2:is_closed(),
+                "throwing decoder before Senders leaked an unclaimed Sender retain")
+    test.assert(#transfer_hook_log == 4 and transfer_hook_log[4] == "dec:b")
+  end)
+
+  context:run("sender-fail-middle-partial", function (_context: test.Context)
+    reset_transfer_hook_state()
+    local pkt, rx1, rx2 = encode_sender_composite_packet(false, true, false)
+    defer rx1:close()
+    defer rx2:close()
+    support.collect_garbage()
+    support.collect_garbage()
+    test.assert(not rx1:is_closed() and not rx2:is_closed())
+    transfer_payload_error(function () pkt:decode() end, "hook-decode-boom:m")
+    -- second was never claimed, so packet unwind released it immediately.
+    test.assert(rx2:is_closed(), "unclaimed second Sender was not released on unwind")
+    -- first was adopted into a wrapper before middle failed; GC collects that wrapper.
+    support.collect_garbage()
+    support.collect_garbage()
+    test.assert(rx1:is_closed(), "partially adopted first Sender wrapper leaked")
+  end)
+
+  context:run("sender-distinguish-adopted-from-unclaimed", function (_context: test.Context)
+    reset_transfer_hook_state()
+    defer reset_transfer_hook_state()
+    local pkt, rx1, rx2 = encode_partial_adopted_sender_packet()
+    defer rx1:close()
+    defer rx2:close()
+    support.collect_garbage()
+    support.collect_garbage()
+    test.assert(not rx1:is_closed() and not rx2:is_closed())
+    transfer_payload_error(function () pkt:decode() end, "hook-decode-boom:m")
+    support.collect_garbage()
+    support.collect_garbage()
+    -- Unclaimed entry (rx2) was released by packet unwind; already-adopted
+    -- wrapper (saved in transfer_hook_saved_sender) remains live and usable.
+    test.assert(rx2:is_closed(), "unclaimed entry was not disposed when decode failed")
+    local ok, val? = transfer_drain_saved_sender(rx1, 777,
+        "packet unwind prematurely released an already-adopted Sender")
+    test.assert(ok and val == 777)
+    support.collect_garbage()
+    support.collect_garbage()
+    test.assert(rx1:is_closed(), "adopted Sender did not close peer after finalization")
+  end)
+
+  context:run("receiver-success-and-failures", function (_context: test.Context)
+    reset_transfer_hook_state()
+    local pkt_ok, tx1_ok, tx2_ok, _ = encode_receiver_composite_packet(false, false, false)
+    defer tx1_ok:close()
+    defer tx2_ok:close()
+    support.collect_garbage()
+    support.collect_garbage()
+    test.assert(not tx1_ok:is_closed() and not tx2_ok:is_closed())
+    local decoded: TransferPayloadReceiverComposite = pkt_ok:decode()
+    local ok1, v1? = decoded.first:try_receive()
+    local ok2, v2? = decoded.second:try_receive()
+    test.assert(ok1 and v1 == 51 and ok2 and v2 == 52)
+    decoded.first:close()
+    decoded.second:close()
+    test.assert(tx1_ok:is_closed() and tx2_ok:is_closed())
+
+    reset_transfer_hook_state()
+    local pkt_fb, tx1_fb, tx2_fb, _ = encode_receiver_composite_packet(true, false, false)
+    defer tx1_fb:close()
+    defer tx2_fb:close()
+    support.collect_garbage()
+    support.collect_garbage()
+    test.assert(not tx1_fb:is_closed() and not tx2_fb:is_closed())
+    transfer_payload_error(function () pkt_fb:decode() end, "hook-decode-boom:b")
+    test.assert(tx1_fb:is_closed() and tx2_fb:is_closed(),
+                "throwing decoder before Receivers leaked an unclaimed Receiver retain")
+
+    reset_transfer_hook_state()
+    defer reset_transfer_hook_state()
+    local pkt_pa, tx1_pa, tx2_pa = encode_partial_adopted_receiver_packet()
+    defer tx1_pa:close()
+    defer tx2_pa:close()
+    support.collect_garbage()
+    support.collect_garbage()
+    transfer_payload_error(function () pkt_pa:decode() end, "hook-decode-boom:m")
+    support.collect_garbage()
+    support.collect_garbage()
+    test.assert(tx2_pa:is_closed(), "unclaimed Receiver entry was not disposed")
+    test.assert(not tx1_pa:is_closed() and transfer_hook_saved_receiver ~= nil,
+                "packet unwind prematurely released an already-adopted Receiver")
+    local adopted_rx: (transfer_thread.Receiver<|integer|>)? = transfer_hook_saved_receiver
+    local got, item? = adopted_rx:try_receive()
+    test.assert(got and item == 81)
+    adopted_rx:close()
+    adopted_rx = nil
+    transfer_hook_saved_receiver = nil
+    test.assert(tx1_pa:is_closed())
+  end)
+end
+
+local function encode_nested_graph_and_closure(): (
+    transfer_mod.Packet,
+    transfer_mod.Packet,
+    {transfer_thread.Receiver<|integer|>},
+    {transfer_thread.Sender<|integer|>})
+  local tx1, rx1 = transfer_thread.channel<|integer|>(2)
+  local tx2, rx2 = transfer_thread.channel<|integer|>(2)
+  local tx3, rx3 = transfer_thread.channel<|integer|>(2)
+  local tx4, rx4 = transfer_thread.channel<|integer|>(2)
+  local tx5, rx5 = transfer_thread.channel<|integer|>(2)
+  local tx6, rx6 = transfer_thread.channel<|integer|>(2)
+  local ptx1, prx1 = transfer_thread.channel<|integer|>(2)
+  local ptx2, prx2 = transfer_thread.channel<|integer|>(2)
+  local ptx3, prx3 = transfer_thread.channel<|integer|>(2)
+  test.assert(ptx1:try_send(11) and ptx2:try_send(22) and ptx3:try_send(33))
+  local frozen_tx: const {transfer_thread.Sender<|integer|>} = {tx4}
+  local graph = TransferPayloadEndpointGraph(
+    tx1,
+    prx1,
+    TransferPayloadEndpointUnion.both(tx2, prx2),
+    {tx3},
+    frozen_tx,
+    {prx3},
+    TransferPayloadStashingSender(tx5, ""))
+  local graph_pkt = transfer_mod.Packet.from_value(graph)
+  local captured_tx = tx6
+  local closure_pkt = transfer_mod.Packet.from_value(function (): integer
+    test.assert(captured_tx:try_send(66))
+    return 66
+  end)
+  return graph_pkt, closure_pkt, {rx1, rx2, rx3, rx4, rx5, rx6}, {ptx1, ptx2, ptx3}
+end
+
+local function encode_duplicate_endpoints(): (
+    transfer_mod.Packet,
+    transfer_thread.Receiver<|integer|>,
+    transfer_thread.Sender<|integer|>,
+    string,
+    string)
+  local tx, rx_peer = transfer_thread.channel<|integer|>(4)
+  local tx_peer, rx = transfer_thread.channel<|integer|>(4)
+  local left_tx = TransferPayloadStashingSender(tx, "")
+  local right_tx = TransferPayloadStashingSender(tx, "")
+  local left_rx = TransferPayloadStashingReceiver(rx, "")
+  local right_rx = TransferPayloadStashingReceiver(rx, "")
+  local dup = TransferPayloadDuplicateEndpoints(
+    left_tx, right_tx, {tx}, left_rx, right_rx)
+  local pkt = transfer_mod.Packet.from_value(dup)
+  return pkt, rx_peer, tx_peer, left_tx.index_bytes, right_tx.index_bytes
+end
+
+-- Read the claimed wrappers inside this helper's frame and return only holder
+-- state. Titan compiled expressions keep values in reserved GC-root slots for
+-- the lifetime of the function, so the drop-and-collect observations below
+-- must run in a frame that never read a wrapper value itself.
+local function extract_duplicate_holders(
+    pkt: transfer_mod.Packet): TransferPayloadDuplicateHolders
+  local decoded: TransferPayloadDuplicateEndpoints = pkt:decode()
+  local holders = TransferPayloadDuplicateHolders {
+    tx1 = decoded.left_tx.tx,
+    tx2 = decoded.right_tx.tx,
+    tx3 = decoded.tx_pair[1],
+    rx1 = decoded.left_rx.rx,
+    rx2 = decoded.right_rx.rx,
+  }
+  decoded.left_tx.tx = nil
+  decoded.right_tx.tx = nil
+  decoded.tx_pair = {}
+  decoded.left_rx.rx = nil
+  decoded.right_rx.rx = nil
+  return holders
+end
+
+local function transfer_duplicate_use_last_sender(
+    holders: TransferPayloadDuplicateHolders): boolean
+  -- An explicitly optional local avoids the checker's inference-time option
+  -- force, which would turn a nil field into a runtime error.
+  local tx: (transfer_thread.Sender<|integer|>)? = holders.tx3
+  holders.tx3 = nil
+  if tx == nil then return false end
+  return tx:try_send(303)
+end
+
+local function transfer_duplicate_receive_last(
+    holders: TransferPayloadDuplicateHolders): (boolean, integer?)
+  local rx: (transfer_thread.Receiver<|integer|>)? = holders.rx2
+  holders.rx2 = nil
+  if rx == nil then return false, nil end
+  return rx:try_receive()
+end
+
+local function check_duplicate_adoption_release(
+    pkt: transfer_mod.Packet,
+    rx_peer: transfer_thread.Receiver<|integer|>,
+    tx_peer: transfer_thread.Sender<|integer|>)
+  defer reset_transfer_hook_state()
+  local holders = extract_duplicate_holders(pkt)
+  reset_transfer_hook_state()
+
+  holders.tx1 = nil
+  support.collect_garbage()
+  support.collect_garbage()
+  test.assert(not rx_peer:is_closed(), "dropping first duplicate Sender closed channel early")
+
+  holders.tx2 = nil
+  support.collect_garbage()
+  support.collect_garbage()
+  test.assert(not rx_peer:is_closed(), "dropping second duplicate Sender closed channel early")
+  test.assert(transfer_duplicate_use_last_sender(holders))
+  local got, val? = rx_peer:try_receive()
+  test.assert(got and val == 303)
+
+  support.collect_garbage()
+  support.collect_garbage()
+  test.assert(rx_peer:is_closed(), "dropping last duplicate Sender did not close channel")
+
+  holders.rx1 = nil
+  support.collect_garbage()
+  support.collect_garbage()
+  test.assert(not tx_peer:is_closed(), "dropping first duplicate Receiver closed channel early")
+  test.assert(tx_peer:try_send(404))
+  local got_rx, val_rx? = transfer_duplicate_receive_last(holders)
+  test.assert(got_rx and val_rx == 404)
+
+  support.collect_garbage()
+  support.collect_garbage()
+  test.assert(tx_peer:is_closed(), "dropping last duplicate Receiver did not close channel")
+end
+
+function test_transfer_resource_nested_shapes_duplicates_and_array_rejection(
+    context: test.Context)
+  context:run("nested-graph-and-closure", function (_context: test.Context)
+    reset_transfer_hook_state()
+    defer reset_transfer_hook_state()
+    local graph_pkt, closure_pkt, rx_peers, tx_peers = encode_nested_graph_and_closure()
+    defer do
+      for i = 1, #rx_peers do rx_peers[i]:close() end
+      for i = 1, #tx_peers do tx_peers[i]:close() end
+    end
+    support.collect_garbage()
+    support.collect_garbage()
+    for i = 1, #rx_peers do
+      test.assert(not rx_peers[i]:is_closed(), "nested Sender was not retained in Packet")
+    end
+    for i = 1, #tx_peers do
+      test.assert(not tx_peers[i]:is_closed(), "nested Receiver was not retained in Packet")
+    end
+
+    local decoded_graph: TransferPayloadEndpointGraph = graph_pkt:decode()
+    local decoded_closure: function (): integer = closure_pkt:decode()
+    reset_transfer_hook_state()
+    test.assert(decoded_graph.direct_tx:try_send(1))
+    local ok_r1, v_r1? = decoded_graph.direct_rx:try_receive()
+    test.assert(ok_r1 and v_r1 == 11)
+    case decoded_graph.choice
+    when both(tx, rx) then
+      test.assert(tx:try_send(2))
+      local ok_r2, v_r2? = rx:try_receive()
+      test.assert(ok_r2 and v_r2 == 22)
+    else raise "expected both variant in decoded endpoint union"
+    end
+    test.assert(decoded_graph.tx_list[1]:try_send(3))
+    test.assert(decoded_graph.const_tx_list[1]:try_send(4))
+    local ok_r3, v_r3? = decoded_graph.rx_list[1]:try_receive()
+    test.assert(ok_r3 and v_r3 == 33)
+    test.assert((decoded_graph.hooked.tx as transfer_thread.Sender<|integer|>):try_send(5))
+    test.assert(decoded_closure() == 66)
+
+    for i = 1, 5 do
+      local ok, item? = rx_peers[i]:try_receive()
+      test.assert(ok and item == i)
+    end
+    local ok6, item6? = rx_peers[6]:try_receive()
+    test.assert(ok6 and item6 == 66)
+  end)
+
+  context:run("duplicate-occurrences-independent-retains", function (_context: test.Context)
+    reset_transfer_hook_state()
+    local pkt, rx_peer, tx_peer, idx0, idx1 = encode_duplicate_endpoints()
+    defer rx_peer:close()
+    defer tx_peer:close()
+    test.assert(#idx0 == 4 and #idx1 == 4 and idx0 ~= idx1,
+                "duplicate endpoint occurrences did not receive distinct 4-byte slot indexes")
+    test.assert(idx0 == "\0\0\0\0" and idx1 == "\1\0\0\0",
+                "unexpected little-endian slot index encoding")
+    support.collect_garbage()
+    support.collect_garbage()
+    test.assert(not rx_peer:is_closed() and not tx_peer:is_closed())
+    check_duplicate_adoption_release(pkt, rx_peer, tx_peer)
+  end)
+
+  context:run("top-level-array-rejected-without-leaking", function (_context: test.Context)
+    local make_rejected_array = function (): transfer_thread.Receiver<|integer|>
+      local tx, rx = transfer_thread.channel<|integer|>(1)
+      local top_array: {transfer_thread.Sender<|integer|>} = {tx}
+      transfer_payload_error(function ()
+        async.TransferValue.from_value(top_array)
+      end, "transfer: unsupported value")
+      local rejected_raw: foreign *void = nil
+      defer do transfer_mod.discard_message(rejected_raw) end
+      transfer_payload_error(function ()
+        rejected_raw = transfer_mod.encode_message(top_array)
+      end, "transfer: unsupported value")
+      transfer_payload_error(function ()
+        transfer_mod.Packet.from_value(top_array)
+      end, "transfer: unsupported value")
+      local const_array: const {integer} = {1, 2, 3}
+      transfer_payload_error(function ()
+        transfer_mod.Packet.from_value(const_array)
+      end, "transfer: unsupported value")
+      return rx
+    end
+    local rx = make_rejected_array()
+    defer rx:close()
+    support.collect_garbage()
+    support.collect_garbage()
+    test.assert(rx:is_closed(), "rejected top-level Array leaked an endpoint reference")
+  end)
+end
+
+record TransferPayloadNestedScopeProbe
+  local mode: string
+end
+
+local nested_scope_peer_rxs: {transfer_thread.Receiver<|integer|>} = {}
+
+function TransferPayloadNestedScopeProbe:to_transfer_payload(): string
+  -- 1. Enclosing encode scope must not authorize claim_resource.
+  transfer_payload_raises(function ()
+    transfer_thread.Sender<|integer|>.from_transfer_payload("\0\0\0\0")
+  end, "enclosing encode scope authorized claim_resource")
+  -- 2. Nested encode-from-encode succeeds in its own isolated table, then Nested
+  -- decode-from-encode claims that inner slot while rejecting attach_resource.
+  local inner_tx, inner_rx = transfer_thread.channel<|integer|>(1)
+  nested_scope_peer_rxs[#nested_scope_peer_rxs + 1] = inner_rx
+  local inner_pkt = transfer_mod.Packet.from_value(
+    TransferPayloadStashingSender(inner_tx, ""))
+  local inner_decoded: TransferPayloadStashingSender = inner_pkt:decode()
+  test.assert(inner_decoded.index_bytes == "\0\0\0\0",
+              "nested encode did not start at its own slot 0")
+  local inner_sender: transfer_thread.Sender<|integer|> = inner_decoded.tx
+  test.assert(inner_sender:try_send(91))
+  inner_sender:close()
+  transfer_hook_saved_sender = nil
+
+  -- 3. Nested failing encode-from-encode rolls back its own attachment and
+  -- restores the outer encode scope.
+  local fail_enc_rx = (function (): transfer_thread.Receiver<|integer|>
+    local ftx, frx = transfer_thread.channel<|integer|>(1)
+    transfer_payload_error(function ()
+      transfer_mod.Packet.from_value(TransferPayloadManySenders(
+        {ftx}, TransferPayloadHookStep("inner-enc-fail", true, false)))
+    end, "hook-encode-boom:inner-enc-fail")
+    return frx
+  end)()
+  nested_scope_peer_rxs[#nested_scope_peer_rxs + 1] = fail_enc_rx
+
+  -- 4. Nested failing decode-from-encode releases its unclaimed resource and
+  -- restores the exact outer encode scope.
+  local fail_dec_pkt, fail_dec_rx1, fail_dec_rx2 =
+    encode_sender_composite_packet(true, false, false)
+  nested_scope_peer_rxs[#nested_scope_peer_rxs + 1] = fail_dec_rx1
+  nested_scope_peer_rxs[#nested_scope_peer_rxs + 1] = fail_dec_rx2
+  transfer_payload_error(function ()
+    fail_dec_pkt:decode()
+  end, "hook-decode-boom:b")
+
+  return self.mode
+end
+
+record TransferPayloadDecodeInsideEncodeProbe
+  local dummy: integer
+end
+
+function TransferPayloadDecodeInsideEncodeProbe:to_transfer_payload(): string
+  -- While an outer decode is paused underneath this nested encode, attempting
+  -- to claim outer slot 1 must fail because the top scope is now ENCODE.
+  transfer_payload_raises(function ()
+    transfer_thread.Sender<|integer|>.from_transfer_payload("\1\0\0\0")
+  end, "nested encode scope allowed claiming from paused outer decode scope")
+  local tx, rx = transfer_thread.channel<|integer|>(1)
+  nested_scope_peer_rxs[#nested_scope_peer_rxs + 1] = rx
+  local idx = tx:to_transfer_payload()
+  test.assert(idx == "\0\0\0\0", "encode-from-decode did not use its own table")
+  return idx
+end
+
+function TransferPayloadDecodeInsideEncodeProbe.from_transfer_payload(
+    payload: string): TransferPayloadDecodeInsideEncodeProbe
+  local adopted = transfer_thread.Sender<|integer|>.from_transfer_payload(payload)
+  test.assert(adopted:try_send(92))
+  adopted:close()
+  return { dummy = 92 }
+end
+
+function TransferPayloadNestedScopeProbe.from_transfer_payload(
+    payload: string): TransferPayloadNestedScopeProbe
+  -- 1. Enclosing decode scope must not authorize attach_resource.
+  local tmp_tx, tmp_rx = transfer_thread.channel<|integer|>(1)
+  defer tmp_tx:close()
+  defer tmp_rx:close()
+  transfer_payload_raises(function ()
+    tmp_tx:to_transfer_payload()
+  end, "enclosing decode scope authorized attach_resource")
+
+  -- 2. Nested encode-from-decode pushes an encode scope (blocking claims against
+  -- the paused outer decode scope), then Nested decode-from-decode decodes it,
+  -- and both restore the exact outer decode scope.
+  local nested_pkt = transfer_mod.Packet.from_value(
+    TransferPayloadDecodeInsideEncodeProbe(1))
+  local nested_out: TransferPayloadDecodeInsideEncodeProbe = nested_pkt:decode()
+  test.assert(nested_out.dummy == 92)
+
+  -- 3. Nested failing encode-from-decode rolls back and restores outer decode scope.
+  local fail_enc_rx = (function (): transfer_thread.Receiver<|integer|>
+    local ftx, frx = transfer_thread.channel<|integer|>(1)
+    transfer_payload_error(function ()
+      transfer_mod.Packet.from_value(TransferPayloadManySenders(
+        {ftx}, TransferPayloadHookStep("dec-inner-enc-fail", true, false)))
+    end, "hook-encode-boom:dec-inner-enc-fail")
+    return frx
+  end)()
+  nested_scope_peer_rxs[#nested_scope_peer_rxs + 1] = fail_enc_rx
+
+  -- 4. Nested failing decode-from-decode releases its packet and restores outer decode scope.
+  local fail_dec_pkt, fail_dec_rx1, fail_dec_rx2 =
+    encode_sender_composite_packet(true, false, false)
+  nested_scope_peer_rxs[#nested_scope_peer_rxs + 1] = fail_dec_rx1
+  nested_scope_peer_rxs[#nested_scope_peer_rxs + 1] = fail_dec_rx2
+  transfer_payload_error(function ()
+    fail_dec_pkt:decode()
+  end, "hook-decode-boom:b")
+
+  return { mode = payload }
+end
+
+record TransferPayloadOuterScopeEnvelope
+  first: TransferPayloadStashingSender
+  probe: TransferPayloadNestedScopeProbe
+  second: TransferPayloadStashingSender
+end
+
+function test_transfer_resource_nested_scopes_table_growth_and_frontier(
+    context: test.Context)
+  context:run("table-growth-and-post-attach-encode-rollback", function (_context: test.Context)
+    local make_failing_many = function (): {transfer_thread.Receiver<|integer|>}
+      local txs: {transfer_thread.Sender<|integer|>} = {}
+      local rxs: {transfer_thread.Receiver<|integer|>} = {}
+      for i = 1, 12 do
+        local tx, rx = transfer_thread.channel<|integer|>(1)
+        txs[i] = tx
+        rxs[i] = rx
+      end
+      transfer_payload_error(function ()
+        transfer_mod.Packet.from_value(TransferPayloadManySenders(
+          txs, TransferPayloadHookStep("after-twelve", true, false)))
+      end, "hook-encode-boom:after-twelve")
+      return rxs
+    end
+    local rxs = make_failing_many()
+    defer do for i = 1, #rxs do rxs[i]:close() end end
+    support.collect_garbage()
+    support.collect_garbage()
+    for i = 1, #rxs do
+      test.assert(rxs[i]:is_closed(),
+                  "failed encode after table growth leaked Sender #" .. i)
+    end
+  end)
+
+  context:run("nested-encode-decode-restores-exact-outer-scope", function (_context: test.Context)
+    reset_transfer_hook_state()
+    nested_scope_peer_rxs = {}
+    defer do
+      for i = 1, #nested_scope_peer_rxs do nested_scope_peer_rxs[i]:close() end
+      nested_scope_peer_rxs = {}
+      reset_transfer_hook_state()
+    end
+    local make_outer = function (): (
+        transfer_mod.Packet,
+        transfer_thread.Receiver<|integer|>,
+        transfer_thread.Receiver<|integer|>,
+        string,
+        string)
+      local tx1, rx1 = transfer_thread.channel<|integer|>(1)
+      local tx2, rx2 = transfer_thread.channel<|integer|>(1)
+      local s1 = TransferPayloadStashingSender(tx1, "")
+      local s2 = TransferPayloadStashingSender(tx2, "")
+      local env = TransferPayloadOuterScopeEnvelope(
+        s1, TransferPayloadNestedScopeProbe("nested-ok"), s2)
+      local pkt = transfer_mod.Packet.from_value(env)
+      return pkt, rx1, rx2, s1.index_bytes, s2.index_bytes
+    end
+    local outer_pkt, outer_rx1, outer_rx2, idx1, idx2 = make_outer()
+    defer outer_rx1:close()
+    defer outer_rx2:close()
+    -- Outer slots must still be 0 and 1 despite inner encode/decode scopes.
+    test.assert(idx1 == "\0\0\0\0" and idx2 == "\1\0\0\0",
+                "nested scopes corrupted the outer packet's resource slot numbering")
+    support.collect_garbage()
+    support.collect_garbage()
+    test.assert(not outer_rx1:is_closed() and not outer_rx2:is_closed())
+
+    local decoded: TransferPayloadOuterScopeEnvelope = outer_pkt:decode()
+    test.assert(decoded.probe.mode == "nested-ok")
+    test.assert((decoded.first.tx as transfer_thread.Sender<|integer|>):try_send(111))
+    test.assert((decoded.second.tx as transfer_thread.Sender<|integer|>):try_send(222))
+    local ok1, v1? = outer_rx1:try_receive()
+    local ok2, v2? = outer_rx2:try_receive()
+    test.assert(ok1 and v1 == 111 and ok2 and v2 == 222)
+
+    support.collect_garbage()
+    support.collect_garbage()
+    -- Check nested peers: [1] received 91 and closed, [5] received 92 and closed,
+    -- and all failing nested encode/decode peers [2..4, 6..8] auto-closed!
+    local ok_n1, vn1? = nested_scope_peer_rxs[1]:try_receive()
+    local ok_n5, vn5? = nested_scope_peer_rxs[5]:try_receive()
+    test.assert(ok_n1 and vn1 == 91 and ok_n5 and vn5 == 92)
+    for i = 1, #nested_scope_peer_rxs do
+      test.assert(nested_scope_peer_rxs[i]:is_closed(),
+                  "nested scope peer #" .. i .. " was not released")
+    end
+  end)
+
+  context:run("packet-encode-projects-capture-frontier-and-calls-hooks-once",
+    function (_context: test.Context)
+      reset_transfer_hook_state()
+      local first_val = 10
+      local second_val = 20
+      local step2 = TransferPayloadHookStep("capture-second", false, false)
+      local mutator = TransferPayloadMutator(function ()
+        transfer_hook_log[#transfer_hook_log + 1] = "enc:capture-first"
+        first_val = 900
+        second_val = 800
+        step2 = TransferPayloadHookStep("replaced-after-projection", true, true)
+      end)
+      local closure = function (): integer
+        local base = mutator:read() + first_val + second_val
+        if step2.fail_encode then return -1 end
+        return base
+      end
+      local pkt = transfer_mod.Packet.from_value(closure)
+      test.assert(first_val == 900 and second_val == 800)
+      test.assert(#transfer_hook_log == 2 and
+                  transfer_hook_log[1] == "enc:capture-first" and
+                  transfer_hook_log[2] == "enc:capture-second",
+                  "packet closure encode did not project captures before hooks or called hooks twice")
+      local restored: function (): integer = pkt:decode()
+      test.assert(restored() == 30,
+                  "packet closure encode observed post-hook mutated capture cells")
+      test.assert(#transfer_hook_log == 3 and transfer_hook_log[3] == "dec:capture-second")
+    end)
+end
+
+record TransferPayloadClaimProbe
+  local mode: string
+  local custom_bytes: string
+end
+
+function TransferPayloadClaimProbe:to_transfer_payload(): string
+  local tx, rx = transfer_thread.channel<|integer|>(1)
+  nested_scope_peer_rxs[#nested_scope_peer_rxs + 1] = rx
+  local idx = tx:to_transfer_payload()
+  test.assert(idx == "\0\0\0\0")
+  return self.mode
+end
+
+function TransferPayloadClaimProbe.from_transfer_payload(
+    payload: string): TransferPayloadClaimProbe
+  if payload == "width-empty" then
+    transfer_thread.Sender<|integer|>.from_transfer_payload("")
+  elseif payload == "width-short" then
+    transfer_thread.Sender<|integer|>.from_transfer_payload("abc")
+  elseif payload == "width-long" then
+    transfer_thread.Sender<|integer|>.from_transfer_payload("12345678")
+  elseif payload == "bounds-invalid-sentinel" then
+    transfer_thread.Sender<|integer|>.from_transfer_payload("\255\255\255\255")
+  elseif payload == "bounds-out-of-range" then
+    transfer_thread.Sender<|integer|>.from_transfer_payload("\1\0\0\0")
+  elseif payload == "kind-mismatch-receiver" then
+    transfer_thread.Receiver<|integer|>.from_transfer_payload("\0\0\0\0")
+  elseif payload == "kind-mismatch-null-release" then
+    local null_release: foreign function(*void): void = nil
+    transfer_mod.claim_resource("\0\0\0\0", null_release)
+  elseif payload == "kind-mismatch-other-release" then
+    transfer_mod.claim_resource("\0\0\0\0", test_resource_other_release)
+  elseif payload == "repeated-claim" then
+    local first = transfer_thread.Sender<|integer|>.from_transfer_payload("\0\0\0\0")
+    transfer_hook_saved_sender = first
+    local _second = transfer_thread.Sender<|integer|>.from_transfer_payload("\0\0\0\0")
+  end
+  return { mode = payload, custom_bytes = "" }
+end
+
+record TransferPayloadCustomResourceProbe
+  local mode: string
+  local ptr: foreign *void
+end
+
+function TransferPayloadCustomResourceProbe:to_transfer_payload(): string
+  local null_cb: foreign function(*void): void = nil
+  if self.mode == "null-resource" then
+    return transfer_mod.attach_resource(nil, test_resource_retain, test_resource_release)
+  elseif self.mode == "null-retain" then
+    return transfer_mod.attach_resource(self.ptr, null_cb, test_resource_release)
+  elseif self.mode == "null-release" then
+    return transfer_mod.attach_resource(self.ptr, test_resource_retain, null_cb)
+  end
+  return transfer_mod.attach_resource(self.ptr, test_resource_retain, test_resource_release)
+end
+
+function TransferPayloadCustomResourceProbe.from_transfer_payload(
+    payload: string): TransferPayloadCustomResourceProbe
+  local raw = transfer_mod.claim_resource(payload, test_resource_release)
+  return { mode = "claimed", ptr = raw }
+end
+
+function test_transfer_resource_validation_and_claim_errors(context: test.Context)
+  context:run("no-active-scope-and-invalid-attach", function (_context: test.Context)
+    local counter: owned int[] = foreign int.new_array(1)
+    counter[0] = 1
+    local ptr = counter as foreign *void
+    transfer_payload_raises(function ()
+      transfer_mod.attach_resource(ptr, test_resource_retain, test_resource_release)
+    end, "attach_resource succeeded outside encode scope")
+    transfer_payload_raises(function ()
+      transfer_mod.claim_resource("\0\0\0\0", test_resource_release)
+    end, "claim_resource succeeded outside decode scope")
+
+    local tx, rx = transfer_thread.channel<|integer|>(1)
+    defer tx:close()
+    defer rx:close()
+    transfer_payload_raises(function ()
+      tx:to_transfer_payload()
+    end, "Sender:to_transfer_payload succeeded outside encode scope")
+    transfer_payload_raises(function ()
+      rx:to_transfer_payload()
+    end, "Receiver:to_transfer_payload succeeded outside encode scope")
+    transfer_payload_raises(function ()
+      transfer_thread.Sender<|integer|>.from_transfer_payload("\0\0\0\0")
+    end, "Sender.from_transfer_payload succeeded outside decode scope")
+    transfer_payload_raises(function ()
+      transfer_thread.Receiver<|integer|>.from_transfer_payload("\0\0\0\0")
+    end, "Receiver.from_transfer_payload succeeded outside decode scope")
+    transfer_payload_raises(function ()
+      async.TransferValue.from_value(tx)
+    end, "TransferValue.from_value accepted an endpoint outside Packet encode")
+
+    local bad_modes = {"null-resource", "null-retain", "null-release"}
+    for i = 1, #bad_modes do
+      local bad_mode = bad_modes[i]
+      transfer_payload_raises(function ()
+        transfer_mod.Packet.from_value(TransferPayloadCustomResourceProbe(bad_mode, ptr))
+      end, "attach_resource accepted invalid argument mode: " .. bad_mode)
+    end
+    test.assert(counter[0] == 1, "rejected attach_resource mutated counter")
+
+    -- Valid custom resource roundtrip and discard.
+    local pkt = transfer_mod.Packet.from_value(TransferPayloadCustomResourceProbe("ok", ptr))
+    test.assert(counter[0] == 2)
+    local claimed: TransferPayloadCustomResourceProbe = pkt:decode()
+    test.assert(claimed.ptr == ptr and counter[0] == 2,
+                "claimed resource was released by decode_message")
+    test_resource_release(claimed.ptr)
+    test.assert(counter[0] == 1)
+
+    local discarded_pkt = transfer_mod.Packet.from_value(
+      TransferPayloadCustomResourceProbe("ok", ptr))
+    test.assert(counter[0] == 2)
+    discarded_pkt:close()
+    test.assert(counter[0] == 1, "closing Packet did not release custom resource")
+  end)
+
+  context:run("index-width-bounds-kind-and-repeated-claim", function (_context: test.Context)
+    reset_transfer_hook_state()
+    nested_scope_peer_rxs = {}
+    defer do
+      for i = 1, #nested_scope_peer_rxs do nested_scope_peer_rxs[i]:close() end
+      nested_scope_peer_rxs = {}
+      reset_transfer_hook_state()
+    end
+    local modes = {
+      "width-empty",
+      "width-short",
+      "width-long",
+      "bounds-invalid-sentinel",
+      "bounds-out-of-range",
+      "kind-mismatch-receiver",
+      "kind-mismatch-null-release",
+      "kind-mismatch-other-release",
+    }
+    for i = 1, #modes do
+      local mode = modes[i]
+      local pkt = transfer_mod.Packet.from_value(TransferPayloadClaimProbe(mode, ""))
+      local peer_rx = nested_scope_peer_rxs[#nested_scope_peer_rxs]
+      support.collect_garbage()
+      support.collect_garbage()
+      test.assert(not peer_rx:is_closed())
+      transfer_payload_raises(function () pkt:decode() end,
+                              "invalid claim mode succeeded: " .. mode)
+      test.assert(peer_rx:is_closed(),
+                  "failed claim (" .. mode .. ") did not release unclaimed slot 0 on unwind")
+    end
+
+    -- Repeated claim of slot 0 raises on second claim without double-releasing the first.
+    local rep_pkt = transfer_mod.Packet.from_value(
+      TransferPayloadClaimProbe("repeated-claim", ""))
+    local rep_rx = nested_scope_peer_rxs[#nested_scope_peer_rxs]
+    support.collect_garbage()
+    support.collect_garbage()
+    test.assert(not rep_rx:is_closed())
+    transfer_payload_raises(function ()
+      rep_pkt:decode()
+    end, "repeated claim of slot 0 succeeded")
+    -- First claim succeeded and stored its wrapper in transfer_hook_saved_sender;
+    -- packet unwind must NOT release an already-claimed slot.
+    support.collect_garbage()
+    support.collect_garbage()
+    local ok, val? = transfer_drain_saved_sender(rep_rx, 444,
+        "repeated claim unwind released the first valid claimant")
+    test.assert(ok and val == 444)
+    support.collect_garbage()
+    support.collect_garbage()
+    test.assert(rep_rx:is_closed(), "adopted Sender was not released after finalizer")
+  end)
+end
+
+local function make_recursive_receiver_packet(): (
+    transfer_mod.Packet,
+    transfer_thread.Receiver<|integer|>,
+    transfer_thread.Receiver<|integer|>)
+  local tx_b, rx_b = transfer_thread.channel<|integer|>(1)
+  local tx_c, rx_c = transfer_thread.channel<|integer|>(1)
+  local tx_a, rx_a = transfer_thread.channel<|transfer_thread.Sender<|integer|>|>(2)
+  test.assert(tx_a:try_send(tx_b))
+  tx_a:close()
+  local pkt = transfer_mod.Packet.from_value(
+    TransferPayloadForbiddenDecode(tx_c, rx_a))
+  return pkt, rx_b, rx_c
+end
+
+local function make_dropped_recursive_packet(): (
+    transfer_thread.Receiver<|integer|>,
+    transfer_thread.Receiver<|integer|>)
+  local _pkt, rx_b, rx_c = make_recursive_receiver_packet()
+  return rx_b, rx_c
+end
+
+local foreign function transfer_count_module_load(state: *lua_State): int
+  local count = ffi.lua_touserdata(state, 1) as foreign *int
+  count[0] = count[0] + 1
+  return 0
+end
+
+function test_transfer_packet_lifecycle_and_runtime_free_discard(context: test.Context)
+  context:run("null-and-consumed-contracts", function (_context: test.Context)
+    local top = ffi.lua_gettop(L)
+    defer ffi.lua_settop(L, top)
+    local empty: foreign *TransferMessageSlot = foreign TransferMessageSlot.new_array(1)
+    local destination = transfer_mod.Packet.new()
+    defer destination:close()
+    local destination_owner = destination:borrow_owner()
+    transfer_payload_raises(function ()
+      local status = transfer_mod.adopt_into(destination_owner, empty)
+      if status ~= 0 then transfer_mod.raise_message_error(status, nil) end
+    end, "adopt_into accepted an empty owner slot")
+    transfer_payload_raises(function ()
+      local status = transfer_mod.decode_message(L, empty)
+      local result: value = nil
+      if status >= 0 then result = ffi.lua_totvalue(L, -1) as value end
+      transfer_message_result(status, result)
+    end, "decode_message accepted an empty owner slot")
+    transfer_mod.discard_message(nil)
+
+    local pkt = transfer_mod.Packet.from_value("hello\0packet")
+    local alias = pkt
+    test.assert(pkt:decode() as string == "hello\0packet")
+    transfer_payload_raises(function () pkt:decode() end,
+                            "consumed Packet decoded twice")
+    transfer_payload_raises(function () alias:decode() end,
+                            "consumed Packet alias decoded")
+    transfer_payload_raises(function () pkt:take_message() end,
+                            "consumed Packet allowed take_message")
+    pkt:close()
+    alias:close()
+
+    local pkt2 = transfer_mod.Packet.from_value(12345)
+    local adopted2 = transfer_mod.Packet.new()
+    defer adopted2:close()
+    local destination_owner = adopted2:borrow_owner()
+    local slot: foreign *TransferMessageSlot = foreign TransferMessageSlot.new_array(1)
+    defer do
+      transfer_mod.discard_message(slot[0])
+      slot[0] = nil
+    end
+    slot[0] = pkt2:take_message()
+    transfer_payload_raises(function () pkt2:take_message() end,
+                            "Packet allowed second take_message")
+    transfer_payload_raises(function () pkt2:decode() end,
+                            "Packet allowed decode after take_message")
+    local status = transfer_mod.adopt_into(destination_owner, slot)
+    if status ~= 0 then transfer_mod.raise_message_error(status, nil) end
+    test.assert(slot[0] == nil, "adopt_into did not consume its caller's slot")
+    test.assert(adopted2:decode() as integer == 12345)
+  end)
+
+  context:run("no-runtime-and-post-runtime-recursive-discard", function (_context: test.Context)
+    local decoder_calls_before = transfer_forbidden_decode_calls
+    -- 1. Outside any Runtime (before runtime_test.run): close, discard_message, and GC drop.
+    local pkt1, rx1_b, rx1_c = make_recursive_receiver_packet()
+    defer rx1_b:close()
+    defer rx1_c:close()
+    support.collect_garbage()
+    support.collect_garbage()
+    test.assert(not rx1_b:is_closed() and not rx1_c:is_closed())
+    pkt1:close()
+    pkt1:close()
+    test.assert(rx1_b:is_closed() and rx1_c:is_closed(),
+                "Packet:close outside Runtime did not recursively drain and release endpoints")
+
+    local pkt2, rx2_b, rx2_c = make_recursive_receiver_packet()
+    defer rx2_b:close()
+    defer rx2_c:close()
+    support.collect_garbage()
+    support.collect_garbage()
+    local raw2: foreign *void = nil
+    defer do transfer_mod.discard_message(raw2) end
+    raw2 = pkt2:take_message()
+    transfer_mod.discard_message(raw2)
+    raw2 = nil
+    test.assert(rx2_b:is_closed() and rx2_c:is_closed(),
+                "discard_message outside Runtime did not recursively drain and release endpoints")
+
+    local rx3_b, rx3_c = make_dropped_recursive_packet()
+    defer rx3_b:close()
+    defer rx3_c:close()
+    support.collect_garbage()
+    support.collect_garbage()
+    test.assert(rx3_b:is_closed() and rx3_c:is_closed(),
+                "dropped Packet finalizer outside Runtime did not release endpoints")
+
+    -- 2. Created inside an active Runtime, then discarded after Runtime shutdown.
+    local post_pkt: transfer_mod.Packet? = nil
+    local post_rx_b: (transfer_thread.Receiver<|integer|>)? = nil
+    local post_rx_c: (transfer_thread.Receiver<|integer|>)? = nil
+    runtime_test.run(function ()
+      local p, rb, rc = make_recursive_receiver_packet()
+      post_pkt = p
+      post_rx_b = rb
+      post_rx_c = rc
+    end)
+    local rb_after = post_rx_b as transfer_thread.Receiver<|integer|>
+    local rc_after = post_rx_c as transfer_thread.Receiver<|integer|>
+    defer rb_after:close()
+    defer rc_after:close()
+    support.collect_garbage()
+    support.collect_garbage()
+    test.assert(not rb_after:is_closed() and not rc_after:is_closed())
+    post_pkt:close()
+    test.assert(rb_after:is_closed() and rc_after:is_closed(),
+                "Packet:close after Runtime shutdown failed to release endpoints")
+    test.assert(transfer_forbidden_decode_calls == decoder_calls_before,
+                "runtime-free or post-shutdown discard entered a user decoder")
+  end)
+
+  context:run("lua-state-close-disposes-unconsumed-packet-and-recursive-receiver",
+    function (_context: test.Context)
+      local pkt, rx_b, rx_c = make_recursive_receiver_packet()
+      defer rx_b:close()
+      defer rx_c:close()
+      support.collect_garbage()
+      support.collect_garbage()
+      test.assert(not rx_b:is_closed() and not rx_c:is_closed())
+      local slot: foreign *TransferMessageSlot = foreign TransferMessageSlot.new_array(1)
+      defer do
+        transfer_mod.discard_message(slot[0])
+        slot[0] = nil
+      end
+      slot[0] = pkt:take_message()
+      local state = transfer_lua.new()
+      defer state:close()
+      local loader_calls: owned int[] = foreign int.new_array(1)
+      state:run([[
+        local slot, counter, count_loader, adopt = ...
+        local transfer = require('titan.transfer')
+        package.loaded['async.tests'] = nil
+        package.preload['async.tests'] = function()
+          count_loader(counter)
+          error('lua_close must not initialize a packet module')
+        end
+        local packet = transfer.Packet.new()
+        adopt(slot, packet:borrow_owner())
+        _G.held_packet_for_state_close = packet
+      ]], "=state-close-packet", async.TransferValue.is_pointer(slot as foreign *void),
+        async.TransferValue.is_pointer(loader_calls as foreign *void),
+        async.TransferValue.is_function(transfer_count_module_load),
+        async.TransferValue.is_function(transfer_adopt_slot_lua))
+      test.assert(slot[0] == nil)
+      test.assert(not rx_b:is_closed() and not rx_c:is_closed())
+      -- Closing the independent Lua state must run Packet's GC finalizer without
+      -- a Runtime and release both the direct Sender and the recursive Receiver queue.
+      state:close()
+      test.assert(rx_b:is_closed() and rx_c:is_closed(),
+                  "lua_close did not dispose unconsumed Packet and recursive Receiver queue")
+      test.assert(loader_calls[0] == 0,
+                  "lua_close entered a nominal loader while discarding an unread packet")
+    end)
+end
+
+function test_transfer_discard_skips_decoders_and_module_loaders(context: test.Context)
+  context:run("zero-decoder-calls-across-all-packet-kinds", function (_context: test.Context)
+    reset_transfer_hook_state()
+    -- 1. Root custom hook record payload
+    local pkt1, rx1_b, rx1_c = make_recursive_receiver_packet()
+    defer rx1_b:close()
+    defer rx1_c:close()
+    -- 2. Structural record containing custom hook record
+    local pkt2, rx2 = (function (): (transfer_mod.Packet, transfer_thread.Receiver<|integer|>)
+      local tx, rx = transfer_thread.channel<|integer|>(1)
+      local env = TransferPayloadForbiddenEnvelope(TransferPayloadForbiddenDecode(tx, nil))
+      return transfer_mod.Packet.from_value(env), rx
+    end)()
+    defer rx2:close()
+    -- 3. Structural union containing custom hook record
+    local pkt3, rx3 = (function (): (transfer_mod.Packet, transfer_thread.Receiver<|integer|>)
+      local tx, rx = transfer_thread.channel<|integer|>(1)
+      local u = TransferPayloadForbiddenUnion.item(TransferPayloadForbiddenDecode(tx, nil))
+      return transfer_mod.Packet.from_value(u), rx
+    end)()
+    defer rx3:close()
+    -- 4. Closure capturing custom hook record
+    local pkt4, rx4 = (function (): (transfer_mod.Packet, transfer_thread.Receiver<|integer|>)
+      local tx, rx = transfer_thread.channel<|integer|>(1)
+      local item = TransferPayloadForbiddenDecode(tx, nil)
+      return transfer_mod.Packet.from_value(function (): value return item end), rx
+    end)()
+    defer rx4:close()
+
+    support.collect_garbage()
+    support.collect_garbage()
+    pkt1:close()
+    local raw2: foreign *void = nil
+    defer do transfer_mod.discard_message(raw2) end
+    raw2 = pkt2:take_message()
+    transfer_mod.discard_message(raw2)
+    raw2 = nil
+    pkt3:close()
+    pkt4:close()
+    test.assert(transfer_forbidden_decode_calls == 0,
+                "discard invoked a user from_transfer_payload decoder")
+    test.assert(rx1_b:is_closed() and rx1_c:is_closed() and
+                rx2:is_closed() and rx3:is_closed() and rx4:is_closed(),
+                "native discard failed to release endpoints across packet kinds")
+  end)
+
+  context:run("unavailable-nominal-module-and-zero-preload-calls-on-discard",
+    function (_context: test.Context)
+      reset_transfer_hook_state()
+      local pkt, rx_b, rx_c = make_recursive_receiver_packet()
+      defer rx_b:close()
+      defer rx_c:close()
+      support.collect_garbage()
+      support.collect_garbage()
+      local slot: foreign *TransferMessageSlot = foreign TransferMessageSlot.new_array(1)
+      defer do
+        transfer_mod.discard_message(slot[0])
+        slot[0] = nil
+      end
+      slot[0] = pkt:take_message()
+      local state = transfer_lua.new()
+      defer state:close()
+      local loader_calls: owned int[] = foreign int.new_array(1)
+      -- Remove async.tests from package.preload and install a trap on any remaining preload lookup.
+      state:run([[
+        local slot, counter, count_loader, adopt = ...
+        local transfer = require('titan.transfer')
+        package.loaded['async.tests'] = nil
+        package.preload['async.tests'] = function()
+          count_loader(counter)
+          error('discard must never invoke module preload loader')
+        end
+        local pkt = transfer.Packet.new()
+        adopt(slot, pkt:borrow_owner())
+        pkt:close()
+        package.preload['async.tests'] = nil
+      ]], "=discard-without-module", async.TransferValue.is_pointer(slot as foreign *void),
+        async.TransferValue.is_pointer(loader_calls as foreign *void),
+        async.TransferValue.is_function(transfer_count_module_load),
+        async.TransferValue.is_function(transfer_adopt_slot_lua))
+      test.assert(slot[0] == nil)
+      test.assert(loader_calls[0] == 0,
+                  "native discard called a nominal module loader")
+      test.assert(transfer_forbidden_decode_calls == 0)
+      test.assert(rx_b:is_closed() and rx_c:is_closed(),
+                  "discard required nominal module initialization to reclaim endpoints")
+
+      -- Also verify that when decode IS attempted in a state where the module loader
+      -- is missing or throws, decode_message unwinds and still releases all attachments.
+      local pkt_missing, rx_m_b, rx_m_c = make_recursive_receiver_packet()
+      defer rx_m_b:close()
+      defer rx_m_c:close()
+      support.collect_garbage()
+      support.collect_garbage()
+      local missing_slot: foreign *TransferMessageSlot = foreign TransferMessageSlot.new_array(1)
+      defer do
+        transfer_mod.discard_message(missing_slot[0])
+        missing_slot[0] = nil
+      end
+      missing_slot[0] = pkt_missing:take_message()
+      transfer_payload_raises(function ()
+        state:run([[
+          local slot, decode = ...
+          local transfer = require('titan.transfer')
+          return decode(slot)
+        ]], "=decode-missing-preload",
+          async.TransferValue.is_pointer(missing_slot as foreign *void),
+          async.TransferValue.is_function(transfer_decode_slot_lua))
+      end, "decode unexpectedly succeeded without its nominal module")
+      test.assert(missing_slot[0] == nil,
+                  "failed raw decode did not consume its caller's slot")
+      test.assert(rx_m_b:is_closed() and rx_m_c:is_closed(),
+                  "module-load failure during decode leaked attached endpoints")
+    end)
+end
+
+record TransferPayloadAttachOomProbe
+  local ptr: foreign *void
+  local ctrl: foreign *size_t
+end
+
+function TransferPayloadAttachOomProbe:to_transfer_payload(): string
+  -- This probe runs only in a freshly initialized independent Lua state.
+  -- Its first slot-6 index is not shared with earlier aggregate cases.
+  -- Fail string allocation after attach_reserved has retained that entry.
+  for _ = 1, 6 do
+    transfer_mod.attach_resource(self.ptr, test_resource_retain, test_resource_release)
+  end
+  self.ctrl[0] = 1 as foreign size_t
+  self.ctrl[1] = 1 as foreign size_t
+  self.ctrl[2] = 0 as foreign size_t
+  return transfer_mod.attach_resource(self.ptr, test_resource_retain, test_resource_release)
+end
+
+function TransferPayloadAttachOomProbe.from_transfer_payload(
+    _payload: string): TransferPayloadAttachOomProbe
+  return { ptr = nil, ctrl = nil }
+end
+
+-- Public only so the fresh-state native preload can call it. This is test
+-- infrastructure, not a production allocation hook or a discovered test.
+function transfer_attach_string_oom_isolated(): integer
+  local counter: owned int[] = foreign int.new_array(1)
+  counter[0] = 1
+  local ctrl: owned size_t[] = foreign size_t.new_array(3)
+  local previous_data: foreign *void = nil
+  local previous = ffi.lua_getallocf(L, previous_data)
+  ffi.lua_setallocf(L, transfer_limited_lua_alloc, ctrl as foreign *void)
+  local caught = false
+  do
+    local packet = transfer_mod.Packet.from_value(
+      TransferPayloadAttachOomProbe(counter as foreign *void, ctrl))
+    defer packet:close()
+  catch
+    caught = true
+  end
+  ffi.lua_setallocf(L, previous, previous_data)
+  test.assert(caught and ctrl[2] >= (2 as foreign size_t),
+              "attach_resource post-retain string OOM did not trigger")
+  test.assert(counter[0] == 1,
+              "attach_resource post-retain string OOM leaked retained resource")
+  return 1
+end
+
+function test_transfer_resource_allocation_and_finalizer_failures(context: test.Context)
+  context:run("attach-resource-post-retain-string-oom", function (_context: test.Context)
+    local state = transfer_lua.new()
+    defer state:close()
+    local receipt = state:run([[
+      return require('async.tests').transfer_attach_string_oom_isolated()
+    ]], "=isolated-attachment-string-oom")
+    case receipt
+    when is_integer(number) then test.assert(number == 1)
+    else raise "isolated attachment string OOM omitted its receipt"
+    end
+  end)
+
+  context:run("prepared-adoption-wrapper-oom-preserves-source", function (_context: test.Context)
+    local pkt, rx_b, rx_c = make_recursive_receiver_packet()
+    defer rx_b:close()
+    defer rx_c:close()
+    support.collect_garbage()
+    support.collect_garbage()
+    local slot: foreign *TransferMessageSlot = foreign TransferMessageSlot.new_array(1)
+    defer do
+      transfer_mod.discard_message(slot[0])
+      slot[0] = nil
+    end
+    slot[0] = pkt:take_message()
+    local top = ffi.lua_gettop(L)
+    defer ffi.lua_settop(L, top)
+    test.assert(not rx_b:is_closed() and not rx_c:is_closed())
+    local ctrl: owned size_t[] = foreign size_t.new_array(3)
+    ctrl[0] = 1 as foreign size_t
+    ctrl[1] = 1 as foreign size_t
+    local prev_ud: foreign *void = nil
+    local prev_alloc = ffi.lua_getallocf(L, prev_ud)
+    ffi.lua_setallocf(L, transfer_limited_lua_alloc, ctrl as foreign *void)
+    local caught = false
+    do
+      local destination = transfer_mod.Packet.new()
+      destination:close()
+    catch
+      caught = true
+    end
+    ffi.lua_setallocf(L, prev_alloc, prev_ud)
+    ffi.lua_settop(L, top)
+    test.assert(caught and ctrl[2] >= (2 as foreign size_t),
+                "Packet preparation did not reach its wrapper allocation failure")
+    test.assert(slot[0] ~= nil and not rx_b:is_closed() and not rx_c:is_closed(),
+                "failed preparation consumed a caller-owned source packet")
+    transfer_mod.discard_message(slot[0])
+    slot[0] = nil
+    test.assert(rx_b:is_closed() and rx_c:is_closed(),
+                "caller could not dispose the packet retained through preparation failure")
+  end)
+
+
+  context:run("decode-large-payload-copy-oom-releases-endpoints", function (_context: test.Context)
+    local make_large = function (): (
+        transfer_mod.Packet,
+        transfer_thread.Receiver<|integer|>,
+        transfer_thread.Receiver<|integer|>)
+      local tx1, rx1 = transfer_thread.channel<|integer|>(1)
+      local tx2, rx2 = transfer_thread.channel<|integer|>(1)
+      local big = receiver_string.rep("payload-oom-bytes-", 4096)
+      local item = TransferPayloadLargeAndSender(tx1, big, tx2)
+      return transfer_mod.Packet.from_value(item), rx1, rx2
+    end
+    local pkt, rx1, rx2 = make_large()
+    defer rx1:close()
+    defer rx2:close()
+    support.collect_garbage()
+    support.collect_garbage()
+    test.assert(not rx1:is_closed() and not rx2:is_closed())
+
+    local ctrl: owned size_t[] = foreign size_t.new_array(3)
+    ctrl[0] = 2 as foreign size_t
+    ctrl[1] = 32768 as foreign size_t
+    ctrl[2] = 0 as foreign size_t
+    local prev_ud: foreign *void = nil
+    local prev_alloc = ffi.lua_getallocf(L, prev_ud)
+    ffi.lua_setallocf(L, transfer_limited_lua_alloc, ctrl as foreign *void)
+    local caught = false
+    do
+      pkt:decode()
+    catch
+      caught = true
+    end
+    ffi.lua_setallocf(L, prev_alloc, prev_ud)
+    test.assert(caught and ctrl[2] >= (2 as foreign size_t),
+                "large payload decode OOM did not trigger")
+    test.assert(rx2:is_closed(),
+                "unclaimed second Sender was not released on payload OOM")
+    support.collect_garbage()
+    support.collect_garbage()
+    test.assert(rx1:is_closed(),
+                "first Sender before OOM field was not released after GC")
+  end)
+end
+
+-- Workstream 4: demand-driven function classification, single structural root
+-- inspection, and direct scalar packet path.
+
+local function transfer_shared_sig_add(a: integer, b: integer): integer
+  return a + b
+end
+
+local function transfer_shared_sig_mul(a: integer, b: integer): integer
+  return a * b
+end
+
+function transfer_generic_echo<|T|>(item: T): T
+  return item
+end
+
+local function transfer_without_typedef(
+    descriptor: transfer_reflect.Type): transfer_reflect.Type
+  local result = descriptor
+  for _ = 1, 16 do
+    case result
+    when is_foreign_typedef{target_descriptor} then result = target_descriptor
+    when is_foreign_named(named) then result = named:resolve()
+    else return result
+    end
+  end
+  return result
+end
+
+local function transfer_foreign_origin_signature(
+    pair: owned *div_t): foreign int
+  return pair.quot
+end
+
+local function make_closure_8_captures(base: integer): function (integer): integer
+  local c1 = base + 1
+  local c2 = base + 2
+  local c3 = base + 3
+  local c4 = base + 4
+  local c5 = base + 5
+  local c6 = base + 6
+  local c7 = base + 7
+  local c8 = base + 8
+  return function (x: integer): integer
+    c1 = c1 + x
+    return c1 + c2 + c3 + c4 + c5 + c6 + c7 + c8
+  end
+end
+
+local function make_closure_64_captures(base: integer): function (): integer
+  local v1, v2, v3, v4, v5, v6, v7, v8 =
+    base + 1, base + 2, base + 3, base + 4, base + 5, base + 6, base + 7, base + 8
+  local v9, v10, v11, v12, v13, v14, v15, v16 =
+    base + 9, base + 10, base + 11, base + 12, base + 13, base + 14, base + 15, base + 16
+  local v17, v18, v19, v20, v21, v22, v23, v24 =
+    base + 17, base + 18, base + 19, base + 20, base + 21, base + 22, base + 23, base + 24
+  local v25, v26, v27, v28, v29, v30, v31, v32 =
+    base + 25, base + 26, base + 27, base + 28, base + 29, base + 30, base + 31, base + 32
+  local v33, v34, v35, v36, v37, v38, v39, v40 =
+    base + 33, base + 34, base + 35, base + 36, base + 37, base + 38, base + 39, base + 40
+  local v41, v42, v43, v44, v45, v46, v47, v48 =
+    base + 41, base + 42, base + 43, base + 44, base + 45, base + 46, base + 47, base + 48
+  local v49, v50, v51, v52, v53, v54, v55, v56 =
+    base + 49, base + 50, base + 51, base + 52, base + 53, base + 54, base + 55, base + 56
+  local v57, v58, v59, v60, v61, v62, v63, v64 =
+    base + 57, base + 58, base + 59, base + 60, base + 61, base + 62, base + 63, base + 64
+  return function (): integer
+    v1 = v1 + 100
+    v64 = v64 + 200
+    -- Keep all 64 captures without deeply nested C macro expansions.
+    local sum1 = v1 + v2 + v3 + v4 + v5 + v6 + v7 + v8
+    local sum2 = v9 + v10 + v11 + v12 + v13 + v14 + v15 + v16
+    local sum3 = v17 + v18 + v19 + v20 + v21 + v22 + v23 + v24
+    local sum4 = v25 + v26 + v27 + v28 + v29 + v30 + v31 + v32
+    local sum5 = v33 + v34 + v35 + v36 + v37 + v38 + v39 + v40
+    local sum6 = v41 + v42 + v43 + v44 + v45 + v46 + v47 + v48
+    local sum7 = v49 + v50 + v51 + v52 + v53 + v54 + v55 + v56
+    local sum8 = v57 + v58 + v59 + v60 + v61 + v62 + v63 + v64
+    return sum1 + sum2 + sum3 + sum4 + sum5 + sum6 + sum7 + sum8
+  end
+end
+
+record TransferPayloadReflectInHook
+  local value: integer
+end
+
+function TransferPayloadReflectInHook:to_transfer_payload(): string
+  case transfer_reflect.inspect(transfer_shared_sig_add)
+  when is_titan_function{tf_type = type} then
+    test.assert(#tf_type.param_descriptors == 2 and #tf_type.return_descriptors == 1)
+  else raise "reflect.inspect inside to_transfer_payload failed"
+  end
+  return transfer_protobuf.serialize_fields({transfer_reflect.Type.is_integer()}, self.value)
+end
+
+function TransferPayloadReflectInHook.from_transfer_payload(
+    payload: string): TransferPayloadReflectInHook
+  case transfer_reflect.inspect(transfer_shared_sig_mul)
+  when is_titan_function{tf_type = type} then
+    test.assert(#tf_type.param_descriptors == 2 and #tf_type.return_descriptors == 1)
+  else raise "reflect.inspect inside from_transfer_payload failed"
+  end
+  local v: integer = transfer_protobuf.deserialize_fields(
+    payload, {transfer_reflect.Type.is_integer()})
+  return { value = v }
+end
+
+local function set_closure_upvalue(fn: value, upvalue_one_based: integer, replacement: value): value
+  local top = ffi.lua_gettop(L)
+  defer ffi.lua_settop(L, top)
+  test.assert(ffi.lua_checkstack(L, 3) ~= 0)
+  ffi.lua_pushtvalue(L, fn)
+  local fn_idx = ffi.lua_gettop(L)
+  test.assert(ffi.lua_getupvalue(L, fn_idx, upvalue_one_based as foreign int) ~= nil)
+  local previous: value = ffi.lua_totvalue(L, -1)
+  ffi.lua_pushtvalue(L, replacement)
+  test.assert(ffi.lua_setupvalue(L, fn_idx, upvalue_one_based as foreign int) ~= nil)
+  return previous
+end
+
+local function make_lightuserdata_from_buffer(buffer: owned char[]): value
+  local top = ffi.lua_gettop(L)
+  defer ffi.lua_settop(L, top)
+  test.assert(ffi.lua_checkstack(L, 1) ~= 0)
+  ffi.lua_pushlightuserdata(L, buffer as foreign *void)
+  return ffi.lua_totvalue(L, -1)
+end
+
+local function make_null_lightuserdata(): value
+  local top = ffi.lua_gettop(L)
+  defer ffi.lua_settop(L, top)
+  test.assert(ffi.lua_checkstack(L, 1) ~= 0)
+  ffi.lua_pushlightuserdata(L, nil)
+  return ffi.lua_totvalue(L, -1)
+end
+
+function test_transfer_closure_avoids_signature_hydration_while_reflection_stays_eager(
+    context: test.Context)
+  context:run("poisoned-signature-tag-transfers-but-fails-reflection",
+    function (_context: test.Context)
+      local captured = 19
+      local inner = function (x: integer): integer return x + captured end
+      local outer = function (y: integer): integer return inner(y) + 1 end
+      local invalid_tag = "not_a_valid_type_descriptor("
+      local poison_buffer: owned char[] = foreign char.new_array(#invalid_tag + 1)
+      ffi.memcpy(poison_buffer as foreign *char, invalid_tag as foreign const *char,
+                 #invalid_tag as foreign size_t)
+      poison_buffer[#invalid_tag] = 0 as foreign char
+      local poison_ptr = make_lightuserdata_from_buffer(poison_buffer)
+      local saved_inner = set_closure_upvalue(inner, 2, poison_ptr)
+      defer do
+        set_closure_upvalue(inner, 2, saved_inner)
+        -- This deferred use pins the mutable owner through both original-tag
+        -- restorations; the outer restoration runs first by LIFO cleanup.
+        poison_buffer[0] = 0 as foreign char
+      end
+      local saved_outer = set_closure_upvalue(outer, 2, poison_ptr)
+      defer set_closure_upvalue(outer, 2, saved_outer)
+
+      -- Eager reflection must read upvalue[1] (1-based index 2) and fail to hydrate.
+      local reflect_failed = false
+      do
+        transfer_reflect.inspect(inner)
+      catch
+        reflect_failed = true
+      end
+      test.assert(reflect_failed, "reflect.inspect did not eagerly hydrate closure signature")
+
+      -- Transfer (both TransferValue.from_value and Packet.from_value) must NOT
+      -- hydrate signatures for root or nested captured closures.
+      local policy = async.TransferValue.from_value(outer)
+      local pkt = transfer_mod.Packet.from_value(outer)
+      local restored_from_policy: function (integer): integer = policy:to_value()
+      local restored_from_pkt: function (integer): integer = pkt:decode()
+      test.assert(restored_from_policy(22) == 42 and restored_from_pkt(22) == 42)
+
+      -- Restored closures use the destination module's canonical signature tag,
+      -- so reflect.inspect succeeds eagerly on the restored closures.
+      case transfer_reflect.inspect(restored_from_pkt)
+      when is_titan_function{tf_type = type} then
+        test.assert(#tf_type.param_descriptors == 1 and #tf_type.return_descriptors == 1)
+      else raise "restored closure lost eager reflection metadata"
+      end
+    end)
+
+  context:run("invalid-closure-headers-and-manifest-membership", function (_context: test.Context)
+    local dummy = 7
+    local candidate = function (): integer return dummy end
+    -- Upvalue 1 (0-based 0): module userdata
+    local saved_mod = set_closure_upvalue(candidate, 1, 42)
+    transfer_payload_error(function () async.TransferValue.from_value(candidate) end,
+                           "invalid Titan closure module")
+    transfer_payload_error(function () transfer_mod.Packet.from_value(candidate) end,
+                           "invalid Titan closure module")
+    set_closure_upvalue(candidate, 1, saved_mod)
+
+    -- Upvalue 3 (0-based 2): native entry lightuserdata
+    local saved_native = set_closure_upvalue(candidate, 3, 42)
+    transfer_payload_error(function () async.TransferValue.from_value(candidate) end,
+                           "invalid Titan closure native entry")
+    set_closure_upvalue(candidate, 3, saved_native)
+
+    -- Upvalue 3 (0-based 2): lightuserdata not present in module manifest
+    saved_native = set_closure_upvalue(candidate, 3, make_null_lightuserdata())
+    transfer_payload_error(function () async.TransferValue.from_value(candidate) end,
+                           "absent from its module manifest")
+    transfer_payload_error(function () transfer_mod.Packet.from_value(candidate) end,
+                           "absent from its module manifest")
+    set_closure_upvalue(candidate, 3, saved_native)
+
+    -- Upvalue 4 (0-based 3): TITAN_BRAND lightuserdata
+    local saved_brand = set_closure_upvalue(candidate, 4, make_null_lightuserdata())
+    transfer_payload_error(function () async.TransferValue.from_value(candidate) end,
+                           "cannot transfer a Lua C closure with upvalues")
+    transfer_payload_error(function () transfer_mod.Packet.from_value(candidate) end,
+                           "cannot transfer a Lua C closure with upvalues")
+    set_closure_upvalue(candidate, 4, saved_brand)
+
+    -- Last upvalue (1-based 6 for 1-capture closure): strict entry light C function
+    local saved_strict = set_closure_upvalue(candidate, 6, 42)
+    transfer_payload_error(function () async.TransferValue.from_value(candidate) end,
+                           "invalid Titan closure strict entry")
+    set_closure_upvalue(candidate, 6, saved_strict)
+  end)
+
+  context:run("captures-0-1-8-64-adjusted-shared-sig-generic-foreign-and-source-close",
+    function (_context: test.Context)
+      -- 0, 1, 8, and 64 captures through both TransferValue and Packet.
+      local c0 = transfer_shared_sig_add
+      local c0_dec: function (integer, integer): integer =
+        transfer_mod.Packet.from_value(c0):decode()
+      local c0_mul: function (integer, integer): integer =
+        transfer_mod.Packet.from_value(transfer_shared_sig_mul):decode()
+      test.assert(c0_dec(6, 7) == 13 and c0_mul(6, 7) == 42,
+                  "distinct functions sharing a signature collided during transfer")
+
+      local cell1 = 10
+      local c1 = function (x: integer): integer
+        cell1 = cell1 + x
+        return cell1
+      end
+      local c1_pkt: function (integer): integer = transfer_mod.Packet.from_value(c1):decode()
+      local c1_pol: function (integer): integer = async.TransferValue.from_value(c1):to_value()
+      test.assert(c1_pkt(5) == 15 and c1_pol(5) == 15 and c1(1) == 11)
+
+      local c8 = make_closure_8_captures(10)
+      local c8_pkt: function (integer): integer = transfer_mod.Packet.from_value(c8):decode()
+      local c8_pol: function (integer): integer = async.TransferValue.from_value(c8):to_value()
+      -- Sum of (11..18) = 116; + 4 = 120.
+      test.assert(c8_pkt(4) == 120 and c8_pol(4) == 120 and c8(0) == 116)
+
+      local c64 = make_closure_64_captures(0)
+      local c64_pkt: function (): integer = transfer_mod.Packet.from_value(c64):decode()
+      local c64_pol: function (): integer = async.TransferValue.from_value(c64):to_value()
+      -- Sum of 1..64 = 2080; + 100 + 200 = 2380.
+      test.assert(c64_pkt() == 2380 and c64_pol() == 2380 and c64() == 2380)
+
+      -- Adjusted closure, raw vs pre-converted policy capture, generic erasure,
+      -- and foreign declaration-origin signature preservation.
+      local adj_count = 20
+      local adj_base = function (n: integer): integer
+        adj_count = adj_count + n
+        return adj_count
+      end
+      local adjusted: function (integer, string): (value, value) = adj_base
+      local raw_cap = function (): integer return 31 end
+      local policy_cap = async.TransferValue.from_value(function (): integer return 37 end)
+      local raw_vs_policy = function (): integer
+        case policy_cap
+        when is_closure(_m, _e, _d) then
+          local fn: function (): integer = policy_cap:to_value()
+          return raw_cap() + fn()
+        else raise "pre-converted closure policy was unwrapped during capture transfer"
+        end
+      end
+      local hooked_reflect: TransferPayloadReflectInHook =
+        transfer_mod.Packet.from_value(TransferPayloadReflectInHook(77)):decode()
+      test.assert(hooked_reflect.value == 77)
+
+      local gen_fn = transfer_generic_echo
+      local gen_restored: function (value): value =
+        transfer_mod.Packet.from_value(gen_fn):decode()
+      test.assert(gen_restored("erased-ok") as string == "erased-ok")
+      case transfer_reflect.inspect(gen_restored)
+      when is_titan_function{tf_type = type} then
+        case tf_type.param_descriptors[1]
+        when is_value() then
+        else raise "generic function parameter lost erased value descriptor"
+        end
+      else raise "expected reflected generic Titan function"
+      end
+
+      local foreign_fn = transfer_foreign_origin_signature
+      local foreign_restored: function (owned *div_t): foreign int =
+        transfer_mod.Packet.from_value(foreign_fn):decode()
+      local div_owner: owned *div_t = foreign div_t.new()
+      div_owner.quot = 29
+      div_owner.rem = 3
+      test.assert(foreign_restored(div_owner) == (29 as foreign int))
+      case transfer_reflect.inspect(foreign_restored)
+      when is_titan_function{tf_type = type} then
+        case tf_type.param_descriptors[1]
+        when is_owned_foreign_pointer(owned_desc) then
+          case transfer_without_typedef(owned_desc.pointee_descriptor)
+          when is_foreign_struct(st) then
+            test.assert(#st.fields == 2)
+          else raise "foreign declaration origin did not resolve to div_t struct"
+          end
+        else raise "expected owned foreign pointer parameter descriptor"
+        end
+      else raise "expected reflected foreign-signature Titan function"
+      end
+
+      -- Cross-state closure transfer surviving source-state close.
+      local state = transfer_lua.new()
+      defer state:close()
+      local adj_carrier, rvp_carrier, c64_carrier = state:run([[
+        local adj, rvp, c64 = ...
+        return adj, rvp, c64
+      ]], "=closure-source-close",
+        async.TransferValue.from_value(adjusted),
+        async.TransferValue.from_value(raw_vs_policy),
+        async.TransferValue.from_value(c64))
+      state:close()
+      support.collect_garbage()
+      support.collect_garbage()
+      local adj_after: function (integer, string): (value, value) =
+        transfer_mod.Packet.from_value(adj_carrier):decode()
+      local r1, r2 = adj_after(7, "extra")
+      test.assert(r1 as integer == 27 and r2 == nil and adj_count == 20)
+      local rvp_after: function (): integer =
+        transfer_mod.Packet.from_value(rvp_carrier):decode()
+      test.assert(rvp_after() == 68)
+      local c64_after: function (): integer =
+        transfer_mod.Packet.from_value(c64_carrier):decode()
+      test.assert(c64_after() == 2680)
+    end)
+end
+
+record TransferPayloadStructuralHookParent
+  id: integer
+  step: TransferPayloadHookStep
+end
+
+union TransferPayloadStructuralHookUnion
+  none()
+  present(step: TransferPayloadHookStep, tag: string)
+end
+
+record TransferPayloadStructuralHookArray
+  items: {TransferPayloadHookStep}
+end
+
+local function make_lua_cfunction(upvalues: integer): value
+  local top = ffi.lua_gettop(L)
+  defer ffi.lua_settop(L, top)
+  test.assert(ffi.lua_checkstack(L, upvalues + 2) ~= 0)
+  if upvalues == 0 then
+    ffi.lua_pushcclosure(L, receiver_test_callback, 0)
+  else
+    for i = 1, upvalues do
+      ffi.lua_pushinteger(L, i as foreign lua_Integer)
+    end
+    ffi.lua_pushcclosure(L, receiver_test_callback, upvalues as foreign int)
+  end
+  return ffi.lua_totvalue(L, -1)
+end
+
+local function make_light_cfunction(): value
+  local top = ffi.lua_gettop(L)
+  defer ffi.lua_settop(L, top)
+  test.assert(ffi.lua_checkstack(L, 1) ~= 0)
+  ffi.lua_pushcclosure(L, receiver_test_callback, 0)
+  return ffi.lua_totvalue(L, -1)
+end
+
+local function make_unbranded_userdata(): (value, foreign *void)
+  local top = ffi.lua_gettop(L)
+  defer ffi.lua_settop(L, top)
+  test.assert(ffi.lua_checkstack(L, 1) ~= 0)
+  local ptr = ffi.lua_newuserdatauv(L, foreign int.sizeof as foreign size_t, 0)
+  local bytes = ptr as foreign *int
+  bytes[0] = 919
+  return ffi.lua_totvalue(L, -1), ptr
+end
+
+local function make_lua_thread_value(): (value, foreign *lua_State)
+  local top = ffi.lua_gettop(L)
+  defer ffi.lua_settop(L, top)
+  test.assert(ffi.lua_checkstack(L, 1) ~= 0)
+  local th = ffi.lua_newthread(L)
+  return ffi.lua_totvalue(L, -1), th
+end
+
+local function make_plain_lua_function(): value
+  local top = ffi.lua_gettop(L)
+  defer ffi.lua_settop(L, top)
+  test.assert(ffi.lua_checkstack(L, 2) ~= 0)
+  test.assert(ffi.luaL_loadstring(L, "return 1") == ffi.LUA_OK)
+  return ffi.lua_totvalue(L, -1)
+end
+
+function test_transfer_scalar_and_structural_codec_equivalence(context: test.Context)
+  context:run("numeric-subtypes-negative-zero-and-binary-strings",
+    function (_context: test.Context)
+      -- Integer vs integral float vs negative zero.
+      local int_zero: value = 0
+      local pos_float_zero: value = 0.0
+      local neg_float_zero: value = -0.0
+      local integral_float: value = 42.0
+
+      case transfer_reflect.inspect(transfer_mod.Packet.from_value(int_zero):decode())
+      when is_integer(n) then test.assert(n == 0)
+      else raise "Packet changed integer 0 tag"
+      end
+      case transfer_reflect.inspect(transfer_mod.Packet.from_value(pos_float_zero):decode())
+      when is_float(f) then test.assert(f == 0.0 and 1.0 / f > 0.0)
+      else raise "Packet changed +0.0 float tag or sign"
+      end
+      case transfer_reflect.inspect(transfer_mod.Packet.from_value(neg_float_zero):decode())
+      when is_float(f) then test.assert(f == 0.0 and 1.0 / f < 0.0)
+      else raise "Packet lost -0.0 negative zero sign bit"
+      end
+      case async.TransferValue.from_value(neg_float_zero)
+      when is_float(f) then test.assert(f == 0.0 and 1.0 / f < 0.0)
+      else raise "TransferValue.from_value lost -0.0 negative zero sign bit"
+      end
+      case transfer_reflect.inspect(
+        transfer_mod.Packet.from_value(async.TransferValue.is_float(-0.0)):decode())
+      when is_float(f) then test.assert(1.0 / f < 0.0)
+      else raise "explicit is_float(-0.0) policy lost negative zero sign bit"
+      end
+      case transfer_reflect.inspect(transfer_mod.Packet.from_value(integral_float):decode())
+      when is_float(f) then test.assert(f == 42.0)
+      else raise "Packet coerced integral float 42.0 into integer"
+      end
+
+      test.assert(transfer_mod.Packet.from_value(transfer_math.mininteger):decode() as integer ==
+                  transfer_math.mininteger)
+      test.assert(transfer_mod.Packet.from_value(transfer_math.maxinteger):decode() as integer ==
+                  transfer_math.maxinteger)
+      test.assert(transfer_mod.Packet.from_value(transfer_math.huge):decode() as float ==
+                  transfer_math.huge)
+      local nan_val: float = 0.0 / 0.0
+      local nan_dec = transfer_mod.Packet.from_value(nan_val):decode() as float
+      test.assert(nan_dec ~= nan_dec, "Packet did not preserve NaN")
+
+      local strings_to_check = {
+        "",
+        "\0",
+        "\0\255binary\0payload\0",
+        receiver_string.rep("chunk\0\255", 2048),
+      }
+      for i = 1, #strings_to_check do
+        local s = strings_to_check[i]
+        test.assert(transfer_mod.Packet.from_value(s):decode() as string == s)
+        test.assert(async.TransferValue.from_value(s):to_value() as string == s)
+      end
+    end)
+
+  context:run("pointers-threads-userdata-cfunctions-and-unsupported",
+    function (_context: test.Context)
+      local null_lud = make_null_lightuserdata()
+      case transfer_reflect.inspect(transfer_mod.Packet.from_value(null_lud):decode())
+      when is_raw_pointer(p) then test.assert(p == nil)
+      else raise "NULL lightuserdata lost raw_pointer classification"
+      end
+
+      local udata_val, udata_ptr = make_unbranded_userdata()
+      case async.TransferValue.from_value(udata_val)
+      when is_pointer(p) then test.assert(p == udata_ptr)
+      else raise "unbranded userdata did not map to borrowed payload pointer"
+      end
+      case transfer_reflect.inspect(transfer_mod.Packet.from_value(udata_val):decode())
+      when is_raw_pointer(p) then
+        test.assert(p == udata_ptr and (p as foreign *int)[0] == 919)
+      else raise "Packet unbranded userdata did not decode to borrowed payload pointer"
+      end
+
+      local th_val, th_ptr = make_lua_thread_value()
+      case async.TransferValue.from_value(th_val)
+      when is_lua_state(s) then test.assert(s == th_ptr)
+      else raise "Lua thread did not map to is_lua_state"
+      end
+      case transfer_reflect.inspect(transfer_mod.Packet.from_value(th_val):decode())
+      when is_raw_pointer(p) then test.assert(p == th_ptr as foreign *void)
+      else raise "Packet Lua thread did not decode to borrowed lua_State pointer"
+      end
+
+      local lcf = make_light_cfunction()
+      local lcf_dec: function (...: value): (...: value) =
+        transfer_mod.Packet.from_value(lcf):decode()
+      local arg1, arg2, arg3 = lcf_dec(10, 20, 30)
+      test.assert(arg1 == 10 and arg2 == 20 and arg3 == 30,
+                  "bare C function lost its flexible-result contract")
+
+      local ccl_1 = make_lua_cfunction(1)
+      local ccl_5 = make_lua_cfunction(5)
+      local bad_fns: {value} = {ccl_1, ccl_5}
+      for i = 1, #bad_fns do
+        local bad_fn = bad_fns[i]
+        transfer_payload_error(function ()
+          async.TransferValue.from_value(bad_fn)
+        end, "cannot transfer a Lua C closure with upvalues")
+        transfer_payload_error(function ()
+          transfer_mod.Packet.from_value(bad_fn)
+        end, "cannot transfer a Lua C closure with upvalues")
+      end
+
+      local null_cfunc: foreign function(*lua_State): int = nil
+      local null_fn_policy = async.TransferValue.is_function(null_cfunc)
+      transfer_payload_error(function ()
+        null_fn_policy:to_value()
+      end, "cannot transfer a NULL Lua C function")
+      transfer_payload_error(function ()
+        transfer_mod.Packet.from_value(null_fn_policy)
+      end, "cannot send a NULL Lua C function")
+
+      local owned_arr: owned int[] = foreign int.new_array(2)
+      local map_val: {string: integer} = {["a"] = 1}
+      local lua_fn = make_plain_lua_function()
+      local unsupported: {value} = {
+        {1, 2},
+        ({1, 2} as const {integer}),
+        map_val,
+        owned_arr,
+        lua_fn,
+      }
+      for i = 1, #unsupported do
+        local bad = unsupported[i]
+        transfer_payload_error(function ()
+          async.TransferValue.from_value(bad)
+        end, "transfer: unsupported value")
+        transfer_payload_error(function ()
+          transfer_mod.Packet.from_value(bad)
+        end, "transfer: unsupported value")
+        transfer_payload_error(function ()
+          transfer_mod.Packet.from_value(function (): value return bad end)
+        end, "transfer: unsupported value")
+      end
+    end)
+
+  context:run("structural-wire-equivalence-and-single-hook-invocation",
+    function (_context: test.Context)
+      reset_transfer_hook_state()
+      local rec = TransferPayloadStructuralHookParent(
+        77, TransferPayloadHookStep("rec-once", false, false))
+      local rec_policy = async.TransferValue.from_value(rec)
+      test.assert(#transfer_hook_log == 1 and transfer_hook_log[1] == "enc:rec-once",
+                  "TransferValue.from_value invoked structural child hook more than once")
+      case rec_policy
+      when is_record(module, name, bytes) then
+        test.assert(module == "async.tests" and
+                    name == "async.tests.TransferPayloadStructuralHookParent")
+        test.assert(bytes == transfer_protobuf.serialize(rec))
+      else raise "expected structural record policy"
+      end
+
+      reset_transfer_hook_state()
+      local rec_pkt = transfer_mod.Packet.from_value(rec)
+      test.assert(#transfer_hook_log == 1 and transfer_hook_log[1] == "enc:rec-once",
+                  "Packet.from_value invoked structural record child hook more than once")
+      local rec_dec: TransferPayloadStructuralHookParent = rec_pkt:decode()
+      test.assert(rec_dec.id == 77 and #transfer_hook_log == 2 and
+                  transfer_hook_log[2] == "dec:rec-once")
+
+      reset_transfer_hook_state()
+      local u = TransferPayloadStructuralHookUnion.present(
+        TransferPayloadHookStep("union-once", false, false), "u-tag")
+      local u_policy = async.TransferValue.from_value(u)
+      test.assert(#transfer_hook_log == 1 and transfer_hook_log[1] == "enc:union-once")
+      case u_policy
+      when is_union(module, name, bytes) then
+        test.assert(module == "async.tests" and
+                    name == "async.tests.TransferPayloadStructuralHookUnion")
+        test.assert(bytes == transfer_protobuf.serialize(u))
+      else raise "expected structural union policy"
+      end
+
+      reset_transfer_hook_state()
+      local u_pkt = transfer_mod.Packet.from_value(u)
+      test.assert(#transfer_hook_log == 1 and transfer_hook_log[1] == "enc:union-once")
+      local u_dec: TransferPayloadStructuralHookUnion = u_pkt:decode()
+      case u_dec
+      when present(_step, tag) then
+        test.assert(tag == "u-tag" and #transfer_hook_log == 2 and
+                    transfer_hook_log[2] == "dec:union-once")
+      else raise "expected present variant"
+      end
+    end)
+end
+
+local function transfer_native_oom_case(context: test.Context, workspace: string,
+                                      scenario: string)
+  context:run(scenario, function (_context: test.Context)
+    local output, why, code = transfer_command.capture({
+      transfer_command.program(workspace, "transfer_alloc_fault_app"), scenario,
+    }, workspace)
+    test.assert(why == "exit" and code == 0,
+                "native transfer allocation fixture failed at " .. scenario .. ": " .. output)
+    test.assert(output == "TRANSFER_NATIVE_OOM_OK\n",
+                "native transfer allocation fixture omitted its ownership receipt")
+  end)
+end
+
+function test_transfer_native_allocation_failures_rollback_resources(
+    context: test.Context)
+  if transfer_common.is_windows() then
+    test.skip("platform: native allocation wrapping requires Linux static archive linkage")
+  end
+  local host, host_why, host_code = transfer_command.capture({"uname", "-s"})
+  test.assert(host_why == "exit" and host_code == 0, host)
+  if host ~= "Linux\n" then
+    test.skip("platform: native allocation wrapping requires Linux static archive linkage")
+  end
+  local workspace = ""
+  runtime_test.run(function ()
+    workspace = transfer_fs.tmpname()
+    transfer_fs.unlink(workspace)
+    transfer_fs.mkdir(workspace)
+    context:cleanup(function () transfer_command.remove_tree(workspace) end)
+    transfer_fs.write_file(workspace .. "/transfer_alloc_fault_api.h",
+      transfer_fs.read_file("spec/fixtures/stdlib/native/transfer_alloc_fault_api.h"))
+    transfer_fs.write_file(workspace .. "/transfer_alloc_fault_app.titan",
+      transfer_fs.read_file("spec/fixtures/stdlib/titan/transfer_alloc_fault_app.titan"))
+    local flags = transfer_os.getenv("TITAN_EXTRA_LDFLAGS") or ""
+    flags = flags .. " -Wl,--wrap=malloc,--wrap=calloc,--wrap=realloc,--wrap=lua_setmetatable"
+    local output, why, code = transfer_command.compile(workspace,
+      "transfer_alloc_fault_app",
+      {"--no-uv-bootstrap", "-X", transfer_command.fixture_object("transfer_alloc_fault")},
+      true, {["TITAN_EXTRA_LDFLAGS"] = flags})
+    test.assert(why == "exit" and code == 0,
+                "could not compile unchanged-provider native allocation child: " .. output)
+  end)
+  transfer_native_oom_case(context, workspace, "reserve-initial")
+  transfer_native_oom_case(context, workspace, "reserve-growth")
+  transfer_native_oom_case(context, workspace, "payload-copy")
+  transfer_native_oom_case(context, workspace, "buffer-initial")
+  transfer_native_oom_case(context, workspace, "buffer-growth")
+  transfer_native_oom_case(context, workspace, "scalar-copy")
+  transfer_native_oom_case(context, workspace, "policy-copy")
+  transfer_native_oom_case(context, workspace, "sender-finalizer")
+  transfer_native_oom_case(context, workspace, "receiver-finalizer")
+end
+
+local function check_raw_child_has_no_transfer_authority(
+    sender: transfer_thread.Sender<|integer|>, parent_index: string)
+  local child = transfer_coroutine.create(function (_: value): value
+    transfer_payload_raises(function () sender:to_transfer_payload() end,
+      "raw child coroutine inherited parent encode authority")
+    transfer_payload_raises(function ()
+      transfer_thread.Sender<|integer|>.from_transfer_payload(parent_index)
+    end, "raw child coroutine inherited parent decode authority")
+
+    -- A child may open its own packet scope, but leaving either its successful
+    -- or failed operation must restore the child's absent top, not the parent.
+    local own_packet = transfer_mod.Packet.from_value(sender)
+    local own_sender: transfer_thread.Sender<|integer|> = own_packet:decode()
+    test.assert(not own_sender:is_closed())
+    transfer_payload_raises(function () own_sender:to_transfer_payload() end,
+      "child packet completion retained an encode scope")
+    transfer_payload_raises(function ()
+      transfer_mod.Packet.from_value(TransferPayloadManySenders(
+        {sender}, TransferPayloadHookStep("raw-child-encode", true, false)))
+    end, "child failing encoder unexpectedly succeeded")
+    transfer_payload_raises(function () sender:to_transfer_payload() end,
+      "failed child encoder did not restore the child's absent scope")
+
+    local failing = transfer_mod.Packet.from_value(TransferPayloadSenderComposite(
+      TransferPayloadHookStep("raw-child-decode", false, true), sender,
+      TransferPayloadHookStep("middle", false, false), sender,
+      TransferPayloadHookStep("after", false, false)))
+    transfer_payload_error(function () failing:decode() end,
+      "hook-decode-boom:raw-child-decode")
+    transfer_payload_raises(function ()
+      transfer_thread.Sender<|integer|>.from_transfer_payload(parent_index)
+    end, "failed child decoder restored the parent's scope into the child")
+    return "child-finished"
+  end, "transfer-synchronous-child")
+  test.assert(child:resume(nil) == "child-finished" and child:status() == "dead",
+              "synchronous child packet operations did not complete")
+end
+
+record TransferPayloadSynchronousChildScope
+  local sender: (transfer_thread.Sender<|integer|>)?
+end
+
+function TransferPayloadSynchronousChildScope:to_transfer_payload(): string
+  local first = self.sender:to_transfer_payload()
+  check_raw_child_has_no_transfer_authority(self.sender, first)
+  local second = self.sender:to_transfer_payload()
+  test.assert(first == "\0\0\0\0" and second == "\1\0\0\0",
+              "raw child operations changed the parent encode packet")
+  return first .. second
+end
+
+function TransferPayloadSynchronousChildScope.from_transfer_payload(
+    payload: string): TransferPayloadSynchronousChildScope
+  local first = transfer_thread.Sender<|integer|>.from_transfer_payload(
+    receiver_string.sub(payload, 1, 4))
+  check_raw_child_has_no_transfer_authority(first, receiver_string.sub(payload, 5, 8))
+  local second = transfer_thread.Sender<|integer|>.from_transfer_payload(
+    receiver_string.sub(payload, 5, 8))
+  test.assert(first:try_send(711) and second:try_send(712),
+              "raw child operations changed the parent decode packet")
+  return { sender = second }
+end
+
+function test_transfer_synchronous_hooks_isolate_raw_child_scope_authority(
+    _context: test.Context)
+  local make_packet = function (): (transfer_mod.Packet, transfer_thread.Receiver<|integer|>)
+    local tx, rx = transfer_thread.channel<|integer|>(4)
+    return transfer_mod.Packet.from_value(TransferPayloadSynchronousChildScope(tx)), rx
+  end
+  local packet, peer = make_packet()
+  defer packet:close()
+  defer peer:close()
+  local decoded: TransferPayloadSynchronousChildScope = packet:decode()
+  local first_ok, first? = peer:try_receive()
+  local second_ok, second? = peer:try_receive()
+  test.assert(first_ok and first == 711 and second_ok and second == 712)
+  test.assert(decoded.sender:try_send(713))
+  local final_ok, final? = peer:try_receive()
+  test.assert(final_ok and final == 713)
+end
+
+-- Deliberately violate the synchronous hook contract to test native ownership
+-- isolation when an execution stack is abandoned. This is fault injection,
+-- not a supported yielding-hook protocol, and no paused hook is resumed.
+record TransferPayloadAbandonedScopeFault
+  local sender: (transfer_thread.Sender<|integer|>)?
+  local phase: string
+end
+
+function TransferPayloadAbandonedScopeFault:to_transfer_payload(): string
+  local index = self.sender:to_transfer_payload()
+  if self.phase == "encode" then
+    transfer_coroutine.yield("unfinished-encode", "transfer-abandoned-scope-fault")
+  end
+  return index .. self.phase
+end
+
+function TransferPayloadAbandonedScopeFault.from_transfer_payload(
+    payload: string): TransferPayloadAbandonedScopeFault
+  local phase = receiver_string.sub(payload, 5)
+  if phase == "decode" then
+    transfer_coroutine.yield("unfinished-decode", "transfer-abandoned-scope-fault")
+  end
+  local adopted = transfer_thread.Sender<|integer|>.from_transfer_payload(
+    receiver_string.sub(payload, 1, 4))
+  return { sender = adopted, phase = phase }
+end
+
+local function abandon_transfer_scope_fault(phase: string): transfer_thread.Receiver<|integer|>
+  local tx, rx = transfer_thread.channel<|integer|>(1)
+  if phase == "encode" then
+    local encoder = transfer_coroutine.create(function (_: value): value
+      local packet = transfer_mod.Packet.from_value(TransferPayloadAbandonedScopeFault(tx, phase))
+      packet:close()
+      return nil
+    end, "transfer-abandoned-scope-fault")
+    test.assert(encoder:resume(nil) == "unfinished-encode")
+    test.assert(encoder:status() == "suspended")
+  else
+    local packet = transfer_mod.Packet.from_value(TransferPayloadAbandonedScopeFault(tx, phase))
+    local decoder = transfer_coroutine.create(function (_: value): value
+      return packet:decode()
+    end, "transfer-abandoned-scope-fault")
+    test.assert(decoder:resume(nil) == "unfinished-decode")
+    test.assert(decoder:status() == "suspended")
+  end
+  test.assert(not rx:is_closed(), "fault injection failed to retain the unfinished packet")
+  transfer_payload_raises(function () tx:to_transfer_payload() end,
+    "paused fault stack authorized an unrelated encoder")
+  transfer_payload_raises(function ()
+    transfer_thread.Sender<|integer|>.from_transfer_payload("\0\0\0\0")
+  end, "paused fault stack authorized an unrelated decoder")
+  local independent = transfer_mod.Packet.from_value(tx)
+  independent:close()
+  return rx
+end
+
+function test_transfer_abandoned_scope_fault_reclaims_native_ownership(
+    context: test.Context)
+  context:run("unfinished-encode", function (_context: test.Context)
+    local peer = abandon_transfer_scope_fault("encode")
+    defer peer:close()
+    transfer_gc.collect()
+    transfer_gc.collect()
+    test.assert(peer:is_closed(), "abandoned encode scope stranded a native retain")
+    transfer_payload_raises(function ()
+      transfer_thread.Sender<|integer|>.from_transfer_payload("\0\0\0\0")
+    end, "abandoned encoder authorized an unrelated execution")
+  end)
+  context:run("unfinished-decode", function (_context: test.Context)
+    local peer = abandon_transfer_scope_fault("decode")
+    defer peer:close()
+    transfer_gc.collect()
+    transfer_gc.collect()
+    test.assert(peer:is_closed(), "abandoned decode scope stranded its packet")
+    local tx, rx = transfer_thread.channel<|integer|>(1)
+    defer rx:close()
+    transfer_payload_raises(function () tx:to_transfer_payload() end,
+      "abandoned decoder authorized an unrelated execution")
+  end)
+end
+
+local transfer_adoption_oom_ctrl: foreign *size_t = nil
+
+record TransferPayloadAdoptionOom
+  local sender: (transfer_thread.Sender<|integer|>)?
+  local receiver: (transfer_thread.Receiver<|integer|>)?
+end
+
+function TransferPayloadAdoptionOom:to_transfer_payload(): string
+  if self.sender ~= nil then return "S" .. self.sender:to_transfer_payload() end
+  return "R" .. self.receiver:to_transfer_payload()
+end
+
+function TransferPayloadAdoptionOom.from_transfer_payload(
+    payload: string): TransferPayloadAdoptionOom
+  local index = receiver_string.sub(payload, 2)
+  local sender_kind = receiver_string.sub(payload, 1, 1) == "S"
+  -- Scope creation, module resolution, and payload copying have finished.
+  -- Arm only at the public endpoint-adoption boundary, before constructing
+  -- its inert wrapper/finalizer, rather than counting unrelated decode setup.
+  if transfer_adoption_oom_ctrl ~= nil then
+    transfer_adoption_oom_ctrl[0] = 1 as foreign size_t
+  end
+  if sender_kind then
+    local sender = transfer_thread.Sender<|integer|>.from_transfer_payload(index)
+    return { sender = sender, receiver = nil }
+  end
+  local receiver = transfer_thread.Receiver<|integer|>.from_transfer_payload(index)
+  return { sender = nil, receiver = receiver }
+end
+
+local function transfer_adoption_failure_case(
+    context: test.Context, kind: string, step: integer)
+  context:run(kind .. "-allocation-" .. step, function (_context: test.Context)
+    -- Warm both endpoint nominal/finalizer paths before installing the allocator.
+    local warm_tx, warm_rx = transfer_thread.channel<|integer|>(1)
+    defer warm_tx:close()
+    defer warm_rx:close()
+    local warm_sender: TransferPayloadAdoptionOom =
+      transfer_mod.Packet.from_value(TransferPayloadAdoptionOom(warm_tx, nil)):decode()
+    local warm_receiver: TransferPayloadAdoptionOom =
+      transfer_mod.Packet.from_value(TransferPayloadAdoptionOom(nil, warm_rx)):decode()
+    test.assert(warm_sender.sender ~= nil and warm_receiver.receiver ~= nil)
+
+    local peer_rx: (transfer_thread.Receiver<|integer|>)? = nil
+    local peer_tx: (transfer_thread.Sender<|integer|>)? = nil
+    local packet = (function (): transfer_mod.Packet
+      local tx, rx = transfer_thread.channel<|integer|>(1)
+      if kind == "sender" then
+        peer_rx = rx
+        return transfer_mod.Packet.from_value(TransferPayloadAdoptionOom(tx, nil))
+      end
+      peer_tx = tx
+      return transfer_mod.Packet.from_value(TransferPayloadAdoptionOom(nil, rx))
+    end)()
+    defer packet:close()
+    defer do
+      if peer_rx ~= nil then peer_rx:close() end
+      if peer_tx ~= nil then peer_tx:close() end
+    end
+    support.collect_garbage()
+    support.collect_garbage()
+    if peer_rx ~= nil then test.assert(not peer_rx:is_closed()) end
+    if peer_tx ~= nil then test.assert(not peer_tx:is_closed()) end
+    local ctrl: owned size_t[] = foreign size_t.new_array(3)
+    ctrl[1] = step as foreign size_t
+    transfer_adoption_oom_ctrl = ctrl
+    defer do transfer_adoption_oom_ctrl = nil end
+    local previous_data: foreign *void = nil
+    local previous = ffi.lua_getallocf(L, previous_data)
+    ffi.lua_setallocf(L, transfer_limited_lua_alloc, ctrl as foreign *void)
+    local failed = false
+    do packet:decode() catch failed = true end
+    ffi.lua_setallocf(L, previous, previous_data)
+    transfer_adoption_oom_ctrl = nil
+    test.assert(failed and ctrl[2] >= (2 as foreign size_t),
+                "endpoint preparation did not reach its armed Lua allocation failure")
+    support.collect_garbage()
+    support.collect_garbage()
+    if peer_rx ~= nil then
+      test.assert(peer_rx:is_closed(), "failed Sender preparation leaked the packet retain")
+    end
+    if peer_tx ~= nil then
+      test.assert(peer_tx:is_closed(), "failed Receiver preparation leaked the packet retain")
+    end
+  end)
+end
+
+function test_transfer_endpoint_adoption_allocation_failures(
+    context: test.Context)
+  transfer_adoption_failure_case(context, "sender", 1)
+  transfer_adoption_failure_case(context, "sender", 2)
+  transfer_adoption_failure_case(context, "receiver", 1)
+  transfer_adoption_failure_case(context, "receiver", 2)
+end
+
+function test_transfer_hook_array_encounter_order_and_single_invocation(
+    _context: test.Context)
+  reset_transfer_hook_state()
+  defer reset_transfer_hook_state()
+  local item = TransferPayloadStructuralHookArray({
+    TransferPayloadHookStep("array-first", false, false),
+    TransferPayloadHookStep("array-second", false, false),
+  })
+  local packet = transfer_mod.Packet.from_value(item)
+  defer packet:close()
+  test.assert(#transfer_hook_log == 2 and
+              transfer_hook_log[1] == "enc:array-first" and
+              transfer_hook_log[2] == "enc:array-second",
+              "Array field encode changed hook encounter order or invoked a hook twice")
+  local restored: TransferPayloadStructuralHookArray = packet:decode()
+  test.assert(#restored.items == 2 and
+              restored.items[1].label == "array-first" and
+              restored.items[2].label == "array-second" and
+              #transfer_hook_log == 4 and
+              transfer_hook_log[3] == "dec:array-first" and
+              transfer_hook_log[4] == "dec:array-second",
+              "Array field decode changed hook encounter order or invoked a hook twice")
+end
+
+function test_transfer_nil_boolean_policies_and_scalar_captures(_context: test.Context)
+  test.assert(transfer_mod.Packet.from_value(nil):decode() == nil)
+  test.assert(transfer_mod.Packet.from_value(false):decode() == false)
+  test.assert(transfer_mod.Packet.from_value(true):decode() == true)
+  test.assert(transfer_mod.Packet.from_value(
+    transfer_mod.TransferValue.is_nil()):decode() == nil)
+  test.assert(transfer_mod.Packet.from_value(
+    transfer_mod.TransferValue.is_boolean(false)):decode() == false)
+  test.assert(transfer_mod.Packet.from_value(
+    transfer_mod.TransferValue.is_string("policy\0bytes")):decode() == "policy\0bytes")
+  local absent: value = nil
+  local flag = false
+  local integer_value = 41
+  local float_value = -0.0
+  local bytes = "capture\0bytes"
+  local closure = function (): (value, boolean, integer, float, string)
+    return absent, flag, integer_value, float_value, bytes
+  end
+  local restored: function (): (value, boolean, integer, float, string) =
+    transfer_mod.Packet.from_value(closure):decode()
+  local out_absent: value, out_flag: boolean, out_integer: integer,
+        out_float: float, out_bytes: string = restored()
+  test.assert(out_absent == nil and not out_flag and out_integer == 41 and
+              out_float == 0.0 and 1.0 / out_float < 0.0 and out_bytes == bytes,
+              "closure scalar capture conversion changed a nil, false, subtype, sign, or byte string")
+end
+
+function test_transfer_decoder_failure_after_last_endpoint(context: test.Context)
+  context:run("sender", function (_context: test.Context)
+    reset_transfer_hook_state()
+    defer reset_transfer_hook_state()
+    local packet, peer1, peer2 = encode_sender_composite_packet(false, false, true)
+    defer packet:close()
+    defer peer1:close()
+    defer peer2:close()
+    support.collect_garbage()
+    support.collect_garbage()
+    test.assert(not peer1:is_closed() and not peer2:is_closed())
+    transfer_payload_error(function () packet:decode() end, "hook-decode-boom:a")
+    test.assert(#transfer_hook_log == 6 and transfer_hook_log[6] == "dec:a",
+                "decoder failed before reaching the post-Sender hook")
+    support.collect_garbage()
+    support.collect_garbage()
+    test.assert(peer1:is_closed() and peer2:is_closed(),
+                "post-Sender decoder failure stranded already-adopted owners")
+  end)
+  context:run("receiver", function (_context: test.Context)
+    reset_transfer_hook_state()
+    defer reset_transfer_hook_state()
+    local packet, peer1, peer2, nested = encode_receiver_composite_packet(false, false, true)
+    defer packet:close()
+    defer peer1:close()
+    defer peer2:close()
+    defer nested:close()
+    support.collect_garbage()
+    support.collect_garbage()
+    test.assert(not peer1:is_closed() and not peer2:is_closed())
+    transfer_payload_error(function () packet:decode() end, "hook-decode-boom:a")
+    test.assert(#transfer_hook_log == 6 and transfer_hook_log[6] == "dec:a",
+                "decoder failed before reaching the post-Receiver hook")
+    support.collect_garbage()
+    support.collect_garbage()
+    test.assert(peer1:is_closed() and peer2:is_closed(),
+                "post-Receiver decoder failure stranded already-adopted owners")
+  end)
+end
+
+record TransferPayloadReceiverClaimFault
+  local receiver: (transfer_thread.Receiver<|integer|>)?
+  local mode: string
+end
+
+function TransferPayloadReceiverClaimFault:to_transfer_payload(): string
+  return self.receiver:to_transfer_payload() .. self.mode
+end
+
+function TransferPayloadReceiverClaimFault.from_transfer_payload(
+    payload: string): TransferPayloadReceiverClaimFault
+  local index = receiver_string.sub(payload, 1, 4)
+  local mode = receiver_string.sub(payload, 5)
+  if mode == "wrong-kind" then
+    transfer_thread.Sender<|integer|>.from_transfer_payload(index)
+  else
+    transfer_hook_saved_receiver =
+      transfer_thread.Receiver<|integer|>.from_transfer_payload(index)
+    transfer_thread.Receiver<|integer|>.from_transfer_payload(index)
+  end
+  return { receiver = nil, mode = mode }
+end
+
+local function transfer_receiver_claim_case(context: test.Context, mode: string)
+  context:run(mode, function (_context: test.Context)
+    reset_transfer_hook_state()
+    defer reset_transfer_hook_state()
+    local packet, peer = (function (): (transfer_mod.Packet, transfer_thread.Sender<|integer|>)
+      local tx, rx = transfer_thread.channel<|integer|>(1)
+      return transfer_mod.Packet.from_value(TransferPayloadReceiverClaimFault(rx, mode)), tx
+    end)()
+    defer packet:close()
+    defer peer:close()
+    support.collect_garbage()
+    support.collect_garbage()
+    test.assert(not peer:is_closed())
+    transfer_payload_raises(function () packet:decode() end,
+      "invalid Receiver attachment claim succeeded")
+    if mode == "wrong-kind" then
+      test.assert(peer:is_closed(), "wrong-kind claim did not dispose unclaimed Receiver")
+    else
+      support.collect_garbage()
+      support.collect_garbage()
+      local got, item? = transfer_drain_saved_receiver(peer, 719,
+          "repeated Receiver claim released the valid first claimant")
+      test.assert(got and item == 719)
+      support.collect_garbage()
+      support.collect_garbage()
+      test.assert(peer:is_closed(), "last adopted Receiver was not reclaimed")
+    end
+  end)
+end
+
+function test_transfer_receiver_claim_kind_and_duplicate_validation(context: test.Context)
+  transfer_receiver_claim_case(context, "wrong-kind")
+  transfer_receiver_claim_case(context, "repeated")
+end
+
+function test_transfer_throwing_module_loader_releases_packet(_context: test.Context)
+  local packet, peer1, peer2 = make_recursive_receiver_packet()
+  defer packet:close()
+  defer peer1:close()
+  defer peer2:close()
+  support.collect_garbage()
+  support.collect_garbage()
+  local state = transfer_lua.new()
+  defer state:close()
+  local calls: owned int[] = foreign int.new_array(1)
+  local slot: foreign *TransferMessageSlot = foreign TransferMessageSlot.new_array(1)
+  defer do
+    transfer_mod.discard_message(slot[0])
+    slot[0] = nil
+  end
+  slot[0] = packet:take_message()
+  transfer_payload_error(function ()
+    state:run([[
+      local slot, counter, count_loader, decode = ...
+      local transfer = require('titan.transfer')
+      package.loaded['async.tests'] = nil
+      package.preload['async.tests'] = function()
+        count_loader(counter)
+        error('owned-module-load-fault')
+      end
+      return decode(slot)
+    ]], "=throwing-transfer-module",
+      transfer_mod.TransferValue.is_pointer(slot as foreign *void),
+      transfer_mod.TransferValue.is_pointer(calls as foreign *void),
+      transfer_mod.TransferValue.is_function(transfer_count_module_load),
+      transfer_mod.TransferValue.is_function(transfer_decode_slot_lua))
+  end, "owned-module-load-fault")
+  test.assert(slot[0] == nil, "throwing module loader left the raw owner slot occupied")
+  test.assert(calls[0] == 1, "decode did not reach the controlled nominal loader failure")
+  test.assert(peer1:is_closed() and peer2:is_closed(),
+              "throwing nominal loader leaked the packet's endpoint attachments")
+end
+
+function test_transfer_packet_copy_boundary_preserves_single_resource_owner(
+    _context: test.Context)
+  transfer_mod.copy_message(nil)
+  local counter: owned int[] = foreign int.new_array(1)
+  counter[0] = 1
+  local attached = transfer_mod.Packet.from_value(
+    TransferPayloadCustomResourceProbe("ok", counter as foreign *void))
+  defer attached:close()
+  local borrowed = attached:borrow_message()
+  test.assert(borrowed == attached:borrow_message() and counter[0] == 2)
+  test.assert(transfer_mod.copy_message(borrowed) == nil and counter[0] == 2,
+              "native copy cloned an attachment table or consumed its original owner")
+  attached:close()
+  test.assert(counter[0] == 1)
+  transfer_payload_raises(function () attached:borrow_message() end,
+    "closed Packet still exposed a borrowed native capability")
+
+  local original = transfer_mod.Packet.from_value("copyable\0bytes")
+  defer original:close()
+  local copied = transfer_mod.Packet.new()
+  defer copied:close()
+  local destination_owner = copied:borrow_owner()
+  local slot: foreign *TransferMessageSlot = foreign TransferMessageSlot.new_array(1)
+  defer do
+    transfer_mod.discard_message(slot[0])
+    slot[0] = nil
+  end
+  slot[0] = transfer_mod.copy_message(original:borrow_message())
+  test.assert(slot[0] ~= nil, "native copy rejected an attachment-free packet")
+  local status = transfer_mod.adopt_into(destination_owner, slot)
+  if status ~= 0 then transfer_mod.raise_message_error(status, nil) end
+  test.assert(slot[0] == nil)
+  original:close()
+  test.assert(copied:decode() == "copyable\0bytes",
+              "attachment-free native copy borrowed storage from its source packet")
+end
+
+function test_transfer_standalone_wire_and_policy_do_not_create_endpoint_owners(
+    _context: test.Context)
+  local tx, rx = transfer_thread.channel<|integer|>(1)
+  defer tx:close()
+  defer rx:close()
+  transfer_payload_raises(function () transfer_protobuf.serialize(tx) end,
+    "standalone protobuf encoding authorized a native endpoint retain")
+  transfer_payload_raises(function ()
+    transfer_mod.TransferValue.from_value(function (): value return tx end)
+  end, "standalone closure policy authorized a captured endpoint retain")
+  transfer_payload_raises(function ()
+    transfer_mod.TransferValue.is_record_payload("titan.thread",
+      "titan.thread.Sender", "\0\0\0\0"):to_value()
+  end, "standalone policy decoding authorized an endpoint claim")
+  test.assert(tx:try_send(727))
+  local got, item? = rx:try_receive()
+  test.assert(got and item == 727,
+              "rejected standalone wire/policy conversion damaged the original endpoint")
+end
+
+function test_transfer_inert_packet_and_consuming_raw_decode(_context: test.Context)
+  local inert = transfer_mod.Packet.new()
+  inert:close()
+  inert:close()
+  transfer_payload_raises(function () inert:borrow_message() end,
+    "inert Packet exposed an unowned message")
+  transfer_payload_raises(function () inert:decode() end,
+    "inert Packet decoded an unowned message")
+  local source = transfer_mod.Packet.from_value(false)
+  defer source:close()
+  local slot: foreign *TransferMessageSlot = foreign TransferMessageSlot.new_array(1)
+  defer do
+    transfer_mod.discard_message(slot[0])
+    slot[0] = nil
+  end
+  slot[0] = source:take_message()
+  local top = ffi.lua_gettop(L)
+  defer ffi.lua_settop(L, top)
+  local status = transfer_mod.decode_message(L, slot)
+  local result: value = nil
+  if status >= 0 then result = ffi.lua_totvalue(L, -1) as value end
+  test.assert(transfer_message_result(status, result) == false and slot[0] == nil,
+              "raw decode did not publish false while consuming the caller's owner slot")
+  transfer_payload_raises(function ()
+    local status = transfer_mod.decode_message(L, slot)
+    local result: value = nil
+    if status >= 0 then result = ffi.lua_totvalue(L, -1) as value end
+    transfer_message_result(status, result)
+  end, "raw decoder consumed an empty slot twice")
+end
+
+function test_transfer_raw_decode_entry_failure_consumes_owner(context: test.Context)
+  context:run("scope-preparation-oom", function (_context: test.Context)
+    local packet, peer1, peer2 = make_recursive_receiver_packet()
+    defer packet:close()
+    defer peer1:close()
+    defer peer2:close()
+    support.collect_garbage()
+    support.collect_garbage()
+    local slot: foreign *TransferMessageSlot = foreign TransferMessageSlot.new_array(1)
+    defer do
+      transfer_mod.discard_message(slot[0])
+      slot[0] = nil
+    end
+    slot[0] = packet:take_message()
+    local top = ffi.lua_gettop(L)
+    defer ffi.lua_settop(L, top)
+    local ctrl: owned size_t[] = foreign size_t.new_array(3)
+    ctrl[0] = 1 as foreign size_t
+    ctrl[1] = 1 as foreign size_t
+    local previous_data: foreign *void = nil
+    local previous = ffi.lua_getallocf(L, previous_data)
+    ffi.lua_setallocf(L, transfer_limited_lua_alloc, ctrl as foreign *void)
+    local status = transfer_mod.decode_message(L, slot)
+    ffi.lua_setallocf(L, previous, previous_data)
+    ffi.lua_settop(L, top)
+    test.assert(status ~= 0 and ctrl[2] >= (2 as foreign size_t),
+                "raw decode scope preparation did not reach its Lua allocation failure")
+    test.assert(slot[0] == nil and peer1:is_closed() and peer2:is_closed(),
+                "raw decode entry failure stranded its caller slot or packet attachments")
+  end)
+end
+
+function test_transfer_prepared_adoption_rejection_preserves_both_owners(
+    _context: test.Context)
+  local source = transfer_mod.Packet.from_value("source\0packet")
+  defer source:close()
+  local destination = transfer_mod.Packet.from_value("destination\0packet")
+  defer destination:close()
+  local owner = destination:borrow_owner()
+  local slot: foreign *TransferMessageSlot = foreign TransferMessageSlot.new_array(1)
+  defer do
+    transfer_mod.discard_message(slot[0])
+    slot[0] = nil
+  end
+  slot[0] = source:take_message()
+  local original = slot[0]
+  local occupied = transfer_mod.adopt_into(owner, slot)
+  test.assert(occupied == -4 and slot[0] == original,
+              "rejected adoption consumed a source or replaced a nonempty destination")
+  test.assert(destination:decode() == "destination\0packet")
+  local invalid_owner = transfer_mod.adopt_into(nil, slot)
+  test.assert(invalid_owner == -2 and slot[0] == original,
+              "invalid destination admission consumed the caller's source")
+  local invalid_slot = transfer_mod.adopt_into(owner, nil)
+  test.assert(invalid_slot == -2 and slot[0] == original)
+  local empty: foreign *TransferMessageSlot = foreign TransferMessageSlot.new_array(1)
+  local null_source = transfer_mod.adopt_into(owner, empty)
+  test.assert(null_source == -5 and empty[0] == nil and slot[0] == original)
+  transfer_payload_raises(function () destination:borrow_message() end,
+    "rejected admission populated the empty destination")
+  local accepted = transfer_mod.adopt_into(owner, slot)
+  test.assert(accepted == 0 and slot[0] == nil,
+              "prepared adoption did not atomically move the caller's packet")
+  test.assert(destination:decode() == "source\0packet")
 end

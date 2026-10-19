@@ -1,0 +1,462 @@
+local wake_gc = import "gc"
+foreign import "stdlib.h"
+foreign import "external-wake-native.h"
+
+-- The loop owns registration references; producers own explicit native
+-- references. Each target pins its heap core, never the Lua/UV handle owner.
+-- All native fields, including the borrowed handle, share the core mutex.
+--- Owned cross-thread external wake bridge backed by an internal async handle and native waiter queue.
+-- @usage uv/types.md#external_wake_t
+record external_wake_t
+  local handle: async_t
+  local handle_view: handle_t
+  local core: foreign *titan_uv_external_wake_core
+  local callback: (function (external_wake_t): ())?
+end
+
+local foreign function external_wake_drop_target_locked(
+    target: *titan_uv_external_wake_target)
+  target.references = target.references - 1
+  if target.references == 0 then
+    target.core.references = target.core.references - 1
+    ffi.free(target)
+  end
+end
+
+local foreign function external_wake_free_core(core: *titan_uv_external_wake_core)
+  ffi.uv_mutex_destroy(core as foreign *uv_mutex_t)
+  ffi.free(core)
+end
+
+local foreign function external_wake_unlink_pending(
+    core: *titan_uv_external_wake_core,
+    target: *titan_uv_external_wake_target)
+  if target.prev ~= nil then
+    target.prev.next = target.next
+  else
+    core.head = target.next
+  end
+  if target.next ~= nil then
+    target.next.prev = target.prev
+  else
+    core.tail = target.prev
+  end
+  target.next = nil
+  target.prev = nil
+end
+
+-- Consumes the core owner's reference. This emergency path also retires every
+-- registration and pending reference, without touching libuv or any GC value.
+-- Retained producer targets survive it, but can no longer access the handle.
+local foreign function external_wake_detach(core: *titan_uv_external_wake_core)
+  if core == nil then return end
+  ffi.uv_mutex_lock(core as foreign *uv_mutex_t)
+  core.handle = nil
+  while core.registered ~= nil do
+    local target = core.registered
+    core.registered = target.registered_next
+    target.registered_next = nil
+    target.registered_prev = nil
+    target.next = nil
+    target.prev = nil
+    local phase = target.phase
+    target.phase = ffi.TITAN_UV_WAKE_RETIRED as foreign int
+    if phase == ffi.TITAN_UV_WAKE_PENDING then
+      external_wake_drop_target_locked(target)
+    end
+    external_wake_drop_target_locked(target)
+  end
+  core.head = nil
+  core.tail = nil
+  core.registrations = 0 as foreign size_t
+  core.active_waits = 0 as foreign size_t
+  core.references = core.references - 1
+  local remaining = core.references
+  ffi.uv_mutex_unlock(core as foreign *uv_mutex_t)
+  if remaining == 0 then external_wake_free_core(core) end
+end
+
+--- Retain an additional native producer reference to a reserved external wake target directly from C or Titan.
+-- @param target Reserved external wake target pointer, or NULL.
+-- @usage uv/supplemental.md#native_external_wake_retain
+foreign function native_external_wake_retain(target: *void): void
+  if target == nil then return end
+  local native = target as foreign *titan_uv_external_wake_target
+  local core = native.core
+  ffi.uv_mutex_lock(core as foreign *uv_mutex_t)
+  native.references = native.references + 1
+  ffi.uv_mutex_unlock(core as foreign *uv_mutex_t)
+end
+
+--- Release a native producer reference to an external wake target directly from C or Titan.
+-- @param target Retained external wake target pointer, or NULL.
+-- @usage uv/supplemental.md#native_external_wake_release
+foreign function native_external_wake_release(target: *void): void
+  if target == nil then return end
+  local native = target as foreign *titan_uv_external_wake_target
+  local core = native.core
+  ffi.uv_mutex_lock(core as foreign *uv_mutex_t)
+  external_wake_drop_target_locked(native)
+  local remaining = core.references
+  ffi.uv_mutex_unlock(core as foreign *uv_mutex_t)
+  if remaining == 0 then external_wake_free_core(core) end
+end
+
+-- A caller must retain the target through this call. Publication is recorded
+-- before notification: a send error does not retract the pending identity.
+--- Enqueue an activated external wake target and notify its destination loop directly from C or Titan.
+-- @param target Retained activated external wake target pointer.
+-- @return Zero when queued or already delivered, or a negative libuv status such as `EINVAL` before activation.
+-- @usage uv/supplemental.md#native_external_wake_notify
+foreign function native_external_wake_notify(target: *void): int
+  if target == nil then return ffi.UV_EINVAL as foreign int end
+  local native = target as foreign *titan_uv_external_wake_target
+  local core = native.core
+  ffi.uv_mutex_lock(core as foreign *uv_mutex_t)
+  if core.handle == nil then
+    ffi.uv_mutex_unlock(core as foreign *uv_mutex_t)
+    return ffi.UV_EINVAL as foreign int
+  end
+  if native.phase == ffi.TITAN_UV_WAKE_RETIRED then
+    ffi.uv_mutex_unlock(core as foreign *uv_mutex_t)
+    return ffi.UV_EINVAL as foreign int
+  end
+  if native.phase == ffi.TITAN_UV_WAKE_PREPARED then
+    ffi.uv_mutex_unlock(core as foreign *uv_mutex_t)
+    return ffi.UV_EINVAL as foreign int
+  end
+  if native.phase == ffi.TITAN_UV_WAKE_DELIVERED then
+    ffi.uv_mutex_unlock(core as foreign *uv_mutex_t)
+    return 0
+  end
+  if native.phase == ffi.TITAN_UV_WAKE_ARMED then
+    native.prev = core.tail
+    native.next = nil
+    if core.tail ~= nil then
+      core.tail.next = native
+    else
+      core.head = native
+    end
+    core.tail = native
+    native.phase = ffi.TITAN_UV_WAKE_PENDING as foreign int
+    native.references = native.references + 1
+  end
+  -- Close takes this same mutex before clearing the handle. Its unlock cannot
+  -- precede the return of an in-flight send over this borrowed native pointer.
+  local status = ffi.uv_async_send(core.handle)
+  ffi.uv_mutex_unlock(core as foreign *uv_mutex_t)
+  return status
+end
+
+local foreign function external_wake_reserve_native(
+    core: *titan_uv_external_wake_core,
+    identity: unsigned long long,
+    output: *(*void)): int
+  output[0] = nil
+  local target = ffi.malloc(foreign titan_uv_external_wake_target.sizeof)
+    as foreign *titan_uv_external_wake_target
+  if target == nil then return ffi.UV_ENOMEM as foreign int end
+  ffi.uv_mutex_lock(core as foreign *uv_mutex_t)
+  if core.handle == nil then
+    ffi.uv_mutex_unlock(core as foreign *uv_mutex_t)
+    ffi.free(target)
+    return ffi.UV_EINVAL as foreign int
+  end
+  target.core = core
+  target.references = 1 as foreign size_t
+  target.identity = identity
+  target.phase = ffi.TITAN_UV_WAKE_PREPARED as foreign int
+  target.registered_prev = nil
+  target.registered_next = core.registered
+  if core.registered ~= nil then core.registered.registered_prev = target end
+  core.registered = target
+  target.next = nil
+  target.prev = nil
+  core.references = core.references + 1
+  core.registrations = core.registrations + 1
+  output[0] = target as foreign *void
+  ffi.uv_mutex_unlock(core as foreign *uv_mutex_t)
+  return 0
+end
+
+local foreign function external_wake_activate_native(
+    core: *titan_uv_external_wake_core,
+    target: *titan_uv_external_wake_target): int
+  if target == nil then return ffi.UV_EINVAL as foreign int end
+  ffi.uv_mutex_lock(core as foreign *uv_mutex_t)
+  if core.handle == nil then
+    ffi.uv_mutex_unlock(core as foreign *uv_mutex_t)
+    return ffi.UV_EINVAL as foreign int
+  end
+  if target.core ~= core then
+    ffi.uv_mutex_unlock(core as foreign *uv_mutex_t)
+    return ffi.UV_EINVAL as foreign int
+  end
+  if target.phase ~= ffi.TITAN_UV_WAKE_PREPARED then
+    ffi.uv_mutex_unlock(core as foreign *uv_mutex_t)
+    return ffi.UV_EINVAL as foreign int
+  end
+  target.phase = ffi.TITAN_UV_WAKE_ARMED as foreign int
+  core.active_waits = core.active_waits + 1
+  if core.active_waits == 1 then
+    ffi.uv_ref(core.handle as foreign *uv_handle_t)
+  end
+  ffi.uv_mutex_unlock(core as foreign *uv_mutex_t)
+  return 0
+end
+
+local foreign function external_wake_unregister_native(
+    core: *titan_uv_external_wake_core,
+    target: *titan_uv_external_wake_target): int
+  if target == nil then return ffi.UV_EINVAL as foreign int end
+  ffi.uv_mutex_lock(core as foreign *uv_mutex_t)
+  if target.core ~= core then
+    ffi.uv_mutex_unlock(core as foreign *uv_mutex_t)
+    return ffi.UV_EINVAL as foreign int
+  end
+  if target.phase == ffi.TITAN_UV_WAKE_RETIRED then
+    ffi.uv_mutex_unlock(core as foreign *uv_mutex_t)
+    return ffi.UV_EINVAL as foreign int
+  end
+  if target.registered_prev ~= nil then
+    target.registered_prev.registered_next = target.registered_next
+  else
+    core.registered = target.registered_next
+  end
+  if target.registered_next ~= nil then
+    target.registered_next.registered_prev = target.registered_prev
+  end
+  target.registered_next = nil
+  target.registered_prev = nil
+  local phase = target.phase
+  target.phase = ffi.TITAN_UV_WAKE_RETIRED as foreign int
+  if phase == ffi.TITAN_UV_WAKE_PENDING then
+    external_wake_unlink_pending(core, target)
+    external_wake_drop_target_locked(target)
+  end
+  core.registrations = core.registrations - 1
+  if phase ~= ffi.TITAN_UV_WAKE_PREPARED then
+    core.active_waits = core.active_waits - 1
+    if core.active_waits == 0 then
+      if core.handle ~= nil then
+        ffi.uv_unref(core.handle as foreign *uv_handle_t)
+      end
+    end
+  end
+  external_wake_drop_target_locked(target)
+  ffi.uv_mutex_unlock(core as foreign *uv_mutex_t)
+  return 0
+end
+
+--- Retire a wake target's registration directly from the destination loop thread.
+-- This C-only entry is owning-loop-thread-only, not a producer-thread operation:
+-- retirement may uv_unref the destination async handle. Clear the destination
+-- identity-map entry and registration borrow before calling. Zero consumes the
+-- registration reference and may free a merely borrowed target immediately;
+-- nonzero consumes nothing. Independent producer references survive and still
+-- need their matching release. Use exactly one unregister form per registration;
+-- never dereference a consumed borrow or rely on status checks for dangling safety.
+-- @param target Valid registration borrow or retained native target, or NULL; never a freed pointer.
+-- @return Native int status: zero retires/consumes the registration; EINVAL for NULL or an already-retired target whose storage remains valid.
+-- @usage uv/supplemental.md#native_external_wake_unregister
+foreign function native_external_wake_unregister(target: *void): int
+  if target == nil then return ffi.UV_EINVAL as foreign int end
+  local native = target as foreign *titan_uv_external_wake_target
+  return external_wake_unregister_native(native.core, native)
+end
+
+--- Query the durable pending-or-delivered notification phase without consuming it.
+-- The core mutex protects the phase snapshot. Drain preserves the latch until
+-- exact unregister or emergency detach; the query neither consumes/rearms the
+-- target nor changes loop liveness. It acquires no reference and cannot protect
+-- a later dereference from retirement. This C-only query may run on a foreign
+-- thread while its caller holds a valid registration borrow or native reference
+-- through the whole call; a freed borrow is never safe to query.
+-- @param target Valid borrowed or retained native target, or NULL; no Lua/Titan GC access.
+-- @return Native int boolean: 1 for PENDING or DELIVERED, 0 for every other phase or NULL; not a negative-status channel.
+-- @usage uv/supplemental.md#native_external_wake_is_notified
+foreign function native_external_wake_is_notified(target: *void): int
+  if target == nil then return 0 end
+  local native = target as foreign *titan_uv_external_wake_target
+  local core = native.core
+  ffi.uv_mutex_lock(core as foreign *uv_mutex_t)
+  local phase = native.phase
+  ffi.uv_mutex_unlock(core as foreign *uv_mutex_t)
+  if phase == ffi.TITAN_UV_WAKE_PENDING then return 1 end
+  if phase == ffi.TITAN_UV_WAKE_DELIVERED then return 1 end
+  return 0
+end
+
+local foreign function external_wake_drain_native(
+    core: *titan_uv_external_wake_core,
+    output: *unsigned long long,
+    capacity: unsigned int,
+    count: *unsigned int): int
+  count[0] = 0 as foreign unsigned int
+  if output == nil then return ffi.UV_EINVAL as foreign int end
+  if capacity == 0 then return ffi.UV_EINVAL as foreign int end
+  ffi.uv_mutex_lock(core as foreign *uv_mutex_t)
+  if core.handle == nil then
+    ffi.uv_mutex_unlock(core as foreign *uv_mutex_t)
+    return ffi.UV_EINVAL as foreign int
+  end
+  local copied: foreign unsigned int = 0 as foreign unsigned int
+  while copied < capacity do
+    if core.head == nil then break end
+    local target = core.head
+    external_wake_unlink_pending(core, target)
+    target.phase = ffi.TITAN_UV_WAKE_DELIVERED as foreign int
+    output[0] = target.identity
+    output = output + 1
+    copied = copied + 1
+    external_wake_drop_target_locked(target)
+  end
+  count[0] = copied
+  local status: foreign int = 0
+  if core.head ~= nil then status = ffi.uv_async_send(core.handle) end
+  ffi.uv_mutex_unlock(core as foreign *uv_mutex_t)
+  return status
+end
+
+local foreign function external_wake_begin_close(
+    core: *titan_uv_external_wake_core): int
+  ffi.uv_mutex_lock(core as foreign *uv_mutex_t)
+  if core.registrations ~= 0 then
+    ffi.uv_mutex_unlock(core as foreign *uv_mutex_t)
+    return ffi.UV_EBUSY as foreign int
+  end
+  core.handle = nil
+  ffi.uv_mutex_unlock(core as foreign *uv_mutex_t)
+  return 0
+end
+
+local function external_wake_finalize(owner: external_wake_t)
+  local core = owner.core
+  owner.core = nil
+  owner.callback = nil
+  external_wake_detach(core)
+end
+
+--- Allocate a fresh external wake bridge owner without initializing its native loop handle or queue.
+-- @return Native external_wake_t result with the documented lifetime and units.
+-- @usage uv/supplemental.md#external_wake_tnew
+function external_wake_t.new(): external_wake_t
+  local handle = async_t.new()
+  local owner: external_wake_t = {
+    handle = handle,
+    handle_view = handle:as_handle_t(),
+    core = nil,
+    callback = nil,
+  }
+  handle.callback = function (_: async_t)
+    local callback? = owner.callback
+    if callback ~= nil then callback(owner) end
+  end
+  handle.close_handler = function (closed: async_t, loop: loop_t)
+    external_wake_finalize(owner)
+    async_closed(closed, loop)
+  catch
+    if loop.failure_count == 0 then
+      loop.failure_error = error
+      loop.failure_trace = traceback
+    end
+    loop.failure_count = loop.failure_count + 1
+    ffi.uv_stop(loop.native)
+  end
+  -- Register before native acquisition, including the rooted-owner lua_close
+  -- case. Finalization only detaches native data; it never drives a loop.
+  wake_gc.finalizable(owner, external_wake_finalize)
+  return owner
+end
+
+--- Initialize an external wake bridge on `loop` with an unreferenced internal async handle and synchronized pending queue.
+-- @param loop Initialized destination loop owner.
+-- @param owner Fresh `external_wake_t` owner.
+-- @param callback Loop-thread notification callback invoked with `owner`.
+-- @return Zero on success, or a negative libuv status.
+-- @usage uv/supplemental.md#external_wake_init
+function external_wake_init(loop: loop_t, owner: external_wake_t,
+                            callback: function (external_wake_t): ()): integer
+  if not loop.initialized or owner.handle.phase ~= HANDLE_FRESH then
+    return ffi.UV_EINVAL
+  end
+  local core = ffi.calloc(1, foreign titan_uv_external_wake_core.sizeof)
+    as foreign *titan_uv_external_wake_core
+  if core == nil then return ffi.UV_ENOMEM end
+  local status: integer = ffi.uv_mutex_init(core as foreign *uv_mutex_t)
+  if status < 0 then ffi.free(core); return status end
+  core.references = 1 as foreign size_t
+  local committed = false
+  defer if not committed then external_wake_detach(core) end
+  status = async_init(loop, owner.handle, owner.handle.callback)
+  if status < 0 then return status end
+  owner.core = core
+  owner.callback = callback
+  core.handle = owner.handle.native as foreign *uv_async_t
+  ffi.uv_unref(core.handle as foreign *uv_handle_t)
+  committed = true
+  return status
+end
+
+-- The returned target is borrowed until exact unregister. A native waiter
+-- retains a separate reference before publication under its own owner mutex.
+--- Preallocate an unreferenced external wake target for an opaque waiter identity before activation.
+-- @param identity Opaque 64-bit waiter identity delivered on drain.
+-- @return Zero and a borrowed native target pointer on success, or a negative libuv status and nil.
+-- @usage uv/supplemental.md#external_wake_treserve
+function external_wake_t:reserve(identity: foreign unsigned long long):
+    (integer, foreign *void)
+  if self.core == nil then return ffi.UV_EINVAL, nil end
+  local target: foreign *void = nil
+  local status: integer = external_wake_reserve_native(self.core, identity, target)
+  return status, target
+end
+
+--- Activate a reserved external wake target without allocating and reference the underlying async handle while active waits remain.
+-- @param target Borrowed prepared target pointer returned by `reserve`.
+-- @return Zero on success, or a negative libuv status such as `EINVAL`.
+-- @usage uv/supplemental.md#external_wake_tactivate
+function external_wake_t:activate(target: foreign *void): integer
+  if self.core == nil then return ffi.UV_EINVAL end
+  return external_wake_activate_native(self.core,
+    target as foreign *titan_uv_external_wake_target)
+end
+
+-- Clear the destination's identity map and borrowed target before this call;
+-- success consumes its registration reference and may free the raw target.
+--- Retire a reserved or activated waiter target, unlinking any pending notification and unreferencing the handle when active waits reach zero.
+-- @param target Borrowed target pointer returned by `reserve`.
+-- @return Zero on success, or a negative libuv status.
+-- @usage uv/supplemental.md#external_wake_tunregister
+function external_wake_t:unregister(target: foreign *void): integer
+  if self.core == nil then return ffi.UV_EINVAL end
+  return external_wake_unregister_native(self.core,
+    target as foreign *titan_uv_external_wake_target)
+end
+
+-- The caller supplies reusable native output storage. Count stays valid even
+-- if rearming the nonempty remainder fails; process these identities first.
+--- Drain up to `capacity` pending waiter identities into caller-owned native storage and rearm if more remain.
+-- @param output Caller-owned array of at least `capacity` `unsigned long long` slots.
+-- @param capacity Maximum number of identities to copy in this batch.
+-- @return Zero (or rearm status) and the number of copied identities.
+-- @usage uv/supplemental.md#external_wake_tdrain
+function external_wake_t:drain(output: foreign *unsigned long long,
+                              capacity: foreign unsigned int):
+    (integer, foreign unsigned int)
+  if self.core == nil then return ffi.UV_EINVAL, 0 end
+  local count: foreign unsigned int = 0
+  local status: integer = external_wake_drain_native(self.core, output, capacity, count)
+  return status, count
+end
+
+--- Begin closing an external wake bridge once all reserved and activated targets have been unregistered.
+-- @return Zero on success, or a negative libuv status such as `EBUSY`.
+-- @usage uv/supplemental.md#external_wake_tclose
+function external_wake_t:close(): integer
+  if self.core == nil then return 0 end
+  local status: integer = external_wake_begin_close(self.core)
+  if status < 0 then return status end
+  if not is_closing(self.handle_view) then close(self.handle_view) end
+  return 0
+end

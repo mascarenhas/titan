@@ -7,9 +7,10 @@ uses `titan.fs` for cooperative file access, `titan.io` for the Reader
 interface, and binary-safe search/slicing helpers from `titan.string`. It
 keeps independent-state ownership separate from current-state loading. The
 public operations require no compiler intrinsic. `titan/lua/lua.titan` owns
-the public `Lua` owner and host-thread wrappers; `titan.async` owns the
-shared `TransferValue` union. `worker.titan` supplies the raw
-foreign entries, and `native.h` declares their native packet layouts.
+the public `Lua` owner and host-thread wrappers; `titan.transfer` owns the
+canonical `TransferValue` union, with `async.TransferValue` a transparent alias.
+`worker.titan` supplies the raw foreign entries, and `native.h` declares their
+native packet layouts.
 
 ## Independent-state ownership
 
@@ -35,6 +36,9 @@ loader entries; only native code pointers cross this boundary. Module names
 become new strings in the destination, and C loaders have no captured host
 GC state. Native loader and resolver addresses remain borrowed code pointers;
 provider libraries must stay loaded for all destination uses.
+Runtime-loaded Titan providers remain mapped for process lifetime under the
+existing [native-image binding rule](foreign-functions.md#source-collaboration-and-binary-isolation).
+That code lifetime does not make a closed Lua state usable.
 
 Generated module initialization registers its native loader in
 `LUA_PRELOAD_TABLE` and a separate native provider descriptor under
@@ -111,13 +115,25 @@ capacity. Receiver messaging does not add a scheduler or resize that pool.
 
 ## Cross-state transfer
 
-The public `async.TransferValue` union is interpreted on the host thread. Nil,
+The canonical `transfer.TransferValue` union (`async.TransferValue` is a
+transparent alias) is interpreted on the host thread. Nil,
 boolean, integer, and float keep their exact Lua value kinds. String arguments
 are copied into the independent state; string results are copied into newly
 allocated host strings. The destination collector must never receive a
 foreign `TString *` as one of its own objects. Result strings remain rooted
 on the independent stack until the host has copied their complete bytes.
 Binary strings retain their explicit lengths throughout.
+
+This boundary uses the separate `titan_lua_value` carrier in
+`titan/lua/native.h`, not `titan_async_message` or a `transfer.Packet`. It has no
+packet resource table and opens no attachment/claim scope. `Lua:run`,
+`run_async`, and their Reader-loading companions therefore do not carry
+packet-attached `thread.Sender` or `thread.Receiver` ownership, even inside
+nominal payloads, opaque hooks, or closure captures. Standalone policy conversion
+cannot manufacture reusable endpoint ownership bytes. Use a thread packet route
+or an owned `async.PacketReceiver` for those resources; see the
+[owning Lua API restriction](../language/standard-library-lua.md#transferring-values)
+and [packet scope rules](transfer-library.md#scoped-resource-table-and-manual-resource-ownership).
 
 Before the userdata fallback, the worker identifies an origin-state
 `titan.transfer.TransferValue` by its exact canonical metatable and uses its
@@ -129,9 +145,9 @@ Explicit packets preserve their supplied module, name or entry token, and bytes.
 Branded Titan closures and other Titan nominals pass through the origin state's
 `TransferValue.from_value` under the existing protected call. Exact public
 record hooks take precedence over structural protobuf encoding; their private
-fields need not be serializable. Hooks exchange one string. Their signatures
-and calls use ordinary public reflection descriptors, with no reserved compiler
-names or generated record-hook manifest.
+fields need not be serializable. Both hooks remain synchronous and nonyielding
+and exchange one string. Their signatures and calls use ordinary public
+reflection descriptors, with no reserved compiler names or generated hook manifest.
 
 Closure conversion projects every immediate capture before calling any custom
 hook, converts captures to flat policies, and serializes those policies and
@@ -164,6 +180,9 @@ source owner roots those ranges until the receiving state copies them. No
 source GC object, descriptor, or module instance crosses the boundary. There
 is no native transfer graph, arena, or recursive cleanup. Application hooks
 remain responsible for safe native detachment/adoption and side effects.
+Only the [specific supported handoff APIs](../language/standard-library-transfer.md#manual-handoff-api-inventory)
+provide such hooks; the separate Lua carrier neither adds missing hooks nor
+automatically disposes manually transferred native resources.
 
 State pointers and ordinary pointers become lightuserdata when passed as
 arguments. Creating a thread-tagged `TValue` from a foreign state's pointer
@@ -206,7 +225,7 @@ The stack transaction has these ownership phases:
 | Admission | Reserve the wrapper, then save the independent state's exact entry stack height before pushing temporary values. |
 | Protected loading and argument copy | Root the compiled chunk, copied input strings, and decoded nominal arguments in the independent state; keep host input owners live while their bytes are borrowed. |
 | Protected chunk call and result encoding | Execute and serialize only values belonging to the independent state; preserve its result roots or error object. |
-| Host conversion | Read rooted result slots after native execution stops; allocate host strings and `async.TransferValue` wrappers on the host thread. |
+| Host conversion | Read rooted result slots after native execution stops; allocate host strings and canonical `transfer.TransferValue` wrappers on the host thread. |
 | Deferred cleanup | Free the native result buffer, restore the independent stack to its saved entry height, and release the reservation after success, load/runtime/conversion error, queue rejection, or cancellation. |
 
 Stack pointers cannot survive an operation that grows that stack. Result

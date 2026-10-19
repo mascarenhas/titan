@@ -1,0 +1,213 @@
+-- The installed production provider is archive-linked unchanged. Only this
+-- fresh process links the libc wrappers; Lua's allocator is bypassed by the
+-- probe, and each native failure disarms itself before transfer unwinds.
+local transfer = import "transfer"
+local gc = import "gc"
+local string = import "string"
+local test = import "test"
+local thread = import "thread"
+foreign import "stdio.h"
+foreign import "titan/ffi.h"
+foreign import "transfer_alloc_fault_api.h"
+
+local decoder_calls = 0
+
+record TransferNativeFaultProbe
+  local mode: integer
+end
+
+local function attach(index: integer): string
+  return transfer.attach_resource(
+    ffi.titan_transfer_fault_resource_at(index as foreign unsigned int) as foreign *void,
+    ffi.titan_transfer_fault_retain, ffi.titan_transfer_fault_release)
+end
+
+function TransferNativeFaultProbe:to_transfer_payload(): string
+  if self.mode == 1 then
+    ffi.titan_transfer_fault_arm(1)
+    return attach(0)
+  elseif self.mode == 2 then
+    for _ = 1, 4 do attach(0) end
+    ffi.titan_transfer_fault_arm(2)
+    return attach(0)
+  end
+  local first = attach(0)
+  local second = attach(1)
+  if self.mode == 3 or self.mode == 5 then
+    ffi.titan_transfer_fault_arm(self.mode as foreign int)
+  end
+  return first .. second
+end
+
+function TransferNativeFaultProbe.from_transfer_payload(
+    _payload: string): TransferNativeFaultProbe
+  decoder_calls = decoder_calls + 1
+  raise "native OOM rollback must not decode a resource"
+end
+
+record TransferNativeFaultEnvelope
+  first: TransferNativeFaultProbe
+  padding: string
+end
+
+local function expect_native_failure(mode: integer, candidate: value,
+                                     expected_retains: integer)
+  local failed = false
+  if mode == 4 then ffi.titan_transfer_fault_arm(4) end
+  do
+    local packet = transfer.Packet.from_value(candidate)
+    defer packet:close()
+  catch
+    failed = true
+  end
+  ffi.titan_transfer_fault_disarm()
+  test.assert(failed and ffi.titan_transfer_fault_fired() == 1,
+              "did not exercise exactly one native allocation failure")
+  test.assert(ffi.titan_transfer_fault_retains_at_failure() ==
+                (expected_retains as foreign size_t),
+              "failed reserve retained before capacity was secured")
+  test.assert(ffi.titan_transfer_fault_releases_at_failure() ==
+                (0 as foreign size_t),
+              "injection observed an unrelated release instead of the requested boundary")
+  local allocator = ffi.titan_transfer_fault_allocator()
+  if mode == 3 then
+    test.assert(allocator == 1 or allocator == 2,
+                "payload copy did not reach native malloc/calloc")
+  elseif mode == 2 or mode == 5 then
+    test.assert(allocator == 3, "native growth did not reach realloc")
+  else
+    test.assert(allocator >= 1 and allocator <= 3,
+                "initial reserve did not reach a native allocator")
+  end
+  for index = 0, 1 do
+    local resource = ffi.titan_transfer_fault_resource_at(index as foreign unsigned int)
+    test.assert(resource.references == (1 as foreign size_t) and
+                resource.retains == resource.releases and
+                resource.invalid_release == 0,
+                "native OOM rollback leaked or double-released a retained resource")
+  end
+  test.assert(decoder_calls == 0, "native OOM rollback entered a decoder")
+
+  -- An error must restore the absent outer scope, not leave an old packet
+  -- authorizing a subsequent direct hook. Then prove fresh encode recovery.
+  local rejected = false
+  do attach(0) catch rejected = true end
+  test.assert(rejected, "failed encode left attachment authority behind")
+  local recovered = transfer.Packet.from_value(TransferNativeFaultProbe(0))
+  recovered:close()
+  for index = 0, 1 do
+    local resource = ffi.titan_transfer_fault_resource_at(index as foreign unsigned int)
+    test.assert(resource.references == (1 as foreign size_t) and
+                resource.retains == resource.releases and
+                resource.invalid_release == 0,
+                "successful encode/discard after native OOM lost resource ownership")
+  end
+end
+
+record TransferFinalizerFaultProbe
+  local sender: (thread.Sender<|integer|>)?
+  local receiver: (thread.Receiver<|integer|>)?
+end
+
+function TransferFinalizerFaultProbe:to_transfer_payload(): string
+  if self.sender ~= nil then return "S" .. self.sender:to_transfer_payload() end
+  return "R" .. self.receiver:to_transfer_payload()
+end
+
+function TransferFinalizerFaultProbe.from_transfer_payload(
+    payload: string): TransferFinalizerFaultProbe
+  local index = string.sub(payload, 2)
+  local sender_kind = string.sub(payload, 1, 1) == "S"
+  ffi.titan_transfer_fault_arm(6)
+  if sender_kind then
+    local sender = thread.Sender<|integer|>.from_transfer_payload(index)
+    return { sender = sender, receiver = nil }
+  end
+  local receiver = thread.Receiver<|integer|>.from_transfer_payload(index)
+  return { sender = nil, receiver = receiver }
+end
+
+local function watch_finalizer(candidate: value)
+  local top = ffi.lua_gettop(L)
+  defer ffi.lua_settop(L, top)
+  test.assert(ffi.lua_checkstack(L, 2) ~= 0)
+  ffi.lua_pushtvalue(L, candidate)
+  test.assert(ffi.titan_transfer_fault_watch_finalizer(L, -1) == 1,
+              "could not select the endpoint's public finalizer boundary")
+end
+
+local function expect_endpoint_finalizer_failure(sender_kind: boolean)
+  local peer_tx: (thread.Sender<|integer|>)? = nil
+  local peer_rx: (thread.Receiver<|integer|>)? = nil
+  local packet = (function (): transfer.Packet
+    local tx, rx = thread.channel<|integer|>(1)
+    if sender_kind then
+      watch_finalizer(tx)
+      peer_rx = rx
+      return transfer.Packet.from_value(TransferFinalizerFaultProbe(tx, nil))
+    end
+    watch_finalizer(rx)
+    peer_tx = tx
+    return transfer.Packet.from_value(TransferFinalizerFaultProbe(nil, rx))
+  end)()
+  defer packet:close()
+  defer do
+    if peer_tx ~= nil then peer_tx:close() end
+    if peer_rx ~= nil then peer_rx:close() end
+  end
+  gc.collect()
+  gc.collect()
+  if peer_tx ~= nil then test.assert(not peer_tx:is_closed()) end
+  if peer_rx ~= nil then test.assert(not peer_rx:is_closed()) end
+  local failed = false
+  do packet:decode() catch failed = true end
+  ffi.titan_transfer_fault_disarm()
+  test.assert(failed and ffi.titan_transfer_fault_fired() == 1,
+              "endpoint adoption did not exercise finalizer registration failure")
+  gc.collect()
+  gc.collect()
+  if peer_tx ~= nil then
+    test.assert(peer_tx:is_closed(), "failed Receiver finalizer registration leaked a retain")
+  end
+  if peer_rx ~= nil then
+    test.assert(peer_rx:is_closed(), "failed Sender finalizer registration leaked a retain")
+  end
+end
+
+function main(args: {string}): integer
+  test.assert(#args == 1, "native OOM fixture requires exactly one scenario")
+  test.assert(ffi.titan_transfer_fault_install(L) == 1,
+              "could not isolate Lua allocations from native allocation injection")
+  defer ffi.titan_transfer_fault_restore(L)
+  gc.pause()
+  defer gc.resume()
+  local scenario = args[1]
+  if scenario == "reserve-initial" then
+    expect_native_failure(1, TransferNativeFaultProbe(1), 0)
+  elseif scenario == "reserve-growth" then
+    expect_native_failure(2, TransferNativeFaultProbe(2), 4)
+  elseif scenario == "payload-copy" then
+    expect_native_failure(3, TransferNativeFaultProbe(3), 2)
+  elseif scenario == "buffer-initial" then
+    expect_native_failure(4,
+      TransferNativeFaultEnvelope(TransferNativeFaultProbe(0), "initial"), 0)
+  elseif scenario == "buffer-growth" then
+    expect_native_failure(5,
+      TransferNativeFaultEnvelope(TransferNativeFaultProbe(5), string.rep("x", 4096)), 2)
+  elseif scenario == "scalar-copy" then
+    ffi.titan_transfer_fault_arm(3)
+    expect_native_failure(3, "native-scalar-copy\0payload", 0)
+  elseif scenario == "policy-copy" then
+    local policy = transfer.TransferValue.is_integer(99)
+    ffi.titan_transfer_fault_arm(3)
+    expect_native_failure(3, policy, 0)
+  elseif scenario == "sender-finalizer" then
+    expect_endpoint_finalizer_failure(true)
+  elseif scenario == "receiver-finalizer" then
+    expect_endpoint_finalizer_failure(false)
+  else
+    raise "unknown native OOM scenario"
+  end
+  ffi.puts("TRANSFER_NATIVE_OOM_OK")
+  return 0
+end

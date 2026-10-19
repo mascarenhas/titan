@@ -1,3 +1,138 @@
+local uv = import "uv"
+
+local foreign function once_callback(): void
+end
+
+local foreign function worker_entry(arg: *void): void
+  uv.native_sem_post(arg)
+end
+
 function main(_args: {string}): integer
+  local mutex_lock: foreign function(*void): void = uv.native_mutex_lock
+  local mutex_trylock: foreign function(*void): int = uv.native_mutex_trylock
+  local mutex_unlock: foreign function(*void): void = uv.native_mutex_unlock
+  local mutex_destroy: foreign function(*void): void = uv.native_mutex_destroy
+  local rwlock_rdlock: foreign function(*void): void = uv.native_rwlock_rdlock
+  local rwlock_tryrdlock: foreign function(*void): int = uv.native_rwlock_tryrdlock
+  local rwlock_rdunlock: foreign function(*void): void = uv.native_rwlock_rdunlock
+  local rwlock_wrlock: foreign function(*void): void = uv.native_rwlock_wrlock
+  local rwlock_trywrlock: foreign function(*void): int = uv.native_rwlock_trywrlock
+  local rwlock_wrunlock: foreign function(*void): void = uv.native_rwlock_wrunlock
+  local sem_post: foreign function(*void): void = uv.native_sem_post
+  local sem_wait: foreign function(*void): void = uv.native_sem_wait
+  local sem_trywait: foreign function(*void): int = uv.native_sem_trywait
+  local cond_signal: foreign function(*void): void = uv.native_cond_signal
+  local cond_broadcast: foreign function(*void): void = uv.native_cond_broadcast
+  local cond_wait: foreign function(*void, *void): void = uv.native_cond_wait
+  local cond_timedwait: foreign function(*void, *void, unsigned long long): int =
+    uv.native_cond_timedwait
+  local barrier_wait: foreign function(*void): int = uv.native_barrier_wait
+  local key_get: foreign function(*void): *void = uv.native_key_get
+  local key_set: foreign function(*void, *void): void = uv.native_key_set
+  local once_call: foreign function(*void, function(): void): void = uv.native_once
+  local thread_join: foreign function(*void): int = uv.native_thread_join
+  local thread_detach: foreign function(*void): int = uv.native_thread_detach
+  local wake_query: foreign function(*void): int = uv.native_external_wake_is_notified
+  local wake_unregister: foreign function(*void): int = uv.native_external_wake_unregister
+  if cond_wait == nil or mutex_destroy == nil then return 40 end
+  if (thread_join(nil) as integer) ~= uv.EINVAL then return 62 end
+  if (thread_detach(nil) as integer) ~= uv.EINVAL then return 63 end
+  if wake_query(nil) ~= 0 then return 64 end
+  if (wake_unregister(nil) as integer) ~= uv.EINVAL then return 65 end
+
+  local heap_mutex = uv.mutex_t.create_native()
+  if heap_mutex == nil then return 41 end
+  mutex_lock(heap_mutex)
+  mutex_unlock(heap_mutex)
+  if mutex_trylock(heap_mutex) ~= 0 then
+    mutex_destroy(heap_mutex)
+    return 42
+  end
+  mutex_unlock(heap_mutex)
+  mutex_destroy(heap_mutex)
+  mutex_destroy(nil)
+
+  local mutex = uv.mutex_t()
+  if uv.mutex_init(mutex) ~= 0 then return 43 end
+  defer uv.mutex_destroy(mutex)
+  local raw_mutex = mutex:borrow()
+  uv.native_mutex_lock(raw_mutex)
+  uv.native_mutex_unlock(raw_mutex)
+  if uv.native_mutex_trylock(raw_mutex) ~= 0 then return 44 end
+  uv.native_mutex_unlock(raw_mutex)
+
+  local rwlock = uv.rwlock_t()
+  if uv.rwlock_init(rwlock) ~= 0 then return 45 end
+  defer uv.rwlock_destroy(rwlock)
+  local raw_rwlock = rwlock:borrow()
+  rwlock_rdlock(raw_rwlock)
+  if rwlock_tryrdlock(raw_rwlock) ~= 0 then
+    rwlock_rdunlock(raw_rwlock)
+    return 46
+  end
+  rwlock_rdunlock(raw_rwlock)
+  rwlock_rdunlock(raw_rwlock)
+  rwlock_wrlock(raw_rwlock)
+  rwlock_wrunlock(raw_rwlock)
+  if rwlock_trywrlock(raw_rwlock) ~= 0 then return 47 end
+  rwlock_wrunlock(raw_rwlock)
+
+  local sem = uv.sem_t()
+  if uv.sem_init(sem, 0) ~= 0 then return 48 end
+  defer uv.sem_destroy(sem)
+  local raw_sem = sem:borrow()
+  if (sem_trywait(raw_sem) as integer) ~= uv.EAGAIN then return 49 end
+  sem_post(raw_sem)
+  if sem_trywait(raw_sem) ~= 0 then return 50 end
+  local worker = uv.thread_t()
+  if uv.thread_create(worker, worker_entry, raw_sem, sem) ~= 0 then return 51 end
+  sem_wait(raw_sem)
+  if uv.thread_join(worker) ~= 0 then return 52 end
+
+  local native_status, native_thread = uv.create_native_thread(worker_entry, raw_sem)
+  defer if native_thread ~= nil then
+    local joined = thread_join(native_thread)
+    if joined == 0 then native_thread = nil end
+    if joined ~= 0 then raise "native thread cleanup failed" end
+  end
+  if native_status ~= 0 then return 66 end
+  local joined = thread_join(native_thread)
+  if joined == 0 then native_thread = nil end
+  if joined ~= 0 then return 67 end
+  sem_wait(raw_sem)
+
+  local cond = uv.cond_t()
+  if uv.cond_init(cond) ~= 0 then return 53 end
+  defer uv.cond_destroy(cond)
+  local raw_cond = cond:borrow()
+  cond_signal(raw_cond)
+  cond_broadcast(raw_cond)
+  mutex_lock(raw_mutex)
+  local timed_out = false
+  for _attempt = 1, 5 do
+    local rc: integer = cond_timedwait(raw_cond, raw_mutex, 1000000)
+    if rc == uv.ETIMEDOUT then timed_out = true; break end
+    if rc ~= 0 then mutex_unlock(raw_mutex); return 54 end
+  end
+  mutex_unlock(raw_mutex)
+  if not timed_out then return 55 end
+
+  local barrier = uv.barrier_t()
+  if uv.barrier_init(barrier, 1) ~= 0 then return 56 end
+  defer uv.barrier_destroy(barrier)
+  if barrier_wait(barrier:borrow()) <= 0 then return 57 end
+
+  local key = uv.key_t()
+  if uv.key_create(key) ~= 0 then return 58 end
+  defer uv.key_delete(key)
+  local raw_key = key:borrow()
+  if key_get(raw_key) ~= nil then return 59 end
+  key_set(raw_key, raw_mutex)
+  if key_get(raw_key) ~= raw_mutex then return 60 end
+  key_set(raw_key, nil)
+  if key_get(raw_key) ~= nil then return 61 end
+
+  local guard = uv.once_t()
+  once_call(guard:borrow(), once_callback)
   return 19
 end

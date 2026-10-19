@@ -3,7 +3,15 @@
 Complete public example: [threading_sync](../examples/threading_sync.titan). See the
 [example guide](../examples/README.md) for build/run commands and platform conditions.
 
-Native thread/once entries are C-only. Thread creation retains argument_owner through join; ordinary Titan calls are not worker-safe. Detach is allowed only with argument_owner=nil and externally valid worker code/argument memory. Detached identifier storage may be reused after native success because the worker never borrows that storage. thread_self is a borrowed identity. Synchronization owners have explicit initialization and terminal destruction; no automatic native destructor or GC release is supplied.
+Native thread and `once` callback entries are C-only. Checked `thread_t` creation retains `argument_owner` through `thread_join`; ordinary Titan calls are not worker-safe. Checked `thread_detach` is allowed only with `argument_owner = nil` and externally valid worker code/argument memory. Detached identifier storage may be reused after native success because the worker never borrows that storage. `thread_self` returns a borrowed identity. The separate caller-owned [heap-token helpers](../supplemental.md#create_native_thread) do not retain a GC argument graph and must not be mixed with checked `thread_t` storage.
+
+See [synchronization and native-carrier ownership](../types.md#synchronization-and-native-carrier-ownership), [supplemental synchronization and wake helpers](../supplemental.md#synchronization-native-carriers-and-external-wake-bridge), and the [libuv extension guide](../../../implementation/libuv-extension-guide.md) for the central ownership, blocking, and quiescence rules:
+
+- **OS-blocking primitives vs cooperative Tasks:** Lock/wait operations on `mutex_t`, `rwlock_t`, `sem_t`, `cond_t`, and `barrier_t` block the calling OS thread, not just a cooperative `async.Task`. Do not suspend a Task while holding a blocking `uv` mutex or lock, or block the loop thread waiting for a sibling Task to release it. Use same-state [`async.channel`](../../async-io.md#bounded-channels) or cross-thread [`thread.channel`](../../standard-library-thread.md#cross-thread-channels) (`Sender<|T|>` and `Receiver<|T|>`) for cooperative coordination; there is no `thread.Mutex` API. Not every synchronization operation blocks: try operations, notifications, queries, and TLS access have their own native contracts.
+- **Explicit checked owner lifecycle vs process-heap mutexes:** `mutex_t`, `rwlock_t`, `sem_t`, `cond_t`, `barrier_t`, and `key_t` have explicit `Fresh -> Live -> Retired` lifetimes (`init`/`create` then `destroy`/`delete` after all native users are quiescent) with no GC auto-destruction. `:borrow()` yields an unrooted `foreign *void` for C-only carriers; keep the Titan owner rooted until every worker or thread finishes before calling `destroy` or `delete`. [`mutex_t.create_native()`](../supplemental.md#mutex_tcreate_native) allocates an independent `uv_mutex_t` on the process heap outside GC; [`native_mutex_lock`](../supplemental.md#native_mutex_lock), [`native_mutex_trylock`](../supplemental.md#native_mutex_trylock), and [`native_mutex_unlock`](../supplemental.md#native_mutex_unlock) accept either a `create_native` pointer or `mutex_t:borrow()`, whereas [`native_mutex_destroy`](../supplemental.md#native_mutex_destroy) both destroys and `free`s **only** `mutex_t.create_native()` pointers after quiescence and must never receive `mutex_t:borrow()`.
+- **`once_t` and `key_t` distinctions:** `once_t.new()` already initializes its `uv_once_t` guard in final stable storage (`UV_ONCE_INIT`); no separate init, reset, or destroy exists. Root it through all participating native calls. [`once`](#once) and [`native_once`](../supplemental.md#native_once) take a non-null C-only `foreign function(): void` callback. `key_t` manages OS-thread-local `foreign *void` storage, not `async.Task`-local state, pointee ownership, or GC rooting; key deletion does not free per-thread pointees.
+- **Direct C-only entries and external wakes:** The [complete 20-operation map](../supplemental.md#direct-synchronization-entry-map) lists removed getters and exact direct public C signatures: 18 entries are newly public, while mutex lock/unlock and the separate heap-only `native_mutex_destroy` were already public. Call or store these entries without runtime getters. The [external wake lifetime rules](../types.md#synchronization-and-native-carrier-ownership) cover borrowed targets, native producer references, admitted-wait liveness through retirement, bounded identity draining, and close versus GC detach. [`native_external_wake_is_notified`](../supplemental.md#native_external_wake_is_notified) queries the durable pending/delivered latch under the core mutex with a live borrow/retain. [`native_external_wake_unregister`](../supplemental.md#native_external_wake_unregister) is C-only but destination-loop-thread-only and consumes the registration on success; it is not a producer release.
+- **Raw heap thread tokens:** [`create_native_thread`](../supplemental.md#create_native_thread), [`native_thread_join`](../supplemental.md#native_thread_join), and [`native_thread_detach`](../supplemental.md#native_thread_detach) are three separate capabilities, not additional getter replacements. Creation returns a uniquely caller-owned heap token or `(status, nil)`; join/detach free it only on `0` and preserve it on failure. NULL retirement returns `uv.EINVAL`. All argument/code lifetime is manual. Join blocks the OS thread; detach neither waits for completion nor frees worker arguments. Serialize retirement and never reuse a consumed token. The existing checked `thread_t` API is unchanged.
 
 ## barrier_destroy
 
@@ -63,7 +71,7 @@ function barrier_wait(owner: barrier_t): integer
 
 **Inputs and outputs:** owner: INPUT/OUTPUT initialized native synchronization owner; caller coordinates external native users and lifetime; destroy/delete only after quiescence.
 
-**Result, lifetime and cleanup:** Return type: integer. Requires a live initialized barrier; blocks the native thread until all participants arrive. Returns a positive value for one participant and 0 for the others, not a conventional error/status channel. Coordinate native users before barrier_destroy. Calling this Titan wrapper blocks the Lua thread; native workers use the C-only entry.
+**Result, lifetime and cleanup:** Return type: integer. Requires a live initialized barrier; blocks the native thread until all participants arrive. Returns a positive serial-thread indicator (`> 0`) for one participant and `0` for all others, not a conventional error/status channel. Coordinate native users before `barrier_destroy`. Calling this Titan wrapper blocks the Lua thread; native workers use [`native_barrier_wait`](../supplemental.md#native_barrier_wait) on `owner:borrow()`.
 
 **Callbacks:** none. no callback
 
@@ -86,7 +94,7 @@ function cond_broadcast(owner: cond_t)
 
 **Inputs and outputs:** owner: INPUT/OUTPUT initialized native synchronization owner; caller coordinates external native users and lifetime; destroy/delete only after quiescence.
 
-**Result, lifetime and cleanup:** Return type: (). Native synchronization/thread operations are blocking OS primitives, not cooperative waits. C-only foreign workers must never access Titan/Lua; packed owners/arguments retained until native lifetime ends. Explicit destroy/join; no GC-finalizer ownership policy.
+**Result, lifetime and cleanup:** Return type: (). Native synchronization/thread operations are blocking OS primitives, not cooperative waits. C-only foreign workers must never access Titan/Lua and use [`native_cond_broadcast`](../supplemental.md#native_cond_broadcast) on `owner:borrow()`; packed owners/arguments are retained until native lifetime ends. Explicit destroy/join; no GC-finalizer ownership policy.
 
 **Callbacks:** none. no callback
 
@@ -155,7 +163,7 @@ function cond_signal(owner: cond_t)
 
 **Inputs and outputs:** owner: INPUT/OUTPUT initialized native synchronization owner; caller coordinates external native users and lifetime; destroy/delete only after quiescence.
 
-**Result, lifetime and cleanup:** Return type: (). Native synchronization/thread operations are blocking OS primitives, not cooperative waits. C-only foreign workers must never access Titan/Lua; packed owners/arguments retained until native lifetime ends. Explicit destroy/join; no GC-finalizer ownership policy.
+**Result, lifetime and cleanup:** Return type: (). Native synchronization/thread operations are blocking OS primitives, not cooperative waits. C-only foreign workers must never access Titan/Lua and use [`native_cond_signal`](../supplemental.md#native_cond_signal) on `owner:borrow()`; packed owners/arguments are retained until native lifetime ends. Explicit destroy/join; no GC-finalizer ownership policy.
 
 **Callbacks:** none. no callback
 
@@ -178,7 +186,7 @@ function cond_timedwait(owner: cond_t, mutex: mutex_t, timeout_ns: foreign unsig
 
 **Inputs and outputs:** owner: INPUT/OUTPUT initialized native synchronization owner; caller coordinates external native users and lifetime; destroy/delete only after quiescence.; mutex: INPUT/OUTPUT initialized native synchronization owner; caller coordinates external native users and lifetime; destroy/delete only after quiescence.; timeout_ns: INPUT foreign unsigned long long value; checked native narrowing occurs before native ownership is accepted.
 
-**Result, lifetime and cleanup:** Return type: integer. Native synchronization/thread operations are blocking OS primitives, not cooperative waits. C-only foreign workers must never access Titan/Lua; packed owners/arguments retained until native lifetime ends. Explicit destroy/join; no GC-finalizer ownership policy. Relative timeout nanoseconds; mutex released/reacquired; ETIMEDOUT is status, spurious wake possible.
+**Result, lifetime and cleanup:** Return type: integer. Native synchronization/thread operations are blocking OS primitives, not cooperative waits. C-only foreign workers must never access Titan/Lua and use [`native_cond_timedwait`](../supplemental.md#native_cond_timedwait); packed owners/arguments are retained until native lifetime ends. Explicit destroy/join; no GC-finalizer ownership policy. `timeout_ns` is a relative `foreign unsigned long long` nanosecond timeout; the locked mutex is atomically released and reacquired; returns `0` when signaled or a negative status such as `uv.ETIMEDOUT`, and callers must still check their predicate in a loop because spurious wakeups are permitted.
 
 **Callbacks:** none. no callback
 
@@ -201,7 +209,7 @@ function cond_wait(owner: cond_t, mutex: mutex_t)
 
 **Inputs and outputs:** owner: INPUT/OUTPUT initialized native synchronization owner; caller coordinates external native users and lifetime; destroy/delete only after quiescence.; mutex: INPUT/OUTPUT initialized native synchronization owner; caller coordinates external native users and lifetime; destroy/delete only after quiescence.
 
-**Result, lifetime and cleanup:** Return type: (). Native synchronization/thread operations are blocking OS primitives, not cooperative waits. C-only foreign workers must never access Titan/Lua; packed owners/arguments retained until native lifetime ends. Explicit destroy/join; no GC-finalizer ownership policy. Atomically unlocks/relocks supplied initialized mutex around native wait; may return spuriously; caller predicate loop required.
+**Result, lifetime and cleanup:** Return type: (). Native synchronization/thread operations are blocking OS primitives, not cooperative waits. C-only foreign workers must never access Titan/Lua and use [`native_cond_wait`](../supplemental.md#native_cond_wait); packed owners/arguments are retained until native lifetime ends. Explicit destroy/join; no GC-finalizer ownership policy. Atomically unlocks/relocks the supplied initialized mutex around the native wait; may return spuriously, so a caller predicate loop is required.
 
 **Callbacks:** none. no callback
 
@@ -247,7 +255,7 @@ function key_delete(owner: key_t)
 
 **Inputs and outputs:** owner: INPUT/OUTPUT initialized native synchronization owner; caller coordinates external native users and lifetime; destroy/delete only after quiescence.
 
-**Result, lifetime and cleanup:** Return type: (). Native synchronization/thread operations are blocking OS primitives, not cooperative waits. C-only foreign workers must never access Titan/Lua; packed owners/arguments retained until native lifetime ends. Explicit destroy/join; no GC-finalizer ownership policy. Destroys TLS key only; does not free all per-thread stored values.
+**Result, lifetime and cleanup:** Return type: (). Destroys the OS-thread-local storage key slot only after all native users are quiescent; it does not free per-thread pointed-to values. Explicit `key_delete`; no GC-finalizer ownership policy.
 
 **Callbacks:** none. no callback
 
@@ -270,7 +278,7 @@ function key_get(owner: key_t): foreign *void
 
 **Inputs and outputs:** owner: INPUT/OUTPUT initialized native synchronization owner; caller coordinates external native users and lifetime; destroy/delete only after quiescence.
 
-**Result, lifetime and cleanup:** Return type: foreign *void. Native synchronization/thread operations are blocking OS primitives, not cooperative waits. C-only foreign workers must never access Titan/Lua; packed owners/arguments retained until native lifetime ends. Explicit destroy/join; no GC-finalizer ownership policy. Returns per-native-thread opaque pointer; no ownership transfer; storage not automatically traced.
+**Result, lifetime and cleanup:** Return type: foreign *void. Non-blocking OS-thread-local slot read (not `async.Task`-local state). C-only foreign workers must never access Titan/Lua and use [`native_key_get`](../supplemental.md#native_key_get) on `owner:borrow()`; packed owners are retained until `key_delete`. Returns the calling OS thread's stored opaque pointer without ownership transfer or automatic GC tracing.
 
 **Callbacks:** none. no callback
 
@@ -293,7 +301,7 @@ function key_set(owner: key_t, value: foreign *void)
 
 **Inputs and outputs:** owner: INPUT/OUTPUT initialized native synchronization owner; caller coordinates external native users and lifetime; destroy/delete only after quiescence.; value: INPUT borrowed native address for explicit C-only/TLS interop; no automatic GC ownership. Retain its complete backing graph using the associated owner parameter or external lifetime.
 
-**Result, lifetime and cleanup:** Return type: (). Native synchronization/thread operations are blocking OS primitives, not cooperative waits. C-only foreign workers must never access Titan/Lua; packed owners/arguments retained until native lifetime ends. Explicit destroy/join; no GC-finalizer ownership policy.
+**Result, lifetime and cleanup:** Return type: (). Non-blocking OS-thread-local slot write (not `async.Task`-local state). C-only foreign workers must never access Titan/Lua and use [`native_key_set`](../supplemental.md#native_key_set) on `owner:borrow()`; the caller retains the pointee across overwrite, thread exit, and `key_delete`. Explicit `key_delete`; no GC-finalizer ownership policy.
 
 **Callbacks:** none. no callback
 
@@ -316,7 +324,7 @@ function mutex_destroy(owner: mutex_t)
 
 **Inputs and outputs:** owner: INPUT/OUTPUT initialized native synchronization owner; caller coordinates external native users and lifetime; destroy/delete only after quiescence.
 
-**Result, lifetime and cleanup:** Return type: (). Native synchronization/thread operations are blocking OS primitives, not cooperative waits. C-only foreign workers must never access Titan/Lua; packed owners/arguments retained until native lifetime ends. Explicit destroy/join; no GC-finalizer ownership policy.
+**Result, lifetime and cleanup:** Return type: (). Destroys a live GC-backed `mutex_t` owner after all native users are quiescent; process-heap mutexes from [`mutex_t.create_native()`](../supplemental.md#mutex_tcreate_native) use [`native_mutex_destroy`](../supplemental.md#native_mutex_destroy) instead (never pass `owner:borrow()` to `native_mutex_destroy`). Explicit destroy/join; no GC-finalizer ownership policy.
 
 **Callbacks:** none. no callback
 
@@ -385,7 +393,7 @@ function mutex_lock(owner: mutex_t)
 
 **Inputs and outputs:** owner: INPUT/OUTPUT initialized native synchronization owner; caller coordinates external native users and lifetime; destroy/delete only after quiescence.
 
-**Result, lifetime and cleanup:** Return type: (). Native synchronization/thread operations are blocking OS primitives, not cooperative waits. C-only foreign workers must never access Titan/Lua; packed owners/arguments retained until native lifetime ends. Explicit destroy/join; no GC-finalizer ownership policy.
+**Result, lifetime and cleanup:** Return type: (). Native synchronization/thread operations are blocking OS primitives, not cooperative waits. Never suspend an `async.Task` while holding a blocking mutex expecting a sibling Task on the same OS thread to run. C-only foreign workers use [`native_mutex_lock`](../supplemental.md#native_mutex_lock) on `owner:borrow()` or a `mutex_t.create_native()` pointer; packed owners/arguments are retained until native lifetime ends. Explicit destroy/join; no GC-finalizer ownership policy.
 
 **Callbacks:** none. no callback
 
@@ -408,7 +416,7 @@ function mutex_trylock(owner: mutex_t): integer
 
 **Inputs and outputs:** owner: INPUT/OUTPUT initialized native synchronization owner; caller coordinates external native users and lifetime; destroy/delete only after quiescence.
 
-**Result, lifetime and cleanup:** Return type: integer. Native synchronization/thread operations are blocking OS primitives, not cooperative waits. C-only foreign workers must never access Titan/Lua; packed owners/arguments retained until native lifetime ends. Explicit destroy/join; no GC-finalizer ownership policy.
+**Result, lifetime and cleanup:** Return type: integer. Returns `0` when acquired or a negative libuv status such as `uv.EBUSY`. C-only foreign workers use [`native_mutex_trylock`](../supplemental.md#native_mutex_trylock) on `owner:borrow()` or a `mutex_t.create_native()` pointer; packed owners/arguments are retained until native lifetime ends. Explicit destroy/join; no GC-finalizer ownership policy.
 
 **Callbacks:** none. no callback
 
@@ -431,7 +439,7 @@ function mutex_unlock(owner: mutex_t)
 
 **Inputs and outputs:** owner: INPUT/OUTPUT initialized native synchronization owner; caller coordinates external native users and lifetime; destroy/delete only after quiescence.
 
-**Result, lifetime and cleanup:** Return type: (). Native synchronization/thread operations are blocking OS primitives, not cooperative waits. C-only foreign workers must never access Titan/Lua; packed owners/arguments retained until native lifetime ends. Explicit destroy/join; no GC-finalizer ownership policy.
+**Result, lifetime and cleanup:** Return type: (). Releases one matching mutex acquisition on the calling OS thread. C-only foreign workers use [`native_mutex_unlock`](../supplemental.md#native_mutex_unlock) on `owner:borrow()` or a `mutex_t.create_native()` pointer; packed owners/arguments are retained until native lifetime ends. Explicit destroy/join; no GC-finalizer ownership policy.
 
 **Callbacks:** none. no callback
 
@@ -452,9 +460,9 @@ Invoke one C-only callback exactly once for the once_t guard, with native cross-
 function once(guard: once_t, callback: foreign function(): void)
 ```
 
-**Inputs and outputs:** guard: INPUT/OUTPUT initialized native synchronization owner; caller coordinates external native users and lifetime; destroy/delete only after quiescence.; callback: INPUT C-only entry; no Lua/Titan execution from a native worker/once callback. Keep code loaded for every invocation.
+**Inputs and outputs:** guard: INPUT/OUTPUT guard already initialized by `once_t.new()` in stable final storage; keep its owner rooted until all participating native callers return. No additional init, reset, destroy, or close exists. callback: INPUT non-null C-only entry; no Lua/Titan execution from the native once callback. Keep its provider/code mapped for every invocation.
 
-**Result, lifetime and cleanup:** Return type: (). Native synchronization/thread operations are blocking OS primitives, not cooperative waits. C-only foreign workers must never access Titan/Lua; packed owners/arguments retained until native lifetime ends. Explicit destroy/join; no GC-finalizer ownership policy. Initialize guard with UV_ONCE_INIT. Callback may be executed by whichever native caller wins, including foreign thread; never enter Lua/Titan. Native primitive may block waiting on another caller.
+**Result, lifetime and cleanup:** Return type: (). `once_t.new()` initializes its guard in final stable owner storage with `UV_ONCE_INIT`; `once_t` has no destroy or reset operation (allocate a new `once_t` owner for a separate guard). `callback` is a non-null C-only `foreign function(): void` that may execute on whichever native caller thread wins the race and must never enter Lua/Titan; contending callers block until the winning initializer returns. C-only foreign callers use [`native_once`](../supplemental.md#native_once) on `guard:borrow()`.
 
 **Callbacks:** synchronous-c-only-at-most-once. C-only potentially foreign thread
 
@@ -523,7 +531,7 @@ function rwlock_rdlock(owner: rwlock_t)
 
 **Inputs and outputs:** owner: INPUT/OUTPUT initialized native synchronization owner; caller coordinates external native users and lifetime; destroy/delete only after quiescence.
 
-**Result, lifetime and cleanup:** Return type: (). Native synchronization/thread operations are blocking OS primitives, not cooperative waits. C-only foreign workers must never access Titan/Lua; packed owners/arguments retained until native lifetime ends. Explicit destroy/join; no GC-finalizer ownership policy.
+**Result, lifetime and cleanup:** Return type: (). Native synchronization/thread operations are blocking OS primitives, not cooperative waits. C-only foreign workers use [`native_rwlock_rdlock`](../supplemental.md#native_rwlock_rdlock) on `owner:borrow()`; packed owners/arguments are retained until native lifetime ends. Explicit destroy/join; no GC-finalizer ownership policy.
 
 **Callbacks:** none. no callback
 
@@ -546,7 +554,7 @@ function rwlock_rdunlock(owner: rwlock_t)
 
 **Inputs and outputs:** owner: INPUT/OUTPUT initialized native synchronization owner; caller coordinates external native users and lifetime; destroy/delete only after quiescence.
 
-**Result, lifetime and cleanup:** Return type: (). Native synchronization/thread operations are blocking OS primitives, not cooperative waits. C-only foreign workers must never access Titan/Lua; packed owners/arguments retained until native lifetime ends. Explicit destroy/join; no GC-finalizer ownership policy.
+**Result, lifetime and cleanup:** Return type: (). Releases a matching read-side lock. C-only foreign workers use [`native_rwlock_rdunlock`](../supplemental.md#native_rwlock_rdunlock) on `owner:borrow()`; packed owners/arguments are retained until native lifetime ends. Explicit destroy/join; no GC-finalizer ownership policy.
 
 **Callbacks:** none. no callback
 
@@ -569,7 +577,7 @@ function rwlock_tryrdlock(owner: rwlock_t): integer
 
 **Inputs and outputs:** owner: INPUT/OUTPUT initialized native synchronization owner; caller coordinates external native users and lifetime; destroy/delete only after quiescence.
 
-**Result, lifetime and cleanup:** Return type: integer. Native synchronization/thread operations are blocking OS primitives, not cooperative waits. C-only foreign workers must never access Titan/Lua; packed owners/arguments retained until native lifetime ends. Explicit destroy/join; no GC-finalizer ownership policy.
+**Result, lifetime and cleanup:** Return type: integer. Returns `0` when acquired or a negative libuv status such as `uv.EBUSY`. C-only foreign workers use [`native_rwlock_tryrdlock`](../supplemental.md#native_rwlock_tryrdlock) on `owner:borrow()`; packed owners/arguments are retained until native lifetime ends. Explicit destroy/join; no GC-finalizer ownership policy.
 
 **Callbacks:** none. no callback
 
@@ -592,7 +600,7 @@ function rwlock_trywrlock(owner: rwlock_t): integer
 
 **Inputs and outputs:** owner: INPUT/OUTPUT initialized native synchronization owner; caller coordinates external native users and lifetime; destroy/delete only after quiescence.
 
-**Result, lifetime and cleanup:** Return type: integer. Native synchronization/thread operations are blocking OS primitives, not cooperative waits. C-only foreign workers must never access Titan/Lua; packed owners/arguments retained until native lifetime ends. Explicit destroy/join; no GC-finalizer ownership policy.
+**Result, lifetime and cleanup:** Return type: integer. Returns `0` when acquired or a negative libuv status such as `uv.EBUSY`. C-only foreign workers use [`native_rwlock_trywrlock`](../supplemental.md#native_rwlock_trywrlock) on `owner:borrow()`; packed owners/arguments are retained until native lifetime ends. Explicit destroy/join; no GC-finalizer ownership policy.
 
 **Callbacks:** none. no callback
 
@@ -615,7 +623,7 @@ function rwlock_wrlock(owner: rwlock_t)
 
 **Inputs and outputs:** owner: INPUT/OUTPUT initialized native synchronization owner; caller coordinates external native users and lifetime; destroy/delete only after quiescence.
 
-**Result, lifetime and cleanup:** Return type: (). Native synchronization/thread operations are blocking OS primitives, not cooperative waits. C-only foreign workers must never access Titan/Lua; packed owners/arguments retained until native lifetime ends. Explicit destroy/join; no GC-finalizer ownership policy.
+**Result, lifetime and cleanup:** Return type: (). Native synchronization/thread operations are blocking OS primitives, not cooperative waits. C-only foreign workers use [`native_rwlock_wrlock`](../supplemental.md#native_rwlock_wrlock) on `owner:borrow()`; packed owners/arguments are retained until native lifetime ends. Explicit destroy/join; no GC-finalizer ownership policy.
 
 **Callbacks:** none. no callback
 
@@ -638,7 +646,7 @@ function rwlock_wrunlock(owner: rwlock_t)
 
 **Inputs and outputs:** owner: INPUT/OUTPUT initialized native synchronization owner; caller coordinates external native users and lifetime; destroy/delete only after quiescence.
 
-**Result, lifetime and cleanup:** Return type: (). Native synchronization/thread operations are blocking OS primitives, not cooperative waits. C-only foreign workers must never access Titan/Lua; packed owners/arguments retained until native lifetime ends. Explicit destroy/join; no GC-finalizer ownership policy.
+**Result, lifetime and cleanup:** Return type: (). Releases a matching write-side lock. C-only foreign workers use [`native_rwlock_wrunlock`](../supplemental.md#native_rwlock_wrunlock) on `owner:borrow()`; packed owners/arguments are retained until native lifetime ends. Explicit destroy/join; no GC-finalizer ownership policy.
 
 **Callbacks:** none. no callback
 
@@ -707,7 +715,7 @@ function sem_post(owner: sem_t)
 
 **Inputs and outputs:** owner: INPUT/OUTPUT initialized native synchronization owner; caller coordinates external native users and lifetime; destroy/delete only after quiescence.
 
-**Result, lifetime and cleanup:** Return type: (). Native synchronization/thread operations are blocking OS primitives, not cooperative waits. C-only foreign workers must never access Titan/Lua; packed owners/arguments retained until native lifetime ends. Explicit destroy/join; no GC-finalizer ownership policy.
+**Result, lifetime and cleanup:** Return type: (). Increments the semaphore and wakes one waiting OS thread when applicable. C-only foreign workers use [`native_sem_post`](../supplemental.md#native_sem_post) on `owner:borrow()`; packed owners/arguments are retained until native lifetime ends. Explicit destroy/join; no GC-finalizer ownership policy.
 
 **Callbacks:** none. no callback
 
@@ -730,7 +738,7 @@ function sem_trywait(owner: sem_t): integer
 
 **Inputs and outputs:** owner: INPUT/OUTPUT initialized native synchronization owner; caller coordinates external native users and lifetime; destroy/delete only after quiescence.
 
-**Result, lifetime and cleanup:** Return type: integer. Native synchronization/thread operations are blocking OS primitives, not cooperative waits. C-only foreign workers must never access Titan/Lua; packed owners/arguments retained until native lifetime ends. Explicit destroy/join; no GC-finalizer ownership policy.
+**Result, lifetime and cleanup:** Return type: integer. Returns `0` when decremented or a negative libuv status such as `uv.EAGAIN`. C-only foreign workers use [`native_sem_trywait`](../supplemental.md#native_sem_trywait) on `owner:borrow()`; packed owners/arguments are retained until native lifetime ends. Explicit destroy/join; no GC-finalizer ownership policy.
 
 **Callbacks:** none. no callback
 
@@ -753,7 +761,7 @@ function sem_wait(owner: sem_t)
 
 **Inputs and outputs:** owner: INPUT/OUTPUT initialized native synchronization owner; caller coordinates external native users and lifetime; destroy/delete only after quiescence.
 
-**Result, lifetime and cleanup:** Return type: (). Native synchronization/thread operations are blocking OS primitives, not cooperative waits. C-only foreign workers must never access Titan/Lua; packed owners/arguments retained until native lifetime ends. Explicit destroy/join; no GC-finalizer ownership policy.
+**Result, lifetime and cleanup:** Return type: (). Native synchronization/thread operations are blocking OS primitives, not cooperative waits. C-only foreign workers use [`native_sem_wait`](../supplemental.md#native_sem_wait) on `owner:borrow()`; packed owners/arguments are retained until native lifetime ends. Explicit destroy/join; no GC-finalizer ownership policy.
 
 **Callbacks:** none. no callback
 

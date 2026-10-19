@@ -311,8 +311,6 @@ Written `T[N]` annotations are removed. Inferred fixed arrays remain 0-based,
 extent. They decay to element pointers in pointer contexts; a whole C array is
 not an assignable or returnable value.
 
-
-
 Automatic storage has ordinary C block lifetime and no escape analysis. A
 pointer returned, stored, or captured beyond that lifetime can dangle. A
 hidden owned backing is rooted for the containing Titan function frame, but a
@@ -357,9 +355,14 @@ size overflow at run time. While the original owner or automatic local retains i
 the parent to raw `T *` erases the provenance; a FAM reached through that raw
 pointer has neither length nor count-aware indexing.
 
-Automatic objects and arrays are spilled and reloaded across catchable Titan
-calls so mutation made before a caught error remains observable. FAM backing
-uses the same protocol for its full dynamic extent.
+Titan spills and reloads automatic objects and arrays across catchable Titan
+calls, so mutation that Titan code made before a caught error remains
+observable afterwards. FAM backing uses the same protocol for its full dynamic
+extent. This tracks Titan's own writes and calls only: mutation through a raw
+pointer or another untracked alias, or asynchronously from C, is not tracked and
+is not rolled back. A borrowed pointer view (`foreign *T` or `foreign T[]`)
+spills only the pointer value; the bytes it points to are never snapshotted or
+restored.
 
 ## A callback-options example
 

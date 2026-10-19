@@ -8,7 +8,7 @@ The companion [allocation results](websocket-allocation-results.md) use independ
 
 ## Paired body intervals
 
-Each lane was calibrated toward at least 250 ms, warmed once, then measured seven times with alternating pair order. The 32-byte cap is 100,000 operations; the 64-KiB cap is 2,048 operations/128 MiB per lane. Each cell gives body-wall median [minimum, maximum] in milliseconds. A pair marked insufficient has at least one measured interval below 250 ms. Full per-repeat wall and Titan process CPU clocks, with exact configurations, remain in the [small measurement summary](../../spec/bench/websocket/background-summary-final5.json).
+Each lane was calibrated toward at least 250 ms, warmed once, then measured seven times with alternating pair order. The 32-byte cap is 100,000 operations; the 64-KiB cap is 2,048 operations/128 MiB per lane. Each cell gives body-wall median [minimum, maximum] in milliseconds. A pair marked insufficient has at least one measured interval below 250 ms. Full per-repeat wall and Titan process CPU clocks, with exact configurations, remain in the [small measurement summary](https://github.com/mascarenhas/titan/releases/download/issue-193-benchmark-archive/websocket-benchmark-issue193.zip) (`spec/bench/websocket/background-summary-final5.json` in [archived issue benchmarks](benchmark-archives.md)).
 
 | Endpoint / operation / bytes | Count | WS/WSS wall ms | Raw TCP/TLS wall ms | Both lanes ≥250ms |
 | --- | ---: | ---: | ---: | --- |

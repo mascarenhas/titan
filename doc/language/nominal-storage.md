@@ -34,9 +34,14 @@ Row[3]`. Titan still has no source-written `foreign int[3]` type syntax. A fixed
 array initializer must have a compatible known extent; an arbitrary pointer
 does not supply an array's length.
 
-The existing [foreign-type export restrictions](ffi.md#c-types-in-titan) still
-apply. A header-dependent C type cannot become part of a public compiled-module
-interface. Keep such storage in a local field or local nominal declaration.
+The existing [C exportability rules](ffi.md#c-types-in-titan) still apply.
+Eligible named header types may appear in public native fields when their
+complete graphs are exportable and consumers provide the original compatible
+C declarations. An ordinary Titan import does not inherit those headers.
+Nonexportable storage requires an explicitly `local` field, variant, or nominal
+declaration. A public field or union part with a nonexportable C type is rejected,
+not silently made local. Public embedding does not relax completeness, alignment,
+flexible-array, or GC-bearing-content restrictions.
 By-value C objects do not become eligible for `value`, ordinary Titan Arrays,
 or Maps just because a record or union can store them.
 

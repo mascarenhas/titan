@@ -564,9 +564,11 @@ is normalized cycle-safely and qualifies only if its target does. A forbidden ty
 an Option, container, callback component, or phantom generic argument is still
 rejected. Generics do not invent a pointer cast, bounds proof, lifetime proof,
 or FFI-to-`value` conversion to make an argument eligible. Exportability is a
-separate recursive rule: contextual C primitives and portable
-pointer/function/owned graphs may be public, while imported typedefs and other
-header-dependent descriptors cannot; see [the C FFI](ffi.md).
+separate recursive rule: both portable graphs and eligible named header
+typedef/aggregate/fixed-array graphs may be public when every component is
+exportable and consumers supply the original compatible C declarations.
+Ordinary imports do not inherit those headers. Exportability alone does not
+make a forbidden raw C shape an eligible generic argument; see [the C FFI](ffi.md).
 
 ## Constraint erasure and run-time safety
 

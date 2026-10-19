@@ -242,16 +242,17 @@ destination.
 If native handoff of the second pipe fails after the first succeeded, the
 source retains the first pipe's payload. A later transfer retries with that
 payload; `write()` re-adopts it locally, while `close()` directly retires its
-descriptor even after Runtime shutdown has closed transfer admission. Once both
-pipes detach, the hook serializes their byte payloads with its private protobuf
-schema. If this final serialization fails, it closes both detached pipes and
-leaves the source communication facades closed; the original child remains
-available through `wait()` and `close()`.
+descriptor even after Runtime shutdown has closed transfer admission. If
+serializing the payload after both pipes detach fails, the hook closes both
+detached pipes and leaves the source communication facades closed; the original
+child remains available through `wait()` and `close()`.
 
-The payload follows the same trusted manual contract as other resource hooks:
+The payload follows the
+[shared manual-handoff rules](standard-library-transfer.md#shared-manual-handoff-rules):
 deliver and adopt it exactly once within this process, recover failed delivery,
-and explicitly close the destination. Copying or dropping a payload does not
-duplicate or close the owned pipes.
+and explicitly close the destination. There is no public
+`discard_transfer_payload`. Copying or dropping a payload does not duplicate or
+close the owned pipes.
 
 ## Standard implementations
 

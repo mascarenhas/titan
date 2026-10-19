@@ -692,9 +692,17 @@ end
 -- Plain C declaration for Titan-visible locals/parameters. Setjmp-sensitive
 -- values are protected by explicit spill/reload slots below, keeping the source
 -- local/param C autos ordinary (and avoiding volatile in the function ABI).
-function cvardecl(ctx, typ, name)
+function cvardecl(ctx, typ, name, quals)
     if types.is_direct_c(typ) then
-        return coder._render_c_declaration(coder._c_value_type(typ), name)
+        local decl_type = typ
+        if quals and #quals > 0 then
+            decl_type = cdeclarator.adjust_parameter_type(typ)
+        end
+        return coder._render_c_declaration(
+            coder._c_value_type(decl_type), name, quals)
+    end
+    if quals and #quals > 0 then
+        return ctype(typ) .. " " .. table.concat(quals, " ") .. " " .. name
     end
     return ctype(typ) .. " " .. name
 end

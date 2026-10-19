@@ -1,0 +1,904 @@
+-- External wake, waiter queue, baton handoff, Thread:task proxy cleanup, and Runtime liveness tests.
+
+local function wait_for_child_cleanup_release(
+  release_rx: thread.Receiver<|boolean|>,
+  entered_tx: thread.Sender<|boolean|>
+)
+  -- The root is cancelled, so a separate child Task owns the ordinary channel
+  -- receive while the root awaits its terminal result through a shielded wait.
+  local reader = async.run<|boolean, value|>(function (): boolean
+    case release_rx:receive_result()
+    when message(released) then return released
+    when closed() then return false
+    end
+  end)
+  local remove_listener: (function (): ())? = nil
+  defer if remove_listener ~= nil then remove_listener() end
+  case async.await_cleanup<|nil, value|>(function (resolve, reject, _fatal)
+    remove_listener = reader:add_terminal_listener(function (status)
+      case status
+      when succeeded(_) then resolve(nil)
+      when failed(failure) then reject(failure.error)
+      when cancelled(reason) then reject(reason)
+      else reject("cleanup barrier reader was not terminal")
+      end
+    end)
+    entered_tx:try_send(true)
+  end)
+  when success(_) then
+  when error(failure) then raise failure
+  end
+end
+
+record EndpointCancellationPayload
+  const sender: thread.Sender<|integer|>
+  const label: string
+end
+
+record CancellationReceipt
+  const reply: thread.Sender<|boolean|>
+  const label: string
+end
+
+function CancellationReceipt:to_transfer_payload(): string
+  return self.reply:to_transfer_payload() .. self.label
+end
+
+function CancellationReceipt.from_transfer_payload(payload: string): CancellationReceipt
+  if #payload < 4 then raise "invalid cancellation receipt" end
+  local reply = thread.Sender<|boolean|>.from_transfer_payload(strings.sub(payload, 1, 4))
+  test.assert(reply:try_send(true), "cancellation receipt channel was not empty")
+  return CancellationReceipt(reply, strings.sub(payload, 5))
+end
+
+local function cancel_worker_and_join_reason(
+  reason: async.CancellationReason<|value|>
+): async.CancellationReason<|value|>
+  local started_tx, started_rx = thread.channel<|boolean|>(1)
+  local hold_tx, hold_rx = thread.channel<|integer|>(1)
+  defer started_tx:close()
+  defer started_rx:close()
+  defer hold_tx:close()
+  defer hold_rx:close()
+  local worker = thread.spawn_two(function (
+    started: thread.Sender<|boolean|>, hold: thread.Receiver<|integer|>
+  ): integer
+    started:send(true)
+    return hold:receive()
+  end, started_tx, hold_rx)
+  defer do worker:cancel(); worker:join() end
+  test.assert(started_rx:receive())
+  worker:cancel(reason)
+  worker:cancel(async.CancellationReason.simple("late losing cancellation"))
+  case worker:join()
+  when cancelled(actual) then return actual
+  else raise "worker did not preserve its admitted cancellation"
+  end
+end
+
+local function exercise_child_self_cancel_before_host_delivery()
+  runtime_test.run(function ()
+    local entered_tx, entered_rx = thread.channel<|boolean|>(1)
+    local release_tx, release_rx = thread.channel<|boolean|>(1)
+    local receipt_tx, receipt_rx = thread.channel<|boolean|>(1)
+    defer entered_tx:close()
+    defer entered_rx:close()
+    defer release_tx:close()
+    defer release_rx:close()
+    defer receipt_tx:close()
+    defer receipt_rx:close()
+    local worker = thread.spawn_two(function (
+      entered: thread.Sender<|boolean|>, release: thread.Receiver<|boolean|>
+    ): integer
+      defer wait_for_child_cleanup_release(release, entered)
+      async.running():cancel(async.CancellationReason.complex(false as value))
+      async.checkpoint()
+      raise "self cancellation did not checkpoint"
+    end, entered_tx, release_rx)
+    local proxy: async.Task<|integer, value|>? = nil
+    defer do
+      release_tx:close()
+      worker:cancel()
+      worker:join()
+      if proxy ~= nil then proxy:cancel(); async.join(proxy) end
+    end
+    test.assert(entered_rx:receive())
+    proxy = worker:task()
+    wait_until_waiting(proxy)
+    local host_reason: async.CancellationReason<|value|> =
+      async.CancellationReason.complex(CancellationReceipt(receipt_tx, "late host request") as value)
+    proxy:cancel(host_reason)
+    test.assert(receipt_rx:receive(),
+      "child did not decode the later host reason during its held self-cancel cleanup")
+    test.assert(not worker:status():has_finished() and not proxy:status():has_finished())
+    test.assert(release_tx:try_send(true))
+    local host_cancelled, actual_host? = async.join(proxy):has_cancelled()
+    test.assert(host_cancelled and actual_host == host_reason, "proxy replaced the exact host reason")
+    case worker:status()
+    when cancelled(reason) then
+      case reason
+      when complex(payload) then
+        test.assert(payload == false, "later host delivery overwrote the child's first self-cancel")
+      else raise "child self-cancel changed its complex reason variant"
+      end
+    else raise "child self-cancel did not remain cancelled"
+    end
+  end)
+end
+
+function test_cancellation_reason_packet_roundtrips_and_self_cancel_precedence(context: test.Context)
+  context:run("simple_empty_text", function (_child: test.Context)
+    runtime_test.run(function ()
+      case cancel_worker_and_join_reason(async.CancellationReason.simple(""))
+      when simple(text) then test.assert(text == "", "empty cancellation text became the default")
+      else raise "simple cancellation changed its reason variant"
+      end
+    end)
+  end)
+  context:run("complex_nil", function (_child: test.Context)
+    runtime_test.run(function ()
+      case cancel_worker_and_join_reason(async.CancellationReason.complex(nil))
+      when complex(payload) then test.assert(payload == nil, "complex nil was not preserved")
+      else raise "complex nil changed its reason variant"
+      end
+    end)
+  end)
+  context:run("complex_false", function (_child: test.Context)
+    runtime_test.run(function ()
+      case cancel_worker_and_join_reason(async.CancellationReason.complex(false as value))
+      when complex(payload) then test.assert(payload == false, "complex false was not preserved")
+      else raise "complex false changed its reason variant"
+      end
+    end)
+  end)
+  context:run("complex_endpoint_payload", function (_child: test.Context)
+    runtime_test.run(function ()
+      local tx, rx = thread.channel<|integer|>(1)
+      defer tx:close()
+      defer rx:close()
+      local payload = EndpointCancellationPayload(tx, "request and result attachments")
+      case cancel_worker_and_join_reason(async.CancellationReason.complex(payload as value))
+      when complex(received) then
+        local restored: EndpointCancellationPayload = received
+        test.assert(restored.label == payload.label and restored.sender ~= tx,
+          "complex cancellation payload did not adopt a distinct endpoint wrapper")
+        test.assert(restored.sender:try_send(252))
+        test.assert(rx:receive() == 252, "cancellation request/result lost its endpoint ownership")
+      else raise "complex endpoint payload changed its reason variant"
+      end
+    end)
+  end)
+  context:run("child_self_cancel_precedes_later_host_delivery", function (_child: test.Context)
+    exercise_child_self_cancel_before_host_delivery()
+  end)
+end
+
+local function exercise_proxy_cleanup_barrier(prestart: boolean, child_first: boolean)
+  runtime_test.run(function ()
+    local started_tx, started_rx = thread.channel<|boolean|>(1)
+    local hold_tx, hold_rx = thread.channel<|integer|>(1)
+    local entered_cleanup_tx, entered_cleanup_rx = thread.channel<|boolean|>(1)
+    local release_cleanup_tx, release_cleanup_rx = thread.channel<|boolean|>(1)
+    local finished_cleanup_tx, finished_cleanup_rx = thread.channel<|boolean|>(1)
+    defer started_tx:close()
+    defer started_rx:close()
+    defer hold_tx:close()
+    defer hold_rx:close()
+    defer entered_cleanup_tx:close()
+    defer entered_cleanup_rx:close()
+    defer release_cleanup_tx:close()
+    defer release_cleanup_rx:close()
+    defer finished_cleanup_tx:close()
+    defer finished_cleanup_rx:close()
+
+    local worker = thread.spawn_five(function (
+      s_tx: thread.Sender<|boolean|>,
+      h_rx: thread.Receiver<|integer|>,
+      enter_tx: thread.Sender<|boolean|>,
+      rel_rx: thread.Receiver<|boolean|>,
+      fin_tx: thread.Sender<|boolean|>
+    ): integer
+      defer do
+        wait_for_child_cleanup_release(rel_rx, enter_tx)
+        fin_tx:try_send(true)
+      end
+      s_tx:send(true)
+      return h_rx:receive()
+    end, started_tx, hold_rx, entered_cleanup_tx, release_cleanup_rx, finished_cleanup_tx)
+    local proxy: async.Task<|integer, value|>? = nil
+    defer do
+      -- Release before either join, including when an ordering assertion fails.
+      release_cleanup_tx:close()
+      worker:cancel()
+      worker:join()
+      if proxy ~= nil then async.join(proxy) end
+    end
+
+    test.assert(started_rx:receive())
+    proxy = worker:task()
+    if prestart then
+      test.assert(proxy:status():as_string() == "ready")
+    else
+      wait_until_waiting(proxy)
+    end
+    local terminal_seen = false
+    local remove_terminal = proxy:add_terminal_listener(function (_status)
+      terminal_seen = true
+    end)
+    defer remove_terminal()
+    local expected_host_reason = prestart and "prestart barrier cancel" or "waiting barrier cancel"
+    local host_reason: async.CancellationReason<|value|> =
+      async.CancellationReason.simple(expected_host_reason)
+    if child_first then
+      -- An accepted child reason must also make later unencodable host
+      -- cancellation payloads irrelevant to the child's sticky reason.
+      host_reason = async.CancellationReason.complex(PrivateNonTransferable(252) as value)
+    end
+    local expected_child_reason = child_first and "accepted child reason" or expected_host_reason
+    if child_first then
+      worker:cancel(async.CancellationReason.simple(expected_child_reason))
+      test.assert(entered_cleanup_rx:receive())
+    end
+    proxy:cancel(host_reason)
+    proxy:cancel(async.CancellationReason.simple("late proxy cancellation"))
+    if not child_first then test.assert(entered_cleanup_rx:receive()) end
+
+    -- Entering cleanup is the handshake: release has not been sent, so the
+    -- child cannot finish. No scheduler turn-count establishes this ordering.
+    test.assert(not worker:status():has_finished(),
+      "worker reported finished while blocked inside child cleanup")
+    test.assert(not proxy:status():has_finished() and not terminal_seen,
+      "cancelled Thread:task() became terminal before child cleanup was released")
+    local finished_early, _? = finished_cleanup_rx:try_receive()
+    test.assert(not finished_early, "child crossed its unreleased cleanup barrier")
+
+    test.assert(release_cleanup_tx:try_send(true))
+    local status = async.join(proxy)
+    local cancelled, actual_reason? = status:has_cancelled()
+    test.assert(cancelled and actual_reason == host_reason,
+      "proxy replaced its exact first host cancellation reason")
+    test.assert(terminal_seen, "proxy did not publish its terminal listener")
+    local finished, value? = finished_cleanup_rx:try_receive()
+    test.assert(finished and value == true,
+      "proxy settled before child cleanup finished")
+    local child_cancelled, child_reason? = worker:status():has_cancelled()
+    test.assert(child_cancelled and child_reason ~= nil and
+      reason_text(child_reason) == expected_child_reason,
+      "proxy retirement replaced the child's accepted cancellation reason")
+  end)
+end
+
+function test_wake_prestart_and_unwinding_proxy_cancel_waits_for_worker_finish(
+  context: test.Context
+)
+  context:run("prestart_proxy_cancel_waits_for_child_cleanup_barrier", function (_child: test.Context)
+    exercise_proxy_cleanup_barrier(true, false)
+  end)
+  context:run("waiting_proxy_cancel_waits_for_child_cleanup_barrier", function (_child: test.Context)
+    exercise_proxy_cleanup_barrier(false, false)
+  end)
+  context:run("proxy_cleanup_preserves_previously_accepted_child_reason", function (_child: test.Context)
+    exercise_proxy_cleanup_barrier(false, true)
+  end)
+end
+
+function test_wake_concurrent_normal_and_cleanup_joins(_context: test.Context)
+  runtime_test.run(function ()
+    -- 1. Multiple concurrent Thread:join() callers plus Thread:task() on the same worker.
+    local ready1_tx, ready1_rx = thread.channel<|boolean|>(1)
+    local gate1_tx, gate1_rx = thread.channel<|integer|>(1)
+    defer ready1_tx:close()
+    defer ready1_rx:close()
+    defer gate1_tx:close()
+    defer gate1_rx:close()
+
+    local worker1 = thread.spawn_two(function (
+      r_tx: thread.Sender<|boolean|>,
+      g_rx: thread.Receiver<|integer|>
+    ): integer
+      r_tx:send(true)
+      return g_rx:receive() + 100
+    end, ready1_tx, gate1_rx)
+    defer do worker1:cancel(); worker1:join() end
+
+    test.assert(ready1_rx:receive())
+    local joiner1 = spawn_task(function (): integer
+      local st = worker1:join()
+      local ok, v? = st:has_succeeded()
+      test.assert(ok)
+      return v as integer
+    end, "joiner1")
+    local joiner2 = spawn_task(function (): integer
+      local st = worker1:join()
+      local ok, v? = st:has_succeeded()
+      test.assert(ok)
+      return v as integer
+    end, "joiner2")
+    local proxy1 = worker1:task()
+    task_support.cleanup_task(proxy1, "normal join proxy cleanup")
+    wait_until_waiting(joiner1)
+    wait_until_waiting(joiner2)
+    wait_until_waiting(proxy1)
+
+    gate1_tx:send(23)
+    test.assert(await_task(joiner1) == 123)
+    test.assert(await_task(joiner2) == 123)
+    test.assert(await_task(proxy1) == 123)
+
+    -- 2. Normal Thread:join() waiter alongside a cancelled Thread:task() cleanup join.
+    local ready2_tx, ready2_rx = thread.channel<|boolean|>(1)
+    local hold2_tx, hold2_rx = thread.channel<|integer|>(1)
+    defer ready2_tx:close()
+    defer ready2_rx:close()
+    defer hold2_tx:close()
+    defer hold2_rx:close()
+
+    local worker2 = thread.spawn_two(function (
+      r_tx: thread.Sender<|boolean|>,
+      h_rx: thread.Receiver<|integer|>
+    ): integer
+      r_tx:send(true)
+      return h_rx:receive()
+    end, ready2_tx, hold2_rx)
+    defer do worker2:cancel(); worker2:join() end
+
+    test.assert(ready2_rx:receive())
+    local normal_joiner = spawn_task(function (): string
+      return worker2:join():as_string()
+    end, "normal_joiner")
+    local proxy2 = worker2:task()
+    task_support.cleanup_task(proxy2, "cleanup join proxy cleanup")
+    wait_until_waiting(normal_joiner)
+    wait_until_waiting(proxy2)
+
+    proxy2:cancel(async.CancellationReason.simple("cancel proxy with normal joiner"))
+    expect_error(function ()
+      await_task(proxy2)
+    end, "cancel proxy with normal joiner")
+    test.assert(await_task(normal_joiner) == "cancelled")
+  end)
+end
+
+function test_wake_many_channels_many_waiters_fifo_and_baton(context: test.Context)
+  context:run("many_channels_and_large_waiter_batches_both_directions", function (_child: test.Context)
+    runtime_test.run(function ()
+      -- 1. Many channels active in one Runtime simultaneously.
+      local const channel_count = 96
+      local txs: {thread.Sender<|integer|>} = {}
+      local rxs: {thread.Receiver<|integer|>} = {}
+      local recv_tasks: {async.Task<|integer, value|>} = {}
+      defer do
+        for i = 1, #txs do txs[i]:close() end
+        for i = 1, #rxs do rxs[i]:close() end
+      end
+      for i = 1, channel_count do
+        local tx, rx = thread.channel<|integer|>(1)
+        txs[i] = tx
+        rxs[i] = rx
+        local idx = i
+        local t = spawn_task(function (): integer
+          return rxs[idx]:receive()
+        end, "multi_ch_recv_" .. i)
+        recv_tasks[i] = t
+        wait_until_waiting(t)
+      end
+
+      local producer = thread.spawn_one(function (senders: EndpointArrayCarrier): integer
+        local list = senders.senders
+        for i = 1, #list do
+          list[i]:send(i * 10)
+        end
+        return #list
+      end, EndpointArrayCarrier("many-channels", txs, {}, {}))
+      defer do producer:cancel(); producer:join() end
+
+      local total = 0
+      for i = 1, channel_count do
+        total = total + await_task(recv_tasks[i])
+      end
+      test.assert(total == (channel_count * (channel_count + 1) // 2) * 10)
+      local pst = producer:join()
+      local pok, pcount? = pst:has_succeeded()
+      test.assert(pok and pcount == channel_count)
+
+      -- Queue more than one whole bridge batch without yielding. The native
+      -- callbacks cannot drain any of these identities until this loop ends.
+      for i = 1, channel_count do
+        local index = i
+        local receiver = spawn_task(function (): integer
+          return rxs[index]:receive()
+        end, "burst receiver " .. i)
+        recv_tasks[i] = receiver
+        wait_until_waiting(receiver)
+      end
+      for i = 1, channel_count do
+        test.assert(txs[i]:try_send(i * 100))
+      end
+      for i = 1, channel_count do
+        test.assert(await_task(recv_tasks[i]) == i * 100)
+      end
+
+      -- More waiters than the Runtime's 64-entry ready/external-wake batches.
+      local const batch_size = 96
+      local b_tx, b_rx = thread.channel<|integer|>(1)
+      defer b_tx:close()
+      defer b_rx:close()
+
+      local underflow_tasks: {async.Task<|integer, value|>} = {}
+      for i = 1, batch_size do
+        local t = spawn_task(function (): integer
+          return b_rx:receive()
+        end, "batch_recv_" .. i)
+        underflow_tasks[i] = t
+        wait_until_waiting(t)
+      end
+
+      for i = 1, batch_size do
+        b_tx:send(i)
+      end
+      local recv_sum = 0
+      for i = 1, batch_size do
+        recv_sum = recv_sum + await_task(underflow_tasks[i])
+      end
+      test.assert(recv_sum == batch_size * (batch_size + 1) // 2)
+
+      -- Fill the 1-slot buffer, then park a full batch of overflow senders.
+      test.assert(b_tx:try_send(1000))
+      local overflow_tasks: {async.Task<|integer, value|>} = {}
+      for i = 1, batch_size do
+        local val = i
+        local t = spawn_task(function (): integer
+          b_tx:send(val)
+          return val
+        end, "batch_send_" .. i)
+        overflow_tasks[i] = t
+        wait_until_waiting(t)
+      end
+
+      local drain_sum = b_rx:receive()
+      for _ = 1, batch_size do
+        drain_sum = drain_sum + b_rx:receive()
+      end
+      for i = 1, batch_size do
+        test.assert(await_task(overflow_tasks[i]) == i)
+      end
+      test.assert(drain_sum == 1000 + batch_size * (batch_size + 1) // 2)
+    end)
+  end)
+
+  context:run("fifo_waiter_selection_and_non_reserved_retry_semantics", function (_child: test.Context)
+    runtime_test.run(function ()
+      local tx, rx = thread.channel<|integer|>(1)
+      defer tx:close()
+      defer rx:close()
+
+      local selected_tx, selected_rx = thread.channel<|integer|>(3)
+      defer selected_tx:close()
+      defer selected_rx:close()
+      local r1 = spawn_task(function (): integer
+        local v = rx:receive()
+        selected_tx:send(1)
+        return v
+      end, "fifo_r1")
+      local r2 = spawn_task(function (): integer
+        local v = rx:receive()
+        selected_tx:send(2)
+        return v
+      end, "fifo_r2")
+      local r3 = spawn_task(function (): integer
+        local v = rx:receive()
+        selected_tx:send(3)
+        return v
+      end, "fifo_r3")
+      wait_until_waiting(r1)
+      wait_until_waiting(r2)
+      wait_until_waiting(r3)
+
+      -- Only r1 is selected for this item; no FIFO completion is promised.
+      test.assert(tx:try_send(10))
+      test.assert(selected_rx:receive() == 1)
+      test.assert(await_task(r1) == 10)
+
+      -- A wake reserves neither the item nor a slot. Steal r2's signalled item
+      -- synchronously, before any other Task can run.
+      test.assert(tx:try_send(20))
+      local raced_ok, raced_val? = rx:try_receive()
+      test.assert(raced_ok and raced_val == 20)
+
+      -- Observe which retry actually receives the next value rather than
+      -- assuming a number of yields put r2 behind r3 in the waiter queue.
+      test.assert(tx:try_send(30))
+      local selected = selected_rx:receive()
+      test.assert(selected == 2 or selected == 3, "retry selected an unknown receiver")
+      if selected == 2 then
+        test.assert(await_task(r2) == 30)
+        test.assert(tx:try_send(40))
+        test.assert(selected_rx:receive() == 3)
+        test.assert(await_task(r3) == 40)
+      else
+        test.assert(await_task(r3) == 30)
+        test.assert(tx:try_send(40))
+        test.assert(selected_rx:receive() == 2)
+        test.assert(await_task(r2) == 40)
+      end
+    end)
+  end)
+
+  context:run("chained_cancel_baton_and_stale_replacement_waits", function (_child: test.Context)
+    runtime_test.run(function ()
+      local tx, rx = thread.channel<|integer|>(1)
+      defer tx:close()
+      defer rx:close()
+
+      -- 1. Chained 3-waiter underflow baton: signal r1, then cancel both r1 and r2 in the same turn;
+      -- the baton passes r1 -> r2 -> r3 so r3 receives the item.
+      local r1 = spawn_task(function (): integer return rx:receive() end, "baton_r1")
+      local r2 = spawn_task(function (): integer return rx:receive() end, "baton_r2")
+      local r3 = spawn_task(function (): integer return rx:receive() end, "baton_r3")
+      wait_until_waiting(r1)
+      wait_until_waiting(r2)
+      wait_until_waiting(r3)
+      test.assert(tx:try_send(777))
+      r1:cancel()
+      r2:cancel()
+      expect_error(function () await_task(r1) end, "cancelled")
+      expect_error(function () await_task(r2) end, "cancelled")
+      test.assert(await_task(r3) == 777)
+
+      -- 2. Chained 3-waiter overflow baton: fill buffer, park s1, s2, s3, dequeue 1 item
+      -- (signaling s1), then cancel both s1 and s2; s3 wakes and enqueues its item.
+      test.assert(tx:try_send(800))
+      local s1 = spawn_task(function (): boolean tx:send(801); return true end, "baton_s1")
+      local s2 = spawn_task(function (): boolean tx:send(802); return true end, "baton_s2")
+      local s3 = spawn_task(function (): boolean tx:send(803); return true end, "baton_s3")
+      wait_until_waiting(s1)
+      wait_until_waiting(s2)
+      wait_until_waiting(s3)
+      local ok800, v800? = rx:try_receive()
+      test.assert(ok800 and v800 == 800)
+      s1:cancel()
+      s2:cancel()
+      expect_error(function () await_task(s1) end, "cancelled")
+      expect_error(function () await_task(s2) end, "cancelled")
+      test.assert(await_task(s3))
+      test.assert(rx:receive() == 803)
+
+      -- 3. Replacement wait on the same Task after a raced wake: a stale wake from the first
+      -- wait must not prematurely resume the second wait on another channel.
+      local ch_a_tx, ch_a_rx = thread.channel<|integer|>(1)
+      local ch_b_tx, ch_b_rx = thread.channel<|integer|>(1)
+      defer ch_a_tx:close()
+      defer ch_a_rx:close()
+      defer ch_b_tx:close()
+      defer ch_b_rx:close()
+
+      local stage = 0
+      local seq_task = spawn_task(function (): integer
+        stage = 1
+        local first = ch_a_rx:receive()
+        stage = 2
+        local second = ch_b_rx:receive()
+        stage = 3
+        return first + second
+      end, "replacement_wait_task")
+      wait_until_waiting(seq_task)
+      test.assert(stage == 1)
+
+      -- Signal and close ch_a while the first wait is parked. Observe entry
+      -- into the replacement operation, not the old wait's identical status.
+      test.assert(ch_a_tx:try_send(100))
+      ch_a_tx:close()
+      while stage < 2 and not seq_task:status():has_finished() do
+        async.yield()
+      end
+      wait_until_waiting(seq_task)
+      test.assert(stage == 2 and seq_task:status():as_string() == "waiting",
+        "replacement wait on ch_b did not stay parked")
+
+      test.assert(ch_b_tx:try_send(200))
+      test.assert(await_task(seq_task) == 300)
+      test.assert(stage == 3)
+    end)
+  end)
+end
+
+local function exercise_thread_shutdown_session(session: integer, fatal_shutdown: boolean)
+  local started_tx, started_rx = thread.channel<|boolean|>(1)
+  local hold_tx, hold_rx = thread.channel<|integer|>(1)
+  local entered_tx, entered_rx = thread.channel<|boolean|>(1)
+  local release_tx, release_rx = thread.channel<|boolean|>(1)
+  local data_tx, data_rx = thread.channel<|integer|>(1)
+  defer started_tx:close()
+  defer started_rx:close()
+  defer hold_tx:close()
+  defer hold_rx:close()
+  defer entered_tx:close()
+  defer entered_rx:close()
+  defer release_tx:close()
+  defer release_rx:close()
+  defer data_tx:close()
+  defer data_rx:close()
+  local worker: thread.Thread<|integer|>? = nil
+  local proxy: async.Task<|integer, value|>? = nil
+  local waiter: async.Task<|integer, value|>? = nil
+  local waiter_stage = 0
+  local shutdown_started = false
+  local marker = "thread wake fatal shutdown " .. session
+  local supervisor = async.run<|nil, value|>(function (): nil
+    worker = thread.spawn_five(function (
+      started: thread.Sender<|boolean|>,
+      hold: thread.Receiver<|integer|>,
+      entered: thread.Sender<|boolean|>,
+      release: thread.Receiver<|boolean|>,
+      data: thread.Sender<|integer|>
+    ): integer
+      defer do
+        data:try_send(session * 100)
+        wait_for_child_cleanup_release(release, entered)
+      end
+      started:send(true)
+      return hold:receive()
+    end, started_tx, hold_rx, entered_tx, release_rx, data_tx)
+    defer do
+      -- This also releases and joins on a failed setup assertion. During
+      -- shutdown the cancelled proxy itself owns the shielded worker join.
+      release_tx:close()
+      if not async.is_closing() then
+        worker:cancel()
+        worker:join()
+        if proxy ~= nil then
+          proxy:cancel()
+          async.join(proxy)
+        end
+        if waiter ~= nil then
+          waiter:cancel()
+          async.join(waiter)
+        end
+      end
+    end
+    test.assert(started_rx:receive())
+    proxy = worker:task()
+    wait_until_waiting(proxy)
+    waiter = async.run<|integer, value|>(function (): integer
+      waiter_stage = 1
+      local first = data_rx:receive()
+      waiter_stage = 2
+      local second = data_rx:receive()
+      waiter_stage = 3
+      return first + second
+    end)
+    wait_until_waiting(waiter)
+    worker:cancel(async.CancellationReason.simple("enter shutdown cleanup"))
+    test.assert(entered_rx:receive())
+    while waiter_stage < 2 and not waiter:status():has_finished() do
+      async.yield()
+    end
+    wait_until_waiting(waiter)
+    test.assert(waiter_stage == 2 and not worker:status():has_finished(),
+      "shutdown setup did not hold a live waiter and unwinding child")
+    waiter:cancel(async.CancellationReason.simple("cancel live replacement wait"))
+    test.assert(async.join(waiter):has_cancelled(),
+      "replacement waiter cancellation was a no-op")
+    test.assert(not proxy:status():has_finished(),
+      "proxy finished while child cleanup was held")
+    shutdown_started = true
+    if fatal_shutdown then
+      async.await<|nil, nil|>(function (_resolve, _reject, fatal)
+        local alarm = uv.timer_t.new()
+        local handle = alarm:as_handle_t()
+        test.assert(uv.timer_init(async.current_loop(), alarm) == 0)
+        local status = uv.timer_start(alarm, function (_: uv.timer_t)
+          uv.close(handle, function (_: uv.handle_t)
+            do
+              raise marker
+            catch
+              fatal(error, traceback)
+              raise
+            end
+          end)
+        end, 0, 0)
+        if status < 0 then
+          uv.close(handle)
+          raise "thread shutdown alarm start failed"
+        end
+      end)
+    else
+      async.request_exit(0)
+      async.checkpoint()
+    end
+    return nil
+  end)
+  local caught = false
+  local failure: value = nil
+  do
+    async.loop()
+  catch
+    caught = true
+    failure = error
+  end
+  if not shutdown_started then
+    case supervisor:status()
+    when failed(err) then err:raise()
+    else raise "thread shutdown setup did not finish"
+    end
+  end
+  test.assert(caught == fatal_shutdown and (not caught or failure == marker),
+    "shutdown changed the callback failure")
+  test.assert(worker:status():has_finished() and proxy:status():has_cancelled(),
+    "Runtime returned before cancelled proxy retired its child thread")
+  test.assert(waiter:status():has_cancelled() and waiter_stage == 2,
+    "shutdown corrupted the cancelled replacement wait")
+end
+
+function test_wake_sole_external_waiter_liveness_and_sequential_runtimes(
+  context: test.Context
+)
+  context:run("sole_external_receiver_sender_and_join_keep_loop_alive", function (_child: test.Context)
+    -- A Task parked on the external operation is established before releasing
+    -- its OS-thread peer. The supervisor then joins it without a timer or any
+    -- other active host handle to keep the Runtime alive.
+    runtime_test.run(function ()
+      local tx, rx = thread.channel<|integer|>(1)
+      local go_tx, go_rx = thread.channel<|boolean|>(1)
+      defer tx:close()
+      defer rx:close()
+      defer go_tx:close()
+      defer go_rx:close()
+      local worker = thread.spawn_two(function (
+        out: thread.Sender<|integer|>, go: thread.Receiver<|boolean|>
+      ): integer
+        go:receive()
+        out:send(404)
+        return 1
+      end, tx, go_rx)
+      defer do worker:cancel(); worker:join() end
+      local receiver = spawn_task(function (): integer
+        return rx:receive()
+      end, "sole external receiver")
+      wait_until_waiting(receiver)
+      go_tx:send(true)
+      test.assert(await_task(receiver) == 404)
+      local ok, result? = worker:join():has_succeeded()
+      test.assert(ok and result == 1)
+    end)
+
+    runtime_test.run(function ()
+      local tx, rx = thread.channel<|integer|>(1)
+      local go_tx, go_rx = thread.channel<|boolean|>(1)
+      defer tx:close()
+      defer rx:close()
+      defer go_tx:close()
+      defer go_rx:close()
+      test.assert(tx:try_send(10))
+      local worker = thread.spawn_two(function (
+        input: thread.Receiver<|integer|>, go: thread.Receiver<|boolean|>
+      ): integer
+        go:receive()
+        local first = input:receive()
+        local second = input:receive()
+        return first + second
+      end, rx, go_rx)
+      defer do worker:cancel(); worker:join() end
+      local sender = spawn_task(function (): boolean
+        tx:send(20)
+        return true
+      end, "sole external sender")
+      wait_until_waiting(sender)
+      go_tx:send(true)
+      test.assert(await_task(sender))
+      local ok, result? = worker:join():has_succeeded()
+      test.assert(ok and result == 30)
+    end)
+
+    runtime_test.run(function ()
+      local go_tx, go_rx = thread.channel<|boolean|>(1)
+      defer go_tx:close()
+      defer go_rx:close()
+      local first = thread.spawn_one(function (go: thread.Receiver<|boolean|>): integer
+        go:receive()
+        return 301
+      end, go_rx)
+      defer do first:cancel(); first:join() end
+      local joiner = spawn_task(function (): integer
+        local ok, result? = first:join():has_succeeded()
+        test.assert(ok)
+        return result
+      end, "sole external join")
+      wait_until_waiting(joiner)
+      go_tx:send(true)
+      test.assert(await_task(joiner) == 301)
+
+      local second = thread.spawn_one(function (go: thread.Receiver<|boolean|>): integer
+        go:receive()
+        return 302
+      end, go_rx)
+      defer do second:cancel(); second:join() end
+      local proxy = second:task()
+      task_support.cleanup_task(proxy, "sole external proxy cleanup")
+      wait_until_waiting(proxy)
+      go_tx:send(true)
+      test.assert(await_task(proxy) == 302)
+    end)
+  end)
+
+  context:run("sequential_runtime_sessions_and_concurrent_shutdown_notifications", function (child: test.Context)
+    for session = 1, 3 do
+      exercise_thread_shutdown_session(session, false)
+    end
+    child:log("BEGIN expected thread proxy fatal callback diagnostics")
+    exercise_thread_shutdown_session(4, true)
+    child:log("END expected thread proxy fatal callback diagnostics")
+    -- A fresh session after the fatal path must not inherit its queued wakes.
+    exercise_thread_shutdown_session(5, false)
+  end)
+end
+
+local function thread_native_retirement_case(context: test.Context,
+    workspace: string, scenario: string)
+  context:run(scenario, function (_child: test.Context)
+    -- This is a safety deadline only, never an interleaving oracle. A broken
+    -- native cancellation/barrier cannot strand the aggregate indefinitely.
+    local output, why, code = thread_fault_command.capture({
+      "timeout", "--signal=KILL", "45s",
+      thread_fault_command.program(workspace, "thread_retirement_fault_app"), scenario,
+    }, workspace)
+    test.assert(why == "exit" and code == 0,
+      "native thread retirement scenario failed at " .. scenario .. ": " .. output)
+    test.assert(strings.find(output, "THREAD_RETIREMENT_OK") ~= nil,
+      "native thread retirement fixture omitted its checked join receipt")
+  end)
+end
+
+function test_native_thread_retirement_exit_join_retry_and_allocation_faults(context: test.Context)
+  if thread_fault_common.is_windows() then
+    test.skip("platform: retirement interposition requires Linux static archive linkage")
+  end
+  local host, why, code = thread_fault_command.capture({"uname", "-s"})
+  test.assert(why == "exit" and code == 0, host)
+  if host ~= "Linux\n" then
+    test.skip("platform: retirement interposition requires Linux static archive linkage")
+  end
+  local workspace = ""
+  runtime_test.run(function ()
+    workspace = thread_fault_fs.tmpname()
+    thread_fault_fs.unlink(workspace)
+    thread_fault_fs.mkdir(workspace)
+    context:cleanup(function () thread_fault_command.remove_tree(workspace) end)
+    thread_fault_fs.write_file(workspace .. "/thread_retirement_fault_api.h",
+      thread_fault_fs.read_file("spec/fixtures/stdlib/native/thread_retirement_fault_api.h"))
+    thread_fault_fs.write_file(workspace .. "/thread_retirement_fault_app.titan",
+      thread_fault_fs.read_file("spec/fixtures/stdlib/titan/thread_retirement_fault_app.titan"))
+    local flags = thread_fault_os.getenv("TITAN_EXTRA_LDFLAGS") or ""
+    flags = flags .. " -Wl,--wrap=uv_thread_create,--wrap=uv_thread_join" ..
+      ",--wrap=luaD_growstack,--wrap=luaS_newudata,--wrap=luaF_newCclosure,--wrap=luaH_set,--wrap=malloc"
+    local output, compile_why, status = thread_fault_command.compile(workspace,
+      "thread_retirement_fault_app",
+      {"--no-uv-bootstrap", "-X", thread_fault_command.fixture_object("thread_retirement_fault")},
+      true, {["TITAN_EXTRA_LDFLAGS"] = flags})
+    test.assert(compile_why == "exit" and status == 0,
+      "could not compile unchanged-provider retirement child: " .. output)
+  end)
+  thread_native_retirement_case(context, workspace, "prestart")
+  thread_native_retirement_case(context, workspace, "waiting")
+  thread_native_retirement_case(context, workspace, "proxy-success")
+  thread_native_retirement_case(context, workspace, "proxy-failure")
+  thread_native_retirement_case(context, workspace, "cached-success-join")
+  thread_native_retirement_case(context, workspace, "cached-failure-join")
+  thread_native_retirement_case(context, workspace, "cached-cancel-join")
+  thread_native_retirement_case(context, workspace, "slow-normal-join")
+  thread_native_retirement_case(context, workspace, "accepted-child-reason")
+  thread_native_retirement_case(context, workspace, "join-retry")
+  thread_native_retirement_case(context, workspace, "group-linked-join-retry")
+  thread_native_retirement_case(context, workspace, "group-finished-constructor-join-retry")
+  thread_native_retirement_case(context, workspace, "group-listener-return-oom")
+  thread_native_retirement_case(context, workspace, "group-listener-registration-oom")
+  thread_native_retirement_case(context, workspace, "group-map-admission-oom")
+  thread_native_retirement_case(context, workspace, "prepare-userdata-oom")
+  thread_native_retirement_case(context, workspace, "forwarding-stack-oom")
+  thread_native_retirement_case(context, workspace, "native-fallback-copy-oom")
+  thread_native_retirement_case(context, workspace, "child-prestart-cancel")
+  thread_native_retirement_case(context, workspace, "child-prestart-native-fallback")
+  thread_native_retirement_case(context, workspace, "wide-body-entry-oom")
+  thread_native_retirement_case(context, workspace, "wide-cleanup-entry-oom")
+  thread_native_retirement_case(context, workspace, "wide-prestart-cleanup-helper-oom")
+end

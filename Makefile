@@ -301,6 +301,7 @@ UV_TITAN_SOURCES := \
 	titan/uv/data.titan \
 	titan/uv/dll.titan \
 	titan/uv/dns.titan \
+	titan/uv/external_wake.titan \
 	titan/uv/fd.titan \
 	titan/uv/identifiers.titan \
 	titan/uv/pipe_tty.titan \
@@ -319,6 +320,7 @@ UV_TITAN_HEADERS := \
 	titan/uv/address-native.h \
 	titan/uv/callback.h \
 	titan/uv/data_native.h \
+	titan/uv/external-wake-native.h \
 	titan/uv/fd-native.h \
 	titan/uv/network-native.h \
 	titan/uv/platform-constants.h \
@@ -394,8 +396,8 @@ stdlib_stem = $(TITAN_OUTPUT_DIR)/$(if $(STDLIB_STEM_$(1)),$(STDLIB_STEM_$(1)),t
 stdlib_outputs = $(call stdlib_stem,$(1)).o $(call stdlib_stem,$(1)).c $(filter $(call stdlib_stem,$(1)).%,$(STDLIB_GENERATED_FOREIGN_HEADERS))
 STDLIB_MODULE_OBJECTS := $(foreach module,$(STDLIB_MODULES),$(call stdlib_stem,$(module)).o)
 STDLIB_IMPORTS_coroutine :=
-STDLIB_IMPORTS_uv := iteration protobuf reflect
-STDLIB_IMPORTS_async := uv coroutine gc string transfer
+STDLIB_IMPORTS_uv := gc iteration protobuf reflect
+STDLIB_IMPORTS_async := uv coroutine gc iteration string transfer
 STDLIB_IMPORTS_timer := async uv
 STDLIB_IMPORTS_io := os string async protobuf reflect
 STDLIB_IMPORTS_fs := async uv string protobuf reflect
@@ -416,9 +418,9 @@ STDLIB_IMPORTS_test :=
 STDLIB_IMPORTS_reflect := iteration
 STDLIB_IMPORTS_sqlite3 := async uv reflect string math protobuf
 STDLIB_IMPORTS_json := reflect string math peg iteration
-STDLIB_IMPORTS_protobuf := reflect string
-STDLIB_IMPORTS_transfer := reflect protobuf
-STDLIB_IMPORTS_thread := async gc lua string transfer uv
+STDLIB_IMPORTS_protobuf := gc reflect string
+STDLIB_IMPORTS_transfer := gc reflect protobuf
+STDLIB_IMPORTS_thread := async gc iteration lua transfer uv
 STDLIB_SHIMS := $(addprefix $(TITAN_OUTPUT_DIR)/,titan/coroutine.lua titan/uv.lua titan/async.lua \
 	titan/timer.lua titan/io.lua titan/fs.lua titan/net.lua titan/ssl.lua \
 	titan/url.lua titan/http.lua titan/websocket.lua titan/os.lua titan/path.lua \
@@ -1184,7 +1186,7 @@ else
   STDLIB_OPENSSL_HEADER_DIRS = $(shell $(OPENSSL_PKG_CONFIG) --variable=includedir openssl 2>/dev/null)
 endif
 STDLIB_C_INPUTS_uv = $(UV_TITAN_HEADERS) $(foreach dir,$(STDLIB_UV_HEADER_DIRS),$(wildcard $(dir)/uv.h $(dir)/uv/*.h))
-STDLIB_C_INPUTS_async = titan/async_signal_platform.h titan/async_receiver_native.h
+STDLIB_C_INPUTS_async = titan/async_signal_platform.h titan/async_receiver_native.h titan/transfer_native.h
 STDLIB_C_INPUTS_fs = titan/fs_platform.h
 STDLIB_C_INPUTS_os = titan/os_platform.h titan/os_environment.h
 STDLIB_C_INPUTS_path = titan/path_platform.h
@@ -1196,8 +1198,8 @@ STDLIB_C_INPUTS_websocket = $(foreach dir,$(STDLIB_OPENSSL_HEADER_DIRS),$(wildca
 STDLIB_C_INPUTS_sqlite3 = $(SQLITE3_HEADER) $(SQLITE3_TITAN_HEADERS)
 STDLIB_C_INPUTS_lua = $(LUA_TITAN_HEADERS)
 STDLIB_C_INPUTS_protobuf = titan/protobuf/native.h
-STDLIB_C_INPUTS_transfer = titan/async_receiver_native.h titan/protobuf/native.h
-STDLIB_C_INPUTS_thread = $(THREAD_TITAN_HEADERS) titan/async_receiver_native.h
+STDLIB_C_INPUTS_transfer = titan/transfer_native.h titan/protobuf/native.h
+STDLIB_C_INPUTS_thread = $(THREAD_TITAN_HEADERS) titan/transfer_native.h
 
 # The command is identical for object builds and the final link. Only the
 # latter receives native payload. Make schedules modules; each compiler gets
@@ -1352,6 +1354,14 @@ titan_test_outputs = $(call titan_test_stem,$(1)).o $(call titan_test_stem,$(1))
 TITAN_TEST_MODULE_OBJECTS := $(foreach module,$(TITAN_TEST_MODULES),$(call titan_test_stem,$(module)).o)
 TITAN_TEST_NATIVE_OBJECTS := $(addprefix $(TITAN_TEST_BUILD_DIR)/,async_foreign_work.o fs_fixture.o uv_stdio_probe.o sqlite3_worker_fixture.o)
 TITAN_TEST_FIXTURE_OUTPUTS := $(TITAN_TEST_NATIVE_OBJECTS) $(addprefix $(TITAN_TEST_BUILD_DIR)/,async_foreign_work.h uv_stdio_probe.h uv_coverage_threads.h uv_coverage_pty.h sqlite3_worker_fixture.h ssl_allocator_fixture.h ssl_allocator_fixture.o ssl_error_strings.h ssl_error_strings.o os_descriptor_limit.h os_descriptor_limit.o os_process_host_child)
+# GNU ld fault wrappers belong only to fresh Linux child processes.
+# Keep their owned outputs separate from every aggregate -X payload.
+TITAN_TEST_LINUX_FAULT_OBJECTS := $(addprefix $(TITAN_TEST_BUILD_DIR)/,transfer_alloc_fault.o uv_sync_alloc_fault.o thread_retirement_fault.o)
+TITAN_TEST_LINUX_FAULT_HEADERS := $(addprefix $(TITAN_TEST_BUILD_DIR)/,transfer_alloc_fault_api.h uv_sync_alloc_fault_api.h thread_retirement_fault_api.h)
+TITAN_TEST_LINUX_FAULT_OUTPUTS := $(TITAN_TEST_LINUX_FAULT_OBJECTS) $(TITAN_TEST_LINUX_FAULT_HEADERS)
+ifeq ($(HOST_OS),Linux)
+TITAN_TEST_FIXTURE_OUTPUTS += $(TITAN_TEST_LINUX_FAULT_OUTPUTS)
+endif
 TITAN_TEST_CONFIG_STAMP := $(TITAN_TEST_BUILD_DIR)/build.config
 # TEST_LUA selects the installed SDK, just as it does for the compiler and the
 # native fixtures. A cold non-test Make invocation need not have one installed.
@@ -1409,6 +1419,7 @@ $(TITAN_TEST_CONFIG_STAMP): FORCE
 	  $(call make_shell_quote,CC=$(CC)) $(call make_shell_quote,AR=$(AR)) \
 	  $(call make_shell_quote,RANLIB=$(RANLIB)) \
 	  $(call make_shell_quote,SDK=$(TITAN_TEST_INSTALL_ROOT)) \
+	  $(call make_shell_quote,HOST_OS=$(HOST_OS)) \
 	  $(call make_shell_quote,CPPFLAGS=$(TITAN_TEST_CPPFLAGS)) \
 	  $(call make_shell_quote,CFLAGS=$(TITAN_TEST_CFLAGS)) \
 	  $(call make_shell_quote,LDFLAGS=$(TITAN_TEST_LDFLAGS)) \
@@ -1418,6 +1429,7 @@ $(TITAN_TEST_CONFIG_STAMP): FORCE
 	else \
 	  rm -f $(TITAN_TEST_MODULE_OBJECTS) \
 	    $(TITAN_TEST_NATIVE_OBJECTS) $(TITAN_TEST_BUILD_DIR)/ssl_allocator_fixture.o \
+	    $(TITAN_TEST_LINUX_FAULT_OUTPUTS) \
 	    $(TITAN_TEST_BUILD_DIR)/ssl_error_strings.o $(TITAN_TEST_BUILD_DIR)/os_descriptor_limit.o \
 	    $(TITAN_TEST_BUILD_DIR)/os_process_host_child \
 	    $(TITAN_TEST_EXECUTABLE); \
@@ -1498,6 +1510,39 @@ $(TITAN_TEST_BUILD_DIR)/sqlite3_worker_fixture.o: spec/fixtures/stdlib/native/sq
 	$(CC) -std=c99 -Wall -Wextra -Werror -fPIC -pthread \
 	  $(TITAN_TEST_CPPFLAGS) $(TITAN_TEST_CFLAGS) $(SQLITE3_CPPFLAGS) \
 	  -I"$$fixture_lua_include" -Ispec/fixtures/stdlib/native -c "$<" -o "$@"
+
+ifeq ($(HOST_OS),Linux)
+$(TITAN_TEST_BUILD_DIR)/transfer_alloc_fault_api.h: spec/fixtures/stdlib/native/transfer_alloc_fault_api.h $(TITAN_TEST_CONFIG_STAMP)
+	cp "$<" "$@"
+$(TITAN_TEST_BUILD_DIR)/uv_sync_alloc_fault_api.h: spec/fixtures/stdlib/native/uv_sync_alloc_fault_api.h $(TITAN_TEST_CONFIG_STAMP)
+	cp "$<" "$@"
+$(TITAN_TEST_BUILD_DIR)/thread_retirement_fault_api.h: spec/fixtures/stdlib/native/thread_retirement_fault_api.h $(TITAN_TEST_CONFIG_STAMP)
+	cp "$<" "$@"
+$(TITAN_TEST_BUILD_DIR)/transfer_alloc_fault.o: spec/fixtures/stdlib/native/transfer_alloc_fault.c $(TITAN_TEST_BUILD_DIR)/transfer_alloc_fault_api.h titan/transfer_native.h $(TITAN_TEST_COMPILER_PREREQS) $(TITAN_TEST_CONFIG_STAMP)
+	@set -e; \
+	fixture_lua_include="$$( $(TEST_LUA) -E -e 'io.write(assert(require("titan-compiler.driver").LUA_SOURCE_PATH))' )"; \
+	test -n "$$fixture_lua_include" && test -f "$$fixture_lua_include/lua.h"; \
+	$(CC) -std=c99 -Wall -Wextra -Werror -fPIC -pthread \
+	  $(TITAN_TEST_CPPFLAGS) $(TITAN_TEST_CFLAGS) \
+	  -I"$$fixture_lua_include" -I"$(TITAN_TEST_INSTALL_ROOT)/include" \
+	  -Ititan -Ispec/fixtures/stdlib/native -c "$<" -o "$@"
+$(TITAN_TEST_BUILD_DIR)/uv_sync_alloc_fault.o: spec/fixtures/stdlib/native/uv_sync_alloc_fault.c $(TITAN_TEST_BUILD_DIR)/uv_sync_alloc_fault_api.h $(TITAN_TEST_COMPILER_PREREQS) $(TITAN_TEST_CONFIG_STAMP)
+	@set -e; \
+	fixture_lua_include="$$( $(TEST_LUA) -E -e 'io.write(assert(require("titan-compiler.driver").LUA_SOURCE_PATH))' )"; \
+	test -n "$$fixture_lua_include" && test -f "$$fixture_lua_include/lua.h"; \
+	$(CC) -std=c99 -Wall -Wextra -Werror -fPIC -pthread \
+	  $(TITAN_TEST_CPPFLAGS) $(TITAN_TEST_CFLAGS) \
+	  -I"$$fixture_lua_include" -Ispec/fixtures/stdlib/native -c "$<" -o "$@"
+$(TITAN_TEST_BUILD_DIR)/thread_retirement_fault.o: spec/fixtures/stdlib/native/thread_retirement_fault.c $(TITAN_TEST_BUILD_DIR)/thread_retirement_fault_api.h $(TITAN_TEST_COMPILER_PREREQS) $(wildcard $(TITAN_TEST_INSTALL_ROOT)/include/uv/*.h) $(TITAN_TEST_CONFIG_STAMP)
+	@set -e; \
+	fixture_lua_include="$$( $(TEST_LUA) -E -e 'io.write(assert(require("titan-compiler.driver").LUA_SOURCE_PATH))' )"; \
+	test -n "$$fixture_lua_include" && test -f "$$fixture_lua_include/lua.h"; \
+	$(CC) -std=c99 -Wall -Wextra -Werror -fPIC -pthread \
+	  $(TITAN_TEST_CPPFLAGS) $(TITAN_TEST_FEATURE_CPPFLAGS) $(TITAN_TEST_CFLAGS) \
+	  -I"$$fixture_lua_include" -I"$(TITAN_TEST_INSTALL_ROOT)/include" \
+	  -Ispec/fixtures/stdlib/native -c "$<" -o "$@"
+endif
+
 $(TITAN_TEST_BUILD_DIR)/os_process_host_child: spec/fixtures/stdlib/native/os_process_host_child.c $(TITAN_TEST_CONFIG_STAMP)
 	$(CC) -std=c99 -Wall -Wextra -Werror $(TITAN_TEST_CPPFLAGS) $(TITAN_TEST_CFLAGS) \
 	  "$<" $(TITAN_TEST_LDFLAGS) -o "$@"

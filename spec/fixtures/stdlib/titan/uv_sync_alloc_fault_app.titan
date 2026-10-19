@@ -1,0 +1,145 @@
+local uv = import "uv"
+local test = import "test"
+
+foreign import "uv_sync_alloc_fault_api.h"
+foreign import "stdio.h"
+
+local function thread_retirement_failure(detach: boolean): integer
+  local token: foreign *void = nil
+  defer if token ~= nil then
+    local result = uv.native_thread_join(token)
+    if result == 0 then token = nil end
+    test.assert(result == 0, "native thread cleanup did not retire its valid token")
+  end
+  local status, created = uv.create_native_thread(ffi.titan_uv_thread_fault_worker, nil)
+  token = created
+  test.assert(status == 0 and token ~= nil)
+  if detach then ffi.titan_uv_thread_fault_arm(2)
+  else ffi.titan_uv_thread_fault_arm(1) end
+  defer ffi.titan_uv_thread_fault_disarm()
+  local result: integer = 0
+  if detach then result = uv.native_thread_detach(token)
+  else result = uv.native_thread_join(token) end
+  ffi.titan_uv_thread_fault_disarm()
+  local freed: integer = ffi.titan_uv_thread_fault_frees()
+  -- Even on an unexpected success/early free, never re-use consumed storage.
+  if result == 0 or freed ~= 0 then token = nil end
+  test.assert(result < 0 and ffi.titan_uv_thread_fault_failures() == 1,
+              "valid native token did not reach the isolated retirement error")
+  test.assert(freed == 0,
+              "failed native retirement consumed caller-owned token storage")
+  local joined = uv.native_thread_join(token)
+  if joined == 0 then token = nil end
+  test.assert(joined == 0 and token == nil,
+              "nonzero native retirement did not preserve a usable token")
+  test.assert(ffi.titan_uv_thread_fault_frees() == 1,
+              "later successful join did not consume token storage exactly once")
+  ffi.puts("UV_NATIVE_OWNERSHIP_OK")
+  return 0
+end
+
+local function thread_constructor_failure(allocation: boolean): integer
+  test.assert(ffi.titan_uv_mutex_fault_install(L) == 1,
+              "could not isolate Lua allocation traffic")
+  defer ffi.titan_uv_mutex_fault_restore(L)
+  local token: foreign *void = nil
+  defer if token ~= nil then
+    local joined = uv.native_thread_join(token)
+    if joined == 0 then token = nil end
+    test.assert(joined == 0, "unexpected native thread could not be retired")
+  end
+  if allocation then ffi.titan_uv_thread_fault_arm(3)
+  else ffi.titan_uv_thread_fault_arm(4) end
+  defer ffi.titan_uv_thread_fault_disarm()
+  local status, created = uv.create_native_thread(ffi.titan_uv_thread_fault_worker, nil)
+  token = created
+  ffi.titan_uv_thread_fault_disarm()
+  test.assert(token == nil and ffi.titan_uv_thread_fault_failures() == 1 and
+              ffi.titan_uv_thread_fault_allocations() == 1,
+              "native constructor did not reject its isolated failure without a token")
+  if allocation then
+    test.assert(status == uv.ENOMEM and
+                ffi.titan_uv_thread_fault_creations() == 0 and
+                ffi.titan_uv_thread_fault_frees() == 0,
+                "failed token allocation reached native acceptance or freed absent storage")
+  else
+    test.assert(status == uv.EAGAIN and
+                ffi.titan_uv_thread_fault_creations() == 1 and
+                ffi.titan_uv_thread_fault_frees() == 1,
+                "failed native creation did not release token storage exactly once")
+  end
+  ffi.puts("UV_NATIVE_OWNERSHIP_OK")
+  return 0
+end
+
+function main(args: {string}): integer
+  test.assert(#args == 1, "expected one native ownership scenario")
+  local scenario = args[1]
+  if scenario == "thread-join-failure" then return thread_retirement_failure(false) end
+  if scenario == "thread-detach-failure" then return thread_retirement_failure(true) end
+  if scenario == "thread-token-allocation-failure" then
+    return thread_constructor_failure(true)
+  end
+  if scenario == "thread-native-create-failure" then
+    return thread_constructor_failure(false)
+  end
+  local mode = 0
+  if scenario == "malloc-failure" then mode = 1
+  elseif scenario == "init-failure" then mode = 2
+  elseif scenario == "success-and-destroy" then mode = 3
+  else raise "unknown mutex allocation scenario"
+  end
+
+  test.assert(ffi.titan_uv_mutex_fault_install(L) == 1,
+              "could not isolate Lua allocation traffic")
+  defer ffi.titan_uv_mutex_fault_restore(L)
+  local native: foreign *void = nil
+  local locked = false
+  defer do
+    if native ~= nil then
+      if locked then uv.native_mutex_unlock(native) end
+      uv.native_mutex_destroy(native)
+    end
+  end
+  ffi.titan_uv_mutex_fault_arm(mode)
+  defer ffi.titan_uv_mutex_fault_disarm()
+  native = uv.mutex_t.create_native()
+  ffi.titan_uv_mutex_fault_disarm()
+
+  test.assert(ffi.titan_uv_mutex_fault_allocations() == 1,
+              "create_native did not reach the isolated heap allocation")
+  if mode == 1 then
+    test.assert(native == nil, "malloc failure returned a mutex")
+    test.assert(ffi.titan_uv_mutex_fault_failures() == 1 and
+                ffi.titan_uv_mutex_fault_initializations() == 0 and
+                ffi.titan_uv_mutex_fault_frees() == 0,
+                "malloc rejection initialized or freed absent storage")
+  elseif mode == 2 then
+    test.assert(native == nil, "native initialization failure returned a mutex")
+    test.assert(ffi.titan_uv_mutex_fault_failures() == 1 and
+                ffi.titan_uv_mutex_fault_initializations() == 1 and
+                ffi.titan_uv_mutex_fault_frees() == 1,
+                "initialization rejection did not free its allocation exactly once")
+  else
+    test.assert(native ~= nil, "unpoisoned create_native failed")
+    test.assert(ffi.titan_uv_mutex_fault_failures() == 0 and
+                ffi.titan_uv_mutex_fault_initializations() == 1 and
+                ffi.titan_uv_mutex_fault_frees() == 0,
+                "successful initialization lost heap ownership")
+    local status = uv.native_mutex_trylock(native)
+    locked = status == 0
+    test.assert(locked, "created mutex could not be acquired")
+    uv.native_mutex_unlock(native)
+    locked = false
+    uv.native_mutex_destroy(native)
+    native = nil
+    test.assert(ffi.titan_uv_mutex_fault_frees() == 1,
+                "native_mutex_destroy did not free its heap allocation exactly once")
+  end
+  local before: integer = ffi.titan_uv_mutex_fault_frees()
+  uv.native_mutex_destroy(nil)
+  test.assert((ffi.titan_uv_mutex_fault_frees() as integer) == before,
+              "NULL destroy released unrelated storage")
+  ffi.puts("UV_NATIVE_OWNERSHIP_OK")
+  return 0
+end

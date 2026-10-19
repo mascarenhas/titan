@@ -119,10 +119,9 @@ An idle open `Connection` implements
 Use `async.TransferValue.from_value(connection)` and decode its custom record
 policy with `packet:to_value()` in a state with an active async Runtime. The
 same-process handoff preserves the client/server role, selected subprotocol,
-read limit and unread WebSocket, HTTP upgrade and TCP/TLS bytes. Its private
-protobuf schema contains copied WebSocket state and the known HTTP child bytes.
-If outer serialization fails after the child detaches, the hook closes the
-detached transport and leaves the source terminal.
+read limit and unread WebSocket, HTTP upgrade and TCP/TLS bytes. If serializing
+the enclosing value fails after the child transport detached, the hook closes
+the detached transport and leaves the source terminal.
 
 Transfer rejects pending reader, writer, Ping, Pong, Close, shutdown or
 retirement work, and rejects a closing or terminal session. An operation remains
@@ -138,11 +137,11 @@ before encoding; all WebSocket and native operation guards still apply.
 
 Successful encoding closes the source facade before delivery without sending
 a WebSocket Close frame. The destination continues the existing protocol
-session. Adopt the payload exactly once, or recover it locally after rejected
-delivery. Replaying it can double close or access freed resources; dropping it
-leaks the detached transport. No automatic replay protection, finalizer or
-delivery rollback is provided. The representation is not suitable for storage
-or another process.
+session. The payload is a manually owned, same-process capability: follow the
+[shared manual-handoff rules](standard-library-transfer.md#shared-manual-handoff-rules),
+adopting it exactly once or recovering it locally after rejected delivery. It is
+not suitable for storage or another process, and dropping it leaks the detached
+transport.
 
 `Connection.discard_transfer_payload(payload: string): integer` consumes an
 unadopted session payload without a Runtime by discarding its HTTP child

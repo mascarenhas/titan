@@ -81,8 +81,10 @@ input module is ignored in test mode. The first requested root owns the
 executable path, including the usual folder-root `__main` rule, so unrelated
 roots can form one test executable. No provider pair or Lua shim is emitted.
 Adjacent generated artifacts use the executable stem: `__test_runner.c/.o` and
-`__test_entrypoint.c/.o`; ordinary test and dependency translation units keep
-their normal source-adjacent paths.
+`__test_entrypoint.c/.o`. Ordinary test and dependency translation units keep
+their normal generated-file locations: the selected
+[output directory](output-directory.md), or beside the source when none is
+selected.
 
 `titan.test` follows ordinary source/provider resolution and uses the same
 standard provider as other imports. Test mode neither copies its source nor

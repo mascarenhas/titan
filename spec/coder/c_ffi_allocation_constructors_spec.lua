@@ -141,4 +141,291 @@ describe("constructor-selected C allocation code generation", function()
             ]], [[assert(test.exercise() == 15)]])
         end)
     end)
+
+    it("keeps automatic pointer-view slots live through captured and deferred use",
+    function()
+        h.run_coder([[
+            foreign import "stdlib.h"
+            foreign type RawSlot = *void
+
+            local foreign function release_slot(slot: *(*void)): int
+                local raw = slot[0]
+                slot[0] = nil
+                if raw == nil then return 0 end
+                ffi.free(raw)
+                return 1
+            end
+
+            function plain(): integer
+                local slot: foreign *RawSlot = foreign RawSlot.new_array(1)
+                local empty: foreign *RawSlot = foreign RawSlot.new_array(1)
+                if slot[0] ~= nil or empty[0] ~= nil then
+                    raise "plain pointer slots were not zero-initialized"
+                end
+                slot[0] = empty as foreign *void
+                if slot[0] ~= empty as foreign *void or empty[0] ~= nil then
+                    raise "distinct automatic pointer slots shared backing"
+                end
+                slot[0] = nil
+                return 1
+            end
+
+            function ordinary(): integer
+                local released = 0
+                local observed = 0
+                do
+                    local slot: foreign *RawSlot = foreign RawSlot.new_array(1)
+                    local empty: foreign *RawSlot = foreign RawSlot.new_array(1)
+                    defer do
+                        released = released + (release_slot(slot) as integer)
+                        released = released + (release_slot(empty) as integer)
+                    end
+                    if slot[0] ~= nil or empty[0] ~= nil then
+                        raise "automatic pointer slots were not zero-initialized"
+                    end
+                    slot[0] = ffi.malloc(foreign int.sizeof as foreign size_t)
+                    if slot[0] == nil then raise "could not allocate slot payload" end
+                    local payload = slot[0] as foreign *int
+                    payload[0] = 41
+                    observed = payload[0] as integer
+                end
+                return observed + released
+            end
+
+            function captured(fail: boolean): integer
+                local released = 0
+                local observed = 0
+                do
+                    local slot: foreign *RawSlot = foreign RawSlot.new_array(1)
+                    local empty: foreign *RawSlot = foreign RawSlot.new_array(1)
+                    defer do
+                        released = released + (release_slot(slot) as integer)
+                        released = released + (release_slot(empty) as integer)
+                    end
+                    local action = function ()
+                        if slot[0] ~= nil or empty[0] ~= nil then
+                            raise "captured pointer slots were not zero-initialized"
+                        end
+                        slot[0] = ffi.malloc(foreign int.sizeof as foreign size_t)
+                        if slot[0] == nil then raise "could not allocate slot payload" end
+                        local payload = slot[0] as foreign *int
+                        payload[0] = 43
+                        observed = payload[0] as integer
+                        if fail then raise "expected pointer-slot unwind" end
+                    end
+                    action()
+                catch
+                    if not fail or error ~= "expected pointer-slot unwind" then
+                        raise error
+                    end
+                end
+                return observed + released
+            end
+        ]], [[
+            assert(test.plain() == 1)
+            assert(test.ordinary() == 42)
+            assert(test.captured(false) == 44)
+            assert(test.captured(true) == 44)
+        ]])
+    end)
+
+    it("preserves borrowed automatic array pointers across caught-error reassignments and C out-parameters",
+    function()
+        h.with_extra_cflags({ "-O2" }, function()
+            with_header([[
+                typedef struct ffi_pair {
+                    int left;
+                    int right;
+                } ffi_pair;
+
+                static void ffi_advance_pair(ffi_pair **cursor, int step) {
+                    *cursor = *cursor + step;
+                }
+
+                static void ffi_repoint_pair(
+                    ffi_pair **cursor,
+                    ffi_pair *target
+                ) {
+                    *cursor = target;
+                }
+            ]], function(header)
+                h.run_coder([[
+                    foreign import "]] .. header .. [["
+
+                    local function fail()
+                        raise "expected"
+                    end
+
+                    function reassigned(): integer
+                        local cursor: foreign *ffi_pair =
+                            foreign ffi_pair.new_array(2)
+                        local other: foreign *ffi_pair =
+                            foreign ffi_pair.new_array(1)
+                        cursor[0].left = 11
+                        cursor[1].left = 17
+                        other[0].left = 29
+                        do
+                            cursor = cursor + 1
+                        catch
+                        end
+                        cursor[0].right = 23
+                        do
+                            fail()
+                        catch
+                        end
+                        local stepped = (cursor[0].left as integer) * 100
+                            + (cursor[0].right as integer)
+                        do
+                            cursor = other
+                        catch
+                        end
+                        cursor[0].right = 31
+                        do
+                            fail()
+                        catch
+                        end
+                        return stepped * 10000
+                            + (cursor[0].left as integer) * 100
+                            + (cursor[0].right as integer)
+                    end
+
+                    function out_param(): integer
+                        local cursor: foreign *ffi_pair =
+                            foreign ffi_pair.new_array(2)
+                        local other: foreign *ffi_pair =
+                            foreign ffi_pair.new_array(1)
+                        cursor[0].left = 37
+                        cursor[1].left = 41
+                        other[0].left = 43
+                        do
+                            ffi.ffi_advance_pair(cursor, 1)
+                        catch
+                        end
+                        cursor[0].right = 47
+                        do
+                            fail()
+                        catch
+                        end
+                        local stepped = (cursor[0].left as integer) * 100
+                            + (cursor[0].right as integer)
+                        do
+                            ffi.ffi_repoint_pair(cursor, other)
+                        catch
+                        end
+                        cursor[0].right = 53
+                        do
+                            fail()
+                        catch
+                        end
+                        return stepped * 10000
+                            + (cursor[0].left as integer) * 100
+                            + (cursor[0].right as integer)
+                    end
+                ]], [[
+                    assert(test.reassigned() == 17232931)
+                    assert(test.out_param() == 41474353)
+                ]])
+            end)
+        end)
+    end)
+
+    it("spills bare foreign function-pointer locals across caught errors",
+    function()
+        with_header([[
+            static int ffi_step_value(int value) {
+                return value + 7;
+            }
+        ]], function(header)
+            h.run_coder([[
+                foreign import "]] .. header .. [["
+
+                local function fail()
+                    raise "expected"
+                end
+
+                function exercise(): integer
+                    local cb: foreign function(int): int = nil
+                    do
+                        cb = ffi.ffi_step_value
+                        fail()
+                    catch
+                    end
+                    return cb(5) as integer
+                end
+            ]], [[
+                assert(test.exercise() == 12)
+            ]])
+        end)
+    end)
+
+    it("keeps loop-scoped borrowed pointer slots live for deferred release after a caught error before decode",
+    function()
+        h.run_coder([[
+            foreign import "stdlib.h"
+            foreign type RawSlot = *void
+
+            local foreign function acquire_slot(slot: *(*void), tag: int): int
+                local raw = ffi.malloc(foreign int.sizeof as foreign size_t)
+                if raw == nil then return 0 end
+                local payload = raw as foreign *int
+                payload[0] = tag
+                slot[0] = raw
+                return 1
+            end
+
+            local foreign function decode_slot(slot: *(*void)): int
+                local raw = slot[0]
+                slot[0] = nil
+                if raw == nil then return -1 end
+                local payload = raw as foreign *int
+                local tag = payload[0]
+                ffi.free(raw)
+                return tag
+            end
+
+            local foreign function release_slot(slot: *(*void)): int
+                local raw = slot[0]
+                slot[0] = nil
+                if raw == nil then return 0 end
+                local payload = raw as foreign *int
+                local tag = payload[0]
+                ffi.free(raw)
+                return tag
+            end
+
+            local function fail_before_decode()
+                raise "expected before decode"
+            end
+
+            function exercise(): integer
+                local released = 0
+                local decoded = 0
+                local caught = 0
+                for attempt = 1, 2 do
+                    local slot: foreign *RawSlot = foreign RawSlot.new_array(1)
+                    defer do
+                        released = released + (release_slot(slot) as integer)
+                    end
+                    if slot[0] ~= nil then
+                        raise "loop pointer slot was not zero-initialized"
+                    end
+                    if acquire_slot(slot, (attempt * 10 + 7) as foreign int) == 0 then
+                        raise "could not allocate slot payload"
+                    end
+                    if attempt == 1 then
+                        fail_before_decode()
+                    end
+                    decoded = decoded + (decode_slot(slot) as integer)
+                catch
+                    if error ~= "expected before decode" then
+                        raise error
+                    end
+                    caught = caught + 1
+                end
+                return caught * 10000 + released * 100 + decoded
+            end
+        ]], [[
+            assert(test.exercise() == 11727)
+        ]])
+    end)
 end)

@@ -584,10 +584,9 @@ fields; upgrade APIs retain their `io.ReaderWriterCloser` return type. Its hook
 preserves the already received protocol prefix. WebSocket transfer unwraps that
 HTTP-owned stream and uses this hook automatically. Custom stream implementations
 passed to `request_upgrade_on` do not gain native handoff support: these HTTP
-hooks require a concrete `net.Connection` or `ssl.Connection` transport. Each
-owner encodes a private protobuf schema containing its metadata and the known
-transport's byte payload. Failure to serialize after transport detachment closes
-the detached transport and leaves the source inactive.
+hooks require a concrete `net.Connection` or `ssl.Connection` transport. If
+serializing the enclosing value fails after the transport detached, the hook
+closes the detached transport and leaves the source inactive.
 
 `Exchange.discard_transfer_payload(payload: string): integer` and
 `UpgradedStream.discard_transfer_payload(payload: string): integer` consume a
@@ -595,7 +594,7 @@ known unadopted payload without a Runtime and return its native close status.
 A close attempt consumes the payload even on an error; do not adopt or discard
 the bytes afterward.
 
-This is the [manual resource handoff contract](standard-library-transfer.md#native-resource-handoff):
+This is the [manual resource handoff contract](standard-library-transfer.md#shared-manual-handoff-rules):
 the source detaches before delivery, payloads must be adopted exactly once, and
 the caller owns recovery after failed delivery. Raw parser state is process-local
 and belongs to the same native provider. Windows pending overlapped reads reject

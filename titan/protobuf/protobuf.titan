@@ -4,6 +4,7 @@
 
 local reflect = import "reflect"
 local string = import "string"
+local gc = import "gc"
 foreign import "lua.h"
 foreign import "titan/ffi.h"
 foreign import "native.h"
@@ -271,20 +272,38 @@ local function unzigzag(number: integer): integer
   return (number >> 1) ~ -(number & 1)
 end
 
+-- Internal compiled transfer entries. Callers supply the already inspected
+-- root; Encoder retains the normal visibility, cycle, depth, and size guards.
+function serialize_inspected_record_to_buffer(
+    buf: foreign *void, candidate: reflect.RecordValue)
+  local pbuf = buf as foreign *titan_protobuf_buffer
+  local start = pbuf.length as integer
+  local encoder = Encoder({})
+  encoder:record_value(pbuf, candidate, 1)
+  check_message_size((pbuf.length as integer) - start)
+end
+
+function serialize_inspected_union_to_buffer(
+    buf: foreign *void, candidate: reflect.UnionValue)
+  local pbuf = buf as foreign *titan_protobuf_buffer
+  local start = pbuf.length as integer
+  local encoder = Encoder({})
+  encoder:union_value(pbuf, candidate, 1)
+  check_message_size((pbuf.length as integer) - start)
+end
+
 --- Append the wire encoding of a public record or union instance to an initialized titan_protobuf_buffer.
 -- @param buf Pointer to an initialized titan_protobuf_buffer.
 -- @param candidate Public record or union instance to traverse.
 -- @usage standard-library-protobuf.md#api
 function serialize_to_buffer(buf: foreign *void, candidate: value)
-  local pbuf = buf as foreign *titan_protobuf_buffer
-  local start = pbuf.length as integer
-  local encoder = Encoder({})
   case reflect.inspect(candidate)
-  when is_record(record_value) then encoder:record_value(pbuf, record_value, 1)
-  when is_union(union_value) then encoder:union_value(pbuf, union_value, 1)
+  when is_record(record_value) then
+    serialize_inspected_record_to_buffer(buf, record_value)
+  when is_union(union_value) then
+    serialize_inspected_union_to_buffer(buf, union_value)
   else raise "protobuf: root must be a public record or union"
   end
-  check_message_size((pbuf.length as integer) - start)
 end
 
 --- Serialize a public record or union instance, rejecting cycles and unsupported encountered values.
@@ -456,4 +475,8 @@ function schema(descriptor: reflect.Type): string
   builder.output:write("syntax = \"proto3\";\n\n")
   builder:type_name(resolved, "Root", 1)
   return builder.output:drain()
+end
+
+do
+  gc.ephemeron(active_record_payloads as {value: value})
 end

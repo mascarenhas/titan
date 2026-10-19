@@ -134,6 +134,12 @@ titan_check_module_compatibility(L, a_b_c_provider, "a_b_c_compatibility", "a/b.
     verifier_source, verifier_length);
 ```
 
+Generated dynamic imports declare one `TitanModuleProvider` variable per
+logical compiled module, even when several local aliases import it. Only the
+declaration is shared: every alias keeps its own module slot and still elects
+and checks the provider, calls initialization, and rechecks the canonical
+provider afterward. Deduplication is by logical module, not provider filename.
+
 The registry entry for `"Titan module a.b.c"` takes precedence over the filename.
 If it exists, its native payload supplies an export callback, including when
 the module was initialized from an executable, archive, or `package.loadlib`.

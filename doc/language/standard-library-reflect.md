@@ -466,10 +466,11 @@ distinct from Titan's `integer` and `float`.
 C struct and union descriptors report their C names, typedef spelling,
 `fields`, and completeness; structs additionally report `has_fam`. Each
 `ForeignFieldType` supplies `name`, `type`, `bitfield`, and
-`is_flexible_array`. `is_foreign_typedef` supplies `name`,
-`target_descriptor`, and qualifiers. These descriptors do not make private
-header-dependent C types exportable or dynamically validate an arbitrary
-pointer's pointee.
+`is_flexible_array`. `is_foreign_typedef` supplies `name`, `target_descriptor`,
+and qualifiers. These
+descriptors do not change which C type graphs a public interface may export
+(see the [FFI export rules](ffi.md)), and they do not dynamically validate an
+arbitrary pointer's pointee.
 
 Recursive C declarations use `Type.is_foreign_named` at references that would
 otherwise expand a declaration again. Its `ForeignNamedType` payload exposes

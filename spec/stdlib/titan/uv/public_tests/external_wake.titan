@@ -1,0 +1,1293 @@
+-- Public compiled external_wake_t behavior and native target lifetime tests.
+local ew_transfer = import "transfer"
+local ew_state_fixture = import "lua.receiver_fixture"
+
+foreign type EwVoidPtr = *void
+foreign type EwUnaryVoidFn = function (*void): void
+foreign type EwNotifyFn = function (*void): int
+foreign type EwBarrierWaitFn = function (*void): int
+
+-- Raw pointers have no dynamic pointee guard. Keep them in nominal fields when
+-- indexing Titan containers; native worker arrays remain explicitly owned C data.
+local record EwTarget
+  native: foreign *void
+end
+
+local function ew_release_targets(targets: owned EwVoidPtr[])
+  for index = 0, #targets - 1 do
+    local target = targets[index]
+    targets[index] = nil
+    uv.native_external_wake_release(target)
+  end
+end
+
+local function ew_pointer(item: ew_transfer.TransferValue): foreign *void
+  case item
+  when is_pointer(pointer) then return pointer
+  else raise "expected TransferValue.is_pointer"
+  end
+end
+
+-- C-only worker that waits on a semaphore, notifies one retained target through
+-- exact C function pointers, records the status, and releases its target ref.
+local foreign function ew_sole_notify_worker(argument: *void)
+  local slots: foreign *EwVoidPtr = argument as foreign *EwVoidPtr
+  local target: foreign *void = slots[0]
+  local sem_go: foreign *void = slots[1]
+  local status_out: foreign *int = slots[2] as foreign *int
+  local wait_fn: foreign EwUnaryVoidFn = slots[3] as foreign EwUnaryVoidFn
+  local notify_fn: foreign EwNotifyFn = slots[4] as foreign EwNotifyFn
+  local release_fn: foreign EwUnaryVoidFn = slots[5] as foreign EwUnaryVoidFn
+  wait_fn(sem_go)
+  status_out[0] = notify_fn(target)
+  status_out[1] = 1 as foreign int
+  release_fn(target)
+  slots[0] = nil
+end
+
+-- C-only worker that notifies an array of retained targets in order, optionally
+-- repeating each notification to exercise duplicate coalescing, then releases
+-- each producer reference.
+local foreign function ew_batch_notify_worker(argument: *void)
+  local slots: foreign *EwVoidPtr = argument as foreign *EwVoidPtr
+  local targets: foreign *EwVoidPtr = slots[0] as foreign *EwVoidPtr
+  local statuses: foreign *int = slots[1] as foreign *int
+  local counts: foreign *int = slots[2] as foreign *int
+  local sem_ready: foreign *void = slots[3]
+  local sem_go: foreign *void = slots[4]
+  local total: foreign int = counts[0]
+  local repeats: foreign int = counts[1]
+
+  if sem_ready ~= nil then
+    uv.native_sem_post { native = sem_ready }
+  end
+  if sem_go ~= nil then
+    uv.native_sem_wait { native = sem_go }
+  end
+
+  for index = 0 as foreign int, total - (1 as foreign int) do
+    local target: foreign *void = targets[index]
+    uv.native_external_wake_retain { target = target }
+    uv.native_external_wake_release { target = target }
+    local last_status: foreign int = 0 as foreign int
+    for _rep = 0 as foreign int, repeats - (1 as foreign int) do
+      last_status = uv.native_external_wake_notify { target = target }
+    end
+    statuses[index] = last_status
+    uv.native_external_wake_release { target = target }
+    targets[index] = nil
+  end
+end
+
+local function ew_notify_batch(targets: owned EwVoidPtr[], statuses: owned int[])
+  local counts: owned int[] = foreign int.new_array(2)
+  counts[0] = #targets
+  counts[1] = 1
+  local slots: owned EwVoidPtr[] = foreign EwVoidPtr.new_array(5)
+  slots[0] = targets
+  slots[1] = statuses
+  slots[2] = counts
+  local worker = uv.thread_t()
+  local started, joined = false, false
+  defer if started and not joined then success(uv.thread_join(worker)) end
+  local owners: {value} = {slots, targets, statuses, counts}
+  local status = uv.thread_create(worker, ew_batch_notify_worker, slots, owners)
+  started = status == 0
+  success(status)
+  success(uv.thread_join(worker))
+  joined = true
+end
+
+-- C-only worker synchronized by a native barrier for multi-producer burst
+-- notifications and concurrent notify-versus-unregister/close races.
+local foreign function ew_barrier_race_worker(argument: *void)
+  local slots: foreign *EwVoidPtr = argument as foreign *EwVoidPtr
+  local targets: foreign *EwVoidPtr = slots[0] as foreign *EwVoidPtr
+  local barrier: foreign *void = slots[1]
+  local params: foreign *int = slots[2] as foreign *int
+  local done_sem: foreign *void = slots[3]
+  local start_sem: foreign *void = slots[4]
+
+  local barrier_wait: foreign EwBarrierWaitFn = uv.native_barrier_wait
+  local retain_fn: foreign EwUnaryVoidFn = uv.native_external_wake_retain
+  local release_fn: foreign EwUnaryVoidFn = uv.native_external_wake_release
+  local notify_fn: foreign EwNotifyFn = uv.native_external_wake_notify
+
+  local count: foreign int = params[0]
+  local reverse: foreign int = params[1]
+  local allow_einval: foreign int = params[2]
+  local expected_einval: foreign int = params[3]
+  local failures: foreign int = 0 as foreign int
+  local zero_count: foreign int = 0 as foreign int
+  local einval_count: foreign int = 0 as foreign int
+
+  -- Creation failure releases accepted workers without entering a partial barrier.
+  uv.native_sem_wait(start_sem)
+  if params[7] ~= (0 as foreign int) then
+    for index = 0 as foreign int, count - (1 as foreign int) do
+      release_fn(targets[index])
+      targets[index] = nil
+    end
+    return
+  end
+
+  local barrier_rc: foreign int = barrier_wait(barrier)
+  if barrier_rc < (0 as foreign int) then
+    params[4] = 1000 as foreign int
+    for index = 0 as foreign int, count - (1 as foreign int) do
+      release_fn(targets[index])
+      targets[index] = nil
+    end
+    if done_sem ~= nil then uv.native_sem_post(done_sem) end
+    return
+  end
+
+  for step = 0 as foreign int, count - (1 as foreign int) do
+    local index: foreign int = step
+    if reverse ~= (0 as foreign int) then
+      index = (count - (1 as foreign int)) - step
+    end
+    local target: foreign *void = targets[index]
+    retain_fn(target)
+    release_fn(target)
+    local rc: foreign int = notify_fn(target)
+    if rc == (0 as foreign int) then
+      zero_count = zero_count + (1 as foreign int)
+    elseif allow_einval ~= (0 as foreign int) then
+      if rc == expected_einval then
+        einval_count = einval_count + (1 as foreign int)
+      else
+        failures = failures + (1 as foreign int)
+      end
+    else
+      failures = failures + (1 as foreign int)
+    end
+    release_fn(target)
+    targets[index] = nil
+  end
+
+  params[4] = failures
+  params[5] = zero_count
+  params[6] = einval_count
+  if done_sem ~= nil then
+    uv.native_sem_post(done_sem)
+  end
+end
+
+local record EwProducer
+  thread: uv.thread_t
+  targets: owned EwVoidPtr[]
+  params: owned int[]
+  slots: owned EwVoidPtr[]
+  barrier: uv.barrier_t
+  start: uv.sem_t
+  done: uv.sem_t?
+  started: boolean
+  joined: boolean
+end
+
+local function ew_producer(count: integer, reverse: integer, allow_einval: integer,
+                           barrier: uv.barrier_t, start: uv.sem_t,
+                           done: uv.sem_t?): EwProducer
+  local targets: owned EwVoidPtr[] = foreign EwVoidPtr.new_array(count)
+  local params: owned int[] = foreign int.new_array(8)
+  params[0] = count
+  params[1] = reverse
+  params[2] = allow_einval
+  params[3] = uv.EINVAL as foreign int
+  params[4] = -1
+  local slots: owned EwVoidPtr[] = foreign EwVoidPtr.new_array(5)
+  slots[0] = targets
+  slots[1] = barrier:borrow()
+  slots[2] = params
+  if done ~= nil then slots[3] = done:borrow() end
+  slots[4] = start:borrow()
+  return EwProducer(uv.thread_t(), targets, params, slots, barrier, start, done,
+                    false, false)
+end
+
+local function EwProducer:launch(targets: {EwTarget})
+  for index = 1, #targets do
+    local target = targets[index].native
+    uv.native_external_wake_retain(target)
+    self.targets[index - 1] = target
+  end
+  local status = uv.thread_create(self.thread, ew_barrier_race_worker, self.slots, self)
+  self.started = status == 0
+  success(status)
+end
+
+local function EwProducer:join()
+  if self.started and not self.joined then
+    success(uv.thread_join(self.thread))
+    self.joined = true
+  end
+end
+
+local function ew_finish_producers(producers: {EwProducer}, start: uv.sem_t,
+                                   released: boolean)
+  if not released then
+    for index = 1, #producers do producers[index].params[7] = 1 end
+    for index = 1, #producers do
+      if producers[index].started then uv.sem_post(start) end
+    end
+  end
+  for index = 1, #producers do producers[index]:join() end
+  for index = 1, #producers do ew_release_targets(producers[index].targets) end
+end
+
+function test_external_wake_uninitialized_and_invalid_arguments(context: test.Context)
+  context:run("fresh_uninitialized_owner_rejects_operations_and_allows_idempotent_close",
+    function (_child: test.Context)
+      local wake = uv.external_wake_t()
+      local r_status, r_target = wake:reserve(1)
+      test.assert(r_status == uv.EINVAL and r_target == nil,
+                  "uninitialized external_wake_t accepted reserve")
+      test.assert(wake:activate(nil) == uv.EINVAL,
+                  "uninitialized external_wake_t accepted activate")
+      test.assert(wake:unregister(nil) == uv.EINVAL,
+                  "uninitialized external_wake_t accepted unregister")
+      local buf: owned unsigned long long[] = foreign unsigned long long.new_array(4)
+      local d_status, d_count = wake:drain(buf, 4)
+      test.assert(d_status == uv.EINVAL and (d_count as integer) == 0,
+                  "uninitialized external_wake_t accepted drain")
+      success(wake:close())
+      success(wake:close())
+
+      -- NULL producer operations must be safe no-ops or return EINVAL.
+      uv.native_external_wake_retain(nil)
+      uv.native_external_wake_release(nil)
+      test.assert((uv.native_external_wake_notify(nil) as integer) == uv.EINVAL,
+                  "NULL target notify did not return EINVAL")
+      collect()
+    end)
+
+  context:run("init_rejects_uninitialized_loop_preserving_fresh_owner_for_reuse",
+    function (_child: test.Context)
+      local uninit_loop = uv.loop_t()
+      local abandoned_wake = uv.external_wake_t()
+      test.assert(uv.external_wake_init(uninit_loop, abandoned_wake,
+                    function (_: uv.external_wake_t) end) == uv.EINVAL,
+                  "external_wake_init accepted an uninitialized loop")
+      success(abandoned_wake:close())
+      collect()
+
+      local loop = new_loop()
+      defer finish_loop(loop)
+      local wake = uv.external_wake_t()
+      test.assert(uv.external_wake_init(uninit_loop, wake,
+                    function (_: uv.external_wake_t) end) == uv.EINVAL)
+      local delivered = 0
+      success(uv.external_wake_init(loop, wake, function (owner: uv.external_wake_t)
+        test.assert(owner == wake)
+        delivered = delivered + 1
+      end))
+      test.assert(uv.external_wake_init(loop, wake,
+                    function (_: uv.external_wake_t) end) == uv.EINVAL,
+                  "second external_wake_init on active bridge succeeded")
+
+      local status, target = wake:reserve(42)
+      success(status)
+      test.assert(target ~= nil)
+      success(wake:activate(target))
+      success(uv.native_external_wake_notify(target))
+      local buf: owned unsigned long long[] = foreign unsigned long long.new_array(2)
+      local d_status, d_count = wake:drain(buf, 2)
+      success(d_status)
+      test.assert((d_count as integer) == 1 and (buf[0] as integer) == 42)
+      -- Deliver the queued async callback while the active target still refs the
+      -- handle; closing first would cancel callback delivery altogether.
+      test.assert(uv.run(loop, uv.RUN_NOWAIT) > 0,
+                  "active target did not preserve loop liveness through callback delivery")
+      success(wake:unregister(target))
+      success(wake:close())
+      success(uv.run(loop))
+      test.assert(delivered == 1)
+
+      -- Retired handle owner must reject re-initialization without leaking a core.
+      test.assert(uv.external_wake_init(loop, wake,
+                    function (_: uv.external_wake_t) end) == uv.EINVAL,
+                  "retired external_wake_t accepted re-initialization")
+      collect()
+    end)
+
+  context:run("drain_and_cross_bridge_target_validation",
+    function (_child: test.Context)
+      local loop = new_loop()
+      defer finish_loop(loop)
+      local wake1, wake2 = uv.external_wake_t(), uv.external_wake_t()
+      success(uv.external_wake_init(loop, wake1, function (_: uv.external_wake_t) end))
+      success(uv.external_wake_init(loop, wake2, function (_: uv.external_wake_t) end))
+
+      local buf: owned unsigned long long[] = foreign unsigned long long.new_array(2)
+      local nil_status, nil_count = wake1:drain(nil, 2)
+      test.assert(nil_status == uv.EINVAL and (nil_count as integer) == 0)
+      local zero_status, zero_count = wake1:drain(buf, 0)
+      test.assert(zero_status == uv.EINVAL and (zero_count as integer) == 0)
+      test.assert(wake1:activate(nil) == uv.EINVAL)
+      test.assert(wake1:unregister(nil) == uv.EINVAL)
+
+      local status, t1 = wake1:reserve(77)
+      success(status)
+      test.assert(t1 ~= nil)
+      test.assert(wake2:activate(t1) == uv.EINVAL,
+                  "bridge activated a target reserved on a different bridge")
+      test.assert(wake2:unregister(t1) == uv.EINVAL,
+                  "bridge unregistered a target reserved on a different bridge")
+
+      success(wake1:activate(t1))
+      test.assert(wake1:activate(t1) == uv.EINVAL,
+                  "duplicate activate on ARMED target succeeded")
+      test.assert(wake2:unregister(t1) == uv.EINVAL,
+                  "second bridge unregistered an ARMED target from first bridge")
+      success(wake1:unregister(t1))
+      success(wake1:close())
+      success(wake2:close())
+    end)
+end
+
+function test_external_wake_idle_and_prepared_liveness_transitions(context: test.Context)
+  context:run("idle_bridge_and_prepared_reservations_do_not_keep_loop_alive",
+    function (_child: test.Context)
+      local loop = new_loop()
+      defer finish_loop(loop)
+      local callbacks = 0
+      local wake = uv.external_wake_t()
+      success(uv.external_wake_init(loop, wake, function (_: uv.external_wake_t)
+        callbacks = callbacks + 1
+      end))
+
+      test.assert(not uv.loop_alive(loop),
+                  "idle external_wake_t referenced its loop at initialization")
+      success(uv.run(loop))
+      test.assert(callbacks == 0)
+
+      local s1, t1 = wake:reserve(101)
+      local s2, t2 = wake:reserve(102)
+      success(s1)
+      success(s2)
+      test.assert(t1 ~= nil and t2 ~= nil)
+
+      -- Prepared (unused) reservations must NOT reference the loop or accept notifies,
+      -- but MUST block bridge close with EBUSY until unregistered.
+      test.assert(not uv.loop_alive(loop),
+                  "unused prepared reservation kept an idle loop alive")
+      success(uv.run(loop))
+      test.assert(callbacks == 0)
+      test.assert((uv.native_external_wake_notify(t1) as integer) == uv.EINVAL,
+                  "prepared target accepted notification before activate")
+      test.assert(wake:close() == uv.EBUSY,
+                  "bridge closed while prepared reservations remained registered")
+
+      success(wake:unregister(t1))
+      test.assert(not uv.loop_alive(loop),
+                  "unregistering a prepared target altered idle loop liveness")
+      test.assert(wake:close() == uv.EBUSY,
+                  "bridge closed while second prepared reservation remained")
+
+      success(wake:unregister(t2))
+      test.assert(not uv.loop_alive(loop))
+      success(wake:close())
+    end)
+
+  context:run("activate_zero_to_one_refs_and_last_active_unregister_unrefs_while_prepared_remains",
+    function (_child: test.Context)
+      local loop = new_loop()
+      defer finish_loop(loop)
+      local wake = uv.external_wake_t()
+      success(uv.external_wake_init(loop, wake, function (_: uv.external_wake_t) end))
+
+      local sp, t_prep = wake:reserve(201)
+      local sa1, t_act1 = wake:reserve(202)
+      local sa2, t_act2 = wake:reserve(203)
+      success(sp)
+      success(sa1)
+      success(sa2)
+      test.assert(not uv.loop_alive(loop))
+
+      -- 0 -> 1 active wait references the bridge handle.
+      success(wake:activate(t_act1))
+      test.assert(uv.loop_alive(loop),
+                  "0 -> 1 active wait transition did not reference the loop")
+
+      -- 1 -> 2 active waits preserves loop liveness.
+      success(wake:activate(t_act2))
+      test.assert(uv.loop_alive(loop))
+
+      -- Unregistering an unactivated prepared target leaves active_waits == 2.
+      success(wake:unregister(t_prep))
+      test.assert(uv.loop_alive(loop),
+                  "unregistering prepared target unreferenced loop while active waits remained")
+
+      -- 2 -> 1 active waits keeps the loop referenced.
+      success(wake:unregister(t_act1))
+      test.assert(uv.loop_alive(loop),
+                  "2 -> 1 active wait transition prematurely unreferenced the loop")
+
+      -- Reserve another prepared target, then drop active_waits 1 -> 0.
+      local sp2, t_prep2 = wake:reserve(204)
+      success(sp2)
+      success(wake:unregister(t_act2))
+      test.assert(not uv.loop_alive(loop),
+                  "1 -> 0 active wait transition did not unreference the loop")
+      test.assert(wake:close() == uv.EBUSY,
+                  "remaining prepared target did not block close with EBUSY")
+
+      success(wake:unregister(t_prep2))
+      success(wake:close())
+    end)
+end
+
+function test_external_wake_sole_native_notification_drives_loop_liveness(_context: test.Context)
+  local loop = new_loop()
+  defer finish_loop(loop)
+  local go = uv.sem_t()
+  success(uv.sem_init(go, 0))
+  defer uv.sem_destroy(go)
+
+  local expected_id: integer = 72623859790382856
+  local target: foreign *void = nil
+  local drained: {integer} = {}
+  local callbacks = 0
+  local wake = uv.external_wake_t()
+  local buf: owned unsigned long long[] = foreign unsigned long long.new_array(4)
+
+  success(uv.external_wake_init(loop, wake, function (owner: uv.external_wake_t)
+    test.assert(owner == wake)
+    callbacks = callbacks + 1
+    local d_status, d_count = owner:drain(buf, 4)
+    success(d_status)
+    local n: integer = d_count
+    for idx = 0, n - 1 do
+      drained[#drained + 1] = buf[idx] as integer
+    end
+    test.assert(owner:close() == uv.EBUSY,
+                "active target did not block close inside callback")
+    success(owner:unregister(target))
+    test.assert(not uv.loop_alive(loop),
+                "unregistering sole active wait did not unreference the loop")
+  end))
+
+  local r_status, reserved = wake:reserve(expected_id as foreign unsigned long long)
+  success(r_status)
+  target = reserved
+  success(wake:activate(target))
+  test.assert(uv.loop_alive(loop))
+
+  -- Gate the worker thread on a prepare handle's close callback so that when
+  -- the worker notifies, external_wake_t is the sole remaining handle on loop.
+  local prep = uv.prepare_t()
+  success(uv.prepare_init(loop, prep))
+  success(uv.prepare_start(prep, function (active_prep: uv.prepare_t)
+    success(uv.prepare_stop(active_prep))
+    uv.close(active_prep:as_handle_t(), function (closed_view: uv.handle_t)
+      test.assert(not closed_view:is_initialized())
+      test.assert(uv.loop_alive(loop),
+                  "sole active external_wake_t did not keep the loop alive after prepare closed")
+      uv.sem_post(go)
+    end)
+  end))
+
+  local status_out: owned int[] = foreign int.new_array(2)
+  status_out[0] = -999 as foreign int
+  status_out[1] = 0 as foreign int
+  local wait_fn: foreign EwUnaryVoidFn = uv.native_sem_wait
+  local notify_fn: foreign EwNotifyFn = uv.native_external_wake_notify
+  local release_fn: foreign EwUnaryVoidFn = uv.native_external_wake_release
+  local slots: owned EwVoidPtr[] = foreign EwVoidPtr.new_array(6)
+  defer if slots[0] ~= nil then uv.native_external_wake_release(slots[0]) end
+  slots[0] = nil
+  slots[1] = go:borrow()
+  slots[2] = status_out
+  slots[3] = wait_fn as foreign *void
+  slots[4] = notify_fn as foreign *void
+  slots[5] = release_fn as foreign *void
+
+  local worker = uv.thread_t()
+  local started, joined = false, false
+  defer if started and not joined then
+    uv.sem_post(go)
+    success(uv.thread_join(worker))
+  end
+  local owners: {value} = {slots, status_out, go, wake}
+  uv.native_external_wake_retain(target)
+  slots[0] = target
+  local create_status = uv.thread_create(worker, ew_sole_notify_worker, slots, owners)
+  started = create_status == 0
+  success(create_status)
+
+  -- uv.run blocks until the worker notifies target, and returns as soon as
+  -- the callback unregisters target (without closing wake yet).
+  success(uv.run(loop))
+  success(uv.thread_join(worker))
+  joined = true
+
+  test.assert((status_out[0] as integer) == 0 and (status_out[1] as integer) == 1,
+              "worker native_external_wake_notify failed")
+  test.assert(callbacks == 1 and #drained == 1 and drained[1] == expected_id,
+              "sole external wake did not deliver the expected 64-bit identity")
+  success(wake:close())
+end
+
+function test_external_wake_bounded_drain_rearms_preserving_fifo(_context: test.Context)
+  local loop = new_loop()
+  defer finish_loop(loop)
+
+  local const total_targets = 7
+  local const drain_capacity = 3
+  local targets_by_id: {integer: EwTarget} = {}
+  local raw_targets: owned EwVoidPtr[] = foreign EwVoidPtr.new_array(total_targets)
+  defer ew_release_targets(raw_targets)
+  local statuses: owned int[] = foreign int.new_array(total_targets)
+
+  local drained_ids: {integer} = {}
+  local batch_sizes: {integer} = {}
+  local callback_calls = 0
+  local buf: owned unsigned long long[] = foreign unsigned long long.new_array(drain_capacity)
+  local wake = uv.external_wake_t()
+
+  success(uv.external_wake_init(loop, wake, function (owner: uv.external_wake_t)
+    callback_calls = callback_calls + 1
+    -- Drain only one bounded batch of capacity 3 per callback turn; external_wake_t:drain
+    -- must rearm the internal async handle while remaining targets stay queued.
+    local d_status, d_count = owner:drain(buf, drain_capacity as foreign unsigned int)
+    success(d_status)
+    local n: integer = d_count
+    test.assert(n > 0 and n <= drain_capacity,
+                "bounded drain returned an out-of-range batch count: " .. n)
+    batch_sizes[#batch_sizes + 1] = n
+    for idx = 0, n - 1 do
+      local id: integer = buf[idx]
+      drained_ids[#drained_ids + 1] = id
+      local target = targets_by_id[id]
+      targets_by_id[id] = nil
+      success(owner:unregister(target.native))
+    end
+  end))
+
+  for i = 1, total_targets do
+    local id = 10000 + i
+    local r_status, target = wake:reserve(id as foreign unsigned long long)
+    success(r_status)
+    test.assert(target ~= nil)
+    success(wake:activate(target))
+    targets_by_id[id] = EwTarget(target)
+    uv.native_external_wake_retain(target)
+    raw_targets[i - 1] = target
+    statuses[i - 1] = -1 as foreign int
+  end
+
+  ew_notify_batch(raw_targets, statuses)
+
+  for i = 0, total_targets - 1 do
+    test.assert((statuses[i] as integer) == 0,
+                "worker notification failed for target index " .. i)
+  end
+
+  -- All 7 targets are queued in FIFO order before uv.run starts.
+  -- Turn 1 drains 3 and rearms; Turn 2 drains 3 and rearms; Turn 3 drains 1
+  -- and unregisters the 7th target, dropping active_waits to 0 so uv.run exits.
+  success(uv.run(loop))
+
+  test.assert(callback_calls == 3,
+              "expected 3 rearmed callback turns for 7 items at capacity 3, got " .. callback_calls)
+  test.assert(#batch_sizes == 3 and batch_sizes[1] == 3 and batch_sizes[2] == 3 and batch_sizes[3] == 1,
+              "unexpected bounded drain batch sizes")
+  test.assert(#drained_ids == total_targets,
+              "expected all 7 identities to drain")
+  for i = 1, total_targets do
+    test.assert(drained_ids[i] == 10000 + i,
+                "FIFO order was not preserved at position " .. i)
+  end
+  test.assert(not uv.loop_alive(loop))
+  success(wake:close())
+end
+
+function test_external_wake_coalescing_and_one_shot_duplicate_notifies(context: test.Context)
+  context:run("libuv_callback_coalescing_versus_pending_queue_work_count",
+    function (_child: test.Context)
+      local loop = new_loop()
+      defer finish_loop(loop)
+
+      local const total_targets = 6
+      local targets: {EwTarget} = {}
+      local drained: {integer} = {}
+      local callback_calls = 0
+      local buf: owned unsigned long long[] = foreign unsigned long long.new_array(8)
+      local wake = uv.external_wake_t()
+
+      success(uv.external_wake_init(loop, wake, function (owner: uv.external_wake_t)
+        callback_calls = callback_calls + 1
+        local d_status, d_count = owner:drain(buf, 8)
+        success(d_status)
+        local n: integer = d_count
+        for idx = 0, n - 1 do
+          drained[#drained + 1] = buf[idx] as integer
+        end
+        local empty_status, empty_count = owner:drain(buf, 8)
+        success(empty_status)
+        test.assert((empty_count as integer) == 0,
+                    "second drain in same callback was not empty")
+        for i = 1, #targets do
+          success(owner:unregister(targets[i].native))
+        end
+      end))
+
+      for i = 1, total_targets do
+        local r_status, target = wake:reserve((200 + i) as foreign unsigned long long)
+        success(r_status)
+        success(wake:activate(target))
+        targets[i] = EwTarget(target)
+        success(uv.native_external_wake_notify(target))
+      end
+
+      -- Six uv_async_send calls before uv.run coalesce into one libuv callback,
+      -- while the native pending queue preserves all six work items.
+      success(uv.run(loop))
+      test.assert(callback_calls == 1,
+                  "libuv did not coalesce pre-run notifications into one callback: " .. callback_calls)
+      test.assert(#drained == total_targets,
+                  "coalesced callback lost queued work items: " .. #drained)
+      for i = 1, total_targets do
+        test.assert(drained[i] == 200 + i,
+                    "coalesced queue corrupted FIFO order at " .. i)
+      end
+      success(wake:close())
+    end)
+
+  context:run("duplicate_notifies_while_pending_and_after_delivery_are_one_shot",
+    function (_child: test.Context)
+      local loop = new_loop()
+      defer finish_loop(loop)
+      local wake = uv.external_wake_t()
+      local callback_calls = 0
+      success(uv.external_wake_init(loop, wake, function (_: uv.external_wake_t)
+        callback_calls = callback_calls + 1
+      end))
+
+      local s1, t1 = wake:reserve(301)
+      local s2, t2 = wake:reserve(302)
+      local s3, t3 = wake:reserve(303)
+      success(s1)
+      success(s2)
+      success(s3)
+      success(wake:activate(t1))
+      success(wake:activate(t2))
+      success(wake:activate(t3))
+
+      -- Notify t1 three times, t2 twice, t1 again, and t3 once while PENDING.
+      success(uv.native_external_wake_notify(t1))
+      success(uv.native_external_wake_notify(t1))
+      success(uv.native_external_wake_notify(t1))
+      success(uv.native_external_wake_notify(t2))
+      success(uv.native_external_wake_notify(t2))
+      success(uv.native_external_wake_notify(t1))
+      success(uv.native_external_wake_notify(t3))
+
+      local buf: owned unsigned long long[] = foreign unsigned long long.new_array(8)
+      local d_status, d_count = wake:drain(buf, 8)
+      success(d_status)
+      test.assert((d_count as integer) == 3,
+                  "duplicate notifications enqueued duplicate target entries")
+      test.assert((buf[0] as integer) == 301 and
+                  (buf[1] as integer) == 302 and
+                  (buf[2] as integer) == 303,
+                  "duplicate notifications altered initial FIFO arrival order")
+
+      -- Once DELIVERED, further notifications on the same one-shot target return 0
+      -- without re-enqueueing it into the pending list.
+      success(uv.native_external_wake_notify(t1))
+      success(uv.native_external_wake_notify(t2))
+      local d2_status, d2_count = wake:drain(buf, 8)
+      success(d2_status)
+      test.assert((d2_count as integer) == 0,
+                  "DELIVERED target re-entered the pending queue on duplicate notify")
+
+      test.assert(uv.run(loop, uv.RUN_NOWAIT) > 0,
+                  "delivered registrations did not keep the loop alive until retirement")
+      success(wake:unregister(t1))
+      success(wake:unregister(t2))
+      success(wake:unregister(t3))
+      test.assert(callback_calls == 1)
+      success(wake:close())
+    end)
+end
+
+function test_external_wake_unregister_unlinks_pending_targets_in_place(_context: test.Context)
+  local loop = new_loop()
+  defer finish_loop(loop)
+  local wake = uv.external_wake_t()
+  local callback_drains = 0
+  local callback_calls = 0
+  local buf: owned unsigned long long[] = foreign unsigned long long.new_array(8)
+
+  success(uv.external_wake_init(loop, wake, function (owner: uv.external_wake_t)
+    callback_calls = callback_calls + 1
+    local d_status, d_count = owner:drain(buf, 8)
+    success(d_status)
+    callback_drains = callback_drains + (d_count as integer)
+  end))
+
+  local targets: {EwTarget} = {}
+  for i = 1, 6 do
+    local r_status, target = wake:reserve((i * 10) as foreign unsigned long long)
+    success(r_status)
+    success(wake:activate(target))
+    targets[i] = EwTarget(target)
+  end
+
+  -- Queue 10 -> 20 -> 30 -> 40 -> 50 as PENDING; keep 60 ARMED.
+  for i = 1, 5 do
+    success(uv.native_external_wake_notify(targets[i].native))
+  end
+
+  -- Unlink head (10), middle (30), tail (50), and non-pending ARMED (60).
+  success(wake:unregister(targets[1].native))
+  success(wake:unregister(targets[3].native))
+  success(wake:unregister(targets[5].native))
+  success(wake:unregister(targets[6].native))
+
+  local d_status, d_count = wake:drain(buf, 8)
+  success(d_status)
+  test.assert((d_count as integer) == 2,
+              "unregistered pending targets were not removed before drain")
+  test.assert((buf[0] as integer) == 20 and (buf[1] as integer) == 40,
+              "unlinking head/middle/tail corrupted remaining FIFO order")
+
+  success(wake:unregister(targets[2].native))
+  success(wake:unregister(targets[4].native))
+
+  -- Also verify that notifying and then unregistering the sole pending target
+  -- before the loop runs leaves an empty queue when the coalesced async callback fires.
+  local s7, t7 = wake:reserve(70)
+  success(s7)
+  success(wake:activate(t7))
+  success(uv.native_external_wake_notify(t7))
+  success(wake:unregister(t7))
+
+  -- Keep the bridge active without adding pending work, so the stale async
+  -- callback must actually run rather than uv.run returning on an idle loop.
+  local keeper_status, keeper = wake:reserve(80)
+  success(keeper_status)
+  success(wake:activate(keeper))
+
+  test.assert(uv.run(loop, uv.RUN_NOWAIT) > 0,
+              "unnotified active keeper did not preserve loop liveness")
+  test.assert(callback_calls == 1, "stale empty callback was not exercised")
+  test.assert(callback_drains == 0,
+              "unregistered pending target was delivered by later loop callback")
+  success(wake:unregister(keeper))
+  success(wake:close())
+end
+
+function test_external_wake_retained_stale_targets_reject_after_unregister_close_and_state_close(
+    context: test.Context)
+  context:run("after_unregister_and_during_closing_window",
+    function (_child: test.Context)
+      local loop = new_loop()
+      local loop_closed = false
+      defer if not loop_closed then finish_loop(loop) end
+      local wake = uv.external_wake_t()
+      success(uv.external_wake_init(loop, wake, function (_: uv.external_wake_t) end))
+
+      local r_status, t1 = wake:reserve(501)
+      success(r_status)
+      success(wake:activate(t1))
+      local raw_targets: owned EwVoidPtr[] = foreign EwVoidPtr.new_array(1)
+      defer ew_release_targets(raw_targets)
+      uv.native_external_wake_retain(t1)
+      raw_targets[0] = t1
+
+      success(wake:unregister(t1))
+      -- While retained by producer after unregister, repeat unregister/activate/notify must fail with EINVAL.
+      test.assert(wake:unregister(t1) == uv.EINVAL,
+                  "repeat unregister on retained retired target did not return EINVAL")
+      test.assert(wake:activate(t1) == uv.EINVAL,
+                  "activate on retained retired target did not return EINVAL")
+      test.assert((uv.native_external_wake_notify(t1) as integer) == uv.EINVAL,
+                  "notify on retained retired target did not return EINVAL")
+
+      -- Close the bridge: before uv.run drives close_handler, wake.core is still
+      -- non-nil while core.handle is nil. Operations in this closing window must
+      -- safely roll back (including freeing the newly malloc'd target in reserve)
+      -- and return EINVAL.
+      success(wake:close())
+      local closing_r_status, closing_target = wake:reserve(502)
+      test.assert(closing_r_status == uv.EINVAL and closing_target == nil,
+                  "reserve on closing bridge did not roll back with EINVAL")
+      test.assert(wake:activate(t1) == uv.EINVAL,
+                  "activate on closing bridge did not return EINVAL")
+      local buf: owned unsigned long long[] = foreign unsigned long long.new_array(2)
+      local closing_d_status, closing_d_count = wake:drain(buf, 2)
+      test.assert(closing_d_status == uv.EINVAL and (closing_d_count as integer) == 0,
+                  "drain on closing bridge did not return EINVAL")
+      success(wake:close())
+
+      -- Finish and close the loop; t1 still pins the native core on the heap.
+      finish_loop(loop)
+      loop_closed = true
+      collect()
+
+      -- Verify from a native worker thread that the stale target after loop close
+      -- safely rejects notification and releases the last core reference.
+      local statuses: owned int[] = foreign int.new_array(1)
+      statuses[0] = 0 as foreign int
+      ew_notify_batch(raw_targets, statuses)
+      test.assert((statuses[0] as integer) == uv.EINVAL,
+                  "worker notify on closed-bridge stale target did not return EINVAL")
+    end)
+
+  context:run("walk_close_emergency_detach_retires_all_phases_and_preserves_retained_core",
+    function (_child: test.Context)
+      local loop = new_loop()
+      local loop_closed = false
+      defer if not loop_closed then finish_loop(loop) end
+      local wake = uv.external_wake_t()
+      success(uv.external_wake_init(loop, wake, function (_: uv.external_wake_t) end))
+
+      -- Create 4 producer-retained targets across PREPARED, ARMED, PENDING, and DELIVERED,
+      -- plus 2 unretained targets (ARMED and PENDING) to verify emergency detach frees them.
+      local s1, t_prep = wake:reserve(601)
+      local s2, t_armed = wake:reserve(602)
+      local s3, t_pending = wake:reserve(603)
+      local s4, t_delivered = wake:reserve(604)
+      local s5, u_armed = wake:reserve(605)
+      local s6, u_pending = wake:reserve(606)
+      success(s1)
+      success(s2)
+      success(s3)
+      success(s4)
+      success(s5)
+      success(s6)
+
+      success(wake:activate(t_armed))
+      success(wake:activate(t_pending))
+      success(wake:activate(t_delivered))
+      success(wake:activate(u_armed))
+      success(wake:activate(u_pending))
+
+      -- Drain t_delivered first so it is in DELIVERED phase, then notify t_pending and u_pending.
+      success(uv.native_external_wake_notify(t_delivered))
+      local buf: owned unsigned long long[] = foreign unsigned long long.new_array(4)
+      local d_status, d_count = wake:drain(buf, 4)
+      success(d_status)
+      test.assert((d_count as integer) == 1 and (buf[0] as integer) == 604)
+
+      success(uv.native_external_wake_notify(t_pending))
+      success(uv.native_external_wake_notify(u_pending))
+
+      local retained: owned EwVoidPtr[] = foreign EwVoidPtr.new_array(4)
+      defer ew_release_targets(retained)
+      uv.native_external_wake_retain(t_prep)
+      retained[0] = t_prep
+      uv.native_external_wake_retain(t_armed)
+      retained[1] = t_armed
+      uv.native_external_wake_retain(t_pending)
+      retained[2] = t_pending
+      uv.native_external_wake_retain(t_delivered)
+      retained[3] = t_delivered
+
+      -- Close the underlying handle via finish_loop's uv.walk WITHOUT calling wake:close().
+      -- handle.close_handler runs external_wake_finalize -> external_wake_detach(core).
+      finish_loop(loop)
+      loop_closed = true
+      collect()
+
+      local post_r_status, post_target = wake:reserve(607)
+      test.assert(post_r_status == uv.EINVAL and post_target == nil)
+      local post_d_status, post_d_count = wake:drain(buf, 4)
+      test.assert(post_d_status == uv.EINVAL and (post_d_count as integer) == 0)
+
+      test.assert((uv.native_external_wake_notify(t_prep) as integer) == uv.EINVAL)
+      test.assert((uv.native_external_wake_notify(t_armed) as integer) == uv.EINVAL)
+      test.assert((uv.native_external_wake_notify(t_pending) as integer) == uv.EINVAL)
+      test.assert((uv.native_external_wake_notify(t_delivered) as integer) == uv.EINVAL)
+      test.assert(uv.native_external_wake_is_notified(t_prep) == 0 and
+                  uv.native_external_wake_is_notified(t_armed) == 0 and
+                  uv.native_external_wake_is_notified(t_pending) == 0 and
+                  uv.native_external_wake_is_notified(t_delivered) == 0,
+                  "emergency detach left a retained target notification latched")
+    end)
+
+  context:run("independent_lua_state_close_finalizer_detaches_without_driving_loop",
+    function (_child: test.Context)
+      local finalization: owned int[] = foreign int.new_array(4)
+      for index = 0, 2 do finalization[index] = uv.EBUSY end
+      finalization[3] = 0
+      local state = lua.new()
+      defer state:close()
+      local v_prep, v_armed, v_pending, v_unretained = state:run([[
+        return require("lua.receiver_fixture").external_wake_targets(...)
+      ]], "=external-wake-state-close", ew_transfer.TransferValue.is_pointer(finalization))
+      local t_prep = ew_pointer(v_prep)
+      local t_armed = ew_pointer(v_armed)
+      local t_pending = ew_pointer(v_pending)
+      local t_unretained = ew_pointer(v_unretained)
+
+      local raw_targets: owned EwVoidPtr[] = foreign EwVoidPtr.new_array(3)
+      defer ew_release_targets(raw_targets)
+      uv.native_external_wake_retain(t_prep)
+      raw_targets[0] = t_prep
+      uv.native_external_wake_retain(t_armed)
+      raw_targets[1] = t_armed
+      uv.native_external_wake_retain(t_pending)
+      raw_targets[2] = t_pending
+
+      -- Enqueue t_pending and t_unretained as PENDING before closing the child state.
+      test.assert((uv.native_external_wake_notify(t_prep) as integer) == uv.EINVAL)
+      success(uv.native_external_wake_notify(t_pending))
+      success(uv.native_external_wake_notify(t_unretained))
+
+      -- Closing the child Lua state first invokes external_wake_finalize without
+      -- driving its loop. The earlier-registered fixture finalizer then observes
+      -- detachment before closing/draining the handle and freeing the loop.
+      -- Unretained targets (including PENDING) are freed immediately; retained
+      -- targets pin the detached core beyond both finalizers.
+      state:close()
+      test.assert((finalization[0] as integer) == uv.EINVAL,
+                  "fixture loop cleanup preceded the external wake GC detach")
+      success(finalization[1])
+      success(finalization[2])
+      test.assert(finalization[3] == 0,
+                  "state close delivered an external wake callback")
+      test.assert(uv.native_external_wake_is_notified(t_prep) == 0 and
+                  uv.native_external_wake_is_notified(t_armed) == 0 and
+                  uv.native_external_wake_is_notified(t_pending) == 0,
+                  "state close left a retained native notification latched")
+
+      test.assert((uv.native_external_wake_notify(t_prep) as integer) == uv.EINVAL)
+      test.assert((uv.native_external_wake_notify(t_armed) as integer) == uv.EINVAL)
+      test.assert((uv.native_external_wake_notify(t_pending) as integer) == uv.EINVAL)
+
+      local statuses: owned int[] = foreign int.new_array(3)
+      ew_notify_batch(raw_targets, statuses)
+
+      for i = 0, 2 do
+        test.assert((statuses[i] as integer) == uv.EINVAL,
+                    "worker notify after child state:close did not return EINVAL")
+      end
+    end)
+end
+
+local function ew_install_weak_bridge(loop: uv.loop_t, weak: {value: value},
+                                      delivered: function (integer): ()): foreign *void
+  local wake = uv.external_wake_t()
+  weak[1] = wake
+  local target: foreign *void = nil
+  local buf: owned unsigned long long[] = foreign unsigned long long.new_array(2)
+  success(uv.external_wake_init(loop, wake, function (owner: uv.external_wake_t)
+    test.assert(owner == weak[1], "callback did not receive the rooted external_wake_t owner")
+    local d_status, d_count = owner:drain(buf, 2)
+    success(d_status)
+    test.assert((d_count as integer) == 1)
+    delivered(buf[0] as integer)
+    success(owner:unregister(target))
+    success(owner:close())
+  end))
+  local r_status, reserved = wake:reserve(888)
+  success(r_status)
+  target = reserved
+  success(wake:activate(target))
+  return target
+end
+
+function test_external_wake_gc_roots_owner_until_handle_close(_context: test.Context)
+  local loop = new_loop()
+  defer finish_loop(loop)
+  local weak: {value: value} = {}
+  gc.weak(weak)
+  local got_id = 0
+  local target = ew_install_weak_bridge(loop, weak, function (id: integer)
+    got_id = id
+  end)
+
+  collect()
+  assert_retained(weak, 1)
+
+  success(uv.native_external_wake_notify(target))
+  success(uv.run(loop))
+  test.assert(got_id == 888, "rooted external_wake_t did not deliver notification")
+
+  collect()
+  test.assert(weak[1] == nil, "closed external_wake_t remained rooted after handle close")
+end
+
+function test_external_wake_concurrent_native_notify_and_retire_with_producer_refs(
+    context: test.Context)
+  context:run("multi_thread_barrier_burst_delivery_and_duplicate_coalescing",
+    function (_child: test.Context)
+      local loop = new_loop()
+      defer finish_loop(loop)
+
+      local const worker_count = 4
+      local const target_count = 16
+      local const drain_capacity = 4
+
+      local barrier = uv.barrier_t()
+      success(uv.barrier_init(barrier, worker_count))
+      defer uv.barrier_destroy(barrier)
+
+      local done_sem = uv.sem_t()
+      success(uv.sem_init(done_sem, 0))
+      defer uv.sem_destroy(done_sem)
+
+      local targets: {EwTarget} = {}
+      local seen: {integer: boolean} = {}
+      local seen_count = 0
+      local batch_calls = 0
+      local buf: owned unsigned long long[] = foreign unsigned long long.new_array(drain_capacity)
+      local wake = uv.external_wake_t()
+
+      success(uv.external_wake_init(loop, wake, function (owner: uv.external_wake_t)
+        batch_calls = batch_calls + 1
+        local d_status, d_count = owner:drain(buf, drain_capacity as foreign unsigned int)
+        success(d_status)
+        local n: integer = d_count
+        for idx = 0, n - 1 do
+          local id: integer = buf[idx]
+          test.assert(not seen[id], "target identity was delivered more than once: " .. id)
+          seen[id] = true
+          seen_count = seen_count + 1
+        end
+        if seen_count == target_count then
+          -- Wait for all 4 workers to complete their duplicate notifications while
+          -- targets are in PENDING/DELIVERED before unregistering them.
+          for _w = 1, worker_count do
+            uv.sem_wait(done_sem)
+          end
+          for i = 1, target_count do
+            success(owner:unregister(targets[i].native))
+          end
+        end
+      end))
+
+      for i = 1, target_count do
+        local r_status, target = wake:reserve((4000 + i) as foreign unsigned long long)
+        success(r_status)
+        success(wake:activate(target))
+        targets[i] = EwTarget(target)
+      end
+
+      local start = uv.sem_t()
+      success(uv.sem_init(start, 0))
+      defer uv.sem_destroy(start)
+      local producers: {EwProducer} = {}
+      local released = false
+      defer ew_finish_producers(producers, start, released)
+      for w = 1, worker_count do
+        local producer = ew_producer(target_count, (w - 1) % 2, 0,
+                                     barrier, start, done_sem)
+        producers[w] = producer
+        producer:launch(targets)
+      end
+      released = true
+      for _w = 1, worker_count do uv.sem_post(start) end
+
+      success(uv.run(loop))
+      for w = 1, worker_count do
+        producers[w]:join()
+        local params = producers[w].params
+        test.assert((params[4] as integer) == 0 and
+                    (params[5] as integer) == target_count and
+                    (params[6] as integer) == 0,
+                    "concurrent burst worker reported unexpected notify status")
+      end
+
+      test.assert(seen_count == target_count,
+                  "concurrent burst did not deliver all 16 target identities")
+      test.assert(batch_calls >= 4,
+                  "bounded drain of 16 items with capacity 4 did not rearm across >= 4 batches")
+      success(wake:close())
+    end)
+
+  context:run("concurrent_worker_notify_versus_main_thread_unregister_and_close",
+    function (_child: test.Context)
+      local loop = new_loop()
+      defer finish_loop(loop)
+
+      local const worker_count = 4
+      local const target_count = 32
+
+      -- 4 workers + 1 main thread synchronize at a 5-party barrier before racing
+      -- native_external_wake_notify/release against unregister and close.
+      local barrier = uv.barrier_t()
+      success(uv.barrier_init(barrier, worker_count + 1))
+      defer uv.barrier_destroy(barrier)
+
+      local targets: {EwTarget} = {}
+      local buf: owned unsigned long long[] = foreign unsigned long long.new_array(8)
+      local wake = uv.external_wake_t()
+
+      success(uv.external_wake_init(loop, wake, function (owner: uv.external_wake_t)
+        owner:drain(buf, 8)
+      end))
+
+      for i = 1, target_count do
+        local r_status, target = wake:reserve((9000 + i) as foreign unsigned long long)
+        success(r_status)
+        success(wake:activate(target))
+        targets[i] = EwTarget(target)
+      end
+
+      local start = uv.sem_t()
+      success(uv.sem_init(start, 0))
+      defer uv.sem_destroy(start)
+      local producers: {EwProducer} = {}
+      local released = false
+      defer ew_finish_producers(producers, start, released)
+      for w = 1, worker_count do
+        local producer = ew_producer(target_count, (w - 1) % 2, 1,
+                                     barrier, start, nil)
+        producers[w] = producer
+        producer:launch(targets)
+      end
+      released = true
+      for _w = 1, worker_count do uv.sem_post(start) end
+
+      -- Release all 4 workers and the main thread simultaneously.
+      local barrier_rc = uv.barrier_wait(barrier)
+      test.assert(barrier_rc >= 0)
+
+      for i = 1, target_count do
+        success(wake:unregister(targets[i].native))
+      end
+      success(wake:close())
+      success(uv.run(loop))
+
+      for w = 1, worker_count do
+        producers[w]:join()
+        local params = producers[w].params
+        local failures: integer = params[4]
+        local zero_count: integer = params[5]
+        local einval_count: integer = params[6]
+        test.assert(failures == 0 and (zero_count + einval_count) == target_count,
+                    "concurrent notify vs unregister/close produced unexpected status")
+      end
+    end)
+end
+
+local foreign function ew_query_notify_worker(argument: *void)
+  local slots = argument as foreign *EwVoidPtr
+  local retained = slots[0] as foreign *EwVoidPtr
+  local statuses = slots[1] as foreign *int
+  local target = retained[1]
+  local query: foreign function(*void): int = uv.native_external_wake_is_notified
+  statuses[0] = query(target)
+  statuses[1] = uv.native_external_wake_notify(target)
+  statuses[2] = query(target)
+  uv.native_external_wake_release(target)
+  retained[1] = nil
+end
+
+function test_external_wake_native_query_and_loop_thread_unregister(context: test.Context)
+  context:run("prepared_and_armed_targets_have_no_latched_notification",
+    function (_child: test.Context)
+      local loop = new_loop()
+      defer finish_loop(loop)
+      local wake = uv.external_wake_t()
+      success(uv.external_wake_init(loop, wake, function (_: uv.external_wake_t) end))
+      local retained: owned EwVoidPtr[] = foreign EwVoidPtr.new_array(2)
+      defer ew_release_targets(retained)
+      local query: foreign function(*void): int = uv.native_external_wake_is_notified
+      local unregister: foreign function(*void): int = uv.native_external_wake_unregister
+      test.assert(query(nil) == 0)
+      test.assert((unregister(nil) as integer) == uv.EINVAL)
+
+      local prepared_status, prepared = wake:reserve(9000)
+      success(prepared_status)
+      uv.native_external_wake_retain(prepared)
+      retained[0] = prepared
+      test.assert(query(prepared) == 0)
+      local retire_prepared = prepared
+      prepared = nil
+      success(unregister(retire_prepared))
+      test.assert(not uv.loop_alive(loop))
+      test.assert(query(retained[0]) == 0)
+      test.assert((unregister(retained[0]) as integer) == uv.EINVAL,
+                  "retained retired registration was consumed twice")
+
+      local armed_status, armed = wake:reserve(9001)
+      success(armed_status)
+      uv.native_external_wake_retain(armed)
+      retained[1] = armed
+      success(wake:activate(armed))
+      test.assert(query(armed) == 0 and uv.loop_alive(loop))
+      local retire_armed = armed
+      armed = nil
+      success(unregister(retire_armed))
+      test.assert(query(retained[1]) == 0 and not uv.loop_alive(loop),
+                  "native unregister did not retire the last active target")
+      success(wake:close())
+    end)
+
+  context:run("native_query_latches_across_drain_until_loop_thread_retirement",
+    function (_child: test.Context)
+      local loop = new_loop()
+      defer finish_loop(loop)
+      local wake = uv.external_wake_t()
+      local retained: owned EwVoidPtr[] = foreign EwVoidPtr.new_array(2)
+      defer ew_release_targets(retained)
+      local target: foreign *void = nil
+      local callbacks = 0
+      local buf: owned unsigned long long[] = foreign unsigned long long.new_array(2)
+      local query: foreign function(*void): int = uv.native_external_wake_is_notified
+      local unregister: foreign function(*void): int = uv.native_external_wake_unregister
+      success(uv.external_wake_init(loop, wake, function (owner: uv.external_wake_t)
+        callbacks = callbacks + 1
+        test.assert(query(retained[0]) == 1,
+                    "draining cleared the native notification latch")
+        local status, count = owner:drain(buf, 2)
+        success(status)
+        test.assert(count == 0)
+        local retiring = target
+        target = nil
+        success(unregister(retiring))
+        test.assert(not uv.loop_alive(loop),
+                    "loop-thread native unregister left the final active reference")
+      end))
+      local status, reserved = wake:reserve(9002)
+      success(status)
+      target = reserved
+      success(wake:activate(target))
+      uv.native_external_wake_retain(target)
+      retained[0] = target
+      uv.native_external_wake_retain(target)
+      retained[1] = target
+      local statuses: owned int[] = foreign int.new_array(3)
+      local slots: owned EwVoidPtr[] = foreign EwVoidPtr.new_array(2)
+      slots[0] = retained
+      slots[1] = statuses
+      local token: foreign *void = nil
+      defer if token ~= nil then
+        local joined = uv.native_thread_join(token)
+        if joined == 0 then token = nil end
+        success(joined)
+      end
+      local created_status, created = uv.create_native_thread(ew_query_notify_worker, slots)
+      token = created
+      success(created_status)
+      local joined = uv.native_thread_join(token)
+      if joined == 0 then token = nil end
+      success(joined)
+      test.assert(slots[0] == (retained as foreign *void),
+                  "caller-owned native carrier did not survive worker completion")
+      test.assert(statuses[0] == 0 and statuses[1] == 0 and statuses[2] == 1,
+                  "native producer query did not distinguish ARMED and PENDING")
+      test.assert(query(retained[0]) == 1)
+      local drain_status, count = wake:drain(buf, 2)
+      success(drain_status)
+      test.assert(count == 1 and buf[0] == 9002)
+      test.assert(query(retained[0]) == 1,
+                  "DELIVERED target lost its notification latch")
+      success(uv.run(loop, uv.RUN_NOWAIT))
+      test.assert(callbacks == 1 and target == nil)
+      test.assert(query(retained[0]) == 0,
+                  "retained retired target kept a notification latch")
+      test.assert((uv.native_external_wake_notify(retained[0]) as integer) == uv.EINVAL)
+      test.assert((unregister(retained[0]) as integer) == uv.EINVAL)
+      success(wake:close())
+      success(uv.run(loop))
+      test.assert(query(retained[0]) == 0,
+                  "closed bridge changed the retained retired target query")
+    end)
+end

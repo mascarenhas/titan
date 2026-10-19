@@ -1,6 +1,7 @@
 foreign import "uv.h"
 foreign import "thread-native.h"
 foreign import "string.h"
+foreign import "stdlib.h"
 
 local const THREAD_FRESH = 0
 local const THREAD_JOINABLE = 1
@@ -53,6 +54,65 @@ end
 function thread_t.new(): thread_t
   local native = foreign titan_uv_thread_storage.new()
   return { native = native, phase = THREAD_FRESH, argument_owner = nil }
+end
+
+--- Start a C-only native thread and return its uniquely caller-owned process-heap token.
+-- The worker may start before this ordinary Titan constructor returns. Prepare
+-- its native argument graph first; this route never retains a GC argument_owner.
+-- Keep worker code/provider and every borrowed argument resource valid through
+-- native completion. Retire the token exactly once by successful native join or
+-- detach, not raw free or the checked thread_t API.
+-- @param entry Non-null C-only worker entry; never enters the hosting Lua/Titan state.
+-- @param argument Borrowed native argument pointer, possibly NULL; complete backing lifetime is caller-managed.
+-- @return Zero and a unique heap token on success; EINVAL for NULL entry, ENOMEM for allocation failure, or native creation status and nil after freeing any unpublished token.
+-- @usage uv/supplemental.md#create_native_thread
+function create_native_thread(entry: foreign function(*void): void,
+                              argument: foreign *void): (integer, foreign *void)
+  if not entry then return ffi.UV_EINVAL, nil end
+  local token = ffi.malloc(foreign titan_uv_thread_storage.sizeof)
+    as foreign *titan_uv_thread_storage
+  if token == nil then return ffi.UV_ENOMEM, nil end
+  local status: integer = ffi.uv_thread_create(token as foreign *uv_thread_t,
+    entry, argument)
+  if status ~= 0 then
+    ffi.free(token)
+    return status, nil
+  end
+  return 0, token as foreign *void
+end
+
+--- Join a caller-owned heap thread token and consume it only on native success.
+-- This C-only entry blocks the calling OS thread. Serialize join/detach; hold
+-- no mutex needed by the worker and require no progress on this blocked loop.
+-- Zero consumes and frees the token, proving worker completion; nonzero
+-- preserves it for the same owner and is not completion evidence. Argument
+-- resources remain separately caller-owned. Never reuse a consumed alias or
+-- pass checked thread_t storage; keep the provider mapped through the call.
+-- @param token Live unique heap token from create_native_thread, or NULL.
+-- @return Native int status: zero consumes/frees the token; nonzero preserves it; NULL returns EINVAL.
+-- @usage uv/supplemental.md#native_thread_join
+foreign function native_thread_join(token: *void): int
+  if token == nil then return ffi.UV_EINVAL as foreign int end
+  local status = ffi.uv_thread_join(token as foreign *uv_thread_t)
+  if status == 0 then ffi.free(token) end
+  return status
+end
+
+--- Detach a caller-owned heap thread token and consume it only on native success.
+-- Serialize retirement. Zero frees only token storage; nonzero preserves the
+-- token for the same owner. Detach does not join, free arguments, or establish
+-- native resource quiescence. The worker's entry/argument copies do not borrow
+-- token storage, including when it detaches itself. This C-only call retains no
+-- GC graph; code/provider and native arguments stay valid through worker
+-- completion. Never mix with checked thread_t storage or reuse a consumed alias.
+-- @param token Live unique heap token from create_native_thread, or NULL.
+-- @return Native int status: zero consumes/frees the token; nonzero preserves it; NULL returns EINVAL.
+-- @usage uv/supplemental.md#native_thread_detach
+foreign function native_thread_detach(token: *void): int
+  if token == nil then return ffi.UV_EINVAL as foreign int end
+  local status = ffi.uv_thread_detach(token as foreign *uv_thread_t)
+  if status == 0 then ffi.free(token) end
+  return status
 end
 
 local function thread_t:begin_create(argument_owner: value)

@@ -3,9 +3,17 @@ local async = import "async"
 local gc = import "gc"
 local uv = import "uv"
 
+local record ExternalWakeFixture
+  loop: uv.loop_t?
+  wake: uv.external_wake_t?
+  -- Host-owned int[4]: detach, run, loop-close statuses, then callback count.
+  results: foreign *int
+end
+
 local receiver: async.Receiver? = nil
 local worker: async.Task<|nil, value|>? = nil
 local received = 0
+local wake_fixture: ExternalWakeFixture? = nil
 
 function initialized(): boolean
   return receiver ~= nil
@@ -20,7 +28,7 @@ function bootstrap(reply: value, quiescence: value): foreign *void
   -- fixture boundary converts it back to the statically typed borrowed handle.
   local destination = reply as foreign *void
   local gate = quiescence as foreign *void
-  local wait = uv.sem_t.wait_function()
+  local wait: foreign function(*void): void = uv.native_sem_wait
   receiver = async.receiver()
   local owner = receiver as async.Receiver
   worker = async.run<|nil, value|>(function (): nil
@@ -72,4 +80,67 @@ function fail_bootstrap()
   receiver = async.receiver()
   defer receiver:close()
   raise "Receiver fixture bootstrap failed"
+end
+
+local function require_wake_status(status: integer)
+  if status ~= 0 then raise "External wake fixture status: " .. status end
+end
+
+local function finalize_wake_fixture(fixture: ExternalWakeFixture)
+  local loop? = fixture.loop
+  fixture.loop = nil
+  if loop == nil then return end
+
+  -- lua_close runs the later-registered external_wake_t finalizer first.
+  -- Observe its detached core BEFORE closing/driving the underlying handle:
+  -- otherwise the handle's close_handler could mask a missing GC detach.
+  if fixture.wake ~= nil then
+    local status = fixture.wake:reserve(705)
+    fixture.results[0] = status
+  end
+  uv.walk(loop, function (handle: uv.handle_t, _argument: value)
+    if not uv.is_closing(handle) then uv.close(handle) end
+  end, nil)
+  fixture.results[1] = uv.run(loop)
+  fixture.results[2] = uv.loop_close(loop)
+end
+
+-- The child Lua caller receives borrowed pointers but never passes arbitrary
+-- lightuserdata back through a typed raw-pointer argument. All reserve/activate
+-- operations stay on this compiled public-UV boundary in the owning state.
+-- The host keeps results rooted until state:close() finishes; finalizer errors
+-- are Lua warnings, so it checks the recorded statuses after lua_close returns.
+function external_wake_targets(results: value):
+    (foreign *void, foreign *void, foreign *void, foreign *void)
+  local fixture = ExternalWakeFixture(nil, nil, results as foreign *int)
+  wake_fixture = fixture
+  -- Register cleanup before native acquisition and before constructing wake.
+  -- Reverse finalization detaches wake without driving, then retires its loop.
+  gc.finalizable(fixture, finalize_wake_fixture)
+  local loop = uv.loop_t()
+  local status = uv.loop_init(loop)
+  if status == 0 then fixture.loop = loop end
+  require_wake_status(status)
+  local wake = uv.external_wake_t()
+  fixture.wake = wake
+  require_wake_status(uv.external_wake_init(loop, wake,
+    function (_: uv.external_wake_t)
+      fixture.results[3] = (fixture.results[3] as integer) + 1
+    end))
+  local s1, prepared = wake:reserve(701)
+  require_wake_status(s1)
+  if prepared == nil then raise "External wake fixture returned NULL prepared target" end
+  local s2, armed = wake:reserve(702)
+  require_wake_status(s2)
+  if armed == nil then raise "External wake fixture returned NULL armed target" end
+  require_wake_status(wake:activate(armed))
+  local s3, pending = wake:reserve(703)
+  require_wake_status(s3)
+  if pending == nil then raise "External wake fixture returned NULL pending target" end
+  require_wake_status(wake:activate(pending))
+  local s4, unretained = wake:reserve(704)
+  require_wake_status(s4)
+  if unretained == nil then raise "External wake fixture returned NULL active target" end
+  require_wake_status(wake:activate(unretained))
+  return prepared, armed, pending, unretained
 end

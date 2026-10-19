@@ -48,6 +48,7 @@ use the chapters below for the normative language reference.
 | Chapter | Covers |
 | --- | --- |
 | [Native build profiles](build-profiles.md) | Production optimization defaults and isolated O0/no-LTO validation SDKs. |
+| [Installing Titan on Linux and macOS](installation.md) | Build and install steps, the `PREFIX` and `ROCKS_TREE` directories, what the installation contains, how Titan finds it, bundled libuv and OpenSSL, building the standard library during development, uninstalling, and cleaning. |
 | [Installing and using Titan on Windows](windows-build.md) | Experimental CLANG64 installation, standalone LuaRocks configuration, DLL programs, packaging, cleanup, and native test entrypoints. |
 | [Documentation comments](documentation-comments.md) | LDoc-style summaries and tags retained for editor hover and completion. |
 | [Design philosophy and history](philosophy.md) | Why Titan exists, its core commitments, the project's history and design principles. |
@@ -82,9 +83,9 @@ use the chapters below for the normative language reference.
 | [Lua interoperability](lua-interop.md) | Using Titan from Lua and Lua values in Titan: what crosses the boundary, what each type looks like on the other side, and where the run-time checks happen. |
 | [Error handling](error-handling.md) | The run-time error model: what raises errors, error messages, `pcall`, `titan.backtrace()`, and the option-type idiom for recoverable failures. |
 | [Coroutines](coroutines.md) | The `coroutine` standard module (`import "coroutine"` from Titan, `require "titan.coroutine"` from Lua): stackful asymmetric coroutines, tagged nested yield, error injection, current coroutine identity, status, and Lua interop. |
-| [Public libuv binding](standard-library-uv.md) | Low-level loop, handle, request, stream, filesystem, process, threading, and utility APIs; exact signatures, native status, callbacks, ownership, and coverage. |
-| [Asynchronous I/O and tasks](async-io.md) | Public registration waits and subscriptions, nonblocking Tasks, structured terminal statuses and errors, blocking foreign calls through the libuv worker pool, the copied/borrowed `TransferValue` union and custom record payload hooks, lossy coalescing cross-state Receivers and opaque send handles, closeable bounded FIFO channels and string Reader/Writer adapters, terminal and Runtime-close listeners, nonconsuming input snapshots, token-guarded explicit suspension/resume, fixed-arity any/race/all/join combinators, loop driving, cancellation, and final libuv-handle cleanup. |
-| [Thread standard library](standard-library-thread.md) | Bounded cross-thread FIFO channels (`Sender`, `Receiver`), nil-preserving message iteration, transferable channel endpoints, standalone OS worker threads (`Thread`, `ThreadStatus`, `Error`), cooperative cancellation, and bounded `Group` execution. |
+| [Public libuv binding](standard-library-uv.md) | Event loops, handles, requests, streams, filesystem, processes, threads and synchronization (including direct C-callable lock entries and a cross-thread wake bridge), and utilities; exact signatures, native status, callbacks, ownership, and API coverage. |
+| [Asynchronous I/O and tasks](async-io.md) | Tasks, their status, errors, and cancellation; scheduling and driving a Runtime; adapting callbacks with `await`; persistent subscriptions; waits on other OS threads and retirement gates for Tasks that own native resources; copied and owned-packet cross-state receivers; bounded same-state channels and Reader/Writer adapters; terminal listeners and combinators; exact-token resume; resources and shutdown. |
+| [Thread standard library](standard-library-thread.md) | Bounded cross-thread FIFO channels (`Sender`, `Receiver`) with nil-preserving iteration and transferable endpoints; standalone OS worker threads (`Thread`, `ThreadStatus`, `Error`) with `join()`, cooperative cancellation, and an `async.Task` proxy that becomes terminal only after the OS thread is joined; and bounded `Group` execution with first-error cancellation and explicit retry boundaries. |
 | [I/O standard library](standard-library-io.md) | The seven `Reader`/`Writer`/`Closer` Interface combinations, standard-output `print`, ownership-safe line iteration, and shell-command `popen` with merged output. |
 | [Timer standard library](standard-library-timer.md) | Task delays, cooperative `yield`, recurring `Ticker` handles, dropped ticks, and explicit close. |
 | [Mathematical standard library](standard-library-math.md) | Typed C99 numeric operations, Lua 5.5-compatible xoshiro256** random sequences, and length-bounded numeric conversion. |
@@ -98,18 +99,18 @@ use the chapters below for the normative language reference.
 | [Operating-system standard library](standard-library-os.md) | Portable clocks and timestamps, ISO C calendars/locales, plus environment, parent stdio, signals, graceful exit, and configurable direct child processes. |
 | [PEG standard library](standard-library-peg.md) | Typed parsing-expression constructors and combinators, labeled failure/recovery, captures and callback timing, anchored pattern matching and leftmost search, locale controls, and relabel source notation. |
 | [String standard library](standard-library-string.md) | Binary byte operations, Lua-compatible formatting and packing, synchronous in-memory streams, and compiled byte-regex matching, capture iteration, splitting, and substitution. |
-| [Lua states and loading standard library](standard-library-lua.md) | Independent Lua states, native loader/dependency snapshots, `async.TransferValue` copies, custom record reconstruction and borrows, exclusive background execution, two-phase Receiver bootstrap/cleanup, Reader input and state cleanup; current-state chunk compilation, file loading, asynchronous `require`, caches, and searchers. |
+| [Lua states and loading standard library](standard-library-lua.md) | Independent states, native loader snapshots, canonical `transfer.TransferValue` copy/borrow policies over a separate carrier that moves no packet attachments, custom reconstruction, exclusive background execution, two-phase `Receiver` bootstrap and cleanup, Reader input, and state cleanup; current-state loading, cooperative `require`, caches, and searchers. |
 | [Iteration standard library](standard-library-iteration.md) | Lua-compatible Map traversal, corrected generic-for iterator tuples, and Array iteration that preserves inner nil elements. |
 | [Garbage-collection standard library](standard-library-gc.md) | Weak Maps and ephemerons, collector actions and mode switches, byte counts, and Lua 5.5 tuning parameters. |
 | [Testing Titan code](standard-library-test.md) | The `titan.test` API, native `titanc --test` discovery, subtests and cleanup, filtering, failure output, and process statuses. |
 | [Native source coverage](native-coverage.md) | Compile-and-run executable-line coverage, automatic source selection, separate coverage objects, and optional LCOV/HTML/Cobertura reports. |
 | [Reflection standard library](standard-library-reflect.md) | Runtime inspection of 19 value kinds, public nominal descriptors, explicit type resolution, erased generic schemas, callable metadata, checked field access, lossless native projections, and default construction. |
 | [JSON standard library](standard-library-json.md) | JSON encoding and typed reflection-directed decoding, record and union mappings, optional null preservation, Unicode/numbers, structured diagnostics, and resource limits. |
-| [Protocol Buffers standard library](standard-library-protobuf.md) | Public record/union serialization, anonymous messages with explicit field descriptors, native C fields, proto3 schemas, and independent-state transfer payloads. |
-| [Transfer policies](standard-library-transfer.md) | State-independent copy/borrow policies, custom resource handoff, and destination Runtime ownership. |
+| [Protocol Buffers standard library](standard-library-protobuf.md) | Public record and union serialization, typed inspected-root native-buffer entries, anonymous field messages, native C fields, proto3 schemas, and independent-state payloads. Standalone protobuf calls grant no packet-resource authority. |
+| [Transfer policies](standard-library-transfer.md) | Canonical `TransferValue` copy/borrow policies; single-owner `Packet` wrappers and borrow intervals; raw packet cells, `adopt_into` moves, and direct raw-slot decode and status handling; packet-scoped endpoint attachment and claim; C-only disposal; the manual-handoff inventory; and destination Runtime ownership. |
 | [SQLite standard library](standard-library-sqlite3.md) | Embedded SQLite with asynchronous native work, prepared statements, owned rows and cursors, reflection bindings and mapping, explicit transactions, and cancellation-safe cleanup. |
-| [The C FFI](ffi.md) | `foreign import`: binding C headers, supported types, calling C functions, ownership, allocation, and limitations. |
-| [Foreign functions](foreign-functions.md) | Public exact C-ABI exports through regular imports, runtime provider selection and stable image bindings, local source callbacks, restricted raw-C bodies, pointer identity, generated companions, and sequencing. |
+| [The C FFI](ffi.md) | `foreign import`: binding C headers, supported types, calling C functions, ownership, allocation, the unsafe-boundary rules, and limitations. |
+| [Foreign functions](foreign-functions.md) | Exact C-ABI exports through regular imports, runtime provider selection and stable per-image bindings, local source callbacks, restricted raw-C bodies, pointer identity, generated companion headers, and sequencing. |
 | [C FFI declarations and expressions](c-ffi-expressions.md) | Named C tags, compiled-probe caching and manual clearing, host-validated pointer conversions, target-directed automatic/owned allocation (including flexible tails), typed object-macro values, macro-projected fields, and target-correct C operators. |
 | [Grammar](grammar.md) | The complete lexical and syntactic grammar. |
 
@@ -186,12 +187,21 @@ remains rejected.
 ### The C FFI
 
 * **The FFI imports real C types, fields, arrays and owned objects**, and
-  is the one place Titan's safety guarantees end — a C function can misuse
-  memory and crash the process, and a Titan `string` handed to a C
-  function that frees or stores it corrupts the heap. Contextual C primitives
+  is the one place Titan's safety guarantees end. Treat `foreign` calls, source
+  `foreign function` bodies, and raw-pointer handoff as an explicit unsafe
+  boundary, comparable to Rust's `unsafe`: Titan code that uses none of them is
+  expected to be well-behaved, while the foreign code and its native callers
+  uphold the pointer, lifetime, ownership, ABI, and threading contracts of the
+  APIs involved. A C function can misuse memory and crash the process, and a
+  Titan `string` handed to a C function that frees or stores it corrupts the
+  heap. Titan neither contains arbitrary native behavior nor validates that a
+  raw pointer is usable. Contextual C primitives
   are distinct from Titan scalars and can form portable public pointer,
   function-pointer, and owned graphs. Header-imported C types support local
-  annotations and regular `as <type>` casts but cannot be exported.
+  annotations and regular `as <type>` casts; an exportable header-dependent C
+  graph may enter a public interface only when every consumer supplies the
+  original compatible declarations, because ordinary imports inherit no
+  headers. Nonexportable C forms stay private.
   C arrays are 0-based (`T[N]` bounds-checked, pointers unchecked, counted
   owned arrays dynamically checked), `#` works for static/count-owned arrays,
   and struct/union fields can be read and written. Direct local `.new()` /
@@ -200,7 +210,8 @@ remains rejected.
   flexible-array-member object while FAM `new_array` remains unavailable.
   Restricted [foreign functions](foreign-functions.md) supply plain C callback
   entries without adapting ordinary Titan closures. Explicit C variadic calls
-  are supported and adopted lifetimes remain parked. Target-directed
+  are supported. Adopting externally allocated C pointers into Titan's
+  collector is not supported. Target-directed
   allocation, named tag-only structures, contextual object-pointer casts, and
   target-correct C operators are described in
   [C FFI declarations and expressions](c-ffi-expressions.md); see also

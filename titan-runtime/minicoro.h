@@ -615,6 +615,10 @@ static MCO_FORCE_INLINE void _mco_asan_start_switch(mco_coro* from, mco_coro* to
   void** fake_stack_save;
   const void* bottom;
   size_t size;
+  if(from == NULL) {
+    runtime->asan_main_stack_bottom = NULL;
+    runtime->asan_main_stack_size = 0;
+  }
   if(from && from->state == MCO_DEAD) {
     fake_stack_save = NULL;
   } else if(from) {
