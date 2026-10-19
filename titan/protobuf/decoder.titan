@@ -1,15 +1,6 @@
 --- Bounded wire parsing and fresh nominal reconstruction.
 -- @module titan.protobuf
 
-local record WireField
-  const number: integer
-  const wire: integer
-  const bits: integer
-  const offset: integer
-  const length: integer
-  previous: integer
-end
-
 local record WireReader
   const base: foreign const *uint8_t
   const limit: integer
@@ -20,8 +11,10 @@ local record Message
   const base: foreign const *uint8_t
   const holder: string?
   const context: value
-  const fields: {WireField}
-  last_by_number: {integer: integer}?
+  const first: foreign titan_protobuf_field
+  entries: (owned titan_protobuf_field[])?
+  count: integer
+  index: (owned uint32_t[])?
 end
 
 local function WireReader:varint(): integer
@@ -55,22 +48,23 @@ local function WireReader:key(): (integer, integer)
   return number, wire
 end
 
-local function WireReader:field(number: integer, wire: integer, depth: integer): WireField
-  if wire == 0 then return WireField(number, wire, self:varint(), 0, 0, 0) end
-  if wire == 1 then return WireField(number, wire, 0, self:take(8), 8, 0) end
+local function WireReader:field(number: integer, wire: integer,
+                                 depth: integer): (integer, integer, integer)
+  if wire == 0 then return self:varint(), 0, 0 end
+  if wire == 1 then return 0, self:take(8), 8 end
   if wire == 2 then
     local count = self:varint()
     if count < 0 or count > 2147483647 then raise "protobuf: invalid byte length" end
-    return WireField(number, wire, 0, self:take(count), count, 0)
+    return 0, self:take(count), count
   end
-  if wire == 5 then return WireField(number, wire, 0, self:take(4), 4, 0) end
+  if wire == 5 then return 0, self:take(4), 4 end
   if wire == 3 then
     require_depth(depth)
     while self.position < self.limit do
       local nested_number, nested_wire = self:key()
       if nested_wire == 4 then
         if nested_number ~= number then raise "protobuf: mismatched end group" end
-        return WireField(number, wire, 0, 0, 0, 0)
+        return 0, 0, 0
       end
       self:field(nested_number, nested_wire, depth + 1)
     end
@@ -79,49 +73,95 @@ local function WireReader:field(number: integer, wire: integer, depth: integer):
   raise "protobuf: invalid wire type"
 end
 
+-- Borrowed entry addresses stay valid after parsing: directory growth finishes
+-- before decoding, and every reader keeps the owning Message reachable.
+local function Message:entry(index: integer): foreign *titan_protobuf_field
+  if index == 1 then return self.first end
+  local entries: owned titan_protobuf_field[] = self.entries
+  return (entries as foreign *titan_protobuf_field) + (index - 2)
+end
+
+local function Message:append(number: integer, wire: integer, bits: integer,
+                               offset: integer, length: integer)
+  if self.count == 1 then
+    local entries: owned titan_protobuf_field[] = foreign titan_protobuf_field.new_array(4)
+    self.entries = entries
+  elseif self.count > 1 and self.count - 1 == #self.entries then
+    local entries: owned titan_protobuf_field[] =
+        foreign titan_protobuf_field.new_array((self.count - 1) * 2)
+    ffi.memcpy(entries, self.entries,
+        ((self.count - 1) * foreign titan_protobuf_field.sizeof) as foreign size_t)
+    self.entries = entries
+  end
+  self.count = self.count + 1
+  local entry = self:entry(self.count)
+  entry.number = number
+  entry.wire = wire
+  entry.bits = bits
+  entry.offset = offset
+  entry.length = length
+end
+
 local function read_message_slice(
     base: foreign const *uint8_t,
     offset: integer,
     length: integer,
     holder: string?, context: value): Message
   local reader = WireReader(base, offset + length, offset)
-  local fields: {WireField} = {}
+  local message = Message {
+    base = base, holder = holder, context = context,
+    first = foreign titan_protobuf_field.new(), entries = nil, count = 0, index = nil,
+  }
   while reader.position < reader.limit do
     local number, wire = reader:key()
-    fields[#fields + 1] = reader:field(number, wire, 1)
+    local bits, start, count = reader:field(number, wire, 1)
+    message:append(number, wire, bits, start, count)
   end
-  return Message(base, holder, context, fields, nil)
+  return message
+end
+
+-- The sparse open-addressed index stores 1-based entry ordinals, with zero as
+-- the empty sentinel. Its capacity depends on entry count, never numeric tags.
+local function Message:index_slot(number: integer, slots: owned uint32_t[]): integer
+  local mask = #slots - 1
+  local slot = ((number ~ (number >> 16)) * 2654435761) & mask
+  while slots[slot] ~= 0 do
+    if self:entry(slots[slot]).number == number then return slot end
+    slot = (slot + 1) & mask
+  end
+  return slot
 end
 
 local function Message:last_index(number: integer): integer
-  local count = #self.fields
-  if count == 0 then return 0 end
-  if count == 1 then
-    if self.fields[1].number == number then return 1 end
+  if self.count == 0 then return 0 end
+  if self.count == 1 then
+    if self.first.number == number then return 1 end
     return 0
   end
-  local last_by_number? = self.last_by_number
-  if last_by_number == nil then
-    -- Ordered-only readers need no index; grow with encountered numeric tags.
-    local built: {integer: integer} = {}
-    for index = 1, count do
-      local field = self.fields[index]
-      field.previous = built[field.number] or 0
-      built[field.number] = index
+  local slots? = self.index
+  if slots == nil then
+    -- Ordered-only readers need no index; the load factor stays at most 1/2.
+    local capacity = 4
+    while capacity < self.count * 2 do capacity = capacity * 2 end
+    slots = foreign uint32_t.new_array(capacity)
+    for index = 1, self.count do
+      local field = self:entry(index)
+      local slot = self:index_slot(field.number, slots)
+      field.previous = slots[slot]
+      slots[slot] = index
     end
-    self.last_by_number = built
-    last_by_number = built
+    self.index = slots
   end
-  return last_by_number[number] or 0
+  return slots[self:index_slot(number, slots)]
 end
 
-local function Message:last(number: integer): WireField?
+local function Message:last(number: integer): foreign *titan_protobuf_field
   local index = self:last_index(number)
   if index == 0 then return nil end
-  return self.fields[index]
+  return self:entry(index)
 end
 
-local function require_wire(field: WireField, expected: integer)
+local function require_wire(field: foreign const *titan_protobuf_field, expected: integer)
   if field.wire ~= expected then raise "protobuf: unexpected wire type" end
 end
 
@@ -129,23 +169,28 @@ end
 -- the final occurrence, as required by the Protocol Buffers wire contract.
 local function Message:merged_message(number: integer): Message
   local index = self:last_index(number)
-  if index == 0 then return Message(self.base, self.holder, self.context, {}, nil) end
-  local field = self.fields[index]
+  if index == 0 then
+    return Message {
+      base = self.base, holder = self.holder, context = self.context,
+      first = foreign titan_protobuf_field.new(), entries = nil, count = 0, index = nil,
+    }
+  end
+  local field = self:entry(index)
   require_wire(field, 2)
   if field.previous == 0 then
     return read_message_slice(self.base, field.offset, field.length, self.holder, self.context)
   end
   -- Walk only this field's occurrences, then restore wire encounter order.
-  local chunks: {WireField} = {}
+  local chunks: {integer} = {}
   while index ~= 0 do
-    field = self.fields[index]
+    field = self:entry(index)
     require_wire(field, 2)
-    chunks[#chunks + 1] = field
+    chunks[#chunks + 1] = index
     index = field.previous
   end
   local output = string.writer()
   for part = #chunks, 1, -1 do
-    local chunk = chunks[part]
+    local chunk = self:entry(chunks[part])
     output:write(slice_to_string(self.base, chunk.offset, chunk.length))
   end
   local merged = output:drain()
@@ -169,26 +214,26 @@ local function decode_union(message: Message, descriptor: reflect.UnionType,
   require_depth(depth)
   require_union(descriptor)
   local selected = 0
-  local selected_field: WireField? = nil
-  local extra_chunks: {WireField}? = nil
-  for index = 1, #message.fields do
-    local field = message.fields[index]
+  local selected_field = 0
+  local extra_chunks: {integer}? = nil
+  for index = 1, message.count do
+    local field = message:entry(index)
     local ordinal = field_ordinal(field.number)
     if ordinal >= 1 and ordinal <= #descriptor.variants then
       require_wire(field, 2)
       if selected ~= ordinal then
         selected = ordinal
-        selected_field = field
+        selected_field = index
         extra_chunks = nil
       else
         if extra_chunks == nil then
-          extra_chunks = {selected_field as WireField}
+          extra_chunks = {selected_field}
         end
-        (extra_chunks as {WireField})[#(extra_chunks as {WireField}) + 1] = field
+        extra_chunks[#extra_chunks + 1] = index
       end
     end
   end
-  if selected == 0 or selected_field == nil then
+  if selected == 0 then
     raise "protobuf: union has no recognized variant"
   end
   local variant = descriptor.variants[selected]
@@ -196,15 +241,16 @@ local function decode_union(message: Message, descriptor: reflect.UnionType,
     if extra_chunks ~= nil then
       local payload = string.writer()
       for index = 1, #extra_chunks do
-        local chunk = extra_chunks[index]
+        local chunk = message:entry(extra_chunks[index])
         payload:write(slice_to_string(message.base, chunk.offset, chunk.length))
       end
       local merged = payload:drain()
       return read_message_slice(
           ffi.titan_protobuf_bytes_ptr(merged), 0, #merged, merged, message.context)
     end
+    local field = message:entry(selected_field)
     return read_message_slice(
-        message.base, selected_field.offset, selected_field.length, message.holder, message.context)
+        message.base, field.offset, field.length, message.holder, message.context)
   end)()
   local parts: {value} = {}
   for index = 1, #variant.parts do
@@ -220,8 +266,8 @@ local function decode_array(message: Message, constness: reflect.ArrayTypeConstn
   local entries: {value} = {}
   local count = 0
   local is_const = false
-  for index = 1, #message.fields do
-    local field = message.fields[index]
+  for index = 1, message.count do
+    local field = message:entry(index)
     if field.number == 1 then
       require_wire(field, 2)
       count = count + 1
@@ -249,8 +295,8 @@ local function decode_foreign_array(message: Message, element: reflect.Type,
   require_depth(depth)
   local entries: {value} = {}
   local count = 0
-  for index = 1, #message.fields do
-    local field = message.fields[index]
+  for index = 1, message.count do
+    local field = message:entry(index)
     if field.number == 1 then
       require_wire(field, 2)
       count = count + 1
@@ -279,7 +325,7 @@ local function decode_field(message: Message, number: integer,
                               descriptor: reflect.Type, depth: integer): value
   require_depth(depth)
   local resolved = resolve_type(descriptor)
-  local field? = message:last(number)
+  local field = message:last(number)
   case resolved
   when is_option(base) then
     if field == nil then return nil end

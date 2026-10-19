@@ -265,6 +265,20 @@ lengths, groups, wire kinds, out-of-range native integers, missing required
 fields, and unrecognized union selections raise. Nesting is limited to 128
 levels, and messages must fit the protobuf 2 GiB size bound.
 
+Decoding keeps a compact directory of wire offsets rather than constructing a
+Titan object for each wire field. Empty and single-field messages need no
+directory backing allocation or lookup index; multi-field lookup is sparse even
+when unknown tags have very large field numbers. This bookkeeping does not
+change the wire mapping, scalar last-selection, repeated-message merging, or
+oneof replacement rules above.
+
+String entry points retain their input throughout decoding, including custom
+decoder calls. Internally merged message bytes remain retained while any child
+slice uses them. The raw `*_buffer` entry points borrow caller-owned memory:
+keep that complete byte range alive and unchanged until the synchronous call
+returns or raises, including while a custom decoder runs. A raw pointer does not
+retain a Titan string or native allocation.
+
 Extended C floating values use C hexadecimal text to avoid narrowing to Titan
 `float`; they do not acquire a standard protobuf numeric interpretation. Pointer
 values are meaningful only while their native targets remain valid in the
