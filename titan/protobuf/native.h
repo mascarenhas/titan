@@ -36,8 +36,8 @@ typedef struct titan_protobuf_backpatch {
   size_t extra;
   unsigned int count;
   unsigned int depth;
-  unsigned int fallback_depth;
-  unsigned int active;
+  unsigned int fallback_depth; /* depth of innermost pre-fallback frame */
+  unsigned int active;         /* innermost still-open tracked entry */
   titan_protobuf_patch entries[TITAN_PROTOBUF_BACKPATCH_LIMIT];
 } titan_protobuf_backpatch;
 
@@ -353,7 +353,13 @@ static inline int titan_protobuf_buf_end_nested(
     titan_protobuf_buffer *buf, titan_protobuf_backpatch *patches,
     int64_t mark_idx) {
   if (patches->fallback_depth != 0) {
-    int tracked = patches->depth <= patches->fallback_depth;
+    /* fallback_depth is the depth of the innermost still-open pre-fallback
+     * frame. A frame opened after the fallback always lies strictly inside it,
+     * so the closing frame is tracked exactly when the current depth reaches
+     * that boundary, and every tracked close lowers it. A shallower sibling
+     * opened after the fallback therefore stays eager and its caller's mark,
+     * not an earlier entry, is authoritative. */
+    int tracked = patches->depth == patches->fallback_depth;
     titan_protobuf_patch *patch =
         tracked ? &patches->entries[patches->active] : NULL;
     int rc = titan_protobuf_buf_end_nested_eager(
@@ -361,6 +367,7 @@ static inline int titan_protobuf_buf_end_nested(
     if (rc > 0) {
       if (patch != NULL) {
         patches->active = patch->parent;
+        patches->fallback_depth--;
       }
       patches->depth--;
     }
