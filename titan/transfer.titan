@@ -100,10 +100,9 @@ local foreign function commit_resources(message: *titan_async_message,
   owner.resources.count = 0 as foreign size_t
 end
 
--- Internal opaque-root copies can move this scope's scratch units into the
--- same one-time allocation. Never clone entries from the input header.
-local foreign function copy_message_with_resources(raw: const *void,
-    owner: *titan_transfer_scope_owner): *void
+--- Copy an attachment-free packet, returning a new raw owner or NULL.
+-- Resource-bearing packets cannot be cloned; move their single owner instead.
+foreign function copy_message(raw: const *void): *void
   if raw == nil then return nil end
   local input = raw as foreign const *titan_async_message
   if input.resources.entries ~= nil then return nil end
@@ -125,10 +124,8 @@ local foreign function copy_message_with_resources(raw: const *void,
   if length > ffi.SIZE_MAX - header_size then return nil end
   if name_length > ffi.SIZE_MAX - header_size - length then return nil end
   if module_length > ffi.SIZE_MAX - header_size - length - name_length then return nil end
-  local count = 0 as foreign size_t
-  if owner ~= nil then count = owner.resources.count end
   local storage_size = packet_storage_size(
-      header_size + length + name_length + module_length, count)
+      header_size + length + name_length + module_length, 0 as foreign size_t)
   if storage_size == 0 then return nil end
   local message = ffi.malloc(storage_size) as foreign *titan_async_message
   if message == nil then return nil end
@@ -152,15 +149,9 @@ local foreign function copy_message_with_resources(raw: const *void,
   if module_length > 0 then
     ffi.memcpy(bytes + length + name_length, input.module, module_length)
   end
-  if owner ~= nil then commit_resources(message, owner, storage_size) end
   return message as foreign *void
 end
 
---- Copy an attachment-free packet, returning a new raw owner or NULL.
--- Resource-bearing packets cannot be cloned; move their single owner instead.
-foreign function copy_message(raw: const *void): *void
-  return copy_message_with_resources(raw, nil)
-end
 
 local foreign function reserve_resource(owner: *titan_transfer_scope_owner): int
   if owner.resources.count >= ffi.TITAN_TRANSFER_INVALID_INDEX then return 0 end
@@ -909,15 +900,6 @@ function TransferValue:to_value(): value
 end
 
 
-local function copy_async_message(input: foreign *titan_async_message,
-    owner: foreign *titan_transfer_scope_owner): foreign *titan_async_message
-  local copied = copy_message_with_resources(input as foreign const *void, owner)
-      as foreign *titan_async_message
-  if copied == nil then
-    raise "transfer: out of memory copying message"
-  end
-  return copied
-end
 
 -- The arguments already contain exact native scalar fields. After allocation
 -- only nonthrowing C operations run; no automatic message header or copy pass
@@ -950,6 +932,53 @@ local function new_scalar_message(
   message.name = storage + length
   message.module = storage + length
   if length > 0 then ffi.memcpy(storage, bytes, length) end
+  return message
+end
+
+-- Byte policies and opaque hooks already own their complete payload strings.
+-- Allocate their header, bytes, metadata, and actual attachment tail once;
+-- after allocation only nonthrowing native stores, copies, and moves remain.
+local function new_nominal_message(
+    kind: foreign titan_async_message_kind,
+    module: string, name: string, payload: string,
+    entry: foreign const *void,
+    owner: foreign *titan_transfer_scope_owner): foreign *titan_async_message
+  local header_size = foreign titan_async_message.sizeof as foreign size_t
+  local length = #payload as foreign size_t
+  local name_length = #name as foreign size_t
+  local module_length = #module as foreign size_t
+  if length > ffi.SIZE_MAX - header_size then
+    raise "transfer: out of memory copying message"
+  end
+  if name_length > ffi.SIZE_MAX - header_size - length then
+    raise "transfer: out of memory copying message"
+  end
+  if module_length > ffi.SIZE_MAX - header_size - length - name_length then
+    raise "transfer: out of memory copying message"
+  end
+  local count = 0 as foreign size_t
+  if owner ~= nil then count = owner.resources.count end
+  local storage_size = packet_storage_size(
+      header_size + length + name_length + module_length, count)
+  if storage_size == 0 then raise "transfer: out of memory copying message" end
+  local message = ffi.malloc(storage_size) as foreign *titan_async_message
+  if message == nil then raise "transfer: out of memory copying message" end
+  ffi.memset(message, 0, header_size)
+  message.kind = kind
+  message.length = length
+  message.name_length = name_length
+  message.module_length = module_length
+  message.entry = entry
+  local bytes = (message + 1) as foreign *char
+  message.bytes = bytes
+  message.name = bytes + length
+  message.module = bytes + length + name_length
+  if length > 0 then ffi.memcpy(bytes, payload, length) end
+  if name_length > 0 then ffi.memcpy(bytes + length, name, name_length) end
+  if module_length > 0 then
+    ffi.memcpy(bytes + length + name_length, module, module_length)
+  end
+  if owner ~= nil then commit_resources(message, owner, storage_size) end
   return message
 end
 
@@ -1076,43 +1105,19 @@ local function transfer_policy_to_message(
     return new_scalar_message(ffi.TITAN_ASYNC_MESSAGE_FUNCTION, 0, 0.0, nil, 0, nil, item, nil)
   when is_pointer(item) then
     return new_scalar_message(ffi.TITAN_ASYNC_MESSAGE_POINTER, 0, 0.0, nil, 0, nil, nil, item)
-  end
-  -- Only explicit nominal byte carriers still stage a header for copy_message.
-  local message = foreign titan_async_message.new()
-  case data
   when is_record(module, name, bytes) then
-    message.kind = ffi.TITAN_ASYNC_MESSAGE_RECORD
-    message.module = module
-    message.module_length = #module
-    message.name = name
-    message.name_length = #name
-    message.bytes = bytes
-    message.length = #bytes
+    return new_nominal_message(
+        ffi.TITAN_ASYNC_MESSAGE_RECORD, module, name, bytes, nil, nil)
   when is_union(module, name, bytes) then
-    message.kind = ffi.TITAN_ASYNC_MESSAGE_UNION
-    message.module = module
-    message.module_length = #module
-    message.name = name
-    message.name_length = #name
-    message.bytes = bytes
-    message.length = #bytes
+    return new_nominal_message(
+        ffi.TITAN_ASYNC_MESSAGE_UNION, module, name, bytes, nil, nil)
   when is_closure(module, entry, bytes) then
-    message.kind = ffi.TITAN_ASYNC_MESSAGE_CLOSURE
-    message.module = module
-    message.module_length = #module
-    message.entry = entry
-    message.bytes = bytes
-    message.length = #bytes
+    return new_nominal_message(
+        ffi.TITAN_ASYNC_MESSAGE_CLOSURE, module, "", bytes, entry, nil)
   when is_record_payload(module, name, payload) then
-    message.kind = ffi.TITAN_ASYNC_MESSAGE_RECORD_PAYLOAD
-    message.module = module
-    message.module_length = #module
-    message.name = name
-    message.name_length = #name
-    message.bytes = payload
-    message.length = #payload
+    return new_nominal_message(
+        ffi.TITAN_ASYNC_MESSAGE_RECORD_PAYLOAD, module, name, payload, nil, nil)
   end
-  return copy_async_message(message, nil)
 end
 
 local function encode_packet(candidate: value, scope: ResourceScope): foreign *void
@@ -1179,15 +1184,8 @@ local function encode_packet(candidate: value, scope: ResourceScope): foreign *v
     local name = record_value.type.name
     if encode ~= nil then
       local payload = encode_record_payload(record_value, encode)
-      local message = foreign titan_async_message.new()
-      message.kind = ffi.TITAN_ASYNC_MESSAGE_RECORD_PAYLOAD
-      message.module = module
-      message.module_length = #module
-      message.name = name
-      message.name_length = #name
-      message.bytes = payload
-      message.length = #payload
-      return copy_async_message(message, scope.native) as foreign *void
+      return new_nominal_message(ffi.TITAN_ASYNC_MESSAGE_RECORD_PAYLOAD,
+          module, name, payload, nil, scope.native) as foreign *void
     end
     local buf: owned *titan_protobuf_buffer = foreign titan_protobuf_buffer.new()
     if init_packet_buffer(buf, #name as foreign size_t, #module as foreign size_t) == 0 then

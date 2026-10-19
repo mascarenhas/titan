@@ -224,9 +224,8 @@ constructing a `reflect.Value` wrapper, invoking transfer hooks, or granting
 scope authority.
 
 Explicit nominal byte carriers (`is_record`, `is_union`, `is_closure`, and
-`is_record_payload`) also bypass encode-scope acquisition, but still stage
-their packet header before copying its fields and payload into native heap
-storage.
+`is_record_payload`) also bypass encode-scope acquisition and initialize their
+header and copied payload/metadata directly in a single native allocation.
 
 Userdata whose metatable itself has a metatable, Titan-branded userdata, and
 branded Titan closures open an execution-local encode scope. Registered

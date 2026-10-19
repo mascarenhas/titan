@@ -45,8 +45,8 @@ reflection; `encode_packet` additionally recognizes registered resource roots:
    header, and writes the scalar fields and optional string bytes in one pass
    without staging an automatic `titan_async_message` or using the packet-copy
    path. Explicit `is_record`, `is_union`, `is_closure`, and `is_record_payload`
-   policies still stage a header and call `copy_async_message`, whose
-   `copy_message_with_resources` helper performs the single heap allocation.
+   policies use `new_nominal_message`, which allocates complete native storage
+   once and writes their header, payload, name and module directly.
 2. **Demand-driven Titan closure classification**: When `LUA_TFUNCTION` is a C
    closure with `nupvalues >= 5` and `upvalue[3] == TITAN_BRAND`,
    `scalar_message_kind` returns `-1` and transfer dispatches directly to
@@ -397,11 +397,9 @@ The scope, registration, attachment, claim, and disposal mechanics are:
     detaches `buf.data`.
   - Registered root endpoints pre-reserve the known one-entry `storage_size`
     before attaching the endpoint and finalize in place.
-  - Opaque root custom-hook payloads call `copy_async_message(message,
-    scope.native)` (`copy_message_with_resources`), which allocates
-    `storage_size` once (including the aligned tail for
-    `scope.native.resources.count`) and moves the scope's units via
-    `commit_resources`.
+  - Opaque root custom-hook payloads use `new_nominal_message` with
+    `scope.native`, reserving the complete payload, metadata and aligned tail in
+    one allocation before moving the scope's units via `commit_resources`.
   - Scalar and explicit-policy packets open no scope and carry an empty
     `resources` table (`{ nil, 0 }`).
 - **Validated claim and finalizer-first adoption (`ResourceScope:claim`,
@@ -432,9 +430,9 @@ The scope, registration, attachment, claim, and disposal mechanics are:
   packet's own trailing bytes, `discard_message(raw)` frees only the single
   `message` allocation after `dispose_resources` finishes—without entering Lua,
   loading modules, running user decoders, or requiring a Runtime. Public foreign
-  `copy_message(raw)` calls `copy_message_with_resources(raw, nil)` and refuses
-  any packet with `resources.entries ~= nil` or `resources.count ~= 0`, copying
-  only attachment-free packets.
+  `copy_message(raw)` refuses any packet with `resources.entries ~= nil` or
+  `resources.count ~= 0`, copying only attachment-free packets. Internal nominal
+  packet creation no longer stages headers through this public copy entry.
 
 The resource table adds no native cycle collection. Queued receiver attachments
 can keep their own channel, or a cycle of channels, alive after all Lua wrappers

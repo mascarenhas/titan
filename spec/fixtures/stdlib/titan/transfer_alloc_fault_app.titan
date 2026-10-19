@@ -54,6 +54,10 @@ end
 
 local function expect_native_failure(mode: integer, candidate: value,
                                      expected_retains: integer)
+  local r0 = ffi.titan_transfer_fault_resource_at(0 as foreign unsigned int)
+  local r1 = ffi.titan_transfer_fault_resource_at(1 as foreign unsigned int)
+  local base_retains = r0.retains + r1.retains
+  local base_releases = r0.releases + r1.releases
   local failed = false
   if mode == 4 then ffi.titan_transfer_fault_arm(4) end
   do
@@ -65,10 +69,10 @@ local function expect_native_failure(mode: integer, candidate: value,
   ffi.titan_transfer_fault_disarm()
   test.assert(failed and ffi.titan_transfer_fault_fired() == 1,
               "did not exercise exactly one native allocation failure")
-  test.assert(ffi.titan_transfer_fault_retains_at_failure() ==
+  test.assert(ffi.titan_transfer_fault_retains_at_failure() - base_retains ==
                 (expected_retains as foreign size_t),
               "failed reserve retained before capacity was secured")
-  test.assert(ffi.titan_transfer_fault_releases_at_failure() ==
+  test.assert(ffi.titan_transfer_fault_releases_at_failure() - base_releases ==
                 (0 as foreign size_t),
               "injection observed an unrelated release instead of the requested boundary")
   local allocator = ffi.titan_transfer_fault_allocator()
@@ -233,6 +237,16 @@ function main(args: {string}): integer
     local policy = transfer.TransferValue.is_integer(99)
     ffi.titan_transfer_fault_arm(3)
     expect_native_failure(3, policy, 0)
+    local nominal_policies: {transfer.TransferValue} = {
+      transfer.TransferValue.is_record("m", "R", "rec\0bytes"),
+      transfer.TransferValue.is_union("m", "U", "union\0bytes"),
+      transfer.TransferValue.is_closure("m", nil, "closure\0bytes"),
+      transfer.TransferValue.is_record_payload("m", "P", "payload\0bytes"),
+    }
+    for i = 1, #nominal_policies do
+      ffi.titan_transfer_fault_arm(3)
+      expect_native_failure(3, nominal_policies[i], 0)
+    end
   elseif scenario == "sender-finalizer" then
     expect_endpoint_finalizer_failure(true, false)
   elseif scenario == "receiver-finalizer" then
