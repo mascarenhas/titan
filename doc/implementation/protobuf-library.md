@@ -46,6 +46,13 @@ deserialize_nominal_buffer_with_context(data: foreign const *void,
                                         length: integer, name: string,
                                         is_union: boolean,
                                         context: value): value
+serialize_fields_to_buffer_with_context(buf: foreign *void,
+                                        fields: const {reflect.Type},
+                                        context: value, ...: value)
+deserialize_fields_buffer_with_context(data: foreign const *void,
+                                       length: integer,
+                                       fields: const {reflect.Type},
+                                       context: value): (...: value)
 
 record ResourceCodec
   const identity: value
@@ -70,11 +77,13 @@ inspected-root helper records its starting length, resolves `context` via
 carrying `context`, appends the already-inspected root at depth 1, and checks
 the appended message size. The caller retains buffer ownership and must provide
 its normal native-buffer cleanup; these entries neither initialize nor finalize
-that storage. Likewise, `deserialize_nominal_buffer_with_context` accepts the
-caller's already-resolved decode `context` (while the general 4-argument
-`deserialize_nominal_buffer` resolves `packet_context(false)` once and
-delegates to it).
-
+that storage. Likewise, `deserialize_nominal_buffer_with_context`,
+`serialize_fields_to_buffer_with_context`, and
+`deserialize_fields_buffer_with_context` accept the caller's already-resolved
+encode or decode `context` (while the public `deserialize_nominal_buffer`,
+`serialize_fields_to_buffer`, and `deserialize_fields_buffer` wrappers resolve
+`packet_context(true)` / `packet_context(false)` once and delegate to them; a
+`nil` `context` carries no attachment/claim authority).
 `titan.protobuf` never imports `titan.transfer` or `titan.thread`. Instead,
 `transfer` installs its `packet_context` resolver once via
 `set_packet_context_provider` and mediates capability registration via
@@ -229,7 +238,10 @@ nominal descriptor or changes the visibility checks on nested nominal values.
 The descriptor remains in the hook's module; only bytes cross the state
 boundary. Resource hooks describe pointer tokens, scalar state, and child
 payload strings this way. Closure snapshots describe Arrays of converted
-`TransferValue` policies and explicit-policy flags. Nested closures and custom
+`TransferValue` policies and explicit-policy flags, passing the packet's
+already-resolved `ResourceScope` to
+`serialize_fields_to_buffer_with_context` and
+`deserialize_fields_buffer_with_context`. Nested closures and custom
 payloads are already byte strings, so this use does not introduce a recursive
 native transfer representation or a separate field codec.
 

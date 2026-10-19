@@ -47,9 +47,16 @@ deserialize_nominal_buffer_with_context(data: foreign const *void,
 serialize_fields(fields: const {reflect.Type}, ...: value): string
 serialize_fields_to_buffer(buf: foreign *void,
                            fields: const {reflect.Type}, ...: value)
+serialize_fields_to_buffer_with_context(buf: foreign *void,
+                                        fields: const {reflect.Type},
+                                        context: value, ...: value)
 deserialize_fields(bytes: string, fields: const {reflect.Type}): (...: value)
 deserialize_fields_buffer(data: foreign const *void, length: integer,
                           fields: const {reflect.Type}): (...: value)
+deserialize_fields_buffer_with_context(data: foreign const *void,
+                                       length: integer,
+                                       fields: const {reflect.Type},
+                                       context: value): (...: value)
 find_transfer_hooks(descriptor: reflect.RecordType, context_prefix: string):
     (reflect.Function?, reflect.Function?)
 encode_transfer_payload(candidate: value, to_hook: reflect.Function,
@@ -88,7 +95,9 @@ name `descriptor.name`), and `encode_transfer_payload` invokes `to_hook` under
 the shared active-record cycle guard.
 
 `serialize_inspected_record_to_buffer`, `serialize_inspected_union_to_buffer`,
-`deserialize_nominal_buffer_with_context`, `ResourceCodec`,
+`deserialize_nominal_buffer_with_context`,
+`serialize_fields_to_buffer_with_context`,
+`deserialize_fields_buffer_with_context`, `ResourceCodec`,
 `set_packet_context_provider`, `register_resource_codec`,
 `find_resource_codec`, `find_resource_codec_by_name`,
 `write_resource_index_bytes`, and `write_resource_index` are ordinary compiled

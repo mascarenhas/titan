@@ -124,8 +124,9 @@ header fields—`init_packet_buffer` leaves the header prefix uninitialized unti
 and detaches the buffer with `titan_protobuf_buf_take_data`.
 Decode reads directly from the packet's byte slices using
 `protobuf.deserialize_nominal_buffer_with_context` (passing `scope` once for
-`RECORD` and `UNION` packets) and `protobuf.deserialize_fields_buffer` under the
-current execution's decode scope. For a `RECORD_PAYLOAD` packet, after
+`RECORD` and `UNION` packets) and
+`protobuf.deserialize_fields_buffer_with_context` for closure envelopes, passing
+the packet's already-resolved decode scope. For a `RECORD_PAYLOAD` packet, after
 `initialize_nominal_raw` ensures the destination module is loaded in the
 receiving state, `decode_message_worker` checks
 `protobuf.find_resource_codec_by_name(name)`: registered resource types invoke
@@ -246,6 +247,10 @@ converts each capture once in declaration order via `TransferValue.from_value`,
 so a custom hook in an earlier capture cannot mutate a shared captured box
 before a later capture is read. A nested closure or custom record is already
 opaque bytes when inserted into its parent's snapshot.
+Packet closure envelopes use `serialize_fields_to_buffer_with_context` and
+`deserialize_fields_buffer_with_context`, carrying the already-resolved scope
+once for the envelope. Standalone helpers and individual capture conversion
+still resolve exact current-execution authority rather than using a global top.
 
 One anonymous protobuf message has two array fields: `{TransferValue}` policies
 and `{boolean}` flags recording which captures were already policy wrappers.

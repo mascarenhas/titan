@@ -452,10 +452,20 @@ function serialize_fields_to_buffer(
     buf: foreign *void,
     fields: const {reflect.Type},
     ...: value)
+  serialize_fields_to_buffer_with_context(buf, fields, packet_context(true), ...)
+end
+
+-- Internal compiled transfer collaboration. A nil context carries no authority;
+-- the transport supplies its already-resolved exact-top encode scope.
+function serialize_fields_to_buffer_with_context(
+    buf: foreign *void,
+    fields: const {reflect.Type},
+    context: value,
+    ...: value)
   if #... ~= #fields then raise "protobuf: anonymous field count mismatch" end
   local pbuf = buf as foreign *titan_protobuf_buffer
   local start = pbuf.length as integer
-  local encoder = Encoder({}, packet_context(true))
+  local encoder = Encoder({}, context)
   for index = 1, #fields do
     encoder:field(pbuf, field_number(index), ...[index], fields[index], 2)
   end
@@ -487,9 +497,19 @@ function deserialize_fields_buffer(
     data: foreign const *void,
     length: integer,
     fields: const {reflect.Type}): (...: value)
+  return deserialize_fields_buffer_with_context(
+      data, length, fields, packet_context(false))
+end
+
+-- As above, the context stays traced only for this synchronous reconstruction.
+function deserialize_fields_buffer_with_context(
+    data: foreign const *void,
+    length: integer,
+    fields: const {reflect.Type},
+    context: value): (...: value)
   check_message_size(length)
   local message = read_message_slice(
-      data as foreign const *uint8_t, 0, length, nil, packet_context(false))
+      data as foreign const *uint8_t, 0, length, nil, context)
   local values: {value} = {}
   for index = 1, #fields do
     values[index] = decode_field(message, field_number(index), fields[index], 2)

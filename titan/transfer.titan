@@ -813,7 +813,7 @@ local function restore_closure_from_buffer(
     module_len: foreign size_t,
     token: foreign const *void,
     data: foreign const *void,
-    data_len: integer): value
+    data_len: integer, context: value): value
   local top = ffi.lua_gettop(L)
   defer ffi.lua_settop(L, top)
   transfer_load_module(L, module, module_len as foreign unsigned long long)
@@ -823,7 +823,7 @@ local function restore_closure_from_buffer(
   local entry = transfer_resolve(L, module_index, token)
   local count = transfer_capture_count(entry) as integer
   local policies: {TransferValue}, was_policy: {value} =
-    protobuf.deserialize_fields_buffer(data, data_len, closure_fields)
+    protobuf.deserialize_fields_buffer_with_context(data, data_len, closure_fields, context)
   if #policies ~= count or #was_policy ~= count then
     raise "invalid closure capture count"
   end
@@ -892,7 +892,7 @@ function TransferValue:to_value(): value
         #module as foreign size_t,
         token,
         ffi.titan_protobuf_bytes_ptr(data) as foreign const *void,
-        #data)
+        #data, packet_context(false))
   when is_record_payload(module, name, payload) then
     initialize_nominal(module, name)
     return decode_initialized_record_payload(name, payload)
@@ -1169,8 +1169,8 @@ local function encode_packet(candidate: value, scope: ResourceScope): foreign *v
       raise "transfer: out of memory copying message"
     end
     defer ffi.titan_protobuf_buf_free_heap(buf)
-    protobuf.serialize_fields_to_buffer(
-        buf as foreign *void, closure_fields, policies, was_policy)
+    protobuf.serialize_fields_to_buffer_with_context(
+        buf as foreign *void, closure_fields, scope, policies, was_policy)
     return finalize_buf_message(buf, ffi.TITAN_ASYNC_MESSAGE_CLOSURE,
         "", module, entry, scope.native) as foreign *void
   end
@@ -1310,7 +1310,7 @@ local function decode_message_worker(slot_value: value): value
         message.module_length,
         message.entry,
         message.bytes as foreign const *void,
-        message.length as integer)
+        message.length as integer, scope)
   elseif kind == ffi.TITAN_ASYNC_MESSAGE_RECORD_PAYLOAD then
     local name = copy_native_bytes(message.name, message.name_length)
     initialize_nominal_raw(message.module, message.module_length, name)
