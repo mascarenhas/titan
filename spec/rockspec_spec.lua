@@ -788,6 +788,7 @@ int titan_sdk_headers(void) { return LUA_VERSION_NUM + SQLITE_VERSION_NUMBER; }
             "spec/stdlib/titan/async/tests/packet_receiver_probe.h",
             "spec/stdlib/titan/async/tests/packet_receiver_test.titan",
             "spec/stdlib/titan/async/tests/transfer_payload_test.titan",
+            "spec/stdlib/titan/async/tests/transfer_scalar_envelope_test.titan",
             "spec/fixtures/stdlib/titan/transfer_ownership_smoke_app.titan",
             "spec/fixtures/stdlib/titan/transfer_alloc_fault_app.titan",
             "spec/fixtures/stdlib/native/transfer_alloc_fault_api.h",

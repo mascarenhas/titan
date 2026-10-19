@@ -87,6 +87,7 @@ TITAN_TEST_SOURCES_async.tests := spec/stdlib/titan/async/tests/tests.titan \
 	spec/stdlib/titan/async/tests/subscription_test.titan \
 	spec/stdlib/titan/async/tests/task_test.titan \
 	spec/stdlib/titan/async/tests/transfer_payload_test.titan \
+	spec/stdlib/titan/async/tests/transfer_scalar_envelope_test.titan \
 	spec/stdlib/titan/async/tests/coverage_combinator_matrix_test.titan \
 	spec/stdlib/titan/async/tests/coverage_recovery_test.titan
 TITAN_TEST_IMPORTS_async.tests := async.test_support support.async support.command support.common support.runtime

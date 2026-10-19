@@ -575,14 +575,6 @@ local function snapshot_closure(candidate: value): TransferValue
     protobuf.serialize_fields(closure_fields, policies, was_policy))
 end
 
-local function snapshot_closure_to_buffer(
-    buf: foreign *titan_protobuf_buffer,
-    candidate: value): (string, foreign const *void)
-  local module, entry, policies, was_policy = project_closure_captures(candidate)
-  protobuf.serialize_fields_to_buffer(
-      buf as foreign *void, closure_fields, policies, was_policy)
-  return module, entry
-end
 
 local function encode_record_payload(
     record_value: reflect.RecordValue,
@@ -931,6 +923,28 @@ local function scalar_value_to_message(
       integer_value, number, bytes, length, state, entry, pointer)
 end
 
+-- Credit at most 64 bytes of the mandatory name/module trailer to the first
+-- reservation. Existing doubling supplies the small-payload slack without
+-- speculatively increasing the final capacity: even an empty payload must
+-- eventually fit these bytes. Keep the logical prefix at the header size.
+-- finalize_buf_message alone clears that prefix after the final move, so this
+-- reservation deliberately leaves it uninitialized; serializers append at
+-- buf.length and never read the header region.
+local foreign function init_packet_buffer(buf: *titan_protobuf_buffer,
+    name_length: size_t, module_length: size_t): int
+  local header_size = foreign titan_async_message.sizeof
+  if name_length > ffi.SIZE_MAX - header_size then return 0 end
+  if module_length > ffi.SIZE_MAX - header_size - name_length then return 0 end
+  local trailer_size = name_length + module_length
+  if trailer_size > 64 then trailer_size = 64 as foreign size_t end
+  ffi.titan_protobuf_buf_init_heap(buf, 0 as foreign size_t)
+  if ffi.titan_protobuf_buf_reserve(buf, header_size + trailer_size) == 0 then
+    return 0
+  end
+  buf.length = header_size
+  return 1
+end
+
 local function finalize_buf_message(
     buf: foreign *titan_protobuf_buffer,
     kind: foreign titan_async_message_kind,
@@ -1063,12 +1077,15 @@ local function encode_packet(candidate: value, scope: ResourceScope): foreign *v
     end
   end
   if ffi.lmacro_ttype(raw) == ffi.LUA_TFUNCTION then
+    -- Snapshot each capture once before choosing the bounded buffer hint.
+    local module, entry, policies, was_policy = project_closure_captures(candidate)
     local buf: owned *titan_protobuf_buffer = foreign titan_protobuf_buffer.new()
-    if ffi.titan_protobuf_buf_init_heap(buf, foreign titan_async_message.sizeof) == 0 then
+    if init_packet_buffer(buf, 0, #module as foreign size_t) == 0 then
       raise "transfer: out of memory copying message"
     end
     defer ffi.titan_protobuf_buf_free_heap(buf)
-    local module, entry = snapshot_closure_to_buffer(buf, candidate)
+    protobuf.serialize_fields_to_buffer(
+        buf as foreign *void, closure_fields, policies, was_policy)
     return finalize_buf_message(
         buf, ffi.TITAN_ASYNC_MESSAGE_CLOSURE, "", module, entry) as foreign *void
   end
@@ -1093,7 +1110,7 @@ local function encode_packet(candidate: value, scope: ResourceScope): foreign *v
       return copy_async_message(message) as foreign *void
     end
     local buf: owned *titan_protobuf_buffer = foreign titan_protobuf_buffer.new()
-    if ffi.titan_protobuf_buf_init_heap(buf, foreign titan_async_message.sizeof) == 0 then
+    if init_packet_buffer(buf, #name as foreign size_t, #module as foreign size_t) == 0 then
       raise "transfer: out of memory copying message"
     end
     defer ffi.titan_protobuf_buf_free_heap(buf)
@@ -1104,7 +1121,7 @@ local function encode_packet(candidate: value, scope: ResourceScope): foreign *v
     local module = nominal_module(candidate)
     local name = union_value.type.name
     local buf: owned *titan_protobuf_buffer = foreign titan_protobuf_buffer.new()
-    if ffi.titan_protobuf_buf_init_heap(buf, foreign titan_async_message.sizeof) == 0 then
+    if init_packet_buffer(buf, #name as foreign size_t, #module as foreign size_t) == 0 then
       raise "transfer: out of memory copying message"
     end
     defer ffi.titan_protobuf_buf_free_heap(buf)
