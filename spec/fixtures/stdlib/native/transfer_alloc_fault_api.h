@@ -12,7 +12,7 @@ typedef struct titan_transfer_fault_resource {
 } titan_transfer_fault_resource;
 
 /* This fixture runs in one fresh, synchronous, archive-linked child. Modes:
- * 1 initial resource reserve, 2 resource growth, 3 packet payload malloc,
+ * 1 first heap spill after two inline resources, 2 resource growth, 3 packet payload malloc,
  * 4 structural buffer initialization, 5 structural buffer growth,
  * 6 endpoint finalizer registration. */
 int titan_transfer_fault_watch_finalizer(lua_State *state, int index);

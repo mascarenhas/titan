@@ -24,6 +24,8 @@ end
 
 function TransferNativeFaultProbe:to_transfer_payload(): string
   if self.mode == 1 then
+    attach(0)
+    attach(0)
     ffi.titan_transfer_fault_arm(1)
     return attach(0)
   elseif self.mode == 2 then
@@ -183,7 +185,7 @@ function main(args: {string}): integer
   defer gc.resume()
   local scenario = args[1]
   if scenario == "reserve-initial" then
-    expect_native_failure(1, TransferNativeFaultProbe(1), 0)
+    expect_native_failure(1, TransferNativeFaultProbe(1), 2)
   elseif scenario == "reserve-growth" then
     expect_native_failure(2, TransferNativeFaultProbe(2), 4)
   elseif scenario == "payload-copy" then

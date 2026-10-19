@@ -14,19 +14,22 @@
  * Entries contain native data only. Their callbacks must not enter Lua. */
 #define TITAN_TRANSFER_PACKET_VERSION 1
 #define TITAN_TRANSFER_INVALID_INDEX UINT32_MAX
+#define TITAN_TRANSFER_INLINE_RESOURCES 2
 
 typedef void (*titan_transfer_resource_fn)(void *);
 
+/* A NULL resource marks a consumed unit; keep release for kind-before-duplicate
+ * claim validation. Committed entries live in the packet's aligned tail. */
 typedef struct titan_transfer_resource {
   void *resource;
   titan_transfer_resource_fn release;
-  int claimed;
 } titan_transfer_resource;
 
+/* Committed packets retain an exact count, never scratch capacity. Their entry
+ * pointer is NULL for zero entries and otherwise points inside the packet. */
 typedef struct titan_transfer_resource_table {
   titan_transfer_resource *entries;
   size_t count;
-  size_t capacity;
 } titan_transfer_resource_table;
 
 typedef enum titan_async_message_kind {
@@ -67,9 +70,14 @@ typedef struct titan_transfer_packet_owner {
   titan_async_message *message;
 } titan_transfer_packet_owner;
 
+/* Scratch is confined to this traced native cell. Capacity zero is inert;
+ * capacity == INLINE_RESOURCES selects inline_entries, larger capacity selects
+ * a heap spill. Retirement frees the spill and zeroes the complete cell. */
 typedef struct titan_transfer_scope_owner {
   titan_transfer_resource_table resources;
+  size_t capacity;
   titan_async_message *message;
+  titan_transfer_resource inline_entries[TITAN_TRANSFER_INLINE_RESOURCES];
 } titan_transfer_scope_owner;
 
 /* Titan's FFI cannot take the mutable address of a C aggregate field on a

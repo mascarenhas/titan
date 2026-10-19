@@ -252,70 +252,135 @@ identity indexes, mutable-cell registries, or graph allocation ledgers.
 ### Packet-scoped resource table (`titan_transfer_resource_table`)
 
 `titan/transfer_native.h` embeds `titan_transfer_resource_table resources`
-(`entries`, `count`, `capacity`) in `titan_async_message`. Each entry
-(`titan_transfer_resource`) holds `(void *resource, titan_transfer_resource_fn
-release, int claimed)` and contains only native pointers and C-ABI callbacks—no
-Lua/Titan GC objects or state-bound closures.
+(`entries`, `count`; no committed `capacity`) in `titan_async_message`. Each
+entry (`titan_transfer_resource`) holds `(void *resource,
+titan_transfer_resource_fn release)` (16 bytes on LP64) with no separate
+`claimed` field: a `nil` `resource` pointer marks a consumed unit while
+`release` is retained so claim validation still checks resource kind before
+duplicate consumption. Entries contain only native pointers and C-ABI
+callbacks—no Lua/Titan GC objects or state-bound closures. Committed entries
+live in the aligned tail of the `titan_async_message` allocation itself; `entries`
+is `nil` when `count == 0` and otherwise points inside that single packet block.
+Changing `titan_async_message` or `titan_transfer_resource_table` alters the
+native packet contract while keeping ABI 2, SDK/package 0.6/0.6.0, and
+language-server API 1 unchanged, so every provider, consumer, and native fixture
+must be cleanly rebuilt with no mixed-layout shim.
 
-- **Execution-local, direction-specific scope stacks (`ResourceScope`)**:
-  `resource_scopes` maps the actual current Lua thread value, obtained by
-  `current_execution()` with `lua_pushthread`, to that execution's linked top.
-  It is an ephemeron Map, not a raw-address registry: a suspended execution can
-  keep its scope alive, while an unreachable execution/scope cycle is
-  collectible. Each frame stores `execution`, `previous`, direction, a
-  `titan_transfer_scope_owner` native cell containing its unfinished resource
-  table/owned decode packet, and a borrowed message pointer for claim lookup.
-  `encode_message` pushes an encode frame; decode pushes a distinct decode
-  frame after preparing its owner. Lexical deferred cleanup restores exactly
-  `resource_scopes[execution] = previous` and calls the pure foreign
-  `dispose_scope` on the frame's native cell on normal or error exit. Only the
-  current execution's exact top authorizes attachment or claim; no older matching
-  phase is searched. Same-stack protobuf fields, opaque hooks, and closure
-  capture conversion share the top, but nested packet operations push their
-  own frame. Other Tasks and separately resumed child Coroutines inherit no
-  packet authority. `gc.finalizable(scope, finalize_resource_scope)` supplies a
-  nonyielding fallback for an abandoned execution stack that never runs its
-  lexical defer; the finalizer invokes that same native disposal path for
-  unfinished retains/owned packet. This isolation/abandonment mechanism does not make
-  yielding transfer hooks supported. Standalone protobuf/policy conversion
-  opens no scope and cannot manufacture ownerless endpoint references.
-- **Capacity-before-retain attachment (`attach_resource`)**: After checking the
-  top encode scope and non-nil `resource`, `retain`, and `release` pointers,
-  `reserve_resource` grows the table inside `scope.native` (up to
-  `TITAN_TRANSFER_INVALID_INDEX = 0xffffffff`, so valid slot indexes are
-  `0..0xfffffffe`) **before** `attach_reserved` calls `retain(resource)`. Once
-  `retain` returns, the entry `{ resource, release, claimed = 0 }` is written
-  and `count` incremented immediately. If pushing the four-byte little-endian
-  index string or subsequent encoding raises, native scope disposal releases
-  the unfinished table. On successful packet creation `commit_resources`
-  transfers that table into `raw->resources` and zeroes the source table in
-  one native interval, independent of earlier buffer growth/detachment.
+- **Execution-local exact-top authority and bounded state-local frame reuse
+  (`ResourceScope`)**: `resource_scopes` maps the actual current Lua thread
+  value, obtained by `current_execution()` with `lua_pushthread`, to that
+  execution's active top `ResourceScope`. It is an ephemeron Map, not a
+  raw-address registry: a suspended execution keeps its active scope alive, while
+  an unreachable execution/scope cycle is collectible. Each `ResourceScope`
+  stores only `encoding` (direction), an inline `titan_transfer_scope_owner`
+  native cell (`resources{entries,count}`, `capacity`, `message`, and
+  `inline_entries[2]`, totaling 64 bytes on LP64), a borrowed `message` pointer
+  for decode claim lookup, and `free_next` for the state-local idle free stack.
+  The current `execution` key and enclosing `previous` frame remain in the
+  lexical locals of `encode_message` and `decode_message_worker`, so a scope
+  frame never retains a strong edge back to its execution thread or parent frame.
+  `acquire_resource_scope()` pops a retired frame from the state-local
+  `idle_resource_scopes` stack (hard-bounded at `idle_resource_scope_limit = 8`
+  frames per Lua state, independent of coroutine/Task identity so Task-per-message
+  callers share the pool); on an empty stack it allocates an inert
+  `ResourceScope` and registers `gc.finalizable(fresh, finalize_resource_scope)`
+  before granting execution authority or native ownership. Lexical deferred
+  retirement stays inline (introducing no fallible ordinary helper entry after
+  packet commitment) and runs in exact order:
+  1. restore `resource_scopes[execution] = previous`;
+  2. call C-only `dispose_scope(scope.native)`, which detaches `message`,
+     `entries`, `count`, and `capacity`, releases any uncommitted scratch units
+     via `dispose_resource_entries`, frees `entries` only when
+     `capacity > TITAN_TRANSFER_INLINE_RESOURCES` (`2`), disposes any owned
+     decode `message` via `discard_message`, and zeroes the complete
+     `titan_transfer_scope_owner` cell with `memset`;
+  3. clear `scope.message = nil` and `scope.encoding = false`;
+  4. push `scope` onto `idle_resource_scopes` only when
+     `idle_resource_scope_count < 8`.
+
+  Idle pooled frames hold no native ownership and grant no authority. Deeper
+  nested bursts (`> 8` concurrent frames in one state) retire their overflow
+  frames normally and leave them for ordinary GC reclamation; when
+  `finalize_resource_scope` later runs on an already-retired overflow frame, its
+  zeroed native cell makes `dispose_scope` a no-op. Only the current execution's
+  exact top authorizes attachment or claim; no older matching phase is searched.
+  Same-stack protobuf fields, opaque hooks, and closure capture conversion share
+  the top, while nested packet operations push their own frame. Other Tasks and
+  separately resumed child Coroutines inherit no packet authority. An abandoned
+  active execution stack that never runs its lexical `defer` never returns its
+  frame to `idle_resource_scopes`; `finalize_resource_scope` reclaims its
+  unfinished scratch units, heap spill, and owned packet natively. This
+  isolation/abandonment mechanism does not make yielding transfer hooks
+  supported. Standalone protobuf/policy conversion opens no scope and cannot
+  manufacture ownerless endpoint references.
+- **Inline scratch cell, heap spill, and pre-detach trailing reservation
+  (`reserve_resource`, `packet_storage_size`, `commit_resources`)**: After
+  checking the top encode scope and non-nil `resource`, `retain`, and `release`
+  pointers, `reserve_resource(scope.native)` reserves a scratch slot **before**
+  `attach_reserved` calls `retain(resource)`. The first
+  `TITAN_TRANSFER_INLINE_RESOURCES` (`2`) attachments use
+  `scope.native.inline_entries` directly (`capacity = 2`) with no heap
+  allocation. A third attachment spills to a 4-entry heap array via `malloc` and
+  copies the two inline entries (the inline address is never passed to
+  `realloc`); subsequent growth doubles `capacity` via `realloc`, saturating at
+  `TITAN_TRANSFER_INVALID_INDEX = 0xffffffff` (valid slot indexes
+  `0..0xfffffffe`) and checking `SIZE_MAX / sizeof(titan_transfer_resource)`. A
+  failed spill or growth leaves all prior units and the existing scratch buffer
+  owned by `scope.native` for native rollback. Once `retain` returns,
+  `attach_reserved` writes `{ resource, release }` and increments `count`. Every
+  packet-producing path reserves header, payload, metadata, alignment padding,
+  and the exact trailing entry bytes before buffer detachment or allocation so a
+  detached packet is never reallocated:
+  - `packet_storage_size(content_size, count)` returns `content_size` when
+    `count == 0` (adding no alignment padding or tail) and otherwise computes
+    `align_up(content_size, alignof(titan_transfer_resource)) + count * sizeof(titan_transfer_resource)`
+    with `SIZE_MAX` overflow checks on alignment padding, byte addition, and
+    entry multiplication.
+  - Structural records, unions, and closure snapshots call
+    `finalize_buf_message`, which reserves `storage_size - buf.length` in the
+    expandable buffer before zeroing and writing the header and `name`/`module`
+    trailers, derives all interior pointers after that final reservation, calls
+    `commit_resources(msg, owner, storage_size)` to `memcpy` the active scratch
+    units into the aligned packet tail and reset `owner.resources.count = 0`, and
+    detaches `buf.data`.
+  - Registered root endpoints pre-reserve the known one-entry `storage_size`
+    before attaching the endpoint and finalize in place.
+  - Opaque root custom-hook payloads call `copy_async_message(message,
+    scope.native)` (`copy_message_with_resources`), which allocates
+    `storage_size` once (including the aligned tail for
+    `scope.native.resources.count`) and moves the scope's units via
+    `commit_resources`.
+  - Scalar and explicit-policy packets open no scope and carry an empty
+    `resources` table (`{ nil, 0 }`).
 - **Validated claim and finalizer-first adoption (`claim_resource`)**: Checks
-  the top decode scope, requires `#index_bytes == 4`, decodes the four-byte
-  little-endian unsigned slot index, checks `index ~= 0xffffffff` and
+  the top decode scope, requires `length == 4`, decodes the four-byte
+  little-endian unsigned slot index (inverse of
+  `protobuf.write_resource_index_bytes`), checks `index ~= 0xffffffff` and
   `index < scope.message.resources.count`, checks
   `expected_release ~= nil and entry.release == expected_release`, and checks
-  `entry.claimed == 0`. It then sets `entry.claimed = 1`, clears
-  `entry.resource = nil`, and returns `resource` with no subsequent allocation
-  or yield. Endpoint decoders (`Sender.from_transfer_payload` and
-  `Receiver.from_transfer_payload`) allocate their wrapper with `native = nil`
-  and register `gc.finalizable` **before** calling `claim_resource`, then assign
-  `native` immediately. Thus a failure before or during `claim_resource` leaves
-  the retain owned by the packet table, while a failure in a later field after
-  `claim_resource` leaves the claimed wrapper owned by the destination GC and
-  disposes only the remaining unclaimed packet entries.
+  `entry.resource ~= nil`. It then sets `entry.resource = nil` (leaving
+  `entry.release` intact so a subsequent wrong-kind claim on the same consumed
+  slot still fails with kind mismatch before duplicate claim) and returns
+  `resource` with no subsequent allocation or yield. Endpoint decoders allocate
+  their inert wrapper (`native = nil`) and register `gc.finalizable` **before**
+  claiming, then assign `native` immediately. Thus a failure before or during the
+  claim leaves the retain owned by the packet's trailing table, while a failure in
+  a later field leaves already-claimed wrappers owned by the destination GC and
+  disposes only the remaining non-nil packet entries.
 - **Reentrant C-only disposal (`dispose_resources`, `discard_message`) and
-  `copy_message`**: `dispose_resources` detaches `entries`, `count`, and
-  `capacity` from the table header before iterating over `0..count - 1` and
-  calling `release(resource)` on entries with `claimed == 0`, then frees
-  `entries`. Detaching first ensures recursive release paths (such as releasing
-  the last `thread.Receiver`, which drains its channel and discards nested
-  packets) cannot observe the table as still owned. Public foreign
-  `discard_message(raw)` is NULL-safe, calls `dispose_resources` on
-  `&message->resources`, and frees `message` without entering Lua, loading
-  modules, running user decoders, or requiring a Runtime. Public foreign
-  `copy_message(raw)` refuses any packet with non-zero `resources` (`entries`,
-  `count`, or `capacity`), copying only attachment-free packets.
+  `copy_message`**: `dispose_resources` detaches `entries` and `count` from the
+  table header (`table.entries = nil`, `table.count = 0`) before
+  `dispose_resource_entries` iterates over `0..count - 1`, clears
+  `entry.resource = nil`, and calls `release(resource)` on each non-nil entry.
+  Detaching first ensures recursive release paths (such as releasing the last
+  `thread.Receiver`, which drains its channel and discards nested packets) cannot
+  observe the table as still owned. Because committed `entries` points into the
+  packet's own trailing bytes, `discard_message(raw)` frees only the single
+  `message` allocation after `dispose_resources` finishes—without entering Lua,
+  loading modules, running user decoders, or requiring a Runtime. Public foreign
+  `copy_message(raw)` calls `copy_message_with_resources(raw, nil)` and refuses
+  any packet with `resources.entries ~= nil` or `resources.count ~= 0`, copying
+  only attachment-free packets.
 - **Prepared `Packet` owner**: `Packet.new()` creates an inert, finalized
   wrapper containing one inline `titan_transfer_packet_owner` cell.
   `Packet:borrow_owner()` borrows that stable cell while the Packet is rooted;

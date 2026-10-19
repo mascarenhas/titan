@@ -346,17 +346,18 @@ allocation to a second consuming operation is invalid, even if every attachment
 was already claimed. An emptied slot is not authority to reuse a saved address.
 
 `copy_message(raw)` is a public C-ABI `foreign function` that duplicates only
-attachment-free packets (`resources.entries == nil`, `count == 0`, and
-`capacity == 0`). It returns `nil` if `raw` is `nil`, if the packet owns any
-resource-table entries or capacity, or if heap allocation fails; it never
-shallow-copies a resource table.
+attachment-free packets (`resources.entries == nil` and `resources.count == 0`).
+It returns `nil` if `raw` is `nil`, if the packet owns any resource-table
+entries, or if heap allocation fails; it never shallow-copies a resource table.
 
 ### Scoped resource attachments and packet-local indexes
 
 `encode_message` and `decode_message` maintain a direction-specific scope stack
 for each actual Lua thread within the state whenever structural, hook, closure,
 or protected decode work runs (scalar/policy encoding and C-only scalar
-decoding bypass scope creation while leaving any enclosing scope intact):
+decoding bypass scope creation while leaving any enclosing scope intact).
+Finalized `ResourceScope` frames are acquired and retired through a bounded
+state-local free stack; idle frames grant no execution authority:
 
 - **Execution-local exact top authority**: `attach_resource` is permitted only
   when the current execution's exact top frame is an encode scope (otherwise
@@ -364,34 +365,40 @@ decoding bypass scope creation while leaving any enclosing scope intact):
   `claim_resource` requires that same execution's exact top frame to be a
   decode scope (otherwise raising
   `"transfer: resource claim requires a decode scope"`). Neither operation
-  searches an older enclosing frame or another Task's scope for permission.
-  A separately resumed child `coroutine.Coroutine` does not inherit its
-  caller's packet authority. Hooks remain synchronous and nonyielding; this
-  isolation does not authorize yielding hooks.
+  searches an older enclosing frame or another Task's scope for permission, and
+  idle pooled frames grant no authority. A separately resumed child
+  `coroutine.Coroutine` does not inherit its caller's packet authority. Hooks
+  remain synchronous and nonyielding; this isolation does not authorize yielding
+  hooks.
 - **Nested and standalone calls**: Opaque custom hooks, nested protobuf
   messages, and closure capture snapshots belonging to the same packet share its
   top scope. A nested `encode_message` or `decode_message` call pushes its own
   scope frame and restores the exact enclosing scope on every normal or error
-  exit. `protobuf.serialize`, `TransferValue.from_value`, and
-  `TransferValue:to_value` do not create scopes. When invoked as opaque-hook or
-  capture work inside a matching current scope, they reuse that enclosing
-  packet; without it endpoint hooks raise. Their temporary index bytes/policies
-  own no attachments and are not standalone reusable ownership.
-  Scope ownership also has a nonyielding finalizer guard: if an execution stack
-  is abandoned without lexical unwind, its unfinished native table/packet is
-  still disposed. That safety mechanism does not broaden the hook contract.
+  exit, disposing and zeroing the frame's native scratch cell before returning
+  the frame to the bounded state-local pool. `protobuf.serialize`,
+  `TransferValue.from_value`, and `TransferValue:to_value` do not create scopes.
+  When invoked as opaque-hook or capture work inside a matching current scope,
+  they reuse that enclosing packet; without it endpoint hooks raise. Their
+  temporary index bytes/policies own no attachments and are not standalone
+  reusable ownership. Scope ownership also has a nonyielding finalizer guard: if
+  an execution stack is abandoned without lexical unwind, its active frame is
+  never pooled and its unfinished native scratch table or packet is disposed when
+  collected. That safety mechanism does not broaden the hook contract.
 - **Attachment (`attach_resource`)**: Rejects a `nil` `resource`, `retain`, or
   `release` argument (`"transfer: invalid native resource attachment"`),
-  reserves capacity in the encode scope's resource table **before** calling
-  `retain(resource)` (`"transfer: out of memory reserving resource attachment"`),
-  records `(resource, release, claimed = 0)`, and returns a four-byte
-  little-endian unsigned slot index string (`0..0xfffffffe`; `0xffffffff` is
-  reserved as invalid). Each encoded occurrence of a resource adds a separate
-  retain and table entry. Both `retain` and `release` must be C-only
+  reserves capacity in the encode scope's scratch resource table (using inline
+  storage for the first two attachments and spilling to the C heap on the third)
+  **before** calling `retain(resource)`
+  (`"transfer: out of memory reserving resource attachment"`), records
+  `(resource, release)`, and returns a four-byte little-endian unsigned slot
+  index string (`0..0xfffffffe`; `0xffffffff` is reserved as invalid). Each
+  encoded occurrence of a resource adds a separate retain and entry. When the
+  packet is finalized, its committed entries are stored in the aligned tail of
+  the single packet allocation. Both `retain` and `release` must be C-only
   `foreign function (*void): void` callbacks that can run without a Lua state,
   module loader, or active Runtime. If encoding raises after one or more
   attachments, unwinding the encode scope automatically releases all entries in
-  the uncommitted table.
+  the uncommitted scratch table.
 - **Claim and adoption (`claim_resource`)**: Validates that `index_bytes` is
   exactly four bytes (`"transfer: invalid resource attachment index width"`),
   decodes the four-byte little-endian unsigned slot index, checks that the index
@@ -400,9 +407,11 @@ decoding bypass scope creation while leaving any enclosing scope intact):
   `expected_release` is non-nil and matches the entry's recorded `release`
   callback (`"transfer: resource attachment kind mismatch"`, preventing a
   `Sender` decoder from claiming a `Receiver` slot or vice versa), and checks
-  that the slot has not already been claimed
-  (`"transfer: resource attachment was already claimed"`). It then marks the
-  slot claimed and returns the native pointer without allocating or yielding.
+  that the slot's `resource` pointer is still non-nil
+  (`"transfer: resource attachment was already claimed"`). It then clears
+  `entry.resource = nil` (retaining `entry.release` so kind checks still precede
+  duplicate checks on consumed slots) and returns the native pointer without
+  allocating or yielding.
 - **Finalizer-first adoption**: A resource's `from_transfer_payload` hook must
   allocate its destination wrapper with an inert `nil` native pointer and
   register its GC finalizer **before** calling `claim_resource`, then assign the

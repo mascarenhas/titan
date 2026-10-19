@@ -14,28 +14,27 @@ local reflect = import "reflect"
 local protobuf = import "protobuf"
 local gc = import "gc"
 
--- This chain is C-only, including every registered release callback. Detach
--- the complete table before invoking callbacks: Receiver release can recurse
--- into other packet disposals without observing this table as still owned.
+-- This chain is C-only, including every registered release callback. The
+-- caller detaches the complete table before Receiver release can recurse.
+local foreign function dispose_resource_entries(entries: *titan_transfer_resource,
+    count: size_t)
+  local index = 0 as foreign size_t
+  while index < count do
+    local entry = entries + index
+    local resource = entry.resource
+    local release = entry.release
+    entry.resource = nil
+    if resource ~= nil then release(resource) end
+    index = index + 1
+  end
+end
+
 local foreign function dispose_resources(table: *titan_transfer_resource_table)
   local entries = table.entries
   local count = table.count
   table.entries = nil
   table.count = 0 as foreign size_t
-  table.capacity = 0 as foreign size_t
-  local index = 0 as foreign size_t
-  while index < count do
-    local entry = entries + index
-    if entry.claimed == 0 then
-      entry.claimed = 1
-      local resource = entry.resource
-      local release = entry.release
-      entry.resource = nil
-      if resource ~= nil then release(resource) end
-    end
-    index = index + 1
-  end
-  ffi.free(entries)
+  dispose_resource_entries(entries, count)
 end
 
 --- Consume a raw packet owner, releasing unclaimed resources entirely in C.
@@ -56,9 +55,19 @@ end
 
 local foreign function dispose_scope(owner: *titan_transfer_scope_owner)
   local message = owner.message
+  local entries = owner.resources.entries
+  local count = owner.resources.count
+  local capacity = owner.capacity
+  -- Detach both owners before any recursive native release callback.
   owner.message = nil
-  dispose_resources(ffi.titan_transfer_scope_resources(owner))
+  owner.resources.entries = nil
+  owner.resources.count = 0 as foreign size_t
+  owner.capacity = 0 as foreign size_t
+  dispose_resource_entries(entries, count)
+  if capacity > ffi.TITAN_TRANSFER_INLINE_RESOURCES then ffi.free(entries) end
   discard_message(message as foreign *void)
+  -- In particular, no inline pointer or old native owner survives reuse.
+  ffi.memset(owner, 0, foreign titan_transfer_scope_owner.sizeof)
 end
 
 local foreign function move_slot_to_scope(owner: *titan_transfer_scope_owner,
@@ -82,14 +91,45 @@ foreign function adopt_into(raw_owner: *void, slot: *(*void)): int
   return 0
 end
 
---- Copy an attachment-free packet, returning a new raw owner or NULL.
--- Resource-bearing packets cannot be cloned; move their single owner instead.
-foreign function copy_message(raw: const *void): *void
+-- Return the complete allocation size, including aligned trailing entries.
+-- Zero denotes overflow; every real packet has a nonempty header.
+local foreign function packet_storage_size(content_size: size_t,
+    count: size_t): size_t
+  if count == 0 then return content_size end
+  local alignment = foreign titan_transfer_resource.alignof
+  local padding = content_size % alignment
+  if padding ~= 0 then padding = alignment - padding end
+  if padding > ffi.SIZE_MAX - content_size then return 0 as foreign size_t end
+  local aligned_size = content_size + padding
+  if count > (ffi.SIZE_MAX - aligned_size) / foreign titan_transfer_resource.sizeof then
+    return 0 as foreign size_t
+  end
+  return aligned_size + count * foreign titan_transfer_resource.sizeof
+end
+
+-- The packet already owns enough trailing space. Move each unit there in one
+-- native interval; scratch capacity remains scope-owned until retirement.
+local foreign function commit_resources(message: *titan_async_message,
+    owner: *titan_transfer_scope_owner, storage_size: size_t)
+  local count = owner.resources.count
+  if count == 0 then return end
+  local bytes = count * foreign titan_transfer_resource.sizeof
+  local entries = ((message as foreign *unsigned char) + storage_size - bytes)
+      as foreign *titan_transfer_resource
+  ffi.memcpy(entries, owner.resources.entries, bytes)
+  message.resources.entries = entries
+  message.resources.count = count
+  owner.resources.count = 0 as foreign size_t
+end
+
+-- Internal opaque-root copies can move this scope's scratch units into the
+-- same one-time allocation. Never clone entries from the input header.
+local foreign function copy_message_with_resources(raw: const *void,
+    owner: *titan_transfer_scope_owner): *void
   if raw == nil then return nil end
   local input = raw as foreign const *titan_async_message
   if input.resources.entries ~= nil then return nil end
   if input.resources.count ~= 0 then return nil end
-  if input.resources.capacity ~= 0 then return nil end
   local length = 0 as foreign size_t
   local name_length = 0 as foreign size_t
   local module_length = 0 as foreign size_t
@@ -107,8 +147,12 @@ foreign function copy_message(raw: const *void): *void
   if length > ffi.SIZE_MAX - header_size then return nil end
   if name_length > ffi.SIZE_MAX - header_size - length then return nil end
   if module_length > ffi.SIZE_MAX - header_size - length - name_length then return nil end
-  local message = ffi.malloc(header_size + length + name_length + module_length)
-    as foreign *titan_async_message
+  local count = 0 as foreign size_t
+  if owner ~= nil then count = owner.resources.count end
+  local storage_size = packet_storage_size(
+      header_size + length + name_length + module_length, count)
+  if storage_size == 0 then return nil end
+  local message = ffi.malloc(storage_size) as foreign *titan_async_message
   if message == nil then return nil end
   ffi.memset(message, 0, header_size)
   message.kind = input.kind
@@ -130,23 +174,45 @@ foreign function copy_message(raw: const *void): *void
   if module_length > 0 then
     ffi.memcpy(bytes + length + name_length, input.module, module_length)
   end
+  if owner ~= nil then commit_resources(message, owner, storage_size) end
   return message as foreign *void
 end
 
-local foreign function reserve_resource(table: *titan_transfer_resource_table): int
-  if table.count >= ffi.TITAN_TRANSFER_INVALID_INDEX then return 0 end
-  if table.count < table.capacity then return 1 end
-  local capacity = table.capacity
-  if capacity == 0 then capacity = 4 as foreign size_t
-  elseif capacity > ((ffi.TITAN_TRANSFER_INVALID_INDEX / 2) as foreign size_t) then
+--- Copy an attachment-free packet, returning a new raw owner or NULL.
+-- Resource-bearing packets cannot be cloned; move their single owner instead.
+foreign function copy_message(raw: const *void): *void
+  return copy_message_with_resources(raw, nil)
+end
+
+local foreign function reserve_resource(owner: *titan_transfer_scope_owner): int
+  if owner.resources.count >= ffi.TITAN_TRANSFER_INVALID_INDEX then return 0 end
+  if owner.resources.count < owner.capacity then return 1 end
+  if owner.capacity == 0 then
+    owner.resources.entries = owner.inline_entries
+    owner.capacity = ffi.TITAN_TRANSFER_INLINE_RESOURCES as foreign size_t
+    return 1
+  end
+  local capacity = owner.capacity
+  if capacity > ((ffi.TITAN_TRANSFER_INVALID_INDEX / 2) as foreign size_t) then
     capacity = ffi.TITAN_TRANSFER_INVALID_INDEX as foreign size_t
   else capacity = capacity * 2 end
   if capacity > ffi.SIZE_MAX / foreign titan_transfer_resource.sizeof then return 0 end
-  local entries = ffi.realloc(table.entries,
-      capacity * foreign titan_transfer_resource.sizeof) as foreign *titan_transfer_resource
-  if entries == nil then return 0 end
-  table.entries = entries
-  table.capacity = capacity
+  local entries: foreign *titan_transfer_resource = nil
+  if owner.capacity == ffi.TITAN_TRANSFER_INLINE_RESOURCES then
+    -- The inline address is never passed to realloc. Failed spill leaves it
+    -- and all prior units owned by the scope for native rollback.
+    entries = ffi.malloc(capacity * foreign titan_transfer_resource.sizeof)
+        as foreign *titan_transfer_resource
+    if entries == nil then return 0 end
+    ffi.memcpy(entries, owner.resources.entries,
+        owner.resources.count * foreign titan_transfer_resource.sizeof)
+  else
+    entries = ffi.realloc(owner.resources.entries,
+        capacity * foreign titan_transfer_resource.sizeof) as foreign *titan_transfer_resource
+    if entries == nil then return 0 end
+  end
+  owner.resources.entries = entries
+  owner.capacity = capacity
   return 1
 end
 
@@ -158,30 +224,29 @@ local foreign function attach_reserved(table: *titan_transfer_resource_table,
   local entry = table.entries + index
   entry.resource = resource
   entry.release = release
-  entry.claimed = 0
   table.count = index + 1
   return index as foreign unsigned int
 end
 
-local foreign function commit_resources(message: *titan_async_message,
-    table: *titan_transfer_resource_table)
-  message.resources.entries = table.entries
-  message.resources.count = table.count
-  message.resources.capacity = table.capacity
-  table.entries = nil
-  table.count = 0 as foreign size_t
-  table.capacity = 0 as foreign size_t
-end
 
+-- The native cell is the frame's only native owner. Execution identity and
+-- the enclosing frame stay in the lexical locals of the two entry points, so
+-- a retired frame cannot retain either one. `message` is a borrowed claim
+-- lookup mirror of the native cell's owned packet; `encoding` is direction.
 local record ResourceScope
   local encoding: boolean
   local native: foreign titan_transfer_scope_owner
   local message: foreign *titan_async_message
-  local execution: value
-  local previous: ResourceScope?
+  local free_next: ResourceScope?
 end
 
 local resource_scopes: {value: ResourceScope} = {}
+-- One state-local stack, independent of Task/coroutine execution identity.
+-- Eight idle frames cover ordinary shallow reentrancy without retaining a
+-- nesting high-water mark. Overflow frames retire normally and remain GC-owned.
+local idle_resource_scopes: ResourceScope? = nil
+local idle_resource_scope_count = 0
+local idle_resource_scope_limit = 8
 
 -- Titan's stackful coroutines each execute on their own real Lua thread.
 -- Root that exact thread value as the map key, not a reusable raw address.
@@ -201,6 +266,27 @@ local function finalize_resource_scope(scope: ResourceScope)
   dispose_scope(scope.native)
 end
 
+local function acquire_resource_scope(): ResourceScope
+  local scope? = idle_resource_scopes
+  if scope ~= nil then
+    idle_resource_scopes = scope.free_next
+    idle_resource_scope_count = idle_resource_scope_count - 1
+    scope.free_next = nil
+    return scope
+  end
+  local native = foreign titan_transfer_scope_owner.new()
+  local fresh = ResourceScope {
+    encoding = false,
+    native = native,
+    message = nil,
+    free_next = nil,
+  }
+  -- Fresh frames have no execution authority or native owners until this
+  -- registration finishes. Reused frames are already finalizable.
+  gc.finalizable(fresh, finalize_resource_scope)
+  return fresh
+end
+
 local function ResourceScope:attach(resource: foreign *void,
     retain: foreign function(*void): void,
     release: foreign function(*void): void): integer
@@ -208,7 +294,7 @@ local function ResourceScope:attach(resource: foreign *void,
   if resource == nil or retain == nil or release == nil then
     raise "transfer: invalid native resource attachment"
   end
-  if reserve_resource(ffi.titan_transfer_scope_resources(self.native)) == 0 then
+  if reserve_resource(self.native) == 0 then
     raise "transfer: out of memory reserving resource attachment"
   end
   return attach_reserved(
@@ -251,11 +337,10 @@ local function ResourceScope:claim(data: foreign const *void, length: integer,
   if expected_release == nil or entry.release ~= expected_release then
     raise "transfer: resource attachment kind mismatch"
   end
-  if entry.claimed ~= 0 then raise "transfer: resource attachment was already claimed" end
+  if entry.resource == nil then raise "transfer: resource attachment was already claimed" end
   -- The caller has already created and finalized an inert destination owner.
   -- No allocation, hook, checked conversion, or yield follows this commit.
   local resource = entry.resource
-  entry.claimed = 1
   entry.resource = nil
   return resource
 end
@@ -846,9 +931,10 @@ function TransferValue:to_value(): value
 end
 
 
-local function copy_async_message(
-    input: foreign *titan_async_message): foreign *titan_async_message
-  local copied = copy_message(input as foreign const *void) as foreign *titan_async_message
+local function copy_async_message(input: foreign *titan_async_message,
+    owner: foreign *titan_transfer_scope_owner): foreign *titan_async_message
+  local copied = copy_message_with_resources(input as foreign const *void, owner)
+      as foreign *titan_async_message
   if copied == nil then
     raise "transfer: out of memory copying message"
   end
@@ -950,18 +1036,27 @@ local function finalize_buf_message(
     kind: foreign titan_async_message_kind,
     name: string,
     module: string,
-    entry: foreign const *void): foreign *titan_async_message
-  local header_size = foreign titan_async_message.sizeof
-  local wire_len = (buf.length - header_size) as foreign size_t
+    entry: foreign const *void,
+    owner: foreign *titan_transfer_scope_owner): foreign *titan_async_message
+  local header_size = foreign titan_async_message.sizeof as foreign size_t
+  local wire_len = buf.length - header_size
   local name_len = #name as foreign size_t
   local module_len = #module as foreign size_t
-  if ffi.titan_protobuf_buf_write_raw(buf, name, name_len) == 0 then
+  if name_len > ffi.SIZE_MAX - buf.length then
     raise "transfer: out of memory copying message"
   end
-  if ffi.titan_protobuf_buf_write_raw(buf, module, module_len) == 0 then
+  if module_len > ffi.SIZE_MAX - buf.length - name_len then
     raise "transfer: out of memory copying message"
   end
-  local msg = ffi.titan_protobuf_buf_take_data(buf) as foreign *titan_async_message
+  local storage_size = packet_storage_size(
+      buf.length + name_len + module_len, owner.resources.count)
+  if storage_size == 0 then raise "transfer: out of memory copying message" end
+  -- Reserve metadata, alignment, and the actual attachment count together
+  -- before writing either trailer. No detached packet ever needs a realloc.
+  if ffi.titan_protobuf_buf_reserve(buf, storage_size - buf.length) == 0 then
+    raise "transfer: out of memory copying message"
+  end
+  local msg = buf.data as foreign *titan_async_message
   local base = (msg + 1) as foreign *char
   ffi.memset(msg, 0, header_size)
   msg.kind = kind
@@ -972,7 +1067,12 @@ local function finalize_buf_message(
   msg.module = base + wire_len + name_len
   msg.module_length = module_len
   msg.entry = entry
-  return msg
+  if name_len > 0 then ffi.memcpy(base + wire_len, name, name_len) end
+  if module_len > 0 then ffi.memcpy(base + wire_len + name_len, module, module_len) end
+  commit_resources(msg, owner, storage_size)
+  -- Every interior pointer is now based on the last buffer address. Only
+  -- native nonthrowing operations remain between the move and detachment.
+  return ffi.titan_protobuf_buf_take_data(buf) as foreign *titan_async_message
 end
 
 local function transfer_policy_to_message(
@@ -1034,7 +1134,7 @@ local function transfer_policy_to_message(
     message.bytes = payload
     message.length = #payload
   end
-  return copy_async_message(message)
+  return copy_async_message(message, nil)
 end
 
 local function encode_packet(candidate: value, scope: ResourceScope): foreign *void
@@ -1056,11 +1156,13 @@ local function encode_packet(candidate: value, scope: ResourceScope): foreign *v
         raise "transfer: out of memory copying message"
       end
       capacity = capacity + module_len
+      capacity = packet_storage_size(capacity, 1 as foreign size_t)
+      if capacity == 0 then raise "transfer: out of memory copying message" end
       local buf: owned *titan_protobuf_buffer = foreign titan_protobuf_buffer.new()
       ffi.titan_protobuf_buf_init_heap(buf, 0)
       defer ffi.titan_protobuf_buf_free_heap(buf)
-      -- All sizes are known: finish growth before writing the attachment
-      -- index, so its four bytes are written only once in the owned packet.
+      -- Header, index, metadata, and the one-entry aligned tail are known:
+      -- finish growth before the resource is attached.
       if ffi.titan_protobuf_buf_reserve(buf, capacity) == 0 then
         raise "transfer: out of memory copying message"
       end
@@ -1072,8 +1174,8 @@ local function encode_packet(candidate: value, scope: ResourceScope): foreign *v
           buf as foreign *void, index as foreign unsigned int) == 0 then
         raise "transfer: out of memory copying message"
       end
-      return finalize_buf_message(
-          buf, ffi.TITAN_ASYNC_MESSAGE_RECORD_PAYLOAD, name, module, nil) as foreign *void
+      return finalize_buf_message(buf, ffi.TITAN_ASYNC_MESSAGE_RECORD_PAYLOAD,
+          name, module, nil, scope.native) as foreign *void
     end
   end
   if ffi.lmacro_ttype(raw) == ffi.LUA_TFUNCTION then
@@ -1086,8 +1188,8 @@ local function encode_packet(candidate: value, scope: ResourceScope): foreign *v
     defer ffi.titan_protobuf_buf_free_heap(buf)
     protobuf.serialize_fields_to_buffer(
         buf as foreign *void, closure_fields, policies, was_policy)
-    return finalize_buf_message(
-        buf, ffi.TITAN_ASYNC_MESSAGE_CLOSURE, "", module, entry) as foreign *void
+    return finalize_buf_message(buf, ffi.TITAN_ASYNC_MESSAGE_CLOSURE,
+        "", module, entry, scope.native) as foreign *void
   end
   case reflect.inspect(candidate)
   when is_lua_userdata() then
@@ -1107,7 +1209,7 @@ local function encode_packet(candidate: value, scope: ResourceScope): foreign *v
       message.name_length = #name
       message.bytes = payload
       message.length = #payload
-      return copy_async_message(message) as foreign *void
+      return copy_async_message(message, scope.native) as foreign *void
     end
     local buf: owned *titan_protobuf_buffer = foreign titan_protobuf_buffer.new()
     if init_packet_buffer(buf, #name as foreign size_t, #module as foreign size_t) == 0 then
@@ -1115,8 +1217,8 @@ local function encode_packet(candidate: value, scope: ResourceScope): foreign *v
     end
     defer ffi.titan_protobuf_buf_free_heap(buf)
     protobuf.serialize_inspected_record_to_buffer(buf as foreign *void, record_value, scope)
-    return finalize_buf_message(
-        buf, ffi.TITAN_ASYNC_MESSAGE_RECORD, name, module, nil) as foreign *void
+    return finalize_buf_message(buf, ffi.TITAN_ASYNC_MESSAGE_RECORD,
+        name, module, nil, scope.native) as foreign *void
   when is_union(union_value) then
     local module = nominal_module(candidate)
     local name = union_value.type.name
@@ -1126,8 +1228,8 @@ local function encode_packet(candidate: value, scope: ResourceScope): foreign *v
     end
     defer ffi.titan_protobuf_buf_free_heap(buf)
     protobuf.serialize_inspected_union_to_buffer(buf as foreign *void, union_value, scope)
-    return finalize_buf_message(
-        buf, ffi.TITAN_ASYNC_MESSAGE_UNION, name, module, nil) as foreign *void
+    return finalize_buf_message(buf, ffi.TITAN_ASYNC_MESSAGE_UNION,
+        name, module, nil, scope.native) as foreign *void
   else
     raise "transfer: unsupported value"
   end
@@ -1142,28 +1244,24 @@ function encode_message(candidate: value): foreign *void
   if kind >= 0 then
     return scalar_value_to_message(candidate, kind) as foreign *void
   end
-  local native = foreign titan_transfer_scope_owner.new()
   local execution = current_execution()
   local previous? = resource_scopes[execution]
-  local scope = ResourceScope {
-    encoding = true,
-    native = native,
-    message = nil,
-    execution = execution,
-    previous = previous,
-  }
-  gc.finalizable(scope, finalize_resource_scope)
+  local scope = acquire_resource_scope()
+  scope.encoding = true
+  -- Keep retirement inline: no fallible ordinary entry follows packet commit.
   defer do
     resource_scopes[execution] = previous
     dispose_scope(scope.native)
+    scope.message = nil
+    scope.encoding = false
+    if idle_resource_scope_count < idle_resource_scope_limit then
+      scope.free_next = idle_resource_scopes
+      idle_resource_scopes = scope
+      idle_resource_scope_count = idle_resource_scope_count + 1
+    end
   end
   resource_scopes[execution] = scope
-  local raw = encode_packet(candidate, scope)
-  -- Native commit cannot allocate or yield. Until this point only the scope
-  -- owns the table, independent of payload buffer reallocation/detachment.
-  commit_resources(raw as foreign *titan_async_message,
-      ffi.titan_transfer_scope_resources(scope.native))
-  return raw
+  return encode_packet(candidate, scope)
 end
 
 
@@ -1185,20 +1283,20 @@ local function decode_message_worker(slot_value: value): value
   local slot = slot_value as foreign *(*void)
   local message = slot[0] as foreign *titan_async_message
   if message == nil then raise "transfer: cannot decode a NULL packet" end
-  local native = foreign titan_transfer_scope_owner.new()
   local execution = current_execution()
   local previous? = resource_scopes[execution]
-  local scope = ResourceScope {
-    encoding = false,
-    native = native,
-    message = message,
-    execution = execution,
-    previous = previous,
-  }
-  gc.finalizable(scope, finalize_resource_scope)
+  local scope = acquire_resource_scope()
+  scope.message = message
   defer do
     resource_scopes[execution] = previous
     dispose_scope(scope.native)
+    scope.message = nil
+    scope.encoding = false
+    if idle_resource_scope_count < idle_resource_scope_limit then
+      scope.free_next = idle_resource_scopes
+      idle_resource_scopes = scope
+      idle_resource_scope_count = idle_resource_scope_count + 1
+    end
   end
   resource_scopes[execution] = scope
   -- A single native move commits both sides after all allocating preparation.

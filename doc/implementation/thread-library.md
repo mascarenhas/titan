@@ -339,6 +339,15 @@ resource table, four-byte little-endian slot index format
   composite decode fails on a subsequent field, the native decode-scope disposer
   releases only remaining unclaimed slots while already-claimed endpoint
   wrappers stay owned by the destination collector.
+
+Scratch capacity lives in the scope's native cell: the first two entries are
+inline and the third spills to the native heap. Every producer reserves aligned
+trailing storage before allocation or buffer detachment, then moves the entries
+into the packet's own block. A committed packet never borrows scope storage.
+Claim clears `entry.resource` to nil but retains `entry.release`, preserving
+kind-before-duplicate validation. Retirement restores the exact parent, disposes
+and zeroes native ownership, and only then returns the frame to the bounded
+state-local pool. An abandoned active frame is never pooled.
 - `channel_retain_sender_native`, `channel_retain_receiver_native`,
   `channel_release_sender_native`, `channel_release_receiver_native`,
   `channel_drain_and_discard`, and `channel_destroy_unreferenced` are
