@@ -217,6 +217,11 @@ function register_resource(
     construct: function (value, foreign const *void, integer): (value))
 ```
 
+Scalar and explicit-policy encoding does not create an attachment scope.
+Native scalar decoding preserves nil/false, integer/float tags and bare C
+functions while consuming the same actual owner slot on every outcome.
+Strings and nominal reconstruction retain protected decoding.
+
 ### `Packet` ownership and move semantics
 
 `Packet` is an opaque single-owner handle for one native packet allocation.

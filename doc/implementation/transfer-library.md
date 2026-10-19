@@ -121,12 +121,16 @@ foreign function adopt_into(raw_owner: *void, slot: *(*void)): int
 
 **Protected decode.** `decode_message` receives a live exclusively owned Lua
 state and actual caller-owned `void *` slot storage. Its foreign body checks the
-slot, reserves three Lua stack slots, installs an error handler and zero-upvalue
-dispatch thunk, and enters `lua_pcallk` before any ordinary decoder worker entry
-can allocate. Stack reservation failure clears/discards the input and returns
-`-3`. Protected dispatch always returns through native residual-slot cleanup,
-which clears/discards any remaining raw owner and removes the handler while
-retaining exactly one result/error root.
+slot and reserves three Lua stack slots. Nil, boolean, integer, float, borrowed
+pointer/state and valid bare C-function packets then decode in C without a
+scope, worker lookup or protected call. The native path consumes and clears the
+actual slot and disposes the packet. Strings and nominal reconstruction retain
+the protected worker path: an error handler and zero-upvalue dispatch thunk enter
+`lua_pcallk` before any ordinary decoder worker entry can allocate. Stack
+reservation failure clears/discards the input and returns `-3`. Protected
+dispatch clears/discards any remaining raw owner and retains one result/error.
+Scalars and explicit `TransferValue` policies are classified and copied before
+encode scope creation; structural and hook work still creates an exact scope.
 
 `decode_message_worker` prepares an execution-local ResourceScope, registers its
 finalizer, installs lexical exact-top restoration/native disposal, and inserts
