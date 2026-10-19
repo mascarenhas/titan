@@ -142,6 +142,12 @@ the scope's native cell. Ordinary worker-entry failure, module initialization,
 and scope-preparation failure therefore leave the input owned by the native
 boundary; after commit the scope owns it.
 
+Protected dispatch looks up its traced, state-local worker closure with
+`lua_rawgetp` under `decode_message_dispatch`'s native code address. A cold miss
+loads transfer inside that same protected boundary and retries. Only the key is
+a native address; the registry value retains the closure and declaring module
+through collection, without a per-packet string-key lookup.
+
 | Decode status | Caller slot | Provided Lua stack |
 | --- | --- | --- |
 | `0` | nil | saved top plus one semantic value, including nil |

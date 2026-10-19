@@ -1320,11 +1320,15 @@ end
 -- this boundary and before its native residual-owner cleanup is installed.
 local foreign function decode_message_dispatch(state: *lua_State): int
   local slot = ffi.lua_touserdata(state, 1) as foreign *(*void)
-  ffi.lua_getfield(state, ffi.LUA_REGISTRYINDEX, "Titan transfer decode worker")
+  -- Only the native code address is a key. The registry value is the traced,
+  -- state-local worker closure (and its module), never a saved GC pointer.
+  local key = (decode_message_dispatch as foreign function(*lua_State): int)
+      as foreign *void
+  ffi.lua_rawgetp(state, ffi.LUA_REGISTRYINDEX, key)
   if ffi.lua_type(state, -1) ~= ffi.LUA_TFUNCTION then
     ffi.lua_settop(state, 1)
     transfer_load_module(state, "titan.transfer", 14 as foreign unsigned long long)
-    ffi.lua_getfield(state, ffi.LUA_REGISTRYINDEX, "Titan transfer decode worker")
+    ffi.lua_rawgetp(state, ffi.LUA_REGISTRYINDEX, key)
   end
   ffi.lua_pushlightuserdata(state, slot)
   ffi.lua_callk(state, 1, 1, 0 as foreign lua_KContext, nil)
@@ -1418,7 +1422,8 @@ do
   defer ffi.lua_settop(L, top)
   if ffi.lua_checkstack(L, 1) == 0 then raise "transfer: cannot reserve packet worker stack" end
   ffi.lua_pushtvalue(L, decode_message_worker)
-  ffi.lua_setfield(L, ffi.LUA_REGISTRYINDEX, "Titan transfer decode worker")
+  ffi.lua_rawsetp(L, ffi.LUA_REGISTRYINDEX,
+      (decode_message_dispatch as foreign function(*lua_State): int) as foreign *void)
   closure_fields = {
     reflect.Type.is_array(reflect.ArrayTypeConstness.is_mutable(),
       reflect.Type.is_named(reflect.NamedType("titan.transfer.TransferValue"))),
