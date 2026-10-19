@@ -1100,8 +1100,10 @@ provides no cleanup shielding or terminal-publication gate.
 
 - Both callbacks must be non-NULL, C-only, nonraising and nonyielding. NULL
   callbacks raise `"native external wait callbacks must not be NULL"` before
-  preparation. Callbacks run on the loop thread after the Task yields, with no
-  driver-held domain or wake-core mutex.
+  preparation. Both run on the loop thread with no driver-held domain or
+  wake-core mutex: `register_fn` runs after the Task yields, while
+  `unregister_fn` runs synchronously from `Task:cancel` or from the waiting
+  Task's own unwind.
 - `register_fn(context, target)` rechecks readiness and publishes under the
   domain mutex: `0` means ready with no linked waiter or retained target, `1`
   means a linked waiter retaining its target, and a negative status means
