@@ -64,6 +64,7 @@ Udata *$INITNAME(lua_State *L) {
          * require must not publish a partial module that bypasses the check
          * when Lua catches the error and retries. */
         titan_pushmodule(L, _mod);
+        $INITRECOVERYSTRINGS
         Table *_titan_metatables = titan_ensure_metatables_table(L);
         (void)_titan_metatables; // in case this module does not publish any types
         $INITSOURCEIDENTITY

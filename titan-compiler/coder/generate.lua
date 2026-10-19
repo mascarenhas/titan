@@ -943,6 +943,27 @@ function coder.generate(modname, ast, static_deps, abi, emit_line_directives, op
         })
     end
 
+    -- Error recovery reads these constants without interning. Root each one in
+    -- the module before initializing dependencies or invoking generated code.
+    local initrecoverystrings = {}
+    local recoveryliterals = {}
+    for literal in pairs(tlcontext.recovery_strings or {}) do
+        recoveryliterals[#recoveryliterals + 1] = literal
+    end
+    table.sort(recoveryliterals, util.bytewise_less)
+    for _, literal in ipairs(recoveryliterals) do
+        table.insert(initrecoverystrings, render([[
+            {
+                TString *_recovery_string = luaS_newliteral(L, $LITERAL);
+                setsvalue(L, &_mod->uv[$INDEX].uv, _recovery_string);
+                luaC_barrierback(L, obj2gco(_mod), &_mod->uv[$INDEX].uv);
+            }
+        ]], {
+            LITERAL = literal,
+            INDEX = c_integer_literal(tlcontext.recovery_strings[literal]),
+        }))
+    end
+
     assert(tlcontext.upvalue <= 0xFFFF,
         ("module '%s' requires %d module-state slots; Lua supports at most %d")
         :format(modname, tlcontext.upvalue, 0xFFFF))
@@ -953,6 +974,7 @@ function coder.generate(modname, ast, static_deps, abi, emit_line_directives, op
         LUAOPEN_NAME = 'luaopen_' .. mangle_qn(modname),
         PRELOADNAME = tlcontext.prefix .. 'register_preload',
         PRELOADMODNAME = c_string_literal(modname),
+        INITRECOVERYSTRINGS = table.concat(initrecoverystrings, "\n"),
         INITMODULES = table.concat(initmods, "\n"),
         LOADMODULES1 = table.concat(loadmods, "\n"),
         LOADGLOBALS = table.concat(loadglobals, "\n"),
