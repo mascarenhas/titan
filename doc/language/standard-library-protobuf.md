@@ -115,6 +115,17 @@ exactly `needed`. Buffer capacity and allocation counts are not part of the
 serialized wire format; see the
 [implementation growth policy](../implementation/protobuf-library.md#encoding).
 
+Nested length prefixes remain canonical minimal varints, including at the
+127/128-byte and 16,383/16,384-byte boundaries. Serialization traverses each
+value occurrence once and invokes each selected custom encoder once; it does
+not replay hooks to measure their payloads. Bounded automatic scratch batches
+nested prefix expansion, with the original eager algorithm beyond its inline
+bound; this changes neither wire bytes nor resource-attachment semantics.
+If a raw-buffer append raises, its starting length and all previously appended
+bytes are preserved, so a caller that catches the error may append again.
+Capacity may remain grown, and hook side effects are not undone.
+
+
 `serialize_inspected_record_to_buffer`, `serialize_inspected_union_to_buffer`,
 `deserialize_nominal_buffer_with_context`,
 `serialize_fields_to_buffer_with_context`,

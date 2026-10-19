@@ -1069,6 +1069,8 @@ local function finalize_buf_message(
     module: string,
     entry: foreign const *void,
     owner: foreign *titan_transfer_scope_owner): foreign *titan_async_message
+  -- Protobuf root appenders finish all deferred widening before returning.
+  -- Only now record wire/trailer offsets or publish attachment-table pointers.
   local header_size = foreign titan_async_message.sizeof as foreign size_t
   local wire_len = buf.length - header_size
   local name_len = #name as foreign size_t

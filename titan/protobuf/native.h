@@ -19,6 +19,28 @@ struct titan_protobuf_buffer {
   titan_protobuf_grow_fn grow;
 };
 
+/* Per-root automatic scratch, never part of a GC buffer or a native packet.
+ * Entries are in opening order; zero vlen denotes an unfinished message.
+ * Beyond this bound, finish the pending patches once and use eager widening
+ * until the outermost message closes. No encoder or hook is replayed. */
+#define TITAN_PROTOBUF_BACKPATCH_LIMIT 32
+typedef struct titan_protobuf_patch {
+  size_t mark;
+  uint32_t payload_len;
+  uint16_t extra_before;
+  uint8_t parent;
+  uint8_t vlen;
+} titan_protobuf_patch;
+
+typedef struct titan_protobuf_backpatch {
+  size_t extra;
+  unsigned int count;
+  unsigned int depth;
+  unsigned int fallback_depth;
+  unsigned int active;
+  titan_protobuf_patch entries[TITAN_PROTOBUF_BACKPATCH_LIMIT];
+} titan_protobuf_backpatch;
+
 static inline int titan_protobuf_heap_grow(
     titan_protobuf_buffer *buf, size_t min_capacity) {
   uint8_t *next = (uint8_t *)realloc(buf->data, min_capacity);
@@ -209,8 +231,69 @@ static inline int titan_protobuf_buf_write_float32(
   return 1;
 }
 
+/* Expand all completed prefixes in one backward pass. The source spans are
+ * disjoint: each original byte moves at most once, regardless of nesting.
+ * Reserve before changing any bytes so a failed grow leaves scratch usable. */
+static inline int titan_protobuf_buf_materialize_nested(
+    titan_protobuf_buffer *buf, titan_protobuf_backpatch *patches) {
+  if (patches->extra == 0) {
+    return 1;
+  }
+  if (!titan_protobuf_buf_reserve(buf, patches->extra)) {
+    return 0;
+  }
+  size_t read_end = buf->length;
+  size_t shift = patches->extra;
+  for (unsigned int i = patches->count; i > 0; i--) {
+    titan_protobuf_patch *patch = &patches->entries[i - 1];
+    if (patch->vlen <= 1) {
+      continue;
+    }
+    size_t start = patch->mark + 1;
+    size_t moved = read_end - start;
+    if (moved != 0) {
+      memmove(buf->data + start + shift, buf->data + start, moved);
+    }
+    shift -= patch->vlen - 1;
+    uint32_t remaining = patch->payload_len;
+    uint8_t *out = buf->data + patch->mark + shift;
+    while (remaining >= 128) {
+      *out++ = (uint8_t)((remaining & 127) | 128);
+      remaining >>= 7;
+    }
+    *out = (uint8_t)remaining;
+    read_end = patch->mark;
+  }
+  buf->length += patches->extra;
+  /* Earlier siblings can precede a still-open message. Its opening debt is
+   * exactly the displacement of its mark; callers' old numeric marks are
+   * not reused for these tracked frames after entering eager fallback. */
+  for (unsigned int i = 0; i < patches->count; i++) {
+    titan_protobuf_patch *patch = &patches->entries[i];
+    if (patch->vlen == 0) {
+      patch->mark += patch->extra_before;
+      patch->extra_before = 0;
+    }
+  }
+  patches->extra = 0;
+  return 1;
+}
+
 static inline int64_t titan_protobuf_buf_begin_nested(
-    titan_protobuf_buffer *buf, int64_t key_bits) {
+    titan_protobuf_buffer *buf, titan_protobuf_backpatch *patches,
+    int64_t key_bits) {
+  if (patches->depth == 0) {
+    patches->count = 0;
+    patches->extra = 0;
+    patches->fallback_depth = 0;
+    patches->active = TITAN_PROTOBUF_BACKPATCH_LIMIT;
+  } else if (patches->fallback_depth == 0 &&
+             patches->count == TITAN_PROTOBUF_BACKPATCH_LIMIT) {
+    if (!titan_protobuf_buf_materialize_nested(buf, patches)) {
+      return -1;
+    }
+    patches->fallback_depth = patches->depth;
+  }
   if (!titan_protobuf_buf_write_varint(buf, key_bits)) {
     return -1;
   }
@@ -220,10 +303,20 @@ static inline int64_t titan_protobuf_buf_begin_nested(
   size_t mark = buf->length;
   buf->data[mark] = 0;
   buf->length = mark + 1;
+  if (patches->fallback_depth == 0) {
+    titan_protobuf_patch *patch = &patches->entries[patches->count];
+    patch->mark = mark;
+    patch->payload_len = 0;
+    patch->extra_before = (uint16_t)patches->extra;
+    patch->parent = (uint8_t)patches->active;
+    patch->vlen = 0;
+    patches->active = patches->count++;
+  }
+  patches->depth++;
   return (int64_t)mark;
 }
 
-static inline int titan_protobuf_buf_end_nested(
+static inline int titan_protobuf_buf_end_nested_eager(
     titan_protobuf_buffer *buf, int64_t mark_idx) {
   size_t mark = (size_t)mark_idx;
   size_t payload_len = buf->length - (mark + 1);
@@ -253,6 +346,55 @@ static inline int titan_protobuf_buf_end_nested(
   }
   *out = (uint8_t)temp;
   buf->length += extra;
+  return 1;
+}
+
+static inline int titan_protobuf_buf_end_nested(
+    titan_protobuf_buffer *buf, titan_protobuf_backpatch *patches,
+    int64_t mark_idx) {
+  if (patches->fallback_depth != 0) {
+    int tracked = patches->depth <= patches->fallback_depth;
+    titan_protobuf_patch *patch =
+        tracked ? &patches->entries[patches->active] : NULL;
+    int rc = titan_protobuf_buf_end_nested_eager(
+        buf, patch != NULL ? (int64_t)patch->mark : mark_idx);
+    if (rc > 0) {
+      if (patch != NULL) {
+        patches->active = patch->parent;
+      }
+      patches->depth--;
+    }
+    return rc;
+  }
+  titan_protobuf_patch *patch = &patches->entries[patches->active];
+  size_t physical_len = buf->length - (patch->mark + 1);
+  size_t descendant_extra = patches->extra - patch->extra_before;
+  if (physical_len > 2147483647ULL ||
+      descendant_extra > 2147483647ULL - physical_len) {
+    return -1;
+  }
+  size_t payload_len = physical_len + descendant_extra;
+  uint8_t vlen = 1;
+  for (size_t remaining = payload_len; remaining >= 128; remaining >>= 7) {
+    vlen++;
+  }
+  size_t total_extra = patches->extra + vlen - 1;
+  /* Do the only fallible operation before completing the outer frame. */
+  if (patches->depth == 1 &&
+      !titan_protobuf_buf_reserve(buf, total_extra)) {
+    return 0;
+  }
+  patch->payload_len = (uint32_t)payload_len;
+  patch->vlen = vlen;
+  if (vlen == 1) {
+    buf->data[patch->mark] = (uint8_t)payload_len;
+  }
+  patches->extra = total_extra;
+  patches->active = patch->parent;
+  patches->depth--;
+  if (patches->depth == 0) {
+    return titan_protobuf_buf_materialize_nested(buf, patches);
+  }
   return 1;
 }
 

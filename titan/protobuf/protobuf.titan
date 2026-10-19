@@ -319,16 +319,19 @@ local function write_float32(buf: foreign *titan_protobuf_buffer, number: intege
   end
 end
 
-local function begin_nested(buf: foreign *titan_protobuf_buffer, number: integer): integer
-  local mark: integer = ffi.titan_protobuf_buf_begin_nested(buf, make_key(number, 2))
+local function begin_nested(buf: foreign *titan_protobuf_buffer,
+    patches: foreign *titan_protobuf_backpatch, number: integer): integer
+  local mark: integer = ffi.titan_protobuf_buf_begin_nested(
+    buf, patches, make_key(number, 2))
   if mark < 0 then
     raise "protobuf: out of memory"
   end
   return mark
 end
 
-local function end_nested(buf: foreign *titan_protobuf_buffer, mark: integer)
-  local rc: integer = ffi.titan_protobuf_buf_end_nested(buf, mark)
+local function end_nested(buf: foreign *titan_protobuf_buffer,
+    patches: foreign *titan_protobuf_backpatch, mark: integer)
+  local rc: integer = ffi.titan_protobuf_buf_end_nested(buf, patches, mark)
   if rc == 0 then raise "protobuf: out of memory" end
   if rc < 0 then raise "protobuf: message exceeds 2 GiB" end
 end
@@ -368,20 +371,34 @@ function serialize_inspected_record_to_buffer(
     buf: foreign *void, candidate: reflect.RecordValue, context: value)
   local pbuf = buf as foreign *titan_protobuf_buffer
   local start = pbuf.length as integer
+  -- Only this synchronous root borrows automatic patch scratch. Failure cleanup
+  -- restores the append boundary without reading mutated scratch after longjmp.
+  local patches = foreign titan_protobuf_backpatch.new()
+  local complete = false
+  defer do
+    if not complete then pbuf.length = start as foreign size_t end
+  end
   if context == nil then context = packet_context(true) end
   local encoder = Encoder({}, context)
-  encoder:record_value(pbuf, candidate, 1)
+  encoder:record_value(pbuf, patches, candidate, 1)
   check_message_size((pbuf.length as integer) - start)
+  complete = true
 end
 
 function serialize_inspected_union_to_buffer(
     buf: foreign *void, candidate: reflect.UnionValue, context: value)
   local pbuf = buf as foreign *titan_protobuf_buffer
   local start = pbuf.length as integer
+  local patches = foreign titan_protobuf_backpatch.new()
+  local complete = false
+  defer do
+    if not complete then pbuf.length = start as foreign size_t end
+  end
   if context == nil then context = packet_context(true) end
   local encoder = Encoder({}, context)
-  encoder:union_value(pbuf, candidate, 1)
+  encoder:union_value(pbuf, patches, candidate, 1)
   check_message_size((pbuf.length as integer) - start)
+  complete = true
 end
 
 --- Append the wire encoding of a public record or union instance to an initialized titan_protobuf_buffer.
@@ -465,11 +482,17 @@ function serialize_fields_to_buffer_with_context(
   if #... ~= #fields then raise "protobuf: anonymous field count mismatch" end
   local pbuf = buf as foreign *titan_protobuf_buffer
   local start = pbuf.length as integer
+  local patches = foreign titan_protobuf_backpatch.new()
+  local complete = false
+  defer do
+    if not complete then pbuf.length = start as foreign size_t end
+  end
   local encoder = Encoder({}, context)
   for index = 1, #fields do
-    encoder:field(pbuf, field_number(index), ...[index], fields[index], 2)
+    encoder:field(pbuf, patches, field_number(index), ...[index], fields[index], 2)
   end
   check_message_size((pbuf.length as integer) - start)
+  complete = true
 end
 
 --- Encode an anonymous root message using an explicit ordered field schema.

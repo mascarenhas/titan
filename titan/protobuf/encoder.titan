@@ -13,6 +13,7 @@ end
 
 local function Encoder:record_value(
     buf: foreign *titan_protobuf_buffer,
+    patches: foreign *titan_protobuf_backpatch,
     candidate: reflect.RecordValue,
     depth: integer)
   require_depth(depth)
@@ -20,13 +21,14 @@ local function Encoder:record_value(
   self:enter(candidate.value)
   defer self.active[candidate.value] = nil
   for index = 1, #candidate.type.fields do
-    self:field(buf, field_number(index), candidate:project(index),
+    self:field(buf, patches, field_number(index), candidate:project(index),
                candidate.type.fields[index].type, depth + 1)
   end
 end
 
 local function Encoder:union_value(
     buf: foreign *titan_protobuf_buffer,
+    patches: foreign *titan_protobuf_backpatch,
     candidate: reflect.UnionValue,
     depth: integer)
   require_depth(depth)
@@ -36,12 +38,12 @@ local function Encoder:union_value(
   for index = 1, #candidate.type.variants do
     local variant = candidate.type.variants[index]
     if variant.tag == candidate.tag then
-      local mark = begin_nested(buf, field_number(index))
+      local mark = begin_nested(buf, patches, field_number(index))
       for part = 1, #variant.parts do
-        self:field(buf, field_number(part), candidate:project(part),
+        self:field(buf, patches, field_number(part), candidate:project(part),
                    variant.parts[part].type, depth + 1)
       end
-      end_nested(buf, mark)
+      end_nested(buf, patches, mark)
       return
     end
   end
@@ -50,6 +52,7 @@ end
 
 local function Encoder:array(
     buf: foreign *titan_protobuf_buffer,
+    patches: foreign *titan_protobuf_backpatch,
     candidate: value,
     element: reflect.Type,
     depth: integer)
@@ -66,10 +69,10 @@ local function Encoder:array(
     end)(candidate)
   for index = 1, #entries do
     local item: value = entries[index]
-    local slot_mark = begin_nested(buf, 1)
+    local slot_mark = begin_nested(buf, patches, 1)
     -- A missing Array slot is legal independently of its element descriptor.
-    if item ~= nil then self:field(buf, 1, item, element, depth + 1) end
-    end_nested(buf, slot_mark)
+    if item ~= nil then self:field(buf, patches, 1, item, element, depth + 1) end
+    end_nested(buf, patches, slot_mark)
   end
   write_key(buf, 2, 0)
   if is_const_arr then write_varint(buf, 1) else write_varint(buf, 0) end
@@ -77,20 +80,22 @@ end
 
 local function Encoder:foreign_array(
     buf: foreign *titan_protobuf_buffer,
+    patches: foreign *titan_protobuf_backpatch,
     candidate: value,
     element: reflect.Type,
     depth: integer)
   require_depth(depth)
   local entries: const {value} = candidate
   for index = 1, #entries do
-    local slot_mark = begin_nested(buf, 1)
-    self:field(buf, 1, entries[index], element, depth + 1)
-    end_nested(buf, slot_mark)
+    local slot_mark = begin_nested(buf, patches, 1)
+    self:field(buf, patches, 1, entries[index], element, depth + 1)
+    end_nested(buf, patches, slot_mark)
   end
 end
 
 local function Encoder:foreign_struct(
     buf: foreign *titan_protobuf_buffer,
+    patches: foreign *titan_protobuf_backpatch,
     candidate: value,
     descriptor: reflect.ForeignStructType,
     depth: integer)
@@ -100,12 +105,13 @@ local function Encoder:foreign_struct(
   for index = 1, #descriptor.fields do
     local field = descriptor.fields[index]
     if field.is_flexible_array then raise "protobuf: flexible foreign array" end
-    self:field(buf, field_number(index), fields[index], field.type, depth + 1)
+    self:field(buf, patches, field_number(index), fields[index], field.type, depth + 1)
   end
 end
 
 local function Encoder:field(
     buf: foreign *titan_protobuf_buffer,
+    patches: foreign *titan_protobuf_backpatch,
     number: integer,
     candidate: value,
     descriptor: reflect.Type,
@@ -114,7 +120,7 @@ local function Encoder:field(
   local resolved = resolve_type(descriptor)
   case resolved
   when is_option(base) then
-    if candidate ~= nil then self:field(buf, number, candidate, base, depth) end
+    if candidate ~= nil then self:field(buf, patches, number, candidate, base, depth) end
   when is_nil() then
     if candidate ~= nil then raise "protobuf: expected nil" end
   when is_boolean() then
@@ -132,9 +138,9 @@ local function Encoder:field(
     local bytes: string = candidate
     write_bytes(buf, number, bytes)
   when is_array{elem_descriptor} then
-    local mark = begin_nested(buf, number)
-    self:array(buf, candidate, elem_descriptor, depth)
-    end_nested(buf, mark)
+    local mark = begin_nested(buf, patches, number)
+    self:array(buf, patches, candidate, elem_descriptor, depth)
+    end_nested(buf, patches, mark)
   when is_record(expected) then
     local codec? = find_resource_codec_by_name(expected.name)
     if codec ~= nil then
@@ -160,9 +166,9 @@ local function Encoder:field(
             actual.value, encode, "protobuf: cyclic object graph")
         write_bytes(buf, number, payload)
       else
-        local mark = begin_nested(buf, number)
-        self:record_value(buf, actual, depth)
-        end_nested(buf, mark)
+        local mark = begin_nested(buf, patches, number)
+        self:record_value(buf, patches, actual, depth)
+        end_nested(buf, patches, mark)
       end
     else raise "protobuf: expected a record"
     end
@@ -170,9 +176,9 @@ local function Encoder:field(
     case reflect.inspect(candidate)
     when is_union(actual) then
       if actual.type.name ~= expected.name then raise "protobuf: union type mismatch" end
-      local mark = begin_nested(buf, number)
-      self:union_value(buf, actual, depth)
-      end_nested(buf, mark)
+      local mark = begin_nested(buf, patches, number)
+      self:union_value(buf, patches, actual, depth)
+      end_nested(buf, patches, mark)
     else raise "protobuf: expected a union"
     end
   when is_foreign_integer{spelling, is_signed, bits} then
@@ -200,14 +206,14 @@ local function Encoder:field(
     local bits: integer = ffi.titan_protobuf_pointer_bits(address)
     write_fixed64(buf, number, bits)
   when is_foreign_struct(structure) then
-    local mark = begin_nested(buf, number)
-    self:foreign_struct(buf, candidate, structure, depth)
-    end_nested(buf, mark)
+    local mark = begin_nested(buf, patches, number)
+    self:foreign_struct(buf, patches, candidate, structure, depth)
+    end_nested(buf, patches, mark)
   when is_foreign_array{elem_descriptor, len} then
     require_foreign_array(len)
-    local mark = begin_nested(buf, number)
-    self:foreign_array(buf, candidate, elem_descriptor, depth)
-    end_nested(buf, mark)
+    local mark = begin_nested(buf, patches, number)
+    self:foreign_array(buf, patches, candidate, elem_descriptor, depth)
+    end_nested(buf, patches, mark)
   else raise "protobuf: unsupported field type"
   end
 end

@@ -187,10 +187,55 @@ slack can require a second payload-sized reallocation through normal growth,
 even when rounding the original field up to the next power of two would have
 left enough room. The proportional slack avoids that extra growth for trailers
 up to about one eighth of a large field's size.
-No sizing pass replays a custom encoder. Nested length-delimited
-messages reserve a one-byte length slot at `begin_nested` and patch or shift in
-place at `end_nested`, avoiding intermediate per-message writers or string
-allocations.
+No sizing pass replays a custom encoder. Each root append entrypoint owns an
+automatic C `titan_protobuf_backpatch` (536 bytes on LP64: 32 sixteen-byte entries
+plus counters), borrowed explicitly through `Encoder` methods and the native
+`begin_nested` / `end_nested` helpers. It contains no Lua references and never
+escapes that synchronous call. Neither `titan_protobuf_buffer` nor `Encoder` nor
+the packet grows, and no Lua/native bookkeeping allocation is added. Automatic
+storage is zero-initialized; only entries actually opened are subsequently
+written or visited. Non-widening encodes retain their existing buffer writes,
+growth requests, and allocation sizes.
+
+Nested messages still open with a one-byte placeholder. On close, the encoder
+computes the canonical child length as its physical byte span plus the deferred
+prefix expansion inside that span, excluding expansion debt from earlier
+siblings. It records the minimal varint width and payload length without moving
+the child. Closing the outermost message reserves all accumulated expansion
+once, then walks entries backward in opening order, moving disjoint source
+spans and writing minimal prefixes. Each original payload byte moves at most
+once per such outermost message: widening movement is O(final size), not
+O(depth × size). Opaque payload strings and four-byte resource indices are
+ordinary bytes in those spans; their encoders execute once, in original order.
+There is no wire-format change, overlong varint, intermediate per-message
+writer, or sizing traversal.
+
+Scratch is bounded independently of graph breadth/depth. Before a 33rd opening
+in the same outermost message, the native helper materializes completed patches,
+rebases still-open marks by their opening expansion debt, and uses the original
+eager widening algorithm until that outermost message closes. Later independent
+outermost messages regain batching. Thus graphs exceeding the inline bound
+retain the old worst-case movement rather than allocating more bookkeeping.
+The 128-level traversal limit and per-message 2 GiB checks remain unchanged;
+the child-size check includes deferred descendant expansion. Both batch and
+fallback reserve before moving bytes, retaining the `SIZE_MAX` growth guards.
+Failure of a batch's final reserve leaves its bytes and open-frame state
+unchanged, permitting a native caller to retry.
+
+Root appenders restore their starting buffer length on failure, preserving all
+previously appended bytes and allowing a caller that catches an error to append
+again. They never read the mutated automatic scratch during error unwind; the
+GC-owned buffer descriptor remains the authority for reallocations and cleanup.
+Capacity can remain grown after failure, and hook side effects/resource
+attachments are not rolled back by protobuf; the enclosing transfer scope owns
+their existing cleanup. No scratch pointer is retained in the buffer.
+
+The kind-40 widening probe belongs at
+`memmove(buf->data + start + shift, buf->data + start, moved);` in
+`titan_protobuf_buf_materialize_nested`, counting `moved` bytes per call. The old
+`memmove(buf->data + mark + vlen, buf->data + mark + 1, payload_len);` remains
+only in `titan_protobuf_buf_end_nested_eager` for bounded fallback and must also
+be counted when attributing overflow cases.
 Varints use logical shifts on the 64-bit integer carrier, including unsigned bit
 patterns represented by negative Titan integers. ZigZag preserves the complete
 signed range. Fixed floating and pointer payloads write little-endian bytes

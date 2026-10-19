@@ -266,6 +266,15 @@ before the packet is detached; wire bytes,
 hook invocation order, and resource ownership do not depend on spare capacity.
 See the [buffer implementation](../implementation/protobuf-library.md#encoding).
 
+Nested structural payloads and closure snapshots use the same canonical,
+minimal length prefixes as `protobuf.serialize`. Prefix expansion is batched
+without replaying custom or resource-attaching encoders. Attachment indices
+move as ordinary payload bytes; packet metadata and attachment-table positions
+are established only after all prefix expansion and final buffer growth.
+The bounded batching fallback preserves the same bytes and single-call hook
+semantics, and failed encoding still disposes pending packet attachments.
+
+
 `decode_message(state, slot)` is a public source-defined C-ABI entry for trusted
 Lua/native integrations. It returns a native status rather than the decoded
 value. Pass an exclusively owned, live Lua state and the address of a **real
