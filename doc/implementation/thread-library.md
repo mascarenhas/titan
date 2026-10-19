@@ -91,15 +91,21 @@ with all semantic encoding/decoding outside the channel/control mutex:
   `new_scalar_message`, without staging a header, copying it through
   `transfer.copy_message`, or allocating intermediate `TransferValue` unions
   or `reflect.Value` wrappers. Binary strings use the same direct heap encoding
-  but keep protected decode to allocate the destination Lua string.
+  but keep scope-free protected decode to allocate the destination Lua string.
+  Explicit nominal `TransferValue` policies and opaque custom-hook roots
+  allocate their single heap packet directly through `new_nominal_message`
+  (attaching the scope's pending units into the aligned tail for opaque roots).
 - Root `Sender<|T|>` and `Receiver<|T|>` values match
   `protobuf.find_resource_codec` by canonical erased metatable identity in
   `encode_packet`, reserve `sizeof(titan_async_message) + 4 + #name + #module`
-  in one heap-backed `owned *titan_protobuf_buffer` before attaching the
-  endpoint via `codec.encode(scope, candidate)`, write the four-byte
-  little-endian slot index via `protobuf.write_resource_index`, and finalize the
+  plus the aligned one-entry attachment tail in one heap-backed
+  `owned *titan_protobuf_buffer` before attaching the endpoint via
+  `codec.encode(scope, candidate)`, write the four-byte little-endian slot index
+  via `protobuf.write_resource_index`, and finalize the
   `TITAN_ASYNC_MESSAGE_RECORD_PAYLOAD` packet in place without a Lua index
-  string or staged `copy_message`.
+  string or staged `copy_message`. Policy conversions (`TransferValue.from_value`
+  and `TransferValue:to_value`, including closure-captured endpoints) likewise
+  dispatch registered `ResourceCodec` records before reflective hooks.
 - Structural records, unions, and Titan closures initialize a heap-backed
   `owned *titan_protobuf_buffer` outside the Lua GC through
   `init_packet_buffer`, which reserves the message header plus a bounded credit
@@ -107,16 +113,17 @@ with all semantic encoding/decoding outside the channel/control mutex:
   the Protocol Buffers wire payload directly into that expandable buffer via
   `protobuf.serialize_inspected_record_to_buffer` (passing `scope`),
   `protobuf.serialize_inspected_union_to_buffer` (passing `scope`), or
-  `protobuf.serialize_fields_to_buffer` (without hydrating closure function
-  signatures or re-inspecting the structural root), append the nominal/module
-  names into the same buffer, detach the single `titan_thread_message *`
-  allocation (`titan_protobuf_buf_take_data`), and commit the encode scope's
-  `titan_transfer_resource_table` into `message.resources`.
+  `protobuf.serialize_fields_to_buffer_with_context` (passing `scope`, without
+  hydrating closure function signatures or re-inspecting the structural root),
+  append the nominal/module names into the same buffer, detach the single
+  `titan_thread_message *` allocation (`titan_protobuf_buf_take_data`), and
+  commit the encode scope's `titan_transfer_resource_table` into
+  `message.resources`.
 - On the receiving thread, transfer's packet decode scope reconstructs
   structural records, unions, closures, and root endpoints directly from the
   native buffer slice (`protobuf.deserialize_nominal_buffer_with_context`,
-  `protobuf.deserialize_fields_buffer`, and `codec.decode` for registered
-  `RECORD_PAYLOAD` capabilities). Each caller keeps a real local
+  `protobuf.deserialize_fields_buffer_with_context`, and `codec.decode` for
+  registered `RECORD_PAYLOAD` capabilities). Each caller keeps a real local
   `void *` slot under an immediate native discard defer and calls
   `transfer.decode_message(state, slot)` **directly** with its address. The
   foreign boundary returns a native status after consuming/clearing the slot;
@@ -184,9 +191,9 @@ supports nested custom transfer hooks (`depth > 1`) via shared
   and invoke `codec.decode(message.context, message.base + field.offset,
   field.length)` (`sender_from_resource` / `receiver_from_resource`) directly on
   the borrowed packet slice without allocating a four-byte Lua string, calling
-  `from_hook.callable`, or re-inspecting the constructed wrapper. Other nested
+  `decode.callable`, or re-inspecting the constructed wrapper. Other nested
   records with custom transfer hooks slice the length-delimited wire field and
-  reconstruct the record via `from_hook.callable(payload)` within the enclosing
+  reconstruct the record via `decode.callable(payload)` within the enclosing
   packet's top decode `ResourceScope`.
 
 ## Channel state machine and endpoint transfer

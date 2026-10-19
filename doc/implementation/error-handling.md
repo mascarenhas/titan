@@ -47,10 +47,13 @@ When a Titan catch re-raises the original error, codegen first writes the
 saved catch-local `traceback` back to `TITAN_BACKTRACE_KEY`, sets the pin,
 places the saved `error` in the single top slot required by Lua's error ABI,
 and calls `lua_error`. The registry writes use `luaH_*` and the registry
-`Table` directly; they neither call the public stack API nor change
-`L->top`. The handler sees the pin and preserves the original deep trace. A
-fresh `raise <exp>` leaves the pin clear, so the handler captures a new trace
-at the new raise site.
+`Table` directly with already-rooted `TString *` keys stored in
+compiler-private module user-value slots; they neither intern key strings nor
+call the public stack API nor change `L->top`. Non-nil re-raise insertion can
+still grow the registry hash table only when no free node exists, after the
+enclosing block's cleanup (`finally` / `defer` body or `catch`-block defers) has already executed. The handler sees the
+pin and preserves the original deep trace. A fresh `raise <exp>` leaves the
+pin clear, so the handler captures a new trace at the new raise site.
 
 Coroutines use one extra registry slot, `TITAN_TRACE_APPEND_KEY`, for
 uncaught errors in a dead coroutine. The coroutine entry stages its own
@@ -61,18 +64,32 @@ trace to the staged coroutine trace, writes the combined string to
 original payload. The final handler therefore preserves the combined trace
 instead of replacing it with only the shallow propagation site.
 
-When a boundary catches an error for a Titan `catch`, it snapshots the
-trace into a reserved stack slot and then clears both the trace slot and
-the pin. A fully handled catch therefore leaves `titan.backtrace()` as
-`nil`; the handled trace is available only through the catch-local
-`traceback`. Snapshot and clear also access `G(L)->l_registry` through the
-internal table machinery without pushing registry keys or values. String-key
-lookup can allocate while interning the fixed key, so generated recovery
-restores `_base` from its saved offset before it writes any reserved slot.
-The lookup tag is checked before its result: an absent trace (for example on
-an exceptional low-level error path that did not populate the registry) falls
-back to the empty traceback string without inspecting an uninitialized
-`TValue`.
+When a boundary catches an error for a Titan `catch` or `finally`, it
+snapshots the trace into a reserved stack slot and then clears both the trace
+slot and the pin. A fully handled catch therefore leaves `titan.backtrace()`
+as `nil`; the handled trace is available only through the catch-local
+`traceback`. Snapshot and clear access `G(L)->l_registry` through Lua's
+internal table machinery (`titan_registry_get_string` and
+`titan_registry_set_string`) without using the Lua stack or interning strings.
+The registry keys (`TITAN_BACKTRACE_KEY` and `TITAN_TRACE_PINNED`) and the
+empty-traceback fallback `""` are stored in at most three lazily allocated
+compiler-private `_mod->uv` slots (allocated only when generated recovery or
+re-raise code requests them, after the public and fixed source-private
+prefixes). Each slot is initialized in `$INITNAME` immediately after
+`titan_pushmodule(L, _mod)` (with `luaC_barrierback` before the next
+allocation), prior to metatables, dependency loading, module-variable
+initializers, or the module `do ... end` initializer. Because `luaH_getstr`,
+the rooted `""` fallback, and short-string `nil` clears in `luaH_psetshortstr`
+/ `luaH_finishset` never allocate—even after an emergency garbage collection
+has swept dead nil-valued registry keys—the generated recovery reads and nil
+clears after restoring `L->errorJmp` cannot raise a secondary `LUA_ERRMEM` that
+skips `catch` or `finally` (`defer`) cleanup. Intervening Lua-frame `__close`
+handlers can allocate; `luaD_closeprotected` runs them under its own protection,
+capturing and retrying their errors. No extra `lua_pcallk` wrapper or
+state-global root protocol is used. The lookup tag is checked
+before its result: an absent trace (such as `LUA_ERRMEM` raised directly by
+`luaD_throw` without calling `L->errfunc`) falls back to the module-rooted
+empty string without inspecting an uninitialized `TValue`.
 
 ### libbacktrace and frame merging
 
@@ -262,9 +279,10 @@ included by `titan.h`. It mirrors the parts of `luaD_rawrunprotected` and
 4. restore `L->errorJmp` and `L->nCcalls` on normal fallthrough;
 5. on error, restore `ci`/`allowhook`, run `luaD_closeprotected`, move the
    error object to the saved top with `luaD_seterrorobj`, recompute `_base`
-   from `_base_off`, snapshot the error and trace into reserved slots, clear
-   the registry trace/pin, and restore `L->top.p` to the function's reserved
-   stack area.
+   from `_base_off`, snapshot the error and trace into reserved slots using
+   the module-rooted registry keys and empty-string fallback, clear the
+   registry trace/pin with `nil` without allocating, and restore `L->top.p`
+   to the function's reserved stack area.
 
 Before `luaD_closeprotected`, Titan restores the `errfunc` value saved at
 boundary entry. This matters when the longjmp skipped an inner Titan
@@ -446,8 +464,9 @@ The highest-value regression tests are:
   raise legality, finally transfer bans, and non-fallthrough analysis.
 * `spec/coder/error_handling_spec.lua` — catch, fresh raise vs. re-raise,
   trace clearing, pending actions, finally override, nested finally order,
-  GC-valued pending returns, including flexible tails across allocating/nested
-  finally blocks, and standalone uncaught-error reporting.
+  sustained-OOM catch/defer recovery across functions, closures, and module
+  initializers, GC-valued pending returns (including flexible tails across
+  allocating/nested finally blocks), and standalone uncaught-error reporting.
 * `spec/coder/stack_relocation_spec.lua` — stack relocation through
   protected recovery.
 * `spec/abi_spec.lua` — runtime/compiler ABI constants.

@@ -653,8 +653,8 @@ local function initialize_nominal(module: string, name: string)
   initialize_nominal_raw(module, #module as foreign size_t, name)
 end
 
--- Classify before allocating either a scope or a packet. A negative kind
--- selects scoped reconstruction; no hook can run during this probe.
+-- Classify before allocating a scope or packet. A negative kind defers to
+-- the caller's reflection/reconstruction path; this probe runs no hook.
 local function scalar_message_kind(candidate: value): foreign int
   local raw: foreign TValue = candidate
   local tag = ffi.lmacro_ttype(raw)
@@ -677,7 +677,7 @@ local function scalar_message_kind(candidate: value): foreign int
     local userdata = ffi.lmacro_uvalue(raw)
     if userdata.metatable ~= nil then
       -- A metatable-of-metatable can invoke __index during the brand lookup.
-      -- Leave that work to scoped reflection, never a no-scope scalar probe.
+      -- Defer that lookup to the caller, never this no-scope scalar probe.
       if userdata.metatable.metatable ~= nil then return -1 as foreign int end
       local mt_value: foreign TValue = nil
       ffi.lmacro_sethvalue(L, mt_value, userdata.metatable)
@@ -763,6 +763,25 @@ function TransferValue.from_value(candidate: value): TransferValue
     return TransferValue.is_function(ffi.lmacro_clCvalue(raw).f)
   end
   if ffi.lmacro_ttype(raw) == ffi.LUA_TFUNCTION then return snapshot_closure(candidate) end
+  if ffi.lmacro_ttype(raw) == ffi.LUA_TUSERDATA then
+    local mt = ffi.lmacro_uvalue(raw).metatable
+    -- A scalar-probe miss may also be a metatable with __index behavior.
+    -- Preserve that single reflective lookup; only plain canonical tables
+    -- take the registered capability route before reflection.
+    if mt ~= nil then
+      if mt.metatable == nil then
+        local codec? = protobuf.find_resource_codec(candidate)
+        if codec ~= nil then
+          local module = nominal_module(candidate)
+          local index = codec.encode(packet_context(true), candidate)
+          local bytes = foreign unsigned char.new_array(4)
+          protobuf.write_resource_index_bytes(bytes as foreign *void, index as foreign unsigned int)
+          return TransferValue.is_record_payload(module, codec.descriptor.name,
+              copy_native_bytes(bytes as foreign const *char, 4 as foreign size_t))
+        end
+      end
+    end
+  end
   case reflect.inspect(candidate)
   when is_lua_userdata() then
     return TransferValue.is_pointer(ffi.lmacro_getudatamem(ffi.lmacro_uvalue(raw)))
@@ -895,6 +914,11 @@ function TransferValue:to_value(): value
         #data, packet_context(false))
   when is_record_payload(module, name, payload) then
     initialize_nominal(module, name)
+    local codec? = protobuf.find_resource_codec_by_name(name)
+    if codec ~= nil then
+      return codec.decode(packet_context(false),
+          ffi.titan_protobuf_bytes_ptr(payload) as foreign const *void, #payload)
+    end
     return decode_initialized_record_payload(name, payload)
   end
 end

@@ -1,9 +1,10 @@
--- Public behavior of schema-directed protobuf serialization.
+-- Public protobuf behavior and caller-owned raw-buffer collaboration.
 local test = import "test"
 local protobuf = import "protobuf"
 local reflect = import "reflect"
 local string = import "string"
 local gc = import "gc"
+local thread = import "thread"
 foreign import "limits.h"
 foreign import "protobuf_fixture.h"
 
@@ -775,5 +776,194 @@ function test_nested_message_varint_length_boundaries_and_realloc_error_cleanup(
   expect_error(function()
     protobuf.serialize(failing_env)
   end, "hooked token encode rejected negative secret")
+end
+
+local function check_nil_context_endpoint_encode_refused(
+    tx: thread.Sender<|integer|>)
+  local buf: owned *titan_protobuf_buffer = foreign titan_protobuf_buffer.new()
+  ffi.titan_protobuf_buf_init_heap(buf, 0)
+  defer ffi.titan_protobuf_buf_free_heap(buf)
+
+  local rejected = false
+  do
+    protobuf.serialize_fields_to_buffer_with_context(
+      buf as foreign *void, {descriptor(tx)}, nil, tx)
+  catch
+    rejected = true
+    test.assert(error == "transfer: resource attachment requires an encode scope",
+      "explicit nil encode context raised a different error")
+  end
+  test.assert(rejected, "explicit nil context authorized endpoint encoding")
+end
+
+local function check_nil_context_endpoint_decode_refused()
+  local buf: owned *titan_protobuf_buffer = foreign titan_protobuf_buffer.new()
+  ffi.titan_protobuf_buf_init_heap(buf, 0)
+  defer ffi.titan_protobuf_buf_free_heap(buf)
+  -- Copy a synthetic field-1 attachment index into storage owned through decode.
+  -- The string argument is borrowed only for this copying C call.
+  test.assert(ffi.titan_protobuf_buf_write_bytes(buf, 10, "\0\0\0\0", 4) ~= 0,
+    "could not prepare endpoint wire bytes")
+  local fields: const {reflect.Type} = {
+    reflect.Type.is_named(reflect.NamedType("titan.thread.Sender")),
+  }
+
+  local rejected = false
+  do
+    protobuf.deserialize_fields_buffer_with_context(
+      buf.data as foreign const *void, buf.length as integer, fields, nil)
+  catch
+    rejected = true
+    test.assert(error == "transfer: resource claim requires a decode scope",
+      "explicit nil decode context raised a different error")
+  end
+  test.assert(rejected, "explicit nil context authorized endpoint decoding")
+end
+
+record NilContextEncodeProbe
+  local tx: thread.Sender<|integer|>
+end
+
+function NilContextEncodeProbe:to_transfer_payload(): string
+  check_nil_context_endpoint_encode_refused(self.tx)
+  return protobuf.serialize_fields({descriptor(self.tx)}, self.tx)
+end
+
+function NilContextEncodeProbe.from_transfer_payload(
+    payload: string): NilContextEncodeProbe
+  local tx: thread.Sender<|integer|> = protobuf.deserialize_fields(payload, {
+    reflect.Type.is_named(reflect.NamedType("titan.thread.Sender")),
+  })
+  return NilContextEncodeProbe(tx)
+end
+
+record NilContextDecodeProbe
+  local tx: thread.Sender<|integer|>
+end
+
+function NilContextDecodeProbe:to_transfer_payload(): string
+  return protobuf.serialize_fields({descriptor(self.tx)}, self.tx)
+end
+
+function NilContextDecodeProbe.from_transfer_payload(
+    payload: string): NilContextDecodeProbe
+  check_nil_context_endpoint_decode_refused()
+  local tx: thread.Sender<|integer|> = protobuf.deserialize_fields(payload, {
+    reflect.Type.is_named(reflect.NamedType("titan.thread.Sender")),
+  })
+  return NilContextDecodeProbe(tx)
+end
+
+function test_anonymous_fields_buffer_with_context_empty(_context: test.Context)
+  local buf: owned *titan_protobuf_buffer = foreign titan_protobuf_buffer.new()
+  ffi.titan_protobuf_buf_init_heap(buf, 0)
+  defer ffi.titan_protobuf_buf_free_heap(buf)
+  local fields: const {reflect.Type} = {}
+
+  protobuf.serialize_fields_to_buffer_with_context(buf as foreign *void, fields, nil)
+  test.assert((buf.length as integer) == 0, "empty schema wrote wire bytes")
+  test.assert(anonymous_result_count(
+    protobuf.deserialize_fields_buffer_with_context(
+      buf.data as foreign const *void, buf.length as integer, fields, nil)) == 0,
+    "empty schema returned a value")
+end
+
+function test_anonymous_fields_buffer_with_context_rejects_count_mismatch(
+    _context: test.Context)
+  local buf: owned *titan_protobuf_buffer = foreign titan_protobuf_buffer.new()
+  ffi.titan_protobuf_buf_init_heap(buf, 0)
+  defer ffi.titan_protobuf_buf_free_heap(buf)
+
+  local rejected = false
+  do
+    protobuf.serialize_fields_to_buffer_with_context(
+      buf as foreign *void, {reflect.Type.is_integer()}, nil, 1, 2)
+  catch
+    rejected = true
+    test.assert(error == "protobuf: anonymous field count mismatch",
+      "field count mismatch raised a different error")
+  end
+  test.assert(rejected, "anonymous buffer encoder accepted surplus values")
+end
+
+function test_anonymous_fields_buffer_with_context_mixed_roundtrip(
+    _context: test.Context)
+  local buf: owned *titan_protobuf_buffer = foreign titan_protobuf_buffer.new()
+  ffi.titan_protobuf_buf_init_heap(buf, 0)
+  defer ffi.titan_protobuf_buf_free_heap(buf)
+  local tok = HookedToken(77, "with\0context")
+  local fields: const {reflect.Type} = {
+    reflect.Type.is_option(reflect.Type.is_integer()),
+    reflect.Type.is_nil(),
+    descriptor(tok),
+    reflect.Type.is_string(),
+  }
+
+  protobuf.serialize_fields_to_buffer_with_context(
+    buf as foreign *void, fields, nil, nil, nil, tok, "tail\0bytes")
+  local r_opt: integer?, r_nil: value, r_tok: HookedToken, r_str: string =
+    protobuf.deserialize_fields_buffer_with_context(
+      buf.data as foreign const *void, buf.length as integer, fields, nil)
+  test.assert(r_opt == nil and r_nil == nil, "nil field positions changed")
+  test.assert(r_tok:read_secret() == 77 and r_tok:read_label() == "with\0context",
+    "custom-hooked field did not round-trip")
+  test.assert(r_str == "tail\0bytes", "binary field did not round-trip")
+end
+
+function test_anonymous_fields_buffer_nil_context_rejects_standalone_encode(
+    _context: test.Context)
+  local tx, rx = thread.channel<|integer|>(1)
+  defer tx:close()
+  defer rx:close()
+  check_nil_context_endpoint_encode_refused(tx)
+end
+
+function test_anonymous_fields_buffer_nil_context_rejects_standalone_decode(
+    _context: test.Context)
+  check_nil_context_endpoint_decode_refused()
+end
+
+function test_anonymous_fields_buffer_nil_context_rejects_active_encode_hook(
+    _context: test.Context)
+  local tx, rx = thread.channel<|integer|>(1)
+  defer tx:close()
+  defer rx:close()
+  local carrier_tx, carrier_rx = thread.channel<|NilContextEncodeProbe|>(1)
+  defer carrier_tx:close()
+  defer carrier_rx:close()
+
+  -- Explicit nil refuses authority in the same hook where the public wrapper attaches.
+  test.assert(carrier_tx:try_send(NilContextEncodeProbe(tx)))
+  local available, decoded? = carrier_rx:try_receive()
+  test.assert(available and decoded ~= nil, "ordinary encode hook did not round-trip")
+  local destination_tx = decoded.tx
+  defer destination_tx:close()
+  test.assert(destination_tx ~= tx, "ambient encode reused the source Sender wrapper")
+  test.assert(destination_tx:try_send(314), "ambient encode Sender could not send")
+  local received, number? = rx:try_receive()
+  test.assert(received and number == 314,
+    "ambient encode Sender did not deliver to its live peer")
+end
+
+function test_anonymous_fields_buffer_nil_context_rejects_active_decode_hook(
+    _context: test.Context)
+  local tx, rx = thread.channel<|integer|>(1)
+  defer tx:close()
+  defer rx:close()
+  local carrier_tx, carrier_rx = thread.channel<|NilContextDecodeProbe|>(1)
+  defer carrier_tx:close()
+  defer carrier_rx:close()
+
+  -- Explicit nil refuses authority in the same hook where the public wrapper claims.
+  test.assert(carrier_tx:try_send(NilContextDecodeProbe(tx)))
+  local available, decoded? = carrier_rx:try_receive()
+  test.assert(available and decoded ~= nil, "ordinary decode hook did not round-trip")
+  local destination_tx = decoded.tx
+  defer destination_tx:close()
+  test.assert(destination_tx ~= tx, "ambient decode reused the source Sender wrapper")
+  test.assert(destination_tx:try_send(271), "ambient decode Sender could not send")
+  local received, number? = rx:try_receive()
+  test.assert(received and number == 271,
+    "ambient decode Sender did not deliver to its live peer")
 end
 

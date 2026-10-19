@@ -33,10 +33,12 @@ reflection; `encode_packet` additionally recognizes registered resource roots:
    payload pointer via `lmacro_getudatamem`), and `LUA_TFUNCTION` for light C
    functions and zero-upvalue C closures (rejecting `NULL` C functions and
    non-Titan C closures with upvalues). If `userdata.metatable.metatable ~= nil`,
-   `scalar_message_kind` returns `-1` so any `__index` metamethod triggered by
-   a brand lookup runs only after the encode scope is established, during
-   resource-capability lookup or `reflect.inspect` (which still encodes
-   `is_lua_userdata` via `new_scalar_message`). Known Titan userdata brands
+   `scalar_message_kind` returns `-1`. In `encode_message`, this defers any
+   `__index` metamethod triggered by a brand lookup until the encode scope is
+   established, during resource-capability lookup or `reflect.inspect` (which
+   still encodes `is_lua_userdata` via `new_scalar_message`).
+   `TransferValue.from_value` shares the probe but does not establish a scope
+   before its `reflect.inspect` lookup. Known Titan userdata brands
    (`TITAN_ARRAY..TITAN_OWNED`) and branded Titan closures likewise return `-1`.
    Explicit scalar `TransferValue` policies and non-negative
    `scalar_message_kind` results use `new_scalar_message`, which checks
@@ -45,8 +47,13 @@ reflection; `encode_packet` additionally recognizes registered resource roots:
    header, and writes the scalar fields and optional string bytes in one pass
    without staging an automatic `titan_async_message` or using the packet-copy
    path. Explicit `is_record`, `is_union`, `is_closure`, and `is_record_payload`
-   policies use `new_nominal_message`, which allocates complete native storage
-   once and writes their header, payload, name and module directly.
+   policies (with `owner == nil`) and opaque custom-hook roots (with
+   `owner == scope.native`) use `new_nominal_message`, which validates `length`,
+   `name_length`, and `module_length` against `SIZE_MAX`, computes the complete
+   allocation size via `packet_storage_size`, allocates the heap packet once,
+   zeroes the header, copies the payload and `name`/`module` strings, and
+   (when `owner ~= nil`) commits the scope's pending attachments via
+   `commit_resources` without automatic header staging.
 2. **Demand-driven Titan closure classification**: When `LUA_TFUNCTION` is a C
    closure with `nupvalues >= 5` and `upvalue[3] == TITAN_BRAND`,
    `scalar_message_kind` returns `-1` and transfer dispatches directly to
@@ -75,6 +82,13 @@ reflection; `encode_packet` additionally recognizes registered resource roots:
    header in the same allocation prefix—producing the
    `TITAN_ASYNC_MESSAGE_RECORD_PAYLOAD` packet in one heap allocation with no
    Lua index string, no reflective hook invocation, and no staged `copy_message`.
+   `TransferValue.from_value` and `TransferValue:to_value` likewise check
+   `protobuf.find_resource_codec` (when `mt ~= nil and mt.metatable == nil`,
+   preserving the single reflective lookup for metatable-of-metatable
+   candidates) and `protobuf.find_resource_codec_by_name` before reflective
+   hook dispatch, passing `packet_context(true)` / `packet_context(false)` to
+   the registered capability while retaining the four-byte little-endian index
+   string inside `is_record_payload` (including for closure-captured endpoints).
 4. **Single structural root inspection and carried packet context**: When a
    non-scalar, non-function value is inspected once with
    `reflect.inspect(candidate)` and yields `is_record(record_value)` (with no
@@ -125,8 +139,9 @@ and detaches the buffer with `titan_protobuf_buf_take_data`.
 Decode reads directly from the packet's byte slices using
 `protobuf.deserialize_nominal_buffer_with_context` (passing `scope` once for
 `RECORD` and `UNION` packets) and
-`protobuf.deserialize_fields_buffer_with_context` for closure envelopes, passing
-the packet's already-resolved decode scope. For a `RECORD_PAYLOAD` packet, after
+`protobuf.deserialize_fields_buffer_with_context` (passing `scope` through
+`restore_closure_from_buffer` for `CLOSURE` packets, matching `encode_packet`'s
+`protobuf.serialize_fields_to_buffer_with_context` call). For a `RECORD_PAYLOAD` packet, after
 `initialize_nominal_raw` ensures the destination module is loaded in the
 receiving state, `decode_message_worker` checks
 `protobuf.find_resource_codec_by_name(name)`: registered resource types invoke
@@ -176,19 +191,23 @@ before calling the worker. Protected dispatch always returns through native
 residual-slot cleanup, which clears/discards any remaining raw owner and removes
 the handler while retaining exactly one result/error root.
 
-Protected `STRING` decode copies its bytes, and malformed nil `FUNCTION` decode
-raises its semantic error, before resolving execution identity or acquiring a
-scope. Both keep the packet in `slot[0]` for the outer C boundary's consuming
-cleanup, including release of any unclaimed attachments on success or error.
-
-`decode_message_worker` acquires either a fully retired pooled `ResourceScope`
-or a fresh inert frame. Only fresh creation registers the finalizer, before
-granting authority or native ownership; pooled frames are already finalizable.
-The worker installs lexical exact-top restoration/native disposal and inserts
-the scope before `move_slot_to_scope` moves and clears the caller's slot into
-the scope's native cell. Ordinary worker-entry failure, module initialization,
-and scope-preparation failure therefore leave the input owned by the native
-boundary; after commit the scope owns it.
+Inside `decode_message_worker`, `STRING` packets (which allocate and root-copy
+via `copy_native_bytes`) and malformed `FUNCTION` packets with a `NULL` pointer
+(which raise `"cannot transfer a NULL Lua C function"`) are handled **before**
+`current_execution()`, `acquire_resource_scope()`, and `move_slot_to_scope`:
+neither path can claim resource attachments, so they skip `ResourceScope`
+acquisition and keep the packet in `slot[0]` until outer `decode_message`
+consumes `slot[0]` and calls `discard_message(remaining)` after `lua_pcallk` on
+both normal return and error. Only nominal packets (`RECORD`, `UNION`,
+`CLOSURE`, `RECORD_PAYLOAD`) acquire either a fully retired pooled
+`ResourceScope` or a fresh inert frame. Only fresh creation registers the
+finalizer, before granting authority or native ownership; pooled frames are
+already finalizable. The worker installs lexical exact-top restoration/native
+disposal and inserts the scope before `move_slot_to_scope` moves and clears the
+caller's slot into the scope's native cell. Ordinary worker-entry failure,
+module initialization, primitive decode failure, and scope-preparation failure
+therefore leave the input owned by the native boundary; after commit the scope
+owns it.
 
 | Decode status | Caller slot | Provided Lua stack |
 | --- | --- | --- |
@@ -247,10 +266,6 @@ converts each capture once in declaration order via `TransferValue.from_value`,
 so a custom hook in an earlier capture cannot mutate a shared captured box
 before a later capture is read. A nested closure or custom record is already
 opaque bytes when inserted into its parent's snapshot.
-Packet closure envelopes use `serialize_fields_to_buffer_with_context` and
-`deserialize_fields_buffer_with_context`, carrying the already-resolved scope
-once for the envelope. Standalone helpers and individual capture conversion
-still resolve exact current-execution authority rather than using a global top.
 
 One anonymous protobuf message has two array fields: `{TransferValue}` policies
 and `{boolean}` flags recording which captures were already policy wrappers.
@@ -341,6 +356,13 @@ The scope, registration, attachment, claim, and disposal mechanics are:
   4. push `scope` onto `idle_resource_scopes` only when
      `idle_resource_scope_count < 8`.
 
+  Generated `defer`/`catch` recovery reaches this cleanup under sustained
+  `LUA_ERRMEM` without interning strings: the compiler roots its recovery keys
+  and empty traceback in private module slots before generated code can run.
+  Transfer needs no separate string-root workaround. See
+  [error recovery](error-handling.md) for the allocation-free recovery arm and
+  the separate, potentially allocating Lua `__close` behavior.
+
   Idle pooled frames hold no native ownership and grant no authority. Deeper
   nested bursts (`> 8` concurrent frames in one state) retire their overflow
   frames normally and leave them for ordinary GC reclamation; when
@@ -349,8 +371,9 @@ The scope, registration, attachment, claim, and disposal mechanics are:
   exact top authorizes attachment or claim; no older matching phase is searched.
   Same-stack protobuf fields, opaque hooks, and closure capture conversion share
   the top, while nested structural/hook packet work pushes its own frame.
-  Scalar/policy encoding and C-only scalar decoding leave the enclosing frame
-  intact without acquiring another. Other Tasks and separately resumed child
+  Scalar/policy encoding, C-only scalar decoding, and scope-free protected
+  `STRING` / `NULL`-`FUNCTION` decoding leave the enclosing frame intact without
+  acquiring another. Other Tasks and separately resumed child
   Coroutines inherit no packet authority. An abandoned
   active execution stack that never runs its lexical `defer` never returns its
   frame to `idle_resource_scopes`; `finalize_resource_scope` reclaims its
@@ -372,9 +395,11 @@ The scope, registration, attachment, claim, and disposal mechanics are:
   boundaries. The carried `context` passed to `codec.encode` and
   `claim_registered_resource` is only ever a live `ResourceScope` from the
   current packet call (never serialized or cached); a `nil` context raises the
-  standard missing-scope error. Public `attach_resource` and `claim_resource`
-  continue to resolve `resource_scopes[current_execution()]` on every call for
-  opaque user hooks and `TransferValue` policy conversions.
+  standard missing-scope error. `TransferValue.from_value` and
+  `TransferValue:to_value` pass `packet_context(true)` and
+  `packet_context(false)` to the registered `ResourceCodec` callbacks, while
+  public `attach_resource` and `claim_resource` continue to resolve
+  `resource_scopes[current_execution()]` on every call for opaque user hooks.
 - **Inline scratch cell, heap spill, and pre-detach trailing reservation
   (`reserve_resource`, `packet_storage_size`, `commit_resources`)**: After
   checking the top encode scope and non-nil `resource`, `retain`, and `release`
@@ -407,11 +432,14 @@ The scope, registration, attachment, claim, and disposal mechanics are:
     detaches `buf.data`.
   - Registered root endpoints pre-reserve the known one-entry `storage_size`
     before attaching the endpoint and finalize in place.
-  - Opaque root custom-hook payloads use `new_nominal_message` with
-    `scope.native`, reserving the complete payload, metadata and aligned tail in
-    one allocation before moving the scope's units via `commit_resources`.
-  - Scalar and explicit-policy packets open no scope and carry an empty
-    `resources` table (`{ nil, 0 }`).
+  - Opaque root custom-hook payloads call `new_nominal_message(...,
+    scope.native)`, which computes `storage_size` once (including the aligned
+    tail for `scope.native.resources.count`), allocates the single heap packet,
+    copies the payload and `name`/`module` strings, and moves the scope's units
+    via `commit_resources`.
+  - Scalar packets (`new_scalar_message`) and explicit-policy packets
+    (`new_scalar_message` or `new_nominal_message(..., nil)`) open no scope and
+    carry an empty `resources` table (`{ nil, 0 }`).
 - **Validated claim and finalizer-first adoption (`ResourceScope:claim`,
   `claim_resource`, and `claim_registered_resource`)**: Checks the top decode
   scope, requires `length == 4`, decodes the four-byte
@@ -440,9 +468,9 @@ The scope, registration, attachment, claim, and disposal mechanics are:
   packet's own trailing bytes, `discard_message(raw)` frees only the single
   `message` allocation after `dispose_resources` finishes—without entering Lua,
   loading modules, running user decoders, or requiring a Runtime. Public foreign
-  `copy_message(raw)` refuses any packet with `resources.entries ~= nil` or
-  `resources.count ~= 0`, copying only attachment-free packets. Internal nominal
-  packet creation no longer stages headers through this public copy entry.
+  `copy_message(raw)` checks `resources.entries == nil` and
+  `resources.count == 0` directly and refuses any packet with attachments,
+  copying only attachment-free packets.
 
 The resource table adds no native cycle collection. Queued receiver attachments
 can keep their own channel, or a cycle of channels, alive after all Lua wrappers

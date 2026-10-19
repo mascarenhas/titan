@@ -57,10 +57,10 @@ deserialize_fields_buffer_with_context(data: foreign const *void,
                                        length: integer,
                                        fields: const {reflect.Type},
                                        context: value): (...: value)
-find_transfer_hooks(descriptor: reflect.RecordType, context_prefix: string):
-    (reflect.Function?, reflect.Function?)
-encode_transfer_payload(candidate: value, to_hook: reflect.Function,
-                        context_prefix: string): string
+find_transfer_hooks(descriptor: reflect.RecordType, prefix: string):
+    (reflect.MethodType?, reflect.StaticFunctionType?)
+encode_transfer_payload(candidate: value, encode: reflect.MethodType,
+                        err_msg: string): string
 
 record ResourceCodec
   const identity: value
@@ -90,9 +90,12 @@ into a caller-initialized `titan_protobuf_buffer` (`buf`) without allocating an
 intermediate Lua string. `deserialize_nominal_buffer` and
 `deserialize_fields_buffer` decode directly from a borrowed `const void *` byte
 slice of length `length`. `find_transfer_hooks` returns a record's validated
-`(to_transfer_payload, from_transfer_payload)` pair (memoized per nominal record
-name `descriptor.name`), and `encode_transfer_payload` invokes `to_hook` under
-the shared active-record cycle guard.
+`(to_transfer_payload, from_transfer_payload)` pair as its reflected
+`MethodType` and `StaticFunctionType` (memoized per nominal record name
+`descriptor.name`), or `(nil, nil)` when the record has neither hook; `prefix`
+(`"protobuf"` or `"transfer"`) only labels its validation errors.
+`encode_transfer_payload` invokes that `encode` method under the shared
+active-record cycle guard and raises `err_msg` if `candidate` is already active.
 
 `serialize_inspected_record_to_buffer`, `serialize_inspected_union_to_buffer`,
 `deserialize_nominal_buffer_with_context`,
@@ -115,6 +118,25 @@ keyed by the record's canonical erased metatable identity, and
 little-endian packet-local slot index. These internal-purpose entries do not
 introduce a new standalone serialization policy or make unsupported roots
 transferable.
+
+The `context` argument is an explicit capability: a packet transport passes the
+`ResourceScope` it already resolved for that packet.
+`serialize_fields_to_buffer_with_context`,
+`deserialize_fields_buffer_with_context`, and
+`deserialize_nominal_buffer_with_context` use the value they are given and never
+fall back to the execution's current scope, so `nil` carries no resource
+authority. A `thread.Sender` or `thread.Receiver` field encoded or decoded with
+`nil` raises `transfer: resource attachment requires an encode scope` or
+`transfer: resource claim requires a decode scope`, even when the call runs
+inside a `to_transfer_payload` or `from_transfer_payload` hook whose packet
+scope is active. The public `serialize_fields_to_buffer`,
+`deserialize_fields_buffer`, and `deserialize_nominal_buffer` wrappers resolve
+the exact top scope of the current execution in the matching direction once
+(`nil` when there is none, as in a standalone call) and delegate. The two
+`serialize_inspected_*_to_buffer` entries differ deliberately: given `nil`, they
+substitute that same current-execution encode scope, so `serialize_to_buffer`,
+which passes no context, can attach endpoints only inside an active packet
+encode scope.
 
 The serialized result of `serialize` and `serialize_fields` is a binary string.
 Names, filenames, and schemas are ordinary strings too, but wire bytes need not
@@ -261,6 +283,14 @@ copy the module, nominal name, and wire bytes into native packets. Their
 [lossy, coalescing delivery](async-io.md#cross-state-receivers) can replace an
 unread packet; protobuf encoding adds no delivery guarantee.
 
+`TransferValue:to_value()` first checks the destination nominal registry. On a
+miss it calls the recorded module's native preload loader and retries lookup.
+The standalone `protobuf.deserialize_nominal` helper only looks up an already
+initialized type. See [independent Lua states](standard-library-lua.md) and
+[transfer values](async-io.md#transfer-values) for ownership and preload rules.
+
+### Custom record transfer hooks
+
 Records with the [custom transfer-hook pair](async-io.md#custom-record-transfer)
 use an `is_record_payload(module, name, bytes)` carrier instead during automatic
 transfer at the root. When such a record appears as a nested field inside an
@@ -271,8 +301,9 @@ Registered packet-scoped resource records (`thread.Sender<|T|>` and
 `thread.Receiver<|T|>`) use their transfer-registered `ResourceCodec`
 capability to attach and claim the four-byte little-endian slot index directly
 in the packet buffer without reflective hook calls or intermediate four-byte
-Lua strings; other hooked records (and `TransferValue` policy conversions)
-delegate to `to_transfer_payload(): string` and
+Lua strings (and `TransferValue.from_value` / `:to_value` likewise dispatch
+registered `ResourceCodec` records before reflective hooks); other hooked
+records delegate to `to_transfer_payload(): string` and
 `from_transfer_payload(payload: string): Record`. Hooks may use an
 anonymous-message descriptor to encode native tokens and copied state. Calling
 `protobuf.serialize` directly on a root record continues to apply the
@@ -287,9 +318,3 @@ the exact current packet scope opened by a
 [packet transfer operation](standard-library-transfer.md#scoped-resource-attachments-and-packet-local-indexes).
 Hooks remain synchronous and nonyielding; nested hook dispatch does not change
 their ownership or execution contract.
-
-`TransferValue:to_value()` first checks the destination nominal registry. On a
-miss it calls the recorded module's native preload loader and retries lookup.
-The standalone `protobuf.deserialize_nominal` helper only looks up an already
-initialized type. See [independent Lua states](standard-library-lua.md) and
-[transfer values](async-io.md#transfer-values) for ownership and preload rules.

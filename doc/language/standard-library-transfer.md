@@ -225,7 +225,8 @@ scope authority.
 
 Explicit nominal byte carriers (`is_record`, `is_union`, `is_closure`, and
 `is_record_payload`) also bypass encode-scope acquisition and initialize their
-header and copied payload/metadata directly in a single native allocation.
+heap packet header, payload, and `name`/`module` strings directly in a single
+allocation (`new_nominal_message`).
 
 Userdata whose metatable itself has a metatable, Titan-branded userdata, and
 branded Titan closures open an execution-local encode scope. Registered
@@ -237,12 +238,16 @@ write the four-byte little-endian slot index via
 `protobuf.write_resource_index`, and finalize the
 `TITAN_ASYNC_MESSAGE_RECORD_PAYLOAD` packet in place without allocating a Lua
 index string or copying a staged header. Branded Titan closures are validated
-directly against their module manifest and project their captures once before
-initializing the bounded packet buffer. Public records and unions are inspected
-once at the root and serialized directly into an expandable native buffer
-prefixed with the message header, carrying the packet's `ResourceScope` once
-into `protobuf` without creating an intermediate `TransferValue` or Lua string
-for the root message.
+directly against their module manifest, project their captures once before
+initializing the bounded packet buffer, and pass `scope` to
+`protobuf.serialize_fields_to_buffer_with_context`. Root records with custom
+`to_transfer_payload` hooks encode their payload string in the active scope and
+allocate their heap packet header, payload, metadata, and aligned attachment
+tail directly in one allocation (`new_nominal_message`). Public records without
+hooks and public unions are inspected once at the root and serialized directly
+into an expandable native buffer prefixed with the message header, carrying the
+packet's `ResourceScope` once into `protobuf` without creating an intermediate
+`TransferValue` or Lua string for the root message.
 
 `decode_message(state, slot)` is a public source-defined C-ABI entry for trusted
 Lua/native integrations. It returns a native status rather than the decoded
@@ -264,12 +269,14 @@ failure, and destination setup failure. After reserving stack space without
 `longjmp`, allocation-free scalar packets (`nil`, `boolean`, `integer`, `float`,
 borrowed `lua_State`, borrowed pointer, and non-nil bare C function) push their
 result directly in C, clear the slot, and dispose of the packet without opening
-a decode scope or entering `lua_pcallk`. Binary strings, nominal packets, empty
-input slots, and malformed nil C-function packets enter the protected Lua
-decoder worker. Strings and malformed functions do not acquire a resource scope;
-the outer native boundary disposes their residual owner and any unclaimed
-attachments. Nominal reconstruction retains exact packet-scope authority.
-Disposal finishes before status returns, without rethrowing after mutating the
+a decode scope or entering `lua_pcallk`. Binary strings (`STRING`) and malformed
+nil C-function (`FUNCTION`) packets enter the protected Lua decoder worker
+without acquiring a `ResourceScope`, keeping the packet in `slot[0]` until outer
+`decode_message` clears the slot and disposes the packet via `discard_message`
+after `lua_pcallk`; only nominal packets (`RECORD`, `UNION`, `CLOSURE`,
+`RECORD_PAYLOAD`) acquire a decode `ResourceScope` and move `slot[0]` into the
+scope. Disposal of any residual owner finishes
+before the status returns, and the entry does not rethrow after mutating the
 slot. The status means:
 
 - `0`: exactly one decoded value, possibly nil, sits above the Lua stack top
@@ -317,11 +324,13 @@ entries, or if heap allocation fails; it never shallow-copies a resource table.
 ### Scoped resource attachments and packet-local indexes
 
 `encode_message` and `decode_message` maintain a direction-specific scope stack
-for each actual Lua thread within the state whenever structural, hook, closure,
-or protected decode work runs. Retired scope frames may be reused within the
+for each actual Lua thread within the state for structural values, registered
+resource roots, transfer hooks, and closure capture work. Retired scope frames
+may be reused within the
 state; the idle retention bound and native scratch layout are private
-implementation details. Scalar/policy encoding and C-only scalar decoding
-bypass scopes while leaving any enclosing scope intact:
+implementation details. Scalar/policy encoding, C-only scalar decoding, and
+scope-free protected `STRING` / `NULL`-`FUNCTION` decoding bypass scopes while
+leaving any enclosing scope intact:
 
 - **Standard endpoint ownership**: Each reference-counted resource unit is owned
   by **exactly one** of: a live finalized wrapper (`Sender` or `Receiver`), or
@@ -332,10 +341,16 @@ bypass scopes while leaving any enclosing scope intact:
   separate lifetimes.
 - **Execution-local exact top authority and carried packet context**:
   `encode_message` and `decode_message` pass their active `ResourceScope` once
-  into `protobuf` and registered `ResourceCodec` callbacks (`register_resource`
-  and `claim_registered_resource`), while public `attach_resource` and
-  `claim_resource` resolve `resource_scopes[current_execution()]` on every call
-  for custom `to_transfer_payload` and `from_transfer_payload` hooks. Attachment
+  into `protobuf` (including closure envelopes via
+  `serialize_fields_to_buffer_with_context` and
+  `deserialize_fields_buffer_with_context`) and registered `ResourceCodec`
+  callbacks (`register_resource` and `claim_registered_resource`), while
+  `TransferValue.from_value` and `TransferValue:to_value` pass
+  `packet_context(true)` and `packet_context(false)` to registered
+  `ResourceCodec` callbacks before reflective hook lookup, and public
+  `attach_resource` and `claim_resource` resolve
+  `resource_scopes[current_execution()]` on every call for custom
+  `to_transfer_payload` and `from_transfer_payload` hooks. Attachment
   is permitted only when the active scope is an encode scope (otherwise raising
   `"transfer: resource attachment requires an encode scope"`), and claim requires
   a decode scope (otherwise raising

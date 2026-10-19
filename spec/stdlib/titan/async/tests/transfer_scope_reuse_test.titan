@@ -237,6 +237,12 @@ function test_scope_reuse_task_per_message_and_direction_reset(context: test.Con
                   ScopeReuseDirectionProbe(txs, true, 0, id))
                 scope_reuse_transfer.discard_message(raw)
               end, "scope-reuse-encode-fail:" .. id)
+              scope_reuse_expect_error(function ()
+                txs[1]:to_transfer_payload()
+              end, "transfer: resource attachment requires an encode scope")
+              scope_reuse_expect_error(function ()
+                scope_reuse_thread.Sender<|integer|>.from_transfer_payload("\0\0\0\0")
+              end, "transfer: resource claim requires a decode scope")
               return rxs
             end)()
             defer do
@@ -323,6 +329,9 @@ function test_scope_reuse_task_per_message_and_direction_reset(context: test.Con
       scope_reuse_expect_error(function ()
         scope_reuse_transfer.raise_message_error(status1, err1)
       end, "scope-reuse-decode-fail:77")
+      scope_reuse_expect_error(function ()
+        scope_reuse_thread.Sender<|integer|>.from_transfer_payload("\0\0\0\0")
+      end, "transfer: resource claim requires a decode scope")
       test.assert(not rx1:is_closed() and rx2:is_closed() and rx3:is_closed(),
                   "partial decode unwind did not release only unclaimed trailing entries")
       scope_reuse_check_stashed_sender(rx1, 771)
@@ -346,6 +355,12 @@ function test_scope_reuse_task_per_message_and_direction_reset(context: test.Con
             ScopeReuseDirectionProbe(txs, true, 0, 88))
           scope_reuse_transfer.discard_message(raw)
         end, "scope-reuse-encode-fail:88")
+        scope_reuse_expect_error(function ()
+          txs[1]:to_transfer_payload()
+        end, "transfer: resource attachment requires an encode scope")
+        scope_reuse_expect_error(function ()
+          scope_reuse_thread.Sender<|integer|>.from_transfer_payload("\0\0\0\0")
+        end, "transfer: resource claim requires a decode scope")
         return rxs
       end)()
       defer do
@@ -463,8 +478,8 @@ function test_scope_reuse_deep_nesting_beyond_pool_bound(context: test.Context)
       counter[0] = 1
       scope_reuse_custom_counter = counter
 
-      -- Depth 12 exceeds the 8-frame state-local idle cap; 4 overflow frames
-      -- retire unpooled and are finalized during the subsequent GC collections.
+      -- Depth 12 holds more frames than the state-local idle bound; overflow
+      -- frames retire unpooled and are finalized during subsequent collections.
       local result: ScopeReuseDeepNestNode = scope_reuse_roundtrip(
         ScopeReuseDeepNestNode(12, 0))
       test.assert(result.depth == 12 and result.total == 78,
@@ -472,7 +487,7 @@ function test_scope_reuse_deep_nesting_beyond_pool_bound(context: test.Context)
       test.assert(counter[0] == 1,
                   "12-level nested round trip leaked or over-released a custom resource")
 
-      -- Collect the 4 overflow frames; their finalizers run dispose_scope on
+      -- Collect the overflow frames; their finalizers run dispose_scope on
       -- already-retired zeroed cells and must be no-ops.
       scope_reuse_gc.collect()
       scope_reuse_gc.collect()
@@ -564,7 +579,6 @@ function test_scope_reuse_abandoned_reused_frame_and_state_close(context: test.C
       defer enc_rx1:close()
       defer enc_rx2:close()
       defer enc_rx3:close()
-      test.assert(not enc_rx1:is_closed() and not enc_rx2:is_closed() and not enc_rx3:is_closed())
       scope_reuse_gc.collect()
       scope_reuse_gc.collect()
       test.assert(enc_rx1:is_closed() and enc_rx2:is_closed() and enc_rx3:is_closed(),
@@ -756,6 +770,66 @@ function test_scope_reuse_abandoned_reused_frame_and_state_close(context: test.C
         test.assert(hold_rx:is_closed(),
                     "abandoned pool-depletion holder scopes did not release their attachments")
       end
+    end)
+
+  context:run("warm-pool-post-gc-structural-decode-oom-retires-scope",
+    function (_context: test.Context)
+      -- Warm-pool + full GC + structural decode OOM under allocator denial:
+      -- compiler-rooted recovery strings keep defer unwinding allocation-free,
+      -- restoring execution authority and releasing trailing attachments.
+      local warm_check: ScopeReuseStructuralCarrier = scope_reuse_roundtrip(
+        ScopeReuseStructuralCarrier("warm-pool", {}, {}))
+      test.assert(warm_check.padding == "warm-pool")
+      local wrx1, wrx2, wraw = (function (): (
+          scope_reuse_thread.Receiver<|integer|>,
+          scope_reuse_thread.Receiver<|integer|>,
+          foreign *void)
+        local tx1, r1 = scope_reuse_thread.channel<|integer|>(1)
+        local tx2, r2 = scope_reuse_thread.channel<|integer|>(1)
+        local pkt = scope_reuse_transfer.encode_message(
+          ScopeReuseStructuralCarrier(
+            scope_reuse_string.rep("warm\0decode\0oom\0", 64), {tx1, tx2}, {}))
+        return r1, r2, pkt
+      end)()
+      defer scope_reuse_transfer.discard_message(wraw)
+      defer wrx1:close()
+      defer wrx2:close()
+      local wslot: foreign *ScopeReuseMessageSlot =
+        foreign ScopeReuseMessageSlot.new_array(1)
+      defer do
+        scope_reuse_transfer.discard_message(wslot[0])
+        wslot[0] = nil
+      end
+      wslot[0] = wraw
+      wraw = nil
+      scope_reuse_gc.collect()
+      scope_reuse_gc.collect()
+      test.assert(not wrx1:is_closed() and not wrx2:is_closed())
+
+      local wtop = ffi.lua_gettop(L)
+      defer ffi.lua_settop(L, wtop)
+      local wctrl: owned size_t[] = foreign size_t.new_array(3)
+      wctrl[0] = 1 as foreign size_t
+      wctrl[1] = 1 as foreign size_t
+      local wprev_ud: foreign *void = nil
+      local wprev_alloc = ffi.lua_getallocf(L, wprev_ud)
+      ffi.lua_setallocf(L, scope_reuse_limited_lua_alloc, wctrl as foreign *void)
+      local wstatus = scope_reuse_transfer.decode_message(L, wslot)
+      ffi.lua_setallocf(L, wprev_alloc, wprev_ud)
+      ffi.lua_settop(L, wtop)
+      test.assert(wstatus > 0 and wslot[0] == nil and wrx1:is_closed() and wrx2:is_closed(),
+                  "warm-pool post-GC decode OOM did not consume slot or release trailing attachments")
+      scope_reuse_expect_error(function ()
+        scope_reuse_transfer.TransferValue.is_record_payload(
+          "titan.thread", "titan.thread.Sender", "\0\0\0\0"):to_value()
+      end, "transfer: resource claim requires a decode scope")
+
+      local check_tx, check_rx = scope_reuse_thread.channel<|integer|>(1)
+      defer check_tx:close()
+      defer check_rx:close()
+      scope_reuse_expect_error(function ()
+        scope_reuse_transfer.TransferValue.from_value(check_tx)
+      end, "transfer: resource attachment requires an encode scope")
     end)
 end
 

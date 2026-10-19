@@ -1919,19 +1919,49 @@ record DirectRouteClaimProbe
 end
 
 function DirectRouteClaimProbe:to_transfer_payload(): string
+  -- Wrong-direction refusal: an active encode scope must reject TransferValue:to_value claims.
+  expect_error(function ()
+    async.TransferValue.is_record_payload(
+      "titan.thread", "titan.thread.Sender", "\x00\x00\x00\x00"):to_value()
+  end, "transfer: resource claim requires a decode scope")
+  expect_error(function ()
+    async.TransferValue.is_record_payload(
+      "titan.thread", "titan.thread.Receiver", "\x00\x00\x00\x00"):to_value()
+  end, "transfer: resource claim requires a decode scope")
+
+  local use_policy = strings.sub(self.mode, 1, 7) == "policy-"
   if self.tx ~= nil then
-    local idx_bytes = self.tx:to_transfer_payload()
-    test.assert(idx_bytes == "\x00\x00\x00\x00",
-      "first attached Sender index was not little-endian zero")
+    if use_policy then
+      case async.TransferValue.from_value(self.tx)
+      when is_record_payload(mod, name, data) then
+        test.assert(
+          mod == "titan.thread" and name == "titan.thread.Sender" and
+          data == "\x00\x00\x00\x00",
+          "TransferValue.from_value(Sender) did not produce expected 4-byte index policy")
+      else raise "expected is_record_payload from TransferValue.from_value(Sender)"
+      end
+    else
+      local idx_bytes = self.tx:to_transfer_payload()
+      test.assert(idx_bytes == "\x00\x00\x00\x00",
+        "first attached Sender index was not little-endian zero")
+    end
   end
   if self.rx ~= nil then
-    local idx_bytes = self.rx:to_transfer_payload()
-    if self.tx ~= nil then
-      test.assert(idx_bytes == "\x01\x00\x00\x00",
-        "second attached Receiver index was not little-endian one")
+    local expected_idx = "\x00\x00\x00\x00"
+    if self.tx ~= nil then expected_idx = "\x01\x00\x00\x00" end
+    if use_policy then
+      case async.TransferValue.from_value(self.rx)
+      when is_record_payload(mod, name, data) then
+        test.assert(
+          mod == "titan.thread" and name == "titan.thread.Receiver" and
+          data == expected_idx,
+          "TransferValue.from_value(Receiver) did not produce expected 4-byte index policy")
+      else raise "expected is_record_payload from TransferValue.from_value(Receiver)"
+      end
     else
-      test.assert(idx_bytes == "\x00\x00\x00\x00",
-        "first attached Receiver index was not little-endian zero")
+      local idx_bytes = self.rx:to_transfer_payload()
+      test.assert(idx_bytes == expected_idx,
+        "attached Receiver index did not match expected little-endian slot")
     end
   end
   return self.mode .. ":" .. self.wire
@@ -1940,6 +1970,17 @@ end
 function DirectRouteClaimProbe.from_transfer_payload(
   payload: string
 ): DirectRouteClaimProbe
+  -- Wrong-direction refusal: an active decode scope must reject TransferValue.from_value attachments.
+  local tmp_tx, tmp_rx = thread.channel<|integer|>(1)
+  defer tmp_tx:close()
+  defer tmp_rx:close()
+  expect_error(function ()
+    async.TransferValue.from_value(tmp_tx)
+  end, "transfer: resource attachment requires an encode scope")
+  expect_error(function ()
+    async.TransferValue.from_value(tmp_rx)
+  end, "transfer: resource attachment requires an encode scope")
+
   local sep? = strings.find(payload, ":")
   if sep == nil then
     raise "invalid DirectRouteClaimProbe payload"
@@ -1955,6 +1996,18 @@ function DirectRouteClaimProbe.from_transfer_payload(
     stashed_adopted_tx = first.tx
     protobuf.deserialize_nominal(
       wire, "thread.tests.DirectSingleSenderCarrier", false)
+  elseif mode == "policy-claim-sender" then
+    async.TransferValue.is_record_payload(
+      "titan.thread", "titan.thread.Sender", wire):to_value()
+  elseif mode == "policy-claim-receiver" then
+    async.TransferValue.is_record_payload(
+      "titan.thread", "titan.thread.Receiver", wire):to_value()
+  elseif mode == "policy-duplicate-sender" then
+    local first = async.TransferValue.is_record_payload(
+      "titan.thread", "titan.thread.Sender", wire):to_value() as thread.Sender<|integer|>
+    stashed_adopted_tx = first
+    async.TransferValue.is_record_payload(
+      "titan.thread", "titan.thread.Sender", wire):to_value()
   else
     protobuf.deserialize_nominal(
       wire, "thread.tests.DirectSingleSenderCarrier", false)
@@ -2103,9 +2156,18 @@ local function exercise_standalone_refusals_and_drop_endpoints(): (
       nil, nil, 4, thread.channel_release_sender_native)
   end, "transfer: resource claim requires a decode scope")
 
-  -- Standalone TransferValue.from_value / :to_value outside packet scopes reject both root and nested endpoints.
+  -- Standalone TransferValue.from_value / :to_value outside packet scopes reject root, nested, and closure-captured endpoints.
   expect_error(function ()
     async.TransferValue.from_value(tx as value)
+  end, "transfer: resource attachment requires an encode scope")
+  expect_error(function ()
+    async.TransferValue.from_value(rx as value)
+  end, "transfer: resource attachment requires an encode scope")
+  expect_error(function ()
+    local cap_tx = tx as thread.Sender<|integer|>
+    async.TransferValue.from_value(function (): boolean
+      return cap_tx:try_send(1)
+    end)
   end, "transfer: resource attachment requires an encode scope")
   expect_error(function ()
     async.TransferValue.from_value(
@@ -2123,7 +2185,12 @@ local function exercise_standalone_refusals_and_drop_endpoints(): (
       "titan.thread.Sender",
       "\x00\x00\x00\x00"):to_value()
   end, "transfer: resource claim requires a decode scope")
-
+  expect_error(function ()
+    async.TransferValue.is_record_payload(
+      "titan.thread",
+      "titan.thread.Receiver",
+      "\x00\x00\x00\x00"):to_value()
+  end, "transfer: resource claim requires a decode scope")
   -- Registration guards reject non-record candidates.
   expect_error(function ()
     transfer.register_resource(
@@ -2146,6 +2213,97 @@ local function exercise_standalone_refusals_and_drop_endpoints(): (
   end, "protobuf: resource codec requires a record")
 
   return peer_rx, rel_tx, peer_tx, rel_rx
+end
+
+local type DirectCapturedEndpointAction = function (
+  thread.Sender<|integer|>?, thread.Receiver<|integer|>?, integer
+): integer
+
+local function exercise_direct_captures_and_drop_sources(): (
+  DirectCapturedEndpointAction,
+  thread.Receiver<|integer|>,
+  thread.Sender<|integer|>
+)
+  local fn_in, fn_out = thread.channel<|DirectCapturedEndpointAction|>(1)
+  defer fn_in:close()
+  defer fn_out:close()
+  -- Separate fresh channels let each surviving opposite-direction peer observe
+  -- finalization without itself retaining a unit in the direction under test.
+  local source_tx, sender_peer = thread.channel<|integer|>(2)
+  local receiver_peer, source_rx = thread.channel<|integer|>(2)
+  local str_tx, str_rx = thread.channel<|string|>(1)
+  defer str_tx:close()
+  defer str_rx:close()
+  local c_tx1: thread.Sender<|integer|>? = source_tx
+  local c_tx2: thread.Sender<|integer|>? = source_tx
+  local c_rx1: thread.Receiver<|integer|>? = source_rx
+  local c_rx2: thread.Receiver<|integer|>? = source_rx
+  local c_str_tx = str_tx
+  fn_in:send(function (
+    orig_tx: thread.Sender<|integer|>?,
+    orig_rx: thread.Receiver<|integer|>?,
+    step: integer
+  ): integer
+    if step == 1 then
+      test.assert(c_tx1 ~= nil and c_tx2 ~= nil and c_tx1 ~= c_tx2,
+        "duplicate captured Senders did not decode into distinct wrappers")
+      test.assert(c_rx1 ~= nil and c_rx2 ~= nil and c_rx1 ~= c_rx2,
+        "duplicate captured Receivers did not decode into distinct wrappers")
+      test.assert(c_tx1 ~= orig_tx and c_tx2 ~= orig_tx,
+        "captured Sender decode reused source wrapper identity")
+      test.assert(c_rx1 ~= orig_rx and c_rx2 ~= orig_rx,
+        "captured Receiver decode reused source wrapper identity")
+      c_tx1:send(41)
+      c_tx2:send(43)
+      c_str_tx:send("captured-erased-ok")
+      local v1 = c_rx1:receive()
+      local v2 = c_rx2:receive()
+      c_tx1 = nil
+      c_rx1 = nil
+      return v1 + v2
+    end
+    c_tx2:send(59)
+    local v3 = c_rx2:receive()
+    c_tx2 = nil
+    c_rx2 = nil
+    return v3
+  end)
+  local decoded_fn = fn_out:receive()
+  receiver_peer:send(41)
+  receiver_peer:send(43)
+  test.assert(decoded_fn(source_tx, source_rx, 1) == 84)
+  test.assert(sender_peer:receive() == 41 and sender_peer:receive() == 43)
+  test.assert(str_rx:receive() == "captured-erased-ok")
+  -- An ordinary returning frame retires every source wrapper, source closure,
+  -- call argument and first-occurrence temporary before the caller forces GC.
+  -- Neither source_tx nor source_rx is explicitly closed.
+  return decoded_fn, sender_peer, receiver_peer
+end
+
+local function add_policy_route_claim_case(
+  context: test.Context,
+  name: string,
+  mode: string,
+  wire: string,
+  expected: string
+)
+  context:run(name, function (_child: test.Context)
+    runtime_test.run(function ()
+      local probe_tx, probe_rx = thread.channel<|DirectRouteClaimProbe|>(1)
+      defer probe_tx:close()
+      defer probe_rx:close()
+      local peer_rx?, rel_tx?, _?, _? =
+        enqueue_direct_route_claim_probe(probe_tx, mode, wire, "sender")
+      defer if peer_rx ~= nil then peer_rx:close() end
+      expect_error(function ()
+        probe_rx:receive()
+      end, expected)
+      assert_sender_released_exactly_once(
+        peer_rx,
+        rel_tx,
+        "policy route failed claim (" .. name .. ") Sender")
+    end)
+  end)
 end
 
 function test_worker_created_channel_pair_survives_worker_lua_close_on_join(
@@ -2267,6 +2425,31 @@ function test_direct_endpoint_resource_codec_routes_and_validation(
     end)
   end)
 
+  context:run("captured_endpoint_occurrences_finalize_independently", function (_child: test.Context)
+    runtime_test.run(function ()
+      local decoded_fn, sender_peer, receiver_peer =
+        exercise_direct_captures_and_drop_sources()
+      defer sender_peer:close()
+      defer receiver_peer:close()
+      gc.collect()
+      gc.collect()
+      test.assert(not sender_peer:is_closed(),
+        "dropping the first captured Sender prematurely closed its peer")
+      test.assert(not receiver_peer:is_closed(),
+        "dropping the first captured Receiver prematurely closed its peer")
+
+      receiver_peer:send(59)
+      test.assert(decoded_fn(nil, nil, 2) == 59)
+      test.assert(sender_peer:receive() == 59)
+      gc.collect()
+      gc.collect()
+      test.assert(sender_peer:is_closed(),
+        "dropping both captured Senders did not finalize the last Sender unit")
+      test.assert(receiver_peer:is_closed(),
+        "dropping both captured Receivers did not finalize the last Receiver unit")
+    end)
+  end)
+
   context:run("direct_route_claim_validation_order_and_unwind", function (_child: test.Context)
     runtime_test.run(function ()
       local probe_tx, probe_rx = thread.channel<|DirectRouteClaimProbe|>(2)
@@ -2333,8 +2516,60 @@ function test_direct_endpoint_resource_codec_routes_and_validation(
       test.assert(
         dup_peer_rx:is_closed(),
         "first adopted Sender from duplicate direct-route claim did not finalize on GC")
+
+      -- 4. Policy-route kind and duplicate validation; width/bounds rows have
+      -- independent named sibling subtests below.
+      local _?, _?, pol_kind_peer_tx?, rel_pol_kind_rx? = enqueue_direct_route_claim_probe(
+        probe_tx, "policy-claim-sender", "\x00\x00\x00\x00", "receiver")
+      defer if pol_kind_peer_tx ~= nil then (pol_kind_peer_tx as thread.Sender<|integer|>):close() end
+      expect_error(function ()
+        probe_rx:receive()
+      end, "transfer: resource attachment kind mismatch")
+      assert_receiver_released_exactly_once(
+        pol_kind_peer_tx as thread.Sender<|integer|>,
+        rel_pol_kind_rx as function (): (),
+        "policy route failed claim (policy-claim-sender) Receiver")
+
+      stashed_adopted_tx = nil
+      defer stashed_adopted_tx = nil
+      local pol_dup_peer_rx = (function (): thread.Receiver<|integer|>
+        local tx, peer_rx = thread.channel<|integer|>(1)
+        probe_tx:send(DirectRouteClaimProbe(
+          "policy-duplicate-sender", "\x00\x00\x00\x00", tx, nil))
+        return peer_rx
+      end)()
+      defer pol_dup_peer_rx:close()
+      gc.collect()
+      gc.collect()
+      expect_error(function ()
+        probe_rx:receive()
+      end, "transfer: resource attachment was already claimed")
+      gc.collect()
+      gc.collect()
+      exercise_and_drop_duplicate_direct_sender(pol_dup_peer_rx)
+      gc.collect()
+      gc.collect()
+      test.assert(
+        pol_dup_peer_rx:is_closed(),
+        "first adopted Sender from duplicate policy-route claim did not finalize on GC")
     end)
   end)
+
+  add_policy_route_claim_case(context, "policy_route_width_empty",
+    "policy-claim-sender", "", "transfer: invalid resource attachment index width")
+  add_policy_route_claim_case(context, "policy_route_width_short",
+    "policy-claim-sender", "abc", "transfer: invalid resource attachment index width")
+  add_policy_route_claim_case(context, "policy_route_width_long",
+    "policy-claim-sender", "abcde", "transfer: invalid resource attachment index width")
+  add_policy_route_claim_case(context, "policy_route_bounds_sentinel",
+    "policy-claim-sender", "\xff\xff\xff\xff",
+    "transfer: resource attachment index is out of bounds")
+  add_policy_route_claim_case(context, "policy_route_bounds_out_of_range",
+    "policy-claim-sender", "\x01\x00\x00\x00",
+    "transfer: resource attachment index is out of bounds")
+  add_policy_route_claim_case(context, "policy_route_kind_mismatch_receiver",
+    "policy-claim-receiver", "\x00\x00\x00\x00",
+    "transfer: resource attachment kind mismatch")
 
   context:run("standalone_protobuf_and_policy_refusals_and_registration_guards", function (_child: test.Context)
     local peer_rx, rel_tx, peer_tx, rel_rx =

@@ -408,11 +408,13 @@ locals/imports, remaining canonical closures, and nominal namespace tables.
 Every direct importer verifies that token against its exact linked producer
 before using the module; explicit source imports additionally rely on fixed
 source-private slots. The remaining Array-writer,
-nominal/owned-C metatable, and transitive-owner
-module slots are allocated in inventory/first-use order and may interleave.
-That private order is a coder detail and is not serialized. Array writers are
-initialized before module variable initializers. Callable tags
-are published even earlier, before either writers or any initializer-created
+nominal/owned-C metatable, transitive-owner module, and error-recovery `TString`
+anchor slots are allocated in inventory/first-use order and may interleave.
+That private order is a coder detail and is not serialized. Error-recovery
+string anchors (`TITAN_BACKTRACE_KEY`, `TITAN_TRACE_PINNED`, and `""`) are
+initialized immediately after `titan_pushmodule(L, _mod)` before dependencies
+or user code; Array writers are initialized before module variable initializers. Callable tags
+are published even earlier than writers, before either writers or any initializer-created
 lambda/bound-method closure can copy them; canonical top-level/static closures
 are initialized later but still before module exposure. Reading a module variable is `getslot` on
 `&_mod->uv[i].uv`; writing a GC-able one is `setslot` plus the **back**

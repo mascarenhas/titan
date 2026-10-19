@@ -77,13 +77,20 @@ local function send_ephemeral_envelope(
 end
 
 local function encode_closure_raw(
-    base: integer): (foreign *void, thread.Receiver<|integer|>, thread.Sender<|integer|>)
+    base: integer): (
+    foreign *void,
+    thread.Receiver<|integer|>,
+    thread.Sender<|integer|>,
+    thread.Receiver<|integer|>)
   local rep_tx, rep_rx = thread.channel<|integer|>(1)
   local in_tx, in_rx = thread.channel<|integer|>(1)
+  local direct_tx, direct_rx = thread.channel<|integer|>(1)
   local choice = SmokeChoice.pair(rep_tx, in_rx)
   local acc = base
   local fn = function (delta: integer): integer
     acc = acc + delta
+    direct_tx:send(acc * 2)
+    direct_tx:close()
     case choice
     when pair(tx, rx) then
       local item = rx:receive()
@@ -95,7 +102,7 @@ local function encode_closure_raw(
     end
     return acc
   end
-  return transfer.encode_message(fn), rep_rx, in_tx
+  return transfer.encode_message(fn), rep_rx, in_tx, direct_rx
 end
 
 local function run_smoke()
@@ -205,14 +212,40 @@ local function run_smoke()
   local ok_mal, v_mal? = mal_ok_rx:try_receive()
   test.assert(ok_mal and v_mal == 88 and mal_ok_rx:is_closed())
 
-  -- 2. Nested union + closure capture packet across a worker thread.
-  local closure_raw, rep_rx, in_tx = encode_closure_raw(50)
+  -- 2. Direct nominal policy, protected string decode, and closure capture packet.
+  local str_raw = transfer.encode_message("smoke\0string")
+  defer transfer.discard_message(str_raw)
+  local top_str = ffi.lua_gettop(L)
+  local status_str = transfer.decode_message(L, str_raw)
+  local val_str: value = nil
+  if status_str >= 0 then val_str = ffi.lua_totvalue(L, -1) end
+  ffi.lua_settop(L, top_str)
+  if status_str ~= 0 then transfer.raise_message_error(status_str, val_str) end
+  test.assert(str_raw == nil and (val_str as string) == "smoke\0string")
+
+  local nom_policy = transfer.TransferValue.from_value(SmokeChoice.empty())
+  local nom_raw = transfer.encode_message(nom_policy)
+  defer transfer.discard_message(nom_raw)
+  local top_nom = ffi.lua_gettop(L)
+  local status_nom = transfer.decode_message(L, nom_raw)
+  local val_nom: value = nil
+  if status_nom >= 0 then val_nom = ffi.lua_totvalue(L, -1) end
+  ffi.lua_settop(L, top_nom)
+  if status_nom ~= 0 then transfer.raise_message_error(status_nom, val_nom) end
+  local dec_nom: SmokeChoice = val_nom
+  case dec_nom
+  when empty() then
+  else raise "nominal policy smoke round-trip failed"
+  end
+
+  local closure_raw, rep_rx, in_tx, direct_rx = encode_closure_raw(50)
   defer transfer.discard_message(closure_raw)
   defer rep_rx:close()
   defer in_tx:close()
+  defer direct_rx:close()
   gc.collect()
   gc.collect()
-  test.assert(not rep_rx:is_closed() and not in_tx:is_closed())
+  test.assert(not rep_rx:is_closed() and not in_tx:is_closed() and not direct_rx:is_closed())
   local top_cl = ffi.lua_gettop(L)
   local status_cl = transfer.decode_message(L, closure_raw)
   local val_cl: value = nil
@@ -224,6 +257,7 @@ local function run_smoke()
   local worker = thread.spawn_one(function (cb: function (integer): integer): integer
     return cb(5)
   end, restored_fn)
+  test.assert(direct_rx:receive() == 110)
   test.assert(rep_rx:receive() == 62)
   case worker:join()
   when succeeded(total) then test.assert(total == 55)

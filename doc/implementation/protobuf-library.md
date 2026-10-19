@@ -72,18 +72,29 @@ foreign function write_resource_index(raw_buf: *void, index: unsigned int): int
 ```
 
 `buf` must point to a live, initialized `titan_protobuf_buffer`. Each
-inspected-root helper records its starting length, resolves `context` via
-`packet_context(true)` only when the caller passed `nil`, creates one `Encoder`
+inspected-root helper records its starting length, creates one `Encoder`
 carrying `context`, appends the already-inspected root at depth 1, and checks
-the appended message size. The caller retains buffer ownership and must provide
-its normal native-buffer cleanup; these entries neither initialize nor finalize
-that storage. Likewise, `deserialize_nominal_buffer_with_context`,
+the appended message size. Its `context` has a deliberate ambient fallback: when
+the caller passes `nil`, the helper substitutes `packet_context(true)`, the exact
+top encode scope of the current execution (or `nil` when there is none), which
+is what lets the public `serialize_to_buffer` pass no context. The caller
+retains buffer ownership and must provide its normal native-buffer cleanup;
+these entries neither initialize nor finalize that storage.
+
+`deserialize_nominal_buffer_with_context`,
 `serialize_fields_to_buffer_with_context`, and
-`deserialize_fields_buffer_with_context` accept the caller's already-resolved
-encode or decode `context` (while the public `deserialize_nominal_buffer`,
+`deserialize_fields_buffer_with_context` have no such fallback. They hand the
+caller's already-resolved encode or decode `context` to the `Encoder` or
+`Message` verbatim, so an explicit `nil` carries no attachment/claim authority:
+the registered `ResourceCodec` callbacks raise
+`transfer: resource attachment requires an encode scope` or
+`transfer: resource claim requires a decode scope`, even when the call is made
+from an opaque `to_transfer_payload` / `from_transfer_payload` hook whose packet
+scope is active for the same execution. The public `deserialize_nominal_buffer`,
 `serialize_fields_to_buffer`, and `deserialize_fields_buffer` wrappers resolve
-`packet_context(true)` / `packet_context(false)` once and delegate to them; a
-`nil` `context` carries no attachment/claim authority).
+`packet_context(true)` / `packet_context(false)` once and delegate to them, and
+`titan.transfer` passes its already-resolved `ResourceScope` directly.
+
 `titan.protobuf` never imports `titan.transfer` or `titan.thread`. Instead,
 `transfer` installs its `packet_context` resolver once via
 `set_packet_context_provider` and mediates capability registration via
@@ -155,9 +166,10 @@ publication. Structs use member order; nested fixed arrays use their projected
 values and target construction validates the actual C extent without evaluating
 C expressions in Titan.
 
-`find_transfer_hooks` memoizes the validated `(to_hook, from_hook)` pair (or a
-negative sentinel) per nominal record name (`descriptor.name`) in a module-local
-Map, and `encode_transfer_payload` shares the module-local
+`find_transfer_hooks` memoizes the validated `(encode, decode)` pair of
+`reflect.MethodType` and `reflect.StaticFunctionType` (or a negative sentinel)
+per nominal record name (`descriptor.name`) in a module-local Map, and
+`encode_transfer_payload` shares the module-local
 `active_record_payloads` ephemeron Map so nested (`depth > 1`) and root hook
 invocations enforce one reentrancy guard without permanently rooting abandoned
 encoding graphs. Lexical removals still restore that guard on normal/error exit.

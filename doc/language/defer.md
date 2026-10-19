@@ -34,7 +34,7 @@ work()
 -- on exit: work(), second(), first()
 ```
 
-This is true for normal fallthrough, `return`, `break`, and errors. If a deferred statement raises an exception, it overrides the pending action.
+This is true for normal fallthrough, `return`, `break`, and errors. Once execution has passed a `defer` statement, Titan's boundary recovery into its cleanup on block exit does not allocate (aside from any intervening user Lua `__close` metamethods, which are run under Lua's protected close path), so non-allocating cleanup actions still run even when the protected block exits with an out-of-memory error. If a deferred statement itself raises an exception (or performs an allocation that fails), it overrides the pending action while still cascading through outer `defer` and `catch` blocks.
 
 Return expressions are evaluated before cleanup runs. For example, this returns `"body"` even though the deferred statement mutates `log` before control reaches the caller:
 

@@ -1,9 +1,8 @@
 #ifndef TITAN_SPEC_PROTOBUF_FIXTURE_H
 #define TITAN_SPEC_PROTOBUF_FIXTURE_H
 
-#include <stdint.h>
-#include <string.h>
-
+/* Use the authoritative raw-buffer collaboration contract, not a layout mirror. */
+#include "../../../../titan/protobuf/native.h"
 typedef int titan_protobuf_row[1 + 2];
 
 typedef struct titan_protobuf_pair {

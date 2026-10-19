@@ -207,13 +207,14 @@ required message type.
   `Sender` and `Receiver` register a direct nominal capability and also
   implement `to_transfer_payload` and `from_transfer_payload` backed by
   [packet-scoped resource attachments](standard-library-transfer.md#scoped-resource-attachments-and-packet-local-indexes):
-  - When `Sender<|T|>` or `Receiver<|T|>` is transferred at the packet root or
-    nested inside public records, unions, or their Array fields,
+  - When `Sender<|T|>` or `Receiver<|T|>` is transferred at the packet root,
+    nested inside public records, unions, or their Array fields, or converted
+    via `TransferValue.from_value` / `:to_value()` (including closure captures),
     `titan.transfer` and `titan.protobuf` use the registered `ResourceCodec`
     capability (keyed by canonical erased metatable identity) to retain one unit
     per occurrence and write/claim the four-byte little-endian packet-local slot
-    index directly in the packet buffer without reflective hook dispatch or
-    intermediate four-byte Lua strings.
+    index without reflective hook dispatch (`TransferValue` policies still use
+    the `is_record_payload` four-byte index string representation).
   - `Sender:to_transfer_payload()` and `Receiver:to_transfer_payload()` call
     `transfer.attach_resource` with the channel pointer and the public C-ABI
     `channel_retain_{sender,receiver}_native` and
@@ -221,8 +222,8 @@ required message type.
     occurrence retains an independent sender or receiver reference in the active
     packet's resource table and returns the identical four-byte little-endian
     packet-local slot index string without invalidating the caller's handle.
-    This hook route remains used by `TransferValue` policies (such as closure
-    captures) and custom user `to_transfer_payload` hooks.
+    This explicit hook route remains available for custom user
+    `to_transfer_payload` / `from_transfer_payload` hooks.
   - Both the registered constructor (`sender_from_resource` /
     `receiver_from_resource`) and `Sender.from_transfer_payload(payload)` /
     `Receiver.from_transfer_payload(payload)` first create a fresh inert

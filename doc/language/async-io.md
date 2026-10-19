@@ -363,6 +363,13 @@ NULL-function rejection) directly without constructing a `reflect.Value`
 wrapper. Branded Titan closures are validated directly against their module
 manifest without hydrating reflection function signatures (while explicit
 `reflect.inspect` calls preserve eager full `FunctionType` signature hydration).
+Registered packet-scoped resource records (`thread.Sender` and
+`thread.Receiver`) are recognized by their registered `ResourceCodec`
+capability before reflective hooks in both `from_value` and `to_value`,
+producing and consuming the same four-byte `is_record_payload` slot-index
+policy under an active encode/decode scope. The direct userdata route in
+`from_value` requires a metatable that has no metatable of its own;
+`to_value` instead resolves the capability by initialized nominal name.
 Public records without custom transfer hooks and public unions are inspected
 once at the root and serialized through `protobuf`'s typed internal buffer
 entries. Lua closures, Lua C closures with upvalues, direct containers,

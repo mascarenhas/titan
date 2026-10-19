@@ -1107,21 +1107,27 @@ on the fixed source-private slots. Remaining private slots are
 allocated as
 their inventories or first uses are encountered during code generation:
 module-local Array writers; record/union, Interface, and owned-C metatables;
-concrete-owner module caches needed by wrappers; and transitive module
-`Udata` caches may therefore interleave. No ordering among
-those categories is serialized.
+concrete-owner module caches needed by wrappers; transitive module
+`Udata` caches; and up to three error-recovery `TString` anchors
+(`TITAN_BACKTRACE_KEY`, `TITAN_TRACE_PINNED`, and `""`) requested by
+generated `catch`/`defer`/re-raise code may therefore interleave. No ordering
+among those categories is serialized.
 
-Code generation freezes the distinct constructed Array element types and
-initializes each corresponding writer after nominal metatables, imports, and
-function-type tag publication but before `$INITVARS`, so an initializer can
-construct an Array without observing an empty slot. Publishing tags first is
-also required because a variable initializer may construct a lambda or
-bound-method closure and must copy a live exact tag into it. First-use private
-objects are filled by `init_data_from_other_modules` or the module
-initializer. Thus all private slots, beginning with the Array cache and fixed
-provider-identity token, come *after* the importer-visible public prefix. Their
-fixed header is part of the current ABI, while later inventory/first-use slots remain
-coder-private and do not perturb the public importer slot math.
+Any requested error-recovery `TString` slots are initialized first in
+`$INITNAME`, immediately after `titan_pushmodule(L, _mod)` and before
+metatables, dependency loading, or generated initializers/bodies can enter a
+protected boundary. Code generation also freezes the distinct constructed
+Array element types and initializes each corresponding writer after nominal
+metatables, imports, and function-type tag publication but before `$INITVARS`,
+so an initializer can construct an Array without observing an empty slot.
+Publishing tags first is also required because a variable initializer may
+construct a lambda or bound-method closure and must copy a live exact tag into
+it. Other first-use private objects are filled by `init_data_from_other_modules`
+or the module initializer. Thus all private slots, beginning with the Array
+cache and fixed provider-identity token, come *after* the importer-visible
+public prefix. Their fixed header is part of the current ABI, while later
+inventory/first-use slots remain coder-private and do not perturb the public
+importer slot math.
 
 An importing module never sees this module's AST. The `Type.Module` interface
 reconstructs the public prefix at compilation, but a separately loaded provider

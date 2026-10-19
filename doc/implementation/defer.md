@@ -121,7 +121,16 @@ without the extra C lexical blocks that a user-written `do ... finally`
 would get, preserving any tail locals for a following `repeat` condition.
 Normal fallthrough, returns, breaks, and raises are still recorded as
 pending actions, the synthetic finally block is emitted, and pending
-action dispatch continues exactly as for user-written `finally`.
+action dispatch continues exactly as for user-written `finally`. Because
+`boundary_recover_open` reads the module-rooted registry-key and
+empty-traceback `TString` anchors and clears the registry entries with `nil`
+without allocating (and `luaD_closeprotected` wraps any intervening Lua
+`__close` metamethods in `luaD_rawrunprotected`), unwinding into a registered
+`defer` block after an in-body error (including `LUA_ERRMEM` after emergency
+collection) cannot fail in generated recovery before the deferred cleanup
+statement begins. Re-inserting a saved trace during post-cleanup `PA_RAISE`
+happens only after the current `defer` body has completed, and any enclosing
+`defer` or `catch` boundary recovers through the same allocation-free path.
 
 ## Tests
 
