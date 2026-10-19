@@ -663,6 +663,32 @@ function test_directory_empty_single_and_group_wire_validation(context: test.Con
   end)
 end
 
+function test_directory_index_chains_colliding_tags(_context: test.Context)
+  local none: {integer} = {}
+  local frozen = none as const {integer}
+  local output = string.writer()
+  for index = 1, 64 do
+    output:write(protobuf.serialize(Arrays({index}, frozen, frozen, nil, {})))
+    -- Each unknown tag shares the index bucket of present field 1 or absent
+    -- field 4 for every index capacity through 2^16 buckets.
+    local field_one_peer = (index << 16) | (1 ~ index)
+    local field_four_peer = (index << 16) | (4 ~ index)
+    -- The repeat replaces its chain head; the next field 1 replaces a later link.
+    append_test_varint(output, field_one_peer << 3)
+    append_test_varint(output, index)
+    append_test_varint(output, field_one_peer << 3)
+    append_test_varint(output, index)
+    append_test_varint(output, field_four_peer << 3)
+    append_test_varint(output, index)
+  end
+  local decoded: Arrays = protobuf.deserialize(output:drain(),
+    descriptor(Arrays(none, frozen, frozen, nil, none)))
+  test.assert(#decoded.mutable == 64 and decoded.absent == nil)
+  for index = 1, 64 do
+    test.assert(decoded.mutable[index] == index, "colliding tags reordered a merged Array")
+  end
+end
+
 local function directory_node_bytes(count: integer): string
   local output = string.writer()
   output:write(string.char(10, 0))

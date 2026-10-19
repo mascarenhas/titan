@@ -200,24 +200,27 @@ field-number walk.
 
 Each message owns a compact native directory of `titan_protobuf_field` entries.
 An entry contains a field number, wire kind, integer bits or `(offset, length)`
-slice, and a previous-occurrence ordinal; it contains no GC pointers. The first
-entry lives inline in `Message`. Empty and single-field messages allocate
-neither entry storage nor a lookup index. The second entry allocates a counted
-`owned titan_protobuf_field[]` of capacity four for entries after the inline
-first entry, doubling only when full. Growth copies populated overflow entries,
-not wire bytes, and finishes before any decoder borrows an entry address. There
-is no per-field record, Array proxy/backing table, external malloc/free lifetime,
-or finalizer.
+slice, a previous-occurrence ordinal, and an index-chain ordinal; it contains
+no GC pointers. The first entry lives inline in `Message`. Empty and
+single-field messages allocate neither entry storage nor a lookup index. The
+second entry allocates a counted `owned titan_protobuf_field[]` of capacity
+four for entries after the inline first entry, doubling only when full. Growth
+copies populated overflow entries, not wire bytes, and finishes before any
+decoder borrows an entry address. There is no per-field record, Array
+proxy/backing table, external malloc/free lifetime, or finalizer.
 
 The first lookup in a multi-field message builds one zeroed, counted
 `owned uint32_t[]` index. Its power-of-two capacity is at least twice the entry
-count. Open addressing stores 1-based directory ordinals with zero as the empty
-sentinel and resolves collisions by linear probing; its size depends on the
-encountered field count, never the largest numeric tag. Insertion records each
-entry's preceding same-number occurrence before replacing the hash slot, so
-singular scalars select only their final occurrence. Building the index takes
-expected linear time; later scalar lookups take expected constant time.
-Ordered-only Array and union readers allocate no index.
+count, and its size depends on the encountered field count, never the largest
+numeric tag. Each bucket heads a chain of 1-based directory ordinals, with zero
+as the empty sentinel. A chain links only the latest entry of each distinct
+field number: insertion records the entry's preceding same-number occurrence
+and lets the new entry take over that occurrence's chain position, so singular
+scalars select only their final occurrence and repeated tags never lengthen a
+chain. A probe visits only the distinct numbers sharing its bucket, so
+adversarial tags cannot build open-addressing clusters across buckets.
+Building the index takes expected linear time; later scalar lookups take
+expected constant time. Ordered-only Array and union readers allocate no index.
 
 Single-occurrence embedded messages and union variants parse child fields in
 place. Repeated singular messages validate every matching occurrence's wire

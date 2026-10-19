@@ -87,9 +87,10 @@ local function Message:append(number: integer, wire: integer, bits: integer,
     local entries: owned titan_protobuf_field[] = foreign titan_protobuf_field.new_array(4)
     self.entries = entries
   elseif self.count > 1 and self.count - 1 == #self.entries then
+    local populated: owned titan_protobuf_field[] = self.entries
     local entries: owned titan_protobuf_field[] =
         foreign titan_protobuf_field.new_array((self.count - 1) * 2)
-    ffi.memcpy(entries, self.entries,
+    ffi.memcpy(entries, populated,
         ((self.count - 1) * foreign titan_protobuf_field.sizeof) as foreign size_t)
     self.entries = entries
   end
@@ -120,16 +121,27 @@ local function read_message_slice(
   return message
 end
 
--- The sparse open-addressed index stores 1-based entry ordinals, with zero as
--- the empty sentinel. Its capacity depends on entry count, never numeric tags.
-local function Message:index_slot(number: integer, slots: owned uint32_t[]): integer
-  local mask = #slots - 1
-  local slot = ((number ~ (number >> 16)) * 2654435761) & mask
-  while slots[slot] ~= 0 do
-    if self:entry(slots[slot]).number == number then return slot end
-    slot = (slot + 1) & mask
+-- The sparse index heads one chain per bucket with 1-based entry ordinals,
+-- zero being the empty sentinel. A chain links only the latest entry of each
+-- distinct field number, so a probe visits only numbers sharing its bucket and
+-- adversarial tags cannot build clusters across buckets. Capacity depends on
+-- entry count, never numeric tags.
+local function index_bucket(number: integer, buckets: owned uint32_t[]): integer
+  return ((number ~ (number >> 16)) * 2654435761) & (#buckets - 1)
+end
+
+-- Returns the latest ordinal for `number`, or zero, and its chain predecessor,
+-- or zero at the bucket head.
+local function Message:chained(number: integer, head: integer): (integer, integer)
+  local before = 0
+  local current = head
+  while current ~= 0 do
+    local field = self:entry(current)
+    if field.number == number then return current, before end
+    before = current
+    current = field.chain
   end
-  return slot
+  return 0, before
 end
 
 local function Message:last_index(number: integer): integer
@@ -138,21 +150,34 @@ local function Message:last_index(number: integer): integer
     if self.first.number == number then return 1 end
     return 0
   end
-  local slots? = self.index
-  if slots == nil then
+  local buckets? = self.index
+  if buckets == nil then
     -- Ordered-only readers need no index; the load factor stays at most 1/2.
     local capacity = 4
     while capacity < self.count * 2 do capacity = capacity * 2 end
-    slots = foreign uint32_t.new_array(capacity)
+    buckets = foreign uint32_t.new_array(capacity)
     for index = 1, self.count do
       local field = self:entry(index)
-      local slot = self:index_slot(field.number, slots)
-      field.previous = slots[slot]
-      slots[slot] = index
+      local bucket = index_bucket(field.number, buckets)
+      local current, before = self:chained(field.number, buckets[bucket])
+      field.previous = current
+      if current == 0 then
+        field.chain = buckets[bucket]
+        buckets[bucket] = index
+      else
+        -- The latest occurrence takes over the earlier one's chain position.
+        field.chain = self:entry(current).chain
+        if before == 0 then
+          buckets[bucket] = index
+        else
+          local predecessor = self:entry(before)
+          predecessor.chain = index
+        end
+      end
     end
-    self.index = slots
+    self.index = buckets
   end
-  return slots[self:index_slot(number, slots)]
+  return (self:chained(number, buckets[index_bucket(number, buckets)]))
 end
 
 local function Message:last(number: integer): foreign *titan_protobuf_field
