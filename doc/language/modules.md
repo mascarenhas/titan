@@ -465,8 +465,8 @@ titanc [--print-ast] [--pretty-print] [-v] [-j jobs] [--static] [--test] \
   [--tree <srcroot>] [-o|--output <directory>] [-l lib1,lib2] [-X object...] <module>...
 ```
 
-`titanc --print-prefix` (or `--print-root`) is a separate query: it prints the
-selected installation prefix followed by a newline and exits without compiling, probing C tools, or
+`titanc --print-root` is a separate query: it prints the selected installation
+root followed by a newline and exits without compiling, probing C tools, or
 creating a probe cache. Do not pass module names with the query. It uses the
 compiler's ordinary `package.cpath` discovery, including Windows installations
 and relocated SDKs, with `TITAN_ROCKS_ROOT` retaining its internal installation

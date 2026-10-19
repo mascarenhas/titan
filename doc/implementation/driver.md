@@ -105,7 +105,7 @@ This is root discovery, not the previous policy of adding every
 find that exact suffix becomes `driver.INSTALLATION_ERROR` and stops
 compiler/toolchain use instead of silently mixing installations.
 
-The CLI's `--print-prefix` / `--print-root` query calls the same
+The CLI's `--print-root` query calls the same
 `driver.resolve_installation_root(package.cpath, TITAN_ROCKS_ROOT)` function
 before creating a resolver or checking build options. It therefore reports the
 normalized SDK root without a C toolchain or any C-probe/cache work, including
@@ -113,7 +113,7 @@ when compilation flags or `TITAN_JOBS` are invalid. Windows ordinary drive and
 UNC paths retain the driver's normalized forward-separator spelling; explicit
 extended paths retain their namespace and literal semantics. No installation
 prefix is embedded in the query, compiler, Lua, or native provider. Its only
-successful stdout is the prefix and one newline. Module names are rejected;
+successful stdout is the root and one newline. Module names are rejected;
 without the query the CLI still requires at least one module name.
 
 ### Standalone startup path discovery

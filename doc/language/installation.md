@@ -71,7 +71,7 @@ Keep `$PREFIX/bin` first on `PATH` so that `lua`, `luarocks`, and `titanc` all c
 from this installation. To check the result:
 
 ```sh
-titanc --print-prefix    # prints the installation root
+titanc --print-root    # prints the installation root
 ```
 
 ### Why a Lua fork, and what stock LuaRocks means here
@@ -431,7 +431,7 @@ For the interpreter at `$PREFIX/bin/lua`:
 
 For an installed `titanc`, the SDK root comes from the first `/lib/titan/0.6/?.so`
 template in `package.cpath`, falling back to an ordinary `/lib/lua/5.5/?.so` template.
-`titanc --print-prefix` (also spelled `--print-root`) prints that root.
+`titanc --print-root` prints that root.
 It compiles nothing and reads the current `package.cpath`.
 
 A compiled executable discovers default library paths at startup: it tries
