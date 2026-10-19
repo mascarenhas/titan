@@ -32,37 +32,78 @@ unchanged. See [reflection implementation](standard-library-reflect.md).
 
 ### Inspected structural-root collaboration
 
-The ordinary compiled API includes two narrowly typed collaboration entries:
+The ordinary compiled API includes narrowly typed collaboration entries used by
+`titan.transfer`:
 
 ```text
 serialize_inspected_record_to_buffer(buf: foreign *void,
-                                     candidate: reflect.RecordValue)
+                                     candidate: reflect.RecordValue,
+                                     context: value)
 serialize_inspected_union_to_buffer(buf: foreign *void,
-                                    candidate: reflect.UnionValue)
+                                    candidate: reflect.UnionValue,
+                                    context: value)
+deserialize_nominal_buffer_with_context(data: foreign const *void,
+                                        length: integer, name: string,
+                                        is_union: boolean,
+                                        context: value): value
+
+record ResourceCodec
+  const identity: value
+  const descriptor: reflect.RecordType
+  const encode: function (value, value): (integer)
+  const decode: function (value, foreign const *void, integer): (value)
+end
+set_packet_context_provider(provider: function (boolean): (value))
+register_resource_codec(
+    candidate: value, descriptor: reflect.RecordType,
+    encode: function (value, value): (integer),
+    decode: function (value, foreign const *void, integer): (value))
+find_resource_codec(candidate: value): ResourceCodec?
+find_resource_codec_by_name(name: string): ResourceCodec?
+foreign function write_resource_index_bytes(dst: *void, index: unsigned int)
+foreign function write_resource_index(raw_buf: *void, index: unsigned int): int
 ```
 
-`buf` must point to a live, initialized `titan_protobuf_buffer`. Each helper
-records its starting length, creates one ordinary `Encoder`, appends the
-already-inspected root at depth 1, and checks the appended message size.
-The caller retains buffer ownership and must provide its normal native-buffer
-cleanup; these entries neither initialize nor finalize that storage.
+`buf` must point to a live, initialized `titan_protobuf_buffer`. Each
+inspected-root helper records its starting length, resolves `context` via
+`packet_context(true)` only when the caller passed `nil`, creates one `Encoder`
+carrying `context`, appends the already-inspected root at depth 1, and checks
+the appended message size. The caller retains buffer ownership and must provide
+its normal native-buffer cleanup; these entries neither initialize nor finalize
+that storage. Likewise, `deserialize_nominal_buffer_with_context` accepts the
+caller's already-resolved decode `context` (while the general 4-argument
+`deserialize_nominal_buffer` resolves `packet_context(false)` once and
+delegates to it).
 
-`serialize_to_buffer` performs one `reflect.inspect` and dispatches to these
-helpers. Transfer already has a `reflect.RecordValue` or `reflect.UnionValue`
-from its root classification, so it passes that same descriptor instead of
-inspecting the root again. These functions are exported through ordinary
-compiled imports because transfer and protobuf are separate modules; no private
-source import, descriptor cache, or second hook/prewalk pass is introduced.
+`titan.protobuf` never imports `titan.transfer` or `titan.thread`. Instead,
+`transfer` installs its `packet_context` resolver once via
+`set_packet_context_provider` and mediates capability registration via
+`transfer.register_resource` -> `protobuf.register_resource_codec`.
+`record_identity` inspects a candidate userdata's metatable directly
+(`TITAN_BRAND == TITAN_RECORD`) without Lua stack or heap allocation; all
+erased applications of a generic record (`Sender<|integer|>`,
+`Sender<|string|>`, `Sender<|value|>`) share one canonical metatable identity.
+At module initialization, `protobuf` validates the state's live
+`TITAN_METATABLES_KEY` registry table (`LUA_TTABLE`) and caches that table
+reference in traced `resource_nominals`. `find_resource_codec_by_name(name)`
+resolves `name` through `resource_nominals[name]` to the live metatable and
+then looks up `resource_codecs[identity]`, so modules loaded after `protobuf`
+and retried module initializations remain visible and a type name spelling
+alone grants no capability. `write_resource_index_bytes` is the single C-only
+four-byte little-endian index writer shared by `write_resource_index` (which
+reserves and appends four bytes into an owned `titan_protobuf_buffer`) and
+`transfer.attach_resource` (which builds the four-byte index string for opaque
+hooks).
 
 `Encoder:record_value` / `union_value` still enforce public nominal and complete
 member visibility, active-path cycle detection, the 128-level depth limit, and
 the normal field/variant traversal with nested custom-hook dispatch. The helper
 checks the existing 2 GiB message limit after encoding. No policy is broadened:
-root custom-hook selection remains transfer's responsibility, and ordinary
-`protobuf.serialize` retains its structural public-data rules. See the
+root custom-hook and root resource-codec selection remain transfer's
+responsibility, and ordinary `protobuf.serialize` retains its structural
+public-data rules. See the
 [owning API inventory](../language/standard-library-protobuf.md#api) and
 [transfer classification](transfer-library.md#flat-packets-and-direct-classification).
-
 
 ## Encoding
 
@@ -106,9 +147,16 @@ Map, and `encode_transfer_payload` shares the module-local
 `active_record_payloads` ephemeron Map so nested (`depth > 1`) and root hook
 invocations enforce one reentrancy guard without permanently rooting abandoned
 encoding graphs. Lexical removals still restore that guard on normal/error exit.
-Nested records (`depth > 1`) that
-provide both `to_transfer_payload` and `from_transfer_payload` encode as
-`optional bytes` via their hooks rather than requiring public fields.
+Nested records (`depth > 1`) first check `find_resource_codec_by_name`: when a
+registered `ResourceCodec` matches `expected.name`, `Encoder:field` verifies
+`record_identity(candidate) == codec.identity`, invokes
+`codec.encode(self.context, candidate)` using the packet's carried `context`,
+and writes the wire key, length `4`, and four-byte little-endian slot index
+directly via `write_resource_index` without calling `reflect.inspect`,
+`encode.callable`, or allocating a four-byte Lua string. Other nested records
+(`depth > 1`) that provide both `to_transfer_payload` and
+`from_transfer_payload` encode as `optional bytes` via their hooks rather than
+requiring public fields.
 
 Array wrappers retain slot positions and distinguish absence from an empty
 container. Nil slots produce empty element messages. The constness field
@@ -147,10 +195,16 @@ and oneof replacement.
 
 Schema-directed decoding requires each non-optional field, validates the wire
 kind, and constructs children before calling reflected construction for the
-parent. No partially constructed value is published after a failure. Type
-lookup uses the destination state's initialized nominal registry; the nominal
-helper checks both name and requested record/union kind. It does not guess a
-module name or execute a module loader.
+parent. When `decode_field` visits a record type with a registered
+`ResourceCodec` (`find_resource_codec_by_name`), it validates wire kind `2` and
+invokes `codec.decode(message.context, message.base + field.offset,
+field.length)` directly on the borrowed wire slice using the carried
+`Message.context`, without allocating a four-byte Lua string, calling a
+reflected hook closure, or re-inspecting the constructed wrapper. No partially
+constructed value is published after a failure. Type lookup uses the
+destination state's initialized nominal registry; the nominal helper checks
+both name and requested record/union kind. It does not guess a module name or
+execute a module loader.
 
 The reader limits nesting and message size. Native reconstruction supplies the
 final C range, qualifier, fixed-array extent, and construction checks. A decoded

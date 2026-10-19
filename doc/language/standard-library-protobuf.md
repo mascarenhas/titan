@@ -30,14 +30,20 @@ end
 serialize(candidate: value): string
 serialize_to_buffer(buf: foreign *void, candidate: value)
 serialize_inspected_record_to_buffer(buf: foreign *void,
-                                     candidate: reflect.RecordValue)
+                                     candidate: reflect.RecordValue,
+                                     context: value)
 serialize_inspected_union_to_buffer(buf: foreign *void,
-                                    candidate: reflect.UnionValue)
+                                    candidate: reflect.UnionValue,
+                                    context: value)
 deserialize(bytes: string, descriptor: reflect.Type): value
 schema(descriptor: reflect.Type): string
 deserialize_nominal(bytes: string, name: string, is_union: boolean): value
 deserialize_nominal_buffer(data: foreign const *void, length: integer,
                            name: string, is_union: boolean): value
+deserialize_nominal_buffer_with_context(data: foreign const *void,
+                                        length: integer, name: string,
+                                        is_union: boolean,
+                                        context: value): value
 serialize_fields(fields: const {reflect.Type}, ...: value): string
 serialize_fields_to_buffer(buf: foreign *void,
                            fields: const {reflect.Type}, ...: value)
@@ -48,6 +54,22 @@ find_transfer_hooks(descriptor: reflect.RecordType, context_prefix: string):
     (reflect.Function?, reflect.Function?)
 encode_transfer_payload(candidate: value, to_hook: reflect.Function,
                         context_prefix: string): string
+
+record ResourceCodec
+  const identity: value
+  const descriptor: reflect.RecordType
+  const encode: function (value, value): (integer)
+  const decode: function (value, foreign const *void, integer): (value)
+end
+set_packet_context_provider(provider: function (boolean): (value))
+register_resource_codec(
+    candidate: value, descriptor: reflect.RecordType,
+    encode: function (value, value): (integer),
+    decode: function (value, foreign const *void, integer): (value))
+find_resource_codec(candidate: value): ResourceCodec?
+find_resource_codec_by_name(name: string): ResourceCodec?
+foreign function write_resource_index_bytes(dst: *void, index: unsigned int)
+foreign function write_resource_index(raw_buf: *void, index: unsigned int): int
 ```
 
 The root must be a public Titan record or union. `deserialize` and `schema`
@@ -65,16 +87,25 @@ slice of length `length`. `find_transfer_hooks` returns a record's validated
 name `descriptor.name`), and `encode_transfer_payload` invokes `to_hook` under
 the shared active-record cycle guard.
 
-`serialize_inspected_record_to_buffer` and
-`serialize_inspected_union_to_buffer` are ordinary compiled collaboration
-entries used by `titan.transfer` after it has already inspected the root.
-`buf` must point to a live, initialized `titan_protobuf_buffer`, just as for
-`serialize_to_buffer`; these functions append to it and do not own or finalize
-the buffer. The typed `reflect.RecordValue` or `reflect.UnionValue` avoids a
-second root inspection, not the normal public-nominal/member visibility,
-active-record cycle, nesting-depth (128), custom-hook dispatch, or 2 GiB
-message-size checks. These internal-purpose entries do not introduce a new
-serialization policy or make unsupported roots transferable.
+`serialize_inspected_record_to_buffer`, `serialize_inspected_union_to_buffer`,
+`deserialize_nominal_buffer_with_context`, `ResourceCodec`,
+`set_packet_context_provider`, `register_resource_codec`,
+`find_resource_codec`, `find_resource_codec_by_name`,
+`write_resource_index_bytes`, and `write_resource_index` are ordinary compiled
+collaboration entries used by `titan.transfer`. `buf` must point to a live,
+initialized `titan_protobuf_buffer`, just as for `serialize_to_buffer`; the
+inspected-root helpers append to it and do not own or finalize the buffer.
+Passing the already-inspected `reflect.RecordValue` or `reflect.UnionValue` and
+the packet's resolved `context` avoids a second root inspection and repeated
+per-field execution-scope lookups while preserving all public-nominal/member
+visibility, active-record cycle, nesting-depth (128), custom-hook dispatch, and
+2 GiB message-size checks. `register_resource_codec` registers a state-local
+nominal resource capability (used for `thread.Sender` and `thread.Receiver`)
+keyed by the record's canonical erased metatable identity, and
+`write_resource_index_bytes` / `write_resource_index` write its four-byte
+little-endian packet-local slot index. These internal-purpose entries do not
+introduce a new standalone serialization policy or make unsupported roots
+transferable.
 
 The serialized result of `serialize` and `serialize_fields` is a binary string.
 Names, filenames, and schemas are ordinary strings too, but wire bytes need not
@@ -225,19 +256,26 @@ Records with the [custom transfer-hook pair](async-io.md#custom-record-transfer)
 use an `is_record_payload(module, name, bytes)` carrier instead during automatic
 transfer at the root. When such a record appears as a nested field inside an
 outer public record or union (or inside an Array field), `protobuf.serialize`,
-`protobuf.deserialize`, and `protobuf.schema` automatically delegate that
-nested field to its `to_transfer_payload(): string` and
-`from_transfer_payload(payload: string): Record` hooks and represent it on the
-wire as `optional bytes` without requiring public fields on the hooked record.
-Hooks may use an anonymous-message descriptor to encode native tokens and
-copied state. Calling `protobuf.serialize` directly on a root record continues
-to apply the structural public-data rules in this chapter.
+`protobuf.deserialize`, and `protobuf.schema` represent it on the wire as
+`optional bytes` without requiring public fields on the hooked record.
+Registered packet-scoped resource records (`thread.Sender<|T|>` and
+`thread.Receiver<|T|>`) use their transfer-registered `ResourceCodec`
+capability to attach and claim the four-byte little-endian slot index directly
+in the packet buffer without reflective hook calls or intermediate four-byte
+Lua strings; other hooked records (and `TransferValue` policy conversions)
+delegate to `to_transfer_payload(): string` and
+`from_transfer_payload(payload: string): Record`. Hooks may use an
+anonymous-message descriptor to encode native tokens and copied state. Calling
+`protobuf.serialize` directly on a root record continues to apply the
+structural public-data rules in this chapter.
 
-Standalone protobuf operations open no packet resource scope. In particular,
-calling these hooks from `protobuf.serialize` does not by itself authorize
-`thread.Sender` or `thread.Receiver` attachment. Endpoints are supported only
-when the protobuf/hook work belongs to the exact current packet scope opened
-by a [packet transfer operation](standard-library-transfer.md#scoped-resource-attachments-and-packet-local-indexes).
+Standalone protobuf operations open no packet resource scope. Neither direct
+`ResourceCodec` fields nor `to_transfer_payload` / `from_transfer_payload`
+hooks invoked from standalone `protobuf.serialize`, `protobuf.deserialize`, or
+`protobuf.deserialize_nominal_buffer` authorize `thread.Sender` or
+`thread.Receiver` attachment or claim; they raise unless the work belongs to
+the exact current packet scope opened by a
+[packet transfer operation](standard-library-transfer.md#scoped-resource-attachments-and-packet-local-indexes).
 Hooks remain synchronous and nonyielding; nested hook dispatch does not change
 their ownership or execution contract.
 

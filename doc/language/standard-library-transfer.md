@@ -58,11 +58,6 @@ endpoints can form native channel cycles; retain a receiver and explicitly
 close/drain it before dropping the last application handle. See
 [endpoint lifetime rules](standard-library-thread.md#closing-cloning-and-transferring-endpoints).
 
-The direct route for nested channel endpoints preserves the hook route's
-ownership contract: each occurrence has its own packet entry, and each decoded
-occurrence gets a fresh finalized wrapper before adoption. Standalone protobuf
-or policy conversion creates no packet scope and cannot mint endpoint units.
-
 **Native packet discard never decodes payloads or invokes `from_transfer_payload`.**
 Discarding an undelivered packet—whether through `transfer.discard_message`,
 `Packet:close()`, a full or closed `Sender:try_send`, a cancelled `Sender:send`,
@@ -209,6 +204,17 @@ function attach_resource(resource: foreign *void,
                          release: foreign function (*void): void): string
 function claim_resource(index_bytes: string,
                         expected_release: foreign function (*void): void): foreign *void
+function claim_registered_resource(
+    context: value,
+    data: foreign const *void,
+    length: integer,
+    expected_release: foreign function (*void): void): foreign *void
+function register_resource(
+    candidate: value,
+    get: function (value): (foreign *void),
+    retain: foreign function (*void): void,
+    release: foreign function (*void): void,
+    construct: function (value, foreign const *void, integer): (value))
 ```
 
 ### `Packet` ownership and move semantics
@@ -271,16 +277,24 @@ Then directly call `adopt_into` at that guarded slot:
 ### Raw packet encoding, decoding, copying, and disposal
 
 `encode_message(candidate)` accepts any transferable Titan value or an explicit
-`TransferValue`. Scalars (`nil`, `boolean`, `integer`, `float`, binary `string`,
-lightuserdata pointers, Lua threads as borrowed `*lua_State`, unbranded Lua
-userdata as borrowed payload pointers, and bare Lua C functions or zero-upvalue
-C closures) are classified directly from their Lua tags without constructing a
-`reflect.Value` wrapper. Branded Titan closures are validated directly against
-their module manifest and projected without hydrating reflection function
-signatures, while public records and unions are inspected once at the root and
-serialized directly into an expandable native buffer prefixed with the message
-header (`titan_async_message`), without creating an intermediate `TransferValue`
-or Lua string for the root message.
+`TransferValue`. Registered packet-scoped resource records (`thread.Sender` and
+`thread.Receiver`) at the root are recognized by their canonical erased
+metatable identity (`protobuf.find_resource_codec`), reserve
+`sizeof(titan_async_message) + 4 + #name + #module` in one heap
+`titan_protobuf_buffer` before attaching the resource, write the four-byte
+little-endian slot index via `protobuf.write_resource_index`, and finalize the
+`TITAN_ASYNC_MESSAGE_RECORD_PAYLOAD` packet in place without allocating a Lua
+index string or copying a staged header. Scalars (`nil`, `boolean`, `integer`,
+`float`, binary `string`, lightuserdata pointers, Lua threads as borrowed
+`*lua_State`, unbranded Lua userdata as borrowed payload pointers, and bare Lua
+C functions or zero-upvalue C closures) are classified directly from their Lua
+tags without constructing a `reflect.Value` wrapper. Branded Titan closures are
+validated directly against their module manifest and projected without hydrating
+reflection function signatures, while public records and unions are inspected
+once at the root and serialized directly into an expandable native buffer
+prefixed with the message header (`titan_async_message`), carrying the packet's
+`ResourceScope` once into `protobuf` without creating an intermediate
+`TransferValue` or Lua string for the root message.
 
 `decode_message(state, slot)` is a public source-defined C-ABI entry for trusted
 Lua/native integrations. It returns a native status rather than the decoded
@@ -350,44 +364,61 @@ shallow-copies a resource table.
 `encode_message` and `decode_message` maintain a direction-specific scope stack
 for each actual Lua thread within the state:
 
-- **Execution-local exact top authority**: `attach_resource` is permitted only
-  when the current execution's exact top frame is an encode scope (otherwise
-  raising `"transfer: resource attachment requires an encode scope"`).
-  `claim_resource` requires that same execution's exact top frame to be a
-  decode scope (otherwise raising
-  `"transfer: resource claim requires a decode scope"`). Neither operation
-  searches an older enclosing frame or another Task's scope for permission.
-  A separately resumed child `coroutine.Coroutine` does not inherit its
-  caller's packet authority. Hooks remain synchronous and nonyielding; this
-  isolation does not authorize yielding hooks.
+- **Standard endpoint ownership**: Each reference-counted resource unit is owned
+  by **exactly one** of: a live finalized wrapper (`Sender` or `Receiver`), or
+  an unconsumed in-flight native message entry. Adoption moves a unit from the
+  message entry to a fresh finalized wrapper; native discard releases unclaimed
+  message entries; `close()` changes state only and never decrements counts.
+  Message bytes, wake targets, loop liveness, and OS-thread retirement are
+  separate lifetimes.
+- **Execution-local exact top authority and carried packet context**:
+  `encode_message` and `decode_message` pass their active `ResourceScope` once
+  into `protobuf` and registered `ResourceCodec` callbacks (`register_resource`
+  and `claim_registered_resource`), while public `attach_resource` and
+  `claim_resource` resolve `resource_scopes[current_execution()]` on every call
+  for custom `to_transfer_payload` and `from_transfer_payload` hooks. Attachment
+  is permitted only when the active scope is an encode scope (otherwise raising
+  `"transfer: resource attachment requires an encode scope"`), and claim requires
+  a decode scope (otherwise raising
+  `"transfer: resource claim requires a decode scope"`). Neither path searches an
+  older enclosing frame or another Task's scope for permission. A separately
+  resumed child `coroutine.Coroutine` does not inherit its caller's packet
+  authority. Hooks remain synchronous and nonyielding; this isolation does not
+  authorize yielding hooks.
 - **Nested and standalone calls**: Opaque custom hooks, nested protobuf
   messages, and closure capture snapshots belonging to the same packet share its
   top scope. A nested `encode_message` or `decode_message` call pushes its own
   scope frame and restores the exact enclosing scope on every normal or error
-  exit. `protobuf.serialize`, `TransferValue.from_value`, and
+  exit. `protobuf.serialize`, `protobuf.deserialize`,
+  `protobuf.deserialize_nominal_buffer`, `TransferValue.from_value`, and
   `TransferValue:to_value` do not create scopes. When invoked as opaque-hook or
   capture work inside a matching current scope, they reuse that enclosing
-  packet; without it endpoint hooks raise. Their temporary index bytes/policies
-  own no attachments and are not standalone reusable ownership.
+  packet; without it both direct `ResourceCodec` fields and endpoint hooks
+  raise. Their temporary index bytes/policies own no attachments and are not
+  standalone reusable ownership.
   Scope ownership also has a nonyielding finalizer guard: if an execution stack
   is abandoned without lexical unwind, its unfinished native table/packet is
   still disposed. That safety mechanism does not broaden the hook contract.
-- **Attachment (`attach_resource`)**: Rejects a `nil` `resource`, `retain`, or
-  `release` argument (`"transfer: invalid native resource attachment"`),
-  reserves capacity in the encode scope's resource table **before** calling
-  `retain(resource)` (`"transfer: out of memory reserving resource attachment"`),
-  records `(resource, release, claimed = 0)`, and returns a four-byte
-  little-endian unsigned slot index string (`0..0xfffffffe`; `0xffffffff` is
-  reserved as invalid). Each encoded occurrence of a resource adds a separate
-  retain and table entry. Both `retain` and `release` must be C-only
-  `foreign function (*void): void` callbacks that can run without a Lua state,
-  module loader, or active Runtime. If encoding raises after one or more
-  attachments, unwinding the encode scope automatically releases all entries in
-  the uncommitted table.
-- **Claim and adoption (`claim_resource`)**: Validates that `index_bytes` is
-  exactly four bytes (`"transfer: invalid resource attachment index width"`),
-  decodes the four-byte little-endian unsigned slot index, checks that the index
-  is not `0xffffffff` and lies within the current packet's attachment count
+- **Attachment (`attach_resource` and registered `ResourceCodec` encode)**:
+  Rejects a `nil` `resource`, `retain`, or `release` argument
+  (`"transfer: invalid native resource attachment"`), reserves capacity in the
+  encode scope's resource table **before** calling `retain(resource)`
+  (`"transfer: out of memory reserving resource attachment"`), records
+  `(resource, release, claimed = 0)`, and encodes a four-byte little-endian
+  unsigned slot index (`0..0xfffffffe`; `0xffffffff` is reserved as invalid)
+  through the shared `protobuf.write_resource_index_bytes` writer (either
+  directly into the owned packet buffer on the registered route or as a
+  four-byte string returned by `attach_resource`). Each encoded occurrence of a
+  resource adds a separate retain and table entry. Both `retain` and `release`
+  must be C-only `foreign function (*void): void` callbacks that can run without
+  a Lua state, module loader, or active Runtime. If encoding raises after one or
+  more attachments, unwinding the encode scope automatically releases all
+  entries in the uncommitted table.
+- **Claim and adoption (`claim_resource` and `claim_registered_resource`)**:
+  Validates that the index slice is exactly four bytes
+  (`"transfer: invalid resource attachment index width"`), decodes the four-byte
+  little-endian unsigned slot index, checks that the index is not `0xffffffff`
+  and lies within the current packet's attachment count
   (`"transfer: resource attachment index is out of bounds"`), checks that
   `expected_release` is non-nil and matches the entry's recorded `release`
   callback (`"transfer: resource attachment kind mismatch"`, preventing a
@@ -395,14 +426,15 @@ for each actual Lua thread within the state:
   that the slot has not already been claimed
   (`"transfer: resource attachment was already claimed"`). It then marks the
   slot claimed and returns the native pointer without allocating or yielding.
-- **Finalizer-first adoption**: A resource's `from_transfer_payload` hook must
-  allocate its destination wrapper with an inert `nil` native pointer and
-  register its GC finalizer **before** calling `claim_resource`, then assign the
-  returned pointer immediately. If wrapper setup or `claim_resource` fails, the
-  retain remains in the packet table and is released when `decode_message`
-  disposes the packet; once `claim_resource` succeeds, the wrapper owns the
-  retain through its normal finalizer even if decoding a later field in the
-  same packet raises.
+- **Finalizer-first adoption**: Both the registered `ResourceCodec` constructor
+  (`sender_from_resource` / `receiver_from_resource`) and a resource's
+  `from_transfer_payload` hook must allocate a fresh destination wrapper with an
+  inert `nil` native pointer and register its GC finalizer **before** claiming
+  the slot, then assign the returned pointer immediately with no intervening
+  fallible entry. If wrapper setup or the claim fails, the retain remains in the
+  packet table and is released when `decode_message` disposes the packet; once
+  the claim succeeds, the wrapper owns the retain through its normal finalizer
+  even if decoding a later field in the same packet raises.
 - **Packet-local index guarantee**: The four-byte slot index is meaningful only
   against the active packet's resource table; it is **not** a global
   anti-replay token across different packets (where slot `0` may name a valid

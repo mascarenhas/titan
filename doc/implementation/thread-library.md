@@ -17,8 +17,11 @@ The user-facing contract is in the
   recursive unlocked ring draining (`channel_drain_and_discard`), and the C-only
   producer-side channel helpers.
 - `titan/thread/channel.titan`: `Sender<|T|>`, `Receiver<|T|>`,
-  `ReceiveResult<|T|>`, `channel`, endpoint cloning, and packet-scoped endpoint
-  transfer hooks (`to_transfer_payload` / `from_transfer_payload`).
+  `ReceiveResult<|T|>`, `channel`, endpoint cloning, registered nominal
+  resource capabilities (`register_channel_resources`, `sender_resource`,
+  `receiver_resource`, `sender_from_resource`, `receiver_from_resource`), and
+  packet-scoped endpoint transfer hooks (`to_transfer_payload` /
+  `from_transfer_payload`).
 - `titan/thread/spawn.titan`: `Thread<|R|>`, `spawn` through `spawn_five`,
   isolated OS worker bootstrap with a joinable native token, cooperative
   cancellation, OS-join-enforcing `Thread:join()`, the native-retirement
@@ -89,22 +92,31 @@ with all semantic encoding/decoding outside the channel/control mutex:
   and root custom-hook payloads likewise copy into a single
   `titan_async_message` allocation on send and allocate a destination Lua string
   on receive.
+- Root `Sender<|T|>` and `Receiver<|T|>` values match
+  `protobuf.find_resource_codec` by canonical erased metatable identity in
+  `encode_packet`, reserve `sizeof(titan_async_message) + 4 + #name + #module`
+  in one heap-backed `owned *titan_protobuf_buffer` before attaching the
+  endpoint via `codec.encode(scope, candidate)`, write the four-byte
+  little-endian slot index via `protobuf.write_resource_index`, and finalize the
+  `TITAN_ASYNC_MESSAGE_RECORD_PAYLOAD` packet in place without a Lua index
+  string or staged `copy_message`.
 - Structural records, unions, and Titan closures initialize a heap-backed
   `owned *titan_protobuf_buffer` outside the Lua GC with
   `sizeof(titan_async_message)` reserved at the front
   (`titan_protobuf_buf_init_heap`), serialize the Protocol Buffers wire payload
   directly into that expandable buffer via
-  `protobuf.serialize_inspected_record_to_buffer`,
-  `protobuf.serialize_inspected_union_to_buffer`, or
+  `protobuf.serialize_inspected_record_to_buffer` (passing `scope`),
+  `protobuf.serialize_inspected_union_to_buffer` (passing `scope`), or
   `protobuf.serialize_fields_to_buffer` (without hydrating closure function
   signatures or re-inspecting the structural root), append the nominal/module
   names into the same buffer, detach the single `titan_thread_message *`
   allocation (`titan_protobuf_buf_take_data`), and commit the encode scope's
   `titan_transfer_resource_table` into `message.resources`.
 - On the receiving thread, transfer's packet decode scope reconstructs
-  structural records, unions, and closures directly from the native buffer
-  slice (`protobuf.deserialize_nominal_buffer` and
-  `protobuf.deserialize_fields_buffer`). Each caller keeps a real local
+  structural records, unions, closures, and root endpoints directly from the
+  native buffer slice (`protobuf.deserialize_nominal_buffer_with_context`,
+  `protobuf.deserialize_fields_buffer`, and `codec.decode` for registered
+  `RECORD_PAYLOAD` capabilities). Each caller keeps a real local
   `void *` slot under an immediate native discard defer and calls
   `transfer.decode_message(state, slot)` **directly** with its address. The
   foreign boundary returns a native status after consuming/clearing the slot;
@@ -146,7 +158,9 @@ host Task's original reason/error remains traced on the host side.
 
 To allow `Sender<|T|>` and `Receiver<|T|>` (and any user record with
 `to_transfer_payload` / `from_transfer_payload`) to be embedded inside outer
-records and unions sent over channels or captured by closures, `titan.protobuf`
+records and unions sent over channels or captured by closures, `titan.thread`
+registers `Sender` and `Receiver` with `transfer.register_resource` at module
+initialization (`register_channel_resources`), while `titan.protobuf` also
 supports nested custom transfer hooks (`depth > 1`) via shared
 `protobuf.find_transfer_hooks`:
 
@@ -155,15 +169,25 @@ supports nested custom transfer hooks (`depth > 1`) via shared
   `to_transfer_payload(): string` and static
   `from_transfer_payload(payload: string): R` maps to `optional bytes`,
   bypassing public-field structural traversal.
-- During encoding (`titan/protobuf/encoder.titan`), nested records with custom
-  transfer hooks invoke `protobuf.encode_transfer_payload` under the shared
-  active-record cycle guard and write the returned payload as a
-  length-delimited wire field directly into `titan_protobuf_buffer`, sharing the
-  enclosing packet's top encode `ResourceScope`.
-- During decoding (`titan/protobuf/decoder.titan`), nested records with custom
-  transfer hooks slice the length-delimited wire field and reconstruct the
-  record via `from_hook.callable(payload)` within the enclosing packet's top
-  decode `ResourceScope`.
+- During encoding (`titan/protobuf/encoder.titan`), nested `Sender` and
+  `Receiver` fields match `find_resource_codec_by_name`, verify canonical erased
+  metatable identity (`record_identity`), attach directly through
+  `codec.encode(self.context, candidate)` using the packet's carried
+  `ResourceScope`, and write the four-byte little-endian slot index into
+  `titan_protobuf_buffer` via `write_resource_index` without calling
+  `reflect.inspect`, `encode.callable`, or allocating a four-byte Lua string.
+  Other nested records with custom transfer hooks invoke
+  `protobuf.encode_transfer_payload` under the shared active-record cycle guard
+  and write the returned payload as a length-delimited wire field.
+- During decoding (`titan/protobuf/decoder.titan`), nested `Sender` and
+  `Receiver` fields match `find_resource_codec_by_name`, validate wire type `2`,
+  and invoke `codec.decode(message.context, message.base + field.offset,
+  field.length)` (`sender_from_resource` / `receiver_from_resource`) directly on
+  the borrowed packet slice without allocating a four-byte Lua string, calling
+  `from_hook.callable`, or re-inspecting the constructed wrapper. Other nested
+  records with custom transfer hooks slice the length-delimited wire field and
+  reconstruct the record via `from_hook.callable(payload)` within the enclosing
+  packet's top decode `ResourceScope`.
 
 ## Channel state machine and endpoint transfer
 
@@ -263,30 +287,58 @@ the reference that keeps the proxy's wake target valid.
 
 `Sender` and `Receiver` transfer ownership through `titan.transfer`'s
 [packet-scoped resource table](transfer-library.md#scoped-resource-table-and-manual-resource-ownership)
-rather than a thread-local depth counter or decode-under-catch discard mode:
+under three core invariants:
 
-- `Sender:to_transfer_payload()` and `Receiver:to_transfer_payload()` call
-  `transfer.attach_resource(self.native as foreign *void,
-  channel_retain_{sender,receiver}_native,
-  channel_release_{sender,receiver}_native)`. `attach_resource` requires the
-  current execution's exact top encode scope (`ResourceScope`), reserves table capacity before
-  calling `channel_retain_*_native`, increments `active_senders` or
-  `active_receivers` under `ch.mutex`, and returns a four-byte little-endian
-  packet-local slot index string. If encoding later fails, unwinding the encode
-  scope releases every attached entry via `channel_release_*_native`.
-  A child Coroutine or other Task does not inherit permission from an enclosing
-  packet operation in another execution. The index is packet-local, not a
-  global anti-replay token; an identical number may name another packet's slot.
-- `Sender.from_transfer_payload(payload)` and
-  `Receiver.from_transfer_payload(payload)` first call `new_sender` or
-  `new_receiver`—which allocate the wrapper with `native = nil` and register
-  `sender_finalize` or `receiver_finalize` with `gc.finalizable`—and then
-  immediately assign `self.native = transfer.claim_resource(payload,
-  channel_release_{sender,receiver}_native)`. No allocation or yield occurs
-  after `claim_resource` marks the slot claimed. If a composite decode fails on
-  a subsequent field, the native decode-scope disposer releases only remaining
-  unclaimed slots while already-claimed endpoint wrappers stay owned by the
-  destination collector.
+- **Each unit is owned by exactly one of: a live finalized wrapper, or an
+  unconsumed message entry.** When a worker thread creates a channel pair and
+  returns it through `Thread:join()`, `thread_worker_main`'s `lua_close`
+  finalizes both worker wrappers before the parent reconstructs the result; the
+  unconsumed result packet's entries hold the units that keep the channel alive
+  until parent adoption. Likewise, if the sole source `Sender` wrapper is
+  collected while its encoded copy is still queued, the unconsumed packet entry
+  prevents premature EOF.
+- **Adoption moves a unit; discard releases it; close changes state only.**
+- **Message bytes, wake targets, loop liveness, and OS-thread retirement are
+  separate lifetimes.** Wrapper counting simplifies none of them.
+
+The direct registered capability and public hook paths share the same native
+resource table, four-byte little-endian slot index format
+(`protobuf.write_resource_index_bytes`), and validation order:
+
+- At `titan.thread` initialization, `register_channel_resources` calls
+  `transfer.register_resource` for `Sender<|value|>` and `Receiver<|value|>`
+  with module-local accessors (`sender_resource`, `receiver_resource`), C-ABI
+  retain/release callbacks (`channel_retain_{sender,receiver}_native`,
+  `channel_release_{sender,receiver}_native`), and finalizer-first constructors
+  (`sender_from_resource`, `receiver_from_resource`). Private `.native` field
+  access stays inside `titan/thread/channel.titan`, and `protobuf` never imports
+  `transfer` or `thread`.
+- On the direct route (root endpoints and nested endpoint fields in records,
+  unions, and Arrays) and on the hook route (`Sender:to_transfer_payload()` /
+  `Receiver:to_transfer_payload()`, used by `TransferValue` policies such as
+  closure captures and by opaque user hooks), each encoded occurrence reserves
+  table capacity in the active encode `ResourceScope` before calling
+  `channel_retain_*_native`, increments `active_senders` or `active_receivers`
+  under `ch.mutex`, and writes the four-byte little-endian packet-local slot
+  index. If encoding later fails, unwinding the encode scope releases every
+  attached entry via `channel_release_*_native`. A child Coroutine or other Task
+  does not inherit permission from an enclosing packet operation in another
+  execution. The index is packet-local, not a global anti-replay token; an
+  identical number may name another packet's slot.
+- Both `sender_from_resource` / `receiver_from_resource` (calling
+  `transfer.claim_registered_resource` with the packet's carried `ResourceScope`
+  and borrowed byte slice) and `Sender.from_transfer_payload(payload)` /
+  `Receiver.from_transfer_payload(payload)` (calling `transfer.claim_resource`
+  with the four-byte string) first call `new_sender` or `new_receiver`—which
+  allocate a fresh wrapper with `native = nil` and register `sender_finalize` or
+  `receiver_finalize` with `gc.finalizable`—and then immediately assign
+  `self.native` from the claim with no fallible ordinary entry, allocation, or
+  yield after the slot is marked claimed. Claim validation checks direction,
+  four-byte width, bounds (`0..count - 1`, `~= 0xffffffff`), expected release
+  callback (`Sender` vs `Receiver`), and unclaimed status in that order. If a
+  composite decode fails on a subsequent field, the native decode-scope disposer
+  releases only remaining unclaimed slots while already-claimed endpoint
+  wrappers stay owned by the destination collector.
 - `channel_retain_sender_native`, `channel_retain_receiver_native`,
   `channel_release_sender_native`, `channel_release_receiver_native`,
   `channel_drain_and_discard`, and `channel_destroy_unreferenced` are

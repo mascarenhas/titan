@@ -136,7 +136,7 @@ local function Encoder:field(
     self:array(buf, candidate, elem_descriptor, depth)
     end_nested(buf, mark)
   when is_record(expected) then
-    local codec? = resource_codec_for_record(expected)
+    local codec? = find_resource_codec_by_name(expected.name)
     if codec ~= nil then
       local identity = record_identity(candidate)
       if identity == nil then raise "protobuf: expected a record" end
@@ -144,7 +144,7 @@ local function Encoder:field(
       local index = codec.encode(self.context, candidate)
       write_key(buf, number, 2)
       write_varint(buf, 4)
-      if write_resource_index(buf, index as foreign unsigned int) == 0 then
+      if write_resource_index(buf as foreign *void, index as foreign unsigned int) == 0 then
         raise "protobuf: out of memory"
       end
       return

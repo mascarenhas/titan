@@ -814,12 +814,7 @@ local function restore_closure_from_buffer(
   return ffi.lua_totvalue(L, -1) as value
 end
 
-local function decode_record_payload(
-    module: foreign const *char,
-    module_len: foreign size_t,
-    name: string,
-    payload: string): value
-  initialize_nominal_raw(module, module_len, name)
+local function decode_initialized_record_payload(name: string, payload: string): value
   local nominal? = reflect.find_nominal(name)
   if nominal == nil then raise "transfer: unknown record type " .. name end
   case nominal
@@ -866,7 +861,8 @@ function TransferValue:to_value(): value
         ffi.titan_protobuf_bytes_ptr(data) as foreign const *void,
         #data)
   when is_record_payload(module, name, payload) then
-    return decode_record_payload(module, #module as foreign size_t, name, payload)
+    initialize_nominal(module, name)
+    return decode_initialized_record_payload(name, payload)
   end
 end
 
@@ -980,11 +976,48 @@ local function encode_packet(candidate: value, scope: ResourceScope): foreign *v
   if candidate is TransferValue then
     return transfer_policy_to_message(candidate as TransferValue) as foreign *void
   end
+  local raw: foreign TValue = candidate
+  if ffi.lmacro_ttype(raw) == ffi.LUA_TUSERDATA then
+    local codec? = protobuf.find_resource_codec(candidate)
+    if codec ~= nil then
+      local module = nominal_module(candidate)
+      local name = codec.descriptor.name
+      local header_size = foreign titan_async_message.sizeof as foreign size_t
+      local name_len = #name as foreign size_t
+      local module_len = #module as foreign size_t
+      local capacity = header_size + (4 as foreign size_t)
+      if name_len > ffi.SIZE_MAX - capacity then
+        raise "transfer: out of memory copying message"
+      end
+      capacity = capacity + name_len
+      if module_len > ffi.SIZE_MAX - capacity then
+        raise "transfer: out of memory copying message"
+      end
+      capacity = capacity + module_len
+      local buf: owned *titan_protobuf_buffer = foreign titan_protobuf_buffer.new()
+      ffi.titan_protobuf_buf_init_heap(buf, 0)
+      defer ffi.titan_protobuf_buf_free_heap(buf)
+      -- All sizes are known: finish growth before writing the attachment
+      -- index, so its four bytes are written only once in the owned packet.
+      if ffi.titan_protobuf_buf_reserve(buf, capacity) == 0 then
+        raise "transfer: out of memory copying message"
+      end
+      -- finalize_buf_message later fills the packet header in this same
+      -- allocation prefix, so the payload begins at the header size.
+      buf.length = header_size
+      local index = codec.encode(scope, candidate)
+      if protobuf.write_resource_index(
+          buf as foreign *void, index as foreign unsigned int) == 0 then
+        raise "transfer: out of memory copying message"
+      end
+      return finalize_buf_message(
+          buf, ffi.TITAN_ASYNC_MESSAGE_RECORD_PAYLOAD, name, module, nil) as foreign *void
+    end
+  end
   local message = foreign titan_async_message.new()
   if scalar_to_message(candidate, message) then
     return copy_async_message(message) as foreign *void
   end
-  local raw: foreign TValue = candidate
   if ffi.lmacro_ttype(raw) == ffi.LUA_TFUNCTION then
     local buf: owned *titan_protobuf_buffer = foreign titan_protobuf_buffer.new()
     if ffi.titan_protobuf_buf_init_heap(buf, foreign titan_async_message.sizeof) == 0 then
@@ -1145,9 +1178,14 @@ local function decode_message_worker(slot_value: value): value
         message.length as integer)
   elseif kind == ffi.TITAN_ASYNC_MESSAGE_RECORD_PAYLOAD then
     local name = copy_native_bytes(message.name, message.name_length)
+    initialize_nominal_raw(message.module, message.module_length, name)
+    local codec? = protobuf.find_resource_codec_by_name(name)
+    if codec ~= nil then
+      return codec.decode(scope, message.bytes as foreign const *void,
+          message.length as integer)
+    end
     local payload = copy_native_bytes(message.bytes, message.length)
-    return decode_record_payload(
-        message.module, message.module_length, name, payload)
+    return decode_initialized_record_payload(name, payload)
   end
   raise "invalid transfer message kind"
 end

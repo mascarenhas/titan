@@ -306,7 +306,7 @@ local function decode_field(message: Message, number: integer,
   when is_array{is_const, elem_descriptor} then
     return decode_array(message:merged_message(number), is_const, elem_descriptor, depth)
   when is_record(record_type) then
-    local codec? = resource_codec_for_record(record_type)
+    local codec? = find_resource_codec_by_name(record_type.name)
     if codec ~= nil then
       require_wire(field, 2)
       return codec.decode(message.context,

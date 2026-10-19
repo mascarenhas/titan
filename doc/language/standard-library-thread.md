@@ -198,23 +198,42 @@ required message type.
   after every public wrapper is dropped. Retain a reachable receiver and call
   `Receiver:close()` to drain and break such cycles before dropping the last
   application handle. `Sender:close()` alone preserves the unread packets.
-- Both `Sender` and `Receiver` implement `to_transfer_payload` and
-  `from_transfer_payload` using **clone-on-transfer** semantics backed by
+- Each sender or receiver reference unit is owned by **exactly one** of: a live
+  finalized `Sender` / `Receiver` wrapper, or an unconsumed in-flight packet
+  attachment entry. Adoption moves a unit to a fresh finalized wrapper; native
+  packet discard releases unclaimed units in C; `Sender:close()` and
+  `Receiver:close()` change channel state only and never decrement counts. Both
+  `Sender` and `Receiver` register a direct nominal capability and also
+  implement `to_transfer_payload` and `from_transfer_payload` backed by
   [packet-scoped resource attachments](standard-library-transfer.md#scoped-resource-attachments-and-packet-local-indexes):
+  - When `Sender<|T|>` or `Receiver<|T|>` is transferred at the packet root or
+    nested inside public records, unions, or their Array fields,
+    `titan.transfer` and `titan.protobuf` use the registered `ResourceCodec`
+    capability (keyed by canonical erased metatable identity) to retain one unit
+    per occurrence and write/claim the four-byte little-endian packet-local slot
+    index directly in the packet buffer without reflective hook dispatch or
+    intermediate four-byte Lua strings.
   - `Sender:to_transfer_payload()` and `Receiver:to_transfer_payload()` call
     `transfer.attach_resource` with the channel pointer and the public C-ABI
     `channel_retain_{sender,receiver}_native` and
     `channel_release_{sender,receiver}_native` callbacks. Each encoded
     occurrence retains an independent sender or receiver reference in the active
-    packet's resource table and returns a four-byte little-endian packet-local
-    slot index string without invalidating the caller's handle.
-  - `Sender.from_transfer_payload(payload)` and
-    `Receiver.from_transfer_payload(payload)` first create an inert destination
-    wrapper that owns no endpoint yet and register its finalizer. Only then do
-    they claim the slot with `transfer.claim_resource(payload,
-    channel_release_{sender,receiver}_native)`. Once the claim succeeds, the
-    wrapper owns the endpoint through its finalizer even if decoding a later
-    field of the same packet fails.
+    packet's resource table and returns the identical four-byte little-endian
+    packet-local slot index string without invalidating the caller's handle.
+    This hook route remains used by `TransferValue` policies (such as closure
+    captures) and custom user `to_transfer_payload` hooks.
+  - Both the registered constructor (`sender_from_resource` /
+    `receiver_from_resource`) and `Sender.from_transfer_payload(payload)` /
+    `Receiver.from_transfer_payload(payload)` first create a fresh inert
+    destination wrapper that owns no endpoint yet and register its finalizer,
+    then claim the slot (`transfer.claim_registered_resource` or
+    `transfer.claim_resource` with `channel_release_{sender,receiver}_native`)
+    and assign the pointer immediately. Once the claim succeeds, the wrapper
+    owns the endpoint through its finalizer even if decoding a later field of
+    the same packet fails. A channel pair created inside a worker thread and
+    returned through `Thread:join()` or `Thread:task()` survives the worker's
+    `lua_close` because the unconsumed result packet owns the endpoint units
+    until parent reconstruction.
   - Attachment and claim are authorized only by the current execution's exact
     top encode or decode scope (`transfer.encode_message`,
     `transfer.decode_message`, `transfer.Packet.from_value`, and

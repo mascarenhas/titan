@@ -1889,3 +1889,460 @@ function test_recursive_receiver_drain_and_discard_without_runtime_and_after_shu
     end)
   end)
 end
+
+record DirectSingleSenderCarrier
+  const tx: thread.Sender<|integer|>
+end
+
+record DirectSingleReceiverCarrier
+  const rx: thread.Receiver<|integer|>
+end
+
+record DirectTypedEndpointsCarrier
+  const int_tx: thread.Sender<|integer|>
+  const str_tx: thread.Sender<|string|>
+  const pair_rx: thread.Receiver<|EndpointPair|>
+  const val_rx: thread.Receiver<|value|>
+end
+
+record DirectAndHookMixedCarrier
+  const direct_tx: thread.Sender<|integer|>
+  const hooked: OpaqueEndpointHook
+  const direct_rx: thread.Receiver<|integer|>
+end
+
+record DirectRouteClaimProbe
+  const mode: string
+  const wire: string
+  const tx: thread.Sender<|integer|>?
+  const rx: thread.Receiver<|integer|>?
+end
+
+function DirectRouteClaimProbe:to_transfer_payload(): string
+  if self.tx ~= nil then
+    local idx_bytes = self.tx:to_transfer_payload()
+    test.assert(idx_bytes == "\x00\x00\x00\x00",
+      "first attached Sender index was not little-endian zero")
+  end
+  if self.rx ~= nil then
+    local idx_bytes = self.rx:to_transfer_payload()
+    if self.tx ~= nil then
+      test.assert(idx_bytes == "\x01\x00\x00\x00",
+        "second attached Receiver index was not little-endian one")
+    else
+      test.assert(idx_bytes == "\x00\x00\x00\x00",
+        "first attached Receiver index was not little-endian zero")
+    end
+  end
+  return self.mode .. ":" .. self.wire
+end
+
+function DirectRouteClaimProbe.from_transfer_payload(
+  payload: string
+): DirectRouteClaimProbe
+  local sep? = strings.find(payload, ":")
+  if sep == nil then
+    raise "invalid DirectRouteClaimProbe payload"
+  end
+  local mode = strings.sub(payload, 1, sep - 1)
+  local wire = strings.sub(payload, sep + 1)
+  if mode == "kind-mismatch-receiver" then
+    protobuf.deserialize_nominal(
+      wire, "thread.tests.DirectSingleReceiverCarrier", false)
+  elseif mode == "duplicate-direct" then
+    local first = protobuf.deserialize_nominal(
+      wire, "thread.tests.DirectSingleSenderCarrier", false) as DirectSingleSenderCarrier
+    stashed_adopted_tx = first.tx
+    protobuf.deserialize_nominal(
+      wire, "thread.tests.DirectSingleSenderCarrier", false)
+  else
+    protobuf.deserialize_nominal(
+      wire, "thread.tests.DirectSingleSenderCarrier", false)
+  end
+  return DirectRouteClaimProbe(mode, wire, nil, nil)
+end
+
+local function join_worker_created_pair_and_exchange_73(): thread.Receiver<|integer|>
+  local worker = thread.spawn(function (): EndpointPair
+    local tx, rx = thread.channel<|integer|>(1)
+    return EndpointPair(tx, rx)
+  end)
+  local st = worker:join()
+  local ok, pair? = st:has_succeeded()
+  test.assert(ok and pair ~= nil, "worker returning fresh channel pair did not succeed")
+  local adopted = pair as EndpointPair
+  test.assert(
+    not adopted.tx:is_closed() and not adopted.rx:is_closed(),
+    "worker lua_close prematurely closed in-flight channel pair")
+  adopted.tx:send(73)
+  test.assert(adopted.rx:receive() == 73,
+    "worker-created channel pair did not deliver 73 after worker lua_close")
+  return adopted.rx
+end
+
+local function enqueue_sole_root_sender_and_drop(
+  carrier_tx: thread.Sender<|thread.Sender<|integer|>|>
+): thread.Receiver<|integer|>
+  local src_tx, src_rx = thread.channel<|integer|>(1)
+  carrier_tx:send(src_tx)
+  return src_rx
+end
+
+local function receive_root_sender_send_41_and_drop(
+  carrier_rx: thread.Receiver<|thread.Sender<|integer|>|>,
+  src_rx: thread.Receiver<|integer|>
+)
+  local adopted_tx = carrier_rx:receive()
+  test.assert(adopted_tx:try_send(41))
+  test.assert(src_rx:receive() == 41,
+    "queued root Sender did not deliver 41 after source GC")
+end
+
+local function enqueue_direct_route_claim_probe(
+  out_tx: thread.Sender<|DirectRouteClaimProbe|>,
+  mode: string,
+  wire: string,
+  attach_kind: string
+): (
+  thread.Receiver<|integer|>?,
+  (function (): ())?,
+  thread.Sender<|integer|>?,
+  (function (): ())?
+)
+  if attach_kind == "sender" then
+    local tx, peer_rx, release_tx = make_sender_release_once_probe()
+    out_tx:send(DirectRouteClaimProbe(mode, wire, tx, nil))
+    return peer_rx, release_tx, nil, nil
+  elseif attach_kind == "receiver" then
+    local peer_tx, rx, release_rx = make_receiver_release_once_probe()
+    out_tx:send(DirectRouteClaimProbe(mode, wire, nil, rx))
+    return nil, nil, peer_tx, release_rx
+  else
+    out_tx:send(DirectRouteClaimProbe(mode, wire, nil, nil))
+    return nil, nil, nil, nil
+  end
+end
+
+local function enqueue_duplicate_direct_claim_probe(
+  out_tx: thread.Sender<|DirectRouteClaimProbe|>
+): thread.Receiver<|integer|>
+  local tx, peer_rx = thread.channel<|integer|>(1)
+  out_tx:send(DirectRouteClaimProbe(
+    "duplicate-direct", "\x0a\x04\x00\x00\x00\x00", tx, nil))
+  return peer_rx
+end
+
+local function exercise_and_drop_duplicate_direct_sender(
+  sender_peer: thread.Receiver<|integer|>
+)
+  -- Keep every read of the stashed wrapper in this activation: even a
+  -- presence comparison can leave a traced temporary until the frame returns.
+  test.assert(
+    not sender_peer:is_closed() and stashed_adopted_tx ~= nil,
+    "duplicate direct-route claim unwind released the first adopted Sender")
+  test.assert(stashed_adopted_tx:try_send(314))
+  test.assert(sender_peer:receive() == 314)
+  stashed_adopted_tx = nil
+end
+
+local function exercise_standalone_refusals_and_drop_endpoints(): (
+  thread.Receiver<|integer|>, function (): (),
+  thread.Sender<|integer|>, function (): ()
+)
+  -- The caller retains only peers and the independently held probe clones.
+  -- Returning retires source-result roots, closure captures, and cast temps
+  -- before the caller checks collection and exactly-once release.
+  local tx?, peer_rx, rel_tx = make_sender_release_once_probe()
+  local peer_tx, rx?, rel_rx = make_receiver_release_once_probe()
+
+  -- Root protobuf.serialize rejects Sender/Receiver private native field.
+  expect_error(function ()
+    protobuf.serialize(tx as value)
+  end, "protobuf: record must be public with only public fields")
+  expect_error(function ()
+    protobuf.serialize(rx as value)
+  end, "protobuf: record must be public with only public fields")
+
+  -- Nested direct-route protobuf.serialize / serialize_fields outside an encode scope rejects attachment.
+  expect_error(function ()
+    protobuf.serialize(EndpointPair(tx as thread.Sender<|integer|>, rx as thread.Receiver<|integer|>))
+  end, "transfer: resource attachment requires an encode scope")
+
+  local sender_nom? = reflect.find_nominal("titan.thread.Sender")
+  local single_sender_nom? = reflect.find_nominal("thread.tests.DirectSingleSenderCarrier")
+  test.assert(sender_nom ~= nil and single_sender_nom ~= nil)
+  local sender_rec_desc: reflect.RecordType? = nil
+  case sender_nom as reflect.NominalType
+  when is_record(rec) then sender_rec_desc = rec
+  else raise "expected Sender RecordType"
+  end
+  local sender_type = reflect.Type.is_record(sender_rec_desc as reflect.RecordType)
+  local single_sender_type: reflect.Type = reflect.Type.is_named(
+    reflect.NamedType("thread.tests.DirectSingleSenderCarrier"))
+
+  expect_error(function ()
+    protobuf.serialize_fields({sender_type}, "not-a-record")
+  end, "protobuf: expected a record")
+  expect_error(function ()
+    protobuf.serialize_fields({sender_type}, rx as value)
+  end, "protobuf: record type mismatch")
+  expect_error(function ()
+    protobuf.serialize_fields({sender_type}, tx as value)
+  end, "transfer: resource attachment requires an encode scope")
+
+  -- Direct-route protobuf.deserialize / deserialize_nominal outside a decode scope rejects claim.
+  expect_error(function ()
+    protobuf.deserialize("\x0a\x04\x00\x00\x00\x00", single_sender_type)
+  end, "transfer: resource claim requires a decode scope")
+  expect_error(function ()
+    protobuf.deserialize_nominal(
+      "\x0a\x04\x00\x00\x00\x00", "thread.tests.DirectSingleSenderCarrier", false)
+  end, "transfer: resource claim requires a decode scope")
+  expect_error(function ()
+    transfer.claim_registered_resource(
+      nil, nil, 4, thread.channel_release_sender_native)
+  end, "transfer: resource claim requires a decode scope")
+
+  -- Standalone TransferValue.from_value / :to_value outside packet scopes reject both root and nested endpoints.
+  expect_error(function ()
+    async.TransferValue.from_value(tx as value)
+  end, "transfer: resource attachment requires an encode scope")
+  expect_error(function ()
+    async.TransferValue.from_value(
+      EndpointPair(tx as thread.Sender<|integer|>, rx as thread.Receiver<|integer|>))
+  end, "transfer: resource attachment requires an encode scope")
+  expect_error(function ()
+    async.TransferValue.is_record(
+      "thread.tests",
+      "thread.tests.DirectSingleSenderCarrier",
+      "\x0a\x04\x00\x00\x00\x00"):to_value()
+  end, "transfer: resource claim requires a decode scope")
+  expect_error(function ()
+    async.TransferValue.is_record_payload(
+      "titan.thread",
+      "titan.thread.Sender",
+      "\x00\x00\x00\x00"):to_value()
+  end, "transfer: resource claim requires a decode scope")
+
+  -- Registration guards reject non-record candidates.
+  expect_error(function ()
+    transfer.register_resource(
+      "not-a-record",
+      function (_: value): foreign *void return nil end,
+      thread.channel_retain_sender_native,
+      thread.channel_release_sender_native,
+      function (_ctx: value, _data: foreign const *void, _len: integer): value
+        return nil
+      end)
+  end, "transfer: registered resource must be a record")
+  expect_error(function ()
+    protobuf.register_resource_codec(
+      "not-a-record",
+      sender_rec_desc as reflect.RecordType,
+      function (_ctx: value, _v: value): integer return 0 end,
+      function (_ctx: value, _data: foreign const *void, _len: integer): value
+        return nil
+      end)
+  end, "protobuf: resource codec requires a record")
+
+  return peer_rx, rel_tx, peer_tx, rel_rx
+end
+
+function test_worker_created_channel_pair_survives_worker_lua_close_on_join(
+  context: test.Context
+)
+  context:run("worker_created_pair_delivers_73_after_worker_lua_close", function (_child: test.Context)
+    runtime_test.run(function ()
+      local adopted_rx = join_worker_created_pair_and_exchange_73()
+      defer adopted_rx:close()
+      gc.collect()
+      gc.collect()
+      test.assert(
+        adopted_rx:is_closed(),
+        "dropping parent's sole adopted Sender did not auto-close worker-created channel")
+    end)
+  end)
+
+  context:run("queued_root_sender_survives_source_gc_and_delivers_41", function (_child: test.Context)
+    runtime_test.run(function ()
+      local carrier_tx, carrier_rx = thread.channel<|thread.Sender<|integer|>|>(1)
+      defer carrier_tx:close()
+      defer carrier_rx:close()
+      local src_rx = enqueue_sole_root_sender_and_drop(carrier_tx)
+      defer src_rx:close()
+      gc.collect()
+      gc.collect()
+      test.assert(
+        not src_rx:is_closed(),
+        "source Sender GC closed channel while root Sender packet remained queued")
+      receive_root_sender_send_41_and_drop(carrier_rx, src_rx)
+      gc.collect()
+      gc.collect()
+      test.assert(
+        src_rx:is_closed(),
+        "destination Sender GC did not auto-close peer after delivery")
+    end)
+  end)
+end
+
+function test_direct_endpoint_resource_codec_routes_and_validation(
+  context: test.Context
+)
+  context:run("root_and_nested_fresh_identity_erasure_and_mixed_hook_interoperability", function (_child: test.Context)
+    runtime_test.run(function ()
+      reset_ownership_hook_state(false, false)
+
+      -- 1. Root Sender/Receiver transfer produces fresh wrappers.
+      local root_tx_in, root_tx_out = thread.channel<|thread.Sender<|integer|>|>(2)
+      local root_rx_in, root_rx_out = thread.channel<|thread.Receiver<|integer|>|>(2)
+      defer root_tx_in:close()
+      defer root_tx_out:close()
+      defer root_rx_in:close()
+      defer root_rx_out:close()
+
+      local base_tx, base_rx = thread.channel<|integer|>(2)
+      defer base_tx:close()
+      defer base_rx:close()
+
+      root_tx_in:send(base_tx)
+      root_rx_in:send(base_rx)
+      local adopted_root_tx = root_tx_out:receive()
+      local adopted_root_rx = root_rx_out:receive()
+      defer adopted_root_tx:close()
+      defer adopted_root_rx:close()
+      test.assert(adopted_root_tx ~= base_tx, "root Sender decode reused source wrapper identity")
+      test.assert(adopted_root_rx ~= base_rx, "root Receiver decode reused source wrapper identity")
+      adopted_root_tx:send(101)
+      test.assert(adopted_root_rx:receive() == 101)
+
+      -- 2. Erased generic specializations round-trip through the direct nested ResourceCodec route.
+      local spec_in, spec_out = thread.channel<|DirectTypedEndpointsCarrier|>(1)
+      defer spec_in:close()
+      defer spec_out:close()
+      local i_tx, i_rx = thread.channel<|integer|>(1)
+      local s_tx, s_rx = thread.channel<|string|>(1)
+      local p_tx, p_rx = thread.channel<|EndpointPair|>(1)
+      local v_tx, v_rx = thread.channel<|value|>(1)
+      defer i_tx:close(); defer i_rx:close()
+      defer s_tx:close(); defer s_rx:close()
+      defer p_tx:close(); defer p_rx:close()
+      defer v_tx:close(); defer v_rx:close()
+
+      spec_in:send(DirectTypedEndpointsCarrier(i_tx, s_tx, p_rx, v_rx))
+      local spec_decoded = spec_out:receive()
+      spec_decoded.int_tx:send(19)
+      spec_decoded.str_tx:send("erased-ok")
+      p_tx:send(EndpointPair(i_tx, i_rx))
+      v_tx:send("dynamic-slot")
+      test.assert(i_rx:receive() == 19)
+      test.assert(s_rx:receive() == "erased-ok")
+      local inner_pair = spec_decoded.pair_rx:receive()
+      inner_pair.tx:send(23)
+      test.assert(inner_pair.rx:receive() == 23)
+      test.assert(spec_decoded.val_rx:receive() == "dynamic-slot")
+
+      -- 3. Direct ResourceCodec fields and custom to_transfer_payload hooks share one packet scope and index sequence.
+      local mix_in, mix_out = thread.channel<|DirectAndHookMixedCarrier|>(1)
+      defer mix_in:close()
+      defer mix_out:close()
+      local d_tx, d_rx = thread.channel<|integer|>(2)
+      local h_tx, h_rx = thread.channel<|integer|>(2)
+      defer d_tx:close(); defer d_rx:close()
+      defer h_tx:close(); defer h_rx:close()
+
+      mix_in:send(DirectAndHookMixedCarrier(
+        d_tx,
+        OpaqueEndpointHook("mixed-scope", h_tx, h_rx),
+        d_rx))
+      test.assert(ownership_encode_calls == 1,
+        "mixed carrier did not invoke OpaqueEndpointHook encoder exactly once")
+      local mix_decoded = mix_out:receive()
+      test.assert(ownership_decode_calls == 1,
+        "mixed carrier did not invoke OpaqueEndpointHook decoder exactly once")
+      test.assert(mix_decoded.hooked.tag == "mixed-scope")
+      mix_decoded.direct_tx:send(31)
+      mix_decoded.hooked.tx:send(37)
+      test.assert(mix_decoded.direct_rx:receive() == 31)
+      test.assert(mix_decoded.hooked.rx:receive() == 37)
+    end)
+  end)
+
+  context:run("direct_route_claim_validation_order_and_unwind", function (_child: test.Context)
+    runtime_test.run(function ()
+      local probe_tx, probe_rx = thread.channel<|DirectRouteClaimProbe|>(2)
+      defer probe_tx:close()
+      defer probe_rx:close()
+
+      -- 1. Wire type check precedes codec.decode, and width -> bounds -> kind -> duplicate order holds on direct route.
+      local sender_error_cases: {{string}} = {
+        {"wire-mismatch", "\x08\x00", "protobuf: unexpected wire type"},
+        {"width-empty", "\x0a\x00", "transfer: invalid resource attachment index width"},
+        {"width-short", "\x0a\x03abc", "transfer: invalid resource attachment index width"},
+        {"width-long", "\x0a\x05abcde", "transfer: invalid resource attachment index width"},
+        {"bounds-sentinel", "\x0a\x04\xff\xff\xff\xff", "transfer: resource attachment index is out of bounds"},
+        {"bounds-out-of-range", "\x0a\x04\x01\x00\x00\x00", "transfer: resource attachment index is out of bounds"},
+        {"kind-mismatch-receiver", "\x0a\x04\x00\x00\x00\x00", "transfer: resource attachment kind mismatch"},
+      }
+      for i = 1, #sender_error_cases do
+        local row = sender_error_cases[i]
+        local peer_rx?, rel_tx?, _?, _? =
+          enqueue_direct_route_claim_probe(probe_tx, row[1], row[2], "sender")
+        defer if peer_rx ~= nil then (peer_rx as thread.Receiver<|integer|>):close() end
+        expect_error(function ()
+          probe_rx:receive()
+        end, row[3])
+        assert_sender_released_exactly_once(
+          peer_rx as thread.Receiver<|integer|>,
+          rel_tx as function (): (),
+          "direct route failed claim (" .. row[1] .. ") Sender")
+      end
+
+      -- 2. Bounds check with zero attached resources, and kind mismatch claiming a Receiver slot as a Sender.
+      enqueue_direct_route_claim_probe(
+        probe_tx, "bounds-empty", "\x0a\x04\x00\x00\x00\x00", "none")
+      expect_error(function ()
+        probe_rx:receive()
+      end, "transfer: resource attachment index is out of bounds")
+
+      local _?, _?, kind_peer_tx?, rel_kind_rx? = enqueue_direct_route_claim_probe(
+        probe_tx, "kind-mismatch-sender", "\x0a\x04\x00\x00\x00\x00", "receiver")
+      defer if kind_peer_tx ~= nil then (kind_peer_tx as thread.Sender<|integer|>):close() end
+      expect_error(function ()
+        probe_rx:receive()
+      end, "transfer: resource attachment kind mismatch")
+      assert_receiver_released_exactly_once(
+        kind_peer_tx as thread.Sender<|integer|>,
+        rel_kind_rx as function (): (),
+        "direct route failed claim (kind-mismatch-sender) Receiver")
+
+      -- 3. Duplicate direct-route claim of slot 0 raises on second claim while preserving first adopted wrapper.
+      stashed_adopted_tx = nil
+      defer stashed_adopted_tx = nil
+      local dup_peer_rx = enqueue_duplicate_direct_claim_probe(probe_tx)
+      defer dup_peer_rx:close()
+      gc.collect()
+      gc.collect()
+      expect_error(function ()
+        probe_rx:receive()
+      end, "transfer: resource attachment was already claimed")
+      gc.collect()
+      gc.collect()
+      exercise_and_drop_duplicate_direct_sender(dup_peer_rx)
+      gc.collect()
+      gc.collect()
+      test.assert(
+        dup_peer_rx:is_closed(),
+        "first adopted Sender from duplicate direct-route claim did not finalize on GC")
+    end)
+  end)
+
+  context:run("standalone_protobuf_and_policy_refusals_and_registration_guards", function (_child: test.Context)
+    local peer_rx, rel_tx, peer_tx, rel_rx =
+      exercise_standalone_refusals_and_drop_endpoints()
+    defer peer_rx:close()
+    defer peer_tx:close()
+
+    assert_sender_released_exactly_once(peer_rx, rel_tx, "standalone refusals Sender")
+    assert_receiver_released_exactly_once(peer_tx, rel_rx, "standalone refusals Receiver")
+  end)
+end

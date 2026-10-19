@@ -100,8 +100,10 @@ function find_resource_codec(candidate: value): ResourceCodec?
   return resource_codecs[identity]
 end
 
-local function resource_codec_for_record(descriptor: reflect.RecordType): ResourceCodec?
-  local identity? = resource_nominals[descriptor.name]
+-- Resolve names through the traced canonical nominal registry, never by
+-- interpreting a spelling as permission to attach or claim native resources.
+function find_resource_codec_by_name(name: string): ResourceCodec?
+  local identity? = resource_nominals[name]
   if identity == nil then return nil end
   return resource_codecs[identity]
 end
@@ -118,8 +120,10 @@ foreign function write_resource_index_bytes(dst: *void, index: unsigned int)
   bytes[3] = (index >> 24) as foreign uint8_t
 end
 
-local foreign function write_resource_index(buf: *titan_protobuf_buffer,
-    index: unsigned int): int
+-- The root packet route uses this same C-only writer without a Lua index
+-- string or an intermediate payload buffer. The caller owns buf throughout.
+foreign function write_resource_index(raw_buf: *void, index: unsigned int): int
+  local buf = raw_buf as foreign *titan_protobuf_buffer
   if ffi.titan_protobuf_buf_reserve(buf, 4 as foreign size_t) == 0 then return 0 end
   write_resource_index_bytes((buf.data + buf.length) as foreign *void, index)
   buf.length = buf.length + (4 as foreign size_t)
