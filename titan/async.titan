@@ -1769,7 +1769,14 @@ local function start_external_wait(
   -- under its domain mutex. An inline notification cannot run this loop.
   owner.registered = true
   local waiting = false
-  do waiting = owner.register_fn(owner.target)
+  do
+    if owner.native.register_wait ~= nil then
+      local status = owner.native.register_wait(owner.native.context, owner.target)
+      if status < 0 then check_status(status, "async.external_wait.register") end
+      waiting = status ~= 0
+    else
+      waiting = owner.register_fn(owner.target)
+    end
   catch
     defer owner:retire()
     owner:detach_domain()
@@ -1869,6 +1876,22 @@ function wait_external(register_fn: function (foreign *void): boolean,
   local owner = prepare_external_wait(register_fn, unregister_fn)
   defer owner:close()
   owner:wait()
+end
+
+--- Await one ordinary external wait through C-only registrars, rooting owner.
+-- Context is borrowed until return, including synchronous cancellation unlink.
+-- register_fn returns 0 (ready), 1 (linked), or a negative status with no link.
+-- This is not a native retirement capability and cannot gate Task publication.
+function wait_external_native(owner: value, context: foreign *void,
+    register_fn: foreign function (*void, *void): int,
+    unregister_fn: foreign function (*void): void)
+  running()
+  if register_fn == nil or unregister_fn == nil then
+    raise "native external wait callbacks must not be NULL"
+  end
+  local wait = prepare_wait(nil, nil, owner, context, register_fn, unregister_fn, nil)
+  defer wait:close()
+  wait:wait()
 end
 
 --- Prepare, await and close one cancellation-shielded external wait.

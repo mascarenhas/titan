@@ -75,6 +75,13 @@ local foreign function external_retirement_signal(context: *void): int
   return status
 end
 
+local foreign function external_wait_notify_during_native_registration(
+    context: *void, target: *void): int
+  local status = external_retirement_register(context, target)
+  if status == 1 then external_retirement_signal(context) end
+  return status
+end
+
 local function external_wait_prepare_retirement(
     ready: boolean): (async.ExternalWait, owned *titan_external_retirement_fixture)
   local fixture: owned *titan_external_retirement_fixture =
@@ -194,6 +201,111 @@ local function external_wait_thread_channel_worker(
   return echo + 1
 end
 
+function test_external_wait_native_registrars(context: test.Context)
+  context:run("inline_ready_and_null_callback_rejection", function (_child: test.Context)
+    runtime_test.run(function ()
+      local fixture: owned *titan_external_retirement_fixture =
+        foreign titan_external_retirement_fixture.new()
+      fixture.ready = 1
+      for _ = 1, 64 do
+        async.wait_external_native(fixture, fixture as foreign *void,
+          external_retirement_register, external_retirement_unregister)
+      end
+      test.assert(fixture.register_calls == 64 and fixture.unregister_calls == 0 and
+        fixture.retire_calls == 0, "ordinary native waits used retirement or rollback on readiness")
+      external_wait_expect_sentinel(function ()
+        async.wait_external_native(fixture, fixture as foreign *void,
+          nil, external_retirement_unregister)
+      end, "native external wait callbacks must not be NULL", "NULL native registrar")
+      external_wait_expect_sentinel(function ()
+        async.wait_external_native(fixture, fixture as foreign *void,
+          external_retirement_register, nil)
+      end, "native external wait callbacks must not be NULL", "NULL native unregistrar")
+      test.assert(fixture.register_calls == 64 and fixture.unregister_calls == 0,
+        "NULL callback rejection invoked the native domain")
+    end)
+  end)
+  context:run("native_notification_during_registration_is_not_lost", function (_child: test.Context)
+    runtime_test.run(function ()
+      local fixture: owned *titan_external_retirement_fixture =
+        foreign titan_external_retirement_fixture.new()
+      async.wait_external_native(fixture, fixture as foreign *void,
+        external_wait_notify_during_native_registration, external_retirement_unregister)
+      test.assert(fixture.register_calls == 1 and fixture.unregister_calls == 0 and
+        fixture.retire_calls == 0 and fixture.target == nil,
+        "notification before native registration returned was lost or rolled back")
+    end)
+  end)
+  context:run("negative_registration_retires_once", function (_child: test.Context)
+    runtime_test.run(function ()
+      local fixture: owned *titan_external_retirement_fixture =
+        foreign titan_external_retirement_fixture.new()
+      fixture.register_error = -22
+      local caught = false
+      do
+        async.wait_external_native(fixture, fixture as foreign *void,
+          external_retirement_register, external_retirement_unregister)
+      catch
+        caught = true
+        test.assert(error is async.OperationError, "native registration lost its operation error")
+        local failure: async.OperationError = error
+        test.assert(failure.code == -22 and failure.operation == "async.external_wait.register",
+          "native registration error used the retirement boundary")
+      end
+      test.assert(caught and fixture.register_calls == 1 and fixture.unregister_calls == 1 and
+        fixture.target == nil and fixture.retire_calls == 0,
+        "rejected native registration did not retire its exact wait")
+    end)
+  end)
+  context:run("notification_and_cancellation_use_distinct_exact_waits", function (_child: test.Context)
+    runtime_test.run(function ()
+      local first: owned *titan_external_retirement_fixture =
+        foreign titan_external_retirement_fixture.new()
+      local waiter = async.run<|nil, value|>(function (): nil
+        async.wait_external_native(first, first as foreign *void,
+          external_retirement_register, external_retirement_unregister)
+        return nil
+      end)
+      task_support.cleanup_task(waiter, "native external cancelled waiter")
+      support.wait_until_waiting(waiter)
+      test.assert(first.register_calls == 1 and first.target ~= nil)
+      -- Keep an independent producer reference through cancellation and a later
+      -- wait; an old notification must not acquire that successor's identity.
+      local stale = first.target
+      uv.native_external_wake_retain(stale)
+      defer uv.native_external_wake_release(stale)
+      local reason: async.CancellationReason<|value|> =
+        async.CancellationReason.simple("native external cancellation")
+      waiter:cancel(reason)
+      waiter:cancel(async.CancellationReason.simple("later cancellation"))
+      test.assert(first.unregister_calls == 1 and first.target == nil,
+        "native cancellation did not unlink synchronously exactly once")
+      local cancelled, actual? = async.join(waiter):has_cancelled()
+      test.assert(cancelled and actual == reason and first.unregister_calls == 1,
+        "native cancellation lost its first reason or unlinked twice on unwind")
+
+      local second: owned *titan_external_retirement_fixture =
+        foreign titan_external_retirement_fixture.new()
+      local successor = async.run<|integer, value|>(function (): integer
+        async.wait_external_native(second, second as foreign *void,
+          external_retirement_register, external_retirement_unregister)
+        return 255
+      end)
+      task_support.cleanup_task(successor, "native external successor")
+      support.wait_until_waiting(successor)
+      uv.native_external_wake_notify(stale)
+      external_wait_flush_bridge_turn()
+      test.assert(successor:status():as_string() == "waiting" and second.unregister_calls == 0,
+        "stale native target completed a successor wait")
+      test.assert(external_retirement_signal(second as foreign *void) == 0)
+      local succeeded, result? = async.join(successor):has_succeeded()
+      test.assert(succeeded and result == 255 and second.register_calls == 1 and
+        second.unregister_calls == 0 and second.retire_calls == 0,
+        "normal native notification ran rollback or a retirement callback")
+    end)
+  end)
+end
+
 function test_external_wait_prepared_lifecycle_and_validation_errors(
     context: test.Context)
   context:run("outside_runtime_and_outside_task_errors", function (_child: test.Context)
@@ -217,6 +329,10 @@ function test_external_wait_prepared_lifecycle_and_validation_errors(
         end,
         function () outside_calls = outside_calls + 1 end)
     end, "wait_external_cleanup outside Runtime")
+    external_wait_expect_rejected(function ()
+      async.wait_external_native(nil, nil,
+        external_retirement_register, external_retirement_unregister)
+    end, "wait_external_native outside Runtime")
     external_wait_expect_rejected(function () async.current_loop() end,
         "outside-Task convenience waits must not bootstrap a Runtime")
     test.assert(outside_calls == 0,
