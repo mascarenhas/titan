@@ -145,11 +145,10 @@ fields and ordinary transfer name/module metadata plus a small attachment tail,
 without retaining the next power-of-two block for a large byte field.
 `length + extra` is checked against `SIZE_MAX`, and the 256-byte slack is added
 only when it still fits; near the limit the request stays at the exact
-`length + extra`, as in the doubling branch. The
-four-capacity comparison also guards its multiplication. Both growth branches
-increase capacity geometrically, preserving amortized O(1) growth for streams
-of small writes. A grow failure leaves the heap buffer and its length/capacity
-unchanged.
+`length + extra`, as in the doubling branch. The four-capacity comparison also
+guards its multiplication. Both growth branches increase capacity
+geometrically, preserving amortized O(1) growth for streams of small writes. A
+grow failure leaves the heap buffer and its length/capacity unchanged.
 
 Because serialization calls may raise Lua errors (`longjmp`)
 after buffer growth, callers allocate the buffer descriptor with
@@ -167,15 +166,17 @@ plus at most 64 bytes of the mandatory `name`/`module` trailer upfront via
 so the serialized wire payload and trailing `name`/`module` bytes are written
 directly after the header prefix without an extra allocation or intermediate Lua
 string, and zeroes/populates the `titan_async_message` header once in
-`finalize_buf_message` before `titan_protobuf_buf_take_data`. The existing
-64-byte initial metadata credit still selects the same small-packet capacities;
-the bulk-write slack is separate and is not added to those initial reservations.
-For a 64 KiB top-level byte field, the encoder performs one small allocation
-and one bulk growth; ordinary metadata and the one-endpoint attachment tail fit
-in that bulk block. The final transfer reservation still computes the exact
-metadata, alignment, and actual attachment count before detaching; unusually
-large trailers or later fields can exhaust the bounded slack and require normal
-growth. No sizing pass replays a custom encoder. Nested length-delimited
+`finalize_buf_message` before `titan_protobuf_buf_take_data`. That initial
+reservation, `sizeof(titan_async_message)` plus at most 64 metadata bytes, stays
+below an empty buffer's bulk threshold (four times the 64-byte minimum) on
+supported targets, so it takes the doubling branch and never receives the
+bulk-write slack. For a 64 KiB top-level byte field, the encoder performs one
+small allocation and one bulk growth; ordinary metadata and the one-endpoint
+attachment tail fit in that bulk block. The final transfer reservation computes
+the exact metadata, alignment, and actual attachment count before detaching.
+Later fields, metadata, and attachment entries that together exceed the
+256-byte slack take a normal doubling growth, a second payload-sized
+reallocation. No sizing pass replays a custom encoder. Nested length-delimited
 messages reserve a one-byte length slot at `begin_nested` and patch or shift in
 place at `end_nested`, avoiding intermediate per-message writers or string
 allocations.

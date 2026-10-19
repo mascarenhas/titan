@@ -140,12 +140,14 @@ and detaches the buffer with `titan_protobuf_buf_take_data`.
 The shared buffer's bulk-write growth rule leaves at most 256 bytes after a
 single reservation exceeding four times the current capacity, rather than
 rounding the large payload up to the next power of two. This slack is separate
-from the initial 64-byte metadata credit: the initial reservation and all
-small-write doubling remain unchanged. A 64 KiB byte field needs only one
-bulk growth, with room for ordinary remaining fields, name/module bytes, and
-the aligned one-endpoint tail. `finalize_buf_message` still reserves the actual
-trailer and entry count before detachment; larger trailers that exhaust the
-bounded slack use normal growth. See [buffer growth](protobuf-library.md#encoding).
+from the initial 64-byte metadata credit: the initial reservation stays below
+the bulk threshold and, like every small write, uses ordinary doubling. A
+64 KiB byte field needs only one bulk growth, with room for ordinary remaining
+fields, name/module bytes, and the aligned one-endpoint tail.
+`finalize_buf_message` reserves the actual trailer and entry count before
+detachment; later fields, trailers, or attachment entries that exceed the
+bounded slack take a normal doubling growth, a second payload-sized
+reallocation. See [buffer growth](protobuf-library.md#encoding).
 
 Decode reads directly from the packet's byte slices using
 `protobuf.deserialize_nominal_buffer_with_context` (passing `scope` once for

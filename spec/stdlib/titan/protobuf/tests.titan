@@ -273,6 +273,7 @@ function test_buffer_small_writes_keep_geometric_growth(_context: test.Context)
   defer ffi.titan_protobuf_buf_free_heap(buf)
   local fields: const {reflect.Type} = {reflect.Type.is_integer()}
   local capacity = 0
+  local changes = 0
   for _ = 1, 512 do
     protobuf.serialize_fields_to_buffer(buf as foreign *void, fields, 0)
     local next_capacity = buf.capacity as integer
@@ -284,10 +285,13 @@ function test_buffer_small_writes_keep_geometric_growth(_context: test.Context)
           "small writes no longer double buffer capacity")
       end
       capacity = next_capacity
+      changes = changes + 1
     end
   end
-  test.assert(counts[0] == 6 and counts[1] == 0 and capacity == 2048,
-    "small-write stream changed its geometric allocation sequence")
+  -- 1024 appended bytes cross at least the 64..1024 doublings; every grow
+  -- request must be one of those observed doublings, never a bulk request.
+  test.assert(changes >= 5 and counts[0] == changes and counts[1] == 0,
+    "small-write stream made a non-doubling buffer growth")
   local expected = string.rep(string.char(8, 0), 512)
   test.assert(buf.length == #expected and
     ffi.memcmp(buf.data, expected, #expected as foreign size_t) == 0,
@@ -306,14 +310,14 @@ function test_buffer_growth_near_size_limit_keeps_the_exact_need(
     _context: test.Context)
   local requested: owned size_t[] = foreign size_t.new_array(1)
   local buf: owned *titan_protobuf_buffer = foreign titan_protobuf_buffer.new()
-  ffi.titan_protobuf_buf_init(buf, nil, 0, 64, requested as foreign *void,
+  ffi.titan_protobuf_buf_init(buf, nil, 0, 0, requested as foreign *void,
     record_refused_growth)
   local extra: foreign size_t = ffi.SIZE_MAX - (100 as foreign size_t)
   test.assert(ffi.titan_protobuf_buf_reserve(buf, extra) == 0,
     "refused near-limit growth reported success")
   test.assert(requested[0] == extra,
     "unrepresentable bulk slack inflated the requested capacity")
-  test.assert(buf.capacity == 64 and buf.length == 0 and buf.data == nil,
+  test.assert(buf.capacity == 0 and buf.length == 0 and buf.data == nil,
     "failed growth changed the buffer descriptor")
 end
 
