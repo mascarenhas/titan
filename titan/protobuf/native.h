@@ -22,7 +22,10 @@ struct titan_protobuf_buffer {
 /* Per-root automatic scratch, never part of a GC buffer or a native packet.
  * Entries are in opening order; zero vlen denotes an unfinished message.
  * Beyond this bound, finish the pending patches once and use eager widening
- * until the outermost message closes. No encoder or hook is replayed. */
+ * until the outermost message closes. No encoder or hook is replayed.
+ * extra_before is at most 31 earlier prefixes times four added bytes (124),
+ * fitting uint16_t. The uint8_t fields hold a parent index or sentinel 32 and
+ * a varint width of at most five bytes under the 2 GiB message limit. */
 #define TITAN_PROTOBUF_BACKPATCH_LIMIT 32
 typedef struct titan_protobuf_patch {
   size_t mark;

@@ -191,8 +191,10 @@ No sizing pass replays a custom encoder. Each root append entrypoint owns an
 automatic C `titan_protobuf_backpatch` (536 bytes on LP64: 32 sixteen-byte entries
 plus counters), borrowed explicitly through `Encoder` methods and the native
 `begin_nested` / `end_nested` helpers. It contains no Lua references and never
-escapes that synchronous call. Neither `titan_protobuf_buffer` nor `Encoder` nor
-the packet grows, and no Lua/native bookkeeping allocation is added. Automatic
+escapes the root append's call stack. A coroutine yield may suspend that root;
+scratch stays valid on the suspended stack, with its address referenced nowhere
+else. Neither `titan_protobuf_buffer` nor `Encoder` nor the packet grows, and no
+Lua/native bookkeeping allocation is added. Automatic
 storage is zero-initialized; only entries actually opened are subsequently
 written or visited. Non-widening encodes retain their existing buffer writes,
 growth requests, and allocation sizes. A widening encode adds its deferred
@@ -235,12 +237,10 @@ Capacity can remain grown after failure, and hook side effects/resource
 attachments are not rolled back by protobuf; the enclosing transfer scope owns
 their existing cleanup. No scratch pointer is retained in the buffer.
 
-The kind-40 widening probe belongs at
-`memmove(buf->data + start + shift, buf->data + start, moved);` in
-`titan_protobuf_buf_materialize_nested`, counting `moved` bytes per call. The old
-`memmove(buf->data + mark + vlen, buf->data + mark + 1, payload_len);` remains
-only in `titan_protobuf_buf_end_nested_eager` for bounded fallback and must also
-be counted when attributing overflow cases.
+Widening bytes move only in `titan_protobuf_buf_materialize_nested` for batched
+patches and `titan_protobuf_buf_end_nested_eager` for bounded fallback. The
+batched path moves disjoint spans; the eager path moves the closing message's
+payload.
 
 Varints use logical shifts on the 64-bit integer carrier, including unsigned bit
 patterns represented by negative Titan integers. ZigZag preserves the complete

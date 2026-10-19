@@ -1115,8 +1115,7 @@ function test_anonymous_fields_buffer_nil_context_rejects_active_decode_hook(
     "ambient decode Sender did not deliver to its live peer")
 end
 
--- H4.3: independent wire construction, including the same empty structural
--- parent field used by the external nested-boundary attribution catalogue.
+-- Canonical nested wire encodings include an empty bytes field after each child.
 record BackpatchNode
   child: BackpatchNode?
   bytes: string
@@ -1246,25 +1245,37 @@ end
 
 record BackpatchForest
   branches: {BackpatchNode}
+  tail: BackpatchNode
 end
 
 function test_backpatch_breadth_fallback_rebases_open_sibling_marks(_: test.Context)
   local nodes: {BackpatchNode} = {}
   local entries = ""
+  -- A leaf is 12 7e + 126 payload bytes (128 bytes). Its parent is
+  -- 0a 80 01 <leaf> 12 00 (133 bytes); two Array entry wrappers make
+  -- 0a 88 01 0a 85 01 <parent> (139 bytes).
   for index = 1, 40 do
     local body = string.rep(string.char(index), 126)
     nodes[index] = BackpatchNode(BackpatchNode(nil, body), "")
-    local wire = backpatch_field(1, backpatch_field(2, body)) .. string.char(18, 0)
-    entries = entries .. backpatch_field(1, backpatch_field(1, wire))
+    entries = entries .. string.char(10, 136, 1, 10, 133, 1, 10, 128, 1, 18, 126) ..
+      body .. string.char(18, 0)
   end
-  local expected = backpatch_field(1, entries .. string.char(16, 0))
-  local original = BackpatchForest(nodes)
+  -- Forty entries plus the 10 00 constness suffix are 5,562 bytes (ba 2b).
+  -- After that outer nest falls back and closes, field 2 opens at depth zero:
+  -- 12 80 01 <128-byte leaf>, requiring a fresh batched widening.
+  local tail_body = string.rep("t", 126)
+  local expected = string.char(10, 186, 43) .. entries .. string.char(16, 0) ..
+    string.char(18, 128, 1, 18, 126) .. tail_body
+  test.assert(#expected == 5696, "canonical forest wire length changed")
+  local original = BackpatchForest(nodes, BackpatchNode(nil, tail_body))
   test.assert(protobuf.serialize(original) == expected,
-    "bounded fallback misplaced a later sibling or the Array constness suffix")
+    "bounded fallback misplaced a sibling, Array suffix, or later outer field")
   local decoded: BackpatchForest = protobuf.deserialize(expected, descriptor(original))
   test.assert(#decoded.branches == 40 and
     decoded.branches[40].child.bytes == string.rep(string.char(40), 126),
     "bounded breadth fallback corrupted a later sibling")
+  test.assert(decoded.tail.child == nil and decoded.tail.bytes == tail_body,
+    "outermost field after bounded fallback did not reset patch scratch")
 end
 
 function test_backpatch_failed_hook_restores_append_boundary(_: test.Context)

@@ -371,8 +371,9 @@ function serialize_inspected_record_to_buffer(
     buf: foreign *void, candidate: reflect.RecordValue, context: value)
   local pbuf = buf as foreign *titan_protobuf_buffer
   local start = pbuf.length as integer
-  -- Only this synchronous root borrows automatic patch scratch. Failure cleanup
-  -- restores the append boundary without reading mutated scratch after longjmp.
+  -- Only this root's call stack borrows automatic patch scratch, which stays
+  -- valid across coroutine yields. Failure cleanup restores the append boundary
+  -- without reading mutated scratch after longjmp.
   local patches = foreign titan_protobuf_backpatch.new()
   local complete = false
   defer do

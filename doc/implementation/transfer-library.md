@@ -172,7 +172,7 @@ On nested failure protobuf restores the root's starting buffer length and the
 existing buffer guard frees its allocation; the exact-top encode scope releases
 pending attachments. Encoders and resource-attaching hooks are never replayed.
 See [nested backpatching](protobuf-library.md#encoding) for the 32-entry bound,
-fallback, and attribution anchors.
+fallback, and the two widening paths.
 
 Decode reads directly from the packet's byte slices using
 `protobuf.deserialize_nominal_buffer_with_context` (passing `scope` once for
