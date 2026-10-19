@@ -1118,6 +1118,13 @@ provides no cleanup shielding or terminal-publication gate.
   stackful Task frame persists across the entire call; it must never escape
   that interval or be retained by a producer after unlink. Rooting `owner` does
   not extend arbitrary native storage through Lua-state close.
+- Callbacks mutate `context` through a raw alias that Titan does not track.
+  When the calling function writes an automatic context and a `defer` or
+  `catch` reads it after a raise, declare a pointer local
+  (`local cell: foreign *T = storage`) and use only that pointer. A by-value
+  aggregate in that position gets a
+  [longjmp-safe spill](../implementation/c-ffi-expressions.md#longjmp-safe-aggregate-spills),
+  and recovery reloads its last Titan-written bytes over the callbacks' writes.
 
 #### Native retirement capabilities
 

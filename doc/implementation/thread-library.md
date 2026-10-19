@@ -257,8 +257,15 @@ clears the cell's packet pointer in the same foreign interval as enqueue;
 receive registration commits the dequeued packet into that guarded cell.
 Therefore cancellation that wins delivery after inline commitment never
 discards a published packet or leaks a dequeued one. `defer` guards the cell's
-remaining packet without a closure/capture box. Normal notified waits retry
-the fast check; they still reserve no slot or message.
+remaining packet without a closure/capture box. Titan code reaches the cell
+only through a `foreign *titan_thread_channel_wait` local: a by-value automatic
+aggregate written in a protected body and read by its `defer` receives a
+[longjmp-safe spill](c-ffi-expressions.md#longjmp-safe-aggregate-spills), and
+recovery would reload the last Titan-written bytes over the registrar's raw
+packet commit. Send installs its `defer` before the fast path because it owns
+the encoded packet from the start; receive installs it only on a waiting
+iteration, so an immediate dequeue has no protected boundary. Normal notified
+waits retry the fast check; they still reserve no slot or message.
 
 The proxy **cleanup** join is a different path on the same bridge. It never
 registers a `titan_thread_waiter` and never calls `async.wait_external`: the

@@ -273,7 +273,11 @@ end
 function Sender:send(message: T)
   -- The native cell owns the packet even when registration commits inline and
   -- cancellation wins delivery. No mutable local is captured on either path.
-  local wait = foreign titan_thread_channel_wait.new()
+  -- Every access goes through the pointer: a by-value automatic aggregate read
+  -- by the defer would get a setjmp spill whose recovery reload restores stale
+  -- bytes over the C registrar's packet commit.
+  local wait_storage = foreign titan_thread_channel_wait.new()
+  local wait: foreign *titan_thread_channel_wait = wait_storage
   wait.channel = self.native
   wait.message = value_to_thread_message(message as value)
   defer if wait.message ~= nil then thread_message_discard(wait.message) end
@@ -358,9 +362,9 @@ function Sender.from_transfer_payload(payload: string): Sender<|T|>
 end
 
 local function Receiver:dequeue_or_wait(): (boolean, foreign *void)
-  local wait = foreign titan_thread_channel_wait.new()
+  local wait_storage = foreign titan_thread_channel_wait.new()
+  local wait: foreign *titan_thread_channel_wait = wait_storage
   wait.channel = self.native
-  defer if wait.message ~= nil then thread_message_discard(wait.message) end
   while true do
     local fast_msg: foreign *titan_thread_message = nil
     local fast = channel_try_dequeue_native(wait.channel, nil, nil, fast_msg)
@@ -369,6 +373,9 @@ local function Receiver:dequeue_or_wait(): (boolean, foreign *void)
     elseif fast == 2 then
       return false, nil
     end
+    -- Only a waiting iteration enters this protected boundary. Access through
+    -- the pointer keeps the registrar's committed packet visible on unwind.
+    defer if wait.message ~= nil then thread_message_discard(wait.message) end
     async.wait_external_native(self, wait,
       channel_register_receive_wait, channel_unregister_receive_wait)
     if wait.status == 0 then
