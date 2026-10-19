@@ -294,6 +294,29 @@ function test_buffer_small_writes_keep_geometric_growth(_context: test.Context)
     "small-write growth changed the appended wire bytes")
 end
 
+-- Records the exact requested capacity and refuses the allocation.
+local foreign function record_refused_growth(
+    buf: *titan_protobuf_buffer, min_capacity: size_t): int
+  local requested = buf.context as foreign *size_t
+  requested[0] = min_capacity
+  return 0
+end
+
+function test_buffer_growth_near_size_limit_keeps_the_exact_need(
+    _context: test.Context)
+  local requested: owned size_t[] = foreign size_t.new_array(1)
+  local buf: owned *titan_protobuf_buffer = foreign titan_protobuf_buffer.new()
+  ffi.titan_protobuf_buf_init(buf, nil, 0, 64, requested as foreign *void,
+    record_refused_growth)
+  local extra: foreign size_t = ffi.SIZE_MAX - (100 as foreign size_t)
+  test.assert(ffi.titan_protobuf_buf_reserve(buf, extra) == 0,
+    "refused near-limit growth reported success")
+  test.assert(requested[0] == extra,
+    "unrepresentable bulk slack inflated the requested capacity")
+  test.assert(buf.capacity == 64 and buf.length == 0 and buf.data == nil,
+    "failed growth changed the buffer descriptor")
+end
+
 function test_signed_wire_golden(_context: test.Context)
   test.assert(protobuf.serialize(IntegerValue(75)) == string.char(8, 150, 1))
   test.assert(protobuf.serialize(IntegerValue(-1)) == string.char(8, 1))

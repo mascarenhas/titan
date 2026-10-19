@@ -142,9 +142,10 @@ writes through its `grow` callback and `context` pointer. When one reservation
 exceeds four times the current capacity (using 64 as the minimum), it instead
 requests `length + extra + 256`: the bounded slack accommodates subsequent
 fields and ordinary transfer name/module metadata plus a small attachment tail,
-without retaining the next power-of-two block for a large byte field. Both
-`length + extra` and the slack addition are checked against `SIZE_MAX`; near the
-limit, the slack is truncated to the remaining representable size. The
+without retaining the next power-of-two block for a large byte field.
+`length + extra` is checked against `SIZE_MAX`, and the 256-byte slack is added
+only when it still fits; near the limit the request stays at the exact
+`length + extra`, as in the doubling branch. The
 four-capacity comparison also guards its multiplication. Both growth branches
 increase capacity geometrically, preserving amortized O(1) growth for streams
 of small writes. A grow failure leaves the heap buffer and its length/capacity
