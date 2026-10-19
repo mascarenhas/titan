@@ -195,7 +195,11 @@ escapes that synchronous call. Neither `titan_protobuf_buffer` nor `Encoder` nor
 the packet grows, and no Lua/native bookkeeping allocation is added. Automatic
 storage is zero-initialized; only entries actually opened are subsequently
 written or visited. Non-widening encodes retain their existing buffer writes,
-growth requests, and allocation sizes.
+growth requests, and allocation sizes. A widening encode adds its deferred
+expansion only when the outermost message closes, so an earlier bulk
+reservation sizes its slack from the shorter unexpanded length; such encodes
+can request slightly different capacities, or rarely one more growth, than
+eager widening.
 
 Nested messages still open with a one-byte placeholder. On close, the encoder
 computes the canonical child length as its physical byte span plus the deferred
@@ -225,7 +229,8 @@ unchanged, permitting a native caller to retry.
 Root appenders restore their starting buffer length on failure, preserving all
 previously appended bytes and allowing a caller that catches an error to append
 again. They never read the mutated automatic scratch during error unwind; the
-GC-owned buffer descriptor remains the authority for reallocations and cleanup.
+caller's buffer descriptor (`data`, `length`, `capacity`) remains the authority
+for reallocation and cleanup.
 Capacity can remain grown after failure, and hook side effects/resource
 attachments are not rolled back by protobuf; the enclosing transfer scope owns
 their existing cleanup. No scratch pointer is retained in the buffer.
@@ -236,6 +241,7 @@ The kind-40 widening probe belongs at
 `memmove(buf->data + mark + vlen, buf->data + mark + 1, payload_len);` remains
 only in `titan_protobuf_buf_end_nested_eager` for bounded fallback and must also
 be counted when attributing overflow cases.
+
 Varints use logical shifts on the 64-bit integer carrier, including unsigned bit
 patterns represented by negative Titan integers. ZigZag preserves the complete
 signed range. Fixed floating and pointer payloads write little-endian bytes

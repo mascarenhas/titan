@@ -274,7 +274,6 @@ are established only after all prefix expansion and final buffer growth.
 The bounded batching fallback preserves the same bytes and single-call hook
 semantics, and failed encoding still disposes pending packet attachments.
 
-
 `decode_message(state, slot)` is a public source-defined C-ABI entry for trusted
 Lua/native integrations. It returns a native status rather than the decoded
 value. Pass an exclusively owned, live Lua state and the address of a **real

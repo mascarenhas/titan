@@ -1445,3 +1445,27 @@ function test_backpatch_nested_size_limit_rejects_before_mutation(_: test.Contex
     "2 GiB rejection modified the prefix or committed its patch")
 end
 
+function test_backpatch_nested_size_limit_counts_deferred_expansion(_: test.Context)
+  local buf: owned *titan_protobuf_buffer = foreign titan_protobuf_buffer.new()
+  ffi.titan_protobuf_buf_init_heap(buf, 0)
+  defer ffi.titan_protobuf_buf_free_heap(buf)
+  local patches = foreign titan_protobuf_backpatch.new()
+  local outer = ffi.titan_protobuf_buf_begin_nested(buf, patches, 10)
+  local inner = ffi.titan_protobuf_buf_begin_nested(buf, patches, 10)
+  local body = string.rep("d", 128)
+  test.assert(outer >= 0 and inner >= 0 and
+    ffi.titan_protobuf_buf_write_raw(buf, body, 128) ~= 0)
+  test.assert(ffi.titan_protobuf_buf_end_nested(buf, patches, inner) == 1 and
+    patches.depth == 1 and patches.extra == 1,
+    "inner prefix widening was not deferred to the outermost close")
+  local actual_length = buf.length
+  -- The outer physical span is exactly 2^31 - 1 bytes. Only the inner child's
+  -- deferred prefix byte makes its canonical payload exceed the 2 GiB limit.
+  buf.length = (2147483648 as foreign size_t) + (outer as foreign size_t)
+  local rc = ffi.titan_protobuf_buf_end_nested(buf, patches, outer)
+  buf.length = actual_length
+  test.assert(rc == -1 and patches.depth == 1 and patches.extra == 1 and
+    buf.data[1] == 0 and buf.data[3] == 0,
+    "2 GiB check ignored deferred descendant expansion or committed its patch")
+end
+

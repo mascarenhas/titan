@@ -125,7 +125,6 @@ If a raw-buffer append raises, its starting length and all previously appended
 bytes are preserved, so a caller that catches the error may append again.
 Capacity may remain grown, and hook side effects are not undone.
 
-
 `serialize_inspected_record_to_buffer`, `serialize_inspected_union_to_buffer`,
 `deserialize_nominal_buffer_with_context`,
 `serialize_fields_to_buffer_with_context`,

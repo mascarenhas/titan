@@ -174,7 +174,6 @@ pending attachments. Encoders and resource-attaching hooks are never replayed.
 See [nested backpatching](protobuf-library.md#encoding) for the 32-entry bound,
 fallback, and attribution anchors.
 
-
 Decode reads directly from the packet's byte slices using
 `protobuf.deserialize_nominal_buffer_with_context` (passing `scope` once for
 `RECORD` and `UNION` packets) and
