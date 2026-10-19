@@ -231,6 +231,69 @@ union NativeChoice
   packet(foreign titan_protobuf_packet)
 end
 
+-- The public raw-buffer API invokes this synchronous C-only grow callback;
+-- its context borrows the rooted test-owned counters only during encoding.
+local foreign function record_buffer_growth(
+    buf: *titan_protobuf_buffer, min_capacity: size_t): int
+  local counts = buf.context as foreign *size_t
+  counts[0] = counts[0] + 1
+  if min_capacity >= 65536 then counts[1] = counts[1] + 1 end
+  return ffi.titan_protobuf_heap_grow(buf, min_capacity)
+end
+
+function test_buffer_bulk_growth_leaves_room_for_trailing_fields(_context: test.Context)
+  local counts: owned size_t[] = foreign size_t.new_array(2)
+  local buf: owned *titan_protobuf_buffer = foreign titan_protobuf_buffer.new()
+  ffi.titan_protobuf_buf_init(buf, nil, 0, 0,
+    counts as foreign *void, record_buffer_growth)
+  defer ffi.titan_protobuf_buf_free_heap(buf)
+  local payload = string.rep("p\0", 32768)
+  local tail = string.rep("t\0", 96)
+  local fields: const {reflect.Type} = {
+    reflect.Type.is_string(), reflect.Type.is_string(),
+  }
+
+  protobuf.serialize_fields_to_buffer(buf as foreign *void, fields, payload, tail)
+  test.assert(counts[0] == 2 and counts[1] == 1,
+    "bulk payload or trailing field caused an extra buffer growth")
+  test.assert(buf.capacity == 65540 + 256,
+    "bulk write retained the next power-of-two capacity")
+  local decoded_payload: string, decoded_tail: string =
+    protobuf.deserialize_fields_buffer(
+      buf.data as foreign const *void, buf.length as integer, fields)
+  test.assert(decoded_payload == payload and decoded_tail == tail,
+    "buffer growth changed binary payload or trailing field bytes")
+end
+
+function test_buffer_small_writes_keep_geometric_growth(_context: test.Context)
+  local counts: owned size_t[] = foreign size_t.new_array(2)
+  local buf: owned *titan_protobuf_buffer = foreign titan_protobuf_buffer.new()
+  ffi.titan_protobuf_buf_init(buf, nil, 0, 0,
+    counts as foreign *void, record_buffer_growth)
+  defer ffi.titan_protobuf_buf_free_heap(buf)
+  local fields: const {reflect.Type} = {reflect.Type.is_integer()}
+  local capacity = 0
+  for _ = 1, 512 do
+    protobuf.serialize_fields_to_buffer(buf as foreign *void, fields, 0)
+    local next_capacity = buf.capacity as integer
+    if next_capacity ~= capacity then
+      if capacity == 0 then
+        test.assert(next_capacity == 64, "initial buffer capacity changed")
+      else
+        test.assert(next_capacity == capacity * 2,
+          "small writes no longer double buffer capacity")
+      end
+      capacity = next_capacity
+    end
+  end
+  test.assert(counts[0] == 6 and counts[1] == 0 and capacity == 2048,
+    "small-write stream changed its geometric allocation sequence")
+  local expected = string.rep(string.char(8, 0), 512)
+  test.assert(buf.length == #expected and
+    ffi.memcmp(buf.data, expected, #expected as foreign size_t) == 0,
+    "small-write growth changed the appended wire bytes")
+end
+
 function test_signed_wire_golden(_context: test.Context)
   test.assert(protobuf.serialize(IntegerValue(75)) == string.char(8, 150, 1))
   test.assert(protobuf.serialize(IntegerValue(-1)) == string.char(8, 1))

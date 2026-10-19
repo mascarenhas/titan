@@ -97,6 +97,15 @@ slice of length `length`. `find_transfer_hooks` returns a record's validated
 `encode_transfer_payload` invokes that `encode` method under the shared
 active-record cycle guard and raises `err_msg` if `candidate` is already active.
 
+The caller retains ownership of a raw buffer and must keep its descriptor and
+any `context` owner alive until serialization returns, then free or detach its
+storage using the matching native buffer operations. The `grow` callback can be
+invoked synchronously while appending. Small writes retain geometric growth;
+a single bulk reservation uses bounded extra capacity instead of rounding a
+large payload up to the next power of two. Buffer capacity and allocation
+counts are not part of the serialized wire format; see the
+[implementation growth policy](../implementation/protobuf-library.md#encoding).
+
 `serialize_inspected_record_to_buffer`, `serialize_inspected_union_to_buffer`,
 `deserialize_nominal_buffer_with_context`,
 `serialize_fields_to_buffer_with_context`,

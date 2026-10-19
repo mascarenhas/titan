@@ -249,6 +249,14 @@ into an expandable native buffer prefixed with the message header, carrying the
 packet's `ResourceScope` once into `protobuf` without creating an intermediate
 `TransferValue` or Lua string for the root message.
 
+Small-packet initial sizing is unchanged. A single large byte-field write uses
+bounded spare buffer capacity rather than retaining a power-of-two block nearly
+twice its size; ordinary metadata and a small attachment tail can use that spare
+space without another payload-sized growth. The actual metadata, alignment,
+and attachment tail are always reserved before the packet is detached; wire
+bytes, hook invocation order, and resource ownership do not depend on spare
+capacity. See the [buffer implementation](../implementation/protobuf-library.md#encoding).
+
 `decode_message(state, slot)` is a public source-defined C-ABI entry for trusted
 Lua/native integrations. It returns a native status rather than the decoded
 value. Pass an exclusively owned, live Lua state and the address of a **real

@@ -136,9 +136,21 @@ active payload only; the all-public type flag still rejects private variants
 anywhere on that nominal declaration.
 
 All wire accumulation writes into a pluggable, expandable native buffer
-(`titan_protobuf_buffer` in `titan/protobuf/native.h`) that grows by amortized
-doubling (`titan_protobuf_buf_reserve`) via a pluggable `grow` callback and
-`context` pointer. Because serialization calls may raise Lua errors (`longjmp`)
+(`titan_protobuf_buffer` in `titan/protobuf/native.h`).
+`titan_protobuf_buf_reserve` starts at 64 bytes and doubles capacity for small
+writes through its `grow` callback and `context` pointer. When one reservation
+exceeds four times the current capacity (using 64 as the minimum), it instead
+requests `length + extra + 256`: the bounded slack accommodates subsequent
+fields and ordinary transfer name/module metadata plus a small attachment tail,
+without retaining the next power-of-two block for a large byte field. Both
+`length + extra` and the slack addition are checked against `SIZE_MAX`; near the
+limit, the slack is truncated to the remaining representable size. The
+four-capacity comparison also guards its multiplication. Both growth branches
+increase capacity geometrically, preserving amortized O(1) growth for streams
+of small writes. A grow failure leaves the heap buffer and its length/capacity
+unchanged.
+
+Because serialization calls may raise Lua errors (`longjmp`)
 after buffer growth, callers allocate the buffer descriptor with
 `owned *titan_protobuf_buffer = foreign titan_protobuf_buffer.new()` so its
 `data`, `length`, and `capacity` fields live in GC-owned userdata storage rather
@@ -154,10 +166,18 @@ plus at most 64 bytes of the mandatory `name`/`module` trailer upfront via
 so the serialized wire payload and trailing `name`/`module` bytes are written
 directly after the header prefix without an extra allocation or intermediate Lua
 string, and zeroes/populates the `titan_async_message` header once in
-`finalize_buf_message` after `titan_protobuf_buf_take_data`. Nested
-length-delimited messages reserve
-a one-byte length slot at `begin_nested` and patch or shift in place at
-`end_nested`, avoiding intermediate per-message writers or string allocations.
+`finalize_buf_message` before `titan_protobuf_buf_take_data`. The existing
+64-byte initial metadata credit still selects the same small-packet capacities;
+the bulk-write slack is separate and is not added to those initial reservations.
+For a 64 KiB top-level byte field, the encoder performs one small allocation
+and one bulk growth; ordinary metadata and the one-endpoint attachment tail fit
+in that bulk block. The final transfer reservation still computes the exact
+metadata, alignment, and actual attachment count before detaching; unusually
+large trailers or later fields can exhaust the bounded slack and require normal
+growth. No sizing pass replays a custom encoder. Nested length-delimited
+messages reserve a one-byte length slot at `begin_nested` and patch or shift in
+place at `end_nested`, avoiding intermediate per-message writers or string
+allocations.
 Varints use logical shifts on the 64-bit integer carrier, including unsigned bit
 patterns represented by negative Titan integers. ZigZag preserves the complete
 signed range. Fixed floating and pointer payloads write little-endian bytes

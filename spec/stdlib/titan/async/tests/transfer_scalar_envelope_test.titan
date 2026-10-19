@@ -984,7 +984,7 @@ function test_transfer_scalar_envelope_bounded_presize_and_single_closure_projec
     context: test.Context)
   context:run("short-and-long-metadata-records-unions-and-closures",
     function (_context: test.Context)
-      local sizes = {0, 1, 48, 128, 256, 1024}
+      local sizes = {0, 1, 48, 128, 256, 1024, 32768}
       for i = 1, #sizes do
         local payload = tse_string.rep("p\0", sizes[i])
         local short_rec: TransferScalarEnvelopeShortRecord = tse_roundtrip_raw(

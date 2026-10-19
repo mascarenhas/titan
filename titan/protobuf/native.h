@@ -43,12 +43,22 @@ static inline int titan_protobuf_buf_reserve(
   if (new_cap < 64) {
     new_cap = 64;
   }
-  while (new_cap < needed) {
-    if (new_cap > SIZE_MAX / 2) {
-      new_cap = needed;
-      break;
+  if (new_cap <= SIZE_MAX / 4 && extra > new_cap * 4) {
+    /* A single bulk write should not retain the next power-of-two block.
+     * Leave bounded room for later fields, packet metadata and attachments. */
+    size_t slack = 256;
+    if (slack > SIZE_MAX - needed) {
+      slack = SIZE_MAX - needed;
     }
-    new_cap *= 2;
+    new_cap = needed + slack;
+  } else {
+    while (new_cap < needed) {
+      if (new_cap > SIZE_MAX / 2) {
+        new_cap = needed;
+        break;
+      }
+      new_cap *= 2;
+    }
   }
   if (buf->grow == NULL) {
     return 0;
