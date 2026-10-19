@@ -137,19 +137,23 @@ anywhere on that nominal declaration.
 
 All wire accumulation writes into a pluggable, expandable native buffer
 (`titan_protobuf_buffer` in `titan/protobuf/native.h`).
-`titan_protobuf_buf_reserve` starts at 64 bytes and doubles capacity for small
-writes through its `grow` callback and `context` pointer. When one reservation
-exceeds four times the current capacity (using 64 as the minimum), it instead
-requests `needed + max(256, needed / 8)`, where `needed = length + extra` and
-division rounds down. The slack absorbs proportional trailing fields and packet
-metadata without retaining the next power-of-two block for a large byte field.
-It is at most 12.5% of `needed` for requests of at least 2,048 bytes; smaller
-bulk requests retain 256 spare bytes. `length + extra` is checked against
-`SIZE_MAX`, and the slack is added only when it still fits; otherwise the request
-stays at the exact `needed`, as in the doubling branch. The four-capacity
-comparison also guards its multiplication. Both growth branches increase capacity
-geometrically, preserving amortized O(1) growth for streams of small writes. A
-grow failure leaves the heap buffer and its length/capacity unchanged.
+`titan_protobuf_buf_reserve` grows small writes through power-of-two capacities
+from a 64-byte minimum via its `grow` callback and `context` pointer. When one
+reservation exceeds four times the current capacity (using 64 as the minimum),
+it instead requests `needed + max(256, needed / 8)`, where
+`needed = length + extra` and division rounds down. The slack absorbs proportional
+trailing fields and packet metadata without retaining the next power-of-two block
+for a large byte field. It is at most 12.5% of `needed` for requests of at least
+2,048 bytes; smaller bulk requests retain 256 spare bytes. `length + extra` is
+checked against `SIZE_MAX`, and the slack is added only when it still fits;
+otherwise the request stays at the exact `needed`. The four-capacity comparison
+also guards its multiplication. In the doubling branch, growth starts at the
+largest power of two no greater than `max(capacity, 64)` and doubles until
+`needed` fits, falling back to exactly `needed` if the next doubling would
+overflow. Thus growth after a bulk allocation rejoins the power-of-two sequence
+instead of doubling its off-sequence capacity. Growth remains amortized O(1)
+for streams of small writes. A grow failure leaves the heap buffer and its
+length/capacity unchanged.
 
 Because serialization calls may raise Lua errors (`longjmp`)
 after buffer growth, callers allocate the buffer descriptor with
@@ -172,13 +176,17 @@ reservation, `sizeof(titan_async_message)` plus at most 64 metadata bytes, stays
 below an empty buffer's bulk threshold (four times the 64-byte minimum) on
 supported targets, so it takes the doubling branch and never receives the
 bulk-write slack. For a 64 KiB top-level byte field, the encoder performs one
-small allocation and one bulk growth; ordinary metadata and the one-endpoint
-attachment tail fit in that bulk block. The final transfer reservation computes
-the exact metadata, alignment, and actual attachment count before detaching.
+bulk growth after its small initial allocations; ordinary metadata and the
+one-endpoint attachment tail fit in that bulk block. On a target with a 120-byte
+packet header, a transfer packet whose name and module total at most eight bytes
+first grows to 128, then 256 bytes before the bulk growth. The final transfer
+reservation computes the exact metadata, alignment, and actual attachment count
+before detaching.
 Later fields, metadata, and attachment entries that together exceed the bulk
-slack can require a second payload-sized reallocation through normal growth.
-The proportional slack avoids that extra growth for trailers up to about one
-eighth of a large field's size, rather than imposing a fixed 256-byte limit.
+slack can require a second payload-sized reallocation through normal growth,
+even when rounding the original field up to the next power of two would have
+left enough room. The proportional slack avoids that extra growth for trailers
+up to about one eighth of a large field's size.
 No sizing pass replays a custom encoder. Nested length-delimited
 messages reserve a one-byte length slot at `begin_nested` and patch or shift in
 place at `end_nested`, avoiding intermediate per-message writers or string

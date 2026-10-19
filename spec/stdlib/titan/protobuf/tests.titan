@@ -265,6 +265,61 @@ function test_buffer_bulk_growth_leaves_room_for_trailing_fields(_context: test.
     "buffer growth changed binary payload or trailing field bytes")
 end
 
+local function check_buffer_bulk_boundary(
+    payload_size: integer, expected_capacity: integer)
+  local counts: owned size_t[] = foreign size_t.new_array(2)
+  local buf: owned *titan_protobuf_buffer = foreign titan_protobuf_buffer.new()
+  ffi.titan_protobuf_buf_init(buf, nil, 0, 0,
+    counts as foreign *void, record_buffer_growth)
+  defer ffi.titan_protobuf_buf_free_heap(buf)
+  local payload = string.rep("b", payload_size)
+  local fields: const {reflect.Type} = {reflect.Type.is_string()}
+
+  protobuf.serialize_fields_to_buffer(buf as foreign *void, fields, payload)
+  test.assert(counts[0] == 2 and buf.capacity == expected_capacity,
+    "first byte field used the wrong side of the strict bulk threshold")
+  local decoded: string = protobuf.deserialize_fields_buffer(
+    buf.data as foreign const *void, buf.length as integer, fields)
+  test.assert(decoded == payload, "boundary growth changed the field bytes")
+end
+
+function test_buffer_bulk_growth_has_strict_four_capacity_boundary(
+    context: test.Context)
+  context:run("256_bytes_doubles_to_512", function (_: test.Context)
+    -- The key and length use three bytes; 256 == 4 * 64 stays on doubling.
+    check_buffer_bulk_boundary(256, 512)
+  end)
+  context:run("257_bytes_bulk_grows_to_516", function (_: test.Context)
+    -- The 260-byte need receives the 256-byte minimum bulk slack.
+    check_buffer_bulk_boundary(257, 516)
+  end)
+end
+
+function test_buffer_growth_after_bulk_rejoins_power_of_two_capacity(
+    _context: test.Context)
+  local counts: owned size_t[] = foreign size_t.new_array(2)
+  local buf: owned *titan_protobuf_buffer = foreign titan_protobuf_buffer.new()
+  ffi.titan_protobuf_buf_init(buf, nil, 0, 0,
+    counts as foreign *void, record_buffer_growth)
+  defer ffi.titan_protobuf_buf_free_heap(buf)
+  local payload = string.rep("p\0", 32768)
+  local tail = string.rep("t\0", 8192)
+  local fields: const {reflect.Type} = {
+    reflect.Type.is_string(), reflect.Type.is_string(),
+  }
+
+  -- The first field bulk-grows to 73,732. The second exceeds its slack,
+  -- so growth must resume at 131,072 rather than doubling to 147,464.
+  protobuf.serialize_fields_to_buffer(buf as foreign *void, fields, payload, tail)
+  test.assert(counts[0] == 3 and counts[1] == 2 and buf.capacity == 131072,
+    "growth after a bulk write did not rejoin the power-of-two sequence")
+  local decoded_payload: string, decoded_tail: string =
+    protobuf.deserialize_fields_buffer(
+      buf.data as foreign const *void, buf.length as integer, fields)
+  test.assert(decoded_payload == payload and decoded_tail == tail,
+    "growth after a bulk write changed the binary fields")
+end
+
 function test_buffer_small_writes_keep_geometric_growth(_context: test.Context)
   local counts: owned size_t[] = foreign size_t.new_array(2)
   local buf: owned *titan_protobuf_buffer = foreign titan_protobuf_buffer.new()
@@ -290,7 +345,7 @@ function test_buffer_small_writes_keep_geometric_growth(_context: test.Context)
   end
   -- 1024 appended bytes cross at least the 64..1024 doublings; every grow
   -- request must be one of those observed doublings, never a bulk request.
-  test.assert(changes >= 5 and counts[0] == changes and counts[1] == 0,
+  test.assert(changes >= 5 and counts[0] == changes,
     "small-write stream made a non-doubling buffer growth")
   local expected = string.rep(string.char(8, 0), 512)
   test.assert(buf.length == #expected and

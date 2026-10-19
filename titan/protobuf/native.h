@@ -58,6 +58,10 @@ static inline int titan_protobuf_buf_reserve(
       new_cap = needed;
     }
   } else {
+    /* Rejoin the power-of-two sequence after an off-sequence bulk growth. */
+    while ((new_cap & (new_cap - 1)) != 0) {
+      new_cap &= new_cap - 1;
+    }
     while (new_cap < needed) {
       if (new_cap > SIZE_MAX / 2) {
         new_cap = needed;

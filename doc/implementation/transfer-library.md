@@ -145,12 +145,16 @@ least 2,048 bytes the slack is at most 12.5% of that need; smaller bulk requests
 leave 256 bytes. If the addition would exceed `SIZE_MAX`, growth requests
 exactly `needed`. This slack is separate from the initial 64-byte metadata
 credit: the initial reservation stays below the bulk threshold and, like every
-small write, uses ordinary doubling. A 64 KiB byte field needs only one bulk
+small write, uses ordinary power-of-two growth. After a bulk growth, the doubling
+branch starts from the largest power of two no greater than
+`max(capacity, 64)`, so later growth rejoins that sequence (or requests exactly
+`needed` if doubling would overflow). A 64 KiB byte field needs only one bulk
 growth, with room for proportional trailing fields, name/module bytes, and the
 aligned one-endpoint tail. `finalize_buf_message` reserves the actual trailer
 and entry count before detachment; trailing data that exceeds the slack can
-require a second payload-sized reallocation through normal growth. See
-[buffer growth](protobuf-library.md#encoding).
+require a second payload-sized reallocation through normal growth, even when
+rounding the original field up to the next power of two would have left enough
+room. See [buffer growth](protobuf-library.md#encoding).
 
 Decode reads directly from the packet's byte slices using
 `protobuf.deserialize_nominal_buffer_with_context` (passing `scope` once for
