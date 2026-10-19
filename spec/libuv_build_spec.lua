@@ -4031,7 +4031,7 @@ printf '%s\0' "$@" > "$TITAN_SELECTOR_ARGV_LOG"
                 for shard = 1, 5 do
                     expected_total = expected_total + #expected[shard]
                 end
-                assert.equal(158, expected_total)
+                assert.equal(160, expected_total)
                 assert.equal(expected_total, total)
 
                 local complete_log = root .. "/complete"
@@ -5548,8 +5548,8 @@ done
                     assert.is_true(tonumber(seconds) >= 0)
                 end
             end
-            assert.same({ 41, 29, 40, 40 }, shard_counts)
-            assert.equal(150, assigned_count)
+            assert.same({ 43, 29, 40, 40 }, shard_counts)
+            assert.equal(152, assigned_count)
             local integration_count = 0
             for line in read_file(
                 "spec/support/ci_stdlib_compiler_test_files.txt"):gmatch("[^\n]+") do
@@ -5562,7 +5562,7 @@ done
                 end
             end
             assert.equal(8, integration_count)
-            assert.equal(158, assigned_count + integration_count)
+            assert.equal(160, assigned_count + integration_count)
 
             local stress_partition = read_file(
                 "spec/support/ci_compiler_stress_files.txt")
