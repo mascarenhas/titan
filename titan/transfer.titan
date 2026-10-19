@@ -1253,12 +1253,23 @@ local function copy_native_bytes(bytes: foreign const *char, length: foreign siz
   return result as string
 end
 
--- The foreign boundary retains the caller's slot through this ordinary
--- worker's entry preparation. Only a completely prepared scope takes it.
+-- The protected foreign boundary retains the caller's slot through worker
+-- preparation and primitive results/errors. Only nominal reconstruction needs
+-- a scope and moves that owner after the scope is completely prepared.
 local function decode_message_worker(slot_value: value): value
   local slot = slot_value as foreign *(*void)
   local message = slot[0] as foreign *titan_async_message
   if message == nil then raise "transfer: cannot decode a NULL packet" end
+  local kind = message.kind
+  if kind == ffi.TITAN_ASYNC_MESSAGE_STRING then
+    -- Keep the packet in the caller's slot while Lua allocates/roots the result.
+    -- decode_message clears and disposes it after pcall on success or failure.
+    return copy_native_bytes(message.bytes, message.length)
+  elseif kind == ffi.TITAN_ASYNC_MESSAGE_FUNCTION then
+    -- Valid bare C functions already took the C-only path. Error creation
+    -- remains protected, but cannot claim attachments or need a scope.
+    raise "cannot transfer a NULL Lua C function"
+  end
   local execution = current_execution()
   local previous? = resource_scopes[execution]
   local scope = acquire_resource_scope()
@@ -1277,14 +1288,7 @@ local function decode_message_worker(slot_value: value): value
   resource_scopes[execution] = scope
   -- A single native move commits both sides after all allocating preparation.
   move_slot_to_scope(scope.native, slot)
-  local kind = message.kind
-  if kind == ffi.TITAN_ASYNC_MESSAGE_STRING then
-    return copy_native_bytes(message.bytes, message.length)
-  elseif kind == ffi.TITAN_ASYNC_MESSAGE_FUNCTION then
-    -- Valid bare C functions take the C-only path. NULL retains its protected
-    -- semantic error, since creating that error can allocate.
-    raise "cannot transfer a NULL Lua C function"
-  elseif kind == ffi.TITAN_ASYNC_MESSAGE_RECORD then
+  if kind == ffi.TITAN_ASYNC_MESSAGE_RECORD then
     local name = copy_native_bytes(message.name, message.name_length)
     initialize_nominal_raw(message.module, message.module_length, name)
     return protobuf.deserialize_nominal_buffer_with_context(

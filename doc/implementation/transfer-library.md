@@ -175,6 +175,11 @@ before calling the worker. Protected dispatch always returns through native
 residual-slot cleanup, which clears/discards any remaining raw owner and removes
 the handler while retaining exactly one result/error root.
 
+Protected `STRING` decode copies its bytes, and malformed nil `FUNCTION` decode
+raises its semantic error, before resolving execution identity or acquiring a
+scope. Both keep the packet in `slot[0]` for the outer C boundary's consuming
+cleanup, including release of any unclaimed attachments on success or error.
+
 `decode_message_worker` acquires either a fully retired pooled `ResourceScope`
 or a fresh inert frame. Only fresh creation registers the finalizer, before
 granting authority or native ownership; pooled frames are already finalizable.

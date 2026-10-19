@@ -266,8 +266,10 @@ borrowed `lua_State`, borrowed pointer, and non-nil bare C function) push their
 result directly in C, clear the slot, and dispose of the packet without opening
 a decode scope or entering `lua_pcallk`. Binary strings, nominal packets, empty
 input slots, and malformed nil C-function packets enter the protected Lua
-decoder worker under a decode scope. Disposal of any residual owner finishes
-before the status returns, and the entry does not rethrow after mutating the
+decoder worker. Strings and malformed functions do not acquire a resource scope;
+the outer native boundary disposes their residual owner and any unclaimed
+attachments. Nominal reconstruction retains exact packet-scope authority.
+Disposal finishes before status returns, without rethrowing after mutating the
 slot. The status means:
 
 - `0`: exactly one decoded value, possibly nil, sits above the Lua stack top
