@@ -13,7 +13,7 @@ local coverage = require 'titan-compiler.coverage'
 
 local p = argparse('titan', 'Titan compiler')
 p:argument('module', 'Names of the modules to compile.'):args("*")
-p:flag('--print-prefix', 'Print the selected Titan installation prefix and exit.')
+p:flag('--print-prefix --print-root', 'Print the selected Titan installation prefix and exit.')
 p:flag('--print-ast', 'Print the AST.')
 p:flag('--pretty-print', 'Format generated C and headers with clang-format.')
 p:flag('-v --verbose', 'Be verbose about compiler invocations.')

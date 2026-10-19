@@ -50,6 +50,14 @@ local function query(arguments, cpath, environment, windows)
 end
 
 describe("titanc installation prefix query", function()
+    it("provides the standalone discovery root query", function()
+        local status, stdout, stderr = query({ "--print-root" },
+            "/SDK/lib/titan/0.6/?.so")
+        assert.equal(0, status)
+        assert.equal("/SDK\n", stdout)
+        assert.equal("", stderr)
+    end)
+
     it("prefers the current Titan SDK over the LuaRocks user tree", function()
         local status, stdout, stderr = query({ "--print-prefix" },
             "/home/dev/.luarocks/lib/lua/5.5/?.so;" ..
