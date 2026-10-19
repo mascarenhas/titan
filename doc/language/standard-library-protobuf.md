@@ -100,10 +100,15 @@ active-record cycle guard and raises `err_msg` if `candidate` is already active.
 The caller retains ownership of a raw buffer and must keep its descriptor and
 any `context` owner alive until serialization returns, then free or detach its
 storage using the matching native buffer operations. The `grow` callback can be
-invoked synchronously while appending. Small writes retain geometric growth;
-a single bulk reservation uses bounded extra capacity instead of rounding a
-large payload up to the next power of two. Buffer capacity and allocation
-counts are not part of the serialized wire format; see the
+invoked synchronously while appending. Small writes double capacity from a
+64-byte minimum. A single reservation exceeding four times the current capacity
+(using 64 as the minimum) requests `needed + max(256, needed / 8)`, where `needed`
+is the appended total length and division rounds down. For `needed` of at least
+2,048 bytes the spare capacity is at most 12.5% of that need; smaller bulk
+requests leave 256 bytes. If adding the slack would exceed `SIZE_MAX`, the
+request is exactly `needed`. This leaves room for proportional trailers without
+retaining the next power-of-two block. Buffer capacity and allocation counts
+are not part of the serialized wire format; see the
 [implementation growth policy](../implementation/protobuf-library.md#encoding).
 
 `serialize_inspected_record_to_buffer`, `serialize_inspected_union_to_buffer`,

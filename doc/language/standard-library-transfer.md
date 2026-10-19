@@ -250,14 +250,17 @@ packet's `ResourceScope` once into `protobuf` without creating an intermediate
 `TransferValue` or Lua string for the root message.
 
 Small packets start from a bounded initial reservation and grow by doubling. A
-single large byte-field write instead grows to its need plus bounded spare
-capacity, rather than retaining a power-of-two block up to twice its size;
-ordinary metadata and a small attachment tail can use that spare space without
-another payload-sized growth, while larger trailing data grows normally. The
-actual metadata, alignment, and attachment tail are always reserved before the
-packet is detached; wire bytes, hook invocation order, and resource ownership do
-not depend on spare capacity. See the
-[buffer implementation](../implementation/protobuf-library.md#encoding).
+single byte-field reservation exceeding four times the current capacity (using
+64 as the minimum) instead grows to `needed + max(256, needed / 8)`, where
+`needed` is the total required buffer length and division rounds down. Spare
+capacity is at most 12.5% of `needed` for requests of at least 2,048 bytes, or
+256 bytes for smaller bulk requests; if adding it would exceed `SIZE_MAX`, the
+request stays at exactly `needed`. Proportional trailing fields, metadata, and
+attachment entries can use that space without another payload-sized growth;
+trailing data exceeding it grows normally. The actual metadata, alignment, and
+attachment tail are always reserved before the packet is detached; wire bytes,
+hook invocation order, and resource ownership do not depend on spare capacity.
+See the [buffer implementation](../implementation/protobuf-library.md#encoding).
 
 `decode_message(state, slot)` is a public source-defined C-ABI entry for trusted
 Lua/native integrations. It returns a native status rather than the decoded

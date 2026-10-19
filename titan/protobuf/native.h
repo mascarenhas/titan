@@ -45,11 +45,15 @@ static inline int titan_protobuf_buf_reserve(
   }
   if (new_cap <= SIZE_MAX / 4 && extra > new_cap * 4) {
     /* A single bulk write should not retain the next power-of-two block.
-     * Leave bounded room for later fields, packet metadata and attachments.
-     * Near the size limit the slack does not fit, so request exactly what the
-     * caller needs instead of an unrepresentable extra 256 bytes. */
-    if (needed <= SIZE_MAX - 256) {
-      new_cap = needed + 256;
+     * Leave max(256, needed / 8) bytes for later fields, packet metadata and
+     * attachments. If that slack would overflow, request exactly what the
+     * caller needs. */
+    size_t slack = needed / 8;
+    if (slack < 256) {
+      slack = 256;
+    }
+    if (needed <= SIZE_MAX - slack) {
+      new_cap = needed + slack;
     } else {
       new_cap = needed;
     }

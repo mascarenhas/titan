@@ -248,7 +248,7 @@ function test_buffer_bulk_growth_leaves_room_for_trailing_fields(_context: test.
     counts as foreign *void, record_buffer_growth)
   defer ffi.titan_protobuf_buf_free_heap(buf)
   local payload = string.rep("p\0", 32768)
-  local tail = string.rep("t\0", 96)
+  local tail = string.rep("t\0", 2048)
   local fields: const {reflect.Type} = {
     reflect.Type.is_string(), reflect.Type.is_string(),
   }
@@ -256,8 +256,8 @@ function test_buffer_bulk_growth_leaves_room_for_trailing_fields(_context: test.
   protobuf.serialize_fields_to_buffer(buf as foreign *void, fields, payload, tail)
   test.assert(counts[0] == 2 and counts[1] == 1,
     "bulk payload or trailing field caused an extra buffer growth")
-  test.assert(buf.capacity == 65540 + 256,
-    "bulk write retained the next power-of-two capacity")
+  test.assert(buf.capacity == 65540 + 65540 // 8,
+    "bulk write did not retain one-eighth proportional slack")
   local decoded_payload: string, decoded_tail: string =
     protobuf.deserialize_fields_buffer(
       buf.data as foreign const *void, buf.length as integer, fields)
@@ -312,7 +312,8 @@ function test_buffer_growth_near_size_limit_keeps_the_exact_need(
   local buf: owned *titan_protobuf_buffer = foreign titan_protobuf_buffer.new()
   ffi.titan_protobuf_buf_init(buf, nil, 0, 0, requested as foreign *void,
     record_refused_growth)
-  local extra: foreign size_t = ffi.SIZE_MAX - (100 as foreign size_t)
+  -- A fixed 256-byte slack would fit, but the proportional slack would not.
+  local extra: foreign size_t = ffi.SIZE_MAX - (512 as foreign size_t)
   test.assert(ffi.titan_protobuf_buf_reserve(buf, extra) == 0,
     "refused near-limit growth reported success")
   test.assert(requested[0] == extra,
