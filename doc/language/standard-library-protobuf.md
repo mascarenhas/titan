@@ -273,11 +273,12 @@ change the wire mapping, scalar last-selection, repeated-message merging, or
 oneof replacement rules above.
 
 String entry points retain their input throughout decoding, including custom
-decoder calls. Internally merged message bytes remain retained while any child
-slice uses them. The raw `*_buffer` entry points borrow caller-owned memory:
-keep that complete byte range alive and unchanged until the synchronous call
-returns or raises, including while a custom decoder runs. A raw pointer does not
-retain a Titan string or native allocation.
+decoder calls that drop the caller's last reference to it. Internally merged
+message bytes remain retained while any child slice uses them. The raw
+`*_buffer` entry points borrow caller-owned memory: keep that complete byte
+range alive and unchanged until the synchronous call returns or raises,
+including while a custom decoder runs. A raw pointer does not retain a Titan
+string or native allocation.
 
 Extended C floating values use C hexadecimal text to avoid narrowing to Titan
 `float`; they do not acquire a standard protobuf numeric interpretation. Pointer
