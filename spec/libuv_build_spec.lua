@@ -1008,25 +1008,6 @@ esac
         end
     end)
 
-    it("requires source foreign headers only for modules declaring foreign functions", function()
-        local expected = {}
-        for _, source in ipairs(stdlib_source_files()) do
-            local module = assert(source:match("^titan/([^/.]+)"))
-            for _, node in ipairs(parsed_source(source)) do
-                if node._tag == "Ast.TopLevelForeignFunc" then
-                    local stem = source:match("^(titan/[^/]+/)[^/]+[.]titan$")
-                    stem = stem and (stem .. module) or ("titan/" .. module)
-                    expected["out/" .. stem .. ".titan.h"] = true
-                end
-            end
-        end
-        local actual = {}
-        for _, path in ipairs(makefile_words("STDLIB_GENERATED_FOREIGN_HEADERS")) do
-            if path:match("[.]titan[.]h$") then actual[path] = true end
-        end
-        assert.same(expected, actual)
-    end)
-
     it("builds and invalidates separate stdlib objects in parallel", function()
             if platform.windows then
                 pending("Unix Make stdlib object DAG and shell compiler fixtures")

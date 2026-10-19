@@ -58,6 +58,11 @@ endpoints can form native channel cycles; retain a receiver and explicitly
 close/drain it before dropping the last application handle. See
 [endpoint lifetime rules](standard-library-thread.md#closing-cloning-and-transferring-endpoints).
 
+The direct route for nested channel endpoints preserves the hook route's
+ownership contract: each occurrence has its own packet entry, and each decoded
+occurrence gets a fresh finalized wrapper before adoption. Standalone protobuf
+or policy conversion creates no packet scope and cannot mint endpoint units.
+
 **Native packet discard never decodes payloads or invokes `from_transfer_payload`.**
 Discarding an undelivered packet—whether through `transfer.discard_message`,
 `Packet:close()`, a full or closed `Sender:try_send`, a cancelled `Sender:send`,

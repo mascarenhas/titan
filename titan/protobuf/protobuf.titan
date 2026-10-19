@@ -40,6 +40,92 @@ local function resolve_type(descriptor: reflect.Type): reflect.Type
   raise "protobuf: cyclic type alias"
 end
 
+-- Transfer installs state-local capabilities; protobuf never imports the
+-- transport or interprets an endpoint's private native layout. Metatable
+-- identity is shared by all erased applications of a generic record.
+record ResourceCodec
+  const identity: value
+  const descriptor: reflect.RecordType
+  const encode: function (value, value): (integer)
+  const decode: function (value, foreign const *void, integer): (value)
+end
+
+local resource_codecs: {value: ResourceCodec} = {}
+local resource_nominals: {string: {value: value}} = {}
+local packet_context_provider: (function (boolean): (value))? = nil
+
+-- Transfer installs the packet-scope resolver exactly once. Protobuf never
+-- imports the transport, and an unresolved or direction-mismatched execution
+-- yields no context, so a standalone protobuf call carries no authority.
+function set_packet_context_provider(provider: function (boolean): (value))
+  packet_context_provider = provider
+end
+
+local function packet_context(encoding: boolean): value
+  if packet_context_provider == nil then return nil end
+  return packet_context_provider(encoding)
+end
+
+-- No stack effects or allocation: copy the canonical table into a traced
+-- TValue before consulting it. Neither the raw userdata nor its table address
+-- is retained independently of the original value.
+local function record_identity(candidate: value): value
+  local raw: foreign TValue = candidate
+  if ffi.lmacro_ttype(raw) ~= ffi.LUA_TUSERDATA then return nil end
+  local mt = ffi.lmacro_uvalue(raw).metatable
+  if mt == nil then return nil end
+  local identity: foreign TValue = nil
+  ffi.lmacro_sethvalue(L, identity, mt)
+  local fields: {value: value} = identity as value
+  local brand: integer? = fields[ffi.TITAN_BRAND]
+  if brand ~= (ffi.TITAN_RECORD as integer) then return nil end
+  return identity as value
+end
+
+-- Internal compiled collaboration: only the transport registers capabilities,
+-- keyed by the candidate's canonical erased metatable identity. A spelling, a
+-- transfer policy, or a standalone protobuf call can never mint an ownerless
+-- attachment; construction still requires the matching live decode scope.
+function register_resource_codec(candidate: value, descriptor: reflect.RecordType,
+    encode: function (value, value): (integer),
+    decode: function (value, foreign const *void, integer): (value))
+  local identity = record_identity(candidate)
+  if identity == nil then raise "protobuf: resource codec requires a record" end
+  resource_codecs[identity] = ResourceCodec(identity, descriptor, encode, decode)
+end
+
+function find_resource_codec(candidate: value): ResourceCodec?
+  local identity = record_identity(candidate)
+  if identity == nil then return nil end
+  return resource_codecs[identity]
+end
+
+local function resource_codec_for_record(descriptor: reflect.RecordType): ResourceCodec?
+  local identity? = resource_nominals[descriptor.name]
+  if identity == nil then return nil end
+  return resource_codecs[identity]
+end
+
+-- One canonical little-endian encoding for every packet attachment index.
+-- `dst` must address at least four writable bytes; this writer cannot
+-- allocate, enter Lua, or interpret a native resource. Both producers (the
+-- owned packet buffer and the opaque-hook index string) call it.
+foreign function write_resource_index_bytes(dst: *void, index: unsigned int)
+  local bytes = dst as foreign *uint8_t
+  bytes[0] = index as foreign uint8_t
+  bytes[1] = (index >> 8) as foreign uint8_t
+  bytes[2] = (index >> 16) as foreign uint8_t
+  bytes[3] = (index >> 24) as foreign uint8_t
+end
+
+local foreign function write_resource_index(buf: *titan_protobuf_buffer,
+    index: unsigned int): int
+  if ffi.titan_protobuf_buf_reserve(buf, 4 as foreign size_t) == 0 then return 0 end
+  write_resource_index_bytes((buf.data + buf.length) as foreign *void, index)
+  buf.length = buf.length + (4 as foreign size_t)
+  return 1
+end
+
 local record HookEntry
   const has_hooks: boolean
   const encode: reflect.MethodType?
@@ -275,19 +361,21 @@ end
 -- Internal compiled transfer entries. Callers supply the already inspected
 -- root; Encoder retains the normal visibility, cycle, depth, and size guards.
 function serialize_inspected_record_to_buffer(
-    buf: foreign *void, candidate: reflect.RecordValue)
+    buf: foreign *void, candidate: reflect.RecordValue, context: value)
   local pbuf = buf as foreign *titan_protobuf_buffer
   local start = pbuf.length as integer
-  local encoder = Encoder({})
+  if context == nil then context = packet_context(true) end
+  local encoder = Encoder({}, context)
   encoder:record_value(pbuf, candidate, 1)
   check_message_size((pbuf.length as integer) - start)
 end
 
 function serialize_inspected_union_to_buffer(
-    buf: foreign *void, candidate: reflect.UnionValue)
+    buf: foreign *void, candidate: reflect.UnionValue, context: value)
   local pbuf = buf as foreign *titan_protobuf_buffer
   local start = pbuf.length as integer
-  local encoder = Encoder({})
+  if context == nil then context = packet_context(true) end
+  local encoder = Encoder({}, context)
   encoder:union_value(pbuf, candidate, 1)
   check_message_size((pbuf.length as integer) - start)
 end
@@ -321,18 +409,18 @@ end
 local function deserialize_buffer(
     data: foreign const *void,
     length: integer,
-    descriptor: reflect.Type): value
+    descriptor: reflect.Type, context: value): value
   check_message_size(length)
   local resolved = resolve_type(descriptor)
   local base = data as foreign const *uint8_t
   case resolved
   when is_record(record_type) then
     require_record(record_type)
-    local message = read_message_slice(base, 0, length, nil)
+    local message = read_message_slice(base, 0, length, nil, context)
     return decode_record(message, record_type, 1)
   when is_union(union_type) then
     require_union(union_type)
-    local message = read_message_slice(base, 0, length, nil)
+    local message = read_message_slice(base, 0, length, nil, context)
     return decode_union(message, union_type, 1)
   else raise "protobuf: root descriptor must be a public record or union"
   end
@@ -348,7 +436,7 @@ function deserialize(bytes: string, descriptor: reflect.Type): value
   return deserialize_buffer(
       ffi.titan_protobuf_bytes_ptr(bytes) as foreign const *void,
       #bytes,
-      descriptor)
+      descriptor, packet_context(false))
 end
 
 --- Append the wire encoding of an anonymous root message to an initialized titan_protobuf_buffer.
@@ -363,7 +451,7 @@ function serialize_fields_to_buffer(
   if #... ~= #fields then raise "protobuf: anonymous field count mismatch" end
   local pbuf = buf as foreign *titan_protobuf_buffer
   local start = pbuf.length as integer
-  local encoder = Encoder({})
+  local encoder = Encoder({}, packet_context(true))
   for index = 1, #fields do
     encoder:field(pbuf, field_number(index), ...[index], fields[index], 2)
   end
@@ -397,7 +485,7 @@ function deserialize_fields_buffer(
     fields: const {reflect.Type}): (...: value)
   check_message_size(length)
   local message = read_message_slice(
-      data as foreign const *uint8_t, 0, length, nil)
+      data as foreign const *uint8_t, 0, length, nil, packet_context(false))
   local values: {value} = {}
   for index = 1, #fields do
     values[index] = decode_field(message, field_number(index), fields[index], 2)
@@ -430,16 +518,29 @@ function deserialize_nominal_buffer(
     length: integer,
     name: string,
     is_union: boolean): value
+  return deserialize_nominal_buffer_with_context(
+      data, length, name, is_union, packet_context(false))
+end
+
+-- Internal compiled collaboration used by `titan.transfer`: the caller passes
+-- the decode scope it already resolved for this packet, so decoding a nominal
+-- never re-resolves the execution's packet context. A nil context carries no
+-- attachment authority, exactly as outside a packet.
+function deserialize_nominal_buffer_with_context(
+    data: foreign const *void,
+    length: integer,
+    name: string,
+    is_union: boolean, context: value): value
   local found? = reflect.find_nominal(name)
   if found == nil then raise "protobuf: unknown nominal type " .. name end
   case found
   when is_record(descriptor) then
     if not is_union then
-      return deserialize_buffer(data, length, reflect.Type.is_record(descriptor))
+      return deserialize_buffer(data, length, reflect.Type.is_record(descriptor), context)
     end
   when is_union(descriptor) then
     if is_union then
-      return deserialize_buffer(data, length, reflect.Type.is_union(descriptor))
+      return deserialize_buffer(data, length, reflect.Type.is_union(descriptor), context)
     end
   end
   raise "protobuf: nominal kind mismatch for " .. name
@@ -478,5 +579,17 @@ function schema(descriptor: reflect.Type): string
 end
 
 do
+  -- Stack ledger: reserve one slot, read the canonical nominal table, copy it
+  -- into traced module storage, then restore the exact entry top. The table is
+  -- the state's live registry, so later nominal registrations stay visible and
+  -- a failed module initialization can be retried.
+  local top = ffi.lua_gettop(L)
+  defer ffi.lua_settop(L, top)
+  if ffi.lua_checkstack(L, 1) == 0 then raise "protobuf: cannot reserve nominal registry stack" end
+  local registry = ffi.lua_getfield(L, ffi.LUA_REGISTRYINDEX, ffi.TITAN_METATABLES_KEY)
+  if registry ~= ffi.LUA_TTABLE then
+    raise "protobuf: Titan nominal registry is not a table"
+  end
+  resource_nominals = ffi.lua_totvalue(L, -1) as value
   gc.ephemeron(active_record_payloads as {value: value})
 end

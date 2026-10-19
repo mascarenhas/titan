@@ -182,6 +182,41 @@ local function new_receiver<|T|>(): Receiver<|T|>
   return rx
 end
 
+-- Exact fixed callables for transfer's registered nominal capability. Private
+-- native fields stay under the generated typed accessors in this module.
+local function sender_resource(candidate: value): foreign *void
+  local tx: Sender<|value|> = candidate
+  return tx.native as foreign *void
+end
+
+local function receiver_resource(candidate: value): foreign *void
+  local rx: Receiver<|value|> = candidate
+  return rx.native as foreign *void
+end
+
+local function sender_from_resource(context: value, data: foreign const *void,
+    length: integer): value
+  local tx = new_sender<|value|>()
+  tx.native = transfer.claim_registered_resource(
+      context, data, length, channel_release_sender_native) as foreign *titan_thread_channel
+  return tx
+end
+
+local function receiver_from_resource(context: value, data: foreign const *void,
+    length: integer): value
+  local rx = new_receiver<|value|>()
+  rx.native = transfer.claim_registered_resource(
+      context, data, length, channel_release_receiver_native) as foreign *titan_thread_channel
+  return rx
+end
+
+local function register_channel_resources()
+  transfer.register_resource(new_sender<|value|>(), sender_resource,
+      channel_retain_sender_native, channel_release_sender_native, sender_from_resource)
+  transfer.register_resource(new_receiver<|value|>(), receiver_resource,
+      channel_retain_receiver_native, channel_release_receiver_native, receiver_from_resource)
+end
+
 --- Create a bounded cross-thread channel pair.
 -- @param capacity Maximum buffered messages before send suspends; defaults to 1.
 -- @return Paired Sender and Receiver endpoints sharing the channel.

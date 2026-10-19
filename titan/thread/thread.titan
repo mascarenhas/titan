@@ -423,4 +423,5 @@ end
 
 do
   register_thread_bootstrap()
+  register_channel_resources()
 end

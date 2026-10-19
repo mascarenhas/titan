@@ -217,6 +217,13 @@ identity indexes, mutable-cell registries, or graph allocation ledgers.
 release, int claimed)` and contains only native pointers and C-ABI callbacks—no
 Lua/Titan GC objects or state-bound closures.
 
+Nested endpoint fields use capabilities registered through `transfer` under
+their canonical erased nominal identity. Protobuf carries the packet's scope
+in its encoder and decoder; it neither imports thread nor reads private endpoint
+storage. The registered constructor still creates a fresh inert wrapper and
+registers its finalizer before claiming an entry. Public opaque hooks continue
+to resolve the current execution's exact top and matching direction.
+
 - **Execution-local, direction-specific scope stacks (`ResourceScope`)**:
   `resource_scopes` maps the actual current Lua thread value, obtained by
   `current_execution()` with `lua_pushthread`, to that execution's linked top.

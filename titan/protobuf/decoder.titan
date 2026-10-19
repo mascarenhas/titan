@@ -19,6 +19,7 @@ end
 local record Message
   const base: foreign const *uint8_t
   const holder: string?
+  const context: value
   const fields: {WireField}
   last_by_number: {integer: integer}?
 end
@@ -82,14 +83,14 @@ local function read_message_slice(
     base: foreign const *uint8_t,
     offset: integer,
     length: integer,
-    holder: string?): Message
+    holder: string?, context: value): Message
   local reader = WireReader(base, offset + length, offset)
   local fields: {WireField} = {}
   while reader.position < reader.limit do
     local number, wire = reader:key()
     fields[#fields + 1] = reader:field(number, wire, 1)
   end
-  return Message(base, holder, fields, nil)
+  return Message(base, holder, context, fields, nil)
 end
 
 local function Message:last_index(number: integer): integer
@@ -128,11 +129,11 @@ end
 -- the final occurrence, as required by the Protocol Buffers wire contract.
 local function Message:merged_message(number: integer): Message
   local index = self:last_index(number)
-  if index == 0 then return Message(self.base, self.holder, {}, nil) end
+  if index == 0 then return Message(self.base, self.holder, self.context, {}, nil) end
   local field = self.fields[index]
   require_wire(field, 2)
   if field.previous == 0 then
-    return read_message_slice(self.base, field.offset, field.length, self.holder)
+    return read_message_slice(self.base, field.offset, field.length, self.holder, self.context)
   end
   -- Walk only this field's occurrences, then restore wire encounter order.
   local chunks: {WireField} = {}
@@ -148,7 +149,7 @@ local function Message:merged_message(number: integer): Message
     output:write(slice_to_string(self.base, chunk.offset, chunk.length))
   end
   local merged = output:drain()
-  return read_message_slice(ffi.titan_protobuf_bytes_ptr(merged), 0, #merged, merged)
+  return read_message_slice(ffi.titan_protobuf_bytes_ptr(merged), 0, #merged, merged, self.context)
 end
 
 local function decode_record(message: Message, descriptor: reflect.RecordType,
@@ -200,10 +201,10 @@ local function decode_union(message: Message, descriptor: reflect.UnionType,
       end
       local merged = payload:drain()
       return read_message_slice(
-          ffi.titan_protobuf_bytes_ptr(merged), 0, #merged, merged)
+          ffi.titan_protobuf_bytes_ptr(merged), 0, #merged, merged, message.context)
     end
     return read_message_slice(
-        message.base, selected_field.offset, selected_field.length, message.holder)
+        message.base, selected_field.offset, selected_field.length, message.holder, message.context)
   end)()
   local parts: {value} = {}
   for index = 1, #variant.parts do
@@ -225,7 +226,7 @@ local function decode_array(message: Message, constness: reflect.ArrayTypeConstn
       require_wire(field, 2)
       count = count + 1
       local slot = read_message_slice(
-          message.base, field.offset, field.length, message.holder)
+          message.base, field.offset, field.length, message.holder, message.context)
       if slot:last(1) ~= nil then
         entries[count] = decode_field(slot, 1, element, depth + 1)
       end
@@ -254,7 +255,7 @@ local function decode_foreign_array(message: Message, element: reflect.Type,
       require_wire(field, 2)
       count = count + 1
       local slot = read_message_slice(
-          message.base, field.offset, field.length, message.holder)
+          message.base, field.offset, field.length, message.holder, message.context)
       entries[count] = decode_field(slot, 1, element, depth + 1)
     end
   end
@@ -305,6 +306,12 @@ local function decode_field(message: Message, number: integer,
   when is_array{is_const, elem_descriptor} then
     return decode_array(message:merged_message(number), is_const, elem_descriptor, depth)
   when is_record(record_type) then
+    local codec? = resource_codec_for_record(record_type)
+    if codec ~= nil then
+      require_wire(field, 2)
+      return codec.decode(message.context,
+          (message.base + field.offset) as foreign const *void, field.length)
+    end
     local _?, decode? = find_transfer_hooks(record_type, "protobuf")
     if decode ~= nil then
       require_wire(field, 2)

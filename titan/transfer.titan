@@ -201,27 +201,30 @@ local function finalize_resource_scope(scope: ResourceScope)
   dispose_scope(scope.native)
 end
 
--- Each execution has one linked top. Never search an older frame or a
--- different coroutine for permission; same-stack opaque work shares the top.
+local function ResourceScope:attach(resource: foreign *void,
+    retain: foreign function(*void): void,
+    release: foreign function(*void): void): integer
+  if not self.encoding then raise "transfer: resource attachment requires an encode scope" end
+  if resource == nil or retain == nil or release == nil then
+    raise "transfer: invalid native resource attachment"
+  end
+  if reserve_resource(ffi.titan_transfer_scope_resources(self.native)) == 0 then
+    raise "transfer: out of memory reserving resource attachment"
+  end
+  return attach_reserved(
+    ffi.titan_transfer_scope_resources(self.native), resource, retain, release)
+end
+
+-- Public opaque hooks resolve the exact execution's top on every call. The
+-- registered codec alone receives the packet's already-resolved scope.
 function attach_resource(resource: foreign *void,
     retain: foreign function(*void): void,
     release: foreign function(*void): void): string
   local scope? = resource_scopes[current_execution()]
   if scope == nil then raise "transfer: resource attachment requires an encode scope" end
-  if not scope.encoding then raise "transfer: resource attachment requires an encode scope" end
-  if resource == nil or retain == nil or release == nil then
-    raise "transfer: invalid native resource attachment"
-  end
-  if reserve_resource(ffi.titan_transfer_scope_resources(scope.native)) == 0 then
-    raise "transfer: out of memory reserving resource attachment"
-  end
-  local index = attach_reserved(
-    ffi.titan_transfer_scope_resources(scope.native), resource, retain, release)
+  local index = scope:attach(resource, retain, release) as foreign unsigned int
   local bytes = foreign unsigned char.new_array(4)
-  bytes[0] = (index & (255 as foreign unsigned int)) as foreign unsigned char
-  bytes[1] = ((index >> 8) & (255 as foreign unsigned int)) as foreign unsigned char
-  bytes[2] = ((index >> 16) & (255 as foreign unsigned int)) as foreign unsigned char
-  bytes[3] = ((index >> 24) & (255 as foreign unsigned int)) as foreign unsigned char
+  protobuf.write_resource_index_bytes(bytes as foreign *void, index)
   local top = ffi.lua_gettop(L)
   defer ffi.lua_settop(L, top)
   if ffi.lua_checkstack(L, 1) == 0 then raise "transfer: cannot reserve attachment index stack" end
@@ -229,22 +232,22 @@ function attach_resource(resource: foreign *void,
   return ffi.lua_totvalue(L, -1) as value
 end
 
-function claim_resource(index_bytes: string,
+local function ResourceScope:claim(data: foreign const *void, length: integer,
     expected_release: foreign function(*void): void): foreign *void
-  local scope? = resource_scopes[current_execution()]
-  if scope == nil then raise "transfer: resource claim requires a decode scope" end
-  if scope.encoding then raise "transfer: resource claim requires a decode scope" end
-  if #index_bytes ~= 4 then raise "transfer: invalid resource attachment index width" end
-  local bytes = ffi.titan_protobuf_bytes_ptr(index_bytes)
+  if self.encoding then raise "transfer: resource claim requires a decode scope" end
+  if length ~= 4 then raise "transfer: invalid resource attachment index width" end
+  -- Inverse of protobuf.write_resource_index_bytes; the width check above
+  -- precedes every read, and the slice is always inside the owned packet.
+  local bytes = data as foreign const *unsigned char
   local index = (bytes[0] as foreign unsigned int)
     | ((bytes[1] as foreign unsigned int) << 8)
     | ((bytes[2] as foreign unsigned int) << 16)
     | ((bytes[3] as foreign unsigned int) << 24)
   if index == ffi.TITAN_TRANSFER_INVALID_INDEX
-      or (index as foreign size_t) >= scope.message.resources.count then
+      or (index as foreign size_t) >= self.message.resources.count then
     raise "transfer: resource attachment index is out of bounds"
   end
-  local entry = scope.message.resources.entries + index
+  local entry = self.message.resources.entries + index
   if expected_release == nil or entry.release ~= expected_release then
     raise "transfer: resource attachment kind mismatch"
   end
@@ -255,6 +258,51 @@ function claim_resource(index_bytes: string,
   entry.claimed = 1
   entry.resource = nil
   return resource
+end
+
+function claim_resource(index_bytes: string,
+    expected_release: foreign function(*void): void): foreign *void
+  local scope? = resource_scopes[current_execution()]
+  if scope == nil then raise "transfer: resource claim requires a decode scope" end
+  return scope:claim(ffi.titan_protobuf_bytes_ptr(index_bytes) as foreign const *void,
+      #index_bytes, expected_release)
+end
+
+-- Internal compiled constructor collaboration. The context is never serialized
+-- or cached: the decoder keeps its owning ResourceScope traced for this call.
+function claim_registered_resource(context: value, data: foreign const *void,
+    length: integer, expected_release: foreign function(*void): void): foreign *void
+  if context == nil then raise "transfer: resource claim requires a decode scope" end
+  local scope: ResourceScope = context
+  return scope:claim(data, length, expected_release)
+end
+
+local function packet_context(encoding: boolean): value
+  local scope? = resource_scopes[current_execution()]
+  if scope == nil then return nil end
+  if scope.encoding ~= encoding then return nil end
+  return scope
+end
+
+-- Register only exact typed accessors and finalizer-first constructors. These
+-- fixed callables retain their declaring module; retain/release remain native
+-- C-only capabilities and no userdata field offsets cross module boundaries.
+function register_resource(candidate: value,
+    get: function (value): (foreign *void),
+    retain: foreign function(*void): void,
+    release: foreign function(*void): void,
+    construct: function (value, foreign const *void, integer): (value))
+  case reflect.inspect(candidate)
+  when is_record(record_value) then
+    protobuf.register_resource_codec(candidate, record_value.type,
+        function (context: value, endpoint: value): integer
+          if context == nil then raise "transfer: resource attachment requires an encode scope" end
+          local scope: ResourceScope = context
+          return scope:attach(get(endpoint), retain, release)
+        end,
+        construct)
+  else raise "transfer: registered resource must be a record"
+  end
 end
 
 -- These private C-ABI functions run only inside the owning state's protected
@@ -928,7 +976,7 @@ local function transfer_policy_to_message(
   return copy_async_message(message)
 end
 
-local function encode_packet(candidate: value): foreign *void
+local function encode_packet(candidate: value, scope: ResourceScope): foreign *void
   if candidate is TransferValue then
     return transfer_policy_to_message(candidate as TransferValue) as foreign *void
   end
@@ -973,7 +1021,7 @@ local function encode_packet(candidate: value): foreign *void
       raise "transfer: out of memory copying message"
     end
     defer ffi.titan_protobuf_buf_free_heap(buf)
-    protobuf.serialize_inspected_record_to_buffer(buf as foreign *void, record_value)
+    protobuf.serialize_inspected_record_to_buffer(buf as foreign *void, record_value, scope)
     return finalize_buf_message(
         buf, ffi.TITAN_ASYNC_MESSAGE_RECORD, name, module, nil) as foreign *void
   when is_union(union_value) then
@@ -984,7 +1032,7 @@ local function encode_packet(candidate: value): foreign *void
       raise "transfer: out of memory copying message"
     end
     defer ffi.titan_protobuf_buf_free_heap(buf)
-    protobuf.serialize_inspected_union_to_buffer(buf as foreign *void, union_value)
+    protobuf.serialize_inspected_union_to_buffer(buf as foreign *void, union_value, scope)
     return finalize_buf_message(
         buf, ffi.TITAN_ASYNC_MESSAGE_UNION, name, module, nil) as foreign *void
   else
@@ -1010,7 +1058,7 @@ function encode_message(candidate: value): foreign *void
     dispose_scope(scope.native)
   end
   resource_scopes[execution] = scope
-  local raw = encode_packet(candidate)
+  local raw = encode_packet(candidate, scope)
   -- Native commit cannot allocate or yield. Until this point only the scope
   -- owns the table, independent of payload buffer reallocation/detachment.
   commit_resources(raw as foreign *titan_async_message,
@@ -1075,19 +1123,19 @@ local function decode_message_worker(slot_value: value): value
   elseif kind == ffi.TITAN_ASYNC_MESSAGE_RECORD then
     local name = copy_native_bytes(message.name, message.name_length)
     initialize_nominal_raw(message.module, message.module_length, name)
-    return protobuf.deserialize_nominal_buffer(
+    return protobuf.deserialize_nominal_buffer_with_context(
         message.bytes as foreign const *void,
         message.length as integer,
         name,
-        false)
+        false, scope)
   elseif kind == ffi.TITAN_ASYNC_MESSAGE_UNION then
     local name = copy_native_bytes(message.name, message.name_length)
     initialize_nominal_raw(message.module, message.module_length, name)
-    return protobuf.deserialize_nominal_buffer(
+    return protobuf.deserialize_nominal_buffer_with_context(
         message.bytes as foreign const *void,
         message.length as integer,
         name,
-        true)
+        true, scope)
   elseif kind == ffi.TITAN_ASYNC_MESSAGE_CLOSURE then
     return restore_closure_from_buffer(
         message.module,
@@ -1247,6 +1295,7 @@ end
 
 
 do
+  protobuf.set_packet_context_provider(packet_context)
   gc.ephemeron(resource_scopes as {value: value})
   gc.ephemeron(transfer_active_closures as {value: value})
   local top = ffi.lua_gettop(L)
