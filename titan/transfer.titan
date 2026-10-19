@@ -46,13 +46,6 @@ foreign function discard_message(raw: *void)
   ffi.free(message)
 end
 
-local foreign function take_packet_message(raw_owner: *void): *void
-  local owner = raw_owner as foreign *titan_transfer_packet_owner
-  local message = owner.message
-  owner.message = nil
-  return message as foreign *void
-end
-
 local foreign function dispose_scope(owner: *titan_transfer_scope_owner)
   local message = owner.message
   local entries = owner.resources.entries
@@ -74,21 +67,6 @@ local foreign function move_slot_to_scope(owner: *titan_transfer_scope_owner,
     slot: *(*void))
   owner.message = slot[0] as foreign *titan_async_message
   slot[0] = nil
-end
-
---- Move a guarded raw packet slot into a previously prepared/rooted Packet owner.
--- Return 0 and clear slot on success; -2 (NULL owner/slot), -4 (occupied
--- destination), or -5 (NULL source) leave both unchanged. This C-only move
--- cannot allocate, enter Lua, or throw; retain the raw cleanup guard on failure.
-foreign function adopt_into(raw_owner: *void, slot: *(*void)): int
-  if raw_owner == nil then return -2 end
-  if slot == nil then return -2 end
-  local owner = raw_owner as foreign *titan_transfer_packet_owner
-  if owner.message ~= nil then return -4 end
-  if slot[0] == nil then return -5 end
-  owner.message = slot[0] as foreign *titan_async_message
-  slot[0] = nil
-  return 0
 end
 
 -- Return the complete allocation size, including aligned trailing entries.
@@ -1344,61 +1322,6 @@ local function decode_message_worker(slot_value: value): value
   end
   raise "invalid transfer message kind"
 end
---- An opaque, single-owner packet capability with idempotent close.
--- Reference copies share its consumed state; they do not clone the packet.
-record Packet
-  local native: foreign titan_transfer_packet_owner
-end
-
---- Dispose the current packet and its unclaimed resources; repeated close is safe.
-function Packet:close()
-  discard_message(take_packet_message(self.native as foreign *void))
-end
-
-local function finalize_packet(packet: Packet)
-  discard_message(take_packet_message(packet.native as foreign *void))
-end
-
---- Prepare an inert, finalized holder before acquiring any raw packet ownership.
-function Packet.new(): Packet
-  local native = foreign titan_transfer_packet_owner.new()
-  local packet: Packet = { native = native }
-  gc.finalizable(packet, finalize_packet)
-  return packet
-end
-
---- Borrow the stable native holder; this pointer neither owns nor roots the Packet.
-function Packet:borrow_owner(): foreign *void
-  return self.native as foreign *void
-end
-
-
---- Encode a value and acquire its resource attachments in a finalized Packet.
-function Packet.from_value(candidate: value): Packet
-  local packet = Packet.new()
-  local owner = packet:borrow_owner()
-  local raw = encode_message(candidate)
-  defer discard_message(raw)
-  local status = adopt_into(owner, raw)
-  if status ~= 0 then raise_message_error(status, nil) end
-  return packet
-end
-
---- Borrow the current message without transferring ownership or rooting its Packet.
--- The borrow expires on close, decode, take, or committed publication; it must
--- never be discarded, decoded, or adopted while this Packet still owns it.
-function Packet:borrow_message(): foreign *void
-  local raw = self.native.message as foreign *void
-  if raw == nil then raise "transfer: packet is consumed or closed" end
-  return raw
-end
-
---- Consume this Packet and transfer its raw owner to exactly one consuming API.
-function Packet:take_message(): foreign *void
-  local raw = self.native.message as foreign *void
-  if raw == nil then raise "transfer: packet is consumed or closed" end
-  return take_packet_message(self.native as foreign *void)
-end
 
 -- Every successful branch pushes one noncollectable value without allocation,
 -- callbacks, or longjmp. The caller reserves the stack and consumes the owner.
@@ -1475,8 +1398,8 @@ foreign function decode_message(state: *lua_State, slot: *(*void)): int
     end
   end
   -- Keep these pushes allocation-free (zero-upvalue C closures/lightuserdata).
-  -- A Packet owner may already have moved its message into a raw C local;
-  -- no throwing operation may precede the protected call that guards it.
+  -- The guarded caller slot still owns the packet; no throwing operation may
+  -- precede the protected call that installs residual-owner cleanup.
   ffi.lua_pushcclosure(state, ffi.errorhandler, 0)
   ffi.lua_pushcclosure(state, decode_message_dispatch, 0)
   ffi.lua_pushlightuserdata(state, slot)
@@ -1490,21 +1413,11 @@ foreign function decode_message(state: *lua_State, slot: *(*void)): int
   return status as foreign int
 end
 
-local foreign function decode_packet_owner(state: *lua_State, raw_owner: *void): int
-  local owner = raw_owner as foreign *titan_transfer_packet_owner
-  if owner.message == nil then return -1 end
-  local raw = take_packet_message(raw_owner)
-  return decode_message(state, raw)
-end
-
 --- Raise an error after a native packet operation commits its owner-slot update.
 -- Pass the caller's traced error for a positive status, nil for a negative
 -- setup status. Success needs no ordinary helper entry.
 function raise_message_error(status: integer, failure: value)
-  if status == -1 then raise "transfer: packet is consumed or closed" end
   if status == -2 then raise "transfer: invalid packet owner slot" end
-  if status == -4 then raise "transfer: packet destination is not empty" end
-  if status == -5 then raise "transfer: cannot adopt a NULL packet" end
   if status < 0 then raise "transfer: cannot reserve packet operation stack" end
   if ffi.lua_checkstack(L, 1) == 0 then
     raise "transfer: cannot reserve packet error stack"
@@ -1513,21 +1426,6 @@ function raise_message_error(status: integer, failure: value)
   ffi.lua_setfield(L, ffi.LUA_REGISTRYINDEX, ffi.TITAN_TRACE_PINNED)
   raise failure
 end
-
---- Consume and decode the packet, disposing unclaimed attachments on every outcome.
-function Packet:decode(): value
-  local owner = self:borrow_owner()
-  local top = ffi.lua_gettop(L)
-  defer ffi.lua_settop(L, top)
-  local status = decode_packet_owner(L, owner)
-  if status ~= 0 then
-    local failure: value = nil
-    if status > 0 then failure = ffi.lua_totvalue(L, -1) as value end
-    raise_message_error(status, failure)
-  end
-  return ffi.lua_totvalue(L, -1) as value
-end
-
 
 do
   protobuf.set_packet_context_provider(packet_context)

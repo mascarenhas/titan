@@ -24,16 +24,17 @@ remains 2; the prerelease language-server API remains 1. Other version numbers
 are unchanged; baseline and ownership revisions are identified by hashes, not
 by an ABI-version delta.
 
-`titan.transfer` defines the canonical `TransferValue` union and `Packet`
-wrapper, and `titan.async` exports a transparent `TransferValue` alias while
-owning `Receiver`, `PacketReceiver`, and `ExternalWait`. Scalar `TransferValue`
-variants hold ordinary Titan values, and the string variant retains its source
-string in a traced slot. Record/union variants retain the defining module,
-nominal name, and protobuf wire bytes in traced slots; async transports these
-packets as opaque data. State, native-function, and raw-pointer variants hold
-portable borrowed C pointer types and do not root their referents. The Lua
-adapter owns its separate `titan_lua_value` packets and copy/borrow conversion
-policy, described in
+`titan.transfer` defines the canonical `TransferValue` union and native packet
+helpers, and `titan.async` exports a transparent `TransferValue` alias while
+owning `Receiver` and `ExternalWait`. Scalar `TransferValue` variants hold
+ordinary Titan values, and the string variant retains its source string in a
+traced slot. Record/union variants retain the defining module, nominal name,
+and protobuf wire bytes in traced slots. State, native-function, and
+raw-pointer variants hold portable borrowed C pointer types and do not root
+their referents. `async.send` and `Receiver:wait` transport values and explicit
+`TransferValue` policies through `titan.transfer`'s native
+`titan_async_message` packets, while the Lua adapter owns its separate
+`titan_lua_value` packets and copy/borrow conversion policy, described in
 [the Lua implementation chapter](lua-library.md#cross-state-transfer).
 
 Tasks use tagged `coroutine.Coroutine` control transfer. Coroutine itself keeps
@@ -639,134 +640,98 @@ actual OS join, not cancellation or a logical status, is the retirement proof.
 
 ## Cross-state receiver ownership
 
-`Receiver` and `PacketReceiver` share `titan_async_receiver`
-(`titan/async_receiver_native.h`), which pairs a borrowed `uv_async_t` address
-and C-only `send` function pointer with an atomic `titan_async_message *message`
-slot (`titan_async_receiver_exchange` using `__atomic_exchange_n(...,
-__ATOMIC_ACQ_REL)`), `closed` flag, and `mode` discriminator (`0` for
-`Receiver`, `1` for `PacketReceiver`). There is no native FIFO or mutex.
-
-Both transports share `receiver_publish_native` and `receiver_disable_native`:
-
-- `receiver_publish_native(receiver, message, source)` atomically exchanges
-  `receiver->message` with `message`, clears `source.message` when a source owner
-  cell was supplied, then disposes the replaced packet through
-  `transfer.discard_message(previous)` and calls `receiver.send(receiver.handle)`.
-  Clearing the source before any release callback or status conversion prevents
-  alias finalization from disposing a packet already owned by the slot.
-- `receiver_disable_native(receiver)` sets `receiver.closed = 1` and disposes
-  any pending packet in `receiver->message` via
-  `transfer.discard_message(titan_async_receiver_exchange(receiver, nil))`.
-
-### Reusable policy receiver (`Receiver`, `mode = 0`)
-
 `Receiver` owns the public
 [lossy cross-state notification](../language/async-io.md#cross-state-receivers)
-boundary for reusable `TransferValue` policies. `receiver_send_native` checks
-`receiver.mode == 0` (returning `3` so `async.send` raises
-`"receiver handle mode mismatch"` on a `PacketReceiver` handle) and
-`receiver.closed == 0` (returning `2` -> `"receiver is closed"`), then copies the
-stack-staged `titan_async_message` into a heap allocation via
-`transfer.copy_message` (which rejects any packet carrying resource-table
-attachments) before calling `receiver_publish_native`. On the destination loop,
-`Receiver:deliver()` atomically exchanges `self.native.message` with `nil`,
-guards the packet with `defer transfer.discard_message(message)`, copies its
-scalar, string, or nominal/closure byte fields into a destination
-`TransferValue`, and publishes that value into `CoalescingSubscription`.
+boundary over `titan_async_receiver` (`titan/async_receiver_native.h`), which
+pairs a borrowed `uv_async_t` address and C-only `send` function pointer with an
+atomic `titan_async_message *message` slot (`titan_async_receiver_exchange`
+using `__atomic_exchange_n(..., __ATOMIC_ACQ_REL)`) and `closed` flag. There is
+no `mode` discriminator, `CoalescingSubscription`, native FIFO, or mutex.
 
 Its opaque `foreign *void` handle names native receiver storage, not a Titan
-record or public `uv.async_t`. The host sending a message never follows a remote
-GC pointer or enters the destination Lua state. Scalar tags/values and copied
-string bytes live in native messages until the destination loop converts them
-into its own `TransferValue`. Nominal packets copy the defining module, nominal
-name, and wire bytes into one native allocation with independently checked
-lengths; no string borrows the sending collector after `send` returns. The
-receiving loop copies them into its own collector and preserves the record/union
-variant without decoding. The one-slot string-copy transaction and native-packet
-lifetime are recorded in the
-[trusted Lua API ledger](ffi-lua-api-followup.md#trusted-standard-library-discipline).
-Borrowed pointer variants remain raw addresses.
+record or public `uv.async_t`. The sender never follows a remote GC pointer or
+enters the destination Lua state:
 
-Closure and custom record packets use the same flat string-copy boundary.
-`from_value` snapshots closure captures (freezing the immediate capture frontier
-before hooks) and runs custom encoding hooks before native publication.
-`TransferValue.from_value` does not create a packet scope; endpoint hooks raise
-without a matching enclosing one. Same-packet opaque/capture work can reuse the
-current top scope, but temporary policy/index bytes own no resource table.
-Receiver copies these strings without interpreting their ownership meaning;
-it does not transport an enclosing packet's attachments. Accepted Receiver
-messages own their copied strings/native allocation, and delivery/replacement/
-discard frees that storage without decoding or closing manual resources.
+- **Guarded encode and atomic publication commit (`async.send`,
+  `receiver_send_native`)**: `async.send(handle, candidate)` rejects a `nil`
+  handle, encodes `candidate` (any transferable Titan value, including
+  `thread.Sender` and `thread.Receiver` endpoints, or an explicit
+  `TransferValue` policy) into a real local
+  `raw = transfer.encode_message(candidate)` guarded by
+  `defer transfer.discard_message(raw)`, and calls the local foreign
+  `receiver_send_native(handle, raw)` directly at that local. In one C-only
+  interval, `receiver_send_native` checks `receiver.closed ~= 0` (returning `2`
+  so `async.send` raises `"receiver is closed"` while leaving `raw` untouched
+  for the deferred `discard_message`), reads `source[0]`, atomically exchanges
+  `receiver->message` with the new packet, clears `source[0] = nil`, disposes
+  any overwritten packet via `transfer.discard_message(previous)`, and calls
+  `receiver.send(receiver.handle)`. Pre-exchange rejection leaves the pending
+  slot unchanged and discards any encoded copy natively. Caller-owned endpoint
+  units and a retained `TransferValue` policy remain available, but a direct
+  manual-handoff hook may already have detached its resource during encoding;
+  rejection does not roll back that hook. For recoverability after rejection,
+  construct and retain `TransferValue.from_value(resource)` for a manual handoff
+  before sending the policy. Clearing the caller's raw slot before any release
+  callback or status conversion ensures that once the atomic exchange commits,
+  the slot owns the allocation even when `uv_async_send` returns a negative
+  status and `check_status` raises `OperationError` (`"async.send"`).
+- **Wake-only callback and direct slot retention (`Receiver:wake`)**: `Receiver`
+  does not copy or decode payloads in its libuv callback. Its callback
+  (`Receiver:wake()`) only marks `reader.notified = true` and requests a
+  deferred wake via `reader.task:resume(reader.token)` (resetting
+  `reader.notified = false` if `resume` raises). The owned
+  `titan_async_message` remains in `self.native.message`—including while the
+  reader's deferred wake is queued in the Runtime ready FIFO—until `wait()`
+  takes it. Replacing or closing the slot before that take disposes unread
+  packets directly in C through `transfer.discard_message`.
+- **Single-reader reservation, direct raw-slot decode, stale wakes, and
+  cancellation (`Receiver:wait`, `receiver_take_native`)**: `wait()` requires a
+  running Task, rejects competing callers when `self.reader ~= nil`
+  (`"receiver already has a waiting reader"`), and installs
+  `self.reader = reader` (with `defer detach()` and a guarded
+  `local raw: foreign *void = nil` + `defer transfer.discard_message(raw)`)
+  **before** inspecting `checkpoint()`, `self.native.closed`, or
+  `self.native.message`. This prevents a second caller from barging ahead while
+  the first reader's wake is queued. On each loop turn after `checkpoint()`, the
+  pure foreign `receiver_take_native(self.native, raw)` checks `closed` (`2` ->
+  `"receiver is closed"`), atomically exchanges `receiver->message` with `nil`,
+  and stores the packet in `raw` (`1` when non-nil, `0` when empty). On status
+  `1`, `wait()` follows the
+  [trusted Lua stack and consuming-slot ledger](transfer-library.md#protected-raw-owner-decode-entry):
+  it snapshots `top = ffi.lua_gettop(L)`, calls `transfer.decode_message(L, raw)`
+  directly at the real guarded local `raw` (committing the cleared spill before
+  ordinary error propagation), copies any nonnegative result/error from
+  `ffi.lua_totvalue(L, -1)` into a traced `value` local, restores
+  `ffi.lua_settop(L, top)`, and calls
+  `transfer.raise_message_error(decoded_status, decoded_value)` when
+  `decoded_status ~= 0`. Decode errors consume the packet and raise from
+  `wait()` with no lazy retry; `nil` and `false` return as ordinary data. When
+  the slot is empty (initially or after a coalesced/stale wake), `wait()` clears
+  `reader.notified = false` and calls `suspend(reader.token, detach)`; a `send`
+  between the empty-slot check and `suspend` either sets `reader.notified` on
+  the loop thread or leaves a pending `uv_async_send` signal for the next loop
+  turn. Cancelling the waiting Task runs `detach` to clear `self.reader` without
+  taking or discarding an unread packet in `self.native.message`.
 
-### Owned packet receiver (`PacketReceiver`, `mode = 1`)
+### Receiver lifecycle and teardown
 
-`PacketReceiver` owns the
-[owned-packet coalescing route](../language/async-io.md#owned-packet-receivers)
-for single-owner `transfer.Packet` instances, including packets with attached
-`thread.Sender` and `thread.Receiver` endpoints:
+`receiver()` uses `ensure_runtime` without requiring a current Task or driving
+the loop, permitting synchronous independent-state bootstrap (and rejecting
+creation once `runtime.closing` or `runtime.exit_code` is set). Explicit
+`close()` marks `native.closed = 1`, atomically takes and disposes any pending
+packet via `transfer.discard_message` (`receiver_disable_native`), wakes any
+waiting reader with `"receiver is closed"`, and initiates `uv.close` on the
+handle. The Runtime's handle walk (`close_handles`) disables `Receiver` owners
+before generic handle close, and `Receiver`'s GC finalizer (`receiver_finalize`)
+calls `receiver_disable_native` to release any unread native packet during
+Lua-state destruction.
 
-- **Prepared publication and commit point (`send_packet`)**: Checked setup
-  validates the handle and obtains `packet:borrow_owner()` while the source
-  Packet remains rooted. The pure foreign `receiver_send_packet_native` reads
-  that inline `titan_transfer_packet_owner` cell and rejects consumed (`4`),
-  wrong-mode (`3`), or closed (`2`) input before exchange. It passes the source
-  cell into `receiver_publish_native`; exchange publishes its packet and clears
-  the source cell in one native interval before disposal/notification. No
-  ordinary `Packet:take_message` call occurs after publication. Error/status
-  construction happens afterward, so a zero/negative native send status means
-  the slot owns the allocation even when libuv notification reports an error.
-  Every alias of the source observes the cleared cell. This isolates the
-  commit; it does not make the preceding ordinary setup allocation-free.
-- **Wake-only callback and direct slot retention**: Unlike `Receiver`,
-  `PacketReceiver` does not use a `CoalescingSubscription` or copy payloads in
-  its libuv callback. Its callback (`PacketReceiver:wake()`) only marks
-  `reader.notified = true` and requests a deferred wake via
-  `reader.task:resume(reader.token)` (resetting `reader.notified = false` if
-  `resume` raises). The owned `titan_async_message` remains in
-  `self.native.message`—including while the reader's deferred wake is queued in
-  the Runtime ready FIFO—until the pure foreign `receiver_take_packet_native`
-  exchanges the slot with nil and writes the allocation directly into a
-  previously finalized destination Packet's native cell. Replacing or closing
-  the slot before that take disposes unread packets directly in C through
-  `transfer.discard_message`.
-- **Single-reader reservation, stale wakes, and cancellation (`wait_packet`)**:
-  `wait_packet()` requires a running Task, rejects competing callers when
-  `self.reader ~= nil` (`"packet receiver already has a waiting reader"`), and
-  installs `self.reader = reader` (with `defer detach()`) **before** inspecting
-  `checkpoint()`, `self.native.closed`, or `self.native.message`. This prevents
-  a second caller from barging ahead while the first reader's wake is queued.
-  Before inspecting the slot, it allocates/finalizes `Packet.new()`, obtains its
-  owner cell, and prepares reader/detachment state. A failed preparation leaves
-  slot ownership unchanged. On success `receiver_take_packet_native` fills the
-  prepared Packet and the method returns that already-rooted owner, never
-  calling an ordinary adopting entry on an unguarded raw result.
-  When the slot is empty (initially or after a coalesced/stale wake), it clears
-  `reader.notified = false` and calls `suspend(reader.token, detach)`; a
-  `send_packet` between the empty-slot check and `suspend` either sets
-  `reader.notified` on the loop thread or leaves a pending `uv_async_send`
-  signal for the next loop turn. Cancelling the waiting Task runs `detach` to
-  clear `self.reader` without taking or discarding an unread packet in
-  `self.native.message`.
-
-### Shared receiver lifecycle and teardown
-
-Both `receiver()` and `packet_receiver()` use `ensure_runtime` without requiring
-a current Task or driving the loop, permitting synchronous independent-state
-bootstrap. Explicit `close()` on either receiver marks `native.closed = 1`,
-atomically takes and disposes any pending packet via `transfer.discard_message`,
-wakes any waiting reader with `"receiver is closed"`, and initiates `uv.close`
-on the handle. The Runtime's handle walk (`close_handles`) disables both
-`Receiver` and `PacketReceiver` owners before generic handle close, and each
-owner's GC finalizer calls `receiver_disable_native` to release any unread
-native packet during Lua-state destruction.
-
-An exported `handle()` does not retain its `Receiver` or `PacketReceiver` owner
-or the originating Lua state. Applications must retain the receiver owner,
-withdraw handles, and complete all in-flight `send` / `send_packet` calls before
-`close`, Runtime shutdown, collection, or state destruction. The atomic packet
-slot synchronizes concurrent sends and reader/callback extraction; it does not
-synchronize concurrent send-versus-close races or authorize use of a handle
-after its owner's lifetime.
+An exported `handle()` does not retain its `Receiver` owner or the originating
+Lua state. Applications must retain the receiver owner, withdraw handles, and
+complete all in-flight `send` calls before `close`, Runtime shutdown,
+collection, or state destruction. The atomic packet slot synchronizes concurrent
+sends and reader extraction; it does not synchronize concurrent send-versus-close
+races or authorize use of a handle after its owner's lifetime.
 
 ## Foreign workers
 
@@ -847,7 +812,7 @@ lexical cleanup while avoiding a stale Task-only orphan snapshot.
 
 Once no Tasks remain, `close_handles` closes the Runtime's `ExternalBridge` (if
 initialized) and `uv.walk` closes remaining non-closing handles (disabling live
-`Receiver` and `PacketReceiver` slots before closing their async handles). The
+`Receiver` slots before closing their async handles). The
 driver continues native callbacks and checks initialized inactive handles as
 well as native liveness before `uv.loop_close`. Immediately after successful
 `uv.loop_close`, it detaches and invokes

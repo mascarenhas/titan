@@ -193,7 +193,8 @@ required message type.
   requiring an active Runtime, including after the originating `lua_State` has
   closed.
 - Packet attachments count as live native endpoints even while unread in a
-  channel. Native reference cycles are not collected by Lua GC: for example,
+  channel or `async.Receiver` slot. Native reference cycles are not collected by
+  Lua GC: for example,
   enqueueing a channel's own `Receiver` can keep its receiver count nonzero
   after every public wrapper is dropped. Retain a reachable receiver and call
   `Receiver:close()` to drain and break such cycles before dropping the last
@@ -235,24 +236,22 @@ required message type.
     `lua_close` because the unconsumed result packet owns the endpoint units
     until parent reconstruction.
   - Attachment and claim are authorized only by the current execution's exact
-    top encode or decode scope (`transfer.encode_message`,
-    `transfer.decode_message`, `transfer.Packet.from_value`, and
-    `transfer.Packet:decode()`); endpoints can cross `Sender:send`,
+    top encode or decode scope (`transfer.encode_message` and
+    `transfer.decode_message`); endpoints can cross `Sender:send`,
     `Sender:try_send`, `thread.spawn*`, `Group:spawn*`, and
-    [`async.PacketReceiver`](async-io.md#owned-packet-receivers)
-    (`async.send_packet` / `PacketReceiver:wait_packet()`), as well as public
-    records, unions, Array fields inside transferable roots, custom hooks, and
-    closure captures within a packet.
+    [`async.Receiver`](async-io.md#cross-state-receivers) (`async.send` /
+    `Receiver:wait()`), as well as public records, unions, Array fields inside
+    transferable roots, custom hooks, and closure captures within a packet.
   - `protobuf.serialize`, `transfer.TransferValue.from_value`, and
-    `transfer.TransferValue:to_value()` do not create packet scopes. Endpoint hooks
-    outside the current execution's matching top scope raise
+    `transfer.TransferValue:to_value()` do not create packet scopes. Endpoint
+    hooks outside the current execution's matching top scope raise
     `"transfer: resource attachment requires an encode scope"` or
     `"transfer: resource claim requires a decode scope"`. Opaque hooks and
     closure-policy conversion within such a scope may reuse its packet, but
-    index bytes/policies own no attachments independently. Legacy
-    `async.send` / `async.Receiver` and independent `lua.Lua:run` / `run_async` carriers
-    copy those bytes, not the enclosing packet's native resource table, and
-    cannot provide standalone endpoint ownership.
+    index bytes/policies own no attachments independently. Independent
+    `lua.Lua:run` / `run_async` carriers copy those bytes over a separate
+    carrier without the enclosing packet's native resource table, and cannot
+    provide standalone endpoint ownership.
     Other Tasks and separately resumed child Coroutines do not inherit a
     caller's packet authority. Custom hooks remain synchronous and nonyielding.
   - Duplicate occurrences of the same `Sender` or `Receiver` in one packet attach
@@ -266,7 +265,7 @@ required message type.
     sender drops its local handle before the receiver decodes the message.
     Encoding failures after earlier attachments, failed or cancelled sends,
     unread messages flushed by `Receiver:close()` or last-`Receiver`
-    finalization, overwritten or closed `PacketReceiver` slots, and unconsumed
+    finalization, overwritten or closed `async.Receiver` slots, and unconsumed
     results, entry closures, or cancellation reasons of abandoned `Thread`
     handles automatically release their unclaimed retains via
     `transfer.discard_message`. If a composite decode fails after some endpoints

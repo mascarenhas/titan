@@ -125,13 +125,13 @@ on the independent stack until the host has copied their complete bytes.
 Binary strings retain their explicit lengths throughout.
 
 This boundary uses the separate `titan_lua_value` carrier in
-`titan/lua/native.h`, not `titan_async_message` or a `transfer.Packet`. It has no
-packet resource table and opens no attachment/claim scope. `Lua:run`,
-`run_async`, and their Reader-loading companions therefore do not carry
-packet-attached `thread.Sender` or `thread.Receiver` ownership, even inside
-nominal payloads, opaque hooks, or closure captures. Standalone policy conversion
-cannot manufacture reusable endpoint ownership bytes. Use a thread packet route
-or an owned `async.PacketReceiver` for those resources; see the
+`titan/lua/native.h`, not `titan_async_message`. It has no packet resource table
+and opens no attachment/claim scope. `Lua:run`, `run_async`, and their
+Reader-loading companions therefore do not carry packet-attached `thread.Sender`
+or `thread.Receiver` ownership, even inside nominal payloads, opaque hooks, or
+closure captures. Standalone policy conversion cannot manufacture reusable
+endpoint ownership bytes. Use a thread packet route or an `async.Receiver` for
+those resources; see the
 [owning Lua API restriction](../language/standard-library-lua.md#transferring-values)
 and [packet scope rules](transfer-library.md#scoped-resource-table-and-manual-resource-ownership).
 

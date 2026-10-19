@@ -444,10 +444,10 @@ must survive:
 - Use `thread.channel<|T|>` for a stream of messages. It is a bounded FIFO with
   backpressure and drops nothing.
 - Use `async.channel<|T|>` between Tasks in the same state. It copies nothing.
-- Use `async.Receiver` or `async.PacketReceiver` to wake another state with the
-  latest value. Both coalesce: a newer value replaces an unread one.
-  `Receiver` copies plain values and cannot carry channel endpoints.
-  `PacketReceiver` moves a `transfer.Packet`, which can carry them.
+- Use `async.Receiver` to wake another state with the latest value. It
+  coalesces: a newer value replaces an unread one, and overwritten or closed
+  unread packets are disposed natively (including any attached channel
+  endpoints).
 
 Observe a thread with `Thread:join()`, or compose `Thread:task()` with the
 `async` combinators. Cancelling the proxy Task only requests cancellation of the
@@ -460,7 +460,7 @@ not released when a packet is discarded. Adopt each payload exactly once, or
 recover it with the type's `discard_transfer_payload` where one exists. The
 [shared manual-handoff rules](language/standard-library-transfer.md#shared-manual-handoff-rules)
 give the details. Release a `transfer.encode_message` packet with
-`transfer.discard_message` or `Packet:close()`, never with `ffi.free`.
+`transfer.discard_message`, never with `ffi.free`.
 
 The `uv` locks block the OS thread. Do not hold one across a Task suspension;
 use channels to coordinate instead.

@@ -77,11 +77,11 @@ TITAN_TEST_SOURCES_async.tests := spec/stdlib/titan/async/tests/tests.titan \
 	spec/stdlib/titan/async/tests/any_race_test.titan \
 	spec/stdlib/titan/async/tests/await_test.titan \
 	spec/stdlib/titan/async/tests/channel_test.titan \
+	spec/stdlib/titan/async/tests/coalescing_receiver_test.titan \
 	spec/stdlib/titan/async/tests/completion_test.titan \
 	spec/stdlib/titan/async/tests/external_wait_test.titan \
 	spec/stdlib/titan/async/tests/fatal_test.titan \
 	spec/stdlib/titan/async/tests/foreign_work_test.titan \
-	spec/stdlib/titan/async/tests/packet_receiver_test.titan \
 	spec/stdlib/titan/async/tests/receiver_test.titan \
 	spec/stdlib/titan/async/tests/runtime_close_test.titan \
 	spec/stdlib/titan/async/tests/subscription_test.titan \
@@ -338,7 +338,7 @@ TITAN_TEST_C_INPUTS_reflect.tests := spec/stdlib/titan/reflect/reflection_recurs
 TITAN_TEST_C_INPUTS_protobuf.tests := spec/stdlib/titan/protobuf/protobuf_fixture.h
 TITAN_TEST_C_INPUTS_async.tests = $(TITAN_TEST_BUILD_DIR)/async_foreign_work.h \
 	spec/stdlib/titan/async/tests/async_stack_probe.h \
-	spec/stdlib/titan/async/tests/packet_receiver_probe.h
+	spec/stdlib/titan/async/tests/receiver_probe.h
 TITAN_TEST_C_INPUTS_uv.runtime_tests = $(TITAN_TEST_BUILD_DIR)/uv_stdio_probe.h
 TITAN_TEST_C_INPUTS_uv.public_tests = $(TITAN_TEST_BUILD_DIR)/uv_coverage_threads.h $(TITAN_TEST_BUILD_DIR)/uv_coverage_pty.h
 TITAN_TEST_C_INPUTS_lua.tests = $(TITAN_TEST_BUILD_DIR)/uv_stdio_probe.h $(TITAN_TEST_BUILD_DIR)/async_foreign_work.h

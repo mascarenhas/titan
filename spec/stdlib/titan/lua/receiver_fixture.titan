@@ -46,8 +46,8 @@ function bootstrap(reply: value, quiescence: value): foreign *void
       local item = owner:wait()
       gc.collect()
       gc.collect()
-      case item
-      when is_string(bytes) then
+      if item is string then
+        local bytes: string = item
         if bytes == "close" then
           response = async.TransferValue.is_string("closed")
           return nil

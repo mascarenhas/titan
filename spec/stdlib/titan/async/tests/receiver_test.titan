@@ -5,11 +5,9 @@ local foreign function receiver_test_callback(state: *lua_State): int
   return ffi.lua_gettop(state)
 end
 
-local function receiver_integer(item: async.TransferValue): integer
-  case item
-  when is_integer(number) then return number
-  else raise "receiver changed an integer's variant"
-  end
+local function receiver_integer(item: value): integer
+  test.assert(item is integer, "receiver changed an integer's variant")
+  return item
 end
 
 local function receiver_error(action: function (): (), expected: string?)
@@ -80,44 +78,54 @@ function test_receiver_preserves_all_transfer_variants_and_copied_bytes(
     memory[0] = 42
     local expected_callback: foreign function (*lua_State): int = receiver_test_callback
     async.send(handle, async.TransferValue.is_nil())
-    case receiver:wait()
-    when is_nil() then
-    else raise "Receiver changed nil's variant" end
+    test.assert(receiver:wait() == nil, "Receiver changed nil's variant")
+    async.send(handle, nil)
+    test.assert(receiver:wait() == nil, "Receiver changed direct nil")
     async.send(handle, async.TransferValue.is_boolean(false))
-    case receiver:wait()
-    when is_boolean(flag) then test.assert(not flag, "Receiver changed false")
-    else raise "Receiver changed false's variant" end
+    local false_val = receiver:wait()
+    test.assert(false_val is boolean and false_val == false,
+                "Receiver changed false's variant")
+    async.send(handle, false)
+    local direct_false = receiver:wait()
+    test.assert(direct_false is boolean and direct_false == false,
+                "Receiver changed direct false")
     async.send(handle, async.TransferValue.is_boolean(true))
-    case receiver:wait()
-    when is_boolean(flag) then test.assert(flag, "Receiver changed true")
-    else raise "Receiver changed true's variant" end
+    local true_val = receiver:wait()
+    test.assert(true_val is boolean and true_val == true,
+                "Receiver changed true's variant")
     async.send(handle, async.TransferValue.is_integer(-73))
     test.assert(receiver_integer(receiver:wait()) == -73)
     async.send(handle, async.TransferValue.is_float(2.5))
-    case receiver:wait()
-    when is_float(number) then test.assert(number == 2.5)
-    else raise "Receiver changed a float's variant" end
+    local float_val = receiver:wait()
+    test.assert(float_val is float and (float_val as float) == 2.5,
+                "Receiver changed a float's variant")
     receiver_send_transient_string(handle)
     support.collect_garbage()
     support.collect_garbage()
-    case receiver:wait()
-    when is_string(bytes) then
-      test.assert(bytes == receiver_string.rep("receiver\0bytes", 4096),
-                  "Receiver lost copied string bytes after sender GC")
-    else raise "Receiver changed a string's variant" end
+    local string_val = receiver:wait()
+    test.assert(string_val is string, "Receiver changed a string's variant")
+    local bytes: string = string_val
+    test.assert(bytes == receiver_string.rep("receiver\0bytes", 4096),
+                "Receiver lost copied string bytes after sender GC")
     async.send(handle, async.TransferValue.is_lua_state(state))
-    case receiver:wait()
-    when is_lua_state(pointer) then test.assert(pointer == state)
-    else raise "Receiver changed a borrowed state's variant" end
+    local state_pointer = receiver:wait() as foreign *lua_State
+    test.assert(state_pointer == state,
+                "Receiver changed a borrowed state's pointer")
     async.send(handle, async.TransferValue.is_function(receiver_test_callback))
-    case receiver:wait()
-    when is_function(callback) then test.assert(callback == expected_callback)
-    else raise "Receiver changed a native function's variant" end
+    local callback = receiver:wait()
+    local top = ffi.lua_gettop(L)
+    defer ffi.lua_settop(L, top)
+    test.assert(ffi.lua_checkstack(L, 1) ~= 0,
+                "could not reserve callback inspection slot")
+    ffi.lua_pushtvalue(L, callback)
+    local actual_callback = ffi.lua_tocfunction(L, -1)
+    ffi.lua_settop(L, top)
+    test.assert(actual_callback == expected_callback,
+                "Receiver changed a native Lua C function")
     async.send(handle, async.TransferValue.is_pointer(memory as foreign *void))
-    case receiver:wait()
-    when is_pointer(pointer) then
-      test.assert(pointer == memory as foreign *void)
-    else raise "Receiver changed a raw pointer's variant" end
+    local pointer = receiver:wait() as foreign *void
+    test.assert(pointer == memory as foreign *void,
+                "Receiver changed a raw pointer's address")
     test.assert(memory[0] == 42, "Receiver wrote through a borrowed pointer")
   end)
 end
@@ -126,7 +134,7 @@ function test_receiver_reserves_one_waiter_without_barging(_context: test.Contex
   runtime_test.run(function ()
     local receiver = async.receiver()
     defer receiver:close()
-    local waiting = async.run<|async.TransferValue, value|>(receiver:wait)
+    local waiting = async.run<|value, value|>(receiver:wait)
     task_support.cleanup_task(waiting, "Receiver reserved waiter cleanup")
     support.wait_until_waiting(waiting)
     receiver_error(function () receiver:wait() end)
@@ -141,15 +149,26 @@ function test_receiver_reserves_one_waiter_without_barging(_context: test.Contex
   end)
 end
 
+record ReceiverNominalRecord
+  label: string
+  payload: string
+  ordinal: integer
+end
+
+union ReceiverNominalUnion
+  bytes(string)
+  number(integer)
+end
+
 local function receiver_send_record_bytes(handle: foreign *void)
-  async.send(handle, async.TransferValue.is_record(
-    receiver_string.rep("record.module", 128), receiver_string.rep("record.name", 128),
-    receiver_string.rep("record\0bytes", 4096)))
+  async.send(handle, ReceiverNominalRecord(
+    receiver_string.rep("record.label", 128),
+    receiver_string.rep("record\0bytes", 4096),
+    91))
 end
 
 local function receiver_send_union_bytes(handle: foreign *void)
-  async.send(handle, async.TransferValue.is_union(
-    receiver_string.rep("union.module", 128), receiver_string.rep("union.name", 128),
+  async.send(handle, ReceiverNominalUnion.bytes(
     receiver_string.rep("union\0bytes", 4096)))
 end
 
@@ -160,21 +179,24 @@ function test_receiver_copies_nominal_names_and_wire_bytes(_context: test.Contex
     receiver_send_record_bytes(receiver:handle())
     support.collect_garbage()
     support.collect_garbage()
-    case receiver:wait()
-    when is_record(module, name, data) then
-      test.assert(module == receiver_string.rep("record.module", 128))
-      test.assert(name == receiver_string.rep("record.name", 128))
-      test.assert(data == receiver_string.rep("record\0bytes", 4096))
-    else raise "Receiver changed the record transfer policy" end
+    local record_val: ReceiverNominalRecord = receiver:wait()
+    test.assert(record_val.label == receiver_string.rep("record.label", 128))
+    test.assert(record_val.payload == receiver_string.rep("record\0bytes", 4096))
+    test.assert(record_val.ordinal == 91)
     receiver_send_union_bytes(receiver:handle())
     support.collect_garbage()
     support.collect_garbage()
-    case receiver:wait()
-    when is_union(module, name, data) then
-      test.assert(module == receiver_string.rep("union.module", 128))
-      test.assert(name == receiver_string.rep("union.name", 128))
+    local union_val: ReceiverNominalUnion = receiver:wait()
+    case union_val
+    when bytes(data) then
       test.assert(data == receiver_string.rep("union\0bytes", 4096))
-    else raise "Receiver changed the union transfer policy" end
+    else raise "Receiver changed the union transfer payload" end
+    async.send(receiver:handle(),
+      async.TransferValue.is_record("async.tests", "MissingNominalRecord", "bad"))
+    receiver_error(function () receiver:wait() end)
+    async.send(receiver:handle(), 92)
+    test.assert(receiver_integer(receiver:wait()) == 92,
+                "failed nominal decode did not consume the Receiver slot")
   end)
 end
 
@@ -182,7 +204,7 @@ function test_receiver_cancellation_preserves_pending_message(_context: test.Con
   runtime_test.run(function ()
     local receiver = async.receiver()
     defer receiver:close()
-    local waiting = async.run<|async.TransferValue, value|>(receiver:wait)
+    local waiting = async.run<|value, value|>(receiver:wait)
     task_support.cleanup_task(waiting, "cancelled Receiver waiter cleanup")
     support.wait_until_waiting(waiting)
     -- Neither send nor cancel yields: cancellation wins before delivery.
@@ -206,7 +228,7 @@ function test_receiver_close_wakes_waiter_and_rejects_late_sends(_context: test.
     local receiver = async.receiver()
     defer receiver:close()
     local handle = receiver:handle()
-    local waiting = async.run<|async.TransferValue, value|>(receiver:wait)
+    local waiting = async.run<|value, value|>(receiver:wait)
     task_support.cleanup_task(waiting, "closed Receiver waiter cleanup")
     support.wait_until_waiting(waiting)
     receiver:close()
@@ -235,7 +257,7 @@ function test_receiver_runtime_shutdown_retires_retained_endpoint(_context: test
   defer receiver:close()
   local handle = receiver:handle()
   async.send(handle, async.TransferValue.is_integer(29))
-  local waiting = async.run<|async.TransferValue, value|>(receiver:wait)
+  local waiting = async.run<|value, value|>(receiver:wait)
   async.loop()
   case waiting:status()
   when succeeded(item) then test.assert(receiver_integer(item) == 29)
@@ -271,18 +293,17 @@ function test_receiver_copies_closure_snapshots_and_retires_packet_bytes(_contex
     receiver_send_transient_closure(handle)
     support.collect_garbage()
     support.collect_garbage()
-    local packet = receiver:wait()
-    case packet
-    when is_closure() then
-      local callback: function (): integer = packet:to_value()
-      local size = #receiver_string.rep("queued\0closure", 1024)
-      test.assert(callback() == 14 + size and callback() == 15 + size,
-        "Receiver did not snapshot the sender's closure captures")
-    else raise "Receiver changed a closure's transfer variant" end
+    local callback: function (): integer = receiver:wait()
+    local size = #receiver_string.rep("queued\0closure", 1024)
+    test.assert(callback() == 14 + size and callback() == 15 + size,
+      "Receiver did not snapshot the sender's closure captures")
     local invalid = async.TransferValue.is_closure("async.tests", nil, "invalid protobuf")
     async.send(handle, invalid)
-    receiver_error(function () receiver:wait():to_value() end,
+    receiver_error(function () receiver:wait() end,
       "closure transfer entry belongs to a different provider or is invalid")
+    async.send(handle, 99)
+    test.assert(receiver_integer(receiver:wait()) == 99,
+      "failed closure decode did not consume the Receiver slot")
     receiver_send_transient_closure(handle)
     receiver:close()
     receiver_error(function () receiver_send_transient_closure(handle) end, "receiver is closed")

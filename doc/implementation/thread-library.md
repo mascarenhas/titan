@@ -86,12 +86,12 @@ with all semantic encoding/decoding outside the channel/control mutex:
 
 - Scalar values (`nil`, `boolean`, `integer`, `float`, pointers, borrowed
   `*lua_State`, and bare C functions) are classified directly from their Lua
-  tags (`scalar_to_message`) and copied into a single `titan_async_message`
-  heap allocation (`transfer.copy_message`) without allocating intermediate
-  `TransferValue` unions or `reflect.Value` wrappers on the Lua GC heap. Strings
-  and root custom-hook payloads likewise copy into a single
-  `titan_async_message` allocation on send and allocate a destination Lua string
-  on receive.
+  tags (`scalar_message_kind`) before acquiring a resource scope.
+  `scalar_value_to_message` fills a single heap packet directly through
+  `new_scalar_message`, without staging a header, copying it through
+  `transfer.copy_message`, or allocating intermediate `TransferValue` unions
+  or `reflect.Value` wrappers. Binary strings use the same direct heap encoding
+  but keep protected decode to allocate the destination Lua string.
 - Root `Sender<|T|>` and `Receiver<|T|>` values match
   `protobuf.find_resource_codec` by canonical erased metatable identity in
   `encode_packet`, reserve `sizeof(titan_async_message) + 4 + #name + #module`
@@ -101,10 +101,10 @@ with all semantic encoding/decoding outside the channel/control mutex:
   `TITAN_ASYNC_MESSAGE_RECORD_PAYLOAD` packet in place without a Lua index
   string or staged `copy_message`.
 - Structural records, unions, and Titan closures initialize a heap-backed
-  `owned *titan_protobuf_buffer` outside the Lua GC with
-  `sizeof(titan_async_message)` reserved at the front
-  (`titan_protobuf_buf_init_heap`), serialize the Protocol Buffers wire payload
-  directly into that expandable buffer via
+  `owned *titan_protobuf_buffer` outside the Lua GC through
+  `init_packet_buffer`, which reserves the message header plus a bounded credit
+  for mandatory nominal/module metadata before serialization. They serialize
+  the Protocol Buffers wire payload directly into that expandable buffer via
   `protobuf.serialize_inspected_record_to_buffer` (passing `scope`),
   `protobuf.serialize_inspected_union_to_buffer` (passing `scope`), or
   `protobuf.serialize_fields_to_buffer` (without hydrating closure function
@@ -318,10 +318,14 @@ resource table, four-byte little-endian slot index format
   `Receiver:to_transfer_payload()`, used by `TransferValue` policies such as
   closure captures and by opaque user hooks), each encoded occurrence reserves
   table capacity in the active encode `ResourceScope` before calling
-  `channel_retain_*_native`, increments `active_senders` or `active_receivers`
-  under `ch.mutex`, and writes the four-byte little-endian packet-local slot
-  index. If encoding later fails, unwinding the encode scope releases every
-  attached entry via `channel_release_*_native`. A child Coroutine or other Task
+  `channel_retain_*_native`. The first two entries use the scope's inline native
+  scratch cell; the third spills to the C heap. Each occurrence increments
+  `active_senders` or `active_receivers` under `ch.mutex` and writes the four-byte
+  little-endian packet-local slot index. Packet finalization commits the entries
+  into the aligned tail of the single packet allocation. If encoding later
+  fails, unwinding the encode scope releases every attached entry via
+  `channel_release_*_native`, zeroes its native cell, and returns the frame to
+  the bounded state-local pool. A child Coroutine or other Task
   does not inherit permission from an enclosing packet operation in another
   execution. The index is packet-local, not a global anti-replay token; an
   identical number may name another packet's slot.
@@ -333,21 +337,13 @@ resource table, four-byte little-endian slot index format
   allocate a fresh wrapper with `native = nil` and register `sender_finalize` or
   `receiver_finalize` with `gc.finalizable`—and then immediately assign
   `self.native` from the claim with no fallible ordinary entry, allocation, or
-  yield after the slot is marked claimed. Claim validation checks direction,
-  four-byte width, bounds (`0..count - 1`, `~= 0xffffffff`), expected release
-  callback (`Sender` vs `Receiver`), and unclaimed status in that order. If a
-  composite decode fails on a subsequent field, the native decode-scope disposer
-  releases only remaining unclaimed slots while already-claimed endpoint
-  wrappers stay owned by the destination collector.
-
-Scratch capacity lives in the scope's native cell: the first two entries are
-inline and the third spills to the native heap. Every producer reserves aligned
-trailing storage before allocation or buffer detachment, then moves the entries
-into the packet's own block. A committed packet never borrows scope storage.
-Claim clears `entry.resource` to nil but retains `entry.release`, preserving
-kind-before-duplicate validation. Retirement restores the exact parent, disposes
-and zeroes native ownership, and only then returns the frame to the bounded
-state-local pool. An abandoned active frame is never pooled.
+  yield after the slot's `resource` is cleared to nil. Claim validation checks
+  direction, four-byte width, bounds (`0..count - 1`, `~= 0xffffffff`),
+  expected release callback (`Sender` vs `Receiver`), and a non-nil resource
+  pointer in that order. The release callback remains after consumption so kind
+  checks precede duplicate checks. If a composite decode fails on a subsequent
+  field, the native decode-scope disposer releases only remaining non-nil slots
+  while already-claimed wrappers stay owned by the destination collector.
 - `channel_retain_sender_native`, `channel_retain_receiver_native`,
   `channel_release_sender_native`, `channel_release_receiver_native`,
   `channel_drain_and_discard`, and `channel_destroy_unreferenced` are

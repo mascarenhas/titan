@@ -380,7 +380,7 @@ function test_lua_independent_receiver_copies_closure_before_origin_close(
     ]], nil, async.TransferValue.is_pointer(receiver:handle()))
     state:close()
     gclib.collect()
-    local callback: function (): integer = transfer_closure(receiver:wait())
+    local callback: function (): integer = receiver:wait()
     test.assert(callback() == 105 and callback() == 205)
   end)
 end

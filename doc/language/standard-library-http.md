@@ -562,9 +562,10 @@ lets the original handler return. The hook preserves request metadata, unread
 body bytes, parser progress, trailers, response headers, framing, and already
 written byte counts. The pair cannot be transferred independently.
 
-In the destination's active Runtime, `packet:to_value()` returns an `Exchange`
-with public const `request` and `response` fields. Either finish the current
-exchange and call `exchange:close()`, or call
+In the destination's active Runtime, `Receiver:wait()` reconstructs and returns
+an `Exchange` with public const `request` and `response` fields. Either finish
+the current exchange and call
+`exchange:close()`, or call
 `exchange:serve(handler, idle_timeout: integer?)` to handle it and subsequent
 requests on that connection. `serve` preserves serial keep-alive processing and
 unread next-request bytes; only one serving loop may own the exchange. The

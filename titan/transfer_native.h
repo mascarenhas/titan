@@ -64,12 +64,6 @@ typedef struct titan_async_message {
   titan_transfer_resource_table resources;
 } titan_async_message;
 
-/* Inline cells belong to traced Titan owners; borrowed cell addresses retain
- * neither the owner nor the packet and are valid only while that owner lives. */
-typedef struct titan_transfer_packet_owner {
-  titan_async_message *message;
-} titan_transfer_packet_owner;
-
 /* Scratch is confined to this traced native cell. Capacity zero is inert;
  * capacity == INLINE_RESOURCES selects inline_entries, larger capacity selects
  * a heap spill. Retirement frees the spill and zeroes the complete cell. */

@@ -57,8 +57,8 @@ local function expect_native_failure(mode: integer, candidate: value,
   local failed = false
   if mode == 4 then ffi.titan_transfer_fault_arm(4) end
   do
-    local packet = transfer.Packet.from_value(candidate)
-    defer packet:close()
+    local raw = transfer.encode_message(candidate)
+    defer transfer.discard_message(raw)
   catch
     failed = true
   end
@@ -95,8 +95,8 @@ local function expect_native_failure(mode: integer, candidate: value,
   local rejected = false
   do attach(0) catch rejected = true end
   test.assert(rejected, "failed encode left attachment authority behind")
-  local recovered = transfer.Packet.from_value(TransferNativeFaultProbe(0))
-  recovered:close()
+  local recovered = transfer.encode_message(TransferNativeFaultProbe(0))
+  transfer.discard_message(recovered)
   for index = 0, 1 do
     local resource = ffi.titan_transfer_fault_resource_at(index as foreign unsigned int)
     test.assert(resource.references == (1 as foreign size_t) and
@@ -129,6 +129,15 @@ function TransferFinalizerFaultProbe.from_transfer_payload(
   return { sender = nil, receiver = receiver }
 end
 
+-- No payload hooks: nested endpoints reach the registered constructors.
+record TransferDirectSenderFinalizerFault
+  sender: thread.Sender<|integer|>
+end
+
+record TransferDirectReceiverFinalizerFault
+  receiver: thread.Receiver<|integer|>
+end
+
 local function watch_finalizer(candidate: value)
   local top = ffi.lua_gettop(L)
   defer ffi.lua_settop(L, top)
@@ -138,21 +147,27 @@ local function watch_finalizer(candidate: value)
               "could not select the endpoint's public finalizer boundary")
 end
 
-local function expect_endpoint_finalizer_failure(sender_kind: boolean)
+local function expect_endpoint_finalizer_failure(sender_kind: boolean, direct: boolean)
   local peer_tx: (thread.Sender<|integer|>)? = nil
   local peer_rx: (thread.Receiver<|integer|>)? = nil
-  local packet = (function (): transfer.Packet
+  local raw = (function (): foreign *void
     local tx, rx = thread.channel<|integer|>(1)
     if sender_kind then
       watch_finalizer(tx)
       peer_rx = rx
-      return transfer.Packet.from_value(TransferFinalizerFaultProbe(tx, nil))
+      if direct then
+        return transfer.encode_message(TransferDirectSenderFinalizerFault(tx))
+      end
+      return transfer.encode_message(TransferFinalizerFaultProbe(tx, nil))
     end
     watch_finalizer(rx)
     peer_tx = tx
-    return transfer.Packet.from_value(TransferFinalizerFaultProbe(nil, rx))
+    if direct then
+      return transfer.encode_message(TransferDirectReceiverFinalizerFault(rx))
+    end
+    return transfer.encode_message(TransferFinalizerFaultProbe(nil, rx))
   end)()
-  defer packet:close()
+  defer transfer.discard_message(raw)
   defer do
     if peer_tx ~= nil then peer_tx:close() end
     if peer_rx ~= nil then peer_rx:close() end
@@ -161,10 +176,25 @@ local function expect_endpoint_finalizer_failure(sender_kind: boolean)
   gc.collect()
   if peer_tx ~= nil then test.assert(not peer_tx:is_closed()) end
   if peer_rx ~= nil then test.assert(not peer_rx:is_closed()) end
+  local top = ffi.lua_gettop(L)
+  defer ffi.lua_settop(L, top)
+  -- The hook route arms inside its decoder; direct fields invoke no hook.
+  if direct then ffi.titan_transfer_fault_arm(6) end
+  local status = transfer.decode_message(L, raw)
+  local failure: value = nil
+  if status >= 0 then failure = ffi.lua_totvalue(L, -1) end
+  ffi.lua_settop(L, top)
   local failed = false
-  do packet:decode() catch failed = true end
+  do
+    if status ~= 0 then
+      transfer.raise_message_error(status, failure)
+    end
+  catch
+    failed = true
+  end
   ffi.titan_transfer_fault_disarm()
-  test.assert(failed and ffi.titan_transfer_fault_fired() == 1,
+  test.assert(failed and status > 0 and raw == nil and
+              ffi.titan_transfer_fault_fired() == 1,
               "endpoint adoption did not exercise finalizer registration failure")
   gc.collect()
   gc.collect()
@@ -204,9 +234,13 @@ function main(args: {string}): integer
     ffi.titan_transfer_fault_arm(3)
     expect_native_failure(3, policy, 0)
   elseif scenario == "sender-finalizer" then
-    expect_endpoint_finalizer_failure(true)
+    expect_endpoint_finalizer_failure(true, false)
   elseif scenario == "receiver-finalizer" then
-    expect_endpoint_finalizer_failure(false)
+    expect_endpoint_finalizer_failure(false, false)
+  elseif scenario == "sender-finalizer-direct" then
+    expect_endpoint_finalizer_failure(true, true)
+  elseif scenario == "receiver-finalizer-direct" then
+    expect_endpoint_finalizer_failure(false, true)
   else
     raise "unknown native OOM scenario"
   end

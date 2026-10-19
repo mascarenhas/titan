@@ -120,16 +120,17 @@ native preload loader and retries lookup. It does not infer a module name from
 the record's dotted name. The reconstruction hook interprets the bytes, using
 the same descriptor as its encoder when it uses an anonymous protobuf message.
 
-**No packet attachments.** These calls use Lua's separate native `titan_lua_value` carrier, not an owned
-`transfer.Packet`. `Lua:run`, `run_async`, and both Reader-loading companions
-open no packet attachment/claim scope and cannot transport packet-attached
-resources such as `thread.Sender` or `thread.Receiver`, including endpoints
-nested in records, opaque hook bytes, or closure captures. Endpoint policy
-conversion without a matching enclosing packet scope raises. Conversion inside
-such a scope may reuse its packet, but its index bytes own nothing and do not
-upgrade this separate Lua carrier into an attachment transport. Use a
+**No packet attachments.** These calls use Lua's separate native
+`titan_lua_value` carrier, not a native transfer packet (`titan_async_message`).
+`Lua:run`, `run_async`, and both Reader-loading companions open no packet
+attachment/claim scope and cannot transport packet-attached resources such as
+`thread.Sender` or `thread.Receiver`, including endpoints nested in records,
+opaque hook bytes, or closure captures. Endpoint policy conversion without a
+matching enclosing packet scope raises. Conversion inside such a scope may reuse
+its packet, but its index bytes own nothing and do not upgrade this separate Lua
+carrier into an attachment transport. Use a
 [`thread` packet route](standard-library-thread.md#closing-cloning-and-transferring-endpoints)
-or an [`async.PacketReceiver`](async-io.md#owned-packet-receivers) when endpoint
+or an [`async.Receiver`](async-io.md#cross-state-receivers) when endpoint
 ownership must cross states.
 
 **Manual handoff.** The programmer owns safe native resource handoff inside supported custom hooks.
