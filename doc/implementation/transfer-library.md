@@ -21,7 +21,7 @@ walk capture graphs, retain Lua objects, or attach packet-scoped resources.
 
 `TransferValue.from_value` and `encode_message` share direct classification
 paths before falling back to general reflection:
-1. **Direct scalar Lua tags (`scalar_to_message`)**: Inspects the raw `TValue`
+1. **Direct scalar Lua tags (`scalar_message_kind`)**: Inspects the raw `TValue`
    tag directly without constructing a `reflect.Value` wrapper. It handles
    `LUA_TNIL`, `LUA_TBOOLEAN`, `LUA_TNUMBER` (testing `LUA_VNUMINT` to keep
    integers distinct from integral floats and `-0.0`), `LUA_TSTRING` (preserving
@@ -34,14 +34,17 @@ paths before falling back to general reflection:
    functions and non-Titan C closures with upvalues).
 2. **Demand-driven Titan closure classification**: When `LUA_TFUNCTION` is a C
    closure with `nupvalues >= 5` and `upvalue[3] == TITAN_BRAND`,
-   `scalar_to_message` returns `false` and transfer dispatches directly to
-   `snapshot_closure` or `snapshot_closure_to_buffer` (`project_closure_captures`).
+   `scalar_message_kind` returns a negative kind and transfer dispatches directly
+   to `snapshot_closure` or `snapshot_closure_to_buffer` (`project_closure_captures`).
    `transfer_closure_entry` validates the closure header, brand, module
    userdata, and manifest entry (`entry.native` and `entry.strict`) directly in
    C without calling `reflect.inspect`. Consequently, neither root nor nested
    closure transfer hydrates reflection's `FunctionType` signature text, while
    explicit `reflect.inspect` calls preserve eager full `FunctionValue` /
    `FunctionType` descriptors without needing a signature cache.
+   Scalar packets are allocated and initialized directly by
+   `new_scalar_message`; they no longer stage an automatic message header or
+   call `copy_message`. Explicit nominal byte carriers still stage a header.
 3. **Registered nominal resource capability (`protobuf.find_resource_codec`)**:
    In `encode_packet`, before scalar or reflection dispatch, a `LUA_TUSERDATA`
    candidate is checked against `protobuf.find_resource_codec(candidate)` by its

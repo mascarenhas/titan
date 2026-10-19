@@ -221,6 +221,8 @@ Scalar and explicit-policy encoding does not create an attachment scope.
 Native scalar decoding preserves nil/false, integer/float tags and bare C
 functions while consuming the same actual owner slot on every outcome.
 Strings and nominal reconstruction retain protected decoding.
+Scalar packets are initialized directly in their heap allocation; this changes
+neither their value semantics nor the consuming-slot ownership contract.
 
 ### `Packet` ownership and move semantics
 

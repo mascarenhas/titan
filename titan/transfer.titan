@@ -607,59 +607,45 @@ local function initialize_nominal(module: string, name: string)
   initialize_nominal_raw(module, #module as foreign size_t, name)
 end
 
--- Classify scalar Lua tags without allocating a reflect.Value. A branded
--- closure returns false and is then fully checked against its module manifest;
--- neither path requests reflection's eagerly hydrated function signature.
-local function scalar_to_message(
-    candidate: value, message: foreign *titan_async_message): boolean
+-- Classify before allocating either a scope or a packet. A negative kind
+-- selects scoped reconstruction; no hook can run during this probe.
+local function scalar_message_kind(candidate: value): foreign int
   local raw: foreign TValue = candidate
   local tag = ffi.lmacro_ttype(raw)
   if tag == ffi.LUA_TNIL then
-    message.kind = ffi.TITAN_ASYNC_MESSAGE_NIL
+    return ffi.TITAN_ASYNC_MESSAGE_NIL as foreign int
   elseif tag == ffi.LUA_TBOOLEAN then
-    message.kind = ffi.TITAN_ASYNC_MESSAGE_BOOLEAN
-    if candidate then message.integer = 1 else message.integer = 0 end
+    return ffi.TITAN_ASYNC_MESSAGE_BOOLEAN as foreign int
   elseif tag == ffi.LUA_TNUMBER then
     if ffi.lmacro_ttypetag(raw) == ffi.LUA_VNUMINT then
-      local item: integer = candidate
-      message.kind = ffi.TITAN_ASYNC_MESSAGE_INTEGER
-      message.integer = item
-    else
-      local item: float = candidate
-      message.kind = ffi.TITAN_ASYNC_MESSAGE_FLOAT
-      message.number = item
+      return ffi.TITAN_ASYNC_MESSAGE_INTEGER as foreign int
     end
+    return ffi.TITAN_ASYNC_MESSAGE_FLOAT as foreign int
   elseif tag == ffi.LUA_TSTRING then
-    local item: string = candidate
-    message.kind = ffi.TITAN_ASYNC_MESSAGE_STRING
-    message.bytes = item
-    message.length = #item
+    return ffi.TITAN_ASYNC_MESSAGE_STRING as foreign int
   elseif tag == ffi.LUA_TLIGHTUSERDATA then
-    message.kind = ffi.TITAN_ASYNC_MESSAGE_POINTER
-    message.pointer = ffi.lmacro_pvalue(raw)
+    return ffi.TITAN_ASYNC_MESSAGE_POINTER as foreign int
   elseif tag == ffi.LUA_TTHREAD then
-    message.kind = ffi.TITAN_ASYNC_MESSAGE_STATE
-    message.state = ffi.lmacro_thvalue(raw)
+    return ffi.TITAN_ASYNC_MESSAGE_STATE as foreign int
   elseif tag == ffi.LUA_TUSERDATA then
     local userdata = ffi.lmacro_uvalue(raw)
     if userdata.metatable ~= nil then
       -- A metatable-of-metatable can invoke __index during the brand lookup.
       -- Leave that work to scoped reflection, never a no-scope scalar probe.
-      if userdata.metatable.metatable ~= nil then return false end
+      if userdata.metatable.metatable ~= nil then return -1 as foreign int end
       local mt_value: foreign TValue = nil
       ffi.lmacro_sethvalue(L, mt_value, userdata.metatable)
       local mt: {value: value} = mt_value as value
       local brand: integer? = mt[ffi.TITAN_BRAND]
       if brand ~= nil then
         if brand >= (ffi.TITAN_ARRAY as integer) and brand <= (ffi.TITAN_OWNED as integer) then
-          return false
+          return -1 as foreign int
         end
       end
     end
     -- Unbranded/unknown-brand Lua userdata keeps the existing borrowed payload
     -- policy; known unsupported Titan brands still go through normal rejection.
-    message.kind = ffi.TITAN_ASYNC_MESSAGE_POINTER
-    message.pointer = ffi.lmacro_getudatamem(userdata)
+    return ffi.TITAN_ASYNC_MESSAGE_POINTER as foreign int
   elseif tag == ffi.LUA_TFUNCTION then
     local entry: foreign function(*lua_State): int = nil
     if ffi.lmacro_ttislcf(raw) ~= 0 then
@@ -672,7 +658,7 @@ local function scalar_to_message(
         if closure.nupvalues >= 5 then
           local upvalues = closure.upvalue as foreign *TValue
           if ffi.lmacro_ttislightuserdata(upvalues[3]) ~= 0 then
-            if ffi.lmacro_pvalue(upvalues[3]) == ffi.TITAN_BRAND then return false end
+            if ffi.lmacro_pvalue(upvalues[3]) == ffi.TITAN_BRAND then return -1 as foreign int end
           end
         end
         raise "transfer: cannot transfer a Lua C closure with upvalues"
@@ -681,12 +667,9 @@ local function scalar_to_message(
       raise "transfer: unsupported value"
     end
     if entry == nil then raise "cannot transfer a NULL Lua C function" end
-    message.kind = ffi.TITAN_ASYNC_MESSAGE_FUNCTION
-    message.function = entry
-  else
-    return false
+    return ffi.TITAN_ASYNC_MESSAGE_FUNCTION as foreign int
   end
-  return true
+  return -1 as foreign int
 end
 
 local function snapshot_record(candidate: reflect.RecordValue): string
@@ -713,25 +696,26 @@ end
 -- @usage async-io.md#custom-record-transfer
 function TransferValue.from_value(candidate: value): TransferValue
   if candidate is TransferValue then return candidate end
-  local message = foreign titan_async_message.new()
-  if scalar_to_message(candidate, message) then
-    local kind = message.kind
-    if kind == ffi.TITAN_ASYNC_MESSAGE_NIL then return TransferValue.is_nil()
-    elseif kind == ffi.TITAN_ASYNC_MESSAGE_BOOLEAN then
-      return TransferValue.is_boolean(message.integer ~= 0)
-    elseif kind == ffi.TITAN_ASYNC_MESSAGE_INTEGER then
-      return TransferValue.is_integer(message.integer)
-    elseif kind == ffi.TITAN_ASYNC_MESSAGE_FLOAT then
-      return TransferValue.is_float(message.number)
-    elseif kind == ffi.TITAN_ASYNC_MESSAGE_STRING then return TransferValue.is_string(candidate)
-    elseif kind == ffi.TITAN_ASYNC_MESSAGE_POINTER then
-      return TransferValue.is_pointer(message.pointer)
-    elseif kind == ffi.TITAN_ASYNC_MESSAGE_STATE then
-      return TransferValue.is_lua_state(message.state)
-    else return TransferValue.is_function(message.function)
-    end
-  end
+  local kind = scalar_message_kind(candidate)
   local raw: foreign TValue = candidate
+  if kind == ffi.TITAN_ASYNC_MESSAGE_NIL then return TransferValue.is_nil()
+  elseif kind == ffi.TITAN_ASYNC_MESSAGE_BOOLEAN then return TransferValue.is_boolean(candidate)
+  elseif kind == ffi.TITAN_ASYNC_MESSAGE_INTEGER then return TransferValue.is_integer(candidate)
+  elseif kind == ffi.TITAN_ASYNC_MESSAGE_FLOAT then return TransferValue.is_float(candidate)
+  elseif kind == ffi.TITAN_ASYNC_MESSAGE_STRING then return TransferValue.is_string(candidate)
+  elseif kind == ffi.TITAN_ASYNC_MESSAGE_POINTER then
+    if ffi.lmacro_ttype(raw) == ffi.LUA_TLIGHTUSERDATA then
+      return TransferValue.is_pointer(ffi.lmacro_pvalue(raw))
+    end
+    return TransferValue.is_pointer(ffi.lmacro_getudatamem(ffi.lmacro_uvalue(raw)))
+  elseif kind == ffi.TITAN_ASYNC_MESSAGE_STATE then
+    return TransferValue.is_lua_state(ffi.lmacro_thvalue(raw))
+  elseif kind == ffi.TITAN_ASYNC_MESSAGE_FUNCTION then
+    if ffi.lmacro_ttislcf(raw) ~= 0 then
+      return TransferValue.is_function(ffi.lmacro_fvalue(raw))
+    end
+    return TransferValue.is_function(ffi.lmacro_clCvalue(raw).f)
+  end
   if ffi.lmacro_ttype(raw) == ffi.LUA_TFUNCTION then return snapshot_closure(candidate) end
   case reflect.inspect(candidate)
   when is_lua_userdata() then
@@ -879,6 +863,74 @@ local function copy_async_message(
   return copied
 end
 
+-- The arguments already contain exact native scalar fields. After allocation
+-- only nonthrowing C operations run; no automatic message header or copy pass
+-- stands between the heap allocation and its initialized owner.
+local function new_scalar_message(
+    kind: foreign titan_async_message_kind,
+    integer_value: foreign lua_Integer,
+    number: foreign lua_Number,
+    bytes: foreign const *char,
+    length: foreign size_t,
+    state: foreign *lua_State,
+    entry: foreign function(*lua_State): int,
+    pointer: foreign *void): foreign *titan_async_message
+  local header_size = foreign titan_async_message.sizeof as foreign size_t
+  if length > ffi.SIZE_MAX - header_size then
+    raise "transfer: out of memory copying message"
+  end
+  local message = ffi.malloc(header_size + length) as foreign *titan_async_message
+  if message == nil then raise "transfer: out of memory copying message" end
+  ffi.memset(message, 0, header_size)
+  message.kind = kind
+  message.integer = integer_value
+  message.number = number
+  message.length = length
+  message.state = state
+  message.function = entry
+  message.pointer = pointer
+  local storage = (message + 1) as foreign *char
+  message.bytes = storage
+  message.name = storage + length
+  message.module = storage + length
+  if length > 0 then ffi.memcpy(storage, bytes, length) end
+  return message
+end
+
+local function scalar_value_to_message(
+    candidate: value, kind: foreign int): foreign *titan_async_message
+  local raw: foreign TValue = candidate
+  local integer_value = 0 as foreign lua_Integer
+  local number = 0.0 as foreign lua_Number
+  local bytes: foreign const *char = nil
+  local length = 0 as foreign size_t
+  local state: foreign *lua_State = nil
+  local entry: foreign function(*lua_State): int = nil
+  local pointer: foreign *void = nil
+  if kind == ffi.TITAN_ASYNC_MESSAGE_BOOLEAN then
+    if candidate then integer_value = 1 end
+  elseif kind == ffi.TITAN_ASYNC_MESSAGE_INTEGER then
+    integer_value = raw.value_.i
+  elseif kind == ffi.TITAN_ASYNC_MESSAGE_FLOAT then
+    number = raw.value_.n
+  elseif kind == ffi.TITAN_ASYNC_MESSAGE_STRING then
+    local item: string = candidate
+    bytes = item
+    length = #item
+  elseif kind == ffi.TITAN_ASYNC_MESSAGE_STATE then
+    state = ffi.lmacro_thvalue(raw)
+  elseif kind == ffi.TITAN_ASYNC_MESSAGE_FUNCTION then
+    if ffi.lmacro_ttislcf(raw) ~= 0 then entry = ffi.lmacro_fvalue(raw)
+    else entry = ffi.lmacro_clCvalue(raw).f end
+  elseif kind == ffi.TITAN_ASYNC_MESSAGE_POINTER then
+    if ffi.lmacro_ttype(raw) == ffi.LUA_TLIGHTUSERDATA then
+      pointer = ffi.lmacro_pvalue(raw)
+    else pointer = ffi.lmacro_getudatamem(ffi.lmacro_uvalue(raw)) end
+  end
+  return new_scalar_message(kind as foreign titan_async_message_kind,
+      integer_value, number, bytes, length, state, entry, pointer)
+end
+
 local function finalize_buf_message(
     buf: foreign *titan_protobuf_buffer,
     kind: foreign titan_async_message_kind,
@@ -911,35 +963,31 @@ end
 
 local function transfer_policy_to_message(
     data: TransferValue): foreign *titan_async_message
-  local message = foreign titan_async_message.new()
   case data
   when is_nil() then
-    message.kind = ffi.TITAN_ASYNC_MESSAGE_NIL
+    return new_scalar_message(ffi.TITAN_ASYNC_MESSAGE_NIL, 0, 0.0, nil, 0, nil, nil, nil)
   when is_boolean(item) then
-    message.kind = ffi.TITAN_ASYNC_MESSAGE_BOOLEAN
-    if item then message.integer = 1 else message.integer = 0 end
+    local integer_value = 0 as foreign lua_Integer
+    if item then integer_value = 1 end
+    return new_scalar_message(ffi.TITAN_ASYNC_MESSAGE_BOOLEAN,
+        integer_value, 0.0, nil, 0, nil, nil, nil)
   when is_integer(item) then
-    message.kind = ffi.TITAN_ASYNC_MESSAGE_INTEGER
-    message.integer = item
+    return new_scalar_message(ffi.TITAN_ASYNC_MESSAGE_INTEGER, item, 0.0, nil, 0, nil, nil, nil)
   when is_float(item) then
-    message.kind = ffi.TITAN_ASYNC_MESSAGE_FLOAT
-    message.number = item
+    return new_scalar_message(ffi.TITAN_ASYNC_MESSAGE_FLOAT, 0, item, nil, 0, nil, nil, nil)
   when is_string(item) then
-    message.kind = ffi.TITAN_ASYNC_MESSAGE_STRING
-    message.bytes = item
-    message.length = #item
+    return new_scalar_message(ffi.TITAN_ASYNC_MESSAGE_STRING, 0, 0.0, item, #item, nil, nil, nil)
   when is_lua_state(item) then
-    message.kind = ffi.TITAN_ASYNC_MESSAGE_STATE
-    message.state = item
+    return new_scalar_message(ffi.TITAN_ASYNC_MESSAGE_STATE, 0, 0.0, nil, 0, item, nil, nil)
   when is_function(item) then
-    if not item then
-      raise "cannot send a NULL Lua C function"
-    end
-    message.kind = ffi.TITAN_ASYNC_MESSAGE_FUNCTION
-    message.function = item
+    if not item then raise "cannot send a NULL Lua C function" end
+    return new_scalar_message(ffi.TITAN_ASYNC_MESSAGE_FUNCTION, 0, 0.0, nil, 0, nil, item, nil)
   when is_pointer(item) then
-    message.kind = ffi.TITAN_ASYNC_MESSAGE_POINTER
-    message.pointer = item
+    return new_scalar_message(ffi.TITAN_ASYNC_MESSAGE_POINTER, 0, 0.0, nil, 0, nil, nil, item)
+  end
+  -- Only explicit nominal byte carriers still stage a header for copy_message.
+  local message = foreign titan_async_message.new()
+  case data
   when is_record(module, name, bytes) then
     message.kind = ffi.TITAN_ASYNC_MESSAGE_RECORD
     message.module = module
@@ -1026,10 +1074,8 @@ local function encode_packet(candidate: value, scope: ResourceScope): foreign *v
   end
   case reflect.inspect(candidate)
   when is_lua_userdata() then
-    local message = foreign titan_async_message.new()
-    message.kind = ffi.TITAN_ASYNC_MESSAGE_POINTER
-    message.pointer = ffi.lmacro_getudatamem(ffi.lmacro_uvalue(raw))
-    return copy_async_message(message) as foreign *void
+    return new_scalar_message(ffi.TITAN_ASYNC_MESSAGE_POINTER, 0, 0.0, nil, 0, nil, nil,
+        ffi.lmacro_getudatamem(ffi.lmacro_uvalue(raw))) as foreign *void
   when is_record(record_value) then
     local encode? = protobuf.find_transfer_hooks(record_value.type, "transfer")
     local module = nominal_module(candidate)
@@ -1075,9 +1121,9 @@ function encode_message(candidate: value): foreign *void
   if candidate is TransferValue then
     return transfer_policy_to_message(candidate as TransferValue) as foreign *void
   end
-  local message = foreign titan_async_message.new()
-  if scalar_to_message(candidate, message) then
-    return copy_async_message(message) as foreign *void
+  local kind = scalar_message_kind(candidate)
+  if kind >= 0 then
+    return scalar_value_to_message(candidate, kind) as foreign *void
   end
   local native = foreign titan_transfer_scope_owner.new()
   local execution = current_execution()
