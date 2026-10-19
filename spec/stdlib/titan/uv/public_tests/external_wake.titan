@@ -807,14 +807,28 @@ function test_external_wake_retained_stale_targets_reject_after_unregister_close
       test.assert((uv.native_external_wake_notify(t1) as integer) == uv.EINVAL,
                   "notify on retained retired target did not return EINVAL")
 
-      -- Close the bridge: before uv.run drives close_handler, wake.core is still
-      -- non-nil while core.handle is nil. Operations in this closing window must
-      -- safely roll back (including freeing the newly malloc'd target in reserve)
-      -- and return EINVAL.
+      -- Warm six distinct retired targets before closing. Eight closing-window
+      -- reserves (while wake.core ~= nil and core.handle == nil) consume/free
+      -- all six cache entries, then roll back two fresh allocations with EINVAL.
+      local warm_targets: {EwTarget} = {}
+      for warm = 1, 6 do
+        local w_status, w_target = wake:reserve((510 + warm) as foreign unsigned long long)
+        success(w_status)
+        if warm % 2 == 0 then success(wake:activate(w_target)) end
+        warm_targets[warm] = EwTarget(w_target)
+      end
+      for warm = 1, #warm_targets do
+        local target = warm_targets[warm].native
+        warm_targets[warm].native = nil
+        success(wake:unregister(target))
+      end
       success(wake:close())
-      local closing_r_status, closing_target = wake:reserve(502)
-      test.assert(closing_r_status == uv.EINVAL and closing_target == nil,
-                  "reserve on closing bridge did not roll back with EINVAL")
+      for step = 1, 8 do
+        local closing_r_status, closing_target =
+          wake:reserve((520 + step) as foreign unsigned long long)
+        test.assert(closing_r_status == uv.EINVAL and closing_target == nil,
+                    "reserve on closing bridge did not roll back with EINVAL")
+      end
       test.assert(wake:activate(t1) == uv.EINVAL,
                   "activate on closing bridge did not return EINVAL")
       local buf: owned unsigned long long[] = foreign unsigned long long.new_array(2)
@@ -846,7 +860,7 @@ function test_external_wake_retained_stale_targets_reject_after_unregister_close
       success(uv.external_wake_init(loop, wake, function (_: uv.external_wake_t) end))
 
       -- Create 4 producer-retained targets across PREPARED, ARMED, PENDING, and DELIVERED,
-      -- plus 2 unretained targets (ARMED and PENDING) to verify emergency detach frees them.
+      -- plus 2 unretained targets (ARMED and PENDING) for emergency-detach retirement.
       local s1, t_prep = wake:reserve(601)
       local s2, t_armed = wake:reserve(602)
       local s3, t_pending = wake:reserve(603)
@@ -866,15 +880,41 @@ function test_external_wake_retained_stale_targets_reject_after_unregister_close
       success(wake:activate(u_armed))
       success(wake:activate(u_pending))
 
-      -- Drain t_delivered first so it is in DELIVERED phase, then notify t_pending and u_pending.
+      -- Drain t_delivered before queuing any standing PENDING targets.
       success(uv.native_external_wake_notify(t_delivered))
       local buf: owned unsigned long long[] = foreign unsigned long long.new_array(4)
       local d_status, d_count = wake:drain(buf, 4)
       success(d_status)
       test.assert((d_count as integer) == 1 and (buf[0] as integer) == 604)
 
+      -- Produce the DELIVERED extras (4, 8, ..., 68) while the FIFO is empty.
+      -- Together with the remaining residues below, these 70 unretained targets
+      -- fill the per-core cache and exercise overflow frees on emergency detach.
+      for extra = 4, 70, 4 do
+        local e_status, e_target = wake:reserve((610 + extra) as foreign unsigned long long)
+        success(e_status)
+        success(wake:activate(e_target))
+        success(uv.native_external_wake_notify(e_target))
+        local ed_status, ed_count = wake:drain(buf, 4)
+        success(ed_status)
+        test.assert((ed_count as integer) == 1 and (buf[0] as integer) == 610 + extra)
+      end
+
+      -- Leave standing and extra PENDING targets queued until emergency detach.
       success(uv.native_external_wake_notify(t_pending))
       success(uv.native_external_wake_notify(u_pending))
+      for extra = 1, 70 do
+        if extra % 4 ~= 0 then
+          local e_status, e_target = wake:reserve((610 + extra) as foreign unsigned long long)
+          success(e_status)
+          if extra % 4 ~= 1 then
+            success(wake:activate(e_target))
+          end
+          if extra % 4 == 3 then
+            success(uv.native_external_wake_notify(e_target))
+          end
+        end
+      end
 
       local retained: owned EwVoidPtr[] = foreign EwVoidPtr.new_array(4)
       defer ew_release_targets(retained)
@@ -1289,5 +1329,288 @@ function test_external_wake_native_query_and_loop_thread_unregister(context: tes
       success(uv.run(loop))
       test.assert(query(retained[0]) == 0,
                   "closed bridge changed the retained retired target query")
+    end)
+end
+
+function test_external_wake_target_cache_reuse_overflow_and_stale_producer_isolation(
+    context: test.Context)
+  context:run("repeated_warmed_cycles_reset_phase_links_and_unique_identities",
+    function (_child: test.Context)
+      local loop = new_loop()
+      defer finish_loop(loop)
+      local wake = uv.external_wake_t()
+      success(uv.external_wake_init(loop, wake, function (_: uv.external_wake_t) end))
+      local buf: owned unsigned long long[] = foreign unsigned long long.new_array(4)
+      local query: foreign function(*void): int = uv.native_external_wake_is_notified
+      local unregister_native: foreign function(*void): int = uv.native_external_wake_unregister
+
+      -- One cold cycle and three warm cycles exercise both unregister forms on reuse.
+      for cycle = 1, 4 do
+        local base_id = 20000 + (cycle * 10)
+        local s1, t_deliver = wake:reserve((base_id + 1) as foreign unsigned long long)
+        local s2, t_pending = wake:reserve((base_id + 2) as foreign unsigned long long)
+        local s3, t_prepared = wake:reserve((base_id + 3) as foreign unsigned long long)
+        success(s1)
+        success(s2)
+        success(s3)
+        test.assert(t_deliver ~= nil and t_pending ~= nil and t_prepared ~= nil)
+
+        -- Every freshly reserved or warmed target must start in PREPARED with
+        -- no latched notification and no active-wait loop reference.
+        test.assert(not uv.loop_alive(loop),
+                    "warmed reservation kept the loop alive before activate")
+        test.assert(query(t_deliver) == 0 and query(t_pending) == 0 and query(t_prepared) == 0,
+                    "warmed reservation retained a prior notification latch")
+        test.assert((uv.native_external_wake_notify(t_deliver) as integer) == uv.EINVAL and
+                    (uv.native_external_wake_notify(t_pending) as integer) == uv.EINVAL and
+                    (uv.native_external_wake_notify(t_prepared) as integer) == uv.EINVAL,
+                    "warmed reservation accepted notify before activate")
+
+        success(wake:activate(t_deliver))
+        success(wake:activate(t_pending))
+        test.assert(uv.loop_alive(loop))
+
+        success(uv.native_external_wake_notify(t_deliver))
+        success(uv.native_external_wake_notify(t_pending))
+        test.assert(query(t_deliver) == 1 and query(t_pending) == 1 and query(t_prepared) == 0)
+
+        -- Unregister t_pending while queued in PENDING and t_prepared while PREPARED.
+        local retire_pending = t_pending
+        t_pending = nil
+        success(wake:unregister(retire_pending))
+        local retire_prepared = t_prepared
+        t_prepared = nil
+        success(wake:unregister(retire_prepared))
+        test.assert(uv.loop_alive(loop),
+                    "remaining active target lost loop liveness after sibling retirement")
+
+        local d_status, d_count = wake:drain(buf, 4)
+        success(d_status)
+        test.assert((d_count as integer) == 1 and (buf[0] as integer) == base_id + 1,
+                    "warmed cycle drained the wrong identity at cycle " .. cycle)
+        test.assert(query(t_deliver) == 1,
+                    "drained target lost DELIVERED notification latch")
+
+        local retire_deliver = t_deliver
+        t_deliver = nil
+        if cycle % 2 == 0 then
+          success(unregister_native(retire_deliver))
+        else
+          success(wake:unregister(retire_deliver))
+        end
+        test.assert(not uv.loop_alive(loop),
+                    "retiring final active target in cycle left loop referenced")
+      end
+
+      local extra_status, extra_count = wake:drain(buf, 4)
+      success(extra_status)
+      test.assert((extra_count as integer) == 0)
+      success(wake:close())
+      success(uv.run(loop))
+    end)
+
+  context:run("simultaneous_overflow_permuted_retire_and_release_preserves_followup_fifo",
+    function (_child: test.Context)
+      local loop = new_loop()
+      defer finish_loop(loop)
+      local wake = uv.external_wake_t()
+      success(uv.external_wake_init(loop, wake, function (_: uv.external_wake_t) end))
+
+      local const initial_count = 96
+      local const retained_count = 48
+      local const followup_count = 80
+      local targets: {EwTarget} = {}
+      local retained: owned EwVoidPtr[] = foreign EwVoidPtr.new_array(retained_count)
+      defer ew_release_targets(retained)
+      local buf: owned unsigned long long[] = foreign unsigned long long.new_array(32)
+      local query: foreign function(*void): int = uv.native_external_wake_is_notified
+
+      for i = 1, initial_count do
+        local r_status, target = wake:reserve((30000 + i) as foreign unsigned long long)
+        success(r_status)
+        test.assert(target ~= nil)
+        if i > 24 then
+          success(wake:activate(target))
+        end
+        if i > 48 then
+          success(uv.native_external_wake_notify(target))
+        end
+        if i % 2 == 0 then
+          uv.native_external_wake_retain(target)
+          retained[(i // 2) - 1] = target
+        end
+        targets[i] = EwTarget(target)
+      end
+
+      -- Drain 24 of the 48 notified targets (49..72 become DELIVERED; 73..96 stay PENDING).
+      local d_status, d_count = wake:drain(buf, 24)
+      success(d_status)
+      test.assert((d_count as integer) == 24)
+      for idx = 0, 23 do
+        test.assert((buf[idx] as integer) == 30049 + idx,
+                    "initial partial drain corrupted FIFO order")
+      end
+
+      -- Unregister all 96 registrations in a deterministic permutation (gcd(37, 96) == 1).
+      for step = 0, initial_count - 1 do
+        local index = ((step * 37) % initial_count) + 1
+        local target = targets[index].native
+        targets[index].native = nil
+        success(wake:unregister(target))
+      end
+
+      test.assert(not uv.loop_alive(loop),
+                  "permuted unregister of all 96 registrations left the loop alive")
+      local rem_status, rem_count = wake:drain(buf, 32)
+      success(rem_status)
+      test.assert((rem_count as integer) == 0,
+                  "permuted unregister left a PENDING target queued")
+
+      -- Release the 48 retained producer references in a different permutation (gcd(29, 48) == 1).
+      for step = 0, retained_count - 1 do
+        local slot = (step * 29) % retained_count
+        local target = retained[slot]
+        retained[slot] = nil
+        test.assert(query(target) == 0 and
+                    (uv.native_external_wake_notify(target) as integer) == uv.EINVAL,
+                    "retained retired target remained active before producer release")
+        uv.native_external_wake_release(target)
+      end
+
+      -- Reserve, activate, notify, and drain a follow-up wave of 80 targets (> 64)
+      -- to verify that cache population and overflow frees preserved FIFO integrity.
+      local followup: {EwTarget} = {}
+      for i = 1, followup_count do
+        local r_status, target = wake:reserve((40000 + i) as foreign unsigned long long)
+        success(r_status)
+        test.assert(target ~= nil)
+        test.assert(query(target) == 0 and
+                    (uv.native_external_wake_notify(target) as integer) == uv.EINVAL,
+                    "follow-up target after overflow release was not reset to PREPARED")
+        success(wake:activate(target))
+        success(uv.native_external_wake_notify(target))
+        followup[i] = EwTarget(target)
+      end
+
+      local drained_followup = 0
+      while drained_followup < followup_count do
+        local f_status, f_count = wake:drain(buf, 32)
+        success(f_status)
+        local n: integer = f_count
+        test.assert(n > 0, "follow-up drain stalled before all 80 identities arrived")
+        for idx = 0, n - 1 do
+          drained_followup = drained_followup + 1
+          test.assert((buf[idx] as integer) == 40000 + drained_followup,
+                      "follow-up wave after overflow release corrupted FIFO order")
+        end
+      end
+
+      for i = 1, followup_count do
+        local target = followup[i].native
+        followup[i].native = nil
+        success(wake:unregister(target))
+      end
+      test.assert(not uv.loop_alive(loop))
+      success(wake:close())
+      success(uv.run(loop))
+    end)
+
+  context:run("retained_stale_producers_remain_isolated_across_successor_reservation_churn",
+    function (_child: test.Context)
+      local loop = new_loop()
+      defer finish_loop(loop)
+      local wake = uv.external_wake_t()
+      success(uv.external_wake_init(loop, wake, function (_: uv.external_wake_t) end))
+
+      local retained: owned EwVoidPtr[] = foreign EwVoidPtr.new_array(3)
+      defer ew_release_targets(retained)
+      local buf: owned unsigned long long[] = foreign unsigned long long.new_array(4)
+      local query: foreign function(*void): int = uv.native_external_wake_is_notified
+
+      -- Create 3 targets retired from PREPARED, ARMED, and DELIVERED while still
+      -- pinned by producer references. None of the 3 may enter the free cache until
+      -- its producer reference is released.
+      local s1, stale_prep = wake:reserve(50001)
+      local s2, stale_armed = wake:reserve(50002)
+      local s3, stale_deliv = wake:reserve(50003)
+      success(s1)
+      success(s2)
+      success(s3)
+      uv.native_external_wake_retain(stale_prep)
+      retained[0] = stale_prep
+      uv.native_external_wake_retain(stale_armed)
+      retained[1] = stale_armed
+      uv.native_external_wake_retain(stale_deliv)
+      retained[2] = stale_deliv
+
+      success(wake:activate(stale_armed))
+      success(wake:activate(stale_deliv))
+      success(uv.native_external_wake_notify(stale_deliv))
+      local init_status, init_count = wake:drain(buf, 4)
+      success(init_status)
+      test.assert((init_count as integer) == 1 and (buf[0] as integer) == 50003)
+
+      success(wake:unregister(stale_prep))
+      success(wake:unregister(stale_armed))
+      success(wake:unregister(stale_deliv))
+      stale_prep = nil
+      stale_armed = nil
+      stale_deliv = nil
+
+      -- Churn successor reservations/activations/notifications while the 3 stale
+      -- producer targets remain retained. Stale producer operations must always
+      -- fail with EINVAL and never notify or corrupt a live successor wait.
+      -- One cold wave and two warm waves cover successor reuse.
+      for wave = 1, 3 do
+        local id_quiet = 60000 + (wave * 2)
+        local id_woken = id_quiet + 1
+        local r_q, t_quiet = wake:reserve(id_quiet as foreign unsigned long long)
+        local r_w, t_woken = wake:reserve(id_woken as foreign unsigned long long)
+        success(r_q)
+        success(r_w)
+
+        for k = 0, 2 do
+          local stale = retained[k]
+          test.assert(query(stale) == 0 and
+                      (uv.native_external_wake_notify(stale) as integer) == uv.EINVAL and
+                      wake:activate(stale) == uv.EINVAL and
+                      wake:unregister(stale) == uv.EINVAL,
+                      "retained stale producer interacted with PREPARED successor in wave " .. wave)
+        end
+
+        success(wake:activate(t_quiet))
+        success(wake:activate(t_woken))
+
+        for k = 0, 2 do
+          local stale = retained[k]
+          test.assert(query(stale) == 0 and
+                      (uv.native_external_wake_notify(stale) as integer) == uv.EINVAL,
+                      "retained stale producer notified ARMED successor in wave " .. wave)
+        end
+
+        -- Only t_woken is notified; t_quiet must remain unnotified.
+        success(uv.native_external_wake_notify(t_woken))
+        test.assert(query(t_quiet) == 0 and query(t_woken) == 1,
+                    "stale producer churn corrupted successor notification state")
+
+        local w_status, w_count = wake:drain(buf, 4)
+        success(w_status)
+        test.assert((w_count as integer) == 1 and (buf[0] as integer) == id_woken,
+                    "successor drain delivered unexpected identity during stale producer churn")
+
+        local retire_q = t_quiet
+        t_quiet = nil
+        success(wake:unregister(retire_q))
+        local retire_w = t_woken
+        t_woken = nil
+        success(wake:unregister(retire_w))
+      end
+
+      -- Release the 3 producer references so the retired targets can be cached.
+      ew_release_targets(retained)
+
+      test.assert(not uv.loop_alive(loop))
+      success(wake:close())
+      success(uv.run(loop))
     end)
 end

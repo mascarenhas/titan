@@ -127,6 +127,31 @@ function external_wake_targets(results: value):
     function (_: uv.external_wake_t)
       fixture.results[3] = (fixture.results[3] as integer) + 1
     end))
+  -- Pre-populate the retired-target cache before reserving the returned targets
+  -- so independent-state teardown exercises warm-cache reuse plus cached entries
+  -- surviving alongside retained producer references through lua_close.
+  local s_w1, w1 = wake:reserve(691)
+  local s_w2, w2 = wake:reserve(692)
+  local s_w3, w3 = wake:reserve(693)
+  local s_w4, w4 = wake:reserve(694)
+  local s_w5, w5 = wake:reserve(695)
+  local s_w6, w6 = wake:reserve(696)
+  require_wake_status(s_w1)
+  require_wake_status(s_w2)
+  require_wake_status(s_w3)
+  require_wake_status(s_w4)
+  require_wake_status(s_w5)
+  require_wake_status(s_w6)
+  require_wake_status(wake:activate(w2))
+  require_wake_status(wake:activate(w4))
+  require_wake_status(wake:activate(w6))
+  require_wake_status(wake:unregister(w1))
+  require_wake_status(wake:unregister(w2))
+  require_wake_status(wake:unregister(w3))
+  require_wake_status(wake:unregister(w4))
+  require_wake_status(wake:unregister(w5))
+  require_wake_status(wake:unregister(w6))
+
   local s1, prepared = wake:reserve(701)
   require_wake_status(s1)
   if prepared == nil then raise "External wake fixture returned NULL prepared target" end

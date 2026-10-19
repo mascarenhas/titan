@@ -378,10 +378,11 @@ not their ownership guard.
    and calls `uv.external_wake_init(runtime.loop, bridge.wake, callback)`.
    `external_wake_init` allocates `titan_uv_external_wake_core` (whose first
    member is `uv_mutex_t mutex`, followed by `uv_async_t *handle`, `references`,
-   `registrations`, `active_waits`, intrusive `registered` list, and intrusive
-   pending FIFO `head`/`tail`), initializes the internal `async_t`, and
-   immediately calls `uv_unref` on `core.handle`. The bridge handle is distinct
-   from the scheduler's zero timer `runtime.wake`.
+   `registrations`, `active_waits`, intrusive `registered` list, intrusive
+   pending FIFO `head`/`tail`, and a hard-bounded `free_targets`/`free_count`
+   stack of up to 64 reference-zero retired targets), initializes the internal
+   `async_t`, and immediately calls `uv_unref` on `core.handle`. The bridge
+   handle is distinct from the scheduler's zero timer `runtime.wake`.
 2. **Two-phase `reserve` (unreferenced) and `activate` (referenced liveness)**:
    - `prepare_external_wait(register_fn, unregister_fn)` calls `ensure_runtime()`
      (creating the Runtime if needed without requiring a running Task or driving
@@ -392,13 +393,21 @@ not their ownership guard.
      `"async external wait identity exhausted"` without wrapping or reusing
      IDs), stores `owner` in `bridge.waits[identity]`, and calls
      `bridge.wake:reserve(identity)`.
-   - `external_wake_t:reserve(identity)` allocates a
-     `titan_uv_external_wake_target` in `TITAN_UV_WAKE_PREPARED` phase
-     (`references = 1` for the registration, `core.references` and
-     `core.registrations` incremented, linked into `core.registered`),
-     **without** incrementing `core.active_waits` or referencing `core.handle`.
-     Holding an unused prepared `ExternalWait` therefore never keeps an
-     otherwise idle event loop alive.
+   - `external_wake_t:reserve(identity)` pops a reference-zero target from
+     `core.free_targets` under `core.mutex` when available, or unlocks
+     `core.mutex` (safe because the owning bridge's core reference cannot be
+     dropped from another thread before same-thread `external_wake_detach`),
+     allocates a fresh `titan_uv_external_wake_target` with `malloc`, and relocks
+     `core.mutex`. On either path it checks `core.handle ~= nil`, freeing the
+     popped or freshly allocated target and returning `UV_EINVAL` when the
+     handle is already nil (closing bridge). It then resets every target field (`core`,
+     `references = 1` for the registration, `identity`,
+     `phase = TITAN_UV_WAKE_PREPARED`, `registered_prev`/`registered_next`,
+     `next`/`prev`), increments `core.references` and `core.registrations`, and
+     links the target into `core.registered`, **without** incrementing
+     `core.active_waits` or referencing `core.handle`. Holding an unused
+     prepared `ExternalWait` therefore never keeps an otherwise idle event loop
+     alive.
    - When `ExternalWait:wait()` (`WAIT_ORDINARY`) or
      `ExternalWait:wait_cleanup()` (`WAIT_CLEANUP`) runs `start_external_wait`,
      it first calls allocation-free `bridge.wake:activate(owner.target)`. Under
@@ -426,15 +435,16 @@ not their ownership guard.
    - Native producers on any OS thread call
      `uv.native_external_wake_notify(target)` (which under `core.mutex` links an
      `ARMED` target to the tail of `core.head`/`core.tail`, sets
-     `TITAN_UV_WAKE_PENDING`, increments `target.references` for the queue, and
+     `TITAN_UV_WAKE_PENDING` without changing `target.references` or
+     `core.references` because `PENDING` implies the target is registered, and
      calls `uv_async_send(core.handle)`) and then release their producer
      reference via `uv.native_external_wake_release(target)`. Producers never
      access Lua or GC state.
    - On the destination loop thread, `ExternalBridge:drain()` calls
      `self.wake:drain(identities, 64)` with a 64-slot stack array. Under
      `core.mutex`, `external_wake_drain_native` unlinks up to 64 pending targets
-     in FIFO order, sets `TITAN_UV_WAKE_DELIVERED`, copies their 64-bit
-     `identity` values, drops their pending-queue reference, and—if
+     in FIFO order, sets `TITAN_UV_WAKE_DELIVERED` without changing reference
+     counts, copies their 64-bit `identity` values, and—if
      `core.head ~= nil`—calls `uv_async_send(core.handle)` to rearm the handle
      for the remaining work before unlocking.
    - After unlocking, `ExternalBridge:drain()` looks up each `identity` in
@@ -448,24 +458,43 @@ not their ownership guard.
    - Cancelling an active ordinary wait runs `owner:cancel_wait()`, which
      synchronously calls `owner:detach_domain()` (`unregister_fn()`) and
      `owner:retire()` (`bridge.wake:unregister(target)`). Under `core.mutex`,
-     `unregister` unlinks the target from `core.registered`, unlinks and drops
-     any `TITAN_UV_WAKE_PENDING` queue reference in $O(1)$ time, marks the
-     target `TITAN_UV_WAKE_RETIRED`, decrements `core.registrations` and (when
-     not `PREPARED`) `core.active_waits`, unreferences `core.handle` when
-     `active_waits` reaches `0`, and drops the registration reference.
+     `unregister` unlinks the target from `core.registered`, unlinks any
+     `TITAN_UV_WAKE_PENDING` queue node in $O(1)$ time, marks the target
+     `TITAN_UV_WAKE_RETIRED`, decrements `core.registrations` and (when not
+     `PREPARED`) `core.active_waits`, unreferences `core.handle` when
+     `active_waits` reaches `0`, and drops the registration reference
+     (`external_wake_drop_target_locked`). Because the loop owns only the
+     registration reference and unlinks any pending node before dropping it, a
+     target reaches `references == 0` only after both registration and all
+     producer references are gone; `external_wake_drop_target_locked` then
+     decrements `core.references` (so cached targets hold no core pin) and
+     either pushes the target onto `core.free_targets` (up to
+     `TITAN_UV_WAKE_TARGET_CACHE_LIMIT = 64` per core, never across cores) or
+     frees it with `free`.
    - Normal `ExternalBridge:close()` (invoked by `close_handles` after all Tasks
      retire) closes any remaining unused `ExternalWait` reservations and calls
      `self.wake:close()` (`external_wake_begin_close` rejects with `UV_EBUSY` if
      `registrations ~= 0`, otherwise clears `core.handle = nil` under
      `core.mutex` and closes the handle).
-   - If `external_wake_t` is finalized by GC / `lua_close` without normal loop
-     drain, `external_wake_detach` locks `core.mutex`, clears
-     `core.handle = nil`, retires all remaining registered and pending targets,
-     and drops the owner's core reference without touching libuv or GC objects.
-     Targets still retained by background native producers keep only the C-heap
-     `core` alive until their final `native_external_wake_release`, and any late
+   - When `handle.close_handler` runs or `external_wake_t` is finalized by
+     GC / `lua_close` without normal loop drain, `external_wake_detach` locks
+     `core.mutex`, clears `core.handle = nil` and `core.head = core.tail = nil`,
+     retires all remaining registrations (clearing both `registered_*` and
+     `next`/`prev` links before dropping each registration reference), and drops
+     the owner's core reference without touching libuv or GC objects. Targets
+     still retained by background native producers (including a detached
+     `Thread:task()` proxy retirement producer) are not cached while their
+     producer reference remains nonzero; they keep only the C-heap `core` alive
+     until their final `native_external_wake_release`, and any late
      `native_external_wake_notify` sees `core.handle == nil` and returns
-     `UV_EINVAL`.
+     `UV_EINVAL`. When `core.references` reaches `0` (in `external_wake_detach`
+     or `native_external_wake_release`), `external_wake_free_core` drains and
+     frees all unpinned targets in `core.free_targets`, destroys `core.mutex`,
+     and frees `core`. Lua/Titan wrapper lifetime (`ExternalWait`,
+     `external_wake_t`, endpoint and task wrappers), in-flight transfer message
+     lifetime, and native wake-target/core lifetime remain separate: the
+     per-core target cache reuses only reference-zero native storage and is not
+     stale-handle or dangling-borrow protection.
 
 ## Native retirement barriers
 

@@ -183,13 +183,18 @@ heap core whose first member is its mutex. A reserved target pins that core;
 neither target nor core contains a Lua/Titan GC value. Keep the bridge and
 destination semantic state on traced loop-thread owners.
 
-`external_wake_t:reserve(identity)` preallocates a `PREPARED` target without
-keeping the loop alive. The returned pointer is borrowed from the destination's
-registration reference until exact unregister/detach. Before publishing it in
-a native domain waiter, take a separate producer reference with
-`native_external_wake_retain`; every such reference eventually pairs with
-`native_external_wake_release`. References pin native storage, not the bridge,
-Lua state, handle, or code image. C-only calls after state close require the
+`external_wake_t:reserve(identity)` prepares a `PREPARED` target without
+keeping the loop alive, reusing a reference-zero retired target from the core's
+hard-bounded 64-entry free list (resetting identity, phase, and links) or
+allocating outside the core mutex and rechecking `core.handle` after relocking.
+The returned pointer is borrowed from the destination's registration reference
+until exact unregister/detach. Before publishing it in a native domain waiter,
+take a separate producer reference with `native_external_wake_retain`; every
+such reference eventually pairs with `native_external_wake_release`. Wrapper,
+in-flight message, and native wake-target/core lifetimes are separate:
+references pin only native target/core storage, not the bridge, Lua state,
+handle, or code image, and the per-core target cache is not stale-handle or
+dangling-borrow protection. C-only calls after state close require the
 [provider image to remain mapped](foreign-functions.md); runtime-loaded Titan
 DSOs remain mapped for process lifetime.
 
@@ -230,19 +235,24 @@ the active wait or release loop liveness: retain the handle reference until
 settlement/cancellation retires the registration.
 
 Clear the destination identity map and target borrow before `:unregister`;
-it unlinks pending state in $O(1)$ time, consumes the registration reference
-(possibly freeing the target), and unreferences the handle when the last
-activated wait retires. Separately retained producer targets may outlive this
-retirement and receive `UV_EINVAL` on later notification. Never reuse a freed
-borrow or treat the status checks as dangling-pointer protection.
+because `PENDING` implies registered, the queue borrows the registration
+reference (`notify` and `drain` change no reference counts). `:unregister`
+unlinks any pending node in $O(1)$ time, consumes the registration reference
+(removing the target's core pin and caching or freeing the target once all
+references reach zero), and unreferences the handle when the last activated
+wait retires. Separately retained producer targets stay out of the cache while
+referenced, may outlive this retirement, and receive `UV_EINVAL` on later
+notification. Never reuse a consumed borrow or treat status checks or the
+per-core target cache as dangling-pointer protection.
 
 `native_external_wake_unregister(target)` exposes the same consuming
 registration retirement using only the target's core. Despite its C ABI it is
 **destination-loop-thread-only**, because it can call `uv_unref`. Clear the
-destination map/borrow first; `0` consumes the registration and may free the
-target, while NULL or a still-live retired target returns `UV_EINVAL`.
+destination map/borrow first; `0` consumes the registration and may cache or free
+the target, while NULL or a still-live retired target returns `UV_EINVAL`.
+A consumed borrow may alias a later reservation on the same core.
 It does not release an independent producer reference. Call exactly one
-unregister form for a registration and never inspect a freed borrow afterward,
+unregister form for a registration and never inspect a consumed borrow afterward,
 including through the notification query.
 
 
@@ -250,12 +260,15 @@ Normal `:close()` requires zero registrations, including `PREPARED` targets
 (`UV_EBUSY` otherwise). It clears `core.handle` under the core mutex before
 initiating `uv.close`; close completion detaches the owner core reference.
 Drive and drain that close before releasing loop ownership. The nonyielding
-GC fallback (`external_wake_detach`) is different: it clears the handle borrow,
-retires all remaining registrations/pending references, and drops the core
-owner reference without calling Lua or driving/closing the loop. Retained
-producer targets survive either path until their final native release; the
-fallback neither completes native handle close nor licenses abandoning normal
-loop cleanup.
+GC fallback (`external_wake_detach`) is different: it clears the handle borrow
+and pending queue, retires all remaining registrations (clearing links before
+dropping each registration reference), and drops the core owner reference
+without calling Lua or driving/closing the loop. Retained producer targets
+survive either path (and are not cached until their last reference drops) until
+their final native release; when `core.references` reaches zero, `free_core`
+drains any cached targets before destroying the mutex and core. The fallback
+neither completes native handle close nor licenses abandoning normal loop
+cleanup.
 
 The independent-state external-wake fixture tests that fallback during
 `lua_close` without abandoning its initialized loop. It registers a test-owned
