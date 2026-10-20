@@ -156,24 +156,6 @@ require a second payload-sized reallocation through normal growth, even when
 rounding the original field up to the next power of two would have left enough
 room. See [buffer growth](protobuf-library.md#encoding).
 
-Nested prefix widening uses protobuf's bounded, per-root automatic patch scratch;
-it adds no packet, buffer-descriptor, `Encoder`, or scope allocation. Structural
-record/union encoding, anonymous closure-capture fields, opaque hooks, and
-registered resource-index writes all finish canonical backpatching before the
-root append entrypoint returns. The only offsets held while it runs are native
-nesting marks: deferred marks describe the unexpanded buffer, and the bounded
-eager fallback rebases any still-open marks when it materializes earlier sibling
-prefixes. The four-byte attachment indices identify resource-table slots, not
-byte positions, so they move unchanged with their enclosing payload.
-`finalize_buf_message` computes `wire_len`, name/module positions, alignment, and
-attachment-table pointers only after that boundary and the final reservation;
-none of those recorded offsets can be invalidated by a later prefix expansion.
-On nested failure protobuf restores the root's starting buffer length and the
-existing buffer guard frees its allocation; the exact-top encode scope releases
-pending attachments. Encoders and resource-attaching hooks are never replayed.
-See [nested backpatching](protobuf-library.md#encoding) for the 32-entry bound,
-fallback, and the two widening paths.
-
 Decode reads directly from the packet's byte slices using
 `protobuf.deserialize_nominal_buffer_with_context` (passing `scope` once for
 `RECORD` and `UNION` packets) and
