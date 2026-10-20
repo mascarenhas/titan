@@ -3228,8 +3228,13 @@ function test_transfer_consuming_raw_decode(_context: test.Context)
   test.assert(caught_empty, "raw decoder consumed an empty slot twice")
 end
 
-function test_transfer_raw_decode_entry_failure_consumes_owner(context: test.Context)
-  context:run("scope-preparation-oom", function (_context: test.Context)
+-- Body-side failure after decode's entry has reserved its frame: the scope
+-- preparation allocation fails inside the protected worker, and decode's catch
+-- consumes the packet. Entry-preamble failures, which leave the packet to the
+-- caller's guard, are covered by the scalar-envelope stack scan.
+function test_transfer_raw_decode_scope_preparation_oom_consumes_owner(
+    context: test.Context)
+  context:run("body-scope-preparation-oom", function (_context: test.Context)
     local raw, peer1, peer2 = make_recursive_receiver_raw()
     defer transfer_mod.discard_message(raw)
     defer peer1:close()
@@ -3258,6 +3263,6 @@ function test_transfer_raw_decode_entry_failure_consumes_owner(context: test.Con
     test.assert(failed and ctrl[2] >= (2 as foreign size_t),
                 "raw decode scope preparation did not reach its Lua allocation failure")
     test.assert(raw == nil and peer1:is_closed() and peer2:is_closed(),
-                "raw decode entry failure stranded its caller slot or packet attachments")
+                "raw decode scope-preparation OOM stranded its caller slot or packet attachments")
   end)
 end

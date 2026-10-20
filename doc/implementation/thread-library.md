@@ -81,7 +81,7 @@ provider snapshot on the parent thread and transfer ownership of the raw
 Every channel item, thread entry closure, thread return value, failure error,
 and cancellation reason is converted into a `titan_thread_message` heap packet
 (aliasing `titan_async_message` from `titan/transfer_native.h`) via
-`transfer.encode_message` and transfer's protected native decode boundary,
+`transfer.encode_message` and transfer's consuming raw-slot `decode_message`,
 with all semantic encoding/decoding outside the channel/control mutex:
 
 - Scalar values (`nil`, `boolean`, `integer`, `float`, pointers, borrowed
@@ -90,8 +90,8 @@ with all semantic encoding/decoding outside the channel/control mutex:
   `scalar_value_to_message` fills a single heap packet directly through
   `new_scalar_message`, without staging a header, copying it through
   `transfer.copy_message`, or allocating intermediate `TransferValue` unions
-  or `reflect.Value` wrappers. Binary strings use the same direct heap encoding
-  but keep scope-free protected decode to allocate the destination Lua string.
+  or `reflect.Value` wrappers. Binary strings use the same direct heap encoding;
+  decode copies them in its scope-free string branch inside its native catch.
   Explicit nominal `TransferValue` policies and opaque custom-hook roots
   allocate their single heap packet directly through `new_nominal_message`
   (attaching the scope's pending units into the aligned tail for opaque roots).
@@ -123,10 +123,11 @@ with all semantic encoding/decoding outside the channel/control mutex:
   structural records, unions, closures, and root endpoints directly from the
   native buffer slice (`protobuf.deserialize_nominal_buffer_with_context`,
   `protobuf.deserialize_fields_buffer_with_context`, and `codec.decode` for
-  registered `RECORD_PAYLOAD` capabilities). Each caller takes its packet into
-  a real local `void *`, installs an immediate native discard defer, and returns
-  or binds `transfer.decode_message(raw)` **directly** on that local, never
-  writing it again inside the guarded region. Decode consumes and clears the
+  registered `RECORD_PAYLOAD` capabilities). Each caller gives a real local
+  `void *` its packet in the local's own declaration, installs an immediate
+  native discard defer, and returns or binds `transfer.decode_message(raw)`
+  **directly** on that local, never writing it again, so the local never gets a
+  recovery spill. Decode consumes and clears the
   local on return and before any decoder error propagates with its original
   traceback; an error from decode's own entry preamble leaves the packet for
   the guard. No ordinary raw-slot wrapper or Lua-stack ledger intervenes; see

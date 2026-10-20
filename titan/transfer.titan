@@ -1405,10 +1405,13 @@ local foreign function decode_scalar_message(
 end
 
 --- Decode and consume the packet owned by an actual guarded raw slot.
--- Pass the caller's own `foreign *void` local, guarded by
--- `defer discard_message(raw)` and never written again in that region. Once
--- the body runs, the packet is consumed and the slot cleared before a result
--- returns or an error propagates with its original traceback.
+-- Pass the caller's own `foreign *void` local, best given its packet in its
+-- own declaration and guarded at once by `defer discard_message(raw)`. That
+-- local must never get a recovery spill: never write it inside any
+-- catch-protected block or defer region whose recovery code reads it, or the
+-- guard would see a stale owner. Once the body runs, the packet is consumed
+-- and the slot cleared before a result returns or an error propagates with
+-- its original traceback.
 function decode_message(slot: foreign *(*void)): value
   if slot == nil then raise "transfer: invalid packet owner slot" end
   local message = slot[0] as foreign *titan_async_message

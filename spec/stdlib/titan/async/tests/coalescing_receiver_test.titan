@@ -2,6 +2,7 @@ local coalescing_receiver_thread = import "thread"
 local coalescing_receiver_lua = import "lua"
 local coalescing_receiver_gc = import "gc"
 local coalescing_receiver_string = import "string"
+local coalescing_receiver_transfer = import "transfer"
 foreign import "receiver_probe.h"
 
 local coalescing_receiver_hook_encode_calls = 0
@@ -58,6 +59,50 @@ record CoalescingReceiverDuplexEnvelope
   probe: CoalescingReceiverHookProbe
   reply: coalescing_receiver_thread.Sender<|string|>
   inbox: coalescing_receiver_thread.Receiver<|integer|>
+end
+
+local foreign function coalescing_receiver_counter_retain(raw: *void)
+  local count = raw as foreign *int
+  count[0] = count[0] + 1
+end
+
+local foreign function coalescing_receiver_counter_release(raw: *void)
+  local count = raw as foreign *int
+  count[0] = count[0] - 1
+end
+
+local coalescing_receiver_decode_fail_trace = ""
+
+-- Attaches two counted native resources, then fails decode before claiming
+-- either; the traceback at the original raise is saved for comparison.
+record CoalescingReceiverDecodeFailProbe
+  local first: foreign *void
+  local second: foreign *void
+end
+
+function CoalescingReceiverDecodeFailProbe:to_transfer_payload(): string
+  return coalescing_receiver_transfer.attach_resource(self.first,
+      coalescing_receiver_counter_retain, coalescing_receiver_counter_release) ..
+    coalescing_receiver_transfer.attach_resource(self.second,
+      coalescing_receiver_counter_retain, coalescing_receiver_counter_release)
+end
+
+function CoalescingReceiverDecodeFailProbe.from_transfer_payload(
+    payload: string): CoalescingReceiverDecodeFailProbe
+  do
+    raise "coalescing-receiver-decode-fail:" .. #payload
+  catch
+    coalescing_receiver_decode_fail_trace = traceback
+    raise
+  end
+end
+
+-- Fields decode in order: `before` is adopted into a finalized wrapper before
+-- the probe fails, while `after` stays an unclaimed packet attachment.
+record CoalescingReceiverDecodeFailEnvelope
+  before: coalescing_receiver_thread.Sender<|integer|>
+  probe: CoalescingReceiverDecodeFailProbe
+  after: coalescing_receiver_thread.Sender<|integer|>
 end
 
 local function coalescing_receiver_reset_hook_counts()
@@ -581,6 +626,77 @@ function test_receiver_close_and_shutdown_dispose_endpoints_without_decode(
     coalescing_receiver_expect_error(function ()
       shutdown_receiver:wait()
     end, "closed")
+  end)
+end
+
+local function send_decode_failing_envelope_in_frame(
+    handle: foreign *void,
+    first: foreign *void,
+    second: foreign *void): (coalescing_receiver_thread.Receiver<|integer|>,
+                             coalescing_receiver_thread.Receiver<|integer|>)
+  local before_tx, before_rx = coalescing_receiver_thread.channel<|integer|>(1)
+  local after_tx, after_rx = coalescing_receiver_thread.channel<|integer|>(1)
+  async.send(handle, CoalescingReceiverDecodeFailEnvelope(
+    before_tx, CoalescingReceiverDecodeFailProbe(first, second), after_tx))
+  return before_rx, after_rx
+end
+
+-- Receiver:wait guards a fresh raw local only after the native take; a decode
+-- failure must consume that packet once, raise the decoder's original error
+-- and traceback, and leave the reader reservation and slot ready for reuse.
+function test_receiver_wait_decode_failure_consumes_packet_and_keeps_receiver_usable(
+    _context: test.Context)
+  runtime_test.run(function ()
+    local receiver = async.receiver()
+    runtime_test.cleanup(function () receiver:close() end)
+    local c1: owned int[] = foreign int.new_array(1)
+    local c2: owned int[] = foreign int.new_array(1)
+    c1[0] = 1
+    c2[0] = 1
+    local before_rx, after_rx = send_decode_failing_envelope_in_frame(
+      receiver:handle(), c1 as foreign *void, c2 as foreign *void)
+    defer before_rx:close()
+    defer after_rx:close()
+    support.collect_garbage()
+    support.collect_garbage()
+    test.assert(not before_rx:is_closed() and not after_rx:is_closed() and
+                c1[0] == 2 and c2[0] == 2,
+      "Receiver slot did not retain every packet attachment")
+
+    coalescing_receiver_decode_fail_trace = ""
+    local failed = false
+    local preserved_trace = false
+    do
+      receiver:wait()
+    catch
+      failed = error is string and
+        support.contains(error as string, "coalescing-receiver-decode-fail:8")
+      preserved_trace = #coalescing_receiver_decode_fail_trace > 0 and
+        traceback == coalescing_receiver_decode_fail_trace
+    end
+    test.assert(failed, "Receiver:wait did not raise the decoder's error")
+    test.assert(preserved_trace,
+      "Receiver:wait replaced the decoder's original traceback")
+    -- Before any explicit collection, decode's catch has released each
+    -- unclaimed attachment exactly once; only the adopted Sender waits for
+    -- its wrapper finalizer.
+    test.assert(c1[0] == 1 and c2[0] == 1 and after_rx:is_closed(),
+      "failed Receiver:wait decode did not release unclaimed attachments once")
+    support.collect_garbage()
+    support.collect_garbage()
+    test.assert(c1[0] == 1 and c2[0] == 1 and before_rx:is_closed(),
+      "failed Receiver:wait decode released twice or leaked the adopted Sender")
+
+    -- The reader reservation and native slot are clear for the next value.
+    local rx_next = send_ephemeral_sender(receiver:handle(), 701)
+    defer rx_next:close()
+    local delivered: CoalescingReceiverSenderEnvelope = receiver:wait()
+    test.assert(delivered.ordinal == 701 and delivered.probe:value() == 701,
+      "Receiver was unusable after a failed decode")
+    test.assert(delivered.tx:try_send(7010))
+    local ok, item? = rx_next:try_receive()
+    test.assert(ok and item == 7010)
+    delivered.tx:close()
   end)
 end
 

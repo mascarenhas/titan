@@ -729,8 +729,10 @@ enters the destination Lua state:
   status `1` does `wait()` install `defer transfer.discard_message(raw)` and
   return `transfer.decode_message(raw)`, following the
   [consuming raw-slot decode contract](transfer-library.md#consuming-raw-slot-decode):
-  the guard follows the native take, so no later write reaches `raw`, and
-  decode clears that actual local on return and before any error propagates.
+  the guard follows the native take, no later write reaches `raw`, and the only
+  enclosing protected region (`defer detach()`) never reads `raw`, so the local
+  never gets a recovery spill; decode clears that actual local on return and
+  before any error propagates.
   Decode errors consume the packet and raise from `wait()` with no lazy retry;
   `nil` and `false` return as ordinary data. When
   the slot is empty (initially or after a coalesced/stale wake), `wait()` clears
