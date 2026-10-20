@@ -36,7 +36,8 @@ The user-facing contract is in the
 - `titan/thread/native.h`: C struct definitions (including
   `../transfer_native.h`) for `titan_thread_message` (aliasing
   `titan_async_message`), `titan_thread_waiter` with its retained
-  `wake_target`, `titan_thread_waiter_queue`, `titan_thread_channel`, and
+  `wake_target`, automatic `titan_thread_channel_wait` context,
+  `titan_thread_waiter_queue`, `titan_thread_channel`, and
   `titan_thread_control` with its joinable `os_thread` token, proxy target and
   separate `cancel_reason_kind`/`result_reason_kind` metadata.
 
@@ -230,11 +231,41 @@ channel's `overflow_waiters` / `underflow_waiters` or thread control block's
 
 #### Shared external-wake suspension
 
-Send, receive, ordinary join, and the proxy body's logical-finish wait suspend
-through `async.wait_external` over the Runtime's single shared
-`uv.external_wake_t`, so no path allocates, initializes, or closes a per-wait
-`uv.async_t`. `titan_thread_waiter.wake_target` holds the retained native target
-for exactly one registration interval.
+Channel send/receive suspend through `async.wait_external_native`; ordinary
+join and the proxy body's logical-finish wait use `async.wait_external`. Both
+use the Runtime's single shared `uv.external_wake_t`, so no path allocates,
+initializes, or closes a per-wait `uv.async_t`.
+`titan_thread_waiter.wake_target` holds the retained native target for exactly
+one registration interval.
+
+Channel calls use one automatic `titan_thread_channel_wait` cell containing
+channel/message pointers, an embedded waiter and registrar status. The fast
+send/dequeue path creates no registrar closure or mutable capture box. A full
+or empty path passes its traced endpoint as the native wait's semantic owner
+and borrows the cell until `wait_external_native` returns. The stackful Task
+frame keeps the cell/waiter storage valid across suspension; all cancellation
+and unwind paths unlink synchronously before that frame can unwind. Native
+producers only access the waiter under the channel mutex, not the endpoint or
+other GC state. This is a call-scoped borrow, not state-close protection for
+arbitrarily abandoned native users.
+
+The C registrars `channel_register_send_wait` /
+`channel_register_receive_wait` perform the same locked inline recheck as the
+fast path after yield. Their `0`/`1` return distinguishes inline-ready from
+linked; the cell's separate status preserves a closed result. Send registration
+clears the cell's packet pointer in the same foreign interval as enqueue;
+receive registration commits the dequeued packet into that guarded cell.
+Therefore cancellation that wins delivery after inline commitment never
+discards a published packet or leaks a dequeued one. `defer` guards the cell's
+remaining packet without a closure/capture box. Titan code reaches the cell
+only through a `foreign *titan_thread_channel_wait` local: a by-value automatic
+aggregate written in a protected body and read by its `defer` receives a
+[longjmp-safe spill](c-ffi-expressions.md#longjmp-safe-aggregate-spills), and
+recovery would reload the last Titan-written bytes over the registrar's raw
+packet commit. Send installs its `defer` before the fast path because it owns
+the encoded packet from the start; receive installs it only on a waiting
+iteration, so an immediate dequeue has no protected boundary. Normal notified
+waits retry the fast check; they still reserve no slot or message.
 
 The proxy **cleanup** join is a different path on the same bridge. It never
 registers a `titan_thread_waiter` and never calls `async.wait_external`: the
@@ -246,7 +277,7 @@ through the native branch of `ExternalWait:await`, which polls
 `ctrl.proxy_wake_target`, so the prearmed capability—not a join-waiter node—owns
 the reference that keeps the proxy's wake target valid.
 
-- `async.wait_external` prepares an `ExternalWait` whose reserved target does not
+- Both ordinary external-wait wrappers prepare an `ExternalWait` whose reserved target does not
   reference the idle handle. The wait yields, and only then activates the target
   without allocating, immediately before invoking the domain registrar. Active
   waits reference the Runtime's one shared async handle until retirement, and a

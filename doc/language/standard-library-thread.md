@@ -167,6 +167,13 @@ For a nonnullable message type, an ordinary payload binding such as
 `for _, job in rx:incoming() do` forces the optional iterator result to that
 required message type.
 
+Immediate send/dequeue paths prepare no external wait or registrar closures.
+Only a full/empty slow path uses the shared
+[`async.wait_external_native`](async-io.md#external-waits) bridge, which rechecks
+the channel under its mutex after the Task yields. Cancellation withdraws that
+exact waiter synchronously; a notification reserves neither a buffer slot nor
+a message, so a woken Task may need to wait again.
+
 ### Closing, cloning, and transferring endpoints
 
 - `Sender:close()` marks the shared channel closed (`is_closed() == true`) for

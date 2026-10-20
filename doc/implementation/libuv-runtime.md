@@ -51,7 +51,7 @@ The generic runtime stores these private layers:
 | `Completion<|C,T,E|>` | One lazily allocated (or `run_with_cleanup` preallocated) reusable cell per Task: scoped context, registrar, Task, captured suspension epoch, policy, phase, outcome/payload and optional accepted request. |
 | `Wait` | The private all-value Completion view; it has the same owner, not another record. |
 | `ExternalBridge` | Lazily initialized per-Runtime `uv.external_wake_t`, sparse `waits` Map from 64-bit identity to `ExternalWait`, monotonic `next_identity`, and `closed` flag. |
-| `ExternalWait` | Reserved target/identity, ordinary closure registrar/unregister pair or inline `titan_async_retirement` plus traced `native_owner`, exact cleanup Task, optional attached Completion/epoch, and distinct `used`, `awaited`, `close_requested`, notified and retired state. |
+| `ExternalWait` | Reserved target/identity, closure registrars or C-ABI registrars/context in the inline `titan_async_retirement` cell plus traced `native_owner`; optional native retirement callback and exact cleanup Task, attached Completion/epoch, and distinct `used`, `awaited`, `close_requested`, notified and retired state. |
 | Subscription `Core` | Queue, explicit count, terminal state, one reserved waiter, producer actions, cleanup drain capability. |
 | Public UV owner | Native request/handle storage and callback rooting until its defined native terminal boundary. |
 | Domain owner | Resources obtained from native completion, facade state, sharing rules, and lexical cleanup. |
@@ -369,10 +369,11 @@ belong in Core and do not require new generic operation kinds.
 onto one Runtime-owned [`uv.external_wake_t`](../language/uv/types.md#external_wake_t)
 bridge instead of initializing and closing a `uv.async_t` handle per wait:
 
-The registration sequence below describes ordinary closure-registered external
-waits. [Native retirement barriers](#native-retirement-barriers) use a separate
-preaccepted Task-level lifecycle; successful entry into a cleanup callback is
-not their ownership guard.
+The registration sequence below describes ordinary external waits: either
+closure-registered or `wait_external_native` with C-ABI registrars/context and a
+traced domain owner. [Native retirement barriers](#native-retirement-barriers)
+use a separate preaccepted Task-level lifecycle; successful entry into a cleanup
+callback is not their ownership guard.
 
 1. **Lazy bridge creation and unreferenced initial handle**:
    `external_bridge(runtime)` lazily creates one `ExternalBridge` per `Runtime`
@@ -420,7 +421,9 @@ not their ownership guard.
      thread as an idle-loop orphan.
 3. **Domain registration, lock order, and inline readiness**:
    - After `activate`, `start_external_wait` sets `owner.registered = true` and
-     invokes `owner.register_fn(owner.target)`.
+     invokes `owner.register_fn(owner.target)`, or
+     `owner.native.register_wait(owner.native.context, owner.target)` for an
+     ordinary C-ABI wait. Both run after the tagged Task yield.
    - The domain callback locks its own native mutex first and, when it must
      wait, calls `uv.native_external_wake_retain(target)` (which locks
      `core.mutex` to increment `target.references`). The lock order is strictly
@@ -432,6 +435,17 @@ not their ownership guard.
      settles `done:resolve(number, nil)` inline without suspending. If
      `register_fn` raises, `start_external_wait` calls `owner:detach_domain()`
      and `owner:retire()` before rethrowing.
+   - The C-ABI ordinary route uses `prepare_wait` with `native.retire = nil`.
+     Register status `0` is inline-ready, `1` is linked, and negative status is
+     clean rejection translated at `async.external_wait.register` with the same
+     detach/retire unwind. `detach_domain` selects native unregister when present;
+     its `registered` latch allows only one cancellation/failure unlink. No
+     native-retirement poll, prearming, cleanup privilege or terminal gate is
+     added. `native_owner` remains traced through callback return/unlink, then
+     retirement clears it along with the context and callback pointers. The
+     context itself is only borrowed: its caller must retain storage through the
+     whole await. Channels use automatic storage in the suspended stackful frame
+     and a traced endpoint owner, not a fresh per-wait context userdata.
 4. **Native producer notification and bounded drain**:
    - Native producers on any OS thread call
      `uv.native_external_wake_notify(target)` (which under `core.mutex` links an

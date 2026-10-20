@@ -477,7 +477,13 @@ The recovery path reloads the last committed bytes before Titan reads the
 object. The loops preserve volatile accesses; they do not cast volatility away
 through `memcpy`. A call that mutates and then nonlocally exits does not commit
 partial bytes. Mutation through an untracked raw alias or asynchronously from C
-remains outside Titan's guarantee.
+remains outside Titan's guarantee for the spilled object itself. Storage reached
+only through a pointer local is never spilled or restored: the pointer walk
+stops at the first pointer, so reads after recovery observe the storage's current
+memory. Code that lets C commit state during a protected region (for example a
+native registrar writing a wait cell) should therefore hold that cell as automatic
+storage plus a pointer local. Escaping the storage's address into an external call
+also keeps compilers from caching it across `setjmp`.
 
 ## C operator traits
 

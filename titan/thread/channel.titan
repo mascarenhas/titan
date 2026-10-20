@@ -154,6 +154,35 @@ local foreign function channel_unregister_underflow_waiter(
   uv.native_mutex_unlock(ch.mutex)
 end
 
+local foreign function channel_register_send_wait(context: *void, target: *void): int
+  local wait = context as foreign *titan_thread_channel_wait
+  wait.status = channel_try_enqueue_native(
+    wait.channel, wait.message, ffi.titan_thread_channel_waiter(wait), target)
+  if wait.status == 0 then wait.message = nil end
+  if wait.status == 1 then return 1 end
+  return 0
+end
+
+local foreign function channel_unregister_send_wait(context: *void)
+  local wait = context as foreign *titan_thread_channel_wait
+  channel_unregister_overflow_waiter(wait.channel, ffi.titan_thread_channel_waiter(wait))
+end
+
+local foreign function channel_register_receive_wait(context: *void, target: *void): int
+  local wait = context as foreign *titan_thread_channel_wait
+  local message: foreign *titan_thread_message = nil
+  wait.status = channel_try_dequeue_native(
+    wait.channel, ffi.titan_thread_channel_waiter(wait), target, message)
+  wait.message = message
+  if wait.status == 1 then return 1 end
+  return 0
+end
+
+local foreign function channel_unregister_receive_wait(context: *void)
+  local wait = context as foreign *titan_thread_channel_wait
+  channel_unregister_underflow_waiter(wait.channel, ffi.titan_thread_channel_waiter(wait))
+end
+
 local function sender_finalize(self: Sender<|value|>)
   local ch = self.native
   self.native = nil
@@ -242,38 +271,29 @@ end
 -- @param message Value to transfer into the channel buffer.
 -- @usage standard-library-thread.md
 function Sender:send(message: T)
-  local msg: foreign *titan_thread_message = value_to_thread_message(message as value)
-  defer if msg ~= nil then thread_message_discard(msg) end
+  -- The native cell owns the packet even when registration commits inline and
+  -- cancellation wins delivery. No mutable local is captured on either path.
+  -- Every access goes through the pointer: a by-value automatic aggregate read
+  -- by the defer would get a setjmp spill whose recovery reload restores stale
+  -- bytes over the C registrar's packet commit.
+  local wait_storage = foreign titan_thread_channel_wait.new()
+  local wait: foreign *titan_thread_channel_wait = wait_storage
+  wait.channel = self.native
+  wait.message = value_to_thread_message(message as value)
+  defer if wait.message ~= nil then thread_message_discard(wait.message) end
   while true do
-    local fast = channel_try_enqueue_native(self.native, msg, nil, nil)
+    local fast = channel_try_enqueue_native(wait.channel, wait.message, nil, nil)
     if fast == 0 then
-      msg = nil
+      wait.message = nil
       return
     elseif fast == 2 then
       raise "channel is closed"
     end
-    local waiter_storage = foreign titan_thread_waiter.new()
-    local waiter: foreign *titan_thread_waiter = waiter_storage
-    local closed_err = false
-    async.wait_external(
-      function (wake_target: foreign *void): boolean
-        local rc = channel_try_enqueue_native(
-          self.native, msg, waiter, wake_target)
-        if rc == 0 then
-          msg = nil
-          return false
-        elseif rc == 2 then
-          closed_err = true
-          return false
-        end
-        return true
-      end,
-      function ()
-        channel_unregister_overflow_waiter(self.native, waiter)
-      end)
-    if msg == nil then
+    async.wait_external_native(self, wait,
+      channel_register_send_wait, channel_unregister_send_wait)
+    if wait.message == nil then
       return
-    elseif closed_err then
+    elseif wait.status == 2 then
       raise "channel is closed"
     end
   end
@@ -342,43 +362,27 @@ function Sender.from_transfer_payload(payload: string): Sender<|T|>
 end
 
 local function Receiver:dequeue_or_wait(): (boolean, foreign *void)
+  local wait_storage = foreign titan_thread_channel_wait.new()
+  local wait: foreign *titan_thread_channel_wait = wait_storage
+  wait.channel = self.native
   while true do
     local fast_msg: foreign *titan_thread_message = nil
-    local fast_status = channel_try_dequeue_native(self.native, nil, nil, fast_msg)
-    if fast_status == 0 then
+    local fast = channel_try_dequeue_native(wait.channel, nil, nil, fast_msg)
+    if fast == 0 then
       return true, fast_msg
-    elseif fast_status == 2 then
+    elseif fast == 2 then
       return false, nil
     end
-    local waiter_storage = foreign titan_thread_waiter.new()
-    local waiter: foreign *titan_thread_waiter = waiter_storage
-    local received = false
-    local closed_empty = false
-    local slow_msg: foreign *titan_thread_message = nil
-    defer if slow_msg ~= nil then thread_message_discard(slow_msg) end
-    async.wait_external(
-      function (wake_target: foreign *void): boolean
-        local msg: foreign *titan_thread_message = nil
-        local status = channel_try_dequeue_native(
-          self.native, waiter, wake_target, msg)
-        if status == 0 then
-          slow_msg = msg
-          received = true
-          return false
-        elseif status == 2 then
-          closed_empty = true
-          return false
-        end
-        return true
-      end,
-      function ()
-        channel_unregister_underflow_waiter(self.native, waiter)
-      end)
-    if received then
-      local msg = slow_msg
-      slow_msg = nil
+    -- Only a waiting iteration enters this protected boundary. Access through
+    -- the pointer keeps the registrar's committed packet visible on unwind.
+    defer if wait.message ~= nil then thread_message_discard(wait.message) end
+    async.wait_external_native(self, wait,
+      channel_register_receive_wait, channel_unregister_receive_wait)
+    if wait.status == 0 then
+      local msg = wait.message
+      wait.message = nil
       return true, msg
-    elseif closed_empty then
+    elseif wait.status == 2 then
       return false, nil
     end
   end

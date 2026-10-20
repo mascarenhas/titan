@@ -358,6 +358,9 @@ function test_receiver_close_flushes_buffer_and_wakes_senders(context: test.Cont
       return true
     end, "sender_task")
     wait_until_waiting(sender_task)
+    -- The C registrar borrows the suspended frame; force GC while its endpoint
+    -- and native context must remain valid through close and wake delivery.
+    gc.collect()
     rx:close()
     test.assert(tx:is_closed() and rx:is_closed())
     local ok_flushed, val_flushed? = rx:try_receive()
@@ -378,6 +381,7 @@ function test_receiver_close_flushes_buffer_and_wakes_senders(context: test.Cont
       end
     end, "parked_recv")
     wait_until_waiting(parked_recv)
+    gc.collect()
     rx2:close()
     test.assert(await_task(parked_recv))
 
@@ -391,6 +395,7 @@ function test_receiver_close_flushes_buffer_and_wakes_senders(context: test.Cont
       end
     end, "parked_rx3")
     wait_until_waiting(parked_rx3)
+    gc.collect()
     tx3:close()
     test.assert(await_task(parked_rx3))
 
@@ -402,6 +407,7 @@ function test_receiver_close_flushes_buffer_and_wakes_senders(context: test.Cont
       return true
     end, "parked_tx4")
     wait_until_waiting(parked_tx4)
+    gc.collect()
     tx4:close()
     expect_error(function ()
       await_task(parked_tx4)
@@ -421,6 +427,7 @@ function test_waiter_cancellation_preserves_subsequent_messages(_context: test.C
       return rx:receive()
     end, "cancelled_recv")
     wait_until_waiting(cancelled_recv)
+    gc.collect()
     cancelled_recv:cancel()
     expect_error(function ()
       await_task(cancelled_recv)
@@ -433,6 +440,7 @@ function test_waiter_cancellation_preserves_subsequent_messages(_context: test.C
       return true
     end, "cancelled_send")
     wait_until_waiting(cancelled_send)
+    gc.collect()
     cancelled_send:cancel()
     expect_error(function ()
       await_task(cancelled_send)

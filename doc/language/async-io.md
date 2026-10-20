@@ -693,6 +693,10 @@ function ExternalWait:close()
 function wait_external(
     register_fn: function (foreign *void): boolean,
     unregister_fn: function (): ())
+function wait_external_native(
+    owner: value, context: foreign *void,
+    register_fn: foreign function (*void, *void): int,
+    unregister_fn: foreign function (*void): void)
 function wait_external_cleanup(
     register_fn: function (foreign *void): boolean,
     unregister_fn: function (): ())
@@ -1000,9 +1004,9 @@ import is required by this adapter.
 
 Cross-thread subsystems can use the Runtime's shared external wake bridge to
 suspend a Task without creating and closing a fresh `uv.async_t` for each wait.
-This is a generic adapter API. The thread standard library builds its channel
-send, channel receive, and `Thread:join()` waits on the public
-`async.wait_external`, so those paths share one bridge
+This is a generic adapter API. The thread standard library builds channel
+send/receive waits on `async.wait_external_native` and ordinary `Thread:join()`
+waits on `async.wait_external`, so those paths share one bridge
 ([thread waiter suspension](../implementation/thread-library.md#shared-external-wake-suspension)).
 
 The rules in this section apply to `prepare_external_wait`. Native retirement
@@ -1086,6 +1090,43 @@ Task.
 `wait_external_cleanup(register_fn, unregister_fn)` require a running Task. They
 call `prepare_external_wait`, `defer owner:close()`, and run `owner:wait()` or
 `owner:wait_cleanup()`.
+
+**C-ABI ordinary waits.** `wait_external_native(owner, context, register_fn,
+unregister_fn)` is the narrow ordinary-wait counterpart for native domains. It
+requires a running Task, roots `owner`, prepares one ordinary `ExternalWait`,
+awaits it and closes it. It replaces the two Titan registrar closures with C
+function pointers; it is not a prepared native retirement capability and
+provides no cleanup shielding or terminal-publication gate.
+
+- Both callbacks must be non-NULL, C-only, nonraising and nonyielding. NULL
+  callbacks raise `"native external wait callbacks must not be NULL"` before
+  preparation. Both run on the loop thread with no driver-held domain or
+  wake-core mutex: `register_fn` runs after the Task yields, while
+  `unregister_fn` runs synchronously from `Task:cancel` or from the waiting
+  Task's own unwind.
+- `register_fn(context, target)` rechecks readiness and publishes under the
+  domain mutex: `0` means ready with no linked waiter or retained target, `1`
+  means a linked waiter retaining its target, and a negative status means
+  rejection with no surviving link/reference. Rejection raises
+  `OperationError` with operation `async.external_wait.register`.
+- `unregister_fn(context)` synchronously and idempotently withdraws the exact
+  waiter on cancellation or registration failure. Normal notification and
+  inline readiness do not call it. The existing one-shot cancellation,
+  Completion/epoch checks, pending-identity delivery and target ref/unref rules
+  are unchanged.
+- `context` is borrowed, not a root or independent native owner. Keep its
+  storage and all referenced GC owners alive through return, including
+  cancellation unlink. An automatic context is valid only while its enclosing
+  stackful Task frame persists across the entire call; it must never escape
+  that interval or be retained by a producer after unlink. Rooting `owner` does
+  not extend arbitrary native storage through Lua-state close.
+- Callbacks mutate `context` through a raw alias that Titan does not track.
+  When the calling function writes an automatic context and a `defer` or
+  `catch` reads it after a raise, declare a pointer local
+  (`local cell: foreign *T = storage`) and use only that pointer. A by-value
+  aggregate in that position gets a
+  [longjmp-safe spill](../implementation/c-ffi-expressions.md#longjmp-safe-aggregate-spills),
+  and recovery reloads its last Titan-written bytes over the callbacks' writes.
 
 #### Native retirement capabilities
 
