@@ -689,10 +689,18 @@ enters the destination Lua state:
   callback or status conversion ensures that once the atomic exchange commits,
   the slot owns the allocation even when `uv_async_send` returns a negative
   status and `check_status` raises `OperationError` (`"async.send"`).
+- **Persistent reader state (`ReceiverReader`)**: `receiver()` allocates the
+  Receiver's only reader state once: a `ReceiverReader` with an empty
+  `task`, a `notified` bit, one `ResumeToken("async.Receiver.wait")`, and one
+  `withdraw` cancellation action (`reader.task = nil`). The reservation is the
+  reserving Task's identity in `reader.task`, so `wait()` allocates no reader
+  record, token, or closure. Clearing `task` on release also drops the
+  Receiver's reference to a finished reader Task.
 - **Wake-only callback and direct slot retention (`Receiver:wake`)**: `Receiver`
   does not copy or decode payloads in its libuv callback. Its callback
-  (`Receiver:wake()`) only marks `reader.notified = true` and requests a
-  deferred wake via `reader.task:resume(reader.token)` (resetting
+  (`Receiver:wake()`) returns unless `reader.task` is reserved and
+  `reader.notified` is clear; it then marks `reader.notified = true` and
+  requests a deferred wake via `task:resume(reader.token)` (resetting
   `reader.notified = false` if `resume` raises). The owned
   `titan_async_message` remains in `self.native.message`—including while the
   reader's deferred wake is queued in the Runtime ready FIFO—until `wait()`
@@ -700,9 +708,10 @@ enters the destination Lua state:
   packets directly in C through `transfer.discard_message`.
 - **Single-reader reservation, direct raw-slot decode, stale wakes, and
   cancellation (`Receiver:wait`, `receiver_take_native`)**: `wait()` requires a
-  running Task, rejects competing callers when `self.reader ~= nil`
-  (`"receiver already has a waiting reader"`), and installs
-  `self.reader = reader` (with `defer detach()`) **before** inspecting
+  running Task, rejects competing callers when `reader.task ~= nil`
+  (`"receiver already has a waiting reader"`), registers
+  `defer if reader.task == task then reader.task = nil end`, and sets
+  `reader.task = task` and `reader.notified = false` **before** inspecting
   `checkpoint()`, `self.native.closed`, or `self.native.message`. This prevents
   a second caller from barging ahead while the first reader's wake is queued.
   On each loop turn after `checkpoint()`, a fresh `local raw: foreign *void = nil`
@@ -718,11 +727,17 @@ enters the destination Lua state:
   Decode errors consume the packet and raise from `wait()` with no lazy retry;
   `nil` and `false` return as ordinary data. When
   the slot is empty (initially or after a coalesced/stale wake), `wait()` clears
-  `reader.notified = false` and calls `suspend(reader.token, detach)`; a `send`
-  between the empty-slot check and `suspend` either sets `reader.notified` on
-  the loop thread or leaves a pending `uv_async_send` signal for the next loop
-  turn. Cancelling the waiting Task runs `detach` to clear `self.reader` without
-  taking or discarding an unread packet in `self.native.message`.
+  `reader.notified = false` and calls `suspend(reader.token, reader.withdraw)`;
+  a `send` between the empty-slot check and `suspend` either sets
+  `reader.notified` on the loop thread or leaves a pending `uv_async_send`
+  signal for the next loop turn. Cancelling the waiting Task runs `withdraw` to
+  clear `reader.task` without taking or discarding an unread packet in
+  `self.native.message`. The unconditional action is exact: `Task:cancel` runs
+  a suspend cancellation action only while its Task is suspended under that
+  action, cancellation is sticky, and nothing else releases the reservation
+  while its reader is suspended. The cancelled reader then unwinds through a
+  queued wake, so a successor may reserve first; the exit `defer` compares Task
+  identity and leaves that successor's reservation intact.
 
 ### Receiver lifecycle and teardown
 

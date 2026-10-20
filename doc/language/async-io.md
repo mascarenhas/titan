@@ -602,7 +602,12 @@ Runtime:
   leaves a pending libuv notification or wake. Cancelling the waiting Task
   detaches only its reader reservation without closing the receiver or taking or
   discarding an unread packet in the slot; later sends may still replace that
-  packet before another waiter consumes it.
+  packet before another waiter consumes it. The reservation is free as soon as
+  `cancel` returns, so another Task may start waiting before the cancelled one
+  has unwound; that unwinding never releases the newer reservation.
+- **No per-wait reader state:** Each `Receiver` owns one reader token and one
+  cancellation action for its whole lifetime, so `wait` allocates no
+  reservation state of its own; decoding a received value is unchanged.
 
 **Closing.** `close()` is idempotent and does not require a Task. It marks the
 Receiver closed, atomically takes and disposes any unread packet in the native

@@ -220,6 +220,42 @@ function test_receiver_cancellation_preserves_pending_message(_context: test.Con
   end)
 end
 
+function test_receiver_cancelled_reader_exit_keeps_successor_reservation(_context: test.Context)
+  runtime_test.run(function ()
+    local receiver = async.receiver()
+    defer receiver:close()
+    local first = async.run<|value, value|>(receiver:wait)
+    task_support.cleanup_task(first, "cancelled Receiver reader cleanup")
+    support.wait_until_waiting(first)
+    -- Queue the successor before cancelling: cancellation withdraws the first
+    -- reservation at once, so the successor reserves and suspends before the
+    -- cancelled reader's queued wake unwinds through its own wait.
+    local successor = async.run<|value, value|>(receiver:wait)
+    task_support.cleanup_task(successor, "successor Receiver reader cleanup")
+    first:cancel(async.CancellationReason.simple("first Receiver reader cancelled"))
+    support.wait_until_waiting(successor)
+    test.assert(support.cancelled_with(async.join(first), "first Receiver reader cancelled"))
+    async.send(receiver:handle(), async.TransferValue.is_integer(81))
+    -- The successor still owns the reader slot after the cancelled reader left.
+    receiver_error(function () receiver:wait() end)
+    case async.join(successor)
+    when succeeded(item) then test.assert(receiver_integer(item) == 81)
+    else raise "cancelled Receiver reader withdrew its successor's reservation" end
+    -- A reader woken by the callback leaves no stale notification for the next
+    -- reader that must suspend on the same Receiver.
+    local third = async.run<|value, value|>(receiver:wait)
+    task_support.cleanup_task(third, "third Receiver reader cleanup")
+    support.wait_until_waiting(third)
+    async.send(receiver:handle(), async.TransferValue.is_integer(82))
+    case async.join(third)
+    when succeeded(item) then test.assert(receiver_integer(item) == 82)
+    else raise "reused Receiver reader state missed a later wake" end
+    async.send(receiver:handle(), async.TransferValue.is_integer(83))
+    test.assert(receiver_integer(receiver:wait()) == 83,
+                "Receiver reservation remained after successive readers")
+  end)
+end
+
 function test_receiver_close_wakes_waiter_and_rejects_late_sends(_context: test.Context)
   runtime_test.run(function ()
     receiver_error(function ()

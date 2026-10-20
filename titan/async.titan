@@ -27,10 +27,13 @@ type SuspendCancelAction = function (): ()
 -- @usage async-io.md#transfer-values
 type TransferValue = transfer.TransferValue
 
+-- One persistent single-reader state per Receiver: a wait reserves by setting
+-- task and reuses the token and cancellation action instead of allocating them.
 local record ReceiverReader
-  task: Task<|value, value|>
-  token: ResumeToken
+  task: Task<|value, value|>?
   notified: boolean
+  token: ResumeToken
+  withdraw: SuspendCancelAction?
 end
 
 --- A lossy latest-value receiver whose borrowed handle can cross Lua states.
@@ -40,7 +43,7 @@ record Receiver
   local native: foreign titan_async_receiver
   local native_handle: uv.async_t
   local handle_view: uv.handle_t
-  local reader: ReceiverReader?
+  local reader: ReceiverReader
 end
 
 -- Positive status 2 rejects admission; libuv's zero/negative statuses follow
@@ -4732,10 +4735,11 @@ local function Receiver:begin_close()
 end
 
 local function Receiver:wake()
-  local reader? = self.reader
-  if reader == nil or reader.notified then return end
+  local reader = self.reader
+  local task? = reader.task
+  if task == nil or reader.notified then return end
   reader.notified = true
-  do reader.task:resume(reader.token)
+  do task:resume(reader.token)
   catch reader.notified = false; raise end
 end
 
@@ -4761,11 +4765,15 @@ function receiver(): Receiver
     raise "cannot create a receiver while async Runtime is shutting down"
   end
   local handle = uv.async_t.new()
+  local reader = ReceiverReader(nil, false, ResumeToken("async.Receiver.wait"), nil)
+  -- Task:cancel runs this only while the reserving Task is suspended in wait,
+  -- so the reservation it withdraws is necessarily that Task's.
+  reader.withdraw = function () reader.task = nil end
   local owner = Receiver {
     native = foreign titan_async_receiver.new(),
     native_handle = handle,
     handle_view = handle:as_handle_t(),
-    reader = nil
+    reader = reader
   }
   owner.native.closed = 1
   gc.finalizable(owner, receiver_finalize)
@@ -4818,16 +4826,15 @@ end
 -- @usage async-io.md#cross-state-receivers
 function Receiver:wait(): value
   local task = running()
-  if self.reader ~= nil then raise "receiver already has a waiting reader" end
-  local reader = ReceiverReader(task, ResumeToken("async.Receiver.wait"), false)
-  local owner = self
-  local detach = function ()
-    if owner.reader == reader then owner.reader = nil end
-  end
-  defer detach()
+  local reader = self.reader
+  if reader.task ~= nil then raise "receiver already has a waiting reader" end
+  -- Cancellation withdraws the reservation before this Task unwinds, so a
+  -- successor may already hold it on exit; release only this Task's own.
+  defer if reader.task == task then reader.task = nil end
   -- Reserve before even inspecting the slot, not just before suspension.
   -- Cancellation withdraws only this reservation; it never takes the packet.
-  self.reader = reader
+  reader.task = task
+  reader.notified = false
   while true do
     checkpoint()
     local raw: foreign *void = nil
@@ -4843,7 +4850,7 @@ function Receiver:wait(): value
     -- reservation and suspend: send between the check and registration leaves
     -- the UV async notification pending until this Task has yielded.
     reader.notified = false
-    suspend(reader.token, detach)
+    suspend(reader.token, reader.withdraw)
   end
 end
 
