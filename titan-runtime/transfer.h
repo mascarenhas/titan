@@ -895,22 +895,32 @@ static inline void titan_codec_parse(lua_State *L, const uint8_t *data,
   }
 }
 
-/* The selected variant when the union message holds exactly one recognized
- * occurrence and it is length-delimited; otherwise 0, and the reflective
- * decoder applies its scan order, oneof replacement, and merge rules. */
-static inline uint32_t titan_codec_single(const TitanCodecField *variants,
-    uint32_t count) {
+/* Validate the complete union message while keeping only its one recognized
+ * occurrence. Multiple, repeated, or non-message variants select reflection,
+ * after all wire fields (including unknown ones) have been validated. */
+static inline uint32_t titan_codec_select_union(lua_State *L,
+    const uint8_t *data, size_t length, uint32_t count,
+    TitanCodecField *selected_field) {
+  size_t position = 0;
   uint32_t selected = 0;
-  for (uint32_t ordinal = 1; ordinal <= count; ordinal++) {
-    if (variants[ordinal - 1].count != 0) {
-      if (selected != 0 || variants[ordinal - 1].count != 1 ||
-          variants[ordinal - 1].wire != 2) {
-        return 0;
+  int multiple = 0;
+  while (position < length) {
+    uint32_t number;
+    uint32_t wire;
+    TitanCodecField entry;
+    titan_codec_key(L, data, length, &position, &number, &wire);
+    titan_codec_field(L, data, length, &position, number, wire, 1, &entry);
+    uint32_t ordinal = titan_codec_ordinal(number);
+    if (ordinal >= 1 && ordinal <= count) {
+      if (selected != 0 || wire != 2) {
+        multiple = 1;
       }
       selected = ordinal;
+      selected_field->offset = entry.offset;
+      selected_field->length = entry.length;
     }
   }
-  return selected;
+  return multiple ? 0 : selected;
 }
 
 static inline void titan_codec_need(lua_State *L, const TitanCodecField *field,

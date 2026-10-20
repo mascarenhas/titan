@@ -171,11 +171,16 @@ struct, or fixed array, or an Option of one of those. Eligibility is per
 nominal, so recursive declarations never depend on declaration order. A
 nominal with a field the reflective codec always rejects (callables, Maps,
 Interfaces, owned or union C types), private members, or hooks stays entirely
-reflective, as does a nominal whose decoder directory would exceed 64 entries
-(record fields; union variants plus every variant's parts). Each entry is 32
-bytes of the decoder's C frame at up to 128 nesting levels, while a reflective
-level's C stack does not grow with field count, so a deep graph of wide
-nominals raises the nesting error instead of exhausting the C stack.
+reflective, as does a nominal whose decoder frame would exceed 64 directory
+entries: a record's fields, or one union selector plus the largest variant's
+parts. Each entry is 32 bytes at up to 128 nesting levels. The union selector
+validates the complete wire message but stores only the one recognized
+occurrence; zero, repeated, replaced, or non-message variants hand back to the
+reflective decoder after that validation. One shared parts directory serves
+the selected variant, so variant count does not grow the C frame. Wider
+records or payloads stay reflective, whose per-level C stack does not grow
+with field count, so deep wide graphs raise the nesting error instead of
+exhausting the C stack.
 
 The declaring module emits one immutable `TitanTransferCodec` array next to
 its `TitanTransferModule` manifest (`transfer.h`) and binds each canonical

@@ -111,11 +111,10 @@ local function native_kind(typ)
     return nil
 end
 
--- A generated decoder keeps one 32-byte directory entry per declared field
--- (a union: per variant plus every variant's parts) on the C stack, at up to
--- 128 nesting levels. Wider nominals stay reflective, whose per-level C stack
--- use does not grow with field count, so deep wide graphs raise the nesting
--- error instead of exhausting the C stack.
+-- A generated decoder keeps at most 64 32-byte directory entries on the C
+-- stack, at up to 128 nesting levels: a record's fields, or one union selector
+-- plus its largest variant's parts. Wider frames stay reflective, so deep
+-- wide graphs raise the nesting error instead of exhausting the C stack.
 local DIRECTORY_LIMIT = 64
 
 local function eligible(node)
@@ -124,12 +123,11 @@ local function eligible(node)
         return false
     end
     local lists = owner._tag == "Type.Record" and { owner.fields } or {}
-    local entries = owner._tag == "Type.Record" and #owner.fields or 0
+    local entries = owner._tag == "Type.Record" and #owner.fields or 1
     if owner._tag == "Type.Union" then
-        entries = #owner.variants
         for _, variant in ipairs(owner.variants) do
             lists[#lists + 1] = variant.parts
-            entries = entries + #variant.parts
+            entries = math.max(entries, 1 + #variant.parts)
         end
     end
     if entries > DIRECTORY_LIMIT then return false end
@@ -467,7 +465,9 @@ end
 local function emit_union(ctx, node, encode, decode)
     local owner = node._type
     local encode_cases, decode_cases = {}, {}
+    local max_parts = 1
     for ordinal, variant in ipairs(owner.variants) do
+        max_parts = math.max(max_parts, #variant.parts)
         local plan = coder._nominal_plan(ctx, owner, variant)
         local env = {
             owner = owner, variant = ordinal, fields = "_parts",
@@ -495,9 +495,8 @@ local function emit_union(ctx, node, encode, decode)
         })
         decode_cases[#decode_cases + 1] = render([[
             case $ORDINAL: {
-                const uint8_t *_part_data = _data + _variants[$SLOT].offset;
-                size_t _part_length = _variants[$SLOT].length;
-                TitanCodecField _parts[$CAPACITY];
+                const uint8_t *_part_data = _data + _variant.offset;
+                size_t _part_length = _variant.length;
                 ptrdiff_t _scratch = -1;
                 (void)_scratch;
                 titan_codec_parse(L, _part_data, _part_length, _parts, $COUNT);
@@ -506,8 +505,6 @@ local function emit_union(ctx, node, encode, decode)
             }
         ]], {
             ORDINAL = c_integer_literal(ordinal),
-            SLOT = c_integer_literal(ordinal - 1),
-            CAPACITY = c_integer_literal(math.max(#variant.parts, 1)),
             COUNT = c_integer_literal(#variant.parts),
             PARTS = decode_fields(ctx, plan, env, node, variant.parts),
         })
@@ -530,11 +527,11 @@ local function emit_union(ctx, node, encode, decode)
         }
         static void $DECODE(lua_State *L, TitanCodecState *_st, Udata *_mod,
             const uint8_t *_data, size_t _length, int _depth) {
-            TitanCodecField _variants[$CAPACITY];
+            TitanCodecField _variant;
+            TitanCodecField _parts[$PART_CAPACITY];
             Udata *_rec;
-            uint32_t _selected;
-            titan_codec_parse(L, _data, _length, _variants, $COUNT);
-            _selected = titan_codec_single(_variants, $COUNT);
+            uint32_t _selected = titan_codec_select_union(
+                L, _data, _length, $COUNT, &_variant);
             if (_selected == 0) {
                 /* Zero, repeated, replaced, or non-message variants. */
                 titan_codec_reserve(L, 1);
@@ -554,7 +551,7 @@ local function emit_union(ctx, node, encode, decode)
         ENCODE = encode,
         DECODE = decode,
         UNIONTAG = coder._nominal_tag("_rec"),
-        CAPACITY = c_integer_literal(math.max(#owner.variants, 1)),
+        PART_CAPACITY = c_integer_literal(max_parts),
         COUNT = c_integer_literal(#owner.variants),
         NAME = c_string_literal(owner.name),
         ENCODE_CASES = table.concat(encode_cases, "\n"),

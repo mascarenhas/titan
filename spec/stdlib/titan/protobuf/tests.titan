@@ -1449,7 +1449,7 @@ end
 
 -- One length-delimited field.
 local function backpatch_field(number: integer, bytes: string): string
-  return string.char((number << 3) | 2) .. backpatch_varint(#bytes) .. bytes
+  return backpatch_varint((number << 3) | 2) .. backpatch_varint(#bytes) .. bytes
 end
 
 -- Encode one transfer packet and decode it in this state.
@@ -1671,6 +1671,88 @@ function test_generated_codecs_cover_public_hook_free_nominals(_context: test.Co
   local previous = protobuf.use_generated_codecs(false)
   defer protobuf.use_generated_codecs(previous)
   test.assert(protobuf.find_generated_codec(IntegerValue(1)) == nil, "disabled codecs")
+end
+
+-- Variant count does not enlarge a generated decoder's C-stack directory.
+union WideGeneratedChoice
+  v1(integer)
+  v2(integer)
+  v3(integer)
+  v4(integer)
+  v5(integer)
+  v6(integer)
+  v7(integer)
+  v8(integer)
+  v9(integer)
+  v10(integer)
+  v11(integer)
+  v12(integer)
+  v13(integer)
+  v14(integer)
+  v15(integer)
+  v16(integer)
+  v17(integer)
+  v18(integer)
+  v19(integer)
+  v20(integer)
+  v21(integer)
+  v22(integer)
+  v23(integer)
+  v24(integer)
+  v25(integer)
+  v26(integer)
+  v27(integer)
+  v28(integer)
+  v29(integer)
+  v30(integer)
+  v31(integer)
+  v32(integer)
+  v33(integer)
+  v34(integer)
+  v35(integer)
+  v36(integer)
+  v37(integer)
+  v38(integer)
+  v39(integer)
+  v40(integer)
+  v41(integer)
+  v42(integer)
+  v43(integer)
+  v44(integer)
+  v45(integer)
+  v46(integer)
+  v47(integer)
+  v48(integer)
+  v49(integer)
+  v50(integer)
+  v51(integer)
+  v52(integer)
+  v53(integer)
+  v54(integer)
+  v55(integer)
+  v56(integer)
+  v57(integer)
+  v58(integer)
+  v59(integer)
+  v60(integer)
+  v61(integer)
+  v62(integer)
+  v63(integer)
+  v64(integer)
+end
+
+function test_generated_codecs_bound_wide_union_frames(context: test.Context)
+  check_generated_codec(context, "first_variant", WideGeneratedChoice.v1(7))
+  check_generated_codec(context, "last_variant", WideGeneratedChoice.v64(73))
+  local first = protobuf.serialize(WideGeneratedChoice.v1(7))
+  local last = protobuf.serialize(WideGeneratedChoice.v64(73))
+  local target = descriptor(WideGeneratedChoice.v64(0))
+  check_decode_outcome(context, "replaced_variant", first .. last, target)
+  check_decode_outcome(context, "repeated_variant", last .. last, target)
+  check_decode_outcome(context, "unknown_variant", backpatch_field(65, "") .. last, target)
+  check_decode_outcome(context, "invalid_trailing_field", last .. string.char(0), target)
+  check_decode_outcome(context, "missing_variant", "", target)
+  check_decode_outcome(context, "nonmessage_variant", string.char(8, 0), target)
 end
 
 local function check_decode_outcome(context: test.Context, name: string,

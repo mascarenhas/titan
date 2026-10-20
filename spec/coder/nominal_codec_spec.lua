@@ -152,9 +152,9 @@ describe("generated nominal codecs", function()
             { "test.Literal" }, { "test.Expr" })
     end)
 
-    -- A generated decoder's C-stack directory is bounded: a wider record or
-    -- union stays reflective.
-    it("keeps nominals wider than the decoder directory budget reflective", function()
+    -- A frame holds at most 64 directory entries: record fields, or one
+    -- union selector plus the largest variant's parts.
+    it("bounds record fields and selected union parts by the decoder budget", function()
         local function fields(count, prefix)
             local lines = {}
             for index = 1, count do
@@ -176,6 +176,22 @@ describe("generated nominal codecs", function()
         assert.is_true(has_codec(c, "test.FitsUnion"))
         assert.is_false(has_codec(c, "test.Wider"))
         assert.is_false(has_codec(c, "test.WiderUnion"))
+    end)
+
+    it("keeps wide unions generated with one selector and a shared parts directory", function()
+        local variants = {}
+        for index = 1, 65 do
+            variants[index] = "v" .. index .. "(integer)"
+        end
+        local c = h.compile_and_read_c(
+            "union WideUnion\n" .. table.concat(variants, "\n") .. "\nend\n")
+        assert.is_true(has_codec(c, "test.WideUnion"))
+        assert.truthy(c:find("TitanCodecField _variant;", 1, true))
+        assert.truthy(c:find("TitanCodecField _parts[1];", 1, true))
+        assert.truthy(c:find("L, _data, _length, 65, &_variant);", 1, true))
+        assert.is_nil(c:find("TitanCodecField _variants[", 1, true))
+        local _, directories = c:gsub("TitanCodecField _parts%[", "")
+        assert.equal(1, directories)
     end)
 
     -- transfer.h calls codec_handoff's native entry directly after checking

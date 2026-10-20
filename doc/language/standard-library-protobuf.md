@@ -181,8 +181,9 @@ value, or wire condition.
 
 The compiler generates a native encoder and decoder for each public record or
 union whose fields are all public and of types this module can encode, which
-has no custom transfer hooks, and whose decoder directory fits its fixed bound
-(at most 64 fields; for a union, its variants plus all of their parts). Every
+has no custom transfer hooks, and whose decoder frame fits its fixed bound
+(at most 64 record fields, or 63 parts in any union variant plus one selector;
+the number of variants does not count against that bound). Every
 protobuf and transfer operation uses them for any such nominal it meets, at the
 root or nested in another value, and they produce exactly the bytes, values,
 errors, hook calls, and resource attachments described on this page. Fields
