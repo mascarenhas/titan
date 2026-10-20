@@ -356,8 +356,8 @@ resource table, four-byte little-endian slot index format
   `Receiver:to_transfer_payload()`, used by `TransferValue` policies such as
   closure captures and by opaque user hooks), each encoded occurrence reserves
   table capacity in the active encode `ResourceScope` before calling
-  `channel_retain_*_native`. The first two entries use the scope's inline native
-  scratch cell; the third spills to the C heap. Each occurrence increments
+  `channel_retain_*_native`. The first four entries use the scope's inline native
+  scratch cell; the fifth spills to the C heap. Each occurrence increments
   `active_senders` or `active_receivers` under `ch.mutex` and writes the four-byte
   little-endian packet-local slot index. Packet finalization commits the entries
   into the aligned tail of the single packet allocation. If encoding later

@@ -351,7 +351,7 @@ The scope, registration, attachment, claim, and disposal mechanics are:
   Each `ResourceScope`
   stores only `encoding` (direction), an inline `titan_transfer_scope_owner`
   native cell (`resources{entries,count}`, `capacity`, `message`, and
-  `inline_entries[2]`, totaling 64 bytes on LP64), a borrowed `message` pointer
+  `inline_entries[4]`, totaling 96 bytes on LP64), a borrowed `message` pointer
   for decode claim lookup, and `free_next` for the state-local idle free stack.
   The current `execution` key and enclosing `previous` frame remain in the
   lexical locals of `encode_message` and `decode_message_worker`, so a scope
@@ -373,7 +373,7 @@ The scope, registration, attachment, claim, and disposal mechanics are:
   2. call C-only `dispose_scope(scope.native)`, which detaches `message`,
      `entries`, `count`, and `capacity`, releases any uncommitted scratch units
      via `dispose_resource_entries`, frees `entries` only when
-     `capacity > TITAN_TRANSFER_INLINE_RESOURCES` (`2`), disposes any owned
+     `capacity > TITAN_TRANSFER_INLINE_RESOURCES` (`4`), disposes any owned
      decode `message` via `discard_message`, and zeroes the complete
      `titan_transfer_scope_owner` cell with `memset`;
   3. clear `scope.message = nil` and `scope.encoding = false`;
@@ -440,11 +440,12 @@ The scope, registration, attachment, claim, and disposal mechanics are:
   checking the top encode scope and non-nil `resource`, `retain`, and `release`
   pointers, `reserve_resource(scope.native)` reserves a scratch slot **before**
   `attach_reserved` calls `retain(resource)`. The first
-  `TITAN_TRANSFER_INLINE_RESOURCES` (`2`) attachments use
-  `scope.native.inline_entries` directly (`capacity = 2`) with no heap
-  allocation. A third attachment spills to a 4-entry heap array via `malloc` and
-  copies the two inline entries (the inline address is never passed to
-  `realloc`); subsequent growth doubles `capacity` via `realloc`, saturating at
+  `TITAN_TRANSFER_INLINE_RESOURCES` (`4`) attachments use
+  `scope.native.inline_entries` directly (`capacity = 4`) with no heap
+  allocation, which covers packets carrying up to four endpoint occurrences. A
+  fifth attachment spills to an 8-entry heap array via one `malloc` and copies
+  the four inline entries (the inline address is never passed to
+  `realloc`); a ninth and later growth double `capacity` via `realloc`, saturating at
   `TITAN_TRANSFER_INVALID_INDEX = 0xffffffff` (valid slot indexes
   `0..0xfffffffe`) and checking `SIZE_MAX / sizeof(titan_transfer_resource)`. A
   failed spill or growth leaves all prior units and the existing scratch buffer

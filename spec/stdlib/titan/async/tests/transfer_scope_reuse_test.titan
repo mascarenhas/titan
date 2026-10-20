@@ -8,7 +8,26 @@ local scope_reuse_gc = import "gc"
 local scope_reuse_string = import "string"
 foreign import "stdlib.h"
 foreign import "lauxlib.h"
+foreign import "../../../../../titan/transfer_native.h"
 foreign type ScopeReuseMessageSlot = *void
+
+-- Attachment counts below are relative to the scope's inline scratch so the
+-- inline, full-inline, first-spill and grown-spill paths stay exercised.
+local function scope_reuse_inline(): integer
+  return ffi.TITAN_TRANSFER_INLINE_RESOURCES as integer
+end
+
+local function scope_reuse_channels(count: integer): (
+    {scope_reuse_thread.Sender<|integer|>}, {scope_reuse_thread.Receiver<|integer|>})
+  local txs: {scope_reuse_thread.Sender<|integer|>} = {}
+  local rxs: {scope_reuse_thread.Receiver<|integer|>} = {}
+  for i = 1, count do
+    local tx, rx = scope_reuse_thread.channel<|integer|>(1)
+    txs[i] = tx
+    rxs[i] = rx
+  end
+  return txs, rxs
+end
 
 local scope_reuse_saved_senders: {scope_reuse_thread.Sender<|integer|>} = {}
 local scope_reuse_saved_receivers: {scope_reuse_thread.Receiver<|integer|>} = {}
@@ -221,9 +240,11 @@ function test_scope_reuse_task_per_message_and_direction_reset(context: test.Con
         for worker_id = 1, 12 do
           local id = worker_id
           local t = async.run<|integer, value|>(function (): integer
-            local count = (id % 4) + 1
-            if count == 4 then count = 5 end
-            -- 1. Failing encode after attaching `count` endpoints (inline 1..2 or spilled 3, 5).
+            local inline_count = scope_reuse_inline()
+            local counts: {integer} = {1, inline_count, inline_count + 1, 2 * inline_count + 1}
+            local count = counts[(id % 4) + 1]
+            -- 1. Failing encode after attaching `count` endpoints (inline, full
+            -- inline, first spill, or grown spill).
             local fail_enc_rxs = (function (): {scope_reuse_thread.Receiver<|integer|>}
               local txs: {scope_reuse_thread.Sender<|integer|>} = {}
               local rxs: {scope_reuse_thread.Receiver<|integer|>} = {}
@@ -298,24 +319,20 @@ function test_scope_reuse_task_per_message_and_direction_reset(context: test.Con
     function (_context: test.Context)
       scope_reuse_reset_state()
       defer scope_reuse_reset_state()
-      -- Step 1: encode 3 endpoints (spilling scratch capacity to 4), then fail
-      -- decode after claiming slot 1 so slot 1 survives and slots 2..3 are disposed.
-      local raw1, rx1, rx2, rx3 = (function (): (
-          foreign *void,
-          scope_reuse_thread.Receiver<|integer|>,
-          scope_reuse_thread.Receiver<|integer|>,
-          scope_reuse_thread.Receiver<|integer|>)
-        local tx1, r1 = scope_reuse_thread.channel<|integer|>(1)
-        local tx2, r2 = scope_reuse_thread.channel<|integer|>(1)
-        local tx3, r3 = scope_reuse_thread.channel<|integer|>(1)
+      -- Step 1: encode one endpoint past the inline scratch (spilling it), then
+      -- fail decode after claiming slot 1 so only slot 1 survives and every
+      -- later slot is disposed.
+      local raw1, rxs1 = (function (): (
+          foreign *void, {scope_reuse_thread.Receiver<|integer|>})
+        local txs, rxs = scope_reuse_channels(scope_reuse_inline() + 1)
         local raw = scope_reuse_transfer.encode_message(
-          ScopeReuseDirectionProbe({tx1, tx2, tx3}, false, 1, 77))
-        return raw, r1, r2, r3
+          ScopeReuseDirectionProbe(txs, false, 1, 77))
+        return raw, rxs
       end)()
       defer scope_reuse_transfer.discard_message(raw1)
-      defer rx1:close()
-      defer rx2:close()
-      defer rx3:close()
+      defer do
+        for i = 1, #rxs1 do rxs1[i]:close() end
+      end
       support.collect_garbage()
       support.collect_garbage()
 
@@ -332,24 +349,23 @@ function test_scope_reuse_task_per_message_and_direction_reset(context: test.Con
       scope_reuse_expect_error(function ()
         scope_reuse_thread.Sender<|integer|>.from_transfer_payload("\0\0\0\0")
       end, "transfer: resource claim requires a decode scope")
-      test.assert(not rx1:is_closed() and rx2:is_closed() and rx3:is_closed(),
-                  "partial decode unwind did not release only unclaimed trailing entries")
-      scope_reuse_check_stashed_sender(rx1, 771)
+      test.assert(not rxs1[1]:is_closed(),
+                  "partial decode unwind released the claimed slot")
+      for i = 2, #rxs1 do
+        test.assert(rxs1[i]:is_closed(),
+                    "partial decode unwind did not release unclaimed trailing entry " .. i)
+      end
+      scope_reuse_check_stashed_sender(rxs1[1], 771)
       scope_reuse_saved_senders = {}
       support.collect_garbage()
       support.collect_garbage()
-      test.assert(rx1:is_closed(), "collecting the stashed Sender did not release slot 0")
+      test.assert(rxs1[1]:is_closed(), "collecting the stashed Sender did not release slot 0")
 
-      -- Step 2: immediately reuse the retired decode frame for a failing 4-endpoint
-      -- encode, then reuse that retired encode frame for a 1-endpoint decode.
+      -- Step 2: immediately reuse the retired decode frame for a failing encode
+      -- that fills its first spill exactly, then reuse that retired encode frame
+      -- for a 1-endpoint decode.
       local fail_rxs = (function (): {scope_reuse_thread.Receiver<|integer|>}
-        local txs: {scope_reuse_thread.Sender<|integer|>} = {}
-        local rxs: {scope_reuse_thread.Receiver<|integer|>} = {}
-        for i = 1, 4 do
-          local tx, rx = scope_reuse_thread.channel<|integer|>(1)
-          txs[i] = tx
-          rxs[i] = rx
-        end
+        local txs, rxs = scope_reuse_channels(2 * scope_reuse_inline())
         scope_reuse_expect_error(function ()
           local raw = scope_reuse_transfer.encode_message(
             ScopeReuseDirectionProbe(txs, true, 0, 88))
@@ -369,7 +385,7 @@ function test_scope_reuse_task_per_message_and_direction_reset(context: test.Con
       support.collect_garbage()
       support.collect_garbage()
       for i = 1, #fail_rxs do
-        test.assert(fail_rxs[i]:is_closed(), "failed 4-endpoint encode leaked slot " .. i)
+        test.assert(fail_rxs[i]:is_closed(), "failed spilled encode leaked slot " .. i)
       end
 
       local tx_final, rx_final = scope_reuse_thread.channel<|integer|>(1)
@@ -402,7 +418,8 @@ local function scope_reuse_claim_counter(idx: string)
 end
 
 function ScopeReuseDeepNestNode:to_transfer_payload(): string
-  local pre_count = (self.depth % 3) + 1
+  -- With the post attachment, depths cycle through inline and spilled scratch.
+  local pre_count = (self.depth % (scope_reuse_inline() + 1)) + 1
   local prefix = ""
   for i = 1, pre_count do
     local idx = scope_reuse_attach_counter()
@@ -418,9 +435,11 @@ function ScopeReuseDeepNestNode:to_transfer_payload(): string
       local before_fail = scope_reuse_custom_counter[0]
       local ftx, frx = scope_reuse_thread.channel<|integer|>(1)
       scope_reuse_nested_peers[#scope_reuse_nested_peers + 1] = frx
+      local spilled: {scope_reuse_thread.Sender<|integer|>} = {}
+      for i = 1, scope_reuse_inline() + 1 do spilled[i] = ftx end
       scope_reuse_expect_error(function ()
         local raw = scope_reuse_transfer.encode_message(
-          ScopeReuseDirectionProbe({ftx, ftx, ftx}, true, 0, 10))
+          ScopeReuseDirectionProbe(spilled, true, 0, 10))
         scope_reuse_transfer.discard_message(raw)
       end, "scope-reuse-encode-fail:10")
       test.assert(scope_reuse_custom_counter[0] == before_fail,
@@ -456,9 +475,11 @@ function ScopeReuseDeepNestNode.from_transfer_payload(
     local verify_tx, verify_rx = scope_reuse_thread.channel<|integer|>(1)
     defer verify_tx:close()
     defer verify_rx:close()
+    local spilled: {scope_reuse_thread.Sender<|integer|>} = {}
+    for i = 1, scope_reuse_inline() + 1 do spilled[i] = verify_tx end
     local probe: ScopeReuseDirectionProbe = scope_reuse_roundtrip(
-      ScopeReuseDirectionProbe({verify_tx, verify_tx, verify_tx}, false, 0, depth))
-    test.assert(#probe.senders == 3)
+      ScopeReuseDirectionProbe(spilled, false, 0, depth))
+    test.assert(#probe.senders == #spilled)
   end
 
   -- Outer decode scope must still own its final attachment slot after nested work.
@@ -526,8 +547,8 @@ end
 
 function ScopeReuseAbandonedSpillFault.from_transfer_payload(
     payload: string): ScopeReuseAbandonedSpillFault
-  -- Claim slot 0 into a rooted wrapper, leaving slots 1 and 2 unclaimed in the
-  -- packet when the coroutine yields and is abandoned.
+  -- Claim slot 0 into a rooted wrapper, leaving every later slot unclaimed in
+  -- the packet when the coroutine yields and is abandoned.
   local first = scope_reuse_thread.Sender<|integer|>.from_transfer_payload(
     scope_reuse_string.sub(payload, 1, 4))
   scope_reuse_saved_senders[#scope_reuse_saved_senders + 1] = first
@@ -541,60 +562,49 @@ function test_scope_reuse_abandoned_reused_frame_and_state_close(context: test.C
       scope_reuse_reset_state()
       defer scope_reuse_reset_state()
 
-      -- 1. Warm the idle scope pool with a 3-attachment spilled round trip so the
-      -- frame popped by the next coroutine is a reused frame, not a fresh allocation.
+      local spill_count = scope_reuse_inline() + 1
+      -- 1. Warm the idle scope pool with a spilled round trip so the frame
+      -- popped by the next coroutine is a reused frame, not a fresh allocation.
       do
-        local wtx1, wrx1 = scope_reuse_thread.channel<|integer|>(1)
-        local wtx2, wrx2 = scope_reuse_thread.channel<|integer|>(1)
-        local wtx3, wrx3 = scope_reuse_thread.channel<|integer|>(1)
-        defer wrx1:close()
-        defer wrx2:close()
-        defer wrx3:close()
+        local wtxs, wrxs = scope_reuse_channels(spill_count)
+        defer do
+          for i = 1, #wrxs do wrxs[i]:close() end
+        end
         local warm: ScopeReuseDirectionProbe = scope_reuse_roundtrip(
-          ScopeReuseDirectionProbe({wtx1, wtx2, wtx3}, false, 0, 1))
-        test.assert(#warm.senders == 3)
-        wtx1:close()
-        wtx2:close()
-        wtx3:close()
+          ScopeReuseDirectionProbe(wtxs, false, 0, 1))
+        test.assert(#warm.senders == spill_count)
+        for i = 1, #wtxs do wtxs[i]:close() end
       end
 
-      -- 2. Pop the reused scope in a child coroutine, attach 3 Senders (spilling
-      -- from inline 2 to heap capacity 4), and abandon the suspended coroutine.
-      local enc_rx1, enc_rx2, enc_rx3 = (function (): (
-          scope_reuse_thread.Receiver<|integer|>,
-          scope_reuse_thread.Receiver<|integer|>,
-          scope_reuse_thread.Receiver<|integer|>)
-        local tx1, rx1 = scope_reuse_thread.channel<|integer|>(1)
-        local tx2, rx2 = scope_reuse_thread.channel<|integer|>(1)
-        local tx3, rx3 = scope_reuse_thread.channel<|integer|>(1)
+      -- 2. Pop the reused scope in a child coroutine, attach one Sender past the
+      -- inline scratch (spilling it to the heap), and abandon the coroutine.
+      local enc_rxs = (function (): {scope_reuse_thread.Receiver<|integer|>}
+        local txs, rxs = scope_reuse_channels(spill_count)
         local co = scope_reuse_coroutine.create(function (_: value): value
           local raw = scope_reuse_transfer.encode_message(
-            ScopeReuseAbandonedSpillFault({tx1, tx2, tx3}, "abandon-encode"))
+            ScopeReuseAbandonedSpillFault(txs, "abandon-encode"))
           scope_reuse_transfer.discard_message(raw)
           return nil
         end, "scope-reuse-abandon-tag")
         test.assert(co:resume(nil) == "paused-encode" and co:status() == "suspended")
-        return rx1, rx2, rx3
+        return rxs
       end)()
-      defer enc_rx1:close()
-      defer enc_rx2:close()
-      defer enc_rx3:close()
+      defer do
+        for i = 1, #enc_rxs do enc_rxs[i]:close() end
+      end
       scope_reuse_gc.collect()
       scope_reuse_gc.collect()
-      test.assert(enc_rx1:is_closed() and enc_rx2:is_closed() and enc_rx3:is_closed(),
-                  "abandoned reused encode frame did not release its 3 spilled attachments")
+      for i = 1, #enc_rxs do
+        test.assert(enc_rxs[i]:is_closed(),
+                    "abandoned reused encode frame did not release spilled attachment " .. i)
+      end
 
       -- 3. Warm the pool again, then pop the reused frame in a decode coroutine
-      -- that claims slot 0 and yields before claiming slots 1 and 2.
-      local dec_rx1, dec_rx2, dec_rx3 = (function (): (
-          scope_reuse_thread.Receiver<|integer|>,
-          scope_reuse_thread.Receiver<|integer|>,
-          scope_reuse_thread.Receiver<|integer|>)
-        local tx1, rx1 = scope_reuse_thread.channel<|integer|>(1)
-        local tx2, rx2 = scope_reuse_thread.channel<|integer|>(1)
-        local tx3, rx3 = scope_reuse_thread.channel<|integer|>(1)
+      -- that claims slot 0 and yields before claiming any later slot.
+      local dec_rxs = (function (): {scope_reuse_thread.Receiver<|integer|>}
+        local txs, rxs = scope_reuse_channels(spill_count)
         local raw = scope_reuse_transfer.encode_message(
-          ScopeReuseAbandonedSpillFault({tx1, tx2, tx3}, "encode-ok"))
+          ScopeReuseAbandonedSpillFault(txs, "encode-ok"))
         local co = scope_reuse_coroutine.create(function (_: value): value
           local local_raw = raw
           defer scope_reuse_transfer.discard_message(local_raw)
@@ -607,22 +617,26 @@ function test_scope_reuse_abandoned_reused_frame_and_state_close(context: test.C
           return result
         end, "scope-reuse-abandon-tag")
         test.assert(co:resume(nil) == "paused-decode" and co:status() == "suspended")
-        return rx1, rx2, rx3
+        return rxs
       end)()
-      defer dec_rx1:close()
-      defer dec_rx2:close()
-      defer dec_rx3:close()
+      defer do
+        for i = 1, #dec_rxs do dec_rxs[i]:close() end
+      end
       scope_reuse_gc.collect()
       scope_reuse_gc.collect()
-      -- Unclaimed slots 1 and 2 must be released by the abandoned decode scope's
+      -- Unclaimed later slots must be released by the abandoned decode scope's
       -- finalizer, while claimed slot 0 stays alive in scope_reuse_saved_senders[1].
-      test.assert(not dec_rx1:is_closed() and dec_rx2:is_closed() and dec_rx3:is_closed(),
-                  "abandoned reused decode frame did not release only unclaimed slots")
-      scope_reuse_check_stashed_sender(dec_rx1, 818)
+      test.assert(not dec_rxs[1]:is_closed(),
+                  "abandoned reused decode frame released its claimed slot")
+      for i = 2, #dec_rxs do
+        test.assert(dec_rxs[i]:is_closed(),
+                    "abandoned reused decode frame did not release unclaimed slot " .. i)
+      end
+      scope_reuse_check_stashed_sender(dec_rxs[1], 818)
       scope_reuse_saved_senders = {}
       scope_reuse_gc.collect()
       scope_reuse_gc.collect()
-      test.assert(dec_rx1:is_closed(),
+      test.assert(dec_rxs[1]:is_closed(),
                   "collecting the stashed Sender after decode abandonment did not release slot 0")
     end)
 
@@ -984,9 +998,11 @@ local function scope_reuse_add_producer_cases(
     context: test.Context, name: string,
     exercise: function (integer, integer, string): ())
   context:run(name, function (producer: test.Context)
-    -- Zero, inline, spill, and growth counts; padding includes odd byte lengths
-    -- and opposite sides of an aligned boundary without repeating every residue.
-    local counts = {0, 1, 2, 3, 5}
+    -- Zero, inline, full-inline, first-spill, and growth counts; padding
+    -- includes odd byte lengths and opposite sides of an aligned boundary
+    -- without repeating every residue.
+    local inline_count = scope_reuse_inline()
+    local counts = {0, 1, inline_count, inline_count + 1, 2 * inline_count + 1}
     local pads = {0, 1, 7}
     for c_idx = 1, #counts do
       for p_idx = 1, #pads do

@@ -22,14 +22,19 @@ local function attach(index: integer): string
     ffi.titan_transfer_fault_retain, ffi.titan_transfer_fault_release)
 end
 
+-- Spill modes cross the provider's inline scratch capacity: the first spill
+-- happens one past it and the first growth one past twice it.
+local function inline_resources(): integer
+  return ffi.titan_transfer_fault_inline_resources() as integer
+end
+
 function TransferNativeFaultProbe:to_transfer_payload(): string
   if self.mode == 1 then
-    attach(0)
-    attach(0)
+    for _ = 1, inline_resources() do attach(0) end
     ffi.titan_transfer_fault_arm(1)
     return attach(0)
   elseif self.mode == 2 then
-    for _ = 1, 4 do attach(0) end
+    for _ = 1, 2 * inline_resources() do attach(0) end
     ffi.titan_transfer_fault_arm(2)
     return attach(0)
   end
@@ -219,9 +224,9 @@ function main(args: {string}): integer
   defer gc.resume()
   local scenario = args[1]
   if scenario == "reserve-initial" then
-    expect_native_failure(1, TransferNativeFaultProbe(1), 2)
+    expect_native_failure(1, TransferNativeFaultProbe(1), inline_resources())
   elseif scenario == "reserve-growth" then
-    expect_native_failure(2, TransferNativeFaultProbe(2), 4)
+    expect_native_failure(2, TransferNativeFaultProbe(2), 2 * inline_resources())
   elseif scenario == "payload-copy" then
     expect_native_failure(3, TransferNativeFaultProbe(3), 2)
   elseif scenario == "buffer-initial" then

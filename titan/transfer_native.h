@@ -14,7 +14,7 @@
  * Entries contain native data only. Their callbacks must not enter Lua. */
 #define TITAN_TRANSFER_PACKET_VERSION 1
 #define TITAN_TRANSFER_INVALID_INDEX UINT32_MAX
-#define TITAN_TRANSFER_INLINE_RESOURCES 2
+#define TITAN_TRANSFER_INLINE_RESOURCES 4
 
 typedef void (*titan_transfer_resource_fn)(void *);
 
