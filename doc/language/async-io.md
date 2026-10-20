@@ -760,7 +760,11 @@ Their registrations receive three capabilities for the exact operation:
 outcome once. The third reports an unexpected exception after that operation's
 native terminal callback has been consumed; its stricter protocol is described
 below. A typed rejection is an ordinary result, not a raised exception.
-`success(nil)` and `success(false)` remain successful outcomes.
+`success(nil)` and `success(false)` remain successful outcomes. Result unions
+are immutable and carry no identity contract: a successful wait without a
+payload may return a shared `success(nil)` value, so inspect results with
+`case` and do not compare them for identity, use them as Map keys, or attach
+finalizers to them.
 
 All await forms require a running Task. Registration runs after that Task has
 yielded and outside a Task context: `async.running()` raises there. Capture the

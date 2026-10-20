@@ -172,10 +172,17 @@ epoch zero, which no public method accepts, and registration publishes the
 newly checked number. A callback captures this number at registration; looking
 up the current wait later would confuse an old callback with a successor.
 Retirement materializes the public tagged Result, then clears context,
-registrar, request and payload before resuming the coroutine. Terminal Task
-cleanup clears its cached cell even if result allocation failed after removing
-`task.wait`. A retained completed Task or stale Completion does not retain old
-operation context. The numeric counter never wraps at `LUA_MAXINTEGER`.
+registrar, request and payload before resuming the coroutine. A success whose
+settled payload is nil materializes nothing: `wait_result` returns
+`SUCCESS_NIL` or, for the cancellable policy, `CANCELLABLE_SUCCESS_NIL`. The
+async root initializer assigns these local const module variables once per
+Lua-state module instance. Unions are immutable and the Runtime never compares
+Result identity, so every explicit `suspend` wake, external wait, timer, and
+other payload-less success shares them; all other outcomes still construct a
+fresh union. Terminal Task cleanup clears its cached cell even if result
+allocation failed after removing `task.wait`. A retained completed Task or
+stale Completion does not retain old operation context. The numeric counter
+never wraps at `LUA_MAXINTEGER`.
 
 `context(number)` is available only for the matching, unretired operation.
 Callbacks and partial-acceptance rollback must independently root any context

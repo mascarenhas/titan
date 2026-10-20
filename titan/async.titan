@@ -185,6 +185,11 @@ union CancellableResult<|T, E|>
   cancelled(CancellationReason<|value|>)
 end
 
+-- Shared immutable outcomes for successful waits without a payload, assigned
+-- once by the root initializer. Result values carry no identity contract.
+local const SUCCESS_NIL: Result<|value, value|>?
+local const CANCELLABLE_SUCCESS_NIL: CancellableResult<|value, value|>?
+
 --- Opaque readable string-channel endpoint created by reader_writer_channel.
 -- @usage async-io.md
 record ChannelReader
@@ -899,11 +904,15 @@ local function wait_result(wait: Wait): (boolean, value)
   end
   if wait.policy == WAIT_CANCELLABLE then
     if wait.kind == OUTCOME_SUCCESS then
+      if wait.payload == nil then return false, CANCELLABLE_SUCCESS_NIL end
       return false, CancellableResult<|value, value|>.success(wait.payload)
     end
     return false, CancellableResult<|value, value|>.error(wait.payload)
   end
-  if wait.kind == OUTCOME_SUCCESS then return false, Result<|value, value|>.success(wait.payload) end
+  if wait.kind == OUTCOME_SUCCESS then
+    if wait.payload == nil then return false, SUCCESS_NIL end
+    return false, Result<|value, value|>.success(wait.payload)
+  end
   return false, Result<|value, value|>.error(wait.payload)
 end
 
@@ -4862,6 +4871,8 @@ function Receiver:close()
 end
 
 do
+  SUCCESS_NIL = Result<|value, value|>.success(nil)
+  CANCELLABLE_SUCCESS_NIL = CancellableResult<|value, value|>.success(nil)
   local native_error = ffi.titan_async_ignore_sigpipe_if_default()
   if native_error ~= 0 then
     check_status(uv.translate_sys_error(native_error), "runtime.sigpipe")
