@@ -98,7 +98,12 @@ scope is active for the same execution. The public `deserialize_nominal_buffer`,
 `titan.protobuf` never imports `titan.transfer` or `titan.thread`. Instead,
 `transfer` installs its `packet_context` resolver once via
 `set_packet_context_provider` and mediates capability registration via
-`transfer.register_resource` -> `protobuf.register_resource_codec`.
+`transfer.register_resource` -> `protobuf.register_resource_codec`. That
+resolver answers `nil` without resolving the current execution while no packet
+frame is installed anywhere in the Lua state (`active_scope_count` in the
+[transfer scope mechanics](transfer-library.md#scoped-resource-table-and-manual-resource-ownership)),
+so a standalone `serialize`/`deserialize` costs one
+provider call and one integer test rather than an execution lookup.
 `record_identity` inspects a candidate userdata's metatable directly
 (`TITAN_BRAND == TITAN_RECORD`) without Lua stack or heap allocation; all
 erased applications of a generic record (`Sender<|integer|>`,

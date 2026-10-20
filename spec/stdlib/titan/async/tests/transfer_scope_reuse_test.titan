@@ -1204,3 +1204,118 @@ function test_scope_reuse_trailing_attachments_across_producers_and_alignment(
                   "dropping stashed wrappers did not release claimed slots 0, 1, and 3")
     end)
 end
+
+-- Root hook records whose only purpose is a nested packet frame that retires
+-- through its error path, once in each direction.
+record ScopeReuseNestedFailure
+  local fail_encode: boolean
+end
+
+function ScopeReuseNestedFailure:to_transfer_payload(): string
+  if self.fail_encode then raise "scope-reuse-nested-encode-fail" end
+  return "nested"
+end
+
+function ScopeReuseNestedFailure.from_transfer_payload(
+    _payload: string): ScopeReuseNestedFailure
+  raise "scope-reuse-nested-decode-fail"
+end
+
+-- More rounds than the frames earlier cases abandon in this state: a frame
+-- count that dropped once per nested failure would reach zero inside a live
+-- packet and turn the carried-context conversion below into a missing scope.
+local scope_reuse_count_rounds = 128
+
+local function scope_reuse_nested_failures()
+  scope_reuse_expect_error(function ()
+    local raw = scope_reuse_transfer.encode_message(ScopeReuseNestedFailure(true))
+    scope_reuse_transfer.discard_message(raw)
+  end, "scope-reuse-nested-encode-fail")
+  scope_reuse_expect_error(function ()
+    scope_reuse_roundtrip(ScopeReuseNestedFailure(false))
+  end, "scope-reuse-nested-decode-fail")
+end
+
+-- Each hook converts its endpoint through TransferValue, which resolves only
+-- the exact top frame of this execution, after every round of nested failures.
+record ScopeReuseCountProbe
+  local sender: scope_reuse_thread.Sender<|integer|>
+end
+
+function ScopeReuseCountProbe:to_transfer_payload(): string
+  local index = ""
+  for round = 1, scope_reuse_count_rounds do
+    scope_reuse_nested_failures()
+    case scope_reuse_transfer.TransferValue.from_value(self.sender)
+    when is_record_payload(_module, _name, data) then
+      test.assert(data == scope_reuse_u32_le(round - 1),
+                  "nested failures disturbed the enclosing encode frame at round " .. round)
+      index = data
+    else
+      raise "registered Sender did not convert to a slot-index policy"
+    end
+  end
+  return index
+end
+
+function ScopeReuseCountProbe.from_transfer_payload(
+    payload: string): ScopeReuseCountProbe
+  for _ = 1, scope_reuse_count_rounds do
+    scope_reuse_nested_failures()
+    -- A lost frame would report a missing decode scope instead of the bound.
+    scope_reuse_expect_error(function ()
+      scope_reuse_thread.Sender<|integer|>.from_transfer_payload(
+        scope_reuse_u32_le(scope_reuse_count_rounds))
+    end, "transfer: resource attachment index is out of bounds")
+  end
+  local sender: scope_reuse_thread.Sender<|integer|> =
+    scope_reuse_transfer.TransferValue.is_record_payload(
+      "titan.thread", "titan.thread.Sender", payload):to_value()
+  return { sender = sender }
+end
+
+function test_scope_reuse_frame_count_neither_grants_nor_drops_authority(
+    context: test.Context)
+  context:run("abandoned-frames-grant-no-authority-to-another-execution",
+    function (_context: test.Context)
+      scope_reuse_reset_state()
+      defer scope_reuse_reset_state()
+      -- Suspended holder frames keep the state's frame count positive while
+      -- this execution has none; every standalone resolution still rejects.
+      local hold_rx = scope_reuse_stash_holder_coroutines()
+      defer hold_rx:close()
+      local tx, rx = scope_reuse_thread.channel<|integer|>(1)
+      defer tx:close()
+      defer rx:close()
+      scope_reuse_expect_error(function ()
+        scope_reuse_transfer.TransferValue.from_value(tx)
+      end, "transfer: resource attachment requires an encode scope")
+      scope_reuse_expect_error(function ()
+        scope_reuse_transfer.TransferValue.is_record_payload(
+          "titan.thread", "titan.thread.Sender", "\0\0\0\0"):to_value()
+      end, "transfer: resource claim requires a decode scope")
+      scope_reuse_expect_error(function ()
+        tx:to_transfer_payload()
+      end, "transfer: resource attachment requires an encode scope")
+      scope_reuse_expect_error(function ()
+        scope_reuse_thread.Sender<|integer|>.from_transfer_payload("\0\0\0\0")
+      end, "transfer: resource claim requires a decode scope")
+
+      scope_reuse_holder_coros = {}
+      support.collect_garbage()
+      support.collect_garbage()
+      test.assert(hold_rx:is_closed(),
+                  "abandoned holder frames did not release their attachments")
+    end)
+
+  context:run("nested-failures-keep-the-enclosing-frame-authority",
+    function (_context: test.Context)
+      local tx, rx = scope_reuse_thread.channel<|integer|>(1)
+      defer rx:close()
+      local restored: ScopeReuseCountProbe = scope_reuse_roundtrip(ScopeReuseCountProbe(tx))
+      test.assert(restored.sender:try_send(128),
+                  "Sender adopted through the carried decode context could not send")
+      local got, item? = rx:try_receive()
+      test.assert(got and item == 128, "adopted Sender delivered the wrong item")
+    end)
+end

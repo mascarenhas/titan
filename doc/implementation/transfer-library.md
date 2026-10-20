@@ -362,10 +362,14 @@ The scope, registration, attachment, claim, and disposal mechanics are:
   independent of coroutine/Task identity so Task-per-message callers share the
   pool); on an empty stack it allocates an inert
   `ResourceScope` and registers `gc.finalizable(fresh, finalize_resource_scope)`
-  before granting execution authority or native ownership. Lexical deferred
+  before granting execution authority or native ownership. Both entry points
+  increment the state-local `active_scope_count` immediately before registering
+  their lexical retirement `defer`, so no normal or error exit can uncount a
+  frame it never counted. Lexical deferred
   retirement stays inline (introducing no fallible ordinary helper entry after
   packet commitment) and runs in exact order:
-  1. restore `resource_scopes[execution] = previous`;
+  1. restore `resource_scopes[execution] = previous` and decrement
+     `active_scope_count`;
   2. call C-only `dispose_scope(scope.native)`, which detaches `message`,
      `entries`, `count`, and `capacity`, releases any uncommitted scratch units
      via `dispose_resource_entries`, frees `entries` only when
@@ -401,6 +405,17 @@ The scope, registration, attachment, claim, and disposal mechanics are:
   isolation/abandonment mechanism does not make yielding transfer hooks
   supported. Standalone protobuf/policy conversion opens no scope and cannot
   manufacture ownerless endpoint references.
+
+  Every resolution of the current top frame goes through
+  `current_resource_scope()`. When `active_scope_count` is zero, no frame is
+  installed for any execution in the state, so it returns nil before calling
+  `current_execution()` (`lua_checkstack`, `lua_pushthread`, and the `defer`
+  frame) or probing the ephemeron Map; this keeps standalone
+  `protobuf.serialize`/`deserialize` and policy conversion free of execution
+  lookup. A frame abandoned on a never-resumed stack is never uncounted, so the
+  count can only over-estimate: the full exact-top lookup then runs and returns
+  only the current execution's own frame, if any. A positive count therefore
+  never grants authority; it only disables the shortcut.
 - **Transfer-mediated nominal capability registration (`register_resource` and
   `claim_registered_resource`)**: During module initialization, `titan.transfer`
   installs `packet_context` into `protobuf.set_packet_context_provider`, and
@@ -418,8 +433,8 @@ The scope, registration, attachment, claim, and disposal mechanics are:
   standard missing-scope error. `TransferValue.from_value` and
   `TransferValue:to_value` pass `packet_context(true)` and
   `packet_context(false)` to the registered `ResourceCodec` callbacks, while
-  public `attach_resource` and `claim_resource` continue to resolve
-  `resource_scopes[current_execution()]` on every call for opaque user hooks.
+  public `attach_resource` and `claim_resource` continue to resolve the exact
+  top through `current_resource_scope()` on every call for opaque user hooks.
 - **Inline scratch cell, heap spill, and pre-detach trailing reservation
   (`reserve_resource`, `packet_storage_size`, `commit_resources`)**: After
   checking the top encode scope and non-nil `resource`, `retain`, and `release`

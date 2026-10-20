@@ -150,7 +150,9 @@ inside a `to_transfer_payload` or `from_transfer_payload` hook whose packet
 scope is active. The public `serialize_fields_to_buffer`,
 `deserialize_fields_buffer`, and `deserialize_nominal_buffer` wrappers resolve
 the exact top scope of the current execution in the matching direction once
-(`nil` when there is none, as in a standalone call) and delegate. The two
+(`nil` when there is none, as in a standalone call; while no packet operation
+is active anywhere in the Lua state that answer needs no execution lookup) and
+delegate. The two
 `serialize_inspected_*_to_buffer` entries differ deliberately: given `nil`, they
 substitute that same current-execution encode scope, so `serialize_to_buffer`,
 which passes no context, can attach endpoints only inside an active packet

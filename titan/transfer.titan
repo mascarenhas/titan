@@ -210,6 +210,12 @@ local record ResourceScope
 end
 
 local resource_scopes: {value: ResourceScope} = {}
+-- Installed frames across every execution in this state. Each entry point
+-- counts its frame before registering the retiring defer and only that defer
+-- uncounts it, so no exit can under-count; a stack abandoned before its defer
+-- runs can only over-count. Zero therefore proves resource_scopes is empty.
+local active_scope_count = 0
+
 -- One state-local stack, independent of Task/coroutine execution identity.
 -- Eight idle frames cover ordinary shallow reentrancy without retaining a
 -- nesting high-water mark. Overflow frames retire normally and remain GC-owned.
@@ -227,6 +233,14 @@ local function current_execution(): value
   end
   ffi.lua_pushthread(L)
   return ffi.lua_totvalue(L, -1) as value
+end
+
+-- The current execution's exact top frame, or nil. With no installed frame
+-- anywhere in the state the lookup cannot succeed, so standalone protobuf and
+-- policy work resolves no execution identity. A positive count grants nothing.
+local function current_resource_scope(): ResourceScope?
+  if active_scope_count == 0 then return nil end
+  return resource_scopes[current_execution()]
 end
 
 local function finalize_resource_scope(scope: ResourceScope)
@@ -275,7 +289,7 @@ end
 function attach_resource(resource: foreign *void,
     retain: foreign function(*void): void,
     release: foreign function(*void): void): string
-  local scope? = resource_scopes[current_execution()]
+  local scope? = current_resource_scope()
   if scope == nil then raise "transfer: resource attachment requires an encode scope" end
   local index = scope:attach(resource, retain, release) as foreign unsigned int
   local bytes = foreign unsigned char.new_array(4)
@@ -316,7 +330,7 @@ end
 
 function claim_resource(index_bytes: string,
     expected_release: foreign function(*void): void): foreign *void
-  local scope? = resource_scopes[current_execution()]
+  local scope? = current_resource_scope()
   if scope == nil then raise "transfer: resource claim requires a decode scope" end
   return scope:claim(ffi.titan_protobuf_bytes_ptr(index_bytes) as foreign const *void,
       #index_bytes, expected_release)
@@ -332,7 +346,7 @@ function claim_registered_resource(context: value, data: foreign const *void,
 end
 
 local function packet_context(encoding: boolean): value
-  local scope? = resource_scopes[current_execution()]
+  local scope? = current_resource_scope()
   if scope == nil then return nil end
   if scope.encoding ~= encoding then return nil end
   return scope
@@ -1248,9 +1262,12 @@ function encode_message(candidate: value): foreign *void
   local previous? = resource_scopes[execution]
   local scope = acquire_resource_scope()
   scope.encoding = true
+  -- Count before registering retirement so an exit can never under-count.
+  active_scope_count = active_scope_count + 1
   -- Keep retirement inline: no fallible ordinary entry follows packet commit.
   defer do
     resource_scopes[execution] = previous
+    active_scope_count = active_scope_count - 1
     dispose_scope(scope.native)
     scope.message = nil
     scope.encoding = false
@@ -1298,8 +1315,10 @@ local function decode_message_worker(slot_value: value): value
   local previous? = resource_scopes[execution]
   local scope = acquire_resource_scope()
   scope.message = message
+  active_scope_count = active_scope_count + 1
   defer do
     resource_scopes[execution] = previous
+    active_scope_count = active_scope_count - 1
     dispose_scope(scope.native)
     scope.message = nil
     scope.encoding = false

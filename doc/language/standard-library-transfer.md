@@ -365,8 +365,8 @@ leaving any enclosing scope intact:
   `TransferValue.from_value` and `TransferValue:to_value` pass
   `packet_context(true)` and `packet_context(false)` to registered
   `ResourceCodec` callbacks before reflective hook lookup, and public
-  `attach_resource` and `claim_resource` resolve
-  `resource_scopes[current_execution()]` on every call for custom
+  `attach_resource` and `claim_resource` resolve the current execution's
+  exact top scope on every call for custom
   `to_transfer_payload` and `from_transfer_payload` hooks. Attachment
   is permitted only when the active scope is an encode scope (otherwise raising
   `"transfer: resource attachment requires an encode scope"`), and claim requires
@@ -387,7 +387,11 @@ leaving any enclosing scope intact:
   When invoked as opaque-hook or capture work inside a matching current scope,
   they reuse that enclosing packet; without it both direct `ResourceCodec`
   fields and endpoint hooks raise. Their temporary index bytes/policies own no
-  attachments and are not standalone reusable ownership. Scope ownership also
+  attachments and are not standalone reusable ownership. While no packet
+  operation is active anywhere in the Lua state, these standalone calls answer
+  "no scope" without resolving the current execution at all; otherwise they
+  perform the full exact-top lookup, so another execution's active (or
+  abandoned) packet never lends them authority. Scope ownership also
   has a nonyielding finalizer guard: if an execution stack is abandoned without
   lexical unwind, its active frame is never pooled and its unfinished native
   scratch table or packet is disposed when collected. That safety mechanism
