@@ -929,12 +929,13 @@ loop's closed state, independently of callback suppression. The application
 contract is unchanged: withdraw handles, finish sends and drain the ordinary
 loop before closing the state. Abandonment reclaims libuv's loop internals,
 not application cleanup semantics.
-A finalizer running later during `lua_close` must not create a new Runtime
-through `async.run`, `async.receiver` or `prepare_external_wait`: Lua no
-longer registers finalizers, so that new Runtime's loop leaks.
+A finalizer running later during `lua_close` must not call anything that creates
+a Runtime, such as `async.run`, `async.run_with_cleanup`, `async.receiver`,
+`prepare_external_wait`, `prepare_native_retirement` or library operations that
+start Tasks: Lua no longer registers finalizers, so the new Runtime's loop leaks.
 An existing separate limitation remains: any abandoned stack-backed native
-wait can outlive its coroutine stack. Channel endpoints may predate the
-Runtime, allowing their finalizers to encounter an invalid intrusive waiter
+wait can outlive its coroutine stack. Channel endpoints older than the waiting
+Task's coroutine can encounter an invalid intrusive waiter during finalization
 after that stack is destroyed; a clone retained by another state or thread
 can also leave the waiter linked and wake it after state close, regardless of
 local creation order. Loop abandonment does not repair these native-borrow

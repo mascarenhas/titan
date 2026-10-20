@@ -387,9 +387,10 @@ local generated_codecs_enabled = true
 local codec_handoff_entry: value = nil
 
 --- Enable or disable generated nominal codecs in this Lua state, returning the previous setting.
--- While disabled every protobuf and transfer operation uses only the reflective
--- codec. Generated codecs produce identical bytes, values, and errors, so this
--- is a diagnostic for differential tests, not a wire policy.
+-- Disabling ordinary generated-codec lookup changes no encoded bytes, decoded
+-- values, errors, hook calls, or resource attachments. Previously obtained codec
+-- handles still run generated code through serialize_generated_to_buffer.
+-- This diagnostic supports differential tests, not a different wire policy.
 -- @param enabled True to dispatch to generated codecs (the default).
 -- @return The previous setting.
 -- @usage standard-library-protobuf.md#generated-codecs

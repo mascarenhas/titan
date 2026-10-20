@@ -629,9 +629,11 @@ waits for accepted work. Treat this as a leak-free loop fallback, not a replacem
 for closing receivers and draining the loop normally. Ordinary garbage collection does not retire
 an active Runtime, which remains rooted by the async module; finalization of
 an already-retired Runtime has no effect on a newer Runtime.
-A finalizer running later during state close must not create another Runtime
-through `async.run`, `async.receiver` or `async.prepare_external_wait`: Lua no
-longer registers finalizers at that point, so the newly created loop leaks.
+A finalizer running later during state close must not call anything that creates
+a Runtime, such as `async.run`, `async.run_with_cleanup`, `async.receiver`,
+`async.prepare_external_wait`, `async.prepare_native_retirement` or library
+operations that start Tasks: Lua no longer registers finalizers at that point,
+so the newly created loop leaks.
 This loop fallback does not make abandonment of stack-backed native waits
 safe: cancel and join Tasks blocked in thread-channel operations and drain
 their Runtime before destroying the state.

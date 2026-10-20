@@ -179,8 +179,8 @@ occurrence; zero, repeated, replaced, or non-message variants hand back to the
 reflective decoder after that validation. One shared parts directory serves
 the selected variant, so variant count does not grow that directory. Wider
 records or payloads stay reflective, whose per-level C stack does not grow
-with field count, so deep wide graphs raise the nesting error instead of
-exhausting the C stack.
+with field count. Deep reflective decoding and its error traceback can still
+exhaust a coroutine's C stack in unoptimized (`-O0`) builds.
 
 The declaring module emits one immutable `TitanTransferCodec` array next to
 its `TitanTransferModule` manifest (`transfer.h`) and binds each canonical

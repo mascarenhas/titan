@@ -48,6 +48,7 @@ function test_loop_abandon_retires_udp_receive_and_send(_: test.Context)
   local loop = new_loop()
   defer success(uv.loop_abandon(loop))
   local calls = 0
+  local received = 0
   local receiver, address = bound(loop, 0)
   local sender = uv.udp_t()
   success(uv.udp_init(loop, sender))
@@ -57,14 +58,22 @@ function test_loop_abandon_retires_udp_receive_and_send(_: test.Context)
       return uv.buf_t.allocate(64)
     end,
     function (_handle: uv.udp_t, _count: integer, _buffer: uv.buf_t?,
-              _peer: uv.sockaddr_t?, _flags: integer)
+              peer: uv.sockaddr_t?, _flags: integer)
       calls = calls + 1
+      if peer ~= nil then received = received + 1 end
     end))
   local sent = uv.udp_send_t()
   success(uv.udp_send(sent, sender, {uv.buf_t.from_string("abandon\0")}, address,
     function (_request: uv.udp_send_t, _status: integer) calls = calls + 1 end))
+  coverage_mc_deadline(loop)
+  while received == 0 do uv.run(loop, uv.RUN_ONCE) end
+  test.assert(received == 1, "the UDP handle never delivered before abandonment")
+  local before = calls
+  uv.close(receiver:as_handle_t(), function (_: uv.handle_t) calls = calls + 1 end)
+  success(uv.udp_send(uv.udp_send_t(), sender, {uv.buf_t.from_string("retire")}, address,
+    function (_request: uv.udp_send_t, _status: integer) calls = calls + 1 end))
   success(uv.loop_abandon(loop))
-  assert_abandoned(loop, calls)
+  assert_abandoned(loop, calls - before)
   test.assert(not receiver:as_handle_t():is_initialized() and
     not sender:as_handle_t():is_initialized(), "abandonment retained UDP owners")
 end
@@ -106,4 +115,118 @@ function test_loop_abandon_retires_process_without_exit_delivery(_: test.Context
   assert_abandoned(loop, calls)
   test.assert(not process:as_handle_t():is_initialized() and
     not output:as_handle_t():is_initialized(), "abandonment retained process owners")
+end
+
+function test_loop_abandon_retires_filesystem_event_watcher(_: test.Context)
+  local directory = coverage_fs_directory()
+  defer coverage_fs_remove(directory, true)
+  local loop = new_loop()
+  defer success(uv.loop_abandon(loop))
+  local calls = 0
+  local watcher = uv.fs_event_t()
+  success(uv.fs_event_init(loop, watcher))
+  local status = uv.fs_event_start(watcher,
+    function (_owner: uv.fs_event_t, _path: string?, _events: integer, _status: integer)
+      calls = calls + 1
+    end, directory, 0)
+  if status == uv.ENOSYS or status == uv.ENOTSUP then
+    test.skip("capability: filesystem events are unavailable")
+  end
+  success(status)
+  test.assert(uv.is_active(watcher:as_handle_t()))
+  success(uv.loop_abandon(loop))
+  assert_abandoned(loop, calls)
+  test.assert(not watcher:as_handle_t():is_initialized())
+end
+
+function test_loop_abandon_retires_filesystem_poll_and_pending_stat(_: test.Context)
+  local path = fixture_file()
+  defer remove_file(path)
+  local loop = new_loop()
+  defer success(uv.loop_abandon(loop))
+  local calls = 0
+  local watcher = uv.fs_poll_t()
+  success(uv.fs_poll_init(loop, watcher))
+  success(uv.fs_poll_start(watcher,
+    function (_owner: uv.fs_poll_t, _status: integer, _previous: uv.stat_t?, _current: uv.stat_t?)
+      calls = calls + 1
+    end, path, 1))
+  test.assert(uv.is_active(watcher:as_handle_t()))
+  success(uv.loop_abandon(loop))
+  assert_abandoned(loop, calls)
+  test.assert(not watcher:as_handle_t():is_initialized())
+end
+
+function test_loop_abandon_retires_socket_poll(_: test.Context)
+  local loop = new_loop()
+  defer success(uv.loop_abandon(loop))
+  local status, left?, right? = uv.socketpair(uv.SOCK_STREAM, 0,
+    uv.NONBLOCK_PIPE, uv.NONBLOCK_PIPE)
+  success(status)
+  local writer, reader = uv.tcp_t(), uv.tcp_t()
+  success(uv.tcp_init(loop, writer))
+  success(uv.tcp_init(loop, reader))
+  success(uv.tcp_open(writer, left))
+  success(uv.tcp_open(reader, right))
+  local poll = uv.poll_t()
+  success(uv.poll_init_socket(loop, poll, right))
+  local calls = 0
+  success(uv.poll_start(poll,
+    function (_owner: uv.poll_t, _status: integer, _events: integer)
+      calls = calls + 1
+    end, uv.READABLE))
+  test.assert(uv.try_write(writer:as_stream_t(), {uv.buf_t.from_string("pending")}) == 7)
+  success(uv.loop_abandon(loop))
+  assert_abandoned(loop, calls)
+  test.assert(not poll:as_handle_t():is_initialized() and
+    not reader:as_handle_t():is_initialized() and not writer:as_handle_t():is_initialized())
+end
+
+function test_loop_abandon_retires_reverse_dns_random_and_shutdown(_: test.Context)
+  local loop = new_loop()
+  defer success(uv.loop_abandon(loop))
+  local calls = 0
+  local status, address? = uv.ip4_addr("127.0.0.1", 1234)
+  success(status)
+  local reverse = uv.getnameinfo_t()
+  success(uv.getnameinfo(loop, reverse,
+    function (_request: uv.getnameinfo_t, _status: integer, _host: string?, _service: string?)
+      calls = calls + 1
+    end, address, uv.NI_NUMERICHOST | uv.NI_NUMERICSERV))
+  local random = uv.random_t()
+  local buffer = uv.buf_t.allocate(32)
+  success(uv.random(loop, random, buffer, 32, 0,
+    function (_request: uv.random_t, _status: integer, _buffer: uv.buf_t, _length: integer)
+      calls = calls + 1
+    end))
+  local reader, writer = open_pipe_pair(loop)
+  success(uv.shutdown(uv.shutdown_t(), writer:as_stream_t(),
+    function (_request: uv.shutdown_t, _status: integer) calls = calls + 1 end))
+  success(uv.loop_abandon(loop))
+  assert_abandoned(loop, calls)
+  test.assert(not reader:as_handle_t():is_initialized() and
+    not writer:as_handle_t():is_initialized())
+  local reverse_status = reverse:result()
+  test.assert(reverse_status ~= uv.EBUSY, "abandonment left reverse DNS pending")
+end
+
+function test_loop_abandon_rejects_non_main_lua_thread_without_mutation(_: test.Context)
+  local loop = new_loop()
+  defer success(uv.loop_abandon(loop))
+  local timer = uv.timer_t()
+  success(uv.timer_init(loop, timer))
+  local run_on_thread = lua.load([[
+    local check = ...
+    local thread = coroutine.create(check)
+    assert(coroutine.resume(thread))
+    assert(coroutine.status(thread) == 'dead')
+  ]])
+  run_on_thread(function ()
+    expect_error(function () uv.loop_abandon(loop) end,
+      "uv.loop_abandon requires the owning main Lua thread")
+  end)
+  test.assert(timer:as_handle_t():is_initialized(),
+    "wrong-thread rejection mutated the native loop")
+  success(uv.loop_abandon(loop))
+  assert_abandoned(loop, 0)
 end

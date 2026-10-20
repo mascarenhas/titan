@@ -1463,8 +1463,9 @@ local function backpatch_transfer_roundtrip(candidate: value): value
 end
 
 -- Compiler-generated nominal codecs. `protobuf.use_generated_codecs(false)`
--- makes every protobuf and transfer operation purely reflective in this state,
--- which is the differential oracle for bytes, values, and error strings.
+-- disables ordinary generated-codec lookup in this state; existing handles can
+-- still run generated code. These helpers use ordinary dispatch as the
+-- differential oracle for bytes, values, and error strings.
 local function reflective_serialize(candidate: value): string
   local previous = protobuf.use_generated_codecs(false)
   defer protobuf.use_generated_codecs(previous)
@@ -2250,9 +2251,10 @@ function test_generated_codecs_maximum_width_depth_on_coroutine_stack(_: test.Co
   local bytes = fields
   for _ = 2, 127 do bytes = fields .. backpatch_field(64, bytes) end
   local too_deep = fields .. backpatch_field(64, bytes)
-  -- Keep the reflective error oracle on the host stack: its existing deep
-  -- decoder plus traceback capture can exhaust a coroutine stack at rejection.
+  -- Keep both reflective oracles on the host stack: deep reflective decoding
+  -- has little coroutine-stack headroom, and traceback capture can exhaust it.
   local reflective_error = decode_outcome(too_deep, target, false)
+  test.assert(reflective_serialize(reflective_deserialize(bytes, target)) == bytes)
   local co = coroutine.create(function (_: value): value
     test.assert(coroutine.running() ~= nil, "codec depth test did not use a coroutine stack")
     local decoded: CodecBoundaryRecord64 = generated_decode(bytes, target)
@@ -2265,7 +2267,6 @@ function test_generated_codecs_maximum_width_depth_on_coroutine_stack(_: test.Co
     end
     test.assert(count == 127 and current.f63 == 63)
     test.assert(generated_wire(decoded) == bytes)
-    test.assert(reflective_serialize(reflective_deserialize(bytes, target)) == bytes)
     -- Scalar fields of the 128th full-width record exceed the shared depth
     -- budget. The generated path must reject safely on this coroutine stack.
     local generated = decode_outcome(too_deep, target, true)
