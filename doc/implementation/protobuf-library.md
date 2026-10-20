@@ -278,9 +278,10 @@ Native string decoding publishes the new `TString` into the rooted record or
 union and applies its backward barrier before `luaC_checkGC`. The scalar
 string arm of `value` likewise pushes the result before polling. This matches
 the reflective decoder's `lua_pushlstring` allocation/poll order without an
-extra string copy or transient root. Deferring the poll until the next entry
-can let sweeping return the allocator's entire free tail before its next large
-string allocation, repeatedly releasing and faulting the same payload pages.
+extra string copy or transient root. With a trimming allocator such as glibc's,
+deferring the poll until the next entry can let sweeping return the allocator's
+entire free tail before its next large string allocation, repeatedly releasing
+and faulting the same payload pages.
 
 Generated codecs serve `serialize_to_buffer` (before `reflect.inspect`), the
 inspected-root entries, `deserialize`, `deserialize_nominal*`, transfer

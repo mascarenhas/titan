@@ -1650,6 +1650,87 @@ function test_generated_codecs_match_reflective_codec(context: test.Context)
   check_generated_codec(context, "deep_nested_lengths", deep)
 end
 
+union StringPublicationChoice
+  text(string)
+  empty()
+end
+
+record StringPublication
+  first: string
+  second: string
+  last: string
+  optional_first: string?
+  optional_last: string?
+  absent: string?
+  choice: StringPublicationChoice
+  item: value
+end
+
+local function assert_published_strings(actual: StringPublication,
+                                       expected: StringPublication)
+  test.assert(actual.first == expected.first, "first required string changed")
+  test.assert(actual.second == expected.second, "second required string changed")
+  test.assert(actual.last == expected.last, "last required string changed")
+  test.assert(actual.optional_first == expected.optional_first,
+      "first optional string changed")
+  test.assert(actual.optional_last == expected.optional_last,
+      "last optional string changed")
+  test.assert(actual.absent == nil, "absent optional string became present")
+  test.assert(actual.item is string and actual.item == expected.item,
+      "value-field string changed")
+  case actual.choice
+  when text(contents) then
+    case expected.choice
+    when text(expected_contents) then
+      test.assert(contents == expected_contents, "union string part changed")
+    else raise "expected string union part"
+    end
+  else raise "decoded string union part changed variant"
+  end
+end
+
+function test_generated_string_fields_survive_aggressive_collection(
+    _context: test.Context)
+  local previous = protobuf.use_generated_codecs(true)
+  defer protobuf.use_generated_codecs(previous)
+  local expected = StringPublication(
+      string.rep("first\0", 12000), string.rep("second\255", 10000),
+      string.rep("last\0", 15000), string.rep("optional-first\0", 5000),
+      string.rep("optional-last\255", 5000), nil,
+      StringPublicationChoice.text(string.rep("union\0", 12000)),
+      string.rep("value\255", 12000))
+  local target = descriptor(expected)
+  local bytes = generated_wire(expected)
+  test.assert(bytes == reflective_serialize(expected))
+
+  local originally_paused = gc.paused()
+  local originally_incremental = gc.incremental()
+  local pause_percent = gc.pause_percent()
+  local stepmul = gc.stepmul()
+  local stepsize = gc.stepsize()
+  defer do
+    gc.pause_percent(pause_percent)
+    gc.stepmul(stepmul)
+    gc.stepsize(stepsize)
+    if originally_incremental then gc.incremental() else gc.generational() end
+    if originally_paused then gc.pause() else gc.resume() end
+  end
+  -- Each field exceeds 64 KiB; make allocation safepoints do collector work
+  -- while later fields are decoded, not just after the record is complete.
+  gc.pause_percent(0)
+  gc.stepmul(100000)
+  gc.stepsize(1)
+  gc.resume()
+  gc.collect()
+
+  local generated: StringPublication = generated_decode(bytes, target)
+  local reflected: StringPublication = reflective_deserialize(bytes, target)
+  gc.collect()
+  assert_published_strings(generated, expected)
+  assert_published_strings(reflected, expected)
+  assert_published_strings(generated, reflected)
+end
+
 function test_generated_codecs_share_erased_generic_applications(_context: test.Context)
   local first = protobuf.find_generated_codec(Tagged<|integer|>.new(1, "one"))
   test.assert(first ~= nil, "missing generic codec")
