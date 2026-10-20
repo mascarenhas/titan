@@ -41,8 +41,9 @@ deserialize_nominal(bytes: string, name: string, is_union: boolean): value
 deserialize_nominal_buffer(data: foreign const *void, length: integer,
                            name: string, is_union: boolean): value
 deserialize_nominal_buffer_with_context(data: foreign const *void,
-                                        length: integer, name: string,
-                                        is_union: boolean,
+                                        length: integer,
+                                        nominal: reflect.NominalType?,
+                                        name: string, is_union: boolean,
                                         context: value): value
 serialize_fields(fields: const {reflect.Type}, ...: value): string
 serialize_fields_to_buffer(buf: foreign *void,
@@ -129,7 +130,11 @@ Passing the already-inspected `reflect.RecordValue` or `reflect.UnionValue` and
 the packet's resolved `context` avoids a second root inspection and repeated
 per-field execution-scope lookups while preserving all public-nominal/member
 visibility, active-record cycle, nesting-depth (128), custom-hook dispatch, and
-2 GiB message-size checks. `register_resource_codec` registers a state-local
+2 GiB message-size checks. `deserialize_nominal_buffer_with_context` takes the
+caller's own `reflect.find_nominal(name)` result as `nominal` instead of
+looking `name` up again; it raises the same unknown-name error when `nominal` is
+nil and the same kind-mismatch error as `deserialize_nominal_buffer`, using
+`name` only in those messages. `register_resource_codec` registers a state-local
 nominal resource capability (used for `thread.Sender` and `thread.Receiver`)
 keyed by the record's canonical erased metatable identity, and
 `write_resource_index_bytes` / `write_resource_index` write its four-byte

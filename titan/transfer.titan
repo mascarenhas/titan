@@ -653,14 +653,18 @@ local function encode_record_payload(
       "transfer: cyclic record payload for " .. record_value.type.name)
 end
 
+-- Returns the registry descriptor, loading the declaring module only on a
+-- miss; nil means the module registered no such name.
 local function initialize_nominal_raw(
     module: foreign const *char,
     module_len: foreign size_t,
-    name: string)
-  if reflect.find_nominal(name) ~= nil then return end
+    name: string): reflect.NominalType?
+  local found? = reflect.find_nominal(name)
+  if found ~= nil then return found end
   local top = ffi.lua_gettop(L)
   defer ffi.lua_settop(L, top)
   transfer_load_module(L, module, module_len as foreign unsigned long long)
+  return reflect.find_nominal(name)
 end
 
 local function initialize_nominal(module: string, name: string)
@@ -1335,19 +1339,19 @@ local function decode_message_worker(slot: foreign *(*void)): value
   move_slot_to_scope(scope.native, slot)
   if kind == ffi.TITAN_ASYNC_MESSAGE_RECORD then
     local name = copy_native_bytes(message.name, message.name_length)
-    initialize_nominal_raw(message.module, message.module_length, name)
+    local nominal? = initialize_nominal_raw(message.module, message.module_length, name)
     return protobuf.deserialize_nominal_buffer_with_context(
         message.bytes as foreign const *void,
         message.length as integer,
-        name,
+        nominal, name,
         false, scope)
   elseif kind == ffi.TITAN_ASYNC_MESSAGE_UNION then
     local name = copy_native_bytes(message.name, message.name_length)
-    initialize_nominal_raw(message.module, message.module_length, name)
+    local nominal? = initialize_nominal_raw(message.module, message.module_length, name)
     return protobuf.deserialize_nominal_buffer_with_context(
         message.bytes as foreign const *void,
         message.length as integer,
-        name,
+        nominal, name,
         true, scope)
   elseif kind == ffi.TITAN_ASYNC_MESSAGE_CLOSURE then
     return restore_closure_from_buffer(

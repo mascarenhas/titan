@@ -410,25 +410,42 @@ function serialize(candidate: value): string
   return buffer_to_string(buf)
 end
 
+-- Root reconstruction from an already-resolved nominal descriptor, so a
+-- caller that holds one never allocates a reflect.Type wrapper to reach it.
 -- String entry points pass their input as the root holder, so it stays traced
 -- even when a custom decoder drops the caller's reference; raw buffers pass nil
 -- and keep their caller-owned synchronous borrow.
+local function deserialize_record_buffer(
+    data: foreign const *void,
+    length: integer,
+    descriptor: reflect.RecordType, context: value, holder: string?): value
+  check_message_size(length)
+  require_record(descriptor)
+  local message = read_message_slice(
+      data as foreign const *uint8_t, 0, length, holder, context)
+  return decode_record(message, descriptor, 1)
+end
+
+local function deserialize_union_buffer(
+    data: foreign const *void,
+    length: integer,
+    descriptor: reflect.UnionType, context: value, holder: string?): value
+  check_message_size(length)
+  require_union(descriptor)
+  local message = read_message_slice(
+      data as foreign const *uint8_t, 0, length, holder, context)
+  return decode_union(message, descriptor, 1)
+end
+
 local function deserialize_buffer(
     data: foreign const *void,
     length: integer,
     descriptor: reflect.Type, context: value, holder: string?): value
-  check_message_size(length)
-  local resolved = resolve_type(descriptor)
-  local base = data as foreign const *uint8_t
-  case resolved
+  case resolve_type(descriptor)
   when is_record(record_type) then
-    require_record(record_type)
-    local message = read_message_slice(base, 0, length, holder, context)
-    return decode_record(message, record_type, 1)
+    return deserialize_record_buffer(data, length, record_type, context, holder)
   when is_union(union_type) then
-    require_union(union_type)
-    local message = read_message_slice(base, 0, length, holder, context)
-    return decode_union(message, union_type, 1)
+    return deserialize_union_buffer(data, length, union_type, context, holder)
   else raise "protobuf: root descriptor must be a public record or union"
   end
 end
@@ -503,7 +520,7 @@ function deserialize_fields_buffer(
       data, length, fields, packet_context(false))
 end
 
--- Shared anonymous decoding; `holder` follows the deserialize_buffer rule.
+-- Shared anonymous decoding; `holder` follows the root-buffer rule above.
 local function deserialize_fields_slice(
     base: foreign const *uint8_t,
     length: integer,
@@ -551,27 +568,25 @@ function deserialize_nominal_buffer(
     name: string,
     is_union: boolean): value
   return deserialize_nominal_buffer_with_context(
-      data, length, name, is_union, packet_context(false))
+      data, length, reflect.find_nominal(name), name, is_union, packet_context(false))
 end
 
--- Shared nominal decoding; `holder` follows the deserialize_buffer rule.
+-- Shared nominal decoding; `holder` follows the root-buffer rule above. The
+-- caller supplies its registry lookup result, so a decode performs one lookup.
 local function deserialize_nominal_slice(
     data: foreign const *void,
     length: integer,
-    name: string,
+    nominal: reflect.NominalType?, name: string,
     is_union: boolean, context: value, holder: string?): value
-  local found? = reflect.find_nominal(name)
-  if found == nil then raise "protobuf: unknown nominal type " .. name end
-  case found
+  if nominal == nil then raise "protobuf: unknown nominal type " .. name end
+  case nominal
   when is_record(descriptor) then
     if not is_union then
-      return deserialize_buffer(
-          data, length, reflect.Type.is_record(descriptor), context, holder)
+      return deserialize_record_buffer(data, length, descriptor, context, holder)
     end
   when is_union(descriptor) then
     if is_union then
-      return deserialize_buffer(
-          data, length, reflect.Type.is_union(descriptor), context, holder)
+      return deserialize_union_buffer(data, length, descriptor, context, holder)
     end
   end
   raise "protobuf: nominal kind mismatch for " .. name
@@ -580,13 +595,15 @@ end
 -- Internal compiled collaboration used by `titan.transfer`: the caller passes
 -- the decode scope it already resolved for this packet, so decoding a nominal
 -- never re-resolves the execution's packet context. A nil context carries no
--- attachment authority, exactly as outside a packet.
+-- attachment authority, exactly as outside a packet. `nominal` is the
+-- caller's `reflect.find_nominal(name)` result (nil when unregistered); `name`
+-- only labels the unknown-name and kind-mismatch errors.
 function deserialize_nominal_buffer_with_context(
     data: foreign const *void,
     length: integer,
-    name: string,
+    nominal: reflect.NominalType?, name: string,
     is_union: boolean, context: value): value
-  return deserialize_nominal_slice(data, length, name, is_union, context, nil)
+  return deserialize_nominal_slice(data, length, nominal, name, is_union, context, nil)
 end
 
 --- Resolve an initialized nominal type by name for cross-state transfer decoding.
@@ -598,7 +615,7 @@ end
 function deserialize_nominal(bytes: string, name: string, is_union: boolean): value
   return deserialize_nominal_slice(
       ffi.titan_protobuf_bytes_ptr(bytes) as foreign const *void,
-      #bytes, name, is_union, packet_context(false), bytes)
+      #bytes, reflect.find_nominal(name), name, is_union, packet_context(false), bytes)
 end
 
 --- Render a complete proto3 schema describing the public record or union wire format.

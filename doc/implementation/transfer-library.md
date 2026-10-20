@@ -158,7 +158,9 @@ room. See [buffer growth](protobuf-library.md#encoding).
 
 Decode reads directly from the packet's byte slices using
 `protobuf.deserialize_nominal_buffer_with_context` (passing `scope` once for
-`RECORD` and `UNION` packets) and
+`RECORD` and `UNION` packets, together with the `reflect.NominalType?` that
+`initialize_nominal_raw` returns from its registry lookup, so protobuf neither
+repeats the lookup nor wraps the descriptor in a `reflect.Type`) and
 `protobuf.deserialize_fields_buffer_with_context` (passing `scope` through
 `restore_closure_from_buffer` for `CLOSURE` packets, matching `encode_packet`'s
 `protobuf.serialize_fields_to_buffer_with_context` call). For a `RECORD_PAYLOAD` packet, after

@@ -43,8 +43,9 @@ serialize_inspected_union_to_buffer(buf: foreign *void,
                                     candidate: reflect.UnionValue,
                                     context: value)
 deserialize_nominal_buffer_with_context(data: foreign const *void,
-                                        length: integer, name: string,
-                                        is_union: boolean,
+                                        length: integer,
+                                        nominal: reflect.NominalType?,
+                                        name: string, is_union: boolean,
                                         context: value): value
 serialize_fields_to_buffer_with_context(buf: foreign *void,
                                         fields: const {reflect.Type},
@@ -94,6 +95,20 @@ scope is active for the same execution. The public `deserialize_nominal_buffer`,
 `serialize_fields_to_buffer`, and `deserialize_fields_buffer` wrappers resolve
 `packet_context(true)` / `packet_context(false)` once and delegate to them, and
 `titan.transfer` passes its already-resolved `ResourceScope` directly.
+
+Nominal roots likewise carry the descriptor the caller already found. The
+`nominal` argument of `deserialize_nominal_buffer_with_context` is the caller's
+`reflect.find_nominal(name)` result: `deserialize_nominal_buffer` and
+`deserialize_nominal` look it up once themselves, and transfer's packet worker
+passes the result of the lookup `initialize_nominal_raw` performs before or
+after loading the declaring module. The shared slice raises the unknown-name
+error for nil and the kind-mismatch error otherwise, then hands the record or
+union descriptor to private `deserialize_record_buffer` /
+`deserialize_union_buffer`. Those check the message size, require public
+members, parse the root slice, and decode it. `deserialize(bytes, descriptor)`
+reaches the same helpers after `resolve_type`, so no nominal root decode
+allocates a `reflect.Type.is_record` / `is_union` wrapper or repeats the
+registry lookup.
 
 `titan.protobuf` never imports `titan.transfer` or `titan.thread`. Instead,
 `transfer` installs its `packet_context` resolver once via

@@ -691,6 +691,42 @@ function test_nominal_lookup_requires_registered_matching_kind(_context: test.Co
   end, "nominal kind mismatch")
 end
 
+local function decode_with_nominal(bytes: string, nominal: reflect.NominalType?,
+                                   name: string, is_union: boolean): value
+  return protobuf.deserialize_nominal_buffer_with_context(
+    ffi.titan_protobuf_bytes_ptr(bytes) as foreign const *void, #bytes,
+    nominal, name, is_union, nil)
+end
+
+function test_nominal_buffer_with_context_decodes_the_supplied_descriptor(
+    _context: test.Context)
+  local record_bytes = protobuf.serialize(IntegerValue(41))
+  local record_nominal? = reflect.find_nominal("protobuf.tests.IntegerValue")
+  test.assert(record_nominal ~= nil)
+  -- The supplied descriptor selects the root; the name only labels errors.
+  local decoded: IntegerValue = decode_with_nominal(
+    record_bytes, record_nominal, "protobuf.tests.Unrelated", false)
+  test.assert(decoded.number == 41)
+  local union_bytes = protobuf.serialize(Choice.pair(-3, "note"))
+  local union_nominal? = reflect.find_nominal("protobuf.tests.Choice")
+  test.assert(union_nominal ~= nil)
+  local choice: Choice = decode_with_nominal(
+    union_bytes, union_nominal, "protobuf.tests.Choice", true)
+  case choice
+  when pair(number, note) then test.assert(number == -3 and note == "note")
+  else raise "union variant changed"
+  end
+  expect_error(function()
+    decode_with_nominal(record_bytes, nil, "protobuf.tests.Missing", false)
+  end, "unknown nominal type protobuf.tests.Missing")
+  expect_error(function()
+    decode_with_nominal(record_bytes, record_nominal, "protobuf.tests.IntegerValue", true)
+  end, "nominal kind mismatch for protobuf.tests.IntegerValue")
+  expect_error(function()
+    decode_with_nominal(union_bytes, union_nominal, "protobuf.tests.Choice", false)
+  end, "nominal kind mismatch for protobuf.tests.Choice")
+end
+
 function test_schema_is_stable_and_contains_matching_wire_types(_context: test.Context)
   local target = descriptor(Scalars(0, 0, false, 0.0, "", nil))
   local output = protobuf.schema(target)
