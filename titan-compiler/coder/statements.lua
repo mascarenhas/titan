@@ -2523,7 +2523,7 @@ function code_hidden_decl(ctx, decl, exp, prepared)
         $CSET
     ]], {
         CSTATS = cstats,
-        CDECL = cvardecl(ctx, typ, decl._cvar) .. " = " .. initval(typ) .. ";",
+        CDECL = coder._local_cvardecl(ctx, decl) .. " = " .. initval(typ) .. ";",
         CVAR = decl._cvar,
         CEXP = cexp,
         CSET = cset,
@@ -2538,7 +2538,7 @@ function code_hidden_result_decls(ctx, decls)
         if types.is_gc(typ) then
             decl._slot = newslot(ctx)
         end
-        table.insert(out, cvardecl(ctx, typ, decl._cvar)
+        table.insert(out, coder._local_cvardecl(ctx, decl)
             .. " = " .. initval(typ) .. ";")
     end
     return table.concat(out, "\n")
@@ -2566,12 +2566,12 @@ function predeclare_defer_tail(ctx, block)
                             decl._cvar = "_local_" .. localname(ctx, decl.name)
                             if decl._c_zero_init then
                                 table.insert(out,
-                                    cvardecl(ctx, decl._type, decl._cvar)
+                                    coder._local_cvardecl(ctx, decl)
                                     .. " = {0};")
                                 decl._c_zero_predeclared = true
                             else
                                 table.insert(out,
-                                    cvardecl(ctx, decl._type, decl._cvar) .. ";")
+                                    coder._local_cvardecl(ctx, decl) .. ";")
                             end
                             local spill = decl._c_zero_init
                                 and spill_decl_init(ctx, decl)
@@ -2736,7 +2736,7 @@ function coder._codeautomaticallocationdecl(ctx, decl)
         ]], {
             BACKING = coder._render_c_declaration(array_type, backing),
             BACKING_NAME = backing,
-            POINTER = coder._render_c_declaration(decl._type, decl._cvar),
+            POINTER = coder._local_cvardecl(ctx, decl),
             CSPILLDECL = spill_decl_init(ctx, decl),
         })
     elseif storage == "automatic_fam" then
@@ -2824,7 +2824,7 @@ function coder._codeinitializeddecl(ctx, decl, cstats, cexp)
             decl._cvar = "_local_" .. localname(ctx, decl.name)
         end
         local cdecl = decl._defer_tail_predeclared
-            and "" or cvardecl(ctx, typ, decl._cvar) .. ";"
+            and "" or coder._local_cvardecl(ctx, decl) .. ";"
         local cset = ""
         local cspilldecl = decl._defer_tail_spill_predeclared
             and "" or spill_decl_zero(ctx, decl)

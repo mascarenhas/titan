@@ -383,6 +383,8 @@ The pass marks a Decl as needing a spill only when all of these are true:
 * it is assigned in a protected body whose error path can later read it
   from a catch, finally, or handled post-try path; or it is assigned in a
   catch that has its own protected boundary and its finally can read it.
+  A contextual mutable C-address conversion counts as a possible write,
+  including when the callee is an ordinary Titan function that can raise.
 
 Marked GC-typed Decls use their existing reserved Lua stack slots as the
 stable storage. Assignments keep the slot current, and protected recovery
@@ -392,7 +394,8 @@ remain valid across collections; the relocation hazard is only pointers to
 Lua stack locations, which are always recomputed from saved offsets such
 as `_base_off`.
 
-Marked non-GC scalar Decls get a tiny internal C-stack spill:
+Marked non-GC scalar Decls whose address is not exposed get a tiny internal
+C-stack spill:
 
 ```c
 lua_Integer _local_n_1;
@@ -401,10 +404,49 @@ volatile lua_Integer _spill_local_n_1;
 
 Codegen updates the spill after assignments that update the Titan
 local/parameter, and protected recovery reloads the ordinary C auto from
-the volatile spill before catch/finally/post-try code can read it. The
-`volatile` qualifier is therefore limited to internal spill storage; the
-Titan-visible local/parameter variables and the native function ABI remain
-plain C declarations.
+the volatile spill before catch/finally/post-try code can read it.
+
+An address-exposed non-GC scalar instead uses **one genuinely volatile
+automatic object** as its canonical recovery home:
+
+```c
+void *volatile _local_raw_1;
+```
+
+`coder._decl_volatile_home` selects this home for an address-taken scalar
+that the liveness pass marks, including a declaration marked by an earlier
+protected region. `_local_cvardecl` applies it to locals and parameters
+(including lambda parameters); no second spill or recovery reload is emitted.
+The callee receives the address of that very object. The internal top-level
+qualifier is removed from the outgoing address type, not from the object's
+declaration; native signatures and ABI are unchanged.
+
+This is an **implementation guarantee on the supported GCC and Clang
+toolchains (including Windows Clang/MSYS2), not a strictly conforming ISO C
+guarantee**. ISO C 6.7.3p6 makes referring to an object defined volatile
+through a non-volatile lvalue undefined behavior. The existing out-parameter
+API uses unqualified pointers, so its stores have exactly that caveat. Titan
+relies on these toolchains performing stores through the escaped pointer to
+the volatile object's actual storage before an opaque raising/longjmp call,
+and performing subsequent catch/deferred reads through the volatile home.
+Address escape alone, with an ordinary non-volatile home, is insufficient.
+
+Production Linux generated code uses `-O3 -flto=auto -ffat-lto-objects`;
+Darwin/Windows use `-O3` without default LTO. Ordinary native Titan functions
+are not generally `noinline`: same-translation-unit optimization and Linux
+cross-TU LTO can inline the callee. Inlining still leaves the write targeting
+the same volatile home's address, not a second snapshot. The default Lua
+build has no LTO IR, so `lua_error`/its nonlocal exit remains opaque even when
+Titan code is inlined; the supported optimizers materialize the preceding
+store and the volatile recovery read reloads it. The optimized regression
+cases exercise local callees at `-O2`/`-O3` as well as the native production
+lane with Linux LTO. Whole-program LTO that also exposes Lua's error machinery,
+different alias rules, or a new optimizer exploiting the qualification caveat
+is not established by these checks and requires renewed qualification.
+
+This selection adds only volatile loads/stores, not allocation, copying, or
+an extra ownership protocol. It does not change aggregate byte-spill commit
+rules or promise recovery for arbitrary untracked aliases/asynchronous C writes.
 
 `coder.lua` also tracks lexical spill scopes, so a recovery boundary
 reloads only spill slots whose Decls are currently in C scope.

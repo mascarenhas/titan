@@ -4855,7 +4855,7 @@ function send(handle: foreign *void, candidate: value)
   if not handle then raise "receiver handle must not be NULL" end
   local raw = transfer.encode_message(candidate)
   defer transfer.discard_message(raw)
-  -- Call at the real guarded local so its cleared mutable-address spill commits
+  -- Call at the real guarded local: its volatile home exposes the native clear
   -- before check_status can enter ordinary Titan code or raise.
   local status = receiver_send_native(handle as foreign *titan_async_receiver, raw)
   if status == 2 then raise "receiver is closed" end

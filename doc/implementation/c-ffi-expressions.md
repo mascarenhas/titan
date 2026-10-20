@@ -482,8 +482,22 @@ only through a pointer local is never spilled or restored: the pointer walk
 stops at the first pointer, so reads after recovery observe the storage's current
 memory. Code that lets C commit state during a protected region (for example a
 native registrar writing a wait cell) should therefore hold that cell as automatic
-storage plus a pointer local. Escaping the storage's address into an external call
-also keeps compilers from caching it across `setjmp`.
+storage plus a pointer local rather than rolling back its bytes on recovery.
+Address escape alone does not exempt a non-volatile automatic object from
+ISO C's `setjmp` rule.
+
+Non-GC **scalar** locals/parameters whose address is exposed and whose value
+is live across recovery use a different home: the actual C object is volatile,
+with no separate spill/reload. The write analysis treats a contextual mutable
+address conversion as a possible write even for an ordinary Titan call.
+Writes through that address are thus visible to catch/deferred cleanup even
+if the callee raises instead of returning. An earlier protected assignment
+does not create a stale snapshot. This is a supported GCC/Clang implementation
+guarantee, subject to the ISO C 6.7.3p6 caveat when the callee accesses the
+volatile object through its unqualified pointer. It changes neither aggregate
+byte-spill commit rules nor untracked raw-alias/asynchronous mutation rules;
+see [recovery storage](error-handling.md#setjmp-sensitive-localparameter-spills)
+for the opaque-raise and LTO assumptions.
 
 ## C operator traits
 

@@ -1571,6 +1571,93 @@ describe("catch", function()
         assert.match("lua_Integer%s+volatile%s+_spill_local_m_1", csrc)
     end)
 
+    it("uses one volatile home for recovery-sensitive address-exposed scalars", function()
+        local csrc = compile_and_read_c([[
+            local function clear(slot: foreign *(*void))
+                slot[0] = nil
+                raise "cleared"
+            end
+            local function change(slot: foreign *int)
+                slot[0] = 7
+                raise "changed"
+            end
+            function run(n: foreign int): boolean
+                local raw: foreign *void = nil
+                local untouched: foreign *void = nil
+                do
+                    raw = untouched
+                catch
+                    return false
+                end
+                defer if raw ~= nil then raise "stale owner" end
+                do
+                    clear(raw)
+                catch
+                end
+                do
+                    change(n)
+                catch
+                end
+                return raw == nil and n == 7
+            end
+        ]])
+        assert.match("void%s*%*%s*volatile%s+_local_raw_1", csrc)
+        assert.match("volatile%s+int%s+_param_n", csrc)
+        assert.not_match("_spill_local_raw_1", csrc)
+        assert.not_match("_spill_param_n", csrc)
+        assert.not_match("volatile%s+_local_untouched_", csrc)
+        assert.not_match("_spill_local_untouched_", csrc)
+    end)
+
+    for _, optimization in ipairs({ "-O2", "-O3" }) do
+        it("preserves indirect scalar writes when an ordinary callee raises at "
+            .. optimization, function()
+            local out = h.with_extra_cflags({ optimization }, function()
+                return compile_and_run([[
+                    local function change(slot: foreign *int)
+                        slot[0] = 7
+                        raise "changed"
+                    end
+                    local function parameter(n: foreign int): integer
+                        do
+                            change(n)
+                        catch
+                        end
+                        return n as integer
+                    end
+                    function run(): integer
+                        local n: foreign int = 1
+                        do
+                            n = 2
+                        catch
+                            return -1
+                        end
+                        local cleaned: integer = 0
+                        do
+                            defer cleaned = n as integer
+                            change(n)
+                        catch
+                        end
+                        local lambda = function (m: foreign int): integer
+                            do
+                                change(m)
+                            catch
+                            end
+                            return m as integer
+                        end
+                        return cleaned * 100 + parameter(1) * 10 + lambda(1)
+                    end
+                ]], [==[
+                    for _ = 1, 20 do
+                        assert(test.run() == 777, "lost indirect recovery write")
+                    end
+                    print("OK")
+                ]==])
+            end)
+            assert.match("OK", out)
+        end)
+    end
+
     it("does not spill locals and params just because a function contains catch", function()
         local csrc = compile_and_read_c([[
             function run(n: integer): integer

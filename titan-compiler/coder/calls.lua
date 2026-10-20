@@ -301,7 +301,11 @@ function nativetoforeignexp(ctx, exp, cexp, target, projection)
     if operation == "mutable_c_address" then
         assert(is_addressable_local(exp),
             "mutable C-address plan has a non-addressable source")
-        return "", render("(&($CEXP))", { CEXP = cexp })
+        local address = render("(&($CEXP))", { CEXP = cexp })
+        if coder._decl_volatile_home(coder._lvalue_root_decl(exp)) then
+            address = foreigncast(address, target)
+        end
+        return "", address
     end
 
     if operation == "c_address" then

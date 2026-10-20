@@ -127,9 +127,9 @@ reserves its single scalar result slot without `longjmp` before consuming a
 C-only scalar packet; strings, nominal reconstruction, and user hooks run inside
 its one native `catch`, which clears the caller's local and disposes of any
 residual owner before re-raising the original error and traceback. The caller
-takes the packet into a fresh local outside any region whose recovery reads it
-and never writes that local again, so the local never gets a recovery spill
-and catch recovery cannot reload a stale owner
+takes the packet into a fresh local and guards it immediately. Its
+address-exposed recovery-sensitive scalar has a volatile home, so catch
+recovery observes decode's clear rather than a stale packet owner
 ([caller rule](transfer-library.md#consuming-raw-slot-decode)). No foreign
 sender accesses the destination state. Async's
 private runtime registry and error-frame operations retain their separate

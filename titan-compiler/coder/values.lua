@@ -689,9 +689,9 @@ function initval(typ --[[:table]])
     return "0"
 end
 
--- Plain C declaration for Titan-visible locals/parameters. Setjmp-sensitive
--- values are protected by explicit spill/reload slots below, keeping the source
--- local/param C autos ordinary (and avoiding volatile in the function ABI).
+-- C declarations for values and temporaries. Recovery homes are selected by
+-- _local_cvardecl: ordinary values use spill/reload storage, while address-
+-- exposed non-GC scalars use the same volatile object throughout the call.
 function cvardecl(ctx, typ, name, quals)
     if types.is_direct_c(typ) then
         local decl_type = typ

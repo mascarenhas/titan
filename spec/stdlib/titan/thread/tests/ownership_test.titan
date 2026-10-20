@@ -305,6 +305,59 @@ local function assert_receiver_released_exactly_once(
     context_label .. ": Receiver retain was leaked")
 end
 
+local function make_earlier_sender_hook_raw_probe(): (
+  foreign *void,
+  thread.Receiver<|integer|>,
+  function (): ()
+)
+  local inner_tx, peer_rx, release_held_tx = make_sender_release_once_probe()
+  -- Keep constructor/argument roots out of the frame that checks endpoint GC.
+  return transfer.encode_message(
+      EarlierSenderHook(OwnershipHook("volatile-raw-slot"), inner_tx)),
+    peer_rx, release_held_tx
+end
+
+function test_raw_decode_address_home_survives_earlier_catch(context: test.Context)
+  context:run("decoder_clear_is_visible_before_guard_recovery", function (_child: test.Context)
+    runtime_test.run(function ()
+      reset_ownership_hook_state(true, false)
+      defer reset_ownership_hook_state(false, false)
+      local peer_rx: thread.Receiver<|integer|>? = nil
+      local release_held_tx: (function (): ())? = nil
+      local raw: foreign *void = nil
+      do
+        -- This earlier protected assignment used to allocate a separate spill
+        -- that later recovery reloaded after decode had consumed the packet.
+        raw, peer_rx, release_held_tx = make_earlier_sender_hook_raw_probe()
+      catch
+        raise
+      end
+      defer transfer.discard_message(raw)
+      defer peer_rx:close()
+      gc.collect()
+      gc.collect()
+      local failed = false
+      local cleared = false
+      do
+        transfer.decode_message(raw)
+      catch
+        test.assert(error is string)
+        test.assert((error as string) == "expected earlier decoder failure")
+        failed = true
+        cleared = raw == nil
+        -- Decode has consumed this packet. Record visibility before clearing
+        -- the test slot so an old compiler fails the assertion, not a second
+        -- native disposal of its stale recovery snapshot.
+        raw = nil
+      end
+      test.assert(failed, "expected the test-owned decoder to reject")
+      test.assert(cleared, "recovery restored a stale raw packet owner")
+      assert_sender_released_exactly_once(
+        peer_rx, release_held_tx, "raw decode after earlier protected assignment")
+    end)
+  end)
+end
+
 local function enqueue_earlier_sender_hook(
   tx: thread.Sender<|EarlierSenderHook|>
 ): (thread.Receiver<|integer|>, function (): ())

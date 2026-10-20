@@ -266,43 +266,33 @@ The caller passes its actual guarded `foreign *void` local. An exact pointer
 local supplied to the `foreign *(*void)` parameter uses the checker's
 `mutable_c_address` coercion, so codegen passes `&local`
 ([contextual object-pointer conversion](c-ffi-expressions.md#contextual-object-pointer-conversion)).
-Ordinary Titan calls record no `_c_mutated_decls`, so the decode call neither
-marks the local as written for spill analysis nor refreshes an existing spill.
+The write analysis recognizes this conversion for ordinary Titan calls as
+well as foreign calls. If recovery or a deferred guard can read the local,
+codegen makes the actual non-GC scalar local a volatile automatic object
+(`void *volatile raw`), with no separate spill snapshot. The decoder clears
+that same storage, so cleanup observes nil even when decode raises without
+returning. Earlier assignments in protected regions do not invalidate this
+guarantee: recovery never reloads a stale packet owner into the volatile home.
+This is the supported GCC/Clang implementation guarantee, including Windows
+Clang/MSYS2, not a claim of strictly conforming ISO C: the outgoing
+unqualified pointer has the ISO C 6.7.3p6 volatile-access caveat. See
+[recovery storage](error-handling.md#setjmp-sensitive-localparameter-spills)
+for the escaped-store/opaque-raise assumption and production LTO analysis.
 
-The safety of the caller's guard therefore depends on the local never being
-spilled at all. Spills are per declaration across the whole generated C
-function: `coder._analyze_try_spills_stat` marks a Decl `_needs_spill` when any
-protected body (a `catch`-trailed block or a `defer` tail) writes it, by
-declaration, assignment, or `_c_mutated_decls` from a mutating C call, and that
-body's catch, finally, or post-try continuation reads it (a catch that has its
-own finally is analyzed the same way). Every later recovery boundary whose spill
-scope contains the Decl then reloads it from the spill (`spill_reload`), and
-only Titan assignments and C out-argument calls update the spill. If any
-region, including one that ended before the guard was installed, spilled the
-guarded local, a decode error would make the guard's recovery reload the stale
-pre-decode packet pointer and discard the packet a second time. For example,
-`local raw = nil; do raw = encode_message(v) catch return nil end` followed by
-`defer discard_message(raw); return decode_message(raw)` double-frees when
-decode raises; a gcc `-O2` and a clang `-O2` AddressSanitizer probe both
-confirm this, while the unspilled forms run clean.
+Install `defer discard_message(raw)` immediately after taking ownership and
+call `decode_message(raw)` directly in that owning function. A fallible
+ordinary forwarding helper would introduce its own entry preamble before
+decode takes ownership. Captured locals still cannot supply mutable pointer
+storage. No registry ledger, heap cell, or raw-slot wrapper is needed.
 
-An unspilled local holds no volatile copy. ISO C leaves an automatic object
-changed between `setjmp` and `longjmp` indeterminate, so reading the local
-after recovery relies on the same accepted compiler assumption as native
-registrar wait cells: because its address escapes to the callee, the compiler
-keeps it in memory and recovery observes decode's clear
-([longjmp-safe spills](c-ffi-expressions.md#longjmp-safe-aggregate-spills)).
-
-Every production caller (the `thread.Receiver` receive paths, child bootstrap,
-cancellation delivery, terminal-status reconstruction, and
-`async.Receiver:wait`) gives the local its packet in its own declaration or
-through one C out-argument call that no reading region encloses, installs the
-guard immediately, and never writes the local afterward. `Receiver:wait`
-declares a fresh local per loop turn and installs its guard only after
-`receiver_take_native` reports a taken packet. The generated C for these
-callers contains no spill for the guarded local. Lua code cannot call
-`decode_message`: generated Lua entries have no dynamic coercion for raw C
-pointer parameters.
+The `thread.Receiver` receive paths, child bootstrap, cancellation delivery,
+terminal-status reconstruction, and `async.Receiver:wait` all follow this
+rule. `Receiver:wait` declares a fresh local per loop turn and installs its
+guard only after `receiver_take_native` reports a taken packet. Their
+recovery-sensitive raw slots now use volatile loads/stores; this adds no
+allocation, copy, ABI change, or additional call on these paths. Lua code
+cannot call `decode_message`: generated Lua entries have no dynamic coercion
+for raw C pointer parameters.
 
 Decode enters Lua, may initialize transfer and destination modules, and may run
 decoders; it cannot use a closed state and is not part of the no-Lua release
