@@ -2,6 +2,8 @@ local test = import "test"
 local runtime_test = import "support.runtime.titan"
 local async = import "async"
 local fs = import "fs"
+local reflect = import "reflect"
+local thread = import "thread"
 foreign import "lua.h"
 foreign import "titan/ffi.h"
 foreign import "source_fixture.h"
@@ -132,4 +134,37 @@ local function package_loaded_table(
     raise "'package.loaded' is not a table"
   end
   return raw_loaded as {string: value}
+end
+
+-- Thread entry for late nominal registration. This module does not import the
+-- probed record's declaring module, so a worker restoring this entry starts
+-- without that nominal: the first resolution misses, then decoding the received
+-- structural packet loads the declaring module and reconstructs the record with
+-- the descriptor found after that load, after which the name resolves.
+local function late_nominal_probe(packets: thread.Receiver<|value|>, name: string): integer
+  case reflect.NamedType(name):resolve()
+  when is_value() then
+  else raise "nominal was registered before its packet arrived: " .. name
+  end
+  local item = packets:receive()
+  case reflect.NamedType(name):resolve()
+  when is_record(descriptor) then
+    if descriptor.name ~= name then raise "late registration resolved another record" end
+  else raise "a name registered after a miss did not resolve: " .. name
+  end
+  case reflect.inspect(item)
+  when is_record(record_value) then
+    if record_value.type.name ~= name then
+      raise "decoded a different record: " .. record_value.type.name
+    end
+    return record_value:get(1)
+  else raise "decoded packet is not a record"
+  end
+end
+
+-- Spawn here, not in a test module: the erased spawn parameter realizes a
+-- callable adapter in the spawning module, and the worker loads that module.
+local function spawn_late_nominal_probe(packets: thread.Receiver<|value|>,
+                                        name: string): thread.Thread<|integer|>
+  return thread.spawn_two(late_nominal_probe, packets, name)
 end

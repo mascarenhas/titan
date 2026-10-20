@@ -182,12 +182,15 @@ conversion such as `value` injection, is not recognized. The coder trusts only
 the checker annotation and never recomputes escape or liveness facts.
 
 `annotate_linear_function_returns` runs after each top-level function body.
-When every return of a mutable Array result is a fresh constructor or such an
-unaliased builder, it replaces that result type with a `linear` Array type.
-Bodies are checked in logical declaration order, so only later callers in the
-same module see it: `types.written_cast` then selects `freeze` for a written
-cast of the call result, and assignment admits an implicit const target. The
-protobuf decoder relies on both shapes
+When every return of a mutable Array result is a fresh constructor, such an
+unaliased builder, or the call result of an earlier function whose result is
+already linear (`is_linear_returned_value` accepts `exp._type.linear`), it
+replaces that result type with a `linear` Array type. A linear call result may
+likewise initialize a builder local. Bodies are checked in logical declaration
+order, so only later callers in the same module see it: `types.written_cast`
+then selects `freeze` for a written cast of the call result, and assignment
+admits an implicit const target. The protobuf decoder relies on both the
+builder-local terminal cast and the linear call-result cast
 ([decoding](protobuf-library.md#decoding)).
 
 A constructor checked under a const Array target is annotated as const at

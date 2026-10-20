@@ -324,7 +324,8 @@ source binding nor any mutable alias is used afterward.
    `consume(items as const { T })`, or a returned cast that the function result
    then converts to `value`, keeps the copy.
 2. **Linear function returns:** When all return paths of a function return a
-   freshly constructed array or an unaliased local builder array, the function's
+   freshly constructed array, an unaliased local builder array, or the result
+   of an earlier linear call, the function's
    return type is marked linear. Directly assigning or casting the call result to
    `const { T }` (e.g. `local res: const { B } = map(xs, f)`) freezes the
    returned array in place without copying. Only a callee that precedes the

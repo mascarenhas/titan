@@ -105,10 +105,21 @@ after loading the declaring module. The shared slice raises the unknown-name
 error for nil and the kind-mismatch error otherwise, then hands the record or
 union descriptor to private `deserialize_record_buffer` /
 `deserialize_union_buffer`. Those check the message size, require public
-members, parse the root slice, and decode it. `deserialize(bytes, descriptor)`
-reaches the same helpers after `resolve_type`, so no nominal root decode
-allocates a `reflect.Type.is_record` / `is_union` wrapper or repeats the
-registry lookup.
+members, parse the root slice, and decode it. These name-based roots therefore
+perform one registry lookup and allocate no `reflect.Type` wrapper.
+
+`deserialize(bytes, descriptor)` reaches the same helpers after `resolve_type`.
+A `Type.is_record` / `is_union` descriptor dispatches directly. A
+`Type.is_named` descriptor first checks `find_nominal` and then calls
+`NamedType:resolve()`, whose state-local cache
+([reflection](standard-library-reflect.md#descriptor-hydration)) allocates
+that name's wrapper only on its first resolution in the state. Root errors keep
+one order on every entry: descriptor or name resolution (unknown nominal,
+cyclic alias), root-kind rejection (not a record or union, nominal kind
+mismatch), then the 2 GiB size check, then the public-member check. For
+`deserialize` this resolves the descriptor before the size check, so an input
+over 2 GiB with an unknown or non-nominal root descriptor reports the
+descriptor error.
 
 `titan.protobuf` never imports `titan.transfer` or `titan.thread`. Instead,
 `transfer` installs its `packet_context` resolver once via
@@ -316,18 +327,22 @@ destination state's initialized nominal registry; the nominal helper checks
 both name and requested record/union kind. It does not guess a module name or
 execute a module loader.
 
-Each reconstruction builder (record fields, union parts, foreign-struct fields,
-and foreign or const Array entries) is a fresh decoder-local Array. Its final
-use is a standalone `local frozen = builder as const {value}` declaration, so
-the checker's [linear-use proof](const-values.md#array-relations-and-linear-use-analysis)
-retags the proxy in place instead of allocating a shallow copy before
-`construct` or the parent field consumes it. `decode_array` first selects the
-result shape from the declared constness and, for a maybe-const Array, the
-final wire marker. A mutable result returns the linear `decode_array_entries`
-builder unchanged; a const result casts that call result, which also freezes in
-place. The element walk still validates every marker occurrence at its wire
-position before any Array is returned. Keep these casts out of call arguments
-and implicitly converted returns, which would restore the copy.
+Every reconstruction builder (record fields, union parts, foreign-struct fields,
+and foreign or const Array entries) is a fresh decoder-local Array, and every
+const result is produced by a standalone `local frozen = ... as const {value}`
+declaration. For records, unions, foreign structs, and foreign arrays the cast
+operand is the builder local itself, which the checker's
+[linear-use proof](const-values.md#array-relations-and-linear-use-analysis)
+freezes in place. A const Array casts the result of a `decode_array_entries`
+call instead; that function only returns its builder, so its declared result is
+linear and the written cast of the call result also freezes in place. Neither
+path allocates a shallow copy before `construct` or the parent field consumes
+the Array. `decode_array` first selects the result shape from the declared
+constness and, for a maybe-const Array, the final wire marker; a mutable result
+returns the `decode_array_entries` builder unchanged. The element walk still
+validates every marker occurrence at its wire position before any Array is
+returned. Keep these casts out of call arguments and implicitly converted
+returns, which would restore the copy.
 
 The reader limits nesting and message size. Native reconstruction supplies the
 final C range, qualifier, fixed-array extent, and construction checks. A decoded

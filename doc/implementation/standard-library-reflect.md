@@ -98,7 +98,11 @@ name every generic application shares. Only successful lookups are stored;
 an unknown name returns a fresh `Type.is_value()` and consults the registry
 again next time, matching `find_nominal`'s retryable misses. Reusing the
 immutable wrapper removes one userdata allocation per resolved named field in
-protobuf encode/decode and in transfer's reflective paths.
+protobuf encode/decode and in transfer's reflective paths. The cache is an
+allocation optimization, not an identity contract: no library code compares or
+keys `Type` values by identity, and the public chapter tells callers not to.
+Native tests assert resolution kinds and names, never wrapper identity. The
+lua owner's worker test covers a miss followed by later registration.
 
 Record and union hydration retain the generated projector, constructor, and
 declaring module owner. Existing serialized total field/variant counts are

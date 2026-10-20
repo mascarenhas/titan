@@ -85,6 +85,11 @@ accept its record/union descriptor or a named descriptor that resolves to it.
 `deserialize_nominal` performs the same operation using a fully qualified name,
 and checks the requested nominal kind. It is also the independent-state
 argument conversion entry. Unknown names raise; lookup does not load modules.
+Every record/union root decoding entry reports root problems in one order: an
+unknown name or unresolvable descriptor first, then a root that is not a record
+or union of the requested kind, then the 2 GiB message limit, and finally the
+public-member requirement. An oversized input with a bad root descriptor
+therefore reports the descriptor error.
 
 `serialize_to_buffer` and `serialize_fields_to_buffer` append encoded wire bytes
 into a caller-initialized `titan_protobuf_buffer` (`buf`) without allocating an

@@ -1,5 +1,6 @@
 local transfer_fixture = import "lua.transfer_fixture"
 local transfer_protobuf = import "titan.protobuf"
+local nominal_thread = import "thread"
 
 local foreign function transfer_state_pointer(state: *lua_State): int
   ffi.lua_pushlightuserdata(state, state)
@@ -437,4 +438,24 @@ function test_lua_independent_closure_rejects_managed_native_pointer_captures(
   gclib.collect()
   local callback: function (): boolean = transfer_closure(result)
   test.assert(callback(), "absent optional managed pointer did not remain nil")
+end
+
+function test_lua_worker_registers_a_missed_nominal_when_its_packet_decodes(
+    _context: test.Context)
+  runtime_test.run(function ()
+    local tx, rx = nominal_thread.channel<|value|>(1)
+    defer tx:close()
+    defer rx:close()
+    -- The entry's module never imports lua.transfer_fixture, so the worker
+    -- resolves this name before any packet has loaded its declaring module.
+    local worker = lua_support.spawn_late_nominal_probe(rx,
+      "lua.transfer_fixture.TransferRecord")
+    tx:send(transfer_fixture.record_value(23))
+    case worker:join()
+    when succeeded(number) then
+      test.assert(number == 23, "worker reconstructed a different record")
+    when failed(failure) then failure:raise()
+    else raise "late nominal worker did not finish normally"
+    end
+  end)
 end

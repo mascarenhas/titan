@@ -222,10 +222,10 @@ local function Message:merged_message(number: integer): Message
   return read_message_slice(ffi.titan_protobuf_bytes_ptr(merged), 0, #merged, merged, self.context)
 end
 
--- Each builder below ends in a sole `local frozen = builder as const {value}`
--- declaration, so the checker's linear-use proof retags the fresh proxy in
--- place instead of shallow-copying it. Keep that statement standalone: a cast
--- nested in a call argument or an implicitly converted return copies.
+-- Each result below is a standalone `local frozen = ... as const {value}` of a
+-- fresh builder local, or of decode_array_entries' linear call result, so the
+-- checker retags the proxy in place instead of shallow-copying it. A cast nested
+-- in a call argument or an implicitly converted return would copy instead.
 local function decode_record(message: Message, descriptor: reflect.RecordType,
                               depth: integer): value
   require_depth(depth)
