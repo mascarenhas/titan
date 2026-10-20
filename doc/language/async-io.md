@@ -607,7 +607,7 @@ Runtime:
   has unwound; that unwinding never releases the newer reservation.
 - **No per-wait reader state:** Each `Receiver` owns one reader token and one
   cancellation action for its whole lifetime, so `wait` allocates no
-  reservation state of its own; decoding a received value is unchanged.
+  reservation state of its own.
 
 **Closing.** `close()` is idempotent and does not require a Task. It marks the
 Receiver closed, atomically takes and disposes any unread packet in the native

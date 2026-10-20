@@ -237,7 +237,7 @@ function test_receiver_cancelled_reader_exit_keeps_successor_reservation(_contex
     test.assert(support.cancelled_with(async.join(first), "first Receiver reader cancelled"))
     async.send(receiver:handle(), async.TransferValue.is_integer(81))
     -- The successor still owns the reader slot after the cancelled reader left.
-    receiver_error(function () receiver:wait() end)
+    receiver_error(function () receiver:wait() end, "receiver already has a waiting reader")
     case async.join(successor)
     when succeeded(item) then test.assert(receiver_integer(item) == 81)
     else raise "cancelled Receiver reader withdrew its successor's reservation" end
@@ -253,6 +253,74 @@ function test_receiver_cancelled_reader_exit_keeps_successor_reservation(_contex
     async.send(receiver:handle(), async.TransferValue.is_integer(83))
     test.assert(receiver_integer(receiver:wait()) == 83,
                 "Receiver reservation remained after successive readers")
+  end)
+end
+
+function test_receiver_close_wakes_successor_after_cancelled_reader(_context: test.Context)
+  runtime_test.run(function ()
+    local receiver = async.receiver()
+    defer receiver:close()
+    local first = async.run<|value, value|>(receiver:wait)
+    task_support.cleanup_task(first, "cancelled Receiver reader cleanup")
+    support.wait_until_waiting(first)
+    local successor = async.run<|value, value|>(receiver:wait)
+    task_support.cleanup_task(successor, "closed successor Receiver reader cleanup")
+    first:cancel(async.CancellationReason.simple("first Receiver reader cancelled"))
+    support.wait_until_waiting(successor)
+    test.assert(support.cancelled_with(async.join(first), "first Receiver reader cancelled"))
+    -- Probe with a packet present so a lost reservation fails here instead of
+    -- leaving the successor parked.
+    async.send(receiver:handle(), async.TransferValue.is_integer(71))
+    receiver_error(function () receiver:wait() end, "receiver already has a waiting reader")
+    -- Close disposes the unread packet and wakes the reservation holder: the
+    -- successor, not the cancelled reader that has already left.
+    receiver:close()
+    case async.join(successor)
+    when failed(failure) then test.assert(failure.error == "receiver is closed")
+    else raise "close did not wake the successor Receiver reader" end
+    receiver_error(function () receiver:wait() end, "receiver is closed")
+  end)
+end
+
+function test_receiver_cancel_after_queued_wake_keeps_packet_and_successor(_context: test.Context)
+  runtime_test.run(function ()
+    local receiver = async.receiver()
+    defer receiver:close()
+    local first = async.run<|value, value|>(receiver:wait)
+    task_support.cleanup_task(first, "queued-wake Receiver reader cleanup")
+    support.wait_until_waiting(first)
+    async.send(receiver:handle(), async.TransferValue.is_integer(91))
+    -- After the poll phase the callback has queued the reader's wake, but the
+    -- ready timer has not delivered it yet.
+    coalescing_receiver_after_poll()
+    test.assert(first:status():as_string() == "waiting",
+                "queued Receiver wake was delivered before cancellation")
+    first:cancel(async.CancellationReason.simple("woken Receiver reader cancelled"))
+    -- Cancellation withdrew the reservation despite the queued wake and left
+    -- the packet unread, before the cancelled reader has unwound.
+    test.assert(receiver_integer(receiver:wait()) == 91,
+                "cancelled reader with a queued wake kept its reservation or packet")
+    local successor = async.running()
+    local prober = async.run<|nil, value|>(function (): nil
+      while not first:status():has_finished() do async.yield() end
+      async.send(receiver:handle(), async.TransferValue.is_integer(92))
+      do
+        receiver_error(function () receiver:wait() end,
+                       "receiver already has a waiting reader")
+      catch
+        -- Fail the parked successor instead of leaving it suspended forever.
+        successor:cancel(async.CancellationReason.simple("Receiver reservation lost"))
+        raise
+      end
+      return nil
+    end)
+    task_support.cleanup_task(prober, "queued-wake Receiver prober cleanup")
+    -- Suspend as the successor while the cancelled reader's wake is still
+    -- queued; its later unwinding must keep this reservation and its wakes.
+    test.assert(receiver_integer(receiver:wait()) == 92,
+                "cancelled reader's unwinding released its successor's reservation")
+    test.assert(support.cancelled_with(async.join(first), "woken Receiver reader cancelled"))
+    test.assert(async.join(prober):has_succeeded(), "Receiver reservation probe failed")
   end)
 end
 
