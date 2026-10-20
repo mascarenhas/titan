@@ -199,13 +199,6 @@ local foreign function channel_destroy_unreferenced(ch: *titan_thread_channel)
   ffi.free(ch)
 end
 
--- The caller's direct foreign decode commits its raw-owner spill before this
--- ordinary helper can allocate or propagate the decoder's error.
-local function thread_message_value(status: foreign int, result: value): value
-  if status ~= 0 then transfer.raise_message_error(status, result) end
-  return result
-end
-
 local foreign function channel_drain_and_discard(ch: *titan_thread_channel)
   if ch == nil then return end
   while true do

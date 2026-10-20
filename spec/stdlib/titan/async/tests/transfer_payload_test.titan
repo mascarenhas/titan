@@ -14,44 +14,23 @@ foreign import "stdlib.h"
 foreign import "transfer.h"
 foreign type TransferMessageSlot = *void
 
--- Called only AFTER a consuming foreign entry has returned and committed the
--- caller slot. The caller must copy the native result/error with lua_totvalue
--- in its own frame BEFORE entering this ordinary helper: the helper preamble
--- reserves fresh nil root slots above the caller's value, so top -1 here is
--- this function's own slot, never the caller's result.
-local function transfer_message_result(status: foreign int, result: value): value
-  if status ~= 0 then
-    transfer_mod.raise_message_error(status, result)
-  end
-  return result
-end
-
+-- Own the raw packet local in this frame: decode_message consumes and clears
+-- the actual guarded local, so the deferred discard sees nil after success or
+-- any decode error.
 local function transfer_roundtrip_value(candidate: value): value
   local raw = transfer_mod.encode_message(candidate)
   defer transfer_mod.discard_message(raw)
-  local top = ffi.lua_gettop(L)
-  local status = transfer_mod.decode_message(L, raw)
-  local result: value = nil
-  if status >= 0 then result = ffi.lua_totvalue(L, -1) end
-  ffi.lua_settop(L, top)
-  return transfer_message_result(status, result)
+  return transfer_mod.decode_message(raw)
 end
 
--- These stateful C entries receive the *caller's slot*, not an unguarded raw
--- value. They are passed as ordinary Lua C functions to independent states.
+-- This stateful C entry receives the *caller's slot*, not an unguarded raw
+-- value. It is passed as an ordinary Lua C function to independent states.
 local foreign function transfer_discard_slot_lua(state: *lua_State): int
   local slot = ffi.lua_touserdata(state, 1) as foreign *(*void)
   local raw = slot[0]
   slot[0] = nil
   transfer_mod.discard_message(raw)
   return 0
-end
-local foreign function transfer_decode_slot_lua(state: *lua_State): int
-  local slot = ffi.lua_touserdata(state, 1) as foreign *(*void)
-  local status = transfer_mod.decode_message(state, slot)
-  if status > 0 then return ffi.lua_error(state) end
-  if status < 0 then return ffi.luaL_error(state, "transfer raw decode setup failed") end
-  return 1
 end
 
 local transfer_payload_new_calls = 0
@@ -963,12 +942,7 @@ function test_transfer_resource_decoder_order_and_partial_adoption(context: test
     support.collect_garbage()
     test.assert(not rx1:is_closed() and not rx2:is_closed(),
                 "encoded packet did not retain encoded Senders after source GC")
-    local top = ffi.lua_gettop(L)
-    local status = transfer_mod.decode_message(L, raw)
-    local result: value = nil
-    if status >= 0 then result = ffi.lua_totvalue(L, -1) end
-    ffi.lua_settop(L, top)
-    local decoded: TransferPayloadSenderComposite = transfer_message_result(status, result)
+    local decoded: TransferPayloadSenderComposite = transfer_mod.decode_message(raw)
     test.assert(#transfer_hook_log == 6 and
                 transfer_hook_log[1] == "enc:b" and transfer_hook_log[2] == "enc:m" and
                 transfer_hook_log[3] == "enc:a" and transfer_hook_log[4] == "dec:b" and
@@ -991,12 +965,7 @@ function test_transfer_resource_decoder_order_and_partial_adoption(context: test
     test.assert(not rx1:is_closed() and not rx2:is_closed())
     local caught = false
     do
-      local top = ffi.lua_gettop(L)
-      local status = transfer_mod.decode_message(L, raw)
-      local result: value = nil
-      if status >= 0 then result = ffi.lua_totvalue(L, -1) end
-      ffi.lua_settop(L, top)
-      transfer_message_result(status, result)
+      transfer_mod.decode_message(raw)
     catch
       caught = error is string and support.contains(error, "hook-decode-boom:b")
     end
@@ -1019,12 +988,7 @@ function test_transfer_resource_decoder_order_and_partial_adoption(context: test
     test.assert(not rx1:is_closed() and not rx2:is_closed())
     local caught = false
     do
-      local top = ffi.lua_gettop(L)
-      local status = transfer_mod.decode_message(L, raw)
-      local result: value = nil
-      if status >= 0 then result = ffi.lua_totvalue(L, -1) end
-      ffi.lua_settop(L, top)
-      transfer_message_result(status, result)
+      transfer_mod.decode_message(raw)
     catch
       caught = error is string and support.contains(error, "hook-decode-boom:m")
     end
@@ -1049,12 +1013,7 @@ function test_transfer_resource_decoder_order_and_partial_adoption(context: test
     test.assert(not rx1:is_closed() and not rx2:is_closed())
     local caught = false
     do
-      local top = ffi.lua_gettop(L)
-      local status = transfer_mod.decode_message(L, raw)
-      local result: value = nil
-      if status >= 0 then result = ffi.lua_totvalue(L, -1) end
-      ffi.lua_settop(L, top)
-      transfer_message_result(status, result)
+      transfer_mod.decode_message(raw)
     catch
       caught = error is string and support.contains(error, "hook-decode-boom:m")
     end
@@ -1081,12 +1040,7 @@ function test_transfer_resource_decoder_order_and_partial_adoption(context: test
     support.collect_garbage()
     support.collect_garbage()
     test.assert(not tx1_ok:is_closed() and not tx2_ok:is_closed())
-    local top_ok = ffi.lua_gettop(L)
-    local status_ok = transfer_mod.decode_message(L, raw_ok)
-    local result_ok: value = nil
-    if status_ok >= 0 then result_ok = ffi.lua_totvalue(L, -1) end
-    ffi.lua_settop(L, top_ok)
-    local decoded: TransferPayloadReceiverComposite = transfer_message_result(status_ok, result_ok)
+    local decoded: TransferPayloadReceiverComposite = transfer_mod.decode_message(raw_ok)
     local ok1, v1? = decoded.first:try_receive()
     local ok2, v2? = decoded.second:try_receive()
     test.assert(ok1 and v1 == 51 and ok2 and v2 == 52)
@@ -1104,12 +1058,7 @@ function test_transfer_resource_decoder_order_and_partial_adoption(context: test
     test.assert(not tx1_fb:is_closed() and not tx2_fb:is_closed())
     local caught_before = false
     do
-      local top = ffi.lua_gettop(L)
-      local status = transfer_mod.decode_message(L, raw_fb)
-      local result: value = nil
-      if status >= 0 then result = ffi.lua_totvalue(L, -1) end
-      ffi.lua_settop(L, top)
-      transfer_message_result(status, result)
+      transfer_mod.decode_message(raw_fb)
     catch
       caught_before = error is string and support.contains(error, "hook-decode-boom:b")
     end
@@ -1127,12 +1076,7 @@ function test_transfer_resource_decoder_order_and_partial_adoption(context: test
     support.collect_garbage()
     local caught_partial = false
     do
-      local top = ffi.lua_gettop(L)
-      local status = transfer_mod.decode_message(L, raw_pa)
-      local result: value = nil
-      if status >= 0 then result = ffi.lua_totvalue(L, -1) end
-      ffi.lua_settop(L, top)
-      transfer_message_result(status, result)
+      transfer_mod.decode_message(raw_pa)
     catch
       caught_partial = error is string and support.contains(error, "hook-decode-boom:m")
     end
@@ -1304,19 +1248,8 @@ function test_transfer_resource_nested_shapes_duplicates_and_array_rejection(
       test.assert(not tx_peers[i]:is_closed(), "nested Receiver was not retained in packet")
     end
 
-    local top_g = ffi.lua_gettop(L)
-    local status_g = transfer_mod.decode_message(L, graph_raw)
-    local result_g: value = nil
-    if status_g >= 0 then result_g = ffi.lua_totvalue(L, -1) end
-    ffi.lua_settop(L, top_g)
-    local decoded_graph: TransferPayloadEndpointGraph = transfer_message_result(status_g, result_g)
-
-    local top_c = ffi.lua_gettop(L)
-    local status_c = transfer_mod.decode_message(L, closure_raw)
-    local result_c: value = nil
-    if status_c >= 0 then result_c = ffi.lua_totvalue(L, -1) end
-    ffi.lua_settop(L, top_c)
-    local decoded_closure: function (): integer = transfer_message_result(status_c, result_c)
+    local decoded_graph: TransferPayloadEndpointGraph = transfer_mod.decode_message(graph_raw)
+    local decoded_closure: function (): integer = transfer_mod.decode_message(closure_raw)
 
     reset_transfer_hook_state()
     test.assert(decoded_graph.direct_tx:try_send(1))
@@ -1357,13 +1290,7 @@ function test_transfer_resource_nested_shapes_duplicates_and_array_rejection(
     support.collect_garbage()
     support.collect_garbage()
     test.assert(not rx_peer:is_closed() and not tx_peer:is_closed())
-    local top = ffi.lua_gettop(L)
-    local status = transfer_mod.decode_message(L, raw)
-    local decoded_val: value = nil
-    if status >= 0 then decoded_val = ffi.lua_totvalue(L, -1) end
-    ffi.lua_settop(L, top)
-    local holders = extract_duplicate_holders(transfer_message_result(status, decoded_val))
-    decoded_val = nil
+    local holders = extract_duplicate_holders(transfer_mod.decode_message(raw))
     check_duplicate_adoption_release(holders, rx_peer, tx_peer)
   end)
 
@@ -1440,12 +1367,7 @@ function TransferPayloadNestedScopeProbe:to_transfer_payload(): string
   nested_scope_peer_rxs[#nested_scope_peer_rxs + 1] = fail_dec_rx2
   local caught = false
   do
-    local top = ffi.lua_gettop(L)
-    local status = transfer_mod.decode_message(L, fail_dec_raw)
-    local result: value = nil
-    if status >= 0 then result = ffi.lua_totvalue(L, -1) end
-    ffi.lua_settop(L, top)
-    transfer_message_result(status, result)
+    transfer_mod.decode_message(fail_dec_raw)
   catch
     caught = error is string and support.contains(error, "hook-decode-boom:b")
   end
@@ -1515,12 +1437,7 @@ function TransferPayloadNestedScopeProbe.from_transfer_payload(
   nested_scope_peer_rxs[#nested_scope_peer_rxs + 1] = fail_dec_rx2
   local caught = false
   do
-    local top = ffi.lua_gettop(L)
-    local status = transfer_mod.decode_message(L, fail_dec_raw)
-    local result: value = nil
-    if status >= 0 then result = ffi.lua_totvalue(L, -1) end
-    ffi.lua_settop(L, top)
-    transfer_message_result(status, result)
+    transfer_mod.decode_message(fail_dec_raw)
   catch
     caught = error is string and support.contains(error, "hook-decode-boom:b")
   end
@@ -1596,12 +1513,7 @@ function test_transfer_resource_nested_scopes_table_growth_and_frontier(
     support.collect_garbage()
     test.assert(not outer_rx1:is_closed() and not outer_rx2:is_closed())
 
-    local top = ffi.lua_gettop(L)
-    local status = transfer_mod.decode_message(L, outer_raw)
-    local result: value = nil
-    if status >= 0 then result = ffi.lua_totvalue(L, -1) end
-    ffi.lua_settop(L, top)
-    local decoded: TransferPayloadOuterScopeEnvelope = transfer_message_result(status, result)
+    local decoded: TransferPayloadOuterScopeEnvelope = transfer_mod.decode_message(outer_raw)
     test.assert(decoded.probe.mode == "nested-ok")
     test.assert((decoded.first.tx as transfer_thread.Sender<|integer|>):try_send(111))
     test.assert((decoded.second.tx as transfer_thread.Sender<|integer|>):try_send(222))
@@ -1646,12 +1558,7 @@ function test_transfer_resource_nested_scopes_table_growth_and_frontier(
                   transfer_hook_log[1] == "enc:capture-first" and
                   transfer_hook_log[2] == "enc:capture-second",
                   "packet closure encode did not project captures before hooks or called hooks twice")
-      local top = ffi.lua_gettop(L)
-      local status = transfer_mod.decode_message(L, raw)
-      local result: value = nil
-      if status >= 0 then result = ffi.lua_totvalue(L, -1) end
-      ffi.lua_settop(L, top)
-      local restored: function (): integer = transfer_message_result(status, result)
+      local restored: function (): integer = transfer_mod.decode_message(raw)
       test.assert(restored() == 30,
                   "packet closure encode observed post-hook mutated capture cells")
       test.assert(#transfer_hook_log == 3 and transfer_hook_log[3] == "dec:capture-second")
@@ -1769,12 +1676,7 @@ function test_transfer_resource_validation_and_claim_errors(context: test.Contex
     local raw = transfer_mod.encode_message(TransferPayloadCustomResourceProbe("ok", ptr))
     defer transfer_mod.discard_message(raw)
     test.assert(counter[0] == 2)
-    local top = ffi.lua_gettop(L)
-    local status = transfer_mod.decode_message(L, raw)
-    local result: value = nil
-    if status >= 0 then result = ffi.lua_totvalue(L, -1) end
-    ffi.lua_settop(L, top)
-    local claimed: TransferPayloadCustomResourceProbe = transfer_message_result(status, result)
+    local claimed: TransferPayloadCustomResourceProbe = transfer_mod.decode_message(raw)
     test.assert(claimed.ptr == ptr and counter[0] == 2,
                 "claimed resource was released by decode_message")
     test_resource_release(claimed.ptr)
@@ -1817,12 +1719,7 @@ function test_transfer_resource_validation_and_claim_errors(context: test.Contex
       test.assert(not peer_rx:is_closed())
       local caught = false
       do
-        local top = ffi.lua_gettop(L)
-        local status = transfer_mod.decode_message(L, raw)
-        local result: value = nil
-        if status >= 0 then result = ffi.lua_totvalue(L, -1) end
-        ffi.lua_settop(L, top)
-        transfer_message_result(status, result)
+        transfer_mod.decode_message(raw)
       catch
         caught = true
       end
@@ -1840,12 +1737,7 @@ function test_transfer_resource_validation_and_claim_errors(context: test.Contex
     test.assert(not rep_rx:is_closed())
     local caught_repeat = false
     do
-      local top = ffi.lua_gettop(L)
-      local status = transfer_mod.decode_message(L, rep_raw)
-      local result: value = nil
-      if status >= 0 then result = ffi.lua_totvalue(L, -1) end
-      ffi.lua_settop(L, top)
-      transfer_message_result(status, result)
+      transfer_mod.decode_message(rep_raw)
     catch
       caught_repeat = true
     end
@@ -2032,12 +1924,11 @@ function test_transfer_discard_skips_decoders_and_module_loaders(context: test.C
       support.collect_garbage()
       transfer_payload_raises(function ()
         state:run([[
-          local slot, decode = ...
-          local transfer = require('titan.transfer')
-          return decode(slot)
+          local slot = ...
+          local support = require('async.test_support')
+          return support.decode_raw_slot(slot, 0)
         ]], "=decode-missing-preload",
-          async.TransferValue.is_pointer(missing_slot as foreign *void),
-          async.TransferValue.is_function(transfer_decode_slot_lua))
+          async.TransferValue.is_pointer(missing_slot as foreign *void))
       end, "decode unexpectedly succeeded without its nominal module")
       test.assert(missing_slot[0] == nil,
                   "failed raw decode did not consume its caller's slot")
@@ -2135,12 +2026,7 @@ function test_transfer_resource_allocation_and_finalizer_failures(context: test.
     ffi.lua_setallocf(L, transfer_limited_lua_alloc, ctrl as foreign *void)
     local caught = false
     do
-      local top = ffi.lua_gettop(L)
-      local status = transfer_mod.decode_message(L, raw)
-      local result: value = nil
-      if status >= 0 then result = ffi.lua_totvalue(L, -1) end
-      ffi.lua_settop(L, top)
-      transfer_message_result(status, result)
+      transfer_mod.decode_message(raw)
     catch
       caught = true
     end
@@ -2717,12 +2603,7 @@ function test_transfer_scalar_and_structural_codec_equivalence(context: test.Con
       defer transfer_mod.discard_message(rec_raw)
       test.assert(#transfer_hook_log == 1 and transfer_hook_log[1] == "enc:rec-once",
                   "encode_message invoked structural record child hook more than once")
-      local top_r = ffi.lua_gettop(L)
-      local status_r = transfer_mod.decode_message(L, rec_raw)
-      local result_r: value = nil
-      if status_r >= 0 then result_r = ffi.lua_totvalue(L, -1) end
-      ffi.lua_settop(L, top_r)
-      local rec_dec: TransferPayloadStructuralHookParent = transfer_message_result(status_r, result_r)
+      local rec_dec: TransferPayloadStructuralHookParent = transfer_mod.decode_message(rec_raw)
       test.assert(rec_dec.id == 77 and #transfer_hook_log == 2 and
                   transfer_hook_log[2] == "dec:rec-once")
 
@@ -2743,12 +2624,7 @@ function test_transfer_scalar_and_structural_codec_equivalence(context: test.Con
       local u_raw = transfer_mod.encode_message(u)
       defer transfer_mod.discard_message(u_raw)
       test.assert(#transfer_hook_log == 1 and transfer_hook_log[1] == "enc:union-once")
-      local top_u = ffi.lua_gettop(L)
-      local status_u = transfer_mod.decode_message(L, u_raw)
-      local result_u: value = nil
-      if status_u >= 0 then result_u = ffi.lua_totvalue(L, -1) end
-      ffi.lua_settop(L, top_u)
-      local u_dec: TransferPayloadStructuralHookUnion = transfer_message_result(status_u, result_u)
+      local u_dec: TransferPayloadStructuralHookUnion = transfer_mod.decode_message(u_raw)
       case u_dec
       when present(_step, tag) then
         test.assert(tag == "u-tag" and #transfer_hook_log == 2 and
@@ -2842,12 +2718,7 @@ local function check_raw_child_has_no_transfer_authority(
     defer transfer_mod.discard_message(failing_raw)
     local caught = false
     do
-      local top = ffi.lua_gettop(L)
-      local status = transfer_mod.decode_message(L, failing_raw)
-      local result: value = nil
-      if status >= 0 then result = ffi.lua_totvalue(L, -1) end
-      ffi.lua_settop(L, top)
-      transfer_message_result(status, result)
+      transfer_mod.decode_message(failing_raw)
     catch
       caught = error is string and support.contains(error, "hook-decode-boom:raw-child-decode")
     end
@@ -2895,12 +2766,7 @@ function test_transfer_synchronous_hooks_isolate_raw_child_scope_authority(
   local raw, peer = make_raw()
   defer transfer_mod.discard_message(raw)
   defer peer:close()
-  local top = ffi.lua_gettop(L)
-  local status = transfer_mod.decode_message(L, raw)
-  local result: value = nil
-  if status >= 0 then result = ffi.lua_totvalue(L, -1) end
-  ffi.lua_settop(L, top)
-  local decoded: TransferPayloadSynchronousChildScope = transfer_message_result(status, result)
+  local decoded: TransferPayloadSynchronousChildScope = transfer_mod.decode_message(raw)
   local first_ok, first? = peer:try_receive()
   local second_ok, second? = peer:try_receive()
   test.assert(first_ok and first == 711 and second_ok and second == 712)
@@ -2954,12 +2820,7 @@ local function abandon_transfer_scope_fault(phase: string): transfer_thread.Rece
     end
     slot[0] = transfer_mod.encode_message(TransferPayloadAbandonedScopeFault(tx, phase))
     local decoder = transfer_coroutine.create(function (_: value): value
-      local top = ffi.lua_gettop(L)
-      local status = transfer_mod.decode_message(L, slot)
-      local result: value = nil
-      if status >= 0 then result = ffi.lua_totvalue(L, -1) end
-      ffi.lua_settop(L, top)
-      return transfer_message_result(status, result)
+      return transfer_mod.decode_message(slot)
     end, "transfer-abandoned-scope-fault")
     test.assert(decoder:resume(nil) == "unfinished-decode")
     test.assert(decoder:status() == "suspended")
@@ -3073,12 +2934,7 @@ local function transfer_adoption_failure_case(
     ffi.lua_setallocf(L, transfer_limited_lua_alloc, ctrl as foreign *void)
     local failed = false
     do
-      local top = ffi.lua_gettop(L)
-      local status = transfer_mod.decode_message(L, raw)
-      local result: value = nil
-      if status >= 0 then result = ffi.lua_totvalue(L, -1) end
-      ffi.lua_settop(L, top)
-      transfer_message_result(status, result)
+      transfer_mod.decode_message(raw)
     catch
       failed = true
     end
@@ -3119,12 +2975,7 @@ function test_transfer_hook_array_encounter_order_and_single_invocation(
               transfer_hook_log[1] == "enc:array-first" and
               transfer_hook_log[2] == "enc:array-second",
               "Array field encode changed hook encounter order or invoked a hook twice")
-  local top = ffi.lua_gettop(L)
-  local status = transfer_mod.decode_message(L, raw)
-  local result: value = nil
-  if status >= 0 then result = ffi.lua_totvalue(L, -1) end
-  ffi.lua_settop(L, top)
-  local restored: TransferPayloadStructuralHookArray = transfer_message_result(status, result)
+  local restored: TransferPayloadStructuralHookArray = transfer_mod.decode_message(raw)
   test.assert(#restored.items == 2 and
               restored.items[1].label == "array-first" and
               restored.items[2].label == "array-second" and
@@ -3174,12 +3025,7 @@ function test_transfer_decoder_failure_after_last_endpoint(context: test.Context
     test.assert(not peer1:is_closed() and not peer2:is_closed())
     local caught = false
     do
-      local top = ffi.lua_gettop(L)
-      local status = transfer_mod.decode_message(L, raw)
-      local result: value = nil
-      if status >= 0 then result = ffi.lua_totvalue(L, -1) end
-      ffi.lua_settop(L, top)
-      transfer_message_result(status, result)
+      transfer_mod.decode_message(raw)
     catch
       caught = error is string and support.contains(error, "hook-decode-boom:a")
     end
@@ -3204,12 +3050,7 @@ function test_transfer_decoder_failure_after_last_endpoint(context: test.Context
     test.assert(not peer1:is_closed() and not peer2:is_closed())
     local caught = false
     do
-      local top = ffi.lua_gettop(L)
-      local status = transfer_mod.decode_message(L, raw)
-      local result: value = nil
-      if status >= 0 then result = ffi.lua_totvalue(L, -1) end
-      ffi.lua_settop(L, top)
-      transfer_message_result(status, result)
+      transfer_mod.decode_message(raw)
     catch
       caught = error is string and support.contains(error, "hook-decode-boom:a")
     end
@@ -3261,12 +3102,7 @@ local function transfer_receiver_claim_case(context: test.Context, mode: string)
     test.assert(not peer:is_closed())
     local caught = false
     do
-      local top = ffi.lua_gettop(L)
-      local status = transfer_mod.decode_message(L, raw)
-      local result: value = nil
-      if status >= 0 then result = ffi.lua_totvalue(L, -1) end
-      ffi.lua_settop(L, top)
-      transfer_message_result(status, result)
+      transfer_mod.decode_message(raw)
     catch
       caught = true
     end
@@ -3308,19 +3144,18 @@ function test_transfer_throwing_module_loader_releases_packet(_context: test.Con
   local calls: owned int[] = foreign int.new_array(1)
   transfer_payload_error(function ()
     state:run([[
-      local slot, counter, count_loader, decode = ...
-      local transfer = require('titan.transfer')
+      local slot, counter, count_loader = ...
+      local support = require('async.test_support')
       package.loaded['async.tests'] = nil
       package.preload['async.tests'] = function()
         count_loader(counter)
         error('owned-module-load-fault')
       end
-      return decode(slot)
+      return support.decode_raw_slot(slot, 0)
     ]], "=throwing-transfer-module",
       transfer_mod.TransferValue.is_pointer(slot as foreign *void),
       transfer_mod.TransferValue.is_pointer(calls as foreign *void),
-      transfer_mod.TransferValue.is_function(transfer_count_module_load),
-      transfer_mod.TransferValue.is_function(transfer_decode_slot_lua))
+      transfer_mod.TransferValue.is_function(transfer_count_module_load))
   end, "owned-module-load-fault")
   test.assert(slot[0] == nil, "throwing module loader left the raw owner slot occupied")
   test.assert(calls[0] == 1, "decode did not reach the controlled nominal loader failure")
@@ -3350,12 +3185,7 @@ function test_transfer_copy_message_preserves_single_resource_owner(
   test.assert(copied ~= nil, "native copy rejected an attachment-free packet")
   transfer_mod.discard_message(original)
   original = nil
-  local top = ffi.lua_gettop(L)
-  local status = transfer_mod.decode_message(L, copied)
-  local result: value = nil
-  if status >= 0 then result = ffi.lua_totvalue(L, -1) end
-  ffi.lua_settop(L, top)
-  test.assert(transfer_message_result(status, result) == "copyable\0bytes",
+  test.assert(transfer_mod.decode_message(copied) == "copyable\0bytes" and copied == nil,
               "attachment-free native copy borrowed storage from its source packet")
 end
 
@@ -3382,27 +3212,16 @@ end
 function test_transfer_consuming_raw_decode(_context: test.Context)
   transfer_mod.discard_message(nil)
   transfer_payload_error(function ()
-    local status = transfer_mod.decode_message(L, nil)
-    transfer_message_result(status, nil)
+    transfer_mod.decode_message(nil)
   end, "transfer: invalid packet owner slot")
 
   local raw = transfer_mod.encode_message(false)
   defer transfer_mod.discard_message(raw)
-  local top = ffi.lua_gettop(L)
-  local status = transfer_mod.decode_message(L, raw)
-  local result: value = nil
-  if status >= 0 then result = ffi.lua_totvalue(L, -1) end
-  ffi.lua_settop(L, top)
-  test.assert(transfer_message_result(status, result) == false and raw == nil,
+  test.assert(transfer_mod.decode_message(raw) == false and raw == nil,
               "raw decode did not publish false while consuming the caller's owner slot")
   local caught_empty = false
   do
-    local empty_top = ffi.lua_gettop(L)
-    local empty_status = transfer_mod.decode_message(L, raw)
-    local empty_result: value = nil
-    if empty_status >= 0 then empty_result = ffi.lua_totvalue(L, -1) end
-    ffi.lua_settop(L, empty_top)
-    transfer_message_result(empty_status, empty_result)
+    transfer_mod.decode_message(raw)
   catch
     caught_empty = true
   end
@@ -3419,16 +3238,24 @@ function test_transfer_raw_decode_entry_failure_consumes_owner(context: test.Con
     support.collect_garbage()
     local top = ffi.lua_gettop(L)
     defer ffi.lua_settop(L, top)
+    -- Reserve decode's own frame first so the armed failure is the scope
+    -- preparation inside its protected body, not stack growth at entry.
+    test.assert(ffi.lua_checkstack(L, 64) ~= 0)
     local ctrl: owned size_t[] = foreign size_t.new_array(3)
     ctrl[0] = 1 as foreign size_t
     ctrl[1] = 1 as foreign size_t
     local previous_data: foreign *void = nil
     local previous = ffi.lua_getallocf(L, previous_data)
     ffi.lua_setallocf(L, transfer_limited_lua_alloc, ctrl as foreign *void)
-    local status = transfer_mod.decode_message(L, raw)
+    local failed = false
+    do
+      transfer_mod.decode_message(raw)
+    catch
+      failed = true
+    end
     ffi.lua_setallocf(L, previous, previous_data)
     ffi.lua_settop(L, top)
-    test.assert(status ~= 0 and ctrl[2] >= (2 as foreign size_t),
+    test.assert(failed and ctrl[2] >= (2 as foreign size_t),
                 "raw decode scope preparation did not reach its Lua allocation failure")
     test.assert(raw == nil and peer1:is_closed() and peer2:is_closed(),
                 "raw decode entry failure stranded its caller slot or packet attachments")

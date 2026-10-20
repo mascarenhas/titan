@@ -3,7 +3,6 @@ local gc = import "gc"
 local test = import "test"
 local thread = import "thread"
 local transfer = import "transfer"
-foreign import "titan/ffi.h"
 
 record SmokeEnvelope
   const id: integer
@@ -113,14 +112,8 @@ local function run_smoke()
   gc.collect()
   gc.collect()
   test.assert(not rx1:is_closed(), "encoded packet did not retain attached Sender")
-  local top1 = ffi.lua_gettop(L)
-  local status1 = transfer.decode_message(L, raw1)
-  local val1: value = nil
-  if status1 >= 0 then val1 = ffi.lua_totvalue(L, -1) end
-  ffi.lua_settop(L, top1)
-  if status1 ~= 0 then transfer.raise_message_error(status1, val1) end
+  local env1: SmokeEnvelope = transfer.decode_message(raw1)
   test.assert(raw1 == nil)
-  local env1: SmokeEnvelope = val1
   env1.reply:send(env1.id + 100)
   env1.reply:close()
   test.assert(rx1:receive() == 110)
@@ -148,13 +141,7 @@ local function run_smoke()
   gc.collect()
   gc.collect()
   test.assert(not dup_rx:is_closed())
-  local top_dup = ffi.lua_gettop(L)
-  local status_dup = transfer.decode_message(L, dup_raw)
-  local val_dup: value = nil
-  if status_dup >= 0 then val_dup = ffi.lua_totvalue(L, -1) end
-  ffi.lua_settop(L, top_dup)
-  if status_dup ~= 0 then transfer.raise_message_error(status_dup, val_dup) end
-  local dup_decoded: SmokeDuplicatePair = val_dup
+  local dup_decoded: SmokeDuplicatePair = transfer.decode_message(dup_raw)
   dup_decoded.left = nil
   gc.collect()
   gc.collect()
@@ -177,12 +164,7 @@ local function run_smoke()
   gc.collect()
   local malformed_failed = false
   do
-    local top_mf = ffi.lua_gettop(L)
-    local status_mf = transfer.decode_message(L, mal_fail_raw)
-    local val_mf: value = nil
-    if status_mf >= 0 then val_mf = ffi.lua_totvalue(L, -1) end
-    ffi.lua_settop(L, top_mf)
-    if status_mf ~= 0 then transfer.raise_message_error(status_mf, val_mf) end
+    transfer.decode_message(mal_fail_raw)
   catch
     malformed_failed = true
   end
@@ -198,13 +180,7 @@ local function run_smoke()
   defer mal_ok_rx:close()
   gc.collect()
   gc.collect()
-  local top_mo = ffi.lua_gettop(L)
-  local status_mo = transfer.decode_message(L, mal_ok_raw)
-  local val_mo: value = nil
-  if status_mo >= 0 then val_mo = ffi.lua_totvalue(L, -1) end
-  ffi.lua_settop(L, top_mo)
-  if status_mo ~= 0 then transfer.raise_message_error(status_mo, val_mo) end
-  local mal_ok: SmokeMalformedClaim = val_mo
+  local mal_ok: SmokeMalformedClaim = transfer.decode_message(mal_ok_raw)
   test.assert((mal_ok.tx as thread.Sender<|integer|>):try_send(88))
   mal_ok.tx = nil
   gc.collect()
@@ -215,24 +191,13 @@ local function run_smoke()
   -- 2. Direct nominal policy, protected string decode, and closure capture packet.
   local str_raw = transfer.encode_message("smoke\0string")
   defer transfer.discard_message(str_raw)
-  local top_str = ffi.lua_gettop(L)
-  local status_str = transfer.decode_message(L, str_raw)
-  local val_str: value = nil
-  if status_str >= 0 then val_str = ffi.lua_totvalue(L, -1) end
-  ffi.lua_settop(L, top_str)
-  if status_str ~= 0 then transfer.raise_message_error(status_str, val_str) end
+  local val_str = transfer.decode_message(str_raw)
   test.assert(str_raw == nil and (val_str as string) == "smoke\0string")
 
   local nom_policy = transfer.TransferValue.from_value(SmokeChoice.empty())
   local nom_raw = transfer.encode_message(nom_policy)
   defer transfer.discard_message(nom_raw)
-  local top_nom = ffi.lua_gettop(L)
-  local status_nom = transfer.decode_message(L, nom_raw)
-  local val_nom: value = nil
-  if status_nom >= 0 then val_nom = ffi.lua_totvalue(L, -1) end
-  ffi.lua_settop(L, top_nom)
-  if status_nom ~= 0 then transfer.raise_message_error(status_nom, val_nom) end
-  local dec_nom: SmokeChoice = val_nom
+  local dec_nom: SmokeChoice = transfer.decode_message(nom_raw)
   case dec_nom
   when empty() then
   else raise "nominal policy smoke round-trip failed"
@@ -246,13 +211,7 @@ local function run_smoke()
   gc.collect()
   gc.collect()
   test.assert(not rep_rx:is_closed() and not in_tx:is_closed() and not direct_rx:is_closed())
-  local top_cl = ffi.lua_gettop(L)
-  local status_cl = transfer.decode_message(L, closure_raw)
-  local val_cl: value = nil
-  if status_cl >= 0 then val_cl = ffi.lua_totvalue(L, -1) end
-  ffi.lua_settop(L, top_cl)
-  if status_cl ~= 0 then transfer.raise_message_error(status_cl, val_cl) end
-  local restored_fn: function (integer): integer = val_cl
+  local restored_fn: function (integer): integer = transfer.decode_message(closure_raw)
   in_tx:send(7)
   local worker = thread.spawn_one(function (cb: function (integer): integer): integer
     return cb(5)

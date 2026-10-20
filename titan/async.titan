@@ -4825,28 +4825,19 @@ function Receiver:wait(): value
     if owner.reader == reader then owner.reader = nil end
   end
   defer detach()
-  local raw: foreign *void = nil
-  defer transfer.discard_message(raw)
   -- Reserve before even inspecting the slot, not just before suspension.
   -- Cancellation withdraws only this reservation; it never takes the packet.
   self.reader = reader
   while true do
     checkpoint()
+    local raw: foreign *void = nil
     local status = receiver_take_native(self.native, raw)
     if status == 2 then raise "receiver is closed" end
     if status == 1 then
-      -- Trusted Lua stack ledger: decode returns normally with raw cleared and
-      -- one result/error for nonnegative status, or no added value otherwise.
-      -- Root that value and restore the stack before any ordinary helper entry.
-      local top = ffi.lua_gettop(L)
-      local decoded_status = transfer.decode_message(L, raw)
-      local decoded_value: value = nil
-      if decoded_status >= 0 then decoded_value = ffi.lua_totvalue(L, -1) end
-      ffi.lua_settop(L, top)
-      if decoded_status ~= 0 then
-        transfer.raise_message_error(decoded_status, decoded_value)
-      end
-      return decoded_value
+      -- Guard only after the native take, so no later write reaches `raw`;
+      -- decode consumes and clears that actual local on return and on raise.
+      defer transfer.discard_message(raw)
+      return transfer.decode_message(raw)
     end
     -- A stale/coalesced notification may have no packet. Re-arm the same
     -- reservation and suspend: send between the check and registration leaves

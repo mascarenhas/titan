@@ -459,12 +459,7 @@ local function child_thread_bootstrap()
       local raw: foreign *void = entry_msg
       defer thread_message_discard(raw)
       entry_msg = nil
-      local top = ffi.lua_gettop(L)
-      defer ffi.lua_settop(L, top)
-      local decoded_status = transfer.decode_message(L, raw)
-      local decoded_value: value = nil
-      if decoded_status >= 0 then decoded_value = ffi.lua_totvalue(L, -1) end
-      local entry_val = thread_message_value(decoded_status, decoded_value)
+      local entry_val = transfer.decode_message(raw)
       local result: value = (entry_val as function (): (value))()
       async.checkpoint()
       local res_msg = value_to_thread_message(result)
@@ -519,16 +514,9 @@ local function child_thread_bootstrap()
     local reason_msg: foreign *void = thread_control_take_cancel_reason_native(ctrl, reason_kind)
     defer thread_message_discard(reason_msg)
     if reason_msg ~= nil then
-      do
-        local top = ffi.lua_gettop(L)
-        defer ffi.lua_settop(L, top)
-        local decoded_status = transfer.decode_message(L, reason_msg)
-        local decoded_value: value = nil
-        if decoded_status >= 0 then decoded_value = ffi.lua_totvalue(L, -1) end
-        local decoded = thread_message_value(decoded_status, decoded_value)
-        reason = thread_message_cancellation(reason_kind, decoded)
-      catch
-      end
+      local decoded = transfer.decode_message(reason_msg)
+      reason = thread_message_cancellation(reason_kind, decoded)
+    catch
     end
     root_task:cancel(reason)
   end
@@ -737,17 +725,10 @@ local function Thread:reconstruct_terminal_status(): ThreadStatus<|R|>
     local val: value = nil
     local decode_ok = true
     if raw ~= nil then
-      do
-        local top = ffi.lua_gettop(L)
-        defer ffi.lua_settop(L, top)
-        local decoded_status = transfer.decode_message(L, raw)
-        local decoded_value: value = nil
-        if decoded_status >= 0 then decoded_value = ffi.lua_totvalue(L, -1) end
-        val = thread_message_value(decoded_status, decoded_value)
-      catch
-        decode_ok = false
-        resolved = ThreadStatus<|R|>.failed(Error(error, traceback))
-      end
+      val = transfer.decode_message(raw)
+    catch
+      decode_ok = false
+      resolved = ThreadStatus<|R|>.failed(Error(error, traceback))
     end
     if decode_ok then
       resolved = ThreadStatus<|R|>.succeeded(val as R)
@@ -756,30 +737,16 @@ local function Thread:reconstruct_terminal_status(): ThreadStatus<|R|>
     local reason: async.CancellationReason<|value|> =
       async.CancellationReason.simple("cancelled")
     if raw ~= nil then
-      do
-        local top = ffi.lua_gettop(L)
-        defer ffi.lua_settop(L, top)
-        local decoded_status = transfer.decode_message(L, raw)
-        local decoded_value: value = nil
-        if decoded_status >= 0 then decoded_value = ffi.lua_totvalue(L, -1) end
-        local decoded = thread_message_value(decoded_status, decoded_value)
-        reason = thread_message_cancellation(reason_kind, decoded)
-      catch
-      end
+      local decoded = transfer.decode_message(raw)
+      reason = thread_message_cancellation(reason_kind, decoded)
+    catch
     end
     resolved = ThreadStatus<|R|>.cancelled(reason)
   else
     local err_val: value = "thread failed"
     if raw ~= nil then
-      do
-        local top = ffi.lua_gettop(L)
-        defer ffi.lua_settop(L, top)
-        local decoded_status = transfer.decode_message(L, raw)
-        local decoded_value: value = nil
-        if decoded_status >= 0 then decoded_value = ffi.lua_totvalue(L, -1) end
-        err_val = thread_message_value(decoded_status, decoded_value)
-      catch
-      end
+      err_val = transfer.decode_message(raw)
+    catch
     end
     resolved = ThreadStatus<|R|>.failed(Error(err_val, trace_str))
   end

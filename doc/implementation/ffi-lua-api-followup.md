@@ -76,7 +76,8 @@ raw Lua C API:
   errors from typed Lua callables use the generated generic-call boundary,
   not a manual `pcall` wrapper. Manual `lua_pcallk` sites are limited to the
   fixed Lua helper factory in `titan.test`, independent-state open/run in
-  `titan.lua`, thread bootstrap, and the consuming raw transfer decoder.
+  `titan.lua`, and thread bootstrap; consuming raw transfer decode is an
+  ordinary Titan function with one native `catch`.
   Restricted foreign bodies have no Titan catch/defer or implicit `L`, and a
   remote state's errors cannot use the host's jump chain. Each retained
   boundary has an explicit result ledger, nil continuation, and owned cleanup.
@@ -121,14 +122,13 @@ state. See the [complete ledger](lua-library.md#protected-execution-and-stack-cl
 and [worker lifetime](lua-library.md#worker-ownership-and-cancellation).
 
 The async Receiver takes one native packet into an actual guarded raw local
-and calls `transfer.decode_message(L, raw)` directly. The C-ABI decoder reserves
-its stack before entering allocating work; noncollectable scalar decoding is
-C-only, while strings, nominal reconstruction and user hooks remain protected.
-It clears and disposes the owner on every normal status return, including
-pre-entry failure, without letting a Lua longjmp bypass the caller's mutable
-slot update. The ordinary caller first copies a nonnegative-status result or
-error into traced Titan `value`, restores its saved stack top, and only then
-returns or raises. No foreign sender accesses the destination state. Async's
+and returns `transfer.decode_message(raw)` directly. That ordinary Titan decoder
+reserves its single scalar result slot without `longjmp` before consuming a
+C-only scalar packet; strings, nominal reconstruction, and user hooks run inside
+its one native `catch`, which clears the caller's local and disposes of any
+residual owner before re-raising the original error and traceback. The caller
+never writes that local again inside its guard, so catch recovery cannot reload
+a stale owner. No foreign sender accesses the destination state. Async's
 private runtime registry and error-frame operations retain their separate
 continuation-runtime contract.
 
@@ -138,7 +138,7 @@ the pushed slot is also a temporary GC root until the saved top is restored.
 | Operation | Stack effect and obligation |
 | --- | --- |
 | `lua_gettop` | Net zero; snapshots the current stack height. |
-| `lua_checkstack` | Net zero; reserves the complete maximum temporary stack effect before the first push. Current-state `titan.lua` helpers reserve one or two slots, or four for preload discovery; independent-state callbacks reserve opener/handler/call slots and argument/result allowance. `titan.iteration` reserves three slots, `titan.gc` four, and raw transfer decode three. A failed raw-decode reservation consumes/disposes the packet and returns a negative status with no new stack value. |
+| `lua_checkstack` | Net zero; reserves the complete maximum temporary stack effect before the first push. Current-state `titan.lua` helpers reserve one or two slots, or four for preload discovery; independent-state callbacks reserve opener/handler/call slots and argument/result allowance. `titan.iteration` reserves three slots, `titan.gc` four, and raw transfer decode one result slot for its C-only scalar path. A failed raw-decode reservation clears the caller's slot and disposes of the packet before raising. |
 | `ffi.lua_pushtvalue` | Push one traced Titan value. The boundary pushes an existing semantic Map, key, string, or other value rather than manufacturing a placeholder. `titan.gc` receives a `{value: value}` view of any more precise cache type and pushes that same underlying Map; the new stack slot roots it until the saved top is restored. |
 | `lua_getglobal` | Push one global value and may invoke the global table's `__index`, allocate, call user code, or raise. `titan.lua` copies the result to a traced `value` before restoration. |
 | `lua_getfield` | Push one fetched value and may invoke `__index`, allocate, call user code, or raise. PEG uses it for its private registry metatable lookup; `titan.lua` uses it on the registry's supported raw layout to fetch the loaded-module or preload table, then validates and roots that table. |
@@ -148,8 +148,8 @@ the pushed slot is also a temporary GC root until the saved top is restored.
 | `lua_next` | Pop the current key and, on success, push the next key and item; exhaustion pushes nothing. It can longjmp for an invalid key. `titan.iteration` copies both successful results into traced `value` locals before restoring the entry top. The host-side `titan.lua` preload snapshot keeps its registry table and iteration key rooted, tests key/loader kinds without changing the key, copies accepted names, and restores its entry top. |
 | `luaL_loadbufferx` | Push exactly one compiled function on success or one error object on failure, using the explicit input length rather than a terminating zero. `titan.lua` checks the status, traces the surviving object, and restores the saved top. Compilation can allocate or longjmp. |
 | `luaL_loadstring` | Push one compiled function or one error object. `titan.test` uses only a fixed internal helper-factory chunk, traces an error before raising, and restores the saved top. The `luaL_dostring` convenience is a function-like macro and is not FFI-callable. |
-| `lua_pcallk` | Pop the function and arguments, then push the requested results or one error. The fixed `titan.test` Lua factory returns two closures; `titan.lua` open and thread bootstrap return zero results; independent execution returns `LUA_MULTRET`; raw transfer decode returns exactly one value/error above the saved top after removing its handler and disposing any residual owner. All use nil continuations and owning-state protection. Ordinary Titan error handling uses inline native catch/defer instead. |
-| `lua_callk` | Inside an already protected foreign trampoline, call the chunk, native bootstrap, or traced destination transfer worker. A nil continuation forbids yielding through the C call. Errors reach the enclosing owning-state `lua_pcallk`; preserve its complete result/error and native-owner ledger before returning to ordinary Titan. |
+| `lua_pcallk` | Pop the function and arguments, then push the requested results or one error. The fixed `titan.test` Lua factory returns two closures; `titan.lua` open and thread bootstrap return zero results; independent execution returns `LUA_MULTRET`. All use nil continuations and owning-state protection. Ordinary Titan error handling, including consuming raw transfer decode, uses inline native catch/defer instead. |
+| `lua_callk` | Call the chunk or native bootstrap inside an already protected foreign trampoline, or the destination preload loader from `transfer_load_module`. A nil continuation forbids yielding through the C call. Errors reach the owning state's enclosing protected boundary (`lua_pcallk` or a native Titan `catch`, such as raw transfer decode's); preserve its complete result/error and native-owner ledger before returning to ordinary Titan. |
 | `luaL_newstate`, `lua_close` | Create or destroy a separate state, with no host stack effect. Check creation for NULL. `Lua` owns the handle, rejects close while busy, and clears its handle before `lua_close`; explicit close and the GC fallback share that policy. `lua_close` invokes that state's finalizers and invalidates its borrowed addresses. |
 | `luaL_openselectedlibs` | Net zero in the independent state; the all-libraries mask opens the Lua standard libraries. It may allocate or raise, so it runs only inside the protected initialization callback. It creates fresh package tables/caches before eligible native loaders and matching provider descriptors from the host snapshot are installed. Cached host module values, package paths, and searchers are not copied. |
 | `titan_module_preload_symbols` | Net zero on success; internally reserves four slots for raw registry/preload lookup and validates the current zero-upvalue C loader against the descriptor and supplied pointer. It may allocate or raise. The host snapshot keeps its saved-top defer; the returned resolver contains no GC reference and borrows provider code. |
@@ -163,7 +163,7 @@ the pushed slot is also a temporary GC root until the saved top is restored.
 | `transfer_nominal_module` (source foreign function) | Push one actual declaring-module name recovered through the candidate metatable's `TITAN_MT_MOD`. Reserve its metatable/owner scratch internally; do not infer module boundaries from nested or folder-qualified nominal names. |
 | `lua_pushnil`, `lua_pushboolean`, `lua_pushinteger`, `lua_pushnumber`, `lua_pushlightuserdata` | Push one scalar or borrowed native address after stack reservation. Independent-state thread arguments use lightuserdata, never a thread-tagged cross-state GC reference. |
 | `lua_pushcclosure` | The independent-state path uses zero upvalues, pushing only a native C function pointer. This includes copied native preload loaders. It rejects NULL input functions and never adapts a host Titan closure. |
-| `lua_pushlstring` | Push one string copied from an explicit byte range. Independent-state input copies run under that state's protection; host result copies retain the independent stack root until conversion. Raw transfer decode copies from its owned packet under the protected destination worker, and the caller roots the value before stack restoration. |
+| `lua_pushlstring` | Push one string copied from an explicit byte range. Independent-state input copies run under that state's protection; host result copies retain the independent stack root until conversion. Raw transfer decode copies from the packet its caller's slot still owns, inside decode's native `catch`, and roots the value before stack restoration. |
 | `lua_getupvalue` | Push one value and return its name when the selected upvalue exists; otherwise push nothing and return NULL. Independent-state result validation probes index 1 and raises if a C function has any upvalues; the protected failure then owns cleanup. Host preload discovery uses the same test, removes any pushed upvalue, and skips unsupported loaders. |
 | `lua_isinteger`, `lua_toboolean`, `lua_tointegerx`, `lua_tonumberx`, `lua_tothread`, `lua_touserdata`, `lua_tocfunction`, `lua_typename` | Net zero. The independent-state transfer loop checks the Lua kind before extracting its scalar or borrowed pointer; pointer results do not retain their source objects. |
 | `lua_tolstring` | Net zero for an already string-valued slot and returns borrowed bytes plus length. The independent-state path retains the string's stack root until host copying finishes. Numeric conversion can allocate and must stay within a protected path. |

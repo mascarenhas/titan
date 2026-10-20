@@ -77,23 +77,6 @@ local foreign function scope_reuse_limited_lua_alloc(
   return ffi.realloc(ptr, nsize)
 end
 
-local foreign function scope_reuse_decode_slot_lua(state: *lua_State): int
-  local slots = ffi.lua_touserdata(state, 1) as foreign *(*void)
-  local offset = ffi.lua_tointegerx(state, 2, nil) as foreign int
-  local top = ffi.lua_gettop(state)
-  local status = scope_reuse_transfer.decode_message(state, slots + offset)
-  if status < 0 then
-    return ffi.luaL_error(state, "scope reuse raw decode setup failed")
-  end
-  if ffi.lua_gettop(state) ~= top + 1 then
-    return ffi.luaL_error(state, "scope reuse raw decode stack top mismatch")
-  end
-  if status > 0 then
-    return ffi.lua_error(state)
-  end
-  return 1
-end
-
 local function scope_reuse_expect_error(action: function (): (), fragment: string)
   local caught = false
   do
@@ -139,20 +122,16 @@ local function scope_reuse_stash_holder_coroutines(): scope_reuse_thread.Receive
   return r_hold
 end
 
--- Own the raw packet local in this helper's frame so decode_message commits its
--- cleared mutable-address spill before any ordinary error helper runs.
+-- Own the raw packet local in this helper's frame: decode_message consumes and
+-- clears that actual guarded local on return and on every decode error.
 local function scope_reuse_roundtrip(candidate: value): value
   local raw = scope_reuse_transfer.encode_message(candidate)
   defer scope_reuse_transfer.discard_message(raw)
   local top = ffi.lua_gettop(L)
-  defer ffi.lua_settop(L, top)
-  local status = scope_reuse_transfer.decode_message(L, raw)
-  local result: value = nil
-  if status >= 0 then result = ffi.lua_totvalue(L, -1) as value end
+  local result = scope_reuse_transfer.decode_message(raw)
   test.assert(raw == nil, "decode_message did not clear its owned local slot")
-  if status ~= 0 then scope_reuse_transfer.raise_message_error(status, result) end
-  test.assert(ffi.lua_gettop(L) == top + 1,
-              "decode_message did not leave one rooted value above entry top")
+  test.assert(ffi.lua_gettop(L) == top,
+              "decode_message changed the caller's Lua stack top")
   return result
 end
 
@@ -336,16 +315,14 @@ function test_scope_reuse_task_per_message_and_direction_reset(context: test.Con
       support.collect_garbage()
       support.collect_garbage()
 
-      local top = ffi.lua_gettop(L)
-      defer ffi.lua_settop(L, top)
-      local status1 = scope_reuse_transfer.decode_message(L, raw1)
-      local err1: value = nil
-      if status1 >= 0 then err1 = ffi.lua_totvalue(L, -1) as value end
-      ffi.lua_settop(L, top)
-      test.assert(raw1 == nil and status1 > 0)
-      scope_reuse_expect_error(function ()
-        scope_reuse_transfer.raise_message_error(status1, err1)
-      end, "scope-reuse-decode-fail:77")
+      local caught1 = false
+      do
+        scope_reuse_transfer.decode_message(raw1)
+      catch
+        caught1 = error is string and support.contains(error, "scope-reuse-decode-fail:77")
+      end
+      test.assert(caught1 and raw1 == nil,
+                  "failing decode did not raise its decoder error or consume its slot")
       scope_reuse_expect_error(function ()
         scope_reuse_thread.Sender<|integer|>.from_transfer_payload("\0\0\0\0")
       end, "transfer: resource claim requires a decode scope")
@@ -608,13 +585,7 @@ function test_scope_reuse_abandoned_reused_frame_and_state_close(context: test.C
         local co = scope_reuse_coroutine.create(function (_: value): value
           local local_raw = raw
           defer scope_reuse_transfer.discard_message(local_raw)
-          local top = ffi.lua_gettop(L)
-          defer ffi.lua_settop(L, top)
-          local status = scope_reuse_transfer.decode_message(L, local_raw)
-          local result: value = nil
-          if status >= 0 then result = ffi.lua_totvalue(L, -1) as value end
-          if status ~= 0 then scope_reuse_transfer.raise_message_error(status, result) end
-          return result
+          return scope_reuse_transfer.decode_message(local_raw)
         end, "scope-reuse-abandon-tag")
         test.assert(co:resume(nil) == "paused-decode" and co:status() == "suspended")
         return rxs
@@ -672,8 +643,9 @@ function test_scope_reuse_abandoned_reused_frame_and_state_close(context: test.C
       test.assert(not rx_warm:is_closed() and not rx_hold:is_closed())
 
       state:run([[
-        local slots, decode_slot = ...
+        local slots = ...
         local coroutine = require "titan.coroutine"
+        local support = require "async.test_support"
         local tag = "scope-reuse-state-close"
         package.loaded["async.tests"] = nil
         package.preload["async.tests"] = function()
@@ -686,7 +658,7 @@ function test_scope_reuse_abandoned_reused_frame_and_state_close(context: test.C
         for i = 0, 8 do
           local idx = i
           coros[i + 1] = coroutine.create(function()
-            return decode_slot(slots, idx)
+            return support.decode_raw_slot(slots, idx)
           end, tag)
           assert(coros[i + 1]:resume(nil) == "pause-inside-decode-scope")
           assert(coros[i + 1]:status() == "suspended")
@@ -703,8 +675,7 @@ function test_scope_reuse_abandoned_reused_frame_and_state_close(context: test.C
         collectgarbage("collect")
         collectgarbage("collect")
       ]], "=scope-reuse-state-close",
-        scope_reuse_transfer.TransferValue.is_pointer(slots as foreign *void),
-        scope_reuse_transfer.TransferValue.is_function(scope_reuse_decode_slot_lua))
+        scope_reuse_transfer.TransferValue.is_pointer(slots as foreign *void))
 
       for i = 0, 8 do
         test.assert(slots[i] == nil, "decode_message did not consume slot " .. i)
@@ -760,17 +731,25 @@ function test_scope_reuse_abandoned_reused_frame_and_state_close(context: test.C
 
         local top = ffi.lua_gettop(L)
         defer ffi.lua_settop(L, top)
+        -- Reserve decode's entry frame so each armed failure lands inside its
+        -- protected body rather than in stack growth at entry.
+        test.assert(ffi.lua_checkstack(L, 64) ~= 0)
         local ctrl: owned size_t[] = foreign size_t.new_array(3)
         ctrl[0] = 1 as foreign size_t
         ctrl[1] = step as foreign size_t
         local prev_ud: foreign *void = nil
         local prev_alloc = ffi.lua_getallocf(L, prev_ud)
         ffi.lua_setallocf(L, scope_reuse_limited_lua_alloc, ctrl as foreign *void)
-        local status = scope_reuse_transfer.decode_message(L, slot)
+        local failed = false
+        do
+          scope_reuse_transfer.decode_message(slot)
+        catch
+          failed = true
+        end
         ffi.lua_setallocf(L, prev_alloc, prev_ud)
         ffi.lua_settop(L, top)
 
-        test.assert(status ~= 0 and ctrl[2] >= (step as foreign size_t),
+        test.assert(failed and ctrl[2] >= (step as foreign size_t),
                     "depleted-pool decode did not hit Lua allocation failure at step " .. step)
         test.assert(slot[0] == nil and rx1:is_closed() and rx2:is_closed(),
                     "depleted-pool decode OOM stranded caller slot or trailing attachments")
@@ -822,16 +801,22 @@ function test_scope_reuse_abandoned_reused_frame_and_state_close(context: test.C
 
       local wtop = ffi.lua_gettop(L)
       defer ffi.lua_settop(L, wtop)
+      test.assert(ffi.lua_checkstack(L, 64) ~= 0)
       local wctrl: owned size_t[] = foreign size_t.new_array(3)
       wctrl[0] = 1 as foreign size_t
       wctrl[1] = 1 as foreign size_t
       local wprev_ud: foreign *void = nil
       local wprev_alloc = ffi.lua_getallocf(L, wprev_ud)
       ffi.lua_setallocf(L, scope_reuse_limited_lua_alloc, wctrl as foreign *void)
-      local wstatus = scope_reuse_transfer.decode_message(L, wslot)
+      local wfailed = false
+      do
+        scope_reuse_transfer.decode_message(wslot)
+      catch
+        wfailed = true
+      end
       ffi.lua_setallocf(L, wprev_alloc, wprev_ud)
       ffi.lua_settop(L, wtop)
-      test.assert(wstatus > 0 and wslot[0] == nil and wrx1:is_closed() and wrx2:is_closed(),
+      test.assert(wfailed and wslot[0] == nil and wrx1:is_closed() and wrx2:is_closed(),
                   "warm-pool post-GC decode OOM did not consume slot or release trailing attachments")
       scope_reuse_expect_error(function ()
         scope_reuse_transfer.TransferValue.is_record_payload(
@@ -956,12 +941,8 @@ local function scope_reuse_verify_producer_packet(
   defer scope_reuse_transfer.discard_message(copied)
   if expected_count == 0 then
     test.assert(copied ~= nil, label .. ": copy_message rejected an attachment-free packet")
-    local top_c = ffi.lua_gettop(L)
-    defer ffi.lua_settop(L, top_c)
-    local status_c = scope_reuse_transfer.decode_message(L, copied)
-    local val_c: value = nil
-    if status_c >= 0 then val_c = ffi.lua_totvalue(L, -1) as value end
-    test.assert(copied == nil and status_c == 0,
+    local val_c = scope_reuse_transfer.decode_message(copied)
+    test.assert(copied == nil,
                 label .. ": attachment-free copy did not decode and consume its slot")
     verify_decoded(val_c)
   else
@@ -976,13 +957,8 @@ local function scope_reuse_verify_producer_packet(
                 label .. ": trailing attachment #" .. i .. " was not retained in packet")
   end
 
-  local top = ffi.lua_gettop(L)
-  defer ffi.lua_settop(L, top)
-  local status = scope_reuse_transfer.decode_message(L, raw)
-  local decoded: value = nil
-  if status >= 0 then decoded = ffi.lua_totvalue(L, -1) as value end
+  local decoded = scope_reuse_transfer.decode_message(raw)
   test.assert(raw == nil, label .. ": decode did not consume its raw slot")
-  if status ~= 0 then scope_reuse_transfer.raise_message_error(status, decoded) end
   verify_decoded(decoded)
 end
 
@@ -1189,16 +1165,15 @@ function test_scope_reuse_trailing_attachments_across_producers_and_alignment(
       support.collect_garbage()
       support.collect_garbage()
 
-      local top = ffi.lua_gettop(L)
-      defer ffi.lua_settop(L, top)
-      local status = scope_reuse_transfer.decode_message(L, raw)
-      local failure: value = nil
-      if status >= 0 then failure = ffi.lua_totvalue(L, -1) as value end
-      ffi.lua_settop(L, top)
-      test.assert(raw == nil and status > 0)
-      scope_reuse_expect_error(function ()
-        scope_reuse_transfer.raise_message_error(status, failure)
-      end, "scope-reuse-partial-spill-abort")
+      local caught = false
+      do
+        scope_reuse_transfer.decode_message(raw)
+      catch
+        caught = error is string and
+          support.contains(error, "scope-reuse-partial-spill-abort")
+      end
+      test.assert(caught and raw == nil,
+                  "partial-spill decode did not raise its abort or consume its slot")
 
       -- Unclaimed slots 2 and 4 must be released immediately on decode unwind;
       -- claimed slots 0, 1, and 3 must stay open in their stashed wrappers.
@@ -1256,16 +1231,15 @@ local function scope_reuse_nested_frames(check: function (): ())
   local raw = scope_reuse_transfer.encode_message(ScopeReuseNestedFailure(false))
   defer scope_reuse_transfer.discard_message(raw)
   check()
-  local top = ffi.lua_gettop(L)
-  defer ffi.lua_settop(L, top)
-  local status = scope_reuse_transfer.decode_message(L, raw)
-  local failure: value = nil
-  if status >= 0 then failure = ffi.lua_totvalue(L, -1) as value end
-  ffi.lua_settop(L, top)
-  test.assert(raw == nil and status > 0, "nested round-trip decode did not fail")
-  scope_reuse_expect_error(function ()
-    scope_reuse_transfer.raise_message_error(status, failure)
-  end, "scope-reuse-nested-decode-fail")
+  local caught = false
+  do
+    scope_reuse_transfer.decode_message(raw)
+  catch
+    caught = error is string and
+      support.contains(error, "scope-reuse-nested-decode-fail")
+  end
+  test.assert(caught and raw == nil,
+              "nested round-trip decode did not fail or consume its slot")
   check()
 end
 

@@ -702,24 +702,21 @@ enters the destination Lua state:
   cancellation (`Receiver:wait`, `receiver_take_native`)**: `wait()` requires a
   running Task, rejects competing callers when `self.reader ~= nil`
   (`"receiver already has a waiting reader"`), and installs
-  `self.reader = reader` (with `defer detach()` and a guarded
-  `local raw: foreign *void = nil` + `defer transfer.discard_message(raw)`)
-  **before** inspecting `checkpoint()`, `self.native.closed`, or
-  `self.native.message`. This prevents a second caller from barging ahead while
-  the first reader's wake is queued. On each loop turn after `checkpoint()`, the
-  pure foreign `receiver_take_native(self.native, raw)` checks `closed` (`2` ->
+  `self.reader = reader` (with `defer detach()`) **before** inspecting
+  `checkpoint()`, `self.native.closed`, or `self.native.message`. This prevents
+  a second caller from barging ahead while the first reader's wake is queued.
+  On each loop turn after `checkpoint()`, a fresh `local raw: foreign *void = nil`
+  receives the packet from the pure foreign
+  `receiver_take_native(self.native, raw)`, which checks `closed` (`2` ->
   `"receiver is closed"`), atomically exchanges `receiver->message` with `nil`,
-  and stores the packet in `raw` (`1` when non-nil, `0` when empty). On status
-  `1`, `wait()` follows the
-  [trusted Lua stack and consuming-slot ledger](transfer-library.md#protected-raw-owner-decode-entry):
-  it snapshots `top = ffi.lua_gettop(L)`, calls `transfer.decode_message(L, raw)`
-  directly at the real guarded local `raw` (committing the cleared spill before
-  ordinary error propagation), copies any nonnegative result/error from
-  `ffi.lua_totvalue(L, -1)` into a traced `value` local, restores
-  `ffi.lua_settop(L, top)`, and calls
-  `transfer.raise_message_error(decoded_status, decoded_value)` when
-  `decoded_status ~= 0`. Decode errors consume the packet and raise from
-  `wait()` with no lazy retry; `nil` and `false` return as ordinary data. When
+  and stores the packet in `raw` (`1` when non-nil, `0` when empty). Only on
+  status `1` does `wait()` install `defer transfer.discard_message(raw)` and
+  return `transfer.decode_message(raw)`, following the
+  [consuming raw-slot decode contract](transfer-library.md#consuming-raw-slot-decode):
+  the guard follows the native take, so no later write reaches `raw`, and
+  decode clears that actual local on return and before any error propagates.
+  Decode errors consume the packet and raise from `wait()` with no lazy retry;
+  `nil` and `false` return as ordinary data. When
   the slot is empty (initially or after a coalesced/stale wake), `wait()` clears
   `reader.notified = false` and calls `suspend(reader.token, detach)`; a `send`
   between the empty-slot check and `suspend` either sets `reader.notified` on

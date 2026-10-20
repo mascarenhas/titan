@@ -185,24 +185,16 @@ local function expect_endpoint_finalizer_failure(sender_kind: boolean, direct: b
   gc.collect()
   if peer_tx ~= nil then test.assert(not peer_tx:is_closed()) end
   if peer_rx ~= nil then test.assert(not peer_rx:is_closed()) end
-  local top = ffi.lua_gettop(L)
-  defer ffi.lua_settop(L, top)
   -- The hook route arms inside its decoder; direct fields invoke no hook.
   if direct then ffi.titan_transfer_fault_arm(6) end
-  local status = transfer.decode_message(L, raw)
-  local failure: value = nil
-  if status >= 0 then failure = ffi.lua_totvalue(L, -1) end
-  ffi.lua_settop(L, top)
   local failed = false
   do
-    if status ~= 0 then
-      transfer.raise_message_error(status, failure)
-    end
+    transfer.decode_message(raw)
   catch
     failed = true
   end
   ffi.titan_transfer_fault_disarm()
-  test.assert(failed and status > 0 and raw == nil and
+  test.assert(failed and raw == nil and
               ffi.titan_transfer_fault_fired() == 1,
               "endpoint adoption did not exercise finalizer registration failure")
   gc.collect()

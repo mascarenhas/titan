@@ -1,16 +1,14 @@
--- Focused scalar/envelope classification, C-only decode, worker-registry, and
--- bounded structural presize tests for titan.transfer (issue #255 / #256).
+-- Focused scalar/envelope classification, C-only decode, consuming-slot error,
+-- and bounded structural presize tests for titan.transfer (issue #255 / #256).
 local tse_reflect = import "reflect"
 local tse_protobuf = import "protobuf"
 local tse_transfer = import "transfer"
-local tse_lua = import "lua"
 local tse_math = import "math"
 local tse_string = import "string"
 local tse_gc = import "gc"
 foreign import "stdlib.h"
 foreign import "lauxlib.h"
 foreign import "../../../../../titan/transfer_native.h"
-foreign type TransferScalarEnvelopeSlot = *void
 
 local tse_hook_encode_calls = 0
 local tse_hook_decode_calls = 0
@@ -72,22 +70,6 @@ local foreign function tse_rewrite_packet_kind(raw: *void, template_raw: const *
   dst.kind = src.kind
 end
 
-local foreign function tse_decode_slot_in_state(state: *lua_State): int
-  local slot = ffi.lua_touserdata(state, 1) as foreign *(*void)
-  local top = ffi.lua_gettop(state)
-  local status = tse_transfer.decode_message(state, slot)
-  if status < 0 then
-    return ffi.luaL_error(state, "tse raw decode negative status")
-  end
-  if ffi.lua_gettop(state) ~= top + 1 then
-    return ffi.luaL_error(state, "tse raw decode stack shape mismatch")
-  end
-  if status > 0 then
-    return ffi.lua_error(state)
-  end
-  return 1
-end
-
 local function tse_expect_error(action: function (): (), fragment: string)
   local caught = false
   do
@@ -98,21 +80,17 @@ local function tse_expect_error(action: function (): (), fragment: string)
   test.assert(caught, "missing expected transfer error containing: " .. fragment)
 end
 
--- Create and own the raw packet local in this helper's own frame so Titan
--- commits the cleared mutable-address spill on decode_message return before
--- any ordinary error helper runs. Never wrap a caller-owned raw slot.
+-- Own the raw packet local in this helper's own frame: decode_message
+-- consumes and clears that actual guarded local on return and on every error.
+-- Never wrap a caller-owned raw slot.
 local function tse_roundtrip_raw(candidate: value): value
   local raw = tse_transfer.encode_message(candidate)
   defer tse_transfer.discard_message(raw)
   local top = ffi.lua_gettop(L)
-  defer ffi.lua_settop(L, top)
-  local status = tse_transfer.decode_message(L, raw)
-  local result: value = nil
-  if status >= 0 then result = ffi.lua_totvalue(L, -1) as value end
+  local result = tse_transfer.decode_message(raw)
   test.assert(raw == nil, "decode_message did not clear its owned local slot")
-  if status ~= 0 then tse_transfer.raise_message_error(status, result) end
-  test.assert(ffi.lua_gettop(L) == top + 1,
-              "decode_message did not leave exactly one value above entry top")
+  test.assert(ffi.lua_gettop(L) == top,
+              "decode_message changed the caller's Lua stack top")
   return result
 end
 
@@ -125,14 +103,10 @@ local function tse_roundtrip_copied_raw(candidate: value): value
   tse_transfer.discard_message(original)
   original = nil
   local top = ffi.lua_gettop(L)
-  defer ffi.lua_settop(L, top)
-  local status = tse_transfer.decode_message(L, copied)
-  local result: value = nil
-  if status >= 0 then result = ffi.lua_totvalue(L, -1) as value end
+  local result = tse_transfer.decode_message(copied)
   test.assert(copied == nil, "decode_message did not clear copied local slot")
-  if status ~= 0 then tse_transfer.raise_message_error(status, result) end
-  test.assert(ffi.lua_gettop(L) == top + 1,
-              "copied decode_message did not leave one value above entry top")
+  test.assert(ffi.lua_gettop(L) == top,
+              "copied decode_message changed the caller's Lua stack top")
   return result
 end
 
@@ -569,7 +543,11 @@ function test_transfer_scalar_envelope_c_only_decode_oom_and_malformed_packets(
 
       local top = ffi.lua_gettop(L)
       defer ffi.lua_settop(L, top)
-      test.assert(ffi.lua_checkstack(L, 16) ~= 0)
+      -- Settle pending finalizers, then reserve decode's entry frame and result
+      -- slot before denial, so every failure below surfaces inside its
+      -- protected body after entry.
+      tse_gc.collect()
+      test.assert(ffi.lua_checkstack(L, 64) ~= 0)
 
       local denied: owned size_t[] = foreign size_t.new_array(1)
       denied[0] = 0 as foreign size_t
@@ -578,91 +556,64 @@ function test_transfer_scalar_envelope_c_only_decode_oom_and_malformed_packets(
       ffi.lua_setallocf(L, tse_deny_lua_alloc, denied as foreign *void)
       defer ffi.lua_setallocf(L, prev_alloc, prev_ud)
 
-      local s_nil = tse_transfer.decode_message(L, raw_nil)
-      local v_nil: value = nil
-      if s_nil == 0 then v_nil = ffi.lua_totvalue(L, -1) as value end
-      ffi.lua_settop(L, top)
-
-      local s_false = tse_transfer.decode_message(L, raw_false)
-      local v_false: value = nil
-      if s_false == 0 then v_false = ffi.lua_totvalue(L, -1) as value end
-      ffi.lua_settop(L, top)
-
-      local s_true = tse_transfer.decode_message(L, raw_true)
-      local v_true: value = nil
-      if s_true == 0 then v_true = ffi.lua_totvalue(L, -1) as value end
-      ffi.lua_settop(L, top)
-
-      local s_min = tse_transfer.decode_message(L, raw_min)
-      local v_min: value = nil
-      if s_min == 0 then v_min = ffi.lua_totvalue(L, -1) as value end
-      ffi.lua_settop(L, top)
-
-      local s_nz = tse_transfer.decode_message(L, raw_neg_zero)
-      local v_nz: value = nil
-      if s_nz == 0 then v_nz = ffi.lua_totvalue(L, -1) as value end
-      ffi.lua_settop(L, top)
-
-      local s_state = tse_transfer.decode_message(L, raw_state)
-      local v_state: value = nil
-      if s_state == 0 then v_state = ffi.lua_totvalue(L, -1) as value end
-      ffi.lua_settop(L, top)
-
-      local s_ptr = tse_transfer.decode_message(L, raw_ptr)
-      local v_ptr: value = nil
-      if s_ptr == 0 then v_ptr = ffi.lua_totvalue(L, -1) as value end
-      ffi.lua_settop(L, top)
-
-      local s_fn = tse_transfer.decode_message(L, raw_fn)
-      local v_fn: value = nil
-      if s_fn == 0 then v_fn = ffi.lua_totvalue(L, -1) as value end
-      ffi.lua_settop(L, top)
-
+      local v_nil = tse_transfer.decode_message(raw_nil)
+      local v_false = tse_transfer.decode_message(raw_false)
+      local v_true = tse_transfer.decode_message(raw_true)
+      local v_min = tse_transfer.decode_message(raw_min)
+      local v_nz = tse_transfer.decode_message(raw_neg_zero)
+      local v_state = tse_transfer.decode_message(raw_state)
+      local v_ptr = tse_transfer.decode_message(raw_ptr)
+      local v_fn = tse_transfer.decode_message(raw_fn)
+      local scalar_top = ffi.lua_gettop(L)
       local denied_after_scalars = denied[0]
 
       -- The long binary string requires an allocation even with a reused scope.
-      -- OOM must still consume raw_str and leave a rooted error.
-      local s_str = tse_transfer.decode_message(L, raw_str)
-      local str_top = ffi.lua_gettop(L)
+      -- OOM must still consume raw_str before its error propagates.
+      local str_failed = false
       local str_error: value = nil
-      if s_str >= 0 then str_error = ffi.lua_totvalue(L, -1) as value end
-      ffi.lua_settop(L, top)
+      do
+        tse_transfer.decode_message(raw_str)
+      catch
+        str_failed = true
+        str_error = error
+      end
 
       ffi.lua_setallocf(L, prev_alloc, prev_ud)
 
-      test.assert(s_nil == 0 and raw_nil == nil and v_nil == nil,
+      test.assert(raw_nil == nil and v_nil == nil,
                   "C-only nil decode failed or left slot occupied")
-      test.assert(s_false == 0 and raw_false == nil and v_false == false,
+      test.assert(raw_false == nil and v_false == false,
                   "C-only false decode failed or confused false with nil")
-      test.assert(s_true == 0 and raw_true == nil and v_true == true,
+      test.assert(raw_true == nil and v_true == true,
                   "C-only true decode failed")
-      test.assert(s_min == 0 and raw_min == nil and
-                  (v_min as integer) == tse_math.mininteger,
+      test.assert(raw_min == nil and (v_min as integer) == tse_math.mininteger,
                   "C-only integer decode failed")
       case tse_reflect.inspect(v_nz)
       when is_float(f) then
-        test.assert(s_nz == 0 and raw_neg_zero == nil and f == 0.0 and 1.0 / f < 0.0)
+        test.assert(raw_neg_zero == nil and f == 0.0 and 1.0 / f < 0.0)
       else raise "C-only float decode lost -0.0 tag or sign"
       end
       case tse_reflect.inspect(v_state)
       when is_raw_pointer(p) then
-        test.assert(s_state == 0 and raw_state == nil and p == (th_ptr as foreign *void))
+        test.assert(raw_state == nil and p == (th_ptr as foreign *void))
       else raise "C-only state decode failed"
       end
       case tse_reflect.inspect(v_ptr)
       when is_raw_pointer(p) then
-        test.assert(s_ptr == 0 and raw_ptr == nil and p == (cell as foreign *void))
+        test.assert(raw_ptr == nil and p == (cell as foreign *void))
       else raise "C-only pointer decode failed"
       end
       local fn_restored: function (...: value): (...: value) = v_fn
-      test.assert(s_fn == 0 and raw_fn == nil and fn_restored(1, 2, 3) as integer == 103,
+      test.assert(raw_fn == nil and fn_restored(1, 2, 3) as integer == 103,
                   "C-only bare C function decode failed")
+      test.assert(scalar_top == top,
+                  "C-only scalar decodes changed the caller's Lua stack top")
       test.assert(denied_after_scalars == (0 as foreign size_t),
                   "C-only scalar decodes attempted a Lua heap allocation")
 
-      test.assert(s_str > 0 and raw_str == nil and str_top == top + 1 and
-                  str_error ~= nil and denied[0] > (0 as foreign size_t),
-                  "protected string decode under OOM did not consume slot or root error")
+      test.assert(str_failed and raw_str == nil and str_error ~= nil and
+                  denied[0] > (0 as foreign size_t),
+                  "protected string decode under OOM did not consume slot or raise")
       -- Before any GC or follow-up packet operation, OOM unwind must have
       -- retired the execution's decode scope rather than leaving stale authority.
       tse_expect_error(function ()
@@ -688,17 +639,22 @@ function test_transfer_scalar_envelope_c_only_decode_oom_and_malformed_packets(
                   "resource-bearing packet did not retain both attachments")
 
       local denied_before_res = denied[0]
-      ffi.lua_setallocf(L, tse_deny_lua_alloc, denied as foreign *void)
-      local s_res = tse_transfer.decode_message(L, raw_res)
-      local res_top = ffi.lua_gettop(L)
+      tse_gc.collect()
+      test.assert(ffi.lua_checkstack(L, 64) ~= 0)
+      local res_failed = false
       local res_error: value = nil
-      if s_res >= 0 then res_error = ffi.lua_totvalue(L, -1) as value end
-      ffi.lua_settop(L, top)
+      ffi.lua_setallocf(L, tse_deny_lua_alloc, denied as foreign *void)
+      do
+        tse_transfer.decode_message(raw_res)
+      catch
+        res_failed = true
+        res_error = error
+      end
       ffi.lua_setallocf(L, prev_alloc, prev_ud)
 
-      test.assert(s_res > 0 and raw_res == nil and res_top == top + 1 and
-                  res_error ~= nil and denied[0] > denied_before_res,
-                  "resource-bearing decode under OOM did not consume slot or root error")
+      test.assert(res_failed and raw_res == nil and res_error ~= nil and
+                  denied[0] > denied_before_res,
+                  "resource-bearing decode under OOM did not consume slot or raise")
       -- The >40-byte qualified nominal name allocates in copy_native_bytes
       -- before the probe decoder can claim either attached resource.
       test.assert(res_c1[0] == 1 and res_c2[0] == 1,
@@ -710,23 +666,9 @@ function test_transfer_scalar_envelope_c_only_decode_oom_and_malformed_packets(
         tse_transfer.attach_resource(
           cell as foreign *void, tse_resource_retain, tse_resource_release)
       end, "transfer: resource attachment requires an encode scope")
-
       tse_gc.collect()
-      local raised = false
-      do
-        tse_transfer.raise_message_error(s_str, str_error)
-      catch
-        raised = error == str_error
-      end
-      test.assert(raised, "protected string decode did not propagate its rooted error")
-
-      local res_raised = false
-      do
-        tse_transfer.raise_message_error(s_res, res_error)
-      catch
-        res_raised = error == res_error
-      end
-      test.assert(res_raised, "resource-bearing decode did not propagate its rooted error")
+      test.assert(res_c1[0] == 1 and res_c2[0] == 1,
+                  "resource-bearing decode under OOM released unclaimed units twice")
 
       local restored_after_oom: TransferScalarEnvelopeScopeBypassProbe =
         tse_roundtrip_raw(TransferScalarEnvelopeScopeBypassProbe(
@@ -747,22 +689,21 @@ function test_transfer_scalar_envelope_c_only_decode_oom_and_malformed_packets(
       defer tse_transfer.discard_message(raw)
       test.assert(tse_clear_encoded_cfunction_pointer(raw, tse_cfunc_echo) == 1,
                   "could not locate encoded C function pointer in packet header")
-      local top = ffi.lua_gettop(L)
-      defer ffi.lua_settop(L, top)
-      local status = tse_transfer.decode_message(L, raw)
-      local err_val: value = nil
-      if status > 0 then err_val = ffi.lua_totvalue(L, -1) as value end
-      test.assert(status > 0 and raw == nil and ffi.lua_gettop(L) == top + 1,
+      local caught = false
+      do
+        tse_transfer.decode_message(raw)
+      catch
+        caught = error is string and
+          support.contains(error, "cannot transfer a NULL Lua C function")
+      end
+      test.assert(caught and raw == nil,
                   "malformed NULL C function packet did not fail via protected decode")
-      tse_expect_error(function ()
-        tse_transfer.raise_message_error(status, err_val)
-      end, "cannot transfer a NULL Lua C function")
     end)
 
   context:run("scope-free-string-with-injected-attachments-success",
     function (_context: test.Context)
-      -- The scope-free worker leaves ownership in the caller slot until outer
-      -- discard_message consumes it, including every unclaimed attachment.
+      -- The scope-free STRING branch keeps ownership in the caller slot while
+      -- it copies, then clears it and disposes every unclaimed attachment.
       local str_template = tse_transfer.encode_message("kind-template")
       defer tse_transfer.discard_message(str_template)
       local c1: owned int[] = foreign int.new_array(1)
@@ -776,13 +717,9 @@ function test_transfer_scalar_envelope_c_only_decode_oom_and_malformed_packets(
       test.assert(c1[0] == 2 and c2[0] == 2)
       tse_rewrite_packet_kind(raw, str_template)
       local top = ffi.lua_gettop(L)
-      defer ffi.lua_settop(L, top)
-      local status = tse_transfer.decode_message(L, raw)
-      local result: value = nil
-      if status == 0 then result = ffi.lua_totvalue(L, -1) as value end
+      local result = tse_transfer.decode_message(raw)
       local after_top = ffi.lua_gettop(L)
-      ffi.lua_settop(L, top)
-      test.assert(status == 0 and raw == nil and after_top == top + 1 and
+      test.assert(raw == nil and after_top == top and
                   (result as string) == "scope\0free\0attached" and
                   c1[0] == 1 and c2[0] == 1,
                   "scope-free STRING decode did not consume slot or release injected attachments")
@@ -811,32 +748,29 @@ function test_transfer_scalar_envelope_c_only_decode_oom_and_malformed_packets(
       denied[0] = 0 as foreign size_t
       local top = ffi.lua_gettop(L)
       defer ffi.lua_settop(L, top)
-      -- Reserve before denial so decode_message's nonthrowing -3 stack
-      -- reservation succeeds and denial surfaces as a protected positive status.
-      test.assert(ffi.lua_checkstack(L, 16) ~= 0)
+      -- Reserve before denial so decode's entry frame and result slot need no
+      -- stack growth; denial then surfaces inside its protected body.
+      tse_gc.collect()
+      test.assert(ffi.lua_checkstack(L, 64) ~= 0)
       local prev_ud: foreign *void = nil
       local prev_alloc = ffi.lua_getallocf(L, prev_ud)
       ffi.lua_setallocf(L, tse_deny_lua_alloc, denied as foreign *void)
       defer ffi.lua_setallocf(L, prev_alloc, prev_ud)
-      local status = tse_transfer.decode_message(L, raw)
-      local after_top = ffi.lua_gettop(L)
-      local rooted_error: value = nil
-      if status > 0 then rooted_error = ffi.lua_totvalue(L, -1) as value end
-      ffi.lua_settop(L, top)
+      local failed = false
+      local raised_error: value = nil
+      do
+        tse_transfer.decode_message(raw)
+      catch
+        failed = true
+        raised_error = error
+      end
       ffi.lua_setallocf(L, prev_alloc, prev_ud)
-      test.assert(status > 0 and raw == nil and after_top == top + 1 and
-                  rooted_error ~= nil and denied[0] > (0 as foreign size_t) and
-                  c1[0] == 1 and c2[0] == 1,
+      test.assert(failed and raw == nil and raised_error ~= nil and
+                  denied[0] > (0 as foreign size_t) and c1[0] == 1 and c2[0] == 1,
                   "scope-free STRING OOM decode did not consume slot or release injected attachments")
       tse_gc.collect()
-      local raised = false
-      do
-        tse_transfer.raise_message_error(status, rooted_error)
-      catch
-        raised = error == rooted_error
-      end
-      test.assert(raised and c1[0] == 1 and c2[0] == 1,
-                  "scope-free STRING OOM lost its rooted error or released attachments twice")
+      test.assert(c1[0] == 1 and c2[0] == 1,
+                  "scope-free STRING OOM released injected attachments twice")
     end)
 
   context:run("scope-free-null-cfunction-with-injected-attachments-semantic-error",
@@ -854,130 +788,86 @@ function test_transfer_scalar_envelope_c_only_decode_oom_and_malformed_packets(
       defer tse_transfer.discard_message(raw)
       test.assert(c1[0] == 2 and c2[0] == 2)
       tse_rewrite_packet_kind(raw, fn_template)
-      local top = ffi.lua_gettop(L)
-      defer ffi.lua_settop(L, top)
-      local status = tse_transfer.decode_message(L, raw)
-      local after_top = ffi.lua_gettop(L)
-      local rooted_error: value = nil
-      if status > 0 then rooted_error = ffi.lua_totvalue(L, -1) as value end
-      ffi.lua_settop(L, top)
-      test.assert(status > 0 and raw == nil and after_top == top + 1 and
-                  rooted_error ~= nil and c1[0] == 1 and c2[0] == 1,
+      local caught = false
+      do
+        tse_transfer.decode_message(raw)
+      catch
+        caught = error is string and
+          support.contains(error, "cannot transfer a NULL Lua C function")
+      end
+      test.assert(caught and raw == nil and c1[0] == 1 and c2[0] == 1,
                   "scope-free NULL-FUNCTION decode did not consume slot or release injected attachments")
       tse_gc.collect()
-      tse_expect_error(function ()
-        tse_transfer.raise_message_error(status, rooted_error)
-      end, "cannot transfer a NULL Lua C function")
       test.assert(c1[0] == 1 and c2[0] == 1,
                   "scope-free NULL-FUNCTION decode released injected attachments twice")
     end)
 
-  context:run("negative-status-null-slot-and-checkstack-exhaustion-consume-owner",
+  context:run("null-slot-and-result-stack-reservation-failure",
     function (_context: test.Context)
-      local top = ffi.lua_gettop(L)
-      defer ffi.lua_settop(L, top)
-      local null_slot: foreign *(*void) = nil
-      local s_null = tse_transfer.decode_message(L, null_slot)
-      test.assert(s_null == -2 and ffi.lua_gettop(L) == top,
-                  "decode_message(L, nil) did not return -2 with unchanged stack")
       tse_expect_error(function ()
-        tse_transfer.raise_message_error(s_null, nil)
+        tse_transfer.decode_message(nil)
       end, "transfer: invalid packet owner slot")
 
-      local c1: owned int[] = foreign int.new_array(1)
-      local c2: owned int[] = foreign int.new_array(1)
-      c1[0] = 1
-      c2[0] = 1
-      local raw_attached = tse_transfer.encode_message(
-        TransferScalarEnvelopeScopeBypassProbe(c1 as foreign *void, c2 as foreign *void))
-      defer tse_transfer.discard_message(raw_attached)
-      test.assert(c1[0] == 2 and c2[0] == 2)
-
-      local aux = ffi.luaL_newstate()
-      test.assert(aux ~= nil, "could not create auxiliary Lua state for checkstack probe")
-      defer ffi.lua_close(aux)
-      ffi.lua_setallocf(aux, tse_deny_lua_alloc, nil)
-      while ffi.lua_checkstack(aux, 1) ~= 0 do
-        ffi.lua_pushnil(aux)
+      -- Scan the free Lua stack under allocator denial with an attachment-bearing
+      -- packet relabeled as a C-only integer. Too little room fails decode's
+      -- own entry before it takes ownership, so the guarded local still owns
+      -- the packet. Exactly one free slot past that entry frame fails only the
+      -- explicit result reservation, which consumes the packet before raising.
+      -- More room decodes normally.
+      local int_template = tse_transfer.encode_message(7)
+      defer tse_transfer.discard_message(int_template)
+      local denied: owned size_t[] = foreign size_t.new_array(1)
+      denied[0] = 0 as foreign size_t
+      local prev_ud: foreign *void = nil
+      local prev_alloc = ffi.lua_getallocf(L, prev_ud)
+      local saw_entry_failure = false
+      local saw_reservation_failure = false
+      local decoded = false
+      local free = 1
+      while not decoded and free <= 128 do
+        local c1: owned int[] = foreign int.new_array(1)
+        local c2: owned int[] = foreign int.new_array(1)
+        c1[0] = 1
+        c2[0] = 1
+        local raw = tse_transfer.encode_message(
+          TransferScalarEnvelopeScopeBypassProbe(c1 as foreign *void, c2 as foreign *void))
+        defer tse_transfer.discard_message(raw)
+        tse_rewrite_packet_kind(raw, int_template)
+        tse_gc.collect()
+        local base = ffi.lua_gettop(L)
+        local failed = false
+        ffi.lua_setallocf(L, tse_deny_lua_alloc, denied as foreign *void)
+        while ffi.lua_checkstack(L, 1) ~= 0 do
+          ffi.lua_pushnil(L)
+        end
+        -- Exactly one slot is free here; leave `free` slots for decode.
+        local filled = ffi.lua_gettop(L) as integer
+        ffi.lua_settop(L, (filled - free + 1) as foreign int)
+        do
+          tse_transfer.decode_message(raw)
+        catch
+          failed = true
+        end
+        ffi.lua_setallocf(L, prev_alloc, prev_ud)
+        ffi.lua_settop(L, base)
+        if not failed then
+          test.assert(raw == nil and c1[0] == 1 and c2[0] == 1,
+                      "reserved C-only decode did not consume its packet")
+          decoded = true
+        elseif raw == nil then
+          test.assert(not saw_reservation_failure and c1[0] == 1 and c2[0] == 1,
+                      "result reservation failure did not release the consumed packet")
+          saw_reservation_failure = true
+        else
+          test.assert(not saw_reservation_failure and c1[0] == 2 and c2[0] == 2,
+                      "decode entry failure consumed the caller-owned packet")
+          saw_entry_failure = true
+        end
+        free = free + 1
       end
-      local exhausted_top = ffi.lua_gettop(aux)
-      local s_exhausted = tse_transfer.decode_message(aux, raw_attached)
-      test.assert(s_exhausted == -3 and raw_attached == nil and
-                  ffi.lua_gettop(aux) == exhausted_top and
-                  c1[0] == 1 and c2[0] == 1,
-                  "checkstack failure (-3) did not clear slot, release attachments, or preserve stack")
-      tse_expect_error(function ()
-        tse_transfer.raise_message_error(s_exhausted, nil)
-      end, "transfer: cannot reserve packet operation stack")
+      test.assert(saw_entry_failure and saw_reservation_failure and decoded,
+                  "stack scan did not reach entry failure, reservation failure, and success")
     end)
-end
-
-function test_transfer_scalar_envelope_worker_registry_across_states_and_gc(
-    _context: test.Context)
-  local slot1: foreign *TransferScalarEnvelopeSlot =
-    foreign TransferScalarEnvelopeSlot.new_array(1)
-  defer do
-    tse_transfer.discard_message(slot1[0])
-    slot1[0] = nil
-  end
-  local slot2: foreign *TransferScalarEnvelopeSlot =
-    foreign TransferScalarEnvelopeSlot.new_array(1)
-  defer do
-    tse_transfer.discard_message(slot2[0])
-    slot2[0] = nil
-  end
-  slot1[0] = tse_transfer.encode_message("cold\0worker\0lookup")
-  slot2[0] = tse_transfer.encode_message(
-    TransferScalarEnvelopeShortRecord(88, "warm\0worker\0after\0gc"))
-
-  local state1 = tse_lua.new()
-  defer state1:close()
-  local r1, r2 = state1:run([[
-    local s1, s2, decode_slot = ...
-    local first = decode_slot(s1)
-    collectgarbage('collect')
-    collectgarbage('collect')
-    local second = decode_slot(s2)
-    return first, second.code .. ':' .. second.label
-  ]], "=cold-and-warm-worker-key",
-    tse_transfer.TransferValue.is_pointer(slot1 as foreign *void),
-    tse_transfer.TransferValue.is_pointer(slot2 as foreign *void),
-    tse_transfer.TransferValue.is_function(tse_decode_slot_in_state))
-  test.assert(slot1[0] == nil and slot2[0] == nil,
-              "independent-state raw decodes did not clear caller slots")
-  case r1
-  when is_string(s) then test.assert(s == "cold\0worker\0lookup")
-  else raise "cold worker lookup did not return expected binary string"
-  end
-  case r2
-  when is_string(s) then test.assert(s == "88:warm\0worker\0after\0gc")
-  else raise "warm worker lookup after GC did not reconstruct record"
-  end
-
-  -- Closing state1 and collecting garbage must not affect host or fresh states.
-  state1:close()
-  tse_gc.collect()
-  tse_gc.collect()
-  local host_rec: TransferScalarEnvelopeShortRecord = tse_roundtrip_raw(
-    TransferScalarEnvelopeShortRecord(89, "host\0after\0state\0close"))
-  test.assert(host_rec.code == 89 and host_rec.label == "host\0after\0state\0close")
-
-  slot1[0] = tse_transfer.encode_message(
-    TransferScalarEnvelopeShortRecord(90, "fresh\0after\0state\0close"))
-  local state2 = tse_lua.new()
-  defer state2:close()
-  local fresh = state2:run([[
-    local slot, decode_slot = ...
-    local restored = decode_slot(slot)
-    return restored.code .. ':' .. restored.label
-  ]], "=fresh-state-after-worker-close",
-    tse_transfer.TransferValue.is_pointer(slot1 as foreign *void),
-    tse_transfer.TransferValue.is_function(tse_decode_slot_in_state))
-  test.assert(slot1[0] == nil, "fresh-state raw decode did not clear caller slot")
-  case fresh
-  when is_string(s) then test.assert(s == "90:fresh\0after\0state\0close")
-  else raise "fresh-state decode after worker close did not reconstruct record"
-  end
 end
 
 function test_transfer_scalar_envelope_bounded_presize_and_single_closure_projection(

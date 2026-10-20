@@ -188,10 +188,9 @@ cross-thread channels, thread spawn/outcomes, and
 
 ```text
 function encode_message(candidate: value): foreign *void
-foreign function decode_message(state: *lua_State, slot: *(*void)): int
+function decode_message(slot: foreign *(*void)): value
 foreign function discard_message(raw: *void)
 foreign function copy_message(raw: const *void): *void
-function raise_message_error(status: integer, failure: value)
 
 function attach_resource(resource: foreign *void,
                          retain: foreign function (*void): void,
@@ -266,63 +265,57 @@ before the packet is detached; wire bytes,
 hook invocation order, and resource ownership do not depend on spare capacity.
 See the [buffer implementation](../implementation/protobuf-library.md#encoding).
 
-`decode_message(state, slot)` is a public source-defined C-ABI entry for trusted
-Lua/native integrations. It returns a native status rather than the decoded
-value. Pass an exclusively owned, live Lua state and the address of a **real
-caller-owned `void *` slot** that holds one uniquely owned packet. A copied
-borrowed packet address grants no ownership. Keep the slot and its enclosing
-owner alive throughout the call.
+`decode_message(slot)` is an ordinary public Titan function for trusted native
+integrations. It reconstructs the semantic value in the current Lua state and
+returns it. Pass a **real caller-owned `foreign *void` local** that holds one
+uniquely owned packet: an exact pointer-local argument passes the address of
+that local itself (see
+[contextual object-pointer conversions](c-ffi-expressions.md#contextual-object-pointer-conversions)),
+or pass an explicit `foreign *(*void)` slot address. A copied borrowed packet
+address grants no ownership. Keep the slot and its enclosing owner alive
+throughout the call.
 
-Call it **directly on the actual guarded local slot** and keep the returned
-status. Do not route the slot through an ordinary forwarding wrapper, and do not
-propagate an error out of the native boundary after the slot changed. A normal
-return commits Titan's mutable-address spill back to the local before any
-ordinary helper can raise.
+Guard the local with `defer transfer.discard_message(raw)` as soon as it holds
+the packet, call `decode_message(raw)` **directly on that local**, and do not
+assign the local again or pass its address to another mutating C call inside the
+guarded region. Titan's catch recovery reloads only locals that Titan code wrote
+inside the protected region, so such a write would let the deferred discard see
+a stale owner. Do not route the slot through an ordinary forwarding wrapper.
+Lua code cannot call `decode_message` directly, because its raw C pointer
+parameter has no dynamic Lua coercion.
 
-With a valid slot, `decode_message` reconstructs the semantic value in `state`
-and clears and consumes the packet on every outcome, including stack
-reservation failure, module initialization failure, ordinary worker-entry
-failure, and destination setup failure. After reserving stack space without
-`longjmp`, allocation-free scalar packets (`nil`, `boolean`, `integer`, `float`,
-borrowed `lua_State`, borrowed pointer, and non-nil bare C function) push their
-result directly in C, clear the slot, and dispose of the packet without opening
-a decode scope or entering `lua_pcallk`. Binary strings (`STRING`) and malformed
-nil C-function (`FUNCTION`) packets enter the protected Lua decoder worker
-without acquiring a `ResourceScope`, keeping the packet in `slot[0]` until outer
-`decode_message` clears the slot and disposes the packet via `discard_message`
-after `lua_pcallk`; only nominal packets (`RECORD`, `UNION`, `CLOSURE`,
-`RECORD_PAYLOAD`) acquire a decode `ResourceScope` and move `slot[0]` into the
-scope. Disposal of any residual owner finishes
-before the status returns, and the entry does not rethrow after mutating the
-slot. The status means:
+Once its body runs, `decode_message` consumes the packet and clears the slot on
+every outcome before it returns or an error propagates: success, result-stack
+reservation failure, module initialization failure, decoder or hook failure,
+partial endpoint claims, and destination setup failure. Only its own entry,
+which reserves its Lua frame, can fail with a memory or stack error before the
+body runs; the slot then still owns the packet, and the caller's deferred
+`discard_message` disposes of it.
 
-- `0`: exactly one decoded value, possibly nil, sits above the Lua stack top
-  saved at entry.
-- A positive Lua status: exactly one rooted error sits above that saved top.
-  Only after the direct native return and slot commit may ordinary code
-  propagate it.
-- `-2`: the slot address is nil. No stack value is added.
-- `-3`: stack reservation failed. No stack value is added, and a valid slot is
-  still cleared and disposed.
+Allocation-free scalar packets (`nil`, `boolean`, `integer`, `float`, borrowed
+`lua_State`, borrowed pointer, and non-nil bare C function) reserve their one
+result stack slot without `longjmp`, build the result directly in C, clear the
+slot, and dispose of the packet without opening a decode scope or a protected
+region. A failed reservation clears the slot and disposes of the packet before
+raising `"transfer: cannot reserve packet operation stack"`. Every other packet
+runs the decoder worker inside one Titan `catch`. Binary strings (`STRING`)
+copy their bytes while the slot still owns the packet, then clear the slot and
+dispose of it. Malformed nil C-function (`FUNCTION`) packets raise
+`"cannot transfer a NULL Lua C function"` without acquiring a `ResourceScope`.
+Only nominal packets (`RECORD`, `UNION`, `CLOSURE`, `RECORD_PAYLOAD`) acquire a
+decode `ResourceScope` and move `slot[0]` into that scope. On any error the
+catch clears `slot[0]`, disposes of any residual packet natively, and re-raises
+the original error with its original traceback.
 
-An empty input slot produces a positive error status for
-`"transfer: cannot decode a NULL packet"`.
+A nil `slot` raises `"transfer: invalid packet owner slot"`, and an empty slot
+raises `"transfer: cannot decode a NULL packet"`. Decoding leaves the caller's
+Lua stack top unchanged.
 
-At the original call site, copy the result or error into traced Titan storage
-before entering any ordinary helper, because a helper's own preamble can change
-the stack top. For a nonnegative status copy the top value; for a negative
-status use nil instead of reading the stack. Save and restore the exact Lua
-stack top around the call. For a nonzero status, then call
-`raise_message_error(status, failure)` to propagate the original error and
-traceback (positive status) or the matching setup diagnostic (negative status).
-That helper is not a raw-owner boundary and must not run before the slot's
-native return has committed. Do not call it on success.
-
-Protected decode may enter Lua, load modules, allocate, and run hooks. It is
-not the no-Lua discard chain, it does not synchronize access to the state, and
-it does not create a Runtime. Ordinary cross-thread and cross-state callers use
+Decode may enter Lua, load modules, allocate, and run hooks. It is not the
+no-Lua discard chain, it does not synchronize access to the state, and it does
+not create a Runtime. Ordinary cross-thread and cross-state callers use
 `thread.channel`, `thread.spawn*`, or `async.send` / `Receiver:wait`, which
-manage guarded raw packet slots around `encode_message` and `decode_message`.
+manage guarded raw packet locals around `encode_message` and `decode_message`.
 
 `discard_message(raw)` is a public C-ABI `foreign function` that releases any
 unclaimed entries in the packet's resource table and frees the packet storage.

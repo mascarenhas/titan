@@ -403,12 +403,7 @@ function Receiver:receive(): T
   if not ok then
     raise "channel is closed"
   end
-  local top = ffi.lua_gettop(L)
-  defer ffi.lua_settop(L, top)
-  local status = transfer.decode_message(L, raw)
-  local decoded_value: value = nil
-  if status >= 0 then decoded_value = ffi.lua_totvalue(L, -1) end
-  return thread_message_value(status, decoded_value) as T
+  return transfer.decode_message(raw) as T
 end
 
 --- Receive the next message or a closed status without raising on clean stream completion.
@@ -420,12 +415,7 @@ function Receiver:receive_result(): ReceiveResult<|T|>
   if not ok then
     return ReceiveResult<|T|>.closed()
   end
-  local top = ffi.lua_gettop(L)
-  defer ffi.lua_settop(L, top)
-  local status = transfer.decode_message(L, raw)
-  local decoded_value: value = nil
-  if status >= 0 then decoded_value = ffi.lua_totvalue(L, -1) end
-  return ReceiveResult<|T|>.message(thread_message_value(status, decoded_value) as T)
+  return ReceiveResult<|T|>.message(transfer.decode_message(raw) as T)
 end
 
 --- Attempt to receive a buffered message without blocking.
@@ -437,12 +427,7 @@ function Receiver:try_receive(): (boolean, T?)
   local raw: foreign *void = msg
   defer thread_message_discard(raw)
   if status == 0 then
-    local top = ffi.lua_gettop(L)
-    defer ffi.lua_settop(L, top)
-    local decoded_status = transfer.decode_message(L, raw)
-    local decoded_value: value = nil
-    if decoded_status >= 0 then decoded_value = ffi.lua_totvalue(L, -1) end
-    return true, thread_message_value(decoded_status, decoded_value) as T
+    return true, transfer.decode_message(raw) as T
   end
   return false, nil
 end
@@ -457,12 +442,7 @@ function Receiver:incoming(): (function (Receiver<|T|>, boolean?): (boolean?, T?
     if not ok then
       return nil, nil
     end
-    local top = ffi.lua_gettop(L)
-    defer ffi.lua_settop(L, top)
-    local status = transfer.decode_message(L, raw)
-    local decoded_value: value = nil
-    if status >= 0 then decoded_value = ffi.lua_totvalue(L, -1) end
-    return true, thread_message_value(status, decoded_value) as T
+    return true, transfer.decode_message(raw) as T
   end, self, nil
 end
 

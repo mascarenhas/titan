@@ -1294,21 +1294,23 @@ local function copy_native_bytes(bytes: foreign const *char, length: foreign siz
   return result as string
 end
 
--- The protected foreign boundary retains the caller's slot through worker
--- preparation and primitive results/errors. Only nominal reconstruction needs
--- a scope and moves that owner after the scope is completely prepared.
-local function decode_message_worker(slot_value: value): value
-  local slot = slot_value as foreign *(*void)
+-- The caller's slot keeps owning the packet through worker preparation and
+-- primitive allocation, so decode_message's catch can consume any residual
+-- owner. Only nominal reconstruction needs a scope and moves that owner after
+-- the scope is completely prepared.
+local function decode_message_worker(slot: foreign *(*void)): value
   local message = slot[0] as foreign *titan_async_message
   if message == nil then raise "transfer: cannot decode a NULL packet" end
   local kind = message.kind
   if kind == ffi.TITAN_ASYNC_MESSAGE_STRING then
-    -- Keep the packet in the caller's slot while Lua allocates/roots the result.
-    -- decode_message clears and disposes it after pcall on success or failure.
-    return copy_native_bytes(message.bytes, message.length)
+    -- Lua allocates and roots the copy while the slot still owns the packet.
+    local text = copy_native_bytes(message.bytes, message.length)
+    slot[0] = nil
+    discard_message(message as foreign *void)
+    return text
   elseif kind == ffi.TITAN_ASYNC_MESSAGE_FUNCTION then
-    -- Valid bare C functions already took the C-only path. Error creation
-    -- remains protected, but cannot claim attachments or need a scope.
+    -- Valid bare C functions already took the C-only path. This error cannot
+    -- claim attachments or need a scope; the residual owner stays in the slot.
     raise "cannot transfer a NULL Lua C function"
   end
   local execution = current_execution()
@@ -1369,7 +1371,7 @@ local function decode_message_worker(slot_value: value): value
 end
 
 -- Every successful branch pushes one noncollectable value without allocation,
--- callbacks, or longjmp. The caller reserves the stack and consumes the owner.
+-- callbacks, or longjmp. decode_message reserves the stack and consumes the owner.
 local foreign function decode_scalar_message(
     state: *lua_State, message: *titan_async_message): int
   local kind = message.kind
@@ -1398,90 +1400,46 @@ local foreign function decode_scalar_message(
   return 1
 end
 
--- This zero-upvalue thunk and its protected caller are C-only. In
--- particular no ordinary Titan preamble runs after a raw slot is entrusted to
--- this boundary and before its native residual-owner cleanup is installed.
-local foreign function decode_message_dispatch(state: *lua_State): int
-  local slot = ffi.lua_touserdata(state, 1) as foreign *(*void)
-  -- Only the native code address is a key. The registry value is the traced,
-  -- state-local worker closure (and its module), never a saved GC pointer.
-  local key = (decode_message_dispatch as foreign function(*lua_State): int)
-      as foreign *void
-  ffi.lua_rawgetp(state, ffi.LUA_REGISTRYINDEX, key)
-  if ffi.lua_type(state, -1) ~= ffi.LUA_TFUNCTION then
-    ffi.lua_settop(state, 1)
-    transfer_load_module(state, "titan.transfer", 14 as foreign unsigned long long)
-    ffi.lua_rawgetp(state, ffi.LUA_REGISTRYINDEX, key)
-  end
-  ffi.lua_pushlightuserdata(state, slot)
-  ffi.lua_callk(state, 1, 1, 0 as foreign lua_KContext, nil)
-  return 1
-end
-
---- Consume and clear the actual guarded packet slot, protecting allocating decode.
--- Call directly at that local so its cleared spill commits before ordinary
--- error propagation. Never rethrow inside this foreign boundary.
--- Status 0 leaves one result; positive Lua status leaves one rooted error;
--- negative status adds no stack value (-2 invalid slot, -3 stack OOM).
--- Snapshot a positive-status error in the caller before any ordinary helper,
--- then restore its stack and pass that traced value to raise_message_error.
-foreign function decode_message(state: *lua_State, slot: *(*void)): int
-  if slot == nil then return -2 end
-  if ffi.lua_checkstack(state, 3) == 0 then
-    local raw = slot[0]
-    slot[0] = nil
-    discard_message(raw)
-    return -3
-  end
-  local top = ffi.lua_gettop(state)
+--- Decode and consume the packet owned by an actual guarded raw slot.
+-- Pass the caller's own `foreign *void` local, guarded by
+-- `defer discard_message(raw)` and never written again in that region. Once
+-- the body runs, the packet is consumed and the slot cleared before a result
+-- returns or an error propagates with its original traceback.
+function decode_message(slot: foreign *(*void)): value
+  if slot == nil then raise "transfer: invalid packet owner slot" end
   local message = slot[0] as foreign *titan_async_message
   if message ~= nil then
-    if decode_scalar_message(state, message) ~= 0 then
+    -- Reserve the result slot without longjmp before taking ownership.
+    if ffi.lua_checkstack(L, 1) == 0 then
       slot[0] = nil
       discard_message(message as foreign *void)
-      return 0
+      raise "transfer: cannot reserve packet operation stack"
+    end
+    local top = ffi.lua_gettop(L)
+    if decode_scalar_message(L, message) ~= 0 then
+      slot[0] = nil
+      discard_message(message as foreign *void)
+      local result: value = ffi.lua_totvalue(L, -1)
+      ffi.lua_settop(L, top)
+      return result
     end
   end
-  -- Keep these pushes allocation-free (zero-upvalue C closures/lightuserdata).
-  -- The guarded caller slot still owns the packet; no throwing operation may
-  -- precede the protected call that installs residual-owner cleanup.
-  ffi.lua_pushcclosure(state, ffi.errorhandler, 0)
-  ffi.lua_pushcclosure(state, decode_message_dispatch, 0)
-  ffi.lua_pushlightuserdata(state, slot)
-  local status = ffi.lua_pcallk(state, 1, 1, top + 1, 0 as foreign lua_KContext, nil)
-  local remaining = slot[0]
-  slot[0] = nil
-  discard_message(remaining)
-  -- Keep exactly the result/error rooted while removing the message handler.
-  ffi.lua_copy(state, -1, top + 1)
-  ffi.lua_settop(state, top + 1)
-  return status as foreign int
-end
-
---- Raise an error after a native packet operation commits its owner-slot update.
--- Pass the caller's traced error for a positive status, nil for a negative
--- setup status. Success needs no ordinary helper entry.
-function raise_message_error(status: integer, failure: value)
-  if status == -2 then raise "transfer: invalid packet owner slot" end
-  if status < 0 then raise "transfer: cannot reserve packet operation stack" end
-  if ffi.lua_checkstack(L, 1) == 0 then
-    raise "transfer: cannot reserve packet error stack"
+  do
+    return decode_message_worker(slot)
+  catch
+    -- Primitive and preparation failures leave the packet in the slot; nominal
+    -- reconstruction already moved it into its scope, leaving the slot empty.
+    local remaining = slot[0]
+    slot[0] = nil
+    discard_message(remaining)
+    raise
   end
-  ffi.lua_pushboolean(L, 1)
-  ffi.lua_setfield(L, ffi.LUA_REGISTRYINDEX, ffi.TITAN_TRACE_PINNED)
-  raise failure
 end
 
 do
   protobuf.set_packet_context_provider(packet_context)
   gc.ephemeron(resource_scopes as {value: value})
   gc.ephemeron(transfer_active_closures as {value: value})
-  local top = ffi.lua_gettop(L)
-  defer ffi.lua_settop(L, top)
-  if ffi.lua_checkstack(L, 1) == 0 then raise "transfer: cannot reserve packet worker stack" end
-  ffi.lua_pushtvalue(L, decode_message_worker)
-  ffi.lua_rawsetp(L, ffi.LUA_REGISTRYINDEX,
-      (decode_message_dispatch as foreign function(*lua_State): int) as foreign *void)
   closure_fields = {
     reflect.Type.is_array(reflect.ArrayTypeConstness.is_mutable(),
       reflect.Type.is_named(reflect.NamedType("titan.transfer.TransferValue"))),

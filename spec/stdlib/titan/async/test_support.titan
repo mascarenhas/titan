@@ -1,6 +1,7 @@
 local test = import "test"
 local async = import "async"
 local timer = import "timer"
+local transfer = import "transfer"
 foreign import "lua.h"
 foreign import "titan/ffi.h"
 foreign import "string.h"
@@ -90,4 +91,12 @@ end
 local function collect_garbage()
   test.assert(ffi.lua_gc(L, ffi.LUA_GCCOLLECT) >= 0,
         "garbage collection is unavailable")
+end
+
+--- Decode the raw packet at `slots[offset]` from Lua code in an independent state.
+-- Only this Lua/lightuserdata boundary asserts the borrowed slot address:
+-- `transfer.decode_message` takes a raw C slot, which has no dynamic Lua
+-- coercion, and consumes the packet on return or error.
+function decode_raw_slot(slots: value, offset: integer): value
+  return transfer.decode_message((slots as foreign *(*void)) + offset)
 end

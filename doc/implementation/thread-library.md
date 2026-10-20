@@ -9,8 +9,7 @@ The user-facing contract is in the
   `waiter_unlink`, `waiter_wake_one`, `waiter_wake_all`) that retain and release
   a native external-wake target per registration, native message
   conversion and C-only discard wrappers (`value_to_thread_message`,
-  `thread_message_value`, `thread_message_discard`) delegating to
-  `transfer.encode_message`, `transfer.decode_message`, and
+  `thread_message_discard`) delegating to `transfer.encode_message` and
   `transfer.discard_message`, public C-ABI channel retain/release callbacks
   (`channel_retain_sender_native`, `channel_retain_receiver_native`,
   `channel_release_sender_native`, `channel_release_receiver_native`),
@@ -124,17 +123,14 @@ with all semantic encoding/decoding outside the channel/control mutex:
   structural records, unions, closures, and root endpoints directly from the
   native buffer slice (`protobuf.deserialize_nominal_buffer_with_context`,
   `protobuf.deserialize_fields_buffer_with_context`, and `codec.decode` for
-  registered `RECORD_PAYLOAD` capabilities). Each caller keeps a real local
-  `void *` slot under an immediate native discard defer and calls
-  `transfer.decode_message(state, slot)` **directly** with its address. The
-  foreign boundary returns a native status after consuming/clearing the slot;
-  normal return commits the compiler's mutable-address spill before any
-  ordinary helper runs. At the same original callsite, callers copy the top
-  result/error into traced `value` storage when status is nonnegative (nil for
-  negative setup status), then pass status and that explicit value to
-  `thread_message_value`. A status-only adapter must not read the stack later:
-  its ordinary preamble may already have changed the top. Every caller owns
-  exact stack save/restore; no ordinary raw-slot wrapper intervenes.
+  registered `RECORD_PAYLOAD` capabilities). Each caller takes its packet into
+  a real local `void *`, installs an immediate native discard defer, and returns
+  or binds `transfer.decode_message(raw)` **directly** on that local, never
+  writing it again inside the guarded region. Decode consumes and clears the
+  local on return and before any decoder error propagates with its original
+  traceback; an error from decode's own entry preamble leaves the packet for
+  the guard. No ordinary raw-slot wrapper or Lua-stack ledger intervenes; see
+  [consuming raw-slot decode](transfer-library.md#consuming-raw-slot-decode).
 
 Cancellation reasons do not use the erased
 `async.CancellationReason<|value|>` schema directly, because protobuf cannot
@@ -466,8 +462,8 @@ Inside `thread_worker_main`:
 2. `child_thread_bootstrap` detaches `ctrl.entry_msg` under a `defer` guard that
    discards any unconsumed `entry_msg` and `leftover_cancel` packet via
    `thread_message_discard`, schedules the child's root `async.Task` (which
-   moves `entry_msg` into a local guarded `void *` slot and directly calls the
-   status-returning native decoder with that slot), registers an
+   moves `entry_msg` into a local guarded `void *` slot and directly calls
+   `transfer.decode_message` on it), registers an
    unreferenced `uv.async_t` cancellation handle in `ctrl.child_cancel_handle`,
    and runs `async.loop()`.
 3. When the root `Task` finishes, its `defer` clears `ctrl.child_cancel_handle`
@@ -505,12 +501,10 @@ Inside `thread_worker_main`:
 5. In the parent state, `Thread:reconstruct_terminal_status` detaches
    `result_msg` and `error_traceback` (or `Thread:cancel`'s `cancel_reason_msg`
    in the child) under `ctrl.mutex` and performs all Lua decoding
-   (direct `transfer.decode_message` on the local `raw: void *` slot guarded by
-   `defer thread_message_discard(raw)`), string allocation, and
-   `defer ffi.free(trace_ptr)` outside the mutex. Native return commits the raw
-   spill, then the original callsite copies its rooted stack result/error before
-   `thread_message_value(status, result)` can enter an ordinary preamble.
-   Each decode has an exact Lua-stack ledger; the reconstructed
+   (direct `transfer.decode_message(raw)` on the local `raw: void *` slot
+   guarded by `defer thread_message_discard(raw)`, inside an `if raw ~= nil`
+   arm whose own `catch` maps a decode failure), string allocation, and
+   `defer ffi.free(trace_ptr)` outside the mutex. The reconstructed
    `ThreadStatus<|R|>` is cached on `self.cached_status`.
    If the parent instead drops and
    finalizes `Thread<|R|>` without reconstructing its status,
