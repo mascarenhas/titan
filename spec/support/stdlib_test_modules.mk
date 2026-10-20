@@ -154,6 +154,7 @@ TITAN_TEST_IMPORTS_json.tests :=
 
 TITAN_TEST_SOURCES_protobuf.tests := spec/stdlib/titan/protobuf/tests.titan
 TITAN_TEST_IMPORTS_protobuf.tests :=
+TITAN_TEST_FOREIGN_protobuf.tests := 1
 
 TITAN_TEST_SOURCES_lua.preload_fixture := spec/stdlib/titan/lua/preload_fixture.titan
 TITAN_TEST_IMPORTS_lua.preload_fixture :=
