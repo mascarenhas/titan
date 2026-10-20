@@ -1221,8 +1221,8 @@ function test_scope_reuse_trailing_attachments_across_producers_and_alignment(
     end)
 end
 
--- Root hook records whose only purpose is a nested packet frame that retires
--- through its error path, once in each direction.
+-- Root hook records whose only purpose is nested packet frames: a failing
+-- encode, and a successful encode whose decode fails.
 record ScopeReuseNestedFailure
   local fail_encode: boolean
 end
@@ -1237,52 +1237,74 @@ function ScopeReuseNestedFailure.from_transfer_payload(
   raise "scope-reuse-nested-decode-fail"
 end
 
--- More rounds than the frames earlier cases abandon in this state: a frame
--- count that dropped once per nested failure would reach zero inside a live
--- packet and turn the carried-context conversion below into a missing scope.
-local scope_reuse_count_rounds = 128
+-- Every nested packet frame below retires between two authority checks. A
+-- retirement that uncounted one frame too many would therefore lower the
+-- state's frame count by exactly one per check and reach zero inside the live
+-- outer packet once the checks outnumber the frames earlier cases abandoned,
+-- turning the next carried-context conversion into a missing scope.
+local scope_reuse_count_rounds = 100
+local scope_reuse_count_attached = 0
 
-local function scope_reuse_nested_failures()
+-- One failing encode, then the successful encode and the failing decode of
+-- one nested round trip: three nested frames, each followed by `check`.
+local function scope_reuse_nested_frames(check: function (): ())
   scope_reuse_expect_error(function ()
-    local raw = scope_reuse_transfer.encode_message(ScopeReuseNestedFailure(true))
-    scope_reuse_transfer.discard_message(raw)
+    local failed = scope_reuse_transfer.encode_message(ScopeReuseNestedFailure(true))
+    scope_reuse_transfer.discard_message(failed)
   end, "scope-reuse-nested-encode-fail")
+  check()
+  local raw = scope_reuse_transfer.encode_message(ScopeReuseNestedFailure(false))
+  defer scope_reuse_transfer.discard_message(raw)
+  check()
+  local top = ffi.lua_gettop(L)
+  defer ffi.lua_settop(L, top)
+  local status = scope_reuse_transfer.decode_message(L, raw)
+  local failure: value = nil
+  if status >= 0 then failure = ffi.lua_totvalue(L, -1) as value end
+  ffi.lua_settop(L, top)
+  test.assert(raw == nil and status > 0, "nested round-trip decode did not fail")
   scope_reuse_expect_error(function ()
-    scope_reuse_roundtrip(ScopeReuseNestedFailure(false))
+    scope_reuse_transfer.raise_message_error(status, failure)
   end, "scope-reuse-nested-decode-fail")
+  check()
 end
 
--- Each hook converts its endpoint through TransferValue, which resolves only
--- the exact top frame of this execution, after every round of nested failures.
+-- The encode hook converts its endpoint through TransferValue, which resolves
+-- only the exact top frame of this execution, after every nested frame.
 record ScopeReuseCountProbe
   local sender: scope_reuse_thread.Sender<|integer|>
 end
 
 function ScopeReuseCountProbe:to_transfer_payload(): string
-  local index = ""
-  for round = 1, scope_reuse_count_rounds do
-    scope_reuse_nested_failures()
-    case scope_reuse_transfer.TransferValue.from_value(self.sender)
-    when is_record_payload(_module, _name, data) then
-      test.assert(data == scope_reuse_u32_le(round - 1),
-                  "nested failures disturbed the enclosing encode frame at round " .. round)
-      index = data
-    else
-      raise "registered Sender did not convert to a slot-index policy"
-    end
+  local sender = self.sender
+  scope_reuse_count_attached = 0
+  for _ = 1, scope_reuse_count_rounds do
+    scope_reuse_nested_frames(function ()
+      case scope_reuse_transfer.TransferValue.from_value(sender)
+      when is_record_payload(_module, _name, data) then
+        test.assert(data == scope_reuse_u32_le(scope_reuse_count_attached),
+                    "a nested frame disturbed the enclosing encode frame after check " ..
+                    scope_reuse_count_attached)
+        scope_reuse_count_attached = scope_reuse_count_attached + 1
+      else
+        raise "registered Sender did not convert to a slot-index policy"
+      end
+    end)
   end
-  return index
+  return scope_reuse_u32_le(scope_reuse_count_attached - 1)
 end
 
 function ScopeReuseCountProbe.from_transfer_payload(
     payload: string): ScopeReuseCountProbe
+  -- The packet holds one attachment per encode check, so this index is its
+  -- bound; a lost frame would report a missing decode scope instead.
+  local bound = scope_reuse_u32_le(3 * scope_reuse_count_rounds)
   for _ = 1, scope_reuse_count_rounds do
-    scope_reuse_nested_failures()
-    -- A lost frame would report a missing decode scope instead of the bound.
-    scope_reuse_expect_error(function ()
-      scope_reuse_thread.Sender<|integer|>.from_transfer_payload(
-        scope_reuse_u32_le(scope_reuse_count_rounds))
-    end, "transfer: resource attachment index is out of bounds")
+    scope_reuse_nested_frames(function ()
+      scope_reuse_expect_error(function ()
+        scope_reuse_thread.Sender<|integer|>.from_transfer_payload(bound)
+      end, "transfer: resource attachment index is out of bounds")
+    end)
   end
   local sender: scope_reuse_thread.Sender<|integer|> =
     scope_reuse_transfer.TransferValue.is_record_payload(
