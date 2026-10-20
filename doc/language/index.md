@@ -111,7 +111,7 @@ use the chapters below for the normative language reference.
 | [SQLite standard library](standard-library-sqlite3.md) | Embedded SQLite with asynchronous native work, prepared statements, owned rows and cursors, reflection bindings and mapping, explicit transactions, and cancellation-safe cleanup. |
 | [The C FFI](ffi.md) | `foreign import`: binding C headers, supported types, calling C functions, ownership, allocation, the unsafe-boundary rules, and limitations. |
 | [Foreign functions](foreign-functions.md) | Exact C-ABI exports through regular imports, runtime provider selection and stable per-image bindings, local source callbacks, restricted raw-C bodies, pointer identity, generated companion headers, and sequencing. |
-| [C FFI declarations and expressions](c-ffi-expressions.md) | Named C tags, compiled-probe caching and manual clearing, host-validated pointer conversions, target-directed automatic/owned allocation (including flexible tails), typed object-macro values, macro-projected fields, and target-correct C operators. |
+| [C FFI declarations and expressions](c-ffi-expressions.md) | Named C tags, compiled-probe caching and manual clearing, host-validated pointer conversions, target-directed automatic/owned allocation (including flexible tails), C storage after a caught error, typed object-macro values, macro-projected fields, and target-correct C operators. |
 | [Grammar](grammar.md) | The complete lexical and syntactic grammar. |
 
 ## Status and limitations

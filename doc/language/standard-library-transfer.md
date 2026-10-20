@@ -236,36 +236,22 @@ call. Lua code cannot call `decode_message`, because its raw C pointer
 parameter has no dynamic Lua coercion.
 
 Guard the local with `defer transfer.discard_message(raw)` as soon as it holds
-the packet, and call `decode_message(raw)` **directly on that local**, not
-through a forwarding wrapper.
-
-The guarded local must never receive a **recovery spill**. After a caught
-error, Titan restores a local from a saved copy if the local was written
-(assigned, or filled through a mutating C out-argument) inside a protected
-region—a block with `catch`, or the code after a `defer`—whose catch, deferred
-cleanup, or code after a handled catch reads it. The saved copy belongs to the
-declaration for the whole function: every later recovery reloads it, and
-`decode_message` clearing the slot never updates it. A spilled guard would
-therefore hand its deferred discard a stale owner, and a decode error would
-dispose of the packet twice. Any protected region in the function counts, not
-only the guard's own; a write in an earlier `do ... catch` is enough:
-
-```text
-local raw: foreign *void = nil
-do raw = transfer.encode_message(v) catch return nil end  -- spills raw
-defer transfer.discard_message(raw)
-return transfer.decode_message(raw)  -- a decode error discards twice
-```
-
-The simplest safe form gives the local its packet in its own declaration (or
-fills it with one C out-argument call that no such region encloses), installs
-the guard immediately, and never assigns the local again:
+the packet, and call `decode_message(raw)` **directly on that local**, in the
+function that owns it, not through a forwarding helper: `decode_message` must
+clear the guarded local itself.
 
 ```text
 local raw = transfer.encode_message(v)
 defer transfer.discard_message(raw)
 return transfer.decode_message(raw)
 ```
+
+When `decode_message` raises, the guard sees the slot it has already cleared
+and does not dispose of the packet again. This holds however the local
+received its packet, including by assignment inside an earlier protected
+region such as a `do ... catch` block: an address-exposed scalar local that
+recovery code reads keeps a single storage location
+([C storage after a caught error](c-ffi-expressions.md#c-storage-after-a-caught-error)).
 
 Once its body runs, `decode_message` consumes the packet and clears the slot on
 every outcome, before it returns or an error propagates with its original

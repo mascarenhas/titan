@@ -1129,10 +1129,9 @@ no cleanup shielding and does not hold back Task publication.
   the calling function keeps the context in automatic storage and a `defer` or
   `catch` reads it after an error, declare a pointer local
   (`local cell: foreign *T = storage`) and access the context only through it.
-  A by-value aggregate read there gets a
-  [longjmp-safe spill](../implementation/c-ffi-expressions.md#longjmp-safe-aggregate-spills),
-  and recovery restores the bytes Titan last wrote, discarding the callbacks'
-  writes.
+  Recovery restores an aggregate read by value there to the bytes Titan last
+  wrote, discarding the callbacks' writes
+  ([C storage after a caught error](c-ffi-expressions.md#c-storage-after-a-caught-error)).
 
 #### Native retirement capabilities
 
