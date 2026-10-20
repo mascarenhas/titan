@@ -222,6 +222,10 @@ local function Message:merged_message(number: integer): Message
   return read_message_slice(ffi.titan_protobuf_bytes_ptr(merged), 0, #merged, merged, self.context)
 end
 
+-- Each builder below ends in a sole `local frozen = builder as const {value}`
+-- declaration, so the checker's linear-use proof retags the fresh proxy in
+-- place instead of shallow-copying it. Keep that statement standalone: a cast
+-- nested in a call argument or an implicitly converted return copies.
 local function decode_record(message: Message, descriptor: reflect.RecordType,
                               depth: integer): value
   require_depth(depth)
@@ -231,7 +235,8 @@ local function decode_record(message: Message, descriptor: reflect.RecordType,
     fields[index] = decode_field(message, field_number(index),
                                  descriptor.fields[index].type, depth + 1)
   end
-  return descriptor:construct(fields as const {value})
+  local frozen = fields as const {value}
+  return descriptor:construct(frozen)
 end
 
 local function decode_union(message: Message, descriptor: reflect.UnionType,
@@ -282,15 +287,16 @@ local function decode_union(message: Message, descriptor: reflect.UnionType,
     parts[index] = decode_field(parts_message, field_number(index),
                                 variant.parts[index].type, depth + 1)
   end
-  return descriptor:construct(variant.tag, parts as const {value})
+  local frozen = parts as const {value}
+  return descriptor:construct(variant.tag, frozen)
 end
 
-local function decode_array(message: Message, constness: reflect.ArrayTypeConstness,
-                             element: reflect.Type, depth: integer): value
-  require_depth(depth)
+-- Elements decode in wire order, and every constness flag occurrence is
+-- validated in that same walk. The linear result lets a const caller freeze it.
+local function decode_array_entries(message: Message, element: reflect.Type,
+                                    depth: integer): {value}
   local entries: {value} = {}
   local count = 0
-  local is_const = false
   for index = 1, message.count do
     local field = message:entry(index)
     if field.number == 1 then
@@ -304,15 +310,34 @@ local function decode_array(message: Message, constness: reflect.ArrayTypeConstn
     elseif field.number == 2 then
       require_wire(field, 0)
       if field.bits ~= 0 and field.bits ~= 1 then raise "protobuf: invalid boolean" end
-      is_const = field.bits == 1
     end
   end
-  case constness
-  when is_const() then return entries as const {value}
-  when is_maybe_const() then
-    if is_const then return entries as const {value} end
-  end
   return entries
+end
+
+-- The final flag occurrence wins. Reading it before the element walk only
+-- selects the result shape; decode_array_entries still rejects a malformed
+-- occurrence at its wire position before any Array is returned.
+local function Message:marks_const_array(): boolean
+  for index = self.count, 1, -1 do
+    local field = self:entry(index)
+    if field.number == 2 then return field.bits == 1 end
+  end
+  return false
+end
+
+local function decode_array(message: Message, constness: reflect.ArrayTypeConstness,
+                             element: reflect.Type, depth: integer): value
+  require_depth(depth)
+  case constness
+  when is_mutable() then return decode_array_entries(message, element, depth)
+  when is_maybe_const() then
+    if not message:marks_const_array() then
+      return decode_array_entries(message, element, depth)
+    end
+  end
+  local frozen = decode_array_entries(message, element, depth) as const {value}
+  return frozen
 end
 
 local function decode_foreign_array(message: Message, element: reflect.Type,
@@ -330,7 +355,8 @@ local function decode_foreign_array(message: Message, element: reflect.Type,
       entries[count] = decode_field(slot, 1, element, depth + 1)
     end
   end
-  return entries as const {value}
+  local frozen = entries as const {value}
+  return frozen
 end
 
 local function decode_foreign_struct(message: Message,
@@ -343,7 +369,8 @@ local function decode_foreign_struct(message: Message,
     fields[index] = decode_field(message, field_number(index),
                                  descriptor.fields[index].type, depth + 1)
   end
-  return fields as const {value}
+  local frozen = fields as const {value}
+  return frozen
 end
 
 local function decode_field(message: Message, number: integer,

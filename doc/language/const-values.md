@@ -316,12 +316,20 @@ source binding nor any mutable alias is used afterward.
 1. **Local builder pattern:** Starts with one local initialized from a fresh
    mutable Array `{}`. Structured control flow and loops may query `#` and read
    or write elements. If the local does not escape before being cast or returned
-   to a `const` target, the compiler emits in-place `titan_array_freeze`.
+   to a `const` target, the compiler emits in-place `titan_array_freeze`. The
+   cast must be the whole initializer of a one-name local declaration or the
+   whole returned expression, in the builder's own block. Later statements may
+   consume that frozen local (`local frozen = items as const { T }` followed by
+   `consume(frozen)`). A cast nested inside another expression, such as
+   `consume(items as const { T })`, or a returned cast that the function result
+   then converts to `value`, keeps the copy.
 2. **Linear function returns:** When all return paths of a function return a
    freshly constructed array or an unaliased local builder array, the function's
    return type is marked linear. Directly assigning or casting the call result to
    `const { T }` (e.g. `local res: const { B } = map(xs, f)`) freezes the
-   returned array in place without copying.
+   returned array in place without copying. Only a callee that precedes the
+   caller in the same module's logical declaration order carries this proof
+   when the caller is checked; a written cast of any other call result copies.
 
 Code must not depend on whether this optimization fires. If both the mutable
 source and const result could still be observed, the proof is not valid and

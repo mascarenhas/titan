@@ -431,6 +431,54 @@ function test_arrays_preserve_holes_empty_absent_and_constness(_context: test.Co
   end
 end
 
+-- One anonymous Array field holding the single element 5, followed by raw
+-- field-2 constness markers.
+local function decode_marked_array(constness: reflect.ArrayTypeConstness,
+                                   markers: string): value
+  local fields: const {reflect.Type} = {
+    reflect.Type.is_array(constness, reflect.Type.is_integer()),
+  }
+  local array = string.char(10, 2, 8, 10) .. markers
+  local decoded: value = protobuf.deserialize_fields(
+    string.char(10, #array) .. array, fields)
+  return decoded
+end
+
+local function expect_marked_array(candidate: value, frozen: boolean)
+  case reflect.inspect(candidate)
+  when is_array(entries) then
+    test.assert(not frozen, "a const Array decoded as mutable")
+    local element: integer = entries[1]
+    test.assert(#entries == 1 and element == 5)
+  when is_const_array(entries) then
+    test.assert(frozen, "a mutable Array decoded as const")
+    local element: integer = entries[1]
+    test.assert(#entries == 1 and element == 5)
+  else raise "expected a decoded Array"
+  end
+end
+
+function test_array_constness_marker_uses_final_validated_occurrence(_context: test.Context)
+  local maybe = reflect.ArrayTypeConstness.is_maybe_const()
+  expect_marked_array(decode_marked_array(maybe, ""), false)
+  expect_marked_array(decode_marked_array(maybe, string.char(16, 0, 16, 1)), true)
+  expect_marked_array(decode_marked_array(maybe, string.char(16, 1, 16, 0)), false)
+  expect_marked_array(
+    decode_marked_array(reflect.ArrayTypeConstness.is_const(), string.char(16, 0)), true)
+  expect_marked_array(
+    decode_marked_array(reflect.ArrayTypeConstness.is_mutable(), string.char(16, 1)), false)
+  -- A malformed earlier marker is rejected even when a valid final one wins.
+  expect_error(function()
+    decode_marked_array(maybe, string.char(16, 2, 16, 1))
+  end, "invalid boolean")
+  expect_error(function()
+    decode_marked_array(reflect.ArrayTypeConstness.is_const(), string.char(16, 2))
+  end, "invalid boolean")
+  expect_error(function()
+    decode_marked_array(maybe, string.char(18, 0, 16, 1))
+  end, "unexpected wire type")
+end
+
 function test_union_empty_and_nullable_payloads(_context: test.Context)
   test.assert(protobuf.serialize(Choice.empty()) == string.char(10, 0))
   local empty: Choice = roundtrip(Choice.empty())

@@ -301,6 +301,19 @@ destination state's initialized nominal registry; the nominal helper checks
 both name and requested record/union kind. It does not guess a module name or
 execute a module loader.
 
+Each reconstruction builder (record fields, union parts, foreign-struct fields,
+and foreign or const Array entries) is a fresh decoder-local Array. Its final
+use is a standalone `local frozen = builder as const {value}` declaration, so
+the checker's [linear-use proof](const-values.md#array-relations-and-linear-use-analysis)
+retags the proxy in place instead of allocating a shallow copy before
+`construct` or the parent field consumes it. `decode_array` first selects the
+result shape from the declared constness and, for a maybe-const Array, the
+final wire marker. A mutable result returns the linear `decode_array_entries`
+builder unchanged; a const result casts that call result, which also freezes in
+place. The element walk still validates every marker occurrence at its wire
+position before any Array is returned. Keep these casts out of call arguments
+and implicitly converted returns, which would restore the copy.
+
 The reader limits nesting and message size. Native reconstruction supplies the
 final C range, qualifier, fixed-array extent, and construction checks. A decoded
 pointer remains a borrowed address. No GC object from the source state enters
