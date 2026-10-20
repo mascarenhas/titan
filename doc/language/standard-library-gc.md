@@ -79,10 +79,11 @@ results are discarded. Finalization follows Lua's ordinary garbage-collection
 rules: it is not prompt or deterministic, and a callback may resurrect its
 value.
 
-The adjustment is a fresh closure per `finalizable` call, so the raw `__gc`
-then differs from the callback you passed. A callback already declared
-`function (value): ()` and registered with `finalizable<|value|>` needs no
-adjustment: the installed `__gc` is that exact closure. For an owner created
+Whenever the callback's parameter type is not exactly `value`, that adjustment
+is a fresh closure per `finalizable` call, so the raw `__gc` then differs from
+the callback you passed. A callback already declared `function (value): ()`
+and registered with `finalizable<|value|>` needs no adjustment: the installed
+`__gc` is that exact closure. For an owner created
 often, register such a callback and project its argument yourself (for example
 `local owner: Owner = candidate`) to avoid one closure allocation per
 registration:

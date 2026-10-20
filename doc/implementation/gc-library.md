@@ -100,12 +100,11 @@ callbacks through Lua, callback replacement on a shared metatable, and scalar
 rejection with a zero stack delta.
 
 The adjustment closure exists only when the callback's erased type differs from
-the erased formal: the generic boundary compares erased types, so a callback
-whose static type is already `function (value): ()` passed under
-`finalizable<|value|>` (or under an unconstrained rigid `T` inside another
-generic body) is exact, the argument is the caller's closure itself, and the
-raw `__gc` keeps its identity. Each concrete record or Map application instead
-allocates one fresh closure per call.
+the erased formal `function (value): ()`: the generic boundary compares erased
+types, so a callback whose erased type is already `function (value): ()` is
+exact, the argument is the caller's closure itself, and the raw `__gc` keeps
+its identity. Any other callback parameter type (a record, union, Interface,
+Array, Map, or scalar) allocates one fresh adjustment closure per call.
 A constructor that registers a finalizer on every allocation of a frequently
 created owner can use that form, strictly projecting its argument back to the
 owner type inside the callback, to avoid one closure allocation per
