@@ -512,10 +512,13 @@ An `automatic_array_borrow` declaration instead preserves only its pointer
 value, never snapshots or restores its backing bytes. An unexposed pointer
 uses the ordinary volatile scalar spill; a recovery-sensitive pointer whose
 mutable address is exposed uses the actual volatile pointer object as its
-single home. In the latter case an out-parameter write remains visible even
-if an ordinary Titan or C callee raises without returning. Writes through
-the borrowed pointer remain in the live backing. Capturing the pointer does
-not extend the backing's lifetime.
+single home, with a declaration-time compiler escape barrier. Together they
+preserve an indirect write even if an ordinary Titan or C callee is inlined
+and raises without returning; volatility alone is insufficient. This supported
+GCC/Clang guarantee retains the ISO C 6.7.3p6 qualifier caveat; see
+[recovery storage](error-handling.md#setjmp-sensitive-localparameter-spills).
+Writes through the borrowed pointer remain in the live backing. Capturing
+the pointer does not extend the backing's lifetime.
 
 A C call that mutates an aggregate and then longjmps does not commit that
 aggregate's partial post-call state to its byte spill; untracked aliases do
@@ -523,6 +526,11 @@ not participate in spill updates. The scalar volatile-home rule above does
 not change that aggregate contract. Foreign functions themselves have no
 such spill protocol because their bodies cannot establish a Titan recovery
 boundary.
+
+Ordinary Titan callees also do not yet commit normally returned mutable
+aggregate out-arguments to their byte spills: if another protected assignment
+made the aggregate spill-tracked, recovery can restore stale pre-call bytes.
+This pre-existing limitation is separate from scalar preservation.
 
 ## Standard-library callback migrations
 

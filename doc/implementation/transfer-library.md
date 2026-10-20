@@ -266,18 +266,20 @@ The caller passes its actual guarded `foreign *void` local. An exact pointer
 local supplied to the `foreign *(*void)` parameter uses the checker's
 `mutable_c_address` coercion, so codegen passes `&local`
 ([contextual object-pointer conversion](c-ffi-expressions.md#contextual-object-pointer-conversion)).
-The write analysis recognizes this conversion for ordinary Titan calls as
-well as foreign calls. If recovery or a deferred guard can read the local,
-codegen makes the actual non-GC scalar local a volatile automatic object
-(`void *volatile raw`), with no separate spill snapshot. The decoder clears
-that same storage, so cleanup observes nil even when decode raises without
-returning. Earlier assignments in protected regions do not invalidate this
-guarantee: recovery never reloads a stale packet owner into the volatile home.
+The scalar write analysis recognizes this conversion for ordinary Titan calls
+as well as foreign calls. If recovery or a deferred guard can read the local,
+codegen gives the actual scalar a volatile home (`void *volatile raw`) plus a
+declaration-time compiler escape barrier, with no separate spill snapshot.
+The barrier keeps the home escaped if an ordinary callee is inlined;
+volatility alone is insufficient. `decode_message` itself contains a
+`catch`/`setjmp` and is not inlined by supported GCC/Clang, including with Linux
+LTO. It clears that same storage, so cleanup sees nil even when decode raises
+without returning. Earlier protected assignments cannot restore a stale owner.
 This is the supported GCC/Clang implementation guarantee, including Windows
-Clang/MSYS2, not a claim of strictly conforming ISO C: the outgoing
-unqualified pointer has the ISO C 6.7.3p6 volatile-access caveat. See
+Clang/MSYS2, not strictly conforming ISO C: the outgoing unqualified pointer
+has the ISO C 6.7.3p6 volatile-access caveat. See
 [recovery storage](error-handling.md#setjmp-sensitive-localparameter-spills)
-for the escaped-store/opaque-raise assumption and production LTO analysis.
+for the escape barrier, opaque-raise assumption and production LTO analysis.
 
 Install `defer discard_message(raw)` immediately after taking ownership and
 call `decode_message(raw)` directly in that owning function. A fallible
@@ -289,8 +291,10 @@ The `thread.Receiver` receive paths, child bootstrap, cancellation delivery,
 terminal-status reconstruction, and `async.Receiver:wait` all follow this
 rule. `Receiver:wait` declares a fresh local per loop turn and installs its
 guard only after `receiver_take_native` reports a taken packet. Their
-recovery-sensitive raw slots now use volatile loads/stores; this adds no
-allocation, copy, ABI change, or additional call on these paths. Lua code
+recovery-sensitive raw slots use volatile loads/stores and an empty compiler
+escape barrier; these add no allocation, copy, ABI change, or additional call.
+The corrective Windows evidence used an effective `-O2` production provider,
+with `-O0 -fno-lto` test objects, not an `-O3` provider. Lua code
 cannot call `decode_message`: generated Lua entries have no dynamic coercion
 for raw C pointer parameters.
 

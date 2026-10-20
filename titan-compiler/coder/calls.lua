@@ -310,7 +310,11 @@ function nativetoforeignexp(ctx, exp, cexp, target, projection)
 
     if operation == "c_address" then
         if is_addressable_local(exp) then
-            return "", render("(&($CEXP))", { CEXP = cexp })
+            local address = render("(&($CEXP))", { CEXP = cexp })
+            if coder._decl_volatile_home(coder._lvalue_root_decl(exp)) then
+                address = foreigncast(address, target)
+            end
+            return "", address
         end
         return materialize_address_tmp(ctx, exp, cexp)
     end

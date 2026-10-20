@@ -133,12 +133,14 @@ happens only after the current `defer` body has completed, and any enclosing
 `defer` or `catch` boundary recovers through the same allocation-free path.
 
 Deferred cleanup participates in the same liveness analysis as a written
-`finally`. If an address-exposed non-GC scalar can be changed in the protected
-tail and read by cleanup, the actual local/parameter has a volatile C home,
-not an ordinary auto plus a stale snapshot. A callee that clears a raw packet
-slot and then raises therefore leaves cleanup seeing the cleared slot. This
-also applies when an earlier protected region already made the declaration
-recovery-sensitive; see
+`finally`. If a non-GC scalar whose mutable C address is taken can be changed
+in the protected tail and read by cleanup, the actual local/parameter has a
+volatile C home and a declaration-time compiler escape barrier, not an
+ordinary auto plus a stale snapshot. Together they preserve a callee's
+indirect write before an opaque raise, including when that callee is inlined;
+volatility alone is insufficient. This also applies when an earlier protected
+region already made the declaration recovery-sensitive. The guarantee is for
+supported GCC/Clang, with the ISO C 6.7.3p6 qualifier caveat; see
 [recovery storage](error-handling.md#setjmp-sensitive-localparameter-spills).
 
 ## Tests

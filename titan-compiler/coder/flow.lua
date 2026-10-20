@@ -296,10 +296,7 @@ function coder._collect_writes_exp(node, out)
             and maybe3.get_checked(node._written_cast, "written cast") or nil
         local coercion = adjustment and adjustment.coercion
             or written and written.coercion
-        local conversion = node._c_conversion
-        if (coercion and coercion.op == "mutable_c_address")
-           or (conversion and conversion.kind ==
-               "address_then_unsafe_object_pointer") then
+        if coercion and coercion.op == "mutable_c_address" then
             local decl = coder._lvalue_root_decl(node.exp)
             if decl and not types.is_gc(decl._type)
                and not types.is_c_aggregate(decl._type) then
@@ -807,7 +804,18 @@ function coder._aggregate_spill_copy(decl, to_spill)
     })
 end
 
+local function volatile_home_escape(decl)
+    -- An inlined callee may store through an unqualified alias. Keep the
+    -- actual home escaped so GCC cannot discard that store before a raise.
+    return render([[
+        __asm__ __volatile__("" : : "r"(&($CVAR)) : "memory");
+    ]], { CVAR = decl._cvar })
+end
+
 function spill_decl_init(ctx, decl)
+    if coder._decl_volatile_home(decl) then
+        return volatile_home_escape(decl)
+    end
     if not decl_needs_spill(decl) then return "" end
     register_spill_decl(ctx, decl)
     if types.is_gc(decl._type) then
@@ -837,6 +845,9 @@ function spill_decl_init(ctx, decl)
 end
 
 function spill_decl_zero(ctx, decl)
+    if coder._decl_volatile_home(decl) then
+        return volatile_home_escape(decl)
+    end
     if not decl_needs_spill(decl) then return "" end
     register_spill_decl(ctx, decl)
     if types.is_gc(decl._type) then return "" end

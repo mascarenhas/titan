@@ -126,9 +126,11 @@ with all semantic encoding/decoding outside the channel/control mutex:
   registered `RECORD_PAYLOAD` capabilities). Each caller gives a real local
   `void *` its packet in the local's own declaration, installs an immediate
   native discard defer, and returns or binds `transfer.decode_message(raw)`
-  **directly** on that local. The recovery-sensitive address-exposed scalar
-  has one volatile home, so no stale spill can replace decode's clear.
-  Decode consumes and clears the
+  **directly** on that local. The recovery-sensitive scalar whose mutable
+  address is taken has one volatile home plus a declaration-time compiler
+  escape barrier, so no stale spill can replace decode's clear. Decode has its
+  own `catch`/`setjmp` and is not inlined by supported GCC/Clang, including
+  under Linux LTO. It consumes and clears the
   local on return and before any decoder error propagates with its original
   traceback; an error from decode's own entry preamble leaves the packet for
   the guard. No ordinary raw-slot wrapper or Lua-stack ledger intervenes; see

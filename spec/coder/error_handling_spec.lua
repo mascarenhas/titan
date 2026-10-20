@@ -1581,6 +1581,9 @@ describe("catch", function()
                 slot[0] = 7
                 raise "changed"
             end
+            local function inspect(slot: foreign const *int): boolean
+                return slot[0] == 7
+            end
             function run(n: foreign int): boolean
                 local raw: foreign *void = nil
                 local untouched: foreign *void = nil
@@ -1598,13 +1601,32 @@ describe("catch", function()
                     change(n)
                 catch
                 end
-                return raw == nil and n == 7
+                local lambda = function (m: foreign int): boolean
+                    do
+                        change(m)
+                    catch
+                        return m == 7
+                    end
+                    return false
+                end
+                return raw == nil and inspect(n) and lambda(1)
             end
         ]])
         assert.match("void%s*%*%s*volatile%s+_local_raw_1", csrc)
         assert.match("volatile%s+int%s+_param_n", csrc)
+        assert.truthy(csrc:find(
+            '__asm__ __volatile__("" : : "r"(&(_local_raw_1)) : "memory");',
+            1, true))
+        assert.truthy(csrc:find(
+            '__asm__ __volatile__("" : : "r"(&(_param_n)) : "memory");',
+            1, true))
+        assert.match("volatile%s+int%s+_param_m", csrc)
+        assert.truthy(csrc:find(
+            '__asm__ __volatile__("" : : "r"(&(_param_m)) : "memory");',
+            1, true))
         assert.not_match("_spill_local_raw_1", csrc)
         assert.not_match("_spill_param_n", csrc)
+        assert.not_match("_spill_param_m", csrc)
         assert.not_match("volatile%s+_local_untouched_", csrc)
         assert.not_match("_spill_local_untouched_", csrc)
     end)
@@ -1655,6 +1677,18 @@ describe("catch", function()
                 ]==])
             end)
             assert.match("OK", out)
+        end)
+
+        it("preserves an inlined scalar write read only during recovery at "
+            .. optimization, function()
+            local fixture = assert(io.open(
+                "spec/fixtures/error_handling/scalar_recovery.titan", "rb"))
+            local source = assert(fixture:read("*a"))
+            assert(fixture:close())
+            local status, out = h.with_extra_cflags({ optimization }, function()
+                return compile_and_run_app(source)
+            end)
+            assert.equal(0, status, out)
         end)
     end
 

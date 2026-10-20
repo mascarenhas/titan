@@ -383,8 +383,9 @@ The pass marks a Decl as needing a spill only when all of these are true:
 * it is assigned in a protected body whose error path can later read it
   from a catch, finally, or handled post-try path; or it is assigned in a
   catch that has its own protected boundary and its finally can read it.
-  A contextual mutable C-address conversion counts as a possible write,
-  including when the callee is an ordinary Titan function that can raise.
+  A contextual mutable C-address conversion of a scalar counts as a possible
+  write, including an ordinary Titan call that can raise. Aggregate
+  out-arguments have the known limitation below.
 
 Marked GC-typed Decls use their existing reserved Lua stack slots as the
 stable storage. Assignments keep the slot current, and protected recovery
@@ -406,11 +407,13 @@ Codegen updates the spill after assignments that update the Titan
 local/parameter, and protected recovery reloads the ordinary C auto from
 the volatile spill before catch/finally/post-try code can read it.
 
-An address-exposed non-GC scalar instead uses **one genuinely volatile
-automatic object** as its canonical recovery home:
+A non-GC scalar whose **mutable** C address is taken anywhere in the function
+instead uses **one genuinely volatile automatic object** as its canonical
+recovery home, plus a compiler escape barrier at its declaration:
 
 ```c
 void *volatile _local_raw_1;
+__asm__ __volatile__("" : : "r"(&(_local_raw_1)) : "memory");
 ```
 
 `coder._decl_volatile_home` selects this home for an address-taken scalar
@@ -425,28 +428,50 @@ This is an **implementation guarantee on the supported GCC and Clang
 toolchains (including Windows Clang/MSYS2), not a strictly conforming ISO C
 guarantee**. ISO C 6.7.3p6 makes referring to an object defined volatile
 through a non-volatile lvalue undefined behavior. The existing out-parameter
-API uses unqualified pointers, so its stores have exactly that caveat. Titan
-relies on these toolchains performing stores through the escaped pointer to
-the volatile object's actual storage before an opaque raising/longjmp call,
-and performing subsequent catch/deferred reads through the volatile home.
-Address escape alone, with an ordinary non-volatile home, is insufficient.
+API uses unqualified pointers, so its stores have exactly that caveat.
+`spill_decl_init` and `spill_decl_zero` emit the empty GNU extended-asm escape
+barrier for every volatile home, including parameters and predeclared locals.
+Without it, GCC can delete an inlined unqualified store when a subsequent
+checked conversion raises through terminal `luaL_error`/`abort` and the body's
+normal return skips the catch-status dispatch: only nonlocal recovery reads
+the home. Volatility alone does not preserve that indirect store. The barrier's
+address operand and memory clobber keep the home escaped after inlining.
+Supported toolchains then perform the indirect store to that storage before
+the opaque raising/longjmp call, and catch/deferred reads reload the home.
+MSVC is not a supported generated-C toolchain; native Windows uses MSYS2 Clang.
 
-Production Linux generated code uses `-O3 -flto=auto -ffat-lto-objects`;
-Darwin/Windows use `-O3` without default LTO. Ordinary native Titan functions
-are not generally `noinline`: same-translation-unit optimization and Linux
-cross-TU LTO can inline the callee. Inlining still leaves the write targeting
-the same volatile home's address, not a second snapshot. The default Lua
-build has no LTO IR, so `lua_error`/its nonlocal exit remains opaque even when
-Titan code is inlined; the supported optimizers materialize the preceding
-store and the volatile recovery read reloads it. The optimized regression
-cases exercise local callees at `-O2`/`-O3` as well as the native production
-lane with Linux LTO. Whole-program LTO that also exposes Lua's error machinery,
-different alias rules, or a new optimizer exploiting the qualification caveat
-is not established by these checks and requires renewed qualification.
+Production Linux generated code defaults to
+`-O3 -flto=auto -ffat-lto-objects`; Darwin/Windows default to `-O3` without
+LTO. Ordinary native Titan functions can be inlined within one translation
+unit or across units under Linux LTO. The escape barrier remains in the
+caller and prevents an inlined unqualified store being deleted as dead merely
+because only recovery reads the home. The default Lua build has no LTO IR,
+leaving `lua_error`/its nonlocal exit opaque. In contrast, `decode_message`
+contains a `catch` and thus a generated `setjmp`; supported GCC/Clang do not
+inline it, including under Linux LTO. The native decode regression covers
+that out-of-line ownership path, not inlining. The coder spec also builds
+`spec/fixtures/error_handling/scalar_recovery.titan` as a native executable
+at `-O2`/`-O3`, using the driver's default inlining thresholds. Its checked-return
+callee writes `7` through the scalar's address, then raises; only the catch
+reads the local. The fixture separately covers an explicit `raise`.
+The Windows corrective evidence used an effective `-O2` provider and
+`-O0 -fno-lto` test objects, not an `-O3` provider.
+Whole-program LTO exposing Lua's error machinery or new optimizer
+behavior still requires renewed qualification.
 
-This selection adds only volatile loads/stores, not allocation, copying, or
-an extra ownership protocol. It does not change aggregate byte-spill commit
-rules or promise recovery for arbitrary untracked aliases/asynchronous C writes.
+The barrier emits no machine instruction. This selection adds volatile
+loads/stores, not allocation, copying, a call, or a new ownership protocol.
+It does not promise recovery for untracked aliases/asynchronous C writes.
+
+**Known aggregate limitation:** ordinary Titan callees do not commit a
+mutable aggregate out-argument to its byte spill, even when they return
+normally. If another protected assignment has made the aggregate spill-tracked,
+a later recovery can restore the pre-call bytes and lose the completed write.
+This is a pre-existing gap, not the scalar volatile-home contract. Mutable
+foreign calls that return normally do commit their tracked aggregate spills;
+a nonlocal exit during such a call does not commit partial bytes. Fixing
+ordinary Titan aggregate out-argument commits requires separate write tracking
+and post-call byte-spill updates; this scalar fix does not implement them.
 
 `coder.lua` also tracks lexical spill scopes, so a recovery boundary
 reloads only spill slots whose Decls are currently in C scope.
