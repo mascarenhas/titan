@@ -961,6 +961,8 @@ static inline lua_Number titan_codec_get_float(lua_State *L,
   return titan_protobuf_read_double(data, field->offset);
 }
 
+/* The caller publishes the returned string before polling the collector,
+ * matching lua_pushlstring without an extra transient stack root. */
 static inline TString *titan_codec_get_string(lua_State *L,
     const TitanCodecField *field, const uint8_t *data) {
   titan_codec_wire(L, field, 2);
@@ -1148,6 +1150,7 @@ static inline void titan_codec_get_value(lua_State *L, TitanCodecState *state,
           TString *text = titan_codec_get_string(L, selected, slice);
           setsvalue2s(L, L->top.p, text);
           L->top.p++;
+          luaC_checkGC(L);
           return;
         }
       }

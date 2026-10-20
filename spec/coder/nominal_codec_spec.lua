@@ -194,6 +194,30 @@ describe("generated nominal codecs", function()
         assert.equal(1, directories)
     end)
 
+    it("polls after publishing decoded strings in records, unions and values", function()
+        local c = h.compile_and_read_c([[
+            record Text
+                required: string
+                optional: string?
+            end
+            union Choice
+                text(string)
+                empty()
+            end
+        ]])
+        local _, polls = c:gsub(
+            "TString %*_text = titan_codec_get_string%b()%s*;%s*"
+            .. "setsvalue%b()%s*;%s*luaC_barrierback%b()%s*;%s*luaC_checkGC%(L%);",
+            "")
+        assert.equal(3, polls)
+        local file = assert(io.open("titan-runtime/transfer.h"))
+        local header = file:read("a")
+        file:close()
+        assert.truthy(header:match(
+            "TString %*text = titan_codec_get_string%b()%s*;%s*"
+            .. "setsvalue2s%b()%s*;%s*L%-%>top%.p%+%+;%s*luaC_checkGC%(L%);"))
+    end)
+
     -- transfer.h calls codec_handoff's native entry directly after checking
     -- the closure's function-type tag. Both spellings there must be exactly
     -- the compiler's for `function (value, value, value, value): (value)`.

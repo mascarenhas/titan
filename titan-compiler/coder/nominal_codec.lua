@@ -257,7 +257,8 @@ local function decode_reference(ctx, kind, field, number, env, ordinal, destinat
         return "{ TString *_text = titan_codec_get_string(L, " .. field .. ", "
             .. env.data .. ");\n"
             .. "setsvalue(L, " .. destination .. ", _text);\n"
-            .. "luaC_barrierback(L, obj2gco(_rec), " .. destination .. "); }"
+            .. "luaC_barrierback(L, obj2gco(_rec), " .. destination .. ");\n"
+            .. "luaC_checkGC(L); }"
     end
     local where = coordinates(env, ordinal)
     return "titan_codec_get_nominal(L, _st, &_mod->uv["

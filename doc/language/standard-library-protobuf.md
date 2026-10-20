@@ -205,6 +205,11 @@ setting; no encoded bytes, decoded values, errors, hook calls, or resource
 attachments change. Previously obtained codec handles still run generated code
 when passed to `serialize_generated_to_buffer`.
 
+Decoded byte fields are independent Lua strings, not borrowed views of the
+input. Generated decoding roots each decoded string before polling the
+collector, with the same allocation/poll order as reflective decoding; this
+does not add a string copy or change packet-resource authority.
+
 ## Anonymous messages
 
 `serialize_fields` and `deserialize_fields` use an explicit ordered Array of
