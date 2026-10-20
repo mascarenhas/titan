@@ -91,7 +91,14 @@ positional list and retain that order.
 The hydration context is saved and restored around each operation, including
 failure, so nested work cannot replace its caller's active owner tables.
 Completed descriptors are cached by metatable. Successful nominal lookups are
-also cached by qualified name.
+also cached by qualified name, and `NamedType:resolve()` keeps a third
+state-local `resolved_named_types` Map from that name to the `Type.is_record`,
+`is_union`, or `is_interface` wrapper it built. The name is the erased base
+name every generic application shares. Only successful lookups are stored;
+an unknown name returns a fresh `Type.is_value()` and consults the registry
+again next time, matching `find_nominal`'s retryable misses. Reusing the
+immutable wrapper removes one userdata allocation per resolved named field in
+protobuf encode/decode and in transfer's reflective paths.
 
 Record and union hydration retain the generated projector, constructor, and
 declaring module owner. Existing serialized total field/variant counts are

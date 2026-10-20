@@ -297,7 +297,10 @@ end
 A nominal reference inside another descriptor is `Type.is_named`, carrying
 its fully qualified name. `NamedType:resolve()` returns the corresponding
 `Type.is_record`, `Type.is_union`, or `Type.is_interface`; an unknown name
-resolves to `Type.is_value()`.
+resolves to `Type.is_value()`. Descriptors are immutable, so every resolution
+of a registered name in the same Lua state returns the same `Type` value,
+whichever `NamedType` carries the name. An unknown name is not remembered: once
+a later module initialization registers it, the next resolution finds it.
 
 `Type:resolve()` performs that lookup when its receiver is `is_named`. An
 `is_foreign_named` receiver instead resolves a retained C declaration, as

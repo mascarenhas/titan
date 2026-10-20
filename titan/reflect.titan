@@ -526,16 +526,8 @@ function InterfaceValue:get(i: integer): value
   return result as value
 end
 
---- Resolve a registered nominal name, falling back to the value descriptor.
--- @return Resolved nominal descriptor, or Type.is_value for an unknown name.
--- @usage standard-library-reflect.md#nominal-lookup-and-resolution
-function NamedType:resolve(): Type
-  local found: NominalType? = find_nominal(self.name)
-  if found == nil then
-    return Type.is_value()
-  end
-  local r = found as NominalType
-  case r
+local function nominal_descriptor(found: NominalType): Type
+  case found
   when is_record(rec) then
     return Type.is_record(rec)
   when is_union(un) then
@@ -543,6 +535,21 @@ function NamedType:resolve(): Type
   when is_interface(iface) then
     return Type.is_interface(iface)
   end
+end
+
+--- Resolve a registered nominal name, falling back to the value descriptor.
+-- @return Resolved nominal descriptor, or Type.is_value for an unknown name.
+-- @usage standard-library-reflect.md#nominal-lookup-and-resolution
+function NamedType:resolve(): Type
+  local cached? = resolved_named_types[self.name]
+  if cached ~= nil then return cached end
+  local found: NominalType? = find_nominal(self.name)
+  if found == nil then
+    return Type.is_value()
+  end
+  local resolved = nominal_descriptor(found)
+  resolved_named_types[self.name] = resolved
+  return resolved
 end
 
 --- Resolve one retained C declaration, raising when its key is unknown.
@@ -591,6 +598,11 @@ local mt_cache: { { value: value } : Type } = {}
 
 -- Cache from qualified nominal name to NominalType
 local nominal_cache: {string: NominalType} = {}
+
+-- Cache from erased qualified nominal name to the immutable Type that
+-- NamedType:resolve returns. Only registered names enter it, so an unknown
+-- name keeps resolving to a fresh is_value until its module registers it.
+local resolved_named_types: {string: Type} = {}
 
 -- Active tables during hydration
 local active_membermap: { string: value }? = nil
